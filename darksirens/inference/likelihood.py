@@ -30,8 +30,8 @@ import numpy as np
 from darksirens.gw.populations import pop_model_parser, pop_model_prior_parser
 from darksirens.em import get_redshift_prior
 from darksirens.em.completion import build_pixel_kde_cache
-from darksirens.utils.cosmology import z_of_dL, ddL_of_z
 from darksirens.utils.utils import logdiffexp
+from darksirens.inference.utils import log_sample_weight
 from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog, GWEvent
 
 from astropy.cosmology import Planck15
@@ -80,25 +80,9 @@ def darksiren_log_likelihood(
         return raw_logPriorUniv(z, pix, cosmo, survey, catalog)
 
     def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalog):
-        z    = z_of_dL(dL, H0, Om0)
-        m1   = m1det / (1.0 + z)
-        return (
-            log_p_pop(m1, q, z, chieff, pop_params)
-            + log_prior_z(z, pix, catalog)
-            - jnp.log(ddL_of_z(z, dL, H0, Om0))
-            - jnp.log(prior_wt)
-            - 2.0 * jnp.log1p(z)
-        )
-    
-    def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalog):
-        z    = z_of_dL(dL, H0, Om0)
-        m1   = m1det / (1.0 + z)
-        return (
-            log_p_pop(m1, q, z, chieff, pop_params)
-            + log_prior_z(z, pix, catalog)
-            - jnp.log(ddL_of_z(z, dL, H0, Om0))
-            - jnp.log(prior_wt)
-            - 2.0 * jnp.log1p(z) - jnp.log(m1)
+        return log_sample_weight(
+            m1det, q, dL, chieff, pix, prior_wt,
+            cosmo, survey, pop_params, catalog, log_p_pop, log_prior_z,
         )
 
     # ------------------------------------------------------------------
@@ -152,7 +136,7 @@ def darksiren_log_likelihood(
     def _pe_event_fn(_, event_idx):
         s  = event_idx * nsamp
         sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
-        ldw = log_weight_ev(
+        ldw = log_weight(
             sl(gw_pe.m1det), sl(gw_pe.q), sl(gw_pe.dL),
             sl(gw_pe.chieff), sl(gw_pe.pixels), sl(gw_pe.prior_wt),
             em_catalog_pe,

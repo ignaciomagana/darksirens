@@ -14,14 +14,20 @@ makes it:
 
 The Jacobian
 ------------
-Changing integration variables from (dL, m1_det, m2_det) to
-(z, m1_src, m2_src) introduces a factor:
+The population models are densities in source-frame ``(m1, q, z)`` while
+PE and selection samples are stored in detector-frame ``(m1_det, m2_det, dL)``.
+Changing variables with
 
-    |∂(dL, m1_det, m2_det) / ∂(z, m1_src, m2_src)|
-        = d(dL)/dz * (1+z) * (1+z)
-        = ddL_of_z(z, dL, H0, Om0) * (1+z)^2
+    m1_det = (1 + z) * m1
+    m2_det = (1 + z) * m1 * q
+    dL     = dL(z)
 
-In log space: log ddL_of_z + 2 log(1+z).
+introduces a factor:
+
+    |∂(dL, m1_det, m2_det) / ∂(z, m1, q)|
+        = d(dL)/dz * (1+z)^2 * m1
+
+In log space: log ddL_of_z + 2 log(1+z) + log(m1).
 
 This is the *only* place in the codebase where this Jacobian is
 computed.  Do not inline it elsewhere.
@@ -42,19 +48,37 @@ def log_jacobian_dL_to_z(
     Om0: jnp.ndarray,
 ) -> jnp.ndarray:
     """
-    Log-Jacobian for the variable change (dL, m1_det, m2_det) → (z, m1_src, m2_src).
+    Log-Jacobian for the partial variable change dL → z and
+    detector-frame masses → source-frame masses at fixed mass ratio.
 
-    Parameters
-    ----------
-    z : redshift at the sample point
-    dL : luminosity distance [Mpc] at the sample point
-    H0, Om0 : cosmological parameters
+    This helper intentionally excludes the ``m1`` factor from the
+    ``(m1, m2) → (m1, q)`` coordinate change.  Use
+    ``log_jacobian_detector_to_source_q`` for likelihood weights.
+    """
+    return jnp.log(ddL_of_z(z, dL, H0, Om0)) + 2.0 * jnp.log1p(z)
+
+
+def log_jacobian_detector_to_source_q(
+    z: jnp.ndarray,
+    dL: jnp.ndarray,
+    m1src: jnp.ndarray,
+    H0: jnp.ndarray,
+    Om0: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    Log-Jacobian for ``(z, m1_src, q) → (dL, m1_det, m2_det)``.
+
+    Both PE and selection terms use samples represented as detector-frame
+    ``(m1_det, m2_det, dL)`` but evaluate population densities in
+    source-frame ``(m1_src, q, z)``.  The mass-coordinate determinant adds
+    an ``m1_src`` factor on top of the usual luminosity-distance and
+    redshifted-mass factors.
 
     Returns
     -------
-    log |J| = log d(dL)/dz + 2 log(1+z)
+    log |J| = log d(dL)/dz + 2 log(1+z) + log(m1_src)
     """
-    return jnp.log(ddL_of_z(z, dL, H0, Om0)) + 2.0 * jnp.log1p(z)
+    return log_jacobian_dL_to_z(z, dL, H0, Om0) + jnp.log(m1src)
 
 
 def log_sample_weight(
@@ -80,8 +104,8 @@ def log_sample_weight(
 
         log w = log p_pop(m1_src, q, z, chi_eff | λ)
               + log p_z(z | pix, Θ)
-              - log |J(dL → z)|        ← change of variables
-              - log p_draw(sample)     ← proposal density
+              - log |J(detector → source, q)|  ← change of variables
+              - log p_draw(sample)             ← proposal density
 
     Parameters
     ----------
@@ -110,6 +134,6 @@ def log_sample_weight(
     return (
         log_p_pop_fn(m1src, q, z, chieff, pop_params)
         + log_prior_z_fn(z, pix, catalog)
-        - log_jacobian_dL_to_z(z, dL, H0, Om0)
+        - log_jacobian_detector_to_source_q(z, dL, m1src, H0, Om0)
         - jnp.log(prior_wt)
     )
