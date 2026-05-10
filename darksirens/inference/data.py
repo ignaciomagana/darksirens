@@ -107,6 +107,7 @@ def load_all_data(opts):
         dzgals_pe=dzgals_pe,
         wgals_pe=wgals_pe,
         ngals=ngals_pe,
+        ngals_pe=ngals_pe,
 
         # Selection samples
         m1detsels=m1detsels,
@@ -126,9 +127,13 @@ def load_all_data(opts):
         nsamp=nsamp,
         apix=apix,
         nside=nside,
+        n_pix_catalog=int(zgals.shape[0]) if zgals is not None else hp.nside2npix(nside),
         zgals=zgals,
         dzgals=dzgals,
         wgals=wgals,
+        ngals_catalog=ngals,
+        dN_obs_kde=None,
+        pixel_to_cache_idx=None,
         sigma_kernel=sigma_kernel
     )
 

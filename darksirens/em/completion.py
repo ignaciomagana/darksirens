@@ -214,6 +214,11 @@ def _precompute_grids(
 
     # Expected dN/dz: n0 * apix * dV * (1+z)^delta
     dN_exp_raw = n0 * apix * dV * (1.0 + zgrid) ** delta
+
+    global _K_SMOOTH
+    if _K_SMOOTH is None:
+        _K_SMOOTH = _build_kernel()
+
     dN_exp_smooth = _K_SMOOTH @ dN_exp_raw           # (N_grid,)
 
     return _CompletionGrids(dN_exp_smooth=dN_exp_smooth, pvol=pvol)
