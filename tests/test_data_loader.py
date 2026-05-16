@@ -203,3 +203,59 @@ def test_load_all_data_stores_bright_siren_counterpart_pixel_and_keeps_it_compac
     )
     assert counterpart_pixel in set(loaded["unique_pixels_pe"].tolist())
     assert counterpart_pixel in set(loaded["unique_pixels_sel"].tolist())
+
+
+def test_load_all_data_accepts_multiple_bright_siren_counterparts(monkeypatch):
+    nside = 2
+    counterpart_pixels = np.array([7, 8], dtype=np.int32)
+    cp_ra, cp_dec = _angles_for_pixels(nside, counterpart_pixels)
+
+    def fake_load_gw_samples(_path):
+        return (
+            np.array([36.0, 38.0, 34.0, 35.0]),
+            np.array([28.8, 30.4, 27.2, 28.0]),
+            np.array([460.0, 500.0, 800.0, 820.0]),
+            np.array([0.0, 0.02, -0.01, 0.01]),
+            np.repeat(cp_ra, 2),
+            np.repeat(cp_dec, 2),
+            np.ones(4),
+            2,
+            2,
+        )
+
+    def fake_load_selection_samples(_path):
+        return (
+            np.array([34.0]),
+            np.array([27.2]),
+            np.array([430.0]),
+            np.zeros(1),
+            np.array([cp_ra[0]]),
+            np.array([cp_dec[0]]),
+            np.ones(1),
+            1,
+        )
+
+    monkeypatch.setattr(data_module, "load_gw_samples", fake_load_gw_samples)
+    monkeypatch.setattr(data_module, "load_selection_samples", fake_load_selection_samples)
+
+    opts = SimpleNamespace(
+        universe_model="bright_sirens",
+        survey_path=None,
+        sigma_kernel=0.0,
+        gw_path="unused-gw.hdf5",
+        gwselection_path="unused-selection.hdf5",
+        use_LSS=False,
+        counterpart=((float(cp_ra[0]), float(cp_dec[0]), 0.2), (float(cp_ra[1]), float(cp_dec[1]), 0.35)),
+        counterpart_nside=nside,
+        counterpart_dz=0.01,
+        bright_siren_sky_marginalized=True,
+    )
+
+    loaded = data_module.load_all_data(opts)
+
+    np.testing.assert_array_equal(loaded["counterpart_pixels"], counterpart_pixels)
+    np.testing.assert_allclose(loaded["counterpart_zs"], np.array([0.2, 0.35]))
+    assert loaded["bright_siren_sky_marginalized"] is True
+    for pix in counterpart_pixels:
+        assert pix in set(loaded["unique_pixels_pe"].tolist())
+        assert pix in set(loaded["unique_pixels_sel"].tolist())

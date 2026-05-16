@@ -28,10 +28,10 @@ Parameter labels must match the labels produced by the selected cosmology, popul
 For `--universe_model bright_sirens`, pass the electromagnetic counterpart as event metadata rather than as `--survey_path`:
 
 ```bash
---universe_model bright_sirens --counterpart RA DEC Z
+--universe_model bright_sirens --counterpart RA1 DEC1 Z1 [RA2 DEC2 Z2 ...]
 ```
 
-`RA` and `DEC` are in radians. The inference loader turns the counterpart into a fixed one-object catalog at `--counterpart_nside` with redshift width `--counterpart_dz`, so the survey/completion parameter block is fixed automatically for this model. Selection samples are still loaded from `--gwselection_path` in the standard way.
+`RA` and `DEC` are in radians. Provide one triplet per GW event, in the same event order as the posterior samples in `--gw_path`. The inference loader turns the counterparts into a fixed synthetic catalog at `--counterpart_nside` with redshift width `--counterpart_dz`, so the survey/completion parameter block is fixed automatically for this model. Selection samples are still loaded from `--gwselection_path` in the standard way and should encode the joint GW+EM detection process for bright-siren analyses.
 
 ## Cosmology block
 

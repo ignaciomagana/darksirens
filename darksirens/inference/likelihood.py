@@ -57,6 +57,18 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     universe_model = opts.universe_model
     sel_batch_size = getattr(opts, "sel_batch_size", None)
     counterpart_pixel = data.get("counterpart_pixel")
+    counterpart_pixels = (
+        barrier(jnp.asarray(data["counterpart_pixels"], dtype=jnp.int32))
+        if data.get("counterpart_pixels") is not None else None
+    )
+    counterpart_zs = (
+        barrier(jnp.asarray(data["counterpart_zs"], dtype=float))
+        if data.get("counterpart_zs") is not None else None
+    )
+    counterpart_dzs = (
+        barrier(jnp.asarray(data["counterpart_dzs"], dtype=float))
+        if data.get("counterpart_dzs") is not None else None
+    )
     bright_siren_sky_marginalized = bool(
         data.get(
             "bright_siren_sky_marginalized",
@@ -110,6 +122,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             unique_pixels=catalogs.unique_pixels_pe,
             sample_to_unique_idx=catalogs.sample_to_unique_pe,
             counterpart_pixel=counterpart_pixel,
+            counterpart_pixels=counterpart_pixels,
+            counterpart_zs=counterpart_zs,
+            counterpart_dzs=counterpart_dzs,
+            active_counterpart_index=0,
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
         )
         em_catalog_sel = EMCatalog(
@@ -125,6 +141,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             unique_pixels=catalogs.unique_pixels_sel,
             sample_to_unique_idx=catalogs.sample_to_unique_sel,
             counterpart_pixel=counterpart_pixel,
+            counterpart_pixels=counterpart_pixels,
+            counterpart_zs=counterpart_zs,
+            counterpart_dzs=counterpart_dzs,
+            active_counterpart_index=0,
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
         )
 

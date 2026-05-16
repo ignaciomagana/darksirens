@@ -152,16 +152,35 @@ def _log_prior_bright_sirens(
     em_catalog: EMCatalog,
 ) -> jnp.ndarray:
     """
-    Bright-siren counterpart redshift prior with an explicit sky-pixel gate.
+    Bright-siren counterpart redshift likelihood with an optional sky gate.
 
-    ``pix`` may contain either global HEALPix pixels or compact catalog row
-    indices.  For compact catalogs, ``em_catalog.unique_pixels`` maps each row
-    back to its global HEALPix pixel.  Unless
-    ``em_catalog.bright_siren_sky_marginalized`` is true, only samples whose
-    global pixel equals ``em_catalog.counterpart_pixel`` receive the
-    counterpart redshift prior; all other samples receive ``-inf``.
+    Multi-event bright-siren analyses store one counterpart redshift and one
+    counterpart sky pixel per GW event.  The likelihood sets
+    ``em_catalog.active_counterpart_index`` before evaluating each event, so the
+    same vectorised prior can use the event-specific counterpart while retaining
+    the compact catalog pixel mapping used by dark-siren analyses.
+
+    For backward compatibility, if the per-event counterpart arrays are absent
+    this falls back to the historical one-object synthetic catalog prior.
     """
+    from jax.scipy.stats import norm
     from .catalog import log_catalog_prior_vmap  # local import avoids circular
+
+    if em_catalog.counterpart_zs is not None:
+        idx = jnp.asarray(em_catalog.active_counterpart_index, dtype=jnp.int32)
+        counterpart_z = jnp.take(em_catalog.counterpart_zs, idx)
+        counterpart_dz = jnp.take(em_catalog.counterpart_dzs, idx)
+        counterpart_pixel = jnp.take(em_catalog.counterpart_pixels, idx)
+
+        if em_catalog.unique_pixels is None:
+            global_pix = pix
+        else:
+            global_pix = jnp.take(em_catalog.unique_pixels, pix)
+
+        sky_marginalized = jnp.asarray(em_catalog.bright_siren_sky_marginalized)
+        in_counterpart_pixel = global_pix == counterpart_pixel
+        log_p_cp = norm.logpdf(z, counterpart_z, counterpart_dz)
+        return jnp.where(sky_marginalized | in_counterpart_pixel, log_p_cp, -jnp.inf)
 
     counterpart_pixel = em_catalog.counterpart_pixel
     if counterpart_pixel is None:
