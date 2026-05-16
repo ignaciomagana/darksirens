@@ -79,12 +79,12 @@ darksirens_inference \
 Analyze saved inference products and compute posterior-predictive summaries.
 
 ```bash
-darksirens_analyze RUN_DIR [--mmin 1] [--mmax 100] [--nm 300]
+darksirens_analyze --run_dirs RUN_DIR [RUN_DIR ...] [--mmin 1] [--mmax 100] [--nm 300]
 ```
 
 Important options:
 
-- positional `RUN_DIR`: directory produced by `darksirens_inference`.
+- `--run_dirs`: required list of one or more directories produced by `darksirens_inference`.
 - `--mmin`, `--mmax`, `--nm`: primary-mass grid bounds and size.
 - `--nq`: mass-ratio grid size.
 - `--nz`: redshift grid size.

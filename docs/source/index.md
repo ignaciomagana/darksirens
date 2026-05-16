@@ -11,6 +11,7 @@ quickstart
 concepts
 data-formats
 cli
+usage-detailed
 workflows
 mock-data
 configuration
