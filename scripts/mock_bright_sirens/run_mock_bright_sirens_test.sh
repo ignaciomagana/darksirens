@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTDIR="${OUTDIR:-${ROOT_DIR}/data/mock_bright_sirens_test}"
 SEED="${SEED:-5678}"
-RUN_INFERENCE="${RUN_INFERENCE:-0}"
+RUN_INFERENCE="${RUN_INFERENCE:-1}"
 
 N0="${N0:-1e-3}"
 ZMAX="${ZMAX:-0.08}"
@@ -15,7 +15,7 @@ SURVEY_Z50="${SURVEY_Z50:-0.75}"
 SURVEY_WIDTH="${SURVEY_WIDTH:-0.12}"
 GALAXY_DENSITY_DELTA="${GALAXY_DENSITY_DELTA:-0.0}"
 
-NOBS="${NOBS:-3}"
+NOBS="${NOBS:-10}"
 NSAMP="${NSAMP:-512}"
 NDRAW="${NDRAW:-100000}"
 SELECTION_BATCH_SIZE="${SELECTION_BATCH_SIZE:-50000}"
@@ -26,11 +26,10 @@ COUNTERPART_NSIDE="${COUNTERPART_NSIDE:-1}"
 COUNTERPART_DZ="${COUNTERPART_DZ:-1e-4}"
 BRIGHT_SIREN_SKY_MARGINALIZED="${BRIGHT_SIREN_SKY_MARGINALIZED:-True}"
 
-INFERENCE_NLIVE="${INFERENCE_NLIVE:-1000}"
+INFERENCE_NLIVE="${INFERENCE_NLIVE:-200}"
 INFERENCE_DLOGZ="${INFERENCE_DLOGZ:-0.1}"
 INFERENCE_MAX_SAMPLES="${INFERENCE_MAX_SAMPLES:-0}"
 INFERENCE_SEL_BATCH_SIZE="${INFERENCE_SEL_BATCH_SIZE:-256}"
-PRIOR_OVERRIDES="${PRIOR_OVERRIDES:-{\"H0\":[40,100],\"Om0\":[0.1,0.5]}}"
 
 DL_FRAC_UNCERTAINTY="${DL_FRAC_UNCERTAINTY:-0.10}"
 M1DET_FRAC_UNCERTAINTY="${M1DET_FRAC_UNCERTAINTY:-0.08}"
@@ -147,13 +146,13 @@ if [ "${RUN_INFERENCE}" = "1" ]; then
     --bright_siren_sky_marginalized "${BRIGHT_SIREN_SKY_MARGINALIZED}" \
     --fix_population False \
     --fix_cosmology False \
-    --prior_overrides "${PRIOR_OVERRIDES}" \
+    --fix_survey True \
     --nlive "${INFERENCE_NLIVE}" \
     --dlogz "${INFERENCE_DLOGZ}" \
     --max_samples "${INFERENCE_MAX_SAMPLES}" \
     --sel_batch_size "${INFERENCE_SEL_BATCH_SIZE}" \
     --seed "${SEED}" \
-    --show_progress False \
+    --show_progress True \
     --save_path "${OUTDIR}/inference_bright_sirens"
 fi
 

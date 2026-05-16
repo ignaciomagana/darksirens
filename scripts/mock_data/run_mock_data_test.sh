@@ -8,7 +8,7 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 OUTDIR="${OUTDIR:-${ROOT_DIR}/data/mock_dark_sirens_test}"
 SEED="${SEED:-1234}"
-RUN_INFERENCE="${RUN_INFERENCE:-0}"
+RUN_INFERENCE="${RUN_INFERENCE:-1}"
 
 # Keep validation subprocesses deterministic on shared CPU machines and avoid
 # fork-after-JAX deadlocks when libraries create worker processes after JAX has
@@ -25,18 +25,18 @@ export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
 # default inference prior log10n0 ∈ [-4, -1].  The low zmax keeps the fixture
 # lightweight while still using a physically meaningful density normalization.
 N0="${N0:-1e-3}"
-ZMAX="${ZMAX:-0.08}"
+ZMAX="${ZMAX:-0.3}"
 SURVEY_Z50="${SURVEY_Z50:-0.75}"
 SURVEY_WIDTH="${SURVEY_WIDTH:-0.12}"
 GALAXY_DENSITY_DELTA="${GALAXY_DENSITY_DELTA:-0.0}"
 LOG10N0="$(python -c 'import math, sys; print(math.log10(float(sys.argv[1])))' "${N0}")"
 
 # Mock size/performance knobs.
-NSIDE="${NSIDE:-8}"
-NOBS="${NOBS:-3}"
+NSIDE="${NSIDE:-128}"
+NOBS="${NOBS:-100}"
 NSAMP="${NSAMP:-128}"
-NDRAW="${NDRAW:-50000}"
-SELECTION_BATCH_SIZE="${SELECTION_BATCH_SIZE:-50000}"
+NDRAW="${NDRAW:-5000000}"
+SELECTION_BATCH_SIZE="${SELECTION_BATCH_SIZE:-500000}"
 SELECTION_PER_OBSERVATION_FACTOR="${SELECTION_PER_OBSERVATION_FACTOR:-}"
 SELECTION_TARGET_DETECTIONS="${SELECTION_TARGET_DETECTIONS:-}"
 
@@ -44,17 +44,17 @@ SELECTION_TARGET_DETECTIONS="${SELECTION_TARGET_DETECTIONS:-}"
 # so even large generated selection files do not have to be materialized as one
 # XLA operation on GPU.  By default the sampler is not call-capped
 # (INFERENCE_MAX_SAMPLES=0); set a positive value only for local debugging.
-INFERENCE_NLIVE="${INFERENCE_NLIVE:-1000}"
+INFERENCE_NLIVE="${INFERENCE_NLIVE:-200}"
 INFERENCE_DLOGZ="${INFERENCE_DLOGZ:-0.1}"
 INFERENCE_MAX_SAMPLES="${INFERENCE_MAX_SAMPLES:-0}"
 INFERENCE_SEL_BATCH_SIZE="${INFERENCE_SEL_BATCH_SIZE:-256}"
 
 # Fractional/absolute widths used to generate mock GW PE samples.
-DL_FRAC_UNCERTAINTY="${DL_FRAC_UNCERTAINTY:-0.20}"
-M1DET_FRAC_UNCERTAINTY="${M1DET_FRAC_UNCERTAINTY:-0.08}"
-M2DET_FRAC_UNCERTAINTY="${M2DET_FRAC_UNCERTAINTY:-0.10}"
+DL_FRAC_UNCERTAINTY="${DL_FRAC_UNCERTAINTY:-0.03}"
+M1DET_FRAC_UNCERTAINTY="${M1DET_FRAC_UNCERTAINTY:-0.03}"
+M2DET_FRAC_UNCERTAINTY="${M2DET_FRAC_UNCERTAINTY:-0.15}"
 CHIEFF_UNCERTAINTY="${CHIEFF_UNCERTAINTY:-0.08}"
-SKY_UNCERTAINTY_DEG="${SKY_UNCERTAINTY_DEG:-5.0}"
+SKY_UNCERTAINTY_DEG="${SKY_UNCERTAINTY_DEG:-0.5}"
 
 FIXED_SURVEY_JSON="${FIXED_SURVEY_JSON:-{\"log10n0\": ${LOG10N0}, \"z50\": ${SURVEY_Z50}, \"w\": ${SURVEY_WIDTH}, \"delta\": ${GALAXY_DENSITY_DELTA}, \"b_miss\": 1.0, \"alpha_miss\": 0.5}}"
 
@@ -162,16 +162,13 @@ if [ "${RUN_INFERENCE}" = "1" ]; then
     --sampler dynesty \
     --pop_model powerlaw+peak_shared_beta_spin \
     --universe_model dark_sirens \
-    --fix_population True \
+    --fix_population False \
     --fix_cosmology False \
-    --fix_survey True \
-    --fixed_parameter_values "${FIXED_SURVEY_JSON}" \
+    --fix_survey False \
     --nlive "${INFERENCE_NLIVE}" \
     --dlogz "${INFERENCE_DLOGZ}" \
-    --max_samples "${INFERENCE_MAX_SAMPLES}" \
-    --sel_batch_size "${INFERENCE_SEL_BATCH_SIZE}" \
     --seed "${SEED}" \
-    --show_progress False \
+    --show_progress True \
     --save_path "${OUTDIR}/inference_realistic"
 fi
 

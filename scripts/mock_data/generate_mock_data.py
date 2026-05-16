@@ -32,6 +32,8 @@ from scipy.special import expit
 
 C_KM_S = 299_792.458
 
+import numpy as np
+import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class PopulationConfig:
@@ -303,7 +305,7 @@ def _draw_selection_batch(
     snr = _network_snr(m1, m2, z, dl, rng)
     det = snr >= snr_threshold
 
-    pz = np.interp(z, grids["z"], grids["dvc_dz"]) / np.trapezoid(grids["dvc_dz"], grids["z"])
+    pz = np.interp(z, grids["z"], grids["dvc_dz"]) / jnp.trapezoid(grids["dvc_dz"], grids["z"])
     ddldz = np.gradient(grids["dl"], grids["z"])
     # Selection densities are consumed in the likelihood's canonical
     # coordinates (m1det, q, dL).  Since m1det = (1+z) m1src and
@@ -365,7 +367,7 @@ def _selection_injections(
 
 
 def _galaxy_count_from_density(n0: float, delta: float, grids: dict[str, np.ndarray]) -> int:
-    density_weighted_volume = np.trapezoid(grids["dvc_dz"] * (1.0 + grids["z"]) ** delta, grids["z"])
+    density_weighted_volume = jnp.trapezoid(grids["dvc_dz"] * (1.0 + grids["z"]) ** delta, grids["z"])
     return max(1, int(round(n0 * density_weighted_volume)))
 
 
