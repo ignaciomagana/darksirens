@@ -72,3 +72,36 @@ def test_bright_siren_sky_marginalized_mode_uses_counterpart_redshift_for_all_pi
 
 def test_prior_registry_uses_dedicated_bright_siren_prior():
     assert PRIOR_REGISTRY["bright_sirens"] is _log_prior_bright_sirens
+
+
+def test_bright_siren_prior_uses_active_counterpart_for_multi_event_catalog():
+    unique_pixels = jnp.array([7, 8], dtype=jnp.int32)
+    catalog = EMCatalog(
+        apix=hp.nside2pixarea(2),
+        zgals=jnp.array([[0.2], [0.35]]),
+        dzgals=jnp.array([[0.01], [0.01]]),
+        wgals=jnp.array([[1.0], [1.0]]),
+        ngals=jnp.array([1, 1], dtype=jnp.int32),
+        delta_g_pix_z=jnp.zeros((1, 1)),
+        sigma_kernel=0.0,
+        dN_obs_kde=None,
+        pixel_to_cache_idx=None,
+        unique_pixels=unique_pixels,
+        counterpart_pixels=jnp.array([7, 8], dtype=jnp.int32),
+        counterpart_zs=jnp.array([0.2, 0.35]),
+        counterpart_dzs=jnp.array([0.01, 0.01]),
+        active_counterpart_index=1,
+        bright_siren_sky_marginalized=False,
+    )
+
+    actual = _log_prior_bright_sirens(
+        jnp.array([0.35, 0.2]),
+        jnp.array([1, 0], dtype=jnp.int32),
+        _cosmo(),
+        _survey(),
+        catalog,
+    )
+
+    actual_np = np.asarray(actual)
+    assert np.isfinite(actual_np[0])
+    assert np.isneginf(actual_np[1])

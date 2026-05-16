@@ -110,3 +110,14 @@ passes `--sel_batch_size` (default `INFERENCE_SEL_BATCH_SIZE=256`) for memory
 safety, uses `INFERENCE_NLIVE=1000` and `INFERENCE_DLOGZ=0.1` by default, and
 does not cap Dynesty likelihood calls unless you set a positive
 `INFERENCE_MAX_SAMPLES` (the default `0` disables the cap).
+
+
+## Bright-siren mock data
+
+A separate bright-siren mock workflow is available under `scripts/mock_bright_sirens` so the dark-siren mock scripts remain unchanged. It generates a complete galaxy population, applies an EM survey selection, draws GW events from galaxies with detectable counterparts, fixes the PE sky samples to the counterpart positions, and writes joint GW+EM selection injections for multi-event bright-siren inference.
+
+```bash
+bash scripts/mock_bright_sirens/run_mock_bright_sirens_test.sh
+```
+
+The runner writes `mock_bright_gw_events.h5`, `mock_bright_gw_selection.h5`, and `bright_counterparts.json` under `data/mock_bright_sirens_test` by default. Set `RUN_INFERENCE=1` to run `darksirens_inference` with `--universe_model bright_sirens` and one `--counterpart RA DEC Z` triplet per generated event.

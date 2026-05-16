@@ -176,27 +176,32 @@ def parse_json_arg(value: str | None, argname: str) -> dict:
                f"  Example: --{argname} '{{\"H0\": [60, 80]}}'")
 
 
-def parse_counterpart_arg(value: list[str] | None) -> tuple[float, float, float] | None:
-    """Parse ``--counterpart RA DEC Z`` into floats.
+def parse_counterpart_arg(value: list[str] | None) -> tuple[tuple[float, float, float], ...] | None:
+    """Parse one or more ``--counterpart RA DEC Z`` triplets into floats.
 
     Angles are expected in radians, matching the GW sample convention used by
-    ``load_gw_samples`` and HEALPix indexing throughout the pipeline.
+    ``load_gw_samples`` and HEALPix indexing throughout the pipeline.  Multiple
+    triplets are ordered by GW event, enabling multi-bright-siren analyses.
     """
     if value is None:
         return None
-    if len(value) != 3:
-        _fatal("--counterpart requires exactly three values: RA DEC Z (angles in radians).")
+    if len(value) % 3 != 0:
+        _fatal("--counterpart requires RA DEC Z triplets (angles in radians).")
     try:
-        ra, dec, z = (float(x) for x in value)
+        vals = [float(x) for x in value]
     except ValueError as e:
-        _fatal(f"--counterpart values must be numeric RA DEC Z. Error: {e}")
-    if not (0.0 <= ra < 2.0 * np.pi):
-        _fatal("--counterpart RA must be in radians with 0 <= RA < 2π.")
-    if not (-0.5 * np.pi <= dec <= 0.5 * np.pi):
-        _fatal("--counterpart Dec must be in radians with -π/2 <= Dec <= π/2.")
-    if z <= 0.0:
-        _fatal("--counterpart redshift Z must be positive.")
-    return ra, dec, z
+        _fatal(f"--counterpart values must be numeric RA DEC Z triplets. Error: {e}")
+    out = []
+    for i in range(0, len(vals), 3):
+        ra, dec, z = vals[i : i + 3]
+        if not (0.0 <= ra < 2.0 * np.pi):
+            _fatal("--counterpart RA must be in radians with 0 <= RA < 2π.")
+        if not (-0.5 * np.pi <= dec <= 0.5 * np.pi):
+            _fatal("--counterpart Dec must be in radians with -π/2 <= Dec <= π/2.")
+        if z <= 0.0:
+            _fatal("--counterpart redshift Z must be positive.")
+        out.append((ra, dec, z))
+    return tuple(out)
 
 
 # ── Parameter table ────────────────────────────────────────────────────────────
@@ -353,9 +358,12 @@ def save_results_hdf5(
         f.attrs["gwselection_path"] = opts.gwselection_path
         f.attrs["survey_path"]     = opts.survey_path or ""
         if getattr(opts, "counterpart", None) is not None:
-            f.attrs["counterpart_ra"] = float(opts.counterpart[0])
-            f.attrs["counterpart_dec"] = float(opts.counterpart[1])
-            f.attrs["counterpart_z"] = float(opts.counterpart[2])
+            counterpart_arr = np.asarray(opts.counterpart, dtype=float)
+            f.create_dataset("counterparts", data=counterpart_arr, **kw)
+            f.attrs["counterpart_ra"] = float(counterpart_arr[0, 0])
+            f.attrs["counterpart_dec"] = float(counterpart_arr[0, 1])
+            f.attrs["counterpart_z"] = float(counterpart_arr[0, 2])
+            f.attrs["n_counterparts"] = int(counterpart_arr.shape[0])
             f.attrs["counterpart_dz"] = float(opts.counterpart_dz)
             f.attrs["counterpart_nside"] = int(opts.counterpart_nside)
             f.attrs["bright_siren_sky_marginalized"] = bool(opts.bright_siren_sky_marginalized)
@@ -584,8 +592,9 @@ def main():
     g.add_argument("--fix_survey",      type=str_to_bool, default=False, metavar="BOOL")
     g.add_argument("--prior_overrides", default=None, metavar="JSON")
     g.add_argument("--fixed_parameter_values", default=None, metavar="JSON")
-    g.add_argument("--counterpart", nargs=3, metavar=("RA", "DEC", "Z"),
-                   help="Bright-siren counterpart coordinates and redshift; angles are radians.")
+    g.add_argument("--counterpart", nargs="+", metavar="RA_DEC_Z",
+                   help=("Bright-siren counterpart RA DEC Z triplet(s), ordered by event; "
+                         "angles are radians."))
     g.add_argument("--counterpart_dz", type=float, default=1.0e-4,
                    help="Gaussian redshift uncertainty for --counterpart.")
     g.add_argument("--counterpart_nside", type=int, default=1,
@@ -663,7 +672,7 @@ def main():
     GALAXY_AWARE = {"dark_sirens", "dark_sirens_complete"}
 
     if opts.universe_model == "bright_sirens" and opts.counterpart is None:
-        _fatal("'bright_sirens' requires --counterpart RA DEC Z (angles in radians).")
+        _fatal("'bright_sirens' requires --counterpart RA DEC Z triplet(s) (angles in radians).")
     if opts.universe_model != "bright_sirens" and opts.counterpart is not None:
         _warn("--counterpart is ignored unless --universe_model bright_sirens.")
     if opts.counterpart_dz <= 0.0:
@@ -688,8 +697,9 @@ def main():
     _section("Run Configuration")
     _row("Universe model",   opts.universe_model)
     if opts.counterpart is not None:
-        ra_cp, dec_cp, z_cp = opts.counterpart
-        _row("Counterpart", f"ra={ra_cp:.8g}, dec={dec_cp:.8g}, z={z_cp:.8g}")
+        first_cp = opts.counterpart[0]
+        _row("Counterparts", len(opts.counterpart))
+        _row("First counterpart", f"ra={first_cp[0]:.8g}, dec={first_cp[1]:.8g}, z={first_cp[2]:.8g}")
         _row("Counterpart dz", opts.counterpart_dz)
         _row("Counterpart nside", opts.counterpart_nside)
         _row("Bright-siren sky marginalized", opts.bright_siren_sky_marginalized)

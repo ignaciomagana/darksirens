@@ -218,10 +218,15 @@ def prepare_catalog_views(
             data.get("pixels_sel"),
         )
     ):
+        counterpart_pixels = data.get("counterpart_pixels")
         required_pixels = (
-            [counterpart_pixel]
-            if universe_model == "bright_sirens" and counterpart_pixel is not None
-            else None
+            counterpart_pixels
+            if universe_model == "bright_sirens" and counterpart_pixels is not None
+            else (
+                [counterpart_pixel]
+                if universe_model == "bright_sirens" and counterpart_pixel is not None
+                else None
+            )
         )
         union_unique_pixels = unique_inference_pixels(
             data["pixels_pe"], data["pixels_sel"], required_pixels=required_pixels

@@ -68,11 +68,21 @@ class EMCatalog(NamedTuple):
         GWEvent pixel index for compact catalogs; the field is retained on
         the catalog for diagnostics/introspection.
     counterpart_pixel : int or None
-        Global HEALPix pixel containing the bright-siren electromagnetic
-        counterpart.  Used only by the bright-siren prior.
+        Backward-compatible scalar global HEALPix pixel for a one-event
+        bright-siren counterpart.
+    counterpart_pixels : array or None
+        Per-event global HEALPix pixels for bright-siren counterparts.
+    counterpart_zs : array or None
+        Per-event counterpart redshifts.
+    counterpart_dzs : array or None
+        Per-event Gaussian redshift uncertainties.
+    active_counterpart_index : int
+        Event index selected by the PE likelihood when evaluating a multi-event
+        bright-siren prior.
     bright_siren_sky_marginalized : bool
         If true, the bright-siren prior applies only the counterpart redshift
-        prior and does not require a GW sample to fall in ``counterpart_pixel``.
+        prior and does not require a GW sample to fall in the event counterpart
+        pixel.
     """
     apix: Any
     zgals: Any
@@ -85,7 +95,11 @@ class EMCatalog(NamedTuple):
     pixel_to_cache_idx: Any    # (N_pix_catalog or N_catalog_rows,) | None
     unique_pixels: Any = None  # (N_catalog_rows,) | None
     sample_to_unique_idx: Any = None  # sample-shaped int array | None
-    counterpart_pixel: Any = None  # global HEALPix pixel for bright sirens | None
+    counterpart_pixel: Any = None  # legacy scalar global HEALPix pixel | None
+    counterpart_pixels: Any = None  # per-event global HEALPix pixels | None
+    counterpart_zs: Any = None  # per-event bright-siren redshifts | None
+    counterpart_dzs: Any = None  # per-event redshift uncertainties | None
+    active_counterpart_index: Any = 0  # event row selected by likelihood
     bright_siren_sky_marginalized: Any = False
 
 

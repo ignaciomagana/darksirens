@@ -13,6 +13,22 @@ GALAXY_AWARE_MODELS = ["dark_sirens", "dark_sirens_complete"]
 BRIGHT_SIREN_MODELS = ["bright_sirens"]
 
 
+def _as_counterpart_array(counterpart) -> np.ndarray:
+    """Return counterpart metadata as an ``(N, 3)`` float array.
+
+    The public CLI accepts either one ``RA DEC Z`` triplet or a flattened list
+    of triplets for multi-event bright-siren analyses.
+    """
+    arr = np.asarray(counterpart, dtype=float)
+    if arr.ndim == 1:
+        if arr.size != 3:
+            raise ValueError("bright_sirens counterpart metadata must be RA DEC Z triplets.")
+        arr = arr.reshape(1, 3)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError("bright_sirens counterpart metadata must have shape (N, 3).")
+    return arr
+
+
 def _compact_catalog_for_pixels(pixels, zgals, dzgals, wgals, ngals, required_pixels=None):
     """Return compact catalog rows and sample→row lookup for pixels.
 
@@ -123,36 +139,49 @@ def load_all_data(opts):
     apix = 0.0
     sigma_kernel = 0.0
     counterpart_pixel = None
+    counterpart_pixels = None
+    counterpart_zs = None
+    counterpart_dzs = None
     bright_siren_sky_marginalized = bool(
         getattr(opts, "bright_siren_sky_marginalized", False)
     )
 
-    # 2. Load survey data, or build the synthetic one-object catalog used by
+    # 2. Load survey data, or build the synthetic counterpart catalog used by
     # bright sirens.  The counterpart is not a survey hyperparameter: it is
     # fixed event metadata supplied through the inference CLI.
     if opts.universe_model in BRIGHT_SIREN_MODELS:
         if opts.counterpart is None:
-            raise ValueError("bright_sirens requires opts.counterpart=(ra, dec, z).")
-        ra_cp, dec_cp, z_cp = opts.counterpart
+            raise ValueError("bright_sirens requires opts.counterpart=RA DEC Z triplets.")
+        counterparts = _as_counterpart_array(opts.counterpart)
+        ra_cp = counterparts[:, 0]
+        dec_cp = counterparts[:, 1]
+        z_cp = counterparts[:, 2]
         nside = int(opts.counterpart_nside)
         npix = hp.nside2npix(nside)
-        cp_pix = int(hp.ang2pix(nside, np.pi / 2.0 - dec_cp, ra_cp))
-        counterpart_pixel = cp_pix
+        counterpart_pixels = hp.ang2pix(nside, np.pi / 2.0 - dec_cp, ra_cp).astype(np.int32)
+        counterpart_pixel = int(counterpart_pixels[0])
+        counterpart_zs = z_cp.astype(float, copy=False)
+        counterpart_dzs = np.ones_like(counterpart_zs, dtype=float) * float(opts.counterpart_dz)
 
-        zgals = np.zeros((npix, 1), dtype=float)
-        dzgals = np.ones((npix, 1), dtype=float) * float(opts.counterpart_dz)
-        wgals = np.zeros((npix, 1), dtype=float)
-        ngals = np.zeros(npix, dtype=np.int32)
-
-        zgals[cp_pix, 0] = z_cp
-        wgals[cp_pix, 0] = 1.0
-        ngals[cp_pix] = 1
+        counts = np.bincount(counterpart_pixels, minlength=npix).astype(np.int32)
+        max_counterparts = max(1, int(counts.max()))
+        zgals = np.zeros((npix, max_counterparts), dtype=float)
+        dzgals = np.ones((npix, max_counterparts), dtype=float) * float(opts.counterpart_dz)
+        wgals = np.zeros((npix, max_counterparts), dtype=float)
+        ngals = counts
+        offsets = np.zeros(npix, dtype=np.int32)
+        for pix_i, z_i in zip(counterpart_pixels, counterpart_zs):
+            j = offsets[pix_i]
+            zgals[pix_i, j] = z_i
+            wgals[pix_i, j] = 1.0
+            offsets[pix_i] += 1
 
         apix = hp.nside2pixarea(nside)
         sigma_kernel = opts.sigma_kernel
         print(
             "Using bright-siren counterpart catalog: "
-            f"ra={ra_cp}, dec={dec_cp}, z={z_cp}, pixel={cp_pix}, nside={nside}"
+            f"{len(counterpart_zs)} counterpart(s), nside={nside}, "
+            f"pixels={counterpart_pixels.tolist()}"
         )
     elif opts.survey_path is not None:
         nside, ngals, zgals, dzgals, wgals = load_survey(opts.survey_path)
@@ -171,6 +200,12 @@ def load_all_data(opts):
     m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = load_gw_samples(
         opts.gw_path
     )
+    if opts.universe_model in BRIGHT_SIREN_MODELS and counterpart_zs is not None:
+        if len(counterpart_zs) != int(nEvents):
+            raise ValueError(
+                "bright_sirens requires one counterpart RA DEC Z triplet per GW event: "
+                f"got {len(counterpart_zs)} counterpart(s) for {int(nEvents)} event(s)."
+            )
 
     # 4. Load Selection samples (Always required)
     (
@@ -185,8 +220,8 @@ def load_all_data(opts):
 
     if zgals is not None:
         required_pixels = (
-            [counterpart_pixel]
-            if opts.universe_model in BRIGHT_SIREN_MODELS and counterpart_pixel is not None
+            counterpart_pixels
+            if opts.universe_model in BRIGHT_SIREN_MODELS and counterpart_pixels is not None
             else None
         )
         (
@@ -270,6 +305,9 @@ def load_all_data(opts):
         catalog_memory=catalog_memory,
         sigma_kernel=sigma_kernel,
         counterpart_pixel=counterpart_pixel,
+        counterpart_pixels=counterpart_pixels,
+        counterpart_zs=counterpart_zs,
+        counterpart_dzs=counterpart_dzs,
         bright_siren_sky_marginalized=bright_siren_sky_marginalized
     )
 
