@@ -10,7 +10,13 @@ Build the docs locally:
 
 ```bash
 python -m pip install -r docs/requirements.txt
-python -m sphinx -b html docs/source docs/_build/html
+make docs-html
+```
+
+For a stricter pre-publish check that treats warnings as errors while continuing through all warnings, run:
+
+```bash
+make docs-strict
 ```
 
 Start with the documentation source at [`docs/source/index.md`](docs/source/index.md), or see the quickstart guide at [`docs/source/quickstart.md`](docs/source/quickstart.md).

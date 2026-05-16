@@ -30,11 +30,15 @@ The inference entry point configures JAX for high precision and conservative mem
 
 ```bash
 python -m pip install -r docs/requirements.txt
-python -m sphinx -b html docs/source docs/_build/html
+make docs-html
 python -m http.server --directory docs/_build/html 8000
 ```
 
-Then open <http://localhost:8000> in a browser.
+Then open <http://localhost:8000> in a browser. Before publishing, maintainers can run the stricter documentation check:
+
+```bash
+make docs-strict
+```
 
 ## Hosted documentation
 
