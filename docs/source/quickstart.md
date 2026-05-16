@@ -70,7 +70,7 @@ darksirens_inference \
 ## 6. Analyze a run
 
 ```bash
-darksirens_analyze runs/spectral_powerlaw_peak \
+darksirens_analyze --run_dirs runs/spectral_powerlaw_peak \
   --mmin 1 \
   --mmax 100 \
   --nm 300 \
