@@ -48,6 +48,7 @@ darksirens_inference \
 - `--fix_survey`: fix survey-completion parameters to fiducial values.
 - `--prior_overrides`: JSON object mapping parameter names to `[lower, upper]` prior bounds.
 - `--fixed_parameter_values`: JSON object mapping parameter names to fixed scalar values.
+- `--bright_siren_sky_marginalized BOOL`: for `bright_sirens`, ignore the counterpart sky-pixel gate and apply only the counterpart redshift prior. Defaults to `False`. Accepted true values are `true`, `t`, `1`, `yes`, and `y`; accepted false values are `false`, `f`, `0`, `no`, and `n` (case-insensitive).
 - `--complete_empty_pixel_policy {zero,volume}`: controls genuinely empty pixels for `dark_sirens_complete` and `bright_sirens`. `zero` is the formal default and returns zero probability (`-inf` log-prior) when `ngals == 0`; `volume` uses the comoving-volume prior as a robustness approximation for sparse pixelations.
 
 ### Catalog options
