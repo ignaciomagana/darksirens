@@ -60,12 +60,28 @@ from .utils import get_mass_grid, get_q_grid, get_chi_grid, M_LO
 
 @dataclass(frozen=True)
 class ParamSpec:
+    """Metadata for one sampled population-model parameter.
+
+    Attributes
+    ----------
+    label:
+        Human-readable label used in tables, diagnostics, and sampler outputs.
+    low, high:
+        Inclusive prior-transform bounds for the unit-cube samplers.
+    """
+
     label: str
     low: float
     high: float
 
 
 def pack_specs(*specs: ParamSpec):
+    """Split ``ParamSpec`` objects into lower bounds, upper bounds, and labels.
+
+    Registry constructors use this helper to build the arrays expected by the
+    sampler-facing prior transform while preserving a single source of truth for
+    parameter ordering.
+    """
     return (
         [s.low  for s in specs],
         [s.high for s in specs],
@@ -99,16 +115,28 @@ def _stick_breaking_weights(v_raw: jnp.ndarray) -> jnp.ndarray:
 # ── Abstract base classes ────────────────────────────────────────────────────
 
 class MassComponent(ABC):
+    """Interface for normalised primary-mass distributions.
+
+    Subclasses implement ``_eval_unnorm(m, theta)`` only.  The base class
+    computes the normalisation integral over the configured mass grid and then
+    returns a probability density for arbitrary scalar or array inputs.
+    """
+
     @property
     @abstractmethod
-    def param_specs(self) -> list[ParamSpec]: ...
+    def param_specs(self) -> list[ParamSpec]:
+        """Parameter metadata in the order consumed by this component."""
+        ...
 
     @property
     def n_params(self) -> int:
+        """Number of free parameters consumed by this component."""
         return len(self.param_specs)
 
     @abstractmethod
-    def _eval_unnorm(self, m, theta): ...
+    def _eval_unnorm(self, m, theta):
+        """Evaluate the component's unnormalised primary-mass density."""
+        ...
 
     def _norm(self, theta) -> jnp.ndarray:
         """
@@ -119,22 +147,40 @@ class MassComponent(ABC):
         return jnp.trapezoid(self._eval_unnorm(mass_grid, theta), mass_grid)
 
     def __call__(self, m, theta, norm=None):
+        """Evaluate the normalised density at mass ``m``.
+
+        ``norm`` may be supplied by callers that already computed the component
+        normalisation for the same ``theta``; this avoids repeated grid
+        integrations inside vectorised population evaluations.
+        """
         p = self._eval_unnorm(m, theta)
         n = norm if norm is not None else self._norm(theta)
         return p / jnp.where(n > 0, n, 1.0)
 
 
 class PairingModel(ABC):
+    """Interface for conditional mass-ratio distributions ``p(q | m1)``.
+
+    Pairing normalisation depends on the primary mass because the secondary-mass
+    cut is imposed through ``m2 = q * m1``.  The base implementation therefore
+    integrates over the mass-ratio grid for each supplied ``m1``.
+    """
+
     @property
     @abstractmethod
-    def param_specs(self) -> list[ParamSpec]: ...
+    def param_specs(self) -> list[ParamSpec]:
+        """Parameter metadata in the order consumed by this pairing model."""
+        ...
 
     @property
     def n_params(self):
+        """Number of free parameters consumed by this pairing model."""
         return len(self.param_specs)
 
     @abstractmethod
-    def _eval_unnorm(self, m1, q, m_min, dm_min, theta): ...
+    def _eval_unnorm(self, m1, q, m_min, dm_min, theta):
+        """Evaluate the unnormalised conditional mass-ratio density."""
+        ...
 
     def __call__(self, m1, q, m_min, dm_min, theta):
         # PairingModel norm integrates over q for each m1 — sample-dependent,
@@ -148,16 +194,28 @@ class PairingModel(ABC):
 
 
 class SpinModel(ABC):
+    """Interface for normalised effective-spin distributions.
+
+    Subclasses define an unnormalised density in ``chieff``.  The base class
+    integrates over the configured spin grid and returns a density suitable for
+    multiplication with mass and pairing factors.
+    """
+
     @property
     @abstractmethod
-    def param_specs(self) -> list[ParamSpec]: ...
+    def param_specs(self) -> list[ParamSpec]:
+        """Parameter metadata in the order consumed by this spin model."""
+        ...
 
     @property
     def n_params(self):
+        """Number of free parameters consumed by this spin model."""
         return len(self.param_specs)
 
     @abstractmethod
-    def _eval_unnorm(self, chieff, theta): ...
+    def _eval_unnorm(self, chieff, theta):
+        """Evaluate the component's unnormalised effective-spin density."""
+        ...
 
     def _norm(self, theta) -> jnp.ndarray:
         """
@@ -168,6 +226,7 @@ class SpinModel(ABC):
         return jnp.trapezoid(self._eval_unnorm(chi_grid, theta), chi_grid)
 
     def __call__(self, chieff, theta, norm=None):
+        """Evaluate the normalised effective-spin density at ``chieff``."""
         p = self._eval_unnorm(chieff, theta)
         n = norm if norm is not None else self._norm(theta)
         return p / jnp.where(n > 0, n, 1.0)
@@ -177,6 +236,15 @@ class SpinModel(ABC):
 
 @dataclass
 class MixtureModel:
+    """Stick-breaking mixture of mass, pairing, and spin components.
+
+    A mixture with ``k`` mass components consumes all component parameters plus
+    ``k - 1`` stick-breaking variables.  Pairing and spin components can either
+    be shared across all mass components or supplied one-per-component.  The
+    final component receives the remaining stick by construction, so mixture
+    weights are always non-negative and sum to one.
+    """
+
     mass_components:    list[MassComponent]
     pairing_components: list[PairingModel]
     spin_components:    list[SpinModel]
@@ -197,10 +265,12 @@ class MixtureModel:
 
     @property
     def n_weight_params(self):
+        """Number of stick-breaking variables required for this mixture."""
         return max(self.k - 1, 0)
 
     @property
     def param_specs(self):
+        """Return weight, mass, pairing, and spin parameter specs in order."""
         # v_i are stick-breaking inputs, bounded [0, 1].
         specs = [ParamSpec(rf"$v_{i+1}$", 0.0, 1.0) for i in range(self.n_weight_params)]
         for c in self.mass_components:    specs.extend(c.param_specs)
@@ -210,9 +280,11 @@ class MixtureModel:
 
     @property
     def n_params(self):
+        """Total number of free mixture parameters."""
         return len(self.param_specs)
 
     def __call__(self, m1, q, chieff, theta):
+        """Evaluate the normalised mixture density for source parameters."""
         n_w = self.n_weight_params
 
         # Stick-breaking: all weights guaranteed ≥ 0, Σ = 1.
@@ -265,13 +337,22 @@ class MixtureModel:
 
 @dataclass
 class PopulationModel:
+    """Full compact-binary population model used by the likelihood.
+
+    The model combines a normalised source-parameter mixture with a redshift
+    evolution term ``(1 + z)**(gamma - 1)``.  Registry entries create instances
+    of this class and expose the corresponding prior bounds to samplers.
+    """
+
     mixture: MixtureModel
 
     @property
     def param_specs(self):
+        """Return mixture parameter specs followed by the redshift slope."""
         return [*self.mixture.param_specs, ParamSpec(r"$\gamma$", -10.0, 10.0)]
 
     def prior_bounds(self):
+        """Return lower bounds, upper bounds, and labels for all parameters."""
         return pack_specs(*self.param_specs)
 
     def log_p_pop(self, m1, q, z, chieff, theta):
