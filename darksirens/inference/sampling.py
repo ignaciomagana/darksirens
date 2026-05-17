@@ -5,7 +5,7 @@ import jax.numpy as jnp
 def run_sampler(method, likelihood, prior_transform, labels,
                 lower_bound, upper_bound, opts):
     """
-    method: "jaxns", "dynesty", or "emcee"
+    method: "jaxns", "dynesty", "emcee", or "numpyro"
     likelihood: function(coord) -> logL (expects 1D array)
     prior_transform: maps unit cube -> parameter space (expects 1D array)
     labels: list of parameter names
@@ -68,6 +68,103 @@ def run_sampler(method, likelihood, prior_transform, labels,
             "samples": np.asarray(samples),
             "logZ": None,        # JAXNS evidence not extracted here
             "logZerr": None
+        }
+
+
+    # --------------------------------------------------------
+    # NumPyro / NUTS
+    # --------------------------------------------------------
+    elif method == "numpyro":
+        import numpyro
+        import numpyro.distributions as dist
+        from numpyro.infer import MCMC, NUTS
+        from numpyro.infer.initialization import init_to_value
+
+        lower = jnp.asarray(lower_bound, dtype=jnp.result_type(float))
+        upper = jnp.asarray(upper_bound, dtype=jnp.result_type(float))
+        midpoint = 0.5 * (lower + upper)
+
+        if not np.all(np.isfinite(np.asarray(lower))) or not np.all(
+            np.isfinite(np.asarray(upper))
+        ):
+            raise ValueError(
+                "NumPyro sampler requires finite lower and upper prior bounds."
+            )
+        if not np.all(np.asarray(upper) > np.asarray(lower)):
+            raise ValueError(
+                "NumPyro sampler requires every prior upper bound to exceed its "
+                "lower bound."
+            )
+
+        def model():
+            # Use the same independent uniform priors as the nested samplers and
+            # emcee boundary checks.  NumPyro handles the constrained-to-real
+            # transform internally so NUTS samples in an unconstrained space.
+            theta_parts = []
+            for i, name in enumerate(labels):
+                theta_parts.append(
+                    numpyro.sample(
+                        name,
+                        dist.Uniform(low=lower[i], high=upper[i]),
+                    )
+                )
+            theta = jnp.stack(theta_parts) if theta_parts else jnp.array([])
+            log_l = likelihood(theta)
+            numpyro.deterministic("log_likelihood", log_l)
+            numpyro.factor("likelihood", log_l)
+
+        init_values = {name: midpoint[i] for i, name in enumerate(labels)}
+        target_accept = float(getattr(opts, "nuts_target_accept", 0.8))
+        max_tree_depth = int(getattr(opts, "nuts_max_tree_depth", 10))
+        num_warmup = int(getattr(opts, "nuts_warmup", 500))
+        num_samples = int(
+            getattr(opts, "nuts_samples", getattr(opts, "nsteps", 1000))
+        )
+        num_chains = int(getattr(opts, "nuts_chains", 1))
+        chain_method = getattr(opts, "nuts_chain_method", "sequential")
+
+        if num_warmup < 0 or num_samples <= 0 or num_chains <= 0:
+            raise ValueError(
+                "NumPyro requires nuts_warmup >= 0, nuts_samples > 0, "
+                "and nuts_chains > 0."
+            )
+
+        kernel = NUTS(
+            model,
+            target_accept_prob=target_accept,
+            max_tree_depth=max_tree_depth,
+            init_strategy=init_to_value(values=init_values),
+        )
+        mcmc = MCMC(
+            kernel,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            num_chains=num_chains,
+            chain_method=chain_method,
+            progress_bar=opts.show_progress,
+        )
+        key = jax.random.PRNGKey(opts.seed)
+        print(
+            "Starting NumPyro NUTS run: "
+            f"warmup={num_warmup}, samples={num_samples}, chains={num_chains}",
+            flush=True,
+        )
+        mcmc.run(key)
+        posterior = mcmc.get_samples(group_by_chain=False)
+        samples = (
+            jnp.column_stack([posterior[name] for name in labels])
+            if labels
+            else jnp.zeros((num_samples * num_chains, 0))
+        )
+        log_likelihood = posterior.get("log_likelihood")
+
+        return {
+            "samples": np.asarray(samples),
+            "logZ": None,
+            "logZerr": None,
+            "log_likelihood": (
+                None if log_likelihood is None else np.asarray(log_likelihood)
+            ),
         }
 
     # --------------------------------------------------------

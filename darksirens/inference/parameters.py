@@ -13,7 +13,7 @@ from darksirens.utils.containers import CosmoParams, SurveyParams
 
 H0_FID = float(Planck15.H0.value)
 OM0_FID = float(Planck15.Om0)
-SURVEY_PARAMS_FID = jnp.array([-2.0, 1.0, 0.5, 0.0, 1.0, 0.5])
+SURVEY_PARAMS_FID = (-2.0, 1.0, 0.5, 0.0, 1.0, 0.5)
 
 COMPLETE_EMPTY_PIXEL_POLICIES = {"zero": 0, "volume": 1}
 
