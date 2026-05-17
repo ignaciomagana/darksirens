@@ -11,3 +11,4 @@ astropy
 tqdm
 dynesty
 seaborn
+numpyro

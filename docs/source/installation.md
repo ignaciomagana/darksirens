@@ -16,10 +16,10 @@ python -m pip install -e .
 python -m pip install -r requirements.txt
 ```
 
-If you use the `dynesty` or `emcee` samplers, install those packages in the same environment:
+If you use optional sampler/post-processing packages outside `requirements.txt`, install them in the same environment:
 
 ```bash
-python -m pip install dynesty emcee corner arviz h5py tqdm
+python -m pip install dynesty emcee numpyro corner arviz h5py tqdm
 ```
 
 ## JAX notes

@@ -28,7 +28,8 @@ python -m pip install -r requirements.txt
 Additional sampler-specific packages may be required depending on the selected backend:
 
 - `dynesty` for `--sampler dynesty`;
-- `emcee` for `--sampler emcee`; and
+- `emcee` for `--sampler emcee`;
+- `numpyro` for `--sampler numpyro`; and
 - `jaxns` for `--sampler jaxns`.
 
 Build the documentation locally with:
@@ -339,6 +340,11 @@ Common sampler options:
 | `--max_samples` | `1000000` | `jaxns`, dynesty call cap | Maximum sample/call budget. |
 | `--nwalkers` | `32` | `emcee` | Number of MCMC walkers. |
 | `--nsteps` | `1000` | `emcee` | Number of MCMC steps. |
+| `--nuts_warmup` | `500` | `numpyro` | Number of NUTS adaptation/warmup steps. |
+| `--nuts_samples` | `1000` | `numpyro` | Number of NUTS posterior samples per chain. |
+| `--nuts_chains` | `1` | `numpyro` | Number of NUTS chains. |
+| `--nuts_target_accept` | `0.8` | `numpyro` | Target acceptance probability for NUTS. |
+| `--nuts_max_tree_depth` | `10` | `numpyro` | Maximum NUTS tree depth. |
 | `--seed` | `22` | all | Random seed. |
 | `--show_progress` | `true` | all | Enable progress output where supported. |
 

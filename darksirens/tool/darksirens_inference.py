@@ -372,6 +372,11 @@ def save_results_hdf5(
         f.attrs["dlogz"]           = float(opts.dlogz)
         f.attrs["nwalkers"]        = int(opts.nwalkers)
         f.attrs["nsteps"]          = int(opts.nsteps)
+        f.attrs["nuts_warmup"]     = int(getattr(opts, "nuts_warmup", 0))
+        f.attrs["nuts_samples"]    = int(getattr(opts, "nuts_samples", 0))
+        f.attrs["nuts_chains"]     = int(getattr(opts, "nuts_chains", 0))
+        f.attrs["nuts_target_accept"] = float(getattr(opts, "nuts_target_accept", 0.0))
+        f.attrs["nuts_max_tree_depth"] = int(getattr(opts, "nuts_max_tree_depth", 0))
         f.attrs["seed"]            = int(opts.seed)
         f.attrs["n_samples"]       = N
         f.attrs["n_dim"]           = ndim
@@ -618,12 +623,18 @@ def main():
                    help="Maximum number of unique catalog pixels to inspect in --validate_completion.")
 
     g = optp.add_argument_group("Sampler")
-    g.add_argument("--sampler",      required=True, choices=["jaxns", "dynesty", "emcee"])
+    g.add_argument("--sampler",      required=True, choices=["jaxns", "dynesty", "emcee", "numpyro"])
     g.add_argument("--nlive",        type=int,   default=1000)
     g.add_argument("--dlogz",        type=float, default=0.1)
     g.add_argument("--max_samples",  type=int,   default=1_000_000)
     g.add_argument("--nwalkers",     type=int,   default=32)
     g.add_argument("--nsteps",       type=int,   default=1000)
+    g.add_argument("--nuts_warmup",  type=int,   default=500)
+    g.add_argument("--nuts_samples", type=int,   default=1000)
+    g.add_argument("--nuts_chains",  type=int,   default=1)
+    g.add_argument("--nuts_target_accept", type=float, default=0.8)
+    g.add_argument("--nuts_max_tree_depth", type=int, default=10)
+    g.add_argument("--nuts_chain_method", default="sequential", choices=["sequential", "parallel", "vectorized"])
     g.add_argument("--seed",         type=int,   default=22)
     g.add_argument("--show_progress",type=str_to_bool, default=True, metavar="BOOL")
 
@@ -728,6 +739,11 @@ def main():
     if opts.sampler == "emcee":
         _row("  walkers", opts.nwalkers)
         _row("  steps",   opts.nsteps)
+    if opts.sampler == "numpyro":
+        _row("  warmup", opts.nuts_warmup)
+        _row("  samples", opts.nuts_samples)
+        _row("  chains", opts.nuts_chains)
+        _row("  target accept", opts.nuts_target_accept)
     _row("  seed", opts.seed)
     print("  │")
     norm_grid = normalization_grid_settings()
@@ -854,6 +870,7 @@ def main():
         "jaxns":   f"nlive={opts.nlive}  max_samples={opts.max_samples:,}  seed={opts.seed}",
         "dynesty": f"nlive={opts.nlive}  dlogz={opts.dlogz}  seed={opts.seed}",
         "emcee":   f"nwalkers={opts.nwalkers}  nsteps={opts.nsteps}  seed={opts.seed}",
+        "numpyro": f"warmup={opts.nuts_warmup}  samples={opts.nuts_samples}  chains={opts.nuts_chains}  seed={opts.seed}",
     }
     _row("Configuration", sampler_info[opts.sampler])
     _row("ndim", len(labels))

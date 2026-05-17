@@ -60,12 +60,17 @@ darksirens_inference \
 
 ### Sampler options
 
-- `--sampler`: required; one of `jaxns`, `dynesty`, or `emcee`.
+- `--sampler`: required; one of `jaxns`, `dynesty`, `emcee`, or `numpyro`.
 - `--nlive`: live points for nested samplers.
 - `--dlogz`: evidence stopping threshold where supported.
 - `--max_samples`: maximum samples for samplers that expose this limit.
 - `--nwalkers`: number of walkers for `emcee`.
 - `--nsteps`: number of steps for `emcee`.
+- `--nuts_warmup`: NUTS warmup/adaptation steps for `numpyro`.
+- `--nuts_samples`: NUTS posterior samples per chain for `numpyro`.
+- `--nuts_chains`: number of NUTS chains for `numpyro`.
+- `--nuts_target_accept`: target acceptance probability for `numpyro` NUTS.
+- `--nuts_max_tree_depth`: maximum NUTS tree depth for `numpyro`.
 - `--seed`: random seed.
 - `--show_progress`: enable or disable progress bars.
 
