@@ -1,6 +1,16 @@
 # Module reference
 
+This page exposes the Sphinx autodoc output for the package.  The short notes
+before each section summarize how the modules fit together; the generated member
+lists provide class, function, and parameter-level details from the code
+comments and docstrings.
+
 ## EM package
+
+Electromagnetic modules load HEALPix galaxy surveys, validate catalog metadata,
+construct smooth observed-galaxy completion terms, and provide redshift priors
+for the likelihood.  These routines are used by both complete-catalog and
+incomplete-catalog dark-siren analyses.
 
 ```{automodule} darksirens.em
 :members:
@@ -46,6 +56,10 @@
 
 ## GW package
 
+Gravitational-wave modules load event posterior samples and injection samples,
+compute sky pixels, and supply the lower-level utilities needed by population
+and selection calculations.
+
 ```{automodule} darksirens.gw.selection
 :members:
 :undoc-members:
@@ -59,6 +73,11 @@
 ```
 
 ## GW population models
+
+Population modules define the source population density.  Analytic and
+Gaussian-process components implement reusable mass, mass-ratio, and spin
+factors.  Registry functions assemble named models, parameter bounds, and labels
+that are consumed by inference priors and samplers.
 
 ```{automodule} darksirens.gw.populations
 :members:
@@ -97,6 +116,12 @@
 ```
 
 ## Inference package
+
+Inference modules turn loaded data into JAX containers, compact repeated catalog
+pixels, define prior transforms, evaluate the hierarchical likelihood, and adapt
+that likelihood to the supported sampler backends.  The JIT-compiled likelihood
+core is intentionally separated from Python-side setup to keep sampler iterations
+fast and deterministic.
 
 ```{automodule} darksirens.inference.catalog_views
 :members:
@@ -166,6 +191,10 @@
 
 ## Tool package
 
+Tool modules back the command-line programs.  They mostly parse arguments,
+validate user-facing configuration, call the documented loaders and samplers,
+and write plots or posterior products.
+
 ```{automodule} darksirens.tool.darksirens_analyze
 :members:
 :undoc-members:
@@ -185,6 +214,10 @@
 ```
 
 ## Utilities package
+
+Utility modules contain shared cosmology, interpolation, plotting, and container
+helpers.  They are intentionally small and are safe to import from scripts that
+need package-compatible numerical conventions.
 
 ```{automodule} darksirens.utils.containers
 :members:
