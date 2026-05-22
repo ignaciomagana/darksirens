@@ -63,9 +63,9 @@ def _lse_to_log_mu_neff(
     lse: jnp.ndarray,
     lse2: jnp.ndarray,
     Ndraw: float,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Convert logsumexp aggregates to (log_mu, N_eff).
+    Convert logsumexp aggregates to (log_mu, N_eff, log_sigma2).
  
     Parameters
     ----------
@@ -75,8 +75,9 @@ def _lse_to_log_mu_neff(
  
     Returns
     -------
-    log_mu : scalar
-    Neff   : scalar  (0.0 when log_mu = -inf; never NaN)
+    log_mu     : scalar
+    Neff       : scalar  (0.0 when log_mu = -inf; never NaN)
+    log_sigma2 : scalar  (selection-integral variance estimator in log-space)
     """
     log_Ndraw  = jnp.log(Ndraw)
     log_mu     = lse  - log_Ndraw
@@ -95,7 +96,7 @@ def _lse_to_log_mu_neff(
         0.0,
     )
  
-    return log_mu, Neff
+    return log_mu, Neff, log_sigma2
 
 
 def selection_log_correction(
@@ -145,9 +146,9 @@ def compute_selection_term(
     Ndraw: float,
     nEvents: int,
     sel_batch_size: int | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Estimate log μ and N_eff from the injection set.
+    Estimate log μ, N_eff, and log σ² from the injection set.
 
     Parameters
     ----------
@@ -172,8 +173,9 @@ def compute_selection_term(
 
     Returns
     -------
-    log_mu : scalar — log of the selection integral estimate
-    Neff   : scalar — effective sample size
+    log_mu     : scalar — log of the selection integral estimate
+    Neff       : scalar — effective sample size
+    log_sigma2 : scalar — log variance estimate of μ
     """
     def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b):
         ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b, em_catalog_sel)

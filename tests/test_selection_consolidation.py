@@ -110,7 +110,7 @@ def _legacy_selection_term(gw_sel, em_catalog_sel, log_weight_fn, Ndraw, nEvents
 
 
 def _new_selection_term(gw_sel, catalog, Ndraw, nEvents, sel_batch_size=None):
-    log_mu, neff = compute_selection_term(
+    log_mu, neff, _log_sigma2 = compute_selection_term(
         gw_sel,
         catalog,
         _fixture_log_weight,
@@ -160,7 +160,7 @@ def test_consolidated_selection_preserves_all_invalid_guard():
         del m1det, q, chieff, pix, prior_wt, catalog
         return jnp.full_like(dL, jnp.inf)
 
-    log_mu, neff = compute_selection_term(
+    log_mu, neff, _log_sigma2 = compute_selection_term(
         gw_sel,
         catalog,
         all_invalid,
@@ -173,3 +173,29 @@ def test_consolidated_selection_preserves_all_invalid_guard():
     assert np.isneginf(np.asarray(log_mu))
     np.testing.assert_allclose(np.asarray(neff), 0.0)
     assert np.isneginf(np.asarray(ll))
+
+def test_selection_term_contract_matches_likelihood_core_path():
+    """Regression: likelihood_core path expects (log_mu, Neff, log_sigma2)."""
+    from darksirens.inference import likelihood_core
+
+    gw_sel = _fixture_event()
+    catalog = _catalog()
+
+    result = likelihood_core.compute_selection_term(
+        gw_sel,
+        catalog,
+        _fixture_log_weight,
+        Ndraw=20.0,
+        nEvents=1,
+        sel_batch_size=4,
+    )
+
+    assert isinstance(result, tuple)
+    assert len(result) == 3
+
+    log_mu, neff, log_sigma2 = result
+    np.testing.assert_allclose(
+        np.asarray(neff),
+        np.asarray(jnp.exp(2.0 * log_mu - log_sigma2)),
+        rtol=1e-12,
+    )
