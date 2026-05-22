@@ -126,11 +126,15 @@ class TestLikelihoodIntegration:
             "n_events": n_events,
             "n_samp": n_samp,
             "Ndraw": 1000.0,
-            "pop_params": jnp.array([]),
+            "pop_params": jnp.asarray(get_fixed_population_params("powerlaw+peak")),
         }
 
     def _call(self, fixture, universe_model, wl_backend=WL_BACKEND_DISABLED,
               wl_a=0.0, wl_b=0.0):
+        pop_params = fixture["pop_params"]
+        expected_len = len(get_fixed_population_params("powerlaw+peak"))
+        assert pop_params.shape[0] > 0
+        assert pop_params.shape[0] == expected_len
         return darksiren_log_likelihood(
             fixture["cosmo"], fixture["survey"], fixture["pop_params"],
             fixture["gw_pe"], fixture["catalog"],
