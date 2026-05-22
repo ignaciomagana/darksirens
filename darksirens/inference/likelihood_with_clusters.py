@@ -162,6 +162,14 @@ def darksiren_log_likelihood_with_clusters(
     structure. nEvents is a static argname so the tuple unpack is
     resolved at trace time.
     """
+    pop_params_shape = tuple(pop_params.shape)
+    if pop_params.ndim == 0 or pop_params_shape[0] == 0:
+        raise ValueError(
+            "darksiren_log_likelihood_with_clusters received empty pop_params: "
+            f"pop_model={pop_model!r}, pop_params.shape={pop_params_shape}. "
+            "Verify parameter-space construction for this population model."
+        )
+
     log_p_pop = pop_model_parser(pop_model=pop_model)
 
     wl_enabled = (wl_backend != WL_BACKEND_DISABLED)
