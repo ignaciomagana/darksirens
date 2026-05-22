@@ -200,7 +200,7 @@ def darksiren_log_likelihood(
         supported = dL_in_z_grid(dL, H0, Om0)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-    log_mu, Neff = compute_selection_term(
+    log_mu, Neff, _log_sigma2 = compute_selection_term(
         gw_sel, em_catalog_sel, log_weight, Ndraw, nEvents,
         sel_batch_size=sel_batch_size,
     )

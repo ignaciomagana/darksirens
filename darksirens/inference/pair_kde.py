@@ -181,6 +181,57 @@ def make_pair_kde(
     )
 
 
+def stack_pair_kdes(kdes: list) -> PairKDE:
+    """Stack a Python list of nEvents PairKDE objects into a single
+    PairKDE whose leaves have a leading event axis.
+
+    Returns a PairKDE with fields:
+        samples       : (nEvents, N_pe, 4)
+        log_weights   : (nEvents, N_pe)
+        log_h         : (nEvents, 4)
+        log_norm      : (nEvents,)
+        valid         : (nEvents, N_pe)
+
+    Use ``lax.dynamic_index_in_dim(stacked.<field>, i, axis=0)`` to
+    extract event i's KDE inside JIT-compiled code.
+
+    All input KDEs must have identical ``N_pe`` (pad upstream if needed).
+    """
+    if len(kdes) == 0:
+        raise ValueError("stack_pair_kdes: empty input list")
+    n_pe = kdes[0].samples.shape[0]
+    for k, kde in enumerate(kdes):
+        if kde.samples.shape[0] != n_pe:
+            raise ValueError(
+                f"stack_pair_kdes: PairKDE {k} has N_pe={kde.samples.shape[0]}, "
+                f"expected {n_pe}. Pad PE arrays upstream so all events have "
+                f"the same length."
+            )
+    return PairKDE(
+        samples=jnp.stack([k.samples for k in kdes], axis=0),
+        log_weights=jnp.stack([k.log_weights for k in kdes], axis=0),
+        log_h=jnp.stack([k.log_h for k in kdes], axis=0),
+        log_norm=jnp.stack([k.log_norm for k in kdes], axis=0),
+        valid=jnp.stack([k.valid for k in kdes], axis=0),
+    )
+
+
+def _slice_event_kde_inside_jit(stacked: PairKDE, event_idx) -> PairKDE:
+    """Internal: extract one event's PairKDE from a stacked container.
+
+    Used by the master likelihood's per-pair loop. ``event_idx`` may be
+    a traced scalar.
+    """
+    from jax import lax
+    return PairKDE(
+        samples=lax.dynamic_index_in_dim(stacked.samples, event_idx, axis=0, keepdims=False),
+        log_weights=lax.dynamic_index_in_dim(stacked.log_weights, event_idx, axis=0, keepdims=False),
+        log_h=lax.dynamic_index_in_dim(stacked.log_h, event_idx, axis=0, keepdims=False),
+        log_norm=lax.dynamic_index_in_dim(stacked.log_norm, event_idx, axis=0, keepdims=False),
+        valid=lax.dynamic_index_in_dim(stacked.valid, event_idx, axis=0, keepdims=False),
+    )
+
+
 def log_eval_pair_kde(
     kde: PairKDE,
     theta_app: jnp.ndarray,
