@@ -22,6 +22,11 @@ from darksirens.em.completion import build_pixel_kde_cache
 from darksirens.inference.catalog_views import barrier, prepare_catalog_views
 from darksirens.inference.events import pad_gw_event_to_multiple
 from darksirens.inference.likelihood_core import darksiren_log_likelihood
+from darksirens.inference.likelihood_core import (
+    WL_BACKEND_DISABLED,
+    WL_BACKEND_LOGNORMAL,
+    WL_BACKEND_TABULATED,
+)
 from darksirens.inference.parameters import (
     H0_FID,
     OM0_FID,
@@ -76,6 +81,37 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         )
     )
 
+    wl_backend = WL_BACKEND_DISABLED
+    wl_a = jnp.asarray(0.0)
+    wl_b = jnp.asarray(0.0)
+    wl_z_grid = jnp.asarray([0.0, 1.0])
+    wl_log_mu_grid = jnp.asarray([0.0, 1.0])
+    wl_log_p_table = jnp.asarray([[0.0, 0.0], [0.0, 0.0]])
+    wl_params = data.get("wl_params")
+    if universe_model == "spectral_sirens_wl":
+        if wl_params is None:
+            raise ValueError(
+                "universe_model='spectral_sirens_wl' requires data['wl_params'] "
+                "to be present."
+            )
+        backend = int(wl_params.backend)
+        if backend == WL_BACKEND_LOGNORMAL:
+            wl_backend = WL_BACKEND_LOGNORMAL
+            wl_a = jnp.asarray(wl_params.a)
+            wl_b = jnp.asarray(wl_params.b)
+        elif backend == WL_BACKEND_TABULATED:
+            wl_backend = WL_BACKEND_TABULATED
+            wl_z_grid = jnp.asarray(wl_params.z_grid)
+            wl_log_mu_grid = jnp.asarray(wl_params.log_mu_grid)
+            wl_log_p_table = jnp.asarray(wl_params.log_p_table)
+        else:
+            raise ValueError(
+                "Unsupported weak-lensing backend in data['wl_params']: "
+                f"{backend}. Expected one of "
+                f"{WL_BACKEND_LOGNORMAL} (LOGNORMAL) or "
+                f"{WL_BACKEND_TABULATED} (TABULATED)."
+            )
+
     catalogs = prepare_catalog_views(
         opts,
         data,
@@ -106,6 +142,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         fixed_parameter_values=fixed_parameter_values,
         wl_params=data.get("wl_params"),
     )
+
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
         cosmo, survey, pop_params = parameter_decoder.decode(coord)
@@ -186,6 +223,12 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             pop_model,
             universe_model,
             sel_batch_size=sel_batch_size,
+            wl_backend=wl_backend,
+            wl_a=wl_a,
+            wl_b=wl_b,
+            wl_z_grid=wl_z_grid,
+            wl_log_mu_grid=wl_log_mu_grid,
+            wl_log_p_table=wl_log_p_table,
         )
 
     return likelihood

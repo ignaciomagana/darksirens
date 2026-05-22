@@ -36,6 +36,7 @@ from darksirens.inference.likelihood_core import (
     WL_BACKEND_DISABLED,
     WL_BACKEND_LOGNORMAL,
 )
+from darksirens.inference import likelihood as likelihood_module
 
 
 # ============================================================================
@@ -231,3 +232,62 @@ class TestLikelihoodIntegration:
                 wl_backend=WL_BACKEND_LOGNORMAL,
                 wl_a=0.01, wl_b=1.0,
             )
+
+
+def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
+    """Factory should translate data['wl_params'] into explicit core kwargs."""
+    captured = {}
+
+    def _fake_core(*args, **kwargs):
+        captured.update(kwargs)
+        return jnp.asarray(0.0)
+
+    class _Decoder:
+        def decode(self, coord):
+            del coord
+            return _cosmo(), _survey(), jnp.array([])
+
+    monkeypatch.setattr(likelihood_module, "prepare_catalog_views", lambda *a, **k: type("C", (), dict(
+        sample_to_unique_pe=jnp.zeros(2, dtype=jnp.int32),
+        sample_to_unique_sel=jnp.zeros(2, dtype=jnp.int32),
+        zgals_pe_catalog=jnp.zeros((1, 1)),
+        dzgals_pe_catalog=jnp.ones((1, 1)),
+        wgals_pe_catalog=jnp.ones((1, 1)),
+        ngals_pe_catalog=jnp.ones((1,), dtype=jnp.int32),
+        zgals_sel_catalog=jnp.zeros((1, 1)),
+        dzgals_sel_catalog=jnp.ones((1, 1)),
+        wgals_sel_catalog=jnp.ones((1, 1)),
+        ngals_sel_catalog=jnp.ones((1,), dtype=jnp.int32),
+        delta_g_pix_z=jnp.zeros((1, 1)),
+        sigma_kernel=0.1,
+        dN_obs_kde_pe=None, pixel_to_cache_idx_pe=None, unique_pixels_pe=None,
+        dN_obs_kde_sel=None, pixel_to_cache_idx_sel=None, unique_pixels_sel=None,
+    ))())
+    monkeypatch.setattr(likelihood_module, "build_parameter_decoder", lambda *a, **k: _Decoder())
+    monkeypatch.setattr(likelihood_module, "darksiren_log_likelihood", _fake_core)
+
+    opts = type("Opts", (), {"pop_model": "powerlaw+peak", "universe_model": "spectral_sirens_wl", "sel_batch_size": None})()
+    data = dict(
+        nEvents=1, nsamp=2, Ndraw=2.0, apix=1.0,
+        m1det=jnp.array([30.0, 31.0]), m2det=jnp.array([20.0, 21.0]), dL=jnp.array([1000.0, 1100.0]),
+        chieff=jnp.array([0.0, 0.1]), p_pe=jnp.array([1.0, 1.0]),
+        m1detsels=jnp.array([30.0, 31.0]), m2detsels=jnp.array([20.0, 21.0]), dLsels=jnp.array([1000.0, 1100.0]),
+        chieffsels=jnp.array([0.0, 0.1]), p_draw=jnp.array([1.0, 1.0]),
+        wl_params=type("P", (), {"backend": WL_BACKEND_LOGNORMAL, "a": jnp.asarray(1e-3), "b": jnp.asarray(1.0)})(),
+    )
+    like = likelihood_module.make_likelihood(opts, data, pop_params_fid=())
+    _ = like(jnp.array([]))
+    assert captured["wl_backend"] == WL_BACKEND_LOGNORMAL
+    assert float(captured["wl_a"]) == pytest.approx(1e-3)
+    assert float(captured["wl_b"]) == pytest.approx(1.0)
+
+
+def test_make_likelihood_spectral_sirens_wl_missing_params_raises(monkeypatch):
+    """WL universe model should fail clearly when data['wl_params'] is missing."""
+    monkeypatch.setattr(likelihood_module, "prepare_catalog_views", lambda *a, **k: None)
+    monkeypatch.setattr(likelihood_module, "build_parameter_decoder", lambda *a, **k: None)
+    opts = type("Opts", (), {"pop_model": "powerlaw+peak", "universe_model": "spectral_sirens_wl", "sel_batch_size": None})()
+    data = dict(nEvents=1, nsamp=1, Ndraw=1.0, apix=1.0, wl_params=None)
+    data.update({k: jnp.array([1.0]) for k in ("m1det", "m2det", "dL", "chieff", "p_pe", "m1detsels", "m2detsels", "dLsels", "chieffsels", "p_draw")})
+    with pytest.raises(ValueError, match=r"data\['wl_params'\]"):
+        likelihood_module.make_likelihood(opts, data, pop_params_fid=())
