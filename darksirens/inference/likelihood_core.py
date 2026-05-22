@@ -124,6 +124,14 @@ def darksiren_log_likelihood(
          0 → lognormal: uses (wl_a, wl_b)
          1 → tabulated: uses (wl_z_grid, wl_log_mu_grid, wl_log_p_table)
     """
+    pop_params_shape = tuple(pop_params.shape)
+    if pop_params.ndim == 0 or pop_params_shape[0] == 0:
+        raise ValueError(
+            "darksiren_log_likelihood received empty pop_params: "
+            f"pop_model={pop_model!r}, pop_params.shape={pop_params_shape}. "
+            "Verify parameter-space construction for this population model."
+        )
+
     log_p_pop = pop_model_parser(pop_model=pop_model)
 
     # `universe_model` is a Python string (static_argnames), so this
