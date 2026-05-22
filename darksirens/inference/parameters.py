@@ -68,6 +68,7 @@ class ParameterDecoder:
             b_miss=sp[4],
             alpha_miss=sp[5],
             complete_empty_pixel_policy=self.complete_empty_pixel_policy,
+            wl_params=self.wl_params,
         )
         return cosmo, survey, pop_params
 

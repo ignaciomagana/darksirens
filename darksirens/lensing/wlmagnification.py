@@ -253,3 +253,95 @@ def log_p_wl(mu: jnp.ndarray, z: jnp.ndarray, p: WLParams) -> jnp.ndarray:
         raise ValueError(
             f"Unknown WL backend {p.backend}. Use 0 (lognormal) or 1 (tabulated)."
         )
+
+
+# ============================================================================
+# JIT-friendly closure factories (commit 2)
+# ============================================================================
+#
+# The ``log_p_wl(mu, z, p)`` dispatcher above branches on ``int(p.backend)``,
+# which raises ``ConcretizationTypeError`` if ``p`` is a tracer inside ``jit``.
+# These factory functions build closures that bake the backend choice in at
+# Python level, so the returned callable is fully JIT-friendly. They match
+# the architectural pattern used by ``pop_model_parser`` and
+# ``get_redshift_prior`` in the rest of darksirens.
+#
+# Use these inside any JIT-compiled inference path. The free functions above
+# remain available for tests, diagnostics, and any code that runs outside JIT.
+
+
+def make_lognormal_log_p_wl(a: jnp.ndarray, b: jnp.ndarray):
+    """Build a JIT-friendly lognormal log-PDF closure.
+
+    Returns a callable ``log_p_wl_fn(mu, z) -> log p_WL(μ | z)`` with the
+    lognormal parameters baked in as traced arrays. The closure can be
+    called from inside JIT'd code without dispatch issues.
+
+    Parameters
+    ----------
+    a, b
+        Variance schedule s²(z) = a · z^b. Both passed as JAX scalars
+        (will be auto-converted from Python floats).
+
+    Notes
+    -----
+    The closure clips z ≥ 1e-3 inside to prevent the variance vanishing
+    at z = 0 (which would produce a degenerate PDF). This is identical
+    behaviour to ``_log_p_wl_lognormal``.
+    """
+    a_jx = jnp.asarray(a, dtype=jnp.float64)
+    b_jx = jnp.asarray(b, dtype=jnp.float64)
+
+    def log_p_wl_fn(mu: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
+        z_safe = jnp.maximum(z, 1.0e-3)
+        s2 = a_jx * jnp.power(z_safe, b_jx)
+        s = jnp.sqrt(s2)
+        m = -0.5 * s2
+        log_mu = jnp.log(mu)
+        return norm.logpdf(log_mu, loc=m, scale=s) - log_mu
+
+    return log_p_wl_fn
+
+
+def make_tabulated_log_p_wl(
+    z_grid: jnp.ndarray,
+    log_mu_grid: jnp.ndarray,
+    log_p_table: jnp.ndarray,
+):
+    """Build a JIT-friendly tabulated log-PDF closure.
+
+    Returns a callable ``log_p_wl_fn(mu, z) -> log p_WL(μ | z)`` with the
+    interpolation table baked in.
+    """
+    z_grid = jnp.asarray(z_grid, dtype=jnp.float64)
+    log_mu_grid = jnp.asarray(log_mu_grid, dtype=jnp.float64)
+    log_p_table = jnp.asarray(log_p_table, dtype=jnp.float64)
+
+    def log_p_wl_fn(mu: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
+        log_mu = jnp.log(mu)
+        flat_z = z.reshape(-1)
+        flat_lm = log_mu.reshape(-1)
+        interp = vmap(
+            lambda zi, lmi: _bilinear_interp(zi, lmi, z_grid, log_mu_grid, log_p_table)
+        )
+        return interp(flat_z, flat_lm).reshape(mu.shape)
+
+    return log_p_wl_fn
+
+
+def make_log_p_wl_from_params(p: WLParams):
+    """Build a JIT-friendly closure from a ``WLParams`` container.
+
+    Convenience adapter: inspects ``p.backend`` at Python level (so the
+    branch is resolved before tracing) and delegates to the appropriate
+    factory.
+    """
+    backend = int(p.backend)
+    if backend == 0:
+        return make_lognormal_log_p_wl(p.a, p.b)
+    elif backend == 1:
+        return make_tabulated_log_p_wl(p.z_grid, p.log_mu_grid, p.log_p_table)
+    else:
+        raise ValueError(
+            f"Unknown WL backend {backend}. Use 0 (lognormal) or 1 (tabulated)."
+        )

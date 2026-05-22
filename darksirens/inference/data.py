@@ -340,5 +340,25 @@ def load_all_data(opts):
 
     # Append the LSS overdensity field to the returned dictionary
     data["delta_g_pix_z"] = delta_g_pix_z
+    
+    if opts.universe_model == "spectral_sirens_wl":
+        if opts.lensing_wl_model == "lognormal":
+            wl_params = make_lognormal_wl_params(
+                a=opts.lensing_wl_a,
+                b=opts.lensing_wl_b,
+            )
+        elif opts.lensing_wl_model == "tabulated":
+            with h5py.File(opts.lensing_wl_table_path, "r") as f:
+                z_grid = jnp.asarray(f["z_grid"])
+                log_mu_grid = jnp.asarray(f["log_mu_grid"])
+                log_p_table = jnp.asarray(f["log_p_table"])
+            wl_params = make_tabulated_wl_params(
+                z_grid, log_mu_grid, log_p_table,
+            )
+        else:
+            raise ValueError(...)
+        data["wl_params"] = wl_params
+    else:
+        data["wl_params"] = None
 
     return data

@@ -110,3 +110,57 @@ def make_y_grid(n_nodes: int = 32) -> tuple:
     y_x, y_w = _gauss_legendre_on_interval(n_nodes, 0.0, 1.0)
     log_w = np.log(y_w)
     return jnp.asarray(y_x, dtype=jnp.float64), jnp.asarray(log_w, dtype=jnp.float64)
+
+
+def make_hermite_u_grid(n_nodes: int = 16) -> tuple:
+    """Gauss-Hermite nodes ``u`` and physicist's log-weights, for
+    integration against ``exp(-u²/2)/√(2π)`` over the whole real line.
+
+    Mathematical setup
+    ~~~~~~~~~~~~~~~~~~
+    The physicists' Gauss-Hermite rule approximates
+
+        ∫_{-∞}^{∞} g(u) · e^{-u²} du  ≈  Σ_ℓ w_ℓ^H · g(u_ℓ^H).
+
+    For a Gaussian integrand ``e^{-u²/2}/√(2π) · f(u)``, change variables
+    to ``v = u/√2`` to get
+
+        ∫ e^{-u²/2}/√(2π) · f(u) du = (1/√π) · ∫ e^{-v²} · f(√2 v) dv
+                                    ≈ (1/√π) · Σ_ℓ w_ℓ^H · f(√2 u_ℓ^H).
+
+    This routine returns the **rescaled** nodes ``u_ℓ = √2 · u_ℓ^H`` and
+    log-weights ``log(w_ℓ^H / √π)`` so the caller writes
+
+        ∫ f(u) · N(u; 0, 1) du  ≈  Σ_ℓ exp(log_weights_ℓ + log f(u_ℓ)).
+
+    Why this matters for WL
+    ~~~~~~~~~~~~~~~~~~~~~~~
+    A lognormal in ``μ`` with parameters (m(z), s(z)) becomes a unit
+    Gaussian in the standardized variable ``u = (ln μ - m(z)) / s(z)``.
+    Using a fixed Gauss-Hermite grid in ``u`` makes the quadrature
+    **independent of s(z)** — the same nodes resolve narrow and wide
+    distributions equally well. This fixes the quadrature breakdown at
+    small WL variance documented in commit 2 testing.
+
+    Returns
+    -------
+    u_nodes : (n_nodes,) jnp.ndarray
+        Nodes in the standardized variable ``u = (ln μ - m) / s``.
+    log_weights : (n_nodes,) jnp.ndarray
+        log of the rescaled weights, ready to combine directly with
+        log f(u_ℓ).
+
+    Notes
+    -----
+    For weak lensing this is exact (matches the lognormal moments
+    exactly through u_max = √(2 (n_nodes - 1)) ≈ √30 ≈ 5.5σ at
+    n_nodes=16). For tabulated PDFs this rule is *not* appropriate;
+    use ``make_log_mu_grid`` instead.
+    """
+    if n_nodes < 2:
+        raise ValueError(f"n_nodes must be ≥ 2, got {n_nodes}.")
+    u_h, w_h = np.polynomial.hermite.hermgauss(n_nodes)
+    # Convert to "probabilist's" convention against N(0, 1)
+    u_nodes = np.sqrt(2.0) * u_h
+    log_w = np.log(w_h / np.sqrt(np.pi))
+    return jnp.asarray(u_nodes, dtype=jnp.float64), jnp.asarray(log_w, dtype=jnp.float64)

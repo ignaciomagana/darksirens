@@ -40,6 +40,10 @@ from darksirens.lensing.wlmagnification import (
     make_lognormal_wl_params,
     make_tabulated_wl_params,
     log_p_wl,
+    # Closure factories (commit 2, for use inside JIT)
+    make_lognormal_log_p_wl,
+    make_tabulated_log_p_wl,
+    make_log_p_wl_from_params,
 )
 from darksirens.lensing.slmarks import (
     SISLensParams,
@@ -62,6 +66,9 @@ __all__ = [
     "make_lognormal_wl_params",
     "make_tabulated_wl_params",
     "log_p_wl",
+    "make_lognormal_log_p_wl",
+    "make_tabulated_log_p_wl",
+    "make_log_p_wl_from_params",
     # SL marks
     "SISLensParams",
     "make_sis_lens_params",

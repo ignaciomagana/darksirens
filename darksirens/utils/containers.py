@@ -15,7 +15,9 @@ class SurveyParams(NamedTuple):
     ``complete_empty_pixel_policy`` controls how the formally complete-catalog
     prior treats catalog rows with zero real galaxies: ``0`` is the strict
     policy (zero probability), while ``1`` enables a volume-prior robustness
-    approximation.
+    approximation. The default `wl_params` set to`None` preserves existing behaviour for all non-WL universe
+    models.  When `wl_params` is non-None it must be a
+    `darksirens.lensing.wlmagnification.WLParams` instance.
     """
     n0: Any
     z50: Any
@@ -24,6 +26,7 @@ class SurveyParams(NamedTuple):
     b_miss: Any
     alpha_miss: Any
     complete_empty_pixel_policy: Any = 0
+    wl_params: Any = None
 
 
 class EMCatalog(NamedTuple):
