@@ -190,15 +190,16 @@ def main() -> None:
         f.attrs["nsamp"] = int(nsamp)
         f.attrs["mock_data"] = True
         f.attrs["source"] = "darksirens_skymaps_to_samples"
-        f.create_dataset("ra", data=ra)
-        f.create_dataset("dec", data=dec)
-        f.create_dataset("dL", data=dL)
-        f.create_dataset("m1det", data=m1det)
-        f.create_dataset("m2det", data=m2det)
-        f.create_dataset("chieff", data=chieff)
-        f.create_dataset("p_pe", data=p_pe)
+        # darksirens loaders expect flattened arrays with length nobs*nsamp.
+        f.create_dataset("ra", data=ra.reshape(-1))
+        f.create_dataset("dec", data=dec.reshape(-1))
+        f.create_dataset("dL", data=dL.reshape(-1))
+        f.create_dataset("m1det", data=m1det.reshape(-1))
+        f.create_dataset("m2det", data=m2det.reshape(-1))
+        f.create_dataset("chieff", data=chieff.reshape(-1))
+        f.create_dataset("p_pe", data=p_pe.reshape(-1))
 
-    print(f"Wrote {out} with {nobs} events x {nsamp} samples")
+    print(f"Wrote {out} with {nobs} events x {nsamp} samples (flattened length {nobs*nsamp})")
 
 
 if __name__ == "__main__":
