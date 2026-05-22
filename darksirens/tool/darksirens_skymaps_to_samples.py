@@ -6,7 +6,11 @@ from pathlib import Path
 import h5py
 import healpy as hp
 import numpy as np
-from astropy.io import fits
+
+try:
+    from ligo.skymap.io import read_sky_map
+except Exception:  # pragma: no cover - optional dependency
+    read_sky_map = None
 
 
 def _positive_int(value: str) -> int:
@@ -21,18 +25,38 @@ def _rng(seed: int | None) -> np.random.Generator:
 
 
 def _read_skymap(path: Path):
-    with fits.open(path) as hdul:
-        data = hdul[1].data
-        names = set(data.names or [])
-
-        if "PROB" not in names:
-            raise ValueError(f"{path}: missing PROB column")
-        if not {"DISTMU", "DISTSIGMA"}.issubset(names):
-            raise ValueError(f"{path}: 3D skymap must include DISTMU and DISTSIGMA")
-
-        prob = np.asarray(data["PROB"], dtype=float)
-        distmu = np.asarray(data["DISTMU"], dtype=float)
-        distsigma = np.asarray(data["DISTSIGMA"], dtype=float)
+    """Read a 3D skymap, supporting both MOC and standard HEALPix FITS layouts."""
+    # Preferred: ligo.skymap reader handles MOC products transparently.
+    if read_sky_map is not None:
+        try:
+            m = read_sky_map(str(path), moc=False, distances=True)
+            # ligo.skymap returns ((prob, distmu, distsigma, distnorm), meta)
+            # when distances=True.
+            if isinstance(m, tuple) and len(m) == 2 and isinstance(m[0], tuple) and len(m[0]) >= 4:
+                prob, distmu, distsigma, _distnorm = m[0][:4]
+            elif isinstance(m, tuple) and len(m) >= 4:
+                # Backward/alternate shape: direct 4-array tuple.
+                prob, distmu, distsigma, _distnorm = m[:4]
+            else:
+                raise ValueError(
+                    "ligo.skymap returned unexpected map structure; expected "
+                    "((prob, distmu, distsigma, distnorm), meta)"
+                )
+            prob = np.asarray(prob, dtype=float)
+            distmu = np.asarray(distmu, dtype=float)
+            distsigma = np.asarray(distsigma, dtype=float)
+        except Exception:
+            # Fallback for unusual files where ligo.skymap parsing fails.
+            prob, distmu, distsigma, _distnorm = hp.read_map(str(path), field=range(4))
+            prob = np.asarray(prob, dtype=float)
+            distmu = np.asarray(distmu, dtype=float)
+            distsigma = np.asarray(distsigma, dtype=float)
+    else:
+        # Fallback path when ligo.skymap is unavailable.
+        prob, distmu, distsigma, _distnorm = hp.read_map(str(path), field=range(4))
+        prob = np.asarray(prob, dtype=float)
+        distmu = np.asarray(distmu, dtype=float)
+        distsigma = np.asarray(distsigma, dtype=float)
 
     if prob.ndim != 1:
         raise ValueError(f"{path}: PROB must be 1D")
