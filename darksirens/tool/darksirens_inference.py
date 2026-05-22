@@ -377,6 +377,8 @@ def save_results_hdf5(
         f.attrs["nuts_chains"]     = int(getattr(opts, "nuts_chains", 0))
         f.attrs["nuts_target_accept"] = float(getattr(opts, "nuts_target_accept", 0.0))
         f.attrs["nuts_max_tree_depth"] = int(getattr(opts, "nuts_max_tree_depth", 0))
+        f.attrs["nuts_init_tries"] = int(getattr(opts, "nuts_init_tries", 0))
+        f.attrs["nuts_init_seed_offset"] = int(getattr(opts, "nuts_init_seed_offset", 0))
         f.attrs["seed"]            = int(opts.seed)
         f.attrs["n_samples"]       = N
         f.attrs["n_dim"]           = ndim
@@ -635,6 +637,8 @@ def main():
     g.add_argument("--nuts_target_accept", type=float, default=0.8)
     g.add_argument("--nuts_max_tree_depth", type=int, default=10)
     g.add_argument("--nuts_chain_method", default="sequential", choices=["sequential", "parallel", "vectorized"])
+    g.add_argument("--nuts_init_tries", type=int, default=32)
+    g.add_argument("--nuts_init_seed_offset", type=int, default=100_000)
     g.add_argument("--seed",         type=int,   default=22)
     g.add_argument("--show_progress",type=str_to_bool, default=True, metavar="BOOL")
 
@@ -744,6 +748,8 @@ def main():
         _row("  samples", opts.nuts_samples)
         _row("  chains", opts.nuts_chains)
         _row("  target accept", opts.nuts_target_accept)
+        _row("  init tries", opts.nuts_init_tries)
+        _row("  init seed offset", opts.nuts_init_seed_offset)
     _row("  seed", opts.seed)
     print("  │")
     norm_grid = normalization_grid_settings()

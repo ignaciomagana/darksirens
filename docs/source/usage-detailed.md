@@ -345,6 +345,8 @@ Common sampler options:
 | `--nuts_chains` | `1` | `numpyro` | Number of NUTS chains. |
 | `--nuts_target_accept` | `0.8` | `numpyro` | Target acceptance probability for NUTS. |
 | `--nuts_max_tree_depth` | `10` | `numpyro` | Maximum NUTS tree depth. |
+| `--nuts_init_tries` | `32` | `numpyro` | Number of fallback prior-box candidates tested if midpoint init is non-finite. |
+| `--nuts_init_seed_offset` | `100000` | `numpyro` | Added to `--seed` for deterministic fallback-init candidate generation. |
 | `--seed` | `22` | all | Random seed. |
 | `--show_progress` | `true` | all | Enable progress output where supported. |
 
