@@ -156,6 +156,44 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 )
             init_values = {name: best_theta[i] for i, name in enumerate(labels)}
 
+        theta0 = jnp.asarray([init_values[name] for name in labels], dtype=lower.dtype)
+        log_l0 = likelihood(theta0)
+
+        def _likelihood_scalar(theta):
+            return jnp.asarray(likelihood(theta), dtype=lower.dtype)
+
+        grad_l0 = jax.grad(_likelihood_scalar)(theta0)
+        log_l0_finite = bool(np.asarray(jnp.isfinite(log_l0)))
+        grad_l0_finite = bool(np.asarray(jnp.all(jnp.isfinite(grad_l0))))
+        if not (log_l0_finite and grad_l0_finite):
+            lower_np = np.asarray(lower, dtype=float)
+            upper_np = np.asarray(upper, dtype=float)
+            theta0_np = np.asarray(theta0, dtype=float)
+            widths = upper_np - lower_np
+            near_boundary = np.minimum(theta0_np - lower_np, upper_np - theta0_np) <= (
+                1e-6 * np.maximum(1.0, widths)
+            )
+            print(
+                "NumPyro NUTS preflight failure at initial point "
+                f"(finite_logL={log_l0_finite}, finite_grad={grad_l0_finite}):",
+                flush=True,
+            )
+            for i, name in enumerate(labels):
+                print(
+                    "  "
+                    f"{name}: value={theta0_np[i]:.12g}, "
+                    f"bounds=({lower_np[i]:.12g}, {upper_np[i]:.12g}), "
+                    f"near_boundary={bool(near_boundary[i])}",
+                    flush=True,
+                )
+            raise RuntimeError(
+                "NumPyro preflight check failed at initial point: "
+                f"finite_log_likelihood={log_l0_finite}, "
+                f"finite_log_likelihood_gradient={grad_l0_finite}. "
+                "Review the per-parameter report above and adjust parameter bounds "
+                "or initialization."
+            )
+
         kernel = NUTS(
             model,
             target_accept_prob=target_accept,
