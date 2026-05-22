@@ -163,6 +163,10 @@ def run_sampler(method, likelihood, prior_transform, labels,
             return jnp.asarray(likelihood(theta), dtype=lower.dtype)
 
         grad_l0 = jax.grad(_likelihood_scalar)(theta0)
+        grad_np = np.asarray(grad_l0, dtype=float)
+        grad_isfinite = np.isfinite(grad_np)
+        grad_isnan = np.isnan(grad_np)
+        grad_isinf = np.isinf(grad_np)
         log_l0_finite = bool(np.asarray(jnp.isfinite(log_l0)))
         grad_l0_finite = bool(np.asarray(jnp.all(jnp.isfinite(grad_l0))))
         if not (log_l0_finite and grad_l0_finite):
@@ -173,9 +177,17 @@ def run_sampler(method, likelihood, prior_transform, labels,
             near_boundary = np.minimum(theta0_np - lower_np, upper_np - theta0_np) <= (
                 1e-6 * np.maximum(1.0, widths)
             )
+            bad_grad_params = [
+                name for i, name in enumerate(labels) if not bool(grad_isfinite[i])
+            ]
             print(
                 "NumPyro NUTS preflight failure at initial point "
                 f"(finite_logL={log_l0_finite}, finite_grad={grad_l0_finite}):",
+                flush=True,
+            )
+            print(
+                f"  bad_grad_params={bad_grad_params} "
+                f"({len(bad_grad_params)}/{len(labels)})",
                 flush=True,
             )
             for i, name in enumerate(labels):
@@ -183,15 +195,19 @@ def run_sampler(method, likelihood, prior_transform, labels,
                     "  "
                     f"{name}: value={theta0_np[i]:.12g}, "
                     f"bounds=({lower_np[i]:.12g}, {upper_np[i]:.12g}), "
-                    f"near_boundary={bool(near_boundary[i])}",
+                    f"near_boundary={bool(near_boundary[i])}, "
+                    f"grad={grad_np[i]:.6g}, "
+                    f"grad_finite={bool(grad_isfinite[i])}, "
+                    f"grad_nan={bool(grad_isnan[i])}, "
+                    f"grad_inf={bool(grad_isinf[i])}",
                     flush=True,
                 )
             raise RuntimeError(
                 "NumPyro preflight check failed at initial point: "
                 f"finite_log_likelihood={log_l0_finite}, "
                 f"finite_log_likelihood_gradient={grad_l0_finite}. "
-                "Review the per-parameter report above and adjust parameter bounds "
-                "or initialization."
+                "Review the per-parameter log output (with gradients reported for "
+                "each parameter) and adjust parameter bounds or initialization."
             )
 
         kernel = NUTS(
