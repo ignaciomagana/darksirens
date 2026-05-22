@@ -28,6 +28,7 @@ setup(
             "darksirens_inference=darksirens.tool.darksirens_inference:main",
             "darksirens_analyze=darksirens.tool.darksirens_analyze:main",
             "darksirens_pixelate=darksirens.tool.darksirens_pixelate:main",
+            "darksirens_skymaps_to_samples=darksirens.tool.darksirens_skymaps_to_samples:main",
         ]
     },
     classifiers=[
