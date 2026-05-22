@@ -104,6 +104,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         opts,
         pop_params_fid,
         fixed_parameter_values=fixed_parameter_values,
+        wl_params=data.get("wl_params"),
     )
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:

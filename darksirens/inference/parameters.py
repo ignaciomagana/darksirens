@@ -35,6 +35,7 @@ class ParameterDecoder:
     survey_labels: tuple[str, ...]
     pop_params_fid: tuple[float, ...]
     complete_empty_pixel_policy: int
+    wl_params: object | None = None
 
     def decode(self, coord: jnp.ndarray):
         """Return ``(cosmo, survey, pop_params)`` for sampler coordinate ``coord``."""
@@ -77,6 +78,7 @@ def build_parameter_decoder(
     opts,
     pop_params_fid,
     fixed_parameter_values: dict | None = None,
+    wl_params=None,
 ) -> ParameterDecoder:
     """Build the coordinate decoder using ``build_parameter_space`` ordering."""
     if fixed_parameter_values is None:
@@ -113,5 +115,8 @@ def build_parameter_decoder(
         pop_params_fid=tuple(float(v) for v in pop_params_fid),
         complete_empty_pixel_policy=complete_empty_pixel_policy_code(
             getattr(opts, "complete_empty_pixel_policy", "zero")
+        ),
+        wl_params=(
+            wl_params if getattr(opts, "universe_model", None) == "spectral_sirens_wl" else None
         ),
     )
