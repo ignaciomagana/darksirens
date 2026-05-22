@@ -34,6 +34,7 @@ class ParameterDecoder:
     pop_labels: tuple[str, ...]
     survey_labels: tuple[str, ...]
     pop_params_fid: tuple[float, ...]
+    expected_pop_param_count: int
     complete_empty_pixel_policy: int
     wl_params: object | None = None
 
@@ -54,6 +55,13 @@ class ParameterDecoder:
             _get(label, self.pop_params_fid[i])
             for i, label in enumerate(self.pop_labels)
         ])
+        if pop_params.shape[0] != self.expected_pop_param_count:
+            raise ValueError(
+                "Population parameter decoding mismatch: decoded "
+                f"{int(pop_params.shape[0])} values but expected "
+                f"{self.expected_pop_param_count} for pop_model labels "
+                f"{self.pop_labels}."
+            )
 
         sp = jnp.array([
             _get(label, float(SURVEY_PARAMS_FID[i]))
@@ -107,12 +115,23 @@ def build_parameter_decoder(
         fixed_parameter_values=fixed_parameter_values,
     )
 
+    pop_labels = tuple(pop_labels)
+    pop_params_fid = tuple(float(v) for v in pop_params_fid)
+    if len(pop_params_fid) != len(pop_labels):
+        raise ValueError(
+            "Population fiducial vector length mismatch: "
+            f"pop_params_fid has {len(pop_params_fid)} values but pop_model "
+            f"'{opts.pop_model}' expects {len(pop_labels)} parameters "
+            f"({pop_labels})."
+        )
+
     return ParameterDecoder(
         sampled_labels=tuple(sampled_labels),
         fixed_parameter_values=fixed_parameter_values,
-        pop_labels=tuple(pop_labels),
+        pop_labels=pop_labels,
         survey_labels=tuple(survey_labels),
-        pop_params_fid=tuple(float(v) for v in pop_params_fid),
+        pop_params_fid=pop_params_fid,
+        expected_pop_param_count=len(pop_labels),
         complete_empty_pixel_policy=complete_empty_pixel_policy_code(
             getattr(opts, "complete_empty_pixel_policy", "zero")
         ),

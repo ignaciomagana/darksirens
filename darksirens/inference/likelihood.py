@@ -146,6 +146,13 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
         cosmo, survey, pop_params = parameter_decoder.decode(coord)
+        if len(pop_params) != len(parameter_decoder.pop_labels):
+            raise ValueError(
+                "Population parameter length mismatch before likelihood "
+                f"evaluation: decoded {len(pop_params)} values but pop_model "
+                f"'{pop_model}' expects {len(parameter_decoder.pop_labels)} "
+                "parameters."
+            )
 
         em_catalog_pe = EMCatalog(
             apix=apix,
