@@ -229,6 +229,27 @@ class TestLikelihoodIntegration:
                 wl_backend=WL_BACKEND_DISABLED,
             )
 
+
+    def test_empty_pop_params_raises_clear_error(self, fixture):
+        """Empty pop_params should fail fast with a descriptive ValueError."""
+        with pytest.raises(ValueError, match=r"pop_model='powerlaw\+peak'.*pop_params\.shape=\(0,\).*Verify parameter-space construction"):
+            darksiren_log_likelihood(
+                fixture["cosmo"],
+                fixture["survey"],
+                jnp.array([]),
+                fixture["gw_pe"],
+                fixture["catalog"],
+                fixture["gw_sel"],
+                fixture["catalog"],
+                fixture["n_events"],
+                fixture["n_samp"],
+                fixture["Ndraw"],
+                pop_model="powerlaw+peak",
+                universe_model="spectral_sirens",
+                sel_batch_size=None,
+                wl_backend=WL_BACKEND_DISABLED,
+            )
+
     def test_wl_backend_without_spectral_sirens_wl_raises(self, fixture):
         """wl_backend != DISABLED with universe_model != 'spectral_sirens_wl' raises."""
         with pytest.raises(ValueError, match="universe_model"):
