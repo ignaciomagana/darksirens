@@ -35,7 +35,7 @@ LOG10N0="$(python -c 'import math, sys; print(math.log10(float(sys.argv[1])))' "
 NSIDE="${NSIDE:-128}"
 NOBS="${NOBS:-100}"
 NSAMP="${NSAMP:-128}"
-NDRAW="${NDRAW:-5000000}"
+NDRAW="${NDRAW:-25000000}"
 SELECTION_BATCH_SIZE="${SELECTION_BATCH_SIZE:-500000}"
 SELECTION_PER_OBSERVATION_FACTOR="${SELECTION_PER_OBSERVATION_FACTOR:-}"
 SELECTION_TARGET_DETECTIONS="${SELECTION_TARGET_DETECTIONS:-}"
@@ -44,7 +44,7 @@ SELECTION_TARGET_DETECTIONS="${SELECTION_TARGET_DETECTIONS:-}"
 # so even large generated selection files do not have to be materialized as one
 # XLA operation on GPU.  By default the sampler is not call-capped
 # (INFERENCE_MAX_SAMPLES=0); set a positive value only for local debugging.
-INFERENCE_NLIVE="${INFERENCE_NLIVE:-200}"
+INFERENCE_NLIVE="${INFERENCE_NLIVE:-50}"
 INFERENCE_DLOGZ="${INFERENCE_DLOGZ:-0.1}"
 INFERENCE_MAX_SAMPLES="${INFERENCE_MAX_SAMPLES:-0}"
 INFERENCE_SEL_BATCH_SIZE="${INFERENCE_SEL_BATCH_SIZE:-256}"
@@ -93,7 +93,7 @@ elif [ -n "${SELECTION_PER_OBSERVATION_FACTOR}" ]; then
 fi
 
 # shellcheck disable=SC2086 # intentional splitting of optional selection_target_args
-python scripts/mock_data/generate_mock_data.py \
+python scripts/mock_dark_sirens/generate_mock_data.py \
   --outdir "${OUTDIR}" \
   --seed "${SEED}" \
   --n0 "${N0}" \
