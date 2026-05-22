@@ -37,6 +37,7 @@ from darksirens.inference.likelihood_core import (
     WL_BACKEND_LOGNORMAL,
 )
 from darksirens.inference import likelihood as likelihood_module
+from darksirens.gw.populations import get_fixed_population_params
 
 
 # ============================================================================
@@ -243,6 +244,7 @@ def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
         return jnp.asarray(0.0)
 
     class _Decoder:
+        pop_labels = ()
         def decode(self, coord):
             del coord
             return _cosmo(), _survey(), jnp.array([])
@@ -291,3 +293,49 @@ def test_make_likelihood_spectral_sirens_wl_missing_params_raises(monkeypatch):
     data.update({k: jnp.array([1.0]) for k in ("m1det", "m2det", "dL", "chieff", "p_pe", "m1detsels", "m2detsels", "dLsels", "chieffsels", "p_draw")})
     with pytest.raises(ValueError, match=r"data\['wl_params'\]"):
         likelihood_module.make_likelihood(opts, data, pop_params_fid=())
+
+
+def test_make_likelihood_fails_fast_on_empty_population_theta(monkeypatch):
+    """When pop_model expects params, empty decoded theta should fail before core."""
+    monkeypatch.setattr(likelihood_module, "prepare_catalog_views", lambda *a, **k: type("C", (), dict(
+        sample_to_unique_pe=jnp.zeros(2, dtype=jnp.int32),
+        sample_to_unique_sel=jnp.zeros(2, dtype=jnp.int32),
+        zgals_pe_catalog=jnp.zeros((1, 1)),
+        dzgals_pe_catalog=jnp.ones((1, 1)),
+        wgals_pe_catalog=jnp.ones((1, 1)),
+        ngals_pe_catalog=jnp.ones((1,), dtype=jnp.int32),
+        zgals_sel_catalog=jnp.zeros((1, 1)),
+        dzgals_sel_catalog=jnp.ones((1, 1)),
+        wgals_sel_catalog=jnp.ones((1, 1)),
+        ngals_sel_catalog=jnp.ones((1,), dtype=jnp.int32),
+        delta_g_pix_z=jnp.zeros((1, 1)),
+        sigma_kernel=0.1,
+        dN_obs_kde_pe=None, pixel_to_cache_idx_pe=None, unique_pixels_pe=None,
+        dN_obs_kde_sel=None, pixel_to_cache_idx_sel=None, unique_pixels_sel=None,
+    ))())
+
+    class _Decoder:
+        pop_labels = ("gamma",)
+
+        def decode(self, coord):
+            del coord
+            return _cosmo(), _survey(), jnp.array([])
+
+    monkeypatch.setattr(likelihood_module, "build_parameter_decoder", lambda *a, **k: _Decoder())
+    opts = type("Opts", (), {"pop_model": "powerlaw+peak", "universe_model": "spectral_sirens", "sel_batch_size": None})()
+    data = dict(
+        nEvents=1, nsamp=2, Ndraw=2.0, apix=1.0,
+        m1det=jnp.array([30.0, 31.0]), m2det=jnp.array([20.0, 21.0]), dL=jnp.array([1000.0, 1100.0]),
+        chieff=jnp.array([0.0, 0.1]), p_pe=jnp.array([1.0, 1.0]),
+        m1detsels=jnp.array([30.0, 31.0]), m2detsels=jnp.array([20.0, 21.0]), dLsels=jnp.array([1000.0, 1100.0]),
+        chieffsels=jnp.array([0.0, 0.1]), p_draw=jnp.array([1.0, 1.0]),
+    )
+    like = likelihood_module.make_likelihood(opts, data, pop_params_fid=())
+    with pytest.raises(ValueError, match="Population parameter length mismatch before likelihood evaluation"):
+        _ = like(jnp.array([]))
+
+
+def test_powerlaw_peak_fixture_population_vector_is_non_empty():
+    """Guard fixture construction: powerlaw+peak must have non-empty pop params."""
+    pop_params = jnp.asarray(get_fixed_population_params("powerlaw+peak"))
+    assert pop_params.size > 0
