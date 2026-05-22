@@ -114,6 +114,8 @@ def run_sampler(method, likelihood, prior_transform, labels,
             numpyro.factor("likelihood", log_l)
 
         init_values = {name: midpoint[i] for i, name in enumerate(labels)}
+        nuts_init_tries = int(getattr(opts, "nuts_init_tries", 32))
+        nuts_init_seed_offset = int(getattr(opts, "nuts_init_seed_offset", 100_000))
         target_accept = float(getattr(opts, "nuts_target_accept", 0.8))
         max_tree_depth = int(getattr(opts, "nuts_max_tree_depth", 10))
         num_warmup = int(getattr(opts, "nuts_warmup", 500))
@@ -123,11 +125,36 @@ def run_sampler(method, likelihood, prior_transform, labels,
         num_chains = int(getattr(opts, "nuts_chains", 1))
         chain_method = getattr(opts, "nuts_chain_method", "sequential")
 
-        if num_warmup < 0 or num_samples <= 0 or num_chains <= 0:
+        if num_warmup < 0 or num_samples <= 0 or num_chains <= 0 or nuts_init_tries <= 0:
             raise ValueError(
                 "NumPyro requires nuts_warmup >= 0, nuts_samples > 0, "
-                "and nuts_chains > 0."
+                "nuts_chains > 0, and nuts_init_tries > 0."
             )
+        midpoint_log_l = float(np.asarray(likelihood(midpoint)))
+        if not np.isfinite(midpoint_log_l):
+            rng = np.random.default_rng(int(opts.seed) + nuts_init_seed_offset)
+            lower_np = np.asarray(lower, dtype=float)
+            upper_np = np.asarray(upper, dtype=float)
+            best_theta = None
+            best_log_l = -np.inf
+            for _ in range(nuts_init_tries):
+                candidate = rng.uniform(lower_np, upper_np)
+                candidate_log_l = float(
+                    np.asarray(likelihood(jnp.asarray(candidate, dtype=lower.dtype)))
+                )
+                if np.isfinite(candidate_log_l) and candidate_log_l > best_log_l:
+                    best_log_l = candidate_log_l
+                    best_theta = candidate
+            if best_theta is None:
+                raise RuntimeError(
+                    "Failed to find a finite NumPyro NUTS initial point after "
+                    f"{nuts_init_tries} attempts. "
+                    f"parameter_names={list(labels)}, "
+                    f"bounds_min={lower_np.tolist()}, bounds_max={upper_np.tolist()}. "
+                    "Hint: run a likelihood dry-run diagnostic across prior bounds "
+                    "to identify non-finite regions."
+                )
+            init_values = {name: best_theta[i] for i, name in enumerate(labels)}
 
         kernel = NUTS(
             model,

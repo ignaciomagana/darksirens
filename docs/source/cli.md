@@ -71,6 +71,8 @@ darksirens_inference \
 - `--nuts_chains`: number of NUTS chains for `numpyro`.
 - `--nuts_target_accept`: target acceptance probability for `numpyro` NUTS.
 - `--nuts_max_tree_depth`: maximum NUTS tree depth for `numpyro`.
+- `--nuts_init_tries`: fallback initial-point draws from priors when midpoint has non-finite likelihood.
+- `--nuts_init_seed_offset`: seed offset used for the NUTS fallback initial-point search.
 - `--seed`: random seed.
 - `--show_progress`: enable or disable progress bars.
 
