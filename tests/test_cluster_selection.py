@@ -428,13 +428,17 @@ class TestMasterLikelihoodReduction:
             q=jnp.asarray(rng.uniform(0.3, 1.0, n_sel)),
             valid=jnp.ones(n_sel, dtype=jnp.bool_),
         )
+        pop_params = get_fixed_population_params("powerlaw+peak")
+        assert pop_params.ndim == 1
+        assert pop_params.shape[0] > 0
+
         return {
             "cosmo": _cosmo(), "survey": _survey(),
             "gw_pe": gw_pe, "gw_sel": gw_sel,
             "catalog": _toy_catalog(),
             "n_events": n_events, "n_samp": n_samp,
             "Ndraw": 1000.0,
-            "pop_params": jnp.asarray(get_fixed_population_params("powerlaw+peak")),
+            "pop_params": pop_params,
         }
 
     def test_cluster_mode_off_empty_pop_params_raises_clear_error(self, fixture):
@@ -470,6 +474,7 @@ class TestMasterLikelihoodReduction:
             )
 
     def test_cluster_mode_off_matches_commit2(self, fixture):
+        assert fixture["pop_params"].shape[0] > 0, "fixture pop_params must be non-empty for pop_model=powerlaw+peak"
         """With cluster_mode=OFF, the cluster-aware master likelihood must
         match commit 2's darksiren_log_likelihood bit-identically."""
         from darksirens.inference.likelihood_core import (
@@ -516,6 +521,7 @@ class TestMasterLikelihoodReduction:
         )
 
     def test_cluster_mode_j2_runs_end_to_end(self, fixture):
+        assert fixture["pop_params"].shape[0] > 0, "fixture pop_params must be non-empty for pop_model=powerlaw+peak"
         """Master likelihood with cluster_mode=J2 evaluates finite for a
         synthetic dataset with one pair and one singleton.
 
@@ -623,6 +629,7 @@ class TestMasterLikelihoodReduction:
         assert jnp.isfinite(ll), f"cluster_mode=J2 returned non-finite ll: {ll}"
 
     def test_cluster_mode_j2_pair_outscores_swapped_singletons(self, fixture):
+        assert fixture["pop_params"].shape[0] > 0, "fixture pop_params must be non-empty for pop_model=powerlaw+peak"
         """The master likelihood with a TRUE lensed pair declared as a pair
         should outscore the SAME data with those two events declared as
         singletons (and the rest declared as pair). This is a CRUCIAL
