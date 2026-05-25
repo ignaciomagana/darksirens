@@ -87,7 +87,8 @@ def log_catalog_prior(
         The log probability $\ln p_{\text{gal}}(z_k | \Omega_p)$.
     """
     H0, Om0 = cosmo.H0, cosmo.Om0
-    zgals, dzgals, wgals, sigma_kde = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals, em_catalog.sigma_kernel
+    zgals, dzgals, wgals = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals
+    sigma_kde = survey.sigma_kde
 
     # ``pix`` is the catalog-row index for compact/sliced catalogs (the
     # caller passes the per-sample ``sample_to_unique_idx`` map) and the raw
