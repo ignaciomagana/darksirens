@@ -23,6 +23,7 @@ class SurveyParams(NamedTuple):
     delta: Any
     b_miss: Any
     alpha_miss: Any
+    sigma_kde: Any = 0.0
     complete_empty_pixel_policy: Any = 0
 
 

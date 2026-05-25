@@ -225,7 +225,7 @@ def _print_parameter_table(
     """
     COSMO_FID  = {"H0": 67.74, "Om0": 0.3075}
     SURVEY_FID = {"log10n0": -2.0, "z50": 1.0, "w": 0.5,
-                  "delta": 0.0, "b_miss": 1.0, "alpha_miss": 0.5}
+                  "delta": 0.0, "b_miss": 1.0, "alpha_miss": 0.5, "sigma_kde": 0.0}
     pop_fid_map = {lbl: float(pop_params_fid[i])
                    for i, lbl in enumerate(pop_labels_all)}
 
@@ -468,6 +468,7 @@ def _completion_validation_survey_values(
         "delta": 0.0,
         "b_miss": 1.0,
         "alpha_miss": 0.5,
+        "sigma_kde": 0.0,
     }
     values = dict(fid)
     for label in values:
@@ -537,6 +538,7 @@ def run_completion_validation(
         delta=survey_values["delta"],
         b_miss=survey_values["b_miss"],
         alpha_miss=survey_values["alpha_miss"],
+        sigma_kde=survey_values["sigma_kde"],
     )
     em_catalog = EMCatalog(
         apix=data["apix"],

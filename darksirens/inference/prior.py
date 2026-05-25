@@ -115,9 +115,9 @@ def build_parameter_space(
     # these defaults keep the survey rolloff inside that domain while avoiding
     # the formerly ultra-broad density/evolution fits that could force heavy
     # clipping throughout the completion grid.
-    survey_labels = ["log10n0", "z50", "w", "delta", "b_miss", "alpha_miss"]
-    survey_lower = [-4.0, 0.05, 0.02, -3.0, 0.0, 0.0]
-    survey_upper = [-1.0, 4.5, 1.5, 3.0, 3.0, 1.0]
+    survey_labels = ["log10n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde"]
+    survey_lower = [-4.0, 0.05, 0.02, -3.0, 0.0, 0.0, 0.0]
+    survey_upper = [-1.0, 4.5, 1.5, 3.0, 3.0, 1.0, 0.05]
 
     # Make sure all prior override keys are valid parameter labels
     known_labels = set(cosmo_labels) | set(pop_labels) | set(survey_labels)
