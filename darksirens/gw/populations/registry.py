@@ -527,8 +527,10 @@ def _fiducial_gp_pairing():
             *([0.0] * 5)]            # y0..y4
 
 def _fiducial_gp_pairing_2d():
+    from .gp import _PAIR2D_N_NODES
+
     return [0.0, 1.0, 1.0, 0.5,      # beta amp ls_m ls_q
-            *([0.0] * 30)]            # y nodes on the 6x5 GP grid
+            *([0.0] * _PAIR2D_N_NODES)]  # y nodes on the 30-node GP grid
 
 
 _FIDUCIAL_PARAMS: dict[str, dict] = {
