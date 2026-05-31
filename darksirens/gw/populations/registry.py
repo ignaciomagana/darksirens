@@ -311,7 +311,7 @@ def _gp_mass_pairing_2d(
     y_labels    = None,
     *,
     beta  = GP_BETA_Q,
-    amp   = _B(0.01, 3.0),
+    amp   = _B(0.05, 3.0),
     ls_m  = GP_LS_M_PAIR,
     ls_q  = GP_LS_Q_PAIR,
     y     = GP_Y_PAIR,
@@ -320,13 +320,13 @@ def _gp_mass_pairing_2d(
 
     if y_labels is None:
         y_labels = [rf"$y_{{q,{i}}}$" for i in range(_PAIR2D_N_NODES)]
-    y_specs = tuple(ParamSpec(label, y.lo, y.hi) for label in y_labels)
+    assert len(y_labels) == _PAIR2D_N_NODES, "y_labels count must match node grid"
     return GaussianProcessPairing2D(
         ParamSpec(beta_label,  beta.lo,  beta.hi),
         ParamSpec(amp_label,   amp.lo,   amp.hi),
         ParamSpec(ls_m_label,  ls_m.lo,  ls_m.hi),
         ParamSpec(ls_q_label,  ls_q.lo,  ls_q.hi),
-        y_specs,
+        tuple(ParamSpec(lbl, y.lo, y.hi) for lbl in y_labels),
     )
 
 
