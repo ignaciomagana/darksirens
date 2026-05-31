@@ -20,6 +20,12 @@ from .base import MassComponent, PairingModel, ParamSpec
 from .utils import get_mass_grid, sfilter_high, sfilter_low
 
 
+_PAIR2D_LOGM_NODES = jnp.log(jnp.array([9.0, 18.0, 30.0, 42.0, 60.0, 90.0]))
+_PAIR2D_Q_NODES = jnp.array([0.15, 0.35, 0.55, 0.75, 0.95])
+_PAIR2D_N_NODES = int(_PAIR2D_LOGM_NODES.size * _PAIR2D_Q_NODES.size)
+_PAIR2D_JITTER_REL = 1e-4
+
+
 @dataclass
 class GaussianProcessMass1D(MassComponent):
     """One-dimensional GP model for the primary-mass log-density.
@@ -167,65 +173,36 @@ class GaussianProcessPairing2D(PairingModel):
 
     This component lets the mass-ratio distribution vary with primary mass.
     ``beta`` defines a mass-ratio mean trend, ``amp`` sets the covariance
-    amplitude, ``ls_m`` and ``ls_q`` set separate length scales, and sixteen
-    node amplitudes live on a 4x4 grid in log-primary-mass and mass ratio.
+    amplitude, ``ls_m`` and ``ls_q`` set separate length scales, and ``y_specs``
+    contains the latent node amplitudes on the configured log-primary-mass and
+    mass-ratio grid.
     """
 
     beta_spec: ParamSpec
     amp_spec: ParamSpec
     ls_m_spec: ParamSpec
     ls_q_spec: ParamSpec
-    y0_spec: ParamSpec
-    y1_spec: ParamSpec
-    y2_spec: ParamSpec
-    y3_spec: ParamSpec
-    y4_spec: ParamSpec
-    y5_spec: ParamSpec
-    y6_spec: ParamSpec
-    y7_spec: ParamSpec
-    y8_spec: ParamSpec
-    y9_spec: ParamSpec
-    y10_spec: ParamSpec
-    y11_spec: ParamSpec
-    y12_spec: ParamSpec
-    y13_spec: ParamSpec
-    y14_spec: ParamSpec
-    y15_spec: ParamSpec
+    y_specs: tuple
 
     @property
     def param_specs(self):
-        """Return mean, covariance, and 4x4 node specs in vector order."""
+        """Return mean, covariance, and node specs in vector order."""
         return [
             self.beta_spec,
             self.amp_spec,
             self.ls_m_spec,
             self.ls_q_spec,
-            self.y0_spec,
-            self.y1_spec,
-            self.y2_spec,
-            self.y3_spec,
-            self.y4_spec,
-            self.y5_spec,
-            self.y6_spec,
-            self.y7_spec,
-            self.y8_spec,
-            self.y9_spec,
-            self.y10_spec,
-            self.y11_spec,
-            self.y12_spec,
-            self.y13_spec,
-            self.y14_spec,
-            self.y15_spec,
+            *self.y_specs,
         ]
 
     def _eval_unnorm(self, m1, q, m_min, dm_min, t):
         """Evaluate the smoothed 2D GP conditional pairing density."""
         beta, amp, ls_m, ls_q = t[0], t[1], t[2], t[3]
-        y_nodes = jnp.array(t[4:20])
+        y_nodes = jnp.asarray(t[4 : 4 + _PAIR2D_N_NODES])
 
-        log_m1_nodes = jnp.log(jnp.array([10.0, 20.0, 40.0, 80.0]))
-        q_nodes = jnp.array([0.20, 0.40, 0.60, 0.80])
-        m_node, q_node = jnp.meshgrid(log_m1_nodes, q_nodes, indexing="ij")
+        m_node, q_node = jnp.meshgrid(
+            _PAIR2D_LOGM_NODES, _PAIR2D_Q_NODES, indexing="ij"
+        )
         x_nodes = jnp.stack([m_node.flatten(), q_node.flatten()], axis=-1)
 
         shape = jnp.broadcast_shapes(jnp.shape(m1), jnp.shape(q))
@@ -244,7 +221,10 @@ class GaussianProcessPairing2D(PairingModel):
 
         kernel = (amp**2) * kernels.Matern52()
         gp_prior = GaussianProcess(
-            kernel=kernel, X=x_nodes_scaled, mean=mean_fn, diag=1e-2
+            kernel=kernel,
+            X=x_nodes_scaled,
+            mean=mean_fn,
+            diag=(amp**2) * _PAIR2D_JITTER_REL + 1e-9,
         )
         _, gp_cond = gp_prior.condition(y_nodes, x_test_scaled)
 

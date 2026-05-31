@@ -316,16 +316,17 @@ def _gp_mass_pairing_2d(
     ls_q  = GP_LS_Q_PAIR,
     y     = GP_Y_PAIR,
 ) -> GaussianProcessPairing2D:
-    from .gp import GaussianProcessPairing2D
+    from .gp import GaussianProcessPairing2D, _PAIR2D_N_NODES
 
     if y_labels is None:
-        y_labels = [rf"$y_{{q,{i}}}$" for i in range(16)]
+        y_labels = [rf"$y_{{q,{i}}}$" for i in range(_PAIR2D_N_NODES)]
+    y_specs = tuple(ParamSpec(label, y.lo, y.hi) for label in y_labels)
     return GaussianProcessPairing2D(
         ParamSpec(beta_label,  beta.lo,  beta.hi),
         ParamSpec(amp_label,   amp.lo,   amp.hi),
         ParamSpec(ls_m_label,  ls_m.lo,  ls_m.hi),
         ParamSpec(ls_q_label,  ls_q.lo,  ls_q.hi),
-        *[ParamSpec(label, y.lo, y.hi) for label in y_labels],
+        y_specs,
     )
 
 
@@ -527,7 +528,7 @@ def _fiducial_gp_pairing():
 
 def _fiducial_gp_pairing_2d():
     return [0.0, 1.0, 1.0, 0.5,      # beta amp ls_m ls_q
-            *([0.0] * 16)]            # y0..y15
+            *([0.0] * 30)]            # y nodes on the 6x5 GP grid
 
 
 _FIDUCIAL_PARAMS: dict[str, dict] = {
