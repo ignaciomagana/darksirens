@@ -311,21 +311,22 @@ def _gp_mass_pairing_2d(
     y_labels    = None,
     *,
     beta  = GP_BETA_Q,
-    amp   = _B(0.01, 3.0),
+    amp   = _B(0.05, 3.0),
     ls_m  = GP_LS_M_PAIR,
     ls_q  = GP_LS_Q_PAIR,
     y     = GP_Y_PAIR,
 ) -> GaussianProcessPairing2D:
-    from .gp import GaussianProcessPairing2D
+    from .gp import GaussianProcessPairing2D, _PAIR2D_N_NODES
 
     if y_labels is None:
-        y_labels = [rf"$y_{{q,{i}}}$" for i in range(16)]
+        y_labels = [rf"$y_{{q,{i}}}$" for i in range(_PAIR2D_N_NODES)]
+    assert len(y_labels) == _PAIR2D_N_NODES, "y_labels count must match node grid"
     return GaussianProcessPairing2D(
         ParamSpec(beta_label,  beta.lo,  beta.hi),
         ParamSpec(amp_label,   amp.lo,   amp.hi),
         ParamSpec(ls_m_label,  ls_m.lo,  ls_m.hi),
         ParamSpec(ls_q_label,  ls_q.lo,  ls_q.hi),
-        *[ParamSpec(label, y.lo, y.hi) for label in y_labels],
+        tuple(ParamSpec(lbl, y.lo, y.hi) for lbl in y_labels),
     )
 
 
@@ -526,8 +527,10 @@ def _fiducial_gp_pairing():
             *([0.0] * 5)]            # y0..y4
 
 def _fiducial_gp_pairing_2d():
+    from .gp import _PAIR2D_N_NODES
+
     return [0.0, 1.0, 1.0, 0.5,      # beta amp ls_m ls_q
-            *([0.0] * 16)]            # y0..y15
+            *([0.0] * _PAIR2D_N_NODES)]  # y nodes on the 30-node GP grid
 
 
 _FIDUCIAL_PARAMS: dict[str, dict] = {
