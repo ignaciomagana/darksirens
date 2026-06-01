@@ -115,7 +115,6 @@ opts = Namespace(
     survey_path=None,
     gw_path=str(out / "mock_bright_gw_events.h5"),
     gwselection_path=str(out / "mock_bright_gw_selection.h5"),
-    sigma_kernel=0.005,
     use_LSS=False,
     counterpart=counterparts,
     counterpart_nside=int(os.environ["COUNTERPART_NSIDE"]),

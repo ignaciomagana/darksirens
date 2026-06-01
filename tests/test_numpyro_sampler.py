@@ -51,7 +51,6 @@ def _small_likelihood_inputs(universe_model):
         "dzgals_catalog": dzgals,
         "wgals_catalog": wgals,
         "delta_g_pix_z": jnp.zeros((n_pix_catalog, len(zgrid))),
-        "sigma_kernel": 0.02,
         "m1det": jnp.array([36.0, 38.0]),
         "m2det": jnp.array([28.8, 30.4]),
         "dL": jnp.array([460.0, 500.0]),

@@ -26,7 +26,7 @@ darksirens_inference \
 1. Pixelate the raw survey at the NSIDE resolution used by the GW sky localization products.
 2. Run inference with `--survey_path` and `--universe_model dark_sirens`.
 3. Compare against `dark_sirens_complete` to understand sensitivity to incompleteness modeling.
-4. Tune `--sigma_kernel` and survey priors only after validating the catalog format.
+4. Tune survey priors only after validating the catalog format.
 
 Template:
 

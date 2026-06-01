@@ -31,7 +31,6 @@ def _dummy_catalog():
         wgals=jnp.ones((1, 1)),
         ngals=jnp.ones((1,), dtype=jnp.int32),
         delta_g_pix_z=jnp.zeros((1, 1)),
-        sigma_kernel=0.1,
         dN_obs_kde=None,
         pixel_to_cache_idx=None,
     )

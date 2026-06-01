@@ -137,7 +137,6 @@ def load_all_data(opts):
     ngals = ngals_pe = ngals_sel = None
     catalog_memory = None
     apix = 0.0
-    sigma_kernel = 0.0
     counterpart_pixel = None
     counterpart_pixels = None
     counterpart_zs = None
@@ -177,7 +176,6 @@ def load_all_data(opts):
             offsets[pix_i] += 1
 
         apix = hp.nside2pixarea(nside)
-        sigma_kernel = opts.sigma_kernel
         print(
             "Using bright-siren counterpart catalog: "
             f"{len(counterpart_zs)} counterpart(s), nside={nside}, "
@@ -187,8 +185,6 @@ def load_all_data(opts):
         nside, ngals, zgals, dzgals, wgals = load_survey(opts.survey_path)
         npix = hp.nside2npix(nside)
         apix = hp.nside2pixarea(nside)
-        sigma_kernel = opts.sigma_kernel
-        print("Using a smoothing kernel of sigma: " + str(sigma_kernel))
     else:
         # If no survey, we might still need a default nside for 
         # pixelization logic in other parts of the code
@@ -303,7 +299,6 @@ def load_all_data(opts):
         dzgals_catalog=dzgals,
         wgals_catalog=wgals,
         catalog_memory=catalog_memory,
-        sigma_kernel=sigma_kernel,
         counterpart_pixel=counterpart_pixel,
         counterpart_pixels=counterpart_pixels,
         counterpart_zs=counterpart_zs,

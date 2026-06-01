@@ -48,7 +48,6 @@ class CatalogViews:
     sample_to_unique_pe: jnp.ndarray
     sample_to_unique_sel: jnp.ndarray
     delta_g_pix_z: jnp.ndarray
-    sigma_kernel: float
     dN_obs_kde_pe: jnp.ndarray | None
     dN_obs_kde_sel: jnp.ndarray | None
     pixel_to_cache_idx_pe: jnp.ndarray | None
@@ -261,7 +260,6 @@ def prepare_catalog_views(
         unique_pixels_pe = unique_pixels_sel = unique_pixels_union
 
     delta_g_pix_z = barrier(_to_jax(data, "delta_g_pix_z"))
-    sigma_kernel = data["sigma_kernel"]
 
     dN_obs_kde_pe = dN_obs_kde_sel = None
     pixel_to_cache_idx_pe = pixel_to_cache_idx_sel = None
@@ -373,7 +371,6 @@ def prepare_catalog_views(
         sample_to_unique_pe=sample_to_unique_pe,
         sample_to_unique_sel=sample_to_unique_sel,
         delta_g_pix_z=delta_g_pix_z,
-        sigma_kernel=sigma_kernel,
         dN_obs_kde_pe=dN_obs_kde_pe,
         dN_obs_kde_sel=dN_obs_kde_sel,
         pixel_to_cache_idx_pe=pixel_to_cache_idx_pe,
