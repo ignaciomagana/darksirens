@@ -23,6 +23,7 @@ class SurveyParams(NamedTuple):
     delta: Any
     b_miss: Any
     alpha_miss: Any
+    sigma_kde: Any = 0.0
     complete_empty_pixel_policy: Any = 0
 
 
@@ -48,8 +49,6 @@ class EMCatalog(NamedTuple):
         LSS overdensity field pre-computed on the redshift grid.  This
         remains globally pixel-indexed when LSS is enabled; compact
         catalogs use ``unique_pixels[row]`` before indexing it.
-    sigma_kernel : float
-        KDE bandwidth for the catalog prior [redshift units].
     dN_obs_kde : (N_unique_pix, N_grid) or None
         Precomputed per-pixel KDE grids for dN_obs/dz.
         None until ``build_pixel_kde_cache`` is called.
@@ -90,7 +89,6 @@ class EMCatalog(NamedTuple):
     wgals: Any
     ngals: Any
     delta_g_pix_z: Any
-    sigma_kernel: Any
     dN_obs_kde: Any            # (N_unique_pix, N_grid) | None
     pixel_to_cache_idx: Any    # (N_pix_catalog or N_catalog_rows,) | None
     unique_pixels: Any = None  # (N_catalog_rows,) | None

@@ -73,7 +73,6 @@ def test_completion_clip_diagnostics_reports_grid_fractions():
         wgals=wgals,
         ngals=ngals,
         delta_g_pix_z=jnp.zeros((1, len(zgrid))),
-        sigma_kernel=0.01,
         dN_obs_kde=dN_obs_kde,
         pixel_to_cache_idx=pixel_to_cache_idx,
     )

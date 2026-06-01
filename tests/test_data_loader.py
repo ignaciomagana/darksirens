@@ -114,7 +114,6 @@ def test_load_all_data_returns_named_pe_counts_for_survey_fixture(
     opts = SimpleNamespace(
         universe_model="dark_sirens",
         survey_path=str(survey_path),
-        sigma_kernel=0.02,
         gw_path="unused-gw.hdf5",
         gwselection_path="unused-selection.hdf5",
         use_LSS=False,
@@ -183,7 +182,6 @@ def test_load_all_data_stores_bright_siren_counterpart_pixel_and_keeps_it_compac
     opts = SimpleNamespace(
         universe_model="bright_sirens",
         survey_path=None,
-        sigma_kernel=0.0,
         gw_path="unused-gw.hdf5",
         gwselection_path="unused-selection.hdf5",
         use_LSS=False,
@@ -241,7 +239,6 @@ def test_load_all_data_accepts_multiple_bright_siren_counterparts(monkeypatch):
     opts = SimpleNamespace(
         universe_model="bright_sirens",
         survey_path=None,
-        sigma_kernel=0.0,
         gw_path="unused-gw.hdf5",
         gwselection_path="unused-selection.hdf5",
         use_LSS=False,

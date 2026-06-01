@@ -27,7 +27,6 @@ def test_selection_batching_matches_unbatched_for_non_divisible_length():
         wgals=jnp.ones((1, 1)),
         ngals=jnp.ones(1, dtype=jnp.int32),
         delta_g_pix_z=jnp.zeros((1, 1)),
-        sigma_kernel=0.1,
         dN_obs_kde=None,
         pixel_to_cache_idx=None,
     )
@@ -84,7 +83,6 @@ def test_padded_selection_entries_use_explicit_valid_mask_not_prior_weight():
         wgals=jnp.ones((1, 1)),
         ngals=jnp.ones(1, dtype=jnp.int32),
         delta_g_pix_z=jnp.zeros((1, 1)),
-        sigma_kernel=0.1,
         dN_obs_kde=None,
         pixel_to_cache_idx=None,
     )

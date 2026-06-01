@@ -138,7 +138,6 @@ opts = Namespace(
     survey_path=str(out / f"catalog_pixelated_nside_{nside}.h5"),
     gw_path=str(out / "mock_gw_events.h5"),
     gwselection_path=str(out / "mock_gw_selection.h5"),
-    sigma_kernel=0.005,
     use_LSS=False,
     counterpart=None,
     counterpart_nside=1,

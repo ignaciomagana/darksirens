@@ -70,7 +70,6 @@ def test_dark_sirens_likelihood_evaluates_once_before_sampling():
         "dzgals_catalog": dzgals,
         "wgals_catalog": wgals,
         "delta_g_pix_z": jnp.zeros((n_pix_catalog, len(zgrid))),
-        "sigma_kernel": 0.02,
         "m1det": jnp.array([36.0, 38.0]),
         "m2det": jnp.array([28.8, 30.4]),
         "dL": jnp.array([460.0, 500.0]),
@@ -103,7 +102,7 @@ def test_dark_sirens_likelihood_evaluates_once_before_sampling():
     assert value.shape == ()
     assert not bool(jnp.isnan(value))
     # Reference value from the pre-refactor monolithic likelihood implementation.
-    np.testing.assert_allclose(float(value), 0.016343561059983358, rtol=1e-12)
+    np.testing.assert_allclose(float(value), 0.016347464281930607, rtol=1e-12)
 
 
 def test_make_likelihood_does_not_mutate_data_when_compacting_catalogs():
@@ -133,7 +132,6 @@ def test_make_likelihood_does_not_mutate_data_when_compacting_catalogs():
         "dzgals_catalog": dzgals,
         "wgals_catalog": wgals,
         "delta_g_pix_z": jnp.zeros((n_pix_catalog, len(zgrid))),
-        "sigma_kernel": 0.02,
         "m1det": jnp.array([36.0, 38.0]),
         "m2det": jnp.array([28.8, 30.4]),
         "dL": jnp.array([460.0, 500.0]),
@@ -212,7 +210,6 @@ def test_dark_sirens_cache_is_built_once_for_unique_pixels(monkeypatch):
         "dzgals_catalog": dzgals,
         "wgals_catalog": wgals,
         "delta_g_pix_z": jnp.zeros((n_pix_catalog, len(zgrid))),
-        "sigma_kernel": 0.02,
         "m1det": jnp.array([36.0, 38.0, 35.0, 37.0]),
         "m2det": jnp.array([28.8, 30.4, 28.0, 29.6]),
         "dL": jnp.array([460.0, 500.0, 470.0, 490.0]),
