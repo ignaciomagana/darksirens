@@ -24,7 +24,6 @@ python darksirens_inference.py \
     --pop_model         brokenpowerlaw+2peaks \
     --universe_model    dark_sirens \
     --fix_cosmology     true \
-    --sigma_kernel      0.005
 
 # Fix individual parameters via JSON:
     --fixed_parameter_values '{"$v_1$": 0.1}'
@@ -367,7 +366,6 @@ def save_results_hdf5(
             f.attrs["counterpart_dz"] = float(opts.counterpart_dz)
             f.attrs["counterpart_nside"] = int(opts.counterpart_nside)
             f.attrs["bright_siren_sky_marginalized"] = bool(opts.bright_siren_sky_marginalized)
-        f.attrs["sigma_kernel"]    = float(opts.sigma_kernel)
         f.attrs["nlive"]           = int(opts.nlive)
         f.attrs["dlogz"]           = float(opts.dlogz)
         f.attrs["nwalkers"]        = int(opts.nwalkers)
@@ -549,7 +547,6 @@ def run_completion_validation(
         delta_g_pix_z=jnp.asarray(
             data.get("delta_g_pix_z", jnp.zeros((1, dN_obs_kde.shape[1])))
         ),
-        sigma_kernel=data["sigma_kernel"],
         dN_obs_kde=dN_obs_kde,
         pixel_to_cache_idx=pixel_to_cache_idx,
         unique_pixels=jnp.asarray(unique_pixels, dtype=jnp.int32),
@@ -618,7 +615,6 @@ def main():
                          "'volume' preserves the historical volume-prior robustness approximation."))
 
     g = optp.add_argument_group("Catalog")
-    g.add_argument("--sigma_kernel", type=float, default=0.0)
     g.add_argument("--use_LSS",      type=str_to_bool, default=False, metavar="BOOL")
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
@@ -703,8 +699,6 @@ def main():
         _warn(f"--survey_path provided but '{opts.universe_model}' does not use it.")
     if opts.fix_population and opts.fix_cosmology and opts.fix_survey:
         _warn("All blocks fixed — nothing will be inferred.")
-    if opts.sigma_kernel == 0.0 and opts.universe_model in GALAXY_AWARE:
-        _warn("--sigma_kernel=0 — galaxy redshift uncertainties unsmoothed.")
 
     _ok("Configuration is valid.")
     _end()
@@ -765,7 +759,6 @@ def main():
     _row("Selection path",  opts.gwselection_path)
     if opts.survey_path:
         _row("Survey path",  opts.survey_path)
-        _row("σ_kernel",     opts.sigma_kernel)
         _row("Use LSS",      "yes" if opts.use_LSS else "no")
     _row("Output root",     opts.save_path)
     if opts.sel_batch_size:

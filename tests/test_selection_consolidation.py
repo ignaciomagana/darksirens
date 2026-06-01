@@ -23,7 +23,6 @@ def _catalog():
         wgals=jnp.ones((2, 1)),
         ngals=jnp.ones(2, dtype=jnp.int32),
         delta_g_pix_z=jnp.zeros((2, 1)),
-        sigma_kernel=0.1,
         dN_obs_kde=None,
         pixel_to_cache_idx=None,
     )

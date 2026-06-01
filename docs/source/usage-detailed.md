@@ -246,7 +246,6 @@ darksirens_inference \
   --universe_model dark_sirens \
   --pop_model powerlaw+peak \
   --sampler dynesty \
-  --sigma_kernel 0.005 \
   --save_path runs/dark_powerlaw_peak
 ```
 
