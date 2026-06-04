@@ -57,38 +57,12 @@ import glob
 
 from darksirens.utils.cosmology import *
 
-_GWDIST_SPIN_MODULE = sys.modules.get("gwdistributions.distributions.spin")
-if (
-    _GWDIST_SPIN_MODULE is not None
-    and hasattr(_GWDIST_SPIN_MODULE, "IsotropicUniformMagnitudeChiEffGivenComponentMass")
-):
-    IsotropicUniformMagnitudeChiEffGivenComponentMass = (
-        _GWDIST_SPIN_MODULE.IsotropicUniformMagnitudeChiEffGivenComponentMass
-    )
-else:
-    _GWDIST_ROOT_SPEC = importlib.util.find_spec("gwdistributions")
-    _GWDIST_SPEC = (
-        importlib.util.find_spec("gwdistributions.distributions.spin")
-        if _GWDIST_ROOT_SPEC is not None
-        else None
-    )
-    if _GWDIST_SPEC is not None:
-        IsotropicUniformMagnitudeChiEffGivenComponentMass = importlib.import_module(
-            "gwdistributions.distributions.spin"
-        ).IsotropicUniformMagnitudeChiEffGivenComponentMass
-    else:
-        IsotropicUniformMagnitudeChiEffGivenComponentMass = None
+from gwcat.spin import chi_eff_prior_logprob
 
 import warnings
 warnings.filterwarnings("ignore", message="invalid value encountered in log")
 warnings.filterwarnings("ignore", message="invalid value encountered in arctanh")
 warnings.filterwarnings("ignore", message="divide by zero encountered in log")
-
-if IsotropicUniformMagnitudeChiEffGivenComponentMass is not None:
-    spin_prior = IsotropicUniformMagnitudeChiEffGivenComponentMass()
-    spin_prior._init_values(max_spin_magnitude=0.99)
-else:
-    spin_prior = None
 
 def load_gw_samples(gw_path):
     """
@@ -142,6 +116,9 @@ def load_gw_samples(gw_path):
         if _has_src:
             m1source = np.array(f["m1src"])
             m2source = np.array(f["m2src"])
+
+        _chi_in_ppe = bool(f.attrs.get("chi_eff_in_p_pe", False))
+        _chi_amax = float(f.attrs.get("chi_eff_amax", 0.99))
     
     # Source masses: use pre-stored if available (gwcat-1.0), else compute
     if not _has_src:
@@ -154,20 +131,12 @@ def load_gw_samples(gw_path):
     # ------------------------------------------------------------
     # p_pe handling
     # ------------------------------------------------------------
-    # Likelihood convention: samples are integrated over (m1det, q, dL),
-    # where q = m2det / m1det.  p_pe is therefore expected in that basis
-    # before the per-event normalisation below.  The non-mock branch folds
-    # in the 1D chi_eff prior so the final proposal density includes the
-    # spin coordinate consumed by the population model.
     if is_mock:
         print("This is using mock data.")
-    else:
-        if spin_prior is None:
-            raise ModuleNotFoundError(
-                "gwdistributions is required to load non-mock GW samples with chi_eff priors."
-            )
-        p_pe_chieff = np.exp(spin_prior._logprob(chieff, m1source, m2source, 0.99))
-        p_pe = p_pe * p_pe_chieff
+    elif not _chi_in_ppe:
+        # chi_eff not yet in p_pe — apply it now
+        logp_chi = chi_eff_prior_logprob(chieff, m1source, m2source, amax=_chi_amax)
+        p_pe = p_pe * np.exp(np.clip(logp_chi, -50.0, None))
 
     # Normalise per event so that each event's importance weights are
     # independent.  The per-event marginal likelihood is
@@ -267,11 +236,8 @@ def load_selection_samples(
 
             # Apply 1-D chi_eff spin-prior swap if not already done
             if not f.attrs.get("chi_eff_swap_applied", True):
-                if spin_prior is None:
-                    raise ModuleNotFoundError(
-                        "gwdistributions is required to apply the chi_eff spin-prior swap."
-                    )
-                log_p_chi = spin_prior._logprob(chieffsels, m1src_sel, m2src_sel, 0.99)
+                _amax = float(f.attrs.get("chi_eff_amax", 0.99))
+                log_p_chi = chi_eff_prior_logprob(chieffsels, m1src_sel, m2src_sel, amax=_amax)
                 safe_log_p_chi = np.clip(log_p_chi, a_min=-50.0, a_max=None)
                 pdraw_sel = pdraw_sel * np.exp(safe_log_p_chi)
 
@@ -367,7 +333,7 @@ def load_selection_samples(
             ln_pdraw_spin = -np.log(16.0 * np.pi**2 * a1**2 * a2**2 * 0.99**2)
             
             # Safely calculate 1D chi_eff draw probability
-            log_p_chi = spin_prior._logprob(chieff_all, m1src_all, m2src_all, 0.99)
+            log_p_chi = chi_eff_prior_logprob(chieff_all, m1src_all, m2src_all, amax=0.99)
             safe_log_p_chi = np.clip(log_p_chi, a_min=-50.0, a_max=None)
             
             # Swap the 6D spin probability for the 1D chi_eff probability in log-space
@@ -384,8 +350,16 @@ def load_selection_samples(
                 / ddL_of_z(z_all, dL_all, H0Planck, Om0Planck)
             )
 
+            raw_searches = f.attrs["searches"]
+            if hasattr(raw_searches, 'tolist'):
+                raw_searches = raw_searches.tolist()
+            searches = [s.decode() if isinstance(s, bytes) else str(s)
+                        for s in (raw_searches if hasattr(raw_searches, '__iter__')
+                                  and not isinstance(raw_searches, (str, bytes))
+                                  else [raw_searches])]
+
             far_all = np.min(
-                [np.array(f["events"]["%s_far" % s][:]) for s in f.attrs["searches"]],
+                [np.array(f["events"]["%s_far" % s][:]) for s in searches],
                 axis=0,
             )
 
