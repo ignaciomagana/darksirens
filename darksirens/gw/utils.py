@@ -134,14 +134,22 @@ def load_gw_samples(gw_path):
         p_pe = np.array(f["p_pe"]) if "p_pe" in f else np.ones(dL.shape)
         
         is_mock = bool(f.attrs.get("mock_data", False))
-    
-    # Define cosmology to prevent NameError
-    H0Planck = Planck15.H0.value
-    Om0Planck = Planck15.Om0
 
-    redshift = z_of_dL(dL, H0Planck, Om0Planck)
-    m1source = m1det/(1+redshift)
-    m2source = m2det/(1+redshift)
+        # gwcat-1.0 files store the PE cosmology and pre-computed source masses
+        _pe_H0 = float(f.attrs["pe_cosmology_H0"]) if "pe_cosmology_H0" in f.attrs else None
+        _pe_Om0 = float(f.attrs["pe_cosmology_Om0"]) if "pe_cosmology_Om0" in f.attrs else None
+        _has_src = "m1src" in f and "m2src" in f
+        if _has_src:
+            m1source = np.array(f["m1src"])
+            m2source = np.array(f["m2src"])
+    
+    # Source masses: use pre-stored if available (gwcat-1.0), else compute
+    if not _has_src:
+        H0_ref = _pe_H0 if _pe_H0 is not None else Planck15.H0.value
+        Om0_ref = _pe_Om0 if _pe_Om0 is not None else Planck15.Om0
+        redshift = z_of_dL(dL, H0_ref, Om0_ref)
+        m1source = m1det/(1+redshift)
+        m2source = m2det/(1+redshift)
     
     # ------------------------------------------------------------
     # p_pe handling
@@ -242,6 +250,51 @@ def load_selection_samples(
 
     with h5py.File(file, "r") as f:
 
+        # Branch: gwcat pre-processed selection file (format_version="gwcat-selection-1.0")
+        # Everything is already in (m1det, q, dL) basis except the 1-D chi_eff
+        # swap, which we apply here.
+        if f.attrs.get("format_version", "") == "gwcat-selection-1.0":
+            m1detsels  = np.array(f["m1det"])
+            m2detsels  = np.array(f["m2det"])
+            dLsels     = np.array(f["dL"])
+            chieffsels = np.array(f["chieff"])
+            rasels     = np.array(f["ra"])
+            decsels    = np.array(f["dec"])
+            pdraw_sel  = np.array(f["pdraw"])
+            m1src_sel  = np.array(f["m1src"])
+            m2src_sel  = np.array(f["m2src"])
+            ndraw      = int(f.attrs["ndraw"])
+
+            # Apply 1-D chi_eff spin-prior swap if not already done
+            if not f.attrs.get("chi_eff_swap_applied", True):
+                if spin_prior is None:
+                    raise ModuleNotFoundError(
+                        "gwdistributions is required to apply the chi_eff spin-prior swap."
+                    )
+                log_p_chi = spin_prior._logprob(chieffsels, m1src_sel, m2src_sel, 0.99)
+                safe_log_p_chi = np.clip(log_p_chi, a_min=-50.0, a_max=None)
+                pdraw_sel = pdraw_sel * np.exp(safe_log_p_chi)
+
+            n_det = len(pdraw_sel)
+            print(f"    [gwcat selection] {n_det:,} detected injections  "
+                  f"Ndraw={ndraw:,}  "
+                  f"H0={f.attrs.get('cosmology_H0', '?')}  "
+                  f"Om0={f.attrs.get('cosmology_Om0', '?')}")
+            print(f"    p_draw: min={pdraw_sel.min():.3e}  "
+                  f"max={pdraw_sel.max():.3e}  "
+                  f"mean={pdraw_sel.mean():.3e}")
+
+            return (
+                jnp.array(m1detsels),
+                jnp.array(m2detsels),
+                jnp.array(dLsels),
+                jnp.array(chieffsels),
+                jnp.array(rasels),
+                jnp.array(decsels),
+                jnp.array(pdraw_sel),
+                ndraw,
+            )
+
         # Branch 0 — mock selection file (generate_selection.py)
         if f.attrs.get("mock_data", False):
             print("This is using mock selection.")
@@ -273,75 +326,7 @@ def load_selection_samples(
                 ndraw,
             )
         # ------------------------------------------------------------
-        # Branch 1: "injections/..." format
-        # ------------------------------------------------------------
-        elif "injections" in f:
-            m1det_all  = np.array(f["injections"]["mass1"][:])
-            m2det_all  = np.array(f["injections"]["mass2"][:])
-            dL_all     = np.array(f["injections"]["distance"][:])
-            ra_all     = np.array(f["injections"]["right_ascension"][:])
-            dec_all    = np.array(f["injections"]["declination"][:])
-            s1z_all    = np.array(f["injections"]["spin1z"][:])
-            s2z_all    = np.array(f["injections"]["spin2z"][:])
-            
-            # Cosmology for reference distribution
-            H0Planck = Planck15.H0.value
-            Om0Planck = Planck15.Om0
-
-            z_all = z_of_dL(dL_all, H0Planck, Om0Planck)
-
-            m1src_all = m1det_all / (1.0 + z_all)
-            m2src_all = m2det_all / (1.0 + z_all)
-            chieff_all = (m1src_all*s1z_all + m2src_all*s2z_all)/(m1src_all + m2src_all)        
-            
-            # Safely calculate 1D chi_eff draw probability (preventing -inf underflow)
-            log_p_chi = spin_prior._logprob(chieff_all, m1src_all, m2src_all, 0.99)
-            safe_log_p_chi = np.clip(log_p_chi, a_min=-50.0, a_max=None)
-            p_chieff_draw = np.exp(safe_log_p_chi)
-
-            # Load the joint PDF and the exact 3D spin PDFs
-            p_joint = np.array(f["injections"]["sampling_pdf"][:])
-            p_spin1 = np.array(f["injections"]["spin1x_spin1y_spin1z_sampling_pdf"][:])
-            p_spin2 = np.array(f["injections"]["spin2x_spin2y_spin2z_sampling_pdf"][:])
-            
-            # Remove the 6D spin probability and replace it with the 1D chi_eff probability
-            p_effective = (p_joint / (p_spin1 * p_spin2)) * p_chieff_draw
-
-            # Convert the effective draw density to the likelihood's
-            # canonical detector-frame variables (m1det, q, dL).  This
-            # branch's mass draw is native to component-mass coordinates,
-            # so the q-basis conversion contributes |dm2det/dq| = m1det
-            # in addition to the source-to-detector redshift/distance
-            # factors.
-            pdraw_all = (
-                p_effective
-                * m1det_all
-                / (1.0 + z_all) ** 2
-                / ddL_of_z(z_all, dL_all, H0Planck, Om0Planck)
-            )
-
-            # FAR-based detection
-            pycbc_far    = np.array(f["injections"]["far_pycbc_hyperbank"])
-            pycbc_bbh_far = np.array(f["injections"]["far_pycbc_bbh"])
-            gstlal_far   = np.array(f["injections"]["far_gstlal"])
-            mbta_far     = np.array(f["injections"]["far_mbta"])
-
-            detected = (
-                (pycbc_far < far_threshold)
-                | (pycbc_bbh_far < far_threshold)
-                | (gstlal_far < far_threshold)
-                | (mbta_far < far_threshold)
-            )
-
-            ndraw = int(f.attrs["n_accepted"] + f.attrs["n_rejected"])
-
-            T = (f.attrs["end_time_s"] - f.attrs["start_time_s"]) / (
-                3600.0 * 24.0 * 365.25
-            )
-            pdraw_all /= T
-
-        # ------------------------------------------------------------
-        # Branch 2: "events/..." format
+        # Branch 1: "events/..." format (all current LVK injection sets)
         # ------------------------------------------------------------
         elif "events" in f:
             m1src_all = np.array(f["events"]["mass1_source"][:])
@@ -413,8 +398,15 @@ def load_selection_samples(
             detected = far_all < far_threshold
 
         else:
+            if "injections" in f:
+                raise RuntimeError(
+                    "This file uses the legacy O3 'injections/' format, which "
+                    "is no longer supported. Use the cumulative GWTC-5 injection "
+                    "sets (Zenodo 19500052) which cover O1–O4b in the modern "
+                    "'events/' format, or pre-process with gwcat.SelectionSet."
+                )
             raise RuntimeError("Unrecognized injection file format: "
-                               "no 'mock_data' attr, 'injections', or 'events' group.")
+                               "no 'mock_data' attr or 'events' group.")
     # ------------------------------------------------------------
     # Restrict to detected injections
     # ------------------------------------------------------------
