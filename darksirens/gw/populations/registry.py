@@ -44,8 +44,14 @@ import jax.numpy as jnp
 
 from .base import ParamSpec, MixtureModel, PopulationModel, _stick_breaking_weights
 from .parametric import (
-    PowerLaw, BrokenPowerLaw, Gaussian,
-    PowerLawPairing, TruncatedGaussianSpin,
+    PowerLaw,
+    BrokenPowerLaw,
+    Gaussian,
+    PowerLawPairing,
+    TruncatedGaussianSpin,
+    GolombRemnantMass1G,
+    GolombRemnantMass1GPlusTail,
+    GolombSymmetricMassPopulationModel,
 )
 
 
@@ -77,6 +83,17 @@ GP_ALPHA     = _B(-4.0,  12.0)
 GP_BETA_Q    = _B(-4.0,  12.0)
 GP_Y         = _B(-7.0,   7.0)
 GP_Y_PAIR    = _B(-5.0,   5.0)
+
+# Golomb--Isi--Farr physical remnant-map model.
+GOL_A = _B(-1.65, 6.35)
+GOL_B = _B(-2.10, 5.90)
+GOL_MTR = _B(20.0, 50.0)
+GOL_DELTA = _B(0.5, 7.0)      # M_BH,max - M_tr
+GOL_SIGMA = _B(0.05, 0.50)
+GOL_C = _B(0.0, 8.0)
+GOL_LOG10_FPL = _B(-3.0, 0.0) # f_PL in [1e-3, 1]
+GOL_DM_TAIL = _B(0.1, 20.0)
+GOL_BETA_M = _B(-6.0, 6.0)
 
 
 # ============================================================
@@ -242,6 +259,47 @@ def _spin(
     return TruncatedGaussianSpin(
         ParamSpec(mu_label,  mu.lo,  mu.hi),
         ParamSpec(sig_label, sig.lo, sig.hi),
+    )
+
+
+def _golomb_1g_mass() -> GolombRemnantMass1G:
+    return GolombRemnantMass1G(
+        ParamSpec(r"$a$", GOL_A.lo, GOL_A.hi),
+        ParamSpec(r"$b$", GOL_B.lo, GOL_B.hi),
+        ParamSpec(r"$M_{\rm tr}$", GOL_MTR.lo, GOL_MTR.hi),
+        ParamSpec(r"$\Delta_{\rm PPI}$", GOL_DELTA.lo, GOL_DELTA.hi),
+        ParamSpec(r"$\sigma_{\rm map}$", GOL_SIGMA.lo, GOL_SIGMA.hi),
+    )
+
+
+def _golomb_tail_mass() -> GolombRemnantMass1GPlusTail:
+    return GolombRemnantMass1GPlusTail(
+        ParamSpec(r"$a$", GOL_A.lo, GOL_A.hi),
+        ParamSpec(r"$b$", GOL_B.lo, GOL_B.hi),
+        ParamSpec(r"$M_{\rm tr}$", GOL_MTR.lo, GOL_MTR.hi),
+        ParamSpec(r"$\Delta_{\rm PPI}$", GOL_DELTA.lo, GOL_DELTA.hi),
+        ParamSpec(r"$\sigma_{\rm map}$", GOL_SIGMA.lo, GOL_SIGMA.hi),
+        ParamSpec(r"$c_{\rm PL}$", GOL_C.lo, GOL_C.hi),
+        ParamSpec(r"$\log_{10} f_{\rm PL}$", GOL_LOG10_FPL.lo, GOL_LOG10_FPL.hi),
+        ParamSpec(r"$\delta m_{\rm PL}$", GOL_DM_TAIL.lo, GOL_DM_TAIL.hi),
+    )
+
+
+def _model_golomb_1g() -> GolombSymmetricMassPopulationModel:
+    return GolombSymmetricMassPopulationModel(
+        mass_component=_golomb_1g_mass(),
+        spin_component=_spin(),
+        beta_spec=ParamSpec(r"$\beta_M$", GOL_BETA_M.lo, GOL_BETA_M.hi),
+        gamma_spec=ParamSpec(r"$\gamma$", -10.0, 10.0),
+    )
+
+
+def _model_golomb_tail() -> GolombSymmetricMassPopulationModel:
+    return GolombSymmetricMassPopulationModel(
+        mass_component=_golomb_tail_mass(),
+        spin_component=_spin(),
+        beta_spec=ParamSpec(r"$\beta_M$", GOL_BETA_M.lo, GOL_BETA_M.hi),
+        gamma_spec=ParamSpec(r"$\gamma$", -10.0, 10.0),
     )
 
 
@@ -494,6 +552,18 @@ for _name, (_mix_fn, _latex) in _RAW_MODELS.items():
         _MODEL_FACTORIES[_key] = (_mix_fn, _sb, _ss)
         MODEL_NAME_LATEX[_key] = _latex + _label_suffix
 
+_CUSTOM_MODEL_FACTORIES = {
+    "golomb_1g": _model_golomb_1g,
+    "golomb_1g+tail": _model_golomb_tail,
+}
+
+MODEL_NAME_LATEX.update(
+    {
+        "golomb_1g": r"\text{Golomb 1G}",
+        "golomb_1g+tail": r"\text{Golomb 1G+PL}",
+    }
+)
+
 
 # ============================================================
 # 6. Fiducial parameters
@@ -608,6 +678,46 @@ _FIDUCIAL_PARAMS: dict[str, dict] = {
     ),
 }
 
+_CUSTOM_FIDUCIAL_PARAMS = {
+    # Ordering:
+    # a, b, M_tr, Delta_PPI, sigma_map,
+    # beta_M,
+    # mu_chi, sigma_chi,
+    # gamma
+    "golomb_1g": [
+        2.35,
+        1.90,
+        35.0,
+        3.0,
+        0.08,
+        0.0,
+        0.0,
+        0.10,
+        0.0,
+    ],
+
+    # Ordering:
+    # a, b, M_tr, Delta_PPI, sigma_map,
+    # c_PL, log10_f_PL, delta_m_PL,
+    # beta_M,
+    # mu_chi, sigma_chi,
+    # gamma
+    "golomb_1g+tail": [
+        2.35,
+        1.90,
+        35.0,
+        3.0,
+        0.08,
+        4.0,
+        -1.4,   # f_PL ~ 0.04
+        5.0,
+        0.0,
+        0.0,
+        0.10,
+        0.0,
+    ],
+}
+
 
 # ============================================================
 # 7. Public API
@@ -624,6 +734,9 @@ def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
     The conversion from the human-readable fractions in _FIDUCIAL_PARAMS is
     done here via _w_to_v so that _FIDUCIAL_PARAMS remains easy to audit.
     """
+    if pop_model in _CUSTOM_FIDUCIAL_PARAMS:
+        return jnp.array(_CUSTOM_FIDUCIAL_PARAMS[pop_model], dtype=float)
+
     base_model  = pop_model
     shared_beta = False
     shared_spin = False
@@ -676,12 +789,17 @@ def get_model(pop_model: str) -> PopulationModel:
     except KeyError:
         pass
 
+    if pop_model in _CUSTOM_MODEL_FACTORIES:
+        model = _CUSTOM_MODEL_FACTORIES[pop_model]()
+        _MODEL_REGISTRY[pop_model] = model
+        return model
+
     try:
         mix_fn, shared_beta, shared_spin = _MODEL_FACTORIES[pop_model]
     except KeyError:
         raise ValueError(
             f"Unknown model {pop_model!r}. "
-            f"Available: {sorted(_MODEL_FACTORIES.keys())}"
+            f"Available: {sorted([*_MODEL_FACTORIES.keys(), *_CUSTOM_MODEL_FACTORIES.keys()])}"
         )
 
     model = PopulationModel(mixture=mix_fn(shared_beta=shared_beta, shared_spin=shared_spin))
