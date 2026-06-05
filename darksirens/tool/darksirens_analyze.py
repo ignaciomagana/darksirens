@@ -4,7 +4,7 @@ import json
 import argparse
 
 import numpy as np
-import corner
+import h5py
 from tqdm import tqdm
 
 import jax
@@ -34,15 +34,114 @@ c = sns.color_palette('colorblind')
 # ------------------------------------------------------------
 # I/O
 # ------------------------------------------------------------
-def load_run(run_dir):
-    settings = json.load(open(os.path.join(run_dir, "settings.json")))
-    results = np.load(os.path.join(run_dir, "samples.npy"), allow_pickle=True).item()
+def _json_safe_hdf5_attr(value):
+    """Convert HDF5 attribute values into plain JSON-like Python values."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return [_json_safe_hdf5_attr(item) for item in value.tolist()]
+    return value
+
+
+def _load_settings(run_dir):
+    settings_path = os.path.join(run_dir, "settings.json")
+    if os.path.exists(settings_path):
+        with open(settings_path) as f:
+            return json.load(f)
+    return {}
+
+
+def _merge_hdf5_metadata(settings, h5_file):
+    """Backfill settings from results.hdf5 attrs/datasets when available."""
+    merged = dict(settings)
+
+    for key, value in h5_file.attrs.items():
+        if key in {"environment", "prior_overrides"} and isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        merged.setdefault(key, _json_safe_hdf5_attr(value))
+
+    if "labels" not in merged and "labels" in h5_file:
+        merged["labels"] = [
+            label.decode("utf-8") if isinstance(label, bytes) else str(label)
+            for label in h5_file["labels"][()]
+        ]
+
+    if "lower_bound" not in merged and "lower_bound" in h5_file:
+        merged["lower_bound"] = h5_file["lower_bound"][()].astype(float).tolist()
+    if "upper_bound" not in merged and "upper_bound" in h5_file:
+        merged["upper_bound"] = h5_file["upper_bound"][()].astype(float).tolist()
+
+    if (
+        not merged.get("fixed_parameter_values")
+        and "fixed_labels" in h5_file
+        and "fixed_values" in h5_file
+    ):
+        fixed_labels = [
+            label.decode("utf-8") if isinstance(label, bytes) else str(label)
+            for label in h5_file["fixed_labels"][()]
+        ]
+        fixed_values = h5_file["fixed_values"][()]
+        merged["fixed_parameter_values"] = {
+            label: float(value) for label, value in zip(fixed_labels, fixed_values)
+        }
+
+    return merged
+
+
+def _load_run_hdf5(run_dir):
+    path = os.path.join(run_dir, "results.hdf5")
+    settings = _load_settings(run_dir)
+
+    with h5py.File(path, "r") as f:
+        if "samples" not in f:
+            raise KeyError(f"{path} does not contain a 'samples' dataset")
+
+        samples = f["samples"][()]
+        settings = _merge_hdf5_metadata(settings, f)
+        logZ = f.attrs.get("logZ", None)
+        logZerr = f.attrs.get("logZerr", None)
+
+    if logZ is not None:
+        logZ = float(logZ)
+    if logZerr is not None:
+        logZerr = float(logZerr)
+        if np.isnan(logZerr):
+            logZerr = None
+
+    return settings, samples, logZ, logZerr
+
+
+def _load_run_npy(run_dir):
+    settings = _load_settings(run_dir)
+    path = os.path.join(run_dir, "samples.npy")
+    results = np.load(path, allow_pickle=True).item()
 
     samples = results["samples"]
     logZ = results.get("logZ", None)
     logZerr = results.get("logZerr", None)
 
     return settings, samples, logZ, logZerr
+
+
+def load_run(run_dir):
+    """Load a completed inference run from the current HDF5 or legacy NPY format."""
+    hdf5_path = os.path.join(run_dir, "results.hdf5")
+    npy_path = os.path.join(run_dir, "samples.npy")
+
+    if os.path.exists(hdf5_path):
+        return _load_run_hdf5(run_dir)
+    if os.path.exists(npy_path):
+        return _load_run_npy(run_dir)
+
+    raise FileNotFoundError(
+        f"No inference results found in {run_dir!r}; expected 'results.hdf5' "
+        "(current format) or 'samples.npy' (legacy format)."
+    )
 
 
 # ------------------------------------------------------------
@@ -394,8 +493,8 @@ def main():
     parser.add_argument(
         "--run_dirs",
         nargs="+",
-        required=True,
-        help="One or more run directories (PL1, PL2, Bump, etc.)"
+        default=["."],
+        help="One or more run directories (PL1, PL2, Bump, etc.); defaults to the current directory"
     )
     parser.add_argument("--mmin", type=float, default=1.0)
     parser.add_argument("--mmax", type=float, default=100.0)
