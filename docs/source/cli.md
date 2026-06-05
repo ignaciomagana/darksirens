@@ -82,15 +82,15 @@ darksirens_inference \
 
 ## `darksirens_analyze`
 
-Analyze saved inference products and compute posterior-predictive summaries.
+Analyze saved inference products and compute posterior-predictive summaries. The analyzer reads the current `results.hdf5` output format and still supports legacy `samples.npy` runs.
 
 ```bash
-darksirens_analyze --run_dirs RUN_DIR [RUN_DIR ...] [--mmin 1] [--mmax 100] [--nm 300]
+darksirens_analyze [--run_dirs RUN_DIR [RUN_DIR ...]] [--mmin 1] [--mmax 100] [--nm 300]
 ```
 
 Important options:
 
-- `--run_dirs`: required list of one or more directories produced by `darksirens_inference`.
+- `--run_dirs`: optional list of one or more directories produced by `darksirens_inference`; when omitted, the current directory is analyzed.
 - `--mmin`, `--mmax`, `--nm`: primary-mass grid bounds and size.
 - `--nq`: mass-ratio grid size.
 - `--nz`: redshift grid size.
