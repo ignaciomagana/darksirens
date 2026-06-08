@@ -48,6 +48,18 @@ if "gwdistributions" not in sys.modules:
     sys.modules["gwdistributions.distributions"] = distributions_stub
     sys.modules["gwdistributions.distributions.spin"] = spin_stub
 
+
+if "gwcat" not in sys.modules:
+    gwcat_stub = types.ModuleType("gwcat")
+    spin_stub = types.ModuleType("gwcat.spin")
+
+    def _chi_eff_prior_logprob(*args, **kwargs):
+        return 0.0
+
+    spin_stub.chi_eff_prior_logprob = _chi_eff_prior_logprob
+    sys.modules["gwcat"] = gwcat_stub
+    sys.modules["gwcat.spin"] = spin_stub
+
 if "seaborn" not in sys.modules:
     seaborn_stub = types.ModuleType("seaborn")
 
@@ -85,10 +97,10 @@ def _render_table(
     ("fix_cosmology", "fix_population", "fix_survey", "expected"),
     [
         (False, False, False, None),
-        (True, False, False, 2),
+        (True, False, False, 4),
         (False, True, False, 3),
         (False, False, True, 6),
-        (True, True, True, 11),
+        (True, True, True, 13),
     ],
 )
 def test_parameter_table_block_fixed_count_logic(
@@ -124,6 +136,8 @@ def test_parameter_table_shows_block_fixed_fiducial_rows(capsys):
     assert "[cosmology]" in output
     assert "H0" in output and "67.74" in output
     assert "Om0" in output and "0.3075" in output
+    assert "w0" in output and "-1" in output
+    assert "wa" in output and "0" in output
 
     assert "[population]" in output
     pop_fiducials = {"pop_a": "1.25", "pop_b": "-3.5", "pop_c": "7"}

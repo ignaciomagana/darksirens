@@ -13,6 +13,8 @@ from darksirens.utils.containers import CosmoParams, SurveyParams
 
 H0_FID = float(Planck15.H0.value)
 OM0_FID = float(Planck15.Om0)
+W0_FID = -1.0
+WA_FID = 0.0
 SURVEY_PARAMS_FID = (-2.0, 1.0, 0.5, 0.0, 1.0, 0.5, 0.0)
 
 COMPLETE_EMPTY_PIXEL_POLICIES = {"zero": 0, "volume": 1}
@@ -48,6 +50,8 @@ class ParameterDecoder:
 
         H0 = _get("H0", H0_FID)
         Om0 = _get("Om0", OM0_FID)
+        w0 = _get("w0", W0_FID)
+        wa = _get("wa", WA_FID)
 
         pop_params = jnp.array([
             _get(label, self.pop_params_fid[i])
@@ -59,7 +63,7 @@ class ParameterDecoder:
             for i, label in enumerate(self.survey_labels)
         ])
 
-        cosmo = CosmoParams(H0=H0, Om0=Om0)
+        cosmo = CosmoParams(H0=H0, Om0=Om0, w0=w0, wa=wa)
         survey = SurveyParams(
             n0=10.0 ** sp[0],
             z50=sp[1],

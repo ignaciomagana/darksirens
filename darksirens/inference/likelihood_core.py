@@ -48,7 +48,7 @@ def darksiren_log_likelihood(
     raw_logPriorSelection = get_redshift_prior(
         "spectral_sirens" if universe_model == "bright_sirens" else universe_model
     )
-    H0, Om0 = cosmo.H0, cosmo.Om0
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
     # No finite guard on the redshift prior. -inf propagates correctly through
     # logsumexp and is caught by the final isfinite check.
@@ -74,7 +74,7 @@ def darksiren_log_likelihood(
             log_p_pop,
             log_prior_z,
         )
-        supported = dL_in_z_grid(dL, H0, Om0)
+        supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
     def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalog):
@@ -92,7 +92,7 @@ def darksiren_log_likelihood(
             m1det, q, dL, chieff, pix, prior_wt, cosmo, survey, pop_params,
             catalog, log_p_pop, _selection_prior,
         )
-        supported = dL_in_z_grid(dL, H0, Om0)
+        supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
     def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalog):

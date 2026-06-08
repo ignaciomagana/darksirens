@@ -1,6 +1,13 @@
 import numpy as np
 from darksirens.gw.populations import pop_model_prior_parser
-from darksirens.utils.cosmology import Om0Planck
+from darksirens.utils.cosmology import (
+    Om0PriorLower,
+    Om0PriorUpper,
+    w0PriorLower,
+    w0PriorUpper,
+    waPriorLower,
+    waPriorUpper,
+)
 
 def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
     """Apply flat per-parameter prior overrides to a parameter block.
@@ -101,9 +108,9 @@ def build_parameter_space(
         fixed_parameter_values = {}
 
     # --- Cosmology ---
-    cosmo_labels = ["H0", "Om0"]
-    cosmo_lower = [20.0, Om0Planck - 0.1]
-    cosmo_upper = [120.0, Om0Planck + 0.1]
+    cosmo_labels = ["H0", "Om0", "w0", "wa"]
+    cosmo_lower = [20.0, Om0PriorLower, w0PriorLower, waPriorLower]
+    cosmo_upper = [120.0, Om0PriorUpper, w0PriorUpper, waPriorUpper]
 
     # --- Population ---
     pop_lower, pop_upper, pop_labels, model_name = pop_model_prior_parser(pop_model)

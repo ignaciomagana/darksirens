@@ -66,6 +66,8 @@ def log_jacobian_m1src_q_z_to_m1det_q_dL(
     dL: jnp.ndarray,
     H0: jnp.ndarray,
     Om0: jnp.ndarray,
+    w0: jnp.ndarray = -1.0,
+    wa: jnp.ndarray = 0.0,
 ) -> jnp.ndarray:
     """
     Log-Jacobian for ``(m1src, q, z) → (m1det, q, dL)``.
@@ -74,13 +76,13 @@ def log_jacobian_m1src_q_z_to_m1det_q_dL(
     ----------
     z : redshift at the sample point
     dL : luminosity distance [Mpc] at the sample point
-    H0, Om0 : cosmological parameters
+    H0, Om0, w0, wa : cosmological parameters
 
     Returns
     -------
     log |J| = log d(dL)/dz + log(1+z)
     """
-    return jnp.log(ddL_of_z(z, dL, H0, Om0)) + jnp.log1p(z)
+    return jnp.log(ddL_of_z(z, dL, H0, Om0, w0, wa)) + jnp.log1p(z)
 
 
 # Backwards-compatible name for callers that imported the old helper.  The
@@ -91,9 +93,11 @@ def log_jacobian_dL_to_z(
     dL: jnp.ndarray,
     H0: jnp.ndarray,
     Om0: jnp.ndarray,
+    w0: jnp.ndarray = -1.0,
+    wa: jnp.ndarray = 0.0,
 ) -> jnp.ndarray:
     """Alias for the canonical ``(m1src, q, z) → (m1det, q, dL)`` Jacobian."""
-    return log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0)
+    return log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa)
 
 
 def log_target_density_m1det_q_dL(
@@ -116,14 +120,14 @@ def log_target_density_m1det_q_dL(
     source-frame population model supplies ``log p_pop(m1src, q, z,
     chieff | λ)`` and the EM term supplies ``log p_z(z | pix, Θ)``.
     """
-    H0, Om0 = cosmo.H0, cosmo.Om0
-    z = z_of_dL(dL, H0, Om0)
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+    z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
 
     return (
         log_p_pop_fn(m1src, q, z, chieff, pop_params)
         + log_prior_z_fn(z, pix, catalog)
-        - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0)
+        - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa)
     )
 
 

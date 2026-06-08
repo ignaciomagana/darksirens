@@ -19,6 +19,7 @@ if "tinygp" not in sys.modules:
     sys.modules["tinygp"] = tinygp_stub
 
 from darksirens.inference.prior import build_parameter_space
+from darksirens.utils.cosmology import w0PriorLower, w0PriorUpper, waPriorLower, waPriorUpper
 
 
 def test_survey_default_priors_are_physical_and_overridable():
@@ -47,6 +48,32 @@ def test_survey_default_priors_are_physical_and_overridable():
     bounds = {label: (float(lo), float(hi)) for label, lo, hi in zip(labels, lower, upper)}
     assert bounds["log10n0"] == (-6.0, -2.0)
 
+
+
+def test_cosmology_default_priors_include_cpl_grid_supported_bounds():
+    labels, lower, upper, *_ = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=False,
+        fix_survey=True,
+    )
+    bounds = {label: (float(lo), float(hi)) for label, lo, hi in zip(labels, lower, upper)}
+
+    assert bounds["w0"] == (w0PriorLower, w0PriorUpper)
+    assert bounds["wa"] == (waPriorLower, waPriorUpper)
+
+    labels, lower, upper, *_ = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=False,
+        fix_survey=True,
+        prior_overrides={"w0": [-1.2, -0.8], "wa": [-0.5, 0.5]},
+        fixed_parameter_values={"w0": -1.0},
+    )
+    bounds = {label: (float(lo), float(hi)) for label, lo, hi in zip(labels, lower, upper)}
+
+    assert "w0" not in labels
+    assert bounds["wa"] == (-0.5, 0.5)
 
 def test_fixed_parameter_prior_override_overlap_in_range_is_reported():
     res = build_parameter_space(

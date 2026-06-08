@@ -86,7 +86,7 @@ def log_catalog_prior(
     float
         The log probability $\ln p_{\text{gal}}(z_k | \Omega_p)$.
     """
-    H0, Om0 = cosmo.H0, cosmo.Om0
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     zgals, dzgals, wgals = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals
     sigma_kde = survey.sigma_kde
 
@@ -98,7 +98,7 @@ def log_catalog_prior(
     w = wgals[pix]          # w_i: (N_max_gals,) Base weights
 
     # 1. Calculate the log of the volume weights based on the current cosmology
-    log_vol_weights = jnp.log(dV_of_z(zs, H0, Om0))
+    log_vol_weights = jnp.log(dV_of_z(zs, H0, Om0, w0, wa))
     
     # 2. Add it to the base log-weights
     safe_w = jnp.where(w > 0, w, 1.0)
