@@ -57,9 +57,9 @@ darksirens_inference \
   --sampler emcee \
   --nwalkers 32 \
   --nsteps 200 \
-  --fix_cosmology true \
+  --fix_de true \
   --fix_survey true \
-  --fixed_parameter_values '{"H0": 67.74}' \
+  --fixed_parameter_values '{"H0": 67.74, "Om0": 0.3075}' \
   --save_path runs/smoke_test
 ```
 

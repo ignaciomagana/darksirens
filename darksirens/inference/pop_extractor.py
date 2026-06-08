@@ -18,8 +18,8 @@ def make_pop_extractor(settings: dict):
     ----------
     settings : dict  (loaded from the run's settings.json)
         Required key: "pop_model"
-        Optional keys: "fix_population", "fix_cosmology", "fix_survey",
-                       "fixed_parameter_values"
+        Optional keys: "fix_population", "fix_cosmology", "fix_de",
+                       "fixed_de", "fix_survey", "fixed_parameter_values"
 
     Returns
     -------
@@ -72,6 +72,9 @@ def make_pop_extractor(settings: dict):
         fix_population         = fix_population,
         fix_cosmology          = fix_cosmology,
         fix_survey             = fix_survey,
+        fix_de                 = bool(
+            settings.get("fix_de", settings.get("fixed_de", False))
+        ),
         fixed_parameter_values = fixed_parameter_values,
     )
 

@@ -95,6 +95,8 @@ def _small_data():
     [
         {"H0": 67.74},
         {"Om0": 0.3075},
+        {"w0": -0.9},
+        {"wa": 0.1},
         {"$\\alpha$": 1.5},
         {"z50": 1.2},
     ],
@@ -128,7 +130,9 @@ def test_fixed_parameters_are_removed_from_sampler_coordinates_and_likelihood(mo
     ):
         del gw_pe, em_catalog_pe, gw_sel, em_catalog_sel
         del nEvents, nsamp, Ndraw, pop_model, universe_model, sel_batch_size
-        return jnp.asarray(cosmo.H0 + cosmo.Om0 + survey.z50 + jnp.sum(pop_params))
+        return jnp.asarray(
+            cosmo.H0 + cosmo.Om0 + cosmo.w0 + cosmo.wa + survey.z50 + jnp.sum(pop_params)
+        )
 
     monkeypatch.setattr(likelihood_module, "darksiren_log_likelihood", fake_log_likelihood)
     likelihood = likelihood_module.make_likelihood(
@@ -167,3 +171,53 @@ def test_pop_extractor_accepts_sampled_coordinate_length_with_fixed_population_p
 
     assert pop_theta.shape == (len(pop_labels),)
     assert float(pop_theta[pop_labels.index("$\\alpha$")]) == fixed_values["$\\alpha$"]
+
+
+def _sampled_labels(*, fix_cosmology=False, fix_de=False, fixed_parameter_values=None):
+    labels, *_ = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=fix_cosmology,
+        fix_survey=True,
+        fix_de=fix_de,
+        fixed_parameter_values=fixed_parameter_values,
+    )
+    return labels
+
+
+def test_default_sampled_cosmology_labels_include_cpl_dark_energy():
+    labels = _sampled_labels()
+
+    assert labels == ["H0", "Om0", "w0", "wa"]
+
+
+def test_fixed_cosmology_removes_all_cosmology_labels():
+    labels = _sampled_labels(fix_cosmology=True)
+
+    for label in ("H0", "Om0", "w0", "wa"):
+        assert label not in labels
+
+
+def test_fixed_dark_energy_removes_only_cpl_dark_energy_labels():
+    labels = _sampled_labels(fix_de=True)
+
+    assert "H0" in labels
+    assert "Om0" in labels
+    assert "w0" not in labels
+    assert "wa" not in labels
+
+
+@pytest.mark.parametrize(
+    "label,value",
+    [
+        ("H0", 67.74),
+        ("Om0", 0.3075),
+        ("w0", -1.0),
+        ("wa", 0.0),
+    ],
+)
+def test_individual_fixed_cosmology_values_remove_matching_label(label, value):
+    labels = _sampled_labels(fixed_parameter_values={label: value})
+
+    assert label not in labels
+    assert all(other in labels for other in {"H0", "Om0", "w0", "wa"} - {label})

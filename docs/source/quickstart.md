@@ -54,7 +54,7 @@ darksirens_inference \
 
 ## 5. Fix or override parameters
 
-Use JSON objects for prior overrides and fixed parameter values. Quote JSON carefully in your shell:
+Use JSON objects for prior overrides and fixed parameter values. Quote JSON carefully in your shell. The default sampled cosmology labels are `H0`, `Om0`, `w0`, and `wa`; add `--fix_cosmology true` to fix all four, or `--fix_de true` to fix only `w0` and `wa` at their ΛCDM values.
 
 ```bash
 darksirens_inference \
@@ -62,7 +62,7 @@ darksirens_inference \
   --gwselection_path data/injections.h5 \
   --sampler dynesty \
   --universe_model spectral_sirens \
-  --prior_overrides '{"H0": [60.0, 80.0]}' \
+  --prior_overrides '{"H0": [60.0, 80.0], "w0": [-1.2, -0.8], "wa": [-0.5, 0.5]}' \
   --fixed_parameter_values '{"Om0": 0.3075}'
 ```
 

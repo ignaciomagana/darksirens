@@ -358,7 +358,8 @@ The following boolean options control whether major parameter blocks are sampled
 | Option | Default | Description |
 | --- | --- | --- |
 | `--fix_population` | `false` | Fix population parameters to model defaults. |
-| `--fix_cosmology` | `false` | Fix cosmology parameters. |
+| `--fix_cosmology` | `false` | Fix all cosmology parameters (`H0`, `Om0`, `w0`, `wa`). |
+| `--fix_de` | `false` | Fix only the CPL dark-energy parameters (`w0`, `wa`), leaving `H0` and `Om0` sampled unless otherwise fixed. |
 | `--fix_survey` | `false` | Fix survey/completion parameters. |
 
 Boolean options accept values such as:
@@ -372,7 +373,7 @@ true, false, 1, 0, yes, no, t, f, y, n
 Use `--prior_overrides` to change prior bounds for named parameters:
 
 ```bash
---prior_overrides '{"H0": [60.0, 80.0], "Om0": [0.2, 0.4]}'
+--prior_overrides '{"H0": [60.0, 80.0], "Om0": [0.2, 0.4], "w0": [-1.2, -0.8], "wa": [-0.5, 0.5]}'
 ```
 
 ### Fixed individual parameters
@@ -380,7 +381,7 @@ Use `--prior_overrides` to change prior bounds for named parameters:
 Use `--fixed_parameter_values` to fix individual parameters:
 
 ```bash
---fixed_parameter_values '{"H0": 67.74, "Om0": 0.3075}'
+--fixed_parameter_values '{"H0": 67.74, "Om0": 0.3075, "w0": -1.0, "wa": 0.0}'
 ```
 
 Both options must be JSON objects. Quote them carefully in your shell.

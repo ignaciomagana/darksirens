@@ -1,10 +1,9 @@
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import jax.numpy as jnp
 from jax.scipy.ndimage import map_coordinates
 
-
-__all__ = ["interp2d", "CartesianGrid"]
+__all__ = ["interp2d", "interpnd", "CartesianGrid"]
 Array = jnp.ndarray
 
 
@@ -63,6 +62,65 @@ def interp2d(
         z = jnp.where(oob, fill_value, z)
 
     return z
+
+
+def interpnd(
+    coords: Sequence[Array],
+    points: Sequence[Array],
+    values: Array,
+    fill_value: Optional[Array] = None,
+) -> Array:
+    """Multilinear interpolation on a rectilinear grid.
+
+    Unlike :class:`CartesianGrid`, each axis may be irregularly spaced.  The
+    coordinate arrays are broadcast together, so callers can mix scalar model
+    parameters with vector-valued coordinates.  When ``fill_value`` is provided,
+    any point outside at least one grid axis is filled instead of extrapolated.
+    """
+    if len(coords) != len(points):
+        raise ValueError("coords and points must have the same length")
+    if values.ndim != len(points):
+        raise ValueError("values must have one dimension per interpolation axis")
+
+    for axis, grid in enumerate(points):
+        if grid.ndim != 1:
+            raise ValueError("all interpolation point arrays must be 1D")
+        if values.shape[axis] != grid.shape[0]:
+            raise ValueError("values shape must match the interpolation grids")
+
+    coords = jnp.broadcast_arrays(*coords)
+    lower_indices = []
+    upper_indices = []
+    weights = []
+    oob = jnp.zeros(coords[0].shape, dtype=bool)
+
+    for coord, grid in zip(coords, points):
+        upper = jnp.clip(jnp.searchsorted(grid, coord, side="right"), 1, len(grid) - 1)
+        lower = upper - 1
+        denom = grid[upper] - grid[lower]
+        weight = (coord - grid[lower]) / denom
+        lower_indices.append(lower)
+        upper_indices.append(upper)
+        weights.append(weight)
+        oob = oob | (coord < grid[0]) | (coord > grid[-1])
+
+    interpolated = jnp.zeros(coords[0].shape, dtype=values.dtype)
+    for corner in range(1 << len(points)):
+        corner_indices = []
+        corner_weight = jnp.ones(coords[0].shape, dtype=values.dtype)
+        for axis in range(len(points)):
+            if corner & (1 << axis):
+                corner_indices.append(upper_indices[axis])
+                corner_weight = corner_weight * weights[axis]
+            else:
+                corner_indices.append(lower_indices[axis])
+                corner_weight = corner_weight * (1.0 - weights[axis])
+        interpolated = interpolated + corner_weight * values[tuple(corner_indices)]
+
+    if fill_value is not None:
+        interpolated = jnp.where(oob, fill_value, interpolated)
+
+    return interpolated
 
 
 class CartesianGrid:

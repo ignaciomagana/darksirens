@@ -63,12 +63,16 @@ def _known_proposal_density_m1det_q_dL(m1det, q, dL, chieff):
 
 
 def test_target_jacobian_is_for_m1det_q_dL_coordinates():
-    cosmo = CosmoParams(H0=67.74, Om0=0.3089)
+    cosmo = CosmoParams(H0=67.74, Om0=0.3089, w0=-1.0, wa=0.0)
     dL = jnp.array([250.0, 800.0, 1400.0])
-    z = z_of_dL(dL, cosmo.H0, cosmo.Om0)
+    z = z_of_dL(dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
 
-    actual = log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, cosmo.H0, cosmo.Om0)
-    expected = jnp.log(ddL_of_z(z, dL, cosmo.H0, cosmo.Om0)) + jnp.log1p(z)
+    actual = log_jacobian_m1src_q_z_to_m1det_q_dL(
+        z, dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+    )
+    expected = jnp.log(
+        ddL_of_z(z, dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+    ) + jnp.log1p(z)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-12)
 
@@ -79,7 +83,7 @@ def test_pe_and_selection_weights_are_invariant_under_equivalent_m2_q_proposals(
     must give identical weights whether that proposal is represented natively
     in q or converted from an equivalent m2 density.
     """
-    cosmo = CosmoParams(H0=67.74, Om0=0.3089)
+    cosmo = CosmoParams(H0=67.74, Om0=0.3089, w0=-1.0, wa=0.0)
     survey = _dummy_survey()
     catalog = _dummy_catalog()
     pop_params = jnp.array([])
@@ -168,11 +172,11 @@ def test_z_of_dL_returns_nan_outside_interpolation_grid():
     """Distances outside the tabulated dL(z) support must not clamp to z-grid edges."""
     from darksirens.utils.cosmology import dL_grid_bounds
 
-    cosmo = CosmoParams(H0=67.74, Om0=0.3089)
-    dL_min, dL_max = dL_grid_bounds(cosmo.H0, cosmo.Om0)
+    cosmo = CosmoParams(H0=67.74, Om0=0.3089, w0=-1.0, wa=0.0)
+    dL_min, dL_max = dL_grid_bounds(cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
     dL = jnp.array([dL_min - 1.0, 500.0, dL_max + 1.0])
 
-    z = z_of_dL(dL, cosmo.H0, cosmo.Om0)
+    z = z_of_dL(dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
 
     assert bool(jnp.isnan(z[0]))
     assert bool(jnp.isfinite(z[1]))

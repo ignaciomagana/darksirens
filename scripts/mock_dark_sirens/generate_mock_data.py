@@ -25,7 +25,7 @@ from pathlib import Path
 import h5py
 import healpy as hp
 import numpy as np
-from astropy.cosmology import FlatLambdaCDM
+from astropy.cosmology import Flatw0waCDM
 import astropy.units as u
 from scipy.integrate import cumulative_trapezoid
 from scipy.special import expit
@@ -68,15 +68,15 @@ class SurveyConfig:
     delta: float = 0.0
 
 
-def _build_cosmology(h0: float, om0: float) -> FlatLambdaCDM:
-    return FlatLambdaCDM(H0=h0 * u.km / u.s / u.Mpc, Om0=om0)
+def _build_cosmology(h0: float, om0: float, w0: float, wa: float) -> Flatw0waCDM:
+    return Flatw0waCDM(H0=h0 * u.km / u.s / u.Mpc, Om0=om0, w0=w0, wa=wa)
 
 
-def _cosmology_grids(cosmo: FlatLambdaCDM, zmax: float, ngrid: int = 20_000) -> dict[str, np.ndarray]:
+def _cosmology_grids(cosmo: Flatw0waCDM, zmax: float, ngrid: int = 20_000) -> dict[str, np.ndarray]:
     z = np.linspace(0.0, zmax, ngrid)
     dc = cosmo.comoving_distance(z).to_value(u.Mpc)
     dl = cosmo.luminosity_distance(z).to_value(u.Mpc)
-    ez = np.sqrt(cosmo.Om0 * (1.0 + z) ** 3 + (1.0 - cosmo.Om0))
+    ez = cosmo.efunc(z)
     dvc_dz = 4.0 * np.pi * (C_KM_S / cosmo.H0.value) * dc**2 / ez
     vc_cdf = cumulative_trapezoid(dvc_dz, z, initial=0.0)
     vc_cdf /= vc_cdf[-1]
@@ -382,7 +382,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
 
-    cosmo = _build_cosmology(args.H0, args.Om0)
+    cosmo = _build_cosmology(args.H0, args.Om0, args.w0, args.wa)
     zmax = float(args.zmax)
     grids = _cosmology_grids(cosmo, zmax)
     n_galaxies = (
@@ -431,7 +431,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
 
     metadata = {
         "seed": args.seed,
-        "cosmology": {"H0": args.H0, "Om0": args.Om0},
+        "cosmology": {"H0": args.H0, "Om0": args.Om0, "w0": args.w0, "wa": args.wa},
         "population": asdict(pop),
         "survey": asdict(survey),
         "snr_threshold": args.snr_threshold,
@@ -523,6 +523,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zmax", type=_positive_float, default=0.08)
     parser.add_argument("--H0", type=_positive_float, default=67.74)
     parser.add_argument("--Om0", type=_positive_float, default=0.3075)
+    parser.add_argument("--w0", type=float, default=-1.0, help="CPL dark-energy equation-of-state value today.")
+    parser.add_argument("--wa", type=float, default=0.0, help="CPL dark-energy evolution parameter.")
     parser.add_argument("--snr-threshold", type=_positive_float, default=8.0)
     parser.add_argument("--survey-z50", type=float, default=SurveyConfig.z50)
     parser.add_argument("--survey-width", type=_positive_float, default=SurveyConfig.width)

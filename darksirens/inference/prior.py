@@ -1,6 +1,13 @@
 import numpy as np
 from darksirens.gw.populations import pop_model_prior_parser
-from darksirens.utils.cosmology import Om0Planck
+from darksirens.utils.cosmology import (
+    Om0PriorLower,
+    Om0PriorUpper,
+    w0PriorLower,
+    w0PriorUpper,
+    waPriorLower,
+    waPriorUpper,
+)
 
 def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
     """Apply flat per-parameter prior overrides to a parameter block.
@@ -93,17 +100,28 @@ def build_parameter_space(
     fix_survey,
     prior_overrides=None,
     fixed_parameter_values=None,
+    fix_de=False,
 ):
-    """Construct labels and prior bounds for cosmological, population, and survey parameters."""
+    """Construct labels and prior bounds for cosmological, population, and survey parameters.
+
+    Parameters
+    ----------
+    fix_cosmology
+        When true, remove the full cosmology block (``H0``, ``Om0``, ``w0``,
+        and ``wa``) from sampling.
+    fix_de
+        When true, remove only the dark-energy cosmology labels (``w0`` and
+        ``wa``) from sampling. ``fix_cosmology`` supersedes this flag.
+    """
     if prior_overrides is None:
         prior_overrides = {}
     if fixed_parameter_values is None:
         fixed_parameter_values = {}
 
     # --- Cosmology ---
-    cosmo_labels = ["H0", "Om0"]
-    cosmo_lower = [20.0, Om0Planck - 0.1]
-    cosmo_upper = [120.0, Om0Planck + 0.1]
+    cosmo_labels = ["H0", "Om0", "w0", "wa"]
+    cosmo_lower = [20.0, Om0PriorLower, w0PriorLower, waPriorLower]
+    cosmo_upper = [120.0, Om0PriorUpper, w0PriorUpper, waPriorUpper]
 
     # --- Population ---
     pop_lower, pop_upper, pop_labels, model_name = pop_model_prior_parser(pop_model)
@@ -161,6 +179,21 @@ def build_parameter_space(
     sampled_cosmo_labels, sampled_cosmo_lower, sampled_cosmo_upper = filter_fixed_parameters(
         cosmo_labels, cosmo_lower, cosmo_upper, fixed_parameter_values
     )
+    if fix_de and not fix_cosmology:
+        dark_energy_labels = {"w0", "wa"}
+        sampled_cosmo = [
+            (label, lo, hi)
+            for label, lo, hi in zip(
+                sampled_cosmo_labels, sampled_cosmo_lower, sampled_cosmo_upper
+            )
+            if label not in dark_energy_labels
+        ]
+        if sampled_cosmo:
+            sampled_cosmo_labels, sampled_cosmo_lower, sampled_cosmo_upper = map(
+                list, zip(*sampled_cosmo)
+            )
+        else:
+            sampled_cosmo_labels, sampled_cosmo_lower, sampled_cosmo_upper = [], [], []
     sampled_pop_labels, sampled_pop_lower, sampled_pop_upper = filter_fixed_parameters(
         pop_labels, pop_lower, pop_upper, fixed_parameter_values
     )

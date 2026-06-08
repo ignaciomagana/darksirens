@@ -11,13 +11,13 @@ Boolean command-line options accept common true/false strings such as `true`, `f
 Prior override example:
 
 ```bash
---prior_overrides '{"H0": [60.0, 80.0], "Om0": [0.2, 0.4]}'
+--prior_overrides '{"H0": [60.0, 80.0], "Om0": [0.2, 0.4], "w0": [-1.2, -0.8], "wa": [-0.5, 0.5]}'
 ```
 
 Fixed-parameter example:
 
 ```bash
---fixed_parameter_values '{"H0": 67.74, "Om0": 0.3075}'
+--fixed_parameter_values '{"H0": 67.74, "Om0": 0.3075, "w0": -1.0, "wa": 0.0}'
 ```
 
 Parameter labels must match the labels produced by the selected cosmology, population, and survey blocks. The inference command prints a parameter table at startup showing sampled, fixed, and overridden parameters.
@@ -35,10 +35,14 @@ For `--universe_model bright_sirens`, pass the electromagnetic counterpart as ev
 
 ## Cosmology block
 
-The standard cosmology block includes:
+The standard cosmology block is a flat CPL dark-energy model and includes:
 
 - `H0`: Hubble constant.
 - `Om0`: matter density fraction.
+- `w0`: present-day CPL dark-energy equation-of-state parameter.
+- `wa`: CPL dark-energy evolution parameter.
+
+The fiducial dark-energy values `w0=-1` and `wa=0` reproduce flat ΛCDM. Use `--fix_cosmology true` to remove all four cosmology labels from sampling, or `--fix_de true` to fix only `w0` and `wa` while still sampling `H0` and `Om0`. Individual cosmology labels can also be pinned with `--fixed_parameter_values`, for example `--fixed_parameter_values '{"w0": -1.0, "wa": 0.0}'`, and their prior ranges can be narrowed with `--prior_overrides`.
 
 ## Survey block
 

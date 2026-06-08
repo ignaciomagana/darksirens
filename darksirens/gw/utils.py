@@ -112,6 +112,8 @@ def load_gw_samples(gw_path):
         # gwcat-1.0 files store the PE cosmology and pre-computed source masses
         _pe_H0 = float(f.attrs["pe_cosmology_H0"]) if "pe_cosmology_H0" in f.attrs else None
         _pe_Om0 = float(f.attrs["pe_cosmology_Om0"]) if "pe_cosmology_Om0" in f.attrs else None
+        _pe_w0 = float(f.attrs["pe_cosmology_w0"]) if "pe_cosmology_w0" in f.attrs else None
+        _pe_wa = float(f.attrs["pe_cosmology_wa"]) if "pe_cosmology_wa" in f.attrs else None
         _has_src = "m1src" in f and "m2src" in f
         if _has_src:
             m1source = np.array(f["m1src"])
@@ -124,7 +126,9 @@ def load_gw_samples(gw_path):
     if not _has_src:
         H0_ref = _pe_H0 if _pe_H0 is not None else Planck15.H0.value
         Om0_ref = _pe_Om0 if _pe_Om0 is not None else Planck15.Om0
-        redshift = z_of_dL(dL, H0_ref, Om0_ref)
+        w0_ref = _pe_w0 if _pe_w0 is not None else -1.0
+        wa_ref = _pe_wa if _pe_wa is not None else 0.0
+        redshift = z_of_dL(dL, H0_ref, Om0_ref, w0_ref, wa_ref)
         m1source = m1det/(1+redshift)
         m2source = m2det/(1+redshift)
     
@@ -313,8 +317,10 @@ def load_selection_samples(
             
             H0Planck = Planck15.H0.value
             Om0Planck = Planck15.Om0
+            w0Planck = -1.0
+            waPlanck = 0.0
 
-            z_all = z_of_dL(dL_all, H0Planck, Om0Planck)
+            z_all = z_of_dL(dL_all, H0Planck, Om0Planck, w0Planck, waPlanck)
             m1det_all = m1src_all * (1.0 + z_all)
             m2det_all = m2src_all * (1.0 + z_all)
 
@@ -347,7 +353,7 @@ def load_selection_samples(
                 np.exp(ln_pdraw_effective)
                 * m1det_all
                 / (1.0 + z_all) ** 2
-                / ddL_of_z(z_all, dL_all, H0Planck, Om0Planck)
+                / ddL_of_z(z_all, dL_all, H0Planck, Om0Planck, w0Planck, waPlanck)
             )
 
             raw_searches = f.attrs["searches"]

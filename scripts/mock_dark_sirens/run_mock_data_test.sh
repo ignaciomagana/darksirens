@@ -29,6 +29,8 @@ ZMAX="${ZMAX:-0.3}"
 SURVEY_Z50="${SURVEY_Z50:-0.75}"
 SURVEY_WIDTH="${SURVEY_WIDTH:-0.12}"
 GALAXY_DENSITY_DELTA="${GALAXY_DENSITY_DELTA:-0.0}"
+W0="${W0:--1.0}"
+WA="${WA:-0.0}"
 LOG10N0="$(python -c 'import math, sys; print(math.log10(float(sys.argv[1])))' "${N0}")"
 
 # Mock size/performance knobs.
@@ -101,6 +103,8 @@ python scripts/mock_dark_sirens/generate_mock_data.py \
   --survey-z50 "${SURVEY_Z50}" \
   --survey-width "${SURVEY_WIDTH}" \
   --galaxy-density-delta "${GALAXY_DENSITY_DELTA}" \
+  --w0 "${W0}" \
+  --wa "${WA}" \
   --nobs "${NOBS}" \
   --nsamp "${NSAMP}" \
   --ndraw "${NDRAW}" \
