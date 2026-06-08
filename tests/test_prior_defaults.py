@@ -75,6 +75,40 @@ def test_cosmology_default_priors_include_cpl_grid_supported_bounds():
     assert "w0" not in labels
     assert bounds["wa"] == (-0.5, 0.5)
 
+
+def test_fixed_de_removes_only_dark_energy_cosmology_labels():
+    labels, lower, upper, *rest = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=False,
+        fix_survey=True,
+        fix_de=True,
+    )
+    n_cosmo_eff = rest[4]
+
+    assert "H0" in labels
+    assert "Om0" in labels
+    assert "w0" not in labels
+    assert "wa" not in labels
+    assert n_cosmo_eff == 2
+    assert len(labels) == len(lower) == len(upper) == 2
+
+
+def test_fixed_cosmology_supersedes_fixed_de():
+    labels, lower, upper, *rest = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=True,
+        fix_survey=True,
+        fix_de=True,
+    )
+    n_cosmo_eff = rest[4]
+
+    assert labels == []
+    assert len(lower) == len(upper) == 0
+    assert n_cosmo_eff == 0
+
+
 def test_fixed_parameter_prior_override_overlap_in_range_is_reported():
     res = build_parameter_space(
         "powerlaw+peak",

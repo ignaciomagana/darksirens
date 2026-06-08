@@ -103,8 +103,9 @@ def build_parameter_decoder(
     ) = build_parameter_space(
         opts.pop_model,
         opts.fix_population,
-        opts.fix_cosmology,
+        getattr(opts, "fix_cosmology", getattr(opts, "fixed_cosmology", False)),
         opts.fix_survey,
+        fix_de=getattr(opts, "fix_de", getattr(opts, "fixed_de", False)),
         prior_overrides=getattr(opts, "prior_overrides", None),
         fixed_parameter_values=fixed_parameter_values,
     )
