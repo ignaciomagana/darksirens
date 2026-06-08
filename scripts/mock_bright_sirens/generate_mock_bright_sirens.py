@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate end-to-end mock data for multi-event bright-siren inference.
 
-This workflow mirrors ``scripts/mock_data`` without modifying it.  It builds a
+This workflow mirrors ``scripts/mock_dark_sirens`` without modifying it.  It builds a
 complete galaxy population, applies an EM survey selection, draws GW events only
 from galaxies with detectable counterparts, writes bright-siren PE samples with
 fixed event sky coordinates, and generates joint GW+EM selection injections.
@@ -23,7 +23,7 @@ from scipy.special import expit
 
 def _load_dark_mock_module():
     root = Path(__file__).resolve().parents[2]
-    path = root / "scripts" / "mock_data" / "generate_mock_data.py"
+    path = root / "scripts" / "mock_dark_sirens" / "generate_mock_data.py"
     spec = importlib.util.spec_from_file_location("dark_mock_data_generator", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not import dark-siren mock helpers from {path}")
@@ -138,7 +138,7 @@ def write_mock_data(args):
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
 
-    cosmo = _dark._build_cosmology(args.H0, args.Om0)
+    cosmo = _dark._build_cosmology(args.H0, args.Om0, args.w0, args.wa)
     grids = _dark._cosmology_grids(cosmo, float(args.zmax))
     n_galaxies = _dark._galaxy_count_from_density(args.n0, args.galaxy_density_delta, grids)
     complete = _dark._generate_complete_catalog(rng, n_galaxies, grids, survey)
@@ -169,7 +169,7 @@ def write_mock_data(args):
     selection_neff = float(inv_pdraw.sum() ** 2 / np.square(inv_pdraw).sum()) if len(inv_pdraw) else 0.0
     metadata = {
         "seed": args.seed,
-        "cosmology": {"H0": args.H0, "Om0": args.Om0},
+        "cosmology": {"H0": args.H0, "Om0": args.Om0, "w0": args.w0, "wa": args.wa},
         "population": asdict(pop),
         "survey": asdict(survey),
         "snr_threshold": args.snr_threshold,
@@ -246,6 +246,8 @@ def parse_args():
     parser.add_argument("--zmax", type=_dark._positive_float, default=0.08)
     parser.add_argument("--H0", type=_dark._positive_float, default=67.74)
     parser.add_argument("--Om0", type=_dark._positive_float, default=0.3075)
+    parser.add_argument("--w0", type=float, default=-1.0, help="CPL dark-energy equation-of-state value today.")
+    parser.add_argument("--wa", type=float, default=0.0, help="CPL dark-energy evolution parameter.")
     parser.add_argument("--snr-threshold", type=_dark._positive_float, default=8.0)
     parser.add_argument("--survey-z50", type=float, default=_dark.SurveyConfig.z50)
     parser.add_argument("--survey-width", type=_dark._positive_float, default=_dark.SurveyConfig.width)

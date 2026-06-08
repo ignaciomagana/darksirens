@@ -8,7 +8,7 @@ The defaults keep the ingestibility check tractable, while `RUN_INFERENCE=1` now
 Run:
 
 ```bash
-python scripts/mock_data/generate_mock_data.py --outdir data/mock_dark_sirens
+python scripts/mock_dark_sirens/generate_mock_data.py --outdir data/mock_dark_sirens
 ```
 
 By default the generator uses a realistic local galaxy-density normalization,
@@ -26,7 +26,7 @@ Mock GW posterior widths can be controlled with fractional PE-uncertainty
 arguments, for example:
 
 ```bash
-python scripts/mock_data/generate_mock_data.py \
+python scripts/mock_dark_sirens/generate_mock_data.py \
   --outdir data/mock_dark_sirens \
   --dL-fractional-uncertainty 0.20 \
   --m1det-fractional-uncertainty 0.08 \
@@ -73,7 +73,7 @@ The simulation is intentionally simple:
 Run the default ingestibility validation with:
 
 ```bash
-bash scripts/mock_data/run_mock_data_test.sh
+bash scripts/mock_dark_sirens/run_mock_data_test.sh
 ```
 
 The script creates a data set under `data/mock_dark_sirens_test` using `N0=1e-3` Mpc^-3 and calls `darksirens.inference.data.load_all_data` to verify that the generated HDF5 products are readable by the inference pipeline.
@@ -81,13 +81,13 @@ The script creates a data set under `data/mock_dark_sirens_test` using `N0=1e-3`
 To also launch an optional production-style sampler run with free cosmology, use:
 
 ```bash
-RUN_INFERENCE=1 bash scripts/mock_data/run_mock_data_test.sh
+RUN_INFERENCE=1 bash scripts/mock_dark_sirens/run_mock_data_test.sh
 ```
 
 You can override the mock size without editing the script, for example:
 
 ```bash
-NOBS=5 NSAMP=256 NDRAW=50000 NSIDE=16 bash scripts/mock_data/run_mock_data_test.sh
+NOBS=5 NSAMP=256 NDRAW=50000 NSIDE=16 bash scripts/mock_dark_sirens/run_mock_data_test.sh
 ```
 
 By default the validation script does not set a detected-injection stopping
@@ -105,7 +105,7 @@ after JAX has initialized its thread pool.
 
 The optional inference run fixes only the generated survey hyperparameters via
 `--fixed_parameter_values`, including `log10n0 = -3`, and explicitly leaves
-cosmology free (`--fix_cosmology False`) so both `H0` and `Om0` are sampled.  It
+cosmology free (`--fix_cosmology False`) so `H0`, `Om0`, `w0`, and `wa` are sampled. Use `--fix_de True` for a ΛCDM mock-analysis run that samples only `H0` and `Om0`. The mock generators accept `--w0` and `--wa` and store them in `metadata_json` alongside `H0` and `Om0`.  It
 passes `--sel_batch_size` (default `INFERENCE_SEL_BATCH_SIZE=256`) for memory
 safety, uses `INFERENCE_NLIVE=1000` and `INFERENCE_DLOGZ=0.1` by default, and
 does not cap Dynesty likelihood calls unless you set a positive

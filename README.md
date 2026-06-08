@@ -21,6 +21,11 @@ make docs-strict
 
 Start with the documentation source at [`docs/source/index.md`](docs/source/index.md), or see the quickstart guide at [`docs/source/quickstart.md`](docs/source/quickstart.md).
 
+
+## Cosmology model
+
+The inference cosmology block samples a flat CPL dark-energy model with labels `H0`, `Om0`, `w0`, and `wa`. The default dark-energy point `w0=-1` and `wa=0` recovers flat ΛCDM. Use `--fix_cosmology true` to hold all four cosmology labels fixed, `--fix_de true` to hold only `w0` and `wa` fixed, and `--prior_overrides`/`--fixed_parameter_values` to narrow or pin individual labels.
+
 ## Command-line tools
 
 Installing the package exposes:

@@ -77,7 +77,7 @@ def test_completion_clip_diagnostics_reports_grid_fractions():
         pixel_to_cache_idx=pixel_to_cache_idx,
     )
     diagnostics = completion_clip_diagnostics(
-        CosmoParams(H0=67.74, Om0=0.3075),
+        CosmoParams(H0=67.74, Om0=0.3075, w0=-1.0, wa=0.0),
         SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0, alpha_miss=0.5),
         catalog,
         max_pixels=1,
