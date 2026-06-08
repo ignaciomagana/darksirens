@@ -28,6 +28,7 @@ Installing the package exposes:
 - `darksirens_pixelate` — convert a raw galaxy survey HDF5 file into a pixelated HEALPix catalog.
 - `darksirens_inference` — run spectral-siren or dark-siren hierarchical inference.
 - `darksirens_analyze` — analyze saved inference products and posterior-predictive distributions.
+- `darksirens_skymaps_to_samples` — convert a directory of 3D skymap FITS files into GW posterior-like samples (`gwdata.h5`) with broad uninformative mass/spin surrogates for low-latency runs.
 
 ## Minimal installation
 
