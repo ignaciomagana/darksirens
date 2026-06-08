@@ -44,10 +44,11 @@ darksirens_inference \
 - `--universe_model`: one of `spectral_sirens`, `bright_sirens`, `dark_sirens`, or `dark_sirens_complete`.
 - `--pop_model`: population model name, for example `powerlaw+peak`.
 - `--fix_population`: fix all population parameters to fiducial values.
-- `--fix_cosmology`: fix cosmological parameters to fiducial values.
+- `--fix_cosmology`: fix all cosmological parameters (`H0`, `Om0`, `w0`, `wa`) to fiducial values.
+- `--fix_de`: fix only the CPL dark-energy parameters (`w0=-1`, `wa=0`) while leaving `H0` and `Om0` available unless fixed separately.
 - `--fix_survey`: fix survey-completion parameters to fiducial values.
-- `--prior_overrides`: JSON object mapping parameter names to `[lower, upper]` prior bounds.
-- `--fixed_parameter_values`: JSON object mapping parameter names to fixed scalar values.
+- `--prior_overrides`: JSON object mapping parameter names to `[lower, upper]` prior bounds, e.g. `{"H0": [60, 80], "w0": [-1.2, -0.8], "wa": [-0.5, 0.5]}`.
+- `--fixed_parameter_values`: JSON object mapping parameter names to fixed scalar values, e.g. `{"Om0": 0.3075, "w0": -1.0, "wa": 0.0}`.
 - `--bright_siren_sky_marginalized BOOL`: for `bright_sirens`, ignore the counterpart sky-pixel gate and apply only the counterpart redshift prior. Defaults to `False`. Accepted true values are `true`, `t`, `1`, `yes`, and `y`; accepted false values are `false`, `f`, `0`, `no`, and `n` (case-insensitive).
 - `--complete_empty_pixel_policy {zero,volume}`: controls genuinely empty pixels for `dark_sirens_complete` and `bright_sirens`. `zero` is the formal default and returns zero probability (`-inf` log-prior) when `ngals == 0`; `volume` uses the comoving-volume prior as a robustness approximation for sparse pixelations.
 

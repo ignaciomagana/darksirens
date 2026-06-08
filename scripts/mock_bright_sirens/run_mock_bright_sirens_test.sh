@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate a realistic multi-event bright-siren mock data set and validate that
 # it can be ingested by the inference pipeline.  This intentionally lives
-# outside scripts/mock_data so the working dark-siren mock workflow is unchanged.
+# outside scripts/mock_dark_sirens so the working dark-siren mock workflow is unchanged.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -14,6 +14,8 @@ ZMAX="${ZMAX:-0.08}"
 SURVEY_Z50="${SURVEY_Z50:-0.75}"
 SURVEY_WIDTH="${SURVEY_WIDTH:-0.12}"
 GALAXY_DENSITY_DELTA="${GALAXY_DENSITY_DELTA:-0.0}"
+W0="${W0:--1.0}"
+WA="${WA:-0.0}"
 
 NOBS="${NOBS:-10}"
 NSAMP="${NSAMP:-512}"
@@ -70,6 +72,8 @@ python scripts/mock_bright_sirens/generate_mock_bright_sirens.py \
   --survey-z50 "${SURVEY_Z50}" \
   --survey-width "${SURVEY_WIDTH}" \
   --galaxy-density-delta "${GALAXY_DENSITY_DELTA}" \
+  --w0 "${W0}" \
+  --wa "${WA}" \
   --nobs "${NOBS}" \
   --nsamp "${NSAMP}" \
   --ndraw "${NDRAW}" \

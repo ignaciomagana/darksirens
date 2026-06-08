@@ -10,7 +10,7 @@ from darksirens.utils.containers import CosmoParams, EMCatalog, SurveyParams
 
 
 def _cosmo():
-    return CosmoParams(H0=67.74, Om0=0.3075)
+    return CosmoParams(H0=67.74, Om0=0.3075, w0=-1.0, wa=0.0)
 
 
 def _survey(policy):
