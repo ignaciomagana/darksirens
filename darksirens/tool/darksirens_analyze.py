@@ -198,6 +198,13 @@ def print_bayes_factors(labels, logZs):
                 print(f"{labels[i]} vs {labels[j]}:  log10 BF = {logZs[i] - logZs[j]:.3f}")
 
 
+def _should_plot_bayes_factor_matrix(labels, logZs):
+    """Return True when there is at least one pair of models to compare."""
+    if len(labels) < 2:
+        return False
+    return sum(z is not None for z in logZs) >= 2
+
+
 import matplotlib.colors as mcolors
 import matplotlib.cm as cm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -653,11 +660,14 @@ def main():
     # ------------------------------------------------------------
     # Bayes factor matrices
     # ------------------------------------------------------------
-    if any(z is not None for z in logZs):
+    if _should_plot_bayes_factor_matrix(labels, logZs):
         # Full pairwise matrix
         fig_pair = plot_bayes_factor_matrix_pairwise(labels, logZs, logZerrs)
         fig_pair.savefig("bayes_factors_pairwise.pdf")
         print("Saved bayes_factors_pairwise.pdf")
+
+    elif len(labels) < 2:
+        print("\nSkipping Bayes factor matrix: at least two run directories are required.")
 
     else:
         print("\nNo evidence available to compute Bayes factors.")
