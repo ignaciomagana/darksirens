@@ -65,10 +65,14 @@ def _known_proposal_density_m1det_q_dL(m1det, q, dL, chieff):
 def test_target_jacobian_is_for_m1det_q_dL_coordinates():
     cosmo = CosmoParams(H0=67.74, Om0=0.3089)
     dL = jnp.array([250.0, 800.0, 1400.0])
-    z = z_of_dL(dL, cosmo.H0, cosmo.Om0)
+    z = z_of_dL(dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
 
-    actual = log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, cosmo.H0, cosmo.Om0)
-    expected = jnp.log(ddL_of_z(z, dL, cosmo.H0, cosmo.Om0)) + jnp.log1p(z)
+    actual = log_jacobian_m1src_q_z_to_m1det_q_dL(
+        z, dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+    )
+    expected = jnp.log(
+        ddL_of_z(z, dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+    ) + jnp.log1p(z)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-12)
 
@@ -169,10 +173,10 @@ def test_z_of_dL_returns_nan_outside_interpolation_grid():
     from darksirens.utils.cosmology import dL_grid_bounds
 
     cosmo = CosmoParams(H0=67.74, Om0=0.3089)
-    dL_min, dL_max = dL_grid_bounds(cosmo.H0, cosmo.Om0)
+    dL_min, dL_max = dL_grid_bounds(cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
     dL = jnp.array([dL_min - 1.0, 500.0, dL_max + 1.0])
 
-    z = z_of_dL(dL, cosmo.H0, cosmo.Om0)
+    z = z_of_dL(dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
 
     assert bool(jnp.isnan(z[0]))
     assert bool(jnp.isfinite(z[1]))
