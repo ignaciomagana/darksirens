@@ -75,7 +75,7 @@ from darksirens.tool.darksirens_inference import _print_parameter_table
 
 
 def _render_table(
-    capsys, *, fix_cosmology=False, fix_population=False, fix_survey=False
+    capsys, *, fix_cosmology=False, fix_de=False, fix_population=False, fix_survey=False
 ):
     _print_parameter_table(
         labels=["sampled"],
@@ -85,6 +85,7 @@ def _render_table(
         prior_overrides={},
         fixed_parameter_statuses={},
         fix_cosmology=fix_cosmology,
+        fix_de=fix_de,
         fix_population=fix_population,
         fix_survey=fix_survey,
         pop_params_fid=np.asarray([1.25, -3.5, 7.0]),
@@ -119,6 +120,31 @@ def test_parameter_table_block_fixed_count_logic(
     else:
         assert match is not None
         assert int(match.group(1)) == expected
+
+
+
+
+def test_parameter_table_dark_energy_block_fixed_count(capsys):
+    output = _render_table(capsys, fix_de=True)
+
+    match = re.search(r"Fixed \(block\)\s+(\d+)", output)
+    assert match is not None
+    assert int(match.group(1)) == 2
+    assert "[dark energy]" in output
+    assert "w0" in output
+    assert "wa" in output
+    assert "H0" not in output
+    assert "Om0" not in output
+
+
+def test_parameter_table_full_cosmology_supersedes_dark_energy_count(capsys):
+    output = _render_table(capsys, fix_cosmology=True, fix_de=True)
+
+    match = re.search(r"Fixed \(block\)\s+(\d+)", output)
+    assert match is not None
+    assert int(match.group(1)) == 4
+    assert "[cosmology]" in output
+    assert "[dark energy]" not in output
 
 
 def test_parameter_table_shows_block_fixed_fiducial_rows(capsys):

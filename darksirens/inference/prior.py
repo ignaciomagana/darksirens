@@ -100,8 +100,19 @@ def build_parameter_space(
     fix_survey,
     prior_overrides=None,
     fixed_parameter_values=None,
+    fix_de=False,
 ):
-    """Construct labels and prior bounds for cosmological, population, and survey parameters."""
+    """Construct labels and prior bounds for cosmological, population, and survey parameters.
+
+    Parameters
+    ----------
+    fix_cosmology
+        When true, remove the full cosmology block (``H0``, ``Om0``, ``w0``,
+        and ``wa``) from sampling.
+    fix_de
+        When true, remove only the dark-energy cosmology labels (``w0`` and
+        ``wa``) from sampling. ``fix_cosmology`` supersedes this flag.
+    """
     if prior_overrides is None:
         prior_overrides = {}
     if fixed_parameter_values is None:
@@ -168,6 +179,21 @@ def build_parameter_space(
     sampled_cosmo_labels, sampled_cosmo_lower, sampled_cosmo_upper = filter_fixed_parameters(
         cosmo_labels, cosmo_lower, cosmo_upper, fixed_parameter_values
     )
+    if fix_de and not fix_cosmology:
+        dark_energy_labels = {"w0", "wa"}
+        sampled_cosmo = [
+            (label, lo, hi)
+            for label, lo, hi in zip(
+                sampled_cosmo_labels, sampled_cosmo_lower, sampled_cosmo_upper
+            )
+            if label not in dark_energy_labels
+        ]
+        if sampled_cosmo:
+            sampled_cosmo_labels, sampled_cosmo_lower, sampled_cosmo_upper = map(
+                list, zip(*sampled_cosmo)
+            )
+        else:
+            sampled_cosmo_labels, sampled_cosmo_lower, sampled_cosmo_upper = [], [], []
     sampled_pop_labels, sampled_pop_lower, sampled_pop_upper = filter_fixed_parameters(
         pop_labels, pop_lower, pop_upper, fixed_parameter_values
     )
