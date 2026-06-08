@@ -95,6 +95,8 @@ def _small_data():
     [
         {"H0": 67.74},
         {"Om0": 0.3075},
+        {"w0": -0.9},
+        {"wa": 0.1},
         {"$\\alpha$": 1.5},
         {"z50": 1.2},
     ],
@@ -128,7 +130,9 @@ def test_fixed_parameters_are_removed_from_sampler_coordinates_and_likelihood(mo
     ):
         del gw_pe, em_catalog_pe, gw_sel, em_catalog_sel
         del nEvents, nsamp, Ndraw, pop_model, universe_model, sel_batch_size
-        return jnp.asarray(cosmo.H0 + cosmo.Om0 + survey.z50 + jnp.sum(pop_params))
+        return jnp.asarray(
+            cosmo.H0 + cosmo.Om0 + cosmo.w0 + cosmo.wa + survey.z50 + jnp.sum(pop_params)
+        )
 
     monkeypatch.setattr(likelihood_module, "darksiren_log_likelihood", fake_log_likelihood)
     likelihood = likelihood_module.make_likelihood(

@@ -266,11 +266,11 @@ def _precompute_grids(
     -------
     _CompletionGrids with (dN_exp_smooth, pvol).
     """
-    H0, Om0 = cosmo.H0, cosmo.Om0
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     n0, delta = survey.n0, survey.delta
     apix = em_catalog.apix
 
-    dV = dV_of_z(zgrid, H0, Om0)                    # (N_grid,)
+    dV = dV_of_z(zgrid, H0, Om0, w0, wa)                    # (N_grid,)
     pvol = dV / jnp.trapezoid(dV, zgrid)             # normalised volume element
 
     global _K_SMOOTH

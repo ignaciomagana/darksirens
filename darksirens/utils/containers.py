@@ -7,6 +7,8 @@ class CosmoParams(NamedTuple):
     """Cosmological parameters for the background universe."""
     H0: Any
     Om0: Any
+    w0: Any = -1.0
+    wa: Any = 0.0
 
 
 class SurveyParams(NamedTuple):

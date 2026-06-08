@@ -47,8 +47,8 @@ def _precompute_volume_grid(cosmo: CosmoParams) -> jnp.ndarray:
     -------
     pvol_norm : (N_grid,) — normalised so that trapezoid(pvol_norm, zgrid) = 1.
     """
-    H0, Om0 = cosmo.H0, cosmo.Om0
-    pvol = dV_of_z(zgrid, H0, Om0)
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+    pvol = dV_of_z(zgrid, H0, Om0, w0, wa)
     return pvol / jnp.trapezoid(pvol, zgrid)
 
 
@@ -62,7 +62,7 @@ def log_volume_prior(z: float, cosmo: CosmoParams, survey: SurveyParams) -> floa
     z : float
         Redshift at which to evaluate the prior.
     cosmo : CosmoParams
-        Cosmological parameters (H0, Om0).
+        Cosmological parameters (H0, Om0, w0, wa).
     survey : SurveyParams
         Accepted for API uniformity; not used here.
 

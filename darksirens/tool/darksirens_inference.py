@@ -61,6 +61,7 @@ from darksirens.em.completion import build_pixel_kde_cache, completion_clip_diag
 from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
+from darksirens.inference.parameters import H0_FID, OM0_FID, W0_FID, WA_FID
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -222,7 +223,7 @@ def _print_parameter_table(
     Print sampled parameters with bounds, individually-fixed params with their
     values, and block-fixed parameters with their fiducial values.
     """
-    COSMO_FID  = {"H0": 67.74, "Om0": 0.3075}
+    COSMO_FID  = {"H0": H0_FID, "Om0": OM0_FID, "w0": W0_FID, "wa": WA_FID}
     SURVEY_FID = {"log10n0": -2.0, "z50": 1.0, "w": 0.5,
                   "delta": 0.0, "b_miss": 1.0, "alpha_miss": 0.5, "sigma_kde": 0.0}
     pop_fid_map = {lbl: float(pop_params_fid[i])
@@ -278,7 +279,7 @@ def _print_parameter_table(
 
     n_free = sum(1 for lo, hi in zip(lower_bound, upper_bound) if lo != hi)
     n_fix_ind   = len(fixed_parameter_values)
-    n_fix_block = ((2 if fix_cosmology else 0)
+    n_fix_block = ((len(COSMO_FID) if fix_cosmology else 0)
                    + (len(pop_labels_all) if fix_population else 0)
                    + (6 if fix_survey else 0))
     _row("Free (sampled)",      n_free)
@@ -526,8 +527,10 @@ def run_completion_validation(
         prior_overrides, fixed_parameter_values
     )
     cosmo = CosmoParams(
-        H0=float(fixed_parameter_values.get("H0", 67.74)),
-        Om0=float(fixed_parameter_values.get("Om0", 0.3075)),
+        H0=float(fixed_parameter_values.get("H0", H0_FID)),
+        Om0=float(fixed_parameter_values.get("Om0", OM0_FID)),
+        w0=float(fixed_parameter_values.get("w0", W0_FID)),
+        wa=float(fixed_parameter_values.get("wa", WA_FID)),
     )
     survey = SurveyParams(
         n0=10.0 ** survey_values["log10n0"],
@@ -558,7 +561,12 @@ def run_completion_validation(
         max_pixels=max_pixels,
     )
     diagnostics["survey_values"] = survey_values
-    diagnostics["cosmology_values"] = {"H0": float(cosmo.H0), "Om0": float(cosmo.Om0)}
+    diagnostics["cosmology_values"] = {
+        "H0": float(cosmo.H0),
+        "Om0": float(cosmo.Om0),
+        "w0": float(cosmo.w0),
+        "wa": float(cosmo.wa),
+    }
     diagnostics["prior_overrides"] = prior_overrides or None
     diagnostics["fixed_parameter_values"] = fixed_parameter_values or None
 
