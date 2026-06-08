@@ -101,6 +101,51 @@ def _fatal(msg: str):
     sys.exit(1)
 
 
+def _fixed_dark_energy_metadata(opts, fixed_parameter_values: dict | None) -> dict:
+    """Return fixed-state metadata for CPL dark-energy parameters."""
+    fixed_parameter_values = fixed_parameter_values or {}
+    block_fixed = bool(
+        getattr(opts, "fix_cosmology", False) or getattr(opts, "fix_de", False)
+    )
+    w0_fixed = block_fixed or "w0" in fixed_parameter_values
+    wa_fixed = block_fixed or "wa" in fixed_parameter_values
+
+    return {
+        "fixed_dark_energy": bool(w0_fixed and wa_fixed),
+        "w0_fixed": bool(w0_fixed),
+        "wa_fixed": bool(wa_fixed),
+        "w0_value": (
+            float(fixed_parameter_values["w0"])
+            if "w0" in fixed_parameter_values
+            else float(W0_FID)
+            if w0_fixed
+            else None
+        ),
+        "wa_value": (
+            float(fixed_parameter_values["wa"])
+            if "wa" in fixed_parameter_values
+            else float(WA_FID)
+            if wa_fixed
+            else None
+        ),
+    }
+
+
+def _format_fixed_dark_energy_summary(opts, fixed_parameter_values: dict | None) -> str:
+    """Format fixed CPL dark-energy state for human-readable summaries."""
+    meta = _fixed_dark_energy_metadata(opts, fixed_parameter_values)
+    if not (meta["w0_fixed"] or meta["wa_fixed"]):
+        return "no"
+    pieces = ["yes" if meta["fixed_dark_energy"] else "partial"]
+    fixed_values = []
+    if meta["w0_fixed"]:
+        fixed_values.append(f"w0={meta['w0_value']:.6g}")
+    if meta["wa_fixed"]:
+        fixed_values.append(f"wa={meta['wa_value']:.6g}")
+    if fixed_values:
+        pieces.append(f"({', '.join(fixed_values)})")
+    return " ".join(pieces)
+
 def _format_option_value(value):
     """Format parsed CLI option values for human-readable config tables."""
     if isinstance(value, bool):
@@ -359,6 +404,14 @@ def save_results_hdf5(
         f.attrs["fixed_cosmology"] = bool(opts.fix_cosmology)
         f.attrs["fix_de"]          = bool(getattr(opts, "fix_de", False))
         f.attrs["fixed_de"]        = bool(getattr(opts, "fix_de", False))
+        de_meta = _fixed_dark_energy_metadata(opts, fixed_parameter_values)
+        f.attrs["fixed_dark_energy"] = bool(de_meta["fixed_dark_energy"])
+        f.attrs["w0_fixed"]        = bool(de_meta["w0_fixed"])
+        f.attrs["wa_fixed"]        = bool(de_meta["wa_fixed"])
+        if de_meta["w0_value"] is not None:
+            f.attrs["fixed_w0"]    = float(de_meta["w0_value"])
+        if de_meta["wa_value"] is not None:
+            f.attrs["fixed_wa"]    = float(de_meta["wa_value"])
         f.attrs["fix_population"]  = bool(opts.fix_population)
         f.attrs["fix_survey"]      = bool(opts.fix_survey)
         f.attrs["gw_path"]         = opts.gw_path
@@ -443,6 +496,18 @@ def save_settings_json(
     d["prior_overrides"]        = prior_overrides        if prior_overrides        else None
     d["fixed_cosmology"]        = bool(getattr(opts, "fix_cosmology", False))
     d["fixed_de"]               = bool(getattr(opts, "fix_de", False))
+    de_meta = _fixed_dark_energy_metadata(opts, fixed_parameter_values)
+    d["fixed_dark_energy"]      = de_meta["fixed_dark_energy"]
+    d["dark_energy_fixed_values"] = {
+        label: value
+        for label, value in (
+            ("w0", de_meta["w0_value"]),
+            ("wa", de_meta["wa_value"]),
+        )
+        if value is not None
+    } or None
+    d["w0_fixed"]               = de_meta["w0_fixed"]
+    d["wa_fixed"]               = de_meta["wa_fixed"]
 
     d["labels"]      = list(labels)
     d["lower_bound"] = list(map(float, lower_bound))
@@ -537,11 +602,13 @@ def run_completion_validation(
     survey_values = _completion_validation_survey_values(
         prior_overrides, fixed_parameter_values
     )
+    # Completion validation is a dry run, so unsampled cosmological values must
+    # be represented by the fixed/fiducial values used by the likelihood decoder.
     cosmo = CosmoParams(
         H0=float(fixed_parameter_values.get("H0", H0_FID)),
         Om0=float(fixed_parameter_values.get("Om0", OM0_FID)),
-        w0=float(fixed_parameter_values.get("w0", W0_FID)),
-        wa=float(fixed_parameter_values.get("wa", WA_FID)),
+        w0=float(fixed_parameter_values.get("w0", -1.0)),
+        wa=float(fixed_parameter_values.get("wa", 0.0)),
     )
     survey = SurveyParams(
         n0=10.0 ** survey_values["log10n0"],
@@ -578,6 +645,9 @@ def run_completion_validation(
         "w0": float(cosmo.w0),
         "wa": float(cosmo.wa),
     }
+    diagnostics["dark_energy_fixed"] = _fixed_dark_energy_metadata(
+        opts, fixed_parameter_values
+    )
     diagnostics["prior_overrides"] = prior_overrides or None
     diagnostics["fixed_parameter_values"] = fixed_parameter_values or None
 
@@ -758,7 +828,10 @@ def main():
         _row("Empty-pixel policy", opts.complete_empty_pixel_policy)
     print("  │")
     _row("Fix cosmology",    "yes" if opts.fix_cosmology  else "no")
-    _row("Fix dark energy",  "yes" if opts.fix_de else "no")
+    _row(
+        "Fix dark energy",
+        _format_fixed_dark_energy_summary(opts, fixed_parameter_values),
+    )
     _row("Fix population",   "yes" if opts.fix_population else "no")
     _row("Fix survey",       "yes" if opts.fix_survey     else "no")
     _row("Prior overrides",  json.dumps(prior_overrides) if prior_overrides else "none")
