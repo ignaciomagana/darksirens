@@ -42,7 +42,7 @@ from typing import NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
-from .base import ParamSpec, MixtureModel, PopulationModel, _stick_breaking_weights
+from .base import ParamSpec, MixtureModel, PopulationModel, _stick_breaking_weights, pack_specs
 from .parametric import (
     PowerLaw,
     BrokenPowerLaw,
@@ -52,6 +52,8 @@ from .parametric import (
     GolombRemnantMass1G,
     GolombRemnantMass1GPlusTail,
     GolombSymmetricMassPopulationModel,
+    GWTC5FiducialBPL2PeaksMass,
+    GWTC5FiducialBPL2PeaksPairing,
 )
 
 
@@ -301,6 +303,73 @@ def _model_golomb_tail() -> GolombSymmetricMassPopulationModel:
         beta_spec=ParamSpec(r"$\beta_M$", GOL_BETA_M.lo, GOL_BETA_M.hi),
         gamma_spec=ParamSpec(r"$\gamma$", -10.0, 10.0),
     )
+
+
+class GWTC5FiducialBPL2PeaksPopulationModel:
+    """GWTC-5 fiducial DefaultBBH Broken Power Law + 2 Peaks model."""
+
+    def __init__(self):
+        self.mass_component = GWTC5FiducialBPL2PeaksMass(
+            ParamSpec(r"$\alpha_1$", -4.0, 12.0),
+            ParamSpec(r"$\alpha_2$", -4.0, 12.0),
+            ParamSpec(r"$m_{\rm break}$", 20.0, 50.0),
+            ParamSpec(r"$\mu_1$", 5.0, 20.0),
+            ParamSpec(r"$\sigma_1$", 0.0, 10.0),
+            ParamSpec(r"$\mu_2$", 25.0, 60.0),
+            ParamSpec(r"$\sigma_2$", 0.0, 10.0),
+            ParamSpec(r"$m_{1,{\rm low}}$", 3.0, 10.0),
+            ParamSpec(r"$\delta m_1$", 0.0, 10.0),
+            ParamSpec(r"$\lambda_0$", 0.0, 1.0),
+            ParamSpec(r"$\lambda_1$", 0.0, 1.0),
+        )
+        self.pairing_component = GWTC5FiducialBPL2PeaksPairing(
+            ParamSpec(r"$\beta_q$", -2.0, 7.0),
+            ParamSpec(r"$m_{2,{\rm low}}$", 3.0, 10.0),
+            ParamSpec(r"$\delta m_2$", 0.0, 10.0),
+        )
+        self.spin_component = _spin(mu=_B(0.0, 1.0), sig=_B(0.005, 1.0))
+        self.gamma_spec = ParamSpec(r"$\gamma$", -10.0, 10.0)
+
+    @property
+    def param_specs(self):
+        return [
+            *self.mass_component.param_specs,
+            *self.pairing_component.param_specs,
+            *self.spin_component.param_specs,
+            self.gamma_spec,
+        ]
+
+    def prior_bounds(self):
+        return pack_specs(*self.param_specs)
+
+    def log_p_pop(self, m1, q, z, chieff, theta):
+        idx = 0
+        tm = theta[idx : idx + self.mass_component.n_params]
+        idx += self.mass_component.n_params
+        tp = theta[idx : idx + self.pairing_component.n_params]
+        idx += self.pairing_component.n_params
+        ts = theta[idx : idx + self.spin_component.n_params]
+        gamma = theta[idx + self.spin_component.n_params]
+
+        m1_low = tm[7]
+        lambda0, lambda1 = tm[9], tm[10]
+        m2_low = tp[1]
+        valid = (lambda0 + lambda1 <= 1.0) & (m2_low <= m1_low)
+
+        mass_norm = self.mass_component._norm(tm)
+        spin_norm = self.spin_component._norm(ts)
+        p = (
+            self.mass_component(m1, tm, norm=mass_norm)
+            * self.pairing_component(m1, q, m2_low, tp[2], tp)
+            * self.spin_component(chieff, ts, norm=spin_norm)
+        )
+        p = jnp.where(valid, p, 0.0)
+        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        return log_p + (gamma - 1.0) * jnp.log1p(z)
+
+
+def _model_gwtc5_fiducial_bpl2peaks() -> GWTC5FiducialBPL2PeaksPopulationModel:
+    return GWTC5FiducialBPL2PeaksPopulationModel()
 
 
 def _gp_mass(
@@ -555,12 +624,18 @@ for _name, (_mix_fn, _latex) in _RAW_MODELS.items():
 _CUSTOM_MODEL_FACTORIES = {
     "golomb_1g": _model_golomb_1g,
     "golomb_1g+tail": _model_golomb_tail,
+    "gwtc5_fiducial_brokenpowerlaw+2peaks": _model_gwtc5_fiducial_bpl2peaks,
+    "gwtc5_brokenpowerlaw+2peaks": _model_gwtc5_fiducial_bpl2peaks,
+    "gwtc5_fiducial_bpl2peaks": _model_gwtc5_fiducial_bpl2peaks,
 }
 
 MODEL_NAME_LATEX.update(
     {
         "golomb_1g": r"\text{Golomb 1G}",
         "golomb_1g+tail": r"\text{Golomb 1G+PL}",
+        "gwtc5_fiducial_brokenpowerlaw+2peaks": r"\text{GWTC-5 Fiducial BPL+2G}",
+        "gwtc5_brokenpowerlaw+2peaks": r"\text{GWTC-5 Fiducial BPL+2G}",
+        "gwtc5_fiducial_bpl2peaks": r"\text{GWTC-5 Fiducial BPL+2G}",
     }
 )
 
@@ -674,7 +749,7 @@ _FIDUCIAL_PARAMS: dict[str, dict] = {
         n_comp            = 1,
         weights           = [],
         masses            = _fiducial_gp_mass(),
-        _pairing_override = _fiducial_gp_pairing_2d(),
+        _pairing_override_factory = _fiducial_gp_pairing_2d,
     ),
 }
 
@@ -716,6 +791,31 @@ _CUSTOM_FIDUCIAL_PARAMS = {
         0.10,
         0.0,
     ],
+
+    # GWTC-5 DefaultBBH / fiducial Broken Power Law + 2 Peaks.
+    # Ordering follows GWTC5FiducialBPL2PeaksPopulationModel.param_specs:
+    # alpha1, alpha2, mbreak, mu1, sigma1, mu2, sigma2,
+    # m1_low, delta_m_1, lambda0, lambda1, beta_q, m2_low,
+    # delta_m_2, mu_chi, sigma_chi, gamma.
+    "gwtc5_fiducial_brokenpowerlaw+2peaks": [
+        2.0,
+        4.0,
+        35.0,
+        10.0,
+        2.0,
+        35.0,
+        5.0,
+        5.0,
+        3.0,
+        1.0 / 3.0,
+        1.0 / 3.0,
+        1.0,
+        3.0,
+        3.0,
+        0.0,
+        0.10,
+        0.0,
+    ],
 }
 
 
@@ -734,8 +834,13 @@ def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
     The conversion from the human-readable fractions in _FIDUCIAL_PARAMS is
     done here via _w_to_v so that _FIDUCIAL_PARAMS remains easy to audit.
     """
-    if pop_model in _CUSTOM_FIDUCIAL_PARAMS:
-        return jnp.array(_CUSTOM_FIDUCIAL_PARAMS[pop_model], dtype=float)
+    fiducial_key = {
+        "gwtc5_brokenpowerlaw+2peaks": "gwtc5_fiducial_brokenpowerlaw+2peaks",
+        "gwtc5_fiducial_bpl2peaks": "gwtc5_fiducial_brokenpowerlaw+2peaks",
+    }.get(pop_model, pop_model)
+
+    if fiducial_key in _CUSTOM_FIDUCIAL_PARAMS:
+        return jnp.array(_CUSTOM_FIDUCIAL_PARAMS[fiducial_key], dtype=float)
 
     base_model  = pop_model
     shared_beta = False
@@ -770,6 +875,8 @@ def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
     # --- Pairing fiducials ---
     if "_pairing_override" in spec:
         betas = spec["_pairing_override"]
+    elif "_pairing_override_factory" in spec:
+        betas = spec["_pairing_override_factory"]()
     elif shared_beta:
         betas = _fiducial_pl_pairing(n=1)
     else:
