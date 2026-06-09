@@ -86,5 +86,5 @@ If only one distribution has narrow features, increase only the corresponding gr
 ## Performance tuning
 
 - Increase `--nlive` for more reliable nested-sampling evidences in high dimensions.
-- Set `--sel_batch_size` if the injection file is too large to process at once.
+- Set `--sel_batch_size` if the gwcat selection file is too large to process at once.
 - Reduce posterior-predictive grid sizes (`--nm`, `--nq`, `--nz`, `--nchi`) during analyzer smoke tests.

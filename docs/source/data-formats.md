@@ -4,13 +4,15 @@ The command-line tools exchange HDF5 files. This page documents the expected top
 
 ## GW posterior samples
 
-`--gw_path` should point to an HDF5 file containing per-event posterior samples. Each event must provide samples for the quantities consumed by the likelihood, including luminosity distance, sky position/pixel information, component masses, spin variables, and event-level prior weights.
+`--gw_path` must point to a gwcat HDF5 export with `format_version="gwcat-1.0"`. Generate this file with `gwcat.GWCatalog._to_darksirens_format(...)`; darksirens no longer ingests raw PE files or performs catalog-specific coordinate conversions in `darksirens.gw.utils`.
 
-Because different GW pipelines name datasets differently, inspect `darksirens.gw.utils.load_gw_samples` before adapting a new posterior format. Keep units consistent with the cosmology and population model assumptions used in the run.
+The export must contain the datasets consumed by the likelihood: `ra`, `dec`, `m1det`, `m2det`, `dL`, `chieff`, `p_pe`, `m1src`, and `m2src`. It must also contain the attributes `nsamp`, `nobs`, `pe_cosmology_H0`, `pe_cosmology_Om0`, `chi_eff_in_p_pe`, and `chi_eff_amax`.
+
+Before running inference, you can use `gwcat.validate_export(gw_path, selection_path)` to check that the posterior and selection files are mutually compatible.
 
 ## GW selection samples
 
-`--gwselection_path` should point to an HDF5 file of injections/selection samples. The selection loader reads injection parameters and their weights, then the likelihood computes an expected-detection correction.
+`--gwselection_path` must point to a gwcat HDF5 export with `format_version="gwcat-selection-1.0"`. Generate it with `gwcat.SelectionSet.to_darksirens(...)` or `gwcat.CombinedSelectionSet.to_darksirens(...)`; darksirens no longer reads raw LVK injection files directly. The selection loader reads gwcat-preprocessed detected injections and their physical draw densities, then the likelihood computes an expected-detection correction.
 
 For large injection sets, use:
 

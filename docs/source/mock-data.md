@@ -57,7 +57,7 @@ The generator writes files that can be consumed directly by `darksirens_inferenc
 | `mock_survey_raw.h5` | Raw survey-table format accepted by `darksirens_pixelate`. |
 | `catalog_pixelated_nside_<nside>.h5` | Pixelated survey catalog accepted by `--survey_path`. |
 | `mock_gw_events.h5` | Mock per-event GW posterior samples accepted by `--gw_path`. |
-| `mock_gw_selection.h5` | Mock detected injection/selection samples accepted by `--gwselection_path`. |
+| `mock_gw_selection.h5` | Mock detected gwcat selection samples accepted by `--gwselection_path`. |
 
 The simulation is intentionally simple:
 
@@ -66,7 +66,7 @@ The simulation is intentionally simple:
 3. Draw GW hosts from the complete pre-selection catalog.
 4. Draw binary masses/spins from `powerlaw+peak_shared_beta_spin`: a power-law plus Gaussian peak mass model with one shared mass-ratio beta and one shared truncated-Gaussian `chi_eff` model.
 5. Apply a semi-analytic network-SNR threshold to decide GW detectability.
-6. Write posterior samples around detected truth values and detected injection samples with `p_draw` weights.
+6. Write posterior samples around detected truth values and detected gwcat-format selection samples with `pdraw` weights.
 
 ## Validation shell script
 

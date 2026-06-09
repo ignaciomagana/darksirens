@@ -44,4 +44,4 @@ Population models are selected by name with `--pop_model`. The code uses a regis
 
 ## Selection effects
 
-Selection effects are handled with the GW injection file supplied by `--gwselection_path`. The inference code computes a selection correction for each proposed parameter point, optionally batching the selection calculation with `--sel_batch_size` for memory control.
+Selection effects are handled with the gwcat GW selection file supplied by `--gwselection_path`. The inference code computes a selection correction for each proposed parameter point, optionally batching the selection calculation with `--sel_batch_size` for memory control.
