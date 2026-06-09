@@ -40,6 +40,7 @@ Population models are selected by name with `--pop_model`. The code uses a regis
 
 - `powerlaw+peak`
 - `brokenpowerlaw+2peaks`
+- `gwtc5_fiducial_brokenpowerlaw+2peaks` (GWTC-5 Table 5 fiducial BBH mass model; aliases: `gwtc5_brokenpowerlaw+2peaks`, `gwtc5_fiducial_bpl2peaks`)
 
 ## Selection effects
 

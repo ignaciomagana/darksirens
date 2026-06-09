@@ -128,6 +128,121 @@ class Gaussian(MassComponent):
         return jnp.exp(-0.5 * ((m - mu) / sig) ** 2)
 
 
+@dataclass
+class GWTC5FiducialBPL2PeaksMass(MassComponent):
+    r"""GWTC-5 fiducial Broken Power Law + 2 Peaks primary-mass model.
+
+    This is the DefaultBBH mass model from GWTC-5 Table 5 / Eqs. B10--B14:
+    a normalized broken power law plus two truncated Gaussian peaks, with the
+    full mixture multiplied by the low-mass Planck taper
+    ``S(m_1 | m_{1,low}, delta_m_1)``.  The high-mass edge is fixed to
+    ``m_high = 300 Msun`` and is therefore not sampled.
+
+    Parameter order is ``alpha_1``, ``alpha_2``, ``m_break``, ``mu_1``,
+    ``sigma_1``, ``mu_2``, ``sigma_2``, ``m_1_low``, ``delta_m_1``,
+    ``lambda_0``, and ``lambda_1``.
+    """
+
+    alpha1_spec: ParamSpec
+    alpha2_spec: ParamSpec
+    m_break_spec: ParamSpec
+    mu1_spec: ParamSpec
+    sigma1_spec: ParamSpec
+    mu2_spec: ParamSpec
+    sigma2_spec: ParamSpec
+    m1_low_spec: ParamSpec
+    delta_m1_spec: ParamSpec
+    lambda0_spec: ParamSpec
+    lambda1_spec: ParamSpec
+    m_high: float = 300.0
+
+    @property
+    def param_specs(self):
+        return [
+            self.alpha1_spec,
+            self.alpha2_spec,
+            self.m_break_spec,
+            self.mu1_spec,
+            self.sigma1_spec,
+            self.mu2_spec,
+            self.sigma2_spec,
+            self.m1_low_spec,
+            self.delta_m1_spec,
+            self.lambda0_spec,
+            self.lambda1_spec,
+        ]
+
+    def _bpl_raw(self, m, alpha1, alpha2, m_break, m1_low):
+        below = (m >= m1_low) & (m < m_break)
+        above = (m >= m_break) & (m < self.m_high)
+        p_below = (m / m_break) ** (-alpha1)
+        p_above = (m / m_break) ** (-alpha2)
+        return jnp.where(below, p_below, jnp.where(above, p_above, 0.0))
+
+    def _trunc_gauss_raw(self, m, mu, sigma, m1_low):
+        sigma_safe = jnp.maximum(sigma, 1.0e-12)
+        support = (m >= m1_low) & (m < self.m_high)
+        return jnp.where(support, jnp.exp(-0.5 * ((m - mu) / sigma_safe) ** 2), 0.0)
+
+    def _mass_grid(self):
+        base_grid = get_mass_grid()
+        return jnp.linspace(base_grid[0], self.m_high, base_grid.size)
+
+    def _grid_norm(self, values):
+        norm = jnp.trapezoid(values, self._mass_grid())
+        return jnp.where(norm > 0.0, norm, 1.0)
+
+    def _norm(self, theta) -> jnp.ndarray:
+        mass_grid = self._mass_grid()
+        return jnp.trapezoid(self._eval_unnorm(mass_grid, theta), mass_grid)
+
+    def _eval_unnorm(self, m, t):
+        alpha1, alpha2, m_break, mu1, sigma1, mu2, sigma2, m1_low, delta_m1, lambda0, lambda1 = t
+        mass_grid = self._mass_grid()
+
+        bpl_grid = self._bpl_raw(mass_grid, alpha1, alpha2, m_break, m1_low)
+        g1_grid = self._trunc_gauss_raw(mass_grid, mu1, sigma1, m1_low)
+        g2_grid = self._trunc_gauss_raw(mass_grid, mu2, sigma2, m1_low)
+
+        bpl = self._bpl_raw(m, alpha1, alpha2, m_break, m1_low) / self._grid_norm(bpl_grid)
+        g1 = self._trunc_gauss_raw(m, mu1, sigma1, m1_low) / self._grid_norm(g1_grid)
+        g2 = self._trunc_gauss_raw(m, mu2, sigma2, m1_low) / self._grid_norm(g2_grid)
+
+        lambda2 = 1.0 - lambda0 - lambda1
+        valid_weights = (lambda0 >= 0.0) & (lambda1 >= 0.0) & (lambda2 >= 0.0)
+        mixture = lambda0 * bpl + lambda1 * g1 + lambda2 * g2
+        tapered = mixture * sfilter_low(m, m1_low, delta_m1)
+        return jnp.where(valid_weights, tapered, 0.0)
+
+
+@dataclass
+class GWTC5FiducialBPL2PeaksPairing(PairingModel):
+    r"""GWTC-5 fiducial low-mass-tapered mass-ratio power law.
+
+    The conditional mass-ratio distribution follows ``q**beta_q`` and applies
+    the separate secondary-mass taper ``S(m_2 | m_{2,low}, delta_m_2)`` from
+    GWTC-5 Table 5.  This intentionally keeps ``delta_m_2`` independent from
+    the primary-mass taper ``delta_m_1``.
+    """
+
+    beta_spec: ParamSpec
+    m2_low_spec: ParamSpec
+    delta_m2_spec: ParamSpec
+
+    @property
+    def param_specs(self):
+        return [self.beta_spec, self.m2_low_spec, self.delta_m2_spec]
+
+    def _eval_unnorm(self, m1, q, m_min, dm_min, theta):
+        del m_min, dm_min
+        beta_q, m2_low, delta_m2 = theta
+        m2 = q * m1
+        safe_q = jnp.where(q > 0.0, q, 1.0)
+        p = jnp.where(q > 0.0, safe_q ** beta_q, 0.0)
+        p = p * sfilter_low(m2, m2_low, delta_m2)
+        return jnp.where(m2 < m2_low, 0.0, p)
+
+
 _LOG_SQRT_2PI = 0.9189385332046727
 _EPS = 1.0e-30
 
