@@ -42,4 +42,4 @@ python -m pip install -e .
 python -m pip install -r requirements.txt
 ```
 
-Additional sampler-specific packages such as `dynesty` or `emcee` may be required for the workflows you choose.
+`requirements.txt` installs `gwcat` from a pinned `ignaciomagana/gwcat` Git commit. Keep `gwcat` external rather than vendoring it into this repository: `gwcat` owns preprocessing of raw GW PE and selection/injection products, while `darksirens` consumes the resulting HDF5 catalogs for inference. Additional sampler-specific packages such as `dynesty` or `emcee` may be required for the workflows you choose.

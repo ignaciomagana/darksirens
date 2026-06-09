@@ -316,13 +316,15 @@ def _draw_selection_batch(
     p_draw = np.maximum(p_draw, 1.0e-300)
 
     return {
-        "m1detsels": m1[det] * (1.0 + z[det]),
-        "m2detsels": m2[det] * (1.0 + z[det]),
-        "dLsels": dl[det],
-        "chieffsels": chi[det],
-        "rasels": ra[det],
-        "decsels": dec[det],
-        "p_draw": p_draw[det],
+        "m1det": m1[det] * (1.0 + z[det]),
+        "m2det": m2[det] * (1.0 + z[det]),
+        "m1src": m1[det],
+        "m2src": m2[det],
+        "dL": dl[det],
+        "chieff": chi[det],
+        "ra": ra[det],
+        "dec": dec[det],
+        "pdraw": p_draw[det],
         "Ndraw": ndraw,
         "n_detected": int(det.sum()),
     }
@@ -341,7 +343,7 @@ def _selection_injections(
     chunks: list[dict[str, np.ndarray | int]] = []
     n_proposed = 0
     n_detected = 0
-    keys = ["m1detsels", "m2detsels", "dLsels", "chieffsels", "rasels", "decsels", "p_draw"]
+    keys = ["m1det", "m2det", "m1src", "m2src", "dL", "chieff", "ra", "dec", "pdraw"]
 
     while n_proposed < ndraw:
         n_batch = min(batch_size, ndraw - n_proposed)
@@ -412,6 +414,9 @@ def write_mock_data(args: argparse.Namespace) -> None:
         chieff_uncertainty=args.chieff_uncertainty,
         sky_uncertainty_deg=args.sky_uncertainty_deg,
     )
+    z_pe = np.interp(post["dL"], grids["dl"], grids["z"])
+    post["m1src"] = post["m1det"] / (1.0 + z_pe)
+    post["m2src"] = post["m2det"] / (1.0 + z_pe)
     selection_target_detections = args.selection_target_detections
     if args.selection_per_observation_factor is not None:
         selection_target_detections = int(np.ceil(args.selection_per_observation_factor * args.nobs))
@@ -426,7 +431,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
         verbose=args.verbose,
     )
 
-    inv_pdraw = 1.0 / np.asarray(sel["p_draw"])
+    inv_pdraw = 1.0 / np.asarray(sel["pdraw"])
     selection_neff = float(inv_pdraw.sum() ** 2 / np.square(inv_pdraw).sum()) if len(inv_pdraw) else 0.0
 
     metadata = {
@@ -467,9 +472,14 @@ def write_mock_data(args: argparse.Namespace) -> None:
 
     gw_path = out / "mock_gw_events.h5"
     with h5py.File(gw_path, "w") as f:
+        f.attrs["format_version"] = "gwcat-1.0"
         f.attrs["mock_data"] = True
         f.attrs["nobs"] = int(args.nobs)
         f.attrs["nsamp"] = int(args.nsamp)
+        f.attrs["pe_cosmology_H0"] = float(args.H0)
+        f.attrs["pe_cosmology_Om0"] = float(args.Om0)
+        f.attrs["chi_eff_in_p_pe"] = True
+        f.attrs["chi_eff_amax"] = 0.99
         f.attrs["pop_model"] = "powerlaw+peak_shared_beta_spin"
         f.attrs["metadata_json"] = json.dumps(metadata)
         for key, val in post.items():
@@ -480,12 +490,17 @@ def write_mock_data(args: argparse.Namespace) -> None:
 
     sel_path = out / "mock_gw_selection.h5"
     with h5py.File(sel_path, "w") as f:
+        f.attrs["format_version"] = "gwcat-selection-1.0"
         f.attrs["mock_data"] = True
-        f.attrs["Ndraw"] = int(sel["Ndraw"])
+        f.attrs["ndraw"] = int(sel["Ndraw"])
         f.attrs["Neff"] = selection_neff
+        f.attrs["chi_eff_swap_applied"] = True
+        f.attrs["chi_eff_amax"] = 0.99
+        f.attrs["cosmology_H0"] = float(args.H0)
+        f.attrs["cosmology_Om0"] = float(args.Om0)
         f.attrs["pop_model"] = "powerlaw+peak_shared_beta_spin"
         f.attrs["metadata_json"] = json.dumps(metadata)
-        for key in ["m1detsels", "m2detsels", "dLsels", "chieffsels", "rasels", "decsels", "p_draw"]:
+        for key in ["m1det", "m2det", "m1src", "m2src", "dL", "chieff", "ra", "dec", "pdraw"]:
             f.create_dataset(key, data=sel[key], compression="gzip", shuffle=True)
 
     print("Mock dark-sirens data written:")

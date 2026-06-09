@@ -13,7 +13,7 @@ Template:
 ```bash
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --universe_model spectral_sirens \
   --pop_model powerlaw+peak \
   --sampler dynesty \
@@ -38,7 +38,7 @@ darksirens_pixelate \
 
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --survey_path data/pixelated/catalog_pixelated_nside_64.h5 \
   --universe_model dark_sirens \
   --pop_model brokenpowerlaw+2peaks \
@@ -53,7 +53,7 @@ Before launching a large production job, fix expensive or well-understood parame
 ```bash
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --sampler emcee \
   --nwalkers 32 \
   --nsteps 200 \

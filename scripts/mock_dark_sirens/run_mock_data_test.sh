@@ -151,8 +151,8 @@ data = load_all_data(opts)
 assert int(data["nEvents"]) == nobs, data["nEvents"]
 assert int(data["nsamp"]) == nsamp, data["nsamp"]
 assert int(data["nside"]) == nside, data["nside"]
-assert len(data["p_draw"]) > 5 * nobs, "too few detected selection samples"
-assert np.isfinite(np.asarray(data["p_draw"])).all(), "non-finite p_draw values"
+assert len(data["pdraw"]) > 5 * nobs, "too few detected selection samples"
+assert np.isfinite(np.asarray(data["pdraw"])).all(), "non-finite pdraw values"
 print("Ingestion validation passed.")
 PY
 

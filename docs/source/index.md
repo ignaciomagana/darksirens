@@ -36,7 +36,7 @@ changelog
 
 ## What is included?
 
-- **GW data loading** for event posterior samples and injection/selection samples.
+- **GW data loading** for event posterior samples and gwcat selection samples.
 - **EM survey handling** for pixelated HEALPix galaxy catalogs.
 - **Redshift priors** for spectral sirens, complete-catalog dark sirens, and incomplete-catalog dark sirens.
 - **Population models** with registry-based selection of parametric and Gaussian-process-like variants.

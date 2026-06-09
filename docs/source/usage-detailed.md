@@ -47,40 +47,22 @@ make docs-strict
 
 ## Input data overview
 
-Most workflows require two GW inputs:
+Most workflows require two gwcat-generated GW inputs:
 
 1. posterior samples for one or more GW events; and
-2. GW selection or injection samples.
+2. GW selection samples generated from the relevant injection products.
 
 Dark-siren workflows additionally require a pixelated galaxy catalog. Bright-siren workflows use counterpart coordinates and redshifts instead of a survey catalog.
 
 ### GW posterior sample file
 
-The GW posterior sample file is an HDF5 file passed with:
+The GW posterior sample file is a gwcat HDF5 export passed with:
 
 ```bash
 --gw_path PATH_TO_GW_POSTERIORS.h5
 ```
 
-The loader expects file attributes:
-
-| Attribute | Meaning |
-| --- | --- |
-| `nsamp` | Number of posterior samples per event. |
-| `nobs` | Number of observed GW events. |
-| `mock_data` | Optional boolean flag. If true, mock-data handling is used. |
-
-Expected datasets include:
-
-| Dataset | Meaning | Units / convention |
-| --- | --- | --- |
-| `ra` | Right ascension | radians |
-| `dec` | Declination | radians |
-| `m1det` | Detector-frame primary mass | solar masses |
-| `m2det` | Detector-frame secondary mass | solar masses |
-| `dL` | Luminosity distance | Mpc |
-| `chieff` | Effective spin | dimensionless; defaults to zeros if absent |
-| `p_pe` | Posterior proposal density | defaults to ones if absent |
+Create it with `gwcat.GWCatalog._to_darksirens_format(...)`. The loader requires `format_version="gwcat-1.0"` plus the gwcat-exported posterior datasets and metadata documented in [Data formats](data-formats.md). It rejects raw PE files and files that rely on darksirens to fill in missing `chieff`, `p_pe`, or source-mass arrays.
 
 The likelihood convention uses the canonical sample basis:
 
@@ -94,19 +76,19 @@ where:
 q = m2det / m1det
 ```
 
-If an external pipeline provides a density in `(m1det, m2det, dL)`, convert it into the `(m1det, q, dL)` basis before storing it as `p_pe`.
+`gwcat` is responsible for storing `p_pe` in that basis before darksirens inference starts.
 
-### GW selection / injection file
+### GW selection file
 
-The GW selection file is passed with:
+The GW selection file is a gwcat HDF5 export passed with:
 
 ```bash
---gwselection_path PATH_TO_INJECTIONS.h5
+--gwselection_path PATH_TO_SELECTION.h5
 ```
 
-It is used to compute the selection correction for each sampled population and cosmology point.
+Create it with `gwcat.SelectionSet.to_darksirens(...)` or `gwcat.CombinedSelectionSet.to_darksirens(...)`. The loader requires `format_version="gwcat-selection-1.0"`; raw LVK injection files should be preprocessed with gwcat first. It is used to compute the selection correction for each sampled population and cosmology point.
 
-For large injection sets, reduce memory pressure with:
+For large gwcat selection files, reduce memory pressure with:
 
 ```bash
 --sel_batch_size 200000
@@ -189,7 +171,7 @@ The main inference command is:
 ```bash
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --sampler dynesty \
   --universe_model spectral_sirens \
   --pop_model powerlaw+peak \
@@ -214,7 +196,7 @@ A spectral-siren run uses GW posterior samples and GW selection samples, but no 
 ```bash
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --universe_model spectral_sirens \
   --pop_model powerlaw+peak \
   --sampler dynesty \
@@ -241,7 +223,7 @@ Then run inference:
 ```bash
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --survey_path data/pixelated/catalog_pixelated_nside_64.h5 \
   --universe_model dark_sirens \
   --pop_model powerlaw+peak \
@@ -264,7 +246,7 @@ Example:
 ```bash
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --survey_path data/pixelated/catalog_pixelated_nside_64.h5 \
   --universe_model dark_sirens_complete \
   --pop_model powerlaw+peak \
@@ -291,7 +273,7 @@ Bright-siren inference uses known electromagnetic counterparts.
 ```bash
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --universe_model bright_sirens \
   --counterpart RA1 DEC1 Z1 \
   --counterpart_dz 1.0e-4 \
@@ -404,7 +386,7 @@ Before a long dark-siren run, validate the completion model:
 ```bash
 darksirens_inference \
   --gw_path data/gw_events.h5 \
-  --gwselection_path data/injections.h5 \
+  --gwselection_path data/selection.h5 \
   --survey_path data/pixelated/catalog_pixelated_nside_64.h5 \
   --universe_model dark_sirens \
   --sampler dynesty \
@@ -425,7 +407,7 @@ and exits before likelihood construction and sampling.
 
 ### Selection batching
 
-For large injection files:
+For large gwcat selection files:
 
 ```bash
 --sel_batch_size 200000
@@ -533,7 +515,7 @@ bayes_factors_pairwise.pdf
 Before launching a large run:
 
 - Confirm the GW posterior file contains the required attributes and datasets.
-- Confirm the injection file matches the selection assumptions for the analysis.
+- Confirm the gwcat selection file matches the selection assumptions for the analysis.
 - Pixelate the survey at a HEALPix resolution compatible with the GW sky localization data.
 - Run `--validate_completion true` for incomplete-catalog dark-siren analyses.
 - Run a small fixed-parameter smoke test.
