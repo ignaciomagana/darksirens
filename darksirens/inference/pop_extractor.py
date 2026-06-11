@@ -76,6 +76,7 @@ def make_pop_extractor(settings: dict):
             settings.get("fix_de", settings.get("fixed_de", False))
         ),
         fixed_parameter_values = fixed_parameter_values,
+        universe_model         = settings.get("universe_model"),
     )
 
     label_to_coord_idx = {label: idx for idx, label in enumerate(labels)}

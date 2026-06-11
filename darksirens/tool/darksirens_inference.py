@@ -735,6 +735,9 @@ def main():
     g.add_argument("--nuts_init_seed_offset", type=int, default=100_000)
     g.add_argument("--seed",         type=int,   default=22)
     g.add_argument("--show_progress",type=str_to_bool, default=True, metavar="BOOL")
+    g.add_argument("--dynesty_diagnostics", type=str_to_bool, default=False, metavar="BOOL",
+                   help="Write dynesty runplot/traceplot PDFs every 10 minutes to "
+                        "<save_path>/dynesty_diagnostics/. Only used with --sampler dynesty.")
 
     g = optp.add_argument_group("Performance")
     g.add_argument("--sel_batch_size", type=int, default=None, metavar="N")
@@ -944,6 +947,7 @@ def main():
         fix_de                 = opts.fix_de,
         prior_overrides        = prior_overrides,
         fixed_parameter_values = fixed_parameter_values,
+        universe_model         = opts.universe_model,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
