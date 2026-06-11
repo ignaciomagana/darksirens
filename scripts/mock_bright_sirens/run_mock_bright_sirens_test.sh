@@ -129,8 +129,8 @@ data = load_all_data(opts)
 assert int(data["nEvents"]) == int(os.environ["NOBS"]), data["nEvents"]
 assert int(data["nsamp"]) == int(os.environ["NSAMP"]), data["nsamp"]
 assert len(data["counterpart_zs"]) == int(os.environ["NOBS"])
-assert np.isfinite(np.asarray(data["pdraw"])).all(), "non-finite pdraw values"
-assert len(data["pdraw"]) > 5 * int(os.environ["NOBS"]), "too few joint GW+EM detected selection samples"
+assert np.isfinite(np.asarray(data["p_draw"])).all(), "non-finite pdraw values"
+assert len(data["p_draw"]) > 5 * int(os.environ["NOBS"]), "too few joint GW+EM detected selection samples"
 print("Bright-siren ingestion validation passed.")
 PY
 
