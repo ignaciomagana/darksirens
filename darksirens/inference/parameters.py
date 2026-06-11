@@ -108,6 +108,7 @@ def build_parameter_decoder(
         fix_de=getattr(opts, "fix_de", getattr(opts, "fixed_de", False)),
         prior_overrides=getattr(opts, "prior_overrides", None),
         fixed_parameter_values=fixed_parameter_values,
+        universe_model=getattr(opts, "universe_model", None),
     )
 
     return ParameterDecoder(

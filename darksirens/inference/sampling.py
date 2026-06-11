@@ -253,9 +253,16 @@ def run_sampler(method, likelihood, prior_transform, labels,
     # --------------------------------------------------------
 
     elif method == "dynesty":
+        import time
+        import os
         from dynesty import NestedSampler
         from dynesty.utils import resample_equal
-        
+        import dynesty.plotting as dyplot
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import threading
+
         # Tracker variables to peek inside Dynesty
         eval_count = 0
         valid_count = 0
@@ -264,16 +271,16 @@ def run_sampler(method, likelihood, prior_transform, labels,
         def dynesty_loglike(theta):
             nonlocal eval_count, valid_count
             eval_count += 1
-            
+
             val = float(np.asarray(likelihood(jnp.asarray(theta))))
-            
+
             if np.isfinite(val):
                 valid_count += 1
 
             # Print an update every 500 evaluations, stopping after 5000
             if eval_count % 500 == 0 and eval_count <= 5000:
                 print(f"  ... [Dynesty Setup] Likelihood calls: {eval_count} | Valid points found: {valid_count}", flush=True)
-                
+
             return val
 
         def dynesty_ptform(u):
@@ -283,24 +290,71 @@ def run_sampler(method, likelihood, prior_transform, labels,
         if maxcall is not None and maxcall <= 0:
             maxcall = None
 
+        save_path = getattr(opts, "save_path", ".")
+        enable_diag = bool(getattr(opts, "dynesty_diagnostics", False))
+        diag_interval = 600  # 10 minutes in seconds
+        _diag_index = [0]
+        _stop_diag = threading.Event()
+
+        def _write_dynesty_diagnostics(sampler_ref):
+            res = sampler_ref.results
+            if len(res.samples) < 2:
+                return
+            _diag_index[0] += 1
+            idx = _diag_index[0]
+            out_dir = os.path.join(save_path, "dynesty_diagnostics")
+            os.makedirs(out_dir, exist_ok=True)
+            try:
+                fig, _ = dyplot.runplot(res, label_kwargs={"fontsize": 10})
+                fig.savefig(os.path.join(out_dir, f"runplot_{idx:04d}.pdf"), bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"[dynesty diag] runplot failed: {e}", flush=True)
+            try:
+                fig, _ = dyplot.traceplot(res, labels=labels,
+                                          label_kwargs={"fontsize": 8},
+                                          title_kwargs={"fontsize": 8})
+                fig.savefig(os.path.join(out_dir, f"traceplot_{idx:04d}.pdf"), bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"[dynesty diag] traceplot failed: {e}", flush=True)
+            print(f"[dynesty diag] wrote diagnostics #{idx} to {out_dir}", flush=True)
+
         print(f"[*] Asking Dynesty to find {opts.nlive} initial live points. This may take a minute...", flush=True)
         sampler = NestedSampler(
-            dynesty_loglike, 
-            dynesty_ptform,  
+            dynesty_loglike,
+            dynesty_ptform,
             ndims,
-            bound="multi", 
+            bound="multi",
             sample="rwalk",
             nlive=opts.nlive
         )
-        
+
+        if enable_diag:
+            def _diag_thread_fn():
+                # Wait one full interval before the first plot so dynesty has real samples.
+                _stop_diag.wait(timeout=diag_interval)
+                while not _stop_diag.is_set():
+                    _write_dynesty_diagnostics(sampler)
+                    _stop_diag.wait(timeout=diag_interval)
+
+            diag_thread = threading.Thread(target=_diag_thread_fn, daemon=True)
+            diag_thread.start()
+            print(f"[*] Diagnostic plots enabled — writing to {save_path}/dynesty_diagnostics/ every 10 min.", flush=True)
+
         print(f"[*] Initial live points found! Starting main nested sampling loop...", flush=True)
         if maxcall is not None:
             print(f"[*] Dynesty call cap: maxcall={maxcall}", flush=True)
-        sampler.run_nested(
-            dlogz=opts.dlogz,
-            maxcall=maxcall,
-            print_progress=opts.show_progress,
-        )
+        try:
+            sampler.run_nested(
+                dlogz=opts.dlogz,
+                maxcall=maxcall,
+                print_progress=opts.show_progress,
+            )
+        finally:
+            if enable_diag:
+                _stop_diag.set()
+                diag_thread.join(timeout=120)
         res = sampler.results
 
         # Weighted posterior samples
@@ -329,7 +383,6 @@ def run_sampler(method, likelihood, prior_transform, labels,
     # --------------------------------------------------------
     elif method == "emcee":
         import emcee
-        import h5py
         import os
         import time
         from pathlib import Path

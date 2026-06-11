@@ -9,6 +9,21 @@ from darksirens.utils.cosmology import (
     waPriorUpper,
 )
 
+#: Survey parameters that actually enter each universe model's likelihood.
+#: Parameters outside a model's set are not sampled (they would be flat nuisance
+#: dimensions); the decoder fills them from fiducial defaults.  Models absent
+#: from this map sample the full survey block.
+#:
+#: ``dark_sirens_complete`` assumes a 100%-complete catalog, so the completion /
+#: missing-galaxy parameters (``log10n0``, ``z50``, ``w``, ``delta``,
+#: ``b_miss``, ``alpha_miss``) never enter its prior — only ``sigma_kde`` does.
+_ACTIVE_SURVEY_PARAMS = {
+    "dark_sirens_complete": ("sigma_kde",),
+    "spectral_sirens": (),
+    "bright_sirens": (),
+}
+
+
 def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
     """Apply flat per-parameter prior overrides to a parameter block.
 
@@ -101,6 +116,7 @@ def build_parameter_space(
     prior_overrides=None,
     fixed_parameter_values=None,
     fix_de=False,
+    universe_model=None,
 ):
     """Construct labels and prior bounds for cosmological, population, and survey parameters.
 
@@ -200,6 +216,25 @@ def build_parameter_space(
     sampled_survey_labels, sampled_survey_lower, sampled_survey_upper = filter_fixed_parameters(
         survey_labels, survey_lower, survey_upper, fixed_parameter_values
     )
+
+    # Drop survey parameters that do not enter this universe model's likelihood
+    # (e.g. completion parameters under the complete-catalog model). They stay
+    # in ``survey_labels`` so the decoder still fills SurveyParams from fiducials.
+    active_survey = _ACTIVE_SURVEY_PARAMS.get(universe_model)
+    if active_survey is not None:
+        kept = [
+            (label, lo, hi)
+            for label, lo, hi in zip(
+                sampled_survey_labels, sampled_survey_lower, sampled_survey_upper
+            )
+            if label in active_survey
+        ]
+        if kept:
+            sampled_survey_labels, sampled_survey_lower, sampled_survey_upper = map(
+                list, zip(*kept)
+            )
+        else:
+            sampled_survey_labels, sampled_survey_lower, sampled_survey_upper = [], [], []
 
     labels = []
     lower = []

@@ -98,14 +98,16 @@ def log_catalog_prior(
     w = wgals[pix]          # w_i: (N_max_gals,) Base weights
 
     # 1. Calculate the log of the volume weights based on the current cosmology
-    log_vol_weights = jnp.log(dV_of_z(zs, H0, Om0, w0, wa))
-    
+    real = w > 0
+    safe_zs = jnp.where(real, zs, 0.1)
+    log_vol_weights = jnp.log(dV_of_z(safe_zs, H0, Om0, w0, wa))
+
     # 2. Add it to the base log-weights
-    safe_w = jnp.where(w > 0, w, 1.0)
-    log_base_w = jnp.where(w > 0, jnp.log(safe_w), -jnp.inf)
-    
-    log_total_w = log_base_w + log_vol_weights
-    
+    safe_w = jnp.where(real, w, 1.0)
+    log_base_w = jnp.where(real, jnp.log(safe_w), -jnp.inf)
+
+    log_total_w = jnp.where(real, log_base_w + log_vol_weights, -jnp.inf)
+
     # 3. Normalize the new log-weights locally inside the pixel
     log_w_norm = log_total_w - logsumexp(log_total_w)
     
