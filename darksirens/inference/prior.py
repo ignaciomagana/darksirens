@@ -15,9 +15,15 @@ from darksirens.utils.cosmology import (
 #: from this map sample the full survey block.
 #:
 #: ``dark_sirens_complete`` assumes a 100%-complete catalog, so the completion /
-#: missing-galaxy parameters (``log10n0``, ``z50``, ``w``, ``delta``,
-#: ``b_miss``, ``alpha_miss``) never enter its prior — only ``sigma_kde`` does.
+#: missing-galaxy parameters never enter its prior — only ``sigma_kde`` does.
+#:
+#: ``dark_sirens`` uses the ratio-only completeness estimator: there is no
+#: parametric roll-off, so ``z50`` and ``w`` do not enter the likelihood.
+#: ``alpha_miss`` and ``b_miss`` enter only through the exact product
+#: ``alpha_miss * b_miss`` (a perfect degeneracy), so only ``b_miss`` is
+#: sampled and ``alpha_miss`` stays at its fiducial of 1.
 _ACTIVE_SURVEY_PARAMS = {
+    "dark_sirens": ("log10n0", "delta", "b_miss", "sigma_kde"),
     "dark_sirens_complete": ("sigma_kde",),
     "spectral_sirens": (),
     "bright_sirens": (),

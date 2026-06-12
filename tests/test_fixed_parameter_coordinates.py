@@ -109,6 +109,7 @@ def test_fixed_parameters_are_removed_from_sampler_coordinates_and_likelihood(mo
         opts.fix_cosmology,
         opts.fix_survey,
         fixed_parameter_values=fixed_values,
+        universe_model=opts.universe_model,
     )
     assert len(labels) == len(lower) == len(upper)
     assert all(label not in labels for label in fixed_values)

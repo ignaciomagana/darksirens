@@ -14,6 +14,18 @@ class CosmoParams(NamedTuple):
 class SurveyParams(NamedTuple):
     """Parameters dictating galaxy survey completeness and selection.
 
+    ``n0`` is the comoving galaxy number density [Mpc^-3] of the n(z) =
+    n0 (1+z)^delta model; with the unit-mass completeness kernels it is
+    directly comparable to physical catalog densities.  ``z50`` and ``w``
+    are legacy roll-off parameters retained for API compatibility: the
+    dark-siren completeness is the data-driven kernel ratio and does not
+    use them.  ``b_miss`` is the LSS bias of the missing-galaxy density;
+    ``alpha_miss`` enters only through the exact product
+    ``alpha_miss * b_miss`` (perfect degeneracy) and defaults to 1 so that
+    ``b_miss`` alone carries the modulation.  ``sigma_kde`` broadens the
+    catalog redshift kernels in quadrature (an effective floor of 1e-4 in
+    redshift, ~30 km/s, protects spectroscopic entries numerically).
+
     ``complete_empty_pixel_policy`` controls how the formally complete-catalog
     prior treats catalog rows with zero real galaxies: ``0`` is the strict
     policy (zero probability), while ``1`` enables a volume-prior robustness

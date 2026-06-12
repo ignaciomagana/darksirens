@@ -51,11 +51,11 @@ The dark-siren incompleteness model uses survey/completion parameters with these
 | Parameter | Meaning and units | Default prior | Recommended use |
 | --- | --- | --- | --- |
 | `log10n0` | Base-10 logarithm of the comoving galaxy number density `n0` in `Mpc^-3`. The completion model multiplies `n0` by the HEALPix pixel solid angle and `dV_c/dz` in `Mpc^3 sr^-1 dz^-1`. | `[-4, -1]` | Keep near measured catalog densities; override explicitly for unusual luminosity cuts. |
-| `z50` | Redshift where the logistic survey rolloff is 50% complete. The completion grid covers `0 <= z <= 5`. | `[0.05, 4.5]` | Use a catalog-depth estimate when available. Avoid values at or beyond the grid edge. |
-| `w` | Logistic rolloff width in redshift units. | `[0.02, 1.5]` | Use narrower ranges for surveys with a well-characterized depth transition. |
+| `z50` | Legacy logistic-rolloff midpoint. **Inactive for `dark_sirens`**: completeness is the data-driven kernel ratio, so this parameter does not enter the likelihood and is not sampled. Retained for configuration compatibility. | `[0.05, 4.5]` | No effect on `dark_sirens`; leave at the fiducial. |
+| `w` | Legacy logistic-rolloff width. **Inactive for `dark_sirens`** (see `z50`). | `[0.02, 1.5]` | No effect on `dark_sirens`; leave at the fiducial. |
 | `delta` | Power-law evolution of expected galaxy density, `n(z) = n0 (1+z)^delta`. | `[-3, 3]` | Broaden only with a catalog-specific justification. Merger-rate evolution is handled separately. |
 | `b_miss` | Bias amplitude for the LSS-modulated missing-galaxy density. Dimensionless. | `[0, 3]` | Fix to `1` or narrow around it unless testing LSS systematics. |
-| `alpha_miss` | Mixture between isotropic and LSS-modulated missing density. Dimensionless; `0` is isotropic, `1` is fully LSS-modulated. | `[0, 1]` | Use the full range for model uncertainty, or fix to `0` to disable LSS modulation. |
+| `alpha_miss` | Legacy isotropic/LSS blend weight. Enters the model only through the exact product `alpha_miss * b_miss` (a perfect degeneracy with `b_miss`), so it is **not sampled** and defaults to `1`; `b_miss` alone carries the LSS modulation. Set `b_miss = 0` to disable LSS modulation. | `[0, 1]` | Leave at `1`; vary `b_miss` instead. |
 
 The default survey priors are intentionally narrower than earlier broad exploratory bounds, because extremely large density or evolution ranges can make `C_iso`, `C_eff`, or `rho_miss_eff` clip over much of the redshift grid. If a fit truly requires broader bounds, pass explicit `--prior_overrides` for the affected survey labels and record the catalog-density units used to justify them.
 

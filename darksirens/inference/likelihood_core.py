@@ -9,7 +9,10 @@ import jax.numpy as jnp
 from jax import lax
 from jax.scipy.special import logsumexp
 
-from darksirens.em import get_redshift_prior
+from darksirens.em.prior import (
+    eval_redshift_prior_with_state,
+    prepare_redshift_prior_state,
+)
 from darksirens.gw.populations import pop_model_parser
 from darksirens.inference.selection import compute_selection_term, selection_log_correction
 from darksirens.inference.utils import log_sample_weight
@@ -44,19 +47,35 @@ def darksiren_log_likelihood(
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``."""
     log_p_pop = pop_model_parser(pop_model=pop_model)
-    raw_logPriorUniv = get_redshift_prior(universe_model)
-    raw_logPriorSelection = get_redshift_prior(
+    selection_model = (
         "spectral_sirens" if universe_model == "bright_sirens" else universe_model
     )
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
+    # Per-proposal prior states: O(N_rows × N_grid) precomputation done ONCE
+    # here, then captured by the per-sample closures below.  Because the
+    # closures only *read* these arrays, neither the per-event ``lax.scan``
+    # nor the selection batching recomputes them (the state arrays are
+    # loop-invariant operands of the scans).  For ``bright_sirens`` the state
+    # is None and the evaluator uses the live per-event catalog.
+    prior_state_univ = prepare_redshift_prior_state(
+        universe_model, cosmo, survey, em_catalog_pe
+    )
+    prior_state_sel = prepare_redshift_prior_state(
+        selection_model, cosmo, survey, em_catalog_sel
+    )
+
     # No finite guard on the redshift prior. -inf propagates correctly through
     # logsumexp and is caught by the final isfinite check.
     def log_prior_z(z, pix, catalog):
-        return raw_logPriorUniv(z, pix, cosmo, survey, catalog)
+        return eval_redshift_prior_with_state(
+            universe_model, prior_state_univ, z, pix, cosmo, survey, catalog
+        )
 
     def log_prior_z_selection(z, pix, catalog):
-        return raw_logPriorSelection(z, pix, cosmo, survey, catalog)
+        return eval_redshift_prior_with_state(
+            selection_model, prior_state_sel, z, pix, cosmo, survey, catalog
+        )
 
     def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
         """Return -inf for distances outside the tabulated z(dL) support."""

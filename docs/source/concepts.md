@@ -26,7 +26,13 @@ Use this mode with:
 
 ## Dark sirens with an incomplete catalog
 
-The default dark-siren model combines catalog galaxies with a missing-galaxy completion term. The completeness curve changes with redshift and is controlled by survey parameters such as `z50`, `w`, and density/evolution parameters.
+The default dark-siren model combines catalog galaxies with a missing-galaxy completion term, additively in galaxy number densities (the in/out-of-catalog decomposition of Gray et al. 2020, arXiv:1908.06050; Gair et al. 2023, AJ 166, 22):
+
+```
+p(z | pix) = [ N_obs(pix) * p_cat(z | pix) + dN_miss(z | pix) ] / [ N_obs(pix) + N_miss(pix) ]
+```
+
+Here `p_cat` is the normalised weighted-kernel catalog shape (each galaxy contributes a unit-mass volumetric photo-z posterior), `N_obs` is the observed galaxy count in the pixel, and `dN_miss = (1 - C(z)) * dN_exp(z) * max(1 + b_miss * delta_g, 0)` is the missing-galaxy density. Completeness `C(z)` is data-driven: the ratio of the boundary-corrected observed KDE to the expected counts `n0 * apix * dV/dz * (1+z)^delta`, both smoothed by the same matched kernel. There is no parametric roll-off (`z50`, `w` are inactive), and the prior integrates to 1 per pixel by construction. The catalog-vs-missing odds are therefore the count odds `N_obs : N_miss`, controlled by the sampled density normalisation `n0`.
 
 Use this mode with:
 

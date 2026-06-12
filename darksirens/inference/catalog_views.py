@@ -19,6 +19,23 @@ def barrier(arr: jnp.ndarray) -> jnp.ndarray:
     return lax.optimization_barrier(jnp.asarray(arr))
 
 
+def _global_cache_lookup(unique_pixels, n_rows: int, identity_lookup):
+    """Return a cache lookup indexed by global HEALPix pixel.
+
+    ``identity_lookup`` is the row-indexed lookup returned by the cache
+    builder for ``unique_pixels=arange(n_rows)``.  When the compact view
+    carries global pixel ids, the completion code indexes the lookup by
+    global pixel, so it must be re-keyed; otherwise rows are the keys and
+    the identity lookup is already correct.
+    """
+    if unique_pixels is None:
+        return identity_lookup
+    globals_np = np.asarray(unique_pixels, dtype=np.int64).reshape(-1)
+    lookup = np.zeros(int(globals_np.max()) + 1, dtype=np.int32)
+    lookup[globals_np] = np.arange(n_rows, dtype=np.int32)
+    return lookup
+
+
 @dataclass(frozen=True)
 class CompactCatalogView:
     """Caller-independent compact catalog arrays for one sample view."""
@@ -342,6 +359,20 @@ def prepare_catalog_views(
                     n_pix_catalog=n_sel_rows,
                     wgals=sel_view.wgals,
                     ngals=sel_view.ngals,
+                )
+                # The KDE rows above are per *compact row*, but the completion
+                # code looks the cache up by GLOBAL HEALPix pixel whenever the
+                # catalog carries ``unique_pixels`` (it translates row ->
+                # global before indexing).  A row-sized lookup indexed by a
+                # global pixel id silently clamps out of bounds under JIT and
+                # returns the wrong pixel's KDE — so rebuild the lookup in the
+                # global key space here.  Without ``unique_pixels`` the rows
+                # themselves are the keys and the identity lookup is correct.
+                pixel_to_cache_idx_pe = _global_cache_lookup(
+                    pe_view.unique_pixels, n_pe_rows, pixel_to_cache_idx_pe
+                )
+                pixel_to_cache_idx_sel = _global_cache_lookup(
+                    sel_view.unique_pixels, n_sel_rows, pixel_to_cache_idx_sel
                 )
 
     dN_obs_kde_pe = barrier(dN_obs_kde_pe) if dN_obs_kde_pe is not None else None
