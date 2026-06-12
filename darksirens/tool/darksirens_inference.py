@@ -272,7 +272,7 @@ def _print_parameter_table(
     COSMO_FID  = {"H0": H0_FID, "Om0": OM0_FID, "w0": W0_FID, "wa": WA_FID}
     DE_FID = {"w0": W0_FID, "wa": WA_FID}
     SURVEY_FID = {"log10n0": -2.0, "z50": 1.0, "w": 0.5,
-                  "delta": 0.0, "b_miss": 1.0, "alpha_miss": 0.5, "sigma_kde": 0.0}
+                  "delta": 0.0, "b_miss": 1.0, "alpha_miss": 1.0, "sigma_kde": 0.0}
     pop_fid_map = {lbl: float(pop_params_fid[i])
                    for i, lbl in enumerate(pop_labels_all)}
 
@@ -542,7 +542,7 @@ def _completion_validation_survey_values(
         "w": 0.5,
         "delta": 0.0,
         "b_miss": 1.0,
-        "alpha_miss": 0.5,
+        "alpha_miss": 1.0,
         "sigma_kde": 0.0,
     }
     values = dict(fid)

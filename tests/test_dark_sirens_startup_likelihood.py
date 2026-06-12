@@ -6,6 +6,10 @@ import types
 import jax
 
 jax.config.update("jax_enable_x64", True)
+# Pin the matmul precision the production CLI mandates (darksirens_inference
+# sets it globally at import); otherwise the golden value below depends on
+# whether a CLI test imported the tool earlier in the session.
+jax.config.update("jax_default_matmul_precision", "highest")
 
 import healpy as hp
 import jax.numpy as jnp
@@ -101,8 +105,17 @@ def test_dark_sirens_likelihood_evaluates_once_before_sampling():
     value = likelihood(jnp.array([]))
     assert value.shape == ()
     assert not bool(jnp.isnan(value))
-    # Reference value from the pre-refactor monolithic likelihood implementation.
-    np.testing.assert_allclose(float(value), 0.016347464281930607, rtol=1e-12)
+    # Reference value re-pinned after the completion-model correction
+    # (additive-density prior, normalised KDE, ratio-only completeness,
+    # tilted catalog kernels), computed on jax 0.10.1 / CPU.
+    #
+    # Tolerance: model/logic regressions move this value at the >= 1e-4
+    # relative level; XLA compile-context reassociation (e.g. the global
+    # matmul-precision flag the CLI sets at import) moves it at ~1e-9.
+    # rtol = 1e-7 separates the two cleanly and is order-independent.
+    # The previous 1e-12 pin also drifted ~1e-4 across jax *versions*,
+    # so re-pin the constant when CI changes jax rather than loosening.
+    np.testing.assert_allclose(float(value), 0.01634337653677953, rtol=1e-7)
 
 
 def test_make_likelihood_does_not_mutate_data_when_compacting_catalogs():

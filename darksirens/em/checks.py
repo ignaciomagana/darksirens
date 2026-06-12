@@ -9,18 +9,15 @@ normalisation bugs early, before they silently corrupt inference results.
 
 Why normalisation matters
 ~~~~~~~~~~~~~~~~~~~~~~~~~
-Several quantities in this package are constructed to be normalised by
-design (e.g. p_miss, the Gaussian mixture in p_cat), but the assembled
-dark-sirens prior
+Every quantity in this package is constructed to be normalised by
+design.  In particular the assembled dark-sirens prior
 
-    p(z | pix) ∝ C_eff(z) * p_cat(z) + (1 - C_eff(z)) * p_miss(z)
+    p(z | pix) = [N_obs * p_cat(z|pix) + dN_miss(z|pix)] / (N_obs + N_miss)
 
-is not guaranteed to integrate to 1 because the mixing weight C_eff(z)
-varies with redshift.  In practice the selection-correction term in the
-likelihood absorbs an overall constant, but a large deviation from unity
-signals a modelling inconsistency that the selection integral cannot
-silently fix (e.g. C_eff >> 1 somewhere, or p_miss leaking outside
-zgrid).
+integrates to 1 per pixel exactly (up to grid quadrature of the narrow
+catalog kernels).  A deviation here signals an implementation bug, not a
+modelling tolerance: per-pixel normalisation errors vary across the sky
+and cannot be absorbed by the selection-correction term.
 
 Typical usage
 ~~~~~~~~~~~~~
@@ -251,28 +248,21 @@ def check_prior_normalization(
     em_catalog: EMCatalog,
     test_pixels: jnp.ndarray,
     *,
-    atol: float = 0.10,
+    atol: float = 0.02,
     verbose: bool = True,
 ) -> dict[int, bool]:
     """
     Verify that the assembled redshift prior integrates to ~1 over zgrid
     for each test pixel.
 
-    For ``"dark_sirens"`` the prior is a z-dependent mixture:
+    For ``"dark_sirens"`` the prior is additive in densities:
 
-        p(z|pix) ∝ C_eff(z) * p_cat(z) + (1 - C_eff(z)) * p_miss(z)
+        p(z|pix) = [N_obs * p_cat(z|pix) + dN_miss(z|pix)] / (N_obs + N_miss)
 
-    This is not analytically guaranteed to be normalised because C_eff(z)
-    varies with redshift.  A significant departure from 1 here indicates
-    a modelling inconsistency.  The selection-correction term in the
-    likelihood absorbs an overall constant per event, but cannot fix
-    per-pixel normalisation errors that vary across the sky.
-
-    A looser default tolerance (10 %) is used here relative to the
-    component-level checks because the dark-sirens mixture is assembled
-    from two independently-normalised densities with a varying weight,
-    and small deviations are expected.  Values outside ~20 % should be
-    investigated.
+    and integrates to 1 per pixel by construction.  The residual is grid
+    quadrature error from the narrow catalog kernels, so the default
+    tolerance is tight (2 %); any larger deviation indicates an
+    implementation bug.
 
     Parameters
     ----------
@@ -322,7 +312,7 @@ def run_all_checks(
     atol_volume: float = 0.01,
     atol_p_miss: float = 0.02,
     atol_p_cat: float = 0.05,
-    atol_prior: float = 0.10,
+    atol_prior: float = 0.02,
     verbose: bool = True,
     raise_on_failure: bool = False,
 ) -> dict[str, bool | dict]:

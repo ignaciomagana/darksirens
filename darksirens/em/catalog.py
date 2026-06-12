@@ -1,30 +1,180 @@
 """
 catalog.py
 ----------
-EM catalog redshift prior: p_cat(z | pix).
+EM catalog redshift prior: p_cat(z | pix), the *shape* of the host
+probability over the observed galaxies in a pixel.
 
-Each galaxy in the pixel is treated as a Gaussian in redshift space
-(centre = photo-z, width = photo-z uncertainty).  The mixture is
-weighted by:
+Each real galaxy i contributes a kernel that is the normalised
+volumetric photo-z posterior
 
-    w_i ∝ w_gal,i * dV_c(z_i) * (1+z_i)^delta
+    p(z | gal i) = N(z; z_i, sigma_eff,i) * g(z) / Z_i,
+    Z_i          = ∫_0^zmax N(z'; z_i, sigma_eff,i) g(z') dz',
 
-where the volume weight reflects the galaxy number density model
+with the galaxy measure g(z) = dV_c/dz * (1+z)^delta and
 
-    n(z) = n0 (1+z)^delta
+    sigma_eff,i = max( sqrt(sigma_cat,i^2 + sigma_kde^2), 1e-4 ).
 
-Note: the (1+z)^delta factor here is purely the number-density
-evolution of the galaxy population.  Merger rate evolution is handled
-elsewhere in the pipeline and must not appear in this weight.
+The Gaussian is the photo-z/instrumental likelihood broadened by the
+LSS kernel sigma_kde (variances add for Gaussian overlap); g(z) is the
+volumetric interim prior on the galaxy's true redshift (Gray et al.
+2020, arXiv:1908.06050).  Because Z_i normalises each kernel to unit
+mass on [0, zmax], every galaxy carries exactly its base weight:
+
+    p_cat(z | pix) = Σ_i  w~_i * p(z | gal i),     w~_i = w_i / Σ_j w_j,
+
+which integrates to 1 per pixel.  Crucially the volumetric prior tilts
+each kernel but does NOT rescale a galaxy's total host probability —
+multiplying the mixture weights by dV(z_i) (a previous implementation)
+makes a galaxy more probable as a host merely for being far away.
+
+Z_i is evaluated by Gauss–Legendre quadrature in the Gaussian quantile
+variable (exact treatment of the [0, zmax] truncation; robust for any
+sigma_eff from the 1e-4 floor up to broad photo-z), with g interpolated
+from a per-proposal grid.  The sigma_eff floor (~30 km/s) only protects
+numerics when spectroscopic errors underflow; it is far below any
+physical redshift uncertainty.
+
+Hot paths precompute the per-galaxy quantities once per parameter
+proposal via ``catalog_kernel_state`` and evaluate per sample with
+``eval_log_catalog_prior_state``; the scalar ``log_catalog_prior`` keeps
+the historical signature for the complete-catalog and bright-siren
+models and for tests.
 """
 
+from __future__ import annotations
+
+import numpy as np
 import jax.numpy as jnp
 from jax import jit, vmap
-from jax.scipy.special import logsumexp
+from jax.scipy.special import logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
+from typing import NamedTuple
 
-from darksirens.utils.cosmology import dV_of_z
 from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+
+from .utils import zgrid
+from .completion import log_galaxy_measure_grid
+
+_ZMAX: float = float(np.asarray(zgrid)[-1])
+
+#: Numerical floor on sigma_eff [redshift units]; ~30 km/s, well below any
+#: physical photo-z or peculiar-velocity scale.  Protects against
+#: spectroscopic dzgals -> 0 with sigma_kde = 0.
+SIGMA_EFF_FLOOR: float = 1e-4
+
+# Gauss–Legendre nodes/weights on [0, 1] for the kernel normalisation.
+_GL_NODES = 24
+_glx, _glw = np.polynomial.legendre.leggauss(_GL_NODES)
+_GL_X = jnp.asarray(0.5 * (_glx + 1.0))
+_GL_W = jnp.asarray(0.5 * _glw)
+
+
+def _row_real_mask(zs, ws, ngal):
+    """Real-galaxy mask for one padded row."""
+    if ngal is not None:
+        return jnp.arange(zs.shape[0]) < ngal
+    return ws > 0
+
+
+def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid):
+    """
+    log Z_i for one row: Z_i = ∫_0^zmax N(z; z_i, sig_i) g(z) dz.
+
+    Substituting u = Phi((z - z_i)/sig_i) maps the truncated integral to
+    ∫_a^b g(z_i + sig_i * Phi^{-1}(u)) du with a = Phi(-z_i/sig),
+    b = Phi((zmax - z_i)/sig): truncation handled exactly, integrand
+    smooth, Gauss–Legendre converges fast for any sigma.
+    """
+    a = ndtr(-zs / sig_eff)
+    b = ndtr((_ZMAX - zs) / sig_eff)
+    span = b - a                                            # (N_max,)
+    u = a[..., None] + span[..., None] * _GL_X              # (N_max, K)
+    u = jnp.clip(u, 1e-12, 1.0 - 1e-12)
+    z_node = jnp.clip(zs[..., None] + sig_eff[..., None] * ndtri(u), 0.0, _ZMAX)
+    g = jnp.exp(
+        jnp.interp(z_node.reshape(-1), zgrid, log_g_grid)
+    ).reshape(z_node.shape)
+    Z = span * (g * _GL_W).sum(axis=-1)                     # (N_max,)
+    return jnp.where(real & (Z > 0.0), jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+
+
+def _row_kernel_state(zs, dzs, ws, ngal, sigma_kde, log_g_grid):
+    """
+    Per-galaxy kernel quantities for one row.
+
+    Returns
+    -------
+    log_kw : (N_max,) log[ w~_i / Z_i ]  (-inf for padded slots and for
+        empty rows, where the weight normalisation is undefined).
+    sig_eff : (N_max,) effective kernel widths (floored).
+    """
+    real = _row_real_mask(zs, ws, ngal)
+    sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
+
+    log_w = jnp.where(real, jnp.log(jnp.maximum(ws, 1e-300)), -jnp.inf)
+    lse = logsumexp(log_w)
+    has_galaxies = jnp.isfinite(lse)
+    log_w_norm = jnp.where(real, log_w - jnp.where(has_galaxies, lse, 0.0), -jnp.inf)
+
+    log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
+    log_kw = jnp.where(real, log_w_norm - log_Z, -jnp.inf)
+    return log_kw, sig_eff
+
+
+class CatalogKernelState(NamedTuple):
+    """Per-galaxy kernel quantities for all catalog rows (one proposal)."""
+    log_g_grid: jnp.ndarray  # (N_grid,)
+    log_kw: jnp.ndarray      # (N_rows, N_max) log[w~_i / Z_i]
+    sig_eff: jnp.ndarray     # (N_rows, N_max)
+
+
+def catalog_kernel_state(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    log_g_grid: jnp.ndarray | None = None,
+) -> CatalogKernelState:
+    """Precompute per-galaxy kernel quantities once per parameter proposal."""
+    if log_g_grid is None:
+        log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+    zgals, dzgals, wgals = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals
+    ngals = em_catalog.ngals
+
+    if ngals is not None:
+        per_row = vmap(_row_kernel_state, in_axes=(0, 0, 0, 0, None, None))
+        log_kw, sig_eff = per_row(
+            zgals, dzgals, wgals, ngals, survey.sigma_kde, log_g_grid
+        )
+    else:
+        per_row = vmap(
+            lambda zs, dzs, ws: _row_kernel_state(
+                zs, dzs, ws, None, survey.sigma_kde, log_g_grid
+            ),
+            in_axes=(0, 0, 0),
+        )
+        log_kw, sig_eff = per_row(zgals, dzgals, wgals)
+
+    return CatalogKernelState(log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff)
+
+
+def eval_log_catalog_prior_state(
+    z: float,
+    pix: int,
+    state: CatalogKernelState,
+    em_catalog: EMCatalog,
+) -> float:
+    """
+    log p_cat(z | pix) using a precomputed ``CatalogKernelState``.
+
+    O(N_max) per sample: one row gather, one Gaussian logpdf per galaxy,
+    one logsumexp, one 1-D interpolation for log g(z).
+    """
+    zs = em_catalog.zgals[pix]
+    log_kw = state.log_kw[pix]
+    sig = state.sig_eff[pix]
+    log_g_z = jnp.interp(z, zgrid, state.log_g_grid)
+    return log_g_z + logsumexp(log_kw + norm.logpdf(z, zs, sig))
+
 
 @jit
 def log_catalog_prior(
@@ -35,99 +185,31 @@ def log_catalog_prior(
     em_catalog: EMCatalog,
 ) -> float:
     r"""
-    Log of the EM-catalog redshift prior at redshift z for pixel pix.
+    Log of the EM-catalog redshift prior at redshift z for catalog row pix.
 
-    Computes $\ln p_{\text{gal}}(z_k | \Omega_p)$ for a single discrete Gravitational 
-    Wave (GW) posterior sample $z_k$ using an exact KDE overlap integration method.
+    Historical scalar signature; builds the per-row kernel state on the
+    fly.  Under ``vmap`` over samples, the (cosmo, survey)-only pieces
+    (the log g grid) are hoisted automatically; the per-row pieces are
+    recomputed per sample, so hot paths should use
+    ``catalog_kernel_state`` + ``eval_log_catalog_prior_state`` instead.
 
-    Notes
-    -----
-    When cross-correlating a broad continuous GW posterior with a highly precise 
-    discrete galaxy catalog (e.g., DESI), evaluating discrete GW samples at the 
-    exact catalog redshifts causes numerical failure because the instrumental 
-    errors are nearly Dirac delta functions. 
-
-    To fix this, we evaluate the exact overlap integral between the GW posterior 
-    KDE and the discrete catalog. Due to Gaussian overlap symmetry, applying a KDE 
-    bandwidth to the discrete GW samples is mathematically identical to applying 
-    the KDE bandwidth to the catalog galaxies and evaluating at the discrete GW points:
-
-    $$ \int p_{\text{GW}}(z) p_{\text{gal}}(z) \, dz = \frac{1}{K} \sum_k \left[ \sum_{i \in \Omega_p} \tilde{W}_i \, \mathcal{N}(z_k; z_i, \sigma_{\text{eff}, i}) \right] $$
-
-    Where the effective variance is the sum in quadrature of the instrumental 
-    error and the LSS smoothing kernel:
-    $$ \sigma_{\text{eff}, i} = \sqrt{\sigma_{\text{cat}, i}^2 + \sigma_{\text{kde}}^2} $$
-
-    The individual galaxy weights $W_i$ inside the pixel are calculated by scaling 
-    the base completeness/luminosity weights $w_i$ by the cosmological volume element:
-    $$ W_i = w_i \cdot \frac{dV_c}{dz}(z_i | H_0, \Omega_m) $$
-    
-    These weights are then locally normalized to sum to 1 inside the pixel:
-    $$ \tilde{W}_i = \frac{W_i}{\sum_{j} W_j} $$
-
-    Finally, the logsumexp trick is used to stably compute the log probability:
-    $$ \ln p_{\text{gal}}(z_k | \Omega_p) = \text{logsumexp} \left( \ln \tilde{W}_i + \ln \mathcal{N}(z_k; z_i, \sigma_{\text{eff}, i}) \right) $$
-
-    Parameters
-    ----------
-    z : float
-        Redshift $z_k$ at which to evaluate the prior (a single discrete GW sample).
-    pix : int
-        HEALPix pixel index $\Omega_p$.
-    cosmo : CosmoParams
-        Cosmological parameters ($H_0, \Omega_m$) for volume weighting.
-    survey : SurveyParams
-        Survey parameters.
-    em_catalog : EMCatalog
-        EM galaxy catalog arrays containing redshifts, errors, and base weights.
-
-    Returns
-    -------
-    float
-        The log probability $\ln p_{\text{gal}}(z_k | \Omega_p)$.
+    Empty rows return -inf (no host candidates), never NaN.
     """
-    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
-    zgals, dzgals, wgals = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals
-    sigma_kde = survey.sigma_kde
+    zs = em_catalog.zgals[pix]
+    dzs = em_catalog.dzgals[pix]
+    ws = em_catalog.wgals[pix]
+    ngal = None if em_catalog.ngals is None else em_catalog.ngals[pix]
 
-    # ``pix`` is the catalog-row index for compact/sliced catalogs (the
-    # caller passes the per-sample ``sample_to_unique_idx`` map) and the raw
-    # HEALPix pixel for legacy full catalogs.
-    zs = zgals[pix]         # z_i: (N_max_gals,)
-    sig = dzgals[pix]       # \sigma_{cat, i}: (N_max_gals,) Raw instrumental errors
-    w = wgals[pix]          # w_i: (N_max_gals,) Base weights
-
-    # 1. Calculate the log of the volume weights based on the current cosmology
-    real = w > 0
-    safe_zs = jnp.where(real, zs, 0.1)
-    log_vol_weights = jnp.log(dV_of_z(safe_zs, H0, Om0, w0, wa))
-
-    # 2. Add it to the base log-weights
-    safe_w = jnp.where(real, w, 1.0)
-    log_base_w = jnp.where(real, jnp.log(safe_w), -jnp.inf)
-
-    log_total_w = jnp.where(real, log_base_w + log_vol_weights, -jnp.inf)
-
-    # 3. Normalize the new log-weights locally inside the pixel
-    log_w_norm = log_total_w - logsumexp(log_total_w)
-    
-    # ---------------------------------------------------------
-    # 4. THE KDE OVERLAP INTEGRAL
-    # ---------------------------------------------------------
-    # We apply a KDE bandwidth to the galaxies to represent the 
-    # continuous structure of the dark matter halos/LSS. 
-    # dz = 0.0025 roughly corresponds to ~10 Mpc clustering scale at low redshift.
-    
-    # Sum the variances in quadrature (Analytical integral of two Gaussians)
-    sig_eff = jnp.sqrt(sig**2 + sigma_kde**2)
-    
-    # Evaluate the discrete GW sample z_k against the smoothed catalog in log-space
-    return logsumexp(log_w_norm + norm.logpdf(z, zs, sig_eff))
+    log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+    log_kw, sig_eff = _row_kernel_state(
+        zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid
+    )
+    log_g_z = jnp.interp(z, zgrid, log_g_grid)
+    return log_g_z + logsumexp(log_kw + norm.logpdf(z, zs, sig_eff))
 
 
 # Vectorised over (z, pix) pairs — both vmapped simultaneously so the
 # call signature matches all prior assembly functions.
-# Outer function takes z_array (N_samples,) and pix_array (N_samples,)
 log_catalog_prior_vmap = jit(
     vmap(log_catalog_prior, in_axes=(0, 0, None, None, None), out_axes=0)
 )

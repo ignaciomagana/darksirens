@@ -15,56 +15,85 @@ Four regimes are supported:
    GW data only.  Prior is the comoving volume element dV_c/dz.
 
 2. ``"bright_sirens"``
-   Counterpart-informed inference using a synthetic one-object catalog.
-   By default, the counterpart redshift prior is finite only for samples in
-   the global HEALPix counterpart pixel and is ``-inf`` elsewhere.  If the
-   catalog explicitly requests sky marginalization, the same redshift prior is
-   applied independent of sample sky pixel.
+   Counterpart-informed inference; see ``_log_prior_bright_sirens``.
 
 3. ``"dark_sirens_complete"``
-   EM catalog assumed 100 % complete.
-
-        p(z | pix) = p_cat(z | pix)
-
-   Empty pixels are handled by an explicit policy.  The formal complete-catalog
-   default is ``zero``: a pixel with no real catalog galaxies has zero host
-   probability and returns ``-inf``.  The optional ``volume`` policy preserves
-   the historical volume-prior fallback as a robustness approximation for
-   sparse pixelations.
+   EM catalog assumed 100 % complete: p(z | pix) = p_cat(z | pix), with
+   an explicit empty-pixel policy (``zero`` default, ``volume`` fallback).
 
 4. ``"dark_sirens"``  (default)
-   Incomplete catalog; prior is a mixture weighted by C_eff(z):
+   Incomplete catalog.  The prior is additive in galaxy *densities*
+   (counts per unit z), the in/out-of-catalog decomposition of
+   Gray et al. 2020 (arXiv:1908.06050) / Gair et al. 2023 (AJ 166, 22):
 
-        p(z | pix) ∝ C_eff(z|pix) * p_cat(z|pix)
-                   + (1 - C_eff(z|pix)) * p_miss(z|pix)
+       p(z | pix) = [ N_obs(pix) * p_cat(z | pix)  +  dN_miss(z | pix) ]
+                    / [ N_obs(pix) + N_miss(pix) ]
 
-   Empty-pixel handling: C_eff → 0 automatically when the pixel has
-   no observed galaxies, routing the prior entirely to p_miss.  No
-   explicit fallback needed here.
+   with p_cat the per-pixel *normalised* weighted-kernel catalog shape
+   (catalog.py), N_obs the observed real-galaxy count in the pixel,
+   dN_miss = (1 - C(z)) * dN_exp(z) * LSS the missing-galaxy density
+   (completion.py), and N_miss = ∫ dN_miss dz.  Writing the catalog term
+   as N_obs * p_cat assigns the missing population the pixel-mean
+   observed weight (⟨w⟩_miss = Σ_i w_i / N_obs): the catalog:missing
+   odds are the count odds N_obs : N_miss, while the within-catalog
+   shape follows the weights.  This is conservative under luminosity
+   weighting (true missing galaxies are typically fainter, so if
+   anything the missing branch is over-weighted).
 
-Performance: single-vmap fusion in ``_log_prior_dark_sirens``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The previous implementation called ``catalog_completion_vmap`` and
-``log_catalog_prior_vmap`` as two separate vmaps over the same (z, pix)
-pairs.  The new implementation fuses them into a single inner function
-that is vmapped once:
+   The prior integrates to 1 per pixel by construction — no z-dependent
+   mixture weight, no per-pixel normalisation residue for the selection
+   term to (fail to) absorb.  Empty pixels route to the missing branch
+   automatically (N_obs = 0).
 
-  1. ``_precompute_grids`` runs once (pixel-independent grids).
-  2. A single vmap over (z, pix) evaluates completion + catalog prior
-     in one sweep, halving the vmap invocation overhead.
-  3. The per-pixel KDE lookup (cached) happens once per (z, pix) pair
-     instead of once per vmap call.
+Two-phase evaluation (performance)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Everything except the sample redshift depends only on (pixel, Θ).  The
+state API splits the work accordingly:
+
+    state = prepare_redshift_prior_state(model, cosmo, survey, em_catalog)
+    log_p = eval_redshift_prior_with_state(model, state, z, pix,
+                                           cosmo, survey, em_catalog)
+
+``prepare`` computes, once per parameter proposal: the log galaxy
+measure grid, per-galaxy kernel weights/widths (catalog.py), and the
+per-row completion curves dN_miss(zgrid), N_miss (completion.py) —
+O(N_rows × N_grid).  ``eval`` then costs O(N_max_gals) per sample: one
+row gather, one Gaussian logpdf per galaxy, two 1-D interpolations.
+The likelihood builds the state once per proposal and captures it in
+its per-sample closures, so neither the per-event ``lax.scan`` nor the
+selection batching recomputes it.
+
+The historical one-shot registry functions (``PRIOR_REGISTRY``) remain
+for checks, diagnostics, and tests; they build the state internally on
+every call.
 """
 
 import jax.numpy as jnp
-from jax import jit, vmap
+from jax import jit, lax, vmap
 from jax.scipy.special import logsumexp
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
 
-from .volume import log_volume_prior, log_volume_prior_vmap, _precompute_volume_grid
-from .catalog import log_catalog_prior
-from .completion import _precompute_grids, _catalog_completion_inner
+def _materialize(state):
+    """Force XLA to materialize a prior state instead of fusing its
+    construction into per-sample consumers.
+
+    Without this barrier, gathering ``state.dN_miss[pix, idx]`` per sample
+    invites XLA to recompute the producing (N_rows × N_grid) curves inside
+    the sample loop — measured ~10x slowdown of the one-shot prior at 1e5
+    samples.  The barrier is a value identity.
+    """
+    return lax.optimization_barrier(state)
+
+from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from typing import NamedTuple, Any
+
+from .volume import log_volume_prior_vmap, _precompute_volume_grid
+from .catalog import (
+    catalog_kernel_state,
+    eval_log_catalog_prior_state,
+    CatalogKernelState,
+)
+from .completion import completion_curves, log_galaxy_measure_grid
 
 from .utils import zgrid
 
@@ -74,7 +103,154 @@ COMPLETE_EMPTY_PIXEL_POLICY_VOLUME = 1
 
 
 # ------------------------------------------------------------
-# Individual prior implementations
+# Prior states (per-proposal precomputations)
+# ------------------------------------------------------------
+
+class SpectralPriorState(NamedTuple):
+    log_pvol: Any  # (N_grid,) log normalised comoving-volume prior
+
+
+class CompletePriorState(NamedTuple):
+    kernels: Any   # CatalogKernelState
+    row_has: Any   # (N_rows,) bool — row contains at least one real galaxy
+    log_pvol: Any  # (N_grid,) volume fallback for the ``volume`` policy
+
+
+class DarkSirenPriorState(NamedTuple):
+    kernels: Any   # CatalogKernelState
+    log_Nobs: Any  # (N_rows,) log real-galaxy count (-inf for empty rows)
+    dN_miss: Any   # (N_rows, N_grid) missing-galaxy density
+    log_Z: Any     # (N_rows,) log[N_obs + N_miss]
+
+
+def _row_counts(em_catalog: EMCatalog) -> jnp.ndarray:
+    if em_catalog.ngals is not None:
+        return jnp.asarray(em_catalog.ngals, dtype=jnp.float64)
+    return jnp.sum(em_catalog.wgals > 0.0, axis=-1).astype(jnp.float64)
+
+
+def prepare_redshift_prior_state(
+    model: str,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+):
+    """Build the per-proposal state for ``model``.  O(N_rows × N_grid)."""
+    if model == "spectral_sirens":
+        return _materialize(
+            SpectralPriorState(log_pvol=jnp.log(_precompute_volume_grid(cosmo)))
+        )
+
+    if model == "bright_sirens":
+        return None  # per-event counterpart logic needs the live catalog
+
+    if model == "dark_sirens_complete":
+        kernels = catalog_kernel_state(cosmo, survey, em_catalog)
+        row_has = _row_counts(em_catalog) > 0.0
+        log_pvol = jnp.log(_precompute_volume_grid(cosmo))
+        return _materialize(
+            CompletePriorState(kernels=kernels, row_has=row_has, log_pvol=log_pvol)
+        )
+
+    if model == "dark_sirens":
+        log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+        kernels = catalog_kernel_state(cosmo, survey, em_catalog, log_g_grid=log_g_grid)
+        curves = completion_curves(cosmo, survey, em_catalog)
+        Nobs = _row_counts(em_catalog)
+        log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1e-300)), -jnp.inf)
+        Z = Nobs + curves.N_miss
+        log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+        return _materialize(
+            DarkSirenPriorState(
+                kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z
+            )
+        )
+
+    raise ValueError(f"Unknown redshift prior model '{model}'.")
+
+
+# ------------------------------------------------------------
+# Per-sample evaluators
+# ------------------------------------------------------------
+
+def _interp_row(table_row_lo, table_row_hi, t):
+    """Linear interpolation given precomputed bracketing values and weight."""
+    return table_row_lo + t * (table_row_hi - table_row_lo)
+
+
+def _grid_bracket(z):
+    """Index and weight bracketing ``z`` on ``zgrid`` (endpoint-clamped).
+
+    NaN z propagates to a NaN weight, which downstream positivity checks
+    turn into -inf (never probability 1).
+    """
+    idx = jnp.clip(jnp.searchsorted(zgrid, z, side="right") - 1, 0, zgrid.size - 2)
+    t = (z - zgrid[idx]) / (zgrid[idx + 1] - zgrid[idx])
+    return idx, jnp.clip(t, 0.0, 1.0)
+
+
+def _eval_dark_scalar(z, pix, state: DarkSirenPriorState, em_catalog: EMCatalog):
+    log_p_cat = eval_log_catalog_prior_state(z, pix, state.kernels, em_catalog)
+    # NaN (out-of-grid z, degenerate kernels) must mean "impossible", never p=1.
+    log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+
+    # Two-element gather instead of jnp.interp(z, zgrid, dN_miss[pix]):
+    # gathering the full (N_grid,) row per sample costs ~8 kB of memory
+    # traffic per sample and dominates the evaluator on CPU/GPU alike.
+    idx, t = _grid_bracket(z)
+    miss = _interp_row(state.dN_miss[pix, idx], state.dN_miss[pix, idx + 1], t)
+    log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
+
+    return (
+        jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss) - state.log_Z[pix]
+    )
+
+
+def _eval_complete_scalar(
+    z, pix, state: CompletePriorState, survey: SurveyParams, em_catalog: EMCatalog
+):
+    log_p_cat = eval_log_catalog_prior_state(z, pix, state.kernels, em_catalog)
+    log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+    log_p_vol = jnp.interp(z, zgrid, state.log_pvol)
+    empty_value = jnp.where(
+        survey.complete_empty_pixel_policy == COMPLETE_EMPTY_PIXEL_POLICY_VOLUME,
+        log_p_vol,
+        -jnp.inf,
+    )
+    return jnp.where(state.row_has[pix], log_p_cat, empty_value)
+
+
+def eval_redshift_prior_with_state(
+    model: str,
+    state,
+    z: jnp.ndarray,
+    pix: jnp.ndarray,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+) -> jnp.ndarray:
+    """Vectorised log p(z | pix) using a prepared state.  O(N_max) / sample."""
+    if model == "spectral_sirens":
+        return vmap(lambda z_i: jnp.interp(z_i, zgrid, state.log_pvol))(z)
+
+    if model == "bright_sirens":
+        return _log_prior_bright_sirens(z, pix, cosmo, survey, em_catalog)
+
+    if model == "dark_sirens_complete":
+        return vmap(
+            lambda z_i, p_i: _eval_complete_scalar(z_i, p_i, state, survey, em_catalog)
+        )(z, pix)
+
+    if model == "dark_sirens":
+        return vmap(
+            lambda z_i, p_i: _eval_dark_scalar(z_i, p_i, state, em_catalog)
+        )(z, pix)
+
+    raise ValueError(f"Unknown redshift prior model '{model}'.")
+
+
+# ------------------------------------------------------------
+# One-shot prior implementations (registry; checks/tests/back-compat)
 # ------------------------------------------------------------
 
 @jit
@@ -85,11 +261,7 @@ def _log_prior_spectral_sirens(
     survey: SurveyParams,
     em_catalog: EMCatalog,
 ) -> jnp.ndarray:
-    """
-    GW-only prior: normalised comoving volume element.
-
-    ``pix`` and ``em_catalog`` are accepted for API uniformity; ignored.
-    """
+    """GW-only prior: normalised comoving volume element."""
     return log_volume_prior_vmap(z, cosmo, survey)
 
 
@@ -102,45 +274,16 @@ def _log_prior_complete_catalog(
     em_catalog: EMCatalog,
 ) -> jnp.ndarray:
     """
-    Dark-siren prior under the complete-catalog assumption.
-
-        p(z | pix) = p_cat(z | pix)
-
-    Empty-pixel policy
-    ------------------
-    The strict complete-catalog interpretation is controlled by
-    ``survey.complete_empty_pixel_policy == 0`` (``zero``): if the requested
-    catalog row has no real galaxies, the prior returns ``-inf`` because no
-    host exists in that pixel.
-
-    ``survey.complete_empty_pixel_policy == 1`` (``volume``) keeps the previous
-    volume-prior fallback only for genuinely empty pixels.  This is a
-    robustness approximation for sparse pixelations, not the formal
-    complete-catalog model.
-
-    Empty pixels are identified from ``em_catalog.ngals`` (or, for legacy
-    catalogs lacking it, a positive-weight real-galaxy mask), not from
-    ``isfinite(log_p_cat)``.  Therefore numerical underflow in a non-empty
-    pixel does not silently switch to the volume prior.
+    Dark-siren prior under the complete-catalog assumption:
+    p(z | pix) = p_cat(z | pix), with the empty-pixel policy from
+    ``survey.complete_empty_pixel_policy`` (0 = zero/-inf, 1 = volume
+    fallback).  Empty pixels are identified from real-galaxy counts, not
+    from numerical underflow of p_cat.
     """
-    from .catalog import log_catalog_prior_vmap  # local import avoids circular
-    log_p_cat = log_catalog_prior_vmap(z, pix, cosmo, survey, em_catalog)
-
-    if em_catalog.ngals is not None:
-        row_has_galaxies = jnp.take(em_catalog.ngals, pix) > 0
-    else:
-        row_has_galaxies = jnp.any(jnp.take(em_catalog.wgals, pix, axis=0) > 0.0, axis=-1)
-
-    # Precompute volume grid once (shared across all samples via CSE).
-    pvol_norm  = _precompute_volume_grid(cosmo)
-    log_p_vol  = vmap(lambda z_i: jnp.interp(z_i, zgrid, jnp.log(pvol_norm)))(z)
-
-    empty_value = jnp.where(
-        survey.complete_empty_pixel_policy == COMPLETE_EMPTY_PIXEL_POLICY_VOLUME,
-        log_p_vol,
-        -jnp.inf,
+    state = prepare_redshift_prior_state("dark_sirens_complete", cosmo, survey, em_catalog)
+    return eval_redshift_prior_with_state(
+        "dark_sirens_complete", state, z, pix, cosmo, survey, em_catalog
     )
-    return jnp.where(row_has_galaxies, log_p_cat, empty_value)
 
 
 @jit
@@ -155,13 +298,11 @@ def _log_prior_bright_sirens(
     Bright-siren counterpart redshift likelihood with an optional sky gate.
 
     Multi-event bright-siren analyses store one counterpart redshift and one
-    counterpart sky pixel per GW event.  The likelihood sets
-    ``em_catalog.active_counterpart_index`` before evaluating each event, so the
-    same vectorised prior can use the event-specific counterpart while retaining
-    the compact catalog pixel mapping used by dark-siren analyses.
-
-    For backward compatibility, if the per-event counterpart arrays are absent
-    this falls back to the historical one-object synthetic catalog prior.
+    counterpart sky pixel per GW event; the likelihood sets
+    ``em_catalog.active_counterpart_index`` before evaluating each event.
+    For backward compatibility, if the per-event counterpart arrays are
+    absent this falls back to the historical one-object synthetic catalog
+    prior.
     """
     from jax.scipy.stats import norm
     from .catalog import log_catalog_prior_vmap  # local import avoids circular
@@ -215,48 +356,18 @@ def _log_prior_dark_sirens(
     em_catalog: EMCatalog,
 ) -> jnp.ndarray:
     """
-    Dark-siren prior with catalog completion (the general case).
+    Dark-siren prior with catalog completion (the general case):
 
-    Mixes catalog and missing-galaxy densities using C_eff(z):
+        p(z|pix) = [N_obs * p_cat(z|pix) + dN_miss(z|pix)] / (N_obs + N_miss).
 
-        p(z|pix) ∝ C_eff(z|pix) * p_cat(z|pix)
-                 + (1 - C_eff(z|pix)) * p_miss(z|pix)
-
-    Single-vmap implementation
-    --------------------------
-    ``_precompute_grids`` (pixel-independent) runs once.  A single inner
-    function computes both the completion term and the catalog prior for
-    each (z_i, pix_i) pair.  This function is vmapped once, replacing
-    the previous two-vmap implementation (one for completion, one for
-    catalog prior).
-
-    The per-pixel KDE lookup uses ``em_catalog.dN_obs_kde`` (precomputed
-    at startup by ``build_pixel_kde_cache``) — an O(1) index rather than
-    an O(N_grid × N_max_gals) recomputation.
+    Exactly normalised per pixel.  One-shot signature: builds the
+    per-proposal state internally; the likelihood uses the state API
+    directly to avoid rebuilding it per event / per selection batch.
     """
-    # Pixel-independent grids — hoisted out of the vmap by JAX CSE.
-    grids = _precompute_grids(cosmo, survey, em_catalog)
-
-    def _inner(z_i, pix_i):
-        # --- Completion ---
-        _, p_miss, C_z = _catalog_completion_inner(z_i, pix_i, grids, survey, em_catalog)
-
-        # --- Catalog prior ---
-        log_p_cat = log_catalog_prior(z_i, pix_i, cosmo, survey, em_catalog)
-
-        # --- Numerically safe log-space mixture ---
-        log_C      = jnp.where(C_z   >  0.0, jnp.log(C_z),       -jnp.inf)
-        log_1mC    = jnp.where(C_z   <  1.0, jnp.log1p(-C_z),    -jnp.inf)
-        log_p_miss = jnp.where(p_miss > 0.0, jnp.log(p_miss),    -jnp.inf)
-        log_p_cat  = jnp.nan_to_num(log_p_cat, neginf=-jnp.inf)
-        log_p_miss = jnp.nan_to_num(log_p_miss, neginf=-jnp.inf)
-
-        return logsumexp(jnp.stack([
-            log_C   + log_p_cat,
-            log_1mC + log_p_miss,
-        ]))
-
-    return vmap(_inner)(z, pix)
+    state = prepare_redshift_prior_state("dark_sirens", cosmo, survey, em_catalog)
+    return eval_redshift_prior_with_state(
+        "dark_sirens", state, z, pix, cosmo, survey, em_catalog
+    )
 
 
 # ------------------------------------------------------------
@@ -274,29 +385,10 @@ PRIOR_REGISTRY: dict = {
 
 
 def get_redshift_prior(model: str):
-    """
-    Return the compiled log-prior function for the requested model.
-
-    Parameters
-    ----------
-    model : str
-        One of ``"spectral_sirens"``, ``"bright_sirens"``,
-        ``"dark_sirens_complete"``, or ``"dark_sirens"``.
-
-    Returns
-    -------
-    callable with signature::
-
-        log_prior(z, pix, cosmo, survey, em_catalog) -> jnp.ndarray
-
-    Raises
-    ------
-    ValueError if model is not in ``PRIOR_REGISTRY``.
-    """
+    """Return the compiled one-shot log-prior function for ``model``."""
     if model not in PRIOR_REGISTRY:
         available = ", ".join(f'"{k}"' for k in PRIOR_REGISTRY)
         raise ValueError(
-            f"Unknown redshift prior model '{model}'. "
-            f"Available: {available}."
+            f"Unknown redshift prior model '{model}'. Available: {available}."
         )
     return PRIOR_REGISTRY[model]
