@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Updated user-facing documentation for the current population-model grammar,
+  stick-breaking mixture weights, tagged CLI parameter labels, and the
+  corrected matched-kernel catalog-completion model. The completion docs now
+  clarify that `z50` and `w` are legacy compatibility parameters, while the
+  likelihood uses a data-driven completeness ratio plus additive missing-galaxy
+  density.
 - **Population registry refactor (compositional grammar).** `--pop_model`
   names are now parsed directly into mixture compositions
   (`darksirens.gw.populations.grammar`); components self-register declarative
