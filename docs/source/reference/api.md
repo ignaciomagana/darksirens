@@ -10,9 +10,14 @@ intended to be imported by tests, notebooks, and custom inference drivers.
   tuples that move JAX arrays through the likelihood without Python object
   mutation.  They define the shape contract between data loading, catalog view
   preparation, and the JIT-compiled likelihood core.
-- **Population components** in `darksirens.gw.populations` expose two layers:
-  component classes describe primary-mass, mass-ratio, and spin factors, while
-  registry helpers assemble named population models and their prior metadata.
+- **Population components** in `darksirens.gw.populations` expose three layers:
+  component classes describe primary-mass, mass-ratio, and spin factors and
+  self-register declarative blueprints (parameter names, labels, default
+  bounds, and fiducials) in `components`; the `grammar` module parses
+  `--pop_model` names into compositions and assembles them generically; and
+  `registry` holds the curated physics tuning for standard models plus the
+  stable named helpers (`get_model`, `pop_model_parser`,
+  `pop_model_prior_parser`, `get_fixed_population_params`).
 - **EM prior modules** in `darksirens.em` implement the redshift priors for
   spectral sirens, complete catalogs, incomplete catalogs, and bright-siren
   counterparts.  The inference code selects these functions with

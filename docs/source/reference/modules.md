@@ -76,8 +76,11 @@ and selection calculations.
 
 Population modules define the source population density.  Analytic and
 Gaussian-process components implement reusable mass, mass-ratio, and spin
-factors.  Registry functions assemble named models, parameter bounds, and labels
-that are consumed by inference priors and samplers.
+factors and declare their parameter metadata once as blueprints
+(``components``).  The ``grammar`` module parses ``--pop_model`` names into
+mixture compositions and builds models generically; the ``registry`` carries
+curated per-model prior tuning and exposes the named model, bound, and label
+helpers consumed by inference priors and samplers.
 
 ```{automodule} darksirens.gw.populations
 :members:
@@ -86,6 +89,18 @@ that are consumed by inference priors and samplers.
 ```
 
 ```{automodule} darksirens.gw.populations.base
+:members:
+:undoc-members:
+:show-inheritance:
+```
+
+```{automodule} darksirens.gw.populations.components
+:members:
+:undoc-members:
+:show-inheritance:
+```
+
+```{automodule} darksirens.gw.populations.grammar
 :members:
 :undoc-members:
 :show-inheritance:

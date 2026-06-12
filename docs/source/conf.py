@@ -67,6 +67,9 @@ autodoc_mock_imports = [
 ]
 
 myst_enable_extensions = ["colon_fence", "deflist"]
+# Generate anchors for headings (depth <= 3) so pages can cross-reference
+# sections like concepts.md#population-models.
+myst_heading_anchors = 3
 
 # Keep examples readable in both light and dark themes.
 pygments_style = "sphinx"

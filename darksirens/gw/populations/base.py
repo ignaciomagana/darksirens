@@ -68,11 +68,15 @@ class ParamSpec:
         Human-readable label used in tables, diagnostics, and sampler outputs.
     low, high:
         Inclusive prior-transform bounds for the unit-cube samplers.
+    name:
+        Optional machine-readable ASCII identifier (e.g. ``"G1.mu"``).  Unlike
+        ``label`` it contains no LaTeX and is stable under display changes.
     """
 
     label: str
     low: float
     high: float
+    name: str = ""
 
 
 def pack_specs(*specs: ParamSpec):
@@ -272,7 +276,10 @@ class MixtureModel:
     def param_specs(self):
         """Return weight, mass, pairing, and spin parameter specs in order."""
         # v_i are stick-breaking inputs, bounded [0, 1].
-        specs = [ParamSpec(rf"$v_{i+1}$", 0.0, 1.0) for i in range(self.n_weight_params)]
+        specs = [
+            ParamSpec(rf"$v_{i+1}$", 0.0, 1.0, name=f"v{i+1}")
+            for i in range(self.n_weight_params)
+        ]
         for c in self.mass_components:    specs.extend(c.param_specs)
         for c in self.pairing_components: specs.extend(c.param_specs)
         for c in self.spin_components:    specs.extend(c.param_specs)
@@ -349,7 +356,7 @@ class PopulationModel:
     @property
     def param_specs(self):
         """Return mixture parameter specs followed by the redshift slope."""
-        return [*self.mixture.param_specs, ParamSpec(r"$\gamma$", -10.0, 10.0)]
+        return [*self.mixture.param_specs, ParamSpec(r"$\gamma$", -10.0, 10.0, name="gamma")]
 
     def prior_bounds(self):
         """Return lower bounds, upper bounds, and labels for all parameters."""

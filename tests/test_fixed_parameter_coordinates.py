@@ -97,7 +97,7 @@ def _small_data():
         {"Om0": 0.3075},
         {"w0": -0.9},
         {"wa": 0.1},
-        {"$\\alpha$": 1.5},
+        {"$\\alpha_{\\rm PL}$": 1.5},
         {"z50": 1.2},
     ],
 )
@@ -109,7 +109,6 @@ def test_fixed_parameters_are_removed_from_sampler_coordinates_and_likelihood(mo
         opts.fix_cosmology,
         opts.fix_survey,
         fixed_parameter_values=fixed_values,
-        universe_model=opts.universe_model,
     )
     assert len(labels) == len(lower) == len(upper)
     assert all(label not in labels for label in fixed_values)
@@ -150,7 +149,7 @@ def test_fixed_parameters_are_removed_from_sampler_coordinates_and_likelihood(mo
 
 
 def test_pop_extractor_accepts_sampled_coordinate_length_with_fixed_population_parameter():
-    fixed_values = {"$\\alpha$": 1.5}
+    fixed_values = {"$\\alpha_{\\rm PL}$": 1.5}
     settings = {
         "pop_model": "powerlaw+peak",
         "fix_cosmology": False,
@@ -171,7 +170,10 @@ def test_pop_extractor_accepts_sampled_coordinate_length_with_fixed_population_p
     pop_theta = make_pop_extractor(settings)(theta)
 
     assert pop_theta.shape == (len(pop_labels),)
-    assert float(pop_theta[pop_labels.index("$\\alpha$")]) == fixed_values["$\\alpha$"]
+    assert (
+        float(pop_theta[pop_labels.index("$\\alpha_{\\rm PL}$")])
+        == fixed_values["$\\alpha_{\\rm PL}$"]
+    )
 
 
 def _sampled_labels(*, fix_cosmology=False, fix_de=False, fixed_parameter_values=None):

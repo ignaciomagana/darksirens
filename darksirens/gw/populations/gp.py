@@ -20,9 +20,13 @@ from .base import MassComponent, PairingModel, ParamSpec
 from .utils import get_mass_grid, sfilter_high, sfilter_low
 
 
-_PAIR2D_LOGM_NODES = jnp.log(jnp.array([9.0, 18.0, 30.0, 42.0, 60.0, 90.0]))
-_PAIR2D_Q_NODES = jnp.array([0.15, 0.35, 0.55, 0.75, 0.95])
-_PAIR2D_N_NODES = int(_PAIR2D_LOGM_NODES.size * _PAIR2D_Q_NODES.size)
+# Node counts derive from the plain-Python lists so the module stays
+# importable when jax is replaced by an autodoc mock during docs builds.
+_PAIR2D_M_VALUES = [9.0, 18.0, 30.0, 42.0, 60.0, 90.0]
+_PAIR2D_Q_VALUES = [0.15, 0.35, 0.55, 0.75, 0.95]
+_PAIR2D_LOGM_NODES = jnp.log(jnp.array(_PAIR2D_M_VALUES))
+_PAIR2D_Q_NODES = jnp.array(_PAIR2D_Q_VALUES)
+_PAIR2D_N_NODES = len(_PAIR2D_M_VALUES) * len(_PAIR2D_Q_VALUES)
 _PAIR2D_JITTER_REL = 1e-4
 
 

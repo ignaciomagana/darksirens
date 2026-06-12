@@ -147,7 +147,11 @@ N_CHI: int = _NORMALIZATION_GRID_SETTINGS.n_chi
 MASS_GRID = get_mass_grid()
 Q_GRID = get_q_grid()
 CHI_GRID = get_chi_grid()
-M1_MESH, Q_MESH = get_m1_q_mesh()
+# Indexing instead of tuple-unpacking keeps this importable when jax is
+# replaced by an autodoc mock during documentation builds.
+_M1_Q_MESH = get_m1_q_mesh()
+M1_MESH = _M1_Q_MESH[0]
+Q_MESH = _M1_Q_MESH[1]
 
 # ======================================================================
 # Smooth edge filters

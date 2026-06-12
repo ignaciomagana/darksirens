@@ -18,9 +18,33 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 
 from .base import MassComponent, PairingModel, ParamSpec, SpinModel, pack_specs
+from .components import (
+    ALPHA,
+    ALPHA_BPL,
+    BETA,
+    CHI_MU,
+    CHI_SIGMA,
+    DM_MAX,
+    DM_MIN,
+    GAUSS_MU,
+    GAUSS_SIGMA,
+    M_BREAK,
+    M_MAX,
+    M_MIN,
+    ParamBlueprint,
+    component,
+    mass_token,
+)
 from .utils import get_mass_grid, get_q_grid, sfilter_high, sfilter_low
 
 
+@mass_token("powerlaw", plural="powerlaws", short="PL", params=(
+    ParamBlueprint("alpha", r"\alpha", ALPHA, 2.3),
+    ParamBlueprint("m_min", r"m_{\min}", M_MIN, 5.0),
+    ParamBlueprint("m_max", r"m_{\max}", M_MAX, 80.0),
+    ParamBlueprint("dm_min", r"\delta m_{\min}", DM_MIN, 3.0),
+    ParamBlueprint("dm_max", r"\delta m_{\max}", DM_MAX, 10.0),
+))
 @dataclass
 class PowerLaw(MassComponent):
     """Smoothed primary-mass power law.
@@ -56,6 +80,15 @@ class PowerLaw(MassComponent):
         return S * m ** (-a)
 
 
+@mass_token("brokenpowerlaw", plural="brokenpowerlaws", short="BPL", params=(
+    ParamBlueprint("alpha1", r"\alpha_1", ALPHA_BPL, 2.0),
+    ParamBlueprint("alpha2", r"\alpha_2", ALPHA_BPL, 4.0),
+    ParamBlueprint("m_break", r"m_{\rm break}", M_BREAK, 30.0),
+    ParamBlueprint("m_min", r"m_{\min}", M_MIN, 5.0),
+    ParamBlueprint("m_max", r"m_{\max}", M_MAX, 80.0),
+    ParamBlueprint("dm_min", r"\delta m_{\min}", DM_MIN, 3.0),
+    ParamBlueprint("dm_max", r"\delta m_{\max}", DM_MAX, 10.0),
+))
 @dataclass
 class BrokenPowerLaw(MassComponent):
     """Two-slope primary-mass power law with a continuous break.
@@ -104,6 +137,10 @@ class BrokenPowerLaw(MassComponent):
         return S * p
 
 
+@mass_token("peak", plural="peaks", short="G", params=(
+    ParamBlueprint("mu", r"\mu", GAUSS_MU, 35.0),
+    ParamBlueprint("sigma", r"\sigma", GAUSS_SIGMA, 5.0),
+))
 @dataclass
 class Gaussian(MassComponent):
     """Unnormalised Gaussian primary-mass peak.
@@ -241,6 +278,72 @@ class GWTC5FiducialBPL2PeaksPairing(PairingModel):
         p = jnp.where(q > 0.0, safe_q ** beta_q, 0.0)
         p = p * sfilter_low(m2, m2_low, delta_m2)
         return jnp.where(m2 < m2_low, 0.0, p)
+
+
+class GWTC5FiducialBPL2PeaksPopulationModel:
+    """GWTC-5 fiducial DefaultBBH Broken Power Law + 2 Peaks model."""
+
+    def __init__(self):
+        self.mass_component = GWTC5FiducialBPL2PeaksMass(
+            ParamSpec(r"$\alpha_1$", -4.0, 12.0),
+            ParamSpec(r"$\alpha_2$", -4.0, 12.0),
+            ParamSpec(r"$m_{\rm break}$", 20.0, 50.0),
+            ParamSpec(r"$\mu_1$", 5.0, 20.0),
+            ParamSpec(r"$\sigma_1$", 0.0, 10.0),
+            ParamSpec(r"$\mu_2$", 25.0, 60.0),
+            ParamSpec(r"$\sigma_2$", 0.0, 10.0),
+            ParamSpec(r"$m_{1,{\rm low}}$", 3.0, 10.0),
+            ParamSpec(r"$\delta m_1$", 0.0, 10.0),
+            ParamSpec(r"$\lambda_0$", 0.0, 1.0),
+            ParamSpec(r"$\lambda_1$", 0.0, 1.0),
+        )
+        self.pairing_component = GWTC5FiducialBPL2PeaksPairing(
+            ParamSpec(r"$\beta_q$", -2.0, 7.0),
+            ParamSpec(r"$m_{2,{\rm low}}$", 3.0, 10.0),
+            ParamSpec(r"$\delta m_2$", 0.0, 10.0),
+        )
+        self.spin_component = TruncatedGaussianSpin(
+            ParamSpec(r"$\mu_\chi$", 0.0, 1.0),
+            ParamSpec(r"$\sigma_\chi$", 0.005, 1.0),
+        )
+        self.gamma_spec = ParamSpec(r"$\gamma$", -10.0, 10.0)
+
+    @property
+    def param_specs(self):
+        return [
+            *self.mass_component.param_specs,
+            *self.pairing_component.param_specs,
+            *self.spin_component.param_specs,
+            self.gamma_spec,
+        ]
+
+    def prior_bounds(self):
+        return pack_specs(*self.param_specs)
+
+    def log_p_pop(self, m1, q, z, chieff, theta):
+        idx = 0
+        tm = theta[idx : idx + self.mass_component.n_params]
+        idx += self.mass_component.n_params
+        tp = theta[idx : idx + self.pairing_component.n_params]
+        idx += self.pairing_component.n_params
+        ts = theta[idx : idx + self.spin_component.n_params]
+        gamma = theta[idx + self.spin_component.n_params]
+
+        m1_low = tm[7]
+        lambda0, lambda1 = tm[9], tm[10]
+        m2_low = tp[1]
+        valid = (lambda0 + lambda1 <= 1.0) & (m2_low <= m1_low)
+
+        mass_norm = self.mass_component._norm(tm)
+        spin_norm = self.spin_component._norm(ts)
+        p = (
+            self.mass_component(m1, tm, norm=mass_norm)
+            * self.pairing_component(m1, q, m2_low, tp[2], tp)
+            * self.spin_component(chieff, ts, norm=spin_norm)
+        )
+        p = jnp.where(valid, p, 0.0)
+        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        return log_p + (gamma - 1.0) * jnp.log1p(z)
 
 
 _LOG_SQRT_2PI = 0.9189385332046727
@@ -535,6 +638,9 @@ class GolombSymmetricMassPopulationModel:
         return log_p + (gamma - 1.0) * jnp.log1p(z)
 
 
+@component("pl_pairing", kind="pairing", params=(
+    ParamBlueprint("beta", r"\beta", BETA, 1.0),
+))
 @dataclass
 class PowerLawPairing(PairingModel):
     """Mass-ratio pairing model proportional to ``q**beta``.
@@ -587,6 +693,10 @@ class GaussianPairing(PairingModel):
         return jnp.where(m2 < m_min, 0.0, p)
 
 
+@component("spin", kind="spin", params=(
+    ParamBlueprint("mu_chi", r"\mu_\chi", CHI_MU, 0.0),
+    ParamBlueprint("sigma_chi", r"\sigma_\chi", CHI_SIGMA, 0.1),
+))
 @dataclass
 class TruncatedGaussianSpin(SpinModel):
     """Gaussian effective-spin distribution truncated to ``[-1, 1]``.

@@ -3,7 +3,7 @@
 ## Spectral-siren production run
 
 1. Validate the GW posterior and selection HDF5 files.
-2. Choose a population model.
+2. Choose a population model (compose one by name, e.g. `brokenpowerlaw+2peaks`; see [Concepts → Population models](concepts.md#population-models) for the naming grammar).
 3. Run a nested sampler with enough live points for the dimensionality of your parameter space.
 4. Inspect the saved corner plot and evidence summary.
 5. Use `darksirens_analyze` to compare posterior-predictive distributions across models.

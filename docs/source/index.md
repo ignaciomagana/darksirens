@@ -39,7 +39,7 @@ changelog
 - **GW data loading** for event posterior samples and gwcat selection samples.
 - **EM survey handling** for pixelated HEALPix galaxy catalogs.
 - **Redshift priors** for spectral sirens, complete-catalog dark sirens, and incomplete-catalog dark sirens.
-- **Population models** with registry-based selection of parametric and Gaussian-process-like variants.
+- **Population models** composed directly from the `--pop_model` name (e.g. `brokenpowerlaw+2peaks`): parametric components combine through a naming grammar, with Gaussian-process variants and curated physics-tuned priors for standard models.
 - **Sampling front end** for `jaxns`, `dynesty`, and `emcee`.
 - **Analysis utilities** for evidences, Bayes factors, and posterior-predictive mass/redshift distributions.
 

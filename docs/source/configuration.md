@@ -51,11 +51,11 @@ The dark-siren incompleteness model uses survey/completion parameters with these
 | Parameter | Meaning and units | Default prior | Recommended use |
 | --- | --- | --- | --- |
 | `log10n0` | Base-10 logarithm of the comoving galaxy number density `n0` in `Mpc^-3`. The completion model multiplies `n0` by the HEALPix pixel solid angle and `dV_c/dz` in `Mpc^3 sr^-1 dz^-1`. | `[-4, -1]` | Keep near measured catalog densities; override explicitly for unusual luminosity cuts. |
-| `z50` | Legacy logistic-rolloff midpoint. **Inactive for `dark_sirens`**: completeness is the data-driven kernel ratio, so this parameter does not enter the likelihood and is not sampled. Retained for configuration compatibility. | `[0.05, 4.5]` | No effect on `dark_sirens`; leave at the fiducial. |
-| `w` | Legacy logistic-rolloff width. **Inactive for `dark_sirens`** (see `z50`). | `[0.02, 1.5]` | No effect on `dark_sirens`; leave at the fiducial. |
+| `z50` | Redshift where the logistic survey rolloff is 50% complete. The completion grid covers `0 <= z <= 5`. | `[0.05, 4.5]` | Use a catalog-depth estimate when available. Avoid values at or beyond the grid edge. |
+| `w` | Logistic rolloff width in redshift units. | `[0.02, 1.5]` | Use narrower ranges for surveys with a well-characterized depth transition. |
 | `delta` | Power-law evolution of expected galaxy density, `n(z) = n0 (1+z)^delta`. | `[-3, 3]` | Broaden only with a catalog-specific justification. Merger-rate evolution is handled separately. |
 | `b_miss` | Bias amplitude for the LSS-modulated missing-galaxy density. Dimensionless. | `[0, 3]` | Fix to `1` or narrow around it unless testing LSS systematics. |
-| `alpha_miss` | Legacy isotropic/LSS blend weight. Enters the model only through the exact product `alpha_miss * b_miss` (a perfect degeneracy with `b_miss`), so it is **not sampled** and defaults to `1`; `b_miss` alone carries the LSS modulation. Set `b_miss = 0` to disable LSS modulation. | `[0, 1]` | Leave at `1`; vary `b_miss` instead. |
+| `alpha_miss` | Mixture between isotropic and LSS-modulated missing density. Dimensionless; `0` is isotropic, `1` is fully LSS-modulated. | `[0, 1]` | Use the full range for model uncertainty, or fix to `0` to disable LSS modulation. |
 
 The default survey priors are intentionally narrower than earlier broad exploratory bounds, because extremely large density or evolution ranges can make `C_iso`, `C_eff`, or `rho_miss_eff` clip over much of the redshift grid. If a fit truly requires broader bounds, pass explicit `--prior_overrides` for the affected survey labels and record the catalog-density units used to justify them.
 
@@ -69,7 +69,28 @@ This dry run loads the survey, computes clipping fractions for `C_iso`, `C_eff`,
 
 ## Population block
 
-Population parameters depend on `--pop_model`. Use a small dry run to print the parameter table before committing compute time to a production job.
+Population parameters depend on `--pop_model`. The model name is parsed as a
+composition grammar — see [Concepts → Population models](concepts.md#population-models)
+for the full syntax. Key points for configuration:
+
+- Curated compositions (`powerlaw+peak`, `brokenpowerlaw+2peaks`,
+  `2powerlaws+peak`, ...) carry physics-tuned per-component prior bounds and
+  fiducial values. Novel compositions (e.g. `powerlaw+3peaks`) build with
+  blueprint-default priors, uniform fiducial mixture weights, and an
+  informational log message; tune them per-run with `--prior_overrides`.
+- Parameter labels follow a uniform rule: mass parameters carry their
+  component tag when the mixture has two or more components
+  (`$\alpha_{\rm PL}$`, `$\mu_{\rm G1}$`), pairing/spin parameters are bare
+  when shared (`$\beta$`, `$\mu_\chi$`) and tagged when per-component
+  (`$\beta_{\rm G2}$`), mixture weights are `$v_1$ ... $v_{k-1}$`
+  (stick-breaking inputs), and `$\gamma$` is always last.
+- Deprecated spellings (`twopowerlaws+*`, the long `gwtc5_*` names) still
+  resolve but emit a `DeprecationWarning`; prefer the canonical names in new
+  job scripts.
+
+Use a small dry run to print the parameter table before committing compute
+time to a production job, and use exactly the printed labels in
+`--prior_overrides` and `--fixed_parameter_values`.
 
 ## Normalization-grid tuning
 

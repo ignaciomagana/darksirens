@@ -26,13 +26,7 @@ Use this mode with:
 
 ## Dark sirens with an incomplete catalog
 
-The default dark-siren model combines catalog galaxies with a missing-galaxy completion term, additively in galaxy number densities (the in/out-of-catalog decomposition of Gray et al. 2020, arXiv:1908.06050; Gair et al. 2023, AJ 166, 22):
-
-```
-p(z | pix) = [ N_obs(pix) * p_cat(z | pix) + dN_miss(z | pix) ] / [ N_obs(pix) + N_miss(pix) ]
-```
-
-Here `p_cat` is the normalised weighted-kernel catalog shape (each galaxy contributes a unit-mass volumetric photo-z posterior), `N_obs` is the observed galaxy count in the pixel, and `dN_miss = (1 - C(z)) * dN_exp(z) * max(1 + b_miss * delta_g, 0)` is the missing-galaxy density. Completeness `C(z)` is data-driven: the ratio of the boundary-corrected observed KDE to the expected counts `n0 * apix * dV/dz * (1+z)^delta`, both smoothed by the same matched kernel. There is no parametric roll-off (`z50`, `w` are inactive), and the prior integrates to 1 per pixel by construction. The catalog-vs-missing odds are therefore the count odds `N_obs : N_miss`, controlled by the sampled density normalisation `n0`.
+The default dark-siren model combines catalog galaxies with a missing-galaxy completion term. The completeness curve changes with redshift and is controlled by survey parameters such as `z50`, `w`, and density/evolution parameters.
 
 Use this mode with:
 
@@ -42,11 +36,51 @@ Use this mode with:
 
 ## Population models
 
-Population models are selected by name with `--pop_model`. The code uses a registry internally, so documented names map to callable model implementations and prior blocks. Common examples include:
+Population models are selected by name with `--pop_model`, and the name itself
+defines the mixture: `+`-separated component tokens, with optional digit count
+prefixes and sharing suffixes:
 
-- `powerlaw+peak`
-- `brokenpowerlaw+2peaks`
-- `gwtc5_fiducial_brokenpowerlaw+2peaks` (GWTC-5 Table 5 fiducial BBH mass model; aliases: `gwtc5_brokenpowerlaw+2peaks`, `gwtc5_fiducial_bpl2peaks`)
+```text
+name        := composition [suffix]
+composition := term ("+" term)*
+term        := token | <digits><plural>      # "peak", "2peaks", "3powerlaws"
+suffix      := _shared_beta | _shared_spin | _shared_beta_spin
+```
+
+Available mass tokens are `powerlaw`, `brokenpowerlaw`, and `peak` (a Gaussian
+peak). Any composition works without code changes — `powerlaw+3peaks` builds a
+power law plus three Gaussian peaks with blueprint-default priors. Curated
+compositions (e.g. `powerlaw+peak`, `brokenpowerlaw+2peaks`,
+`2powerlaws+peak`) additionally carry physics-tuned per-component priors and
+fiducial values. Examples:
+
+- `powerlaw+peak` — LVK POWER LAW + PEAK
+- `brokenpowerlaw+2peaks+powerlaw` — BPL + two peaks + high-mass tail
+- `2powerlaws+3peaks_shared_beta_spin` — five components, shared pairing/spin
+- `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint` — Gaussian-process models
+- `golomb_1g`, `golomb_1g+tail`, `gwtc5_fiducial_bpl2peaks` — bespoke
+  (non-mixture) models registered explicitly
+
+### Migration from the pre-grammar registry
+
+Model names and parameter labels were regularized when the registry moved to
+the grammar:
+
+- `twopowerlaws+peak`, `twopowerlaws+2peaks`, and `twopowerlaws+3peaks` are
+  now spelled `2powerlaws+peak`, `2powerlaws+2peaks`, `2powerlaws+3peaks`;
+  `gwtc5_fiducial_brokenpowerlaw+2peaks` and `gwtc5_brokenpowerlaw+2peaks` are
+  now `gwtc5_fiducial_bpl2peaks`. The old spellings still resolve (with a
+  `DeprecationWarning`), so existing `settings.json` files and HDF5
+  `pop_model` attributes keep working.
+- Mass-component parameter labels in multi-component mixtures now always carry
+  their component tag: `$\alpha$` became `$\alpha_{\rm PL}$`, `$\mu_1$` became
+  `$\mu_{\rm G1}$`, `$m_{\min}$` became `$m_{\min,\rm BPL}$`, and so on. Tags
+  are the component short name (`PL`, `BPL`, `G`) plus a 1-based index when a
+  token appears more than once. Pairing, spin, weight (`$v_i$`), and
+  `$\gamma$` labels are unchanged. **JSON keys passed via
+  `--fixed_parameter_values` or `--prior_overrides` that used old mass labels
+  must be updated.** Prior bounds, parameter ordering, and fiducial values are
+  unchanged — only names and labels moved.
 
 ## Selection effects
 

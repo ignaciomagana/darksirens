@@ -368,6 +368,12 @@ Use `--fixed_parameter_values` to fix individual parameters:
 
 Both options must be JSON objects. Quote them carefully in your shell.
 
+Population parameters are addressed by their printed LaTeX labels, e.g.
+`'{"$\\alpha_{\\rm PL}$": 2.3}'` for the power-law slope in `powerlaw+peak`.
+Run a small dry run first and copy the labels from the printed parameter
+table; the label conventions are described in
+[Concepts → Population models](concepts.md#population-models).
+
 ### Survey/completion parameters
 
 Incomplete-catalog dark-siren runs use survey/completion parameters.
