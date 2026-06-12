@@ -26,7 +26,16 @@ Use this mode with:
 
 ## Dark sirens with an incomplete catalog
 
-The default dark-siren model combines catalog galaxies with a missing-galaxy completion term. The completeness curve changes with redshift and is controlled by survey parameters such as `z50`, `w`, and density/evolution parameters.
+The default dark-siren model combines observed catalog galaxies with a missing-galaxy completion term. The current completion model is data-driven: for each catalog pixel it compares the smoothed observed galaxy redshift density to the smoothed expected density `n0 * dV_c/dz * (1 + z)^delta`. The same truncated, boundary-normalized Gaussian kernel is applied to both numerator and denominator, so a constant true completeness remains constant after smoothing, including near `z = 0`.
+
+The inferred missing-host density is an additive count density, not a replacement probability:
+
+```text
+dN_miss/dz = (1 - C(z|pix)) * n0 * apix * dV_c/dz * (1 + z)^delta
+             * max(1 + alpha_miss * b_miss * delta_g(pix,z), 0)
+```
+
+where `C(z|pix)` is the clipped matched-kernel ratio and `delta_g` is the optional observed large-scale-structure overdensity. `alpha_miss` and `b_miss` enter only through their exact product; by default the sampled amplitude is carried by `b_miss`; `alpha_miss` stays at its fiducial value of `1` unless explicitly fixed to a different value. The legacy `z50` and `w` survey parameters are retained for settings compatibility but no longer define a parametric logistic rolloff in the dark-siren completion likelihood. Use `--validate_completion true` before long runs to write clipping diagnostics for representative pixels and catch inconsistent survey-density assumptions.
 
 Use this mode with:
 
@@ -36,9 +45,9 @@ Use this mode with:
 
 ## Population models
 
-Population models are selected by name with `--pop_model`, and the name itself
-defines the mixture: `+`-separated component tokens, with optional digit count
-prefixes and sharing suffixes:
+Population models are selected by name with `--pop_model`. For parametric
+mixtures, the name itself is the model definition: `+`-separated mass-component
+tokens, optional digit count prefixes, and optional sharing suffixes:
 
 ```text
 name        := composition [suffix]
@@ -47,12 +56,28 @@ term        := token | <digits><plural>      # "peak", "2peaks", "3powerlaws"
 suffix      := _shared_beta | _shared_spin | _shared_beta_spin
 ```
 
-Available mass tokens are `powerlaw`, `brokenpowerlaw`, and `peak` (a Gaussian
-peak). Any composition works without code changes — `powerlaw+3peaks` builds a
-power law plus three Gaussian peaks with blueprint-default priors. Curated
-compositions (e.g. `powerlaw+peak`, `brokenpowerlaw+2peaks`,
-`2powerlaws+peak`) additionally carry physics-tuned per-component priors and
-fiducial values. Examples:
+Available grammar mass tokens are:
+
+| Token | Plural for count prefixes | Meaning | Default mass parameters |
+| --- | --- | --- | --- |
+| `powerlaw` | `powerlaws` | Smoothed primary-mass power law | `alpha`, `m_min`, `m_max`, `dm_min`, `dm_max` |
+| `brokenpowerlaw` | `brokenpowerlaws` | Two-slope primary-mass power law with a continuous break | `alpha1`, `alpha2`, `m_break`, `m_min`, `m_max`, `dm_min`, `dm_max` |
+| `peak` | `peaks` | Gaussian primary-mass peak | `mu`, `sigma` |
+
+Any grammar composition works without code changes: `powerlaw+3peaks` builds a
+power law plus three Gaussian peaks with blueprint-default priors and fiducial
+values. Curated compositions additionally carry physics-tuned per-component
+priors, fiducials, and display names:
+
+| Curated name | Display label | Notes |
+| --- | --- | --- |
+| `powerlaw+peak` | `PL+G` | Standard LVK-style power law plus peak. |
+| `brokenpowerlaw+2peaks` | `BPL+2G` | Broken power law plus two Gaussian peaks. |
+| `brokenpowerlaw+3peaks` | `BPL+3G` | Broken power law plus three Gaussian peaks. |
+| `brokenpowerlaw+2peaks+powerlaw` | `BPL+2G+PL` | Adds a high-mass power-law tail. |
+| `2powerlaws+peak`, `2powerlaws+2peaks`, `2powerlaws+3peaks` | `2PL+...` | Two power-law components plus one or more peaks. |
+
+Examples:
 
 - `powerlaw+peak` — LVK POWER LAW + PEAK
 - `brokenpowerlaw+2peaks+powerlaw` — BPL + two peaks + high-mass tail
@@ -60,6 +85,18 @@ fiducial values. Examples:
 - `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint` — Gaussian-process models
 - `golomb_1g`, `golomb_1g+tail`, `gwtc5_fiducial_bpl2peaks` — bespoke
   (non-mixture) models registered explicitly
+
+### Parameter order, weights, and labels
+
+The sampler-facing population parameter order is:
+
+```text
+v_weights -> mass components in composition order -> pairing -> spin -> gamma
+```
+
+Mixture weights are sampled as stick-breaking inputs `$v_i$`, not direct final fractions. A `k`-component mixture has `k - 1` sampled inputs in `[0, 1]`, and the final component receives the remaining stick by construction. This keeps all component weights non-negative and summing to one. If you are fixing a multi-component model by hand, convert desired final fractions with `v_i = w_i / (1 - w_1 - ... - w_{i-1})`; for two components, `v_1 = w_1`.
+
+Mass-component labels are tagged whenever there is more than one mass slot. A single `powerlaw` uses base labels such as `$\alpha$`, while `powerlaw+peak` uses `$\alpha_{\rm PL}$`, `$m_{\min,\rm PL}$`, `$\mu_{\rm G}$`, and `$\sigma_{\rm G}$`. Repeated tokens receive 1-based indices such as `$\mu_{\rm G1}$` and `$\mu_{\rm G2}$`. Pairing and spin parameters are also tagged per mass slot unless the model name ends in `_shared_beta`, `_shared_spin`, or `_shared_beta_spin` (or the model has only one mass slot). `$\gamma$` is always last.
 
 ### Migration from the pre-grammar registry
 

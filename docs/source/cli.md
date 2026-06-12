@@ -42,20 +42,20 @@ darksirens_inference \
 ### Physical-model options
 
 - `--universe_model`: one of `spectral_sirens`, `bright_sirens`, `dark_sirens`, or `dark_sirens_complete`.
-- `--pop_model`: population model name. The name is a composition grammar: `+`-separated component tokens (`powerlaw`, `brokenpowerlaw`, `peak`) with optional digit count prefixes and sharing suffixes, e.g. `powerlaw+peak`, `brokenpowerlaw+2peaks`, `2powerlaws+3peaks_shared_beta_spin`. Any composition works; curated names additionally carry physics-tuned priors. See [Concepts → Population models](concepts.md#population-models).
+- `--pop_model`: population model name. Parametric mixture names are parsed as a composition grammar: `+`-separated mass tokens (`powerlaw`, `brokenpowerlaw`, `peak`) with optional digit count prefixes and sharing suffixes, e.g. `powerlaw+peak`, `brokenpowerlaw+2peaks`, `2powerlaws+3peaks_shared_beta_spin`. Any grammar composition works with blueprint-default priors; curated names additionally carry physics-tuned priors and fiducials. Bespoke names such as `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint`, `golomb_1g`, `golomb_1g+tail`, and `gwtc5_fiducial_bpl2peaks` are registered explicitly. See [Concepts → Population models](concepts.md#population-models).
 - `--fix_population`: fix all population parameters to fiducial values.
 - `--fix_cosmology`: fix all cosmological parameters (`H0`, `Om0`, `w0`, `wa`) to fiducial values.
 - `--fix_de`: fix only the CPL dark-energy parameters (`w0=-1`, `wa=0`) while leaving `H0` and `Om0` available unless fixed separately.
 - `--fix_survey`: fix survey-completion parameters to fiducial values.
-- `--prior_overrides`: JSON object mapping parameter labels to `[lower, upper]` prior bounds, e.g. `{"H0": [60, 80], "w0": [-1.2, -0.8], "wa": [-0.5, 0.5]}`. Population parameters use their printed LaTeX labels, e.g. `{"$\\alpha_{\\rm PL}$": [0.0, 4.0]}`.
-- `--fixed_parameter_values`: JSON object mapping parameter labels to fixed scalar values, e.g. `{"Om0": 0.3075, "w0": -1.0, "wa": 0.0}` or `{"$\\mu_{\\rm G}$": 35.0}`.
+- `--prior_overrides`: JSON object mapping parameter labels to `[lower, upper]` prior bounds, e.g. `{"H0": [60, 80], "w0": [-1.2, -0.8], "wa": [-0.5, 0.5]}`. Population parameters use the printed LaTeX labels from the startup parameter table, e.g. `{"$\\alpha_{\\rm PL}$": [0.0, 4.0]}`. Multi-component mass labels are tagged by slot (`PL`, `BPL`, `G1`, `G2`, ...).
+- `--fixed_parameter_values`: JSON object mapping parameter labels to fixed scalar values, e.g. `{"Om0": 0.3075, "w0": -1.0, "wa": 0.0}` or `{"$\\mu_{\\rm G}$": 35.0}`. Mixture-weight labels are stick-breaking inputs (`$v_1$`, `$v_2$`, ...), not final component fractions.
 - `--bright_siren_sky_marginalized BOOL`: for `bright_sirens`, ignore the counterpart sky-pixel gate and apply only the counterpart redshift prior. Defaults to `False`. Accepted true values are `true`, `t`, `1`, `yes`, and `y`; accepted false values are `false`, `f`, `0`, `no`, and `n` (case-insensitive).
 - `--complete_empty_pixel_policy {zero,volume}`: controls genuinely empty pixels for `dark_sirens_complete` and `bright_sirens`. `zero` is the formal default and returns zero probability (`-inf` log-prior) when `ngals == 0`; `volume` uses the comoving-volume prior as a robustness approximation for sparse pixelations.
 
 ### Catalog options
 
 - `--use_LSS`: include large-scale-structure overdensity where supported.
-- `--validate_completion`: run a dry-run completion clipping diagnostic, save `completion_validation__*.json` under `--save_path`, and exit before likelihood construction or sampling.
+- `--validate_completion`: run a dry-run completion clipping diagnostic, save `completion_validation__*.json` under `--save_path`, and exit before likelihood construction or sampling. The diagnostic uses the same matched-kernel completeness ratio as the likelihood and reports clipping fractions for the raw ratio, LSS modulation, and effective completeness.
 - `--completion_validation_pixels`: maximum number of unique catalog pixels to inspect during `--validate_completion`; defaults to `64`.
 
 ### Sampler options
@@ -75,6 +75,7 @@ darksirens_inference \
 - `--nuts_init_seed_offset`: seed offset used for the NUTS fallback initial-point search.
 - `--seed`: random seed.
 - `--show_progress`: enable or disable progress bars.
+- `--dynesty_diagnostics`: when using `--sampler dynesty`, write periodic runplot/traceplot PDF diagnostics under `<save_path>/dynesty_diagnostics/`.
 
 ### Performance options
 

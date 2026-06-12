@@ -20,8 +20,12 @@ intended to be imported by tests, notebooks, and custom inference drivers.
   `pop_model_prior_parser`, `get_fixed_population_params`).
 - **EM prior modules** in `darksirens.em` implement the redshift priors for
   spectral sirens, complete catalogs, incomplete catalogs, and bright-siren
-  counterparts.  The inference code selects these functions with
-  `get_redshift_prior` based on `--universe_model`.
+  counterparts.  Incomplete-catalog completion lives in
+  `darksirens.em.completion`: it builds a cached observed-galaxy KDE per unique
+  catalog pixel, estimates completeness as a matched-kernel ratio against the
+  expected galaxy density, and exposes `completion_curves` for the likelihood
+  hot path plus scalar/vmapped helpers for diagnostics.  The inference code
+  selects these functions with `get_redshift_prior` based on `--universe_model`.
 - **Inference modules** in `darksirens.inference` load and compact data, build
   parameter tables and prior transforms, evaluate the selection correction, and
   expose sampler adapters for `jaxns`, `dynesty`, and `emcee`.

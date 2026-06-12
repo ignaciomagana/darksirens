@@ -189,6 +189,18 @@ darksirens_inference \
 | `dark_sirens_complete` | Complete-catalog dark-siren inference. Requires `--survey_path`. |
 | `bright_sirens` | Bright-siren inference using known counterpart coordinates/redshifts via `--counterpart`. |
 
+### Population-model names in CLI runs
+
+`--pop_model` accepts either a grammar-built mixture or an explicitly registered bespoke model. Grammar mixtures combine `powerlaw`, `brokenpowerlaw`, and `peak` mass tokens with optional count prefixes (`2peaks`, `3powerlaws`) and optional suffixes (`_shared_beta`, `_shared_spin`, `_shared_beta_spin`). For example:
+
+```bash
+--pop_model powerlaw+peak
+--pop_model brokenpowerlaw+2peaks+powerlaw
+--pop_model 2powerlaws+3peaks_shared_beta_spin
+```
+
+The first `k - 1` mixture parameters are `$v_i$` stick-breaking coordinates for a `k`-component mixture. The startup parameter table is the authoritative source for CLI JSON labels and bounds; copy labels from that table when using `--prior_overrides` or `--fixed_parameter_values`.
+
 ### Spectral-siren workflow
 
 A spectral-siren run uses GW posterior samples and GW selection samples, but no galaxy survey.
@@ -231,7 +243,7 @@ darksirens_inference \
   --save_path runs/dark_powerlaw_peak
 ```
 
-The incomplete-catalog model combines catalog galaxies with a missing-galaxy completion term. Survey parameters such as `log10n0`, `z50`, `w`, `delta`, `b_miss`, and `alpha_miss` control the completion model.
+The incomplete-catalog model combines catalog galaxies with an additive missing-galaxy density. Completion is estimated from a matched-kernel ratio: observed per-pixel galaxy counts are smoothed on the redshift grid with the same truncated Gaussian operator used for the expected `n0 * dV_c/dz * (1 + z)^delta` counts. The likelihood then adds `(1 - C) * dN_exp/dz`, optionally modulated by `max(1 + alpha_miss * b_miss * delta_g, 0)` when LSS information is enabled. `z50`, `w`, and `alpha_miss` are legacy/degenerate compatibility parameters that are not sampled for `dark_sirens` by default; `z50` and `w` do not impose a logistic rolloff in the current completion model.
 
 ### Complete-catalog dark-siren workflow
 
@@ -330,6 +342,7 @@ Common sampler options:
 | `--nuts_init_seed_offset` | `100000` | `numpyro` | Added to `--seed` for deterministic fallback-init candidate generation. |
 | `--seed` | `22` | all | Random seed. |
 | `--show_progress` | `true` | all | Enable progress output where supported. |
+| `--dynesty_diagnostics` | `false` | `dynesty` | Write periodic dynesty runplot/traceplot PDF diagnostics under `<save_path>/dynesty_diagnostics/`. |
 
 ## Parameter configuration
 
@@ -372,7 +385,9 @@ Population parameters are addressed by their printed LaTeX labels, e.g.
 `'{"$\\alpha_{\\rm PL}$": 2.3}'` for the power-law slope in `powerlaw+peak`.
 Run a small dry run first and copy the labels from the printed parameter
 table; the label conventions are described in
-[Concepts → Population models](concepts.md#population-models).
+[Concepts → Population models](concepts.md#population-models). Mixture weights use
+stick-breaking labels (`$v_1$`, `$v_2$`, ...) rather than direct final fractions;
+convert desired final fractions before fixing them in JSON.
 
 ### Survey/completion parameters
 
@@ -380,12 +395,13 @@ Incomplete-catalog dark-siren runs use survey/completion parameters.
 
 | Parameter | Meaning |
 | --- | --- |
-| `log10n0` | Base-10 logarithm of the comoving galaxy density normalization. |
-| `z50` | Redshift where the survey completeness curve is 50%. |
-| `w` | Width of the logistic completeness rolloff. |
-| `delta` | Power-law evolution of expected galaxy density with redshift. |
+| `log10n0` | Base-10 logarithm of the comoving galaxy density normalization `n0` in the expected count model. |
+| `z50` | Legacy compatibility parameter; retained in settings/priors but not used by the matched-kernel completion likelihood. |
+| `w` | Legacy compatibility parameter; retained in settings/priors but not used as a logistic rolloff width. |
+| `delta` | Power-law evolution of expected galaxy density, `n(z) = n0 * (1 + z)^delta`. |
 | `b_miss` | Bias amplitude for LSS-modulated missing galaxies. |
-| `alpha_miss` | Mixture between isotropic and LSS-modulated missing density. |
+| `alpha_miss` | Multiplies `b_miss` exactly; the model depends on `alpha_miss * b_miss`, so these two labels are degenerate and the default fixed value is `alpha_miss = 1`. |
+| `sigma_kde` | Extra catalog-redshift KDE broadening, added in quadrature to catalog redshift errors. |
 
 Before a long dark-siren run, validate the completion model:
 
@@ -401,13 +417,13 @@ darksirens_inference \
   --save_path runs/completion_validation
 ```
 
-This loads the data, computes completion clipping diagnostics, writes a file like:
+This loads the data, builds the per-pixel observed-galaxy KDE cache, computes completion clipping diagnostics, writes a file like:
 
 ```text
 completion_validation__YYYY-MM-DDTHH-MM-SS.json
 ```
 
-and exits before likelihood construction and sampling.
+and exits before likelihood construction and sampling. The JSON includes the representative survey/cosmology values used for the dry run plus per-pixel and summary clipping fractions for `C_iso`, `C_eff`, and the LSS missing-density factor.
 
 ## Performance tuning
 
