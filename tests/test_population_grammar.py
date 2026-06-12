@@ -18,6 +18,7 @@ from darksirens.gw.populations import (
     pop_model_parser,
     pop_model_prior_parser,
 )
+from darksirens.gw.populations.base import PopulationModel
 from darksirens.gw.populations.grammar import (
     ModelNameError,
     parse_model_name,
@@ -162,6 +163,50 @@ def test_single_component_labels_untagged():
     _, _, labels, _ = pop_model_prior_parser("gp_mass")
     assert labels[0] == r"$m_{\min}$"
     assert r"$\beta$" in labels and r"$\mu_\chi$" in labels
+
+
+def test_per_component_gamma_specs_and_evaluation():
+    shared_model = get_model("powerlaw+peak")
+    model = PopulationModel(mixture=shared_model.mixture, shared_gamma=False)
+
+    specs = model.param_specs
+    assert [s.label for s in specs[-2:]] == [
+        r"$\gamma_{\rm PL}$",
+        r"$\gamma_{\rm G}$",
+    ]
+    assert [s.name for s in specs[-2:]] == ["PL.gamma", "G.gamma"]
+
+    fid = jnp.asarray(get_fixed_population_params("powerlaw+peak"), dtype=jnp.float64)
+    theta = jnp.concatenate([fid[:-1], jnp.asarray([-1.0, 2.0])])
+    m1 = jnp.array([8.0, 35.0, 60.0])
+    q = jnp.array([0.7, 0.9, 0.8])
+    z = jnp.array([0.2, 0.3, 0.1])
+    chi = jnp.array([0.0, 0.1, -0.1])
+
+    comp = model.mixture.component_densities(m1, q, chi, fid[:-1])
+    expected = jnp.log(
+        jnp.sum(comp * (1.0 + z) ** jnp.asarray([[-2.0], [1.0]]), axis=0)
+    )
+    actual = model.log_p_pop(m1, q, z, chi, theta)
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-10)
+
+
+def test_shared_gamma_default_preserves_param_order_and_evaluation():
+    model = get_model("powerlaw+peak")
+    fid = jnp.asarray(get_fixed_population_params("powerlaw+peak"), dtype=jnp.float64)
+    m1 = jnp.array([8.0, 35.0, 60.0])
+    q = jnp.array([0.7, 0.9, 0.8])
+    z = jnp.array([0.2, 0.3, 0.1])
+    chi = jnp.array([0.0, 0.1, -0.1])
+
+    assert model.shared_gamma is True
+    assert model.param_specs[-1].label == r"$\gamma$"
+    assert model.param_specs[-1].name == "gamma"
+
+    p = model.mixture(m1, q, chi, fid[:-1])
+    expected = jnp.log(p) + (fid[-1] - 1.0) * jnp.log1p(z)
+    actual = model.log_p_pop(m1, q, z, chi, fid)
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-10)
 
 
 # ── Novel compositions ───────────────────────────────────────────────────────
