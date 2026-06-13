@@ -9,7 +9,9 @@ The model NAME is the model definition.  ``--pop_model`` strings are parsed by
     powerlaw+peak                       PowerLaw + Gaussian peak mixture
     brokenpowerlaw+2peaks+powerlaw      BPL + 2 Gaussians + PL tail
     3powerlaws+peak                     novel composition - works with NO code
-    <name>_shared_beta[_spin]           share pairing/spin across components
+    <name>_shared_beta                  explicit spelling of shared pairing default
+    <name>_shared_spin                  explicit spelling of shared spin default
+    <name>_shared_gamma                 explicit spelling of shared gamma default
 
 Components self-register grammar tokens with default labels, prior bounds, and
 fiducials (see :mod:`.components`).  Curated legacy compositions keep their
@@ -64,6 +66,7 @@ from .components import (
 )
 from .grammar import (
     ModelNameError,
+    _SUFFIX_FLAGS,
     _split_suffix,
     _stick_breaking_weights_np,  # noqa: F401  (re-exported for callers/tests)
     _w_to_v,
@@ -222,7 +225,7 @@ def _resolve_legacy(pop_model: str) -> str:
     if pop_model in LEGACY_NAME_ALIASES:
         target = LEGACY_NAME_ALIASES[pop_model]
     else:
-        base, _sb, _ss = _split_suffix(pop_model)
+        base, _sb, _ss, _sg = _split_suffix(pop_model)
         if base not in LEGACY_BASE_ALIASES:
             return pop_model
         target = LEGACY_BASE_ALIASES[base] + pop_model[len(base):]
@@ -334,11 +337,23 @@ register_model(
 # 4. Display names
 # ============================================================
 
-_VARIANT_DECOR = (
-    ("", ""),
-    ("_shared_beta", r" (Shared $\beta$)"),
-    ("_shared_spin", r" (Shared Spin)"),
-    ("_shared_beta_spin", r" (Shared $\beta$, Spin)"),
+_VARIANT_LABELS = {
+    "shared_beta": r"Shared $\beta$",
+    "shared_spin": "Shared Spin",
+    "shared_gamma": r"Shared $\gamma$",
+}
+_VARIANT_SUFFIXES = ("", *_SUFFIX_FLAGS)
+
+
+def _suffix_decor(suffix: str) -> str:
+    flags = _SUFFIX_FLAGS.get(suffix)
+    if not flags:
+        return ""
+    return " (" + ", ".join(_VARIANT_LABELS[f] for f in flags) + ")"
+
+
+_VARIANT_DECOR = tuple(
+    (suffix, _suffix_decor(suffix)) for suffix in _VARIANT_SUFFIXES
 )
 
 for _base, _entry in CURATED.items():
@@ -358,9 +373,8 @@ def _latex_name(pop_model: str) -> str:
         ir = parse_model_name(pop_model)
     except ModelNameError:
         return pop_model
-    decor = dict((s, d) for s, d in _VARIANT_DECOR)
     suffix = pop_model[len(ir.base_name):]
-    return derive_latex([s.token for s in ir.slots]) + decor.get(suffix, "")
+    return derive_latex([s.token for s in ir.slots]) + _suffix_decor(suffix)
 
 
 # ============================================================
@@ -377,7 +391,7 @@ def available_models() -> list[str]:
 
 
 def _build_mixture_model(name: str) -> PopulationModel:
-    base, shared_beta, shared_spin = _split_suffix(name)
+    base, shared_beta, shared_spin, shared_gamma = _split_suffix(name)
 
     entry = CURATED.get(base)
     if entry is not None and entry.mass is not None:
@@ -386,6 +400,7 @@ def _build_mixture_model(name: str) -> PopulationModel:
             entry.mass,
             shared_beta=shared_beta,
             shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
             pairing=entry.pairing,
             spin=entry.spin,
             bounds=entry.bounds,
@@ -400,12 +415,16 @@ def _build_mixture_model(name: str) -> PopulationModel:
             "grammar with blueprint-default priors and fiducials.", name,
         )
         return build_population_model(
-            tokens, shared_beta=ir.shared_beta, shared_spin=ir.shared_spin,
+            tokens,
+            shared_beta=ir.shared_beta,
+            shared_spin=ir.shared_spin,
+            shared_gamma=ir.shared_gamma,
         )
     return build_population_model(
         tokens,
         shared_beta=ir.shared_beta,
         shared_spin=ir.shared_spin,
+        shared_gamma=ir.shared_gamma,
         bounds=entry.bounds,
     )
 
@@ -443,13 +462,14 @@ def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
     if name in _CUSTOM_FIDUCIALS:
         return jnp.array(_CUSTOM_FIDUCIALS[name], dtype=float)
 
-    base, shared_beta, shared_spin = _split_suffix(name)
+    base, shared_beta, shared_spin, shared_gamma = _split_suffix(name)
     entry = CURATED.get(base)
     if entry is not None and entry.mass is not None:
         return build_fiducial_vector(
             entry.mass,
             shared_beta=shared_beta,
             shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
             pairing=entry.pairing,
             spin=entry.spin,
             weights=entry.weights,
@@ -466,12 +486,14 @@ def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
             tokens,
             shared_beta=ir.shared_beta,
             shared_spin=ir.shared_spin,
+            shared_gamma=ir.shared_gamma,
             on_violation="error",
         )
     return build_fiducial_vector(
         tokens,
         shared_beta=ir.shared_beta,
         shared_spin=ir.shared_spin,
+        shared_gamma=ir.shared_gamma,
         weights=entry.weights,
         fids=entry.fids,
         bounds=entry.bounds,
