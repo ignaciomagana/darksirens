@@ -26,6 +26,9 @@ from darksirens.utils.cosmology import dL_in_z_grid
         "nEvents",
         "nsamp",
         "pop_model",
+        "shared_beta",
+        "shared_spin",
+        "shared_gamma",
         "universe_model",
         "sel_batch_size",
     ],
@@ -43,10 +46,18 @@ def darksiren_log_likelihood(
     Ndraw: float,
     pop_model: str,
     universe_model: str,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
     sel_batch_size: int | None = None,
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``."""
-    log_p_pop = pop_model_parser(pop_model=pop_model)
+    log_p_pop = pop_model_parser(
+        pop_model=pop_model,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    )
     selection_model = (
         "spectral_sirens" if universe_model == "bright_sirens" else universe_model
     )

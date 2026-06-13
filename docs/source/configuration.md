@@ -80,9 +80,12 @@ for the full syntax. Key points for configuration:
   informational log message; tune them per-run with `--prior_overrides`.
 - Parameter labels follow a uniform rule: mass parameters carry their
   component tag when the mixture has two or more components
-  (`$\alpha_{\rm PL}$`, `$\mu_{\rm G1}$`), pairing/spin parameters are bare
-  when shared (`$\beta$`, `$\mu_\chi$`) and tagged when per-component
-  (`$\beta_{\rm G2}$`), mixture weights are `$v_1$ ... $v_{k-1}$`
+  (`$\alpha_{\rm PL}$`, `$\mu_{\rm G1}$`). CLI grammar models share pairing,
+  spin, and redshift evolution by default, so those labels are bare
+  (`$\beta$`, `$\mu_\chi$`, `$\sigma_\chi$`, `$\gamma$`). Set
+  `--shared_beta false`, `--shared_spin false`, or `--shared_gamma false` for
+  per-component labels tagged by mass slot (for example `$\beta_{\rm G2}$`).
+  Mixture weights are `$v_1$ ... $v_{k-1}$`
   (stick-breaking inputs), and `$\gamma$` is always last.
 - Deprecated spellings (`twopowerlaws+*`, the long `gwtc5_*` names) still
   resolve but emit a `DeprecationWarning`; prefer the canonical names in new

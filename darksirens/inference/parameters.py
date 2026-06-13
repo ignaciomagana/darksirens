@@ -112,6 +112,9 @@ def build_parameter_decoder(
         prior_overrides=getattr(opts, "prior_overrides", None),
         fixed_parameter_values=fixed_parameter_values,
         universe_model=getattr(opts, "universe_model", None),
+        shared_beta=getattr(opts, "shared_beta", True),
+        shared_spin=getattr(opts, "shared_spin", True),
+        shared_gamma=getattr(opts, "shared_gamma", True),
     )
 
     return ParameterDecoder(

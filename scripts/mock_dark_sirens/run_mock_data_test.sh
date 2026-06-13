@@ -163,7 +163,7 @@ if [ "${RUN_INFERENCE}" = "1" ]; then
     --gwselection_path "${OUTDIR}/mock_gw_selection.h5" \
     --survey_path "${OUTDIR}/catalog_pixelated_nside_${NSIDE}.h5" \
     --sampler dynesty \
-    --pop_model powerlaw+peak_shared_beta_spin \
+    --pop_model powerlaw+peak \
     --universe_model dark_sirens \
     --fix_population False \
     --fix_cosmology False \

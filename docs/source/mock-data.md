@@ -64,7 +64,7 @@ The simulation is intentionally simple:
 1. Draw galaxies isotropically on the sky and uniformly in comoving volume.
 2. Apply an EM survey footprint, an apparent-magnitude cut, a redshift limit, and a smooth redshift-completeness curve.
 3. Draw GW hosts from the complete pre-selection catalog.
-4. Draw binary masses/spins from `powerlaw+peak_shared_beta_spin`: a power-law plus Gaussian peak mass model with one shared mass-ratio beta and one shared truncated-Gaussian `chi_eff` model.
+4. Draw binary masses/spins from `powerlaw+peak` with the default shared beta/spin/gamma CLI settings: a power-law plus Gaussian peak mass model with shared mass-ratio beta, truncated-Gaussian `chi_eff`, and redshift-evolution gamma parameters.
 5. Apply a semi-analytic network-SNR threshold to decide GW detectability.
 6. Write posterior samples around detected truth values and detected gwcat-format selection samples with `pdraw` weights.
 

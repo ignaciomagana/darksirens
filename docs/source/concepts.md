@@ -46,14 +46,16 @@ Use this mode with:
 ## Population models
 
 Population models are selected by name with `--pop_model`. For parametric
-mixtures, the name itself is the model definition: `+`-separated mass-component
-tokens, optional digit count prefixes, and optional sharing suffixes:
+mixtures, the name itself is the mass-composition definition: `+`-separated
+mass-component tokens with optional digit count prefixes. Pairing, spin, and
+redshift-evolution sharing are separate CLI controls (`--shared_beta`,
+`--shared_spin`, and `--shared_gamma`) and are not encoded as suffixes in
+`--pop_model`:
 
 ```text
-name        := composition [suffix]
+name        := composition
 composition := term ("+" term)*
 term        := token | <digits><plural>      # "peak", "2peaks", "3powerlaws"
-suffix      := _shared_beta | _shared_spin | _shared_beta_spin
 ```
 
 Available grammar mass tokens are:
@@ -81,7 +83,7 @@ Examples:
 
 - `powerlaw+peak` — LVK POWER LAW + PEAK
 - `brokenpowerlaw+2peaks+powerlaw` — BPL + two peaks + high-mass tail
-- `2powerlaws+3peaks_shared_beta_spin` — five components, shared pairing/spin
+- `2powerlaws+3peaks` — five mass components; add `--shared_beta false`, `--shared_spin false`, or `--shared_gamma false` for per-component beta, spin, or redshift evolution
 - `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint` — Gaussian-process models
 - `golomb_1g`, `golomb_1g+tail`, `gwtc5_fiducial_bpl2peaks` — bespoke
   (non-mixture) models registered explicitly
@@ -96,7 +98,7 @@ v_weights -> mass components in composition order -> pairing -> spin -> gamma
 
 Mixture weights are sampled as stick-breaking inputs `$v_i$`, not direct final fractions. A `k`-component mixture has `k - 1` sampled inputs in `[0, 1]`, and the final component receives the remaining stick by construction. This keeps all component weights non-negative and summing to one. If you are fixing a multi-component model by hand, convert desired final fractions with `v_i = w_i / (1 - w_1 - ... - w_{i-1})`; for two components, `v_1 = w_1`.
 
-Mass-component labels are tagged whenever there is more than one mass slot. A single `powerlaw` uses base labels such as `$\alpha$`, while `powerlaw+peak` uses `$\alpha_{\rm PL}$`, `$m_{\min,\rm PL}$`, `$\mu_{\rm G}$`, and `$\sigma_{\rm G}$`. Repeated tokens receive 1-based indices such as `$\mu_{\rm G1}$` and `$\mu_{\rm G2}$`. Pairing and spin parameters are also tagged per mass slot unless the model name ends in `_shared_beta`, `_shared_spin`, or `_shared_beta_spin` (or the model has only one mass slot). `$\gamma$` is always last.
+Mass-component labels are tagged whenever there is more than one mass slot. A single `powerlaw` uses base labels such as `$\alpha$`, while `powerlaw+peak` uses `$\alpha_{\rm PL}$`, `$m_{\min,\rm PL}$`, `$\mu_{\rm G}$`, and `$\sigma_{\rm G}$`. Repeated tokens receive 1-based indices such as `$\mu_{\rm G1}$` and `$\mu_{\rm G2}$`. Pairing, spin, and redshift-evolution parameters are shared by default, so their labels remain untagged (`$\beta$`, `$\mu_\chi$`, `$\sigma_\chi$`, `$\gamma$`) and `$\gamma$` is always last. Set `--shared_beta false`, `--shared_spin false`, or `--shared_gamma false` to sample per-component parameters tagged by mass slot (for example `$\beta_{\rm G2}$` or `$\gamma_{\rm PL}$`).
 
 ### Migration from the pre-grammar registry
 

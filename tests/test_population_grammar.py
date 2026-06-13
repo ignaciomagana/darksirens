@@ -1,6 +1,5 @@
 """Unit tests for the population model-name grammar and generic builder."""
 
-import itertools
 import subprocess
 import sys
 from pathlib import Path
@@ -44,13 +43,6 @@ PARSE_CASES = [
     ("2powerlaws+peak",
      ["powerlaw", "powerlaw", "peak"], ["PL1", "PL2", "G"], True, True, True,
      "2powerlaws+peak"),
-    ("2powerlaws+3peaks_shared_beta",
-     ["powerlaw", "powerlaw", "peak", "peak", "peak"],
-     ["PL1", "PL2", "G1", "G2", "G3"], True, True, True, "2powerlaws+3peaks"),
-    ("powerlaw+peak_shared_beta_shared_spin",
-     ["powerlaw", "peak"], ["PL", "G"], True, True, True, "powerlaw+peak"),
-    ("powerlaw+peak_shared_spin",
-     ["powerlaw", "peak"], ["PL", "G"], True, True, True, "powerlaw+peak"),
     # respelled compositions collapse to the same canonical key
     ("powerlaw+powerlaw+peak",
      ["powerlaw", "powerlaw", "peak"], ["PL1", "PL2", "G"], True, True, True,
@@ -72,28 +64,16 @@ def test_parse_model_name(name, tokens, tags, sb, ss, sg, canonical):
     assert ir.canonical == canonical
 
 
-def test_gamma_suffixes_parse_and_compose():
-    explicit_shared = parse_model_name(
-        "powerlaw+peak_shared_beta_shared_spin_shared_gamma"
-    )
-    assert explicit_shared.shared_beta is True
-    assert explicit_shared.shared_spin is True
-    assert explicit_shared.shared_gamma is True
-
-    normalized = parse_model_name("powerlaw+peak_shared_beta_shared_gamma")
-    assert normalized.shared_beta is True
-    assert normalized.shared_spin is True
-    assert normalized.shared_gamma is True
-
-
-def test_all_shared_suffix_permutations_parse():
-    atoms = ("shared_beta", "shared_spin", "shared_gamma")
-    for n_atoms in range(1, len(atoms) + 1):
-        for ordered_atoms in itertools.permutations(atoms, n_atoms):
-            ir = parse_model_name("powerlaw+peak_" + "_".join(ordered_atoms))
-            assert ir.shared_beta is True
-            assert ir.shared_spin is True
-            assert ir.shared_gamma is True
+def test_shared_suffixes_are_no_longer_part_of_model_names():
+    for name in (
+        "powerlaw+peak_shared_beta",
+        "powerlaw+peak_shared_spin",
+        "powerlaw+peak_shared_gamma",
+        "powerlaw+peak_shared_beta_spin",
+        "powerlaw+peak_shared_beta_shared_spin_shared_gamma",
+    ):
+        with pytest.raises(ValueError, match="Unknown component"):
+            parse_model_name(name)
 
 
 def test_respelled_curated_name_gets_curated_priors():
@@ -138,10 +118,6 @@ def test_unknown_model_raises_value_error():
 
 @pytest.mark.parametrize("legacy,canonical", [
     ("twopowerlaws+peak", "2powerlaws+peak"),
-    (
-        "twopowerlaws+2peaks_shared_beta_shared_spin",
-        "2powerlaws+2peaks_shared_beta_shared_spin",
-    ),
     ("gwtc5_fiducial_brokenpowerlaw+2peaks", "gwtc5_fiducial_bpl2peaks"),
     ("gwtc5_brokenpowerlaw+2peaks", "gwtc5_fiducial_bpl2peaks"),
 ])
@@ -180,20 +156,42 @@ def test_powerlaw_peak_labels():
     assert latex == "PL+G"
 
 
-def test_gamma_suffix_registry_builds_expected_parameters():
+def test_shared_gamma_cli_flag_builds_expected_parameters():
     _, _, labels, latex = pop_model_prior_parser(
-        "powerlaw+peak_shared_beta_shared_spin_shared_gamma"
+        "powerlaw+peak", shared_beta=True, shared_spin=True, shared_gamma=True
     )
     assert labels[-1:] == [r"$\gamma$"]
-    assert latex == r"PL+G (Shared $\beta$, Shared Spin, Shared $\gamma$)"
+    assert latex == "PL+G"
 
     fid = np.asarray(
         get_fixed_population_params(
-            "powerlaw+peak_shared_beta_shared_spin_shared_gamma"
+            "powerlaw+peak", shared_beta=True, shared_spin=True, shared_gamma=True
         )
     )
     assert fid.shape == (len(labels),)
     assert fid[-1] == 0.0
+
+
+def test_per_component_cli_flags_build_expected_labels():
+    _, _, labels, latex = pop_model_prior_parser(
+        "powerlaw+peak", shared_beta=False, shared_spin=False, shared_gamma=False
+    )
+    assert r"$\beta_{\rm PL}$" in labels
+    assert r"$\beta_{\rm G}$" in labels
+    assert r"$\mu_{\chi,\rm PL}$" in labels
+    assert r"$\mu_{\chi,\rm G}$" in labels
+    assert labels[-2:] == [r"$\gamma_{\rm PL}$", r"$\gamma_{\rm G}$"]
+    assert latex == (
+        r"PL+G (Per-component $\beta$, Per-component Spin, "
+        r"Per-component $\gamma$)"
+    )
+
+    fid = np.asarray(
+        get_fixed_population_params(
+            "powerlaw+peak", shared_beta=False, shared_spin=False, shared_gamma=False
+        )
+    )
+    assert fid.shape == (len(labels),)
 
 
 def test_param_ascii_names():
@@ -264,7 +262,6 @@ NOVEL_NAMES = [
     "powerlaw+2peaks",
     "brokenpowerlaw+peak+powerlaw",
     "3powerlaws+peak",
-    "powerlaw+2peaks_shared_beta_shared_spin",
 ]
 
 

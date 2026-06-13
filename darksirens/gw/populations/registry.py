@@ -9,9 +9,10 @@ The model NAME is the model definition.  ``--pop_model`` strings are parsed by
     powerlaw+peak                       PowerLaw + Gaussian peak mixture
     brokenpowerlaw+2peaks+powerlaw      BPL + 2 Gaussians + PL tail
     3powerlaws+peak                     novel composition - works with NO code
-    <name>_shared_beta                  explicit spelling of shared pairing default
-    <name>_shared_spin                  explicit spelling of shared spin default
-    <name>_shared_gamma                 explicit spelling of shared gamma default
+
+Sharing of beta/pairing, spin, and gamma is controlled by separate
+``shared_beta``, ``shared_spin``, and ``shared_gamma`` flags, not by suffixes
+in the model name.
 
 Components self-register grammar tokens with default labels, prior bounds, and
 fiducials (see :mod:`.components`).  Curated legacy compositions keep their
@@ -66,8 +67,6 @@ from .components import (
 )
 from .grammar import (
     ModelNameError,
-    _SUFFIX_FLAGS,
-    _split_suffix,
     _stick_breaking_weights_np,  # noqa: F401  (re-exported for callers/tests)
     _w_to_v,
     build_fiducial_vector,
@@ -186,8 +185,7 @@ CURATED: dict[str, Curated] = {
         fids={2: {"mu": 10.0, "sigma": 3.0}, 4: {"mu": 70.0, "sigma": 10.0}},
     ),
     # ---- GP models: names are not grammar-parseable, so the composition is
-    # explicit.  Shared-suffix variants are accepted but are no-ops (k = 1),
-    # exactly like the old flag-ignoring GP factories.
+    # explicit.
     "gp_mass": Curated(
         latex="GP",
         mass=("gp_mass",), pairing=("pl_pairing",), spin=("spin",),
@@ -207,7 +205,7 @@ CURATED: dict[str, Curated] = {
 # 2. Legacy name aliases (clean-break migration aids)
 # ============================================================
 
-# Base-name aliases: the suffix (_shared_beta etc.) is re-attached after remap.
+# Base-name aliases.
 LEGACY_BASE_ALIASES = {
     "twopowerlaws+peak": "2powerlaws+peak",
     "twopowerlaws+2peaks": "2powerlaws+2peaks",
@@ -224,11 +222,10 @@ LEGACY_NAME_ALIASES = {
 def _resolve_legacy(pop_model: str) -> str:
     if pop_model in LEGACY_NAME_ALIASES:
         target = LEGACY_NAME_ALIASES[pop_model]
+    elif pop_model in LEGACY_BASE_ALIASES:
+        target = LEGACY_BASE_ALIASES[pop_model]
     else:
-        base, _sb, _ss, _sg = _split_suffix(pop_model)
-        if base not in LEGACY_BASE_ALIASES:
-            return pop_model
-        target = LEGACY_BASE_ALIASES[base] + pop_model[len(base):]
+        return pop_model
     warnings.warn(
         f"Population model name {pop_model!r} is deprecated; use {target!r}.",
         DeprecationWarning,
@@ -337,51 +334,73 @@ register_model(
 # 4. Display names
 # ============================================================
 
-_VARIANT_LABELS = {
+_SHARING_LABELS = {
     "shared_beta": r"Shared $\beta$",
     "shared_spin": "Shared Spin",
     "shared_gamma": r"Shared $\gamma$",
+    "per_component_beta": r"Per-component $\beta$",
+    "per_component_spin": "Per-component Spin",
+    "per_component_gamma": r"Per-component $\gamma$",
 }
-_VARIANT_SUFFIXES = ("", *_SUFFIX_FLAGS)
-
-
-def _suffix_decor(suffix: str) -> str:
-    flags = _SUFFIX_FLAGS.get(suffix)
-    if not flags:
-        return ""
-    return " (" + ", ".join(_VARIANT_LABELS[f] for f in flags) + ")"
-
-
-_VARIANT_DECOR = tuple(
-    (suffix, _suffix_decor(suffix)) for suffix in _VARIANT_SUFFIXES
-)
 
 for _base, _entry in CURATED.items():
-    for _sfx, _decor in _VARIANT_DECOR:
-        MODEL_NAME_LATEX[_base + _sfx] = _entry.latex + _decor
+    MODEL_NAME_LATEX[_base] = _entry.latex
 for _legacy, _canon in LEGACY_BASE_ALIASES.items():
-    for _sfx, _decor in _VARIANT_DECOR:
-        MODEL_NAME_LATEX[_legacy + _sfx] = CURATED[_canon].latex + _decor
+    MODEL_NAME_LATEX[_legacy] = CURATED[_canon].latex
 for _legacy, _canon in LEGACY_NAME_ALIASES.items():
     MODEL_NAME_LATEX[_legacy] = MODEL_NAME_LATEX[_canon]
 
 
-def _latex_name(pop_model: str) -> str:
+def _sharing_key(
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> tuple[bool, bool, bool]:
+    return bool(shared_beta), bool(shared_spin), bool(shared_gamma)
+
+
+def _sharing_decor(
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> str:
+    if shared_beta and shared_spin and shared_gamma:
+        return ""
+    labels = []
+    labels.append(_SHARING_LABELS["shared_beta" if shared_beta else "per_component_beta"])
+    labels.append(_SHARING_LABELS["shared_spin" if shared_spin else "per_component_spin"])
+    labels.append(_SHARING_LABELS["shared_gamma" if shared_gamma else "per_component_gamma"])
+    return " (" + ", ".join(labels) + ")"
+
+
+def _latex_name(
+    pop_model: str,
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> str:
     if pop_model in MODEL_NAME_LATEX:
-        return MODEL_NAME_LATEX[pop_model]
-    try:
-        ir = parse_model_name(pop_model)
-    except ModelNameError:
-        return pop_model
-    suffix = pop_model[len(ir.base_name):]
-    return derive_latex([s.token for s in ir.slots]) + _suffix_decor(suffix)
+        base = MODEL_NAME_LATEX[pop_model]
+    else:
+        try:
+            ir = parse_model_name(pop_model)
+        except ModelNameError:
+            return pop_model
+        base = derive_latex([s.token for s in ir.slots])
+    return base + _sharing_decor(
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    )
 
 
 # ============================================================
 # 5. Public API
 # ============================================================
 
-_MODEL_REGISTRY: dict[str, object] = {}
+_MODEL_REGISTRY: dict[tuple[str, bool, bool, bool], object] = {}
 
 
 def available_models() -> list[str]:
@@ -390,10 +409,14 @@ def available_models() -> list[str]:
     return sorted(names)
 
 
-def _build_mixture_model(name: str) -> PopulationModel:
-    base, shared_beta, shared_spin, shared_gamma = _split_suffix(name)
-
-    entry = CURATED.get(base)
+def _build_mixture_model(
+    name: str,
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> PopulationModel:
+    entry = CURATED.get(name)
     if entry is not None and entry.mass is not None:
         # Explicit composition (GP models).
         return build_population_model(
@@ -416,37 +439,57 @@ def _build_mixture_model(name: str) -> PopulationModel:
         )
         return build_population_model(
             tokens,
-            shared_beta=ir.shared_beta,
-            shared_spin=ir.shared_spin,
-            shared_gamma=ir.shared_gamma,
+            shared_beta=shared_beta,
+            shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
         )
     return build_population_model(
         tokens,
-        shared_beta=ir.shared_beta,
-        shared_spin=ir.shared_spin,
-        shared_gamma=ir.shared_gamma,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
         bounds=entry.bounds,
     )
 
 
-def get_model(pop_model: str) -> PopulationModel:
+def get_model(
+    pop_model: str,
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> PopulationModel:
+    flags = _sharing_key(shared_beta, shared_spin, shared_gamma)
+    cache_key = (pop_model, *flags)
     try:
-        return _MODEL_REGISTRY[pop_model]
+        return _MODEL_REGISTRY[cache_key]
     except KeyError:
         pass
 
     name = _resolve_legacy(pop_model)
+    resolved_key = (name, *flags)
     if name in _CUSTOM_MODEL_FACTORIES:
         model = _CUSTOM_MODEL_FACTORIES[name]()
     else:
-        model = _build_mixture_model(name)
+        model = _build_mixture_model(
+            name,
+            shared_beta=flags[0],
+            shared_spin=flags[1],
+            shared_gamma=flags[2],
+        )
 
-    _MODEL_REGISTRY[pop_model] = model
-    _MODEL_REGISTRY[name] = model
+    _MODEL_REGISTRY[cache_key] = model
+    _MODEL_REGISTRY[resolved_key] = model
     return model
 
 
-def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
+def get_fixed_population_params(
+    pop_model: str,
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> jnp.ndarray:
     """
     Return the fiducial population parameter vector for --fix_population=True.
 
@@ -462,8 +505,7 @@ def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
     if name in _CUSTOM_FIDUCIALS:
         return jnp.array(_CUSTOM_FIDUCIALS[name], dtype=float)
 
-    base, shared_beta, shared_spin, shared_gamma = _split_suffix(name)
-    entry = CURATED.get(base)
+    entry = CURATED.get(name)
     if entry is not None and entry.mass is not None:
         return build_fiducial_vector(
             entry.mass,
@@ -484,16 +526,16 @@ def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
     if entry is None:
         return build_fiducial_vector(
             tokens,
-            shared_beta=ir.shared_beta,
-            shared_spin=ir.shared_spin,
-            shared_gamma=ir.shared_gamma,
+            shared_beta=shared_beta,
+            shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
             on_violation="error",
         )
     return build_fiducial_vector(
         tokens,
-        shared_beta=ir.shared_beta,
-        shared_spin=ir.shared_spin,
-        shared_gamma=ir.shared_gamma,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
         weights=entry.weights,
         fids=entry.fids,
         bounds=entry.bounds,
@@ -501,11 +543,38 @@ def get_fixed_population_params(pop_model: str) -> jnp.ndarray:
     )
 
 
-def pop_model_parser(pop_model: str):
-    return get_model(pop_model).log_p_pop
+def pop_model_parser(
+    pop_model: str,
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+):
+    return get_model(
+        pop_model,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    ).log_p_pop
 
 
-def pop_model_prior_parser(pop_model: str) -> tuple[list, list, list, str]:
-    model = get_model(pop_model)
+def pop_model_prior_parser(
+    pop_model: str,
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> tuple[list, list, list, str]:
+    model = get_model(
+        pop_model,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    )
     lows, highs, labels = model.prior_bounds()
-    return lows, highs, labels, _latex_name(pop_model)
+    return lows, highs, labels, _latex_name(
+        pop_model,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    )

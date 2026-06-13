@@ -54,6 +54,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     Ndraw = data["Ndraw"]
     apix = data["apix"]
     pop_model = opts.pop_model
+    shared_beta = bool(getattr(opts, "shared_beta", True))
+    shared_spin = bool(getattr(opts, "shared_spin", True))
+    shared_gamma = bool(getattr(opts, "shared_gamma", True))
     universe_model = opts.universe_model
     sel_batch_size = getattr(opts, "sel_batch_size", None)
     counterpart_pixel = data.get("counterpart_pixel")
@@ -169,6 +172,22 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         if sel_batch_size is not None:
             gw_sel, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
 
+        if shared_beta and shared_spin and shared_gamma:
+            return darksiren_log_likelihood(
+                cosmo,
+                survey,
+                pop_params,
+                gw_pe,
+                em_catalog_pe,
+                gw_sel,
+                em_catalog_sel,
+                nEvents,
+                nsamp,
+                Ndraw,
+                pop_model,
+                universe_model,
+                sel_batch_size=sel_batch_size,
+            )
         return darksiren_log_likelihood(
             cosmo,
             survey,
@@ -182,6 +201,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             Ndraw,
             pop_model,
             universe_model,
+            shared_beta=shared_beta,
+            shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
             sel_batch_size=sel_batch_size,
         )
 

@@ -5,8 +5,8 @@ The mock is intentionally simple and transparent:
 
 * galaxies are isotropic on the sky and uniform in comoving volume;
 * GW hosts are drawn from the complete catalog, before EM incompleteness;
-* BBH masses/spins use a POWER LAW + PEAK model with one shared beta and one
-  shared truncated-Gaussian chi_eff spin distribution;
+* BBH masses/spins/redshift evolution use a POWER LAW + PEAK model with
+  shared beta, truncated-Gaussian chi_eff, and gamma parameters;
 * GW detectability is a semi-analytic network-SNR threshold;
 * the observed EM survey is produced by applying a footprint, redshift/magnitude
   limits, and a smooth redshift-dependent completeness curve.
@@ -37,7 +37,7 @@ import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class PopulationConfig:
-    """Fiducial POWER LAW + PEAK, shared beta, shared spin parameters."""
+    """Fiducial POWER LAW + PEAK with shared beta, spin, and gamma."""
 
     alpha: float = 3.4
     mmin: float = 5.0
@@ -440,7 +440,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
         "population": asdict(pop),
         "survey": asdict(survey),
         "snr_threshold": args.snr_threshold,
-        "pop_model_for_inference": "powerlaw+peak_shared_beta_spin",
+        "pop_model_for_inference": "powerlaw+peak",
+        "shared_beta_for_inference": True,
+        "shared_spin_for_inference": True,
+        "shared_gamma_for_inference": True,
     }
 
     complete_path = out / "mock_galaxy_catalog_complete.h5"
@@ -480,7 +483,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["pe_cosmology_Om0"] = float(args.Om0)
         f.attrs["chi_eff_in_p_pe"] = True
         f.attrs["chi_eff_amax"] = 0.99
-        f.attrs["pop_model"] = "powerlaw+peak_shared_beta_spin"
+        f.attrs["pop_model"] = "powerlaw+peak"
+        f.attrs["shared_beta"] = True
+        f.attrs["shared_spin"] = True
+        f.attrs["shared_gamma"] = True
         f.attrs["metadata_json"] = json.dumps(metadata)
         for key, val in post.items():
             f.create_dataset(key, data=val, compression="gzip", shuffle=True)
@@ -498,7 +504,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["chi_eff_amax"] = 0.99
         f.attrs["cosmology_H0"] = float(args.H0)
         f.attrs["cosmology_Om0"] = float(args.Om0)
-        f.attrs["pop_model"] = "powerlaw+peak_shared_beta_spin"
+        f.attrs["pop_model"] = "powerlaw+peak"
+        f.attrs["shared_beta"] = True
+        f.attrs["shared_spin"] = True
+        f.attrs["shared_gamma"] = True
         f.attrs["metadata_json"] = json.dumps(metadata)
         for key in ["m1det", "m2det", "m1src", "m2src", "dL", "chieff", "ra", "dec", "pdraw"]:
             f.create_dataset(key, data=sel[key], compression="gzip", shuffle=True)
