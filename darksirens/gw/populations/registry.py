@@ -409,6 +409,28 @@ def available_models() -> list[str]:
     return sorted(names)
 
 
+def _format_available_model_error(pop_model: str, cause: Exception) -> str:
+    """Return a CLI-friendly message for an unrecognised population model.
+
+    The grammar accepts infinitely many mass-component mixtures, so an exhaustive
+    list can only cover explicitly registered curated/custom names.  Include
+    both: the parser's token-level reason for the failure and the complete
+    registry vocabulary for non-grammar models such as GP, GWTC-5, and Golomb.
+    """
+    registered = ", ".join(available_models())
+    return (
+        f"Unknown population model {pop_model!r}. {cause} "
+        f"Registered population models: {registered}. "
+        "Mixture grammar: combine mass tokens 'powerlaw', 'brokenpowerlaw', "
+        "and 'peak' with '+', using count prefixes with plurals such as "
+        "'2peaks' or '3powerlaws'."
+    )
+
+
+def _raise_unknown_pop_model(pop_model: str, cause: Exception):
+    raise ModelNameError(_format_available_model_error(pop_model, cause)) from cause
+
+
 def _build_mixture_model(
     name: str,
     *,
@@ -429,7 +451,10 @@ def _build_mixture_model(
             bounds=entry.bounds,
         )
 
-    ir = parse_model_name(name)
+    try:
+        ir = parse_model_name(name)
+    except ModelNameError as exc:
+        _raise_unknown_pop_model(name, exc)
     entry = CURATED.get(ir.canonical)
     tokens = [s.token for s in ir.slots]
     if entry is None:
@@ -520,7 +545,10 @@ def get_fixed_population_params(
             on_violation="warn",
         )
 
-    ir = parse_model_name(name)
+    try:
+        ir = parse_model_name(name)
+    except ModelNameError as exc:
+        _raise_unknown_pop_model(pop_model, exc)
     entry = CURATED.get(ir.canonical)
     tokens = [s.token for s in ir.slots]
     if entry is None:

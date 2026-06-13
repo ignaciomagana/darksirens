@@ -114,6 +114,32 @@ def test_unknown_model_raises_value_error():
         get_model("not_a_model")
 
 
+def test_unknown_model_error_lists_registered_models():
+    with pytest.raises(ValueError) as err:
+        get_model("not_a_model")
+
+    message = str(err.value)
+    assert "Registered population models:" in message
+    assert "Mixture grammar:" in message
+    assert "gp_mass" in message
+    assert "gwtc5_fiducial_bpl2peaks" in message
+    assert "golomb_1g" in message
+    assert "powerlaw" in message
+    assert "brokenpowerlaw" in message
+    assert "peak" in message
+
+
+def test_fixed_population_unknown_model_error_lists_registered_models():
+    with pytest.raises(ValueError) as err:
+        get_fixed_population_params("not_a_model")
+
+    message = str(err.value)
+    assert "Registered population models:" in message
+    assert "gp_mass_pairing_joint" in message
+    assert "gwtc5_brokenpowerlaw+2peaks" in message
+    assert "golomb_1g+tail" in message
+
+
 # ── Legacy aliases ───────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("legacy,canonical", [
