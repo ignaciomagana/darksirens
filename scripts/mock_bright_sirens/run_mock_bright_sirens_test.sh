@@ -141,7 +141,7 @@ if [ "${RUN_INFERENCE}" = "1" ]; then
     --gw_path "${OUTDIR}/mock_bright_gw_events.h5" \
     --gwselection_path "${OUTDIR}/mock_bright_gw_selection.h5" \
     --sampler dynesty \
-    --pop_model powerlaw+peak_shared_beta_spin \
+    --pop_model powerlaw+peak \
     --universe_model bright_sirens \
     --counterpart ${COUNTERPART_ARGS} \
     --counterpart_dz "${COUNTERPART_DZ}" \

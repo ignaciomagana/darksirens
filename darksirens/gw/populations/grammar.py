@@ -2,12 +2,10 @@ r"""Model-name grammar and generic mixture assembly.
 
 The population model name IS the model definition::
 
-    name        := composition suffix?
+    name        := composition
     composition := term ("+" term)*
     term        := TOKEN            # "powerlaw", "brokenpowerlaw", "peak"
                  | DIGITS PLURAL    # "2peaks", "3powerlaws"
-    suffix      := "_" sharing ("_" sharing)*
-    sharing     := "shared_beta" | "shared_spin" | "shared_gamma"
 
 so ``"brokenpowerlaw+2peaks+powerlaw"`` parses to the mass composition
 ``[BrokenPowerLaw, Gaussian, Gaussian, PowerLaw]``.  Components self-register
@@ -23,12 +21,11 @@ Label rule (uniform, no per-model overrides)
   ``$\mu_{\rm G1}$``, ``$m_{\min,\rm BPL}$``;
 * pairing/spin: bare (``$\beta$``, ``$\mu_\chi$``) when shared or k == 1,
   tagged with the mass slot tag (``$\beta_{\rm G2}$``) when per-component;
-* redshift evolution: existing names keep one shared ``$\gamma$`` by default.
+* redshift evolution: one shared ``$\gamma$`` by default.
 
-Pairing, spin, and gamma all default to shared.  The ``_shared_beta``,
-``_shared_spin``, and ``_shared_gamma`` suffix atoms are accepted as explicit
-spellings of those defaults and may be composed in any order, e.g.
-``_shared_beta_shared_spin_shared_gamma``.
+Pairing, spin, and gamma sharing is controlled by the CLI/API flags
+``shared_beta``, ``shared_spin``, and ``shared_gamma`` rather than by suffixes
+in the model name.
 
 Slot tags are the component short name (``PL``, ``BPL``, ``G``) plus a 1-based
 index iff that token occurs more than once: ``brokenpowerlaw+2peaks+powerlaw``
@@ -43,7 +40,6 @@ so bounds, labels, and fiducials can never disagree on order or length.
 from __future__ import annotations
 
 import difflib
-import itertools
 import logging
 import re
 from collections import Counter
@@ -72,26 +68,6 @@ class ModelNameError(ValueError):
 # Parsing
 # ============================================================
 
-_SUFFIX_ATOMS = {
-    "shared_beta": "shared_beta",
-    "shared_spin": "shared_spin",
-    "shared_gamma": "shared_gamma",
-}
-
-
-def _make_suffix_flags() -> dict[str, Tuple[str, ...]]:
-    """All explicit sharing-suffix permutations built from simple atoms."""
-    suffixes = {}
-    atoms = tuple(_SUFFIX_ATOMS)
-    for n_atoms in range(1, len(atoms) + 1):
-        for ordered_atoms in itertools.permutations(atoms, n_atoms):
-            suffix = "_" + "_".join(ordered_atoms)
-            suffixes[suffix] = tuple(_SUFFIX_ATOMS[a] for a in ordered_atoms)
-    return suffixes
-
-
-_SUFFIX_FLAGS = _make_suffix_flags()
-_SUFFIXES = tuple(sorted(_SUFFIX_FLAGS, key=len, reverse=True))
 _COUNT_RE = re.compile(r"^([1-9]\d*)([a-z_]+)$")
 
 
@@ -112,43 +88,8 @@ class ModelIR:
     shared_beta: bool
     shared_spin: bool
     shared_gamma: bool
-    base_name: str    # name as typed, suffix stripped
+    base_name: str    # composition name as typed
     canonical: str    # run-collapsed canonical composition key
-
-
-def _split_suffix(name: str):
-    """Split a model name into base composition and sharing flags.
-
-    Pairing, spin, and gamma default to shared.  The sharing suffixes are
-    explicit no-op spellings of those defaults, and may be composed in any
-    order from the simple ``shared_beta``, ``shared_spin``, and
-    ``shared_gamma`` atoms.
-    """
-    base = name
-    flags = {
-        "shared_beta": True,
-        "shared_spin": True,
-        "shared_gamma": True,
-    }
-    seen: set[str] = set()
-
-    matched = None
-    for suffix in _SUFFIXES:
-        if base.endswith(suffix):
-            matched = suffix
-            break
-
-    if matched is not None:
-        base = base[: -len(matched)]
-        for flag in _SUFFIX_FLAGS[matched]:
-            if flag in seen:
-                raise ModelNameError(
-                    f"Duplicate suffix flag {flag!r} in population model {name!r}"
-                )
-            seen.add(flag)
-            flags[flag] = True
-
-    return base, flags["shared_beta"], flags["shared_spin"], flags["shared_gamma"]
 
 
 def _unknown_term_error(term: str, name: str) -> ModelNameError:
@@ -214,19 +155,18 @@ def canonical_composition(tokens: Sequence[str]) -> str:
 @lru_cache(maxsize=None)
 def parse_model_name(name: str) -> ModelIR:
     """Parse a population model name into its intermediate representation."""
-    base, shared_beta, shared_spin, shared_gamma = _split_suffix(name)
-    if not base:
+    if not name:
         raise ModelNameError(f"Empty composition in population model {name!r}")
     tokens: list[str] = []
-    for term in base.split("+"):
+    for term in name.split("+"):
         token, count = _parse_term(term, name)
         tokens.extend([token] * count)
     return ModelIR(
         slots=make_slots(tokens),
-        shared_beta=shared_beta,
-        shared_spin=shared_spin,
-        shared_gamma=shared_gamma,
-        base_name=base,
+        shared_beta=True,
+        shared_spin=True,
+        shared_gamma=True,
+        base_name=name,
         canonical=canonical_composition(tokens),
     )
 
@@ -470,7 +410,10 @@ def build_fiducial_vector(
     for key, tag in _resolve_sub_slots("spin", DEFAULT_SPIN, spin, slots, shared_spin):
         _collect(COMPONENTS[key], {}, {}, tag or key)
 
-    values.append(gamma)
+    if shared_gamma or len(slots) == 1:
+        values.append(gamma)
+    else:
+        values.extend([gamma] * len(slots))
 
     if violations and on_violation != "ignore":
         message = "; ".join(violations)

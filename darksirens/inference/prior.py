@@ -123,6 +123,9 @@ def build_parameter_space(
     fixed_parameter_values=None,
     fix_de=False,
     universe_model=None,
+    shared_beta=True,
+    shared_spin=True,
+    shared_gamma=True,
 ):
     """Construct labels and prior bounds for cosmological, population, and survey parameters.
 
@@ -146,7 +149,12 @@ def build_parameter_space(
     cosmo_upper = [120.0, Om0PriorUpper, w0PriorUpper, waPriorUpper]
 
     # --- Population ---
-    pop_lower, pop_upper, pop_labels, model_name = pop_model_prior_parser(pop_model)
+    pop_lower, pop_upper, pop_labels, model_name = pop_model_prior_parser(
+        pop_model,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    )
 
     # --- Survey ---
     # ``log10n0`` is log10 of the comoving galaxy density in Mpc^-3,

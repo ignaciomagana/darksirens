@@ -42,7 +42,10 @@ darksirens_inference \
 ### Physical-model options
 
 - `--universe_model`: one of `spectral_sirens`, `bright_sirens`, `dark_sirens`, or `dark_sirens_complete`.
-- `--pop_model`: population model name. Parametric mixture names are parsed as a composition grammar: `+`-separated mass tokens (`powerlaw`, `brokenpowerlaw`, `peak`) with optional digit count prefixes and sharing suffixes, e.g. `powerlaw+peak`, `brokenpowerlaw+2peaks`, `2powerlaws+3peaks_shared_beta_spin`. Any grammar composition works with blueprint-default priors; curated names additionally carry physics-tuned priors and fiducials. Bespoke names such as `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint`, `golomb_1g`, `golomb_1g+tail`, and `gwtc5_fiducial_bpl2peaks` are registered explicitly. See [Concepts → Population models](concepts.md#population-models).
+- `--pop_model`: population model name. Parametric mixture names are parsed as a composition grammar: `+`-separated mass tokens (`powerlaw`, `brokenpowerlaw`, `peak`) with optional digit count prefixes, e.g. `powerlaw+peak`, `brokenpowerlaw+2peaks`, `2powerlaws+3peaks`. Any grammar composition works with blueprint-default priors; curated names additionally carry physics-tuned priors and fiducials. Bespoke names such as `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint`, `golomb_1g`, `golomb_1g+tail`, and `gwtc5_fiducial_bpl2peaks` are registered explicitly. See [Concepts → Population models](concepts.md#population-models).
+- `--shared_beta`: whether to use one shared beta/pairing distribution (`true`, default) or per-component beta parameters (`false`).
+- `--shared_spin`: whether to use one shared spin distribution (`true`, default) or per-component spin parameters (`false`).
+- `--shared_gamma`: whether to use one shared redshift-evolution gamma (`true`, default) or per-component gamma parameters (`false`).
 - `--fix_population`: fix all population parameters to fiducial values.
 - `--fix_cosmology`: fix all cosmological parameters (`H0`, `Om0`, `w0`, `wa`) to fiducial values.
 - `--fix_de`: fix only the CPL dark-energy parameters (`w0=-1`, `wa=0`) while leaving `H0` and `Om0` available unless fixed separately.

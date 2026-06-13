@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Updated user-facing documentation for the current population-model grammar,
+  CLI-level `--shared_beta` / `--shared_spin` / `--shared_gamma` controls,
   stick-breaking mixture weights, tagged CLI parameter labels, and the
   corrected matched-kernel catalog-completion model. The completion docs now
   clarify that `z50` and `w` are legacy compatibility parameters, while the

@@ -397,6 +397,9 @@ def save_results_hdf5(
 
         # Run metadata
         f.attrs["pop_model"]       = opts.pop_model
+        f.attrs["shared_beta"]     = bool(getattr(opts, "shared_beta", True))
+        f.attrs["shared_spin"]     = bool(getattr(opts, "shared_spin", True))
+        f.attrs["shared_gamma"]    = bool(getattr(opts, "shared_gamma", True))
         f.attrs["universe_model"]  = opts.universe_model
         f.attrs["complete_empty_pixel_policy"] = opts.complete_empty_pixel_policy
         f.attrs["sampler"]         = opts.sampler
@@ -681,7 +684,38 @@ def main():
     g = optp.add_argument_group("Physical model")
     g.add_argument("--universe_model", default="spectral_sirens",
                    choices=["spectral_sirens", "dark_sirens", "dark_sirens_complete", "bright_sirens"])
-    g.add_argument("--pop_model",       default="powerlaw+peak")
+    g.add_argument(
+        "--pop_model",
+        default="powerlaw+peak",
+        help=(
+            "Population model composition. Grammar mixtures combine mass "
+            "tokens (powerlaw, brokenpowerlaw, peak) with '+' and optional "
+            "count prefixes (for example, brokenpowerlaw+2peaks). Sharing is "
+            "controlled separately by --shared_beta, --shared_spin, and "
+            "--shared_gamma."
+        ),
+    )
+    g.add_argument(
+        "--shared_beta",
+        type=str_to_bool,
+        default=True,
+        metavar="BOOL",
+        help="Use one shared beta/pairing distribution; false gives one beta per mass component.",
+    )
+    g.add_argument(
+        "--shared_spin",
+        type=str_to_bool,
+        default=True,
+        metavar="BOOL",
+        help="Use one shared spin distribution; false gives one spin distribution per mass component.",
+    )
+    g.add_argument(
+        "--shared_gamma",
+        type=str_to_bool,
+        default=True,
+        metavar="BOOL",
+        help="Use one shared redshift-evolution gamma; false gives one gamma per mass component.",
+    )
     g.add_argument("--fix_population",  type=str_to_bool, default=False, metavar="BOOL")
     g.add_argument("--fixed_cosmology", "--fix_cosmology", dest="fix_cosmology",
                    type=str_to_bool, default=False, metavar="BOOL",
@@ -827,6 +861,9 @@ def main():
         _row("Counterpart nside", opts.counterpart_nside)
         _row("Bright-siren sky marginalized", opts.bright_siren_sky_marginalized)
     _row("Population model", opts.pop_model)
+    _row("Shared beta", "yes" if opts.shared_beta else "no")
+    _row("Shared spin", "yes" if opts.shared_spin else "no")
+    _row("Shared gamma", "yes" if opts.shared_gamma else "no")
     if opts.universe_model in {"dark_sirens_complete", "bright_sirens"}:
         _row("Empty-pixel policy", opts.complete_empty_pixel_policy)
     print("  │")
@@ -948,13 +985,26 @@ def main():
         prior_overrides        = prior_overrides,
         fixed_parameter_values = fixed_parameter_values,
         universe_model         = opts.universe_model,
+        shared_beta            = opts.shared_beta,
+        shared_spin            = opts.shared_spin,
+        shared_gamma           = opts.shared_gamma,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
     fixed_parameter_statuses = res[10]
 
-    _, _, pop_labels_all, _ = pop_model_prior_parser(opts.pop_model)
-    pop_params_fid  = get_fixed_population_params(opts.pop_model)
+    _, _, pop_labels_all, _ = pop_model_prior_parser(
+        opts.pop_model,
+        shared_beta=opts.shared_beta,
+        shared_spin=opts.shared_spin,
+        shared_gamma=opts.shared_gamma,
+    )
+    pop_params_fid  = get_fixed_population_params(
+        opts.pop_model,
+        shared_beta=opts.shared_beta,
+        shared_spin=opts.shared_spin,
+        shared_gamma=opts.shared_gamma,
+    )
     prior_transform = make_prior_transform(lower_bound, upper_bound)
 
     _ok(f"Parameter space built:  {len(labels)} free dimensions")
