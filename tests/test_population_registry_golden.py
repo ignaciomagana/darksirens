@@ -63,7 +63,7 @@ _BASE_MIXTURES = [
     "gp_mass_pairing",
     "gp_mass_pairing_joint",
 ]
-_SUFFIXES = ["", "_shared_beta", "_shared_spin", "_shared_beta_spin"]
+_SUFFIXES = [""]
 _CUSTOM = [
     "golomb_1g",
     "golomb_1g+tail",

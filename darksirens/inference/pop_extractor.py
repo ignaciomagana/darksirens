@@ -18,7 +18,8 @@ def make_pop_extractor(settings: dict):
     ----------
     settings : dict  (loaded from the run's settings.json)
         Required key: "pop_model"
-        Optional keys: "fix_population", "fix_cosmology", "fix_de",
+        Optional keys: "shared_beta", "shared_spin", "shared_gamma",
+                       "fix_population", "fix_cosmology", "fix_de",
                        "fixed_de", "fix_survey", "fixed_parameter_values"
 
     Returns
@@ -28,6 +29,9 @@ def make_pop_extractor(settings: dict):
         Safe inside jax.jit and jax.vmap.
     """
     pop_model_name         = settings["pop_model"]
+    shared_beta            = bool(settings.get("shared_beta", True))
+    shared_spin            = bool(settings.get("shared_spin", True))
+    shared_gamma           = bool(settings.get("shared_gamma", True))
     fix_population         = bool(settings.get("fix_population", False))
     fix_cosmology          = bool(settings.get("fix_cosmology",  False))
     fix_survey             = bool(settings.get("fix_survey",     False))
@@ -36,9 +40,17 @@ def make_pop_extractor(settings: dict):
     # Fast path: entire population block is fixed.  Individual fixed values
     # still override the fiducial fixed-population vector.
     if fix_population:
-        fixed_array = get_fixed_population_params(pop_model_name)
+        fixed_array = get_fixed_population_params(
+            pop_model_name,
+            shared_beta=shared_beta,
+            shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
+        )
         _pop_lower, _pop_upper, pop_labels, _model_name = pop_model_prior_parser(
-            pop_model_name
+            pop_model_name,
+            shared_beta=shared_beta,
+            shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
         )
         overrides = [
             float(fixed_parameter_values[label])
@@ -77,6 +89,9 @@ def make_pop_extractor(settings: dict):
         ),
         fixed_parameter_values = fixed_parameter_values,
         universe_model         = settings.get("universe_model"),
+        shared_beta            = shared_beta,
+        shared_spin            = shared_spin,
+        shared_gamma           = shared_gamma,
     )
 
     label_to_coord_idx = {label: idx for idx, label in enumerate(labels)}

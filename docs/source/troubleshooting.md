@@ -24,10 +24,10 @@ The inference command sets JAX memory environment variables before importing JAX
 
 ## Unknown population model name
 
-`--pop_model` names are parsed as a composition grammar. If parsing fails, the error lists the known component tokens and suggests close matches for typos (`powrlaw` → `powerlaw`). Two common pitfalls:
+`--pop_model` names are parsed as a composition grammar. If parsing fails, the error lists the known component tokens and suggests close matches for typos (`powrlaw` → `powerlaw`). Common pitfalls:
 
 - Bare plurals are rejected: write `powerlaw+2peaks` or `powerlaw+peak`, never `powerlaw+peaks`.
-- Sharing suffixes must be exact: `_shared_beta`, `_shared_spin`, or `_shared_beta_spin`.
+- Sharing is not part of `--pop_model`; do not append `_shared_*` suffixes. Use `--shared_beta`, `--shared_spin`, and `--shared_gamma` instead.
 
 A name that parses but is not curated (for example `powerlaw+4peaks`) is valid: it builds with blueprint-default priors and logs an informational message rather than failing.
 

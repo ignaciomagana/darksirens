@@ -191,15 +191,15 @@ darksirens_inference \
 
 ### Population-model names in CLI runs
 
-`--pop_model` accepts either a grammar-built mixture or an explicitly registered bespoke model. Grammar mixtures combine `powerlaw`, `brokenpowerlaw`, and `peak` mass tokens with optional count prefixes (`2peaks`, `3powerlaws`) and optional suffixes (`_shared_beta`, `_shared_spin`, `_shared_beta_spin`). For example:
+`--pop_model` accepts either a grammar-built mixture or an explicitly registered bespoke model. Grammar mixtures combine `powerlaw`, `brokenpowerlaw`, and `peak` mass tokens with optional count prefixes (`2peaks`, `3powerlaws`). For example:
 
 ```bash
 --pop_model powerlaw+peak
 --pop_model brokenpowerlaw+2peaks+powerlaw
---pop_model 2powerlaws+3peaks_shared_beta_spin
+--pop_model 2powerlaws+3peaks
 ```
 
-The first `k - 1` mixture parameters are `$v_i$` stick-breaking coordinates for a `k`-component mixture. The startup parameter table is the authoritative source for CLI JSON labels and bounds; copy labels from that table when using `--prior_overrides` or `--fixed_parameter_values`.
+Use `--shared_beta false`, `--shared_spin false`, or `--shared_gamma false` to switch from the default shared beta/pairing, spin, or redshift-evolution parameters to per-component parameters. The first `k - 1` mixture parameters are `$v_i$` stick-breaking coordinates for a `k`-component mixture. The startup parameter table is the authoritative source for CLI JSON labels and bounds; copy labels from that table when using `--prior_overrides` or `--fixed_parameter_values`.
 
 ### Spectral-siren workflow
 

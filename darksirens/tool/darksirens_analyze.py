@@ -539,7 +539,12 @@ def main():
         print(f"\n=== Processing model: {run_dir} ===")
 
         settings, samples, logZ, logZerr = load_run(run_dir)
-        pop_model = pop_model_parser(settings["pop_model"])
+        pop_model = pop_model_parser(
+            settings["pop_model"],
+            shared_beta=bool(settings.get("shared_beta", True)),
+            shared_spin=bool(settings.get("shared_spin", True)),
+            shared_gamma=bool(settings.get("shared_gamma", True)),
+        )
 
         # Convert to log10 if available
         if logZ is not None:

@@ -290,8 +290,15 @@ class MixtureModel:
         """Total number of free mixture parameters."""
         return len(self.param_specs)
 
-    def __call__(self, m1, q, chieff, theta):
-        """Evaluate the normalised mixture density for source parameters."""
+    def component_densities(self, m1, q, chieff, theta):
+        """Return weighted source-density contributions for each component.
+
+        The leading axis indexes mass-mixture components; summing over that
+        axis reproduces :meth:`__call__`.  Exposing contributions before the
+        mixture sum lets callers apply component-specific factors, such as a
+        per-component redshift evolution, without changing the source-density
+        parameter ordering.
+        """
         n_w = self.n_weight_params
 
         # Stick-breaking: all weights guaranteed ≥ 0, Σ = 1.
@@ -316,7 +323,7 @@ class MixtureModel:
             for i, c in enumerate(self.spin_components)
         ]
 
-        out = 0.0
+        contributions = []
         for i in range(self.k):
             c_m  = self.mass_components[i];    tm = tm_list[i]
             c_p  = self.pairing_components[0 if self.shared_pairing else i]
@@ -331,13 +338,17 @@ class MixtureModel:
             if hasattr(c_m, "dm_min_spec"):
                 dmmin = tm[c_m.param_specs.index(c_m.dm_min_spec)]
 
-            out = out + w[i] * (
+            contributions.append(w[i] * (
                 c_m(m1, tm, norm=mass_norms[i])
                 * c_p(m1, q, mmin, dmmin, tp)
                 * c_s(chieff, ts, norm=spin_norms[s_idx])
-            )
+            ))
 
-        return out
+        return jnp.stack(contributions, axis=0)
+
+    def __call__(self, m1, q, chieff, theta):
+        """Evaluate the normalised mixture density for source parameters."""
+        return jnp.sum(self.component_densities(m1, q, chieff, theta), axis=0)
 
 
 # ── Population model ─────────────────────────────────────────────────────────
@@ -352,11 +363,40 @@ class PopulationModel:
     """
 
     mixture: MixtureModel
+    shared_gamma: bool = True
+
+    def _component_gamma_spec(self, i: int) -> ParamSpec:
+        """Return a redshift-slope spec tagged to mass component ``i``."""
+        for spec in self.mixture.mass_components[i].param_specs:
+            if spec.name and "." in spec.name:
+                tag = spec.name.split(".", 1)[0]
+                return ParamSpec(
+                    rf"$\gamma_{{\rm {tag}}}$",
+                    -10.0,
+                    10.0,
+                    name=f"{tag}.gamma",
+                )
+
+        # Fallback for custom components without tagged ASCII parameter names.
+        j = i + 1
+        return ParamSpec(
+            rf"$\gamma_{{{j}}}$",
+            -10.0,
+            10.0,
+            name=f"component{j}.gamma",
+        )
+
+    @property
+    def gamma_param_specs(self):
+        """Return shared or per-component redshift-slope parameter specs."""
+        if self.shared_gamma or self.mixture.k == 1:
+            return [ParamSpec(r"$\gamma$", -10.0, 10.0, name="gamma")]
+        return [self._component_gamma_spec(i) for i in range(self.mixture.k)]
 
     @property
     def param_specs(self):
-        """Return mixture parameter specs followed by the redshift slope."""
-        return [*self.mixture.param_specs, ParamSpec(r"$\gamma$", -10.0, 10.0, name="gamma")]
+        """Return mixture parameter specs followed by redshift slope(s)."""
+        return [*self.mixture.param_specs, *self.gamma_param_specs]
 
     def prior_bounds(self):
         """Return lower bounds, upper bounds, and labels for all parameters."""
@@ -370,8 +410,19 @@ class PopulationModel:
         −∞ propagates correctly through logsumexp / jnp.sum; the final
         jnp.isfinite guard in the likelihood rejects the proposal cleanly.
         """
-        tm    = theta[:-1]
-        gamma = theta[-1]
-        p     = self.mixture(m1, q, chieff, tm)
-        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
-        return log_p + (gamma - 1.0) * jnp.log1p(z)
+        if self.shared_gamma or self.mixture.k == 1:
+            tm    = theta[:-1]
+            gamma = theta[-1]
+            p     = self.mixture(m1, q, chieff, tm)
+            log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+            return log_p + (gamma - 1.0) * jnp.log1p(z)
+
+        n_mix  = self.mixture.n_params
+        tm     = theta[:n_mix]
+        gamma  = theta[n_mix : n_mix + self.mixture.k]
+        p_comp = self.mixture.component_densities(m1, q, chieff, tm)
+
+        gamma_shape = (self.mixture.k,) + (1,) * (jnp.ndim(p_comp) - 1)
+        z_factor = jnp.power(1.0 + z, gamma.reshape(gamma_shape) - 1.0)
+        p = jnp.sum(p_comp * z_factor, axis=0)
+        return jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
