@@ -215,52 +215,10 @@ def tag_latex(base: str, tag: str) -> str:
 
 
 # ============================================================
-# GP component blueprints (lazy classes — never import .gp here)
+# GP component blueprints
 # ============================================================
-
-_GP = "darksirens.gw.populations.gp"
-
-
-def _gp_pairing_2d_params() -> ParamTuple:
-    n = import_module(_GP)._PAIR2D_N_NODES  # node count lives with the grid
-    return (
-        ParamBlueprint("beta", r"\beta", GP_BETA_Q, 0.0),
-        ParamBlueprint("amp", r"A_q", _B(0.05, 3.0), 1.0),
-        ParamBlueprint("ls_m", r"\ell_{m,q}", GP_LS_M_PAIR, 1.0),
-        ParamBlueprint("ls_q", r"\ell_{q,q}", GP_LS_Q_PAIR, 0.5),
-        *[ParamBlueprint(f"y{i}", rf"y_{{q,{i}}}", GP_Y_PAIR, 0.0) for i in range(n)],
-    )
-
-
-_register(ComponentBlueprint(
-    key="gp_mass", kind="mass", short="GP",
-    cls=f"{_GP}:GaussianProcessMass1D",
-    params=(
-        ParamBlueprint("m_min", r"m_{\min}", M_MIN, 5.0),
-        ParamBlueprint("m_max", r"m_{\max}", M_MAX, 80.0),
-        ParamBlueprint("dm_min", r"\delta m_{\min}", DM_MIN, 3.0),
-        ParamBlueprint("dm_max", r"\delta m_{\max}", DM_MAX, 10.0),
-        ParamBlueprint("alpha", r"\alpha", GP_ALPHA, 2.3),
-        ParamBlueprint("amp", r"A", GP_AMP, 1.0),
-        ParamBlueprint("ls", r"\ell", GP_LS, 1.0),
-        *[ParamBlueprint(f"y{i}", rf"y_{{{i}}}", GP_Y, 0.0) for i in range(11)],
-    ),
-))
-
-_register(ComponentBlueprint(
-    key="gp_pairing", kind="pairing", short="GP",
-    cls=f"{_GP}:GaussianProcessMassRatio1D",
-    params=(
-        ParamBlueprint("beta", r"\beta_q", GP_BETA_Q, 1.5),
-        ParamBlueprint("amp", r"A_q", GP_AMP, 1.0),
-        ParamBlueprint("ls", r"\ell_q", GP_LS, 0.5),
-        *[ParamBlueprint(f"y{i}", rf"y_{{q,{i}}}", GP_Y_PAIR, 0.0) for i in range(5)],
-    ),
-))
-
-_register(ComponentBlueprint(
-    key="gp_pairing_2d", kind="pairing", short="GP",
-    cls=f"{_GP}:GaussianProcessPairing2D",
-    params=_gp_pairing_2d_params,
-    build=lambda cls, specs: cls(specs[0], specs[1], specs[2], specs[3], tuple(specs[4:])),
-))
+# The legacy mixture-coupled GP components (``gp_mass``, ``gp_pairing``,
+# ``gp_pairing_2d``) have been removed.  GP population models are now standalone,
+# true-GP-prior models registered directly via ``register_model`` in
+# :mod:`darksirens.gw.populations.registry` (see :mod:`darksirens.gw.populations.gp`)
+# and no longer participate in the stick-breaking mixture grammar.

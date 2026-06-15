@@ -76,7 +76,7 @@ def _small_likelihood_inputs(universe_model):
             }
         )
 
-    pop_lower, pop_upper, pop_labels, _ = pop_model_prior_parser("powerlaw+peak")
+    pop_lower, pop_upper, pop_labels, _, _ = pop_model_prior_parser("powerlaw+peak")
     pop_params_fid = get_fixed_population_params("powerlaw+peak")
     sampled_pop_label = pop_labels[0]
     prior_overrides = {sampled_pop_label: [float(pop_lower[0]), float(pop_upper[0])]}

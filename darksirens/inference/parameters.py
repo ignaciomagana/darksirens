@@ -103,6 +103,7 @@ def build_parameter_decoder(
         _n_survey_eff,
         _model_name,
         _fixed_parameter_statuses,
+        _prior_kinds,
     ) = build_parameter_space(
         opts.pop_model,
         opts.fix_population,

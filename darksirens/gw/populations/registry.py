@@ -184,20 +184,6 @@ CURATED: dict[str, Curated] = {
         },
         fids={2: {"mu": 10.0, "sigma": 3.0}, 4: {"mu": 70.0, "sigma": 10.0}},
     ),
-    # ---- GP models: names are not grammar-parseable, so the composition is
-    # explicit.
-    "gp_mass": Curated(
-        latex="GP",
-        mass=("gp_mass",), pairing=("pl_pairing",), spin=("spin",),
-    ),
-    "gp_mass_pairing": Curated(
-        latex="GPxGP",
-        mass=("gp_mass",), pairing=("gp_pairing",), spin=("spin",),
-    ),
-    "gp_mass_pairing_joint": Curated(
-        latex="GP 2D",
-        mass=("gp_mass",), pairing=("gp_pairing_2d",), spin=("spin",),
-    ),
 }
 
 
@@ -328,6 +314,25 @@ register_model(
         3.0, 0.0, 0.10, 0.0,
     ),
 )(GWTC5FiducialBPL2PeaksPopulationModel)
+
+
+# ============================================================
+# 3b. Gaussian-process model family (true-GP prior, mixture-decoupled)
+# ============================================================
+# Registered lazily: importing ``.gp`` pulls in neither ``tinygp`` (imported
+# only inside the field evaluation) nor any heavy state, so registry import
+# stays light.  Each factory builds a configured GP population on demand; the
+# fiducial (xi = 0, central hyperparameters) is computed from the spec list
+# without constructing a kernel.
+from .gp import GP_MODEL_NAMES, GP_LATEX, build_gp_model, gp_fiducial  # noqa: E402
+
+for _gp_name in GP_MODEL_NAMES:
+    register_model(
+        _gp_name,
+        latex=GP_LATEX[_gp_name],
+        fiducial=gp_fiducial(_gp_name),
+    )((lambda _n: (lambda: build_gp_model(_n)))(_gp_name))
+del _gp_name
 
 
 # ============================================================
@@ -592,7 +597,7 @@ def pop_model_prior_parser(
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,
-) -> tuple[list, list, list, str]:
+) -> tuple[list, list, list, list, str]:
     model = get_model(
         pop_model,
         shared_beta=shared_beta,
@@ -600,7 +605,12 @@ def pop_model_prior_parser(
         shared_gamma=shared_gamma,
     )
     lows, highs, labels = model.prior_bounds()
-    return lows, highs, labels, _latex_name(
+    # Per-parameter prior family (read straight off the specs; defaults to
+    # "uniform").  Aligned to ``labels`` because both derive from ``param_specs``
+    # in the same order.  This is the Option-A channel that lets whitened GP
+    # latents declare a standard-normal prior to the sampler.
+    kinds = [(s.prior_kind, s.prior_loc, s.prior_scale) for s in model.param_specs]
+    return lows, highs, labels, kinds, _latex_name(
         pop_model,
         shared_beta=shared_beta,
         shared_spin=shared_spin,

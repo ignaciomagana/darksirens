@@ -59,10 +59,11 @@ _BASE_MIXTURES = [
     "twopowerlaws+peak",
     "twopowerlaws+2peaks",
     "twopowerlaws+3peaks",
-    "gp_mass",
-    "gp_mass_pairing",
-    "gp_mass_pairing_joint",
 ]
+# NOTE: the legacy mixture-coupled GP models (gp_mass, gp_mass_pairing,
+# gp_mass_pairing_joint) were removed.  GP population models are now standalone,
+# true-GP-prior models registered via register_model (see populations/gp.py) and
+# are covered by dedicated GP validation rather than this mixture golden.
 _SUFFIXES = [""]
 _CUSTOM = [
     "golomb_1g",
@@ -98,7 +99,7 @@ def _snapshot(name: str) -> dict:
     with warnings.catch_warnings():
         # Post-refactor, legacy spellings resolve through a deprecation alias.
         warnings.simplefilter("ignore", DeprecationWarning)
-        lows, highs, labels, latex = pop_model_prior_parser(name)
+        lows, highs, labels, _, latex = pop_model_prior_parser(name)
         fid = np.asarray(get_fixed_population_params(name), dtype=np.float64)
         log_p_pop = pop_model_parser(name)
 

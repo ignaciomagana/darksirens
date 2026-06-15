@@ -349,6 +349,7 @@ def save_results_hdf5(
     prior_overrides:        dict,
     opts,
     meta:                   dict,
+    prior_kinds=None,
 ) -> str:
     """
     Save posterior samples and all metadata to a single HDF5 file.
@@ -400,6 +401,13 @@ def save_results_hdf5(
         f.attrs["shared_beta"]     = bool(getattr(opts, "shared_beta", True))
         f.attrs["shared_spin"]     = bool(getattr(opts, "shared_spin", True))
         f.attrs["shared_gamma"]    = bool(getattr(opts, "shared_gamma", True))
+        # Per-parameter prior family (Option A); lets post-processing reconstruct
+        # the exact prior. Default uniform when unset.
+        if prior_kinds is not None:
+            f.attrs["prior_kinds"] = json.dumps(
+                {lbl: [k[0], k[1], k[2]] for lbl, k in zip(labels, prior_kinds)},
+                default=str,
+            )
         f.attrs["universe_model"]  = opts.universe_model
         f.attrs["complete_empty_pixel_policy"] = opts.complete_empty_pixel_policy
         f.attrs["sampler"]         = opts.sampler
@@ -992,8 +1000,9 @@ def main():
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
     fixed_parameter_statuses = res[10]
+    prior_kinds = res[11]
 
-    _, _, pop_labels_all, _ = pop_model_prior_parser(
+    _, _, pop_labels_all, _, _ = pop_model_prior_parser(
         opts.pop_model,
         shared_beta=opts.shared_beta,
         shared_spin=opts.shared_spin,
@@ -1005,7 +1014,7 @@ def main():
         shared_spin=opts.shared_spin,
         shared_gamma=opts.shared_gamma,
     )
-    prior_transform = make_prior_transform(lower_bound, upper_bound)
+    prior_transform = make_prior_transform(lower_bound, upper_bound, prior_kinds)
 
     _ok(f"Parameter space built:  {len(labels)} free dimensions")
     _end()
@@ -1050,6 +1059,7 @@ def main():
         method=opts.sampler, likelihood=likelihood,
         prior_transform=prior_transform, labels=labels,
         lower_bound=lower_bound, upper_bound=upper_bound, opts=opts,
+        prior_kinds=prior_kinds,
     )
     t_sample_end  = datetime.datetime.now()
     wall_sampling = t_sample_end - t_sample_start
@@ -1097,6 +1107,7 @@ def main():
     hdf5_path = save_results_hdf5(
         results, run_dir, labels, lower_bound, upper_bound,
         fixed_parameter_values, prior_overrides, opts, meta,
+        prior_kinds=prior_kinds,
     )
     _ok(f"results.hdf5   →  {hdf5_path}")
 

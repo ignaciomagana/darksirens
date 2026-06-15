@@ -149,7 +149,7 @@ def build_parameter_space(
     cosmo_upper = [120.0, Om0PriorUpper, w0PriorUpper, waPriorUpper]
 
     # --- Population ---
-    pop_lower, pop_upper, pop_labels, model_name = pop_model_prior_parser(
+    pop_lower, pop_upper, pop_labels, pop_kinds, model_name = pop_model_prior_parser(
         pop_model,
         shared_beta=shared_beta,
         shared_spin=shared_spin,
@@ -278,6 +278,17 @@ def build_parameter_space(
     else:
         n_survey_eff = 0
 
+    # Per-parameter prior family aligned to the final ``labels`` ordering.
+    # Cosmology and survey blocks are uniform; the population block carries the
+    # kinds reported by the parser (keyed by label, matching the codebase's
+    # global-label-uniqueness assumption used for bounds/overrides).  Fixed
+    # parameters are filtered out automatically because they are absent from
+    # ``labels``.
+    kind_map = {lbl: ("uniform", None, None) for lbl in cosmo_labels + survey_labels}
+    for lbl, knd in zip(pop_labels, pop_kinds):
+        kind_map[lbl] = knd
+    prior_kinds = [kind_map.get(lbl, ("uniform", None, None)) for lbl in labels]
+
     return (
         labels,
         np.array(lower),
@@ -290,11 +301,61 @@ def build_parameter_space(
         n_survey_eff,
         model_name,
         fixed_parameter_statuses,
+        prior_kinds,
     )
 
-def make_prior_transform(lower, upper):
-    lower = np.asarray(lower)
-    upper = np.asarray(upper)
+def make_prior_transform(lower, upper, prior_kinds=None):
+    """Unit-cube -> parameter inverse-CDF transform, per-parameter prior-aware.
+
+    ``prior_kinds`` is an optional list aligned to ``lower``/``upper`` of
+    ``(kind, loc, scale)`` triples (kind in ``{"uniform", "normal",
+    "lognormal"}``).  ``None`` reproduces the legacy all-uniform affine map.
+    Used by the nested samplers (dynesty/jaxns); numpyro builds its own prior
+    via ``run_sampler``.  ``low``/``high`` always act as truncation bounds, so
+    every kind maps the cube to ``[low, high]`` and the measure matches the
+    corresponding numpyro distribution.
+
+    Implementation note: dynesty wraps this with ``np.asarray(transform(
+    jnp.asarray(u)))``, i.e. the transform always receives a JAX array, so
+    ``jax.scipy.special`` is safe across all nested backends.
+    """
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+
+    if prior_kinds is None or all(k[0] == "uniform" for k in prior_kinds):
+        def prior_transform(u):
+            return u * (upper - lower) + lower
+        return prior_transform
+
+    import jax.numpy as jnp
+    from jax.scipy.special import ndtr, ndtri
+
+    kinds = [k[0] for k in prior_kinds]
+    loc = jnp.asarray([0.0 if k[1] is None else float(k[1]) for k in prior_kinds])
+    scale = jnp.asarray([1.0 if k[2] is None else float(k[2]) for k in prior_kinds])
+    lo_j, hi_j = jnp.asarray(lower), jnp.asarray(upper)
+    is_normal = jnp.asarray([k == "normal" for k in kinds])
+    is_lognorm = jnp.asarray([k == "lognormal" for k in kinds])
+
+    def _trunc_normal_ppf(u, a, b, mu, sg):
+        # inverse CDF of N(mu, sg^2) truncated to [a, b]
+        za = (a - mu) / sg
+        zb = (b - mu) / sg
+        Phi_a, Phi_b = ndtr(za), ndtr(zb)
+        x = ndtri(jnp.clip(Phi_a + u * (Phi_b - Phi_a), 1e-12, 1.0 - 1e-12))
+        return mu + sg * x
+
     def prior_transform(u):
-        return u * (upper - lower) + lower
+        u = jnp.asarray(u)
+        uniform = u * (hi_j - lo_j) + lo_j
+        # normal: truncated to [lo, hi]
+        normal = _trunc_normal_ppf(u, lo_j, hi_j, loc, scale)
+        # lognormal: exp of a normal in log-space truncated to [log lo, log hi]
+        log_lo = jnp.log(jnp.clip(lo_j, 1e-300, None))
+        log_hi = jnp.log(jnp.clip(hi_j, 1e-300, None))
+        lognormal = jnp.exp(_trunc_normal_ppf(u, log_lo, log_hi, loc, scale))
+        out = jnp.where(is_normal, normal, uniform)
+        out = jnp.where(is_lognorm, lognormal, out)
+        return out
+
     return prior_transform

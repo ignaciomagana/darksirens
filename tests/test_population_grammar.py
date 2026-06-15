@@ -79,8 +79,8 @@ def test_shared_suffixes_are_no_longer_part_of_model_names():
 def test_respelled_curated_name_gets_curated_priors():
     """'powerlaw+powerlaw+peak' must resolve to the same curated priors as
     '2powerlaws+peak' (canonical aliasing), not blueprint defaults."""
-    lo_a, hi_a, _, _ = pop_model_prior_parser("2powerlaws+peak")
-    lo_b, hi_b, _, _ = pop_model_prior_parser("powerlaw+powerlaw+peak")
+    lo_a, hi_a, _, _, _ = pop_model_prior_parser("2powerlaws+peak")
+    lo_b, hi_b, _, _, _ = pop_model_prior_parser("powerlaw+powerlaw+peak")
     assert lo_a == lo_b and hi_a == hi_b
     fid_a = np.asarray(get_fixed_population_params("2powerlaws+peak"))
     fid_b = np.asarray(get_fixed_population_params("powerlaw+powerlaw+peak"))
@@ -121,7 +121,7 @@ def test_unknown_model_error_lists_registered_models():
     message = str(err.value)
     assert "Registered population models:" in message
     assert "Mixture grammar:" in message
-    assert "gp_mass" in message
+    assert "gp1d_m1" in message
     assert "gwtc5_fiducial_bpl2peaks" in message
     assert "golomb_1g" in message
     assert "powerlaw" in message
@@ -135,7 +135,7 @@ def test_fixed_population_unknown_model_error_lists_registered_models():
 
     message = str(err.value)
     assert "Registered population models:" in message
-    assert "gp_mass_pairing_joint" in message
+    assert "gp4d" in message
     assert "gwtc5_brokenpowerlaw+2peaks" in message
     assert "golomb_1g+tail" in message
 
@@ -169,7 +169,7 @@ def test_legacy_alias_warns_and_matches(legacy, canonical):
 # ── Labels ───────────────────────────────────────────────────────────────────
 
 def test_powerlaw_peak_labels():
-    _, _, labels, latex = pop_model_prior_parser("powerlaw+peak")
+    _, _, labels, _, latex = pop_model_prior_parser("powerlaw+peak")
     assert labels == [
         "$v_1$",
         r"$\alpha_{\rm PL}$", r"$m_{\min,\rm PL}$", r"$m_{\max,\rm PL}$",
@@ -183,7 +183,7 @@ def test_powerlaw_peak_labels():
 
 
 def test_shared_gamma_cli_flag_builds_expected_parameters():
-    _, _, labels, latex = pop_model_prior_parser(
+    _, _, labels, _, latex = pop_model_prior_parser(
         "powerlaw+peak", shared_beta=True, shared_spin=True, shared_gamma=True
     )
     assert labels[-1:] == [r"$\gamma$"]
@@ -199,7 +199,7 @@ def test_shared_gamma_cli_flag_builds_expected_parameters():
 
 
 def test_per_component_cli_flags_build_expected_labels():
-    _, _, labels, latex = pop_model_prior_parser(
+    _, _, labels, _, latex = pop_model_prior_parser(
         "powerlaw+peak", shared_beta=False, shared_spin=False, shared_gamma=False
     )
     assert r"$\beta_{\rm PL}$" in labels
@@ -233,9 +233,9 @@ def test_param_ascii_names():
 
 
 def test_single_component_labels_untagged():
-    _, _, labels, _ = pop_model_prior_parser("gp_mass")
+    _, _, labels, _, _ = pop_model_prior_parser("gp1d_m1")
     assert labels[0] == r"$m_{\min}$"
-    assert r"$\beta$" in labels and r"$\mu_\chi$" in labels
+    assert r"$\beta_q$" in labels and r"$\mu_\chi$" in labels
 
 
 def test_per_component_gamma_specs_and_evaluation():
@@ -293,7 +293,7 @@ NOVEL_NAMES = [
 
 @pytest.mark.parametrize("name", NOVEL_NAMES)
 def test_novel_composition_builds_and_evaluates(name):
-    lows, highs, labels, latex = pop_model_prior_parser(name)
+    lows, highs, labels, _, latex = pop_model_prior_parser(name)
     assert len(lows) == len(highs) == len(labels)
     assert len(set(labels)) == len(labels), "labels must be unique"
 
@@ -311,17 +311,22 @@ def test_novel_composition_builds_and_evaluates(name):
 
 
 def test_novel_latex_derived():
-    _, _, _, latex = pop_model_prior_parser("3powerlaws+peak")
+    _, _, _, _, latex = pop_model_prior_parser("3powerlaws+peak")
     assert latex == "3PL+G"
 
 
 # ── Import laziness ──────────────────────────────────────────────────────────
 
-def test_registry_import_does_not_import_gp():
-    """Importing the registry must not import .gp (tinygp may be stubbed)."""
+def test_registry_import_does_not_import_tinygp():
+    """Importing the registry must not import tinygp (it may be stubbed/absent).
+
+    GP population models live in ``.gp``, which the registry now imports eagerly
+    for registration -- but ``.gp`` imports ``tinygp`` lazily (only inside the
+    field evaluation), so importing the registry never pulls ``tinygp``.
+    """
     code = (
         "import sys; import darksirens.gw.populations.registry; "
-        "assert 'darksirens.gw.populations.gp' not in sys.modules, 'gp imported eagerly'; "
+        "assert 'tinygp' not in sys.modules, 'tinygp imported eagerly'; "
         "sys.stdout.write('ok')"
     )
     result = subprocess.run(

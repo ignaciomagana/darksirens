@@ -12,7 +12,7 @@ MODEL = "gwtc5_fiducial_brokenpowerlaw+2peaks"
 
 
 def test_gwtc5_fiducial_bpl2peaks_table5_priors_and_fiducial_order():
-    lower, upper, labels, latex = pop_model_prior_parser(MODEL)
+    lower, upper, labels, _, latex = pop_model_prior_parser(MODEL)
 
     expected = [
         (r"$\alpha_1$", -4.0, 12.0),

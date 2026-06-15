@@ -71,12 +71,28 @@ class ParamSpec:
     name:
         Optional machine-readable ASCII identifier (e.g. ``"G1.mu"``).  Unlike
         ``label`` it contains no LaTeX and is stable under display changes.
+    prior_kind:
+        Prior family the sampler should place on this parameter.  One of
+        ``"uniform"`` (default; affine unit-cube transform / ``dist.Uniform``),
+        ``"normal"`` (truncated standard normal — used for whitened GP latents
+        ``xi``), or ``"lognormal"`` (exp of a truncated normal in log-space).
+        ``low``/``high`` always act as the truncation bounds, so existing
+        bounds-based machinery (overrides, fixed-value validation, sampler
+        bound checks) keeps working unchanged.
+    prior_loc, prior_scale:
+        Location/scale of the underlying (log-)normal for ``"normal"`` and
+        ``"lognormal"`` kinds.  ``None`` defaults to ``(0.0, 1.0)``, i.e. the
+        standard normal appropriate for whitened ``xi``.  Ignored for
+        ``"uniform"``.
     """
 
     label: str
     low: float
     high: float
     name: str = ""
+    prior_kind: str = "uniform"
+    prior_loc: float | None = None
+    prior_scale: float | None = None
 
 
 def pack_specs(*specs: ParamSpec):

@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 
 def run_sampler(method, likelihood, prior_transform, labels,
-                lower_bound, upper_bound, opts):
+                lower_bound, upper_bound, opts, prior_kinds=None):
     """
     method: "jaxns", "dynesty", "emcee", or "numpyro"
     likelihood: function(coord) -> logL (expects 1D array)
@@ -96,18 +96,34 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 "lower bound."
             )
 
+        def _site(i, name):
+            # Per-parameter prior, matching make_prior_transform's measure so
+            # nested and NUTS infer the same posterior.  "normal" gives whitened
+            # GP latents the unit-scale geometry NUTS needs (Option A); low/high
+            # act as truncation bounds for every kind.
+            kind, kloc, kscale = ("uniform", None, None)
+            if prior_kinds is not None:
+                kind, kloc, kscale = prior_kinds[i]
+            if kind == "normal":
+                loc = 0.0 if kloc is None else float(kloc)
+                sc = 1.0 if kscale is None else float(kscale)
+                return numpyro.sample(name, dist.TruncatedNormal(
+                    loc=loc, scale=sc, low=lower[i], high=upper[i]))
+            if kind == "lognormal":
+                loc = 0.0 if kloc is None else float(kloc)
+                sc = 1.0 if kscale is None else float(kscale)
+                base = dist.TruncatedNormal(
+                    loc=loc, scale=sc,
+                    low=jnp.log(lower[i]), high=jnp.log(upper[i]))
+                return numpyro.sample(name, dist.TransformedDistribution(
+                    base, dist.transforms.ExpTransform()))
+            return numpyro.sample(name, dist.Uniform(low=lower[i], high=upper[i]))
+
         def model():
-            # Use the same independent uniform priors as the nested samplers and
-            # emcee boundary checks.  NumPyro handles the constrained-to-real
-            # transform internally so NUTS samples in an unconstrained space.
-            theta_parts = []
-            for i, name in enumerate(labels):
-                theta_parts.append(
-                    numpyro.sample(
-                        name,
-                        dist.Uniform(low=lower[i], high=upper[i]),
-                    )
-                )
+            # Independent priors per parameter (uniform unless a parameter
+            # declares otherwise via prior_kinds).  NumPyro maps to an
+            # unconstrained space internally so NUTS samples there.
+            theta_parts = [_site(i, name) for i, name in enumerate(labels)]
             theta = jnp.stack(theta_parts) if theta_parts else jnp.array([])
             log_l = likelihood(theta)
             numpyro.deterministic("log_likelihood", log_l)

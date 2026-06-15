@@ -1,243 +1,663 @@
-"""Gaussian-process population components.
+r"""Gaussian-process population models (true-GP prior, mixture-decoupled).
 
-The classes in this module provide flexible, node-based alternatives to the
-analytic distributions in :mod:`darksirens.gw.populations.parametric`.  Each
-component conditions a tinygp Gaussian process on free node amplitudes supplied
-by the sampler, exponentiates the resulting log-density, and then relies on the
-base component interfaces for numerical normalisation.
+This module provides *standalone* compact-binary population models whose
+source-parameter density is a Gaussian-process prior over one or more of
+``(m1, q, chi_eff, z)``.  They are registered with :func:`register_model` and
+therefore bypass the stick-breaking ``MixtureModel`` grammar entirely: each
+model exposes the population-model duck type consumed by the likelihood --
+``param_specs``, ``prior_bounds()`` and ``log_p_pop(m1, q, z, chieff, theta)``.
 
-The GP components are intentionally deterministic JAX functions: all stochastic
-behavior lives in the inference sampler, not in the tinygp objects created here.
-That makes the functions safe to JIT inside the hierarchical likelihood.
+Why this replaces the old node-conditioned classes
+--------------------------------------------------
+The previous GP classes sampled latent node *values* ``y`` from uniform box
+priors and called ``tinygp.condition(y, ...)``.  With a flat prior on ``y`` and
+no ``log N(y; mu, K)`` term, the kernel only governed interpolation between free
+nodes -- it was *not* a GP prior.  These models instead impose a genuine GP
+prior via a whitened (non-centred) parameterisation.
+
+Construction (whitened, rank-M, no interpolation)
+-------------------------------------------------
+For the GP axes with inducing grid ``Z`` (in coordinate space) and standard
+normal latent ``xi``::
+
+    K     = amp^2 * prod_axis kernel_axis(Z, Z) + jitter
+    L     = chol(K)
+    alpha = L^{-T} xi                         # one triangular solve
+    f(x*) = mu(x*) + k(x*, Z) @ alpha
+
+This is the standard finite-dimensional ("deterministic inducing point") GP
+prior, the same representation used by the binned-GP (Ray et al. 2023,
+ApJ 957, 37) and B-spline (Edelman et al. 2023) population analyses: an exact
+GP draw at the inducing points and a smooth RKHS conditional mean elsewhere,
+evaluated at the exact query points with no interpolation grid.  Because
+``xi ~ N(0, I)`` carries ``prior_kind="normal"``, NUTS samples the clean,
+unit-scale Gaussian geometry the whitening is designed to expose.
+
+Redshift convention
+-------------------
+``z`` is always a *conditioning / rate* axis, never a probability axis: the
+GP is normalised only over the probability axes ``{m1, q, chi}`` that it spans
+(conditional on ``z`` when ``z`` is a GP axis), and the marginal redshift
+evolution is always the parametric ``(1 + z)**(gamma - 1)`` rate term.  A GP
+on ``z`` therefore adds *conditional shape evolution* (e.g. a mass function
+that evolves with redshift) on top of the parametric rate.
+
+Import note
+-----------
+``tinygp`` is imported lazily inside the field evaluation so that importing
+this module (for registration, parameter specs, or fiducials) never imports
+``tinygp``.  Only ``log_p_pop`` requires it.
 """
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Sequence
 
 import jax.numpy as jnp
-from tinygp import GaussianProcess, kernels
+import jax.scipy.linalg as jsl
 
-from .base import MassComponent, PairingModel, ParamSpec
-from .utils import get_mass_grid, sfilter_high, sfilter_low
+from .base import ParamSpec, pack_specs
+from .utils import get_mass_grid, get_q_grid, get_chi_grid, sfilter_low, sfilter_high
 
 
-# Node counts derive from the plain-Python lists so the module stays
-# importable when jax is replaced by an autodoc mock during docs builds.
-_PAIR2D_M_VALUES = [9.0, 18.0, 30.0, 42.0, 60.0, 90.0]
-_PAIR2D_Q_VALUES = [0.15, 0.35, 0.55, 0.75, 0.95]
-_PAIR2D_LOGM_NODES = jnp.log(jnp.array(_PAIR2D_M_VALUES))
-_PAIR2D_Q_NODES = jnp.array(_PAIR2D_Q_VALUES)
-_PAIR2D_N_NODES = len(_PAIR2D_M_VALUES) * len(_PAIR2D_Q_VALUES)
-_PAIR2D_JITTER_REL = 1e-4
+# ============================================================
+# Axis coordinate transforms and default inducing geometry
+# ============================================================
 
+AXIS_ORDER = ("m1", "q", "chi", "z")          # canonical ordering
+_PROB_AXES = ("m1", "q", "chi")               # normalised over these
+_COND_AXES = ("z",)                           # conditioning / rate axis
+
+_LOGSAFE = 1e-12
+_FIELD_CLIP = 10.0
+_JITTER_REL = 1e-4
+
+# Normalisation grids.  When z is a GP axis the normalisation integral over the
+# probability axes is a smooth 1-D function of z, so it is evaluated on a small
+# z-grid and interpolated (cost independent of the number of query points).  For
+# multi-axis (>=2) probability integrals under z-conditioning a dedicated coarse
+# grid keeps the (z-grid x prob-grid) tensor tractable; single-axis and
+# z-independent integrals use the full normalisation grids for accuracy.
+_KD_N = {"m1": 48, "q": 24, "chi": 24}     # coarse per-axis sizes for k-D norm
+_KD_SPAN = {"m1": (2.0, 100.0), "q": (0.02, 1.0), "chi": (-1.0, 1.0)}
+_ZNORM_N = 24
+_ZNORM_HI = 3.0
+
+
+def _coarse_axis_grid(axis: str):
+    lo, hi = _KD_SPAN[axis]
+    return jnp.linspace(lo, hi, _KD_N[axis])
+
+
+def _znorm_interp(eval_norm_fn, z_query):
+    """Evaluate the prob-axis normalisation on a z-grid and interpolate (log-space)."""
+    import jax
+    zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
+    norms = jax.vmap(eval_norm_fn)(zg)
+    return jnp.exp(jnp.interp(z_query, zg, jnp.log(jnp.where(norms > 0, norms, _LOGSAFE))))
+
+
+def _to_coord(axis: str, m1, q, chi, z):
+    """Map a physical value of ``axis`` to its GP coordinate."""
+    if axis == "m1":
+        return jnp.log(jnp.clip(m1, _LOGSAFE, None))
+    if axis == "q":
+        return jnp.asarray(q)
+    if axis == "chi":
+        return jnp.sin(0.5 * jnp.pi * jnp.clip(chi, -1.0, 1.0))   # boundary-warp
+    if axis == "z":
+        return jnp.log1p(jnp.asarray(z))
+    raise ValueError(f"unknown axis {axis!r}")
+
+
+def _axis_phys_grid(axis: str):
+    """Normalisation grid (physical units) for a probability axis."""
+    if axis == "m1":
+        return get_mass_grid()
+    if axis == "q":
+        return get_q_grid()
+    if axis == "chi":
+        return get_chi_grid()
+    raise ValueError(f"axis {axis!r} is not a probability axis")
+
+
+@dataclass(frozen=True)
+class AxisCfg:
+    """Per-axis GP configuration."""
+    name: str
+    family: str          # "matern32" | "rbf"
+    n_inducing: int
+    node_lo: float       # inducing-node span (physical units)
+    node_hi: float
+    log_ls_lo: float     # log length-scale prior bounds (coordinate units)
+    log_ls_hi: float
+
+    def nodes_phys(self) -> jnp.ndarray:
+        if self.name == "m1":
+            return jnp.exp(jnp.linspace(jnp.log(self.node_lo),
+                                        jnp.log(self.node_hi), self.n_inducing))
+        return jnp.linspace(self.node_lo, self.node_hi, self.n_inducing)
+
+    def nodes_coord(self) -> jnp.ndarray:
+        p = self.nodes_phys()
+        return _to_coord(self.name, p, p, p, p)
+
+
+# Default per-axis configurations (kernels: Matern-3/2 for m1, RBF elsewhere).
+_DEFAULT_AXES = {
+    "m1":  AxisCfg("m1",  "matern32", 10, 3.0,   100.0, float(jnp.log(0.15)), float(jnp.log(2.0))),
+    "q":   AxisCfg("q",   "rbf",       8, 0.10,    1.0, float(jnp.log(0.05)), float(jnp.log(0.8))),
+    "chi": AxisCfg("chi", "rbf",      10, -0.95,   0.95, float(jnp.log(0.05)), float(jnp.log(1.0))),
+    "z":   AxisCfg("z",   "rbf",       8, 0.0,     1.5, float(jnp.log(0.05)), float(jnp.log(0.8))),
+}
+
+# Shared prior bounds.
+_B_MMIN  = (2.0, 10.0)
+_B_DMMIN = (0.01, 10.0)
+_B_MMAX  = (50.0, 100.0)
+_B_DMMAX = (0.01, 20.0)
+_B_LOGAMP = (float(jnp.log(0.1)), float(jnp.log(3.0)))
+_B_ALPHA_GP = (-4.0, 12.0)     # m1 shape-mean slope
+_B_BETA_GP  = (-4.0, 12.0)     # q  shape-mean slope
+_B_ALPHA_MASS = (-4.0, 6.0)    # baseline power-law mass slope
+_B_BETA_Q = (-2.0, 7.0)        # baseline pairing slope
+_B_MUCHI = (-1.0, 1.0)
+_B_SIGCHI = (0.01, 1.0)
+_B_GAMMA = (-10.0, 10.0)
+
+
+# ============================================================
+# Kernel + whitened rank-M field
+# ============================================================
+
+def _build_kernel(amp: jnp.ndarray, ls: Sequence, families: Sequence[str]):
+    """Product ARD kernel over axes: amp^2 * prod_i family_i(scale=ls_i) on axis i."""
+    from tinygp import kernels, transforms   # lazy: tinygp only needed to evaluate
+
+    fam_map = {"matern32": kernels.Matern32, "rbf": kernels.ExpSquared}
+    k = None
+    for i, (fam, l) in enumerate(zip(families, ls)):
+        base = fam_map[fam](scale=l)
+        sub = transforms.Subspace(i, base) if len(families) > 1 else base
+        k = sub if k is None else k * sub
+    return (amp ** 2) * k
+
+
+def _field_factor(nodes, families, amp, ls, jitter):
+    """Cholesky factor L of K(Z, Z) and the kernel object (reused for all evals)."""
+    k = _build_kernel(amp, ls, families)
+    K = k(nodes, nodes) + jitter * jnp.eye(nodes.shape[0])
+    return jnp.linalg.cholesky(K), k
+
+
+def _alpha_from_xi(L, xi):
+    """alpha = L^{-T} xi  (so that f(Z) = mu(Z) + L xi exactly)."""
+    return jsl.solve_triangular(L, xi, lower=True, trans=1)
+
+
+def _eval_field(coords, kern, nodes, alpha, mean):
+    """f(coords) = mean(coords) + k(coords, Z) @ alpha."""
+    kqz = kern(coords, nodes)                      # (Nq, M)
+    return mean + kqz @ alpha
+
+
+def _grid_integrate(values, grids):
+    """Nested trapezoid of ``values`` over the listed 1-D ``grids`` (trailing axes)."""
+    out = values
+    for g in reversed(grids):
+        out = jnp.trapezoid(out, g, axis=-1)
+    return out
+
+
+# ============================================================
+# Joint GP population model
+# ============================================================
 
 @dataclass
-class GaussianProcessMass1D(MassComponent):
-    """One-dimensional GP model for the primary-mass log-density.
+class JointGPPopulation:
+    """A population model with a joint GP source-shape over ``gp_axes``.
 
-    The first four parameters set the lower/upper mass taper, ``alpha`` defines
-    a power-law mean trend in log mass, ``amp`` and ``ls`` set the Matern-5/2 GP
-    covariance, and eleven ``y`` parameters are the latent node values.  The GP
-    is conditioned on logarithmically spaced mass nodes and interpolated onto
-    the shared mass grid before evaluating arbitrary masses.
+    ``p(m1, q, chi, z) = G(gp_axes) * Prod_{a not in gp_axes} B_a``, with the GP
+    factor ``G`` normalised over its probability axes (m1, q, chi) -- conditional
+    on z when z is a GP axis -- and the marginal redshift rate carried by the
+    parametric ``(1+z)**(gamma-1)`` term.  Low-mass tapers and the ``m2 = q*m1``
+    secondary cut are applied consistently to both the density and its
+    normalisation integral.
+
+    Parameter order (sliced by ``log_p_pop`` exactly as listed by ``param_specs``)
+    ------------------------------------------------------------------------------
+    m_min, dm_min, m_max, dm_max,                      # m1 taper (always)
+    log_amp,                                           # GP amplitude
+    log_ls_<axis> for axis in gp_axes,                 # ARD length scales
+    [alpha_gp if m1 in gp_axes and mean_mode=="shape"],
+    [beta_gp  if q  in gp_axes and mean_mode=="shape"],
+    xi_0 .. xi_{M-1},                                  # whitened latent (normal)
+    [alpha_mass if m1 not in gp_axes],                 # baseline mass slope
+    [beta_q     if q  not in gp_axes],                 # baseline pairing slope
+    [mu_chi, sigma_chi if chi not in gp_axes],         # baseline spin
+    gamma                                              # redshift rate (always)
     """
 
-    m_min_spec: ParamSpec
-    m_max_spec: ParamSpec
-    dm_min_spec: ParamSpec
-    dm_max_spec: ParamSpec
-    alpha_spec: ParamSpec
-    amp_spec: ParamSpec
-    ls_spec: ParamSpec
-    y0_spec: ParamSpec
-    y1_spec: ParamSpec
-    y2_spec: ParamSpec
-    y3_spec: ParamSpec
-    y4_spec: ParamSpec
-    y5_spec: ParamSpec
-    y6_spec: ParamSpec
-    y7_spec: ParamSpec
-    y8_spec: ParamSpec
-    y9_spec: ParamSpec
-    y10_spec: ParamSpec
+    gp_axes: tuple
+    mean_mode: str = "shape"            # "shape" | "zero"
+    axes_cfg: dict = field(default_factory=lambda: dict(_DEFAULT_AXES))
+    latex: str = "GP"
+
+    def __post_init__(self):
+        self.gp_axes = tuple(a for a in AXIS_ORDER if a in self.gp_axes)
+        if not self.gp_axes:
+            raise ValueError("JointGPPopulation needs at least one GP axis")
+        self._cfgs = [self.axes_cfg[a] for a in self.gp_axes]
+        self._families = [c.family for c in self._cfgs]
+        node_axes = [c.nodes_coord() for c in self._cfgs]
+        mesh = jnp.meshgrid(*node_axes, indexing="ij")
+        self._Z = jnp.stack([m.ravel() for m in mesh], axis=-1)   # (M, d)
+        self.M = int(self._Z.shape[0])
+        self._prob_gp = [a for a in self.gp_axes if a in _PROB_AXES]
+        self._z_in_gp = "z" in self.gp_axes
+        self._jitter = _JITTER_REL
+
+    # -- parameter specifications ------------------------------------------
 
     @property
     def param_specs(self):
-        """Return mass-taper, GP hyperparameter, and node specs in vector order."""
-        return [
-            self.m_min_spec,
-            self.m_max_spec,
-            self.dm_min_spec,
-            self.dm_max_spec,
-            self.alpha_spec,
-            self.amp_spec,
-            self.ls_spec,
-            self.y0_spec,
-            self.y1_spec,
-            self.y2_spec,
-            self.y3_spec,
-            self.y4_spec,
-            self.y5_spec,
-            self.y6_spec,
-            self.y7_spec,
-            self.y8_spec,
-            self.y9_spec,
-            self.y10_spec,
+        s = [
+            ParamSpec(r"$m_{\min}$",        *_B_MMIN,  name="m_min"),
+            ParamSpec(r"$\delta m_{\min}$", *_B_DMMIN, name="dm_min"),
+            ParamSpec(r"$m_{\max}$",        *_B_MMAX,  name="m_max"),
+            ParamSpec(r"$\delta m_{\max}$", *_B_DMMAX, name="dm_max"),
+            ParamSpec(r"$\log A$",          *_B_LOGAMP, name="log_amp"),
         ]
+        for a in self.gp_axes:
+            c = self.axes_cfg[a]
+            s.append(ParamSpec(rf"$\log\ell_{{{a}}}$", c.log_ls_lo, c.log_ls_hi,
+                               name=f"log_ls_{a}"))
+        if self.mean_mode == "shape":
+            if "m1" in self.gp_axes:
+                s.append(ParamSpec(r"$\alpha_{\rm GP}$", *_B_ALPHA_GP, name="alpha_gp"))
+            if "q" in self.gp_axes:
+                s.append(ParamSpec(r"$\beta_{\rm GP}$", *_B_BETA_GP, name="beta_gp"))
+        for i in range(self.M):
+            s.append(ParamSpec(rf"$\xi_{{{i}}}$", -6.0, 6.0, name=f"xi_{i}",
+                               prior_kind="normal", prior_loc=0.0, prior_scale=1.0))
+        if "m1" not in self.gp_axes:
+            s.append(ParamSpec(r"$\alpha_m$", *_B_ALPHA_MASS, name="alpha_mass"))
+        if "q" not in self.gp_axes:
+            s.append(ParamSpec(r"$\beta_q$", *_B_BETA_Q, name="beta_q"))
+        if "chi" not in self.gp_axes:
+            s.append(ParamSpec(r"$\mu_\chi$", *_B_MUCHI, name="mu_chi"))
+            s.append(ParamSpec(r"$\sigma_\chi$", *_B_SIGCHI, name="sigma_chi"))
+        s.append(ParamSpec(r"$\gamma$", *_B_GAMMA, name="gamma"))
+        return s
 
-    def _eval_unnorm(self, m, t):
-        """Evaluate the smoothed exponentiated GP primary-mass density."""
-        mmin, mmax, dmmin, dmmax = t[0], t[1], t[2], t[3]
-        alpha, amp, ls = t[4], t[5], t[6]
-        y_nodes = jnp.array(t[7:18])
-        mass_grid = get_mass_grid()
-        log_mass_grid = jnp.log(mass_grid)
-        log_nodes = jnp.linspace(jnp.log(2.0), jnp.log(100.0), 11)
+    def prior_bounds(self):
+        return pack_specs(*self.param_specs)
 
-        def mean_fn(x):
-            """Power-law mean trend expressed in log-mass coordinates."""
-            return -alpha * x
+    def fiducial(self):
+        """Fiducial vector: xi = 0 (field == mean), central hyperparameters."""
+        return [0.0 if sp.name.startswith("xi_") else float((sp.low + sp.high) * 0.5)
+                for sp in self.param_specs]
 
-        kernel = (amp**2) * kernels.Matern52(scale=ls)
-        gp_prior = GaussianProcess(kernel=kernel, X=log_nodes, mean=mean_fn, diag=1e-5)
-        _, gp_cond = gp_prior.condition(y_nodes, log_mass_grid)
+    # -- field mean (parametric shape on the GP axes) ----------------------
 
-        logpm_grid = gp_cond.loc
-        s_grid = sfilter_low(mass_grid, mmin, dmmin) * sfilter_high(
-            mass_grid, mmax, dmmax
-        )
-        pm_grid = s_grid * jnp.exp(logpm_grid)
-        return jnp.interp(m, mass_grid, pm_grid, left=0.0, right=0.0)
+    def _mean_on_coords(self, coords, alpha_gp, beta_gp):
+        """Additive parametric mean evaluated on GP coordinates ``coords`` (N, d)."""
+        if self.mean_mode == "zero":
+            return jnp.zeros(coords.shape[0])
+        mu = jnp.zeros(coords.shape[0])
+        for j, a in enumerate(self.gp_axes):
+            if a == "m1":
+                mu = mu - alpha_gp * coords[:, j]                 # coord = log m1
+            elif a == "q":
+                mu = mu + beta_gp * jnp.log(coords[:, j] + 0.01)  # coord = q
+        return mu
 
+    # -- evaluation --------------------------------------------------------
+
+    def log_p_pop(self, m1, q, z, chieff, theta):
+        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
+        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
+        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
+        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
+
+        # ---- unpack theta in param_specs order ----
+        m_min, dm_min, m_max, dm_max = theta[0], theta[1], theta[2], theta[3]
+        i = 4
+        amp = jnp.exp(theta[i]); i += 1
+        ls = [jnp.exp(theta[i + j]) for j in range(len(self.gp_axes))]
+        i += len(self.gp_axes)
+        alpha_gp = beta_gp = 0.0
+        if self.mean_mode == "shape":
+            if "m1" in self.gp_axes:
+                alpha_gp = theta[i]; i += 1
+            if "q" in self.gp_axes:
+                beta_gp = theta[i]; i += 1
+        xi = theta[i:i + self.M]; i += self.M
+        alpha_mass = beta_q = mu_chi = sig_chi = None
+        if "m1" not in self.gp_axes:
+            alpha_mass = theta[i]; i += 1
+        if "q" not in self.gp_axes:
+            beta_q = theta[i]; i += 1
+        if "chi" not in self.gp_axes:
+            mu_chi = theta[i]; sig_chi = theta[i + 1]; i += 2
+        gamma = theta[i]
+
+        # ---- GP factor ----
+        L, kern = _field_factor(self._Z, self._families, amp, ls,
+                                self._jitter * amp ** 2 + 1e-9)
+        alpha = _alpha_from_xi(L, xi)
+
+        coords_q = jnp.stack([_to_coord(a, m1, q, chi, z) for a in self.gp_axes], axis=-1)
+        f_q = _eval_field(coords_q, kern, self._Z, alpha,
+                          self._mean_on_coords(coords_q, alpha_gp, beta_gp))
+        p_gp_un = jnp.exp(jnp.clip(f_q, -_FIELD_CLIP, _FIELD_CLIP))
+        p_gp_un = p_gp_un * self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
+
+        norm = self._normalise(kern, alpha, alpha_gp, beta_gp,
+                               z, m_min, dm_min, m_max, dm_max)
+        p_gp = p_gp_un / jnp.where(norm > 0, norm, 1.0)
+
+        # ---- baseline factors for non-GP probability axes ----
+        p_base = jnp.ones_like(m1)
+        if "m1" not in self.gp_axes:
+            p_base = p_base * self._baseline_mass(m1, alpha_mass, m_min, dm_min, m_max, dm_max)
+        if "q" not in self.gp_axes:
+            p_base = p_base * self._baseline_pairing(m1, q, beta_q, m_min, dm_min)
+        if "chi" not in self.gp_axes:
+            p_base = p_base * self._baseline_spin(chi, mu_chi, sig_chi)
+
+        p = p_gp * p_base
+        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        return log_p + (gamma - 1.0) * jnp.log1p(z)
+
+    # -- tapers / cut, applied identically to density and normalisation ----
+
+    def _taper_cut(self, m1, q, m_min, dm_min, m_max, dm_max):
+        s = jnp.ones_like(m1)
+        if "m1" in self.gp_axes:
+            s = s * sfilter_low(m1, m_min, dm_min) * sfilter_high(m1, m_max, dm_max)
+        if "q" in self.gp_axes:
+            m2 = q * m1
+            cut = jnp.nan_to_num(sfilter_low(m2, m_min, dm_min), nan=0.0)
+            s = s * jnp.where(m2 < m_min, 0.0, cut)
+        return s
+
+    def _normalise(self, kern, alpha, alpha_gp, beta_gp,
+                   z, m_min, dm_min, m_max, dm_max):
+        """Integrate exp(f) * tapers over the probability axes.
+
+        When z is a GP axis the field is z-dependent; the integral is then a
+        smooth function of z evaluated on a small z-grid and interpolated to the
+        query redshifts (cost independent of the number of queries).  A coarse
+        prob-axis grid is used for multi-axis integrals under z-conditioning;
+        single-axis and z-independent integrals use the full grids.
+        """
+        coarse = self._z_in_gp and len(self._prob_gp) >= 2
+        if coarse:
+            grids = [_coarse_axis_grid(a) for a in self._prob_gp]
+        else:
+            grids = [_axis_phys_grid(a) for a in self._prob_gp]
+        mesh = jnp.meshgrid(*grids, indexing="ij")
+        flat = [mm.ravel() for mm in mesh]
+        G = flat[0].shape[0]
+        phys = {a: jnp.ones(G) for a in AXIS_ORDER}
+        for a, fv in zip(self._prob_gp, flat):
+            phys[a] = fv
+
+        def _eval_norm(zval):
+            cols = []
+            for a in self.gp_axes:
+                if a == "z":
+                    cols.append(_to_coord("z", None, None, None, jnp.full(G, zval)))
+                else:
+                    cols.append(_to_coord(a, phys["m1"], phys["q"], phys["chi"], None))
+            coords = jnp.stack(cols, axis=-1)
+            fg = _eval_field(coords, kern, self._Z, alpha,
+                             self._mean_on_coords(coords, alpha_gp, beta_gp))
+            val = jnp.exp(jnp.clip(fg, -_FIELD_CLIP, _FIELD_CLIP))
+            val = val * self._taper_cut(phys["m1"], phys["q"],
+                                        m_min, dm_min, m_max, dm_max)
+            return _grid_integrate(val.reshape([g.shape[0] for g in grids]), grids)
+
+        if self._z_in_gp:
+            return _znorm_interp(_eval_norm, z)         # (Nquery,)
+        return _eval_norm(0.0)                          # scalar
+
+    # -- baseline parametric factors --------------------------------------
+
+    def _baseline_mass(self, m1, alpha_mass, m_min, dm_min, m_max, dm_max):
+        grid = get_mass_grid()
+        un = (sfilter_low(grid, m_min, dm_min) * sfilter_high(grid, m_max, dm_max)
+              * grid ** (-alpha_mass))
+        norm = jnp.trapezoid(un, grid)
+        p = (sfilter_low(m1, m_min, dm_min) * sfilter_high(m1, m_max, dm_max)
+             * m1 ** (-alpha_mass))
+        return p / jnp.where(norm > 0, norm, 1.0)
+
+    def _baseline_pairing(self, m1, q, beta_q, m_min, dm_min):
+        qg = get_q_grid()
+        m2g = qg[None, :] * m1[..., None]
+        raw = (qg[None, :] ** beta_q) * jnp.nan_to_num(
+            sfilter_low(m2g, m_min, dm_min), nan=0.0)
+        raw = jnp.where(m2g < m_min, 0.0, raw)
+        norm = jnp.trapezoid(raw, qg, axis=-1)
+        m2 = q * m1
+        p = (q ** beta_q) * jnp.nan_to_num(sfilter_low(m2, m_min, dm_min), nan=0.0)
+        p = jnp.where(m2 < m_min, 0.0, p)
+        return p / jnp.where(norm > 0, norm, 1.0)
+
+    def _baseline_spin(self, chi, mu_chi, sig_chi):
+        cg = get_chi_grid()
+        un = jnp.where((cg >= -1) & (cg <= 1),
+                       jnp.exp(-0.5 * ((cg - mu_chi) / sig_chi) ** 2), 0.0)
+        norm = jnp.trapezoid(un, cg)
+        p = jnp.where((chi >= -1) & (chi <= 1),
+                      jnp.exp(-0.5 * ((chi - mu_chi) / sig_chi) ** 2), 0.0)
+        return p / jnp.where(norm > 0, norm, 1.0)
+
+
+# ============================================================
+# Additive (functional-ANOVA) GP population model
+# ============================================================
 
 @dataclass
-class GaussianProcessMassRatio1D(PairingModel):
-    """One-dimensional GP model for the conditional mass-ratio density.
+class AdditiveGPPopulation:
+    """Functional-ANOVA decomposition: ``f = sum_terms f_term`` (each centred).
 
-    ``beta`` defines a power-law mean in ``log(q)``, ``amp`` and ``ls`` define a
-    Matern-5/2 covariance over mass ratio, and five node amplitudes allow
-    departures from the mean.  The model is conditional on ``m1`` because the
-    secondary-mass threshold is applied after evaluating the GP in ``q``.
+    Probability axes are ``{m1, q, chi}``; ``z`` enters only through interaction
+    terms that include it (conditioning).  Each term is an independent whitened
+    rank-M GP with its own amplitude, length scales, and ``xi``, constrained to
+    integrate to zero over its own axes (sum-to-zero -- required for ANOVA
+    identifiability, else per-term contributions are not separable).
     """
 
-    beta_spec: ParamSpec
-    amp_spec: ParamSpec
-    ls_spec: ParamSpec
-    y0_spec: ParamSpec
-    y1_spec: ParamSpec
-    y2_spec: ParamSpec
-    y3_spec: ParamSpec
-    y4_spec: ParamSpec
+    terms: tuple = (("m1",), ("q",), ("chi",), ("m1", "q"), ("m1", "z"), ("chi", "z"))
+    mean_mode: str = "shape"
+    axes_cfg: dict = field(default_factory=lambda: dict(_DEFAULT_AXES))
+    latex: str = "GP add"
+
+    def __post_init__(self):
+        self.terms = tuple(tuple(a for a in AXIS_ORDER if a in t) for t in self.terms)
+        self._term_meta = []
+        for t in self.terms:
+            cfgs = [self.axes_cfg[a] for a in t]
+            node_axes = [c.nodes_coord() for c in cfgs]
+            mesh = jnp.meshgrid(*node_axes, indexing="ij")
+            Z = jnp.stack([m.ravel() for m in mesh], axis=-1)
+            self._term_meta.append({"axes": t, "fam": [c.family for c in cfgs],
+                                    "Z": Z, "M": int(Z.shape[0])})
+        self._z_in_gp = any("z" in t for t in self.terms)
+        self._jitter = _JITTER_REL
 
     @property
     def param_specs(self):
-        """Return ``beta``, GP hyperparameter, and node specs in vector order."""
-        return [
-            self.beta_spec,
-            self.amp_spec,
-            self.ls_spec,
-            self.y0_spec,
-            self.y1_spec,
-            self.y2_spec,
-            self.y3_spec,
-            self.y4_spec,
+        s = [
+            ParamSpec(r"$m_{\min}$",        *_B_MMIN,  name="m_min"),
+            ParamSpec(r"$\delta m_{\min}$", *_B_DMMIN, name="dm_min"),
+            ParamSpec(r"$m_{\max}$",        *_B_MMAX,  name="m_max"),
+            ParamSpec(r"$\delta m_{\max}$", *_B_DMMAX, name="dm_max"),
         ]
+        for t, meta in zip(self.terms, self._term_meta):
+            tag = "".join(t)
+            s.append(ParamSpec(rf"$\log A_{{{tag}}}$", *_B_LOGAMP, name=f"log_amp_{tag}"))
+            for a in t:
+                c = self.axes_cfg[a]
+                s.append(ParamSpec(rf"$\log\ell_{{{tag},{a}}}$", c.log_ls_lo, c.log_ls_hi,
+                                   name=f"log_ls_{tag}_{a}"))
+            for i in range(meta["M"]):
+                s.append(ParamSpec(rf"$\xi_{{{tag},{i}}}$", -6.0, 6.0,
+                                   name=f"xi_{tag}_{i}",
+                                   prior_kind="normal", prior_loc=0.0, prior_scale=1.0))
+        s.append(ParamSpec(r"$\gamma$", *_B_GAMMA, name="gamma"))
+        return s
 
-    def _eval_unnorm(self, m1, q, m_min, dm_min, t):
-        """Evaluate the smoothed GP mass-ratio pairing density."""
-        beta, amp, ls = t[0], t[1], t[2]
-        y_nodes = jnp.array(t[3:8])
-        q_nodes = jnp.linspace(0.1, 1.0, 5)
-        q_eval_grid = jnp.linspace(0.01, 1.0, 500)
+    def prior_bounds(self):
+        return pack_specs(*self.param_specs)
 
-        def mean_fn(x):
-            """Power-law mean trend for mass ratio."""
-            return beta * jnp.log(x)
+    def fiducial(self):
+        return [0.0 if sp.name.startswith("xi_") else float((sp.low + sp.high) * 0.5)
+                for sp in self.param_specs]
 
-        kernel = (amp**2) * kernels.Matern52(scale=ls)
-        gp_prior = GaussianProcess(kernel=kernel, X=q_nodes, mean=mean_fn, diag=1e-4)
-        _, gp_cond = gp_prior.condition(y_nodes, q_eval_grid)
+    @staticmethod
+    def _term_eval(meta, kern, alpha, phys, zval, n):
+        """Evaluate one (uncentred) term field at ``n`` points; ``zval`` scalar or (n,)."""
+        cols = []
+        for a in meta["axes"]:
+            if a == "z":
+                cols.append(_to_coord("z", None, None, None, jnp.broadcast_to(zval, (n,))))
+            else:
+                cols.append(_to_coord(a, phys["m1"], phys["q"], phys["chi"], None))
+        coords = jnp.stack(cols, axis=-1)
+        return _eval_field(coords, kern, meta["Z"], alpha, jnp.zeros(n))
 
-        log_pq_grid = jnp.nan_to_num(gp_cond.loc, nan=-20.0)
-        log_pq_grid = jnp.clip(log_pq_grid, -10.0, 10.0)
-        pq_grid = jnp.exp(log_pq_grid)
+    def log_p_pop(self, m1, q, z, chieff, theta):
+        import jax
+        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
+        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
+        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
+        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
+        N = m1.shape[0]
 
-        pq = jnp.interp(q, q_eval_grid, pq_grid, left=0.0, right=0.0)
-        m1_b, q_b = jnp.broadcast_arrays(m1, q)
-        m2 = q_b * m1_b
+        m_min, dm_min, m_max, dm_max = theta[0], theta[1], theta[2], theta[3]
+        i = 4
+        # Build each term's kernel + alpha ONCE (z-independent).
+        term_built = []
+        for meta in self._term_meta:
+            amp = jnp.exp(theta[i]); i += 1
+            ls = [jnp.exp(theta[i + j]) for j in range(len(meta["axes"]))]
+            i += len(meta["axes"])
+            xi = theta[i:i + meta["M"]]; i += meta["M"]
+            L, kern = _field_factor(meta["Z"], meta["fam"], amp, ls,
+                                    self._jitter * amp ** 2 + 1e-9)
+            term_built.append((meta, kern, _alpha_from_xi(L, xi)))
+        gamma = theta[i]
 
-        smooth_cut = sfilter_low(m2, m_min, dm_min)
-        smooth_cut = jnp.nan_to_num(smooth_cut, nan=0.0)
-        p = smooth_cut * pq
-        return jnp.where(m2 < m_min, 1e-20, p)
+        # Coarse probability grid (m1, q, chi) for centring + normalisation.
+        grids = [_coarse_axis_grid("m1"), _coarse_axis_grid("q"), _coarse_axis_grid("chi")]
+        mg, qg, cg = grids
+        Mg, Qg, Cg = jnp.meshgrid(mg, qg, cg, indexing="ij")
+        flatg = {"m1": Mg.ravel(), "q": Qg.ravel(), "chi": Cg.ravel()}
+        G = flatg["m1"].shape[0]
+        taper_grid = self._taper_cut(flatg["m1"], flatg["q"], m_min, dm_min, m_max, dm_max)
+
+        # Per z-grid node: per-term sum-to-zero constant c_term(z) and the
+        # prob-axis normalisation Z(z).  Smooth in z -> interpolate to queries.
+        def _grid_quant(zval):
+            cs = []
+            F = jnp.zeros(G)
+            for meta, kern, alpha in term_built:
+                fg = self._term_eval(meta, kern, alpha, flatg, zval, G)
+                c = jnp.mean(fg)
+                cs.append(c)
+                F = F + (fg - c)
+            pg = jnp.exp(jnp.clip(F, -_FIELD_CLIP, _FIELD_CLIP)) * taper_grid
+            Z = _grid_integrate(pg.reshape([g.shape[0] for g in grids]), grids)
+            return Z, jnp.stack(cs)
+
+        zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
+        Zg, Cg_terms = jax.lax.map(_grid_quant, zg)        # (nz,), (nz, n_terms)
+
+        # Query points (direct evaluation; centring constants interpolated in z).
+        qphys = {"m1": m1, "q": q, "chi": chi}
+        F_q = jnp.zeros(N)
+        for j, (meta, kern, alpha) in enumerate(term_built):
+            fpt = self._term_eval(meta, kern, alpha, qphys, z, N)
+            c_at = jnp.interp(z, zg, Cg_terms[:, j])
+            F_q = F_q + (fpt - c_at)
+        pun = jnp.exp(jnp.clip(F_q, -_FIELD_CLIP, _FIELD_CLIP)) * \
+            self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
+        norm = jnp.exp(jnp.interp(z, zg, jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
+        log_p_src = (jnp.log(jnp.where(pun > 0, pun, _LOGSAFE))
+                     - jnp.log(jnp.where(norm > 0, norm, 1.0)))
+        return log_p_src + (gamma - 1.0) * jnp.log1p(z)
+
+    def _taper_cut(self, m1, q, m_min, dm_min, m_max, dm_max):
+        s = sfilter_low(m1, m_min, dm_min) * sfilter_high(m1, m_max, dm_max)
+        m2 = q * m1
+        cut = jnp.nan_to_num(sfilter_low(m2, m_min, dm_min), nan=0.0)
+        return s * jnp.where(m2 < m_min, 0.0, cut)
 
 
-@dataclass
-class GaussianProcessPairing2D(PairingModel):
-    """Two-dimensional GP pairing model over ``(log(m1), q)``.
+# ============================================================
+# Model menu + lazy factory (consumed by registry.register_model)
+# ============================================================
 
-    This component lets the mass-ratio distribution vary with primary mass.
-    ``beta`` defines a mass-ratio mean trend, ``amp`` sets the covariance
-    amplitude, ``ls_m`` and ``ls_q`` set separate length scales, and ``y_specs``
-    contains the latent node amplitudes on the configured log-primary-mass and
-    mass-ratio grid.
-    """
+def _joint(axes, latex):
+    return lambda mode="shape": JointGPPopulation(tuple(axes), mean_mode=mode, latex=latex)
 
-    beta_spec: ParamSpec
-    amp_spec: ParamSpec
-    ls_m_spec: ParamSpec
-    ls_q_spec: ParamSpec
-    y_specs: tuple
 
-    @property
-    def param_specs(self):
-        """Return mean, covariance, and node specs in vector order."""
-        return [
-            self.beta_spec,
-            self.amp_spec,
-            self.ls_m_spec,
-            self.ls_q_spec,
-            *self.y_specs,
-        ]
+_GP_BUILDERS: dict = {}
+GP_LATEX: dict = {}
 
-    def _eval_unnorm(self, m1, q, m_min, dm_min, t):
-        """Evaluate the smoothed 2D GP conditional pairing density."""
-        beta, amp, ls_m, ls_q = t[0], t[1], t[2], t[3]
-        y_nodes = jnp.asarray(t[4 : 4 + _PAIR2D_N_NODES])
 
-        m_node, q_node = jnp.meshgrid(
-            _PAIR2D_LOGM_NODES, _PAIR2D_Q_NODES, indexing="ij"
-        )
-        x_nodes = jnp.stack([m_node.flatten(), q_node.flatten()], axis=-1)
+def _reg(name, builder, latex):
+    _GP_BUILDERS[name] = builder
+    GP_LATEX[name] = latex
 
-        shape = jnp.broadcast_shapes(jnp.shape(m1), jnp.shape(q))
-        m1_b, q_b = jnp.broadcast_arrays(m1, q)
-        x_test = jnp.stack([jnp.log(m1_b), q_b], axis=-1)
-        x_test_flat = x_test.reshape(-1, 2)
 
-        scales = jnp.array([ls_m, ls_q])
-        x_nodes_scaled = x_nodes / scales
-        x_test_scaled = x_test_flat / scales
+# 1-D
+_reg("gp1d_m1",  _joint(("m1",),  "GP m1"),  "GP m1")
+_reg("gp1d_q",   _joint(("q",),   "GP q"),   "GP q")
+_reg("gp1d_chi", _joint(("chi",), "GP chi"), "GP chi")
+_reg("gp1d_z",   _joint(("z",),   "GP z"),   "GP z")
+# 2-D
+_reg("gp2d_m1_q",   _joint(("m1", "q"),   "GP m1,q"),   "GP m1,q")
+_reg("gp2d_m1_chi", _joint(("m1", "chi"), "GP m1,chi"), "GP m1,chi")
+_reg("gp2d_m1_z",   _joint(("m1", "z"),   "GP m1,z"),   "GP m1,z")
+_reg("gp2d_q_chi",  _joint(("q", "chi"),  "GP q,chi"),  "GP q,chi")
+_reg("gp2d_q_z",    _joint(("q", "z"),    "GP q,z"),    "GP q,z")
+_reg("gp2d_chi_z",  _joint(("chi", "z"),  "GP chi,z"),  "GP chi,z")
+# 3-D
+_reg("gp3d_m1_q_chi", _joint(("m1", "q", "chi"), "GP m1,q,chi"), "GP m1,q,chi")
+_reg("gp3d_m1_q_z",   _joint(("m1", "q", "z"),   "GP m1,q,z"),   "GP m1,q,z")
+_reg("gp3d_m1_chi_z", _joint(("m1", "chi", "z"), "GP m1,chi,z"), "GP m1,chi,z")
+_reg("gp3d_q_chi_z",  _joint(("q", "chi", "z"),  "GP q,chi,z"),  "GP q,chi,z")
+# 4-D joint
+_reg("gp4d", _joint(("m1", "q", "chi", "z"), "GP 4D"), "GP 4D")
+# Separable null: independent 1-D GP per probability axis, no interactions
+_reg("gp_separable",
+     lambda mode="shape": AdditiveGPPopulation(
+         terms=(("m1",), ("q",), ("chi",)), mean_mode=mode, latex="GP sep"),
+     "GP sep")
+# Additive (functional ANOVA): mains + m1q + m1z + chiz interactions
+_reg("gp4d_additive",
+     lambda mode="shape": AdditiveGPPopulation(mean_mode=mode, latex="GP add"),
+     "GP add")
 
-        def mean_fn(x_scaled):
-            """Mass-ratio mean trend evaluated in scaled GP coordinates."""
-            q_true = x_scaled[..., 1] * ls_q
-            return beta * jnp.log(q_true + 0.01)
 
-        kernel = (amp**2) * kernels.Matern52()
-        gp_prior = GaussianProcess(
-            kernel=kernel,
-            X=x_nodes_scaled,
-            mean=mean_fn,
-            diag=(amp**2) * _PAIR2D_JITTER_REL + 1e-9,
-        )
-        _, gp_cond = gp_prior.condition(y_nodes, x_test_scaled)
+GP_MODEL_NAMES = tuple(_GP_BUILDERS.keys())
 
-        safe_loc = jnp.nan_to_num(gp_cond.loc, nan=-20.0)
-        log_pq = jnp.clip(safe_loc.reshape(shape), -10.0, 10.0)
-        p = jnp.exp(log_pq)
 
-        m2 = q_b * m1_b
-        smooth_cut = sfilter_low(m2, m_min, dm_min)
-        smooth_cut = jnp.nan_to_num(smooth_cut, nan=0.0)
-        p = smooth_cut * p
-        return jnp.where(m2 < m_min, 1e-20, p)
+def build_gp_model(name: str):
+    """Construct a GP population model by registry name (no tinygp import)."""
+    base, _, suffix = name.partition("@")          # optional "@zero" / "@shape"
+    mode = suffix or "shape"
+    if base not in _GP_BUILDERS:
+        raise KeyError(f"unknown GP model {name!r}; known: {sorted(_GP_BUILDERS)}")
+    return _GP_BUILDERS[base](mode)
+
+
+def gp_fiducial(name: str):
+    """Fiducial vector for a GP model (xi = 0, central hyperparameters)."""
+    return tuple(build_gp_model(name).fiducial())
