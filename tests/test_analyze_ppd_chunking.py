@@ -53,34 +53,34 @@ from darksirens.gw.populations import pop_model_parser
 # --------------------------------------------------------------------------
 
 def test_plan_ppd_sizing_bounds_working_set_for_gp():
-    grid_points = 4_718_592          # 128*48*32*24, the default analyze grid
-    n_nodes = 6400                   # gp4d
+    n_outer, nz, nchi = 6144, 32, 24   # 128*48 outer rows; default (z,chi) plane
+    n_nodes = 6400                     # gp4d
     budget = 8e9
-    safe_frac, n_live, dtype = 0.4, 10, 8
-    batch, chunk = plan_ppd_sizing(
-        nsamples=200, grid_points=grid_points, n_nodes=n_nodes,
+    safe_frac, n_live, dtype = 0.4, 16, 8
+    batch, slab = plan_ppd_sizing(
+        nsamples=200, n_outer=n_outer, nz=nz, nchi=nchi, n_nodes=n_nodes,
         max_mem_bytes=budget, safe_frac=safe_frac, n_live=n_live, dtype_bytes=dtype,
     )
-    assert batch >= 1 and chunk is not None and chunk < grid_points
-    # eval-phase working set within budget
-    assert batch * chunk * dtype * (n_nodes + n_live) <= safe_frac * budget
+    assert batch >= 1 and slab is not None and slab <= n_outer
+    # per-slab working set within budget
+    assert batch * slab * nz * nchi * dtype * (n_nodes + n_live) <= safe_frac * budget
 
 
 def test_plan_ppd_sizing_no_chunk_for_parametric_small_grid():
-    batch, chunk = plan_ppd_sizing(
-        nsamples=500, grid_points=20_000, n_nodes=0,
+    batch, slab = plan_ppd_sizing(   # grid_points = 2500*4*2 = 20000 <= full_grid_max
+        nsamples=500, n_outer=2500, nz=4, nchi=2, n_nodes=0,
         max_mem_bytes=16e9, safe_frac=0.4,
     )
-    assert chunk is None          # whole grid fits → unchunked (legacy) path
+    assert slab is None           # whole grid fits → unchunked (full) path
     assert batch >= 1
 
 
 def test_plan_ppd_sizing_honors_overrides():
-    batch, chunk = plan_ppd_sizing(
-        nsamples=100, grid_points=1_000_000, n_nodes=10,
+    batch, slab = plan_ppd_sizing(
+        nsamples=100, n_outer=1000, nz=32, nchi=24, n_nodes=10,
         max_mem_bytes=8e9, batch_size=3, grid_chunk=11,
     )
-    assert batch == 3 and chunk == 11
+    assert batch == 3 and slab == 11
 
 
 def test_probe_device_memory_positive():
@@ -117,9 +117,9 @@ def test_chunked_matches_unchunked():
     common = dict(batch_size=2, max_mem_gb=8.0)
     ref = posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
                                grid_chunk=None, **common)
-    # grid = 10*6*5*4 = 1200; chunk 97 does not divide it → exercises pad+trim
+    # n_outer = nm*nq = 60; slab 7 does not divide it → exercises pad+trim
     new = posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
-                               grid_chunk=97, **common)
+                               grid_chunk=7, **common)
     for a, b in zip(ref, new):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-6, atol=1e-12)
 
@@ -128,7 +128,7 @@ def test_marginals_are_normalised():
     pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid = _powerlaw_setup()
     p_m1, p_m2, p_q, p_z, p_chi, p_m1m2 = posterior_predictive(
         pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
-        batch_size=2, grid_chunk=97, max_mem_gb=8.0,
+        batch_size=2, grid_chunk=7, max_mem_gb=8.0,
     )
     for grid, marg in [(mgrid, p_m1), (mgrid, p_m2), (qgrid, p_q),
                        (zgrid, p_z), (chigrid, p_chi)]:
