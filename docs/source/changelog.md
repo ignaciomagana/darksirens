@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Binned Gaussian-process population models (`gppop`, `gppop_mz`).** Added the
+  nonparametric binned-GP rate model of Ray et al. 2023 (arXiv:2304.08046) as
+  standalone population models in `darksirens.gw.populations.gp`. The rate is
+  piecewise-constant over lower-triangular `(ln m1, ln m2)` mass bins (optionally
+  crossed with redshift bins) under the same whitened finite-rank GP prior as the
+  existing GP models. `gppop` is mass-only with a parametric `(1+z)**(gamma-1)`
+  rate; `gppop_mz` adds redshift bins carrying a free-form rate evolution. Both
+  plug into the existing hierarchical likelihood and sampled cosmology with no
+  framework changes; default bin edges are configurable via
+  `DARKSIRENS_GPPOP_M_EDGES` / `DARKSIRENS_GPPOP_Z_EDGES`.
 - Updated user-facing documentation for the current population-model grammar,
   CLI-level `--shared_beta` / `--shared_spin` / `--shared_gamma` controls,
   stick-breaking mixture weights, tagged CLI parameter labels, and the

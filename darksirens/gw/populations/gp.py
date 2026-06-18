@@ -111,17 +111,6 @@ def _to_coord(axis: str, m1, q, chi, z):
     raise ValueError(f"unknown axis {axis!r}")
 
 
-def _broadcast_logp_inputs(m1, q, z, chieff):
-    """Broadcast population-model inputs and flatten query axes for GP evaluation."""
-    m1, q, z, chi = jnp.broadcast_arrays(
-        jnp.asarray(m1, dtype=float),
-        jnp.asarray(q, dtype=float),
-        jnp.asarray(z, dtype=float),
-        jnp.asarray(chieff, dtype=float),
-    )
-    out_shape = m1.shape
-    return m1.ravel(), q.ravel(), z.ravel(), chi.ravel(), out_shape
-
 def _axis_phys_grid(axis: str):
     """Normalisation grid (physical units) for a probability axis."""
     if axis == "m1":
@@ -327,7 +316,10 @@ class JointGPPopulation:
     # -- evaluation --------------------------------------------------------
 
     def log_p_pop(self, m1, q, z, chieff, theta):
-        m1, q, z, chi, out_shape = _broadcast_logp_inputs(m1, q, z, chieff)
+        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
+        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
+        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
+        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
 
         # ---- unpack theta in param_specs order ----
         m_min, dm_min, m_max, dm_max = theta[0], theta[1], theta[2], theta[3]
@@ -377,7 +369,7 @@ class JointGPPopulation:
 
         p = p_gp * p_base
         log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
-        return (log_p + (gamma - 1.0) * jnp.log1p(z)).reshape(out_shape)
+        return log_p + (gamma - 1.0) * jnp.log1p(z)
 
     # -- tapers / cut, applied identically to density and normalisation ----
 
@@ -541,7 +533,10 @@ class AdditiveGPPopulation:
 
     def log_p_pop(self, m1, q, z, chieff, theta):
         import jax
-        m1, q, z, chi, out_shape = _broadcast_logp_inputs(m1, q, z, chieff)
+        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
+        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
+        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
+        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
         N = m1.shape[0]
 
         m_min, dm_min, m_max, dm_max = theta[0], theta[1], theta[2], theta[3]
@@ -595,13 +590,225 @@ class AdditiveGPPopulation:
         norm = jnp.exp(jnp.interp(z, zg, jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
         log_p_src = (jnp.log(jnp.where(pun > 0, pun, _LOGSAFE))
                      - jnp.log(jnp.where(norm > 0, norm, 1.0)))
-        return (log_p_src + (gamma - 1.0) * jnp.log1p(z)).reshape(out_shape)
+        return log_p_src + (gamma - 1.0) * jnp.log1p(z)
 
     def _taper_cut(self, m1, q, m_min, dm_min, m_max, dm_max):
         s = sfilter_low(m1, m_min, dm_min) * sfilter_high(m1, m_max, dm_max)
         m2 = q * m1
         cut = jnp.nan_to_num(sfilter_low(m2, m_min, dm_min), nan=0.0)
         return s * jnp.where(m2 < m_min, 0.0, cut)
+
+
+# ============================================================
+# Binned GP population model (gppop; Ray et al. 2023, ApJ 957, 37)
+# ============================================================
+#
+# Same whitened finite-rank GP prior as ``JointGPPopulation``, but the field is
+# *piecewise-constant* over bins: the inducing points are the bin centres and a
+# query is gathered by bin lookup (no smooth interpolation).  Bins are
+# lower-triangular in (ln m1, ln m2) (m2 <= m1) following gppop, optionally
+# crossed with redshift bins.  The gppop rate density
+#     p(m1, m2, z) = n_bin * (dV_c/dz)/(1+z) / (m1 m2)
+# maps onto darksirens by dropping the (dV_c/dz)/(1+z) factor (supplied by the
+# redshift prior + the likelihood Jacobian) and converting (m1, m2) -> (m1, q)
+# via |dm2/dq| = m1, giving the source-frame shape  n_bin / (q m1).
+
+# Default bin edges (coarse for tractability; override via env vars).
+def _gppop_edges(env_name, default):
+    import os
+    raw = os.environ.get(env_name)
+    if not raw:
+        return tuple(float(x) for x in default)
+    return tuple(float(x) for x in raw.replace(",", " ").split())
+
+
+_GPPOP_M_EDGES = _gppop_edges(
+    "DARKSIRENS_GPPOP_M_EDGES", (5.0, 10.0, 15.0, 25.0, 40.0, 65.0, 100.0))
+_GPPOP_Z_EDGES = _gppop_edges(
+    "DARKSIRENS_GPPOP_Z_EDGES", (0.0, 0.3, 0.7, 1.2))
+
+# Log length-scale prior bounds (coordinate units: ln-mass for mass, linear z).
+_B_GPPOP_LS_M = (float(jnp.log(0.1)), float(jnp.log(3.0)))
+_B_GPPOP_LS_Z = (float(jnp.log(0.05)), float(jnp.log(2.0)))
+
+
+@dataclass
+class BinnedGPPopulation:
+    """Binned (piecewise-constant) GP population over lower-triangular mass bins.
+
+    ``mass_edges`` are the m1 = m2 bin edges (solar masses); ``z_edges`` (optional)
+    adds redshift bins.  With ``z_edges is None`` (model ``gppop``) the marginal
+    redshift rate is the parametric ``(1 + z)**(gamma - 1)`` term and the mass
+    shape is normalised over the (m1, q) grid.  With ``z_edges`` set (model
+    ``gppop_mz``) the (m1, m2, z) binning carries a *free-form* rate evolution
+    (no gamma, no z-normalisation); the unnormalised z-dependence is the physical
+    R(z).  A baseline truncated-Gaussian spin (mu_chi, sigma_chi) is always
+    included.
+
+    Parameter order (sliced by ``log_p_pop`` exactly as listed by ``param_specs``)
+    ------------------------------------------------------------------------------
+    log_amp, log_ls_m, [log_ls_z if z_edges],
+    xi_0 .. xi_{M-1},                 # whitened latent (normal), M = #bins
+    mu_chi, sigma_chi,
+    [gamma if z_edges is None]
+    """
+
+    mass_edges: tuple
+    z_edges: tuple | None = None
+    latex: str = "gppop"
+
+    def __post_init__(self):
+        medges = [float(e) for e in self.mass_edges]
+        if len(medges) < 2 or any(b <= a for a, b in zip(medges, medges[1:])):
+            raise ValueError("mass_edges must be strictly increasing with >= 2 entries")
+        lnm = jnp.log(jnp.asarray(medges))
+        self._ln_m_edges = lnm
+        n_m = len(medges) - 1
+        self._n_m = n_m
+        # Lower-triangular (j <= i, i.e. m2 <= m1) bin set + (i, j) -> tri index map.
+        tril_map = [[-1] * n_m for _ in range(n_m)]
+        centers_m = []
+        t = 0
+        for i in range(n_m):
+            for j in range(n_m):
+                if j <= i:
+                    tril_map[i][j] = t
+                    centers_m.append((0.5 * (lnm[i] + lnm[i + 1]),
+                                      0.5 * (lnm[j] + lnm[j + 1])))
+                    t += 1
+        self._n_tril = t
+        self._tril_map = jnp.asarray(tril_map, dtype=jnp.int32)
+
+        if self.z_edges is None:
+            self._has_z = False
+            self._n_z = 1
+            self._z_edges = None
+            self._Z = jnp.asarray(centers_m)                       # (n_tril, 2)
+            self._families = ["rbf", "rbf"]
+        else:
+            self._has_z = True
+            zedges = [float(e) for e in self.z_edges]
+            if len(zedges) < 2 or any(b <= a for a, b in zip(zedges, zedges[1:])):
+                raise ValueError("z_edges must be strictly increasing with >= 2 entries")
+            self._z_edges = jnp.asarray(zedges)
+            n_z = len(zedges) - 1
+            self._n_z = n_z
+            zc = [0.5 * (zedges[k] + zedges[k + 1]) for k in range(n_z)]
+            rows = [(a, b, zc[k]) for (a, b) in centers_m for k in range(n_z)]
+            self._Z = jnp.asarray(rows)                            # (n_tril * n_z, 3)
+            self._families = ["rbf", "rbf", "rbf"]
+        self.M = int(self._Z.shape[0])
+        self._jitter = _JITTER_REL
+
+    # -- parameter specifications ------------------------------------------
+
+    @property
+    def param_specs(self):
+        s = [
+            ParamSpec(r"$\log A$", *_B_LOGAMP, name="log_amp"),
+            ParamSpec(r"$\log\ell_m$", *_B_GPPOP_LS_M, name="log_ls_m"),
+        ]
+        if self._has_z:
+            s.append(ParamSpec(r"$\log\ell_z$", *_B_GPPOP_LS_Z, name="log_ls_z"))
+        for b in range(self.M):
+            s.append(ParamSpec(rf"$\xi_{{{b}}}$", -6.0, 6.0, name=f"xi_{b}",
+                               prior_kind="normal", prior_loc=0.0, prior_scale=1.0))
+        s.append(ParamSpec(r"$\mu_\chi$", *_B_MUCHI, name="mu_chi"))
+        s.append(ParamSpec(r"$\sigma_\chi$", *_B_SIGCHI, name="sigma_chi"))
+        if not self._has_z:
+            s.append(ParamSpec(r"$\gamma$", *_B_GAMMA, name="gamma"))
+        return s
+
+    def prior_bounds(self):
+        return pack_specs(*self.param_specs)
+
+    def fiducial(self):
+        """Fiducial vector: xi = 0 (flat field), central hyperparameters."""
+        return [0.0 if sp.name.startswith("xi_") else float((sp.low + sp.high) * 0.5)
+                for sp in self.param_specs]
+
+    # -- binned field + bin lookup ----------------------------------------
+
+    def _bin_log_rates(self, amp, ls_vec, xi):
+        """Per-bin log-rate logn = (L xi) at the bin centres (zero mean)."""
+        L, _ = _field_factor(self._Z, self._families, amp, ls_vec,
+                             self._jitter * amp ** 2 + 1e-9)
+        return jnp.clip(L @ xi, -_FIELD_CLIP, _FIELD_CLIP)         # (M,)
+
+    def _binned_density(self, m1, q, z, logn):
+        """exp(logn[bin]) / (q m1) inside the bin grid, 0 outside (incl. m2 > m1)."""
+        m2 = q * m1
+        i = jnp.searchsorted(self._ln_m_edges,
+                             jnp.log(jnp.clip(m1, _LOGSAFE, None)), side="right") - 1
+        j = jnp.searchsorted(self._ln_m_edges,
+                             jnp.log(jnp.clip(m2, _LOGSAFE, None)), side="right") - 1
+        valid = (i >= 0) & (i < self._n_m) & (j >= 0) & (j < self._n_m) & (m2 <= m1)
+        tril = self._tril_map[jnp.clip(i, 0, self._n_m - 1),
+                              jnp.clip(j, 0, self._n_m - 1)]
+        valid = valid & (tril >= 0)
+        if self._has_z:
+            k = jnp.searchsorted(self._z_edges, z, side="right") - 1
+            valid = valid & (k >= 0) & (k < self._n_z)
+            flat = jnp.clip(tril, 0, self._n_tril - 1) * self._n_z \
+                + jnp.clip(k, 0, self._n_z - 1)
+        else:
+            flat = jnp.clip(tril, 0, self._n_tril - 1)
+        val = jnp.exp(logn[jnp.clip(flat, 0, self.M - 1)]) / (q * m1)
+        return jnp.where(valid, val, 0.0)
+
+    def _mass_norm(self, logn):
+        """(m1, q)-grid normalisation of the z-independent mass shape (scalar)."""
+        mg = get_mass_grid()
+        qg = get_q_grid()
+        M1, Q = jnp.meshgrid(mg, qg, indexing="ij")
+        pun = self._binned_density(M1.ravel(), Q.ravel(),
+                                   jnp.zeros(M1.size), logn).reshape(M1.shape)
+        return _grid_integrate(pun, [mg, qg])
+
+    def _spin_density(self, chi, mu_chi, sig_chi):
+        cg = get_chi_grid()
+        un = jnp.where((cg >= -1) & (cg <= 1),
+                       jnp.exp(-0.5 * ((cg - mu_chi) / sig_chi) ** 2), 0.0)
+        norm = jnp.trapezoid(un, cg)
+        p = jnp.where((chi >= -1) & (chi <= 1),
+                      jnp.exp(-0.5 * ((chi - mu_chi) / sig_chi) ** 2), 0.0)
+        return p / jnp.where(norm > 0, norm, 1.0)
+
+    # -- evaluation --------------------------------------------------------
+
+    def log_p_pop(self, m1, q, z, chieff, theta):
+        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
+        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
+        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
+        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
+
+        # ---- unpack theta in param_specs order ----
+        i = 0
+        amp = jnp.exp(theta[i]); i += 1
+        if self._has_z:
+            ls_m = jnp.exp(theta[i]); ls_z = jnp.exp(theta[i + 1]); i += 2
+            ls_vec = [ls_m, ls_m, ls_z]
+        else:
+            ls_m = jnp.exp(theta[i]); i += 1
+            ls_vec = [ls_m, ls_m]
+        xi = theta[i:i + self.M]; i += self.M
+        mu_chi = theta[i]; sig_chi = theta[i + 1]; i += 2
+        gamma = None if self._has_z else theta[i]
+
+        logn = self._bin_log_rates(amp, ls_vec, xi)
+        p_un = self._binned_density(m1, q, z, logn)
+        if not self._has_z:
+            # Mass-only: normalise the z-independent mass shape over (m1, q).
+            norm = self._mass_norm(logn)
+            p_un = p_un / jnp.where(norm > 0, norm, 1.0)
+        # gppop_mz: leave unnormalised over z -- the z-dependence is the free-form
+        # rate R(z); its overall scale cancels with the rate in the likelihood.
+
+        p = p_un * self._spin_density(chi, mu_chi, sig_chi)
+        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        if self._has_z:
+            return log_p
+        return log_p + (gamma - 1.0) * jnp.log1p(z)
 
 
 # ============================================================
@@ -649,6 +856,14 @@ _reg("gp_separable",
 _reg("gp4d_additive",
      lambda mode="shape": AdditiveGPPopulation(mean_mode=mode, latex="GP add"),
      "GP add")
+# Binned GP (gppop): mass-only and full (m1, m2, z)
+_reg("gppop",
+     lambda mode="shape": BinnedGPPopulation(mass_edges=_GPPOP_M_EDGES),
+     "gppop")
+_reg("gppop_mz",
+     lambda mode="shape": BinnedGPPopulation(mass_edges=_GPPOP_M_EDGES,
+                                             z_edges=_GPPOP_Z_EDGES),
+     "gppop m,z")
 
 
 GP_MODEL_NAMES = tuple(_GP_BUILDERS.keys())
