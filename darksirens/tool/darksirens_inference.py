@@ -1119,12 +1119,24 @@ def main():
 
     print("  │  Generating corner plot...")
     try:
-        from darksirens.utils.plotting import make_production_corner
+        import matplotlib.pyplot as _plt
+        from darksirens.utils.plotting import make_production_corner, make_latent_summary
 
+        # Headline corner: cosmology + physical hyperparameters + survey.
+        # For high-dimensional models (GP / gppop) the dozens of xi_* latents
+        # are excluded for legibility and summarized separately below.
         fig = make_production_corner(results["samples"], labels)
         corner_path = os.path.join(run_dir, "corner.pdf")
         fig.savefig(corner_path, bbox_inches="tight", dpi=200)
+        _plt.close(fig)
         _ok(f"corner.pdf     →  {corner_path}")
+
+        fig_lat = make_latent_summary(results["samples"], labels)
+        if fig_lat is not None:
+            latents_path = os.path.join(run_dir, "latents.pdf")
+            fig_lat.savefig(latents_path, bbox_inches="tight", dpi=200)
+            _plt.close(fig_lat)
+            _ok(f"latents.pdf    →  {latents_path}")
     except ModuleNotFoundError as e:
         _warn(f"Corner plot skipped; optional plotting dependency is missing: {e.name}")
     except Exception as e:

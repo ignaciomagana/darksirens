@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""darksirens_analyze — post-process and plot one or more inference runs.
+
+Reads the current ``results.hdf5`` save format (legacy ``samples.npy`` is still
+accepted), recomputes posterior-predictive population distributions, and makes
+publication-quality figures:
+
+  * 1-D posterior-predictive spectra p(m1), p(m2), p(q), p(z), p(chi)
+  * 2-D joint p(m1, m2)
+  * cosmology posteriors (H0 / Om0 / w0 / wa) with the injected value marked
+  * the redshift distribution / detection rate dN/dz
+  * a compact GP-latent summary (for GP / gppop models)
+  * model comparison: relative evidences + pairwise Bayes factors
+
+The population density is evaluated on a flattened, equal-shape coordinate grid
+so the recompute works for every model type, including the GP / binned-GP
+(gppop) models (which require equal-shape arguments to ``log_p_pop``).
+"""
 import os
 import json
 import argparse
@@ -10,32 +27,39 @@ from tqdm import tqdm
 import jax
 import jax.numpy as jnp
 
-from darksirens.gw.populations import pop_model_parser, pop_model_prior_parser, get_fixed_population_params
-from darksirens.inference.pop_extractor import make_pop_extractor
-
 import matplotlib
+import matplotlib.cm
+import matplotlib.colors
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-
-matplotlib.rcParams['font.family'] = 'Times New Roman'
-matplotlib.rcParams['font.sans-serif'] = ['Bitstream Vera Sans']
-matplotlib.rcParams['text.usetex'] = False
-matplotlib.rcParams['mathtext.fontset'] = 'cm'
-matplotlib.rcParams['figure.figsize'] = (16.0, 10.0)
-matplotlib.rcParams['axes.unicode_minus'] = False
-
 import seaborn as sns
-sns.set_context('talk')
-sns.set_style('ticks')
-sns.set_palette('colorblind')
-c = sns.color_palette('colorblind')
+
+from darksirens.gw.populations import pop_model_parser
+from darksirens.inference.pop_extractor import make_pop_extractor
+from darksirens.inference.parameters import H0_FID, OM0_FID, W0_FID, WA_FID
+from darksirens.utils.cosmology import dV_of_z
+from darksirens.utils.plotting import (
+    set_publication_style,
+    latent_indices,
+    make_latent_summary,
+)
+
+set_publication_style()
+matplotlib.rcParams['figure.figsize'] = (16.0, 10.0)
+_PALETTE = sns.color_palette('colorblind')
+
+COSMO_FID = {"H0": H0_FID, "Om0": OM0_FID, "w0": W0_FID, "wa": WA_FID}
+COSMO_TEX = {
+    "H0": r"$H_0$  [km s$^{-1}$ Mpc$^{-1}$]",
+    "Om0": r"$\Omega_m$",
+    "w0": r"$w_0$",
+    "wa": r"$w_a$",
+}
 
 
 # ------------------------------------------------------------
-# I/O
+# I/O — current HDF5 format with a legacy NPY fallback
 # ------------------------------------------------------------
 def _json_safe_hdf5_attr(value):
-    """Convert HDF5 attribute values into plain JSON-like Python values."""
     if isinstance(value, bytes):
         return value.decode("utf-8")
     if isinstance(value, np.generic):
@@ -43,6 +67,10 @@ def _json_safe_hdf5_attr(value):
     if isinstance(value, np.ndarray):
         return [_json_safe_hdf5_attr(item) for item in value.tolist()]
     return value
+
+
+def _decode_labels(raw):
+    return [lbl.decode("utf-8") if isinstance(lbl, bytes) else str(lbl) for lbl in raw]
 
 
 def _load_settings(run_dir):
@@ -54,7 +82,7 @@ def _load_settings(run_dir):
 
 
 def _merge_hdf5_metadata(settings, h5_file):
-    """Backfill settings from results.hdf5 attrs/datasets when available."""
+    """Backfill settings from results.hdf5 attrs/datasets when missing from JSON."""
     merged = dict(settings)
 
     for key, value in h5_file.attrs.items():
@@ -66,11 +94,7 @@ def _merge_hdf5_metadata(settings, h5_file):
         merged.setdefault(key, _json_safe_hdf5_attr(value))
 
     if "labels" not in merged and "labels" in h5_file:
-        merged["labels"] = [
-            label.decode("utf-8") if isinstance(label, bytes) else str(label)
-            for label in h5_file["labels"][()]
-        ]
-
+        merged["labels"] = _decode_labels(h5_file["labels"][()])
     if "lower_bound" not in merged and "lower_bound" in h5_file:
         merged["lower_bound"] = h5_file["lower_bound"][()].astype(float).tolist()
     if "upper_bound" not in merged and "upper_bound" in h5_file:
@@ -81,10 +105,7 @@ def _merge_hdf5_metadata(settings, h5_file):
         and "fixed_labels" in h5_file
         and "fixed_values" in h5_file
     ):
-        fixed_labels = [
-            label.decode("utf-8") if isinstance(label, bytes) else str(label)
-            for label in h5_file["fixed_labels"][()]
-        ]
+        fixed_labels = _decode_labels(h5_file["fixed_labels"][()])
         fixed_values = h5_file["fixed_values"][()]
         merged["fixed_parameter_values"] = {
             label: float(value) for label, value in zip(fixed_labels, fixed_values)
@@ -93,44 +114,17 @@ def _merge_hdf5_metadata(settings, h5_file):
     return merged
 
 
-
-def _find_hdf5_samples_dataset(h5_file):
-    """Return the dataset path for posterior samples in supported HDF5 layouts."""
-    candidates = (
-        "samples",
-        "posterior/samples",
-        "results/samples",
-        "posterior_samples",
-    )
-    for candidate in candidates:
-        if candidate in h5_file and isinstance(h5_file[candidate], h5py.Dataset):
-            return candidate
-    return None
-
-
-def _first_hdf5_attr(h5_file, *names):
-    """Return the first available attribute from common evidence-name aliases."""
-    for name in names:
-        if name in h5_file.attrs:
-            return h5_file.attrs[name]
-    return None
-
 def _load_run_hdf5(run_dir):
     path = os.path.join(run_dir, "results.hdf5")
     settings = _load_settings(run_dir)
 
     with h5py.File(path, "r") as f:
-        samples_path = _find_hdf5_samples_dataset(f)
-        if samples_path is None:
-            raise KeyError(
-                f"{path} does not contain posterior samples; expected a 'samples' "
-                "dataset at the file root or in a posterior/results group"
-            )
-
-        samples = f[samples_path][()]
+        if "samples" not in f:
+            raise KeyError(f"{path} does not contain a 'samples' dataset")
+        samples = f["samples"][()]
         settings = _merge_hdf5_metadata(settings, f)
-        logZ = _first_hdf5_attr(f, "logZ", "log_evidence", "logz")
-        logZerr = _first_hdf5_attr(f, "logZerr", "log_evidence_err", "logzerr")
+        logZ = f.attrs.get("logZ", None)
+        logZerr = f.attrs.get("logZerr", None)
 
     if logZ is not None:
         logZ = float(logZ)
@@ -143,257 +137,113 @@ def _load_run_hdf5(run_dir):
 
 
 def _load_run_npy(run_dir):
+    """Legacy loader for the deprecated samples.npy format."""
     settings = _load_settings(run_dir)
-    path = os.path.join(run_dir, "samples.npy")
-    results = np.load(path, allow_pickle=True).item()
-
-    samples = results["samples"]
-    logZ = results.get("logZ", None)
-    logZerr = results.get("logZerr", None)
-
-    return settings, samples, logZ, logZerr
+    results = np.load(os.path.join(run_dir, "samples.npy"), allow_pickle=True).item()
+    return settings, results["samples"], results.get("logZ"), results.get("logZerr")
 
 
 def load_run(run_dir):
-    """Load a completed inference run from the current HDF5 or legacy NPY format."""
-    hdf5_path = os.path.join(run_dir, "results.hdf5")
-    npy_path = os.path.join(run_dir, "samples.npy")
-
-    if os.path.exists(hdf5_path):
+    """Load a completed inference run (current HDF5, else legacy NPY)."""
+    if os.path.exists(os.path.join(run_dir, "results.hdf5")):
         return _load_run_hdf5(run_dir)
-    if os.path.exists(npy_path):
+    if os.path.exists(os.path.join(run_dir, "samples.npy")):
         return _load_run_npy(run_dir)
-
     raise FileNotFoundError(
         f"No inference results found in {run_dir!r}; expected 'results.hdf5' "
         "(current format) or 'samples.npy' (legacy format)."
     )
 
 
-# ------------------------------------------------------------
-# Evidence plotting
-# ------------------------------------------------------------
-def plot_model_evidences(labels, logZs, logZerrs, figsize=(10, 6)):
-    # 1. Convert to numpy arrays for calculation
-    logZs = np.array(logZs)
-    logZerrs = np.array(logZerrs)
-    
-    # 2. Calculate relative evidence (Delta log10 Z)
-    # The "best" model is the one with the maximum logZ
-    best_logZ = np.max(logZs)
-    delta_logZs = logZs - best_logZ
-
-    fig, ax = plt.subplots(figsize=figsize)
-
-    xs = np.arange(len(labels))
-    
-    # Using a color cycle if 'c' isn't explicitly passed
-    colors = plt.cm.tab10(np.linspace(0, 1, len(labels)))
-    
-    # 3. Plot the delta values
-    bars = ax.bar(xs, delta_logZs, yerr=logZerrs, color=colors, alpha=0.8, capsize=5)
-
-    # 4. Formatting
-    ax.set_xticks(xs)
-    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=18)
-    
-    # Update label to show it is relative
-    ax.set_ylabel(r"$\Delta \log_{10} Z$ (Relative to Best)", fontsize=22)
-    ax.set_title("Model Comparison (Relative Evidence)", fontsize=26)
-    ax.tick_params(labelsize=18)
-    
-    # Add a horizontal dashed line at 0 for the reference model
-    ax.axhline(0, color='black', lw=1.5, ls='--')
-
-    # Optional: Add text labels on top/bottom of bars to show exact delta values
-    for bar, val in zip(bars, delta_logZs):
-        yval = bar.get_height()
-        # Offset text slightly below the bar
-        ax.text(bar.get_x() + bar.get_width()/2, yval - (0.05 * abs(np.min(delta_logZs))), 
-                f'{val:.2f}', ha='center', va='top', fontsize=14, fontweight='bold')
-
-    fig.tight_layout()
-    return fig
+def _labels_of(settings):
+    return [str(lbl) for lbl in settings.get("labels", [])]
 
 
-def print_bayes_factors(labels, logZs):
-    print("\n=== Bayes Factors (log BF) ===")
-    for i in range(len(labels)):
-        for j in range(i+1, len(labels)):
-            if logZs[i] is not None and logZs[j] is not None:
-                print(f"{labels[i]} vs {labels[j]}:  log10 BF = {logZs[i] - logZs[j]:.3f}")
-
-
-def _should_plot_bayes_factor_matrix(labels, logZs):
-    """Return True when there is at least one pair of models to compare."""
-    if len(labels) < 2:
-        return False
-    return sum(z is not None for z in logZs) >= 2
-
-
-import matplotlib.colors as mcolors
-import matplotlib.cm as cm
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-def plot_bayes_factor_matrix_pairwise(labels, log10Zs, log10Zerrs, figsize=(10, 10), cmap_name="coolwarm"):
-    n = len(labels)
-    # Use layout=None and we will handle the colorbar axis manually
-    fig, axes = plt.subplots(n, n, figsize=figsize)
-
-    # Compute all pairwise BF values for normalization
-    bf_matrix = np.full((n, n), np.nan)
-    for i in range(n):
-        for j in range(n):
-            if log10Zs[i] is not None and log10Zs[j] is not None:
-                bf_matrix[i, j] = log10Zs[i] - log10Zs[j]
-
-    vmin = np.nanmin(bf_matrix)
-    vmax = np.nanmax(bf_matrix)
-    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-    cmap = cm.get_cmap(cmap_name)
-
-    for i in range(n):
-        for j in range(n):
-            ax = axes[i, j]
-
-            if i == j:
-                ax.text(0.5, 0.5, labels[i], ha="center", va="center", fontsize=12, weight='bold')
-            elif log10Zs[i] is not None and log10Zs[j] is not None:
-                bf = bf_matrix[i, j]
-                bf_err = np.sqrt(log10Zerrs[i]**2 + log10Zerrs[j]**2)
-                ax.set_facecolor(cmap(norm(bf)))
-                ax.text(0.5, 0.55, f"{bf:.2f}", ha="center", va="center", fontsize=12)
-                ax.text(0.5, 0.30, f"±{bf_err:.2f}", ha="center", va="center", fontsize=9)
-            else:
-                ax.set_facecolor("lightgray")
-                ax.text(0.5, 0.5, "—", ha="center", va="center", fontsize=12)
-
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-    # --- THE FIX ---
-    # 1. Create a "divider" based on the last column of axes
-    # This ensures the colorbar matches the height of the grid
-    divider = make_axes_locatable(axes[0, -1]) 
-    
-    # Actually, to cover the whole height of the grid, we'll use a more manual 'cax' approach
-    # We'll shrink the grid slightly to make a dedicated home for the colorbar.
-    fig.subplots_adjust(right=0.85) # Make room on the right
-    cax = fig.add_axes([0.88, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
-
-    sm = cm.ScalarMappable(norm=norm, cmap=cmap)
-    sm.set_array([])
-
-    cbar = fig.colorbar(sm, cax=cax)
-    cbar.set_label(r"$\log_{10}$ Bayes Factor (Model $i$ $-$ Model $j$)", fontsize=14)
-
-    fig.suptitle(r"Pairwise $\log_{10}$ Bayes Factors", fontsize=18, y=0.98)
-    
-    # We use subplots_adjust instead of tight_layout to keep our manual cax in place
-    fig.subplots_adjust(top=0.92, wspace=0.1, hspace=0.1)
-
-    return fig
+def _column(samples, labels, name):
+    """Posterior samples of parameter ``name`` (or None if it was fixed)."""
+    if name in labels:
+        return np.asarray(samples)[:, labels.index(name)]
+    return None
 
 
 # ------------------------------------------------------------
-# JAX posterior predictive engine (batched, per-sample PPD)
+# Vectorized batched map ("jmap"): jit + vmap + automatic batch size
 # ------------------------------------------------------------
-def _trapezoid_weights(grid):
-    """Return integration weights equivalent to ``jnp.trapezoid`` on a 1D grid."""
-    grid = jnp.asarray(grid)
-    n = grid.size
-    if n == 1:
-        return jnp.ones_like(grid)
-    widths = jnp.diff(grid)
-    weights = jnp.empty_like(grid)
-    weights = weights.at[0].set(0.5 * widths[0])
-    weights = weights.at[-1].set(0.5 * widths[-1])
-    if n > 2:
-        weights = weights.at[1:-1].set(0.5 * (widths[:-1] + widths[1:]))
-    return weights
+def auto_batch_size(nsamples, grid_points, target_bytes=2.0e9, dtype_bytes=8, cap=256):
+    """Largest batch whose per-sample grid stays under ``target_bytes``."""
+    per_sample = float(grid_points) * dtype_bytes
+    if per_sample <= 0:
+        return min(nsamples, cap)
+    return int(min(nsamples, max(1, int(target_bytes // per_sample)), cap))
 
 
-def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid, max_grid_points=100_000):
-    """Build a memory-bounded posterior-predictive evaluator for one sample.
+def batched_map(fn, samples, batch_size):
+    """Apply ``fn`` to each row of ``samples`` via jit(vmap), batched.
 
-    The original implementation evaluated the full ``(m1, q, z, chi)`` tensor in
-    one JAX program.  For GP population models this can require XLA to build very
-    large intermediate kernel matrices even for a single posterior sample.  This
-    evaluator automatically slices the redshift/spin plane so each population
-    model call stays below ``max_grid_points`` query points, while accumulating
-    the same trapezoidal integrals needed for the plotted marginals.
+    Pads the final batch so every call shares one compiled shape, then trims.
+    Returns a pytree (matching ``fn``'s output) stacked over all samples.
+    """
+    samples = jnp.asarray(samples)
+    ns = samples.shape[0]
+    pad = (-ns) % batch_size
+    if pad:
+        samples = jnp.concatenate([samples, jnp.repeat(samples[-1:], pad, axis=0)], axis=0)
+
+    vfn = jax.jit(jax.vmap(fn))
+    outs = [
+        vfn(samples[i:i + batch_size])
+        for i in tqdm(range(0, samples.shape[0], batch_size),
+                      desc="Posterior-predictive batches")
+    ]
+    stacked = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *outs)
+    return jax.tree_util.tree_map(lambda a: a[:ns], stacked)
+
+
+# ------------------------------------------------------------
+# Posterior-predictive engine (flattened grid → works for all models)
+# ------------------------------------------------------------
+def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid):
+    """Build a jit'd per-sample evaluator returning the PPD marginals + p(m1,m2).
+
+    The population density is evaluated on a flattened, equal-shape coordinate
+    grid (every coordinate is a 1-D array of length nm*nq*nz*nchi), so the
+    call satisfies the equal-shape requirement of the GP / binned-GP models'
+    ``log_p_pop`` as well as the natural broadcasting of the parametric models.
     """
     mgrid = jnp.asarray(mgrid)
     qgrid = jnp.asarray(qgrid)
     zgrid = jnp.asarray(zgrid)
     chigrid = jnp.asarray(chigrid)
+    nm, nq, nz, nchi = mgrid.size, qgrid.size, zgrid.size, chigrid.size
 
-    nm = int(mgrid.size)
-    nq = int(qgrid.size)
-    nz = int(zgrid.size)
-    nchi = int(chigrid.size)
-    max_grid_points = max(int(max_grid_points), nm * nq)
-    max_zchi_points = max(1, max_grid_points // (nm * nq))
-    chi_chunk = max(1, min(nchi, max_zchi_points))
-    z_chunk = max(1, min(nz, max_zchi_points // chi_chunk))
+    M1, Q, Z, CHI = jnp.meshgrid(mgrid, qgrid, zgrid, chigrid, indexing="ij")
+    m1f, qf, zf, chif = M1.ravel(), Q.ravel(), Z.ravel(), CHI.ravel()
 
-    wm = _trapezoid_weights(mgrid)
-    wq = _trapezoid_weights(qgrid)
-    wz = _trapezoid_weights(zgrid)
-    wchi = _trapezoid_weights(chigrid)
-
-    m1_grid = mgrid[:, None, None, None]
-    q_grid = qgrid[None, :, None, None]
-
-    m2_vals = mgrid
-    q_eval = m2_vals[None, :] / mgrid[:, None]
+    # q→m2 interpolation geometry for the 2-D joint.
+    q_eval = mgrid[None, :] / mgrid[:, None]
     valid = (q_eval >= qgrid[0]) & (q_eval <= qgrid[-1])
     jac = 1.0 / mgrid[:, None]
 
     pop_extractor = make_pop_extractor(settings)
 
     @jax.jit
-    def eval_chunk(pop_theta, z_sub, chi_sub):
-        z_grid = z_sub[None, None, :, None]
-        chi_grid = chi_sub[None, None, None, :]
-        return jnp.exp(pop_model(m1_grid, q_grid, z_grid, chi_grid, pop_theta))
-
     def single_theta(theta):
         pop_theta = pop_extractor(theta)
-        p_m1 = jnp.zeros(nm)
-        p_q = jnp.zeros(nq)
-        p_z = jnp.zeros(nz)
-        p_chi = jnp.zeros(nchi)
-        p_m1q = jnp.zeros((nm, nq))
+        logp = pop_model(m1f, qf, zf, chif, pop_theta)
+        p = jnp.exp(logp).reshape(nm, nq, nz, nchi)
 
-        for zs in range(0, nz, z_chunk):
-            ze = min(zs + z_chunk, nz)
-            z_sub = zgrid[zs:ze]
-            wz_sub = wz[zs:ze]
-            for cs in range(0, nchi, chi_chunk):
-                ce = min(cs + chi_chunk, nchi)
-                chi_sub = chigrid[cs:ce]
-                wchi_sub = wchi[cs:ce]
-                p = eval_chunk(pop_theta, z_sub, chi_sub)
-
-                wzchi = wz_sub[None, None, :, None] * wchi_sub[None, None, None, :]
-                p_m1 = p_m1 + jnp.sum(p * wq[None, :, None, None] * wzchi, axis=(1, 2, 3))
-                p_q = p_q + jnp.sum(p * wm[:, None, None, None] * wzchi, axis=(0, 2, 3))
-                p_z = p_z.at[zs:ze].add(
-                    jnp.sum(p * wm[:, None, None, None] * wq[None, :, None, None]
-                            * wchi_sub[None, None, None, :], axis=(0, 1, 3))
-                )
-                p_chi = p_chi.at[cs:ce].add(
-                    jnp.sum(p * wm[:, None, None, None] * wq[None, :, None, None]
-                            * wz_sub[None, None, :, None], axis=(0, 1, 2))
-                )
-                p_m1q = p_m1q + jnp.sum(p * wzchi, axis=(2, 3))
-
+        # 1-D marginals (integrate out the other three axes).
+        p_m1 = jnp.trapezoid(jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2), qgrid, axis=1)
         p_m1 /= jnp.trapezoid(p_m1, mgrid)
+        p_q = jnp.trapezoid(jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2), mgrid, axis=0)
         p_q /= jnp.trapezoid(p_q, qgrid)
+        p_z = jnp.trapezoid(jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), qgrid, axis=1), mgrid, axis=0)
         p_z /= jnp.trapezoid(p_z, zgrid)
+        p_chi = jnp.trapezoid(jnp.trapezoid(jnp.trapezoid(p, zgrid, axis=2), qgrid, axis=1), mgrid, axis=0)
         p_chi /= jnp.trapezoid(p_chi, chigrid)
 
+        # 2-D joint p(m1, m2): marginalize chi, z → p(m1, q), map q→m2.
+        p_m1q = jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2)
         p_interp = jax.vmap(
             lambda row, qev: jnp.interp(qev, qgrid, row, left=0.0, right=0.0)
         )(p_m1q, q_eval)
@@ -403,290 +253,262 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
         p_m2 = jnp.trapezoid(p_m1m2, mgrid, axis=0)
         p_m2 /= jnp.trapezoid(p_m2, mgrid)
 
-        return p_m1, p_m2, p_q, p_z, p_chi
+        return p_m1, p_m2, p_q, p_z, p_chi, p_m1m2
 
     return single_theta
 
 
-def auto_batch_size(nsamples, nm, nq, nz, nchi, target_bytes=2e9):
-    # Now calculating bytes for a 4D array per sample
-    per_sample_bytes = nm * nq * nz * nchi * 8.0
-    if per_sample_bytes == 0:
-        return min(nsamples, 64)
-
-    max_batch = int(target_bytes // per_sample_bytes)
-    max_batch = max(1, min(max_batch, 256))
-    return min(nsamples, max_batch)
-
-
-def posterior_predictive_mass_distributions_jax(
-    pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid, batch_size=None, grid_chunk_points=100_000
-):
+def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
+                         batch_size=None):
+    """Return per-sample (p_m1, p_m2, p_q, p_z, p_chi, p_m1m2) stacks."""
     samples = jnp.asarray(samples)
-    mgrid = jnp.asarray(mgrid)
-    qgrid = jnp.asarray(qgrid)
-    zgrid = jnp.asarray(zgrid)
-    chigrid = jnp.asarray(chigrid)
-
-    ns = samples.shape[0]
-    nm = mgrid.size
-    nq = qgrid.size
-    nz = zgrid.size
-    nchi = chigrid.size
-
+    grid_points = mgrid.size * qgrid.size * zgrid.size * chigrid.size
     if batch_size is None:
-        batch_size = auto_batch_size(ns, nm, nq, nz, nchi)
+        batch_size = auto_batch_size(samples.shape[0], grid_points)
 
-    min_grid_chunk_points = int(nm * nq)
-    grid_chunk_points = max(int(grid_chunk_points), min_grid_chunk_points)
-    single_theta = make_single_theta_predictive(
-        pop_model, settings, mgrid, qgrid, zgrid, chigrid, max_grid_points=grid_chunk_points
-    )
-    batched_theta = jax.jit(jax.vmap(single_theta))
-
-    pm1_list   = []
-    pm2_list   = []
-    pq_list    = []
-    pz_list    = []
-    pchi_list  = []
-
-    n_batches = (ns + batch_size - 1) // batch_size
-
-    for i in tqdm(range(n_batches), desc="Posterior predictive batches"):
-        start = i * batch_size
-        end = min((i + 1) * batch_size, ns)
-        batch = samples[start:end]
-
-        while True:
-            try:
-                p1_batch, p2_batch, pq_batch, pz_batch, pchi_batch = batched_theta(batch)
-                break
-            except RuntimeError as exc:
-                msg = str(exc).lower()
-                if "out of memory" not in msg and "resource_exhausted" not in msg:
-                    raise
-                if grid_chunk_points <= min_grid_chunk_points:
-                    raise
-                grid_chunk_points = max(min_grid_chunk_points, grid_chunk_points // 2)
-                print(
-                    "JAX ran out of memory during posterior predictive evaluation; "
-                    f"retrying with --grid_chunk_points={grid_chunk_points}."
-                )
-                single_theta = make_single_theta_predictive(
-                    pop_model, settings, mgrid, qgrid, zgrid, chigrid,
-                    max_grid_points=grid_chunk_points,
-                )
-                batched_theta = jax.jit(jax.vmap(single_theta))
-
-        pm1_list.append(p1_batch)
-        pm2_list.append(p2_batch)
-        pq_list.append(pq_batch)
-        pz_list.append(pz_batch)
-        pchi_list.append(pchi_batch)
-
-    pm1_samples   = jnp.concatenate(pm1_list,   axis=0)
-    pm2_samples   = jnp.concatenate(pm2_list,   axis=0)
-    pq_samples    = jnp.concatenate(pq_list,    axis=0)
-    pz_samples    = jnp.concatenate(pz_list,    axis=0)
-    pchi_samples  = jnp.concatenate(pchi_list,  axis=0)
-
-    return pm1_samples, pm2_samples, pq_samples, pz_samples, pchi_samples
+    single_theta = make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid)
+    return batched_map(single_theta, samples, batch_size)
 
 
-# ------------------------------------------------------------
-# PPD summarization + plotting
-# ------------------------------------------------------------
 def summarize_ppd(ppd_samples, limits=(5, 95)):
     lo, hi = limits
     median = jnp.median(ppd_samples, axis=0)
     lower = jnp.percentile(ppd_samples, lo, axis=0)
     upper = jnp.percentile(ppd_samples, hi, axis=0)
-    return median, lower, upper
+    return np.asarray(median), np.asarray(lower), np.asarray(upper)
 
 
-def plot_parameter_corner(samples_list, labels, parameter_labels_list, max_parameters=6, figsize_per_panel=2.8):
-    """Plot 1D/2D posterior marginals for sampled parameters shared by all runs."""
-    if not samples_list or not parameter_labels_list:
-        return None
+def redshift_rate_samples(pz_samples, zgrid, h0_samples, om0=OM0_FID):
+    """dN/dz ∝ p_z(z) · (dV_c/dz)(z; H0) / (1+z), normalised per sample."""
+    zg = jnp.asarray(zgrid)
 
-    common = list(parameter_labels_list[0])
-    for labs in parameter_labels_list[1:]:
-        labset = set(labs)
-        common = [lab for lab in common if lab in labset]
-    if not common:
-        return None
+    def one(pz, h0):
+        rate = pz * dV_of_z(zg, h0, om0) / (1.0 + zg)
+        norm = jnp.trapezoid(rate, zg)
+        return rate / jnp.where(norm > 0, norm, 1.0)
 
-    chosen = common[:max_parameters]
-    ndim = len(chosen)
-    fig, axes = plt.subplots(
-        ndim, ndim, figsize=(figsize_per_panel * ndim, figsize_per_panel * ndim), squeeze=False
-    )
-
-    for row in range(ndim):
-        for col in range(ndim):
-            ax = axes[row, col]
-            if col > row:
-                ax.axis("off")
-                continue
-            for i, (samples, run_labels) in enumerate(zip(samples_list, parameter_labels_list)):
-                color = c[i % len(c)]
-                idx_x = run_labels.index(chosen[col])
-                x = np.asarray(samples[:, idx_x], dtype=float)
-                if row == col:
-                    ax.hist(x, bins=40, density=True, histtype="step", color=color, lw=1.8)
-                else:
-                    idx_y = run_labels.index(chosen[row])
-                    y = np.asarray(samples[:, idx_y], dtype=float)
-                    ax.scatter(x, y, s=4, alpha=0.12, color=color, rasterized=True)
-            if row == ndim - 1:
-                ax.set_xlabel(chosen[col], fontsize=12)
-            else:
-                ax.set_xticklabels([])
-            if col == 0 and row > 0:
-                ax.set_ylabel(chosen[row], fontsize=12)
-            elif col != 0:
-                ax.set_yticklabels([])
-            ax.tick_params(labelsize=9)
-
-    handles = [Line2D([0], [0], color=c[i % len(c)], lw=2) for i in range(len(labels))]
-    fig.legend(handles, labels, loc="upper right", frameon=False, fontsize=12)
-    fig.suptitle("Posterior parameter marginals", y=0.995, fontsize=16)
-    fig.tight_layout(rect=(0, 0, 0.94, 0.98))
-    return fig
+    return np.asarray(jax.vmap(one)(jnp.asarray(pz_samples), jnp.asarray(h0_samples)))
 
 
-def plot_ppd_moment_summary(metric_names, median_matrix, labels, ylabel, figsize=(10, 6)):
-    """Plot scalar summaries of posterior-predictive distributions across runs."""
-    fig, ax = plt.subplots(figsize=figsize)
-    xs = np.arange(len(metric_names))
-    width = 0.8 / max(1, len(labels))
-    for i, label in enumerate(labels):
-        offset = (i - 0.5 * (len(labels) - 1)) * width
-        ax.bar(xs + offset, median_matrix[i], width=width, label=label, color=c[i % len(c)], alpha=0.85)
-    ax.set_xticks(xs)
-    ax.set_xticklabels(metric_names, rotation=20, ha="right")
-    ax.set_ylabel(ylabel)
-    ax.legend(frameon=False)
-    fig.tight_layout()
-    return fig
-
-
-def plot_1d_spectrum(
-    xgrid,
-    ppd_list,
-    labels,
-    limits=(5, 95),
-    xlabel="x",
-    ylabel="p(x)",
-    xlim=None,
-    ylim=None,
-    colors=None,
-    figsize=(24, 10),
-    logy=True,
-):
-    if colors is None:
-        import seaborn as sns
-        colors = sns.color_palette('colorblind')
-
+# ------------------------------------------------------------
+# Plots
+# ------------------------------------------------------------
+def plot_1d_spectrum(xgrid, summaries, labels, xlabel, ylabel,
+                     xlim=None, ylim=None, logy=True, figsize=(16, 9)):
     xgrid = np.asarray(xgrid)
     fig, ax = plt.subplots(figsize=figsize)
+    for i, (median, lower, upper) in enumerate(summaries):
+        color = _PALETTE[i % len(_PALETTE)]
+        ax.fill_between(xgrid, lower, upper, alpha=0.18, color=color, lw=0, label=labels[i])
+        ax.plot(xgrid, median, color=color, lw=2.5)
+        ax.plot(xgrid, lower, color=color, lw=0.8, alpha=0.6)
+        ax.plot(xgrid, upper, color=color, lw=0.8, alpha=0.6)
 
-    means = []
-    for i, ppd in enumerate(ppd_list):
-        # We assume ppd is a tuple of (median, lower, upper)
-        median, lower, upper = ppd 
-        color = colors[i % len(colors)]
-
-        ax.fill_between(
-            xgrid, np.asarray(lower), np.asarray(upper),
-            alpha=0.15,
-            color=color,
-            label=labels[i],
-            lw=0
-        )
-
-        ax.plot(xgrid, np.asarray(lower), color=color, lw=0.8, alpha=0.6)
-        ax.plot(xgrid, np.asarray(upper), color=color, lw=0.8, alpha=0.6)
-        
-        # Optional: plotting the median to represent the curve's center
-        ax.plot(xgrid, np.asarray(median), color=color, lw=2.5)
-
-        means.append(np.asarray(median))
-
-    if xlim is None:
-        xlim = (xgrid.min(), xgrid.max())
-    if ylim is None:
-        mean_arr = np.vstack(means)
-        ymin = max(1e-6, float(mean_arr.min()))
-        ymax = float(mean_arr.max()) * 1.5
-        ylim = (ymin, ymax)
-
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
-
-    ax.set_xlabel(xlabel, fontsize=32)
-    ax.set_ylabel(ylabel, fontsize=32)
-    ax.legend(fontsize=24, frameon=False)
-    ax.tick_params(labelsize=22)
-
+    ax.set_xlim(*(xlim or (xgrid.min(), xgrid.max())))
+    if ylim is not None:
+        ax.set_ylim(*ylim)
     if logy:
         ax.set_yscale("log")
-
+    ax.set_xlabel(xlabel, fontsize=30)
+    ax.set_ylabel(ylabel, fontsize=30)
+    ax.tick_params(labelsize=20)
+    ax.legend(fontsize=20, frameon=False)
     fig.tight_layout()
     return fig
+
+
+def plot_2d_mass(mgrid, p_m1m2_per_model, labels, figsize=None):
+    """Median joint p(m1, m2) as filled contours, one panel per model."""
+    mgrid = np.asarray(mgrid)
+    n = len(labels)
+    ncol = min(n, 3)
+    nrow = int(np.ceil(n / ncol))
+    figsize = figsize or (6.0 * ncol, 5.5 * nrow)
+    fig, axes = plt.subplots(nrow, ncol, figsize=figsize, squeeze=False)
+    M1, M2 = np.meshgrid(mgrid, mgrid, indexing="ij")
+    for k, (label, p2d) in enumerate(zip(labels, p_m1m2_per_model)):
+        ax = axes[k // ncol][k % ncol]
+        med = np.median(np.asarray(p2d), axis=0)
+        masked = np.where(M2 <= M1, med, np.nan)
+        levels = np.linspace(np.nanmax(masked) * 1e-3, np.nanmax(masked), 12) \
+            if np.nanmax(masked) > 0 else None
+        cf = ax.contourf(M1, M2, masked, levels=levels, cmap="viridis")
+        ax.plot([mgrid.min(), mgrid.max()], [mgrid.min(), mgrid.max()], 'w--', lw=1, alpha=0.6)
+        ax.set_xlabel(r"$m_1$ [$M_\odot$]", fontsize=22)
+        ax.set_ylabel(r"$m_2$ [$M_\odot$]", fontsize=22)
+        ax.set_title(label, fontsize=20)
+        fig.colorbar(cf, ax=ax, label=r"$p(m_1, m_2)$")
+    for k in range(n, nrow * ncol):
+        axes[k // ncol][k % ncol].axis("off")
+    fig.tight_layout()
+    return fig
+
+
+def plot_cosmology_posterior(cosmo_samples_per_model, labels, params, figsize=None):
+    """Overlay 1-D cosmology posteriors per model; mark the injected value."""
+    params = [p for p in params if any(p in cs and cs[p] is not None
+                                       for cs in cosmo_samples_per_model)]
+    if not params:
+        return None
+    n = len(params)
+    figsize = figsize or (6.0 * n, 5.0)
+    fig, axes = plt.subplots(1, n, figsize=figsize, squeeze=False)
+    for a, param in enumerate(params):
+        ax = axes[0][a]
+        for i, cs in enumerate(cosmo_samples_per_model):
+            vals = cs.get(param)
+            if vals is None:
+                continue
+            color = _PALETTE[i % len(_PALETTE)]
+            ax.hist(np.asarray(vals), bins=40, density=True, histtype="stepfilled",
+                    alpha=0.25, color=color)
+            ax.hist(np.asarray(vals), bins=40, density=True, histtype="step",
+                    color=color, lw=2.0, label=labels[i])
+        if param in COSMO_FID:
+            ax.axvline(COSMO_FID[param], color="k", ls="--", lw=1.5, label="injected")
+        ax.set_xlabel(COSMO_TEX.get(param, param), fontsize=24)
+        ax.set_ylabel("posterior density", fontsize=22)
+        ax.tick_params(labelsize=18)
+        if a == 0:
+            ax.legend(fontsize=16, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def plot_model_evidences(labels, log10Zs, log10Zerrs, figsize=(10, 6)):
+    log10Zs = np.asarray(log10Zs, dtype=float)
+    errs = np.asarray([0.0 if e is None else e for e in log10Zerrs], dtype=float)
+    delta = log10Zs - np.max(log10Zs)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    xs = np.arange(len(labels))
+    colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(labels))]
+    ax.bar(xs, delta, yerr=errs, color=colors, alpha=0.85, capsize=5)
+    ax.axhline(0.0, color="black", lw=1.5, ls="--")
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=16)
+    ax.set_ylabel(r"$\Delta \log_{10} Z$ (relative to best)", fontsize=20)
+    ax.set_title("Model comparison", fontsize=22)
+    ax.tick_params(labelsize=16)
+    fig.tight_layout()
+    return fig
+
+
+def print_bayes_factors(labels, log10Zs):
+    print("\n=== Pairwise Bayes factors (log10) ===")
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            if log10Zs[i] is not None and log10Zs[j] is not None:
+                print(f"{labels[i]} vs {labels[j]}:  log10 BF = {log10Zs[i] - log10Zs[j]:.3f}")
+
+
+def plot_bayes_factor_matrix(labels, log10Zs, log10Zerrs, figsize=(10, 10),
+                             cmap_name="coolwarm"):
+    n = len(labels)
+    bf = np.full((n, n), np.nan)
+    for i in range(n):
+        for j in range(n):
+            if log10Zs[i] is not None and log10Zs[j] is not None:
+                bf[i, j] = log10Zs[i] - log10Zs[j]
+
+    norm = matplotlib.colors.Normalize(vmin=np.nanmin(bf), vmax=np.nanmax(bf))
+    cmap = plt.get_cmap(cmap_name)
+
+    fig, axes = plt.subplots(n, n, figsize=figsize, squeeze=False)
+    errs = [0.0 if e is None else e for e in log10Zerrs]
+    for i in range(n):
+        for j in range(n):
+            ax = axes[i][j]
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if i == j:
+                ax.text(0.5, 0.5, labels[i], ha="center", va="center", fontsize=11, weight="bold")
+            elif not np.isnan(bf[i, j]):
+                ax.set_facecolor(cmap(norm(bf[i, j])))
+                ax.text(0.5, 0.58, f"{bf[i, j]:.2f}", ha="center", va="center", fontsize=12)
+                ax.text(0.5, 0.30, f"±{np.hypot(errs[i], errs[j]):.2f}",
+                        ha="center", va="center", fontsize=9)
+            else:
+                ax.set_facecolor("lightgray")
+                ax.text(0.5, 0.5, "—", ha="center", va="center", fontsize=12)
+
+    fig.subplots_adjust(right=0.85, top=0.92, wspace=0.1, hspace=0.1)
+    cax = fig.add_axes([0.88, 0.15, 0.03, 0.7])
+    sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    fig.colorbar(sm, cax=cax).set_label(
+        r"$\log_{10}$ Bayes factor (model $i - j$)", fontsize=14)
+    fig.suptitle(r"Pairwise $\log_{10}$ Bayes factors", fontsize=18, y=0.98)
+    return fig
+
+
+def overlay_observed_events(ax, settings):
+    """Best-effort faint rug of observed detector-frame m1 medians on p(m1)."""
+    try:
+        from darksirens.gw.utils import load_gw_samples
+        gw_path = settings.get("gw_path")
+        if not gw_path or not os.path.exists(gw_path):
+            return
+        out = load_gw_samples(gw_path)
+        m1det, nEvents, nsamp = np.asarray(out[0]), int(out[-2]), int(out[-1])
+        med = np.median(m1det.reshape(nEvents, nsamp), axis=1)
+        for k, v in enumerate(med):
+            ax.axvline(v, color="0.3", alpha=0.18, lw=0.8,
+                       label="observed (det-frame $m_1$)" if k == 0 else None)
+        ax.legend(fontsize=16, frameon=False)
+    except Exception as exc:  # noqa: BLE001 — overlay is best-effort
+        print(f"  [info] event overlay skipped: {exc}")
+
 
 # ------------------------------------------------------------
 # CLI / main
 # ------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--run_dirs",
-        nargs="+",
-        default=["."],
-        help="One or more run directories (PL1, PL2, Bump, etc.); defaults to the current directory"
-    )
-    parser.add_argument("--mmin", type=float, default=1.0)
-    parser.add_argument("--mmax", type=float, default=100.0)
-    parser.add_argument("--nm", type=int, default=300)
-    parser.add_argument("--nq", type=int, default=100)
-    parser.add_argument("--nz", type=int, default=50)
-    
-    # New arguments for chieff
-    parser.add_argument("--nchi", type=int, default=50)
-    parser.add_argument("--chimin", type=float, default=-1.0)
-    parser.add_argument("--chimax", type=float, default=1.0)
+def _build_parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--run_dirs", nargs="+", default=["."],
+                   help="One or more run directories; defaults to the current directory.")
+    p.add_argument("--mmin", type=float, default=1.0)
+    p.add_argument("--mmax", type=float, default=100.0)
+    p.add_argument("--nm", type=int, default=128)
+    p.add_argument("--nq", type=int, default=48)
+    p.add_argument("--nz", type=int, default=32)
+    p.add_argument("--nchi", type=int, default=24)
+    p.add_argument("--zmax", type=float, default=2.0)
+    p.add_argument("--chimin", type=float, default=-1.0)
+    p.add_argument("--chimax", type=float, default=1.0)
+    p.add_argument("--batch_size", type=int, default=None,
+                   help="Per-sample batch size; auto-chosen from grid memory if unset. "
+                        "Smooth-GP models may need a small value (e.g. 1-4).")
+    p.add_argument("--cred_lo", type=float, default=5.0)
+    p.add_argument("--cred_hi", type=float, default=95.0)
+    p.add_argument("--overlay_events", action="store_true",
+                   help="Overlay observed detector-frame m1 medians on p(m1).")
+    p.add_argument("--outdir", default=".", help="Directory for output figures.")
+    return p
 
-    parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--grid_chunk_points", type=int, default=100_000,
-                        help="Maximum (m1, q, z, chi) grid points per population-model evaluation during PPD analysis.")
-    parser.add_argument("--cred_lo", type=float, default=5.0)
-    parser.add_argument("--cred_hi", type=float, default=95.0)
-    args = parser.parse_args()
+
+def main():
+    args = _build_parser().parse_args()
+    os.makedirs(args.outdir, exist_ok=True)
+    out = lambda name: os.path.join(args.outdir, name)
 
     mgrid = np.linspace(args.mmin, args.mmax, args.nm)
     qgrid = np.linspace(0.01, 1.0, args.nq)
-    zgrid = np.linspace(0.0, 2.0, args.nz)
+    zgrid = np.linspace(0.0, args.zmax, args.nz)
     chigrid = np.linspace(args.chimin, args.chimax, args.nchi)
-
-    pm1_list   = []
-    pm2_list   = []
-    pq_list    = []
-    pz_list    = []
-    pchi_list  = []
-    sample_list = []
-    parameter_labels_list = []
-    ppd_mean_rows = []
-    labels     = []
-    logZs      = []
-    logZerrs   = []
-    
     limits = (args.cred_lo, args.cred_hi)
-    
+
+    labels, logZs, logZerrs = [], [], []
+    spec = {k: [] for k in ("m1", "m2", "q", "z", "chi")}
+    p_m1m2_per_model, cosmo_per_model, rate_per_model = [], [], []
+    first_settings = None
+
     for run_dir in args.run_dirs:
         print(f"\n=== Processing model: {run_dir} ===")
-
         settings, samples, logZ, logZerr = load_run(run_dir)
+        first_settings = first_settings or settings
+        run_labels = _labels_of(settings)
+
         pop_model = pop_model_parser(
             settings["pop_model"],
             shared_beta=bool(settings.get("shared_beta", True)),
@@ -694,169 +516,98 @@ def main():
             shared_gamma=bool(settings.get("shared_gamma", True)),
         )
 
-        # Convert to log10 if available; preserve missing evidence as None.
-        if logZ is not None:
-            log10Z = logZ / np.log(10.0)
-            log10Zerr = logZerr / np.log(10.0) if logZerr is not None else 0.0
-        else:
-            log10Z = None
-            log10Zerr = None
-
+        log10Z = (logZ / np.log(10.0)) if logZ is not None else None
+        log10Zerr = (logZerr / np.log(10.0)) if (logZ is not None and logZerr is not None) else None
         logZs.append(log10Z)
         logZerrs.append(log10Zerr)
 
-        pm1_samples, pm2_samples, pq_samples, pz_samples, pchi_samples = (
-            posterior_predictive_mass_distributions_jax(
-                pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
-                batch_size=args.batch_size, grid_chunk_points=args.grid_chunk_points
-            )
+        p_m1, p_m2, p_q, p_z, p_chi, p_m1m2 = posterior_predictive(
+            pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
+            batch_size=args.batch_size,
         )
+        spec["m1"].append(summarize_ppd(p_m1, limits))
+        spec["m2"].append(summarize_ppd(p_m2, limits))
+        spec["q"].append(summarize_ppd(p_q, limits))
+        spec["z"].append(summarize_ppd(p_z, limits))
+        spec["chi"].append(summarize_ppd(p_chi, limits))
+        p_m1m2_per_model.append(np.asarray(p_m1m2))
 
-        # Summaries
-        pm1_med, pm1_lo, pm1_hi = summarize_ppd(pm1_samples, limits)
-        pm2_med, pm2_lo, pm2_hi = summarize_ppd(pm2_samples, limits)
-        pq_med,  pq_lo,  pq_hi  = summarize_ppd(pq_samples,  limits)
-        pz_med,  pz_lo,  pz_hi  = summarize_ppd(pz_samples,  limits)
-        pchi_med, pchi_lo, pchi_hi = summarize_ppd(pchi_samples, limits)
+        # Cosmology posteriors (only the sampled ones).
+        cosmo_per_model.append({
+            name: _column(samples, run_labels, name) for name in COSMO_FID
+        })
 
-        parameter_labels = list(settings.get("labels", []))
-        if parameter_labels and len(parameter_labels) == samples.shape[1]:
-            sample_list.append(np.asarray(samples))
-            parameter_labels_list.append(parameter_labels)
+        # Redshift distribution / detection rate dN/dz, using sampled H0 if present.
+        h0_col = _column(samples, run_labels, "H0")
+        h0_samples = h0_col if h0_col is not None else np.full(p_z.shape[0], H0_FID)
+        rate_per_model.append(summarize_ppd(
+            redshift_rate_samples(p_z, zgrid, h0_samples), limits))
 
-        ppd_mean_rows.append([
-            float(jnp.trapezoid(mgrid * pm1_med, mgrid)),
-            float(jnp.trapezoid(mgrid * pm2_med, mgrid)),
-            float(jnp.trapezoid(qgrid * pq_med, qgrid)),
-            float(jnp.trapezoid(zgrid * pz_med, zgrid)),
-            float(jnp.trapezoid(chigrid * pchi_med, chigrid)),
-        ])
+        # GP-latent caterpillar (only for models with latents).
+        if run_labels and latent_indices(run_labels):
+            fig = make_latent_summary(samples, run_labels)
+            if fig is not None:
+                tag = os.path.basename(os.path.normpath(run_dir)) or "run"
+                fig.savefig(out(f"latents_{tag}.pdf"), bbox_inches="tight", dpi=300)
+                plt.close(fig)
 
-        # Store summaries as tuples for plotting
-        pm1_list.append((pm1_med, pm1_lo, pm1_hi))
-        pm2_list.append((pm2_med, pm2_lo, pm2_hi))
-        pq_list.append((pq_med, pq_lo, pq_hi))
-        pz_list.append((pz_med, pz_lo, pz_hi))
-        pchi_list.append((pchi_med, pchi_lo, pchi_hi))
-
-        # Free GPU memory
-        del pm1_samples, pm2_samples, pq_samples, pz_samples, pchi_samples
+        labels.append(settings.get("model_name", os.path.basename(os.path.normpath(run_dir))))
+        del p_m1, p_m2, p_q, p_z, p_chi, p_m1m2
         jax.clear_caches()
 
-        model_label = settings.get("model_name", os.path.basename(run_dir))
-        labels.append(model_label)
+    # ---- 1-D posterior-predictive spectra ----
+    specs = [
+        ("m1", mgrid, r"$m_1$ [$M_\odot$]", r"$p(m_1)$ [$M_\odot^{-1}$]", None, (1e-5, 1.0)),
+        ("m2", mgrid, r"$m_2$ [$M_\odot$]", r"$p(m_2)$ [$M_\odot^{-1}$]", None, (1e-5, 1.0)),
+        ("q",  qgrid, r"$q$", r"$p(q)$", (0.0, 1.0), (1e-6, 1e1)),
+        ("z",  zgrid, r"$z$", r"$p(z)$", (0.0, args.zmax), (1e-2, 1e1)),
+        ("chi", chigrid, r"$\chi_\mathrm{eff}$", r"$p(\chi_\mathrm{eff})$",
+         (args.chimin, args.chimax), (1e-2, 1e1)),
+    ]
+    for key, xg, xl, yl, xlim, ylim in specs:
+        fig = plot_1d_spectrum(xg, spec[key], labels, xl, yl, xlim=xlim, ylim=ylim)
+        if key == "m1" and args.overlay_events and first_settings is not None:
+            overlay_observed_events(fig.axes[0], first_settings)
+        fig.savefig(out(f"p{key}_all_models.pdf"), bbox_inches="tight", dpi=300)
+        plt.close(fig)
 
-    # p(m1)
-    fig_m1 = plot_1d_spectrum(
-        mgrid,
-        pm1_list,
-        labels,
-        limits,
-        xlabel=r"$m_1$ [$M_\odot$]",
-        ylabel=r"$p(m_1)$ [$M_\odot^{-1}$]",
-        logy=True,
-        ylim=(1e-5, 1.0),
-    )
-    fig_m1.savefig("pm1_all_models.pdf")
+    # ---- 2-D joint p(m1, m2) ----
+    fig = plot_2d_mass(mgrid, p_m1m2_per_model, labels)
+    fig.savefig(out("pm1m2_all_models.pdf"), bbox_inches="tight", dpi=300)
+    plt.close(fig)
 
-    # p(m2)
-    fig_m2 = plot_1d_spectrum(
-        mgrid,
-        pm2_list,
-        labels,
-        limits,
-        xlabel=r"$m_2$ [$M_\odot$]",
-        ylabel=r"$p(m_2)$ [$M_\odot^{-1}$]",
-        logy=True,
-        ylim=(1e-5, 1.0),
-    )
-    fig_m2.savefig("pm2_all_models.pdf")
+    # ---- cosmology posteriors ----
+    fig = plot_cosmology_posterior(cosmo_per_model, labels, list(COSMO_FID))
+    if fig is not None:
+        fig.savefig(out("cosmology_posterior.pdf"), bbox_inches="tight", dpi=300)
+        plt.close(fig)
+    else:
+        print("\nCosmology was fixed in all runs; skipping cosmology posterior plot.")
 
-    # p(q)
-    fig_q = plot_1d_spectrum(
-        qgrid,
-        pq_list,
-        labels,
-        limits,
-        xlabel=r"$q$",
-        ylabel=r"$p(q)$",
-        xlim=(0.0, 1.0),
-        ylim=(1e-6, 10.0),
-        logy=True,
-    )
-    fig_q.savefig("pq_all_models.pdf")
+    # ---- redshift distribution / rate ----
+    fig = plot_1d_spectrum(zgrid, rate_per_model, labels, r"$z$",
+                           r"$\mathrm{d}N/\mathrm{d}z$  (normalised)",
+                           xlim=(0.0, args.zmax), ylim=None, logy=False)
+    fig.savefig(out("rate_dNdz.pdf"), bbox_inches="tight", dpi=300)
+    plt.close(fig)
 
-    # p(z)
-    fig_z = plot_1d_spectrum(
-        zgrid,
-        pz_list,
-        labels,
-        limits,
-        xlabel=r"$z$",
-        ylabel=r"$p(z)$",
-        xlim=(0.0, 2.0),
-        ylim=(1e-2, 10.0),
-        logy=True,
-    )
-    fig_z.savefig("pz_all_models.pdf")
-    
-    # p(chi)
-    fig_chi = plot_1d_spectrum(
-        chigrid, pchi_list, labels, limits,
-        xlabel=r"$\chi_\mathrm{eff}$",
-        ylabel=r"$p(\chi_\mathrm{eff})$",
-        xlim=(args.chimin, args.chimax), ylim=(1e-2, 10.0), logy=True
-    )
-    fig_chi.savefig("pchi_all_models.pdf")
-
-    fig_corner = plot_parameter_corner(sample_list, labels, parameter_labels_list)
-    if fig_corner is not None:
-        fig_corner.savefig("posterior_parameter_corner.pdf")
-
-    if ppd_mean_rows:
-        fig_moments = plot_ppd_moment_summary(
-            [r"$E[m_1]$", r"$E[m_2]$", r"$E[q]$", r"$E[z]$", r"$E[\chi_\mathrm{eff}]$"],
-            np.asarray(ppd_mean_rows), labels, "Posterior-predictive median mean"
-        )
-        fig_moments.savefig("ppd_median_means.pdf")
-
-    # ------------------------------------------------------------
-    # Evidence comparison (separate figure)
-    # ------------------------------------------------------------
+    # ---- model comparison ----
     if any(z is not None for z in logZs):
-        evidence_items = [(label, z, ze or 0.0) for label, z, ze in zip(labels, logZs, logZerrs) if z is not None]
-        fig_ev = plot_model_evidences(
-            [item[0] for item in evidence_items],
-            [item[1] for item in evidence_items],
-            [item[2] for item in evidence_items],
-        )
-        fig_ev.savefig("model_evidences.pdf")
-
-        print("\n=== Model Evidences ===")
+        fig = plot_model_evidences(labels, [0.0 if z is None else z for z in logZs], logZerrs)
+        fig.savefig(out("model_evidences.pdf"), bbox_inches="tight", dpi=300)
+        plt.close(fig)
+        print("\n=== Model evidences (log10 Z) ===")
         for label, z, ze in zip(labels, logZs, logZerrs):
-            if z is None:
-                print(f"{label:20s} log10Z = unavailable")
-            else:
-                print(f"{label:20s} log10Z = {z} ± {ze}")
-
+            print(f"{label:24s} log10Z = {z} ± {ze}")
         print_bayes_factors(labels, logZs)
+        if len(labels) >= 2 and sum(z is not None for z in logZs) >= 2:
+            fig = plot_bayes_factor_matrix(labels, logZs, logZerrs)
+            fig.savefig(out("bayes_factors.pdf"), bbox_inches="tight", dpi=300)
+            plt.close(fig)
     else:
-        print("\nNo evidence information found in any run.")
-        
-    # ------------------------------------------------------------
-    # Bayes factor matrices
-    # ------------------------------------------------------------
-    if _should_plot_bayes_factor_matrix(labels, logZs):
-        # Full pairwise matrix
-        fig_pair = plot_bayes_factor_matrix_pairwise(labels, logZs, logZerrs)
-        fig_pair.savefig("bayes_factors_pairwise.pdf")
-        print("Saved bayes_factors_pairwise.pdf")
+        print("\nNo evidence information found in any run; skipping model comparison.")
 
-    elif len(labels) < 2:
-        print("\nSkipping Bayes factor matrix: at least two run directories are required.")
-
-    else:
-        print("\nNo evidence available to compute Bayes factors.")
+    print(f"\nFigures written to {os.path.abspath(args.outdir)}")
 
 
 if __name__ == "__main__":
