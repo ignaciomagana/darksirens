@@ -520,7 +520,7 @@ Important options:
 | `--cred_lo` | `5.0` | Lower credible interval percentile. |
 | `--cred_hi` | `95.0` | Upper credible interval percentile. |
 
-The analyzer produces posterior-predictive plots such as:
+The analyzer reads current `results.hdf5` runs (including root-level or grouped posterior sample datasets), still supports legacy `samples.npy` runs, and produces posterior-predictive plots such as:
 
 ```text
 pm1_all_models.pdf
@@ -528,6 +528,8 @@ pm2_all_models.pdf
 pq_all_models.pdf
 pz_all_models.pdf
 pchi_all_models.pdf
+posterior_parameter_corner.pdf
+ppd_median_means.pdf
 model_evidences.pdf
 bayes_factors_pairwise.pdf
 ```
