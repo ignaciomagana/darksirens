@@ -26,6 +26,7 @@ from tqdm import tqdm
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 import matplotlib
 import matplotlib.cm
@@ -169,12 +170,77 @@ def _column(samples, labels, name):
 # ------------------------------------------------------------
 # Vectorized batched map ("jmap"): jit + vmap + automatic batch size
 # ------------------------------------------------------------
-def auto_batch_size(nsamples, grid_points, target_bytes=2.0e9, dtype_bytes=8, cap=256):
-    """Largest batch whose per-sample grid stays under ``target_bytes``."""
-    per_sample = float(grid_points) * dtype_bytes
-    if per_sample <= 0:
-        return min(nsamples, cap)
-    return int(min(nsamples, max(1, int(target_bytes // per_sample)), cap))
+def probe_device_memory_bytes(default_gb=4.0):
+    """Best-effort free-memory probe for the first JAX device.
+
+    Returns ``(bytes, source)``.  Uses ``device.memory_stats()`` when available
+    (GPU/TPU): ``bytes_limit - bytes_in_use`` if both present, else
+    ``bytes_limit`` / ``bytes_reservable_limit``.  Falls back to ``default_gb``
+    on the CPU backend or older jaxlib (where ``memory_stats`` returns ``None``
+    or lacks these keys).
+
+    Note: unless ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` is exported, JAX
+    preallocates a large fraction of the GPU and ``bytes_limit`` reports that
+    *pool* (still a safe ceiling for sizing — we stay within it).
+    """
+    try:
+        dev = jax.devices()[0]
+        stats = dev.memory_stats() or {}
+        limit = stats.get("bytes_limit")
+        if limit:
+            in_use = int(stats.get("bytes_in_use", 0) or 0)
+            free = max(int(limit) - in_use, int(0.1 * int(limit)))
+            return int(free), f"device:{dev.platform} bytes_limit-in_use"
+        res = stats.get("bytes_reservable_limit")
+        if res:
+            return int(res), f"device:{dev.platform} bytes_reservable_limit"
+    except Exception:
+        pass
+    return int(default_gb * 1e9), "fallback-default"
+
+
+def plan_ppd_sizing(nsamples, grid_points, n_nodes, max_mem_bytes,
+                    safe_frac=0.4, batch_size=None, grid_chunk=None,
+                    dtype_bytes=8, n_live=16, batch_cap=64, chunk_floor=50_000):
+    """Choose ``(batch_size, grid_chunk)`` so the posterior-predictive peak
+    stays under ``safe_frac * max_mem_bytes``.
+
+    Memory model (per vmapped sample): the marginalization holds several live
+    grid-sized buffers, ``~ batch * grid_points * dtype * n_live`` (the
+    "reduction" phase); the density evaluation additionally holds the GP kernel
+    tensor ``(chunk * n_nodes)`` plus working buffers, ``~ batch * chunk *
+    dtype * (n_nodes + n_live)`` (the "eval" phase).  We size ``batch`` from the
+    reduction phase and ``grid_chunk`` from the eval phase; if a large GP node
+    count forces a tiny chunk we shrink ``batch`` (fewer chunks → faster).
+
+    ``grid_chunk`` is returned as ``None`` when the whole grid fits in one piece
+    at the chosen batch (parametric models / small grids) — the caller then
+    takes the unchunked path, which is bit-identical to the legacy behaviour.
+    User-supplied ``batch_size`` / ``grid_chunk`` are honoured as-is.
+    """
+    budget = max(1.0, float(safe_frac) * float(max_mem_bytes))
+    gp = max(1, int(grid_points))
+    nn = max(0, int(n_nodes))
+
+    if batch_size is not None:
+        b = max(1, int(batch_size))
+    else:
+        b = int(budget // (gp * dtype_bytes * n_live))
+        b = max(1, min(b, batch_cap, int(nsamples)))
+
+    if grid_chunk is not None:
+        c = max(1, int(grid_chunk))
+        return b, (None if c >= gp else c)
+
+    def _chunk_for(bb):
+        return int(budget // max(bb * dtype_bytes * (nn + n_live), 1))
+
+    c = _chunk_for(b)
+    while c < chunk_floor and b > 1:        # GP eval term too costly at this batch
+        b = max(1, b // 2)
+        c = _chunk_for(b)
+    c = max(1, min(c, gp))
+    return b, (None if c >= gp else c)
 
 
 def batched_map(fn, samples, batch_size):
@@ -202,13 +268,22 @@ def batched_map(fn, samples, batch_size):
 # ------------------------------------------------------------
 # Posterior-predictive engine (flattened grid → works for all models)
 # ------------------------------------------------------------
-def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid):
+def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid,
+                                  grid_chunk=None):
     """Build a jit'd per-sample evaluator returning the PPD marginals + p(m1,m2).
 
     The population density is evaluated on a flattened, equal-shape coordinate
     grid (every coordinate is a 1-D array of length nm*nq*nz*nchi), so the
     call satisfies the equal-shape requirement of the GP / binned-GP models'
     ``log_p_pop`` as well as the natural broadcasting of the parametric models.
+
+    ``grid_chunk`` bounds peak memory: when set, the density is evaluated over
+    the flattened grid in chunks of ``grid_chunk`` points via ``lax.scan``
+    (mirroring the chunking idiom in ``inference/selection.py``), which caps the
+    GP kernel tensor ``(chunk x n_nodes)`` regardless of grid size.  The
+    assembled ``logp`` and all downstream marginalization are unchanged, so the
+    outputs are numerically identical (``grid_chunk=None`` is exactly the legacy
+    path).
     """
     mgrid = jnp.asarray(mgrid)
     qgrid = jnp.asarray(qgrid)
@@ -218,6 +293,21 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
 
     M1, Q, Z, CHI = jnp.meshgrid(mgrid, qgrid, zgrid, chigrid, indexing="ij")
     m1f, qf, zf, chif = M1.ravel(), Q.ravel(), Z.ravel(), CHI.ravel()
+    Nq = int(m1f.size)
+
+    # Pre-pad the flattened grid to a multiple of the chunk size (pad with the
+    # last point, then trim ``logp`` back to ``Nq``); static shapes keep the
+    # scan/vmap happy.  Done once here, captured by the closure.
+    if grid_chunk is not None:
+        C = max(1, int(grid_chunk))
+        n_chunks = (Nq + C - 1) // C
+        Pq = n_chunks * C
+        pad = Pq - Nq
+        if pad:
+            _ext = lambda a: jnp.concatenate([a, jnp.repeat(a[-1:], pad)])
+            m1f_p, qf_p, zf_p, chif_p = _ext(m1f), _ext(qf), _ext(zf), _ext(chif)
+        else:
+            m1f_p, qf_p, zf_p, chif_p = m1f, qf, zf, chif
 
     # q→m2 interpolation geometry for the 2-D joint.
     q_eval = mgrid[None, :] / mgrid[:, None]
@@ -229,7 +319,18 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
     @jax.jit
     def single_theta(theta):
         pop_theta = pop_extractor(theta)
-        logp = pop_model(m1f, qf, zf, chif, pop_theta)
+        if grid_chunk is None:
+            logp = pop_model(m1f, qf, zf, chif, pop_theta)
+        else:
+            def _eval_chunk(_carry, k):
+                s = k * C
+                sl = lambda a: lax.dynamic_slice_in_dim(a, s, C)
+                lp = pop_model(sl(m1f_p), sl(qf_p), sl(zf_p), sl(chif_p), pop_theta)
+                return _carry, lp
+            _, lp_chunks = lax.scan(_eval_chunk, None, jnp.arange(n_chunks))
+            # Fixed-shape reshape (not -1) so the outer vmap can track the batch
+            # axis; trim the padding.
+            logp = lp_chunks.reshape(Pq)[:Nq]
         p = jnp.exp(logp).reshape(nm, nq, nz, nchi)
 
         # 1-D marginals (integrate out the other three axes).
@@ -259,14 +360,45 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
 
 
 def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
-                         batch_size=None):
-    """Return per-sample (p_m1, p_m2, p_q, p_z, p_chi, p_m1m2) stacks."""
-    samples = jnp.asarray(samples)
-    grid_points = mgrid.size * qgrid.size * zgrid.size * chigrid.size
-    if batch_size is None:
-        batch_size = auto_batch_size(samples.shape[0], grid_points)
+                         batch_size=None, grid_chunk=None, max_mem_gb=None,
+                         mem_safe_frac=0.4):
+    """Return per-sample (p_m1, p_m2, p_q, p_z, p_chi, p_m1m2) stacks.
 
-    single_theta = make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid)
+    Sample-batch and grid-chunk sizes are chosen automatically from probed
+    device memory (``probe_device_memory_bytes`` / ``plan_ppd_sizing``) so the
+    recompute does not OOM for any model — in particular the GP / binned-GP
+    models, whose per-query kernel tensor scales with the number of inducing
+    nodes.  ``batch_size`` / ``grid_chunk`` / ``max_mem_gb`` override the
+    automatic choices.
+    """
+    samples = jnp.asarray(samples)
+    grid_points = int(mgrid.size * qgrid.size * zgrid.size * chigrid.size)
+    # GP inducing-node count (drives the (chunk x M) eval cost); 0 for parametric.
+    n_nodes = int(getattr(getattr(pop_model, "__self__", None), "M", 0) or 0)
+
+    if max_mem_gb is not None:
+        max_mem_bytes, mem_src = float(max_mem_gb) * 1e9, "cli:--max_mem_gb"
+    elif os.environ.get("DARKSIRENS_ANALYZE_MAX_MEM_GB"):
+        max_mem_bytes = float(os.environ["DARKSIRENS_ANALYZE_MAX_MEM_GB"]) * 1e9
+        mem_src = "env:DARKSIRENS_ANALYZE_MAX_MEM_GB"
+    else:
+        max_mem_bytes, mem_src = probe_device_memory_bytes()
+
+    batch_size, grid_chunk = plan_ppd_sizing(
+        samples.shape[0], grid_points, n_nodes, max_mem_bytes,
+        safe_frac=mem_safe_frac, batch_size=batch_size, grid_chunk=grid_chunk,
+    )
+    est_peak_gb = batch_size * grid_points * 8 * 16 / 1e9
+    print(
+        f"    [ppd] grid={grid_points:,} pts  GP_nodes={n_nodes}  "
+        f"mem={max_mem_bytes / 1e9:.1f}GB ({mem_src})  batch={batch_size}  "
+        f"grid_chunk={grid_chunk if grid_chunk is not None else 'full'}  "
+        f"~peak={est_peak_gb:.1f}GB"
+    )
+
+    single_theta = make_single_theta_predictive(
+        pop_model, settings, mgrid, qgrid, zgrid, chigrid, grid_chunk=grid_chunk
+    )
     return batched_map(single_theta, samples, batch_size)
 
 
@@ -477,8 +609,15 @@ def _build_parser():
     p.add_argument("--chimin", type=float, default=-1.0)
     p.add_argument("--chimax", type=float, default=1.0)
     p.add_argument("--batch_size", type=int, default=None,
-                   help="Per-sample batch size; auto-chosen from grid memory if unset. "
-                        "Smooth-GP models may need a small value (e.g. 1-4).")
+                   help="Per-sample batch size; auto-chosen from device memory if unset.")
+    p.add_argument("--grid_chunk", type=int, default=None,
+                   help="Flattened-grid points per density-evaluation chunk; auto-chosen "
+                        "from device memory if unset (bounds the GP kernel tensor).")
+    p.add_argument("--max_mem_gb", type=float, default=None,
+                   help="Memory budget in GB for posterior-predictive sizing; probes the "
+                        "JAX device if unset (env DARKSIRENS_ANALYZE_MAX_MEM_GB also works).")
+    p.add_argument("--mem_safe_frac", type=float, default=0.4,
+                   help="Fraction of the memory budget the posterior-predictive peak may use.")
     p.add_argument("--cred_lo", type=float, default=5.0)
     p.add_argument("--cred_hi", type=float, default=95.0)
     p.add_argument("--overlay_events", action="store_true",
@@ -526,6 +665,9 @@ def main():
         p_m1, p_m2, p_q, p_z, p_chi, p_m1m2 = posterior_predictive(
             pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
             batch_size=args.batch_size,
+            grid_chunk=args.grid_chunk,
+            max_mem_gb=args.max_mem_gb,
+            mem_safe_frac=args.mem_safe_frac,
         )
         spec["m1"].append(summarize_ppd(p_m1, limits))
         spec["m2"].append(summarize_ppd(p_m2, limits))
