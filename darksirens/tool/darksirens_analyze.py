@@ -298,86 +298,112 @@ def plot_bayes_factor_matrix_pairwise(labels, log10Zs, log10Zerrs, figsize=(10, 
 # ------------------------------------------------------------
 # JAX posterior predictive engine (batched, per-sample PPD)
 # ------------------------------------------------------------
-def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid):
+def _trapezoid_weights(grid):
+    """Return integration weights equivalent to ``jnp.trapezoid`` on a 1D grid."""
+    grid = jnp.asarray(grid)
+    n = grid.size
+    if n == 1:
+        return jnp.ones_like(grid)
+    widths = jnp.diff(grid)
+    weights = jnp.empty_like(grid)
+    weights = weights.at[0].set(0.5 * widths[0])
+    weights = weights.at[-1].set(0.5 * widths[-1])
+    if n > 2:
+        weights = weights.at[1:-1].set(0.5 * (widths[:-1] + widths[1:]))
+    return weights
+
+
+def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid, max_grid_points=100_000):
+    """Build a memory-bounded posterior-predictive evaluator for one sample.
+
+    The original implementation evaluated the full ``(m1, q, z, chi)`` tensor in
+    one JAX program.  For GP population models this can require XLA to build very
+    large intermediate kernel matrices even for a single posterior sample.  This
+    evaluator automatically slices the redshift/spin plane so each population
+    model call stays below ``max_grid_points`` query points, while accumulating
+    the same trapezoidal integrals needed for the plotted marginals.
+    """
     mgrid = jnp.asarray(mgrid)
     qgrid = jnp.asarray(qgrid)
     zgrid = jnp.asarray(zgrid)
     chigrid = jnp.asarray(chigrid)
 
-    nm = mgrid.size
+    nm = int(mgrid.size)
+    nq = int(qgrid.size)
+    nz = int(zgrid.size)
+    nchi = int(chigrid.size)
+    max_grid_points = max(int(max_grid_points), nm * nq)
+    max_zchi_points = max(1, max_grid_points // (nm * nq))
+    chi_chunk = max(1, min(nchi, max_zchi_points))
+    z_chunk = max(1, min(nz, max_zchi_points // chi_chunk))
 
-    # Expand to 4D: (m1, q, z, chi)
-    m1_grid  = mgrid[:, None, None, None]
-    q_grid   = qgrid[None, :, None, None]
-    z_grid   = zgrid[None, None, :, None]
-    chi_grid = chigrid[None, None, None, :]
+    wm = _trapezoid_weights(mgrid)
+    wq = _trapezoid_weights(qgrid)
+    wz = _trapezoid_weights(zgrid)
+    wchi = _trapezoid_weights(chigrid)
+
+    m1_grid = mgrid[:, None, None, None]
+    q_grid = qgrid[None, :, None, None]
 
     m2_vals = mgrid
     q_eval = m2_vals[None, :] / mgrid[:, None]
     valid = (q_eval >= qgrid[0]) & (q_eval <= qgrid[-1])
     jac = 1.0 / mgrid[:, None]
 
-    # Initialize dynamic parameter extractor
     pop_extractor = make_pop_extractor(settings)
 
     @jax.jit
+    def eval_chunk(pop_theta, z_sub, chi_sub):
+        z_grid = z_sub[None, None, :, None]
+        chi_grid = chi_sub[None, None, None, :]
+        return jnp.exp(pop_model(m1_grid, q_grid, z_grid, chi_grid, pop_theta))
+
     def single_theta(theta):
-        # Extract purely population parameters
         pop_theta = pop_extractor(theta)
-        
-        # pop_model must now accept chi_grid and the filtered pop_theta
-        logp = pop_model(m1_grid, q_grid, z_grid, chi_grid, pop_theta)
-        p = jnp.exp(logp)
+        p_m1 = jnp.zeros(nm)
+        p_q = jnp.zeros(nq)
+        p_z = jnp.zeros(nz)
+        p_chi = jnp.zeros(nchi)
+        p_m1q = jnp.zeros((nm, nq))
 
-        # -----------------------------------------------------
-        # 1D Marginalizations (Integrate out 3 dimensions)
-        # -----------------------------------------------------
-        # p(m1): integrate over chi (axis 3), z (axis 2), q (axis 1)
-        p_m1 = jnp.trapezoid(
-            jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2), qgrid, axis=1
-        )
+        for zs in range(0, nz, z_chunk):
+            ze = min(zs + z_chunk, nz)
+            z_sub = zgrid[zs:ze]
+            wz_sub = wz[zs:ze]
+            for cs in range(0, nchi, chi_chunk):
+                ce = min(cs + chi_chunk, nchi)
+                chi_sub = chigrid[cs:ce]
+                wchi_sub = wchi[cs:ce]
+                p = eval_chunk(pop_theta, z_sub, chi_sub)
+
+                wzchi = wz_sub[None, None, :, None] * wchi_sub[None, None, None, :]
+                p_m1 = p_m1 + jnp.sum(p * wq[None, :, None, None] * wzchi, axis=(1, 2, 3))
+                p_q = p_q + jnp.sum(p * wm[:, None, None, None] * wzchi, axis=(0, 2, 3))
+                p_z = p_z.at[zs:ze].add(
+                    jnp.sum(p * wm[:, None, None, None] * wq[None, :, None, None]
+                            * wchi_sub[None, None, None, :], axis=(0, 1, 3))
+                )
+                p_chi = p_chi.at[cs:ce].add(
+                    jnp.sum(p * wm[:, None, None, None] * wq[None, :, None, None]
+                            * wz_sub[None, None, :, None], axis=(0, 1, 2))
+                )
+                p_m1q = p_m1q + jnp.sum(p * wzchi, axis=(2, 3))
+
         p_m1 /= jnp.trapezoid(p_m1, mgrid)
-
-        # p(q): integrate over chi (axis 3), z (axis 2), m1 (axis 0)
-        p_q = jnp.trapezoid(
-            jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2), mgrid, axis=0
-        )
         p_q /= jnp.trapezoid(p_q, qgrid)
-
-        # p(z): integrate over chi (axis 3), q (axis 1), m1 (axis 0)
-        p_z = jnp.trapezoid(
-            jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), qgrid, axis=1), mgrid, axis=0
-        )
         p_z /= jnp.trapezoid(p_z, zgrid)
-
-        # p(chi): integrate over z (axis 2), q (axis 1), m1 (axis 0)
-        p_chi = jnp.trapezoid(
-            jnp.trapezoid(jnp.trapezoid(p, zgrid, axis=2), qgrid, axis=1), mgrid, axis=0
-        )
         p_chi /= jnp.trapezoid(p_chi, chigrid)
 
-        # -----------------------------------------------------
-        # 2D Joint Mass Distribution p(m1, m2)
-        # -----------------------------------------------------
-        # First, marginalize over chi and z to get p(m1, q)
-        p_m1q = jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2)
-
-        # Interpolate q onto m2 grid
         p_interp = jax.vmap(
             lambda row, qev: jnp.interp(qev, qgrid, row, left=0.0, right=0.0)
         )(p_m1q, q_eval)
-
         p_m1m2 = p_interp * jac * valid
-
-        norm_2d = jnp.trapezoid(
-            jnp.trapezoid(p_m1m2, mgrid, axis=0), mgrid, axis=0
-        )
+        norm_2d = jnp.trapezoid(jnp.trapezoid(p_m1m2, mgrid, axis=0), mgrid, axis=0)
         p_m1m2 = jnp.where(norm_2d > 0, p_m1m2 / norm_2d, p_m1m2)
-
         p_m2 = jnp.trapezoid(p_m1m2, mgrid, axis=0)
         p_m2 /= jnp.trapezoid(p_m2, mgrid)
 
-        return p_m1, p_m2, p_q, p_z, p_chi, p_m1m2
+        return p_m1, p_m2, p_q, p_z, p_chi
 
     return single_theta
 
@@ -394,7 +420,7 @@ def auto_batch_size(nsamples, nm, nq, nz, nchi, target_bytes=2e9):
 
 
 def posterior_predictive_mass_distributions_jax(
-    pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid, batch_size=None
+    pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid, batch_size=None, grid_chunk_points=100_000
 ):
     samples = jnp.asarray(samples)
     mgrid = jnp.asarray(mgrid)
@@ -411,7 +437,11 @@ def posterior_predictive_mass_distributions_jax(
     if batch_size is None:
         batch_size = auto_batch_size(ns, nm, nq, nz, nchi)
 
-    single_theta = make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigrid)
+    min_grid_chunk_points = int(nm * nq)
+    grid_chunk_points = max(int(grid_chunk_points), min_grid_chunk_points)
+    single_theta = make_single_theta_predictive(
+        pop_model, settings, mgrid, qgrid, zgrid, chigrid, max_grid_points=grid_chunk_points
+    )
 
     pm1_list   = []
     pm2_list   = []
@@ -426,7 +456,28 @@ def posterior_predictive_mass_distributions_jax(
         end = min((i + 1) * batch_size, ns)
         batch = samples[start:end]
 
-        p1_batch, p2_batch, pq_batch, pz_batch, pchi_batch, p2d_batch = jax.vmap(single_theta)(batch)
+        while True:
+            try:
+                batch_outputs = [single_theta(batch[j]) for j in range(batch.shape[0])]
+                p1_batch, p2_batch, pq_batch, pz_batch, pchi_batch = [
+                    jnp.stack(parts, axis=0) for parts in zip(*batch_outputs)
+                ]
+                break
+            except RuntimeError as exc:
+                msg = str(exc).lower()
+                if "out of memory" not in msg and "resource_exhausted" not in msg:
+                    raise
+                if grid_chunk_points <= min_grid_chunk_points:
+                    raise
+                grid_chunk_points = max(min_grid_chunk_points, grid_chunk_points // 2)
+                print(
+                    "JAX ran out of memory during posterior predictive evaluation; "
+                    f"retrying with --grid_chunk_points={grid_chunk_points}."
+                )
+                single_theta = make_single_theta_predictive(
+                    pop_model, settings, mgrid, qgrid, zgrid, chigrid,
+                    max_grid_points=grid_chunk_points,
+                )
 
         pm1_list.append(p1_batch)
         pm2_list.append(p2_batch)
@@ -608,6 +659,8 @@ def main():
     parser.add_argument("--chimax", type=float, default=1.0)
 
     parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--grid_chunk_points", type=int, default=100_000,
+                        help="Maximum (m1, q, z, chi) grid points per population-model evaluation during PPD analysis.")
     parser.add_argument("--cred_lo", type=float, default=5.0)
     parser.add_argument("--cred_hi", type=float, default=95.0)
     args = parser.parse_args()
@@ -655,7 +708,8 @@ def main():
 
         pm1_samples, pm2_samples, pq_samples, pz_samples, pchi_samples = (
             posterior_predictive_mass_distributions_jax(
-                pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid, batch_size=args.batch_size
+                pop_model, settings, samples, mgrid, qgrid, zgrid, chigrid,
+                batch_size=args.batch_size, grid_chunk_points=args.grid_chunk_points
             )
         )
 
