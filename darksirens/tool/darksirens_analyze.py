@@ -199,48 +199,52 @@ def probe_device_memory_bytes(default_gb=4.0):
     return int(default_gb * 1e9), "fallback-default"
 
 
-def plan_ppd_sizing(nsamples, grid_points, n_nodes, max_mem_bytes,
+def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
                     safe_frac=0.4, batch_size=None, grid_chunk=None,
-                    dtype_bytes=8, n_live=16, batch_cap=64, chunk_floor=50_000):
-    """Choose ``(batch_size, grid_chunk)`` so the posterior-predictive peak
-    stays under ``safe_frac * max_mem_bytes``.
+                    dtype_bytes=8, n_live=16, batch_cap=64, slab_floor=8,
+                    full_grid_max=200_000):
+    """Choose ``(batch_size, slab_rows)`` for the slab-accumulation evaluator.
 
-    Memory model (per vmapped sample): the marginalization holds several live
-    grid-sized buffers, ``~ batch * grid_points * dtype * n_live`` (the
-    "reduction" phase); the density evaluation additionally holds the GP kernel
-    tensor ``(chunk * n_nodes)`` plus working buffers, ``~ batch * chunk *
-    dtype * (n_nodes + n_live)`` (the "eval" phase).  We size ``batch`` from the
-    reduction phase and ``grid_chunk`` from the eval phase; if a large GP node
-    count forces a tiny chunk we shrink ``batch`` (fewer chunks → faster).
+    The density is integrated over ``(z, chi)`` in slabs of ``slab_rows`` rows of
+    the flattened ``(m1, q)`` outer plane (``n_outer = nm*nq``); the per-step
+    working set is ``~ batch * slab_rows * nz * nchi * dtype * (n_nodes +
+    n_live)`` (the density slab + the GP kernel ``(pts x n_nodes)`` + a few
+    trapezoid buffers).  The marginals are tiny running accumulators, so the
+    full 4-D grid is never materialised and the memory model is a small,
+    *predictable* constant — unlike the legacy full-grid path, whose many
+    simultaneously-live grid-sized reduction buffers are what OOMs.
 
-    ``grid_chunk`` is returned as ``None`` when the whole grid fits in one piece
-    at the chosen batch (parametric models / small grids) — the caller then
-    takes the unchunked path, which is bit-identical to the legacy behaviour.
-    User-supplied ``batch_size`` / ``grid_chunk`` are honoured as-is.
+    Returns ``slab_rows=None`` for small grids (``grid_points <=
+    full_grid_max``) so the caller takes the cheaper full-grid path; otherwise a
+    concrete slab size.  ``batch_size`` / ``grid_chunk`` overrides are honoured
+    (``grid_chunk`` sets ``slab_rows`` directly).
     """
     budget = max(1.0, float(safe_frac) * float(max_mem_bytes))
-    gp = max(1, int(grid_points))
+    n_outer = max(1, int(n_outer))
+    plane = max(1, int(nz) * int(nchi))
+    grid_points = n_outer * plane
     nn = max(0, int(n_nodes))
 
     if batch_size is not None:
         b = max(1, int(batch_size))
     else:
-        b = int(budget // (gp * dtype_bytes * n_live))
-        b = max(1, min(b, batch_cap, int(nsamples)))
+        b = max(1, min(batch_cap, int(nsamples)))
 
     if grid_chunk is not None:
-        c = max(1, int(grid_chunk))
-        return b, (None if c >= gp else c)
+        return b, max(1, min(int(grid_chunk), n_outer))
 
-    def _chunk_for(bb):
-        return int(budget // max(bb * dtype_bytes * (nn + n_live), 1))
+    if grid_points <= full_grid_max:
+        return b, None                       # small grid: full path is cheap
 
-    c = _chunk_for(b)
-    while c < chunk_floor and b > 1:        # GP eval term too costly at this batch
+    def _slab_for(bb):
+        return int(budget // max(bb * plane * dtype_bytes * (nn + n_live), 1))
+
+    c = _slab_for(b)
+    while c < slab_floor and b > 1:          # GP eval term too costly at this batch
         b = max(1, b // 2)
-        c = _chunk_for(b)
-    c = max(1, min(c, gp))
-    return b, (None if c >= gp else c)
+        c = _slab_for(b)
+    c = max(1, min(c, n_outer))
+    return b, c
 
 
 def batched_map(fn, samples, batch_size):
@@ -272,18 +276,23 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
                                   grid_chunk=None):
     """Build a jit'd per-sample evaluator returning the PPD marginals + p(m1,m2).
 
-    The population density is evaluated on a flattened, equal-shape coordinate
-    grid (every coordinate is a 1-D array of length nm*nq*nz*nchi), so the
-    call satisfies the equal-shape requirement of the GP / binned-GP models'
-    ``log_p_pop`` as well as the natural broadcasting of the parametric models.
+    The density is integrated over ``(z, chi)`` to three small arrays — the
+    inner integrals
 
-    ``grid_chunk`` bounds peak memory: when set, the density is evaluated over
-    the flattened grid in chunks of ``grid_chunk`` points via ``lax.scan``
-    (mirroring the chunking idiom in ``inference/selection.py``), which caps the
-    GP kernel tensor ``(chunk x n_nodes)`` regardless of grid size.  The
-    assembled ``logp`` and all downstream marginalization are unchanged, so the
-    outputs are numerically identical (``grid_chunk=None`` is exactly the legacy
-    path).
+        I_c  = ∫ p dchi        shape (nm, nq, nz)
+        I_zc = ∫∫ p dz dchi     shape (nm, nq)
+        I_z  = ∫ p dz          shape (nm, nq, nchi)
+
+    from which every output marginal is a trivial outer ``(m1, q)`` integral.
+    All six outputs are bit-equivalent to the legacy full-tensor marginalization
+    (same integration order, up to floating-point reassociation).
+
+    ``grid_chunk`` bounds peak memory: when set, the ``(m1, q)`` outer plane is
+    processed in slabs of ``grid_chunk`` rows via ``lax.scan`` (mirroring
+    ``inference/selection.py``), so the density slab ``(slab, nz, nchi)`` and the
+    GP kernel ``(slab*nz*nchi, n_nodes)`` are the only large transients — the
+    full 4-D grid is never held.  ``grid_chunk=None`` keeps the simple full-grid
+    path (used for small grids, where it is cheap).
     """
     mgrid = jnp.asarray(mgrid)
     qgrid = jnp.asarray(qgrid)
@@ -291,23 +300,21 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
     chigrid = jnp.asarray(chigrid)
     nm, nq, nz, nchi = mgrid.size, qgrid.size, zgrid.size, chigrid.size
 
-    M1, Q, Z, CHI = jnp.meshgrid(mgrid, qgrid, zgrid, chigrid, indexing="ij")
-    m1f, qf, zf, chif = M1.ravel(), Q.ravel(), Z.ravel(), CHI.ravel()
-    Nq = int(m1f.size)
+    # Flattened (m1, q) outer plane: row r = i_m*nq + i_q.
+    n_outer = nm * nq
+    m1_row = jnp.repeat(mgrid, nq)
+    q_row = jnp.tile(qgrid, nm)
 
-    # Pre-pad the flattened grid to a multiple of the chunk size (pad with the
-    # last point, then trim ``logp`` back to ``Nq``); static shapes keep the
-    # scan/vmap happy.  Done once here, captured by the closure.
     if grid_chunk is not None:
         C = max(1, int(grid_chunk))
-        n_chunks = (Nq + C - 1) // C
-        Pq = n_chunks * C
-        pad = Pq - Nq
+        n_slabs = (n_outer + C - 1) // C
+        Pc = n_slabs * C
+        pad = Pc - n_outer
         if pad:
             _ext = lambda a: jnp.concatenate([a, jnp.repeat(a[-1:], pad)])
-            m1f_p, qf_p, zf_p, chif_p = _ext(m1f), _ext(qf), _ext(zf), _ext(chif)
+            m1_row_p, q_row_p = _ext(m1_row), _ext(q_row)
         else:
-            m1f_p, qf_p, zf_p, chif_p = m1f, qf, zf, chif
+            m1_row_p, q_row_p = m1_row, q_row
 
     # q→m2 interpolation geometry for the 2-D joint.
     q_eval = mgrid[None, :] / mgrid[:, None]
@@ -316,35 +323,58 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
 
     pop_extractor = make_pop_extractor(settings)
 
+    def _slab_integrals(m1c, qc, pop_theta):
+        """Integrate the density over (z, chi) for a slab of outer rows.
+
+        ``m1c``/``qc`` are (S,) outer-row coordinates; returns
+        ``(I_c (S,nz), I_zc (S,), I_z (S,nchi))``.  Built from the unbatched grid
+        constants and broadcast against the sampled ``pop_theta`` — the outer
+        vmap tracks the sample axis through the fixed-shape reshapes.
+        """
+        S = m1c.shape[0]
+        shp = (S, nz, nchi)
+        m1f = jnp.broadcast_to(m1c[:, None, None], shp).reshape(S * nz * nchi)
+        qf = jnp.broadcast_to(qc[:, None, None], shp).reshape(S * nz * nchi)
+        zf = jnp.broadcast_to(zgrid[None, :, None], shp).reshape(S * nz * nchi)
+        chif = jnp.broadcast_to(chigrid[None, None, :], shp).reshape(S * nz * nchi)
+        p = jnp.exp(pop_model(m1f, qf, zf, chif, pop_theta)).reshape(shp)
+        I_c = jnp.trapezoid(p, chigrid, axis=2)      # (S, nz)
+        I_zc = jnp.trapezoid(I_c, zgrid, axis=1)     # (S,)
+        I_z = jnp.trapezoid(p, zgrid, axis=1)        # (S, nchi)
+        return I_c, I_zc, I_z
+
     @jax.jit
     def single_theta(theta):
         pop_theta = pop_extractor(theta)
         if grid_chunk is None:
-            logp = pop_model(m1f, qf, zf, chif, pop_theta)
+            I_c, I_zc, I_z = _slab_integrals(m1_row, q_row, pop_theta)
         else:
-            def _eval_chunk(_carry, k):
+            def _body(_carry, k):
                 s = k * C
                 sl = lambda a: lax.dynamic_slice_in_dim(a, s, C)
-                lp = pop_model(sl(m1f_p), sl(qf_p), sl(zf_p), sl(chif_p), pop_theta)
-                return _carry, lp
-            _, lp_chunks = lax.scan(_eval_chunk, None, jnp.arange(n_chunks))
-            # Fixed-shape reshape (not -1) so the outer vmap can track the batch
-            # axis; trim the padding.
-            logp = lp_chunks.reshape(Pq)[:Nq]
-        p = jnp.exp(logp).reshape(nm, nq, nz, nchi)
+                return _carry, _slab_integrals(sl(m1_row_p), sl(q_row_p), pop_theta)
+            _, (I_c_s, I_zc_s, I_z_s) = lax.scan(_body, None, jnp.arange(n_slabs))
+            # Concatenate slabs and trim padding (fixed-shape reshapes keep the
+            # outer vmap valid).
+            I_c = I_c_s.reshape(Pc, nz)[:n_outer]
+            I_zc = I_zc_s.reshape(Pc)[:n_outer]
+            I_z = I_z_s.reshape(Pc, nchi)[:n_outer]
+        I_c = I_c.reshape(nm, nq, nz)
+        I_zc = I_zc.reshape(nm, nq)
+        I_z = I_z.reshape(nm, nq, nchi)
 
-        # 1-D marginals (integrate out the other three axes).
-        p_m1 = jnp.trapezoid(jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2), qgrid, axis=1)
+        # 1-D marginals: outer (m1, q) integrals of the inner (z, chi) integrals.
+        p_m1q = I_zc                                          # ∫∫ p dz dchi
+        p_m1 = jnp.trapezoid(p_m1q, qgrid, axis=1)
         p_m1 /= jnp.trapezoid(p_m1, mgrid)
-        p_q = jnp.trapezoid(jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2), mgrid, axis=0)
+        p_q = jnp.trapezoid(p_m1q, mgrid, axis=0)
         p_q /= jnp.trapezoid(p_q, qgrid)
-        p_z = jnp.trapezoid(jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), qgrid, axis=1), mgrid, axis=0)
+        p_z = jnp.trapezoid(jnp.trapezoid(I_c, qgrid, axis=1), mgrid, axis=0)
         p_z /= jnp.trapezoid(p_z, zgrid)
-        p_chi = jnp.trapezoid(jnp.trapezoid(jnp.trapezoid(p, zgrid, axis=2), qgrid, axis=1), mgrid, axis=0)
+        p_chi = jnp.trapezoid(jnp.trapezoid(I_z, qgrid, axis=1), mgrid, axis=0)
         p_chi /= jnp.trapezoid(p_chi, chigrid)
 
-        # 2-D joint p(m1, m2): marginalize chi, z → p(m1, q), map q→m2.
-        p_m1q = jnp.trapezoid(jnp.trapezoid(p, chigrid, axis=3), zgrid, axis=2)
+        # 2-D joint p(m1, m2): map q→m2 on p(m1, q).
         p_interp = jax.vmap(
             lambda row, qev: jnp.interp(qev, qgrid, row, left=0.0, right=0.0)
         )(p_m1q, q_eval)
@@ -372,8 +402,10 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
     automatic choices.
     """
     samples = jnp.asarray(samples)
-    grid_points = int(mgrid.size * qgrid.size * zgrid.size * chigrid.size)
-    # GP inducing-node count (drives the (chunk x M) eval cost); 0 for parametric.
+    nm, nq, nz, nchi = mgrid.size, qgrid.size, zgrid.size, chigrid.size
+    n_outer = int(nm * nq)
+    grid_points = int(nm * nq * nz * nchi)
+    # GP inducing-node count (drives the (pts x M) eval cost); 0 for parametric.
     n_nodes = int(getattr(getattr(pop_model, "__self__", None), "M", 0) or 0)
 
     if max_mem_gb is not None:
@@ -385,14 +417,15 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
         max_mem_bytes, mem_src = probe_device_memory_bytes()
 
     batch_size, grid_chunk = plan_ppd_sizing(
-        samples.shape[0], grid_points, n_nodes, max_mem_bytes,
+        samples.shape[0], n_outer, nz, nchi, n_nodes, max_mem_bytes,
         safe_frac=mem_safe_frac, batch_size=batch_size, grid_chunk=grid_chunk,
     )
-    est_peak_gb = batch_size * grid_points * 8 * 16 / 1e9
+    slab_pts = (grid_chunk if grid_chunk is not None else n_outer) * nz * nchi
+    est_peak_gb = batch_size * slab_pts * 8 * (n_nodes + 16) / 1e9
     print(
         f"    [ppd] grid={grid_points:,} pts  GP_nodes={n_nodes}  "
         f"mem={max_mem_bytes / 1e9:.1f}GB ({mem_src})  batch={batch_size}  "
-        f"grid_chunk={grid_chunk if grid_chunk is not None else 'full'}  "
+        f"slab_rows={grid_chunk if grid_chunk is not None else 'full'}  "
         f"~peak={est_peak_gb:.1f}GB"
     )
 

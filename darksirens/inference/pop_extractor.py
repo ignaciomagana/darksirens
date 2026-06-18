@@ -46,7 +46,7 @@ def make_pop_extractor(settings: dict):
             shared_spin=shared_spin,
             shared_gamma=shared_gamma,
         )
-        _pop_lower, _pop_upper, pop_labels, _model_name = pop_model_prior_parser(
+        _pop_lower, _pop_upper, pop_labels, _pop_kinds, _model_name = pop_model_prior_parser(
             pop_model_name,
             shared_beta=shared_beta,
             shared_spin=shared_spin,
