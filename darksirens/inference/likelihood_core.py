@@ -18,7 +18,7 @@ from darksirens.inference.selection import compute_selection_term, selection_log
 from darksirens.inference.utils import log_sample_weight
 from darksirens.sky import sky_model_parser
 from darksirens.utils.containers import CosmoParams, EMCatalog, GWEvent, SurveyParams
-from darksirens.utils.cosmology import dL_in_z_grid
+from darksirens.utils.cosmology import dL_in_z_grid, z_of_dL
 
 
 @partial(
@@ -74,8 +74,13 @@ def darksiren_log_likelihood(
     # the isotropic path adds nothing to the compute graph.
     apply_sky = sky_model != "isotropic"
     log_g_sky = sky_model_parser(sky_model)
+    # The sky factor g(n̂, z) may depend on redshift (3-D models); the selection
+    # closure derives z from dL with the SAME cosmology as the PE term, so the
+    # detector-anisotropy cancellation between the two is preserved.
     sky_log_weight_fn = (
-        (lambda nx, ny, nz: log_g_sky(nx, ny, nz, sky_params)) if apply_sky else None
+        (lambda nx, ny, nz, dL: log_g_sky(
+            nx, ny, nz, z_of_dL(dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa), sky_params
+        )) if apply_sky else None
     )
     selection_model = (
         "spectral_sirens" if universe_model == "bright_sirens" else universe_model
@@ -176,9 +181,12 @@ def darksiren_log_likelihood(
             sl(gw_pe.prior_wt),
             catalog_ev,
         )
-        # Angular factor log g(n̂) per sample (skipped entirely when isotropic).
+        # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
         if apply_sky:
-            ldw = ldw + log_g_sky(sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), sky_params)
+            z_ev = z_of_dL(dL_ev, H0, Om0, w0, wa)
+            ldw = ldw + log_g_sky(
+                sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
+            )
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
         return None, -jnp.log(nsamp) + logsumexp(ldw)
 

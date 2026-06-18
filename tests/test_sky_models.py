@@ -42,7 +42,9 @@ def _random_unit_vectors(n, seed=0):
 # --------------------------------------------------------------------------
 
 def test_registry_names_and_unknown():
-    assert set(SKY_MODEL_NAMES) == {"isotropic", "dipole", "sphere_gp"}
+    assert set(SKY_MODEL_NAMES) == {
+        "isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp"
+    }
     for name in SKY_MODEL_NAMES:
         assert get_sky_model(name) is not None
     # cached: same object
@@ -79,21 +81,24 @@ def test_param_counts_and_kinds():
 
 def test_isotropic_is_zero():
     nx, ny, nz = _random_unit_vectors(64)
-    log_g = sky_model_parser("isotropic")(nx, ny, nz, jnp.array([]))
+    z = jnp.zeros_like(nx)
+    log_g = sky_model_parser("isotropic")(nx, ny, nz, z, jnp.array([]))
     np.testing.assert_allclose(np.asarray(log_g), 0.0, atol=0.0)
 
 
 def test_dipole_matches_closed_form_and_positivity():
     log_g_sky = sky_model_parser("dipole")
     nx, ny, nz = _random_unit_vectors(256, seed=1)
+    z = jnp.zeros_like(nx)
     d = jnp.array([0.3, -0.2, 0.1])
     g = 1.0 + nx * d[0] + ny * d[1] + nz * d[2]
     np.testing.assert_allclose(
-        np.asarray(log_g_sky(nx, ny, nz, d)), np.asarray(jnp.log(g)), rtol=1e-6
+        np.asarray(log_g_sky(nx, ny, nz, z, d)), np.asarray(jnp.log(g)), rtol=1e-6
     )
     # antipodal point of a unit-amplitude dipole has g = 0 -> -inf
     dunit = jnp.array([1.0, 0.0, 0.0])
-    log_g_anti = log_g_sky(jnp.array([-1.0]), jnp.array([0.0]), jnp.array([0.0]), dunit)
+    log_g_anti = log_g_sky(jnp.array([-1.0]), jnp.array([0.0]), jnp.array([0.0]),
+                           jnp.array([0.0]), dunit)
     assert not np.isfinite(np.asarray(log_g_anti)[0])
 
 
@@ -103,7 +108,7 @@ def test_dipole_is_mean_one_over_sphere():
     log_g_sky = sky_model_parser("dipole")
     nx, ny, nz = _random_unit_vectors(200_000, seed=2)
     d = jnp.array([0.4, 0.0, 0.0])
-    g = jnp.exp(log_g_sky(nx, ny, nz, d))
+    g = jnp.exp(log_g_sky(nx, ny, nz, jnp.zeros_like(nx), d))
     assert abs(float(jnp.mean(g)) - 1.0) < 5e-3
 
 
@@ -111,18 +116,18 @@ def test_dipole_fiducial_is_isotropic():
     nx, ny, nz = _random_unit_vectors(32)
     theta = get_fixed_sky_params("dipole")
     np.testing.assert_allclose(np.asarray(theta), 0.0)
-    log_g = sky_model_parser("dipole")(nx, ny, nz, theta)
+    log_g = sky_model_parser("dipole")(nx, ny, nz, jnp.zeros_like(nx), theta)
     np.testing.assert_allclose(np.asarray(log_g), 0.0, atol=1e-12)
 
 
 # --------------------------------------------------------------------------
-# sphere GP (needs tinygp)
+# Angular sphere GP
 # --------------------------------------------------------------------------
 
 def test_sphere_gp_fiducial_is_isotropic():
     nx, ny, nz = _random_unit_vectors(48, seed=3)
     theta = get_fixed_sky_params("sphere_gp")  # xi = 0 -> f = 0 -> g = 1
-    log_g = sky_model_parser("sphere_gp")(nx, ny, nz, theta)
+    log_g = sky_model_parser("sphere_gp")(nx, ny, nz, jnp.zeros_like(nx), theta)
     np.testing.assert_allclose(np.asarray(log_g), 0.0, atol=1e-6)
 
 
@@ -137,9 +142,81 @@ def test_sphere_gp_is_mean_one_on_quadrature():
     xi = rng.normal(size=M)
     theta = jnp.asarray(np.concatenate([[log_amp, log_ls], xi]))
     Zq = model._Zq
-    log_g = model.log_g_sky(Zq[:, 0], Zq[:, 1], Zq[:, 2], theta)
+    z = jnp.zeros(Zq.shape[0])
+    log_g = model.log_g_sky(Zq[:, 0], Zq[:, 1], Zq[:, 2], z, theta)
     # by construction g is normalised by its mean over exactly these points
     assert abs(float(jnp.mean(jnp.exp(log_g))) - 1.0) < 1e-6
+
+
+# --------------------------------------------------------------------------
+# 3-D (sphere × z) GP models: sphere_gp_z (per-shell) & overdensity_gp (global)
+# --------------------------------------------------------------------------
+
+def _gp3d_random_theta(model, seed):
+    """Mid hyperparameters + random whitened latents for a (sphere × z) model."""
+    rng = np.random.default_rng(seed)
+    specs = model.param_specs
+    hyper = [0.5 * (s.low + s.high) for s in specs[:3]]   # log_amp, log_ls_sphere, log_ls_z
+    xi = rng.normal(size=model._M)
+    return jnp.asarray(np.concatenate([hyper, xi]))
+
+
+@pytest.mark.parametrize("name", ["sphere_gp_z", "overdensity_gp"])
+def test_gp3d_param_contract(name):
+    model = get_sky_model(name)
+    M = model._M
+    assert M == model._M_sph * model._M_z
+    lows, highs, labels, kinds, _latex = sky_model_prior_parser(name)
+    assert len(labels) == len(lows) == len(highs) == len(kinds) == 3 + M
+    assert all(k[0] == "uniform" for k in kinds[:3])          # log_amp, ls_sphere, ls_z
+    assert all(k == ("normal", 0.0, 1.0) for k in kinds[3:])  # whitened latents
+    names = [s.name for s in model.param_specs]
+    assert {"sky_log_amp", "sky_log_ls_sphere", "sky_log_ls_z"} <= set(names)
+    assert sum(n.startswith("sky_xi_") for n in names) == M
+
+
+@pytest.mark.parametrize("name", ["sphere_gp_z", "overdensity_gp"])
+def test_gp3d_fiducial_is_isotropic_at_all_z(name):
+    # xi = 0 -> f = 0 -> g = 1 for ANY redshift (incl. NaN passes through).
+    nx, ny, nz = _random_unit_vectors(40, seed=5)
+    theta = get_fixed_sky_params(name)
+    log_g_sky = sky_model_parser(name)
+    for z_val in (0.0, 0.3, 1.0, 2.5):
+        z = jnp.full(nx.shape[0], z_val)
+        log_g = log_g_sky(nx, ny, nz, z, theta)
+        np.testing.assert_allclose(np.asarray(log_g), 0.0, atol=1e-6)
+    # NaN z -> non-finite log_g (dropped downstream), never a bogus finite value
+    z_nan = jnp.array([float("nan")] * nx.shape[0])
+    log_g_nan = np.asarray(log_g_sky(nx, ny, nz, z_nan, theta))
+    assert not np.any(np.isfinite(log_g_nan))
+
+
+def test_sphere_gp_z_is_mean_one_per_shell():
+    # Per-z-shell normalisation: at a z that is a normalisation-grid node, the
+    # sphere mean of g is exactly 1 (interpolation returns the node value).
+    model = get_sky_model("sphere_gp_z")
+    theta = _gp3d_random_theta(model, seed=6)
+    Zq = model._Zq
+    for k in (1, len(model._zg) // 2, len(model._zg) - 2):
+        z0 = float(model._zg[k])
+        z = jnp.full(Zq.shape[0], z0)
+        g = jnp.exp(model.log_g_sky(Zq[:, 0], Zq[:, 1], Zq[:, 2], z, theta))
+        assert abs(float(jnp.mean(g)) - 1.0) < 1e-5
+
+
+def test_overdensity_gp_is_mean_one_over_volume():
+    # Global normalisation: the volume-weighted (sphere × z-grid) mean of g is 1.
+    model = get_sky_model("overdensity_gp")
+    theta = _gp3d_random_theta(model, seed=7)
+    Zq = model._Zq
+    w = np.exp(np.asarray(model._log_vol_w))            # (Nzg,) normalised z weights
+    shell_means = []
+    for k in range(len(model._zg)):
+        z = jnp.full(Zq.shape[0], float(model._zg[k]))
+        g = jnp.exp(model.log_g_sky(Zq[:, 0], Zq[:, 1], Zq[:, 2], z, theta))
+        shell_means.append(float(jnp.mean(g)))
+    vol_mean = float(np.sum(w * np.array(shell_means)))
+    assert abs(vol_mean - 1.0) < 1e-4
 
 
 # --------------------------------------------------------------------------
@@ -233,6 +310,21 @@ def test_sphere_gp_posterior_map_shape():
     m = sphere_gp_posterior_map(samples, labels, nside=nside, max_draws=5)
     assert m.shape[0] == hp.nside2npix(nside)
     np.testing.assert_allclose(m, 1.0, atol=1e-5)  # isotropic params -> g = 1
+
+
+def test_gp3d_posterior_map_z_slice_shape():
+    hp = pytest.importorskip("healpy")
+    from darksirens.sky.analyze import sphere_gp_posterior_map
+
+    model = get_sky_model("sphere_gp_z")
+    labels = [s.label for s in model.param_specs]
+    theta = np.asarray(get_fixed_sky_params("sphere_gp_z"))
+    samples = np.tile(theta, (3, 1))
+    nside = 8
+    m = sphere_gp_posterior_map(samples, labels, nside=nside, max_draws=3,
+                                sky_model="sphere_gp_z", z_slice=0.5)
+    assert m.shape[0] == hp.nside2npix(nside)
+    np.testing.assert_allclose(m, 1.0, atol=1e-5)  # fiducial -> g = 1 at any z
 
 
 @pytest.mark.parametrize("universe_model", ["spectral_sirens", "dark_sirens", "dark_sirens_complete"])

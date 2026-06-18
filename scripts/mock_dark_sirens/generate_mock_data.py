@@ -236,19 +236,19 @@ def _draw_events_until_detected(
     grids: dict[str, np.ndarray],
     pop: PopulationConfig,
     snr_threshold: float,
-    sky_dipole: np.ndarray | None = None,
+    sky_weight_fn=None,
+    sky_g_max: float = 1.0,
 ) -> dict[str, np.ndarray]:
     """Draw detected events from the host catalog.
 
-    When ``sky_dipole`` (a Cartesian vector ``d``, ``|d| < 1``) is given, the
-    detected sources follow a dipole-modulated rate ``g(n̂) = 1 + n̂·d`` via
-    rejection on the host direction.  The host galaxy catalog and the selection
-    injection set stay isotropic, so this injects a *pure source-rate* dipole
-    for validating the sky model (recoverable even in GW-only mode).
+    When ``sky_weight_fn(nx, ny, nz, z)`` is given, the detected sources follow a
+    rate-modulated 3-D field ``g(n̂, z)`` via rejection on the host direction and
+    redshift (accept ∝ ``g / sky_g_max``).  The host galaxy catalog and the
+    selection injection set stay isotropic, so this injects a *pure source-rate*
+    over-density for validating the sky models (recoverable even in GW-only
+    mode).  ``sky_g_max`` must upper-bound ``g`` over the sampled domain.
     """
     kept: list[dict[str, np.ndarray]] = []
-    dvec = None if sky_dipole is None else np.asarray(sky_dipole, dtype=float)
-    g_max = 1.0 + float(np.linalg.norm(dvec)) if dvec is not None else 1.0
     while sum(len(x["z"]) for x in kept) < nobs:
         ntry = max(4 * nobs, 256)
         host_idx = rng.integers(0, len(catalog["z"]), ntry)
@@ -262,12 +262,12 @@ def _draw_events_until_detected(
         chi = _sample_chieff(rng, ntry, pop)
         snr = _network_snr(m1, m2, z, dl, rng)
         det = snr >= snr_threshold
-        if dvec is not None:
+        if sky_weight_fn is not None:
             nx = np.cos(dec) * np.cos(ra)
             ny = np.cos(dec) * np.sin(ra)
             nz = np.sin(dec)
-            g = 1.0 + nx * dvec[0] + ny * dvec[1] + nz * dvec[2]
-            accept = rng.uniform(size=len(ra)) < np.clip(g / g_max, 0.0, 1.0)
+            g = sky_weight_fn(nx, ny, nz, z)
+            accept = rng.uniform(size=len(ra)) < np.clip(g / sky_g_max, 0.0, 1.0)
             det = det & accept
         if np.any(det):
             kept.append({k: v[det] for k, v in dict(z=z, ra=ra, dec=dec, dl=dl, m1=m1, m2=m2, q=q, chi=chi, snr=snr).items()})
@@ -421,21 +421,78 @@ def write_mock_data(args: argparse.Namespace) -> None:
         complete["ra"][observed], complete["dec"][observed], complete["z"][observed], zerr[observed], weights, args.nside
     )
 
-    sky_dipole = None
-    if float(getattr(args, "sky_dipole_amp", 0.0)) != 0.0:
+    # Build the injected 3-D source-rate field g(n̂, z) as a product of optional
+    # factors: a (possibly z-evolving) dipole and a localized (ra, dec, z0) blob.
+    # Selection injections stay isotropic; only the detected events are reweighted.
+    sky_factors = []
+    sky_g_max = 1.0
+    injected_sky: dict = {}
+
+    dip_amp = float(getattr(args, "sky_dipole_amp", 0.0))
+    if dip_amp != 0.0:
         ra_d = np.deg2rad(args.sky_dipole_ra_deg)
         dec_d = np.deg2rad(args.sky_dipole_dec_deg)
-        dhat = np.array([
+        dvec = dip_amp * np.array([
             np.cos(dec_d) * np.cos(ra_d),
             np.cos(dec_d) * np.sin(ra_d),
             np.sin(dec_d),
         ])
-        sky_dipole = float(args.sky_dipole_amp) * dhat
+        z_pivot = getattr(args, "sky_dipole_z_pivot", None)
+
+        def _g_dipole(nx, ny, nz, z, dvec=dvec, z_pivot=z_pivot):
+            # w(z) ramps 0→1 over [0, z_pivot] (constant dipole when z_pivot=None).
+            w = 1.0 if z_pivot is None else np.clip(z / z_pivot, 0.0, 1.0)
+            return 1.0 + w * (nx * dvec[0] + ny * dvec[1] + nz * dvec[2])
+
+        sky_factors.append(_g_dipole)
+        sky_g_max *= 1.0 + dip_amp
+        injected_sky["dipole"] = {
+            "d": [float(x) for x in dvec],
+            "z_pivot": None if z_pivot is None else float(z_pivot),
+        }
         if args.verbose:
-            print(f"Injecting source-rate sky dipole d={sky_dipole.tolist()} (|d|={args.sky_dipole_amp:g}).")
+            print(f"Injecting dipole d={dvec.tolist()} z_pivot={z_pivot}.")
+
+    blob_amp = float(getattr(args, "sky_blob_amp", 0.0))
+    if blob_amp != 0.0:
+        ra_b = np.deg2rad(args.sky_blob_ra_deg)
+        dec_b = np.deg2rad(args.sky_blob_dec_deg)
+        n0 = np.array([
+            np.cos(dec_b) * np.cos(ra_b),
+            np.cos(dec_b) * np.sin(ra_b),
+            np.sin(dec_b),
+        ])
+        sigma_ang = np.deg2rad(args.sky_blob_sigma_deg)
+        z0, sigma_z = float(args.sky_blob_z0), float(args.sky_blob_sigma_z)
+
+        def _g_blob(nx, ny, nz, z, n0=n0, B=blob_amp, sa=sigma_ang, z0=z0, sz=sigma_z):
+            cosang = np.clip(nx * n0[0] + ny * n0[1] + nz * n0[2], -1.0, 1.0)
+            ang = np.arccos(cosang)
+            return 1.0 + B * np.exp(-0.5 * (ang / sa) ** 2 - 0.5 * ((z - z0) / sz) ** 2)
+
+        sky_factors.append(_g_blob)
+        sky_g_max *= 1.0 + blob_amp
+        injected_sky["blob"] = {
+            "amp": blob_amp, "ra_deg": args.sky_blob_ra_deg,
+            "dec_deg": args.sky_blob_dec_deg, "z0": z0,
+            "sigma_deg": args.sky_blob_sigma_deg, "sigma_z": sigma_z,
+        }
+        if args.verbose:
+            print(f"Injecting 3-D blob amp={blob_amp:g} at "
+                  f"(ra,dec,z0)=({args.sky_blob_ra_deg},{args.sky_blob_dec_deg},{z0}).")
+
+    if sky_factors:
+        def sky_weight_fn(nx, ny, nz, z, _factors=tuple(sky_factors)):
+            g = np.ones_like(np.asarray(z, dtype=float))
+            for fkt in _factors:
+                g = g * fkt(nx, ny, nz, z)
+            return g
+    else:
+        sky_weight_fn = None
 
     truth = _draw_events_until_detected(
-        rng, args.nobs, complete, grids, pop, args.snr_threshold, sky_dipole=sky_dipole
+        rng, args.nobs, complete, grids, pop, args.snr_threshold,
+        sky_weight_fn=sky_weight_fn, sky_g_max=sky_g_max,
     )
     post = _posterior_samples(
         rng,
@@ -521,8 +578,9 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["shared_spin"] = True
         f.attrs["shared_gamma"] = True
         f.attrs["injected_sky_dipole"] = json.dumps(
-            None if sky_dipole is None else [float(x) for x in sky_dipole]
+            injected_sky.get("dipole", {}).get("d")  # back-compat: dipole vector or None
         )
+        f.attrs["injected_sky"] = json.dumps(injected_sky or None)
         f.attrs["metadata_json"] = json.dumps(metadata)
         for key, val in post.items():
             f.create_dataset(key, data=val, compression="gzip", shuffle=True)
@@ -605,6 +663,22 @@ def parse_args() -> argparse.Namespace:
                         help="Right ascension (deg) of the injected sky-dipole direction.")
     parser.add_argument("--sky-dipole-dec-deg", type=float, default=0.0,
                         help="Declination (deg) of the injected sky-dipole direction.")
+    parser.add_argument("--sky-dipole-z-pivot", type=_positive_float, default=None,
+                        help="If set, the dipole amplitude ramps as min(z/z_pivot, 1) "
+                             "(z-evolving dipole = a 3-D structure); unset = constant dipole.")
+    parser.add_argument("--sky-blob-amp", type=float, default=0.0,
+                        help="Inject a localized 3-D over-density g=1+B*exp(-ang^2/2sig^2 "
+                             "-(z-z0)^2/2sigz^2) into the detected events; 0 = none.")
+    parser.add_argument("--sky-blob-ra-deg", type=float, default=0.0,
+                        help="Right ascension (deg) of the injected 3-D blob centre.")
+    parser.add_argument("--sky-blob-dec-deg", type=float, default=0.0,
+                        help="Declination (deg) of the injected 3-D blob centre.")
+    parser.add_argument("--sky-blob-z0", type=_positive_float, default=0.5,
+                        help="Redshift centre z0 of the injected 3-D blob.")
+    parser.add_argument("--sky-blob-sigma-deg", type=_positive_float, default=15.0,
+                        help="Angular width (deg) of the injected 3-D blob.")
+    parser.add_argument("--sky-blob-sigma-z", type=_positive_float, default=0.1,
+                        help="Redshift width of the injected 3-D blob.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     if args.n0 is None and args.n_galaxies is None:

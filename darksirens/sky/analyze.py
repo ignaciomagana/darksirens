@@ -81,22 +81,26 @@ def summarize_dipole_posterior(samples, labels, quantiles=(0.05, 0.5, 0.95)):
     }
 
 
-def sphere_gp_posterior_map(samples, labels, nside=16, max_draws=200):
-    """Posterior-mean angular density ``g(n̂)`` of a ``sphere_gp`` run as a
-    HEALPix map (RING ordering), suitable for ``healpy.mollview``.
+def sphere_gp_posterior_map(samples, labels, nside=16, max_draws=200,
+                            sky_model="sphere_gp", z_slice=None):
+    """Posterior-mean sky density ``g(n̂)`` (or ``g(n̂, z_slice)`` for the 3-D
+    models) of a GP-sky run as a HEALPix map (RING ordering), for
+    ``healpy.mollview``.
 
     Averages ``g`` over up to ``max_draws`` posterior samples evaluated at the
-    HEALPix pixel centres.  Imports ``jax``/``healpy`` lazily.
+    HEALPix pixel centres.  ``z_slice=None`` evaluates at z=0 (angular models
+    ignore z); for ``sphere_gp_z`` / ``overdensity_gp`` pass a redshift to map a
+    distance shell.  Imports ``jax``/``healpy`` lazily.
     """
     import healpy as hp
     import jax.numpy as jnp
 
-    idx = _sky_column_indices(labels, "sphere_gp")
-    model = get_sky_model("sphere_gp")
+    idx = _sky_column_indices(labels, sky_model)
+    model = get_sky_model(sky_model)
     names = [s.name for s in model.param_specs]
     missing = set(names) - set(idx)
     if missing:
-        raise KeyError(f"sphere_gp parameters not found in labels: {sorted(missing)}")
+        raise KeyError(f"{sky_model} parameters not found in labels: {sorted(missing)}")
     cols = [idx[n] for n in names]
 
     samples = np.asarray(samples)
@@ -110,10 +114,11 @@ def sphere_gp_posterior_map(samples, labels, nside=16, max_draws=200):
     ny = jnp.asarray(np.sin(theta) * np.sin(phi))
     nz = jnp.asarray(np.cos(theta))
 
+    z_arr = jnp.zeros(npix) if z_slice is None else jnp.full(npix, float(z_slice))
     acc = np.zeros(npix)
     for row in samples:
         theta_sky = jnp.asarray(row[cols])
-        acc += np.asarray(jnp.exp(model.log_g_sky(nx, ny, nz, theta_sky)))
+        acc += np.asarray(jnp.exp(model.log_g_sky(nx, ny, nz, z_arr, theta_sky)))
     return acc / len(samples)
 
 
@@ -168,18 +173,22 @@ def plot_dipole_posterior(samples, labels, figsize=(11.0, 4.5)):
     return fig
 
 
-def plot_sphere_gp_map(samples, labels, nside=16, max_draws=200):
-    """Mollweide HEALPix map of the posterior-mean ``sphere_gp`` density
-    ``g(n̂)``.  Returns a matplotlib Figure.  Imports ``healpy`` lazily."""
+def plot_sphere_gp_map(samples, labels, nside=16, max_draws=200,
+                       sky_model="sphere_gp", z_slice=None):
+    """Mollweide HEALPix map of the posterior-mean sky density ``g(n̂)`` (or
+    ``g(n̂, z_slice)`` for the 3-D models).  Returns a matplotlib Figure.  Imports
+    ``healpy`` lazily."""
     import matplotlib.pyplot as plt
     import healpy as hp
 
-    m = sphere_gp_posterior_map(samples, labels, nside=nside, max_draws=max_draws)
+    m = sphere_gp_posterior_map(samples, labels, nside=nside, max_draws=max_draws,
+                                sky_model=sky_model, z_slice=z_slice)
+    zlabel = "" if z_slice is None else rf" at $z={float(z_slice):.2f}$"
     fig = plt.figure(figsize=(8.0, 5.0))
     hp.mollview(
         m,
         fig=fig.number,
-        title=r"Posterior-mean sky density $g(\hat n)$",
+        title=rf"Posterior-mean sky density $g(\hat n)${zlabel}",
         unit=r"$g(\hat n)$",
         cmap="RdBu_r",
         min=float(np.min(m)),

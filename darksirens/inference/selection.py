@@ -170,11 +170,13 @@ def compute_selection_term(
         If not None, process injections in chunks via ``lax.scan`` to
         limit peak GPU memory.  Non-divisible inputs are padded internally;
         padded rows have ``valid == False`` and contribute zero weight.
-    sky_log_weight_fn : callable(nx, ny, nz) → array or None
-        Optional angular factor ``log g(n̂)`` added to each injection's log
+    sky_log_weight_fn : callable(nx, ny, nz, dL) → array or None
+        Optional sky factor ``log g(n̂, z)`` added to each injection's log
         importance weight (the same factor applied to the PE term), so the
-        selection integral reweights ``μ`` consistently.  ``None`` (default)
-        leaves the integral sky-agnostic — the isotropic / legacy behaviour.
+        selection integral reweights ``μ`` consistently.  ``dL`` is passed so the
+        closure can derive the redshift ``z`` for 3-D ``g(n̂, z)`` models with the
+        same cosmology as the PE term.  ``None`` (default) leaves the integral
+        sky-agnostic — the isotropic / legacy behaviour.
 
     Returns
     -------
@@ -184,7 +186,7 @@ def compute_selection_term(
     def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b, nx_b, ny_b, nz_b):
         ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b, em_catalog_sel)
         if sky_log_weight_fn is not None:
-            ldw = ldw + sky_log_weight_fn(nx_b, ny_b, nz_b)
+            ldw = ldw + sky_log_weight_fn(nx_b, ny_b, nz_b, dL_b)
         valid = valid_b & (pwt_b > 0.0)
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
         return logsumexp(ldw), logsumexp(2.0 * ldw)
