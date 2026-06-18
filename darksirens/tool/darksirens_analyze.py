@@ -93,18 +93,44 @@ def _merge_hdf5_metadata(settings, h5_file):
     return merged
 
 
+
+def _find_hdf5_samples_dataset(h5_file):
+    """Return the dataset path for posterior samples in supported HDF5 layouts."""
+    candidates = (
+        "samples",
+        "posterior/samples",
+        "results/samples",
+        "posterior_samples",
+    )
+    for candidate in candidates:
+        if candidate in h5_file and isinstance(h5_file[candidate], h5py.Dataset):
+            return candidate
+    return None
+
+
+def _first_hdf5_attr(h5_file, *names):
+    """Return the first available attribute from common evidence-name aliases."""
+    for name in names:
+        if name in h5_file.attrs:
+            return h5_file.attrs[name]
+    return None
+
 def _load_run_hdf5(run_dir):
     path = os.path.join(run_dir, "results.hdf5")
     settings = _load_settings(run_dir)
 
     with h5py.File(path, "r") as f:
-        if "samples" not in f:
-            raise KeyError(f"{path} does not contain a 'samples' dataset")
+        samples_path = _find_hdf5_samples_dataset(f)
+        if samples_path is None:
+            raise KeyError(
+                f"{path} does not contain posterior samples; expected a 'samples' "
+                "dataset at the file root or in a posterior/results group"
+            )
 
-        samples = f["samples"][()]
+        samples = f[samples_path][()]
         settings = _merge_hdf5_metadata(settings, f)
-        logZ = f.attrs.get("logZ", None)
-        logZerr = f.attrs.get("logZerr", None)
+        logZ = _first_hdf5_attr(f, "logZ", "log_evidence", "logz")
+        logZerr = _first_hdf5_attr(f, "logZerr", "log_evidence_err", "logzerr")
 
     if logZ is not None:
         logZ = float(logZ)
@@ -428,6 +454,73 @@ def summarize_ppd(ppd_samples, limits=(5, 95)):
     return median, lower, upper
 
 
+def plot_parameter_corner(samples_list, labels, parameter_labels_list, max_parameters=6, figsize_per_panel=2.8):
+    """Plot 1D/2D posterior marginals for sampled parameters shared by all runs."""
+    if not samples_list or not parameter_labels_list:
+        return None
+
+    common = list(parameter_labels_list[0])
+    for labs in parameter_labels_list[1:]:
+        labset = set(labs)
+        common = [lab for lab in common if lab in labset]
+    if not common:
+        return None
+
+    chosen = common[:max_parameters]
+    ndim = len(chosen)
+    fig, axes = plt.subplots(
+        ndim, ndim, figsize=(figsize_per_panel * ndim, figsize_per_panel * ndim), squeeze=False
+    )
+
+    for row in range(ndim):
+        for col in range(ndim):
+            ax = axes[row, col]
+            if col > row:
+                ax.axis("off")
+                continue
+            for i, (samples, run_labels) in enumerate(zip(samples_list, parameter_labels_list)):
+                color = c[i % len(c)]
+                idx_x = run_labels.index(chosen[col])
+                x = np.asarray(samples[:, idx_x], dtype=float)
+                if row == col:
+                    ax.hist(x, bins=40, density=True, histtype="step", color=color, lw=1.8)
+                else:
+                    idx_y = run_labels.index(chosen[row])
+                    y = np.asarray(samples[:, idx_y], dtype=float)
+                    ax.scatter(x, y, s=4, alpha=0.12, color=color, rasterized=True)
+            if row == ndim - 1:
+                ax.set_xlabel(chosen[col], fontsize=12)
+            else:
+                ax.set_xticklabels([])
+            if col == 0 and row > 0:
+                ax.set_ylabel(chosen[row], fontsize=12)
+            elif col != 0:
+                ax.set_yticklabels([])
+            ax.tick_params(labelsize=9)
+
+    handles = [Line2D([0], [0], color=c[i % len(c)], lw=2) for i in range(len(labels))]
+    fig.legend(handles, labels, loc="upper right", frameon=False, fontsize=12)
+    fig.suptitle("Posterior parameter marginals", y=0.995, fontsize=16)
+    fig.tight_layout(rect=(0, 0, 0.94, 0.98))
+    return fig
+
+
+def plot_ppd_moment_summary(metric_names, median_matrix, labels, ylabel, figsize=(10, 6)):
+    """Plot scalar summaries of posterior-predictive distributions across runs."""
+    fig, ax = plt.subplots(figsize=figsize)
+    xs = np.arange(len(metric_names))
+    width = 0.8 / max(1, len(labels))
+    for i, label in enumerate(labels):
+        offset = (i - 0.5 * (len(labels) - 1)) * width
+        ax.bar(xs + offset, median_matrix[i], width=width, label=label, color=c[i % len(c)], alpha=0.85)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(metric_names, rotation=20, ha="right")
+    ax.set_ylabel(ylabel)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    return fig
+
+
 def plot_1d_spectrum(
     xgrid,
     ppd_list,
@@ -529,6 +622,9 @@ def main():
     pq_list    = []
     pz_list    = []
     pchi_list  = []
+    sample_list = []
+    parameter_labels_list = []
+    ppd_mean_rows = []
     labels     = []
     logZs      = []
     logZerrs   = []
@@ -546,13 +642,13 @@ def main():
             shared_gamma=bool(settings.get("shared_gamma", True)),
         )
 
-        # Convert to log10 if available
+        # Convert to log10 if available; preserve missing evidence as None.
         if logZ is not None:
             log10Z = logZ / np.log(10.0)
-            log10Zerr = logZerr / np.log(10.0) if logZerr is not None else None
+            log10Zerr = logZerr / np.log(10.0) if logZerr is not None else 0.0
         else:
-            log10Z = 0.0
-            log10Zerr = 0.0
+            log10Z = None
+            log10Zerr = None
 
         logZs.append(log10Z)
         logZerrs.append(log10Zerr)
@@ -570,6 +666,19 @@ def main():
         pz_med,  pz_lo,  pz_hi  = summarize_ppd(pz_samples,  limits)
         pchi_med, pchi_lo, pchi_hi = summarize_ppd(pchi_samples, limits)
 
+        parameter_labels = list(settings.get("labels", []))
+        if parameter_labels and len(parameter_labels) == samples.shape[1]:
+            sample_list.append(np.asarray(samples))
+            parameter_labels_list.append(parameter_labels)
+
+        ppd_mean_rows.append([
+            float(jnp.trapezoid(mgrid * pm1_med, mgrid)),
+            float(jnp.trapezoid(mgrid * pm2_med, mgrid)),
+            float(jnp.trapezoid(qgrid * pq_med, qgrid)),
+            float(jnp.trapezoid(zgrid * pz_med, zgrid)),
+            float(jnp.trapezoid(chigrid * pchi_med, chigrid)),
+        ])
+
         # Store summaries as tuples for plotting
         pm1_list.append((pm1_med, pm1_lo, pm1_hi))
         pm2_list.append((pm2_med, pm2_lo, pm2_hi))
@@ -578,7 +687,7 @@ def main():
         pchi_list.append((pchi_med, pchi_lo, pchi_hi))
 
         # Free GPU memory
-        del pm1_samples, pm2_samples, pq_samples, pz_samples
+        del pm1_samples, pm2_samples, pq_samples, pz_samples, pchi_samples
         jax.clear_caches()
 
         model_label = settings.get("model_name", os.path.basename(run_dir))
@@ -647,16 +756,35 @@ def main():
     )
     fig_chi.savefig("pchi_all_models.pdf")
 
+    fig_corner = plot_parameter_corner(sample_list, labels, parameter_labels_list)
+    if fig_corner is not None:
+        fig_corner.savefig("posterior_parameter_corner.pdf")
+
+    if ppd_mean_rows:
+        fig_moments = plot_ppd_moment_summary(
+            [r"$E[m_1]$", r"$E[m_2]$", r"$E[q]$", r"$E[z]$", r"$E[\chi_\mathrm{eff}]$"],
+            np.asarray(ppd_mean_rows), labels, "Posterior-predictive median mean"
+        )
+        fig_moments.savefig("ppd_median_means.pdf")
+
     # ------------------------------------------------------------
     # Evidence comparison (separate figure)
     # ------------------------------------------------------------
     if any(z is not None for z in logZs):
-        fig_ev = plot_model_evidences(labels, logZs, logZerrs)
+        evidence_items = [(label, z, ze or 0.0) for label, z, ze in zip(labels, logZs, logZerrs) if z is not None]
+        fig_ev = plot_model_evidences(
+            [item[0] for item in evidence_items],
+            [item[1] for item in evidence_items],
+            [item[2] for item in evidence_items],
+        )
         fig_ev.savefig("model_evidences.pdf")
 
         print("\n=== Model Evidences ===")
         for label, z, ze in zip(labels, logZs, logZerrs):
-            print(f"{label:20s} log10Z = {z} ± {ze}")
+            if z is None:
+                print(f"{label:20s} log10Z = unavailable")
+            else:
+                print(f"{label:20s} log10Z = {z} ± {ze}")
 
         print_bayes_factors(labels, logZs)
     else:

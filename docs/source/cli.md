@@ -87,7 +87,7 @@ darksirens_inference \
 
 ## `darksirens_analyze`
 
-Analyze saved inference products and compute posterior-predictive summaries. The analyzer reads the current `results.hdf5` output format and still supports legacy `samples.npy` runs.
+Analyze saved inference products and compute posterior-predictive summaries. The analyzer reads the current `results.hdf5` output format (including root-level or grouped posterior samples) and still supports legacy `samples.npy` runs.
 
 ```bash
 darksirens_analyze [--run_dirs RUN_DIR [RUN_DIR ...]] [--mmin 1] [--mmax 100] [--nm 300]
