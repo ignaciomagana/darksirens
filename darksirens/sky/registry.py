@@ -15,21 +15,31 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from .models import IsotropicSky, DipoleSky, SphereGPSky
+from .models import (
+    IsotropicSky,
+    DipoleSky,
+    SphereGPSky,
+    SphereZGPSky,
+    OverdensityGP3D,
+)
 
 #: Canonical sky-model names (``isotropic`` is the default / null model).
-SKY_MODEL_NAMES = ("isotropic", "dipole", "sphere_gp")
+SKY_MODEL_NAMES = ("isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp")
 
 _SKY_FACTORIES = {
     "isotropic": IsotropicSky,
     "dipole": DipoleSky,
     "sphere_gp": SphereGPSky,
+    "sphere_gp_z": SphereZGPSky,
+    "overdensity_gp": OverdensityGP3D,
 }
 
 SKY_MODEL_LATEX = {
     "isotropic": r"\text{Isotropic}",
     "dipole": r"\text{Dipole}",
     "sphere_gp": r"\text{Sphere GP}",
+    "sphere_gp_z": r"\text{Sphere GP }(\hat n, z)",
+    "overdensity_gp": r"\text{3D Overdensity GP}",
 }
 
 _SKY_REGISTRY: dict = {}

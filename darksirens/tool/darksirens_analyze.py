@@ -752,10 +752,18 @@ def main():
                     fig = plot_dipole_posterior(samples, run_labels)
                     fig.savefig(out(f"sky_dipole_{tag}.pdf"), bbox_inches="tight", dpi=300)
                     plt.close(fig)
-                elif sky_model == "sphere_gp":
-                    fig = plot_sphere_gp_map(samples, run_labels, nside=args.sky_nside)
-                    fig.savefig(out(f"sky_gp_map_{tag}.pdf"), bbox_inches="tight", dpi=300)
-                    plt.close(fig)
+                elif sky_model in ("sphere_gp", "sphere_gp_z", "overdensity_gp"):
+                    # Angular model → one map; 3-D models → a few z-shell maps.
+                    z_slices = [None] if sky_model == "sphere_gp" else [0.1, 0.5, 1.0]
+                    for zs in z_slices:
+                        fig = plot_sphere_gp_map(
+                            samples, run_labels, nside=args.sky_nside,
+                            sky_model=sky_model, z_slice=zs,
+                        )
+                        suffix = "" if zs is None else f"_z{zs:.2f}".replace(".", "p")
+                        fig.savefig(out(f"sky_gp_map_{tag}{suffix}.pdf"),
+                                    bbox_inches="tight", dpi=300)
+                        plt.close(fig)
             except (KeyError, ImportError) as exc:
                 print(f"  [sky] skipped sky plot for {tag}: {exc}")
 
