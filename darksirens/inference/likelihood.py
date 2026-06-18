@@ -59,6 +59,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     shared_gamma = bool(getattr(opts, "shared_gamma", True))
     universe_model = opts.universe_model
     sel_batch_size = getattr(opts, "sel_batch_size", None)
+    sky_model = getattr(opts, "sky_model", "isotropic")
     counterpart_pixel = data.get("counterpart_pixel")
     counterpart_pixels = (
         barrier(jnp.asarray(data["counterpart_pixels"], dtype=jnp.int32))
@@ -94,6 +95,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     p_pe = barrier(_to_jax(data, "p_pe"))
     pixels_pe = catalogs.sample_to_unique_pe
     q_pe = barrier(m2det_pe / m1det_pe)
+    nx_pe = barrier(_to_jax(data, "nx_pe"))
+    ny_pe = barrier(_to_jax(data, "ny_pe"))
+    nz_pe = barrier(_to_jax(data, "nz_pe"))
 
     m1det_sel = barrier(_to_jax(data, "m1detsels"))
     m2det_sel = barrier(_to_jax(data, "m2detsels"))
@@ -102,6 +106,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     p_draw = barrier(_to_jax(data, "p_draw"))
     pixels_sel = catalogs.sample_to_unique_sel
     q_sel = barrier(m2det_sel / m1det_sel)
+    nx_sel = barrier(_to_jax(data, "nx_sel"))
+    ny_sel = barrier(_to_jax(data, "ny_sel"))
+    nz_sel = barrier(_to_jax(data, "nz_sel"))
 
     parameter_decoder = build_parameter_decoder(
         opts,
@@ -110,7 +117,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     )
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
-        cosmo, survey, pop_params = parameter_decoder.decode(coord)
+        cosmo, survey, pop_params, sky_params = parameter_decoder.decode(coord)
 
         em_catalog_pe = EMCatalog(
             apix=apix,
@@ -158,6 +165,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             pixels=pixels_pe,
             q=q_pe,
             valid=jnp.ones_like(dL_pe, dtype=bool),
+            nx=nx_pe,
+            ny=ny_pe,
+            nz=nz_pe,
         )
         gw_sel = GWEvent(
             m1det=m1det_sel,
@@ -168,6 +178,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             pixels=pixels_sel,
             q=q_sel,
             valid=jnp.ones_like(dL_sel, dtype=bool),
+            nx=nx_sel,
+            ny=ny_sel,
+            nz=nz_sel,
         )
         if sel_batch_size is not None:
             gw_sel, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
@@ -187,6 +200,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 pop_model,
                 universe_model,
                 sel_batch_size=sel_batch_size,
+                sky_model=sky_model,
+                sky_params=sky_params,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -205,6 +220,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             shared_spin=shared_spin,
             shared_gamma=shared_gamma,
             sel_batch_size=sel_batch_size,
+            sky_model=sky_model,
+            sky_params=sky_params,
         )
 
     return likelihood

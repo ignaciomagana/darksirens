@@ -80,6 +80,7 @@ def make_pop_extractor(settings: dict):
         _model_name,
         _fixed_parameter_statuses,
         _prior_kinds,
+        _sky_labels,
     ) = build_parameter_space(
         pop_model              = pop_model_name,
         fix_population         = fix_population,
@@ -93,6 +94,7 @@ def make_pop_extractor(settings: dict):
         shared_beta            = shared_beta,
         shared_spin            = shared_spin,
         shared_gamma           = shared_gamma,
+        sky_model              = settings.get("sky_model", "isotropic"),
     )
 
     label_to_coord_idx = {label: idx for idx, label in enumerate(labels)}

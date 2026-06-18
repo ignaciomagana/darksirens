@@ -214,6 +214,21 @@ def load_all_data(opts):
     pixels_pe = hp.ang2pix(nside, jnp.pi/2 - dec, ra)
     pixels_sel = hp.ang2pix(nside, jnp.pi/2 - decsels, rasels)
 
+    # Sky-direction unit vectors n̂ = (cos δ cos α, cos δ sin α, sin δ), retained
+    # per sample for the angular/sky model.  Unlike ``pixels`` (whose resolution
+    # collapses to nside=1 with no survey), these give the sky model full
+    # angular resolution in every universe model, including GW-only runs.
+    nx_pe, ny_pe, nz_pe = (
+        jnp.cos(dec) * jnp.cos(ra),
+        jnp.cos(dec) * jnp.sin(ra),
+        jnp.sin(dec),
+    )
+    nx_sel, ny_sel, nz_sel = (
+        jnp.cos(decsels) * jnp.cos(rasels),
+        jnp.cos(decsels) * jnp.sin(rasels),
+        jnp.sin(decsels),
+    )
+
     if zgals is not None:
         required_pixels = (
             counterpart_pixels
@@ -261,6 +276,9 @@ def load_all_data(opts):
         chieff=chieff,
         p_pe=p_pe,
         pixels_pe=jnp.asarray(pixels_pe),
+        nx_pe=jnp.asarray(nx_pe),
+        ny_pe=jnp.asarray(ny_pe),
+        nz_pe=jnp.asarray(nz_pe),
         zgals_pe=zgals_pe,
         dzgals_pe=dzgals_pe,
         wgals_pe=wgals_pe,
@@ -275,6 +293,9 @@ def load_all_data(opts):
         chieffsels=chieffsels,
         p_draw=p_draw,
         pixels_sel=jnp.asarray(pixels_sel),
+        nx_sel=jnp.asarray(nx_sel),
+        ny_sel=jnp.asarray(ny_sel),
+        nz_sel=jnp.asarray(nz_sel),
         zgals_sel=zgals_sel,
         dzgals_sel=dzgals_sel,
         wgals_sel=wgals_sel,

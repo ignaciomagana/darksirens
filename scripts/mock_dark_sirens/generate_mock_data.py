@@ -236,8 +236,19 @@ def _draw_events_until_detected(
     grids: dict[str, np.ndarray],
     pop: PopulationConfig,
     snr_threshold: float,
+    sky_dipole: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
+    """Draw detected events from the host catalog.
+
+    When ``sky_dipole`` (a Cartesian vector ``d``, ``|d| < 1``) is given, the
+    detected sources follow a dipole-modulated rate ``g(n̂) = 1 + n̂·d`` via
+    rejection on the host direction.  The host galaxy catalog and the selection
+    injection set stay isotropic, so this injects a *pure source-rate* dipole
+    for validating the sky model (recoverable even in GW-only mode).
+    """
     kept: list[dict[str, np.ndarray]] = []
+    dvec = None if sky_dipole is None else np.asarray(sky_dipole, dtype=float)
+    g_max = 1.0 + float(np.linalg.norm(dvec)) if dvec is not None else 1.0
     while sum(len(x["z"]) for x in kept) < nobs:
         ntry = max(4 * nobs, 256)
         host_idx = rng.integers(0, len(catalog["z"]), ntry)
@@ -251,6 +262,13 @@ def _draw_events_until_detected(
         chi = _sample_chieff(rng, ntry, pop)
         snr = _network_snr(m1, m2, z, dl, rng)
         det = snr >= snr_threshold
+        if dvec is not None:
+            nx = np.cos(dec) * np.cos(ra)
+            ny = np.cos(dec) * np.sin(ra)
+            nz = np.sin(dec)
+            g = 1.0 + nx * dvec[0] + ny * dvec[1] + nz * dvec[2]
+            accept = rng.uniform(size=len(ra)) < np.clip(g / g_max, 0.0, 1.0)
+            det = det & accept
         if np.any(det):
             kept.append({k: v[det] for k, v in dict(z=z, ra=ra, dec=dec, dl=dl, m1=m1, m2=m2, q=q, chi=chi, snr=snr).items()})
     out = {k: np.concatenate([x[k] for x in kept])[:nobs] for k in kept[0]}
@@ -403,7 +421,22 @@ def write_mock_data(args: argparse.Namespace) -> None:
         complete["ra"][observed], complete["dec"][observed], complete["z"][observed], zerr[observed], weights, args.nside
     )
 
-    truth = _draw_events_until_detected(rng, args.nobs, complete, grids, pop, args.snr_threshold)
+    sky_dipole = None
+    if float(getattr(args, "sky_dipole_amp", 0.0)) != 0.0:
+        ra_d = np.deg2rad(args.sky_dipole_ra_deg)
+        dec_d = np.deg2rad(args.sky_dipole_dec_deg)
+        dhat = np.array([
+            np.cos(dec_d) * np.cos(ra_d),
+            np.cos(dec_d) * np.sin(ra_d),
+            np.sin(dec_d),
+        ])
+        sky_dipole = float(args.sky_dipole_amp) * dhat
+        if args.verbose:
+            print(f"Injecting source-rate sky dipole d={sky_dipole.tolist()} (|d|={args.sky_dipole_amp:g}).")
+
+    truth = _draw_events_until_detected(
+        rng, args.nobs, complete, grids, pop, args.snr_threshold, sky_dipole=sky_dipole
+    )
     post = _posterior_samples(
         rng,
         truth,
@@ -487,6 +520,9 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["shared_beta"] = True
         f.attrs["shared_spin"] = True
         f.attrs["shared_gamma"] = True
+        f.attrs["injected_sky_dipole"] = json.dumps(
+            None if sky_dipole is None else [float(x) for x in sky_dipole]
+        )
         f.attrs["metadata_json"] = json.dumps(metadata)
         for key, val in post.items():
             f.create_dataset(key, data=val, compression="gzip", shuffle=True)
@@ -562,6 +598,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--m2det-fractional-uncertainty", type=_positive_float, default=0.10)
     parser.add_argument("--chieff-uncertainty", type=_positive_float, default=0.08)
     parser.add_argument("--sky-uncertainty-deg", type=_positive_float, default=None)
+    parser.add_argument("--sky-dipole-amp", type=float, default=0.0,
+                        help="Inject a source-rate dipole |d| in [0,1) into the detected events "
+                             "(g(n)=1+n.d); 0 (default) leaves the sky isotropic.")
+    parser.add_argument("--sky-dipole-ra-deg", type=float, default=0.0,
+                        help="Right ascension (deg) of the injected sky-dipole direction.")
+    parser.add_argument("--sky-dipole-dec-deg", type=float, default=0.0,
+                        help="Declination (deg) of the injected sky-dipole direction.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     if args.n0 is None and args.n_galaxies is None:

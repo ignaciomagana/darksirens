@@ -145,6 +145,7 @@ def compute_selection_term(
     Ndraw: float,
     nEvents: int,
     sel_batch_size: int | None = None,
+    sky_log_weight_fn=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
     Estimate log μ and N_eff from the injection set.
@@ -169,14 +170,21 @@ def compute_selection_term(
         If not None, process injections in chunks via ``lax.scan`` to
         limit peak GPU memory.  Non-divisible inputs are padded internally;
         padded rows have ``valid == False`` and contribute zero weight.
+    sky_log_weight_fn : callable(nx, ny, nz) → array or None
+        Optional angular factor ``log g(n̂)`` added to each injection's log
+        importance weight (the same factor applied to the PE term), so the
+        selection integral reweights ``μ`` consistently.  ``None`` (default)
+        leaves the integral sky-agnostic — the isotropic / legacy behaviour.
 
     Returns
     -------
     log_mu : scalar — log of the selection integral estimate
     Neff   : scalar — effective sample size
     """
-    def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b):
+    def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b, nx_b, ny_b, nz_b):
         ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b, em_catalog_sel)
+        if sky_log_weight_fn is not None:
+            ldw = ldw + sky_log_weight_fn(nx_b, ny_b, nz_b)
         valid = valid_b & (pwt_b > 0.0)
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
         return logsumexp(ldw), logsumexp(2.0 * ldw)
@@ -191,6 +199,9 @@ def compute_selection_term(
             gw_sel.pixels,
             gw_sel.prior_wt,
             gw_sel.valid,
+            gw_sel.nx,
+            gw_sel.ny,
+            gw_sel.nz,
         )
     else:
         # --- Batched via lax.scan ---
@@ -202,6 +213,10 @@ def compute_selection_term(
         def _scan_fn(_, batch_idx):
             start = batch_idx * sel_batch_size
             sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, sel_batch_size)
+            if sky_log_weight_fn is not None:
+                nx_b, ny_b, nz_b = sl(gw_sel.nx), sl(gw_sel.ny), sl(gw_sel.nz)
+            else:
+                nx_b = ny_b = nz_b = None
             lse_b, lse2_b = _batch_lse(
                 sl(gw_sel.dL),
                 sl(gw_sel.m1det),
@@ -210,6 +225,9 @@ def compute_selection_term(
                 sl(gw_sel.pixels),
                 sl(gw_sel.prior_wt),
                 sl(gw_sel.valid),
+                nx_b,
+                ny_b,
+                nz_b,
             )
             return None, (lse_b, lse2_b)
 

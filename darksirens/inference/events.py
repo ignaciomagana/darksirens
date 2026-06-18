@@ -56,6 +56,9 @@ def make_gw_event(
     prior_wt,
     pixels,
     valid=None,
+    nx=None,
+    ny=None,
+    nz=None,
 ) -> GWEvent:
     """
     Construct a ``GWEvent`` with barrier-wrapped arrays and pre-computed ``q``.
@@ -76,6 +79,11 @@ def make_gw_event(
         Explicit structural mask.  Defaults to all True; padding helpers set
         padded entries to False so downstream log-sum-exp code can reject
         them without relying on physical sentinel values.
+    nx, ny, nz : array-like, optional
+        Sky-direction unit-vector components per sample (the angular analog of
+        ``dL``).  Default to zeros when unspecified — harmless, because they are
+        only read by an anisotropic sky model; an isotropic run never touches
+        them.
 
     Returns
     -------
@@ -97,6 +105,11 @@ def make_gw_event(
     valid_b   = _barrier(jnp.asarray(valid, dtype=bool))
     q_b       = _barrier(m2det_b / m1det_b)
 
+    def _sky(v):
+        if v is None:
+            return _barrier(jnp.zeros_like(dL_b))
+        return _barrier(jnp.asarray(v, dtype=jnp.float64))
+
     return GWEvent(
         m1det    = m1det_b,
         m2det    = m2det_b,
@@ -106,6 +119,9 @@ def make_gw_event(
         pixels   = pixels_b,
         q        = q_b,
         valid    = valid_b,
+        nx       = _sky(nx),
+        ny       = _sky(ny),
+        nz       = _sky(nz),
     )
 
 
@@ -161,5 +177,9 @@ def pad_gw_event_to_multiple(
         prior_wt = _pad1d(event.prior_wt, fill=fill_prior_wt),
         pixels   = _pad1d(event.pixels.astype(np.int32), fill=0),
         valid    = _pad1d(event.valid,    fill=False),
+        # Sky direction: pad with a finite placeholder (masked out by valid).
+        nx       = _pad1d(event.nx, fill=0.0) if event.nx is not None else None,
+        ny       = _pad1d(event.ny, fill=0.0) if event.ny is not None else None,
+        nz       = _pad1d(event.nz, fill=0.0) if event.nz is not None else None,
     )
     return padded, pad
