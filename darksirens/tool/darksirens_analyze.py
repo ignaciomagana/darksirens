@@ -442,6 +442,7 @@ def posterior_predictive_mass_distributions_jax(
     single_theta = make_single_theta_predictive(
         pop_model, settings, mgrid, qgrid, zgrid, chigrid, max_grid_points=grid_chunk_points
     )
+    batched_theta = jax.jit(jax.vmap(single_theta))
 
     pm1_list   = []
     pm2_list   = []
@@ -458,10 +459,7 @@ def posterior_predictive_mass_distributions_jax(
 
         while True:
             try:
-                batch_outputs = [single_theta(batch[j]) for j in range(batch.shape[0])]
-                p1_batch, p2_batch, pq_batch, pz_batch, pchi_batch = [
-                    jnp.stack(parts, axis=0) for parts in zip(*batch_outputs)
-                ]
+                p1_batch, p2_batch, pq_batch, pz_batch, pchi_batch = batched_theta(batch)
                 break
             except RuntimeError as exc:
                 msg = str(exc).lower()
@@ -478,6 +476,7 @@ def posterior_predictive_mass_distributions_jax(
                     pop_model, settings, mgrid, qgrid, zgrid, chigrid,
                     max_grid_points=grid_chunk_points,
                 )
+                batched_theta = jax.jit(jax.vmap(single_theta))
 
         pm1_list.append(p1_batch)
         pm2_list.append(p2_batch)
