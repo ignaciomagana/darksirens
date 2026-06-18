@@ -111,6 +111,17 @@ def _to_coord(axis: str, m1, q, chi, z):
     raise ValueError(f"unknown axis {axis!r}")
 
 
+def _broadcast_logp_inputs(m1, q, z, chieff):
+    """Broadcast population-model inputs and flatten query axes for GP evaluation."""
+    m1, q, z, chi = jnp.broadcast_arrays(
+        jnp.asarray(m1, dtype=float),
+        jnp.asarray(q, dtype=float),
+        jnp.asarray(z, dtype=float),
+        jnp.asarray(chieff, dtype=float),
+    )
+    out_shape = m1.shape
+    return m1.ravel(), q.ravel(), z.ravel(), chi.ravel(), out_shape
+
 def _axis_phys_grid(axis: str):
     """Normalisation grid (physical units) for a probability axis."""
     if axis == "m1":
@@ -316,10 +327,7 @@ class JointGPPopulation:
     # -- evaluation --------------------------------------------------------
 
     def log_p_pop(self, m1, q, z, chieff, theta):
-        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
-        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
-        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
-        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
+        m1, q, z, chi, out_shape = _broadcast_logp_inputs(m1, q, z, chieff)
 
         # ---- unpack theta in param_specs order ----
         m_min, dm_min, m_max, dm_max = theta[0], theta[1], theta[2], theta[3]
@@ -369,7 +377,7 @@ class JointGPPopulation:
 
         p = p_gp * p_base
         log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
-        return log_p + (gamma - 1.0) * jnp.log1p(z)
+        return (log_p + (gamma - 1.0) * jnp.log1p(z)).reshape(out_shape)
 
     # -- tapers / cut, applied identically to density and normalisation ----
 
@@ -533,10 +541,7 @@ class AdditiveGPPopulation:
 
     def log_p_pop(self, m1, q, z, chieff, theta):
         import jax
-        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
-        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
-        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
-        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
+        m1, q, z, chi, out_shape = _broadcast_logp_inputs(m1, q, z, chieff)
         N = m1.shape[0]
 
         m_min, dm_min, m_max, dm_max = theta[0], theta[1], theta[2], theta[3]
@@ -590,7 +595,7 @@ class AdditiveGPPopulation:
         norm = jnp.exp(jnp.interp(z, zg, jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
         log_p_src = (jnp.log(jnp.where(pun > 0, pun, _LOGSAFE))
                      - jnp.log(jnp.where(norm > 0, norm, 1.0)))
-        return log_p_src + (gamma - 1.0) * jnp.log1p(z)
+        return (log_p_src + (gamma - 1.0) * jnp.log1p(z)).reshape(out_shape)
 
     def _taper_cut(self, m1, q, m_min, dm_min, m_max, dm_max):
         s = sfilter_low(m1, m_min, dm_min) * sfilter_high(m1, m_max, dm_max)
