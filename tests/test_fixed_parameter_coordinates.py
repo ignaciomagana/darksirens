@@ -127,9 +127,12 @@ def test_fixed_parameters_are_removed_from_sampler_coordinates_and_likelihood(mo
         pop_model,
         universe_model,
         sel_batch_size=None,
+        sky_model="isotropic",
+        sky_params=None,
     ):
         del gw_pe, em_catalog_pe, gw_sel, em_catalog_sel
         del nEvents, nsamp, Ndraw, pop_model, universe_model, sel_batch_size
+        del sky_model, sky_params
         return jnp.asarray(
             cosmo.H0 + cosmo.Om0 + cosmo.w0 + cosmo.wa + survey.z50 + jnp.sum(pop_params)
         )

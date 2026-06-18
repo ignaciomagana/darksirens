@@ -483,6 +483,8 @@ def _build_parser():
     p.add_argument("--cred_hi", type=float, default=95.0)
     p.add_argument("--overlay_events", action="store_true",
                    help="Overlay observed detector-frame m1 medians on p(m1).")
+    p.add_argument("--sky_nside", type=int, default=16,
+                   help="HEALPix nside for the sphere_gp posterior sky map.")
     p.add_argument("--outdir", default=".", help="Directory for output figures.")
     return p
 
@@ -550,6 +552,37 @@ def main():
                 tag = os.path.basename(os.path.normpath(run_dir)) or "run"
                 fig.savefig(out(f"latents_{tag}.pdf"), bbox_inches="tight", dpi=300)
                 plt.close(fig)
+
+        # Sky-anisotropy summaries — only when an anisotropic sky model was run
+        # (gated on the ``sky_model`` flag stored in the run's hdf5/settings).
+        sky_model = str(settings.get("sky_model", "isotropic"))
+        if sky_model != "isotropic" and run_labels:
+            tag = os.path.basename(os.path.normpath(run_dir)) or "run"
+            from darksirens.sky.analyze import (
+                summarize_dipole_posterior,
+                plot_dipole_posterior,
+                plot_sphere_gp_map,
+            )
+            try:
+                if sky_model == "dipole":
+                    summ = summarize_dipole_posterior(samples, run_labels)
+                    amp = summ["amplitude_quantiles"]
+                    d = summ["mean_direction_deg"]
+                    print(
+                        f"  sky dipole |d| (5/50/95%) = "
+                        f"{amp[0.05]:.3f}/{amp[0.5]:.3f}/{amp[0.95]:.3f}; "
+                        f"dir (ra,dec)deg = ({d['ra']:.1f}, {d['dec']:.1f}); "
+                        f"P(|d|<0.05) = {summ['P_amp_lt_0.05']:.2f}"
+                    )
+                    fig = plot_dipole_posterior(samples, run_labels)
+                    fig.savefig(out(f"sky_dipole_{tag}.pdf"), bbox_inches="tight", dpi=300)
+                    plt.close(fig)
+                elif sky_model == "sphere_gp":
+                    fig = plot_sphere_gp_map(samples, run_labels, nside=args.sky_nside)
+                    fig.savefig(out(f"sky_gp_map_{tag}.pdf"), bbox_inches="tight", dpi=300)
+                    plt.close(fig)
+            except (KeyError, ImportError) as exc:
+                print(f"  [sky] skipped sky plot for {tag}: {exc}")
 
         labels.append(settings.get("model_name", os.path.basename(os.path.normpath(run_dir))))
         del p_m1, p_m2, p_q, p_z, p_chi, p_m1m2

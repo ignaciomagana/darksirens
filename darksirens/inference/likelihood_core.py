@@ -16,6 +16,7 @@ from darksirens.em.prior import (
 from darksirens.gw.populations import pop_model_parser
 from darksirens.inference.selection import compute_selection_term, selection_log_correction
 from darksirens.inference.utils import log_sample_weight
+from darksirens.sky import sky_model_parser
 from darksirens.utils.containers import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import dL_in_z_grid
 
@@ -31,6 +32,7 @@ from darksirens.utils.cosmology import dL_in_z_grid
         "shared_gamma",
         "universe_model",
         "sel_batch_size",
+        "sky_model",
     ],
 )
 def darksiren_log_likelihood(
@@ -50,13 +52,30 @@ def darksiren_log_likelihood(
     shared_spin: bool = True,
     shared_gamma: bool = True,
     sel_batch_size: int | None = None,
+    sky_model: str = "isotropic",
+    sky_params: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-    """Return ``log p({d_i} | cosmo, survey, pop_params)``."""
+    """Return ``log p({d_i} | cosmo, survey, pop_params)``.
+
+    The angular (sky) model contributes a factor ``g(n̂)`` to the source rate via
+    ``log_g_sky``.  It is applied identically to the per-event PE term and the
+    selection integral, so an isotropically-drawn injection set reweights ``μ``
+    by the same ``g(n̂)`` and the detector's own anisotropy divides out.  When
+    ``sky_model == "isotropic"`` the factor is skipped entirely (static branch),
+    so the result is bit-for-bit identical to the sky-free likelihood.
+    """
     log_p_pop = pop_model_parser(
         pop_model=pop_model,
         shared_beta=shared_beta,
         shared_spin=shared_spin,
         shared_gamma=shared_gamma,
+    )
+    # Angular factor g(n̂).  ``apply_sky`` is a Python bool (static under jit), so
+    # the isotropic path adds nothing to the compute graph.
+    apply_sky = sky_model != "isotropic"
+    log_g_sky = sky_model_parser(sky_model)
+    sky_log_weight_fn = (
+        (lambda nx, ny, nz: log_g_sky(nx, ny, nz, sky_params)) if apply_sky else None
     )
     selection_model = (
         "spectral_sirens" if universe_model == "bright_sirens" else universe_model
@@ -138,6 +157,7 @@ def darksiren_log_likelihood(
         Ndraw,
         nEvents,
         sel_batch_size=sel_batch_size,
+        sky_log_weight_fn=sky_log_weight_fn,
     )
     ll = selection_log_correction(log_mu, Neff, nEvents)
 
@@ -156,6 +176,9 @@ def darksiren_log_likelihood(
             sl(gw_pe.prior_wt),
             catalog_ev,
         )
+        # Angular factor log g(n̂) per sample (skipped entirely when isotropic).
+        if apply_sky:
+            ldw = ldw + log_g_sky(sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), sky_params)
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
         return None, -jnp.log(nsamp) + logsumexp(ldw)
 

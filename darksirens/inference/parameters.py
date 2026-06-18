@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from astropy.cosmology import Planck15
 
 from darksirens.inference.prior import build_parameter_space, resolve_parameter_values
+from darksirens.sky import get_fixed_sky_params
 from darksirens.utils.containers import CosmoParams, SurveyParams
 
 H0_FID = float(Planck15.H0.value)
@@ -40,9 +41,11 @@ class ParameterDecoder:
     survey_labels: tuple[str, ...]
     pop_params_fid: tuple[float, ...]
     complete_empty_pixel_policy: int
+    sky_labels: tuple[str, ...] = ()
+    sky_params_fid: tuple[float, ...] = ()
 
     def decode(self, coord: jnp.ndarray):
-        """Return ``(cosmo, survey, pop_params)`` for sampler coordinate ``coord``."""
+        """Return ``(cosmo, survey, pop_params, sky_params)`` for ``coord``."""
         coord = jnp.asarray(coord)
         values = resolve_parameter_values(
             coord, self.sampled_labels, self.fixed_parameter_values
@@ -66,6 +69,12 @@ class ParameterDecoder:
             for i, label in enumerate(self.survey_labels)
         ])
 
+        # Sky parameter sub-vector (empty for the isotropic model).
+        sky_params = jnp.array([
+            _get(label, self.sky_params_fid[i])
+            for i, label in enumerate(self.sky_labels)
+        ])
+
         cosmo = CosmoParams(H0=H0, Om0=Om0, w0=w0, wa=wa)
         survey = SurveyParams(
             n0=10.0 ** sp[0],
@@ -77,7 +86,7 @@ class ParameterDecoder:
             sigma_kde=sp[6],
             complete_empty_pixel_policy=self.complete_empty_pixel_policy,
         )
-        return cosmo, survey, pop_params
+        return cosmo, survey, pop_params, sky_params
 
 
 def build_parameter_decoder(
@@ -91,6 +100,7 @@ def build_parameter_decoder(
     fixed_parameter_values = {
         label: float(value) for label, value in fixed_parameter_values.items()
     }
+    sky_model = getattr(opts, "sky_model", "isotropic")
     (
         sampled_labels,
         _lower,
@@ -104,6 +114,7 @@ def build_parameter_decoder(
         _model_name,
         _fixed_parameter_statuses,
         _prior_kinds,
+        sky_labels,
     ) = build_parameter_space(
         opts.pop_model,
         opts.fix_population,
@@ -116,6 +127,7 @@ def build_parameter_decoder(
         shared_beta=getattr(opts, "shared_beta", True),
         shared_spin=getattr(opts, "shared_spin", True),
         shared_gamma=getattr(opts, "shared_gamma", True),
+        sky_model=sky_model,
     )
 
     return ParameterDecoder(
@@ -127,4 +139,6 @@ def build_parameter_decoder(
         complete_empty_pixel_policy=complete_empty_pixel_policy_code(
             getattr(opts, "complete_empty_pixel_policy", "zero")
         ),
+        sky_labels=tuple(sky_labels),
+        sky_params_fid=tuple(float(v) for v in get_fixed_sky_params(sky_model)),
     )

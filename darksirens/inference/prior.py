@@ -1,5 +1,6 @@
 import numpy as np
 from darksirens.gw.populations import pop_model_prior_parser
+from darksirens.sky import sky_model_prior_parser
 from darksirens.utils.cosmology import (
     Om0PriorLower,
     Om0PriorUpper,
@@ -126,8 +127,9 @@ def build_parameter_space(
     shared_beta=True,
     shared_spin=True,
     shared_gamma=True,
+    sky_model="isotropic",
 ):
-    """Construct labels and prior bounds for cosmological, population, and survey parameters.
+    """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
     Parameters
     ----------
@@ -167,8 +169,13 @@ def build_parameter_space(
     survey_lower = [-4.0, 0.05, 0.02, -3.0, 0.0, 0.0, 0.0]
     survey_upper = [-1.0, 4.5, 1.5, 3.0, 3.0, 1.0, 0.05]
 
+    # --- Sky (angular source distribution) ---
+    # Appended after the survey block; ``isotropic`` contributes no parameters.
+    sky_lower, sky_upper, sky_labels, sky_kinds, _sky_latex = sky_model_prior_parser(sky_model)
+    sky_lower, sky_upper = list(sky_lower), list(sky_upper)
+
     # Make sure all prior override keys are valid parameter labels
-    known_labels = set(cosmo_labels) | set(pop_labels) | set(survey_labels)
+    known_labels = set(cosmo_labels) | set(pop_labels) | set(survey_labels) | set(sky_labels)
     unknown = [k for k in prior_overrides.keys() if k not in known_labels]
     if unknown:
         raise KeyError(
@@ -193,6 +200,9 @@ def build_parameter_space(
     survey_lower, survey_upper = apply_block_prior_overrides(
         "survey", survey_labels, survey_lower, survey_upper, prior_overrides
     )
+    sky_lower, sky_upper = apply_block_prior_overrides(
+        "sky", sky_labels, sky_lower, sky_upper, prior_overrides
+    )
 
     all_bounds = {
         label: (float(lo), float(hi))
@@ -200,6 +210,7 @@ def build_parameter_space(
             list(zip(cosmo_labels, cosmo_lower, cosmo_upper))
             + list(zip(pop_labels, pop_lower, pop_upper))
             + list(zip(survey_labels, survey_lower, survey_upper))
+            + list(zip(sky_labels, sky_lower, sky_upper))
         )
     }
     fixed_parameter_statuses = validate_fixed_parameter_overrides(
@@ -229,6 +240,9 @@ def build_parameter_space(
     )
     sampled_survey_labels, sampled_survey_lower, sampled_survey_upper = filter_fixed_parameters(
         survey_labels, survey_lower, survey_upper, fixed_parameter_values
+    )
+    sampled_sky_labels, sampled_sky_lower, sampled_sky_upper = filter_fixed_parameters(
+        sky_labels, sky_lower, sky_upper, fixed_parameter_values
     )
 
     # Drop survey parameters that do not enter this universe model's likelihood
@@ -278,6 +292,14 @@ def build_parameter_space(
     else:
         n_survey_eff = 0
 
+    # Sky block: appended last so existing cosmo/pop/survey indices are stable.
+    # The chosen ``sky_model`` decides the parameters (none for ``isotropic``);
+    # individually-fixed sky labels were already removed above.
+    labels += sampled_sky_labels
+    lower += sampled_sky_lower
+    upper += sampled_sky_upper
+    n_sky_eff = len(sampled_sky_labels)
+
     # Per-parameter prior family aligned to the final ``labels`` ordering.
     # Cosmology and survey blocks are uniform; the population block carries the
     # kinds reported by the parser (keyed by label, matching the codebase's
@@ -286,6 +308,8 @@ def build_parameter_space(
     # ``labels``.
     kind_map = {lbl: ("uniform", None, None) for lbl in cosmo_labels + survey_labels}
     for lbl, knd in zip(pop_labels, pop_kinds):
+        kind_map[lbl] = knd
+    for lbl, knd in zip(sky_labels, sky_kinds):
         kind_map[lbl] = knd
     prior_kinds = [kind_map.get(lbl, ("uniform", None, None)) for lbl in labels]
 
@@ -302,6 +326,7 @@ def build_parameter_space(
         model_name,
         fixed_parameter_statuses,
         prior_kinds,
+        sky_labels,
     )
 
 def make_prior_transform(lower, upper, prior_kinds=None):

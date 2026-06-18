@@ -134,6 +134,14 @@ class GWEvent(NamedTuple):
     pixels: Any     # HEALPix pixel indices corresponding to the sky location
     q: Any          # Mass ratio m2det/m1det — stored at construction, never recomputed
     valid: Any      # Explicit structural mask; False for padded sentinel rows
+    # Sky direction unit vector n̂ = (cos δ cos α, cos δ sin α, sin δ), per sample.
+    # Carried alongside dL so the angular (sky) model can be evaluated at full
+    # resolution even with no galaxy catalog (where ``pixels`` is coarse).
+    # Default None for back-compat with isotropic runs / direct construction;
+    # ``make_gw_event`` always populates them (zeros when unspecified).
+    nx: Any = None
+    ny: Any = None
+    nz: Any = None
 
     @property
     def chirp_mass(self):

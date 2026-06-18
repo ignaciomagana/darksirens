@@ -409,6 +409,7 @@ def save_results_hdf5(
                 default=str,
             )
         f.attrs["universe_model"]  = opts.universe_model
+        f.attrs["sky_model"]       = getattr(opts, "sky_model", "isotropic")
         f.attrs["complete_empty_pixel_policy"] = opts.complete_empty_pixel_policy
         f.attrs["sampler"]         = opts.sampler
         f.attrs["fix_cosmology"]   = bool(opts.fix_cosmology)
@@ -693,6 +694,18 @@ def main():
     g.add_argument("--universe_model", default="spectral_sirens",
                    choices=["spectral_sirens", "dark_sirens", "dark_sirens_complete", "bright_sirens"])
     g.add_argument(
+        "--sky_model", default="isotropic",
+        choices=["isotropic", "dipole", "sphere_gp"],
+        help=(
+            "Angular (sky) distribution of the source rate. 'isotropic' "
+            "(default) is the null hypothesis; 'dipole' (Isi, Farr & Varma "
+            "2023) and 'sphere_gp' (log-Gaussian random field, Essick et al. "
+            "2023) are anisotropic alternatives, compared to isotropy by "
+            "evidence. Works with every universe model; forced to 'isotropic' "
+            "for bright_sirens (the sky is pinned to the counterpart)."
+        ),
+    )
+    g.add_argument(
         "--pop_model",
         default="powerlaw+peak",
         help=(
@@ -821,6 +834,14 @@ def main():
         # Bright sirens use a synthetic one-object catalog fixed by the
         # counterpart rather than survey-completion hyperparameters.
         opts.fix_survey = True
+        # The sky direction is pinned to the counterpart, so an anisotropic
+        # source-rate model is not identifiable; force the isotropic null.
+        if getattr(opts, "sky_model", "isotropic") != "isotropic":
+            print(
+                f"  [!] --sky_model '{opts.sky_model}' is not supported with "
+                "universe_model 'bright_sirens'; forcing 'isotropic'."
+            )
+            opts.sky_model = "isotropic"
 
     _print_all_cli_options(
         optp,
@@ -996,6 +1017,7 @@ def main():
         shared_beta            = opts.shared_beta,
         shared_spin            = opts.shared_spin,
         shared_gamma           = opts.shared_gamma,
+        sky_model              = opts.sky_model,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
