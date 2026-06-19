@@ -34,12 +34,46 @@ Installing the package exposes:
 - `darksirens_inference` — run spectral-siren or dark-siren hierarchical inference.
 - `darksirens_analyze` — analyze saved inference products and posterior-predictive distributions.
 - `darksirens_skymaps_to_samples` — convert a directory of 3D skymap FITS files into GW posterior-like samples (`gwdata.h5`) with broad uninformative mass/spin surrogates for low-latency runs.
+- `darksirens_build_lognormal_completion` — **offline** preprocessor that builds an LSS-conditioned lognormal completion field `Q_LSS(p,z)` (see below) from a pixelated survey catalog.
+- `darksirens_diagnose_lognormal_completion` — per-pixel diagnostic plots of `Q_LSS`, the missing-galaxy density, and the redshift prior.
 
 ## Population and completion models
 
 Population mixtures are selected with `--pop_model` using a compositional name grammar. Tokens such as `powerlaw`, `brokenpowerlaw`, and `peak` can be combined directly (`powerlaw+peak`, `brokenpowerlaw+2peaks`, `2powerlaws+3peaks`), with curated names receiving physics-tuned priors and arbitrary grammar combinations using blueprint defaults. Use `--shared_beta`, `--shared_spin`, and `--shared_gamma` to choose shared (default) versus per-component pairing, spin, and redshift-evolution parameters. Mixture weights are sampled as stick-breaking parameters labeled `$v_i$`; copy the printed startup parameter table when passing population labels to `--prior_overrides` or `--fixed_parameter_values`.
 
 Incomplete-catalog dark-siren runs use a data-driven completion model rather than a parametric logistic rolloff: the observed per-pixel galaxy redshift KDE is divided by the identically smoothed expected `n0 * dV_c/dz * (1 + z)^delta` density, clipped to `[0, 1]`, and converted into an additive missing-galaxy density. `z50` and `w` remain in the survey parameter block for compatibility, but the current completion likelihood is controlled by `log10n0`, `delta`, `b_miss` (with fixed `alpha_miss = 1` unless overridden), and `sigma_kde`. Run `--validate_completion true` for dry-run clipping diagnostics before long dark-siren analyses.
+
+### LSS-conditioned lognormal completion
+
+By default the missing-galaxy branch is modulated by the local-overdensity factor `max(1 + b_eff * delta_g(p,z), 0)`. Optionally it can instead be multiplied by a **precomputed, LSS-conditioned lognormal completion field** `Q_LSS(p,z)`:
+
+```
+dN_miss(p,z) = [1 - C(p,z)] * dN_exp(z) * Q_LSS(p,z)
+```
+
+`Q_LSS` is a *clustered* missing-galaxy correction. It is built **offline** from a per-pixel, 1-D Poisson-lognormal model along the redshift grid (a latent Gaussian field correlated along comoving distance, with a built-in Gaussian-correlation power spectrum whose fixed hyperparameters — correlation length, amplitude, bias — come from `SurveyParams`/`CosmoParams` and are never marginalised). **The likelihood stays deterministic: it never samples a field or generates galaxies — it consumes fixed `Q` arrays.** With no completion file supplied, behaviour is unchanged (the legacy `delta_g` factor is used).
+
+Build a completion file from a pixelated catalog and pass it to inference:
+
+```bash
+darksirens_build_lognormal_completion --catalog survey.h5 --out lss_completion.h5 --n-members 32
+darksirens_inference --universe_model dark_sirens --sky ... --lss_completion lss_completion.h5 ...
+darksirens_diagnose_lognormal_completion --catalog survey.h5 --lss-completion lss_completion.h5 --pixel 1234 --outdir figs
+```
+
+The builder produces a **MAP** estimate `Q_MAP` and, optionally, a fixed **Laplace/FFT-diagonal posterior ensemble** `{Q^(m)}` (an approximation around the MAP, not a full BORG sampler). Inference consumes only the deterministic MAP (or the posterior-mean when only an ensemble is present); the ensemble drives the Bayesian redshift-prior **diagnostic**
+
+```
+p_Bayes(z|p) = (1/M) * sum_m p_m(z|p),
+```
+
+where each member prior `p_m` is normalised individually. The target for a fully Bayesian marginalisation over completion realisations is
+
+```
+log L(Lambda) ≈ logsumexp_m log L(Lambda; Q_m) - log M,
+```
+
+which is **not** performed inside the GW likelihood in this implementation (member support is exposed through prior-state diagnostics).
 
 ## Minimal installation
 

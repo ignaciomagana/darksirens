@@ -29,6 +29,8 @@ setup(
             "darksirens_analyze=darksirens.tool.darksirens_analyze:main",
             "darksirens_pixelate=darksirens.tool.darksirens_pixelate:main",
             "darksirens_skymaps_to_samples=darksirens.tool.darksirens_skymaps_to_samples:main",
+            "darksirens_build_lognormal_completion=darksirens.tool.darksirens_build_lognormal_completion:main",
+            "darksirens_diagnose_lognormal_completion=darksirens.tool.darksirens_diagnose_lognormal_completion:main",
         ]
     },
     classifiers=[

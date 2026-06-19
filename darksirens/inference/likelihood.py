@@ -136,6 +136,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             counterpart_dzs=counterpart_dzs,
             active_counterpart_index=0,
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
+            lss_completion_logq=catalogs.lss_completion_logq,
+            lss_completion_indexing=catalogs.lss_completion_indexing,
         )
         em_catalog_sel = EMCatalog(
             apix=apix,
@@ -154,6 +156,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             counterpart_dzs=counterpart_dzs,
             active_counterpart_index=0,
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
+            lss_completion_logq=catalogs.lss_completion_logq,
+            lss_completion_indexing=catalogs.lss_completion_indexing,
         )
 
         gw_pe = GWEvent(

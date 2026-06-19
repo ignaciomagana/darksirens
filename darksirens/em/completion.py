@@ -274,11 +274,158 @@ def _precompute_grids(
 # ------------------------------------------------------------
 
 class CompletionCurves(NamedTuple):
-    """Per-catalog-row completion outputs on ``zgrid``."""
+    """Per-catalog-row completion outputs on ``zgrid``.
+
+    ``dN_miss_members`` / ``N_miss_members`` are populated only when the
+    catalog carries an LSS-completion *ensemble* (``lss_completion_*_members``);
+    they support the Bayesian redshift-prior diagnostic and default to ``None``
+    (the scalar API and the GW likelihood ignore them).
+    """
     f: jnp.ndarray        # (N_rows,) scalar number-weighted completeness (diagnostic)
     dN_miss: jnp.ndarray  # (N_rows, N_grid) missing-galaxy density [counts / unit z]
     C_eff: jnp.ndarray    # (N_rows, N_grid) effective completeness (diagnostic)
     N_miss: jnp.ndarray   # (N_rows,) integral of dN_miss
+    dN_miss_members: jnp.ndarray = None  # (M, N_rows, N_grid) | None
+    N_miss_members: jnp.ndarray = None   # (M, N_rows) | None
+
+
+# ------------------------------------------------------------
+# LSS-conditioned lognormal completion factor Q_LSS (optional)
+# ------------------------------------------------------------
+
+#: log Q is clipped to this symmetric range before exponentiating, so that a
+#: heavy lognormal tail cannot blow up the missing-galaxy density.
+_LOGQ_CLIP: float = 7.0
+
+
+def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
+    """Resolve the (optional) Q_LSS tables to **row order** for the vmap.
+
+    Runs eagerly inside :func:`completion_curves` (where ``em_catalog`` is a
+    concrete pytree, never traced), so the ``is None`` checks, the ``int``
+    indexing enum and the static-shape inference below are all host-side.
+
+    Returns ``(q_row, q_members_row)``:
+
+    * ``q_row``           — ``(N_rows, N_grid)`` deterministic Q, or ``None``.
+    * ``q_members_row``   — ``(N_rows, M, N_grid)`` ensemble Q (row-major
+      leading axis, ready to vmap), or ``None``.
+
+    Resolution rules (matching the proposal): prefer ``logq`` over ``q``; clip
+    ``logq`` to ``[-_LOGQ_CLIP, _LOGQ_CLIP]`` then exponentiate; validate
+    ``N_grid == zgrid.size`` (no silent interpolation); pick compact vs global
+    indexing from ``lss_completion_indexing`` (0=auto/1=compact/2=global,
+    auto ⇒ compact iff the row axis equals ``N_rows``) and pre-gather global
+    tables to row order via ``unique_pixels``.  If only an ensemble is supplied,
+    the deterministic ``q_row`` is the posterior-mean Q so the scalar prior path
+    still runs.  Q is **not** renormalised here — it is a physical density ratio.
+    """
+    logq = em_catalog.lss_completion_logq
+    q = em_catalog.lss_completion_q
+    logq_m = em_catalog.lss_completion_logq_members
+    q_m = em_catalog.lss_completion_q_members
+    if logq is None and q is None and logq_m is None and q_m is None:
+        return None, None  # no Q table -> legacy local-overdensity path
+
+    n_rows = int(em_catalog.zgals.shape[0])
+    raw_idx = em_catalog.lss_completion_indexing
+    indexing = 0 if raw_idx is None else int(raw_idx)
+
+    def _to_q(logq_arr, q_arr):
+        if logq_arr is not None:
+            lq = jnp.clip(jnp.asarray(logq_arr, dtype=float), -_LOGQ_CLIP, _LOGQ_CLIP)
+        elif q_arr is not None:
+            lq = jnp.clip(
+                jnp.log(jnp.maximum(jnp.asarray(q_arr, dtype=float), 1e-300)),
+                -_LOGQ_CLIP, _LOGQ_CLIP,
+            )
+        else:
+            return None
+        return jnp.exp(lq)
+
+    def _check_grid(arr):
+        if arr.shape[-1] != int(zgrid.size):
+            raise ValueError(
+                f"LSS completion table has N_grid={arr.shape[-1]} but the package "
+                f"zgrid has size {int(zgrid.size)}; the offline builder must use the "
+                "same redshift grid (no silent interpolation)."
+            )
+
+    def _row_align(table, row_axis):
+        K = table.shape[row_axis]
+        if indexing == 1:
+            mode = "compact"
+        elif indexing == 2:
+            mode = "global"
+        else:
+            mode = "compact" if K == n_rows else "global"
+        if mode == "compact":
+            if K != n_rows:
+                raise ValueError(
+                    f"compact LSS completion table has {K} rows but the catalog has "
+                    f"{n_rows} rows."
+                )
+            return table
+        # global: gather the catalog rows' global pixels into row order
+        if em_catalog.unique_pixels is None:
+            idx = jnp.arange(n_rows, dtype=jnp.int32)
+        else:
+            idx = jnp.asarray(em_catalog.unique_pixels, dtype=jnp.int32)
+        return jnp.take(table, idx, axis=row_axis)
+
+    q_det = _to_q(logq, q)        # (K, N_grid) | None
+    q_mem = _to_q(logq_m, q_m)    # (M, K, N_grid) | None
+
+    q_row = None
+    if q_det is not None:
+        _check_grid(q_det)
+        q_row = _row_align(q_det, 0)                       # (N_rows, N_grid)
+
+    q_members_row = None
+    if q_mem is not None:
+        _check_grid(q_mem)
+        q_mem_rows = _row_align(q_mem, 1)                  # (M, N_rows, N_grid)
+        q_members_row = jnp.transpose(q_mem_rows, (1, 0, 2))  # (N_rows, M, N_grid)
+
+    if q_row is None and q_members_row is not None:
+        # Only an ensemble supplied: deterministic branch uses posterior-mean Q.
+        q_row = jnp.mean(q_members_row, axis=1)            # (N_rows, N_grid)
+
+    return q_row, q_members_row
+
+
+def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
+    """Differential completeness ``C(z)`` for one catalog row (shared core).
+
+    ``row`` is the compact catalog row index (== global HEALPix pixel for legacy
+    full catalogs).  Returns ``(C, global_pix)``; depends on ``(row, Θ)`` only,
+    never on a sample redshift.
+    """
+    global_pix = row if em_catalog.unique_pixels is None else em_catalog.unique_pixels[row]
+
+    # --- observed density: O(1) cache lookup, or on-the-fly fallback ---
+    if em_catalog.dN_obs_kde is not None:
+        cache_idx = em_catalog.pixel_to_cache_idx[global_pix]
+        dN_obs = em_catalog.dN_obs_kde[cache_idx]
+    else:
+        dN_obs = _kde_dndz_obs(row, em_catalog.zgals, wgals=em_catalog.wgals, ngals=em_catalog.ngals)
+
+    # --- differential completeness: matched-kernel ratio, no roll-off ---
+    dN_exp_safe = jnp.where(grids.dN_exp_smooth > 0.0, grids.dN_exp_smooth, 1.0)
+    C = jnp.clip(dN_obs / dN_exp_safe, 0.0, 1.0)
+    return C, global_pix
+
+
+def _assemble_curves(C, lss, grids: _CompletionGrids):
+    """Assemble the per-row completion outputs from ``C`` and the rate factor ``lss``."""
+    dN_miss = (1.0 - C) * grids.dN_exp * lss
+    N_miss = jnp.trapezoid(dN_miss, zgrid)
+
+    dN_exp_pos = jnp.where(grids.dN_exp > 0.0, grids.dN_exp, 1.0)
+    C_eff = jnp.clip(1.0 - dN_miss / dN_exp_pos, 0.0, 1.0)
+    N_exp = jnp.trapezoid(grids.dN_exp, zgrid)
+    f = 1.0 - N_miss / jnp.where(N_exp > 0.0, N_exp, 1.0)
+    return f, dN_miss, C_eff, N_miss
 
 
 def _completion_curves_row(
@@ -287,51 +434,59 @@ def _completion_curves_row(
     survey: SurveyParams,
     em_catalog: EMCatalog,
 ):
+    """Legacy completion curves for one row (local-overdensity LSS factor).
+
+    Used whenever no ``Q_LSS`` table is supplied — physically identical to the
+    pre-existing behaviour: ``lss = max(1 + alpha_miss*b_miss*delta_g(pix,z), 0)``.
     """
-    Completion curves for one catalog row.  ``row`` is the compact catalog
-    row index (== global HEALPix pixel for legacy full catalogs).
-    Everything here depends on (row, Θ) only — never on a sample redshift —
-    so the caller computes it once per row per proposal.
-    """
-    zgals = em_catalog.zgals
-    wgals = em_catalog.wgals
-    ngals = em_catalog.ngals
+    C, global_pix = _row_C(row, grids, em_catalog)
     delta_g_pix_z = em_catalog.delta_g_pix_z
-
-    global_pix = row if em_catalog.unique_pixels is None else em_catalog.unique_pixels[row]
-
-    # --- observed density: O(1) cache lookup, or on-the-fly fallback ---
-    if em_catalog.dN_obs_kde is not None:
-        cache_idx = em_catalog.pixel_to_cache_idx[global_pix]
-        dN_obs = em_catalog.dN_obs_kde[cache_idx]
-    else:
-        dN_obs = _kde_dndz_obs(row, zgals, wgals=wgals, ngals=ngals)
-
-    # --- differential completeness: matched-kernel ratio, no roll-off ---
-    dN_exp_safe = jnp.where(grids.dN_exp_smooth > 0.0, grids.dN_exp_smooth, 1.0)
-    C = jnp.clip(dN_obs / dN_exp_safe, 0.0, 1.0)
-
-    # --- missing density with LSS modulation (b_eff = alpha_miss * b_miss) ---
     b_eff = survey.alpha_miss * survey.b_miss
     if delta_g_pix_z.shape[0] == 1:        # static shape -> trace-time branch
         delta_g_z = delta_g_pix_z[0]
     else:
         delta_g_z = delta_g_pix_z[global_pix]
     lss = jnp.maximum(1.0 + b_eff * delta_g_z, 0.0)
+    return _assemble_curves(C, lss, grids)
 
-    dN_miss = (1.0 - C) * grids.dN_exp * lss
-    N_miss = jnp.trapezoid(dN_miss, zgrid)
 
-    dN_exp_pos = jnp.where(grids.dN_exp > 0.0, grids.dN_exp, 1.0)
-    C_eff = jnp.clip(1.0 - dN_miss / dN_exp_pos, 0.0, 1.0)
-    N_exp = jnp.trapezoid(grids.dN_exp, zgrid)
-    f = 1.0 - N_miss / jnp.where(N_exp > 0.0, N_exp, 1.0)
+def _completion_curves_row_q(
+    row: int,
+    q_row: jnp.ndarray,
+    grids: _CompletionGrids,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+):
+    """Completion curves for one row using a precomputed Q_LSS factor.
 
-    return f, dN_miss, C_eff, N_miss
+    ``q_row`` (``(N_grid,)``, already row-aligned) **replaces** the legacy
+    local-overdensity factor: ``dN_miss = (1 - C) dN_exp Q_LSS``.
+    """
+    C, _ = _row_C(row, grids, em_catalog)
+    return _assemble_curves(C, q_row, grids)
+
+
+def _completion_member_row(
+    row: int,
+    q_members_row: jnp.ndarray,
+    grids: _CompletionGrids,
+    em_catalog: EMCatalog,
+):
+    """Per-row ensemble missing densities for ``q_members_row`` ``(M, N_grid)``."""
+    C, _ = _row_C(row, grids, em_catalog)
+    dN_miss_m = (1.0 - C)[None, :] * grids.dN_exp[None, :] * q_members_row  # (M, N_grid)
+    N_miss_m = jnp.trapezoid(dN_miss_m, zgrid, axis=-1)                     # (M,)
+    return dN_miss_m, N_miss_m
 
 
 _completion_curves_rows_vmap = vmap(
     _completion_curves_row, in_axes=(0, None, None, None), out_axes=(0, 0, 0, 0)
+)
+_completion_curves_rows_q_vmap = vmap(
+    _completion_curves_row_q, in_axes=(0, 0, None, None, None), out_axes=(0, 0, 0, 0)
+)
+_completion_member_rows_vmap = vmap(
+    _completion_member_row, in_axes=(0, 0, None, None), out_axes=(0, 0)
 )
 
 
@@ -340,13 +495,38 @@ def completion_curves(
     survey: SurveyParams,
     em_catalog: EMCatalog,
 ) -> CompletionCurves:
-    """All per-row completion curves for one parameter proposal."""
+    """All per-row completion curves for one parameter proposal.
+
+    Eager (host-side); called once per proposal by
+    :func:`darksirens.em.prior.prepare_redshift_prior_state`.  When the catalog
+    carries an LSS-conditioned lognormal completion table the per-row factor is
+    ``Q_LSS`` (replacing the legacy ``max(1 + b_eff delta_g, 0)``); with an
+    ensemble it additionally returns member missing densities for diagnostics.
+    """
     grids = _precompute_grids(cosmo, survey, em_catalog)
     n_rows = em_catalog.zgals.shape[0]
-    f, dN_miss, C_eff, N_miss = _completion_curves_rows_vmap(
-        jnp.arange(n_rows, dtype=jnp.int32), grids, survey, em_catalog
+    rows = jnp.arange(n_rows, dtype=jnp.int32)
+
+    q_row, q_members_row = _resolve_lss_completion_row_tables(em_catalog)
+
+    if q_row is None:
+        f, dN_miss, C_eff, N_miss = _completion_curves_rows_vmap(rows, grids, survey, em_catalog)
+    else:
+        f, dN_miss, C_eff, N_miss = _completion_curves_rows_q_vmap(
+            rows, q_row, grids, survey, em_catalog
+        )
+
+    dN_miss_members = None
+    N_miss_members = None
+    if q_members_row is not None:
+        dM, NM = _completion_member_rows_vmap(rows, q_members_row, grids, em_catalog)
+        dN_miss_members = jnp.transpose(dM, (1, 0, 2))  # (M, N_rows, N_grid)
+        N_miss_members = jnp.transpose(NM, (1, 0))      # (M, N_rows)
+
+    return CompletionCurves(
+        f=f, dN_miss=dN_miss, C_eff=C_eff, N_miss=N_miss,
+        dN_miss_members=dN_miss_members, N_miss_members=N_miss_members,
     )
-    return CompletionCurves(f=f, dN_miss=dN_miss, C_eff=C_eff, N_miss=N_miss)
 
 
 # ------------------------------------------------------------

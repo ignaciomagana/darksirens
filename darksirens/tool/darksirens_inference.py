@@ -778,6 +778,12 @@ def main():
                          "--save_path, and exit before building the likelihood."))
     g.add_argument("--completion_validation_pixels", type=int, default=64, metavar="N",
                    help="Maximum number of unique catalog pixels to inspect in --validate_completion.")
+    g.add_argument("--lss_completion", default=None, metavar="PATH",
+                   help=("Path to a precomputed LSS-conditioned lognormal completion file "
+                         "(/lss_completion/logq_map), built offline by "
+                         "darksirens-build-lognormal-completion. Replaces the legacy "
+                         "max(1+b*delta_g,0) missing-galaxy factor for dark_sirens. If unset, "
+                         "an in-catalog /lss_completion group (if present) is used automatically."))
 
     g = optp.add_argument_group("Sampler")
     g.add_argument("--sampler",      required=True, choices=["jaxns", "dynesty", "emcee", "numpyro"])

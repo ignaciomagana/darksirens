@@ -357,4 +357,55 @@ def load_all_data(opts):
     # Append the LSS overdensity field to the returned dictionary
     data["delta_g_pix_z"] = delta_g_pix_z
 
+    # --------------------------------------------------------
+    # LSS-conditioned lognormal completion table Q_LSS (optional)
+    # --------------------------------------------------------
+    # Deterministic log Q_LSS only — the ensemble members are a diagnostic and
+    # are intentionally NOT threaded into the (jit'd) likelihood.  An explicit
+    # --lss_completion path overrides an in-catalog /lss_completion group.
+    lss_completion_logq = None
+    lss_completion_indexing = 0  # int enum: 0=auto, 1=compact, 2=global
+    lss_path = getattr(opts, "lss_completion", None)
+    if lss_path is None and opts.survey_path is not None:
+        try:
+            import h5py
+            with h5py.File(opts.survey_path, "r") as _f:
+                if "lss_completion" in _f:
+                    lss_path = opts.survey_path
+        except Exception:
+            lss_path = None
+    if lss_path is not None and opts.universe_model in GALAXY_AWARE_MODELS:
+        from darksirens.em.lognormal_completion import load_lss_completion_hdf5
+        loaded = load_lss_completion_hdf5(lss_path)
+        logq = loaded.get("logq_map")
+        if logq is None:
+            raise ValueError(
+                f"LSS completion file '{lss_path}' has no /lss_completion/logq_map "
+                "(deterministic table required for inference)."
+            )
+        logq = np.asarray(logq, dtype=float)
+        if logq.shape[-1] != len(zgrid):
+            raise ValueError(
+                f"LSS completion N_grid={logq.shape[-1]} but the package zgrid has "
+                f"size {len(zgrid)}; rebuild the completion on the package grid."
+            )
+        zg_file = loaded.get("zgrid")
+        if zg_file is not None and not np.allclose(
+            np.asarray(zg_file, dtype=float), np.asarray(zgrid, dtype=float),
+            rtol=1e-5, atol=1e-8,
+        ):
+            raise ValueError(
+                "LSS completion zgrid does not match the package zgrid (no silent interpolation)."
+            )
+        lss_completion_logq = jnp.asarray(logq)
+        lss_completion_indexing = {"compact": 1, "global": 2}.get(
+            str(loaded.get("indexing", "compact")), 0
+        )
+        print(
+            f"    - LSS completion loaded from {lss_path}: logq_map {tuple(logq.shape)}, "
+            f"indexing={loaded.get('indexing')}"
+        )
+    data["lss_completion_logq"] = lss_completion_logq
+    data["lss_completion_indexing"] = lss_completion_indexing
+
     return data

@@ -69,6 +69,11 @@ class CatalogViews:
     dN_obs_kde_sel: jnp.ndarray | None
     pixel_to_cache_idx_pe: jnp.ndarray | None
     pixel_to_cache_idx_sel: jnp.ndarray | None
+    # Optional deterministic LSS-conditioned lognormal completion table Q_LSS,
+    # shared across PE/selection (the per-row resolution to compact rows happens
+    # in completion.py via each view's unique_pixels).  ``None`` = legacy path.
+    lss_completion_logq: jnp.ndarray | None = None
+    lss_completion_indexing: int = 0  # int enum: 0=auto, 1=compact, 2=global
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -278,6 +283,10 @@ def prepare_catalog_views(
 
     delta_g_pix_z = barrier(_to_jax(data, "delta_g_pix_z"))
 
+    _lss_logq = data.get("lss_completion_logq")
+    lss_completion_logq = None if _lss_logq is None else barrier(jnp.asarray(_lss_logq))
+    lss_completion_indexing = int(data.get("lss_completion_indexing", 0))
+
     dN_obs_kde_pe = dN_obs_kde_sel = None
     pixel_to_cache_idx_pe = pixel_to_cache_idx_sel = None
     cache_required = universe_model in DARK_SIREN_CACHE_MODELS
@@ -406,4 +415,6 @@ def prepare_catalog_views(
         dN_obs_kde_sel=dN_obs_kde_sel,
         pixel_to_cache_idx_pe=pixel_to_cache_idx_pe,
         pixel_to_cache_idx_sel=pixel_to_cache_idx_sel,
+        lss_completion_logq=lss_completion_logq,
+        lss_completion_indexing=lss_completion_indexing,
     )
