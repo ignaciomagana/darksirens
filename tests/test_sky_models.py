@@ -43,7 +43,8 @@ def _random_unit_vectors(n, seed=0):
 
 def test_registry_names_and_unknown():
     assert set(SKY_MODEL_NAMES) == {
-        "isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp"
+        "isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp",
+        "multipole", "multipole_l3",
     }
     for name in SKY_MODEL_NAMES:
         assert get_sky_model(name) is not None
@@ -338,3 +339,73 @@ def test_sky_block_present_for_all_universe_models(universe_model):
         universe_model=universe_model, sky_model="dipole",
     )
     assert len(res[12]) == 3
+
+
+# --------------------------------------------------------------------------
+# Low-ℓ spherical-harmonic multipole model
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,lmax", [("multipole", 2), ("multipole_l3", 3)])
+def test_multipole_param_contract(name, lmax):
+    n_coeff = (lmax + 1) ** 2 - 1
+    lows, highs, labels, kinds, _latex = sky_model_prior_parser(name)
+    assert len(labels) == len(lows) == len(highs) == len(kinds) == n_coeff
+    assert all(k[0] == "uniform" for k in kinds)
+    names = [s.name for s in get_sky_model(name).param_specs]
+    assert all(n.startswith("sky_a_") for n in names)
+
+
+@pytest.mark.parametrize("name", ["multipole", "multipole_l3"])
+def test_multipole_fiducial_is_isotropic(name):
+    nx, ny, nz = _random_unit_vectors(40, seed=11)
+    theta = get_fixed_sky_params(name)          # all a_lm = 0
+    np.testing.assert_allclose(np.asarray(theta), 0.0)
+    log_g = sky_model_parser(name)(nx, ny, nz, jnp.zeros_like(nx), theta)
+    np.testing.assert_allclose(np.asarray(log_g), 0.0, atol=1e-12)
+
+
+def test_multipole_is_mean_one_over_sphere():
+    # Small random a_lm -> g>0 everywhere; sphere-mean of g is 1 (ℓ≥1 → 0).
+    log_g_sky = sky_model_parser("multipole")
+    nx, ny, nz = _random_unit_vectors(200_000, seed=12)
+    rng = np.random.default_rng(12)
+    a = jnp.asarray(rng.uniform(-0.1, 0.1, size=8))
+    g = jnp.exp(log_g_sky(nx, ny, nz, jnp.zeros_like(nx), a))
+    assert abs(float(jnp.mean(g)) - 1.0) < 5e-3
+
+
+def test_real_ylm_orthonormality():
+    from darksirens.sky.models import _real_ylm
+
+    nx, ny, nz = _random_unit_vectors(500_000, seed=13)
+    Y = np.asarray(_real_ylm(nx, ny, nz, 3))     # (N, 15)
+    gram = 4.0 * np.pi * (Y.T @ Y) / Y.shape[0]  # ∫ Y_i Y_j dΩ ≈ δ_ij
+    np.testing.assert_allclose(gram, np.eye(Y.shape[1]), atol=2e-2)
+
+
+def test_multipole_l1_equals_dipole():
+    from darksirens.sky.models import MultipoleSky
+
+    nx, ny, nz = _random_unit_vectors(256, seed=14)
+    z = jnp.zeros_like(nx)
+    d = np.array([0.3, -0.2, 0.1])               # (d_x, d_y, d_z)
+    # a_1m = sqrt(4π/3) * d_component, ordered (m=-1→y, m=0→z, m=+1→x)
+    c = np.sqrt(4.0 * np.pi / 3.0)
+    a = jnp.asarray([c * d[1], c * d[2], c * d[0]])
+    log_g_mp = MultipoleSky(lmax=1).log_g_sky(nx, ny, nz, z, a)
+    log_g_dip = sky_model_parser("dipole")(nx, ny, nz, z, jnp.asarray(d))
+    np.testing.assert_allclose(np.asarray(log_g_mp), np.asarray(log_g_dip), rtol=1e-6)
+
+
+def test_summarize_multipole_cl_matches_definition():
+    from darksirens.sky.analyze import summarize_multipole_posterior
+
+    model = get_sky_model("multipole")
+    labels = [s.label for s in model.param_specs]          # 8 coeffs (ℓ=1,2)
+    a = np.arange(1, 9, dtype=float) * 0.05                 # distinct a_lm
+    samples = np.tile(a, (4, 1))
+    summ = summarize_multipole_posterior(samples, labels, "multipole")
+    # C_1 = sum of first 3 squared; C_2 = sum of next 5 squared
+    c1 = float(np.sum(a[:3] ** 2)); c2 = float(np.sum(a[3:] ** 2))
+    assert abs(summ["C_ell_quantiles"][1][0.5] - c1) < 1e-9
+    assert abs(summ["C_ell_quantiles"][2][0.5] - c2) < 1e-9
