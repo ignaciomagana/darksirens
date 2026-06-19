@@ -22,6 +22,12 @@ import pytest
 pytest.importorskip("healpy")
 pytest.importorskip("jax")
 
+# darksirens runs JAX in double precision (GW distances/redshifts need it); enable
+# x64 so the jax sfilter is computed in float64 and matches the numpy mirror.
+import jax as _jax
+
+_jax.config.update("jax_enable_x64", True)
+
 ROOT = Path(__file__).resolve().parents[1]
 GEN_PATH = ROOT / "scripts" / "mock_dark_sirens" / "generate_mock_data.py"
 
@@ -51,11 +57,11 @@ def test_numpy_tapers_match_inference_sfilters(gen):
     m = np.linspace(0.0, 120.0, 700)
     for m_min, dm in [(5.0, 3.0), (2.0, 1.0), (10.0, 0.5)]:
         np.testing.assert_allclose(
-            gen._sfilter_low(m, m_min, dm), np.asarray(sfilter_low(m, m_min, dm)), atol=1e-6
+            gen._sfilter_low(m, m_min, dm), np.asarray(sfilter_low(m, m_min, dm)), atol=1e-9
         )
     for m_max, dm in [(85.0, 10.0), (50.0, 5.0), (100.0, 2.0)]:
         np.testing.assert_allclose(
-            gen._sfilter_high(m, m_max, dm), np.asarray(sfilter_high(m, m_max, dm)), atol=1e-6
+            gen._sfilter_high(m, m_max, dm), np.asarray(sfilter_high(m, m_max, dm)), atol=1e-9
         )
 
 
