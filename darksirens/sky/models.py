@@ -42,6 +42,8 @@ dependency.
 
 from __future__ import annotations
 
+import math
+
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 from jax.scipy.special import logsumexp
@@ -365,3 +367,84 @@ class OverdensityGP3D(_SphereZGPBase):
         # to all query samples.  xi=0 ⇒ fq=0 ⇒ this is log(Σ_g w_g) = 0.
         terms = fq + self._log_vol_w[:, None] - jnp.log(self._Q)     # (Nzg, Q)
         return logsumexp(terms)                                      # scalar
+
+
+# ============================================================
+# Low-ℓ spherical-harmonic multipole model
+# ============================================================
+
+def _real_ylm(nx, ny, nz, lmax):
+    """Orthonormalised real spherical harmonics ``Y_lm(n̂)`` for ℓ=1..lmax,
+    stacked as ``(..., n_coeff)`` with ``n_coeff = (lmax+1)² − 1``.
+
+    Explicit Cartesian-polynomial forms in the unit-vector components
+    ``n̂ = (nx, ny, nz)``; normalised so ``∫ Y_lm Y_l'm' dΩ = δ`` (hence
+    ``C_ℓ = Σ_m a_lm²`` is the power per multipole).  Column order matches
+    ``[(ℓ, m) for ℓ in 1..lmax for m in -ℓ..ℓ]``.
+    """
+    pi = math.pi
+    cols = []
+    if lmax >= 1:
+        c1 = math.sqrt(3.0 / (4.0 * pi))
+        cols += [c1 * ny, c1 * nz, c1 * nx]                       # m = -1, 0, +1
+    if lmax >= 2:
+        c2a = math.sqrt(15.0 / (4.0 * pi))                        # xy, yz, xz
+        cols += [
+            c2a * nx * ny,                                        # m = -2
+            c2a * ny * nz,                                        # m = -1
+            math.sqrt(5.0 / (16.0 * pi)) * (3.0 * nz**2 - 1.0),   # m =  0
+            c2a * nx * nz,                                        # m = +1
+            math.sqrt(15.0 / (16.0 * pi)) * (nx**2 - ny**2),      # m = +2
+        ]
+    if lmax >= 3:
+        cols += [
+            0.25 * math.sqrt(35.0 / (2.0 * pi)) * ny * (3.0 * nx**2 - ny**2),  # -3
+            0.5 * math.sqrt(105.0 / pi) * nx * ny * nz,                        # -2
+            0.25 * math.sqrt(21.0 / (2.0 * pi)) * ny * (5.0 * nz**2 - 1.0),    # -1
+            0.25 * math.sqrt(7.0 / pi) * nz * (5.0 * nz**2 - 3.0),             #  0
+            0.25 * math.sqrt(21.0 / (2.0 * pi)) * nx * (5.0 * nz**2 - 1.0),    # +1
+            0.25 * math.sqrt(105.0 / pi) * nz * (nx**2 - ny**2),               # +2
+            0.25 * math.sqrt(35.0 / (2.0 * pi)) * nx * (nx**2 - 3.0 * ny**2),  # +3
+        ]
+    return jnp.stack(cols, axis=-1)
+
+
+def multipole_lm_indices(lmax):
+    """``[(ℓ, m), ...]`` in the column order of :func:`_real_ylm` / the params."""
+    return [(l, m) for l in range(1, int(lmax) + 1) for m in range(-l, l + 1)]
+
+
+class MultipoleSky:
+    r"""Low-order spherical-harmonic anisotropy: ``g(n̂) = 1 + Σ_{ℓ=1}^{ℓmax}
+    Σ_m a_lm Y_lm(n̂)`` — the perturbative basis for *small* departures from
+    isotropy (generalises the dipole, which is exactly ℓ=1).
+
+    Mean-one by construction (every ℓ≥1 harmonic integrates to zero), so
+    ``a_lm = 0 ⇒ g ≡ 1``; positivity (``g ≥ 0``) is enforced pointwise.  With the
+    orthonormal harmonics the angular power spectrum is ``C_ℓ = Σ_m a_lm²``.
+    Purely angular — the ``z`` argument is ignored.
+    """
+
+    def __init__(self, lmax: int = 2, a_bound: float = 1.0):
+        if int(lmax) not in (1, 2, 3):
+            raise ValueError("MultipoleSky supports lmax in {1, 2, 3}.")
+        self._lmax = int(lmax)
+        self._a_bound = float(a_bound)
+        self._lm = multipole_lm_indices(self._lmax)
+        self._n_coeff = len(self._lm)                 # (lmax+1)^2 - 1
+
+    @property
+    def param_specs(self):
+        b = self._a_bound
+        return [
+            ParamSpec(rf"$a_{{{l},{m}}}$", -b, b, name=f"sky_a_l{l}_m{m}")
+            for (l, m) in self._lm
+        ]
+
+    def prior_bounds(self):
+        return pack_specs(*self.param_specs)
+
+    def log_g_sky(self, nx, ny, nz, z, theta):
+        Y = _real_ylm(nx, ny, nz, self._lmax)         # (N, n_coeff)
+        g = 1.0 + Y @ theta                           # (N,)
+        return jnp.where(g > 0.0, jnp.log(jnp.where(g > 0.0, g, 1.0)), -jnp.inf)

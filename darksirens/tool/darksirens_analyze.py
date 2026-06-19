@@ -737,6 +737,8 @@ def main():
                 summarize_dipole_posterior,
                 plot_dipole_posterior,
                 plot_sphere_gp_map,
+                summarize_multipole_posterior,
+                plot_multipole_cl,
             )
             try:
                 if sky_model == "dipole":
@@ -764,6 +766,19 @@ def main():
                         fig.savefig(out(f"sky_gp_map_{tag}{suffix}.pdf"),
                                     bbox_inches="tight", dpi=300)
                         plt.close(fig)
+                elif sky_model in ("multipole", "multipole_l3"):
+                    summ = summarize_multipole_posterior(samples, run_labels, sky_model)
+                    cl = summ["C_ell_quantiles"]
+                    print("  sky multipole C_l (median): " + ", ".join(
+                        f"l={l}:{cl[l][0.5]:.3g}" for l in sorted(cl)))
+                    fig = plot_multipole_cl(samples, run_labels, sky_model)
+                    fig.savefig(out(f"sky_multipole_cl_{tag}.pdf"),
+                                bbox_inches="tight", dpi=300)
+                    plt.close(fig)
+                    fig = plot_sphere_gp_map(samples, run_labels, nside=args.sky_nside,
+                                             sky_model=sky_model)
+                    fig.savefig(out(f"sky_gp_map_{tag}.pdf"), bbox_inches="tight", dpi=300)
+                    plt.close(fig)
             except (KeyError, ImportError) as exc:
                 print(f"  [sky] skipped sky plot for {tag}: {exc}")
 

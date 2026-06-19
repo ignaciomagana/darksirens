@@ -21,10 +21,14 @@ from .models import (
     SphereGPSky,
     SphereZGPSky,
     OverdensityGP3D,
+    MultipoleSky,
 )
 
 #: Canonical sky-model names (``isotropic`` is the default / null model).
-SKY_MODEL_NAMES = ("isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp")
+SKY_MODEL_NAMES = (
+    "isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp",
+    "multipole", "multipole_l3",
+)
 
 _SKY_FACTORIES = {
     "isotropic": IsotropicSky,
@@ -32,6 +36,8 @@ _SKY_FACTORIES = {
     "sphere_gp": SphereGPSky,
     "sphere_gp_z": SphereZGPSky,
     "overdensity_gp": OverdensityGP3D,
+    "multipole": lambda: MultipoleSky(lmax=2),
+    "multipole_l3": lambda: MultipoleSky(lmax=3),
 }
 
 SKY_MODEL_LATEX = {
@@ -40,6 +46,8 @@ SKY_MODEL_LATEX = {
     "sphere_gp": r"\text{Sphere GP}",
     "sphere_gp_z": r"\text{Sphere GP }(\hat n, z)",
     "overdensity_gp": r"\text{3D Overdensity GP}",
+    "multipole": r"\text{Multipole }(\ell\le2)",
+    "multipole_l3": r"\text{Multipole }(\ell\le3)",
 }
 
 _SKY_REGISTRY: dict = {}
@@ -85,7 +93,11 @@ def sky_fiducial(sky_model: str) -> tuple[float, ...]:
     model = get_sky_model(sky_model)
     values = []
     for spec in model.param_specs:
-        if spec.name.startswith("sky_xi") or spec.name in ("sky_dx", "sky_dy", "sky_dz"):
+        if (
+            spec.name.startswith("sky_xi")
+            or spec.name.startswith("sky_a")          # multipole a_lm
+            or spec.name in ("sky_dx", "sky_dy", "sky_dz")
+        ):
             values.append(0.0)
         else:  # log_amp / log_ls hyperparameters: centre of the prior range
             values.append(0.5 * (spec.low + spec.high))

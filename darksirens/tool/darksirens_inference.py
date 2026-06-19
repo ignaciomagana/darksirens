@@ -695,7 +695,8 @@ def main():
                    choices=["spectral_sirens", "dark_sirens", "dark_sirens_complete", "bright_sirens"])
     g.add_argument(
         "--sky_model", default="isotropic",
-        choices=["isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp"],
+        choices=["isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp",
+                 "multipole", "multipole_l3"],
         help=(
             "Sky distribution of the source rate. 'isotropic' (default) is the "
             "null; 'dipole' (Isi, Farr & Varma 2023) and 'sphere_gp' "
@@ -703,8 +704,11 @@ def main():
             "'sphere_gp_z' is a (sphere x z) GP normalised per z-shell "
             "(directional anisotropy evolving with distance); 'overdensity_gp' "
             "is the same field normalised over the comoving volume (full 3-D "
-            "clustering, use with gamma fixed). All compared to isotropy by "
-            "evidence; forced to 'isotropic' for bright_sirens."
+            "clustering, use with gamma fixed). 'multipole'/'multipole_l3' are "
+            "low-order spherical-harmonic expansions g=1+sum a_lm Y_lm (l<=2/3) "
+            "-- the perturbative, sharply-constrained choice for a small "
+            "deviation, giving the angular power spectrum C_l. All compared to "
+            "isotropy by evidence; forced to 'isotropic' for bright_sirens."
         ),
     )
     g.add_argument(

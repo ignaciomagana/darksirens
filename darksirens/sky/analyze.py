@@ -81,6 +81,42 @@ def summarize_dipole_posterior(samples, labels, quantiles=(0.05, 0.5, 0.95)):
     }
 
 
+def summarize_multipole_posterior(samples, labels, sky_model="multipole",
+                                  quantiles=(0.05, 0.5, 0.95)):
+    """Summarise a multipole run: the angular power spectrum ``C_ℓ = Σ_m a_lm²``
+    (per ℓ) and the per-coefficient quantiles.
+
+    Returns a dict with ``C_ell_quantiles`` (``{ℓ: {q: value}}``),
+    ``coeff_quantiles`` (``{name: {q: value}}``), and ``C_ell_samples``
+    (``{ℓ: (N,) array}``) for downstream plotting.
+    """
+    idx = _sky_column_indices(labels, sky_model)
+    model = get_sky_model(sky_model)
+    names = [s.name for s in model.param_specs]
+    missing = set(names) - set(idx)
+    if missing:
+        raise KeyError(f"{sky_model} parameters not found in labels: {sorted(missing)}")
+
+    samples = np.asarray(samples)
+    by_l = {}
+    for n in names:                       # name format: sky_a_l{ℓ}_m{m}
+        parts = n.split("_")
+        ell = int(parts[2][1:])
+        by_l.setdefault(ell, []).append(idx[n])
+
+    cl_quant, cl_samples = {}, {}
+    for ell, cols in sorted(by_l.items()):
+        cl = np.sum(samples[:, cols] ** 2, axis=1)     # C_ℓ per posterior sample
+        cl_samples[ell] = cl
+        cl_quant[ell] = {q: float(np.quantile(cl, q)) for q in quantiles}
+    coeff_quant = {
+        n: {q: float(np.quantile(samples[:, idx[n]], q)) for q in quantiles}
+        for n in names
+    }
+    return {"C_ell_quantiles": cl_quant, "coeff_quantiles": coeff_quant,
+            "C_ell_samples": cl_samples}
+
+
 def sphere_gp_posterior_map(samples, labels, nside=16, max_draws=200,
                             sky_model="sphere_gp", z_slice=None):
     """Posterior-mean sky density ``g(n̂)`` (or ``g(n̂, z_slice)`` for the 3-D
@@ -195,4 +231,28 @@ def plot_sphere_gp_map(samples, labels, nside=16, max_draws=200,
         max=float(np.max(m)),
     )
     hp.graticule()
+    return fig
+
+
+def plot_multipole_cl(samples, labels, sky_model="multipole", figsize=(7.0, 4.5)):
+    """Angular power spectrum ``C_ℓ = Σ_m a_lm²`` (posterior median + 5–95%) per
+    multipole ℓ.  Returns a matplotlib Figure."""
+    import matplotlib.pyplot as plt
+
+    summ = summarize_multipole_posterior(samples, labels, sky_model=sky_model)
+    cl = summ["C_ell_quantiles"]
+    ells = sorted(cl)
+    med = [cl[l][0.5] for l in ells]
+    lo = [cl[l][0.5] - cl[l][0.05] for l in ells]
+    hi = [cl[l][0.95] - cl[l][0.5] for l in ells]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.errorbar(ells, med, yerr=[lo, hi], fmt="o", capsize=5, color="C0")
+    ax.set_xticks(ells)
+    ax.set_xlabel(r"multipole $\ell$")
+    ax.set_ylabel(r"$C_\ell = \sum_m a_{\ell m}^2$")
+    ax.set_title("Angular power spectrum (posterior median, 5–95%)")
+    ax.set_ylim(bottom=0.0)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
     return fig

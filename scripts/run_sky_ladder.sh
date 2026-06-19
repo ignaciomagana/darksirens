@@ -33,13 +33,15 @@ NDRAW="${NDRAW:-80000}"
 SAMPLER="${SAMPLER:-dynesty}"
 NLIVE="${NLIVE:-1000}"
 SEED="${SEED:-22}"
-SKY_MODELS="${SKY_MODELS:-isotropic dipole sphere_gp sphere_gp_z overdensity_gp}"
+SKY_MODELS="${SKY_MODELS:-isotropic dipole multipole multipole_l3 sphere_gp sphere_gp_z overdensity_gp}"
 FIX_POP="${FIX_POP:-false}"
 
-# Injected truth: a z-evolving dipole (amplitude ramps to z_pivot) + a 3-D blob.
+# Injected truth: a z-evolving dipole (amplitude ramps to z_pivot) + a 3-D blob;
+# optionally an axisymmetric quadrupole (QUAD_AMP>0) to exercise the ℓ=2 channel.
 DIP_AMP="${DIP_AMP:-0.5}"; DIP_RA="${DIP_RA:-120}"; DIP_ZPIV="${DIP_ZPIV:-1.0}"
 BLOB_AMP="${BLOB_AMP:-0.8}"; BLOB_RA="${BLOB_RA:-250}"; BLOB_DEC="${BLOB_DEC:--30}"
 BLOB_Z0="${BLOB_Z0:-0.5}"
+QUAD_AMP="${QUAD_AMP:-0.0}"; QUAD_RA="${QUAD_RA:-0}"; QUAD_DEC="${QUAD_DEC:-60}"
 
 DATA="$OUTDIR/data"
 GW="$DATA/mock_gw_events.h5"
@@ -58,7 +60,9 @@ python scripts/mock_dark_sirens/generate_mock_data.py \
     --outdir "$DATA" --nobs "$NOBS" --ndraw "$NDRAW" --seed "$SEED" --verbose \
     --sky-dipole-amp "$DIP_AMP" --sky-dipole-ra-deg "$DIP_RA" --sky-dipole-z-pivot "$DIP_ZPIV" \
     --sky-blob-amp "$BLOB_AMP" --sky-blob-ra-deg "$BLOB_RA" --sky-blob-dec-deg "$BLOB_DEC" \
-    --sky-blob-z0 "$BLOB_Z0"
+    --sky-blob-z0 "$BLOB_Z0" \
+    --sky-quadrupole-amp "$QUAD_AMP" --sky-quadrupole-ra-deg "$QUAD_RA" \
+    --sky-quadrupole-dec-deg "$QUAD_DEC"
 
 RUN_DIRS=()
 for model in $SKY_MODELS; do

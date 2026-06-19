@@ -481,6 +481,30 @@ def write_mock_data(args: argparse.Namespace) -> None:
             print(f"Injecting 3-D blob amp={blob_amp:g} at "
                   f"(ra,dec,z0)=({args.sky_blob_ra_deg},{args.sky_blob_dec_deg},{z0}).")
 
+    quad_amp = float(getattr(args, "sky_quadrupole_amp", 0.0))
+    if quad_amp != 0.0:
+        ra_q = np.deg2rad(args.sky_quadrupole_ra_deg)
+        dec_q = np.deg2rad(args.sky_quadrupole_dec_deg)
+        aq = np.array([
+            np.cos(dec_q) * np.cos(ra_q),
+            np.cos(dec_q) * np.sin(ra_q),
+            np.sin(dec_q),
+        ])
+
+        def _g_quad(nx, ny, nz, z, aq=aq, Q=quad_amp):
+            mu = nx * aq[0] + ny * aq[1] + nz * aq[2]      # cos(angle to axis)
+            return 1.0 + Q * 0.5 * (3.0 * mu**2 - 1.0)     # axisymmetric ℓ=2 (P2)
+
+        sky_factors.append(_g_quad)
+        sky_g_max *= 1.0 + quad_amp                        # P2 max is 1 (at n̂=±â)
+        injected_sky["quadrupole"] = {
+            "amp": quad_amp, "ra_deg": args.sky_quadrupole_ra_deg,
+            "dec_deg": args.sky_quadrupole_dec_deg,
+        }
+        if args.verbose:
+            print(f"Injecting axisymmetric quadrupole amp={quad_amp:g} about "
+                  f"(ra,dec)=({args.sky_quadrupole_ra_deg},{args.sky_quadrupole_dec_deg}).")
+
     if sky_factors:
         def sky_weight_fn(nx, ny, nz, z, _factors=tuple(sky_factors)):
             g = np.ones_like(np.asarray(z, dtype=float))
@@ -679,6 +703,13 @@ def parse_args() -> argparse.Namespace:
                         help="Angular width (deg) of the injected 3-D blob.")
     parser.add_argument("--sky-blob-sigma-z", type=_positive_float, default=0.1,
                         help="Redshift width of the injected 3-D blob.")
+    parser.add_argument("--sky-quadrupole-amp", type=float, default=0.0,
+                        help="Inject an axisymmetric quadrupole g=1+Q*(3mu^2-1)/2 "
+                             "(mu=cos angle to the axis); 0 = none. Tests the l=2 channel.")
+    parser.add_argument("--sky-quadrupole-ra-deg", type=float, default=0.0,
+                        help="Right ascension (deg) of the quadrupole symmetry axis.")
+    parser.add_argument("--sky-quadrupole-dec-deg", type=float, default=0.0,
+                        help="Declination (deg) of the quadrupole symmetry axis.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     if args.n0 is None and args.n_galaxies is None:
