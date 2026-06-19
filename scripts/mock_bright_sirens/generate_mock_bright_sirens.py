@@ -93,7 +93,8 @@ def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold):
     em_det = _joint_em_detected(rng, ra, dec, z, dl, survey)
     det = gw_det & em_det
 
-    pz = np.interp(z, grids["z"], grids["dvc_dz"]) / np.trapz(grids["dvc_dz"], grids["z"])
+    # np.trapz was removed in NumPy 2.0; reuse the dark generator's version-safe shim.
+    pz = np.interp(z, grids["z"], grids["dvc_dz"]) / _dark._trapz(grids["dvc_dz"], grids["z"])
     ddldz = np.gradient(grids["dl"], grids["z"])
     jac = np.interp(z, grids["z"], ddldz) * (1.0 + z)
     p_draw = _dark._mass_spin_pdf(m1, q, chi, pop) * pz / np.maximum(jac, 1.0e-300) / (4.0 * np.pi)
