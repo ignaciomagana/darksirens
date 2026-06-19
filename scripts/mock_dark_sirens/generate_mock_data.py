@@ -5,8 +5,10 @@ The mock is intentionally simple and transparent:
 
 * galaxies are isotropic on the sky and uniform in comoving volume;
 * GW hosts are drawn from the complete catalog, before EM incompleteness;
-* BBH masses/spins/redshift evolution use a POWER LAW + PEAK model with
-  shared beta, truncated-Gaussian chi_eff, and gamma parameters;
+* BBH masses/spins/redshift evolution use a POWER LAW + PEAK model that
+  matches the inference model exactly (logistic-tapered primary-mass edges via
+  ``sfilter_low``/``sfilter_high``, a Gaussian peak, ``S_low(m2)``-tapered mass
+  ratio), with shared beta, truncated-Gaussian chi_eff, and gamma parameters;
 * GW detectability is a semi-analytic network-SNR threshold;
 * the observed EM survey is produced by applying a footprint, redshift/magnitude
   limits, and a smooth redshift-dependent completeness curve.
@@ -42,6 +44,11 @@ class PopulationConfig:
     alpha: float = 3.4
     mmin: float = 5.0
     mmax: float = 85.0
+    # Logistic edge-taper widths (Msun), matching the inference PowerLaw
+    # component (darksirens.gw.populations sfilter_low/high).  These are part
+    # of the mass-model truth, so the inference model contains it exactly.
+    dm_min: float = 3.0
+    dm_max: float = 10.0
     peak_fraction: float = 0.10
     peak_mu: float = 35.0
     peak_sigma: float = 4.0
@@ -98,15 +105,83 @@ def _sample_sky(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarra
     return ra, dec
 
 
-def _powerlaw_pdf(m: np.ndarray, alpha: float, mmin: float, mmax: float) -> np.ndarray:
-    out = np.zeros_like(m, dtype=float)
-    mask = (m >= mmin) & (m <= mmax)
-    if np.isclose(alpha, 1.0):
-        norm = np.log(mmax / mmin)
-    else:
-        norm = (mmax ** (1.0 - alpha) - mmin ** (1.0 - alpha)) / (1.0 - alpha)
-    out[mask] = m[mask] ** (-alpha) / norm
-    return out
+# --- Inference-matched mass model -------------------------------------------
+# The primary-mass density mirrors the inference ``powerlaw+peak`` model so the
+# fitted model contains the injected truth exactly (no hard-edge vs. tapered
+# mismatch).  ``_sfilter_low``/``_sfilter_high`` are plain-numpy mirrors of
+# darksirens.gw.populations.utils.sfilter_low/sfilter_high (kept numpy-only so
+# this generator stays importable without jax / the darksirens package;
+# tests/test_mock_generator_taper.py asserts they match the jax originals).
+_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+
+# Normalisation grids mirror the inference defaults: mass on [1, 200] Msun and
+# mass ratio on (0, 1] (cf. get_mass_grid / get_q_grid).  Densities are
+# normalised on these grids so the stored ``pdraw`` is exactly the density the
+# samplers draw from.
+_MASS_NORM_GRID = np.linspace(1.0, 200.0, 1024)
+_Q_NORM_GRID = np.linspace(1.0e-3, 1.0, 512)
+
+
+def _sfilter_low(m: np.ndarray, m_min: float, dm: float) -> np.ndarray:
+    """Logistic low-mass taper: 0 for m<=m_min, ramps to 1 over [m_min, m_min+dm]."""
+    m = np.asarray(m, dtype=float)
+    delta = m - m_min
+    safe_d = np.where(delta > 0.0, delta, 1.0)
+    safe_dm = dm if dm > 0.0 else 1.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # delta == dm at one grid point gives 1/0 here; the where-masks below
+        # set the correct boundary value, so the intermediate inf is harmless.
+        expo = np.clip(safe_dm / safe_d + safe_dm / (safe_d - safe_dm), -500.0, 500.0)
+        S = 1.0 / (np.exp(expo) + 1.0)
+    S = np.where(m <= m_min, 0.0, S)
+    S = np.where(m >= m_min + dm, 1.0, S)
+    return S
+
+
+def _sfilter_high(m: np.ndarray, m_max: float, dm: float) -> np.ndarray:
+    """Logistic high-mass taper: 1 below m_max-dm, ramps to 0 over [m_max-dm, m_max]."""
+    m = np.asarray(m, dtype=float)
+    delta = m_max - m
+    safe_d = np.where(delta > 0.0, delta, 1.0)
+    safe_dm = dm if dm > 0.0 else 1.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # delta == dm at one grid point gives 1/0 here; the where-masks below
+        # set the correct boundary value, so the intermediate inf is harmless.
+        expo = np.clip(safe_dm / safe_d + safe_dm / (safe_d - safe_dm), -500.0, 500.0)
+        S = 1.0 / (np.exp(expo) + 1.0)
+    S = np.where(m >= m_max, 0.0, S)
+    S = np.where(m <= m_max - dm, 1.0, S)
+    return S
+
+
+def _powerlaw_unnorm(
+    m: np.ndarray, alpha: float, mmin: float, mmax: float, dm_min: float, dm_max: float
+) -> np.ndarray:
+    """Tapered power law ``S_low(m) * S_high(m) * m**(-alpha)`` (un-normalised)."""
+    m = np.asarray(m, dtype=float)
+    S = _sfilter_low(m, mmin, dm_min) * _sfilter_high(m, mmax, dm_max)
+    return S * np.power(m, -alpha)
+
+
+def _powerlaw_pdf(
+    m: np.ndarray, alpha: float, mmin: float, mmax: float, dm_min: float, dm_max: float
+) -> np.ndarray:
+    """Primary-mass power law with logistic inner-edge tapers, matching the
+    inference ``PowerLaw`` component; normalised by trapezoid on the mass grid."""
+    norm = _trapz(
+        _powerlaw_unnorm(_MASS_NORM_GRID, alpha, mmin, mmax, dm_min, dm_max),
+        _MASS_NORM_GRID,
+    )
+    unnorm = _powerlaw_unnorm(m, alpha, mmin, mmax, dm_min, dm_max)
+    return unnorm / np.where(norm > 0.0, norm, 1.0)
+
+
+def _peak_pdf(m: np.ndarray, mu: float, sigma: float) -> np.ndarray:
+    """Plain Gaussian peak normalised on the mass grid (untruncated, as in the
+    inference ``Gaussian`` component)."""
+    m = np.asarray(m, dtype=float)
+    norm = _trapz(np.exp(-0.5 * ((_MASS_NORM_GRID - mu) / sigma) ** 2), _MASS_NORM_GRID)
+    return np.exp(-0.5 * ((m - mu) / sigma) ** 2) / norm
 
 
 def _truncnorm_pdf(x: np.ndarray, mu: float, sigma: float, lo: float, hi: float) -> np.ndarray:
@@ -125,21 +200,53 @@ def _sample_powerlaw(rng: np.random.Generator, n: int, alpha: float, mmin: float
     return (u * (mmax**a - mmin**a) + mmin**a) ** (1.0 / a)
 
 
+def _sample_truncated_gaussian(
+    rng: np.random.Generator, n: int, mu: float, sigma: float, lo: float, hi: float
+) -> np.ndarray:
+    """Draw ``n`` samples from ``N(mu, sigma)`` truncated to ``[lo, hi]`` (rejection)."""
+    out = np.empty(int(n), dtype=float)
+    filled = 0
+    while filled < n:
+        cand = rng.normal(mu, sigma, max(2 * (n - filled), 64))
+        cand = cand[(cand >= lo) & (cand <= hi)]
+        take = min(len(cand), n - filled)
+        out[filled:filled + take] = cand[:take]
+        filled += take
+    return out
+
+
+def _sample_tapered_powerlaw(rng: np.random.Generator, n: int, pop: PopulationConfig) -> np.ndarray:
+    """Draw ``n`` primary masses from the tapered power law via rejection against
+    the hard power law (accept with probability ``S_low(m) * S_high(m)``)."""
+    out = np.empty(int(n), dtype=float)
+    filled = 0
+    while filled < n:
+        cand = _sample_powerlaw(rng, max(2 * (n - filled), 64), pop.alpha, pop.mmin, pop.mmax)
+        S = _sfilter_low(cand, pop.mmin, pop.dm_min) * _sfilter_high(cand, pop.mmax, pop.dm_max)
+        cand = cand[rng.uniform(size=len(cand)) < S]
+        take = min(len(cand), n - filled)
+        out[filled:filled + take] = cand[:take]
+        filled += take
+    return out
+
+
 def _sample_powerlaw_peak_m1(rng: np.random.Generator, n: int, pop: PopulationConfig) -> np.ndarray:
+    """Primary mass from the tapered power law + Gaussian peak mixture, matching
+    the inference ``powerlaw+peak`` density (``peak_fraction`` weight in the peak)."""
     use_peak = rng.uniform(size=n) < pop.peak_fraction
-    m1 = _sample_powerlaw(rng, n, pop.alpha, pop.mmin, pop.mmax)
+    m1 = np.empty(int(n), dtype=float)
     n_peak = int(use_peak.sum())
+    if n - n_peak:
+        m1[~use_peak] = _sample_tapered_powerlaw(rng, n - n_peak, pop)
     if n_peak:
-        draws = []
-        while sum(map(len, draws)) < n_peak:
-            cand = rng.normal(pop.peak_mu, pop.peak_sigma, n_peak)
-            cand = cand[(cand >= pop.mmin) & (cand <= pop.mmax)]
-            draws.append(cand)
-        m1[use_peak] = np.concatenate(draws)[:n_peak]
+        m1[use_peak] = _sample_truncated_gaussian(
+            rng, n_peak, pop.peak_mu, pop.peak_sigma, _MASS_NORM_GRID[0], _MASS_NORM_GRID[-1]
+        )
     return m1
 
 
-def _sample_q(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
+def _sample_q_hard(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
+    """Inverse-CDF draw from the hard power law ``q**beta`` on ``[m_min/m1, 1]``."""
     qmin = np.clip(pop.mmin / m1, 1.0e-3, 1.0)
     u = rng.uniform(size=len(m1))
     b = pop.beta
@@ -149,16 +256,39 @@ def _sample_q(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig) -
     return (u * (1.0 - qmin**bp1) + qmin**bp1) ** (1.0 / bp1)
 
 
-def _q_pdf(q: np.ndarray, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
-    qmin = np.clip(pop.mmin / m1, 1.0e-3, 1.0)
-    out = np.zeros_like(q, dtype=float)
-    mask = (q >= qmin) & (q <= 1.0)
-    if np.isclose(pop.beta, -1.0):
-        norm = np.log(1.0 / qmin)
-    else:
-        norm = (1.0 - qmin ** (pop.beta + 1.0)) / (pop.beta + 1.0)
-    out[mask] = q[mask] ** pop.beta / norm[mask]
+def _sample_q(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
+    """Mass ratio from ``p(q|m1) propto S_low(m2) q**beta`` (m2 = q*m1), matching
+    the inference pairing model: rejection against the hard ``q**beta`` proposal."""
+    m1 = np.asarray(m1, dtype=float)
+    out = np.empty_like(m1)
+    todo = np.ones(len(m1), dtype=bool)
+    for _ in range(10000):
+        if not todo.any():
+            break
+        idx = np.where(todo)[0]
+        cand = _sample_q_hard(rng, m1[idx], pop)
+        acc = rng.uniform(size=len(cand)) < _sfilter_low(cand * m1[idx], pop.mmin, pop.dm_min)
+        out[idx[acc]] = cand[acc]
+        todo[idx[acc]] = False
+    if todo.any():
+        # Pathological m1 ~ m_min (measure ~0): fall back to the hard draw.
+        idx = np.where(todo)[0]
+        out[idx] = _sample_q_hard(rng, m1[idx], pop)
     return out
+
+
+def _q_pdf(q: np.ndarray, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
+    """``p(q | m1) propto S_low(m2) q**beta`` normalised over q on ``_Q_NORM_GRID``
+    (matches the inference pairing model)."""
+    q = np.atleast_1d(np.asarray(q, dtype=float))
+    m1 = np.atleast_1d(np.asarray(m1, dtype=float))
+    qg = _Q_NORM_GRID
+    m2g = qg[None, :] * m1[:, None]                       # (N, Nq)
+    unnorm_g = (qg[None, :] ** pop.beta) * _sfilter_low(m2g, pop.mmin, pop.dm_min)
+    norm = _trapz(unnorm_g, qg, axis=-1)                  # (N,)
+    unnorm = (q ** pop.beta) * _sfilter_low(q * m1, pop.mmin, pop.dm_min)
+    out = unnorm / np.where(norm > 0.0, norm, 1.0)
+    return np.where((q > 0.0) & (q <= 1.0), out, 0.0)
 
 
 def _sample_chieff(rng: np.random.Generator, n: int, pop: PopulationConfig) -> np.ndarray:
@@ -170,8 +300,8 @@ def _sample_chieff(rng: np.random.Generator, n: int, pop: PopulationConfig) -> n
 
 
 def _mass_spin_pdf(m1: np.ndarray, q: np.ndarray, chi: np.ndarray, pop: PopulationConfig) -> np.ndarray:
-    p_pl = _powerlaw_pdf(m1, pop.alpha, pop.mmin, pop.mmax)
-    p_pk = _truncnorm_pdf(m1, pop.peak_mu, pop.peak_sigma, pop.mmin, pop.mmax)
+    p_pl = _powerlaw_pdf(m1, pop.alpha, pop.mmin, pop.mmax, pop.dm_min, pop.dm_max)
+    p_pk = _peak_pdf(m1, pop.peak_mu, pop.peak_sigma)
     p_m1 = (1.0 - pop.peak_fraction) * p_pl + pop.peak_fraction * p_pk
     p_chi = _truncnorm_pdf(chi, pop.chi_mu, pop.chi_sigma, -1.0, 1.0)
     return p_m1 * _q_pdf(q, m1, pop) * p_chi
