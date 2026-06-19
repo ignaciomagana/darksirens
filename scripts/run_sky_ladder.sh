@@ -23,8 +23,9 @@
 #   overdensity_gp ~195 whitened latents), so nested sampling is SLOW there —
 #   raise NLIVE and expect long runtimes, or trim SKY_MODELS for a quick check.
 # * overdensity_gp (radial clustering) is partly degenerate with the population
-#   redshift slope gamma; set FIX_POP=true for an identifiable measurement
-#   (this drops 'isotropic', which would then have zero free parameters).
+#   redshift slope gamma; set FIX_POP=true for an identifiable measurement.
+#   ('isotropic' then has zero free parameters; run_sampler returns its exact
+#   evidence logZ = logL at the fixed point, so it is kept as the null baseline.)
 set -euo pipefail
 
 OUTDIR="${OUTDIR:-results/sky_ladder}"
@@ -51,8 +52,10 @@ mkdir -p "$DATA"
 extra_fix=""
 if [ "$FIX_POP" = "true" ]; then
     extra_fix="--fix_population true"
-    SKY_MODELS="$(echo "$SKY_MODELS" | tr ' ' '\n' | grep -v '^isotropic$' | tr '\n' ' ')"
-    echo "[ladder] FIX_POP=true -> dropping 'isotropic' (0 free params); models: $SKY_MODELS"
+    # 'isotropic' then has 0 free parameters; run_sampler now returns its exact
+    # evidence (logZ = logL at the fixed point), so it is KEPT as the null
+    # baseline for the Bayes factors rather than dropped.
+    echo "[ladder] FIX_POP=true (isotropic kept as baseline; 0 free params -> exact logZ)"
 fi
 
 echo "==> [1/3] Generating mock with injected 3-D structure (nobs=$NOBS)"

@@ -23,6 +23,33 @@ def run_sampler(method, likelihood, prior_transform, labels,
     ndims = len(labels)
 
     # --------------------------------------------------------
+    # Zero free parameters
+    # --------------------------------------------------------
+    # Every block is fixed (e.g. --sky_model isotropic with
+    # --fix_population --fixed_cosmology, the null model of the sky
+    # ladder).  The prior is then a point mass at the fixed point, so the
+    # evidence is exact: Z = L(theta_fixed)  =>  logZ = logL.  Evaluate the
+    # likelihood once and short-circuit BEFORE any sampler dispatch:
+    # dynesty/jaxns/emcee cannot build a 0-dimensional proposal (dynesty
+    # raises LAPACK "dsyevr: il=1" on the 0x0 bounding ellipsoid), and NUTS
+    # would only burn warmup on an empty model.  This makes the ladder's
+    # null baseline produce an exact logZ for the Bayes-factor comparison.
+    if ndims == 0:
+        log_l_fixed = float(np.asarray(likelihood(jnp.zeros(0))))
+        print(
+            "[*] 0 free parameters (all blocks fixed) - skipping nested "
+            "sampling; evidence is exact at the fixed point.",
+            flush=True,
+        )
+        print(f"    log Z = log L(fixed point) = {log_l_fixed:.6f}", flush=True)
+        return {
+            "samples": np.zeros((1, 0), dtype=float),   # one point, zero free dims
+            "logZ": log_l_fixed,
+            "logZerr": 0.0,                             # delta prior => no MC error
+            "log_likelihood": np.array([log_l_fixed], dtype=float),
+        }
+
+    # --------------------------------------------------------
     # JAXNS
     # --------------------------------------------------------
     if method == "jaxns":
