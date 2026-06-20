@@ -210,6 +210,25 @@ def _grid_integrate(values, grids):
     return out
 
 
+def _broadcast_logp_inputs(m1, q, z, chieff):
+    """Broadcast population-model inputs and flatten the query axes for GP eval.
+
+    Accepts scalars or arbitrarily broadcastable arrays (e.g. a sparse predictive
+    mesh with one non-trivial axis each: ``m1`` ``(Nm,1,1,1)``, ``q``
+    ``(1,Nq,1,1)``, …) and returns the four inputs broadcast to their common
+    shape and raveled to 1-D, plus that common shape so callers can reshape the
+    flat result back.  Scalars give ``out_shape == ()`` with length-1 flats.
+    """
+    m1, q, z, chi = jnp.broadcast_arrays(
+        jnp.asarray(m1, dtype=float),
+        jnp.asarray(q, dtype=float),
+        jnp.asarray(z, dtype=float),
+        jnp.asarray(chieff, dtype=float),
+    )
+    out_shape = m1.shape
+    return m1.ravel(), q.ravel(), z.ravel(), chi.ravel(), out_shape
+
+
 # ============================================================
 # Joint GP population model
 # ============================================================

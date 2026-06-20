@@ -120,12 +120,21 @@ def _load_run_hdf5(run_dir):
     settings = _load_settings(run_dir)
 
     with h5py.File(path, "r") as f:
-        if "samples" not in f:
-            raise KeyError(f"{path} does not contain a 'samples' dataset")
-        samples = f["samples"][()]
+        # Samples: a top-level dataset (current layout), else nested under a
+        # "posterior" group (grouped layout).
+        if "samples" in f:
+            samples = f["samples"][()]
+        elif "posterior" in f and "samples" in f["posterior"]:
+            samples = f["posterior"]["samples"][()]
+        else:
+            raise KeyError(
+                f"{path} does not contain a 'samples' dataset "
+                "(checked the root and the 'posterior' group)"
+            )
         settings = _merge_hdf5_metadata(settings, f)
-        logZ = f.attrs.get("logZ", None)
-        logZerr = f.attrs.get("logZerr", None)
+        # Evidence: canonical attr names with documented aliases.
+        logZ = f.attrs.get("logZ", f.attrs.get("log_evidence", None))
+        logZerr = f.attrs.get("logZerr", f.attrs.get("log_evidence_err", None))
 
     if logZ is not None:
         logZ = float(logZ)
@@ -567,6 +576,16 @@ def print_bayes_factors(labels, log10Zs):
                 print(f"{labels[i]} vs {labels[j]}:  log10 BF = {log10Zs[i] - log10Zs[j]:.3f}")
 
 
+def _should_plot_bayes_factor_matrix(labels, log10Zs):
+    """Whether a pairwise Bayes-factor matrix is meaningful.
+
+    Requires at least two models AND at least two present evidences (a pairwise
+    matrix needs >=2 comparable ``logZ`` values; ``None`` entries are runs with
+    no evidence estimate).
+    """
+    return len(labels) >= 2 and sum(z is not None for z in log10Zs) >= 2
+
+
 def plot_bayes_factor_matrix(labels, log10Zs, log10Zerrs, figsize=(10, 10),
                              cmap_name="coolwarm"):
     n = len(labels)
@@ -831,7 +850,7 @@ def main():
         for label, z, ze in zip(labels, logZs, logZerrs):
             print(f"{label:24s} log10Z = {z} ± {ze}")
         print_bayes_factors(labels, logZs)
-        if len(labels) >= 2 and sum(z is not None for z in logZs) >= 2:
+        if _should_plot_bayes_factor_matrix(labels, logZs):
             fig = plot_bayes_factor_matrix(labels, logZs, logZerrs)
             fig.savefig(out("bayes_factors.pdf"), bbox_inches="tight", dpi=300)
             plt.close(fig)
