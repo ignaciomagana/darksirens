@@ -33,6 +33,8 @@ from darksirens.utils.cosmology import dL_in_z_grid, z_of_dL
         "universe_model",
         "sel_batch_size",
         "sky_model",
+        "mark_model",
+        "mark_names",
     ],
 )
 def darksiren_log_likelihood(
@@ -54,6 +56,9 @@ def darksiren_log_likelihood(
     sel_batch_size: int | None = None,
     sky_model: str = "isotropic",
     sky_params: jnp.ndarray | None = None,
+    mark_model: str = "none",
+    mark_params: jnp.ndarray | None = None,
+    mark_names: tuple = (),
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
@@ -93,11 +98,16 @@ def darksiren_log_likelihood(
     # nor the selection batching recomputes them (the state arrays are
     # loop-invariant operands of the scans).  For ``bright_sirens`` the state
     # is None and the evaluator uses the live per-event catalog.
+    # The marked-host model (eta) reweights the dark-siren catalog prior; pass it
+    # to both states so it is applied identically to the PE and selection terms
+    # (prepare ignores it for non-dark_sirens models).
     prior_state_univ = prepare_redshift_prior_state(
-        universe_model, cosmo, survey, em_catalog_pe
+        universe_model, cosmo, survey, em_catalog_pe,
+        mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
     )
     prior_state_sel = prepare_redshift_prior_state(
-        selection_model, cosmo, survey, em_catalog_sel
+        selection_model, cosmo, survey, em_catalog_sel,
+        mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
     )
 
     # No finite guard on the redshift prior. -inf propagates correctly through

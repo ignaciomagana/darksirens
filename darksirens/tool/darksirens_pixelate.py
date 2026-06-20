@@ -8,6 +8,15 @@ import healpy as hp
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+#: Optional per-galaxy "mark" columns -> EMCatalog mark dataset name.  Read from
+#: the raw catalog if present (for the marked-host model); padded like zgals.
+MARK_INPUT_COLUMNS = {
+    "mark_logmstar": "LOGMSTAR",
+    "mark_logssfr": "LOGSSFR",
+    "mark_metallicity": "LOGZ",
+    "mark_color": "GR_COLOR",
+}
+
 def plot_diagnostics(counts, zs, npix, save_dir, nside):
     """Generates and saves diagnostic plots for the survey data."""
     print("Generating diagnostic plots...")
@@ -45,14 +54,14 @@ def plot_diagnostics(counts, zs, npix, save_dir, nside):
     
     print(f"Plots saved to {save_dir}")
 
-def main():
+def main(argv=None):
     optp = ArgumentParser(description="Process galaxy survey data into HEALPix pixels.")
     optp.add_argument("--survey_path", required=True, help="Path to the input HDF5 survey data")
     optp.add_argument("--save_path", default='./', help="Directory to save the outputs")
     optp.add_argument("--nside", type=int, default=64, help="HEALPix Nside parameter")
     optp.add_argument("--add_plots", action="store_true", help="Generate diagnostic plots")
-    
-    opts = optp.parse_args()
+
+    opts = optp.parse_args(argv)
 
     survey_file = Path(opts.survey_path)
     save_dir = Path(opts.save_path)
@@ -73,6 +82,12 @@ def main():
         zs = np.array(f['Z'])
         ddzs = np.array(f['ZERR'])
         wts = np.array(f['WEIGHT'])
+        marks_in = {
+            ds: np.array(f[col], dtype=float)
+            for ds, col in MARK_INPUT_COLUMNS.items() if col in f
+        }
+    if marks_in:
+        print(f"Found mark columns: {sorted(marks_in)}")
 
     ngals_total = len(ras)
     print(f"Loaded {ngals_total} galaxies.")
@@ -92,16 +107,19 @@ def main():
     cats_out = np.full((npix, maxgals), 100.0, dtype=zs.dtype)
     dzcats_out = np.full((npix, maxgals), 1.0, dtype=ddzs.dtype)
     dwcats_out = np.full((npix, maxgals), 0.0, dtype=wts.dtype)
+    # Marks padded with 0 (masked downstream by ngals; centred at load).
+    marks_out = {ds: np.full((npix, maxgals), 0.0, dtype=float) for ds in marks_in}
 
     # 5. Fast Vectorized Grouping
     print("Grouping galaxies into pixels...")
     sort_idx = np.argsort(ind)
     sorted_ind = ind[sort_idx]
-    
+
     # Sort the data arrays based on pixel index
     sorted_zs = zs[sort_idx]
     sorted_ddzs = ddzs[sort_idx]
     sorted_wts = wts[sort_idx]
+    sorted_marks = {ds: arr[sort_idx] for ds, arr in marks_in.items()}
 
     # Find the boundary indices for each unique pixel
     unique_pix, start_indices = np.unique(sorted_ind, return_index=True)
@@ -111,10 +129,12 @@ def main():
         start = start_indices[i]
         end = start_indices[i+1] if i + 1 < len(start_indices) else len(sorted_ind)
         count = end - start
-        
+
         cats_out[pix, :count] = sorted_zs[start:end]
         dzcats_out[pix, :count] = sorted_ddzs[start:end]
         dwcats_out[pix, :count] = sorted_wts[start:end]
+        for ds in marks_out:
+            marks_out[ds][pix, :count] = sorted_marks[ds][start:end]
 
     # 6. Save outputs
     out_file = save_dir / f'catalog_pixelated_nside_{nside}.h5'
@@ -125,6 +145,10 @@ def main():
         f.create_dataset('dzgals', data=dzcats_out, compression='gzip', shuffle=True)
         f.create_dataset('wgals', data=dwcats_out, compression='gzip', shuffle=True)
         f.create_dataset('ngals', data=counts, compression='gzip', shuffle=True)
+        for ds, arr in marks_out.items():
+            f.create_dataset(ds, data=arr, compression='gzip', shuffle=True)
+    if marks_out:
+        print(f"Wrote mark datasets: {sorted(marks_out)}")
     
     print("Data processing complete!")
 

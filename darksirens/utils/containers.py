@@ -131,6 +131,14 @@ class EMCatalog(NamedTuple):
         else global), ``1`` = compact (index by catalog row), ``2`` = global
         (index by ``unique_pixels[row]``).  Members infer from the *second*
         axis when auto.  The human-readable string lives only in the HDF5 file.
+    mark_logmstar, mark_logssfr, mark_metallicity, mark_color : (N_rows, N_max_gals) or None
+        Optional per-galaxy "marks" — galaxy properties used by the marked-host
+        model (:mod:`darksirens.marks`) to reweight the catalog's contribution to
+        the redshift prior via a BBH-host efficiency ``h(marks | eta)``.  Stored
+        **z-centered** (``x - E[x|z]``, computed on the full catalog at load) so
+        the sampled ``eta`` measure host preference at fixed redshift.  Each field
+        is ``None`` unless that mark was provided; ``mark_model="none"`` (default)
+        ignores them entirely (bit-for-bit legacy behaviour).
     """
     apix: Any
     zgals: Any
@@ -154,6 +162,11 @@ class EMCatalog(NamedTuple):
     lss_completion_logq_members: Any = None  # (M, N_rows|N_pix, N_grid) | None
     lss_completion_q_members: Any = None     # (M, N_rows|N_pix, N_grid) | None
     lss_completion_indexing: Any = 0         # int enum: 0=auto, 1=compact, 2=global
+    # --- marked-host model marks (optional, z-centered; default None = unused) ---
+    mark_logmstar: Any = None       # (N_rows, N_max_gals) | None
+    mark_logssfr: Any = None        # (N_rows, N_max_gals) | None
+    mark_metallicity: Any = None    # (N_rows, N_max_gals) | None
+    mark_color: Any = None          # (N_rows, N_max_gals) | None
 
 
 class GWEvent(NamedTuple):

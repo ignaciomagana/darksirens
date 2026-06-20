@@ -157,6 +157,70 @@ def catalog_kernel_state(
     return CatalogKernelState(log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff)
 
 
+# ------------------------------------------------------------
+# Marked-host kernel state (galaxy marks -> BBH-host efficiency)
+# ------------------------------------------------------------
+
+def _row_marked_kernel_state(zs, dzs, ws, log_h_row, ngal, sigma_kde, log_g_grid):
+    """Per-galaxy kernel quantities for one row using host-efficiency weights.
+
+    Identical to :func:`_row_kernel_state` but the per-pixel-normalised weight is
+    ``w_i·h_i`` (host efficiency ``h_i = exp(log_h_row_i)``) instead of ``w_i``,
+    and the row's marked total ``log_N_host = log Σ_i w_i h_i`` is returned (it
+    replaces the integer count in the assembled prior).  With ``log_h_row ≡ 0``
+    and unit weights this reduces to :func:`_row_kernel_state`.
+    """
+    real = _row_real_mask(zs, ws, ngal)
+    sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
+
+    log_w = jnp.where(real, jnp.log(jnp.maximum(ws, 1e-300)), -jnp.inf)
+    log_wh = jnp.where(real, log_w + log_h_row, -jnp.inf)   # log(w_i h_i)
+    lse = logsumexp(log_wh)                                 # log Σ_i w_i h_i
+    has_galaxies = jnp.isfinite(lse)
+    log_wh_norm = jnp.where(real, log_wh - jnp.where(has_galaxies, lse, 0.0), -jnp.inf)
+
+    log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
+    log_kw = jnp.where(real, log_wh_norm - log_Z, -jnp.inf)
+    log_N_host = jnp.where(has_galaxies, lse, -jnp.inf)
+    return log_kw, sig_eff, log_N_host
+
+
+def marked_catalog_kernel_state(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    log_h: jnp.ndarray,
+    log_g_grid: jnp.ndarray | None = None,
+):
+    """Marked per-galaxy kernel state + per-row marked total ``log_N_host``.
+
+    ``log_h`` is ``(N_rows, N_max_gals)`` per-galaxy log host efficiency (from
+    :mod:`darksirens.marks`).  Returns ``(CatalogKernelState, log_N_host)`` where
+    the state's ``log_kw`` carries the marked (per-pixel-normalised) weights, so
+    the existing per-sample evaluator is reused unchanged.
+    """
+    if log_g_grid is None:
+        log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+    zgals, dzgals, wgals = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals
+    ngals = em_catalog.ngals
+
+    if ngals is not None:
+        per_row = vmap(_row_marked_kernel_state, in_axes=(0, 0, 0, 0, 0, None, None))
+        log_kw, sig_eff, log_N_host = per_row(
+            zgals, dzgals, wgals, log_h, ngals, survey.sigma_kde, log_g_grid
+        )
+    else:
+        per_row = vmap(
+            lambda zs, dzs, ws, lh: _row_marked_kernel_state(
+                zs, dzs, ws, lh, None, survey.sigma_kde, log_g_grid
+            ),
+            in_axes=(0, 0, 0, 0),
+        )
+        log_kw, sig_eff, log_N_host = per_row(zgals, dzgals, wgals, log_h)
+
+    return CatalogKernelState(log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff), log_N_host
+
+
 def eval_log_catalog_prior_state(
     z: float,
     pix: int,

@@ -60,6 +60,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     universe_model = opts.universe_model
     sel_batch_size = getattr(opts, "sel_batch_size", None)
     sky_model = getattr(opts, "sky_model", "isotropic")
+    mark_model = getattr(opts, "mark_model", "none")
+    mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     counterpart_pixel = data.get("counterpart_pixel")
     counterpart_pixels = (
         barrier(jnp.asarray(data["counterpart_pixels"], dtype=jnp.int32))
@@ -111,6 +113,26 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     lss_q_pe, lss_idx_pe = _compact_lss_q(catalogs.unique_pixels_pe)
     lss_q_sel, lss_idx_sel = _compact_lss_q(catalogs.unique_pixels_sel)
 
+    # Per-galaxy marks: gathered to the compact catalog rows using the SAME
+    # unique-pixel map that compacts zgals, so they align row-for-row.  None
+    # (mark absent) flows through to the legacy galaxy-count host model.
+    from darksirens.marks import MARK_FIELDS as _MARK_FIELDS
+
+    def _compact_marks(unique_pixels):
+        out = {}
+        for field in _MARK_FIELDS.values():
+            full = data.get(field)
+            if full is None:
+                out[field] = None
+            else:
+                full = jnp.asarray(full)
+                arr = full if unique_pixels is None else full[jnp.asarray(unique_pixels)]
+                out[field] = barrier(arr)
+        return out
+
+    marks_pe = _compact_marks(catalogs.unique_pixels_pe)
+    marks_sel = _compact_marks(catalogs.unique_pixels_sel)
+
     m1det_pe = barrier(_to_jax(data, "m1det"))
     m2det_pe = barrier(_to_jax(data, "m2det"))
     dL_pe = barrier(_to_jax(data, "dL"))
@@ -140,7 +162,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     )
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
-        cosmo, survey, pop_params, sky_params = parameter_decoder.decode(coord)
+        cosmo, survey, pop_params, sky_params, mark_params = parameter_decoder.decode(coord)
 
         em_catalog_pe = EMCatalog(
             apix=apix,
@@ -161,6 +183,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
             lss_completion_logq=lss_q_pe,
             lss_completion_indexing=lss_idx_pe,
+            mark_logmstar=marks_pe["mark_logmstar"],
+            mark_logssfr=marks_pe["mark_logssfr"],
+            mark_metallicity=marks_pe["mark_metallicity"],
+            mark_color=marks_pe["mark_color"],
         )
         em_catalog_sel = EMCatalog(
             apix=apix,
@@ -181,6 +207,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
             lss_completion_logq=lss_q_sel,
             lss_completion_indexing=lss_idx_sel,
+            mark_logmstar=marks_sel["mark_logmstar"],
+            mark_logssfr=marks_sel["mark_logssfr"],
+            mark_metallicity=marks_sel["mark_metallicity"],
+            mark_color=marks_sel["mark_color"],
         )
 
         gw_pe = GWEvent(
@@ -229,6 +259,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 sel_batch_size=sel_batch_size,
                 sky_model=sky_model,
                 sky_params=sky_params,
+                mark_model=mark_model,
+                mark_params=mark_params,
+                mark_names=mark_names,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -249,6 +282,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             sel_batch_size=sel_batch_size,
             sky_model=sky_model,
             sky_params=sky_params,
+            mark_model=mark_model,
+            mark_params=mark_params,
+            mark_names=mark_names,
         )
 
     return likelihood
