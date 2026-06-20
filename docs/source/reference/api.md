@@ -4,6 +4,11 @@ The public Python API is organized by scientific task.  Most users interact with
 `darksirens` through the command-line programs, but the modules below are also
 intended to be imported by tests, notebooks, and custom inference drivers.
 
+The mathematical framework behind these modules is collected on the
+[Theory & methods](../theory.md) page.  The per-subpackage reference pages listed
+at the bottom document **every** module — a prose-and-equations overview of each,
+followed by the full autodoc API generated from the source docstrings.
+
 ## How to read the reference
 
 - **Container types** in `darksirens.utils.containers` are lightweight named
@@ -53,6 +58,14 @@ intermediate dictionaries by hand.
 
 ```{toctree}
 :maxdepth: 2
+:caption: Module reference
 
-modules
+em
+populations
+inference
+sky
+marks
+lensing
+utils
+tools
 ```

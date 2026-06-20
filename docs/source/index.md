@@ -9,6 +9,7 @@
 installation
 quickstart
 concepts
+theory
 data-formats
 cli
 usage-detailed
@@ -23,7 +24,6 @@ troubleshooting
 :caption: Reference
 
 reference/api
-reference/modules
 ```
 
 ```{toctree}
