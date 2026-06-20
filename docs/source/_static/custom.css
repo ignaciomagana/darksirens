@@ -1,0 +1,25 @@
+/* darksirens documentation — small polish on top of the furo theme. */
+
+/* Give long equations and wide API signatures room to breathe. */
+.math {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.1rem 0;
+}
+
+/* Make autodoc signatures wrap instead of overflowing on narrow screens. */
+dl.py dt {
+    white-space: normal;
+}
+
+/* Slightly tighter, scrollable tables. */
+table.docutils {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+/* Subtle accent for "key equation" admonitions. */
+.admonition.key-equation {
+    border-left: 0.2rem solid var(--color-brand-primary);
+}
