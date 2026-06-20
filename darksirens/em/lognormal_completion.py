@@ -33,6 +33,17 @@ The Laplace ensemble draws approximate posterior samples around the MAP with an
 **FFT-diagonal** Hessian ``H(k) ~= prior_strength / P(k) + bias^2 median(lambda_map)``
 — a robust, deterministic-given-seed approximation (not a full BORG sampler).
 
+Caveats (this is **radial** completion, not 3-D LSS):
+- The field is independent **per pixel** — no angular coupling between
+  neighbouring lines of sight (an angular-coupling upgrade is planned separately).
+- The completeness ``C`` and the fitted ``Q`` come from the **same** observed
+  counts, so ``Q`` is the sub-smoothing radial residual, not a separately
+  identifiable completeness; and the model assumes **missing galaxies trace the
+  observed clustering** along the line of sight (not validatable from the data
+  alone).
+- Built at fixed fiducial cosmology/survey parameters; the GW likelihood consumes
+  the deterministic/posterior-mean ``Q`` (not the fully-marginalised ensemble).
+
 This module uses NumPy/SciPy only.
 """
 from __future__ import annotations

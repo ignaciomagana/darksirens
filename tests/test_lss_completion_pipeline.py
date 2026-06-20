@@ -125,3 +125,18 @@ def test_diagnose_cli_smoke(survey_path, tmp_path):
     diagnose_main(["--catalog", path, "--lss-completion", qfile,
                    "--pixel", "2", "--outdir", str(outdir)])
     assert (outdir / "lss_completion_pixel2.pdf").exists()
+
+
+def test_build_occupied_only_and_uniform_chi(survey_path):
+    """Tier-2: build only occupied pixels (empties -> logQ=0) on a uniform-chi grid."""
+    path, npix = survey_path
+    logq_map, _, diag = build_completion(path, n_members=0, maxiter=40)
+    assert logq_map.shape == (npix, NG)
+    assert np.all(np.isfinite(logq_map))
+    assert 0 < diag["n_occupied"] <= npix
+    assert diag["dchi_uniform_mpc"] > 0.0          # uniform comoving-distance grid
+    with h5py.File(path, "r") as f:
+        ng = np.asarray(f["ngals"])
+    empty = ng == 0
+    assert empty.any()
+    assert np.allclose(logq_map[empty], 0.0)       # empty pixels -> Q = 1

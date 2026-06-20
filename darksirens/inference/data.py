@@ -397,13 +397,30 @@ def load_all_data(opts):
             raise ValueError(
                 "LSS completion zgrid does not match the package zgrid (no silent interpolation)."
             )
-        lss_completion_logq = jnp.asarray(logq)
+        # Keep the full global table HOST-side (numpy); the likelihood slices it
+        # to the union(PE,selection) pixels so only that compact block reaches
+        # the device / jit (avoids capturing the full (n_pix, n_grid) table).
+        lss_completion_logq = np.asarray(logq)
         lss_completion_indexing = {"compact": 1, "global": 2}.get(
             str(loaded.get("indexing", "compact")), 0
         )
         print(
             f"    - LSS completion loaded from {lss_path}: logq_map {tuple(logq.shape)}, "
             f"indexing={loaded.get('indexing')}"
+        )
+        _diag = loaded.get("diagnostics") or {}
+        _fid = {k: _diag[k] for k in (
+            "fiducial_H0", "fiducial_Om0", "fiducial_n0", "fiducial_delta",
+            "bias_b_miss", "lss_corr_length_mpc", "lss_sigma",
+        ) if k in _diag}
+        if _fid:
+            print(f"    - Q_LSS build fiducials: {_fid}")
+        print(
+            "    [!] Q_LSS is FIXED at its build-time fiducials (cosmology, n0, "
+            "delta, bias); the inference will vary some of these. Q is a "
+            "radial completion field on the SAME zgrid (validated), interpreted "
+            "as a dimensionless density-ratio. Rebuild Q if your fiducials differ "
+            "substantially."
         )
     data["lss_completion_logq"] = lss_completion_logq
     data["lss_completion_indexing"] = lss_completion_indexing

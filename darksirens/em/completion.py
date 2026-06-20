@@ -371,6 +371,12 @@ def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
             idx = jnp.arange(n_rows, dtype=jnp.int32)
         else:
             idx = jnp.asarray(em_catalog.unique_pixels, dtype=jnp.int32)
+        if int(idx.max()) >= K:
+            raise ValueError(
+                f"global LSS completion table has {K} rows but a catalog pixel index "
+                f"reaches {int(idx.max())}; the table does not cover all catalog pixels "
+                "(rebuild Q over the full nside, or pass a compact table)."
+            )
         return jnp.take(table, idx, axis=row_axis)
 
     q_det = _to_q(logq, q)        # (K, N_grid) | None
@@ -538,15 +544,18 @@ def _completion_clip_fractions_for_pixel(
     grids: _CompletionGrids,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    q_row=None,
 ) -> dict[str, float]:
     """Clipping fractions on ``zgrid`` for one catalog row.
 
-    Mirrors ``_completion_curves_row`` while keeping the pre-clipped
-    arrays.  Key names are retained from the previous model for JSON
-    compatibility: ``C_iso_clipped_fraction`` is the raw-ratio clip,
-    ``rho_miss_eff_clipped_fraction`` is the fraction of the grid where
-    the LSS factor (1 + b_eff*delta_g) < 0, and ``C_eff_clipped_fraction``
-    is the effective-completeness clip.
+    ``C_iso_clipped_fraction`` is the raw-ratio clip and
+    ``C_eff_clipped_fraction`` the effective-completeness clip (both always
+    valid).  ``rho_miss_eff_clipped_fraction`` depends on the missing-galaxy
+    rate factor: for the legacy local-overdensity model it is the fraction where
+    ``1 + b_eff*delta_g < 0``; for an LSS-conditioned ``Q_LSS`` table (``q_row``
+    supplied, the row-aligned ``(N_grid,)`` factor) ``Q >= 0`` always, so it is
+    instead the fraction where ``logQ`` hit the ``±_LOGQ_CLIP`` bound.
+    ``lss_source`` records which factor was used.
     """
     global_pix = pix if em_catalog.unique_pixels is None else em_catalog.unique_pixels[pix]
 
@@ -563,15 +572,24 @@ def _completion_clip_fractions_for_pixel(
     C_clipped_mask = (C_raw < 0.0) | (C_raw > 1.0)
     C = jnp.clip(C_raw, 0.0, 1.0)
 
-    b_eff = survey.alpha_miss * survey.b_miss
-    if em_catalog.delta_g_pix_z.shape[0] == 1:
-        delta_g_z = em_catalog.delta_g_pix_z[0]
+    if q_row is not None:
+        lss = q_row[pix]                       # row-aligned Q_LSS factor (>= 0)
+        lss_source = "Q_LSS"
+        q_hi = float(jnp.exp(_LOGQ_CLIP)) * (1.0 - 1e-6)
+        q_lo = float(jnp.exp(-_LOGQ_CLIP)) * (1.0 + 1e-6)
+        lss_clipped_mask = (lss >= q_hi) | (lss <= q_lo)
     else:
-        delta_g_z = em_catalog.delta_g_pix_z[global_pix]
-    lss_raw = 1.0 + b_eff * delta_g_z
-    lss_clipped_mask = lss_raw < 0.0
+        b_eff = survey.alpha_miss * survey.b_miss
+        if em_catalog.delta_g_pix_z.shape[0] == 1:
+            delta_g_z = em_catalog.delta_g_pix_z[0]
+        else:
+            delta_g_z = em_catalog.delta_g_pix_z[global_pix]
+        lss_raw = 1.0 + b_eff * delta_g_z
+        lss = jnp.maximum(lss_raw, 0.0)
+        lss_source = "legacy_delta_g"
+        lss_clipped_mask = lss_raw < 0.0
 
-    dN_miss = (1.0 - C) * grids.dN_exp * jnp.maximum(lss_raw, 0.0)
+    dN_miss = (1.0 - C) * grids.dN_exp * lss
     dN_exp_pos = jnp.where(grids.dN_exp > 0.0, grids.dN_exp, 1.0)
     C_eff_raw = 1.0 - dN_miss / dN_exp_pos
     C_eff_clipped_mask = (C_eff_raw < 0.0) | (C_eff_raw > 1.0)
@@ -580,6 +598,7 @@ def _completion_clip_fractions_for_pixel(
         "C_iso_clipped_fraction": float(jnp.mean(C_clipped_mask)),
         "C_eff_clipped_fraction": float(jnp.mean(C_eff_clipped_mask)),
         "rho_miss_eff_clipped_fraction": float(jnp.mean(lss_clipped_mask)),
+        "lss_source": lss_source,
     }
 
 
@@ -592,6 +611,9 @@ def completion_clip_diagnostics(
 ) -> dict[str, object]:
     """Summarise completion clipping over a representative pixel set."""
     grids = _precompute_grids(cosmo, survey, em_catalog)
+    # Q_LSS-aware: resolve the (optional) completion table once and report the
+    # Q-clip instead of the (inapplicable) delta_g-negativity when it is present.
+    q_row, _ = _resolve_lss_completion_row_tables(em_catalog)
 
     if pixels is None:
         if em_catalog.unique_pixels is not None:
@@ -607,7 +629,7 @@ def completion_clip_diagnostics(
     per_pixel = []
     for pix in pixels_np:
         fractions = _completion_clip_fractions_for_pixel(
-            int(pix), grids, survey, em_catalog
+            int(pix), grids, survey, em_catalog, q_row=q_row
         )
         fractions["pixel"] = int(pix)
         if em_catalog.unique_pixels is not None:
@@ -624,6 +646,7 @@ def completion_clip_diagnostics(
         "z_min": float(zgrid[0]),
         "z_max": float(zgrid[-1]),
         "n_pixels_checked": int(len(per_pixel)),
+        "lss_source": "Q_LSS" if q_row is not None else "legacy_delta_g",
         "per_pixel": per_pixel,
     }
     for field in fields:
@@ -638,26 +661,14 @@ def completion_clip_diagnostics(
 # Public scalar / vmapped API (checks & diagnostics; slow path)
 # ------------------------------------------------------------
 
-def _catalog_completion_inner(
-    z: float,
-    pix: int,
-    grids: _CompletionGrids,
-    survey: SurveyParams,
-    em_catalog: EMCatalog,
-):
-    """Evaluate (f, p_miss(z), C_eff(z)) at a single (z, pix) point."""
-    f, dN_miss, C_eff, N_miss = _completion_curves_row(pix, grids, survey, em_catalog)
-    norm = jnp.where(N_miss > 0.0, N_miss, 1.0)
-    p_miss_grid = dN_miss / norm
-    return f, jnp.interp(z, zgrid, p_miss_grid), jnp.interp(z, zgrid, C_eff)
+def _curves_scalar(z, pix, curves: CompletionCurves):
+    """Interpolate ``(f, p_miss(z), C_eff(z))`` from precomputed per-row curves."""
+    nm = jnp.where(curves.N_miss[pix] > 0.0, curves.N_miss[pix], 1.0)
+    p_miss = jnp.interp(z, zgrid, curves.dN_miss[pix] / nm)
+    C_eff = jnp.interp(z, zgrid, curves.C_eff[pix])
+    return curves.f[pix], p_miss, C_eff
 
 
-_catalog_completion_inner_vmap = vmap(
-    _catalog_completion_inner, in_axes=(0, 0, None, None, None), out_axes=(0, 0, 0)
-)
-
-
-@jit
 def catalog_completion(
     z: float,
     pix: int,
@@ -668,17 +679,21 @@ def catalog_completion(
     """
     Characterise catalog incompleteness at a single (z, pix) point.
 
+    **Q_LSS-aware**: delegates to :func:`completion_curves` (the single source of
+    truth that applies any LSS-conditioned completion table), then interpolates
+    the per-row curve at ``z``.  Eager / diagnostic slow path (NOT jitted — the
+    hot likelihood uses ``completion_curves`` via ``darksirens.em.prior``).
+
     Returns
     -------
     f : float — scalar number-weighted completeness fraction (diagnostic).
     p_miss : float — normalised missing-galaxy PDF at z.
     C : float — effective completeness C_eff(z|pix).
     """
-    grids = _precompute_grids(cosmo, survey, em_catalog)
-    return _catalog_completion_inner(z, pix, grids, survey, em_catalog)
+    curves = completion_curves(cosmo, survey, em_catalog)
+    return _curves_scalar(z, jnp.asarray(pix), curves)
 
 
-@jit
 def catalog_completion_vmap(
     z: jnp.ndarray,
     pix: jnp.ndarray,
@@ -688,12 +703,14 @@ def catalog_completion_vmap(
 ):
     """Vectorised ``catalog_completion`` over arrays of (z, pix) pairs.
 
-    Note: recomputes the per-row curves for every sample; intended for
-    checks/diagnostics.  Hot paths use ``completion_curves`` via the
-    state API in ``darksirens.em.prior``.
+    Q_LSS-aware (delegates to ``completion_curves``); eager / diagnostic slow
+    path.  Hot paths use ``completion_curves`` via the state API in
+    ``darksirens.em.prior``.
     """
-    grids = _precompute_grids(cosmo, survey, em_catalog)
-    return _catalog_completion_inner_vmap(z, pix, grids, survey, em_catalog)
+    curves = completion_curves(cosmo, survey, em_catalog)
+    z = jnp.asarray(z)
+    pix = jnp.asarray(pix)
+    return vmap(lambda z_i, p_i: _curves_scalar(z_i, p_i, curves))(z, pix)
 
 
 # ------------------------------------------------------------

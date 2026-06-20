@@ -283,8 +283,9 @@ def prepare_catalog_views(
 
     delta_g_pix_z = barrier(_to_jax(data, "delta_g_pix_z"))
 
-    _lss_logq = data.get("lss_completion_logq")
-    lss_completion_logq = None if _lss_logq is None else barrier(jnp.asarray(_lss_logq))
+    # Carry the (global) Q table HOST-side, unbarriered: likelihood.py slices it
+    # to the per-view union pixels so only the compact block reaches the device.
+    lss_completion_logq = data.get("lss_completion_logq")
     lss_completion_indexing = int(data.get("lss_completion_indexing", 0))
 
     dN_obs_kde_pe = dN_obs_kde_sel = None

@@ -75,6 +75,8 @@ log L(Lambda) ≈ logsumexp_m log L(Lambda; Q_m) - log M,
 
 which is **not** performed inside the GW likelihood in this implementation (member support is exposed through prior-state diagnostics).
 
+**Scope & caveats (experimental — read before using as a science result).** This is a **radial, per-pixel** lognormal completion: each HEALPix line of sight is an independent 1-D field along comoving distance, so it does **not** borrow information angularly between neighbouring pixels (it is not a 3-D `P(k)`-conditioned reconstruction — a genuine angular-coupling upgrade is planned separately). The GW likelihood uses the **deterministic / posterior-mean** `Q` (not the fully-marginalised `logsumexp_m`), so it is not yet Bayesian over field uncertainty. The completeness `C = dN_obs/dN_exp` and the fitted `Q` are both derived from the **same** observed counts, so `Q` is the sub-smoothing **radial residual** rather than a separately-identifiable completeness; and the whole construction assumes **missing galaxies trace the observed clustering** along the line of sight — an assumption the data alone cannot validate. `Q` is built at **fixed fiducial** cosmology/survey parameters (printed + stored at load) while inference varies them. Treat results as exploratory.
+
 ## Minimal installation
 
 ```bash

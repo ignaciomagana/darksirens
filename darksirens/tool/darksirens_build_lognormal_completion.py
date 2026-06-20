@@ -34,7 +34,7 @@ from darksirens.em import zgrid
 from darksirens.em.utils import load_survey
 from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial
-from darksirens.em.completion import _precompute_grids, _kde_dndz_obs, _TRAPW_NP
+from darksirens.em.completion import _precompute_grids, _kde_dndz_obs
 from darksirens.em.lognormal_completion import (
     gaussian_correlation_spectrum,
     poisson_lognormal_map,
@@ -58,6 +58,17 @@ def _zgrid_bin_edges() -> np.ndarray:
     z = np.asarray(zgrid, dtype=float)
     mids = 0.5 * (z[:-1] + z[1:])
     return np.concatenate([[z[0]], mids, [z[-1]]])
+
+
+def _rebin_counts_to_uniform(counts_z, chi, chi_u):
+    """Reassign per-zgrid-bin counts to the uniform-chi bin each point falls in
+    (conserves the total, unlike interpolation)."""
+    n = chi_u.size
+    dchi_u = (chi_u[1] - chi_u[0]) if n > 1 else 1.0
+    idx = np.clip(np.round((chi - chi_u[0]) / dchi_u).astype(int), 0, n - 1)
+    out = np.zeros(n, dtype=float)
+    np.add.at(out, idx, counts_z)
+    return out
 
 
 def build_completion(
@@ -85,39 +96,56 @@ def build_completion(
     grids = _precompute_grids(cosmo, survey, em)
     dN_exp_density = np.asarray(grids.dN_exp, dtype=float)
     dN_exp_smooth = np.asarray(grids.dN_exp_smooth, dtype=float)
-    dN_exp_count = dN_exp_density * _TRAPW_NP  # expected detected counts per z-bin
-
-    # Observed completeness (matched-kernel ratio) and binned counts per pixel.
+    safe_smooth = np.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
     edges = _zgrid_bin_edges()
     ngals_np = np.asarray(ngals).astype(int)
     zgals_np = np.asarray(zgals, dtype=float)
-    C = np.empty((n_pix, n_grid), dtype=float)
-    N_obs = np.zeros((n_pix, n_grid), dtype=float)
-    safe_smooth = np.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
-    for r in range(n_pix):
-        dN_obs_s = np.asarray(_kde_dndz_obs(r, em.zgals, ngals=em.ngals), dtype=float)
-        C[r] = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
-        zs = zgals_np[r, : ngals_np[r]]
-        if zs.size:
-            N_obs[r], _ = np.histogram(zs, bins=edges)
 
-    # Built-in Gaussian-correlation P(k): correlation length (Mpc) -> grid units.
+    # Grid-aware P(k): solve on a UNIFORM comoving-distance grid so the Gaussian
+    # correlation length is constant in Mpc (zgrid is log-spaced ⇒ Δχ varies).
     chi = np.asarray(r_of_z(jnp.asarray(zgrid), cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa), dtype=float)
-    dchi = np.diff(chi)
-    med_dchi = float(np.median(dchi[dchi > 0.0])) if np.any(dchi > 0.0) else 1.0
-    ell_grid = float(survey.lss_corr_length_mpc) / max(med_dchi, 1e-6)
+    chi_u = np.linspace(float(chi[0]), float(chi[-1]), n_grid)
+    dchi_u = float(chi_u[1] - chi_u[0]) if n_grid > 1 else 1.0
+    ell_grid = float(survey.lss_corr_length_mpc) / max(dchi_u, 1e-6)  # now constant in Mpc
     pk = gaussian_correlation_spectrum(n_grid, ell_grid, float(survey.lss_sigma))
+    dN_exp_count_u = np.interp(chi_u, chi, dN_exp_density) * dchi_u  # expected counts / χ-bin
+
+    # Build only OCCUPIED pixels (DESI footprints are mostly empty ⇒ huge speedup);
+    # empty pixels get logQ = 0 (Q = 1, homogeneous) by the zero-init below.
+    occ = np.nonzero(ngals_np > 0)[0]
+    n_occ = int(occ.size)
+    C_u = np.empty((n_occ, n_grid), dtype=float)
+    N_obs_u = np.zeros((n_occ, n_grid), dtype=float)
+    for i, r in enumerate(occ):
+        dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+        C_u[i] = np.clip(np.interp(chi_u, chi, dN_obs_s / safe_smooth), 0.0, 1.0)
+        zs = zgals_np[r, : ngals_np[r]]
+        counts_z, _ = np.histogram(zs, bins=edges)
+        N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
 
     bias = float(survey.b_miss)
     mp = poisson_lognormal_map(
-        N_obs, C, dN_exp_count, pk,
+        N_obs_u, C_u, dN_exp_count_u, pk,
         bias=bias, prior_strength=prior_strength, maxiter=maxiter,
     )
+    # Map logQ back from uniform-χ to zgrid and scatter occupied rows into the
+    # full (n_pix, n_grid) table (empties stay logQ = 0).
+    logq_map = np.zeros((n_pix, n_grid), dtype=float)
+    for i, r in enumerate(occ):
+        logq_map[r] = np.interp(chi, chi_u, mp["logq_map"][i])
+
     diagnostics = dict(mp["diagnostics"])
     diagnostics.update({
-        "nside": int(nside), "n_pix": n_pix, "ell_grid": ell_grid,
+        "nside": int(nside), "n_pix": n_pix, "n_occupied": n_occ,
+        "ell_grid_uniform_chi": ell_grid, "dchi_uniform_mpc": dchi_u,
         "lss_corr_length_mpc": float(survey.lss_corr_length_mpc),
-        "lss_sigma": float(survey.lss_sigma), "median_dchi_mpc": med_dchi,
+        "lss_sigma": float(survey.lss_sigma),
+        # Fixed fiducials Q was built at (inference varies these — see the warning
+        # printed at load): cosmology, density/evolution, and the field bias.
+        "fiducial_H0": float(cosmo.H0), "fiducial_Om0": float(cosmo.Om0),
+        "fiducial_w0": float(cosmo.w0), "fiducial_wa": float(cosmo.wa),
+        "fiducial_n0": float(survey.n0), "fiducial_delta": float(survey.delta),
+        "bias_b_miss": float(survey.b_miss),
     })
 
     logq_members = None
@@ -126,10 +154,15 @@ def build_completion(
             mp["s_map"], mp["lambda_map"], pk,
             n_members=int(n_members), bias=bias, prior_strength=prior_strength, seed=int(seed),
         )
-        logq_members = members["logq_members"]
+        lm_u = members["logq_members"]                       # (M, n_occ, n_grid) on χ_u
+        M = int(n_members)
+        logq_members = np.zeros((M, n_pix, n_grid), dtype=float)
+        for i, r in enumerate(occ):
+            for m in range(M):
+                logq_members[m, r] = np.interp(chi, chi_u, lm_u[m, i])
         diagnostics.update(members["diagnostics"])
 
-    return mp["logq_map"], logq_members, diagnostics
+    return logq_map, logq_members, diagnostics
 
 
 def main(argv=None):

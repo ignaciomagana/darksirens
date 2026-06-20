@@ -13,7 +13,9 @@ import jax.numpy as jnp
 
 from darksirens.em import zgrid
 from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
-from darksirens.em.completion import completion_curves, build_pixel_kde_cache
+from darksirens.em.completion import (
+    completion_curves, build_pixel_kde_cache, catalog_completion, completion_clip_diagnostics,
+)
 from darksirens.em.prior import (
     prepare_redshift_prior_state,
     eval_redshift_prior_with_state,
@@ -258,3 +260,37 @@ def test_completion_hdf5_roundtrip(tmp_path):
     assert d["model"] == "poisson_lognormal"
     assert d["completion_kind"] == "laplace_members"
     assert d["diagnostics"]["n_members"] == 4
+
+
+# ------------------------------------------------------------
+# Tier 1+2 hardening: Q-aware diagnostics, bounds, builder
+# ------------------------------------------------------------
+
+def test_catalog_completion_respects_Q():
+    """The scalar diagnostic must use Q (not the legacy factor): Q=2 doubles the
+    missing density, so the completeness fraction f changes."""
+    cat0 = _tiny_catalog()  # no Q -> legacy (b_miss=0 -> factor 1)
+    catq = _tiny_catalog(lss_completion_logq=jnp.full((2, NG), np.log(2.0)))
+    z = jnp.asarray(0.12)
+    pix = jnp.asarray(0, jnp.int32)
+    f0, _, _ = catalog_completion(z, pix, COSMO, SURVEY_B0, cat0)
+    fq, _, _ = catalog_completion(z, pix, COSMO, SURVEY_B0, catq)
+    assert not np.isclose(float(f0), float(fq))
+
+
+def test_clip_diagnostics_reports_lss_source():
+    q = completion_clip_diagnostics(
+        COSMO, SURVEY_B0, _tiny_catalog(lss_completion_logq=jnp.zeros((2, NG)))
+    )
+    assert q["lss_source"] == "Q_LSS"
+    base = completion_clip_diagnostics(COSMO, SURVEY_B0, _tiny_catalog())
+    assert base["lss_source"] == "legacy_delta_g"
+
+
+def test_global_Q_too_few_rows_raises():
+    gt = np.zeros((3, NG))  # 3 rows, but pixel ids reach 5
+    cat = _tiny_catalog(
+        unique_pixels=[5, 2], lss_completion_logq=jnp.asarray(gt), lss_completion_indexing=2
+    )
+    with pytest.raises(ValueError, match="reaches|does not cover"):
+        completion_curves(COSMO, SURVEY_B0, cat)
