@@ -31,15 +31,19 @@ class SurveyParams(NamedTuple):
     policy (zero probability), while ``1`` enables a volume-prior robustness
     approximation.
 
-    ``lss_corr_length_mpc`` and ``lss_sigma`` are **fixed** hyperparameters of
-    the offline LSS-conditioned lognormal completion builder
-    (:mod:`darksirens.em.lognormal_completion`): the comoving correlation
-    length [Mpc] and the latent-Gaussian field standard deviation of the
-    per-pixel 1-D Poisson-lognormal model.  They parameterise the built-in
-    Gaussian-correlation power spectrum and are **never marginalised over** —
-    the GW likelihood does not read them; only the offline builder does (the
-    bias of the field reuses ``b_miss``).  They are deliberately excluded from
-    the sampled parameter space.
+    ``lss_corr_length_mpc``, ``lss_sigma`` and ``lss_corr_length_ang`` are
+    **fixed** hyperparameters of the offline LSS-conditioned lognormal
+    completion builder (:mod:`darksirens.em.lognormal_completion`): the radial
+    comoving correlation length [Mpc], the latent-Gaussian field standard
+    deviation, and (for the 3-D angular-coupling ``mode="gp3d"`` builder only)
+    the **angular** correlation length in chordal units on the unit sphere
+    (``ls_sph`` of the (sphere x z) GP; the chordal distance between two unit
+    vectors lies in ``[0, 2]``, so an angular correlation length ``ell``
+    corresponds to ``~2 arcsin(ell/2)``).  They parameterise the completion
+    field and are **never marginalised over** — the GW likelihood does not read
+    them; only the offline builder does (the bias of the field reuses
+    ``b_miss``).  They are deliberately excluded from the sampled parameter
+    space.
     """
     n0: Any
     z50: Any
@@ -51,6 +55,7 @@ class SurveyParams(NamedTuple):
     complete_empty_pixel_policy: Any = 0
     lss_corr_length_mpc: Any = 50.0
     lss_sigma: Any = 1.0
+    lss_corr_length_ang: Any = 0.2
 
 
 class EMCatalog(NamedTuple):

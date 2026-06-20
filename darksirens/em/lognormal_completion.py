@@ -33,9 +33,13 @@ The Laplace ensemble draws approximate posterior samples around the MAP with an
 **FFT-diagonal** Hessian ``H(k) ~= prior_strength / P(k) + bias^2 median(lambda_map)``
 — a robust, deterministic-given-seed approximation (not a full BORG sampler).
 
-Caveats (this is **radial** completion, not 3-D LSS):
+Caveats (the default **radial** completion, ``mode="radial"``):
 - The field is independent **per pixel** — no angular coupling between
-  neighbouring lines of sight (an angular-coupling upgrade is planned separately).
+  neighbouring lines of sight.  The 3-D angular-coupling builder
+  (``mode="gp3d"``; :func:`build_lowrank_operator` /
+  :func:`poisson_lognormal_gp3d_map` / :func:`eval_logq_gp3d` below) lifts this:
+  it solves ONE low-rank field over occupied (pixel x z) voxels with the
+  (sphere x z) GP so empty pixels borrow angularly from their neighbours.
 - The completeness ``C`` and the fitted ``Q`` come from the **same** observed
   counts, so ``Q`` is the sub-smoothing radial residual, not a separately
   identifiable completeness; and the model assumes **missing galaxies trace the
@@ -44,7 +48,9 @@ Caveats (this is **radial** completion, not 3-D LSS):
 - Built at fixed fiducial cosmology/survey parameters; the GW likelihood consumes
   the deterministic/posterior-mean ``Q`` (not the fully-marginalised ensemble).
 
-This module uses NumPy/SciPy only.
+The radial builder uses NumPy/SciPy only; the gp3d builder additionally uses
+JAX and the (sphere x z) GP of :mod:`darksirens.sky.models`, both imported
+lazily so importing this module for the radial API never requires JAX.
 """
 from __future__ import annotations
 
@@ -280,6 +286,358 @@ def laplace_lognormal_members(
             "seed": (None if seed is None else int(seed)),
         },
     }
+
+
+# ------------------------------------------------------------
+# 3-D angular-coupling (mode="gp3d"): ONE low-rank Poisson-lognormal field over
+# occupied (pixel x z) voxels, reusing the (sphere x z) GP
+# ------------------------------------------------------------
+#
+# The radial builder above solves an INDEPENDENT 1-D field per pixel.  The gp3d
+# builder instead solves a SINGLE field over all occupied (pixel x z) voxels,
+# coupled by the whitened finite-rank (sphere x z) GP of
+# :mod:`darksirens.sky.models` (chordal-RBF on n-hat x RBF on zeta=log1p(z),
+# Fibonacci-sphere x z inducing nodes).  Because the field is
+#     f(x) = k(x, Z) @ L^{-T} xi = Phi @ xi   (Phi = k(x,Z) L^{-T}, xi ~ N(0,I)),
+# it is LINEAR in the M~192 whitened latents xi, so the Poisson-lognormal MAP is
+# a SINGLE convex GLM (Newton over an M x M Hessian) instead of a per-pixel loop.
+# The output table is the Laplace POSTERIOR-MEAN E[Q] (:func:`eval_logq_gp3d`):
+# under-observed pixels BORROW angularly from neighbours, and pixels far from any
+# data read as exactly Q=1 (there the posterior variance equals the prior
+# variance, so the lognormal-mean and the mean-one shift cancel).
+
+
+def _require_jax_kernel():
+    """Lazy import of JAX + the (sphere x z) GP kernel for the gp3d builder.
+
+    Reuses the EXACT kernel and inducing-node geometry of the online sky model
+    (:func:`darksirens.sky.models._sphere_z_kernel`,
+    :func:`darksirens.sky.models._fibonacci_sphere`) so the offline completion
+    field and the online sky field share one construction.  Enables float64
+    (``jax_enable_x64``) defensively — the chordal/zeta kernel + Cholesky need
+    double precision and a direct caller (e.g. a unit test) may not have imported
+    a module that already set it.  Kept out of the module import so the radial
+    NumPy/SciPy API never requires JAX.
+    """
+    try:
+        import jax
+        jax.config.update("jax_enable_x64", True)
+        import jax.numpy as jnp
+        import jax.scipy.linalg as jsl
+        from darksirens.sky.models import _sphere_z_kernel, _fibonacci_sphere
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise ImportError(
+            "The 3-D angular-coupling completion (mode='gp3d') requires JAX and "
+            "darksirens.sky.models. Install jax to use the gp3d builder, or use "
+            "the radial builder (mode='radial')."
+        ) from exc
+    return jnp, jsl, _sphere_z_kernel, _fibonacci_sphere
+
+
+def lowrank_inducing_nodes(n_inducing_sphere: int = 32, n_inducing_z: int = 6,
+                           z_node_hi: float = 3.0):
+    """Inducing nodes ``(Zn, Zz)`` of the (sphere x z) GP.
+
+    IDENTICAL to :class:`darksirens.sky.models._SphereZGPBase`: a Fibonacci
+    sphere (``M_sph`` points) crossed with ``linspace(0, log1p(z_node_hi), M_z)``
+    in ``zeta = log1p(z)``, flattened with ordering ``i = i_sph * M_z + i_z`` so
+    the offline builder and the online sky GP agree node-for-node (asserted in
+    the tests).
+
+    Returns
+    -------
+    Zn : (M, 3) unit-vector sphere coordinates of the nodes.
+    Zz : (M,)   ``zeta = log1p(z)`` coordinates of the nodes.
+    """
+    jnp, _, _, _fibonacci_sphere = _require_jax_kernel()
+    M_sph = int(n_inducing_sphere)
+    M_z = int(n_inducing_z)
+    Z_sph = _fibonacci_sphere(M_sph)                                   # (M_sph, 3)
+    zeta_nodes = jnp.linspace(0.0, float(jnp.log1p(z_node_hi)), M_z)   # (M_z,)
+    Zn = jnp.repeat(Z_sph, M_z, axis=0)                               # (M, 3)
+    Zz = jnp.tile(zeta_nodes, M_sph)                                  # (M,)
+    return Zn, Zz
+
+
+def build_lowrank_operator(Zn, Zz, X_n, X_z, *, amp, ls_sph, ls_z,
+                           jitter_rel: float = 1e-4, jitter_abs: float = 1e-9):
+    """Whitened finite-rank GP design matrix ``Phi`` and Cholesky factor ``L``.
+
+    With ``K = k(Z,Z) + jitter I`` and ``L = chol(K)``, returns
+    ``Phi = k(X, Z) @ L^{-T}`` (shape ``(V, M)``) so the field at the voxels is
+    ``f = Phi @ xi`` for whitened latents ``xi ~ N(0, I)`` — the EXACT
+    construction of :meth:`_SphereZGPBase._field` (there ``alpha = L^{-T} xi``,
+    ``f = k(X,Z) @ alpha``).  ``sum(Phi**2, axis=1) = k(x,Z) K^{-1} k(Z,x)`` is
+    the per-voxel prior (Nystrom) variance used for the mean-one shift.
+
+    ``jitter = jitter_rel * amp**2 + jitter_abs`` matches the GP's own floor.
+    """
+    jnp, jsl, _sphere_z_kernel, _ = _require_jax_kernel()
+    M = int(Zn.shape[0])
+    jitter = jitter_rel * float(amp) ** 2 + jitter_abs
+    K = _sphere_z_kernel(Zn, Zz, Zn, Zz, amp, ls_sph, ls_z) + jitter * jnp.eye(M)
+    L = jnp.linalg.cholesky(K)
+    Kxz = _sphere_z_kernel(X_n, X_z, Zn, Zz, amp, ls_sph, ls_z)        # (V, M)
+    # Phi = Kxz @ L^{-T}.  solve_triangular(L, Kxz.T, lower=True) = L^{-1} Kxz.T,
+    # whose transpose is Kxz @ L^{-T}.
+    Phi = jsl.solve_triangular(L, Kxz.T, lower=True).T                 # (V, M)
+    return Phi, L
+
+
+def poisson_lognormal_gp3d_map(
+    N_obs,
+    base,
+    Phi,
+    *,
+    bias: float = 1.0,
+    sigma2_vox=None,
+    max_newton: int = 50,
+    tol: float = 1e-8,
+    logq_clip: float = 7.0,
+    field_clip: float = 10.0,
+) -> dict:
+    """Single convex Poisson-lognormal MAP over the ``M`` whitened GP latents.
+
+    Minimises (convex in ``xi``)::
+
+        J(xi) = 0.5 ||xi||^2 + sum_v [ lam_v - N_obs_v log lam_v ],
+        lam_v   = base_v * exp(bias * (Phi @ xi)_v - shift_v),
+        shift_v = 0.5 * bias^2 * sigma2_vox_v        (per-voxel mean-one shift),
+
+    over voxels ``v`` with ``base_v = C_v * dN_exp_v >= 0`` (active mask
+    ``base_v > 0``).  ``sigma2_vox`` defaults to ``sum(Phi**2, axis=1)`` (the
+    Nystrom prior variance) for the per-voxel lognormal mean-one shift.  Solved by
+    Newton with Armijo backtracking on the ``M x M`` SPD Hessian
+    ``H = I + bias^2 Phi^T diag(lam) Phi`` (SPD even when ``V < M`` thanks to the
+    prior ``I``); falls back to L-BFGS-B if Newton stalls.
+
+    Returns ``{xi_map, H_chol, sigma2_vox, f_solve, logq_solve, lambda_solve,
+    diagnostics}``.  ``H_chol`` (lower Cholesky of ``H`` at the MAP) feeds BOTH the
+    Laplace ensemble (:func:`laplace_lognormal_gp3d_members`) and the deterministic
+    posterior-mean output table (:func:`eval_logq_gp3d`).  ``logq_solve`` is the
+    per-draw MAP value (a diagnostic), not the output table.
+    """
+    optimize = _require_scipy()
+    Phi = np.asarray(Phi, dtype=float)              # (V, M)
+    N_obs = np.asarray(N_obs, dtype=float).ravel()  # (V,)
+    base = np.asarray(base, dtype=float).ravel()    # (V,)
+    V, M = Phi.shape
+    b = float(bias)
+    mask = base > 0.0
+    logbase = np.where(mask, np.log(np.where(mask, base, 1.0)), 0.0)
+    if sigma2_vox is None:
+        sigma2_vox = np.sum(Phi ** 2, axis=1)       # (V,) Nystrom variance
+    else:
+        sigma2_vox = np.asarray(sigma2_vox, dtype=float).ravel()
+    shift = 0.5 * b * b * sigma2_vox                # (V,)
+    eye = np.eye(M)
+
+    def _lam(xi):
+        fld = np.clip(Phi @ xi, -field_clip, field_clip)
+        return fld, np.where(mask, np.exp(logbase + b * fld - shift), 0.0)
+
+    def _objective(xi):
+        fld, lam = _lam(xi)
+        loglam = logbase + b * fld - shift
+        data = float(np.sum(lam - N_obs * np.where(mask, loglam, 0.0)))
+        return 0.5 * float(np.dot(xi, xi)) + data
+
+    def _grad(xi):
+        _, lam = _lam(xi)
+        return xi + b * (Phi.T @ np.where(mask, lam - N_obs, 0.0))
+
+    # Scale-aware gradient tolerance: the Poisson data gradient scales with the
+    # observed counts, so convergence is judged on the gradient inf-norm relative
+    # to the problem scale (``tol`` is the relative tolerance).
+    gscale = max(1.0, b * float(np.max(np.abs(N_obs)))) if N_obs.size else 1.0
+    gtol = float(tol) * gscale
+
+    xi = np.zeros(M, dtype=float)
+    n_iter = 0
+    for n_iter in range(1, int(max_newton) + 1):
+        _, lam = _lam(xi)
+        g = xi + b * (Phi.T @ np.where(mask, lam - N_obs, 0.0))
+        gnorm = float(np.max(np.abs(g))) if M else 0.0
+        if gnorm < gtol:
+            break
+        W = Phi * (np.where(mask, lam, 0.0) * (b * b))[:, None]    # (V, M)
+        H = eye + Phi.T @ W                                        # (M, M) SPD
+        try:
+            step = np.linalg.solve(H, g)
+        except np.linalg.LinAlgError:                             # pragma: no cover
+            step = np.linalg.lstsq(H, g, rcond=None)[0]
+        # Armijo backtracking on the convex objective.
+        obj0 = _objective(xi)
+        slope = float(np.dot(g, step))
+        t = 1.0
+        accepted = False
+        for _ls in range(40):
+            xi_try = xi - t * step
+            obj_try = _objective(xi_try)
+            if np.isfinite(obj_try) and obj_try <= obj0 - 1e-4 * t * slope:
+                xi = xi_try
+                accepted = True
+                break
+            t *= 0.5
+        if not accepted:
+            break  # line search stalled -> hand off to the L-BFGS fallback
+
+    g = _grad(xi)
+    gnorm = float(np.max(np.abs(g))) if M else 0.0
+    if (gnorm >= gtol) or (not np.all(np.isfinite(xi))):
+        res = optimize.minimize(
+            _objective, np.zeros(M), jac=_grad, method="L-BFGS-B",
+            options={"maxiter": 1000},
+        )
+        if np.all(np.isfinite(res.x)) and _objective(res.x) <= _objective(xi):
+            xi = np.asarray(res.x, dtype=float)
+            g = _grad(xi)
+            gnorm = float(np.max(np.abs(g))) if M else 0.0
+    converged = bool(gnorm < gtol)
+
+    # Hessian Cholesky at the MAP (feeds the Laplace ensemble).
+    _, lam = _lam(xi)
+    W = Phi * (np.where(mask, lam, 0.0) * (b * b))[:, None]
+    H = eye + Phi.T @ W
+    try:
+        H_chol = np.linalg.cholesky(H)              # lower; H = H_chol H_chol^T
+    except np.linalg.LinAlgError:                   # pragma: no cover
+        H_chol = np.linalg.cholesky(H + 1e-8 * eye)
+
+    fld = np.clip(Phi @ xi, -field_clip, field_clip)
+    logq_solve = np.clip(b * fld - shift, -logq_clip, logq_clip)
+    return {
+        "xi_map": xi,
+        "H_chol": H_chol,
+        "sigma2_vox": sigma2_vox,
+        "f_solve": fld,
+        "logq_solve": logq_solve,
+        "lambda_solve": lam,
+        "diagnostics": {
+            "n_voxels": int(V),
+            "M": int(M),
+            "bias": b,
+            "n_iter": int(n_iter),
+            "converged": bool(converged),
+            "grad_inf": float(gnorm),
+            "logq_clip": float(logq_clip),
+        },
+    }
+
+
+def laplace_lognormal_gp3d_members(xi_map, H_chol, *, n_members: int = 32,
+                                   seed: int | None = None) -> np.ndarray:
+    """Laplace posterior ensemble of the whitened latents around the MAP.
+
+    Draws ``xi_m = xi_map + L_H^{-T} g_m``, ``g_m ~ N(0, I_M)``, where
+    ``H = L_H L_H^T`` is the MAP Hessian Cholesky, so ``Cov(xi_m) = H^{-1}``.
+    One ``M x M`` factor for the whole ensemble — cheaper and more principled than
+    the radial FFT-diagonal members (it captures the full cross-pixel/z posterior
+    correlation).  Deterministic given ``seed``.  Returns ``(n_members, M)``.
+    """
+    from scipy.linalg import solve_triangular
+    xi_map = np.asarray(xi_map, dtype=float).ravel()
+    L_H = np.asarray(H_chol, dtype=float)
+    M = xi_map.shape[0]
+    rng = np.random.default_rng(seed)
+    out = np.empty((int(n_members), M), dtype=float)
+    for m in range(int(n_members)):
+        g = rng.standard_normal(M)
+        out[m] = xi_map + solve_triangular(L_H, g, lower=True, trans="T")
+    return out
+
+
+def eval_logq_gp3d(
+    xi,
+    Zn,
+    Zz,
+    *,
+    amp,
+    ls_sph,
+    ls_z,
+    n_hat_out,
+    z_out,
+    bias: float = 1.0,
+    logq_clip: float = 7.0,
+    pix_chunk: int = 512,
+    L=None,
+    H_chol=None,
+) -> np.ndarray:
+    """Evaluate the completion ``logQ`` on (pixel x z) output voxels, CHUNKED over
+    pixels.  The continuous field is evaluated directly on ``z_out`` (the package
+    zgrid), so no interpolation-back is needed.  Two modes:
+
+    * **Deterministic posterior-mean** (``xi`` is the MAP ``(M,)`` *and*
+      ``H_chol`` is given) -> ``(n_pix, n_grid)``:
+      ``logQ = bias*f_MAP - 0.5*bias^2*(prior_var - post_var)`` = log of the
+      Laplace posterior mean ``E[Q]`` (with ``prior_var = k(x,Z)K^{-1}k(Z,x)`` and
+      ``post_var = phi(x) H^{-1} phi(x)^T``).  Data-free voxels have
+      ``post_var = prior_var`` so ``logQ = 0`` (Q = 1, homogeneous); near data the
+      variance shrinks and the field borrows; data-rich voxels recover the MAP.
+      **This is the table the GW likelihood consumes.**
+    * **Per-draw** (``H_chol`` is ``None``): the lognormal mean-one draw
+      ``logQ = bias*f - 0.5*bias^2*prior_var`` for each latent vector; ``xi`` may
+      be ``(M,)`` -> ``(n_pix, n_grid)`` or ``(n_members, M)`` ->
+      ``(n_members, n_pix, n_grid)`` (the HDF5 members layout).  The empirical mean
+      of the members reproduces the deterministic posterior mean.
+
+    Pass ``L`` (the Cholesky from :func:`build_lowrank_operator`) to avoid
+    recomputing it; if omitted it is rebuilt with the same default jitter.
+    """
+    jnp, jsl, _sphere_z_kernel, _ = _require_jax_kernel()
+    xi = jnp.asarray(xi)
+    single = xi.ndim == 1
+    Xi = xi[:, None] if single else xi.T              # (M, K)
+    K = int(Xi.shape[1])
+    Zn = jnp.asarray(Zn)
+    Zz = jnp.asarray(Zz)
+    M = int(Zn.shape[0])
+    n_hat_out = np.asarray(n_hat_out, dtype=float)     # (n_pix, 3)
+    n_pix = n_hat_out.shape[0]
+    z_out = np.asarray(z_out, dtype=float)
+    n_grid = z_out.shape[0]
+    zeta_out = jnp.log1p(jnp.clip(jnp.asarray(z_out), 0.0, None))  # (n_grid,)
+    b = float(bias)
+
+    posterior_mean = (H_chol is not None) and single
+    Hc = jnp.asarray(H_chol) if posterior_mean else None
+
+    if L is None:
+        jitter = 1e-4 * float(amp) ** 2 + 1e-9
+        Kzz = _sphere_z_kernel(Zn, Zz, Zn, Zz, amp, ls_sph, ls_z) + jitter * jnp.eye(M)
+        L = jnp.linalg.cholesky(Kzz)
+    else:
+        L = jnp.asarray(L)
+
+    out = (np.empty((n_pix, n_grid), dtype=float) if single
+           else np.empty((K, n_pix, n_grid), dtype=float))
+
+    step = max(int(pix_chunk), 1)
+    for start in range(0, n_pix, step):
+        nh = jnp.asarray(n_hat_out[start:start + step])    # (Pc, 3)
+        Pc = int(nh.shape[0])
+        Xn = jnp.repeat(nh, n_grid, axis=0)                # (Pc*n_grid, 3)
+        Xz = jnp.tile(zeta_out, Pc)                        # (Pc*n_grid,)
+        Kxz = _sphere_z_kernel(Xn, Xz, Zn, Zz, amp, ls_sph, ls_z)  # (Pc*n_grid, M)
+        Phi = jsl.solve_triangular(L, Kxz.T, lower=True).T         # (Pc*n_grid, M)
+        prior_var = jnp.sum(Phi ** 2, axis=1)              # (Pc*n_grid,)
+        if posterior_mean:
+            U = jsl.solve_triangular(Hc, Phi.T, lower=True)        # (M, Pc*n_grid)
+            post_var = jnp.sum(U ** 2, axis=0)                     # (Pc*n_grid,)
+            f = Phi @ Xi[:, 0]                                     # (Pc*n_grid,)
+            logq = jnp.clip(b * f - 0.5 * b * b * (prior_var - post_var),
+                            -logq_clip, logq_clip)
+            out[start:start + Pc] = np.asarray(logq).reshape(Pc, n_grid)
+        else:
+            f = Phi @ Xi                                          # (Pc*n_grid, K)
+            shift = 0.5 * b * b * prior_var
+            logq = jnp.clip(b * f - shift[:, None], -logq_clip, logq_clip)
+            logq_np = np.asarray(logq).reshape(Pc, n_grid, K)
+            if single:
+                out[start:start + Pc] = logq_np[..., 0]
+            else:
+                out[:, start:start + Pc, :] = np.moveaxis(logq_np, 2, 0)
+    return out
 
 
 # ------------------------------------------------------------

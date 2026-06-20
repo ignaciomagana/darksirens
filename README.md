@@ -51,12 +51,20 @@ By default the missing-galaxy branch is modulated by the local-overdensity facto
 dN_miss(p,z) = [1 - C(p,z)] * dN_exp(z) * Q_LSS(p,z)
 ```
 
-`Q_LSS` is a *clustered* missing-galaxy correction. It is built **offline** from a per-pixel, 1-D Poisson-lognormal model along the redshift grid (a latent Gaussian field correlated along comoving distance, with a built-in Gaussian-correlation power spectrum whose fixed hyperparameters — correlation length, amplitude, bias — come from `SurveyParams`/`CosmoParams` and are never marginalised). **The likelihood stays deterministic: it never samples a field or generates galaxies — it consumes fixed `Q` arrays.** With no completion file supplied, behaviour is unchanged (the legacy `delta_g` factor is used).
+`Q_LSS` is a *clustered* missing-galaxy correction. It is built **offline** from a Poisson-lognormal model whose fixed hyperparameters (correlation length, amplitude, bias) come from `SurveyParams`/`CosmoParams` and are never marginalised. **The likelihood stays deterministic: it never samples a field or generates galaxies — it consumes fixed `Q` arrays.** With no completion file supplied, behaviour is unchanged (the legacy `delta_g` factor is used).
+
+Two builder modes write the **same** `Q_LSS(p,z)` table (consumed identically by inference):
+
+- **`--mode radial`** (default) — an independent 1-D Poisson-lognormal field per HEALPix pixel along comoving distance. Simple and battle-tested, but each line of sight is solved alone (no angular coupling).
+- **`--mode gp3d`** — ONE low-rank Poisson-lognormal field over all occupied (pixel × z) voxels, coupled by the whitened **(sphere × z) Gaussian process** (chordal-RBF on `n̂` × RBF on `log(1+z)`, Fibonacci-sphere × z inducing nodes — reused from the sky-anisotropy models). Empty/under-observed pixels **borrow angularly from their neighbours**; the output table is the Laplace posterior mean `E[Q]`, so pixels far from any data read as `Q = 1` (homogeneous). The angular correlation length is the fixed `SurveyParams.lss_corr_length_ang` (chordal).
 
 Build a completion file from a pixelated catalog and pass it to inference:
 
 ```bash
+# default radial (independent per-pixel 1-D) completion:
 darksirens_build_lognormal_completion --catalog survey.h5 --out lss_completion.h5 --n-members 32
+# 3-D angular-coupling completion (empty pixels borrow from neighbours):
+darksirens_build_lognormal_completion --catalog survey.h5 --out lss_gp3d.h5 --mode gp3d --n-members 32
 darksirens_inference --universe_model dark_sirens --sky ... --lss_completion lss_completion.h5 ...
 darksirens_diagnose_lognormal_completion --catalog survey.h5 --lss-completion lss_completion.h5 --pixel 1234 --outdir figs
 ```
@@ -75,7 +83,7 @@ log L(Lambda) ≈ logsumexp_m log L(Lambda; Q_m) - log M,
 
 which is **not** performed inside the GW likelihood in this implementation (member support is exposed through prior-state diagnostics).
 
-**Scope & caveats (experimental — read before using as a science result).** This is a **radial, per-pixel** lognormal completion: each HEALPix line of sight is an independent 1-D field along comoving distance, so it does **not** borrow information angularly between neighbouring pixels (it is not a 3-D `P(k)`-conditioned reconstruction — a genuine angular-coupling upgrade is planned separately). The GW likelihood uses the **deterministic / posterior-mean** `Q` (not the fully-marginalised `logsumexp_m`), so it is not yet Bayesian over field uncertainty. The completeness `C = dN_obs/dN_exp` and the fitted `Q` are both derived from the **same** observed counts, so `Q` is the sub-smoothing **radial residual** rather than a separately-identifiable completeness; and the whole construction assumes **missing galaxies trace the observed clustering** along the line of sight — an assumption the data alone cannot validate. `Q` is built at **fixed fiducial** cosmology/survey parameters (printed + stored at load) while inference varies them. Treat results as exploratory.
+**Scope & caveats (experimental — read before using as a science result).** The **default** builder (`--mode radial`) is a **radial, per-pixel** lognormal completion: each HEALPix line of sight is an independent 1-D field along comoving distance, so it does **not** borrow information angularly between neighbouring pixels. **`--mode gp3d`** lifts exactly this limitation (a clustered (sphere × z) field; empty pixels borrow from neighbours), but it remains a low-rank GP reconstruction, not a full 3-D `P(k)`-conditioned `BORG`-style inference. The GW likelihood uses the **deterministic / posterior-mean** `Q` (not the fully-marginalised `logsumexp_m`), so it is not yet Bayesian over field uncertainty. The completeness `C = dN_obs/dN_exp` and the fitted `Q` are both derived from the **same** observed counts, so `Q` is the sub-smoothing **residual** rather than a separately-identifiable completeness (an external/shrinkage completeness option is a planned next step); and the whole construction assumes **missing galaxies trace the observed clustering** — an assumption the data alone cannot validate. `Q` is built at **fixed fiducial** cosmology/survey parameters (printed + stored at load) while inference varies them. Treat results as exploratory.
 
 ### Marked-host model (galaxy marks → BBH-host efficiency)
 
