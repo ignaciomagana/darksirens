@@ -467,4 +467,37 @@ def load_all_data(opts):
                 data[_name] = jnp.asarray(_arr)
             print(f"    - Loaded galaxy marks {sorted(raw_marks)} (z-centred)")
 
+    # --------------------------------------------------------
+    # Weak-lensing magnification model (optional; built only for the WL
+    # universe model, inert/None otherwise).
+    # --------------------------------------------------------
+    if getattr(opts, "universe_model", None) == "spectral_sirens_wl":
+        import h5py
+        from darksirens.lensing.wlmagnification import (
+            make_lognormal_wl_params,
+            make_tabulated_wl_params,
+        )
+
+        if opts.lensing_wl_model == "lognormal":
+            wl_params = make_lognormal_wl_params(
+                a=opts.lensing_wl_a,
+                b=opts.lensing_wl_b,
+            )
+        elif opts.lensing_wl_model == "tabulated":
+            with h5py.File(opts.lensing_wl_table_path, "r") as f:
+                z_grid = jnp.asarray(f["z_grid"])
+                log_mu_grid = jnp.asarray(f["log_mu_grid"])
+                log_p_table = jnp.asarray(f["log_p_table"])
+            wl_params = make_tabulated_wl_params(
+                z_grid, log_mu_grid, log_p_table,
+            )
+        else:
+            raise ValueError(
+                f"Unknown --lensing_wl_model '{opts.lensing_wl_model}'. "
+                "Expected 'lognormal' or 'tabulated'."
+            )
+        data["wl_params"] = wl_params
+    else:
+        data["wl_params"] = None
+
     return data

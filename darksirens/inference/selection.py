@@ -63,9 +63,9 @@ def _lse_to_log_mu_neff(
     lse: jnp.ndarray,
     lse2: jnp.ndarray,
     Ndraw: float,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Convert logsumexp aggregates to (log_mu, N_eff).
+    Convert logsumexp aggregates to (log_mu, N_eff, log_sigma2).
  
     Parameters
     ----------
@@ -77,6 +77,10 @@ def _lse_to_log_mu_neff(
     -------
     log_mu : scalar
     Neff   : scalar  (0.0 when log_mu = -inf; never NaN)
+    log_sigma2 : scalar  (log Monte-Carlo variance of the selection integral μ;
+        consumed by the strong-lensing cluster-selection combiner. May be
+        -inf/NaN when log_mu = -inf, where Neff = 0 already forces the
+        too-sparse -inf selection correction downstream.)
     """
     log_Ndraw  = jnp.log(Ndraw)
     log_mu     = lse  - log_Ndraw
@@ -95,7 +99,7 @@ def _lse_to_log_mu_neff(
         0.0,
     )
  
-    return log_mu, Neff
+    return log_mu, Neff, log_sigma2
 
 
 def selection_log_correction(
@@ -146,9 +150,13 @@ def compute_selection_term(
     nEvents: int,
     sel_batch_size: int | None = None,
     sky_log_weight_fn=None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Estimate log μ and N_eff from the injection set.
+    Estimate log μ, N_eff and log_sigma2 from the injection set.
+
+    Returns the 3-tuple ``(log_mu, Neff, log_sigma2)`` (the third element is the
+    log Monte-Carlo variance of μ, used by the strong-lensing cluster path; the
+    standard single-event likelihood ignores it).
 
     Parameters
     ----------

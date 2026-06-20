@@ -16,9 +16,26 @@ from darksirens.em.prior import (
 from darksirens.gw.populations import pop_model_parser
 from darksirens.inference.selection import compute_selection_term, selection_log_correction
 from darksirens.inference.utils import log_sample_weight
+from darksirens.inference.wl_weight import (
+    log_sample_weight_wl_or_standard,
+    log_sample_weight_wl_lognormal_hermite,
+)
+from darksirens.lensing.grids import make_log_mu_grid, make_hermite_u_grid
+from darksirens.lensing.wlmagnification import make_tabulated_log_p_wl
 from darksirens.sky import sky_model_parser
 from darksirens.utils.containers import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import dL_in_z_grid, z_of_dL
+
+
+# Weak-lensing quadrature node counts / ranges.
+_WL_NMU_NODES = 16
+_WL_LOG_MU_RANGE = (-0.6, 0.6)
+_WL_HERMITE_NODES = 16
+
+# Backend codes for the static_argnames dispatch (weak-lensing magnification).
+WL_BACKEND_DISABLED = -1
+WL_BACKEND_LOGNORMAL = 0
+WL_BACKEND_TABULATED = 1
 
 
 @partial(
@@ -35,6 +52,7 @@ from darksirens.utils.cosmology import dL_in_z_grid, z_of_dL
         "sky_model",
         "mark_model",
         "mark_names",
+        "wl_backend",
     ],
 )
 def darksiren_log_likelihood(
@@ -59,6 +77,13 @@ def darksiren_log_likelihood(
     mark_model: str = "none",
     mark_params: jnp.ndarray | None = None,
     mark_names: tuple = (),
+    # Weak-lensing extension. All inert when wl_backend == WL_BACKEND_DISABLED.
+    wl_backend: int = WL_BACKEND_DISABLED,
+    wl_a: float = 0.0,
+    wl_b: float = 0.0,
+    wl_z_grid: jnp.ndarray | None = None,
+    wl_log_mu_grid: jnp.ndarray | None = None,
+    wl_log_p_table: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
@@ -69,6 +94,14 @@ def darksiren_log_likelihood(
     ``sky_model == "isotropic"`` the factor is skipped entirely (static branch),
     so the result is bit-for-bit identical to the sky-free likelihood.
     """
+    pop_params_shape = tuple(pop_params.shape)
+    if pop_params.ndim == 0 or pop_params_shape[0] == 0:
+        raise ValueError(
+            "darksiren_log_likelihood received empty pop_params: "
+            f"pop_model={pop_model!r}, pop_params.shape={pop_params_shape}. "
+            "Verify parameter-space construction for this population model."
+        )
+
     log_p_pop = pop_model_parser(
         pop_model=pop_model,
         shared_beta=shared_beta,
@@ -87,8 +120,29 @@ def darksiren_log_likelihood(
             nx, ny, nz, z_of_dL(dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa), sky_params
         )) if apply_sky else None
     )
+    # Weak-lensing dispatch (static): wl_enabled gates ALL WL machinery off for
+    # every non-WL model, so they remain numerically identical to the non-WL code.
+    wl_enabled = wl_backend != WL_BACKEND_DISABLED
+    if wl_enabled and universe_model != "spectral_sirens_wl":
+        raise ValueError(
+            f"wl_backend={wl_backend} requires universe_model='spectral_sirens_wl', "
+            f"got {universe_model!r}"
+        )
+    if universe_model == "spectral_sirens_wl" and not wl_enabled:
+        raise ValueError(
+            "universe_model='spectral_sirens_wl' requires wl_backend in {0, 1}."
+        )
+
+    # The WL universe model reuses the spectral-sirens redshift prior for the PE
+    # integral; WL and bright-siren selection both use the spectral-sirens
+    # (population) redshift distribution for the selection integral.
+    pe_model = (
+        "spectral_sirens" if universe_model == "spectral_sirens_wl" else universe_model
+    )
     selection_model = (
-        "spectral_sirens" if universe_model == "bright_sirens" else universe_model
+        "spectral_sirens"
+        if universe_model in ("bright_sirens", "spectral_sirens_wl")
+        else universe_model
     )
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
@@ -102,7 +156,7 @@ def darksiren_log_likelihood(
     # to both states so it is applied identically to the PE and selection terms
     # (prepare ignores it for non-dark_sirens models).
     prior_state_univ = prepare_redshift_prior_state(
-        universe_model, cosmo, survey, em_catalog_pe,
+        pe_model, cosmo, survey, em_catalog_pe,
         mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
     )
     prior_state_sel = prepare_redshift_prior_state(
@@ -114,7 +168,7 @@ def darksiren_log_likelihood(
     # logsumexp and is caught by the final isfinite check.
     def log_prior_z(z, pix, catalog):
         return eval_redshift_prior_with_state(
-            universe_model, prior_state_univ, z, pix, cosmo, survey, catalog
+            pe_model, prior_state_univ, z, pix, cosmo, survey, catalog
         )
 
     def log_prior_z_selection(z, pix, catalog):
@@ -122,22 +176,57 @@ def darksiren_log_likelihood(
             selection_model, prior_state_sel, z, pix, cosmo, survey, catalog
         )
 
+    # WL quadrature plumbing — only allocated when wl_enabled (static).  Lognormal
+    # uses Gauss-Hermite in the standardized variable u=(ln mu - m(z))/s(z); the
+    # tabulated backend uses Gauss-Legendre in ln mu.  Sentinels otherwise.
+    if wl_enabled:
+        if wl_backend == WL_BACKEND_LOGNORMAL:
+            u_nodes, log_wH_nodes = make_hermite_u_grid(_WL_HERMITE_NODES)
+            mu_nodes = jnp.zeros(1, dtype=jnp.float64)
+            log_w_nodes = jnp.zeros(1, dtype=jnp.float64)
+            log_p_wl_fn = None
+        elif wl_backend == WL_BACKEND_TABULATED:
+            mu_nodes, log_w_nodes = make_log_mu_grid(_WL_NMU_NODES, _WL_LOG_MU_RANGE)
+            log_p_wl_fn = make_tabulated_log_p_wl(wl_z_grid, wl_log_mu_grid, wl_log_p_table)
+            u_nodes = jnp.zeros(1, dtype=jnp.float64)
+            log_wH_nodes = jnp.zeros(1, dtype=jnp.float64)
+        else:
+            raise ValueError(f"Unknown wl_backend={wl_backend}")
+    else:
+        mu_nodes = jnp.zeros(1, dtype=jnp.float64)
+        log_w_nodes = jnp.zeros(1, dtype=jnp.float64)
+        u_nodes = jnp.zeros(1, dtype=jnp.float64)
+        log_wH_nodes = jnp.zeros(1, dtype=jnp.float64)
+        log_p_wl_fn = None
+
     def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
-        """Return -inf for distances outside the tabulated z(dL) support."""
-        ldw = log_sample_weight(
-            m1det,
-            q,
-            dL,
-            chieff,
-            pix,
-            prior_wt,
-            cosmo,
-            survey,
-            pop_params,
-            catalog,
-            log_p_pop,
-            log_prior_z,
-        )
+        """PE per-sample weight; WL-marginalized when wl_enabled, else standard.
+
+        Returns -inf for distances outside the tabulated z(dL) support.  The
+        angular factor g(n̂, z) is applied separately in ``_pe_event_fn`` (so WL
+        is only ever combined with an isotropic sky in this build — see the WL
+        docs).
+        """
+        if not wl_enabled:
+            ldw = log_sample_weight(
+                m1det, q, dL, chieff, pix, prior_wt, cosmo, survey, pop_params,
+                catalog, log_p_pop, log_prior_z,
+            )
+        elif wl_backend == WL_BACKEND_LOGNORMAL:
+            ldw = log_sample_weight_wl_lognormal_hermite(
+                m1det, q, dL, chieff, pix, prior_wt,
+                cosmo, survey, pop_params, catalog,
+                log_p_pop, log_prior_z,
+                wl_a, wl_b, u_nodes, log_wH_nodes,
+            )
+        else:
+            ldw = log_sample_weight_wl_or_standard(
+                m1det, q, dL, chieff, pix, prior_wt,
+                cosmo, survey, pop_params, catalog,
+                log_p_pop, log_prior_z,
+                log_p_wl_fn, mu_nodes, log_w_nodes,
+                wl_enabled=wl_enabled,
+            )
         supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
@@ -165,7 +254,7 @@ def darksiren_log_likelihood(
             m1det, q, dL, chieff, pix, prior_wt, catalog
         )
 
-    log_mu, Neff = compute_selection_term(
+    log_mu, Neff, _log_sigma2 = compute_selection_term(
         gw_sel,
         em_catalog_sel,
         log_weight,

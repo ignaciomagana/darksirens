@@ -21,7 +21,12 @@ import jax.numpy as jnp
 from darksirens.em.completion import build_pixel_kde_cache
 from darksirens.inference.catalog_views import barrier, prepare_catalog_views
 from darksirens.inference.events import pad_gw_event_to_multiple
-from darksirens.inference.likelihood_core import darksiren_log_likelihood
+from darksirens.inference.likelihood_core import (
+    darksiren_log_likelihood,
+    WL_BACKEND_DISABLED,
+    WL_BACKEND_LOGNORMAL,
+    WL_BACKEND_TABULATED,
+)
 from darksirens.inference.parameters import (
     H0_FID,
     OM0_FID,
@@ -62,6 +67,41 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
+
+    # Weak-lensing magnification backend (resolved up front, before the heavy
+    # catalog-view prep, so a missing WL config fails fast).  All values are
+    # inert when wl_backend == WL_BACKEND_DISABLED, preserving behaviour for
+    # every non-WL universe model.
+    wl_backend = WL_BACKEND_DISABLED
+    wl_a = jnp.asarray(0.0)
+    wl_b = jnp.asarray(0.0)
+    wl_z_grid = jnp.asarray([0.0, 1.0])
+    wl_log_mu_grid = jnp.asarray([0.0, 1.0])
+    wl_log_p_table = jnp.asarray([[0.0, 0.0], [0.0, 0.0]])
+    wl_params = data.get("wl_params")
+    if universe_model == "spectral_sirens_wl":
+        if wl_params is None:
+            raise ValueError(
+                "universe_model='spectral_sirens_wl' requires data['wl_params'] "
+                "to be present."
+            )
+        backend = int(wl_params.backend)
+        if backend == WL_BACKEND_LOGNORMAL:
+            wl_backend = WL_BACKEND_LOGNORMAL
+            wl_a = jnp.asarray(wl_params.a)
+            wl_b = jnp.asarray(wl_params.b)
+        elif backend == WL_BACKEND_TABULATED:
+            wl_backend = WL_BACKEND_TABULATED
+            wl_z_grid = jnp.asarray(wl_params.z_grid)
+            wl_log_mu_grid = jnp.asarray(wl_params.log_mu_grid)
+            wl_log_p_table = jnp.asarray(wl_params.log_p_table)
+        else:
+            raise ValueError(
+                "Unsupported weak-lensing backend in data['wl_params']: "
+                f"{backend}. Expected {WL_BACKEND_LOGNORMAL} (LOGNORMAL) or "
+                f"{WL_BACKEND_TABULATED} (TABULATED)."
+            )
+
     counterpart_pixel = data.get("counterpart_pixel")
     counterpart_pixels = (
         barrier(jnp.asarray(data["counterpart_pixels"], dtype=jnp.int32))
@@ -159,10 +199,18 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         opts,
         pop_params_fid,
         fixed_parameter_values=fixed_parameter_values,
+        wl_params=data.get("wl_params"),
     )
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
         cosmo, survey, pop_params, sky_params, mark_params = parameter_decoder.decode(coord)
+        if len(pop_params) != len(parameter_decoder.pop_labels):
+            raise ValueError(
+                "Population parameter length mismatch before likelihood "
+                f"evaluation: decoded {len(pop_params)} values but pop_model "
+                f"'{pop_model}' expects {len(parameter_decoder.pop_labels)}. "
+                "Verify parameter-space construction for this population model."
+            )
 
         em_catalog_pe = EMCatalog(
             apix=apix,
@@ -262,6 +310,12 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 mark_model=mark_model,
                 mark_params=mark_params,
                 mark_names=mark_names,
+                wl_backend=wl_backend,
+                wl_a=wl_a,
+                wl_b=wl_b,
+                wl_z_grid=wl_z_grid,
+                wl_log_mu_grid=wl_log_mu_grid,
+                wl_log_p_table=wl_log_p_table,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -285,6 +339,12 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             mark_model=mark_model,
             mark_params=mark_params,
             mark_names=mark_names,
+            wl_backend=wl_backend,
+            wl_a=wl_a,
+            wl_b=wl_b,
+            wl_z_grid=wl_z_grid,
+            wl_log_mu_grid=wl_log_mu_grid,
+            wl_log_p_table=wl_log_p_table,
         )
 
     return likelihood

@@ -109,7 +109,7 @@ def _legacy_selection_term(gw_sel, em_catalog_sel, log_weight_fn, Ndraw, nEvents
 
 
 def _new_selection_term(gw_sel, catalog, Ndraw, nEvents, sel_batch_size=None):
-    log_mu, neff = compute_selection_term(
+    log_mu, neff, _log_sigma2 = compute_selection_term(
         gw_sel,
         catalog,
         _fixture_log_weight,
@@ -159,7 +159,7 @@ def test_consolidated_selection_preserves_all_invalid_guard():
         del m1det, q, chieff, pix, prior_wt, catalog
         return jnp.full_like(dL, jnp.inf)
 
-    log_mu, neff = compute_selection_term(
+    log_mu, neff, _log_sigma2 = compute_selection_term(
         gw_sel,
         catalog,
         all_invalid,
