@@ -46,6 +46,9 @@ class ParameterDecoder:
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
     mark_params_fid: tuple[float, ...] = ()
+    # Weak-lensing magnification model carried on SurveyParams (NOT a sampled
+    # parameter); None for every non-WL universe model.
+    wl_params: object | None = None
 
     def decode(self, coord: jnp.ndarray):
         """Return ``(cosmo, survey, pop_params, sky_params, mark_params)`` for ``coord``."""
@@ -94,6 +97,7 @@ class ParameterDecoder:
             alpha_miss=sp[5],
             sigma_kde=sp[6],
             complete_empty_pixel_policy=self.complete_empty_pixel_policy,
+            wl_params=self.wl_params,
         )
         return cosmo, survey, pop_params, sky_params, mark_params
 
@@ -102,6 +106,7 @@ def build_parameter_decoder(
     opts,
     pop_params_fid,
     fixed_parameter_values: dict | None = None,
+    wl_params=None,
 ) -> ParameterDecoder:
     """Build the coordinate decoder using ``build_parameter_space`` ordering."""
     if fixed_parameter_values is None:
@@ -157,4 +162,9 @@ def build_parameter_decoder(
         sky_params_fid=tuple(float(v) for v in get_fixed_sky_params(sky_model)),
         mark_labels=tuple(mark_labels),
         mark_params_fid=tuple(float(v) for v in mark_fiducial(mark_model, mark_names)),
+        wl_params=(
+            wl_params
+            if getattr(opts, "universe_model", None) == "spectral_sirens_wl"
+            else None
+        ),
     )

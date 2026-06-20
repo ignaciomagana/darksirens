@@ -694,7 +694,8 @@ def main():
 
     g = optp.add_argument_group("Physical model")
     g.add_argument("--universe_model", default="spectral_sirens",
-                   choices=["spectral_sirens", "dark_sirens", "dark_sirens_complete", "bright_sirens"])
+                   choices=["spectral_sirens", "spectral_sirens_wl", "dark_sirens",
+                            "dark_sirens_complete", "bright_sirens"])
     g.add_argument(
         "--sky_model", default="isotropic",
         choices=["isotropic", "dipole", "sphere_gp", "sphere_gp_z", "overdensity_gp",
@@ -835,6 +836,19 @@ def main():
                    help="Mass-ratio-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_Q).")
     g.add_argument("--norm_nchi", type=int, default=None, metavar="N",
                    help="Spin-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_CHI).")
+
+    g = optp.add_argument_group("Lensing")
+    g.add_argument("--lensing_wl_model", choices=["lognormal", "tabulated"], default="lognormal",
+                   help="Weak-lensing magnification PDF model "
+                        "(used only with --universe_model spectral_sirens_wl).")
+    g.add_argument("--lensing_wl_a", type=float, default=4e-3,
+                   help="Lognormal WL variance amplitude: s^2(z) = a*z^b. "
+                        "Default 4e-3 ~ Takahashi+11 fit at z<2.")
+    g.add_argument("--lensing_wl_b", type=float, default=1.5,
+                   help="Lognormal WL variance slope.")
+    g.add_argument("--lensing_wl_table_path", type=str, default=None,
+                   help="Path to HDF5 table of log p_WL(mu|z) "
+                        "(used with --lensing_wl_model tabulated).")
 
     opts = optp.parse_args()
     # Persist the canonical names in settings while keeping opts.fix_cosmology

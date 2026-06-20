@@ -540,6 +540,9 @@ def _log_prior_dark_sirens(
 #: Signature: f(z, pix, cosmo, survey, em_catalog) → log_prior (array).
 PRIOR_REGISTRY: dict = {
     "spectral_sirens":      _log_prior_spectral_sirens,
+    # Weak-lensing universe model reuses the spectral-sirens redshift prior; the
+    # WL magnification marginalization is applied in the likelihood, not here.
+    "spectral_sirens_wl":   _log_prior_spectral_sirens,
     "bright_sirens":        _log_prior_bright_sirens,
     "dark_sirens_complete": _log_prior_complete_catalog,
     "dark_sirens":          _log_prior_dark_sirens,

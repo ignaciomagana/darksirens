@@ -44,6 +44,11 @@ class SurveyParams(NamedTuple):
     them; only the offline builder does (the bias of the field reuses
     ``b_miss``).  They are deliberately excluded from the sampled parameter
     space.
+
+    ``wl_params`` defaults to ``None``, preserving existing behaviour for all
+    non-weak-lensing universe models.  When non-``None`` it must be a
+    ``darksirens.lensing.wlmagnification.WLParams`` instance carrying the
+    weak-lensing magnification model used by ``universe_model='spectral_sirens_wl'``.
     """
     n0: Any
     z50: Any
@@ -56,6 +61,7 @@ class SurveyParams(NamedTuple):
     lss_corr_length_mpc: Any = 50.0
     lss_sigma: Any = 1.0
     lss_corr_length_ang: Any = 0.2
+    wl_params: Any = None
 
 
 class EMCatalog(NamedTuple):

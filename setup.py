@@ -31,6 +31,7 @@ setup(
             "darksirens_skymaps_to_samples=darksirens.tool.darksirens_skymaps_to_samples:main",
             "darksirens_build_lognormal_completion=darksirens.tool.darksirens_build_lognormal_completion:main",
             "darksirens_diagnose_lognormal_completion=darksirens.tool.darksirens_diagnose_lognormal_completion:main",
+            "darksirens_inference_lensing=darksirens.tool.darksirens_inference_lensing:main",
         ]
     },
     classifiers=[
