@@ -10,6 +10,7 @@ from astropy.cosmology import Planck15
 
 from darksirens.inference.prior import build_parameter_space, resolve_parameter_values
 from darksirens.sky import get_fixed_sky_params
+from darksirens.marks import mark_fiducial
 from darksirens.utils.containers import CosmoParams, SurveyParams
 
 H0_FID = float(Planck15.H0.value)
@@ -43,9 +44,11 @@ class ParameterDecoder:
     complete_empty_pixel_policy: int
     sky_labels: tuple[str, ...] = ()
     sky_params_fid: tuple[float, ...] = ()
+    mark_labels: tuple[str, ...] = ()
+    mark_params_fid: tuple[float, ...] = ()
 
     def decode(self, coord: jnp.ndarray):
-        """Return ``(cosmo, survey, pop_params, sky_params)`` for ``coord``."""
+        """Return ``(cosmo, survey, pop_params, sky_params, mark_params)`` for ``coord``."""
         coord = jnp.asarray(coord)
         values = resolve_parameter_values(
             coord, self.sampled_labels, self.fixed_parameter_values
@@ -75,6 +78,12 @@ class ParameterDecoder:
             for i, label in enumerate(self.sky_labels)
         ])
 
+        # Mark (eta) sub-vector (empty for mark_model="none").
+        mark_params = jnp.array([
+            _get(label, self.mark_params_fid[i])
+            for i, label in enumerate(self.mark_labels)
+        ])
+
         cosmo = CosmoParams(H0=H0, Om0=Om0, w0=w0, wa=wa)
         survey = SurveyParams(
             n0=10.0 ** sp[0],
@@ -86,7 +95,7 @@ class ParameterDecoder:
             sigma_kde=sp[6],
             complete_empty_pixel_policy=self.complete_empty_pixel_policy,
         )
-        return cosmo, survey, pop_params, sky_params
+        return cosmo, survey, pop_params, sky_params, mark_params
 
 
 def build_parameter_decoder(
@@ -101,6 +110,8 @@ def build_parameter_decoder(
         label: float(value) for label, value in fixed_parameter_values.items()
     }
     sky_model = getattr(opts, "sky_model", "isotropic")
+    mark_model = getattr(opts, "mark_model", "none")
+    mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     (
         sampled_labels,
         _lower,
@@ -115,6 +126,7 @@ def build_parameter_decoder(
         _fixed_parameter_statuses,
         _prior_kinds,
         sky_labels,
+        mark_labels,
     ) = build_parameter_space(
         opts.pop_model,
         opts.fix_population,
@@ -128,6 +140,8 @@ def build_parameter_decoder(
         shared_spin=getattr(opts, "shared_spin", True),
         shared_gamma=getattr(opts, "shared_gamma", True),
         sky_model=sky_model,
+        mark_model=mark_model,
+        mark_names=mark_names,
     )
 
     return ParameterDecoder(
@@ -141,4 +155,6 @@ def build_parameter_decoder(
         ),
         sky_labels=tuple(sky_labels),
         sky_params_fid=tuple(float(v) for v in get_fixed_sky_params(sky_model)),
+        mark_labels=tuple(mark_labels),
+        mark_params_fid=tuple(float(v) for v in mark_fiducial(mark_model, mark_names)),
     )

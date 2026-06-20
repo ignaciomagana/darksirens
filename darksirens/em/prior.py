@@ -90,6 +90,7 @@ from typing import NamedTuple, Any
 from .volume import log_volume_prior_vmap, _precompute_volume_grid
 from .catalog import (
     catalog_kernel_state,
+    marked_catalog_kernel_state,
     eval_log_catalog_prior_state,
     CatalogKernelState,
 )
@@ -147,13 +148,60 @@ def _row_counts(em_catalog: EMCatalog) -> jnp.ndarray:
     return jnp.sum(em_catalog.wgals > 0.0, axis=-1).astype(jnp.float64)
 
 
+# Symmetric clip on log h(m|eta) so wide eta cannot blow up the host efficiency
+# (mirrors the lognormal-completion log-Q clip).
+_LOG_H_CLIP: float = 7.0
+#: coarse z-bins for the empirical missing-galaxy efficiency mu_miss(z|eta).
+_MU_MISS_NBINS: int = 40
+
+
+def _mu_miss_grid(em_catalog: EMCatalog, log_h: jnp.ndarray) -> jnp.ndarray:
+    """Level-B missing-galaxy host efficiency ``mu_miss(z|eta) = E_obs[h | z]``.
+
+    The deterministic estimator of the *expected* host efficiency of the
+    unobserved galaxies along the line of sight: the z-binned mean of
+    ``h = exp(log_h)`` over the catalog's **observed** galaxies, interpolated to
+    ``zgrid``.  Empty/out-of-range z-bins default to 1 (homogeneous), so the
+    missing branch is only modulated where the catalog carries mark information.
+    No galaxies are invented — this reuses the observed marks (consistent with
+    the deterministic-likelihood principle of the LSS completion).
+    """
+    zs = jnp.asarray(em_catalog.zgals).reshape(-1)
+    h = jnp.exp(jnp.asarray(log_h)).reshape(-1)
+    if em_catalog.ngals is not None:
+        n_max = em_catalog.zgals.shape[1]
+        real = (jnp.arange(n_max)[None, :] < jnp.asarray(em_catalog.ngals)[:, None]).reshape(-1)
+    else:
+        real = (jnp.asarray(em_catalog.wgals) > 0.0).reshape(-1)
+    real = real.astype(h.dtype)
+
+    z_hi = float(zgrid[-1])
+    edges = jnp.linspace(0.0, z_hi, _MU_MISS_NBINS + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    b = jnp.clip(jnp.searchsorted(edges, zs, side="right") - 1, 0, _MU_MISS_NBINS - 1)
+    sum_h = jnp.zeros(_MU_MISS_NBINS).at[b].add(h * real)
+    cnt = jnp.zeros(_MU_MISS_NBINS).at[b].add(real)
+    mu_bin = jnp.where(cnt > 0.0, sum_h / jnp.where(cnt > 0.0, cnt, 1.0), 1.0)
+    return jnp.maximum(jnp.interp(zgrid, centers, mu_bin), 0.0)
+
+
 def prepare_redshift_prior_state(
     model: str,
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    mark_model: str = "none",
+    mark_params=None,
+    mark_names=(),
 ):
-    """Build the per-proposal state for ``model``.  O(N_rows × N_grid)."""
+    """Build the per-proposal state for ``model``.  O(N_rows × N_grid).
+
+    ``mark_model`` (+ sampled ``mark_params`` ``eta`` and the resolved
+    ``mark_names``) optionally activates the marked-host model for
+    ``dark_sirens`` (:mod:`darksirens.marks`): catalog galaxies are reweighted by
+    a BBH-host efficiency ``h(m|eta)``.  ``mark_model="none"`` (default) is the
+    legacy galaxy-count host model, bit-for-bit.
+    """
     if model == "spectral_sirens":
         return _materialize(
             SpectralPriorState(log_pvol=jnp.log(_precompute_volume_grid(cosmo)))
@@ -172,8 +220,36 @@ def prepare_redshift_prior_state(
 
     if model == "dark_sirens":
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
-        kernels = catalog_kernel_state(cosmo, survey, em_catalog, log_g_grid=log_g_grid)
         curves = completion_curves(cosmo, survey, em_catalog)
+
+        if mark_model is not None and mark_model != "none":
+            # Marked-host model: galaxies reweighted by h(m|eta).  Built entirely
+            # here (the per-sample evaluator and DarkSirenPriorState are reused),
+            # because dN_host_obs = N_host_obs * p_host(z) with p_host normalised.
+            # Composes with Q_LSS: curves.dN_miss already carries any deterministic
+            # (or posterior-mean) Q_LSS.  The Level-B missing branch multiplies it
+            # by mu_miss(z|eta) = E_obs[h|z].
+            from darksirens.marks import mark_model_parser
+            log_h = jnp.clip(
+                mark_model_parser(mark_model, mark_names)(em_catalog, mark_params),
+                -_LOG_H_CLIP, _LOG_H_CLIP,
+            )
+            kernels, log_N_host = marked_catalog_kernel_state(
+                cosmo, survey, em_catalog, log_h, log_g_grid=log_g_grid
+            )
+            mu_miss = _mu_miss_grid(em_catalog, log_h)                  # (N_grid,)
+            dN_miss = curves.dN_miss * mu_miss[None, :]                 # (N_rows, N_grid)
+            N_host_miss = jnp.trapezoid(dN_miss, zgrid, axis=-1)        # (N_rows,)
+            N_host_obs = jnp.where(jnp.isfinite(log_N_host), jnp.exp(log_N_host), 0.0)
+            Z = N_host_obs + N_host_miss
+            log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+            return _materialize(
+                DarkSirenPriorState(
+                    kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss, log_Z=log_Z
+                )
+            )
+
+        kernels = catalog_kernel_state(cosmo, survey, em_catalog, log_g_grid=log_g_grid)
         Nobs = _row_counts(em_catalog)
         log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1e-300)), -jnp.inf)
         # Scalar-compatibility normalisation: curves.dN_miss / N_miss already

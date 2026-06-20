@@ -116,6 +116,77 @@ def test_build_cli_then_load_into_inference(survey_path, tmp_path, monkeypatch):
     assert data["lss_completion_indexing"] == 2  # global
 
 
+def test_center_marks_zero_global_mean():
+    """_center_marks subtracts the running E[m|z], leaving zero global mean
+    over real galaxies (pure within-z reweighting)."""
+    from darksirens.inference.data import _center_marks
+    zg = np.array([[0.10, 0.50, 1.00], [0.20, 0.60, 1.10]])
+    ng = np.array([3, 3], dtype=np.int32)
+    M = 2.0 + 3.0 * zg  # linear-in-z mark
+    out = _center_marks({"mark_logmstar": M}, zg, ng)["mark_logmstar"]
+    assert out.shape == (2, 3)
+    real = np.arange(3)[None, :] < ng[:, None]
+    assert abs(float(out[real].mean())) < 1e-10  # per-bin centering => zero global mean
+
+
+def test_pixelate_writes_marks_and_load_all_data_centers_them(tmp_path, monkeypatch):
+    from darksirens.tool.darksirens_pixelate import main as pixelate_main
+    from darksirens.em.utils import load_survey_marks
+    from darksirens.inference import data as data_module
+
+    # Raw DESI-like catalog with a LOGMSTAR mark column.
+    nside = 1
+    npix = hp.nside2npix(nside)
+    rng = np.random.default_rng(0)
+    n = 60
+    pix = rng.integers(0, npix, size=n)
+    theta, phi = hp.pix2ang(nside, pix)
+    raw = tmp_path / "desi_raw.h5"
+    with h5py.File(raw, "w") as f:
+        f.create_dataset("TARGET_RA", data=np.degrees(phi))
+        f.create_dataset("TARGET_DEC", data=np.degrees(np.pi / 2 - theta))
+        zs = rng.uniform(0.05, 0.8, size=n)
+        f.create_dataset("Z", data=zs)
+        f.create_dataset("ZERR", data=np.full(n, 0.001))
+        f.create_dataset("WEIGHT", data=np.ones(n))
+        f.create_dataset("LOGMSTAR", data=10.0 + 2.0 * zs)  # correlated with z
+
+    pixelate_main(["--survey_path", str(raw), "--save_path", str(tmp_path), "--nside", str(nside)])
+    cat = str(tmp_path / f"catalog_pixelated_nside_{nside}.h5")
+    marks = load_survey_marks(cat)
+    assert "mark_logmstar" in marks and marks["mark_logmstar"].shape[0] == npix
+
+    # Load into the inference data path (dark_sirens) -> centered full-catalog marks.
+    pe_pix = np.array([int(pix[0])], dtype=np.int32)
+    sel_pix = np.array([int(pix[1])], dtype=np.int32)
+
+    def _ang(p):
+        th, ph = hp.pix2ang(nside, np.asarray(p, dtype=np.int64))
+        return ph, np.pi / 2 - th
+
+    pe_ra, pe_dec = _ang(pe_pix)
+    sel_ra, sel_dec = _ang(sel_pix)
+    monkeypatch.setattr(data_module, "load_gw_samples", lambda _p: (
+        np.array([36.0]), np.array([28.8]), np.array([460.0]), np.array([0.0]),
+        pe_ra, pe_dec, np.ones(1), 1, 1))
+    monkeypatch.setattr(data_module, "load_selection_samples", lambda _p: (
+        np.array([34.0, 40.0]), np.array([27.2, 32.0]), np.array([430.0, 530.0]),
+        np.zeros(2), sel_ra, sel_dec, np.ones(2), 2))
+
+    opts = SimpleNamespace(
+        universe_model="dark_sirens", survey_path=cat,
+        gw_path="x", gwselection_path="x", use_LSS=False,
+        counterpart=None, counterpart_nside=1, counterpart_dz=0.01, lss_completion=None,
+    )
+    data = data_module.load_all_data(opts)
+    cm = data["mark_logmstar"]
+    assert cm is not None and np.asarray(cm).shape[0] == npix
+    # centered: zero global mean over real galaxies
+    ng = np.asarray(data["ngals_catalog"])
+    real = np.arange(np.asarray(cm).shape[1])[None, :] < ng[:, None]
+    assert abs(float(np.asarray(cm)[real].mean())) < 1e-8
+
+
 def test_diagnose_cli_smoke(survey_path, tmp_path):
     path, npix = survey_path
     qfile = str(tmp_path / "lss_completion.h5")

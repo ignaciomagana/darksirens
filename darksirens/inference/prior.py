@@ -1,6 +1,7 @@
 import numpy as np
 from darksirens.gw.populations import pop_model_prior_parser
 from darksirens.sky import sky_model_prior_parser
+from darksirens.marks import mark_model_prior_parser
 from darksirens.utils.cosmology import (
     Om0PriorLower,
     Om0PriorUpper,
@@ -128,6 +129,8 @@ def build_parameter_space(
     shared_spin=True,
     shared_gamma=True,
     sky_model="isotropic",
+    mark_model="none",
+    mark_names=(),
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
@@ -174,8 +177,19 @@ def build_parameter_space(
     sky_lower, sky_upper, sky_labels, sky_kinds, _sky_latex = sky_model_prior_parser(sky_model)
     sky_lower, sky_upper = list(sky_lower), list(sky_upper)
 
+    # --- Marks (BBH-host efficiency eta block) ---
+    # Appended after the sky block; ``none`` contributes no parameters.  The
+    # eta coefficients are one per available mark (``mark_names``).
+    mark_lower, mark_upper, mark_labels, mark_kinds, _mark_latex = mark_model_prior_parser(
+        mark_model, mark_names
+    )
+    mark_lower, mark_upper = list(mark_lower), list(mark_upper)
+
     # Make sure all prior override keys are valid parameter labels
-    known_labels = set(cosmo_labels) | set(pop_labels) | set(survey_labels) | set(sky_labels)
+    known_labels = (
+        set(cosmo_labels) | set(pop_labels) | set(survey_labels)
+        | set(sky_labels) | set(mark_labels)
+    )
     unknown = [k for k in prior_overrides.keys() if k not in known_labels]
     if unknown:
         raise KeyError(
@@ -244,6 +258,9 @@ def build_parameter_space(
     sampled_sky_labels, sampled_sky_lower, sampled_sky_upper = filter_fixed_parameters(
         sky_labels, sky_lower, sky_upper, fixed_parameter_values
     )
+    sampled_mark_labels, sampled_mark_lower, sampled_mark_upper = filter_fixed_parameters(
+        mark_labels, mark_lower, mark_upper, fixed_parameter_values
+    )
 
     # Drop survey parameters that do not enter this universe model's likelihood
     # (e.g. completion parameters under the complete-catalog model). They stay
@@ -300,6 +317,12 @@ def build_parameter_space(
     upper += sampled_sky_upper
     n_sky_eff = len(sampled_sky_labels)
 
+    # Mark block: appended after sky so all earlier indices stay stable.
+    labels += sampled_mark_labels
+    lower += sampled_mark_lower
+    upper += sampled_mark_upper
+    n_mark_eff = len(sampled_mark_labels)
+
     # Per-parameter prior family aligned to the final ``labels`` ordering.
     # Cosmology and survey blocks are uniform; the population block carries the
     # kinds reported by the parser (keyed by label, matching the codebase's
@@ -310,6 +333,8 @@ def build_parameter_space(
     for lbl, knd in zip(pop_labels, pop_kinds):
         kind_map[lbl] = knd
     for lbl, knd in zip(sky_labels, sky_kinds):
+        kind_map[lbl] = knd
+    for lbl, knd in zip(mark_labels, mark_kinds):
         kind_map[lbl] = knd
     prior_kinds = [kind_map.get(lbl, ("uniform", None, None)) for lbl in labels]
 
@@ -327,6 +352,7 @@ def build_parameter_space(
         fixed_parameter_statuses,
         prior_kinds,
         sky_labels,
+        mark_labels,
     )
 
 def make_prior_transform(lower, upper, prior_kinds=None):

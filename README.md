@@ -77,6 +77,31 @@ which is **not** performed inside the GW likelihood in this implementation (memb
 
 **Scope & caveats (experimental — read before using as a science result).** This is a **radial, per-pixel** lognormal completion: each HEALPix line of sight is an independent 1-D field along comoving distance, so it does **not** borrow information angularly between neighbouring pixels (it is not a 3-D `P(k)`-conditioned reconstruction — a genuine angular-coupling upgrade is planned separately). The GW likelihood uses the **deterministic / posterior-mean** `Q` (not the fully-marginalised `logsumexp_m`), so it is not yet Bayesian over field uncertainty. The completeness `C = dN_obs/dN_exp` and the fitted `Q` are both derived from the **same** observed counts, so `Q` is the sub-smoothing **radial residual** rather than a separately-identifiable completeness; and the whole construction assumes **missing galaxies trace the observed clustering** along the line of sight — an assumption the data alone cannot validate. `Q` is built at **fixed fiducial** cosmology/survey parameters (printed + stored at load) while inference varies them. Treat results as exploratory.
 
+### Marked-host model (galaxy marks → BBH-host efficiency)
+
+The LSS completion says *where* galaxies are; **marks** say *which* galaxies host BBHs. If the pixelated catalog carries per-galaxy "marks" (stellar mass, sSFR, metallicity, colour), `--mark_model loglinear` reweights the catalog's contribution to the dark-siren redshift prior by a sampled BBH-host efficiency
+
+```
+h(m | eta) = exp( sum_k eta_k * m_tilde_k ),
+```
+
+so the observed missing-galaxy decomposition becomes a marked one:
+
+```
+dN_host_obs(p,z) = sum_{i in p} w_i h(m_i|eta) K_i(z),   N_host_obs = sum_i w_i h(m_i|eta),
+```
+
+with the missing branch scaled by the expected host efficiency of unobserved galaxies, `mu_miss(z|eta) = E_obs[h | z]` (Level B). Marks are **z-centred at load** (`m_tilde = m - E[m|z]`) so `eta` measures host preference **at fixed redshift** and does not mimic `R(z)/H0/gamma`. With `--mark_model none` (default) behaviour is the legacy galaxy-count host model, bit-for-bit.
+
+Provide marks by adding columns (`LOGMSTAR`, `LOGSSFR`, `LOGZ`, `GR_COLOR`) to the raw catalog before `darksirens_pixelate` (they are padded and written alongside `zgals`), then:
+
+```bash
+darksirens_inference --universe_model dark_sirens --survey_path catalog.h5 \
+    --mark_model loglinear --marks logmstar,logssfr  ...   # --marks defaults to all present
+```
+
+Positive `eta_logmstar` means GW hosts prefer high-stellar-mass galaxies (old/long-delay-time), positive `eta_logssfr` prefers star-forming hosts (recent/short-delay); both `~0` means the host distribution is consistent with galaxy counts. The marked model **composes with `Q_LSS`** and stays fully deterministic (no galaxies are invented; the missing-galaxy efficiency reuses the observed marks). It applies to `dark_sirens`. *Out of scope (next steps):* an old+young mixture model, an LSS-conditioned missing-mark distribution, and channel-dependent marks tied to the GW population mixture.
+
 ## Minimal installation
 
 ```bash
