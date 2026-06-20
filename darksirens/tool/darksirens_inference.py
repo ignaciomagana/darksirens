@@ -410,6 +410,8 @@ def save_results_hdf5(
             )
         f.attrs["universe_model"]  = opts.universe_model
         f.attrs["sky_model"]       = getattr(opts, "sky_model", "isotropic")
+        f.attrs["mark_model"]      = getattr(opts, "mark_model", "none")
+        f.attrs["mark_names"]      = ",".join(getattr(opts, "mark_names", ()) or ())
         f.attrs["complete_empty_pixel_policy"] = opts.complete_empty_pixel_policy
         f.attrs["sampler"]         = opts.sampler
         f.attrs["fix_cosmology"]   = bool(opts.fix_cosmology)
@@ -709,6 +711,25 @@ def main():
             "-- the perturbative, sharply-constrained choice for a small "
             "deviation, giving the angular power spectrum C_l. All compared to "
             "isotropy by evidence; forced to 'isotropic' for bright_sirens."
+        ),
+    )
+    g.add_argument(
+        "--mark_model", default="none", choices=["none", "loglinear"],
+        help=(
+            "Marked-host model (dark_sirens): reweight catalog galaxies by a "
+            "BBH-host efficiency h(m|eta) over per-galaxy marks. 'none' (default) "
+            "is the legacy galaxy-count host model. 'loglinear' fits "
+            "h=exp(sum_k eta_k m_tilde_k) over the (z-centred) marks selected by "
+            "--marks. Measures whether GW hosts prefer high-M*/sSFR/low-Z "
+            "galaxies at fixed redshift."
+        ),
+    )
+    g.add_argument(
+        "--marks", default=None, metavar="LIST",
+        help=(
+            "Comma-separated marks for --mark_model loglinear "
+            "(subset of: logmstar,logssfr,metallicity,color). Default: all marks "
+            "present in the catalog."
         ),
     )
     g.add_argument(
@@ -1016,6 +1037,24 @@ def main():
 
     # ── Parameter space ────────────────────────────────────────────
 
+    # Resolve the galaxy marks for the marked-host model (dark_sirens): those
+    # present in the catalog, optionally narrowed by --marks.  Stored on opts so
+    # the decoder/likelihood see the same ordered list as the parameter space.
+    from darksirens.marks import MARK_FIELDS as _MARK_FIELDS
+    _present_marks = tuple(n for n in _MARK_FIELDS if data.get(_MARK_FIELDS[n]) is not None)
+    if opts.marks:
+        _req = tuple(s.strip() for s in opts.marks.split(",") if s.strip())
+        _missing = [m for m in _req if m not in _present_marks]
+        if _missing:
+            _fatal(f"--marks requested {_missing} but the catalog provides "
+                   f"{list(_present_marks)}.")
+        opts.mark_names = _req
+    else:
+        opts.mark_names = _present_marks
+    if opts.mark_model != "none" and not opts.mark_names:
+        _fatal("--mark_model loglinear requires per-galaxy marks, but the catalog "
+               "provides none (expected datasets like LOGMSTAR/LOGSSFR).")
+
     _section("Building parameter space")
     res = build_parameter_space(
         opts.pop_model,
@@ -1030,6 +1069,8 @@ def main():
         shared_spin            = opts.shared_spin,
         shared_gamma           = opts.shared_gamma,
         sky_model              = opts.sky_model,
+        mark_model             = opts.mark_model,
+        mark_names             = opts.mark_names,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]

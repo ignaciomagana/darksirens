@@ -278,7 +278,7 @@ def test_decoder_returns_sky_params(sky_model, n_sky):
     assert len(decoder.sky_labels) == n_sky
 
     coord = jnp.zeros(len(decoder.sampled_labels))
-    cosmo, survey, pop_params, sky_params = decoder.decode(coord)
+    cosmo, survey, pop_params, sky_params, _mark_params = decoder.decode(coord)
     assert int(sky_params.shape[0]) == n_sky
 
 
