@@ -123,6 +123,24 @@ class DarkSirenPriorState(NamedTuple):
     log_Z: Any     # (N_rows,) log[N_obs + N_miss]
 
 
+class DarkSirenEnsemblePriorState(NamedTuple):
+    """Dark-siren state with a fixed LSS-completion ensemble (Q_LSS^(m)).
+
+    ``dN_miss`` / ``log_Z`` are the **posterior-mean (or deterministic)**
+    scalar-compatibility fields — identical to what a plain
+    :class:`DarkSirenPriorState` would carry — so ``eval_redshift_prior_with_state``
+    (and hence the GW likelihood) behaves exactly as the mean prior and is
+    unaffected by the ensemble.  The member fields drive only the Bayesian
+    redshift-prior **diagnostic** (``eval_redshift_prior_members_with_state``).
+    """
+    kernels: Any           # CatalogKernelState
+    log_Nobs: Any          # (N_rows,) log real-galaxy count (-inf for empty rows)
+    dN_miss: Any           # (N_rows, N_grid) scalar-compat missing-galaxy density
+    log_Z: Any             # (N_rows,) scalar-compat log[N_obs + N_miss]
+    dN_miss_members: Any   # (M, N_rows, N_grid) per-member missing-galaxy density
+    log_Z_members: Any     # (M, N_rows) per-member log[N_obs + N_miss^m]
+
+
 def _row_counts(em_catalog: EMCatalog) -> jnp.ndarray:
     if em_catalog.ngals is not None:
         return jnp.asarray(em_catalog.ngals, dtype=jnp.float64)
@@ -158,11 +176,27 @@ def prepare_redshift_prior_state(
         curves = completion_curves(cosmo, survey, em_catalog)
         Nobs = _row_counts(em_catalog)
         log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1e-300)), -jnp.inf)
+        # Scalar-compatibility normalisation: curves.dN_miss / N_miss already
+        # carry the deterministic Q (or the posterior-mean Q when only an
+        # ensemble was supplied), so this matches the legacy behaviour exactly.
         Z = Nobs + curves.N_miss
         log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+        if curves.dN_miss_members is None:
+            return _materialize(
+                DarkSirenPriorState(
+                    kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z
+                )
+            )
+        # Fixed LSS-completion ensemble present -> add per-member fields for the
+        # Bayesian redshift-prior diagnostic (the scalar fields above are unchanged).
+        Z_members = Nobs[None, :] + curves.N_miss_members          # (M, N_rows)
+        log_Z_members = jnp.where(
+            Z_members > 0.0, jnp.log(jnp.maximum(Z_members, 1e-300)), 0.0
+        )
         return _materialize(
-            DarkSirenPriorState(
-                kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z
+            DarkSirenEnsemblePriorState(
+                kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z,
+                dN_miss_members=curves.dN_miss_members, log_Z_members=log_Z_members,
             )
         )
 
@@ -247,6 +281,58 @@ def eval_redshift_prior_with_state(
         )(z, pix)
 
     raise ValueError(f"Unknown redshift prior model '{model}'.")
+
+
+def _eval_dark_member_scalar(z, pix, m, state: "DarkSirenEnsemblePriorState", em_catalog):
+    """log p_m(z | pix) for LSS-completion ensemble member ``m`` (diagnostic).
+
+        p_m(z|pix) = [N_obs(pix) p_cat(z|pix) + dN_miss^m(z|pix)]
+                     / [N_obs(pix) + N_miss^m(pix)].
+    """
+    log_p_cat = eval_log_catalog_prior_state(z, pix, state.kernels, em_catalog)
+    log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+    idx, t = _grid_bracket(z)
+    miss = _interp_row(
+        state.dN_miss_members[m, pix, idx],
+        state.dN_miss_members[m, pix, idx + 1],
+        t,
+    )
+    log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
+    return jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss) - state.log_Z_members[m, pix]
+
+
+def eval_redshift_prior_members_with_state(
+    model: str,
+    state,
+    z: jnp.ndarray,
+    pix: jnp.ndarray,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+) -> jnp.ndarray:
+    """Per-member log p_m(z | pix) for a fixed LSS-completion ensemble.
+
+    Returns shape ``(M, len(z))``.  This is a **diagnostic** path (the Bayesian
+    marginalised prior is ``p_Bayes(z|pix) = mean_m exp(log p_m)`` with each
+    member normalised individually) and is never used inside the GW likelihood.
+    For non-ensemble states (or other models) it returns shape ``(1, len(z))``
+    using the scalar (posterior-mean) prior, so callers can always index a
+    leading member axis.
+    """
+    z = jnp.asarray(z)
+    pix = jnp.asarray(pix)
+    if model == "dark_sirens" and isinstance(state, DarkSirenEnsemblePriorState):
+        M = int(state.dN_miss_members.shape[0])
+
+        def _per_member(m):
+            return vmap(
+                lambda z_i, p_i: _eval_dark_member_scalar(z_i, p_i, m, state, em_catalog)
+            )(z, pix)
+
+        return vmap(_per_member)(jnp.arange(M, dtype=jnp.int32))  # (M, len(z))
+
+    lp = eval_redshift_prior_with_state(model, state, z, pix, cosmo, survey, em_catalog)
+    return jnp.reshape(lp, (1, -1))
 
 
 # ------------------------------------------------------------

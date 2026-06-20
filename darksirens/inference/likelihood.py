@@ -88,6 +88,29 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         cache_builder=build_pixel_kde_cache,
     )
 
+    # Slice the (global, host-side) Q_LSS table to each view's union pixels, so
+    # only the compact (n_union, n_grid) block becomes a device/jit operand
+    # rather than the full (n_pix, n_grid) table.  Returns (compact_logq, indexing).
+    def _compact_lss_q(unique_pixels):
+        full = catalogs.lss_completion_logq
+        if full is None:
+            return None, 0
+        full_j = jnp.asarray(full)
+        idx = int(catalogs.lss_completion_indexing or 0)
+        if idx == 1 or unique_pixels is None:
+            # already compact, or a legacy full catalog (rows are global pixels)
+            return barrier(full_j), (1 if idx == 1 else idx)
+        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
+        if int(jnp.max(up)) >= full_j.shape[0]:
+            raise ValueError(
+                f"LSS completion table has {full_j.shape[0]} rows but a catalog "
+                f"pixel index reaches {int(jnp.max(up))} (rebuild Q over the full nside)."
+            )
+        return barrier(full_j[up]), 1
+
+    lss_q_pe, lss_idx_pe = _compact_lss_q(catalogs.unique_pixels_pe)
+    lss_q_sel, lss_idx_sel = _compact_lss_q(catalogs.unique_pixels_sel)
+
     m1det_pe = barrier(_to_jax(data, "m1det"))
     m2det_pe = barrier(_to_jax(data, "m2det"))
     dL_pe = barrier(_to_jax(data, "dL"))
@@ -136,6 +159,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             counterpart_dzs=counterpart_dzs,
             active_counterpart_index=0,
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
+            lss_completion_logq=lss_q_pe,
+            lss_completion_indexing=lss_idx_pe,
         )
         em_catalog_sel = EMCatalog(
             apix=apix,
@@ -154,6 +179,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             counterpart_dzs=counterpart_dzs,
             active_counterpart_index=0,
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
+            lss_completion_logq=lss_q_sel,
+            lss_completion_indexing=lss_idx_sel,
         )
 
         gw_pe = GWEvent(

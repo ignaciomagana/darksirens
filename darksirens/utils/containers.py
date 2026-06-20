@@ -30,6 +30,16 @@ class SurveyParams(NamedTuple):
     prior treats catalog rows with zero real galaxies: ``0`` is the strict
     policy (zero probability), while ``1`` enables a volume-prior robustness
     approximation.
+
+    ``lss_corr_length_mpc`` and ``lss_sigma`` are **fixed** hyperparameters of
+    the offline LSS-conditioned lognormal completion builder
+    (:mod:`darksirens.em.lognormal_completion`): the comoving correlation
+    length [Mpc] and the latent-Gaussian field standard deviation of the
+    per-pixel 1-D Poisson-lognormal model.  They parameterise the built-in
+    Gaussian-correlation power spectrum and are **never marginalised over** —
+    the GW likelihood does not read them; only the offline builder does (the
+    bias of the field reuses ``b_miss``).  They are deliberately excluded from
+    the sampled parameter space.
     """
     n0: Any
     z50: Any
@@ -39,6 +49,8 @@ class SurveyParams(NamedTuple):
     alpha_miss: Any
     sigma_kde: Any = 0.0
     complete_empty_pixel_policy: Any = 0
+    lss_corr_length_mpc: Any = 50.0
+    lss_sigma: Any = 1.0
 
 
 class EMCatalog(NamedTuple):
@@ -96,6 +108,29 @@ class EMCatalog(NamedTuple):
         If true, the bright-siren prior applies only the counterpart redshift
         prior and does not require a GW sample to fall in the event counterpart
         pixel.
+    lss_completion_logq : (N_catalog_rows, N_grid) or (N_global_pix, N_grid) or None
+        Deterministic log Q_LSS(p, z) completion table (preferred over the
+        linear form).  Multiplies the missing-galaxy branch:
+        ``dN_miss = (1 - C) dN_exp Q_LSS``, replacing the legacy
+        ``max(1 + b_eff delta_g, 0)`` factor when supplied.  Built offline by
+        :mod:`darksirens.em.lognormal_completion`; consumed deterministically
+        (the likelihood never samples it).  ``N_grid`` must equal ``zgrid.size``.
+    lss_completion_q : same shape as ``lss_completion_logq`` or None
+        Linear-space Q_LSS table.  ``lss_completion_logq`` is preferred if both
+        are supplied.
+    lss_completion_logq_members : (M, N_rows, N_grid) or (M, N_global_pix, N_grid) or None
+        Fixed posterior ensemble of log Q_LSS (M members).  Used only for
+        Bayesian redshift-prior **diagnostics** (posterior-mean and member
+        bands); not threaded through the per-event GW likelihood.
+    lss_completion_q_members : same shape as ``lss_completion_logq_members`` or None
+        Linear-space ensemble (``logq`` preferred if both supplied).
+    lss_completion_indexing : int
+        Indexing convention for the Q tables, stored as an int enum so the
+        container stays a valid JAX pytree (a string leaf would break tracing):
+        ``0`` = auto (infer from shape: first axis == N_catalog_rows ⇒ compact,
+        else global), ``1`` = compact (index by catalog row), ``2`` = global
+        (index by ``unique_pixels[row]``).  Members infer from the *second*
+        axis when auto.  The human-readable string lives only in the HDF5 file.
     """
     apix: Any
     zgals: Any
@@ -113,6 +148,12 @@ class EMCatalog(NamedTuple):
     counterpart_dzs: Any = None  # per-event redshift uncertainties | None
     active_counterpart_index: Any = 0  # event row selected by likelihood
     bright_siren_sky_marginalized: Any = False
+    # --- LSS-conditioned lognormal completion (optional; default None = legacy) ---
+    lss_completion_logq: Any = None          # (N_rows|N_pix, N_grid) | None
+    lss_completion_q: Any = None             # (N_rows|N_pix, N_grid) | None
+    lss_completion_logq_members: Any = None  # (M, N_rows|N_pix, N_grid) | None
+    lss_completion_q_members: Any = None     # (M, N_rows|N_pix, N_grid) | None
+    lss_completion_indexing: Any = 0         # int enum: 0=auto, 1=compact, 2=global
 
 
 class GWEvent(NamedTuple):
