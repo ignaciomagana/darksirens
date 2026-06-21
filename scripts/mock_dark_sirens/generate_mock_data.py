@@ -341,7 +341,7 @@ def _apply_survey_selection(
     return footprint & depth & (rng.uniform(size=len(catalog["z"])) < completeness)
 
 
-def _pixelate_catalog(ra: np.ndarray, dec: np.ndarray, z: np.ndarray, dz: np.ndarray, w: np.ndarray, nside: int) -> dict[str, np.ndarray]:
+def _pixelate_catalog(ra: np.ndarray, dec: np.ndarray, z: np.ndarray, dz: np.ndarray, w: np.ndarray, nside: int, marks: dict | None = None) -> dict[str, np.ndarray]:
     npix = hp.nside2npix(nside)
     pix = hp.ang2pix(nside, np.pi / 2.0 - dec, ra)
     counts = np.bincount(pix, minlength=npix).astype(np.int32)
@@ -349,14 +349,17 @@ def _pixelate_catalog(ra: np.ndarray, dec: np.ndarray, z: np.ndarray, dz: np.nda
     zgals = np.full((npix, max_gals), 100.0)
     dzgals = np.full((npix, max_gals), 1.0)
     wgals = np.zeros((npix, max_gals))
+    markgals = {name: np.zeros((npix, max_gals)) for name in (marks or {})}
     offsets = np.zeros(npix, dtype=np.int32)
     for i, p in enumerate(pix):
         j = offsets[p]
         zgals[p, j] = z[i]
         dzgals[p, j] = dz[i]
         wgals[p, j] = w[i]
+        for name, arr in (marks or {}).items():
+            markgals[name][p, j] = arr[i]
         offsets[p] += 1
-    return {"zgals": zgals, "dzgals": dzgals, "wgals": wgals, "ngals": counts}
+    return {"zgals": zgals, "dzgals": dzgals, "wgals": wgals, "ngals": counts, **markgals}
 
 
 def _draw_events_until_detected(
@@ -368,6 +371,8 @@ def _draw_events_until_detected(
     snr_threshold: float,
     sky_weight_fn=None,
     sky_g_max: float = 1.0,
+    mark_weight=None,
+    mark_g_max: float = 1.0,
 ) -> dict[str, np.ndarray]:
     """Draw detected events from the host catalog.
 
@@ -377,6 +382,10 @@ def _draw_events_until_detected(
     selection injection set stay isotropic, so this injects a *pure source-rate*
     over-density for validating the sky models (recoverable even in GW-only
     mode).  ``sky_g_max`` must upper-bound ``g`` over the sampled domain.
+
+    When ``mark_weight`` (a per-catalog-galaxy host efficiency ``h(m|eta)``) is
+    given, hosts are additionally accepted ∝ ``mark_weight[host]/mark_g_max`` —
+    a *marked-host* preference recoverable by ``--mark_model loglinear``.
     """
     kept: list[dict[str, np.ndarray]] = []
     while sum(len(x["z"]) for x in kept) < nobs:
@@ -399,6 +408,9 @@ def _draw_events_until_detected(
             g = sky_weight_fn(nx, ny, nz, z)
             accept = rng.uniform(size=len(ra)) < np.clip(g / sky_g_max, 0.0, 1.0)
             det = det & accept
+        if mark_weight is not None:
+            hh = mark_weight[host_idx]
+            det = det & (rng.uniform(size=len(host_idx)) < np.clip(hh / mark_g_max, 0.0, 1.0))
         if np.any(det):
             kept.append({k: v[det] for k, v in dict(z=z, ra=ra, dec=dec, dl=dl, m1=m1, m2=m2, q=q, chi=chi, snr=snr).items()})
     out = {k: np.concatenate([x[k] for x in kept])[:nobs] for k in kept[0]}
@@ -544,11 +556,37 @@ def write_mock_data(args: argparse.Namespace) -> None:
         print(f"Derived {n_galaxies:,} galaxies from n0={args.n0:g} Mpc^-3 over z=[0, {zmax:g}].")
 
     complete = _generate_complete_catalog(rng, n_galaxies, grids, survey)
+
+    # Optional injected host-mark preference: assign per-pixel-coherent marks to
+    # every galaxy and draw GW hosts ∝ h(m|eta_true) = exp(Σ_k eta_k m_k).  The
+    # marks are z-independent (so the inference's z-centring is a no-op) but
+    # spatially coherent per HEALPix pixel, so the preference imprints a
+    # *recoverable* angular over-density of hosts in high-mark pixels.  Purely
+    # per-galaxy-random marks average out per pixel and leave eta unconstrained.
+    eta_true = {"mark_logmstar": float(args.mark_eta_logmstar),
+                "mark_logssfr": float(args.mark_eta_logssfr)}
+    with_marks = bool(args.with_marks) or any(v != 0.0 for v in eta_true.values())
+    mark_weight, mark_g_max = None, 1.0
+    if with_marks:
+        npix_m = hp.nside2npix(args.nside)
+        pix_all = hp.ang2pix(args.nside, np.pi / 2.0 - complete["dec"], complete["ra"])
+        log_h = np.zeros(len(complete["z"]))
+        for name, eta in eta_true.items():
+            field = rng.normal(0.0, args.mark_pixel_sigma, npix_m)   # per-pixel coherent
+            complete[name] = field[pix_all] + rng.normal(0.0, args.mark_scatter, len(pix_all))
+            log_h += eta * complete[name]
+        mark_weight = np.exp(log_h - log_h.max())     # max = 1 -> exact rejection bound
+        if args.verbose:
+            print(f"Injecting host-mark preference eta={eta_true} "
+                  f"(pixel_sigma={args.mark_pixel_sigma}, scatter={args.mark_scatter}).")
+
     observed = _apply_survey_selection(rng, complete, survey)
     zerr = survey.redshift_error_floor + survey.redshift_error_slope * (1.0 + complete["z"])
     weights = np.ones(observed.sum())
+    mark_obs = ({name: complete[name][observed] for name in eta_true} if with_marks else None)
     pixelated = _pixelate_catalog(
-        complete["ra"][observed], complete["dec"][observed], complete["z"][observed], zerr[observed], weights, args.nside
+        complete["ra"][observed], complete["dec"][observed], complete["z"][observed],
+        zerr[observed], weights, args.nside, marks=mark_obs,
     )
 
     # Build the injected 3-D source-rate field g(n̂, z) as a product of optional
@@ -647,6 +685,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
     truth = _draw_events_until_detected(
         rng, args.nobs, complete, grids, pop, args.snr_threshold,
         sky_weight_fn=sky_weight_fn, sky_g_max=sky_g_max,
+        mark_weight=mark_weight, mark_g_max=mark_g_max,
     )
     post = _posterior_samples(
         rng,
@@ -688,6 +727,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
         "shared_beta_for_inference": True,
         "shared_spin_for_inference": True,
         "shared_gamma_for_inference": True,
+        "injected_marks": ({"eta": eta_true,
+                            "pixel_sigma": float(args.mark_pixel_sigma),
+                            "scatter": float(args.mark_scatter)}
+                           if with_marks else None),
     }
 
     complete_path = out / "mock_galaxy_catalog_complete.h5"
@@ -840,6 +883,22 @@ def parse_args() -> argparse.Namespace:
                         help="Right ascension (deg) of the quadrupole symmetry axis.")
     parser.add_argument("--sky-quadrupole-dec-deg", type=float, default=0.0,
                         help="Declination (deg) of the quadrupole symmetry axis.")
+    parser.add_argument("--with-marks", action="store_true",
+                        help="Write per-galaxy marks (mark_logmstar, mark_logssfr) to the "
+                             "pixelated catalog so --mark_model loglinear can read them. "
+                             "Auto-enabled when any --mark-eta-* is nonzero.")
+    parser.add_argument("--mark-eta-logmstar", type=float, default=0.0,
+                        help="Injected TRUE host-preference coefficient eta for logmstar: "
+                             "GW hosts are drawn proportional to exp(eta*mark). 0 = none. "
+                             "Recoverable by --mark_model loglinear --marks logmstar.")
+    parser.add_argument("--mark-eta-logssfr", type=float, default=0.0,
+                        help="Injected TRUE host-preference coefficient eta for logssfr.")
+    parser.add_argument("--mark-pixel-sigma", type=float, default=1.0,
+                        help="Std of the per-HEALPix-pixel coherent mark field — the spatial "
+                             "structure that makes the injected eta recoverable (survives the "
+                             "inference's per-z-bin mark centring).")
+    parser.add_argument("--mark-scatter", type=float, default=0.3,
+                        help="Std of the within-pixel per-galaxy mark scatter.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     if args.n0 is None and args.n_galaxies is None:
