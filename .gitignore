@@ -1,6 +1,10 @@
 # my folders
 data/
 
+# local strong-lensing simulation pipeline (not for upstream) + smoke-test outputs
+SIM_LENSING_donotpush/
+scripts/smoke_tests/_out/
+
 #other
 .vscode/
 

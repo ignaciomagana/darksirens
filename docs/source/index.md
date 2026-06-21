@@ -15,6 +15,7 @@ cli
 usage-detailed
 workflows
 mock-data
+testing
 configuration
 troubleshooting
 ```
