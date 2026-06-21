@@ -20,13 +20,16 @@ zMax: float = 5.0
 zgrid = jnp.expm1(jnp.linspace(jnp.log(1.0), jnp.log(zMax + 1.0), 1000))
 
 
-def load_survey(survey_path):
+def load_survey(survey_path, to_device=True):
+    """Load the pixelated survey. ``to_device=False`` keeps the dense full-sky
+    arrays on the host so callers can compact before transferring to device."""
+    asarray = jnp.asarray if to_device else np.asarray
     with h5py.File(survey_path, 'r') as f:
         nside = f.attrs['nside']
-        zgals = jnp.asarray(f['zgals'])
-        ngals = jnp.asarray(f['ngals'])
-        dzgals = jnp.asarray(f['dzgals'])
-        wgals = jnp.asarray(f['wgals'])
+        zgals = asarray(f['zgals'])
+        ngals = asarray(f['ngals'])
+        dzgals = asarray(f['dzgals'])
+        wgals = asarray(f['wgals'])
     return nside, ngals, zgals, dzgals, wgals
 
 
