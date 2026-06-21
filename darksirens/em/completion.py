@@ -301,9 +301,14 @@ _LOGQ_CLIP: float = 7.0
 def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
     """Resolve the (optional) Q_LSS tables to **row order** for the vmap.
 
-    Runs eagerly inside :func:`completion_curves` (where ``em_catalog`` is a
-    concrete pytree, never traced), so the ``is None`` checks, the ``int``
-    indexing enum and the static-shape inference below are all host-side.
+    Trace-safe consumer: this runs INSIDE the jitted likelihood (via
+    :func:`completion_curves` <- ``prepare_redshift_prior_state`` <-
+    ``darksiren_log_likelihood``), so every ``em_catalog`` field is a tracer and no
+    concrete ``int()``/``.max()`` may touch one.  The indexing-enum decode, the
+    global->compact row gather and the pixel-coverage validation are already done
+    EAGERLY (host-side, before the jit) in
+    ``inference/likelihood.py::make_likelihood._compact_lss_q``, which delivers a
+    compact, row-aligned table.  Here we only consume it with static shapes.
 
     Returns ``(q_row, q_members_row)``:
 
@@ -311,14 +316,16 @@ def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
     * ``q_members_row``   — ``(N_rows, M, N_grid)`` ensemble Q (row-major
       leading axis, ready to vmap), or ``None``.
 
-    Resolution rules (matching the proposal): prefer ``logq`` over ``q``; clip
-    ``logq`` to ``[-_LOGQ_CLIP, _LOGQ_CLIP]`` then exponentiate; validate
-    ``N_grid == zgrid.size`` (no silent interpolation); pick compact vs global
-    indexing from ``lss_completion_indexing`` (0=auto/1=compact/2=global,
-    auto ⇒ compact iff the row axis equals ``N_rows``) and pre-gather global
-    tables to row order via ``unique_pixels``.  If only an ensemble is supplied,
-    the deterministic ``q_row`` is the posterior-mean Q so the scalar prior path
-    still runs.  Q is **not** renormalised here — it is a physical density ratio.
+    Resolution rules: prefer ``logq`` over ``q``; clip ``logq`` to
+    ``[-_LOGQ_CLIP, _LOGQ_CLIP]`` then exponentiate; validate ``N_grid ==
+    zgrid.size`` (no silent interpolation; a static-shape check).  A table whose
+    row axis already equals ``N_rows`` is used as-is (the normal jit path); a
+    non-compacted global table (only reachable on the eager *diagnostic* path,
+    never under jit) is gathered to row order via ``unique_pixels`` after an eager
+    pixel-coverage check.  If only an ensemble is supplied, the deterministic
+    ``q_row`` is the posterior-mean
+    Q so the scalar prior path still runs.  Q is **not** renormalised here — it is
+    a physical density ratio.
     """
     logq = em_catalog.lss_completion_logq
     q = em_catalog.lss_completion_q
@@ -327,9 +334,7 @@ def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
     if logq is None and q is None and logq_m is None and q_m is None:
         return None, None  # no Q table -> legacy local-overdensity path
 
-    n_rows = int(em_catalog.zgals.shape[0])
-    raw_idx = em_catalog.lss_completion_indexing
-    indexing = 0 if raw_idx is None else int(raw_idx)
+    n_rows = em_catalog.zgals.shape[0]  # static int (shape) — safe under trace
 
     def _to_q(logq_arr, q_arr):
         if logq_arr is not None:
@@ -352,21 +357,17 @@ def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
             )
 
     def _row_align(table, row_axis):
+        # Compact-vs-global is decided by STATIC shapes only (``K`` and ``n_rows``
+        # are concrete even under a trace, so nothing here concretises a tracer).
+        # In the jitted likelihood the table is ALWAYS already compact --
+        # make_likelihood._compact_lss_q slices global->compact before the jit -- so
+        # ``K == n_rows`` and we return it untouched (the hot path).
         K = table.shape[row_axis]
-        if indexing == 1:
-            mode = "compact"
-        elif indexing == 2:
-            mode = "global"
-        else:
-            mode = "compact" if K == n_rows else "global"
-        if mode == "compact":
-            if K != n_rows:
-                raise ValueError(
-                    f"compact LSS completion table has {K} rows but the catalog has "
-                    f"{n_rows} rows."
-                )
+        if K == n_rows:
             return table
-        # global: gather the catalog rows' global pixels into row order
+        # ``K != n_rows`` is reachable ONLY on the eager path (a full global table
+        # handed straight to completion_curves by a test or diagnostic), never under
+        # jit, so ``unique_pixels`` is concrete here and the coverage check is safe.
         if em_catalog.unique_pixels is None:
             idx = jnp.arange(n_rows, dtype=jnp.int32)
         else:
