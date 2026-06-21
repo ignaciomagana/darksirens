@@ -145,7 +145,12 @@ def darksiren_log_likelihood(
     )
     selection_model = (
         "spectral_sirens"
-        if universe_model in ("bright_sirens", "spectral_sirens_wl")
+        if universe_model in (
+            "bright_sirens",
+            "spectral_sirens_wl",
+            "dark_sirens",
+            "dark_sirens_complete",
+        )
         else universe_model
     )
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
@@ -241,13 +246,7 @@ def darksiren_log_likelihood(
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
         def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalog):
-            """Selection weight in the canonical ``(m1det, q, dL)`` variables.
-
-            Bright-siren selection injections already encode joint GW+EM
-            detectability.  The selection integral should therefore use the
-            population redshift distribution, not the observed counterparts'
-            narrow redshift likelihoods.
-            """
+            """Selection weight in the canonical ``(m1det, q, dL, chieff)`` variables."""
             def _selection_prior(z, pix, catalog):
                 return log_prior_z_selection(z, pix, catalog)
 
