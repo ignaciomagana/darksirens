@@ -175,7 +175,11 @@ def _mu_miss_grid(em_catalog: EMCatalog, log_h: jnp.ndarray) -> jnp.ndarray:
         real = (jnp.asarray(em_catalog.wgals) > 0.0).reshape(-1)
     real = real.astype(h.dtype)
 
-    z_hi = float(zgrid[-1])
+    # Keep ``z_hi`` as a JAX scalar (do NOT ``float()`` it): ``_mu_miss_grid`` runs
+    # inside the jitted likelihood, where the module ``zgrid`` constant is captured
+    # as a tracer, so a concrete ``float()`` raises ConcretizationTypeError.
+    # ``jnp.linspace`` accepts an array ``stop`` because ``num`` is static.
+    z_hi = zgrid[-1]
     edges = jnp.linspace(0.0, z_hi, _MU_MISS_NBINS + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
     b = jnp.clip(jnp.searchsorted(edges, zs, side="right") - 1, 0, _MU_MISS_NBINS - 1)

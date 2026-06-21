@@ -81,11 +81,13 @@ obs}/\mathrm{d}N_{\rm exp})$, built from a cached per-pixel KDE of the observed
 galaxy redshifts (`build_pixel_kde_cache`). The missing-galaxy branch is
 $\mathrm{d}N_{\rm miss} = (1-C)\,\mathrm{d}N_{\rm exp}\,Q_{\rm LSS}$, where
 $Q_{\rm LSS}$ is either the legacy local-overdensity factor $\max(1 + b_{\rm
-eff}\delta_g, 0)$ or a precomputed lognormal table. `completion_curves` is the
-eager entry; the per-row work is `jax.vmap`-traced, so the optional $Q$ table is
-resolved and row-aligned eagerly by `_resolve_lss_completion_row_tables`
-(handling compact vs global HEALPix indexing, the $\pm7$ $\log Q$ clip, and the
-grid-size check). Scalar/vmapped diagnostics (`catalog_completion`,
+eff}\delta_g, 0)$ or a precomputed lognormal table. The optional $Q$ table is
+sliced to compact, row-aligned form — and its HEALPix pixel coverage validated —
+*eagerly*, host-side before the jit, in `make_likelihood._compact_lss_q`; the
+in-trace consumer `_resolve_lss_completion_row_tables` then reads it with static
+shapes only (the $\pm7$ $\log Q$ clip and the grid-size check), so the whole
+`jax.vmap`-traced per-row path is trace-safe. Scalar/vmapped diagnostics
+(`catalog_completion`,
 `completion_clip_diagnostics`) delegate to the same hot path.
 
 ```{automodule} darksirens.em.completion
