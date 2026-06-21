@@ -153,6 +153,28 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     lss_q_pe, lss_idx_pe = _compact_lss_q(catalogs.unique_pixels_pe)
     lss_q_sel, lss_idx_sel = _compact_lss_q(catalogs.unique_pixels_sel)
 
+    # Slice the (optional) Q_LSS ENSEMBLE (M, n_pix, n_grid) to each view's union
+    # pixels the same way, for the fully-Bayesian marginalisation (--lss_marginalize).
+    def _compact_lss_members(unique_pixels):
+        full = catalogs.lss_completion_logq_members
+        if full is None:
+            return None
+        full_j = jnp.asarray(full)
+        idx = int(catalogs.lss_completion_indexing or 0)
+        if idx == 1 or unique_pixels is None:
+            return barrier(full_j)
+        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
+        if int(jnp.max(up)) >= full_j.shape[1]:
+            raise ValueError(
+                f"LSS completion ensemble has {full_j.shape[1]} pixels but a catalog "
+                f"pixel index reaches {int(jnp.max(up))} (rebuild Q over the full nside)."
+            )
+        return barrier(full_j[:, up])
+
+    lss_qm_pe = _compact_lss_members(catalogs.unique_pixels_pe)
+    lss_qm_sel = _compact_lss_members(catalogs.unique_pixels_sel)
+    lss_marginalize = bool(getattr(opts, "lss_marginalize", False))
+
     # Per-galaxy marks: gathered to the compact catalog rows using the SAME
     # unique-pixel map that compacts zgals, so they align row-for-row.  None
     # (mark absent) flows through to the legacy galaxy-count host model.
@@ -230,6 +252,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             active_counterpart_index=0,
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
             lss_completion_logq=lss_q_pe,
+            lss_completion_logq_members=lss_qm_pe,
             lss_completion_indexing=lss_idx_pe,
             mark_logmstar=marks_pe["mark_logmstar"],
             mark_logssfr=marks_pe["mark_logssfr"],
@@ -254,6 +277,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             active_counterpart_index=0,
             bright_siren_sky_marginalized=bright_siren_sky_marginalized,
             lss_completion_logq=lss_q_sel,
+            lss_completion_logq_members=lss_qm_sel,
             lss_completion_indexing=lss_idx_sel,
             mark_logmstar=marks_sel["mark_logmstar"],
             mark_logssfr=marks_sel["mark_logssfr"],
@@ -316,6 +340,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 wl_z_grid=wl_z_grid,
                 wl_log_mu_grid=wl_log_mu_grid,
                 wl_log_p_table=wl_log_p_table,
+                lss_marginalize=lss_marginalize,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -345,6 +370,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             wl_z_grid=wl_z_grid,
             wl_log_mu_grid=wl_log_mu_grid,
             wl_log_p_table=wl_log_p_table,
+            lss_marginalize=lss_marginalize,
         )
 
     return likelihood
