@@ -10,6 +10,8 @@ from jax import lax
 from jax.scipy.special import logsumexp
 
 from darksirens.em.prior import (
+    DarkSirenEnsemblePriorState,
+    DarkSirenPriorState,
     eval_redshift_prior_with_state,
     prepare_redshift_prior_state,
 )
@@ -53,6 +55,7 @@ WL_BACKEND_TABULATED = 1
         "mark_model",
         "mark_names",
         "wl_backend",
+        "lss_marginalize",
     ],
 )
 def darksiren_log_likelihood(
@@ -84,6 +87,7 @@ def darksiren_log_likelihood(
     wl_z_grid: jnp.ndarray | None = None,
     wl_log_mu_grid: jnp.ndarray | None = None,
     wl_log_p_table: jnp.ndarray | None = None,
+    lss_marginalize: bool = False,
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
@@ -164,21 +168,10 @@ def darksiren_log_likelihood(
         mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
     )
 
-    # No finite guard on the redshift prior. -inf propagates correctly through
-    # logsumexp and is caught by the final isfinite check.
-    def log_prior_z(z, pix, catalog):
-        return eval_redshift_prior_with_state(
-            pe_model, prior_state_univ, z, pix, cosmo, survey, catalog
-        )
-
-    def log_prior_z_selection(z, pix, catalog):
-        return eval_redshift_prior_with_state(
-            selection_model, prior_state_sel, z, pix, cosmo, survey, catalog
-        )
-
     # WL quadrature plumbing — only allocated when wl_enabled (static).  Lognormal
     # uses Gauss-Hermite in the standardized variable u=(ln mu - m(z))/s(z); the
     # tabulated backend uses Gauss-Legendre in ln mu.  Sentinels otherwise.
+    # Q-independent, so computed once and shared across LSS-completion members.
     if wl_enabled:
         if wl_backend == WL_BACKEND_LOGNORMAL:
             u_nodes, log_wH_nodes = make_hermite_u_grid(_WL_HERMITE_NODES)
@@ -199,97 +192,149 @@ def darksiren_log_likelihood(
         log_wH_nodes = jnp.zeros(1, dtype=jnp.float64)
         log_p_wl_fn = None
 
-    def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
-        """PE per-sample weight; WL-marginalized when wl_enabled, else standard.
+    def _ll_given_states(prior_state_univ, prior_state_sel):
+        """Full log-likelihood (selection + PE) for ONE pair of redshift-prior
+        states.  Factored out so the LSS-completion ensemble can be marginalised
+        over (one call per Q_LSS member); for the default deterministic path it is
+        called exactly once, so the compute graph is unchanged."""
+        # No finite guard on the redshift prior. -inf propagates correctly through
+        # logsumexp and is caught by the final isfinite check.
+        def log_prior_z(z, pix, catalog):
+            return eval_redshift_prior_with_state(
+                pe_model, prior_state_univ, z, pix, cosmo, survey, catalog
+            )
 
-        Returns -inf for distances outside the tabulated z(dL) support.  The
-        angular factor g(n̂, z) is applied separately in ``_pe_event_fn`` (so WL
-        is only ever combined with an isotropic sky in this build — see the WL
-        docs).
-        """
-        if not wl_enabled:
+        def log_prior_z_selection(z, pix, catalog):
+            return eval_redshift_prior_with_state(
+                selection_model, prior_state_sel, z, pix, cosmo, survey, catalog
+            )
+
+        def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
+            """PE per-sample weight; WL-marginalized when wl_enabled, else standard.
+
+            Returns -inf for distances outside the tabulated z(dL) support.  The
+            angular factor g(n̂, z) is applied separately in ``_pe_event_fn`` (so WL
+            is only ever combined with an isotropic sky in this build — see the WL
+            docs).
+            """
+            if not wl_enabled:
+                ldw = log_sample_weight(
+                    m1det, q, dL, chieff, pix, prior_wt, cosmo, survey, pop_params,
+                    catalog, log_p_pop, log_prior_z,
+                )
+            elif wl_backend == WL_BACKEND_LOGNORMAL:
+                ldw = log_sample_weight_wl_lognormal_hermite(
+                    m1det, q, dL, chieff, pix, prior_wt,
+                    cosmo, survey, pop_params, catalog,
+                    log_p_pop, log_prior_z,
+                    wl_a, wl_b, u_nodes, log_wH_nodes,
+                )
+            else:
+                ldw = log_sample_weight_wl_or_standard(
+                    m1det, q, dL, chieff, pix, prior_wt,
+                    cosmo, survey, pop_params, catalog,
+                    log_p_pop, log_prior_z,
+                    log_p_wl_fn, mu_nodes, log_w_nodes,
+                    wl_enabled=wl_enabled,
+                )
+            supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
+            return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+
+        def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalog):
+            """Selection weight in the canonical ``(m1det, q, dL)`` variables.
+
+            Bright-siren selection injections already encode joint GW+EM
+            detectability.  The selection integral should therefore use the
+            population redshift distribution, not the observed counterparts'
+            narrow redshift likelihoods.
+            """
+            def _selection_prior(z, pix, catalog):
+                return log_prior_z_selection(z, pix, catalog)
+
             ldw = log_sample_weight(
                 m1det, q, dL, chieff, pix, prior_wt, cosmo, survey, pop_params,
-                catalog, log_p_pop, log_prior_z,
+                catalog, log_p_pop, _selection_prior,
             )
-        elif wl_backend == WL_BACKEND_LOGNORMAL:
-            ldw = log_sample_weight_wl_lognormal_hermite(
-                m1det, q, dL, chieff, pix, prior_wt,
-                cosmo, survey, pop_params, catalog,
-                log_p_pop, log_prior_z,
-                wl_a, wl_b, u_nodes, log_wH_nodes,
+            supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
+            return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+
+        def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalog):
+            """PE weight in the same ``(m1det, q, dL)`` variables as selection."""
+            return _log_sample_weight_if_supported(
+                m1det, q, dL, chieff, pix, prior_wt, catalog
             )
-        else:
-            ldw = log_sample_weight_wl_or_standard(
-                m1det, q, dL, chieff, pix, prior_wt,
-                cosmo, survey, pop_params, catalog,
-                log_p_pop, log_prior_z,
-                log_p_wl_fn, mu_nodes, log_w_nodes,
-                wl_enabled=wl_enabled,
-            )
-        supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
-        return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-    def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalog):
-        """Selection weight in the canonical ``(m1det, q, dL)`` variables.
-
-        Bright-siren selection injections already encode joint GW+EM
-        detectability.  The selection integral should therefore use the
-        population redshift distribution, not the observed counterparts'
-        narrow redshift likelihoods.
-        """
-        def _selection_prior(z, pix, catalog):
-            return log_prior_z_selection(z, pix, catalog)
-
-        ldw = log_sample_weight(
-            m1det, q, dL, chieff, pix, prior_wt, cosmo, survey, pop_params,
-            catalog, log_p_pop, _selection_prior,
+        log_mu, Neff, _log_sigma2 = compute_selection_term(
+            gw_sel,
+            em_catalog_sel,
+            log_weight,
+            Ndraw,
+            nEvents,
+            sel_batch_size=sel_batch_size,
+            sky_log_weight_fn=sky_log_weight_fn,
         )
-        supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
-        return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+        ll = selection_log_correction(log_mu, Neff, nEvents)
 
-    def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalog):
-        """PE weight in the same ``(m1det, q, dL)`` variables as selection."""
-        return _log_sample_weight_if_supported(
-            m1det, q, dL, chieff, pix, prior_wt, catalog
-        )
-
-    log_mu, Neff, _log_sigma2 = compute_selection_term(
-        gw_sel,
-        em_catalog_sel,
-        log_weight,
-        Ndraw,
-        nEvents,
-        sel_batch_size=sel_batch_size,
-        sky_log_weight_fn=sky_log_weight_fn,
-    )
-    ll = selection_log_correction(log_mu, Neff, nEvents)
-
-    def _pe_event_fn(_, event_idx):
-        s = event_idx * nsamp
-        sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
-        dL_ev = sl(gw_pe.dL)
-        valid = sl(gw_pe.valid) & (sl(gw_pe.prior_wt) > 0.0)
-        catalog_ev = em_catalog_pe._replace(active_counterpart_index=event_idx)
-        ldw = log_weight_ev(
-            sl(gw_pe.m1det),
-            sl(gw_pe.q),
-            dL_ev,
-            sl(gw_pe.chieff),
-            sl(gw_pe.pixels),
-            sl(gw_pe.prior_wt),
-            catalog_ev,
-        )
-        # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
-        if apply_sky:
-            z_ev = z_of_dL(dL_ev, H0, Om0, w0, wa)
-            ldw = ldw + log_g_sky(
-                sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
+        def _pe_event_fn(_, event_idx):
+            s = event_idx * nsamp
+            sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
+            dL_ev = sl(gw_pe.dL)
+            valid = sl(gw_pe.valid) & (sl(gw_pe.prior_wt) > 0.0)
+            catalog_ev = em_catalog_pe._replace(active_counterpart_index=event_idx)
+            ldw = log_weight_ev(
+                sl(gw_pe.m1det),
+                sl(gw_pe.q),
+                dL_ev,
+                sl(gw_pe.chieff),
+                sl(gw_pe.pixels),
+                sl(gw_pe.prior_wt),
+                catalog_ev,
             )
-        ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
-        return None, -jnp.log(nsamp) + logsumexp(ldw)
+            # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
+            if apply_sky:
+                z_ev = z_of_dL(dL_ev, H0, Om0, w0, wa)
+                ldw = ldw + log_g_sky(
+                    sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
+                )
+            ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
+            return None, -jnp.log(nsamp) + logsumexp(ldw)
 
-    _, event_lls = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
-    ll += jnp.sum(event_lls)
+        _, event_lls = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
+        return ll + jnp.sum(event_lls)
+
+    # LSS-completion marginalisation: logL = logsumexp_m logL(Λ; Q_m) − log M,
+    # treating the M lognormal-completion members as Monte-Carlo draws of the
+    # missing-galaxy field.  Opt-in (static); off by default so the deterministic
+    # (posterior-mean Q) path is bit-for-bit unchanged.
+    if lss_marginalize:
+        if not (
+            isinstance(prior_state_univ, DarkSirenEnsemblePriorState)
+            and isinstance(prior_state_sel, DarkSirenEnsemblePriorState)
+        ):
+            raise ValueError(
+                "lss_marginalize=True requires an LSS-completion ENSEMBLE on both the "
+                "PE and selection catalogs. Build Q_LSS with members "
+                "(darksirens_build_lognormal_completion --n-members M > 0) and pass it "
+                "via --lss_completion; only universe_model='dark_sirens' supports it."
+            )
+        n_members = prior_state_univ.log_Z_members.shape[0]
+        # Per-member states reuse the (Q-independent) kernels + log_Nobs and swap in
+        # the member missing-galaxy density / normalisation; vmap over the M axis.
+        univ_members = DarkSirenPriorState(
+            kernels=prior_state_univ.kernels, log_Nobs=prior_state_univ.log_Nobs,
+            dN_miss=prior_state_univ.dN_miss_members, log_Z=prior_state_univ.log_Z_members,
+        )
+        sel_members = DarkSirenPriorState(
+            kernels=prior_state_sel.kernels, log_Nobs=prior_state_sel.log_Nobs,
+            dN_miss=prior_state_sel.dN_miss_members, log_Z=prior_state_sel.log_Z_members,
+        )
+        member_axes = DarkSirenPriorState(kernels=None, log_Nobs=None, dN_miss=0, log_Z=0)
+        ll_members = jax.vmap(_ll_given_states, in_axes=(member_axes, member_axes))(
+            univ_members, sel_members
+        )
+        ll_members = jnp.where(jnp.isfinite(ll_members), ll_members, -jnp.inf)
+        ll = logsumexp(ll_members) - jnp.log(n_members)
+    else:
+        ll = _ll_given_states(prior_state_univ, prior_state_sel)
 
     return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)

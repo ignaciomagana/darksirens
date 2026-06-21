@@ -390,6 +390,7 @@ def load_all_data(opts):
     # are intentionally NOT threaded into the (jit'd) likelihood.  An explicit
     # --lss_completion path overrides an in-catalog /lss_completion group.
     lss_completion_logq = None
+    lss_completion_logq_members = None  # (M, n_pix|n_rows, n_grid) ensemble | None
     lss_completion_indexing = 0  # int enum: 0=auto, 1=compact, 2=global
     lss_path = getattr(opts, "lss_completion", None)
     if lss_path is None and opts.survey_path is not None:
@@ -430,6 +431,31 @@ def load_all_data(opts):
         lss_completion_indexing = {"compact": 1, "global": 2}.get(
             str(loaded.get("indexing", "compact")), 0
         )
+        # Optional Q ENSEMBLE for the fully-Bayesian marginalisation
+        # (logL = logsumexp_m logL(Q_m) − log M).  Loaded only when requested, to
+        # avoid carrying the (M, n_pix, n_grid) members table otherwise.  Members
+        # share the deterministic table's indexing/grid, so the likelihood slices
+        # them to the union pixels the same way.
+        if getattr(opts, "lss_marginalize", False):
+            logq_m = loaded.get("logq_members")
+            if logq_m is None:
+                raise ValueError(
+                    f"--lss_marginalize requires an LSS-completion ENSEMBLE, but "
+                    f"'{lss_path}' has no /lss_completion/logq_members. Rebuild Q with "
+                    "darksirens_build_lognormal_completion --n-members M (M > 0)."
+                )
+            logq_m = np.asarray(logq_m, dtype=float)
+            if logq_m.shape[-1] != len(zgrid):
+                raise ValueError(
+                    f"LSS completion members N_grid={logq_m.shape[-1]} but the package "
+                    f"zgrid has size {len(zgrid)}; rebuild on the package grid."
+                )
+            lss_completion_logq_members = logq_m
+            print(
+                f"    - LSS completion ENSEMBLE loaded: logq_members "
+                f"{tuple(logq_m.shape)} (M={logq_m.shape[0]}) for fully-Bayesian "
+                "marginalisation over the missing-galaxy field"
+            )
         print(
             f"    - LSS completion loaded from {lss_path}: logq_map {tuple(logq.shape)}, "
             f"indexing={loaded.get('indexing')}"
@@ -449,6 +475,7 @@ def load_all_data(opts):
             "substantially."
         )
     data["lss_completion_logq"] = lss_completion_logq
+    data["lss_completion_logq_members"] = lss_completion_logq_members
     data["lss_completion_indexing"] = lss_completion_indexing
 
     # --------------------------------------------------------

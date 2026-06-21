@@ -806,6 +806,13 @@ def main():
                          "darksirens-build-lognormal-completion. Replaces the legacy "
                          "max(1+b*delta_g,0) missing-galaxy factor for dark_sirens. If unset, "
                          "an in-catalog /lss_completion group (if present) is used automatically."))
+    g.add_argument("--lss_marginalize", type=str_to_bool, default=False, metavar="BOOL",
+                   help=("Fully-Bayesian marginalisation of the GW likelihood over the "
+                         "Q_LSS ENSEMBLE: logL = logsumexp_m logL(Q_m) - log M, instead of "
+                         "the deterministic posterior-mean Q. Requires --lss_completion to "
+                         "point at a file built with members "
+                         "(darksirens-build-lognormal-completion --n-members M>0); "
+                         "dark_sirens only. Off (default) = deterministic Q, unchanged."))
 
     g = optp.add_argument_group("Sampler")
     g.add_argument("--sampler",      required=True, choices=["jaxns", "dynesty", "emcee", "numpyro"])

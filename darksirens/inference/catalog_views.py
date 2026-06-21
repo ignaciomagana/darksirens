@@ -73,6 +73,7 @@ class CatalogViews:
     # shared across PE/selection (the per-row resolution to compact rows happens
     # in completion.py via each view's unique_pixels).  ``None`` = legacy path.
     lss_completion_logq: jnp.ndarray | None = None
+    lss_completion_logq_members: jnp.ndarray | None = None  # (M, n_pix|n_rows, n_grid)
     lss_completion_indexing: int = 0  # int enum: 0=auto, 1=compact, 2=global
 
 
@@ -286,6 +287,7 @@ def prepare_catalog_views(
     # Carry the (global) Q table HOST-side, unbarriered: likelihood.py slices it
     # to the per-view union pixels so only the compact block reaches the device.
     lss_completion_logq = data.get("lss_completion_logq")
+    lss_completion_logq_members = data.get("lss_completion_logq_members")
     lss_completion_indexing = int(data.get("lss_completion_indexing", 0))
 
     dN_obs_kde_pe = dN_obs_kde_sel = None
@@ -417,5 +419,6 @@ def prepare_catalog_views(
         pixel_to_cache_idx_pe=pixel_to_cache_idx_pe,
         pixel_to_cache_idx_sel=pixel_to_cache_idx_sel,
         lss_completion_logq=lss_completion_logq,
+        lss_completion_logq_members=lss_completion_logq_members,
         lss_completion_indexing=lss_completion_indexing,
     )

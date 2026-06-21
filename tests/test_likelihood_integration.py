@@ -285,7 +285,7 @@ def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
         ngals_sel_catalog=jnp.ones((1,), dtype=jnp.int32),
         delta_g_pix_z=jnp.zeros((1, 1)),        dN_obs_kde_pe=None, pixel_to_cache_idx_pe=None, unique_pixels_pe=None,
         dN_obs_kde_sel=None, pixel_to_cache_idx_sel=None, unique_pixels_sel=None,
-        lss_completion_logq=None, lss_completion_indexing=0,
+        lss_completion_logq=None, lss_completion_logq_members=None, lss_completion_indexing=0,
     ))())
     monkeypatch.setattr(likelihood_module, "build_parameter_decoder", lambda *a, **k: _Decoder())
     monkeypatch.setattr(likelihood_module, "darksiren_log_likelihood", _fake_core)
@@ -332,7 +332,7 @@ def test_make_likelihood_fails_fast_on_empty_population_theta(monkeypatch):
         ngals_sel_catalog=jnp.ones((1,), dtype=jnp.int32),
         delta_g_pix_z=jnp.zeros((1, 1)),        dN_obs_kde_pe=None, pixel_to_cache_idx_pe=None, unique_pixels_pe=None,
         dN_obs_kde_sel=None, pixel_to_cache_idx_sel=None, unique_pixels_sel=None,
-        lss_completion_logq=None, lss_completion_indexing=0,
+        lss_completion_logq=None, lss_completion_logq_members=None, lss_completion_indexing=0,
     ))())
 
     class _Decoder:
