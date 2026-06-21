@@ -33,7 +33,6 @@ ENV="${ENV:-darksirens-dev}"
 OUT="scripts/smoke_tests/_out"
 LOGS="$OUT/logs"; RUNS="$OUT/runs"; FIGS="$OUT/figs"
 DATA="$OUT/data"; BDATA="$OUT/data_bright"; LENSD="$OUT/lensing"
-SIM_DIR="SIM_LENSING_donotpush"
 
 ONLY=""; DO_LIST=0; FULL=0; KEEP=0; DO_PYTEST=0; DO_SLOW=0
 while [ $# -gt 0 ]; do
@@ -61,7 +60,7 @@ if [ "$FULL" = 1 ]; then
   DYN_HI="--sampler dynesty --nlive $NLIVE"
   NUTS="--sampler numpyro --nuts_warmup 300 --nuts_samples 300 --nuts_chains 1"
   NORM_ENV=""   # full: use the tool's default normalisation grids
-  SIM_KW="n_universe=120000, seed=7, nsamp=500, n_sing_keep=80, n_pair_keep=20, n_unlensed_inj=120000, n_lensed_inj=120000"
+  SIM_FLAGS="--n-universe 120000 --seed 7 --nsamp 500 --n-sing-keep 80 --n-pair-keep 20 --n-unlensed-inj 120000 --n-lensed-inj 120000"
 else
   # Smoke = "does it run", not accuracy: tiny mock, early-stop sampling, coarse
   # normalisation grids (via env vars the tool reads).
@@ -71,7 +70,7 @@ else
   # shallow NUTS tree (default depth 10 ⇒ up to 1024 leapfrogs/step ⇒ minutes for 192-dim GPs)
   NUTS="--sampler numpyro --nuts_warmup 8 --nuts_samples 8 --nuts_chains 1 --nuts_max_tree_depth 3"
   NORM_ENV="export DARKSIRENS_GW_N_MASS=16 DARKSIRENS_GW_N_Q=8 DARKSIRENS_GW_N_CHI=8;"
-  SIM_KW="n_universe=8000, seed=7, nsamp=200, n_sing_keep=15, n_pair_keep=5, n_unlensed_inj=20000, n_lensed_inj=20000"
+  SIM_FLAGS="--n-universe 8000 --seed 7 --nsamp 200 --n-sing-keep 15 --n-pair-keep 5 --n-unlensed-inj 20000 --n-lensed-inj 20000"
 fi
 
 # ---- helpers ----------------------------------------------------------------
@@ -85,6 +84,7 @@ BUILDQ="python -m darksirens.tool.darksirens_build_lognormal_completion"
 ANALYZE="python -m darksirens.tool.darksirens_analyze"
 MOCK="python scripts/mock_dark_sirens/generate_mock_data.py"
 BMOCK="python scripts/mock_bright_sirens/generate_mock_bright_sirens.py"
+LMOCK="python scripts/mock_lensing/generate_mock_lensing.py"
 
 # ---- data paths -------------------------------------------------------------
 GWE="$DATA/mock_gw_events.h5";        SEL="$DATA/mock_gw_selection.h5"
@@ -203,13 +203,9 @@ PY
 )"
   CMDS[4]="$INFER --gw_path $BGWE --gwselection_path $BSEL --universe_model bright_sirens --counterpart $CPARGS --counterpart_dz 1e-4 --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-bright"
 fi
-if [ -f "$SIM_DIR/sim_step6.py" ]; then
-  # Run from the repo root (so `darksirens` imports) with the sim dir on PYTHONPATH
-  # (so sim_step6's sibling `sim_step12/...` imports resolve).
-  prep lensing_sim HAVE_LENS "PYTHONPATH='$SIM_DIR' python -c \"import sim_step6; sim_step6.assemble(r'$LENSD', $SIM_KW)\""
-else
-  echo "[prep] SIM_LENSING_donotpush/ absent — strong-lensing j2 case (X-cl2) will SKIP"
-fi
+# Strong-lensing mock: standalone in-repo generator (writes the current gwcat
+# schema, so the files load through darksirens_inference_lensing's loaders).
+prep lensing_sim HAVE_LENS "$LMOCK --outdir $LENSD $SIM_FLAGS"
 hr
 
 # ---- run cases --------------------------------------------------------------
