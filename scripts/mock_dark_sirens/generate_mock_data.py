@@ -454,32 +454,43 @@ def _draw_selection_batch(
     grids: dict[str, np.ndarray],
     pop: PopulationConfig,
     snr_threshold: float,
+    m1det_range: tuple[float, float] = (2.0, 200.0),
 ) -> dict[str, np.ndarray | int]:
+    # Selection injections are drawn from a BROAD proposal, NOT from the
+    # population: uniform in detector-frame primary mass, mass ratio, and spin
+    # (z already broad via dV_c/dz).  Drawing masses from the population makes the
+    # proposal a narrow envelope around the fiducial, so the importance-sampling
+    # estimate of mu(theta) is only well-conditioned near the truth: away from it
+    # (steep mass slopes, large gamma) p_pop/pdraw blows up, the effective sample
+    # size collapses, mu is under-resolved, and the recovered population is biased
+    # (gamma rails).  The #94 mass-taper made the population envelope even more
+    # peaked, tipping this over.  A broad proposal keeps mu well-conditioned over
+    # the whole prior.  pdraw is the proposal density in the canonical
+    # (m1det, q, dL) basis (with the isotropic 1/4pi sky factor, as before).
+    m1lo, m1hi = m1det_range
+    m1det = rng.uniform(m1lo, m1hi, ndraw)
+    q = rng.uniform(0.0, 1.0, ndraw)
+    chi = rng.uniform(-1.0, 1.0, ndraw)
     z = _sample_uniform_comoving_z(rng, grids, ndraw)
     ra, dec = _sample_sky(rng, ndraw)
     dl = _interp_dl(z, grids)
-    m1 = _sample_powerlaw_peak_m1(rng, ndraw, pop)
-    q = _sample_q(rng, m1, pop)
-    m2 = q * m1
-    chi = _sample_chieff(rng, ndraw, pop)
-    snr = _network_snr(m1, m2, z, dl, rng)
+    m1src = m1det / (1.0 + z)
+    m2src = q * m1src
+    snr = _network_snr(m1src, m2src, z, dl, rng)
     det = snr >= snr_threshold
 
     pz = np.interp(z, grids["z"], grids["dvc_dz"]) / jnp.trapezoid(grids["dvc_dz"], grids["z"])
-    ddldz = np.gradient(grids["dl"], grids["z"])
-    # Selection densities are consumed in the likelihood's canonical
-    # coordinates (m1det, q, dL).  Since m1det = (1+z) m1src and
-    # dL = dL(z), the Jacobian from (m1src, q, z) to (m1det, q, dL) is
-    # (1+z) * d(dL)/dz.
-    jac = np.interp(z, grids["z"], ddldz) * (1.0 + z)
-    p_draw = _mass_spin_pdf(m1, q, chi, pop) * pz / np.maximum(jac, 1.0e-300) / (4.0 * np.pi)
+    ddldz = np.interp(z, grids["z"], np.gradient(grids["dl"], grids["z"]))
+    # m1det is drawn directly (no source->detector Jacobian); p(dL) = p_z(z)|dz/ddL|.
+    p_dL = pz / np.maximum(ddldz, 1.0e-300)
+    p_draw = (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
     p_draw = np.maximum(p_draw, 1.0e-300)
 
     return {
-        "m1det": m1[det] * (1.0 + z[det]),
-        "m2det": m2[det] * (1.0 + z[det]),
-        "m1src": m1[det],
-        "m2src": m2[det],
+        "m1det": m1det[det],
+        "m2det": (q * m1det)[det],
+        "m1src": m1src[det],
+        "m2src": m2src[det],
         "dL": dl[det],
         "chieff": chi[det],
         "ra": ra[det],
