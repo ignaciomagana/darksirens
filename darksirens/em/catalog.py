@@ -98,34 +98,50 @@ def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid):
     return jnp.where(real & (Z > 0.0), jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
 
 
-def _row_kernel_state(zs, dzs, ws, ngal, sigma_kde, log_g_grid):
+def _row_kernel_state(zs, dzs, ws, ngal, sigma_kde, log_g_grid, volume_weighted):
     """
-    Per-galaxy kernel quantities for one row.
+    Per-galaxy kernel quantities for one row, under one of two host-weight
+    conventions for the galaxy measure g(z) = dV_c/dz * (1+z)^delta:
 
-    Returns
-    -------
-    log_kw : (N_max,) log[ w~_i / Z_i ]  (-inf for padded slots and for
-        empty rows, where the weight normalisation is undefined).
-    sig_eff : (N_max,) effective kernel widths (floored).
+    - ``volume_weighted=False`` (incomplete-catalog default): each galaxy's
+      total host probability is its base weight w~_i; g only tilts the kernel
+      shape, divided back out by Z_i = ∫ N(z;z_i,sig) g(z) dz so each kernel has
+      unit mass.  The g(z) front factor is reapplied per sample in the evaluator.
+
+    - ``volume_weighted=True`` (complete-catalog): each galaxy's host
+      probability scales with the comoving volume at its redshift, weight
+      w_i * g(z_i), with a plain N(z;z_i,sig) kernel (no Z_i, no front g(z)).
+      The catalog is the full universe, so the host rate must track the number
+      of candidate hosts per redshift shell.
+
+    Returns ``(log_kw, sig_eff)``; the evaluator's g(z) handling is selected by
+    the same ``volume_weighted`` flag carried on :class:`CatalogKernelState`.
     """
     real = _row_real_mask(zs, ws, ngal)
     sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
-
     log_w = jnp.where(real, jnp.log(jnp.maximum(ws, 1e-300)), -jnp.inf)
+
+    if volume_weighted:
+        log_w = log_w + jnp.where(real, jnp.interp(zs, zgrid, log_g_grid), 0.0)
+
     lse = logsumexp(log_w)
     has_galaxies = jnp.isfinite(lse)
     log_w_norm = jnp.where(real, log_w - jnp.where(has_galaxies, lse, 0.0), -jnp.inf)
 
-    log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
-    log_kw = jnp.where(real, log_w_norm - log_Z, -jnp.inf)
+    if volume_weighted:
+        log_kw = log_w_norm
+    else:
+        log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
+        log_kw = jnp.where(real, log_w_norm - log_Z, -jnp.inf)
     return log_kw, sig_eff
 
 
 class CatalogKernelState(NamedTuple):
     """Per-galaxy kernel quantities for all catalog rows (one proposal)."""
     log_g_grid: jnp.ndarray  # (N_grid,)
-    log_kw: jnp.ndarray      # (N_rows, N_max) log[w~_i / Z_i]
+    log_kw: jnp.ndarray      # (N_rows, N_max)
     sig_eff: jnp.ndarray     # (N_rows, N_max)
+    volume_weighted: bool = False
 
 
 def catalog_kernel_state(
@@ -133,6 +149,7 @@ def catalog_kernel_state(
     survey: SurveyParams,
     em_catalog: EMCatalog,
     log_g_grid: jnp.ndarray | None = None,
+    volume_weighted: bool = False,
 ) -> CatalogKernelState:
     """Precompute per-galaxy kernel quantities once per parameter proposal."""
     if log_g_grid is None:
@@ -141,20 +158,23 @@ def catalog_kernel_state(
     ngals = em_catalog.ngals
 
     if ngals is not None:
-        per_row = vmap(_row_kernel_state, in_axes=(0, 0, 0, 0, None, None))
+        per_row = vmap(_row_kernel_state, in_axes=(0, 0, 0, 0, None, None, None))
         log_kw, sig_eff = per_row(
-            zgals, dzgals, wgals, ngals, survey.sigma_kde, log_g_grid
+            zgals, dzgals, wgals, ngals, survey.sigma_kde, log_g_grid, volume_weighted
         )
     else:
         per_row = vmap(
             lambda zs, dzs, ws: _row_kernel_state(
-                zs, dzs, ws, None, survey.sigma_kde, log_g_grid
+                zs, dzs, ws, None, survey.sigma_kde, log_g_grid, volume_weighted
             ),
             in_axes=(0, 0, 0),
         )
         log_kw, sig_eff = per_row(zgals, dzgals, wgals)
 
-    return CatalogKernelState(log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff)
+    return CatalogKernelState(
+        log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
+        volume_weighted=volume_weighted,
+    )
 
 
 # ------------------------------------------------------------
@@ -236,8 +256,12 @@ def eval_log_catalog_prior_state(
     zs = em_catalog.zgals[pix]
     log_kw = state.log_kw[pix]
     sig = state.sig_eff[pix]
-    log_g_z = jnp.interp(z, zgrid, state.log_g_grid)
-    return log_g_z + logsumexp(log_kw + norm.logpdf(z, zs, sig))
+    log_mix = logsumexp(log_kw + norm.logpdf(z, zs, sig))
+    # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
+    # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
+    # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
+    log_g_front = jnp.where(state.volume_weighted, 0.0, jnp.interp(z, zgrid, state.log_g_grid))
+    return log_g_front + log_mix
 
 
 @jit

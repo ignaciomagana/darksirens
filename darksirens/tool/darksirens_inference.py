@@ -837,6 +837,12 @@ def main():
 
     g = optp.add_argument_group("Performance")
     g.add_argument("--sel_batch_size", type=int, default=None, metavar="N")
+    g.add_argument("--drop_full_catalog", type=str_to_bool, default=False, metavar="BOOL",
+                   help="Discard the dense full-sky (npix, n_max_gals) galaxy arrays after "
+                        "compacting to inference pixels, keeping only the compact PE/selection "
+                        "views on device. Cuts startup GPU memory drastically for large nside. "
+                        "Incompatible with --use_LSS and bright-siren models, which need the "
+                        "full-sky rows.")
     g.add_argument("--norm_nmass", type=int, default=None, metavar="N",
                    help="Mass-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_MASS).")
     g.add_argument("--norm_nq", type=int, default=None, metavar="N",
@@ -999,6 +1005,8 @@ def main():
     _row("Output root",     opts.save_path)
     if opts.sel_batch_size:
         _row("Sel. batch",   f"{opts.sel_batch_size:,} samples/batch")
+    if opts.drop_full_catalog:
+        _row("Drop full catalog", "yes (compact views only)")
     _end()
 
     # ── Load data ──────────────────────────────────────────────────

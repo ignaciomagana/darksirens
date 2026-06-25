@@ -171,6 +171,12 @@ def load_all_data(opts):
         getattr(opts, "bright_siren_sky_marginalized", False)
     )
 
+    if getattr(opts, "drop_full_catalog", False) and opts.universe_model in BRIGHT_SIREN_MODELS:
+        raise ValueError(
+            "--drop_full_catalog is incompatible with bright-siren models: "
+            "the counterpart prior needs the full-sky galaxy rows."
+        )
+
     # 2. Load survey data, or build the synthetic counterpart catalog used by
     # bright sirens.  The counterpart is not a survey hyperparameter: it is
     # fixed event metadata supplied through the inference CLI.
@@ -208,7 +214,17 @@ def load_all_data(opts):
             f"pixels={counterpart_pixels.tolist()}"
         )
     elif opts.survey_path is not None:
-        nside, ngals, zgals, dzgals, wgals = load_survey(opts.survey_path)
+        # When dropping the full-sky catalog, load it on the host so compaction
+        # happens before any device transfer; only the compact views go to GPU.
+        drop_full_catalog = getattr(opts, "drop_full_catalog", False)
+        if drop_full_catalog and opts.use_LSS:
+            raise ValueError(
+                "--drop_full_catalog is incompatible with --use_LSS: the LSS "
+                "overdensity field needs the full-sky galaxy rows."
+            )
+        nside, ngals, zgals, dzgals, wgals = load_survey(
+            opts.survey_path, to_device=not drop_full_catalog
+        )
         npix = hp.nside2npix(nside)
         apix = hp.nside2pixarea(nside)
     else:
@@ -526,5 +542,27 @@ def load_all_data(opts):
         data["wl_params"] = wl_params
     else:
         data["wl_params"] = None
+
+    # Optionally drop the dense full-sky catalog arrays
+    if getattr(opts, "drop_full_catalog", False):
+        if data.get("zgals_pe") is None and data.get("zgals_sel") is None:
+            raise ValueError(
+                "--drop_full_catalog requires a compacted survey catalog, but no "
+                "compact PE/selection views were built (no survey loaded?)."
+            )
+        dropped_bytes = sum(
+            int(np.asarray(data[k]).nbytes)
+            for k in ("zgals_catalog", "dzgals_catalog", "wgals_catalog", "ngals_catalog")
+            if data.get(k) is not None
+        )
+        for key in (
+            "zgals", "dzgals", "wgals",
+            "zgals_catalog", "dzgals_catalog", "wgals_catalog", "ngals_catalog",
+        ):
+            data[key] = None
+        print(
+            "    - Dropped dense full-sky catalog arrays "
+            f"({dropped_bytes / 1e9:.2f} GB freed); using compact views only."
+        )
 
     return data
