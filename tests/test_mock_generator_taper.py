@@ -133,3 +133,91 @@ def test_mass_spin_pdf_positive_and_finite(gen):
     p = gen._mass_spin_pdf(m1, q, chi, pop)
     assert np.all(np.isfinite(p))
     assert np.all(p > 0.0)
+
+
+def _selection_is_neff(gen, b, grids, th):
+    """Effective sample size of the selection integral mu(th) = <p_pop/pdraw>.
+
+    Reconstructs the importance weight ``p_target(th)/pdraw`` over the *detected*
+    injections in the canonical (m1det, q, chi, dL, sky) basis the generator draws
+    in -- the same estimator the inference uses.  The q / chi / sky factors of the
+    proposal are flat, so they cancel against the target except for the mass-spin
+    density and the (1+z) detector-frame Jacobian, plus the redshift ratio
+    ``p_z(z|th) / p_z(z|proposal)`` (proposal z ~ dVc/dz).
+    """
+    z = np.interp(np.asarray(b["dL"]), grids["dl"], grids["z"])
+    m1src = np.asarray(b["m1src"])
+    q = np.asarray(b["m2src"]) / m1src
+    chi = np.asarray(b["chieff"])
+
+    # mass-spin target (source frame) with the m1det->m1src Jacobian, over the flat
+    # (uniform m1det in [2,200]) x (uniform q) x (uniform chi) proposal mass factor.
+    p_ms = np.asarray(gen._mass_spin_pdf(m1src, q, chi, th)) / (1.0 + z)
+    prop_mass = (1.0 / (200.0 - 2.0)) * 1.0 * 0.5
+
+    dvc, zg = grids["dvc_dz"], grids["z"]
+    pz_t = (1.0 + zg) ** (th.gamma - 1.0) * dvc
+    pz_t = np.interp(z, zg, pz_t / np.trapezoid(pz_t, zg))
+    pz_p = np.interp(z, zg, dvc / np.trapezoid(dvc, zg))
+
+    w = (p_ms / prop_mass) * (pz_t / pz_p)
+    w = w[np.isfinite(w) & (w > 0.0)]
+    return float(w.sum() ** 2 / np.sum(w ** 2)), w.size
+
+
+def test_selection_proposal_is_population_independent(gen):
+    """The exact regression guard for the spectral-siren bug (gamma railing).
+
+    The bug was that ``pdraw`` was the *population* density at the truth
+    (``_mass_spin_pdf(..., pop)``), so the selection proposal was a narrow envelope
+    tied to theta.  The importance-sampling estimate of mu(theta) was then only
+    well-conditioned near the truth and the recovered population (esp. gamma, via
+    the mass-z degeneracy) was biased.  The fix draws from a broad, *population-
+    parameter-independent* proposal.  This pins exactly that: with the same seed,
+    a wildly different population must give byte-identical proposal draws and pdraw.
+    """
+    import dataclasses
+
+    grids = gen._cosmology_grids(gen._build_cosmology(67.74, 0.3075, -1.0, 0.0), zmax=0.3)
+    pop = gen.PopulationConfig()
+    steep = dataclasses.replace(pop, alpha=5.0, beta=3.0, mmin=8.0, gamma=6.0, peak_fraction=0.4)
+
+    b_truth = gen._draw_selection_batch(np.random.default_rng(0), 40000, grids, pop, snr_threshold=8.0)
+    b_steep = gen._draw_selection_batch(np.random.default_rng(0), 40000, grids, steep, snr_threshold=8.0)
+
+    # Population-independent proposal => same RNG stream => identical detections + pdraw.
+    np.testing.assert_array_equal(b_truth["m1det"], b_steep["m1det"])
+    np.testing.assert_array_equal(b_truth["chieff"], b_steep["chieff"])
+    np.testing.assert_array_equal(np.asarray(b_truth["pdraw"]), np.asarray(b_steep["pdraw"]))
+
+
+def test_selection_injections_broad_and_well_conditioned(gen):
+    """The proposal is broad and the selection integral stays conditioned over the prior.
+
+    (1) Broad: detected injections reach well past the population peak (~35) and
+        mass cap (~85); a population-drawn proposal would not.
+    (2) Non-collapsing: the IS effective sample size of mu(theta) at a stress point
+        (steep slope, heavy pairing) stays a healthy fraction of its value at the
+        truth.  The buggy population proposal gave Neff ~= Ndet at the truth but a
+        catastrophic collapse off it; the fix keeps the ratio order-unity.
+    """
+    import dataclasses
+
+    rng = np.random.default_rng(0)
+    grids = gen._cosmology_grids(gen._build_cosmology(67.74, 0.3075, -1.0, 0.0), zmax=0.3)
+    pop = gen.PopulationConfig()
+    b = gen._draw_selection_batch(rng, 200_000, grids, pop, snr_threshold=8.0)
+    m1det = np.asarray(b["m1det"])
+    assert m1det.size > 1000 and np.all(np.asarray(b["pdraw"]) > 0.0)
+
+    # (1) Broad proposal.
+    assert np.percentile(m1det, 99) > 120.0, "selection proposal looks population-narrow"
+
+    # (2) IS conditioning does not collapse across the prior.
+    neff_truth, _ = _selection_is_neff(gen, b, grids, pop)
+    neff_stress, _ = _selection_is_neff(gen, b, grids, dataclasses.replace(pop, alpha=5.0, beta=3.0))
+    assert neff_truth > 20.0, f"selection Neff at truth is degenerate: {neff_truth:.0f}"
+    assert neff_stress > 0.2 * neff_truth, (
+        f"selection IS Neff collapsed off the truth: {neff_stress:.0f} vs {neff_truth:.0f} "
+        "(signature of a population-coupled proposal)"
+    )

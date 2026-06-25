@@ -215,7 +215,7 @@ def prepare_redshift_prior_state(
         return None  # per-event counterpart logic needs the live catalog
 
     if model == "dark_sirens_complete":
-        kernels = catalog_kernel_state(cosmo, survey, em_catalog)
+        kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=True)
         row_has = _row_counts(em_catalog) > 0.0
         log_pvol = jnp.log(_precompute_volume_grid(cosmo))
         return _materialize(
