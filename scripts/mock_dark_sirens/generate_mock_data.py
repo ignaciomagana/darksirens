@@ -401,6 +401,17 @@ def _draw_events_until_detected(
         chi = _sample_chieff(rng, ntry, pop)
         snr = _network_snr(m1, m2, z, dl, rng)
         det = snr >= snr_threshold
+        # Inject the rate evolution: GW mergers per host galaxy ∝ (1+z)**(gamma-1)
+        # — the source-frame rate (1+z)**gamma times the 1/(1+z) clock-dilation
+        # factor.  Host galaxies themselves trace the comoving volume dV_c/dz
+        # (catalog draw), so weighting host acceptance by (1+z)**(gamma-1) makes
+        # the detected events follow p(z) ∝ dV_c/dz (1+z)**(gamma-1), i.e. exactly
+        # the inference population redshift model, so the injected ``gamma`` is the
+        # value the inference recovers (the bare dV_c/dz draw is gamma=1, not 0).
+        zmax_grid = float(grids["z"][-1])
+        rate_gmax = max(1.0, (1.0 + zmax_grid) ** (pop.gamma - 1.0))
+        rate_acc = (1.0 + z) ** (pop.gamma - 1.0) / rate_gmax
+        det = det & (rng.uniform(size=len(z)) < rate_acc)
         if sky_weight_fn is not None:
             nx = np.cos(dec) * np.cos(ra)
             ny = np.cos(dec) * np.sin(ra)
@@ -535,7 +546,7 @@ def _galaxy_count_from_density(n0: float, delta: float, grids: dict[str, np.ndar
 
 def write_mock_data(args: argparse.Namespace) -> None:
     rng = np.random.default_rng(args.seed)
-    pop = PopulationConfig()
+    pop = PopulationConfig(gamma=args.gamma)
     survey = SurveyConfig(
         z50=args.survey_z50,
         width=args.survey_width,
@@ -840,6 +851,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--Om0", type=_positive_float, default=0.3075)
     parser.add_argument("--w0", type=float, default=-1.0, help="CPL dark-energy equation-of-state value today.")
     parser.add_argument("--wa", type=float, default=0.0, help="CPL dark-energy evolution parameter.")
+    parser.add_argument("--gamma", type=float, default=PopulationConfig.gamma,
+                        help="Injected rate-evolution index: GW rate ∝ (1+z)**gamma "
+                             "(events drawn ∝ dV_c/dz (1+z)**(gamma-1)). Default matches "
+                             "the inference fiducial; recoverable only with enough redshift "
+                             "lever arm (raise --zmax).")
     parser.add_argument("--snr-threshold", type=_positive_float, default=8.0)
     parser.add_argument("--survey-z50", type=float, default=SurveyConfig.z50)
     parser.add_argument("--survey-width", type=_positive_float, default=SurveyConfig.width)
