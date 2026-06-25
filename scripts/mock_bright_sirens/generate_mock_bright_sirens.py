@@ -81,37 +81,30 @@ def _bright_posterior_samples(rng, truth, nsamp, **kwargs):
     return post
 
 
-def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold,
-                                m1det_range=(2.0, 200.0)):
-    # Broad detector-frame proposal (NOT the population) so the joint GW+EM
-    # selection integral stays well-conditioned over the whole prior; see
-    # generate_mock_data._draw_selection_batch for why drawing from the population
-    # collapses the effective sample size away from the fiducial and biases the fit.
-    m1lo, m1hi = m1det_range
-    m1det = rng.uniform(m1lo, m1hi, ndraw)
-    q = rng.uniform(0.0, 1.0, ndraw)
-    chi = rng.uniform(-1.0, 1.0, ndraw)
+def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold):
     z = _dark._sample_uniform_comoving_z(rng, grids, ndraw)
     ra, dec = _dark._sample_sky(rng, ndraw)
     dl = _dark._interp_dl(z, grids)
-    m1src = m1det / (1.0 + z)
-    m2src = q * m1src
-    gw_det = _dark._network_snr(m1src, m2src, z, dl, rng) >= snr_threshold
+    m1 = _dark._sample_powerlaw_peak_m1(rng, ndraw, pop)
+    q = _dark._sample_q(rng, m1, pop)
+    m2 = q * m1
+    chi = _dark._sample_chieff(rng, ndraw, pop)
+    gw_det = _dark._network_snr(m1, m2, z, dl, rng) >= snr_threshold
     em_det = _joint_em_detected(rng, ra, dec, z, dl, survey)
     det = gw_det & em_det
 
     # np.trapz was removed in NumPy 2.0; reuse the dark generator's version-safe shim.
     pz = np.interp(z, grids["z"], grids["dvc_dz"]) / _dark._trapz(grids["dvc_dz"], grids["z"])
-    ddldz = np.interp(z, grids["z"], np.gradient(grids["dl"], grids["z"]))
-    p_dL = pz / np.maximum(ddldz, 1.0e-300)             # p(dL) = p_z(z) |dz/ddL|
-    p_draw = (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
+    ddldz = np.gradient(grids["dl"], grids["z"])
+    jac = np.interp(z, grids["z"], ddldz) * (1.0 + z)
+    p_draw = _dark._mass_spin_pdf(m1, q, chi, pop) * pz / np.maximum(jac, 1.0e-300) / (4.0 * np.pi)
     p_draw = np.maximum(p_draw, 1.0e-300)
 
     return {
-        "m1det": m1det[det],
-        "m2det": (q * m1det)[det],
-        "m1src": m1src[det],
-        "m2src": m2src[det],
+        "m1det": m1[det] * (1.0 + z[det]),
+        "m2det": m2[det] * (1.0 + z[det]),
+        "m1src": m1[det],
+        "m2src": m2[det],
         "dL": dl[det],
         "chieff": chi[det],
         "ra": ra[det],

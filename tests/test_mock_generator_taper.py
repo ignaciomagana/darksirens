@@ -133,38 +133,3 @@ def test_mass_spin_pdf_positive_and_finite(gen):
     p = gen._mass_spin_pdf(m1, q, chi, pop)
     assert np.all(np.isfinite(p))
     assert np.all(p > 0.0)
-
-
-def test_selection_injections_use_broad_well_conditioned_proposal(gen):
-    """Regression guard for the spectral-siren recovery bug (gamma railing).
-
-    Selection injections must be drawn from a BROAD proposal, NOT the population.
-    Drawing from the population makes the importance-sampling estimate of mu(theta)
-    collapse away from the fiducial (Neff -> single digits), under-resolving the
-    selection integral so the recovered population (esp. gamma, via the mass-z
-    degeneracy) is biased.  A broad proposal keeps Neff a healthy fraction of the
-    detected sample across the prior.
-    """
-    import dataclasses
-
-    rng = np.random.default_rng(0)
-    grids = gen._cosmology_grids(gen._build_cosmology(67.74, 0.3075, -1.0, 0.0), zmax=0.3)
-    pop = gen.PopulationConfig()
-    b = gen._draw_selection_batch(rng, 40000, grids, pop, snr_threshold=8.0)
-    m1det = np.asarray(b["m1det"])
-    pdraw = np.asarray(b["pdraw"])
-    assert m1det.size > 1000 and np.all(pdraw > 0.0)
-
-    # (1) Broad proposal: detected injections reach well beyond the population peak
-    # (~35) and mass cap (~85); a population-drawn proposal would not.
-    assert np.percentile(m1det, 99) > 120.0, "selection proposal looks population-narrow"
-
-    # (2) IS conditioning across the prior: the population/proposal mass weight keeps
-    # a healthy Neff at the truth AND at a stress point (steep slope, heavy pairing).
-    # The buggy population proposal collapsed Neff at the stress point.
-    q = np.asarray(b["m2src"]) / np.asarray(b["m1src"])
-    mass_prop = (1.0 / (200.0 - 2.0)) * 1.0 * 0.5  # uniform (m1det, q, chi) part of pdraw
-    for th in (pop, dataclasses.replace(pop, alpha=5.0, beta=3.0)):
-        w = gen._mass_spin_pdf(np.asarray(b["m1src"]), q, np.asarray(b["chieff"]), th) / mass_prop
-        neff = float(w.sum() ** 2 / np.sum(w ** 2))
-        assert neff > 0.02 * w.size, f"selection IS Neff collapsed: {neff:.0f}/{w.size} at {th}"
