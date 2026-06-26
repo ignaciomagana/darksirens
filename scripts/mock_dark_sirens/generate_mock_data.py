@@ -34,8 +34,16 @@ from scipy.special import expit
 
 C_KM_S = 299_792.458
 
-import numpy as np
+from functools import partial
+
+import jax
+# Distances/redshifts (and the dV_c/dz weights behind pdraw) need double
+# precision, matching the rest of darksirens; enable x64 before any jax op.
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+from jax import lax
+
+SELECTION_PROPOSALS = ("population", "uniform")
 
 @dataclass(frozen=True)
 class PopulationConfig:
@@ -459,38 +467,79 @@ def _posterior_samples(
     return {k: np.concatenate(v) for k, v in arrays.items()}
 
 
+_M1DET_RANGE: tuple[float, float] = (2.0, 200.0)
+SELECTION_KEYS = ["m1det", "m2det", "m1src", "m2src", "dL", "chieff", "ra", "dec", "pdraw"]
+
+
+def _selection_pdraw(
+    proposal: str,
+    m1src: np.ndarray,
+    q: np.ndarray,
+    chi: np.ndarray,
+    z: np.ndarray,
+    grids: dict[str, np.ndarray],
+    pop: PopulationConfig,
+    m1det_range: tuple[float, float] = _M1DET_RANGE,
+) -> np.ndarray:
+    """Proposal density of the selection draws in the likelihood's canonical
+    coordinates (m1det, q, chi, dL, sky).
+
+    ``population`` draws masses/spins FROM the fiducial population, so pdraw is the
+    population density with the (1+z) m1src->m1det Jacobian.  ``uniform`` draws a
+    broad, population-parameter-independent proposal (uniform m1det/q/chi), so its
+    mass-spin factor is flat -- this is the proposal that keeps the importance-
+    sampling estimate of mu(theta) well-conditioned across the whole prior (high
+    Neff), at the cost of detecting a smaller fraction of the draws.
+    """
+    pz = np.interp(z, grids["z"], grids["dvc_dz"]) / _trapz(grids["dvc_dz"], grids["z"])
+    ddldz = np.interp(z, grids["z"], np.gradient(grids["dl"], grids["z"]))
+    if proposal == "uniform":
+        m1lo, m1hi = m1det_range
+        # m1det is drawn directly (no source->detector Jacobian); p(dL)=p_z(z)|dz/ddL|.
+        p_dL = pz / np.maximum(ddldz, 1.0e-300)
+        p_draw = (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
+    else:
+        # m1det = (1+z) m1src, dL = dL(z): Jacobian (m1src,q,z)->(m1det,q,dL) is (1+z) dL'(z).
+        jac = ddldz * (1.0 + z)
+        p_draw = _mass_spin_pdf(m1src, q, chi, pop) * pz / np.maximum(jac, 1.0e-300) / (4.0 * np.pi)
+    return np.maximum(p_draw, 1.0e-300)
+
+
 def _draw_selection_batch(
     rng: np.random.Generator,
     ndraw: int,
     grids: dict[str, np.ndarray],
     pop: PopulationConfig,
     snr_threshold: float,
+    proposal: str = "population",
+    m1det_range: tuple[float, float] = _M1DET_RANGE,
 ) -> dict[str, np.ndarray | int]:
+    """Numpy reference selection draw (the JAX path in ``_selection_injections``
+    mirrors this exactly; tests pin this implementation)."""
     z = _sample_uniform_comoving_z(rng, grids, ndraw)
     ra, dec = _sample_sky(rng, ndraw)
     dl = _interp_dl(z, grids)
-    m1 = _sample_powerlaw_peak_m1(rng, ndraw, pop)
-    q = _sample_q(rng, m1, pop)
-    m2 = q * m1
-    chi = _sample_chieff(rng, ndraw, pop)
-    snr = _network_snr(m1, m2, z, dl, rng)
+    if proposal == "uniform":
+        m1lo, m1hi = m1det_range
+        m1det = rng.uniform(m1lo, m1hi, ndraw)
+        q = rng.uniform(0.0, 1.0, ndraw)
+        chi = rng.uniform(-1.0, 1.0, ndraw)
+        m1src = m1det / (1.0 + z)
+    else:
+        m1src = _sample_powerlaw_peak_m1(rng, ndraw, pop)
+        q = _sample_q(rng, m1src, pop)
+        chi = _sample_chieff(rng, ndraw, pop)
+    m2src = q * m1src
+    snr = _network_snr(m1src, m2src, z, dl, rng)
     det = snr >= snr_threshold
 
-    pz = np.interp(z, grids["z"], grids["dvc_dz"]) / jnp.trapezoid(grids["dvc_dz"], grids["z"])
-    ddldz = np.gradient(grids["dl"], grids["z"])
-    # Selection densities are consumed in the likelihood's canonical
-    # coordinates (m1det, q, dL).  Since m1det = (1+z) m1src and
-    # dL = dL(z), the Jacobian from (m1src, q, z) to (m1det, q, dL) is
-    # (1+z) * d(dL)/dz.
-    jac = np.interp(z, grids["z"], ddldz) * (1.0 + z)
-    p_draw = _mass_spin_pdf(m1, q, chi, pop) * pz / np.maximum(jac, 1.0e-300) / (4.0 * np.pi)
-    p_draw = np.maximum(p_draw, 1.0e-300)
+    p_draw = _selection_pdraw(proposal, m1src, q, chi, z, grids, pop, m1det_range)
 
     return {
-        "m1det": m1[det] * (1.0 + z[det]),
-        "m2det": m2[det] * (1.0 + z[det]),
-        "m1src": m1[det],
-        "m2src": m2[det],
+        "m1det": (m1src * (1.0 + z))[det],
+        "m2det": (q * m1src * (1.0 + z))[det],
+        "m1src": m1src[det],
+        "m2src": m2src[det],
         "dL": dl[det],
         "chieff": chi[det],
         "ra": ra[det],
@@ -499,6 +548,211 @@ def _draw_selection_batch(
         "Ndraw": ndraw,
         "n_detected": int(det.sum()),
     }
+
+
+# --- JIT/vmap-accelerated selection-injection kernels ------------------------
+# ``_draw_selection_batch`` (above) is the readable numpy reference and is what
+# tests pin.  Production runs draw tens of millions of injections to clear the
+# SNR cut, so the hot loop below runs the *same* draw + detection on the XLA
+# device: a per-injection kernel ``vmap``-ed over the batch and ``jit``-compiled
+# once, fed in fixed-size chunks (``--nbatches``) so device memory stays bounded.
+# Only the SAMPLING + detection run on device; pdraw is evaluated by the exact
+# numpy density (``_selection_pdraw``) on the small DETECTED subset, so the
+# stored pdraw is byte-for-byte the reference value (no density reimplementation).
+# jax.random supplies the draws (seeded from ``rng``); the selection set is the
+# last consumer of ``rng`` in both generators, so nothing else shifts.
+_REJECTION_MAXITER = 10_000
+
+
+def _jax_sfilter_low(m, m_min, dm):
+    delta = m - m_min
+    safe_d = jnp.where(delta > 0.0, delta, 1.0)
+    safe_dm = dm if dm > 0.0 else 1.0
+    expo = jnp.clip(safe_dm / safe_d + safe_dm / (safe_d - safe_dm), -500.0, 500.0)
+    S = 1.0 / (jnp.exp(expo) + 1.0)
+    S = jnp.where(m <= m_min, 0.0, S)
+    return jnp.where(m >= m_min + dm, 1.0, S)
+
+
+def _jax_sfilter_high(m, m_max, dm):
+    delta = m_max - m
+    safe_d = jnp.where(delta > 0.0, delta, 1.0)
+    safe_dm = dm if dm > 0.0 else 1.0
+    expo = jnp.clip(safe_dm / safe_d + safe_dm / (safe_d - safe_dm), -500.0, 500.0)
+    S = 1.0 / (jnp.exp(expo) + 1.0)
+    S = jnp.where(m >= m_max, 0.0, S)
+    return jnp.where(m <= m_max - dm, 1.0, S)
+
+
+def _make_population_mass_spin_sampler(pop: PopulationConfig):
+    """Build scalar (per-injection) JAX samplers for m1src, q|m1, chi mirroring the
+    numpy population samplers: tapered-power-law + Gaussian-peak m1, S_low(m2)-tapered
+    q (both by rejection via a per-lane ``while_loop``), truncated-Gaussian chi."""
+    alpha, mmin, mmax = float(pop.alpha), float(pop.mmin), float(pop.mmax)
+    dm_min, dm_max = float(pop.dm_min), float(pop.dm_max)
+    pf, mu, sigma = float(pop.peak_fraction), float(pop.peak_mu), float(pop.peak_sigma)
+    beta = float(pop.beta)
+    chi_mu, chi_sigma = float(pop.chi_mu), float(pop.chi_sigma)
+    lo_m, hi_m = float(_MASS_NORM_GRID[0]), float(_MASS_NORM_GRID[-1])
+    a = 1.0 - alpha
+    alpha_is_one = bool(np.isclose(alpha, 1.0))
+    bp1 = beta + 1.0
+    beta_is_minus_one = bool(np.isclose(beta, -1.0))
+
+    def _hard_powerlaw(u):
+        if alpha_is_one:
+            return mmin * (mmax / mmin) ** u
+        return (u * (mmax ** a - mmin ** a) + mmin ** a) ** (1.0 / a)
+
+    def _hard_q(u, qmin):
+        if beta_is_minus_one:
+            return qmin * (1.0 / qmin) ** u
+        return (u * (1.0 - qmin ** bp1) + qmin ** bp1) ** (1.0 / bp1)
+
+    def sample_m1(key):
+        ku, kpl, kpk = jax.random.split(key, 3)
+        use_peak = jax.random.uniform(ku) < pf
+
+        def cond(st):
+            _, _, acc, it = st
+            return jnp.logical_and(jnp.logical_not(acc), it < _REJECTION_MAXITER)
+
+        def body(st):
+            k, m, _, it = st
+            k, k1, k2 = jax.random.split(k, 3)
+            cand = _hard_powerlaw(jax.random.uniform(k1))
+            S = _jax_sfilter_low(cand, mmin, dm_min) * _jax_sfilter_high(cand, mmax, dm_max)
+            acc = jax.random.uniform(k2) < S
+            return k, jnp.where(acc, cand, m), acc, it + 1
+
+        init = (kpl, jnp.asarray(mmin), jnp.asarray(False), jnp.asarray(0, jnp.int32))
+        _, m_pl, _, _ = lax.while_loop(cond, body, init)
+        tn = jax.random.truncated_normal(kpk, (lo_m - mu) / sigma, (hi_m - mu) / sigma)
+        m_pk = mu + sigma * tn
+        return jnp.where(use_peak, m_pk, m_pl)
+
+    def sample_q(key, m1):
+        qmin = jnp.clip(mmin / m1, 1.0e-3, 1.0)
+        kinit, kloop = jax.random.split(key, 2)
+        q0 = _hard_q(jax.random.uniform(kinit), qmin)   # fallback for the (measure-0) no-accept case
+
+        def cond(st):
+            _, _, acc, it = st
+            return jnp.logical_and(jnp.logical_not(acc), it < _REJECTION_MAXITER)
+
+        def body(st):
+            k, qv, _, it = st
+            k, k1, k2 = jax.random.split(k, 3)
+            cand = _hard_q(jax.random.uniform(k1), qmin)
+            acc = jax.random.uniform(k2) < _jax_sfilter_low(cand * m1, mmin, dm_min)
+            return k, jnp.where(acc, cand, qv), acc, it + 1
+
+        init = (kloop, q0, jnp.asarray(False), jnp.asarray(0, jnp.int32))
+        _, qf, _, _ = lax.while_loop(cond, body, init)
+        return qf
+
+    def sample_chi(key):
+        tn = jax.random.truncated_normal(key, (-1.0 - chi_mu) / chi_sigma, (1.0 - chi_mu) / chi_sigma)
+        return chi_mu + chi_sigma * tn
+
+    return sample_m1, sample_q, sample_chi
+
+
+def _make_selection_kernel(grids: dict[str, np.ndarray], pop: PopulationConfig,
+                           snr_threshold: float, proposal: str,
+                           m1det_range: tuple[float, float] = _M1DET_RANGE,
+                           extra_detect=None):
+    """Return ``jit(vmap(sample_one))`` mapping a batch of PRNG keys to per-injection
+    (m1src, q, chi, z, ra, dec, dL, det).  ``extra_detect(state) -> bool array`` adds a
+    further per-injection cut (e.g. the bright-siren EM selection)."""
+    z_grid = jnp.asarray(grids["z"])
+    dl_grid = jnp.asarray(grids["dl"])
+    vc_cdf = jnp.asarray(grids["vc_cdf"])
+    m1lo, m1hi = m1det_range
+    samplers = _make_population_mass_spin_sampler(pop) if proposal == "population" else None
+
+    def sample_one(key):
+        ks = jax.random.split(key, 7)
+        z = jnp.interp(jax.random.uniform(ks[0]), vc_cdf, z_grid)
+        ra = jax.random.uniform(ks[1], maxval=2.0 * jnp.pi)
+        dec = jnp.arcsin(jax.random.uniform(ks[2], minval=-1.0, maxval=1.0))
+        dl = jnp.interp(z, z_grid, dl_grid)
+        if proposal == "uniform":
+            m1det = jax.random.uniform(ks[3], minval=m1lo, maxval=m1hi)
+            q = jax.random.uniform(ks[4])
+            chi = jax.random.uniform(ks[5], minval=-1.0, maxval=1.0)
+            m1src = m1det / (1.0 + z)
+        else:
+            sample_m1, sample_q, sample_chi = samplers
+            m1src = sample_m1(ks[3])
+            q = sample_q(ks[4], m1src)
+            chi = sample_chi(ks[5])
+        m2src = q * m1src
+        mchirp_det = (m1src * m2src) ** 0.6 / (m1src + m2src) ** 0.2 * (1.0 + z)
+        proj = jnp.sqrt(jax.random.beta(ks[6], 2.0, 5.0))
+        snr = 11.5 * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * proj
+        det = snr >= snr_threshold
+        state = {"m1src": m1src, "q": q, "chi": chi, "z": z, "ra": ra, "dec": dec, "dL": dl}
+        if extra_detect is not None:
+            det = jnp.logical_and(det, extra_detect(key, state))
+        return {**state, "det": det}
+
+    return jax.jit(jax.vmap(sample_one))
+
+
+def _run_selection_chunks(
+    rng: np.random.Generator,
+    ndraw: int,
+    grids: dict[str, np.ndarray],
+    pop: PopulationConfig,
+    proposal: str,
+    batch_size: int,
+    kernel,
+    target_detections: int | None = None,
+    verbose: bool = False,
+    label: str = "selection",
+    m1det_range: tuple[float, float] = _M1DET_RANGE,
+) -> dict[str, np.ndarray | int]:
+    """Drive ``kernel`` (a jitted vmapped sampler) over fixed-size chunks, mask to
+    detected on the host, and evaluate the exact numpy pdraw on the detected subset."""
+    key0 = jax.random.PRNGKey(int(rng.integers(0, 2**63 - 1)))
+    chunks: list[dict[str, np.ndarray]] = []
+    n_proposed = 0
+    n_detected = 0
+    ci = 0
+    while n_proposed < ndraw:
+        n_batch = int(min(batch_size, ndraw - n_proposed))
+        subkeys = jax.random.split(jax.random.fold_in(key0, ci), n_batch)
+        ci += 1
+        out = kernel(subkeys)
+        det = np.asarray(out["det"])
+        z = np.asarray(out["z"])[det]
+        m1src = np.asarray(out["m1src"])[det]
+        q = np.asarray(out["q"])[det]
+        chi = np.asarray(out["chi"])[det]
+        chunks.append({
+            "m1det": m1src * (1.0 + z),
+            "m2det": q * m1src * (1.0 + z),
+            "m1src": m1src,
+            "m2src": q * m1src,
+            "dL": np.asarray(out["dL"])[det],
+            "chieff": chi,
+            "ra": np.asarray(out["ra"])[det],
+            "dec": np.asarray(out["dec"])[det],
+            "pdraw": _selection_pdraw(proposal, m1src, q, chi, z, grids, pop, m1det_range),
+        })
+        n_proposed += n_batch
+        n_detected += int(det.sum())
+        if verbose:
+            print(f"  {label} batch: proposed={n_proposed:,}/{ndraw:,}, detected={n_detected:,}")
+        if target_detections is not None and n_detected >= target_detections:
+            break
+
+    if chunks:
+        arrays = {key: np.concatenate([chunk[key] for chunk in chunks]) for key in SELECTION_KEYS}
+    else:
+        arrays = {key: np.array([], dtype=float) for key in SELECTION_KEYS}
+    return {**arrays, "Ndraw": n_proposed, "n_detected": n_detected}
 
 
 def _selection_injections(
@@ -510,33 +764,15 @@ def _selection_injections(
     batch_size: int,
     target_detections: int | None = None,
     verbose: bool = False,
+    proposal: str = "population",
+    m1det_range: tuple[float, float] = _M1DET_RANGE,
 ) -> dict[str, np.ndarray | int]:
-    chunks: list[dict[str, np.ndarray | int]] = []
-    n_proposed = 0
-    n_detected = 0
-    keys = ["m1det", "m2det", "m1src", "m2src", "dL", "chieff", "ra", "dec", "pdraw"]
-
-    while n_proposed < ndraw:
-        n_batch = min(batch_size, ndraw - n_proposed)
-        chunk = _draw_selection_batch(rng, n_batch, grids, pop, snr_threshold)
-        chunks.append(chunk)
-        n_proposed += int(chunk["Ndraw"])
-        n_detected += int(chunk["n_detected"])
-        if verbose:
-            print(f"  selection batch: proposed={n_proposed:,}/{ndraw:,}, detected={n_detected:,}")
-        if target_detections is not None and n_detected >= target_detections:
-            break
-
-    if chunks:
-        arrays = {key: np.concatenate([chunk[key] for chunk in chunks]) for key in keys}
-    else:
-        arrays = {key: np.array([], dtype=float) for key in keys}
-
-    return {
-        **arrays,
-        "Ndraw": n_proposed,
-        "n_detected": n_detected,
-    }
+    kernel = _make_selection_kernel(grids, pop, float(snr_threshold), proposal, m1det_range)
+    return _run_selection_chunks(
+        rng, ndraw, grids, pop, proposal, batch_size, kernel,
+        target_detections=target_detections, verbose=verbose,
+        label="selection", m1det_range=m1det_range,
+    )
 
 
 def _galaxy_count_from_density(n0: float, delta: float, grids: dict[str, np.ndarray]) -> int:
@@ -714,15 +950,23 @@ def write_mock_data(args: argparse.Namespace) -> None:
     selection_target_detections = args.selection_target_detections
     if args.selection_per_observation_factor is not None:
         selection_target_detections = int(np.ceil(args.selection_per_observation_factor * args.nobs))
+    # Chunk the nselection draws: explicit --selection-batch-size wins (legacy),
+    # otherwise split into --nbatches equal chunks (default 1 = one kernel call).
+    selection_batch_size = (
+        args.selection_batch_size
+        if args.selection_batch_size is not None
+        else int(np.ceil(args.ndraw / args.nbatches))
+    )
     sel = _selection_injections(
         rng,
         args.ndraw,
         grids,
         pop,
         args.snr_threshold,
-        args.selection_batch_size,
+        selection_batch_size,
         target_detections=selection_target_detections,
         verbose=args.verbose,
+        proposal=args.proposal,
     )
 
     inv_pdraw = 1.0 / np.asarray(sel["pdraw"])
@@ -734,6 +978,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
         "population": asdict(pop),
         "survey": asdict(survey),
         "snr_threshold": args.snr_threshold,
+        "selection_proposal": args.proposal,
         "pop_model_for_inference": "powerlaw+peak",
         "shared_beta_for_inference": True,
         "shared_spin_for_inference": True,
@@ -802,6 +1047,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["mock_data"] = True
         f.attrs["ndraw"] = int(sel["Ndraw"])
         f.attrs["Neff"] = selection_neff
+        f.attrs["selection_proposal"] = args.proposal
         f.attrs["chi_eff_swap_applied"] = True
         f.attrs["chi_eff_amax"] = 0.99
         f.attrs["cosmology_H0"] = float(args.H0)
@@ -844,7 +1090,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n0", type=_positive_float, default=None, help="Comoving galaxy density in Mpc^-3; overrides --n-galaxies when provided.")
     parser.add_argument("--nobs", type=_positive_int, default=8)
     parser.add_argument("--nsamp", type=_positive_int, default=512)
-    parser.add_argument("--ndraw", type=_positive_int, default=80_000)
+    parser.add_argument("--nselection", "--ndraw", dest="ndraw", type=_positive_int, default=80_000,
+                        help="Total number of selection injections to PROPOSE (the detected "
+                             "subset is what gets stored). Without an early-stop target, exactly "
+                             "this many are drawn. --ndraw is a legacy alias.")
+    parser.add_argument("--nbatches", type=_positive_int, default=1,
+                        help="Split the --nselection draws into this many equal chunks for the "
+                             "jit/vmap kernel; chunking bounds device memory. Default 1 draws all "
+                             "injections in a single kernel call (best on GPU).")
+    parser.add_argument("--proposal", choices=SELECTION_PROPOSALS, default="population",
+                        help="Selection-injection proposal. 'population' (default) draws "
+                             "masses/spins from the fiducial population (matches the inference "
+                             "selection integral; smaller detected Neff). 'uniform' draws a broad, "
+                             "population-independent proposal (uniform m1det/q/chi) that keeps the "
+                             "importance-sampling Neff high across the whole prior.")
     parser.add_argument("--nside", type=_positive_int, default=16)
     parser.add_argument("--zmax", type=_positive_float, default=0.08)
     parser.add_argument("--H0", type=_positive_float, default=67.74)
@@ -860,7 +1119,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--survey-z50", type=float, default=SurveyConfig.z50)
     parser.add_argument("--survey-width", type=_positive_float, default=SurveyConfig.width)
     parser.add_argument("--galaxy-density-delta", type=float, default=SurveyConfig.delta)
-    parser.add_argument("--selection-batch-size", type=_positive_int, default=50_000)
+    parser.add_argument("--selection-batch-size", type=_positive_int, default=None,
+                        help="Explicit chunk size (legacy). If set, it takes precedence over "
+                             "--nbatches; otherwise the chunk size is --nselection / --nbatches.")
     selection_targets = parser.add_mutually_exclusive_group()
     selection_targets.add_argument("--selection-target-detections", type=_positive_int, default=None)
     selection_targets.add_argument("--selection-per-observation-factor", type=_positive_float, default=None)
