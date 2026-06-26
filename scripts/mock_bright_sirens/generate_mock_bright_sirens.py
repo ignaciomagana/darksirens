@@ -18,6 +18,11 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+
+import jax
+jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
+from jax.scipy.special import expit as jexpit
 from scipy.special import expit
 
 
@@ -81,30 +86,37 @@ def _bright_posterior_samples(rng, truth, nsamp, **kwargs):
     return post
 
 
-def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold):
+def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold,
+                                proposal="population", m1det_range=_dark._M1DET_RANGE):
+    """Numpy reference joint GW+EM selection draw (the JAX path mirrors it).  See
+    generate_mock_data._draw_selection_batch for the ``proposal`` semantics; the EM
+    footprint/depth/completeness cut multiplies the GW-SNR detection mask, and pdraw
+    is unchanged (the EM selection is part of the selection function, not the proposal)."""
     z = _dark._sample_uniform_comoving_z(rng, grids, ndraw)
     ra, dec = _dark._sample_sky(rng, ndraw)
     dl = _dark._interp_dl(z, grids)
-    m1 = _dark._sample_powerlaw_peak_m1(rng, ndraw, pop)
-    q = _dark._sample_q(rng, m1, pop)
-    m2 = q * m1
-    chi = _dark._sample_chieff(rng, ndraw, pop)
-    gw_det = _dark._network_snr(m1, m2, z, dl, rng) >= snr_threshold
+    if proposal == "uniform":
+        m1lo, m1hi = m1det_range
+        m1det = rng.uniform(m1lo, m1hi, ndraw)
+        q = rng.uniform(0.0, 1.0, ndraw)
+        chi = rng.uniform(-1.0, 1.0, ndraw)
+        m1src = m1det / (1.0 + z)
+    else:
+        m1src = _dark._sample_powerlaw_peak_m1(rng, ndraw, pop)
+        q = _dark._sample_q(rng, m1src, pop)
+        chi = _dark._sample_chieff(rng, ndraw, pop)
+    m2src = q * m1src
+    gw_det = _dark._network_snr(m1src, m2src, z, dl, rng) >= snr_threshold
     em_det = _joint_em_detected(rng, ra, dec, z, dl, survey)
     det = gw_det & em_det
 
-    # np.trapz was removed in NumPy 2.0; reuse the dark generator's version-safe shim.
-    pz = np.interp(z, grids["z"], grids["dvc_dz"]) / _dark._trapz(grids["dvc_dz"], grids["z"])
-    ddldz = np.gradient(grids["dl"], grids["z"])
-    jac = np.interp(z, grids["z"], ddldz) * (1.0 + z)
-    p_draw = _dark._mass_spin_pdf(m1, q, chi, pop) * pz / np.maximum(jac, 1.0e-300) / (4.0 * np.pi)
-    p_draw = np.maximum(p_draw, 1.0e-300)
+    p_draw = _dark._selection_pdraw(proposal, m1src, q, chi, z, grids, pop, m1det_range)
 
     return {
-        "m1det": m1[det] * (1.0 + z[det]),
-        "m2det": m2[det] * (1.0 + z[det]),
-        "m1src": m1[det],
-        "m2src": m2[det],
+        "m1det": (m1src * (1.0 + z))[det],
+        "m2det": (q * m1src * (1.0 + z))[det],
+        "m1src": m1src[det],
+        "m2src": m2src[det],
         "dL": dl[det],
         "chieff": chi[det],
         "ra": ra[det],
@@ -115,23 +127,46 @@ def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold):
     }
 
 
-def _joint_selection_injections(rng, ndraw, grids, pop, survey, snr_threshold, batch_size, target_detections=None, verbose=False):
-    chunks = []
-    n_proposed = 0
-    n_detected = 0
-    keys = ["m1det", "m2det", "m1src", "m2src", "dL", "chieff", "ra", "dec", "pdraw"]
-    while n_proposed < ndraw:
-        n_batch = min(batch_size, ndraw - n_proposed)
-        chunk = _draw_joint_selection_batch(rng, n_batch, grids, pop, survey, snr_threshold)
-        chunks.append(chunk)
-        n_proposed += int(chunk["Ndraw"])
-        n_detected += int(chunk["n_detected"])
-        if verbose:
-            print(f"  joint selection batch: proposed={n_proposed:,}/{ndraw:,}, detected={n_detected:,}")
-        if target_detections is not None and n_detected >= target_detections:
-            break
-    arrays = {key: np.concatenate([chunk[key] for chunk in chunks]) for key in keys}
-    return {**arrays, "Ndraw": n_proposed, "n_detected": n_detected}
+def _em_extra_detect(survey):
+    """Per-injection JAX EM-selection cut (footprint, depth, completeness) for the
+    joint GW+EM selection kernel.  Uses a key derived from the injection key via
+    fold_in so its randoms are independent of the GW draws in the dark kernel."""
+    dec_min = float(survey.footprint_dec_min_deg)
+    dec_max = float(survey.footprint_dec_max_deg)
+    z_hard = float(survey.z_hard_max)
+    mag_lim = float(survey.magnitude_limit)
+    abs_mu = float(survey.absolute_mag_mean)
+    abs_sig = float(survey.absolute_mag_sigma)
+    z50 = float(survey.z50)
+    width = float(survey.width)
+
+    def extra(key, state):
+        z, dl, dec = state["z"], state["dL"], state["dec"]
+        k1, k2 = jax.random.split(jax.random.fold_in(key, 101), 2)
+        abs_mag = abs_mu + abs_sig * jax.random.normal(k1)
+        app_mag = abs_mag + 5.0 * jnp.log10(jnp.maximum(dl * 1.0e6, 10.0) / 10.0)
+        dec_deg = jnp.rad2deg(dec)
+        footprint = jnp.logical_and(dec_deg >= dec_min, dec_deg <= dec_max)
+        depth = jnp.logical_and(z <= z_hard, app_mag <= mag_lim)
+        completeness = jexpit((z50 - z) / width)
+        return jnp.logical_and(jnp.logical_and(footprint, depth),
+                               jax.random.uniform(k2) < completeness)
+
+    return extra
+
+
+def _joint_selection_injections(rng, ndraw, grids, pop, survey, snr_threshold, batch_size,
+                                target_detections=None, verbose=False,
+                                proposal="population", m1det_range=_dark._M1DET_RANGE):
+    kernel = _dark._make_selection_kernel(
+        grids, pop, float(snr_threshold), proposal, m1det_range,
+        extra_detect=_em_extra_detect(survey),
+    )
+    return _dark._run_selection_chunks(
+        rng, ndraw, grids, pop, proposal, batch_size, kernel,
+        target_detections=target_detections, verbose=verbose,
+        label="joint selection", m1det_range=m1det_range,
+    )
 
 
 def write_mock_data(args):
@@ -166,9 +201,16 @@ def write_mock_data(args):
     target = args.selection_target_detections
     if args.selection_per_observation_factor is not None:
         target = int(np.ceil(args.selection_per_observation_factor * args.nobs))
+    # Chunk the nselection draws: explicit --selection-batch-size wins (legacy),
+    # otherwise split into --nbatches equal chunks (default 1 = one kernel call).
+    selection_batch_size = (
+        args.selection_batch_size
+        if args.selection_batch_size is not None
+        else int(np.ceil(args.ndraw / args.nbatches))
+    )
     sel = _joint_selection_injections(
-        rng, args.ndraw, grids, pop, survey, args.snr_threshold, args.selection_batch_size,
-        target_detections=target, verbose=args.verbose,
+        rng, args.ndraw, grids, pop, survey, args.snr_threshold, selection_batch_size,
+        target_detections=target, verbose=args.verbose, proposal=args.proposal,
     )
 
     inv_pdraw = 1.0 / np.asarray(sel["pdraw"])
@@ -179,6 +221,7 @@ def write_mock_data(args):
         "population": asdict(pop),
         "survey": asdict(survey),
         "snr_threshold": args.snr_threshold,
+        "selection_proposal": args.proposal,
         "universe_model_for_inference": "bright_sirens",
         "pop_model_for_inference": "powerlaw+peak",
         "shared_beta_for_inference": True,
@@ -233,6 +276,7 @@ def write_mock_data(args):
         f.attrs["mock_data"] = True
         f.attrs["ndraw"] = int(sel["Ndraw"])
         f.attrs["Neff"] = selection_neff
+        f.attrs["selection_proposal"] = args.proposal
         f.attrs["chi_eff_swap_applied"] = True
         f.attrs["chi_eff_amax"] = 0.99
         f.attrs["cosmology_H0"] = float(args.H0)
@@ -267,7 +311,19 @@ def parse_args():
     parser.add_argument("--n0", type=_dark._positive_float, default=1.0e-3)
     parser.add_argument("--nobs", type=_dark._positive_int, default=3)
     parser.add_argument("--nsamp", type=_dark._positive_int, default=512)
-    parser.add_argument("--ndraw", type=_dark._positive_int, default=100_000)
+    parser.add_argument("--nselection", "--ndraw", dest="ndraw", type=_dark._positive_int, default=100_000,
+                        help="Total number of joint GW+EM selection injections to PROPOSE (the "
+                             "detected subset is stored). Without an early-stop target, exactly "
+                             "this many are drawn. --ndraw is a legacy alias.")
+    parser.add_argument("--nbatches", type=_dark._positive_int, default=1,
+                        help="Split the --nselection draws into this many equal chunks for the "
+                             "jit/vmap kernel; chunking bounds device memory. Default 1 draws all "
+                             "injections in a single kernel call (best on GPU).")
+    parser.add_argument("--proposal", choices=_dark.SELECTION_PROPOSALS, default="population",
+                        help="Selection-injection proposal. 'population' (default) draws "
+                             "masses/spins from the fiducial population; 'uniform' draws a broad, "
+                             "population-independent proposal that keeps the importance-sampling "
+                             "Neff high across the prior.")
     parser.add_argument("--zmax", type=_dark._positive_float, default=0.08)
     parser.add_argument("--H0", type=_dark._positive_float, default=67.74)
     parser.add_argument("--Om0", type=_dark._positive_float, default=0.3075)
@@ -277,7 +333,9 @@ def parse_args():
     parser.add_argument("--survey-z50", type=float, default=_dark.SurveyConfig.z50)
     parser.add_argument("--survey-width", type=_dark._positive_float, default=_dark.SurveyConfig.width)
     parser.add_argument("--galaxy-density-delta", type=float, default=_dark.SurveyConfig.delta)
-    parser.add_argument("--selection-batch-size", type=_dark._positive_int, default=50_000)
+    parser.add_argument("--selection-batch-size", type=_dark._positive_int, default=None,
+                        help="Explicit chunk size (legacy). If set, it takes precedence over "
+                             "--nbatches; otherwise the chunk size is --nselection / --nbatches.")
     targets = parser.add_mutually_exclusive_group()
     targets.add_argument("--selection-target-detections", type=_dark._positive_int, default=None)
     targets.add_argument("--selection-per-observation-factor", type=_dark._positive_float, default=None)
