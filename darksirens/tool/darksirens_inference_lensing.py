@@ -330,6 +330,9 @@ def build_parser():
                    help="tinyns proposal kernel: jitted JAX (default) or pure Python.")
     p.add_argument("--tinyns_walks", type=int, default=25,
                    help="tinyns: number of random-walk steps per update (sample=rwalk).")
+    p.add_argument("--tinyns_replacement_chains", type=int, default=1,
+                   help="tinyns: independent random-walk chains run in parallel per "
+                        "replacement (rwalk+jax only; default 1).")
     p.add_argument("--tinyns_slices", type=int, default=5,
                    help="tinyns: number of slice directions per update.")
     p.add_argument("--tinyns_slice_steps", type=int, default=10,

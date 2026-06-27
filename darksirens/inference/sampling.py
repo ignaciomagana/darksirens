@@ -76,6 +76,9 @@ def run_sampler(method, likelihood, prior_transform, labels,
         # entirely inside a jitted JAX kernel (no host round-trip per step), so
         # it is much faster than the Python slice proposal for this likelihood.
         # slice/rslice/prior and the pure-Python kernel remain selectable.
+        # replacement_chains runs several independent constrained random walks
+        # in parallel per replacement (rwalk+jax only; default 1 = original
+        # behaviour), trading throughput for GPU occupancy.
         sampler = NestedSampler(
             tinyns_loglike,
             tinyns_ptform,
@@ -84,6 +87,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
             sample=getattr(opts, "tinyns_sample", "rwalk"),
             kernel=getattr(opts, "tinyns_kernel", "jax"),
             walks=int(getattr(opts, "tinyns_walks", 25)),
+            replacement_chains=int(getattr(opts, "tinyns_replacement_chains", 1)),
             slices=int(getattr(opts, "tinyns_slices", 5)),
             slice_steps=int(getattr(opts, "tinyns_slice_steps", 10)),
             step_scale=float(getattr(opts, "tinyns_step_scale", 0.1)),
