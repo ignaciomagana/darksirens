@@ -333,6 +333,7 @@ Common sampler options:
 | `--tinyns_sample` | `rwalk` | `tinyns` | Proposal method: `rwalk`, `slice`, `rslice`, or `prior`. |
 | `--tinyns_kernel` | `jax` | `tinyns` | Proposal kernel: `jax` (jitted) or `python`. |
 | `--tinyns_walks` | `25` | `tinyns` | Number of random-walk steps per update (`sample=rwalk`). |
+| `--tinyns_replacement_chains` | `1` | `tinyns` | Independent random-walk chains run in parallel per replacement (`rwalk`+`jax` only). |
 | `--tinyns_slices` | `5` | `tinyns` | Number of slice directions per update. |
 | `--tinyns_slice_steps` | `10` | `tinyns` | Maximum stepping-out steps per slice. |
 | `--tinyns_step_scale` | `0.1` | `tinyns` | Initial proposal step scale (fraction of prior width). |
