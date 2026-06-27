@@ -33,7 +33,7 @@ followed by the full autodoc API generated from the source docstrings.
   selects these functions with `get_redshift_prior` based on `--universe_model`.
 - **Inference modules** in `darksirens.inference` load and compact data, build
   parameter tables and prior transforms, evaluate the selection correction, and
-  expose sampler adapters for `jaxns`, `dynesty`, and `emcee`.
+  expose sampler adapters for `tinyns`, `dynesty`, and `numpyro`.
 
 ## Stability notes
 

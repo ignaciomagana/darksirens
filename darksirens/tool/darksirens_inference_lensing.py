@@ -12,13 +12,11 @@ channel. This tool adds:
   * loading of the lensed-injection set + per-pair PE,
   * the cluster master likelihood (``darksiren_log_likelihood_with_clusters``),
   * ``--cluster_mode {off,j2}`` so it subsumes the pure-singleton fit,
-  * memory-safe PE down-sampling for the O(N_pe^2 N_y) pair likelihood,
-  * resume-aware emcee checkpointing for multi-day runs.
+  * memory-safe PE down-sampling for the O(N_pe^2 N_y) pair likelihood.
 
 It REUSES the branch's machinery wherever possible: prior construction,
-``run_sampler`` (jaxns/dynesty/numpyro), result saving, and the singleton data
-loaders. Only the cluster-specific assembly and a resume-capable emcee loop are
-added here.
+``run_sampler`` (tinyns/dynesty/numpyro), result saving, and the singleton data
+loaders. Only the cluster-specific assembly is added here.
 
 Design notes
 ------------
@@ -45,14 +43,14 @@ darksirens_inference_lensing \
     --pe_max_per_pair 400 \
     --save_path ./run_joint/
 
-# Pure singleton (no pairs), emcee with resume:
+# Pure singleton (no pairs), tinyns (slice):
 darksirens_inference_lensing \
     --gw_path mock_gw_pe.h5 --gwselection_path mock_gw_selection.h5 \
     --pop_model powerlaw+peak --cluster_mode off \
     --wl_backend lognormal --lensing_wl_a 4e-3 --lensing_wl_b 1.5 \
     --fix_cosmology true --fix_survey true \
-    --sampler emcee --nwalkers 64 --nsteps 200000 \
-    --resume --save_path ./run_singleton/
+    --sampler tinyns --nlive 2000 --tinyns_sample slice \
+    --save_path ./run_singleton/
 """
 from __future__ import annotations
 import os
@@ -67,7 +65,6 @@ import json
 import time
 import argparse
 import datetime
-from pathlib import Path
 
 import numpy as np
 import h5py
@@ -292,62 +289,6 @@ def build_cluster_likelihood(opts, inp, decoder):
 
 
 # =============================================================================
-# Resume-aware emcee (the branch's emcee path calls backend.reset() every start,
-# which destroys checkpoints; we provide a resume-capable variant here).
-# =============================================================================
-def run_emcee_resumable(loglike, prior_transform, labels, lower, upper, opts):
-    import emcee
-    ndim = len(labels)
-    ckpt_dir = Path(opts.save_path) / "emcee_checkpoints"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    backend_file = ckpt_dir / f"chain_{opts.run_tag}.h5"
-    backend = emcee.backends.HDFBackend(str(backend_file))
-
-    def logprob(coord):
-        oob = np.any((coord < lower) | (coord > upper), axis=-1) if coord.ndim > 1 \
-            else np.any((coord < lower) | (coord > upper))
-        if coord.ndim == 1:
-            if oob:
-                return -np.inf
-            return float(loglike(jnp.asarray(coord)))
-        out = np.full(coord.shape[0], -np.inf)
-        for i in range(coord.shape[0]):
-            if not oob[i]:
-                out[i] = float(loglike(jnp.asarray(coord[i])))
-        return out
-
-    resuming = opts.resume and backend_file.exists() and backend.iteration > 0
-    if resuming:
-        print(f"[resume] continuing from {backend_file} at iteration {backend.iteration}", flush=True)
-        p0 = None
-        nsteps_remaining = max(opts.nsteps - backend.iteration, 0)
-    else:
-        backend.reset(opts.nwalkers, ndim)
-        p0 = np.random.uniform(lower, upper, size=(opts.nwalkers, ndim))
-        nsteps_remaining = opts.nsteps
-
-    sampler = emcee.EnsembleSampler(
-        opts.nwalkers, ndim, logprob, backend=backend,
-        moves=[(emcee.moves.DEMove(), 0.8), (emcee.moves.DESnookerMove(), 0.2)],
-        vectorize=True,
-    )
-    interval = 5000
-    t0 = time.time()
-    done = backend.iteration if resuming else 0
-    state = None if resuming else p0
-    while done < opts.nsteps:
-        n = min(interval, opts.nsteps - done)
-        state = sampler.run_mcmc(state, n, progress=opts.show_progress)
-        done += n
-        # HDFBackend writes incrementally; an explicit sync is not required and
-        # older versions lack .flush(). The backend file is already up to date.
-        print(f"[emcee] step {done}/{opts.nsteps}  elapsed {time.time()-t0:.0f}s "
-              f"(checkpoint synced)", flush=True)
-    chain = sampler.get_chain(discard=opts.nsteps // 2, flat=True)
-    return {"samples": np.asarray(chain), "logZ": None, "logZerr": None}
-
-
-# =============================================================================
 # CLI
 # =============================================================================
 def build_parser():
@@ -377,19 +318,23 @@ def build_parser():
                    help="JSON dict of {label: [lo, hi]}")
     # sampler
     p.add_argument("--sampler", required=True,
-                   choices=["jaxns", "dynesty", "emcee", "numpyro"])
+                   choices=["tinyns", "dynesty", "numpyro"])
     p.add_argument("--nlive", type=int, default=2000)
     p.add_argument("--dlogz", type=float, default=0.1)
     p.add_argument("--max_samples", type=int, default=2_000_000)
-    p.add_argument("--nwalkers", type=int, default=64)
-    p.add_argument("--nsteps", type=int, default=200_000)
+    p.add_argument("--tinyns_sample", default="slice", choices=["slice", "rwalk", "prior"],
+                   help="tinyns proposal: constrained slice (default), random walk, or prior.")
+    p.add_argument("--tinyns_slices", type=int, default=5,
+                   help="tinyns: number of slice directions per update.")
+    p.add_argument("--tinyns_slice_steps", type=int, default=10,
+                   help="tinyns: max stepping-out steps per slice.")
+    p.add_argument("--tinyns_step_scale", type=float, default=0.1,
+                   help="tinyns: initial step scale as a fraction of the prior width.")
+    p.add_argument("--tinyns_progress_interval", type=int, default=100,
+                   help="tinyns: iterations between progress-bar updates.")
     p.add_argument("--nuts_warmup", type=int, default=500)
     p.add_argument("--nuts_samples", type=int, default=2000)
     p.add_argument("--nuts_chains", type=int, default=4)
-    p.add_argument("--resume", action="store_true",
-                   help="resume emcee from existing checkpoint if present")
-    p.add_argument("--run_tag", default=None,
-                   help="checkpoint tag (default: SLURM_JOB_ID or timestamp)")
     # perf / memory
     p.add_argument("--pe_max_per_pair", type=int, default=400,
                    help="down-sample PE per pair image (0=keep all). Controls "
@@ -413,9 +358,6 @@ def main():
     opts.fix_cosmology = _str2bool(opts.fix_cosmology)
     opts.fix_survey = _str2bool(opts.fix_survey)
     opts.fix_population = _str2bool(opts.fix_population)
-    if opts.run_tag is None:
-        opts.run_tag = os.environ.get("SLURM_JOB_ID") or \
-            datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     os.makedirs(opts.save_path, exist_ok=True)
 
     print(f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend}] ===")
@@ -457,12 +399,9 @@ def main():
 
     # --- sample ---
     print(f"sampling with {opts.sampler} ...", flush=True)
-    if opts.sampler == "emcee":
-        results = run_emcee_resumable(loglike, prior_transform, labels, lower, upper, opts)
-    else:
-        results = run_sampler(method=opts.sampler, likelihood=loglike,
-                              prior_transform=prior_transform, labels=labels,
-                              lower_bound=lower, upper_bound=upper, opts=opts)
+    results = run_sampler(method=opts.sampler, likelihood=loglike,
+                          prior_transform=prior_transform, labels=labels,
+                          lower_bound=lower, upper_bound=upper, opts=opts)
 
     # --- save ---
     ts = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")

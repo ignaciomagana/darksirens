@@ -15,12 +15,14 @@ python darksirens_inference.py \
     --universe_model    spectral_sirens \
     --nlive             2000
 
-# Dark sirens with galaxy catalog, fixed cosmology, emcee:
+# Dark sirens with galaxy catalog, fixed cosmology, tinyns (slice):
 python darksirens_inference.py \
     --gw_path           gw_events.h5 \
     --gwselection_path  injections.h5 \
     --survey_path       catalog_nside64.h5 \
-    --sampler           emcee \
+    --sampler           tinyns \
+    --nlive             1000 \
+    --tinyns_sample     slice \
     --pop_model         brokenpowerlaw+2peaks \
     --universe_model    dark_sirens \
     --fixed_cosmology   true \
@@ -443,8 +445,10 @@ def save_results_hdf5(
             f.attrs["bright_siren_sky_marginalized"] = bool(opts.bright_siren_sky_marginalized)
         f.attrs["nlive"]           = int(opts.nlive)
         f.attrs["dlogz"]           = float(opts.dlogz)
-        f.attrs["nwalkers"]        = int(opts.nwalkers)
-        f.attrs["nsteps"]          = int(opts.nsteps)
+        f.attrs["tinyns_sample"]   = str(getattr(opts, "tinyns_sample", ""))
+        f.attrs["tinyns_slices"]   = int(getattr(opts, "tinyns_slices", 0))
+        f.attrs["tinyns_slice_steps"] = int(getattr(opts, "tinyns_slice_steps", 0))
+        f.attrs["tinyns_step_scale"]  = float(getattr(opts, "tinyns_step_scale", 0.0))
         f.attrs["nuts_warmup"]     = int(getattr(opts, "nuts_warmup", 0))
         f.attrs["nuts_samples"]    = int(getattr(opts, "nuts_samples", 0))
         f.attrs["nuts_chains"]     = int(getattr(opts, "nuts_chains", 0))
@@ -815,12 +819,22 @@ def main():
                          "dark_sirens only. Off (default) = deterministic Q, unchanged."))
 
     g = optp.add_argument_group("Sampler")
-    g.add_argument("--sampler",      required=True, choices=["jaxns", "dynesty", "emcee", "numpyro"])
+    g.add_argument("--sampler",      required=True, choices=["tinyns", "dynesty", "numpyro"])
     g.add_argument("--nlive",        type=int,   default=1000)
     g.add_argument("--dlogz",        type=float, default=0.1)
-    g.add_argument("--max_samples",  type=int,   default=1_000_000)
-    g.add_argument("--nwalkers",     type=int,   default=32)
-    g.add_argument("--nsteps",       type=int,   default=1000)
+    g.add_argument("--max_samples",  type=int,   default=1_000_000,
+                   help="Max call/iteration budget for nested samplers "
+                        "(dynesty call cap, tinyns iteration cap); 0 = unlimited.")
+    g.add_argument("--tinyns_sample", default="slice", choices=["slice", "rwalk", "prior"],
+                   help="tinyns proposal: constrained slice (default), random walk, or prior.")
+    g.add_argument("--tinyns_slices", type=int, default=5,
+                   help="tinyns: number of slice directions per update (sample=slice/rwalk).")
+    g.add_argument("--tinyns_slice_steps", type=int, default=10,
+                   help="tinyns: max stepping-out steps per slice (sample=slice/rwalk).")
+    g.add_argument("--tinyns_step_scale", type=float, default=0.1,
+                   help="tinyns: initial proposal step scale as a fraction of the prior width.")
+    g.add_argument("--tinyns_progress_interval", type=int, default=100,
+                   help="tinyns: iterations between progress-bar updates.")
     g.add_argument("--nuts_warmup",  type=int,   default=500)
     g.add_argument("--nuts_samples", type=int,   default=1000)
     g.add_argument("--nuts_chains",  type=int,   default=1)
@@ -972,15 +986,14 @@ def main():
         _row("Fixed param values", "none")
     print("  │")
     _row("Sampler", opts.sampler)
-    if opts.sampler in ("jaxns", "dynesty"):
+    if opts.sampler in ("tinyns", "dynesty"):
         _row("  live points", opts.nlive)
-    if opts.sampler == "dynesty":
         _row("  ΔlogZ stop",  opts.dlogz)
-    if opts.sampler == "jaxns":
-        _row("  max samples", f"{opts.max_samples:,}")
-    if opts.sampler == "emcee":
-        _row("  walkers", opts.nwalkers)
-        _row("  steps",   opts.nsteps)
+    if opts.sampler == "tinyns":
+        _row("  proposal",    opts.tinyns_sample)
+        _row("  slices",      opts.tinyns_slices)
+        _row("  slice steps", opts.tinyns_slice_steps)
+        _row("  step scale",  opts.tinyns_step_scale)
     if opts.sampler == "numpyro":
         _row("  warmup", opts.nuts_warmup)
         _row("  samples", opts.nuts_samples)
@@ -1149,9 +1162,8 @@ def main():
 
     _section(f"Sampling  [{opts.sampler.upper()}]")
     sampler_info = {
-        "jaxns":   f"nlive={opts.nlive}  max_samples={opts.max_samples:,}  seed={opts.seed}",
+        "tinyns":  f"nlive={opts.nlive}  dlogz={opts.dlogz}  sample={opts.tinyns_sample}  seed={opts.seed}",
         "dynesty": f"nlive={opts.nlive}  dlogz={opts.dlogz}  seed={opts.seed}",
-        "emcee":   f"nwalkers={opts.nwalkers}  nsteps={opts.nsteps}  seed={opts.seed}",
         "numpyro": f"warmup={opts.nuts_warmup}  samples={opts.nuts_samples}  chains={opts.nuts_chains}  seed={opts.seed}",
     }
     _row("Configuration", sampler_info[opts.sampler])

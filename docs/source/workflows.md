@@ -54,9 +54,9 @@ Before launching a large production job, fix expensive or well-understood parame
 darksirens_inference \
   --gw_path data/gw_events.h5 \
   --gwselection_path data/selection.h5 \
-  --sampler emcee \
-  --nwalkers 32 \
-  --nsteps 200 \
+  --sampler tinyns \
+  --nlive 100 \
+  --dlogz 10 \
   --fix_de true \
   --fix_survey true \
   --fixed_parameter_values '{"H0": 67.74, "Om0": 0.3075}' \

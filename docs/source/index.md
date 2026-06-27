@@ -41,7 +41,7 @@ changelog
 - **EM survey handling** for pixelated HEALPix galaxy catalogs.
 - **Redshift priors** for spectral sirens, complete-catalog dark sirens, and incomplete-catalog dark sirens.
 - **Population models** composed directly from the `--pop_model` name (e.g. `brokenpowerlaw+2peaks`): parametric components combine through a naming grammar, with Gaussian-process variants and curated physics-tuned priors for standard models.
-- **Sampling front end** for `jaxns`, `dynesty`, and `emcee`.
+- **Sampling front end** for `tinyns`, `dynesty`, and `numpyro`.
 - **Analysis utilities** for evidences, Bayes factors, and posterior-predictive mass/redshift distributions.
 
 ## Documentation status

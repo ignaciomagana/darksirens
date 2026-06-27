@@ -361,7 +361,7 @@ def make_prior_transform(lower, upper, prior_kinds=None):
     ``prior_kinds`` is an optional list aligned to ``lower``/``upper`` of
     ``(kind, loc, scale)`` triples (kind in ``{"uniform", "normal",
     "lognormal"}``).  ``None`` reproduces the legacy all-uniform affine map.
-    Used by the nested samplers (dynesty/jaxns); numpyro builds its own prior
+    Used by the nested samplers (dynesty/tinyns); numpyro builds its own prior
     via ``run_sampler``.  ``low``/``high`` always act as truncation bounds, so
     every kind maps the cube to ``[low, high]`` and the measure matches the
     corresponding numpyro distribution.

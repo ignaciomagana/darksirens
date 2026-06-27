@@ -8,8 +8,8 @@ point, so the evidence is exact: ``Z = L(theta_fixed)`` ⇒ ``logZ = logL``.
 
 ``run_sampler`` must short-circuit and return that — for *every* sampler —
 rather than handing a 0-dimensional problem to dynesty (which crashes in its
-bounding-ellipsoid eigendecomposition, LAPACK ``dsyevr: il=1``), jaxns, or
-emcee.  The short-circuit returns before the method dispatch, so it imports no
+bounding-ellipsoid eigendecomposition, LAPACK ``dsyevr: il=1``) or tinyns.
+The short-circuit returns before the method dispatch, so it imports no
 sampler package; this test therefore needs only jax + numpy.
 """
 from types import SimpleNamespace
@@ -34,7 +34,7 @@ def _stub_likelihood(coord):
     return jnp.asarray(_FIXED_LOG_L)
 
 
-@pytest.mark.parametrize("method", ["dynesty", "numpyro", "jaxns", "emcee"])
+@pytest.mark.parametrize("method", ["dynesty", "numpyro", "tinyns"])
 def test_run_sampler_zero_free_params_short_circuits(method):
     # ``opts`` is intentionally empty: the ndim==0 path returns before any
     # sampler-specific option is read or any sampler package is imported, so

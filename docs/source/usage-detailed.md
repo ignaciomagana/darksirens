@@ -27,10 +27,9 @@ python -m pip install -r requirements.txt
 
 Additional sampler-specific packages may be required depending on the selected backend:
 
-- `dynesty` for `--sampler dynesty`;
-- `emcee` for `--sampler emcee`;
-- `numpyro` for `--sampler numpyro`; and
-- `jaxns` for `--sampler jaxns`.
+- `tinyns` for `--sampler tinyns` (installed from GitHub via `requirements.txt`);
+- `dynesty` for `--sampler dynesty`; and
+- `numpyro` for `--sampler numpyro`.
 
 Build the documentation locally with:
 
@@ -320,19 +319,22 @@ to ignore the counterpart sky-pixel gate and apply only the counterpart redshift
 
 | Sampler | Description |
 | --- | --- |
+| `tinyns` | Lightweight JAX nested sampler (dynesty-compatible) with a constrained-slice proposal and evidence output. Default. |
 | `dynesty` | Dynamic/static nested-sampling backend with evidence output. |
-| `emcee` | Ensemble MCMC backend with checkpointing. |
-| `jaxns` | JAX nested-sampling backend. |
+| `numpyro` | JAX NUTS (HMC) backend; posterior samples, no evidence. |
 
 Common sampler options:
 
 | Option | Default | Used by | Description |
 | --- | --- | --- | --- |
-| `--nlive` | `1000` | `dynesty`, `jaxns` | Number of live points. |
-| `--dlogz` | `0.1` | `dynesty` | Evidence stopping threshold. |
-| `--max_samples` | `1000000` | `jaxns`, dynesty call cap | Maximum sample/call budget. |
-| `--nwalkers` | `32` | `emcee` | Number of MCMC walkers. |
-| `--nsteps` | `1000` | `emcee` | Number of MCMC steps. |
+| `--nlive` | `1000` | `tinyns`, `dynesty` | Number of live points. |
+| `--dlogz` | `0.1` | `tinyns`, `dynesty` | Evidence stopping threshold. |
+| `--max_samples` | `1000000` | `dynesty` call cap, `tinyns` iteration cap | Maximum call/iteration budget (`0` = unlimited). |
+| `--tinyns_sample` | `slice` | `tinyns` | Proposal method: `slice`, `rwalk`, or `prior`. |
+| `--tinyns_slices` | `5` | `tinyns` | Number of slice directions per update. |
+| `--tinyns_slice_steps` | `10` | `tinyns` | Maximum stepping-out steps per slice. |
+| `--tinyns_step_scale` | `0.1` | `tinyns` | Initial proposal step scale (fraction of prior width). |
+| `--tinyns_progress_interval` | `100` | `tinyns` | Iterations between progress-bar updates. |
 | `--nuts_warmup` | `500` | `numpyro` | Number of NUTS adaptation/warmup steps. |
 | `--nuts_samples` | `1000` | `numpyro` | Number of NUTS posterior samples per chain. |
 | `--nuts_chains` | `1` | `numpyro` | Number of NUTS chains. |

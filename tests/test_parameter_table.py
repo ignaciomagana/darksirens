@@ -207,8 +207,6 @@ def _serialization_opts(**overrides):
         counterpart=None,
         nlive=10,
         dlogz=0.1,
-        nwalkers=4,
-        nsteps=8,
         nuts_warmup=0,
         nuts_samples=0,
         nuts_chains=0,
