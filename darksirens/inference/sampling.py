@@ -72,12 +72,18 @@ def run_sampler(method, likelihood, prior_transform, labels,
         if maxiter is not None and maxiter <= 0:
             maxiter = None
 
+        # rwalk + the JAX kernel is the default: the random-walk proposal runs
+        # entirely inside a jitted JAX kernel (no host round-trip per step), so
+        # it is much faster than the Python slice proposal for this likelihood.
+        # slice/rslice/prior and the pure-Python kernel remain selectable.
         sampler = NestedSampler(
             tinyns_loglike,
             tinyns_ptform,
             ndim=ndims,
             nlive=int(getattr(opts, "nlive", 500)),
-            sample=getattr(opts, "tinyns_sample", "slice"),
+            sample=getattr(opts, "tinyns_sample", "rwalk"),
+            kernel=getattr(opts, "tinyns_kernel", "jax"),
+            walks=int(getattr(opts, "tinyns_walks", 25)),
             slices=int(getattr(opts, "tinyns_slices", 5)),
             slice_steps=int(getattr(opts, "tinyns_slice_steps", 10)),
             step_scale=float(getattr(opts, "tinyns_step_scale", 0.1)),

@@ -319,7 +319,7 @@ to ignore the counterpart sky-pixel gate and apply only the counterpart redshift
 
 | Sampler | Description |
 | --- | --- |
-| `tinyns` | Lightweight JAX nested sampler (dynesty-compatible) with a constrained-slice proposal and evidence output. Default. |
+| `tinyns` | Lightweight JAX nested sampler (dynesty-compatible) with a JAX-kernel random-walk proposal (slice/rslice also available) and evidence output. Default. |
 | `dynesty` | Dynamic/static nested-sampling backend with evidence output. |
 | `numpyro` | JAX NUTS (HMC) backend; posterior samples, no evidence. |
 
@@ -330,7 +330,9 @@ Common sampler options:
 | `--nlive` | `1000` | `tinyns`, `dynesty` | Number of live points. |
 | `--dlogz` | `0.1` | `tinyns`, `dynesty` | Evidence stopping threshold. |
 | `--max_samples` | `1000000` | `dynesty` call cap, `tinyns` iteration cap | Maximum call/iteration budget (`0` = unlimited). |
-| `--tinyns_sample` | `slice` | `tinyns` | Proposal method: `slice`, `rwalk`, or `prior`. |
+| `--tinyns_sample` | `rwalk` | `tinyns` | Proposal method: `rwalk`, `slice`, `rslice`, or `prior`. |
+| `--tinyns_kernel` | `jax` | `tinyns` | Proposal kernel: `jax` (jitted) or `python`. |
+| `--tinyns_walks` | `25` | `tinyns` | Number of random-walk steps per update (`sample=rwalk`). |
 | `--tinyns_slices` | `5` | `tinyns` | Number of slice directions per update. |
 | `--tinyns_slice_steps` | `10` | `tinyns` | Maximum stepping-out steps per slice. |
 | `--tinyns_step_scale` | `0.1` | `tinyns` | Initial proposal step scale (fraction of prior width). |
