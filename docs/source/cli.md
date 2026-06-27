@@ -67,7 +67,9 @@ darksirens_inference \
 - `--nlive`: live points for nested samplers (`tinyns`, `dynesty`).
 - `--dlogz`: evidence stopping threshold for nested samplers (`tinyns`, `dynesty`).
 - `--max_samples`: maximum call/iteration budget for nested samplers (`dynesty` call cap, `tinyns` iteration cap); `0` = unlimited.
-- `--tinyns_sample`: `tinyns` proposal method: `slice` (default), `rwalk`, or `prior`.
+- `--tinyns_sample`: `tinyns` proposal method: `rwalk` (default), `slice`, `rslice`, or `prior`.
+- `--tinyns_kernel`: `tinyns` proposal kernel: `jax` (default, jitted) or `python`.
+- `--tinyns_walks`: `tinyns` number of random-walk steps per update (`sample=rwalk`).
 - `--tinyns_slices`: `tinyns` number of slice directions per update.
 - `--tinyns_slice_steps`: `tinyns` maximum stepping-out steps per slice.
 - `--tinyns_step_scale`: `tinyns` initial proposal step scale as a fraction of the prior width.

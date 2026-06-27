@@ -15,14 +15,15 @@ python darksirens_inference.py \
     --universe_model    spectral_sirens \
     --nlive             2000
 
-# Dark sirens with galaxy catalog, fixed cosmology, tinyns (slice):
+# Dark sirens with galaxy catalog, fixed cosmology, tinyns (rwalk + jax kernel):
 python darksirens_inference.py \
     --gw_path           gw_events.h5 \
     --gwselection_path  injections.h5 \
     --survey_path       catalog_nside64.h5 \
     --sampler           tinyns \
     --nlive             1000 \
-    --tinyns_sample     slice \
+    --tinyns_sample     rwalk \
+    --tinyns_kernel     jax \
     --pop_model         brokenpowerlaw+2peaks \
     --universe_model    dark_sirens \
     --fixed_cosmology   true \
@@ -446,6 +447,8 @@ def save_results_hdf5(
         f.attrs["nlive"]           = int(opts.nlive)
         f.attrs["dlogz"]           = float(opts.dlogz)
         f.attrs["tinyns_sample"]   = str(getattr(opts, "tinyns_sample", ""))
+        f.attrs["tinyns_kernel"]   = str(getattr(opts, "tinyns_kernel", ""))
+        f.attrs["tinyns_walks"]    = int(getattr(opts, "tinyns_walks", 0))
         f.attrs["tinyns_slices"]   = int(getattr(opts, "tinyns_slices", 0))
         f.attrs["tinyns_slice_steps"] = int(getattr(opts, "tinyns_slice_steps", 0))
         f.attrs["tinyns_step_scale"]  = float(getattr(opts, "tinyns_step_scale", 0.0))
@@ -825,12 +828,18 @@ def main():
     g.add_argument("--max_samples",  type=int,   default=1_000_000,
                    help="Max call/iteration budget for nested samplers "
                         "(dynesty call cap, tinyns iteration cap); 0 = unlimited.")
-    g.add_argument("--tinyns_sample", default="slice", choices=["slice", "rwalk", "prior"],
-                   help="tinyns proposal: constrained slice (default), random walk, or prior.")
+    g.add_argument("--tinyns_sample", default="rwalk",
+                   choices=["rwalk", "slice", "rslice", "prior"],
+                   help="tinyns proposal: random walk (default), slice, reflective "
+                        "slice, or prior.")
+    g.add_argument("--tinyns_kernel", default="jax", choices=["jax", "python"],
+                   help="tinyns proposal kernel: jitted JAX (default) or pure Python.")
+    g.add_argument("--tinyns_walks", type=int, default=25,
+                   help="tinyns: number of random-walk steps per update (sample=rwalk).")
     g.add_argument("--tinyns_slices", type=int, default=5,
-                   help="tinyns: number of slice directions per update (sample=slice/rwalk).")
+                   help="tinyns: number of slice directions per update (sample=slice/rslice).")
     g.add_argument("--tinyns_slice_steps", type=int, default=10,
-                   help="tinyns: max stepping-out steps per slice (sample=slice/rwalk).")
+                   help="tinyns: max stepping-out steps per slice (sample=slice/rslice).")
     g.add_argument("--tinyns_step_scale", type=float, default=0.1,
                    help="tinyns: initial proposal step scale as a fraction of the prior width.")
     g.add_argument("--tinyns_progress_interval", type=int, default=100,
@@ -991,6 +1000,8 @@ def main():
         _row("  ΔlogZ stop",  opts.dlogz)
     if opts.sampler == "tinyns":
         _row("  proposal",    opts.tinyns_sample)
+        _row("  kernel",      opts.tinyns_kernel)
+        _row("  walks",       opts.tinyns_walks)
         _row("  slices",      opts.tinyns_slices)
         _row("  slice steps", opts.tinyns_slice_steps)
         _row("  step scale",  opts.tinyns_step_scale)
@@ -1162,7 +1173,7 @@ def main():
 
     _section(f"Sampling  [{opts.sampler.upper()}]")
     sampler_info = {
-        "tinyns":  f"nlive={opts.nlive}  dlogz={opts.dlogz}  sample={opts.tinyns_sample}  seed={opts.seed}",
+        "tinyns":  f"nlive={opts.nlive}  dlogz={opts.dlogz}  sample={opts.tinyns_sample}  kernel={opts.tinyns_kernel}  seed={opts.seed}",
         "dynesty": f"nlive={opts.nlive}  dlogz={opts.dlogz}  seed={opts.seed}",
         "numpyro": f"warmup={opts.nuts_warmup}  samples={opts.nuts_samples}  chains={opts.nuts_chains}  seed={opts.seed}",
     }

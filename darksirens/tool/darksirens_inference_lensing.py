@@ -43,13 +43,13 @@ darksirens_inference_lensing \
     --pe_max_per_pair 400 \
     --save_path ./run_joint/
 
-# Pure singleton (no pairs), tinyns (slice):
+# Pure singleton (no pairs), tinyns (rwalk + jax kernel):
 darksirens_inference_lensing \
     --gw_path mock_gw_pe.h5 --gwselection_path mock_gw_selection.h5 \
     --pop_model powerlaw+peak --cluster_mode off \
     --wl_backend lognormal --lensing_wl_a 4e-3 --lensing_wl_b 1.5 \
     --fix_cosmology true --fix_survey true \
-    --sampler tinyns --nlive 2000 --tinyns_sample slice \
+    --sampler tinyns --nlive 2000 --tinyns_sample rwalk --tinyns_kernel jax \
     --save_path ./run_singleton/
 """
 from __future__ import annotations
@@ -322,8 +322,14 @@ def build_parser():
     p.add_argument("--nlive", type=int, default=2000)
     p.add_argument("--dlogz", type=float, default=0.1)
     p.add_argument("--max_samples", type=int, default=2_000_000)
-    p.add_argument("--tinyns_sample", default="slice", choices=["slice", "rwalk", "prior"],
-                   help="tinyns proposal: constrained slice (default), random walk, or prior.")
+    p.add_argument("--tinyns_sample", default="rwalk",
+                   choices=["rwalk", "slice", "rslice", "prior"],
+                   help="tinyns proposal: random walk (default), slice, reflective "
+                        "slice, or prior.")
+    p.add_argument("--tinyns_kernel", default="jax", choices=["jax", "python"],
+                   help="tinyns proposal kernel: jitted JAX (default) or pure Python.")
+    p.add_argument("--tinyns_walks", type=int, default=25,
+                   help="tinyns: number of random-walk steps per update (sample=rwalk).")
     p.add_argument("--tinyns_slices", type=int, default=5,
                    help="tinyns: number of slice directions per update.")
     p.add_argument("--tinyns_slice_steps", type=int, default=10,
