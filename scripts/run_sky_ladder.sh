@@ -18,7 +18,7 @@
 #
 # Notes
 # -----
-# * The Bayes factor needs a nested sampler (dynesty/jaxns) for the evidence.
+# * The Bayes factor needs a nested sampler (dynesty/tinyns) for the evidence.
 #   The GP sky models are high-dimensional (sphere_gp ~50, sphere_gp_z /
 #   overdensity_gp ~195 whitened latents), so nested sampling is SLOW there —
 #   raise NLIVE and expect long runtimes, or trim SKY_MODELS for a quick check.

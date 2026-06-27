@@ -29,7 +29,7 @@ def test_cli_rejects_sigma_kernel_argument():
             "--gwselection_path",
             "selection.hdf5",
             "--sampler",
-            "jaxns",
+            "tinyns",
             "--sigma_kernel",
             "0.01",
         ],

@@ -25,7 +25,7 @@ Run hierarchical inference.
 darksirens_inference \
   --gw_path GW.h5 \
   --gwselection_path INJECTIONS.h5 \
-  --sampler dynesty \
+  --sampler tinyns \
   [options]
 ```
 
@@ -63,12 +63,15 @@ darksirens_inference \
 
 ### Sampler options
 
-- `--sampler`: required; one of `jaxns`, `dynesty`, `emcee`, or `numpyro`.
-- `--nlive`: live points for nested samplers.
-- `--dlogz`: evidence stopping threshold where supported.
-- `--max_samples`: maximum samples for samplers that expose this limit.
-- `--nwalkers`: number of walkers for `emcee`.
-- `--nsteps`: number of steps for `emcee`.
+- `--sampler`: required; one of `tinyns`, `dynesty`, or `numpyro`.
+- `--nlive`: live points for nested samplers (`tinyns`, `dynesty`).
+- `--dlogz`: evidence stopping threshold for nested samplers (`tinyns`, `dynesty`).
+- `--max_samples`: maximum call/iteration budget for nested samplers (`dynesty` call cap, `tinyns` iteration cap); `0` = unlimited.
+- `--tinyns_sample`: `tinyns` proposal method: `slice` (default), `rwalk`, or `prior`.
+- `--tinyns_slices`: `tinyns` number of slice directions per update.
+- `--tinyns_slice_steps`: `tinyns` maximum stepping-out steps per slice.
+- `--tinyns_step_scale`: `tinyns` initial proposal step scale as a fraction of the prior width.
+- `--tinyns_progress_interval`: `tinyns` iterations between progress-bar updates.
 - `--nuts_warmup`: NUTS warmup/adaptation steps for `numpyro`.
 - `--nuts_samples`: NUTS posterior samples per chain for `numpyro`.
 - `--nuts_chains`: number of NUTS chains for `numpyro`.

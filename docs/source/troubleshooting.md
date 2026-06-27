@@ -2,7 +2,7 @@
 
 ## Import errors during inference
 
-Make sure the runtime environment includes workflow-specific packages. For example, `dynesty` is needed only when `--sampler dynesty` is selected, `emcee` is needed only for `--sampler emcee`, and `numpyro` is needed only for `--sampler numpyro`.
+Make sure the runtime environment includes workflow-specific packages. For example, `tinyns` is needed only when `--sampler tinyns` is selected, `dynesty` is needed only for `--sampler dynesty`, and `numpyro` is needed only for `--sampler numpyro`.
 
 ## HDF5 dataset not found
 

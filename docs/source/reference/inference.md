@@ -144,8 +144,8 @@ precomputation happens here, while the returned closure calls the JIT core.
 
 ## `darksirens.inference.sampling`
 
-`run_sampler` adapts a likelihood + prior transform to `jaxns`, `dynesty`,
-`emcee`, or `numpyro` behind one interface. When the parameter space has zero
+`run_sampler` adapts a likelihood + prior transform to `tinyns`, `dynesty`,
+or `numpyro` behind one interface. When the parameter space has zero
 free dimensions (everything fixed) it short-circuits before any sampler — the
 prior is a point mass so the evidence is exact, $\ln Z = \ln \mathcal L$ at the
 fixed point.

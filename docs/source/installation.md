@@ -2,7 +2,7 @@
 
 ## Requirements
 
-`darksirens` targets Python 3.11 or newer. The core scientific stack includes JAX, NumPy, SciPy, Matplotlib, Healpy, and HDF5 support. GW posterior and selection inputs are preprocessed by `gwcat`, which is installed from the pinned Git commit recorded in `requirements.txt` because the intended `ignaciomagana/gwcat` package is not consumed from PyPI here. Some samplers and plotting paths use optional packages such as `dynesty`, `emcee`, `corner`, and `arviz` depending on the workflow you run.
+`darksirens` targets Python 3.11 or newer. The core scientific stack includes JAX, NumPy, SciPy, Matplotlib, Healpy, and HDF5 support. GW posterior and selection inputs are preprocessed by `gwcat`, which is installed from the pinned Git commit recorded in `requirements.txt` because the intended `ignaciomagana/gwcat` package is not consumed from PyPI here. Some samplers and plotting paths use optional packages such as `dynesty`, `corner`, and `arviz` depending on the workflow you run. The default nested sampler `tinyns` is installed from GitHub via `requirements.txt`.
 
 ## Install from a local checkout
 
@@ -19,7 +19,7 @@ python -m pip install -r requirements.txt
 If you use optional sampler/post-processing packages outside `requirements.txt`, install them in the same environment:
 
 ```bash
-python -m pip install dynesty emcee numpyro corner arviz h5py tqdm
+python -m pip install dynesty numpyro corner arviz h5py tqdm
 ```
 
 ## JAX notes

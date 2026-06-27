@@ -5,7 +5,7 @@ numpy
 pytest
 scipy
 healpy
-jaxns
+tinyns @ git+https://github.com/ignaciomagana/tinyns.git
 h5py
 astropy
 tqdm

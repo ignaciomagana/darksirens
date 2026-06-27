@@ -5,7 +5,7 @@ import jax.numpy as jnp
 def run_sampler(method, likelihood, prior_transform, labels,
                 lower_bound, upper_bound, opts, prior_kinds=None):
     """
-    method: "jaxns", "dynesty", "emcee", or "numpyro"
+    method: "tinyns", "dynesty", or "numpyro"
     likelihood: function(coord) -> logL (expects 1D array)
     prior_transform: maps unit cube -> parameter space (expects 1D array)
     labels: list of parameter names
@@ -30,7 +30,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
     # ladder).  The prior is then a point mass at the fixed point, so the
     # evidence is exact: Z = L(theta_fixed)  =>  logZ = logL.  Evaluate the
     # likelihood once and short-circuit BEFORE any sampler dispatch:
-    # dynesty/jaxns/emcee cannot build a 0-dimensional proposal (dynesty
+    # dynesty/tinyns cannot build a 0-dimensional proposal (dynesty
     # raises LAPACK "dsyevr: il=1" on the 0x0 bounding ellipsoid), and NUTS
     # would only burn warmup on an empty model.  This makes the ladder's
     # null baseline produce an exact logZ for the Bayes-factor comparison.
@@ -50,51 +50,56 @@ def run_sampler(method, likelihood, prior_transform, labels,
         }
 
     # --------------------------------------------------------
-    # JAXNS
+    # tinyns  (lightweight JAX nested sampler, dynesty-compatible)
     # --------------------------------------------------------
-    if method == "jaxns":
-        import tensorflow_probability.substrates.jax as tfp
-        tfpd = tfp.distributions
-        from jaxns import NestedSampler
-        from jaxns.framework.model import Model
-        from jaxns.framework.prior import Prior
+    if method == "tinyns":
+        from tinyns import NestedSampler
 
-        # Prior model: returns a vector theta of shape (ndim,)
-        def prior_model():
-            params = []
-            for i, name in enumerate(labels):
-                low = float(lower_bound[i])
-                high = float(upper_bound[i])
-                x = yield Prior(tfpd.Uniform(low=low, high=high), name=name)
-                params.append(x)
-            return jnp.stack(params)
-
-        def log_likelihood(theta):
+        # tinyns is JAX-native, so the branch's JAX likelihood and prior
+        # transform pass straight through (no host round-trip like dynesty
+        # needs).  loglike takes a 1-D theta and returns a scalar logL;
+        # prior_transform maps the unit cube to parameter space.
+        def tinyns_loglike(theta):
             return likelihood(jnp.asarray(theta))
 
-        model = Model(
-            prior_model=prior_model,
-            log_likelihood=log_likelihood,
+        def tinyns_ptform(u):
+            return jnp.asarray(prior_transform(jnp.asarray(u)))
+
+        # dynesty's call cap (--max_samples) doubles as tinyns' iteration
+        # cap; one nested-sampling iteration retires ~one live point, so the
+        # budget is comparable.  0/None means "run to the dlogz criterion".
+        maxiter = getattr(opts, "max_samples", None)
+        if maxiter is not None and maxiter <= 0:
+            maxiter = None
+
+        sampler = NestedSampler(
+            tinyns_loglike,
+            tinyns_ptform,
+            ndim=ndims,
+            nlive=int(getattr(opts, "nlive", 500)),
+            sample=getattr(opts, "tinyns_sample", "slice"),
+            slices=int(getattr(opts, "tinyns_slices", 5)),
+            slice_steps=int(getattr(opts, "tinyns_slice_steps", 10)),
+            step_scale=float(getattr(opts, "tinyns_step_scale", 0.1)),
         )
 
-        ns = NestedSampler(
-            model=model,
-            num_live_points=opts.nlive,
-            max_samples=opts.max_samples,
-            verbose=opts.show_progress,
+        key = jax.random.PRNGKey(int(getattr(opts, "seed", 0)))
+        result = sampler.run(
+            key,
+            dlogz=float(getattr(opts, "dlogz", 0.1)),
+            maxiter=maxiter,
+            progress=bool(getattr(opts, "show_progress", True)),
+            progress_interval=int(getattr(opts, "tinyns_progress_interval", 100)),
         )
 
-        key = jax.random.PRNGKey(opts.seed)
-        term, state = ns(key)
-        results = ns.to_results(term, state)
-
-        posterior = results.samples  # dict of arrays
-        samples = jnp.column_stack([posterior[name] for name in labels])
+        # Equal-weight posterior samples (tinyns mirrors dynesty's resampler).
+        key, resample_key = jax.random.split(key)
+        samples = np.asarray(result.resample_equal(resample_key))
 
         return {
-            "samples": np.asarray(samples),
-            "logZ": None,        # JAXNS evidence not extracted here
-            "logZerr": None
+            "samples": samples,
+            "logZ": float(result.logz),
+            "logZerr": float(result.logzerr),
         }
 
 
@@ -162,9 +167,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
         target_accept = float(getattr(opts, "nuts_target_accept", 0.8))
         max_tree_depth = int(getattr(opts, "nuts_max_tree_depth", 10))
         num_warmup = int(getattr(opts, "nuts_warmup", 500))
-        num_samples = int(
-            getattr(opts, "nuts_samples", getattr(opts, "nsteps", 1000))
-        )
+        num_samples = int(getattr(opts, "nuts_samples", 1000))
         num_chains = int(getattr(opts, "nuts_chains", 1))
         chain_method = getattr(opts, "nuts_chain_method", "sequential")
 
@@ -420,119 +423,6 @@ def run_sampler(method, likelihood, prior_transform, labels,
             "samples": np.asarray(samples),
             "logZ": logZ,
             "logZerr": logZerr
-        }
-    # --------------------------------------------------------
-    # emcee
-    # --------------------------------------------------------
-    elif method == "emcee":
-        import emcee
-        import os
-        import time
-        from pathlib import Path
-
-        # JIT the likelihood for fast single-point evaluation and batch it when possible.
-        batched_likelihood = jax.vmap(likelihood)
-
-        # --- NEW: Define a safe batch size to prevent GPU OOM ---
-        # 8 is usually a safe sweet spot. If it still crashes, drop to 4 or 2.
-        # If your GPU has lots of memory (e.g., 40GB A100), you can push it to 16.
-        BATCH_SIZE = 1
-
-        def batched_log_prob(coords):
-            coords = np.asarray(coords)
-
-            # emcee calls the log-probability on a single walker at a time unless vectorization is enabled.
-            if coords.ndim == 1:
-                if np.any((coords < lower_bound) | (coords > upper_bound)):
-                    return -np.inf
-                return float(np.asarray(likelihood(coords)))
-            if coords.ndim != 2:
-                raise ValueError(f"Expected emcee coordinates with ndim 1 or 2, got shape {coords.shape}.")
-
-            # 1. Find which walkers are out of bounds (boolean mask)
-            out_of_bounds = np.any((coords < lower_bound) | (coords > upper_bound), axis=1)
-            
-            # 2. Evaluate likelihood in chunks to save GPU memory
-            logl_list = []
-            for i in range(0, len(coords), BATCH_SIZE):
-                batch_coords = coords[i : i + BATCH_SIZE]
-                batch_logl = batched_likelihood(batch_coords)
-                logl_list.append(np.asarray(batch_logl))
-            
-            logl = np.concatenate(logl_list)
-            
-            # 3. Apply -inf to the out-of-bounds walkers
-            logl[out_of_bounds] = -np.inf
-            return logl
-
-        p0 = np.random.uniform(lower_bound, upper_bound,
-                               size=(opts.nwalkers, ndims))
-
-        # Set up checkpointing via emcee backend
-        checkpoint_dir = Path(opts.save_path) / "emcee_checkpoints"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        # Auto-isolate checkpoint files per run so concurrent jobs do not contend for one HDF5 lock.
-        job_tag = os.environ.get("SLURM_JOB_ID")
-        if not job_tag:
-            job_tag = f"{int(time.time())}_{os.getpid()}"
-        backend_filename = checkpoint_dir / f"chain_{job_tag}.h5"
-        
-        backend = emcee.backends.HDFBackend(str(backend_filename))
-        backend.reset(opts.nwalkers, ndims)
-
-        def finalize_backend() -> None:
-            sync = getattr(backend, "sync", None)
-            if callable(sync):
-                sync()
-                return
-
-            flush = getattr(backend, "flush", None)
-            if callable(flush):
-                flush()
-
-        sampler = emcee.EnsembleSampler(
-            opts.nwalkers, ndims, batched_log_prob,
-            backend=backend,
-            moves=[(emcee.moves.DEMove(), 0.8),
-                   (emcee.moves.DESnookerMove(), 0.2)]
-        )
-        
-        # Run with periodic checkpointing (save every hour or every 10,000 steps, whichever is first)
-        checkpoint_interval = 10_000  # steps
-        last_checkpoint_time = time.time()
-        checkpoint_time_interval = 3600  # seconds (1 hour)
-        
-        print(f"Starting emcee run: nwalkers={opts.nwalkers}, nsteps={opts.nsteps}", flush=True)
-        print(f"Checkpoints will be saved to: {backend_filename}", flush=True)
-        
-        for i in range(0, opts.nsteps, checkpoint_interval):
-            n_steps = min(checkpoint_interval, opts.nsteps - i)
-            sampler.run_mcmc(p0, n_steps, progress=opts.show_progress)
-            p0 = sampler.get_last_sample()
-            
-            current_time = time.time()
-            elapsed_since_checkpoint = current_time - last_checkpoint_time
-            
-            # Log progress
-            print(f"Completed step {i + n_steps}/{opts.nsteps} ({100*(i+n_steps)/opts.nsteps:.1f}%) - "
-                  f"Elapsed: {elapsed_since_checkpoint:.1f}s", flush=True)
-            
-            if elapsed_since_checkpoint >= checkpoint_time_interval:
-                finalize_backend()
-                print(f"Checkpoint saved at step {i + n_steps}", flush=True)
-                last_checkpoint_time = current_time
-        
-        # Final sync to ensure all data is saved
-        finalize_backend()
-        print(f"Sampling complete. Final checkpoint saved to: {backend_filename}", flush=True)
-        
-        chain = sampler.flatchain
-        samples = chain[len(chain)//2:]
-
-        return {
-            "samples": np.asarray(samples),
-            "logZ": None,
-            "logZerr": None
         }
 
     else:
