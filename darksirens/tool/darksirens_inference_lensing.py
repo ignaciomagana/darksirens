@@ -333,6 +333,10 @@ def build_parser():
     p.add_argument("--tinyns_replacement_chains", type=int, default=1,
                    help="tinyns: independent random-walk chains run in parallel per "
                         "replacement (rwalk+jax only; default 1).")
+    p.add_argument("--tinyns_max_attempts", type=int, default=None,
+                   help="tinyns: max constrained-proposal attempts per replacement "
+                        "(tinyns default 10000). Must be >= walks*replacement_chains; "
+                        "if unset it auto-raises to that product when needed.")
     p.add_argument("--tinyns_slices", type=int, default=5,
                    help="tinyns: number of slice directions per update.")
     p.add_argument("--tinyns_slice_steps", type=int, default=10,
