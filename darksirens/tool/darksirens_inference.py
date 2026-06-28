@@ -450,6 +450,8 @@ def save_results_hdf5(
         f.attrs["tinyns_kernel"]   = str(getattr(opts, "tinyns_kernel", ""))
         f.attrs["tinyns_walks"]    = int(getattr(opts, "tinyns_walks", 0))
         f.attrs["tinyns_replacement_chains"] = int(getattr(opts, "tinyns_replacement_chains", 0))
+        # 0 = unset (sampler auto-picks max(10000, walks*replacement_chains)).
+        f.attrs["tinyns_max_attempts"] = int(getattr(opts, "tinyns_max_attempts", None) or 0)
         f.attrs["tinyns_slices"]   = int(getattr(opts, "tinyns_slices", 0))
         f.attrs["tinyns_slice_steps"] = int(getattr(opts, "tinyns_slice_steps", 0))
         f.attrs["tinyns_step_scale"]  = float(getattr(opts, "tinyns_step_scale", 0.0))
@@ -840,6 +842,10 @@ def main():
     g.add_argument("--tinyns_replacement_chains", type=int, default=1,
                    help="tinyns: independent random-walk chains run in parallel per "
                         "replacement (rwalk+jax only; default 1).")
+    g.add_argument("--tinyns_max_attempts", type=int, default=None,
+                   help="tinyns: max constrained-proposal attempts per replacement "
+                        "(tinyns default 10000). Must be >= walks*replacement_chains; "
+                        "if unset it auto-raises to that product when needed.")
     g.add_argument("--tinyns_slices", type=int, default=5,
                    help="tinyns: number of slice directions per update (sample=slice/rslice).")
     g.add_argument("--tinyns_slice_steps", type=int, default=10,
@@ -1007,6 +1013,9 @@ def main():
         _row("  kernel",      opts.tinyns_kernel)
         _row("  walks",       opts.tinyns_walks)
         _row("  repl. chains", opts.tinyns_replacement_chains)
+        _row("  max attempts", opts.tinyns_max_attempts
+                               if opts.tinyns_max_attempts is not None
+                               else f"auto ({max(10000, opts.tinyns_walks * opts.tinyns_replacement_chains)})")
         _row("  slices",      opts.tinyns_slices)
         _row("  slice steps", opts.tinyns_slice_steps)
         _row("  step scale",  opts.tinyns_step_scale)

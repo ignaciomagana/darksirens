@@ -79,6 +79,22 @@ def run_sampler(method, likelihood, prior_transform, labels,
         # replacement_chains runs several independent constrained random walks
         # in parallel per replacement (rwalk+jax only; default 1 = original
         # behaviour), trading throughput for GPU occupancy.
+        walks = int(getattr(opts, "tinyns_walks", 25))
+        replacement_chains = int(getattr(opts, "tinyns_replacement_chains", 1))
+
+        # tinyns requires max_attempts >= walks * replacement_chains (its rwalk
+        # kernel draws up to that many proposals per replacement).  When the
+        # user does not set --tinyns_max_attempts (None), use tinyns' default of
+        # 10000 but auto-raise it to walks * replacement_chains if that product
+        # exceeds the default, so large replacement_chains "just works" instead
+        # of crashing.  An explicit value is passed through untouched (tinyns
+        # validates it).
+        max_attempts = getattr(opts, "tinyns_max_attempts", None)
+        if max_attempts is None:
+            max_attempts = max(10000, walks * replacement_chains)
+        else:
+            max_attempts = int(max_attempts)
+
         sampler = NestedSampler(
             tinyns_loglike,
             tinyns_ptform,
@@ -86,8 +102,9 @@ def run_sampler(method, likelihood, prior_transform, labels,
             nlive=int(getattr(opts, "nlive", 500)),
             sample=getattr(opts, "tinyns_sample", "rwalk"),
             kernel=getattr(opts, "tinyns_kernel", "jax"),
-            walks=int(getattr(opts, "tinyns_walks", 25)),
-            replacement_chains=int(getattr(opts, "tinyns_replacement_chains", 1)),
+            walks=walks,
+            replacement_chains=replacement_chains,
+            max_attempts=max_attempts,
             slices=int(getattr(opts, "tinyns_slices", 5)),
             slice_steps=int(getattr(opts, "tinyns_slice_steps", 10)),
             step_scale=float(getattr(opts, "tinyns_step_scale", 0.1)),
