@@ -334,6 +334,7 @@ Common sampler options:
 | `--tinyns_kernel` | `jax` | `tinyns` | Proposal kernel: `jax` (jitted) or `python`. |
 | `--tinyns_walks` | `25` | `tinyns` | Number of random-walk steps per update (`sample=rwalk`). |
 | `--tinyns_replacement_chains` | `1` | `tinyns` | Independent random-walk chains run in parallel per replacement (`rwalk`+`jax` only). |
+| `--tinyns_replacement_chain_schedule` | `none` | `tinyns` | Adaptive `rwalk`+`jax` escalation schedule (ascending, e.g. `1,4,16,64,256`); escalates only when a stage fails. Mutually exclusive with `--tinyns_replacement_chains`. |
 | `--tinyns_max_attempts` | auto (`10000`) | `tinyns` | Max constrained-proposal attempts per replacement. Must be `>= walks * replacement_chains`; auto-raised to that product when unset. |
 | `--tinyns_slices` | `5` | `tinyns` | Number of slice directions per update. |
 | `--tinyns_slice_steps` | `10` | `tinyns` | Maximum stepping-out steps per slice. |

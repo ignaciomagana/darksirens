@@ -450,6 +450,9 @@ def save_results_hdf5(
         f.attrs["tinyns_kernel"]   = str(getattr(opts, "tinyns_kernel", ""))
         f.attrs["tinyns_walks"]    = int(getattr(opts, "tinyns_walks", 0))
         f.attrs["tinyns_replacement_chains"] = int(getattr(opts, "tinyns_replacement_chains", 0))
+        # "" = unset (fixed replacement_chains path); else the escalation schedule.
+        f.attrs["tinyns_replacement_chain_schedule"] = str(
+            getattr(opts, "tinyns_replacement_chain_schedule", None) or "")
         # 0 = unset (sampler auto-picks max(10000, walks*replacement_chains)).
         f.attrs["tinyns_max_attempts"] = int(getattr(opts, "tinyns_max_attempts", None) or 0)
         f.attrs["tinyns_slices"]   = int(getattr(opts, "tinyns_slices", 0))
@@ -842,6 +845,11 @@ def main():
     g.add_argument("--tinyns_replacement_chains", type=int, default=1,
                    help="tinyns: independent random-walk chains run in parallel per "
                         "replacement (rwalk+jax only; default 1).")
+    g.add_argument("--tinyns_replacement_chain_schedule", type=str, default=None,
+                   help="tinyns: adaptive rwalk+jax escalation schedule, e.g. "
+                        "'1,4,16,64,256' (ascending). Starts small and escalates only "
+                        "when a stage fails. Mutually exclusive with "
+                        "--tinyns_replacement_chains.")
     g.add_argument("--tinyns_max_attempts", type=int, default=None,
                    help="tinyns: max constrained-proposal attempts per replacement "
                         "(tinyns default 10000). Must be >= walks*replacement_chains; "
@@ -1013,9 +1021,16 @@ def main():
         _row("  kernel",      opts.tinyns_kernel)
         _row("  walks",       opts.tinyns_walks)
         _row("  repl. chains", opts.tinyns_replacement_chains)
+        _row("  chain sched.", opts.tinyns_replacement_chain_schedule or "none")
+        if opts.tinyns_replacement_chain_schedule:
+            _auto_chains = max(
+                int(t) for t in opts.tinyns_replacement_chain_schedule
+                .replace("(", "").replace(")", "").split(",") if t.strip())
+        else:
+            _auto_chains = opts.tinyns_replacement_chains
         _row("  max attempts", opts.tinyns_max_attempts
                                if opts.tinyns_max_attempts is not None
-                               else f"auto ({max(10000, opts.tinyns_walks * opts.tinyns_replacement_chains)})")
+                               else f"auto ({max(10000, opts.tinyns_walks * _auto_chains)})")
         _row("  slices",      opts.tinyns_slices)
         _row("  slice steps", opts.tinyns_slice_steps)
         _row("  step scale",  opts.tinyns_step_scale)

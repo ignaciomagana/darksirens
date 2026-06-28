@@ -78,22 +78,59 @@ def run_sampler(method, likelihood, prior_transform, labels,
         # slice/rslice/prior and the pure-Python kernel remain selectable.
         # replacement_chains runs several independent constrained random walks
         # in parallel per replacement (rwalk+jax only; default 1 = original
-        # behaviour), trading throughput for GPU occupancy.
+        # behaviour), trading throughput for GPU occupancy.  As an adaptive
+        # alternative, replacement_chain_schedule (e.g. (1, 4, 16, 64, 256))
+        # starts at the smallest batch and escalates only when a stage fails,
+        # returning as soon as any stage succeeds -- it avoids always paying for
+        # large batches.  The two are mutually exclusive (use one or the other).
         walks = int(getattr(opts, "tinyns_walks", 25))
         replacement_chains = int(getattr(opts, "tinyns_replacement_chains", 1))
 
-        # tinyns requires max_attempts >= walks * replacement_chains (its rwalk
-        # kernel draws up to that many proposals per replacement).  When the
-        # user does not set --tinyns_max_attempts (None), use tinyns' default of
-        # 10000 but auto-raise it to walks * replacement_chains if that product
-        # exceeds the default, so large replacement_chains "just works" instead
-        # of crashing.  An explicit value is passed through untouched (tinyns
-        # validates it).
+        schedule_raw = getattr(opts, "tinyns_replacement_chain_schedule", None)
+        replacement_chain_schedule = None
+        if schedule_raw:
+            replacement_chain_schedule = tuple(
+                int(tok)
+                for tok in str(schedule_raw).replace("(", "").replace(")", "").split(",")
+                if tok.strip()
+            )
+            if not replacement_chain_schedule or any(
+                c <= 0 for c in replacement_chain_schedule
+            ):
+                raise ValueError(
+                    "--tinyns_replacement_chain_schedule must be a comma-separated "
+                    f"list of positive integers, got {schedule_raw!r}."
+                )
+            if replacement_chains != 1:
+                raise ValueError(
+                    "Set either --tinyns_replacement_chains or "
+                    "--tinyns_replacement_chain_schedule, not both."
+                )
+
+        # tinyns requires max_attempts >= walks * (chains at the active stage):
+        # its rwalk kernel draws up to that many proposals per replacement.  The
+        # binding constraint is the largest batch -- max(schedule) when a
+        # schedule is set, else replacement_chains.  When the user does not set
+        # --tinyns_max_attempts (None), use tinyns' default of 10000 but
+        # auto-raise it to that product when larger, so big batches/schedules
+        # "just work" instead of crashing.  An explicit value is passed through
+        # untouched (tinyns validates it).
+        chains_for_attempts = (
+            max(replacement_chain_schedule)
+            if replacement_chain_schedule is not None
+            else replacement_chains
+        )
         max_attempts = getattr(opts, "tinyns_max_attempts", None)
         if max_attempts is None:
-            max_attempts = max(10000, walks * replacement_chains)
+            max_attempts = max(10000, walks * chains_for_attempts)
         else:
             max_attempts = int(max_attempts)
+
+        # The adaptive schedule is only included when set; otherwise tinyns uses
+        # the fixed replacement_chains path (default 1 = original behaviour).
+        extra = {}
+        if replacement_chain_schedule is not None:
+            extra["replacement_chain_schedule"] = replacement_chain_schedule
 
         sampler = NestedSampler(
             tinyns_loglike,
@@ -108,6 +145,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
             slices=int(getattr(opts, "tinyns_slices", 5)),
             slice_steps=int(getattr(opts, "tinyns_slice_steps", 10)),
             step_scale=float(getattr(opts, "tinyns_step_scale", 0.1)),
+            **extra,
         )
 
         key = jax.random.PRNGKey(int(getattr(opts, "seed", 0)))
