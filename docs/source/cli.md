@@ -71,6 +71,7 @@ darksirens_inference \
 - `--tinyns_kernel`: `tinyns` proposal kernel: `jax` (default, jitted) or `python`.
 - `--tinyns_walks`: `tinyns` number of random-walk steps per update (`sample=rwalk`).
 - `--tinyns_replacement_chains`: `tinyns` independent random-walk chains run in parallel per replacement (`rwalk`+`jax` only; default `1`).
+- `--tinyns_replacement_chain_schedule`: `tinyns` adaptive `rwalk`+`jax` escalation schedule, e.g. `1,4,16,64,256` (ascending). Starts at the smallest batch and escalates only when a stage fails, returning as soon as any stage succeeds. Mutually exclusive with `--tinyns_replacement_chains`.
 - `--tinyns_max_attempts`: `tinyns` maximum constrained-proposal attempts per replacement (tinyns default `10000`). Must be `>= walks * replacement_chains`; if left unset it auto-raises to that product when needed.
 - `--tinyns_slices`: `tinyns` number of slice directions per update.
 - `--tinyns_slice_steps`: `tinyns` maximum stepping-out steps per slice.

@@ -333,6 +333,11 @@ def build_parser():
     p.add_argument("--tinyns_replacement_chains", type=int, default=1,
                    help="tinyns: independent random-walk chains run in parallel per "
                         "replacement (rwalk+jax only; default 1).")
+    p.add_argument("--tinyns_replacement_chain_schedule", type=str, default=None,
+                   help="tinyns: adaptive rwalk+jax escalation schedule, e.g. "
+                        "'1,4,16,64,256' (ascending). Starts small and escalates only "
+                        "when a stage fails. Mutually exclusive with "
+                        "--tinyns_replacement_chains.")
     p.add_argument("--tinyns_max_attempts", type=int, default=None,
                    help="tinyns: max constrained-proposal attempts per replacement "
                         "(tinyns default 10000). Must be >= walks*replacement_chains; "
