@@ -21,7 +21,7 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
         except Exception:
             lss_path = None
     if lss_path is not None and opts.universe_model in GALAXY_AWARE_MODELS:
-        from darksirens.em.lognormal_completion import load_lss_completion_hdf5
+        from darksirens.redshift.lognormal_completion import load_lss_completion_hdf5
         loaded = load_lss_completion_hdf5(lss_path)
         logq = loaded.get("logq_map")
         if logq is None:

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from jax import lax
 import numpy as np
 
-from darksirens.em.completion import build_pixel_kde_cache
+from darksirens.redshift.completion import build_pixel_kde_cache
 
 DARK_SIREN_CACHE_MODELS = {"dark_sirens"}
 

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.scipy.special import logsumexp
 
-from darksirens.em.prior import (
+from darksirens.redshift.prior import (
     DarkSirenEnsemblePriorState,
     DarkSirenPriorState,
     eval_redshift_prior_with_state,
