@@ -70,6 +70,17 @@ def _draw_bright_events_until_detected(rng, nobs, observed_catalog, grids, pop, 
         chi = _dark._sample_chieff(rng, ntry, pop)
         snr = _dark._network_snr(m1, m2, z, dl, rng)
         det = snr >= snr_threshold
+        # Match the dark-siren generator's source-frame rate evolution.  The
+        # host catalog is uniform in comoving volume, so accepting hosts with
+        # probability proportional to (1+z)**(gamma-1) makes the bright-siren
+        # population use the same redshift convention as the inference model.
+        # With the registry-fixed powerlaw+peak fiducial, gamma=0; if the shared
+        # PopulationConfig is ever changed deliberately, bright mocks follow it
+        # automatically instead of silently using a different redshift truth.
+        zmax_grid = float(grids["z"][-1])
+        rate_gmax = max(1.0, (1.0 + zmax_grid) ** (pop.gamma - 1.0))
+        rate_acc = (1.0 + z) ** (pop.gamma - 1.0) / rate_gmax
+        det = det & (rng.uniform(size=len(z)) < rate_acc)
         if np.any(det):
             kept.append({k: v[det] for k, v in dict(z=z, ra=ra, dec=dec, dl=dl, m1=m1, m2=m2, q=q, chi=chi, snr=snr).items()})
     return {k: np.concatenate([x[k] for x in kept])[:nobs] for k in kept[0]}

@@ -206,7 +206,7 @@ def _build_z_cdf(theta, H0, Om0, nz=4000):
     pdf = np.where(np.isfinite(pdf) & (pdf > 0), pdf, 0.0)
     cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pdf[1:] + pdf[:-1]) * np.diff(zg))])
     cdf /= cdf[-1]
-    return zg, pdf / np.trapezoid(pdf, zg), cdf
+    return zg, pdf / np.trapz(pdf, zg), cdf
 
 
 def sample_redshift(n, theta, rng, H0, Om0):

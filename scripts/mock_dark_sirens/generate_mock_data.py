@@ -47,22 +47,29 @@ SELECTION_PROPOSALS = ("population", "uniform")
 
 @dataclass(frozen=True)
 class PopulationConfig:
-    """Fiducial POWER LAW + PEAK with shared beta, spin, and gamma."""
+    """Registry-fixed POWER LAW + PEAK with shared beta, spin, and gamma.
 
-    alpha: float = 3.4
+    Keep these defaults aligned with
+    ``get_fixed_population_params("powerlaw+peak")`` so mock generation and
+    ``--fix_population true`` inference use the same truth without a JSON
+    override.  The curated registry has ``$v_1$=0.10``, i.e. final mixture
+    fractions ``w_PL=0.10`` and ``w_G=0.90`` under stick breaking.
+    """
+
+    alpha: float = 2.3
     mmin: float = 5.0
-    mmax: float = 85.0
+    mmax: float = 80.0
     # Logistic edge-taper widths (Msun), matching the inference PowerLaw
     # component (darksirens.gw.populations sfilter_low/high).  These are part
     # of the mass-model truth, so the inference model contains it exactly.
     dm_min: float = 3.0
     dm_max: float = 10.0
-    peak_fraction: float = 0.10
+    peak_fraction: float = 0.90
     peak_mu: float = 35.0
-    peak_sigma: float = 4.0
-    beta: float = 1.3
+    peak_sigma: float = 5.0
+    beta: float = 1.0
     chi_mu: float = 0.0
-    chi_sigma: float = 0.15
+    chi_sigma: float = 0.10
     gamma: float = 0.0
 
 
