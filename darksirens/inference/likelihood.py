@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from darksirens.em.completion import build_pixel_kde_cache
+from darksirens.redshift.completion import build_pixel_kde_cache
 from darksirens.inference.catalog_views import barrier, prepare_catalog_views
 from darksirens.inference.events import pad_gw_event_to_multiple
 from darksirens.inference.likelihood_core import (

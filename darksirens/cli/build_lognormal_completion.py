@@ -37,8 +37,8 @@ from darksirens.em import zgrid
 from darksirens.em.utils import load_survey
 from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial
-from darksirens.em.completion import _precompute_grids, _kde_dndz_obs
-from darksirens.em.lognormal_completion import (
+from darksirens.redshift.completion import _precompute_grids, _kde_dndz_obs
+from darksirens.redshift.lognormal_completion import (
     gaussian_correlation_spectrum,
     poisson_lognormal_map,
     laplace_lognormal_members,

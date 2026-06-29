@@ -22,13 +22,13 @@ import jax.numpy as jnp
 from darksirens.em import zgrid
 from darksirens.em.utils import load_survey
 from darksirens.utils.containers import EMCatalog, SurveyParams
-from darksirens.em.completion import completion_curves
-from darksirens.em.prior import (
+from darksirens.redshift.completion import completion_curves
+from darksirens.redshift.prior import (
     prepare_redshift_prior_state,
     eval_redshift_prior_with_state,
     eval_redshift_prior_members_with_state,
 )
-from darksirens.em.lognormal_completion import load_lss_completion_hdf5
+from darksirens.redshift.lognormal_completion import load_lss_completion_hdf5
 from darksirens.cli.build_lognormal_completion import _fiducial_cosmo_survey
 
 _INDEXING = {"compact": 1, "global": 2}
