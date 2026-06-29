@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import healpy as hp
 import numpy as np
 
-from darksirens.gw.utils import load_gw_samples, load_selection_samples
+from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.em.utils import load_survey
 
 from darksirens.em import zgrid, compute_lss_overdensity

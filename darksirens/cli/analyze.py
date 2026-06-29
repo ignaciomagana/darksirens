@@ -629,7 +629,7 @@ def plot_bayes_factor_matrix(labels, log10Zs, log10Zerrs, figsize=(10, 10),
 def overlay_observed_events(ax, settings):
     """Best-effort faint rug of observed detector-frame m1 medians on p(m1)."""
     try:
-        from darksirens.gw.utils import load_gw_samples
+        from darksirens.gw.samples import load_gw_samples
         gw_path = settings.get("gw_path")
         if not gw_path or not os.path.exists(gw_path):
             return
