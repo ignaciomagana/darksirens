@@ -36,9 +36,9 @@ python darksirens_inference.py \
 import os
 
 # ── JAX memory configuration (before any JAX import) ──────────────────────────
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE",  "false")
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
-os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR",    "platform")
+from darksirens.core.jax_config import configure_jax_runtime
+
+configure_jax_runtime()
 
 import sys
 import json
@@ -61,13 +61,11 @@ from darksirens.gw.populations.utils import (
 from darksirens.inference.data import load_all_data, validate_loaded_survey_shapes
 from darksirens.inference.likelihood import make_likelihood
 from darksirens.em.completion import build_pixel_kde_cache, completion_clip_diagnostics
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.parameters import H0_FID, OM0_FID, W0_FID, WA_FID
 
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
 warnings.simplefilter("ignore", FutureWarning)
 
 
