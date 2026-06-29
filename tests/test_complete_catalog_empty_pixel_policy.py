@@ -4,9 +4,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-from darksirens.em.catalog import log_catalog_prior_vmap
-from darksirens.em.prior import _log_prior_complete_catalog
-from darksirens.utils.containers import CosmoParams, EMCatalog, SurveyParams
+from darksirens.redshift.catalog import log_catalog_prior_vmap
+from darksirens.redshift.prior import _log_prior_complete_catalog
+from darksirens.core.types import CosmoParams, EMCatalog, SurveyParams
 
 
 def _cosmo():

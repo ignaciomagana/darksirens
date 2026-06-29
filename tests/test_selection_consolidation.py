@@ -6,12 +6,12 @@ import numpy as np
 from jax import lax
 from jax.scipy.special import logsumexp
 
-from darksirens.inference.events import make_gw_event, pad_gw_event_to_multiple
-from darksirens.inference.selection import (
+from darksirens.likelihood.events import make_gw_event, pad_gw_event_to_multiple
+from darksirens.likelihood.selection import (
     compute_selection_term,
     selection_log_correction,
 )
-from darksirens.utils.containers import EMCatalog
+from darksirens.core.types import EMCatalog
 from darksirens.utils.utils import logdiffexp
 
 

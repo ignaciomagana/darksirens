@@ -4,9 +4,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-from darksirens.inference.events import make_gw_event
-from darksirens.inference.selection import compute_selection_term
-from darksirens.utils.containers import EMCatalog
+from darksirens.likelihood.events import make_gw_event
+from darksirens.likelihood.selection import compute_selection_term
+from darksirens.core.types import EMCatalog
 
 
 def test_selection_batching_matches_unbatched_for_non_divisible_length():
@@ -60,7 +60,7 @@ def test_selection_batching_matches_unbatched_for_non_divisible_length():
 
 def test_padded_selection_entries_use_explicit_valid_mask_not_prior_weight():
     """Padded rows are structural mask entries even if their prior weight is positive."""
-    from darksirens.inference.events import pad_gw_event_to_multiple
+    from darksirens.likelihood.events import pad_gw_event_to_multiple
 
     n_sel = 10
     gw_sel = make_gw_event(

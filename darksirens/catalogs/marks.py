@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 import numpy as np
 
-from darksirens.em import zgrid
+from darksirens.redshift import zgrid
 from darksirens.catalogs.io import load_survey_marks
 
 #: z-bins for centering per-galaxy marks (subtract the running mean E[m|z]).

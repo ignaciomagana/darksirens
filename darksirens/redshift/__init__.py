@@ -2,13 +2,11 @@
 Redshift prior and completion models for dark-siren inference.
 
 This package contains redshift-prior, catalog-completion, lognormal LSS
-completion, and volume-prior math that was historically exposed from
-``darksirens.em``.  The old ``darksirens.em`` imports remain available as
-compatibility wrappers.
+completion, and volume-prior math for dark-siren inference.
 """
 
-from darksirens.em.utils import zgrid, zMax, load_survey
-from darksirens.em.catalog import log_catalog_prior, log_catalog_prior_vmap
+from darksirens.catalogs.io import zgrid, zMax, load_survey
+from darksirens.redshift.catalog import log_catalog_prior, log_catalog_prior_vmap
 from darksirens.redshift.prior import get_redshift_prior, PRIOR_REGISTRY
 from darksirens.redshift.volume import log_volume_prior
 from darksirens.redshift.completion import (

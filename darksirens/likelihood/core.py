@@ -306,13 +306,10 @@ def darksiren_log_likelihood(
     # missing-galaxy field.  Opt-in (static); off by default so the deterministic
     # (posterior-mean Q) path is bit-for-bit unchanged.
     if lss_marginalize:
-        if not (
-            isinstance(prior_state_univ, DarkSirenEnsemblePriorState)
-            and isinstance(prior_state_sel, DarkSirenEnsemblePriorState)
-        ):
+        if getattr(prior_state_univ, "dN_miss_members", None) is None:
             raise ValueError(
-                "lss_marginalize=True requires an LSS-completion ENSEMBLE on both the "
-                "PE and selection catalogs. Build Q_LSS with members "
+                "lss_marginalize=True requires an LSS-completion ENSEMBLE on the "
+                "PE catalog. Build Q_LSS with members "
                 "(darksirens_build_lognormal_completion --n-members M > 0) and pass it "
                 "via --lss_completion; only universe_model='dark_sirens' supports it."
             )
@@ -323,12 +320,19 @@ def darksiren_log_likelihood(
             kernels=prior_state_univ.kernels, log_Nobs=prior_state_univ.log_Nobs,
             dN_miss=prior_state_univ.dN_miss_members, log_Z=prior_state_univ.log_Z_members,
         )
-        sel_members = DarkSirenPriorState(
-            kernels=prior_state_sel.kernels, log_Nobs=prior_state_sel.log_Nobs,
-            dN_miss=prior_state_sel.dN_miss_members, log_Z=prior_state_sel.log_Z_members,
+        sel_has_members = getattr(prior_state_sel, "dN_miss_members", None) is not None
+        sel_members = (
+            DarkSirenPriorState(
+                kernels=prior_state_sel.kernels, log_Nobs=prior_state_sel.log_Nobs,
+                dN_miss=prior_state_sel.dN_miss_members, log_Z=prior_state_sel.log_Z_members,
+            )
+            if sel_has_members else prior_state_sel
         )
         member_axes = DarkSirenPriorState(kernels=None, log_Nobs=None, dN_miss=0, log_Z=0)
-        ll_members = jax.vmap(_ll_given_states, in_axes=(member_axes, member_axes))(
+        ll_members = jax.vmap(
+            _ll_given_states,
+            in_axes=(member_axes, member_axes if sel_has_members else None),
+        )(
             univ_members, sel_members
         )
         ll_members = jnp.where(jnp.isfinite(ll_members), ll_members, -jnp.inf)

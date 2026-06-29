@@ -5,8 +5,8 @@ import healpy as hp
 import jax.numpy as jnp
 import numpy as np
 
-from darksirens.em.prior import PRIOR_REGISTRY, _log_prior_bright_sirens
-from darksirens.utils.containers import CosmoParams, EMCatalog, SurveyParams
+from darksirens.redshift.prior import PRIOR_REGISTRY, _log_prior_bright_sirens
+from darksirens.core.types import CosmoParams, EMCatalog, SurveyParams
 
 
 def _cosmo():

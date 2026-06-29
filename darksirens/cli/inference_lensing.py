@@ -74,7 +74,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 # ── branch machinery we reuse ────────────────────────────────────────────────
-from darksirens.em import zgrid
+from darksirens.redshift import zgrid
 from darksirens.core.types import (
     CosmoParams, SurveyParams, EMCatalog, GWEvent,
 )
@@ -92,7 +92,7 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
-from darksirens.inference.pair_kde import make_pair_kde, stack_pair_kdes
+from darksirens.likelihood.pair_kde import make_pair_kde, stack_pair_kdes
 from darksirens.likelihood.likelihood_with_clusters import (
     darksiren_log_likelihood_with_clusters,
     CLUSTER_MODE_J2, CLUSTER_MODE_OFF,

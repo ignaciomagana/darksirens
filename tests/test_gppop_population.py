@@ -67,8 +67,14 @@ def test_gppop_mz_param_contract():
 # Binned density behaviour (needs tinygp for the kernel/Cholesky)
 # --------------------------------------------------------------------------
 
+def _require_tinygp_transforms():
+    tinygp = pytest.importorskip("tinygp")
+    if not hasattr(tinygp, "transforms"):
+        pytest.skip("tinygp.transforms is required")
+
+
 def test_gppop_density_finite_inside_inf_outside():
-    pytest.importorskip("tinygp")
+    _require_tinygp_transforms()
     model = get_model("gppop")
     theta = jnp.asarray(get_fixed_population_params("gppop"))
 
@@ -86,7 +92,7 @@ def test_gppop_density_finite_inside_inf_outside():
 
 
 def test_gppop_mass_shape_is_normalised():
-    pytest.importorskip("tinygp")
+    _require_tinygp_transforms()
     model = get_model("gppop")
     theta = jnp.asarray(get_fixed_population_params("gppop"))
     amp = jnp.exp(theta[0])
@@ -104,7 +110,7 @@ def test_gppop_mass_shape_is_normalised():
 
 
 def test_gppop_rate_constant_within_bin():
-    pytest.importorskip("tinygp")
+    _require_tinygp_transforms()
     model = get_model("gppop")
     theta = jnp.asarray(get_fixed_population_params("gppop"))
     amp = jnp.exp(theta[0])
@@ -125,7 +131,7 @@ def test_gppop_rate_constant_within_bin():
 
 
 def test_gppop_mz_redshift_binning():
-    pytest.importorskip("tinygp")
+    _require_tinygp_transforms()
     model = get_model("gppop_mz")
     theta = jnp.asarray(get_fixed_population_params("gppop_mz"))
 

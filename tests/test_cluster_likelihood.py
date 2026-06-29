@@ -35,13 +35,13 @@ HERE = Path(__file__).resolve().parent
 PKG_ROOT = HERE.parent
 sys.path.insert(0, str(PKG_ROOT))
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import H0Planck, Om0Planck, dL_of_z
-from darksirens.em.volume import log_volume_prior_vmap
-from darksirens.inference.pair_kde import (
+from darksirens.redshift.volume import log_volume_prior_vmap
+from darksirens.likelihood.pair_kde import (
     PairKDE, make_pair_kde, log_eval_pair_kde, _silverman_bandwidth_diag,
 )
-from darksirens.inference.cluster_likelihood import (
+from darksirens.likelihood.cluster_likelihood import (
     cluster_log_likelihood_pair, _log_jac_app_to_src,
 )
 from darksirens.lensing.slmarks import (
@@ -517,7 +517,7 @@ class TestNumpyReference:
     def test_jax_branch_matches_numpy(self):
         """The internal _pair_branch_log_integrand vectorization must match
         the numpy reference line-by-line."""
-        from darksirens.inference.cluster_likelihood import _pair_branch_log_integrand
+        from darksirens.likelihood.cluster_likelihood import _pair_branch_log_integrand
         ev_i, ev_j = _synth_lensed_pair(n_pe=50, seed=42)
         kde_i = make_pair_kde(
             ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"],

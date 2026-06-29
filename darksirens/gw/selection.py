@@ -11,7 +11,7 @@ would be detected by a network, given a specific noise realisation or
 a population-averaged noise curve.
 
 This is DISTINCT from the hierarchical selection integral in
-``darksirens.inference.selection``, which computes
+``darksirens.likelihood.selection``, which computes
 
     μ = (1/N_draw) Σ_{det inj}  p_pop / p_draw
 
@@ -29,7 +29,7 @@ selection-corrected rate estimates without a full injection campaign.
 Status
 ------
 Not yet implemented.  Populate this module before moving away from the
-injection-based selection integral in ``darksirens.inference.selection``.
+injection-based selection integral in ``darksirens.likelihood.selection``.
 
 References
 ----------

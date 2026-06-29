@@ -2,12 +2,12 @@ import subprocess
 import sys
 
 from darksirens.inference.prior import build_parameter_space
-from darksirens.tool.darksirens_inference import _completion_validation_survey_values
+from darksirens.cli.inference import _completion_validation_survey_values
 
 
 def test_cli_help_does_not_list_sigma_kernel():
     result = subprocess.run(
-        [sys.executable, "-m", "darksirens.tool.darksirens_inference", "--help"],
+        [sys.executable, "-m", "darksirens.cli.inference", "--help"],
         check=True,
         capture_output=True,
         text=True,
@@ -23,7 +23,7 @@ def test_cli_rejects_sigma_kernel_argument():
         [
             sys.executable,
             "-m",
-            "darksirens.tool.darksirens_inference",
+            "darksirens.cli.inference",
             "--gw_path",
             "gw.hdf5",
             "--gwselection_path",

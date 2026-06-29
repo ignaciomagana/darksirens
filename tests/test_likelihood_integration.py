@@ -29,14 +29,14 @@ HERE = Path(__file__).resolve().parent
 PKG_ROOT = HERE.parent
 sys.path.insert(0, str(PKG_ROOT))
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog, GWEvent
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog, GWEvent
 from darksirens.utils.cosmology import H0Planck, Om0Planck
-from darksirens.inference.likelihood_core import (
+from darksirens.likelihood.core import (
     darksiren_log_likelihood,
     WL_BACKEND_DISABLED,
     WL_BACKEND_LOGNORMAL,
 )
-from darksirens.inference import likelihood as likelihood_module
+from darksirens.likelihood import factory as likelihood_module
 from darksirens.gw.populations import get_fixed_population_params
 
 

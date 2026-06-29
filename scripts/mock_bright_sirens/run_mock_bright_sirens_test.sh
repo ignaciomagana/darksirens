@@ -137,7 +137,7 @@ PY
 if [ "${RUN_INFERENCE}" = "1" ]; then
   echo "Starting optional bright-siren darksirens_inference sampler run."
   # shellcheck disable=SC2086
-  python -m darksirens.tool.darksirens_inference \
+  python -m darksirens.cli.inference \
     --gw_path "${OUTDIR}/mock_bright_gw_events.h5" \
     --gwselection_path "${OUTDIR}/mock_bright_gw_selection.h5" \
     --sampler dynesty \

@@ -63,7 +63,7 @@ log_galaxy_measure_grid(cosmo, survey)                       -> log g(zgrid)
 The scalar/vmap entry points recompute the per-row curves per call and
 are intended for checks and diagnostics.  Hot paths (the likelihood)
 should use ``completion_curves`` once per parameter proposal via
-``darksirens.em.prior.prepare_redshift_prior_state``.
+``darksirens.redshift.prior.prepare_redshift_prior_state``.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ from typing import NamedTuple
 from darksirens.utils.cosmology import dV_of_z
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
-from darksirens.em.utils import zgrid
+from darksirens.catalogs.io import zgrid
 
 
 # Gaussian kernel width for the completeness ratio (both sides).
@@ -505,7 +505,7 @@ def completion_curves(
     """All per-row completion curves for one parameter proposal.
 
     Eager (host-side); called once per proposal by
-    :func:`darksirens.em.prior.prepare_redshift_prior_state`.  When the catalog
+    :func:`darksirens.redshift.prior.prepare_redshift_prior_state`.  When the catalog
     carries an LSS-conditioned lognormal completion table the per-row factor is
     ``Q_LSS`` (replacing the legacy ``max(1 + b_eff delta_g, 0)``); with an
     ensemble it additionally returns member missing densities for diagnostics.
@@ -683,7 +683,7 @@ def catalog_completion(
     **Q_LSS-aware**: delegates to :func:`completion_curves` (the single source of
     truth that applies any LSS-conditioned completion table), then interpolates
     the per-row curve at ``z``.  Eager / diagnostic slow path (NOT jitted — the
-    hot likelihood uses ``completion_curves`` via ``darksirens.em.prior``).
+    hot likelihood uses ``completion_curves`` via ``darksirens.redshift.prior``).
 
     Returns
     -------
@@ -706,7 +706,7 @@ def catalog_completion_vmap(
 
     Q_LSS-aware (delegates to ``completion_curves``); eager / diagnostic slow
     path.  Hot paths use ``completion_curves`` via the state API in
-    ``darksirens.em.prior``.
+    ``darksirens.redshift.prior``.
     """
     curves = completion_curves(cosmo, survey, em_catalog)
     z = jnp.asarray(z)

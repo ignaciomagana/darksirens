@@ -45,7 +45,7 @@ import pytest
 hp = pytest.importorskip("healpy")
 h5py = pytest.importorskip("h5py")
 
-CONVERTER_MODULE = "darksirens.tool.darksirens_skymaps_to_samples"
+CONVERTER_MODULE = "darksirens.cli.skymaps_to_samples"
 
 # Converter CLI settings shared by the fixture and the structural assertion.
 NSIDE = 16

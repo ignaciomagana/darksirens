@@ -11,19 +11,19 @@ import pytest
 pytest.importorskip("jax")
 import jax.numpy as jnp
 
-from darksirens.em import zgrid
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
-from darksirens.em.completion import (
+from darksirens.redshift import zgrid
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+from darksirens.redshift.completion import (
     completion_curves, build_pixel_kde_cache, catalog_completion, completion_clip_diagnostics,
 )
-from darksirens.em.prior import (
+from darksirens.redshift.prior import (
     prepare_redshift_prior_state,
     eval_redshift_prior_with_state,
     eval_redshift_prior_members_with_state,
     DarkSirenPriorState,
     DarkSirenEnsemblePriorState,
 )
-from darksirens.em.lognormal_completion import (
+from darksirens.redshift.lognormal_completion import (
     gaussian_correlation_spectrum,
     poisson_lognormal_map,
     laplace_lognormal_members,

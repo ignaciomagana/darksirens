@@ -33,10 +33,10 @@ pytest.importorskip("scipy")
 import h5py
 import healpy as hp
 
-from darksirens.em import zgrid
-from darksirens.em.lognormal_completion import load_lss_completion_hdf5
-from darksirens.tool.darksirens_build_lognormal_completion import build_completion, main as build_main
-from darksirens.tool.darksirens_diagnose_lognormal_completion import main as diagnose_main
+from darksirens.redshift import zgrid
+from darksirens.redshift.lognormal_completion import load_lss_completion_hdf5
+from darksirens.cli.build_lognormal_completion import build_completion, main as build_main
+from darksirens.cli.diagnose_lognormal_completion import main as diagnose_main
 
 NG = int(zgrid.size)
 
@@ -119,7 +119,7 @@ def test_build_cli_then_load_into_inference(survey_path, tmp_path, monkeypatch):
 def test_center_marks_zero_global_mean():
     """_center_marks subtracts the running E[m|z], leaving zero global mean
     over real galaxies (pure within-z reweighting)."""
-    from darksirens.inference.data import _center_marks
+    from darksirens.catalogs.marks import _center_marks
     zg = np.array([[0.10, 0.50, 1.00], [0.20, 0.60, 1.10]])
     ng = np.array([3, 3], dtype=np.int32)
     M = 2.0 + 3.0 * zg  # linear-in-z mark
@@ -130,8 +130,8 @@ def test_center_marks_zero_global_mean():
 
 
 def test_pixelate_writes_marks_and_load_all_data_centers_them(tmp_path, monkeypatch):
-    from darksirens.tool.darksirens_pixelate import main as pixelate_main
-    from darksirens.em.utils import load_survey_marks
+    from darksirens.cli.pixelate import main as pixelate_main
+    from darksirens.catalogs.io import load_survey_marks
     from darksirens.inference import data as data_module
 
     # Raw DESI-like catalog with a LOGMSTAR mark column.

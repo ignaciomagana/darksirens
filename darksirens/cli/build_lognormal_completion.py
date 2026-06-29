@@ -33,7 +33,7 @@ import argparse
 import numpy as np
 import jax.numpy as jnp
 
-from darksirens.em import zgrid
+from darksirens.redshift import zgrid
 from darksirens.catalogs.io import load_survey
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial

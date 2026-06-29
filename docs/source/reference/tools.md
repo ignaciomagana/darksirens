@@ -1,6 +1,6 @@
 # Command-line tools (`darksirens.cli`)
 
-Each `darksirens.cli` module backs an installed console script. `darksirens.tool` remains available as a compatibility-only module path (see
+Each `darksirens.cli` module backs an installed console script (see
 [`setup.py` entry points](../cli.md)). This page documents what each program
 does and the modules behind them; full flag listings are in the
 [CLI reference](../cli.md).
@@ -63,7 +63,7 @@ grouped `results.hdf5` (with a legacy `samples.npy` fallback).
 
 The **offline** preprocessor that builds the LSS-conditioned lognormal
 completion file $Q_{\rm LSS}(p,z)$ from a pixelated catalog
-([`em.lognormal_completion`](em.md)). The `--mode radial` path solves an
+([`redshift.lognormal_completion`](em.md)). The `--mode radial` path solves an
 independent 1-D field per pixel; `--mode gp3d` solves one low-rank
 $(\text{sphere}\times z)$ field so empty pixels borrow angularly from their
 neighbours. Both write the same HDF5 table consumed by

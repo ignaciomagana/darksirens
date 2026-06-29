@@ -78,10 +78,10 @@ dsrun_eval() { "$CONDA" run --no-capture-output -n "$ENV" bash -c "${NORM_ENV:-}
 hr() { printf '%s\n' "------------------------------------------------------------"; }
 
 # Tools (run as modules → PATH-independent; two console scripts aren't installed).
-INFER="python -m darksirens.tool.darksirens_inference"
-LENS="python -m darksirens.tool.darksirens_inference_lensing"
-BUILDQ="python -m darksirens.tool.darksirens_build_lognormal_completion"
-ANALYZE="python -m darksirens.tool.darksirens_analyze"
+INFER="python -m darksirens.cli.inference"
+LENS="python -m darksirens.cli.inference_lensing"
+BUILDQ="python -m darksirens.cli.build_lognormal_completion"
+ANALYZE="python -m darksirens.cli.analyze"
 MOCK="python scripts/mock_dark_sirens/generate_mock_data.py"
 BMOCK="python scripts/mock_bright_sirens/generate_mock_bright_sirens.py"
 LMOCK="python scripts/mock_lensing/generate_mock_lensing.py"
