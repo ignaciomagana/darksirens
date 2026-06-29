@@ -86,7 +86,7 @@ from darksirens.inference.sampling import run_sampler
 from darksirens.inference.parameters import (
     build_parameter_decoder, complete_empty_pixel_policy_code,
 )
-from darksirens.gw.utils import load_gw_samples, load_selection_samples
+from darksirens.gw.samples import load_gw_samples, load_selection_samples
 
 # ── lensing / cluster pieces ─────────────────────────────────────────────────
 from darksirens.lensing.slmarks import make_sis_lens_params
