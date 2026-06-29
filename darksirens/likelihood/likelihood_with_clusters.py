@@ -43,7 +43,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.scipy.special import logsumexp
 
-from darksirens.em import get_redshift_prior
+from darksirens.redshift import get_redshift_prior
 from darksirens.gw.populations import pop_model_parser
 from darksirens.likelihood.selection import compute_selection_term, selection_log_correction
 from darksirens.inference.utils import log_sample_weight

@@ -1,25 +1,25 @@
-# Electromagnetic / catalog modules (`darksirens.em`)
+# Redshift and catalog modules (`darksirens.redshift`)
 
-The `em` subpackage turns a pixelated HEALPix galaxy survey into the redshift
+The redshift package turns a pixelated HEALPix galaxy survey into the redshift
 prior $p(z\mid\text{pix})$ consumed by the dark-siren likelihood. It also hosts
 the offline builder for the LSS-conditioned lognormal completion field
 $Q_{\rm LSS}$. The mathematics is derived on the
 [Theory & methods](../theory.md) page; this page documents the modules that
 implement it.
 
-## `darksirens.em`
+## `darksirens.redshift`
 
 The package `__init__` exposes the shared redshift grid `zgrid` and the
 `get_redshift_prior` dispatcher that maps a `--universe_model` name onto the
 corresponding one-shot prior function.
 
-```{automodule} darksirens.em
+```{automodule} darksirens.redshift
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.em.utils`
+## `darksirens.catalogs.io`
 
 Module-level utilities shared across the subpackage: the log-spaced redshift
 grid `zgrid` (1000 points, $z\in[0,5]$, finer at low $z$ where the catalog is
@@ -28,7 +28,7 @@ densest) and `load_survey`, which reads the pixelated catalog datasets
 defined once so JAX can trace through it without recompilation. Optional marked
 fields are loaded by `load_survey_marks`.
 
-```{automodule} darksirens.em.utils
+```{automodule} darksirens.catalogs.io
 :members:
 :undoc-members:
 :show-inheritance:
@@ -127,7 +127,7 @@ contract shared by both modes (see the
 :show-inheritance:
 ```
 
-## `darksirens.em.catalog`
+## `darksirens.redshift.catalog`
 
 Builds the per-pixel catalog kernel state used by the dark-siren prior: the
 per-galaxy redshift kernels $K_i(z) = \mathcal N(z; z_i, \sigma_i)\,g(z)/Z_i$
@@ -135,20 +135,20 @@ per-galaxy redshift kernels $K_i(z) = \mathcal N(z; z_i, \sigma_i)\,g(z)/Z_i$
 (`marked_catalog_kernel_state`) that swaps the galaxy weights for marked
 host-intensity weights $w_i\,h(m_i\mid\eta)$ (see [`marks`](marks.md)).
 
-```{automodule} darksirens.em.catalog
+```{automodule} darksirens.redshift.catalog
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.em.checks`
+## `darksirens.redshift.checks`
 
 Numerical self-consistency checks used in tests and dry-runs: normalisation of
 the volume prior, the missing-probability branch, the catalog prior, and the
 $[0,1]$ bounds on $C_{\rm eff}$. `run_all_checks` integrates each density on the
 package grid and asserts it matches the analytic expectation within tolerance.
 
-```{automodule} darksirens.em.checks
+```{automodule} darksirens.redshift.checks
 :members:
 :undoc-members:
 :show-inheritance:

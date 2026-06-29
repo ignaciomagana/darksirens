@@ -33,7 +33,7 @@ class SurveyParams(NamedTuple):
 
     ``lss_corr_length_mpc``, ``lss_sigma`` and ``lss_corr_length_ang`` are
     **fixed** hyperparameters of the offline LSS-conditioned lognormal
-    completion builder (:mod:`darksirens.em.lognormal_completion`): the radial
+    completion builder (:mod:`darksirens.redshift.lognormal_completion`): the radial
     comoving correlation length [Mpc], the latent-Gaussian field standard
     deviation, and (for the 3-D angular-coupling ``mode="gp3d"`` builder only)
     the **angular** correlation length in chordal units on the unit sphere
@@ -124,7 +124,7 @@ class EMCatalog(NamedTuple):
         linear form).  Multiplies the missing-galaxy branch:
         ``dN_miss = (1 - C) dN_exp Q_LSS``, replacing the legacy
         ``max(1 + b_eff delta_g, 0)`` factor when supplied.  Built offline by
-        :mod:`darksirens.em.lognormal_completion`; consumed deterministically
+        :mod:`darksirens.redshift.lognormal_completion`; consumed deterministically
         (the likelihood never samples it).  ``N_grid`` must equal ``zgrid.size``.
     lss_completion_q : same shape as ``lss_completion_logq`` or None
         Linear-space Q_LSS table.  ``lss_completion_logq`` is preferred if both
@@ -187,7 +187,7 @@ class GWEvent(NamedTuple):
 
     Notes
     -----
-    Do NOT construct directly — use ``darksirens.inference.events.make_gw_event``,
+    Do NOT construct directly — use ``darksirens.likelihood.events.make_gw_event``,
     which applies ``lax.optimization_barrier`` to every field and pre-computes ``q``
     so it is never recomputed inside a vmap or ``lax.scan`` hot path.
     """

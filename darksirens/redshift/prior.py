@@ -88,7 +88,7 @@ from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from typing import NamedTuple, Any
 
 from darksirens.redshift.volume import log_volume_prior_vmap, _precompute_volume_grid
-from darksirens.em.catalog import (
+from darksirens.redshift.catalog import (
     catalog_kernel_state,
     marked_catalog_kernel_state,
     eval_log_catalog_prior_state,
@@ -96,7 +96,7 @@ from darksirens.em.catalog import (
 )
 from darksirens.redshift.completion import completion_curves, log_galaxy_measure_grid
 
-from darksirens.em.utils import zgrid
+from darksirens.catalogs.io import zgrid
 
 
 COMPLETE_EMPTY_PIXEL_POLICY_ZERO = 0
@@ -471,7 +471,7 @@ def _log_prior_bright_sirens(
     prior.
     """
     from jax.scipy.stats import norm
-    from darksirens.em.catalog import log_catalog_prior_vmap  # local import avoids circular
+    from darksirens.redshift.catalog import log_catalog_prior_vmap  # local import avoids circular
 
     if em_catalog.counterpart_zs is not None:
         idx = jnp.asarray(em_catalog.active_counterpart_index, dtype=jnp.int32)

@@ -2,7 +2,7 @@
 
 This subsystem adds two gravitational-lensing capabilities, both opt-in and
 inert by default: **weak-lensing magnification** marginalisation for the
-spectral-siren PE integral (`darksirens.lensing` + `darksirens.inference.wl_weight`),
+spectral-siren PE integral (`darksirens.lensing` + `darksirens.likelihood.wl_weight`),
 and a **strong-lensing cluster** likelihood for multiply-imaged sirens
 (`darksirens.inference.cluster_*` + `darksirens.likelihood.likelihood_with_clusters`).
 The physics is summarised on the [Theory & methods](../theory.md) page.
@@ -84,7 +84,7 @@ for the lensed selection injections used by the cluster selection term.
 :show-inheritance:
 ```
 
-## `darksirens.inference.wl_weight`
+## `darksirens.likelihood.wl_weight`
 
 The weak-lensing per-sample weights. `log_sample_weight_wl_lognormal_hermite`
 marginalises the PE weight over magnification by Gauss-Hermite quadrature (the
@@ -93,13 +93,13 @@ on $\mu$); `log_sample_weight_wl_or_standard` dispatches to the tabulated
 quadrature or the standard (non-WL) weight. Both reduce exactly to
 `log_sample_weight` as the lensing variance $\to 0$.
 
-```{automodule} darksirens.inference.wl_weight
+```{automodule} darksirens.likelihood.wl_weight
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.inference.pair_kde`
+## `darksirens.likelihood.pair_kde`
 
 A fixed-bandwidth Gaussian KDE over the image-pair parameters
 $(m_1^{\rm det}, q, d_L^{\rm app}, \chi_{\rm eff})$ used by the cluster
@@ -107,25 +107,25 @@ likelihood. `make_pair_kde` builds a per-event KDE (Silverman diagonal
 bandwidth), `stack_pair_kdes` batches them, and `log_eval_pair_kde` evaluates the
 log-density inside the JIT.
 
-```{automodule} darksirens.inference.pair_kde
+```{automodule} darksirens.likelihood.pair_kde
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.inference.cluster_likelihood`
+## `darksirens.likelihood.cluster_likelihood`
 
 The strong-lensing cluster likelihood for a lensed image pair: it combines the
 SIS lens marks, the source-position PDF, and the pair KDE into the per-pair
 contribution to the hierarchical likelihood.
 
-```{automodule} darksirens.inference.cluster_likelihood
+```{automodule} darksirens.likelihood.cluster_likelihood
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.inference.cluster_selection`
+## `darksirens.likelihood.cluster_selection`
 
 The cluster selection correction. `compute_cluster_selection_term` returns its
 own $(\ln\mu, N_{\rm eff}, \ln\widehat\sigma^2_\mu)$ from the lensed injection
@@ -133,7 +133,7 @@ set, and `combined_selection_log_correction` merges the singleton and cluster
 selection integrals (using the variance term from each) into one
 Vitale-criterion-guarded correction.
 
-```{automodule} darksirens.inference.cluster_selection
+```{automodule} darksirens.likelihood.cluster_selection
 :members:
 :undoc-members:
 :show-inheritance:

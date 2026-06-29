@@ -26,21 +26,21 @@ import numpy as np
 import pytest
 from scipy.special import expit
 
-from darksirens.em import zgrid
-from darksirens.em.catalog import log_catalog_prior_vmap
-from darksirens.em.completion import (
+from darksirens.redshift import zgrid
+from darksirens.redshift.catalog import log_catalog_prior_vmap
+from darksirens.redshift.completion import (
     _S_EXP,
     _precompute_grids,
     build_pixel_kde_cache,
     completion_curves,
 )
-from darksirens.em.prior import (
+from darksirens.redshift.prior import (
     _log_prior_dark_sirens,
     eval_redshift_prior_with_state,
     prepare_redshift_prior_state,
 )
-from darksirens.inference.catalog_views import _global_cache_lookup
-from darksirens.utils.containers import CosmoParams, EMCatalog, SurveyParams
+from darksirens.likelihood.catalog_views import _global_cache_lookup
+from darksirens.core.types import CosmoParams, EMCatalog, SurveyParams
 from darksirens.utils.cosmology import dV_of_z
 
 ZG = np.asarray(zgrid)

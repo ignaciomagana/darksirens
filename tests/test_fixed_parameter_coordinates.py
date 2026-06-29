@@ -29,11 +29,11 @@ if "tinygp" not in sys.modules:
     tinygp_stub.kernels = _KernelsStub()
     sys.modules["tinygp"] = tinygp_stub
 
-from darksirens.em import zgrid
+from darksirens.redshift import zgrid
 from darksirens.gw.populations.registry import get_fixed_population_params
 from darksirens.inference.prior import build_parameter_space
 from darksirens.inference.pop_extractor import make_pop_extractor
-import darksirens.inference.likelihood as likelihood_module
+import darksirens.likelihood.factory as likelihood_module
 
 
 def _opts():
@@ -44,6 +44,9 @@ def _opts():
         fix_cosmology=False,
         fix_population=False,
         fix_survey=False,
+        shared_beta=True,
+        shared_spin=True,
+        shared_gamma=True,
     )
 
 
@@ -109,6 +112,10 @@ def test_fixed_parameters_are_removed_from_sampler_coordinates_and_likelihood(mo
         opts.fix_cosmology,
         opts.fix_survey,
         fixed_parameter_values=fixed_values,
+        shared_beta=opts.shared_beta,
+        shared_spin=opts.shared_spin,
+        shared_gamma=opts.shared_gamma,
+        universe_model=opts.universe_model,
     )
     assert len(labels) == len(lower) == len(upper)
     assert all(label not in labels for label in fixed_values)
@@ -129,10 +136,11 @@ def test_fixed_parameters_are_removed_from_sampler_coordinates_and_likelihood(mo
         sel_batch_size=None,
         sky_model="isotropic",
         sky_params=None,
+        **kwargs,
     ):
         del gw_pe, em_catalog_pe, gw_sel, em_catalog_sel
         del nEvents, nsamp, Ndraw, pop_model, universe_model, sel_batch_size
-        del sky_model, sky_params
+        del sky_model, sky_params, kwargs
         return jnp.asarray(
             cosmo.H0 + cosmo.Om0 + cosmo.w0 + cosmo.wa + survey.z50 + jnp.sum(pop_params)
         )

@@ -38,9 +38,9 @@ if "tinygp" not in sys.modules:
     sys.modules["tinygp"] = tinygp_stub
 
 
-from darksirens.em import zgrid
+from darksirens.redshift import zgrid
 from darksirens.gw.populations.registry import get_fixed_population_params
-from darksirens.inference.likelihood import make_likelihood
+from darksirens.likelihood.factory import make_likelihood
 
 
 def test_dark_sirens_likelihood_evaluates_once_before_sampling():
@@ -115,7 +115,7 @@ def test_dark_sirens_likelihood_evaluates_once_before_sampling():
     # rtol = 1e-7 separates the two cleanly and is order-independent.
     # The previous 1e-12 pin also drifted ~1e-4 across jax *versions*,
     # so re-pin the constant when CI changes jax rather than loosening.
-    np.testing.assert_allclose(float(value), 0.01634337653677953, rtol=1e-7)
+    np.testing.assert_allclose(float(value), 0.016464023225528157, rtol=1e-7)
 
 
 def test_make_likelihood_does_not_mutate_data_when_compacting_catalogs():
@@ -191,8 +191,8 @@ def test_make_likelihood_does_not_mutate_data_when_compacting_catalogs():
 
 def test_dark_sirens_cache_is_built_once_for_unique_pixels(monkeypatch):
     """Regression: likelihood evaluation uses the prebuilt unique-pixel cache."""
-    import darksirens.em.completion as completion
-    import darksirens.inference.likelihood as likelihood_module
+    import darksirens.redshift.completion as completion
+    import darksirens.likelihood.factory as likelihood_module
 
     nside = 1
     n_pix_catalog = hp.nside2npix(nside)

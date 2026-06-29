@@ -19,7 +19,7 @@ import os
 import numpy as np
 import jax.numpy as jnp
 
-from darksirens.em import zgrid
+from darksirens.redshift import zgrid
 from darksirens.catalogs.io import load_survey
 from darksirens.core.types import EMCatalog, SurveyParams
 from darksirens.redshift.completion import completion_curves

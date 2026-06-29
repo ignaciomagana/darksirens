@@ -4,8 +4,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-from darksirens.em.completion import _kde_dndz_obs, build_pixel_kde_cache
-from darksirens.em import zgrid
+from darksirens.redshift.completion import _kde_dndz_obs, build_pixel_kde_cache
+from darksirens.redshift import zgrid
 
 
 def test_kde_masks_empty_pixel_with_wgals_indicator():
@@ -54,8 +54,8 @@ def test_build_pixel_kde_cache_masks_empty_and_partially_padded_pixels():
 
 
 def test_completion_clip_diagnostics_reports_grid_fractions():
-    from darksirens.em.completion import completion_clip_diagnostics
-    from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+    from darksirens.redshift.completion import completion_clip_diagnostics
+    from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
     zgals = jnp.array([[0.1, 0.2]])
     wgals = jnp.ones_like(zgals)

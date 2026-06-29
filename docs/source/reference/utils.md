@@ -4,7 +4,7 @@ Foundational types and numerics shared across the package: the container
 pytrees that move arrays through the JIT likelihood, the cosmology layer, small
 interpolation and math helpers, and the plotting style.
 
-## `darksirens.core.types` (with `darksirens.utils.containers` as a compatibility path)
+## `darksirens.core.types`
 
 The JAX-pytree `NamedTuple` containers that define the shape contract between
 data loading and the likelihood:
@@ -23,7 +23,7 @@ data loading and the likelihood:
 Optional array fields default to `None` (an empty pytree subtree) and metadata is
 encoded as integer enums so every field stays JAX-traceable.
 
-```{automodule} darksirens.utils.containers
+```{automodule} darksirens.core.types
 :members:
 :undoc-members:
 :show-inheritance:

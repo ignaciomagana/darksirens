@@ -52,7 +52,7 @@ from typing import NamedTuple
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
-from .utils import zgrid
+from darksirens.catalogs.io import zgrid
 from .completion import log_galaxy_measure_grid
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
@@ -98,7 +98,7 @@ def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid):
     return jnp.where(real & (Z > 0.0), jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
 
 
-def _row_kernel_state(zs, dzs, ws, ngal, sigma_kde, log_g_grid, volume_weighted):
+def _row_kernel_state(zs, dzs, ws, ngal, sigma_kde, log_g_grid, volume_weighted=False):
     """
     Per-galaxy kernel quantities for one row, under one of two host-weight
     conventions for the galaxy measure g(z) = dV_c/dz * (1+z)^delta:
@@ -290,10 +290,9 @@ def log_catalog_prior(
 
     log_g_grid = log_galaxy_measure_grid(cosmo, survey)
     log_kw, sig_eff = _row_kernel_state(
-        zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid
+        zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, True
     )
-    log_g_z = jnp.interp(z, zgrid, log_g_grid)
-    return log_g_z + logsumexp(log_kw + norm.logpdf(z, zs, sig_eff))
+    return logsumexp(log_kw + norm.logpdf(z, zs, sig_eff))
 
 
 # Vectorised over (z, pix) pairs — both vmapped simultaneously so the

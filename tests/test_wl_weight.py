@@ -41,12 +41,12 @@ HERE = Path(__file__).resolve().parent
 PKG_ROOT = HERE.parent
 sys.path.insert(0, str(PKG_ROOT))
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import (
     z_of_dL, dL_of_z, ddL_of_z, dL_in_z_grid, H0Planck, Om0Planck,
 )
 from darksirens.inference.utils import log_sample_weight
-from darksirens.inference.wl_weight import (
+from darksirens.likelihood.wl_weight import (
     log_sample_weight_wl_marginalized,
     log_sample_weight_wl_or_standard,
 )
@@ -55,7 +55,7 @@ from darksirens.lensing.wlmagnification import (
     make_tabulated_log_p_wl,
 )
 from darksirens.lensing.grids import make_log_mu_grid
-from darksirens.em.volume import log_volume_prior_vmap
+from darksirens.redshift.volume import log_volume_prior_vmap
 
 
 # ============================================================================

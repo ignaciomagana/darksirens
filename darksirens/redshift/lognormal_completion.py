@@ -2,7 +2,7 @@
 lognormal_completion.py
 -----------------------
 **Offline** builder for the LSS-conditioned lognormal completion field
-``Q_LSS(p, z)`` consumed by :mod:`darksirens.em.completion`.
+``Q_LSS(p, z)`` consumed by :mod:`darksirens.redshift.completion`.
 
 This module is **never imported by the GW likelihood** — the likelihood stays
 deterministic and consumes fixed ``Q`` arrays (see
@@ -65,7 +65,7 @@ def _require_scipy():
         raise ImportError(
             "Building LSS-conditioned lognormal completion requires SciPy "
             "(scipy.optimize). Install scipy to use "
-            "darksirens.em.lognormal_completion."
+            "darksirens.redshift.lognormal_completion."
         ) from exc
     return optimize
 
@@ -675,7 +675,7 @@ def save_lss_completion_hdf5(
         grp.attrs["indexing"] = indexing
         grp.attrs["model"] = "poisson_lognormal"
         grp.attrs["completion_kind"] = completion_kind
-        grp.attrs["created_by"] = "darksirens.em.lognormal_completion"
+        grp.attrs["created_by"] = "darksirens.redshift.lognormal_completion"
         if metadata:
             grp.attrs["diagnostics"] = json.dumps(metadata, default=str)
     return path

@@ -1,9 +1,8 @@
 """Import guardrails for the staged package-layout refactor.
 
-These tests document the intended migration path: new production code should use
+These tests document the post-cleanup package layout: production code should use
 ``darksirens.core``, ``darksirens.cli``, ``darksirens.likelihood``, and
-``darksirens.redshift`` while the legacy wrapper modules continue to import until
-an explicit wrapper-removal step.
+``darksirens.redshift`` directly.
 """
 
 
@@ -39,13 +38,3 @@ def test_new_redshift_imports():
     assert callable(build_pixel_kde_cache)
 
 
-def test_compatibility_imports_still_work():
-    from darksirens.tool.darksirens_inference import main as old_main
-    from darksirens.utils.containers import GWEvent
-    from darksirens.em.completion import build_pixel_kde_cache
-    from darksirens.inference.likelihood import make_likelihood
-
-    assert callable(old_main)
-    assert GWEvent is not None
-    assert callable(build_pixel_kde_cache)
-    assert callable(make_likelihood)

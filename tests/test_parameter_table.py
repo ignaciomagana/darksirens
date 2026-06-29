@@ -74,7 +74,7 @@ if "seaborn" not in sys.modules:
     seaborn_stub.set_style = lambda *args, **kwargs: None
     sys.modules["seaborn"] = seaborn_stub
 
-from darksirens.tool.darksirens_inference import (
+from darksirens.cli.inference import (
     _format_fixed_dark_energy_summary,
     _print_parameter_table,
     save_results_hdf5,
