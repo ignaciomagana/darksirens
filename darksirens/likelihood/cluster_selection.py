@@ -74,7 +74,7 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.lensing.lensed_injections import LensedInjectionSet
 from darksirens.lensing.slmarks import SISLensParams, tau_2_SIS
 from darksirens.utils.utils import logdiffexp

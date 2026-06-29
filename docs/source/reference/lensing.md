@@ -4,7 +4,7 @@ This subsystem adds two gravitational-lensing capabilities, both opt-in and
 inert by default: **weak-lensing magnification** marginalisation for the
 spectral-siren PE integral (`darksirens.lensing` + `darksirens.inference.wl_weight`),
 and a **strong-lensing cluster** likelihood for multiply-imaged sirens
-(`darksirens.inference.cluster_*` + `darksirens.inference.likelihood_with_clusters`).
+(`darksirens.inference.cluster_*` + `darksirens.likelihood.likelihood_with_clusters`).
 The physics is summarised on the [Theory & methods](../theory.md) page.
 
 ## `darksirens.lensing`
@@ -139,14 +139,14 @@ Vitale-criterion-guarded correction.
 :show-inheritance:
 ```
 
-## `darksirens.inference.likelihood_with_clusters`
+## `darksirens.likelihood.likelihood_with_clusters`
 
 The top-level driver `darksiren_log_likelihood_with_clusters` that splits events
 into singletons and lensed pairs, evaluates each with the appropriate likelihood,
 and applies the combined selection correction. It is invoked by the
 [`darksirens_inference_lensing`](tools.md) CLI.
 
-```{automodule} darksirens.inference.likelihood_with_clusters
+```{automodule} darksirens.likelihood.likelihood_with_clusters
 :members:
 :undoc-members:
 :show-inheritance:

@@ -59,7 +59,7 @@ from darksirens.gw.populations.utils import (
     normalization_grid_settings,
 )
 from darksirens.inference.data import load_all_data, validate_loaded_survey_shapes
-from darksirens.inference.likelihood import make_likelihood
+from darksirens.likelihood.factory import make_likelihood
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.inference.sampling import run_sampler

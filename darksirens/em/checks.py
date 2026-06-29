@@ -40,7 +40,7 @@ import warnings
 import numpy as np
 import jax.numpy as jnp
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 from .utils import zgrid
 from .completion import catalog_completion_vmap

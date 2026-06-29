@@ -75,7 +75,7 @@ import jax.numpy as jnp
 
 # ── branch machinery we reuse ────────────────────────────────────────────────
 from darksirens.em import zgrid
-from darksirens.utils.containers import (
+from darksirens.core.types import (
     CosmoParams, SurveyParams, EMCatalog, GWEvent,
 )
 from darksirens.utils.cosmology import H0Planck, Om0Planck
@@ -93,7 +93,7 @@ from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
 from darksirens.inference.pair_kde import make_pair_kde, stack_pair_kdes
-from darksirens.inference.likelihood_with_clusters import (
+from darksirens.likelihood.likelihood_with_clusters import (
     darksiren_log_likelihood_with_clusters,
     CLUSTER_MODE_J2, CLUSTER_MODE_OFF,
     WL_BACKEND_LOGNORMAL, WL_BACKEND_DISABLED,
@@ -101,7 +101,7 @@ from darksirens.inference.likelihood_with_clusters import (
 
 
 # =============================================================================
-# Container builders (mirror darksirens.inference.likelihood)
+# Container builders (mirror darksirens.likelihood.factory)
 # =============================================================================
 def _empty_em_catalog(nside=1):
     npix = hp.nside2npix(nside)

@@ -34,20 +34,20 @@ fields are loaded by `load_survey_marks`.
 :show-inheritance:
 ```
 
-## `darksirens.em.volume`
+## `darksirens.redshift.volume`
 
 The comoving-volume rate prior used by the spectral-siren model. It precomputes
 a volume grid from the cosmology and returns the (log) volume prior
 $\log p(z) \propto \log\!\big[\tfrac{1}{1+z}\tfrac{\mathrm{d}V_c}{\mathrm{d}z}\big]$,
 the homogeneous redshift law against which catalog completeness is measured.
 
-```{automodule} darksirens.em.volume
+```{automodule} darksirens.redshift.volume
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.em.prior`
+## `darksirens.redshift.prior`
 
 Assembles the universe-model redshift priors. The dark-siren per-pixel prior is
 
@@ -67,13 +67,13 @@ per-sample evaluator. `DarkSirenEnsemblePriorState` plus
 diagnostic $p_{\rm Bayes}(z\mid p) = \tfrac1M\sum_m p_m(z\mid p)$ over a loaded
 $Q_{\rm LSS}$ ensemble.
 
-```{automodule} darksirens.em.prior
+```{automodule} darksirens.redshift.prior
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.em.completion`
+## `darksirens.redshift.completion`
 
 Implements the incomplete-catalog completion. The completeness is a
 matched-kernel ratio clipped to $[0,1]$, $C(p,z) = \mathrm{clip}(\mathrm{d}N_{\rm
@@ -90,13 +90,13 @@ shapes only (the $\pm7$ $\log Q$ clip and the grid-size check), so the whole
 (`catalog_completion`,
 `completion_clip_diagnostics`) delegate to the same hot path.
 
-```{automodule} darksirens.em.completion
+```{automodule} darksirens.redshift.completion
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.em.lognormal_completion`
+## `darksirens.redshift.lognormal_completion`
 
 The **offline** builder for $Q_{\rm LSS}(p,z)$ — never imported by the
 likelihood. The latent log-overdensity is Gaussian and the completion factor is
@@ -121,7 +121,7 @@ with $\lambda = C\,\mathrm{d}N_{\rm exp}\,Q$.
 contract shared by both modes (see the
 [`darksirens_build_lognormal_completion`](tools.md) CLI).
 
-```{automodule} darksirens.em.lognormal_completion
+```{automodule} darksirens.redshift.lognormal_completion
 :members:
 :undoc-members:
 :show-inheritance:

@@ -9,12 +9,12 @@ It must NOT be run inside the GW likelihood — it is a one-off build step.
 
 Pipeline
 --------
-1. Load the survey catalog (``darksirens.em.utils.load_survey``).
+1. Load the survey catalog (``darksirens.catalogs.io.load_survey``).
 2. Bin observed galaxies onto the package ``zgrid`` per pixel  -> ``N_obs``.
 3. Compute the matched-kernel completeness ``C`` and homogeneous expected
    counts ``dN_exp`` with the existing completion machinery
-   (:func:`darksirens.em.completion._precompute_grids`,
-   :func:`darksirens.em.completion._kde_dndz_obs`) under a *fiducial*
+   (:func:`darksirens.redshift.completion._precompute_grids`,
+   :func:`darksirens.redshift.completion._kde_dndz_obs`) under a *fiducial*
    cosmology/survey (the same fiducials the inference dry-run uses).
 4. Build a per-pixel 1-D Gaussian-correlation power spectrum from the **fixed**
    SurveyParams/CosmoParams hyperparameters (correlation length in Mpc mapped to
@@ -34,8 +34,8 @@ import numpy as np
 import jax.numpy as jnp
 
 from darksirens.em import zgrid
-from darksirens.em.utils import load_survey
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.catalogs.io import load_survey
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial
 from darksirens.redshift.completion import _precompute_grids, _kde_dndz_obs
 from darksirens.redshift.lognormal_completion import (

@@ -25,7 +25,7 @@ from darksirens.likelihood.wl_weight import (
 from darksirens.lensing.grids import make_log_mu_grid, make_hermite_u_grid
 from darksirens.lensing.wlmagnification import make_tabulated_log_p_wl
 from darksirens.sky import sky_model_parser
-from darksirens.utils.containers import CosmoParams, EMCatalog, GWEvent, SurveyParams
+from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import dL_in_z_grid, z_of_dL
 
 

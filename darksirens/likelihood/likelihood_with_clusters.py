@@ -64,7 +64,7 @@ from darksirens.lensing.wlmagnification import (
     WLParams, make_lognormal_log_p_wl, make_tabulated_log_p_wl,
 )
 from darksirens.lensing.slmarks import SISLensParams
-from darksirens.utils.containers import CosmoParams, EMCatalog, GWEvent, SurveyParams
+from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import dL_in_z_grid
 
 
