@@ -334,10 +334,15 @@ def run_sampler(method, likelihood, prior_transform, labels,
             maxcall = None
 
         save_path = getattr(opts, "save_path", ".")
+        run_name = getattr(opts, "run_name", "run") or "run"
         enable_diag = bool(getattr(opts, "dynesty_diagnostics", False))
         diag_interval = 600  # 10 minutes in seconds
         _diag_index = [0]
         _stop_diag = threading.Event()
+
+        # Stable filenames so each pass overwrites the previous plots
+        runplot_path = os.path.join(save_path, f"{run_name}_runplot.pdf")
+        traceplot_path = os.path.join(save_path, f"{run_name}_traceplot.pdf")
 
         def _write_dynesty_diagnostics(sampler_ref):
             res = sampler_ref.results
@@ -345,11 +350,10 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 return
             _diag_index[0] += 1
             idx = _diag_index[0]
-            out_dir = os.path.join(save_path, "dynesty_diagnostics")
-            os.makedirs(out_dir, exist_ok=True)
+            os.makedirs(save_path, exist_ok=True)
             try:
                 fig, _ = dyplot.runplot(res, label_kwargs={"fontsize": 10})
-                fig.savefig(os.path.join(out_dir, f"runplot_{idx:04d}.pdf"), bbox_inches="tight")
+                fig.savefig(runplot_path, bbox_inches="tight")
                 plt.close(fig)
             except Exception as e:
                 print(f"[dynesty diag] runplot failed: {e}", flush=True)
@@ -357,11 +361,12 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 fig, _ = dyplot.traceplot(res, labels=labels,
                                           label_kwargs={"fontsize": 8},
                                           title_kwargs={"fontsize": 8})
-                fig.savefig(os.path.join(out_dir, f"traceplot_{idx:04d}.pdf"), bbox_inches="tight")
+                fig.savefig(traceplot_path, bbox_inches="tight")
                 plt.close(fig)
             except Exception as e:
                 print(f"[dynesty diag] traceplot failed: {e}", flush=True)
-            print(f"[dynesty diag] wrote diagnostics #{idx} to {out_dir}", flush=True)
+            print(f"[dynesty diag] refreshed diagnostics (pass #{idx}): "
+                  f"{runplot_path}, {traceplot_path}", flush=True)
 
         print(f"[*] Asking Dynesty to find {opts.nlive} initial live points. This may take a minute...", flush=True)
         sampler = NestedSampler(
@@ -383,7 +388,8 @@ def run_sampler(method, likelihood, prior_transform, labels,
 
             diag_thread = threading.Thread(target=_diag_thread_fn, daemon=True)
             diag_thread.start()
-            print(f"[*] Diagnostic plots enabled — writing to {save_path}/dynesty_diagnostics/ every 10 min.", flush=True)
+            print(f"[*] Diagnostic plots enabled — overwriting {run_name}_runplot.pdf / "
+                  f"{run_name}_traceplot.pdf in {save_path} every 10 min ", flush=True)
 
         print(f"[*] Initial live points found! Starting main nested sampling loop...", flush=True)
         if maxcall is not None:

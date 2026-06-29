@@ -31,6 +31,7 @@ python darksirens_inference.py \
 """
 
 import os
+import shutil
 
 # ── JAX memory configuration (before any JAX import) ──────────────────────────
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE",  "false")
@@ -713,6 +714,12 @@ def main():
     g.add_argument("--gwselection_path", required=True)
     g.add_argument("--survey_path",      default=None)
     g.add_argument("--save_path",        default="./")
+    g.add_argument("--run_name",         default=None,
+                   help=("Short label for the run. Names the results folder "
+                         "(<save_path>/<run_name>__<timestamp>/) and prefixes the "
+                         "diagnostic plot filenames (e.g. --run_name sigma_kde_fixed "
+                         "→ sigma_kde_fixed_runplot.pdf). Defaults to "
+                         "<pop_model>__<universe_model>__<sampler>."))
 
     g = optp.add_argument_group("Physical model")
     g.add_argument("--universe_model", default="spectral_sirens",
@@ -854,8 +861,8 @@ def main():
     g.add_argument("--seed",         type=int,   default=22)
     g.add_argument("--show_progress",type=str_to_bool, default=True, metavar="BOOL")
     g.add_argument("--dynesty_diagnostics", type=str_to_bool, default=False, metavar="BOOL",
-                   help="Write dynesty runplot/traceplot PDFs every 10 minutes to "
-                        "<save_path>/dynesty_diagnostics/. Only used with --sampler dynesty.")
+                   help="Every 10 minutes, (over)write <run_name>_runplot.pdf and "
+                        "<run_name>_traceplot.pdf. Only used with --sampler dynesty.")
 
     g = optp.add_argument_group("Performance")
     g.add_argument("--sel_batch_size", type=int, default=None, metavar="N")
@@ -893,6 +900,9 @@ def main():
                         "(used with --lensing_wl_model tabulated).")
 
     opts = optp.parse_args()
+    # Default run_name based on the model and sampler if not explicitly provided
+    if not opts.run_name:
+        opts.run_name = f"{opts.pop_model}__{opts.universe_model}__{opts.sampler}"
     # Persist the canonical names in settings while keeping opts.fix_cosmology
     # for backward-compatible internal callers and saved metadata.
     opts.fixed_cosmology = bool(opts.fix_cosmology)
@@ -1222,9 +1232,18 @@ def main():
 
     t_end     = datetime.datetime.now()
     timestamp = t_end.strftime("%Y-%m-%dT%H-%M-%S")
-    run_name  = f"{opts.pop_model}__{opts.universe_model}__{opts.sampler}__{timestamp}"
-    run_dir   = os.path.join(opts.save_path, run_name)
+    # Results folder is named by --run_name
+    run_dir_name = f"{opts.run_name}__{timestamp}"
+    run_dir      = os.path.join(opts.save_path, run_dir_name)
     os.makedirs(run_dir, exist_ok=True)
+
+    # Move the live dynesty diagnostic plots (written under save_path during the
+    # run, see inference/sampling.py) into the final results directory.
+    if getattr(opts, "dynesty_diagnostics", False):
+        for _diag_name in (f"{opts.run_name}_runplot.pdf", f"{opts.run_name}_traceplot.pdf"):
+            _src = os.path.join(opts.save_path, _diag_name)
+            if os.path.exists(_src):
+                shutil.move(_src, os.path.join(run_dir, _diag_name))
 
     meta = {
         "n_events":         nEvents,
