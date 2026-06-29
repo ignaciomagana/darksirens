@@ -30,7 +30,7 @@ import jax.numpy as jnp
 from jax import jit, vmap
 
 from darksirens.utils.cosmology import dV_of_z
-from darksirens.utils.containers import CosmoParams, SurveyParams
+from darksirens.core.types import CosmoParams, SurveyParams
 
 from darksirens.em.utils import zgrid
 

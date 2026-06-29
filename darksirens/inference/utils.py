@@ -55,7 +55,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from darksirens.utils.cosmology import z_of_dL, ddL_of_z
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 
 M1DET_Q_DL_COORDS = "m1det_q_dL"

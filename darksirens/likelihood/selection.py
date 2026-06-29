@@ -51,7 +51,7 @@ from jax import lax
 from jax.scipy.special import logsumexp
 
 from darksirens.utils.utils import logdiffexp
-from darksirens.utils.containers import GWEvent, EMCatalog
+from darksirens.core.types import GWEvent, EMCatalog
 from darksirens.likelihood.events import pad_gw_event_to_multiple
 
 

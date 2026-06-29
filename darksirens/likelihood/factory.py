@@ -34,7 +34,7 @@ from darksirens.inference.parameters import (
     build_parameter_decoder,
     complete_empty_pixel_policy_code,
 )
-from darksirens.utils.containers import EMCatalog, GWEvent
+from darksirens.core.types import EMCatalog, GWEvent
 
 # Backward-compatible aliases for callers/tests that imported private helpers.
 _barrier = barrier

@@ -83,7 +83,7 @@ import jax.numpy as jnp
 from jax import lax, vmap
 from jax.scipy.special import logsumexp
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import z_of_dL, dL_of_z, ddL_of_z, dL_in_z_grid
 from darksirens.likelihood.pair_kde import PairKDE, log_eval_pair_kde
 from darksirens.lensing.slmarks import (

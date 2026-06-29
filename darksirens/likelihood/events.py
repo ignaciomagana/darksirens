@@ -35,7 +35,7 @@ import numpy as np
 import jax.numpy as jnp
 from jax import lax
 
-from darksirens.utils.containers import GWEvent
+from darksirens.core.types import GWEvent
 
 
 def _barrier(arr: jnp.ndarray) -> jnp.ndarray:

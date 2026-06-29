@@ -111,7 +111,7 @@ strong-lensing cluster combiner ([`lensing`](lensing.md)).
 :show-inheritance:
 ```
 
-## `darksirens.inference.likelihood_core`
+## `darksirens.likelihood.core`
 
 The pure, JIT-compiled likelihood body `darksiren_log_likelihood`: a `lax.scan`
 over events of the log-sum-exp PE term, minus the selection correction. It adds
@@ -122,13 +122,13 @@ weak-lensing magnification marginalisation (disabled / lognormal / tabulated),
 which is bit-for-bit inert for every non-WL model; `pe_model` / `selection_model`
 fall back to `spectral_sirens` for the WL and bright-siren cases.
 
-```{automodule} darksirens.inference.likelihood_core
+```{automodule} darksirens.likelihood.core
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.inference.likelihood`
+## `darksirens.likelihood.factory`
 
 `make_likelihood` is the host-side factory: it prepares the compact catalog
 views, builds the parameter decoder, resolves the weak-lensing backend from
@@ -136,7 +136,7 @@ views, builds the parameter decoder, resolves the weak-lensing backend from
 sampler. It marks the eager/traced boundary — the heavy per-proposal
 precomputation happens here, while the returned closure calls the JIT core.
 
-```{automodule} darksirens.inference.likelihood
+```{automodule} darksirens.likelihood.factory
 :members:
 :undoc-members:
 :show-inheritance:

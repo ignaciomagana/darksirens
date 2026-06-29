@@ -84,7 +84,7 @@ def _materialize(state):
     """
     return lax.optimization_barrier(state)
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from typing import NamedTuple, Any
 
 from darksirens.redshift.volume import log_volume_prior_vmap, _precompute_volume_grid

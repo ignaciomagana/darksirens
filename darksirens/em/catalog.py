@@ -50,7 +50,7 @@ from jax.scipy.special import logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
 from typing import NamedTuple
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 from .utils import zgrid
 from .completion import log_galaxy_measure_grid

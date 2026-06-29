@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from darksirens.em import zgrid
-from darksirens.em.utils import load_survey_marks
+from darksirens.catalogs.io import load_survey_marks
 
 #: z-bins for centering per-galaxy marks (subtract the running mean E[m|z]).
 _MARK_CENTER_NBINS = 40
