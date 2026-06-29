@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
-from .base import MassComponent, PairingModel, ParamSpec, SpinModel, pack_specs
+from .base import MassComponent, PairingModel, ParamSpec, SpinModel, pack_specs, _log_rate_norm
 from .components import (
     ALPHA,
     ALPHA_BPL,
@@ -320,7 +320,7 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def log_p_pop(self, m1, q, z, chieff, theta, z_norm_grid=None):
         idx = 0
         tm = theta[idx : idx + self.mass_component.n_params]
         idx += self.mass_component.n_params
@@ -343,7 +343,12 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
         )
         p = jnp.where(valid, p, 0.0)
         log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
-        return log_p + (gamma - 1.0) * jnp.log1p(z)
+
+        z_term = (gamma - 1.0) * jnp.log1p(z)
+        if z_norm_grid is not None:
+            zgrid, log_pvol = z_norm_grid
+            z_term = z_term - _log_rate_norm(gamma, zgrid, log_pvol)
+        return log_p + z_term
 
 
 _LOG_SQRT_2PI = 0.9189385332046727
@@ -616,7 +621,7 @@ class GolombSymmetricMassPopulationModel:
         norm = self._mass_pair_norm(theta_m, beta)
         return raw / jnp.where(norm > 0.0, norm, 1.0)
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def log_p_pop(self, m1, q, z, chieff, theta, z_norm_grid=None):
         n_m = self.mass_component.n_params
         n_s = self.spin_component.n_params
 
@@ -633,9 +638,11 @@ class GolombSymmetricMassPopulationModel:
         p = p_mq * p_spin
         log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
 
-        # Keep your current redshift convention:
-        # p(z) ∝ (1 + z)^(gamma - 1).
-        return log_p + (gamma - 1.0) * jnp.log1p(z)
+        z_term = (gamma - 1.0) * jnp.log1p(z)
+        if z_norm_grid is not None:
+            zgrid, log_pvol = z_norm_grid
+            z_term = z_term - _log_rate_norm(gamma, zgrid, log_pvol)
+        return log_p + z_term
 
 
 @component("pl_pairing", kind="pairing", params=(

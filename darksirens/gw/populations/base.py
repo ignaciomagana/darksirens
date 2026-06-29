@@ -52,8 +52,22 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import jax.numpy as jnp
+from jax.scipy.special import logsumexp
 
 from .utils import get_mass_grid, get_q_grid, get_chi_grid, M_LO
+
+
+# ── Redshift rate-evolution normalisation ────────────────────────────────────
+
+def _log_rate_norm(gamma, zgrid, log_pvol):
+    """log ∫ (1 + z)**(gamma - 1) p_vol(z) dz over ``zgrid``."""
+    gamma = jnp.asarray(gamma)
+    log_dz = jnp.log(jnp.diff(zgrid)) # (N_grid-1,)
+    # Trapezoid integration in log-space: log( Σ_j (dz_j/2)(f_j + f_{j+1}) ) 
+    # with log f(z) = (gamma-1) log(1+z) + log_pvol(z)
+    log_f = (gamma[..., None] - 1.0) * jnp.log1p(zgrid) + log_pvol   # (..., N_grid)
+    log_seg = jnp.logaddexp(log_f[..., :-1], log_f[..., 1:]) + log_dz - jnp.log(2.0)
+    return logsumexp(log_seg, axis=-1)                      # (...) matching gamma
 
 
 # ── Parameter bookkeeping ────────────────────────────────────────────────────
@@ -418,20 +432,30 @@ class PopulationModel:
         """Return lower bounds, upper bounds, and labels for all parameters."""
         return pack_specs(*self.param_specs)
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def log_p_pop(self, m1, q, z, chieff, theta, z_norm_grid=None):
         """
-        Log population probability at (m1, q, z, chieff) under parameters theta.
+        Log population probability at (m1, q, z, chieff) under population parameters theta.
 
         Sentinel: p = 0  →  log p = −jnp.inf  (not −1e10).
         −∞ propagates correctly through logsumexp / jnp.sum; the final
         jnp.isfinite guard in the likelihood rejects the proposal cleanly.
+
+        ``z_norm_grid`` is an optional ``(zgrid, log_pvol)`` pair where ``log_pvol``
+        is ``log p_vol(z)`` on ``zgrid`` (normalised so ``∫ p_vol dz = 1``).  When
+        provided the rate factor is normalised; when ``None`` the legacy
+        unnormalised behaviour is returned unchanged (preserved for callers that do
+        not depend on the redshift term, e.g. mass/spin-only diagnostics).
         """
         if self.shared_gamma or self.mixture.k == 1:
             tm    = theta[:-1]
             gamma = theta[-1]
             p     = self.mixture(m1, q, chieff, tm)
             log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
-            return log_p + (gamma - 1.0) * jnp.log1p(z)
+            z_term = (gamma - 1.0) * jnp.log1p(z)
+            if z_norm_grid is not None:
+                zgrid, log_pvol = z_norm_grid
+                z_term = z_term - _log_rate_norm(gamma, zgrid, log_pvol)
+            return log_p + z_term
 
         n_mix  = self.mixture.n_params
         tm     = theta[:n_mix]
@@ -440,5 +464,12 @@ class PopulationModel:
 
         gamma_shape = (self.mixture.k,) + (1,) * (jnp.ndim(p_comp) - 1)
         z_factor = jnp.power(1.0 + z, gamma.reshape(gamma_shape) - 1.0)
+        if z_norm_grid is not None:
+            # Per-component normalisation: each component carries its own gamma and
+            # is its own redshift density, so each (1+z)^(gamma_c - 1) factor must
+            # be normalised separately *before* the mixture sum.
+            zgrid, log_pvol = z_norm_grid
+            log_norm = _log_rate_norm(gamma, zgrid, log_pvol)          # (k,)
+            z_factor = z_factor * jnp.exp(-log_norm).reshape(gamma_shape)
         p = jnp.sum(p_comp * z_factor, axis=0)
         return jnp.where(p > 0.0, jnp.log(p), -jnp.inf)

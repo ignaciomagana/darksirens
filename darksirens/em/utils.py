@@ -10,14 +10,22 @@ at low redshift where the catalog is densest, and coarser resolution
 at high redshift where the prior is smooth.
 """
 
+import os
+
 import jax.numpy as jnp
 import numpy as np
 import h5py
 
-# Log-spaced from z~0 to zMax, giving 1000 points.
+# Log-spaced from z~0 to zMax, giving ``_NZ`` points.
 # expm1(linspace(log(1), log(zMax+1))) maps [0, log(zMax+1)] → [0, zMax].
-zMax: float = 5.0
-zgrid = jnp.expm1(jnp.linspace(jnp.log(1.0), jnp.log(zMax + 1.0), 1000))
+
+zMax: float = float(os.getenv("DARK_SIREN_ZMAX", "5.0"))
+_NZ: int = int(os.getenv("DARK_SIREN_NZ", "1000"))
+if zMax <= 0.0:
+    raise ValueError(f"DARK_SIREN_ZMAX must be > 0, got {zMax}")
+if _NZ < 2:
+    raise ValueError(f"DARK_SIREN_NZ must be >= 2, got {_NZ}")
+zgrid = jnp.expm1(jnp.linspace(jnp.log(1.0), jnp.log(zMax + 1.0), _NZ))
 
 
 def load_survey(survey_path, to_device=True):

@@ -57,7 +57,7 @@ from typing import Sequence
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 
-from .base import ParamSpec, pack_specs
+from .base import ParamSpec, pack_specs, _log_rate_norm
 from .utils import get_mass_grid, get_q_grid, get_chi_grid, sfilter_low, sfilter_high
 
 
@@ -334,7 +334,7 @@ class JointGPPopulation:
 
     # -- evaluation --------------------------------------------------------
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def log_p_pop(self, m1, q, z, chieff, theta, z_norm_grid=None):
         m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
         q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
         z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
@@ -388,7 +388,11 @@ class JointGPPopulation:
 
         p = p_gp * p_base
         log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
-        return log_p + (gamma - 1.0) * jnp.log1p(z)
+        z_term = (gamma - 1.0) * jnp.log1p(z)
+        if z_norm_grid is not None:
+            zg, log_pvol = z_norm_grid
+            z_term = z_term - _log_rate_norm(gamma, zg, log_pvol)
+        return log_p + z_term
 
     # -- tapers / cut, applied identically to density and normalisation ----
 
@@ -550,7 +554,7 @@ class AdditiveGPPopulation:
         coords = jnp.stack(cols, axis=-1)
         return _eval_field(coords, kern, meta["Z"], alpha, jnp.zeros(n))
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def log_p_pop(self, m1, q, z, chieff, theta, z_norm_grid=None):
         import jax
         m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
         q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
@@ -609,7 +613,11 @@ class AdditiveGPPopulation:
         norm = jnp.exp(jnp.interp(z, zg, jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
         log_p_src = (jnp.log(jnp.where(pun > 0, pun, _LOGSAFE))
                      - jnp.log(jnp.where(norm > 0, norm, 1.0)))
-        return log_p_src + (gamma - 1.0) * jnp.log1p(z)
+        z_term = (gamma - 1.0) * jnp.log1p(z)
+        if z_norm_grid is not None:
+            zgrid_norm, log_pvol = z_norm_grid
+            z_term = z_term - _log_rate_norm(gamma, zgrid_norm, log_pvol)
+        return log_p_src + z_term
 
     def _taper_cut(self, m1, q, m_min, dm_min, m_max, dm_max):
         s = sfilter_low(m1, m_min, dm_min) * sfilter_high(m1, m_max, dm_max)
@@ -795,7 +803,7 @@ class BinnedGPPopulation:
 
     # -- evaluation --------------------------------------------------------
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def log_p_pop(self, m1, q, z, chieff, theta, z_norm_grid=None):
         m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
         q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
         z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
@@ -826,8 +834,13 @@ class BinnedGPPopulation:
         p = p_un * self._spin_density(chi, mu_chi, sig_chi)
         log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
         if self._has_z:
+            # Free-form R(z), intentionally unnormalised over z
             return log_p
-        return log_p + (gamma - 1.0) * jnp.log1p(z)
+        z_term = (gamma - 1.0) * jnp.log1p(z)
+        if z_norm_grid is not None:
+            zgrid_norm, log_pvol = z_norm_grid
+            z_term = z_term - _log_rate_norm(gamma, zgrid_norm, log_pvol)
+        return log_p + z_term
 
 
 # ============================================================

@@ -38,6 +38,20 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
 os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR",    "platform")
 
 import sys
+
+# ── Redshift-grid configuration (before any darksirens import) ────────────────
+def _hoist_grid_env(argv):
+    _flag_to_env = {"--zmax": "DARK_SIREN_ZMAX",
+                    "--nz": "DARK_SIREN_NZ",
+                    "--nz_cosmo": "DARK_SIREN_NZ_COSMO"}
+    for i, tok in enumerate(argv):
+        for flag, env in _flag_to_env.items():
+            if tok == flag and i + 1 < len(argv):
+                os.environ[env] = argv[i + 1]
+            elif tok.startswith(flag + "="):
+                os.environ[env] = tok.split("=", 1)[1]
+_hoist_grid_env(sys.argv[1:])
+
 import json
 import datetime
 import warnings
@@ -529,6 +543,14 @@ def save_settings_json(
     d.update(meta)
     d["normalization_grid"] = normalization_grid_settings().to_dict()
 
+    from darksirens.em.utils import zgrid as _em_zgrid, zMax as _em_zmax
+    from darksirens.utils.cosmology import zgrid as _cosmo_zgrid
+    d["redshift_grid"] = {
+        "zmax":     float(_em_zmax),
+        "nz":       int(_em_zgrid.shape[0]),
+        "nz_cosmo": int(_cosmo_zgrid.shape[0]),
+    }
+
     d["environment"] = {
         "jax_version":    jax.__version__,
         "numpy_version":  np.__version__,
@@ -849,6 +871,13 @@ def main():
                    help="Mass-ratio-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_Q).")
     g.add_argument("--norm_nchi", type=int, default=None, metavar="N",
                    help="Spin-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_CHI).")
+    g.add_argument("--zmax", type=float, default=None, metavar="Z",
+                   help="Maximum redshift of the EM/catalog/prior/rate-normalisation grid AND the "
+                        "dL<->z interpolation table (env: DARK_SIREN_ZMAX, default 5.0).")
+    g.add_argument("--nz", type=int, default=None, metavar="N",
+                   help="Number of points on the EM grid (env: DARK_SIREN_NZ, default 1000).")
+    g.add_argument("--nz_cosmo", type=int, default=None, metavar="N",
+                   help="Number of points on the dL<->z interpolation grid (env: DARK_SIREN_NZ_COSMO, default 500).")
 
     g = optp.add_argument_group("Lensing")
     g.add_argument("--lensing_wl_model", choices=["lognormal", "tabulated"], default="lognormal",
@@ -993,6 +1022,12 @@ def main():
     norm_grid = normalization_grid_settings()
     _row("Norm grids", (
         f"mass={norm_grid.n_mass}, q={norm_grid.n_q}, chi={norm_grid.n_chi}"
+    ))
+    from darksirens.em.utils import zgrid as _em_zgrid, zMax as _em_zmax
+    from darksirens.utils.cosmology import zgrid as _cosmo_zgrid
+    _row("Redshift grid", (
+        f"zmax={_em_zmax:g}, nz={_em_zgrid.shape[0]} (EM), "
+        f"nz={_cosmo_zgrid.shape[0]} (dL↔z)"
     ))
     _row("JAX backend", jax.default_backend())
     _row("JAX devices",  ", ".join(str(d) for d in jax.devices()))

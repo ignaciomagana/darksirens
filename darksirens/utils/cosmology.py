@@ -14,6 +14,8 @@ with guard bands so that sampler proposals at the edge of the allowed prior do
 not silently extrapolate.
 """
 
+import os
+
 import astropy.constants as constants
 import jax
 import numpy as np
@@ -26,8 +28,8 @@ from darksirens.utils.interp2d import interpnd
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
-zMax = 5
-"""Maximum redshift covered by the precomputed interpolation grid."""
+zMax = float(os.getenv("DARK_SIREN_ZMAX", "5"))
+"""Maximum redshift covered by the precomputed dL↔z interpolation grid."""
 
 H0Planck = Planck15.H0.value
 """Planck-2015 Hubble constant used to build the reference distance grid."""
@@ -63,7 +65,8 @@ w0PriorUpper = w0Fiducial + _W0_PRIOR_HALF_WIDTH
 waPriorLower = waFiducial - _WA_PRIOR_HALF_WIDTH
 waPriorUpper = waFiducial + _WA_PRIOR_HALF_WIDTH
 
-zgrid = np.expm1(np.linspace(np.log(1), np.log(zMax + 1), 500))
+_NZ_COSMO = int(os.getenv("DARK_SIREN_NZ_COSMO", "500"))
+zgrid = np.expm1(np.linspace(np.log(1), np.log(zMax + 1), _NZ_COSMO))
 
 Om0grid = jnp.linspace(
     Om0PriorLower - _OM0_GRID_PAD,

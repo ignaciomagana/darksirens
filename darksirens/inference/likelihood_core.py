@@ -27,6 +27,8 @@ from darksirens.lensing.wlmagnification import make_tabulated_log_p_wl
 from darksirens.sky import sky_model_parser
 from darksirens.utils.containers import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import dL_in_z_grid, z_of_dL
+from darksirens.em.utils import zgrid as _ZGRID
+from darksirens.em.volume import _precompute_volume_grid
 
 
 # Weak-lensing quadrature node counts / ranges.
@@ -106,12 +108,18 @@ def darksiren_log_likelihood(
             "Verify parameter-space construction for this population model."
         )
 
-    log_p_pop = pop_model_parser(
+    _log_p_pop_raw = pop_model_parser(
         pop_model=pop_model,
         shared_beta=shared_beta,
         shared_spin=shared_spin,
         shared_gamma=shared_gamma,
     )
+    # Grid for normalizing the redshift rate-evolution factor (1+z)^(gamma-1) 
+    _z_norm_grid = (_ZGRID, jnp.log(_precompute_volume_grid(cosmo)))
+
+    def log_p_pop(m1, q, z, chieff, theta):
+        """Normalized log_pop function."""
+        return _log_p_pop_raw(m1, q, z, chieff, theta, z_norm_grid=_z_norm_grid)
     # Angular factor g(n̂).  ``apply_sky`` is a Python bool (static under jit), so
     # the isotropic path adds nothing to the compute graph.
     apply_sky = sky_model != "isotropic"
