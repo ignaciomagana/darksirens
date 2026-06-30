@@ -7,7 +7,8 @@ import numpy as np
 from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.catalogs.io import load_survey
 
-from darksirens.redshift import zgrid, compute_lss_overdensity
+from darksirens.redshift.grid import zgrid
+from darksirens.redshift.completion import compute_lss_overdensity
 from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
 
 from darksirens.catalogs.compact import (
