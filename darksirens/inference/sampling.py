@@ -1,6 +1,7 @@
 import numpy as np
 import jax
 import jax.numpy as jnp
+from darksirens.inference.tinyns_config import build_tinyns_config, tinyns_run_kwargs, tinyns_sampler_kwargs
 
 def run_sampler(method, likelihood, prior_transform, labels,
                 lower_bound, upper_bound, opts, prior_kinds=None):
@@ -72,100 +73,50 @@ def run_sampler(method, likelihood, prior_transform, labels,
         if maxiter is not None and maxiter <= 0:
             maxiter = None
 
-        # rwalk + the JAX kernel is the default: the random-walk proposal runs
-        # entirely inside a jitted JAX kernel (no host round-trip per step), so
-        # it is much faster than the Python slice proposal for this likelihood.
-        # slice/rslice/prior and the pure-Python kernel remain selectable.
-        # replacement_chains runs several independent constrained random walks
-        # in parallel per replacement (rwalk+jax only; default 1 = original
-        # behaviour), trading throughput for GPU occupancy.  As an adaptive
-        # alternative, replacement_chain_schedule (e.g. (1, 4, 16, 64, 256))
-        # starts at the smallest batch and escalates only when a stage fails,
-        # returning as soon as any stage succeeds -- it avoids always paying for
-        # large batches.  The two are mutually exclusive (use one or the other).
-        walks = int(getattr(opts, "tinyns_walks", 25))
-        replacement_chains = int(getattr(opts, "tinyns_replacement_chains", 1))
-
-        schedule_raw = getattr(opts, "tinyns_replacement_chain_schedule", None)
-        replacement_chain_schedule = None
-        if schedule_raw:
-            replacement_chain_schedule = tuple(
-                int(tok)
-                for tok in str(schedule_raw).replace("(", "").replace(")", "").split(",")
-                if tok.strip()
-            )
-            if not replacement_chain_schedule or any(
-                c <= 0 for c in replacement_chain_schedule
-            ):
-                raise ValueError(
-                    "--tinyns_replacement_chain_schedule must be a comma-separated "
-                    f"list of positive integers, got {schedule_raw!r}."
-                )
-            if replacement_chains != 1:
-                raise ValueError(
-                    "Set either --tinyns_replacement_chains or "
-                    "--tinyns_replacement_chain_schedule, not both."
-                )
-
-        # tinyns requires max_attempts >= walks * (chains at the active stage):
-        # its rwalk kernel draws up to that many proposals per replacement.  The
-        # binding constraint is the largest batch -- max(schedule) when a
-        # schedule is set, else replacement_chains.  When the user does not set
-        # --tinyns_max_attempts (None), use tinyns' default of 10000 but
-        # auto-raise it to that product when larger, so big batches/schedules
-        # "just work" instead of crashing.  An explicit value is passed through
-        # untouched (tinyns validates it).
-        chains_for_attempts = (
-            max(replacement_chain_schedule)
-            if replacement_chain_schedule is not None
-            else replacement_chains
-        )
-        max_attempts = getattr(opts, "tinyns_max_attempts", None)
-        if max_attempts is None:
-            max_attempts = max(10000, walks * chains_for_attempts)
-        else:
-            max_attempts = int(max_attempts)
-
-        # The adaptive schedule is only included when set; otherwise tinyns uses
-        # the fixed replacement_chains path (default 1 = original behaviour).
-        extra = {}
-        if replacement_chain_schedule is not None:
-            extra["replacement_chain_schedule"] = replacement_chain_schedule
-
+        config = build_tinyns_config(opts)
         sampler = NestedSampler(
             tinyns_loglike,
             tinyns_ptform,
             ndim=ndims,
-            nlive=int(getattr(opts, "nlive", 500)),
-            sample=getattr(opts, "tinyns_sample", "rwalk"),
-            kernel=getattr(opts, "tinyns_kernel", "jax"),
-            walks=walks,
-            replacement_chains=replacement_chains,
-            max_attempts=max_attempts,
-            slices=int(getattr(opts, "tinyns_slices", 5)),
-            slice_steps=int(getattr(opts, "tinyns_slice_steps", 10)),
-            step_scale=float(getattr(opts, "tinyns_step_scale", 0.1)),
-            **extra,
+            nlive=config.nlive,
+            **tinyns_sampler_kwargs(config),
         )
 
-        key = jax.random.PRNGKey(int(getattr(opts, "seed", 0)))
-        result = sampler.run(
-            key,
-            dlogz=float(getattr(opts, "dlogz", 0.1)),
-            maxiter=maxiter,
-            progress=bool(getattr(opts, "show_progress", True)),
-            progress_interval=int(getattr(opts, "tinyns_progress_interval", 100)),
-        )
+        key = jax.random.PRNGKey(config.seed)
+        run_kwargs = tinyns_run_kwargs(config)
+        if config.resume_from:
+            result = sampler.resume(
+                config.resume_from,
+                **run_kwargs,
+                checkpoint_path_out=config.checkpoint_path_out,
+            )
+        else:
+            result = sampler.run(
+                key,
+                **run_kwargs,
+                checkpoint_path=config.checkpoint_path,
+            )
 
         # Equal-weight posterior samples (tinyns mirrors dynesty's resampler).
         key, resample_key = jax.random.split(key)
         samples = np.asarray(result.resample_equal(resample_key))
 
-        return {
+        out = {
             "samples": samples,
             "logZ": float(result.logz),
             "logZerr": float(result.logzerr),
         }
+        if hasattr(result, "diagnostics"):
+            try:
+                out["tinyns_diagnostics"] = result.diagnostics()
+            except Exception:
+                pass
+        if hasattr(result, "summary"):
+            try:
+                out["tinyns_summary"] = result.summary()
+            except Exception:
+                pass
+        return out
 
 
     # --------------------------------------------------------

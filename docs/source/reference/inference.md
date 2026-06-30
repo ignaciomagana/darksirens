@@ -20,7 +20,7 @@ completion grid before the JIT boundary.
 :show-inheritance:
 ```
 
-## `darksirens.inference.catalog_views`
+## `darksirens.likelihood.catalog_views`
 
 Compacts the per-sample catalog so only the pixels actually touched by the PE
 and injection sets are transferred to the device: repeated sample pixels are
@@ -28,19 +28,19 @@ replaced by `unique_pixels_*` plus a `sample_to_unique_*` gather map. `barrier`
 wraps a host→device transfer so a large static operand is materialised once and
 captured by the JIT, not re-sent per call.
 
-```{automodule} darksirens.inference.catalog_views
+```{automodule} darksirens.likelihood.catalog_views
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.inference.events`
+## `darksirens.likelihood.events`
 
 The `GWEvent` padding helpers. `pad_gw_event_to_multiple` appends explicit
 invalid sentinel rows so the selection set length is divisible by the scan batch
 size, keeping `lax.scan` shapes static without changing the estimate.
 
-```{automodule} darksirens.inference.events
+```{automodule} darksirens.likelihood.events
 :members:
 :undoc-members:
 :show-inheritance:
@@ -92,7 +92,7 @@ identically by the PE and selection terms.
 :show-inheritance:
 ```
 
-## `darksirens.inference.selection`
+## `darksirens.likelihood.selection`
 
 The Monte-Carlo selection correction (Farr 2019). `_lse_to_log_mu_neff`
 converts the log-sum-exp aggregates of the injection weights into
@@ -105,13 +105,13 @@ $-\infty$ otherwise. `compute_selection_term` evaluates the injection weights
 the angular factor, and returns the 3-tuple — the third element feeds the
 strong-lensing cluster combiner ([`lensing`](lensing.md)).
 
-```{automodule} darksirens.inference.selection
+```{automodule} darksirens.likelihood.selection
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.inference.likelihood_core`
+## `darksirens.likelihood.core`
 
 The pure, JIT-compiled likelihood body `darksiren_log_likelihood`: a `lax.scan`
 over events of the log-sum-exp PE term, minus the selection correction. It adds
@@ -122,13 +122,13 @@ weak-lensing magnification marginalisation (disabled / lognormal / tabulated),
 which is bit-for-bit inert for every non-WL model; `pe_model` / `selection_model`
 fall back to `spectral_sirens` for the WL and bright-siren cases.
 
-```{automodule} darksirens.inference.likelihood_core
+```{automodule} darksirens.likelihood.core
 :members:
 :undoc-members:
 :show-inheritance:
 ```
 
-## `darksirens.inference.likelihood`
+## `darksirens.likelihood.factory`
 
 `make_likelihood` is the host-side factory: it prepares the compact catalog
 views, builds the parameter decoder, resolves the weak-lensing backend from
@@ -136,7 +136,7 @@ views, builds the parameter decoder, resolves the weak-lensing backend from
 sampler. It marks the eager/traced boundary — the heavy per-proposal
 precomputation happens here, while the returned closure calls the JIT core.
 
-```{automodule} darksirens.inference.likelihood
+```{automodule} darksirens.likelihood.factory
 :members:
 :undoc-members:
 :show-inheritance:

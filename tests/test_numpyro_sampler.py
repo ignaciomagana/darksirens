@@ -8,10 +8,10 @@ import pytest
 
 pytest.importorskip("numpyro")
 
-from darksirens.em import zgrid
+from darksirens.redshift import zgrid
 from darksirens.gw.populations import pop_model_prior_parser
 from darksirens.gw.populations.registry import get_fixed_population_params
-from darksirens.inference.likelihood import make_likelihood
+from darksirens.likelihood.factory import make_likelihood
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
 

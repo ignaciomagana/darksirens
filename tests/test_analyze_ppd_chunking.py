@@ -2,7 +2,7 @@
 test_analyze_ppd_chunking.py
 ----------------------------
 Tests for the memory-safe posterior-predictive engine in
-``darksirens.tool.darksirens_analyze``:
+``darksirens.cli.analyze``:
 
 * ``plan_ppd_sizing`` keeps the working-set estimate under the budget and
   honours user overrides;
@@ -40,7 +40,7 @@ if "tinygp" not in sys.modules:
 
 jnp = pytest.importorskip("jax.numpy")
 
-from darksirens.tool.darksirens_analyze import (
+from darksirens.cli.analyze import (
     plan_ppd_sizing,
     probe_device_memory_bytes,
     posterior_predictive,

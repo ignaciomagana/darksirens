@@ -11,7 +11,7 @@ followed by the full autodoc API generated from the source docstrings.
 
 ## How to read the reference
 
-- **Container types** in `darksirens.utils.containers` are lightweight named
+- **Container types** in `darksirens.core.types` are lightweight named
   tuples that move JAX arrays through the likelihood without Python object
   mutation.  They define the shape contract between data loading, catalog view
   preparation, and the JIT-compiled likelihood core.
@@ -23,10 +23,10 @@ followed by the full autodoc API generated from the source docstrings.
   `registry` holds the curated physics tuning for standard models plus the
   stable named helpers (`get_model`, `pop_model_parser`,
   `pop_model_prior_parser`, `get_fixed_population_params`).
-- **EM prior modules** in `darksirens.em` implement the redshift priors for
+- **Redshift modules** in `darksirens.redshift` implement the redshift priors for
   spectral sirens, complete catalogs, incomplete catalogs, and bright-siren
   counterparts.  Incomplete-catalog completion lives in
-  `darksirens.em.completion`: it builds a cached observed-galaxy KDE per unique
+  `darksirens.redshift.completion`: it builds a cached observed-galaxy KDE per unique
   catalog pixel, estimates completeness as a matched-kernel ratio against the
   expected galaxy density, and exposes `completion_curves` for the likelihood
   hot path plus scalar/vmapped helpers for diagnostics.  The inference code
@@ -60,7 +60,7 @@ intermediate dictionaries by hand.
 :maxdepth: 2
 :caption: Module reference
 
-em
+redshift
 populations
 inference
 sky

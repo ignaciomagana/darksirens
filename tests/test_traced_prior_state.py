@@ -25,10 +25,10 @@ pytest.importorskip("jax")
 import jax
 import jax.numpy as jnp
 
-from darksirens.em import zgrid
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
-from darksirens.em.completion import build_pixel_kde_cache
-from darksirens.em.prior import (
+from darksirens.redshift import zgrid
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+from darksirens.redshift.completion import build_pixel_kde_cache
+from darksirens.redshift.prior import (
     prepare_redshift_prior_state,
     eval_redshift_prior_with_state,
     DarkSirenPriorState,

@@ -25,12 +25,12 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
 
-from darksirens.em import zgrid
-from darksirens.em.completion import build_pixel_kde_cache
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog, GWEvent
+from darksirens.redshift import zgrid
+from darksirens.redshift.completion import build_pixel_kde_cache
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog, GWEvent
 from darksirens.utils.cosmology import H0Planck, Om0Planck
 from darksirens.gw.populations import get_fixed_population_params
-from darksirens.inference.likelihood_core import darksiren_log_likelihood
+from darksirens.likelihood.core import darksiren_log_likelihood
 
 NG = int(zgrid.size)
 _Z = np.asarray(zgrid)

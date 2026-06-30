@@ -38,7 +38,7 @@ wraps calls for you; to run commands by hand, prefix them, e.g. on Windows:
 ```bash
 CONDA="/c/Users/Alien/anaconda3/Scripts/conda.exe"
 RUN="$CONDA run --no-capture-output -n darksirens-dev"
-$RUN python -m darksirens.tool.darksirens_inference --help
+$RUN python -m darksirens.cli.inference --help
 ```
 
 GP / binned-GP population models and the GP sky models need **`tinygp`**:
@@ -47,7 +47,7 @@ GP / binned-GP population models and the GP sky models need **`tinygp`**:
 $RUN python -m pip install tinygp
 ```
 
-The tools are invoked as modules (`python -m darksirens.tool.<name>`) so they
+The tools are invoked as modules (`python -m darksirens.cli.<name>`) so they
 work regardless of whether the console scripts are on `PATH`.
 
 ## Tier 0 — pytest (fast)
@@ -89,9 +89,9 @@ $RUN python scripts/smoke_tests/make_marks.py \
     --catalog $DATA/catalog_pixelated_nside_8.h5 --out $DATA/catalog_marked.h5
 
 # LSS-conditioned completion tables (radial + 3-D angular-coupling)
-$RUN python -m darksirens.tool.darksirens_build_lognormal_completion \
+$RUN python -m darksirens.cli.build_lognormal_completion \
     --catalog $DATA/catalog_pixelated_nside_8.h5 --out $DATA/q_radial.h5 --mode radial --n-members 0
-$RUN python -m darksirens.tool.darksirens_build_lognormal_completion \
+$RUN python -m darksirens.cli.build_lognormal_completion \
     --catalog $DATA/catalog_pixelated_nside_8.h5 --out $DATA/q_gp3d.h5 --mode gp3d --n-members 0
 
 # Bright-siren mock: GW + selection + bright_counterparts.json
@@ -128,29 +128,29 @@ CAT=$DATA/catalog_pixelated_nside_8.h5
 
 ```bash
 # U-spec  spectral sirens (GW only)
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model powerlaw+peak \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-spec
 
 # U-wl  spectral sirens + weak-lensing magnification (lognormal s^2(z)=a z^b)
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens_wl --lensing_wl_model lognormal --lensing_wl_a 4e-3 --lensing_wl_b 1.5 \
     --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-wl
 
 # U-dark  incomplete galaxy catalog
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens --pop_model powerlaw+peak \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-dark
 
 # U-complete  complete-catalog formalism
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens_complete --pop_model powerlaw+peak \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-complete
 
 # U-bright  EM counterparts (extract RA/Dec/z from bright_counterparts.json)
 CP=$($RUN python -c "import json;d=json.load(open('data/smoke_bright/bright_counterparts.json'));\
 it=d['counterparts'] if isinstance(d,dict) else d;print(' '.join(f\"{c['ra_rad']} {c['dec_rad']} {c['z']}\" for c in it))")
-$RUN python -m darksirens.tool.darksirens_inference \
+$RUN python -m darksirens.cli.inference \
     --gw_path data/smoke_bright/mock_bright_gw_events.h5 \
     --gwselection_path data/smoke_bright/mock_bright_gw_selection.h5 \
     --universe_model bright_sirens --counterpart $CP --counterpart_dz 1e-4 \
@@ -164,19 +164,19 @@ with numpyro (high dimensional). `powerlaw+peak` is covered by `U-spec`.
 
 ```bash
 # P-bpl2pk  broken power law + 2 peaks
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model brokenpowerlaw+2peaks \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/P-bpl2pk
 
 # P-gp1d  1-D Gaussian-process mass function (tinygp)
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model gp1d_m1 \
     --fixed_cosmology true --fix_survey true --sampler numpyro --nuts_warmup 10 --nuts_samples 10 --nuts_max_tree_depth 3 --save_path out/P-gp1d
 
 # P-gppop  binned-GP population (tinygp). Uses dynesty (gradient-free): gppop
 # currently trips the numpyro/NUTS gradient preflight (NaN gradient at the
 # initial point) — a known issue to investigate; dynesty exercises the model.
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model gppop \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 80 --dlogz 10 --save_path out/P-gppop
 ```
@@ -188,13 +188,13 @@ free). The high-dimensional GP sky models use numpyro.
 
 ```bash
 for SKY in isotropic dipole multipole multipole_l3; do
-  $RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL \
+  $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
       --universe_model spectral_sirens --sky_model $SKY --pop_model powerlaw+peak \
       --fixed_cosmology true --fix_population true --fix_survey true \
       --sampler dynesty --nlive 60 --save_path out/S-$SKY
 done
 for SKY in sphere_gp sphere_gp_z overdensity_gp; do
-  $RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL \
+  $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
       --universe_model spectral_sirens --sky_model $SKY --pop_model powerlaw+peak \
       --fixed_cosmology true --fix_population true --fix_survey true \
       --sampler numpyro --nuts_warmup 10 --nuts_samples 10 --nuts_max_tree_depth 3 --save_path out/S-$SKY
@@ -209,7 +209,7 @@ compare evidences with `scripts/run_sky_ladder.sh`.
 
 ```bash
 # M-loglin  log-linear host efficiency over galaxy marks (needs the marked catalog)
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --survey_path $DATA/catalog_marked.h5 --universe_model dark_sirens \
     --mark_model loglinear --marks logmstar,logssfr --pop_model powerlaw+peak \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/M-loglin
@@ -219,15 +219,15 @@ $RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection
 
 ```bash
 # L-legacy  legacy local-overdensity factor
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens --use_LSS true --pop_model powerlaw+peak \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-legacy
 
 # L-radial / L-gp3d  precomputed lognormal completion table
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens --lss_completion $DATA/q_radial.h5 --pop_model powerlaw+peak \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-radial
-$RUN python -m darksirens.tool.darksirens_inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
+$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens --lss_completion $DATA/q_gp3d.h5 --pop_model powerlaw+peak \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-gp3d
 ```
@@ -238,13 +238,13 @@ Weak lensing is `U-wl` above. Strong-lensing clusters use the dedicated driver:
 
 ```bash
 # X-cloff  singleton-only (no cluster inputs needed)
-$RUN python -m darksirens.tool.darksirens_inference_lensing --gw_path $GWE --gwselection_path $SEL \
+$RUN python -m darksirens.cli.inference_lensing --gw_path $GWE --gwselection_path $SEL \
     --cluster_mode off --wl_backend lognormal --pop_model powerlaw+peak \
     --fix_cosmology true --fix_survey true --fix_population true --sampler dynesty --nlive 60 --save_path out/X-cloff
 
 # X-cl2  J=2 image pairs (needs the SIM_LENSING dataset from Tier 1)
 LD=data/lensing
-$RUN python -m darksirens.tool.darksirens_inference_lensing \
+$RUN python -m darksirens.cli.inference_lensing \
     --gw_path $LD/mock_gw_pe.h5 --gwselection_path $LD/mock_gw_selection.h5 \
     --lensed_injections_path $LD/mock_lensed_injections.h5 --pair_pe_path $LD/mock_pair_pe.h5 \
     --partition_path $LD/partition.json --cluster_mode j2 --wl_backend lognormal \
@@ -270,7 +270,7 @@ e.g. on `U-spec`:
 run directories, the relative evidences + pairwise Bayes-factor matrix:
 
 ```bash
-$RUN python -m darksirens.tool.darksirens_analyze \
+$RUN python -m darksirens.cli.analyze \
     --run_dirs out/S-iso/* out/S-dip/* out/S-mult/* --outdir out/figs
 ```
 
@@ -297,7 +297,7 @@ real issues worth fixing:
 
 - **`L-radial`, `L-gp3d` (FAIL).** Loading a `Q_LSS` table and running it through
   the **jitted** likelihood raises `ConcretizationTypeError` in
-  `darksirens.em.completion._resolve_lss_completion_row_tables` — the global-table
+  `darksirens.redshift.completion._resolve_lss_completion_row_tables` — the global-table
   bounds check does a concrete `int(unique_pixels.max())` on a *traced* array.
   The offline builder, table load, and `completion_curves` *eager* path all work
   (unit-tested); only the end-to-end traced consumption is broken. The legacy

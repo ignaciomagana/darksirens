@@ -25,13 +25,13 @@ setup(
     packages=find_packages(include=["darksirens", "darksirens.*"]),
     entry_points={
         "console_scripts": [
-            "darksirens_inference=darksirens.tool.darksirens_inference:main",
-            "darksirens_analyze=darksirens.tool.darksirens_analyze:main",
-            "darksirens_pixelate=darksirens.tool.darksirens_pixelate:main",
-            "darksirens_skymaps_to_samples=darksirens.tool.darksirens_skymaps_to_samples:main",
-            "darksirens_build_lognormal_completion=darksirens.tool.darksirens_build_lognormal_completion:main",
-            "darksirens_diagnose_lognormal_completion=darksirens.tool.darksirens_diagnose_lognormal_completion:main",
-            "darksirens_inference_lensing=darksirens.tool.darksirens_inference_lensing:main",
+            "darksirens_inference=darksirens.cli.inference:main",
+            "darksirens_analyze=darksirens.cli.analyze:main",
+            "darksirens_pixelate=darksirens.cli.pixelate:main",
+            "darksirens_skymaps_to_samples=darksirens.cli.skymaps_to_samples:main",
+            "darksirens_build_lognormal_completion=darksirens.cli.build_lognormal_completion:main",
+            "darksirens_diagnose_lognormal_completion=darksirens.cli.diagnose_lognormal_completion:main",
+            "darksirens_inference_lensing=darksirens.cli.inference_lensing:main",
         ]
     },
     classifiers=[

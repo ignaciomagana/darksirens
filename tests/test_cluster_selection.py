@@ -36,9 +36,9 @@ HERE = Path(__file__).resolve().parent
 PKG_ROOT = HERE.parent
 sys.path.insert(0, str(PKG_ROOT))
 
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog, GWEvent
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog, GWEvent
 from darksirens.utils.cosmology import H0Planck, Om0Planck
-from darksirens.em.volume import log_volume_prior_vmap
+from darksirens.redshift.volume import log_volume_prior_vmap
 from darksirens.lensing.lensed_injections import (
     LensedInjectionSet, make_lensed_injection_set,
     save_lensed_injections, load_lensed_injections,
@@ -46,7 +46,7 @@ from darksirens.lensing.lensed_injections import (
 from darksirens.lensing.slmarks import (
     make_sis_lens_params, tau_2_SIS, mu_plus_minus_from_y,
 )
-from darksirens.inference.cluster_selection import (
+from darksirens.likelihood.cluster_selection import (
     compute_cluster_selection_term,
     combined_selection_log_correction,
     _per_source_log_weight,
@@ -443,7 +443,7 @@ class TestMasterLikelihoodReduction:
 
     def test_cluster_mode_off_empty_pop_params_raises_clear_error(self, fixture):
         """Empty pop_params should raise a clear ValueError before JAX internals."""
-        from darksirens.inference.likelihood_with_clusters import (
+        from darksirens.likelihood.likelihood_with_clusters import (
             darksiren_log_likelihood_with_clusters,
             CLUSTER_MODE_OFF,
         )
@@ -477,10 +477,10 @@ class TestMasterLikelihoodReduction:
         assert fixture["pop_params"].shape[0] > 0, "fixture pop_params must be non-empty for pop_model=powerlaw+peak"
         """With cluster_mode=OFF, the cluster-aware master likelihood must
         match commit 2's darksiren_log_likelihood bit-identically."""
-        from darksirens.inference.likelihood_core import (
+        from darksirens.likelihood.core import (
             darksiren_log_likelihood, WL_BACKEND_DISABLED,
         )
-        from darksirens.inference.likelihood_with_clusters import (
+        from darksirens.likelihood.likelihood_with_clusters import (
             darksiren_log_likelihood_with_clusters,
             CLUSTER_MODE_OFF, WL_BACKEND_DISABLED as WL_BACKEND_DISABLED_C4,
         )
@@ -533,11 +533,11 @@ class TestMasterLikelihoodReduction:
 
         Pair: (0, 1). Singletons: [2, 3].
         """
-        from darksirens.inference.likelihood_with_clusters import (
+        from darksirens.likelihood.likelihood_with_clusters import (
             darksiren_log_likelihood_with_clusters,
             CLUSTER_MODE_J2,
         )
-        from darksirens.inference.pair_kde import make_pair_kde, stack_pair_kdes
+        from darksirens.likelihood.pair_kde import make_pair_kde, stack_pair_kdes
 
         # Build a synthetic lensed pair for events (0, 1), and use existing PE
         # samples for events 2, 3 as "noise" singletons.
@@ -642,11 +642,11 @@ class TestMasterLikelihoodReduction:
 
         Partition A should outscore B (when the synthetic pair is strong).
         """
-        from darksirens.inference.likelihood_with_clusters import (
+        from darksirens.likelihood.likelihood_with_clusters import (
             darksiren_log_likelihood_with_clusters,
             CLUSTER_MODE_J2,
         )
-        from darksirens.inference.pair_kde import make_pair_kde, stack_pair_kdes
+        from darksirens.likelihood.pair_kde import make_pair_kde, stack_pair_kdes
         from darksirens.utils.cosmology import dL_of_z
 
         # Same synthetic-pair construction as above

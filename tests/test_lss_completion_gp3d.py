@@ -2,7 +2,7 @@
 Tests for the 3-D angular-coupling LSS completion builder (``mode="gp3d"``).
 
 Exercises the low-rank Poisson-lognormal GP solver in
-``darksirens.em.lognormal_completion`` and the ``--mode gp3d`` build path.  The
+``darksirens.redshift.lognormal_completion`` and the ``--mode gp3d`` build path.  The
 output keeps the SAME ``Q_LSS(p,z)`` HDF5 table contract as the radial builder,
 so the inference side is unchanged (verified by feeding the table to
 ``completion_curves`` via the global-pixel resolver).
@@ -15,9 +15,9 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-from darksirens.em import zgrid
+from darksirens.redshift import zgrid
 from darksirens.sky.models import _SphereZGPBase, _fibonacci_sphere
-from darksirens.em.lognormal_completion import (
+from darksirens.redshift.lognormal_completion import (
     lowrank_inducing_nodes,
     build_lowrank_operator,
     poisson_lognormal_gp3d_map,
@@ -201,7 +201,7 @@ def _write_tiny_survey(path, nside=2):
 
 def test_gp3d_build_smoke_and_contract(tmp_path):
     pytest.importorskip("healpy")
-    from darksirens.tool.darksirens_build_lognormal_completion import build_completion
+    from darksirens.cli.build_lognormal_completion import build_completion
     cat = str(tmp_path / "survey.h5")
     npix = _write_tiny_survey(cat, nside=2)
     logq_map, logq_members, diag = build_completion(
@@ -223,7 +223,7 @@ def test_gp3d_build_radial_dispatch_unchanged(tmp_path):
     """mode='radial' still returns the global (n_pix, NG) table; unknown mode
     raises."""
     pytest.importorskip("healpy")
-    from darksirens.tool.darksirens_build_lognormal_completion import build_completion
+    from darksirens.cli.build_lognormal_completion import build_completion
     cat = str(tmp_path / "survey.h5")
     npix = _write_tiny_survey(cat, nside=2)
     logq_map, _, _ = build_completion(cat, mode="radial", n_members=0, maxiter=50)
@@ -236,9 +236,9 @@ def test_gp3d_output_consumable_by_inference(tmp_path):
     """The global gp3d table round-trips through HDF5 and is consumed unchanged by
     the inference resolver (completion_curves) via unique_pixels -> rows."""
     pytest.importorskip("healpy")
-    from darksirens.tool.darksirens_build_lognormal_completion import build_completion
-    from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
-    from darksirens.em.completion import completion_curves
+    from darksirens.cli.build_lognormal_completion import build_completion
+    from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+    from darksirens.redshift.completion import completion_curves
 
     cat = str(tmp_path / "survey.h5")
     npix = _write_tiny_survey(cat, nside=2)

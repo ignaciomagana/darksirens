@@ -8,7 +8,7 @@ from darksirens.inference.utils import (
     log_jacobian_m1src_q_z_to_m1det_q_dL,
     log_sample_weight,
 )
-from darksirens.utils.containers import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import z_of_dL, ddL_of_z
 
 

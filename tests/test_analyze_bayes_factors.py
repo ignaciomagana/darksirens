@@ -22,7 +22,7 @@ if "tinygp" not in sys.modules:
     sys.modules["tinygp"] = tinygp_stub
 
 
-from darksirens.tool.darksirens_analyze import _should_plot_bayes_factor_matrix
+from darksirens.cli.analyze import _should_plot_bayes_factor_matrix
 
 
 def test_bayes_factor_matrix_is_skipped_for_single_run():
@@ -39,7 +39,7 @@ def test_bayes_factor_matrix_is_plotted_for_model_pair():
 import h5py
 import numpy as np
 
-from darksirens.tool.darksirens_analyze import load_run
+from darksirens.cli.analyze import load_run
 
 
 def test_load_run_reads_current_results_hdf5_root_samples(tmp_path):

@@ -106,9 +106,9 @@ def test_load_all_data_returns_named_pe_counts_for_survey_fixture(
             2,
         )
 
-    monkeypatch.setattr(data_module, "load_gw_samples", fake_load_gw_samples)
+    monkeypatch.setattr(data_module.loaders, "load_gw_samples", fake_load_gw_samples)
     monkeypatch.setattr(
-        data_module, "load_selection_samples", fake_load_selection_samples
+        data_module.loaders, "load_selection_samples", fake_load_selection_samples
     )
 
     opts = SimpleNamespace(
@@ -174,9 +174,9 @@ def test_load_all_data_stores_bright_siren_counterpart_pixel_and_keeps_it_compac
             1,
         )
 
-    monkeypatch.setattr(data_module, "load_gw_samples", fake_load_gw_samples)
+    monkeypatch.setattr(data_module.loaders, "load_gw_samples", fake_load_gw_samples)
     monkeypatch.setattr(
-        data_module, "load_selection_samples", fake_load_selection_samples
+        data_module.loaders, "load_selection_samples", fake_load_selection_samples
     )
 
     opts = SimpleNamespace(
@@ -233,8 +233,8 @@ def test_load_all_data_accepts_multiple_bright_siren_counterparts(monkeypatch):
             1,
         )
 
-    monkeypatch.setattr(data_module, "load_gw_samples", fake_load_gw_samples)
-    monkeypatch.setattr(data_module, "load_selection_samples", fake_load_selection_samples)
+    monkeypatch.setattr(data_module.loaders, "load_gw_samples", fake_load_gw_samples)
+    monkeypatch.setattr(data_module.loaders, "load_selection_samples", fake_load_selection_samples)
 
     opts = SimpleNamespace(
         universe_model="bright_sirens",

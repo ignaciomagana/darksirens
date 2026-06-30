@@ -1,6 +1,6 @@
-# Command-line tools (`darksirens.tool`)
+# Command-line tools (`darksirens.cli`)
 
-Each `tool` module is an installed console script (see
+Each `darksirens.cli` module backs an installed console script (see
 [`setup.py` entry points](../cli.md)). This page documents what each program
 does and the modules behind them; full flag listings are in the
 [CLI reference](../cli.md).
@@ -10,9 +10,9 @@ does and the modules behind them; full flag listings are in the
 Bins a raw galaxy catalog (RA, Dec, $z$, optional weights and marks) onto a
 HEALPix grid at a chosen `nside`, producing the padded per-pixel survey datasets
 (`zgals`, `ngals`, `dzgals`, `wgals`, and any mark columns) that
-[`em.utils.load_survey`](em.md) reads.
+[`catalogs.io.load_survey`](api.md) reads.
 
-```{automodule} darksirens.tool.darksirens_pixelate
+```{automodule} darksirens.cli.pixelate
 :members:
 :undoc-members:
 :show-inheritance:
@@ -26,7 +26,7 @@ space and likelihood, runs the chosen sampler, and writes `results.hdf5` plus
 marked-host model, and (optionally) the LSS completion table and weak-lensing
 magnification via CLI flags.
 
-```{automodule} darksirens.tool.darksirens_inference
+```{automodule} darksirens.cli.inference
 :members:
 :undoc-members:
 :show-inheritance:
@@ -38,7 +38,7 @@ The strong-lensing variant: splits events into singletons and lensed image
 pairs and drives `darksiren_log_likelihood_with_clusters`
 ([`lensing`](lensing.md)) over a `ClusterSet` and a `LensedInjectionSet`.
 
-```{automodule} darksirens.tool.darksirens_inference_lensing
+```{automodule} darksirens.cli.inference_lensing
 :members:
 :undoc-members:
 :show-inheritance:
@@ -53,7 +53,7 @@ detection-rate $\mathrm{d}N/\mathrm{d}z$, and compares models via relative
 evidences and the pairwise Bayes-factor matrix. `load_run` reads the current
 grouped `results.hdf5` (with a legacy `samples.npy` fallback).
 
-```{automodule} darksirens.tool.darksirens_analyze
+```{automodule} darksirens.cli.analyze
 :members:
 :undoc-members:
 :show-inheritance:
@@ -63,13 +63,13 @@ grouped `results.hdf5` (with a legacy `samples.npy` fallback).
 
 The **offline** preprocessor that builds the LSS-conditioned lognormal
 completion file $Q_{\rm LSS}(p,z)$ from a pixelated catalog
-([`em.lognormal_completion`](em.md)). The `--mode radial` path solves an
+([`redshift.lognormal_completion`](em.md)). The `--mode radial` path solves an
 independent 1-D field per pixel; `--mode gp3d` solves one low-rank
 $(\text{sphere}\times z)$ field so empty pixels borrow angularly from their
 neighbours. Both write the same HDF5 table consumed by
 `darksirens_inference --lss_completion`.
 
-```{automodule} darksirens.tool.darksirens_build_lognormal_completion
+```{automodule} darksirens.cli.build_lognormal_completion
 :members:
 :undoc-members:
 :show-inheritance:
@@ -81,7 +81,7 @@ Diagnostic plots for a completion file at a chosen pixel: $Q_{\rm LSS}(p,z)$
 (MAP, posterior mean, and member band), the missing-galaxy density, and the
 assembled $p(z\mid\text{pix})$ including the Bayesian completion mean.
 
-```{automodule} darksirens.tool.darksirens_diagnose_lognormal_completion
+```{automodule} darksirens.cli.diagnose_lognormal_completion
 :members:
 :undoc-members:
 :show-inheritance:
@@ -92,7 +92,7 @@ assembled $p(z\mid\text{pix})$ including the Bayesian completion mean.
 Converts GW localisation sky maps into the per-event posterior samples consumed
 by the loaders, drawing distance/sky samples consistent with the map.
 
-```{automodule} darksirens.tool.darksirens_skymaps_to_samples
+```{automodule} darksirens.cli.skymaps_to_samples
 :members:
 :undoc-members:
 :show-inheritance:
