@@ -67,14 +67,12 @@ darksirens_inference \
 - `--nlive`: live points for nested samplers (`tinyns`, `dynesty`).
 - `--dlogz`: evidence stopping threshold for nested samplers (`tinyns`, `dynesty`).
 - `--max_samples`: maximum call/iteration budget for nested samplers (`dynesty` call cap, `tinyns` iteration cap); `0` = unlimited.
-- `--tinyns_sample`: `tinyns` proposal method: `rwalk` (default), `slice`, `rslice`, or `prior`.
+- `--tinyns_sample`: `tinyns` proposal method: `rwalk` or `prior` (TinyNS no longer supports `slice`/`rslice`; use `dynesty` for slice-style comparisons).
 - `--tinyns_kernel`: `tinyns` proposal kernel: `jax` (default, jitted) or `python`.
 - `--tinyns_walks`: `tinyns` number of random-walk steps per update (`sample=rwalk`).
 - `--tinyns_replacement_chains`: `tinyns` independent random-walk chains run in parallel per replacement (`rwalk`+`jax` only; default `1`).
 - `--tinyns_replacement_chain_schedule`: `tinyns` adaptive `rwalk`+`jax` escalation schedule, e.g. `1,4,16,64,256` (ascending). Starts at the smallest batch and escalates only when a stage fails, returning as soon as any stage succeeds. Mutually exclusive with `--tinyns_replacement_chains`.
 - `--tinyns_max_attempts`: `tinyns` maximum constrained-proposal attempts per replacement (tinyns default `10000`). Must be `>= walks * replacement_chains`; if left unset it auto-raises to that product when needed.
-- `--tinyns_slices`: `tinyns` number of slice directions per update.
-- `--tinyns_slice_steps`: `tinyns` maximum stepping-out steps per slice.
 - `--tinyns_step_scale`: `tinyns` initial proposal step scale as a fraction of the prior width.
 - `--tinyns_progress_interval`: `tinyns` iterations between progress-bar updates.
 - `--nuts_warmup`: NUTS warmup/adaptation steps for `numpyro`.
@@ -110,3 +108,19 @@ Important options:
 - `--nchi`, `--chimin`, `--chimax`: spin grid configuration.
 - `--batch_size`: posterior-predictive evaluation batch size.
 - `--cred_lo`, `--cred_hi`: lower and upper credible intervals.
+
+
+## TinyNS presets
+
+TinyNS support targets the current upstream sampler API. TinyNS modes are `rwalk`
+and `prior`; TinyNS no longer supports `slice`/`rslice` modes. Use `dynesty` for
+slice-style nested-sampling comparisons.
+
+The default `--tinyns_preset recommended` selects the fast current science path:
+`sample=rwalk`, `kernel=jax`, unbounded random-walk proposals, and a modest JAX
+block size. Other presets include `python_debug` for a pure-Python reference,
+`prior` for constrained-prior draws, `batched_gpu`/`adaptive_gpu` for GPU chain
+parallelism, and experimental bounded presets (`bounded_single`,
+`bounded_multi`, `fused_bounded_multi`). Explicit `--tinyns_*` options override
+the selected preset, and the resolved configuration is recorded in
+`tinyns_resolved_config` in `settings.json`.
