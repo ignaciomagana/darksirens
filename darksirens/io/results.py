@@ -117,16 +117,25 @@ def save_results_hdf5(
         f.attrs["dlogz"]           = float(opts.dlogz)
         f.attrs["tinyns_sample"]   = str(getattr(opts, "tinyns_sample", ""))
         f.attrs["tinyns_kernel"]   = str(getattr(opts, "tinyns_kernel", ""))
-        f.attrs["tinyns_walks"]    = int(getattr(opts, "tinyns_walks", 0))
-        f.attrs["tinyns_replacement_chains"] = int(getattr(opts, "tinyns_replacement_chains", 0))
+        f.attrs["tinyns_walks"]    = int(getattr(opts, "tinyns_walks", None) or 0)
+        f.attrs["tinyns_replacement_chains"] = int(getattr(opts, "tinyns_replacement_chains", None) or 0)
         # "" = unset (fixed replacement_chains path); else the escalation schedule.
         f.attrs["tinyns_replacement_chain_schedule"] = str(
             getattr(opts, "tinyns_replacement_chain_schedule", None) or "")
         # 0 = unset (sampler auto-picks max(10000, walks*replacement_chains)).
         f.attrs["tinyns_max_attempts"] = int(getattr(opts, "tinyns_max_attempts", None) or 0)
-        f.attrs["tinyns_slices"]   = int(getattr(opts, "tinyns_slices", 0))
-        f.attrs["tinyns_slice_steps"] = int(getattr(opts, "tinyns_slice_steps", 0))
-        f.attrs["tinyns_step_scale"]  = float(getattr(opts, "tinyns_step_scale", 0.0))
+        f.attrs["tinyns_preset"]   = str(getattr(opts, "tinyns_preset", ""))
+        f.attrs["tinyns_bound"]    = str(getattr(opts, "tinyns_bound", ""))
+        f.attrs["tinyns_step_scale"]  = float(getattr(opts, "tinyns_step_scale", None) or 0.0)
+        if getattr(opts, "tinyns_resolved_config", None) is not None:
+            f.attrs["tinyns_resolved_config"] = json.dumps(opts.tinyns_resolved_config, default=str)
+        if results.get("tinyns_summary") is not None:
+            f.attrs["tinyns_summary"] = str(results["tinyns_summary"])
+        if results.get("tinyns_diagnostics") is not None:
+            try:
+                f.attrs["tinyns_diagnostics"] = json.dumps(results["tinyns_diagnostics"], default=str)
+            except (TypeError, ValueError):
+                pass
         f.attrs["nuts_warmup"]     = int(getattr(opts, "nuts_warmup", 0))
         f.attrs["nuts_samples"]    = int(getattr(opts, "nuts_samples", 0))
         f.attrs["nuts_chains"]     = int(getattr(opts, "nuts_chains", 0))

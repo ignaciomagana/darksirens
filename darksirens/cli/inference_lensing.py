@@ -321,9 +321,8 @@ def build_parser():
     p.add_argument("--dlogz", type=float, default=0.1)
     p.add_argument("--max_samples", type=int, default=2_000_000)
     p.add_argument("--tinyns_sample", default="rwalk",
-                   choices=["rwalk", "slice", "rslice", "prior"],
-                   help="tinyns proposal: random walk (default), slice, reflective "
-                        "slice, or prior.")
+                   choices=["rwalk", "prior"],
+                   help="tinyns proposal: random walk (default) or prior.")
     p.add_argument("--tinyns_kernel", default="jax", choices=["jax", "python"],
                    help="tinyns proposal kernel: jitted JAX (default) or pure Python.")
     p.add_argument("--tinyns_walks", type=int, default=25,
@@ -340,10 +339,6 @@ def build_parser():
                    help="tinyns: max constrained-proposal attempts per replacement "
                         "(tinyns default 10000). Must be >= walks*replacement_chains; "
                         "if unset it auto-raises to that product when needed.")
-    p.add_argument("--tinyns_slices", type=int, default=5,
-                   help="tinyns: number of slice directions per update.")
-    p.add_argument("--tinyns_slice_steps", type=int, default=10,
-                   help="tinyns: max stepping-out steps per slice.")
     p.add_argument("--tinyns_step_scale", type=float, default=0.1,
                    help="tinyns: initial step scale as a fraction of the prior width.")
     p.add_argument("--tinyns_progress_interval", type=int, default=100,

@@ -319,7 +319,7 @@ to ignore the counterpart sky-pixel gate and apply only the counterpart redshift
 
 | Sampler | Description |
 | --- | --- |
-| `tinyns` | Lightweight JAX nested sampler (dynesty-compatible) with a JAX-kernel random-walk proposal (slice/rslice also available) and evidence output. Default. |
+| `tinyns` | Lightweight JAX nested sampler (dynesty-compatible) with a JAX-kernel random-walk proposal and evidence output. TinyNS supports `rwalk`/`prior`; use `dynesty` for slice-style comparisons. Default. |
 | `dynesty` | Dynamic/static nested-sampling backend with evidence output. |
 | `numpyro` | JAX NUTS (HMC) backend; posterior samples, no evidence. |
 
@@ -330,14 +330,12 @@ Common sampler options:
 | `--nlive` | `1000` | `tinyns`, `dynesty` | Number of live points. |
 | `--dlogz` | `0.1` | `tinyns`, `dynesty` | Evidence stopping threshold. |
 | `--max_samples` | `1000000` | `dynesty` call cap, `tinyns` iteration cap | Maximum call/iteration budget (`0` = unlimited). |
-| `--tinyns_sample` | `rwalk` | `tinyns` | Proposal method: `rwalk`, `slice`, `rslice`, or `prior`. |
+| `--tinyns_sample` | `rwalk` | `tinyns` | Proposal method: `rwalk` or `prior` (TinyNS no longer supports `slice`/`rslice`). |
 | `--tinyns_kernel` | `jax` | `tinyns` | Proposal kernel: `jax` (jitted) or `python`. |
 | `--tinyns_walks` | `25` | `tinyns` | Number of random-walk steps per update (`sample=rwalk`). |
 | `--tinyns_replacement_chains` | `1` | `tinyns` | Independent random-walk chains run in parallel per replacement (`rwalk`+`jax` only). |
 | `--tinyns_replacement_chain_schedule` | `none` | `tinyns` | Adaptive `rwalk`+`jax` escalation schedule (ascending, e.g. `1,4,16,64,256`); escalates only when a stage fails. Mutually exclusive with `--tinyns_replacement_chains`. |
 | `--tinyns_max_attempts` | auto (`10000`) | `tinyns` | Max constrained-proposal attempts per replacement. Must be `>= walks * replacement_chains`; auto-raised to that product when unset. |
-| `--tinyns_slices` | `5` | `tinyns` | Number of slice directions per update. |
-| `--tinyns_slice_steps` | `10` | `tinyns` | Maximum stepping-out steps per slice. |
 | `--tinyns_step_scale` | `0.1` | `tinyns` | Initial proposal step scale (fraction of prior width). |
 | `--tinyns_progress_interval` | `100` | `tinyns` | Iterations between progress-bar updates. |
 | `--nuts_warmup` | `500` | `numpyro` | Number of NUTS adaptation/warmup steps. |
