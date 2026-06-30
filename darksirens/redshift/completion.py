@@ -39,7 +39,7 @@ enter the model only through this product — they are exactly degenerate —
 so only ``b_miss`` is sampled and ``alpha_miss`` defaults to 1.)
 ``dN_miss`` carries the same (1+z)^delta evolution as dN_exp, and is the
 quantity the assembled redshift prior adds to the catalog counts; see
-``darksirens/em/prior.py``.
+``darksirens/redshift/prior.py``.
 
 Per-pixel KDE cache
 -------------------
@@ -49,7 +49,7 @@ appearing in the PE and selection sample sets, once at startup, stored
 as ``EMCatalog.dN_obs_kde`` with the lookup ``EMCatalog.pixel_to_cache_idx``
 indexed by the *same key space the cache was built with* (global HEALPix
 pixel in the production union path; see
-``darksirens/inference/catalog_views.py``).
+``darksirens/likelihood/catalog_views.py``).
 
 Public API
 ----------
@@ -78,7 +78,7 @@ from typing import NamedTuple
 from darksirens.utils.cosmology import dV_of_z
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
-from darksirens.catalogs.io import zgrid
+from darksirens.redshift.grid import zgrid
 
 
 # Gaussian kernel width for the completeness ratio (both sides).

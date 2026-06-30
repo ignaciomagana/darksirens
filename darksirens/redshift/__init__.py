@@ -5,7 +5,7 @@ This package contains redshift-prior, catalog-completion, lognormal LSS
 completion, and volume-prior math for dark-siren inference.
 """
 
-from darksirens.catalogs.io import zgrid, zMax, load_survey
+from darksirens.redshift.grid import zgrid, zMax
 from darksirens.redshift.catalog import log_catalog_prior, log_catalog_prior_vmap
 from darksirens.redshift.prior import get_redshift_prior, PRIOR_REGISTRY
 from darksirens.redshift.volume import log_volume_prior

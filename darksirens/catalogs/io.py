@@ -1,23 +1,12 @@
-"""
-utils.py
---------
-Module-level utilities and redshift grid shared across all submodules.
+"""Survey catalog I/O helpers.
 
-The grid is defined once here so that JAX can trace through it at
-compile time (via `jit`) without recompilation when it is imported by
-multiple submodules.  Using a log-spaced grid gives finer resolution
-at low redshift where the catalog is densest, and coarser resolution
-at high redshift where the prior is smooth.
+This module loads pixelated survey HDF5 files and optional per-galaxy mark
+datasets. Redshift grids live in :mod:`darksirens.redshift.grid`.
 """
 
 import jax.numpy as jnp
 import numpy as np
 import h5py
-
-# Log-spaced from z~0 to zMax, giving 1000 points.
-# expm1(linspace(log(1), log(zMax+1))) maps [0, log(zMax+1)] → [0, zMax].
-zMax: float = 5.0
-zgrid = jnp.expm1(jnp.linspace(jnp.log(1.0), jnp.log(zMax + 1.0), 1000))
 
 
 def load_survey(survey_path, to_device=True):

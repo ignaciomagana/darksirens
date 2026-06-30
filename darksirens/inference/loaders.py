@@ -8,6 +8,7 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.catalogs.io import load_survey
 
 from darksirens.redshift import zgrid, compute_lss_overdensity
+from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
 
 from darksirens.catalogs.compact import (
     _catalog_memory_diagnostics,
@@ -18,8 +19,6 @@ from darksirens.catalogs.counterparts import build_counterpart_catalog
 from darksirens.catalogs.lss import maybe_load_lss_completion
 from darksirens.catalogs.marks import load_and_center_survey_marks
 
-GALAXY_AWARE_MODELS = ["dark_sirens", "dark_sirens_complete"]
-BRIGHT_SIREN_MODELS = ["bright_sirens"]
 
 
 def load_or_build_catalog_inputs(opts) -> dict:

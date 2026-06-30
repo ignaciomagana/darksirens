@@ -96,7 +96,7 @@ from darksirens.redshift.catalog import (
 )
 from darksirens.redshift.completion import completion_curves, log_galaxy_measure_grid
 
-from darksirens.catalogs.io import zgrid
+from darksirens.redshift.grid import zgrid
 
 
 COMPLETE_EMPTY_PIXEL_POLICY_ZERO = 0

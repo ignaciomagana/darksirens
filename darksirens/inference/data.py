@@ -3,10 +3,8 @@
 import jax.numpy as jnp
 
 from darksirens.catalogs.compact import validate_loaded_survey_shapes
-from darksirens.gw.samples import load_gw_samples, load_selection_samples
-from darksirens.catalogs.io import load_survey
 from darksirens.inference import loaders
-from darksirens.inference.loaders import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
+from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
 
 
 def load_all_data(opts):
@@ -14,12 +12,6 @@ def load_all_data(opts):
     Loads survey, GW posterior, and selection data.
     Handles cases where survey_path might be None (non-dark sirens models).
     """
-    # Keep historical monkeypatch points on darksirens.inference.data working
-    # while the implementation lives in the staged loader module.
-    loaders.load_survey = load_survey
-    loaders.load_gw_samples = load_gw_samples
-    loaders.load_selection_samples = load_selection_samples
-
     catalog_inputs = loaders.load_or_build_catalog_inputs(opts)
     gw_inputs = loaders.load_gw_and_selection_inputs(opts)
 
