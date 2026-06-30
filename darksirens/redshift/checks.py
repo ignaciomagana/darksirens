@@ -42,7 +42,7 @@ import jax.numpy as jnp
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
-from darksirens.catalogs.io import zgrid
+from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import catalog_completion_vmap
 from .catalog import log_catalog_prior_vmap
 from .volume import log_volume_prior

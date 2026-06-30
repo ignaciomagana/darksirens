@@ -2,8 +2,7 @@
 
 import numpy as np
 
-
-GALAXY_AWARE_MODELS = ["dark_sirens", "dark_sirens_complete"]
+from darksirens.core.model_kinds import GALAXY_AWARE_MODELS
 
 
 def maybe_load_lss_completion(opts, *, zgrid) -> dict:

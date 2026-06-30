@@ -19,14 +19,25 @@ corresponding one-shot prior function.
 :show-inheritance:
 ```
 
+## `darksirens.redshift.grid`
+
+Owns the package redshift grid `zgrid` (1000 points, $z\in[0,5]$, finer at low
+$z$ where the catalog is densest) and `zMax`. Redshift prior and completion code
+imports the grid from this module so JAX can trace through one shared constant
+without making catalog I/O own redshift-grid state.
+
+```{automodule} darksirens.redshift.grid
+:members:
+:undoc-members:
+:show-inheritance:
+```
+
 ## `darksirens.catalogs.io`
 
-Module-level utilities shared across the subpackage: the log-spaced redshift
-grid `zgrid` (1000 points, $z\in[0,5]$, finer at low $z$ where the catalog is
-densest) and `load_survey`, which reads the pixelated catalog datasets
-(`zgals`, `ngals`, `dzgals`, `wgals`) and the `nside` attribute. The grid is
-defined once so JAX can trace through it without recompilation. Optional marked
-fields are loaded by `load_survey_marks`.
+Survey catalog I/O lives here. `load_survey` reads the pixelated catalog
+datasets (`zgals`, `ngals`, `dzgals`, `wgals`) and the `nside` attribute;
+optional marked fields are loaded by `load_survey_marks`. The redshift package
+no longer re-exports survey loading.
 
 ```{automodule} darksirens.catalogs.io
 :members:

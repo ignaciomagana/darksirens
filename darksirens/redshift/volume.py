@@ -32,7 +32,7 @@ from jax import jit, vmap
 from darksirens.utils.cosmology import dV_of_z
 from darksirens.core.types import CosmoParams, SurveyParams
 
-from darksirens.catalogs.io import zgrid
+from darksirens.redshift.grid import zgrid
 
 
 def _precompute_volume_grid(cosmo: CosmoParams) -> jnp.ndarray:

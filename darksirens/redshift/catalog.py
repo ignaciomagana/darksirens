@@ -52,7 +52,7 @@ from typing import NamedTuple
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
-from darksirens.catalogs.io import zgrid
+from darksirens.redshift.grid import zgrid
 from .completion import log_galaxy_measure_grid
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])

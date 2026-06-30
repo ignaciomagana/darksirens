@@ -27,10 +27,8 @@ from darksirens.likelihood.core import (
     WL_BACKEND_LOGNORMAL,
     WL_BACKEND_TABULATED,
 )
+from darksirens.core.constants import H0_FID, OM0_FID, SURVEY_PARAMS_FID
 from darksirens.inference.parameters import (
-    H0_FID,
-    OM0_FID,
-    SURVEY_PARAMS_FID,
     build_parameter_decoder,
     complete_empty_pixel_policy_code,
 )

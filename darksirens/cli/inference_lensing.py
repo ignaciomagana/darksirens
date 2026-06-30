@@ -53,13 +53,12 @@ darksirens_inference_lensing \
     --save_path ./run_singleton/
 """
 from __future__ import annotations
+# JAX memory configuration (before any JAX import)
+from darksirens.core.jax_config import configure_jax_runtime
+
+configure_jax_runtime()
+
 import os
-
-# JAX memory config BEFORE importing jax (matches the stock CLI)
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
-os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
-
 import sys
 import json
 import time
@@ -70,7 +69,6 @@ import numpy as np
 import h5py
 import healpy as hp
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 # ── branch machinery we reuse ────────────────────────────────────────────────

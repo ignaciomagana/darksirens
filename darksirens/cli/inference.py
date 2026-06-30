@@ -64,7 +64,7 @@ from darksirens.redshift.completion import build_pixel_kde_cache, completion_cli
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
-from darksirens.inference.parameters import H0_FID, OM0_FID, W0_FID, WA_FID
+from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
 
 warnings.simplefilter("ignore", FutureWarning)
 

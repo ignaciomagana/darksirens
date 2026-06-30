@@ -36,7 +36,7 @@ import seaborn as sns
 
 from darksirens.gw.populations import pop_model_parser
 from darksirens.inference.pop_extractor import make_pop_extractor
-from darksirens.inference.parameters import H0_FID, OM0_FID, W0_FID, WA_FID
+from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
 from darksirens.utils.cosmology import dV_of_z
 from darksirens.utils.plotting import (
     set_publication_style,
