@@ -130,13 +130,30 @@ the per-pair PE likelihood.
 The mock generator writes optional SIS time-delay metadata into
 `mock_pair_pe.h5`: `delta_t_obs`, `sigma_delta_t`, `true_y`, `true_delta_t`, and
 image arrival-time attributes.  These marks are inert by default.  Add
-`--pair_marks time` to include the Gaussian time-delay mark in the J=2 likelihood
-for fixed partitions only; `--pair_time_sigma_sec` is only a fallback when pair
-metadata has `delta_t_obs` but omits `sigma_delta_t`.  Exact candidate-pair
-marginalization (`--partition_mode marginalize_exact`) must use
-`--pair_marks none` until candidate-edge time metadata is implemented, because
-the current pair-PE time metadata is indexed by pair ordinal (`pair_0`,
-`pair_1`, ...) rather than by candidate-edge identity.
+`--pair_marks time` to include the Gaussian time-delay mark in the J=2 likelihood.
+For fixed partitions, the likelihood continues to read ordinal `pair_pe`
+metadata (`pair_0`, `pair_1`, ...); `--pair_time_sigma_sec` is only a fallback
+when pair metadata has `delta_t_obs` but omits `sigma_delta_t`.  For exact
+candidate-pair marginalization (`--partition_mode marginalize_exact`), time
+marks must be stored on every selectable candidate edge in `candidate_pairs.json`
+so each evaluated partition can gather marks by candidate-edge identity.
+
+Example candidate edge with time marks::
+
+  {
+    "i": 4,
+    "j": 19,
+    "log_prior_odds": -2.0,
+    "label": "candidate",
+    "marks": {
+      "delta_t_obs": 12345.0,
+      "sigma_delta_t": 3600.0
+    }
+  }
+
+Both `marks.delta_t_obs` and positive finite `marks.sigma_delta_t` must be
+present together.  Marginalized `--pair_marks time` runs fail preflight if any
+candidate edge lacks these marks.
 
 ### Lens-rate sampling
 
@@ -418,7 +435,7 @@ catalog-selection support.
 
 ### Marginalized partition diagnostics
 
-For spectral-siren lensing runs with `--cluster_mode j2`, fixed-partition diagnostics describe exactly one materialized partition: the `singleton_indices` and `pair_indices` supplied by `--partition_path`.  Fixed partitions are also the only mode that currently supports `--pair_marks time`, because the stored pair-PE time-delay metadata is pair-ordinal.  In contrast, `--partition_mode marginalize_exact` enumerates every compatible matching from `--candidate_pairs_path`, evaluates the scalar likelihood for each partition, and writes diagnostics marginalized over the posterior partition weights.  Exact candidate-pair marginalization requires edge-indexed marks, so marginalized runs must use `--pair_marks none` until candidate-edge time metadata is implemented.
+For spectral-siren lensing runs with `--cluster_mode j2`, fixed-partition diagnostics describe exactly one materialized partition: the `singleton_indices` and `pair_indices` supplied by `--partition_path`.  Fixed partitions use pair-ordinal time-delay metadata from `pair_pe`.  In contrast, `--partition_mode marginalize_exact` enumerates every compatible matching from `--candidate_pairs_path`, evaluates the scalar likelihood for each partition, and writes diagnostics marginalized over the posterior partition weights.  Marginalized `--pair_marks time` uses edge-indexed candidate marks rather than pair-ordinal `pair_pe` metadata.
 
 A marginalized `diagnostics.json` includes the prior normalizer (`log_z_partition_prior`), marginalized scalar likelihood (`logL_marginalized`, also aliased as `logL_total`), per-partition prior weights and likelihoods, posterior partition probabilities, posterior pair probabilities in the validated candidate-pair order, the posterior expected numbers of pairs and singletons, and a compact MAP partition object.  Candidate pairs are treated as unordered edges; if an input pair is written as `(j, i)`, the validated diagnostics report the normalized order `(min(i, j), max(i, j))` while preserving optional `label` and `log_prior_odds` fields.
 

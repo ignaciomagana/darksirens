@@ -106,7 +106,11 @@ def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary):
                         errors.append(f"{pname} event-index metadata {pair} does not match partition pair {partition_pairs[k]}")
                 has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
                 has_sig = "sigma_delta_t" in g.attrs or "sigma_delta_t" in g or _get(opts, "pair_time_sigma_sec") is not None
-                if _get(opts, "pair_marks", "none") == "time":
+                fixed_time_marks = (
+                    _get(opts, "pair_marks", "none") == "time"
+                    and _get(opts, "partition_mode", "fixed") == "fixed"
+                )
+                if fixed_time_marks:
                     if not has_dt:
                         errors.append(f"pair_marks=time requires delta_t_obs metadata for {pname}")
                     if not has_sig:
@@ -144,6 +148,14 @@ def _check_candidates(path, n_events, opts, errors, summary):
         summary["n_candidate_pairs"] = len(pairs)
         if n_events is not None and cand_n != n_events:
             errors.append(f"candidate_pairs n_events={cand_n} does not match gw n_events={n_events}")
+        if _get(opts, "pair_marks", "none") == "time":
+            for pair in pairs:
+                if pair.delta_t_obs is None or pair.sigma_delta_t is None:
+                    errors.append(
+                        "candidate pair "
+                        f"({pair.i},{pair.j}) missing marks.delta_t_obs/sigma_delta_t "
+                        "required by pair_marks=time"
+                    )
         states = enumerate_compatible_partitions(cand_n, pairs, max_partitions=int(_get(opts, "max_exact_partitions", 10000)))
         summary["n_exact_partitions"] = len(states)
     except Exception as exc:
@@ -174,19 +186,11 @@ def _check_lensed(path, errors, summary):
         errors.append(f"lensed_injections_path not readable: {path}: {exc}")
 
 
-UNSAFE_MARGINALIZED_TIME_MARKS_ERROR = 'pair_marks=time is currently unsafe with partition_mode=marginalize_exact because pair time metadata is indexed by pair_pe ordinal, not candidate-edge identity. Use --pair_marks none or implement candidate-edge time marks.'
-
 
 def run_lensing_preflight(opts) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     summary = {"cluster_mode": _get(opts, "cluster_mode"), "partition_mode": _get(opts, "partition_mode", "fixed"), "pair_marks": _get(opts, "pair_marks", "none"), "p_tag_present": False}
-    if (
-        _get(opts, "cluster_mode") == "j2"
-        and _get(opts, "partition_mode", "fixed") == "marginalize_exact"
-        and _get(opts, "pair_marks", "none") == "time"
-    ):
-        errors.append(UNSAFE_MARGINALIZED_TIME_MARKS_ERROR)
     n_events, _ = _infer_gw(_get(opts, "gw_path"), errors, summary)
     _exists(_get(opts, "gwselection_path"), errors, "gwselection_path")
     partition_pairs = []
