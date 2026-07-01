@@ -867,3 +867,83 @@ Recommended robustness studies should run at least three simulated cases: the
 correct injected `p_tag` model, a perturbed `p_tag` model, and a constant `p_tag`
 model.  Differences in the recovered lens-rate parameters quantify sensitivity
 to pair-identification/tagging selection uncertainty.
+
+## Simulated end-to-end study
+
+`scripts/mock_lensing/run_simulated_lensing_study.py` is the mock-only runner for
+an end-to-end spectral-siren lensing validation study.  A single command
+constructs observed-event mocks, rebuilds the candidate graph from observed PE
+and observed metadata, runs CLI preflight checks, launches inference, and then
+uses truth labels only in the final evaluation step:
+
+```bash
+python scripts/mock_lensing/run_simulated_lensing_study.py \
+  --workdir runs/simulated_lensing_study \
+  --profile tiny \
+  --sampler dynesty \
+  --diagnostics_only true
+```
+
+The runner intentionally does not ingest real GWTC releases and does not use
+galaxy catalogs, LSS fields, host probabilities, or dark-siren catalog support.
+Its inference inputs are the unified observed-event PE file
+`mock_observed_gw_pe.h5`, `observed_catalog.json`, the selection files, and the
+observed-data candidate graph `candidate_pairs.json`; truth-shaped pair PE is
+not part of the inference path.
+
+### Study cases
+
+The built-in matrix covers the following controlled simulation cases:
+
+* `A_no_true_pairs_sparse_wrong_graph`: a null mock with no injected lensed
+  pairs and a sparse graph of candidate wrong edges.
+* `B_true_pairs_clean_graph`: injected pairs with a low-degree graph intended to
+  isolate the strongest observed-data candidates.
+* `C_true_pairs_many_wrong_edges`: injected pairs with a larger wrong-edge
+  budget to test false-positive control.
+* `D_true_pairs_bad_pair_tag`: injected pairs with a deliberately perturbed
+  pair-tag model at inference time to quantify `p_tag` model bias.
+* `E_true_pairs_no_sky_marks`: injected pairs with sky marks omitted from the
+  candidate graph and edge-prior model.
+* `F_true_pairs_no_time_marks`: injected pairs with time-delay marks omitted
+  from the pair likelihood.
+* `G_true_pairs_full_marks`: injected pairs with time and sky marks enabled.
+* `H_ambiguous_components`: injected pairs with higher-degree components to
+  exercise exact candidate-partition marginalisation in ambiguous graphs.
+
+### Outputs
+
+Each run writes a reproducible manifest and summary products under `--workdir`:
+
+* `run_manifest.json`: full command plan, case settings, seeds, preflight
+  commands, and inference commands.  With `--dry_run true`, this manifest and
+  `validation_plan.json` are written without generating mocks or running
+  inference.
+* `validation_summary.json`: per-case preflight/inference status, diagnostics,
+  result attributes, recovery metrics, evidence placeholders, lens-rate summary
+  fields, and pair-tag bias fields.
+* `validation_summary.md`: compact Markdown table for quick inspection.
+* `posterior_pair_probabilities.csv`: posterior probability for each candidate
+  edge, annotated with truth labels only after inference.
+* `partition_component_summary.csv`: candidate graph size and partition-level
+  summary fields per case.
+* `truth_recovery_summary.csv`: injected pair count, expected pair count, MAP
+  pair count, mean true-edge posterior probability, maximum/summed false-edge
+  posterior probability, and MAP exact-truth-match flag when available.
+* `bias_summary.csv`: case-level pair-tag model and perturbation summary for
+  diagnosing bad-`p_tag` runs.
+
+### Diagnostics-only versus evidence runs
+
+`--diagnostics_only true` forces the inference command onto the compile and
+likelihood-diagnostic path (`max_samples=0`, small `nlive`, loose `dlogz`).  This
+is appropriate for fast CI checks and for validating schemas, graph building,
+preflight behavior, and finite diagnostic likelihood terms.  Evidence values
+from diagnostics-only runs are not meaningful and should not be used for paper
+claims.
+
+Use `--diagnostics_only false` with an adequate profile, sampler, `--nlive`, and
+`--dlogz` for evidence and posterior summaries.  These full runs are the basis
+for paper figures that compare recovery, evidence differences such as
+`delta_logZ_j2_minus_off`, false-positive behavior, and pair-tag model bias
+across the simulated study matrix.
