@@ -221,7 +221,8 @@ bash scripts/mock_lensing/run_tiny_lensing_validation.sh
 ```
 
 Preview the heavier evidence validation without generating mocks or launching a
-sampler with dry-run mode:
+sampler with dry-run mode.  `--dry_run true` writes `validation_plan.json` with
+the mock-generation commands and per-case inference commands, then exits:
 
 ```bash
 python scripts/mock_lensing/run_lensing_evidence_validation.py \
@@ -230,8 +231,24 @@ python scripts/mock_lensing/run_lensing_evidence_validation.py \
   --dry_run true
 ```
 
+For a fast end-to-end wiring check, use diagnostics-only mode.  This still
+generates the tiny mocks, runs the lensing CLI preflight before every case, and
+executes the prior-midpoint compile/diagnostics path, but it passes
+`--max_samples 0` so it does **not** produce meaningful sampler evidence:
+
+```bash
+python scripts/mock_lensing/run_lensing_evidence_validation.py \
+  --profile tiny_evidence \
+  --workdir /tmp/ds_lens_evidence_diag \
+  --use_unified_observed_catalog true \
+  --diagnostics_only true
+```
+
 A local opt-in evidence run uses loose nested-sampling settings so that it is
-manageable on a workstation rather than production scale:
+manageable on a workstation rather than production scale.  This is the mode that
+can populate evidence-based `logZ` comparisons; it is intentionally not part of
+default CI and should be run locally or on a cluster before producing paper
+figures:
 
 ```bash
 python scripts/mock_lensing/run_lensing_evidence_validation.py \
@@ -244,23 +261,44 @@ python scripts/mock_lensing/run_lensing_evidence_validation.py \
   --reuse
 ```
 
+By default the runner also launches a preflight-only command before each actual
+inference command and writes `<case>/preflight.json`; `--skip_preflight true` is
+available only for debugging.  If a preflight fails, that case is marked
+`failed_preflight`, the sampler is not launched for that case, the remaining
+independent cases continue, and the runner exits nonzero.
+
 The runner writes `validation_summary.json` and `validation_summary.md`.  The
 matrix compares a singleton-only true catalog (`off_true_catalog`), fixed true
 J=2 partition (`j2_fixed_true`), deliberately shuffled/wrong fixed partition
 (`j2_fixed_wrong`), zero-pair null mock (`j2_null` plus `off_null` for evidence
 control), exact marginalized candidate-pair mode when `candidate_pairs.json` is
 available (`j2_marginalized`), and a batched fixed-true run (`j2_batched`).  It
-collects each latest run directory, `diagnostics.json`, `results.hdf5`
-attributes, sampler evidence when available, labels, lens-parameter posterior
-summaries when sampled, and runtime metadata.
+collects each case status, command, preflight command and JSON report, start and
+finish times, runtime, return code, latest run directory, `diagnostics.json`,
+`results.hdf5` attributes, sampler evidence and `logZerr` when available,
+labels, lens-parameter posterior summaries when sampled, and runtime metadata.
+The Markdown summary includes a table with case, status, `logZ`, `logZerr`,
+prior-midpoint `logL_total`, pair likelihood sum, pair count, runtime, and run
+directory.
 
 Pass/fail checks cover run completion, finite diagnostics, true-pair
 `pair_logL_sum` exceeding the shuffled partition, null/off modes reporting zero
-pairs, batched and unbatched prior-midpoint `logL_total` agreement, evidence
-ordering when `logZ` is available, and marginalized-run posterior-pair metadata.
-Failures usually indicate either a mock-generation problem, a regression in the
-J=2 likelihood/partition plumbing, numerical instability, or sampler settings
-that are too loose for the requested evidence comparison.  The optional
+pairs, batched and unbatched prior-midpoint `logL_total` agreement at `1e-6`,
+evidence ordering when `logZ` is available, and marginalized-run posterior-pair
+metadata.  Evidence-based checks are those that use `results.hdf5` `logZ`
+attributes, such as true-vs-wrong evidence ordering and the null J=2 vs off
+comparison when both evidences exist.  Prior-midpoint diagnostic checks use
+`diagnostics.json`; they prove the likelihood plumbing compiled and evaluated at
+the prior midpoint, but they are not evidence.  If null-run `logZ` values are
+unavailable, the runner records `logL_j2_null_minus_off_null` and warns that the
+fallback is diagnostic-only, not evidence.
+
+Exact marginalized checks require `partition_mode == "marginalize_exact"`, at
+least one enumerated partition, finite `expected_n_pairs`, posterior pair
+probabilities in `[0, 1]`, and posterior probabilities whose sum matches
+`expected_n_pairs`.  Newer result files may also include `expected_n_pairs` and
+`map_partition_n_pairs` attributes; absence of those attributes is warned, not
+failed, for compatibility with older branches.  The optional
 `--run_lens_rate_recovery true` path is experimental; it uses a
 Poisson-conditioned mock and samples `log10_tau_A` while fixing `tau_n` through
 `--fixed_parameter_values`.
