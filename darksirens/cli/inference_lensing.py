@@ -97,6 +97,7 @@ from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
 from darksirens.lensing.partitions import exact_partitions_from_json, validate_candidate_pairs
+from darksirens.lensing.preflight import run_lensing_preflight
 from darksirens.lensing.marginal_diagnostics import compute_marginalized_partition_diagnostics
 from darksirens.likelihood.pair_kde import (
     make_pair_kde, stack_pair_kdes, validate_pair_prior_wt,
@@ -739,6 +740,10 @@ def build_parser():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--show_progress", action="store_true")
     p.add_argument("--save_path", default="./")
+    p.add_argument("--preflight_only", default="false",
+                   help="true runs lensing input preflight checks, writes JSON, and exits before compilation/sampling")
+    p.add_argument("--preflight_json", default=None,
+                   help="optional output path for preflight JSON (defaults to save_path/preflight.json when --preflight_only true)")
     return p
 
 
@@ -755,6 +760,7 @@ def main():
     opts.fix_survey = _str2bool(opts.fix_survey)
     opts.fix_population = _str2bool(opts.fix_population)
     opts.fix_lens_rate = _str2bool(opts.fix_lens_rate)
+    opts.preflight_only = _str2bool(opts.preflight_only)
     os.makedirs(opts.save_path, exist_ok=True)
     if opts.sampler == "tinyns":
         build_tinyns_config(opts)
@@ -781,6 +787,24 @@ def main():
         f"fix_lens_rate={opts.fix_lens_rate}, sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
         flush=True,
     )
+
+    preflight = run_lensing_preflight(opts)
+    print("preflight summary:", json.dumps(preflight["summary"], sort_keys=True), flush=True)
+    for warning in preflight["warnings"]:
+        print(f"  [preflight warning] {warning}", flush=True)
+    for error in preflight["errors"]:
+        print(f"  [preflight error] {error}", flush=True)
+    if opts.preflight_only:
+        out_path = opts.preflight_json or os.path.join(opts.save_path, "preflight.json")
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(preflight, f, indent=2, allow_nan=False)
+            f.write("\n")
+        print(f"wrote preflight JSON: {out_path}", flush=True)
+        raise SystemExit(0 if preflight["ok"] else 2)
+    if not preflight["ok"]:
+        raise SystemExit("preflight failed; fix input errors or run --preflight_only true for JSON details")
+
     print("loading data ...", flush=True)
     inp = load_inputs(opts)
     print(f"  events: {inp['nEvents']}  ({inp['n_singletons']} singletons "

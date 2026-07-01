@@ -1178,3 +1178,138 @@ def test_exact_enumeration_rejects_over_limit():
     })
     with pytest.raises(ValueError, match="max_partitions=2"):
         enumerate_compatible_partitions(n_events, pairs, max_partitions=2)
+
+# Lensing preflight tests
+
+def _write_preflight_mock(tmp_path, *, n_events=3, bad_prior=False, include_time=True):
+    import json
+    import h5py
+    import numpy as np
+    from types import SimpleNamespace
+
+    gw = tmp_path / "gw.h5"
+    sel = tmp_path / "sel.h5"
+    lens = tmp_path / "lensed.h5"
+    pair = tmp_path / "pair.h5"
+    part = tmp_path / "partition.json"
+    cand = tmp_path / "candidate_pairs.json"
+    nsamp = 4
+    with h5py.File(gw, "w") as f:
+        f.attrs["nobs"] = n_events
+        f.attrs["nsamp"] = nsamp
+        f.create_dataset("m1det", data=np.ones(n_events * nsamp))
+    with h5py.File(sel, "w") as f:
+        f.attrs["ndraw"] = 10
+    with h5py.File(lens, "w") as f:
+        f.attrs["Ndraw_sources"] = 5
+        f.create_dataset("p_tag_per_source", data=np.ones(5))
+    with h5py.File(pair, "w") as f:
+        f.attrs["npairs"] = 1
+        g = f.create_group("pair_0")
+        g.attrs["event_index_image0"] = 1
+        g.attrs["event_index_image1"] = 2
+        if include_time:
+            g.attrs["delta_t_obs"] = 12.0
+            g.attrs["sigma_delta_t"] = 1.0
+        for name in ("image0", "image1"):
+            gi = g.create_group(name)
+            gi.create_dataset("m1det", data=np.arange(1, nsamp + 1.0))
+            gi.create_dataset("q", data=np.full(nsamp, 0.8))
+            gi.create_dataset("dL_app", data=np.arange(10, 10 + nsamp, dtype=float))
+            gi.create_dataset("chieff", data=np.zeros(nsamp))
+            prior = np.ones(nsamp)
+            if bad_prior and name == "image1":
+                prior[0] = 0.0
+            gi.create_dataset("prior_wt", data=prior)
+    part.write_text(json.dumps({"singleton_indices": [0], "pair_indices": [[1, 2]], "n_singletons": 1, "n_pairs": 1}))
+    cand.write_text(json.dumps({"n_events": n_events, "candidate_pairs": [{"i": 1, "j": 2, "log_prior_odds": 0.0}]}))
+    opts = SimpleNamespace(
+        gw_path=str(gw), gwselection_path=str(sel), lensed_injections_path=str(lens),
+        pair_pe_path=str(pair), partition_path=str(part), candidate_pairs_path=str(cand),
+        partition_mode="fixed", cluster_mode="j2", pair_marks="none", pair_time_sigma_sec=None,
+        wl_backend="lognormal", wl_selection="standard", fix_lens_rate=True,
+        sl_tau_A=5e-4, sl_tau_n=3.0, lens_prior_overrides=None, max_exact_partitions=10000,
+    )
+    return opts
+
+
+def test_lensing_preflight_valid_tiny_mock_passes(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path)
+    result = run_lensing_preflight(opts)
+    assert result["ok"], result
+    assert result["summary"]["n_events"] == 3
+    assert result["summary"]["n_pairs_pair_pe"] == 1
+
+
+def test_lensing_preflight_missing_pair_pe_path_errors_for_j2(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path)
+    opts.pair_pe_path = str(tmp_path / "missing_pair.h5")
+    result = run_lensing_preflight(opts)
+    assert not result["ok"]
+    assert any("pair_pe_path" in e for e in result["errors"])
+
+
+def test_lensing_preflight_duplicate_fixed_partition_errors(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    import json
+    opts = _write_preflight_mock(tmp_path)
+    opts.partition_path = str(tmp_path / "dup_partition.json")
+    (tmp_path / "dup_partition.json").write_text(json.dumps({"singleton_indices": [1], "pair_indices": [[1, 2]], "n_singletons": 1, "n_pairs": 1}))
+    result = run_lensing_preflight(opts)
+    assert not result["ok"]
+    assert any("more than once" in e for e in result["errors"])
+
+
+def test_lensing_preflight_candidate_pairs_n_events_mismatch_errors(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    import json
+    opts = _write_preflight_mock(tmp_path)
+    opts.partition_mode = "marginalize_exact"
+    (tmp_path / "candidate_pairs.json").write_text(json.dumps({"n_events": 4, "candidate_pairs": [{"i": 1, "j": 2, "log_prior_odds": 0.0}]}))
+    result = run_lensing_preflight(opts)
+    assert not result["ok"]
+    assert any("does not match gw n_events" in e for e in result["errors"])
+
+
+def test_lensing_preflight_pair_marks_time_requires_delta_t_obs(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path, include_time=False)
+    opts.pair_marks = "time"
+    opts.pair_time_sigma_sec = 2.0
+    result = run_lensing_preflight(opts)
+    assert not result["ok"]
+    assert any("delta_t_obs" in e for e in result["errors"])
+
+
+def test_lensing_preflight_malformed_prior_wt_errors(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path, bad_prior=True)
+    result = run_lensing_preflight(opts)
+    assert not result["ok"]
+    assert any("prior_wt" in e and "finite and positive" in e for e in result["errors"])
+
+def test_lensing_preflight_only_cli_exits_zero_on_valid_mock(tmp_path):
+    import json
+    import subprocess
+    import sys
+    opts = _write_preflight_mock(tmp_path)
+    out = tmp_path / "preflight.json"
+    cmd = [
+        sys.executable, "-m", "darksirens.cli.inference_lensing",
+        "--gw_path", opts.gw_path,
+        "--gwselection_path", opts.gwselection_path,
+        "--lensed_injections_path", opts.lensed_injections_path,
+        "--pair_pe_path", opts.pair_pe_path,
+        "--partition_path", opts.partition_path,
+        "--cluster_mode", "j2",
+        "--sampler", "dynesty",
+        "--preflight_only", "true",
+        "--preflight_json", str(out),
+        "--save_path", str(tmp_path / "run"),
+    ]
+    proc = subprocess.run(cmd, cwd=str(__import__('pathlib').Path(__file__).resolve().parents[1]), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    assert proc.returncode == 0, proc.stdout
+    payload = json.loads(out.read_text())
+    assert payload["ok"] is True

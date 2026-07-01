@@ -485,3 +485,32 @@ Run exact candidate-pair marginalization::
     --pair_pe_path /tmp/ds_lens_unified/mock_pair_pe.h5 \
     --candidate_pairs_path /tmp/ds_lens_unified/candidate_pairs.json \
     --partition_mode marginalize_exact --cluster_mode j2
+
+## Preflight checks
+
+Before a spectral-siren lensing run, the lensing CLI can validate the input
+schema without loading the full likelihood or triggering expensive JAX
+compilation/sampling:
+
+```bash
+python -m darksirens.cli.inference_lensing \
+  --gw_path mock_gw_pe.h5 \
+  --gwselection_path mock_gw_selection.h5 \
+  --lensed_injections_path mock_lensed_injections.h5 \
+  --pair_pe_path mock_pair_pe.h5 \
+  --partition_path partition.json \
+  --cluster_mode j2 \
+  --sampler dynesty \
+  --preflight_only true
+```
+
+`--preflight_json PATH` writes the structured report to a chosen location; when
+omitted in preflight-only mode the CLI writes `preflight.json` under
+`--save_path`. Normal lensing inference also runs the lightweight preflight
+before data loading and stops early on fatal errors.
+
+Common failures include missing J=2 files, a fixed partition that reuses an event
+more than once, `candidate_pairs.json` whose `n_events` differs from the GW PE
+file, malformed pair-image `prior_wt` values, pair-time marks without
+`delta_t_obs`/positive `sigma_delta_t`, and weak-lensing options such as
+`wl_selection=wl_lognormal` paired with a non-lognormal WL backend.

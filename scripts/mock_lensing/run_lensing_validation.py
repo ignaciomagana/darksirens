@@ -78,7 +78,7 @@ def _latest_diagnostics(save_root: Path) -> dict:
     return json.loads(files[-1].read_text())
 
 
-def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int, pair_batch_size: int = 0, partition_mode: str = "fixed", use_unified_observed_catalog: bool = False) -> dict:
+def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int, pair_batch_size: int = 0, partition_mode: str = "fixed", use_unified_observed_catalog: bool = False, skip_preflight: bool = False) -> dict:
     if save_root.exists():
         shutil.rmtree(save_root)
     save_root.mkdir(parents=True, exist_ok=True)
@@ -102,6 +102,9 @@ def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
             cmd += ["--candidate_pairs_path", str(mock_dir / "candidate_pairs.json")]
         else:
             cmd += ["--partition_path", str(partition or mock_dir / "partition.json")]
+    if not skip_preflight:
+        preflight_json = save_root / "preflight.json"
+        _run(cmd + ["--preflight_only", "true", "--preflight_json", str(preflight_json)])
     _run(cmd)
     return _latest_diagnostics(save_root)
 
@@ -123,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="also run --partition_mode marginalize_exact when candidate_pairs.json exists")
     ap.add_argument("--use_unified_observed_catalog", action="store_true",
                     help="run validation with mock_observed_gw_pe.h5 as --gw_path")
+    ap.add_argument("--skip_preflight", action="store_true",
+                    help="skip the preflight-only pass before each expensive CLI run")
     args = ap.parse_args(argv)
 
     cfg = PROFILES[args.profile]
@@ -141,16 +146,16 @@ def main(argv: list[str] | None = None) -> int:
     _write_wrong_partition(mock, wrong_part)
     _generate_mock(null_mock, cfg, seed=args.seed + 17, n_pair_keep=0, reuse=args.reuse)
 
-    off = _run_cli(mock, runs / "off", cluster_mode="off", partition=None, cfg=cfg, seed=args.seed, use_unified_observed_catalog=args.use_unified_observed_catalog)
-    true = _run_cli(mock, runs / "j2_true", cluster_mode="j2", partition=mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, use_unified_observed_catalog=args.use_unified_observed_catalog)
-    wrong = _run_cli(mock, runs / "j2_wrong", cluster_mode="j2", partition=wrong_part, cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, use_unified_observed_catalog=args.use_unified_observed_catalog)
-    null = _run_cli(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size)
+    off = _run_cli(mock, runs / "off", cluster_mode="off", partition=None, cfg=cfg, seed=args.seed, use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight)
+    true = _run_cli(mock, runs / "j2_true", cluster_mode="j2", partition=mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight)
+    wrong = _run_cli(mock, runs / "j2_wrong", cluster_mode="j2", partition=wrong_part, cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight)
+    null = _run_cli(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, skip_preflight=args.skip_preflight)
     marginalized = None
     if args.run_marginalized and (mock / "candidate_pairs.json").exists():
         marginalized = _run_cli(
             mock, runs / "j2_marginalized", cluster_mode="j2", partition=None, cfg=cfg,
             seed=args.seed, pair_batch_size=args.pair_batch_size, partition_mode="marginalize_exact",
-            use_unified_observed_catalog=args.use_unified_observed_catalog,
+            use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight,
         )
 
     checks = {
