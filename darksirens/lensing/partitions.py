@@ -5,27 +5,114 @@ pair matchings for exact marginalization on small graphs.  Candidate edges carry
 ``log_prior_odds`` relative to leaving their two endpoints unpaired, so a
 matching's unnormalized log prior is the sum of included edge log-odds.
 """
+
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 from scipy.special import logsumexp
 
+KNOWN_EDGE_MARKS = {
+    "delta_t_obs",
+    "sigma_delta_t",
+    "log_sky_overlap",
+    "log_mass_distance_score",
+    "log_spin_score",
+}
+
 
 @dataclass(frozen=True)
+class EdgeMarks:
+    """Structured candidate-edge marks used by simulations and diagnostics."""
+
+    delta_t_obs: float | None = None
+    sigma_delta_t: float | None = None
+    log_sky_overlap: float | None = None
+    log_mass_distance_score: float | None = None
+    log_spin_score: float | None = None
+    extra: dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for key in (
+            "delta_t_obs",
+            "sigma_delta_t",
+            "log_sky_overlap",
+            "log_mass_distance_score",
+            "log_spin_score",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = float(value)
+        out.update({str(k): float(v) for k, v in sorted(self.extra.items())})
+        return out
+
+    def get(self, key: str) -> float | None:
+        if key in KNOWN_EDGE_MARKS:
+            return getattr(self, key)
+        return self.extra.get(key)
+
+    @property
+    def keys(self) -> set[str]:
+        return set(self.to_dict())
+
+
+@dataclass(frozen=True, init=False)
 class CandidatePair:
-    """One unordered candidate pair edge from the JSON schema."""
+    """One unordered candidate pair edge from the JSON schema.
+
+    The constructor accepts both the new ``marks=EdgeMarks(...)`` form and the
+    legacy positional ``delta_t_obs, sigma_delta_t`` fields.
+    """
 
     i: int
     j: int
     log_prior_odds: float
     label: str | None = None
-    delta_t_obs: float | None = None
-    sigma_delta_t: float | None = None
+    marks: EdgeMarks = field(default_factory=EdgeMarks)
+
+    def __init__(
+        self,
+        i: int,
+        j: int,
+        log_prior_odds: float,
+        label: str | None = None,
+        marks: EdgeMarks | None = None,
+        sigma_delta_t: float | None = None,
+        *,
+        delta_t_obs: float | None = None,
+    ):
+        if marks is not None and not isinstance(marks, EdgeMarks):
+            # Legacy positional form: CandidatePair(i, j, logp, label, dt, sigma).
+            if delta_t_obs is not None:
+                raise TypeError("delta_t_obs specified twice")
+            delta_t_obs = float(marks)
+            marks = None
+        if marks is None:
+            marks = EdgeMarks(delta_t_obs=delta_t_obs, sigma_delta_t=sigma_delta_t)
+        elif sigma_delta_t is not None or delta_t_obs is not None:
+            raise TypeError(
+                "pass either marks=EdgeMarks(...) or legacy delta_t_obs/sigma_delta_t, not both"
+            )
+        object.__setattr__(self, "i", int(i))
+        object.__setattr__(self, "j", int(j))
+        object.__setattr__(self, "log_prior_odds", float(log_prior_odds))
+        object.__setattr__(self, "label", label)
+        object.__setattr__(self, "marks", marks)
+
+    @property
+    def delta_t_obs(self) -> float | None:
+        """Backward-compatible access to ``marks.delta_t_obs``."""
+        return self.marks.delta_t_obs
+
+    @property
+    def sigma_delta_t(self) -> float | None:
+        """Backward-compatible access to ``marks.sigma_delta_t``."""
+        return self.marks.sigma_delta_t
 
 
 @dataclass(frozen=True)
@@ -47,16 +134,89 @@ def load_candidate_pairs_json(path: str | Path) -> dict:
         return json.load(f)
 
 
+def _finite_float(value, *, context: str, positive: bool = False) -> float:
+    out = float(value)
+    if not np.isfinite(out) or (positive and out <= 0):
+        suffix = "finite and positive" if positive else "finite"
+        raise ValueError(f"{context} must be {suffix}")
+    return out
+
+
+def validate_edge_marks(raw_marks: Mapping | None, *, context: str) -> EdgeMarks:
+    """Validate and normalize one candidate-edge ``marks`` object."""
+    if raw_marks is None:
+        return EdgeMarks()
+    if not isinstance(raw_marks, Mapping):
+        raise ValueError(f"{context}.marks must be an object")
+
+    has_dt = "delta_t_obs" in raw_marks
+    has_sigma = "sigma_delta_t" in raw_marks
+    if has_dt != has_sigma:
+        raise ValueError(
+            f"{context}.marks must define both delta_t_obs and sigma_delta_t, or neither"
+        )
+
+    values: dict[str, float | None] = {k: None for k in KNOWN_EDGE_MARKS}
+    extra: dict[str, float] = {}
+    for key, value in raw_marks.items():
+        if key == "delta_t_obs":
+            values[key] = _finite_float(value, context=f"{context}.marks.{key}")
+        elif key == "sigma_delta_t":
+            values[key] = _finite_float(
+                value, context=f"{context}.marks.{key}", positive=True
+            )
+        elif key in ("log_sky_overlap", "log_mass_distance_score", "log_spin_score"):
+            values[key] = _finite_float(value, context=f"{context}.marks.{key}")
+        elif isinstance(key, str) and key.startswith("log_"):
+            extra[key] = _finite_float(value, context=f"{context}.marks.{key}")
+        else:
+            raise ValueError(
+                f"{context}.marks has unsupported key {key!r}; custom marks must start with 'log_'"
+            )
+    return EdgeMarks(
+        delta_t_obs=values["delta_t_obs"],
+        sigma_delta_t=values["sigma_delta_t"],
+        log_sky_overlap=values["log_sky_overlap"],
+        log_mass_distance_score=values["log_mass_distance_score"],
+        log_spin_score=values["log_spin_score"],
+        extra=extra,
+    )
+
+
+def parse_edge_mark_keys(value: str | Sequence[str] | None) -> tuple[str, ...]:
+    """Parse a comma-separated edge-mark key list."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        pieces = [p.strip() for p in value.split(",")]
+    else:
+        pieces = [str(p).strip() for p in value]
+    return tuple(p for p in pieces if p)
+
+
+def apply_edge_mark_prior_keys(
+    candidate_pairs: Iterable[CandidatePair], keys: Sequence[str]
+) -> tuple[CandidatePair, ...]:
+    """Return pairs with selected log-mark values added to effective log prior odds."""
+    keys = parse_edge_mark_keys(keys)
+    out = []
+    for pair in candidate_pairs:
+        total = float(pair.log_prior_odds)
+        for key in keys:
+            value = pair.marks.get(key)
+            if value is None:
+                raise ValueError(
+                    f"candidate pair ({pair.i},{pair.j}) missing requested edge prior mark {key!r}"
+                )
+            if not key.startswith("log_"):
+                raise ValueError(f"edge prior mark {key!r} is not a log_* mark")
+            total += float(value)
+        out.append(CandidatePair(pair.i, pair.j, total, pair.label, pair.marks))
+    return tuple(out)
+
+
 def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]]:
-    """Validate and normalize the candidate-pair JSON schema.
-
-    Raises
-    ------
-    ValueError
-        If the schema is malformed, contains self-pairs, duplicate unordered
-        pairs, non-finite log odds, or indices outside ``[0, n_events)``.
-    """
-
+    """Validate and normalize the candidate-pair JSON schema."""
     if not isinstance(data, dict):
         raise ValueError("candidate-pair file must contain a JSON object")
     fmt = data.get("format_version")
@@ -67,12 +227,11 @@ def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]
     n_events = int(data["n_events"])
     if n_events < 0:
         raise ValueError(f"n_events must be non-negative, got {n_events}")
-    if "pairs" in data:
-        raw_pairs = data["pairs"]
-    elif "candidate_pairs" in data:
-        raw_pairs = data["candidate_pairs"]
-    else:
-        raise ValueError("candidate-pair file requires 'pairs' (or legacy 'candidate_pairs')")
+    raw_pairs = data.get("pairs", data.get("candidate_pairs"))
+    if raw_pairs is None:
+        raise ValueError(
+            "candidate-pair file requires 'pairs' (or legacy 'candidate_pairs')"
+        )
     if not isinstance(raw_pairs, list):
         raise ValueError("candidate_pairs must be a list")
 
@@ -83,9 +242,10 @@ def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]
             raise ValueError(f"candidate_pairs[{k}] must be an object")
         missing = {"i", "j", "log_prior_odds"} - set(item)
         if missing:
-            raise ValueError(f"candidate_pairs[{k}] missing required keys: {sorted(missing)}")
-        i = int(item["i"])
-        j = int(item["j"])
+            raise ValueError(
+                f"candidate_pairs[{k}] missing required keys: {sorted(missing)}"
+            )
+        i, j = int(item["i"]), int(item["j"])
         if i == j:
             raise ValueError(f"candidate_pairs[{k}] is a self-pair ({i}, {j})")
         if not (0 <= i < n_events and 0 <= j < n_events):
@@ -96,40 +256,14 @@ def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]
         if (a, b) in seen:
             raise ValueError(f"duplicate unordered candidate pair ({a}, {b})")
         seen.add((a, b))
-        log_prior_odds = float(item["log_prior_odds"])
-        if not np.isfinite(log_prior_odds):
-            raise ValueError(f"candidate_pairs[{k}].log_prior_odds must be finite")
-        delta_t_obs = None
-        sigma_delta_t = None
-        if "marks" in item:
-            marks = item["marks"]
-            if not isinstance(marks, dict):
-                raise ValueError(f"candidate_pairs[{k}].marks must be an object")
-            has_dt = "delta_t_obs" in marks
-            has_sigma = "sigma_delta_t" in marks
-            if has_dt != has_sigma:
-                raise ValueError(
-                    f"candidate_pairs[{k}].marks must define both delta_t_obs and sigma_delta_t, or neither"
-                )
-            if has_dt:
-                delta_t_obs = float(marks["delta_t_obs"])
-                sigma_delta_t = float(marks["sigma_delta_t"])
-                if not np.isfinite(delta_t_obs):
-                    raise ValueError(f"candidate_pairs[{k}].marks.delta_t_obs must be finite")
-                if not np.isfinite(sigma_delta_t) or sigma_delta_t <= 0:
-                    raise ValueError(f"candidate_pairs[{k}].marks.sigma_delta_t must be finite and positive")
-            for mark_name, mark_value in marks.items():
-                try:
-                    arr = np.asarray(mark_value, dtype=float)
-                except Exception:
-                    continue
-                if not np.all(np.isfinite(arr)):
-                    raise ValueError(f"candidate_pairs[{k}].marks.{mark_name} must be finite")
+        log_prior_odds = _finite_float(
+            item["log_prior_odds"], context=f"candidate_pairs[{k}].log_prior_odds"
+        )
+        marks = validate_edge_marks(item.get("marks"), context=f"candidate_pairs[{k}]")
         label = item.get("label")
         pairs.append(
             CandidatePair(
-                a, b, log_prior_odds, None if label is None else str(label),
-                delta_t_obs, sigma_delta_t,
+                a, b, log_prior_odds, None if label is None else str(label), marks
             )
         )
     return n_events, tuple(pairs)
@@ -141,39 +275,40 @@ def enumerate_compatible_partitions(
     *,
     max_partitions: int = 10_000,
 ) -> tuple[PartitionState, ...]:
-    """Enumerate every matching compatible with ``candidate_pairs``.
-
-    The empty matching is always included.  ``max_partitions`` protects exact
-    marginalization from exponential candidate graphs.
-    """
-
+    """Enumerate every matching compatible with ``candidate_pairs``."""
     pairs = tuple(candidate_pairs)
     if max_partitions < 1:
         raise ValueError("max_partitions must be at least 1")
     states: list[PartitionState] = []
 
-    def emit(chosen: list[tuple[int, CandidatePair]], used: set[int], logw: float) -> None:
+    def emit(
+        chosen: list[tuple[int, CandidatePair]], used: set[int], logw: float
+    ) -> None:
         if len(states) >= max_partitions:
             raise ValueError(
                 f"exact partition enumeration exceeded max_partitions={max_partitions}"
             )
-        pair_indices = np.asarray([[p.i, p.j] for _, p in chosen], dtype=np.int32).reshape((-1, 2))
+        pair_indices = np.asarray(
+            [[p.i, p.j] for _, p in chosen], dtype=np.int32
+        ).reshape((-1, 2))
         candidate_edge_indices = np.asarray([idx for idx, _ in chosen], dtype=np.int32)
         singleton_indices = np.asarray(
             [idx for idx in range(n_events) if idx not in used], dtype=np.int32
         )
         states.append(
             PartitionState(
-                singleton_indices=singleton_indices,
-                pair_indices=pair_indices,
-                n_singletons=int(singleton_indices.size),
-                n_pairs=int(pair_indices.shape[0]),
-                log_prior_weight=float(logw),
-                candidate_edge_indices=candidate_edge_indices,
+                singleton_indices,
+                pair_indices,
+                int(singleton_indices.size),
+                int(pair_indices.shape[0]),
+                float(logw),
+                candidate_edge_indices,
             )
         )
 
-    def rec(pos: int, chosen: list[tuple[int, CandidatePair]], used: set[int], logw: float) -> None:
+    def rec(
+        pos: int, chosen: list[tuple[int, CandidatePair]], used: set[int], logw: float
+    ) -> None:
         if pos == len(pairs):
             emit(chosen, used, logw)
             return
@@ -191,10 +326,21 @@ def enumerate_compatible_partitions(
     return tuple(states)
 
 
-def exact_partitions_from_json(data: dict, *, max_partitions: int = 10_000):
+def exact_partitions_from_json(
+    data: dict,
+    *,
+    max_partitions: int = 10_000,
+    edge_mark_prior_keys: Sequence[str] | None = None,
+):
     """Validate a candidate-pair JSON object and enumerate exact partitions."""
-
     n_events, pairs = validate_candidate_pairs(data)
-    states = enumerate_compatible_partitions(n_events, pairs, max_partitions=max_partitions)
-    log_z_prior = float(logsumexp([s.log_prior_weight for s in states])) if states else -np.inf
+    pairs = apply_edge_mark_prior_keys(
+        pairs, parse_edge_mark_keys(edge_mark_prior_keys)
+    )
+    states = enumerate_compatible_partitions(
+        n_events, pairs, max_partitions=max_partitions
+    )
+    log_z_prior = (
+        float(logsumexp([s.log_prior_weight for s in states])) if states else -np.inf
+    )
     return n_events, states, log_z_prior

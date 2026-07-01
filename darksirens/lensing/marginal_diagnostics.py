@@ -1,4 +1,5 @@
 """Posterior diagnostics for exact partition-marginalized lensing runs."""
+
 from __future__ import annotations
 
 from typing import Callable, Iterable
@@ -12,7 +13,9 @@ from darksirens.lensing.partitions import CandidatePair, PartitionState
 def _partition_object(state: PartitionState) -> dict:
     return {
         "singleton_indices": np.asarray(state.singleton_indices, dtype=int).tolist(),
-        "pair_indices": np.asarray(state.pair_indices, dtype=int).reshape((-1, 2)).tolist(),
+        "pair_indices": np.asarray(state.pair_indices, dtype=int)
+        .reshape((-1, 2))
+        .tolist(),
         "n_singletons": int(state.n_singletons),
         "n_pairs": int(state.n_pairs),
     }
@@ -40,8 +43,12 @@ def compute_marginalized_partition_diagnostics(
     post = np.exp(log_post)
     map_idx = int(np.argmax(log_post))
 
-    expected_n_pairs = float(np.sum(post * np.asarray([s.n_pairs for s in states], dtype=float)))
-    expected_n_singletons = float(np.sum(post * np.asarray([s.n_singletons for s in states], dtype=float)))
+    expected_n_pairs = float(
+        np.sum(post * np.asarray([s.n_pairs for s in states], dtype=float))
+    )
+    expected_n_singletons = float(
+        np.sum(post * np.asarray([s.n_singletons for s in states], dtype=float))
+    )
 
     pair_probs = np.zeros(len(candidates), dtype=float)
     singleton_probs = None
@@ -63,7 +70,13 @@ def compute_marginalized_partition_diagnostics(
 
     posterior_pair_probabilities = []
     for c, p_pair in zip(candidates, pair_probs):
-        item = {"i": int(c.i), "j": int(c.j), "p_pair": float(p_pair), "log_prior_odds": float(c.log_prior_odds)}
+        item = {
+            "i": int(c.i),
+            "j": int(c.j),
+            "p_pair": float(p_pair),
+            "log_prior_odds": float(c.log_prior_odds),
+            "marks": c.marks.to_dict(),
+        }
         if c.label is not None:
             item["label"] = c.label
         posterior_pair_probabilities.append(item)
