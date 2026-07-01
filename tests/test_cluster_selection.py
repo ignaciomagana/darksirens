@@ -311,6 +311,75 @@ class TestClusterSelectionMath:
         # Neff < N_kept (would be == only if all weights equal)
         assert 0.0 < float(Neff) <= inj.n_kept
 
+
+    def test_pair_tag_one_reproduces_default_selection(self):
+        camp = _synth_lensed_injection_campaign(n_sources=80, seed=91)
+        inj = make_lensed_injection_set(
+            **{k: v for k, v in camp.items() if k != "n_both_detected"}
+        )
+        cosmo, survey, catalog = _cosmo(), _survey(), _toy_catalog()
+        sis = make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0)
+        default = compute_cluster_selection_term(
+            inj, cosmo, survey, jnp.array([]), catalog, sis,
+            _toy_log_p_pop, _toy_volume_prior,
+        )
+        explicit = compute_cluster_selection_term(
+            inj, cosmo, survey, jnp.array([]), catalog, sis,
+            _toy_log_p_pop, _toy_volume_prior,
+            log_p_tag_per_source=jnp.zeros(inj.n_kept),
+        )
+        np.testing.assert_allclose(
+            float(default[0]), float(explicit[0]), rtol=0, atol=0
+        )
+
+    def test_constant_pair_tag_shifts_log_mu_by_log_c(self):
+        camp = _synth_lensed_injection_campaign(n_sources=100, seed=92)
+        c = 0.37
+        inj = make_lensed_injection_set(
+            **{k: v for k, v in camp.items() if k != "n_both_detected"},
+            p_tag_per_source=np.full(camp["n_draw_sources"], c),
+        )
+        inj_one = make_lensed_injection_set(
+            **{k: v for k, v in camp.items() if k != "n_both_detected"}
+        )
+        cosmo, survey, catalog = _cosmo(), _survey(), _toy_catalog()
+        sis = make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0)
+        log_mu_c, _, _ = compute_cluster_selection_term(
+            inj, cosmo, survey, jnp.array([]), catalog, sis,
+            _toy_log_p_pop, _toy_volume_prior, inj.log_p_tag_per_source,
+        )
+        log_mu_one, _, _ = compute_cluster_selection_term(
+            inj_one, cosmo, survey, jnp.array([]), catalog, sis,
+            _toy_log_p_pop, _toy_volume_prior,
+        )
+        np.testing.assert_allclose(
+            float(log_mu_c - log_mu_one), np.log(c), rtol=1e-12
+        )
+
+    def test_lower_pair_tag_reduces_mu_and_selection_penalty(self):
+        camp = _synth_lensed_injection_campaign(n_sources=100, seed=93)
+        inj = make_lensed_injection_set(
+            **{k: v for k, v in camp.items() if k != "n_both_detected"}
+        )
+        cosmo, survey, catalog = _cosmo(), _survey(), _toy_catalog()
+        sis = make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0)
+        log_mu_hi, _, log_sig_hi = compute_cluster_selection_term(
+            inj, cosmo, survey, jnp.array([]), catalog, sis,
+            _toy_log_p_pop, _toy_volume_prior, jnp.zeros(inj.n_kept),
+        )
+        log_mu_lo, _, log_sig_lo = compute_cluster_selection_term(
+            inj, cosmo, survey, jnp.array([]), catalog, sis,
+            _toy_log_p_pop, _toy_volume_prior, jnp.log(jnp.full(inj.n_kept, 0.25)),
+        )
+        assert float(log_mu_lo) < float(log_mu_hi)
+        corr_hi = combined_selection_log_correction(
+            jnp.log(10.0), jnp.log(1e-4), log_mu_hi, log_sig_hi, 50, 1,
+        )
+        corr_lo = combined_selection_log_correction(
+            jnp.log(10.0), jnp.log(1e-4), log_mu_lo, log_sig_lo, 50, 1,
+        )
+        assert float(corr_lo) > float(corr_hi)
+
     def test_undetected_pairs_excluded(self):
         """If we manually flip a source's detected flag, μ̂ must change."""
         camp = _synth_lensed_injection_campaign(n_sources=80, seed=12)

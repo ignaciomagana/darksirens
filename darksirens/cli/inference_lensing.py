@@ -340,8 +340,13 @@ def build_cluster_likelihood(opts, inp, decoder):
     wl_selection = WL_SELECTION_LOGNORMAL if opts.wl_selection == "wl_lognormal" else WL_SELECTION_STANDARD
     universe_model = opts.universe_model
 
-    nkept = 0 if inp["lensed"] is None else int(np.asarray(inp["lensed"].m1_src).shape[0])
-    log_p_tag = jnp.zeros(nkept)
+    if inp["lensed"] is None:
+        log_p_tag = jnp.zeros(0)
+    else:
+        fallback = jnp.zeros(int(np.asarray(inp["lensed"].m1_src).shape[0]))
+        log_p_tag = jnp.asarray(
+            getattr(inp["lensed"], "log_p_tag_per_source", fallback)
+        )
 
     def loglike(coord):
         # decode() returns a 5-tuple (cosmo, survey, pop, sky, mark) on current
@@ -371,8 +376,13 @@ def build_cluster_diagnostics(opts, inp, decoder):
     wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
     wl_selection = WL_SELECTION_LOGNORMAL if opts.wl_selection == "wl_lognormal" else WL_SELECTION_STANDARD
     universe_model = opts.universe_model
-    nkept = 0 if inp["lensed"] is None else int(np.asarray(inp["lensed"].m1_src).shape[0])
-    log_p_tag = jnp.zeros(nkept)
+    if inp["lensed"] is None:
+        log_p_tag = jnp.zeros(0)
+    else:
+        fallback = jnp.zeros(int(np.asarray(inp["lensed"].m1_src).shape[0]))
+        log_p_tag = jnp.asarray(
+            getattr(inp["lensed"], "log_p_tag_per_source", fallback)
+        )
 
     def diagnostics(coord):
         cosmo, survey, pop_params, _sky_params, _mark_params = decoder.decode(jnp.asarray(coord))
