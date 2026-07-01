@@ -78,6 +78,7 @@ from darksirens.lensing.slmarks import (
 )
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import save_lensed_injections
+from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
 from darksirens.lensing.observed_catalog import write_observed_pe_attrs
 from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs, _log_sky_overlap
 
@@ -432,23 +433,20 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
     det_m = rng.uniform(0, 1, n_draw_sources) < pdet_m
     both = det_p & det_m
 
-    if pair_tag_model == "none":
+    snr_p = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_p))
+    snr_m = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_m))
+    true_dt = np.asarray(delta_t_from_y(jnp.asarray(y), make_sis_lens_params()), dtype=float)
+    log_sky_overlap = np.log(np.clip((np.minimum(snr_p, snr_m) / np.maximum(snr_p, snr_m)) ** 2, 1e-12, 1.0))
+    normalized_model = "snr_time" if pair_tag_model == "min_snr_proxy" else pair_tag_model
+    if normalized_model == "none":
         p_tag = np.ones(n_draw_sources, dtype=float)
-    elif pair_tag_model == "constant":
-        if not (0.0 <= pair_tag_prob <= 1.0):
-            raise ValueError("pair_tag_prob must be in [0, 1]")
-        p_tag = np.ones(n_draw_sources, dtype=float)
-        p_tag[both] = float(pair_tag_prob)
-    elif pair_tag_model == "min_snr_proxy":
-        # Mock-only deterministic proxy: higher minimum image SNR strength gives
-        # a higher chance that a pair-identification statistic would tag the pair.
-        strength_p = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_p)) / model.rho_thr
-        strength_m = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_m)) / model.rho_thr
-        min_strength = np.minimum(strength_p, strength_m)
-        p_tag = np.ones(n_draw_sources, dtype=float)
-        p_tag[both] = np.clip(0.10 + 0.45 * (min_strength[both] - 1.0), 0.05, 1.0)
+    elif normalized_model in ("constant", "snr_time", "snr_time_sky"):
+        tag_model = make_pair_tag_selection_model(normalized_model, constant=pair_tag_prob)
+        p_tag = tag_model.probability(snr_image0=snr_p, snr_image1=snr_m, delta_t_obs=true_dt, log_sky_overlap=log_sky_overlap)
     else:
         raise ValueError(f"unknown pair_tag_model: {pair_tag_model}")
+    tagged_pair = np.zeros(n_draw_sources, dtype=bool)
+    tagged_pair[both] = rng.uniform(0, 1, int(both.sum())) < p_tag[both]
 
     # per-IMAGE flat arrays (2 rows per source, interleaved +/-)
     N = n_draw_sources
@@ -470,6 +468,8 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
             detected=interleave(det_p, det_m),
             p_prop_src=np.repeat(p_prop_src, 2), p_prop_y=np.repeat(p_prop_y, 2),
             n_draw_sources=int(N), p_tag_per_source=p_tag,
+            snr_image0=snr_p, snr_image1=snr_m, delta_t_obs=true_dt, true_delta_t=true_dt,
+            log_sky_overlap=log_sky_overlap, p_tag_true=p_tag, tagged_pair=tagged_pair,
         )
     return dict(n_sources=N, n_both=int(both.sum()),
                 pair_tag_model=pair_tag_model, pair_tag_prob=float(pair_tag_prob),
@@ -1067,7 +1067,7 @@ def parse_args():
     p.add_argument("--tau-n", type=float, default=3.0, help="SIS optical-depth z-power")
     p.add_argument("--wl-a", type=float, default=4.0e-3, help="WL lognormal variance amplitude")
     p.add_argument("--wl-b", type=float, default=1.5, help="WL lognormal variance z-power")
-    p.add_argument("--pair-tag-model", choices=("none", "constant", "min_snr_proxy"),
+    p.add_argument("--pair-tag-model", choices=("none", "constant", "min_snr_proxy", "snr_time", "snr_time_sky"),
                    default="none", help="mock-only pair-tag selection model for lensed injections")
     p.add_argument("--pair-tag-prob", type=float, default=1.0,
                    help="pair-tag probability used by --pair-tag-model constant")

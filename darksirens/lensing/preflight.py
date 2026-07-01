@@ -22,6 +22,7 @@ from darksirens.lensing.partitions import (
     validate_candidate_pairs,
 )
 from darksirens.likelihood.pair_kde import validate_pair_prior_wt
+from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
 
 
 def _get(opts: Any, name: str, default=None):
@@ -363,7 +364,7 @@ def _check_candidates(path, n_events, opts, errors, summary, *, observed_n_event
         errors.append(f"candidate_pairs invalid: {exc}")
 
 
-def _check_lensed(path, errors, summary):
+def _check_lensed(path, errors, summary, opts=None):
     if not _exists(path, errors, "lensed_injections_path"):
         return
     try:
@@ -397,6 +398,22 @@ def _check_lensed(path, errors, summary):
             summary["p_tag_present"] = ptag_present
             if not ptag_present:
                 summary["p_tag_default"] = 1
+            kind = _get(opts, "pair_tag_model", "constant") if opts is not None else "constant"
+            summary["pair_tag_model"] = kind
+            summary["pair_tag_perturb_logit"] = float(_get(opts, "pair_tag_perturb_logit", 0.0) or 0.0) if opts is not None else 0.0
+            if kind == "file":
+                if not _get(opts, "pair_tag_selection_path"):
+                    errors.append("pair_tag_model=file requires --pair_tag_selection_path")
+            elif kind != "constant":
+                model = make_pair_tag_selection_model(kind, constant=float(_get(opts, "pair_tag_constant", 1.0)), perturb_logit=float(_get(opts, "pair_tag_perturb_logit", 0.0) or 0.0))
+                for req in model.required_fields:
+                    dname = "delta_t_obs" if req in ("delta_t_obs", "true_delta_t") else req
+                    if dname not in f:
+                        errors.append(f"pair_tag_model={kind} requires lensed injection dataset {dname}")
+                    else:
+                        arr = np.asarray(f[dname], dtype=float)
+                        if arr.size == 0 or np.all(~np.isfinite(arr)):
+                            errors.append(f"pair_tag_model={kind} requires finite values in {dname}")
     except Exception as exc:
         errors.append(f"lensed_injections_path not readable: {path}: {exc}")
 
@@ -476,7 +493,7 @@ def run_lensing_preflight(opts) -> dict:
             )
             summary["unified_observed_mode_inferred_heuristic"] = True
         summary["unified_observed_mode"] = bool(unified_observed_mode)
-        _check_lensed(_get(opts, "lensed_injections_path"), errors, summary)
+        _check_lensed(_get(opts, "lensed_injections_path"), errors, summary, opts)
         pair_meta_path = _get(opts, "pair_metadata_path")
         pair_pe_path = _get(opts, "pair_pe_path")
         if (

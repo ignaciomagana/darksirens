@@ -1407,3 +1407,79 @@ def test_lensing_preflight_marginalized_time_marks_pass_with_edge_marks(tmp_path
     path.write_text(json.dumps(data))
     result = run_lensing_preflight(opts)
     assert result["ok"], result["errors"]
+
+
+def test_pair_tag_selection_model_probabilities_and_snr_monotonic():
+    from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
+
+    model = make_pair_tag_selection_model("snr_time")
+    low = model.probability(
+        snr_image0=np.array([8.0]), snr_image1=np.array([8.0]), delta_t_obs=np.array([1000.0])
+    )[0]
+    high = model.probability(
+        snr_image0=np.array([14.0]), snr_image1=np.array([14.0]), delta_t_obs=np.array([1000.0])
+    )[0]
+    assert 0.0 <= low <= 1.0
+    assert 0.0 <= high <= 1.0
+    assert high > low
+
+
+def test_pair_tag_perturb_logit_changes_probability():
+    from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
+
+    base = make_pair_tag_selection_model("constant", constant=0.25)
+    pert = make_pair_tag_selection_model("constant", constant=0.25, perturb_logit=1.0)
+    np.testing.assert_raises(AssertionError, np.testing.assert_allclose, base.probability(), pert.probability())
+
+
+def test_lensed_injection_loading_reads_pair_tag_fields():
+    camp = _synth_lensed_injection_campaign(n_sources=8, seed=24)
+    n = camp["n_draw_sources"]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/inj.h5"
+        save_lensed_injections(
+            path=path,
+            **{k: v for k, v in camp.items() if k not in ("n_both_detected",)},
+            snr_image0=np.linspace(8, 12, n),
+            snr_image1=np.linspace(7, 11, n),
+            delta_t_obs=np.linspace(10, 20, n),
+            log_sky_overlap=np.linspace(-2, 0, n),
+            p_tag_true=np.linspace(0.2, 0.8, n),
+            tagged_pair=np.arange(n) % 2 == 0,
+        )
+        inj = load_lensed_injections(path)
+    assert hasattr(inj, "snr_image0")
+    assert inj.snr_image0.shape == inj.m1_src.shape
+    assert np.all(np.isfinite(np.asarray(inj.delta_t_obs)))
+
+
+def test_preflight_catches_missing_snr_time_sky_fields(tmp_path):
+    from argparse import Namespace
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    camp = _synth_lensed_injection_campaign(n_sources=4, seed=25)
+    inj_path = tmp_path / "inj.h5"
+    save_lensed_injections(
+        path=str(inj_path),
+        **{k: v for k, v in camp.items() if k not in ("n_both_detected",)},
+    )
+    opts = Namespace(
+        cluster_mode="j2", partition_mode="marginalize_exact", pair_marks="none",
+        edge_mark_prior_keys="", edge_mark_likelihood_keys="", gw_path=None,
+        gwselection_path=str(inj_path), lensed_injections_path=str(inj_path),
+        candidate_pairs_path=None, observed_catalog_path=None, pair_tag_model="snr_time_sky",
+        pair_tag_constant=1.0, pair_tag_perturb_logit=0.0,
+    )
+    report = run_lensing_preflight(opts)
+    assert any("snr_image0" in e for e in report["errors"])
+    assert any("log_sky_overlap" in e for e in report["errors"])
+
+
+def test_selection_correction_changes_with_pair_tag_model():
+    camp = _synth_lensed_injection_campaign(n_sources=60, seed=26)
+    inj1 = make_lensed_injection_set(**{k: v for k, v in camp.items() if k not in ("n_both_detected",)})
+    inj2 = make_lensed_injection_set(**{k: v for k, v in camp.items() if k not in ("n_both_detected",)}, p_tag_per_source=np.full(camp["n_draw_sources"], 0.5))
+    args = (_cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), make_sis_lens_params(), _toy_log_p_pop, _toy_volume_prior)
+    log_mu1, _, _ = compute_cluster_selection_term(inj1, *args, log_p_tag_per_source=inj1.log_p_tag_per_source)
+    log_mu2, _, _ = compute_cluster_selection_term(inj2, *args, log_p_tag_per_source=inj2.log_p_tag_per_source)
+    assert float(log_mu2) < float(log_mu1)
