@@ -34,9 +34,38 @@ magnification via CLI flags.
 
 ## `darksirens_inference_lensing`
 
-The strong-lensing variant: splits events into singletons and lensed image
-pairs and drives `darksiren_log_likelihood_with_clusters`
-([`lensing`](lensing.md)) over a `ClusterSet` and a `LensedInjectionSet`.
+The spectral-siren lensing driver: splits events into singletons and optional
+J=2 lensed image pairs and drives `darksiren_log_likelihood_with_clusters`
+([`lensing`](lensing.md)) over a `ClusterSet` and a `LensedInjectionSet`.  This
+CLI is for `spectral_sirens` / `spectral_sirens_wl` lensing only; it does not
+run galaxy-catalog dark-siren, LSS-completion, or catalog-host lensing
+inference.
+
+Important data and model flags:
+
+* `--gw_path` and `--gwselection_path` are required for all runs.
+* `--cluster_mode off` runs the singleton spectral-siren likelihood only.
+* `--cluster_mode j2` adds J=2 strong-lensing pairs and requires
+  `--lensed_injections_path` and `--pair_pe_path`.
+* `--partition_mode fixed` uses one explicit `--partition_path`;
+  `--partition_mode marginalize_exact` uses `--candidate_pairs_path` and
+  `--max_exact_partitions` to exactly marginalise over a small candidate graph.
+* `--wl_backend {lognormal,disabled}` selects `spectral_sirens_wl` or ordinary
+  `spectral_sirens`; `--wl_selection {standard,wl_lognormal}` controls whether
+  singleton selection also receives the lognormal/Hermite WL treatment.
+* `--pair_marks {none,time}` optionally adds SIS time-delay marks from pair-PE
+  metadata, with `--pair_time_sigma_sec` as a fallback uncertainty.
+* `--fix_lens_rate true` fixes `--sl_tau_A` and `--sl_tau_n`;
+  `--fix_lens_rate false` samples `log10_tau_A` and `tau_n`, optionally with
+  `--lens_prior_overrides` and `--fixed_parameter_values`.
+* `--pe_max_per_pair`, `--pair_batch_size`, `--y_nodes_pair`, and
+  `--sel_batch_size` are memory/performance controls for pair and selection
+  integrals.
+
+Every run writes `results.hdf5`, `settings.json`, `diagnostics.json`, and
+`diagnostics.hdf5` under the run directory.  Use
+`darksirens_inference_lensing` or `python -m darksirens.cli.inference_lensing`;
+there is no supported `darksirens.tool` path for this workflow.
 
 ```{automodule} darksirens.cli.inference_lensing
 :members:

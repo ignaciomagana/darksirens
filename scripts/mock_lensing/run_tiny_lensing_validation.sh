@@ -52,5 +52,22 @@ echo "[tiny-lens] running cluster_mode=j2"
   $SAMPLER_ARGS \
   --save_path "$RUNROOT/j2"
 
+if [[ "${RUN_MARGINALIZE_EXACT:-0}" == "1" && -f "$OUTDIR/candidate_pairs.json" ]]; then
+  echo "[tiny-lens] running cluster_mode=j2 with partition_mode=marginalize_exact"
+  "$PYTHON" -m darksirens.cli.inference_lensing \
+    "${COMMON[@]}" \
+    --cluster_mode j2 \
+    --lensed_injections_path "$OUTDIR/mock_lensed_injections.h5" \
+    --pair_pe_path "$OUTDIR/mock_pair_pe.h5" \
+    --candidate_pairs_path "$OUTDIR/candidate_pairs.json" \
+    --partition_mode marginalize_exact \
+    --max_exact_partitions "${MAX_EXACT_PARTITIONS:-10000}" \
+    $SAMPLER_ARGS \
+    --save_path "$RUNROOT/j2_marginalized"
+fi
+
 echo "[tiny-lens] mock files: $OUTDIR"
-echo "[tiny-lens] inference outputs: $RUNROOT/off and $RUNROOT/j2"
+echo "[tiny-lens] inference outputs: $RUNROOT/off, $RUNROOT/j2"
+if [[ "${RUN_MARGINALIZE_EXACT:-0}" == "1" && -f "$OUTDIR/candidate_pairs.json" ]]; then
+  echo "[tiny-lens] marginalization output: $RUNROOT/j2_marginalized"
+fi
