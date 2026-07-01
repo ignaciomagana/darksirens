@@ -23,6 +23,7 @@ from darksirens.lensing.partitions import (
 )
 from darksirens.likelihood.pair_kde import validate_pair_prior_wt
 from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
+from darksirens.lensing import file_contract
 
 
 def _get(opts: Any, name: str, default=None):
@@ -433,12 +434,28 @@ def run_lensing_preflight(opts) -> dict:
         ),
         "p_tag_present": False,
     }
-    n_events, _ = _infer_gw(_get(opts, "gw_path"), errors, summary)
+    gw_report = file_contract.validate_observed_gw_pe(_get(opts, "gw_path")) if _get(opts, "gw_path") else {"ok": False, "errors": ["missing gw_path"], "summary": {}}
+    summary["file_contract"] = {"observed_gw_pe": gw_report}
+    if gw_report.get("ok"):
+        summary.update({k: v for k, v in gw_report["summary"].items() if k in ("n_events", "nsamp")})
+        n_events = gw_report["summary"].get("n_events")
+    else:
+        n_events, _ = _infer_gw(_get(opts, "gw_path"), errors, summary)
+        errors.extend([f"observed_gw_pe: {e}" for e in gw_report.get("errors", []) if "format_version" not in e])
+        if any("format_version" in e for e in gw_report.get("errors", [])):
+            warnings.extend([f"observed_gw_pe contract warning: {e}" for e in gw_report.get("errors", [])])
+    if _get(opts, "observed_catalog_path"):
+        observed_report = file_contract.validate_observed_catalog(_get(opts, "observed_catalog_path"))
+        summary["file_contract"]["observed_catalog"] = observed_report
     observed_meta = _resolve_observed_catalog(opts, n_events, errors, warnings, summary)
     observed_n_events = (
         int(observed_meta["n_events"]) if observed_meta is not None else None
     )
     _exists(_get(opts, "gwselection_path"), errors, "gwselection_path")
+    if _get(opts, "gwselection_path"):
+        summary["file_contract"]["gwselection"] = file_contract.validate_selection_inputs(_get(opts, "gwselection_path"))
+    if _get(opts, "selection_path"):
+        summary["file_contract"]["selection_inputs"] = file_contract.validate_selection_inputs(_get(opts, "selection_path"))
     partition_pairs = []
     unified_observed_mode = False
     if _get(opts, "cluster_mode") == "j2":
@@ -470,6 +487,10 @@ def run_lensing_preflight(opts) -> dict:
                     _get(opts, "pair_metadata_path") or not _get(opts, "pair_pe_path")
                 )
         elif _get(opts, "partition_mode") == "marginalize_exact":
+            cand_report = file_contract.validate_candidate_pairs(_get(opts, "candidate_pairs_path"))
+            summary["file_contract"]["candidate_pairs"] = cand_report
+            summary["n_candidate_pairs"] = cand_report.get("summary", {}).get("n_candidate_pairs")
+            warnings.extend([f"candidate_pairs: {w}" for w in cand_report.get("warnings", [])])
             _check_candidates(
                 _get(opts, "candidate_pairs_path"),
                 n_events,
@@ -493,6 +514,8 @@ def run_lensing_preflight(opts) -> dict:
             )
             summary["unified_observed_mode_inferred_heuristic"] = True
         summary["unified_observed_mode"] = bool(unified_observed_mode)
+        if _get(opts, "lensed_injections_path"):
+            summary["file_contract"]["lensed_injections"] = file_contract.validate_selection_inputs(_get(opts, "lensed_injections_path"))
         _check_lensed(_get(opts, "lensed_injections_path"), errors, summary, opts)
         pair_meta_path = _get(opts, "pair_metadata_path")
         pair_pe_path = _get(opts, "pair_pe_path")
