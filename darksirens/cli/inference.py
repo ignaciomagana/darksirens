@@ -63,7 +63,7 @@ from darksirens.likelihood.factory import make_likelihood
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.inference.sampling import run_sampler
-from darksirens.inference.tinyns_config import build_tinyns_config
+from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
 
@@ -457,50 +457,7 @@ def main():
     g.add_argument("--max_samples",  type=int,   default=1_000_000,
                    help="Max call/iteration budget for nested samplers "
                         "(dynesty call cap, tinyns iteration cap); 0 = unlimited.")
-    g.add_argument("--tinyns_preset", default="recommended",
-                   choices=["recommended", "conservative", "python_debug", "prior",
-                            "batched_gpu", "adaptive_gpu", "bounded_single",
-                            "bounded_multi", "fused_bounded_multi", "custom"],
-                   help="tinyns preset; explicit TinyNS options override preset defaults.")
-    g.add_argument("--tinyns_sample", default=None, choices=["rwalk", "prior"],
-                   help="tinyns sampler: current TinyNS supports rwalk or prior.")
-    g.add_argument("--tinyns_kernel", default=None, choices=["jax", "python"],
-                   help="tinyns proposal kernel.")
-    g.add_argument("--tinyns_vectorized", type=str_to_bool, default=None, metavar="BOOL")
-    g.add_argument("--tinyns_max_attempts", type=int, default=None)
-    g.add_argument("--tinyns_walks", type=int, default=None)
-    g.add_argument("--tinyns_step_scale", type=float, default=None)
-    g.add_argument("--tinyns_batch_size", type=int, default=None)
-    g.add_argument("--tinyns_min_accepts", type=int, default=None)
-    g.add_argument("--tinyns_replacement_chains", type=int, default=None)
-    g.add_argument("--tinyns_replacement_chain_schedule", type=str, default=None,
-                   help="Comma-separated positive increasing schedule, e.g. '1,4,16,64'.")
-    g.add_argument("--tinyns_rwalk_proposal", choices=["isotropic", "live-cov"], default=None)
-    g.add_argument("--tinyns_rwalk_cov_jitter", type=float, default=None)
-    g.add_argument("--tinyns_bound", choices=["none", "single", "multi"], default=None)
-    g.add_argument("--tinyns_bound_enlargement", type=float, default=None)
-    g.add_argument("--tinyns_bound_update_interval", type=int, default=None)
-    g.add_argument("--tinyns_bound_jitter", type=float, default=None)
-    g.add_argument("--tinyns_bound_max_draws", type=int, default=None)
-    g.add_argument("--tinyns_multi_bound_max_ellipsoids", type=int, default=None)
-    g.add_argument("--tinyns_multi_bound_min_points", type=int, default=None)
-    g.add_argument("--tinyns_multi_bound_split_threshold", type=float, default=None)
-    g.add_argument("--tinyns_multi_bound_enlargement", type=float, default=None)
-    g.add_argument("--tinyns_multi_bound_overlap_correction", type=str_to_bool, default=None, metavar="BOOL")
-    g.add_argument("--tinyns_rwalk_seed", choices=["live", "bound"], default=None)
-    g.add_argument("--tinyns_rwalk_seed_fallback", type=str_to_bool, default=None, metavar="BOOL")
-    g.add_argument("--tinyns_bound_seed_kernel", choices=["python", "jax"], default=None)
-    g.add_argument("--tinyns_allow_unused_bound", type=str_to_bool, default=None, metavar="BOOL")
-    g.add_argument("--tinyns_fused_bound_rwalk", type=str_to_bool, default=None, metavar="BOOL")
-    g.add_argument("--tinyns_bound_rebuild_on_failure", type=str_to_bool, default=None, metavar="BOOL")
-    g.add_argument("--tinyns_bound_failure_rebuild_threshold", type=int, default=None)
-    g.add_argument("--tinyns_jax_vectorized", type=str_to_bool, default=None, metavar="BOOL")
-    g.add_argument("--tinyns_jax_block_size", type=int, default=None)
-    g.add_argument("--tinyns_checkpoint_path", default=None)
-    g.add_argument("--tinyns_checkpoint_interval", type=int, default=None)
-    g.add_argument("--tinyns_resume_from", default=None)
-    g.add_argument("--tinyns_checkpoint_path_out", default=None)
-    g.add_argument("--tinyns_progress_interval", type=int, default=None)
+    add_tinyns_arguments(g, bool_type=str_to_bool)
     g.add_argument("--nuts_warmup",  type=int,   default=500)
     g.add_argument("--nuts_samples", type=int,   default=1000)
     g.add_argument("--nuts_chains",  type=int,   default=1)
@@ -676,6 +633,8 @@ def main():
         _row("  chain sched.", cfg["replacement_chain_schedule"] or "none")
         _row("  max attempts", cfg["max_attempts"])
         _row("  jax block size", cfg["jax_block_size"])
+        _row("  jax vectorized", cfg.get("jax_vectorized"))
+        _row("  progress interval", cfg.get("progress_interval"))
         if cfg.get("checkpoint_path") or cfg.get("resume_from") or cfg.get("checkpoint_path_out"):
             _row("  checkpoint", cfg.get("checkpoint_path") or "none")
             _row("  resume from", cfg.get("resume_from") or "none")
@@ -847,8 +806,13 @@ def main():
     # ── Sampling ───────────────────────────────────────────────────
 
     _section(f"Sampling  [{opts.sampler.upper()}]")
+    tinyns_cfg = getattr(opts, "tinyns_resolved_config", {})
     sampler_info = {
-        "tinyns":  f"nlive={opts.nlive}  dlogz={opts.dlogz}  sample={opts.tinyns_sample}  kernel={opts.tinyns_kernel}  seed={opts.seed}",
+        "tinyns": (
+            f"nlive={opts.nlive}  dlogz={opts.dlogz}  "
+            f"sample={tinyns_cfg.get('sample')}  kernel={tinyns_cfg.get('kernel')}  "
+            f"seed={opts.seed}"
+        ),
         "dynesty": f"nlive={opts.nlive}  dlogz={opts.dlogz}  seed={opts.seed}",
         "numpyro": f"warmup={opts.nuts_warmup}  samples={opts.nuts_samples}  chains={opts.nuts_chains}  seed={opts.seed}",
     }

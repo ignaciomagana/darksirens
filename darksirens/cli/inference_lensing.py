@@ -81,6 +81,7 @@ from darksirens.gw.populations.registry import get_fixed_population_params, get_
 
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
+from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
 from darksirens.inference.parameters import (
     build_parameter_decoder, complete_empty_pixel_policy_code,
 )
@@ -320,29 +321,7 @@ def build_parser():
     p.add_argument("--nlive", type=int, default=2000)
     p.add_argument("--dlogz", type=float, default=0.1)
     p.add_argument("--max_samples", type=int, default=2_000_000)
-    p.add_argument("--tinyns_sample", default="rwalk",
-                   choices=["rwalk", "prior"],
-                   help="tinyns proposal: random walk (default) or prior.")
-    p.add_argument("--tinyns_kernel", default="jax", choices=["jax", "python"],
-                   help="tinyns proposal kernel: jitted JAX (default) or pure Python.")
-    p.add_argument("--tinyns_walks", type=int, default=25,
-                   help="tinyns: number of random-walk steps per update (sample=rwalk).")
-    p.add_argument("--tinyns_replacement_chains", type=int, default=1,
-                   help="tinyns: independent random-walk chains run in parallel per "
-                        "replacement (rwalk+jax only; default 1).")
-    p.add_argument("--tinyns_replacement_chain_schedule", type=str, default=None,
-                   help="tinyns: adaptive rwalk+jax escalation schedule, e.g. "
-                        "'1,4,16,64,256' (ascending). Starts small and escalates only "
-                        "when a stage fails. Mutually exclusive with "
-                        "--tinyns_replacement_chains.")
-    p.add_argument("--tinyns_max_attempts", type=int, default=None,
-                   help="tinyns: max constrained-proposal attempts per replacement "
-                        "(tinyns default 10000). Must be >= walks*replacement_chains; "
-                        "if unset it auto-raises to that product when needed.")
-    p.add_argument("--tinyns_step_scale", type=float, default=0.1,
-                   help="tinyns: initial step scale as a fraction of the prior width.")
-    p.add_argument("--tinyns_progress_interval", type=int, default=100,
-                   help="tinyns: iterations between progress-bar updates.")
+    add_tinyns_arguments(p)
     p.add_argument("--nuts_warmup", type=int, default=500)
     p.add_argument("--nuts_samples", type=int, default=2000)
     p.add_argument("--nuts_chains", type=int, default=4)
@@ -409,6 +388,16 @@ def main():
     print(f"  logL(prior midpoint) = {v:.3f}  [compile {time.time()-t:.1f}s]", flush=True)
 
     # --- sample ---
+    if opts.sampler == "tinyns":
+        cfg = build_tinyns_config(opts).to_json_dict()
+        print("  TinyNS resolved config:", flush=True)
+        for key in ["preset", "sample", "kernel", "rwalk_proposal", "walks",
+                    "step_scale", "min_accepts", "replacement_chains",
+                    "max_attempts", "jax_block_size"]:
+            print(f"    {key}: {cfg[key]}", flush=True)
+        print(f"    dlogz: {opts.dlogz}", flush=True)
+        print(f"    nlive: {opts.nlive}", flush=True)
+        print(f"    max_samples: {opts.max_samples}", flush=True)
     print(f"sampling with {opts.sampler} ...", flush=True)
     results = run_sampler(method=opts.sampler, likelihood=loglike,
                           prior_transform=prior_transform, labels=labels,
@@ -430,6 +419,12 @@ def main():
         f.attrs["n_pairs"] = inp["n_pairs"]
         if results.get("logZ") is not None:
             f.attrs["logZ"] = float(results["logZ"])
+        if getattr(opts, "tinyns_resolved_config", None) is not None:
+            f.attrs["tinyns_resolved_config"] = json.dumps(opts.tinyns_resolved_config, default=str)
+        if results.get("tinyns_summary") is not None:
+            f.attrs["tinyns_summary"] = json.dumps(results["tinyns_summary"], default=str)
+        if results.get("tinyns_diagnostics") is not None:
+            f.attrs["tinyns_diagnostics"] = json.dumps(results["tinyns_diagnostics"], default=str)
     with open(os.path.join(run_dir, "settings.json"), "w") as f:
         json.dump({k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
                    for k, v in vars(opts).items()}, f, indent=2)

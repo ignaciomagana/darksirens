@@ -3,7 +3,7 @@ from argparse import Namespace
 import pytest
 
 from darksirens.inference.tinyns_config import build_tinyns_config, parse_chain_schedule
-from darksirens.cli.inference import main  # import smoke
+from darksirens.cli.inference_lensing import build_parser as build_lensing_parser
 
 
 def ns(**kw):
@@ -31,11 +31,60 @@ def ns(**kw):
 
 def test_recommended_defaults():
     c = build_tinyns_config(ns())
-    assert (c.sample, c.kernel, c.rwalk_proposal, c.walks) == ("rwalk", "jax", "isotropic", 5)
+    assert c.sample == "rwalk"
+    assert c.kernel == "jax"
+    assert c.rwalk_proposal == "isotropic"
+    assert c.walks == 5
+    assert c.step_scale == 0.1
+    assert c.min_accepts == 1
     assert c.replacement_chains == 1
     assert c.bound == "none"
     assert c.jax_block_size == 32
 
+
+
+def test_heavy_darksirens_preset():
+    c = build_tinyns_config(ns(tinyns_preset="heavy_darksirens"))
+    assert c.walks == 80
+    assert c.step_scale == 0.015
+    assert c.min_accepts == 8
+    assert c.replacement_chains == 16
+    assert c.max_attempts == 300000
+    assert c.jax_block_size == 32
+    assert c.bound == "none"
+    assert c.rwalk_proposal == "isotropic"
+
+
+def test_heavy_darksirens_strong_preset():
+    c = build_tinyns_config(ns(tinyns_preset="heavy_darksirens_strong"))
+    assert c.walks == 160
+    assert c.step_scale == 0.01
+    assert c.min_accepts == 12
+    assert c.replacement_chains == 16
+    assert c.max_attempts == 300000
+    assert c.jax_block_size == 32
+
+
+def test_explicit_override_beats_heavy_preset():
+    c = build_tinyns_config(ns(tinyns_preset="heavy_darksirens", tinyns_walks=40))
+    assert c.walks == 40
+    assert c.max_attempts == 300000
+
+
+def test_lensing_parser_tinyns_defaults_do_not_override_recommended():
+    opts = build_lensing_parser().parse_args([
+        "--sampler", "tinyns",
+        "--gw_path", "dummy",
+        "--gwselection_path", "dummy",
+    ])
+    assert opts.tinyns_preset == "recommended"
+    assert opts.tinyns_walks is None
+    assert opts.tinyns_step_scale is None
+    assert opts.tinyns_replacement_chains is None
+    assert opts.tinyns_jax_block_size is None
+    c = build_tinyns_config(opts)
+    assert c.walks == 5
+    assert c.jax_block_size == 32
 
 def test_python_debug_defaults():
     c = build_tinyns_config(ns(tinyns_preset="python_debug"))

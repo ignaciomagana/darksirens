@@ -13,6 +13,18 @@ PRESETS = {
         replacement_chain_schedule=None, bound="none", jax_block_size=32,
         jax_vectorized=False, vectorized=False, batch_size=128, max_attempts=None,
     ),
+    "heavy_darksirens": dict(
+        sample="rwalk", kernel="jax", rwalk_proposal="isotropic", walks=80,
+        step_scale=0.015, min_accepts=8, replacement_chains=16,
+        replacement_chain_schedule=None, bound="none", jax_block_size=32,
+        jax_vectorized=False, vectorized=False, batch_size=128, max_attempts=300000,
+    ),
+    "heavy_darksirens_strong": dict(
+        sample="rwalk", kernel="jax", rwalk_proposal="isotropic", walks=160,
+        step_scale=0.01, min_accepts=12, replacement_chains=16,
+        replacement_chain_schedule=None, bound="none", jax_block_size=32,
+        jax_vectorized=False, vectorized=False, batch_size=128, max_attempts=300000,
+    ),
     "conservative": dict(sample="rwalk", kernel="jax", rwalk_proposal="isotropic", walks=5, replacement_chains=1, bound="none", jax_block_size=1),
     "python_debug": dict(sample="rwalk", kernel="python", rwalk_proposal="isotropic", walks=25, replacement_chains=1, replacement_chain_schedule=None, bound="none", jax_block_size=1),
     "prior": dict(sample="prior", kernel="python", vectorized=False, bound="none", jax_block_size=1, replacement_chains=1, replacement_chain_schedule=None),
@@ -40,6 +52,59 @@ BASE_DEFAULTS = dict(
     checkpoint_path=None, checkpoint_interval=None, resume_from=None,
     checkpoint_path_out=None, progress_interval=100,
 )
+
+
+def add_tinyns_arguments(parser_or_group, *, bool_type=None):
+    """Register TinyNS CLI arguments with preset-safe defaults.
+
+    Individual TinyNS options default to None so build_tinyns_config can
+    distinguish omitted flags from explicit user overrides.
+    """
+    if bool_type is None:
+        from darksirens.cli.common import str_to_bool as bool_type
+
+    g = parser_or_group
+    g.add_argument("--tinyns_preset", default="recommended", choices=list(PRESETS),
+                   help="tinyns preset; explicit TinyNS options override preset defaults.")
+    g.add_argument("--tinyns_sample", default=None, choices=["rwalk", "prior"],
+                   help="tinyns sampler: current TinyNS supports rwalk or prior.")
+    g.add_argument("--tinyns_kernel", default=None, choices=["jax", "python"],
+                   help="tinyns proposal kernel.")
+    g.add_argument("--tinyns_vectorized", type=bool_type, default=None, metavar="BOOL")
+    g.add_argument("--tinyns_max_attempts", type=int, default=None)
+    g.add_argument("--tinyns_walks", type=int, default=None)
+    g.add_argument("--tinyns_step_scale", type=float, default=None)
+    g.add_argument("--tinyns_batch_size", type=int, default=None)
+    g.add_argument("--tinyns_min_accepts", type=int, default=None)
+    g.add_argument("--tinyns_replacement_chains", type=int, default=None)
+    g.add_argument("--tinyns_replacement_chain_schedule", type=str, default=None,
+                   help="Comma-separated positive increasing schedule, e.g. '1,4,16,64'.")
+    g.add_argument("--tinyns_rwalk_proposal", choices=["isotropic", "live-cov"], default=None)
+    g.add_argument("--tinyns_rwalk_cov_jitter", type=float, default=None)
+    g.add_argument("--tinyns_bound", choices=["none", "single", "multi"], default=None)
+    g.add_argument("--tinyns_bound_enlargement", type=float, default=None)
+    g.add_argument("--tinyns_bound_update_interval", type=int, default=None)
+    g.add_argument("--tinyns_bound_jitter", type=float, default=None)
+    g.add_argument("--tinyns_bound_max_draws", type=int, default=None)
+    g.add_argument("--tinyns_multi_bound_max_ellipsoids", type=int, default=None)
+    g.add_argument("--tinyns_multi_bound_min_points", type=int, default=None)
+    g.add_argument("--tinyns_multi_bound_split_threshold", type=float, default=None)
+    g.add_argument("--tinyns_multi_bound_enlargement", type=float, default=None)
+    g.add_argument("--tinyns_multi_bound_overlap_correction", type=bool_type, default=None, metavar="BOOL")
+    g.add_argument("--tinyns_rwalk_seed", choices=["live", "bound"], default=None)
+    g.add_argument("--tinyns_rwalk_seed_fallback", type=bool_type, default=None, metavar="BOOL")
+    g.add_argument("--tinyns_bound_seed_kernel", choices=["python", "jax"], default=None)
+    g.add_argument("--tinyns_allow_unused_bound", type=bool_type, default=None, metavar="BOOL")
+    g.add_argument("--tinyns_fused_bound_rwalk", type=bool_type, default=None, metavar="BOOL")
+    g.add_argument("--tinyns_bound_rebuild_on_failure", type=bool_type, default=None, metavar="BOOL")
+    g.add_argument("--tinyns_bound_failure_rebuild_threshold", type=int, default=None)
+    g.add_argument("--tinyns_jax_vectorized", type=bool_type, default=None, metavar="BOOL")
+    g.add_argument("--tinyns_jax_block_size", type=int, default=None)
+    g.add_argument("--tinyns_checkpoint_path", default=None)
+    g.add_argument("--tinyns_checkpoint_interval", type=int, default=None)
+    g.add_argument("--tinyns_resume_from", default=None)
+    g.add_argument("--tinyns_checkpoint_path_out", default=None)
+    g.add_argument("--tinyns_progress_interval", type=int, default=None)
 
 @dataclass(frozen=True)
 class TinyNSConfig:
@@ -99,9 +164,10 @@ def build_tinyns_config(opts):
         max_samples=getattr(opts, "max_samples", None), seed=int(getattr(opts, "seed", 0)), show_progress=bool(getattr(opts, "show_progress", True)),
         explicit=tuple(explicit), **vals)
     validate_tinyns_config(cfg)
-    # write resolved values back for print/settings
-    for k, v in cfg.to_json_dict().items():
-        if k != "explicit": setattr(opts, f"tinyns_{k}" if k in names or k == "preset" else k, v)
+    # Keep individual CLI override attributes unchanged so repeated resolution
+    # remains idempotent and omitted flags stay distinguishable from explicit
+    # overrides. Store the complete resolved config separately for printing and
+    # result metadata.
     setattr(opts, "tinyns_resolved_config", cfg.to_json_dict())
     return cfg
 

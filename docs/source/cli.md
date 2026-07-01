@@ -116,11 +116,62 @@ TinyNS support targets the current upstream sampler API. TinyNS modes are `rwalk
 and `prior`; TinyNS no longer supports `slice`/`rslice` modes. Use `dynesty` for
 slice-style nested-sampling comparisons.
 
-The default `--tinyns_preset recommended` selects the fast current science path:
-`sample=rwalk`, `kernel=jax`, unbounded random-walk proposals, and a modest JAX
-block size. Other presets include `python_debug` for a pure-Python reference,
-`prior` for constrained-prior draws, `batched_gpu`/`adaptive_gpu` for GPU chain
-parallelism, and experimental bounded presets (`bounded_single`,
-`bounded_multi`, `fused_bounded_multi`). Explicit `--tinyns_*` options override
-the selected preset, and the resolved configuration is recorded in
-`tinyns_resolved_config` in `settings.json`.
+The default `--tinyns_preset recommended` uses the current TinyNS recommended
+B32 fast path: `sample=rwalk`, `kernel=jax`, unbounded isotropic random-walk
+proposals, `walks=5`, `replacement_chains=1`, and `jax_block_size=32`. B64/B128
+are not darksirens defaults. Live-cov proposals and bounded/fused-bound modes
+remain experimental and must be selected explicitly.
+
+Heavy realistic dark-siren likelihoods can opt in to diagnostic starting points:
+
+- `--tinyns_preset heavy_darksirens`
+- `--tinyns_preset heavy_darksirens_strong`
+
+These heavy presets are expensive and target-specific. They are not guaranteed
+production settings; validate each target by inspecting `tinyns_resolved_config`,
+`tinyns_diagnostics`, `tinyns_summary`, replacement metadata such as
+`replacement_failures` and `replacement_rescue_used`, insertion-rank diagnostics
+when present, and logZ scatter across independent seeds. Explicit `--tinyns_*`
+options override the selected preset, and the resolved configuration is recorded
+in `tinyns_resolved_config` in `settings.json` and supported HDF5 outputs.
+
+### Heavy darksirens TinyNS templates
+
+Copy-pasteable runner script:
+
+```bash
+GW_PATH=/path/to/gw.h5 \
+GWSELECTION_PATH=/path/to/injections.h5 \
+SURVEY_PATH=/path/to/catalog.h5 \
+SAVE_PATH=./runs/heavy_tinyns \
+scripts/run_tinyns_heavy_darksirens_likelihood.sh
+```
+
+Direct CLI equivalent:
+
+```bash
+darksirens_inference \
+  --gw_path /path/to/gw.h5 \
+  --gwselection_path /path/to/injections.h5 \
+  --survey_path /path/to/catalog.h5 \
+  --sampler tinyns \
+  --tinyns_preset heavy_darksirens \
+  --universe_model dark_sirens \
+  --pop_model brokenpowerlaw+2peaks \
+  --fixed_cosmology true \
+  --fix_survey true \
+  --nlive 2000 \
+  --dlogz 0.11 \
+  --max_samples 0 \
+  --sel_batch_size 4096 \
+  --drop_full_catalog true \
+  --show_progress true \
+  --save_path ./runs/heavy_tinyns
+```
+
+For a stronger opt-in starting point after target-specific validation, change the
+preset in either command to:
+
+```bash
+--tinyns_preset heavy_darksirens_strong
+```
