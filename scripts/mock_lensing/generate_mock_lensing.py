@@ -49,6 +49,7 @@ import argparse
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
 
 # Make ``darksirens`` importable when this script is run directly from any cwd
@@ -568,12 +569,16 @@ def write_pair_pe_file(pairs, path, nsamp):
 # STEP 6 - assemble
 # ============================================================
 def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
+             conditioning, max_sing_keep, max_pair_keep,
              rho_thr, horizon_Mpc, n_unlensed_inj, n_lensed_inj,
              H0, Om0, sis, wl):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
     truth.update(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
-                 n_universe=n_universe, nsamp=nsamp)
+                 n_sources_universe=n_universe, nsamp=nsamp,
+                 conditioning=conditioning,
+                 selection_model="Finn-Chernoff orientation-averaged p_det",
+                 pe_prior_convention="p_pe proportional to m1det * dL^2 in the (m1det, q, dL) basis")
 
     rng = np.random.default_rng(seed)
     model = SNRModel(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc)
@@ -584,10 +589,47 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     det_s, _, _ = apply_selection_singletons(src, marks, model, rng)
     dbl = apply_selection_doubles(src, marks, model, rng)
 
-    sing_idx = np.where(det_s)[0]
-    rng.shuffle(sing_idx)
-    sing_idx = sing_idx[:n_sing_keep]
-    pair_src_idx = np.where(dbl["both_detected"])[0][:n_pair_keep]
+    sing_candidates = np.where(det_s)[0]
+    pair_candidates = np.where(dbl["both_detected"])[0]
+    n_singletons_detected_total = int(sing_candidates.size)
+    n_pairs_both_detected_total = int(pair_candidates.size)
+
+    # Randomize before any truncation so the kept catalog is an unbiased subset
+    # of the detected mock rather than the first sources in simulation order.
+    rng.shuffle(sing_candidates)
+    rng.shuffle(pair_candidates)
+
+    caps_applied = {"singletons": False, "pairs": False}
+    if conditioning == "fixed_counts":
+        if n_sing_keep > n_singletons_detected_total:
+            warnings.warn(
+                f"requested --n-sing-keep={n_sing_keep} but only "
+                f"{n_singletons_detected_total} singleton sources were detected; "
+                "keeping all available singleton detections",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        if n_pair_keep > n_pairs_both_detected_total:
+            warnings.warn(
+                f"requested --n-pair-keep={n_pair_keep} but only "
+                f"{n_pairs_both_detected_total} lensed pairs had both images detected; "
+                "keeping all available detected pairs",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        sing_idx = sing_candidates[:n_sing_keep]
+        pair_src_idx = pair_candidates[:n_pair_keep]
+    elif conditioning == "poisson_counts":
+        sing_idx = sing_candidates
+        pair_src_idx = pair_candidates
+        if max_sing_keep is not None and sing_idx.size > max_sing_keep:
+            sing_idx = sing_idx[:max_sing_keep]
+            caps_applied["singletons"] = True
+        if max_pair_keep is not None and pair_src_idx.size > max_pair_keep:
+            pair_src_idx = pair_src_idx[:max_pair_keep]
+            caps_applied["pairs"] = True
+    else:  # argparse enforces this; keep defensive guard for direct callers.
+        raise ValueError(f"unknown conditioning mode: {conditioning}")
 
     # ---- PE: singletons + pairs ----
     events = [make_event_pe(src["m1"][i], src["q"][i], src["z"][i], src["chi"][i],
@@ -616,6 +658,11 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         n_singletons=S, n_pairs=P,
         singleton_indices=list(range(S)),
         pair_indices=[[S + 2 * k, S + 2 * k + 1] for k in range(P)],
+        truth=dict(
+            singleton_source_indices=[int(i) for i in sing_idx],
+            pair_source_indices=[int(i) for i in pair_src_idx],
+            pair_partition=[[S + 2 * k, S + 2 * k + 1] for k in range(P)],
+        ),
         note="event order: singletons [0..S-1], then pair images [S+2k, S+2k+1]",
     )
     with open(os.path.join(out_dir, "partition.json"), "w") as f:
@@ -625,6 +672,14 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     truth_out = {k: (v.tolist() if isinstance(v, np.ndarray) else v)
                  for k, v in truth.items()}
     truth_out["theta_param_order"] = THETA_PARAM_ORDER
+    truth_out.update(
+        n_singletons_detected_total=n_singletons_detected_total,
+        n_pairs_both_detected_total=n_pairs_both_detected_total,
+        n_singletons_kept=S,
+        n_pairs_kept=P,
+        caps_applied=caps_applied,
+        pair_partition_truth=partition["truth"],
+    )
     with open(os.path.join(out_dir, "truth.json"), "w") as f:
         json.dump(truth_out, f, indent=2)
 
@@ -637,7 +692,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             "mock_pair_pe.h5": "pair PE per image; lensed-pair-pe-1.0",
             "mock_gw_selection.h5": "unlensed injections; gwcat-selection-1.0; load_selection_samples",
             "mock_lensed_injections.h5": "lensed J=2 injections; load_lensed_injections",
-            "partition.json": "TRUE partition (singleton_indices, pair_indices)",
+            "partition.json": "TRUE partition (singleton_indices, pair_indices, source-index truth)",
         },
         pair_pe_schema=dict(
             format_version="lensed-pair-pe-1.0",
@@ -654,14 +709,16 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             ),
         ),
         counts=dict(
-            n_universe=n_universe,
-            n_singletons_detected_total=int(det_s.sum()), n_singletons_kept=S,
-            n_pairs_detected_total=int(dbl["both_detected"].sum()), n_pairs_kept=P,
+            n_sources_universe=n_universe,
+            n_singletons_detected_total=n_singletons_detected_total, n_singletons_kept=S,
+            n_pairs_both_detected_total=n_pairs_both_detected_total, n_pairs_kept=P,
+            conditioning=conditioning, caps_applied=caps_applied,
             nsamp=nsamp, n_unlensed_injections=n_unlensed_inj,
             n_lensed_injection_sources=n_lensed_inj,
         ),
         model=dict(pop_name=POP_NAME, rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
-                   selection="Finn-Chernoff orientation-averaged p_det",
+                   selection_model="Finn-Chernoff orientation-averaged p_det",
+                   pe_prior_convention="p_pe proportional to m1det * dL^2 in the (m1det, q, dL) basis",
                    cosmology=f"H0={H0}, Om0={Om0}",
                    tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
                    wl_a=float(wl.a), wl_b=float(wl.b)),
@@ -680,6 +737,14 @@ def parse_args():
     p.add_argument("--n-universe", type=int, default=120_000, help="source draws")
     p.add_argument("--n-sing-keep", type=int, default=200, help="singletons kept")
     p.add_argument("--n-pair-keep", type=int, default=40, help="pairs kept")
+    p.add_argument("--conditioning", choices=("fixed_counts", "poisson_counts"),
+                   default="fixed_counts",
+                   help="fixed_counts preserves exact requested debug counts; "
+                        "poisson_counts keeps the stochastic detected counts")
+    p.add_argument("--max-sing-keep", type=int, default=None,
+                   help="optional singleton cap for --conditioning poisson_counts")
+    p.add_argument("--max-pair-keep", type=int, default=None,
+                   help="optional pair cap for --conditioning poisson_counts")
     p.add_argument("--n-unlensed-inj", type=int, default=200_000)
     p.add_argument("--n-lensed-inj", type=int, default=300_000, help="lensed source draws")
     p.add_argument("--rho-thr", type=float, default=8.0, help="network SNR threshold")
@@ -700,6 +765,8 @@ def main():
     manifest = assemble(
         args.outdir, n_universe=args.n_universe, seed=args.seed, nsamp=args.nsamp,
         n_sing_keep=args.n_sing_keep, n_pair_keep=args.n_pair_keep,
+        conditioning=args.conditioning, max_sing_keep=args.max_sing_keep,
+        max_pair_keep=args.max_pair_keep,
         rho_thr=args.rho_thr, horizon_Mpc=args.horizon_mpc,
         n_unlensed_inj=args.n_unlensed_inj, n_lensed_inj=args.n_lensed_inj,
         H0=args.H0, Om0=args.Om0, sis=sis, wl=wl,
