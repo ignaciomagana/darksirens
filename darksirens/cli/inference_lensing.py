@@ -696,6 +696,15 @@ def load_inputs(opts):
                 candidate_data,
                 max_partitions=getattr(opts, "max_exact_partitions", 10000),
                 edge_mark_prior_keys=getattr(opts, "edge_mark_prior_keys", None),
+                component_mode=getattr(
+                    opts, "partition_component_mode", "componentwise"
+                ),
+                max_component_events=getattr(opts, "max_component_events", None),
+                max_component_edges=getattr(opts, "max_component_edges", None),
+                max_component_partitions=getattr(
+                    opts, "max_component_partitions", None
+                ),
+                max_total_partitions=getattr(opts, "max_total_partitions", None),
             )
         )
         if candidate_n_events != n_events_total:
@@ -1171,6 +1180,15 @@ def build_parser():
         "--partition_mode", choices=["fixed", "marginalize_exact"], default="fixed"
     )
     p.add_argument("--max_exact_partitions", type=int, default=10000)
+    p.add_argument(
+        "--partition_component_mode",
+        choices=["global", "componentwise"],
+        default="componentwise",
+    )
+    p.add_argument("--max_component_events", type=int, default=None)
+    p.add_argument("--max_component_edges", type=int, default=None)
+    p.add_argument("--max_component_partitions", type=int, default=None)
+    p.add_argument("--max_total_partitions", type=int, default=None)
     # model
     p.add_argument("--pop_model", default="powerlaw+peak")
     p.add_argument("--cluster_mode", choices=["off", "j2"], default="j2")

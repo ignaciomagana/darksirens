@@ -502,11 +502,29 @@ lensed-injection selection estimator may include the optional `p_tag` pair-tag
 factor described above, but still does not add dark-siren, LSS, or
 catalog-selection support.
 
+
+### Scaling exact partition marginalization
+
+Exact candidate-pair marginalization enumerates every matching compatible with the candidate graph.  This is exact, but the number of matchings can grow exponentially with graph size, so dense or weakly pruned simulated candidate graphs can otherwise hang before inference starts.
+
+For `--partition_mode marginalize_exact`, the default `--partition_component_mode componentwise` decomposes the candidate graph into connected components, enumerates matchings inside each component, and reports component complexity in preflight and marginalized diagnostics.  Small graphs still produce the same global partitions, posterior pair probabilities, and partition-prior normalizer as global exact enumeration; the decomposition is a scaling guardrail, not an approximation.  If you need legacy behavior, pass `--partition_component_mode global`.
+
+Use the component caps to protect simulation campaigns:
+
+```bash
+--max_component_events 12 \
+--max_component_edges 30 \
+--max_component_partitions 10000 \
+--max_total_partitions 50000
+```
+
+If any component or the Cartesian product of component partitions exceeds these caps, inference fails early with an error suggesting candidate-graph pruning.  Pruning should happen before inference, for example by tightening time-delay, sky-overlap, mass-distance, spin, or prior-odds cuts in the candidate-pair builder.  This PR does not introduce an approximate sampler over partitions and does not change dark-siren/LSS/catalog-host workflows.
+
 ### Marginalized partition diagnostics
 
 For spectral-siren lensing runs with `--cluster_mode j2`, fixed-partition diagnostics describe exactly one materialized partition: the `singleton_indices` and `pair_indices` supplied by `--partition_path`.  Fixed partitions use pair-ordinal time-delay metadata from `pair_pe`.  In contrast, `--partition_mode marginalize_exact` enumerates every compatible matching from `--candidate_pairs_path`, evaluates the scalar likelihood for each partition, and writes diagnostics marginalized over the posterior partition weights.  Marginalized `--pair_marks time` uses edge-indexed candidate marks rather than pair-ordinal `pair_pe` metadata.
 
-A marginalized `diagnostics.json` includes the prior normalizer (`log_z_partition_prior`), marginalized scalar likelihood (`logL_marginalized`, also aliased as `logL_total`), per-partition prior weights and likelihoods, posterior partition probabilities, posterior pair probabilities in the validated candidate-pair order, the posterior expected numbers of pairs and singletons, and a compact MAP partition object.  Candidate pairs are treated as unordered edges; if an input pair is written as `(j, i)`, the validated diagnostics report the normalized order `(min(i, j), max(i, j))` while preserving optional `label` and `log_prior_odds` fields.
+A marginalized `diagnostics.json` includes the prior normalizer (`log_z_partition_prior`), marginalized scalar likelihood (`logL_marginalized`, also aliased as `logL_total`), per-partition prior weights and likelihoods, posterior partition probabilities, posterior pair probabilities in the validated candidate-pair order, connected-component summaries (`n_components`, `component_event_indices`, `component_candidate_edge_indices`, `component_n_partitions`, `component_log_z_partition_prior`, `component_expected_n_pairs`, and `component_max_p_pair`), the posterior expected numbers of pairs and singletons, and a compact MAP partition object.  Candidate pairs are treated as unordered edges; if an input pair is written as `(j, i)`, the validated diagnostics report the normalized order `(min(i, j), max(i, j))` while preserving optional `label` and `log_prior_odds` fields.
 
 For marginalized runs, the legacy `results.hdf5` `n_pairs` attribute remains a reference-partition field for backward compatibility and is annotated by `n_pairs_meaning = "reference_partition_n_pairs"`.  Use `expected_n_pairs`, `map_partition_n_pairs`, and `posterior_pair_probabilities` for marginalized inference summaries instead of interpreting `n_pairs` as a posterior pair count.
 

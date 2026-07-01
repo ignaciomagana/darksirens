@@ -9,7 +9,9 @@ from darksirens.lensing.marginal_diagnostics import (
 )
 from darksirens.lensing.partitions import (
     CandidatePair,
+    connected_components_from_candidate_pairs,
     enumerate_compatible_partitions,
+    exact_partitions_componentwise,
     exact_partitions_from_json,
 )
 
@@ -31,6 +33,73 @@ def test_exact_partitions_track_candidate_edge_indices_and_prior_only_posteriors
     assert diag["posterior_pair_probabilities"][0]["label"] == "a"
     assert diag["posterior_pair_probabilities"][0]["p_pair"] == pytest.approx(2.0 / 6.0)
     assert diag["posterior_pair_probabilities"][1]["p_pair"] == pytest.approx(3.0 / 6.0)
+
+
+def test_connected_components_and_componentwise_equal_global():
+    candidates = [
+        CandidatePair(0, 1, math.log(2.0)),
+        CandidatePair(1, 2, math.log(3.0)),
+        CandidatePair(3, 4, math.log(5.0)),
+    ]
+    components = connected_components_from_candidate_pairs(6, candidates)
+    assert [c["event_indices"] for c in components] == [(0, 1, 2), (3, 4), (5,)]
+    assert [c["candidate_edge_indices"] for c in components] == [(0, 1), (2,), ()]
+
+    global_states = enumerate_compatible_partitions(6, candidates)
+    component_states, summaries, _ = exact_partitions_componentwise(
+        6, candidates, max_total_partitions=100
+    )
+    assert [s["n_partitions"] for s in summaries] == [3, 2, 1]
+
+    def key(state):
+        return (
+            tuple(map(tuple, np.asarray(state.pair_indices).reshape((-1, 2)).tolist())),
+            tuple(np.asarray(state.candidate_edge_indices).tolist()),
+            pytest.approx(state.log_prior_weight),
+        )
+
+    assert len(component_states) == len(global_states)
+    assert sorted(
+        (
+            tuple(map(tuple, s.pair_indices.tolist())),
+            tuple(s.candidate_edge_indices.tolist()),
+        )
+        for s in component_states
+    ) == sorted(
+        (
+            tuple(map(tuple, s.pair_indices.tolist())),
+            tuple(s.candidate_edge_indices.tolist()),
+        )
+        for s in global_states
+    )
+    np.testing.assert_allclose(
+        sorted(s.log_prior_weight for s in component_states),
+        sorted(s.log_prior_weight for s in global_states),
+    )
+
+
+def test_component_caps_fail_helpfully():
+    candidates = [CandidatePair(0, 1, 0.0), CandidatePair(1, 2, 0.0)]
+    with pytest.raises(ValueError, match="max_component_events=2.*prune"):
+        exact_partitions_componentwise(3, candidates, max_component_events=2)
+    with pytest.raises(ValueError, match="max_component_edges=1.*prune"):
+        exact_partitions_componentwise(3, candidates, max_component_edges=1)
+    with pytest.raises(ValueError, match="max_total_partitions=2.*prune"):
+        exact_partitions_componentwise(3, candidates, max_total_partitions=2)
+
+
+def test_diagnostics_include_component_summary():
+    candidates = [CandidatePair(0, 1, 0.0), CandidatePair(2, 3, 0.0)]
+    states, _, _ = exact_partitions_componentwise(
+        4, candidates, max_total_partitions=10
+    )
+    diag = compute_marginalized_partition_diagnostics(states, candidates, lambda s: 0.0)
+    assert diag["n_components"] == 2
+    assert diag["component_event_indices"] == [[0, 1], [2, 3]]
+    assert diag["component_candidate_edge_indices"] == [[0], [1]]
+    assert diag["component_n_partitions"] == [2, 2]
+    assert diag["component_expected_n_pairs"] == pytest.approx([0.5, 0.5])
+    assert diag["component_max_p_pair"] == pytest.approx([0.5, 0.5])
 
 
 def test_single_candidate_graph_has_empty_and_pair_partitions():
@@ -554,8 +623,12 @@ def test_preflight_fails_missing_requested_prior_mark(tmp_path):
     assert any("missing requested edge prior mark" in e for e in report["errors"])
 
 
-def test_observed_builder_computes_finite_sky_overlap_and_true_pairs_are_higher(tmp_path):
-    from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs
+def test_observed_builder_computes_finite_sky_overlap_and_true_pairs_are_higher(
+    tmp_path,
+):
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import (
+        build_candidate_pairs,
+    )
 
     gw = _observed_gw(tmp_path / "gw.h5", n_events=4)
     cat = _observed_catalog_with_truth(tmp_path / "observed_catalog.json", n_events=4)
@@ -571,8 +644,16 @@ def test_observed_builder_computes_finite_sky_overlap_and_true_pairs_are_higher(
     )
     overlaps = [edge["marks"]["log_sky_overlap"] for edge in data["pairs"]]
     assert all(np.isfinite(overlaps))
-    true_overlap = next(edge["marks"]["log_sky_overlap"] for edge in data["pairs"] if edge.get("label") == "true")
-    wrong = [edge["marks"]["log_sky_overlap"] for edge in data["pairs"] if edge.get("label") == "wrong"]
+    true_overlap = next(
+        edge["marks"]["log_sky_overlap"]
+        for edge in data["pairs"]
+        if edge.get("label") == "true"
+    )
+    wrong = [
+        edge["marks"]["log_sky_overlap"]
+        for edge in data["pairs"]
+        if edge.get("label") == "wrong"
+    ]
     assert wrong
     assert true_overlap > max(wrong)
 
@@ -582,16 +663,50 @@ def test_preflight_rejects_invalid_requested_sky_overlap_mark(tmp_path):
     import json
     from darksirens.lensing.preflight import run_lensing_preflight
 
-    gw = tmp_path / "gw.h5"; sel = tmp_path / "sel.h5"; linj = tmp_path / "linj.h5"; cand = tmp_path / "candidate_pairs.json"
-    _minimal_gw(gw); _minimal_selection(sel); _minimal_lensed(linj)
-    cand.write_text(json.dumps({"n_events": 2, "candidate_pairs": [{"i": 0, "j": 1, "log_prior_odds": 0.0, "marks": {"log_sky_overlap": float("nan")}}]}))
+    gw = tmp_path / "gw.h5"
+    sel = tmp_path / "sel.h5"
+    linj = tmp_path / "linj.h5"
+    cand = tmp_path / "candidate_pairs.json"
+    _minimal_gw(gw)
+    _minimal_selection(sel)
+    _minimal_lensed(linj)
+    cand.write_text(
+        json.dumps(
+            {
+                "n_events": 2,
+                "candidate_pairs": [
+                    {
+                        "i": 0,
+                        "j": 1,
+                        "log_prior_odds": 0.0,
+                        "marks": {"log_sky_overlap": float("nan")},
+                    }
+                ],
+            }
+        )
+    )
     opts = SimpleNamespace(
-        gw_path=str(gw), gwselection_path=str(sel), lensed_injections_path=str(linj),
-        partition_path=None, candidate_pairs_path=str(cand), observed_catalog_path=None,
-        pair_pe_path=None, pair_metadata_path=None, cluster_mode="j2", partition_mode="marginalize_exact",
-        pair_marks="none", pair_time_sigma_sec=None, max_exact_partitions=10000,
-        wl_selection="standard", wl_backend="lognormal", fix_lens_rate=True, sl_tau_A=5e-4, sl_tau_n=3.0,
-        lens_prior_overrides=None, edge_mark_prior_keys="log_sky_overlap", edge_mark_likelihood_keys="",
+        gw_path=str(gw),
+        gwselection_path=str(sel),
+        lensed_injections_path=str(linj),
+        partition_path=None,
+        candidate_pairs_path=str(cand),
+        observed_catalog_path=None,
+        pair_pe_path=None,
+        pair_metadata_path=None,
+        cluster_mode="j2",
+        partition_mode="marginalize_exact",
+        pair_marks="none",
+        pair_time_sigma_sec=None,
+        max_exact_partitions=10000,
+        wl_selection="standard",
+        wl_backend="lognormal",
+        fix_lens_rate=True,
+        sl_tau_A=5e-4,
+        sl_tau_n=3.0,
+        lens_prior_overrides=None,
+        edge_mark_prior_keys="log_sky_overlap",
+        edge_mark_likelihood_keys="",
     )
     report = run_lensing_preflight(opts)
     assert not report["ok"]
