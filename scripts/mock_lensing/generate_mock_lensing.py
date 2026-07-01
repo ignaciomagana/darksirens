@@ -602,7 +602,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              rho_thr, horizon_Mpc, n_unlensed_inj, n_lensed_inj,
              H0, Om0, sis, wl, pair_tag_model="none", pair_tag_prob=1.0,
              n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
-             wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0):
+             wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0,
+             validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0)):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
     truth.update(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
@@ -766,6 +767,28 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     with open(os.path.join(out_dir, "truth.json"), "w") as f:
         json.dump(truth_out, f, indent=2)
 
+
+    tiny_recovery_command = (
+        "darksirens_inference_lensing "
+        f"--gw_path {os.path.join(out_dir, 'mock_gw_pe.h5')} "
+        f"--gwselection_path {os.path.join(out_dir, 'mock_gw_selection.h5')} "
+        f"--lensed_injections_path {os.path.join(out_dir, 'mock_lensed_injections.h5')} "
+        f"--pair_pe_path {os.path.join(out_dir, 'mock_pair_pe.h5')} "
+        f"--partition_path {os.path.join(out_dir, 'partition.json')} "
+        "--cluster_mode j2 --wl_backend lognormal --fix_cosmology true --fix_survey true "
+        "--sampler tinyns --nlive 32 --max_samples 256 --pe_max_per_pair 16 "
+        f"--sl_tau_A {float(sis.A_tau)} --sl_tau_n {float(sis.n_tau)}"
+    )
+    if validation_sample_log10_tau_A:
+        lo, hi = (float(validation_log10_tau_A_prior[0]), float(validation_log10_tau_A_prior[1]))
+        fixed_json = json.dumps({"tau_n": float(sis.n_tau)})
+        override_json = json.dumps({"log10_tau_A": [lo, hi]})
+        tiny_recovery_command += (
+            " --fix_lens_rate false "
+            f"--fixed_parameter_values '{fixed_json}' "
+            f"--lens_prior_overrides '{override_json}'"
+        )
+
     # ---- manifest.json (informational) ----
     manifest = dict(
         description="Standalone strong-lensing mock for darksirens_inference_lensing "
@@ -815,6 +838,10 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                    cosmology=f"H0={H0}, Om0={Om0}",
                    tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
                    wl_a=float(wl.a), wl_b=float(wl.b)),
+        validation=dict(
+            sample_log10_tau_A=bool(validation_sample_log10_tau_A),
+            tiny_recovery_command=tiny_recovery_command,
+        ),
     )
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
@@ -860,6 +887,10 @@ def parse_args():
                    help="log prior odds assigned to shuffled wrong candidate edges")
     p.add_argument("--time-delay-sigma-sec", type=float, default=3600.0,
                    help="Gaussian sigma for observed SIS pair time delays, in seconds")
+    p.add_argument("--validation-sample-log10-tau-A", action="store_true",
+                   help="write/print a tiny validation command that samples log10_tau_A while fixing tau_n")
+    p.add_argument("--validation-log10-tau-A-prior", type=float, nargs=2, default=(-7.0, -2.0),
+                   metavar=("LO", "HI"), help="prior for the optional validation log10_tau_A recovery command")
     return p.parse_args()
 
 
@@ -880,10 +911,15 @@ def main():
         candidate_pair_log_prior_odds=args.candidate_pair_log_prior_odds,
         wrong_candidate_log_prior_odds=args.wrong_candidate_log_prior_odds,
         time_delay_sigma_sec=args.time_delay_sigma_sec,
+        validation_sample_log10_tau_A=args.validation_sample_log10_tau_A,
+        validation_log10_tau_A_prior=args.validation_log10_tau_A_prior,
     )
     c = manifest["counts"]
     print(json.dumps(c, indent=2))
     print(f"partition: {c['n_singletons_kept']} singletons, {c['n_pairs_kept']} pairs")
+    if args.validation_sample_log10_tau_A:
+        print("tiny recovery command (samples log10_tau_A, fixes tau_n):")
+        print(manifest["validation"]["tiny_recovery_command"])
     print(f"written to: {args.outdir}")
 
 

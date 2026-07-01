@@ -111,6 +111,67 @@ from darksirens.likelihood.likelihood_with_clusters import (
 
 
 # =============================================================================
+# Local lensing-parameter space
+# =============================================================================
+LENS_PARAMETER_PRIORS = {
+    "log10_tau_A": (-7.0, -2.0),
+    "tau_n": (0.0, 6.0),
+}
+
+
+def _build_lens_parameter_space(opts, fixed_parameter_values, lens_prior_overrides):
+    """Return sampled SIS optical-depth labels and bounds for this lensing CLI.
+
+    The main darksirens parameter machinery intentionally remains unchanged:
+    these parameters are spectral-siren lensing-only hyperparameters and are
+    appended locally when ``--fix_lens_rate false``.  A label present in
+    ``fixed_parameter_values`` is treated as fixed, which allows tiny recovery
+    runs such as sampling ``log10_tau_A`` while fixing ``tau_n``.
+    """
+    if getattr(opts, "fix_lens_rate", True):
+        return [], np.asarray([], dtype=float), np.asarray([], dtype=float)
+
+    labels, lower, upper = [], [], []
+    for label, default_bounds in LENS_PARAMETER_PRIORS.items():
+        if label in fixed_parameter_values:
+            continue
+        bounds = lens_prior_overrides.get(label, default_bounds)
+        if len(bounds) != 2:
+            raise ValueError(f"lens prior override for {label!r} must be [lo, hi]")
+        lo, hi = float(bounds[0]), float(bounds[1])
+        if not np.isfinite(lo) or not np.isfinite(hi) or not lo < hi:
+            raise ValueError(f"invalid lens prior bounds for {label!r}: {bounds!r}")
+        labels.append(label)
+        lower.append(lo)
+        upper.append(hi)
+    return labels, np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
+
+
+def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
+    """Construct ``SISLensParams`` from fixed CLI values or sampled lens coords."""
+    if getattr(opts, "fix_lens_rate", True):
+        return make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
+
+    values = {label: jnp.asarray(coord)[i] for i, label in enumerate(sampled_labels)}
+    values.update({label: float(value) for label, value in fixed_parameter_values.items()})
+    log10_tau_A = values.get("log10_tau_A", np.log10(float(opts.sl_tau_A)))
+    tau_n = values.get("tau_n", float(opts.sl_tau_n))
+    return make_sis_lens_params(A_tau=10.0 ** log10_tau_A, n_tau=tau_n)
+
+
+def _lens_settings_dict(coord, sampled_labels, fixed_parameter_values, opts):
+    sis = _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts)
+    return dict(
+        lens_labels=[label for label in sampled_labels if label in LENS_PARAMETER_PRIORS],
+        fix_lens_rate=bool(getattr(opts, "fix_lens_rate", True)),
+        sl_tau_A=float(opts.sl_tau_A),
+        sl_tau_n=float(opts.sl_tau_n),
+        lens_A_tau=float(np.asarray(sis.A_tau)),
+        lens_n_tau=float(np.asarray(sis.n_tau)),
+    )
+
+
+# =============================================================================
 # Container builders (mirror darksirens.likelihood.factory)
 # =============================================================================
 def _empty_em_catalog(nside=1):
@@ -236,7 +297,7 @@ def load_inputs(opts):
                     pair_time_sigma.append(float(opts.pair_time_sigma_sec))
                 else:
                     raise SystemExit(f"pair_marks=time requires sigma_delta_t in pair_{k} or --pair_time_sigma_sec")
-            elif opts.pair_marks == "time":
+            elif getattr(opts, "pair_marks", "none") == "time":
                 raise SystemExit(f"pair_marks=time requires delta_t_obs metadata for pair_{k}")
             for name in ("image0", "image1"):
                 gi = g[name]
@@ -385,7 +446,7 @@ def _print_diagnostics_summary(diagnostics):
     )
 
 
-def build_cluster_likelihood(opts, inp, decoder):
+def build_cluster_likelihood(opts, inp, decoder, lens_sampled_labels=None, fixed_parameter_values=None):
     """Return a closure logL(sampler_coord) using the branch ParameterDecoder.
 
     ``decoder.decode(coord) -> (cosmo, survey, pop_params)`` and the decoder was
@@ -393,11 +454,12 @@ def build_cluster_likelihood(opts, inp, decoder):
     parameters and the integer empty-pixel policy. We pass them straight through.
     """
     em = _empty_em_catalog()
-    sis = make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
+    lens_sampled_labels = list(lens_sampled_labels or [])
+    fixed_parameter_values = dict(fixed_parameter_values or {})
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
     wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
     wl_selection = WL_SELECTION_LOGNORMAL if opts.wl_selection == "wl_lognormal" else WL_SELECTION_STANDARD
-    pair_marks = PAIR_MARKS_TIME if opts.pair_marks == "time" else PAIR_MARKS_NONE
+    pair_marks = PAIR_MARKS_TIME if getattr(opts, "pair_marks", "none") == "time" else PAIR_MARKS_NONE
     universe_model = opts.universe_model
 
     if inp["lensed"] is None:
@@ -421,14 +483,16 @@ def build_cluster_likelihood(opts, inp, decoder):
                 inp["nEvents"], inp["nsamp"], inp["Ndraw"],
                 part["singleton_indices"], part["pair_indices"],
                 part["n_singletons"], part["n_pairs"],
-                inp["lensed"], inp["pair_kdes"], sis, log_p_tag,
+                inp["lensed"], inp["pair_kdes"],
+                _decode_lens_params(coord, lens_sampled_labels, fixed_parameter_values, opts),
+                log_p_tag,
                 opts.pop_model, universe_model,
                 sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
                 wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
                 wl_selection=wl_selection,
                 pair_marks=pair_marks,
-                pair_time_delta_t_obs=inp["pair_time_delta_t_obs"],
-                pair_time_sigma=inp["pair_time_sigma"],
+                pair_time_delta_t_obs=inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64)),
+                pair_time_sigma=inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
@@ -442,13 +506,14 @@ def build_cluster_likelihood(opts, inp, decoder):
     return loglike
 
 
-def build_cluster_diagnostics(opts, inp, decoder):
+def build_cluster_diagnostics(opts, inp, decoder, lens_sampled_labels=None, fixed_parameter_values=None):
     em = _empty_em_catalog()
-    sis = make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
+    lens_sampled_labels = list(lens_sampled_labels or [])
+    fixed_parameter_values = dict(fixed_parameter_values or {})
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
     wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
     wl_selection = WL_SELECTION_LOGNORMAL if opts.wl_selection == "wl_lognormal" else WL_SELECTION_STANDARD
-    pair_marks = PAIR_MARKS_TIME if opts.pair_marks == "time" else PAIR_MARKS_NONE
+    pair_marks = PAIR_MARKS_TIME if getattr(opts, "pair_marks", "none") == "time" else PAIR_MARKS_NONE
     universe_model = opts.universe_model
     if inp["lensed"] is None:
         log_p_tag = jnp.zeros(0)
@@ -466,22 +531,23 @@ def build_cluster_diagnostics(opts, inp, decoder):
             inp["nEvents"], inp["nsamp"], inp["Ndraw"],
             inp["singleton_indices"], inp["pair_indices"],
             inp["n_singletons"], inp["n_pairs"],
-            inp["lensed"], inp["pair_kdes"], sis, log_p_tag,
+            inp["lensed"], inp["pair_kdes"],
+            _decode_lens_params(coord, lens_sampled_labels, fixed_parameter_values, opts),
+            log_p_tag,
             opts.pop_model, universe_model,
             sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
             wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
             wl_selection=wl_selection,
             pair_marks=pair_marks,
-            pair_time_delta_t_obs=inp["pair_time_delta_t_obs"],
-            pair_time_sigma=inp["pair_time_sigma"],
+            pair_time_delta_t_obs=inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64)),
+            pair_time_sigma=inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
         )
         out = _diagnostics_to_python(raw)
         out.update(
             cluster_mode=opts.cluster_mode,
             wl_backend=opts.wl_backend,
             wl_selection=opts.wl_selection,
-            sl_tau_A=float(opts.sl_tau_A),
-            sl_tau_n=float(opts.sl_tau_n),
+            **_lens_settings_dict(coord, lens_sampled_labels, fixed_parameter_values, opts),
         )
         return out
     return diagnostics
@@ -512,6 +578,10 @@ def build_parser():
     p.add_argument("--lensing_wl_b", type=float, default=1.5)
     p.add_argument("--sl_tau_A", type=float, default=5e-4)
     p.add_argument("--sl_tau_n", type=float, default=3.0)
+    p.add_argument("--fix_lens_rate", default="true",
+                   help="true fixes SIS optical-depth parameters to --sl_tau_A/--sl_tau_n; false samples lensing hyperparameters")
+    p.add_argument("--lens_prior_overrides", default=None,
+                   help="JSON dict of SIS lens prior overrides, e.g. {\"log10_tau_A\": [-6, -3]}")
     p.add_argument("--pair_marks", choices=["none", "time"], default="none",
                    help="Optional J=2 pair marks. 'time' uses delta_t_obs metadata in --pair_pe_path.")
     p.add_argument("--pair_time_sigma_sec", type=float, default=None,
@@ -568,6 +638,7 @@ def main():
     opts.fix_cosmology = _str2bool(opts.fix_cosmology)
     opts.fix_survey = _str2bool(opts.fix_survey)
     opts.fix_population = _str2bool(opts.fix_population)
+    opts.fix_lens_rate = _str2bool(opts.fix_lens_rate)
     os.makedirs(opts.save_path, exist_ok=True)
     if opts.sampler == "tinyns":
         build_tinyns_config(opts)
@@ -591,7 +662,7 @@ def main():
         "  lensing hyperparameters: "
         f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, wl_selection={opts.wl_selection}, pair_marks={opts.pair_marks}, "
         f"wl_a={opts.lensing_wl_a}, wl_b={opts.lensing_wl_b}, "
-        f"sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
+        f"fix_lens_rate={opts.fix_lens_rate}, sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
         flush=True,
     )
     print("loading data ...", flush=True)
@@ -602,6 +673,7 @@ def main():
     # --- build parameter space + prior + decoder using branch machinery ---
     fixed = json.loads(opts.fixed_parameter_values) if opts.fixed_parameter_values else {}
     overrides = json.loads(opts.prior_overrides) if opts.prior_overrides else {}
+    lens_overrides = json.loads(opts.lens_prior_overrides) if opts.lens_prior_overrides else {}
     pop_params_fid = get_fixed_population_params(opts.pop_model)
 
     # the branch parses "true"/"false" strings into bools internally via opts;
@@ -610,8 +682,11 @@ def main():
         opts.pop_model, opts.fix_population, opts.fix_cosmology, opts.fix_survey,
         prior_overrides=overrides, fixed_parameter_values=fixed,
     )
-    labels = space[0]
-    lower = np.asarray(space[1]); upper = np.asarray(space[2])
+    base_labels = list(space[0])
+    base_lower = np.asarray(space[1]); base_upper = np.asarray(space[2])
+    lens_labels, lens_lower, lens_upper = _build_lens_parameter_space(opts, fixed, lens_overrides)
+    labels = base_labels + lens_labels
+    lower = np.concatenate([base_lower, lens_lower]); upper = np.concatenate([base_upper, lens_upper])
     prior_transform = make_prior_transform(lower, upper)
     print(f"  free parameters ({len(labels)}): {labels}", flush=True)
 
@@ -622,8 +697,8 @@ def main():
         opts, pop_params_fid, fixed_parameter_values=fixed, wl_params=wl_params,
     )
 
-    loglike = build_cluster_likelihood(opts, inp, decoder)
-    diagnostics_fn = build_cluster_diagnostics(opts, inp, decoder)
+    loglike = build_cluster_likelihood(opts, inp, decoder, labels, fixed)
+    diagnostics_fn = build_cluster_diagnostics(opts, inp, decoder, labels, fixed)
 
     # smoke eval at the prior midpoint so JIT compile errors surface early
     mid = 0.5 * (lower + upper)
@@ -665,8 +740,13 @@ def main():
         f.attrs["wl_selection"] = opts.wl_selection
         f.attrs["wl_a"] = float(opts.lensing_wl_a)
         f.attrs["wl_b"] = float(opts.lensing_wl_b)
+        lens_settings = _lens_settings_dict(mid, labels, fixed, opts)
+        f.attrs["lens_labels"] = json.dumps(lens_settings["lens_labels"])
+        f.attrs["fix_lens_rate"] = bool(opts.fix_lens_rate)
         f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
         f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
+        f.attrs["lens_A_tau"] = float(lens_settings["lens_A_tau"])
+        f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
         f.attrs["n_events"] = inp["nEvents"]
         f.attrs["n_pairs"] = inp["n_pairs"]
         if results.get("logZ") is not None:
@@ -682,8 +762,8 @@ def main():
     settings.update(
         wl_a=float(opts.lensing_wl_a),
         wl_b=float(opts.lensing_wl_b),
-        sl_tau_A=float(opts.sl_tau_A),
-        sl_tau_n=float(opts.sl_tau_n),
+        lens_prior_overrides=lens_overrides,
+        **_lens_settings_dict(mid, labels, fixed, opts),
     )
     with open(os.path.join(run_dir, "settings.json"), "w") as f:
         json.dump(settings, f, indent=2)

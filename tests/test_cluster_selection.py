@@ -935,6 +935,69 @@ def test_lensing_cli_threads_sl_tau_A_into_prior_midpoint_likelihood(monkeypatch
     assert high != low
 
 
+def test_lensing_cli_sampled_lens_params_affect_cluster_and_pair_terms(monkeypatch):
+    """Sampled log10_tau_A/tau_n must be decoded into SISLensParams."""
+    from types import SimpleNamespace
+    from darksirens.cli import inference_lensing
+
+    class _Decoder:
+        def decode(self, coord):
+            del coord
+            return _cosmo(), _survey(), jnp.ones(1), None, None
+
+    seen = []
+    def _fake_cluster_likelihood(*args, **kwargs):
+        del kwargs
+        sis_params = args[16]
+        seen.append((float(sis_params.A_tau), float(sis_params.n_tau)))
+        # Mimic a log_mu_cluster/pair-likelihood dependence through tau_2.
+        return jnp.log(sis_params.A_tau) + sis_params.n_tau * jnp.log(2.0)
+
+    monkeypatch.setattr(
+        inference_lensing, "darksiren_log_likelihood_with_clusters", _fake_cluster_likelihood
+    )
+    inp = dict(
+        gw_pe=None, gw_sel=None, nEvents=2, nsamp=1, Ndraw=1.0,
+        singleton_indices=jnp.asarray([], dtype=jnp.int32),
+        pair_indices=jnp.asarray([[0, 1]], dtype=jnp.int32),
+        n_singletons=0, n_pairs=1, pair_kdes=None, lensed=SimpleNamespace(m1_src=jnp.ones(2)),
+    )
+    opts = SimpleNamespace(
+        fix_lens_rate=False, sl_tau_A=5e-4, sl_tau_n=3.0,
+        cluster_mode="j2", wl_backend="disabled", wl_selection="standard",
+        universe_model="spectral_sirens", pop_model="powerlaw+peak", sel_batch_size=None,
+        lensing_wl_a=4e-3, lensing_wl_b=1.5, pair_marks="none",
+    )
+
+    loglike = inference_lensing.build_cluster_likelihood(
+        opts, inp, _Decoder(), ["log10_tau_A", "tau_n"], {}
+    )
+    low = float(loglike(jnp.asarray([-6.0, 1.0])))
+    high = float(loglike(jnp.asarray([-3.0, 4.0])))
+
+    assert seen == pytest.approx([(1.0e-6, 1.0), (1.0e-3, 4.0)])
+    assert high != low
+
+
+def test_lensing_cli_lens_labels_appended_when_rate_sampled():
+    """Local lens priors are appended only when --fix_lens_rate false."""
+    from types import SimpleNamespace
+    from darksirens.cli import inference_lensing
+
+    opts = SimpleNamespace(fix_lens_rate=False)
+    labels, lower, upper = inference_lensing._build_lens_parameter_space(opts, {}, {})
+    assert labels == ["log10_tau_A", "tau_n"]
+    assert lower.tolist() == [-7.0, 0.0]
+    assert upper.tolist() == [-2.0, 6.0]
+
+    labels, lower, upper = inference_lensing._build_lens_parameter_space(
+        opts, {"tau_n": 3.0}, {"log10_tau_A": [-5.0, -3.0]}
+    )
+    assert labels == ["log10_tau_A"]
+    assert lower.tolist() == [-5.0]
+    assert upper.tolist() == [-3.0]
+
+
 @pytest.fixture(scope="module")
 def wl_selection_fixture():
     rng = np.random.default_rng(0)
