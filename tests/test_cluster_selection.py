@@ -732,3 +732,54 @@ class TestMasterLikelihoodReduction:
             f"True partition (0,1)-pair did not outscore wrong partition: "
             f"ll_truth={ll_truth}, ll_swapped={ll_swapped}, diff={diff}"
         )
+
+
+def test_lensing_cli_threads_sl_tau_A_into_prior_midpoint_likelihood(monkeypatch):
+    """Changing --sl_tau_A must change the J=2 likelihood closure inputs."""
+    from types import SimpleNamespace
+    from darksirens.cli import inference_lensing
+
+    class _Decoder:
+        def decode(self, coord):
+            del coord
+            return _cosmo(), _survey(), jnp.ones(1), None, None
+
+    def _fake_cluster_likelihood(*args, **kwargs):
+        del kwargs
+        # build_cluster_likelihood passes sis_params immediately before log_p_tag.
+        sis_params = args[16]
+        return sis_params.A_tau
+
+    monkeypatch.setattr(
+        inference_lensing,
+        "darksiren_log_likelihood_with_clusters",
+        _fake_cluster_likelihood,
+    )
+
+    inp = dict(
+        gw_pe=None, gw_sel=None, nEvents=2, nsamp=1, Ndraw=1.0,
+        singleton_indices=jnp.asarray([], dtype=jnp.int32),
+        pair_indices=jnp.asarray([[0, 1]], dtype=jnp.int32),
+        n_singletons=0, n_pairs=1, pair_kdes=None, lensed=SimpleNamespace(m1_src=jnp.ones(2)),
+    )
+
+    def _opts(sl_tau_A):
+        return SimpleNamespace(
+            sl_tau_A=sl_tau_A,
+            sl_tau_n=3.0,
+            cluster_mode="j2",
+            wl_backend="disabled",
+            universe_model="spectral_sirens",
+            pop_model="powerlaw+peak",
+            sel_batch_size=None,
+            lensing_wl_a=4e-3,
+            lensing_wl_b=1.5,
+        )
+
+    midpoint = jnp.zeros(1)
+    low = float(inference_lensing.build_cluster_likelihood(_opts(1.0e-4), inp, _Decoder())(midpoint))
+    high = float(inference_lensing.build_cluster_likelihood(_opts(9.0e-4), inp, _Decoder())(midpoint))
+
+    assert low == pytest.approx(1.0e-4)
+    assert high == pytest.approx(9.0e-4)
+    assert high != low
