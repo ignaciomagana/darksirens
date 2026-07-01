@@ -440,6 +440,10 @@ def _print_diagnostics_summary(diagnostics):
     print(
         f"    n_singletons: {diagnostics['n_singletons']}  "
         f"n_pairs: {diagnostics['n_pairs']}  "
+        f"pair_batch_size: {diagnostics.get('pair_batch_size')}  "
+        f"y_nodes_pair: {diagnostics.get('y_nodes_pair')}  "
+        f"pe_max_per_pair: {diagnostics.get('pe_max_per_pair')}  "
+        f"pair_eval_shape: {diagnostics.get('approximate_pair_evaluation_shape')}  "
         f"cluster_mode: {diagnostics['cluster_mode']}  "
         f"wl_backend: {diagnostics['wl_backend']}",
         flush=True,
@@ -493,6 +497,8 @@ def build_cluster_likelihood(opts, inp, decoder, lens_sampled_labels=None, fixed
                 pair_marks=pair_marks,
                 pair_time_delta_t_obs=inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64)),
                 pair_time_sigma=inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
+                pair_batch_size=opts.pair_batch_size,
+                y_nodes_pair=opts.y_nodes_pair,
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
@@ -541,12 +547,18 @@ def build_cluster_diagnostics(opts, inp, decoder, lens_sampled_labels=None, fixe
             pair_marks=pair_marks,
             pair_time_delta_t_obs=inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64)),
             pair_time_sigma=inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
+            pair_batch_size=opts.pair_batch_size,
+            y_nodes_pair=opts.y_nodes_pair,
         )
         out = _diagnostics_to_python(raw)
         out.update(
             cluster_mode=opts.cluster_mode,
             wl_backend=opts.wl_backend,
             wl_selection=opts.wl_selection,
+            pair_batch_size=opts.pair_batch_size,
+            y_nodes_pair=opts.y_nodes_pair,
+            pe_max_per_pair=opts.pe_max_per_pair,
+            approximate_pair_evaluation_shape=[int(inp["n_pairs"]), int(inp["nsamp"]), int(opts.y_nodes_pair)],
             **_lens_settings_dict(coord, lens_sampled_labels, fixed_parameter_values, opts),
         )
         return out
@@ -619,6 +631,10 @@ def build_parser():
     p.add_argument("--pe_max_per_pair", type=int, default=400,
                    help="down-sample PE per pair image (0=keep all). Controls "
                         "the O(N_pe^2 N_y) pair-KDE memory.")
+    p.add_argument("--pair_batch_size", type=int, default=0,
+                   help="candidate-pair batch size for J=2 likelihood scans (0 keeps legacy unbatched path)")
+    p.add_argument("--y_nodes_pair", type=int, default=32,
+                   help="Gauss-Legendre y nodes for each J=2 pair likelihood")
     p.add_argument("--sel_batch_size", type=int, default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--show_progress", action="store_true")
