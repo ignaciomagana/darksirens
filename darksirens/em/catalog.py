@@ -264,6 +264,24 @@ def eval_log_catalog_prior_state(
     return log_g_front + log_mix
 
 
+def log_catalog_prior_norm_state(
+    state: CatalogKernelState,
+    em_catalog: EMCatalog,
+) -> jnp.ndarray:
+    """
+    Per-row log normaliser ``log ∫_0^zmax p_cat(z | pix) dz``.
+
+    Only valid for ``state.volume_weighted``; the incomplete model normalises
+    differently (per-kernel ``Z_i`` + the assembled ``log_Z`` division) and must
+    not call this.
+    """
+    zs = em_catalog.zgals                                   # (N_rows, N_max)
+    sig = state.sig_eff                                     # (N_rows, N_max)
+    mass = ndtr((_ZMAX - zs) / sig) - ndtr(-zs / sig)       # (N_rows, N_max)
+    log_mass = jnp.where(mass > 0.0, jnp.log(jnp.maximum(mass, 1e-300)), -jnp.inf)
+    return logsumexp(state.log_kw + log_mass, axis=-1)      # (N_rows,)
+
+
 @jit
 def log_catalog_prior(
     z: float,
@@ -289,8 +307,10 @@ def log_catalog_prior(
     ngal = None if em_catalog.ngals is None else em_catalog.ngals[pix]
 
     log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+    # Scalar (incomplete-model / test) path: unit-mass kernels + front g(z),
+    # i.e. the volume_weighted=False convention.
     log_kw, sig_eff = _row_kernel_state(
-        zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid
+        zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, False
     )
     log_g_z = jnp.interp(z, zgrid, log_g_grid)
     return log_g_z + logsumexp(log_kw + norm.logpdf(z, zs, sig_eff))

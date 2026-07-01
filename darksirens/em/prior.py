@@ -92,6 +92,7 @@ from .catalog import (
     catalog_kernel_state,
     marked_catalog_kernel_state,
     eval_log_catalog_prior_state,
+    log_catalog_prior_norm_state,
     CatalogKernelState,
 )
 from .completion import completion_curves, log_galaxy_measure_grid
@@ -112,9 +113,10 @@ class SpectralPriorState(NamedTuple):
 
 
 class CompletePriorState(NamedTuple):
-    kernels: Any   # CatalogKernelState
-    row_has: Any   # (N_rows,) bool — row contains at least one real galaxy
-    log_pvol: Any  # (N_grid,) volume fallback for the ``volume`` policy
+    kernels: Any    # CatalogKernelState
+    row_has: Any    # (N_rows,) bool — row contains at least one real galaxy
+    log_pvol: Any   # (N_grid,) volume fallback for the ``volume`` policy
+    log_norm: Any   # (N_rows,) log ∫_0^zmax p_cat(z|pix) dz — per-pixel normaliser
 
 
 class DarkSirenPriorState(NamedTuple):
@@ -218,8 +220,12 @@ def prepare_redshift_prior_state(
         kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=True)
         row_has = _row_counts(em_catalog) > 0.0
         log_pvol = jnp.log(_precompute_volume_grid(cosmo))
+        # Per-pixel normaliser
+        log_norm = log_catalog_prior_norm_state(kernels, em_catalog)
         return _materialize(
-            CompletePriorState(kernels=kernels, row_has=row_has, log_pvol=log_pvol)
+            CompletePriorState(
+                kernels=kernels, row_has=row_has, log_pvol=log_pvol, log_norm=log_norm
+            )
         )
 
     if model == "dark_sirens":
@@ -325,6 +331,9 @@ def _eval_complete_scalar(
 ):
     log_p_cat = eval_log_catalog_prior_state(z, pix, state.kernels, em_catalog)
     log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+    # Normalise to a probability density in z per pixel: ∫_0^zmax p_cat dz = 1.
+    # The volume fallback (log_pvol) is already normalised, so it needs no division.
+    log_p_cat = log_p_cat - state.log_norm[pix]
     log_p_vol = jnp.interp(z, zgrid, state.log_pvol)
     empty_value = jnp.where(
         survey.complete_empty_pixel_policy == COMPLETE_EMPTY_PIXEL_POLICY_VOLUME,

@@ -65,15 +65,24 @@ def test_complete_catalog_volume_policy_uses_finite_volume_fallback_for_empty_pi
     assert np.isfinite(np.asarray(actual)[0])
 
 
-def test_complete_catalog_non_empty_pixel_uses_catalog_prior_for_both_policies():
-    z = jnp.array([0.25])
-    pix = jnp.array([1], dtype=jnp.int32)
+def test_complete_catalog_non_empty_pixel_is_normalized_density():
+    # For a populated pixel the complete prior is a probability density in z:
+    # it integrates to 1 over [0, zmax], and the empty-pixel policy is
+    # irrelevant (it only governs empty pixels).
+    from darksirens.em.utils import zgrid
+
     catalog = _catalog()
     cosmo = _cosmo()
+    pix = jnp.array([1], dtype=jnp.int32)
 
-    expected = log_catalog_prior_vmap(z, pix, cosmo, _survey(0), catalog)
+    z = jnp.array([0.25])
     strict = _log_prior_complete_catalog(z, pix, cosmo, _survey(0), catalog)
     fallback = _log_prior_complete_catalog(z, pix, cosmo, _survey(1), catalog)
+    np.testing.assert_allclose(np.asarray(strict), np.asarray(fallback), rtol=1e-12)
 
-    np.testing.assert_allclose(np.asarray(strict), np.asarray(expected), rtol=1e-12)
-    np.testing.assert_allclose(np.asarray(fallback), np.asarray(expected), rtol=1e-12)
+    zfine = jnp.asarray(np.linspace(1e-4, float(np.asarray(zgrid)[-1]), 4000))
+    lp = _log_prior_complete_catalog(
+        zfine, jnp.ones(zfine.size, jnp.int32), cosmo, _survey(0), catalog
+    )
+    integral = float(np.trapezoid(np.exp(np.asarray(lp)), np.asarray(zfine)))
+    assert abs(integral - 1.0) < 1e-3
