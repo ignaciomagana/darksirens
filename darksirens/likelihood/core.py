@@ -56,6 +56,7 @@ WL_BACKEND_TABULATED = 1
         "mark_names",
         "wl_backend",
         "lss_marginalize",
+        "materialize_redshift_prior_state",
     ],
 )
 def darksiren_log_likelihood(
@@ -88,6 +89,7 @@ def darksiren_log_likelihood(
     wl_log_mu_grid: jnp.ndarray | None = None,
     wl_log_p_table: jnp.ndarray | None = None,
     lss_marginalize: bool = False,
+    materialize_redshift_prior_state: bool = True,
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
@@ -167,10 +169,12 @@ def darksiren_log_likelihood(
     prior_state_univ = prepare_redshift_prior_state(
         pe_model, cosmo, survey, em_catalog_pe,
         mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
+        materialize_state=materialize_redshift_prior_state,
     )
     prior_state_sel = prepare_redshift_prior_state(
         selection_model, cosmo, survey, em_catalog_sel,
         mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
+        materialize_state=materialize_redshift_prior_state,
     )
 
     # WL quadrature plumbing — only allocated when wl_enabled (static).  Lognormal

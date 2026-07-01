@@ -72,18 +72,6 @@ import jax.numpy as jnp
 from jax import jit, lax, vmap
 from jax.scipy.special import logsumexp
 
-
-def _materialize(state):
-    """Force XLA to materialize a prior state instead of fusing its
-    construction into per-sample consumers.
-
-    Without this barrier, gathering ``state.dN_miss[pix, idx]`` per sample
-    invites XLA to recompute the producing (N_rows × N_grid) curves inside
-    the sample loop — measured ~10x slowdown of the one-shot prior at 1e5
-    samples.  The barrier is a value identity.
-    """
-    return lax.optimization_barrier(state)
-
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from typing import NamedTuple, Any
 
@@ -101,6 +89,23 @@ from darksirens.redshift.grid import zgrid
 
 COMPLETE_EMPTY_PIXEL_POLICY_ZERO = 0
 COMPLETE_EMPTY_PIXEL_POLICY_VOLUME = 1
+
+
+def _materialize(state):
+    """Force XLA to materialize a prior state instead of fusing its
+    construction into per-sample consumers.
+
+    Without this barrier, gathering ``state.dN_miss[pix, idx]`` per sample
+    invites XLA to recompute the producing (N_rows × N_grid) curves inside
+    the sample loop — measured ~10x slowdown of the one-shot prior at 1e5
+    samples.  The barrier is a value identity.
+    """
+    return lax.optimization_barrier(state)
+
+
+def _maybe_materialize(state, enabled: bool = True):
+    """Return ``state`` with the optimization barrier only when requested."""
+    return _materialize(state) if enabled else state
 
 
 # ------------------------------------------------------------
@@ -197,6 +202,8 @@ def prepare_redshift_prior_state(
     mark_model: str = "none",
     mark_params=None,
     mark_names=(),
+    *,
+    materialize_state: bool = True,
 ):
     """Build the per-proposal state for ``model``.  O(N_rows × N_grid).
 
@@ -207,9 +214,8 @@ def prepare_redshift_prior_state(
     legacy galaxy-count host model, bit-for-bit.
     """
     if model == "spectral_sirens":
-        return _materialize(
-            SpectralPriorState(log_pvol=jnp.log(_precompute_volume_grid(cosmo)))
-        )
+        state = SpectralPriorState(log_pvol=jnp.log(_precompute_volume_grid(cosmo)))
+        return _maybe_materialize(state, materialize_state)
 
     if model == "bright_sirens":
         return None  # per-event counterpart logic needs the live catalog
@@ -218,9 +224,8 @@ def prepare_redshift_prior_state(
         kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=True)
         row_has = _row_counts(em_catalog) > 0.0
         log_pvol = jnp.log(_precompute_volume_grid(cosmo))
-        return _materialize(
-            CompletePriorState(kernels=kernels, row_has=row_has, log_pvol=log_pvol)
-        )
+        state = CompletePriorState(kernels=kernels, row_has=row_has, log_pvol=log_pvol)
+        return _maybe_materialize(state, materialize_state)
 
     if model == "dark_sirens":
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
@@ -247,11 +252,10 @@ def prepare_redshift_prior_state(
             N_host_obs = jnp.where(jnp.isfinite(log_N_host), jnp.exp(log_N_host), 0.0)
             Z = N_host_obs + N_host_miss
             log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
-            return _materialize(
-                DarkSirenPriorState(
-                    kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss, log_Z=log_Z
-                )
+            state = DarkSirenPriorState(
+                kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss, log_Z=log_Z
             )
+            return _maybe_materialize(state, materialize_state)
 
         kernels = catalog_kernel_state(cosmo, survey, em_catalog, log_g_grid=log_g_grid)
         Nobs = _row_counts(em_catalog)
@@ -262,23 +266,21 @@ def prepare_redshift_prior_state(
         Z = Nobs + curves.N_miss
         log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
         if curves.dN_miss_members is None:
-            return _materialize(
-                DarkSirenPriorState(
-                    kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z
-                )
+            state = DarkSirenPriorState(
+                kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z
             )
+            return _maybe_materialize(state, materialize_state)
         # Fixed LSS-completion ensemble present -> add per-member fields for the
         # Bayesian redshift-prior diagnostic (the scalar fields above are unchanged).
         Z_members = Nobs[None, :] + curves.N_miss_members          # (M, N_rows)
         log_Z_members = jnp.where(
             Z_members > 0.0, jnp.log(jnp.maximum(Z_members, 1e-300)), 0.0
         )
-        return _materialize(
-            DarkSirenEnsemblePriorState(
-                kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z,
-                dN_miss_members=curves.dN_miss_members, log_Z_members=log_Z_members,
-            )
+        state = DarkSirenEnsemblePriorState(
+            kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z,
+            dN_miss_members=curves.dN_miss_members, log_Z_members=log_Z_members,
         )
+        return _maybe_materialize(state, materialize_state)
 
     raise ValueError(f"Unknown redshift prior model '{model}'.")
 

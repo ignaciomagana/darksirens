@@ -59,7 +59,11 @@ from darksirens.gw.populations.utils import (
     normalization_grid_settings,
 )
 from darksirens.inference.data import load_all_data, validate_loaded_survey_shapes
-from darksirens.likelihood.factory import make_likelihood
+from darksirens.likelihood.factory import (
+    _redshift_prior_materialization_reason,
+    _resolve_redshift_prior_materialization,
+    make_likelihood,
+)
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.inference.sampling import run_sampler
@@ -411,6 +415,17 @@ def main():
                    help=("Fix only dark-energy cosmology parameters (w0, wa); "
                          "ignored when --fixed_cosmology is true."))
     g.add_argument("--fix_survey",      type=str_to_bool, default=False, metavar="BOOL")
+    g.add_argument(
+        "--redshift_prior_barrier",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help=(
+            "Controls the internal redshift-prior state optimization barrier. 'auto' keeps "
+            "the barrier for ordinary JIT paths but disables the likelihood-internal barrier "
+            "for TinyNS JAX rwalk because JAX cannot batch optimization_barrier under vmap. "
+            "Use 'on' only for non-vmapped samplers; use 'off' to force vmappable behavior."
+        ),
+    )
     g.add_argument("--prior_overrides", default=None, metavar="JSON")
     g.add_argument("--fixed_parameter_values", default=None, metavar="JSON")
     g.add_argument("--counterpart", nargs="+", metavar="RA_DEC_Z",
@@ -533,6 +548,19 @@ def main():
         except ValueError as e:
             _fatal(str(e))
 
+    opts.materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
+    opts.redshift_prior_barrier_resolved = _redshift_prior_materialization_reason(
+        opts, opts.materialize_redshift_prior_state
+    )
+    if (
+        opts.redshift_prior_barrier == "auto"
+        and not opts.materialize_redshift_prior_state
+    ):
+        print(
+            "  [i] Disabling likelihood-internal redshift-prior optimization_barrier "
+            "for TinyNS JAX rwalk vmappability."
+        )
+
     if opts.universe_model == "bright_sirens":
         # Bright sirens use a synthetic one-object catalog fixed by the
         # counterpart rather than survey-completion hyperparameters.
@@ -608,6 +636,7 @@ def main():
     _row("Fix survey",       "yes" if opts.fix_survey     else "no")
     _row("Prior overrides",  json.dumps(prior_overrides) if prior_overrides else "none")
     _row("Validate completion", "yes" if opts.validate_completion else "no")
+    _row("Redshift prior barrier", opts.redshift_prior_barrier_resolved)
     if fixed_parameter_values:
         for lbl, val in fixed_parameter_values.items():
             _row(f"  fixed: {lbl}", val)
