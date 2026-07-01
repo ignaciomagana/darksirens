@@ -116,20 +116,20 @@ def _check_partition(path, n_events, errors, summary, *, observed_n_events=None)
     return [tuple(map(int, p)) for p in pairs.reshape((-1, 2))] if pairs.ndim == 2 else []
 
 
-def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary, *, unified_observed_mode=False):
+def _check_pair_pe(path, n_events, partition_pairs, opts, errors, warnings, summary, *, unified_observed_mode=False, label="pair_pe_path"):
     if not path:
         if unified_observed_mode and _get(opts, "pair_marks", "none") == "none":
             summary["pair_pe_metadata_optional"] = True
             return
-        errors.append("missing pair_pe_path")
+        errors.append(f"missing {label}")
         return
     if not Path(path).exists():
-        errors.append(f"pair_pe_path does not exist: {path}")
+        errors.append(f"{label} does not exist: {path}")
         return
     try:
         with h5py.File(path, "r") as f:
             if "npairs" not in f.attrs:
-                errors.append("pair_pe_path missing npairs attribute")
+                errors.append(f"{label} missing npairs attribute")
                 npairs = 0
             else:
                 npairs = int(f.attrs["npairs"])
@@ -137,7 +137,7 @@ def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary, *, un
             for k in range(npairs):
                 pname = f"pair_{k}"
                 if pname not in f:
-                    errors.append(f"pair_pe_path missing group {pname}")
+                    errors.append(f"{label} missing group {pname}")
                     continue
                 g = f[pname]
                 if ("event_index_image0" in g.attrs) != ("event_index_image1" in g.attrs):
@@ -167,8 +167,14 @@ def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary, *, un
                     except Exception as exc:
                         errors.append(f"{pname} sigma_delta_t not readable: {exc}")
                 if unified_observed_mode:
-                    # Unified mode treats pair_pe_path as optional metadata only;
-                    # image PE groups may be absent and are never inference inputs.
+                    # Unified mode treats pair files as metadata only; image PE
+                    # groups may be present for legacy compatibility but are
+                    # never inference inputs.
+                    if "image0" in g or "image1" in g:
+                        warnings.append(
+                            f"{label} contains legacy image PE groups in {pname}; "
+                            "unified observed mode ignores them and reads PE samples from gw_path"
+                        )
                     continue
                 for img in ("image0", "image1"):
                     if img not in g:
@@ -184,7 +190,7 @@ def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary, *, un
                         except Exception as exc:
                             errors.append(str(exc))
     except Exception as exc:
-        errors.append(f"pair_pe_path not readable: {path}: {exc}")
+        errors.append(f"{label} not readable: {path}: {exc}")
 
 
 def _check_candidates(path, n_events, opts, errors, summary, *, observed_n_events=None):
@@ -256,7 +262,10 @@ def run_lensing_preflight(opts) -> dict:
                     singletons = list(map(int, _read_json(_get(opts, "partition_path")).get("singleton_indices", [])))
                 except Exception:
                     pass
-                unified_observed_mode = (max(singletons + used, default=-1) + 1 == n_events)
+                unified_observed_mode = (
+                    max(singletons + used, default=-1) + 1 == n_events
+                    and (_get(opts, "pair_metadata_path") or not _get(opts, "pair_pe_path"))
+                )
         elif _get(opts, "partition_mode") == "marginalize_exact":
             _check_candidates(_get(opts, "candidate_pairs_path"), n_events, opts, errors, summary, observed_n_events=observed_n_events)
             try:
@@ -271,7 +280,22 @@ def run_lensing_preflight(opts) -> dict:
             summary["unified_observed_mode_inferred_heuristic"] = True
         summary["unified_observed_mode"] = bool(unified_observed_mode)
         _check_lensed(_get(opts, "lensed_injections_path"), errors, summary)
-        _check_pair_pe(_get(opts, "pair_pe_path"), n_events, partition_pairs, opts, errors, summary, unified_observed_mode=unified_observed_mode)
+        pair_meta_path = _get(opts, "pair_metadata_path")
+        pair_pe_path = _get(opts, "pair_pe_path")
+        if pair_meta_path and pair_pe_path and Path(pair_meta_path) != Path(pair_pe_path):
+            errors.append("--pair_metadata_path and --pair_pe_path both provided but point to different paths")
+        pair_path = pair_meta_path or pair_pe_path
+        pair_label = "pair_metadata_path" if pair_meta_path else "pair_pe_path"
+        if not (
+            unified_observed_mode
+            and _get(opts, "partition_mode", "fixed") == "marginalize_exact"
+            and _get(opts, "candidate_pairs_path")
+        ):
+            _check_pair_pe(pair_path, n_events, partition_pairs, opts, errors, warnings, summary, unified_observed_mode=unified_observed_mode, label=pair_label)
+        elif pair_path:
+            _check_pair_pe(pair_path, n_events, partition_pairs, opts, errors, warnings, summary, unified_observed_mode=unified_observed_mode, label=pair_label)
+        else:
+            summary["pair_metadata_from_candidate_pairs"] = True
     if _get(opts, "wl_selection") == "wl_lognormal" and _get(opts, "wl_backend") != "lognormal":
         warnings.append("wl_selection=wl_lognormal is only meaningful with wl_backend=lognormal")
     if _get(opts, "fix_lens_rate", True):

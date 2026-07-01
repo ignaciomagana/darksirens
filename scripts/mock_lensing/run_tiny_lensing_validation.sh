@@ -47,7 +47,7 @@ echo "[tiny-lens] running cluster_mode=j2"
   "${COMMON[@]}" \
   --cluster_mode j2 \
   --lensed_injections_path "$OUTDIR/mock_lensed_injections.h5" \
-  --pair_pe_path "$OUTDIR/mock_pair_pe.h5" \
+  --pair_metadata_path "$OUTDIR/mock_pair_metadata.h5" \
   --partition_path "$OUTDIR/partition.json" \
   $SAMPLER_ARGS \
   --save_path "$RUNROOT/j2"
@@ -58,7 +58,7 @@ if [[ "${RUN_MARGINALIZE_EXACT:-0}" == "1" && -f "$OUTDIR/candidate_pairs.json" 
     "${COMMON[@]}" \
     --cluster_mode j2 \
     --lensed_injections_path "$OUTDIR/mock_lensed_injections.h5" \
-    --pair_pe_path "$OUTDIR/mock_pair_pe.h5" \
+    --pair_metadata_path "$OUTDIR/mock_pair_metadata.h5" \
     --candidate_pairs_path "$OUTDIR/candidate_pairs.json" \
     --partition_mode marginalize_exact \
     --max_exact_partitions "${MAX_EXACT_PARTITIONS:-10000}" \
