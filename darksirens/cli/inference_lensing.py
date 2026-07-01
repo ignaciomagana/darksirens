@@ -70,6 +70,7 @@ import h5py
 import healpy as hp
 import jax
 import jax.numpy as jnp
+from jax.scipy.special import logsumexp as jax_logsumexp
 
 # ── branch machinery we reuse ────────────────────────────────────────────────
 from darksirens.redshift import zgrid
@@ -95,6 +96,7 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
+from darksirens.lensing.partitions import exact_partitions_from_json
 from darksirens.likelihood.pair_kde import (
     make_pair_kde, stack_pair_kdes, validate_pair_prior_wt,
 )
@@ -202,12 +204,16 @@ def load_inputs(opts):
             pair_kdes=pair_kdes, lensed=None,
         )
 
-    # --- j2: lensed injections + pair PE + partition ---
-    if not (opts.lensed_injections_path and opts.pair_pe_path and opts.partition_path):
-        raise SystemExit("--cluster_mode j2 requires --lensed_injections_path, "
-                         "--pair_pe_path, and --partition_path")
+    # --- j2: lensed injections + pair PE + partition(s) ---
+    if not (opts.lensed_injections_path and opts.pair_pe_path):
+        raise SystemExit("--cluster_mode j2 requires --lensed_injections_path and --pair_pe_path")
+    partition_mode = getattr(opts, "partition_mode", "fixed")
+    if partition_mode == "fixed" and not opts.partition_path:
+        raise SystemExit("--partition_mode fixed requires --partition_path")
+    if partition_mode == "marginalize_exact" and not opts.candidate_pairs_path:
+        raise SystemExit("--partition_mode marginalize_exact requires --candidate_pairs_path")
     lensed = load_lensed_injections(opts.lensed_injections_path)
-    partition = json.load(open(opts.partition_path))
+    partition = json.load(open(opts.partition_path, "r", encoding="utf-8")) if opts.partition_path else None
 
     pairs = []
     with h5py.File(opts.pair_pe_path) as f:
@@ -269,13 +275,46 @@ def load_inputs(opts):
                                       img["chieff"], img["prior_wt"]))
     pair_kdes = stack_pair_kdes(kdes)
 
+    n_events_total = n_sing + 2 * P
+    if partition_mode == "marginalize_exact":
+        candidate_data = json.load(open(opts.candidate_pairs_path, "r", encoding="utf-8"))
+        candidate_n_events, partition_states, log_z_prior = exact_partitions_from_json(
+            candidate_data, max_partitions=getattr(opts, "max_exact_partitions", 10000)
+        )
+        if candidate_n_events != n_events_total:
+            raise SystemExit(
+                f"candidate_pairs n_events={candidate_n_events} does not match loaded event count "
+                f"{n_events_total}"
+            )
+        marginal_partitions = tuple(
+            dict(
+                singleton_indices=jnp.asarray(state.singleton_indices, dtype=jnp.int32),
+                pair_indices=jnp.asarray(state.pair_indices, dtype=jnp.int32),
+                n_singletons=state.n_singletons,
+                n_pairs=state.n_pairs,
+                log_prior_weight=state.log_prior_weight,
+            )
+            for state in partition_states
+        )
+        fixed_singletons = marginal_partitions[0]["singleton_indices"]
+        fixed_pairs = marginal_partitions[0]["pair_indices"]
+        fixed_n_singletons = marginal_partitions[0]["n_singletons"]
+        fixed_n_pairs = marginal_partitions[0]["n_pairs"]
+    else:
+        marginal_partitions = None
+        log_z_prior = 0.0
+        fixed_singletons = jnp.asarray(partition["singleton_indices"], dtype=jnp.int32)
+        fixed_pairs = jnp.asarray(partition["pair_indices"], dtype=jnp.int32)
+        fixed_n_singletons = int(partition["n_singletons"])
+        fixed_n_pairs = int(partition["n_pairs"])
+
     return dict(
-        gw_pe=gw_pe, gw_sel=gw_sel, nEvents=n_sing + 2 * P, nsamp=nsamp,
+        gw_pe=gw_pe, gw_sel=gw_sel, nEvents=n_events_total, nsamp=nsamp,
         Ndraw=float(Ndraw),
-        singleton_indices=jnp.asarray(partition["singleton_indices"], dtype=jnp.int32),
-        pair_indices=jnp.asarray(partition["pair_indices"], dtype=jnp.int32),
-        n_singletons=int(partition["n_singletons"]), n_pairs=P,
+        singleton_indices=fixed_singletons, pair_indices=fixed_pairs,
+        n_singletons=fixed_n_singletons, n_pairs=fixed_n_pairs,
         pair_kdes=pair_kdes, lensed=lensed,
+        marginal_partitions=marginal_partitions, log_z_prior=float(log_z_prior),
     )
 
 
@@ -354,18 +393,28 @@ def build_cluster_likelihood(opts, inp, decoder):
         cosmo, survey, pop_params, _sky_params, _mark_params = decoder.decode(
             jnp.asarray(coord)
         )
-        return darksiren_log_likelihood_with_clusters(
-            cosmo, survey, pop_params,
-            inp["gw_pe"], em, inp["gw_sel"], em,
-            inp["nEvents"], inp["nsamp"], inp["Ndraw"],
-            inp["singleton_indices"], inp["pair_indices"],
-            inp["n_singletons"], inp["n_pairs"],
-            inp["lensed"], inp["pair_kdes"], sis, log_p_tag,
-            opts.pop_model, universe_model,
-            sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
-            wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
-            wl_selection=wl_selection,
-        )
+        def _eval_partition(part):
+            return darksiren_log_likelihood_with_clusters(
+                cosmo, survey, pop_params,
+                inp["gw_pe"], em, inp["gw_sel"], em,
+                inp["nEvents"], inp["nsamp"], inp["Ndraw"],
+                part["singleton_indices"], part["pair_indices"],
+                part["n_singletons"], part["n_pairs"],
+                inp["lensed"], inp["pair_kdes"], sis, log_p_tag,
+                opts.pop_model, universe_model,
+                sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
+                wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
+                wl_selection=wl_selection,
+            )
+
+        if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            terms = [
+                part["log_prior_weight"] + _eval_partition(part)
+                for part in inp["marginal_partitions"]
+            ]
+            return jax_logsumexp(jnp.stack(terms)) - inp["log_z_prior"]
+
+        return _eval_partition(inp)
     return loglike
 
 
@@ -422,6 +471,9 @@ def build_parser():
     p.add_argument("--lensed_injections_path", default=None)
     p.add_argument("--pair_pe_path", default=None)
     p.add_argument("--partition_path", default=None)
+    p.add_argument("--candidate_pairs_path", default=None)
+    p.add_argument("--partition_mode", choices=["fixed", "marginalize_exact"], default="fixed")
+    p.add_argument("--max_exact_partitions", type=int, default=10000)
     # model
     p.add_argument("--pop_model", default="powerlaw+peak")
     p.add_argument("--cluster_mode", choices=["off", "j2"], default="j2")

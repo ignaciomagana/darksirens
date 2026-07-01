@@ -592,7 +592,9 @@ def write_pair_pe_file(pairs, path, nsamp):
 def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              conditioning, max_sing_keep, max_pair_keep,
              rho_thr, horizon_Mpc, n_unlensed_inj, n_lensed_inj,
-             H0, Om0, sis, wl, pair_tag_model="none", pair_tag_prob=1.0):
+             H0, Om0, sis, wl, pair_tag_model="none", pair_tag_prob=1.0,
+             n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
+             wrong_candidate_log_prior_odds=-5.0):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
     truth.update(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
@@ -693,6 +695,43 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     with open(os.path.join(out_dir, "partition.json"), "w") as f:
         json.dump(partition, f, indent=2)
 
+    # ---- candidate pairs for exact partition marginalization ----
+    true_edges = [
+        {
+            "i": int(S + 2 * k),
+            "j": int(S + 2 * k + 1),
+            "log_prior_odds": float(candidate_pair_log_prior_odds),
+            "label": "true",
+        }
+        for k in range(P)
+    ]
+    used_edges = {tuple(edge[x] for x in ("i", "j")) for edge in true_edges}
+    wrong_edges = []
+    n_events_total = S + 2 * P
+    max_wrong_edges = n_events_total * (n_events_total - 1) // 2 - len(used_edges)
+    if n_wrong_candidate_pairs > max_wrong_edges:
+        raise ValueError(
+            f"requested {n_wrong_candidate_pairs} wrong candidate pairs but only "
+            f"{max_wrong_edges} are available"
+        )
+    while len(wrong_edges) < n_wrong_candidate_pairs:
+        i, j = sorted(rng.choice(n_events_total, size=2, replace=False).astype(int).tolist())
+        edge = (i, j)
+        if edge in used_edges:
+            continue
+        used_edges.add(edge)
+        wrong_edges.append({
+            "i": i, "j": j,
+            "log_prior_odds": float(wrong_candidate_log_prior_odds),
+            "label": "wrong",
+        })
+    candidate_pairs = {
+        "n_events": n_events_total,
+        "candidate_pairs": true_edges + wrong_edges,
+    }
+    with open(os.path.join(out_dir, "candidate_pairs.json"), "w") as f:
+        json.dump(candidate_pairs, f, indent=2)
+
     # ---- truth.json (informational) ----
     truth_out = {k: (v.tolist() if isinstance(v, np.ndarray) else v)
                  for k, v in truth.items()}
@@ -718,6 +757,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             "mock_gw_selection.h5": "unlensed injections; gwcat-selection-1.0; load_selection_samples",
             "mock_lensed_injections.h5": "lensed J=2 injections; load_lensed_injections; includes p_tag_per_source pair-tag metadata",
             "partition.json": "TRUE partition (singleton_indices, pair_indices, source-index truth)",
+            "candidate_pairs.json": "candidate-pair graph for --partition_mode marginalize_exact",
         },
         lensed_injection_schema=dict(
             pair_tag_dataset="p_tag_per_source",
@@ -747,6 +787,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             lensed_injection_pair_tag=lensed_inj_summary,
             nsamp=nsamp, n_unlensed_injections=n_unlensed_inj,
             n_lensed_injection_sources=n_lensed_inj,
+            n_wrong_candidate_pairs=int(n_wrong_candidate_pairs),
         ),
         model=dict(pop_name=POP_NAME, rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
                    selection_model="Finn-Chernoff orientation-averaged p_det",
@@ -791,6 +832,12 @@ def parse_args():
                    default="none", help="mock-only pair-tag selection model for lensed injections")
     p.add_argument("--pair-tag-prob", type=float, default=1.0,
                    help="pair-tag probability used by --pair-tag-model constant")
+    p.add_argument("--n-wrong-candidate-pairs", type=int, default=0,
+                   help="number of shuffled non-truth candidate edges to add to candidate_pairs.json")
+    p.add_argument("--candidate-pair-log-prior-odds", type=float, default=0.0,
+                   help="log prior odds assigned to true candidate edges")
+    p.add_argument("--wrong-candidate-log-prior-odds", type=float, default=-5.0,
+                   help="log prior odds assigned to shuffled wrong candidate edges")
     return p.parse_args()
 
 
@@ -807,6 +854,9 @@ def main():
         n_unlensed_inj=args.n_unlensed_inj, n_lensed_inj=args.n_lensed_inj,
         H0=args.H0, Om0=args.Om0, sis=sis, wl=wl,
         pair_tag_model=args.pair_tag_model, pair_tag_prob=args.pair_tag_prob,
+        n_wrong_candidate_pairs=args.n_wrong_candidate_pairs,
+        candidate_pair_log_prior_odds=args.candidate_pair_log_prior_odds,
+        wrong_candidate_log_prior_odds=args.wrong_candidate_log_prior_odds,
     )
     c = manifest["counts"]
     print(json.dumps(c, indent=2))
