@@ -88,7 +88,7 @@ from darksirens.utils.cosmology import z_of_dL, dL_of_z, ddL_of_z, dL_in_z_grid
 from darksirens.likelihood.pair_kde import PairKDE, log_eval_pair_kde
 from darksirens.lensing.slmarks import (
     SISLensParams, tau_2_SIS, log_p_y_SIS,
-    mu_plus_minus_from_y,
+    mu_plus_minus_from_y, delta_t_from_y,
 )
 from darksirens.lensing.grids import make_y_grid
 
@@ -131,6 +131,10 @@ def _pair_branch_log_integrand(
     cosmo: CosmoParams, survey: SurveyParams, pop_params: jnp.ndarray, catalog: EMCatalog,
     sis_params: SISLensParams,
     log_p_pop_fn: Callable, log_prior_z_fn: Callable,
+    pair_marks: int = 0,
+    delta_t_obs: jnp.ndarray | None = None,
+    sigma_delta_t: jnp.ndarray | None = None,
+    y_nodes: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Compute the per-PE-sample log-integrand over y for one image-assignment branch.
 
@@ -186,6 +190,20 @@ def _pair_branch_log_integrand(
     log_J = _log_jac_app_to_src(z_s_safe, dL_true_ij, mu_i_b, H0, Om0)
     log_quad = log_py[None, :] + log_wy[None, :]      # (1, N_y), broadcasts
 
+    # Optional pair mark: observed SIS time delay.  The mark is evaluated
+    # inside the y quadrature so it constrains the same impact parameter as
+    # the magnification marks. pair_marks=0 is exactly inert.
+    if pair_marks == 1:
+        if delta_t_obs is None or sigma_delta_t is None or y_nodes is None:
+            raise ValueError("pair_marks=time requires delta_t_obs, sigma_delta_t, and y_nodes")
+        dt_model = delta_t_from_y(y_nodes, sis_params)
+        sig = jnp.asarray(sigma_delta_t, dtype=jnp.float64)
+        log_time = (
+            -0.5 * jnp.square((jnp.asarray(delta_t_obs, dtype=jnp.float64) - dt_model) / sig)
+            - jnp.log(sig) - 0.5 * jnp.log(2.0 * jnp.pi)
+        )
+        log_quad = log_quad + log_time[None, :]
+
     # PE proposal density: importance correction for event-i sample
     valid_i_b = (valid_i & (prior_wt_i > 0.0))[:, None]   # (N_pe_i, 1)
     log_pe_wt = jnp.where(valid_i_b, -jnp.log(prior_wt_i)[:, None], -jnp.inf)
@@ -216,6 +234,9 @@ def cluster_log_likelihood_pair(
     log_prior_z_fn: Callable,
     y_nodes: jnp.ndarray,
     log_wy: jnp.ndarray,
+    pair_marks: int = 0,
+    delta_t_obs: jnp.ndarray | None = None,
+    sigma_delta_t: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Symmetric J=2 pair log-likelihood ``log L_2(d_i, d_j | λ, Θ)``.
 
@@ -249,6 +270,8 @@ def cluster_log_likelihood_pair(
         cosmo=cosmo, survey=survey, pop_params=pop_params, catalog=catalog,
         sis_params=sis_params,
         log_p_pop_fn=log_p_pop_fn, log_prior_z_fn=log_prior_z_fn,
+        pair_marks=pair_marks, delta_t_obs=delta_t_obs,
+        sigma_delta_t=sigma_delta_t, y_nodes=y_nodes,
     )
     N_i = event_i["m1det"].shape[0]
     log_branch_a = logsumexp(log_int_a) - jnp.log(N_i)
@@ -264,6 +287,8 @@ def cluster_log_likelihood_pair(
         cosmo=cosmo, survey=survey, pop_params=pop_params, catalog=catalog,
         sis_params=sis_params,
         log_p_pop_fn=log_p_pop_fn, log_prior_z_fn=log_prior_z_fn,
+        pair_marks=pair_marks, delta_t_obs=delta_t_obs,
+        sigma_delta_t=sigma_delta_t, y_nodes=y_nodes,
     )
     N_j = event_j["m1det"].shape[0]
     log_branch_b = logsumexp(log_int_b) - jnp.log(N_j)

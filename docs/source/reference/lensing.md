@@ -24,6 +24,8 @@ cases with `--conditioning {fixed_counts,poisson_counts}`:
   counts. Use `--max-sing-keep` and `--max-pair-keep` only as optional file-size
   caps; `manifest.json` and `truth.json` record whether those caps were applied.
 
+Both modes also write optional SIS time-delay pair metadata into `mock_pair_pe.h5`: per-pair `delta_t_obs`, `sigma_delta_t`, `true_y`, `true_delta_t`, and image arrival-time attributes. The observed delay is generated as `delta_t_from_y(y, sis)` plus Gaussian noise controlled by `--time-delay-sigma-sec`. These marks are inert unless inference is run with `--pair_marks time`; the default `--pair_marks none` preserves old pair-PE behavior.
+
 Both modes can also record mock pair-tag selection with
 `--pair-tag-model {none,constant,min_snr_proxy}`. `none` writes `p_tag=1`;
 `constant` writes `--pair-tag-prob` for both-detected sources; and
@@ -189,7 +191,7 @@ log-density inside the JIT.
 
 The strong-lensing cluster likelihood for a lensed image pair: it combines the
 SIS lens marks, the source-position PDF, and the pair KDE into the per-pair
-contribution to the hierarchical likelihood.
+contribution to the hierarchical likelihood.  When `pair_marks=time`, an additional Gaussian `log p(delta_t_obs | y, T0)` term is added inside the same `y` quadrature; `pair_marks=none` omits this term for backward compatibility.
 
 ```{automodule} darksirens.likelihood.cluster_likelihood
 :members:
@@ -215,7 +217,7 @@ Vitale-criterion-guarded correction.
 
 The top-level driver `darksiren_log_likelihood_with_clusters` that splits events
 into singletons and lensed pairs, evaluates each with the appropriate likelihood,
-and applies the combined selection correction. It is invoked by the
+and applies the combined selection correction. The lensing CLI accepts `--pair_marks {none,time}` and `--pair_time_sigma_sec` as a fallback when time-delay metadata provides `delta_t_obs` but omits `sigma_delta_t`. It is invoked by the
 [`darksirens_inference_lensing`](tools.md) CLI.
 
 ```{automodule} darksirens.likelihood.likelihood_with_clusters
