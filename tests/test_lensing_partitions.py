@@ -193,3 +193,90 @@ def test_unified_legacy_pair_pe_warns_image_groups_ignored(tmp_path):
     report = run_lensing_preflight(opts)
     assert report["ok"], report
     assert any("ignores them" in w for w in report["warnings"])
+
+
+def _observed_catalog_with_truth(path, n_events=4):
+    import json
+    events = []
+    for i in range(n_events):
+        events.append({
+            "event_index": i,
+            "event_id": f"e{i}",
+            "gps_time": 1000.0 + i,
+            "truth_source_id": 10 if i in (0, 1) else 20 + i,
+            "truth_image_index": i if i in (0, 1) else None,
+            "truth_is_lensed_image": i in (0, 1),
+        })
+    path.write_text(json.dumps({
+        "format_version": "observed-lensing-catalog-1.0",
+        "event_indexing": "global",
+        "n_events": n_events,
+        "events": events,
+    }))
+    return path
+
+
+def _observed_gw(path, n_events=4, nsamp=8):
+    import h5py
+    m1 = []
+    m2 = []
+    dL = []
+    chi = []
+    for i in range(n_events):
+        center = 30.0 if i in (0, 1) else 50.0 + i
+        m1.extend(center + 0.01 * np.arange(nsamp))
+        m2.extend(0.8 * (center + 0.01 * np.arange(nsamp)))
+        dL.extend((1000.0 + 10 * i) + np.arange(nsamp))
+        chi.extend(np.zeros(nsamp) + 0.01 * i)
+    with h5py.File(path, "w") as f:
+        f.attrs["nsamp"] = nsamp
+        f.attrs["nobs"] = n_events
+        f.create_dataset("m1det", data=np.asarray(m1))
+        f.create_dataset("m2det", data=np.asarray(m2))
+        f.create_dataset("dL", data=np.asarray(dL))
+        f.create_dataset("chieff", data=np.asarray(chi))
+    return path
+
+
+def test_observed_builder_labels_and_degree_limit(tmp_path):
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs
+    from darksirens.lensing.partitions import validate_candidate_pairs
+    gw = _observed_gw(tmp_path / "gw.h5")
+    cat = _observed_catalog_with_truth(tmp_path / "observed_catalog.json")
+    data = build_candidate_pairs(
+        gw_path=gw,
+        observed_catalog_path=cat,
+        max_edges_per_event=1,
+        max_total_edges=10,
+        time_window_sec=100.0,
+        include_time_marks=True,
+        include_truth_labels=True,
+        seed=3,
+    )
+    assert data["format_version"] == "candidate-pairs-1.0"
+    assert data["n_events"] == 4
+    degree = [0] * 4
+    for edge in data["pairs"]:
+        degree[edge["i"]] += 1
+        degree[edge["j"]] += 1
+    assert max(degree) <= 1
+    assert any(edge["i"] == 0 and edge["j"] == 1 and edge["label"] == "true" for edge in data["pairs"])
+    validate_candidate_pairs(data)
+
+
+def test_observed_builder_without_truth_labels(tmp_path):
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs
+    gw = _observed_gw(tmp_path / "gw.h5", n_events=3)
+    cat = _observed_catalog_with_truth(tmp_path / "observed_catalog.json", n_events=3)
+    data = build_candidate_pairs(
+        gw_path=gw,
+        observed_catalog_path=cat,
+        max_edges_per_event=2,
+        max_total_edges=2,
+        include_time_marks=False,
+        include_truth_labels=False,
+        seed=4,
+    )
+    assert len(data["pairs"]) <= 2
+    assert all("label" not in edge for edge in data["pairs"])
+    assert all("log_mass_distance_score" in edge["marks"] for edge in data["pairs"])

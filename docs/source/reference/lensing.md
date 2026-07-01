@@ -659,3 +659,76 @@ more than once, `candidate_pairs.json` whose `n_events` differs from the GW PE
 file, malformed pair-image `prior_wt` values, pair-time marks without
 `delta_t_obs`/positive `sigma_delta_t`, and weak-lensing options such as
 `wl_selection=wl_lognormal` paired with a non-lognormal WL backend.
+
+### Simulated candidate graph builder from observed events
+
+`candidate_pairs.json` can be built directly from the unified simulated observed
+catalog rather than from the truth partition.  The simulation-only builder is:
+
+```bash
+python scripts/mock_lensing/build_candidate_pairs_from_observed.py \
+  --gw_path data/mock_lensing/mock_observed_gw_pe.h5 \
+  --observed_catalog_path data/mock_lensing/observed_catalog.json \
+  --truth_path data/mock_lensing/truth.json \
+  --out data/mock_lensing/candidate_pairs.json \
+  --max_edges_per_event 4 \
+  --max_total_edges 1000 \
+  --time_window_sec inf \
+  --mass_distance_top_k 0 \
+  --include_time_marks true \
+  --include_truth_labels true \
+  --seed 2026
+```
+
+The same step can be requested during mock generation with
+`--build_candidate_pairs_from_observed true`.  In that mode the generator first
+writes the simulated observed PE file and `observed_catalog.json`, then overwrites
+`candidate_pairs.json` with edges scored from observed event metadata and PE
+posteriors.
+
+The builder uses only inference-available observed quantities to decide which
+edges are included and how they are scored: observed GPS-time separation when
+available, posterior-sample summaries for detector-frame mass and mass ratio,
+an apparent-distance/magnification compatibility proxy, and optional effective
+spin consistency.  These observable scores determine `log_prior_odds`; truth is
+not consulted for inclusion or ranking.
+
+When `--include_truth_labels true` is used and truth fields exist in the
+simulated `observed_catalog.json`, each edge receives a validation-only `label`:
+`"true"` for two lensed images with the same `truth_source_id`, and `"wrong"`
+otherwise.  Inference ignores this label; it is intended only for diagnostics and
+end-to-end validation.  Runs without truth labels are supported with
+`--include_truth_labels false`.
+
+The output format is `candidate-pairs-1.0`:
+
+```json
+{
+  "format_version": "candidate-pairs-1.0",
+  "n_events": 6,
+  "pairs": [
+    {
+      "i": 0,
+      "j": 5,
+      "log_prior_odds": -3.4,
+      "label": "wrong",
+      "marks": {
+        "delta_t_obs": 12345.0,
+        "sigma_delta_t": 100.0,
+        "log_mass_distance_score": -0.3
+      }
+    }
+  ],
+  "builder": {
+    "name": "build_candidate_pairs_from_observed"
+  }
+}
+```
+
+For backward compatibility with existing marginalization loaders, the generated
+file also includes a legacy `candidate_pairs` alias containing the same edge
+list.  Preflight validates the `format_version`, checks `n_events`, and requires
+all numeric mark fields to be finite.  This is the simulation-realistic path for
+current end-to-end studies and is intended to be GWTC-ready later, but it does
+not ingest real GWTC-5 data and does not add galaxy-catalog, LSS, or dark-siren
+candidate support.
