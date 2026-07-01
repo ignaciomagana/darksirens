@@ -1059,3 +1059,62 @@ PyYAML is available, or `resolved_config.json` otherwise.  The same resolved
 configuration is embedded in `run_manifest.json` with the planned commands, so a
 dry run records the exact simulation, candidate-graph, selection, and inference
 settings that would be used.
+
+## Unified lensing file contract
+
+The simulated end-to-end lensing study now targets the same file/interface
+contract that a future GWTC adapter must produce.  This interface is the adapter
+boundary only: this release does **not** download, parse, or ingest GWTC-5 data,
+and it does not add galaxy-catalog, LSS, or dark-siren inputs to the lensing
+workflow.
+
+The inference CLI consumes these contract files:
+
+* `observed_gw_pe.h5`: posterior samples for all observed events in one global
+  event-index system.  Required root attrs are `format_version =
+  "observed-lensing-pe-1.0"`, `event_indexing = "global"`, `n_events` (also
+  accepted as legacy `nobs`), and `nsamp`.  Required event-major flattened
+  datasets include `m1det`, `m2det`, `dL`, `chieff`, and `p_pe`, each of length
+  `n_events * nsamp`.  Event index `k` owns slice `[k*nsamp:(k+1)*nsamp]`.
+* `observed_catalog.json`: event metadata with `format_version =
+  "observed-lensing-catalog-1.0"`, `event_indexing = "global"`, `n_events`, and
+  an `events` list.  Every event requires contiguous `event_index`, unique
+  `event_id`, and optional finite `gps_time`.  Truth fields such as
+  `truth_source_id`, `truth_image_index`, labels, and true sky positions are
+  validation-only conveniences for simulations and are not required by
+  inference.
+* `candidate_pairs.json`: a graph over global event indices with
+  `format_version = "candidate-pairs-1.0"`, `n_events`, and a `pairs` list.  Each
+  edge requires distinct in-range `i` and `j` plus finite `log_prior_odds`.
+  Optional `marks` may include `delta_t_obs`/`sigma_delta_t` together and any
+  finite `log_*` mark used by priors.  Optional `label` values are ignored by
+  inference.  The legacy `candidate_pairs` edge-list alias is still accepted but
+  documented as legacy.
+* `selection_inputs.h5`: consolidated selection data with root
+  `format_version = "lensing-selection-inputs-1.0"` and `unlensed`/`lensed`
+  groups.  During transition, legacy `gwcat-selection-1.0` singleton-selection
+  files and lensed-injection files with `p_tag_per_source` metadata are accepted
+  by validators with warnings.  If pair-tag selection is used, `p_tag` fields
+  must be present and finite in the lensed selection component.
+* `run_config.yaml` or `run_config.json`: the resolved simulation/inference
+  configuration.  New files should use `format_version =
+  "lensing-run-config-1.0"`; existing resolved simulation configs without this
+  field validate with a compatibility warning.
+
+Validate a complete set with:
+
+```bash
+python scripts/mock_lensing/validate_lensing_file_contract.py \
+  --gw_path observed_gw_pe.h5 \
+  --observed_catalog_path observed_catalog.json \
+  --candidate_pairs_path candidate_pairs.json \
+  --selection_path selection_inputs.h5 \
+  --config run_config.yaml \
+  --out validation_report.json
+```
+
+Preflight uses the same validators and reports file-format versions, event
+counts, candidate-pair counts, selection summaries, and compatibility warnings.
+Simulation output includes both current CLI filenames and the contract aliases so
+future real-data pipelines can satisfy the same interface without changing the
+inference command semantics.

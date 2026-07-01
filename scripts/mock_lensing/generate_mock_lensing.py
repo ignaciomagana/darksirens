@@ -50,6 +50,7 @@ import json
 import os
 import sys
 import warnings
+import shutil
 from pathlib import Path
 
 # Make ``darksirens`` importable when this script is run directly from any cwd
@@ -761,6 +762,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         observed_events.extend(pair["images"])
 
     observed_pe_path = os.path.join(out_dir, "mock_observed_gw_pe.h5")
+    contract_observed_pe_path = os.path.join(out_dir, "observed_gw_pe.h5")
     observed_catalog_path = os.path.join(out_dir, "observed_catalog.json")
     if write_unified_observed_catalog:
         write_gw_pe_file(observed_events, observed_pe_path, nsamp, H0, Om0)
@@ -860,6 +862,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             catalog_path=observed_catalog_path,
             source="mock_lensing",
         )
+        shutil.copyfile(observed_pe_path, contract_observed_pe_path)
 
     # ---- candidate pairs for exact partition marginalization ----
     true_edges = []
@@ -917,6 +920,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         "n_events": n_events_total,
         "candidate_pairs": true_edges + wrong_edges,
     }
+    candidate_pairs["format_version"] = "candidate-pairs-1.0"
+    candidate_pairs["pairs"] = candidate_pairs["candidate_pairs"]
     with open(os.path.join(out_dir, "candidate_pairs.json"), "w") as f:
         json.dump(candidate_pairs, f, indent=2)
     if build_candidate_pairs_from_observed:
@@ -937,6 +942,15 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         )
         with open(os.path.join(out_dir, "candidate_pairs.json"), "w") as f:
             json.dump(observed_built, f, indent=2)
+
+    # ---- consolidated selection contract (links legacy component files) ----
+    with h5py.File(os.path.join(out_dir, "selection_inputs.h5"), "w") as f:
+        f.attrs["format_version"] = "lensing-selection-inputs-1.0"
+        f.attrs["source"] = "mock_lensing"
+        f.attrs["unlensed_path"] = "mock_gw_selection.h5"
+        f.attrs["lensed_path"] = "mock_lensed_injections.h5"
+        f["unlensed"] = h5py.ExternalLink("mock_gw_selection.h5", "/")
+        f["lensed"] = h5py.ExternalLink("mock_lensed_injections.h5", "/")
 
     # ---- truth.json (informational) ----
     truth_out = {k: (v.tolist() if isinstance(v, np.ndarray) else v)
@@ -982,11 +996,13 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                     f"(population {POP_NAME} + SIS strong lensing + lognormal WL).",
         files={
             "mock_gw_pe.h5": "legacy singleton PE; gwcat-1.0; load via load_gw_samples",
-            "mock_observed_gw_pe.h5": "unified observed-event PE; gwcat-1.0; singletons first, then lensed image pairs",
+            "mock_observed_gw_pe.h5": "legacy name for unified observed-event PE",
+            "observed_gw_pe.h5": "contract unified observed-event PE; observed-lensing-pe-1.0; global event indices",
             "observed_catalog.json": "metadata for unified observed event-index system",
             "mock_pair_metadata.h5": "metadata-only pair/candidate-edge marks; lensing-pair-metadata-1.0",
             "mock_pair_pe.h5": "legacy split-pair PE per image; lensed-pair-pe-1.0 (written only in legacy mode or with --write-legacy-pair-pe true)",
-            "mock_gw_selection.h5": "unlensed injections; gwcat-selection-1.0; load_selection_samples",
+            "selection_inputs.h5": "contract consolidated selection inputs linking singleton and lensed injection campaigns",
+            "mock_gw_selection.h5": "legacy unlensed injections; gwcat-selection-1.0; load_selection_samples",
             "mock_lensed_injections.h5": "lensed J=2 injections; load_lensed_injections; includes p_tag_per_source pair-tag metadata",
             "partition.json": "TRUE partition (singleton_indices, pair_indices, source-index truth)",
             "candidate_pairs.json": "candidate-pair graph for --partition_mode marginalize_exact",
