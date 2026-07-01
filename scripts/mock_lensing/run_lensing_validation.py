@@ -109,7 +109,10 @@ def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
             "--partition_mode", partition_mode,
         ]
         if partition_mode == "marginalize_exact":
-            cmd += ["--candidate_pairs_path", str(mock_dir / "candidate_pairs.json")]
+            # Time-delay marks are currently fixed-partition only; exact
+            # marginalization must remain on pair_marks=none until candidate-edge
+            # time metadata is implemented.
+            cmd += ["--candidate_pairs_path", str(mock_dir / "candidate_pairs.json"), "--pair_marks", "none"]
         else:
             cmd += ["--partition_path", str(partition or mock_dir / "partition.json")]
     if not skip_preflight:

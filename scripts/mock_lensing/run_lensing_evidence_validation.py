@@ -134,7 +134,10 @@ def _cli_cmd(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
     if cluster_mode == "j2":
         cmd += ["--lensed_injections_path", str(mock_dir / "mock_lensed_injections.h5"), "--pair_pe_path", str(mock_dir / "mock_pair_pe.h5"), "--partition_mode", partition_mode]
         if partition_mode == "marginalize_exact":
-            cmd += ["--candidate_pairs_path", str(mock_dir / "candidate_pairs.json")]
+            # Time-delay marks are currently fixed-partition only; exact
+            # marginalization must remain on pair_marks=none until candidate-edge
+            # time metadata is implemented.
+            cmd += ["--candidate_pairs_path", str(mock_dir / "candidate_pairs.json"), "--pair_marks", "none"]
         else:
             cmd += ["--partition_path", str(partition or mock_dir / "partition.json")]
     return cmd

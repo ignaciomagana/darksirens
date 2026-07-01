@@ -97,7 +97,7 @@ from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
 from darksirens.lensing.partitions import exact_partitions_from_json, validate_candidate_pairs
-from darksirens.lensing.preflight import run_lensing_preflight
+from darksirens.lensing.preflight import UNSAFE_MARGINALIZED_TIME_MARKS_ERROR, run_lensing_preflight
 from darksirens.lensing.marginal_diagnostics import compute_marginalized_partition_diagnostics
 from darksirens.likelihood.pair_kde import (
     make_pair_kde, stack_pair_kdes, validate_pair_prior_wt,
@@ -844,6 +844,12 @@ def main():
             f.write("\n")
         print(f"wrote preflight JSON: {out_path}", flush=True)
         raise SystemExit(0 if preflight["ok"] else 2)
+    if (
+        opts.cluster_mode == "j2"
+        and opts.partition_mode == "marginalize_exact"
+        and opts.pair_marks == "time"
+    ):
+        raise SystemExit(UNSAFE_MARGINALIZED_TIME_MARKS_ERROR)
     if not preflight["ok"]:
         raise SystemExit("preflight failed; fix input errors or run --preflight_only true for JSON details")
 

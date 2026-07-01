@@ -174,10 +174,19 @@ def _check_lensed(path, errors, summary):
         errors.append(f"lensed_injections_path not readable: {path}: {exc}")
 
 
+UNSAFE_MARGINALIZED_TIME_MARKS_ERROR = 'pair_marks=time is currently unsafe with partition_mode=marginalize_exact because pair time metadata is indexed by pair_pe ordinal, not candidate-edge identity. Use --pair_marks none or implement candidate-edge time marks.'
+
+
 def run_lensing_preflight(opts) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     summary = {"cluster_mode": _get(opts, "cluster_mode"), "partition_mode": _get(opts, "partition_mode", "fixed"), "pair_marks": _get(opts, "pair_marks", "none"), "p_tag_present": False}
+    if (
+        _get(opts, "cluster_mode") == "j2"
+        and _get(opts, "partition_mode", "fixed") == "marginalize_exact"
+        and _get(opts, "pair_marks", "none") == "time"
+    ):
+        errors.append(UNSAFE_MARGINALIZED_TIME_MARKS_ERROR)
     n_events, _ = _infer_gw(_get(opts, "gw_path"), errors, summary)
     _exists(_get(opts, "gwselection_path"), errors, "gwselection_path")
     partition_pairs = []
