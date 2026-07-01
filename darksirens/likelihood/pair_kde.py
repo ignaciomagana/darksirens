@@ -43,6 +43,43 @@ PAIR_KDE_COORDS = ("m1det", "q", "dL_app", "chieff")
 _D = 4   # KDE dimensionality (fixed for this analysis)
 
 
+def validate_pair_prior_wt(
+    prior_wt: np.ndarray,
+    valid: np.ndarray | None = None,
+    *,
+    context: str = "PairKDE prior_wt",
+) -> np.ndarray:
+    """Validate per-sample PE proposal-density weights for one pair image.
+
+    Pair PE uses the same convention as singleton PE: every structurally valid
+    sample must carry a finite, strictly positive proposal-density value.  The
+    pair-PE loader is responsible for any per-image normalization convention;
+    this helper only rejects malformed weights before they can silently become
+    ``-inf``/``nan`` in the KDE.
+    """
+    prior_wt = np.asarray(prior_wt, dtype=np.float64)
+    if valid is None:
+        valid = np.ones(prior_wt.shape, dtype=bool)
+    else:
+        valid = np.asarray(valid, dtype=bool)
+    if prior_wt.shape != valid.shape:
+        raise ValueError(
+            f"{context}: prior_wt shape {prior_wt.shape} does not match "
+            f"valid shape {valid.shape}."
+        )
+    n_valid = int(valid.sum())
+    if n_valid == 0:
+        raise ValueError(f"{context}: no valid PE samples.")
+    good = np.isfinite(prior_wt) & (prior_wt > 0.0)
+    if not bool(np.all(good[valid])):
+        n_bad = int(np.count_nonzero(valid & ~good))
+        raise ValueError(
+            f"{context}: all valid prior_wt values must be finite and positive; "
+            f"found {n_bad} malformed sample(s)."
+        )
+    return prior_wt
+
+
 class PairKDE(NamedTuple):
     """Per-event precomputed Gaussian KDE for the cluster-pair likelihood.
 
@@ -159,6 +196,7 @@ def make_pair_kde(
         valid = np.ones(n, dtype=bool)
     else:
         valid = np.asarray(valid, dtype=bool)
+    prior_wt = validate_pair_prior_wt(prior_wt, valid, context="make_pair_kde prior_wt")
 
     # Bandwidth from UNWEIGHTED posterior samples
     h = _silverman_bandwidth_diag(samples, valid=valid)

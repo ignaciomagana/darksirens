@@ -40,6 +40,7 @@ from darksirens.utils.cosmology import H0Planck, Om0Planck, dL_of_z
 from darksirens.redshift.volume import log_volume_prior_vmap
 from darksirens.likelihood.pair_kde import (
     PairKDE, make_pair_kde, log_eval_pair_kde, _silverman_bandwidth_diag,
+    validate_pair_prior_wt,
 )
 from darksirens.likelihood.cluster_likelihood import (
     cluster_log_likelihood_pair, _log_jac_app_to_src,
@@ -196,6 +197,40 @@ class TestPairKDE:
         np.testing.assert_allclose(
             np.asarray(log_p_ours), log_p_ref, rtol=1e-10, atol=1e-12,
         )
+
+    def test_log_eval_uses_provided_normalized_pprop_convention(self):
+        """PairKDE must use loader-normalized prior_wt as provided.
+
+        If an image has N samples with constant raw p_prop, the loader
+        normalizes the per-image array to 1/N.  The KDE should therefore
+        estimate π_PE / (1/N), without any additional self-normalization.
+        """
+        rng = np.random.default_rng(12)
+        N = 400
+        m1det = rng.normal(35.0, 3.0, N)
+        q = np.clip(rng.normal(0.7, 0.05, N), 0.1, 1.0)
+        dL = rng.normal(1000.0, 100.0, N)
+        chieff = rng.normal(0.0, 0.1, N)
+        prior_wt = np.ones(N) / N
+
+        kde = make_pair_kde(m1det, q, dL, chieff, prior_wt)
+        samples = np.stack([m1det, q, dL, chieff], axis=-1)
+        h = np.asarray(np.exp(kde.log_h))
+        log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum()
+        query = np.array([[35.0, 0.7, 1000.0, 0.0]])
+
+        from scipy.special import logsumexp as sp_lse
+        diffs_sq = np.sum(((query[0] - samples) / h) ** 2, axis=-1)
+        log_pi_PE = log_norm + sp_lse(-0.5 * diffs_sq) - np.log(N)
+        log_ref = log_pi_PE - np.log(1.0 / N)
+
+        log_ours = np.asarray(log_eval_pair_kde(kde, jnp.asarray(query)))[0]
+        np.testing.assert_allclose(log_ours, log_ref, rtol=1e-10, atol=1e-12)
+
+    @pytest.mark.parametrize("bad_prior_wt", [np.zeros(4), np.full(4, np.nan)])
+    def test_malformed_prior_wt_raises_useful_error(self, bad_prior_wt):
+        with pytest.raises(ValueError, match="finite and positive"):
+            validate_pair_prior_wt(bad_prior_wt, context="pair_0/image0/prior_wt")
 
     def test_importance_weights_correct_target(self):
         """With non-uniform p_prop, the KDE should estimate π_PE/p_prop.
