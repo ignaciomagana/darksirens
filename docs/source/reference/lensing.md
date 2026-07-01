@@ -418,6 +418,8 @@ For spectral-siren lensing runs with `--cluster_mode j2`, fixed-partition diagno
 
 A marginalized `diagnostics.json` includes the prior normalizer (`log_z_partition_prior`), marginalized scalar likelihood (`logL_marginalized`, also aliased as `logL_total`), per-partition prior weights and likelihoods, posterior partition probabilities, posterior pair probabilities in the validated candidate-pair order, the posterior expected numbers of pairs and singletons, and a compact MAP partition object.  Candidate pairs are treated as unordered edges; if an input pair is written as `(j, i)`, the validated diagnostics report the normalized order `(min(i, j), max(i, j))` while preserving optional `label` and `log_prior_odds` fields.
 
+For marginalized runs, the legacy `results.hdf5` `n_pairs` attribute remains a reference-partition field for backward compatibility and is annotated by `n_pairs_meaning = "reference_partition_n_pairs"`.  Use `expected_n_pairs`, `map_partition_n_pairs`, and `posterior_pair_probabilities` for marginalized inference summaries instead of interpreting `n_pairs` as a posterior pair count.
+
 Example:
 
 ```bash

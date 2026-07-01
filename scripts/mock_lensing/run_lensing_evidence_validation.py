@@ -249,7 +249,16 @@ def main(argv: list[str] | None = None) -> int:
         checks["null_j2_does_not_strongly_beat_off"] = float(runs["j2_null"]["logZ"]) - float(runs["off_null"]["logZ"]) < 5.0
     if "j2_marginalized" in runs:
         md = runs["j2_marginalized"]["diagnostics"]
-        checks.update({"marginalized_logL_finite": math.isfinite(float(md.get("logL_marginalized", md.get("logL_total")))), "marginalized_posterior_pair_probabilities_present": bool(md.get("posterior_pair_probabilities")), "marginalized_expected_n_pairs_finite": math.isfinite(float(md.get("expected_n_pairs")))})
+        ma = runs["j2_marginalized"].get("results_attrs", {})
+        checks.update({
+            "marginalized_logL_finite": math.isfinite(float(md.get("logL_marginalized", md.get("logL_total")))),
+            "marginalized_posterior_pair_probabilities_present": bool(md.get("posterior_pair_probabilities")),
+            "marginalized_expected_n_pairs_finite": math.isfinite(float(md.get("expected_n_pairs"))),
+            "marginalized_results_partition_mode_attr": ma.get("partition_mode") == "marginalize_exact",
+            "marginalized_results_expected_n_pairs_attr": "expected_n_pairs" in ma,
+            "marginalized_results_reference_partition_n_pairs_attr": "reference_partition_n_pairs" in ma,
+            "marginalized_results_map_partition_n_pairs_attr": "map_partition_n_pairs" in ma,
+        })
     if "lens_rate_recovery" in runs:
         posterior = runs["lens_rate_recovery"].get("posterior_summary", {}).get("log10_tau_A", {})
         injected = math.log10(5.0e-4)
