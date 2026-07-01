@@ -39,6 +39,36 @@ _barrier = barrier
 _complete_empty_pixel_policy_code = complete_empty_pixel_policy_code
 
 
+def _resolve_redshift_prior_materialization(opts) -> bool:
+    """Resolve whether to keep the likelihood-internal redshift-prior barrier."""
+    mode = getattr(opts, "redshift_prior_barrier", "auto")
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    if mode != "auto":
+        raise ValueError(
+            "redshift_prior_barrier must be one of {'auto', 'on', 'off'}, "
+            f"got {mode!r}."
+        )
+    tinyns_cfg = getattr(opts, "tinyns_resolved_config", None) or {}
+    is_tinyns_jax_rwalk = (
+        getattr(opts, "sampler", None) == "tinyns"
+        and tinyns_cfg.get("kernel") == "jax"
+        and tinyns_cfg.get("sample") == "rwalk"
+    )
+    return not is_tinyns_jax_rwalk
+
+
+def _redshift_prior_materialization_reason(opts, materialize: bool) -> str:
+    mode = getattr(opts, "redshift_prior_barrier", "auto")
+    if mode in {"on", "off"}:
+        return f"forced {mode}"
+    if materialize:
+        return "auto -> on"
+    return "auto -> off for TinyNS JAX rwalk"
+
+
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
     val = data.get(key)
     return jnp.asarray(val) if val is not None else jnp.array([0.0])
@@ -65,6 +95,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
+    materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
 
     # Weak-lensing magnification backend (resolved up front, before the heavy
     # catalog-view prep, so a missing WL config fails fast).  All values are
@@ -339,6 +370,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 wl_log_mu_grid=wl_log_mu_grid,
                 wl_log_p_table=wl_log_p_table,
                 lss_marginalize=lss_marginalize,
+                materialize_redshift_prior_state=materialize_redshift_prior_state,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -369,6 +401,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             wl_log_mu_grid=wl_log_mu_grid,
             wl_log_p_table=wl_log_p_table,
             lss_marginalize=lss_marginalize,
+            materialize_redshift_prior_state=materialize_redshift_prior_state,
         )
 
     return likelihood

@@ -135,6 +135,36 @@ when present, and logZ scatter across independent seeds. Explicit `--tinyns_*`
 options override the selected preset, and the resolved configuration is recorded
 in `tinyns_resolved_config` in `settings.json` and supported HDF5 outputs.
 
+
+### TinyNS JAX rwalk and redshift-prior barriers
+
+JAX TinyNS rwalk evaluates replacement proposals in a vmapped JAX kernel. Some
+JAX primitives, including `lax.optimization_barrier`, cannot be batched. The
+`--redshift_prior_barrier auto` default disables the likelihood-internal
+redshift-prior materialization barrier for TinyNS JAX rwalk while preserving it
+for ordinary non-vmapped paths.
+
+If users see:
+
+```text
+NotImplementedError: Batching rule for 'optimization_barrier' not implemented
+```
+
+then use:
+
+```bash
+--redshift_prior_barrier off
+```
+
+or keep the default:
+
+```bash
+--redshift_prior_barrier auto --sampler tinyns --tinyns_preset recommended
+```
+
+For diagnostic fallback only, `--tinyns_preset python_debug` avoids the JAX rwalk
+path, but it is slow and should not be treated as the production default.
+
 ### Heavy darksirens TinyNS templates
 
 Copy-pasteable runner script:

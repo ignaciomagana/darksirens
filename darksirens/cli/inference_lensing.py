@@ -82,6 +82,10 @@ from darksirens.gw.populations.registry import get_fixed_population_params, get_
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
+from darksirens.likelihood.factory import (
+    _redshift_prior_materialization_reason,
+    _resolve_redshift_prior_materialization,
+)
 from darksirens.inference.parameters import (
     build_parameter_decoder, complete_empty_pixel_policy_code,
 )
@@ -315,6 +319,17 @@ def build_parser():
                    help="JSON dict of {label: value}")
     p.add_argument("--prior_overrides", default=None,
                    help="JSON dict of {label: [lo, hi]}")
+    p.add_argument(
+        "--redshift_prior_barrier",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help=(
+            "Controls the internal redshift-prior state optimization barrier. 'auto' keeps "
+            "the barrier for ordinary JIT paths but disables the likelihood-internal barrier "
+            "for TinyNS JAX rwalk because JAX cannot batch optimization_barrier under vmap. "
+            "Use 'on' only for non-vmapped samplers; use 'off' to force vmappable behavior."
+        ),
+    )
     # sampler
     p.add_argument("--sampler", required=True,
                    choices=["tinyns", "dynesty", "numpyro"])
@@ -349,6 +364,18 @@ def main():
     opts.fix_survey = _str2bool(opts.fix_survey)
     opts.fix_population = _str2bool(opts.fix_population)
     os.makedirs(opts.save_path, exist_ok=True)
+    if opts.sampler == "tinyns":
+        build_tinyns_config(opts)
+    opts.materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
+    opts.redshift_prior_barrier_resolved = _redshift_prior_materialization_reason(
+        opts, opts.materialize_redshift_prior_state
+    )
+    if opts.redshift_prior_barrier == "auto" and not opts.materialize_redshift_prior_state:
+        print(
+            "  [i] Disabling likelihood-internal redshift-prior optimization_barrier "
+            "for TinyNS JAX rwalk vmappability.",
+            flush=True,
+        )
 
     print(f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend}] ===")
     print("loading data ...", flush=True)
@@ -389,7 +416,7 @@ def main():
 
     # --- sample ---
     if opts.sampler == "tinyns":
-        cfg = build_tinyns_config(opts).to_json_dict()
+        cfg = opts.tinyns_resolved_config
         print("  TinyNS resolved config:", flush=True)
         for key in ["preset", "sample", "kernel", "rwalk_proposal", "walks",
                     "step_scale", "min_accepts", "replacement_chains",
@@ -398,6 +425,7 @@ def main():
         print(f"    dlogz: {opts.dlogz}", flush=True)
         print(f"    nlive: {opts.nlive}", flush=True)
         print(f"    max_samples: {opts.max_samples}", flush=True)
+        print(f"    redshift_prior_barrier: {opts.redshift_prior_barrier_resolved}", flush=True)
     print(f"sampling with {opts.sampler} ...", flush=True)
     results = run_sampler(method=opts.sampler, likelihood=loglike,
                           prior_transform=prior_transform, labels=labels,
