@@ -994,3 +994,68 @@ Use `--diagnostics_only false` with an adequate profile, sampler, `--nlive`, and
 for paper figures that compare recovery, evidence differences such as
 `delta_logZ_j2_minus_off`, false-positive behavior, and pair-tag model bias
 across the simulated study matrix.
+
+## Simulation config
+
+Simulated end-to-end lensing studies can be driven by a reproducible YAML or
+JSON config instead of relying only on command-line flags.  The config system is
+limited to mock simulations: it does not ingest GWTC-5 data, galaxy catalogs,
+large-scale-structure information, or dark-siren host catalogs.
+
+The study runner accepts `--config` plus repeatable dotted-key overrides:
+
+```bash
+python scripts/mock_lensing/run_simulated_lensing_study.py \
+  --config configs/mock_lensing/tiny_simulated_study.yaml \
+  --workdir runs/mock_lensing/tiny \
+  --override study.seed=1234 \
+  --override inference.diagnostics_only=true
+```
+
+JSON configs are always supported.  YAML configs are supported when PyYAML is
+installed; otherwise the runner exits with a message asking you to install
+PyYAML or use JSON.  Unknown keys fail validation by default.  Use
+`--allow_unknown_config_keys true` only when intentionally carrying auxiliary
+metadata through a config file.
+
+Example config:
+
+```yaml
+study:
+  profile: tiny
+  seed: 2026
+  cases: [B_true_pairs_clean_graph]
+mock:
+  n_universe: 4000
+  n_singletons: 2
+  n_lensed_pairs: 2
+  nsamp: 48
+  n_unlensed_inj: 1000
+  n_lensed_inj: 1000
+  conditioning: fixed_counts
+candidate_graph:
+  max_edges_per_event: 2
+  max_total_edges: 8
+  include_time_marks: true
+  include_sky_marks: true
+  include_mass_distance_score: true
+  edge_mark_prior_keys: [log_sky_overlap]
+selection:
+  pair_tag_model: snr_time_sky
+  pair_tag_constant: 1.0
+  pair_tag_perturb_logit: 0.0
+inference:
+  partition_mode: marginalize_exact
+  sampler: dynesty
+  nlive: 32
+  dlogz: 10.0
+  pair_batch_size: 256
+  y_nodes_pair: 64
+  diagnostics_only: false
+```
+
+Every run writes the resolved configuration to `resolved_config.yaml` when
+PyYAML is available, or `resolved_config.json` otherwise.  The same resolved
+configuration is embedded in `run_manifest.json` with the planned commands, so a
+dry run records the exact simulation, candidate-graph, selection, and inference
+settings that would be used.
