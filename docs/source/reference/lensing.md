@@ -377,3 +377,51 @@ python -m darksirens.cli.inference_lensing \
 ```
 
 Use fixed mode when you want diagnostics for one assumed partition; use `marginalize_exact` when you want interpretable posterior partition weights, posterior pair probabilities, and the MAP partition for a small candidate graph.
+
+Unified observed-catalog mocks
+------------------------------
+
+Mock lensing generation also writes a unified observed-event catalog by default:
+``mock_observed_gw_pe.h5`` plus ``observed_catalog.json``.  This file uses the
+same ``gwcat-1.0`` event-major schema as the existing GW PE files, but contains
+every observed event in one index system: all unlensed singleton detections
+first, followed by image 0 and image 1 for each detected lensed pair.  The
+``candidate_pairs.json`` graph refers to these unified observed-event indices,
+which makes it the preferred mock format for unknown-partition and
+candidate-pair marginalization tests.  The truth partition is retained only as
+metadata in ``partition.json`` and ``observed_catalog.json``.
+
+The fixed-partition workflow remains useful for controlled validation, where the
+true singleton and pair assignment is intentionally supplied to the likelihood.
+For unknown-partition validation, pass the unified observed catalog as
+``--gw_path`` and use ``--partition_mode marginalize_exact`` with
+``candidate_pairs.json``.
+
+Generate a unified mock::
+
+  python scripts/mock_lensing/generate_mock_lensing.py \
+    --outdir /tmp/ds_lens_unified \
+    --conditioning fixed_counts \
+    --n-universe 3000 --n-sing-keep 2 --n-pair-keep 2 \
+    --n-unlensed-inj 1000 --n-lensed-inj 1000 \
+    --write-unified-observed-catalog true
+
+Run with the fixed truth partition on the unified observed catalog::
+
+  python -m darksirens.cli.inference_lensing \
+    --gw_path /tmp/ds_lens_unified/mock_observed_gw_pe.h5 \
+    --gwselection_path /tmp/ds_lens_unified/mock_gw_selection.h5 \
+    --lensed_injections_path /tmp/ds_lens_unified/mock_lensed_injections.h5 \
+    --pair_pe_path /tmp/ds_lens_unified/mock_pair_pe.h5 \
+    --partition_path /tmp/ds_lens_unified/partition.json \
+    --partition_mode fixed --cluster_mode j2
+
+Run exact candidate-pair marginalization::
+
+  python -m darksirens.cli.inference_lensing \
+    --gw_path /tmp/ds_lens_unified/mock_observed_gw_pe.h5 \
+    --gwselection_path /tmp/ds_lens_unified/mock_gw_selection.h5 \
+    --lensed_injections_path /tmp/ds_lens_unified/mock_lensed_injections.h5 \
+    --pair_pe_path /tmp/ds_lens_unified/mock_pair_pe.h5 \
+    --candidate_pairs_path /tmp/ds_lens_unified/candidate_pairs.json \
+    --partition_mode marginalize_exact --cluster_mode j2

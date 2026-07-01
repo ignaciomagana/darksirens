@@ -279,14 +279,36 @@ def load_inputs(opts):
         raise SystemExit("--partition_mode marginalize_exact requires --candidate_pairs_path")
     lensed = load_lensed_injections(opts.lensed_injections_path)
     partition = json.load(open(opts.partition_path, "r", encoding="utf-8")) if opts.partition_path else None
+    candidate_data = None
+    candidate_n_events = None
+    candidate_pairs = None
+    if partition_mode == "marginalize_exact":
+        candidate_data = json.load(open(opts.candidate_pairs_path, "r", encoding="utf-8"))
+        candidate_n_events, candidate_pairs = validate_candidate_pairs(candidate_data)
+    partition_pair_indices = []
+    if partition is not None:
+        partition_pair_indices = [tuple(map(int, pair)) for pair in partition.get("pair_indices", [])]
 
     pairs = []
+    pair_metadata_indices = []
     pair_time_delta_t_obs = []
     pair_time_sigma = []
     with h5py.File(opts.pair_pe_path) as f:
         npairs = int(f.attrs["npairs"])
         for k in range(npairs):
             g = f[f"pair_{k}"]; imgs = []
+            meta_pair = None
+            if "event_index_image0" in g.attrs or "event_index_image1" in g.attrs:
+                if not ("event_index_image0" in g.attrs and "event_index_image1" in g.attrs):
+                    raise SystemExit(f"pair_{k} must define both event_index_image0 and event_index_image1")
+                meta_pair = (int(g.attrs["event_index_image0"]), int(g.attrs["event_index_image1"]))
+                if meta_pair[0] < 0 or meta_pair[1] < 0 or meta_pair[0] == meta_pair[1]:
+                    raise SystemExit(f"pair_{k} has invalid event-index metadata: {meta_pair}")
+                if partition_pair_indices and k < len(partition_pair_indices) and meta_pair != partition_pair_indices[k]:
+                    raise SystemExit(
+                        f"pair_{k} event-index metadata {meta_pair} does not match partition pair "
+                        f"{partition_pair_indices[k]}"
+                    )
             has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
             if has_dt:
                 pair_time_delta_t_obs.append(float(g.attrs["delta_t_obs"] if "delta_t_obs" in g.attrs else np.asarray(g["delta_t_obs"])[()]))
@@ -313,7 +335,22 @@ def load_inputs(opts):
                 )
                 imgs.append(d)
             pairs.append(imgs)
+            pair_metadata_indices.append(meta_pair)
     P = len(pairs)
+
+    max_partition_event = -1
+    if partition is not None:
+        all_part_idx = list(map(int, partition.get("singleton_indices", [])))
+        for a, b in partition.get("pair_indices", []):
+            all_part_idx.extend([int(a), int(b)])
+        max_partition_event = max(all_part_idx, default=-1)
+    if max_partition_event < 0 and candidate_n_events is not None:
+        max_partition_event = int(candidate_n_events) - 1
+    unified_observed_catalog = max_partition_event >= 0 and n_sing == max_partition_event + 1
+    if unified_observed_catalog and P and partition is not None and int(partition.get("n_pairs", P)) != P:
+        raise SystemExit(
+            f"partition n_pairs={partition.get('n_pairs')} does not match pair_pe npairs={P}"
+        )
 
     # Build the full event catalog: [singletons 0..S-1, then pair images].
     # NOTE the singleton PE arrays are already nsamp-per-event; pair images use
@@ -335,30 +372,44 @@ def load_inputs(opts):
         dL = np.concatenate(new_dL); chieff = np.concatenate(new_chi); p_pe = np.concatenate(new_pw)
         nsamp = pe_per_pair
 
-    m1_all = [m1det]; m2_all = [m2det]; dL_all = [dL]; chi_all = [chieff]; pw_all = [p_pe]
-    for imgs in pairs:
-        for img in imgs:
-            m1_all.append(img["m1det"]); m2_all.append(img["q"] * img["m1det"])
-            dL_all.append(img["dL_app"]); chi_all.append(img["chieff"]); pw_all.append(img["prior_wt"])
-    gw_pe = _gw_event(np.concatenate(m1_all), np.concatenate(m2_all),
-                      np.concatenate(dL_all), np.concatenate(chi_all),
-                      np.concatenate(pw_all))
-
-    # per-event KDEs (singletons trivial; pair images real)
-    kdes = []
-    for i in range(n_sing):
-        sl = slice(i * nsamp, (i + 1) * nsamp)
-        kdes.append(make_pair_kde(m1det[sl], m2det[sl] / m1det[sl], dL[sl], chieff[sl], p_pe[sl]))
-    for imgs in pairs:
-        for img in imgs:
-            kdes.append(make_pair_kde(img["m1det"], img["q"], img["dL_app"],
-                                      img["chieff"], img["prior_wt"]))
+    if unified_observed_catalog:
+        gw_pe = _gw_event(m1det, m2det, dL, chieff, p_pe)
+        n_events_total = n_sing
+        kdes = []
+        for i in range(n_events_total):
+            sl = slice(i * nsamp, (i + 1) * nsamp)
+            kdes.append(make_pair_kde(m1det[sl], m2det[sl] / m1det[sl], dL[sl], chieff[sl], p_pe[sl]))
+        for k, imgs in enumerate(pairs):
+            if k < len(partition_pair_indices):
+                event_indices = partition_pair_indices[k]
+            elif k < len(pair_metadata_indices) and pair_metadata_indices[k] is not None:
+                event_indices = pair_metadata_indices[k]
+            else:
+                event_indices = None
+            if event_indices is not None:
+                for event_index, img in zip(event_indices, imgs):
+                    kdes[int(event_index)] = make_pair_kde(img["m1det"], img["q"], img["dL_app"],
+                                                           img["chieff"], img["prior_wt"])
+    else:
+        m1_all = [m1det]; m2_all = [m2det]; dL_all = [dL]; chi_all = [chieff]; pw_all = [p_pe]
+        for imgs in pairs:
+            for img in imgs:
+                m1_all.append(img["m1det"]); m2_all.append(img["q"] * img["m1det"])
+                dL_all.append(img["dL_app"]); chi_all.append(img["chieff"]); pw_all.append(img["prior_wt"])
+        gw_pe = _gw_event(np.concatenate(m1_all), np.concatenate(m2_all),
+                          np.concatenate(dL_all), np.concatenate(chi_all),
+                          np.concatenate(pw_all))
+        kdes = []
+        for i in range(n_sing):
+            sl = slice(i * nsamp, (i + 1) * nsamp)
+            kdes.append(make_pair_kde(m1det[sl], m2det[sl] / m1det[sl], dL[sl], chieff[sl], p_pe[sl]))
+        for imgs in pairs:
+            for img in imgs:
+                kdes.append(make_pair_kde(img["m1det"], img["q"], img["dL_app"],
+                                          img["chieff"], img["prior_wt"]))
+        n_events_total = n_sing + 2 * P
     pair_kdes = stack_pair_kdes(kdes)
-
-    n_events_total = n_sing + 2 * P
     if partition_mode == "marginalize_exact":
-        candidate_data = json.load(open(opts.candidate_pairs_path, "r", encoding="utf-8"))
-        candidate_n_events, candidate_pairs = validate_candidate_pairs(candidate_data)
         _candidate_n_events2, partition_states, log_z_prior = exact_partitions_from_json(
             candidate_data, max_partitions=getattr(opts, "max_exact_partitions", 10000)
         )

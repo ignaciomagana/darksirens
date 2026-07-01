@@ -563,7 +563,7 @@ def write_gw_pe_file(events, path, nsamp, H0, Om0):
     return nobs
 
 
-def write_pair_pe_file(pairs, path, nsamp):
+def write_pair_pe_file(pairs, path, nsamp, pair_indices=None):
     """Pair PE per image (apparent-frame coords) — read directly by the lensing
     tool's ``load_inputs``."""
     with h5py.File(path, "w") as f:
@@ -578,6 +578,11 @@ def write_pair_pe_file(pairs, path, nsamp):
         for k, pair in enumerate(pairs):
             img0, img1 = pair["images"]
             g = f.create_group(f"pair_{k}")
+            if pair_indices is not None:
+                g.attrs["event_index_image0"] = int(pair_indices[k][0])
+                g.attrs["event_index_image1"] = int(pair_indices[k][1])
+            g.attrs["source_index"] = int(pair.get("source_index", -1))
+            g.attrs["pair_index"] = int(k)
             g.attrs["delta_t_obs"] = float(pair["delta_t_obs"])
             g.attrs["sigma_delta_t"] = float(pair["sigma_delta_t"])
             g.attrs["true_y"] = float(pair["true_y"])
@@ -603,6 +608,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              H0, Om0, sis, wl, pair_tag_model="none", pair_tag_prob=1.0,
              n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
              wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0,
+             write_unified_observed_catalog=True,
              validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0)):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
@@ -686,7 +692,21 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             t_obs_image0=0.0, t_obs_image1=dt_obs,
             source_index=int(i),
         ))
-    write_pair_pe_file(pairs, os.path.join(out_dir, "mock_pair_pe.h5"), nsamp)
+
+    # ---- unified observed catalog / truth partition indices ----
+    S, P = len(events), len(pairs)
+    pair_indices = [[S + 2 * k, S + 2 * k + 1] for k in range(P)]
+    observed_events = list(events)
+    for pair in pairs:
+        observed_events.extend(pair["images"])
+
+    if write_unified_observed_catalog:
+        write_gw_pe_file(
+            observed_events, os.path.join(out_dir, "mock_observed_gw_pe.h5"),
+            nsamp, H0, Om0,
+        )
+
+    write_pair_pe_file(pairs, os.path.join(out_dir, "mock_pair_pe.h5"), nsamp, pair_indices=pair_indices)
 
     # ---- injection campaigns ----
     generate_unlensed_injections(n_unlensed_inj, model, rng, H0, Om0,
@@ -698,21 +718,47 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     )
 
     # ---- partition (TRUE): [singletons 0..S-1, then pair images S+2k, S+2k+1] ----
-    S, P = len(events), len(pairs)
     partition = dict(
         n_singletons=S, n_pairs=P,
         singleton_indices=list(range(S)),
-        pair_indices=[[S + 2 * k, S + 2 * k + 1] for k in range(P)],
+        pair_indices=pair_indices,
         truth=dict(
             singleton_source_indices=[int(i) for i in sing_idx],
             pair_source_indices=[int(i) for i in pair_src_idx],
             pair_time_delays=[dict(source_index=p["source_index"], true_y=p["true_y"], true_delta_t=p["true_delta_t"], delta_t_obs=p["delta_t_obs"], sigma_delta_t=p["sigma_delta_t"]) for p in pairs],
-            pair_partition=[[S + 2 * k, S + 2 * k + 1] for k in range(P)],
+            pair_partition=pair_indices,
         ),
         note="event order: singletons [0..S-1], then pair images [S+2k, S+2k+1]",
     )
     with open(os.path.join(out_dir, "partition.json"), "w") as f:
         json.dump(partition, f, indent=2)
+
+    event_records = []
+    for event_index, source_index in enumerate(sing_idx):
+        event_records.append(dict(
+            event_index=int(event_index), kind="singleton", source_index=int(source_index),
+            pair_index=None, image_index=None, truth_partner_event_index=None,
+        ))
+    for k, (pair, (i0, i1)) in enumerate(zip(pairs, pair_indices)):
+        event_records.extend([
+            dict(event_index=int(i0), kind="lensed_image", source_index=int(pair["source_index"]),
+                 pair_index=int(k), image_index=0, truth_partner_event_index=int(i1)),
+            dict(event_index=int(i1), kind="lensed_image", source_index=int(pair["source_index"]),
+                 pair_index=int(k), image_index=1, truth_partner_event_index=int(i0)),
+        ])
+    observed_catalog = dict(
+        n_events=int(S + 2 * P),
+        event_order="singletons first, then lensed image pairs",
+        event_records=event_records,
+        truth_partition=dict(
+            singleton_indices=partition["singleton_indices"],
+            pair_indices=partition["pair_indices"],
+            n_singletons=S, n_pairs=P,
+        ),
+    )
+    if write_unified_observed_catalog:
+        with open(os.path.join(out_dir, "observed_catalog.json"), "w") as f:
+            json.dump(observed_catalog, f, indent=2)
 
     # ---- candidate pairs for exact partition marginalization ----
     true_edges = [
@@ -794,7 +840,9 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         description="Standalone strong-lensing mock for darksirens_inference_lensing "
                     f"(population {POP_NAME} + SIS strong lensing + lognormal WL).",
         files={
-            "mock_gw_pe.h5": "singleton PE; gwcat-1.0; load via load_gw_samples",
+            "mock_gw_pe.h5": "legacy singleton PE; gwcat-1.0; load via load_gw_samples",
+            "mock_observed_gw_pe.h5": "unified observed-event PE; gwcat-1.0; singletons first, then lensed image pairs",
+            "observed_catalog.json": "metadata for unified observed event-index system",
             "mock_pair_pe.h5": "pair PE per image; lensed-pair-pe-1.0",
             "mock_gw_selection.h5": "unlensed injections; gwcat-selection-1.0; load_selection_samples",
             "mock_lensed_injections.h5": "lensed J=2 injections; load_lensed_injections; includes p_tag_per_source pair-tag metadata",
@@ -831,6 +879,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             nsamp=nsamp, n_unlensed_injections=n_unlensed_inj,
             n_lensed_injection_sources=n_lensed_inj,
             n_wrong_candidate_pairs=int(n_wrong_candidate_pairs),
+            unified_observed_catalog=bool(write_unified_observed_catalog),
         ),
         model=dict(pop_name=POP_NAME, rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
                    selection_model="Finn-Chernoff orientation-averaged p_det",
@@ -879,8 +928,12 @@ def parse_args():
                    default="none", help="mock-only pair-tag selection model for lensed injections")
     p.add_argument("--pair-tag-prob", type=float, default=1.0,
                    help="pair-tag probability used by --pair-tag-model constant")
-    p.add_argument("--n-wrong-candidate-pairs", type=int, default=0,
+    p.add_argument("--n-wrong-candidate-pairs", "--candidate-extra-wrong-pairs", dest="n_wrong_candidate_pairs", type=int, default=0,
                    help="number of shuffled non-truth candidate edges to add to candidate_pairs.json")
+    p.add_argument("--candidate-random-pairs", dest="n_wrong_candidate_pairs", type=int,
+                   help="alias for --candidate-extra-wrong-pairs; random non-truth candidate edges")
+    p.add_argument("--write-unified-observed-catalog", choices=("true", "false"), default="true",
+                   help="write mock_observed_gw_pe.h5 and observed_catalog.json using one observed-event index system")
     p.add_argument("--candidate-pair-log-prior-odds", type=float, default=0.0,
                    help="log prior odds assigned to true candidate edges")
     p.add_argument("--wrong-candidate-log-prior-odds", type=float, default=-5.0,
@@ -911,6 +964,7 @@ def main():
         candidate_pair_log_prior_odds=args.candidate_pair_log_prior_odds,
         wrong_candidate_log_prior_odds=args.wrong_candidate_log_prior_odds,
         time_delay_sigma_sec=args.time_delay_sigma_sec,
+        write_unified_observed_catalog=args.write_unified_observed_catalog.lower() == "true",
         validation_sample_log10_tau_A=args.validation_sample_log10_tau_A,
         validation_log10_tau_A_prior=args.validation_log10_tau_A_prior,
     )
