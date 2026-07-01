@@ -59,12 +59,20 @@ def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]
 
     if not isinstance(data, dict):
         raise ValueError("candidate-pair file must contain a JSON object")
-    if "n_events" not in data or "candidate_pairs" not in data:
-        raise ValueError("candidate-pair file requires 'n_events' and 'candidate_pairs'")
+    fmt = data.get("format_version")
+    if fmt is not None and fmt != "candidate-pairs-1.0":
+        raise ValueError("candidate-pair format_version must be 'candidate-pairs-1.0'")
+    if "n_events" not in data:
+        raise ValueError("candidate-pair file requires 'n_events'")
     n_events = int(data["n_events"])
     if n_events < 0:
         raise ValueError(f"n_events must be non-negative, got {n_events}")
-    raw_pairs = data["candidate_pairs"]
+    if "pairs" in data:
+        raw_pairs = data["pairs"]
+    elif "candidate_pairs" in data:
+        raw_pairs = data["candidate_pairs"]
+    else:
+        raise ValueError("candidate-pair file requires 'pairs' (or legacy 'candidate_pairs')")
     if not isinstance(raw_pairs, list):
         raise ValueError("candidate_pairs must be a list")
 
@@ -110,6 +118,13 @@ def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]
                     raise ValueError(f"candidate_pairs[{k}].marks.delta_t_obs must be finite")
                 if not np.isfinite(sigma_delta_t) or sigma_delta_t <= 0:
                     raise ValueError(f"candidate_pairs[{k}].marks.sigma_delta_t must be finite and positive")
+            for mark_name, mark_value in marks.items():
+                try:
+                    arr = np.asarray(mark_value, dtype=float)
+                except Exception:
+                    continue
+                if not np.all(np.isfinite(arr)):
+                    raise ValueError(f"candidate_pairs[{k}].marks.{mark_name} must be finite")
         label = item.get("label")
         pairs.append(
             CandidatePair(

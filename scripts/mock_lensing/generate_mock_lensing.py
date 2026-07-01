@@ -79,6 +79,7 @@ from darksirens.lensing.slmarks import (
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import save_lensed_injections
 from darksirens.lensing.observed_catalog import write_observed_pe_attrs
+from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs
 
 POP_NAME = "powerlaw+peak"
 THETA_PARAM_ORDER = [
@@ -634,6 +635,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
              wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0,
              write_unified_observed_catalog=True, candidate_time_marks=True,
+             build_candidate_pairs_from_observed=False,
              validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0),
              write_legacy_pair_pe=False):
     os.makedirs(out_dir, exist_ok=True)
@@ -859,6 +861,21 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     }
     with open(os.path.join(out_dir, "candidate_pairs.json"), "w") as f:
         json.dump(candidate_pairs, f, indent=2)
+    if build_candidate_pairs_from_observed:
+        observed_built = build_candidate_pairs(
+            gw_path=observed_pe_path,
+            observed_catalog_path=observed_catalog_path,
+            truth_path=os.path.join(out_dir, "truth.json"),
+            max_edges_per_event=max(1, min(8, n_events_total - 1)),
+            max_total_edges=max(1, n_events_total * max(1, min(8, n_events_total - 1)) // 2),
+            time_window_sec=float("inf"),
+            mass_distance_top_k=0,
+            include_time_marks=bool(candidate_time_marks),
+            include_truth_labels=True,
+            seed=int(seed),
+        )
+        with open(os.path.join(out_dir, "candidate_pairs.json"), "w") as f:
+            json.dump(observed_built, f, indent=2)
 
     # ---- truth.json (informational) ----
     truth_out = {k: (v.tolist() if isinstance(v, np.ndarray) else v)
@@ -944,6 +961,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             n_lensed_injection_sources=n_lensed_inj,
             n_wrong_candidate_pairs=int(n_wrong_candidate_pairs),
             unified_observed_catalog=bool(write_unified_observed_catalog),
+            candidate_pairs_from_observed=bool(build_candidate_pairs_from_observed),
         ),
         model=dict(pop_name=POP_NAME, rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
                    selection_model="Finn-Chernoff orientation-averaged p_det",
@@ -1006,6 +1024,9 @@ def parse_args():
                    help="log prior odds assigned to shuffled wrong candidate edges")
     p.add_argument("--candidate-time-marks", choices=("true", "false"), default="true",
                    help="write edge-level time-delay marks for true candidate edges")
+    p.add_argument("--build_candidate_pairs_from_observed", "--build-candidate-pairs-from-observed",
+                   choices=("true", "false"), default="false",
+                   help="overwrite candidate_pairs.json with a graph scored from observed metadata/posteriors")
     p.add_argument("--time-delay-sigma-sec", type=float, default=3600.0,
                    help="Gaussian sigma for observed SIS pair time delays, in seconds")
     p.add_argument("--validation-sample-log10-tau-A", action="store_true",
@@ -1034,6 +1055,7 @@ def main():
         time_delay_sigma_sec=args.time_delay_sigma_sec,
         write_unified_observed_catalog=args.write_unified_observed_catalog.lower() == "true",
         candidate_time_marks=args.candidate_time_marks.lower() == "true",
+        build_candidate_pairs_from_observed=args.build_candidate_pairs_from_observed.lower() == "true",
         validation_sample_log10_tau_A=args.validation_sample_log10_tau_A,
         validation_log10_tau_A_prior=args.validation_log10_tau_A_prior,
         write_legacy_pair_pe=args.write_legacy_pair_pe.lower() == "true",
