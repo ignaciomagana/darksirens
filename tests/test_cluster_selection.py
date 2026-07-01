@@ -1047,3 +1047,71 @@ class TestWeakLensingSingletonSelection:
         src = inspect.getsource(inference_lensing.main)
         assert 'f.attrs["wl_selection"] = opts.wl_selection' in src
         assert "for k, v in vars(opts).items()" in src
+
+# PR08 candidate-pair partition enumeration tests
+
+def test_candidate_pair_validation_rejects_duplicate_and_self_pairs():
+    from darksirens.lensing.partitions import validate_candidate_pairs
+    import pytest
+
+    with pytest.raises(ValueError, match="self-pair"):
+        validate_candidate_pairs({
+            "n_events": 2,
+            "candidate_pairs": [{"i": 1, "j": 1, "log_prior_odds": 0.0}],
+        })
+
+    with pytest.raises(ValueError, match="duplicate unordered"):
+        validate_candidate_pairs({
+            "n_events": 3,
+            "candidate_pairs": [
+                {"i": 0, "j": 2, "log_prior_odds": 0.0},
+                {"i": 2, "j": 0, "log_prior_odds": 1.0},
+            ],
+        })
+
+
+def test_exact_enumeration_counts_simple_graphs():
+    from darksirens.lensing.partitions import (
+        enumerate_compatible_partitions,
+        validate_candidate_pairs,
+    )
+
+    n_events, pairs = validate_candidate_pairs({
+        "n_events": 3,
+        "candidate_pairs": [
+            {"i": 0, "j": 1, "log_prior_odds": 0.0},
+            {"i": 1, "j": 2, "log_prior_odds": 0.0},
+        ],
+    })
+    states = enumerate_compatible_partitions(n_events, pairs)
+    assert len(states) == 3  # empty + either edge in the length-2 path
+    assert sorted(state.n_pairs for state in states) == [0, 1, 1]
+
+    n_events, pairs = validate_candidate_pairs({
+        "n_events": 4,
+        "candidate_pairs": [
+            {"i": 0, "j": 1, "log_prior_odds": 0.0},
+            {"i": 2, "j": 3, "log_prior_odds": 0.0},
+        ],
+    })
+    states = enumerate_compatible_partitions(n_events, pairs)
+    assert len(states) == 4  # empty, each edge alone, both disjoint edges
+    assert max(state.n_pairs for state in states) == 2
+
+
+def test_exact_enumeration_rejects_over_limit():
+    from darksirens.lensing.partitions import (
+        enumerate_compatible_partitions,
+        validate_candidate_pairs,
+    )
+    import pytest
+
+    n_events, pairs = validate_candidate_pairs({
+        "n_events": 4,
+        "candidate_pairs": [
+            {"i": 0, "j": 1, "log_prior_odds": 0.0},
+            {"i": 2, "j": 3, "log_prior_odds": 0.0},
+        ],
+    })
+    with pytest.raises(ValueError, match="max_partitions=2"):
+        enumerate_compatible_partitions(n_events, pairs, max_partitions=2)
