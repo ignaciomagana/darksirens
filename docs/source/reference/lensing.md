@@ -7,6 +7,50 @@ and a **strong-lensing cluster** likelihood for multiply-imaged sirens
 (`darksirens.inference.cluster_*` + `darksirens.likelihood.likelihood_with_clusters`).
 The physics is summarised on the [Theory & methods](../theory.md) page.
 
+
+## Mock strong-lensing generation modes
+
+`scripts/mock_lensing/generate_mock_lensing.py` can write a standalone mock in
+current `gwcat-1.0`, `gwcat-selection-1.0`, lensed-injection, pair-PE, partition,
+truth, and manifest formats. The generator now separates two validation use
+cases with `--conditioning {fixed_counts,poisson_counts}`:
+
+* `fixed_counts` is the default for backward-compatible toy debugging. It
+  preserves `--n-sing-keep` and `--n-pair-keep`, shuffles the detected singleton
+  and pair candidate source indices before truncating them, and warns when the
+  requested fixed count exceeds the available detections.
+* `poisson_counts` keeps the observed singleton and pair counts produced by the
+  simulated universe and detection process instead of forcing exact requested
+  counts. Use `--max-sing-keep` and `--max-pair-keep` only as optional file-size
+  caps; `manifest.json` and `truth.json` record whether those caps were applied.
+
+Both modes record the optical-depth and weak-lensing hyperparameters (`tau_A`,
+`tau_n`, `wl_a`, `wl_b`), `n_sources_universe`, detected and kept singleton/pair
+counts, the conditioning mode, the Finn-Chernoff selection model, the PE prior
+convention, and the true pair partition/source-index mapping in the generated
+truth/manifest files.
+
+Examples:
+
+```bash
+python scripts/mock_lensing/generate_mock_lensing.py \
+  --outdir data/mock_lensing_fixed \
+  --conditioning fixed_counts \
+  --n-universe 2000 --n-sing-keep 5 --n-pair-keep 2 \
+  --n-unlensed-inj 1000 --n-lensed-inj 1000
+
+python scripts/mock_lensing/generate_mock_lensing.py \
+  --outdir data/mock_lensing_poisson \
+  --conditioning poisson_counts \
+  --n-universe 2000 --max-sing-keep 10 --max-pair-keep 5 \
+  --n-unlensed-inj 1000 --n-lensed-inj 1000
+```
+
+For a local end-to-end check, `scripts/mock_lensing/run_tiny_lensing_validation.sh`
+generates a tiny mock in `data/tiny_lens`, runs `darksirens.cli.inference_lensing`
+with `cluster_mode=off` and `cluster_mode=j2` using very small sampler settings,
+and prints the mock and run-output directories.
+
 ## `darksirens.lensing`
 
 The package `__init__` re-exports the lensing parameter containers and factory
