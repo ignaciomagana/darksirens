@@ -84,6 +84,15 @@ WL_BACKEND_DISABLED = -1
 WL_BACKEND_LOGNORMAL = 0
 WL_BACKEND_TABULATED = 1
 
+# Singleton-selection weak-lensing policy.  STANDARD preserves the legacy
+# commit-2/4 behavior: PE weights may be WL-marginalized, but singleton
+# injections use the ordinary spectral-siren selection integral.  LOGNORMAL
+# opts into the same lognormal/Hermite WL marginalization for singleton
+# selection.  Cluster J=2 lensed-injection selection is intentionally not
+# changed by this switch.
+WL_SELECTION_STANDARD = 0
+WL_SELECTION_LOGNORMAL = 1
+
 
 @partial(
     jax.jit,
@@ -98,6 +107,7 @@ WL_BACKEND_TABULATED = 1
         "wl_backend",
         "cluster_mode",
         "return_diagnostics",
+        "wl_selection",
     ],
 )
 def darksiren_log_likelihood_with_clusters(
@@ -134,6 +144,7 @@ def darksiren_log_likelihood_with_clusters(
     wl_log_mu_grid: jnp.ndarray | None = None,
     wl_log_p_table: jnp.ndarray | None = None,
     return_diagnostics: bool = False,
+    wl_selection: int = WL_SELECTION_STANDARD,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
 
@@ -175,6 +186,15 @@ def darksiren_log_likelihood_with_clusters(
     log_p_pop = pop_model_parser(pop_model=pop_model)
 
     wl_enabled = (wl_backend != WL_BACKEND_DISABLED)
+    wl_selection_enabled = (
+        wl_selection == WL_SELECTION_LOGNORMAL
+        and wl_backend == WL_BACKEND_LOGNORMAL
+    )
+    if wl_selection == WL_SELECTION_LOGNORMAL and wl_backend != WL_BACKEND_LOGNORMAL:
+        # Disabled WL (or future non-lognormal backends) must keep the exact
+        # legacy singleton-selection path.  In particular wl_backend=disabled
+        # reduces to standard selection, as required for backward compatibility.
+        wl_selection_enabled = False
     if wl_enabled and universe_model != "spectral_sirens_wl":
         raise ValueError(
             f"wl_backend={wl_backend} requires universe_model='spectral_sirens_wl', "
@@ -224,17 +244,30 @@ def darksiren_log_likelihood_with_clusters(
         log_p_wl_fn = None
 
     # ──────────────────────────────────────────────────────────────────
-    # Singleton selection integral.  Uses the standard log_sample_weight
-    # with the volume prior — unchanged from commit 2.
+    # Singleton selection integral.  By default this uses the standard
+    # log_sample_weight with the volume prior — unchanged from commit 2.
+    # If explicitly requested via wl_selection=LOGNORMAL, and only for the
+    # lognormal WL backend with nonzero wl_a, singleton injections use the
+    # same Hermite WL marginalization as PE samples.  The wl_backend=disabled
+    # case deliberately falls through to the standard path; wl_a=0 is handled
+    # by the Hermite kernel itself and reduces numerically to the standard path.
     # ──────────────────────────────────────────────────────────────────
     def log_weight_sel(m1det, q, dL, chieff, pix, prior_wt, catalog):
         def _selection_prior(z, pix, catalog):
             return log_prior_z_selection(z, pix, catalog)
-        ldw = log_sample_weight(
-            m1det, q, dL, chieff, pix, prior_wt,
-            cosmo, survey, pop_params, catalog,
-            log_p_pop, _selection_prior,
-        )
+        if wl_selection_enabled:
+            ldw = log_sample_weight_wl_lognormal_hermite(
+                m1det, q, dL, chieff, pix, prior_wt,
+                cosmo, survey, pop_params, catalog,
+                log_p_pop, _selection_prior,
+                wl_a, wl_b, u_nodes, log_wH_nodes,
+            )
+        else:
+            ldw = log_sample_weight(
+                m1det, q, dL, chieff, pix, prior_wt,
+                cosmo, survey, pop_params, catalog,
+                log_p_pop, _selection_prior,
+            )
         supported = dL_in_z_grid(dL, H0, Om0)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
@@ -245,6 +278,8 @@ def darksiren_log_likelihood_with_clusters(
 
     # ──────────────────────────────────────────────────────────────────
     # Cluster selection integral. Inert when cluster_mode == OFF —
+    # NOTE: wl_selection affects only singleton injections above.  The J=2
+    # lensed-injection selection estimator remains unchanged in this PR.
     # log_mu = -inf and log_sigma2 = -inf so that
     # combined_selection_log_correction collapses to the singleton form.
     # ──────────────────────────────────────────────────────────────────
@@ -389,6 +424,7 @@ def darksiren_log_likelihood_with_clusters(
             "per_pair_logL": per_pair_logL,
             "n_singletons": jnp.asarray(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
             "n_pairs": jnp.asarray(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
+            "wl_selection": jnp.asarray(wl_selection),
         }
     return logL_total
 
