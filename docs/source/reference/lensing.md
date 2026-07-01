@@ -334,6 +334,53 @@ failed, for compatibility with older branches.  The optional
 Poisson-conditioned mock and samples `log10_tau_A` while fixing `tau_n` through
 `--fixed_parameter_values`.
 
+### Simulated study plots
+
+After running the simulated end-to-end lensing study, generate one diagnostic
+figure per plot with the plotting helper.  The helper reads the study directory
+written by `run_simulated_lensing_study.py`, skips plots whose optional inputs are
+missing, and writes `plot_manifest.json` with produced plots, skipped plots, and
+warnings:
+
+```bash
+python scripts/mock_lensing/plot_simulated_lensing_study.py \
+  --study_dir /tmp/ds_simulated_lensing_study \
+  --outdir /tmp/ds_simulated_lensing_study/plots \
+  --format png \
+  --show false \
+  --min_edge_probability 0.0
+```
+
+The deterministic output names are:
+
+* `fig_pair_probabilities.{png,pdf}`: posterior pair probabilities grouped by
+  truth label from `posterior_pair_probabilities.csv`.
+* `fig_pair_prob_vs_edge_score.{png,pdf}`: posterior pair probability versus
+  candidate-edge `log_prior_odds` from per-case `candidate_pairs.json`; this is
+  skipped if candidate-edge scores are unavailable.
+* `fig_evidence_matrix.{png,pdf}`: available sampler evidence or evidence-delta
+  values from `validation_summary.json`.  This requires evidence-bearing runs;
+  diagnostics-only studies usually skip it or should treat it as non-science
+  diagnostics.
+* `fig_lens_rate_recovery.{png,pdf}`: posterior `log10_tau_A` summaries when
+  lens-rate sampling produced them.  It is skipped for fixed-rate or
+  diagnostics-only studies without posterior samples.
+* `fig_candidate_graph_summary.{png,pdf}`: candidate-edge and MAP-pair counts
+  from `partition_component_summary.csv`.
+* `fig_ablation_summary.{png,pdf}`: full marks versus no-sky, no-time, and bad
+  `p_tag` ablations from `truth_recovery_summary.csv`.
+* `fig_false_positive_summary.{png,pdf}`: maximum and summed false-edge posterior
+  probabilities from `truth_recovery_summary.csv`.
+
+The pair-probability, edge-score, candidate-graph, ablation, and false-positive
+plots are diagnostic summaries and can be produced from diagnostics-only study
+outputs when the corresponding CSV/JSON artifacts exist.  Evidence plots require
+real sampler outputs (`results.hdf5` attributes propagated into
+`validation_summary.json`) and should not be interpreted from `--diagnostics_only
+true` runs, where `max_samples=0` makes evidence unavailable or non-meaningful.
+The plotting utility is still simulation-only and does not ingest GWTC-5, galaxy
+catalogs, LSS maps, or dark-siren host information.
+
 This validation is still not a real LVK science run.  It validates methodology
 on controlled mocks only and deliberately avoids dark-siren, LSS, or
 catalog-host inference.
