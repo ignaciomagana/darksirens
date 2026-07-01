@@ -1,46 +1,29 @@
 # Lensing: weak magnification & strong-lensing clusters
 
-This subsystem adds two gravitational-lensing capabilities, both opt-in and
-inert by default: **weak-lensing magnification** marginalisation for the
-spectral-siren PE integral (`darksirens.lensing` + `darksirens.likelihood.wl_weight`),
-and a **strong-lensing cluster** likelihood for multiply-imaged sirens
-(`darksirens.inference.cluster_*` + `darksirens.likelihood.likelihood_with_clusters`).
+This page documents the **spectral-siren lensing** workflow.  The current
+lensing branch does two things:
+
+* `spectral_sirens_wl`: spectral-siren singleton inference with optional
+  weak-lensing magnification marginalisation (`--wl_backend lognormal`).
+* `spectral_sirens` / `spectral_sirens_wl` plus **J=2 strong-lensing clusters**:
+  candidate pairs of multiply-imaged sirens are evaluated with the SIS pair
+  likelihood and the lensed-injection cluster selection term
+  (`--cluster_mode j2`).
+
+It deliberately does **not** implement galaxy-catalog dark sirens, LSS
+completion, catalog host probabilities, or dark-siren/LSS lensing inference.
+Those features remain out of scope for the lensing CLI; use the ordinary
+`darksirens_inference` and LSS tools for non-lensing catalog workflows.
+
 The physics is summarised on the [Theory & methods](../theory.md) page.
 
+## End-to-end spectral-siren lensing workflow
 
-## Mock strong-lensing generation modes
+### 1. Generate a mock
 
-`scripts/mock_lensing/generate_mock_lensing.py` can write a standalone mock in
-current `gwcat-1.0`, `gwcat-selection-1.0`, lensed-injection, pair-PE, partition,
-truth, and manifest formats. The generator now separates two validation use
-cases with `--conditioning {fixed_counts,poisson_counts}`:
-
-* `fixed_counts` is the default for backward-compatible toy debugging. It
-  preserves `--n-sing-keep` and `--n-pair-keep`, shuffles the detected singleton
-  and pair candidate source indices before truncating them, and warns when the
-  requested fixed count exceeds the available detections.
-* `poisson_counts` keeps the observed singleton and pair counts produced by the
-  simulated universe and detection process instead of forcing exact requested
-  counts. Use `--max-sing-keep` and `--max-pair-keep` only as optional file-size
-  caps; `manifest.json` and `truth.json` record whether those caps were applied.
-
-Both modes also write optional SIS time-delay pair metadata into `mock_pair_pe.h5`: per-pair `delta_t_obs`, `sigma_delta_t`, `true_y`, `true_delta_t`, and image arrival-time attributes. The observed delay is generated as `delta_t_from_y(y, sis)` plus Gaussian noise controlled by `--time-delay-sigma-sec`. These marks are inert unless inference is run with `--pair_marks time`; the default `--pair_marks none` preserves old pair-PE behavior.
-
-Both modes can also record mock pair-tag selection with
-`--pair-tag-model {none,constant,min_snr_proxy}`. `none` writes `p_tag=1`;
-`constant` writes `--pair-tag-prob` for both-detected sources; and
-`min_snr_proxy` is a deterministic **mock-only** proxy based on the weaker
-image detection strength. The tag factor is stored in
-`mock_lensed_injections.h5` and affects only the J=2 cluster selection
-integral, not the per-pair PE likelihood.
-
-Both modes record the optical-depth and weak-lensing hyperparameters (`tau_A`,
-`tau_n`, `wl_a`, `wl_b`), `n_sources_universe`, detected and kept singleton/pair
-counts, the conditioning mode, the Finn-Chernoff selection model, the PE prior
-convention, and the true pair partition/source-index mapping in the generated
-truth/manifest files.
-
-Examples:
+`scripts/mock_lensing/generate_mock_lensing.py` writes a standalone spectral-siren
+lensing mock with current `gwcat-1.0`, `gwcat-selection-1.0`, lensed-injection,
+pair-PE, fixed-partition, candidate-pair, truth, and manifest files.
 
 ```bash
 python scripts/mock_lensing/generate_mock_lensing.py \
@@ -56,18 +39,142 @@ python scripts/mock_lensing/generate_mock_lensing.py \
   --n-unlensed-inj 1000 --n-lensed-inj 1000
 ```
 
-For a local end-to-end check, `scripts/mock_lensing/run_tiny_lensing_validation.sh`
-generates a tiny mock in `data/tiny_lens`, runs `darksirens.cli.inference_lensing`
-with `cluster_mode=off` and `cluster_mode=j2` using very small sampler settings,
-and prints the mock and run-output directories.
+`--conditioning fixed_counts` preserves the requested kept singleton/pair counts
+when enough detections exist.  `--conditioning poisson_counts` keeps the observed
+counts from the simulated universe, with `--max-sing-keep` and `--max-pair-keep`
+serving only as optional file-size caps.  The generated `manifest.json` and
+`truth.json` record the conditioning mode, kept counts, lensing hyperparameters,
+weak-lensing hyperparameters, selection model, PE prior convention, and pair
+truth mapping.
 
-For the lightweight validation equivalent of a full F1/F2 lensing guide, use
-`run_lensing_validation.py`.  It generates (or, with `--reuse`, reuses) a small
-in-repo mock, exercises the actual `darksirens.cli.inference_lensing` loading
-path at fixed prior-midpoint parameters, and checks four cases: singleton-only
-`cluster_mode=off`, true J=2 pairs, intentionally shuffled/wrong J=2 partners,
-and a null J=2 mock with `n_pair_keep=0`.  The default `tiny` profile is intended
-for local and CI diagnostics; `small` uses modestly larger mock files.
+### 2. Run singleton-only and J=2 inference
+
+All commands should use the installed console script `darksirens_inference_lensing`
+or the equivalent module form `python -m darksirens.cli.inference_lensing`.
+There is no `darksirens.tool` lensing path.
+
+Singleton-only mode ignores lensed-injection, pair-PE, and partition paths:
+
+```bash
+darksirens_inference_lensing \
+  --gw_path data/mock_lensing_fixed/mock_gw_pe.h5 \
+  --gwselection_path data/mock_lensing_fixed/mock_gw_selection.h5 \
+  --cluster_mode off \
+  --wl_backend lognormal \
+  --fix_cosmology true --fix_survey true --fix_population true \
+  --sampler dynesty --nlive 40 --dlogz 10 --max_samples 0 \
+  --save_path runs/lensing/off
+```
+
+J=2 mode adds lensed selection injections, pair PE, and either a fixed partition
+or exact marginalisation over a candidate-pair graph:
+
+```bash
+darksirens_inference_lensing \
+  --gw_path data/mock_lensing_fixed/mock_gw_pe.h5 \
+  --gwselection_path data/mock_lensing_fixed/mock_gw_selection.h5 \
+  --lensed_injections_path data/mock_lensing_fixed/mock_lensed_injections.h5 \
+  --pair_pe_path data/mock_lensing_fixed/mock_pair_pe.h5 \
+  --partition_path data/mock_lensing_fixed/partition.json \
+  --partition_mode fixed \
+  --cluster_mode j2 \
+  --wl_backend lognormal \
+  --fix_cosmology true --fix_survey true --fix_population true \
+  --sampler dynesty --nlive 40 --dlogz 10 --max_samples 0 \
+  --pe_max_per_pair 64 \
+  --save_path runs/lensing/j2_fixed
+```
+
+For exact candidate-pair marginalisation, replace the fixed partition with the
+candidate graph written by the mock generator:
+
+```bash
+darksirens_inference_lensing \
+  --gw_path data/mock_lensing_fixed/mock_gw_pe.h5 \
+  --gwselection_path data/mock_lensing_fixed/mock_gw_selection.h5 \
+  --lensed_injections_path data/mock_lensing_fixed/mock_lensed_injections.h5 \
+  --pair_pe_path data/mock_lensing_fixed/mock_pair_pe.h5 \
+  --candidate_pairs_path data/mock_lensing_fixed/candidate_pairs.json \
+  --partition_mode marginalize_exact --max_exact_partitions 10000 \
+  --cluster_mode j2 \
+  --wl_backend lognormal \
+  --fix_cosmology true --fix_survey true --fix_population true \
+  --sampler dynesty --nlive 40 --dlogz 10 --max_samples 0 \
+  --pe_max_per_pair 64 \
+  --save_path runs/lensing/j2_marginalized
+```
+
+### Fixed partitions vs candidate-pair marginalisation
+
+`--partition_mode fixed` evaluates one explicit event split from
+`--partition_path`.  The mock generator's `partition.json` is the truth
+partition and is useful for validation and controlled recovery studies.
+
+`--partition_mode marginalize_exact` enumerates compatible partitions from
+`--candidate_pairs_path`, combines each partition likelihood with its prior
+weight, and log-sum-exp marginalises over the finite candidate graph.  Use this
+only for small candidate sets; `--max_exact_partitions` is a guardrail against
+accidental combinatorial explosions.
+
+### Pair-tag selection
+
+Mock generation supports `--pair-tag-model {none,constant,min_snr_proxy}`.
+`none` stores `p_tag=1`; `constant` stores `--pair-tag-prob`; and
+`min_snr_proxy` writes a deterministic mock-only tag probability based on the
+weaker image detection proxy.  The tag factor is stored in
+`mock_lensed_injections.h5` and affects the J=2 cluster selection integral, not
+the per-pair PE likelihood.
+
+### Optional time-delay marks
+
+The mock generator writes optional SIS time-delay metadata into
+`mock_pair_pe.h5`: `delta_t_obs`, `sigma_delta_t`, `true_y`, `true_delta_t`, and
+image arrival-time attributes.  These marks are inert by default.  Add
+`--pair_marks time` to include the Gaussian time-delay mark in the J=2 likelihood;
+`--pair_time_sigma_sec` is only a fallback when pair metadata has `delta_t_obs`
+but omits `sigma_delta_t`.
+
+### Lens-rate sampling
+
+By default, `--fix_lens_rate true` fixes SIS optical-depth hyperparameters to
+`--sl_tau_A` and `--sl_tau_n`.  Set `--fix_lens_rate false` to sample
+`log10_tau_A` and `tau_n`; use `--lens_prior_overrides` to change their bounds,
+and `--fixed_parameter_values` to hold one of them fixed for a controlled
+validation run.
+
+### Diagnostics files
+
+Every inference run writes `results.hdf5`, `settings.json`, `diagnostics.json`,
+and `diagnostics.hdf5` under the timestamped run directory.  The diagnostics are
+evaluated at the prior midpoint before sampling and include total, singleton,
+pair, and selection log-likelihood components; observed singleton/pair counts;
+cluster and weak-lensing modes; pair batching and quadrature settings; and lens
+rate settings.  They are the fastest way to verify that `cluster_mode=off` is
+singleton-only, `cluster_mode=j2` sees the expected pairs, and exact
+marginalisation found the intended candidate partitions.
+
+## Validation
+
+### Minimal local validation
+
+The quickest local smoke test generates a tiny mock, runs `cluster_mode off`,
+runs `cluster_mode j2`, and, when `RUN_MARGINALIZE_EXACT=1`, also runs exact
+candidate-pair marginalisation if `candidate_pairs.json` exists:
+
+```bash
+bash scripts/mock_lensing/run_tiny_lensing_validation.sh
+```
+
+Useful environment overrides include `OUTDIR`, `RUNROOT`, `N_UNIVERSE`,
+`MAX_SING_KEEP`, `MAX_PAIR_KEEP`, `NSAMP`, `N_UNLENSED_INJ`, `N_LENSED_INJ`,
+`SAMPLER_ARGS`, and `RUN_MARGINALIZE_EXACT=1`.
+
+### Full validation
+
+For the lightweight F1/F2-style validation matrix, run the Python validator.  It
+uses tiny in-repo mocks and prior-midpoint diagnostics to check singleton-only
+mode, true J=2 pairs, deliberately wrong pair partners, and a null J=2 mock with
+zero observed pairs:
 
 ```bash
 python scripts/mock_lensing/run_lensing_validation.py \
@@ -77,8 +184,8 @@ python scripts/mock_lensing/run_lensing_validation.py \
 python -m pytest tests/test_lensing_validation_script.py
 ```
 
-The validation passes only if the true-pair J=2 diagnostics are finite, wrong
-pair partners have a lower `pair_logL_sum` than the true partition, the null mock
+The validation passes only if true-pair J=2 diagnostics are finite, wrong pair
+partners have a lower `pair_logL_sum` than the truth partition, the null mock
 reports zero observed pairs, and `cluster_mode=off` remains singleton-only.
 
 ## `darksirens.lensing`
@@ -91,7 +198,6 @@ helpers.
 :undoc-members:
 :show-inheritance:
 ```
-
 ## `darksirens.lensing.wlmagnification`
 
 The weak-lensing magnification PDF $p(\mu\mid z)$. `WLParams` carries the backend
