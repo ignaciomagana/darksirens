@@ -732,3 +732,60 @@ all numeric mark fields to be finite.  This is the simulation-realistic path for
 current end-to-end studies and is intended to be GWTC-ready later, but it does
 not ingest real GWTC-5 data and does not add galaxy-catalog, LSS, or dark-siren
 candidate support.
+
+## Candidate edge marks
+
+Simulation candidate-pair files can attach structured, edge-level information in
+an optional `marks` object.  Time-delay fields remain supported, and additional
+interpretable log-scores can be carried without changing the pair schema:
+
+```json
+{
+  "format_version": "candidate-pairs-1.0",
+  "n_events": 6,
+  "candidate_pairs": [
+    {
+      "i": 0,
+      "j": 5,
+      "log_prior_odds": -2.1,
+      "label": "true",
+      "marks": {
+        "delta_t_obs": 12345.0,
+        "sigma_delta_t": 3600.0,
+        "log_sky_overlap": -0.4,
+        "log_mass_distance_score": -1.2,
+        "log_spin_score": -0.1,
+        "log_custom_sim_score": -0.7
+      }
+    }
+  ]
+}
+```
+
+Validation rules are intentionally strict.  `delta_t_obs` and
+`sigma_delta_t` must either both be present or both be absent, and
+`sigma_delta_t` must be positive and finite.  The built-in log-score fields
+`log_sky_overlap`, `log_mass_distance_score`, and `log_spin_score` must be
+finite when present.  Custom simulation marks are accepted only when their key
+starts with `log_` and their value is finite; unknown non-`log_` keys are
+rejected so misspellings do not silently change inference.
+
+Edge marks have two roles:
+
+* **Prior marks** are requested with `--edge_mark_prior_keys`, a comma-separated
+  list of `log_*` keys.  Each requested mark is added to the effective edge
+  `log_prior_odds` before exact partition enumeration.  For example,
+  `--edge_mark_prior_keys log_sky_overlap,log_mass_distance_score` lets a
+  simulation use sky-overlap and mass-distance compatibility as interpretable
+  edge-prior contributions while preserving the base `log_prior_odds` field.
+* **Likelihood marks** are requested with `--edge_mark_likelihood_keys`.  In
+  this PR, only the existing time-delay likelihood is implemented, via
+  `pair_marks=time` or the `time`/`delta_t_obs` likelihood key.  Other
+  likelihood marks are parsed and rejected with a clear not-implemented error
+  until corresponding likelihood terms are added.
+
+By default, no extra edge marks are used: existing `log_prior_odds` behavior is
+unchanged, and time marks affect the likelihood only when the run requests the
+time mark.  Marginalized diagnostics include a `marks` dictionary on each
+`posterior_pair_probabilities` entry so downstream simulation studies can audit
+which edge-level information contributed to each candidate pair.
