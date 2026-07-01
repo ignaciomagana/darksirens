@@ -38,6 +38,7 @@ sys.path.insert(0, str(PKG_ROOT))
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog, GWEvent
 from darksirens.utils.cosmology import H0Planck, Om0Planck
+
 from darksirens.redshift.volume import log_volume_prior_vmap
 from darksirens.lensing.lensed_injections import (
     LensedInjectionSet, make_lensed_injection_set,
@@ -52,6 +53,31 @@ from darksirens.likelihood.cluster_selection import (
     _per_source_log_weight,
 )
 from darksirens.gw.populations import get_fixed_population_params
+
+
+def test_pair_pe_loader_prior_wt_normalization_scale_invariant():
+    """Pair-image prior weights are normalized per image by the loader helper."""
+    from darksirens.cli.inference_lensing import _normalize_pair_image_prior_wt
+
+    raw = np.array([0.2, 0.4, 0.8, 1.6])
+    norm = _normalize_pair_image_prior_wt(raw, context="pair_0/image0/prior_wt")
+    scaled = _normalize_pair_image_prior_wt(
+        17.0 * raw, context="pair_0/image0/prior_wt"
+    )
+
+    np.testing.assert_allclose(norm.sum(), 1.0)
+    np.testing.assert_allclose(scaled.sum(), 1.0)
+    np.testing.assert_allclose(scaled, norm)
+
+
+@pytest.mark.parametrize("bad_prior_wt", [np.zeros(4), np.full(4, np.nan)])
+def test_pair_pe_loader_rejects_malformed_prior_wt(bad_prior_wt):
+    from darksirens.cli.inference_lensing import _normalize_pair_image_prior_wt
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        _normalize_pair_image_prior_wt(
+            bad_prior_wt, context="pair_0/image1/prior_wt"
+        )
 
 
 # ============================================================================

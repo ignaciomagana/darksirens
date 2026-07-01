@@ -543,10 +543,14 @@ def write_gw_pe_file(events, path, nsamp, H0, Om0):
 
 def write_pair_pe_file(pairs, path, nsamp):
     """Pair PE per image (apparent-frame coords) — read directly by the lensing
-    tool's ``load_inputs`` (no format_version required)."""
+    tool's ``load_inputs``."""
     with h5py.File(path, "w") as f:
+        f.attrs["format_version"] = "lensed-pair-pe-1.0"
         f.attrs["npairs"] = len(pairs)
         f.attrs["nsamp"] = int(nsamp)
+        f.attrs["prior_weight_convention"] = (
+            "raw_pe_prior_density_written; loader_normalizes_per_image"
+        )
         f.attrs["mock_data"] = True
         for k, (img0, img1) in enumerate(pairs):
             g = f.create_group(f"pair_{k}")
@@ -630,11 +634,25 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                     f"(population {POP_NAME} + SIS strong lensing + lognormal WL).",
         files={
             "mock_gw_pe.h5": "singleton PE; gwcat-1.0; load via load_gw_samples",
-            "mock_pair_pe.h5": "pair PE per image; coords (m1det,q,dL_app,chieff)+prior_wt",
+            "mock_pair_pe.h5": "pair PE per image; lensed-pair-pe-1.0",
             "mock_gw_selection.h5": "unlensed injections; gwcat-selection-1.0; load_selection_samples",
             "mock_lensed_injections.h5": "lensed J=2 injections; load_lensed_injections",
             "partition.json": "TRUE partition (singleton_indices, pair_indices)",
         },
+        pair_pe_schema=dict(
+            format_version="lensed-pair-pe-1.0",
+            layout="root/pair_{k}/image{0,1}/datasets",
+            attrs=[
+                "format_version", "npairs", "nsamp",
+                "prior_weight_convention", "mock_data",
+            ],
+            coordinates=["m1det", "q", "dL_app", "chieff"],
+            prior_wt=(
+                "raw PE prior-density values are written in each image; "
+                "darksirens_inference_lensing validates finite positive values "
+                "and normalizes prior_wt per image at load time"
+            ),
+        ),
         counts=dict(
             n_universe=n_universe,
             n_singletons_detected_total=int(det_s.sum()), n_singletons_kept=S,

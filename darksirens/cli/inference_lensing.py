@@ -95,7 +95,9 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
-from darksirens.likelihood.pair_kde import make_pair_kde, stack_pair_kdes
+from darksirens.likelihood.pair_kde import (
+    make_pair_kde, stack_pair_kdes, validate_pair_prior_wt,
+)
 from darksirens.likelihood.likelihood_with_clusters import (
     darksiren_log_likelihood_with_clusters,
     CLUSTER_MODE_J2, CLUSTER_MODE_OFF,
@@ -140,6 +142,25 @@ def _downsample(arrs_dict, n_keep, rng):
         return arrs_dict
     idx = rng.choice(n, size=n_keep, replace=False)
     return {k: np.asarray(v)[idx] for k, v in arrs_dict.items()}
+
+
+def _normalize_pair_image_prior_wt(prior_wt, *, context):
+    """Validate and normalize one pair-image PE ``prior_wt`` array.
+
+    Singleton PE loading normalizes ``p_pe`` independently for each event.
+    Pair PE is read directly rather than through ``load_gw_samples``, so we
+    apply the matching convention here: every image's finite positive
+    proposal-density weights are divided by their own sum.  This keeps pair
+    likelihood constants independent of arbitrary PE prior-density scale.
+    """
+    prior_wt = validate_pair_prior_wt(prior_wt, context=context)
+    norm = float(np.sum(prior_wt))
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise ValueError(
+            f"{context}: finite positive prior_wt values must have a "
+            f"finite positive sum, got {norm}."
+        )
+    return prior_wt / norm
 
 
 def load_inputs(opts):
@@ -198,6 +219,10 @@ def load_inputs(opts):
                          prior_wt=np.array(gi["prior_wt"]))
                 if opts.pe_max_per_pair > 0:
                     d = _downsample(d, opts.pe_max_per_pair, rng)
+                d["prior_wt"] = _normalize_pair_image_prior_wt(
+                    d["prior_wt"],
+                    context=f"{opts.pair_pe_path}: pair_{k}/{name}/prior_wt",
+                )
                 imgs.append(d)
             pairs.append(imgs)
     P = len(pairs)
