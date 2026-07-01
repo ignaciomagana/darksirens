@@ -85,6 +85,7 @@ class LensedInjectionSet(NamedTuple):
     mu_minus: Any                 # (N_kept,) — μ_- for kept source
     p_prop_src: Any               # (N_kept,) — source proposal density
     p_prop_y: Any                 # (N_kept,) — y proposal density
+    log_p_tag_per_source: Any      # (N_kept,) — log pair-tag probability
     valid: Any                    # (N_kept,) bool — structural mask for padding
     # Bookkeeping
     n_draw_sources: Any           # scalar — total source-frame draws
@@ -106,6 +107,8 @@ def _make_lensed_injection_arrays_per_source(
     detected: np.ndarray,
     p_prop_src: np.ndarray,
     p_prop_y: np.ndarray,
+    log_p_tag_per_source: Optional[np.ndarray] = None,
+    p_tag_per_source: Optional[np.ndarray] = None,
 ):
     """Group per-image arrays into per-source arrays for paired sources where
     BOTH images are detected. Returns the seven per-source arrays in the
@@ -149,16 +152,6 @@ def _make_lensed_injection_arrays_per_source(
     def _take_plus(arr): return np.asarray(arr)[order][0::2]
     def _take_minus(arr): return np.asarray(arr)[order][1::2]
 
-    # Source-level fields: take the μ_+ value (which by validation equals μ_-)
-    m1_src_psrc = _take_plus(m1_src)
-    q_src_psrc = _take_plus(q_src)
-    z_src_psrc = _take_plus(z_src)
-    chieff_psrc = _take_plus(chieff)
-    y_source_psrc = _take_plus(y_source)
-    p_prop_src_psrc = _take_plus(p_prop_src)
-    p_prop_y_psrc = _take_plus(p_prop_y)
-
-    # Validate source-level consistency between paired images
     def _check_consistency(arr, name):
         plus = _take_plus(arr)
         minus = _take_minus(arr)
@@ -168,6 +161,50 @@ def _make_lensed_injection_arrays_per_source(
                 f"Source-level field '{name}' inconsistent between μ_+ and "
                 f"μ_- images for {n_bad} sources. Check injection writer."
             )
+
+    # Source-level fields: take the μ_+ value (which by validation equals μ_-)
+    m1_src_psrc = _take_plus(m1_src)
+    q_src_psrc = _take_plus(q_src)
+    z_src_psrc = _take_plus(z_src)
+    chieff_psrc = _take_plus(chieff)
+    y_source_psrc = _take_plus(y_source)
+    p_prop_src_psrc = _take_plus(p_prop_src)
+    p_prop_y_psrc = _take_plus(p_prop_y)
+
+    if log_p_tag_per_source is not None and p_tag_per_source is not None:
+        raise ValueError("Pass only one of log_p_tag_per_source or p_tag_per_source")
+    if p_tag_per_source is not None:
+        p_tag_arr = np.asarray(p_tag_per_source, dtype=float)
+        if np.any((p_tag_arr < 0.0) | (p_tag_arr > 1.0)):
+            raise ValueError("p_tag_per_source must be in [0, 1]")
+        log_p_tag_arr = np.full_like(p_tag_arr, -np.inf, dtype=float)
+        positive = p_tag_arr > 0.0
+        log_p_tag_arr[positive] = np.log(p_tag_arr[positive])
+    elif log_p_tag_per_source is not None:
+        log_p_tag_arr = np.asarray(log_p_tag_per_source, dtype=float)
+    else:
+        log_p_tag_arr = None
+
+    if log_p_tag_arr is None:
+        log_p_tag_psrc = np.zeros_like(m1_src_psrc, dtype=float)
+    elif log_p_tag_arr.shape[0] == n_img:
+        _check_consistency(log_p_tag_arr, "log_p_tag_per_source")
+        log_p_tag_psrc = _take_plus(log_p_tag_arr)
+    elif log_p_tag_arr.shape[0] == n_img // 2:
+        # Per-source layout follows sorted source_id order. This is what the
+        # mock generator writes; old files omit this dataset and default to 1.
+        sid_plus = _take_plus(source_id)
+        if not np.array_equal(sid_plus, np.arange(n_img // 2)):
+            raise ValueError(
+                "per-source p_tag datasets require source_id values 0..N_sources-1"
+            )
+        log_p_tag_psrc = log_p_tag_arr
+    else:
+        raise ValueError(
+            "log_p_tag_per_source/p_tag_per_source must have length N_sources "
+            "or N_img"
+        )
+
     for arr, name in [
         (m1_src, "m1_src"), (q_src, "q_src"), (z_src, "z_src"),
         (chieff, "chieff"), (y_source, "y_source"),
@@ -199,6 +236,7 @@ def _make_lensed_injection_arrays_per_source(
         "mu_minus": mu_minus[both_det],
         "p_prop_src": p_prop_src_psrc[both_det],
         "p_prop_y": p_prop_y_psrc[both_det],
+        "log_p_tag_per_source": log_p_tag_psrc[both_det],
         "n_kept": n_kept,
     }
 
@@ -216,6 +254,8 @@ def make_lensed_injection_set(
     p_prop_src: np.ndarray,
     p_prop_y: np.ndarray,
     n_draw_sources: int,
+    log_p_tag_per_source: Optional[np.ndarray] = None,
+    p_tag_per_source: Optional[np.ndarray] = None,
 ) -> LensedInjectionSet:
     """Construct a LensedInjectionSet from raw per-image arrays.
 
@@ -233,6 +273,8 @@ def make_lensed_injection_set(
         m1_src=m1_src, q_src=q_src, z_src=z_src, chieff=chieff,
         y_source=y_source, mu=mu, detected=detected,
         p_prop_src=p_prop_src, p_prop_y=p_prop_y,
+        log_p_tag_per_source=log_p_tag_per_source,
+        p_tag_per_source=p_tag_per_source,
     )
     n_kept = grouped["n_kept"]
     valid = np.ones(n_kept, dtype=bool)
@@ -248,6 +290,7 @@ def make_lensed_injection_set(
         mu_minus=jnp.asarray(grouped["mu_minus"]),
         p_prop_src=jnp.asarray(grouped["p_prop_src"]),
         p_prop_y=jnp.asarray(grouped["p_prop_y"]),
+        log_p_tag_per_source=jnp.asarray(grouped["log_p_tag_per_source"]),
         valid=jnp.asarray(valid),
         n_draw_sources=jnp.asarray(n_draw_sources, dtype=jnp.float64),
     )
@@ -273,6 +316,12 @@ def load_lensed_injections(path: str) -> LensedInjectionSet:
         attrs/n_draw_sources  int
     """
     with h5py.File(path, "r") as f:
+        log_p_tag = None
+        p_tag = None
+        if "log_p_tag_per_source" in f:
+            log_p_tag = f["log_p_tag_per_source"][:]
+        elif "p_tag_per_source" in f:
+            p_tag = f["p_tag_per_source"][:]
         out = make_lensed_injection_set(
             source_id=f["source_id"][:],
             image_id=f["image_id"][:],
@@ -286,6 +335,8 @@ def load_lensed_injections(path: str) -> LensedInjectionSet:
             p_prop_src=f["p_prop_src"][:],
             p_prop_y=f["p_prop_y"][:],
             n_draw_sources=int(f.attrs["n_draw_sources"]),
+            log_p_tag_per_source=log_p_tag,
+            p_tag_per_source=p_tag,
         )
     return out
 
@@ -304,6 +355,8 @@ def save_lensed_injections(
     p_prop_src: np.ndarray,
     p_prop_y: np.ndarray,
     n_draw_sources: int,
+    log_p_tag_per_source: Optional[np.ndarray] = None,
+    p_tag_per_source: Optional[np.ndarray] = None,
 ) -> None:
     """Save raw per-image arrays to disk in the canonical HDF5 layout."""
     with h5py.File(path, "w") as f:
@@ -318,4 +371,12 @@ def save_lensed_injections(
         f.create_dataset("detected", data=np.asarray(detected, dtype=bool))
         f.create_dataset("p_prop_src", data=np.asarray(p_prop_src))
         f.create_dataset("p_prop_y", data=np.asarray(p_prop_y))
+        if log_p_tag_per_source is not None and p_tag_per_source is not None:
+            raise ValueError("Pass only one of log_p_tag_per_source or p_tag_per_source")
+        if log_p_tag_per_source is not None:
+            f.create_dataset("log_p_tag_per_source", data=np.asarray(log_p_tag_per_source))
+            f.attrs["pair_tag_dataset"] = "log_p_tag_per_source"
+        elif p_tag_per_source is not None:
+            f.create_dataset("p_tag_per_source", data=np.asarray(p_tag_per_source))
+            f.attrs["pair_tag_dataset"] = "p_tag_per_source"
         f.attrs["n_draw_sources"] = int(n_draw_sources)

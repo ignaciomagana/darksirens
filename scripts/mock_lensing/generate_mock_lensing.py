@@ -398,7 +398,8 @@ def generate_unlensed_injections(n_draw, model, rng, H0, Om0, *,
 
 
 def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
-                               m1src_range=(3.0, 120.0), out_path=None):
+                               m1src_range=(3.0, 120.0), out_path=None,
+                               pair_tag_model="none", pair_tag_prob=1.0):
     """Lensed J=2 injections in the SOURCE-frame proposal basis, written via the
     lensing per-image schema (``save_lensed_injections``)."""
     m1lo, m1hi = m1src_range
@@ -424,6 +425,25 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
     pdet_m = model.p_det(m1_src, q, z, dL_src / np.sqrt(mu_m))
     det_p = rng.uniform(0, 1, n_draw_sources) < pdet_p
     det_m = rng.uniform(0, 1, n_draw_sources) < pdet_m
+    both = det_p & det_m
+
+    if pair_tag_model == "none":
+        p_tag = np.ones(n_draw_sources, dtype=float)
+    elif pair_tag_model == "constant":
+        if not (0.0 <= pair_tag_prob <= 1.0):
+            raise ValueError("pair_tag_prob must be in [0, 1]")
+        p_tag = np.ones(n_draw_sources, dtype=float)
+        p_tag[both] = float(pair_tag_prob)
+    elif pair_tag_model == "min_snr_proxy":
+        # Mock-only deterministic proxy: higher minimum image SNR strength gives
+        # a higher chance that a pair-identification statistic would tag the pair.
+        strength_p = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_p)) / model.rho_thr
+        strength_m = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_m)) / model.rho_thr
+        min_strength = np.minimum(strength_p, strength_m)
+        p_tag = np.ones(n_draw_sources, dtype=float)
+        p_tag[both] = np.clip(0.10 + 0.45 * (min_strength[both] - 1.0), 0.05, 1.0)
+    else:
+        raise ValueError(f"unknown pair_tag_model: {pair_tag_model}")
 
     # per-IMAGE flat arrays (2 rows per source, interleaved +/-)
     N = n_draw_sources
@@ -444,10 +464,11 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
             y_source=np.repeat(y, 2), mu=interleave(mu_p, mu_m),
             detected=interleave(det_p, det_m),
             p_prop_src=np.repeat(p_prop_src, 2), p_prop_y=np.repeat(p_prop_y, 2),
-            n_draw_sources=int(N),
+            n_draw_sources=int(N), p_tag_per_source=p_tag,
         )
-    both = det_p & det_m
-    return dict(n_sources=N, n_both=int(both.sum())), int(both.sum())
+    return dict(n_sources=N, n_both=int(both.sum()),
+                pair_tag_model=pair_tag_model, pair_tag_prob=float(pair_tag_prob),
+                mean_p_tag_both=float(np.mean(p_tag[both])) if np.any(both) else None), int(both.sum())
 
 
 # ============================================================
@@ -571,10 +592,11 @@ def write_pair_pe_file(pairs, path, nsamp):
 def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              conditioning, max_sing_keep, max_pair_keep,
              rho_thr, horizon_Mpc, n_unlensed_inj, n_lensed_inj,
-             H0, Om0, sis, wl):
+             H0, Om0, sis, wl, pair_tag_model="none", pair_tag_prob=1.0):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
     truth.update(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
+                 pair_tag_model=pair_tag_model, pair_tag_prob=pair_tag_prob,
                  n_sources_universe=n_universe, nsamp=nsamp,
                  conditioning=conditioning,
                  selection_model="Finn-Chernoff orientation-averaged p_det",
@@ -649,8 +671,11 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     # ---- injection campaigns ----
     generate_unlensed_injections(n_unlensed_inj, model, rng, H0, Om0,
                                  out_path=os.path.join(out_dir, "mock_gw_selection.h5"))
-    generate_lensed_injections(n_lensed_inj, model, rng, H0, Om0,
-                               out_path=os.path.join(out_dir, "mock_lensed_injections.h5"))
+    lensed_inj_summary, _ = generate_lensed_injections(
+        n_lensed_inj, model, rng, H0, Om0,
+        out_path=os.path.join(out_dir, "mock_lensed_injections.h5"),
+        pair_tag_model=pair_tag_model, pair_tag_prob=pair_tag_prob,
+    )
 
     # ---- partition (TRUE): [singletons 0..S-1, then pair images S+2k, S+2k+1] ----
     S, P = len(events), len(pairs)
@@ -691,9 +716,15 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             "mock_gw_pe.h5": "singleton PE; gwcat-1.0; load via load_gw_samples",
             "mock_pair_pe.h5": "pair PE per image; lensed-pair-pe-1.0",
             "mock_gw_selection.h5": "unlensed injections; gwcat-selection-1.0; load_selection_samples",
-            "mock_lensed_injections.h5": "lensed J=2 injections; load_lensed_injections",
+            "mock_lensed_injections.h5": "lensed J=2 injections; load_lensed_injections; includes p_tag_per_source pair-tag metadata",
             "partition.json": "TRUE partition (singleton_indices, pair_indices, source-index truth)",
         },
+        lensed_injection_schema=dict(
+            pair_tag_dataset="p_tag_per_source",
+            pair_tag_model=pair_tag_model,
+            pair_tag_prob=float(pair_tag_prob),
+            note="min_snr_proxy is a deterministic mock-only proxy based on the weaker image SNR strength",
+        ),
         pair_pe_schema=dict(
             format_version="lensed-pair-pe-1.0",
             layout="root/pair_{k}/image{0,1}/datasets",
@@ -713,6 +744,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             n_singletons_detected_total=n_singletons_detected_total, n_singletons_kept=S,
             n_pairs_both_detected_total=n_pairs_both_detected_total, n_pairs_kept=P,
             conditioning=conditioning, caps_applied=caps_applied,
+            lensed_injection_pair_tag=lensed_inj_summary,
             nsamp=nsamp, n_unlensed_injections=n_unlensed_inj,
             n_lensed_injection_sources=n_lensed_inj,
         ),
@@ -755,6 +787,10 @@ def parse_args():
     p.add_argument("--tau-n", type=float, default=3.0, help="SIS optical-depth z-power")
     p.add_argument("--wl-a", type=float, default=4.0e-3, help="WL lognormal variance amplitude")
     p.add_argument("--wl-b", type=float, default=1.5, help="WL lognormal variance z-power")
+    p.add_argument("--pair-tag-model", choices=("none", "constant", "min_snr_proxy"),
+                   default="none", help="mock-only pair-tag selection model for lensed injections")
+    p.add_argument("--pair-tag-prob", type=float, default=1.0,
+                   help="pair-tag probability used by --pair-tag-model constant")
     return p.parse_args()
 
 
@@ -770,6 +806,7 @@ def main():
         rho_thr=args.rho_thr, horizon_Mpc=args.horizon_mpc,
         n_unlensed_inj=args.n_unlensed_inj, n_lensed_inj=args.n_lensed_inj,
         H0=args.H0, Om0=args.Om0, sis=sis, wl=wl,
+        pair_tag_model=args.pair_tag_model, pair_tag_prob=args.pair_tag_prob,
     )
     c = manifest["counts"]
     print(json.dumps(c, indent=2))

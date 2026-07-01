@@ -24,6 +24,14 @@ cases with `--conditioning {fixed_counts,poisson_counts}`:
   counts. Use `--max-sing-keep` and `--max-pair-keep` only as optional file-size
   caps; `manifest.json` and `truth.json` record whether those caps were applied.
 
+Both modes can also record mock pair-tag selection with
+`--pair-tag-model {none,constant,min_snr_proxy}`. `none` writes `p_tag=1`;
+`constant` writes `--pair-tag-prob` for both-detected sources; and
+`min_snr_proxy` is a deterministic **mock-only** proxy based on the weaker
+image detection strength. The tag factor is stored in
+`mock_lensed_injections.h5` and affects only the J=2 cluster selection
+integral, not the per-pair PE likelihood.
+
 Both modes record the optical-depth and weak-lensing hyperparameters (`tau_A`,
 `tau_n`, `wl_a`, `wl_b`), `n_sources_universe`, detected and kept singleton/pair
 counts, the conditioning mode, the Finn-Chernoff selection model, the PE prior
@@ -232,5 +240,6 @@ path reduces numerically to the standard selection path.  The option is recorded
 `settings.json` and the `results.hdf5` `wl_selection` attribute.
 
 This switch affects singleton selection only.  The J=2 strong-lensing
-lensed-injection selection estimator is unchanged and does not add dark-siren,
-LSS, or catalog-selection support.
+lensed-injection selection estimator may include the optional `p_tag` pair-tag
+factor described above, but still does not add dark-siren, LSS, or
+catalog-selection support.
