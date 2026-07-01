@@ -79,7 +79,7 @@ from darksirens.lensing.slmarks import (
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import save_lensed_injections
 from darksirens.lensing.observed_catalog import write_observed_pe_attrs
-from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs
+from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs, _log_sky_overlap
 
 POP_NAME = "powerlaw+peak"
 THETA_PARAM_ORDER = [
@@ -261,7 +261,10 @@ def generate_step12(n_universe, seed, H0, Om0, sis, wl):
 
     dL_src = np.asarray(dL_of_z(jnp.asarray(z), H0, Om0))
     m1det = (1.0 + z) * m1
-    src = dict(m1=m1, q=q, chi=chi, z=z, dL_src=dL_src, m1det=m1det)
+    ra_true = rng.uniform(0.0, 2 * np.pi, n_universe)
+    dec_true = np.arcsin(rng.uniform(-1.0, 1.0, n_universe))
+    src = dict(m1=m1, q=q, chi=chi, z=z, dL_src=dL_src, m1det=m1det,
+               ra_true=ra_true, dec_true=dec_true)
     return dict(truth=truth, src=src, marks=marks, z_grid=zg, z_pdf=zpdf)
 
 
@@ -509,7 +512,17 @@ def _draw_posterior_samples(m1det_true, q_true, dL_app_true, chieff_true,
     return m1det, q, dL, chieff
 
 
-def make_event_pe(m1_src, q, z, chieff, mu, model, nsamp, rng, H0, Om0):
+def _wrap_ra(ra):
+    return float(np.mod(ra, 2 * np.pi))
+
+
+def _clip_dec(dec):
+    eps = 1e-9
+    return float(np.clip(dec, -0.5 * np.pi + eps, 0.5 * np.pi - eps))
+
+
+def make_event_pe(m1_src, q, z, chieff, mu, model, nsamp, rng, H0, Om0, *,
+                  ra_true=None, dec_true=None, sky_sigma_floor_rad=0.01):
     """One detected object's PE samples given its TRUE source params and mu."""
     dL_src = float(np.asarray(dL_of_z(jnp.asarray(z), H0, Om0)))
     dL_app_true = dL_src / np.sqrt(mu)
@@ -522,10 +535,20 @@ def make_event_pe(m1_src, q, z, chieff, mu, model, nsamp, rng, H0, Om0):
     m1det, qs, dL, chi = _draw_posterior_samples(
         m1det_true, q, dL_app_true, chieff, rho_eff, nsamp, rng)
     m2det = qs * m1det
-    ra = np.full(nsamp, rng.uniform(0, 2 * np.pi))
-    dec = np.full(nsamp, np.arcsin(rng.uniform(-1, 1)))
+    if ra_true is None:
+        ra_true = rng.uniform(0, 2 * np.pi)
+    if dec_true is None:
+        dec_true = np.arcsin(rng.uniform(-1, 1))
+    sky_sigma_rad = float(max(sky_sigma_floor_rad, np.clip(2.5 / max(rho_eff, 1.0), 0.01, 0.40)))
+    dec_mean = _clip_dec(float(dec_true) + rng.normal(0.0, sky_sigma_rad))
+    # Tangent-plane approximation: scale RA noise by cos(dec) to keep angular noise comparable.
+    ra_mean = _wrap_ra(float(ra_true) + rng.normal(0.0, sky_sigma_rad / max(np.cos(dec_mean), 0.1)))
+    ra = np.full(nsamp, ra_mean)
+    dec = np.full(nsamp, dec_mean)
     p_pe = _pe_prior_density(m1det, qs, dL)
-    return dict(m1det=m1det, m2det=m2det, dL=dL, chieff=chi, ra=ra, dec=dec, p_pe=p_pe)
+    return dict(m1det=m1det, m2det=m2det, dL=dL, chieff=chi, ra=ra, dec=dec, p_pe=p_pe,
+                ra_mean=float(ra_mean), dec_mean=float(dec_mean), sky_sigma_rad=sky_sigma_rad,
+                ra_true=float(ra_true), dec_true=float(dec_true))
 
 
 def _src_masses_from_dL(m1det, m2det, dL, H0, Om0):
@@ -562,6 +585,11 @@ def write_gw_pe_file(events, path, nsamp, H0, Om0):
             p_pe=stack("p_pe"),
         ).items():
             f.create_dataset(key, data=val)
+        for key in ("ra_mean", "dec_mean", "sky_sigma_rad", "ra_true", "dec_true"):
+            if all(key in e for e in events):
+                f.create_dataset(
+                    key, data=np.asarray([e[key] for e in events], dtype=float)
+                )
     return nobs
 
 
@@ -701,16 +729,19 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
 
     # ---- PE: singletons + pairs ----
     events = [make_event_pe(src["m1"][i], src["q"][i], src["z"][i], src["chi"][i],
-                            marks["mu"][i], model, nsamp, rng, H0, Om0)
+                            marks["mu"][i], model, nsamp, rng, H0, Om0,
+                            ra_true=src["ra_true"][i], dec_true=src["dec_true"][i])
               for i in sing_idx]
     write_gw_pe_file(events, os.path.join(out_dir, "mock_gw_pe.h5"), nsamp, H0, Om0)
 
     pairs = []
     for i in pair_src_idx:
         img0 = make_event_pe(src["m1"][i], src["q"][i], src["z"][i], src["chi"][i],
-                             marks["mu_plus"][i], model, nsamp, rng, H0, Om0)
+                             marks["mu_plus"][i], model, nsamp, rng, H0, Om0,
+                             ra_true=src["ra_true"][i], dec_true=src["dec_true"][i])
         img1 = make_event_pe(src["m1"][i], src["q"][i], src["z"][i], src["chi"][i],
-                             marks["mu_minus"][i], model, nsamp, rng, H0, Om0)
+                             marks["mu_minus"][i], model, nsamp, rng, H0, Om0,
+                             ra_true=src["ra_true"][i], dec_true=src["dec_true"][i])
         true_dt = float(delta_t_from_y(jnp.asarray(marks["y"][i]), sis))
         dt_obs = float(true_dt + rng.normal(0.0, time_delay_sigma_sec))
         pairs.append(dict(
@@ -779,6 +810,11 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             truth_source_id=int(source_index),
             truth_image_index=None,
             truth_is_lensed_image=False,
+            ra_mean=float(events[event_index]["ra_mean"]),
+            dec_mean=float(events[event_index]["dec_mean"]),
+            sky_sigma_rad=float(events[event_index]["sky_sigma_rad"]),
+            ra_true=float(events[event_index]["ra_true"]),
+            dec_true=float(events[event_index]["dec_true"]),
         ))
     for k, (pair, (i0, i1)) in enumerate(zip(pairs, pair_indices)):
         event_records.extend([
@@ -796,6 +832,11 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                 truth_source_id=int(pair["source_index"]),
                 truth_image_index=int(image_index),
                 truth_is_lensed_image=True,
+                ra_mean=float(observed_events[event_index]["ra_mean"]),
+                dec_mean=float(observed_events[event_index]["dec_mean"]),
+                sky_sigma_rad=float(observed_events[event_index]["sky_sigma_rad"]),
+                ra_true=float(observed_events[event_index]["ra_true"]),
+                dec_true=float(observed_events[event_index]["dec_true"]),
             ))
     observed_catalog = dict(
         format_version="observed-lensing-catalog-1.0",
@@ -829,11 +870,21 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             "log_prior_odds": float(candidate_pair_log_prior_odds),
             "label": "true",
         }
+        marks_edge = {
+            "log_sky_overlap": float(
+                _log_sky_overlap(
+                    observed_events[edge["i"]],
+                    observed_events[edge["j"]],
+                    sigma_floor_rad=1e-3,
+                )
+            ),
+        }
         if candidate_time_marks:
-            edge["marks"] = {
+            marks_edge.update({
                 "delta_t_obs": float(pairs[k]["delta_t_obs"]),
                 "sigma_delta_t": float(pairs[k]["sigma_delta_t"]),
-            }
+            })
+        edge["marks"] = marks_edge
         true_edges.append(edge)
     used_edges = {tuple(edge[x] for x in ("i", "j")) for edge in true_edges}
     wrong_edges = []
@@ -854,6 +905,13 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             "i": i, "j": j,
             "log_prior_odds": float(wrong_candidate_log_prior_odds),
             "label": "wrong",
+            "marks": {
+                "log_sky_overlap": float(
+                    _log_sky_overlap(
+                        observed_events[i], observed_events[j], sigma_floor_rad=1e-3
+                    )
+                )
+            },
         })
     candidate_pairs = {
         "n_events": n_events_total,
@@ -872,6 +930,9 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             mass_distance_top_k=0,
             include_time_marks=bool(candidate_time_marks),
             include_truth_labels=True,
+            include_sky_marks=True,
+            sky_overlap_weight=0.0,
+            sky_sigma_floor_rad=1e-3,
             seed=int(seed),
         )
         with open(os.path.join(out_dir, "candidate_pairs.json"), "w") as f:

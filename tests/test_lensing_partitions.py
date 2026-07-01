@@ -334,6 +334,11 @@ def _observed_catalog_with_truth(path, n_events=4):
                 "truth_source_id": 10 if i in (0, 1) else 20 + i,
                 "truth_image_index": i if i in (0, 1) else None,
                 "truth_is_lensed_image": i in (0, 1),
+                "ra_mean": 1.0 + (0.01 * i if i in (0, 1) else 1.0 + i),
+                "dec_mean": 0.5 + (0.01 * i if i in (0, 1) else 0.5 + 0.1 * i),
+                "sky_sigma_rad": 0.05,
+                "ra_true": 1.0 if i in (0, 1) else 2.0 + i,
+                "dec_true": 0.5 if i in (0, 1) else 1.0,
             }
         )
     path.write_text(
@@ -547,3 +552,47 @@ def test_preflight_fails_missing_requested_prior_mark(tmp_path):
     report = run_lensing_preflight(opts)
     assert not report["ok"]
     assert any("missing requested edge prior mark" in e for e in report["errors"])
+
+
+def test_observed_builder_computes_finite_sky_overlap_and_true_pairs_are_higher(tmp_path):
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs
+
+    gw = _observed_gw(tmp_path / "gw.h5", n_events=4)
+    cat = _observed_catalog_with_truth(tmp_path / "observed_catalog.json", n_events=4)
+    data = build_candidate_pairs(
+        gw_path=gw,
+        observed_catalog_path=cat,
+        max_edges_per_event=3,
+        max_total_edges=6,
+        include_time_marks=False,
+        include_truth_labels=True,
+        include_sky_marks=True,
+        seed=9,
+    )
+    overlaps = [edge["marks"]["log_sky_overlap"] for edge in data["pairs"]]
+    assert all(np.isfinite(overlaps))
+    true_overlap = next(edge["marks"]["log_sky_overlap"] for edge in data["pairs"] if edge.get("label") == "true")
+    wrong = [edge["marks"]["log_sky_overlap"] for edge in data["pairs"] if edge.get("label") == "wrong"]
+    assert wrong
+    assert true_overlap > max(wrong)
+
+
+def test_preflight_rejects_invalid_requested_sky_overlap_mark(tmp_path):
+    from types import SimpleNamespace
+    import json
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    gw = tmp_path / "gw.h5"; sel = tmp_path / "sel.h5"; linj = tmp_path / "linj.h5"; cand = tmp_path / "candidate_pairs.json"
+    _minimal_gw(gw); _minimal_selection(sel); _minimal_lensed(linj)
+    cand.write_text(json.dumps({"n_events": 2, "candidate_pairs": [{"i": 0, "j": 1, "log_prior_odds": 0.0, "marks": {"log_sky_overlap": float("nan")}}]}))
+    opts = SimpleNamespace(
+        gw_path=str(gw), gwselection_path=str(sel), lensed_injections_path=str(linj),
+        partition_path=None, candidate_pairs_path=str(cand), observed_catalog_path=None,
+        pair_pe_path=None, pair_metadata_path=None, cluster_mode="j2", partition_mode="marginalize_exact",
+        pair_marks="none", pair_time_sigma_sec=None, max_exact_partitions=10000,
+        wl_selection="standard", wl_backend="lognormal", fix_lens_rate=True, sl_tau_A=5e-4, sl_tau_n=3.0,
+        lens_prior_overrides=None, edge_mark_prior_keys="log_sky_overlap", edge_mark_likelihood_keys="",
+    )
+    report = run_lensing_preflight(opts)
+    assert not report["ok"]
+    assert any("log_sky_overlap" in e for e in report["errors"])

@@ -32,6 +32,8 @@ def _generate_unified_mock(tmp_path: Path) -> Path:
         "16",
         "--write-unified-observed-catalog",
         "true",
+        "--write-legacy-pair-pe",
+        "true",
     ]
     subprocess.run(cmd, cwd=repo, check=True, timeout=180)
     return out
@@ -52,6 +54,12 @@ def test_generator_writes_unified_observed_catalog_metadata(tmp_path):
     assert observed["n_events"] == candidate_pairs["n_events"]
     assert observed["truth_partition"]["singleton_indices"] == partition["singleton_indices"]
     assert observed["truth_partition"]["pair_indices"] == partition["pair_indices"]
+    for event in observed["events"]:
+        assert "ra_mean" in event
+        assert "dec_mean" in event
+        assert "sky_sigma_rad" in event
+        assert "ra_true" in event
+        assert "dec_true" in event
 
     with h5py.File(mock / "mock_observed_gw_pe.h5") as f:
         assert int(f.attrs["nobs"]) == observed["n_events"]
@@ -60,6 +68,8 @@ def test_generator_writes_unified_observed_catalog_metadata(tmp_path):
         assert int(f.attrs["n_events"]) == observed["n_events"]
         assert f.attrs["source"] == "mock_lensing"
         assert "observed_catalog_sha256" in f.attrs
+        for name in ("ra_mean", "dec_mean", "sky_sigma_rad", "ra_true", "dec_true"):
+            assert name in f
     with h5py.File(mock / "mock_pair_pe.h5") as f:
         for k, pair_indices in enumerate(partition["pair_indices"]):
             group = f[f"pair_{k}"]
