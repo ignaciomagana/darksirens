@@ -54,7 +54,7 @@ def _run(cmd: list[str], *, cwd: Path = ROOT) -> tuple[float, int]:
 
 
 def _mock_ready(mock_dir: Path, *, n_pair_keep: int) -> bool:
-    needed = ["mock_gw_pe.h5", "mock_gw_selection.h5", "mock_lensed_injections.h5", "mock_pair_pe.h5", "partition.json", "candidate_pairs.json"]
+    needed = ["mock_gw_pe.h5", "mock_gw_selection.h5", "mock_lensed_injections.h5", "partition.json", "candidate_pairs.json"]
     if not all((mock_dir / p).exists() for p in needed):
         return False
     try:
@@ -153,7 +153,12 @@ def _cli_cmd(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
         cmd += ["--fixed_parameter_values", '{"tau_n": 3.0}', "--lens_prior_overrides", '{"log10_tau_A": [-5.0, -2.5]}']
     if cluster_mode == "j2":
         cmd += ["--lensed_injections_path", str(mock_dir / "mock_lensed_injections.h5"), "--partition_mode", partition_mode]
-        if (not use_unified_observed_catalog) or pair_pe_path is not None:
+        if use_unified_observed_catalog:
+            if pair_pe_path is not None:
+                cmd += ["--pair_pe_path", str(pair_pe_path)]
+            else:
+                cmd += ["--pair_metadata_path", str(mock_dir / "mock_pair_metadata.h5")]
+        else:
             cmd += ["--pair_pe_path", str(pair_pe_path or mock_dir / "mock_pair_pe.h5")]
         if partition_mode == "marginalize_exact":
             # Time-delay marks are currently fixed-partition only; exact

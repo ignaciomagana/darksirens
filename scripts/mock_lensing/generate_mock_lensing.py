@@ -31,7 +31,7 @@ Physics
 Outputs (in ``--outdir``)
 -------------------------
   mock_gw_pe.h5             singleton PE          (format_version="gwcat-1.0")
-  mock_pair_pe.h5           paired-image PE       (per-pair groups; read directly)
+  mock_pair_metadata.h5     pair metadata/marks  (no duplicated image PE)
   mock_gw_selection.h5      unlensed injections   (format_version="gwcat-selection-1.0")
   mock_lensed_injections.h5 lensed J=2 injections (lensing.lensed_injections schema)
   partition.json            TRUE (singleton_indices, pair_indices)
@@ -564,6 +564,30 @@ def write_gw_pe_file(events, path, nsamp, H0, Om0):
     return nobs
 
 
+
+def write_pair_metadata_file(pairs, path, pair_indices=None):
+    """Metadata-only HDF5 for candidate-edge/pair marks; contains no image PE samples."""
+    with h5py.File(path, "w") as f:
+        f.attrs["format_version"] = "lensing-pair-metadata-1.0"
+        f.attrs["npairs"] = len(pairs)
+        f.attrs["mock_data"] = True
+        for k, pair in enumerate(pairs):
+            g = f.create_group(f"pair_{k}")
+            if pair_indices is not None:
+                g.attrs["event_index_image0"] = int(pair_indices[k][0])
+                g.attrs["event_index_image1"] = int(pair_indices[k][1])
+                g.attrs["i"] = int(pair_indices[k][0])
+                g.attrs["j"] = int(pair_indices[k][1])
+            g.attrs["label"] = "true"
+            g.attrs["truth_is_lensed_pair"] = True
+            g.attrs["delta_t_obs"] = float(pair["delta_t_obs"])
+            g.attrs["sigma_delta_t"] = float(pair["sigma_delta_t"])
+            g.attrs["true_y"] = float(pair["true_y"])
+            g.attrs["true_mu0"] = float(pair.get("true_mu0", np.nan))
+            g.attrs["true_mu1"] = float(pair.get("true_mu1", np.nan))
+            g.attrs["true_source_id"] = int(pair.get("source_index", -1))
+    return len(pairs)
+
 def write_pair_pe_file(pairs, path, nsamp, pair_indices=None):
     """Pair PE per image (apparent-frame coords) — read directly by the lensing
     tool's ``load_inputs``."""
@@ -610,7 +634,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
              wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0,
              write_unified_observed_catalog=True, candidate_time_marks=True,
-             validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0)):
+             validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0),
+             write_legacy_pair_pe=False):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
     truth.update(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
@@ -691,6 +716,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             true_delta_t=true_dt, delta_t_obs=dt_obs,
             sigma_delta_t=float(time_delay_sigma_sec),
             t_obs_image0=0.0, t_obs_image1=dt_obs,
+            true_mu0=float(marks["mu_plus"][i]), true_mu1=float(marks["mu_minus"][i]),
             source_index=int(i),
         ))
 
@@ -706,7 +732,9 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     if write_unified_observed_catalog:
         write_gw_pe_file(observed_events, observed_pe_path, nsamp, H0, Om0)
 
-    write_pair_pe_file(pairs, os.path.join(out_dir, "mock_pair_pe.h5"), nsamp, pair_indices=pair_indices)
+    write_pair_metadata_file(pairs, os.path.join(out_dir, "mock_pair_metadata.h5"), pair_indices=pair_indices)
+    if (not write_unified_observed_catalog) or write_legacy_pair_pe:
+        write_pair_pe_file(pairs, os.path.join(out_dir, "mock_pair_pe.h5"), nsamp, pair_indices=pair_indices)
 
     # ---- injection campaigns ----
     generate_unlensed_injections(n_unlensed_inj, model, rng, H0, Om0,
@@ -854,7 +882,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         f"--gw_path {os.path.join(out_dir, 'mock_gw_pe.h5')} "
         f"--gwselection_path {os.path.join(out_dir, 'mock_gw_selection.h5')} "
         f"--lensed_injections_path {os.path.join(out_dir, 'mock_lensed_injections.h5')} "
-        f"--pair_pe_path {os.path.join(out_dir, 'mock_pair_pe.h5')} "
+        f"--pair_metadata_path {os.path.join(out_dir, 'mock_pair_metadata.h5')} "
         f"--partition_path {os.path.join(out_dir, 'partition.json')} "
         "--cluster_mode j2 --wl_backend lognormal --fix_cosmology true --fix_survey true "
         "--sampler tinyns --nlive 32 --max_samples 256 --pe_max_per_pair 16 "
@@ -878,7 +906,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             "mock_gw_pe.h5": "legacy singleton PE; gwcat-1.0; load via load_gw_samples",
             "mock_observed_gw_pe.h5": "unified observed-event PE; gwcat-1.0; singletons first, then lensed image pairs",
             "observed_catalog.json": "metadata for unified observed event-index system",
-            "mock_pair_pe.h5": "pair PE per image; lensed-pair-pe-1.0",
+            "mock_pair_metadata.h5": "metadata-only pair/candidate-edge marks; lensing-pair-metadata-1.0",
+            "mock_pair_pe.h5": "legacy split-pair PE per image; lensed-pair-pe-1.0 (written only in legacy mode or with --write-legacy-pair-pe true)",
             "mock_gw_selection.h5": "unlensed injections; gwcat-selection-1.0; load_selection_samples",
             "mock_lensed_injections.h5": "lensed J=2 injections; load_lensed_injections; includes p_tag_per_source pair-tag metadata",
             "partition.json": "TRUE partition (singleton_indices, pair_indices, source-index truth)",
@@ -967,6 +996,8 @@ def parse_args():
                    help="number of shuffled non-truth candidate edges to add to candidate_pairs.json")
     p.add_argument("--candidate-random-pairs", dest="n_wrong_candidate_pairs", type=int,
                    help="alias for --candidate-extra-wrong-pairs; random non-truth candidate edges")
+    p.add_argument("--write-legacy-pair-pe", choices=("true", "false"), default="false",
+                   help="write duplicated image PE to mock_pair_pe.h5; default false for unified observed mode")
     p.add_argument("--write-unified-observed-catalog", choices=("true", "false"), default="true",
                    help="write mock_observed_gw_pe.h5 and observed_catalog.json using one observed-event index system")
     p.add_argument("--candidate-pair-log-prior-odds", type=float, default=0.0,
@@ -1005,6 +1036,7 @@ def main():
         candidate_time_marks=args.candidate_time_marks.lower() == "true",
         validation_sample_log10_tau_A=args.validation_sample_log10_tau_A,
         validation_log10_tau_A_prior=args.validation_log10_tau_A_prior,
+        write_legacy_pair_pe=args.write_legacy_pair_pe.lower() == "true",
     )
     c = manifest["counts"]
     print(json.dumps(c, indent=2))

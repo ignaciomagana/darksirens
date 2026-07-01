@@ -517,6 +517,33 @@ as legacy split-pair mock mode.  Inference consumes observed events, a fixed
 partition or candidate graph, selection inputs, and optional marks; truth-shaped
 pair PE belongs in validation products, not inference inputs.
 
+
+PE samples vs pair metadata
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Spectral-siren lensing inputs now distinguish posterior samples from pair or
+candidate-edge metadata:
+
+* ``observed_gw_pe.h5`` (or the mock ``mock_observed_gw_pe.h5``) contains the
+  observed-event posterior samples.  Unified observed-catalog inference reads PE
+  samples from this file only.
+* ``candidate_pairs.json`` contains the candidate graph.  Its edge ``marks`` are
+  the authoritative source for marginalized ``--pair_marks time`` runs and can
+  also provide fixed-partition time marks when the fixed edge appears in the
+  candidate graph.
+* ``--pair_metadata_path`` names an optional metadata-only HDF5 file for extra
+  diagnostics or fixed-partition marks.  The metadata-only schema uses
+  ``format_version = "lensing-pair-metadata-1.0"`` and ``pair_k`` groups with
+  event indices, labels/truth flags, time-delay marks, lens truth, and source
+  identifiers, but no ``image0``/``image1`` PE sample groups.
+* ``--pair_pe_path`` with ``image0``/``image1`` groups is the legacy split-pair
+  format.  It remains supported for legacy split-pair workflows.  In unified
+  observed-catalog mode it is accepted only as a backward-compatible metadata
+  source; duplicated image PE groups are ignored and preflight emits a warning.
+
+If both ``--pair_metadata_path`` and ``--pair_pe_path`` are provided, they must
+refer to the same path.
+
 Mock lensing generation also writes a unified observed-event catalog by default:
 ``mock_observed_gw_pe.h5`` plus ``observed_catalog.json``.  This file uses the
 same ``gwcat-1.0`` event-major schema as the existing GW PE files, but contains
@@ -589,7 +616,7 @@ Run with the fixed truth partition on the unified observed catalog::
     --observed_catalog_path /tmp/ds_lens_unified/observed_catalog.json \
     --gwselection_path /tmp/ds_lens_unified/mock_gw_selection.h5 \
     --lensed_injections_path /tmp/ds_lens_unified/mock_lensed_injections.h5 \
-    --pair_pe_path /tmp/ds_lens_unified/mock_pair_pe.h5 \
+    --pair_metadata_path /tmp/ds_lens_unified/mock_pair_metadata.h5 \
     --partition_path /tmp/ds_lens_unified/partition.json \
     --partition_mode fixed --cluster_mode j2
 
@@ -600,7 +627,7 @@ Run exact candidate-pair marginalization::
     --observed_catalog_path /tmp/ds_lens_unified/observed_catalog.json \
     --gwselection_path /tmp/ds_lens_unified/mock_gw_selection.h5 \
     --lensed_injections_path /tmp/ds_lens_unified/mock_lensed_injections.h5 \
-    --pair_pe_path /tmp/ds_lens_unified/mock_pair_pe.h5 \
+    --pair_metadata_path /tmp/ds_lens_unified/mock_pair_metadata.h5 \
     --candidate_pairs_path /tmp/ds_lens_unified/candidate_pairs.json \
     --partition_mode marginalize_exact --cluster_mode j2
 

@@ -94,3 +94,102 @@ def test_enumerate_compatible_partitions_preserves_candidate_edge_indices():
     candidates = [CandidatePair(0, 1, 0.0), CandidatePair(2, 3, 0.0)]
     states = enumerate_compatible_partitions(4, candidates)
     assert any(s.candidate_edge_indices.tolist() == [0, 1] for s in states)
+
+
+def _minimal_gw(path, n_events=2, nsamp=2):
+    import h5py
+    with h5py.File(path, "w") as f:
+        f.attrs["format_version"] = "gwcat-1.0"
+        f.attrs["nobs"] = n_events
+        f.attrs["nsamp"] = nsamp
+        for name in ("m1det", "m2det", "dL", "chieff", "p_pe"):
+            f.create_dataset(name, data=np.ones(n_events * nsamp))
+
+
+def _minimal_selection(path):
+    import h5py
+    with h5py.File(path, "w") as f:
+        f.attrs["ok"] = True
+
+
+def _minimal_lensed(path):
+    import h5py
+    with h5py.File(path, "w") as f:
+        f.attrs["Ndraw_sources"] = 1
+        f.create_dataset("p_tag_per_source", data=np.array([1.0]))
+
+
+def _partition(path):
+    import json
+    path.write_text(json.dumps({"n_singletons": 0, "n_pairs": 1, "singleton_indices": [], "pair_indices": [[0, 1]]}))
+
+
+def _metadata_h5(path, *, image_groups=False):
+    import h5py
+    with h5py.File(path, "w") as f:
+        f.attrs["format_version"] = "lensing-pair-metadata-1.0"
+        f.attrs["npairs"] = 1
+        g = f.create_group("pair_0")
+        g.attrs["event_index_image0"] = 0
+        g.attrs["event_index_image1"] = 1
+        g.attrs["delta_t_obs"] = 1.0
+        g.attrs["sigma_delta_t"] = 0.1
+        if image_groups:
+            for im in ("image0", "image1"):
+                gi = g.create_group(im)
+                for d in ("m1det", "q", "dL_app", "chieff", "prior_wt"):
+                    gi.create_dataset(d, data=np.ones(2))
+
+
+def test_metadata_only_pair_file_preflight_unified_and_fails_legacy(tmp_path):
+    from types import SimpleNamespace
+    from darksirens.lensing.preflight import run_lensing_preflight
+    gw = tmp_path / "gw.h5"; sel = tmp_path / "sel.h5"; linj = tmp_path / "linj.h5"
+    part = tmp_path / "partition.json"; meta = tmp_path / "pair_meta.h5"
+    _minimal_gw(gw); _minimal_selection(sel); _minimal_lensed(linj); _partition(part); _metadata_h5(meta)
+    opts = SimpleNamespace(gw_path=str(gw), gwselection_path=str(sel), lensed_injections_path=str(linj),
+        partition_path=str(part), candidate_pairs_path=None, observed_catalog_path=None, pair_pe_path=None,
+        pair_metadata_path=str(meta), cluster_mode="j2", partition_mode="fixed", pair_marks="time",
+        pair_time_sigma_sec=None, max_exact_partitions=10000, wl_selection="standard", wl_backend="lognormal",
+        fix_lens_rate=True, sl_tau_A=5e-4, sl_tau_n=3.0, lens_prior_overrides=None)
+    report = run_lensing_preflight(opts)
+    assert report["ok"], report
+    opts.observed_catalog_path = None
+    _minimal_gw(gw, n_events=3)  # partition no longer implies unified catalog
+    opts.pair_metadata_path = None; opts.pair_pe_path = str(meta)
+    report = run_lensing_preflight(opts)
+    assert not report["ok"]
+    assert any("missing image0" in e for e in report["errors"])
+
+
+def test_candidate_pairs_marks_suffice_for_marginalized_preflight(tmp_path):
+    from types import SimpleNamespace
+    import json
+    from darksirens.lensing.preflight import run_lensing_preflight
+    gw = tmp_path / "gw.h5"; sel = tmp_path / "sel.h5"; linj = tmp_path / "linj.h5"; cand = tmp_path / "candidate_pairs.json"
+    _minimal_gw(gw); _minimal_selection(sel); _minimal_lensed(linj)
+    cand.write_text(json.dumps({"n_events": 2, "candidate_pairs": [{"i": 0, "j": 1, "log_prior_odds": 0.0, "marks": {"delta_t_obs": 1.0, "sigma_delta_t": 0.1}}]}))
+    opts = SimpleNamespace(gw_path=str(gw), gwselection_path=str(sel), lensed_injections_path=str(linj),
+        partition_path=None, candidate_pairs_path=str(cand), observed_catalog_path=None, pair_pe_path=None,
+        pair_metadata_path=None, cluster_mode="j2", partition_mode="marginalize_exact", pair_marks="time",
+        pair_time_sigma_sec=None, max_exact_partitions=10000, wl_selection="standard", wl_backend="lognormal",
+        fix_lens_rate=True, sl_tau_A=5e-4, sl_tau_n=3.0, lens_prior_overrides=None)
+    report = run_lensing_preflight(opts)
+    assert report["ok"], report
+
+
+def test_unified_legacy_pair_pe_warns_image_groups_ignored(tmp_path):
+    from types import SimpleNamespace
+    from darksirens.lensing.preflight import run_lensing_preflight
+    gw = tmp_path / "gw.h5"; sel = tmp_path / "sel.h5"; linj = tmp_path / "linj.h5"; part = tmp_path / "partition.json"; pe = tmp_path / "pair_pe.h5"
+    _minimal_gw(gw); _minimal_selection(sel); _minimal_lensed(linj); _partition(part); _metadata_h5(pe, image_groups=True)
+    obs = tmp_path / "observed_catalog.json"
+    obs.write_text('{"format_version":"observed-lensing-catalog-1.0","event_indexing":"global","n_events":2,"events":[{"event_index":0,"event_id":"e0"},{"event_index":1,"event_id":"e1"}]}')
+    opts = SimpleNamespace(gw_path=str(gw), gwselection_path=str(sel), lensed_injections_path=str(linj),
+        partition_path=str(part), candidate_pairs_path=None, observed_catalog_path=str(obs), pair_pe_path=str(pe),
+        pair_metadata_path=None, cluster_mode="j2", partition_mode="fixed", pair_marks="none",
+        pair_time_sigma_sec=None, max_exact_partitions=10000, wl_selection="standard", wl_backend="lognormal",
+        fix_lens_rate=True, sl_tau_A=5e-4, sl_tau_n=3.0, lens_prior_overrides=None)
+    report = run_lensing_preflight(opts)
+    assert report["ok"], report
+    assert any("ignores them" in w for w in report["warnings"])

@@ -365,7 +365,7 @@ def load_inputs(opts):
     candidate_data = None
     candidate_n_events = None
     candidate_pairs = None
-    if partition_mode == "marginalize_exact":
+    if opts.candidate_pairs_path:
         candidate_data = json.load(open(opts.candidate_pairs_path, "r", encoding="utf-8"))
         candidate_n_events, candidate_pairs = validate_candidate_pairs(candidate_data)
     partition_pair_indices = []
@@ -384,6 +384,11 @@ def load_inputs(opts):
     heuristic_unified_observed_catalog = max_partition_event >= 0 and n_sing == max_partition_event + 1
     unified_observed_catalog = explicit_unified_observed_catalog or heuristic_unified_observed_catalog
 
+    pair_metadata_path = getattr(opts, "pair_metadata_path", None)
+    if pair_metadata_path and opts.pair_pe_path and os.path.abspath(pair_metadata_path) != os.path.abspath(opts.pair_pe_path):
+        raise SystemExit("--pair_metadata_path and --pair_pe_path both provided but point to different paths")
+    pair_file_path = pair_metadata_path or opts.pair_pe_path
+
     if not unified_observed_catalog and not opts.pair_pe_path:
         raise SystemExit("legacy split-pair --cluster_mode j2 requires --pair_pe_path with image0/image1 groups")
 
@@ -391,8 +396,8 @@ def load_inputs(opts):
     pair_metadata_indices = []
     pair_time_delta_t_obs = []
     pair_time_sigma = []
-    if opts.pair_pe_path:
-        with h5py.File(opts.pair_pe_path) as f:
+    if pair_file_path:
+        with h5py.File(pair_file_path) as f:
             npairs = int(f.attrs.get("npairs", 0))
             for k in range(npairs):
                 g = f[f"pair_{k}"]; imgs = []
@@ -436,7 +441,7 @@ def load_inputs(opts):
                             d = _downsample(d, opts.pe_max_per_pair, rng)
                         d["prior_wt"] = _normalize_pair_image_prior_wt(
                             d["prior_wt"],
-                            context=f"{opts.pair_pe_path}: pair_{k}/{name}/prior_wt",
+                            context=f"{pair_file_path}: pair_{k}/{name}/prior_wt",
                         )
                         imgs.append(d)
                     pairs.append(imgs)
@@ -444,6 +449,25 @@ def load_inputs(opts):
     P = len(pairs) if not unified_observed_catalog else (
         int(partition.get("n_pairs", len(partition_pair_indices))) if partition is not None else 0
     )
+
+    if (
+        unified_observed_catalog
+        and partition_mode == "fixed"
+        and getattr(opts, "pair_marks", "none") == "time"
+        and not pair_time_delta_t_obs
+        and candidate_pairs is not None
+        and partition_pair_indices
+    ):
+        mark_by_edge = {(p.i, p.j): p for p in candidate_pairs}
+        for pair in partition_pair_indices:
+            edge = tuple(sorted(pair))
+            meta = mark_by_edge.get(edge)
+            if meta is None or meta.delta_t_obs is None or meta.sigma_delta_t is None:
+                raise SystemExit(
+                    f"pair_marks=time requires candidate_pairs.json marks or pair metadata for fixed pair {pair}"
+                )
+            pair_time_delta_t_obs.append(float(meta.delta_t_obs))
+            pair_time_sigma.append(float(meta.sigma_delta_t))
 
     if unified_observed_catalog and partition is not None and len(pair_time_delta_t_obs) not in (0, int(partition.get("n_pairs", 0))):
         raise SystemExit("pair time metadata count does not match fixed partition n_pairs")
@@ -717,8 +741,8 @@ def build_cluster_likelihood(opts, inp, decoder, lens_sampled_labels=None, fixed
                 pair_marks=pair_marks,
                 pair_time_delta_t_obs=part.get("pair_time_delta_t_obs", inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64))),
                 pair_time_sigma=part.get("pair_time_sigma", inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64))),
-                pair_batch_size=opts.pair_batch_size,
-                y_nodes_pair=opts.y_nodes_pair,
+                pair_batch_size=getattr(opts, "pair_batch_size", 0),
+                y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
@@ -769,8 +793,8 @@ def build_cluster_diagnostics(opts, inp, decoder, lens_sampled_labels=None, fixe
                 pair_marks=pair_marks,
                 pair_time_delta_t_obs=(part or {}).get("pair_time_delta_t_obs", inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64))),
                 pair_time_sigma=(part or {}).get("pair_time_sigma", inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64))),
-                pair_batch_size=opts.pair_batch_size,
-                y_nodes_pair=opts.y_nodes_pair,
+                pair_batch_size=getattr(opts, "pair_batch_size", 0),
+                y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
@@ -802,8 +826,8 @@ def build_cluster_diagnostics(opts, inp, decoder, lens_sampled_labels=None, fixe
             cluster_mode=opts.cluster_mode,
             wl_backend=opts.wl_backend,
             wl_selection=opts.wl_selection,
-            pair_batch_size=opts.pair_batch_size,
-            y_nodes_pair=opts.y_nodes_pair,
+            pair_batch_size=getattr(opts, "pair_batch_size", 0),
+            y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
             pe_max_per_pair=opts.pe_max_per_pair,
             approximate_pair_evaluation_shape=[int(out.get("expected_n_pairs", inp["n_pairs"])), int(inp["nsamp"]), int(opts.y_nodes_pair)],
             **_lens_settings_dict(coord, lens_sampled_labels, fixed_parameter_values, opts),
@@ -823,6 +847,8 @@ def build_parser():
     p.add_argument("--gwselection_path", required=True)
     p.add_argument("--lensed_injections_path", default=None)
     p.add_argument("--pair_pe_path", default=None)
+    p.add_argument("--pair_metadata_path", default=None,
+                   help="Optional pair/candidate-edge metadata file. Preferred over --pair_pe_path in unified observed mode.")
     p.add_argument("--partition_path", default=None)
     p.add_argument("--candidate_pairs_path", default=None)
     p.add_argument("--observed_catalog_path", default=None,
@@ -844,7 +870,7 @@ def build_parser():
     p.add_argument("--lens_prior_overrides", default=None,
                    help="JSON dict of SIS lens prior overrides, e.g. {\"log10_tau_A\": [-6, -3]}")
     p.add_argument("--pair_marks", choices=["none", "time"], default="none",
-                   help="Optional J=2 pair marks. 'time' uses delta_t_obs metadata in --pair_pe_path.")
+                   help="Optional J=2 pair marks. 'time' uses candidate_pairs.json marks in marginalized mode or pair metadata in fixed mode.")
     p.add_argument("--pair_time_sigma_sec", type=float, default=None,
                    help="Fallback sigma_delta_t in seconds when pair time metadata omits sigma.")
     # fixing
@@ -1025,6 +1051,7 @@ def main():
     with h5py.File(os.path.join(run_dir, "results.hdf5"), "w") as f:
         f.create_dataset("samples", data=samples)
         f.attrs["labels"] = json.dumps(labels)
+        f.attrs["wl_selection"] = opts.wl_selection
         _write_result_partition_metadata(f.attrs, opts=opts, inp=inp, diagnostics=diagnostics)
         f.attrs["wl_a"] = float(opts.lensing_wl_a)
         f.attrs["wl_b"] = float(opts.lensing_wl_b)
