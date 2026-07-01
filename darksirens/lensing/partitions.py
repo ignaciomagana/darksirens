@@ -9,6 +9,7 @@ matching's unnormalized log prior is the sum of included edge log-odds.
 from __future__ import annotations
 
 import json
+import itertools
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -269,6 +270,183 @@ def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]
     return n_events, tuple(pairs)
 
 
+def connected_components_from_candidate_pairs(
+    n_events: int, candidate_pairs: Iterable[CandidatePair]
+) -> tuple[dict, ...]:
+    """Return connected components of the candidate-pair graph.
+
+    Isolated events are included as singleton components with no candidate edges.
+    Edge indices refer to the input candidate-pair order.
+    """
+    pairs = tuple(candidate_pairs)
+    if n_events < 0:
+        raise ValueError("n_events must be non-negative")
+    parent = list(range(n_events))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for p in pairs:
+        if not (0 <= p.i < n_events and 0 <= p.j < n_events):
+            raise ValueError(
+                f"candidate pair ({p.i},{p.j}) index out of range for n_events={n_events}"
+            )
+        union(p.i, p.j)
+
+    comps: dict[int, dict[str, list[int]]] = {}
+    for event in range(n_events):
+        comps.setdefault(
+            find(event), {"event_indices": [], "candidate_edge_indices": []}
+        )["event_indices"].append(event)
+    for edge_idx, p in enumerate(pairs):
+        comps[find(p.i)]["candidate_edge_indices"].append(edge_idx)
+
+    return tuple(
+        {
+            "event_indices": tuple(v["event_indices"]),
+            "candidate_edge_indices": tuple(v["candidate_edge_indices"]),
+        }
+        for _, v in sorted(
+            comps.items(), key=lambda item: min(item[1]["event_indices"])
+        )
+    )
+
+
+def exact_component_partitions(
+    component: Mapping[str, Sequence[int]],
+    candidate_pairs: Sequence[CandidatePair],
+    *,
+    max_partitions: int = 10_000,
+) -> tuple[PartitionState, ...]:
+    """Enumerate exact matching partitions for one connected component."""
+    events = tuple(int(i) for i in component["event_indices"])
+    edge_indices = tuple(int(i) for i in component["candidate_edge_indices"])
+    local_pairs = tuple(candidate_pairs[i] for i in edge_indices)
+    local_states = enumerate_compatible_partitions(
+        max(events) + 1 if events else 0, local_pairs, max_partitions=max_partitions
+    )
+    out = []
+    event_set = set(events)
+    for state in local_states:
+        singletons = np.asarray(
+            [
+                i
+                for i in np.asarray(state.singleton_indices, dtype=int)
+                if i in event_set
+            ],
+            dtype=np.int32,
+        )
+        global_edges = np.asarray(
+            [
+                edge_indices[int(i)]
+                for i in np.asarray(state.candidate_edge_indices, dtype=int)
+            ],
+            dtype=np.int32,
+        )
+        out.append(
+            PartitionState(
+                singletons,
+                np.asarray(state.pair_indices, dtype=np.int32).reshape((-1, 2)),
+                int(singletons.size),
+                int(state.n_pairs),
+                float(state.log_prior_weight),
+                global_edges,
+            )
+        )
+    return tuple(out)
+
+
+def exact_partitions_componentwise(
+    n_events: int,
+    candidate_pairs: Iterable[CandidatePair],
+    *,
+    max_component_events: int | None = None,
+    max_component_edges: int | None = None,
+    max_component_partitions: int = 10_000,
+    max_total_partitions: int = 10_000,
+) -> tuple[tuple[PartitionState, ...], tuple[dict, ...], tuple[PartitionState, ...]]:
+    """Enumerate matchings per component and combine by Cartesian product."""
+    pairs = tuple(candidate_pairs)
+    components = connected_components_from_candidate_pairs(n_events, pairs)
+    component_states = []
+    summaries = []
+    total = 1
+    for idx, comp in enumerate(components):
+        n_comp_events = len(comp["event_indices"])
+        n_comp_edges = len(comp["candidate_edge_indices"])
+        if max_component_events is not None and n_comp_events > max_component_events:
+            raise ValueError(
+                f"candidate component {idx} has {n_comp_events} events, exceeding max_component_events={max_component_events}; prune the candidate graph before inference"
+            )
+        if max_component_edges is not None and n_comp_edges > max_component_edges:
+            raise ValueError(
+                f"candidate component {idx} has {n_comp_edges} edges, exceeding max_component_edges={max_component_edges}; prune the candidate graph before inference"
+            )
+        states = exact_component_partitions(
+            comp, pairs, max_partitions=max_component_partitions
+        )
+        total *= len(states)
+        if total > max_total_partitions:
+            raise ValueError(
+                f"component-wise exact enumeration would produce {total} total partitions, exceeding max_total_partitions={max_total_partitions}; prune the candidate graph before inference"
+            )
+        component_states.append(states)
+        summaries.append({**comp, "n_partitions": len(states)})
+
+    combined = []
+    for product in itertools.product(*component_states):
+        singletons = (
+            np.concatenate([s.singleton_indices for s in product]).astype(np.int32)
+            if product
+            else np.asarray([], dtype=np.int32)
+        )
+        pair_arrays = [
+            np.asarray(s.pair_indices, dtype=np.int32).reshape((-1, 2))
+            for s in product
+            if s.n_pairs
+        ]
+        pair_indices = (
+            np.concatenate(pair_arrays).astype(np.int32)
+            if pair_arrays
+            else np.asarray([], dtype=np.int32).reshape((0, 2))
+        )
+        edge_arrays = [
+            np.asarray(s.candidate_edge_indices, dtype=np.int32)
+            for s in product
+            if s.candidate_edge_indices is not None and len(s.candidate_edge_indices)
+        ]
+        edge_indices = (
+            np.concatenate(edge_arrays).astype(np.int32)
+            if edge_arrays
+            else np.asarray([], dtype=np.int32)
+        )
+        order = (
+            np.argsort(edge_indices) if edge_indices.size else np.asarray([], dtype=int)
+        )
+        if edge_indices.size:
+            edge_indices = edge_indices[order]
+            pair_indices = pair_indices[order]
+        combined.append(
+            PartitionState(
+                np.sort(singletons).astype(np.int32),
+                pair_indices,
+                int(singletons.size),
+                int(pair_indices.shape[0]),
+                float(sum(s.log_prior_weight for s in product)),
+                edge_indices,
+            )
+        )
+    return tuple(combined), tuple(summaries), tuple(component_states)
+
+
 def enumerate_compatible_partitions(
     n_events: int,
     candidate_pairs: Iterable[CandidatePair],
@@ -331,15 +509,32 @@ def exact_partitions_from_json(
     *,
     max_partitions: int = 10_000,
     edge_mark_prior_keys: Sequence[str] | None = None,
+    component_mode: str = "global",
+    max_component_events: int | None = None,
+    max_component_edges: int | None = None,
+    max_component_partitions: int | None = None,
+    max_total_partitions: int | None = None,
 ):
     """Validate a candidate-pair JSON object and enumerate exact partitions."""
     n_events, pairs = validate_candidate_pairs(data)
     pairs = apply_edge_mark_prior_keys(
         pairs, parse_edge_mark_keys(edge_mark_prior_keys)
     )
-    states = enumerate_compatible_partitions(
-        n_events, pairs, max_partitions=max_partitions
-    )
+    if component_mode == "global":
+        states = enumerate_compatible_partitions(
+            n_events, pairs, max_partitions=max_partitions
+        )
+    elif component_mode == "componentwise":
+        states, _summaries, _component_states = exact_partitions_componentwise(
+            n_events,
+            pairs,
+            max_component_events=max_component_events,
+            max_component_edges=max_component_edges,
+            max_component_partitions=max_component_partitions or max_partitions,
+            max_total_partitions=max_total_partitions or max_partitions,
+        )
+    else:
+        raise ValueError("component_mode must be 'global' or 'componentwise'")
     log_z_prior = (
         float(logsumexp([s.log_prior_weight for s in states])) if states else -np.inf
     )

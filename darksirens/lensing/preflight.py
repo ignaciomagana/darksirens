@@ -15,7 +15,9 @@ from darksirens.lensing.observed_catalog import (
 )
 from darksirens.lensing.partitions import (
     apply_edge_mark_prior_keys,
+    connected_components_from_candidate_pairs,
     enumerate_compatible_partitions,
+    exact_partitions_componentwise,
     parse_edge_mark_keys,
     validate_candidate_pairs,
 )
@@ -310,12 +312,53 @@ def _check_candidates(path, n_events, opts, errors, summary, *, observed_n_event
         effective_pairs = (
             apply_edge_mark_prior_keys(pairs, prior_keys) if not errors else pairs
         )
-        states = enumerate_compatible_partitions(
-            cand_n,
-            effective_pairs,
-            max_partitions=int(_get(opts, "max_exact_partitions", 10000)),
-        )
-        summary["n_exact_partitions"] = len(states)
+        components = connected_components_from_candidate_pairs(cand_n, effective_pairs)
+        summary["n_components"] = len(components)
+        summary["component_event_indices"] = [
+            list(c["event_indices"]) for c in components
+        ]
+        summary["component_candidate_edge_indices"] = [
+            list(c["candidate_edge_indices"]) for c in components
+        ]
+        if _get(opts, "partition_component_mode", "componentwise") == "global":
+            if len(components) > 1 and len(effective_pairs) > 8:
+                summary["global_enumeration_warning"] = (
+                    "global exact enumeration requested on a decomposable candidate graph; "
+                    "componentwise mode is safer for larger simulations"
+                )
+            states = enumerate_compatible_partitions(
+                cand_n,
+                effective_pairs,
+                max_partitions=int(_get(opts, "max_exact_partitions", 10000)),
+            )
+            summary["n_exact_partitions"] = len(states)
+        else:
+            states, comp_summaries, _ = exact_partitions_componentwise(
+                cand_n,
+                effective_pairs,
+                max_component_events=_get(opts, "max_component_events"),
+                max_component_edges=_get(opts, "max_component_edges"),
+                max_component_partitions=int(
+                    _get(
+                        opts,
+                        "max_component_partitions",
+                        _get(opts, "max_exact_partitions", 10000),
+                    )
+                    or _get(opts, "max_exact_partitions", 10000)
+                ),
+                max_total_partitions=int(
+                    _get(
+                        opts,
+                        "max_total_partitions",
+                        _get(opts, "max_exact_partitions", 10000),
+                    )
+                    or _get(opts, "max_exact_partitions", 10000)
+                ),
+            )
+            summary["component_n_partitions"] = [
+                c["n_partitions"] for c in comp_summaries
+            ]
+            summary["n_exact_partitions"] = len(states)
     except Exception as exc:
         errors.append(f"candidate_pairs invalid: {exc}")
 

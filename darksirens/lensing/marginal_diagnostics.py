@@ -7,7 +7,12 @@ from typing import Callable, Iterable
 import numpy as np
 from scipy.special import logsumexp
 
-from darksirens.lensing.partitions import CandidatePair, PartitionState
+from darksirens.lensing.partitions import (
+    CandidatePair,
+    PartitionState,
+    connected_components_from_candidate_pairs,
+    exact_component_partitions,
+)
 
 
 def _partition_object(state: PartitionState) -> dict:
@@ -81,6 +86,34 @@ def compute_marginalized_partition_diagnostics(
             item["label"] = c.label
         posterior_pair_probabilities.append(item)
 
+    components = (
+        connected_components_from_candidate_pairs(n_events, candidates)
+        if n_events
+        else ()
+    )
+    component_n_partitions = []
+    component_log_z = []
+    component_expected = []
+    component_max_p = []
+    for comp in components:
+        try:
+            cstates = exact_component_partitions(comp, candidates)
+            component_n_partitions.append(int(len(cstates)))
+            component_log_z.append(
+                float(logsumexp([s.log_prior_weight for s in cstates]))
+            )
+        except Exception:
+            component_n_partitions.append(None)
+            component_log_z.append(None)
+        edges = list(comp["candidate_edge_indices"])
+        probs = (
+            pair_probs[np.asarray(edges, dtype=int)]
+            if edges
+            else np.asarray([], dtype=float)
+        )
+        component_expected.append(float(np.sum(probs)))
+        component_max_p.append(float(np.max(probs)) if probs.size else 0.0)
+
     out = {
         "partition_mode": "marginalize_exact",
         "n_partitions": int(len(states)),
@@ -95,6 +128,15 @@ def compute_marginalized_partition_diagnostics(
         "partition_log_posterior_weight": log_post.tolist(),
         "partition_posterior_probability": post.tolist(),
         "posterior_pair_probabilities": posterior_pair_probabilities,
+        "n_components": int(len(components)),
+        "component_event_indices": [list(c["event_indices"]) for c in components],
+        "component_candidate_edge_indices": [
+            list(c["candidate_edge_indices"]) for c in components
+        ],
+        "component_n_partitions": component_n_partitions,
+        "component_log_z_partition_prior": component_log_z,
+        "component_expected_n_pairs": component_expected,
+        "component_max_p_pair": component_max_p,
         "map_partition": _partition_object(states[map_idx]),
     }
     if singleton_probs is not None:
