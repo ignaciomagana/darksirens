@@ -502,6 +502,21 @@ Use fixed mode when you want diagnostics for one assumed partition; use `margina
 Unified observed-catalog mocks
 ------------------------------
 
+Unified observed mode
+^^^^^^^^^^^^^^^^^^^^^
+
+Spectral-siren lensing inference supports a unified observed-catalog mode in
+which PE samples live only in ``mock_observed_gw_pe.h5`` (or another unified GW
+PE file).  Fixed ``partition.json`` and ``candidate_pairs.json`` edges use
+global observed event indices into that file.  In this mode ``mock_pair_pe.h5``
+is optional: when supplied it is read only for pair/edge metadata such as
+event-index attributes or time-delay marks, and any duplicated ``image0``/
+``image1`` posterior samples are ignored rather than appended to the observed
+event catalog.  The old ``mock_pair_pe.h5`` image duplication is retained only
+as legacy split-pair mock mode.  Inference consumes observed events, a fixed
+partition or candidate graph, selection inputs, and optional marks; truth-shaped
+pair PE belongs in validation products, not inference inputs.
+
 Mock lensing generation also writes a unified observed-event catalog by default:
 ``mock_observed_gw_pe.h5`` plus ``observed_catalog.json``.  This file uses the
 same ``gwcat-1.0`` event-major schema as the existing GW PE files, but contains
