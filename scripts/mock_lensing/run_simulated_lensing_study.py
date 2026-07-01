@@ -14,6 +14,10 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from darksirens.lensing.simulation_config import resolve_config, write_config
+
 GEN = ROOT / "scripts" / "mock_lensing" / "generate_mock_lensing.py"
 BUILD = ROOT / "scripts" / "mock_lensing" / "build_candidate_pairs_from_observed.py"
 
@@ -52,11 +56,13 @@ def _jsonable(value: Any) -> Any:
         return value.item()
     return value
 
-def _case_spec(name: str, cfg: dict[str, int]) -> dict[str, Any]:
-    spec = dict(n_pair=cfg["n_pair"], max_edges_per_event=2, max_total_edges=cfg["max_total_edges"],
-                include_sky_marks=True, include_time_marks=True, time_window_sec=math.inf,
-                pair_marks="time", edge_prior_marks="log_sky_overlap", pair_tag_model="snr_time_sky",
-                pair_tag_perturb_logit=0.0, pair_tag_constant=1.0)
+def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    edge_keys = cfg.get("edge_mark_prior_keys", ["log_sky_overlap"])
+    spec = dict(n_pair=cfg["n_pair"], max_edges_per_event=cfg.get("max_edges_per_event", 2), max_total_edges=cfg["max_total_edges"],
+                include_sky_marks=cfg.get("include_sky_marks", True), include_time_marks=cfg.get("include_time_marks", True), time_window_sec=math.inf,
+                pair_marks="time" if cfg.get("include_time_marks", True) else "none", edge_prior_marks=",".join(edge_keys), pair_tag_model=cfg.get("pair_tag_model", "snr_time_sky"),
+                pair_tag_perturb_logit=cfg.get("pair_tag_perturb_logit", 0.0), pair_tag_constant=cfg.get("pair_tag_constant", 1.0),
+                edge_mark_prior_keys=edge_keys)
     if name.startswith("A_"):
         spec.update(n_pair=0, max_edges_per_event=1, max_total_edges=max(1, cfg["n_sing"]), include_sky_marks=False, include_time_marks=False, pair_marks="none", edge_prior_marks="")
     elif name.startswith("B_"):
@@ -75,8 +81,8 @@ def _case_spec(name: str, cfg: dict[str, int]) -> dict[str, Any]:
         spec.update(max_edges_per_event=3, max_total_edges=max(6, 3 * cfg["n_pair"]), edge_prior_marks="")
     return spec
 
-def generate_cmd(case_dir: Path, spec: dict[str, Any], cfg: dict[str, int], seed: int) -> list[str]:
-    return [sys.executable, str(GEN), "--outdir", str(case_dir), "--conditioning", "fixed_counts",
+def generate_cmd(case_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], seed: int) -> list[str]:
+    return [sys.executable, str(GEN), "--outdir", str(case_dir), "--conditioning", str(cfg["conditioning"]),
             "--n-universe", str(cfg["n_universe"]), "--n-sing-keep", str(cfg["n_sing"]),
             "--n-pair-keep", str(spec["n_pair"]), "--max-sing-keep", str(cfg["n_sing"]),
             "--max-pair-keep", str(spec["n_pair"]), "--nsamp", str(cfg["nsamp"]),
@@ -90,20 +96,21 @@ def build_graph_cmd(case_dir: Path, spec: dict[str, Any], seed: int) -> list[str
             "--include_time_marks", str(spec["include_time_marks"]).lower(), "--include_sky_marks", str(spec["include_sky_marks"]).lower(),
             "--include_truth_labels", "false", "--sky_overlap_weight", "0.0", "--seed", str(seed)]
 
-def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict[str, int], args: argparse.Namespace) -> list[str]:
-    max_samples = "0" if args.diagnostics_only else "5000"
-    nlive = args.nlive or cfg["default_nlive"]
+def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
+    max_samples = "0" if diagnostics_only else "5000"
+    nlive = args.nlive or cfg["nlive"]
     cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(case_dir / "mock_observed_gw_pe.h5"),
            "--observed_catalog_path", str(case_dir / "observed_catalog.json"), "--gwselection_path", str(case_dir / "mock_gw_selection.h5"),
            "--lensed_injections_path", str(case_dir / "mock_lensed_injections.h5"), "--pair_metadata_path", str(case_dir / "mock_pair_metadata.h5"),
-           "--candidate_pairs_path", str(case_dir / "candidate_pairs.json"), "--partition_mode", "marginalize_exact", "--cluster_mode", "j2",
+           "--candidate_pairs_path", str(case_dir / "candidate_pairs.json"), "--partition_mode", str(cfg["partition_mode"]), "--cluster_mode", "j2",
            "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak", "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true",
            "--fix_lens_rate", "false", "--fixed_parameter_values", '{"tau_n": 3.0}', "--lens_prior_overrides", '{"log10_tau_A": [-5.0, -2.5]}',
-           "--sampler", args.sampler, "--nlive", str(nlive), "--dlogz", str(args.dlogz), "--max_samples", max_samples, "--pe_max_per_pair", str(cfg["pe_max"]),
-           "--seed", str(args.seed), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
+           "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples, "--pe_max_per_pair", str(cfg["pe_max"]),
+           "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
            "--edge_prior_marks", spec["edge_prior_marks"], "--save_path", str(run_dir)]
-    if args.diagnostics_only:
+    if diagnostics_only:
         cmd[cmd.index("--nlive") + 1] = "8"; cmd[cmd.index("--dlogz") + 1] = "50"
     return cmd
 
@@ -151,17 +158,20 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> Non
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore"); w.writeheader(); w.writerows(rows)
 
-def build_plan(args: argparse.Namespace, cfg: dict[str, int], work: Path) -> dict[str, Any]:
+def build_plan(args: argparse.Namespace, cfg: dict[str, Any], resolved_config: dict[str, Any], work: Path) -> dict[str, Any]:
     cases = {}
-    for n, name in enumerate(CASE_ORDER):
+    selected_cases = resolved_config["study"].get("cases") or CASE_ORDER
+    for n, name in enumerate(selected_cases):
         spec = _case_spec(name, cfg); cdir = work / "cases" / name; rdir = work / "runs" / name
         icmd = inference_cmd(cdir, rdir, spec, cfg, args)
         cases[name] = {"spec": spec, "generate": generate_cmd(cdir, spec, cfg, args.seed + 101*n), "build_graph": build_graph_cmd(cdir, spec, args.seed + 1001*n), "preflight": preflight_cmd(icmd, rdir / "preflight.json"), "inference": icmd}
-    return {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "cases": cases}
+    return {"created_at": _utc(), "profile": resolved_config["study"]["profile"], "diagnostics_only": cfg["diagnostics_only"], "resolved_config": resolved_config, "cases": cases}
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config")
+    ap.add_argument("--override", action="append", default=[], help="Override config value with dotted.key=value; may be repeated")
+    ap.add_argument("--allow_unknown_config_keys", type=_str2bool, default=False)
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--profile", choices=PROFILES, default="tiny")
     ap.add_argument("--seed", type=int, default=2026)
@@ -172,15 +182,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reuse", type=_str2bool, default=False)
     ap.add_argument("--dry_run", type=_str2bool, default=False)
     args = ap.parse_args(argv)
-    cfg = PROFILES[args.profile].copy()
-    if args.config:
-        cfg.update(json.loads(Path(args.config).read_text()).get("profile_overrides", {}))
+    resolved_config = resolve_config(args.config, args.override, profile=args.profile, allow_unknown=args.allow_unknown_config_keys)
+    if args.seed != 2026:
+        resolved_config["study"]["seed"] = args.seed
+    if args.sampler != "dynesty":
+        resolved_config["inference"]["sampler"] = args.sampler
+    if args.dlogz != 10.0:
+        resolved_config["inference"]["dlogz"] = args.dlogz
+    if args.diagnostics_only:
+        resolved_config["inference"]["diagnostics_only"] = True
+    args.profile = resolved_config["study"]["profile"]
+    args.seed = int(resolved_config["study"]["seed"])
+    args.sampler = resolved_config["inference"]["sampler"]
+    args.dlogz = float(resolved_config["inference"]["dlogz"])
+    args.diagnostics_only = bool(resolved_config["inference"]["diagnostics_only"])
+    mock = resolved_config["mock"]; graph = resolved_config["candidate_graph"]; inf = resolved_config["inference"]
+    cfg = {"n_universe": mock["n_universe"], "n_sing": mock["n_singletons"], "n_pair": mock["n_lensed_pairs"], "nsamp": mock["nsamp"], "n_unlensed_inj": mock["n_unlensed_inj"], "n_lensed_inj": mock["n_lensed_inj"], "conditioning": mock["conditioning"], "pe_max": min(mock["nsamp"], 512), "seed": resolved_config["study"]["seed"], **graph, **resolved_config["selection"], **inf}
     work = Path(args.workdir).resolve(); work.mkdir(parents=True, exist_ok=True)
-    plan = build_plan(args, cfg, work)
+    write_config(work / "resolved_config.yaml", resolved_config)
+    plan = build_plan(args, cfg, resolved_config, work)
     (work / "run_manifest.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n")
     if args.dry_run:
         (work / "validation_plan.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n"); return 0
-    summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "diagnostics_only_note": "Evidence values are not meaningful when max_samples=0." if args.diagnostics_only else None, "cases": {}}
+    summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "resolved_config": resolved_config, "diagnostics_only_note": "Evidence values are not meaningful when max_samples=0." if args.diagnostics_only else None, "cases": {}}
     pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]
     for name, entry in plan["cases"].items():
         cdir = work / "cases" / name; rdir = work / "runs" / name
