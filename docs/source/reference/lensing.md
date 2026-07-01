@@ -155,6 +155,37 @@ Both `marks.delta_t_obs` and positive finite `marks.sigma_delta_t` must be
 present together.  Marginalized `--pair_marks time` runs fail preflight if any
 candidate edge lacks these marks.
 
+### Simulated sky-overlap edge mark
+
+The mock lensing pipeline can attach a lightweight event-pair sky-consistency
+mark to candidate edges.  The generator assigns simulated source truth positions
+(`ra_true`, `dec_true`) and observed circular-Gaussian sky localizations
+(`ra_mean`, `dec_mean`, `sky_sigma_rad`) to each mock event in
+`observed_catalog.json`.  For lensed images of the same source, the two observed
+means are independent noisy draws around the same true sky position, so they tend
+to have larger overlap than unrelated events.
+
+`scripts/mock_lensing/build_candidate_pairs_from_observed.py` can write
+`marks.log_sky_overlap`, an approximate tangent-plane log overlap for two
+circular Gaussian sky posteriors.  This is an event-pair sky-consistency score
+for simulated candidate-pair ranking/prior studies; it is **not** a
+galaxy-catalog dark-siren likelihood, does not use LSS information, and does not
+model host-galaxy probabilities.  It is intended only to mimic a real
+candidate-pair prior/score inside the spectral-siren lensing workflow.
+
+The builder options are:
+
+* `--include_sky_marks true|false` to write or omit `marks.log_sky_overlap`.
+* `--sky_sigma_floor_rad FLOAT` to regularize very small circular Gaussian sky
+  widths.
+* `--sky_overlap_weight FLOAT` to optionally add a weighted sky-overlap term to
+  the builder's candidate-edge `log_prior_odds`.
+
+For inference-time use with exact candidate-pair marginalization, keep
+`marks.log_sky_overlap` in `candidate_pairs.json` and request it as an edge-prior
+mark, for example `--edge_mark_prior_keys log_sky_overlap`.  Preflight fails if
+that requested mark is missing or non-finite on any selectable candidate edge.
+
 ### Lens-rate sampling
 
 By default, `--fix_lens_rate true` fixes SIS optical-depth hyperparameters to

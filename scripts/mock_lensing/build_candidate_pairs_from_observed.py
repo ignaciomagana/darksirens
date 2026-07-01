@@ -91,6 +91,34 @@ def _gaussian_log_score(a: tuple[float, float], b: tuple[float, float], *, log_s
     return float(-0.5 * z * z)
 
 
+def _angle_delta(a: float, b: float) -> float:
+    return float((a - b + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def _log_sky_overlap(
+    ei: dict[str, Any], ej: dict[str, Any], *, sigma_floor_rad: float = 0.0
+) -> float:
+    try:
+        rai = float(ei["ra_mean"])
+        deci = float(ei["dec_mean"])
+        si = float(ei["sky_sigma_rad"])
+        raj = float(ej["ra_mean"])
+        decj = float(ej["dec_mean"])
+        sj = float(ej["sky_sigma_rad"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "sky marks require ra_mean, dec_mean, and sky_sigma_rad for every event"
+        ) from exc
+    si = max(si, float(sigma_floor_rad), 1e-12)
+    sj = max(sj, float(sigma_floor_rad), 1e-12)
+    dec_bar = 0.5 * (deci + decj)
+    dra = _angle_delta(rai, raj) * math.cos(dec_bar)
+    ddec = deci - decj
+    d2 = dra * dra + ddec * ddec
+    var = si * si + sj * sj
+    out = -math.log(2.0 * math.pi * var) - 0.5 * d2 / var
+    return float(out) if math.isfinite(out) else -1.0e300
+
 def _truth_label(ei: dict[str, Any], ej: dict[str, Any]) -> str:
     same_source = ei.get("truth_source_id") is not None and ei.get("truth_source_id") == ej.get("truth_source_id")
     both_lensed = bool(ei.get("truth_is_lensed_image")) and bool(ej.get("truth_is_lensed_image"))
@@ -102,7 +130,8 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
                           max_edges_per_event: int = 4, max_total_edges: int = 1000,
                           time_window_sec: float = math.inf, mass_distance_top_k: int = 0,
                           include_time_marks: bool = True, include_truth_labels: bool = False,
-                          seed: int = 0) -> dict[str, Any]:
+                          include_sky_marks: bool = True, sky_overlap_weight: float = 0.0,
+                          sky_sigma_floor_rad: float = 1e-3, seed: int = 0) -> dict[str, Any]:
     del truth_path  # Labels are read from observed-catalog truth fields when present.
     rng = np.random.default_rng(seed)
     catalog = load_observed_catalog(observed_catalog_path)
@@ -128,7 +157,14 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
             chi_score = _gaussian_log_score(summaries[i]["chieff"], summaries[j]["chieff"]) if "chieff" in samples else 0.0
             time_score = 0.0 if delta_t is None else -math.log1p(delta_t / max(time_window_sec if np.isfinite(time_window_sec) else 86400.0, 1.0))
             log_mass_distance_score = float(mass_score + 0.25 * q_score + distance_score + 0.25 * chi_score)
-            score = float(-3.0 + log_mass_distance_score + 0.25 * time_score + rng.uniform(0.0, 1e-12))
+            log_sky_overlap = None
+            if include_sky_marks:
+                log_sky_overlap = _log_sky_overlap(
+                    events[i], events[j], sigma_floor_rad=sky_sigma_floor_rad
+                )
+            score = float(-3.0 + log_mass_distance_score + 0.25 * time_score
+                          + float(sky_overlap_weight) * (log_sky_overlap or 0.0)
+                          + rng.uniform(0.0, 1e-12))
             edge = {"i": i, "j": j, "log_prior_odds": score}
             if include_truth_labels:
                 edge["label"] = _truth_label(events[i], events[j])
@@ -136,6 +172,8 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
             if delta_t is not None and include_time_marks:
                 marks["delta_t_obs"] = float(delta_t)
                 marks["sigma_delta_t"] = float(max(1.0, min(abs(delta_t) * 0.1, 86400.0)))
+            if include_sky_marks:
+                marks["log_sky_overlap"] = float(log_sky_overlap)
             edge["marks"] = marks
             candidates.append(edge)
 
@@ -170,6 +208,9 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
             "mass_distance_top_k": int(mass_distance_top_k),
             "include_time_marks": bool(include_time_marks),
             "include_truth_labels": bool(include_truth_labels),
+            "include_sky_marks": bool(include_sky_marks),
+            "sky_overlap_weight": float(sky_overlap_weight),
+            "sky_sigma_floor_rad": float(sky_sigma_floor_rad),
             "seed": int(seed),
         },
     }
@@ -187,6 +228,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--mass_distance_top_k", type=int, default=0)
     p.add_argument("--include_time_marks", type=_str_to_bool, default=True)
     p.add_argument("--include_truth_labels", type=_str_to_bool, default=False)
+    p.add_argument("--include_sky_marks", type=_str_to_bool, default=True)
+    p.add_argument("--sky_overlap_weight", type=float, default=0.0)
+    p.add_argument("--sky_sigma_floor_rad", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args(argv)
     data = build_candidate_pairs(
@@ -199,6 +243,9 @@ def main(argv: list[str] | None = None) -> None:
         mass_distance_top_k=args.mass_distance_top_k,
         include_time_marks=args.include_time_marks,
         include_truth_labels=args.include_truth_labels,
+        include_sky_marks=args.include_sky_marks,
+        sky_overlap_weight=args.sky_overlap_weight,
+        sky_sigma_floor_rad=args.sky_sigma_floor_rad,
         seed=args.seed,
     )
     Path(args.out).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
