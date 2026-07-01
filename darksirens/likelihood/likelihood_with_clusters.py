@@ -97,6 +97,7 @@ WL_BACKEND_TABULATED = 1
         "sel_batch_size",
         "wl_backend",
         "cluster_mode",
+        "return_diagnostics",
     ],
 )
 def darksiren_log_likelihood_with_clusters(
@@ -132,6 +133,7 @@ def darksiren_log_likelihood_with_clusters(
     wl_z_grid: jnp.ndarray | None = None,
     wl_log_mu_grid: jnp.ndarray | None = None,
     wl_log_p_table: jnp.ndarray | None = None,
+    return_diagnostics: bool = False,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
 
@@ -254,15 +256,24 @@ def darksiren_log_likelihood_with_clusters(
         )
     else:
         log_mu_2 = jnp.asarray(-jnp.inf, dtype=jnp.float64)
+        Neff_2 = jnp.asarray(0.0, dtype=jnp.float64)
         log_sigma2_2 = jnp.asarray(-jnp.inf, dtype=jnp.float64)
 
     # Combined selection correction
-    ll = combined_selection_log_correction(
+    selection_correction_total = combined_selection_log_correction(
         log_mu_1, log_sigma2_1,
         log_mu_2, log_sigma2_2,
         n_singletons_observed=(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
         n_clusters_observed=(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
     )
+    log_mu_combined = jnp.logaddexp(log_mu_1, log_mu_2)
+    log_sigma2_combined = jnp.logaddexp(log_sigma2_1, log_sigma2_2)
+    Neff_combined = jnp.where(
+        jnp.isfinite(log_mu_combined) & jnp.isfinite(log_sigma2_combined),
+        jnp.exp(2.0 * log_mu_combined - log_sigma2_combined),
+        0.0,
+    )
+    ll = selection_correction_total
 
     # ──────────────────────────────────────────────────────────────────
     # PE per-event term for singletons.
@@ -311,11 +322,14 @@ def darksiren_log_likelihood_with_clusters(
     else:
         # Legacy: sum all events
         _, event_lls = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
-    ll += jnp.sum(event_lls)
+    singleton_logL_sum = jnp.sum(event_lls)
+    ll += singleton_logL_sum
 
     # ──────────────────────────────────────────────────────────────────
     # Per-pair log-likelihood loop.  Skipped when cluster_mode == OFF.
     # ──────────────────────────────────────────────────────────────────
+    per_pair_logL_values = []
+    pair_logL_sum = jnp.asarray(0.0, dtype=jnp.float64)
     if cluster_mode == CLUSTER_MODE_J2 and n_pairs > 0:
         # y-grid for cluster pair likelihoods
         y_nodes, log_wy = make_y_grid(_Y_NODES_FOR_CLUSTER_PAIR_LIKE)
@@ -347,6 +361,43 @@ def darksiren_log_likelihood_with_clusters(
                 cosmo, survey, pop_params, em_catalog_pe, sis_params,
                 log_p_pop, log_prior_z, y_nodes, log_wy,
             )
-            ll = ll + jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf)
+            ll_pair_safe = jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf)
+            if return_diagnostics:
+                per_pair_logL_values.append(ll_pair_safe)
+            pair_logL_sum = pair_logL_sum + ll_pair_safe
+            ll = ll + ll_pair_safe
 
-    return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
+    logL_total = jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
+    if return_diagnostics:
+        per_pair_logL = (
+            jnp.stack(per_pair_logL_values)
+            if per_pair_logL_values
+            else jnp.zeros((0,), dtype=jnp.float64)
+        )
+        return {
+            "logL_total": logL_total,
+            "log_mu_singleton": log_mu_1,
+            "Neff_singleton": Neff_1,
+            "log_sigma2_singleton": log_sigma2_1,
+            "log_mu_cluster": log_mu_2,
+            "Neff_cluster": Neff_2,
+            "log_sigma2_cluster": log_sigma2_2,
+            "Neff_combined": Neff_combined,
+            "selection_correction_total": selection_correction_total,
+            "singleton_logL_sum": singleton_logL_sum,
+            "pair_logL_sum": pair_logL_sum,
+            "per_pair_logL": per_pair_logL,
+            "n_singletons": jnp.asarray(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
+            "n_pairs": jnp.asarray(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
+        }
+    return logL_total
+
+
+def darksiren_likelihood_diagnostics_with_clusters(*args, **kwargs):
+    """Evaluate the cluster likelihood once and return component diagnostics.
+
+    This uses a separate static JIT specialization from the scalar sampler path,
+    so production likelihood calls keep returning only the scalar log-likelihood.
+    """
+    kwargs["return_diagnostics"] = True
+    return darksiren_log_likelihood_with_clusters(*args, **kwargs)

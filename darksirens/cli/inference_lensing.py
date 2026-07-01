@@ -100,6 +100,7 @@ from darksirens.likelihood.pair_kde import (
 )
 from darksirens.likelihood.likelihood_with_clusters import (
     darksiren_log_likelihood_with_clusters,
+    darksiren_likelihood_diagnostics_with_clusters,
     CLUSTER_MODE_J2, CLUSTER_MODE_OFF,
     WL_BACKEND_LOGNORMAL, WL_BACKEND_DISABLED,
 )
@@ -280,6 +281,50 @@ def load_inputs(opts):
 # =============================================================================
 # Likelihood closure
 # =============================================================================
+def _diagnostics_to_python(diag):
+    out = {}
+    for key, value in diag.items():
+        arr = np.asarray(value)
+        if arr.shape == ():
+            if np.issubdtype(arr.dtype, np.integer):
+                out[key] = int(arr)
+            else:
+                out[key] = float(arr)
+        else:
+            out[key] = arr.astype(float).tolist()
+    return out
+
+
+def _write_diagnostics(run_dir, diagnostics):
+    with open(os.path.join(run_dir, "diagnostics.json"), "w") as f:
+        json.dump(diagnostics, f, indent=2, allow_nan=True)
+    with h5py.File(os.path.join(run_dir, "diagnostics.hdf5"), "w") as f:
+        for key, value in diagnostics.items():
+            if isinstance(value, list):
+                f.create_dataset(key, data=np.asarray(value, dtype=float))
+            elif isinstance(value, str):
+                f.attrs[key] = value
+            else:
+                f.attrs[key] = value
+
+
+def _print_diagnostics_summary(diagnostics):
+    print("  likelihood diagnostics (prior midpoint):", flush=True)
+    for key in (
+        "logL_total", "selection_correction_total", "singleton_logL_sum",
+        "pair_logL_sum", "log_mu_singleton", "Neff_singleton",
+        "log_mu_cluster", "Neff_cluster", "Neff_combined",
+    ):
+        print(f"    {key}: {diagnostics[key]}", flush=True)
+    print(
+        f"    n_singletons: {diagnostics['n_singletons']}  "
+        f"n_pairs: {diagnostics['n_pairs']}  "
+        f"cluster_mode: {diagnostics['cluster_mode']}  "
+        f"wl_backend: {diagnostics['wl_backend']}",
+        flush=True,
+    )
+
+
 def build_cluster_likelihood(opts, inp, decoder):
     """Return a closure logL(sampler_coord) using the branch ParameterDecoder.
 
@@ -314,6 +359,39 @@ def build_cluster_likelihood(opts, inp, decoder):
             wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
         )
     return loglike
+
+
+def build_cluster_diagnostics(opts, inp, decoder):
+    em = _empty_em_catalog()
+    sis = make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
+    cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
+    wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
+    universe_model = opts.universe_model
+    nkept = 0 if inp["lensed"] is None else int(np.asarray(inp["lensed"].m1_src).shape[0])
+    log_p_tag = jnp.zeros(nkept)
+
+    def diagnostics(coord):
+        cosmo, survey, pop_params, _sky_params, _mark_params = decoder.decode(jnp.asarray(coord))
+        raw = darksiren_likelihood_diagnostics_with_clusters(
+            cosmo, survey, pop_params,
+            inp["gw_pe"], em, inp["gw_sel"], em,
+            inp["nEvents"], inp["nsamp"], inp["Ndraw"],
+            inp["singleton_indices"], inp["pair_indices"],
+            inp["n_singletons"], inp["n_pairs"],
+            inp["lensed"], inp["pair_kdes"], sis, log_p_tag,
+            opts.pop_model, universe_model,
+            sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
+            wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
+        )
+        out = _diagnostics_to_python(raw)
+        out.update(
+            cluster_mode=opts.cluster_mode,
+            wl_backend=opts.wl_backend,
+            sl_tau_A=float(opts.sl_tau_A),
+            sl_tau_n=float(opts.sl_tau_n),
+        )
+        return out
+    return diagnostics
 
 
 # =============================================================================
@@ -443,12 +521,15 @@ def main():
     )
 
     loglike = build_cluster_likelihood(opts, inp, decoder)
+    diagnostics_fn = build_cluster_diagnostics(opts, inp, decoder)
 
     # smoke eval at the prior midpoint so JIT compile errors surface early
     mid = 0.5 * (lower + upper)
     t = time.time()
     v = float(loglike(jnp.asarray(mid)))
     print(f"  logL(prior midpoint) = {v:.3f}  [compile {time.time()-t:.1f}s]", flush=True)
+    diagnostics = diagnostics_fn(jnp.asarray(mid))
+    _print_diagnostics_summary(diagnostics)
 
     # --- sample ---
     if opts.sampler == "tinyns":
@@ -503,6 +584,7 @@ def main():
     )
     with open(os.path.join(run_dir, "settings.json"), "w") as f:
         json.dump(settings, f, indent=2)
+    _write_diagnostics(run_dir, diagnostics)
     print(f"saved {samples.shape[0]} samples -> {run_dir}", flush=True)
 
     # corner (best-effort)
