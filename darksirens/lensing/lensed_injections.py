@@ -86,6 +86,12 @@ class LensedInjectionSet(NamedTuple):
     p_prop_src: Any               # (N_kept,) — source proposal density
     p_prop_y: Any                 # (N_kept,) — y proposal density
     log_p_tag_per_source: Any      # (N_kept,) — log pair-tag probability
+    snr_image0: Any                # (N_kept,) optional pair-tag field; nan if absent
+    snr_image1: Any                # (N_kept,) optional pair-tag field; nan if absent
+    delta_t_obs: Any               # (N_kept,) optional pair-tag field; nan if absent
+    log_sky_overlap: Any           # (N_kept,) optional pair-tag field; nan if absent
+    p_tag_true: Any                # (N_kept,) optional injected tag probability; nan if absent
+    tagged_pair: Any               # (N_kept,) optional injected tag boolean; false if absent
     valid: Any                    # (N_kept,) bool — structural mask for padding
     # Bookkeeping
     n_draw_sources: Any           # scalar — total source-frame draws
@@ -109,6 +115,13 @@ def _make_lensed_injection_arrays_per_source(
     p_prop_y: np.ndarray,
     log_p_tag_per_source: Optional[np.ndarray] = None,
     p_tag_per_source: Optional[np.ndarray] = None,
+    snr_image0: Optional[np.ndarray] = None,
+    snr_image1: Optional[np.ndarray] = None,
+    delta_t_obs: Optional[np.ndarray] = None,
+    true_delta_t: Optional[np.ndarray] = None,
+    log_sky_overlap: Optional[np.ndarray] = None,
+    p_tag_true: Optional[np.ndarray] = None,
+    tagged_pair: Optional[np.ndarray] = None,
 ):
     """Group per-image arrays into per-source arrays for paired sources where
     BOTH images are detected. Returns the seven per-source arrays in the
@@ -225,6 +238,16 @@ def _make_lensed_injection_arrays_per_source(
     # Source IDs of kept sources (from the μ_+ row of each kept pair)
     sid_plus_kept = _take_plus(source_id)[both_det]
 
+    def _optional_source_array(arr, *, dtype=float, default=np.nan):
+        if arr is None:
+            return np.full(n_kept, default, dtype=dtype)
+        arr = np.asarray(arr, dtype=dtype)
+        if arr.shape[0] == n_img:
+            arr = _take_plus(arr)
+        elif arr.shape[0] != n_img // 2:
+            raise ValueError("optional lensed-injection pair-tag fields must have length N_sources or N_img")
+        return arr[both_det]
+
     return {
         "source_id": sid_plus_kept.astype(np.int32),
         "m1_src": m1_src_psrc[both_det],
@@ -237,6 +260,12 @@ def _make_lensed_injection_arrays_per_source(
         "p_prop_src": p_prop_src_psrc[both_det],
         "p_prop_y": p_prop_y_psrc[both_det],
         "log_p_tag_per_source": log_p_tag_psrc[both_det],
+        "snr_image0": _optional_source_array(snr_image0),
+        "snr_image1": _optional_source_array(snr_image1),
+        "delta_t_obs": _optional_source_array(delta_t_obs if delta_t_obs is not None else true_delta_t),
+        "log_sky_overlap": _optional_source_array(log_sky_overlap),
+        "p_tag_true": _optional_source_array(p_tag_true),
+        "tagged_pair": _optional_source_array(tagged_pair, dtype=bool, default=False),
         "n_kept": n_kept,
     }
 
@@ -256,6 +285,13 @@ def make_lensed_injection_set(
     n_draw_sources: int,
     log_p_tag_per_source: Optional[np.ndarray] = None,
     p_tag_per_source: Optional[np.ndarray] = None,
+    snr_image0: Optional[np.ndarray] = None,
+    snr_image1: Optional[np.ndarray] = None,
+    delta_t_obs: Optional[np.ndarray] = None,
+    true_delta_t: Optional[np.ndarray] = None,
+    log_sky_overlap: Optional[np.ndarray] = None,
+    p_tag_true: Optional[np.ndarray] = None,
+    tagged_pair: Optional[np.ndarray] = None,
 ) -> LensedInjectionSet:
     """Construct a LensedInjectionSet from raw per-image arrays.
 
@@ -275,6 +311,9 @@ def make_lensed_injection_set(
         p_prop_src=p_prop_src, p_prop_y=p_prop_y,
         log_p_tag_per_source=log_p_tag_per_source,
         p_tag_per_source=p_tag_per_source,
+        snr_image0=snr_image0, snr_image1=snr_image1,
+        delta_t_obs=delta_t_obs, true_delta_t=true_delta_t,
+        log_sky_overlap=log_sky_overlap, p_tag_true=p_tag_true, tagged_pair=tagged_pair,
     )
     n_kept = grouped["n_kept"]
     valid = np.ones(n_kept, dtype=bool)
@@ -291,6 +330,12 @@ def make_lensed_injection_set(
         p_prop_src=jnp.asarray(grouped["p_prop_src"]),
         p_prop_y=jnp.asarray(grouped["p_prop_y"]),
         log_p_tag_per_source=jnp.asarray(grouped["log_p_tag_per_source"]),
+        snr_image0=jnp.asarray(grouped["snr_image0"]),
+        snr_image1=jnp.asarray(grouped["snr_image1"]),
+        delta_t_obs=jnp.asarray(grouped["delta_t_obs"]),
+        log_sky_overlap=jnp.asarray(grouped["log_sky_overlap"]),
+        p_tag_true=jnp.asarray(grouped["p_tag_true"]),
+        tagged_pair=jnp.asarray(grouped["tagged_pair"]),
         valid=jnp.asarray(valid),
         n_draw_sources=jnp.asarray(n_draw_sources, dtype=jnp.float64),
     )
@@ -322,6 +367,7 @@ def load_lensed_injections(path: str) -> LensedInjectionSet:
             log_p_tag = f["log_p_tag_per_source"][:]
         elif "p_tag_per_source" in f:
             p_tag = f["p_tag_per_source"][:]
+        optional = {name: (f[name][:] if name in f else None) for name in ("snr_image0", "snr_image1", "delta_t_obs", "true_delta_t", "log_sky_overlap", "p_tag_true", "tagged_pair")}
         out = make_lensed_injection_set(
             source_id=f["source_id"][:],
             image_id=f["image_id"][:],
@@ -337,6 +383,7 @@ def load_lensed_injections(path: str) -> LensedInjectionSet:
             n_draw_sources=int(f.attrs["n_draw_sources"]),
             log_p_tag_per_source=log_p_tag,
             p_tag_per_source=p_tag,
+            **optional,
         )
     return out
 
@@ -357,6 +404,13 @@ def save_lensed_injections(
     n_draw_sources: int,
     log_p_tag_per_source: Optional[np.ndarray] = None,
     p_tag_per_source: Optional[np.ndarray] = None,
+    snr_image0: Optional[np.ndarray] = None,
+    snr_image1: Optional[np.ndarray] = None,
+    delta_t_obs: Optional[np.ndarray] = None,
+    true_delta_t: Optional[np.ndarray] = None,
+    log_sky_overlap: Optional[np.ndarray] = None,
+    p_tag_true: Optional[np.ndarray] = None,
+    tagged_pair: Optional[np.ndarray] = None,
 ) -> None:
     """Save raw per-image arrays to disk in the canonical HDF5 layout."""
     with h5py.File(path, "w") as f:
@@ -379,4 +433,7 @@ def save_lensed_injections(
         elif p_tag_per_source is not None:
             f.create_dataset("p_tag_per_source", data=np.asarray(p_tag_per_source))
             f.attrs["pair_tag_dataset"] = "p_tag_per_source"
+        for name, arr in (("snr_image0", snr_image0), ("snr_image1", snr_image1), ("delta_t_obs", delta_t_obs), ("true_delta_t", true_delta_t), ("log_sky_overlap", log_sky_overlap), ("p_tag_true", p_tag_true), ("tagged_pair", tagged_pair)):
+            if arr is not None:
+                f.create_dataset(name, data=np.asarray(arr, dtype=bool) if name == "tagged_pair" else np.asarray(arr))
         f.attrs["n_draw_sources"] = int(n_draw_sources)

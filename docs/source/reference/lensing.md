@@ -838,3 +838,32 @@ unchanged, and time marks affect the likelihood only when the run requests the
 time mark.  Marginalized diagnostics include a `marks` dictionary on each
 `posterior_pair_probabilities` entry so downstream simulation studies can audit
 which edge-level information contributed to each candidate pair.
+
+## Simulated pair-tag selection
+
+The strong-lensing mock pipeline can attach a simulated pair-tag probability,
+`p_tag`, to lensed injection pairs.  This quantity is the probability that an
+already both-detected image pair is identified or tagged as a candidate pair by a
+pair-level statistic.  It is not the single-event detection probability, which is
+still represented by each image's `detected` flag in the lensed-injection file.
+
+This support is simulation-calibration scaffolding only.  It is intended for
+robustness studies of spectral-siren lensing inference and is not a GWTC-5 or
+real-search calibration.  The available deterministic mock models are:
+
+* `constant`: uses `--pair_tag_constant` for every kept pair.
+* `snr_time`: computes `p_tag` from `snr_image0`, `snr_image1`, and
+  `delta_t_obs` (or `true_delta_t`) stored in the mock lensed injections.
+* `snr_time_sky`: also requires `log_sky_overlap`.
+* `file`: reads a small JSON model specification from `--pair_tag_selection_path`.
+
+Inference defaults preserve the existing behavior: if no nontrivial model is
+selected and the lensed-injection file already contains `p_tag_per_source` or
+`log_p_tag_per_source`, that stored selection correction is used.  Passing
+`--pair_tag_perturb_logit` intentionally shifts the model in logit space so
+validation runs can compare correct and perturbed pair-tag selection.
+
+Recommended robustness studies should run at least three simulated cases: the
+correct injected `p_tag` model, a perturbed `p_tag` model, and a constant `p_tag`
+model.  Differences in the recovered lens-rate parameters quantify sensitivity
+to pair-identification/tagging selection uncertainty.

@@ -102,6 +102,7 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
+from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model, load_pair_tag_selection_file
 from darksirens.lensing.observed_catalog import (
     observed_catalog_metadata_from_hdf5,
     validate_observed_catalog_file,
@@ -133,6 +134,36 @@ from darksirens.likelihood.likelihood_with_clusters import (
     PAIR_MARKS_NONE,
     PAIR_MARKS_TIME,
 )
+
+
+def _pair_tag_log_probs_from_options(opts, lensed):
+    if lensed is None:
+        return jnp.zeros(0)
+    kind = getattr(opts, "pair_tag_model", "constant")
+    perturb = float(getattr(opts, "pair_tag_perturb_logit", 0.0) or 0.0)
+    if kind == "file":
+        model = load_pair_tag_selection_file(opts.pair_tag_selection_path, perturb_logit=perturb)
+    elif kind == "constant" and perturb == 0.0 and float(getattr(opts, "pair_tag_constant", 1.0)) == 1.0:
+        # Preserve legacy behavior: consume the p_tag dataset written by older mocks.
+        fallback = jnp.zeros(int(np.asarray(lensed.m1_src).shape[0]))
+        return jnp.asarray(getattr(lensed, "log_p_tag_per_source", fallback))
+    else:
+        model = make_pair_tag_selection_model(
+            kind,
+            constant=float(getattr(opts, "pair_tag_constant", 1.0)),
+            perturb_logit=perturb,
+        )
+    missing = []
+    fields = {}
+    for name in model.required_fields:
+        attr = "delta_t_obs" if name in ("delta_t_obs", "true_delta_t") else name
+        arr = np.asarray(getattr(lensed, attr))
+        if arr.size == 0 or np.all(~np.isfinite(arr)):
+            missing.append(name)
+        fields[name] = arr
+    if missing:
+        raise SystemExit(f"pair_tag_model={model.kind} requires lensed injection fields: {missing}")
+    return jnp.asarray(model.log_probability(**fields))
 
 # =============================================================================
 # Local lensing-parameter space
@@ -938,13 +969,7 @@ def build_cluster_likelihood(
     )
     universe_model = opts.universe_model
 
-    if inp["lensed"] is None:
-        log_p_tag = jnp.zeros(0)
-    else:
-        fallback = jnp.zeros(int(np.asarray(inp["lensed"].m1_src).shape[0]))
-        log_p_tag = jnp.asarray(
-            getattr(inp["lensed"], "log_p_tag_per_source", fallback)
-        )
+    log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
 
     def loglike(coord):
         # decode() returns a 5-tuple (cosmo, survey, pop, sky, mark) on current
@@ -1031,13 +1056,7 @@ def build_cluster_diagnostics(
         else PAIR_MARKS_NONE
     )
     universe_model = opts.universe_model
-    if inp["lensed"] is None:
-        log_p_tag = jnp.zeros(0)
-    else:
-        fallback = jnp.zeros(int(np.asarray(inp["lensed"].m1_src).shape[0]))
-        log_p_tag = jnp.asarray(
-            getattr(inp["lensed"], "log_p_tag_per_source", fallback)
-        )
+    log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
 
     def diagnostics(coord):
         coord = jnp.asarray(coord)
@@ -1227,6 +1246,10 @@ def build_parser():
         default=None,
         help="Fallback sigma_delta_t in seconds when pair time metadata omits sigma.",
     )
+    p.add_argument("--pair_tag_model", choices=["constant", "snr_time", "snr_time_sky", "file"], default="constant")
+    p.add_argument("--pair_tag_constant", type=float, default=1.0)
+    p.add_argument("--pair_tag_perturb_logit", type=float, default=0.0)
+    p.add_argument("--pair_tag_selection_path", default=None)
     p.add_argument(
         "--edge_mark_prior_keys",
         default="",
@@ -1362,7 +1385,7 @@ def main():
     )
     print(
         "  lensing hyperparameters: "
-        f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, wl_selection={opts.wl_selection}, pair_marks={opts.pair_marks}, edge_mark_prior_keys={opts.edge_mark_prior_keys}, "
+        f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, wl_selection={opts.wl_selection}, pair_marks={opts.pair_marks}, pair_tag_model={opts.pair_tag_model}, pair_tag_perturb_logit={opts.pair_tag_perturb_logit}, edge_mark_prior_keys={opts.edge_mark_prior_keys}, "
         f"wl_a={opts.lensing_wl_a}, wl_b={opts.lensing_wl_b}, "
         f"fix_lens_rate={opts.fix_lens_rate}, sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
         flush=True,
@@ -1506,6 +1529,9 @@ def main():
         f.create_dataset("samples", data=samples)
         f.attrs["labels"] = json.dumps(labels)
         f.attrs["wl_selection"] = opts.wl_selection
+        f.attrs["pair_tag_model"] = opts.pair_tag_model
+        f.attrs["pair_tag_constant"] = float(opts.pair_tag_constant)
+        f.attrs["pair_tag_perturb_logit"] = float(opts.pair_tag_perturb_logit)
         _write_result_partition_metadata(
             f.attrs, opts=opts, inp=inp, diagnostics=diagnostics
         )
