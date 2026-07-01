@@ -35,6 +35,7 @@ class PartitionState:
     n_singletons: int
     n_pairs: int
     log_prior_weight: float
+    candidate_edge_indices: np.ndarray | None = None
 
 
 def load_candidate_pairs_json(path: str | Path) -> dict:
@@ -110,12 +111,13 @@ def enumerate_compatible_partitions(
         raise ValueError("max_partitions must be at least 1")
     states: list[PartitionState] = []
 
-    def emit(chosen: list[CandidatePair], used: set[int], logw: float) -> None:
+    def emit(chosen: list[tuple[int, CandidatePair]], used: set[int], logw: float) -> None:
         if len(states) >= max_partitions:
             raise ValueError(
                 f"exact partition enumeration exceeded max_partitions={max_partitions}"
             )
-        pair_indices = np.asarray([[p.i, p.j] for p in chosen], dtype=np.int32).reshape((-1, 2))
+        pair_indices = np.asarray([[p.i, p.j] for _, p in chosen], dtype=np.int32).reshape((-1, 2))
+        candidate_edge_indices = np.asarray([idx for idx, _ in chosen], dtype=np.int32)
         singleton_indices = np.asarray(
             [idx for idx in range(n_events) if idx not in used], dtype=np.int32
         )
@@ -126,10 +128,11 @@ def enumerate_compatible_partitions(
                 n_singletons=int(singleton_indices.size),
                 n_pairs=int(pair_indices.shape[0]),
                 log_prior_weight=float(logw),
+                candidate_edge_indices=candidate_edge_indices,
             )
         )
 
-    def rec(pos: int, chosen: list[CandidatePair], used: set[int], logw: float) -> None:
+    def rec(pos: int, chosen: list[tuple[int, CandidatePair]], used: set[int], logw: float) -> None:
         if pos == len(pairs):
             emit(chosen, used, logw)
             return
@@ -137,7 +140,7 @@ def enumerate_compatible_partitions(
         p = pairs[pos]
         if p.i not in used and p.j not in used:
             used.update((p.i, p.j))
-            chosen.append(p)
+            chosen.append((pos, p))
             rec(pos + 1, chosen, used, logw + p.log_prior_odds)
             chosen.pop()
             used.remove(p.i)

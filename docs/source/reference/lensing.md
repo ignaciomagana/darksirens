@@ -351,3 +351,29 @@ This switch affects singleton selection only.  The J=2 strong-lensing
 lensed-injection selection estimator may include the optional `p_tag` pair-tag
 factor described above, but still does not add dark-siren, LSS, or
 catalog-selection support.
+
+### Marginalized partition diagnostics
+
+For spectral-siren lensing runs with `--cluster_mode j2`, fixed-partition diagnostics describe exactly one materialized partition: the `singleton_indices` and `pair_indices` supplied by `--partition_path`.  In contrast, `--partition_mode marginalize_exact` enumerates every compatible matching from `--candidate_pairs_path`, evaluates the scalar likelihood for each partition, and writes diagnostics marginalized over the posterior partition weights.
+
+A marginalized `diagnostics.json` includes the prior normalizer (`log_z_partition_prior`), marginalized scalar likelihood (`logL_marginalized`, also aliased as `logL_total`), per-partition prior weights and likelihoods, posterior partition probabilities, posterior pair probabilities in the validated candidate-pair order, the posterior expected numbers of pairs and singletons, and a compact MAP partition object.  Candidate pairs are treated as unordered edges; if an input pair is written as `(j, i)`, the validated diagnostics report the normalized order `(min(i, j), max(i, j))` while preserving optional `label` and `log_prior_odds` fields.
+
+Example:
+
+```bash
+python -m darksirens.cli.inference_lensing \
+  --cluster_mode j2 \
+  --partition_mode marginalize_exact \
+  --candidate_pairs_path candidate_pairs.json \
+  --gw_path mock_gw_pe.h5 \
+  --gwselection_path mock_gw_selection.h5 \
+  --lensed_injections_path mock_lensed_injections.h5 \
+  --pair_pe_path mock_pair_pe.h5 \
+  --pop_model powerlaw+peak \
+  --wl_backend lognormal \
+  --fix_cosmology true --fix_survey true --fix_population true \
+  --sampler dynesty --nlive 20 --max_samples 0 \
+  --save_path runs/marginalized
+```
+
+Use fixed mode when you want diagnostics for one assumed partition; use `marginalize_exact` when you want interpretable posterior partition weights, posterior pair probabilities, and the MAP partition for a small candidate graph.
