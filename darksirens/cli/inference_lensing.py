@@ -24,7 +24,7 @@ Design notes
   numerically the commit-2 / branch singleton likelihood.
 * Joint run: ``--cluster_mode j2`` requires ``--lensed_injections_path`` and
   ``--pair_pe_path`` and a ``--partition_path`` (the candidate-pair list).
-* WL: ``--wl_backend {lognormal,disabled}`` with ``--lensing_wl_a/b``.
+* WL: ``--wl_backend {lognormal,disabled}`` with ``--lensing_wl_a/b`` and optional singleton-selection matching via ``--wl_selection``.
 
 Examples
 --------
@@ -103,6 +103,7 @@ from darksirens.likelihood.likelihood_with_clusters import (
     darksiren_likelihood_diagnostics_with_clusters,
     CLUSTER_MODE_J2, CLUSTER_MODE_OFF,
     WL_BACKEND_LOGNORMAL, WL_BACKEND_DISABLED,
+    WL_SELECTION_STANDARD, WL_SELECTION_LOGNORMAL,
 )
 
 
@@ -336,6 +337,7 @@ def build_cluster_likelihood(opts, inp, decoder):
     sis = make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
     wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
+    wl_selection = WL_SELECTION_LOGNORMAL if opts.wl_selection == "wl_lognormal" else WL_SELECTION_STANDARD
     universe_model = opts.universe_model
 
     nkept = 0 if inp["lensed"] is None else int(np.asarray(inp["lensed"].m1_src).shape[0])
@@ -357,6 +359,7 @@ def build_cluster_likelihood(opts, inp, decoder):
             opts.pop_model, universe_model,
             sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
             wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
+            wl_selection=wl_selection,
         )
     return loglike
 
@@ -366,6 +369,7 @@ def build_cluster_diagnostics(opts, inp, decoder):
     sis = make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
     wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
+    wl_selection = WL_SELECTION_LOGNORMAL if opts.wl_selection == "wl_lognormal" else WL_SELECTION_STANDARD
     universe_model = opts.universe_model
     nkept = 0 if inp["lensed"] is None else int(np.asarray(inp["lensed"].m1_src).shape[0])
     log_p_tag = jnp.zeros(nkept)
@@ -382,11 +386,13 @@ def build_cluster_diagnostics(opts, inp, decoder):
             opts.pop_model, universe_model,
             sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
             wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
+            wl_selection=wl_selection,
         )
         out = _diagnostics_to_python(raw)
         out.update(
             cluster_mode=opts.cluster_mode,
             wl_backend=opts.wl_backend,
+            wl_selection=opts.wl_selection,
             sl_tau_A=float(opts.sl_tau_A),
             sl_tau_n=float(opts.sl_tau_n),
         )
@@ -410,6 +416,8 @@ def build_parser():
     p.add_argument("--pop_model", default="powerlaw+peak")
     p.add_argument("--cluster_mode", choices=["off", "j2"], default="j2")
     p.add_argument("--wl_backend", choices=["lognormal", "disabled"], default="lognormal")
+    p.add_argument("--wl_selection", choices=["standard", "wl_lognormal"], default="standard",
+                   help="Singleton selection treatment. standard preserves legacy selection; wl_lognormal uses lognormal/Hermite WL marginalization for singleton injections when wl_backend=lognormal (wl_a=0 reduces to standard).")
     p.add_argument("--lensing_wl_a", type=float, default=4e-3)
     p.add_argument("--lensing_wl_b", type=float, default=1.5)
     p.add_argument("--sl_tau_A", type=float, default=5e-4)
@@ -484,10 +492,10 @@ def main():
         "spectral_sirens_wl" if opts.wl_backend == "lognormal" else "spectral_sirens"
     )
 
-    print(f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend}] ===")
+    print(f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend} | wl_selection={opts.wl_selection}] ===")
     print(
         "  lensing hyperparameters: "
-        f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, "
+        f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, wl_selection={opts.wl_selection}, "
         f"wl_a={opts.lensing_wl_a}, wl_b={opts.lensing_wl_b}, "
         f"sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
         flush=True,
@@ -560,6 +568,7 @@ def main():
         f.attrs["labels"] = json.dumps(labels)
         f.attrs["cluster_mode"] = opts.cluster_mode
         f.attrs["wl_backend"] = opts.wl_backend
+        f.attrs["wl_selection"] = opts.wl_selection
         f.attrs["wl_a"] = float(opts.lensing_wl_a)
         f.attrs["wl_b"] = float(opts.lensing_wl_b)
         f.attrs["sl_tau_A"] = float(opts.sl_tau_A)

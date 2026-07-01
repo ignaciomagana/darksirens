@@ -215,3 +215,22 @@ and applies the combined selection correction. It is invoked by the
 :undoc-members:
 :show-inheritance:
 ```
+
+## Weak-lensing singleton selection consistency
+
+`darksirens.cli.inference_lensing` exposes `--wl_selection {standard,wl_lognormal}`
+for spectral-siren lensing runs.  The default, `standard`, preserves the legacy
+behavior: `--wl_backend lognormal` marginalizes weak-lensing magnification in the
+singleton PE weights, while singleton injection selection uses the ordinary
+spectral-siren selection integral.
+
+Set `--wl_selection wl_lognormal` to apply the same lognormal/Hermite
+weak-lensing marginalization to singleton selection weights.  This option only
+applies when `--wl_backend lognormal`.  If weak lensing is disabled, the
+standard selection path is used; if `--lensing_wl_a 0`, the WL-aware Hermite
+path reduces numerically to the standard selection path.  The option is recorded in both
+`settings.json` and the `results.hdf5` `wl_selection` attribute.
+
+This switch affects singleton selection only.  The J=2 strong-lensing
+lensed-injection selection estimator is unchanged and does not add dark-siren,
+LSS, or catalog-selection support.

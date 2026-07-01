@@ -849,6 +849,7 @@ def test_lensing_cli_threads_sl_tau_A_into_prior_midpoint_likelihood(monkeypatch
             sl_tau_n=3.0,
             cluster_mode="j2",
             wl_backend="disabled",
+            wl_selection="standard",
             universe_model="spectral_sirens",
             pop_model="powerlaw+peak",
             sel_batch_size=None,
@@ -863,3 +864,117 @@ def test_lensing_cli_threads_sl_tau_A_into_prior_midpoint_likelihood(monkeypatch
     assert low == pytest.approx(1.0e-4)
     assert high == pytest.approx(9.0e-4)
     assert high != low
+
+
+@pytest.fixture(scope="module")
+def wl_selection_fixture():
+    rng = np.random.default_rng(0)
+    n_events, n_samp, n_sel = 4, 200, 500
+    total = n_events * n_samp
+    gw_pe = GWEvent(
+        m1det=jnp.asarray(rng.uniform(20.0, 60.0, total)),
+        m2det=jnp.asarray(rng.uniform(10.0, 30.0, total)),
+        dL=jnp.asarray(rng.uniform(400.0, 3000.0, total)),
+        chieff=jnp.asarray(rng.uniform(-0.3, 0.3, total)),
+        prior_wt=jnp.asarray(rng.uniform(0.5, 1.5, total)),
+        pixels=jnp.zeros(total, dtype=jnp.int32),
+        q=jnp.asarray(rng.uniform(0.3, 1.0, total)),
+        valid=jnp.ones(total, dtype=jnp.bool_),
+    )
+    gw_sel = GWEvent(
+        m1det=jnp.asarray(rng.uniform(15.0, 70.0, n_sel)),
+        m2det=jnp.asarray(rng.uniform(8.0, 35.0, n_sel)),
+        dL=jnp.asarray(rng.uniform(200.0, 3000.0, n_sel)),
+        chieff=jnp.asarray(rng.uniform(-0.3, 0.3, n_sel)),
+        prior_wt=jnp.asarray(rng.uniform(0.5, 1.5, n_sel)),
+        pixels=jnp.zeros(n_sel, dtype=jnp.int32),
+        q=jnp.asarray(rng.uniform(0.3, 1.0, n_sel)),
+        valid=jnp.ones(n_sel, dtype=jnp.bool_),
+    )
+    return {
+        "cosmo": _cosmo(), "survey": _survey(),
+        "gw_pe": gw_pe, "gw_sel": gw_sel,
+        "catalog": _toy_catalog(),
+        "n_events": n_events, "n_samp": n_samp,
+        "Ndraw": 1000.0,
+        "pop_params": get_fixed_population_params("powerlaw+peak"),
+    }
+
+
+def _cluster_diag_for_wl_selection(fixture, *, wl_a, wl_selection):
+    from darksirens.likelihood.likelihood_with_clusters import (
+        darksiren_likelihood_diagnostics_with_clusters,
+        CLUSTER_MODE_OFF,
+        WL_BACKEND_LOGNORMAL,
+        WL_SELECTION_STANDARD,
+        WL_SELECTION_LOGNORMAL,
+    )
+
+    return darksiren_likelihood_diagnostics_with_clusters(
+        fixture["cosmo"], fixture["survey"], fixture["pop_params"],
+        fixture["gw_pe"], fixture["catalog"],
+        fixture["gw_sel"], fixture["catalog"],
+        fixture["n_events"], fixture["n_samp"], fixture["Ndraw"],
+        singleton_indices=jnp.arange(fixture["n_events"], dtype=jnp.int32),
+        pair_indices=jnp.zeros((0, 2), dtype=jnp.int32),
+        n_singletons=fixture["n_events"], n_pairs=0,
+        lensed_injections=None,
+        pair_kdes=None,
+        sis_params=make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0),
+        log_p_tag_per_source=jnp.zeros(0),
+        pop_model="powerlaw+peak",
+        universe_model="spectral_sirens_wl",
+        sel_batch_size=None,
+        cluster_mode=CLUSTER_MODE_OFF,
+        wl_backend=WL_BACKEND_LOGNORMAL,
+        wl_a=wl_a,
+        wl_b=1.5,
+        wl_selection=(
+            WL_SELECTION_LOGNORMAL if wl_selection == "wl_lognormal"
+            else WL_SELECTION_STANDARD
+        ),
+    )
+
+
+class TestWeakLensingSingletonSelection:
+    def test_wl_selection_lognormal_wl_a_zero_matches_standard_log_mu(self, wl_selection_fixture):
+        diag_standard = _cluster_diag_for_wl_selection(
+            wl_selection_fixture, wl_a=0.0, wl_selection="standard"
+        )
+        diag_wl = _cluster_diag_for_wl_selection(
+            wl_selection_fixture, wl_a=0.0, wl_selection="wl_lognormal"
+        )
+
+        np.testing.assert_allclose(
+            float(diag_wl["log_mu_singleton"]),
+            float(diag_standard["log_mu_singleton"]),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_wl_selection_lognormal_changes_nonzero_wl_a_log_mu(self, wl_selection_fixture):
+        diag_standard = _cluster_diag_for_wl_selection(
+            wl_selection_fixture, wl_a=0.0, wl_selection="standard"
+        )
+        diag_wl = _cluster_diag_for_wl_selection(
+            wl_selection_fixture, wl_a=0.2, wl_selection="wl_lognormal"
+        )
+
+        assert np.isfinite(float(diag_wl["log_mu_singleton"]))
+        assert abs(float(diag_wl["log_mu_singleton"] - diag_standard["log_mu_singleton"])) > 1e-6
+
+    def test_inference_lensing_records_wl_selection_in_outputs(self):
+        import inspect
+        from darksirens.cli import inference_lensing
+
+        parser = inference_lensing.build_parser()
+        opts = parser.parse_args([
+            "--gw_path", "gw.h5",
+            "--gwselection_path", "sel.h5",
+            "--sampler", "tinyns",
+        ])
+        assert opts.wl_selection == "standard"
+
+        src = inspect.getsource(inference_lensing.main)
+        assert 'f.attrs["wl_selection"] = opts.wl_selection' in src
+        assert "for k, v in vars(opts).items()" in src

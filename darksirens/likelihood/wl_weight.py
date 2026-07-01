@@ -75,12 +75,12 @@ standard hot path.
 
 Selection
 ~~~~~~~~~
-**This function is NOT used for the selection integral** in commit 2.
-The selection term continues to use the standard ``log_sample_weight``.
-The leading-order WL effect on the selection integral is
-O(s² · d² log p_det / d(ln μ)²), a few-percent correction that does not
-change the *shape* of the population posterior (only the absolute rate).
-A full cluster-level selection treatment is deferred to commit 4.
+The default lensing CLI behavior still keeps singleton selection on the
+standard ``log_sample_weight`` path for backward compatibility.  The lensing
+cluster likelihood can optionally route singleton selection through the
+lognormal/Hermite WL marginalization as well (``--wl_selection wl_lognormal``).
+That option affects singleton injections only; the J=2 strong-lensing
+lensed-injection selection estimator remains separate and unchanged.
 
 References
 ~~~~~~~~~~
