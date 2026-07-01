@@ -24,6 +24,8 @@ class CandidatePair:
     j: int
     log_prior_odds: float
     label: str | None = None
+    delta_t_obs: float | None = None
+    sigma_delta_t: float | None = None
 
 
 @dataclass(frozen=True)
@@ -89,8 +91,32 @@ def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]
         log_prior_odds = float(item["log_prior_odds"])
         if not np.isfinite(log_prior_odds):
             raise ValueError(f"candidate_pairs[{k}].log_prior_odds must be finite")
+        delta_t_obs = None
+        sigma_delta_t = None
+        if "marks" in item:
+            marks = item["marks"]
+            if not isinstance(marks, dict):
+                raise ValueError(f"candidate_pairs[{k}].marks must be an object")
+            has_dt = "delta_t_obs" in marks
+            has_sigma = "sigma_delta_t" in marks
+            if has_dt != has_sigma:
+                raise ValueError(
+                    f"candidate_pairs[{k}].marks must define both delta_t_obs and sigma_delta_t, or neither"
+                )
+            if has_dt:
+                delta_t_obs = float(marks["delta_t_obs"])
+                sigma_delta_t = float(marks["sigma_delta_t"])
+                if not np.isfinite(delta_t_obs):
+                    raise ValueError(f"candidate_pairs[{k}].marks.delta_t_obs must be finite")
+                if not np.isfinite(sigma_delta_t) or sigma_delta_t <= 0:
+                    raise ValueError(f"candidate_pairs[{k}].marks.sigma_delta_t must be finite and positive")
         label = item.get("label")
-        pairs.append(CandidatePair(a, b, log_prior_odds, None if label is None else str(label)))
+        pairs.append(
+            CandidatePair(
+                a, b, log_prior_odds, None if label is None else str(label),
+                delta_t_obs, sigma_delta_t,
+            )
+        )
     return n_events, tuple(pairs)
 
 

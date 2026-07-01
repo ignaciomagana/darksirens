@@ -1284,43 +1284,6 @@ def test_lensing_preflight_pair_marks_time_requires_delta_t_obs(tmp_path):
 
 
 
-def test_lensing_preflight_blocks_marginalized_time_marks(tmp_path):
-    from darksirens.lensing.preflight import run_lensing_preflight
-    opts = _write_preflight_mock(tmp_path)
-    opts.partition_mode = "marginalize_exact"
-    opts.pair_marks = "time"
-    result = run_lensing_preflight(opts)
-    assert not result["ok"]
-    assert any("pair_marks=time" in e and "marginalize_exact" in e for e in result["errors"])
-
-
-def test_lensing_preflight_only_cli_blocks_marginalized_time_marks(tmp_path):
-    import json
-    import subprocess
-    import sys
-    opts = _write_preflight_mock(tmp_path)
-    out = tmp_path / "preflight.json"
-    cmd = [
-        sys.executable, "-m", "darksirens.cli.inference_lensing",
-        "--gw_path", opts.gw_path,
-        "--gwselection_path", opts.gwselection_path,
-        "--lensed_injections_path", opts.lensed_injections_path,
-        "--pair_pe_path", opts.pair_pe_path,
-        "--candidate_pairs_path", opts.candidate_pairs_path,
-        "--cluster_mode", "j2",
-        "--partition_mode", "marginalize_exact",
-        "--pair_marks", "time",
-        "--sampler", "dynesty",
-        "--preflight_only", "true",
-        "--preflight_json", str(out),
-        "--save_path", str(tmp_path / "run"),
-    ]
-    proc = subprocess.run(cmd, cwd=str(__import__('pathlib').Path(__file__).resolve().parents[1]), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    assert proc.returncode != 0, proc.stdout
-    payload = json.loads(out.read_text())
-    assert payload["ok"] is False
-    assert any("pair_marks=time" in e and "marginalize_exact" in e for e in payload["errors"])
-
 def test_lensing_preflight_malformed_prior_wt_errors(tmp_path):
     from darksirens.lensing.preflight import run_lensing_preflight
     opts = _write_preflight_mock(tmp_path, bad_prior=True)
@@ -1351,3 +1314,28 @@ def test_lensing_preflight_only_cli_exits_zero_on_valid_mock(tmp_path):
     assert proc.returncode == 0, proc.stdout
     payload = json.loads(out.read_text())
     assert payload["ok"] is True
+
+
+def test_lensing_preflight_marginalized_time_marks_require_candidate_edge_marks(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path)
+    opts.partition_mode = "marginalize_exact"
+    opts.pair_marks = "time"
+    result = run_lensing_preflight(opts)
+    assert not result["ok"]
+    assert any("missing marks.delta_t_obs/sigma_delta_t" in e for e in result["errors"])
+
+
+def test_lensing_preflight_marginalized_time_marks_pass_with_edge_marks(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path)
+    opts.partition_mode = "marginalize_exact"
+    opts.pair_marks = "time"
+    import json
+    path = __import__('pathlib').Path(opts.candidate_pairs_path)
+    data = json.loads(path.read_text())
+    for pair in data["candidate_pairs"]:
+        pair["marks"] = {"delta_t_obs": 1.0, "sigma_delta_t": 2.0}
+    path.write_text(json.dumps(data))
+    result = run_lensing_preflight(opts)
+    assert result["ok"], result["errors"]

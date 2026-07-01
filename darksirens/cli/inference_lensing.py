@@ -97,7 +97,7 @@ from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
 from darksirens.lensing.partitions import exact_partitions_from_json, validate_candidate_pairs
-from darksirens.lensing.preflight import UNSAFE_MARGINALIZED_TIME_MARKS_ERROR, run_lensing_preflight
+from darksirens.lensing.preflight import run_lensing_preflight
 from darksirens.lensing.marginal_diagnostics import compute_marginalized_partition_diagnostics
 from darksirens.likelihood.pair_kde import (
     make_pair_kde, stack_pair_kdes, validate_pair_prior_wt,
@@ -197,6 +197,34 @@ def _gw_event(m1det, m2det, dL, chieff, prior_wt):
                    prior_wt=jnp.asarray(prior_wt),
                    pixels=jnp.zeros_like(dL, dtype=jnp.int32),
                    q=m2det / m1det, valid=jnp.ones_like(dL, dtype=bool))
+
+
+def _time_mark_arrays_for_partition_state(state, candidate_pairs):
+    """Return edge-level time marks ordered like ``state.pair_indices``."""
+    dt_obs = []
+    dt_sigma = []
+    for edge_idx in np.asarray(state.candidate_edge_indices, dtype=int):
+        pair = candidate_pairs[int(edge_idx)]
+        if pair.delta_t_obs is None or pair.sigma_delta_t is None:
+            raise SystemExit(
+                "candidate pair "
+                f"({pair.i},{pair.j}) missing marks.delta_t_obs/sigma_delta_t "
+                "required by pair_marks=time"
+            )
+        dt = float(pair.delta_t_obs)
+        sig = float(pair.sigma_delta_t)
+        if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0:
+            raise SystemExit(
+                "candidate pair "
+                f"({pair.i},{pair.j}) has invalid marks.delta_t_obs/sigma_delta_t "
+                "required by pair_marks=time"
+            )
+        dt_obs.append(dt)
+        dt_sigma.append(sig)
+    return (
+        jnp.asarray(dt_obs, dtype=jnp.float64),
+        jnp.asarray(dt_sigma, dtype=jnp.float64),
+    )
 
 
 # =============================================================================
@@ -311,7 +339,12 @@ def load_inputs(opts):
                         f"{partition_pair_indices[k]}"
                     )
             has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
-            if has_dt:
+            use_pair_pe_time = has_dt or (
+                getattr(opts, "pair_marks", "none") == "time" and partition_mode == "fixed"
+            )
+            if use_pair_pe_time:
+                if not has_dt:
+                    raise SystemExit(f"pair_marks=time requires delta_t_obs metadata for pair_{k}")
                 pair_time_delta_t_obs.append(float(g.attrs["delta_t_obs"] if "delta_t_obs" in g.attrs else np.asarray(g["delta_t_obs"])[()]))
                 if "sigma_delta_t" in g.attrs:
                     pair_time_sigma.append(float(g.attrs["sigma_delta_t"]))
@@ -321,8 +354,6 @@ def load_inputs(opts):
                     pair_time_sigma.append(float(opts.pair_time_sigma_sec))
                 else:
                     raise SystemExit(f"pair_marks=time requires sigma_delta_t in pair_{k} or --pair_time_sigma_sec")
-            elif getattr(opts, "pair_marks", "none") == "time":
-                raise SystemExit(f"pair_marks=time requires delta_t_obs metadata for pair_{k}")
             for name in ("image0", "image1"):
                 gi = g[name]
                 d = dict(m1det=np.array(gi["m1det"]), q=np.array(gi["q"]),
@@ -419,8 +450,9 @@ def load_inputs(opts):
                 f"candidate_pairs n_events={candidate_n_events} does not match loaded event count "
                 f"{n_events_total}"
             )
-        marginal_partitions = tuple(
-            dict(
+        marginal_parts = []
+        for state in partition_states:
+            part = dict(
                 singleton_indices=jnp.asarray(state.singleton_indices, dtype=jnp.int32),
                 pair_indices=jnp.asarray(state.pair_indices, dtype=jnp.int32),
                 n_singletons=state.n_singletons,
@@ -428,8 +460,12 @@ def load_inputs(opts):
                 log_prior_weight=state.log_prior_weight,
                 candidate_edge_indices=jnp.asarray(state.candidate_edge_indices, dtype=jnp.int32),
             )
-            for state in partition_states
-        )
+            if getattr(opts, "pair_marks", "none") == "time":
+                dt_obs, dt_sigma = _time_mark_arrays_for_partition_state(state, candidate_pairs)
+                part["pair_time_delta_t_obs"] = dt_obs
+                part["pair_time_sigma"] = dt_sigma
+            marginal_parts.append(part)
+        marginal_partitions = tuple(marginal_parts)
         fixed_singletons = marginal_partitions[0]["singleton_indices"]
         fixed_pairs = marginal_partitions[0]["pair_indices"]
         fixed_n_singletons = marginal_partitions[0]["n_singletons"]
@@ -614,8 +650,8 @@ def build_cluster_likelihood(opts, inp, decoder, lens_sampled_labels=None, fixed
                 wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
                 wl_selection=wl_selection,
                 pair_marks=pair_marks,
-                pair_time_delta_t_obs=inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64)),
-                pair_time_sigma=inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
+                pair_time_delta_t_obs=part.get("pair_time_delta_t_obs", inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64))),
+                pair_time_sigma=part.get("pair_time_sigma", inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64))),
                 pair_batch_size=opts.pair_batch_size,
                 y_nodes_pair=opts.y_nodes_pair,
             )
@@ -652,7 +688,7 @@ def build_cluster_diagnostics(opts, inp, decoder, lens_sampled_labels=None, fixe
         coord = jnp.asarray(coord)
         cosmo, survey, pop_params, _sky_params, _mark_params = decoder.decode(coord)
 
-        def _raw_for(singletons, pairs, n_singletons, n_pairs):
+        def _raw_for(singletons, pairs, n_singletons, n_pairs, part=None):
             return darksiren_likelihood_diagnostics_with_clusters(
                 cosmo, survey, pop_params,
                 inp["gw_pe"], em, inp["gw_sel"], em,
@@ -666,28 +702,31 @@ def build_cluster_diagnostics(opts, inp, decoder, lens_sampled_labels=None, fixe
                 wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
                 wl_selection=wl_selection,
                 pair_marks=pair_marks,
-                pair_time_delta_t_obs=inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64)),
-                pair_time_sigma=inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
+                pair_time_delta_t_obs=(part or {}).get("pair_time_delta_t_obs", inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64))),
+                pair_time_sigma=(part or {}).get("pair_time_sigma", inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64))),
                 pair_batch_size=opts.pair_batch_size,
                 y_nodes_pair=opts.y_nodes_pair,
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            state_to_part = {id(state): part for state, part in zip(inp["partition_states"], inp["marginal_partitions"])}
             def _part_loglike(state):
+                part = state_to_part[id(state)]
                 raw = _raw_for(
                     jnp.asarray(state.singleton_indices, dtype=jnp.int32),
                     jnp.asarray(state.pair_indices, dtype=jnp.int32),
-                    state.n_singletons, state.n_pairs,
+                    state.n_singletons, state.n_pairs, part,
                 )
                 return float(np.asarray(raw["logL_total"]))
             out = compute_marginalized_partition_diagnostics(
                 inp["partition_states"], inp["candidate_pairs"], _part_loglike,
                 log_z_partition_prior=inp["log_z_prior"],
             )
+            map_part = inp["marginal_partitions"][int(out["map_partition_index"])]
             raw = _raw_for(
                 jnp.asarray(out["map_partition"]["singleton_indices"], dtype=jnp.int32),
                 jnp.asarray(out["map_partition"]["pair_indices"], dtype=jnp.int32),
-                out["map_partition"]["n_singletons"], out["map_partition"]["n_pairs"],
+                out["map_partition"]["n_singletons"], out["map_partition"]["n_pairs"], map_part,
             )
             out.update({f"map_{k}": v for k, v in _diagnostics_to_python(raw).items()})
         else:
@@ -844,12 +883,6 @@ def main():
             f.write("\n")
         print(f"wrote preflight JSON: {out_path}", flush=True)
         raise SystemExit(0 if preflight["ok"] else 2)
-    if (
-        opts.cluster_mode == "j2"
-        and opts.partition_mode == "marginalize_exact"
-        and opts.pair_marks == "time"
-    ):
-        raise SystemExit(UNSAFE_MARGINALIZED_TIME_MARKS_ERROR)
     if not preflight["ok"]:
         raise SystemExit("preflight failed; fix input errors or run --preflight_only true for JSON details")
 

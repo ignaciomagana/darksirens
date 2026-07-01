@@ -608,7 +608,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              H0, Om0, sis, wl, pair_tag_model="none", pair_tag_prob=1.0,
              n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
              wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0,
-             write_unified_observed_catalog=True,
+             write_unified_observed_catalog=True, candidate_time_marks=True,
              validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0)):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
@@ -761,15 +761,20 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             json.dump(observed_catalog, f, indent=2)
 
     # ---- candidate pairs for exact partition marginalization ----
-    true_edges = [
-        {
+    true_edges = []
+    for k in range(P):
+        edge = {
             "i": int(S + 2 * k),
             "j": int(S + 2 * k + 1),
             "log_prior_odds": float(candidate_pair_log_prior_odds),
             "label": "true",
         }
-        for k in range(P)
-    ]
+        if candidate_time_marks:
+            edge["marks"] = {
+                "delta_t_obs": float(pairs[k]["delta_t_obs"]),
+                "sigma_delta_t": float(pairs[k]["sigma_delta_t"]),
+            }
+        true_edges.append(edge)
     used_edges = {tuple(edge[x] for x in ("i", "j")) for edge in true_edges}
     wrong_edges = []
     n_events_total = S + 2 * P
@@ -938,6 +943,8 @@ def parse_args():
                    help="log prior odds assigned to true candidate edges")
     p.add_argument("--wrong-candidate-log-prior-odds", type=float, default=-5.0,
                    help="log prior odds assigned to shuffled wrong candidate edges")
+    p.add_argument("--candidate-time-marks", choices=("true", "false"), default="true",
+                   help="write edge-level time-delay marks for true candidate edges")
     p.add_argument("--time-delay-sigma-sec", type=float, default=3600.0,
                    help="Gaussian sigma for observed SIS pair time delays, in seconds")
     p.add_argument("--validation-sample-log10-tau-A", action="store_true",
@@ -965,6 +972,7 @@ def main():
         wrong_candidate_log_prior_odds=args.wrong_candidate_log_prior_odds,
         time_delay_sigma_sec=args.time_delay_sigma_sec,
         write_unified_observed_catalog=args.write_unified_observed_catalog.lower() == "true",
+        candidate_time_marks=args.candidate_time_marks.lower() == "true",
         validation_sample_log10_tau_A=args.validation_sample_log10_tau_A,
         validation_log10_tau_A_prior=args.validation_log10_tau_A_prior,
     )

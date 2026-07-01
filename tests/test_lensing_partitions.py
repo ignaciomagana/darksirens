@@ -58,3 +58,39 @@ def test_expected_n_pairs_equals_sum_of_candidate_pair_probabilities():
         logsumexp(np.array(diag["partition_log_prior_weight"]) + np.array(diag["partition_logL"]))
         - diag["log_z_partition_prior"]
     )
+
+
+def test_validate_candidate_pairs_accepts_edge_time_marks():
+    from darksirens.lensing.partitions import validate_candidate_pairs
+    n_events, pairs = validate_candidate_pairs({
+        "n_events": 2,
+        "candidate_pairs": [{
+            "i": 1, "j": 0, "log_prior_odds": 0.0,
+            "marks": {"delta_t_obs": 12.5, "sigma_delta_t": 2.0},
+        }],
+    })
+    assert n_events == 2
+    assert pairs[0].i == 0
+    assert pairs[0].j == 1
+    assert pairs[0].delta_t_obs == pytest.approx(12.5)
+    assert pairs[0].sigma_delta_t == pytest.approx(2.0)
+
+
+def test_validate_candidate_pairs_rejects_incomplete_or_invalid_time_marks():
+    from darksirens.lensing.partitions import validate_candidate_pairs
+    base = {"n_events": 2, "candidate_pairs": [{"i": 0, "j": 1, "log_prior_odds": 0.0}]}
+    for marks in (
+        {"delta_t_obs": 1.0},
+        {"sigma_delta_t": 1.0},
+        {"delta_t_obs": float("nan"), "sigma_delta_t": 1.0},
+        {"delta_t_obs": 1.0, "sigma_delta_t": 0.0},
+    ):
+        data = {**base, "candidate_pairs": [{**base["candidate_pairs"][0], "marks": marks}]}
+        with pytest.raises(ValueError):
+            validate_candidate_pairs(data)
+
+
+def test_enumerate_compatible_partitions_preserves_candidate_edge_indices():
+    candidates = [CandidatePair(0, 1, 0.0), CandidatePair(2, 3, 0.0)]
+    states = enumerate_compatible_partitions(4, candidates)
+    assert any(s.candidate_edge_indices.tolist() == [0, 1] for s in states)
