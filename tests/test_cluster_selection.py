@@ -546,6 +546,37 @@ class TestMasterLikelihoodReduction:
             rtol=1e-12, atol=1e-14,
         )
 
+
+    def test_cluster_mode_off_diagnostics_have_no_pair_terms(self, fixture):
+        from darksirens.likelihood.likelihood_with_clusters import (
+            darksiren_likelihood_diagnostics_with_clusters,
+            CLUSTER_MODE_OFF, WL_BACKEND_DISABLED as WL_BACKEND_DISABLED_C4,
+        )
+
+        diag = darksiren_likelihood_diagnostics_with_clusters(
+            fixture["cosmo"], fixture["survey"], fixture["pop_params"],
+            fixture["gw_pe"], fixture["catalog"],
+            fixture["gw_sel"], fixture["catalog"],
+            fixture["n_events"], fixture["n_samp"], fixture["Ndraw"],
+            singleton_indices=jnp.arange(fixture["n_events"], dtype=jnp.int32),
+            pair_indices=jnp.zeros((0, 2), dtype=jnp.int32),
+            n_singletons=fixture["n_events"], n_pairs=0,
+            lensed_injections=None,
+            pair_kdes=None,
+            sis_params=make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0),
+            log_p_tag_per_source=jnp.zeros(0),
+            pop_model="powerlaw+peak",
+            universe_model="spectral_sirens",
+            sel_batch_size=None,
+            cluster_mode=CLUSTER_MODE_OFF,
+            wl_backend=WL_BACKEND_DISABLED_C4,
+        )
+
+        assert int(diag["n_pairs"]) == 0
+        assert np.asarray(diag["per_pair_logL"]).shape == (0,)
+        assert float(diag["pair_logL_sum"]) == pytest.approx(0.0)
+        assert jnp.isfinite(diag["logL_total"])
+
     def test_cluster_mode_j2_runs_end_to_end(self, fixture):
         assert fixture["pop_params"].shape[0] > 0, "fixture pop_params must be non-empty for pop_model=powerlaw+peak"
         """Master likelihood with cluster_mode=J2 evaluates finite for a
@@ -653,6 +684,29 @@ class TestMasterLikelihoodReduction:
         # The actual VALUE depends on injection randomness; we only assert
         # that the cluster path doesn't blow up.
         assert jnp.isfinite(ll), f"cluster_mode=J2 returned non-finite ll: {ll}"
+
+        from darksirens.likelihood.likelihood_with_clusters import darksiren_likelihood_diagnostics_with_clusters
+        diag = darksiren_likelihood_diagnostics_with_clusters(
+            fixture["cosmo"], fixture["survey"], fixture["pop_params"],
+            gw_pe, fixture["catalog"],
+            fixture["gw_sel"], fixture["catalog"],
+            fixture["n_events"], n_pe, fixture["Ndraw"],
+            singleton_indices=jnp.asarray([2, 3], dtype=jnp.int32),
+            pair_indices=jnp.asarray([[0, 1]], dtype=jnp.int32),
+            n_singletons=2, n_pairs=1,
+            lensed_injections=inj,
+            pair_kdes=stacked,
+            sis_params=sis,
+            log_p_tag_per_source=jnp.zeros(inj.n_kept),
+            pop_model="powerlaw+peak",
+            universe_model="spectral_sirens",
+            sel_batch_size=None,
+            cluster_mode=CLUSTER_MODE_J2,
+        )
+        assert jnp.isfinite(diag["logL_total"])
+        assert int(diag["n_pairs"]) == 1
+        assert np.asarray(diag["per_pair_logL"]).shape == (1,)
+        assert np.all(np.isfinite(np.asarray(diag["per_pair_logL"])))
 
     def test_cluster_mode_j2_pair_outscores_swapped_singletons(self, fixture):
         assert fixture["pop_params"].shape[0] > 0, "fixture pop_params must be non-empty for pop_model=powerlaw+peak"
