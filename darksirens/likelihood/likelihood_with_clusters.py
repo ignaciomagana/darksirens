@@ -112,6 +112,8 @@ PAIR_MARKS_TIME = 1
         "return_diagnostics",
         "wl_selection",
         "pair_marks",
+        "pair_batch_size",
+        "y_nodes_pair",
     ],
 )
 def darksiren_log_likelihood_with_clusters(
@@ -152,6 +154,8 @@ def darksiren_log_likelihood_with_clusters(
     pair_marks: int = PAIR_MARKS_NONE,
     pair_time_delta_t_obs: jnp.ndarray | None = None,
     pair_time_sigma: jnp.ndarray | None = None,
+    pair_batch_size: int = 0,
+    y_nodes_pair: int = _Y_NODES_FOR_CLUSTER_PAIR_LIKE,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
 
@@ -374,7 +378,7 @@ def darksiren_log_likelihood_with_clusters(
     pair_logL_sum = jnp.asarray(0.0, dtype=jnp.float64)
     if cluster_mode == CLUSTER_MODE_J2 and n_pairs > 0:
         # y-grid for cluster pair likelihoods
-        y_nodes, log_wy = make_y_grid(_Y_NODES_FOR_CLUSTER_PAIR_LIKE)
+        y_nodes, log_wy = make_y_grid(y_nodes_pair)
 
         # Pair KDEs are a Python tuple of PairKDE NamedTuples, indexed by
         # global event index. nEvents is static so the loop unrolls at
@@ -390,8 +394,7 @@ def darksiren_log_likelihood_with_clusters(
                 "valid": sl(gw_pe.valid), "pixels": sl(gw_pe.pixels),
             }
 
-        # Iterate pairs at Python level (n_pairs is static_argnames)
-        for k in range(n_pairs):
+        def _pair_loglike_at_index(k):
             i = pair_indices[k, 0]
             j = pair_indices[k, 1]
             ev_i = _extract_event(i)
@@ -411,11 +414,39 @@ def darksiren_log_likelihood_with_clusters(
                 pair_marks=pair_marks,
                 delta_t_obs=dt_obs_k, sigma_delta_t=dt_sig_k,
             )
-            ll_pair_safe = jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf)
+            return jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf)
+
+        if pair_batch_size and pair_batch_size > 0:
+            # Chunk candidate pairs into fixed-size batches and scan over the
+            # padded pair axis. This keeps the compiled graph size independent
+            # of n_pairs while preserving the exact per-pair kernel.
+            n_batches = (n_pairs + pair_batch_size - 1) // pair_batch_size
+            n_padded = n_batches * pair_batch_size
+
+            def _scan_pair(carry, k):
+                active = k < n_pairs
+                ll_pair_safe = lax.cond(
+                    active,
+                    _pair_loglike_at_index,
+                    lambda _: jnp.asarray(0.0, dtype=jnp.float64),
+                    k,
+                )
+                return carry + ll_pair_safe, jnp.where(active, ll_pair_safe, -jnp.inf)
+
+            pair_logL_sum, padded_pair_logL = lax.scan(
+                _scan_pair, jnp.asarray(0.0, dtype=jnp.float64), jnp.arange(n_padded)
+            )
+            ll = ll + pair_logL_sum
             if return_diagnostics:
-                per_pair_logL_values.append(ll_pair_safe)
-            pair_logL_sum = pair_logL_sum + ll_pair_safe
-            ll = ll + ll_pair_safe
+                per_pair_logL_values = [padded_pair_logL[k] for k in range(n_pairs)]
+        else:
+            # Legacy small-n path: iterate pairs at Python level (n_pairs is static).
+            for k in range(n_pairs):
+                ll_pair_safe = _pair_loglike_at_index(k)
+                if return_diagnostics:
+                    per_pair_logL_values.append(ll_pair_safe)
+                pair_logL_sum = pair_logL_sum + ll_pair_safe
+                ll = ll + ll_pair_safe
 
     logL_total = jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
     if return_diagnostics:
@@ -439,6 +470,10 @@ def darksiren_log_likelihood_with_clusters(
             "per_pair_logL": per_pair_logL,
             "n_singletons": jnp.asarray(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
             "n_pairs": jnp.asarray(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
+            "pair_batch_size": jnp.asarray(pair_batch_size),
+            "y_nodes_pair": jnp.asarray(y_nodes_pair),
+            "pair_eval_shape_n": jnp.asarray(nsamp),
+            "pair_eval_shape_y": jnp.asarray(y_nodes_pair),
             "wl_selection": jnp.asarray(wl_selection),
         }
     return logL_total

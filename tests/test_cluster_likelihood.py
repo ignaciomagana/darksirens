@@ -50,6 +50,7 @@ from darksirens.lensing.slmarks import (
     mu_plus_minus_from_y, log_p_y_SIS,
 )
 from darksirens.lensing.grids import make_y_grid
+from jax import lax
 
 
 # ============================================================================
@@ -623,3 +624,62 @@ def test_incompatible_time_delay_penalizes_shuffled_wrong_pair():
     compatible = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=sis.T0 * 0.30, sigma_delta_t=sigma)
     shuffled = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=sis.T0 * 0.90, sigma_delta_t=sigma)
     assert float(compatible) > float(shuffled)
+
+
+def _pair_value_for_batch_test(ev_i, ev_j):
+    kde_i = make_pair_kde(
+        np.asarray(ev_i["m1det"]), np.asarray(ev_i["q"]), np.asarray(ev_i["dL"]),
+        np.asarray(ev_i["chieff"]), np.asarray(ev_i["prior_wt"]), np.asarray(ev_i["valid"]),
+    )
+    kde_j = make_pair_kde(
+        np.asarray(ev_j["m1det"]), np.asarray(ev_j["q"]), np.asarray(ev_j["dL"]),
+        np.asarray(ev_j["chieff"]), np.asarray(ev_j["prior_wt"]), np.asarray(ev_j["valid"]),
+    )
+    y_nodes, log_wy = make_y_grid(16)
+    return cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+        make_sis_lens_params(), _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+    )
+
+
+def _batched_pair_sum_for_test(pair_values, n_pairs, pair_batch_size):
+    """Mirror the production padded lax.scan summation used for pair batching."""
+    n_batches = (n_pairs + pair_batch_size - 1) // pair_batch_size
+    n_padded = n_batches * pair_batch_size
+
+    def _scan_pair(carry, k):
+        active = k < n_pairs
+        ll_pair = lax.cond(
+            active,
+            lambda kk: pair_values[kk],
+            lambda _: jnp.asarray(0.0, dtype=jnp.float64),
+            k,
+        )
+        return carry + ll_pair, jnp.where(active, ll_pair, -jnp.inf)
+
+    return lax.scan(_scan_pair, jnp.asarray(0.0, dtype=jnp.float64), jnp.arange(n_padded))
+
+
+def test_pair_batch_scan_matches_unbatched_for_small_mock():
+    pairs = [_synth_lensed_pair(n_pe=64, seed=seed) for seed in (101, 102, 103)]
+    pair_values = jnp.asarray([_pair_value_for_batch_test(a, b) for a, b in pairs])
+    unbatched = jnp.sum(pair_values)
+    batched, per_pair = _batched_pair_sum_for_test(pair_values, n_pairs=3, pair_batch_size=2)
+    np.testing.assert_allclose(np.asarray(batched), np.asarray(unbatched), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(per_pair[:3]), np.asarray(pair_values), rtol=1e-12, atol=1e-12)
+
+
+def test_pair_batch_size_larger_than_n_pairs_matches_unbatched():
+    pairs = [_synth_lensed_pair(n_pe=64, seed=seed) for seed in (201, 202)]
+    pair_values = jnp.asarray([_pair_value_for_batch_test(a, b) for a, b in pairs])
+    unbatched = jnp.sum(pair_values)
+    batched, _ = _batched_pair_sum_for_test(pair_values, n_pairs=2, pair_batch_size=8)
+    np.testing.assert_allclose(np.asarray(batched), np.asarray(unbatched), rtol=1e-12, atol=1e-12)
+
+
+def test_pair_batch_size_one_matches_unbatched():
+    pairs = [_synth_lensed_pair(n_pe=64, seed=seed) for seed in (301, 302, 303)]
+    pair_values = jnp.asarray([_pair_value_for_batch_test(a, b) for a, b in pairs])
+    unbatched = jnp.sum(pair_values)
+    batched, _ = _batched_pair_sum_for_test(pair_values, n_pairs=3, pair_batch_size=1)
+    np.testing.assert_allclose(np.asarray(batched), np.asarray(unbatched), rtol=1e-12, atol=1e-12)

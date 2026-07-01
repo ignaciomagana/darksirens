@@ -78,7 +78,7 @@ def _latest_diagnostics(save_root: Path) -> dict:
     return json.loads(files[-1].read_text())
 
 
-def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int) -> dict:
+def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int, pair_batch_size: int = 0) -> dict:
     if save_root.exists():
         shutil.rmtree(save_root)
     save_root.mkdir(parents=True, exist_ok=True)
@@ -89,7 +89,7 @@ def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
         "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak",
         "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true",
         "--sampler", "dynesty", "--nlive", "20", "--dlogz", "10", "--max_samples", "0",
-        "--pe_max_per_pair", str(cfg["pe_max"]), "--seed", str(seed),
+        "--pe_max_per_pair", str(cfg["pe_max"]), "--pair_batch_size", str(pair_batch_size), "--seed", str(seed),
         "--cluster_mode", cluster_mode, "--save_path", str(save_root),
     ]
     if cluster_mode == "j2":
@@ -113,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workdir", default="/tmp/ds_lensing_validation")
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--reuse", action="store_true", help="reuse compatible mock directories if present")
+    ap.add_argument("--pair_batch_size", type=int, default=0,
+                    help="forwarded to the lensing CLI for J=2 pair likelihood batching")
     args = ap.parse_args(argv)
 
     cfg = PROFILES[args.profile]
@@ -128,9 +130,9 @@ def main(argv: list[str] | None = None) -> int:
     _generate_mock(null_mock, cfg, seed=args.seed + 17, n_pair_keep=0, reuse=args.reuse)
 
     off = _run_cli(mock, runs / "off", cluster_mode="off", partition=None, cfg=cfg, seed=args.seed)
-    true = _run_cli(mock, runs / "j2_true", cluster_mode="j2", partition=mock / "partition.json", cfg=cfg, seed=args.seed)
-    wrong = _run_cli(mock, runs / "j2_wrong", cluster_mode="j2", partition=wrong_part, cfg=cfg, seed=args.seed)
-    null = _run_cli(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", cfg=cfg, seed=args.seed)
+    true = _run_cli(mock, runs / "j2_true", cluster_mode="j2", partition=mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size)
+    wrong = _run_cli(mock, runs / "j2_wrong", cluster_mode="j2", partition=wrong_part, cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size)
+    null = _run_cli(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size)
 
     checks = {
         "true_j2_finite_logL_and_diagnostics": math.isfinite(float(true["logL_total"])) and _finite_diag(true),
