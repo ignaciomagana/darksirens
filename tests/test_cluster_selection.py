@@ -1225,6 +1225,7 @@ def _write_preflight_mock(tmp_path, *, n_events=3, bad_prior=False, include_time
     cand.write_text(json.dumps({"n_events": n_events, "candidate_pairs": [{"i": 1, "j": 2, "log_prior_odds": 0.0}]}))
     opts = SimpleNamespace(
         gw_path=str(gw), gwselection_path=str(sel), lensed_injections_path=str(lens),
+        observed_catalog_path=None,
         pair_pe_path=str(pair), partition_path=str(part), candidate_pairs_path=str(cand),
         partition_mode="fixed", cluster_mode="j2", pair_marks="none", pair_time_sigma_sec=None,
         wl_backend="lognormal", wl_selection="standard", fix_lens_rate=True,
@@ -1240,6 +1241,73 @@ def test_lensing_preflight_valid_tiny_mock_passes(tmp_path):
     assert result["ok"], result
     assert result["summary"]["n_events"] == 3
     assert result["summary"]["n_pairs_pair_pe"] == 1
+
+
+def _write_observed_catalog(path, n_events):
+    import json
+    path.write_text(json.dumps({
+        "format_version": "observed-lensing-catalog-1.0",
+        "event_indexing": "global",
+        "n_events": n_events,
+        "events": [
+            {
+                "event_index": i,
+                "event_id": f"mock_event_{i:03d}",
+                "kind": "singleton_or_image",
+                "gps_time": 1234567890.0 + i,
+                "truth_source_id": i,
+                "truth_image_index": None,
+                "truth_is_lensed_image": False,
+            }
+            for i in range(n_events)
+        ],
+    }))
+    return path
+
+
+def test_observed_catalog_valid_passes(tmp_path):
+    from darksirens.lensing.observed_catalog import validate_observed_catalog_file
+    meta = validate_observed_catalog_file(_write_observed_catalog(tmp_path / "observed_catalog.json", 3))
+    assert meta["n_events"] == 3
+
+
+def test_observed_catalog_missing_required_fields_fail(tmp_path):
+    from darksirens.lensing.observed_catalog import validate_observed_catalog_file
+    import json
+    path = tmp_path / "bad_observed_catalog.json"
+    path.write_text(json.dumps({"event_indexing": "global", "n_events": 0, "events": []}))
+    with pytest.raises(ValueError, match="format_version"):
+        validate_observed_catalog_file(path)
+
+
+def test_observed_catalog_noncontiguous_event_indices_fail(tmp_path):
+    from darksirens.lensing.observed_catalog import validate_observed_catalog_file
+    import json
+    path = _write_observed_catalog(tmp_path / "observed_catalog.json", 3)
+    data = json.loads(path.read_text())
+    data["events"][2]["event_index"] = 4
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="contiguous"):
+        validate_observed_catalog_file(path)
+
+
+def test_lensing_preflight_observed_catalog_n_events_mismatch_errors(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path)
+    opts.observed_catalog_path = str(_write_observed_catalog(tmp_path / "observed_catalog.json", 4))
+    result = run_lensing_preflight(opts)
+    assert not result["ok"]
+    assert any("observed_catalog n_events=4" in e for e in result["errors"])
+
+
+def test_explicit_observed_catalog_path_overrides_legacy_heuristic(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path)
+    opts.observed_catalog_path = str(_write_observed_catalog(tmp_path / "observed_catalog.json", 3))
+    result = run_lensing_preflight(opts)
+    assert result["ok"], result
+    assert result["summary"]["unified_observed_mode"] is True
+    assert not result["summary"].get("unified_observed_mode_inferred_heuristic", False)
 
 
 def test_lensing_preflight_missing_pair_pe_path_errors_for_j2(tmp_path):

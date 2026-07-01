@@ -102,6 +102,8 @@ def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
         "--pe_max_per_pair", str(cfg["pe_max"]), "--pair_batch_size", str(pair_batch_size), "--seed", str(seed),
         "--cluster_mode", cluster_mode, "--save_path", str(save_root),
     ]
+    if use_unified_observed_catalog:
+        cmd += ["--observed_catalog_path", str(mock_dir / "observed_catalog.json")]
     if cluster_mode == "j2":
         cmd += [
             "--lensed_injections_path", str(mock_dir / "mock_lensed_injections.h5"),

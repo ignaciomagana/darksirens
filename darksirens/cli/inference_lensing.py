@@ -96,6 +96,10 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
+from darksirens.lensing.observed_catalog import (
+    observed_catalog_metadata_from_hdf5,
+    validate_observed_catalog_file,
+)
 from darksirens.lensing.partitions import exact_partitions_from_json, validate_candidate_pairs
 from darksirens.lensing.preflight import run_lensing_preflight
 from darksirens.lensing.marginal_diagnostics import compute_marginalized_partition_diagnostics
@@ -303,6 +307,21 @@ def load_inputs(opts):
     m1det, m2det, dL, chieff, ra, dec, p_pe, n_sing, nsamp = out
     m1det = np.asarray(m1det); m2det = np.asarray(m2det); dL = np.asarray(dL)
     chieff = np.asarray(chieff); p_pe = np.asarray(p_pe)
+    observed_catalog_meta = None
+    if getattr(opts, "observed_catalog_path", None):
+        observed_catalog_meta = validate_observed_catalog_file(opts.observed_catalog_path)
+        if int(observed_catalog_meta["n_events"]) != int(n_sing):
+            raise SystemExit(
+                f"observed_catalog n_events={observed_catalog_meta['n_events']} "
+                f"does not match GW PE n_events={n_sing}"
+            )
+    else:
+        observed_catalog_meta = observed_catalog_metadata_from_hdf5(opts.gw_path)
+        if observed_catalog_meta is not None and int(observed_catalog_meta["n_events"]) != int(n_sing):
+            raise SystemExit(
+                f"observed PE n_events={observed_catalog_meta['n_events']} "
+                f"does not match GW PE n_events={n_sing}"
+            )
 
     # --- selection ---
     sel = load_selection_samples(opts.gwselection_path)
@@ -330,6 +349,7 @@ def load_inputs(opts):
             pair_kdes=pair_kdes, lensed=None,
             pair_time_delta_t_obs=jnp.zeros((0,), dtype=jnp.float64),
             pair_time_sigma=jnp.zeros((0,), dtype=jnp.float64),
+            observed_catalog=observed_catalog_meta,
         )
 
     # --- j2: lensed injections + pair PE/metadata + partition(s) ---
@@ -360,7 +380,9 @@ def load_inputs(opts):
         max_partition_event = max(all_part_idx, default=-1)
     if max_partition_event < 0 and candidate_n_events is not None:
         max_partition_event = int(candidate_n_events) - 1
-    unified_observed_catalog = max_partition_event >= 0 and n_sing == max_partition_event + 1
+    explicit_unified_observed_catalog = observed_catalog_meta is not None
+    heuristic_unified_observed_catalog = max_partition_event >= 0 and n_sing == max_partition_event + 1
+    unified_observed_catalog = explicit_unified_observed_catalog or heuristic_unified_observed_catalog
 
     if not unified_observed_catalog and not opts.pair_pe_path:
         raise SystemExit("legacy split-pair --cluster_mode j2 requires --pair_pe_path with image0/image1 groups")
@@ -523,6 +545,8 @@ def load_inputs(opts):
         pair_time_sigma=jnp.asarray(pair_time_sigma, dtype=jnp.float64),
         partition_states=partition_states if partition_mode == "marginalize_exact" else None,
         candidate_pairs=candidate_pairs if partition_mode == "marginalize_exact" else None,
+        observed_catalog=observed_catalog_meta,
+        observed_catalog_heuristic=bool(heuristic_unified_observed_catalog and not explicit_unified_observed_catalog),
     )
 
 
@@ -604,6 +628,13 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
     else:
         attrs["n_singletons"] = int(inp["n_singletons"])
         attrs["n_pairs"] = int(inp["n_pairs"])
+    observed_catalog = inp.get("observed_catalog")
+    if observed_catalog:
+        if observed_catalog.get("path"):
+            attrs["observed_catalog_path"] = str(observed_catalog["path"])
+        attrs["observed_catalog_format_version"] = str(
+            observed_catalog.get("format_version") or observed_catalog.get("pe_format_version", "")
+        )
 
 
 def _print_diagnostics_summary(diagnostics):
@@ -794,6 +825,8 @@ def build_parser():
     p.add_argument("--pair_pe_path", default=None)
     p.add_argument("--partition_path", default=None)
     p.add_argument("--candidate_pairs_path", default=None)
+    p.add_argument("--observed_catalog_path", default=None,
+                   help="Explicit observed_catalog.json for unified observed lensing mode.")
     p.add_argument("--partition_mode", choices=["fixed", "marginalize_exact"], default="fixed")
     p.add_argument("--max_exact_partitions", type=int, default=10000)
     # model
@@ -922,6 +955,8 @@ def main():
 
     print("loading data ...", flush=True)
     inp = load_inputs(opts)
+    if inp.get("observed_catalog_heuristic"):
+        print("  [warning] unified observed mode inferred by deprecated event-count heuristic", flush=True)
     print(f"  events: {inp['nEvents']}  ({inp['n_singletons']} singletons "
           f"+ {inp['n_pairs']} pairs)  nsamp/event={inp['nsamp']}", flush=True)
 
@@ -1017,6 +1052,12 @@ def main():
         lens_prior_overrides=lens_overrides,
         **_lens_settings_dict(mid, labels, fixed, opts),
     )
+    if inp.get("observed_catalog"):
+        settings["observed_catalog_path"] = inp["observed_catalog"].get("path")
+        settings["observed_catalog_format_version"] = (
+            inp["observed_catalog"].get("format_version")
+            or inp["observed_catalog"].get("pe_format_version")
+        )
     if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
         settings.update(
             expected_n_pairs=float(diagnostics["expected_n_pairs"]),
