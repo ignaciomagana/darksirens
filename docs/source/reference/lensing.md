@@ -188,6 +188,66 @@ The validation passes only if true-pair J=2 diagnostics are finite, wrong pair
 partners have a lower `pair_logL_sum` than the truth partition, the null mock
 reports zero observed pairs, and `cluster_mode=off` remains singleton-only.
 
+
+### Evidence/recovery validation
+
+The evidence/recovery validator is an opt-in, heavier mock-only matrix for
+spectral-siren lensing.  Keep using the tiny diagnostic validation above for
+fast default checks; it is unchanged and remains the recommended smoke test:
+
+```bash
+bash scripts/mock_lensing/run_tiny_lensing_validation.sh
+```
+
+Preview the heavier evidence validation without generating mocks or launching a
+sampler with dry-run mode:
+
+```bash
+python scripts/mock_lensing/run_lensing_evidence_validation.py \
+  --profile tiny_evidence \
+  --workdir /tmp/ds_lens_evidence \
+  --dry_run true
+```
+
+A local opt-in evidence run uses loose nested-sampling settings so that it is
+manageable on a workstation rather than production scale:
+
+```bash
+python scripts/mock_lensing/run_lensing_evidence_validation.py \
+  --profile tiny_evidence \
+  --workdir /tmp/ds_lens_evidence \
+  --sampler dynesty \
+  --nlive 40 \
+  --dlogz 10 \
+  --pair_batch_size 8 \
+  --reuse
+```
+
+The runner writes `validation_summary.json` and `validation_summary.md`.  The
+matrix compares a singleton-only true catalog (`off_true_catalog`), fixed true
+J=2 partition (`j2_fixed_true`), deliberately shuffled/wrong fixed partition
+(`j2_fixed_wrong`), zero-pair null mock (`j2_null` plus `off_null` for evidence
+control), exact marginalized candidate-pair mode when `candidate_pairs.json` is
+available (`j2_marginalized`), and a batched fixed-true run (`j2_batched`).  It
+collects each latest run directory, `diagnostics.json`, `results.hdf5`
+attributes, sampler evidence when available, labels, lens-parameter posterior
+summaries when sampled, and runtime metadata.
+
+Pass/fail checks cover run completion, finite diagnostics, true-pair
+`pair_logL_sum` exceeding the shuffled partition, null/off modes reporting zero
+pairs, batched and unbatched prior-midpoint `logL_total` agreement, evidence
+ordering when `logZ` is available, and marginalized-run posterior-pair metadata.
+Failures usually indicate either a mock-generation problem, a regression in the
+J=2 likelihood/partition plumbing, numerical instability, or sampler settings
+that are too loose for the requested evidence comparison.  The optional
+`--run_lens_rate_recovery true` path is experimental; it uses a
+Poisson-conditioned mock and samples `log10_tau_A` while fixing `tau_n` through
+`--fixed_parameter_values`.
+
+This validation is still not a real LVK science run.  It validates methodology
+on controlled mocks only and deliberately avoids dark-siren, LSS, or
+catalog-host inference.
+
 ## `darksirens.lensing`
 
 The package `__init__` re-exports the lensing parameter containers and factory
