@@ -586,3 +586,40 @@ class TestNumpyReference:
         log_branch_np = self._ref_branch(ev_i, kde_j, sis_params, y_nodes, log_wy, cosmo)
 
         np.testing.assert_allclose(log_branch_jax, log_branch_np, rtol=1e-9, atol=1e-12)
+
+
+def test_pair_marks_none_matches_legacy_likelihood():
+    ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=120, seed=30)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"], ev_j["prior_wt"])
+    y_nodes, log_wy = make_y_grid(16)
+    sis = make_sis_lens_params(T0_seconds=4.32e5)
+    base = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy)
+    marked_none = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=0, delta_t_obs=jnp.asarray(1.0), sigma_delta_t=jnp.asarray(1.0))
+    np.testing.assert_allclose(np.asarray(marked_none), np.asarray(base), rtol=0, atol=0)
+
+
+def test_true_time_delay_increases_pair_likelihood():
+    y_true = 0.45
+    ev_i, ev_j = _synth_lensed_pair(y_true=y_true, n_pe=160, seed=31)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"], ev_j["prior_wt"])
+    y_nodes, log_wy = make_y_grid(32)
+    sis = make_sis_lens_params(T0_seconds=4.32e5)
+    true_dt = sis.T0 * y_true
+    sigma = 2.0e4
+    good = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=true_dt, sigma_delta_t=sigma)
+    bad = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=true_dt + 8.0 * sigma, sigma_delta_t=sigma)
+    assert float(good) > float(bad)
+
+
+def test_incompatible_time_delay_penalizes_shuffled_wrong_pair():
+    ev_i, ev_j = _synth_lensed_pair(y_true=0.30, n_pe=160, seed=32)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"], ev_j["prior_wt"])
+    y_nodes, log_wy = make_y_grid(32)
+    sis = make_sis_lens_params(T0_seconds=4.32e5)
+    sigma = 1.5e4
+    compatible = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=sis.T0 * 0.30, sigma_delta_t=sigma)
+    shuffled = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=sis.T0 * 0.90, sigma_delta_t=sigma)
+    assert float(compatible) > float(shuffled)

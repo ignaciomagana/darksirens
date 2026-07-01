@@ -74,7 +74,7 @@ from darksirens.utils.cosmology import (
 
 # ---- imported truth: lensing ----
 from darksirens.lensing.slmarks import (
-    tau_2_SIS, mu_plus_minus_from_y, make_sis_lens_params,
+    tau_2_SIS, mu_plus_minus_from_y, make_sis_lens_params, delta_t_from_y,
 )
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import save_lensed_injections
@@ -574,8 +574,16 @@ def write_pair_pe_file(pairs, path, nsamp):
             "raw_pe_prior_density_written; loader_normalizes_per_image"
         )
         f.attrs["mock_data"] = True
-        for k, (img0, img1) in enumerate(pairs):
+        f.attrs["time_delay_metadata"] = True
+        for k, pair in enumerate(pairs):
+            img0, img1 = pair["images"]
             g = f.create_group(f"pair_{k}")
+            g.attrs["delta_t_obs"] = float(pair["delta_t_obs"])
+            g.attrs["sigma_delta_t"] = float(pair["sigma_delta_t"])
+            g.attrs["true_y"] = float(pair["true_y"])
+            g.attrs["true_delta_t"] = float(pair["true_delta_t"])
+            g.attrs["t_obs_image0"] = float(pair["t_obs_image0"])
+            g.attrs["t_obs_image1"] = float(pair["t_obs_image1"])
             for name, img in (("image0", img0), ("image1", img1)):
                 gi = g.create_group(name)
                 gi.create_dataset("m1det", data=img["m1det"])
@@ -594,7 +602,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              rho_thr, horizon_Mpc, n_unlensed_inj, n_lensed_inj,
              H0, Om0, sis, wl, pair_tag_model="none", pair_tag_prob=1.0,
              n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
-             wrong_candidate_log_prior_odds=-5.0):
+             wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
     truth.update(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
@@ -602,7 +610,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                  n_sources_universe=n_universe, nsamp=nsamp,
                  conditioning=conditioning,
                  selection_model="Finn-Chernoff orientation-averaged p_det",
-                 pe_prior_convention="p_pe proportional to m1det * dL^2 in the (m1det, q, dL) basis")
+                 pe_prior_convention="p_pe proportional to m1det * dL^2 in the (m1det, q, dL) basis",
+                 time_delay_sigma_sec=float(time_delay_sigma_sec))
 
     rng = np.random.default_rng(seed)
     model = SNRModel(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc)
@@ -667,7 +676,15 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                              marks["mu_plus"][i], model, nsamp, rng, H0, Om0)
         img1 = make_event_pe(src["m1"][i], src["q"][i], src["z"][i], src["chi"][i],
                              marks["mu_minus"][i], model, nsamp, rng, H0, Om0)
-        pairs.append((img0, img1))
+        true_dt = float(delta_t_from_y(jnp.asarray(marks["y"][i]), sis))
+        dt_obs = float(true_dt + rng.normal(0.0, time_delay_sigma_sec))
+        pairs.append(dict(
+            images=(img0, img1), true_y=float(marks["y"][i]),
+            true_delta_t=true_dt, delta_t_obs=dt_obs,
+            sigma_delta_t=float(time_delay_sigma_sec),
+            t_obs_image0=0.0, t_obs_image1=dt_obs,
+            source_index=int(i),
+        ))
     write_pair_pe_file(pairs, os.path.join(out_dir, "mock_pair_pe.h5"), nsamp)
 
     # ---- injection campaigns ----
@@ -688,6 +705,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         truth=dict(
             singleton_source_indices=[int(i) for i in sing_idx],
             pair_source_indices=[int(i) for i in pair_src_idx],
+            pair_time_delays=[dict(source_index=p["source_index"], true_y=p["true_y"], true_delta_t=p["true_delta_t"], delta_t_obs=p["delta_t_obs"], sigma_delta_t=p["sigma_delta_t"]) for p in pairs],
             pair_partition=[[S + 2 * k, S + 2 * k + 1] for k in range(P)],
         ),
         note="event order: singletons [0..S-1], then pair images [S+2k, S+2k+1]",
@@ -743,6 +761,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         n_pairs_kept=P,
         caps_applied=caps_applied,
         pair_partition_truth=partition["truth"],
+        pair_time_delay_truth=partition["truth"]["pair_time_delays"],
     )
     with open(os.path.join(out_dir, "truth.json"), "w") as f:
         json.dump(truth_out, f, indent=2)
@@ -773,6 +792,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                 "prior_weight_convention", "mock_data",
             ],
             coordinates=["m1det", "q", "dL_app", "chieff"],
+            time_delay={"per_pair_attrs": ["delta_t_obs", "sigma_delta_t", "true_y", "true_delta_t", "t_obs_image0", "t_obs_image1"]},
             prior_wt=(
                 "raw PE prior-density values are written in each image; "
                 "darksirens_inference_lensing validates finite positive values "
@@ -838,6 +858,8 @@ def parse_args():
                    help="log prior odds assigned to true candidate edges")
     p.add_argument("--wrong-candidate-log-prior-odds", type=float, default=-5.0,
                    help="log prior odds assigned to shuffled wrong candidate edges")
+    p.add_argument("--time-delay-sigma-sec", type=float, default=3600.0,
+                   help="Gaussian sigma for observed SIS pair time delays, in seconds")
     return p.parse_args()
 
 
@@ -857,6 +879,7 @@ def main():
         n_wrong_candidate_pairs=args.n_wrong_candidate_pairs,
         candidate_pair_log_prior_odds=args.candidate_pair_log_prior_odds,
         wrong_candidate_log_prior_odds=args.wrong_candidate_log_prior_odds,
+        time_delay_sigma_sec=args.time_delay_sigma_sec,
     )
     c = manifest["counts"]
     print(json.dumps(c, indent=2))

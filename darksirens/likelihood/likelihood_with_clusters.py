@@ -93,6 +93,9 @@ WL_BACKEND_TABULATED = 1
 WL_SELECTION_STANDARD = 0
 WL_SELECTION_LOGNORMAL = 1
 
+PAIR_MARKS_NONE = 0
+PAIR_MARKS_TIME = 1
+
 
 @partial(
     jax.jit,
@@ -108,6 +111,7 @@ WL_SELECTION_LOGNORMAL = 1
         "cluster_mode",
         "return_diagnostics",
         "wl_selection",
+        "pair_marks",
     ],
 )
 def darksiren_log_likelihood_with_clusters(
@@ -145,6 +149,9 @@ def darksiren_log_likelihood_with_clusters(
     wl_log_p_table: jnp.ndarray | None = None,
     return_diagnostics: bool = False,
     wl_selection: int = WL_SELECTION_STANDARD,
+    pair_marks: int = PAIR_MARKS_NONE,
+    pair_time_delta_t_obs: jnp.ndarray | None = None,
+    pair_time_sigma: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
 
@@ -391,10 +398,18 @@ def darksiren_log_likelihood_with_clusters(
             ev_j = _extract_event(j)
             kde_i = _slice_event_kde_inside_jit(pair_kdes, i)
             kde_j = _slice_event_kde_inside_jit(pair_kdes, j)
+            if pair_marks == PAIR_MARKS_TIME:
+                dt_obs_k = pair_time_delta_t_obs[k]
+                dt_sig_k = pair_time_sigma[k]
+            else:
+                dt_obs_k = None
+                dt_sig_k = None
             ll_pair = cluster_log_likelihood_pair(
                 ev_i, ev_j, kde_i, kde_j,
                 cosmo, survey, pop_params, em_catalog_pe, sis_params,
                 log_p_pop, log_prior_z, y_nodes, log_wy,
+                pair_marks=pair_marks,
+                delta_t_obs=dt_obs_k, sigma_delta_t=dt_sig_k,
             )
             ll_pair_safe = jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf)
             if return_diagnostics:

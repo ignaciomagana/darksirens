@@ -106,6 +106,7 @@ from darksirens.likelihood.likelihood_with_clusters import (
     CLUSTER_MODE_J2, CLUSTER_MODE_OFF,
     WL_BACKEND_LOGNORMAL, WL_BACKEND_DISABLED,
     WL_SELECTION_STANDARD, WL_SELECTION_LOGNORMAL,
+    PAIR_MARKS_NONE, PAIR_MARKS_TIME,
 )
 
 
@@ -202,6 +203,8 @@ def load_inputs(opts):
             pair_indices=jnp.zeros((0, 2), dtype=jnp.int32),
             n_singletons=n_sing, n_pairs=0,
             pair_kdes=pair_kdes, lensed=None,
+            pair_time_delta_t_obs=jnp.zeros((0,), dtype=jnp.float64),
+            pair_time_sigma=jnp.zeros((0,), dtype=jnp.float64),
         )
 
     # --- j2: lensed injections + pair PE + partition(s) ---
@@ -216,10 +219,25 @@ def load_inputs(opts):
     partition = json.load(open(opts.partition_path, "r", encoding="utf-8")) if opts.partition_path else None
 
     pairs = []
+    pair_time_delta_t_obs = []
+    pair_time_sigma = []
     with h5py.File(opts.pair_pe_path) as f:
         npairs = int(f.attrs["npairs"])
         for k in range(npairs):
             g = f[f"pair_{k}"]; imgs = []
+            has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
+            if has_dt:
+                pair_time_delta_t_obs.append(float(g.attrs["delta_t_obs"] if "delta_t_obs" in g.attrs else np.asarray(g["delta_t_obs"])[()]))
+                if "sigma_delta_t" in g.attrs:
+                    pair_time_sigma.append(float(g.attrs["sigma_delta_t"]))
+                elif "sigma_delta_t" in g:
+                    pair_time_sigma.append(float(np.asarray(g["sigma_delta_t"])[()]))
+                elif opts.pair_time_sigma_sec is not None:
+                    pair_time_sigma.append(float(opts.pair_time_sigma_sec))
+                else:
+                    raise SystemExit(f"pair_marks=time requires sigma_delta_t in pair_{k} or --pair_time_sigma_sec")
+            elif opts.pair_marks == "time":
+                raise SystemExit(f"pair_marks=time requires delta_t_obs metadata for pair_{k}")
             for name in ("image0", "image1"):
                 gi = g[name]
                 d = dict(m1det=np.array(gi["m1det"]), q=np.array(gi["q"]),
@@ -315,6 +333,8 @@ def load_inputs(opts):
         n_singletons=fixed_n_singletons, n_pairs=fixed_n_pairs,
         pair_kdes=pair_kdes, lensed=lensed,
         marginal_partitions=marginal_partitions, log_z_prior=float(log_z_prior),
+        pair_time_delta_t_obs=jnp.asarray(pair_time_delta_t_obs, dtype=jnp.float64),
+        pair_time_sigma=jnp.asarray(pair_time_sigma, dtype=jnp.float64),
     )
 
 
@@ -377,6 +397,7 @@ def build_cluster_likelihood(opts, inp, decoder):
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
     wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
     wl_selection = WL_SELECTION_LOGNORMAL if opts.wl_selection == "wl_lognormal" else WL_SELECTION_STANDARD
+    pair_marks = PAIR_MARKS_TIME if opts.pair_marks == "time" else PAIR_MARKS_NONE
     universe_model = opts.universe_model
 
     if inp["lensed"] is None:
@@ -405,6 +426,9 @@ def build_cluster_likelihood(opts, inp, decoder):
                 sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
                 wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
                 wl_selection=wl_selection,
+                pair_marks=pair_marks,
+                pair_time_delta_t_obs=inp["pair_time_delta_t_obs"],
+                pair_time_sigma=inp["pair_time_sigma"],
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
@@ -424,6 +448,7 @@ def build_cluster_diagnostics(opts, inp, decoder):
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
     wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
     wl_selection = WL_SELECTION_LOGNORMAL if opts.wl_selection == "wl_lognormal" else WL_SELECTION_STANDARD
+    pair_marks = PAIR_MARKS_TIME if opts.pair_marks == "time" else PAIR_MARKS_NONE
     universe_model = opts.universe_model
     if inp["lensed"] is None:
         log_p_tag = jnp.zeros(0)
@@ -446,6 +471,9 @@ def build_cluster_diagnostics(opts, inp, decoder):
             sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
             wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
             wl_selection=wl_selection,
+            pair_marks=pair_marks,
+            pair_time_delta_t_obs=inp["pair_time_delta_t_obs"],
+            pair_time_sigma=inp["pair_time_sigma"],
         )
         out = _diagnostics_to_python(raw)
         out.update(
@@ -484,6 +512,10 @@ def build_parser():
     p.add_argument("--lensing_wl_b", type=float, default=1.5)
     p.add_argument("--sl_tau_A", type=float, default=5e-4)
     p.add_argument("--sl_tau_n", type=float, default=3.0)
+    p.add_argument("--pair_marks", choices=["none", "time"], default="none",
+                   help="Optional J=2 pair marks. 'time' uses delta_t_obs metadata in --pair_pe_path.")
+    p.add_argument("--pair_time_sigma_sec", type=float, default=None,
+                   help="Fallback sigma_delta_t in seconds when pair time metadata omits sigma.")
     # fixing
     p.add_argument("--fix_cosmology", default="true")
     p.add_argument("--fix_survey", default="true")
@@ -557,7 +589,7 @@ def main():
     print(f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend} | wl_selection={opts.wl_selection}] ===")
     print(
         "  lensing hyperparameters: "
-        f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, wl_selection={opts.wl_selection}, "
+        f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, wl_selection={opts.wl_selection}, pair_marks={opts.pair_marks}, "
         f"wl_a={opts.lensing_wl_a}, wl_b={opts.lensing_wl_b}, "
         f"sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
         flush=True,
