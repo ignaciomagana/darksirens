@@ -8,6 +8,10 @@ from typing import Any
 import h5py
 import numpy as np
 
+from darksirens.lensing.observed_catalog import (
+    observed_catalog_metadata_from_hdf5,
+    validate_observed_catalog_file,
+)
 from darksirens.lensing.partitions import validate_candidate_pairs, enumerate_compatible_partitions
 from darksirens.likelihood.pair_kde import validate_pair_prior_wt
 
@@ -52,7 +56,39 @@ def _infer_gw(path, errors, summary):
         return None, None
 
 
-def _check_partition(path, n_events, errors, summary):
+def _resolve_observed_catalog(opts, gw_n_events, errors, warnings, summary):
+    catalog_path = _get(opts, "observed_catalog_path")
+    meta = None
+    if catalog_path:
+        try:
+            meta = validate_observed_catalog_file(catalog_path)
+        except Exception as exc:
+            errors.append(f"observed_catalog_path invalid: {exc}")
+            return None
+        summary["observed_catalog"] = {k: v for k, v in meta.items() if k != "sha256"}
+        if gw_n_events is not None and int(meta["n_events"]) != int(gw_n_events):
+            errors.append(
+                f"observed_catalog n_events={meta['n_events']} does not match gw n_events={gw_n_events}"
+            )
+        return meta
+    gw_path = _get(opts, "gw_path")
+    if gw_path and Path(gw_path).exists():
+        try:
+            h5_meta = observed_catalog_metadata_from_hdf5(gw_path)
+        except Exception as exc:
+            errors.append(f"gw_path observed-catalog attrs not readable: {exc}")
+            return None
+        if h5_meta is not None:
+            summary["observed_catalog"] = h5_meta
+            if gw_n_events is not None and int(h5_meta["n_events"]) != int(gw_n_events):
+                errors.append(
+                    f"observed PE n_events={h5_meta['n_events']} does not match gw n_events={gw_n_events}"
+                )
+            return h5_meta
+    return None
+
+
+def _check_partition(path, n_events, errors, summary, *, observed_n_events=None):
     if not _exists(path, errors, "partition_path"):
         return []
     try:
@@ -71,8 +107,9 @@ def _check_partition(path, n_events, errors, summary):
     if int(data.get("n_pairs", pairs.shape[0] if pairs.ndim == 2 else -1)) != (pairs.shape[0] if pairs.ndim == 2 else -1):
         errors.append("partition n_pairs does not match pair_indices")
     used = list(map(int, singletons)) + [int(x) for x in pairs.reshape(-1)]
-    if n_events is not None and any(i < 0 or i >= n_events for i in used):
-        errors.append(f"partition index out of range for n_events={n_events}")
+    limit = observed_n_events if observed_n_events is not None else n_events
+    if limit is not None and any(i < 0 or i >= limit for i in used):
+        errors.append(f"partition index out of range for observed catalog n_events={limit}")
     if len(set(used)) != len(used):
         errors.append("fixed partition uses at least one event more than once")
     summary["n_pairs_partition"] = int(pairs.shape[0]) if pairs.ndim == 2 else None
@@ -150,14 +187,15 @@ def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary, *, un
         errors.append(f"pair_pe_path not readable: {path}: {exc}")
 
 
-def _check_candidates(path, n_events, opts, errors, summary):
+def _check_candidates(path, n_events, opts, errors, summary, *, observed_n_events=None):
     if not _exists(path, errors, "candidate_pairs_path"):
         return
     try:
         data = _read_json(path)
         cand_n, pairs = validate_candidate_pairs(data)
         summary["n_candidate_pairs"] = len(pairs)
-        if n_events is not None and cand_n != n_events:
+        expected = observed_n_events if observed_n_events is not None else n_events
+        if expected is not None and cand_n != expected:
             errors.append(f"candidate_pairs n_events={cand_n} does not match gw n_events={n_events}")
         if _get(opts, "pair_marks", "none") == "time":
             for pair in pairs:
@@ -203,12 +241,14 @@ def run_lensing_preflight(opts) -> dict:
     warnings: list[str] = []
     summary = {"cluster_mode": _get(opts, "cluster_mode"), "partition_mode": _get(opts, "partition_mode", "fixed"), "pair_marks": _get(opts, "pair_marks", "none"), "p_tag_present": False}
     n_events, _ = _infer_gw(_get(opts, "gw_path"), errors, summary)
+    observed_meta = _resolve_observed_catalog(opts, n_events, errors, warnings, summary)
+    observed_n_events = int(observed_meta["n_events"]) if observed_meta is not None else None
     _exists(_get(opts, "gwselection_path"), errors, "gwselection_path")
     partition_pairs = []
     unified_observed_mode = False
     if _get(opts, "cluster_mode") == "j2":
         if _get(opts, "partition_mode", "fixed") == "fixed":
-            partition_pairs = _check_partition(_get(opts, "partition_path"), n_events, errors, summary)
+            partition_pairs = _check_partition(_get(opts, "partition_path"), n_events, errors, summary, observed_n_events=observed_n_events)
             if n_events is not None and partition_pairs:
                 used = [i for pair in partition_pairs for i in pair]
                 singletons = []
@@ -218,12 +258,17 @@ def run_lensing_preflight(opts) -> dict:
                     pass
                 unified_observed_mode = (max(singletons + used, default=-1) + 1 == n_events)
         elif _get(opts, "partition_mode") == "marginalize_exact":
-            _check_candidates(_get(opts, "candidate_pairs_path"), n_events, opts, errors, summary)
+            _check_candidates(_get(opts, "candidate_pairs_path"), n_events, opts, errors, summary, observed_n_events=observed_n_events)
             try:
                 cand = _read_json(_get(opts, "candidate_pairs_path"))
                 unified_observed_mode = n_events is not None and int(cand.get("n_events", -1)) == int(n_events)
             except Exception:
                 unified_observed_mode = False
+        if observed_meta is not None:
+            unified_observed_mode = True
+        elif unified_observed_mode:
+            warnings.append("unified observed mode was inferred by deprecated event-count heuristic")
+            summary["unified_observed_mode_inferred_heuristic"] = True
         summary["unified_observed_mode"] = bool(unified_observed_mode)
         _check_lensed(_get(opts, "lensed_injections_path"), errors, summary)
         _check_pair_pe(_get(opts, "pair_pe_path"), n_events, partition_pairs, opts, errors, summary, unified_observed_mode=unified_observed_mode)

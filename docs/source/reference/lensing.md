@@ -527,6 +527,46 @@ which makes it the preferred mock format for unknown-partition and
 candidate-pair marginalization tests.  The truth partition is retained only as
 metadata in ``partition.json`` and ``observed_catalog.json``.
 
+Observed catalog schema
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Unified observed-catalog runs should pass ``--observed_catalog_path
+observed_catalog.json``.  If omitted, inference accepts a GW PE file whose HDF5
+attributes declare ``format_version = "observed-lensing-pe-1.0"`` and
+``event_indexing = "global"``.  The older event-count heuristic is retained only
+as a deprecated fallback and emits a preflight warning.
+
+The observed-catalog JSON schema is intentionally small:
+
+```json
+{
+  "format_version": "observed-lensing-catalog-1.0",
+  "event_indexing": "global",
+  "n_events": 12,
+  "events": [
+    {
+      "event_index": 0,
+      "event_id": "mock_event_000",
+      "kind": "singleton_or_image",
+      "gps_time": 1234567890.0,
+      "truth_source_id": 0,
+      "truth_image_index": null,
+      "truth_is_lensed_image": false
+    }
+  ]
+}
+```
+
+Inference requires only the global indexing contract: ``format_version``,
+``event_indexing = "global"``, ``n_events``, and one unique ``event_id`` for
+each contiguous ``event_index`` from ``0`` through ``n_events - 1``.  ``gps_time``
+is optional for now, but if present it must be finite.  The ``truth_*`` fields
+are validation-only mock metadata; inference ignores them and must not depend on
+them.  Mock ``mock_observed_gw_pe.h5`` files also carry
+``format_version = "observed-lensing-pe-1.0"``, ``event_indexing = "global"``,
+``n_events``, ``source = "mock_lensing"``, and the observed-catalog path and/or
+SHA-256 digest.
+
 The fixed-partition workflow remains useful for controlled validation, where the
 true singleton and pair assignment is intentionally supplied to the likelihood.
 For unknown-partition validation, pass the unified observed catalog as
@@ -546,6 +586,7 @@ Run with the fixed truth partition on the unified observed catalog::
 
   python -m darksirens.cli.inference_lensing \
     --gw_path /tmp/ds_lens_unified/mock_observed_gw_pe.h5 \
+    --observed_catalog_path /tmp/ds_lens_unified/observed_catalog.json \
     --gwselection_path /tmp/ds_lens_unified/mock_gw_selection.h5 \
     --lensed_injections_path /tmp/ds_lens_unified/mock_lensed_injections.h5 \
     --pair_pe_path /tmp/ds_lens_unified/mock_pair_pe.h5 \
@@ -556,6 +597,7 @@ Run exact candidate-pair marginalization::
 
   python -m darksirens.cli.inference_lensing \
     --gw_path /tmp/ds_lens_unified/mock_observed_gw_pe.h5 \
+    --observed_catalog_path /tmp/ds_lens_unified/observed_catalog.json \
     --gwselection_path /tmp/ds_lens_unified/mock_gw_selection.h5 \
     --lensed_injections_path /tmp/ds_lens_unified/mock_lensed_injections.h5 \
     --pair_pe_path /tmp/ds_lens_unified/mock_pair_pe.h5 \

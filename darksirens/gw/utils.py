@@ -63,7 +63,8 @@ def _decode_hdf5_attr(value):
 
 def _require_hdf5_format(f, expected, conversion_hint):
     observed = _decode_hdf5_attr(f.attrs.get("format_version", ""))
-    if observed != expected:
+    expected_values = (expected,) if isinstance(expected, str) else tuple(expected)
+    if observed not in expected_values:
         raise RuntimeError(
             f"Unsupported GW catalog format {observed!r}. Expected {expected!r}. "
             f"{conversion_hint}"
@@ -136,7 +137,7 @@ def load_gw_samples(gw_path):
     )
 
     with h5py.File(gw_path, "r") as f:
-        _require_hdf5_format(f, "gwcat-1.0", conversion_hint)
+        _require_hdf5_format(f, ("gwcat-1.0", "observed-lensing-pe-1.0"), conversion_hint)
         _require_hdf5_members(
             f,
             datasets=required_datasets,

@@ -55,6 +55,11 @@ def test_generator_writes_unified_observed_catalog_metadata(tmp_path):
 
     with h5py.File(mock / "mock_observed_gw_pe.h5") as f:
         assert int(f.attrs["nobs"]) == observed["n_events"]
+        assert f.attrs["format_version"] == "observed-lensing-pe-1.0"
+        assert f.attrs["event_indexing"] == "global"
+        assert int(f.attrs["n_events"]) == observed["n_events"]
+        assert f.attrs["source"] == "mock_lensing"
+        assert "observed_catalog_sha256" in f.attrs
     with h5py.File(mock / "mock_pair_pe.h5") as f:
         for k, pair_indices in enumerate(partition["pair_indices"]):
             group = f[f"pair_{k}"]

@@ -147,6 +147,8 @@ def _collect_run(save_root: Path, *, runtime_s: float, command: list[str]) -> di
 
 def _cli_cmd(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, sampler: str, nlive: int, dlogz: float, seed: int, cfg: dict[str, int], pair_batch_size: int = 0, partition_mode: str = "fixed", use_unified_observed_catalog: bool = False, fix_lens_rate: bool = True, pair_pe_path: Path | None = None) -> list[str]:
     cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(mock_dir / ("mock_observed_gw_pe.h5" if use_unified_observed_catalog else "mock_gw_pe.h5")), "--gwselection_path", str(mock_dir / "mock_gw_selection.h5"), "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak", "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true", "--fix_lens_rate", str(fix_lens_rate).lower(), "--sampler", sampler, "--nlive", str(nlive), "--dlogz", str(dlogz), "--max_samples", "5000", "--pe_max_per_pair", str(cfg["pe_max"]), "--pair_batch_size", str(pair_batch_size), "--seed", str(seed), "--cluster_mode", cluster_mode, "--save_path", str(save_root)]
+    if use_unified_observed_catalog:
+        cmd += ["--observed_catalog_path", str(mock_dir / "observed_catalog.json")]
     if not fix_lens_rate:
         cmd += ["--fixed_parameter_values", '{"tau_n": 3.0}', "--lens_prior_overrides", '{"log10_tau_A": [-5.0, -2.5]}']
     if cluster_mode == "j2":

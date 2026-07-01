@@ -78,6 +78,7 @@ from darksirens.lensing.slmarks import (
 )
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import save_lensed_injections
+from darksirens.lensing.observed_catalog import write_observed_pe_attrs
 
 POP_NAME = "powerlaw+peak"
 THETA_PARAM_ORDER = [
@@ -700,11 +701,10 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     for pair in pairs:
         observed_events.extend(pair["images"])
 
+    observed_pe_path = os.path.join(out_dir, "mock_observed_gw_pe.h5")
+    observed_catalog_path = os.path.join(out_dir, "observed_catalog.json")
     if write_unified_observed_catalog:
-        write_gw_pe_file(
-            observed_events, os.path.join(out_dir, "mock_observed_gw_pe.h5"),
-            nsamp, H0, Om0,
-        )
+        write_gw_pe_file(observed_events, observed_pe_path, nsamp, H0, Om0)
 
     write_pair_pe_file(pairs, os.path.join(out_dir, "mock_pair_pe.h5"), nsamp, pair_indices=pair_indices)
 
@@ -734,10 +734,21 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         json.dump(partition, f, indent=2)
 
     event_records = []
+    schema_events = []
+    base_gps_time = 1234567890.0
     for event_index, source_index in enumerate(sing_idx):
         event_records.append(dict(
             event_index=int(event_index), kind="singleton", source_index=int(source_index),
             pair_index=None, image_index=None, truth_partner_event_index=None,
+        ))
+        schema_events.append(dict(
+            event_index=int(event_index),
+            event_id=f"mock_event_{event_index:03d}",
+            kind="singleton_or_image",
+            gps_time=float(base_gps_time + event_index),
+            truth_source_id=int(source_index),
+            truth_image_index=None,
+            truth_is_lensed_image=False,
         ))
     for k, (pair, (i0, i1)) in enumerate(zip(pairs, pair_indices)):
         event_records.extend([
@@ -746,8 +757,21 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             dict(event_index=int(i1), kind="lensed_image", source_index=int(pair["source_index"]),
                  pair_index=int(k), image_index=1, truth_partner_event_index=int(i0)),
         ])
+        for image_index, event_index in enumerate((i0, i1)):
+            schema_events.append(dict(
+                event_index=int(event_index),
+                event_id=f"mock_event_{event_index:03d}",
+                kind="singleton_or_image",
+                gps_time=float(base_gps_time + event_index),
+                truth_source_id=int(pair["source_index"]),
+                truth_image_index=int(image_index),
+                truth_is_lensed_image=True,
+            ))
     observed_catalog = dict(
+        format_version="observed-lensing-catalog-1.0",
+        event_indexing="global",
         n_events=int(S + 2 * P),
+        events=schema_events,
         event_order="singletons first, then lensed image pairs",
         event_records=event_records,
         truth_partition=dict(
@@ -757,8 +781,14 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         ),
     )
     if write_unified_observed_catalog:
-        with open(os.path.join(out_dir, "observed_catalog.json"), "w") as f:
+        with open(observed_catalog_path, "w") as f:
             json.dump(observed_catalog, f, indent=2)
+        write_observed_pe_attrs(
+            observed_pe_path,
+            n_events=int(S + 2 * P),
+            catalog_path=observed_catalog_path,
+            source="mock_lensing",
+        )
 
     # ---- candidate pairs for exact partition marginalization ----
     true_edges = []
