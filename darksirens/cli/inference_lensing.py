@@ -505,6 +505,37 @@ def _write_diagnostics(run_dir, diagnostics):
                 f.attrs[key] = value
 
 
+def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
+    """Write unambiguous partition-count metadata to ``results.hdf5`` attrs."""
+    partition_mode = str(getattr(opts, "partition_mode", "fixed"))
+    attrs["partition_mode"] = partition_mode
+    attrs["cluster_mode"] = opts.cluster_mode
+    attrs["wl_backend"] = opts.wl_backend
+    attrs["wl_selection"] = opts.wl_selection
+    attrs["n_events"] = int(inp["nEvents"])
+    attrs["reference_partition_n_singletons"] = int(inp["n_singletons"])
+    attrs["reference_partition_n_pairs"] = int(inp["n_pairs"])
+    if partition_mode == "marginalize_exact":
+        # Backward-compatible legacy fields.  They intentionally remain the
+        # enumerator/reference partition counts rather than posterior means.
+        attrs["n_singletons"] = int(inp["n_singletons"])
+        attrs["n_pairs"] = int(inp["n_pairs"])
+        attrs["n_singletons_meaning"] = "reference_partition_n_singletons"
+        attrs["n_pairs_meaning"] = "reference_partition_n_pairs"
+        attrs["n_partitions"] = int(diagnostics["n_partitions"])
+        attrs["expected_n_singletons"] = float(diagnostics["expected_n_singletons"])
+        attrs["expected_n_pairs"] = float(diagnostics["expected_n_pairs"])
+        attrs["map_partition_index"] = int(diagnostics["map_partition_index"])
+        map_partition = diagnostics["map_partition"]
+        attrs["map_partition_n_singletons"] = int(map_partition["n_singletons"])
+        attrs["map_partition_n_pairs"] = int(map_partition["n_pairs"])
+        attrs["logL_marginalized"] = float(diagnostics["logL_marginalized"])
+        attrs["log_z_partition_prior"] = float(diagnostics["log_z_partition_prior"])
+    else:
+        attrs["n_singletons"] = int(inp["n_singletons"])
+        attrs["n_pairs"] = int(inp["n_pairs"])
+
+
 def _print_diagnostics_summary(diagnostics):
     print("  likelihood diagnostics (prior midpoint):", flush=True)
     for key in (
@@ -514,9 +545,20 @@ def _print_diagnostics_summary(diagnostics):
     ):
         if key in diagnostics:
             print(f"    {key}: {diagnostics[key]}", flush=True)
+    if diagnostics.get("partition_mode") == "marginalize_exact":
+        count_summary = (
+            f"    expected_n_singletons: {diagnostics.get('expected_n_singletons')}  "
+            f"expected_n_pairs: {diagnostics.get('expected_n_pairs')}  "
+            f"map_n_pairs: {diagnostics.get('map_partition', {}).get('n_pairs')}  "
+            f"n_partitions: {diagnostics.get('n_partitions')}  "
+        )
+    else:
+        count_summary = (
+            f"    n_singletons: {diagnostics.get('n_singletons')}  "
+            f"n_pairs: {diagnostics.get('n_pairs')}  "
+        )
     print(
-        f"    n_singletons: {diagnostics.get('n_singletons', diagnostics.get('expected_n_singletons'))}  "
-        f"n_pairs: {diagnostics.get('n_pairs', diagnostics.get('expected_n_pairs'))}  "
+        count_summary +
         f"pair_batch_size: {diagnostics.get('pair_batch_size')}  "
         f"y_nodes_pair: {diagnostics.get('y_nodes_pair')}  "
         f"pe_max_per_pair: {diagnostics.get('pe_max_per_pair')}  "
@@ -875,9 +917,7 @@ def main():
     with h5py.File(os.path.join(run_dir, "results.hdf5"), "w") as f:
         f.create_dataset("samples", data=samples)
         f.attrs["labels"] = json.dumps(labels)
-        f.attrs["cluster_mode"] = opts.cluster_mode
-        f.attrs["wl_backend"] = opts.wl_backend
-        f.attrs["wl_selection"] = opts.wl_selection
+        _write_result_partition_metadata(f.attrs, opts=opts, inp=inp, diagnostics=diagnostics)
         f.attrs["wl_a"] = float(opts.lensing_wl_a)
         f.attrs["wl_b"] = float(opts.lensing_wl_b)
         lens_settings = _lens_settings_dict(mid, labels, fixed, opts)
@@ -887,8 +927,6 @@ def main():
         f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
         f.attrs["lens_A_tau"] = float(lens_settings["lens_A_tau"])
         f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
-        f.attrs["n_events"] = inp["nEvents"]
-        f.attrs["n_pairs"] = inp["n_pairs"]
         if results.get("logZ") is not None:
             f.attrs["logZ"] = float(results["logZ"])
         if getattr(opts, "tinyns_resolved_config", None) is not None:
@@ -902,9 +940,17 @@ def main():
     settings.update(
         wl_a=float(opts.lensing_wl_a),
         wl_b=float(opts.lensing_wl_b),
+        partition_mode=getattr(opts, "partition_mode", "fixed"),
         lens_prior_overrides=lens_overrides,
         **_lens_settings_dict(mid, labels, fixed, opts),
     )
+    if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+        settings.update(
+            expected_n_pairs=float(diagnostics["expected_n_pairs"]),
+            map_n_pairs=int(diagnostics["map_partition"]["n_pairs"]),
+            n_partitions=int(diagnostics["n_partitions"]),
+            logL_marginalized=float(diagnostics["logL_marginalized"]),
+        )
     with open(os.path.join(run_dir, "settings.json"), "w") as f:
         json.dump(settings, f, indent=2)
     _write_diagnostics(run_dir, diagnostics)

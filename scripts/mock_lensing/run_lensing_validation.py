@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import h5py
+
 ROOT = Path(__file__).resolve().parents[2]
 GEN = ROOT / "scripts" / "mock_lensing" / "generate_mock_lensing.py"
 
@@ -76,6 +78,14 @@ def _latest_diagnostics(save_root: Path) -> dict:
     if not files:
         raise RuntimeError(f"no diagnostics.json found under {save_root}")
     return json.loads(files[-1].read_text())
+
+
+def _latest_results_attrs(save_root: Path) -> dict:
+    files = sorted(save_root.glob("**/results.hdf5"), key=lambda p: p.stat().st_mtime)
+    if not files:
+        raise RuntimeError(f"no results.hdf5 found under {save_root}")
+    with h5py.File(files[-1], "r") as f:
+        return {k: (v.decode() if isinstance(v, bytes) else v.item() if hasattr(v, "item") else v) for k, v in f.attrs.items()}
 
 
 def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int, pair_batch_size: int = 0, partition_mode: str = "fixed", use_unified_observed_catalog: bool = False, skip_preflight: bool = False) -> dict:
@@ -152,11 +162,15 @@ def main(argv: list[str] | None = None) -> int:
     null = _run_cli(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, skip_preflight=args.skip_preflight)
     marginalized = None
     if args.run_marginalized and (mock / "candidate_pairs.json").exists():
+        marginalized_root = runs / "j2_marginalized"
         marginalized = _run_cli(
-            mock, runs / "j2_marginalized", cluster_mode="j2", partition=None, cfg=cfg,
+            mock, marginalized_root, cluster_mode="j2", partition=None, cfg=cfg,
             seed=args.seed, pair_batch_size=args.pair_batch_size, partition_mode="marginalize_exact",
             use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight,
         )
+        marginalized_attrs = _latest_results_attrs(marginalized_root)
+    else:
+        marginalized_attrs = None
 
     checks = {
         "true_j2_finite_logL_and_diagnostics": math.isfinite(float(true["logL_total"])) and _finite_diag(true),
@@ -179,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
             "marginalized_has_partitions": int(marginalized["n_partitions"]) >= 1,
             "marginalized_expected_n_pairs_finite": math.isfinite(float(marginalized["expected_n_pairs"])),
             "marginalized_pair_probabilities_in_unit_interval": all(0.0 <= p <= 1.0 for p in probs),
+            "marginalized_results_partition_mode_attr": marginalized_attrs.get("partition_mode") == "marginalize_exact",
+            "marginalized_results_n_partitions_attr": "n_partitions" in marginalized_attrs,
+            "marginalized_results_expected_n_pairs_attr": "expected_n_pairs" in marginalized_attrs,
+            "marginalized_results_map_partition_n_pairs_attr": "map_partition_n_pairs" in marginalized_attrs,
+            "marginalized_results_reference_partition_n_pairs_attr": "reference_partition_n_pairs" in marginalized_attrs,
         })
     print("\n[validation] diagnostics summary")
     summary_items = [("off", off), ("j2_true", true), ("j2_wrong", wrong), ("j2_null", null)]
