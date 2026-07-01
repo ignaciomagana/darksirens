@@ -51,6 +51,26 @@ generates a tiny mock in `data/tiny_lens`, runs `darksirens.cli.inference_lensin
 with `cluster_mode=off` and `cluster_mode=j2` using very small sampler settings,
 and prints the mock and run-output directories.
 
+For the lightweight validation equivalent of a full F1/F2 lensing guide, use
+`run_lensing_validation.py`.  It generates (or, with `--reuse`, reuses) a small
+in-repo mock, exercises the actual `darksirens.cli.inference_lensing` loading
+path at fixed prior-midpoint parameters, and checks four cases: singleton-only
+`cluster_mode=off`, true J=2 pairs, intentionally shuffled/wrong J=2 partners,
+and a null J=2 mock with `n_pair_keep=0`.  The default `tiny` profile is intended
+for local and CI diagnostics; `small` uses modestly larger mock files.
+
+```bash
+python scripts/mock_lensing/run_lensing_validation.py \
+  --profile tiny \
+  --workdir /tmp/ds_lensing_validation
+
+python -m pytest tests/test_lensing_validation_script.py
+```
+
+The validation passes only if the true-pair J=2 diagnostics are finite, wrong
+pair partners have a lower `pair_logL_sum` than the true partition, the null mock
+reports zero observed pairs, and `cluster_mode=off` remains singleton-only.
+
 ## `darksirens.lensing`
 
 The package `__init__` re-exports the lensing parameter containers and factory
