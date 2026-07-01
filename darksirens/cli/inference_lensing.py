@@ -263,10 +263,10 @@ def build_cluster_likelihood(opts, inp, decoder):
     parameters and the integer empty-pixel policy. We pass them straight through.
     """
     em = _empty_em_catalog()
-    sis = make_sis_lens_params()
+    sis = make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
     wl_backend = WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
-    universe_model = "spectral_sirens_wl" if wl_backend != WL_BACKEND_DISABLED else "spectral_sirens"
+    universe_model = opts.universe_model
 
     nkept = 0 if inp["lensed"] is None else int(np.asarray(inp["lensed"].m1_src).shape[0])
     log_p_tag = jnp.zeros(nkept)
@@ -377,7 +377,18 @@ def main():
             flush=True,
         )
 
+    opts.universe_model = (
+        "spectral_sirens_wl" if opts.wl_backend == "lognormal" else "spectral_sirens"
+    )
+
     print(f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend}] ===")
+    print(
+        "  lensing hyperparameters: "
+        f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, "
+        f"wl_a={opts.lensing_wl_a}, wl_b={opts.lensing_wl_b}, "
+        f"sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
+        flush=True,
+    )
     print("loading data ...", flush=True)
     inp = load_inputs(opts)
     print(f"  events: {inp['nEvents']}  ({inp['n_singletons']} singletons "
@@ -443,6 +454,10 @@ def main():
         f.attrs["labels"] = json.dumps(labels)
         f.attrs["cluster_mode"] = opts.cluster_mode
         f.attrs["wl_backend"] = opts.wl_backend
+        f.attrs["wl_a"] = float(opts.lensing_wl_a)
+        f.attrs["wl_b"] = float(opts.lensing_wl_b)
+        f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
+        f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
         f.attrs["n_events"] = inp["nEvents"]
         f.attrs["n_pairs"] = inp["n_pairs"]
         if results.get("logZ") is not None:
@@ -453,9 +468,16 @@ def main():
             f.attrs["tinyns_summary"] = json.dumps(results["tinyns_summary"], default=str)
         if results.get("tinyns_diagnostics") is not None:
             f.attrs["tinyns_diagnostics"] = json.dumps(results["tinyns_diagnostics"], default=str)
+    settings = {k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
+                for k, v in vars(opts).items()}
+    settings.update(
+        wl_a=float(opts.lensing_wl_a),
+        wl_b=float(opts.lensing_wl_b),
+        sl_tau_A=float(opts.sl_tau_A),
+        sl_tau_n=float(opts.sl_tau_n),
+    )
     with open(os.path.join(run_dir, "settings.json"), "w") as f:
-        json.dump({k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
-                   for k, v in vars(opts).items()}, f, indent=2)
+        json.dump(settings, f, indent=2)
     print(f"saved {samples.shape[0]} samples -> {run_dir}", flush=True)
 
     # corner (best-effort)

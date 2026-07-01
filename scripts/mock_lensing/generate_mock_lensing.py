@@ -96,7 +96,7 @@ def make_truth(seed, H0, Om0, sis, wl):
         theta=theta,                       # 12-vector
         gamma=float(theta[-1]),
         H0=float(H0), Om0=float(Om0), zMax=float(zMax),
-        A_tau=float(sis.A_tau), n_tau=float(sis.n_tau),
+        tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
         wl_a=float(wl.a), wl_b=float(wl.b),
         seed=int(seed),
     )
@@ -644,7 +644,9 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         ),
         model=dict(pop_name=POP_NAME, rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
                    selection="Finn-Chernoff orientation-averaged p_det",
-                   cosmology=f"H0={H0}, Om0={Om0}"),
+                   cosmology=f"H0={H0}, Om0={Om0}",
+                   tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
+                   wl_a=float(wl.a), wl_b=float(wl.b)),
     )
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
