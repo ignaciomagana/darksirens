@@ -96,7 +96,8 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
-from darksirens.lensing.partitions import exact_partitions_from_json
+from darksirens.lensing.partitions import exact_partitions_from_json, validate_candidate_pairs
+from darksirens.lensing.marginal_diagnostics import compute_marginalized_partition_diagnostics
 from darksirens.likelihood.pair_kde import (
     make_pair_kde, stack_pair_kdes, validate_pair_prior_wt,
 )
@@ -357,7 +358,8 @@ def load_inputs(opts):
     n_events_total = n_sing + 2 * P
     if partition_mode == "marginalize_exact":
         candidate_data = json.load(open(opts.candidate_pairs_path, "r", encoding="utf-8"))
-        candidate_n_events, partition_states, log_z_prior = exact_partitions_from_json(
+        candidate_n_events, candidate_pairs = validate_candidate_pairs(candidate_data)
+        _candidate_n_events2, partition_states, log_z_prior = exact_partitions_from_json(
             candidate_data, max_partitions=getattr(opts, "max_exact_partitions", 10000)
         )
         if candidate_n_events != n_events_total:
@@ -372,6 +374,7 @@ def load_inputs(opts):
                 n_singletons=state.n_singletons,
                 n_pairs=state.n_pairs,
                 log_prior_weight=state.log_prior_weight,
+                candidate_edge_indices=jnp.asarray(state.candidate_edge_indices, dtype=jnp.int32),
             )
             for state in partition_states
         )
@@ -396,6 +399,8 @@ def load_inputs(opts):
         marginal_partitions=marginal_partitions, log_z_prior=float(log_z_prior),
         pair_time_delta_t_obs=jnp.asarray(pair_time_delta_t_obs, dtype=jnp.float64),
         pair_time_sigma=jnp.asarray(pair_time_sigma, dtype=jnp.float64),
+        partition_states=partition_states if partition_mode == "marginalize_exact" else None,
+        candidate_pairs=candidate_pairs if partition_mode == "marginalize_exact" else None,
     )
 
 
@@ -419,10 +424,29 @@ def _diagnostics_to_python(diag):
 def _write_diagnostics(run_dir, diagnostics):
     with open(os.path.join(run_dir, "diagnostics.json"), "w") as f:
         json.dump(diagnostics, f, indent=2, allow_nan=True)
+    numeric_array_keys = {
+        "partition_log_prior_weight", "partition_logL",
+        "partition_log_posterior_weight", "partition_posterior_probability",
+        "posterior_singleton_probability",
+    }
     with h5py.File(os.path.join(run_dir, "diagnostics.hdf5"), "w") as f:
         for key, value in diagnostics.items():
-            if isinstance(value, list):
+            if key in numeric_array_keys:
                 f.create_dataset(key, data=np.asarray(value, dtype=float))
+            elif key == "posterior_pair_probabilities":
+                f.create_dataset("posterior_pair_probability_i", data=np.asarray([x["i"] for x in value], dtype=np.int32))
+                f.create_dataset("posterior_pair_probability_j", data=np.asarray([x["j"] for x in value], dtype=np.int32))
+                f.create_dataset("posterior_pair_probability", data=np.asarray([x["p_pair"] for x in value], dtype=float))
+                f.attrs[key] = json.dumps(value)
+            elif isinstance(value, (dict, list, tuple)):
+                try:
+                    arr = np.asarray(value, dtype=float)
+                    if arr.dtype.kind in "fiu" and arr.ndim > 0:
+                        f.create_dataset(key, data=arr)
+                    else:
+                        f.attrs[key] = json.dumps(value)
+                except (TypeError, ValueError):
+                    f.attrs[key] = json.dumps(value)
             elif isinstance(value, str):
                 f.attrs[key] = value
             else:
@@ -436,10 +460,11 @@ def _print_diagnostics_summary(diagnostics):
         "pair_logL_sum", "log_mu_singleton", "Neff_singleton",
         "log_mu_cluster", "Neff_cluster", "Neff_combined",
     ):
-        print(f"    {key}: {diagnostics[key]}", flush=True)
+        if key in diagnostics:
+            print(f"    {key}: {diagnostics[key]}", flush=True)
     print(
-        f"    n_singletons: {diagnostics['n_singletons']}  "
-        f"n_pairs: {diagnostics['n_pairs']}  "
+        f"    n_singletons: {diagnostics.get('n_singletons', diagnostics.get('expected_n_singletons'))}  "
+        f"n_pairs: {diagnostics.get('n_pairs', diagnostics.get('expected_n_pairs'))}  "
         f"pair_batch_size: {diagnostics.get('pair_batch_size')}  "
         f"y_nodes_pair: {diagnostics.get('y_nodes_pair')}  "
         f"pe_max_per_pair: {diagnostics.get('pe_max_per_pair')}  "
@@ -530,27 +555,51 @@ def build_cluster_diagnostics(opts, inp, decoder, lens_sampled_labels=None, fixe
         )
 
     def diagnostics(coord):
-        cosmo, survey, pop_params, _sky_params, _mark_params = decoder.decode(jnp.asarray(coord))
-        raw = darksiren_likelihood_diagnostics_with_clusters(
-            cosmo, survey, pop_params,
-            inp["gw_pe"], em, inp["gw_sel"], em,
-            inp["nEvents"], inp["nsamp"], inp["Ndraw"],
-            inp["singleton_indices"], inp["pair_indices"],
-            inp["n_singletons"], inp["n_pairs"],
-            inp["lensed"], inp["pair_kdes"],
-            _decode_lens_params(coord, lens_sampled_labels, fixed_parameter_values, opts),
-            log_p_tag,
-            opts.pop_model, universe_model,
-            sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
-            wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
-            wl_selection=wl_selection,
-            pair_marks=pair_marks,
-            pair_time_delta_t_obs=inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64)),
-            pair_time_sigma=inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
-            pair_batch_size=opts.pair_batch_size,
-            y_nodes_pair=opts.y_nodes_pair,
-        )
-        out = _diagnostics_to_python(raw)
+        coord = jnp.asarray(coord)
+        cosmo, survey, pop_params, _sky_params, _mark_params = decoder.decode(coord)
+
+        def _raw_for(singletons, pairs, n_singletons, n_pairs):
+            return darksiren_likelihood_diagnostics_with_clusters(
+                cosmo, survey, pop_params,
+                inp["gw_pe"], em, inp["gw_sel"], em,
+                inp["nEvents"], inp["nsamp"], inp["Ndraw"],
+                singletons, pairs, n_singletons, n_pairs,
+                inp["lensed"], inp["pair_kdes"],
+                _decode_lens_params(coord, lens_sampled_labels, fixed_parameter_values, opts),
+                log_p_tag,
+                opts.pop_model, universe_model,
+                sel_batch_size=opts.sel_batch_size, cluster_mode=cluster_mode,
+                wl_backend=wl_backend, wl_a=opts.lensing_wl_a, wl_b=opts.lensing_wl_b,
+                wl_selection=wl_selection,
+                pair_marks=pair_marks,
+                pair_time_delta_t_obs=inp.get("pair_time_delta_t_obs", jnp.zeros((0,), dtype=jnp.float64)),
+                pair_time_sigma=inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
+                pair_batch_size=opts.pair_batch_size,
+                y_nodes_pair=opts.y_nodes_pair,
+            )
+
+        if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            def _part_loglike(state):
+                raw = _raw_for(
+                    jnp.asarray(state.singleton_indices, dtype=jnp.int32),
+                    jnp.asarray(state.pair_indices, dtype=jnp.int32),
+                    state.n_singletons, state.n_pairs,
+                )
+                return float(np.asarray(raw["logL_total"]))
+            out = compute_marginalized_partition_diagnostics(
+                inp["partition_states"], inp["candidate_pairs"], _part_loglike,
+                log_z_partition_prior=inp["log_z_prior"],
+            )
+            raw = _raw_for(
+                jnp.asarray(out["map_partition"]["singleton_indices"], dtype=jnp.int32),
+                jnp.asarray(out["map_partition"]["pair_indices"], dtype=jnp.int32),
+                out["map_partition"]["n_singletons"], out["map_partition"]["n_pairs"],
+            )
+            out.update({f"map_{k}": v for k, v in _diagnostics_to_python(raw).items()})
+        else:
+            raw = _raw_for(inp["singleton_indices"], inp["pair_indices"], inp["n_singletons"], inp["n_pairs"])
+            out = _diagnostics_to_python(raw)
+            out.update(partition_mode="fixed", n_partitions=1)
         out.update(
             cluster_mode=opts.cluster_mode,
             wl_backend=opts.wl_backend,
@@ -558,7 +607,7 @@ def build_cluster_diagnostics(opts, inp, decoder, lens_sampled_labels=None, fixe
             pair_batch_size=opts.pair_batch_size,
             y_nodes_pair=opts.y_nodes_pair,
             pe_max_per_pair=opts.pe_max_per_pair,
-            approximate_pair_evaluation_shape=[int(inp["n_pairs"]), int(inp["nsamp"]), int(opts.y_nodes_pair)],
+            approximate_pair_evaluation_shape=[int(out.get("expected_n_pairs", inp["n_pairs"])), int(inp["nsamp"]), int(opts.y_nodes_pair)],
             **_lens_settings_dict(coord, lens_sampled_labels, fixed_parameter_values, opts),
         )
         return out

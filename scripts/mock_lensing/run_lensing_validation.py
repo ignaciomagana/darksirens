@@ -30,7 +30,7 @@ def _run(cmd: list[str], *, cwd: Path = ROOT) -> None:
 
 
 def _mock_ready(mock_dir: Path, *, n_pair_keep: int) -> bool:
-    needed = ["mock_gw_pe.h5", "mock_gw_selection.h5", "mock_lensed_injections.h5", "mock_pair_pe.h5", "partition.json"]
+    needed = ["mock_gw_pe.h5", "mock_gw_selection.h5", "mock_lensed_injections.h5", "mock_pair_pe.h5", "partition.json", "candidate_pairs.json"]
     if not all((mock_dir / p).exists() for p in needed):
         return False
     try:
@@ -78,7 +78,7 @@ def _latest_diagnostics(save_root: Path) -> dict:
     return json.loads(files[-1].read_text())
 
 
-def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int, pair_batch_size: int = 0) -> dict:
+def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int, pair_batch_size: int = 0, partition_mode: str = "fixed") -> dict:
     if save_root.exists():
         shutil.rmtree(save_root)
     save_root.mkdir(parents=True, exist_ok=True)
@@ -96,8 +96,12 @@ def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
         cmd += [
             "--lensed_injections_path", str(mock_dir / "mock_lensed_injections.h5"),
             "--pair_pe_path", str(mock_dir / "mock_pair_pe.h5"),
-            "--partition_path", str(partition or mock_dir / "partition.json"),
+            "--partition_mode", partition_mode,
         ]
+        if partition_mode == "marginalize_exact":
+            cmd += ["--candidate_pairs_path", str(mock_dir / "candidate_pairs.json")]
+        else:
+            cmd += ["--partition_path", str(partition or mock_dir / "partition.json")]
     _run(cmd)
     return _latest_diagnostics(save_root)
 
@@ -115,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reuse", action="store_true", help="reuse compatible mock directories if present")
     ap.add_argument("--pair_batch_size", type=int, default=0,
                     help="forwarded to the lensing CLI for J=2 pair likelihood batching")
+    ap.add_argument("--run_marginalized", action="store_true",
+                    help="also run --partition_mode marginalize_exact when candidate_pairs.json exists")
     args = ap.parse_args(argv)
 
     cfg = PROFILES[args.profile]
@@ -133,6 +139,12 @@ def main(argv: list[str] | None = None) -> int:
     true = _run_cli(mock, runs / "j2_true", cluster_mode="j2", partition=mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size)
     wrong = _run_cli(mock, runs / "j2_wrong", cluster_mode="j2", partition=wrong_part, cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size)
     null = _run_cli(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size)
+    marginalized = None
+    if args.run_marginalized and (mock / "candidate_pairs.json").exists():
+        marginalized = _run_cli(
+            mock, runs / "j2_marginalized", cluster_mode="j2", partition=None, cfg=cfg,
+            seed=args.seed, pair_batch_size=args.pair_batch_size, partition_mode="marginalize_exact",
+        )
 
     checks = {
         "true_j2_finite_logL_and_diagnostics": math.isfinite(float(true["logL_total"])) and _finite_diag(true),
@@ -140,13 +152,27 @@ def main(argv: list[str] | None = None) -> int:
         "null_case_reports_no_observed_pairs": int(null["n_pairs"]) == 0 and float(null.get("pair_logL_sum", 0.0)) == 0.0,
         "off_mode_singleton_only": off["cluster_mode"] == "off" and int(off["n_pairs"]) == 0 and float(off.get("pair_logL_sum", 0.0)) == 0.0,
     }
+    if marginalized is not None:
+        probs = [float(x["p_pair"]) for x in marginalized.get("posterior_pair_probabilities", [])]
+        checks.update({
+            "marginalized_finite_logL": math.isfinite(float(marginalized["logL_marginalized"])),
+            "marginalized_has_partitions": int(marginalized["n_partitions"]) >= 1,
+            "marginalized_expected_n_pairs_finite": math.isfinite(float(marginalized["expected_n_pairs"])),
+            "marginalized_pair_probabilities_in_unit_interval": all(0.0 <= p <= 1.0 for p in probs),
+        })
     print("\n[validation] diagnostics summary")
-    for name, diag in [("off", off), ("j2_true", true), ("j2_wrong", wrong), ("j2_null", null)]:
-        print(f"  {name}: logL={diag['logL_total']} singleton={diag['singleton_logL_sum']} pair={diag['pair_logL_sum']} n_pairs={diag['n_pairs']}")
+    summary_items = [("off", off), ("j2_true", true), ("j2_wrong", wrong), ("j2_null", null)]
+    if marginalized is not None:
+        summary_items.append(("j2_marginalized", marginalized))
+    for name, diag in summary_items:
+        print(f"  {name}: logL={diag.get('logL_total', diag.get('logL_marginalized'))} singleton={diag.get('singleton_logL_sum', diag.get('map_singleton_logL_sum'))} pair={diag.get('pair_logL_sum', diag.get('map_pair_logL_sum'))} n_pairs={diag.get('n_pairs', diag.get('expected_n_pairs'))}")
     print("[validation] checks")
     for k, v in checks.items():
         print(f"  {'PASS' if v else 'FAIL'} {k}")
-    (work / "validation_summary.json").write_text(json.dumps({"checks": checks, "diagnostics": {"off": off, "j2_true": true, "j2_wrong": wrong, "j2_null": null}}, indent=2, allow_nan=True) + "\n")
+    diagnostics_out = {"off": off, "j2_true": true, "j2_wrong": wrong, "j2_null": null}
+    if marginalized is not None:
+        diagnostics_out["j2_marginalized"] = marginalized
+    (work / "validation_summary.json").write_text(json.dumps({"checks": checks, "diagnostics": diagnostics_out}, indent=2, allow_nan=True) + "\n")
     if not all(checks.values()):
         return 1
     print(f"[validation] complete: {work}")
