@@ -79,8 +79,15 @@ def _check_partition(path, n_events, errors, summary):
     return [tuple(map(int, p)) for p in pairs.reshape((-1, 2))] if pairs.ndim == 2 else []
 
 
-def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary):
-    if not _exists(path, errors, "pair_pe_path"):
+def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary, *, unified_observed_mode=False):
+    if not path:
+        if unified_observed_mode and _get(opts, "pair_marks", "none") == "none":
+            summary["pair_pe_metadata_optional"] = True
+            return
+        errors.append("missing pair_pe_path")
+        return
+    if not Path(path).exists():
+        errors.append(f"pair_pe_path does not exist: {path}")
         return
     try:
         with h5py.File(path, "r") as f:
@@ -122,6 +129,10 @@ def _check_pair_pe(path, n_events, partition_pairs, opts, errors, summary):
                             errors.append(f"{pname} sigma_delta_t must be positive")
                     except Exception as exc:
                         errors.append(f"{pname} sigma_delta_t not readable: {exc}")
+                if unified_observed_mode:
+                    # Unified mode treats pair_pe_path as optional metadata only;
+                    # image PE groups may be absent and are never inference inputs.
+                    continue
                 for img in ("image0", "image1"):
                     if img not in g:
                         errors.append(f"{pname} missing {img} group")
@@ -194,13 +205,28 @@ def run_lensing_preflight(opts) -> dict:
     n_events, _ = _infer_gw(_get(opts, "gw_path"), errors, summary)
     _exists(_get(opts, "gwselection_path"), errors, "gwselection_path")
     partition_pairs = []
+    unified_observed_mode = False
     if _get(opts, "cluster_mode") == "j2":
         if _get(opts, "partition_mode", "fixed") == "fixed":
             partition_pairs = _check_partition(_get(opts, "partition_path"), n_events, errors, summary)
+            if n_events is not None and partition_pairs:
+                used = [i for pair in partition_pairs for i in pair]
+                singletons = []
+                try:
+                    singletons = list(map(int, _read_json(_get(opts, "partition_path")).get("singleton_indices", [])))
+                except Exception:
+                    pass
+                unified_observed_mode = (max(singletons + used, default=-1) + 1 == n_events)
         elif _get(opts, "partition_mode") == "marginalize_exact":
             _check_candidates(_get(opts, "candidate_pairs_path"), n_events, opts, errors, summary)
+            try:
+                cand = _read_json(_get(opts, "candidate_pairs_path"))
+                unified_observed_mode = n_events is not None and int(cand.get("n_events", -1)) == int(n_events)
+            except Exception:
+                unified_observed_mode = False
+        summary["unified_observed_mode"] = bool(unified_observed_mode)
         _check_lensed(_get(opts, "lensed_injections_path"), errors, summary)
-        _check_pair_pe(_get(opts, "pair_pe_path"), n_events, partition_pairs, opts, errors, summary)
+        _check_pair_pe(_get(opts, "pair_pe_path"), n_events, partition_pairs, opts, errors, summary, unified_observed_mode=unified_observed_mode)
     if _get(opts, "wl_selection") == "wl_lognormal" and _get(opts, "wl_backend") != "lognormal":
         warnings.append("wl_selection=wl_lognormal is only meaningful with wl_backend=lognormal")
     if _get(opts, "fix_lens_rate", True):

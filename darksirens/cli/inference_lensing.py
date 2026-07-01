@@ -259,6 +259,40 @@ def _normalize_pair_image_prior_wt(prior_wt, *, context):
     return prior_wt / norm
 
 
+
+
+def extract_event_samples_from_gw_pe(gw_pe_arrays, event_index, nsamp, pe_max=0, rng=None):
+    """Extract one observed-event PE sample block from event-major GW PE arrays."""
+    m1det, m2det, dL, chieff, p_pe = gw_pe_arrays
+    event_index = int(event_index)
+    sl = slice(event_index * nsamp, (event_index + 1) * nsamp)
+    d = dict(
+        m1det=np.asarray(m1det[sl]),
+        q=np.asarray(m2det[sl]) / np.asarray(m1det[sl]),
+        dL_app=np.asarray(dL[sl]),
+        chieff=np.asarray(chieff[sl]),
+        prior_wt=np.asarray(p_pe[sl]),
+    )
+    if pe_max and pe_max > 0:
+        if rng is None:
+            rng = np.random.default_rng()
+        d = _downsample(d, int(pe_max), rng)
+    d["prior_wt"] = _normalize_pair_image_prior_wt(
+        d["prior_wt"], context=f"gw_pe event {event_index}/prior_wt"
+    )
+    return d
+
+
+def make_pair_kdes_from_gw_pe(gw_pe_arrays, event_indices, nsamp, pe_max_per_pair=0, rng=None):
+    """Build per-observed-event KDEs directly from unified GW PE samples."""
+    kdes = []
+    for event_index in event_indices:
+        d = extract_event_samples_from_gw_pe(
+            gw_pe_arrays, int(event_index), nsamp, pe_max_per_pair, rng
+        )
+        kdes.append(make_pair_kde(d["m1det"], d["q"], d["dL_app"], d["chieff"], d["prior_wt"]))
+    return kdes
+
 def load_inputs(opts):
     """Load singleton PE + selection, and (for j2) the lensed injections + pair
     PE + partition. Returns the assembled inputs for the cluster likelihood."""
@@ -298,9 +332,9 @@ def load_inputs(opts):
             pair_time_sigma=jnp.zeros((0,), dtype=jnp.float64),
         )
 
-    # --- j2: lensed injections + pair PE + partition(s) ---
-    if not (opts.lensed_injections_path and opts.pair_pe_path):
-        raise SystemExit("--cluster_mode j2 requires --lensed_injections_path and --pair_pe_path")
+    # --- j2: lensed injections + pair PE/metadata + partition(s) ---
+    if not opts.lensed_injections_path:
+        raise SystemExit("--cluster_mode j2 requires --lensed_injections_path")
     partition_mode = getattr(opts, "partition_mode", "fixed")
     if partition_mode == "fixed" and not opts.partition_path:
         raise SystemExit("--partition_mode fixed requires --partition_path")
@@ -318,58 +352,6 @@ def load_inputs(opts):
     if partition is not None:
         partition_pair_indices = [tuple(map(int, pair)) for pair in partition.get("pair_indices", [])]
 
-    pairs = []
-    pair_metadata_indices = []
-    pair_time_delta_t_obs = []
-    pair_time_sigma = []
-    with h5py.File(opts.pair_pe_path) as f:
-        npairs = int(f.attrs["npairs"])
-        for k in range(npairs):
-            g = f[f"pair_{k}"]; imgs = []
-            meta_pair = None
-            if "event_index_image0" in g.attrs or "event_index_image1" in g.attrs:
-                if not ("event_index_image0" in g.attrs and "event_index_image1" in g.attrs):
-                    raise SystemExit(f"pair_{k} must define both event_index_image0 and event_index_image1")
-                meta_pair = (int(g.attrs["event_index_image0"]), int(g.attrs["event_index_image1"]))
-                if meta_pair[0] < 0 or meta_pair[1] < 0 or meta_pair[0] == meta_pair[1]:
-                    raise SystemExit(f"pair_{k} has invalid event-index metadata: {meta_pair}")
-                if partition_pair_indices and k < len(partition_pair_indices) and meta_pair != partition_pair_indices[k]:
-                    raise SystemExit(
-                        f"pair_{k} event-index metadata {meta_pair} does not match partition pair "
-                        f"{partition_pair_indices[k]}"
-                    )
-            has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
-            use_pair_pe_time = has_dt or (
-                getattr(opts, "pair_marks", "none") == "time" and partition_mode == "fixed"
-            )
-            if use_pair_pe_time:
-                if not has_dt:
-                    raise SystemExit(f"pair_marks=time requires delta_t_obs metadata for pair_{k}")
-                pair_time_delta_t_obs.append(float(g.attrs["delta_t_obs"] if "delta_t_obs" in g.attrs else np.asarray(g["delta_t_obs"])[()]))
-                if "sigma_delta_t" in g.attrs:
-                    pair_time_sigma.append(float(g.attrs["sigma_delta_t"]))
-                elif "sigma_delta_t" in g:
-                    pair_time_sigma.append(float(np.asarray(g["sigma_delta_t"])[()]))
-                elif opts.pair_time_sigma_sec is not None:
-                    pair_time_sigma.append(float(opts.pair_time_sigma_sec))
-                else:
-                    raise SystemExit(f"pair_marks=time requires sigma_delta_t in pair_{k} or --pair_time_sigma_sec")
-            for name in ("image0", "image1"):
-                gi = g[name]
-                d = dict(m1det=np.array(gi["m1det"]), q=np.array(gi["q"]),
-                         dL_app=np.array(gi["dL_app"]), chieff=np.array(gi["chieff"]),
-                         prior_wt=np.array(gi["prior_wt"]))
-                if opts.pe_max_per_pair > 0:
-                    d = _downsample(d, opts.pe_max_per_pair, rng)
-                d["prior_wt"] = _normalize_pair_image_prior_wt(
-                    d["prior_wt"],
-                    context=f"{opts.pair_pe_path}: pair_{k}/{name}/prior_wt",
-                )
-                imgs.append(d)
-            pairs.append(imgs)
-            pair_metadata_indices.append(meta_pair)
-    P = len(pairs)
-
     max_partition_event = -1
     if partition is not None:
         all_part_idx = list(map(int, partition.get("singleton_indices", [])))
@@ -379,10 +361,70 @@ def load_inputs(opts):
     if max_partition_event < 0 and candidate_n_events is not None:
         max_partition_event = int(candidate_n_events) - 1
     unified_observed_catalog = max_partition_event >= 0 and n_sing == max_partition_event + 1
-    if unified_observed_catalog and P and partition is not None and int(partition.get("n_pairs", P)) != P:
-        raise SystemExit(
-            f"partition n_pairs={partition.get('n_pairs')} does not match pair_pe npairs={P}"
-        )
+
+    if not unified_observed_catalog and not opts.pair_pe_path:
+        raise SystemExit("legacy split-pair --cluster_mode j2 requires --pair_pe_path with image0/image1 groups")
+
+    pairs = []
+    pair_metadata_indices = []
+    pair_time_delta_t_obs = []
+    pair_time_sigma = []
+    if opts.pair_pe_path:
+        with h5py.File(opts.pair_pe_path) as f:
+            npairs = int(f.attrs.get("npairs", 0))
+            for k in range(npairs):
+                g = f[f"pair_{k}"]; imgs = []
+                meta_pair = None
+                if "event_index_image0" in g.attrs or "event_index_image1" in g.attrs:
+                    if not ("event_index_image0" in g.attrs and "event_index_image1" in g.attrs):
+                        raise SystemExit(f"pair_{k} must define both event_index_image0 and event_index_image1")
+                    meta_pair = (int(g.attrs["event_index_image0"]), int(g.attrs["event_index_image1"]))
+                    if meta_pair[0] < 0 or meta_pair[1] < 0 or meta_pair[0] == meta_pair[1]:
+                        raise SystemExit(f"pair_{k} has invalid event-index metadata: {meta_pair}")
+                    if partition_pair_indices and k < len(partition_pair_indices) and meta_pair != partition_pair_indices[k]:
+                        raise SystemExit(
+                            f"pair_{k} event-index metadata {meta_pair} does not match partition pair "
+                            f"{partition_pair_indices[k]}"
+                        )
+                has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
+                use_pair_pe_time = has_dt or (
+                    getattr(opts, "pair_marks", "none") == "time" and partition_mode == "fixed"
+                )
+                if use_pair_pe_time:
+                    if not has_dt:
+                        raise SystemExit(f"pair_marks=time requires delta_t_obs metadata for pair_{k}")
+                    pair_time_delta_t_obs.append(float(g.attrs["delta_t_obs"] if "delta_t_obs" in g.attrs else np.asarray(g["delta_t_obs"])[()]))
+                    if "sigma_delta_t" in g.attrs:
+                        pair_time_sigma.append(float(g.attrs["sigma_delta_t"]))
+                    elif "sigma_delta_t" in g:
+                        pair_time_sigma.append(float(np.asarray(g["sigma_delta_t"])[()]))
+                    elif opts.pair_time_sigma_sec is not None:
+                        pair_time_sigma.append(float(opts.pair_time_sigma_sec))
+                    else:
+                        raise SystemExit(f"pair_marks=time requires sigma_delta_t in pair_{k} or --pair_time_sigma_sec")
+                if not unified_observed_catalog:
+                    for name in ("image0", "image1"):
+                        if name not in g:
+                            raise SystemExit(f"legacy pair_pe_path missing pair_{k}/{name} group")
+                        gi = g[name]
+                        d = dict(m1det=np.array(gi["m1det"]), q=np.array(gi["q"]),
+                                 dL_app=np.array(gi["dL_app"]), chieff=np.array(gi["chieff"]),
+                                 prior_wt=np.array(gi["prior_wt"]))
+                        if opts.pe_max_per_pair > 0:
+                            d = _downsample(d, opts.pe_max_per_pair, rng)
+                        d["prior_wt"] = _normalize_pair_image_prior_wt(
+                            d["prior_wt"],
+                            context=f"{opts.pair_pe_path}: pair_{k}/{name}/prior_wt",
+                        )
+                        imgs.append(d)
+                    pairs.append(imgs)
+                pair_metadata_indices.append(meta_pair)
+    P = len(pairs) if not unified_observed_catalog else (
+        int(partition.get("n_pairs", len(partition_pair_indices))) if partition is not None else 0
+    )
+
+    if unified_observed_catalog and partition is not None and len(pair_time_delta_t_obs) not in (0, int(partition.get("n_pairs", 0))):
+        raise SystemExit("pair time metadata count does not match fixed partition n_pairs")
 
     # Build the full event catalog: [singletons 0..S-1, then pair images].
     # NOTE the singleton PE arrays are already nsamp-per-event; pair images use
@@ -390,8 +432,8 @@ def load_inputs(opts):
     # branch's GWEvent stores ragged events via the flat (nEvents*nsamp) layout
     # ONLY when all events share nsamp. To keep shapes uniform we down-sample the
     # singleton PE to the SAME pe count as the pairs when they differ.
-    pe_per_pair = len(pairs[0][0]["m1det"]) if P else nsamp
-    if pe_per_pair != nsamp:
+    pe_per_pair = (len(pairs[0][0]["m1det"]) if (P and not unified_observed_catalog) else nsamp)
+    if (not unified_observed_catalog) and pe_per_pair != nsamp:
         # downsample singleton PE to pe_per_pair for a uniform array
         new_m1, new_m2, new_dL, new_chi, new_pw = [], [], [], [], []
         for i in range(n_sing):
@@ -407,21 +449,13 @@ def load_inputs(opts):
     if unified_observed_catalog:
         gw_pe = _gw_event(m1det, m2det, dL, chieff, p_pe)
         n_events_total = n_sing
-        kdes = []
-        for i in range(n_events_total):
-            sl = slice(i * nsamp, (i + 1) * nsamp)
-            kdes.append(make_pair_kde(m1det[sl], m2det[sl] / m1det[sl], dL[sl], chieff[sl], p_pe[sl]))
-        for k, imgs in enumerate(pairs):
-            if k < len(partition_pair_indices):
-                event_indices = partition_pair_indices[k]
-            elif k < len(pair_metadata_indices) and pair_metadata_indices[k] is not None:
-                event_indices = pair_metadata_indices[k]
-            else:
-                event_indices = None
-            if event_indices is not None:
-                for event_index, img in zip(event_indices, imgs):
-                    kdes[int(event_index)] = make_pair_kde(img["m1det"], img["q"], img["dL_app"],
-                                                           img["chieff"], img["prior_wt"])
+        kdes = make_pair_kdes_from_gw_pe(
+            (m1det, m2det, dL, chieff, p_pe),
+            range(n_events_total),
+            nsamp,
+            opts.pe_max_per_pair,
+            rng,
+        )
     else:
         m1_all = [m1det]; m2_all = [m2det]; dL_all = [dL]; chi_all = [chieff]; pw_all = [p_pe]
         for imgs in pairs:

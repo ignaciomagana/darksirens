@@ -105,9 +105,10 @@ def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
     if cluster_mode == "j2":
         cmd += [
             "--lensed_injections_path", str(mock_dir / "mock_lensed_injections.h5"),
-            "--pair_pe_path", str(mock_dir / "mock_pair_pe.h5"),
             "--partition_mode", partition_mode,
         ]
+        if not use_unified_observed_catalog:
+            cmd += ["--pair_pe_path", str(mock_dir / "mock_pair_pe.h5")]
         if partition_mode == "marginalize_exact":
             # Time-delay marks are currently fixed-partition only; exact
             # marginalization must remain on pair_marks=none until candidate-edge

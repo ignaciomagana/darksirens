@@ -99,3 +99,88 @@ def test_load_inputs_accepts_unified_observed_catalog_fixed_and_marginalized(tmp
     ))
     assert marginalized["nEvents"] == 6
     assert marginalized["partition_states"] is not None
+
+@pytest.mark.integration
+@pytest.mark.slow
+def test_load_inputs_unified_observed_without_pair_pe_image_groups(tmp_path):
+    from darksirens.cli.inference_lensing import load_inputs
+
+    mock = _generate_unified_mock(tmp_path)
+    meta = tmp_path / "metadata_only_pair_pe.h5"
+    partition = json.loads((mock / "partition.json").read_text())
+    with h5py.File(meta, "w") as f:
+        f.attrs["npairs"] = len(partition["pair_indices"])
+        for k, (i, j) in enumerate(partition["pair_indices"]):
+            g = f.create_group(f"pair_{k}")
+            g.attrs["event_index_image0"] = i
+            g.attrs["event_index_image1"] = j
+
+    base = dict(
+        seed=1,
+        gw_path=str(mock / "mock_observed_gw_pe.h5"),
+        gwselection_path=str(mock / "mock_gw_selection.h5"),
+        cluster_mode="j2",
+        lensed_injections_path=str(mock / "mock_lensed_injections.h5"),
+        pe_max_per_pair=8,
+        pair_marks="none",
+        pair_time_sigma_sec=None,
+        max_exact_partitions=1000,
+    )
+    fixed = load_inputs(Namespace(
+        **base,
+        pair_pe_path=str(meta),
+        partition_mode="fixed",
+        partition_path=str(mock / "partition.json"),
+        candidate_pairs_path=None,
+    ))
+    assert fixed["nEvents"] == 6
+    assert fixed["n_pairs"] == 2
+
+    marginalized = load_inputs(Namespace(
+        **base,
+        pair_pe_path=None,
+        partition_mode="marginalize_exact",
+        partition_path=None,
+        candidate_pairs_path=str(mock / "candidate_pairs.json"),
+    ))
+    assert marginalized["nEvents"] == 6
+    assert marginalized["partition_states"] is not None
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+def test_preflight_unified_metadata_only_and_legacy_malformed(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    mock = _generate_unified_mock(tmp_path)
+    meta = tmp_path / "metadata_only_pair_pe.h5"
+    partition = json.loads((mock / "partition.json").read_text())
+    with h5py.File(meta, "w") as f:
+        f.attrs["npairs"] = len(partition["pair_indices"])
+        for k, (i, j) in enumerate(partition["pair_indices"]):
+            g = f.create_group(f"pair_{k}")
+            g.attrs["event_index_image0"] = i
+            g.attrs["event_index_image1"] = j
+    opts = Namespace(
+        gw_path=str(mock / "mock_observed_gw_pe.h5"),
+        gwselection_path=str(mock / "mock_gw_selection.h5"),
+        cluster_mode="j2",
+        partition_mode="fixed",
+        partition_path=str(mock / "partition.json"),
+        candidate_pairs_path=None,
+        lensed_injections_path=str(mock / "mock_lensed_injections.h5"),
+        pair_pe_path=str(meta),
+        pair_marks="none",
+        pair_time_sigma_sec=None,
+        max_exact_partitions=1000,
+        wl_selection=None,
+        wl_backend="lognormal",
+        fix_lens_rate=False,
+        lens_prior_overrides=None,
+    )
+    assert run_lensing_preflight(opts)["ok"]
+
+    opts.gw_path = str(mock / "mock_gw_pe.h5")
+    result = run_lensing_preflight(opts)
+    assert not result["ok"]
+    assert any("missing image0 group" in e or "missing image1 group" in e for e in result["errors"])

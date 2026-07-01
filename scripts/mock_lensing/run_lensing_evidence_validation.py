@@ -150,7 +150,9 @@ def _cli_cmd(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
     if not fix_lens_rate:
         cmd += ["--fixed_parameter_values", '{"tau_n": 3.0}', "--lens_prior_overrides", '{"log10_tau_A": [-5.0, -2.5]}']
     if cluster_mode == "j2":
-        cmd += ["--lensed_injections_path", str(mock_dir / "mock_lensed_injections.h5"), "--pair_pe_path", str(pair_pe_path or mock_dir / "mock_pair_pe.h5"), "--partition_mode", partition_mode]
+        cmd += ["--lensed_injections_path", str(mock_dir / "mock_lensed_injections.h5"), "--partition_mode", partition_mode]
+        if (not use_unified_observed_catalog) or pair_pe_path is not None:
+            cmd += ["--pair_pe_path", str(pair_pe_path or mock_dir / "mock_pair_pe.h5")]
         if partition_mode == "marginalize_exact":
             # Time-delay marks are currently fixed-partition only; exact
             # marginalization must remain on pair_marks=none until candidate-edge
@@ -313,7 +315,7 @@ def build_plan(args: argparse.Namespace, cfg: dict[str, int], work: Path) -> dic
     cases = {
         "off_true_catalog": _cli_cmd(mock, runs / "off_true_catalog", cluster_mode="off", partition=None, sampler=args.sampler, nlive=nlive, dlogz=args.dlogz, seed=args.seed, cfg=cfg, use_unified_observed_catalog=args.use_unified_observed_catalog),
         "j2_fixed_true": _cli_cmd(mock, runs / "j2_fixed_true", cluster_mode="j2", partition=mock / "partition.json", sampler=args.sampler, nlive=nlive, dlogz=args.dlogz, seed=args.seed, cfg=cfg, use_unified_observed_catalog=args.use_unified_observed_catalog),
-        "j2_fixed_wrong": _cli_cmd(mock, runs / "j2_fixed_wrong", cluster_mode="j2", partition=work / "wrong_partition.json", sampler=args.sampler, nlive=nlive, dlogz=args.dlogz, seed=args.seed, cfg=cfg, use_unified_observed_catalog=args.use_unified_observed_catalog, pair_pe_path=work / "wrong_pair_pe.h5"),
+        "j2_fixed_wrong": _cli_cmd(mock, runs / "j2_fixed_wrong", cluster_mode="j2", partition=work / "wrong_partition.json", sampler=args.sampler, nlive=nlive, dlogz=args.dlogz, seed=args.seed, cfg=cfg, use_unified_observed_catalog=args.use_unified_observed_catalog, pair_pe_path=(None if args.use_unified_observed_catalog else work / "wrong_pair_pe.h5")),
         "j2_null": _cli_cmd(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", sampler=args.sampler, nlive=nlive, dlogz=args.dlogz, seed=args.seed, cfg=cfg),
         "off_null": _cli_cmd(null_mock, runs / "off_null", cluster_mode="off", partition=None, sampler=args.sampler, nlive=nlive, dlogz=args.dlogz, seed=args.seed, cfg=cfg),
         "j2_marginalized": _cli_cmd(mock, runs / "j2_marginalized", cluster_mode="j2", partition=None, sampler=args.sampler, nlive=nlive, dlogz=args.dlogz, seed=args.seed, cfg=cfg, partition_mode="marginalize_exact", use_unified_observed_catalog=args.use_unified_observed_catalog),
@@ -353,7 +355,8 @@ def main(argv: list[str] | None = None) -> int:
     mock = work / f"mock_{args.profile}"; null_mock = work / f"mock_{args.profile}_null"; runs_root = work / "runs"
     _generate_mock(mock, cfg, seed=args.seed, n_pair_keep=cfg["n_pair"], reuse=args.reuse)
     wrong_pairs = _write_wrong_partition(mock, work / "wrong_partition.json")
-    _write_wrong_pair_pe(mock, work / "wrong_pair_pe.h5", wrong_pairs)
+    if not args.use_unified_observed_catalog:
+        _write_wrong_pair_pe(mock, work / "wrong_pair_pe.h5", wrong_pairs)
     _generate_mock(null_mock, cfg, seed=args.seed + 17, n_pair_keep=0, reuse=args.reuse)
     nlive = args.nlive if args.nlive is not None else cfg["default_nlive"]
 
@@ -362,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     cases = {
         "off_true_catalog": cmd("off_true_catalog", mock, "off_true_catalog", cluster_mode="off", partition=None, use_unified_observed_catalog=args.use_unified_observed_catalog),
         "j2_fixed_true": cmd("j2_fixed_true", mock, "j2_fixed_true", cluster_mode="j2", partition=mock / "partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog),
-        "j2_fixed_wrong": cmd("j2_fixed_wrong", mock, "j2_fixed_wrong", cluster_mode="j2", partition=work / "wrong_partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog, pair_pe_path=work / "wrong_pair_pe.h5"),
+        "j2_fixed_wrong": cmd("j2_fixed_wrong", mock, "j2_fixed_wrong", cluster_mode="j2", partition=work / "wrong_partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog, pair_pe_path=(None if args.use_unified_observed_catalog else work / "wrong_pair_pe.h5")),
         "j2_null": cmd("j2_null", null_mock, "j2_null", cluster_mode="j2", partition=null_mock / "partition.json"),
         "off_null": cmd("off_null", null_mock, "off_null", cluster_mode="off", partition=None),
         "j2_batched": cmd("j2_batched", mock, "j2_batched", cluster_mode="j2", partition=mock / "partition.json", pair_batch_size=max(1, args.pair_batch_size), use_unified_observed_catalog=args.use_unified_observed_catalog),
