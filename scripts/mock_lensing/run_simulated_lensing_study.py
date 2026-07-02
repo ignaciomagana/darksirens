@@ -76,7 +76,7 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
     elif name.startswith("E_"):
         spec.update(include_sky_marks=False, edge_mark_prior_keys_csv="", pair_tag_model="snr_time")
     elif name.startswith("F_"):
-        spec.update(include_time_marks=False, pair_marks="none", pair_tag_model="snr_time_sky")
+        spec.update(include_time_marks=False, pair_marks="none", pair_tag_model="snr_sky")
     elif name.startswith("G_"):
         pass
     elif name.startswith("H_"):

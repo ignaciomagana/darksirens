@@ -36,6 +36,10 @@ class PairTagSelectionModel:
     def required_fields(self) -> tuple[str, ...]:
         if self.kind in ("none", "constant"):
             return ()
+        if self.kind == "snr_only":
+            return ("snr_image0", "snr_image1")
+        if self.kind == "snr_sky":
+            return ("snr_image0", "snr_image1", "log_sky_overlap")
         if self.kind == "snr_time":
             return ("snr_image0", "snr_image1", "delta_t_obs")
         if self.kind == "snr_time_sky":
@@ -48,13 +52,15 @@ class PairTagSelectionModel:
             p = np.asarray(self.constant, dtype=float)
         elif self.kind == "constant":
             p = np.asarray(self.constant, dtype=float)
-        elif self.kind in ("snr_time", "snr_time_sky"):
+        elif self.kind in ("snr_only", "snr_sky", "snr_time", "snr_time_sky"):
             snr0 = np.asarray(fields["snr_image0"], dtype=float)
             snr1 = np.asarray(fields["snr_image1"], dtype=float)
-            dt = np.abs(np.asarray(fields.get("delta_t_obs", fields.get("true_delta_t")), dtype=float))
             min_snr = np.minimum(snr0, snr1)
-            score = -1.25 + 0.32 * (min_snr - 8.0) + 0.10 * np.log1p(dt / 86400.0)
-            if self.kind == "snr_time_sky":
+            score = -1.25 + 0.32 * (min_snr - 8.0)
+            if self.kind in ("snr_time", "snr_time_sky"):
+                dt = np.abs(np.asarray(fields.get("delta_t_obs", fields.get("true_delta_t")), dtype=float))
+                score = score + 0.10 * np.log1p(dt / 86400.0)
+            if self.kind in ("snr_sky", "snr_time_sky"):
                 score = score + 0.25 * np.asarray(fields["log_sky_overlap"], dtype=float)
             p = _sigmoid(score)
         else:

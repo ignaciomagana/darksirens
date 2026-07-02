@@ -957,9 +957,13 @@ robustness studies of spectral-siren lensing inference and is not a GWTC-5 or
 real-search calibration.  The available deterministic mock models are:
 
 * `constant`: uses `--pair_tag_constant` for every kept pair.
-* `snr_time`: computes `p_tag` from `snr_image0`, `snr_image1`, and
-  `delta_t_obs` (or `true_delta_t`) stored in the mock lensed injections.
-* `snr_time_sky`: also requires `log_sky_overlap`.
+* `snr_only`: computes `p_tag` only from the weaker image SNR, using
+  `snr_image0` and `snr_image1`.
+* `snr_time`: computes `p_tag` from the weaker image SNR and `delta_t_obs`
+  (or `true_delta_t`) stored in the mock lensed injections.
+* `snr_sky`: computes `p_tag` from the weaker image SNR and
+  `log_sky_overlap`, without requiring or using time-delay information.
+* `snr_time_sky`: combines weaker image SNR, time delay, and sky overlap.
 * `file`: reads a small JSON model specification from `--pair_tag_selection_path`.
 
 Inference defaults preserve the existing behavior: if no nontrivial model is
@@ -1009,9 +1013,11 @@ The built-in matrix covers the following controlled simulation cases:
 * `D_true_pairs_bad_pair_tag`: injected pairs with a deliberately perturbed
   pair-tag model at inference time to quantify `p_tag` model bias.
 * `E_true_pairs_no_sky_marks`: injected pairs with sky marks omitted from the
-  candidate graph and edge-prior model.
+  candidate graph and edge-prior model; the simulated pair-tag model uses
+  `snr_time`, so sky information is also omitted from pair-tag selection.
 * `F_true_pairs_no_time_marks`: injected pairs with time-delay marks omitted
-  from the pair likelihood.
+  from the pair likelihood; the simulated pair-tag model uses `snr_sky`, so
+  time information is also omitted from pair-tag selection.
 * `G_true_pairs_full_marks`: injected pairs with time and sky marks enabled.
 * `H_ambiguous_components`: injected pairs with higher-degree components to
   exercise exact candidate-partition marginalisation in ambiguous graphs.

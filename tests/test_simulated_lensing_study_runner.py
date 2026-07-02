@@ -29,6 +29,8 @@ def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
         assert j2_only_flag not in off_cmd
     assert "--fix_lens_rate" in off_cmd
     assert off_cmd[off_cmd.index("--fix_lens_rate") + 1] == "true"
+    f_case = plan["cases"]["F_true_pairs_no_time_marks"]["inference"]
+    assert f_case[f_case.index("--pair_tag_model") + 1] == "snr_sky"
 
 
 def test_truth_recovery_metrics_with_fake_posterior_probabilities():
