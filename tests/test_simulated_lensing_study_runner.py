@@ -152,6 +152,9 @@ def test_diagnostics_only_plan_records_evidence_warning_and_off_max_samples_zero
     case = plan["cases"]["A_no_true_pairs_sparse_wrong_graph"]
     assert case["inference"][case["inference"].index("--max_samples") + 1] == "0"
     assert case["off"][case["off"].index("--max_samples") + 1] == "0"
+    b_cmd = plan["cases"]["B_true_pairs_clean_graph"]["inference"]
+    assert b_cmd[b_cmd.index("--fixed_parameter_values") + 1] == '{"tau_n": 3.0}'
+    assert b_cmd[b_cmd.index("--lens_prior_overrides") + 1] == '{"log10_tau_A": [-5.0, -2.5]}'
     assert plan["diagnostics_only"] is True
 
 from scripts.mock_lensing.run_simulated_lensing_study import audit_candidate_graph, _candidate_audit_csv_row, _write_csv

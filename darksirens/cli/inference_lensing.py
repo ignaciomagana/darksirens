@@ -175,6 +175,30 @@ LENS_PARAMETER_PRIORS = {
 }
 
 
+def _split_lensing_fixed_parameters(fixed):
+    """Separate shared/base fixed values from lensing-only fixed values."""
+    if fixed is None:
+        fixed = {}
+    if not isinstance(fixed, dict):
+        raise TypeError("fixed_parameter_values must be a JSON object")
+
+    base_fixed, lens_fixed = {}, {}
+    for label, value in fixed.items():
+        try:
+            value_float = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"fixed value for {label!r} must be a finite number"
+            ) from exc
+        if not np.isfinite(value_float):
+            raise ValueError(f"fixed value for {label!r} must be finite")
+        if label in LENS_PARAMETER_PRIORS:
+            lens_fixed[label] = value_float
+        else:
+            base_fixed[label] = value_float
+    return base_fixed, lens_fixed
+
+
 def _build_lens_parameter_space(opts, fixed_parameter_values, lens_prior_overrides):
     """Return sampled SIS optical-depth labels and bounds for this lensing CLI.
 
@@ -230,6 +254,14 @@ def _lens_settings_dict(coord, sampled_labels, fixed_parameter_values, opts):
         lens_n_tau=float(np.asarray(sis.n_tau)),
     )
 
+
+def _decode_base_parameters(decoder, coord):
+    """Decode only the base-parameter prefix from a combined sampler vector."""
+    coord = jnp.asarray(coord)
+    sampled_labels = getattr(decoder, "sampled_labels", None)
+    if sampled_labels is None:
+        return decoder.decode(coord)
+    return decoder.decode(coord[: len(sampled_labels)])
 
 # =============================================================================
 # Container builders (mirror darksirens.likelihood.factory)
@@ -1026,8 +1058,8 @@ def build_cluster_likelihood(
     def loglike(coord):
         # decode() returns a 5-tuple (cosmo, survey, pop, sky, mark) on current
         # master; the cluster likelihood is WL-only (sky/mark unused here).
-        cosmo, survey, pop_params, _sky_params, _mark_params = decoder.decode(
-            jnp.asarray(coord)
+        cosmo, survey, pop_params, _sky_params, _mark_params = _decode_base_parameters(
+            decoder, coord
         )
 
         def _eval_partition(part):
@@ -1112,7 +1144,9 @@ def build_cluster_diagnostics(
 
     def diagnostics(coord):
         coord = jnp.asarray(coord)
-        cosmo, survey, pop_params, _sky_params, _mark_params = decoder.decode(coord)
+        cosmo, survey, pop_params, _sky_params, _mark_params = _decode_base_parameters(
+            decoder, coord
+        )
 
         def _raw_for(singletons, pairs, n_singletons, n_pairs, part=None):
             return darksiren_likelihood_diagnostics_with_clusters(
@@ -1473,9 +1507,33 @@ def main():
 
     run_dir = _make_run_dir(opts)
     settings = _jsonable_settings(opts)
+    labels = []
+    fixed = {}
+    base_fixed = {}
+    lens_fixed = {}
+    try:
+        fixed = (
+            json.loads(opts.fixed_parameter_values) if opts.fixed_parameter_values else {}
+        )
+        base_fixed, lens_fixed = _split_lensing_fixed_parameters(fixed)
+        settings.update(
+            fixed_parameter_values_raw=fixed,
+            fixed_parameter_values_base=base_fixed,
+            fixed_parameter_values_lens=lens_fixed,
+        )
+    except Exception as exc:
+        settings.update(
+            fixed_parameter_values_raw=opts.fixed_parameter_values,
+            fixed_parameter_values_base={},
+            fixed_parameter_values_lens={},
+        )
+        _write_json(os.path.join(run_dir, "settings.json"), settings)
+        _write_failure(
+            run_dir, "build_parameter_space", exc, labels=labels, settings=settings
+        )
+        raise
     _write_json(os.path.join(run_dir, "settings.json"), settings)
 
-    labels = []
     print("loading data ...", flush=True)
     try:
         inp = load_inputs(opts)
@@ -1495,9 +1553,6 @@ def main():
 
     # --- build parameter space + prior + decoder using branch machinery ---
     try:
-        fixed = (
-            json.loads(opts.fixed_parameter_values) if opts.fixed_parameter_values else {}
-        )
         overrides = json.loads(opts.prior_overrides) if opts.prior_overrides else {}
         lens_overrides = (
             json.loads(opts.lens_prior_overrides) if opts.lens_prior_overrides else {}
@@ -1512,13 +1567,13 @@ def main():
             opts.fix_cosmology,
             opts.fix_survey,
             prior_overrides=overrides,
-            fixed_parameter_values=fixed,
+            fixed_parameter_values=base_fixed,
         )
         base_labels = list(space[0])
         base_lower = np.asarray(space[1])
         base_upper = np.asarray(space[2])
         lens_labels, lens_lower, lens_upper = _build_lens_parameter_space(
-            opts, fixed, lens_overrides
+            opts, lens_fixed, lens_overrides
         )
         labels = base_labels + lens_labels
         lower = np.concatenate([base_lower, lens_lower])
@@ -1532,12 +1587,12 @@ def main():
         decoder = build_parameter_decoder(
             opts,
             pop_params_fid,
-            fixed_parameter_values=fixed,
+            fixed_parameter_values=base_fixed,
             wl_params=wl_params,
         )
 
-        loglike = build_cluster_likelihood(opts, inp, decoder, labels, fixed)
-        diagnostics_fn = build_cluster_diagnostics(opts, inp, decoder, labels, fixed)
+        loglike = build_cluster_likelihood(opts, inp, decoder, labels, lens_fixed)
+        diagnostics_fn = build_cluster_diagnostics(opts, inp, decoder, labels, lens_fixed)
     except Exception as exc:
         _write_failure(run_dir, "build_parameter_space", exc, labels=labels, settings=settings)
         raise
@@ -1608,6 +1663,9 @@ def main():
         with h5py.File(os.path.join(run_dir, "results.hdf5"), "w") as f:
             f.create_dataset("samples", data=samples)
             f.attrs["labels"] = json.dumps(labels)
+            f.attrs["fixed_parameter_values_raw"] = json.dumps(fixed, default=str)
+            f.attrs["fixed_parameter_values_base"] = json.dumps(base_fixed, default=str)
+            f.attrs["fixed_parameter_values_lens"] = json.dumps(lens_fixed, default=str)
             f.attrs["wl_selection"] = opts.wl_selection
             f.attrs["pair_tag_model"] = opts.pair_tag_model
             f.attrs["pair_tag_constant"] = float(opts.pair_tag_constant)
@@ -1617,7 +1675,7 @@ def main():
             )
             f.attrs["wl_a"] = float(opts.lensing_wl_a)
             f.attrs["wl_b"] = float(opts.lensing_wl_b)
-            lens_settings = _lens_settings_dict(mid, labels, fixed, opts)
+            lens_settings = _lens_settings_dict(mid, labels, lens_fixed, opts)
             f.attrs["lens_labels"] = json.dumps(lens_settings["lens_labels"])
             f.attrs["fix_lens_rate"] = bool(opts.fix_lens_rate)
             f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
@@ -1643,7 +1701,10 @@ def main():
             wl_b=float(opts.lensing_wl_b),
             partition_mode=getattr(opts, "partition_mode", "fixed"),
             lens_prior_overrides=lens_overrides,
-            **_lens_settings_dict(mid, labels, fixed, opts),
+            fixed_parameter_values_raw=fixed,
+            fixed_parameter_values_base=base_fixed,
+            fixed_parameter_values_lens=lens_fixed,
+            **_lens_settings_dict(mid, labels, lens_fixed, opts),
         )
         if inp.get("observed_catalog"):
             settings["observed_catalog_path"] = inp["observed_catalog"].get("path")
