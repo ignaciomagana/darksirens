@@ -334,6 +334,62 @@ failed, for compatibility with older branches.  The optional
 Poisson-conditioned mock and samples `log10_tau_A` while fixing `tau_n` through
 `--fixed_parameter_values`.
 
+
+### Simulated end-to-end study runner with J=2/off evidence pairs
+
+`run_simulated_lensing_study.py` is a mock-only end-to-end study runner for the
+candidate-graph recovery cases.  By default it now plans a matched
+`cluster_mode=off` control for every J=2 case (`--run_off_controls true`).  Each
+control uses the same observed GW PE file, observed catalog, GW selection file,
+weak-lensing backend, population model, and fixed cosmology/survey/population
+choices as the J=2 run, but intentionally omits J=2-only inputs such as lensed
+injections, pair metadata, candidate-pair graphs, partition mode, pair marks, and
+pair-tag settings.  The off control fixes the lens-rate hyperparameters
+(`--fix_lens_rate true`) because those parameters are irrelevant when
+`--cluster_mode off`.
+
+Preview the paired commands without generating mocks or running samplers:
+
+```bash
+python scripts/mock_lensing/run_simulated_lensing_study.py \
+  --profile tiny \
+  --workdir /tmp/ds_simulated_lensing_study \
+  --dry_run true \
+  --run_off_controls true
+```
+
+A future evidence-producing run should disable diagnostics-only mode and use real
+sampler settings.  The runner writes each J=2 case under `runs/<case>` and the
+matched off control under `runs/<case>__off`:
+
+```bash
+python scripts/mock_lensing/run_simulated_lensing_study.py \
+  --profile small \
+  --workdir /tmp/ds_simulated_lensing_study_evidence \
+  --sampler dynesty \
+  --nlive 80 \
+  --dlogz 10 \
+  --diagnostics_only false \
+  --run_off_controls true
+```
+
+`validation_summary.json` stores a nested record for each case with separate
+`j2` and `off` sections (`status`, `run_dir`, `logZ`, `logZerr`, diagnostics,
+and result attributes).  When both sampler evidences are present, the runner
+computes `delta_logZ_j2_minus_off = logZ_j2 - logZ_off`; if both evidence errors
+are available it also writes `delta_logZerr`.  The Markdown summary includes a
+paired evidence table with J=2 status, off status, both evidences, the evidence
+delta, expected pair count, and run directories.  Candidate recovery outputs such
+as `posterior_pair_probabilities.csv` and `truth_recovery_summary.csv` remain
+J=2-based diagnostics.
+
+`--diagnostics_only true` still runs the paired J=2/off commands with
+`--max_samples 0` when `--run_off_controls true`, which is useful for cheap
+wiring checks.  Those outputs are not sampler evidence; the runner records the
+warning `diagnostics_only: evidence deltas are not meaningful` and leaves
+`delta_logZ_j2_minus_off` unset unless a future backend produces meaningful
+log-evidence values despite diagnostics-only mode.
+
 ### Simulated study plots
 
 After running the simulated end-to-end lensing study, generate one diagnostic

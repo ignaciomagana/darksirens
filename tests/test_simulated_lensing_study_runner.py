@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.mock_lensing.run_simulated_lensing_study import recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary
+from scripts.mock_lensing.run_simulated_lensing_study import evidence_delta, extract_logz, recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary
 
 
 def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
@@ -19,6 +19,16 @@ def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
     commands = json.dumps(plan)
     assert "--edge_mark_prior_keys" in commands
     assert "--edge_prior_marks" not in commands
+    first = plan["cases"]["A_no_true_pairs_sparse_wrong_graph"]
+    assert "off" in first
+    assert "off_preflight" in first
+    off_cmd = first["off"]
+    assert "--cluster_mode" in off_cmd
+    assert off_cmd[off_cmd.index("--cluster_mode") + 1] == "off"
+    for j2_only_flag in ["--lensed_injections_path", "--pair_metadata_path", "--candidate_pairs_path", "--partition_mode", "--pair_marks", "--pair_tag_model"]:
+        assert j2_only_flag not in off_cmd
+    assert "--fix_lens_rate" in off_cmd
+    assert off_cmd[off_cmd.index("--fix_lens_rate") + 1] == "true"
 
 
 def test_truth_recovery_metrics_with_fake_posterior_probabilities():
@@ -77,3 +87,30 @@ def test_preflight_only_dry_run_plan_has_preflight_no_generated_outputs(tmp_path
     assert "--preflight_only" in commands
     assert "preflight.json" in commands
     assert not (workdir / "cases" / "A_no_true_pairs_sparse_wrong_graph" / "mock_observed_gw_pe.h5").exists()
+
+
+def test_extract_logz_from_fake_attrs():
+    assert extract_logz({"logZ": "12.5"}) == 12.5
+    assert extract_logz({"logz": -3}) == -3.0
+    assert extract_logz({"logZ": "nan"}) is None
+    assert extract_logz({}) is None
+
+
+def test_delta_logz_arithmetic_for_fake_attrs():
+    j2 = extract_logz({"logZ": 10.0})
+    off = extract_logz({"logZ": 7.5})
+    assert evidence_delta(j2, off) == 2.5
+    assert evidence_delta(j2, extract_logz({})) is None
+    assert evidence_delta(j2, off, diagnostics_only=True) is None
+
+
+def test_diagnostics_only_plan_records_evidence_warning_and_off_max_samples_zero(tmp_path):
+    repo = Path(__file__).resolve().parents[1]
+    workdir = tmp_path / "study"
+    cmd = [sys.executable, "scripts/mock_lensing/run_simulated_lensing_study.py", "--workdir", str(workdir), "--profile", "tiny", "--diagnostics_only", "true", "--dry_run", "true"]
+    subprocess.run(cmd, cwd=repo, check=True, timeout=60)
+    plan = json.loads((workdir / "validation_plan.json").read_text())
+    case = plan["cases"]["A_no_true_pairs_sparse_wrong_graph"]
+    assert case["inference"][case["inference"].index("--max_samples") + 1] == "0"
+    assert case["off"][case["off"].index("--max_samples") + 1] == "0"
+    assert plan["diagnostics_only"] is True

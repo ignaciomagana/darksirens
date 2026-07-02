@@ -156,6 +156,53 @@ def build_graph_cmd(case_dir: Path, spec: dict[str, Any], seed: int) -> list[str
             "--include_time_marks", str(spec["include_time_marks"]).lower(), "--include_sky_marks", str(spec["include_sky_marks"]).lower(),
             "--include_truth_labels", "false", "--sky_overlap_weight", "0.0", "--seed", str(seed)]
 
+def read_results_attrs(run_dir: Path | None) -> dict[str, Any]:
+    """Read lightweight result-file attributes from a timestamped run directory."""
+    if run_dir is None:
+        return {}
+    results_path = run_dir / "results.hdf5"
+    if not results_path.exists():
+        return {}
+    try:
+        import h5py
+        with h5py.File(results_path, "r") as f:
+            attrs = {k: _jsonable(v) for k, v in f.attrs.items()}
+            labels = json.loads(attrs.get("labels", "[]")) if isinstance(attrs.get("labels"), str) else []
+            if "samples" in f and "log10_tau_A" in labels:
+                col = np.asarray(f["samples"])[:, labels.index("log10_tau_A")]
+                attrs["log10_tau_A_summary"] = {"mean": float(np.mean(col)), "median": float(np.median(col)), "q05": float(np.quantile(col, 0.05)), "q95": float(np.quantile(col, 0.95))}
+            return attrs
+    except Exception as exc:
+        return {"read_error": str(exc)}
+
+def extract_logz(results_attrs: dict[str, Any]) -> float | None:
+    """Return sampler log-evidence from result attributes when available."""
+    for key in ("logZ", "logz", "log_evidence", "log_evidence_final"):
+        if key in results_attrs and results_attrs[key] is not None:
+            try:
+                value = float(results_attrs[key])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                return value
+    return None
+
+def extract_logzerr(results_attrs: dict[str, Any]) -> float | None:
+    for key in ("logZerr", "logzerr", "logZ_error", "log_evidence_err"):
+        if key in results_attrs and results_attrs[key] is not None:
+            try:
+                value = float(results_attrs[key])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                return value
+    return None
+
+def evidence_delta(logz_j2: float | None, logz_off: float | None, diagnostics_only: bool = False) -> float | None:
+    if diagnostics_only or logz_j2 is None or logz_off is None:
+        return None
+    return logz_j2 - logz_off
+
 def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
     diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
     max_samples = "0" if diagnostics_only else "5000"
@@ -170,6 +217,20 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
            "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir)]
+    if diagnostics_only:
+        cmd[cmd.index("--nlive") + 1] = "8"; cmd[cmd.index("--dlogz") + 1] = "50"
+    return cmd
+
+def off_control_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
+    max_samples = "0" if diagnostics_only else "5000"
+    nlive = args.nlive or cfg["nlive"]
+    cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(case_dir / "mock_observed_gw_pe.h5"),
+           "--observed_catalog_path", str(case_dir / "observed_catalog.json"), "--gwselection_path", str(case_dir / "mock_gw_selection.h5"),
+           "--cluster_mode", "off", "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak",
+           "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true", "--fix_lens_rate", "true",
+           "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples,
+           "--seed", str(cfg["seed"]), "--save_path", str(run_dir)]
     if diagnostics_only:
         cmd[cmd.index("--nlive") + 1] = "8"; cmd[cmd.index("--dlogz") + 1] = "50"
     return cmd
@@ -225,8 +286,15 @@ def build_plan(args: argparse.Namespace, cfg: dict[str, Any], resolved_config: d
         spec = _case_spec(name, cfg); cdir = work / "cases" / name; rdir = work / "runs" / name
         icmd = inference_cmd(cdir, rdir, spec, cfg, args)
         validate_known_inference_flags(icmd)
-        cases[name] = {"spec": spec, "generate": generate_cmd(cdir, spec, cfg, args.seed + 101*n), "build_graph": build_graph_cmd(cdir, spec, args.seed + 1001*n), "preflight": preflight_cmd(icmd, rdir / "preflight.json"), "inference": icmd}
-    return {"created_at": _utc(), "profile": resolved_config["study"]["profile"], "diagnostics_only": cfg["diagnostics_only"], "resolved_config": resolved_config, "cases": cases}
+        case_plan = {"spec": spec, "generate": generate_cmd(cdir, spec, cfg, args.seed + 101*n), "build_graph": build_graph_cmd(cdir, spec, args.seed + 1001*n), "preflight": preflight_cmd(icmd, rdir / "preflight.json"), "inference": icmd}
+        if args.run_off_controls:
+            off_dir = work / "runs" / f"{name}__off"
+            ocmd = off_control_cmd(cdir, off_dir, cfg, args)
+            validate_known_inference_flags(ocmd)
+            case_plan["off"] = ocmd
+            case_plan["off_preflight"] = preflight_cmd(ocmd, off_dir / "preflight.json")
+        cases[name] = case_plan
+    return {"created_at": _utc(), "profile": resolved_config["study"]["profile"], "diagnostics_only": cfg["diagnostics_only"], "run_off_controls": args.run_off_controls, "resolved_config": resolved_config, "cases": cases}
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -243,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reuse", type=_str2bool, default=False)
     ap.add_argument("--dry_run", type=_str2bool, default=False)
     ap.add_argument("--preflight_only", type=_str2bool, default=False)
+    ap.add_argument("--run_off_controls", type=_str2bool, default=True)
     args = ap.parse_args(argv)
     resolved_config = resolve_config(args.config, args.override, profile=args.profile, allow_unknown=args.allow_unknown_config_keys)
     if args.seed != 2026:
@@ -266,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     (work / "run_manifest.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n")
     if args.dry_run:
         (work / "validation_plan.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n"); return 0
-    summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "preflight_only": args.preflight_only, "resolved_config": resolved_config, "diagnostics_only_note": "Evidence values are not meaningful when max_samples=0." if args.diagnostics_only else None, "cases": {}}
+    summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "preflight_only": args.preflight_only, "resolved_config": resolved_config, "diagnostics_only_note": "diagnostics_only: evidence deltas are not meaningful" if args.diagnostics_only else None, "run_off_controls": args.run_off_controls, "cases": {}}
     pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]
     for name, entry in plan["cases"].items():
         cdir = work / "cases" / name; rdir = work / "runs" / name
@@ -292,36 +361,40 @@ def main(argv: list[str] | None = None) -> int:
             summary["cases"][name] = {**base_rec, "status":"passed_preflight"}; continue
         rt, rc = _run(entry["inference"])
         run = latest_run(rdir); diag = _load_json(run / "diagnostics.json", {}) if run else {}
-        results_attrs = {}
-        if run and (run / "results.hdf5").exists():
-            try:
-                import h5py
-                with h5py.File(run / "results.hdf5", "r") as f:
-                    results_attrs = {k: _jsonable(v) for k,v in f.attrs.items()}
-                    labels = json.loads(results_attrs.get("labels", "[]")) if isinstance(results_attrs.get("labels"), str) else []
-                    if "samples" in f and "log10_tau_A" in labels:
-                        col = np.asarray(f["samples"])[:, labels.index("log10_tau_A")]
-                        results_attrs["log10_tau_A_summary"] = {"mean": float(np.mean(col)), "median": float(np.median(col)), "q05": float(np.quantile(col, 0.05)), "q95": float(np.quantile(col, 0.95))}
-            except Exception as exc: results_attrs = {"read_error": str(exc)}
+        results_attrs = read_results_attrs(run)
+        off_run = None; off_diag = {}; off_attrs = {}; off_rc = None; off_status = "skipped"
+        if args.run_off_controls:
+            off_dir = work / "runs" / f"{name}__off"; off_dir.mkdir(parents=True, exist_ok=True)
+            _run(entry["off_preflight"])
+            _ot, off_rc = _run(entry["off"])
+            off_run = latest_run(off_dir); off_diag = _load_json(off_run / "diagnostics.json", {}) if off_run else {}; off_attrs = read_results_attrs(off_run)
+            off_status = "passed" if off_rc == 0 and off_run else "failed_inference"
+        logz_j2 = extract_logz(results_attrs); logzerr_j2 = extract_logzerr(results_attrs)
+        logz_off = extract_logz(off_attrs); logzerr_off = extract_logzerr(off_attrs)
+        delta_logz = evidence_delta(logz_j2, logz_off, args.diagnostics_only)
+        delta_logzerr = math.sqrt(logzerr_j2**2 + logzerr_off**2) if (delta_logz is not None and logzerr_j2 is not None and logzerr_off is not None) else None
         true_edges = true_edges_from_catalog(cdir / "observed_catalog.json")
         items = posterior_probability_items(diag, cdir / "candidate_pairs.json")
         rec = recovery_metrics(true_edges, items, diag)
         for (i,j), prob in items: pair_rows.append({"case":name,"i":i,"j":j,"posterior_probability":prob,"is_true_edge":(i,j) in true_edges})
         truth_rows.append({"case": name, **rec})
-        bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None})
+        bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None, "logZ_j2": logz_j2, "logZ_off": logz_off, "delta_logZ_j2_minus_off": delta_logz})
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})
-        summary["cases"][name] = {"status":"passed" if rc == 0 and run else "failed_inference", "return_code":rc, "run_dir":str(run) if run else None, "diagnostics":diag, "results_attrs":results_attrs, "recovery":rec, "delta_logZ_j2_minus_off": None, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
+        j2_status = "passed" if rc == 0 and run else "failed_inference"
+        warnings = (["diagnostics_only: evidence deltas are not meaningful"] if args.diagnostics_only else [])
+        summary["cases"][name] = {"status": j2_status, "return_code": rc, "run_dir": str(run) if run else None, "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "j2": {"status": j2_status, "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "diagnostics": diag, "results_attrs": results_attrs}, "off": {"status": off_status, "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "diagnostics": off_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
     if args.preflight_only:
         write_preflight_summary(work, summary)
         return 0 if all(c.get("status") == "passed_preflight" for c in summary["cases"].values()) else 1
     _write_csv(work / "posterior_pair_probabilities.csv", pair_rows, ["case","i","j","posterior_probability","is_true_edge"])
     _write_csv(work / "partition_component_summary.csv", comp_rows, ["case","n_events","n_candidate_edges","expected_n_pairs","map_n_pairs"])
     _write_csv(work / "truth_recovery_summary.csv", truth_rows, ["case","injected_n_pairs","expected_n_pairs","map_n_pairs","true_edge_posterior_probability_mean","false_edge_posterior_probability_max","false_edge_posterior_probability_sum","map_partition_exact_truth_match"])
-    _write_csv(work / "bias_summary.csv", bias_rows, ["case","p_tag_model","pair_tag_perturb_logit","delta_expected_n_pairs_minus_injected"])
+    _write_csv(work / "bias_summary.csv", bias_rows, ["case","p_tag_model","pair_tag_perturb_logit","delta_expected_n_pairs_minus_injected","logZ_j2","logZ_off","delta_logZ_j2_minus_off"])
     (work / "validation_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
-    lines = [f"# Simulated lensing study ({args.profile})", "", "Diagnostics-only: " + str(args.diagnostics_only), "", "| case | status | injected pairs | expected pairs | max false edge p | run dir |", "| --- | --- | ---: | ---: | ---: | --- |"]
+    lines = [f"# Simulated lensing study ({args.profile})", "", "Diagnostics-only: " + str(args.diagnostics_only), "", "| case | j2 status | off status | logZ_j2 | logZ_off | delta_logZ | expected_n_pairs | run dirs |", "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"]
     for name, rec in summary["cases"].items():
-        r = rec.get("recovery", {}); lines.append(f"| {name} | {rec.get('status')} | {r.get('injected_n_pairs')} | {r.get('expected_n_pairs')} | {r.get('false_edge_posterior_probability_max')} | {rec.get('run_dir')} |")
+        r = rec.get("recovery", {}); j2 = rec.get("j2", {}); off = rec.get("off", {})
+        lines.append(f"| {name} | {j2.get('status', rec.get('status'))} | {off.get('status')} | {j2.get('logZ')} | {off.get('logZ')} | {rec.get('delta_logZ_j2_minus_off')} | {r.get('expected_n_pairs')} | {j2.get('run_dir')}<br>{off.get('run_dir')} |")
     (work / "validation_summary.md").write_text("\n".join(lines) + "\n")
     return 0 if all(c.get("status") == "passed" for c in summary["cases"].values()) else 1
 
