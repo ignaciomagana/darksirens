@@ -14,6 +14,16 @@ from typing import Mapping, Any
 import numpy as np
 
 
+PAIR_TAG_SELECTION_MODEL_KINDS = (
+    "constant",
+    "snr_only",
+    "snr_sky",
+    "snr_time",
+    "snr_time_sky",
+    "file",
+)
+
+
 def _sigmoid(x):
     x = np.asarray(x, dtype=float)
     return 1.0 / (1.0 + np.exp(-np.clip(x, -700.0, 700.0)))

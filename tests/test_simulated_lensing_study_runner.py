@@ -33,6 +33,33 @@ def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
     assert f_case[f_case.index("--pair_tag_model") + 1] == "snr_sky"
 
 
+def test_lensing_parser_accepts_new_pair_tag_models():
+    from darksirens.cli.inference_lensing import build_parser
+
+    for model in ("snr_sky", "snr_only"):
+        opts = build_parser().parse_args([
+            "--gw_path", "gw.h5",
+            "--gwselection_path", "sel.h5",
+            "--sampler", "dynesty",
+            "--pair_tag_model", model,
+        ])
+        assert opts.pair_tag_model == model
+
+
+def test_dry_run_b_clean_graph_command_accepts_snr_sky_pair_tag(tmp_path):
+    from darksirens.cli.inference_lensing import build_parser
+
+    repo = Path(__file__).resolve().parents[1]
+    workdir = tmp_path / "study"
+    cmd = [sys.executable, "scripts/mock_lensing/run_simulated_lensing_study.py", "--workdir", str(workdir), "--profile", "tiny", "--dry_run", "true"]
+    subprocess.run(cmd, cwd=repo, check=True, timeout=60)
+    plan = json.loads((workdir / "validation_plan.json").read_text())
+    b_cmd = plan["cases"]["B_true_pairs_clean_graph"]["inference"]
+    assert b_cmd[b_cmd.index("--pair_tag_model") + 1] == "snr_sky"
+    validate_known_inference_flags(b_cmd)
+    opts = build_parser().parse_args(b_cmd[b_cmd.index("--gw_path"):])
+    assert opts.pair_tag_model == "snr_sky"
+
 def test_run_logged_writes_stdout_stderr_for_nonzero_exit(tmp_path):
     log = _run_logged([sys.executable, "-c", "import sys; print(\"out msg\"); print(\"err msg\", file=sys.stderr); sys.exit(3)"], tmp_path / "cmd")
     assert log["return_code"] == 3
