@@ -50,6 +50,45 @@ def test_lensing_parser_accepts_new_pair_tag_models():
         assert opts.pair_tag_model == model
 
 
+def test_componentwise_exact_lensing_runtime_imports_smoke():
+    from darksirens.cli.inference_lensing import (
+        _all_singleton_partition_state,
+        _factorized_logsumexp_jax,
+        build_parser,
+    )
+    from darksirens.lensing.marginal_diagnostics import (
+        compute_componentwise_factorized_partition_diagnostics,
+    )
+    from darksirens.lensing.partitions import (
+        PartitionState,
+        combine_component_partitions,
+        exact_partition_components,
+    )
+
+    opts = build_parser().parse_args([
+        "--gw_path",
+        "gw.h5",
+        "--gwselection_path",
+        "sel.h5",
+        "--sampler",
+        "dynesty",
+        "--partition_mode",
+        "marginalize_exact",
+        "--partition_component_mode",
+        "componentwise",
+    ])
+
+    state = _all_singleton_partition_state(2)
+    assert isinstance(state, PartitionState)
+    assert state.n_singletons == 2
+    assert state.n_pairs == 0
+    assert opts.partition_mode == "marginalize_exact"
+    assert opts.partition_component_mode == "componentwise"
+    assert callable(_factorized_logsumexp_jax)
+    assert callable(exact_partition_components)
+    assert callable(combine_component_partitions)
+    assert callable(compute_componentwise_factorized_partition_diagnostics)
+
 def test_dry_run_b_clean_graph_command_accepts_snr_sky_pair_tag(tmp_path):
     from darksirens.cli.inference_lensing import build_parser
 

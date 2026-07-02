@@ -128,7 +128,10 @@ from darksirens.lensing.observed_catalog import (
     validate_observed_catalog_file,
 )
 from darksirens.lensing.partitions import (
+    PartitionState,
     exact_partitions_from_pairs,
+    exact_partition_components,
+    combine_component_partitions,
     prepare_candidate_pairs_for_partitioning,
     parse_edge_mark_keys,
     validate_candidate_pairs,
@@ -136,6 +139,7 @@ from darksirens.lensing.partitions import (
 from darksirens.lensing.preflight import run_lensing_preflight
 from darksirens.lensing.marginal_diagnostics import (
     compute_marginalized_partition_diagnostics,
+    compute_componentwise_factorized_partition_diagnostics,
 )
 from darksirens.likelihood.pair_kde import (
     make_pair_kde,
@@ -1038,7 +1042,8 @@ def load_inputs(opts):
         component_full_partition_states=component_full_partition_states,
         component_full_partitions=component_full_partitions,
         baseline_partition=baseline_partition,
-        selection_probe_partitions=selection_probe_partitions,        candidate_pairs=(
+        selection_probe_partitions=selection_probe_partitions,
+        candidate_pairs=(
             candidate_pairs if partition_mode == "marginalize_exact" else None
         ),
         candidate_pairs_raw=(
