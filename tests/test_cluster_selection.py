@@ -1424,6 +1424,36 @@ def test_pair_tag_selection_model_probabilities_and_snr_monotonic():
     assert high > low
 
 
+
+def test_pair_tag_selection_model_required_fields_for_snr_ablations():
+    from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
+
+    assert make_pair_tag_selection_model("snr_only").required_fields == ("snr_image0", "snr_image1")
+    assert make_pair_tag_selection_model("snr_sky").required_fields == (
+        "snr_image0",
+        "snr_image1",
+        "log_sky_overlap",
+    )
+
+
+def test_snr_sky_pair_tag_probability_omits_time_dependence():
+    from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
+
+    model = make_pair_tag_selection_model("snr_sky")
+    base = model.probability(
+        snr_image0=np.array([10.0]),
+        snr_image1=np.array([9.0]),
+        log_sky_overlap=np.array([-1.0]),
+        delta_t_obs=np.array([1.0]),
+    )
+    later = model.probability(
+        snr_image0=np.array([10.0]),
+        snr_image1=np.array([9.0]),
+        log_sky_overlap=np.array([-1.0]),
+        delta_t_obs=np.array([1.0e9]),
+    )
+    np.testing.assert_allclose(base, later)
+
 def test_pair_tag_perturb_logit_changes_probability():
     from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
 
@@ -1451,6 +1481,30 @@ def test_lensed_injection_loading_reads_pair_tag_fields():
     assert hasattr(inj, "snr_image0")
     assert inj.snr_image0.shape == inj.m1_src.shape
     assert np.all(np.isfinite(np.asarray(inj.delta_t_obs)))
+
+
+def test_preflight_catches_missing_snr_sky_fields_without_requiring_time(tmp_path):
+    from argparse import Namespace
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    camp = _synth_lensed_injection_campaign(n_sources=4, seed=125)
+    inj_path = tmp_path / "inj_snr_sky.h5"
+    save_lensed_injections(
+        path=str(inj_path),
+        **{k: v for k, v in camp.items() if k not in ("n_both_detected",)},
+        snr_image0=np.linspace(8, 12, camp["n_draw_sources"]),
+        snr_image1=np.linspace(7, 11, camp["n_draw_sources"]),
+    )
+    opts = Namespace(
+        cluster_mode="j2", partition_mode="marginalize_exact", pair_marks="none",
+        edge_mark_prior_keys="", edge_mark_likelihood_keys="", gw_path=None,
+        gwselection_path=str(inj_path), lensed_injections_path=str(inj_path),
+        candidate_pairs_path=None, observed_catalog_path=None, pair_tag_model="snr_sky",
+        pair_tag_constant=1.0, pair_tag_perturb_logit=0.0,
+    )
+    report = run_lensing_preflight(opts)
+    assert any("log_sky_overlap" in e for e in report["errors"])
+    assert not any("delta_t_obs" in e for e in report["errors"])
 
 
 def test_preflight_catches_missing_snr_time_sky_fields(tmp_path):
