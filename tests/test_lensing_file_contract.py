@@ -67,3 +67,26 @@ def test_legacy_candidate_pairs_alias_is_accepted_with_warning(tmp_path):
     assert report["ok"]
     assert report["summary"]["labels_present"] is True
     assert any("legacy" in w for w in report["warnings"])
+
+
+def test_canonical_lensed_injection_selection_file_is_accepted(tmp_path):
+    path = tmp_path / "mock_lensed_injections.h5"
+    with h5py.File(path, "w") as f:
+        for name in (
+            "source_id",
+            "image_id",
+            "m1_src",
+            "q_src",
+            "z_src",
+            "chieff",
+            "y_source",
+            "mu",
+            "detected",
+            "p_prop_src",
+            "p_prop_y",
+        ):
+            f.create_dataset(name, data=np.ones(3))
+    report = file_contract.validate_selection_inputs(path)
+    assert report["ok"]
+    assert report["summary"]["selection_kind"] == "lensed"
+    assert report["summary"]["canonical_lensed_injections"] is True

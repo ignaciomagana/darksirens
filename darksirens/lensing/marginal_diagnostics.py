@@ -32,10 +32,18 @@ def compute_marginalized_partition_diagnostics(
     partition_loglike: Callable[[PartitionState], float],
     *,
     log_z_partition_prior: float | None = None,
+    raw_candidate_pairs: Iterable[CandidatePair] | None = None,
+    edge_mark_prior_contributions: Iterable[float] | None = None,
 ) -> dict:
     """Compute exact posterior diagnostics over a finite set of partitions."""
     states = tuple(partition_states)
     candidates = tuple(candidate_pairs)
+    raw_candidates = tuple(raw_candidate_pairs) if raw_candidate_pairs is not None else ()
+    contributions = (
+        tuple(float(x) for x in edge_mark_prior_contributions)
+        if edge_mark_prior_contributions is not None
+        else ()
+    )
     if not states:
         raise ValueError("at least one partition is required")
 
@@ -74,12 +82,29 @@ def compute_marginalized_partition_diagnostics(
             singleton_probs[np.asarray(state.singleton_indices, dtype=int)] += w
 
     posterior_pair_probabilities = []
-    for c, p_pair in zip(candidates, pair_probs):
+    for edge_idx, (c, p_pair) in enumerate(zip(candidates, pair_probs)):
+        raw_c = raw_candidates[edge_idx] if edge_idx < len(raw_candidates) else None
+        contribution = (
+            contributions[edge_idx]
+            if edge_idx < len(contributions)
+            else (
+                float(c.log_prior_odds) - float(raw_c.log_prior_odds)
+                if raw_c is not None
+                else 0.0
+            )
+        )
+        raw_log_prior = (
+            float(raw_c.log_prior_odds) if raw_c is not None else float(c.log_prior_odds)
+        )
+        effective_log_prior = float(c.log_prior_odds)
         item = {
             "i": int(c.i),
             "j": int(c.j),
             "p_pair": float(p_pair),
-            "log_prior_odds": float(c.log_prior_odds),
+            "log_prior_odds": effective_log_prior,
+            "log_prior_odds_raw": raw_log_prior,
+            "log_prior_odds_effective": effective_log_prior,
+            "edge_mark_prior_contribution": float(contribution),
             "marks": c.marks.to_dict(),
         }
         if c.label is not None:

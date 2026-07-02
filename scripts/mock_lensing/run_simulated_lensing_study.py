@@ -60,11 +60,11 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
     edge_keys = cfg.get("edge_mark_prior_keys", ["log_sky_overlap"])
     spec = dict(n_pair=cfg["n_pair"], max_edges_per_event=cfg.get("max_edges_per_event", 2), max_total_edges=cfg["max_total_edges"],
                 include_sky_marks=cfg.get("include_sky_marks", True), include_time_marks=cfg.get("include_time_marks", True), time_window_sec=math.inf,
-                pair_marks="time" if cfg.get("include_time_marks", True) else "none", edge_prior_marks=",".join(edge_keys), pair_tag_model=cfg.get("pair_tag_model", "snr_time_sky"),
+                pair_marks="time" if cfg.get("include_time_marks", True) else "none", edge_mark_prior_keys_csv=",".join(edge_keys), pair_tag_model=cfg.get("pair_tag_model", "snr_time_sky"),
                 pair_tag_perturb_logit=cfg.get("pair_tag_perturb_logit", 0.0), pair_tag_constant=cfg.get("pair_tag_constant", 1.0),
                 edge_mark_prior_keys=edge_keys)
     if name.startswith("A_"):
-        spec.update(n_pair=0, max_edges_per_event=1, max_total_edges=max(1, cfg["n_sing"]), include_sky_marks=False, include_time_marks=False, pair_marks="none", edge_prior_marks="")
+        spec.update(n_pair=0, max_edges_per_event=1, max_total_edges=max(1, cfg["n_sing"]), include_sky_marks=False, include_time_marks=False, pair_marks="none", edge_mark_prior_keys_csv="")
     elif name.startswith("B_"):
         spec.update(max_edges_per_event=1, max_total_edges=max(1, cfg["n_pair"]))
     elif name.startswith("C_"):
@@ -72,13 +72,13 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
     elif name.startswith("D_"):
         spec.update(pair_tag_model="snr_time_sky", pair_tag_perturb_logit=1.5)
     elif name.startswith("E_"):
-        spec.update(include_sky_marks=False, edge_prior_marks="", pair_tag_model="snr_time")
+        spec.update(include_sky_marks=False, edge_mark_prior_keys_csv="", pair_tag_model="snr_time")
     elif name.startswith("F_"):
         spec.update(include_time_marks=False, pair_marks="none", pair_tag_model="snr_time_sky")
     elif name.startswith("G_"):
         pass
     elif name.startswith("H_"):
-        spec.update(max_edges_per_event=3, max_total_edges=max(6, 3 * cfg["n_pair"]), edge_prior_marks="")
+        spec.update(max_edges_per_event=3, max_total_edges=max(6, 3 * cfg["n_pair"]), edge_mark_prior_keys_csv="")
     return spec
 
 def generate_cmd(case_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], seed: int) -> list[str]:
@@ -109,7 +109,7 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples, "--pe_max_per_pair", str(cfg["pe_max"]),
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
-           "--edge_prior_marks", spec["edge_prior_marks"], "--save_path", str(run_dir)]
+           "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir)]
     if diagnostics_only:
         cmd[cmd.index("--nlive") + 1] = "8"; cmd[cmd.index("--dlogz") + 1] = "50"
     return cmd

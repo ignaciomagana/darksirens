@@ -543,8 +543,12 @@ def test_validate_candidate_pairs_rejects_bad_generic_marks():
             validate_candidate_pairs(data)
 
 
-def test_requested_prior_key_adds_to_effective_edge_log_prior():
-    from darksirens.lensing.partitions import exact_partitions_from_json
+def test_requested_prior_key_adds_to_effective_edge_log_prior_once():
+    from darksirens.lensing.partitions import (
+        exact_partitions_from_pairs,
+        exact_partitions_from_json,
+        prepare_candidate_pairs_for_partitioning,
+    )
 
     data = {
         "n_events": 2,
@@ -552,8 +556,8 @@ def test_requested_prior_key_adds_to_effective_edge_log_prior():
             {
                 "i": 0,
                 "j": 1,
-                "log_prior_odds": -2.0,
-                "marks": {"log_sky_overlap": -0.5},
+                "log_prior_odds": -3.0,
+                "marks": {"log_sky_overlap": -2.0},
             }
         ],
     }
@@ -561,18 +565,38 @@ def test_requested_prior_key_adds_to_effective_edge_log_prior():
         data, edge_mark_prior_keys="log_sky_overlap"
     )
     pair_state = next(s for s in states if s.n_pairs == 1)
-    assert pair_state.log_prior_weight == pytest.approx(-2.5)
+    assert pair_state.log_prior_weight == pytest.approx(-5.0)
+
+    n_events, raw_pairs, effective_pairs, contributions = (
+        prepare_candidate_pairs_for_partitioning(data, "log_sky_overlap")
+    )
+    assert raw_pairs[0].log_prior_odds == pytest.approx(-3.0)
+    assert effective_pairs[0].log_prior_odds == pytest.approx(-5.0)
+    assert contributions == pytest.approx((-2.0,))
+    _, states, _ = exact_partitions_from_pairs(n_events, effective_pairs)
+    pair_state = next(s for s in states if s.n_pairs == 1)
+    assert pair_state.log_prior_weight == pytest.approx(-5.0)
 
 
-def test_posterior_pair_probabilities_include_marks():
+def test_posterior_pair_probabilities_include_prior_semantics_and_marks():
     from darksirens.lensing.partitions import EdgeMarks
 
-    candidates = [CandidatePair(0, 1, 0.0, marks=EdgeMarks(log_sky_overlap=-0.2))]
+    raw = [CandidatePair(0, 1, -3.0, marks=EdgeMarks(log_sky_overlap=-2.0))]
+    candidates = [CandidatePair(0, 1, -5.0, marks=EdgeMarks(log_sky_overlap=-2.0))]
     states = enumerate_compatible_partitions(2, candidates)
     diag = compute_marginalized_partition_diagnostics(
-        states, candidates, lambda _s: 0.0
+        states,
+        candidates,
+        lambda _s: 0.0,
+        raw_candidate_pairs=raw,
+        edge_mark_prior_contributions=(-2.0,),
     )
-    assert diag["posterior_pair_probabilities"][0]["marks"] == {"log_sky_overlap": -0.2}
+    item = diag["posterior_pair_probabilities"][0]
+    assert item["marks"] == {"log_sky_overlap": -2.0}
+    assert item["log_prior_odds"] == pytest.approx(-5.0)
+    assert item["log_prior_odds_raw"] == pytest.approx(-3.0)
+    assert item["log_prior_odds_effective"] == pytest.approx(-5.0)
+    assert item["edge_mark_prior_contribution"] == pytest.approx(-2.0)
 
 
 def test_preflight_fails_missing_requested_prior_mark(tmp_path):
