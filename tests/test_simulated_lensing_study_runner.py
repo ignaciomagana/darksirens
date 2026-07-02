@@ -60,6 +60,50 @@ def test_dry_run_b_clean_graph_command_accepts_snr_sky_pair_tag(tmp_path):
     opts = build_parser().parse_args(b_cmd[b_cmd.index("--gw_path"):])
     assert opts.pair_tag_model == "snr_sky"
 
+
+def _planned_b_command(tmp_path, *overrides):
+    repo = Path(__file__).resolve().parents[1]
+    workdir = tmp_path / "study"
+    cmd = [
+        sys.executable,
+        "scripts/mock_lensing/run_simulated_lensing_study.py",
+        "--workdir",
+        str(workdir),
+        "--profile",
+        "tiny",
+        "--dry_run",
+        "true",
+        "--override",
+        'study.cases=["B_true_pairs_clean_graph"]',
+    ]
+    for override in overrides:
+        cmd.extend(["--override", override])
+    subprocess.run(cmd, cwd=repo, check=True, timeout=60)
+    plan = json.loads((workdir / "validation_plan.json").read_text())
+    return plan["cases"]["B_true_pairs_clean_graph"]["inference"]
+
+
+def test_dry_run_lens_inference_defaults_are_configured(tmp_path):
+    b_cmd = _planned_b_command(tmp_path)
+    assert b_cmd[b_cmd.index("--fix_lens_rate") + 1] == "false"
+    assert b_cmd[b_cmd.index("--fixed_parameter_values") + 1] == '{"tau_n": 3.0}'
+    assert b_cmd[b_cmd.index("--lens_prior_overrides") + 1] == '{"log10_tau_A": [-5.0, -2.5]}'
+
+
+def test_dry_run_lens_prior_override_changes_inference_command(tmp_path):
+    b_cmd = _planned_b_command(tmp_path, 'inference.lens_prior_overrides={"log10_tau_A": [-4.0, -1.5]}')
+    assert b_cmd[b_cmd.index("--lens_prior_overrides") + 1] == '{"log10_tau_A": [-4.0, -1.5]}'
+
+
+def test_dry_run_fixed_parameter_override_changes_inference_command(tmp_path):
+    b_cmd = _planned_b_command(tmp_path, 'inference.fixed_parameter_values={"tau_n": 2.5}')
+    assert b_cmd[b_cmd.index("--fixed_parameter_values") + 1] == '{"tau_n": 2.5}'
+
+
+def test_dry_run_fix_lens_rate_override_changes_inference_command(tmp_path):
+    b_cmd = _planned_b_command(tmp_path, "inference.fix_lens_rate=true")
+    assert b_cmd[b_cmd.index("--fix_lens_rate") + 1] == "true"
+
 def test_run_logged_writes_stdout_stderr_for_nonzero_exit(tmp_path):
     log = _run_logged([sys.executable, "-c", "import sys; print(\"out msg\"); print(\"err msg\", file=sys.stderr); sys.exit(3)"], tmp_path / "cmd")
     assert log["return_code"] == 3

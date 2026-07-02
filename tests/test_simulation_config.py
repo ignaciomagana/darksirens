@@ -32,6 +32,26 @@ def test_override_works(tmp_path):
     assert cfg["inference"]["diagnostics_only"] is True
 
 
+def test_lensing_inference_config_overrides_parse_json(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text("{}")
+    cfg = sc.resolve_config(path, [
+        'inference.lens_prior_overrides={"log10_tau_A": [-4.0, -1.5]}',
+        'inference.fixed_parameter_values={"tau_n": 3.5}',
+        "inference.fix_lens_rate=false",
+    ])
+    assert cfg["inference"]["lens_prior_overrides"] == {"log10_tau_A": [-4.0, -1.5]}
+    assert cfg["inference"]["fixed_parameter_values"] == {"tau_n": 3.5}
+    assert cfg["inference"]["fix_lens_rate"] is False
+
+
+def test_lensing_inference_config_validation_rejects_bad_types(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"inference": {"lens_prior_overrides": [], "fixed_parameter_values": [], "fix_lens_rate": "false"}}))
+    with pytest.raises(ValueError, match="fix_lens_rate.*invalid type.*fixed_parameter_values.*invalid type.*lens_prior_overrides.*invalid type"):
+        sc.resolve_config(path)
+
+
 def test_invalid_config_fails(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text(json.dumps({"mock": {"n_universe": 0}, "extra": {}}))

@@ -358,6 +358,21 @@ python scripts/mock_lensing/run_simulated_lensing_study.py \
   --run_off_controls true
 ```
 
+The J=2 inference lens-rate settings are exposed under the simulated-study
+`inference` config section and may be changed with CLI overrides.  Defaults
+preserve the historical command: `fix_lens_rate: false`,
+`fixed_parameter_values: {tau_n: 3.0}`, and
+`lens_prior_overrides: {log10_tau_A: [-5.0, -2.5]}`.  For example:
+
+```bash
+python scripts/mock_lensing/run_simulated_lensing_study.py \
+  --profile tiny \
+  --workdir /tmp/ds_simulated_lensing_study \
+  --dry_run true \
+  --override 'study.cases=["B_true_pairs_clean_graph"]' \
+  --override 'inference.lens_prior_overrides={"log10_tau_A": [-4.0, -1.5]}'
+```
+
 A future evidence-producing run should disable diagnostics-only mode and use real
 sampler settings.  The runner writes each J=2 case under `runs/<case>` and the
 matched off control under `runs/<case>__off`:
