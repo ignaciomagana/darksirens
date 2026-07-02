@@ -107,6 +107,19 @@ def compute_marginalized_partition_diagnostics(
             "edge_mark_prior_contribution": float(contribution),
             "marks": c.marks.to_dict(),
         }
+        if c.delta_t_obs is not None:
+            item["pair_time_delta_t_obs"] = float(c.delta_t_obs)
+        if c.sigma_delta_t is not None:
+            item["pair_time_sigma"] = float(c.sigma_delta_t)
+        if (
+            c.delta_t_obs is not None
+            and c.sigma_delta_t is not None
+            and np.isclose(float(c.delta_t_obs), 1.0, rtol=0.0, atol=1e-12)
+            and np.isclose(float(c.sigma_delta_t), 1.0, rtol=0.0, atol=1e-12)
+        ):
+            item["pair_time_placeholder_warning"] = (
+                "candidate time marks look like placeholders"
+            )
         if c.label is not None:
             item["label"] = c.label
         posterior_pair_probabilities.append(item)

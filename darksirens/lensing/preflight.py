@@ -266,7 +266,7 @@ def _check_pair_pe(
         errors.append(f"{label} not readable: {path}: {exc}")
 
 
-def _check_candidates(path, n_events, opts, errors, summary, *, observed_n_events=None):
+def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observed_n_events=None):
     if not _exists(path, errors, "candidate_pairs_path"):
         return
     try:
@@ -311,6 +311,21 @@ def _check_candidates(path, n_events, opts, errors, summary, *, observed_n_event
                         f"({pair.i},{pair.j}) missing marks.delta_t_obs/sigma_delta_t "
                         "required by time edge-mark likelihood"
                     )
+            marked_pairs = [
+                pair for pair in pairs
+                if pair.delta_t_obs is not None and pair.sigma_delta_t is not None
+            ]
+            if marked_pairs and len(marked_pairs) == len(pairs) and all(
+                np.isclose(float(pair.delta_t_obs), 1.0, rtol=0.0, atol=1e-12)
+                and np.isclose(float(pair.sigma_delta_t), 1.0, rtol=0.0, atol=1e-12)
+                for pair in marked_pairs
+            ):
+                msg = (
+                    "candidate time marks look like placeholders; pair likelihood may be "
+                    "dominated by unphysical time-delay penalty"
+                )
+                summary["candidate_time_marks_placeholder"] = True
+                warnings.append(msg)
         effective_pairs = (
             apply_edge_mark_prior_keys(pairs, prior_keys) if not errors else pairs
         )
@@ -496,6 +511,7 @@ def run_lensing_preflight(opts) -> dict:
                 n_events,
                 opts,
                 errors,
+                warnings,
                 summary,
                 observed_n_events=observed_n_events,
             )
