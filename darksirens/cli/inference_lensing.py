@@ -103,7 +103,11 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import load_lensed_injections
-from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model, load_pair_tag_selection_file
+from darksirens.lensing.pair_tag_selection import (
+    PAIR_TAG_SELECTION_MODEL_KINDS,
+    make_pair_tag_selection_model,
+    load_pair_tag_selection_file,
+)
 from darksirens.lensing.observed_catalog import (
     observed_catalog_metadata_from_hdf5,
     validate_observed_catalog_file,
@@ -1337,7 +1341,7 @@ def build_parser():
         default=None,
         help="Fallback sigma_delta_t in seconds when pair time metadata omits sigma.",
     )
-    p.add_argument("--pair_tag_model", choices=["constant", "snr_time", "snr_time_sky", "file"], default="constant")
+    p.add_argument("--pair_tag_model", choices=PAIR_TAG_SELECTION_MODEL_KINDS, default="constant")
     p.add_argument("--pair_tag_constant", type=float, default=1.0)
     p.add_argument("--pair_tag_perturb_logit", type=float, default=0.0)
     p.add_argument("--pair_tag_selection_path", default=None)
