@@ -476,6 +476,10 @@ def test_observed_builder_labels_and_degree_limit(tmp_path):
         for edge in data["pairs"]
     )
     validate_candidate_pairs(data)
+    assert all(
+        "delta_t_obs" not in edge["marks"] and "sigma_delta_t" not in edge["marks"]
+        for edge in data["pairs"]
+    )
 
 
 def test_observed_builder_without_truth_labels(tmp_path):
@@ -497,6 +501,24 @@ def test_observed_builder_without_truth_labels(tmp_path):
     assert len(data["pairs"]) <= 2
     assert all("label" not in edge for edge in data["pairs"])
     assert all("log_mass_distance_score" in edge["marks"] for edge in data["pairs"])
+
+
+def test_observed_builder_defaults_to_no_time_marks(tmp_path):
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import (
+        build_candidate_pairs,
+    )
+
+    gw = _observed_gw(tmp_path / "gw.h5", n_events=3)
+    cat = _observed_catalog_with_truth(tmp_path / "observed_catalog.json", n_events=3)
+    data = build_candidate_pairs(
+        gw_path=gw,
+        observed_catalog_path=cat,
+        max_edges_per_event=2,
+        max_total_edges=2,
+        seed=5,
+    )
+    assert all("delta_t_obs" not in edge["marks"] for edge in data["pairs"])
+    assert all("sigma_delta_t" not in edge["marks"] for edge in data["pairs"])
 
 
 def test_validate_candidate_pairs_accepts_generic_log_marks():

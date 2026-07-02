@@ -126,10 +126,21 @@ def _truth_label(ei: dict[str, Any], ej: dict[str, Any]) -> str:
     return "true" if same_source and both_lensed and different_images else "wrong"
 
 
+def _looks_like_placeholder_time_marks(deltas: list[float], sigmas: list[float]) -> bool:
+    """Return True when all requested time marks match the legacy 1s placeholder."""
+    if not deltas or len(deltas) != len(sigmas):
+        return False
+    return all(
+        math.isclose(float(dt), 1.0, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(float(sig), 1.0, rel_tol=0.0, abs_tol=1e-12)
+        for dt, sig in zip(deltas, sigmas)
+    )
+
+
 def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | Path, truth_path: str | Path | None = None,
                           max_edges_per_event: int = 4, max_total_edges: int = 1000,
                           time_window_sec: float = math.inf, mass_distance_top_k: int = 0,
-                          include_time_marks: bool = True, include_truth_labels: bool = False,
+                          include_time_marks: bool = False, include_truth_labels: bool = False,
                           include_sky_marks: bool = True, sky_overlap_weight: float = 0.0,
                           sky_sigma_floor_rad: float = 1e-3, seed: int = 0) -> dict[str, Any]:
     del truth_path  # Labels are read from observed-catalog truth fields when present.
@@ -193,6 +204,22 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
         degree[i] += 1; degree[j] += 1
         kept.append(edge)
 
+    if include_time_marks:
+        deltas = [
+            float(edge["marks"]["delta_t_obs"])
+            for edge in kept
+            if "delta_t_obs" in edge.get("marks", {})
+        ]
+        sigmas = [
+            float(edge["marks"]["sigma_delta_t"])
+            for edge in kept
+            if "sigma_delta_t" in edge.get("marks", {})
+        ]
+        if _looks_like_placeholder_time_marks(deltas, sigmas):
+            for edge in kept:
+                edge.get("marks", {}).pop("delta_t_obs", None)
+                edge.get("marks", {}).pop("sigma_delta_t", None)
+
     return {
         "format_version": FORMAT_VERSION,
         "n_events": n_events,
@@ -226,7 +253,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max_total_edges", type=int, default=1000)
     p.add_argument("--time_window_sec", type=float, default=math.inf)
     p.add_argument("--mass_distance_top_k", type=int, default=0)
-    p.add_argument("--include_time_marks", type=_str_to_bool, default=True)
+    p.add_argument("--include_time_marks", type=_str_to_bool, default=False)
     p.add_argument("--include_truth_labels", type=_str_to_bool, default=False)
     p.add_argument("--include_sky_marks", type=_str_to_bool, default=True)
     p.add_argument("--sky_overlap_weight", type=float, default=0.0)

@@ -1409,6 +1409,23 @@ def test_lensing_preflight_marginalized_time_marks_pass_with_edge_marks(tmp_path
     assert result["ok"], result["errors"]
 
 
+def test_lensing_preflight_warns_on_placeholder_time_marks(tmp_path):
+    from darksirens.lensing.preflight import run_lensing_preflight
+    opts = _write_preflight_mock(tmp_path)
+    opts.partition_mode = "marginalize_exact"
+    opts.pair_marks = "time"
+    import json
+    path = __import__('pathlib').Path(opts.candidate_pairs_path)
+    data = json.loads(path.read_text())
+    for pair in data["candidate_pairs"]:
+        pair["marks"] = {"delta_t_obs": 1.0, "sigma_delta_t": 1.0}
+    path.write_text(json.dumps(data))
+    result = run_lensing_preflight(opts)
+    assert result["ok"], result["errors"]
+    assert result["summary"]["candidate_time_marks_placeholder"] is True
+    assert any("candidate time marks look like placeholders" in w for w in result["warnings"])
+
+
 def test_pair_tag_selection_model_probabilities_and_snr_monotonic():
     from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
 

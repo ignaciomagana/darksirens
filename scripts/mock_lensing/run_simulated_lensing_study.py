@@ -104,7 +104,13 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
     if name.startswith("A_"):
         spec.update(n_pair=0, max_edges_per_event=1, max_total_edges=max(1, cfg["n_sing"]), include_sky_marks=False, include_time_marks=False, pair_marks="none", edge_mark_prior_keys_csv="")
     elif name.startswith("B_"):
-        spec.update(max_edges_per_event=1, max_total_edges=max(1, cfg["n_pair"]))
+        spec.update(
+            max_edges_per_event=1,
+            max_total_edges=max(1, cfg["n_pair"]),
+            include_time_marks=False,
+            pair_marks="none",
+            pair_tag_model="snr_sky",
+        )
     elif name.startswith("C_"):
         spec.update(max_edges_per_event=4, max_total_edges=max(8, 4 * cfg["n_pair"]))
     elif name.startswith("D_"):
