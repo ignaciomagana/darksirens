@@ -129,8 +129,8 @@ def write_preflight_summary(work: Path, summary: dict[str, Any]) -> None:
     (work / "preflight_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
     lines = [
         f"# Simulated lensing preflight ({summary.get('profile')})", "",
-        "| case | status | n_events | n_edges | n_components | n_partitions | warnings | errors |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| case | j2 preflight | off preflight | n_events | n_edges | n_components | n_partitions | warnings | errors |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, rec in summary.get("cases", {}).items():
         g = rec.get("candidate_graph_summary", {})
@@ -139,7 +139,11 @@ def write_preflight_summary(work: Path, summary: dict[str, Any]) -> None:
             n_partitions = math.prod(int(x) for x in parts)
         else:
             n_partitions = ""
-        lines.append(f"| {name} | {rec.get('status')} | {g.get('n_events')} | {g.get('n_candidate_edges')} | {g.get('n_components')} | {n_partitions} | {len(rec.get('warnings', []))} | {len(rec.get('errors', []))} |")
+        j2 = rec.get("j2", {})
+        off = rec.get("off", {})
+        j2_status = j2.get("status", rec.get("status"))
+        off_status = off.get("status", "skipped")
+        lines.append(f"| {name} | {j2_status} | {off_status} | {g.get('n_events')} | {g.get('n_candidate_edges')} | {g.get('n_components')} | {n_partitions} | {len(rec.get('warnings', []))} | {len(rec.get('errors', []))} |")
     (work / "preflight_summary.md").write_text("\n".join(lines) + "\n")
 
 def generate_cmd(case_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], seed: int) -> list[str]:
@@ -238,6 +242,24 @@ def off_control_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: ar
 
 def preflight_cmd(cmd: list[str], path: Path) -> list[str]:
     return [*cmd, "--preflight_only", "true", "--preflight_json", str(path)]
+
+def preflight_status(j2_return_code: int, j2_report: dict[str, Any], off_return_code: int | None = None, off_report: dict[str, Any] | None = None, run_off_controls: bool = False) -> str:
+    if j2_return_code or not j2_report.get("ok", False):
+        return "failed_preflight"
+    if run_off_controls and (off_return_code or not (off_report or {}).get("ok", False)):
+        return "failed_off_preflight"
+    return "passed_preflight"
+
+def combined_inference_status(j2_status: str, off_status: str, run_off_controls: bool = False) -> str:
+    j2_failed = j2_status != "passed"
+    off_failed = run_off_controls and off_status != "passed"
+    if j2_failed and off_failed:
+        return "failed_both"
+    if j2_failed:
+        return "failed_j2_inference"
+    if off_failed:
+        return "failed_off_inference"
+    return "passed"
 
 def _numeric_summary(values: list[float]) -> dict[str, float | None]:
     vals = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=float)
@@ -433,17 +455,24 @@ def main(argv: list[str] | None = None) -> int:
         if not fc.get("ok", False):
             summary["cases"][name] = {"status":"failed_preflight", "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary({}, fc, entry["spec"]), "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":[], "errors":[f"file contract failed: {k}" for k,v in fc.items() if isinstance(v, dict) and not v.get("ok", True)]}; continue
         prt, prc = _run(entry["preflight"]); pre = _load_json(rdir / "preflight.json", {})
-        base_rec = {"return_code":prc, "preflight_report":pre, "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary(pre, fc, entry["spec"]), "candidate_graph_audit": audit, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":pre.get("warnings", []), "errors":pre.get("errors", [])}
-        if prc or not pre.get("ok", False): summary["cases"][name] = {**base_rec, "status":"failed_preflight"}; continue
+        off_pre = {}; off_prc = None; off_dir = work / "runs" / f"{name}__off"
+        if args.run_off_controls:
+            off_dir.mkdir(parents=True, exist_ok=True)
+            _oprt, off_prc = _run(entry["off_preflight"])
+            off_pre = _load_json(off_dir / "preflight.json", {})
+        status = preflight_status(prc, pre, off_prc, off_pre, args.run_off_controls)
+        warnings = list(pre.get("warnings", [])) + list(off_pre.get("warnings", []))
+        errors = list(pre.get("errors", [])) + list(off_pre.get("errors", []))
+        base_rec = {"status": status, "return_code":prc, "off_return_code": off_prc, "preflight_report":pre, "off_preflight_report": off_pre if args.run_off_controls else None, "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary(pre, fc, entry["spec"]), "candidate_graph_audit": audit, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "off_command": shlex.join(entry["off"]) if args.run_off_controls else None, "off_preflight_command": shlex.join(entry["off_preflight"]) if args.run_off_controls else None, "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":warnings, "errors":errors, "j2": {"status": "passed_preflight" if status != "failed_preflight" else "failed_preflight", "return_code": prc, "preflight_report": pre, "run_dir": str(rdir)}, "off": {"status": ("skipped" if not args.run_off_controls else ("passed_preflight" if off_prc == 0 and off_pre.get("ok", False) else "failed_preflight")), "return_code": off_prc, "preflight_report": off_pre if args.run_off_controls else None, "run_dir": str(off_dir) if args.run_off_controls else None}}
+        if status != "passed_preflight": summary["cases"][name] = base_rec; continue
         if args.preflight_only:
-            summary["cases"][name] = {**base_rec, "status":"passed_preflight"}; continue
+            summary["cases"][name] = base_rec; continue
         rt, rc = _run(entry["inference"])
         run = latest_run(rdir); diag = _load_json(run / "diagnostics.json", {}) if run else {}
         results_attrs = read_results_attrs(run)
         off_run = None; off_diag = {}; off_attrs = {}; off_rc = None; off_status = "skipped"
         if args.run_off_controls:
-            off_dir = work / "runs" / f"{name}__off"; off_dir.mkdir(parents=True, exist_ok=True)
-            _run(entry["off_preflight"])
+            off_dir.mkdir(parents=True, exist_ok=True)
             _ot, off_rc = _run(entry["off"])
             off_run = latest_run(off_dir); off_diag = _load_json(off_run / "diagnostics.json", {}) if off_run else {}; off_attrs = read_results_attrs(off_run)
             off_status = "passed" if off_rc == 0 and off_run else "failed_inference"
@@ -459,8 +488,9 @@ def main(argv: list[str] | None = None) -> int:
         bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None, "logZ_j2": logz_j2, "logZ_off": logz_off, "delta_logZ_j2_minus_off": delta_logz})
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})
         j2_status = "passed" if rc == 0 and run else "failed_inference"
+        case_status = combined_inference_status(j2_status, off_status, args.run_off_controls)
         warnings = (["diagnostics_only: evidence deltas are not meaningful"] if args.diagnostics_only else [])
-        summary["cases"][name] = {"status": j2_status, "return_code": rc, "run_dir": str(run) if run else None, "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "diagnostics": diag, "results_attrs": results_attrs}, "off": {"status": off_status, "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "diagnostics": off_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
+        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "diagnostics": diag, "results_attrs": results_attrs}, "off": {"status": off_status, "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "diagnostics": off_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
     if args.preflight_only:
         _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
         write_preflight_summary(work, summary)
