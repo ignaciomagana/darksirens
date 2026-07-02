@@ -7,7 +7,7 @@ inference, and then reads truth labels only for recovery summaries.
 """
 from __future__ import annotations
 
-import argparse, csv, datetime, json, math, shutil, subprocess, sys, time
+import argparse, csv, datetime, json, math, shutil, shlex, subprocess, sys, time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from darksirens.lensing.simulation_config import resolve_config, write_config
+from darksirens.lensing import file_contract
 
 GEN = ROOT / "scripts" / "mock_lensing" / "generate_mock_lensing.py"
 BUILD = ROOT / "scripts" / "mock_lensing" / "build_candidate_pairs_from_observed.py"
@@ -80,6 +81,65 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
     elif name.startswith("H_"):
         spec.update(max_edges_per_event=3, max_total_edges=max(6, 3 * cfg["n_pair"]), edge_mark_prior_keys_csv="")
     return spec
+
+def validate_known_inference_flags(cmd: list[str]) -> None:
+    """Reject stale or unknown long options in generated inference commands."""
+    if "--edge_prior_marks" in cmd:
+        raise ValueError("generated inference command uses stale flag --edge_prior_marks; use --edge_mark_prior_keys")
+    try:
+        from darksirens.cli.inference_lensing import build_parser
+        known = {opt for action in build_parser()._actions for opt in action.option_strings if opt.startswith("--")}
+    except Exception:
+        known = {"--edge_mark_prior_keys", "--preflight_only", "--preflight_json"}
+    unknown = []
+    for tok in cmd:
+        if isinstance(tok, str) and tok.startswith("--") and tok not in known:
+            unknown.append(tok)
+    if unknown:
+        raise ValueError(f"generated inference command contains unknown inference flags: {sorted(set(unknown))}")
+
+def _file_contract_report(case_dir: Path, config_path: Path) -> dict[str, Any]:
+    report = {
+        "observed_gw_pe": file_contract.validate_observed_gw_pe(case_dir / "mock_observed_gw_pe.h5"),
+        "observed_catalog": file_contract.validate_observed_catalog(case_dir / "observed_catalog.json"),
+        "candidate_pairs": file_contract.validate_candidate_pairs(case_dir / "candidate_pairs.json"),
+        "gwselection": file_contract.validate_selection_inputs(case_dir / "mock_gw_selection.h5"),
+        "lensed_injections": file_contract.validate_selection_inputs(case_dir / "mock_lensed_injections.h5"),
+        "run_config": file_contract.validate_run_config(config_path),
+    }
+    report["ok"] = all(v.get("ok", False) for v in report.values() if isinstance(v, dict))
+    return report
+
+def _candidate_graph_summary(preflight: dict[str, Any], file_report: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    ps = preflight.get("summary", {}) if isinstance(preflight, dict) else {}
+    cs = file_report.get("candidate_pairs", {}).get("summary", {}) if isinstance(file_report, dict) else {}
+    return {
+        "n_events": ps.get("n_events", cs.get("n_events")),
+        "n_candidate_edges": ps.get("n_candidate_pairs", cs.get("n_candidate_pairs")),
+        "n_components": ps.get("n_components"),
+        "component_n_partitions": ps.get("component_n_partitions"),
+        "available_edge_mark_keys": ps.get("available_edge_mark_keys", cs.get("mark_keys")),
+        "requested_edge_mark_prior_keys": ps.get("edge_mark_prior_keys", spec.get("edge_mark_prior_keys", [])),
+        "pair_marks": ps.get("pair_marks", spec.get("pair_marks")),
+        "pair_tag_model": ps.get("pair_tag_model", spec.get("pair_tag_model")),
+    }
+
+def write_preflight_summary(work: Path, summary: dict[str, Any]) -> None:
+    (work / "preflight_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
+    lines = [
+        f"# Simulated lensing preflight ({summary.get('profile')})", "",
+        "| case | status | n_events | n_edges | n_components | n_partitions | warnings | errors |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name, rec in summary.get("cases", {}).items():
+        g = rec.get("candidate_graph_summary", {})
+        parts = g.get("component_n_partitions")
+        if isinstance(parts, list) and all(isinstance(x, (int, float)) for x in parts):
+            n_partitions = math.prod(int(x) for x in parts)
+        else:
+            n_partitions = ""
+        lines.append(f"| {name} | {rec.get('status')} | {g.get('n_events')} | {g.get('n_candidate_edges')} | {g.get('n_components')} | {n_partitions} | {len(rec.get('warnings', []))} | {len(rec.get('errors', []))} |")
+    (work / "preflight_summary.md").write_text("\n".join(lines) + "\n")
 
 def generate_cmd(case_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], seed: int) -> list[str]:
     return [sys.executable, str(GEN), "--outdir", str(case_dir), "--conditioning", str(cfg["conditioning"]),
@@ -164,6 +224,7 @@ def build_plan(args: argparse.Namespace, cfg: dict[str, Any], resolved_config: d
     for n, name in enumerate(selected_cases):
         spec = _case_spec(name, cfg); cdir = work / "cases" / name; rdir = work / "runs" / name
         icmd = inference_cmd(cdir, rdir, spec, cfg, args)
+        validate_known_inference_flags(icmd)
         cases[name] = {"spec": spec, "generate": generate_cmd(cdir, spec, cfg, args.seed + 101*n), "build_graph": build_graph_cmd(cdir, spec, args.seed + 1001*n), "preflight": preflight_cmd(icmd, rdir / "preflight.json"), "inference": icmd}
     return {"created_at": _utc(), "profile": resolved_config["study"]["profile"], "diagnostics_only": cfg["diagnostics_only"], "resolved_config": resolved_config, "cases": cases}
 
@@ -181,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--diagnostics_only", type=_str2bool, default=False)
     ap.add_argument("--reuse", type=_str2bool, default=False)
     ap.add_argument("--dry_run", type=_str2bool, default=False)
+    ap.add_argument("--preflight_only", type=_str2bool, default=False)
     args = ap.parse_args(argv)
     resolved_config = resolve_config(args.config, args.override, profile=args.profile, allow_unknown=args.allow_unknown_config_keys)
     if args.seed != 2026:
@@ -204,19 +266,30 @@ def main(argv: list[str] | None = None) -> int:
     (work / "run_manifest.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n")
     if args.dry_run:
         (work / "validation_plan.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n"); return 0
-    summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "resolved_config": resolved_config, "diagnostics_only_note": "Evidence values are not meaningful when max_samples=0." if args.diagnostics_only else None, "cases": {}}
+    summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "preflight_only": args.preflight_only, "resolved_config": resolved_config, "diagnostics_only_note": "Evidence values are not meaningful when max_samples=0." if args.diagnostics_only else None, "cases": {}}
     pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]
     for name, entry in plan["cases"].items():
         cdir = work / "cases" / name; rdir = work / "runs" / name
         if not args.reuse or not (cdir / "mock_observed_gw_pe.h5").exists():
             if cdir.exists(): shutil.rmtree(cdir)
             rt, rc = _run(entry["generate"])
-            if rc: summary["cases"][name] = {"status":"failed_generate", "return_code":rc}; continue
+            if rc:
+                summary["cases"][name] = {"status":"failed_generate", "return_code":rc, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [], "candidate_graph_summary": _candidate_graph_summary({}, {}, entry["spec"]), "warnings": [], "errors": ["mock generation command failed"]}
+                continue
         rt, rc = _run(entry["build_graph"])
-        if rc: summary["cases"][name] = {"status":"failed_build_graph", "return_code":rc}; continue
+        if rc:
+            summary["cases"][name] = {"status":"failed_build_graph", "return_code":rc, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "candidate_graph_summary": _candidate_graph_summary({}, {}, entry["spec"]), "warnings": [], "errors": ["candidate graph build command failed"]}
+            continue
         rdir.mkdir(parents=True, exist_ok=True)
+        fc = _file_contract_report(cdir, work / "resolved_config.yaml")
+        (rdir / "file_contract_report.json").write_text(json.dumps(fc, indent=2, allow_nan=True) + "\n")
+        if not fc.get("ok", False):
+            summary["cases"][name] = {"status":"failed_preflight", "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary({}, fc, entry["spec"]), "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":[], "errors":[f"file contract failed: {k}" for k,v in fc.items() if isinstance(v, dict) and not v.get("ok", True)]}; continue
         prt, prc = _run(entry["preflight"]); pre = _load_json(rdir / "preflight.json", {})
-        if prc or not pre.get("ok", False): summary["cases"][name] = {"status":"failed_preflight", "return_code":prc, "preflight_report":pre}; continue
+        base_rec = {"return_code":prc, "preflight_report":pre, "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary(pre, fc, entry["spec"]), "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":pre.get("warnings", []), "errors":pre.get("errors", [])}
+        if prc or not pre.get("ok", False): summary["cases"][name] = {**base_rec, "status":"failed_preflight"}; continue
+        if args.preflight_only:
+            summary["cases"][name] = {**base_rec, "status":"passed_preflight"}; continue
         rt, rc = _run(entry["inference"])
         run = latest_run(rdir); diag = _load_json(run / "diagnostics.json", {}) if run else {}
         results_attrs = {}
@@ -238,6 +311,9 @@ def main(argv: list[str] | None = None) -> int:
         bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None})
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})
         summary["cases"][name] = {"status":"passed" if rc == 0 and run else "failed_inference", "return_code":rc, "run_dir":str(run) if run else None, "diagnostics":diag, "results_attrs":results_attrs, "recovery":rec, "delta_logZ_j2_minus_off": None, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
+    if args.preflight_only:
+        write_preflight_summary(work, summary)
+        return 0 if all(c.get("status") == "passed_preflight" for c in summary["cases"].values()) else 1
     _write_csv(work / "posterior_pair_probabilities.csv", pair_rows, ["case","i","j","posterior_probability","is_true_edge"])
     _write_csv(work / "partition_component_summary.csv", comp_rows, ["case","n_events","n_candidate_edges","expected_n_pairs","map_n_pairs"])
     _write_csv(work / "truth_recovery_summary.csv", truth_rows, ["case","injected_n_pairs","expected_n_pairs","map_n_pairs","true_edge_posterior_probability_mean","false_edge_posterior_probability_max","false_edge_posterior_probability_sum","map_partition_exact_truth_match"])
