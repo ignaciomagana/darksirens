@@ -374,14 +374,38 @@ python scripts/mock_lensing/run_simulated_lensing_study.py \
 ```
 
 `validation_summary.json` stores a nested record for each case with separate
-`j2` and `off` sections (`status`, `run_dir`, `logZ`, `logZerr`, diagnostics,
-and result attributes).  When both required sampler evidences exist, the runner
-computes `delta_logZ_j2_minus_off = logZ_j2 - logZ_off`; if both evidence errors
-are available it also writes `delta_logZerr`.  If either evidence is missing, the
-delta is left unset and the case status reflects the failed J=2 and/or off-control
-inference.  The Markdown summary includes a paired evidence table with J=2
-status, off status, both evidences, the evidence delta, expected pair count, and
-run directories.  Candidate recovery outputs such as
+`j2` and `off` sections (`status`, `run_dir`, `logZ`, `logZerr`,
+`evidence_status`, diagnostics, failure payloads, subprocess logs, and result
+attributes).  Preflight logs are saved as `runs/<case>/preflight.stdout` and
+`runs/<case>/preflight.stderr`; inference logs are saved as
+`runs/<case>/inference.stdout` and `runs/<case>/inference.stderr`.  Off-control
+logs use the matched `runs/<case>__off/` directory with the same filenames.  The
+summary also repeats these paths as `preflight_stdout_path`,
+`preflight_stderr_path`, `off_preflight_stdout_path`, and
+`off_preflight_stderr_path` for quick indexing.
+
+Each inference process creates its timestamped attempt directory before the
+prior-midpoint likelihood evaluation and sampler.  Before sampling it writes
+`settings.json`, `midpoint.json`, and, when available,
+`midpoint_diagnostics.json`.  If loading inputs, building the parameter space,
+evaluating the midpoint likelihood, computing midpoint diagnostics, sampling, or
+saving fails, the CLI writes `failure.json` in that timestamped attempt directory
+and then exits nonzero.  `failure.json` contains the failing `stage`, exception
+type, message, traceback, current labels, and command/settings context.  The
+study runner treats a failed attempt containing `failure.json` as the case
+`run_dir`, parses that failure into `validation_summary.json`, and marks the
+case status as the appropriate failed J=2/off inference state.
+
+When both required sampler evidences exist and are finite, the runner computes
+`delta_logZ_j2_minus_off = logZ_j2 - logZ_off`; if both evidence errors are
+available it also writes `delta_logZerr`.  In non-diagnostics mode, a zero-exit
+run with missing or non-finite evidence receives
+`evidence_status = "missing_or_nonfinite_logZ"` and is not treated as usable
+evidence.  If either evidence is missing, the delta is left unset and the case
+status reflects the failed J=2 and/or off-control inference.  The Markdown
+summary includes a paired evidence table with J=2 status, off status, both
+evidences, the evidence delta, expected pair count, and run directories.
+Candidate recovery outputs such as
 `posterior_pair_probabilities.csv` and `truth_recovery_summary.csv` remain
 J=2-based diagnostics.
 
@@ -391,6 +415,15 @@ wiring checks.  Those outputs are not sampler evidence; the runner records the
 warning `diagnostics_only: evidence deltas are not meaningful` and leaves
 `delta_logZ_j2_minus_off` unset unless a future backend produces meaningful
 log-evidence values despite diagnostics-only mode.
+
+To triage a J=2 failure, start with `validation_summary.json` for
+`cases.<case>.j2.failure.stage` and `error_message`, then open the corresponding
+`runs/<case>/inference.stderr` for the full process stderr.  If `failure.json`
+exists under the timestamped `j2.run_dir`, it has the Python traceback and the
+last labels/settings known before failure.  Compare the matched
+`runs/<case>__off/inference.stderr` and off-control `failure.json` to distinguish
+J=2-specific pair/partition problems from shared singleton or environment
+problems.
 
 ### Simulated study plots
 

@@ -66,6 +66,7 @@ import json
 import time
 import argparse
 import datetime
+import traceback
 
 import numpy as np
 import h5py
@@ -877,6 +878,41 @@ def _write_diagnostics(run_dir, diagnostics):
                 f.attrs[key] = value
 
 
+def _make_run_dir(opts):
+    ts = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    run_dir = os.path.join(
+        opts.save_path, f"{opts.pop_model}__{opts.cluster_mode}__{opts.sampler}__{ts}"
+    )
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
+
+
+def _jsonable_settings(opts):
+    return {
+        k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
+        for k, v in vars(opts).items()
+    }
+
+
+def _write_json(path, payload, *, allow_nan=True):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, allow_nan=allow_nan)
+        f.write("\n")
+
+
+def _write_failure(run_dir, stage, exc, *, labels=None, settings=None):
+    payload = {
+        "stage": stage,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "traceback": traceback.format_exc(),
+        "labels": list(labels or []),
+        "settings": settings or {},
+        "command": [sys.executable, "-m", "darksirens.cli.inference_lensing", *sys.argv[1:]],
+    }
+    _write_json(os.path.join(run_dir, "failure.json"), payload, allow_nan=True)
+
+
 def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
     """Write unambiguous partition-count metadata to ``results.hdf5`` attrs."""
     partition_mode = str(getattr(opts, "partition_mode", "fixed"))
@@ -1435,8 +1471,17 @@ def main():
             "preflight failed; fix input errors or run --preflight_only true for JSON details"
         )
 
+    run_dir = _make_run_dir(opts)
+    settings = _jsonable_settings(opts)
+    _write_json(os.path.join(run_dir, "settings.json"), settings)
+
+    labels = []
     print("loading data ...", flush=True)
-    inp = load_inputs(opts)
+    try:
+        inp = load_inputs(opts)
+    except Exception as exc:
+        _write_failure(run_dir, "load_inputs", exc, labels=labels, settings=settings)
+        raise
     if inp.get("observed_catalog_heuristic"):
         print(
             "  [warning] unified observed mode inferred by deprecated event-count heuristic",
@@ -1449,58 +1494,72 @@ def main():
     )
 
     # --- build parameter space + prior + decoder using branch machinery ---
-    fixed = (
-        json.loads(opts.fixed_parameter_values) if opts.fixed_parameter_values else {}
-    )
-    overrides = json.loads(opts.prior_overrides) if opts.prior_overrides else {}
-    lens_overrides = (
-        json.loads(opts.lens_prior_overrides) if opts.lens_prior_overrides else {}
-    )
-    pop_params_fid = get_fixed_population_params(opts.pop_model)
+    try:
+        fixed = (
+            json.loads(opts.fixed_parameter_values) if opts.fixed_parameter_values else {}
+        )
+        overrides = json.loads(opts.prior_overrides) if opts.prior_overrides else {}
+        lens_overrides = (
+            json.loads(opts.lens_prior_overrides) if opts.lens_prior_overrides else {}
+        )
+        pop_params_fid = get_fixed_population_params(opts.pop_model)
 
-    # the branch parses "true"/"false" strings into bools internally via opts;
-    # build_parameter_space takes the raw opts.fix_* values it was given.
-    space = build_parameter_space(
-        opts.pop_model,
-        opts.fix_population,
-        opts.fix_cosmology,
-        opts.fix_survey,
-        prior_overrides=overrides,
-        fixed_parameter_values=fixed,
-    )
-    base_labels = list(space[0])
-    base_lower = np.asarray(space[1])
-    base_upper = np.asarray(space[2])
-    lens_labels, lens_lower, lens_upper = _build_lens_parameter_space(
-        opts, fixed, lens_overrides
-    )
-    labels = base_labels + lens_labels
-    lower = np.concatenate([base_lower, lens_lower])
-    upper = np.concatenate([base_upper, lens_upper])
-    prior_transform = make_prior_transform(lower, upper)
-    print(f"  free parameters ({len(labels)}): {labels}", flush=True)
+        # the branch parses "true"/"false" strings into bools internally via opts;
+        # build_parameter_space takes the raw opts.fix_* values it was given.
+        space = build_parameter_space(
+            opts.pop_model,
+            opts.fix_population,
+            opts.fix_cosmology,
+            opts.fix_survey,
+            prior_overrides=overrides,
+            fixed_parameter_values=fixed,
+        )
+        base_labels = list(space[0])
+        base_lower = np.asarray(space[1])
+        base_upper = np.asarray(space[2])
+        lens_labels, lens_lower, lens_upper = _build_lens_parameter_space(
+            opts, fixed, lens_overrides
+        )
+        labels = base_labels + lens_labels
+        lower = np.concatenate([base_lower, lens_lower])
+        upper = np.concatenate([base_upper, lens_upper])
+        prior_transform = make_prior_transform(lower, upper)
+        print(f"  free parameters ({len(labels)}): {labels}", flush=True)
 
-    # decoder carries the WL params so decode() returns a survey with wl_params set
-    opts.prior_overrides = overrides  # decoder reads getattr(opts,'prior_overrides')
-    wl_params = make_lognormal_wl_params(a=opts.lensing_wl_a, b=opts.lensing_wl_b)
-    decoder = build_parameter_decoder(
-        opts,
-        pop_params_fid,
-        fixed_parameter_values=fixed,
-        wl_params=wl_params,
-    )
+        # decoder carries the WL params so decode() returns a survey with wl_params set
+        opts.prior_overrides = overrides  # decoder reads getattr(opts,'prior_overrides')
+        wl_params = make_lognormal_wl_params(a=opts.lensing_wl_a, b=opts.lensing_wl_b)
+        decoder = build_parameter_decoder(
+            opts,
+            pop_params_fid,
+            fixed_parameter_values=fixed,
+            wl_params=wl_params,
+        )
 
-    loglike = build_cluster_likelihood(opts, inp, decoder, labels, fixed)
-    diagnostics_fn = build_cluster_diagnostics(opts, inp, decoder, labels, fixed)
+        loglike = build_cluster_likelihood(opts, inp, decoder, labels, fixed)
+        diagnostics_fn = build_cluster_diagnostics(opts, inp, decoder, labels, fixed)
+    except Exception as exc:
+        _write_failure(run_dir, "build_parameter_space", exc, labels=labels, settings=settings)
+        raise
 
     # smoke eval at the prior midpoint so JIT compile errors surface early
     mid = 0.5 * (lower + upper)
     t = time.time()
-    v = float(loglike(jnp.asarray(mid)))
+    try:
+        v = float(loglike(jnp.asarray(mid)))
+    except Exception as exc:
+        _write_failure(run_dir, "midpoint_loglike", exc, labels=labels, settings=settings)
+        raise
+    _write_json(os.path.join(run_dir, "midpoint.json"), {"labels": labels, "values": np.asarray(mid, dtype=float).tolist(), "loglike": v})
     print(
         f"  logL(prior midpoint) = {v:.3f}  [compile {time.time()-t:.1f}s]", flush=True
     )
-    diagnostics = diagnostics_fn(jnp.asarray(mid))
+    try:
+        diagnostics = diagnostics_fn(jnp.asarray(mid))
+        _write_json(os.path.join(run_dir, "midpoint_diagnostics.json"), diagnostics)
+    except Exception as exc:
+        _write_failure(run_dir, "midpoint_diagnostics", exc, labels=labels, settings=settings)
+        raise
     _print_diagnostics_summary(diagnostics)
 
     # --- sample ---
@@ -1528,83 +1587,81 @@ def main():
             flush=True,
         )
     print(f"sampling with {opts.sampler} ...", flush=True)
-    results = run_sampler(
-        method=opts.sampler,
-        likelihood=loglike,
-        prior_transform=prior_transform,
-        labels=labels,
-        lower_bound=lower,
-        upper_bound=upper,
-        opts=opts,
-    )
+    try:
+        results = run_sampler(
+            method=opts.sampler,
+            likelihood=loglike,
+            prior_transform=prior_transform,
+            labels=labels,
+            lower_bound=lower,
+            upper_bound=upper,
+            opts=opts,
+        )
+    except Exception as exc:
+        _write_failure(run_dir, "sampler", exc, labels=labels, settings=settings)
+        raise
 
     # --- save ---
-    ts = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    run_dir = os.path.join(
-        opts.save_path, f"{opts.pop_model}__{opts.cluster_mode}__{opts.sampler}__{ts}"
-    )
-    os.makedirs(run_dir, exist_ok=True)
-    samples = np.asarray(results["samples"])
-    np.save(os.path.join(run_dir, "samples.npy"), samples)
-    with h5py.File(os.path.join(run_dir, "results.hdf5"), "w") as f:
-        f.create_dataset("samples", data=samples)
-        f.attrs["labels"] = json.dumps(labels)
-        f.attrs["wl_selection"] = opts.wl_selection
-        f.attrs["pair_tag_model"] = opts.pair_tag_model
-        f.attrs["pair_tag_constant"] = float(opts.pair_tag_constant)
-        f.attrs["pair_tag_perturb_logit"] = float(opts.pair_tag_perturb_logit)
-        _write_result_partition_metadata(
-            f.attrs, opts=opts, inp=inp, diagnostics=diagnostics
-        )
-        f.attrs["wl_a"] = float(opts.lensing_wl_a)
-        f.attrs["wl_b"] = float(opts.lensing_wl_b)
-        lens_settings = _lens_settings_dict(mid, labels, fixed, opts)
-        f.attrs["lens_labels"] = json.dumps(lens_settings["lens_labels"])
-        f.attrs["fix_lens_rate"] = bool(opts.fix_lens_rate)
-        f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
-        f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
-        f.attrs["lens_A_tau"] = float(lens_settings["lens_A_tau"])
-        f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
-        if results.get("logZ") is not None:
-            f.attrs["logZ"] = float(results["logZ"])
-        if getattr(opts, "tinyns_resolved_config", None) is not None:
-            f.attrs["tinyns_resolved_config"] = json.dumps(
-                opts.tinyns_resolved_config, default=str
+    try:
+        samples = np.asarray(results["samples"])
+        np.save(os.path.join(run_dir, "samples.npy"), samples)
+        with h5py.File(os.path.join(run_dir, "results.hdf5"), "w") as f:
+            f.create_dataset("samples", data=samples)
+            f.attrs["labels"] = json.dumps(labels)
+            f.attrs["wl_selection"] = opts.wl_selection
+            f.attrs["pair_tag_model"] = opts.pair_tag_model
+            f.attrs["pair_tag_constant"] = float(opts.pair_tag_constant)
+            f.attrs["pair_tag_perturb_logit"] = float(opts.pair_tag_perturb_logit)
+            _write_result_partition_metadata(
+                f.attrs, opts=opts, inp=inp, diagnostics=diagnostics
             )
-        if results.get("tinyns_summary") is not None:
-            f.attrs["tinyns_summary"] = json.dumps(
-                results["tinyns_summary"], default=str
-            )
-        if results.get("tinyns_diagnostics") is not None:
-            f.attrs["tinyns_diagnostics"] = json.dumps(
-                results["tinyns_diagnostics"], default=str
-            )
-    settings = {
-        k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
-        for k, v in vars(opts).items()
-    }
-    settings.update(
-        wl_a=float(opts.lensing_wl_a),
-        wl_b=float(opts.lensing_wl_b),
-        partition_mode=getattr(opts, "partition_mode", "fixed"),
-        lens_prior_overrides=lens_overrides,
-        **_lens_settings_dict(mid, labels, fixed, opts),
-    )
-    if inp.get("observed_catalog"):
-        settings["observed_catalog_path"] = inp["observed_catalog"].get("path")
-        settings["observed_catalog_format_version"] = inp["observed_catalog"].get(
-            "format_version"
-        ) or inp["observed_catalog"].get("pe_format_version")
-    if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            f.attrs["wl_a"] = float(opts.lensing_wl_a)
+            f.attrs["wl_b"] = float(opts.lensing_wl_b)
+            lens_settings = _lens_settings_dict(mid, labels, fixed, opts)
+            f.attrs["lens_labels"] = json.dumps(lens_settings["lens_labels"])
+            f.attrs["fix_lens_rate"] = bool(opts.fix_lens_rate)
+            f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
+            f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
+            f.attrs["lens_A_tau"] = float(lens_settings["lens_A_tau"])
+            f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
+            if results.get("logZ") is not None:
+                f.attrs["logZ"] = float(results["logZ"])
+            if getattr(opts, "tinyns_resolved_config", None) is not None:
+                f.attrs["tinyns_resolved_config"] = json.dumps(
+                    opts.tinyns_resolved_config, default=str
+                )
+            if results.get("tinyns_summary") is not None:
+                f.attrs["tinyns_summary"] = json.dumps(
+                    results["tinyns_summary"], default=str
+                )
+            if results.get("tinyns_diagnostics") is not None:
+                f.attrs["tinyns_diagnostics"] = json.dumps(
+                    results["tinyns_diagnostics"], default=str
+                )
         settings.update(
-            expected_n_pairs=float(diagnostics["expected_n_pairs"]),
-            map_n_pairs=int(diagnostics["map_partition"]["n_pairs"]),
-            n_partitions=int(diagnostics["n_partitions"]),
-            logL_marginalized=float(diagnostics["logL_marginalized"]),
+            wl_a=float(opts.lensing_wl_a),
+            wl_b=float(opts.lensing_wl_b),
+            partition_mode=getattr(opts, "partition_mode", "fixed"),
+            lens_prior_overrides=lens_overrides,
+            **_lens_settings_dict(mid, labels, fixed, opts),
         )
-    with open(os.path.join(run_dir, "settings.json"), "w") as f:
-        json.dump(settings, f, indent=2)
-    _write_diagnostics(run_dir, diagnostics)
+        if inp.get("observed_catalog"):
+            settings["observed_catalog_path"] = inp["observed_catalog"].get("path")
+            settings["observed_catalog_format_version"] = inp["observed_catalog"].get(
+                "format_version"
+            ) or inp["observed_catalog"].get("pe_format_version")
+        if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            settings.update(
+                expected_n_pairs=float(diagnostics["expected_n_pairs"]),
+                map_n_pairs=int(diagnostics["map_partition"]["n_pairs"]),
+                n_partitions=int(diagnostics["n_partitions"]),
+                logL_marginalized=float(diagnostics["logL_marginalized"]),
+            )
+        _write_json(os.path.join(run_dir, "settings.json"), settings)
+        _write_diagnostics(run_dir, diagnostics)
+    except Exception as exc:
+        _write_failure(run_dir, "save", exc, labels=labels, settings=settings)
+        raise
     print(f"saved {samples.shape[0]} samples -> {run_dir}", flush=True)
 
     # corner (best-effort)

@@ -45,8 +45,44 @@ def _utc() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
 def _run(cmd: list[str]) -> tuple[float, int]:
+    result = _run_logged(cmd)
+    return float(result["runtime_sec"]), int(result["return_code"])
+
+def _run_logged(cmd: list[str], log_prefix: Path | None = None) -> dict[str, Any]:
+    """Run a command, streaming output while optionally saving full logs."""
     print("+", " ".join(map(str, cmd)), flush=True)
-    t = time.time(); p = subprocess.run(cmd, cwd=ROOT); return time.time() - t, int(p.returncode)
+    stdout_path = stderr_path = None
+    out_fh = err_fh = None
+    if log_prefix is not None:
+        log_prefix.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path = log_prefix.with_suffix(".stdout")
+        stderr_path = log_prefix.with_suffix(".stderr")
+        out_fh = stdout_path.open("wb")
+        err_fh = stderr_path.open("wb")
+    t = time.time()
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    import selectors
+    sel = selectors.DefaultSelector()
+    assert p.stdout is not None and p.stderr is not None
+    sel.register(p.stdout, selectors.EVENT_READ, (sys.stdout.buffer, out_fh))
+    sel.register(p.stderr, selectors.EVENT_READ, (sys.stderr.buffer, err_fh))
+    while sel.get_map():
+        for key, _ in sel.select():
+            chunk = key.fileobj.read1(8192)
+            stream, fh = key.data
+            if chunk:
+                stream.write(chunk); stream.flush()
+                if fh is not None:
+                    fh.write(chunk); fh.flush()
+            else:
+                sel.unregister(key.fileobj)
+    rc = int(p.wait())
+    if out_fh is not None: out_fh.close()
+    if err_fh is not None: err_fh.close()
+    runtime = time.time() - t
+    if log_prefix is not None:
+        print(f"  command exited {rc} in {runtime:.1f}s; logs: {stdout_path}, {stderr_path}", flush=True)
+    return {"runtime_sec": runtime, "return_code": rc, "stdout_path": str(stdout_path) if stdout_path else None, "stderr_path": str(stderr_path) if stderr_path else None}
 
 def _load_json(path: Path, default: Any = None) -> Any:
     return json.loads(path.read_text()) if path.exists() else default
@@ -335,6 +371,13 @@ def latest_run(run_root: Path) -> Path | None:
     ds = sorted(run_root.glob("**/diagnostics.json"), key=lambda p: p.stat().st_mtime)
     return ds[-1].parent if ds else None
 
+def latest_attempt(run_root: Path) -> Path | None:
+    ds = sorted(list(run_root.glob("**/diagnostics.json")) + list(run_root.glob("**/failure.json")), key=lambda p: p.stat().st_mtime)
+    return ds[-1].parent if ds else None
+
+def _log_path(log: dict[str, Any], key: str) -> str | None:
+    return log.get(key) if isinstance(log, dict) else None
+
 def true_edges_from_catalog(catalog_path: Path) -> set[tuple[int,int]]:
     cat = _load_json(catalog_path, {}) or {}; events = cat.get("events", [])
     out = set()
@@ -454,28 +497,33 @@ def main(argv: list[str] | None = None) -> int:
         (rdir / "file_contract_report.json").write_text(json.dumps(fc, indent=2, allow_nan=True) + "\n")
         if not fc.get("ok", False):
             summary["cases"][name] = {"status":"failed_preflight", "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary({}, fc, entry["spec"]), "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":[], "errors":[f"file contract failed: {k}" for k,v in fc.items() if isinstance(v, dict) and not v.get("ok", True)]}; continue
-        prt, prc = _run(entry["preflight"]); pre = _load_json(rdir / "preflight.json", {})
+        pre_log = _run_logged(entry["preflight"], rdir / "preflight"); prt, prc = pre_log["runtime_sec"], pre_log["return_code"]; pre = _load_json(rdir / "preflight.json", {})
+        off_pre_log = {}
         off_pre = {}; off_prc = None; off_dir = work / "runs" / f"{name}__off"
         if args.run_off_controls:
             off_dir.mkdir(parents=True, exist_ok=True)
-            _oprt, off_prc = _run(entry["off_preflight"])
+            off_pre_log = _run_logged(entry["off_preflight"], off_dir / "preflight")
+            _oprt, off_prc = off_pre_log["runtime_sec"], off_pre_log["return_code"]
             off_pre = _load_json(off_dir / "preflight.json", {})
         status = preflight_status(prc, pre, off_prc, off_pre, args.run_off_controls)
         warnings = list(pre.get("warnings", [])) + list(off_pre.get("warnings", []))
         errors = list(pre.get("errors", [])) + list(off_pre.get("errors", []))
-        base_rec = {"status": status, "return_code":prc, "off_return_code": off_prc, "preflight_report":pre, "off_preflight_report": off_pre if args.run_off_controls else None, "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary(pre, fc, entry["spec"]), "candidate_graph_audit": audit, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "off_command": shlex.join(entry["off"]) if args.run_off_controls else None, "off_preflight_command": shlex.join(entry["off_preflight"]) if args.run_off_controls else None, "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":warnings, "errors":errors, "j2": {"status": "passed_preflight" if status != "failed_preflight" else "failed_preflight", "return_code": prc, "preflight_report": pre, "run_dir": str(rdir)}, "off": {"status": ("skipped" if not args.run_off_controls else ("passed_preflight" if off_prc == 0 and off_pre.get("ok", False) else "failed_preflight")), "return_code": off_prc, "preflight_report": off_pre if args.run_off_controls else None, "run_dir": str(off_dir) if args.run_off_controls else None}}
+        base_rec = {"status": status, "return_code":prc, "off_return_code": off_prc, "preflight_report":pre, "off_preflight_report": off_pre if args.run_off_controls else None, "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary(pre, fc, entry["spec"]), "candidate_graph_audit": audit, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "off_command": shlex.join(entry["off"]) if args.run_off_controls else None, "off_preflight_command": shlex.join(entry["off_preflight"]) if args.run_off_controls else None, "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":warnings, "errors":errors, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(locals().get("off_pre_log", {}), "stdout_path"), "off_preflight_stderr_path": _log_path(locals().get("off_pre_log", {}), "stderr_path"), "j2": {"stdout_path": _log_path(pre_log, "stdout_path"), "stderr_path": _log_path(pre_log, "stderr_path"), "status": "passed_preflight" if status != "failed_preflight" else "failed_preflight", "return_code": prc, "preflight_report": pre, "run_dir": str(rdir)}, "off": {"stdout_path": _log_path(locals().get("off_pre_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_pre_log", {}), "stderr_path"), "status": ("skipped" if not args.run_off_controls else ("passed_preflight" if off_prc == 0 and off_pre.get("ok", False) else "failed_preflight")), "return_code": off_prc, "preflight_report": off_pre if args.run_off_controls else None, "run_dir": str(off_dir) if args.run_off_controls else None}}
         if status != "passed_preflight": summary["cases"][name] = base_rec; continue
         if args.preflight_only:
             summary["cases"][name] = base_rec; continue
-        rt, rc = _run(entry["inference"])
-        run = latest_run(rdir); diag = _load_json(run / "diagnostics.json", {}) if run else {}
+        inf_log = _run_logged(entry["inference"], rdir / "inference")
+        rt, rc = inf_log["runtime_sec"], inf_log["return_code"]
+        run = latest_attempt(rdir); diag = _load_json(run / "diagnostics.json", {}) if run else {}; failure = _load_json(run / "failure.json", None) if run else None
         results_attrs = read_results_attrs(run)
+        off_log = {}; off_failure = None
         off_run = None; off_diag = {}; off_attrs = {}; off_rc = None; off_status = "skipped"
         if args.run_off_controls:
             off_dir.mkdir(parents=True, exist_ok=True)
-            _ot, off_rc = _run(entry["off"])
-            off_run = latest_run(off_dir); off_diag = _load_json(off_run / "diagnostics.json", {}) if off_run else {}; off_attrs = read_results_attrs(off_run)
-            off_status = "passed" if off_rc == 0 and off_run else "failed_inference"
+            off_log = _run_logged(entry["off"], off_dir / "inference")
+            _ot, off_rc = off_log["runtime_sec"], off_log["return_code"]
+            off_run = latest_attempt(off_dir); off_diag = _load_json(off_run / "diagnostics.json", {}) if off_run else {}; off_failure = _load_json(off_run / "failure.json", None) if off_run else None; off_attrs = read_results_attrs(off_run)
+            off_status = "passed" if off_rc == 0 and off_run and (off_run / "diagnostics.json").exists() else "failed_inference"
         logz_j2 = extract_logz(results_attrs); logzerr_j2 = extract_logzerr(results_attrs)
         logz_off = extract_logz(off_attrs); logzerr_off = extract_logzerr(off_attrs)
         delta_logz = evidence_delta(logz_j2, logz_off, args.diagnostics_only)
@@ -487,10 +535,12 @@ def main(argv: list[str] | None = None) -> int:
         truth_rows.append({"case": name, **rec})
         bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None, "logZ_j2": logz_j2, "logZ_off": logz_off, "delta_logZ_j2_minus_off": delta_logz})
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})
-        j2_status = "passed" if rc == 0 and run else "failed_inference"
+        j2_evidence_status = None if args.diagnostics_only or rc != 0 else ("usable" if logz_j2 is not None else "missing_or_nonfinite_logZ")
+        off_evidence_status = None if args.diagnostics_only or off_rc not in (0, None) else ("usable" if (not args.run_off_controls or logz_off is not None) else "missing_or_nonfinite_logZ")
+        j2_status = "passed" if rc == 0 and run and (run / "diagnostics.json").exists() else "failed_inference"
         case_status = combined_inference_status(j2_status, off_status, args.run_off_controls)
         warnings = (["diagnostics_only: evidence deltas are not meaningful"] if args.diagnostics_only else [])
-        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "diagnostics": diag, "results_attrs": results_attrs}, "off": {"status": off_status, "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "diagnostics": off_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
+        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(off_pre_log, "stdout_path"), "off_preflight_stderr_path": _log_path(off_pre_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "evidence_status": j2_evidence_status, "failure": failure, "stdout_path": _log_path(inf_log, "stdout_path"), "stderr_path": _log_path(inf_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs}, "off": {"status": off_status, "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "evidence_status": off_evidence_status, "failure": locals().get("off_failure"), "stdout_path": _log_path(locals().get("off_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_log", {}), "stderr_path"), "diagnostics": off_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
     if args.preflight_only:
         _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
         write_preflight_summary(work, summary)

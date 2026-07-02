@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.mock_lensing.run_simulated_lensing_study import combined_inference_status, evidence_delta, extract_logz, preflight_status, recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary
+from scripts.mock_lensing.run_simulated_lensing_study import combined_inference_status, evidence_delta, extract_logz, latest_attempt, preflight_status, recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary, _run_logged
 
 
 def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
@@ -31,6 +31,29 @@ def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
     assert off_cmd[off_cmd.index("--fix_lens_rate") + 1] == "true"
     f_case = plan["cases"]["F_true_pairs_no_time_marks"]["inference"]
     assert f_case[f_case.index("--pair_tag_model") + 1] == "snr_sky"
+
+
+def test_run_logged_writes_stdout_stderr_for_nonzero_exit(tmp_path):
+    log = _run_logged([sys.executable, "-c", "import sys; print(\"out msg\"); print(\"err msg\", file=sys.stderr); sys.exit(3)"], tmp_path / "cmd")
+    assert log["return_code"] == 3
+    assert Path(log["stdout_path"]).read_text().strip() == "out msg"
+    assert Path(log["stderr_path"]).read_text().strip() == "err msg"
+
+
+def test_latest_attempt_finds_failure_json(tmp_path):
+    run = tmp_path / "run_root" / "pop__j2__dynesty__2026-01-01T00-00-00"
+    run.mkdir(parents=True)
+    (run / "failure.json").write_text(json.dumps({"stage": "sampler", "error_message": "boom"}))
+    assert latest_attempt(tmp_path / "run_root") == run
+
+
+def test_failure_payload_can_be_included_in_summary_record(tmp_path):
+    run = tmp_path / "runs" / "case" / "attempt"
+    run.mkdir(parents=True)
+    failure = {"stage": "midpoint_loglike", "error_message": "bad shape"}
+    (run / "failure.json").write_text(json.dumps(failure))
+    summary = {"cases": {"case": {"status": "failed_j2_inference", "j2": {"run_dir": str(latest_attempt(tmp_path / "runs" / "case")), "failure": json.loads((run / "failure.json").read_text())}}}}
+    assert summary["cases"]["case"]["j2"]["failure"] == failure
 
 
 def test_truth_recovery_metrics_with_fake_posterior_probabilities():
