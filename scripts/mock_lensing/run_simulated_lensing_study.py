@@ -216,17 +216,51 @@ def read_results_attrs(run_dir: Path | None) -> dict[str, Any]:
     except Exception as exc:
         return {"read_error": str(exc)}
 
-def extract_logz(results_attrs: dict[str, Any]) -> float | None:
-    """Return sampler log-evidence from result attributes when available."""
-    for key in ("logZ", "logz", "log_evidence", "log_evidence_final"):
-        if key in results_attrs and results_attrs[key] is not None:
+def _extract_finite_float(record: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        if key in record and record[key] is not None:
             try:
-                value = float(results_attrs[key])
+                value = float(record[key])
             except (TypeError, ValueError):
                 continue
             if math.isfinite(value):
                 return value
     return None
+
+def _has_present_value(record: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    return any(key in record and record[key] is not None for key in keys)
+
+def extract_logz(results_attrs: dict[str, Any]) -> float | None:
+    """Return finite sampler log-evidence from result attributes when available."""
+    return _extract_finite_float(results_attrs, ("logZ", "logz", "log_evidence", "log_evidence_final"))
+
+def extract_midpoint_loglike(diagnostics: dict[str, Any] | None) -> float | None:
+    """Return finite prior-midpoint log-likelihood from diagnostics/midpoint JSON."""
+    if not isinstance(diagnostics, dict):
+        return None
+    return _extract_finite_float(diagnostics, ("logL_total", "loglike", "logL", "log_likelihood"))
+
+def classify_run_outputs(results_attrs: dict[str, Any] | None, diagnostics: dict[str, Any] | None, diagnostics_only: bool) -> dict[str, str]:
+    """Classify process-independent midpoint and evidence usability."""
+    results_attrs = results_attrs or {}
+    diagnostics = diagnostics or {}
+    midpoint_keys = ("logL_total", "loglike", "logL", "log_likelihood")
+    logz_keys = ("logZ", "logz", "log_evidence", "log_evidence_final")
+    if extract_midpoint_loglike(diagnostics) is not None:
+        midpoint_status = "finite_midpoint"
+    elif _has_present_value(diagnostics, midpoint_keys):
+        midpoint_status = "nonfinite_midpoint"
+    else:
+        midpoint_status = "missing_midpoint"
+    if diagnostics_only:
+        evidence_status = "diagnostics_only_not_meaningful"
+    elif extract_logz(results_attrs) is not None:
+        evidence_status = "finite_logZ"
+    elif _has_present_value(results_attrs, logz_keys):
+        evidence_status = "nonfinite_logZ"
+    else:
+        evidence_status = "missing_logZ"
+    return {"process_status": "passed", "midpoint_status": midpoint_status, "evidence_status": evidence_status}
 
 def extract_logzerr(results_attrs: dict[str, Any]) -> float | None:
     for key in ("logZerr", "logzerr", "logZ_error", "log_evidence_err"):
@@ -514,15 +548,15 @@ def main(argv: list[str] | None = None) -> int:
             summary["cases"][name] = base_rec; continue
         inf_log = _run_logged(entry["inference"], rdir / "inference")
         rt, rc = inf_log["runtime_sec"], inf_log["return_code"]
-        run = latest_attempt(rdir); diag = _load_json(run / "diagnostics.json", {}) if run else {}; failure = _load_json(run / "failure.json", None) if run else None
+        run = latest_attempt(rdir); diag = _load_json(run / "diagnostics.json", {}) if run else {}; mid_diag = _load_json(run / "midpoint_diagnostics.json", _load_json(run / "midpoint.json", {})) if run else {}; failure = _load_json(run / "failure.json", None) if run else None
         results_attrs = read_results_attrs(run)
         off_log = {}; off_failure = None
-        off_run = None; off_diag = {}; off_attrs = {}; off_rc = None; off_status = "skipped"
+        off_run = None; off_diag = {}; off_mid_diag = {}; off_attrs = {}; off_rc = None; off_status = "skipped"
         if args.run_off_controls:
             off_dir.mkdir(parents=True, exist_ok=True)
             off_log = _run_logged(entry["off"], off_dir / "inference")
             _ot, off_rc = off_log["runtime_sec"], off_log["return_code"]
-            off_run = latest_attempt(off_dir); off_diag = _load_json(off_run / "diagnostics.json", {}) if off_run else {}; off_failure = _load_json(off_run / "failure.json", None) if off_run else None; off_attrs = read_results_attrs(off_run)
+            off_run = latest_attempt(off_dir); off_diag = _load_json(off_run / "diagnostics.json", {}) if off_run else {}; off_mid_diag = _load_json(off_run / "midpoint_diagnostics.json", _load_json(off_run / "midpoint.json", {})) if off_run else {}; off_failure = _load_json(off_run / "failure.json", None) if off_run else None; off_attrs = read_results_attrs(off_run)
             off_status = "passed" if off_rc == 0 and off_run and (off_run / "diagnostics.json").exists() else "failed_inference"
         logz_j2 = extract_logz(results_attrs); logzerr_j2 = extract_logzerr(results_attrs)
         logz_off = extract_logz(off_attrs); logzerr_off = extract_logzerr(off_attrs)
@@ -535,12 +569,25 @@ def main(argv: list[str] | None = None) -> int:
         truth_rows.append({"case": name, **rec})
         bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None, "logZ_j2": logz_j2, "logZ_off": logz_off, "delta_logZ_j2_minus_off": delta_logz})
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})
-        j2_evidence_status = None if args.diagnostics_only or rc != 0 else ("usable" if logz_j2 is not None else "missing_or_nonfinite_logZ")
-        off_evidence_status = None if args.diagnostics_only or off_rc not in (0, None) else ("usable" if (not args.run_off_controls or logz_off is not None) else "missing_or_nonfinite_logZ")
+        j2_class = classify_run_outputs(results_attrs, mid_diag, args.diagnostics_only)
+        off_class = classify_run_outputs(off_attrs, off_mid_diag, args.diagnostics_only) if args.run_off_controls else {"process_status": "passed", "midpoint_status": "missing_midpoint", "evidence_status": "missing_logZ"}
         j2_status = "passed" if rc == 0 and run and (run / "diagnostics.json").exists() else "failed_inference"
+        if j2_status != "passed":
+            j2_class["process_status"] = "failed_inference"
+        if args.run_off_controls and off_status != "passed":
+            off_class["process_status"] = "failed_inference"
         case_status = combined_inference_status(j2_status, off_status, args.run_off_controls)
+        evidence_unusable = (
+            not args.diagnostics_only
+            and (
+                (j2_status == "passed" and j2_class["evidence_status"] != "finite_logZ")
+                or (args.run_off_controls and off_status == "passed" and off_class["evidence_status"] != "finite_logZ")
+            )
+        )
+        if evidence_unusable:
+            case_status = "failed_unusable_evidence"
         warnings = (["diagnostics_only: evidence deltas are not meaningful"] if args.diagnostics_only else [])
-        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(off_pre_log, "stdout_path"), "off_preflight_stderr_path": _log_path(off_pre_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "evidence_status": j2_evidence_status, "failure": failure, "stdout_path": _log_path(inf_log, "stdout_path"), "stderr_path": _log_path(inf_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs}, "off": {"status": off_status, "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "evidence_status": off_evidence_status, "failure": locals().get("off_failure"), "stdout_path": _log_path(locals().get("off_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_log", {}), "stderr_path"), "diagnostics": off_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
+        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(off_pre_log, "stdout_path"), "off_preflight_stderr_path": _log_path(off_pre_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "process_status": j2_class["process_status"], "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "midpoint_status": j2_class["midpoint_status"], "evidence_status": j2_class["evidence_status"], "failure": failure, "stdout_path": _log_path(inf_log, "stdout_path"), "stderr_path": _log_path(inf_log, "stderr_path"), "diagnostics": diag, "midpoint_diagnostics": mid_diag, "results_attrs": results_attrs}, "off": {"status": off_status, "process_status": off_class["process_status"], "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "midpoint_status": off_class["midpoint_status"], "evidence_status": off_class["evidence_status"], "failure": locals().get("off_failure"), "stdout_path": _log_path(locals().get("off_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_log", {}), "stderr_path"), "diagnostics": off_diag, "midpoint_diagnostics": off_mid_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
     if args.preflight_only:
         _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
         write_preflight_summary(work, summary)
@@ -551,10 +598,19 @@ def main(argv: list[str] | None = None) -> int:
     _write_csv(work / "truth_recovery_summary.csv", truth_rows, ["case","injected_n_pairs","expected_n_pairs","map_n_pairs","true_edge_posterior_probability_mean","false_edge_posterior_probability_max","false_edge_posterior_probability_sum","map_partition_exact_truth_match"])
     _write_csv(work / "bias_summary.csv", bias_rows, ["case","p_tag_model","pair_tag_perturb_logit","delta_expected_n_pairs_minus_injected","logZ_j2","logZ_off","delta_logZ_j2_minus_off"])
     (work / "validation_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
-    lines = [f"# Simulated lensing study ({args.profile})", "", "Diagnostics-only: " + str(args.diagnostics_only), "", "| case | j2 status | off status | logZ_j2 | logZ_off | delta_logZ | expected_n_pairs | run dirs |", "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"]
+    lines = [
+        f"# Simulated lensing study ({args.profile})",
+        "",
+        "Diagnostics-only: " + str(args.diagnostics_only),
+        "",
+        "Process status records whether the command completed; midpoint/evidence status records whether finite, usable likelihood/evidence was produced.",
+        "",
+        "| case | j2 status | j2 midpoint | j2 evidence | off status | off midpoint | off evidence | logZ_j2 | logZ_off | delta_logZ | expected_n_pairs | run dirs |",
+        "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
     for name, rec in summary["cases"].items():
         r = rec.get("recovery", {}); j2 = rec.get("j2", {}); off = rec.get("off", {})
-        lines.append(f"| {name} | {j2.get('status', rec.get('status'))} | {off.get('status')} | {j2.get('logZ')} | {off.get('logZ')} | {rec.get('delta_logZ_j2_minus_off')} | {r.get('expected_n_pairs')} | {j2.get('run_dir')}<br>{off.get('run_dir')} |")
+        lines.append(f"| {name} | {j2.get('status', rec.get('status'))} | {j2.get('midpoint_status')} | {j2.get('evidence_status')} | {off.get('status')} | {off.get('midpoint_status')} | {off.get('evidence_status')} | {j2.get('logZ')} | {off.get('logZ')} | {rec.get('delta_logZ_j2_minus_off')} | {r.get('expected_n_pairs')} | {j2.get('run_dir')}<br>{off.get('run_dir')} |")
     (work / "validation_summary.md").write_text("\n".join(lines) + "\n")
     return 0 if all(c.get("status") == "passed" for c in summary["cases"].values()) else 1
 
