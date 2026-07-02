@@ -1199,3 +1199,34 @@ counts, candidate-pair counts, selection summaries, and compatibility warnings.
 Simulation output includes both current CLI filenames and the contract aliases so
 future real-data pipelines can satisfy the same interface without changing the
 inference command semantics.
+
+## Simulated candidate-graph audit
+
+Simulated studies write a cheap candidate-graph audit before likelihood
+compilation or sampling.  The audit validates the graph that was produced from
+observed-event quantities and then, only after graph construction, reads the
+simulation truth fields in `observed_catalog.json` to evaluate whether the graph
+still contains the injected lensed-image edges.  These truth fields are not added
+to `candidate_pairs.json` and are not inference inputs.
+
+For each generated case the runner writes
+`cases/<case>/candidate_graph_audit.json`.  The top-level study directory also
+contains `candidate_graph_audit.csv` with one row per case.  The report includes
+basic graph size, the number of injected true edges, how many true edges survived
+candidate pruning, the number of false candidate edges, maximum observed degree,
+connected-component sizes and edge counts, approximate exact-matching partition
+counts per component, available mark keys, mark summaries, and true-versus-false
+summaries for available marks and edge prior odds.
+
+True-edge survival is a prerequisite for recovery: if the candidate builder
+prunes an injected true edge, downstream partition enumeration and sampling have
+no state that can recover that true pair.  The audit therefore runs in
+`--preflight_only` and normal/diagnostics workflows immediately after the
+candidate graph is built and before the preflight inference command.  `--dry_run`
+still writes only planned commands because observed catalogs and candidate files
+do not exist yet.
+
+By default the audit is informational, which keeps stress tests that intentionally
+prune hard graphs from failing early.  For debugging candidate-builder settings,
+run the simulated study with `--require_true_edge_survival true`; any case with
+at least one missing injected true edge will stop before preflight/inference.

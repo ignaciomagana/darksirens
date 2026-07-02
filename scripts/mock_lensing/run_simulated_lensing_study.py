@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from darksirens.lensing.simulation_config import resolve_config, write_config
 from darksirens.lensing import file_contract
+from darksirens.lensing.partitions import connected_components_from_candidate_pairs, exact_component_partitions, validate_candidate_pairs
 
 GEN = ROOT / "scripts" / "mock_lensing" / "generate_mock_lensing.py"
 BUILD = ROOT / "scripts" / "mock_lensing" / "build_candidate_pairs_from_observed.py"
@@ -238,6 +239,76 @@ def off_control_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: ar
 def preflight_cmd(cmd: list[str], path: Path) -> list[str]:
     return [*cmd, "--preflight_only", "true", "--preflight_json", str(path)]
 
+def _numeric_summary(values: list[float]) -> dict[str, float | None]:
+    vals = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=float)
+    if vals.size == 0:
+        return {"min": None, "median": None, "max": None}
+    return {"min": float(np.min(vals)), "median": float(np.median(vals)), "max": float(np.max(vals))}
+
+def audit_candidate_graph(candidate_pairs_path: str | Path, observed_catalog_path: str | Path) -> dict[str, Any]:
+    """Audit whether a simulated observed-event candidate graph kept truth edges.
+
+    Truth fields from the observed catalog are used only here, after graph construction,
+    for validation/evaluation and are not added to inference inputs.
+    """
+    candidate_pairs_path = Path(candidate_pairs_path)
+    observed_catalog_path = Path(observed_catalog_path)
+    cand = _load_json(candidate_pairs_path, {}) or {}
+    n_events, pairs = validate_candidate_pairs(cand)
+    pair_edges = {(min(p.i, p.j), max(p.i, p.j)) for p in pairs}
+    true_edges = true_edges_from_catalog(observed_catalog_path)
+    kept_true = pair_edges & true_edges
+    false_edges = pair_edges - true_edges
+    degrees = [0] * n_events
+    for p in pairs:
+        degrees[p.i] += 1; degrees[p.j] += 1
+    components = connected_components_from_candidate_pairs(n_events, pairs)
+    component_sizes = [len(c["event_indices"]) for c in components]
+    component_edge_counts = [len(c["candidate_edge_indices"]) for c in components]
+    component_partition_counts: list[int | None] = []
+    for comp in components:
+        try:
+            component_partition_counts.append(len(exact_component_partitions(comp, pairs, max_partitions=100_000)))
+        except Exception:
+            component_partition_counts.append(None)
+    mark_keys = sorted({k for p in pairs for k in p.marks.to_dict()})
+    mark_summary = {key: _numeric_summary([p.marks.to_dict().get(key) for p in pairs]) for key in ("log_sky_overlap", "log_mass_distance_score", "delta_t_obs") if key in mark_keys}
+    true_false_mark_summary = {}
+    for key in ("log_sky_overlap", "log_mass_distance_score", "delta_t_obs", "log_prior_odds"):
+        if key == "log_prior_odds":
+            true_vals = [p.log_prior_odds for p in pairs if (p.i, p.j) in true_edges]
+            false_vals = [p.log_prior_odds for p in pairs if (p.i, p.j) not in true_edges]
+        else:
+            true_vals = [p.marks.to_dict().get(key) for p in pairs if (p.i, p.j) in true_edges]
+            false_vals = [p.marks.to_dict().get(key) for p in pairs if (p.i, p.j) not in true_edges]
+        if true_vals or false_vals:
+            true_false_mark_summary[key] = {"true": _numeric_summary(true_vals), "false": _numeric_summary(false_vals)}
+    return {
+        "candidate_pairs_path": str(candidate_pairs_path),
+        "observed_catalog_path": str(observed_catalog_path),
+        "n_events": n_events,
+        "n_candidate_edges": len(pairs),
+        "n_true_edges_in_catalog": len(true_edges),
+        "n_true_edges_in_candidate_graph": len(kept_true),
+        "true_edge_survival_fraction": (len(kept_true) / len(true_edges)) if true_edges else None,
+        "missing_true_edges": [list(e) for e in sorted(true_edges - pair_edges)],
+        "n_false_edges": len(false_edges),
+        "max_edges_per_event_observed": max(degrees) if degrees else 0,
+        "n_components": len(components),
+        "component_sizes": component_sizes,
+        "component_edge_counts": component_edge_counts,
+        "component_partition_counts": component_partition_counts,
+        "approximate_total_partitions": math.prod(c for c in component_partition_counts if c is not None) if component_partition_counts and all(c is not None for c in component_partition_counts) else None,
+        "mark_key_availability": {key: sum(1 for p in pairs if key in p.marks.to_dict()) for key in mark_keys},
+        "available_mark_keys": mark_keys,
+        "mark_summary_by_key": mark_summary,
+        "true_vs_false_mark_summaries": true_false_mark_summary,
+        "truth_label_source": "observed_catalog truth_* fields",
+    }
+
+def _candidate_audit_csv_row(case: str, audit: dict[str, Any]) -> dict[str, Any]:
+    return {"case": case, "n_events": audit.get("n_events"), "n_candidate_edges": audit.get("n_candidate_edges"), "n_true_edges": audit.get("n_true_edges_in_catalog"), "n_true_edges_kept": audit.get("n_true_edges_in_candidate_graph"), "true_edge_survival_fraction": audit.get("true_edge_survival_fraction"), "n_false_edges": audit.get("n_false_edges"), "n_components": audit.get("n_components"), "max_component_events": max(audit.get("component_sizes") or [0]), "max_component_edges": max(audit.get("component_edge_counts") or [0]), "max_component_partitions": max([x for x in (audit.get("component_partition_counts") or []) if x is not None] or [None]), "available_mark_keys": ";".join(audit.get("available_mark_keys") or [])}
+
 def latest_run(run_root: Path) -> Path | None:
     ds = sorted(run_root.glob("**/diagnostics.json"), key=lambda p: p.stat().st_mtime)
     return ds[-1].parent if ds else None
@@ -312,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry_run", type=_str2bool, default=False)
     ap.add_argument("--preflight_only", type=_str2bool, default=False)
     ap.add_argument("--run_off_controls", type=_str2bool, default=True)
+    ap.add_argument("--require_true_edge_survival", type=_str2bool, default=False)
     args = ap.parse_args(argv)
     resolved_config = resolve_config(args.config, args.override, profile=args.profile, allow_unknown=args.allow_unknown_config_keys)
     if args.seed != 2026:
@@ -336,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         (work / "validation_plan.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n"); return 0
     summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "preflight_only": args.preflight_only, "resolved_config": resolved_config, "diagnostics_only_note": "diagnostics_only: evidence deltas are not meaningful" if args.diagnostics_only else None, "run_off_controls": args.run_off_controls, "cases": {}}
-    pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]
+    pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]; audit_rows=[]
     for name, entry in plan["cases"].items():
         cdir = work / "cases" / name; rdir = work / "runs" / name
         if not args.reuse or not (cdir / "mock_observed_gw_pe.h5").exists():
@@ -350,12 +422,18 @@ def main(argv: list[str] | None = None) -> int:
             summary["cases"][name] = {"status":"failed_build_graph", "return_code":rc, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "candidate_graph_summary": _candidate_graph_summary({}, {}, entry["spec"]), "warnings": [], "errors": ["candidate graph build command failed"]}
             continue
         rdir.mkdir(parents=True, exist_ok=True)
+        audit = audit_candidate_graph(cdir / "candidate_pairs.json", cdir / "observed_catalog.json")
+        (cdir / "candidate_graph_audit.json").write_text(json.dumps(audit, indent=2, allow_nan=True) + "\n")
+        audit_rows.append(_candidate_audit_csv_row(name, audit))
+        if args.require_true_edge_survival and audit["n_true_edges_in_candidate_graph"] < audit["n_true_edges_in_catalog"]:
+            summary["cases"][name] = {"status":"failed_candidate_graph_audit", "candidate_graph_audit": audit, "candidate_graph_summary": audit, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "warnings": [], "errors": ["candidate graph audit failed: missing injected true edge"]}
+            continue
         fc = _file_contract_report(cdir, work / "resolved_config.yaml")
         (rdir / "file_contract_report.json").write_text(json.dumps(fc, indent=2, allow_nan=True) + "\n")
         if not fc.get("ok", False):
             summary["cases"][name] = {"status":"failed_preflight", "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary({}, fc, entry["spec"]), "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":[], "errors":[f"file contract failed: {k}" for k,v in fc.items() if isinstance(v, dict) and not v.get("ok", True)]}; continue
         prt, prc = _run(entry["preflight"]); pre = _load_json(rdir / "preflight.json", {})
-        base_rec = {"return_code":prc, "preflight_report":pre, "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary(pre, fc, entry["spec"]), "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":pre.get("warnings", []), "errors":pre.get("errors", [])}
+        base_rec = {"return_code":prc, "preflight_report":pre, "file_contract_report":fc, "candidate_graph_summary":_candidate_graph_summary(pre, fc, entry["spec"]), "candidate_graph_audit": audit, "command":shlex.join(entry["inference"]), "preflight_command":shlex.join(entry["preflight"]), "generated_files": [str(cdir / x) for x in ["mock_observed_gw_pe.h5", "observed_catalog.json", "candidate_pairs.json", "mock_gw_selection.h5", "mock_lensed_injections.h5"]], "warnings":pre.get("warnings", []), "errors":pre.get("errors", [])}
         if prc or not pre.get("ok", False): summary["cases"][name] = {**base_rec, "status":"failed_preflight"}; continue
         if args.preflight_only:
             summary["cases"][name] = {**base_rec, "status":"passed_preflight"}; continue
@@ -382,10 +460,12 @@ def main(argv: list[str] | None = None) -> int:
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})
         j2_status = "passed" if rc == 0 and run else "failed_inference"
         warnings = (["diagnostics_only: evidence deltas are not meaningful"] if args.diagnostics_only else [])
-        summary["cases"][name] = {"status": j2_status, "return_code": rc, "run_dir": str(run) if run else None, "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "j2": {"status": j2_status, "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "diagnostics": diag, "results_attrs": results_attrs}, "off": {"status": off_status, "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "diagnostics": off_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
+        summary["cases"][name] = {"status": j2_status, "return_code": rc, "run_dir": str(run) if run else None, "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "diagnostics": diag, "results_attrs": results_attrs}, "off": {"status": off_status, "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "diagnostics": off_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
     if args.preflight_only:
+        _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
         write_preflight_summary(work, summary)
         return 0 if all(c.get("status") == "passed_preflight" for c in summary["cases"].values()) else 1
+    _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
     _write_csv(work / "posterior_pair_probabilities.csv", pair_rows, ["case","i","j","posterior_probability","is_true_edge"])
     _write_csv(work / "partition_component_summary.csv", comp_rows, ["case","n_events","n_candidate_edges","expected_n_pairs","map_n_pairs"])
     _write_csv(work / "truth_recovery_summary.csv", truth_rows, ["case","injected_n_pairs","expected_n_pairs","map_n_pairs","true_edge_posterior_probability_mean","false_edge_posterior_probability_max","false_edge_posterior_probability_sum","map_partition_exact_truth_match"])

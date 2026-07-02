@@ -114,3 +114,81 @@ def test_diagnostics_only_plan_records_evidence_warning_and_off_max_samples_zero
     assert case["inference"][case["inference"].index("--max_samples") + 1] == "0"
     assert case["off"][case["off"].index("--max_samples") + 1] == "0"
     assert plan["diagnostics_only"] is True
+
+from scripts.mock_lensing.run_simulated_lensing_study import audit_candidate_graph, _candidate_audit_csv_row, _write_csv
+
+
+def _write_audit_inputs(tmp_path, *, pairs, events):
+    cand = {"format_version": "candidate-pairs-1.0", "n_events": len(events), "pairs": pairs}
+    cat = {"n_events": len(events), "events": events}
+    cp = tmp_path / "candidate_pairs.json"
+    op = tmp_path / "observed_catalog.json"
+    cp.write_text(json.dumps(cand))
+    op.write_text(json.dumps(cat))
+    return cp, op
+
+
+def _event(source=None, image=None, lensed=False):
+    return {"truth_source_id": source, "truth_image_index": image, "truth_is_lensed_image": lensed}
+
+
+def test_candidate_graph_audit_detects_true_edge_survival(tmp_path):
+    cp, op = _write_audit_inputs(
+        tmp_path,
+        pairs=[{"i": 0, "j": 1, "log_prior_odds": 2.0, "marks": {"log_mass_distance_score": 1.0}}],
+        events=[_event("s", 0, True), _event("s", 1, True)],
+    )
+    audit = audit_candidate_graph(cp, op)
+    assert audit["n_true_edges_in_catalog"] == 1
+    assert audit["n_true_edges_in_candidate_graph"] == 1
+    assert audit["true_edge_survival_fraction"] == 1.0
+    assert audit["n_false_edges"] == 0
+
+
+def test_candidate_graph_audit_reports_missing_true_edge(tmp_path):
+    cp, op = _write_audit_inputs(
+        tmp_path,
+        pairs=[{"i": 0, "j": 2, "log_prior_odds": -1.0, "marks": {}}],
+        events=[_event("s", 0, True), _event("s", 1, True), _event("x", 0, False)],
+    )
+    audit = audit_candidate_graph(cp, op)
+    assert audit["n_true_edges_in_candidate_graph"] == 0
+    assert audit["true_edge_survival_fraction"] == 0.0
+    assert audit["missing_true_edges"] == [[0, 1]]
+    assert audit["n_false_edges"] == 1
+
+
+def test_candidate_graph_audit_works_with_no_true_pairs(tmp_path):
+    cp, op = _write_audit_inputs(
+        tmp_path,
+        pairs=[{"i": 0, "j": 1, "log_prior_odds": -1.0, "marks": {"delta_t_obs": 2.0, "sigma_delta_t": 1.0}}],
+        events=[_event("a", 0, False), _event("b", 0, False)],
+    )
+    audit = audit_candidate_graph(cp, op)
+    assert audit["n_true_edges_in_catalog"] == 0
+    assert audit["true_edge_survival_fraction"] is None
+    assert audit["n_false_edges"] == 1
+    assert "delta_t_obs" in audit["available_mark_keys"]
+
+
+def test_candidate_graph_audit_does_not_require_candidate_labels(tmp_path):
+    cp, op = _write_audit_inputs(
+        tmp_path,
+        pairs=[{"i": 0, "j": 1, "log_prior_odds": 0.5, "marks": {"log_sky_overlap": -3.0, "log_mass_distance_score": -0.2}}],
+        events=[_event("s", 0, True), _event("s", 1, True)],
+    )
+    raw = json.loads(cp.read_text())
+    assert "label" not in raw["pairs"][0]
+    audit = audit_candidate_graph(cp, op)
+    assert audit["n_true_edges_in_candidate_graph"] == 1
+    assert audit["mark_summary_by_key"]["log_sky_overlap"]["median"] == -3.0
+
+
+def test_candidate_graph_audit_csv_writer(tmp_path):
+    row = _candidate_audit_csv_row("case", {"n_events": 2, "n_candidate_edges": 1, "n_true_edges_in_catalog": 1, "n_true_edges_in_candidate_graph": 1, "true_edge_survival_fraction": 1.0, "n_false_edges": 0, "n_components": 1, "component_sizes": [2], "component_edge_counts": [1], "component_partition_counts": [2], "available_mark_keys": ["log_mass_distance_score"]})
+    out = tmp_path / "candidate_graph_audit.csv"
+    fields = ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"]
+    _write_csv(out, [row], fields)
+    text = out.read_text()
+    assert "case,n_events,n_candidate_edges" in text
+    assert "log_mass_distance_score" in text
