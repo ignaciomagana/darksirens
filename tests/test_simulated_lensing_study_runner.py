@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.mock_lensing.run_simulated_lensing_study import evidence_delta, extract_logz, recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary
+from scripts.mock_lensing.run_simulated_lensing_study import combined_inference_status, evidence_delta, extract_logz, preflight_status, recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary
 
 
 def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
@@ -68,13 +68,13 @@ def test_command_validator_accepts_edge_mark_prior_keys(tmp_path):
 
 
 def test_preflight_summary_writer_with_fake_records(tmp_path):
-    summary = {"profile": "tiny", "cases": {"A": {"status": "passed_preflight", "candidate_graph_summary": {"n_events": 2, "n_candidate_edges": 1, "n_components": 1, "component_n_partitions": [2]}, "warnings": ["w"], "errors": []}}}
+    summary = {"profile": "tiny", "cases": {"A": {"status": "passed_preflight", "j2": {"status": "passed_preflight"}, "off": {"status": "passed_preflight"}, "candidate_graph_summary": {"n_events": 2, "n_candidate_edges": 1, "n_components": 1, "component_n_partitions": [2]}, "warnings": ["w"], "errors": []}}}
     write_preflight_summary(tmp_path, summary)
     data = json.loads((tmp_path / "preflight_summary.json").read_text())
     assert data["cases"]["A"]["status"] == "passed_preflight"
     md = (tmp_path / "preflight_summary.md").read_text()
-    assert "| case | status | n_events | n_edges | n_components | n_partitions | warnings | errors |" in md
-    assert "| A | passed_preflight | 2 | 1 | 1 | 2 | 1 | 0 |" in md
+    assert "| case | j2 preflight | off preflight | n_events | n_edges | n_components | n_partitions | warnings | errors |" in md
+    assert "| A | passed_preflight | passed_preflight | 2 | 1 | 1 | 2 | 1 | 0 |" in md
 
 
 def test_preflight_only_dry_run_plan_has_preflight_no_generated_outputs(tmp_path):
@@ -88,6 +88,20 @@ def test_preflight_only_dry_run_plan_has_preflight_no_generated_outputs(tmp_path
     assert "preflight.json" in commands
     assert not (workdir / "cases" / "A_no_true_pairs_sparse_wrong_graph" / "mock_observed_gw_pe.h5").exists()
 
+
+
+def test_preflight_status_accounts_for_off_controls():
+    assert preflight_status(0, {"ok": True}, 0, {"ok": True}, True) == "passed_preflight"
+    assert preflight_status(0, {"ok": True}, 1, {"ok": False}, True) == "failed_off_preflight"
+    assert preflight_status(1, {"ok": False}, 0, {"ok": True}, True) == "failed_preflight"
+
+
+def test_combined_inference_status_accounts_for_off_controls():
+    assert combined_inference_status("passed", "passed", True) == "passed"
+    assert combined_inference_status("passed", "failed_inference", True) == "failed_off_inference"
+    assert combined_inference_status("failed_inference", "passed", True) == "failed_j2_inference"
+    assert combined_inference_status("failed_inference", "failed_inference", True) == "failed_both"
+    assert combined_inference_status("passed", "failed_inference", False) == "passed"
 
 def test_extract_logz_from_fake_attrs():
     assert extract_logz({"logZ": "12.5"}) == 12.5

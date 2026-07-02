@@ -375,12 +375,14 @@ python scripts/mock_lensing/run_simulated_lensing_study.py \
 
 `validation_summary.json` stores a nested record for each case with separate
 `j2` and `off` sections (`status`, `run_dir`, `logZ`, `logZerr`, diagnostics,
-and result attributes).  When both sampler evidences are present, the runner
+and result attributes).  When both required sampler evidences exist, the runner
 computes `delta_logZ_j2_minus_off = logZ_j2 - logZ_off`; if both evidence errors
-are available it also writes `delta_logZerr`.  The Markdown summary includes a
-paired evidence table with J=2 status, off status, both evidences, the evidence
-delta, expected pair count, and run directories.  Candidate recovery outputs such
-as `posterior_pair_probabilities.csv` and `truth_recovery_summary.csv` remain
+are available it also writes `delta_logZerr`.  If either evidence is missing, the
+delta is left unset and the case status reflects the failed J=2 and/or off-control
+inference.  The Markdown summary includes a paired evidence table with J=2
+status, off status, both evidences, the evidence delta, expected pair count, and
+run directories.  Candidate recovery outputs such as
+`posterior_pair_probabilities.csv` and `truth_recovery_summary.csv` remain
 J=2-based diagnostics.
 
 `--diagnostics_only true` still runs the paired J=2/off commands with
@@ -1052,8 +1054,11 @@ stale options, and exits before generating mocks or building candidate graphs.
 generates or reuses the simulated mocks, builds `candidate_pairs.json` from the
 observed events, validates the split simulation files against the file contract,
 runs `darksirens.cli.inference_lensing --preflight_only true` for every selected
-case, writes per-case preflight reports, and then stops before likelihood JIT
-compilation, midpoint diagnostics, or sampler execution:
+case, and, when `--run_off_controls true`, also runs the off-control preflight
+into `runs/<case>__off/preflight.json`.  The resulting `preflight_summary.json`
+and `preflight_summary.md` report both J=2 and off-control preflight status and
+the runner exits nonzero if either required preflight fails.  It then stops before
+likelihood JIT compilation, midpoint diagnostics, or sampler execution:
 
 ```bash
 python scripts/mock_lensing/run_simulated_lensing_study.py \
