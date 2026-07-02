@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.mock_lensing.run_simulated_lensing_study import combined_inference_status, evidence_delta, extract_logz, latest_attempt, preflight_status, recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary, _run_logged
+from scripts.mock_lensing.run_simulated_lensing_study import classify_run_outputs, combined_inference_status, evidence_delta, extract_logz, extract_midpoint_loglike, latest_attempt, preflight_status, recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary, _run_logged
 
 
 def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
@@ -127,6 +127,30 @@ def test_combined_inference_status_accounts_for_off_controls():
     assert combined_inference_status("failed_inference", "passed", True) == "failed_j2_inference"
     assert combined_inference_status("failed_inference", "failed_inference", True) == "failed_both"
     assert combined_inference_status("passed", "failed_inference", False) == "passed"
+
+
+
+def test_classify_run_outputs_distinguishes_nonfinite_and_missing_logz():
+    assert classify_run_outputs({"logZ": "-inf"}, {"logL_total": -1.0}, diagnostics_only=False)["evidence_status"] == "nonfinite_logZ"
+    assert classify_run_outputs({}, {"logL_total": -1.0}, diagnostics_only=False)["evidence_status"] == "missing_logZ"
+
+
+def test_classify_run_outputs_marks_diagnostics_only_evidence_not_meaningful():
+    statuses = classify_run_outputs({"logZ": -12.0}, {"logL_total": -1.0}, diagnostics_only=True)
+    assert statuses["evidence_status"] == "diagnostics_only_not_meaningful"
+    assert statuses["midpoint_status"] == "finite_midpoint"
+
+
+def test_classify_run_outputs_marks_nonfinite_midpoint():
+    statuses = classify_run_outputs({"logZ": -12.0}, {"logL_total": "-inf", "Neff_singleton": 25.36}, diagnostics_only=True)
+    assert extract_midpoint_loglike({"logL_total": "-inf"}) is None
+    assert statuses["midpoint_status"] == "nonfinite_midpoint"
+
+
+def test_delta_logz_requires_both_finite_logz():
+    assert evidence_delta(extract_logz({"logZ": 1.0}), extract_logz({"logZ": 0.5})) == 0.5
+    assert evidence_delta(extract_logz({"logZ": 1.0}), extract_logz({"logZ": "-inf"})) is None
+    assert evidence_delta(extract_logz({"logZ": "nan"}), extract_logz({"logZ": 0.5})) is None
 
 def test_extract_logz_from_fake_attrs():
     assert extract_logz({"logZ": "12.5"}) == 12.5
