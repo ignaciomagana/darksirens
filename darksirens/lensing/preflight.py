@@ -18,6 +18,7 @@ from darksirens.lensing.partitions import (
     apply_edge_mark_prior_keys,
     connected_components_from_candidate_pairs,
     enumerate_compatible_partitions,
+    exact_partition_components,
     exact_partitions_componentwise,
     parse_edge_mark_keys,
     validate_candidate_pairs,
@@ -327,45 +328,52 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
         summary["component_candidate_edge_indices"] = [
             list(c["candidate_edge_indices"]) for c in components
         ]
-        if _get(opts, "partition_component_mode", "componentwise") == "global":
+        component_mode = _get(opts, "partition_component_mode", "componentwise")
+        summary["partition_component_mode"] = component_mode
+        summary["component_sizes"] = [len(c["event_indices"]) for c in components]
+        summary["component_edge_counts"] = [len(c["candidate_edge_indices"]) for c in components]
+        if component_mode == "global":
             if len(components) > 1 and len(effective_pairs) > 8:
                 summary["global_enumeration_warning"] = (
                     "global exact enumeration requested on a decomposable candidate graph; "
                     "componentwise mode is safer for larger simulations"
                 )
+            max_exact = int(_get(opts, "max_exact_partitions", 10000))
+            global_cap = int(_get(opts, "max_total_partitions", max_exact) or max_exact)
             states = enumerate_compatible_partitions(
                 cand_n,
                 effective_pairs,
-                max_partitions=int(_get(opts, "max_exact_partitions", 10000)),
+                max_partitions=global_cap,
             )
             summary["n_exact_partitions"] = len(states)
+            summary["approximate_total_partitions"] = len(states)
+            summary["largest_component_n_partitions"] = len(states)
+            summary["factorized_exact_enabled"] = False
         else:
-            states, comp_summaries, _ = exact_partitions_componentwise(
+            max_exact = int(_get(opts, "max_exact_partitions", 10000))
+            max_component_partitions = int(
+                _get(opts, "max_component_partitions", max_exact) or max_exact
+            )
+            comp_summaries, component_states, approximate_total = exact_partition_components(
                 cand_n,
                 effective_pairs,
                 max_component_events=_get(opts, "max_component_events"),
                 max_component_edges=_get(opts, "max_component_edges"),
-                max_component_partitions=int(
-                    _get(
-                        opts,
-                        "max_component_partitions",
-                        _get(opts, "max_exact_partitions", 10000),
-                    )
-                    or _get(opts, "max_exact_partitions", 10000)
-                ),
-                max_total_partitions=int(
-                    _get(
-                        opts,
-                        "max_total_partitions",
-                        _get(opts, "max_exact_partitions", 10000),
-                    )
-                    or _get(opts, "max_exact_partitions", 10000)
-                ),
+                max_component_partitions=max_component_partitions,
             )
-            summary["component_n_partitions"] = [
-                c["n_partitions"] for c in comp_summaries
-            ]
-            summary["n_exact_partitions"] = len(states)
+            component_n_partitions = [c["n_partitions"] for c in comp_summaries]
+            summary["component_n_partitions"] = component_n_partitions
+            summary["n_exact_partitions"] = int(approximate_total)
+            summary["approximate_total_partitions"] = int(approximate_total)
+            summary["largest_component_n_partitions"] = int(max(component_n_partitions or [0]))
+            summary["factorized_exact_enabled"] = True
+            max_total = _get(opts, "max_total_partitions")
+            if max_total is not None and int(approximate_total) > int(max_total):
+                warnings.append(
+                    "candidate_pairs approximate_total_partitions="
+                    f"{int(approximate_total)} exceeds max_total_partitions={int(max_total)}; "
+                    "componentwise factorized exact marginalization avoids global enumeration"
+                )
     except Exception as exc:
         errors.append(f"candidate_pairs invalid: {exc}")
 
@@ -430,6 +438,7 @@ def run_lensing_preflight(opts) -> dict:
     summary = {
         "cluster_mode": _get(opts, "cluster_mode"),
         "partition_mode": _get(opts, "partition_mode", "fixed"),
+        "partition_component_mode": _get(opts, "partition_component_mode", "componentwise"),
         "pair_marks": _get(opts, "pair_marks", "none"),
         "edge_mark_prior_keys": list(
             parse_edge_mark_keys(_get(opts, "edge_mark_prior_keys"))

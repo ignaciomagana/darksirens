@@ -18,6 +18,10 @@ def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
     assert (workdir / "run_manifest.json").exists()
     commands = json.dumps(plan)
     assert "--edge_mark_prior_keys" in commands
+    assert "--partition_component_mode" in commands
+    assert "componentwise" in commands
+    assert "--max_total_partitions" in commands
+    assert "--max_component_partitions" in commands
     assert "--edge_prior_marks" not in commands
     first = plan["cases"]["A_no_true_pairs_sparse_wrong_graph"]
     assert "off" in first

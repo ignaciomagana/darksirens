@@ -20,7 +20,13 @@ from jax import numpy as jnp
 from jax.lax import cond
 
 import numpy as np
-import healpy as hp
+try:
+    import healpy as hp
+except ModuleNotFoundError:
+    class _HealpyFallback:
+        __version__ = "unavailable"
+
+    hp = _HealpyFallback()
 
 import h5py
 
@@ -48,7 +54,13 @@ else:
             return _NoOpProgress()
         return iterable
 
-from gwcat.spin import chi_eff_prior_logprob
+try:
+    from gwcat.spin import chi_eff_prior_logprob
+except ModuleNotFoundError:
+    def chi_eff_prior_logprob(*_args, **_kwargs):
+        raise ModuleNotFoundError(
+            "gwcat is required to load gwcat PE/selection files; install the gwcat package or use precomputed prior weights"
+        )
 
 import warnings
 warnings.filterwarnings("ignore", message="invalid value encountered in log")
