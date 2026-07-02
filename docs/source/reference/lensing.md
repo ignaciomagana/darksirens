@@ -964,8 +964,14 @@ Each run writes a reproducible manifest and summary products under `--workdir`:
 
 * `run_manifest.json`: full command plan, case settings, seeds, preflight
   commands, and inference commands.  With `--dry_run true`, this manifest and
-  `validation_plan.json` are written without generating mocks or running
-  inference.
+  `validation_plan.json` are written without generating mocks, building graphs,
+  running CLI preflight, compiling likelihoods, or sampling.
+* `preflight_summary.json` / `preflight_summary.md`: written by
+  `--preflight_only true` with per-case pass/fail status, generated files,
+  candidate graph complexity, requested/available edge marks, pair-tag settings,
+  warnings, and errors.
+* `runs/<case>/preflight.json` and `runs/<case>/file_contract_report.json`:
+  per-case CLI preflight and unified file-contract reports.
 * `validation_summary.json`: per-case preflight/inference status, diagnostics,
   result attributes, recovery metrics, evidence placeholders, lens-rate summary
   fields, and pair-tag bias fields.
@@ -980,14 +986,33 @@ Each run writes a reproducible manifest and summary products under `--workdir`:
 * `bias_summary.csv`: case-level pair-tag model and perturbation summary for
   diagnosing bad-`p_tag` runs.
 
-### Diagnostics-only versus evidence runs
+### Dry-run, preflight-only, diagnostics-only, and evidence runs
 
-`--diagnostics_only true` forces the inference command onto the compile and
-likelihood-diagnostic path (`max_samples=0`, small `nlive`, loose `dlogz`).  This
-is appropriate for fast CI checks and for validating schemas, graph building,
-preflight behavior, and finite diagnostic likelihood terms.  Evidence values
-from diagnostics-only runs are not meaningful and should not be used for paper
-claims.
+`--dry_run true` is a command-plan preview only: it writes `run_manifest.json`
+and `validation_plan.json`, validates generated inference flags for obvious
+stale options, and exits before generating mocks or building candidate graphs.
+
+`--preflight_only true` is the cheapest executable end-to-end gate.  It
+generates or reuses the simulated mocks, builds `candidate_pairs.json` from the
+observed events, validates the split simulation files against the file contract,
+runs `darksirens.cli.inference_lensing --preflight_only true` for every selected
+case, writes per-case preflight reports, and then stops before likelihood JIT
+compilation, midpoint diagnostics, or sampler execution:
+
+```bash
+python scripts/mock_lensing/run_simulated_lensing_study.py \
+  --profile tiny \
+  --workdir /tmp/ds_lens_study_preflight \
+  --preflight_only true
+```
+
+`--diagnostics_only true` runs after preflight and forces the inference command
+onto the compile and likelihood-diagnostic path (`max_samples=0`, small `nlive`,
+loose `dlogz`).  This is appropriate for validating finite diagnostic likelihood
+terms without meaningful sampler evidence.  It is intentionally more expensive
+than preflight-only mode because it compiles/evaluates the likelihood.  Evidence
+values from diagnostics-only runs are not meaningful and should not be used for
+paper claims.
 
 Use `--diagnostics_only false` with an adequate profile, sampler, `--nlive`, and
 `--dlogz` for evidence and posterior summaries.  These full runs are the basis
