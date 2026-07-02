@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +120,19 @@ def _log_sky_overlap(
     out = -math.log(2.0 * math.pi * var) - 0.5 * d2 / var
     return float(out) if math.isfinite(out) else -1.0e300
 
+def _physical_time_mark(ei: dict[str, Any], ej: dict[str, Any]) -> tuple[float, float] | None:
+    """Return explicit physical time-delay metadata for this edge, never GPS/index spacing."""
+    for src, other in ((ei, ej), (ej, ei)):
+        partner = src.get("time_delay_partner_event_index")
+        if partner is not None and int(partner) != int(other.get("event_index", -1)):
+            continue
+        if "delta_t_obs" in src and "sigma_delta_t" in src:
+            return (float(src["delta_t_obs"]), float(src["sigma_delta_t"]))
+        meta = src.get("time_delay")
+        if isinstance(meta, dict) and "delta_t_obs" in meta and "sigma_delta_t" in meta:
+            return (float(meta["delta_t_obs"]), float(meta["sigma_delta_t"]))
+    return None
+
 def _truth_label(ei: dict[str, Any], ej: dict[str, Any]) -> str:
     same_source = ei.get("truth_source_id") is not None and ei.get("truth_source_id") == ej.get("truth_source_id")
     both_lensed = bool(ei.get("truth_is_lensed_image")) and bool(ej.get("truth_is_lensed_image"))
@@ -180,9 +194,10 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
             if include_truth_labels:
                 edge["label"] = _truth_label(events[i], events[j])
             marks = {"log_mass_distance_score": log_mass_distance_score}
-            if delta_t is not None and include_time_marks:
-                marks["delta_t_obs"] = float(delta_t)
-                marks["sigma_delta_t"] = float(max(1.0, min(abs(delta_t) * 0.1, 86400.0)))
+            if include_time_marks:
+                physical = _physical_time_mark(events[i], events[j])
+                if physical is not None:
+                    marks["delta_t_obs"], marks["sigma_delta_t"] = physical
             if include_sky_marks:
                 marks["log_sky_overlap"] = float(log_sky_overlap)
             edge["marks"] = marks
@@ -203,6 +218,12 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
             continue
         degree[i] += 1; degree[j] += 1
         kept.append(edge)
+
+    if include_time_marks and not any("delta_t_obs" in edge.get("marks", {}) for edge in kept):
+        warnings.warn(
+            "--include_time_marks requested, but observed catalog contains no explicit physical time-delay metadata for candidate edges; omitting delta_t_obs/sigma_delta_t marks",
+            RuntimeWarning,
+        )
 
     if include_time_marks:
         deltas = [

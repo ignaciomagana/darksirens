@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Callable, Iterable
+import json
 
 import numpy as np
 from scipy.special import logsumexp
@@ -15,15 +16,83 @@ from darksirens.lensing.partitions import (
 )
 
 
+def _state_pair_edges(state: PartitionState) -> list[list[int]]:
+    return np.asarray(state.pair_indices, dtype=int).reshape((-1, 2)).tolist()
+
 def _partition_object(state: PartitionState) -> dict:
     return {
         "singleton_indices": np.asarray(state.singleton_indices, dtype=int).tolist(),
-        "pair_indices": np.asarray(state.pair_indices, dtype=int)
-        .reshape((-1, 2))
-        .tolist(),
+        "pair_indices": _state_pair_edges(state),
         "n_singletons": int(state.n_singletons),
         "n_pairs": int(state.n_pairs),
     }
+
+def _looks_like_suspicious_time_mark(delta_t: float | None, sigma: float | None) -> bool:
+    if delta_t is None or sigma is None:
+        return False
+    dt = float(delta_t)
+    sig = float(sigma)
+    return (
+        np.isfinite(dt)
+        and np.isfinite(sig)
+        and np.isclose(sig, 1.0, rtol=0.0, atol=1e-12)
+        and 0.0 < abs(dt) <= 10.0
+        and np.isclose(abs(dt), round(abs(dt)), rtol=0.0, atol=1e-12)
+    )
+
+def candidate_time_mark_suspicion(candidate_pairs: Iterable[CandidatePair]) -> dict:
+    pairs = tuple(candidate_pairs)
+    marked = [p for p in pairs if p.delta_t_obs is not None and p.sigma_delta_t is not None]
+    if not marked:
+        return {"candidate_time_marks_placeholder": False, "candidate_time_marks_suspicious": False}
+    suspicious = [p for p in marked if _looks_like_suspicious_time_mark(p.delta_t_obs, p.sigma_delta_t)]
+    n_one_one = sum(
+        np.isclose(float(p.delta_t_obs), 1.0, rtol=0.0, atol=1e-12)
+        and np.isclose(float(p.sigma_delta_t), 1.0, rtol=0.0, atol=1e-12)
+        for p in marked
+    )
+    placeholder = len(marked) == len(pairs) and len(suspicious) == len(marked)
+    many = len(suspicious) >= max(2, int(np.ceil(0.5 * len(marked)))) or n_one_one >= 2
+    warning = None
+    if placeholder or many:
+        warning = (
+            "candidate time marks look like placeholders/synthetic values; small integer second-level time marks "
+            "with sigma_delta_t=1 may dominate the time-mark likelihood"
+        )
+    return {
+        "candidate_time_marks_placeholder": bool(placeholder),
+        "candidate_time_marks_suspicious": bool(placeholder or many),
+        "candidate_time_marks_warning": warning,
+    }
+
+def partition_diagnostic_rows(diagnostics: dict, *, case: str = "", truth_edges: set[tuple[int, int]] | None = None) -> list[dict]:
+    truth_edges = truth_edges or set()
+    n = int(diagnostics.get("n_partitions", len(diagnostics.get("partition_logL", []))))
+    map_idx = diagnostics.get("map_partition_index")
+    partitions = diagnostics.get("partitions", [])
+    rows = []
+    for idx in range(n):
+        pobj = partitions[idx] if idx < len(partitions) else {}
+        pair_edges = [tuple(map(int, e)) for e in pobj.get("pair_edges", pobj.get("pair_indices", []))]
+        n_true = sum((min(i, j), max(i, j)) in truth_edges for i, j in pair_edges)
+        rows.append({
+            "case": case,
+            "partition_index": idx,
+            "n_pairs": pobj.get("n_pairs", len(pair_edges)),
+            "pair_edges": json.dumps([list(e) for e in pair_edges]),
+            "log_likelihood": _list_get(diagnostics.get("partition_logL"), idx),
+            "log_prior_weight": _list_get(diagnostics.get("partition_log_prior_weight"), idx),
+            "log_posterior_weight": _list_get(diagnostics.get("partition_log_posterior_weight"), idx),
+            "posterior_probability": _list_get(diagnostics.get("partition_posterior_probability"), idx),
+            "is_map_partition": idx == map_idx,
+            "is_truth_partition": (len(pair_edges) == len(truth_edges) and n_true == len(truth_edges)) if truth_edges else None,
+            "n_true_edges": n_true if truth_edges else None,
+            "n_false_edges": (len(pair_edges) - n_true) if truth_edges else None,
+        })
+    return rows
+
+def _list_get(values, idx):
+    return values[idx] if isinstance(values, list) and idx < len(values) else None
 
 
 def compute_marginalized_partition_diagnostics(
@@ -111,14 +180,9 @@ def compute_marginalized_partition_diagnostics(
             item["pair_time_delta_t_obs"] = float(c.delta_t_obs)
         if c.sigma_delta_t is not None:
             item["pair_time_sigma"] = float(c.sigma_delta_t)
-        if (
-            c.delta_t_obs is not None
-            and c.sigma_delta_t is not None
-            and np.isclose(float(c.delta_t_obs), 1.0, rtol=0.0, atol=1e-12)
-            and np.isclose(float(c.sigma_delta_t), 1.0, rtol=0.0, atol=1e-12)
-        ):
+        if _looks_like_suspicious_time_mark(c.delta_t_obs, c.sigma_delta_t):
             item["pair_time_placeholder_warning"] = (
-                "candidate time marks look like placeholders"
+                "candidate time marks look synthetic/placeholder-like: small integer second-level time marks with sigma_delta_t=1"
             )
         if c.label is not None:
             item["label"] = c.label
@@ -165,6 +229,10 @@ def compute_marginalized_partition_diagnostics(
         "partition_logL": logL.tolist(),
         "partition_log_posterior_weight": log_post.tolist(),
         "partition_posterior_probability": post.tolist(),
+        "partitions": [
+            {**_partition_object(state), "pair_edges": _state_pair_edges(state)}
+            for state in states
+        ],
         "posterior_pair_probabilities": posterior_pair_probabilities,
         "n_components": int(len(components)),
         "component_event_indices": [list(c["event_indices"]) for c in components],
@@ -177,6 +245,7 @@ def compute_marginalized_partition_diagnostics(
         "component_max_p_pair": component_max_p,
         "map_partition": _partition_object(states[map_idx]),
     }
+    out.update(candidate_time_mark_suspicion(candidates))
     if singleton_probs is not None:
         out["posterior_singleton_probability"] = singleton_probs.tolist()
     return out

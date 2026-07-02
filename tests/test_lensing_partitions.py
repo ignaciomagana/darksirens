@@ -757,3 +757,42 @@ def test_preflight_rejects_invalid_requested_sky_overlap_mark(tmp_path):
     report = run_lensing_preflight(opts)
     assert not report["ok"]
     assert any("log_sky_overlap" in e for e in report["errors"])
+
+
+def test_suspicious_small_integer_time_marks_are_flagged():
+    from darksirens.lensing.partitions import EdgeMarks
+
+    candidates = [
+        CandidatePair(0, 1, 0.0, marks=EdgeMarks(delta_t_obs=1.0, sigma_delta_t=1.0)),
+        CandidatePair(2, 3, 0.0, marks=EdgeMarks(delta_t_obs=2.0, sigma_delta_t=1.0)),
+    ]
+    states = enumerate_compatible_partitions(4, candidates)
+    diag = compute_marginalized_partition_diagnostics(states, candidates, lambda _s: 0.0)
+    assert diag["candidate_time_marks_placeholder"] is True
+    assert diag["candidate_time_marks_suspicious"] is True
+    assert "small integer" in diag["candidate_time_marks_warning"]
+    assert "pair_time_placeholder_warning" in diag["posterior_pair_probabilities"][0]
+
+
+def test_partition_diagnostic_rows_handles_fake_exact_payload():
+    from darksirens.lensing.marginal_diagnostics import partition_diagnostic_rows
+
+    diag = {
+        "n_partitions": 2,
+        "map_partition_index": 1,
+        "partition_logL": [-2.0, -1.0],
+        "partition_log_prior_weight": [0.0, -0.5],
+        "partition_log_posterior_weight": [-1.0, -0.2],
+        "partition_posterior_probability": [0.3, 0.7],
+        "partitions": [
+            {"n_pairs": 0, "pair_edges": []},
+            {"n_pairs": 1, "pair_edges": [[0, 1]]},
+        ],
+    }
+    rows = partition_diagnostic_rows(diag, case="X", truth_edges={(0, 1)})
+    assert rows[1]["case"] == "X"
+    assert rows[1]["pair_edges"] == "[[0, 1]]"
+    assert rows[1]["is_map_partition"] is True
+    assert rows[1]["is_truth_partition"] is True
+    assert rows[1]["n_true_edges"] == 1
+    assert rows[1]["n_false_edges"] == 0

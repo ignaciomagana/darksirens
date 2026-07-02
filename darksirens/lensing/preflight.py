@@ -13,6 +13,7 @@ from darksirens.lensing.observed_catalog import (
     observed_catalog_metadata_from_hdf5,
     validate_observed_catalog_file,
 )
+from darksirens.lensing.marginal_diagnostics import candidate_time_mark_suspicion
 from darksirens.lensing.partitions import (
     apply_edge_mark_prior_keys,
     connected_components_from_candidate_pairs,
@@ -311,21 +312,10 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
                         f"({pair.i},{pair.j}) missing marks.delta_t_obs/sigma_delta_t "
                         "required by time edge-mark likelihood"
                     )
-            marked_pairs = [
-                pair for pair in pairs
-                if pair.delta_t_obs is not None and pair.sigma_delta_t is not None
-            ]
-            if marked_pairs and len(marked_pairs) == len(pairs) and all(
-                np.isclose(float(pair.delta_t_obs), 1.0, rtol=0.0, atol=1e-12)
-                and np.isclose(float(pair.sigma_delta_t), 1.0, rtol=0.0, atol=1e-12)
-                for pair in marked_pairs
-            ):
-                msg = (
-                    "candidate time marks look like placeholders; pair likelihood may be "
-                    "dominated by unphysical time-delay penalty"
-                )
-                summary["candidate_time_marks_placeholder"] = True
-                warnings.append(msg)
+            suspicion = candidate_time_mark_suspicion(pairs)
+            summary.update(suspicion)
+            if suspicion.get("candidate_time_marks_suspicious"):
+                warnings.append(str(suspicion.get("candidate_time_marks_warning")))
         effective_pairs = (
             apply_edge_mark_prior_keys(pairs, prior_keys) if not errors else pairs
         )
