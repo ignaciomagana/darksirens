@@ -128,7 +128,7 @@ def test_failure_payload_can_be_included_in_summary_record(tmp_path):
 
 
 def test_truth_recovery_metrics_with_fake_posterior_probabilities():
-    metrics = recovery_metrics({(0, 1), (2, 3)}, [((0, 1), 0.8), ((2, 3), 0.6), ((1, 2), 0.2)], {"expected_n_pairs": 1.6, "map_partition_pairs": [[0, 1], [2, 3]], "map_partition_n_pairs": 2})
+    metrics = recovery_metrics({(0, 1), (2, 3)}, [((0, 1), 0.8), ((2, 3), 0.6), ((1, 2), 0.2)], {"expected_n_pairs": 1.6, "map_n_pairs": 2, "map_partition": {"pair_indices": [[0, 1], [2, 3]], "n_pairs": 2}})
     assert metrics["injected_n_pairs"] == 2
     assert metrics["map_n_pairs"] == 2
     assert metrics["true_edge_posterior_probability_mean"] == 0.7
@@ -136,6 +136,42 @@ def test_truth_recovery_metrics_with_fake_posterior_probabilities():
     assert metrics["false_edge_posterior_probability_sum"] == 0.2
     assert metrics["map_partition_exact_truth_match"] is True
 
+
+
+def test_recovery_metrics_reads_map_partition_pair_indices_and_map_n_pairs():
+    metrics = recovery_metrics(
+        {(4, 5), (2, 3)},
+        [((4, 5), 0.9), ((2, 3), 0.8)],
+        {"map_n_pairs": 2, "map_partition": {"pair_indices": [[4, 5], [2, 3]], "n_pairs": 99}},
+    )
+    assert metrics["map_n_pairs"] == 2
+    assert metrics["map_partition_exact_truth_match"] is True
+
+
+def test_recovery_metrics_reads_map_partition_n_pairs_when_top_level_missing():
+    metrics = recovery_metrics(
+        {(4, 5), (2, 3)},
+        [((4, 5), 0.9), ((2, 3), 0.8)],
+        {"map_partition": {"pair_indices": [[4, 5], [2, 3]], "n_pairs": 2}},
+    )
+    assert metrics["map_n_pairs"] == 2
+    assert metrics["map_partition_exact_truth_match"] is True
+
+
+def test_recovery_metrics_exact_truth_match_false_for_partial_map_partition():
+    metrics = recovery_metrics(
+        {(4, 5), (2, 3)},
+        [((4, 5), 0.9), ((2, 3), 0.8)],
+        {"map_n_pairs": 1, "map_partition": {"pair_indices": [[4, 5]], "n_pairs": 1}},
+    )
+    assert metrics["map_n_pairs"] == 1
+    assert metrics["map_partition_exact_truth_match"] is False
+
+
+def test_recovery_metrics_uses_legacy_map_pairs_fallback():
+    metrics = recovery_metrics({(4, 5), (2, 3)}, [], {"map_pairs": [[5, 4], [3, 2]]})
+    assert metrics["map_n_pairs"] == 2
+    assert metrics["map_partition_exact_truth_match"] is True
 
 def test_posterior_probability_items_from_list(tmp_path):
     cand = {"pairs": [{"i": 4, "j": 1}, {"i": 2, "j": 3}]}
@@ -176,8 +212,8 @@ def test_recovery_metrics_with_list_of_dict_posterior_probabilities(tmp_path):
     diagnostics = {
         "posterior_pair_probabilities": [{"i": 1, "j": 0, "p_pair": 0.8}, {"i": 2, "j": 3, "p_pair": 0.6}, {"i": 1, "j": 2, "p_pair": 0.2}],
         "expected_n_pairs": 1.6,
-        "map_partition_pairs": [[0, 1], [2, 3]],
-        "map_partition_n_pairs": 2,
+        "map_n_pairs": 2,
+        "map_partition": {"pair_indices": [[0, 1], [2, 3]], "n_pairs": 2},
     }
     metrics = recovery_metrics({(0, 1), (2, 3)}, posterior_probability_items(diagnostics, path), diagnostics)
     assert metrics["true_edge_posterior_probability_mean"] == 0.7

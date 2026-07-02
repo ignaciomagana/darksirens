@@ -468,11 +468,30 @@ def posterior_probability_items(diagnostics: dict[str, Any], candidate_path: Pat
             items.append(((min(int(e["i"]), int(e["j"])), max(int(e["i"]), int(e["j"]))), float(v)))
     return items
 
+def _normalized_pair_set(pairs: Any) -> set[tuple[int, int]]:
+    return {tuple(sorted(map(int, x))) for x in pairs if isinstance(x, (list, tuple)) and len(x) == 2}
+
+
 def recovery_metrics(true_edges: set[tuple[int,int]], posterior_items: list[tuple[tuple[int,int], float]], diagnostics: dict[str, Any]) -> dict[str, Any]:
     p = dict(posterior_items); false = [v for e, v in posterior_items if e not in true_edges]; truep = [p.get(e, 0.0) for e in true_edges]
-    map_pairs = diagnostics.get("map_partition_pairs") or diagnostics.get("map_pairs") or []
-    map_set = {tuple(sorted(map(int, x))) for x in map_pairs if isinstance(x, (list, tuple)) and len(x) == 2}
-    return {"injected_n_pairs": len(true_edges), "expected_n_pairs": diagnostics.get("expected_n_pairs"), "map_n_pairs": diagnostics.get("map_partition_n_pairs", len(map_set) if map_set else None),
+    map_partition = diagnostics.get("map_partition") if isinstance(diagnostics.get("map_partition"), dict) else {}
+    map_pairs_source = None
+    if "pair_indices" in map_partition:
+        map_pairs_source = map_partition.get("pair_indices")
+    elif "pairs" in map_partition:
+        map_pairs_source = map_partition.get("pairs")
+    elif "map_pairs" in diagnostics:
+        map_pairs_source = diagnostics.get("map_pairs")
+    map_set = _normalized_pair_set(map_pairs_source or [])
+    if "map_n_pairs" in diagnostics:
+        map_n_pairs = diagnostics.get("map_n_pairs")
+    elif "n_pairs" in map_partition:
+        map_n_pairs = map_partition.get("n_pairs")
+    elif map_pairs_source is not None:
+        map_n_pairs = len(map_set)
+    else:
+        map_n_pairs = None
+    return {"injected_n_pairs": len(true_edges), "expected_n_pairs": diagnostics.get("expected_n_pairs"), "map_n_pairs": map_n_pairs,
             "true_edge_posterior_probability_mean": float(np.mean(truep)) if truep else None,
             "false_edge_posterior_probability_max": float(np.max(false)) if false else 0.0,
             "false_edge_posterior_probability_sum": float(np.sum(false)) if false else 0.0,
