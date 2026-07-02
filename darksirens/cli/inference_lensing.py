@@ -871,6 +871,40 @@ def _diagnostics_to_python(diag):
     return out
 
 
+def _is_finite_number(value):
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _add_off_control_nonfinite_diagnostics(diagnostics, *, opts, inp):
+    """Attach source-oriented diagnostics when singleton/off control is nonfinite."""
+    if getattr(opts, "cluster_mode", None) != "off":
+        return diagnostics
+    keys = (
+        "logL_total",
+        "singleton_logL_sum",
+        "selection_correction_total",
+        "Neff_singleton",
+        "log_mu_singleton",
+        "log_sigma2_singleton",
+    )
+    flags = {key: (key in diagnostics and not _is_finite_number(diagnostics.get(key))) for key in keys}
+    diagnostics["off_control_nonfinite_component_flags"] = flags
+    diagnostics["off_control_has_nonfinite_component"] = any(flags.values())
+    diagnostics["n_events"] = int(inp["nEvents"])
+    diagnostics["nsamp"] = int(inp["nsamp"])
+    diagnostics["selection_file_summary"] = {
+        "path": str(opts.gwselection_path),
+        "n_draw": float(inp["Ndraw"]),
+        "n_samples": int(np.asarray(inp["gw_sel"].m1det).size),
+        "sel_batch_size": opts.sel_batch_size,
+        "wl_selection": opts.wl_selection,
+    }
+    return diagnostics
+
+
 def _write_diagnostics(run_dir, diagnostics):
     with open(os.path.join(run_dir, "diagnostics.json"), "w") as f:
         json.dump(diagnostics, f, indent=2, allow_nan=True)
@@ -1261,6 +1295,7 @@ def build_cluster_diagnostics(
                 coord, lens_sampled_labels, fixed_parameter_values, opts
             ),
         )
+        _add_off_control_nonfinite_diagnostics(out, opts=opts, inp=inp)
         return out
 
     return diagnostics

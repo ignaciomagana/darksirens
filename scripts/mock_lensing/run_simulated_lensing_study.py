@@ -294,6 +294,40 @@ def evidence_delta(logz_j2: float | None, logz_off: float | None, diagnostics_on
         return None
     return logz_j2 - logz_off
 
+def run_diagnostics_path(run_dir: Path | None) -> str | None:
+    if run_dir is None:
+        return None
+    path = run_dir / "midpoint_diagnostics.json"
+    if path.exists():
+        return str(path)
+    path = run_dir / "diagnostics.json"
+    return str(path) if path.exists() else None
+
+def run_failure_path(run_dir: Path | None) -> str | None:
+    if run_dir is None:
+        return None
+    path = run_dir / "failure.json"
+    return str(path) if path.exists() else None
+
+def off_control_nonfinite_warning(off_class: dict[str, str], off_run: Path | None, cfg: dict[str, Any], seed: int) -> str | None:
+    if off_class.get("midpoint_status") == "finite_midpoint" and off_class.get("evidence_status") == "finite_logZ":
+        return None
+    if off_class.get("midpoint_status") not in {"nonfinite_midpoint", "missing_midpoint"} and off_class.get("evidence_status") not in {"nonfinite_logZ", "missing_logZ"}:
+        return None
+    diag_path = run_diagnostics_path(off_run)
+    failure_path = run_failure_path(off_run)
+    retry = ""
+    if cfg.get("off_retry_n_unlensed_inj"):
+        retry = f"; consider rerunning seed {seed} with mock.n_unlensed_inj={cfg['off_retry_n_unlensed_inj']}"
+    else:
+        retry = f"; consider rerunning seed {seed} with a larger mock.n_unlensed_inj"
+    return (
+        "off-control produced nonfinite midpoint/logZ; delta_logZ unavailable; "
+        f"inspect off diagnostics: {diag_path or 'missing'}"
+        + (f"; failure: {failure_path}" if failure_path else "")
+        + retry
+    )
+
 def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
     diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
     max_samples = "0" if diagnostics_only else "5000"
@@ -327,6 +361,15 @@ def off_control_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: ar
            "--seed", str(cfg["seed"]), "--save_path", str(run_dir)]
     if diagnostics_only:
         cmd[cmd.index("--nlive") + 1] = "8"; cmd[cmd.index("--dlogz") + 1] = "50"
+    return cmd
+
+def off_control_retry_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: argparse.Namespace) -> list[str] | None:
+    if not cfg.get("off_retry_on_nonfinite", False):
+        return None
+    cmd = off_control_cmd(case_dir, run_dir, cfg, args)
+    retry_nlive = cfg.get("off_retry_nlive")
+    if retry_nlive is not None:
+        cmd[cmd.index("--nlive") + 1] = str(retry_nlive)
     return cmd
 
 def preflight_cmd(cmd: list[str], path: Path) -> list[str]:
@@ -610,6 +653,19 @@ def main(argv: list[str] | None = None) -> int:
             _ot, off_rc = off_log["runtime_sec"], off_log["return_code"]
             off_run = latest_attempt(off_dir); off_diag = _load_json(off_run / "diagnostics.json", {}) if off_run else {}; off_mid_diag = _load_json(off_run / "midpoint_diagnostics.json", _load_json(off_run / "midpoint.json", {})) if off_run else {}; off_failure = _load_json(off_run / "failure.json", None) if off_run else None; off_attrs = read_results_attrs(off_run)
             off_status = "passed" if off_rc == 0 and off_run and (off_run / "diagnostics.json").exists() else "failed_inference"
+            initial_off_class = classify_run_outputs(off_attrs, off_mid_diag, args.diagnostics_only)
+            if off_status == "passed" and cfg.get("off_retry_on_nonfinite", False) and (
+                initial_off_class["midpoint_status"] != "finite_midpoint" or initial_off_class["evidence_status"] != "finite_logZ"
+            ):
+                retry_cmd = off_control_retry_cmd(cdir, off_dir, cfg, args)
+                if retry_cmd is not None and retry_cmd != entry["off"]:
+                    retry_prefix = off_dir / "inference_retry"
+                    off_log = _run_logged(retry_cmd, retry_prefix)
+                    _ot, off_rc = off_log["runtime_sec"], off_log["return_code"]
+                    off_run = latest_attempt(off_dir); off_diag = _load_json(off_run / "diagnostics.json", {}) if off_run else {}; off_mid_diag = _load_json(off_run / "midpoint_diagnostics.json", _load_json(off_run / "midpoint.json", {})) if off_run else {}; off_failure = _load_json(off_run / "failure.json", None) if off_run else None; off_attrs = read_results_attrs(off_run)
+                    off_status = "passed" if off_rc == 0 and off_run and (off_run / "diagnostics.json").exists() else "failed_inference"
+                else:
+                    warnings.append("off_retry_on_nonfinite requested, but no safer off-control retry settings were provided; J2 was not rerun")
         logz_j2 = extract_logz(results_attrs); logzerr_j2 = extract_logzerr(results_attrs)
         logz_off = extract_logz(off_attrs); logzerr_off = extract_logzerr(off_attrs)
         delta_logz = evidence_delta(logz_j2, logz_off, args.diagnostics_only)
@@ -651,12 +707,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         if evidence_unusable:
             case_status = "failed_unusable_evidence"
-        warnings = (["diagnostics_only: evidence deltas are not meaningful"] if args.diagnostics_only else [])
+        warnings = (["diagnostics_only: evidence deltas are not meaningful"] if args.diagnostics_only else []) + list(warnings)
         if len(items) > 0 and all(float(prob) == 0.0 for _edge, prob in items):
             warnings.append("all candidate edge posterior probabilities are zero; inspect partition_diagnostics.csv")
         if diag.get("candidate_time_marks_suspicious"):
             warnings.append("candidate time marks look synthetic/placeholder-like; time-mark likelihood may dominate")
-        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(off_pre_log, "stdout_path"), "off_preflight_stderr_path": _log_path(off_pre_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "process_status": j2_class["process_status"], "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "midpoint_status": j2_class["midpoint_status"], "evidence_status": j2_class["evidence_status"], "failure": failure, "stdout_path": _log_path(inf_log, "stdout_path"), "stderr_path": _log_path(inf_log, "stderr_path"), "diagnostics": diag, "midpoint_diagnostics": mid_diag, "results_attrs": results_attrs}, "off": {"status": off_status, "process_status": off_class["process_status"], "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "midpoint_status": off_class["midpoint_status"], "evidence_status": off_class["evidence_status"], "failure": locals().get("off_failure"), "stdout_path": _log_path(locals().get("off_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_log", {}), "stderr_path"), "diagnostics": off_diag, "midpoint_diagnostics": off_mid_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
+        off_warning = off_control_nonfinite_warning(off_class, off_run, cfg, args.seed) if args.run_off_controls and off_status == "passed" and not args.diagnostics_only else None
+        if off_warning:
+            warnings.append(off_warning)
+        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(off_pre_log, "stdout_path"), "off_preflight_stderr_path": _log_path(off_pre_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "process_status": j2_class["process_status"], "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "midpoint_status": j2_class["midpoint_status"], "evidence_status": j2_class["evidence_status"], "failure": failure, "failure_path": run_failure_path(run), "stdout_path": _log_path(inf_log, "stdout_path"), "stderr_path": _log_path(inf_log, "stderr_path"), "diagnostics": diag, "diagnostics_path": run_diagnostics_path(run), "midpoint_diagnostics": mid_diag, "results_attrs": results_attrs}, "off": {"status": off_status, "process_status": off_class["process_status"], "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "midpoint_status": off_class["midpoint_status"], "evidence_status": off_class["evidence_status"], "failure": locals().get("off_failure"), "failure_path": run_failure_path(off_run), "stdout_path": _log_path(locals().get("off_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_log", {}), "stderr_path"), "diagnostics": off_diag, "diagnostics_path": run_diagnostics_path(off_run), "midpoint_diagnostics": off_mid_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
     if args.preflight_only:
         _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
         write_preflight_summary(work, summary)
@@ -675,12 +734,13 @@ def main(argv: list[str] | None = None) -> int:
         "",
         "Process status records whether the command completed; midpoint/evidence status records whether finite, usable likelihood/evidence was produced.",
         "",
-        "| case | j2 status | j2 midpoint | j2 evidence | off status | off midpoint | off evidence | logZ_j2 | logZ_off | delta_logZ | expected_n_pairs | run dirs |",
-        "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| case | j2 status | j2 midpoint | j2 evidence | off status | off midpoint | off evidence | logZ_j2 | logZ_off | delta_logZ | warnings | expected_n_pairs | run dirs |",
+        "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- |",
     ]
     for name, rec in summary["cases"].items():
         r = rec.get("recovery", {}); j2 = rec.get("j2", {}); off = rec.get("off", {})
-        lines.append(f"| {name} | {j2.get('status', rec.get('status'))} | {j2.get('midpoint_status')} | {j2.get('evidence_status')} | {off.get('status')} | {off.get('midpoint_status')} | {off.get('evidence_status')} | {j2.get('logZ')} | {off.get('logZ')} | {rec.get('delta_logZ_j2_minus_off')} | {r.get('expected_n_pairs')} | {j2.get('run_dir')}<br>{off.get('run_dir')} |")
+        warning_text = "<br>".join(str(w) for w in rec.get("warnings", []))
+        lines.append(f"| {name} | {j2.get('status', rec.get('status'))} | {j2.get('midpoint_status')} | {j2.get('evidence_status')} | {off.get('status')} | {off.get('midpoint_status')} | {off.get('evidence_status')} | {j2.get('logZ')} | {off.get('logZ')} | {rec.get('delta_logZ_j2_minus_off')} | {warning_text} | {r.get('expected_n_pairs')} | {j2.get('run_dir')}<br>{off.get('run_dir')} |")
     (work / "validation_summary.md").write_text("\n".join(lines) + "\n")
     return 0 if all(c.get("status") == "passed" for c in summary["cases"].values()) else 1
 
