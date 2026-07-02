@@ -70,10 +70,25 @@ import traceback
 
 import numpy as np
 import h5py
-import healpy as hp
+try:
+    import healpy as hp
+except ModuleNotFoundError:
+    class _HealpyFallback:
+        __version__ = "unavailable"
+
+        @staticmethod
+        def nside2npix(nside):
+            return 12 * int(nside) * int(nside)
+
+        @staticmethod
+        def nside2pixarea(nside):
+            return 4.0 * np.pi / _HealpyFallback.nside2npix(nside)
+
+    hp = _HealpyFallback()
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp as jax_logsumexp
+from scipy.special import logsumexp
 
 # ── branch machinery we reuse ────────────────────────────────────────────────
 from darksirens.redshift import zgrid
@@ -340,6 +355,104 @@ def _time_mark_arrays_for_partition_state(state, candidate_pairs):
 # =============================================================================
 # Data loading
 # =============================================================================
+
+def _all_singleton_partition_state(n_events: int) -> PartitionState:
+    return PartitionState(
+        np.arange(int(n_events), dtype=np.int32),
+        np.asarray([], dtype=np.int32).reshape((0, 2)),
+        int(n_events),
+        0,
+        0.0,
+        np.asarray([], dtype=np.int32),
+    )
+
+
+def _full_state_for_component(
+    n_events: int, component: dict, local_state: PartitionState
+) -> PartitionState:
+    component_events = {int(x) for x in component["event_indices"]}
+    outside_singletons = [idx for idx in range(int(n_events)) if idx not in component_events]
+    singletons = np.asarray(
+        outside_singletons + np.asarray(local_state.singleton_indices, dtype=int).tolist(),
+        dtype=np.int32,
+    )
+    pair_indices = np.asarray(local_state.pair_indices, dtype=np.int32).reshape((-1, 2))
+    edge_indices = np.asarray(
+        local_state.candidate_edge_indices if local_state.candidate_edge_indices is not None else [],
+        dtype=np.int32,
+    )
+    if edge_indices.size:
+        order = np.argsort(edge_indices)
+        edge_indices = edge_indices[order]
+        pair_indices = pair_indices[order]
+    return PartitionState(
+        np.sort(singletons).astype(np.int32),
+        pair_indices,
+        int(singletons.size),
+        int(pair_indices.shape[0]),
+        float(local_state.log_prior_weight),
+        edge_indices,
+    )
+
+
+def _runtime_part_from_state(
+    state: PartitionState,
+    candidate_pairs,
+    *,
+    pair_marks: str = "none",
+    pair_time_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+) -> dict:
+    part = dict(
+        singleton_indices=jnp.asarray(state.singleton_indices, dtype=jnp.int32),
+        pair_indices=jnp.asarray(state.pair_indices, dtype=jnp.int32),
+        n_singletons=int(state.n_singletons),
+        n_pairs=int(state.n_pairs),
+        log_prior_weight=float(state.log_prior_weight),
+        candidate_edge_indices=jnp.asarray(
+            state.candidate_edge_indices if state.candidate_edge_indices is not None else [],
+            dtype=jnp.int32,
+        ),
+    )
+    if pair_marks == "time":
+        if pair_time_override is not None:
+            dt_obs, dt_sigma = pair_time_override
+        else:
+            dt_obs, dt_sigma = _time_mark_arrays_for_partition_state(state, candidate_pairs)
+        part["pair_time_delta_t_obs"] = dt_obs
+        part["pair_time_sigma"] = dt_sigma
+    return part
+
+
+def _count_probe_partition_state(n_events: int, n_pairs: int) -> PartitionState:
+    pairs = np.asarray([[2 * k, 2 * k + 1] for k in range(int(n_pairs))], dtype=np.int32)
+    used = {int(x) for x in pairs.reshape(-1)} if pairs.size else set()
+    singletons = np.asarray([idx for idx in range(int(n_events)) if idx not in used], dtype=np.int32)
+    return PartitionState(
+        singletons,
+        pairs.reshape((-1, 2)),
+        int(singletons.size),
+        int(n_pairs),
+        0.0,
+        np.asarray([], dtype=np.int32),
+    )
+
+
+def _factorized_logsumexp_jax(component_terms, count_loglike_delta):
+    max_pairs = int(count_loglike_delta.shape[0]) - 1
+    dp = jnp.full((max_pairs + 1,), -jnp.inf, dtype=jnp.float64)
+    dp = dp.at[0].set(0.0)
+    for terms in component_terms:
+        new = jnp.full((max_pairs + 1,), -jnp.inf, dtype=jnp.float64)
+        for n_pairs, logw in terms:
+            n_pairs = int(n_pairs)
+            valid = max_pairs + 1 - n_pairs
+            if valid <= 0:
+                continue
+            proposed = dp[:valid] + logw
+            current = new[n_pairs : n_pairs + valid]
+            new = new.at[n_pairs : n_pairs + valid].set(jnp.logaddexp(current, proposed))
+        dp = new
+    return jax_logsumexp(dp + count_loglike_delta)
 def _downsample(arrs_dict, n_keep, rng):
     """Down-sample a dict of per-sample arrays to n_keep (memory control for the
     O(N_pe^2) pair KDE). Returns the same dict with shorter arrays."""
@@ -765,59 +878,137 @@ def load_inputs(opts):
         n_events_total = n_sing + 2 * P
     pair_kdes = stack_pair_kdes(kdes)
     if partition_mode == "marginalize_exact":
-        _candidate_n_events2, partition_states, log_z_prior = (
-            exact_partitions_from_pairs(
-                candidate_n_events,
-                candidate_pairs,
-                max_partitions=getattr(opts, "max_exact_partitions", 10000),
-                component_mode=getattr(
-                    opts, "partition_component_mode", "componentwise"
-                ),
-                max_component_events=getattr(opts, "max_component_events", None),
-                max_component_edges=getattr(opts, "max_component_edges", None),
-                max_component_partitions=getattr(
-                    opts, "max_component_partitions", None
-                ),
-                max_total_partitions=getattr(opts, "max_total_partitions", None),
-            )
-        )
         if candidate_n_events != n_events_total:
             raise SystemExit(
                 f"candidate_pairs n_events={candidate_n_events} does not match loaded event count "
                 f"{n_events_total}"
             )
-        marginal_parts = []
-        for state in partition_states:
-            part = dict(
-                singleton_indices=jnp.asarray(state.singleton_indices, dtype=jnp.int32),
-                pair_indices=jnp.asarray(state.pair_indices, dtype=jnp.int32),
-                n_singletons=state.n_singletons,
-                n_pairs=state.n_pairs,
-                log_prior_weight=state.log_prior_weight,
-                candidate_edge_indices=jnp.asarray(
-                    state.candidate_edge_indices, dtype=jnp.int32
-                ),
+        partition_component_mode = getattr(opts, "partition_component_mode", "componentwise")
+        pair_marks_mode = getattr(opts, "pair_marks", "none")
+        max_exact_partitions = int(getattr(opts, "max_exact_partitions", 10000))
+        max_component_partitions = (
+            getattr(opts, "max_component_partitions", None) or max_exact_partitions
+        )
+        max_total_partitions = getattr(opts, "max_total_partitions", None)
+        global_row_cap = int(max_total_partitions or max_exact_partitions)
+        factorized_exact = partition_component_mode == "componentwise"
+        component_partition_summaries = None
+        component_partition_states = None
+        component_marginal_partitions = None
+        component_full_partition_states = None
+        component_full_partitions = None
+        baseline_partition = None
+        selection_probe_partitions = None
+        approximate_total_partitions = None
+
+        if partition_component_mode == "global":
+            _candidate_n_events2, partition_states, log_z_prior = exact_partitions_from_pairs(
+                candidate_n_events,
+                candidate_pairs,
+                max_partitions=max_exact_partitions,
+                component_mode="global",
             )
-            if getattr(opts, "pair_marks", "none") == "time":
-                dt_obs, dt_sigma = _time_mark_arrays_for_partition_state(
-                    state, candidate_pairs
+            marginal_partitions = tuple(
+                _runtime_part_from_state(state, candidate_pairs, pair_marks=pair_marks_mode)
+                for state in partition_states
+            )
+            fixed_singletons = marginal_partitions[0]["singleton_indices"]
+            fixed_pairs = marginal_partitions[0]["pair_indices"]
+            fixed_n_singletons = marginal_partitions[0]["n_singletons"]
+            fixed_n_pairs = marginal_partitions[0]["n_pairs"]
+            approximate_total_partitions = len(partition_states)
+        else:
+            component_partition_summaries, component_partition_states, approximate_total_partitions = exact_partition_components(
+                candidate_n_events,
+                candidate_pairs,
+                max_component_events=getattr(opts, "max_component_events", None),
+                max_component_edges=getattr(opts, "max_component_edges", None),
+                max_component_partitions=int(max_component_partitions),
+            )
+            log_z_prior = float(
+                sum(
+                    logsumexp([state.log_prior_weight for state in states])
+                    for states in component_partition_states
                 )
-                part["pair_time_delta_t_obs"] = dt_obs
-                part["pair_time_sigma"] = dt_sigma
-            marginal_parts.append(part)
-        marginal_partitions = tuple(marginal_parts)
-        fixed_singletons = marginal_partitions[0]["singleton_indices"]
-        fixed_pairs = marginal_partitions[0]["pair_indices"]
-        fixed_n_singletons = marginal_partitions[0]["n_singletons"]
-        fixed_n_pairs = marginal_partitions[0]["n_pairs"]
+            )
+            component_full_partition_states = tuple(
+                tuple(
+                    _full_state_for_component(candidate_n_events, summary, state)
+                    for state in states
+                )
+                for summary, states in zip(component_partition_summaries, component_partition_states)
+            )
+            component_full_partitions = tuple(
+                tuple(
+                    _runtime_part_from_state(state, candidate_pairs, pair_marks=pair_marks_mode)
+                    for state in states
+                )
+                for states in component_full_partition_states
+            )
+            component_marginal_partitions = tuple(
+                tuple(
+                    _runtime_part_from_state(state, candidate_pairs, pair_marks=pair_marks_mode)
+                    for state in states
+                )
+                for states in component_partition_states
+            )
+            baseline_state = _all_singleton_partition_state(candidate_n_events)
+            baseline_partition = _runtime_part_from_state(
+                baseline_state, candidate_pairs, pair_marks=pair_marks_mode
+            )
+            max_factorized_pairs = sum(
+                max(int(state.n_pairs) for state in states)
+                for states in component_partition_states
+            )
+            selection_probe_partitions = []
+            for n_pairs_probe in range(max_factorized_pairs + 1):
+                probe_state = _count_probe_partition_state(candidate_n_events, n_pairs_probe)
+                time_override = None
+                if pair_marks_mode == "time":
+                    time_override = (
+                        jnp.zeros((n_pairs_probe,), dtype=jnp.float64),
+                        jnp.ones((n_pairs_probe,), dtype=jnp.float64),
+                    )
+                selection_probe_partitions.append(
+                    _runtime_part_from_state(
+                        probe_state,
+                        candidate_pairs,
+                        pair_marks=pair_marks_mode,
+                        pair_time_override=time_override,
+                    )
+                )
+            selection_probe_partitions = tuple(selection_probe_partitions)
+            if approximate_total_partitions <= global_row_cap:
+                partition_states = combine_component_partitions(component_partition_states)
+                marginal_partitions = tuple(
+                    _runtime_part_from_state(state, candidate_pairs, pair_marks=pair_marks_mode)
+                    for state in partition_states
+                )
+            else:
+                partition_states = None
+                marginal_partitions = None
+            fixed_singletons = baseline_partition["singleton_indices"]
+            fixed_pairs = baseline_partition["pair_indices"]
+            fixed_n_singletons = baseline_partition["n_singletons"]
+            fixed_n_pairs = baseline_partition["n_pairs"]
     else:
+        partition_component_mode = None
+        factorized_exact = False
+        component_partition_summaries = None
+        component_partition_states = None
+        component_marginal_partitions = None
+        component_full_partition_states = None
+        component_full_partitions = None
+        baseline_partition = None
+        selection_probe_partitions = None
+        approximate_total_partitions = None
         marginal_partitions = None
+        partition_states = None
         log_z_prior = 0.0
         fixed_singletons = jnp.asarray(partition["singleton_indices"], dtype=jnp.int32)
         fixed_pairs = jnp.asarray(partition["pair_indices"], dtype=jnp.int32)
         fixed_n_singletons = int(partition["n_singletons"])
         fixed_n_pairs = int(partition["n_pairs"])
-
     return dict(
         gw_pe=gw_pe,
         gw_sel=gw_sel,
@@ -837,7 +1028,17 @@ def load_inputs(opts):
         partition_states=(
             partition_states if partition_mode == "marginalize_exact" else None
         ),
-        candidate_pairs=(
+        partition_component_mode=partition_component_mode,
+        factorized_exact=bool(factorized_exact),
+        global_partitions_enumerated=bool(partition_states is not None),
+        approximate_total_partitions=approximate_total_partitions,
+        component_partition_summaries=component_partition_summaries,
+        component_partition_states=component_partition_states,
+        component_marginal_partitions=component_marginal_partitions,
+        component_full_partition_states=component_full_partition_states,
+        component_full_partitions=component_full_partitions,
+        baseline_partition=baseline_partition,
+        selection_probe_partitions=selection_probe_partitions,        candidate_pairs=(
             candidate_pairs if partition_mode == "marginalize_exact" else None
         ),
         candidate_pairs_raw=(
@@ -1001,6 +1202,11 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
         attrs["n_singletons_meaning"] = "reference_partition_n_singletons"
         attrs["n_pairs_meaning"] = "reference_partition_n_pairs"
         attrs["n_partitions"] = int(diagnostics["n_partitions"])
+        attrs["partition_component_mode"] = str(diagnostics.get("partition_component_mode", getattr(opts, "partition_component_mode", "global")))
+        attrs["factorized_exact"] = bool(diagnostics.get("factorized_exact", False))
+        attrs["global_partitions_enumerated"] = bool(diagnostics.get("global_partitions_enumerated", True))
+        if diagnostics.get("approximate_total_partitions") is not None:
+            attrs["approximate_total_partitions"] = int(diagnostics["approximate_total_partitions"])
         attrs["expected_n_singletons"] = float(diagnostics["expected_n_singletons"])
         attrs["expected_n_pairs"] = float(diagnostics["expected_n_pairs"])
         attrs["map_partition_index"] = int(diagnostics["map_partition_index"])
@@ -1100,8 +1306,13 @@ def build_cluster_likelihood(
             decoder, coord
         )
 
-        def _eval_partition(part):
-            return darksiren_log_likelihood_with_clusters(
+        def _call_partition(part, *, diagnostics=False):
+            fn = (
+                darksiren_likelihood_diagnostics_with_clusters
+                if diagnostics
+                else darksiren_log_likelihood_with_clusters
+            )
+            return fn(
                 cosmo,
                 survey,
                 pop_params,
@@ -1145,7 +1356,52 @@ def build_cluster_likelihood(
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
             )
 
+        def _eval_partition(part):
+            return _call_partition(part, diagnostics=False)
+
+        def _selection_correction(part):
+            return _call_partition(part, diagnostics=True)["selection_correction_total"]
+
+        def _content_loglike(raw):
+            return raw["singleton_logL_sum"] + raw["pair_logL_sum"]
+
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            if inp.get("factorized_exact"):
+                baseline_raw = _call_partition(inp["baseline_partition"], diagnostics=True)
+                baseline = baseline_raw["logL_total"]
+                baseline_content = _content_loglike(baseline_raw)
+                selection0 = baseline_raw["selection_correction_total"]
+                count_delta = jnp.stack(
+                    [
+                        _selection_correction(part) - selection0
+                        for part in inp["selection_probe_partitions"]
+                    ]
+                )
+                component_terms = []
+                for states, parts in zip(
+                    inp["component_partition_states"], inp["component_full_partitions"]
+                ):
+                    terms = []
+                    for state, part in zip(states, parts):
+                        n_pairs = int(state.n_pairs)
+                        if n_pairs == 0:
+                            content_delta = jnp.asarray(0.0, dtype=jnp.float64)
+                        else:
+                            raw = _call_partition(part, diagnostics=True)
+                            content_delta = _content_loglike(raw) - baseline_content
+                        terms.append(
+                            (
+                                n_pairs,
+                                jnp.asarray(float(state.log_prior_weight), dtype=jnp.float64)
+                                + content_delta,
+                            )
+                        )
+                    component_terms.append(tuple(terms))
+                return (
+                    baseline
+                    + _factorized_logsumexp_jax(component_terms, count_delta)
+                    - inp["log_z_prior"]
+                )
             terms = [
                 part["log_prior_weight"] + _eval_partition(part)
                 for part in inp["marginal_partitions"]
@@ -1153,7 +1409,6 @@ def build_cluster_likelihood(
             return jax_logsumexp(jnp.stack(terms)) - inp["log_z_prior"]
 
         return _eval_partition(inp)
-
     return loglike
 
 
@@ -1232,41 +1487,175 @@ def build_cluster_diagnostics(
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
-            state_to_part = {
-                id(state): part
-                for state, part in zip(
-                    inp["partition_states"], inp["marginal_partitions"]
-                )
-            }
+            def _global_diagnostics():
+                state_to_part = {
+                    id(state): part
+                    for state, part in zip(
+                        inp["partition_states"], inp["marginal_partitions"]
+                    )
+                }
 
-            def _part_loglike(state):
-                part = state_to_part[id(state)]
+                def _part_loglike(state):
+                    part = state_to_part[id(state)]
+                    raw = _raw_for(
+                        jnp.asarray(state.singleton_indices, dtype=jnp.int32),
+                        jnp.asarray(state.pair_indices, dtype=jnp.int32),
+                        state.n_singletons,
+                        state.n_pairs,
+                        part,
+                    )
+                    return float(np.asarray(raw["logL_total"]))
+
+                return compute_marginalized_partition_diagnostics(
+                    inp["partition_states"],
+                    inp["candidate_pairs"],
+                    _part_loglike,
+                    log_z_partition_prior=inp["log_z_prior"],
+                    raw_candidate_pairs=inp.get("candidate_pairs_raw"),
+                    edge_mark_prior_contributions=inp.get("edge_mark_prior_contributions"),
+                )
+
+            if inp.get("factorized_exact"):
+                baseline_part = inp["baseline_partition"]
+                baseline_raw = _raw_for(
+                    baseline_part["singleton_indices"],
+                    baseline_part["pair_indices"],
+                    baseline_part["n_singletons"],
+                    baseline_part["n_pairs"],
+                    baseline_part,
+                )
+                baseline_loglike = float(np.asarray(baseline_raw["logL_total"]))
+                baseline_content = float(
+                    np.asarray(
+                        baseline_raw["singleton_logL_sum"] + baseline_raw["pair_logL_sum"]
+                    )
+                )
+                selection0 = None
+                count_delta = []
+                for probe_part in inp["selection_probe_partitions"]:
+                    probe_raw = _raw_for(
+                        probe_part["singleton_indices"],
+                        probe_part["pair_indices"],
+                        probe_part["n_singletons"],
+                        probe_part["n_pairs"],
+                        probe_part,
+                    )
+                    selection = float(np.asarray(probe_raw["selection_correction_total"]))
+                    if selection0 is None:
+                        selection0 = selection
+                    count_delta.append(selection - selection0)
+                component_deltas = []
+                for states, parts in zip(
+                    inp["component_partition_states"], inp["component_full_partitions"]
+                ):
+                    deltas = []
+                    for state, part in zip(states, parts):
+                        n_pairs = int(state.n_pairs)
+                        if n_pairs == 0:
+                            deltas.append(0.0)
+                            continue
+                        raw = _raw_for(
+                            part["singleton_indices"],
+                            part["pair_indices"],
+                            part["n_singletons"],
+                            part["n_pairs"],
+                            part,
+                        )
+                        local_content = float(
+                            np.asarray(raw["singleton_logL_sum"] + raw["pair_logL_sum"])
+                        )
+                        local_selection_delta = float(
+                            np.asarray(raw["selection_correction_total"])
+                        ) - float(selection0)
+                        if not np.isclose(
+                            local_selection_delta,
+                            count_delta[n_pairs],
+                            rtol=0.0,
+                            atol=1e-8,
+                        ):
+                            raise RuntimeError(
+                                "componentwise exact factorization failed: selection correction is not count-only"
+                            )
+                        deltas.append(local_content - baseline_content)
+                    component_deltas.append(deltas)
+                out = compute_componentwise_factorized_partition_diagnostics(
+                    inp["component_partition_states"],
+                    inp["candidate_pairs"],
+                    component_deltas,
+                    count_delta,
+                    baseline_loglike,
+                    log_z_partition_prior=inp["log_z_prior"],
+                    component_summaries=inp.get("component_partition_summaries"),
+                    raw_candidate_pairs=inp.get("candidate_pairs_raw"),
+                    edge_mark_prior_contributions=inp.get("edge_mark_prior_contributions"),
+                )
+                if inp.get("partition_states") is not None:
+                    global_out = _global_diagnostics()
+                    pair_diff = max(
+                        [
+                            abs(float(a["p_pair"]) - float(b["p_pair"]))
+                            for a, b in zip(
+                                out["posterior_pair_probabilities"],
+                                global_out["posterior_pair_probabilities"],
+                            )
+                        ]
+                        or [0.0]
+                    )
+                    log_diff = abs(float(out["logL_marginalized"]) - float(global_out["logL_marginalized"]))
+                    exp_diff = abs(float(out["expected_n_pairs"]) - float(global_out["expected_n_pairs"]))
+                    map_pairs = {tuple(pair) for pair in out["map_partition"].get("pair_indices", [])}
+                    global_map_pairs = {tuple(pair) for pair in global_out["map_partition"].get("pair_indices", [])}
+                    if log_diff > 1e-6 or exp_diff > 1e-6 or pair_diff > 1e-6 or map_pairs != global_map_pairs:
+                        raise RuntimeError(
+                            "componentwise factorized exact diagnostics do not match global exact enumeration"
+                        )
+                    for key in (
+                        "partition_log_prior_weight",
+                        "partition_logL",
+                        "partition_log_posterior_weight",
+                        "partition_posterior_probability",
+                        "partitions",
+                        "map_partition_index",
+                    ):
+                        out[key] = global_out[key]
+                    out["global_partitions_enumerated"] = True
+                    out["factorized_global_check"] = {
+                        "logL_abs_diff": log_diff,
+                        "expected_n_pairs_abs_diff": exp_diff,
+                        "posterior_pair_probability_max_abs_diff": pair_diff,
+                    }
+                selected_states = [
+                    inp["component_partition_states"][idx][state_idx]
+                    for idx, state_idx in enumerate(out["map_component_partition_indices"])
+                ]
+                map_state = combine_component_partitions(tuple((state,) for state in selected_states))[0]
+                map_part = _runtime_part_from_state(
+                    map_state,
+                    inp["candidate_pairs"],
+                    pair_marks=getattr(opts, "pair_marks", "none"),
+                )
                 raw = _raw_for(
-                    jnp.asarray(state.singleton_indices, dtype=jnp.int32),
-                    jnp.asarray(state.pair_indices, dtype=jnp.int32),
-                    state.n_singletons,
-                    state.n_pairs,
-                    part,
+                    map_part["singleton_indices"],
+                    map_part["pair_indices"],
+                    map_part["n_singletons"],
+                    map_part["n_pairs"],
+                    map_part,
                 )
-                return float(np.asarray(raw["logL_total"]))
-
-            out = compute_marginalized_partition_diagnostics(
-                inp["partition_states"],
-                inp["candidate_pairs"],
-                _part_loglike,
-                log_z_partition_prior=inp["log_z_prior"],
-                raw_candidate_pairs=inp.get("candidate_pairs_raw"),
-                edge_mark_prior_contributions=inp.get("edge_mark_prior_contributions"),
-            )
-            map_part = inp["marginal_partitions"][int(out["map_partition_index"])]
-            raw = _raw_for(
-                jnp.asarray(out["map_partition"]["singleton_indices"], dtype=jnp.int32),
-                jnp.asarray(out["map_partition"]["pair_indices"], dtype=jnp.int32),
-                out["map_partition"]["n_singletons"],
-                out["map_partition"]["n_pairs"],
-                map_part,
-            )
-            out.update({f"map_{k}": v for k, v in _diagnostics_to_python(raw).items()})
+                out.update({f"map_{k}": v for k, v in _diagnostics_to_python(raw).items()})
+            else:
+                out = _global_diagnostics()
+                out["partition_component_mode"] = "global"
+                out["factorized_exact"] = False
+                out["global_partitions_enumerated"] = True
+                map_part = inp["marginal_partitions"][int(out["map_partition_index"])]
+                raw = _raw_for(
+                    jnp.asarray(out["map_partition"]["singleton_indices"], dtype=jnp.int32),
+                    jnp.asarray(out["map_partition"]["pair_indices"], dtype=jnp.int32),
+                    out["map_partition"]["n_singletons"],
+                    out["map_partition"]["n_pairs"],
+                    map_part,
+                )
+                out.update({f"map_{k}": v for k, v in _diagnostics_to_python(raw).items()})
         else:
             raw = _raw_for(
                 inp["singleton_indices"],
@@ -1755,6 +2144,10 @@ def main():
                 expected_n_pairs=float(diagnostics["expected_n_pairs"]),
                 map_n_pairs=int(diagnostics["map_partition"]["n_pairs"]),
                 n_partitions=int(diagnostics["n_partitions"]),
+                approximate_total_partitions=int(diagnostics.get("approximate_total_partitions", diagnostics["n_partitions"])),
+                partition_component_mode=diagnostics.get("partition_component_mode"),
+                factorized_exact=bool(diagnostics.get("factorized_exact", False)),
+                global_partitions_enumerated=bool(diagnostics.get("global_partitions_enumerated", True)),
                 logL_marginalized=float(diagnostics["logL_marginalized"]),
             )
         _write_json(os.path.join(run_dir, "settings.json"), settings)

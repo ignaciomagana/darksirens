@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from darksirens.lensing.simulation_config import resolve_config, write_config
 from darksirens.lensing import file_contract
 from darksirens.lensing.partitions import connected_components_from_candidate_pairs, exact_component_partitions, validate_candidate_pairs
-from darksirens.lensing.marginal_diagnostics import partition_diagnostic_rows
+from darksirens.lensing.marginal_diagnostics import component_partition_diagnostic_rows, partition_diagnostic_rows
 
 GEN = ROOT / "scripts" / "mock_lensing" / "generate_mock_lensing.py"
 BUILD = ROOT / "scripts" / "mock_lensing" / "build_candidate_pairs_from_observed.py"
@@ -338,13 +338,22 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
     cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(case_dir / "mock_observed_gw_pe.h5"),
            "--observed_catalog_path", str(case_dir / "observed_catalog.json"), "--gwselection_path", str(case_dir / "mock_gw_selection.h5"),
            "--lensed_injections_path", str(case_dir / "mock_lensed_injections.h5"), "--pair_metadata_path", str(case_dir / "mock_pair_metadata.h5"),
-           "--candidate_pairs_path", str(case_dir / "candidate_pairs.json"), "--partition_mode", str(cfg["partition_mode"]), "--cluster_mode", "j2",
+           "--candidate_pairs_path", str(case_dir / "candidate_pairs.json"), "--partition_mode", str(cfg["partition_mode"]), "--partition_component_mode", str(cfg.get("partition_component_mode", "componentwise")), "--max_exact_partitions", str(cfg.get("max_exact_partitions", 10000)), "--cluster_mode", "j2",
            "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak", "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true",
            "--fix_lens_rate", fix_lens_rate, "--fixed_parameter_values", fixed_parameter_values, "--lens_prior_overrides", lens_prior_overrides,
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples, "--pe_max_per_pair", str(cfg["pe_max"]),
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
            "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir)]
+    for flag, key in (
+        ("--max_component_events", "max_component_events"),
+        ("--max_component_edges", "max_component_edges"),
+        ("--max_component_partitions", "max_component_partitions"),
+        ("--max_total_partitions", "max_total_partitions"),
+    ):
+        value = cfg.get(key)
+        if value is not None:
+            cmd.extend([flag, str(value)])
     if diagnostics_only:
         cmd[cmd.index("--nlive") + 1] = "8"; cmd[cmd.index("--dlogz") + 1] = "50"
     return cmd
@@ -602,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         (work / "validation_plan.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n"); return 0
     summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "preflight_only": args.preflight_only, "resolved_config": resolved_config, "diagnostics_only_note": "diagnostics_only: evidence deltas are not meaningful" if args.diagnostics_only else None, "run_off_controls": args.run_off_controls, "cases": {}}
-    pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]; audit_rows=[]; partition_rows=[]
+    pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]; audit_rows=[]; partition_rows=[]; component_partition_rows=[]
     for name, entry in plan["cases"].items():
         cdir = work / "cases" / name; rdir = work / "runs" / name
         if not args.reuse or not (cdir / "mock_observed_gw_pe.h5").exists():
@@ -687,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
                 "marks_json": json.dumps(extra.get("marks", {}), sort_keys=True),
             })
         partition_rows.extend(partition_diagnostic_rows(diag, case=name, truth_edges=true_edges))
+        component_partition_rows.extend(component_partition_diagnostic_rows(diag, case=name, truth_edges=true_edges))
         truth_rows.append({"case": name, **rec})
         bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None, "logZ_j2": logz_j2, "logZ_off": logz_off, "delta_logZ_j2_minus_off": delta_logz})
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})

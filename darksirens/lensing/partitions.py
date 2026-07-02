@@ -409,9 +409,38 @@ def exact_partitions_componentwise(
     max_component_events: int | None = None,
     max_component_edges: int | None = None,
     max_component_partitions: int = 10_000,
-    max_total_partitions: int = 10_000,
-) -> tuple[tuple[PartitionState, ...], tuple[dict, ...], tuple[PartitionState, ...]]:
+    max_total_partitions: int | None = 10_000,
+) -> tuple[tuple[PartitionState, ...], tuple[dict, ...], tuple[tuple[PartitionState, ...], ...]]:
     """Enumerate matchings per component and combine by Cartesian product."""
+    summaries, component_states, total = exact_partition_components(
+        n_events,
+        candidate_pairs,
+        max_component_events=max_component_events,
+        max_component_edges=max_component_edges,
+        max_component_partitions=max_component_partitions,
+    )
+    if max_total_partitions is not None and total > max_total_partitions:
+        raise ValueError(
+            f"component-wise exact enumeration would produce {total} total partitions, exceeding max_total_partitions={max_total_partitions}; prune the candidate graph before inference"
+        )
+    combined = combine_component_partitions(component_states)
+    return combined, summaries, component_states
+
+
+def exact_partition_components(
+    n_events: int,
+    candidate_pairs: Iterable[CandidatePair],
+    *,
+    max_component_events: int | None = None,
+    max_component_edges: int | None = None,
+    max_component_partitions: int = 10_000,
+) -> tuple[tuple[dict, ...], tuple[tuple[PartitionState, ...], ...], int]:
+    """Enumerate exact matching partitions independently inside each component.
+
+    This deliberately does not enumerate the Cartesian product across
+    components.  The returned ``total`` is the size of that product if a caller
+    chooses to materialize it for small compatibility tests or diagnostics.
+    """
     pairs = tuple(candidate_pairs)
     components = connected_components_from_candidate_pairs(n_events, pairs)
     component_states = []
@@ -432,13 +461,15 @@ def exact_partitions_componentwise(
             comp, pairs, max_partitions=max_component_partitions
         )
         total *= len(states)
-        if total > max_total_partitions:
-            raise ValueError(
-                f"component-wise exact enumeration would produce {total} total partitions, exceeding max_total_partitions={max_total_partitions}; prune the candidate graph before inference"
-            )
         component_states.append(states)
         summaries.append({**comp, "n_partitions": len(states)})
+    return tuple(summaries), tuple(component_states), int(total)
 
+
+def combine_component_partitions(
+    component_states: Sequence[Sequence[PartitionState]],
+) -> tuple[PartitionState, ...]:
+    """Materialize the global Cartesian product of component-local states."""
     combined = []
     for product in itertools.product(*component_states):
         singletons = (
@@ -482,8 +513,7 @@ def exact_partitions_componentwise(
                 edge_indices,
             )
         )
-    return tuple(combined), tuple(summaries), tuple(component_states)
-
+    return tuple(combined)
 
 def enumerate_compatible_partitions(
     n_events: int,

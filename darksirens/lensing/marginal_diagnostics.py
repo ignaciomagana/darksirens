@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 import json
 
 import numpy as np
@@ -67,9 +67,13 @@ def candidate_time_mark_suspicion(candidate_pairs: Iterable[CandidatePair]) -> d
 
 def partition_diagnostic_rows(diagnostics: dict, *, case: str = "", truth_edges: set[tuple[int, int]] | None = None) -> list[dict]:
     truth_edges = truth_edges or set()
+    if diagnostics.get("global_partitions_enumerated") is False:
+        return []
+    partitions = diagnostics.get("partitions", [])
+    if not partitions and not diagnostics.get("partition_logL"):
+        return []
     n = int(diagnostics.get("n_partitions", len(diagnostics.get("partition_logL", []))))
     map_idx = diagnostics.get("map_partition_index")
-    partitions = diagnostics.get("partitions", [])
     rows = []
     for idx in range(n):
         pobj = partitions[idx] if idx < len(partitions) else {}
@@ -94,6 +98,414 @@ def partition_diagnostic_rows(diagnostics: dict, *, case: str = "", truth_edges:
 def _list_get(values, idx):
     return values[idx] if isinstance(values, list) and idx < len(values) else None
 
+
+
+def _combine_component_states(states: Sequence[PartitionState]) -> PartitionState:
+    singletons = (
+        np.concatenate([np.asarray(s.singleton_indices, dtype=np.int32) for s in states])
+        if states
+        else np.asarray([], dtype=np.int32)
+    )
+    pair_arrays = [
+        np.asarray(s.pair_indices, dtype=np.int32).reshape((-1, 2))
+        for s in states
+        if s.n_pairs
+    ]
+    pair_indices = (
+        np.concatenate(pair_arrays).astype(np.int32)
+        if pair_arrays
+        else np.asarray([], dtype=np.int32).reshape((0, 2))
+    )
+    edge_arrays = [
+        np.asarray(s.candidate_edge_indices, dtype=np.int32)
+        for s in states
+        if s.candidate_edge_indices is not None and len(s.candidate_edge_indices)
+    ]
+    edge_indices = (
+        np.concatenate(edge_arrays).astype(np.int32)
+        if edge_arrays
+        else np.asarray([], dtype=np.int32)
+    )
+    if edge_indices.size:
+        order = np.argsort(edge_indices)
+        edge_indices = edge_indices[order]
+        pair_indices = pair_indices[order]
+    return PartitionState(
+        np.sort(singletons).astype(np.int32),
+        pair_indices,
+        int(singletons.size),
+        int(pair_indices.shape[0]),
+        float(sum(s.log_prior_weight for s in states)),
+        edge_indices,
+    )
+
+
+def _component_event_indices(states: Sequence[PartitionState]) -> list[int]:
+    events: set[int] = set()
+    for state in states:
+        events.update(int(x) for x in np.asarray(state.singleton_indices, dtype=int))
+        for i, j in np.asarray(state.pair_indices, dtype=int).reshape((-1, 2)):
+            events.add(int(i))
+            events.add(int(j))
+    return sorted(events)
+
+
+def _prefix_suffix_count_dp(
+    component_counts: Sequence[np.ndarray],
+    component_log_weights: Sequence[np.ndarray],
+    max_pairs: int,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    prefix = [np.full(max_pairs + 1, -np.inf, dtype=float)]
+    prefix[0][0] = 0.0
+    for counts, weights in zip(component_counts, component_log_weights):
+        new = np.full(max_pairs + 1, -np.inf, dtype=float)
+        for n_pairs, logw in zip(counts, weights):
+            n_pairs = int(n_pairs)
+            if n_pairs > max_pairs:
+                continue
+            valid = max_pairs + 1 - n_pairs
+            new[n_pairs:] = np.logaddexp(new[n_pairs:], prefix[-1][:valid] + float(logw))
+        prefix.append(new)
+
+    suffix = [np.full(max_pairs + 1, -np.inf, dtype=float) for _ in range(len(component_counts) + 1)]
+    suffix[-1][0] = 0.0
+    for idx in range(len(component_counts) - 1, -1, -1):
+        new = np.full(max_pairs + 1, -np.inf, dtype=float)
+        for n_pairs, logw in zip(component_counts[idx], component_log_weights[idx]):
+            n_pairs = int(n_pairs)
+            if n_pairs > max_pairs:
+                continue
+            valid = max_pairs + 1 - n_pairs
+            new[n_pairs:] = np.logaddexp(new[n_pairs:], suffix[idx + 1][:valid] + float(logw))
+        suffix[idx] = new
+    return prefix, suffix
+
+
+def _component_state_log_marginal(
+    component_index: int,
+    state_index: int,
+    component_counts: Sequence[np.ndarray],
+    component_log_weights: Sequence[np.ndarray],
+    count_loglike_delta: np.ndarray,
+    prefix: Sequence[np.ndarray],
+    suffix: Sequence[np.ndarray],
+    log_total_inner: float,
+) -> float:
+    n_pairs = int(component_counts[component_index][state_index])
+    local_logw = float(component_log_weights[component_index][state_index])
+    terms = []
+    left = prefix[component_index]
+    right = suffix[component_index + 1]
+    for left_count, left_logw in enumerate(left):
+        if not np.isfinite(left_logw):
+            continue
+        max_right = len(count_loglike_delta) - left_count - n_pairs
+        if max_right <= 0:
+            continue
+        vals = right[:max_right]
+        finite = np.isfinite(vals)
+        if not np.any(finite):
+            continue
+        right_counts = np.nonzero(finite)[0]
+        total_counts = left_count + n_pairs + right_counts
+        terms.extend((left_logw + local_logw + vals[finite] + count_loglike_delta[total_counts]).tolist())
+    return float(logsumexp(terms) - log_total_inner) if terms else -np.inf
+
+
+def _componentwise_map_state_indices(
+    component_counts: Sequence[np.ndarray],
+    component_log_weights: Sequence[np.ndarray],
+    count_loglike_delta: np.ndarray,
+) -> list[int]:
+    max_pairs = len(count_loglike_delta) - 1
+    dp = np.full(max_pairs + 1, -np.inf, dtype=float)
+    dp[0] = 0.0
+    back_counts: list[np.ndarray] = []
+    back_states: list[np.ndarray] = []
+    for counts, weights in zip(component_counts, component_log_weights):
+        new = np.full(max_pairs + 1, -np.inf, dtype=float)
+        prev_count = np.full(max_pairs + 1, -1, dtype=int)
+        prev_state = np.full(max_pairs + 1, -1, dtype=int)
+        for old_count, old_logw in enumerate(dp):
+            if not np.isfinite(old_logw):
+                continue
+            for state_idx, (n_pairs, logw) in enumerate(zip(counts, weights)):
+                total = old_count + int(n_pairs)
+                if total > max_pairs:
+                    continue
+                val = old_logw + float(logw)
+                if val > new[total]:
+                    new[total] = val
+                    prev_count[total] = old_count
+                    prev_state[total] = state_idx
+        dp = new
+        back_counts.append(prev_count)
+        back_states.append(prev_state)
+    final = dp + count_loglike_delta
+    if not np.any(np.isfinite(final)):
+        raise ValueError("factorized partition posterior has no finite states")
+    count = int(np.nanargmax(final))
+    chosen = [0] * len(component_counts)
+    for idx in range(len(component_counts) - 1, -1, -1):
+        state_idx = int(back_states[idx][count])
+        if state_idx < 0:
+            raise ValueError("factorized partition MAP backtrack failed")
+        chosen[idx] = state_idx
+        count = int(back_counts[idx][count])
+    return chosen
+
+
+def component_partition_diagnostic_rows(
+    diagnostics: dict,
+    *,
+    case: str = "",
+    truth_edges: set[tuple[int, int]] | None = None,
+) -> list[dict]:
+    truth_edges = truth_edges or set()
+    rows = []
+    for comp in diagnostics.get("component_partition_diagnostics", []):
+        pair_edges = [tuple(map(int, e)) for e in comp.get("pair_edges", [])]
+        n_true = sum((min(i, j), max(i, j)) in truth_edges for i, j in pair_edges)
+        rows.append({
+            "case": case,
+            "component_index": comp.get("component_index"),
+            "local_partition_index": comp.get("local_partition_index"),
+            "n_pairs": comp.get("n_pairs"),
+            "pair_edges": json.dumps([list(e) for e in pair_edges]),
+            "log_likelihood_delta_or_local": comp.get("log_likelihood_delta_or_local"),
+            "log_prior_weight": comp.get("log_prior_weight"),
+            "log_posterior_weight_local": comp.get("log_posterior_weight_local"),
+            "posterior_probability_local": comp.get("posterior_probability_local"),
+            "is_component_map_partition": comp.get("is_component_map_partition"),
+            "n_true_edges": n_true if truth_edges else None,
+            "n_false_edges": (len(pair_edges) - n_true) if truth_edges else None,
+        })
+    return rows
+
+
+def compute_componentwise_factorized_partition_diagnostics(
+    component_partition_states: Sequence[Sequence[PartitionState]],
+    candidate_pairs: Iterable[CandidatePair],
+    component_loglike_delta: Sequence[Sequence[float]],
+    count_loglike_delta: Sequence[float],
+    baseline_loglike: float,
+    *,
+    log_z_partition_prior: float | None = None,
+    component_summaries: Sequence[dict] | None = None,
+    raw_candidate_pairs: Iterable[CandidatePair] | None = None,
+    edge_mark_prior_contributions: Iterable[float] | None = None,
+) -> dict:
+    """Compute exact factorized diagnostics without global partition rows.
+
+    Component-local likelihood deltas must exclude any global count-only term.
+    ``count_loglike_delta[k]`` supplies that global term relative to the
+    all-singleton baseline for total pair count ``k``.
+    """
+    component_states = tuple(tuple(states) for states in component_partition_states)
+    if not component_states:
+        raise ValueError("at least one component is required")
+    candidates = tuple(candidate_pairs)
+    raw_candidates = tuple(raw_candidate_pairs) if raw_candidate_pairs is not None else ()
+    contributions = (
+        tuple(float(x) for x in edge_mark_prior_contributions)
+        if edge_mark_prior_contributions is not None
+        else ()
+    )
+    count_delta = np.asarray(tuple(float(x) for x in count_loglike_delta), dtype=float)
+    if count_delta.ndim != 1 or count_delta.size == 0:
+        raise ValueError("count_loglike_delta must be a non-empty vector")
+    max_pairs = int(count_delta.size - 1)
+
+    component_counts = [
+        np.asarray([int(state.n_pairs) for state in states], dtype=int)
+        for states in component_states
+    ]
+    like_delta = [np.asarray(tuple(float(x) for x in vals), dtype=float) for vals in component_loglike_delta]
+    if len(like_delta) != len(component_states):
+        raise ValueError("component_loglike_delta length does not match component states")
+    component_log_weights = []
+    for states, deltas in zip(component_states, like_delta):
+        if len(states) != len(deltas):
+            raise ValueError("component loglike-delta length does not match states")
+        priors = np.asarray([float(state.log_prior_weight) for state in states], dtype=float)
+        component_log_weights.append(priors + deltas)
+
+    approximate_total = 1
+    for states in component_states:
+        approximate_total *= len(states)
+    if log_z_partition_prior is None:
+        log_z_partition_prior = float(
+            sum(logsumexp([state.log_prior_weight for state in states]) for states in component_states)
+        )
+
+    prefix, suffix = _prefix_suffix_count_dp(component_counts, component_log_weights, max_pairs)
+    final_terms = prefix[-1] + count_delta
+    log_total_inner = float(logsumexp(final_terms))
+    log_norm = float(baseline_loglike + log_total_inner)
+
+    state_log_probs: list[list[float]] = []
+    state_probs: list[list[float]] = []
+    for comp_idx, states in enumerate(component_states):
+        logs = []
+        probs = []
+        for state_idx, _state in enumerate(states):
+            lp = _component_state_log_marginal(
+                comp_idx,
+                state_idx,
+                component_counts,
+                component_log_weights,
+                count_delta,
+                prefix,
+                suffix,
+                log_total_inner,
+            )
+            logs.append(lp)
+            probs.append(float(np.exp(lp)) if np.isfinite(lp) else 0.0)
+        state_log_probs.append(logs)
+        state_probs.append(probs)
+
+    pair_probs = np.zeros(len(candidates), dtype=float)
+    n_events = 0
+    for c in candidates:
+        n_events = max(n_events, c.i + 1, c.j + 1)
+    for states in component_states:
+        for state in states:
+            if state.singleton_indices.size:
+                n_events = max(n_events, int(np.max(state.singleton_indices)) + 1)
+            if state.pair_indices.size:
+                n_events = max(n_events, int(np.max(state.pair_indices)) + 1)
+    singleton_probs = np.zeros(n_events, dtype=float) if n_events else None
+
+    expected_n_pairs = 0.0
+    expected_n_singletons = 0.0
+    component_expected = []
+    component_max_p = []
+    component_rows = []
+    component_maps = []
+    for comp_idx, states in enumerate(component_states):
+        probs = np.asarray(state_probs[comp_idx], dtype=float)
+        counts = component_counts[comp_idx].astype(float)
+        component_expected.append(float(np.sum(probs * counts)))
+        expected_n_pairs += component_expected[-1]
+        expected_n_singletons += float(
+            np.sum(probs * np.asarray([state.n_singletons for state in states], dtype=float))
+        )
+        local_map_idx = int(np.argmax(probs)) if len(probs) else 0
+        component_maps.append(local_map_idx)
+        for state_idx, (state, prob, log_prob) in enumerate(zip(states, probs, state_log_probs[comp_idx])):
+            edge_idx = np.asarray(state.candidate_edge_indices, dtype=int) if state.candidate_edge_indices is not None else np.asarray([], dtype=int)
+            if edge_idx.size:
+                pair_probs[edge_idx] += float(prob)
+            if singleton_probs is not None:
+                singleton_probs[np.asarray(state.singleton_indices, dtype=int)] += float(prob)
+            component_rows.append({
+                "component_index": comp_idx,
+                "local_partition_index": state_idx,
+                "n_pairs": int(state.n_pairs),
+                "pair_edges": _state_pair_edges(state),
+                "log_likelihood_delta_or_local": float(like_delta[comp_idx][state_idx]),
+                "log_prior_weight": float(state.log_prior_weight),
+                "log_posterior_weight_local": float(log_prob),
+                "posterior_probability_local": float(prob),
+                "is_component_map_partition": state_idx == local_map_idx,
+            })
+        edges = []
+        if component_summaries is not None and comp_idx < len(component_summaries):
+            edges = list(component_summaries[comp_idx].get("candidate_edge_indices", []))
+        else:
+            edges = sorted({int(e) for state in states for e in np.asarray(state.candidate_edge_indices if state.candidate_edge_indices is not None else [], dtype=int)})
+        edge_probs = pair_probs[np.asarray(edges, dtype=int)] if edges else np.asarray([], dtype=float)
+        component_max_p.append(float(np.max(edge_probs)) if edge_probs.size else 0.0)
+
+    posterior_pair_probabilities = []
+    for edge_idx, (c, p_pair) in enumerate(zip(candidates, pair_probs)):
+        raw_c = raw_candidates[edge_idx] if edge_idx < len(raw_candidates) else None
+        contribution = (
+            contributions[edge_idx]
+            if edge_idx < len(contributions)
+            else (
+                float(c.log_prior_odds) - float(raw_c.log_prior_odds)
+                if raw_c is not None
+                else 0.0
+            )
+        )
+        raw_log_prior = float(raw_c.log_prior_odds) if raw_c is not None else float(c.log_prior_odds)
+        effective_log_prior = float(c.log_prior_odds)
+        item = {
+            "i": int(c.i),
+            "j": int(c.j),
+            "p_pair": float(p_pair),
+            "log_prior_odds": effective_log_prior,
+            "log_prior_odds_raw": raw_log_prior,
+            "log_prior_odds_effective": effective_log_prior,
+            "edge_mark_prior_contribution": float(contribution),
+            "marks": c.marks.to_dict(),
+        }
+        if c.delta_t_obs is not None:
+            item["pair_time_delta_t_obs"] = float(c.delta_t_obs)
+        if c.sigma_delta_t is not None:
+            item["pair_time_sigma"] = float(c.sigma_delta_t)
+        if _looks_like_suspicious_time_mark(c.delta_t_obs, c.sigma_delta_t):
+            item["pair_time_placeholder_warning"] = (
+                "candidate time marks look synthetic/placeholder-like: small integer second-level time marks with sigma_delta_t=1"
+            )
+        if c.label is not None:
+            item["label"] = c.label
+        posterior_pair_probabilities.append(item)
+
+    map_indices = _componentwise_map_state_indices(component_counts, component_log_weights, count_delta)
+    map_state = _combine_component_states(
+        [component_states[comp_idx][state_idx] for comp_idx, state_idx in enumerate(map_indices)]
+    )
+
+    summaries = tuple(component_summaries or ())
+    component_diagnostics = []
+    for comp_idx, states in enumerate(component_states):
+        summary = summaries[comp_idx] if comp_idx < len(summaries) else {}
+        component_diagnostics.append({
+            "component_index": comp_idx,
+            "event_indices": list(summary.get("event_indices", _component_event_indices(states))),
+            "candidate_edge_indices": list(summary.get("candidate_edge_indices", [])),
+            "n_partitions": int(len(states)),
+            "logZ_component_delta": float(logsumexp(component_log_weights[comp_idx])),
+            "expected_n_pairs_component": float(component_expected[comp_idx]),
+            "max_p_pair_component": float(component_max_p[comp_idx]),
+            "map_local_partition": _partition_object(states[component_maps[comp_idx]]),
+        })
+
+    out = {
+        "partition_mode": "marginalize_exact",
+        "partition_component_mode": "componentwise",
+        "factorized_exact": True,
+        "global_partitions_enumerated": False,
+        "n_partitions": int(approximate_total),
+        "approximate_total_partitions": int(approximate_total),
+        "log_z_partition_prior": float(log_z_partition_prior),
+        "baseline_logL_all_singletons": float(baseline_loglike),
+        "count_loglike_delta": count_delta.tolist(),
+        "logL_marginalized": float(log_norm - log_z_partition_prior),
+        "logL_total": float(log_norm - log_z_partition_prior),
+        "map_partition_index": -1,
+        "map_component_partition_indices": [int(x) for x in map_indices],
+        "expected_n_pairs": float(expected_n_pairs),
+        "expected_n_singletons": float(expected_n_singletons),
+        "map_partition": _partition_object(map_state),
+        "map_n_pairs": int(map_state.n_pairs),
+        "posterior_pair_probabilities": posterior_pair_probabilities,
+        "n_components": int(len(component_states)),
+        "component_event_indices": [d["event_indices"] for d in component_diagnostics],
+        "component_candidate_edge_indices": [d["candidate_edge_indices"] for d in component_diagnostics],
+        "component_n_partitions": [int(len(states)) for states in component_states],
+        "largest_component_n_partitions": int(max(len(states) for states in component_states)),
+        "component_expected_n_pairs": component_expected,
+        "component_max_p_pair": component_max_p,
+        "component_diagnostics": component_diagnostics,
+        "component_partition_diagnostics": component_rows,
+    }
+    out.update(candidate_time_mark_suspicion(candidates))
+    if singleton_probs is not None:
+        out["posterior_singleton_probability"] = singleton_probs.tolist()
+    return out
 
 def compute_marginalized_partition_diagnostics(
     partition_states: Iterable[PartitionState],

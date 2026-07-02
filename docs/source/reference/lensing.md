@@ -660,7 +660,7 @@ catalog-selection support.
 
 Exact candidate-pair marginalization enumerates every matching compatible with the candidate graph.  This is exact, but the number of matchings can grow exponentially with graph size, so dense or weakly pruned simulated candidate graphs can otherwise hang before inference starts.
 
-For `--partition_mode marginalize_exact`, the default `--partition_component_mode componentwise` decomposes the candidate graph into connected components, enumerates matchings inside each component, and reports component complexity in preflight and marginalized diagnostics.  Small graphs still produce the same global partitions, posterior pair probabilities, and partition-prior normalizer as global exact enumeration; the decomposition is a scaling guardrail, not an approximation.  If you need legacy behavior, pass `--partition_component_mode global`.
+For `--partition_mode marginalize_exact`, the default `--partition_component_mode componentwise` decomposes the candidate graph into connected components, enumerates matchings inside each component, and combines the component-local sums with an exact dynamic program over total pair count.  The total-pair-count step preserves the existing global selection-correction term without materializing the Cartesian product.  Small graphs still match global exact enumeration for marginalized log likelihoods, posterior pair probabilities, expected pair counts, and MAP partitions; the decomposition is a scaling guardrail, not an approximation.  If you need legacy behavior, pass `--partition_component_mode global`.
 
 Use the component caps to protect simulation campaigns:
 
@@ -671,7 +671,7 @@ Use the component caps to protect simulation campaigns:
 --max_total_partitions 50000
 ```
 
-If any component or the Cartesian product of component partitions exceeds these caps, inference fails early with an error suggesting candidate-graph pruning.  Pruning should happen before inference, for example by tightening time-delay, sky-overlap, mass-distance, spin, or prior-odds cuts in the candidate-pair builder.  This PR does not introduce an approximate sampler over partitions and does not change dark-siren/LSS/catalog-host workflows.
+In componentwise mode, `--max_component_events`, `--max_component_edges`, and `--max_component_partitions` are hard caps.  `--max_total_partitions` is advisory: preflight reports and warns about the virtual Cartesian-product size, but factorized exact marginalization can proceed when each component is individually small.  In `--partition_component_mode global`, the total partition cap remains a hard global-enumeration guard.  Pruning should happen before inference, for example by tightening time-delay, sky-overlap, mass-distance, spin, or prior-odds cuts in the candidate-pair builder.  This path does not introduce an approximate sampler over partitions and does not change dark-siren/LSS/catalog-host workflows.
 
 ### Marginalized partition diagnostics
 

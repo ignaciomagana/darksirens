@@ -5,16 +5,18 @@ import pytest
 from scipy.special import logsumexp
 
 from darksirens.lensing.marginal_diagnostics import (
+    component_partition_diagnostic_rows,
+    compute_componentwise_factorized_partition_diagnostics,
     compute_marginalized_partition_diagnostics,
 )
 from darksirens.lensing.partitions import (
     CandidatePair,
     connected_components_from_candidate_pairs,
     enumerate_compatible_partitions,
+    exact_partition_components,
     exact_partitions_componentwise,
     exact_partitions_from_json,
 )
-
 
 def test_exact_partitions_track_candidate_edge_indices_and_prior_only_posteriors():
     candidates = [
@@ -102,6 +104,52 @@ def test_diagnostics_include_component_summary():
     assert diag["component_max_p_pair"] == pytest.approx([0.5, 0.5])
 
 
+
+def test_factorized_component_diagnostics_match_global_with_count_coupling():
+    candidates = [CandidatePair(0, 1, math.log(2.0)), CandidatePair(2, 3, math.log(3.0))]
+    global_states = enumerate_compatible_partitions(4, candidates)
+    summaries, component_states, approximate_total = exact_partition_components(4, candidates)
+    assert approximate_total == len(global_states) == 4
+
+    baseline = 7.0
+    edge_delta = {0: 0.25, 1: -0.4}
+    count_delta = [0.0, -0.3, -1.1]
+
+    def loglike(state):
+        edges = np.asarray(state.candidate_edge_indices, dtype=int).tolist()
+        return baseline + count_delta[state.n_pairs] + sum(edge_delta[e] for e in edges)
+
+    global_diag = compute_marginalized_partition_diagnostics(
+        global_states, candidates, loglike
+    )
+    component_deltas = []
+    for states in component_states:
+        component_deltas.append(
+            [sum(edge_delta[e] for e in np.asarray(state.candidate_edge_indices, dtype=int).tolist()) for state in states]
+        )
+    fact_diag = compute_componentwise_factorized_partition_diagnostics(
+        component_states,
+        candidates,
+        component_deltas,
+        count_delta,
+        baseline,
+        component_summaries=summaries,
+    )
+
+    assert fact_diag["factorized_exact"] is True
+    assert fact_diag["global_partitions_enumerated"] is False
+    assert fact_diag["logL_marginalized"] == pytest.approx(global_diag["logL_marginalized"], abs=1e-10)
+    assert fact_diag["expected_n_pairs"] == pytest.approx(global_diag["expected_n_pairs"], abs=1e-10)
+    np.testing.assert_allclose(
+        [x["p_pair"] for x in fact_diag["posterior_pair_probabilities"]],
+        [x["p_pair"] for x in global_diag["posterior_pair_probabilities"]],
+        atol=1e-10,
+    )
+    assert {tuple(x) for x in fact_diag["map_partition"]["pair_indices"]} == {
+        tuple(x) for x in global_diag["map_partition"]["pair_indices"]
+    }
+    rows = component_partition_diagnostic_rows(fact_diag, case="case")
+    assert len(rows) == sum(len(states) for states in component_states)
 def test_single_candidate_graph_has_empty_and_pair_partitions():
     data = {
         "n_events": 2,
@@ -346,6 +394,78 @@ def test_candidate_pairs_marks_suffice_for_marginalized_preflight(tmp_path):
     assert report["ok"], report
 
 
+
+def test_componentwise_preflight_warns_on_total_cap_but_global_fails(tmp_path):
+    from types import SimpleNamespace
+    import json
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    gw = tmp_path / "gw.h5"
+    sel = tmp_path / "sel.h5"
+    linj = tmp_path / "linj.h5"
+    cand = tmp_path / "candidate_pairs.json"
+    _minimal_gw(gw, n_events=8)
+    _minimal_selection(sel)
+    _minimal_lensed(linj)
+    cand.write_text(
+        json.dumps(
+            {
+                "n_events": 8,
+                "candidate_pairs": [
+                    {"i": 0, "j": 1, "log_prior_odds": 0.0},
+                    {"i": 2, "j": 3, "log_prior_odds": 0.0},
+                    {"i": 4, "j": 5, "log_prior_odds": 0.0},
+                    {"i": 6, "j": 7, "log_prior_odds": 0.0},
+                ],
+            }
+        )
+    )
+    opts = SimpleNamespace(
+        gw_path=str(gw),
+        gwselection_path=str(sel),
+        lensed_injections_path=str(linj),
+        partition_path=None,
+        candidate_pairs_path=str(cand),
+        observed_catalog_path=None,
+        pair_pe_path=None,
+        pair_metadata_path=None,
+        cluster_mode="j2",
+        partition_mode="marginalize_exact",
+        partition_component_mode="componentwise",
+        pair_marks="none",
+        pair_time_sigma_sec=None,
+        edge_mark_prior_keys=None,
+        edge_mark_likelihood_keys=None,
+        max_exact_partitions=10000,
+        max_component_events=None,
+        max_component_edges=None,
+        max_component_partitions=4,
+        max_total_partitions=4,
+        wl_selection="standard",
+        wl_backend="lognormal",
+        fix_lens_rate=True,
+        sl_tau_A=5e-4,
+        sl_tau_n=3.0,
+        lens_prior_overrides=None,
+    )
+    report = run_lensing_preflight(opts)
+    assert report["ok"], report
+    summary = report["summary"]
+    assert summary["factorized_exact_enabled"] is True
+    assert summary["approximate_total_partitions"] == 16
+    assert summary["component_n_partitions"] == [2, 2, 2, 2]
+    assert any("exceeds max_total_partitions=4" in w for w in report["warnings"])
+
+    opts.partition_component_mode = "global"
+    report = run_lensing_preflight(opts)
+    assert not report["ok"]
+    assert any("exact partition enumeration exceeded max_partitions=4" in e for e in report["errors"])
+
+    opts.partition_component_mode = "componentwise"
+    opts.max_component_partitions = 1
+    report = run_lensing_preflight(opts)
+    assert not report["ok"]
+    assert any("max_partitions=1" in e for e in report["errors"])
 def test_unified_legacy_pair_pe_warns_image_groups_ignored(tmp_path):
     from types import SimpleNamespace
     from darksirens.lensing.preflight import run_lensing_preflight
