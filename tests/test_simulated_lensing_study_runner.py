@@ -16,6 +16,9 @@ def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
     assert "A_no_true_pairs_sparse_wrong_graph" in plan["cases"]
     assert "H_ambiguous_components" in plan["cases"]
     assert (workdir / "run_manifest.json").exists()
+    commands = json.dumps(plan)
+    assert "--edge_mark_prior_keys" in commands
+    assert "--edge_prior_marks" not in commands
 
 
 def test_truth_recovery_metrics_with_fake_posterior_probabilities():

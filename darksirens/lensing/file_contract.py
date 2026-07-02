@@ -138,7 +138,28 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
                     _finite_dataset(f, name)
                 warnings.append("legacy unlensed selection file accepted; prefer consolidated selection_inputs.h5")
                 return {"format_version": fmt, "selection_kind": "unlensed", "n_injections": int(len(f["dL"])), "ndraw": int(f.attrs.get("ndraw", len(f["dL"]))), "warnings": warnings}
-            # Lensed injection writer has varied format strings; require recognizable pair source datasets.
+            # Lensed injection writer has varied format strings; accept both legacy
+            # names and the canonical mock writer output used by simulated studies.
+            canonical_lensed = {
+                "source_id",
+                "image_id",
+                "m1_src",
+                "q_src",
+                "z_src",
+                "chieff",
+                "y_source",
+                "mu",
+                "detected",
+                "p_prop_src",
+                "p_prop_y",
+            }
+            datasets = set(f.keys())
+            if canonical_lensed.issubset(datasets):
+                n = _finite_dataset(f, "source_id")
+                for name in sorted(canonical_lensed - {"source_id"}):
+                    _finite_dataset(f, name, size=n)
+                warnings.append("canonical lensed injection file accepted; prefer consolidated selection_inputs.h5")
+                return {"format_version": fmt, "selection_kind": "lensed", "datasets": list(f.keys()), "canonical_lensed_injections": True, "n_injections": n, "p_tag_present": "p_tag_per_source" in f, "warnings": warnings}
             if "p_tag_per_source" in f or "m1src" in f or "m1det_image0" in f:
                 warnings.append("legacy lensed injection file accepted; prefer consolidated selection_inputs.h5")
                 return {"format_version": fmt, "selection_kind": "lensed", "datasets": list(f.keys()), "p_tag_present": "p_tag_per_source" in f, "warnings": warnings}

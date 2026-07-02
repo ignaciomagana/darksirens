@@ -108,8 +108,8 @@ from darksirens.lensing.observed_catalog import (
     validate_observed_catalog_file,
 )
 from darksirens.lensing.partitions import (
-    apply_edge_mark_prior_keys,
-    exact_partitions_from_json,
+    exact_partitions_from_pairs,
+    prepare_candidate_pairs_for_partitioning,
     parse_edge_mark_keys,
     validate_candidate_pairs,
 )
@@ -461,14 +461,20 @@ def load_inputs(opts):
     candidate_data = None
     candidate_n_events = None
     candidate_pairs = None
+    candidate_pairs_raw = None
+    edge_prior_contributions = None
     if opts.candidate_pairs_path:
         candidate_data = json.load(
             open(opts.candidate_pairs_path, "r", encoding="utf-8")
         )
-        candidate_n_events, candidate_pairs = validate_candidate_pairs(candidate_data)
-        prior_keys = parse_edge_mark_keys(getattr(opts, "edge_mark_prior_keys", None))
-        if prior_keys:
-            candidate_pairs = apply_edge_mark_prior_keys(candidate_pairs, prior_keys)
+        (
+            candidate_n_events,
+            candidate_pairs_raw,
+            candidate_pairs,
+            edge_prior_contributions,
+        ) = prepare_candidate_pairs_for_partitioning(
+            candidate_data, getattr(opts, "edge_mark_prior_keys", None)
+        )
     partition_pair_indices = []
     if partition is not None:
         partition_pair_indices = [
@@ -723,10 +729,10 @@ def load_inputs(opts):
     pair_kdes = stack_pair_kdes(kdes)
     if partition_mode == "marginalize_exact":
         _candidate_n_events2, partition_states, log_z_prior = (
-            exact_partitions_from_json(
-                candidate_data,
+            exact_partitions_from_pairs(
+                candidate_n_events,
+                candidate_pairs,
                 max_partitions=getattr(opts, "max_exact_partitions", 10000),
-                edge_mark_prior_keys=getattr(opts, "edge_mark_prior_keys", None),
                 component_mode=getattr(
                     opts, "partition_component_mode", "componentwise"
                 ),
@@ -797,6 +803,13 @@ def load_inputs(opts):
         candidate_pairs=(
             candidate_pairs if partition_mode == "marginalize_exact" else None
         ),
+        candidate_pairs_raw=(
+            candidate_pairs_raw if partition_mode == "marginalize_exact" else None
+        ),
+        edge_mark_prior_contributions=(
+            edge_prior_contributions if partition_mode == "marginalize_exact" else None
+        ),
+        edge_mark_prior_keys=list(parse_edge_mark_keys(getattr(opts, "edge_mark_prior_keys", None))),
         observed_catalog=observed_catalog_meta,
         observed_catalog_heuristic=bool(
             heuristic_unified_observed_catalog and not explicit_unified_observed_catalog
@@ -890,6 +903,9 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
         attrs["map_partition_n_pairs"] = int(map_partition["n_pairs"])
         attrs["logL_marginalized"] = float(diagnostics["logL_marginalized"])
         attrs["log_z_partition_prior"] = float(diagnostics["log_z_partition_prior"])
+        attrs["edge_mark_prior_keys"] = json.dumps(inp.get("edge_mark_prior_keys", []))
+        attrs["edge_prior_semantics"] = "effective_log_prior_odds = raw_log_prior_odds + sum(requested log_* marks)"
+        attrs["edge_prior_applied_once"] = True
     else:
         attrs["n_singletons"] = int(inp["n_singletons"])
         attrs["n_pairs"] = int(inp["n_pairs"])
@@ -1131,6 +1147,8 @@ def build_cluster_diagnostics(
                 inp["candidate_pairs"],
                 _part_loglike,
                 log_z_partition_prior=inp["log_z_prior"],
+                raw_candidate_pairs=inp.get("candidate_pairs_raw"),
+                edge_mark_prior_contributions=inp.get("edge_mark_prior_contributions"),
             )
             map_part = inp["marginal_partitions"][int(out["map_partition_index"])]
             raw = _raw_for(
@@ -1157,6 +1175,9 @@ def build_cluster_diagnostics(
             pair_batch_size=getattr(opts, "pair_batch_size", 0),
             y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
             pe_max_per_pair=opts.pe_max_per_pair,
+            edge_mark_prior_keys=inp.get("edge_mark_prior_keys", []),
+            edge_prior_semantics="effective_log_prior_odds = raw_log_prior_odds + sum(requested log_* marks)",
+            edge_prior_applied_once=True,
             approximate_pair_evaluation_shape=[
                 int(out.get("expected_n_pairs", inp["n_pairs"])),
                 int(inp["nsamp"]),

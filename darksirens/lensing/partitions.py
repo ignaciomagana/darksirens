@@ -195,14 +195,14 @@ def parse_edge_mark_keys(value: str | Sequence[str] | None) -> tuple[str, ...]:
     return tuple(p for p in pieces if p)
 
 
-def apply_edge_mark_prior_keys(
+def edge_mark_prior_contributions(
     candidate_pairs: Iterable[CandidatePair], keys: Sequence[str]
-) -> tuple[CandidatePair, ...]:
-    """Return pairs with selected log-mark values added to effective log prior odds."""
+) -> tuple[float, ...]:
+    """Return selected log-mark prior contributions for each raw candidate pair."""
     keys = parse_edge_mark_keys(keys)
-    out = []
+    out: list[float] = []
     for pair in candidate_pairs:
-        total = float(pair.log_prior_odds)
+        total = 0.0
         for key in keys:
             value = pair.marks.get(key)
             if value is None:
@@ -212,8 +212,46 @@ def apply_edge_mark_prior_keys(
             if not key.startswith("log_"):
                 raise ValueError(f"edge prior mark {key!r} is not a log_* mark")
             total += float(value)
-        out.append(CandidatePair(pair.i, pair.j, total, pair.label, pair.marks))
+        out.append(total)
     return tuple(out)
+
+
+def apply_edge_mark_prior_keys(
+    candidate_pairs: Iterable[CandidatePair], keys: Sequence[str]
+) -> tuple[CandidatePair, ...]:
+    """Return pairs with selected log-mark values added to effective log prior odds."""
+    pairs = tuple(candidate_pairs)
+    contributions = edge_mark_prior_contributions(pairs, keys)
+    return tuple(
+        CandidatePair(
+            pair.i,
+            pair.j,
+            float(pair.log_prior_odds) + float(contribution),
+            pair.label,
+            pair.marks,
+        )
+        for pair, contribution in zip(pairs, contributions)
+    )
+
+
+def prepare_candidate_pairs_for_partitioning(
+    data: dict, edge_mark_prior_keys: Sequence[str] | None = None
+) -> tuple[int, tuple[CandidatePair, ...], tuple[CandidatePair, ...], tuple[float, ...]]:
+    """Validate candidate-pair JSON and apply requested edge priors exactly once."""
+    n_events, raw_pairs = validate_candidate_pairs(data)
+    prior_keys = parse_edge_mark_keys(edge_mark_prior_keys)
+    contributions = edge_mark_prior_contributions(raw_pairs, prior_keys)
+    effective_pairs = tuple(
+        CandidatePair(
+            pair.i,
+            pair.j,
+            float(pair.log_prior_odds) + float(contribution),
+            pair.label,
+            pair.marks,
+        )
+        for pair, contribution in zip(raw_pairs, contributions)
+    )
+    return n_events, raw_pairs, effective_pairs, contributions
 
 
 def validate_candidate_pairs(data: dict) -> tuple[int, tuple[CandidatePair, ...]]:
@@ -504,22 +542,19 @@ def enumerate_compatible_partitions(
     return tuple(states)
 
 
-def exact_partitions_from_json(
-    data: dict,
+def exact_partitions_from_pairs(
+    n_events: int,
+    candidate_pairs: Iterable[CandidatePair],
     *,
     max_partitions: int = 10_000,
-    edge_mark_prior_keys: Sequence[str] | None = None,
     component_mode: str = "global",
     max_component_events: int | None = None,
     max_component_edges: int | None = None,
     max_component_partitions: int | None = None,
     max_total_partitions: int | None = None,
 ):
-    """Validate a candidate-pair JSON object and enumerate exact partitions."""
-    n_events, pairs = validate_candidate_pairs(data)
-    pairs = apply_edge_mark_prior_keys(
-        pairs, parse_edge_mark_keys(edge_mark_prior_keys)
-    )
+    """Enumerate exact partitions from already-effective candidate pairs."""
+    pairs = tuple(candidate_pairs)
     if component_mode == "global":
         states = enumerate_compatible_partitions(
             n_events, pairs, max_partitions=max_partitions
@@ -539,3 +574,30 @@ def exact_partitions_from_json(
         float(logsumexp([s.log_prior_weight for s in states])) if states else -np.inf
     )
     return n_events, states, log_z_prior
+
+
+def exact_partitions_from_json(
+    data: dict,
+    *,
+    max_partitions: int = 10_000,
+    edge_mark_prior_keys: Sequence[str] | None = None,
+    component_mode: str = "global",
+    max_component_events: int | None = None,
+    max_component_edges: int | None = None,
+    max_component_partitions: int | None = None,
+    max_total_partitions: int | None = None,
+):
+    """Validate a candidate-pair JSON object and enumerate exact partitions."""
+    n_events, _raw_pairs, effective_pairs, _contributions = (
+        prepare_candidate_pairs_for_partitioning(data, edge_mark_prior_keys)
+    )
+    return exact_partitions_from_pairs(
+        n_events,
+        effective_pairs,
+        max_partitions=max_partitions,
+        component_mode=component_mode,
+        max_component_events=max_component_events,
+        max_component_edges=max_component_edges,
+        max_component_partitions=max_component_partitions,
+        max_total_partitions=max_total_partitions,
+    )
