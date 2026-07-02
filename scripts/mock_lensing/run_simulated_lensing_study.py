@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 from darksirens.lensing.simulation_config import resolve_config, write_config
 from darksirens.lensing import file_contract
 from darksirens.lensing.partitions import connected_components_from_candidate_pairs, exact_component_partitions, validate_candidate_pairs
+from darksirens.lensing.marginal_diagnostics import partition_diagnostic_rows
 
 GEN = ROOT / "scripts" / "mock_lensing" / "generate_mock_lensing.py"
 BUILD = ROOT / "scripts" / "mock_lensing" / "build_candidate_pairs_from_observed.py"
@@ -32,7 +33,7 @@ PROFILES: dict[str, dict[str, int]] = {
 CASE_ORDER = [
     "A_no_true_pairs_sparse_wrong_graph", "B_true_pairs_clean_graph", "C_true_pairs_many_wrong_edges",
     "D_true_pairs_bad_pair_tag", "E_true_pairs_no_sky_marks", "F_true_pairs_no_time_marks",
-    "G_true_pairs_full_marks", "H_ambiguous_components",
+    "G_true_pairs_full_marks", "H_ambiguous_components", "H_no_time_ambiguous_components",
 ]
 
 def _str2bool(v: str | bool) -> bool:
@@ -121,6 +122,15 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
         spec.update(include_time_marks=False, pair_marks="none", pair_tag_model="snr_sky")
     elif name.startswith("G_"):
         pass
+    elif name == "H_no_time_ambiguous_components":
+        spec.update(
+            max_edges_per_event=3,
+            max_total_edges=max(6, 3 * cfg["n_pair"]),
+            include_time_marks=False,
+            pair_marks="none",
+            pair_tag_model="snr_sky",
+            edge_mark_prior_keys_csv="",
+        )
     elif name.startswith("H_"):
         spec.update(max_edges_per_event=3, max_total_edges=max(6, 3 * cfg["n_pair"]), edge_mark_prior_keys_csv="")
     return spec
@@ -527,7 +537,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         (work / "validation_plan.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n"); return 0
     summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "preflight_only": args.preflight_only, "resolved_config": resolved_config, "diagnostics_only_note": "diagnostics_only: evidence deltas are not meaningful" if args.diagnostics_only else None, "run_off_controls": args.run_off_controls, "cases": {}}
-    pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]; audit_rows=[]
+    pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]; audit_rows=[]; partition_rows=[]
     for name, entry in plan["cases"].items():
         cdir = work / "cases" / name; rdir = work / "runs" / name
         if not args.reuse or not (cdir / "mock_observed_gw_pe.h5").exists():
@@ -585,7 +595,20 @@ def main(argv: list[str] | None = None) -> int:
         true_edges = true_edges_from_catalog(cdir / "observed_catalog.json")
         items = posterior_probability_items(diag, cdir / "candidate_pairs.json")
         rec = recovery_metrics(true_edges, items, diag)
-        for (i,j), prob in items: pair_rows.append({"case":name,"i":i,"j":j,"posterior_probability":prob,"is_true_edge":(i,j) in true_edges})
+        by_edge = {(int(x.get("i")), int(x.get("j"))): x for x in diag.get("posterior_pair_probabilities", []) if isinstance(x, dict) and "i" in x and "j" in x}
+        for (i,j), prob in items:
+            extra = by_edge.get((i, j), by_edge.get((j, i), {}))
+            pair_rows.append({
+                "case": name, "i": i, "j": j, "posterior_probability": prob, "is_true_edge": (i,j) in true_edges,
+                "log_prior_odds_raw": extra.get("log_prior_odds_raw"),
+                "log_prior_odds_effective": extra.get("log_prior_odds_effective", extra.get("log_prior_odds")),
+                "edge_mark_prior_contribution": extra.get("edge_mark_prior_contribution"),
+                "pair_time_delta_t_obs": extra.get("pair_time_delta_t_obs"),
+                "pair_time_sigma": extra.get("pair_time_sigma"),
+                "pair_time_placeholder_warning": extra.get("pair_time_placeholder_warning"),
+                "marks_json": json.dumps(extra.get("marks", {}), sort_keys=True),
+            })
+        partition_rows.extend(partition_diagnostic_rows(diag, case=name, truth_edges=true_edges))
         truth_rows.append({"case": name, **rec})
         bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None, "logZ_j2": logz_j2, "logZ_off": logz_off, "delta_logZ_j2_minus_off": delta_logz})
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})
@@ -607,13 +630,18 @@ def main(argv: list[str] | None = None) -> int:
         if evidence_unusable:
             case_status = "failed_unusable_evidence"
         warnings = (["diagnostics_only: evidence deltas are not meaningful"] if args.diagnostics_only else [])
+        if len(items) > 0 and all(float(prob) == 0.0 for _edge, prob in items):
+            warnings.append("all candidate edge posterior probabilities are zero; inspect partition_diagnostics.csv")
+        if diag.get("candidate_time_marks_suspicious"):
+            warnings.append("candidate time marks look synthetic/placeholder-like; time-mark likelihood may dominate")
         summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(off_pre_log, "stdout_path"), "off_preflight_stderr_path": _log_path(off_pre_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "process_status": j2_class["process_status"], "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "midpoint_status": j2_class["midpoint_status"], "evidence_status": j2_class["evidence_status"], "failure": failure, "stdout_path": _log_path(inf_log, "stdout_path"), "stderr_path": _log_path(inf_log, "stderr_path"), "diagnostics": diag, "midpoint_diagnostics": mid_diag, "results_attrs": results_attrs}, "off": {"status": off_status, "process_status": off_class["process_status"], "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "midpoint_status": off_class["midpoint_status"], "evidence_status": off_class["evidence_status"], "failure": locals().get("off_failure"), "stdout_path": _log_path(locals().get("off_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_log", {}), "stderr_path"), "diagnostics": off_diag, "midpoint_diagnostics": off_mid_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
     if args.preflight_only:
         _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
         write_preflight_summary(work, summary)
         return 0 if all(c.get("status") == "passed_preflight" for c in summary["cases"].values()) else 1
     _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
-    _write_csv(work / "posterior_pair_probabilities.csv", pair_rows, ["case","i","j","posterior_probability","is_true_edge"])
+    _write_csv(work / "posterior_pair_probabilities.csv", pair_rows, ["case","i","j","posterior_probability","is_true_edge","log_prior_odds_raw","log_prior_odds_effective","edge_mark_prior_contribution","pair_time_delta_t_obs","pair_time_sigma","pair_time_placeholder_warning","marks_json"])
+    _write_csv(work / "partition_diagnostics.csv", partition_rows, ["case","partition_index","n_pairs","pair_edges","log_likelihood","log_prior_weight","log_posterior_weight","posterior_probability","is_map_partition","is_truth_partition","n_true_edges","n_false_edges"])
     _write_csv(work / "partition_component_summary.csv", comp_rows, ["case","n_events","n_candidate_edges","expected_n_pairs","map_n_pairs"])
     _write_csv(work / "truth_recovery_summary.csv", truth_rows, ["case","injected_n_pairs","expected_n_pairs","map_n_pairs","true_edge_posterior_probability_mean","false_edge_posterior_probability_max","false_edge_posterior_probability_sum","map_partition_exact_truth_match"])
     _write_csv(work / "bias_summary.csv", bias_rows, ["case","p_tag_model","pair_tag_perturb_logit","delta_expected_n_pairs_minus_injected","logZ_j2","logZ_off","delta_logZ_j2_minus_off"])

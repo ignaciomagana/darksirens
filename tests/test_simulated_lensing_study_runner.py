@@ -327,3 +327,20 @@ def test_candidate_graph_audit_csv_writer(tmp_path):
     text = out.read_text()
     assert "case,n_events,n_candidate_edges" in text
     assert "log_mass_distance_score" in text
+
+
+def test_h_no_time_ambiguous_case_spec_controls_time_marks():
+    from scripts.mock_lensing.run_simulated_lensing_study import _case_spec
+
+    cfg = {"n_pair": 2, "n_sing": 2, "max_total_edges": 8}
+    no_time = _case_spec("H_no_time_ambiguous_components", cfg)
+    assert no_time["max_edges_per_event"] == 3
+    assert no_time["max_total_edges"] == 6
+    assert no_time["include_time_marks"] is False
+    assert no_time["pair_marks"] == "none"
+    assert no_time["pair_tag_model"] == "snr_sky"
+    assert no_time["edge_mark_prior_keys_csv"] == ""
+
+    stress = _case_spec("H_ambiguous_components", cfg)
+    assert stress["pair_marks"] == "time"
+    assert stress["pair_tag_model"] == "snr_time_sky"
