@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.mock_lensing.run_simulated_lensing_study import classify_run_outputs, combined_inference_status, evidence_delta, extract_logz, extract_midpoint_loglike, latest_attempt, preflight_status, recovery_metrics, posterior_probability_items, validate_known_inference_flags, write_preflight_summary, _run_logged
+from scripts.mock_lensing.run_simulated_lensing_study import classify_run_outputs, combined_inference_status, evidence_delta, extract_logz, extract_midpoint_loglike, latest_attempt, off_control_nonfinite_warning, preflight_status, recovery_metrics, posterior_probability_items, run_diagnostics_path, run_failure_path, validate_known_inference_flags, write_preflight_summary, _run_logged
 
 
 def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
@@ -298,6 +298,43 @@ def test_delta_logz_requires_both_finite_logz():
     assert evidence_delta(extract_logz({"logZ": 1.0}), extract_logz({"logZ": 0.5})) == 0.5
     assert evidence_delta(extract_logz({"logZ": 1.0}), extract_logz({"logZ": "-inf"})) is None
     assert evidence_delta(extract_logz({"logZ": "nan"}), extract_logz({"logZ": 0.5})) is None
+
+
+def test_nonfinite_off_warning_includes_diagnostics_and_failure_paths(tmp_path):
+    off_run = tmp_path / "runs" / "case__off" / "powerlaw+peak__off__dynesty__2026-07-02T00-00-00"
+    off_run.mkdir(parents=True)
+    (off_run / "midpoint_diagnostics.json").write_text(json.dumps({"logL_total": "-inf"}))
+    (off_run / "failure.json").write_text(json.dumps({"stage": "sampler", "error_message": "bad"}))
+    off_class = {"process_status": "passed", "midpoint_status": "nonfinite_midpoint", "evidence_status": "nonfinite_logZ"}
+    warning = off_control_nonfinite_warning(off_class, off_run, {"off_retry_n_unlensed_inj": 8000}, 2029)
+    assert "off-control produced nonfinite midpoint/logZ; delta_logZ unavailable; inspect off diagnostics" in warning
+    assert str(off_run / "midpoint_diagnostics.json") in warning
+    assert str(off_run / "failure.json") in warning
+    assert "mock.n_unlensed_inj=8000" in warning
+    assert run_diagnostics_path(off_run) == str(off_run / "midpoint_diagnostics.json")
+    assert run_failure_path(off_run) == str(off_run / "failure.json")
+
+
+def test_nonfinite_off_summary_shape_keeps_delta_none(tmp_path):
+    off_run = tmp_path / "off_attempt"
+    off_run.mkdir()
+    (off_run / "diagnostics.json").write_text(json.dumps({"logL_total": "-inf"}))
+    off_class = classify_run_outputs({"logZ": "-inf"}, {"logL_total": "-inf"}, diagnostics_only=False)
+    warning = off_control_nonfinite_warning(off_class, off_run, {}, 2029)
+    rec = {
+        "off": {
+            "midpoint_status": off_class["midpoint_status"],
+            "evidence_status": off_class["evidence_status"],
+            "diagnostics_path": run_diagnostics_path(off_run),
+            "failure_path": run_failure_path(off_run),
+        },
+        "delta_logZ_j2_minus_off": evidence_delta(extract_logz({"logZ": 2.0}), extract_logz({"logZ": "-inf"})),
+        "warnings": [warning],
+    }
+    assert rec["off"]["diagnostics_path"] == str(off_run / "diagnostics.json")
+    assert rec["off"]["failure_path"] is None
+    assert rec["delta_logZ_j2_minus_off"] is None
+    assert "delta_logZ unavailable" in rec["warnings"][0]
 
 def test_extract_logz_from_fake_attrs():
     assert extract_logz({"logZ": "12.5"}) == 12.5
