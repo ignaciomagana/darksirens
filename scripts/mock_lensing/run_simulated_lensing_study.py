@@ -298,12 +298,15 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
     diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
     max_samples = "0" if diagnostics_only else "5000"
     nlive = args.nlive or cfg["nlive"]
+    fix_lens_rate = str(cfg.get("fix_lens_rate", False)).lower()
+    fixed_parameter_values = json.dumps(cfg.get("fixed_parameter_values", {"tau_n": 3.0}))
+    lens_prior_overrides = json.dumps(cfg.get("lens_prior_overrides", {"log10_tau_A": [-5.0, -2.5]}))
     cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(case_dir / "mock_observed_gw_pe.h5"),
            "--observed_catalog_path", str(case_dir / "observed_catalog.json"), "--gwselection_path", str(case_dir / "mock_gw_selection.h5"),
            "--lensed_injections_path", str(case_dir / "mock_lensed_injections.h5"), "--pair_metadata_path", str(case_dir / "mock_pair_metadata.h5"),
            "--candidate_pairs_path", str(case_dir / "candidate_pairs.json"), "--partition_mode", str(cfg["partition_mode"]), "--cluster_mode", "j2",
            "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak", "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true",
-           "--fix_lens_rate", "false", "--fixed_parameter_values", '{"tau_n": 3.0}', "--lens_prior_overrides", '{"log10_tau_A": [-5.0, -2.5]}',
+           "--fix_lens_rate", fix_lens_rate, "--fixed_parameter_values", fixed_parameter_values, "--lens_prior_overrides", lens_prior_overrides,
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples, "--pe_max_per_pair", str(cfg["pe_max"]),
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
