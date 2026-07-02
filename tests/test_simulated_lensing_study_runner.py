@@ -73,6 +73,46 @@ def test_posterior_probability_items_from_list(tmp_path):
     assert posterior_probability_items({"posterior_pair_probabilities": [0.4, 0.5]}, path) == [((1, 4), 0.4), ((2, 3), 0.5)]
 
 
+
+def test_posterior_probability_items_from_dict_mapping(tmp_path):
+    path = tmp_path / "candidate_pairs.json"
+    path.write_text(json.dumps({"pairs": []}))
+    assert posterior_probability_items({"posterior_pair_probabilities": {"4-1": 0.4, "2,3": "0.5"}}, path) == [((1, 4), 0.4), ((2, 3), 0.5)]
+
+
+def test_posterior_probability_items_from_list_of_dicts(tmp_path):
+    path = tmp_path / "candidate_pairs.json"
+    path.write_text(json.dumps({"pairs": []}))
+    diagnostics = {"posterior_pair_probabilities": [{"i": 4, "j": 1, "p_pair": 0.4, "extra": "ignored"}, {"i": 2, "j": 3, "p_pair": "0.5"}]}
+    assert posterior_probability_items(diagnostics, path) == [((1, 4), 0.4), ((2, 3), 0.5)]
+
+
+def test_posterior_probability_items_from_list_of_dicts_requires_p_pair(tmp_path):
+    path = tmp_path / "candidate_pairs.json"
+    path.write_text(json.dumps({"pairs": []}))
+    try:
+        posterior_probability_items({"posterior_pair_probabilities": [{"i": 1, "j": 4}]}, path)
+    except ValueError as exc:
+        assert "posterior_pair_probabilities[0]" in str(exc)
+        assert "p_pair" in str(exc)
+    else:
+        raise AssertionError("missing p_pair should raise ValueError")
+
+
+def test_recovery_metrics_with_list_of_dict_posterior_probabilities(tmp_path):
+    path = tmp_path / "candidate_pairs.json"
+    path.write_text(json.dumps({"pairs": []}))
+    diagnostics = {
+        "posterior_pair_probabilities": [{"i": 1, "j": 0, "p_pair": 0.8}, {"i": 2, "j": 3, "p_pair": 0.6}, {"i": 1, "j": 2, "p_pair": 0.2}],
+        "expected_n_pairs": 1.6,
+        "map_partition_pairs": [[0, 1], [2, 3]],
+        "map_partition_n_pairs": 2,
+    }
+    metrics = recovery_metrics({(0, 1), (2, 3)}, posterior_probability_items(diagnostics, path), diagnostics)
+    assert metrics["true_edge_posterior_probability_mean"] == 0.7
+    assert metrics["false_edge_posterior_probability_max"] == 0.2
+    assert metrics["map_partition_exact_truth_match"] is True
+
 def test_command_validator_rejects_stale_edge_prior_marks():
     try:
         validate_known_inference_flags([sys.executable, "-m", "darksirens.cli.inference_lensing", "--edge_prior_marks", "log_sky_overlap"])

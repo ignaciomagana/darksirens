@@ -423,13 +423,27 @@ def true_edges_from_catalog(catalog_path: Path) -> set[tuple[int,int]]:
 
 def posterior_probability_items(diagnostics: dict[str, Any], candidate_path: Path) -> list[tuple[tuple[int,int], float]]:
     probs = diagnostics.get("posterior_pair_probabilities") or {}
-    cand = (_load_json(candidate_path, {}) or {}).get("pairs") or (_load_json(candidate_path, {}) or {}).get("candidate_pairs") or []
+    candidate_data = _load_json(candidate_path, {}) or {}
+    cand = candidate_data.get("pairs") or candidate_data.get("candidate_pairs") or []
     items = []
     if isinstance(probs, dict):
         for k, v in probs.items():
             parts = str(k).replace(",", "-").split("-")
             if len(parts) >= 2 and all(p.strip().lstrip("-").isdigit() for p in parts[:2]):
                 items.append(((min(int(parts[0]), int(parts[1])), max(int(parts[0]), int(parts[1]))), float(v)))
+    elif all(isinstance(entry, dict) for entry in probs):
+        for idx, entry in enumerate(probs):
+            missing = {key for key in ("i", "j", "p_pair") if key not in entry}
+            if missing:
+                missing_text = ", ".join(sorted(missing))
+                raise ValueError(f"posterior_pair_probabilities[{idx}] is missing required key(s): {missing_text}")
+            try:
+                i = int(entry["i"])
+                j = int(entry["j"])
+                probability = float(entry["p_pair"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"posterior_pair_probabilities[{idx}] must have integer i/j and float p_pair") from exc
+            items.append(((min(i, j), max(i, j)), probability))
     else:
         for e, v in zip(cand, probs):
             items.append(((min(int(e["i"]), int(e["j"])), max(int(e["i"]), int(e["j"]))), float(v)))
