@@ -75,7 +75,7 @@ def test_normalize_tinyns_diagnostics_missing_fields_are_json_safe():
     json.dumps(diag)
 
 
-def test_save_results_hdf5_writes_tinyns_diagnostics_attrs(tmp_path):
+def test_main_inference_save_path_writes_tinyns_diagnostics_sidecar(tmp_path):
     results = {
         "samples": np.zeros((2, 1)),
         "logZ": -1.0,
@@ -90,12 +90,19 @@ def test_save_results_hdf5_writes_tinyns_diagnostics_attrs(tmp_path):
     path = save_results_hdf5(
         results, str(tmp_path), ["H0"], [10.0], [100.0], {}, {}, _opts(), _meta()
     )
+    sidecar = tmp_path / "tinyns_diagnostics.json"
+    assert sidecar.exists()
     with h5py.File(path, "r") as f:
         assert "tinyns_runtime_diagnostics" in f.attrs
+        assert "tinyns_resolved_config" in f.attrs
+        assert "tinyns_diagnostics" in f.attrs
+        assert "tinyns_summary" in f.attrs
         assert f.attrs["tinyns_niter"] == 10
         assert f.attrs["tinyns_ncall"] == 200
         assert f.attrs["tinyns_replacement_failures"] == 2
         assert bool(f.attrs["tinyns_replacement_rescue_used"]) is True
+    payload = json.loads(sidecar.read_text())
+    assert payload["tinyns_resolved_config"]["sample"] == "rwalk"
 
 
 def test_save_tinyns_diagnostics_json_sidecar(tmp_path):

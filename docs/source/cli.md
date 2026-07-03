@@ -212,3 +212,99 @@ preset in either command to:
 ```bash
 --tinyns_preset heavy_darksirens_strong
 ```
+
+## TinyNS short-budget benchmark sweep
+
+The repository includes a lightweight benchmark driver at
+`scripts/benchmark_tinyns_darksirens_short_budget.py` for comparing a small set
+of TinyNS-only settings on realistic Darksirens inputs.  It launches
+`darksirens_inference` repeatedly, keeps each run under a per-configuration wall
+clock limit, and writes simple logs plus `summary.csv` and `summary.json`.
+
+The benchmark relies on the main `darksirens_inference` output path writing
+`tinyns_diagnostics.json` next to `results.hdf5`; this is the preferred source
+for speed and health fields.  If that sidecar is missing, the script falls back
+to TinyNS attributes in `results.hdf5`, then to limited stdout parsing.
+
+Example spectral-sirens short-budget sweep, with no survey catalog required:
+
+```bash
+python scripts/benchmark_tinyns_darksirens_short_budget.py \
+  --gw-path "$GWE" \
+  --gwselection-path "$SEL" \
+  --universe-model spectral_sirens \
+  --pop-model powerlaw+peak \
+  --base-save-path "$R/tinyns_bench" \
+  --nlive 400 \
+  --dlogz 0.5 \
+  --max-samples 2000 \
+  --seed 21 \
+  --timeout-minutes 20 \
+  --extra-arg --fixed_cosmology --extra-arg true \
+  --extra-arg --fix_survey --extra-arg true
+```
+
+Example dark-sirens sweep with a galaxy catalog:
+
+```bash
+python scripts/benchmark_tinyns_darksirens_short_budget.py \
+  --gw-path "$GWE" \
+  --gwselection-path "$SEL" \
+  --survey-path "$CAT" \
+  --universe-model dark_sirens \
+  --pop-model powerlaw+peak \
+  --base-save-path "$R/tinyns_bench" \
+  --nlive 400 \
+  --dlogz 0.5 \
+  --max-samples 2000 \
+  --seed 21 \
+  --timeout-minutes 20
+```
+
+By default the sweep changes only TinyNS settings: `recommended`, `cheap`,
+`fast16`, `fast32`, and `fast16_B128`.  It always passes `--sampler tinyns`, the
+requested `--nlive`, `--dlogz`, `--max_samples`, `--seed`,
+`--tinyns_progress_interval 10`, and a unique `--save_path` for each
+configuration.  It does not alter normalization-grid settings by default.
+
+Custom sweeps can be supplied with `--sweep-json`, for example:
+
+```json
+[
+  {
+    "name": "my_config",
+    "tinyns_replacement_chains": 16,
+    "tinyns_walks": 20,
+    "tinyns_step_scale": 0.03,
+    "tinyns_min_accepts": 3,
+    "tinyns_jax_block_size": 64,
+    "tinyns_max_attempts": 100000
+  }
+]
+```
+
+Each benchmark directory is named like
+`tinyns_short_budget__YYYY-MM-DDTHH-MM-SS/` and contains one subdirectory per
+configuration, `stdout.log`, `stderr.log`, `command.txt`, `summary.csv`, and
+`summary.json`.  Summary fields include status, return code, elapsed time,
+TinyNS settings, evidence fields, iteration/call rates, replacement statistics,
+rescue usage, insertion-rank diagnostics, and a short parser message.
+
+Interpretation guidelines:
+
+- `niter_per_sec` is the primary short-budget speed indicator printed in the
+  ranking table.
+- `replacement_mean_batches` and `replacement_max_batches` indicate how hard it
+  was to replace live points; large values suggest the configuration may be
+  inefficient for the target likelihood.
+- `replacement_failures` records replacement failures and should be treated as a
+  health warning.
+- `replacement_rescue_used` indicates that rescue logic was needed; the ranking
+  table flags this and avoids selecting rescued configurations as healthy
+  candidates.
+- `final_delta_logz` is useful context for how close the short run came to its
+  stopping target.
+
+This benchmark is a short-budget diagnostic for TinyNS speed and sampler health,
+not final evidence validation.  Promising configurations should still be checked
+with production-quality budgets and normal scientific validation.
