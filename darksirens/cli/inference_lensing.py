@@ -103,6 +103,7 @@ from darksirens.gw.populations.registry import get_fixed_population_params, get_
 
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
+from darksirens.io.results import save_tinyns_diagnostics_json, write_tinyns_metadata
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
 from darksirens.likelihood.factory import (
     _redshift_prior_materialization_reason,
@@ -1939,6 +1940,7 @@ def main():
         )
 
     run_dir = _make_run_dir(opts)
+    # Keep settings serialization equivalent to: for k, v in vars(opts).items()
     settings = _jsonable_settings(opts)
     labels = []
     fixed = {}
@@ -2117,18 +2119,7 @@ def main():
             f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
             if results.get("logZ") is not None:
                 f.attrs["logZ"] = float(results["logZ"])
-            if getattr(opts, "tinyns_resolved_config", None) is not None:
-                f.attrs["tinyns_resolved_config"] = json.dumps(
-                    opts.tinyns_resolved_config, default=str
-                )
-            if results.get("tinyns_summary") is not None:
-                f.attrs["tinyns_summary"] = json.dumps(
-                    results["tinyns_summary"], default=str
-                )
-            if results.get("tinyns_diagnostics") is not None:
-                f.attrs["tinyns_diagnostics"] = json.dumps(
-                    results["tinyns_diagnostics"], default=str
-                )
+            write_tinyns_metadata(f.attrs, results, opts)
         settings.update(
             wl_a=float(opts.lensing_wl_a),
             wl_b=float(opts.lensing_wl_b),
@@ -2156,6 +2147,7 @@ def main():
                 logL_marginalized=float(diagnostics["logL_marginalized"]),
             )
         _write_json(os.path.join(run_dir, "settings.json"), settings)
+        save_tinyns_diagnostics_json(results, run_dir, opts)
         _write_diagnostics(run_dir, diagnostics)
     except Exception as exc:
         _write_failure(run_dir, "save", exc, labels=labels, settings=settings)
