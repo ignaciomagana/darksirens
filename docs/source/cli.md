@@ -135,6 +135,13 @@ when present, and logZ scatter across independent seeds. Explicit `--tinyns_*`
 options override the selected preset, and the resolved configuration is recorded
 in `tinyns_resolved_config` in `settings.json` and supported HDF5 outputs.
 
+When using `--sampler tinyns`, Darksirens prints a compact TinyNS diagnostics
+summary and saves full diagnostics in `results.hdf5` and
+`tinyns_diagnostics.json`. These fields help diagnose slow runs: `niter/sec`,
+`ncall/sec`, `calls/iter`, replacement batches, replacement failures, rescue
+usage, final `dlogz`, live-weight fraction, and insertion-rank diagnostics when
+available.
+
 
 ### TinyNS JAX rwalk and redshift-prior barriers
 

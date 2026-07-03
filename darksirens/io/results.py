@@ -8,8 +8,72 @@ import jax
 import numpy as np
 
 from darksirens.cli.common import _fixed_dark_energy_metadata
+from darksirens.inference.sampling import _json_safe_tinyns_value
 
 # ── Data saving ────────────────────────────────────────────────────────────────
+
+_TINYNS_SCALAR_ATTRS = {
+    "niter": "tinyns_niter",
+    "ncall": "tinyns_ncall",
+    "seconds": "tinyns_seconds",
+    "niter_per_sec": "tinyns_niter_per_sec",
+    "ncall_per_sec": "tinyns_ncall_per_sec",
+    "calls_per_iter": "tinyns_calls_per_iter",
+    "final_delta_logz": "tinyns_final_delta_logz",
+    "live_weight_fraction": "tinyns_live_weight_fraction",
+    "replacement_mean_batches": "tinyns_replacement_mean_batches",
+    "replacement_max_batches": "tinyns_replacement_max_batches",
+    "replacement_failures": "tinyns_replacement_failures",
+    "replacement_rescue_used": "tinyns_replacement_rescue_used",
+    "insertion_rank_mean_z": "tinyns_insertion_rank_mean_z",
+    "insertion_rank_std_ratio": "tinyns_insertion_rank_std_ratio",
+}
+
+
+def _json_attr(value):
+    return json.dumps(_json_safe_tinyns_value(value), default=str)
+
+
+def write_tinyns_metadata(attrs, results, opts) -> None:
+    if getattr(opts, "tinyns_resolved_config", None) is not None:
+        attrs["tinyns_resolved_config"] = _json_attr(opts.tinyns_resolved_config)
+    if results.get("tinyns_runtime_diagnostics") is not None:
+        attrs["tinyns_runtime_diagnostics"] = _json_attr(results["tinyns_runtime_diagnostics"])
+    if results.get("tinyns_summary") is not None:
+        attrs["tinyns_summary"] = str(results["tinyns_summary"])
+    if results.get("tinyns_diagnostics") is not None:
+        attrs["tinyns_diagnostics"] = _json_attr(results["tinyns_diagnostics"])
+    diag = results.get("tinyns_runtime_diagnostics") or {}
+    for key, attr in _TINYNS_SCALAR_ATTRS.items():
+        value = diag.get(key)
+        if value is None:
+            continue
+        try:
+            safe = _json_safe_tinyns_value(value)
+            if isinstance(safe, (str, list, dict)):
+                continue
+            attrs[attr] = safe
+        except (TypeError, ValueError):
+            continue
+
+
+def save_tinyns_diagnostics_json(results: dict, run_dir: str, opts) -> str | None:
+    if getattr(opts, "sampler", None) != "tinyns" and not results.get("tinyns_runtime_diagnostics"):
+        return None
+    payload = {
+        "tinyns_runtime_diagnostics": results.get("tinyns_runtime_diagnostics") or {},
+        "tinyns_resolved_config": getattr(opts, "tinyns_resolved_config", None),
+    }
+    if results.get("tinyns_diagnostics") is not None:
+        payload["tinyns_diagnostics"] = results["tinyns_diagnostics"]
+    if results.get("tinyns_summary") is not None:
+        payload["tinyns_summary"] = results["tinyns_summary"]
+    path = os.path.join(run_dir, "tinyns_diagnostics.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(_json_safe_tinyns_value(payload), fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    return path
+
 
 def save_results_hdf5(
     results:                dict,
@@ -127,15 +191,7 @@ def save_results_hdf5(
         f.attrs["tinyns_preset"]   = str(getattr(opts, "tinyns_preset", ""))
         f.attrs["tinyns_bound"]    = str(getattr(opts, "tinyns_bound", ""))
         f.attrs["tinyns_step_scale"]  = float(getattr(opts, "tinyns_step_scale", None) or 0.0)
-        if getattr(opts, "tinyns_resolved_config", None) is not None:
-            f.attrs["tinyns_resolved_config"] = json.dumps(opts.tinyns_resolved_config, default=str)
-        if results.get("tinyns_summary") is not None:
-            f.attrs["tinyns_summary"] = str(results["tinyns_summary"])
-        if results.get("tinyns_diagnostics") is not None:
-            try:
-                f.attrs["tinyns_diagnostics"] = json.dumps(results["tinyns_diagnostics"], default=str)
-            except (TypeError, ValueError):
-                pass
+        write_tinyns_metadata(f.attrs, results, opts)
         f.attrs["nuts_warmup"]     = int(getattr(opts, "nuts_warmup", 0))
         f.attrs["nuts_samples"]    = int(getattr(opts, "nuts_samples", 0))
         f.attrs["nuts_chains"]     = int(getattr(opts, "nuts_chains", 0))
@@ -171,6 +227,7 @@ def save_results_hdf5(
             "python_version": sys.version,
         })
 
+    save_tinyns_diagnostics_json(results, run_dir, opts)
     return path
 
 
