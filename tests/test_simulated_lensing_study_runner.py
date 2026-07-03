@@ -1,20 +1,35 @@
 import json
-import subprocess
 import sys
 from pathlib import Path
 
-from scripts.mock_lensing.run_simulated_lensing_study import classify_run_outputs, combined_inference_status, evidence_delta, extract_logz, extract_midpoint_loglike, latest_attempt, off_control_nonfinite_warning, preflight_status, recovery_metrics, posterior_probability_items, run_diagnostics_path, run_failure_path, validate_known_inference_flags, write_preflight_summary, _run_logged
+from scripts.mock_lensing.run_simulated_lensing_study import classify_run_outputs, combined_inference_status, evidence_delta, extract_logz, extract_midpoint_loglike, latest_attempt, off_control_nonfinite_warning, preflight_status, recovery_metrics, posterior_probability_items, run_diagnostics_path, run_failure_path, validate_known_inference_flags, write_preflight_summary, _run_logged, main
+
+
+def _run_dry_plan(tmp_path, *args, cases=None, workdir_name="study", overrides=()):
+    workdir = tmp_path / workdir_name
+    argv = ["--workdir", str(workdir), "--profile", "tiny", "--dry_run", "true", *args]
+    if cases is not None:
+        cases_text = ",".join(json.dumps(case) for case in cases)
+        argv.extend(["--override", f"study.cases=[{cases_text}]"])
+    for override in overrides:
+        argv.extend(["--override", override])
+    rc = main(argv)
+    assert rc == 0
+    return workdir, json.loads((workdir / "validation_plan.json").read_text())
 
 
 def test_simulated_lensing_study_dry_run_writes_plan(tmp_path):
-    repo = Path(__file__).resolve().parents[1]
-    workdir = tmp_path / "study"
-    cmd = [sys.executable, "scripts/mock_lensing/run_simulated_lensing_study.py", "--workdir", str(workdir), "--profile", "tiny", "--dry_run", "true"]
-    subprocess.run(cmd, cwd=repo, check=True, timeout=60)
-    plan = json.loads((workdir / "validation_plan.json").read_text())
+    workdir, plan = _run_dry_plan(
+        tmp_path,
+        cases=[
+            "A_no_true_pairs_sparse_wrong_graph",
+            "F_true_pairs_no_time_marks",
+            "H_no_time_ambiguous_components",
+        ],
+    )
     assert plan["profile"] == "tiny"
     assert "A_no_true_pairs_sparse_wrong_graph" in plan["cases"]
-    assert "H_ambiguous_components" in plan["cases"]
+    assert "H_no_time_ambiguous_components" in plan["cases"]
     assert (workdir / "run_manifest.json").exists()
     commands = json.dumps(plan)
     assert "--edge_mark_prior_keys" in commands
@@ -92,11 +107,7 @@ def test_componentwise_exact_lensing_runtime_imports_smoke():
 def test_dry_run_b_clean_graph_command_accepts_snr_sky_pair_tag(tmp_path):
     from darksirens.cli.inference_lensing import build_parser
 
-    repo = Path(__file__).resolve().parents[1]
-    workdir = tmp_path / "study"
-    cmd = [sys.executable, "scripts/mock_lensing/run_simulated_lensing_study.py", "--workdir", str(workdir), "--profile", "tiny", "--dry_run", "true"]
-    subprocess.run(cmd, cwd=repo, check=True, timeout=60)
-    plan = json.loads((workdir / "validation_plan.json").read_text())
+    _, plan = _run_dry_plan(tmp_path, cases=["B_true_pairs_clean_graph"])
     b_cmd = plan["cases"]["B_true_pairs_clean_graph"]["inference"]
     assert b_cmd[b_cmd.index("--pair_tag_model") + 1] == "snr_sky"
     validate_known_inference_flags(b_cmd)
@@ -105,24 +116,11 @@ def test_dry_run_b_clean_graph_command_accepts_snr_sky_pair_tag(tmp_path):
 
 
 def _planned_b_command(tmp_path, *overrides):
-    repo = Path(__file__).resolve().parents[1]
-    workdir = tmp_path / "study"
-    cmd = [
-        sys.executable,
-        "scripts/mock_lensing/run_simulated_lensing_study.py",
-        "--workdir",
-        str(workdir),
-        "--profile",
-        "tiny",
-        "--dry_run",
-        "true",
-        "--override",
-        'study.cases=["B_true_pairs_clean_graph"]',
-    ]
-    for override in overrides:
-        cmd.extend(["--override", override])
-    subprocess.run(cmd, cwd=repo, check=True, timeout=60)
-    plan = json.loads((workdir / "validation_plan.json").read_text())
+    _, plan = _run_dry_plan(
+        tmp_path,
+        cases=["B_true_pairs_clean_graph"],
+        overrides=overrides,
+    )
     return plan["cases"]["B_true_pairs_clean_graph"]["inference"]
 
 
@@ -293,11 +291,12 @@ def test_preflight_summary_writer_with_fake_records(tmp_path):
 
 
 def test_preflight_only_dry_run_plan_has_preflight_no_generated_outputs(tmp_path):
-    repo = Path(__file__).resolve().parents[1]
-    workdir = tmp_path / "study"
-    cmd = [sys.executable, "scripts/mock_lensing/run_simulated_lensing_study.py", "--workdir", str(workdir), "--profile", "tiny", "--preflight_only", "true", "--dry_run", "true"]
-    subprocess.run(cmd, cwd=repo, check=True, timeout=60)
-    plan = json.loads((workdir / "validation_plan.json").read_text())
+    workdir, plan = _run_dry_plan(
+        tmp_path,
+        "--preflight_only",
+        "true",
+        cases=["A_no_true_pairs_sparse_wrong_graph"],
+    )
     commands = json.dumps(plan)
     assert "--preflight_only" in commands
     assert "preflight.json" in commands
@@ -395,11 +394,12 @@ def test_delta_logz_arithmetic_for_fake_attrs():
 
 
 def test_diagnostics_only_plan_records_evidence_warning_and_off_max_samples_zero(tmp_path):
-    repo = Path(__file__).resolve().parents[1]
-    workdir = tmp_path / "study"
-    cmd = [sys.executable, "scripts/mock_lensing/run_simulated_lensing_study.py", "--workdir", str(workdir), "--profile", "tiny", "--diagnostics_only", "true", "--dry_run", "true"]
-    subprocess.run(cmd, cwd=repo, check=True, timeout=60)
-    plan = json.loads((workdir / "validation_plan.json").read_text())
+    _, plan = _run_dry_plan(
+        tmp_path,
+        "--diagnostics_only",
+        "true",
+        cases=["A_no_true_pairs_sparse_wrong_graph", "B_true_pairs_clean_graph"],
+    )
     case = plan["cases"]["A_no_true_pairs_sparse_wrong_graph"]
     assert case["inference"][case["inference"].index("--max_samples") + 1] == "0"
     assert case["off"][case["off"].index("--max_samples") + 1] == "0"

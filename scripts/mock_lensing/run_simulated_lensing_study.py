@@ -8,6 +8,7 @@ inference, and then reads truth labels only for recovery summaries.
 from __future__ import annotations
 
 import argparse, csv, datetime, json, math, shutil, shlex, subprocess, sys, time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -135,13 +136,22 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
         spec.update(max_edges_per_event=3, max_total_edges=max(6, 3 * cfg["n_pair"]), edge_mark_prior_keys_csv="")
     return spec
 
+@lru_cache(maxsize=1)
+def _known_inference_flags() -> set[str]:
+    from darksirens.cli.inference_lensing import build_parser
+    return {
+        opt
+        for action in build_parser()._actions
+        for opt in action.option_strings
+        if opt.startswith("--")
+    }
+
 def validate_known_inference_flags(cmd: list[str]) -> None:
     """Reject stale or unknown long options in generated inference commands."""
     if "--edge_prior_marks" in cmd:
         raise ValueError("generated inference command uses stale flag --edge_prior_marks; use --edge_mark_prior_keys")
     try:
-        from darksirens.cli.inference_lensing import build_parser
-        known = {opt for action in build_parser()._actions for opt in action.option_strings if opt.startswith("--")}
+        known = _known_inference_flags()
     except Exception:
         known = {"--edge_mark_prior_keys", "--preflight_only", "--preflight_json"}
     unknown = []
