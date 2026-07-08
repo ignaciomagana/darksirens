@@ -209,8 +209,23 @@ class PairingModel(ABC):
         m1_exp  = jnp.expand_dims(jnp.atleast_1d(m1), axis=-1)
         q_grid  = get_q_grid()
         p_grid  = self._eval_unnorm(m1_exp, q_grid, m_min, dm_min, theta)
-        n       = jnp.trapezoid(p_grid, q_grid, axis=-1).reshape(jnp.shape(m1))
-        return p / jnp.where(n > 0, n, 1.0)
+        # Scale-invariant normalisation: for an m1 in the low-mass taper toe
+        # both p and its q-integral are ~exp(-500)-tiny; the RATIO is well
+        # conditioned, but a direct p / n has divide's VJP square n, which
+        # UNDERFLOWS to zero and turns the cotangent into inf -> NaN
+        # (measured: one bright-mock injection at m1src = m_min + 0.01
+        # poisoned the whole d logL/d(m_min, dm_min, beta) gradient).
+        # Factoring the row maximum out of the quadrature keeps every
+        # backward division at O(1) scale; the forward value is the same
+        # ratio up to association order (ULP-level).
+        scale   = jnp.max(p_grid, axis=-1, keepdims=True)
+        scale_s = jnp.where(scale > 0, scale, 1.0)
+        n_sc    = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
+        n_sc    = n_sc.reshape(jnp.shape(m1))
+        scale_m = scale_s[..., 0].reshape(jnp.shape(m1))
+        return jnp.where(
+            n_sc > 0, (p / scale_m) / jnp.where(n_sc > 0, n_sc, 1.0), 0.0
+        )
 
 
 class SpinModel(ABC):
@@ -430,7 +445,7 @@ class PopulationModel:
             tm    = theta[:-1]
             gamma = theta[-1]
             p     = self.mixture(m1, q, chieff, tm)
-            log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+            log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
             return log_p + (gamma - 1.0) * jnp.log1p(z)
 
         n_mix  = self.mixture.n_params
@@ -441,4 +456,4 @@ class PopulationModel:
         gamma_shape = (self.mixture.k,) + (1,) * (jnp.ndim(p_comp) - 1)
         z_factor = jnp.power(1.0 + z, gamma.reshape(gamma_shape) - 1.0)
         p = jnp.sum(p_comp * z_factor, axis=0)
-        return jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        return jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
