@@ -49,8 +49,14 @@ def test_marginalized_result_metadata_is_unambiguous():
     assert attrs["n_pairs"] == 0
     assert attrs["n_pairs_meaning"] == "reference_partition_n_pairs"
     assert attrs["reference_partition_n_pairs"] == 0
-    assert attrs["expected_n_pairs"] == 0.75
-    assert attrs["map_partition_n_pairs"] == 1
+    # Midpoint-derived quantities are now explicitly labelled (library
+    # review, lensing CLI finding 6): the attrs carry a prior_midpoint_
+    # prefix + an eval-point marker so pre-posterior numbers cannot be
+    # traced into a paper as run results.
+    assert attrs["partition_diagnostics_eval_point"] == "prior_midpoint"
+    assert attrs["prior_midpoint_expected_n_pairs"] == 0.75
+    assert attrs["prior_midpoint_map_partition_n_pairs"] == 1
+    assert "expected_n_pairs" not in attrs
     assert attrs["n_partitions"] == 3
 
 

@@ -505,6 +505,19 @@ def extract_event_samples_from_gw_pe(
         if rng is None:
             rng = np.random.default_rng()
         d = _downsample(d, int(pe_max), rng)
+        # Do NOT renormalise after downsampling: load_gw_samples already
+        # normalised prior_wt over the FULL nsamp per event, and the
+        # singleton/driven-sample roles keep that convention. Renormalising
+        # the subset multiplied the KDE estimand by ~ nsamp/pe_max, silently
+        # suppressing every pairing by log(nsamp/pe_max) (~1.6 nats at the
+        # 2000->400 defaults) in marginalize_exact partition posteriors and
+        # j2-vs-off evidence comparisons (library review; found independently
+        # by both lensing reviewers with matching measured offsets). The
+        # unbiased subset convention is weights summing to ~ N_sub/N_full.
+        d["prior_wt"] = validate_pair_prior_wt(
+            d["prior_wt"], context=f"gw_pe event {event_index}/prior_wt"
+        )
+        return d
     d["prior_wt"] = _normalize_pair_image_prior_wt(
         d["prior_wt"], context=f"gw_pe event {event_index}/prior_wt"
     )
@@ -1151,8 +1164,14 @@ def _write_diagnostics(run_dir, diagnostics):
                     f.attrs[key] = json.dumps(value)
             elif isinstance(value, str):
                 f.attrs[key] = value
+            elif value is None:
+                # h5py cannot store None (object dtype); keep the key visible.
+                f.attrs[key] = "null"
             else:
-                f.attrs[key] = value
+                try:
+                    f.attrs[key] = value
+                except TypeError:
+                    f.attrs[key] = json.dumps(value, default=str)
 
 
 def _make_run_dir(opts):
@@ -1213,13 +1232,18 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
         attrs["global_partitions_enumerated"] = bool(diagnostics.get("global_partitions_enumerated", True))
         if diagnostics.get("approximate_total_partitions") is not None:
             attrs["approximate_total_partitions"] = int(diagnostics["approximate_total_partitions"])
-        attrs["expected_n_singletons"] = float(diagnostics["expected_n_singletons"])
-        attrs["expected_n_pairs"] = float(diagnostics["expected_n_pairs"])
-        attrs["map_partition_index"] = int(diagnostics["map_partition_index"])
+        # These are evaluated at the PRIOR MIDPOINT (the stdout print says so;
+        # the file attrs previously did not — library review, lensing CLI
+        # finding 6): label them explicitly so nobody traces pre-posterior
+        # numbers into a paper as run results.
+        attrs["partition_diagnostics_eval_point"] = "prior_midpoint"
+        attrs["prior_midpoint_expected_n_singletons"] = float(diagnostics["expected_n_singletons"])
+        attrs["prior_midpoint_expected_n_pairs"] = float(diagnostics["expected_n_pairs"])
+        attrs["prior_midpoint_map_partition_index"] = int(diagnostics["map_partition_index"])
         map_partition = diagnostics["map_partition"]
-        attrs["map_partition_n_singletons"] = int(map_partition["n_singletons"])
-        attrs["map_partition_n_pairs"] = int(map_partition["n_pairs"])
-        attrs["logL_marginalized"] = float(diagnostics["logL_marginalized"])
+        attrs["prior_midpoint_map_partition_n_singletons"] = int(map_partition["n_singletons"])
+        attrs["prior_midpoint_map_partition_n_pairs"] = int(map_partition["n_pairs"])
+        attrs["prior_midpoint_logL_marginalized"] = float(diagnostics["logL_marginalized"])
         attrs["log_z_partition_prior"] = float(diagnostics["log_z_partition_prior"])
         attrs["edge_mark_prior_keys"] = json.dumps(inp.get("edge_mark_prior_keys", []))
         attrs["edge_prior_semantics"] = "effective_log_prior_odds = raw_log_prior_odds + sum(requested log_* marks)"
@@ -1360,6 +1384,9 @@ def build_cluster_likelihood(
                 ),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
+                selection_neff_soft_guard=bool(
+                    getattr(opts, "selection_neff_soft_guard", False)
+                ),
             )
 
         def _eval_partition(part):
@@ -1490,6 +1517,9 @@ def build_cluster_diagnostics(
                 ),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
+                selection_neff_soft_guard=bool(
+                    getattr(opts, "selection_neff_soft_guard", False)
+                ),
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
@@ -1573,6 +1603,21 @@ def build_cluster_diagnostics(
                         local_selection_delta = float(
                             np.asarray(raw["selection_correction_total"])
                         ) - float(selection0)
+                        if not (
+                            np.isfinite(local_selection_delta)
+                            and np.isfinite(count_delta[n_pairs])
+                        ):
+                            raise RuntimeError(
+                                "componentwise exact factorization: selection "
+                                "correction is NON-FINITE at the evaluation point "
+                                f"(delta {local_selection_delta!r} vs "
+                                f"{count_delta[n_pairs]!r}) — typically the "
+                                "sparse-Neff guard (Neff <= 5 N_obs) firing at "
+                                "the prior midpoint. Increase the injection "
+                                "campaign (or use a profile whose Neff clears "
+                                "the threshold); the factorization check cannot "
+                                "run on -inf corrections."
+                            )
                         if not np.isclose(
                             local_selection_delta,
                             count_delta[n_pairs],
@@ -1580,7 +1625,13 @@ def build_cluster_diagnostics(
                             atol=1e-8,
                         ):
                             raise RuntimeError(
-                                "componentwise exact factorization failed: selection correction is not count-only"
+                                "componentwise exact factorization failed: selection "
+                                "correction is not count-only "
+                                f"(n_pairs={n_pairs}: component delta "
+                                f"{local_selection_delta!r} vs probe delta "
+                                f"{count_delta[n_pairs] if n_pairs < len(count_delta) else 'MISSING'!r}, "
+                                f"n_probe_partitions={len(count_delta)}; component part "
+                                f"n_singletons={part['n_singletons']}, n_pairs={part['n_pairs']})"
                             )
                         deltas.append(local_content - baseline_content)
                     component_deltas.append(deltas)
@@ -1707,7 +1758,16 @@ def build_parser():
     p.add_argument("--gw_path", required=True)
     p.add_argument("--gwselection_path", required=True)
     p.add_argument("--lensed_injections_path", default=None)
-    p.add_argument("--pair_pe_path", default=None)
+    p.add_argument(
+        "--pair_pe_path", default=None,
+        help=(
+            "DEPRECATED legacy split-pair layout: the mock generator stopped "
+            "writing mock_pair_pe.h5 by default (2026-07-01 unified-catalog "
+            "migration) and preflight's event-index range check has never "
+            "accepted the split layout. Use the unified observed catalog "
+            "(--observed_catalog_path + optional --pair_metadata_path)."
+        ),
+    )
     p.add_argument(
         "--pair_metadata_path",
         default=None,
@@ -1806,6 +1866,19 @@ def build_parser():
             "Use 'on' only for non-vmapped samplers; use 'off' to force vmappable behavior."
         ),
     )
+    p.add_argument(
+        "--selection_neff_guard",
+        choices=["auto", "hard", "soft"],
+        default="auto",
+        help=(
+            "Sparse-selection (Neff <= 5 N_obs) validity guard for the combined "
+            "singleton+cluster correction. 'hard' returns -inf (nested samplers; "
+            "historical behavior). 'soft' replaces the wall with a steep smooth "
+            "penalty so gradient-based samplers are not divergence-flagged on "
+            "every trajectory that brushes it. 'auto' picks soft for "
+            "--sampler numpyro and hard otherwise."
+        ),
+    )
     # sampler
     p.add_argument("--sampler", required=True, choices=["tinyns", "dynesty", "numpyro"])
     p.add_argument("--nlive", type=int, default=2000)
@@ -1815,6 +1888,11 @@ def build_parser():
     p.add_argument("--nuts_warmup", type=int, default=500)
     p.add_argument("--nuts_samples", type=int, default=2000)
     p.add_argument("--nuts_chains", type=int, default=4)
+    p.add_argument("--nuts_target_accept", type=float, default=0.8)
+    p.add_argument("--nuts_max_tree_depth", type=int, default=10)
+    p.add_argument("--nuts_chain_method", default="sequential",
+                   choices=["sequential", "parallel", "vectorized"])
+    p.add_argument("--nuts_init_tries", type=int, default=32)
     # perf / memory
     p.add_argument(
         "--pe_max_per_pair",
@@ -1881,7 +1959,20 @@ def main():
     ):
         print(
             "  [i] Disabling likelihood-internal redshift-prior optimization_barrier "
-            "for TinyNS JAX rwalk vmappability.",
+            f"({opts.redshift_prior_barrier_resolved}).",
+            flush=True,
+        )
+
+    guard_mode = getattr(opts, "selection_neff_guard", "auto")
+    opts.selection_neff_soft_guard = (
+        guard_mode == "soft"
+        or (guard_mode == "auto" and opts.sampler == "numpyro")
+    )
+    if opts.selection_neff_soft_guard:
+        print(
+            "  [i] Sparse-selection Neff guard: SOFT (smooth wall for "
+            f"gradient-based sampling; mode={guard_mode}). Verify the "
+            "posterior clears the Neff <= 5 N_obs boundary post hoc.",
             flush=True,
         )
 
@@ -2120,6 +2211,17 @@ def main():
             if results.get("logZ") is not None:
                 f.attrs["logZ"] = float(results["logZ"])
             write_tinyns_metadata(f.attrs, results, opts)
+            # NUTS health metadata, mirroring io.results.save_results_hdf5 —
+            # divergence counts previously existed only in stdout for lensing
+            # runs (library review, lensing CLI finding 7).
+            if results.get("numpyro_diagnostics") is not None:
+                try:
+                    f.attrs["numpyro_diagnostics"] = json.dumps(
+                        results["numpyro_diagnostics"], default=str)
+                except (TypeError, ValueError):
+                    pass
+            f.attrs["selection_neff_soft_guard"] = bool(
+                getattr(opts, "selection_neff_soft_guard", False))
         settings.update(
             wl_a=float(opts.lensing_wl_a),
             wl_b=float(opts.lensing_wl_b),

@@ -27,7 +27,7 @@ import h5py
 import numpy as np
 
 # Dataset names must match darksirens_pixelate's mark columns so load_survey_marks
-# picks them up (see darksirens/tool/darksirens_pixelate.py).
+# picks them up (see darksirens/cli/pixelate.py).
 _MARK_DATASETS = ("mark_logmstar", "mark_logssfr")
 
 

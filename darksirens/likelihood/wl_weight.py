@@ -161,7 +161,12 @@ def log_sample_weight_wl_marginalized(
     Nmu=16, scalar input) this is 256 kB per event, comfortably fitting
     in cache.
     """
-    H0, Om0 = cosmo.H0, cosmo.Om0
+    # Full CPL: dropping w0/wa here ran the WL mu-marginalisation in LambdaCDM
+    # while the surrounding likelihood (clamp bounds, volume prior, pop z
+    # terms) used the sampled w0/wa (library review, likelihood finding 2 /
+    # lensing finding 5): internally inconsistent for any --fixed_de false
+    # WL run.
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
     # Broadcast: (..., Nmu)
     mu_b = mu_nodes                                            # (Nmu,)
@@ -174,10 +179,10 @@ def log_sample_weight_wl_marginalized(
 
     # True (cosmological) dL for each μ node
     dL_true = dL_b * jnp.sqrt(mu_b)                            # (..., Nmu)
-    in_grid = dL_in_z_grid(dL_true, H0, Om0)                   # (..., Nmu)
+    in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)                   # (..., Nmu)
 
     # z_s on each μ node (NaN outside grid; we mask to -inf below)
-    z_s = z_of_dL(dL_true, H0, Om0)                            # (..., Nmu)
+    z_s = z_of_dL(dL_true, H0, Om0, w0, wa)                            # (..., Nmu)
     # Replace NaN with a finite dummy so downstream ops don't NaN-poison
     # the logsumexp; we'll mask with -inf at the end.
     z_s_safe = jnp.where(in_grid, z_s, 0.5)                    # arbitrary finite value
@@ -190,7 +195,7 @@ def log_sample_weight_wl_marginalized(
                              catalog).reshape(z_s_safe.shape)            # (..., Nmu)
     log_pwl = log_p_wl_fn(mu_b, z_s_safe)                                # (..., Nmu)
     log_J   = log_jacobian_m1src_q_z_to_m1det_q_dL(
-        z_s_safe, dL_true, H0, Om0
+        z_s_safe, dL_true, H0, Om0, w0, wa
     )                                                                    # (..., Nmu)
 
     # Per-node log-integrand (BEFORE PE proposal subtraction)
@@ -323,10 +328,15 @@ def log_sample_weight_wl_lognormal_hermite(
     order as the WL effect itself. For commit-2 accuracy this is fine.
     A future commit will iterate to self-consistency.
     """
-    H0, Om0 = cosmo.H0, cosmo.Om0
+    # Full CPL: dropping w0/wa here ran the WL mu-marginalisation in LambdaCDM
+    # while the surrounding likelihood (clamp bounds, volume prior, pop z
+    # terms) used the sampled w0/wa (library review, likelihood finding 2 /
+    # lensing finding 5): internally inconsistent for any --fixed_de false
+    # WL run.
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
     # Apparent z (μ=1) sets the lognormal scale
-    z_app = z_of_dL(dL, H0, Om0)                                # (...,)
+    z_app = z_of_dL(dL, H0, Om0, w0, wa)                                # (...,)
     z_app_safe = jnp.maximum(z_app, 1.0e-3)                     # avoid s=0 at z=0
     s2 = wl_a * jnp.power(z_app_safe, wl_b)                     # (...,)
     s  = jnp.sqrt(s2)
@@ -345,15 +355,15 @@ def log_sample_weight_wl_lognormal_hermite(
     pix_b = jnp.broadcast_to(pix[..., None], dL_b.shape[:-1] + (u_b.shape[0],)).astype(pix.dtype)
 
     dL_true = dL_b * jnp.sqrt(mu)                                # (..., Nu)
-    in_grid = dL_in_z_grid(dL_true, H0, Om0)
-    z_s = z_of_dL(dL_true, H0, Om0)
+    in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)
+    z_s = z_of_dL(dL_true, H0, Om0, w0, wa)
     z_s_safe = jnp.where(in_grid, z_s, 0.5)
     m1src = m1det_b / (1.0 + z_s_safe)
 
     log_pp = log_p_pop_fn(m1src, q_b, z_s_safe, chieff_b, pop_params)
     log_pz = log_prior_z_fn(z_s_safe.reshape(-1),
                             pix_b.reshape(-1), catalog).reshape(z_s_safe.shape)
-    log_J  = log_jacobian_m1src_q_z_to_m1det_q_dL(z_s_safe, dL_true, H0, Om0)
+    log_J  = log_jacobian_m1src_q_z_to_m1det_q_dL(z_s_safe, dL_true, H0, Om0, w0, wa)
 
     # Per-node log-integrand: NO extra +log μ from substitution
     # (Hermite quadrature substitution carries the WL PDF as measure).

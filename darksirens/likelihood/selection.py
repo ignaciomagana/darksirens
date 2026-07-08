@@ -162,7 +162,10 @@ def selection_log_correction(
             -nEvents * log_mu
             + nEvents * (3 + nEvents) / (2.0 * Neff_taylor)
         )
-        return correction + wall
+        total = correction + wall
+        # mu == 0 exactly (all-invalid injections): correction and wall are
+        # +/-inf and their sum is NaN — collapse to the hard verdict.
+        return jnp.where(jnp.isfinite(total), total, -jnp.inf)
     correction = (
         -nEvents * log_mu
         + nEvents * (3 + nEvents) / (2.0 * Neff)

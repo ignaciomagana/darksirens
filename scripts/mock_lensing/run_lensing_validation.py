@@ -88,7 +88,7 @@ def _latest_results_attrs(save_root: Path) -> dict:
         return {k: (v.decode() if isinstance(v, bytes) else v.item() if hasattr(v, "item") else v) for k, v in f.attrs.items()}
 
 
-def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int, pair_batch_size: int = 0, partition_mode: str = "fixed", use_unified_observed_catalog: bool = False, skip_preflight: bool = False) -> dict:
+def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, cfg: dict[str, int], seed: int, pair_batch_size: int = 0, partition_mode: str = "fixed", use_unified_observed_catalog: bool = False, skip_preflight: bool = False, pass_pair_metadata: bool = True) -> dict:
     if save_root.exists():
         shutil.rmtree(save_root)
     save_root.mkdir(parents=True, exist_ok=True)
@@ -110,7 +110,11 @@ def _run_cli(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
             "--partition_mode", partition_mode,
         ]
         if use_unified_observed_catalog:
-            cmd += ["--pair_metadata_path", str(mock_dir / "mock_pair_metadata.h5")]
+            # Metadata is optional in unified mode with pair_marks=none; the
+            # wrong-partition control MUST omit it (its truth event indices
+            # would make preflight reject the deliberately-wrong partition).
+            if pass_pair_metadata and (mock_dir / "mock_pair_metadata.h5").exists():
+                cmd += ["--pair_metadata_path", str(mock_dir / "mock_pair_metadata.h5")]
         else:
             cmd += ["--pair_pe_path", str(mock_dir / "mock_pair_pe.h5")]
         if partition_mode == "marginalize_exact":
@@ -142,8 +146,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="forwarded to the lensing CLI for J=2 pair likelihood batching")
     ap.add_argument("--run_marginalized", action="store_true",
                     help="also run --partition_mode marginalize_exact when candidate_pairs.json exists")
-    ap.add_argument("--use_unified_observed_catalog", action="store_true",
-                    help="run validation with mock_observed_gw_pe.h5 as --gw_path")
+    ap.add_argument("--use_unified_observed_catalog",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="run validation with mock_observed_gw_pe.h5 as --gw_path "
+                         "(default: on — the legacy split-pair layout cannot pass "
+                         "preflight since the 2026-07-01 unified-catalog migration)")
     ap.add_argument("--skip_preflight", action="store_true",
                     help="skip the preflight-only pass before each expensive CLI run")
     args = ap.parse_args(argv)
@@ -166,8 +173,8 @@ def main(argv: list[str] | None = None) -> int:
 
     off = _run_cli(mock, runs / "off", cluster_mode="off", partition=None, cfg=cfg, seed=args.seed, use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight)
     true = _run_cli(mock, runs / "j2_true", cluster_mode="j2", partition=mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight)
-    wrong = _run_cli(mock, runs / "j2_wrong", cluster_mode="j2", partition=wrong_part, cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight)
-    null = _run_cli(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, skip_preflight=args.skip_preflight)
+    wrong = _run_cli(mock, runs / "j2_wrong", cluster_mode="j2", partition=wrong_part, cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight, pass_pair_metadata=False)
+    null = _run_cli(null_mock, runs / "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", cfg=cfg, seed=args.seed, pair_batch_size=args.pair_batch_size, use_unified_observed_catalog=args.use_unified_observed_catalog, skip_preflight=args.skip_preflight)
     marginalized = None
     if args.run_marginalized and (mock / "candidate_pairs.json").exists():
         marginalized_root = runs / "j2_marginalized"
@@ -203,8 +210,8 @@ def main(argv: list[str] | None = None) -> int:
             "marginalized_pair_probabilities_in_unit_interval": all(0.0 <= p <= 1.0 for p in probs),
             "marginalized_results_partition_mode_attr": marginalized_attrs.get("partition_mode") == "marginalize_exact",
             "marginalized_results_n_partitions_attr": "n_partitions" in marginalized_attrs,
-            "marginalized_results_expected_n_pairs_attr": "expected_n_pairs" in marginalized_attrs,
-            "marginalized_results_map_partition_n_pairs_attr": "map_partition_n_pairs" in marginalized_attrs,
+            "marginalized_results_expected_n_pairs_attr": "prior_midpoint_expected_n_pairs" in marginalized_attrs,
+            "marginalized_results_map_partition_n_pairs_attr": "prior_midpoint_map_partition_n_pairs" in marginalized_attrs,
             "marginalized_results_reference_partition_n_pairs_attr": "reference_partition_n_pairs" in marginalized_attrs,
         })
     print("\n[validation] diagnostics summary")

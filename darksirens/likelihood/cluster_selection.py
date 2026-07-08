@@ -78,6 +78,7 @@ from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.lensing.lensed_injections import LensedInjectionSet
 from darksirens.lensing.slmarks import SISLensParams, tau_2_SIS
 from darksirens.utils.utils import logdiffexp
+from darksirens.likelihood.selection import selection_log_correction
 
 
 def _per_source_log_weight(
@@ -208,6 +209,7 @@ def combined_selection_log_correction(
     log_sigma2_cluster: jnp.ndarray,
     n_singletons_observed: int,
     n_clusters_observed: int,
+    soft_guard: bool = False,
 ) -> jnp.ndarray:
     """Master-likelihood selection-correction for the marked-Poisson
     singleton + J=2 cluster model.
@@ -265,12 +267,15 @@ def combined_selection_log_correction(
         jnp.exp(2.0 * log_mu_tot - log_sigma2_tot),
         0.0,
     )
-    N_tot = jnp.asarray(n_singletons_observed + n_clusters_observed,
-                        dtype=jnp.float64)
-    ll = jnp.where(Neff_tot <= 5.0 * N_tot, -jnp.inf, 0.0)
-    ll = ll + jnp.where(
-        N_tot > 0,
-        -N_tot * log_mu_tot + N_tot * (3.0 + N_tot) / (2.0 * Neff_tot),
-        0.0,
+    n_tot = int(n_singletons_observed) + int(n_clusters_observed)
+    if n_tot <= 0:
+        return jnp.asarray(0.0)
+    # Delegate to the singleton correction so the sparse-Neff guard semantics
+    # (hard -inf for nested samplers, reward-tracking smooth wall for
+    # gradient-based sampling) stay defined in exactly one place — the
+    # cluster stack previously had only the hard wall and reproduced the
+    # 100%-divergent-NUTS failure the main CLI was fixed for (library
+    # review, lensing-stack finding 4).
+    return selection_log_correction(
+        log_mu_tot, Neff_tot, n_tot, soft_guard=soft_guard
     )
-    return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)

@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GEN = ROOT / "scripts" / "mock_lensing" / "generate_mock_lensing.py"
 
 PROFILES: dict[str, dict[str, int]] = {
-    "tiny_evidence": dict(n_universe=4000, n_sing=2, n_pair=2, nsamp=56, n_unlensed_inj=1200, n_lensed_inj=1200, pe_max=56, default_nlive=40),
+    "tiny_evidence": dict(n_universe=4000, n_sing=2, n_pair=2, nsamp=56, n_unlensed_inj=4800, n_lensed_inj=4800, pe_max=56, default_nlive=40),  # inj counts sized so Neff_combined clears the 5*N_tot sparse guard at the prior midpoint (was 11.7 vs threshold 30 at 1200: every diagnostic was -inf)
     "small_evidence": dict(n_universe=10000, n_sing=4, n_pair=3, nsamp=96, n_unlensed_inj=3000, n_lensed_inj=3500, pe_max=96, default_nlive=80),
 }
 
@@ -145,7 +145,7 @@ def _collect_run(save_root: Path, *, runtime_s: float, command: list[str]) -> di
     }
 
 
-def _cli_cmd(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, sampler: str, nlive: int, dlogz: float, seed: int, cfg: dict[str, int], pair_batch_size: int = 0, partition_mode: str = "fixed", use_unified_observed_catalog: bool = False, fix_lens_rate: bool = True, pair_pe_path: Path | None = None, pair_tag_model: str = "constant", pair_tag_perturb_logit: float = 0.0, pair_tag_constant: float = 1.0) -> list[str]:
+def _cli_cmd(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: Path | None, sampler: str, nlive: int, dlogz: float, seed: int, cfg: dict[str, int], pair_batch_size: int = 0, partition_mode: str = "fixed", use_unified_observed_catalog: bool = False, fix_lens_rate: bool = True, pair_pe_path: Path | None = None, pair_tag_model: str = "constant", pair_tag_perturb_logit: float = 0.0, pair_tag_constant: float = 1.0, pass_pair_metadata: bool = True) -> list[str]:
     cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(mock_dir / ("mock_observed_gw_pe.h5" if use_unified_observed_catalog else "mock_gw_pe.h5")), "--gwselection_path", str(mock_dir / "mock_gw_selection.h5"), "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak", "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true", "--fix_lens_rate", str(fix_lens_rate).lower(), "--sampler", sampler, "--nlive", str(nlive), "--dlogz", str(dlogz), "--max_samples", "5000", "--pe_max_per_pair", str(cfg["pe_max"]), "--pair_batch_size", str(pair_batch_size), "--seed", str(seed), "--cluster_mode", cluster_mode, "--save_path", str(save_root), "--pair_tag_model", pair_tag_model, "--pair_tag_constant", str(pair_tag_constant), "--pair_tag_perturb_logit", str(pair_tag_perturb_logit)]
     if use_unified_observed_catalog:
         cmd += ["--observed_catalog_path", str(mock_dir / "observed_catalog.json")]
@@ -156,7 +156,10 @@ def _cli_cmd(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
         if use_unified_observed_catalog:
             if pair_pe_path is not None:
                 cmd += ["--pair_pe_path", str(pair_pe_path)]
-            else:
+            elif pass_pair_metadata and (mock_dir / "mock_pair_metadata.h5").exists():
+                # Optional with pair_marks=none; wrong-partition controls must
+                # omit it (truth event indices would fail preflight against
+                # the deliberately-wrong partition).
                 cmd += ["--pair_metadata_path", str(mock_dir / "mock_pair_metadata.h5")]
         else:
             cmd += ["--pair_pe_path", str(pair_pe_path or mock_dir / "mock_pair_pe.h5")]
@@ -274,7 +277,13 @@ def _posterior_pair_probability_check(diagnostics: dict[str, Any], *, tol: float
     probs = diagnostics.get("posterior_pair_probabilities")
     if not probs:
         return False, "posterior_pair_probabilities missing"
-    vals = np.asarray(list(probs.values()) if isinstance(probs, dict) else probs, dtype=float)
+    # marginal_diagnostics emits a LIST OF DICTS with a 'p_pair' field per
+    # candidate edge; accept dict/list-of-floats forms for compatibility.
+    if isinstance(probs, dict):
+        raw = list(probs.values())
+    else:
+        raw = [x.get("p_pair") if isinstance(x, dict) else x for x in probs]
+    vals = np.asarray(raw, dtype=float)
     if vals.size == 0 or not np.all(np.isfinite(vals)):
         return False, "posterior_pair_probabilities are empty or non-finite"
     if not np.all((vals >= 0.0) & (vals <= 1.0)):
@@ -343,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--nlive", type=int, default=None)
     ap.add_argument("--dlogz", type=float, default=10.0)
     ap.add_argument("--pair_batch_size", type=int, default=8)
-    ap.add_argument("--use_unified_observed_catalog", type=_str2bool, default=False)
+    ap.add_argument("--use_unified_observed_catalog", type=_str2bool, default=True)
     ap.add_argument("--run_lens_rate_recovery", type=_str2bool, default=False)
     ap.add_argument("--dry_run", type=_str2bool, default=False)
     ap.add_argument("--diagnostics_only", type=_str2bool, default=False)
@@ -372,9 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     cases = {
         "off_true_catalog": cmd("off_true_catalog", mock, "off_true_catalog", cluster_mode="off", partition=None, use_unified_observed_catalog=args.use_unified_observed_catalog),
         "j2_fixed_true": cmd("j2_fixed_true", mock, "j2_fixed_true", cluster_mode="j2", partition=mock / "partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog),
-        "j2_fixed_wrong": cmd("j2_fixed_wrong", mock, "j2_fixed_wrong", cluster_mode="j2", partition=work / "wrong_partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog, pair_pe_path=(None if args.use_unified_observed_catalog else work / "wrong_pair_pe.h5")),
-        "j2_null": cmd("j2_null", null_mock, "j2_null", cluster_mode="j2", partition=null_mock / "partition.json"),
-        "off_null": cmd("off_null", null_mock, "off_null", cluster_mode="off", partition=None),
+        "j2_fixed_wrong": cmd("j2_fixed_wrong", mock, "j2_fixed_wrong", cluster_mode="j2", partition=work / "wrong_partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog, pair_pe_path=(None if args.use_unified_observed_catalog else work / "wrong_pair_pe.h5"), pass_pair_metadata=False),
+        "j2_null": cmd("j2_null", null_mock, "j2_null", cluster_mode="j2", partition=null_mock / "partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog),
+        "off_null": cmd("off_null", null_mock, "off_null", cluster_mode="off", partition=None, use_unified_observed_catalog=args.use_unified_observed_catalog),
         "j2_batched": cmd("j2_batched", mock, "j2_batched", cluster_mode="j2", partition=mock / "partition.json", pair_batch_size=max(1, args.pair_batch_size), use_unified_observed_catalog=args.use_unified_observed_catalog),
         "correct_pair_tag_model": cmd("correct_pair_tag_model", mock, "correct_pair_tag_model", cluster_mode="j2", partition=mock / "partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog, pair_tag_model="snr_time"),
         "perturbed_pair_tag_model": cmd("perturbed_pair_tag_model", mock, "perturbed_pair_tag_model", cluster_mode="j2", partition=mock / "partition.json", use_unified_observed_catalog=args.use_unified_observed_catalog, pair_tag_model="snr_time", pair_tag_perturb_logit=1.0),
