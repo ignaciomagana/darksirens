@@ -501,6 +501,11 @@ def main():
                    help="Mass-ratio-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_Q).")
     g.add_argument("--norm_nchi", type=int, default=None, metavar="N",
                    help="Spin-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_CHI).")
+    g.add_argument("--kernel_gl_nodes", type=int, default=None, metavar="N",
+                   help="Gauss-Legendre nodes for the per-galaxy kernel normalisation Z_i "
+                        "(default 24). Spectroscopic catalogs (sigma_eff <~ 5e-3) are exact "
+                        "to likelihood precision at 4-8 nodes and the quadrature dominates "
+                        "wide-sky dark-siren runs; do NOT reduce for broad photo-z kernels.")
 
     g = optp.add_argument_group("Lensing")
     g.add_argument("--lensing_wl_model", choices=["lognormal", "tabulated"], default="lognormal",
@@ -533,6 +538,12 @@ def main():
         )
     except ValueError as e:
         _fatal(str(e))
+
+    if opts.kernel_gl_nodes is not None:
+        from darksirens.redshift.catalog import configure_kernel_quadrature
+        if opts.kernel_gl_nodes < 2:
+            _fatal("--kernel_gl_nodes must be >= 2")
+        configure_kernel_quadrature(opts.kernel_gl_nodes)
 
     prior_overrides        = parse_json_arg(opts.prior_overrides,        "prior_overrides")
     fixed_parameter_values = parse_json_arg(opts.fixed_parameter_values, "fixed_parameter_values")

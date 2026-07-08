@@ -130,5 +130,9 @@ def test_lensing_cli_base_decoder_ignores_appended_lens_coordinate(monkeypatch):
     value = float(loglike(jnp.asarray([-4.0])))
 
     assert seen_decoder_shapes == [(0,)]
-    assert seen_sis == pytest.approx([(1.0e-4, 3.0)])
+    # pytest.approx does not recurse into tuples, so compare fields directly
+    # (10**-4.0 differs from the 1e-4 literal by one float64 ULP).
+    assert len(seen_sis) == 1
+    assert seen_sis[0][0] == pytest.approx(1.0e-4)
+    assert seen_sis[0][1] == pytest.approx(3.0)
     assert value == pytest.approx(3.0001)

@@ -43,6 +43,8 @@ Population mixtures are selected with `--pop_model` using a compositional name g
 
 Incomplete-catalog dark-siren runs use a data-driven completion model rather than a parametric logistic rolloff: the observed per-pixel galaxy redshift KDE is divided by the identically smoothed expected `n0 * dV_c/dz * (1 + z)^delta` density, clipped to `[0, 1]`, and converted into an additive missing-galaxy density. `z50` and `w` remain in the survey parameter block for compatibility, but the current completion likelihood is controlled by `log10n0`, `delta`, `b_miss` (with fixed `alpha_miss = 1` unless overridden), and `sigma_kde`. Run `--validate_completion true` for dry-run clipping diagnostics before long dark-siren analyses.
 
+Two performance notes for wide-sky dark-siren runs (many pixels × many galaxies per pixel): the per-galaxy kernel-state build is automatically row-chunked above a size threshold, bounding device memory with no numerical change (`darksirens.redshift.catalog.configure_catalog_row_chunk`); and `--kernel_gl_nodes N` reduces the Gauss–Legendre node count of the per-galaxy kernel normalisation — exact to likelihood precision at `N = 4`–`8` for spectroscopic catalogs (`sigma_eff ≲ 5e-3`) and roughly `24/N`× faster, but do **not** reduce it for broad photo-z kernels.
+
 ### LSS-conditioned lognormal completion
 
 By default the missing-galaxy branch is modulated by the local-overdensity factor `max(1 + b_eff * delta_g(p,z), 0)`. Optionally it can instead be multiplied by a **precomputed, LSS-conditioned lognormal completion field** `Q_LSS(p,z)`:
@@ -75,15 +77,15 @@ The builder produces a **MAP** estimate `Q_MAP` and, optionally, a fixed **Lapla
 p_Bayes(z|p) = (1/M) * sum_m p_m(z|p),
 ```
 
-where each member prior `p_m` is normalised individually. The target for a fully Bayesian marginalisation over completion realisations is
+where each member prior `p_m` is normalised individually. The fully Bayesian marginalisation over completion realisations,
 
 ```
-log L(Lambda) ≈ logsumexp_m log L(Lambda; Q_m) - log M,
+log L(Lambda) = logsumexp_m log L(Lambda; Q_m) - log M,
 ```
 
-which is **not** performed inside the GW likelihood in this implementation (member support is exposed through prior-state diagnostics).
+is performed inside the GW likelihood when `--lss_marginalize true` is passed together with an ensemble completion file (`--n-members M > 0`); it costs ~`M×` the deterministic likelihood and is supported for `--universe_model dark_sirens`. Without the flag, inference consumes only the deterministic MAP (or posterior-mean) `Q`.
 
-**Scope & caveats (experimental — read before using as a science result).** The **default** builder (`--mode radial`) is a **radial, per-pixel** lognormal completion: each HEALPix line of sight is an independent 1-D field along comoving distance, so it does **not** borrow information angularly between neighbouring pixels. **`--mode gp3d`** lifts exactly this limitation (a clustered (sphere × z) field; empty pixels borrow from neighbours), but it remains a low-rank GP reconstruction, not a full 3-D `P(k)`-conditioned `BORG`-style inference. The GW likelihood uses the **deterministic / posterior-mean** `Q` (not the fully-marginalised `logsumexp_m`), so it is not yet Bayesian over field uncertainty. The completeness `C = dN_obs/dN_exp` and the fitted `Q` are both derived from the **same** observed counts, so `Q` is the sub-smoothing **residual** rather than a separately-identifiable completeness (an external/shrinkage completeness option is a planned next step); and the whole construction assumes **missing galaxies trace the observed clustering** — an assumption the data alone cannot validate. `Q` is built at **fixed fiducial** cosmology/survey parameters (printed + stored at load) while inference varies them. Treat results as exploratory.
+**Scope & caveats (experimental — read before using as a science result).** The **default** builder (`--mode radial`) is a **radial, per-pixel** lognormal completion: each HEALPix line of sight is an independent 1-D field along comoving distance, so it does **not** borrow information angularly between neighbouring pixels. **`--mode gp3d`** lifts exactly this limitation (a clustered (sphere × z) field; empty pixels borrow from neighbours), but it remains a low-rank GP reconstruction, not a full 3-D `P(k)`-conditioned `BORG`-style inference. The GW likelihood uses the **deterministic / posterior-mean** `Q` by default; pass `--lss_marginalize true` (with an ensemble file) for the fully-marginalised `logsumexp_m` treatment of the field uncertainty. The completeness `C = dN_obs/dN_exp` and the fitted `Q` are both derived from the **same** observed counts, so `Q` is the sub-smoothing **residual** rather than a separately-identifiable completeness (an external/shrinkage completeness option is a planned next step); and the whole construction assumes **missing galaxies trace the observed clustering** — an assumption the data alone cannot validate. `Q` is built at **fixed fiducial** cosmology/survey parameters (printed + stored at load) while inference varies them. Treat results as exploratory.
 
 ### Marked-host model (galaxy marks → BBH-host efficiency)
 

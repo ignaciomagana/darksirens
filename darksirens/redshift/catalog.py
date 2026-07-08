@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import numpy as np
 import jax.numpy as jnp
-from jax import jit, vmap
+from jax import jit, lax, vmap
 from jax.scipy.special import logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
 from typing import NamedTuple
@@ -63,10 +63,36 @@ _ZMAX: float = float(np.asarray(zgrid)[-1])
 SIGMA_EFF_FLOOR: float = 1e-4
 
 # Gauss–Legendre nodes/weights on [0, 1] for the kernel normalisation.
+# The default 24 nodes are conservative for broad photo-z kernels; for
+# spectroscopic catalogs (sigma_eff ~ 1e-3, g(z) locally smooth) far fewer
+# nodes are exact to likelihood precision and the quadrature dominates the
+# per-proposal cost of wide-sky runs, so the count is configurable.
 _GL_NODES = 24
-_glx, _glw = np.polynomial.legendre.leggauss(_GL_NODES)
-_GL_X = jnp.asarray(0.5 * (_glx + 1.0))
-_GL_W = jnp.asarray(0.5 * _glw)
+_GL_X = None
+_GL_W = None
+
+
+def configure_kernel_quadrature(n_nodes: int = 24):
+    """Set the Gauss–Legendre node count for the kernel normalisation Z_i.
+
+    Trace-time configuration: call BEFORE the first likelihood evaluation
+    (reconfiguring after a jit trace does not affect the compiled graph).
+    Node-count guidance: 24 (default) is safe for any kernel width; 8 is
+    validated for spectroscopic catalogs across the sampled sigma_kde prior
+    (see tests/test_catalog_row_chunk.py); 4 is only safe when sigma_kde is
+    FIXED near zero — its error grows ~20x by sigma_kde = 0.05.
+    """
+    global _GL_NODES, _GL_X, _GL_W
+    n_nodes = int(n_nodes)
+    if n_nodes < 2:
+        raise ValueError(f"kernel quadrature needs >= 2 nodes, got {n_nodes}")
+    _GL_NODES = n_nodes
+    _glx, _glw = np.polynomial.legendre.leggauss(_GL_NODES)
+    _GL_X = jnp.asarray(0.5 * (_glx + 1.0))
+    _GL_W = jnp.asarray(0.5 * _glw)
+
+
+configure_kernel_quadrature(_GL_NODES)
 
 
 def _row_real_mask(zs, ws, ngal):
@@ -74,6 +100,71 @@ def _row_real_mask(zs, ws, ngal):
     if ngal is not None:
         return jnp.arange(zs.shape[0]) < ngal
     return ws > 0
+
+
+# Row-chunked mapping over catalog rows.  The per-row kernel-norm quadrature
+# materialises (N_max_gals, K) intermediates; a plain vmap over all rows holds
+# (N_rows, N_max_gals, K) at once, which OOMs for wide-sky runs (e.g. a
+# 49k-row x 2113-galaxy DESI view requests ~80 GB).  Above the element
+# threshold the vmap is wrapped in ``lax.map`` over fixed-size row chunks:
+# identical per-row arithmetic (no cross-row ops), bounded peak memory.
+_ROW_CHUNK_AUTO_THRESHOLD: int = 2**25   # N_rows * N_max_gals elements
+_ROW_CHUNK_SIZE: int = 512
+_ROW_CHUNK_MODE = "auto"                 # "auto" | None | int (for tests)
+
+
+def configure_catalog_row_chunk(mode="auto"):
+    """Set row-chunking for kernel-state builds: "auto", None (off), or an int.
+
+    Trace-time configuration: call BEFORE the first likelihood evaluation.
+    Reconfiguring after a function has been jit-traced has no effect on the
+    already-compiled graph (the mode is read when the trace is built).
+    """
+    global _ROW_CHUNK_MODE
+    if mode is not None and mode != "auto":
+        mode = int(mode)
+        if mode < 1:
+            raise ValueError(f"row chunk must be >= 1, got {mode}")
+    _ROW_CHUNK_MODE = mode
+
+
+def _resolve_row_chunk(n_rows: int, n_max: int) -> int | None:
+    if _ROW_CHUNK_MODE is None:
+        return None
+    if _ROW_CHUNK_MODE != "auto":
+        return int(_ROW_CHUNK_MODE)
+    if n_rows * n_max > _ROW_CHUNK_AUTO_THRESHOLD:
+        return _ROW_CHUNK_SIZE
+    return None
+
+
+def _map_rows(row_fn, args: tuple):
+    """vmap ``row_fn`` over the leading (row) axis of every array in ``args``,
+    chunking with ``lax.map`` when the catalog view is large (see above).
+
+    Zero-padded rows evaluate through the same masked per-row path (empty
+    ``real`` mask) and are sliced off the result, so outputs are identical to
+    the unchunked vmap row-for-row.
+    """
+    n_rows = args[0].shape[0]
+    n_max = args[0].shape[1] if args[0].ndim > 1 else 1
+    chunk = _resolve_row_chunk(n_rows, n_max)
+    if chunk is None or chunk >= n_rows:
+        return vmap(row_fn)(*args)
+
+    n_pad = (-n_rows) % chunk
+    def _prep(a):
+        if n_pad:
+            pad = jnp.zeros((n_pad,) + a.shape[1:], dtype=a.dtype)
+            a = jnp.concatenate([a, pad], axis=0)
+        return a.reshape((n_rows + n_pad) // chunk, chunk, *a.shape[1:])
+    chunked = tuple(_prep(a) for a in args)
+    out = lax.map(lambda ch: vmap(row_fn)(*ch), chunked)
+    def _post(o):
+        return o.reshape(-1, *o.shape[2:])[:n_rows]
+    if isinstance(out, tuple):
+        return tuple(_post(o) for o in out)
+    return _post(out)
 
 
 def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid):
@@ -158,18 +249,19 @@ def catalog_kernel_state(
     ngals = em_catalog.ngals
 
     if ngals is not None:
-        per_row = vmap(_row_kernel_state, in_axes=(0, 0, 0, 0, None, None, None))
-        log_kw, sig_eff = per_row(
-            zgals, dzgals, wgals, ngals, survey.sigma_kde, log_g_grid, volume_weighted
+        log_kw, sig_eff = _map_rows(
+            lambda zs, dzs, ws, ng: _row_kernel_state(
+                zs, dzs, ws, ng, survey.sigma_kde, log_g_grid, volume_weighted
+            ),
+            (zgals, dzgals, wgals, ngals),
         )
     else:
-        per_row = vmap(
+        log_kw, sig_eff = _map_rows(
             lambda zs, dzs, ws: _row_kernel_state(
                 zs, dzs, ws, None, survey.sigma_kde, log_g_grid, volume_weighted
             ),
-            in_axes=(0, 0, 0),
+            (zgals, dzgals, wgals),
         )
-        log_kw, sig_eff = per_row(zgals, dzgals, wgals)
 
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
@@ -225,18 +317,19 @@ def marked_catalog_kernel_state(
     ngals = em_catalog.ngals
 
     if ngals is not None:
-        per_row = vmap(_row_marked_kernel_state, in_axes=(0, 0, 0, 0, 0, None, None))
-        log_kw, sig_eff, log_N_host = per_row(
-            zgals, dzgals, wgals, log_h, ngals, survey.sigma_kde, log_g_grid
+        log_kw, sig_eff, log_N_host = _map_rows(
+            lambda zs, dzs, ws, lh, ng: _row_marked_kernel_state(
+                zs, dzs, ws, lh, ng, survey.sigma_kde, log_g_grid
+            ),
+            (zgals, dzgals, wgals, log_h, ngals),
         )
     else:
-        per_row = vmap(
+        log_kw, sig_eff, log_N_host = _map_rows(
             lambda zs, dzs, ws, lh: _row_marked_kernel_state(
                 zs, dzs, ws, lh, None, survey.sigma_kde, log_g_grid
             ),
-            in_axes=(0, 0, 0, 0),
+            (zgals, dzgals, wgals, log_h),
         )
-        log_kw, sig_eff, log_N_host = per_row(zgals, dzgals, wgals, log_h)
 
     return CatalogKernelState(log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff), log_N_host
 

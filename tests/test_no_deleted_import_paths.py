@@ -19,6 +19,10 @@ def test_deleted_import_paths_not_used_in_production_code():
         if not root.exists():
             continue
         for path in root.rglob("*.py"):
+            # Jupyter checkpoint litter is not production code and preserves
+            # pre-refactor imports by construction.
+            if ".ipynb_checkpoints" in path.parts:
+                continue
             text = path.read_text(encoding="utf-8")
             for needle in FORBIDDEN:
                 if needle in text:
