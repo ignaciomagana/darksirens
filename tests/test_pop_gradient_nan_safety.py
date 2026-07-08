@@ -36,6 +36,36 @@ except Exception:  # pragma: no cover
     HAVE_TINYGP = False
 
 
+@pytest.mark.parametrize("pop_model", ["powerlaw+peak", "gp1d_m1"])
+def test_log_p_pop_gradient_finite_at_negative_beta(pop_model):
+    """q**beta on a q-grid containing 0 exactly: pow's VJP gives 0*inf = NaN
+    in d/dbeta for EVERY beta < 0 (library review, populations finding 1) —
+    the prior floor is -2, so NUTS was silently walled out of beta <= 0."""
+    if pop_model == "gp1d_m1" and not HAVE_TINYGP:
+        pytest.skip("tinygp unavailable (or stubbed by a parametric test module)")
+    from darksirens.gw.populations import pop_model_prior_parser
+
+    log_p_pop = pop_model_parser(pop_model)
+    theta = np.array(get_fixed_population_params(pop_model), dtype=float, copy=True)
+    _, _, labels, *_ = pop_model_prior_parser(pop_model)
+    beta_idx = [i for i, l in enumerate(labels) if "beta" in str(l).lower()]
+    assert beta_idx, f"no beta-like label in {labels}"
+    theta[beta_idx[0]] = -0.5
+
+    m1 = jnp.asarray([35.0, 20.0])
+    q = jnp.asarray([0.8, 0.5])
+    z = jnp.asarray([0.3, 0.3])
+    chieff = jnp.asarray([0.0, 0.1])
+
+    def total(th):
+        lp = log_p_pop(m1, q, z, chieff, th)
+        lp = jnp.where(jnp.isfinite(lp), lp, -jnp.inf)
+        return jax.scipy.special.logsumexp(lp)
+
+    grad = np.asarray(jax.grad(total)(jnp.asarray(theta)))
+    assert np.all(np.isfinite(grad)), dict(zip(map(str, labels), grad.tolist()))
+
+
 @pytest.mark.parametrize("pop_model", MODELS)
 def test_log_p_pop_gradient_finite_at_zero_density(pop_model):
     if pop_model == "gp1d_m1" and not HAVE_TINYGP:

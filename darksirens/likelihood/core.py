@@ -143,11 +143,19 @@ def darksiren_log_likelihood(
     # The sky factor g(n̂, z) may depend on redshift (3-D models); the selection
     # closure derives z from dL with the SAME cosmology as the PE term, so the
     # detector-anisotropy cancellation between the two is preserved.
-    sky_log_weight_fn = (
-        (lambda nx, ny, nz, dL: log_g_sky(
-            nx, ny, nz, z_of_dL(dL, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa), sky_params
-        )) if apply_sky else None
-    )
+    # Clamped distance, same rationale as the weight paths below: an
+    # out-of-support dL makes z_of_dL return its NaN sentinel, and any
+    # z-dependent sky model multiplying that z by sampled parameters
+    # NaN-poisons the reverse pass despite the -inf value mask (library
+    # review, likelihood finding 4). The invalid samples carry exactly zero
+    # weight through the select, so the clamped garbage z is inert.
+    def _sky_weight(nx, ny, nz, dL):
+        dL_lo, dL_hi = dL_grid_bounds(cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+        z_c = z_of_dL(jnp.clip(dL, dL_lo, dL_hi),
+                      cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+        return log_g_sky(nx, ny, nz, z_c, sky_params)
+
+    sky_log_weight_fn = _sky_weight if apply_sky else None
     # Weak-lensing dispatch (static): wl_enabled gates ALL WL machinery off for
     # every non-WL model, so they remain numerically identical to the non-WL code.
     wl_enabled = wl_backend != WL_BACKEND_DISABLED
@@ -333,8 +341,10 @@ def darksiren_log_likelihood(
                 catalog_ev,
             )
             # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
+            # Clamped dL for the same reverse-NaN reason as the weight paths.
             if apply_sky:
-                z_ev = z_of_dL(dL_ev, H0, Om0, w0, wa)
+                dL_lo_s, dL_hi_s = dL_grid_bounds(H0, Om0, w0, wa)
+                z_ev = z_of_dL(jnp.clip(dL_ev, dL_lo_s, dL_hi_s), H0, Om0, w0, wa)
                 ldw = ldw + log_g_sky(
                     sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
                 )

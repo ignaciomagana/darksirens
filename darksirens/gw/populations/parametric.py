@@ -662,7 +662,13 @@ class PowerLawPairing(PairingModel):
         """Evaluate the unnormalised conditional density ``p(q | m1)``."""
         beta = t[0]
         m2 = q * m1
-        p = q**beta
+        # Safe pow: the normalisation q-grid contains q = 0 exactly, where
+        # 0**beta = inf for beta < 0; the value is masked below but pow's VJP
+        # then yields 0*inf = NaN in d/dbeta for EVERY beta < 0 (prior floor
+        # is -2), silently walling NUTS out of beta <= 0. Same double-where
+        # idiom as GWTC5FiducialBPL2PeaksPairing above.
+        safe_q = jnp.where(q > 0.0, q, 1.0)
+        p = jnp.where(q > 0.0, safe_q**beta, 0.0)
         p = sfilter_low(m2, m_min, dm_min) * p
         return jnp.where(m2 < m_min, 0.0, p)
 

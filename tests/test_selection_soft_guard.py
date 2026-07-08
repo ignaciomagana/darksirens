@@ -66,6 +66,27 @@ def test_soft_guard_differentiable_across_threshold():
         assert g > 0.0, (x, g)
 
 
+def test_soft_guard_dominates_unbounded_reward():
+    """The retained -N log(mu) term grows without bound as mu -> 0; a
+    fixed-height wall saturates and opens a spurious high-likelihood pocket
+    in the deep-sparse region (library review, likelihood finding 3). The
+    reward-tracking wall must dominate at the review's demonstrated exploit
+    points, and crossing from valid Neff into the deep-sparse region at the
+    same mu must be strongly penalised."""
+    # (log_mu, Neff, nEvents) exploit points from the review:
+    v1 = float(selection_log_correction(jnp.asarray(-300.0), jnp.asarray(1.0), 100, soft_guard=True))
+    assert v1 < -1e5, v1
+    v2 = float(selection_log_correction(jnp.asarray(-50.0), jnp.asarray(10.0), 40, soft_guard=True))
+    assert v2 < -1e4, v2
+    # no incentive to cross below threshold at fixed mu:
+    for log_mu in (-300.0, -50.0, -5.0):
+        above = float(selection_log_correction(
+            jnp.asarray(log_mu), jnp.asarray(1.2 * THRESHOLD), N_EVENTS, soft_guard=True))
+        deep = float(selection_log_correction(
+            jnp.asarray(log_mu), jnp.asarray(0.5 * THRESHOLD), N_EVENTS, soft_guard=True))
+        assert deep < above - 1e3, (log_mu, above, deep)
+
+
 def test_barrier_resolver_disables_for_numpyro():
     # lax.optimization_barrier has no differentiation rule; NUTS on the
     # catalog (dark/bright) paths died with NotImplementedError until the

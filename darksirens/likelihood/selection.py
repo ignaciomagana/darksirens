@@ -140,15 +140,23 @@ def selection_log_correction(
         # every trajectory that brushes it is flagged divergent (the H1-profile
         # smoke measured 100% divergent transitions with the sparse-Neff wall
         # 1.5 posterior-sigma from the mean). Replace the wall with a steep
-        # smooth penalty: ~-0.7 at Neff == threshold, ~-100 by Neff ~ 0.75x
-        # threshold, growing linearly below — and freeze the 1/Neff Taylor
-        # term at the threshold so it cannot blow up (positively!) in the
-        # sparse regime the penalty is pushing away from. Bit-identical to the
-        # hard guard wherever Neff comfortably exceeds the threshold; nested
-        # samplers keep the hard cut, and the sampler cross-check (gate V9)
-        # verifies the difference carries no posterior mass.
+        # smooth penalty whose MAGNITUDE TRACKS the -N log(mu) reward it is
+        # guarding against: a fixed-height wall saturates (~ -1.5e3) while
+        # -N log(mu) grows without bound as mu -> 0, opening a spurious
+        # high-likelihood pocket in the deep-sparse region (library review,
+        # likelihood finding 3). With the reward-tracking factor the wall
+        # dominates the reward for Neff <~ 0.95x threshold; the residual
+        # boundary layer (0.95 < Neff/threshold < 1) is thin, its reward is
+        # already legitimately available just above threshold, and the
+        # sampler cross-check (gate V9) verifies no posterior mass sits
+        # there. Above ~1.05x threshold the gate underflows and the branch is
+        # numerically identical to the hard guard's valid branch. The 1/Neff
+        # Taylor term is frozen at the threshold so it cannot blow up
+        # (positively) in the regime the wall is pushing away from.
         x = Neff / threshold
-        wall = -100.0 * jax.nn.softplus(20.0 * (1.0 - x) - 5.0)
+        gate = jax.nn.softplus(200.0 * (1.0 - x) - 10.0)
+        reward_mag = nEvents * jax.nn.softplus(-log_mu)
+        wall = -gate * (100.0 + 2.0 * reward_mag)
         Neff_taylor = jnp.maximum(Neff, threshold)
         correction = (
             -nEvents * log_mu

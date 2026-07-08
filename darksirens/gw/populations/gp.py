@@ -457,12 +457,17 @@ class JointGPPopulation:
     def _baseline_pairing(self, m1, q, beta_q, m_min, dm_min):
         qg = get_q_grid()
         m2g = qg[None, :] * m1[..., None]
-        raw = (qg[None, :] ** beta_q) * jnp.nan_to_num(
+        # Safe pow (see PowerLawPairing._eval_unnorm): the q = 0 grid node
+        # makes d/dbeta_q NaN for every beta_q < 0 without the double-where.
+        qg_safe = jnp.where(qg > 0.0, qg, 1.0)
+        raw = jnp.where(qg[None, :] > 0.0, qg_safe[None, :] ** beta_q, 0.0) * jnp.nan_to_num(
             sfilter_low(m2g, m_min, dm_min), nan=0.0)
         raw = jnp.where(m2g < m_min, 0.0, raw)
         norm = jnp.trapezoid(raw, qg, axis=-1)
         m2 = q * m1
-        p = (q ** beta_q) * jnp.nan_to_num(sfilter_low(m2, m_min, dm_min), nan=0.0)
+        q_safe = jnp.where(q > 0.0, q, 1.0)
+        p = jnp.where(q > 0.0, q_safe ** beta_q, 0.0) * jnp.nan_to_num(
+            sfilter_low(m2, m_min, dm_min), nan=0.0)
         p = jnp.where(m2 < m_min, 0.0, p)
         return p / jnp.where(norm > 0, norm, 1.0)
 
