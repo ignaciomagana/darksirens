@@ -975,7 +975,11 @@ def test_lensing_cli_sampled_lens_params_affect_cluster_and_pair_terms(monkeypat
     low = float(loglike(jnp.asarray([-6.0, 1.0])))
     high = float(loglike(jnp.asarray([-3.0, 4.0])))
 
-    assert seen == pytest.approx([(1.0e-6, 1.0), (1.0e-3, 4.0)])
+    # pytest.approx does not recurse into tuples (10**x differs from the
+    # literal by one float64 ULP), so compare fields directly.
+    assert [len(s) for s in seen] == [2, 2]
+    assert [s[0] for s in seen] == pytest.approx([1.0e-6, 1.0e-3])
+    assert [s[1] for s in seen] == pytest.approx([1.0, 4.0])
     assert high != low
 
 
@@ -1109,7 +1113,12 @@ class TestWeakLensingSingletonSelection:
 
         src = inspect.getsource(inference_lensing.main)
         assert 'f.attrs["wl_selection"] = opts.wl_selection' in src
-        assert "for k, v in vars(opts).items()" in src
+        # The generic settings-persistence loop was factored out of main()
+        # into _jsonable_settings (still `for k, v in vars(opts).items()`);
+        # assert main still routes the full opts through it.
+        assert "_jsonable_settings(opts)" in src
+        helper_src = inspect.getsource(inference_lensing._jsonable_settings)
+        assert "for k, v in vars(opts).items()" in helper_src
 
 # PR08 candidate-pair partition enumeration tests
 

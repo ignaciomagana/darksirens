@@ -391,7 +391,7 @@ def poisson_lognormal_gp3d_map(
     *,
     bias: float = 1.0,
     sigma2_vox=None,
-    max_newton: int = 50,
+    max_newton: int = 100,
     tol: float = 1e-8,
     logq_clip: float = 7.0,
     field_clip: float = 10.0,
@@ -409,7 +409,14 @@ def poisson_lognormal_gp3d_map(
     Nystrom prior variance) for the per-voxel lognormal mean-one shift.  Solved by
     Newton with Armijo backtracking on the ``M x M`` SPD Hessian
     ``H = I + bias^2 Phi^T diag(lam) Phi`` (SPD even when ``V < M`` thanks to the
-    prior ``I``); falls back to L-BFGS-B if Newton stalls.
+    prior ``I``); falls back to L-BFGS-B if Newton stalls.  The gradient/Hessian
+    are KKT-projected at the ``field_clip`` boundary: a voxel pinned at the clip
+    and pressing outward contributes nothing (its clipped field is locally
+    constant in ``xi``), while one pulling back inward keeps its pull so iterates
+    can re-enter.  This keeps gradient, Hessian, and objective describing the
+    same clipped function (no line-search stall against phantom pull from
+    saturated voxels) and lets a legitimate kink minimum — data demanding a field
+    beyond the clip, e.g. ``N_obs >> base`` — report ``converged``.
 
     Returns ``{xi_map, H_chol, sigma2_vox, f_solve, logq_solve, lambda_solve,
     diagnostics}``.  ``H_chol`` (lower Cholesky of ``H`` at the MAP) feeds BOTH the
@@ -433,18 +440,39 @@ def poisson_lognormal_gp3d_map(
     eye = np.eye(M)
 
     def _lam(xi):
-        fld = np.clip(Phi @ xi, -field_clip, field_clip)
-        return fld, np.where(mask, np.exp(logbase + b * fld - shift), 0.0)
+        raw = Phi @ xi
+        fld = np.clip(raw, -field_clip, field_clip)
+        return raw, fld, np.where(mask, np.exp(logbase + b * fld - shift), 0.0)
 
     def _objective(xi):
-        fld, lam = _lam(xi)
+        _, fld, lam = _lam(xi)
         loglam = logbase + b * fld - shift
         data = float(np.sum(lam - N_obs * np.where(mask, loglam, 0.0)))
         return 0.5 * float(np.dot(xi, xi)) + data
 
+    # Voxels pinned at the field clip and pressing OUTWARD contribute nothing to
+    # d(objective)/d(xi) (the clipped field is locally constant in xi there);
+    # voxels at the clip pulling back INWARD keep their pull so iterates can
+    # re-enter. Without this KKT projection the gradient describes a different
+    # function than the objective, the Armijo test can never be satisfied, and
+    # the line search stalls — and a legitimate kink minimum (a voxel the data
+    # push beyond the clip, e.g. N_obs >> base) could never report converged.
+    # Boundary tolerance for the KKT test: a kink minimizer is approached from
+    # strictly inside the clip in floating point, where the outward pull is
+    # still fully counted; treating a 1e-6 field-unit sliver as "at the clip"
+    # is physically nothing (the output table is clipped to logq_clip anyway).
+    clip_eps = 1e-6
+
+    def _kkt_residual(raw, lam):
+        w = np.where(mask, lam - N_obs, 0.0)
+        pinned = (((raw >= field_clip - clip_eps) & (w < 0.0))
+                  | ((raw <= -(field_clip - clip_eps)) & (w > 0.0)))
+        return np.where(pinned, 0.0, w), pinned
+
     def _grad(xi):
-        _, lam = _lam(xi)
-        return xi + b * (Phi.T @ np.where(mask, lam - N_obs, 0.0))
+        raw, _, lam = _lam(xi)
+        w, _ = _kkt_residual(raw, lam)
+        return xi + b * (Phi.T @ w)
 
     # Scale-aware gradient tolerance: the Poisson data gradient scales with the
     # observed counts, so convergence is judged on the gradient inf-norm relative
@@ -455,12 +483,13 @@ def poisson_lognormal_gp3d_map(
     xi = np.zeros(M, dtype=float)
     n_iter = 0
     for n_iter in range(1, int(max_newton) + 1):
-        _, lam = _lam(xi)
-        g = xi + b * (Phi.T @ np.where(mask, lam - N_obs, 0.0))
+        raw, _, lam = _lam(xi)
+        w, pinned = _kkt_residual(raw, lam)
+        g = xi + b * (Phi.T @ w)
         gnorm = float(np.max(np.abs(g))) if M else 0.0
         if gnorm < gtol:
             break
-        W = Phi * (np.where(mask, lam, 0.0) * (b * b))[:, None]    # (V, M)
+        W = Phi * (np.where(mask & ~pinned, lam, 0.0) * (b * b))[:, None]    # (V, M)
         H = eye + Phi.T @ W                                        # (M, M) SPD
         try:
             step = np.linalg.solve(H, g)
@@ -493,11 +522,43 @@ def poisson_lognormal_gp3d_map(
             xi = np.asarray(res.x, dtype=float)
             g = _grad(xi)
             gnorm = float(np.max(np.abs(g))) if M else 0.0
+    gnorm_raw = gnorm
+    n_pin = 0
+    if gnorm >= gtol:
+        # KKT stationarity at a kink minimum: with voxels pinned at the field
+        # clip, the projected gradient need not vanish — the kept residual must
+        # be BALANCED by bounded multipliers on the pinned voxels' feature rows,
+        # g = sum_p c_p phi_p with c_p between 0 and -bias*w_p (the dropped
+        # outward pull). Complementary slackness: only voxels AT the boundary
+        # (within clip_eps) admit a multiplier — a voxel strictly beyond the
+        # clip has a locally flat objective and its subdifferential is {0}, so
+        # granting it a multiplier would certify non-stationary points as
+        # converged (module review of the fix, finding 1). Fit by bounded least
+        # squares and judge convergence on what the multipliers cannot absorb.
+        # Skipped for absurdly large boundary sets (grossly inconsistent inputs
+        # SHOULD read unconverged).
+        raw, _, lam = _lam(xi)
+        w_all = np.where(mask, lam - N_obs, 0.0)
+        _, pinned = _kkt_residual(raw, lam)
+        at_bnd = pinned & (np.abs(raw) <= field_clip + clip_eps)
+        n_pin = int(np.sum(pinned))
+        n_bnd = int(np.sum(at_bnd))
+        if 0 < n_bnd <= 4 * M:
+            A = Phi[at_bnd].T                               # (M, P)
+            cb = -b * w_all[at_bnd]
+            lb, ub = np.minimum(0.0, cb), np.maximum(0.0, cb)
+            try:
+                fit = optimize.lsq_linear(A, g, bounds=(lb, ub))
+                gnorm = float(np.max(np.abs(g - A @ fit.x)))
+            except Exception:                               # pragma: no cover
+                pass                                        # keep raw gnorm
     converged = bool(gnorm < gtol)
 
-    # Hessian Cholesky at the MAP (feeds the Laplace ensemble).
-    _, lam = _lam(xi)
-    W = Phi * (np.where(mask, lam, 0.0) * (b * b))[:, None]
+    # Hessian Cholesky at the MAP (feeds the Laplace ensemble); clip-pinned
+    # voxels carry no curvature, same masking as the solve.
+    raw, _, lam = _lam(xi)
+    _, pinned = _kkt_residual(raw, lam)
+    W = Phi * (np.where(mask & ~pinned, lam, 0.0) * (b * b))[:, None]
     H = eye + Phi.T @ W
     try:
         H_chol = np.linalg.cholesky(H)              # lower; H = H_chol H_chol^T
@@ -519,7 +580,12 @@ def poisson_lognormal_gp3d_map(
             "bias": b,
             "n_iter": int(n_iter),
             "converged": bool(converged),
+            # grad_inf is what `converged` was judged on: the projected-gradient
+            # inf-norm after absorbing the bounded boundary-KKT multipliers (it
+            # equals grad_inf_raw whenever no voxel sat at the clip boundary).
             "grad_inf": float(gnorm),
+            "grad_inf_raw": float(gnorm_raw),
+            "n_pinned": int(n_pin),
             "logq_clip": float(logq_clip),
         },
     }

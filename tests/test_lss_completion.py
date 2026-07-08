@@ -99,8 +99,10 @@ def test_compact_vs_global_indexing():
         COSMO, SURVEY_B0,
         _tiny_catalog(lss_completion_logq=compact, lss_completion_indexing=1),
     )
-    assert float(jnp.max(jnp.abs(cc.dN_miss[0] - 3.0 * q1.dN_miss[0]))) < 1e-10
-    assert float(jnp.max(jnp.abs(cc.dN_miss[1] - 5.0 * q1.dN_miss[1]))) < 1e-10
+    # dN_miss is O(1e8) here, so compare at relative float64 precision: the
+    # x*exp(log q) vs q*x orderings legitimately differ by ~1 ULP.
+    np.testing.assert_allclose(np.asarray(cc.dN_miss[0]), 3.0 * np.asarray(q1.dN_miss[0]), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(cc.dN_miss[1]), 5.0 * np.asarray(q1.dN_miss[1]), rtol=1e-12)
 
     # global: rows map to pixels 5 and 2; table is global-pixel indexed
     gt = np.zeros((6, NG))
@@ -114,8 +116,8 @@ def test_compact_vs_global_indexing():
             lss_completion_indexing=2,
         ),
     )
-    assert float(jnp.max(jnp.abs(gc.dN_miss[0] - 3.0 * q1.dN_miss[0]))) < 1e-10
-    assert float(jnp.max(jnp.abs(gc.dN_miss[1] - 5.0 * q1.dN_miss[1]))) < 1e-10
+    np.testing.assert_allclose(np.asarray(gc.dN_miss[0]), 3.0 * np.asarray(q1.dN_miss[0]), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(gc.dN_miss[1]), 5.0 * np.asarray(q1.dN_miss[1]), rtol=1e-12)
 
 
 def test_member_shapes_and_mean():

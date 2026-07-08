@@ -51,11 +51,21 @@ from darksirens.redshift.lognormal_completion import (
 )
 
 
-def _fiducial_cosmo_survey():
-    """Fiducial cosmology + survey (matching the inference dry-run defaults)."""
+def _fiducial_cosmo_survey(log10n0=None, delta=None):
+    """Fiducial cosmology + survey (matching the inference dry-run defaults).
+
+    ``log10n0``/``delta`` override the expected-density normalisation
+    ``dN_exp = n0 * apix * dV_c/dz * (1+z)^delta`` that the Poisson-lognormal
+    fit is conditioned on.  Calibrate ``log10n0`` to the survey's observed
+    comoving density: a mis-set n0 cannot be separated from completeness and
+    is absorbed into Q with spurious redshift structure (which then biases
+    any downstream H0 inference — see working/GATES.md V2/V3).
+    """
     cosmo = CosmoParams(H0=H0Planck, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial)
     survey = SurveyParams(
-        n0=10.0 ** -2.0, z50=1.0, w=0.5, delta=0.0,
+        n0=10.0 ** (float(log10n0) if log10n0 is not None else -2.0),
+        z50=1.0, w=0.5,
+        delta=float(delta) if delta is not None else 0.0,
         b_miss=1.0, alpha_miss=1.0, sigma_kde=0.0,
     )  # lss_corr_length_mpc / lss_sigma take their container defaults
     return cosmo, survey
@@ -86,6 +96,8 @@ def _build_completion_radial(
     seed: int = 1234,
     prior_strength: float = 1.0,
     maxiter: int = 300,
+    log10n0=None,
+    delta=None,
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
@@ -100,7 +112,7 @@ def _build_completion_radial(
     n_grid = int(zgrid.size)
     apix = float(hp.nside2pixarea(int(nside)))
 
-    cosmo, survey = _fiducial_cosmo_survey()
+    cosmo, survey = _fiducial_cosmo_survey(log10n0=log10n0, delta=delta)
     em = EMCatalog(
         apix=apix, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(dzgals),
         wgals=jnp.asarray(wgals), ngals=jnp.asarray(ngals),
@@ -186,6 +198,8 @@ def _build_completion_gp3d(
     gp3d_nz_solve: int = 32,
     gp3d_pix_chunk: int = 512,
     lss_corr_length_ang=None,
+    log10n0=None,
+    delta=None,
 ):
     """3-D angular-coupling MAP + optional ensemble log Q tables.
 
@@ -204,7 +218,7 @@ def _build_completion_gp3d(
     n_grid = int(zgrid.size)
     apix = float(hp.nside2pixarea(int(nside)))
 
-    cosmo, survey = _fiducial_cosmo_survey()
+    cosmo, survey = _fiducial_cosmo_survey(log10n0=log10n0, delta=delta)
     if lss_corr_length_ang is not None:
         survey = survey._replace(lss_corr_length_ang=float(lss_corr_length_ang))
 
@@ -258,24 +272,28 @@ def _build_completion_gp3d(
     # Coarse SOLVE z-grid: the field is low-rank in z (only M_z nodes), so a fine
     # solve grid adds no resolvable radial signal.  Output is on the full zgrid.
     z_s = np.linspace(0.0, float(zgrid_np[-1]), int(gp3d_nz_solve))
-    dz_s = np.gradient(z_s)
     edges_s = np.concatenate([[z_s[0]], 0.5 * (z_s[:-1] + z_s[1:]), [z_s[-1]]])
     zeta_s = np.log1p(z_s)
     G_s = int(z_s.size)
-    # Expected counts per coarse z-bin (delta-weighted density — same footing as
-    # the integer observed counts).
-    dN_exp_count_s = np.interp(z_s, zgrid_np, dN_exp_density) * dz_s        # (G_s,)
-
     n_hat_occ = np.asarray(hp.pix2vec(int(nside), occ, nest=False), dtype=float).T  # (n_occ,3)
-    C_vox = np.empty((n_occ, G_s), dtype=float)
+    # Expected OBSERVED counts per coarse z-bin: integrate C(z) * dN_exp(z) over
+    # each bin on the fine grid, on the same footing as the histogram that fills
+    # N_obs_vox over the same bin. Point-evaluating C at the coarse node instead
+    # is catastrophic wherever the KDE support and the bin contents disagree
+    # (e.g. the z=0 node of a low-z-complete catalog: C(0) ~ KDE tail ~ 0 while
+    # the bin holds real galaxies, so the fit demands field values beyond
+    # field_clip and the solve saturates).
+    dz_fine = np.diff(zgrid_np)
     N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
+    base_vox = np.empty((n_occ, G_s), dtype=float)
     for i, r in enumerate(occ):
         dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        C_vox[i] = np.clip(np.interp(z_s, zgrid_np, dN_obs_s / safe_smooth), 0.0, 1.0)
+        prod = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0) * dN_exp_density
+        cum = np.concatenate([[0.0], np.cumsum(0.5 * (prod[1:] + prod[:-1]) * dz_fine)])
+        base_vox[i] = np.diff(np.interp(edges_s, zgrid_np, cum))
         zs = zgals_np[r, : ngals_np[r]]
         counts_s, _ = np.histogram(zs, bins=edges_s)
         N_obs_vox[i] = counts_s
-    base_vox = C_vox * dN_exp_count_s[None, :]                             # (n_occ, G_s)
 
     # Map the fixed radial Mpc length into the kernel's zeta = log1p(z) units at a
     # count-weighted reference redshift: ls_z = L_mpc * dzeta/dchi |_{z_ref}.
@@ -349,6 +367,8 @@ def build_completion(
     gp3d_nz_solve: int = 32,
     gp3d_pix_chunk: int = 512,
     lss_corr_length_ang=None,
+    log10n0=None,
+    delta=None,
 ):
     """Build the log Q completion tables from a survey catalog.
 
@@ -361,12 +381,14 @@ def build_completion(
         return _build_completion_radial(
             catalog_path, n_members=n_members, seed=seed,
             prior_strength=prior_strength, maxiter=maxiter,
+            log10n0=log10n0, delta=delta,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
             catalog_path, n_members=n_members, seed=seed,
             gp3d_nz_solve=gp3d_nz_solve, gp3d_pix_chunk=gp3d_pix_chunk,
             lss_corr_length_ang=lss_corr_length_ang,
+            log10n0=log10n0, delta=delta,
         )
     raise ValueError(f"Unknown build mode {mode!r}; expected 'radial' or 'gp3d'.")
 
@@ -393,6 +415,14 @@ def main(argv=None):
     p.add_argument("--lss-corr-length-ang", type=float, default=None,
                    help="(gp3d) Override the fixed angular (chordal) correlation "
                         "length; default is the SurveyParams fiducial.")
+    p.add_argument("--log10n0", type=float, default=None,
+                   help="Override log10 of the expected comoving galaxy density "
+                        "[Mpc^-3] the fit is conditioned on (default -2.0). "
+                        "CALIBRATE this to the catalog (N / (f_sky * V_c)); a "
+                        "mis-set n0 is absorbed into Q as spurious z-structure.")
+    p.add_argument("--delta", type=float, default=None,
+                   help="Override the expected-density evolution exponent "
+                        "(1+z)^delta (default 0.0).")
     p.add_argument("--indexing", choices=["compact", "global"], default="global",
                    help="How the inference should index the Q rows. A full survey "
                         "catalog is global-HEALPix-pixel indexed (default).")
@@ -409,6 +439,7 @@ def main(argv=None):
         prior_strength=opts.prior_strength, maxiter=opts.maxiter,
         gp3d_nz_solve=opts.gp3d_nz_solve, gp3d_pix_chunk=opts.gp3d_pix_chunk,
         lss_corr_length_ang=opts.lss_corr_length_ang,
+        log10n0=opts.log10n0, delta=opts.delta,
     )
     print(f"    MAP logq_map shape {logq_map.shape}; "
           f"members {'none' if logq_members is None else logq_members.shape}")

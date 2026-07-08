@@ -135,6 +135,44 @@ def test_angular_borrowing():
     assert abs(qC) < 0.05               # C is effectively homogeneous (Q_C ~ 1)
 
 
+def test_solver_clip_saturation_no_stall():
+    """A voxel demanding a field far beyond field_clip (base ~ 1e-300 with
+    N_obs > 0 — the BGS z=0-node pathology) must saturate gracefully at the
+    clip: with the clip-masked gradient/Hessian the line search stays
+    consistent, the impossible voxel pins at +field_clip, and the rest of the
+    field still converges (pre-fix: Armijo stalled at iteration 2 and the
+    returned field was ~zero everywhere with grad_inf ~ 1e4)."""
+    Zn, Zz = lowrank_inducing_nodes()
+    z_s = np.linspace(0.1, 1.5, 6)
+    A = np.array([0.0, 0.0, 1.0])
+    X_n = np.repeat(A[None, :], z_s.size, axis=0)
+    Phi, _ = build_lowrank_operator(Zn, Zz, X_n, np.log1p(z_s),
+                                    amp=1.0, ls_sph=0.6, ls_z=0.6)
+    base = np.full(z_s.size, 10.0)
+    N_obs = base.copy()
+    base[0] = 1e-300            # essentially zero expected counts ...
+    N_obs[0] = 500.0            # ... but real galaxies counted in the bin
+    # (the Poisson pull on the shared latents scales with N, so N must beat the
+    # unit prior by >> field_clip to actually saturate, as the aggregated BGS
+    # z=0-node counts did)
+    mp = poisson_lognormal_gp3d_map(N_obs, base, Phi, bias=1.0)
+    d = mp["diagnostics"]
+    assert np.all(np.isfinite(mp["xi_map"]))
+    fld = np.asarray(mp["f_solve"])
+    assert float(fld[0]) >= 10.0 - 1e-6     # pinned at clip (within the
+    # solver's clip_eps band; a kink minimum is reached from inside in floats)
+    assert np.all(np.isfinite(fld))
+    assert float(np.max(np.abs(fld[1:]))) < 5.0   # rest of the field stays fit
+    # grad_inf is the residual AFTER absorbing the bounded KKT multipliers of
+    # the pinned voxels; pre-fix it was ~1e4 (raw stalled gradient). Exact
+    # stationarity at a kink needs equality-constrained steps the solver does
+    # not take (the pin chatters), so `converged` is honestly False here and
+    # only the relative residual is asserted; consistently-built inputs
+    # (base ~ N wherever galaxies exist) never pin and do report converged.
+    gscale = float(np.max(N_obs))
+    assert d["grad_inf"] < 0.01 * gscale, d
+
+
 def test_underdetermined_hessian_spd():
     """V < M (far fewer voxels than latents): the unit-Gaussian prior keeps H SPD
     and the solve well-posed (no special handling needed)."""
@@ -217,6 +255,82 @@ def test_gp3d_build_smoke_and_contract(tmp_path):
     for k in ("fiducial_H0", "bias_b_miss", "lss_corr_length_mpc", "lss_sigma",
               "lss_corr_length_ang"):
         assert k in diag
+
+
+def _write_lowz_survey(path, nside=2):
+    """Galaxies at z ~ 0.05 in two pixels: the first coarse solve bin holds them
+    all while dN_exp_density(z=0) ~ 0, so a base built by point-evaluating at
+    the node (instead of integrating C * dN_exp over the bin) is ~1e-308
+    against a real N_obs — the construction that saturated the BGS solve."""
+    import h5py
+    import healpy as hp
+    npix = hp.nside2npix(int(nside))
+    maxg = 5
+    zgals = np.full((npix, maxg), 100.0)
+    dzgals = np.full((npix, maxg), 0.01)
+    wgals = np.zeros((npix, maxg))
+    ngals = np.zeros(npix, dtype=np.int32)
+    rng = np.random.default_rng(1)
+    for p in (0, 1):
+        zgals[p, :3] = 0.05 + 0.01 * rng.standard_normal(3)
+        wgals[p, :3] = 1.0
+        ngals[p] = 3
+    with h5py.File(path, "w") as f:
+        f.attrs["nside"] = int(nside)
+        f.create_dataset("zgals", data=zgals)
+        f.create_dataset("ngals", data=ngals)
+        f.create_dataset("dzgals", data=dzgals)
+        f.create_dataset("wgals", data=wgals)
+    return npix
+
+
+def test_gp3d_lowz_catalog_base_consistent(tmp_path):
+    """End-to-end: a low-z catalog must build a converged gp3d table with no
+    spurious low-z completion spike. Fails pre-fix (bin-integrated base): the
+    z=0 node's point-evaluated base underflows, the solve saturates, and the
+    table degenerates."""
+    pytest.importorskip("healpy")
+    from darksirens.cli.build_lognormal_completion import build_completion
+    cat = str(tmp_path / "survey_lowz.h5")
+    npix = _write_lowz_survey(cat, nside=2)
+    logq_map, _, diag = build_completion(cat, mode="gp3d", n_members=0,
+                                         gp3d_nz_solve=16, gp3d_pix_chunk=8)
+    assert diag["converged"], diag
+    assert logq_map.shape[0] == npix
+    assert np.all(np.isfinite(logq_map))
+    j_lo = int(np.searchsorted(np.asarray(zgrid), 0.15))
+    # fixed build measures ~0.46 here; the point-evaluated-base regression
+    # measures ~2.97 (module review of the fix, finding 2a)
+    assert float(np.max(logq_map[:, :j_lo])) < 1.0
+
+
+def test_gp3d_base_counts_anchored_to_histogram(tmp_path, monkeypatch):
+    """Units guard on the bin-integrated base: over the bins that actually hold
+    the galaxies, sum(base) must be the same order as sum(N_obs) — for these
+    sparse fixtures C < 1 unclipped, so integral(C * dN_exp) ~ integral(dN_obs)
+    ~ the galaxy count. Catches stray normalization factors (dropped/extra dz)
+    that both end-to-end tests would miss (module review of the fix, finding
+    2b: a x0.25 base error still converged and passed the spike assert)."""
+    pytest.importorskip("healpy")
+    import darksirens.cli.build_lognormal_completion as B
+    cat = str(tmp_path / "survey_lowz.h5")
+    _write_lowz_survey(cat, nside=2)
+    captured = {}
+    orig = B.poisson_lognormal_gp3d_map
+
+    def spy(N_obs, base, Phi, **kw):
+        captured["N"] = np.asarray(N_obs, dtype=float).copy()
+        captured["base"] = np.asarray(base, dtype=float).copy()
+        return orig(N_obs, base, Phi, **kw)
+
+    monkeypatch.setattr(B, "poisson_lognormal_gp3d_map", spy)
+    B.build_completion(cat, mode="gp3d", n_members=0,
+                       gp3d_nz_solve=16, gp3d_pix_chunk=8)
+    N, base = captured["N"], captured["base"]
+    hold = N > 0
+    assert hold.any()
+    ratio = float(base[hold].sum() / N[hold].sum())
+    assert 0.3 < ratio < 3.0, ratio
 
 
 def test_gp3d_build_radial_dispatch_unchanged(tmp_path):
