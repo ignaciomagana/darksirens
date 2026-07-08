@@ -95,14 +95,23 @@ def interpnd(
     oob = jnp.zeros(coords[0].shape, dtype=bool)
 
     for coord, grid in zip(coords, points):
-        upper = jnp.clip(jnp.searchsorted(grid, coord, side="right"), 1, len(grid) - 1)
+        # Sanitize BEFORE computing weights: out-of-range (or NaN) queries are
+        # answered by fill_value anyway, but if the weight itself is computed
+        # from the raw coordinate the backward pass multiplies cotangents by
+        # non-finite intermediates (mul's VJP scales by the stored operand),
+        # so a single NaN/inf here poisons the WHOLE gradient even though the
+        # forward value is correctly masked. Clamp for the arithmetic; keep
+        # the mask from the raw coordinate.
+        bad = jnp.isnan(coord)
+        coord_c = jnp.where(bad, grid[0], jnp.clip(coord, grid[0], grid[-1]))
+        upper = jnp.clip(jnp.searchsorted(grid, coord_c, side="right"), 1, len(grid) - 1)
         lower = upper - 1
         denom = grid[upper] - grid[lower]
-        weight = (coord - grid[lower]) / denom
+        weight = (coord_c - grid[lower]) / denom
         lower_indices.append(lower)
         upper_indices.append(upper)
         weights.append(weight)
-        oob = oob | (coord < grid[0]) | (coord > grid[-1])
+        oob = oob | bad | (coord < grid[0]) | (coord > grid[-1])
 
     interpolated = jnp.zeros(coords[0].shape, dtype=values.dtype)
     for corner in range(1 << len(points)):

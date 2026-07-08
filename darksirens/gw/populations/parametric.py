@@ -342,7 +342,7 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
             * self.spin_component(chieff, ts, norm=spin_norm)
         )
         p = jnp.where(valid, p, 0.0)
-        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
         return log_p + (gamma - 1.0) * jnp.log1p(z)
 
 
@@ -631,7 +631,7 @@ class GolombSymmetricMassPopulationModel:
         p_spin = self.spin_component(chieff, theta_s, norm=spin_norm)
 
         p = p_mq * p_spin
-        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
 
         # Keep your current redshift convention:
         # p(z) ∝ (1 + z)^(gamma - 1).

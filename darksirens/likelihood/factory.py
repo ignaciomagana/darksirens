@@ -57,7 +57,13 @@ def _resolve_redshift_prior_materialization(opts) -> bool:
         and tinyns_cfg.get("kernel") == "jax"
         and tinyns_cfg.get("sample") == "rwalk"
     )
-    return not is_tinyns_jax_rwalk
+    # NumPyro NUTS differentiates the likelihood w.r.t. theta; the redshift
+    # prior STATE depends on theta and ``lax.optimization_barrier`` has no
+    # differentiation rule, so the barrier must come off for gradient-based
+    # sampling (otherwise dark/bright-siren NUTS dies with
+    # NotImplementedError at the first gradient).
+    is_numpyro = getattr(opts, "sampler", None) == "numpyro"
+    return not (is_tinyns_jax_rwalk or is_numpyro)
 
 
 def _redshift_prior_materialization_reason(opts, materialize: bool) -> str:
@@ -66,6 +72,8 @@ def _redshift_prior_materialization_reason(opts, materialize: bool) -> str:
         return f"forced {mode}"
     if materialize:
         return "auto -> on"
+    if getattr(opts, "sampler", None) == "numpyro":
+        return "auto -> off for NumPyro NUTS (optimization_barrier is not differentiable)"
     return "auto -> off for TinyNS JAX rwalk"
 
 
@@ -96,6 +104,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
+    selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
 
     # Weak-lensing magnification backend (resolved up front, before the heavy
     # catalog-view prep, so a missing WL config fails fast).  All values are
@@ -371,6 +380,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 wl_log_p_table=wl_log_p_table,
                 lss_marginalize=lss_marginalize,
                 materialize_redshift_prior_state=materialize_redshift_prior_state,
+                selection_neff_soft_guard=selection_neff_soft_guard,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -402,6 +412,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             wl_log_p_table=wl_log_p_table,
             lss_marginalize=lss_marginalize,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
+            selection_neff_soft_guard=selection_neff_soft_guard,
         )
 
     return likelihood

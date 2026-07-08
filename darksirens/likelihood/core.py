@@ -15,6 +15,7 @@ from darksirens.redshift.prior import (
     eval_redshift_prior_with_state,
     prepare_redshift_prior_state,
 )
+from darksirens.redshift.catalog import _logsumexp_neginf_safe
 from darksirens.gw.populations import pop_model_parser
 from darksirens.likelihood.selection import compute_selection_term, selection_log_correction
 from darksirens.inference.utils import log_sample_weight
@@ -26,7 +27,7 @@ from darksirens.lensing.grids import make_log_mu_grid, make_hermite_u_grid
 from darksirens.lensing.wlmagnification import make_tabulated_log_p_wl
 from darksirens.sky import sky_model_parser
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
-from darksirens.utils.cosmology import dL_in_z_grid, z_of_dL
+from darksirens.utils.cosmology import dL_grid_bounds, dL_in_z_grid, z_of_dL
 
 
 # Weak-lensing quadrature node counts / ranges.
@@ -57,6 +58,7 @@ WL_BACKEND_TABULATED = 1
         "wl_backend",
         "lss_marginalize",
         "materialize_redshift_prior_state",
+        "selection_neff_soft_guard",
     ],
 )
 def darksiren_log_likelihood(
@@ -90,6 +92,7 @@ def darksiren_log_likelihood(
     wl_log_p_table: jnp.ndarray | None = None,
     lss_marginalize: bool = False,
     materialize_redshift_prior_state: bool = True,
+    selection_neff_soft_guard: bool = False,
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
@@ -225,28 +228,39 @@ def darksiren_log_likelihood(
             angular factor g(n̂, z) is applied separately in ``_pe_event_fn`` (so WL
             is only ever combined with an isotropic sky in this build — see the WL
             docs).
+
+            The weight arithmetic runs on a CLAMPED distance: out-of-support
+            samples hit z_of_dL's NaN sentinel, and although the -inf mask fixes
+            the VALUE, every multiplication that stored a NaN operand replays it
+            in the backward pass regardless of the zero cotangent (mul's VJP
+            scales by the stored operand) — one out-of-grid sample then poisons
+            d logL/dH0 for the whole event and NUTS cannot run.  Clamping is
+            bit-identical for supported samples; the clamped garbage rows carry
+            exactly zero cotangent through the select.
             """
+            dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
+            supported = (dL >= dL_lo) & (dL <= dL_hi)
+            dL_c = jnp.clip(dL, dL_lo, dL_hi)
             if not wl_enabled:
                 ldw = log_sample_weight(
-                    m1det, q, dL, chieff, pix, prior_wt, cosmo, survey, pop_params,
+                    m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
                     catalog, log_p_pop, log_prior_z,
                 )
             elif wl_backend == WL_BACKEND_LOGNORMAL:
                 ldw = log_sample_weight_wl_lognormal_hermite(
-                    m1det, q, dL, chieff, pix, prior_wt,
+                    m1det, q, dL_c, chieff, pix, prior_wt,
                     cosmo, survey, pop_params, catalog,
                     log_p_pop, log_prior_z,
                     wl_a, wl_b, u_nodes, log_wH_nodes,
                 )
             else:
                 ldw = log_sample_weight_wl_or_standard(
-                    m1det, q, dL, chieff, pix, prior_wt,
+                    m1det, q, dL_c, chieff, pix, prior_wt,
                     cosmo, survey, pop_params, catalog,
                     log_p_pop, log_prior_z,
                     log_p_wl_fn, mu_nodes, log_w_nodes,
                     wl_enabled=wl_enabled,
                 )
-            supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
         def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalog):
@@ -254,11 +268,15 @@ def darksiren_log_likelihood(
             def _selection_prior(z, pix, catalog):
                 return log_prior_z_selection(z, pix, catalog)
 
+            # Same clamped-distance treatment as the PE weights (see above):
+            # z_of_dL's NaN sentinel must never enter the arithmetic.
+            dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
+            supported = (dL >= dL_lo) & (dL <= dL_hi)
+            dL_c = jnp.clip(dL, dL_lo, dL_hi)
             ldw = log_sample_weight(
-                m1det, q, dL, chieff, pix, prior_wt, cosmo, survey, pop_params,
+                m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
                 catalog, log_p_pop, _selection_prior,
             )
-            supported = dL_in_z_grid(dL, H0, Om0, w0, wa)
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
         def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalog):
@@ -276,7 +294,9 @@ def darksiren_log_likelihood(
             sel_batch_size=sel_batch_size,
             sky_log_weight_fn=sky_log_weight_fn,
         )
-        ll = selection_log_correction(log_mu, Neff, nEvents)
+        ll = selection_log_correction(
+            log_mu, Neff, nEvents, soft_guard=selection_neff_soft_guard
+        )
 
         def _pe_event_fn(_, event_idx):
             s = event_idx * nsamp
@@ -300,7 +320,10 @@ def darksiren_log_likelihood(
                     sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
                 )
             ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
-            return None, -jnp.log(nsamp) + logsumexp(ldw)
+            # NaN-safe reduction: an event whose samples ALL mask to -inf (the
+            # sampler exploring, e.g., mmax below every sample of one event)
+            # must contribute -inf, not a NaN backward softmax.
+            return None, -jnp.log(nsamp) + _logsumexp_neginf_safe(ldw)
 
         _, event_lls = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
         return ll + jnp.sum(event_lls)

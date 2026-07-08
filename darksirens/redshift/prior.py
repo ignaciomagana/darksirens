@@ -214,7 +214,15 @@ def prepare_redshift_prior_state(
     legacy galaxy-count host model, bit-for-bit.
     """
     if model == "spectral_sirens":
-        state = SpectralPriorState(log_pvol=jnp.log(_precompute_volume_grid(cosmo)))
+        # NaN-guarded log: the volume grid is EXACTLY zero at z = 0, and a
+        # naked log makes d log_pvol[0]/dH0 = (1/0) * 0 = NaN in reverse mode.
+        # Any sample interpolating into the first z-cell (low-z injections!)
+        # then poisons d logL/dH0 wholesale -- this is what broke dark-siren
+        # NumPyro NUTS. log(tiny) instead of -inf is numerically identical
+        # downstream (exp underflows to exactly zero weight).
+        vol = _precompute_volume_grid(cosmo)
+        state = SpectralPriorState(
+            log_pvol=jnp.log(jnp.maximum(vol, jnp.finfo(vol.dtype).tiny)))
         return _maybe_materialize(state, materialize_state)
 
     if model == "bright_sirens":
@@ -223,7 +231,8 @@ def prepare_redshift_prior_state(
     if model == "dark_sirens_complete":
         kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=True)
         row_has = _row_counts(em_catalog) > 0.0
-        log_pvol = jnp.log(_precompute_volume_grid(cosmo))
+        vol = _precompute_volume_grid(cosmo)
+        log_pvol = jnp.log(jnp.maximum(vol, jnp.finfo(vol.dtype).tiny))
         state = CompletePriorState(kernels=kernels, row_has=row_has, log_pvol=log_pvol)
         return _maybe_materialize(state, materialize_state)
 

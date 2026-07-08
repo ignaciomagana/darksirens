@@ -136,6 +136,13 @@ def save_results_hdf5(
                 f.attrs["tinyns_diagnostics"] = json.dumps(results["tinyns_diagnostics"], default=str)
             except (TypeError, ValueError):
                 pass
+        if results.get("numpyro_diagnostics") is not None:
+            try:
+                f.attrs["numpyro_diagnostics"] = json.dumps(results["numpyro_diagnostics"], default=str)
+            except (TypeError, ValueError):
+                pass
+        f.attrs["selection_neff_soft_guard"] = bool(
+            getattr(opts, "selection_neff_soft_guard", False))
         f.attrs["nuts_warmup"]     = int(getattr(opts, "nuts_warmup", 0))
         f.attrs["nuts_samples"]    = int(getattr(opts, "nuts_samples", 0))
         f.attrs["nuts_chains"]     = int(getattr(opts, "nuts_chains", 0))

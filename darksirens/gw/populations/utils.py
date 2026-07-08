@@ -156,14 +156,45 @@ Q_MESH = _M1_Q_MESH[1]
 # ======================================================================
 # Smooth edge filters
 # ======================================================================
+def _sfilter_expo_cap(x):
+    # Bound the taper's dynamic range so that NO downstream product, square,
+    # or reciprocal of S (or of q-integrals of S) can overflow in forward or
+    # reverse mode, under ANY XLA fusion order. The historical cap of 500
+    # left S ~ exp(-500) ~ 7e-218 in the taper toe: well-conditioned RATIOS
+    # of such values are fine op-by-op, but compiled backward passes fuse
+    # them into transient 0 * inf = NaN (measured: one bright-mock injection
+    # at m1src = m_min + 0.01 poisoned the full hyperparameter gradient, and
+    # only under jit). exp(-130) is physically indistinguishable from
+    # exp(-500) — both vanish against any O(1) density in every logsumexp —
+    # while exp(+-130)^2 stays ~180 orders of magnitude inside float64.
+    # The dtype-aware minimum keeps float32 safe too (exp caps near 88).
+    return jnp.minimum(130.0, 0.9 * jnp.log(jnp.finfo(jnp.result_type(x)).max))
+
+
+# Floor for the taper's division denominators: a sample or q-grid node can
+# land within ~1e-300 of the window edge (measured: 1 in 105,170 bright-mock
+# injections), making dm/delta OVERFLOW to inf before the clip — and although
+# the clip's select zeroes the cotangent, mul's VJP multiplies by the stored
+# inf, so the whole gradient goes NaN. At/above the floor the filter is
+# bit-identical; below it the filter is saturated anyway (expo >> cap).
+_SFILTER_DELTA_FLOOR = 1e-290
+
+
+def _floor_signed(x):
+    """Push |x| out of the overflow-producing range, preserving sign."""
+    mag = jnp.maximum(jnp.abs(x), _SFILTER_DELTA_FLOOR)
+    return jnp.where(x < 0, -mag, mag)
+
+
 @jit
 def sfilter_low(m, m_min, dm):
     delta = m - m_min
-    safe_d = jnp.where(delta > 0, delta, 1.0)
+    safe_d = jnp.where(delta > 0, jnp.maximum(delta, _SFILTER_DELTA_FLOOR), 1.0)
     safe_dm = jnp.where(dm > 0, dm, 1.0)
+    cap = _sfilter_expo_cap(safe_d)
     expo = jnp.clip(
-        safe_dm / safe_d + safe_dm / (safe_d - safe_dm),
-        -500.0, 500.0
+        safe_dm / safe_d + safe_dm / _floor_signed(safe_d - safe_dm),
+        -cap, cap
     )
     S = 1.0 / (jnp.exp(expo) + 1.0)
     S = jnp.where(m <= m_min, 0.0, S)
@@ -173,11 +204,12 @@ def sfilter_low(m, m_min, dm):
 @jit
 def sfilter_high(m, m_max, dm):
     delta = m_max - m
-    safe_d = jnp.where(delta > 0, delta, 1.0)
+    safe_d = jnp.where(delta > 0, jnp.maximum(delta, _SFILTER_DELTA_FLOOR), 1.0)
     safe_dm = jnp.where(dm > 0, dm, 1.0)
+    cap = _sfilter_expo_cap(safe_d)
     expo = jnp.clip(
-        safe_dm / safe_d + safe_dm / (safe_d - safe_dm),
-        -500.0, 500.0
+        safe_dm / safe_d + safe_dm / _floor_signed(safe_d - safe_dm),
+        -cap, cap
     )
     S = 1.0 / (jnp.exp(expo) + 1.0)
     S = jnp.where(m >= m_max, 0.0, S)

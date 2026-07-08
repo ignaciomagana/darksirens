@@ -387,7 +387,7 @@ class JointGPPopulation:
             p_base = p_base * self._baseline_spin(chi, mu_chi, sig_chi)
 
         p = p_gp * p_base
-        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
         return log_p + (gamma - 1.0) * jnp.log1p(z)
 
     # -- tapers / cut, applied identically to density and normalisation ----
@@ -824,7 +824,7 @@ class BinnedGPPopulation:
         # rate R(z); its overall scale cancels with the rate in the likelihood.
 
         p = p_un * self._spin_density(chi, mu_chi, sig_chi)
-        log_p = jnp.where(p > 0.0, jnp.log(p), -jnp.inf)
+        log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
         if self._has_z:
             return log_p
         return log_p + (gamma - 1.0) * jnp.log1p(z)

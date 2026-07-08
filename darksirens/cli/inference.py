@@ -426,6 +426,19 @@ def main():
             "Use 'on' only for non-vmapped samplers; use 'off' to force vmappable behavior."
         ),
     )
+    g.add_argument(
+        "--selection_neff_guard",
+        choices=["auto", "hard", "soft"],
+        default="auto",
+        help=(
+            "Sparse-selection (Neff <= 5 N_obs) validity guard. 'hard' returns -inf "
+            "(nested samplers; the historical behavior). 'soft' replaces the wall with a "
+            "steep smooth penalty so gradient-based samplers are not divergence-flagged "
+            "on every trajectory that brushes it. 'auto' picks soft for --sampler numpyro "
+            "and hard otherwise. Check the posterior clears the Neff boundary post hoc "
+            "whenever the soft guard ran."
+        ),
+    )
     g.add_argument("--prior_overrides", default=None, metavar="JSON")
     g.add_argument("--fixed_parameter_values", default=None, metavar="JSON")
     g.add_argument("--counterpart", nargs="+", metavar="RA_DEC_Z",
@@ -569,7 +582,19 @@ def main():
     ):
         print(
             "  [i] Disabling likelihood-internal redshift-prior optimization_barrier "
-            "for TinyNS JAX rwalk vmappability."
+            f"({opts.redshift_prior_barrier_resolved})."
+        )
+
+    guard_mode = getattr(opts, "selection_neff_guard", "auto")
+    opts.selection_neff_soft_guard = (
+        guard_mode == "soft"
+        or (guard_mode == "auto" and opts.sampler == "numpyro")
+    )
+    if opts.selection_neff_soft_guard:
+        print(
+            "  [i] Sparse-selection Neff guard: SOFT (smooth wall for gradient-based "
+            f"sampling; mode={guard_mode}). Verify the posterior clears the "
+            "Neff <= 5 N_obs boundary post hoc."
         )
 
     if opts.universe_model == "bright_sirens":
