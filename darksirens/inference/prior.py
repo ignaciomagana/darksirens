@@ -29,6 +29,12 @@ _ACTIVE_SURVEY_PARAMS = {
     "dark_sirens_complete": ("sigma_kde",),
     "spectral_sirens": (),
     "bright_sirens": (),
+    # Catalog-free: no survey parameter enters the WL likelihood. Omitting the
+    # entry made the block filter skip entirely, so spectral_sirens_wl sampled
+    # SEVEN phantom flat nuisance dimensions (12 -> 19), slowing sampling and
+    # offsetting logZ by the extra prior volumes — invalidating Bayes-factor
+    # comparisons against spectral_sirens (library review, CLI finding 1).
+    "spectral_sirens_wl": (),
 }
 
 

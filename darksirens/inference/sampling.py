@@ -549,13 +549,19 @@ def run_sampler(method, likelihood, prior_transform, labels,
             print(f"[dynesty diag] wrote diagnostics #{idx} to {out_dir}", flush=True)
 
         print(f"[*] Asking Dynesty to find {opts.nlive} initial live points. This may take a minute...", flush=True)
+        # Seeded RNG: without an explicit rstate dynesty draws fresh global
+        # NumPy entropy, so --seed had NO effect on dynesty runs while being
+        # recorded as the run seed in results.hdf5 (library review, CLI
+        # finding 2). tinyns and numpyro already honour opts.seed.
+        dynesty_rstate = np.random.default_rng(int(opts.seed))
         sampler = NestedSampler(
             dynesty_loglike,
             dynesty_ptform,
             ndims,
             bound="multi",
             sample="rwalk",
-            nlive=opts.nlive
+            nlive=opts.nlive,
+            rstate=dynesty_rstate,
         )
 
         if enable_diag:
@@ -596,7 +602,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
         if not np.isfinite(weight_sum) or weight_sum <= 0.0:
             raise RuntimeError("dynesty posterior weights could not be normalized.")
         weights /= weight_sum
-        samples = resample_equal(res.samples, weights)
+        samples = resample_equal(res.samples, weights, rstate=dynesty_rstate)
 
         logZ = float(res.logz[-1])
         logZerr = float(res.logzerr[-1])

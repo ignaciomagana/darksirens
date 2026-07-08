@@ -196,8 +196,6 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
         catalog_memory = _catalog_memory_diagnostics(
             zgals, dzgals, wgals, pixels_pe, pixels_sel, ngals_pe, ngals_sel
         )
-        print("samples" + str(ngals_pe[sample_to_unique_pe].sum()))
-        print("selection" + str(ngals_sel[sample_to_unique_sel].sum()))
         print(
             "    - Compact catalog rows: "
             f"PE {catalog_memory['unique_pe_pixels']:,}, "

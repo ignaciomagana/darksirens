@@ -71,7 +71,15 @@ def log_volume_prior(z: float, cosmo: CosmoParams, survey: SurveyParams) -> floa
     float : log p(z), normalised over zgrid.
     """
     pvol_norm = _precompute_volume_grid(cosmo)
-    return jnp.interp(z, zgrid, jnp.log(pvol_norm))
+    # NaN-guarded log: dV(z=0) == 0 exactly, and the naked log makes
+    # d log_pvol[0]/dH0 = (1/0) * 0 = NaN in reverse mode for any query in the
+    # first z-cell — the same defect fixed in the state path
+    # (redshift/prior.py); this one-shot registry path is used by the
+    # WL/cluster likelihood and checks.py. log(tiny) is numerically identical
+    # downstream (exp underflows to exactly zero weight).
+    return jnp.interp(
+        z, zgrid, jnp.log(jnp.maximum(pvol_norm, jnp.finfo(pvol_norm.dtype).tiny))
+    )
 
 
 #: Vectorised over z-samples only; cosmo and survey are broadcast constants.
