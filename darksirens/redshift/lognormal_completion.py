@@ -196,7 +196,23 @@ def poisson_lognormal_map(
         lam_map[r] = np.where(mask, np.exp(log_rate + (b * res.x - shift)), 0.0)
         n_converged += int(bool(res.success))
 
-    logq_map = np.clip(b * s_map - shift, -logq_clip, logq_clip)
+    # Deterministic table = Laplace posterior-mean E[Q], using the SAME
+    # FFT-diagonal Hessian approximation as `laplace_lognormal_members`, so the
+    # deterministic table agrees with the mean of its own ensemble and with the
+    # gp3d output convention: a data-free bin reads logQ -> 0 (Q = 1,
+    # homogeneous; var_post -> sigma_s^2 cancels the mean-one shift) instead of
+    # the raw per-draw MAP's -0.5 b^2 sigma_s^2 (library review, radial
+    # finding 2). Data-rich bins are unchanged to O(var_post): the posterior
+    # variance collapses and E[Q] -> Q(s_map).
+    var_post = np.empty(n_rows, dtype=float)
+    for r in range(n_rows):
+        lam_scale = float(np.median(lam_map[r]))
+        H = ps / pk + (b * b) * lam_scale
+        var_post[r] = float(np.mean(1.0 / np.maximum(H, 1e-30)))
+    logq_map = np.clip(
+        b * s_map - shift + 0.5 * (b * b) * var_post[:, None],
+        -logq_clip, logq_clip,
+    )
     q_map = np.exp(logq_map)
     return {
         "s_map": s_map,

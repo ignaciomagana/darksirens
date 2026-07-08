@@ -133,7 +133,29 @@ def _build_completion_radial(
     dchi_u = float(chi_u[1] - chi_u[0]) if n_grid > 1 else 1.0
     ell_grid = float(survey.lss_corr_length_mpc) / max(dchi_u, 1e-6)  # now constant in Mpc
     pk = gaussian_correlation_spectrum(n_grid, ell_grid, float(survey.lss_sigma))
-    dN_exp_count_u = np.interp(chi_u, chi, dN_exp_density) * dchi_u  # expected counts / χ-bin
+
+    # Expected counts per uniform-chi bin: INTEGRATE the per-unit-z density in z
+    # between the bin-edge redshifts (cumulative trapezoid on the fine grid,
+    # differenced at the chi-bin edges; chi(z) is monotone so the edges map
+    # 1:1). The previous point-evaluation `interp(chi_u, chi, density) * dchi_u`
+    # multiplied a per-unit-z density by a bin width in Mpc — missing the
+    # dz/dchi Jacobian (~ c/H(z) ~ 4e3) and inflating the homogeneous
+    # expectation ~1e3x, which crushed the field and railed every radial table
+    # at the -7 clip (library review P0.1). Bin edges are the chi-node
+    # midpoints, matching the round-to-nearest convention of
+    # `_rebin_counts_to_uniform` used for N_obs.
+    zg = np.asarray(zgrid, dtype=float)
+    dz_fine = np.diff(zg)
+    edges_chi = np.concatenate([[chi_u[0]], 0.5 * (chi_u[:-1] + chi_u[1:]), [chi_u[-1]]])
+
+    def _bin_integral(density_fine):
+        cum = np.concatenate([
+            [0.0], np.cumsum(0.5 * (density_fine[1:] + density_fine[:-1]) * dz_fine)
+        ])
+        return np.diff(np.interp(edges_chi, chi, cum))
+
+    dN_exp_count_u = _bin_integral(dN_exp_density)               # (n_grid,)
+    exp_safe = np.where(dN_exp_count_u > 0.0, dN_exp_count_u, 1.0)
 
     # Build only OCCUPIED pixels (DESI footprints are mostly empty ⇒ huge speedup);
     # empty pixels get logQ = 0 (Q = 1, homogeneous) by the zero-init below.
@@ -143,7 +165,11 @@ def _build_completion_radial(
     N_obs_u = np.zeros((n_occ, n_grid), dtype=float)
     for i, r in enumerate(occ):
         dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        C_u[i] = np.clip(np.interp(chi_u, chi, dN_obs_s / safe_smooth), 0.0, 1.0)
+        # Expectation-weighted bin completeness: C_bin = int(C * dN_exp) / int(dN_exp),
+        # so the solver's rate_base = C_u * dN_exp_count_u is exactly the
+        # bin-integrated expected OBSERVED counts — the same footing as N_obs.
+        prod = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0) * dN_exp_density
+        C_u[i] = np.clip(_bin_integral(prod) / exp_safe, 0.0, 1.0)
         zs = zgals_np[r, : ngals_np[r]]
         counts_z, _ = np.histogram(zs, bins=edges)
         N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
