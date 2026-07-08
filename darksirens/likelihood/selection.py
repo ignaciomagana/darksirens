@@ -106,12 +106,15 @@ def selection_log_correction(
     log_mu: jnp.ndarray,
     Neff: jnp.ndarray,
     nEvents: int,
+    soft_guard: bool = False,
 ) -> jnp.ndarray:
     """
     Log selection correction term (Farr 2019 / Talbot & Golomb 2023).
 
     Returns ``-inf`` when N_eff < 5 * N_obs (Vitale et al. 2022 criterion),
     indicating the injection set is too sparse for a reliable estimate.
+    With ``soft_guard=True`` (gradient-based samplers) the hard wall is
+    replaced by a steep smooth penalty — see the inline comment.
 
     The correction is:
 
@@ -130,7 +133,28 @@ def selection_log_correction(
     -------
     Scalar log-likelihood contribution from the selection term.
     """
-    too_sparse = Neff <= 5 * nEvents
+    threshold = 5.0 * nEvents
+    too_sparse = Neff <= threshold
+    if soft_guard:
+        # Gradient-based samplers (NumPyro NUTS) cannot cross a hard -inf wall:
+        # every trajectory that brushes it is flagged divergent (the H1-profile
+        # smoke measured 100% divergent transitions with the sparse-Neff wall
+        # 1.5 posterior-sigma from the mean). Replace the wall with a steep
+        # smooth penalty: ~-0.7 at Neff == threshold, ~-100 by Neff ~ 0.75x
+        # threshold, growing linearly below — and freeze the 1/Neff Taylor
+        # term at the threshold so it cannot blow up (positively!) in the
+        # sparse regime the penalty is pushing away from. Bit-identical to the
+        # hard guard wherever Neff comfortably exceeds the threshold; nested
+        # samplers keep the hard cut, and the sampler cross-check (gate V9)
+        # verifies the difference carries no posterior mass.
+        x = Neff / threshold
+        wall = -100.0 * jax.nn.softplus(20.0 * (1.0 - x) - 5.0)
+        Neff_taylor = jnp.maximum(Neff, threshold)
+        correction = (
+            -nEvents * log_mu
+            + nEvents * (3 + nEvents) / (2.0 * Neff_taylor)
+        )
+        return correction + wall
     correction = (
         -nEvents * log_mu
         + nEvents * (3 + nEvents) / (2.0 * Neff)

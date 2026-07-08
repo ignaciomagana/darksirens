@@ -334,6 +334,20 @@ def marked_catalog_kernel_state(
     return CatalogKernelState(log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff), log_N_host
 
 
+def _logsumexp_neginf_safe(terms):
+    """logsumexp returning exactly -inf for an all--inf row WITHOUT the NaN
+    backward pass of the plain reduction: softmax of all--inf is 0/0 = NaN,
+    and that NaN survives multiplication by a ZERO upstream cotangent (mul's
+    VJP scales by the stored NaN), poisoning every parameter's gradient —
+    this is what broke NumPyro NUTS for dark sirens (empty catalog pixels).
+    Rows with any finite entry are bit-identical to plain logsumexp: the
+    sanitized padding's weight exp(-1e30 - max) underflows to exactly zero.
+    """
+    finite = jnp.isfinite(terms)
+    safe = jnp.where(finite, terms, -1e30)
+    return jnp.where(jnp.any(finite), logsumexp(safe), -jnp.inf)
+
+
 def eval_log_catalog_prior_state(
     z: float,
     pix: int,
@@ -349,7 +363,7 @@ def eval_log_catalog_prior_state(
     zs = em_catalog.zgals[pix]
     log_kw = state.log_kw[pix]
     sig = state.sig_eff[pix]
-    log_mix = logsumexp(log_kw + norm.logpdf(z, zs, sig))
+    log_mix = _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig))
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
@@ -385,7 +399,7 @@ def log_catalog_prior(
     log_kw, sig_eff = _row_kernel_state(
         zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, True
     )
-    return logsumexp(log_kw + norm.logpdf(z, zs, sig_eff))
+    return _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig_eff))
 
 
 # Vectorised over (z, pix) pairs — both vmapped simultaneously so the

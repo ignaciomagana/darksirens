@@ -426,7 +426,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
             f"warmup={num_warmup}, samples={num_samples}, chains={num_chains}",
             flush=True,
         )
-        mcmc.run(key)
+        mcmc.run(key, extra_fields=("diverging", "num_steps", "accept_prob"))
         posterior = mcmc.get_samples(group_by_chain=False)
         samples = (
             jnp.column_stack([posterior[name] for name in labels])
@@ -435,6 +435,37 @@ def run_sampler(method, likelihood, prior_transform, labels,
         )
         log_likelihood = posterior.get("log_likelihood")
 
+        # Sampler-health diagnostics. Divergences mean the leapfrog integrator
+        # hit numerically unstable curvature (or a -inf likelihood cliff inside
+        # the prior box); their post-warmup fraction is THE headline NUTS
+        # quality number and must be visible in the log and the saved results.
+        extra = mcmc.get_extra_fields(group_by_chain=False)
+        diverging = np.asarray(extra.get("diverging", np.zeros(0, dtype=bool)))
+        num_steps = np.asarray(extra.get("num_steps", np.zeros(0, dtype=int)))
+        accept = np.asarray(extra.get("accept_prob", np.zeros(0, dtype=float)))
+        max_steps = int(2 ** max_tree_depth - 1)
+        numpyro_diagnostics = {
+            "n_divergent": int(diverging.sum()),
+            "divergence_fraction": float(diverging.mean()) if diverging.size else 0.0,
+            "mean_accept_prob": float(accept.mean()) if accept.size else float("nan"),
+            "mean_num_steps": float(num_steps.mean()) if num_steps.size else float("nan"),
+            "frac_at_max_tree_depth": (
+                float((num_steps >= max_steps).mean()) if num_steps.size else 0.0
+            ),
+            "max_tree_depth": max_tree_depth,
+            "target_accept": target_accept,
+        }
+        print(
+            "NumPyro NUTS diagnostics: "
+            f"divergences {numpyro_diagnostics['n_divergent']}"
+            f"/{diverging.size} "
+            f"({100.0 * numpyro_diagnostics['divergence_fraction']:.1f}%), "
+            f"mean accept {numpyro_diagnostics['mean_accept_prob']:.3f}, "
+            f"mean leapfrog steps {numpyro_diagnostics['mean_num_steps']:.1f}, "
+            f"at max tree depth {100.0 * numpyro_diagnostics['frac_at_max_tree_depth']:.1f}%",
+            flush=True,
+        )
+
         return {
             "samples": np.asarray(samples),
             "logZ": None,
@@ -442,6 +473,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
             "log_likelihood": (
                 None if log_likelihood is None else np.asarray(log_likelihood)
             ),
+            "numpyro_diagnostics": numpyro_diagnostics,
         }
 
     # --------------------------------------------------------
