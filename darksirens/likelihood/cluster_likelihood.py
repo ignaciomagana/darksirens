@@ -96,24 +96,27 @@ from darksirens.lensing.grids import make_y_grid
 def _log_jac_app_to_src(z_s: jnp.ndarray,
                         dL_true: jnp.ndarray,
                         mu: jnp.ndarray,
-                        H0: jnp.ndarray, Om0: jnp.ndarray) -> jnp.ndarray:
+                        H0: jnp.ndarray, Om0: jnp.ndarray,
+                        w0: jnp.ndarray = -1.0, wa: jnp.ndarray = 0.0) -> jnp.ndarray:
     """log|∂(m1src, q, z_s, χ) / ∂(m1det, q, dL_app, χ)|_at fixed μ.
 
-    The map (m1det, dL_app) → (m1src, z_s) at fixed q, χ, μ has
-    |J_app→src| = |J_src→app|^{-1}, so
+    The triangular map (m1src, z_s) → (m1det, dL_app) at fixed q, χ, μ has
+    determinant (1 + z_s) · dL'(z_s) / √μ, so the factor that converts the
+    source-frame density to the apparent-frame density at the PE-sample
+    point is its reciprocal:
 
         log|J_app→src| = -log(1 + z_s) - log dL'(z_s) + 0.5 log μ.
 
-    Wait — that's the inverse Jacobian. Used here as a multiplier on
-    the source-frame density to give the apparent-frame density at the
-    PE-sample point. See cluster_likelihood derivation in module docstring.
+    (Independently re-derived in the 2026-07-08 library review: the
+    implementation below is correct; an earlier docstring stated the
+    inverse and shipped with an unresolved "Wait —" note.)
 
     Returns
     -------
     log_J : same shape as inputs
         Signed log-Jacobian; ADD to log-integrand.
     """
-    return -jnp.log1p(z_s) - jnp.log(ddL_of_z(z_s, dL_true, H0, Om0)) + 0.5 * jnp.log(mu)
+    return -jnp.log1p(z_s) - jnp.log(ddL_of_z(z_s, dL_true, H0, Om0, w0, wa)) + 0.5 * jnp.log(mu)
 
 
 def _pair_branch_log_integrand(
@@ -143,7 +146,10 @@ def _pair_branch_log_integrand(
     log_per_sample : (N_pe_i, N_y) — log of the integrand contribution
         from each (PE-i sample, y-node) cell, BEFORE summing over y or s.
     """
-    H0, Om0 = cosmo.H0, cosmo.Om0
+    # Full CPL (library review, lensing finding 5): dropping w0/wa ran the
+    # pair kinematics in LambdaCDM against a CPL-sampled surrounding
+    # likelihood.
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
     # Broadcast: (N_pe_i, N_y)
     mu_i_b = mu_i[None, :]                            # (1, N_y)
@@ -155,13 +161,13 @@ def _pair_branch_log_integrand(
 
     # Map event-i PE sample s through assigned magnification mu_i to source frame
     dL_true_ij = dL_app_i_b * jnp.sqrt(mu_i_b)        # (N_pe_i, N_y)
-    in_grid = dL_in_z_grid(dL_true_ij, H0, Om0)
-    z_s = z_of_dL(dL_true_ij, H0, Om0)
+    in_grid = dL_in_z_grid(dL_true_ij, H0, Om0, w0, wa)
+    z_s = z_of_dL(dL_true_ij, H0, Om0, w0, wa)
     z_s_safe = jnp.where(in_grid, z_s, 0.5)           # finite dummy when out-of-grid
     m1src_ij = m1det_i_b / (1.0 + z_s_safe)           # (N_pe_i, N_y)
 
     # Predict event-j apparent parameters given same source-frame θ_s and μ_j
-    dL_src_at_zs = dL_of_z(z_s_safe, H0, Om0)
+    dL_src_at_zs = dL_of_z(z_s_safe, H0, Om0, w0, wa)
     dL_app_j_pred = dL_src_at_zs / jnp.sqrt(mu_j_b)   # (N_pe_i, N_y)
     m1det_j_pred = (1.0 + z_s_safe) * m1src_ij        # (N_pe_i, N_y), algebraically = m1det_i_b
     # Broadcast (N_pe_i, 1) → (N_pe_i, N_y) for q and chieff
@@ -187,7 +193,7 @@ def _pair_branch_log_integrand(
     log_tau = jnp.log(tau_2_SIS(z_s_safe, sis_params))
 
     # Jacobian and quadrature weights
-    log_J = _log_jac_app_to_src(z_s_safe, dL_true_ij, mu_i_b, H0, Om0)
+    log_J = _log_jac_app_to_src(z_s_safe, dL_true_ij, mu_i_b, H0, Om0, w0, wa)
     log_quad = log_py[None, :] + log_wy[None, :]      # (1, N_y), broadcasts
 
     # Optional pair mark: observed SIS time delay.  The mark is evaluated

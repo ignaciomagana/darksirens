@@ -60,7 +60,7 @@ def test_lensing_evidence_validation_diagnostics_only(tmp_path):
         "--diagnostics_only",
         "true",
     ]
-    subprocess.run(cmd, cwd=repo, check=True, timeout=300)
+    subprocess.run(cmd, cwd=repo, check=True, timeout=900)  # CPU-only boxes need headroom; still guards against hangs
     summary = json.loads((workdir / "validation_summary.json").read_text())
     assert summary["diagnostics_only"] is True
     assert all(run["preflight_json"] for run in summary["runs"].values())
@@ -69,6 +69,22 @@ def test_lensing_evidence_validation_diagnostics_only(tmp_path):
 
 
 def test_posterior_pair_probability_sum_check():
+    # The REAL diagnostics format: marginal_diagnostics emits a list of dicts
+    # with per-edge p_pair fields (the check previously crashed on it with
+    # TypeError — library review, lensing pkg finding 3).
+    ok, msg = _posterior_pair_probability_check(
+        {
+            "posterior_pair_probabilities": [
+                {"pair": [0, 1], "p_pair": 0.25},
+                {"pair": [2, 3], "p_pair": 0.75},
+            ],
+            "expected_n_pairs": 1.0,
+        }
+    )
+    assert ok
+    assert msg is None
+
+    # Compatibility forms still accepted:
     ok, msg = _posterior_pair_probability_check(
         {"posterior_pair_probabilities": {"0-1": 0.25, "2-3": 0.75}, "expected_n_pairs": 1.0}
     )
@@ -82,7 +98,7 @@ def test_posterior_pair_probability_sum_check():
     assert "sum" in msg
 
     ok, msg = _posterior_pair_probability_check(
-        {"posterior_pair_probabilities": [1.2], "expected_n_pairs": 1.2}
+        {"posterior_pair_probabilities": [{"p_pair": 1.2}], "expected_n_pairs": 1.2}
     )
     assert not ok
     assert "[0, 1]" in msg

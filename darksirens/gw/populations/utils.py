@@ -177,7 +177,11 @@ def _sfilter_expo_cap(x):
 # the clip's select zeroes the cotangent, mul's VJP multiplies by the stored
 # inf, so the whole gradient goes NaN. At/above the floor the filter is
 # bit-identical; below it the filter is saturated anyway (expo >> cap).
-_SFILTER_DELTA_FLOOR = 1e-290
+# 1e-140 (not 1e-290): at exactly delta == 0 the floored value must keep
+# dm/delta^2 FINITE in the clip's backward pass (0 * inf = NaN at the exact
+# window edge, e.g. round fiducial edges meeting round mock masses); both
+# regimes clip to the cap, so the forward value is unchanged.
+_SFILTER_DELTA_FLOOR = 1e-140
 
 
 def _floor_signed(x):

@@ -65,7 +65,7 @@ from darksirens.lensing.wlmagnification import (
 )
 from darksirens.lensing.slmarks import SISLensParams
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
-from darksirens.utils.cosmology import dL_in_z_grid
+from darksirens.utils.cosmology import dL_grid_bounds, dL_in_z_grid
 
 
 # Cluster-mode codes (static_argnames dispatch)
@@ -114,6 +114,7 @@ PAIR_MARKS_TIME = 1
         "pair_marks",
         "pair_batch_size",
         "y_nodes_pair",
+        "selection_neff_soft_guard",
     ],
 )
 def darksiren_log_likelihood_with_clusters(
@@ -156,6 +157,7 @@ def darksiren_log_likelihood_with_clusters(
     pair_time_sigma: jnp.ndarray | None = None,
     pair_batch_size: int = 0,
     y_nodes_pair: int = _Y_NODES_FOR_CLUSTER_PAIR_LIKE,
+    selection_neff_soft_guard: bool = False,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
 
@@ -223,7 +225,7 @@ def darksiren_log_likelihood_with_clusters(
     )
     raw_logPriorUniv = get_redshift_prior(pe_prior_name)
     raw_logPriorSelection = get_redshift_prior(sel_prior_name)
-    H0, Om0 = cosmo.H0, cosmo.Om0
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
     def log_prior_z(z, pix, catalog):
         return raw_logPriorUniv(z, pix, cosmo, survey, catalog)
@@ -266,20 +268,28 @@ def darksiren_log_likelihood_with_clusters(
     def log_weight_sel(m1det, q, dL, chieff, pix, prior_wt, catalog):
         def _selection_prior(z, pix, catalog):
             return log_prior_z_selection(z, pix, catalog)
+        # Clamp-then-mask, mirroring likelihood/core.py: an out-of-support dL
+        # hits z_of_dL's NaN sentinel inside the weight arithmetic and
+        # NaN-poisons the reverse pass despite the -inf mask (library review,
+        # lensing-stack finding 1: the cluster wrappers missed the e39dc11
+        # fix). Full CPL bounds: the old dL_in_z_grid(dL, H0, Om0) silently
+        # dropped w0/wa (finding 5).
+        dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
+        supported = (dL >= dL_lo) & (dL <= dL_hi)
+        dL_c = jnp.clip(dL, dL_lo, dL_hi)
         if wl_selection_enabled:
             ldw = log_sample_weight_wl_lognormal_hermite(
-                m1det, q, dL, chieff, pix, prior_wt,
+                m1det, q, dL_c, chieff, pix, prior_wt,
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, _selection_prior,
                 wl_a, wl_b, u_nodes, log_wH_nodes,
             )
         else:
             ldw = log_sample_weight(
-                m1det, q, dL, chieff, pix, prior_wt,
+                m1det, q, dL_c, chieff, pix, prior_wt,
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, _selection_prior,
             )
-        supported = dL_in_z_grid(dL, H0, Om0)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
     log_mu_1, Neff_1, log_sigma2_1 = compute_selection_term(
@@ -311,6 +321,7 @@ def darksiren_log_likelihood_with_clusters(
         log_mu_2, log_sigma2_2,
         n_singletons_observed=(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
         n_clusters_observed=(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
+        soft_guard=selection_neff_soft_guard,
     )
     log_mu_combined = jnp.logaddexp(log_mu_1, log_mu_2)
     log_sigma2_combined = jnp.logaddexp(log_sigma2_1, log_sigma2_2)
@@ -327,22 +338,25 @@ def darksiren_log_likelihood_with_clusters(
     # When cluster_mode == J2: iterate over singleton_indices only.
     # ──────────────────────────────────────────────────────────────────
     def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
+        # Clamp-then-mask + full CPL bounds (see log_weight_sel above).
+        dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
+        supported = (dL >= dL_lo) & (dL <= dL_hi)
+        dL_c = jnp.clip(dL, dL_lo, dL_hi)
         if wl_enabled and wl_backend == WL_BACKEND_LOGNORMAL:
             ldw = log_sample_weight_wl_lognormal_hermite(
-                m1det, q, dL, chieff, pix, prior_wt,
+                m1det, q, dL_c, chieff, pix, prior_wt,
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, log_prior_z,
                 wl_a, wl_b, u_nodes, log_wH_nodes,
             )
         else:
             ldw = log_sample_weight_wl_or_standard(
-                m1det, q, dL, chieff, pix, prior_wt,
+                m1det, q, dL_c, chieff, pix, prior_wt,
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, log_prior_z,
                 log_p_wl_fn, mu_nodes, log_w_nodes,
                 wl_enabled=wl_enabled,
             )
-        supported = dL_in_z_grid(dL, H0, Om0)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
     def _pe_event_fn(_, event_idx):

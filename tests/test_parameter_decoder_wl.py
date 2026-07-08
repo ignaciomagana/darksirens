@@ -61,3 +61,26 @@ def test_decode_has_none_wl_params_for_non_wl_universe_model(monkeypatch):
     _cosmo, survey, _pop_params, _sky, _mark = decoder.decode(())
 
     assert survey.wl_params is None
+
+
+def test_wl_universe_model_samples_no_survey_block():
+    """spectral_sirens_wl is catalog-free: with fix_survey=False it must NOT
+    sample the 7-parameter survey block (library review, CLI finding 1: the
+    missing _ACTIVE_SURVEY_PARAMS entry left 7 phantom flat dimensions in the
+    space, inflating 12 -> 19 dims and corrupting Bayes factors against
+    spectral_sirens)."""
+    from darksirens.inference.prior import build_parameter_space
+
+    labels_wl, *_ = build_parameter_space(
+        "powerlaw+peak", False, True, False,
+        prior_overrides={}, fixed_parameter_values={},
+        universe_model="spectral_sirens_wl",
+    )
+    labels_spec, *_ = build_parameter_space(
+        "powerlaw+peak", False, True, False,
+        prior_overrides={}, fixed_parameter_values={},
+        universe_model="spectral_sirens",
+    )
+    survey_like = {"log10n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde"}
+    assert not (set(map(str, labels_wl)) & survey_like)
+    assert list(map(str, labels_wl)) == list(map(str, labels_spec))

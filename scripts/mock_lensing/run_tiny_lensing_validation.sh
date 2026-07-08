@@ -25,7 +25,10 @@ echo "[tiny-lens] generating mock in $OUTDIR"
   --seed "${SEED:-2026}"
 
 COMMON=(
-  --gw_path "$OUTDIR/mock_gw_pe.h5"
+  # Unified observed-catalog layout (the legacy split mock_gw_pe/mock_pair_pe
+  # layout has been dead since the 2026-07-01 unified migration).
+  --gw_path "$OUTDIR/mock_observed_gw_pe.h5"
+  --observed_catalog_path "$OUTDIR/observed_catalog.json"
   --gwselection_path "$OUTDIR/mock_gw_selection.h5"
   --wl_backend lognormal
   --pop_model powerlaw+peak

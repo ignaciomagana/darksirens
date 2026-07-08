@@ -7,6 +7,15 @@ setup_requires = ['jax>=' + __minimum_jax_version__]
 with open("requirements.txt", "r") as fh:
     install_requires = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
+# pytest is a development dependency, not a runtime one (library review,
+# architecture A2); GP population models lazily import tinygp (gp.py), which
+# is deliberately optional (architecture A3).
+install_requires = [r for r in install_requires if not r.startswith("pytest")]
+extras_require = {
+    "test": ["pytest"],
+    "gp": ["tinygp"],
+}
+
 with open("README.md", "r") as fh:
     long_description = fh.read()    
     
@@ -21,6 +30,7 @@ setup(
     url="https://github.com/ignaciomagana/darksirens",
     setup_requires=setup_requires,
     install_requires=install_requires,
+    extras_require=extras_require,
 
     packages=find_packages(include=["darksirens", "darksirens.*"]),
     entry_points={
