@@ -596,6 +596,9 @@ def main():
             _fatal("--counterpart is not supported with a multi-catalog mixture.")
         if getattr(opts, "validate_completion", False):
             _fatal("--validate_completion is not supported with a multi-catalog mixture.")
+        if getattr(opts, "sky_model", "isotropic") != "isotropic":
+            _fatal("--sky_model must be 'isotropic' with a multi-catalog mixture "
+                   f"(got '{opts.sky_model}').")
 
     # Persist the canonical names in settings while keeping opts.fix_cosmology
     # for backward-compatible internal callers and saved metadata.

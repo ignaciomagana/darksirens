@@ -173,7 +173,8 @@ def save_results_hdf5(
         _survey_paths = getattr(opts, "survey_paths", None)
         if not _survey_paths:
             _survey_paths = [opts.survey_path] if opts.survey_path else []
-        f.attrs["survey_paths"]    = ",".join(_survey_paths)
+        # JSON-encoded so paths containing commas round-trip safely.
+        f.attrs["survey_paths"]    = json.dumps(list(_survey_paths))
         if getattr(opts, "counterpart", None) is not None:
             counterpart_arr = np.asarray(opts.counterpart, dtype=float)
             f.create_dataset("counterparts", data=counterpart_arr, **kw)

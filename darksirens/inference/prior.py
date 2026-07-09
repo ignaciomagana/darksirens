@@ -392,12 +392,29 @@ def build_parameter_space(
                 lower += c_sampled_lower
                 upper += c_sampled_upper
 
-        # Mixture-weight sticks fcat_2..fcat_K (Uniform[0,1] bounds; the Beta(1,b)
+        # Mixture-weight sticks fcat_2..fcat_K ([0,1] bounds; the Beta(1,b)
         # prior family is carried in prior_kinds below).  Sampled regardless of
-        # fix_survey; individually fixable via fixed_parameter_values.
+        # fix_survey; individually fixable via fixed_parameter_values.  Bounds
+        # are overridable and act as TRUNCATION of the Beta(1,b) stick prior
+        # (make_prior_transform's truncated closed-form PPF); a fixed stick
+        # outside [0,1] would silently become a -inf log weight, so reject it.
         fcat_labels = [f"fcat_{m}" for m in range(2, n_catalogs + 1)]
         fcat_lower = [0.0] * len(fcat_labels)
         fcat_upper = [1.0] * len(fcat_labels)
+        fcat_lower, fcat_upper = apply_block_prior_overrides(
+            "mixture", fcat_labels, fcat_lower, fcat_upper, prior_overrides
+        )
+        for _lbl, _lo, _hi in zip(fcat_labels, fcat_lower, fcat_upper):
+            if not (0.0 <= _lo < _hi <= 1.0):
+                raise ValueError(
+                    f"{_lbl} prior bounds must satisfy 0 <= lo < hi <= 1 "
+                    f"(a mixture stick); got [{_lo}, {_hi}]."
+                )
+            fixed_val = (fixed_parameter_values or {}).get(_lbl)
+            if fixed_val is not None and not (0.0 <= float(fixed_val) <= 1.0):
+                raise ValueError(
+                    f"Fixed value for {_lbl} must lie in [0, 1]; got {fixed_val}."
+                )
         fcat_labels, fcat_lower, fcat_upper = filter_fixed_parameters(
             fcat_labels, fcat_lower, fcat_upper, fixed_parameter_values
         )
@@ -490,8 +507,10 @@ def make_prior_transform(lower, upper, prior_kinds=None):
     is_normal = jnp.asarray([k == "normal" for k in kinds])
     is_lognorm = jnp.asarray([k == "lognormal" for k in kinds])
     # Mixture-weight sticks: Beta(1, b) with the closed-form inverse CDF
-    # x = 1 - (1 - u)^(1/b), b in the scale slot.  Support is [0, 1], matching
-    # the fcat bounds, so no truncation rescale is needed.
+    # x = 1 - (1 - u)^(1/b), b in the scale slot.  Bounds act as truncation
+    # (like every other kind): with CDF F(x) = 1 - (1-x)^b the truncated PPF is
+    # x = F^{-1}(F(lo) + u (F(hi) - F(lo))), still closed form.  For the
+    # default [0, 1] bounds this reduces exactly to the untruncated map.
     is_beta = jnp.asarray([k == "beta" for k in kinds])
 
     def _trunc_normal_ppf(u, a, b, mu, sg):
@@ -511,9 +530,16 @@ def make_prior_transform(lower, upper, prior_kinds=None):
         log_lo = jnp.log(jnp.clip(lo_j, 1e-300, None))
         log_hi = jnp.log(jnp.clip(hi_j, 1e-300, None))
         lognormal = jnp.exp(_trunc_normal_ppf(u, log_lo, log_hi, loc, scale))
-        # Beta(1, b) closed-form PPF; scale defaults to 1 for non-beta params so
-        # this expression is finite everywhere (Beta(1,1) reduces to the identity).
-        beta = 1.0 - (1.0 - u) ** (1.0 / scale)
+        # Beta(1, b) closed-form PPF truncated to [lo, hi]; scale defaults to 1
+        # for non-beta params so this expression is finite everywhere.  The
+        # bounds are clipped into [0, 1) so masked-out (non-beta) lanes with
+        # arbitrary physical bounds cannot produce NaNs.
+        b_lo = jnp.clip(lo_j, 0.0, 1.0 - 1e-12)
+        b_hi = jnp.clip(hi_j, 0.0, 1.0)
+        F_lo = 1.0 - (1.0 - b_lo) ** scale
+        F_hi = 1.0 - (1.0 - b_hi) ** scale
+        u_beta = F_lo + u * (F_hi - F_lo)
+        beta = 1.0 - (1.0 - u_beta) ** (1.0 / scale)
         out = jnp.where(is_normal, normal, uniform)
         out = jnp.where(is_lognorm, lognormal, out)
         out = jnp.where(is_beta, beta, out)

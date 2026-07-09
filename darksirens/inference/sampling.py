@@ -302,7 +302,17 @@ def run_sampler(method, likelihood, prior_transform, labels,
             if kind == "beta":
                 # Mixture-weight stick fcat_m ~ Beta(1, b); b in the scale slot.
                 # Matches make_prior_transform's closed-form Beta(1,b) PPF so NUTS
-                # and the nested samplers infer the same posterior.
+                # and the nested samplers infer the same posterior.  The nested
+                # transform supports truncated bounds; numpyro's Beta does not,
+                # so reject non-default bounds rather than silently sampling a
+                # different prior than dynesty/tinyns would.
+                if float(lower[i]) != 0.0 or float(upper[i]) != 1.0:
+                    raise ValueError(
+                        f"Truncated Beta prior bounds [{float(lower[i])}, "
+                        f"{float(upper[i])}] for '{name}' are not supported by "
+                        "the numpyro sampler; use dynesty/tinyns or keep the "
+                        "default [0, 1] bounds."
+                    )
                 return numpyro.sample(name, dist.Beta(1.0, float(kscale or 1.0)))
             return numpyro.sample(name, dist.Uniform(low=lower[i], high=upper[i]))
 
