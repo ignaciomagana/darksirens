@@ -78,6 +78,7 @@ def selection_prior_model(universe_model: str) -> str:
         "lss_marginalize",
         "materialize_redshift_prior_state",
         "selection_neff_soft_guard",
+        "n_catalogs",
     ],
 )
 def darksiren_log_likelihood(
@@ -112,6 +113,16 @@ def darksiren_log_likelihood(
     lss_marginalize: bool = False,
     materialize_redshift_prior_state: bool = True,
     selection_neff_soft_guard: bool = False,
+    # --- K-catalog mixture (dark_sirens only) -------------------------------
+    # ``n_catalogs`` is static (jit specializes on the pytree structure); the
+    # mixture operands are TRACED.  All default to the single-catalog values, so
+    # K = 1 never allocates a mixture tuple and is bit-identical to the legacy
+    # body.  ``mixture_log_weights`` is (K,) and MUST stay traced (it is sampled).
+    n_catalogs: int = 1,
+    mixture_surveys: tuple = (),
+    mixture_em_catalogs_pe: tuple = (),
+    mixture_em_catalogs_sel: tuple = (),
+    mixture_log_weights: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
@@ -186,6 +197,166 @@ def darksiren_log_likelihood(
     )
     selection_model = selection_prior_model(universe_model)
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+
+    # ------------------------------------------------------------------
+    # K-catalog mixture branch (n_catalogs >= 2).  The redshift prior at the two
+    # seams becomes log p_mix(z) = logsumexp_k(log w_k + log p_k(z, pix[:,k])),
+    # inserted at the prior level so the population term is not recomputed K
+    # times.  K = 1 falls through to the verbatim single-catalog body below.
+    # ------------------------------------------------------------------
+    if n_catalogs >= 2:
+        if universe_model != "dark_sirens":
+            raise NotImplementedError(
+                "The K-catalog mixture likelihood supports "
+                f"universe_model='dark_sirens' only; got {universe_model!r}."
+            )
+        if wl_enabled:
+            raise NotImplementedError(
+                "Weak lensing is not supported with the K-catalog mixture."
+            )
+        if lss_marginalize:
+            raise NotImplementedError(
+                "lss_marginalize is not supported with the K-catalog mixture."
+            )
+        if mark_model not in (None, "none"):
+            raise NotImplementedError(
+                "Marked-host models are not supported with the K-catalog mixture."
+            )
+        if sky_model != "isotropic":
+            raise NotImplementedError(
+                "Only the isotropic sky model is supported with the K-catalog "
+                f"mixture; got sky_model={sky_model!r}."
+            )
+        if mixture_log_weights is None:
+            raise ValueError(
+                "n_catalogs >= 2 requires mixture_log_weights (a (K,) array)."
+            )
+        if (
+            len(mixture_surveys) != n_catalogs - 1
+            or len(mixture_em_catalogs_pe) != n_catalogs - 1
+            or len(mixture_em_catalogs_sel) != n_catalogs - 1
+        ):
+            raise ValueError(
+                "Mixture operand counts must each be n_catalogs - 1 = "
+                f"{n_catalogs - 1}; got surveys={len(mixture_surveys)}, "
+                f"pe={len(mixture_em_catalogs_pe)}, "
+                f"sel={len(mixture_em_catalogs_sel)}."
+            )
+
+        surveys_all = (survey,) + tuple(mixture_surveys)
+        catalogs_pe_all = (em_catalog_pe,) + tuple(mixture_em_catalogs_pe)
+        catalogs_sel_all = (em_catalog_sel,) + tuple(mixture_em_catalogs_sel)
+
+        # Per-catalog prior states (marks off; guarded above).  pe_model and
+        # selection_model are both "dark_sirens" here.
+        prior_states_univ = [
+            prepare_redshift_prior_state(
+                pe_model, cosmo, surveys_all[k], catalogs_pe_all[k],
+                mark_model="none",
+                materialize_state=materialize_redshift_prior_state,
+            )
+            for k in range(n_catalogs)
+        ]
+        prior_states_sel = [
+            prepare_redshift_prior_state(
+                selection_model, cosmo, surveys_all[k], catalogs_sel_all[k],
+                mark_model="none",
+                materialize_state=materialize_redshift_prior_state,
+            )
+            for k in range(n_catalogs)
+        ]
+
+        def _mixture_logsumexp(lps):
+            # Per-sample logsumexp over the K catalogs.  Uses the codebase's
+            # all--inf-safe pattern (cf. _logsumexp_neginf_safe): a sample whose
+            # z is impossible under EVERY catalog yields exactly -inf with a
+            # zero (not NaN) backward pass, so jax.grad stays finite.
+            stacked = jnp.stack(lps, axis=0)            # (K, nsamp)
+            finite = jnp.isfinite(stacked)
+            safe = jnp.where(finite, stacked, -1e30)
+            return jnp.where(
+                jnp.any(finite, axis=0), logsumexp(safe, axis=0), -jnp.inf
+            )
+
+        def log_prior_z(z, pix, catalogs):
+            lps = [
+                mixture_log_weights[k] + eval_redshift_prior_with_state(
+                    pe_model, prior_states_univ[k], z, pix[:, k],
+                    cosmo, surveys_all[k], catalogs[k],
+                )
+                for k in range(n_catalogs)
+            ]
+            return _mixture_logsumexp(lps)
+
+        def log_prior_z_selection(z, pix, catalogs):
+            lps = [
+                mixture_log_weights[k] + eval_redshift_prior_with_state(
+                    selection_model, prior_states_sel[k], z, pix[:, k],
+                    cosmo, surveys_all[k], catalogs[k],
+                )
+                for k in range(n_catalogs)
+            ]
+            return _mixture_logsumexp(lps)
+
+        def _mixture_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs, prior_fn):
+            # Same clamped-distance treatment as the single-catalog weights:
+            # z_of_dL's NaN sentinel must never enter the arithmetic.  ``survey``
+            # is inert inside log_sample_weight (the per-catalog survey enters
+            # via the captured prior states), so catalog 1's survey is passed.
+            dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
+            supported = (dL >= dL_lo) & (dL <= dL_hi)
+            dL_c = jnp.clip(dL, dL_lo, dL_hi)
+            ldw = log_sample_weight(
+                m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
+                catalogs, log_p_pop, prior_fn,
+            )
+            return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+
+        def _sel_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs):
+            return _mixture_weight(
+                m1det, q, dL, chieff, pix, prior_wt, catalogs, log_prior_z_selection
+            )
+
+        def _pe_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs):
+            return _mixture_weight(
+                m1det, q, dL, chieff, pix, prior_wt, catalogs, log_prior_z
+            )
+
+        def _ll_given_states_mixture():
+            log_mu, Neff, _log_sigma2 = compute_selection_term(
+                gw_sel,
+                catalogs_sel_all,
+                _sel_weight,
+                Ndraw,
+                nEvents,
+                sel_batch_size=sel_batch_size,
+                sky_log_weight_fn=sky_log_weight_fn,
+            )
+            ll = selection_log_correction(
+                log_mu, Neff, nEvents, soft_guard=selection_neff_soft_guard
+            )
+
+            def _pe_event_fn(_, event_idx):
+                s = event_idx * nsamp
+                sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
+                valid = sl(gw_pe.valid) & (sl(gw_pe.prior_wt) > 0.0)
+                ldw = _pe_weight(
+                    sl(gw_pe.m1det),
+                    sl(gw_pe.q),
+                    sl(gw_pe.dL),
+                    sl(gw_pe.chieff),
+                    sl(gw_pe.pixels),
+                    sl(gw_pe.prior_wt),
+                    catalogs_pe_all,
+                )
+                ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
+                return None, -jnp.log(nsamp) + _logsumexp_neginf_safe(ldw)
+
+            _, event_lls = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
+            return ll + jnp.sum(event_lls)
+
+        ll = _ll_given_states_mixture()
+        return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
 
     # Per-proposal prior states: O(N_rows × N_grid) precomputation done ONCE
     # here, then captured by the per-sample closures below.  Because the

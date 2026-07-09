@@ -169,13 +169,21 @@ def pad_gw_event_to_multiple(
     def _pad1d(arr, fill=0.0):
         return jnp.concatenate([arr, jnp.full(pad, fill, dtype=arr.dtype)])
 
+    def _pad_pixels(arr):
+        # Pixels may be 1-D (single catalog) or (N, K) for the K-catalog
+        # mixture; pad along axis 0 with a zero block of the trailing shape so
+        # both cases work.  Bit-identical to _pad1d(..., fill=0) when 1-D.
+        arr = jnp.asarray(arr, dtype=np.int32)
+        pad_block = jnp.zeros((pad,) + arr.shape[1:], dtype=arr.dtype)
+        return jnp.concatenate([arr, pad_block], axis=0)
+
     padded = make_gw_event(
         m1det    = _pad1d(event.m1det,    fill=30.0),
         m2det    = _pad1d(event.m2det,    fill=30.0),
         dL       = _pad1d(event.dL,       fill=event.dL[0]),
         chieff   = _pad1d(event.chieff,   fill=0.0),
         prior_wt = _pad1d(event.prior_wt, fill=fill_prior_wt),
-        pixels   = _pad1d(event.pixels.astype(np.int32), fill=0),
+        pixels   = _pad_pixels(event.pixels),
         valid    = _pad1d(event.valid,    fill=False),
         # Sky direction: pad with a finite placeholder (masked out by valid).
         nx       = _pad1d(event.nx, fill=0.0) if event.nx is not None else None,
