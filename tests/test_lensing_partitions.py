@@ -1111,3 +1111,85 @@ def test_cli_gate_refuses_suspicious_time_marks():
     }
     _, physical_pairs = validate_candidate_pairs(physical)
     _gate_suspicious_time_marks(strict, physical_pairs)
+
+
+def test_builder_uniform_observation_times_marks_every_edge(tmp_path):
+    """Catalogs with observation_times='uniform' carry physical arrivals, so
+    EVERY candidate edge gets |Delta t_gps| with the catalog sigma — truth
+    pairs reproduce their generator delta_t_obs exactly, false edges get
+    their real separations (the case-G requirement at scale)."""
+    import json
+
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import (
+        build_candidate_pairs,
+    )
+
+    gw = _observed_gw(tmp_path / "gw.h5", n_events=4)
+    base = 1234567890.0
+    dt_true_pair = 43210.5
+    times = [base + 0.0, base + dt_true_pair, base + 9.9e6, base + 2.02e7]
+    events = []
+    for k, t in enumerate(times):
+        events.append(dict(
+            event_index=k, event_id=f"ev{k:03d}", kind="singleton_or_image",
+            gps_time=t,
+            truth_source_id=(0 if k < 2 else k), truth_image_index=(k if k < 2 else None),
+            truth_is_lensed_image=(k < 2),
+            ra_mean=0.1 * k, dec_mean=0.05 * k, sky_sigma_rad=0.01,
+            ra_true=0.1 * k, dec_true=0.05 * k,
+        ))
+    catalog = dict(
+        format_version="observed-lensing-catalog-1.0",
+        event_indexing="global",
+        observation_times="uniform",
+        t_obs_days=365.25,
+        time_delay_sigma_sec=3600.0,
+        n_events=4,
+        events=events,
+    )
+    path = tmp_path / "observed_catalog.json"
+    path.write_text(json.dumps(catalog))
+
+    data = build_candidate_pairs(
+        gw_path=gw, observed_catalog_path=path,
+        max_edges_per_event=3, max_total_edges=10,
+        include_time_marks=True, include_truth_labels=True, seed=1,
+    )
+    assert data["pairs"], "no candidate edges built"
+    for edge in data["pairs"]:
+        marks = edge["marks"]
+        assert "delta_t_obs" in marks and "sigma_delta_t" in marks, edge
+        expected = abs(times[edge["i"]] - times[edge["j"]])
+        assert marks["delta_t_obs"] == pytest.approx(expected)
+        assert marks["sigma_delta_t"] == pytest.approx(3600.0)
+    true_edges = [e for e in data["pairs"] if e.get("label") == "true"]
+    assert true_edges and true_edges[0]["marks"]["delta_t_obs"] == pytest.approx(dt_true_pair)
+
+
+def test_builder_uniform_mode_requires_catalog_sigma(tmp_path):
+    import json
+
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import (
+        build_candidate_pairs,
+    )
+
+    gw = _observed_gw(tmp_path / "gw.h5", n_events=3)
+    catalog = dict(
+        format_version="observed-lensing-catalog-1.0",
+        event_indexing="global",
+        observation_times="uniform",
+        n_events=3,
+        events=[dict(event_index=k, event_id=f"e{k}", kind="singleton_or_image",
+                     gps_time=1e9 + 1e5 * k, truth_source_id=k,
+                     truth_image_index=None, truth_is_lensed_image=False,
+                     ra_mean=0.0, dec_mean=0.0, sky_sigma_rad=0.01,
+                     ra_true=0.0, dec_true=0.0) for k in range(3)],
+    )
+    path = tmp_path / "observed_catalog.json"
+    path.write_text(json.dumps(catalog))
+    with pytest.raises(ValueError, match="time_delay_sigma_sec"):
+        build_candidate_pairs(
+            gw_path=gw, observed_catalog_path=path,
+            max_edges_per_event=2, max_total_edges=4,
+            include_time_marks=True, seed=1,
+        )

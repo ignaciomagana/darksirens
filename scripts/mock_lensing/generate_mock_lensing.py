@@ -725,6 +725,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0,
              write_unified_observed_catalog=True, candidate_time_marks=True,
              include_lensed_singletons=False,
+             observation_times="placeholder", t_obs_days=365.25,
              build_candidate_pairs_from_observed=False,
              validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0),
              write_legacy_pair_pe=False):
@@ -823,6 +824,20 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
               for i, lens in zip(sing_idx, sing_idx_is_lensed)]
     write_gw_pe_file(events, os.path.join(out_dir, "mock_gw_pe.h5"), nsamp, H0, Om0)
 
+    # Observation times. "placeholder" keeps the legacy base+index catalog
+    # times (1 s spacing — NOT physical; time marks then exist only for truth
+    # pairs via metadata). "uniform" draws each source's arrival uniformly
+    # over t_obs_days, so EVERY candidate edge carries a physical
+    # |Delta t_gps| — required for pair_marks=time on graphs with false
+    # edges (case G at scale).
+    if observation_times not in ("placeholder", "uniform"):
+        raise ValueError(f"unknown observation_times mode: {observation_times!r}")
+    uniform_times = observation_times == "uniform"
+    t_obs_window_sec = float(t_obs_days) * 86400.0
+    singleton_arrival = (
+        rng.uniform(0.0, t_obs_window_sec, len(sing_idx)) if uniform_times else None
+    )
+
     pairs = []
     for i in pair_src_idx:
         img0 = make_event_pe(src["m1"][i], src["q"][i], src["z"][i], src["chi"][i],
@@ -833,11 +848,15 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                              ra_true=src["ra_true"][i], dec_true=src["dec_true"][i])
         true_dt = float(delta_t_from_y(jnp.asarray(marks["y"][i]), sis))
         dt_obs = float(true_dt + rng.normal(0.0, time_delay_sigma_sec))
+        # Arrival convention: catalog times are the MEASURED arrivals, so the
+        # noisy delay lives in the arrival difference and the builder's
+        # |Delta t_gps| reproduces delta_t_obs exactly for truth pairs.
+        t0 = float(rng.uniform(0.0, t_obs_window_sec)) if uniform_times else 0.0
         pairs.append(dict(
             images=(img0, img1), true_y=float(marks["y"][i]),
             true_delta_t=true_dt, delta_t_obs=dt_obs,
             sigma_delta_t=float(time_delay_sigma_sec),
-            t_obs_image0=0.0, t_obs_image1=dt_obs,
+            t_obs_image0=t0, t_obs_image1=t0 + dt_obs,
             true_mu0=float(marks["mu_plus"][i]), true_mu1=float(marks["mu_minus"][i]),
             source_index=int(i),
         ))
@@ -901,11 +920,15 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             image_index=image_index,
             truth_partner_event_index=None,
         ))
+        gps = (
+            base_gps_time + singleton_arrival[event_index]
+            if uniform_times else base_gps_time + event_index
+        )
         schema_events.append(dict(
             event_index=int(event_index),
             event_id=f"mock_event_{event_index:03d}",
             kind="singleton_or_image",
-            gps_time=float(base_gps_time + event_index),
+            gps_time=float(gps),
             truth_source_id=int(source_index),
             truth_image_index=image_index,
             truth_is_lensed_image=bool(is_lensed),
@@ -923,11 +946,16 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                  pair_index=int(k), image_index=1, truth_partner_event_index=int(i0)),
         ])
         for image_index, event_index in enumerate((i0, i1)):
+            gps = (
+                base_gps_time + (pair["t_obs_image0"] if image_index == 0
+                                 else pair["t_obs_image1"])
+                if uniform_times else base_gps_time + event_index
+            )
             schema_events.append(dict(
                 event_index=int(event_index),
                 event_id=f"mock_event_{event_index:03d}",
                 kind="singleton_or_image",
-                gps_time=float(base_gps_time + event_index),
+                gps_time=float(gps),
                 truth_source_id=int(pair["source_index"]),
                 truth_image_index=int(image_index),
                 truth_is_lensed_image=True,
@@ -940,6 +968,9 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     observed_catalog = dict(
         format_version="observed-lensing-catalog-1.0",
         event_indexing="global",
+        observation_times=str(observation_times),
+        t_obs_days=float(t_obs_days),
+        time_delay_sigma_sec=float(time_delay_sigma_sec),
         n_events=int(S + 2 * P),
         events=schema_events,
         event_order="singletons first, then lensed image pairs",
@@ -1060,6 +1091,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         n_pairs_both_detected_total=n_pairs_both_detected_total,
         n_lensed_singletons_detected_total=n_lensed_singletons_detected_total,
         include_lensed_singletons=bool(include_lensed_singletons),
+        observation_times=str(observation_times),
+        t_obs_days=float(t_obs_days),
         n_lensed_singletons_kept=int(np.sum(sing_idx_is_lensed)),
         n_singletons_kept=S,
         n_pairs_kept=P,
@@ -1221,6 +1254,16 @@ def parse_args():
                    help="overwrite candidate_pairs.json with a graph scored from observed metadata/posteriors")
     p.add_argument("--time-delay-sigma-sec", type=float, default=3600.0,
                    help="Gaussian sigma for observed SIS pair time delays, in seconds")
+    p.add_argument("--observation-times", "--observation_times",
+                   dest="observation_times",
+                   choices=("placeholder", "uniform"), default="placeholder",
+                   help="placeholder keeps legacy base+index catalog times; uniform draws "
+                        "each source's arrival over --t-obs-days so every candidate edge "
+                        "carries a physical |Delta t| (required for pair_marks=time with "
+                        "false edges)")
+    p.add_argument("--t-obs-days", "--t_obs_days", dest="t_obs_days",
+                   type=float, default=365.25,
+                   help="observing-run length in days for --observation-times uniform")
     p.add_argument("--validation-sample-log10-tau-A", action="store_true",
                    help="write/print a tiny validation command that samples log10_tau_A while fixing tau_n")
     p.add_argument("--validation-log10-tau-A-prior", type=float, nargs=2, default=(-7.0, -2.0),
@@ -1249,6 +1292,8 @@ def main():
         write_unified_observed_catalog=args.write_unified_observed_catalog.lower() == "true",
         candidate_time_marks=args.candidate_time_marks.lower() == "true",
         include_lensed_singletons=args.include_lensed_singletons.lower() == "true",
+        observation_times=args.observation_times,
+        t_obs_days=args.t_obs_days,
         build_candidate_pairs_from_observed=args.build_candidate_pairs_from_observed.lower() == "true",
         validation_sample_log10_tau_A=args.validation_sample_log10_tau_A,
         validation_log10_tau_A_prior=args.validation_log10_tau_A_prior,
