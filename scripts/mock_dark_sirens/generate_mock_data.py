@@ -43,7 +43,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from jax import lax
 
-SELECTION_PROPOSALS = ("population", "uniform")
+SELECTION_PROPOSALS = ("population", "uniform", "population+uniform")
 
 @dataclass(frozen=True)
 class PopulationConfig:
@@ -129,20 +129,41 @@ def _sample_sky(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarra
 # tests/test_mock_generator_taper.py asserts they match the jax originals).
 _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
-# Normalisation grids mirror the inference defaults: mass on [1, 200] Msun and
-# mass ratio on (0, 1] (cf. get_mass_grid / get_q_grid).  Densities are
-# normalised on these grids so the stored ``pdraw`` is exactly the density the
-# samplers draw from.
-_MASS_NORM_GRID = np.linspace(1.0, 200.0, 1024)
-_Q_NORM_GRID = np.linspace(1.0e-3, 1.0, 512)
+# Normalisation grids mirror the inference defaults EXACTLY: mass on [1, 200]
+# Msun with N_MASS=500 nodes and mass ratio on [0, 1] with N_Q=200 nodes, i.e.
+# the same linspaces darksirens.gw.populations.utils.get_mass_grid() /
+# get_q_grid() build from the default NormalizationGridSettings (n_mass=500,
+# n_q=200, m_lo=1, m_hi=200, q_lo=0, q_hi=1).  Densities are normalised on these
+# grids so the stored ``pdraw`` is exactly the density the samplers draw from AND
+# is bit-for-bit the same trapezoid the inference uses -- the mock's mass/pair
+# component densities then match the inference model to machine precision (cf.
+# tests/test_mock_generator_taper.py::test_pairing_matches_inference_component_densities).
+_MASS_NORM_GRID = np.linspace(1.0, 200.0, 500)
+_Q_NORM_GRID = np.linspace(0.0, 1.0, 200)
+
+# Fallback pairing secondary-mass taper for the Gaussian-peak component.  The
+# inference pairs every mass component SEPARATELY: a component without an
+# ``m_min_spec`` (the Gaussian peak) falls back to (M_LO=1.0, dm=0.01) in
+# MixtureModel.component_densities (darksirens/gw/populations/base.py:366,
+# darksirens/gw/populations/utils.py:14), i.e. an essentially un-tapered m2
+# floor at 1 Msun -- NOT the power law's (m_min=5, dm_min=3).  The mock must use
+# the same per-component pairing so p_inference/p_draw stays O(1).
+_PAIR_M_LO = 1.0
+_PAIR_DM = 0.01
 
 
-def _sfilter_low(m: np.ndarray, m_min: float, dm: float) -> np.ndarray:
-    """Logistic low-mass taper: 0 for m<=m_min, ramps to 1 over [m_min, m_min+dm]."""
+def _sfilter_low(m: np.ndarray, m_min, dm) -> np.ndarray:
+    """Logistic low-mass taper: 0 for m<=m_min, ramps to 1 over [m_min, m_min+dm].
+
+    ``m_min`` and ``dm`` may be scalars or per-element arrays (broadcasting with
+    ``m``); the per-lane form is used by the per-component pairing sampler, which
+    applies (m_min=5, dm=3) to power-law lanes and (m_min=1, dm=0.01) to peak
+    lanes in the same vectorised call.
+    """
     m = np.asarray(m, dtype=float)
     delta = m - m_min
     safe_d = np.where(delta > 0.0, delta, 1.0)
-    safe_dm = dm if dm > 0.0 else 1.0
+    safe_dm = np.where(dm > 0.0, dm, 1.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         # delta == dm at one grid point gives 1/0 here; the where-masks below
         # set the correct boundary value, so the intermediate inf is harmless.
@@ -245,9 +266,17 @@ def _sample_tapered_powerlaw(rng: np.random.Generator, n: int, pop: PopulationCo
     return out
 
 
-def _sample_powerlaw_peak_m1(rng: np.random.Generator, n: int, pop: PopulationConfig) -> np.ndarray:
+def _sample_powerlaw_peak_m1(
+    rng: np.random.Generator, n: int, pop: PopulationConfig, return_component: bool = False
+):
     """Primary mass from the tapered power law + Gaussian peak mixture, matching
-    the inference ``powerlaw+peak`` density (``peak_fraction`` weight in the peak)."""
+    the inference ``powerlaw+peak`` density (``peak_fraction`` weight in the peak).
+
+    With ``return_component=True`` also returns the boolean ``use_peak`` lane mask
+    (True where the primary was drawn from the Gaussian peak).  The mask selects
+    the per-component pairing taper in :func:`_sample_q` so the joint (m1, q) draw
+    matches the inference's per-component pairing (peak lanes pair against the
+    (m_min=1, dm=0.01) fallback, power-law lanes against (m_min, dm_min))."""
     use_peak = rng.uniform(size=n) < pop.peak_fraction
     m1 = np.empty(int(n), dtype=float)
     n_peak = int(use_peak.sum())
@@ -257,12 +286,21 @@ def _sample_powerlaw_peak_m1(rng: np.random.Generator, n: int, pop: PopulationCo
         m1[use_peak] = _sample_truncated_gaussian(
             rng, n_peak, pop.peak_mu, pop.peak_sigma, _MASS_NORM_GRID[0], _MASS_NORM_GRID[-1]
         )
+    if return_component:
+        return m1, use_peak
     return m1
 
 
-def _sample_q_hard(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
-    """Inverse-CDF draw from the hard power law ``q**beta`` on ``[m_min/m1, 1]``."""
-    qmin = np.clip(pop.mmin / m1, 1.0e-3, 1.0)
+def _sample_q_hard(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig, m_min=None) -> np.ndarray:
+    """Inverse-CDF draw from the hard power law ``q**beta`` on ``[m_min/m1, 1]``.
+
+    ``m_min`` defaults to ``pop.mmin`` (the power-law pairing floor); pass a
+    per-lane array (e.g. ``_PAIR_M_LO`` for peak lanes) to widen the proposal
+    support down to ``m2 = m_min`` so the rejection sampler covers the whole
+    per-component pairing support."""
+    if m_min is None:
+        m_min = pop.mmin
+    qmin = np.clip(m_min / m1, 1.0e-3, 1.0)
     u = rng.uniform(size=len(m1))
     b = pop.beta
     if np.isclose(b, -1.0):
@@ -271,39 +309,84 @@ def _sample_q_hard(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConf
     return (u * (1.0 - qmin**bp1) + qmin**bp1) ** (1.0 / bp1)
 
 
-def _sample_q(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
+def _sample_q(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig, use_peak=None) -> np.ndarray:
     """Mass ratio from ``p(q|m1) propto S_low(m2) q**beta`` (m2 = q*m1), matching
-    the inference pairing model: rejection against the hard ``q**beta`` proposal."""
+    the inference pairing model: rejection against the hard ``q**beta`` proposal.
+
+    ``use_peak`` (optional per-lane boolean mask, from
+    :func:`_sample_powerlaw_peak_m1`) selects the per-component pairing taper:
+    peak lanes use (``_PAIR_M_LO``, ``_PAIR_DM``) = (1, 0.01) and power-law lanes
+    use (``pop.mmin``, ``pop.dm_min``), exactly as the inference pairs each mass
+    component separately.  ``use_peak=None`` reproduces the historical all-power-
+    law behaviour (every lane tapered at ``pop.mmin``)."""
     m1 = np.asarray(m1, dtype=float)
     out = np.empty_like(m1)
+    if use_peak is None:
+        m_min_lane = np.full(m1.shape, pop.mmin)
+        dm_lane = np.full(m1.shape, pop.dm_min)
+    else:
+        use_peak = np.asarray(use_peak, dtype=bool)
+        m_min_lane = np.where(use_peak, _PAIR_M_LO, pop.mmin)
+        dm_lane = np.where(use_peak, _PAIR_DM, pop.dm_min)
     todo = np.ones(len(m1), dtype=bool)
     for _ in range(10000):
         if not todo.any():
             break
         idx = np.where(todo)[0]
-        cand = _sample_q_hard(rng, m1[idx], pop)
-        acc = rng.uniform(size=len(cand)) < _sfilter_low(cand * m1[idx], pop.mmin, pop.dm_min)
+        cand = _sample_q_hard(rng, m1[idx], pop, m_min=m_min_lane[idx])
+        acc = rng.uniform(size=len(cand)) < _sfilter_low(cand * m1[idx], m_min_lane[idx], dm_lane[idx])
         out[idx[acc]] = cand[acc]
         todo[idx[acc]] = False
     if todo.any():
         # Pathological m1 ~ m_min (measure ~0): fall back to the hard draw.
         idx = np.where(todo)[0]
-        out[idx] = _sample_q_hard(rng, m1[idx], pop)
+        out[idx] = _sample_q_hard(rng, m1[idx], pop, m_min=m_min_lane[idx])
     return out
 
 
-def _q_pdf(q: np.ndarray, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
-    """``p(q | m1) propto S_low(m2) q**beta`` normalised over q on ``_Q_NORM_GRID``
-    (matches the inference pairing model)."""
+def _pair_pdf(q: np.ndarray, m1: np.ndarray, m_min: float, dm: float, beta: float) -> np.ndarray:
+    """Normalised conditional pairing density ``p(q | m1)`` for ONE mass component.
+
+    Replicates the inference ``PairingModel.__call__`` /
+    ``PowerLawPairing._eval_unnorm`` exactly (darksirens/gw/populations/base.py:205-228,
+    parametric.py:661-673):
+
+    * unnormalised ``q**beta * S_low(q*m1; m_min, dm)`` with a HARD zero for
+      ``m2 = q*m1 < m_min`` and the ``q>0`` safe-power guard;
+    * per-``m1`` normalisation by trapezoid over ``_Q_NORM_GRID`` (== get_q_grid())
+      with the row-maximum factored out of the quadrature.  Factoring the row max
+      is a backward-pass conditioning trick in the inference; here it only changes
+      the association order, so the forward density equals ``unnorm / trapz(unnorm)``
+      up to ULP while staying bit-comparable to the inference quadrature.
+
+    ``m_min``/``dm`` are the pairing floor for the component: (``pop.mmin``,
+    ``pop.dm_min``) for the power law, (``_PAIR_M_LO``, ``_PAIR_DM``) for the peak.
+    """
     q = np.atleast_1d(np.asarray(q, dtype=float))
     m1 = np.atleast_1d(np.asarray(m1, dtype=float))
     qg = _Q_NORM_GRID
     m2g = qg[None, :] * m1[:, None]                       # (N, Nq)
-    unnorm_g = (qg[None, :] ** pop.beta) * _sfilter_low(m2g, pop.mmin, pop.dm_min)
-    norm = _trapz(unnorm_g, qg, axis=-1)                  # (N,)
-    unnorm = (q ** pop.beta) * _sfilter_low(q * m1, pop.mmin, pop.dm_min)
-    out = unnorm / np.where(norm > 0.0, norm, 1.0)
+    # Row grid of the unnormalised pairing (safe q>0 power + hard m2<m_min zero).
+    safe_qg = np.where(qg > 0.0, qg, 1.0)
+    pg = np.where(qg > 0.0, safe_qg ** beta, 0.0)[None, :] * _sfilter_low(m2g, m_min, dm)
+    pg = np.where(m2g < m_min, 0.0, pg)
+    scale = np.max(pg, axis=-1, keepdims=True)            # row max (base.py:221)
+    scale_s = np.where(scale > 0.0, scale, 1.0)
+    n_sc = _trapz(pg / scale_s, qg, axis=-1)              # (N,) scaled norm
+    scale_m = scale_s[:, 0]
+    # Same unnormalised form at the requested q.
+    safe_q = np.where(q > 0.0, q, 1.0)
+    p = np.where(q > 0.0, safe_q ** beta, 0.0) * _sfilter_low(q * m1, m_min, dm)
+    p = np.where(q * m1 < m_min, 0.0, p)
+    out = np.where(n_sc > 0.0, (p / scale_m) / np.where(n_sc > 0.0, n_sc, 1.0), 0.0)
     return np.where((q > 0.0) & (q <= 1.0), out, 0.0)
+
+
+def _q_pdf(q: np.ndarray, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
+    """``p(q | m1) propto S_low(m2) q**beta`` for the POWER-LAW pairing floor
+    (``pop.mmin``, ``pop.dm_min``); thin wrapper over :func:`_pair_pdf` kept for
+    backward compatibility with the pinned sampler/normalisation tests."""
+    return _pair_pdf(q, m1, pop.mmin, pop.dm_min, pop.beta)
 
 
 def _sample_chieff(rng: np.random.Generator, n: int, pop: PopulationConfig) -> np.ndarray:
@@ -315,11 +398,28 @@ def _sample_chieff(rng: np.random.Generator, n: int, pop: PopulationConfig) -> n
 
 
 def _mass_spin_pdf(m1: np.ndarray, q: np.ndarray, chi: np.ndarray, pop: PopulationConfig) -> np.ndarray:
+    """Joint source-frame mass-ratio-spin density ``p(m1, q, chi)``, matching the
+    inference ``powerlaw+peak`` mixture's per-component pairing EXACTLY.
+
+    The inference (MixtureModel.component_densities, base.py:324-378) pairs each
+    mass component with its OWN secondary-mass floor: the power law with
+    (``m_min``, ``dm_min``) and the Gaussian peak with the fallback
+    (``M_LO``=1, dm=0.01).  The mixture is therefore
+
+        p(m1,q) = w_PL p_PL(m1) pair(q|m1; m_min, dm_min)
+                + w_G  p_G (m1) pair(q|m1; 1.0,  0.01),
+
+    NOT a single tapered pairing applied to the whole primary mixture (the old
+    ``p_m1 * _q_pdf`` form, which mis-tapered the peak's secondaries at m_min=5
+    and drove p_inference/p_draw -> e^31 for injections with m2 just above 5).
+    """
     p_pl = _powerlaw_pdf(m1, pop.alpha, pop.mmin, pop.mmax, pop.dm_min, pop.dm_max)
     p_pk = _peak_pdf(m1, pop.peak_mu, pop.peak_sigma)
-    p_m1 = (1.0 - pop.peak_fraction) * p_pl + pop.peak_fraction * p_pk
+    pair_pl = _pair_pdf(q, m1, pop.mmin, pop.dm_min, pop.beta)
+    pair_pk = _pair_pdf(q, m1, _PAIR_M_LO, _PAIR_DM, pop.beta)
     p_chi = _truncnorm_pdf(chi, pop.chi_mu, pop.chi_sigma, -1.0, 1.0)
-    return p_m1 * _q_pdf(q, m1, pop) * p_chi
+    p_mass_pair = (1.0 - pop.peak_fraction) * p_pl * pair_pl + pop.peak_fraction * p_pk * pair_pk
+    return p_mass_pair * p_chi
 
 
 def _network_snr(m1: np.ndarray, m2: np.ndarray, z: np.ndarray, dl: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -410,8 +510,8 @@ def _draw_events_until_detected(
         ra = catalog["ra"][host_idx]
         dec = catalog["dec"][host_idx]
         dl = _interp_dl(z, grids)
-        m1 = _sample_powerlaw_peak_m1(rng, ntry, pop)
-        q = _sample_q(rng, m1, pop)
+        m1, use_peak = _sample_powerlaw_peak_m1(rng, ntry, pop, return_component=True)
+        q = _sample_q(rng, m1, pop, use_peak=use_peak)
         m2 = q * m1
         chi = _sample_chieff(rng, ntry, pop)
         snr = _network_snr(m1, m2, z, dl, rng)
@@ -497,18 +597,36 @@ def _selection_pdraw(
     mass-spin factor is flat -- this is the proposal that keeps the importance-
     sampling estimate of mu(theta) well-conditioned across the whole prior (high
     Neff), at the cost of detecting a smaller fraction of the draws.
+
+    ``population+uniform`` is a DEFENSIVE mixture proposal: each draw is a
+    Bernoulli(0.9) choice of the population branch else the uniform branch, so the
+    proposal density of EVERY row is 0.9 p_population + 0.1 p_uniform.  The 0.1
+    uniform floor bounds the importance weight p_inference/p_draw (no e^31 tails,
+    healthy Neff even under a stress population) while the 0.9 population mass
+    keeps the detected fraction high.
     """
     pz = np.interp(z, grids["z"], grids["dvc_dz"]) / _trapz(grids["dvc_dz"], grids["z"])
     ddldz = np.interp(z, grids["z"], np.gradient(grids["dl"], grids["z"]))
-    if proposal == "uniform":
-        m1lo, m1hi = m1det_range
-        # m1det is drawn directly (no source->detector Jacobian); p(dL)=p_z(z)|dz/ddL|.
+    m1lo, m1hi = m1det_range
+
+    def _p_uniform():
+        # m1det drawn directly (no source->detector Jacobian); p(dL)=p_z(z)|dz/ddL|.
         p_dL = pz / np.maximum(ddldz, 1.0e-300)
-        p_draw = (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
-    else:
+        return (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
+
+    def _p_population():
         # m1det = (1+z) m1src, dL = dL(z): Jacobian (m1src,q,z)->(m1det,q,dL) is (1+z) dL'(z).
         jac = ddldz * (1.0 + z)
-        p_draw = _mass_spin_pdf(m1src, q, chi, pop) * pz / np.maximum(jac, 1.0e-300) / (4.0 * np.pi)
+        return _mass_spin_pdf(m1src, q, chi, pop) * pz / np.maximum(jac, 1.0e-300) / (4.0 * np.pi)
+
+    if proposal == "uniform":
+        p_draw = _p_uniform()
+    elif proposal == "population":
+        p_draw = _p_population()
+    elif proposal == "population+uniform":
+        p_draw = 0.9 * _p_population() + 0.1 * _p_uniform()
+    else:
+        raise ValueError(f"Unknown proposal {proposal!r}; expected one of {SELECTION_PROPOSALS}")
     return np.maximum(p_draw, 1.0e-300)
 
 
@@ -532,10 +650,28 @@ def _draw_selection_batch(
         q = rng.uniform(0.0, 1.0, ndraw)
         chi = rng.uniform(-1.0, 1.0, ndraw)
         m1src = m1det / (1.0 + z)
-    else:
-        m1src = _sample_powerlaw_peak_m1(rng, ndraw, pop)
-        q = _sample_q(rng, m1src, pop)
+    elif proposal == "population":
+        m1src, use_peak = _sample_powerlaw_peak_m1(rng, ndraw, pop, return_component=True)
+        q = _sample_q(rng, m1src, pop, use_peak=use_peak)
         chi = _sample_chieff(rng, ndraw, pop)
+    elif proposal == "population+uniform":
+        # DEFENSIVE mixture: per draw, Bernoulli(0.9) -> population branch else
+        # uniform branch.  Draw both branches for every lane and select; pdraw is
+        # the mixture density 0.9 p_pop + 0.1 p_unif for ALL rows (_selection_pdraw).
+        m1lo, m1hi = m1det_range
+        use_pop = rng.uniform(size=ndraw) < 0.9
+        m1_pop, use_peak = _sample_powerlaw_peak_m1(rng, ndraw, pop, return_component=True)
+        q_pop = _sample_q(rng, m1_pop, pop, use_peak=use_peak)
+        chi_pop = _sample_chieff(rng, ndraw, pop)
+        m1det_u = rng.uniform(m1lo, m1hi, ndraw)
+        q_u = rng.uniform(0.0, 1.0, ndraw)
+        chi_u = rng.uniform(-1.0, 1.0, ndraw)
+        m1src_u = m1det_u / (1.0 + z)
+        m1src = np.where(use_pop, m1_pop, m1src_u)
+        q = np.where(use_pop, q_pop, q_u)
+        chi = np.where(use_pop, chi_pop, chi_u)
+    else:
+        raise ValueError(f"Unknown proposal {proposal!r}; expected one of {SELECTION_PROPOSALS}")
     m2src = q * m1src
     snr = _network_snr(m1src, m2src, z, dl, rng)
     det = snr >= snr_threshold
@@ -572,9 +708,11 @@ _REJECTION_MAXITER = 10_000
 
 
 def _jax_sfilter_low(m, m_min, dm):
+    # m_min/dm may be traced per-lane arrays (peak vs power-law pairing floor),
+    # so select the safe dm with jnp.where rather than a Python ``if``.
     delta = m - m_min
     safe_d = jnp.where(delta > 0.0, delta, 1.0)
-    safe_dm = dm if dm > 0.0 else 1.0
+    safe_dm = jnp.where(dm > 0.0, dm, 1.0)
     expo = jnp.clip(safe_dm / safe_d + safe_dm / (safe_d - safe_dm), -500.0, 500.0)
     S = 1.0 / (jnp.exp(expo) + 1.0)
     S = jnp.where(m <= m_min, 0.0, S)
@@ -601,6 +739,7 @@ def _make_population_mass_spin_sampler(pop: PopulationConfig):
     beta = float(pop.beta)
     chi_mu, chi_sigma = float(pop.chi_mu), float(pop.chi_sigma)
     lo_m, hi_m = float(_MASS_NORM_GRID[0]), float(_MASS_NORM_GRID[-1])
+    pair_m_lo, pair_dm = float(_PAIR_M_LO), float(_PAIR_DM)
     a = 1.0 - alpha
     alpha_is_one = bool(np.isclose(alpha, 1.0))
     bp1 = beta + 1.0
@@ -636,10 +775,17 @@ def _make_population_mass_spin_sampler(pop: PopulationConfig):
         _, m_pl, _, _ = lax.while_loop(cond, body, init)
         tn = jax.random.truncated_normal(kpk, (lo_m - mu) / sigma, (hi_m - mu) / sigma)
         m_pk = mu + sigma * tn
-        return jnp.where(use_peak, m_pk, m_pl)
+        # Return the peak/power-law lane flag so sample_q can pick the matching
+        # per-component pairing floor (mirrors _sample_powerlaw_peak_m1's mask).
+        return jnp.where(use_peak, m_pk, m_pl), use_peak
 
-    def sample_q(key, m1):
-        qmin = jnp.clip(mmin / m1, 1.0e-3, 1.0)
+    def sample_q(key, m1, use_peak):
+        # Per-component pairing floor: peak lanes -> (1.0, 0.01), power-law lanes
+        # -> (m_min, dm_min).  qmin uses the component m_min so the proposal
+        # support reaches m2 = m_min (peak lanes must cover m2 in [1, m_min]).
+        m_min_lane = jnp.where(use_peak, pair_m_lo, mmin)
+        dm_lane = jnp.where(use_peak, pair_dm, dm_min)
+        qmin = jnp.clip(m_min_lane / m1, 1.0e-3, 1.0)
         kinit, kloop = jax.random.split(key, 2)
         q0 = _hard_q(jax.random.uniform(kinit), qmin)   # fallback for the (measure-0) no-accept case
 
@@ -651,7 +797,7 @@ def _make_population_mass_spin_sampler(pop: PopulationConfig):
             k, qv, _, it = st
             k, k1, k2 = jax.random.split(k, 3)
             cand = _hard_q(jax.random.uniform(k1), qmin)
-            acc = jax.random.uniform(k2) < _jax_sfilter_low(cand * m1, mmin, dm_min)
+            acc = jax.random.uniform(k2) < _jax_sfilter_low(cand * m1, m_min_lane, dm_lane)
             return k, jnp.where(acc, cand, qv), acc, it + 1
 
         init = (kloop, q0, jnp.asarray(False), jnp.asarray(0, jnp.int32))
@@ -676,7 +822,8 @@ def _make_selection_kernel(grids: dict[str, np.ndarray], pop: PopulationConfig,
     dl_grid = jnp.asarray(grids["dl"])
     vc_cdf = jnp.asarray(grids["vc_cdf"])
     m1lo, m1hi = m1det_range
-    samplers = _make_population_mass_spin_sampler(pop) if proposal == "population" else None
+    uses_population = proposal in ("population", "population+uniform")
+    samplers = _make_population_mass_spin_sampler(pop) if uses_population else None
 
     def sample_one(key):
         ks = jax.random.split(key, 7)
@@ -691,9 +838,22 @@ def _make_selection_kernel(grids: dict[str, np.ndarray], pop: PopulationConfig,
             m1src = m1det / (1.0 + z)
         else:
             sample_m1, sample_q, sample_chi = samplers
-            m1src = sample_m1(ks[3])
-            q = sample_q(ks[4], m1src)
+            m1src, use_peak = sample_m1(ks[3])
+            q = sample_q(ks[4], m1src, use_peak)
             chi = sample_chi(ks[5])
+            if proposal == "population+uniform":
+                # DEFENSIVE mixture: Bernoulli(0.9) picks the population draw else
+                # a uniform (m1det, q, chi) draw.  Extra randoms come from a folded
+                # key so the population/uniform-only paths keep their key layout.
+                ku = jax.random.split(jax.random.fold_in(key, 202), 4)
+                use_pop = jax.random.uniform(ku[0]) < 0.9
+                m1det_u = jax.random.uniform(ku[1], minval=m1lo, maxval=m1hi)
+                q_u = jax.random.uniform(ku[2])
+                chi_u = jax.random.uniform(ku[3], minval=-1.0, maxval=1.0)
+                m1src_u = m1det_u / (1.0 + z)
+                m1src = jnp.where(use_pop, m1src, m1src_u)
+                q = jnp.where(use_pop, q, q_u)
+                chi = jnp.where(use_pop, chi, chi_u)
         m2src = q * m1src
         mchirp_det = (m1src * m2src) ** 0.6 / (m1src + m2src) ** 0.2 * (1.0 + z)
         proj = jnp.sqrt(jax.random.beta(ks[6], 2.0, 5.0))
@@ -1110,7 +1270,11 @@ def parse_args() -> argparse.Namespace:
                              "masses/spins from the fiducial population (matches the inference "
                              "selection integral; smaller detected Neff). 'uniform' draws a broad, "
                              "population-independent proposal (uniform m1det/q/chi) that keeps the "
-                             "importance-sampling Neff high across the whole prior.")
+                             "importance-sampling Neff high across the whole prior. "
+                             "'population+uniform' is a defensive Bernoulli(0.9) mixture of the two "
+                             "(pdraw = 0.9 p_population + 0.1 p_uniform for every row): the 0.1 "
+                             "uniform floor bounds p_inference/p_draw (no heavy weight tails / Neff "
+                             "collapse) while keeping most draws population-like.")
     parser.add_argument("--nside", type=_positive_int, default=16)
     parser.add_argument("--zmax", type=_positive_float, default=0.08)
     parser.add_argument("--H0", type=_positive_float, default=67.74)

@@ -64,8 +64,10 @@ def _draw_bright_events_until_detected(rng, nobs, observed_catalog, grids, pop, 
         ra = observed_catalog["ra"][host_idx]
         dec = observed_catalog["dec"][host_idx]
         dl = _dark._interp_dl(z, grids)
-        m1 = _dark._sample_powerlaw_peak_m1(rng, ntry, pop)
-        q = _dark._sample_q(rng, m1, pop)
+        m1, use_peak = _dark._sample_powerlaw_peak_m1(
+            rng, ntry, pop, return_component=True
+        )
+        q = _dark._sample_q(rng, m1, pop, use_peak=use_peak)
         m2 = q * m1
         chi = _dark._sample_chieff(rng, ntry, pop)
         snr = _dark._network_snr(m1, m2, z, dl, rng)
@@ -113,9 +115,22 @@ def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold,
         chi = rng.uniform(-1.0, 1.0, ndraw)
         m1src = m1det / (1.0 + z)
     else:
-        m1src = _dark._sample_powerlaw_peak_m1(rng, ndraw, pop)
-        q = _dark._sample_q(rng, m1src, pop)
+        # Per-component draw + optional defensive-uniform lanes, mirroring
+        # generate_mock_data._draw_selection_batch so the stored pdraw
+        # (population or 0.9*pop + 0.1*unif mixture) matches the draws.
+        m1src, use_peak = _dark._sample_powerlaw_peak_m1(
+            rng, ndraw, pop, return_component=True
+        )
+        q = _dark._sample_q(rng, m1src, pop, use_peak=use_peak)
         chi = _dark._sample_chieff(rng, ndraw, pop)
+        if proposal == "population+uniform":
+            m1lo, m1hi = m1det_range
+            use_unif = rng.uniform(size=ndraw) < 0.1
+            m1src = np.where(
+                use_unif, rng.uniform(m1lo, m1hi, ndraw) / (1.0 + z), m1src
+            )
+            q = np.where(use_unif, rng.uniform(0.0, 1.0, ndraw), q)
+            chi = np.where(use_unif, rng.uniform(-1.0, 1.0, ndraw), chi)
     m2src = q * m1src
     gw_det = _dark._network_snr(m1src, m2src, z, dl, rng) >= snr_threshold
     em_det = _joint_em_detected(rng, ra, dec, z, dl, survey)
