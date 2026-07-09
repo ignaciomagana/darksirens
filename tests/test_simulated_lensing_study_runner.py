@@ -601,3 +601,20 @@ def test_hyperparameter_recovery_row_mapping():
     assert by_label[r"$z_{\rm peak}$"]["truth_in_90ci"] is True
     assert by_label["log10_tau_A"]["truth_in_90ci"] is False
     assert by_label["log10_tau_A"]["truth"] == -3.0
+
+
+def test_dry_run_case_g_uses_uniform_observation_times(tmp_path):
+    """Case G (pair_marks=time) requires physical arrival times on every
+    edge and enumeration-safe graph caps."""
+    _workdir, plan = _run_dry_plan(tmp_path, cases=["G_true_pairs_full_marks"])
+    case = plan["cases"]["G_true_pairs_full_marks"]
+    gen = " ".join(case["generate"])
+    inf = " ".join(case["inference"])
+    graph = " ".join(case["build_graph"])
+    assert "--observation-times uniform" in gen
+    assert "--pair_marks time" in inf
+    assert "--max_edges_per_event 2" in graph
+    # Other cases keep the legacy placeholder times.
+    _workdir_b, plan_b = _run_dry_plan(tmp_path, cases=["B_true_pairs_clean_graph"], workdir_name="study_b")
+    gen_b = " ".join(plan_b["cases"]["B_true_pairs_clean_graph"]["generate"])
+    assert "--observation-times placeholder" in gen_b

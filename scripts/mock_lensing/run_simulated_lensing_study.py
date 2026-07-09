@@ -122,7 +122,14 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
     elif name.startswith("F_"):
         spec.update(include_time_marks=False, pair_marks="none", pair_tag_model="snr_sky")
     elif name.startswith("G_"):
-        pass
+        # Full-marks case: pair_marks=time needs a physical |Delta t| on EVERY
+        # edge, which only exists under uniform observation times. Cap the
+        # graph like H so components stay exactly enumerable at paper scale.
+        spec.update(
+            observation_times="uniform",
+            max_edges_per_event=2,
+            max_total_edges=max(4, 2 * cfg["n_pair"]),
+        )
     elif name == "H_no_time_ambiguous_components":
         spec.update(
             max_edges_per_event=3,
@@ -224,6 +231,8 @@ def generate_cmd(case_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], seed
            "--n-unlensed-inj", str(cfg["n_unlensed_inj"]), "--n-lensed-inj", str(cfg["n_lensed_inj"]),
            "--pop_model", str(cfg.get("pop_model", "powerlaw+peak")),
            "--include-lensed-singletons", str(bool(cfg.get("include_lensed_singletons", False))).lower(),
+           "--observation-times", str(spec.get("observation_times", cfg.get("observation_times", "placeholder"))),
+           "--t-obs-days", str(spec.get("t_obs_days", cfg.get("t_obs_days", 365.25))),
            "--seed", str(seed), "--write-unified-observed-catalog", "true", "--write-legacy-pair-pe", "false"]
     if cfg.get("tau_A") is not None:
         cmd.extend(["--tau-A", str(cfg["tau_A"])])
@@ -717,7 +726,7 @@ def main(argv: list[str] | None = None) -> int:
     args.dlogz = float(resolved_config["inference"]["dlogz"])
     args.diagnostics_only = bool(resolved_config["inference"]["diagnostics_only"])
     mock = resolved_config["mock"]; graph = resolved_config["candidate_graph"]; inf = resolved_config["inference"]
-    cfg = {"n_universe": mock["n_universe"], "n_sing": mock["n_singletons"], "n_pair": mock["n_lensed_pairs"], "nsamp": mock["nsamp"], "n_unlensed_inj": mock["n_unlensed_inj"], "n_lensed_inj": mock["n_lensed_inj"], "conditioning": mock["conditioning"], "pop_model": mock.get("pop_model", "powerlaw+peak"), "include_lensed_singletons": bool(mock.get("include_lensed_singletons", False)), "tau_A": mock.get("tau_A"), "tau_n": mock.get("tau_n"), "pe_max": min(mock["nsamp"], 512), "seed": resolved_config["study"]["seed"], **graph, **resolved_config["selection"], **inf}
+    cfg = {"n_universe": mock["n_universe"], "n_sing": mock["n_singletons"], "n_pair": mock["n_lensed_pairs"], "nsamp": mock["nsamp"], "n_unlensed_inj": mock["n_unlensed_inj"], "n_lensed_inj": mock["n_lensed_inj"], "conditioning": mock["conditioning"], "pop_model": mock.get("pop_model", "powerlaw+peak"), "include_lensed_singletons": bool(mock.get("include_lensed_singletons", False)), "tau_A": mock.get("tau_A"), "tau_n": mock.get("tau_n"), "observation_times": mock.get("observation_times", "placeholder"), "t_obs_days": mock.get("t_obs_days", 365.25), "pe_max": min(mock["nsamp"], 512), "seed": resolved_config["study"]["seed"], **graph, **resolved_config["selection"], **inf}
     work = Path(args.workdir).resolve(); work.mkdir(parents=True, exist_ok=True)
     write_config(work / "resolved_config.yaml", resolved_config)
     plan = build_plan(args, cfg, resolved_config, work)

@@ -162,6 +162,20 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
     catalog = load_observed_catalog(observed_catalog_path)
     validate_observed_catalog(catalog, path=observed_catalog_path)
     events = catalog["events"]
+    # Catalogs generated with --observation-times uniform carry PHYSICAL
+    # arrival times: every edge then gets a |Delta t_gps| mark (truth pairs
+    # reproduce their generator delta_t_obs exactly; false edges get their
+    # real separations). Placeholder catalogs keep the legacy behavior of
+    # marking only truth pairs via explicit time-delay metadata.
+    uniform_times = catalog.get("observation_times") == "uniform"
+    catalog_time_sigma = catalog.get("time_delay_sigma_sec")
+    if include_time_marks and uniform_times and not (
+        isinstance(catalog_time_sigma, (int, float)) and catalog_time_sigma > 0
+    ):
+        raise ValueError(
+            "observed catalog declares observation_times='uniform' but lacks a "
+            "positive time_delay_sigma_sec; regenerate the mock"
+        )
     n_events = int(catalog["n_events"])
     samples = _read_event_samples(gw_path, n_events)
     summaries = [_event_summary(samples, i) for i in range(n_events)]
@@ -195,9 +209,13 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
                 edge["label"] = _truth_label(events[i], events[j])
             marks = {"log_mass_distance_score": log_mass_distance_score}
             if include_time_marks:
-                physical = _physical_time_mark(events[i], events[j])
-                if physical is not None:
-                    marks["delta_t_obs"], marks["sigma_delta_t"] = physical
+                if uniform_times and delta_t is not None:
+                    marks["delta_t_obs"] = float(delta_t)
+                    marks["sigma_delta_t"] = float(catalog_time_sigma)
+                else:
+                    physical = _physical_time_mark(events[i], events[j])
+                    if physical is not None:
+                        marks["delta_t_obs"], marks["sigma_delta_t"] = physical
             if include_sky_marks:
                 marks["log_sky_overlap"] = float(log_sky_overlap)
             edge["marks"] = marks
