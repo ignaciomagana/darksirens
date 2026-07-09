@@ -230,6 +230,76 @@ def plot_false_positive_summary(ctx: dict[str, Any]) -> Path | None:
     return _save(fig, ctx["outdir"], "fig_false_positive_summary", ctx["format"], ctx["show"])
 
 
+
+
+# Run-kind identity for the joint-campaign ablation figures: fixed order and
+# fixed colors (colorblind-validated palette), marker shape as the secondary
+# encoding so identity survives grayscale/CVD printing.
+_RUN_KIND_STYLE = {
+    "j2": {"color": "#2a78d6", "marker": "o", "label": "pairs + population (full)"},
+    "singles_only": {"color": "#1baf7a", "marker": "s", "label": "singles only (per-event)"},
+    "off": {"color": "#eda100", "marker": "D", "label": "lensing ignored"},
+}
+_HYPER_LABELS = [r"$\gamma$", r"$\kappa$", r"$z_{\rm peak}$", "log10_tau_A"]
+
+
+def plot_hyperparameter_recovery(ctx: dict[str, Any]) -> Path | None:
+    """Median + 90% CI per rate/lens hyperparameter, per case, per run kind,
+    with the mock truth as a dashed reference — the joint-campaign ablation
+    comparison (full pairs model vs singles-only vs lensing-ignored)."""
+    rows = ctx.get("hyper_rows") or []
+    labels = [l for l in _HYPER_LABELS if any(r.get("label") == l for r in rows)]
+    if not rows or not labels:
+        return None
+    cases = [c for c in ctx["cases"] if any(r.get("case") == c for r in rows)]
+    if not cases:
+        return None
+
+    n = len(labels)
+    fig, axes = plt.subplots(1, n, figsize=(3.2 * n, 3.6), sharex=True)
+    axes = np.atleast_1d(axes)
+    kinds = [k for k in _RUN_KIND_STYLE if any(r.get("run") == k for r in rows)]
+    offsets = np.linspace(-0.22, 0.22, len(kinds)) if len(kinds) > 1 else [0.0]
+
+    for ax, label in zip(axes, labels):
+        for x0, case in enumerate(cases):
+            truth = next((_float(r.get("truth")) for r in rows
+                          if r.get("case") == case and r.get("label") == label
+                          and r.get("truth") not in (None, "")), math.nan)
+            if math.isfinite(truth):
+                ax.hlines(truth, x0 - 0.35, x0 + 0.35, colors="0.45",
+                          linestyles="dashed", linewidth=1.2, zorder=1)
+            for kind, dx in zip(kinds, offsets):
+                r = next((r for r in rows if r.get("case") == case
+                          and r.get("label") == label and r.get("run") == kind), None)
+                if r is None:
+                    continue
+                med = _float(r.get("median")); q05 = _float(r.get("q05")); q95 = _float(r.get("q95"))
+                if not math.isfinite(med):
+                    continue
+                style = _RUN_KIND_STYLE[kind]
+                ax.errorbar([x0 + dx], [med],
+                            yerr=[[med - q05], [q95 - med]] if math.isfinite(q05) and math.isfinite(q95) else None,
+                            fmt=style["marker"], color=style["color"], markersize=5,
+                            elinewidth=1.5, capsize=2.5, zorder=2)
+        ax.set_title(label)
+        ax.set_xticks(range(len(cases)),
+                      labels=[c.split("_")[0] for c in cases])
+        ax.grid(axis="y", color="0.9", linewidth=0.8, zorder=0)
+    axes[0].set_ylabel("posterior median with 90% CI")
+    handles = [
+        plt.Line2D([], [], color=_RUN_KIND_STYLE[k]["color"],
+                   marker=_RUN_KIND_STYLE[k]["marker"], linestyle="none",
+                   label=_RUN_KIND_STYLE[k]["label"])
+        for k in kinds
+    ] + [plt.Line2D([], [], color="0.45", linestyle="dashed", label="mock truth")]
+    fig.legend(handles=handles, loc="upper center", ncols=len(handles),
+               frameon=False, bbox_to_anchor=(0.5, 1.02))
+    fig.suptitle("Hyperparameter recovery across ablations", y=1.12)
+    fig.tight_layout()
+    return _save(fig, ctx["outdir"], "fig_hyperparameter_recovery", ctx["format"], ctx["show"])
+
+
 PLOTS: dict[str, Callable[[dict[str, Any]], Path | None]] = {
     "fig_pair_probabilities": plot_pair_probabilities,
     "fig_pair_prob_vs_edge_score": plot_pair_prob_vs_edge_score,
@@ -238,6 +308,7 @@ PLOTS: dict[str, Callable[[dict[str, Any]], Path | None]] = {
     "fig_candidate_graph_summary": plot_candidate_graph_summary,
     "fig_ablation_summary": plot_ablation_summary,
     "fig_false_positive_summary": plot_false_positive_summary,
+    "fig_hyperparameter_recovery": plot_hyperparameter_recovery,
 }
 
 
@@ -263,11 +334,12 @@ def main(argv: list[str] | None = None) -> int:
     truth_rows = _read_csv(study_dir / "truth_recovery_summary.csv")
     bias_rows = _read_csv(study_dir / "bias_summary.csv")
     component_rows = _read_csv(study_dir / "partition_component_summary.csv")
+    hyper_rows = _read_csv(study_dir / "hyperparameter_recovery.csv")
     cases = _case_order(manifest, pair_rows, truth_rows, bias_rows, component_rows)
     if summary.get("diagnostics_only"):
         warnings.append("diagnostic-only mode: sampler evidence plots may be skipped or non-science diagnostics")
 
-    ctx = dict(study_dir=study_dir, outdir=outdir, format=args.format, show=args.show, min_edge_probability=args.min_edge_probability, summary=summary, manifest=manifest, pair_rows=pair_rows, truth_rows=truth_rows, bias_rows=bias_rows, component_rows=component_rows, cases=cases)
+    ctx = dict(study_dir=study_dir, outdir=outdir, format=args.format, show=args.show, min_edge_probability=args.min_edge_probability, summary=summary, manifest=manifest, pair_rows=pair_rows, truth_rows=truth_rows, bias_rows=bias_rows, component_rows=component_rows, hyper_rows=hyper_rows, cases=cases)
     produced=[]; skipped=[]
     for name, func in PLOTS.items():
         try:

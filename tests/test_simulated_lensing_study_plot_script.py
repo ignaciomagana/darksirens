@@ -36,6 +36,14 @@ def _fake_study(tmp_path: Path) -> Path:
         {"case": "G_true_pairs_full_marks", "injected_n_pairs": 1, "expected_n_pairs": 0.9, "map_n_pairs": 1, "true_edge_posterior_probability_mean": 0.8, "false_edge_posterior_probability_max": 0.1, "false_edge_posterior_probability_sum": 0.1, "map_partition_exact_truth_match": True},
     ], ["case", "injected_n_pairs", "expected_n_pairs", "map_n_pairs", "true_edge_posterior_probability_mean", "false_edge_posterior_probability_max", "false_edge_posterior_probability_sum", "map_partition_exact_truth_match"])
     _write_csv(study / "bias_summary.csv", [{"case": "G_true_pairs_full_marks", "p_tag_model": "snr_time_sky", "pair_tag_perturb_logit": 0, "delta_expected_n_pairs_minus_injected": -0.1}], ["case", "p_tag_model", "pair_tag_perturb_logit", "delta_expected_n_pairs_minus_injected"])
+    _write_csv(study / "hyperparameter_recovery.csv", [
+        {"case": "G_true_pairs_full_marks", "run": "j2", "label": r"$z_{\rm peak}$",
+         "truth": 1.9, "mean": 2.0, "median": 2.0, "q05": 1.4, "q95": 2.6, "truth_in_90ci": True},
+        {"case": "G_true_pairs_full_marks", "run": "off", "label": r"$z_{\rm peak}$",
+         "truth": 1.9, "mean": 2.6, "median": 2.6, "q05": 2.3, "q95": 2.9, "truth_in_90ci": False},
+        {"case": "G_true_pairs_full_marks", "run": "singles_only", "label": "log10_tau_A",
+         "truth": -3.3, "mean": -3.0, "median": -3.0, "q05": -3.8, "q95": -2.2, "truth_in_90ci": True},
+    ], ["case", "run", "label", "truth", "mean", "median", "q05", "q95", "truth_in_90ci"])
     _write_csv(study / "partition_component_summary.csv", [{"case": case, "n_events": 4, "n_candidate_edges": 2, "expected_n_pairs": 1, "map_n_pairs": 1} for case in cases], ["case", "n_events", "n_candidate_edges", "expected_n_pairs", "map_n_pairs"])
     for case in cases:
         cdir = study / "cases" / case
@@ -55,6 +63,7 @@ def test_simulated_lensing_study_plot_script_creates_figures(tmp_path):
     assert "fig_pair_probabilities" in produced
     assert "fig_candidate_graph_summary" in produced
     assert "fig_false_positive_summary" in produced
+    assert "fig_hyperparameter_recovery" in produced
     for item in manifest["produced"]:
         assert Path(item["path"]).exists()
 
