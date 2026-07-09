@@ -92,6 +92,19 @@ def load_all_data(opts):
     print(f"    - Data loaded. Found {nEvents_check} GW events.")
     print(f"    - HEALPix nside detected: {nside_check}")
 
+    # Multitracer: for K >= 2 attach the per-catalog compact bundles and skip the
+    # top-level LSS / mark / weak-lensing inputs.  Q tables are loaded PER
+    # BUNDLE inside load_multitracer_catalog_bundles; a top-level attach would
+    # redundantly load catalog 1's table into an unused slot and print a
+    # misleading "LSS completion loaded" line.
+    n_catalogs = int(getattr(opts, "n_catalogs", 1))
+    if n_catalogs >= 2:
+        data["catalogs"] = loaders.load_multitracer_catalog_bundles(opts, gw_inputs)
+        for _ds in ("mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color"):
+            data.setdefault(_ds, None)
+        data.setdefault("wl_params", None)
+        return data
+
     data = loaders.attach_lss_inputs(opts, data)
     data = loaders.attach_mark_inputs(opts, data)
     data = loaders.attach_wl_inputs(opts, data)

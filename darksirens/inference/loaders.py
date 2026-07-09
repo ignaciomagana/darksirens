@@ -105,6 +105,83 @@ def load_or_build_catalog_inputs(opts) -> dict:
     )
 
 
+def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
+    """Load one compact catalog bundle per survey path for the K-catalog mixture.
+
+    Each bundle is self-contained input to
+    :func:`darksirens.likelihood.catalog_views.prepare_catalog_views`: its own
+    ``nside``/``apix``, compact PE and selection views (built from the SAME GW
+    posterior / injection sky directions via a per-catalog ``hp.ang2pix``), a
+    dummy ``(1, N_grid)`` overdensity field (LSS is unsupported for the mixture),
+    and its deterministic Q_LSS table.
+
+    ``opts.survey_paths`` is the aligned list of catalog paths;
+    ``opts.lss_completions`` (if present) is positionally aligned, with ``""`` or
+    a missing entry meaning "no external completion for that catalog".
+    """
+    from types import SimpleNamespace
+
+    survey_paths = list(getattr(opts, "survey_paths", None) or [])
+    lss_list = list(getattr(opts, "lss_completions", None) or [])
+
+    def _lss_for(i):
+        if i < len(lss_list):
+            entry = lss_list[i]
+            return entry if entry not in (None, "") else None
+        return None
+
+    ra = np.asarray(gw_inputs["ra"])
+    dec = np.asarray(gw_inputs["dec"])
+    rasels = np.asarray(gw_inputs["rasels"])
+    decsels = np.asarray(gw_inputs["decsels"])
+
+    bundles = []
+    for i, path in enumerate(survey_paths):
+        # Host-side load + compaction so only the compact per-catalog views reach
+        # the device (mirrors the single-catalog drop_full_catalog memory path).
+        nside, ngals, zgals, dzgals, wgals = load_survey(path, to_device=False)
+        npix = hp.nside2npix(nside)
+        apix = hp.nside2pixarea(nside)
+
+        pixels_pe = np.asarray(
+            hp.ang2pix(nside, np.pi / 2 - dec, ra), dtype=np.int32
+        )
+        pixels_sel = np.asarray(
+            hp.ang2pix(nside, np.pi / 2 - decsels, rasels), dtype=np.int32
+        )
+        (
+            up_pe, s2u_pe, zpe, dzpe, wpe, npe,
+        ) = _compact_catalog_for_pixels(pixels_pe, zgals, dzgals, wgals, ngals)
+        (
+            up_se, s2u_se, zse, dzse, wse, nse,
+        ) = _compact_catalog_for_pixels(pixels_sel, zgals, dzgals, wgals, ngals)
+
+        # Per-catalog deterministic Q_LSS (ensemble marginalisation is off for the
+        # mixture); a private namespace keeps the single-catalog loader contract.
+        lss_ns = SimpleNamespace(
+            survey_path=path,
+            lss_completion=_lss_for(i),
+            universe_model=opts.universe_model,
+            lss_marginalize=False,
+        )
+        lss = maybe_load_lss_completion(lss_ns, zgrid=zgrid)
+
+        bundle = dict(
+            nside=nside,
+            apix=apix,
+            n_pix_catalog=npix,
+            delta_g_pix_z=jnp.zeros((1, len(zgrid))),
+            zgals_pe=zpe, dzgals_pe=dzpe, wgals_pe=wpe, ngals_pe=npe,
+            unique_pixels_pe=up_pe, sample_to_unique_pe=s2u_pe,
+            zgals_sel=zse, dzgals_sel=dzse, wgals_sel=wse, ngals_sel=nse,
+            unique_pixels_sel=up_se, sample_to_unique_sel=s2u_se,
+        )
+        bundle.update(lss)  # lss_completion_logq / _logq_members / _indexing
+        bundles.append(bundle)
+
+    return bundles
+
+
 def load_gw_and_selection_inputs(opts) -> dict:
     """Load GW posterior and selection samples."""
     # Load GW posterior samples (Always required)

@@ -239,3 +239,108 @@ def test_numpyro_nuts_dark_sirens_free_cosmology_gradient_path():
     assert samples.shape == (2, 1)
     assert np.all(np.isfinite(samples))
     assert results["numpyro_diagnostics"]["n_divergent"] >= 0
+
+
+# ---------------------------------------------------------------------------
+# K-catalog multitracer mixture (n_catalogs=2): the mixture-weight stick
+# fcat_2 must sample correctly through NUTS via the "beta" branch of
+# sampling.py's ``_site`` (dist.Beta(1, kscale)), matching
+# make_prior_transform's closed-form Beta(1, b) PPF for the nested samplers.
+# ---------------------------------------------------------------------------
+
+def _small_multitracer_likelihood_inputs():
+    """Two-catalog variant of ``_small_likelihood_inputs``: catalog A and
+    catalog B are each a single compact PE/selection row (all samples map to
+    it), with distinct galaxy redshifts so the mixture weight fcat_2 is
+    identifiable.  Cosmology and both catalogs' survey blocks are fixed so
+    the free coordinate vector is [<pop label>, fcat_2] -- as small as the
+    K=1 fixture's single free population parameter, plus one stick."""
+    nside = 1
+    n_events = 1
+    nsamp = 2
+    n_sel = 8
+
+    def _bundle(z):
+        return dict(
+            apix=hp.nside2pixarea(nside),
+            delta_g_pix_z=jnp.zeros((1, len(zgrid))),
+            zgals_pe=np.array([[z]]), dzgals_pe=np.array([[0.02]]),
+            wgals_pe=np.array([[1.0]]), ngals_pe=np.array([1], dtype=np.int32),
+            unique_pixels_pe=np.array([0], dtype=np.int32),
+            sample_to_unique_pe=np.zeros(nsamp, dtype=np.int32),
+            zgals_sel=np.array([[z]]), dzgals_sel=np.array([[0.02]]),
+            wgals_sel=np.array([[1.0]]), ngals_sel=np.array([1], dtype=np.int32),
+            unique_pixels_sel=np.array([0], dtype=np.int32),
+            sample_to_unique_sel=np.zeros(n_sel, dtype=np.int32),
+        )
+
+    data = {
+        "nEvents": n_events,
+        "nsamp": nsamp,
+        "Ndraw": float(n_sel),
+        "apix": hp.nside2pixarea(nside),  # make_likelihood reads this eagerly
+        "m1det": jnp.array([36.0, 38.0]),
+        "m2det": jnp.array([28.8, 30.4]),
+        "dL": jnp.array([460.0, 500.0]),
+        "chieff": jnp.array([0.0, 0.02]),
+        "p_pe": jnp.ones(nsamp),
+        "m1detsels": jnp.linspace(34.0, 40.0, n_sel),
+        "m2detsels": 0.8 * jnp.linspace(34.0, 40.0, n_sel),
+        "dLsels": jnp.linspace(430.0, 530.0, n_sel),
+        "chieffsels": jnp.zeros(n_sel),
+        "p_draw": jnp.ones(n_sel),
+        "catalogs": [_bundle(0.10), _bundle(0.30)],
+    }
+
+    pop_lower, pop_upper, pop_labels, _, _ = pop_model_prior_parser("powerlaw+peak")
+    pop_params_fid = get_fixed_population_params("powerlaw+peak")
+    sampled_pop_label = pop_labels[0]
+    prior_overrides = {sampled_pop_label: [float(pop_lower[0]), float(pop_upper[0])]}
+    fixed_parameter_values = {
+        label: float(pop_params_fid[i])
+        for i, label in enumerate(pop_labels)
+        if label != sampled_pop_label
+    }
+    opts = SimpleNamespace(
+        pop_model="powerlaw+peak",
+        universe_model="dark_sirens",
+        sel_batch_size=None,
+        fix_cosmology=True,
+        fix_population=False,
+        fix_survey=True,
+        prior_overrides=prior_overrides,
+        fixed_parameter_values=fixed_parameter_values,
+        complete_empty_pixel_policy="volume",
+        bright_siren_sky_marginalized=False,
+        n_catalogs=2,
+    )
+    return opts, data, prior_overrides, fixed_parameter_values, sampled_pop_label
+
+
+def test_numpyro_nuts_multitracer_k2_fcat2_samples_in_bounds():
+    (
+        opts, data, prior_overrides, fixed_parameter_values, sampled_label,
+    ) = _small_multitracer_likelihood_inputs()
+    pop_params_fid = get_fixed_population_params(opts.pop_model)
+    likelihood = make_likelihood(
+        opts, data, pop_params_fid, fixed_parameter_values=fixed_parameter_values,
+    )
+
+    labels, lower, upper, *rest = build_parameter_space(
+        opts.pop_model, opts.fix_population, opts.fix_cosmology, opts.fix_survey,
+        prior_overrides=prior_overrides, fixed_parameter_values=fixed_parameter_values,
+        universe_model=opts.universe_model, n_catalogs=opts.n_catalogs,
+    )
+    prior_kinds = rest[8]
+    assert labels == [sampled_label, "fcat_2"]
+
+    results = run_sampler(
+        "numpyro", likelihood, make_prior_transform(lower, upper, prior_kinds),
+        labels, lower, upper, SimpleNamespace(**_TINY_NUTS_OPTS),
+        prior_kinds=prior_kinds,
+    )
+    samples = np.asarray(results["samples"])
+    assert samples.shape == (2, 2)
+    assert np.all(np.isfinite(samples))
+    fcat_2 = samples[:, labels.index("fcat_2")]
+    assert np.all(fcat_2 >= 0.0) and np.all(fcat_2 <= 1.0)

@@ -27,6 +27,34 @@ def complete_empty_pixel_policy_code(policy: str | int) -> int:
     return int(policy)
 
 
+def _sticks_to_log_weights(v: jnp.ndarray) -> jnp.ndarray:
+    """Stick-breaking sticks ``v = (fcat_2, ..., fcat_K)`` -> log mixture weights.
+
+    Implements the Dirichlet(1, ..., 1) uniform-simplex construction where the
+    sampled labels are the sticks ``v_1 .. v_{K-1}`` (``fcat_m`` is ``v_{m-1}``):
+
+        log w_m = log(v_{m-1}) + sum_{i < m-1} log(1 - v_i)   for m = 2..K
+        log w_1 = sum_j log(1 - v_j)                          (the remainder)
+
+    Returns a ``(K,)`` array ordered ``[w_1, w_2, ..., w_K]``.  Stable via
+    ``jnp.log`` / ``jnp.log1p``; boundary sticks (0 or 1) yield ``-inf`` log
+    weights (a catalog of exactly zero weight), which drop cleanly out of the
+    downstream ``logsumexp`` mixture.
+    """
+    v = jnp.asarray(v)
+    log_v = jnp.log(v)          # log(v_j)
+    log1m = jnp.log1p(-v)       # log(1 - v_j)
+    # Exclusive prefix sum of log(1 - v): excl[s] = sum_{i < s} log1m[i].
+    # Computed as a right-shifted inclusive cumsum rather than
+    # ``cumsum - log1m`` so a boundary stick (v = 1 => log1m = -inf) does not
+    # produce a -inf - (-inf) = NaN weight.
+    incl = jnp.cumsum(log1m)
+    excl = jnp.concatenate([jnp.zeros((1,), dtype=incl.dtype), incl[:-1]])
+    log_w_tail = log_v + excl              # catalogs 2..K, shape (K-1,)
+    log_w_head = jnp.sum(log1m)            # catalog 1 (the simplex remainder)
+    return jnp.concatenate([jnp.reshape(log_w_head, (1,)), log_w_tail])
+
+
 @dataclass(frozen=True)
 class ParameterDecoder:
     """Decode sampler coordinates into typed cosmology, survey, and population params."""
@@ -44,6 +72,9 @@ class ParameterDecoder:
     # Weak-lensing magnification model carried on SurveyParams (NOT a sampled
     # parameter); None for every non-WL universe model.
     wl_params: object | None = None
+    # Number of EM catalogs in the redshift-prior mixture.  1 (default) is the
+    # single-catalog path; ``decode_mixture`` is only meaningful for K >= 2.
+    n_catalogs: int = 1
 
     def decode(self, coord: jnp.ndarray):
         """Return ``(cosmo, survey, pop_params, sky_params, mark_params)`` for ``coord``."""
@@ -96,6 +127,55 @@ class ParameterDecoder:
         )
         return cosmo, survey, pop_params, sky_params, mark_params
 
+    def decode_mixture(self, coord: jnp.ndarray):
+        """Decode ``coord`` into the K-catalog mixture components.
+
+        Returns ``(cosmo, surveys, pop_params, sky_params, mark_params, log_w)``
+        where ``surveys`` is a length-``n_catalogs`` tuple of :class:`SurveyParams`
+        (catalog 1 identical to :meth:`decode`; catalogs ``2..K`` built from the
+        ``_c{k}`` suffixed survey labels, falling back to the shared fiducials,
+        with ``wl_params=None``) and ``log_w`` is the ``(K,)`` array of log mixture
+        weights from the sampled sticks ``fcat_2..fcat_K``.
+        """
+        # Catalog 1 (and cosmo/pop/sky/mark) reuse decode() verbatim, so the
+        # first mixture component is bit-identical to the single-catalog decode.
+        cosmo, survey1, pop_params, sky_params, mark_params = self.decode(coord)
+
+        coord = jnp.asarray(coord)
+        values = resolve_parameter_values(
+            coord, self.sampled_labels, self.fixed_parameter_values
+        )
+
+        def _get(label, default):
+            return values[label] if label in values else default
+
+        surveys = [survey1]
+        for k in range(2, self.n_catalogs + 1):
+            sp_k = jnp.array([
+                _get(f"{label}_c{k}", float(SURVEY_PARAMS_FID[i]))
+                for i, label in enumerate(self.survey_labels)
+            ])
+            surveys.append(SurveyParams(
+                n0=10.0 ** sp_k[0],
+                z50=sp_k[1],
+                w=sp_k[2],
+                delta=sp_k[3],
+                b_miss=sp_k[4],
+                alpha_miss=sp_k[5],
+                sigma_kde=sp_k[6],
+                complete_empty_pixel_policy=self.complete_empty_pixel_policy,
+                wl_params=None,
+            ))
+
+        # Sticks fcat_2..fcat_K are always present in the coordinate/fixed values
+        # for K >= 2 (build_parameter_space appends them); the default is a
+        # defensive fallback only.
+        sticks = jnp.array([
+            _get(f"fcat_{m}", 0.0) for m in range(2, self.n_catalogs + 1)
+        ])
+        log_w = _sticks_to_log_weights(sticks)
+        return cosmo, tuple(surveys), pop_params, sky_params, mark_params, log_w
+
 
 def build_parameter_decoder(
     opts,
@@ -112,6 +192,7 @@ def build_parameter_decoder(
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
+    n_catalogs = int(getattr(opts, "n_catalogs", 1))
     (
         sampled_labels,
         _lower,
@@ -142,6 +223,7 @@ def build_parameter_decoder(
         sky_model=sky_model,
         mark_model=mark_model,
         mark_names=mark_names,
+        n_catalogs=n_catalogs,
     )
 
     return ParameterDecoder(
@@ -162,4 +244,5 @@ def build_parameter_decoder(
             if getattr(opts, "universe_model", None) == "spectral_sirens_wl"
             else None
         ),
+        n_catalogs=n_catalogs,
     )

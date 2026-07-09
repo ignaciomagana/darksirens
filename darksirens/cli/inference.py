@@ -329,7 +329,13 @@ def main():
     g = optp.add_argument_group("Data")
     g.add_argument("--gw_path",          required=True)
     g.add_argument("--gwselection_path", required=True)
-    g.add_argument("--survey_path",      default=None)
+    g.add_argument("--survey_path",      default=None, nargs="+", metavar="PATH",
+                   help=("Galaxy survey catalog(s). One path = current "
+                         "single-catalog behaviour. Multiple paths define a "
+                         "K-catalog dark-siren mixture: the redshift prior "
+                         "becomes sum_k w_k p_k(z) with per-catalog survey "
+                         "blocks (_c{k} labels) and sampled stick weights "
+                         "fcat_2..fcat_K (dark_sirens only)."))
     g.add_argument("--save_path",        default="./")
 
     g = optp.add_argument_group("Physical model")
@@ -464,12 +470,15 @@ def main():
                          "--save_path, and exit before building the likelihood."))
     g.add_argument("--completion_validation_pixels", type=int, default=64, metavar="N",
                    help="Maximum number of unique catalog pixels to inspect in --validate_completion.")
-    g.add_argument("--lss_completion", default=None, metavar="PATH",
+    g.add_argument("--lss_completion", default=None, nargs="+", metavar="PATH",
                    help=("Path to a precomputed LSS-conditioned lognormal completion file "
                          "(/lss_completion/logq_map), built offline by "
                          "darksirens-build-lognormal-completion. Replaces the legacy "
                          "max(1+b*delta_g,0) missing-galaxy factor for dark_sirens. If unset, "
-                         "an in-catalog /lss_completion group (if present) is used automatically."))
+                         "an in-catalog /lss_completion group (if present) is used automatically. "
+                         "For a multi-catalog mixture pass 0, 1, or n_catalogs paths, "
+                         "positionally aligned with --survey_path (use \"\" as a placeholder "
+                         "for a catalog with no external completion)."))
     g.add_argument("--lss_marginalize", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Fully-Bayesian marginalisation of the GW likelihood over the "
                          "Q_LSS ENSEMBLE: logL = logsumexp_m logL(Q_m) - log M, instead of "
@@ -534,6 +543,63 @@ def main():
                         "(used with --lensing_wl_model tabulated).")
 
     opts = optp.parse_args()
+
+    # ── Multitracer survey-path normalization ──────────────────────
+    # --survey_path / --lss_completion accept multiple values (nargs="+"); a
+    # single path reproduces the legacy single-catalog behaviour exactly.  We
+    # keep the aligned lists (opts.survey_paths / opts.lss_completions) for the
+    # mixture loader and re-scalarize opts.survey_path / opts.lss_completion so
+    # every single-catalog reader (loaders, catalogs/lss, io/results) is
+    # untouched.
+    def _as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return list(value)
+
+    survey_paths = _as_list(opts.survey_path)
+    opts.survey_paths = survey_paths
+    opts.n_catalogs = max(1, len(survey_paths))
+
+    lss_values = _as_list(opts.lss_completion)
+    if opts.n_catalogs == 1:
+        valid_counts = (0, 1)
+    else:
+        # With K catalogs the completion tables MUST be spelled out per catalog:
+        # broadcasting one table across catalogs would silently apply e.g. a
+        # galaxy Q table to the AGN catalog whenever the nsides happen to match.
+        valid_counts = (0, opts.n_catalogs)
+    if len(lss_values) not in valid_counts:
+        _fatal(
+            "--lss_completion must have "
+            + ("0 or 1 entries" if opts.n_catalogs == 1
+               else f"0 or exactly n_catalogs={opts.n_catalogs} entries")
+            + f" (got {len(lss_values)}); use \"\" as a placeholder for a "
+            "catalog with no external completion."
+        )
+    opts.lss_completions = [v if v not in (None, "") else None for v in lss_values]
+    opts.survey_path = survey_paths[0] if survey_paths else None
+    opts.lss_completion = opts.lss_completions[0] if opts.lss_completions else None
+
+    if opts.n_catalogs >= 2:
+        if opts.universe_model != "dark_sirens":
+            _fatal("Multiple --survey_path catalogs (a K>=2 mixture) require "
+                   "--universe_model dark_sirens.")
+        if getattr(opts, "use_LSS", False):
+            _fatal("--use_LSS is not supported with a multi-catalog mixture.")
+        if getattr(opts, "lss_marginalize", False):
+            _fatal("--lss_marginalize is not supported with a multi-catalog mixture.")
+        if getattr(opts, "mark_model", "none") not in (None, "none"):
+            _fatal("--mark_model is not supported with a multi-catalog mixture.")
+        if opts.counterpart is not None:
+            _fatal("--counterpart is not supported with a multi-catalog mixture.")
+        if getattr(opts, "validate_completion", False):
+            _fatal("--validate_completion is not supported with a multi-catalog mixture.")
+        if getattr(opts, "sky_model", "isotropic") != "isotropic":
+            _fatal("--sky_model must be 'isotropic' with a multi-catalog mixture "
+                   f"(got '{opts.sky_model}').")
+
     # Persist the canonical names in settings while keeping opts.fix_cosmology
     # for backward-compatible internal callers and saved metadata.
     opts.fixed_cosmology = bool(opts.fix_cosmology)
@@ -723,7 +789,12 @@ def main():
     _row("GW events path",  opts.gw_path)
     _row("Selection path",  opts.gwselection_path)
     if opts.survey_path:
-        _row("Survey path",  opts.survey_path)
+        if opts.n_catalogs == 1:
+            _row("Survey path",  opts.survey_path)
+        else:
+            _row("Catalog mixture", f"{opts.n_catalogs} catalogs")
+            for _i, _p in enumerate(opts.survey_paths):
+                _row(f"  catalog {_i + 1}", _p)
         _row("Use LSS",      "yes" if opts.use_LSS else "no")
     _row("Output root",     opts.save_path)
     if opts.sel_batch_size:
@@ -823,6 +894,7 @@ def main():
         sky_model              = opts.sky_model,
         mark_model             = opts.mark_model,
         mark_names             = opts.mark_names,
+        n_catalogs             = opts.n_catalogs,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]

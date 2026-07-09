@@ -1,6 +1,7 @@
 import sys
 import types
 
+import numpy as np
 import pytest
 
 if "tinygp" not in sys.modules:
@@ -140,3 +141,111 @@ def test_fixed_parameter_prior_override_overlap_out_of_range_raises():
             prior_overrides={"H0": [80.0, 90.0]},
             fixed_parameter_values={"H0": 67.74},
         )
+
+
+# ---------------------------------------------------------------------------
+# K-catalog multitracer mixture (n_catalogs >= 2): per-catalog suffixed
+# survey blocks + fcat_2..fcat_K sticks, appended before sky/mark.  K=1 (the
+# default / explicit) must remain bit-identical.
+# ---------------------------------------------------------------------------
+
+def test_n_catalogs_2_dark_sirens_exposes_fcat2_with_beta_prior_kind():
+    labels, lower, upper, *rest = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=True,
+        fix_survey=False,
+        prior_overrides={},
+        fixed_parameter_values={},
+        universe_model="dark_sirens",
+        n_catalogs=2,
+    )
+    prior_kinds = rest[8]
+
+    assert "fcat_2" in labels
+    idx = labels.index("fcat_2")
+    assert float(lower[idx]) == 0.0
+    assert float(upper[idx]) == 1.0
+    assert prior_kinds[idx] == ("beta", 1.0, 1.0)
+
+
+def test_n_catalogs_2_dark_sirens_only_exposes_active_suffixed_survey_labels():
+    """dark_sirens's _ACTIVE_SURVEY_PARAMS = {log10n0, delta, b_miss,
+    sigma_kde}; the suffix-aware gating (_survey_base_name) must apply the
+    SAME filter to the catalog-2 block, dropping z50_c2/w_c2/alpha_miss_c2."""
+    labels, *_ = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=True,
+        fix_survey=False,
+        prior_overrides={},
+        fixed_parameter_values={},
+        universe_model="dark_sirens",
+        n_catalogs=2,
+    )
+    active_c2 = {"log10n0_c2", "delta_c2", "b_miss_c2", "sigma_kde_c2"}
+    inactive_c2 = {"z50_c2", "w_c2", "alpha_miss_c2"}
+
+    assert active_c2 <= set(labels)
+    assert not (inactive_c2 & set(labels))
+
+
+def test_n_catalogs_1_labels_bounds_identical_to_call_without_kwarg():
+    r_default = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=True,
+        fix_survey=False,
+        prior_overrides={},
+        fixed_parameter_values={},
+        universe_model="dark_sirens",
+    )
+    r_explicit = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=True,
+        fix_survey=False,
+        prior_overrides={},
+        fixed_parameter_values={},
+        universe_model="dark_sirens",
+        n_catalogs=1,
+    )
+
+    assert r_default[0] == r_explicit[0]  # labels
+    np.testing.assert_array_equal(r_default[1], r_explicit[1])  # lower
+    np.testing.assert_array_equal(r_default[2], r_explicit[2])  # upper
+    assert r_default[11] == r_explicit[11]  # prior_kinds
+
+
+def test_n_catalogs_2_prior_override_on_suffixed_survey_label():
+    labels, lower, upper, *_ = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=True,
+        fix_survey=False,
+        prior_overrides={"log10n0_c2": [-5.0, -3.0]},
+        fixed_parameter_values={},
+        universe_model="dark_sirens",
+        n_catalogs=2,
+    )
+    idx = labels.index("log10n0_c2")
+    assert float(lower[idx]) == -5.0
+    assert float(upper[idx]) == -3.0
+    # The unsuffixed (catalog 1) block is untouched by the c2 override.
+    idx1 = labels.index("log10n0")
+    assert float(lower[idx1]) == -4.0
+    assert float(upper[idx1]) == -1.0
+
+
+def test_n_catalogs_2_fixed_parameter_values_removes_fcat2_from_labels():
+    labels, *_ = build_parameter_space(
+        "powerlaw+peak",
+        fix_population=True,
+        fix_cosmology=True,
+        fix_survey=False,
+        prior_overrides={},
+        fixed_parameter_values={"fcat_2": 0.3},
+        universe_model="dark_sirens",
+        n_catalogs=2,
+    )
+    assert "fcat_2" not in labels
