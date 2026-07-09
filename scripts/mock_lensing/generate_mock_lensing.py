@@ -84,10 +84,46 @@ from darksirens.lensing.observed_catalog import write_observed_pe_attrs
 from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs, _log_sky_overlap
 
 POP_NAME = "powerlaw+peak"
-THETA_PARAM_ORDER = [
+_MIXTURE_PARAM_ORDER = [
     "v1", "alpha", "mmin", "mmax", "dmmin", "dmmax",
-    "muG", "sigG", "beta", "muchi", "sigchi", "gamma",
+    "muG", "sigG", "beta", "muchi", "sigchi",
 ]
+# Backward-compatible default (power-law rate); truth.json records the
+# rate-aware order via _theta_param_order().
+THETA_PARAM_ORDER = _MIXTURE_PARAM_ORDER + ["gamma"]
+
+
+def set_pop_model(pop_name: str) -> None:
+    """Select the generator population model (main() calls this from --pop_model).
+
+    The mixture part must stay powerlaw+peak (the analytic rejection proposal
+    is tailored to it); the '@md' decoration swaps the redshift evolution for
+    the Madau-Dickinson-like peaked rate with (gamma, kappa, z_peak).
+    """
+    from darksirens.gw.populations.registry import split_rate_decoration
+    base, _ = split_rate_decoration(pop_name)
+    if base != "powerlaw+peak":
+        raise ValueError(
+            f"generate_mock_lensing supports the powerlaw+peak mixture only "
+            f"(got {pop_name!r}); the rejection proposal is tailored to it."
+        )
+    global POP_NAME
+    POP_NAME = pop_name
+
+
+def _rate_evolution() -> str:
+    from darksirens.gw.populations.registry import split_rate_decoration
+    return split_rate_decoration(POP_NAME)[1]
+
+
+def _n_rate_params() -> int:
+    return 3 if _rate_evolution() == "md" else 1
+
+
+def _theta_param_order() -> list:
+    if _rate_evolution() == "md":
+        return _MIXTURE_PARAM_ORDER + ["gamma", "kappa", "z_peak"]
+    return _MIXTURE_PARAM_ORDER + ["gamma"]
 
 
 # ============================================================
@@ -96,15 +132,21 @@ THETA_PARAM_ORDER = [
 def make_truth(seed, H0, Om0, sis, wl):
     """Pin all ground-truth hyperparameters by importing the fiducials."""
     theta = np.asarray(get_fixed_population_params(POP_NAME))
-    return dict(
+    n_rate = _n_rate_params()
+    truth = dict(
         pop_name=POP_NAME,
-        theta=theta,                       # 12-vector
-        gamma=float(theta[-1]),
+        rate_evolution=_rate_evolution(),
+        theta=theta,                       # mixture params + rate params
+        gamma=float(theta[-n_rate]),
         H0=float(H0), Om0=float(Om0), zMax=float(zMax),
         tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
         wl_a=float(wl.a), wl_b=float(wl.b),
         seed=int(seed),
     )
+    if n_rate == 3:
+        truth["kappa"] = float(theta[-2])
+        truth["z_peak"] = float(theta[-1])
+    return truth
 
 
 # ============================================================
@@ -113,7 +155,7 @@ def make_truth(seed, H0, Om0, sis, wl):
 def _mixture_density(m1, q, chi, theta):
     """Imported mass*pairing*spin density (no z factor). Vectorised."""
     model = get_model(POP_NAME)
-    tm = jnp.asarray(theta[:-1])           # drop gamma
+    tm = jnp.asarray(theta[:-_n_rate_params()])   # drop rate params
     return np.asarray(model.mixture(jnp.asarray(m1), jnp.asarray(q),
                                     jnp.asarray(chi), tm))
 
@@ -123,8 +165,8 @@ def _analytic_proposal(n, theta, rng):
 
     Returns draws AND the proposal density g(m1,q,chi) for the IS correction.
     """
-    v1, alpha, mmin, mmax, dmmin, dmmax, muG, sigG, beta, muchi, sigchi, gamma = \
-        [float(x) for x in theta]
+    v1, alpha, mmin, mmax, dmmin, dmmax, muG, sigG, beta, muchi, sigchi = \
+        [float(x) for x in theta[:11]]     # mixture params; rate tail unused here
 
     # --- m1: PL + Gaussian mixture (broadened slightly past the tapers) ---
     lo, hi = mmin - dmmin, mmax + dmmax
@@ -203,11 +245,24 @@ def sample_masses_spins(n, theta, rng, *, batch=100_000, max_iter=200):
 # ============================================================
 def _build_z_cdf(theta, H0, Om0, nz=4000):
     """Tabulate the normalized source-frame redshift PDF and its CDF using the
-    IMPORTED dV_of_z so the cosmology matches the likelihood."""
-    gamma = float(theta[-1])
+    IMPORTED dV_of_z so the cosmology matches the likelihood.
+
+    Rate evolution follows the generator population model: power law
+    (1+z)^(gamma-1), or for '@md' the Madau-Dickinson-like psi(z)/(1+z) with
+    the SAME (unnormalised) form as PopulationModel.log_p_pop, so mock truth
+    and inference share one definition.
+    """
     zg = np.linspace(1e-4, float(zMax), nz)
     dV = np.asarray(dV_of_z(jnp.asarray(zg), H0, Om0))
-    pdf = dV * (1.0 + zg) ** (gamma - 1.0)
+    if _rate_evolution() == "md":
+        gamma, kappa, z_pk = [float(x) for x in theta[-3:]]
+        log_rate = (gamma - 1.0) * np.log1p(zg) - np.logaddexp(
+            0.0, (gamma + kappa) * (np.log1p(zg) - np.log1p(z_pk))
+        )
+        pdf = dV * np.exp(log_rate)
+    else:
+        gamma = float(theta[-1])
+        pdf = dV * (1.0 + zg) ** (gamma - 1.0)
     pdf = np.where(np.isfinite(pdf) & (pdf > 0), pdf, 0.0)
     cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pdf[1:] + pdf[:-1]) * np.diff(zg))])
     cdf /= cdf[-1]
@@ -957,7 +1012,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     # ---- truth.json (informational) ----
     truth_out = {k: (v.tolist() if isinstance(v, np.ndarray) else v)
                  for k, v in truth.items()}
-    truth_out["theta_param_order"] = THETA_PARAM_ORDER
+    truth_out["theta_param_order"] = _theta_param_order()
     truth_out.update(
         n_singletons_detected_total=n_singletons_detected_total,
         n_pairs_both_detected_total=n_pairs_both_detected_total,
@@ -1062,6 +1117,12 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--outdir", default="data/mock_lensing", help="output directory")
+    p.add_argument("--pop_model", "--pop-model", dest="pop_model",
+                   choices=("powerlaw+peak", "powerlaw+peak@md"),
+                   default="powerlaw+peak",
+                   help="generator population: powerlaw+peak with a power-law "
+                        "(1+z)^(gamma-1) rate, or '@md' for the Madau-Dickinson "
+                        "peaked rate (gamma, kappa, z_peak)")
     p.add_argument("--seed", type=int, default=2026)
     p.add_argument("--nsamp", type=int, default=1000, help="PE samples per object")
     p.add_argument("--n-universe", type=int, default=120_000, help="source draws")
@@ -1117,6 +1178,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    set_pop_model(args.pop_model)
     sis = make_sis_lens_params(A_tau=args.tau_A, n_tau=args.tau_n)
     wl = make_lognormal_wl_params(a=args.wl_a, b=args.wl_b)
     manifest = assemble(

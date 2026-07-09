@@ -389,12 +389,44 @@ class PopulationModel:
     """Full compact-binary population model used by the likelihood.
 
     The model combines a normalised source-parameter mixture with a redshift
-    evolution term ``(1 + z)**(gamma - 1)``.  Registry entries create instances
-    of this class and expose the corresponding prior bounds to samplers.
+    evolution term.  ``rate_evolution`` selects it:
+
+    - ``"powerlaw"`` (default): ``(1 + z)**(gamma - 1)`` — the merger rate
+      density R(z) ∝ (1+z)^gamma with the 1/(1+z) source-time dilation.
+    - ``"md"``: Madau–Dickinson-like peaked rate (select via the ``@md``
+      pop-model name decoration, e.g. ``powerlaw+peak@md``),
+
+          psi(z) = (1+z)^gamma / (1 + ((1+z)/(1+z_peak))^(gamma+kappa)),
+
+      applied as ``psi(z)/(1+z)``: rises like (1+z)^gamma below z_peak and
+      falls like (1+z)^(-kappa) above it.  The conventional normalisation
+      constant [1 + (1+z_peak)^-(gamma+kappa)] is a hyperparameter-dependent
+      overall factor and is deliberately omitted: it multiplies the per-event
+      weights and the selection integral mu(Lambda) identically, so it
+      cancels exactly in the scale-free (rate-marginalised) likelihood.
+      Appends (gamma, kappa, z_peak) to the parameter vector instead of
+      gamma, and requires shared (global) redshift evolution.
+
+    Registry entries create instances of this class and expose the
+    corresponding prior bounds to samplers.
     """
 
     mixture: MixtureModel
     shared_gamma: bool = True
+    rate_evolution: str = "powerlaw"
+
+    def __post_init__(self):
+        if self.rate_evolution not in ("powerlaw", "md"):
+            raise ValueError(
+                f"Unknown rate_evolution {self.rate_evolution!r}; "
+                "expected 'powerlaw' or 'md'."
+            )
+        if self.rate_evolution == "md" and not (self.shared_gamma or self.mixture.k == 1):
+            raise ValueError(
+                "rate_evolution='md' requires shared redshift evolution "
+                "(shared_gamma=True): per-component Madau-Dickinson rates are "
+                "not supported."
+            )
 
     def _component_gamma_spec(self, i: int) -> ParamSpec:
         """Return a redshift-slope spec tagged to mass component ``i``."""
@@ -419,14 +451,25 @@ class PopulationModel:
 
     @property
     def gamma_param_specs(self):
-        """Return shared or per-component redshift-slope parameter specs."""
+        """Return the redshift-evolution parameter specs.
+
+        Power law: shared or per-component gamma.  Madau-Dickinson: the
+        shared triple (gamma, kappa, z_peak) — low-z slope, high-z falling
+        slope, and turnover redshift.
+        """
+        if self.rate_evolution == "md":
+            return [
+                ParamSpec(r"$\gamma$", -10.0, 10.0, name="gamma"),
+                ParamSpec(r"$\kappa$", 0.0, 10.0, name="kappa"),
+                ParamSpec(r"$z_{\rm peak}$", 0.2, 4.0, name="z_peak"),
+            ]
         if self.shared_gamma or self.mixture.k == 1:
             return [ParamSpec(r"$\gamma$", -10.0, 10.0, name="gamma")]
         return [self._component_gamma_spec(i) for i in range(self.mixture.k)]
 
     @property
     def param_specs(self):
-        """Return mixture parameter specs followed by redshift slope(s)."""
+        """Return mixture parameter specs followed by rate-evolution params."""
         return [*self.mixture.param_specs, *self.gamma_param_specs]
 
     def prior_bounds(self):
@@ -441,6 +484,20 @@ class PopulationModel:
         −∞ propagates correctly through logsumexp / jnp.sum; the final
         jnp.isfinite guard in the likelihood rejects the proposal cleanly.
         """
+        if self.rate_evolution == "md":
+            tm    = theta[:-3]
+            gamma = theta[-3]
+            kappa = theta[-2]
+            z_pk  = theta[-1]
+            p     = self.mixture(m1, q, chieff, tm)
+            log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
+            # log[psi(z)/(1+z)] with psi the (unnormalised) Madau-Dickinson
+            # form; softplus keeps the turnover term stable at any slope.
+            log_turnover = jnp.logaddexp(
+                0.0, (gamma + kappa) * (jnp.log1p(z) - jnp.log1p(z_pk))
+            )
+            return log_p + (gamma - 1.0) * jnp.log1p(z) - log_turnover
+
         if self.shared_gamma or self.mixture.k == 1:
             tm    = theta[:-1]
             gamma = theta[-1]

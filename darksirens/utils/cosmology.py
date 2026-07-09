@@ -14,6 +14,8 @@ with guard bands so that sampler proposals at the edge of the allowed prior do
 not silently extrapolate.
 """
 
+import os
+
 import astropy.constants as constants
 import jax
 import numpy as np
@@ -26,8 +28,15 @@ from darksirens.utils.interp2d import interpnd
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
-zMax = 5
-"""Maximum redshift covered by the precomputed interpolation grid."""
+zMax = float(os.environ.get("DARKSIRENS_ZMAX", 5))
+"""Maximum redshift covered by the precomputed interpolation grid.
+
+Default 5 (unchanged numerics). Override with the DARKSIRENS_ZMAX environment
+variable (read once at import) for high-redshift studies — e.g. Madau-Dickinson
+rate inference with strongly lensed sources whose true z exceeds 5. The z-grid
+node count scales with the log range so low-z interpolation accuracy is
+preserved; darksirens.redshift.grid reads the same variable, keeping the two
+grids consistent."""
 
 H0Planck = Planck15.H0.value
 """Planck-2015 Hubble constant used to build the reference distance grid."""
@@ -63,7 +72,10 @@ w0PriorUpper = w0Fiducial + _W0_PRIOR_HALF_WIDTH
 waPriorLower = waFiducial - _WA_PRIOR_HALF_WIDTH
 waPriorUpper = waFiducial + _WA_PRIOR_HALF_WIDTH
 
-zgrid = np.expm1(np.linspace(np.log(1), np.log(zMax + 1), 500))
+# Node count scales with the log-z range (500 at the default zMax=5) so a
+# raised DARKSIRENS_ZMAX keeps the same low-z node density.
+_ZGRID_NODES = max(500, int(round(500 * np.log(zMax + 1.0) / np.log(6.0))))
+zgrid = np.expm1(np.linspace(np.log(1), np.log(zMax + 1), _ZGRID_NODES))
 
 Om0grid = jnp.linspace(
     Om0PriorLower - _OM0_GRID_PAD,
