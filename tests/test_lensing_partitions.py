@@ -916,3 +916,198 @@ def test_partition_diagnostic_rows_handles_fake_exact_payload():
     assert rows[1]["is_truth_partition"] is True
     assert rows[1]["n_true_edges"] == 1
     assert rows[1]["n_false_edges"] == 0
+
+
+def test_folded_mark_keys_guard_rejects_double_count():
+    from darksirens.lensing.partitions import prepare_candidate_pairs_for_partitioning
+
+    data = {
+        "n_events": 2,
+        "candidate_pairs": [
+            {
+                "i": 0,
+                "j": 1,
+                "log_prior_odds": -3.0,
+                "marks": {
+                    "log_mass_distance_score": -1.0,
+                    "log_sky_overlap": -2.0,
+                },
+            }
+        ],
+        "folded_mark_keys": ["log_mass_distance_score"],
+    }
+    # Requesting a key the builder already folded into log_prior_odds must fail.
+    with pytest.raises(ValueError, match="double-count"):
+        prepare_candidate_pairs_for_partitioning(data, "log_mass_distance_score")
+    # Non-folded keys still apply exactly once.
+    _, raw_pairs, effective_pairs, contributions = (
+        prepare_candidate_pairs_for_partitioning(data, "log_sky_overlap")
+    )
+    assert raw_pairs[0].log_prior_odds == pytest.approx(-3.0)
+    assert effective_pairs[0].log_prior_odds == pytest.approx(-5.0)
+    assert contributions == pytest.approx((-2.0,))
+    # Legacy files without the metadata keep the old permissive behavior.
+    legacy = {k: v for k, v in data.items() if k != "folded_mark_keys"}
+    _, _, effective_legacy, _ = prepare_candidate_pairs_for_partitioning(
+        legacy, "log_mass_distance_score"
+    )
+    assert effective_legacy[0].log_prior_odds == pytest.approx(-4.0)
+
+
+def test_parse_folded_mark_keys_validates_schema():
+    from darksirens.lensing.partitions import parse_folded_mark_keys
+
+    assert parse_folded_mark_keys({}) == ()
+    assert parse_folded_mark_keys({"folded_mark_keys": []}) == ()
+    assert parse_folded_mark_keys({"folded_mark_keys": ["log_a", "log_b"]}) == (
+        "log_a",
+        "log_b",
+    )
+    for bad in ("log_a", [1], [""], 3, {"log_a": True}):
+        with pytest.raises(ValueError, match="folded_mark_keys"):
+            parse_folded_mark_keys({"folded_mark_keys": bad})
+
+
+def test_observed_builder_records_folded_mark_keys(tmp_path):
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import (
+        build_candidate_pairs,
+    )
+    from darksirens.lensing.partitions import prepare_candidate_pairs_for_partitioning
+
+    gw = _observed_gw(tmp_path / "gw.h5", n_events=3)
+    cat = _observed_catalog_with_truth(tmp_path / "observed_catalog.json", n_events=3)
+    data = build_candidate_pairs(
+        gw_path=gw,
+        observed_catalog_path=cat,
+        max_edges_per_event=2,
+        max_total_edges=2,
+        seed=6,
+    )
+    # Mass-distance score is always folded into log_prior_odds by the builder.
+    assert data["folded_mark_keys"] == ["log_mass_distance_score"]
+    with pytest.raises(ValueError, match="double-count"):
+        prepare_candidate_pairs_for_partitioning(data, "log_mass_distance_score")
+    # Sky overlap is folded only when it carries nonzero weight in the score.
+    data_weighted = build_candidate_pairs(
+        gw_path=gw,
+        observed_catalog_path=cat,
+        max_edges_per_event=2,
+        max_total_edges=2,
+        sky_overlap_weight=1.0,
+        seed=6,
+    )
+    assert set(data_weighted["folded_mark_keys"]) == {
+        "log_mass_distance_score",
+        "log_sky_overlap",
+    }
+    with pytest.raises(ValueError, match="double-count"):
+        prepare_candidate_pairs_for_partitioning(data_weighted, "log_sky_overlap")
+    # The default study configuration (log_sky_overlap requested, weight 0)
+    # must keep working.
+    prepare_candidate_pairs_for_partitioning(data, "log_sky_overlap")
+
+
+def test_preflight_flags_folded_edge_mark_double_count(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from darksirens.lensing.preflight import _check_candidates
+
+    data = {
+        "format_version": "candidate-pairs-1.0",
+        "n_events": 2,
+        "candidate_pairs": [
+            {
+                "i": 0,
+                "j": 1,
+                "log_prior_odds": -3.0,
+                "marks": {"log_mass_distance_score": -1.0},
+            }
+        ],
+        "folded_mark_keys": ["log_mass_distance_score"],
+    }
+    path = tmp_path / "candidate_pairs.json"
+    path.write_text(json.dumps(data))
+    errors: list = []
+    warns: list = []
+    summary: dict = {}
+    opts = SimpleNamespace(
+        edge_mark_prior_keys="log_mass_distance_score",
+        edge_mark_likelihood_keys="",
+        pair_marks="none",
+    )
+    _check_candidates(str(path), 2, opts, errors, warns, summary)
+    assert any("double-count" in e for e in errors)
+    # Without the folded key requested there is no error.
+    errors2: list = []
+    opts_ok = SimpleNamespace(
+        edge_mark_prior_keys="",
+        edge_mark_likelihood_keys="",
+        pair_marks="none",
+    )
+    _check_candidates(str(path), 2, opts_ok, errors2, [], {})
+    assert not errors2
+
+
+def test_cli_gate_refuses_suspicious_time_marks():
+    from types import SimpleNamespace
+
+    from darksirens.cli.inference_lensing import _gate_suspicious_time_marks
+    from darksirens.lensing.partitions import validate_candidate_pairs
+
+    placeholder = {
+        "n_events": 4,
+        "candidate_pairs": [
+            {
+                "i": 0,
+                "j": 1,
+                "log_prior_odds": 0.0,
+                "marks": {"delta_t_obs": 1.0, "sigma_delta_t": 1.0},
+            },
+            {
+                "i": 2,
+                "j": 3,
+                "log_prior_odds": 0.0,
+                "marks": {"delta_t_obs": 2.0, "sigma_delta_t": 1.0},
+            },
+        ],
+    }
+    _, pairs = validate_candidate_pairs(placeholder)
+    strict = SimpleNamespace(
+        pair_marks="time",
+        edge_mark_likelihood_keys="",
+        candidate_pairs_path="candidate_pairs.json",
+        allow_suspicious_time_marks=False,
+    )
+    with pytest.raises(SystemExit, match="suspicious candidate time marks"):
+        _gate_suspicious_time_marks(strict, pairs)
+    # The escape hatch downgrades the error to a warning.
+    permissive = SimpleNamespace(
+        pair_marks="time",
+        edge_mark_likelihood_keys="",
+        candidate_pairs_path="candidate_pairs.json",
+        allow_suspicious_time_marks="true",
+    )
+    with pytest.warns(RuntimeWarning, match="placeholder"):
+        _gate_suspicious_time_marks(permissive, pairs)
+    # Inert when time marks are not used in the likelihood.
+    unused = SimpleNamespace(
+        pair_marks="none",
+        edge_mark_likelihood_keys="",
+        allow_suspicious_time_marks=False,
+    )
+    _gate_suspicious_time_marks(unused, pairs)
+    # Physical time marks (hour-scale sigma) pass the strict gate.
+    physical = {
+        "n_events": 4,
+        "candidate_pairs": [
+            {
+                "i": 0,
+                "j": 1,
+                "log_prior_odds": 0.0,
+                "marks": {"delta_t_obs": 43210.5, "sigma_delta_t": 3600.0},
+            }
+        ],
+    }
+    _, physical_pairs = validate_candidate_pairs(physical)
+    _gate_suspicious_time_marks(strict, physical_pairs)

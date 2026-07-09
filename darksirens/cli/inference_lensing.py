@@ -67,6 +67,7 @@ import time
 import argparse
 import datetime
 import traceback
+import warnings
 
 import numpy as np
 import h5py
@@ -141,6 +142,7 @@ from darksirens.lensing.preflight import run_lensing_preflight
 from darksirens.lensing.marginal_diagnostics import (
     compute_marginalized_partition_diagnostics,
     compute_componentwise_factorized_partition_diagnostics,
+    candidate_time_mark_suspicion,
 )
 from darksirens.likelihood.pair_kde import (
     make_pair_kde,
@@ -539,6 +541,39 @@ def make_pair_kdes_from_gw_pe(
     return kdes
 
 
+def _gate_suspicious_time_marks(opts, candidate_pairs_raw) -> None:
+    """Refuse placeholder/synthetic time marks that would enter the likelihood.
+
+    Placeholder marks (integer-second delta_t with sigma_delta_t = 1 s) are
+    astronomically sharp on the ~T0 SIS time-delay scale and silently dominate
+    the y-integral. Preflight has always warned about them; the runtime path
+    previously ran anyway. Raise unless --allow_suspicious_time_marks true,
+    and only when time marks are actually in use (pair_marks=time or a
+    time/delta_t_obs edge-mark likelihood key).
+    """
+    time_like_keys = set(
+        parse_edge_mark_keys(getattr(opts, "edge_mark_likelihood_keys", ""))
+    )
+    time_marks_in_use = (
+        getattr(opts, "pair_marks", "none") == "time"
+        or bool(time_like_keys & {"time", "delta_t_obs"})
+    )
+    if not time_marks_in_use or not candidate_pairs_raw:
+        return
+    suspicion = candidate_time_mark_suspicion(candidate_pairs_raw)
+    if not suspicion.get("candidate_time_marks_suspicious"):
+        return
+    message = (
+        f"{suspicion.get('candidate_time_marks_warning')} "
+        f"(candidate_pairs_path={getattr(opts, 'candidate_pairs_path', None)}). "
+        "Pass --allow_suspicious_time_marks true to proceed anyway."
+    )
+    if _str2bool(getattr(opts, "allow_suspicious_time_marks", False)):
+        warnings.warn(message, RuntimeWarning)
+        return
+    raise SystemExit(f"suspicious candidate time marks: {message}")
+
+
 def load_inputs(opts):
     """Load singleton PE + selection, and (for j2) the lensed injections + pair
     PE + partition. Returns the assembled inputs for the cluster likelihood."""
@@ -643,6 +678,7 @@ def load_inputs(opts):
         ) = prepare_candidate_pairs_for_partitioning(
             candidate_data, getattr(opts, "edge_mark_prior_keys", None)
         )
+        _gate_suspicious_time_marks(opts, candidate_pairs_raw)
     partition_pair_indices = []
     if partition is not None:
         partition_pair_indices = [
@@ -1844,6 +1880,11 @@ def build_parser():
         "--edge_mark_likelihood_keys",
         default="",
         help="Comma-separated edge mark likelihood keys. Only time/delta_t_obs is implemented in this PR.",
+    )
+    p.add_argument(
+        "--allow_suspicious_time_marks",
+        default="false",
+        help="true downgrades the placeholder/synthetic time-mark hard error to a warning",
     )
     # fixing
     p.add_argument("--fix_cosmology", default="true")

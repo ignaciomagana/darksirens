@@ -234,12 +234,44 @@ def apply_edge_mark_prior_keys(
     )
 
 
+def parse_folded_mark_keys(data: dict) -> tuple[str, ...]:
+    """Return mark keys the builder already folded into log_prior_odds.
+
+    Producers that bake mark values into the edge scores (e.g.
+    build_candidate_pairs_from_observed folds log_mass_distance_score, and
+    log_sky_overlap when sky_overlap_weight != 0) record them under the
+    optional top-level 'folded_mark_keys' field. Absent field = unknown
+    provenance, no guard (backward compatible with candidate-pairs-1.0
+    files written before this field existed).
+    """
+    folded = data.get("folded_mark_keys")
+    if folded is None:
+        return ()
+    if isinstance(folded, str) or not isinstance(folded, Sequence):
+        raise ValueError("folded_mark_keys must be a list of mark-key strings")
+    out = []
+    for k in folded:
+        if not isinstance(k, str) or not k:
+            raise ValueError("folded_mark_keys must be a list of mark-key strings")
+        out.append(k)
+    return tuple(out)
+
+
 def prepare_candidate_pairs_for_partitioning(
     data: dict, edge_mark_prior_keys: Sequence[str] | None = None
 ) -> tuple[int, tuple[CandidatePair, ...], tuple[CandidatePair, ...], tuple[float, ...]]:
     """Validate candidate-pair JSON and apply requested edge priors exactly once."""
     n_events, raw_pairs = validate_candidate_pairs(data)
     prior_keys = parse_edge_mark_keys(edge_mark_prior_keys)
+    folded_keys = set(parse_folded_mark_keys(data))
+    double_counted = [k for k in prior_keys if k in folded_keys]
+    if double_counted:
+        raise ValueError(
+            f"edge mark prior keys {double_counted} are already folded into "
+            f"log_prior_odds by the candidate-pair builder "
+            f"(folded_mark_keys={sorted(folded_keys)}); applying them again via "
+            "--edge_mark_prior_keys would double-count the pairing prior"
+        )
     contributions = edge_mark_prior_contributions(raw_pairs, prior_keys)
     effective_pairs = tuple(
         CandidatePair(
