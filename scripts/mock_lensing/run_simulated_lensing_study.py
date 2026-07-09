@@ -134,6 +134,14 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
         )
     elif name.startswith("H_"):
         spec.update(max_edges_per_event=3, max_total_edges=max(6, 3 * cfg["n_pair"]), edge_mark_prior_keys_csv="")
+    if cfg.get("singleton_lensing", "off") == "sl_mixture":
+        # The lensed-singleton mixture requires a CERTAIN pair tag (CLI guard:
+        # untagged both-detected pairs would leak into the singleton stream).
+        # Joint-campaign runs therefore use perfect pair identification — a
+        # stated simplification; the case-specific tag models remain for the
+        # pairs-only analyses.
+        spec.update(pair_tag_model="constant", pair_tag_constant=1.0,
+                    pair_tag_perturb_logit=0.0)
     return spec
 
 @lru_cache(maxsize=1)
@@ -209,12 +217,19 @@ def write_preflight_summary(work: Path, summary: dict[str, Any]) -> None:
     (work / "preflight_summary.md").write_text("\n".join(lines) + "\n")
 
 def generate_cmd(case_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], seed: int) -> list[str]:
-    return [sys.executable, str(GEN), "--outdir", str(case_dir), "--conditioning", str(cfg["conditioning"]),
-            "--n-universe", str(cfg["n_universe"]), "--n-sing-keep", str(cfg["n_sing"]),
-            "--n-pair-keep", str(spec["n_pair"]), "--max-sing-keep", str(cfg["n_sing"]),
-            "--max-pair-keep", str(spec["n_pair"]), "--nsamp", str(cfg["nsamp"]),
-            "--n-unlensed-inj", str(cfg["n_unlensed_inj"]), "--n-lensed-inj", str(cfg["n_lensed_inj"]),
-            "--seed", str(seed), "--write-unified-observed-catalog", "true", "--write-legacy-pair-pe", "false"]
+    cmd = [sys.executable, str(GEN), "--outdir", str(case_dir), "--conditioning", str(cfg["conditioning"]),
+           "--n-universe", str(cfg["n_universe"]), "--n-sing-keep", str(cfg["n_sing"]),
+           "--n-pair-keep", str(spec["n_pair"]), "--max-sing-keep", str(cfg["n_sing"]),
+           "--max-pair-keep", str(spec["n_pair"]), "--nsamp", str(cfg["nsamp"]),
+           "--n-unlensed-inj", str(cfg["n_unlensed_inj"]), "--n-lensed-inj", str(cfg["n_lensed_inj"]),
+           "--pop_model", str(cfg.get("pop_model", "powerlaw+peak")),
+           "--include-lensed-singletons", str(bool(cfg.get("include_lensed_singletons", False))).lower(),
+           "--seed", str(seed), "--write-unified-observed-catalog", "true", "--write-legacy-pair-pe", "false"]
+    if cfg.get("tau_A") is not None:
+        cmd.extend(["--tau-A", str(cfg["tau_A"])])
+    if cfg.get("tau_n") is not None:
+        cmd.extend(["--tau-n", str(cfg["tau_n"])])
+    return cmd
 
 def build_graph_cmd(case_dir: Path, spec: dict[str, Any], seed: int) -> list[str]:
     return [sys.executable, str(BUILD), "--gw_path", str(case_dir / "mock_observed_gw_pe.h5"),
@@ -238,6 +253,18 @@ def read_results_attrs(run_dir: Path | None) -> dict[str, Any]:
             if "samples" in f and "log10_tau_A" in labels:
                 col = np.asarray(f["samples"])[:, labels.index("log10_tau_A")]
                 attrs["log10_tau_A_summary"] = {"mean": float(np.mean(col)), "median": float(np.median(col)), "q05": float(np.quantile(col, 0.05)), "q95": float(np.quantile(col, 0.95))}
+            if "samples" in f and labels:
+                samples = np.asarray(f["samples"])
+                attrs["hyperparameter_summaries"] = {
+                    label: {
+                        "mean": float(np.mean(samples[:, k])),
+                        "median": float(np.median(samples[:, k])),
+                        "q05": float(np.quantile(samples[:, k], 0.05)),
+                        "q95": float(np.quantile(samples[:, k], 0.95)),
+                    }
+                    for k, label in enumerate(labels)
+                    if k < samples.shape[1]
+                }
             return attrs
     except Exception as exc:
         return {"read_error": str(exc)}
@@ -304,6 +331,42 @@ def evidence_delta(logz_j2: float | None, logz_off: float | None, diagnostics_on
         return None
     return logz_j2 - logz_off
 
+def hyperparameter_truth_values(truth: dict[str, Any], pop_model: str) -> dict[str, float]:
+    """Map sampled hyperparameter labels to mock truth values.
+
+    Population labels are the registry's LaTeX labels, aligned positionally
+    with the generator's truth theta vector (both derive from the same
+    param_specs ordering). Lens-rate labels are plain names.
+    """
+    out: dict[str, float] = {}
+    theta = truth.get("theta") or []
+    try:
+        from darksirens.gw.populations.registry import pop_model_prior_parser
+        _lows, _highs, labels, _kinds, _latex = pop_model_prior_parser(pop_model)
+        if len(labels) == len(theta):
+            out.update({str(l): float(v) for l, v in zip(labels, theta)})
+    except Exception:
+        pass
+    if truth.get("tau_A"):
+        out["log10_tau_A"] = float(math.log10(float(truth["tau_A"])))
+    if truth.get("tau_n") is not None:
+        out["tau_n"] = float(truth["tau_n"])
+    return out
+
+
+def hyperparameter_recovery_rows(case: str, run_kind: str, results_attrs: dict[str, Any], truth_values: dict[str, float]) -> list[dict[str, Any]]:
+    rows = []
+    for label, s in (results_attrs.get("hyperparameter_summaries") or {}).items():
+        tv = truth_values.get(label)
+        rows.append({
+            "case": case, "run": run_kind, "label": label,
+            "truth": tv, "mean": s.get("mean"), "median": s.get("median"),
+            "q05": s.get("q05"), "q95": s.get("q95"),
+            "truth_in_90ci": (None if tv is None else bool(s.get("q05", -math.inf) <= tv <= s.get("q95", math.inf))),
+        })
+    return rows
+
+
 def run_diagnostics_path(run_dir: Path | None) -> str | None:
     if run_dir is None:
         return None
@@ -349,12 +412,16 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
            "--observed_catalog_path", str(case_dir / "observed_catalog.json"), "--gwselection_path", str(case_dir / "mock_gw_selection.h5"),
            "--lensed_injections_path", str(case_dir / "mock_lensed_injections.h5"), "--pair_metadata_path", str(case_dir / "mock_pair_metadata.h5"),
            "--candidate_pairs_path", str(case_dir / "candidate_pairs.json"), "--partition_mode", str(cfg["partition_mode"]), "--partition_component_mode", str(cfg.get("partition_component_mode", "componentwise")), "--max_exact_partitions", str(cfg.get("max_exact_partitions", 10000)), "--cluster_mode", "j2",
-           "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak", "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true",
+           "--wl_backend", "lognormal", "--pop_model", str(cfg.get("pop_model", "powerlaw+peak")), "--fix_cosmology", "true", "--fix_survey", "true",
+           "--fix_population", str(bool(cfg.get("fix_population", True))).lower(),
+           "--singleton_lensing", str(cfg.get("singleton_lensing", "off")),
            "--fix_lens_rate", fix_lens_rate, "--fixed_parameter_values", fixed_parameter_values, "--lens_prior_overrides", lens_prior_overrides,
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples, "--pe_max_per_pair", str(cfg["pe_max"]),
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
            "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir)]
+    if cfg.get("prior_overrides"):
+        cmd.extend(["--prior_overrides", json.dumps(cfg["prior_overrides"])])
     for flag, key in (
         ("--max_component_events", "max_component_events"),
         ("--max_component_edges", "max_component_edges"),
@@ -374,10 +441,42 @@ def off_control_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: ar
     nlive = args.nlive or cfg["nlive"]
     cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(case_dir / "mock_observed_gw_pe.h5"),
            "--observed_catalog_path", str(case_dir / "observed_catalog.json"), "--gwselection_path", str(case_dir / "mock_gw_selection.h5"),
-           "--cluster_mode", "off", "--wl_backend", "lognormal", "--pop_model", "powerlaw+peak",
-           "--fix_cosmology", "true", "--fix_survey", "true", "--fix_population", "true", "--fix_lens_rate", "true",
+           "--cluster_mode", "off", "--wl_backend", "lognormal", "--pop_model", str(cfg.get("pop_model", "powerlaw+peak")),
+           "--fix_cosmology", "true", "--fix_survey", "true",
+           "--fix_population", str(bool(cfg.get("fix_population", True))).lower(),
+           "--fix_lens_rate", "true",
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples,
            "--seed", str(cfg["seed"]), "--save_path", str(run_dir)]
+    if cfg.get("prior_overrides"):
+        cmd.extend(["--prior_overrides", json.dumps(cfg["prior_overrides"])])
+    if diagnostics_only:
+        cmd[cmd.index("--nlive") + 1] = "8"; cmd[cmd.index("--dlogz") + 1] = "50"
+    return cmd
+
+
+def singles_only_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    """Mould-style per-event-only ablation: no pair channel, but observed
+    singletons carry the lensed-single-image mixture (cluster off +
+    sl_mixture), with the same population/lens-rate treatment as the main
+    run. Requires a mock generated with include_lensed_singletons."""
+    diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
+    max_samples = "0" if diagnostics_only else "5000"
+    nlive = args.nlive or cfg["nlive"]
+    fix_lens_rate = str(cfg.get("fix_lens_rate", False)).lower()
+    fixed_parameter_values = json.dumps(cfg.get("fixed_parameter_values", {"tau_n": 3.0}))
+    lens_prior_overrides = json.dumps(cfg.get("lens_prior_overrides", {"log10_tau_A": [-5.0, -2.5]}))
+    cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(case_dir / "mock_observed_gw_pe.h5"),
+           "--observed_catalog_path", str(case_dir / "observed_catalog.json"), "--gwselection_path", str(case_dir / "mock_gw_selection.h5"),
+           "--lensed_injections_path", str(case_dir / "mock_lensed_injections.h5"),
+           "--cluster_mode", "off", "--wl_backend", "lognormal", "--pop_model", str(cfg.get("pop_model", "powerlaw+peak")),
+           "--singleton_lensing", "sl_mixture",
+           "--fix_cosmology", "true", "--fix_survey", "true",
+           "--fix_population", str(bool(cfg.get("fix_population", True))).lower(),
+           "--fix_lens_rate", fix_lens_rate, "--fixed_parameter_values", fixed_parameter_values, "--lens_prior_overrides", lens_prior_overrides,
+           "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples,
+           "--seed", str(cfg["seed"]), "--save_path", str(run_dir)]
+    if cfg.get("prior_overrides"):
+        cmd.extend(["--prior_overrides", json.dumps(cfg["prior_overrides"])])
     if diagnostics_only:
         cmd[cmd.index("--nlive") + 1] = "8"; cmd[cmd.index("--dlogz") + 1] = "50"
     return cmd
@@ -577,6 +676,11 @@ def build_plan(args: argparse.Namespace, cfg: dict[str, Any], resolved_config: d
             validate_known_inference_flags(ocmd)
             case_plan["off"] = ocmd
             case_plan["off_preflight"] = preflight_cmd(ocmd, off_dir / "preflight.json")
+        if cfg.get("run_singles_only_ablation", False):
+            singles_dir = work / "runs" / f"{name}__singles"
+            scmd = singles_only_cmd(cdir, singles_dir, cfg, args)
+            validate_known_inference_flags(scmd)
+            case_plan["singles_only"] = scmd
         cases[name] = case_plan
     return {"created_at": _utc(), "profile": resolved_config["study"]["profile"], "diagnostics_only": cfg["diagnostics_only"], "run_off_controls": args.run_off_controls, "resolved_config": resolved_config, "cases": cases}
 
@@ -613,7 +717,7 @@ def main(argv: list[str] | None = None) -> int:
     args.dlogz = float(resolved_config["inference"]["dlogz"])
     args.diagnostics_only = bool(resolved_config["inference"]["diagnostics_only"])
     mock = resolved_config["mock"]; graph = resolved_config["candidate_graph"]; inf = resolved_config["inference"]
-    cfg = {"n_universe": mock["n_universe"], "n_sing": mock["n_singletons"], "n_pair": mock["n_lensed_pairs"], "nsamp": mock["nsamp"], "n_unlensed_inj": mock["n_unlensed_inj"], "n_lensed_inj": mock["n_lensed_inj"], "conditioning": mock["conditioning"], "pe_max": min(mock["nsamp"], 512), "seed": resolved_config["study"]["seed"], **graph, **resolved_config["selection"], **inf}
+    cfg = {"n_universe": mock["n_universe"], "n_sing": mock["n_singletons"], "n_pair": mock["n_lensed_pairs"], "nsamp": mock["nsamp"], "n_unlensed_inj": mock["n_unlensed_inj"], "n_lensed_inj": mock["n_lensed_inj"], "conditioning": mock["conditioning"], "pop_model": mock.get("pop_model", "powerlaw+peak"), "include_lensed_singletons": bool(mock.get("include_lensed_singletons", False)), "tau_A": mock.get("tau_A"), "tau_n": mock.get("tau_n"), "pe_max": min(mock["nsamp"], 512), "seed": resolved_config["study"]["seed"], **graph, **resolved_config["selection"], **inf}
     work = Path(args.workdir).resolve(); work.mkdir(parents=True, exist_ok=True)
     write_config(work / "resolved_config.yaml", resolved_config)
     plan = build_plan(args, cfg, resolved_config, work)
@@ -621,7 +725,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         (work / "validation_plan.json").write_text(json.dumps(plan, indent=2, allow_nan=True) + "\n"); return 0
     summary = {"created_at": _utc(), "profile": args.profile, "diagnostics_only": args.diagnostics_only, "preflight_only": args.preflight_only, "resolved_config": resolved_config, "diagnostics_only_note": "diagnostics_only: evidence deltas are not meaningful" if args.diagnostics_only else None, "run_off_controls": args.run_off_controls, "cases": {}}
-    pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]; audit_rows=[]; partition_rows=[]; component_partition_rows=[]
+    pair_rows=[]; comp_rows=[]; truth_rows=[]; bias_rows=[]; audit_rows=[]; partition_rows=[]; component_partition_rows=[]; hyper_rows=[]
     for name, entry in plan["cases"].items():
         cdir = work / "cases" / name; rdir = work / "runs" / name
         if not args.reuse or not (cdir / "mock_observed_gw_pe.h5").exists():
@@ -685,6 +789,15 @@ def main(argv: list[str] | None = None) -> int:
                     off_status = "passed" if off_rc == 0 and off_run and (off_run / "diagnostics.json").exists() else "failed_inference"
                 else:
                     warnings.append("off_retry_on_nonfinite requested, but no safer off-control retry settings were provided; J2 was not rerun")
+        singles_log = {}; singles_run = None; singles_attrs = {}; singles_rc = None; singles_status = "skipped"
+        if "singles_only" in entry:
+            singles_dir = work / "runs" / f"{name}__singles"
+            singles_dir.mkdir(parents=True, exist_ok=True)
+            singles_log = _run_logged(entry["singles_only"], singles_dir / "inference")
+            _st, singles_rc = singles_log["runtime_sec"], singles_log["return_code"]
+            singles_run = latest_attempt(singles_dir)
+            singles_attrs = read_results_attrs(singles_run)
+            singles_status = "passed" if singles_rc == 0 and singles_run and (singles_run / "diagnostics.json").exists() else "failed_inference"
         logz_j2 = extract_logz(results_attrs); logzerr_j2 = extract_logzerr(results_attrs)
         logz_off = extract_logz(off_attrs); logzerr_off = extract_logzerr(off_attrs)
         delta_logz = evidence_delta(logz_j2, logz_off, args.diagnostics_only)
@@ -708,6 +821,13 @@ def main(argv: list[str] | None = None) -> int:
         partition_rows.extend(partition_diagnostic_rows(diag, case=name, truth_edges=true_edges))
         component_partition_rows.extend(component_partition_diagnostic_rows(diag, case=name, truth_edges=true_edges))
         truth_rows.append({"case": name, **rec})
+        case_truth = _load_json(cdir / "truth.json", {}) or {}
+        truth_vals = hyperparameter_truth_values(case_truth, str(cfg.get("pop_model", "powerlaw+peak")))
+        hyper_rows.extend(hyperparameter_recovery_rows(name, "j2", results_attrs, truth_vals))
+        if args.run_off_controls:
+            hyper_rows.extend(hyperparameter_recovery_rows(name, "off", off_attrs, truth_vals))
+        if singles_status != "skipped":
+            hyper_rows.extend(hyperparameter_recovery_rows(name, "singles_only", singles_attrs, truth_vals))
         bias_rows.append({"case": name, "pair_tag_perturb_logit": entry["spec"]["pair_tag_perturb_logit"], "p_tag_model": entry["spec"]["pair_tag_model"], "delta_expected_n_pairs_minus_injected": (float(rec["expected_n_pairs"]) - rec["injected_n_pairs"]) if rec.get("expected_n_pairs") is not None else None, "logZ_j2": logz_j2, "logZ_off": logz_off, "delta_logZ_j2_minus_off": delta_logz})
         cand = _load_json(cdir / "candidate_pairs.json", {}) or {}; comp_rows.append({"case":name,"n_events":cand.get("n_events"),"n_candidate_edges":len(cand.get("pairs", cand.get("candidate_pairs", []))),"expected_n_pairs":rec.get("expected_n_pairs"),"map_n_pairs":rec.get("map_n_pairs")})
         j2_class = classify_run_outputs(results_attrs, mid_diag, args.diagnostics_only)
@@ -735,7 +855,9 @@ def main(argv: list[str] | None = None) -> int:
         off_warning = off_control_nonfinite_warning(off_class, off_run, cfg, args.seed) if args.run_off_controls and off_status == "passed" and not args.diagnostics_only else None
         if off_warning:
             warnings.append(off_warning)
-        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(off_pre_log, "stdout_path"), "off_preflight_stderr_path": _log_path(off_pre_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "process_status": j2_class["process_status"], "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "midpoint_status": j2_class["midpoint_status"], "evidence_status": j2_class["evidence_status"], "failure": failure, "failure_path": run_failure_path(run), "stdout_path": _log_path(inf_log, "stdout_path"), "stderr_path": _log_path(inf_log, "stderr_path"), "diagnostics": diag, "diagnostics_path": run_diagnostics_path(run), "midpoint_diagnostics": mid_diag, "results_attrs": results_attrs}, "off": {"status": off_status, "process_status": off_class["process_status"], "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "midpoint_status": off_class["midpoint_status"], "evidence_status": off_class["evidence_status"], "failure": locals().get("off_failure"), "failure_path": run_failure_path(off_run), "stdout_path": _log_path(locals().get("off_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_log", {}), "stderr_path"), "diagnostics": off_diag, "diagnostics_path": run_diagnostics_path(off_run), "midpoint_diagnostics": off_mid_diag, "results_attrs": off_attrs}, "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
+        if singles_status == "failed_inference":
+            warnings.append("singles-only (Mould-style) ablation run failed; see its run dir")
+        summary["cases"][name] = {"status": case_status, "return_code": rc, "off_return_code": off_rc, "run_dir": str(run) if run else None, "preflight_stdout_path": _log_path(pre_log, "stdout_path"), "preflight_stderr_path": _log_path(pre_log, "stderr_path"), "off_preflight_stdout_path": _log_path(off_pre_log, "stdout_path"), "off_preflight_stderr_path": _log_path(off_pre_log, "stderr_path"), "diagnostics": diag, "results_attrs": results_attrs, "recovery": rec, "candidate_graph_audit": audit, "j2": {"status": j2_status, "process_status": j2_class["process_status"], "run_dir": str(run) if run else None, "logZ": logz_j2, "logZerr": logzerr_j2, "midpoint_status": j2_class["midpoint_status"], "evidence_status": j2_class["evidence_status"], "failure": failure, "failure_path": run_failure_path(run), "stdout_path": _log_path(inf_log, "stdout_path"), "stderr_path": _log_path(inf_log, "stderr_path"), "diagnostics": diag, "diagnostics_path": run_diagnostics_path(run), "midpoint_diagnostics": mid_diag, "results_attrs": results_attrs}, "off": {"status": off_status, "process_status": off_class["process_status"], "run_dir": str(off_run) if off_run else None, "logZ": logz_off, "logZerr": logzerr_off, "midpoint_status": off_class["midpoint_status"], "evidence_status": off_class["evidence_status"], "failure": locals().get("off_failure"), "failure_path": run_failure_path(off_run), "stdout_path": _log_path(locals().get("off_log", {}), "stdout_path"), "stderr_path": _log_path(locals().get("off_log", {}), "stderr_path"), "diagnostics": off_diag, "diagnostics_path": run_diagnostics_path(off_run), "midpoint_diagnostics": off_mid_diag, "results_attrs": off_attrs}, "singles_only": ({"status": singles_status, "return_code": singles_rc, "run_dir": str(singles_run) if singles_run else None, "logZ": extract_logz(singles_attrs), "logZerr": extract_logzerr(singles_attrs), "results_attrs": singles_attrs, "stdout_path": _log_path(singles_log, "stdout_path"), "stderr_path": _log_path(singles_log, "stderr_path"), "command": shlex.join(entry["singles_only"])} if "singles_only" in entry else None), "hyperparameter_summaries": results_attrs.get("hyperparameter_summaries", {}), "delta_logZ_j2_minus_off": delta_logz, "delta_logZerr": delta_logzerr, "warnings": warnings, "lens_rate_posterior_summary": results_attrs.get("log10_tau_A_summary", {}), "p_tag_model_bias_summary": bias_rows[-1]}
     if args.preflight_only:
         _write_csv(work / "candidate_graph_audit.csv", audit_rows, ["case","n_events","n_candidate_edges","n_true_edges","n_true_edges_kept","true_edge_survival_fraction","n_false_edges","n_components","max_component_events","max_component_edges","max_component_partitions","available_mark_keys"])
         write_preflight_summary(work, summary)
@@ -746,6 +868,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_csv(work / "partition_component_summary.csv", comp_rows, ["case","n_events","n_candidate_edges","expected_n_pairs","map_n_pairs"])
     _write_csv(work / "truth_recovery_summary.csv", truth_rows, ["case","injected_n_pairs","expected_n_pairs","map_n_pairs","true_edge_posterior_probability_mean","false_edge_posterior_probability_max","false_edge_posterior_probability_sum","map_partition_exact_truth_match"])
     _write_csv(work / "bias_summary.csv", bias_rows, ["case","p_tag_model","pair_tag_perturb_logit","delta_expected_n_pairs_minus_injected","logZ_j2","logZ_off","delta_logZ_j2_minus_off"])
+    _write_csv(work / "hyperparameter_recovery.csv", hyper_rows, ["case","run","label","truth","mean","median","q05","q95","truth_in_90ci"])
     (work / "validation_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
     lines = [
         f"# Simulated lensing study ({args.profile})",

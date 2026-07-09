@@ -1423,7 +1423,9 @@ def build_cluster_likelihood(
         raise SystemExit(
             "--singleton_lensing sl_mixture requires a certain pair tag "
             "(pair_tag probability 1): untagged both-detected pairs would leak "
-            "into the singleton stream, which this channel does not model."
+            "into the singleton stream, which this channel does not model. "
+            "Use --pair_tag_model constant --pair_tag_constant 1.0 (study "
+            "runner: selection.pair_tag_model/selection.pair_tag_constant)."
         )
 
     def loglike(coord):
@@ -1531,16 +1533,22 @@ def build_cluster_likelihood(
                             )
                         )
                     component_terms.append(tuple(terms))
-                return (
+                total = (
                     baseline
                     + _factorized_logsumexp_jax(component_terms, count_delta)
                     - inp["log_z_prior"]
                 )
+                # Prior-corner draws (e.g. a population box that empties the
+                # selection integral) give -inf corrections, whose deltas are
+                # NaN (-inf minus -inf) and would abort dynesty at live-point
+                # init. -inf is the correct sampler-facing value there.
+                return jnp.where(jnp.isfinite(total), total, -jnp.inf)
             terms = [
                 part["log_prior_weight"] + _eval_partition(part)
                 for part in inp["marginal_partitions"]
             ]
-            return jax_logsumexp(jnp.stack(terms)) - inp["log_z_prior"]
+            total = jax_logsumexp(jnp.stack(terms)) - inp["log_z_prior"]
+            return jnp.where(jnp.isfinite(total), total, -jnp.inf)
 
         return _eval_partition(inp)
     return loglike
