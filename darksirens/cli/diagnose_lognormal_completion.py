@@ -36,7 +36,7 @@ _INDEXING = {"compact": 1, "global": 2}
 
 def _full_catalog(catalog_path, **lss):
     import healpy as hp
-    nside, ngals, zgals, dzgals, wgals = load_survey(catalog_path)
+    nside, ngals, zgals, dzgals, wgals, _z_depth = load_survey(catalog_path)
     return EMCatalog(
         apix=float(hp.nside2pixarea(int(nside))),
         zgals=jnp.asarray(zgals), dzgals=jnp.asarray(dzgals), wgals=jnp.asarray(wgals),

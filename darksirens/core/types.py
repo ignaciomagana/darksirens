@@ -49,6 +49,11 @@ class SurveyParams(NamedTuple):
     non-weak-lensing universe models.  When non-``None`` it must be a
     ``darksirens.lensing.wlmagnification.WLParams`` instance carrying the
     weak-lensing magnification model used by ``universe_model='spectral_sirens_wl'``.
+
+    ``z_depth`` is an optional per-survey redshift depth (a concrete Python
+    float or ``None``, never a sampled/traced value) that bounds the
+    completion missing-galaxy budget to ``zgrid <= z_depth``: ``None`` means
+    the legacy full-grid missing-galaxy budget (:mod:`darksirens.redshift.completion`).
     """
     n0: Any
     z50: Any
@@ -62,6 +67,7 @@ class SurveyParams(NamedTuple):
     lss_sigma: Any = 1.0
     lss_corr_length_ang: Any = 0.2
     wl_params: Any = None
+    z_depth: Any = None
 
 
 class EMCatalog(NamedTuple):

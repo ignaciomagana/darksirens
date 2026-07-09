@@ -29,6 +29,7 @@ def load_or_build_catalog_inputs(opts) -> dict:
     zgals = dzgals = wgals = None
     ngals = None
     apix = 0.0
+    z_depth = None
     counterpart_pixel = None
     counterpart_pixels = None
     counterpart_zs = None
@@ -78,7 +79,7 @@ def load_or_build_catalog_inputs(opts) -> dict:
                 "--drop_full_catalog is incompatible with --use_LSS: the LSS "
                 "overdensity field needs the full-sky galaxy rows."
             )
-        nside, ngals, zgals, dzgals, wgals = load_survey(
+        nside, ngals, zgals, dzgals, wgals, z_depth = load_survey(
             opts.survey_path, to_device=not drop_full_catalog
         )
         npix = hp.nside2npix(nside)
@@ -97,6 +98,7 @@ def load_or_build_catalog_inputs(opts) -> dict:
         wgals=wgals,
         ngals=ngals,
         apix=apix,
+        z_depth=z_depth,
         counterpart_pixel=counterpart_pixel,
         counterpart_pixels=counterpart_pixels,
         counterpart_zs=counterpart_zs,
@@ -139,7 +141,7 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
     for i, path in enumerate(survey_paths):
         # Host-side load + compaction so only the compact per-catalog views reach
         # the device (mirrors the single-catalog drop_full_catalog memory path).
-        nside, ngals, zgals, dzgals, wgals = load_survey(path, to_device=False)
+        nside, ngals, zgals, dzgals, wgals, z_depth = load_survey(path, to_device=False)
         npix = hp.nside2npix(nside)
         apix = hp.nside2pixarea(nside)
 
@@ -169,6 +171,7 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         bundle = dict(
             nside=nside,
             apix=apix,
+            z_depth=z_depth,
             n_pix_catalog=npix,
             delta_g_pix_z=jnp.zeros((1, len(zgrid))),
             zgals_pe=zpe, dzgals_pe=dzpe, wgals_pe=wpe, ngals_pe=npe,

@@ -60,6 +60,17 @@ def main(argv=None):
     optp.add_argument("--save_path", default='./', help="Directory to save the outputs")
     optp.add_argument("--nside", type=int, default=64, help="HEALPix Nside parameter")
     optp.add_argument("--add_plots", action="store_true", help="Generate diagnostic plots")
+    optp.add_argument(
+        "--z_depth", type=float, default=None,
+        help=(
+            "Optional survey redshift depth: the redshift beyond which this "
+            "survey does not attempt to detect galaxies. Written as "
+            "f.attrs['z_depth'] and read by darksirens_inference to bound the "
+            "completion missing-galaxy budget to z <= z_depth instead of the "
+            "full [0, DARKSIRENS_ZMAX] grid. Omit for the legacy behaviour "
+            "(no attribute written; the full-grid budget is used)."
+        ),
+    )
 
     opts = optp.parse_args(argv)
 
@@ -141,6 +152,8 @@ def main(argv=None):
     print(f"Saving to {out_file}...")
     with h5py.File(out_file, 'w') as f:
         f.attrs['nside'] = nside
+        if opts.z_depth is not None:
+            f.attrs['z_depth'] = float(opts.z_depth)
         f.create_dataset('zgals', data=cats_out, compression='gzip', shuffle=True)
         f.create_dataset('dzgals', data=dzcats_out, compression='gzip', shuffle=True)
         f.create_dataset('wgals', data=dwcats_out, compression='gzip', shuffle=True)
@@ -149,7 +162,9 @@ def main(argv=None):
             f.create_dataset(ds, data=arr, compression='gzip', shuffle=True)
     if marks_out:
         print(f"Wrote mark datasets: {sorted(marks_out)}")
-    
+    if opts.z_depth is not None:
+        print(f"Wrote survey z_depth attribute: {opts.z_depth}")
+
     print("Data processing complete!")
 
     # 7. Plotting (Optional)

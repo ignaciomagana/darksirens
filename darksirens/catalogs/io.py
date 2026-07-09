@@ -11,7 +11,15 @@ import h5py
 
 def load_survey(survey_path, to_device=True):
     """Load the pixelated survey. ``to_device=False`` keeps the dense full-sky
-    arrays on the host so callers can compact before transferring to device."""
+    arrays on the host so callers can compact before transferring to device.
+
+    ``z_depth`` is the optional per-survey redshift depth written by
+    ``darksirens_pixelate --z_depth`` (``f.attrs['z_depth']``): the redshift
+    beyond which the survey does not attempt to detect galaxies, used to
+    bound the completion missing-galaxy budget
+    (:mod:`darksirens.redshift.completion`).  ``None`` when the attribute is
+    absent (legacy full-grid budget).
+    """
     asarray = jnp.asarray if to_device else np.asarray
     with h5py.File(survey_path, 'r') as f:
         nside = f.attrs['nside']
@@ -19,7 +27,8 @@ def load_survey(survey_path, to_device=True):
         ngals = asarray(f['ngals'])
         dzgals = asarray(f['dzgals'])
         wgals = asarray(f['wgals'])
-    return nside, ngals, zgals, dzgals, wgals
+        z_depth = float(f.attrs['z_depth']) if 'z_depth' in f.attrs else None
+    return nside, ngals, zgals, dzgals, wgals, z_depth
 
 
 #: Per-galaxy "mark" datasets optionally written by ``darksirens_pixelate``

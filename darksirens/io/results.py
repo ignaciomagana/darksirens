@@ -149,6 +149,17 @@ def save_results_hdf5(
         f.attrs["mark_model"]      = getattr(opts, "mark_model", "none")
         f.attrs["mark_names"]      = ",".join(getattr(opts, "mark_names", ()) or ())
         f.attrs["complete_empty_pixel_policy"] = opts.complete_empty_pixel_policy
+        # Survey z_depth (bounds the completion missing-galaxy budget): the CLI
+        # override (None = unset) plus the resolved per-catalog values actually
+        # used to build SurveyParams, JSON-encoded so a None entry (legacy
+        # full-grid budget) round-trips distinctly from an unset attribute.
+        f.attrs["survey_z_depth"] = (
+            float(opts.survey_z_depth) if getattr(opts, "survey_z_depth", None) is not None
+            else float("nan")
+        )
+        f.attrs["resolved_survey_z_depths"] = json.dumps(
+            list(getattr(opts, "resolved_survey_z_depths", None) or [])
+        )
         f.attrs["sampler"]         = opts.sampler
         f.attrs["fix_cosmology"]   = bool(opts.fix_cosmology)
         f.attrs["fixed_cosmology"] = bool(opts.fix_cosmology)

@@ -68,6 +68,7 @@ def load_all_data(opts):
         Ndraw=gw_inputs["Ndraw"],
         nsamp=gw_inputs["nsamp"],
         apix=catalog_inputs["apix"],
+        z_depth=catalog_inputs.get("z_depth"),
         nside=catalog_inputs["nside"],
         n_pix_catalog=catalog_inputs["npix"],
         zgals=catalog_inputs["zgals"],

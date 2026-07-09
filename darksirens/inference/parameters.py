@@ -65,6 +65,13 @@ class ParameterDecoder:
     survey_labels: tuple[str, ...]
     pop_params_fid: tuple[float, ...]
     complete_empty_pixel_policy: int
+    # Resolved per-catalog survey redshift depth (CLI override > per-catalog
+    # file attr > None), positionally aligned with the catalog order (catalog
+    # 1 first, then 2..K for a mixture). An empty tuple (the default, e.g. for
+    # bare test opts that never set ``resolved_survey_z_depths``) means every
+    # catalog gets ``z_depth=None`` -- the legacy full-grid missing-galaxy
+    # budget, bit-identical to the pre-existing behaviour.
+    z_depths: tuple[float | None, ...] = ()
     sky_labels: tuple[str, ...] = ()
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
@@ -123,6 +130,7 @@ class ParameterDecoder:
             alpha_miss=sp[5],
             sigma_kde=sp[6],
             complete_empty_pixel_policy=self.complete_empty_pixel_policy,
+            z_depth=self.z_depths[0] if len(self.z_depths) >= 1 else None,
             wl_params=self.wl_params,
         )
         return cosmo, survey, pop_params, sky_params, mark_params
@@ -164,6 +172,7 @@ class ParameterDecoder:
                 alpha_miss=sp_k[5],
                 sigma_kde=sp_k[6],
                 complete_empty_pixel_policy=self.complete_empty_pixel_policy,
+                z_depth=self.z_depths[k - 1] if len(self.z_depths) >= k else None,
                 wl_params=None,
             ))
 
@@ -235,6 +244,12 @@ def build_parameter_decoder(
         complete_empty_pixel_policy=complete_empty_pixel_policy_code(
             getattr(opts, "complete_empty_pixel_policy", "zero")
         ),
+        # Resolved per-catalog survey z_depth (CLI --survey_z_depth override >
+        # per-catalog file attr > None), computed host-side in the CLI before
+        # the likelihood is built. Absent on bare/legacy ``opts`` (e.g. tests
+        # that never set it) -> empty tuple -> every catalog's z_depth is None
+        # (the legacy full-grid missing-galaxy budget).
+        z_depths=tuple(getattr(opts, "resolved_survey_z_depths", None) or ()),
         sky_labels=tuple(sky_labels),
         sky_params_fid=tuple(float(v) for v in get_fixed_sky_params(sky_model)),
         mark_labels=tuple(mark_labels),
