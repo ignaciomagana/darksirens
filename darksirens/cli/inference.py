@@ -563,14 +563,21 @@ def main():
     opts.n_catalogs = max(1, len(survey_paths))
 
     lss_values = _as_list(opts.lss_completion)
-    if len(lss_values) not in (0, 1, opts.n_catalogs):
+    if opts.n_catalogs == 1:
+        valid_counts = (0, 1)
+    else:
+        # With K catalogs the completion tables MUST be spelled out per catalog:
+        # broadcasting one table across catalogs would silently apply e.g. a
+        # galaxy Q table to the AGN catalog whenever the nsides happen to match.
+        valid_counts = (0, opts.n_catalogs)
+    if len(lss_values) not in valid_counts:
         _fatal(
-            "--lss_completion must have 0, 1, or n_catalogs entries (got "
-            f"{len(lss_values)} for {opts.n_catalogs} catalog(s)); use \"\" as a "
-            "placeholder for a catalog with no external completion."
+            "--lss_completion must have "
+            + ("0 or 1 entries" if opts.n_catalogs == 1
+               else f"0 or exactly n_catalogs={opts.n_catalogs} entries")
+            + f" (got {len(lss_values)}); use \"\" as a placeholder for a "
+            "catalog with no external completion."
         )
-    if len(lss_values) == 1 and opts.n_catalogs > 1:
-        lss_values = lss_values * opts.n_catalogs
     opts.lss_completions = [v if v not in (None, "") else None for v in lss_values]
     opts.survey_path = survey_paths[0] if survey_paths else None
     opts.lss_completion = opts.lss_completions[0] if opts.lss_completions else None
