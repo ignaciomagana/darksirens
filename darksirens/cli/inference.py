@@ -520,6 +520,19 @@ def main():
 
     g = optp.add_argument_group("Catalog")
     g.add_argument("--use_LSS",      type=str_to_bool, default=False, metavar="BOOL")
+    g.add_argument("--catalog_sky_weighting", default="conditional",
+                   choices=["conditional", "field"],
+                   help=("Catalog redshift-prior normalization convention (dark_sirens). "
+                         "'conditional' (default) normalizes each pixel by its own "
+                         "Z[pix]=N_obs+N_miss -- bit-identical to the pre-existing behaviour "
+                         "and the per-pixel z-shape estimand. 'field' normalizes by the "
+                         "survey-GLOBAL Z(theta)=Sum_all-pixels[N_obs+N_miss], so a K>=2 "
+                         "mixture weight fcat_k measures the host FRACTION (number-density / "
+                         "sky-clustering contrast), empty pixels carry weight proportional to "
+                         "their n0-implied missing count, and log10n0 becomes informative. "
+                         "Requires the full-sky catalog; incompatible with --use_LSS, "
+                         "--lss_marginalize, --lss_completion, --mark_model, and "
+                         "universe models other than dark_sirens."))
     g.add_argument("--survey_z_depth", type=float, default=None, metavar="Z",
                    help=("Redshift depth bounding the completion missing-galaxy budget to "
                          "z <= z_depth instead of the full [0, DARKSIRENS_ZMAX] grid, avoiding "
@@ -668,6 +681,28 @@ def main():
         if getattr(opts, "sky_model", "isotropic") != "isotropic":
             _fatal("--sky_model must be 'isotropic' with a multi-catalog mixture "
                    f"(got '{opts.sky_model}').")
+
+    # FIELD-convention sky weighting scope (host-fraction estimand): gated to the
+    # plain dark_sirens galaxy-count host model over the full-sky catalog.  The
+    # missing-galaxy budget must carry no LSS modulation (delta_g / Q_LSS) or
+    # marks, or the global normalizer and the per-pixel numerator diverge.
+    if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
+        if opts.universe_model != "dark_sirens":
+            _fatal("--catalog_sky_weighting field supports --universe_model dark_sirens "
+                   f"only (got '{opts.universe_model}'; dark_sirens_complete field mode "
+                   "is a later PR).")
+        if getattr(opts, "use_LSS", False):
+            _fatal("--catalog_sky_weighting field is not supported with --use_LSS.")
+        if getattr(opts, "lss_marginalize", False):
+            _fatal("--catalog_sky_weighting field is not supported with --lss_marginalize.")
+        if any(v is not None for v in (getattr(opts, "lss_completions", None) or [])):
+            _fatal("--catalog_sky_weighting field is not supported with --lss_completion "
+                   "(Q_LSS completion table).")
+        if getattr(opts, "mark_model", "none") not in (None, "none"):
+            _fatal("--catalog_sky_weighting field is not supported with --mark_model.")
+        if getattr(opts, "drop_full_catalog", False):
+            _fatal("--catalog_sky_weighting field needs the full-sky catalog rows to "
+                   "count empty pixels; it is incompatible with --drop_full_catalog.")
 
     # Persist the canonical names in settings while keeping opts.fix_cosmology
     # for backward-compatible internal callers and saved metadata.
@@ -871,6 +906,7 @@ def main():
             for _i, _p in enumerate(opts.survey_paths):
                 _row(f"  catalog {_i + 1}", _p)
         _row("Use LSS",      "yes" if opts.use_LSS else "no")
+        _row("Catalog sky weighting", getattr(opts, "catalog_sky_weighting", "conditional"))
     _row("Output root",     opts.save_path)
     if opts.sel_batch_size:
         _row("Sel. batch",   f"{opts.sel_batch_size:,} samples/batch")

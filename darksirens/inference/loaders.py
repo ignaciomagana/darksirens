@@ -8,7 +8,10 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 from darksirens.catalogs.io import load_survey
 
 from darksirens.redshift.grid import zgrid
-from darksirens.redshift.completion import compute_lss_overdensity
+from darksirens.redshift.completion import (
+    build_field_normalization_inputs,
+    compute_lss_overdensity,
+)
 from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
 
 from darksirens.catalogs.compact import (
@@ -180,6 +183,18 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             unique_pixels_sel=up_se, sample_to_unique_sel=s2u_se,
         )
         bundle.update(lss)  # lss_completion_logq / _logq_members / _indexing
+
+        # FIELD-convention sky weighting: precompute this catalog's survey-global
+        # normalization inputs from the FULL-sky rows (before they are dropped),
+        # so the mixture weight measures the host FRACTION for each tracer.
+        if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
+            fobs, n_empty, N_obs_total = build_field_normalization_inputs(
+                zgals, wgals, ngals
+            )
+            bundle["field_dN_obs_s"] = fobs
+            bundle["field_n_empty"] = n_empty
+            bundle["field_N_obs_total"] = N_obs_total
+
         bundles.append(bundle)
 
     return bundles

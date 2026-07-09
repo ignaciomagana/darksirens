@@ -149,6 +149,9 @@ def save_results_hdf5(
         f.attrs["mark_model"]      = getattr(opts, "mark_model", "none")
         f.attrs["mark_names"]      = ",".join(getattr(opts, "mark_names", ()) or ())
         f.attrs["complete_empty_pixel_policy"] = opts.complete_empty_pixel_policy
+        f.attrs["catalog_sky_weighting"] = getattr(
+            opts, "catalog_sky_weighting", "conditional"
+        )
         # Survey z_depth (bounds the completion missing-galaxy budget): the CLI
         # override (None = unset) plus the resolved per-catalog values actually
         # used to build SurveyParams, JSON-encoded so a None entry (legacy
