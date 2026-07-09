@@ -526,6 +526,11 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
             n_draw_sources=int(N), p_tag_per_source=p_tag,
             snr_image0=snr_p, snr_image1=snr_m, delta_t_obs=true_dt, true_delta_t=true_dt,
             log_sky_overlap=log_sky_overlap, p_tag_true=p_tag, tagged_pair=tagged_pair,
+            snr_model_attrs={
+                "fc_rho_thr": model.rho_thr,
+                "fc_r0": model.r0,
+                "fc_mc_bar": model.mc_bar,
+            },
         )
     return dict(n_sources=N, n_both=int(both.sum()),
                 pair_tag_model=pair_tag_model, pair_tag_prob=float(pair_tag_prob),
@@ -719,6 +724,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
              wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0,
              write_unified_observed_catalog=True, candidate_time_marks=True,
+             include_lensed_singletons=False,
              build_candidate_pairs_from_observed=False,
              validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0),
              write_legacy_pair_pe=False):
@@ -743,12 +749,30 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
 
     sing_candidates = np.where(det_s)[0]
     pair_candidates = np.where(dbl["both_detected"])[0]
+    one_det = dbl["det_plus"] ^ dbl["det_minus"]
+    lensed_sing_candidates = np.where(one_det)[0]
     n_singletons_detected_total = int(sing_candidates.size)
     n_pairs_both_detected_total = int(pair_candidates.size)
+    n_lensed_singletons_detected_total = int(lensed_sing_candidates.size)
+
+    # Realistic observation protocol (--include-lensed-singletons true):
+    # a strongly lensed source with exactly one detected image cannot be
+    # distinguished from an ordinary singleton, so it joins the singleton
+    # pool BEFORE the shuffle/caps — preserving the natural lensed fraction
+    # among observed singletons. Default (false) keeps the legacy protocol
+    # that drops these sources entirely (consistent with the OFF likelihood).
+    sing_is_lensed = np.zeros(sing_candidates.size, dtype=bool)
+    if include_lensed_singletons:
+        sing_candidates = np.concatenate([sing_candidates, lensed_sing_candidates])
+        sing_is_lensed = np.concatenate(
+            [sing_is_lensed, np.ones(lensed_sing_candidates.size, dtype=bool)]
+        )
 
     # Randomize before any truncation so the kept catalog is an unbiased subset
     # of the detected mock rather than the first sources in simulation order.
-    rng.shuffle(sing_candidates)
+    perm = rng.permutation(sing_candidates.size)
+    sing_candidates = sing_candidates[perm]
+    sing_is_lensed = sing_is_lensed[perm]
     rng.shuffle(pair_candidates)
 
     caps_applied = {"singletons": False, "pairs": False}
@@ -770,12 +794,15 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                 stacklevel=2,
             )
         sing_idx = sing_candidates[:n_sing_keep]
+        sing_idx_is_lensed = sing_is_lensed[:n_sing_keep]
         pair_src_idx = pair_candidates[:n_pair_keep]
     elif conditioning == "poisson_counts":
         sing_idx = sing_candidates
+        sing_idx_is_lensed = sing_is_lensed
         pair_src_idx = pair_candidates
         if max_sing_keep is not None and sing_idx.size > max_sing_keep:
             sing_idx = sing_idx[:max_sing_keep]
+            sing_idx_is_lensed = sing_idx_is_lensed[:max_sing_keep]
             caps_applied["singletons"] = True
         if max_pair_keep is not None and pair_src_idx.size > max_pair_keep:
             pair_src_idx = pair_src_idx[:max_pair_keep]
@@ -784,10 +811,16 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         raise ValueError(f"unknown conditioning mode: {conditioning}")
 
     # ---- PE: singletons + pairs ----
+    def _observed_singleton_mu(i, is_lensed):
+        if is_lensed:
+            return (marks["mu_plus"][i] if dbl["det_plus"][i]
+                    else marks["mu_minus"][i])
+        return marks["mu"][i]
+
     events = [make_event_pe(src["m1"][i], src["q"][i], src["z"][i], src["chi"][i],
-                            marks["mu"][i], model, nsamp, rng, H0, Om0,
+                            _observed_singleton_mu(i, lens), model, nsamp, rng, H0, Om0,
                             ra_true=src["ra_true"][i], dec_true=src["dec_true"][i])
-              for i in sing_idx]
+              for i, lens in zip(sing_idx, sing_idx_is_lensed)]
     write_gw_pe_file(events, os.path.join(out_dir, "mock_gw_pe.h5"), nsamp, H0, Om0)
 
     pairs = []
@@ -854,10 +887,19 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     event_records = []
     schema_events = []
     base_gps_time = 1234567890.0
-    for event_index, source_index in enumerate(sing_idx):
+    for event_index, (source_index, is_lensed) in enumerate(
+        zip(sing_idx, sing_idx_is_lensed)
+    ):
+        image_index = (
+            (0 if dbl["det_plus"][source_index] else 1) if is_lensed else None
+        )
         event_records.append(dict(
-            event_index=int(event_index), kind="singleton", source_index=int(source_index),
-            pair_index=None, image_index=None, truth_partner_event_index=None,
+            event_index=int(event_index),
+            kind="lensed_single_image" if is_lensed else "singleton",
+            source_index=int(source_index),
+            pair_index=None,
+            image_index=image_index,
+            truth_partner_event_index=None,
         ))
         schema_events.append(dict(
             event_index=int(event_index),
@@ -865,8 +907,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             kind="singleton_or_image",
             gps_time=float(base_gps_time + event_index),
             truth_source_id=int(source_index),
-            truth_image_index=None,
-            truth_is_lensed_image=False,
+            truth_image_index=image_index,
+            truth_is_lensed_image=bool(is_lensed),
             ra_mean=float(events[event_index]["ra_mean"]),
             dec_mean=float(events[event_index]["dec_mean"]),
             sky_sigma_rad=float(events[event_index]["sky_sigma_rad"]),
@@ -1016,6 +1058,9 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     truth_out.update(
         n_singletons_detected_total=n_singletons_detected_total,
         n_pairs_both_detected_total=n_pairs_both_detected_total,
+        n_lensed_singletons_detected_total=n_lensed_singletons_detected_total,
+        include_lensed_singletons=bool(include_lensed_singletons),
+        n_lensed_singletons_kept=int(np.sum(sing_idx_is_lensed)),
         n_singletons_kept=S,
         n_pairs_kept=P,
         caps_applied=caps_applied,
@@ -1164,6 +1209,13 @@ def parse_args():
                    help="log prior odds assigned to shuffled wrong candidate edges")
     p.add_argument("--candidate-time-marks", choices=("true", "false"), default="true",
                    help="write edge-level time-delay marks for true candidate edges")
+    p.add_argument("--include-lensed-singletons", "--include_lensed_singletons",
+                   dest="include_lensed_singletons",
+                   choices=("true", "false"), default="false",
+                   help="true adds strongly lensed sources with exactly one detected "
+                        "image to the observed singleton pool (realistic protocol; "
+                        "requires the sl_mixture singleton channel at inference); "
+                        "false keeps the legacy protocol that drops them")
     p.add_argument("--build_candidate_pairs_from_observed", "--build-candidate-pairs-from-observed",
                    choices=("true", "false"), default="false",
                    help="overwrite candidate_pairs.json with a graph scored from observed metadata/posteriors")
@@ -1196,6 +1248,7 @@ def main():
         time_delay_sigma_sec=args.time_delay_sigma_sec,
         write_unified_observed_catalog=args.write_unified_observed_catalog.lower() == "true",
         candidate_time_marks=args.candidate_time_marks.lower() == "true",
+        include_lensed_singletons=args.include_lensed_singletons.lower() == "true",
         build_candidate_pairs_from_observed=args.build_candidate_pairs_from_observed.lower() == "true",
         validation_sample_log10_tau_A=args.validation_sample_log10_tau_A,
         validation_log10_tau_A_prior=args.validation_log10_tau_A_prior,

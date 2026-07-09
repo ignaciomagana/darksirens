@@ -192,7 +192,72 @@ def compute_cluster_selection_term(
 
     log_sum_w2 = logsumexp(2.0 * log_w)
     log_var_term = logdiffexp(log_sum_w2, 2.0 * log_sum_w - log_n_draw)
-    log_sigma2 = log_var_term - 2.0 * log_n_draw
+    # Empty channel: variance is exactly zero; logdiffexp(-inf, -inf) is
+    # NaN — pin to -inf (same guard as the lensed-single term).
+    log_sigma2 = jnp.where(
+        jnp.isfinite(log_sum_w), log_var_term - 2.0 * log_n_draw, -jnp.inf
+    )
+
+    Neff = jnp.where(
+        jnp.isfinite(log_mu) & jnp.isfinite(log_sigma2),
+        jnp.exp(2.0 * log_mu - log_sigma2),
+        0.0,
+    )
+    return log_mu, Neff, log_sigma2
+
+
+def compute_lensed_single_selection_term(
+    singles,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    pop_params: jnp.ndarray,
+    catalog: EMCatalog,
+    sis_params: SISLensParams,
+    log_p_pop_fn: Callable,
+    log_prior_z_fn: Callable,
+) -> tuple:
+    """Importance-sampled selection integral for the lensed-singleton channel:
+    strongly lensed sources with EXACTLY ONE detected image, observed as
+    ordinary singletons.
+
+    Uses the same per-source weight convention as the cluster (J=2) term —
+    w_s = p_pop * p_z * tau_2 * p(y) / (p_prop_src * p_prop_y) — over the
+    exactly-one-detected subset (see LensedSingleImageSet). No pair-tag
+    factor: single images are never pair-tagged. Detection realization is
+    already encoded in the subset membership, exactly like the both-detected
+    estimator; no P_det factors appear here.
+
+    Returns (log_mu, Neff, log_sigma2) with the same conventions as
+    compute_cluster_selection_term.
+    """
+    log_pop = log_p_pop_fn(
+        singles.m1_src, singles.q_src, singles.z_src, singles.chieff, pop_params,
+    )
+    log_pz = log_prior_z_fn(
+        singles.z_src,
+        jnp.zeros(singles.m1_src.shape[0], dtype=jnp.int32),
+        catalog,
+    )
+    log_tau = jnp.log(tau_2_SIS(singles.z_src, sis_params))
+    log_py = jnp.log(2.0 * singles.y_source)
+    log_p_prop = jnp.log(singles.p_prop_src) + jnp.log(singles.p_prop_y)
+
+    log_w_raw = log_pop + log_pz + log_tau + log_py - log_p_prop
+    valid = singles.valid & (singles.p_prop_src > 0.0) & (singles.p_prop_y > 0.0)
+    log_w = jnp.where(valid & jnp.isfinite(log_w_raw), log_w_raw, -jnp.inf)
+
+    log_sum_w = logsumexp(log_w)
+    log_n_draw = jnp.log(singles.n_draw_sources)
+    log_mu = log_sum_w - log_n_draw
+
+    log_sum_w2 = logsumexp(2.0 * log_w)
+    log_var_term = logdiffexp(log_sum_w2, 2.0 * log_sum_w - log_n_draw)
+    # Empty channel (all weights -inf, e.g. tau_A = 0): the variance is
+    # exactly zero, but logdiffexp(-inf, -inf) is NaN — pin it to -inf so
+    # the channel drops out of combined sums instead of NaN-poisoning them.
+    log_sigma2 = jnp.where(
+        jnp.isfinite(log_sum_w), log_var_term - 2.0 * log_n_draw, -jnp.inf
+    )
 
     Neff = jnp.where(
         jnp.isfinite(log_mu) & jnp.isfinite(log_sigma2),

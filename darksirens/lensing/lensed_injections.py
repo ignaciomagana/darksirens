@@ -411,8 +411,15 @@ def save_lensed_injections(
     log_sky_overlap: Optional[np.ndarray] = None,
     p_tag_true: Optional[np.ndarray] = None,
     tagged_pair: Optional[np.ndarray] = None,
+    snr_model_attrs: Optional[dict] = None,
 ) -> None:
-    """Save raw per-image arrays to disk in the canonical HDF5 layout."""
+    """Save raw per-image arrays to disk in the canonical HDF5 layout.
+
+    ``snr_model_attrs`` optionally records the generator's analytic
+    detection-model constants (e.g. fc_rho_thr / fc_r0 / fc_mc_bar) as file
+    attrs so the lensed-singleton evidence channel can reproduce the exact
+    partner-censoring factor (see darksirens.lensing.fcpdet).
+    """
     with h5py.File(path, "w") as f:
         f.create_dataset("source_id", data=np.asarray(source_id, dtype=np.int32))
         f.create_dataset("image_id", data=np.asarray(image_id, dtype=np.int32))
@@ -437,3 +444,86 @@ def save_lensed_injections(
             if arr is not None:
                 f.create_dataset(name, data=np.asarray(arr, dtype=bool) if name == "tagged_pair" else np.asarray(arr))
         f.attrs["n_draw_sources"] = int(n_draw_sources)
+        for key, value in (snr_model_attrs or {}).items():
+            f.attrs[key] = float(value)
+
+
+# ============================================================================
+# Exactly-one-detected subset: the lensed-singleton selection channel
+# ============================================================================
+
+class LensedSingleImageSet(NamedTuple):
+    """Per-source arrays for sources where EXACTLY ONE image was detected.
+
+    Built from the same on-disk per-image layout as LensedInjectionSet —
+    the single-image channel is purely a load-time regrouping. ``mu_det``
+    is the detected image's magnification, ``mu_partner`` the undetected
+    partner's; ``image_is_plus`` records which image was seen.
+    """
+    m1_src: Any                   # (N_kept,)
+    q_src: Any                    # (N_kept,)
+    z_src: Any                    # (N_kept,)
+    chieff: Any                   # (N_kept,)
+    y_source: Any                 # (N_kept,)
+    mu_det: Any                   # (N_kept,)
+    mu_partner: Any               # (N_kept,)
+    image_is_plus: Any            # (N_kept,) bool
+    p_prop_src: Any               # (N_kept,)
+    p_prop_y: Any                 # (N_kept,)
+    valid: Any                    # (N_kept,) bool
+    n_draw_sources: Any           # scalar
+
+    @property
+    def n_kept(self):
+        return int(self.m1_src.shape[0])
+
+
+def load_lensed_single_image_set(path: str) -> LensedSingleImageSet:
+    """Load the exactly-one-detected per-source subset from an injection file."""
+    with h5py.File(path, "r") as f:
+        source_id = np.asarray(f["source_id"][:])
+        image_id = np.asarray(f["image_id"][:])
+        order = np.lexsort((image_id, source_id))
+        sid = source_id[order]
+        iid = image_id[order]
+        if len(sid) % 2 != 0 or not np.all(sid[0::2] == sid[1::2]):
+            raise ValueError("Each source_id must appear exactly twice.")
+        if not (np.all(iid[0::2] == 0) and np.all(iid[1::2] == 1)):
+            raise ValueError("image_id must be {0: mu_+, 1: mu_-} per source.")
+
+        def plus(name):
+            return np.asarray(f[name][:])[order][0::2]
+
+        def minus(name):
+            return np.asarray(f[name][:])[order][1::2]
+
+        det_p = plus("detected").astype(bool)
+        det_m = minus("detected").astype(bool)
+        one_det = det_p ^ det_m
+        image_is_plus = det_p[one_det]
+        mu_p = plus("mu")[one_det]
+        mu_m = minus("mu")[one_det]
+        return LensedSingleImageSet(
+            m1_src=jnp.asarray(plus("m1_src")[one_det]),
+            q_src=jnp.asarray(plus("q_src")[one_det]),
+            z_src=jnp.asarray(plus("z_src")[one_det]),
+            chieff=jnp.asarray(plus("chieff")[one_det]),
+            y_source=jnp.asarray(plus("y_source")[one_det]),
+            mu_det=jnp.asarray(np.where(image_is_plus, mu_p, mu_m)),
+            mu_partner=jnp.asarray(np.where(image_is_plus, mu_m, mu_p)),
+            image_is_plus=jnp.asarray(image_is_plus),
+            p_prop_src=jnp.asarray(plus("p_prop_src")[one_det]),
+            p_prop_y=jnp.asarray(plus("p_prop_y")[one_det]),
+            valid=jnp.ones(int(one_det.sum()), dtype=bool),
+            n_draw_sources=jnp.asarray(float(f.attrs["n_draw_sources"]), dtype=jnp.float64),
+        )
+
+
+def read_fc_pdet_attrs(path: str) -> dict:
+    """Read the generator's Finn-Chernoff detection-model attrs, if present."""
+    with h5py.File(path, "r") as f:
+        out = {}
+        for key in ("fc_rho_thr", "fc_r0", "fc_mc_bar"):
+            if key in f.attrs:
+                out[key] = float(f.attrs[key])
+        return out
