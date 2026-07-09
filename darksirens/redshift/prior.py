@@ -233,6 +233,13 @@ def prepare_redshift_prior_state(
     contrast), the estimand fix motivated by the gws-agn campaign.  ``"field"``
     is gated to the plain galaxy-count host model with the legacy dummy
     overdensity (no marks, no Q_LSS ensemble/table).
+
+    NOTE (K=1): the global constant ``log_Z_global`` cancels between the PE
+    and selection terms of a single-catalog likelihood, so at K=1 field mode's
+    only effect is removing the per-pixel ``Z[pix]`` normalization; the global
+    normalizer bites only for K>=2 mixtures, where each catalog's ``Z_k``
+    enters its mixture branch non-cancelling. Do not expect K=1 field runs to
+    constrain n0 through ``log_Z_global``.
     """
     if model == "spectral_sirens":
         # NaN-guarded log: the volume grid is EXACTLY zero at z = 0, and a

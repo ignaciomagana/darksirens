@@ -120,6 +120,19 @@ def _require_field_mode_scope(
                 "field_n_empty / field_N_obs_total); build them from the FULL-sky "
                 "catalog via build_field_normalization_inputs."
             )
+        # field_global_log_Z hard-codes lss = 1, so the numerator's overdensity
+        # modulation must be the legacy dummy (delta_g_pix_z shape (1, N_grid),
+        # guaranteed zero-valued upstream by the use_LSS=False CLI gate). The
+        # VALUE cannot be asserted here (delta_g is a tracer under jit); the
+        # static SHAPE is the jit-safe proxy. A real per-pixel delta_g with
+        # field mode would silently bias log10n0/delta by the un-modulated
+        # normalizer (measured 33% Z divergence in the adversarial review).
+        if cat.delta_g_pix_z is not None and cat.delta_g_pix_z.shape[0] != 1:
+            raise NotImplementedError(
+                "catalog_sky_weighting='field' requires the dummy (1, N_grid) "
+                "overdensity grid; a per-pixel delta_g is not supported "
+                "(field_global_log_Z assumes lss = 1)."
+            )
 
 
 @partial(
