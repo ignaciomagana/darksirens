@@ -242,3 +242,164 @@ def test_population_proposal_is_population_coupled(gen):
     # Narrow proposal: detections stay near the population support (well under the
     # uniform proposal's [2, 200] m1det cap).
     assert np.percentile(np.asarray(b_truth["m1det"]), 99) < 120.0
+
+
+# --- Per-component pairing pdraw + defensive population+uniform proposal --------
+# The following tests pin the PR-1 fix: the mock's mass-ratio-spin density
+# (source of the stored selection ``pdraw``) must pair EACH mass component
+# separately, exactly like the inference ``powerlaw+peak`` mixture
+# (MixtureModel.component_densities): the power law with its (m_min, dm_min)
+# secondary-mass taper, the Gaussian peak with the fallback (M_LO=1, dm=0.01).
+# The old single-tapered pairing mis-tapered the peak's secondaries at m_min=5,
+# driving the in-likelihood weight p_inference/pdraw to e^31 for injections with
+# m2src just above 5 (selection Neff -> 1, logL -> -inf at Ndraw >~ 1e6).
+
+
+def _inference_model():
+    """Build the inference ``powerlaw+peak`` model + fiducial theta, or skip."""
+    reg = pytest.importorskip("darksirens.gw.populations.registry")
+    model = reg.get_model("powerlaw+peak")
+    theta = reg.get_fixed_population_params("powerlaw+peak")
+    return model, theta
+
+
+def test_pairing_matches_inference_component_densities(gen):
+    """The generator's ``_mass_spin_pdf`` equals the inference mixture density.
+
+    At z=0 (and gamma=0 fiducial, so the ``(1+z)**(gamma-1)`` factor is 1)
+    ``exp(model.log_p_pop(m1, q, 0, chi, theta)) == mixture(m1, q, chi)``, which
+    is precisely the per-component pairing the generator must reproduce.  The
+    mock normalises its mass and pairing densities on the SAME linspaces and
+    trapezoid the inference uses (_MASS_NORM_GRID == get_mass_grid(),
+    _Q_NORM_GRID == get_q_grid()), so agreement is at machine precision -- far
+    tighter than the 2% the fix requires away from the hard zeros."""
+    import jax.numpy as jnp
+
+    model, theta = _inference_model()
+    pop = gen.PopulationConfig()
+    chi = 0.05
+    worst = 0.0
+    for m1 in (5.2, 6.0, 10.0, 25.0, 35.0, 45.0, 70.0):
+        for q in (0.3, 0.6, 0.9, 0.95, 0.99):
+            g = float(np.asarray(gen._mass_spin_pdf(np.array([m1]), np.array([q]), np.array([chi]), pop))[0])
+            lp = float(np.asarray(model.log_p_pop(
+                jnp.array([float(m1)]), jnp.array([float(q)]), jnp.array([0.0]), jnp.array([chi]), theta))[0])
+            inf = float(np.exp(lp))
+            if inf <= 1e-300 and g <= 1e-300:   # both in a hard zero: nothing to compare
+                continue
+            rel = abs(g - inf) / abs(inf)
+            worst = max(worst, rel)
+    # Grids match the inference exactly, so the residual is pure float64 round-off
+    # (measured worst ~2e-15); assert a tight bound well inside the 1e-6 target.
+    assert worst < 1e-9, f"per-component pairing disagreement {worst:.3e} exceeds 1e-9"
+
+
+def test_importance_weight_bounded_population_proposal(gen):
+    """The in-likelihood weight p_inference/pdraw has no e^31 tail.
+
+    Draw ~2e5 injections from the ``population`` proposal (threshold 0 keeps every
+    draw), build the inference target density in the same canonical
+    ``(m1det, q, dL)`` basis as the stored pdraw, and check the log importance
+    weight is bounded.  Because the stored pdraw now uses the SAME per-component
+    pairing as the inference, log w reduces to ``(gamma-1) log(1+z)`` (a mild,
+    z-only spread) instead of the unbounded mass-ratio-tail blow-up of the bug."""
+    import jax.numpy as jnp
+
+    model, theta = _inference_model()
+    grids = gen._cosmology_grids(gen._build_cosmology(67.74, 0.3075, -1.0, 0.0), zmax=0.3)
+    pop = gen.PopulationConfig()
+
+    b = gen._draw_selection_batch(np.random.default_rng(0), 200_000, grids, pop,
+                                  snr_threshold=0.0, proposal="population")
+    z = np.interp(np.asarray(b["dL"]), grids["dl"], grids["z"])
+    m1src = np.asarray(b["m1src"])
+    q = np.asarray(b["m2src"]) / m1src
+    chi = np.asarray(b["chieff"])
+
+    pz = np.interp(z, grids["z"], grids["dvc_dz"]) / gen._trapz(grids["dvc_dz"], grids["z"])
+    ddldz = np.interp(z, grids["z"], np.gradient(grids["dl"], grids["z"]))
+    jac = ddldz * (1.0 + z)
+    lp = np.asarray(model.log_p_pop(jnp.asarray(m1src), jnp.asarray(q), jnp.asarray(z), jnp.asarray(chi), theta))
+    # Inference canonical target density (matches _selection_pdraw's factorisation).
+    p_inf = np.exp(lp) * pz / np.maximum(jac, 1e-300) / (4.0 * np.pi)
+    pdraw = np.asarray(b["pdraw"])
+
+    logw = np.log(p_inf) - np.log(pdraw)
+    assert np.all(np.isfinite(logw))
+    assert np.max(np.abs(logw - np.median(logw))) < 5.0, (
+        f"population-proposal importance weight has a heavy tail: "
+        f"max|logw-median|={np.max(np.abs(logw - np.median(logw))):.2f}"
+    )
+
+
+def test_defensive_mixture_pdraw_and_neff(gen):
+    """The ``population+uniform`` proposal: exact mixture pdraw + non-collapsing Neff.
+
+    (1) pdraw is EXACTLY ``0.9 p_population + 0.1 p_uniform`` for every row,
+        reconstructed from the two single-branch ``_selection_pdraw`` formulas.
+    (2) The 0.1 uniform floor keeps the flat-weight (1/pdraw) selection Neff a
+        healthy fraction of the detections even under a stress population, where
+        the pure ``population`` proposal's Neff collapses."""
+    import dataclasses
+
+    grids = gen._cosmology_grids(gen._build_cosmology(67.74, 0.3075, -1.0, 0.0), zmax=0.3)
+    pop = gen.PopulationConfig()
+
+    # (1) Exact mixture pdraw.
+    b = gen._draw_selection_batch(np.random.default_rng(1), 120_000, grids, pop,
+                                  snr_threshold=0.0, proposal="population+uniform")
+    z = np.interp(np.asarray(b["dL"]), grids["dl"], grids["z"])
+    m1src = np.asarray(b["m1src"])
+    q = np.asarray(b["m2src"]) / m1src
+    chi = np.asarray(b["chieff"])
+    p_mix = np.asarray(gen._selection_pdraw("population+uniform", m1src, q, chi, z, grids, pop))
+    p_pop = np.asarray(gen._selection_pdraw("population", m1src, q, chi, z, grids, pop))
+    p_unif = np.asarray(gen._selection_pdraw("uniform", m1src, q, chi, z, grids, pop))
+    np.testing.assert_allclose(p_mix, 0.9 * p_pop + 0.1 * p_unif, rtol=1e-9)
+
+    # (2) Flat-weight selection Neff under a stress population.
+    stress = dataclasses.replace(pop, alpha=5.0, beta=3.0)
+
+    def _flat_neff(proposal):
+        bb = gen._draw_selection_batch(np.random.default_rng(2), 200_000, grids, stress,
+                                       snr_threshold=8.0, proposal=proposal)
+        inv = 1.0 / np.asarray(bb["pdraw"])
+        return float(inv.sum() ** 2 / np.square(inv).sum())
+
+    neff_mix = _flat_neff("population+uniform")
+    neff_pop = _flat_neff("population")
+    assert neff_mix > 300.0, f"defensive-mixture flat-weight Neff is unhealthy: {neff_mix:.1f}"
+    assert neff_mix > 10.0 * neff_pop, (
+        f"defensive mixture did not rescue Neff under stress: "
+        f"mixture={neff_mix:.1f} vs pure-population={neff_pop:.1f}"
+    )
+
+
+def test_sample_q_component_split(gen):
+    """``_sample_q`` draws from the per-lane pairing selected by ``use_peak``.
+
+    A forced all-peak mask must sample ``_pair_pdf(.; 1.0, 0.01)`` (secondaries
+    down to m2=1); a forced all-power-law mask must sample the tapered
+    ``_pair_pdf(.; m_min, dm_min)`` (secondaries floored at m2=m_min)."""
+    pop = gen.PopulationConfig()
+    m1v = 35.0
+    m1 = np.full(300_000, m1v)
+    rng = np.random.default_rng(5)
+
+    q_peak = gen._sample_q(rng, m1, pop, use_peak=np.ones(len(m1), dtype=bool))
+    q_pl = gen._sample_q(rng, m1, pop, use_peak=np.zeros(len(m1), dtype=bool))
+
+    # Peak lanes reach below the power-law floor 5/m1 (secondaries m2 in [1, 5]);
+    # power-law lanes stay at/above it.
+    assert q_peak.min() < pop.mmin / m1v
+    assert q_pl.min() > 0.9 * (pop.mmin / m1v)
+
+    for qs, m_min, dm in ((q_peak, gen._PAIR_M_LO, gen._PAIR_DM),
+                          (q_pl, pop.mmin, pop.dm_min)):
+        edges = np.linspace(m_min / m1v - 0.01, 1.0, 60)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        dens, _ = np.histogram(qs, bins=edges, density=True)
+        pdf = gen._pair_pdf(centers, np.full_like(centers, m1v), m_min, dm, pop.beta)
+        mask = pdf > 0.05 * pdf.max()
+        rel = np.abs(dens[mask] - pdf[mask]) / pdf[mask]
+        assert np.median(rel) < 0.1, f"sampled q (m_min={m_min}) off its pair pdf: median rel {np.median(rel):.3f}"
