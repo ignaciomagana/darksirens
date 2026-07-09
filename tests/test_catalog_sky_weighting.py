@@ -276,7 +276,10 @@ def _full_sky_data(nsamp=2, n_sel=8):
         "apix": hp.nside2pixarea(nside), "nside": nside, "n_pix_catalog": n_pix,
         "zgals": zgals, "dzgals": dzgals, "wgals": wgals, "ngals_catalog": ngals,
         "zgals_catalog": zgals, "dzgals_catalog": dzgals, "wgals_catalog": wgals,
-        "delta_g_pix_z": jnp.zeros((n_pix, len(zgrid))),
+        # Compact (1, N_grid) dummy overdensity, matching what the production
+        # loaders always emit for non-LSS runs (the field-mode gate rejects
+        # expanded per-pixel grids by static shape).
+        "delta_g_pix_z": jnp.zeros((1, len(zgrid))),
         "m1det": jnp.array([36.0, 38.0]), "m2det": jnp.array([28.8, 30.4]),
         "dL": jnp.array([460.0, 500.0]), "chieff": jnp.array([0.0, 0.02]),
         "p_pe": jnp.ones(nsamp), "pixels_pe": jnp.array([7, 7], dtype=jnp.int32),
