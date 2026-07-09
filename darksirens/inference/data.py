@@ -93,6 +93,18 @@ def load_all_data(opts):
     print(f"    - HEALPix nside detected: {nside_check}")
 
     data = loaders.attach_lss_inputs(opts, data)
+
+    # Multitracer: for K >= 2 attach the per-catalog compact bundles and skip the
+    # mark / weak-lensing inputs (both unsupported for the mixture, guarded
+    # upstream).  The shared GW / selection / sky keys built above are reused.
+    n_catalogs = int(getattr(opts, "n_catalogs", 1))
+    if n_catalogs >= 2:
+        data["catalogs"] = loaders.load_multitracer_catalog_bundles(opts, gw_inputs)
+        for _ds in ("mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color"):
+            data.setdefault(_ds, None)
+        data.setdefault("wl_params", None)
+        return data
+
     data = loaders.attach_mark_inputs(opts, data)
     data = loaders.attach_wl_inputs(opts, data)
     data = loaders.maybe_drop_full_catalog(opts, data)
