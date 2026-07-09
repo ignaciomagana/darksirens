@@ -107,7 +107,7 @@ def _build_completion_radial(
     """
     import healpy as hp
 
-    nside, ngals, zgals, dzgals, wgals = load_survey(catalog_path)
+    nside, ngals, zgals, dzgals, wgals, _z_depth = load_survey(catalog_path)
     n_pix = int(np.asarray(zgals).shape[0])
     n_grid = int(zgrid.size)
     apix = float(hp.nside2pixarea(int(nside)))
@@ -239,7 +239,7 @@ def _build_completion_gp3d(
 
     M_SPH, M_Z = 32, 6
 
-    nside, ngals, zgals, dzgals, wgals = load_survey(catalog_path)
+    nside, ngals, zgals, dzgals, wgals, _z_depth = load_survey(catalog_path)
     n_pix = int(np.asarray(zgals).shape[0])
     n_grid = int(zgrid.size)
     apix = float(hp.nside2pixarea(int(nside)))

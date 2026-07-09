@@ -65,6 +65,7 @@ from darksirens.likelihood.factory import (
     make_likelihood,
 )
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
+from darksirens.redshift.grid import zMax as _REDSHIFT_GRID_ZMAX
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
@@ -184,6 +185,48 @@ def _print_parameter_table(
     if n_fix_block: _row("Fixed (block)",      n_fix_block)
     _row("Total in coord vec",  len(labels))
     _end()
+
+
+def resolve_survey_z_depth(cli_override, file_attr, zmax=None):
+    """Resolve one catalog's ``z_depth``: CLI override > per-catalog file attr > None.
+
+    Precedence: ``cli_override`` (the ``--survey_z_depth`` value, applied to
+    every catalog when set) wins over ``file_attr`` (the per-catalog
+    ``f.attrs['z_depth']`` written by ``darksirens_pixelate --z_depth``);
+    ``None`` means the legacy full-grid missing-galaxy budget
+    (:mod:`darksirens.redshift.completion`).  A resolved value above the
+    redshift grid ``zMax`` (:data:`darksirens.redshift.grid.zMax`) is
+    equivalent to no bound at all, so it is clamped to ``zMax`` with a
+    warning rather than silently accepted or rejected.
+    """
+    if zmax is None:
+        zmax = _REDSHIFT_GRID_ZMAX
+    z = cli_override if cli_override is not None else file_attr
+    if z is None:
+        return None
+    z = float(z)
+    if z > zmax:
+        msg = (
+            f"z_depth={z:g} exceeds the redshift grid zMax={zmax:g}; clamping "
+            "to zMax (equivalent to the legacy full-grid missing-galaxy budget)."
+        )
+        warnings.warn(msg)
+        _warn(msg)
+        z = float(zmax)
+    return z
+
+
+def _report_survey_z_depth(label: str, resolved) -> None:
+    """Print one loud config line for a catalog's resolved ``z_depth``."""
+    _ok(
+        f"{label}: "
+        + (
+            f"{resolved:g} (bounds missing-galaxy budget to z <= {resolved:g})"
+            if resolved is not None
+            else "None -> full-grid budget (legacy)"
+        )
+    )
+
 
 def _completion_validation_survey_values(
     prior_overrides: dict,
@@ -465,6 +508,14 @@ def main():
 
     g = optp.add_argument_group("Catalog")
     g.add_argument("--use_LSS",      type=str_to_bool, default=False, metavar="BOOL")
+    g.add_argument("--survey_z_depth", type=float, default=None, metavar="Z",
+                   help=("Redshift depth bounding the completion missing-galaxy budget to "
+                         "z <= z_depth instead of the full [0, DARKSIRENS_ZMAX] grid, avoiding "
+                         "the dilution of the catalog term by galaxies the survey was never "
+                         "designed to detect. Applies to ALL catalogs and overrides any "
+                         "per-catalog f.attrs['z_depth'] written by darksirens_pixelate "
+                         "--z_depth. Default None: per-catalog file attr if present, else the "
+                         "legacy full-grid budget (bit-identical to pre-existing behaviour)."))
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
                          "--save_path, and exit before building the likelihood."))
@@ -734,6 +785,12 @@ def main():
     _row("Shared gamma", "yes" if opts.shared_gamma else "no")
     if opts.universe_model in {"dark_sirens_complete", "bright_sirens"}:
         _row("Empty-pixel policy", opts.complete_empty_pixel_policy)
+    if opts.survey_path or opts.survey_paths:
+        _row(
+            "Survey z_depth override",
+            opts.survey_z_depth if opts.survey_z_depth is not None
+            else "none (per-catalog file attr, else legacy full-grid)",
+        )
     print("  │")
     _row("Fix cosmology",    "yes" if opts.fix_cosmology  else "no")
     _row(
@@ -852,6 +909,31 @@ def main():
     if dg is not None:
         gb = np.asarray(dg).nbytes / 1e9
         _ok(f"δ_g field shape:        {np.asarray(dg).shape}  ({gb:.3f} GB)")
+
+    # ── Survey z_depth resolution (bounds the completion missing-galaxy
+    #    budget) ─────────────────────────────────────────────────────────
+    # Precedence: --survey_z_depth (CLI, applies to every catalog) >
+    # per-catalog f.attrs['z_depth'] (written by darksirens_pixelate
+    # --z_depth) > None (legacy full-grid budget, bit-identical). Resolved
+    # host-side here (files are already loaded) and threaded to SurveyParams
+    # via ParameterDecoder.z_depths (inference/parameters.py).
+    if opts.survey_path:
+        if opts.n_catalogs == 1:
+            resolved = resolve_survey_z_depth(opts.survey_z_depth, data.get("z_depth"))
+            opts.resolved_survey_z_depths = [resolved]
+            _report_survey_z_depth("Survey z_depth", resolved)
+        else:
+            bundles = data.get("catalogs") or []
+            resolved_list = [
+                resolve_survey_z_depth(opts.survey_z_depth, b.get("z_depth"))
+                for b in bundles
+            ]
+            opts.resolved_survey_z_depths = resolved_list
+            for _i, _resolved in enumerate(resolved_list):
+                _report_survey_z_depth(f"Catalog {_i + 1} z_depth", _resolved)
+    else:
+        opts.resolved_survey_z_depths = []
+
     _end()
 
     if opts.validate_completion:

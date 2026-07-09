@@ -423,14 +423,45 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
     return C, global_pix
 
 
-def _assemble_curves(C, lss, grids: _CompletionGrids):
-    """Assemble the per-row completion outputs from ``C`` and the rate factor ``lss``."""
+def _assemble_curves(C, lss, grids: _CompletionGrids, survey: SurveyParams):
+    """Assemble the per-row completion outputs from ``C`` and the rate factor ``lss``.
+
+    ``survey.z_depth`` optionally bounds the missing-galaxy budget to
+    ``zgrid <= z_depth``: a survey is never designed to detect galaxies past
+    its own depth, so counting them as "missing" over the FULL grid up to
+    ``DARKSIRENS_ZMAX`` inflates ``N_miss`` and dilutes the catalog term.
+    ``z_depth`` is a concrete Python float (or ``None``) at trace time --
+    never a sampled/traced value -- so the branch below is a Python-level
+    ``if``, resolved once per trace, not a ``jnp.where``/``lax.cond``.
+
+    ``z_depth is None`` takes the ORIGINAL expression untouched (no mask is
+    even constructed), which is the legacy full-grid budget and is
+    guaranteed bit-identical to the pre-existing behaviour.
+    """
     dN_miss = (1.0 - C) * grids.dN_exp * lss
+
+    if survey.z_depth is None:
+        # Legacy full-grid missing budget -- EXACTLY the pre-existing expression.
+        N_miss = jnp.trapezoid(dN_miss, zgrid)
+
+        dN_exp_pos = jnp.where(grids.dN_exp > 0.0, grids.dN_exp, 1.0)
+        C_eff = jnp.clip(1.0 - dN_miss / dN_exp_pos, 0.0, 1.0)
+        N_exp = jnp.trapezoid(grids.dN_exp, zgrid)
+        f = 1.0 - N_miss / jnp.where(N_exp > 0.0, N_exp, 1.0)
+        return f, dN_miss, C_eff, N_miss
+
+    # Bounded budget: zero the missing-galaxy density beyond the survey depth
+    # BEFORE the N_miss quadrature, and bound the N_exp used by the diagnostic
+    # f the same way so it stays consistent with the truncated N_miss (C_eff
+    # is unaffected -- it is already 1.0 wherever dN_miss is zeroed).
+    depth_mask = zgrid <= survey.z_depth
+    dN_miss = jnp.where(depth_mask, dN_miss, 0.0)
     N_miss = jnp.trapezoid(dN_miss, zgrid)
 
     dN_exp_pos = jnp.where(grids.dN_exp > 0.0, grids.dN_exp, 1.0)
     C_eff = jnp.clip(1.0 - dN_miss / dN_exp_pos, 0.0, 1.0)
-    N_exp = jnp.trapezoid(grids.dN_exp, zgrid)
+    dN_exp_bounded = jnp.where(depth_mask, grids.dN_exp, 0.0)
+    N_exp = jnp.trapezoid(dN_exp_bounded, zgrid)
     f = 1.0 - N_miss / jnp.where(N_exp > 0.0, N_exp, 1.0)
     return f, dN_miss, C_eff, N_miss
 
@@ -454,7 +485,7 @@ def _completion_curves_row(
     else:
         delta_g_z = delta_g_pix_z[global_pix]
     lss = jnp.maximum(1.0 + b_eff * delta_g_z, 0.0)
-    return _assemble_curves(C, lss, grids)
+    return _assemble_curves(C, lss, grids, survey)
 
 
 def _completion_curves_row_q(
@@ -470,18 +501,29 @@ def _completion_curves_row_q(
     local-overdensity factor: ``dN_miss = (1 - C) dN_exp Q_LSS``.
     """
     C, _ = _row_C(row, grids, em_catalog)
-    return _assemble_curves(C, q_row, grids)
+    return _assemble_curves(C, q_row, grids, survey)
 
 
 def _completion_member_row(
     row: int,
     q_members_row: jnp.ndarray,
     grids: _CompletionGrids,
+    survey: SurveyParams,
     em_catalog: EMCatalog,
 ):
-    """Per-row ensemble missing densities for ``q_members_row`` ``(M, N_grid)``."""
+    """Per-row ensemble missing densities for ``q_members_row`` ``(M, N_grid)``.
+
+    Mirrors the ``survey.z_depth`` missing-galaxy-budget bound applied in
+    ``_assemble_curves`` (Python-level branch; ``z_depth`` is concrete at
+    trace time, never a tracer) so the ensemble diagnostics stay consistent
+    with the deterministic ``dN_miss``/``N_miss`` curves.  ``z_depth is None``
+    takes the untouched original expression -- no mask is built.
+    """
     C, _ = _row_C(row, grids, em_catalog)
     dN_miss_m = (1.0 - C)[None, :] * grids.dN_exp[None, :] * q_members_row  # (M, N_grid)
+    if survey.z_depth is not None:
+        depth_mask = zgrid <= survey.z_depth
+        dN_miss_m = jnp.where(depth_mask[None, :], dN_miss_m, 0.0)
     N_miss_m = jnp.trapezoid(dN_miss_m, zgrid, axis=-1)                     # (M,)
     return dN_miss_m, N_miss_m
 
@@ -493,7 +535,7 @@ _completion_curves_rows_q_vmap = vmap(
     _completion_curves_row_q, in_axes=(0, 0, None, None, None), out_axes=(0, 0, 0, 0)
 )
 _completion_member_rows_vmap = vmap(
-    _completion_member_row, in_axes=(0, 0, None, None), out_axes=(0, 0)
+    _completion_member_row, in_axes=(0, 0, None, None, None), out_axes=(0, 0)
 )
 
 
@@ -526,7 +568,7 @@ def completion_curves(
     dN_miss_members = None
     N_miss_members = None
     if q_members_row is not None:
-        dM, NM = _completion_member_rows_vmap(rows, q_members_row, grids, em_catalog)
+        dM, NM = _completion_member_rows_vmap(rows, q_members_row, grids, survey, em_catalog)
         dN_miss_members = jnp.transpose(dM, (1, 0, 2))  # (M, N_rows, N_grid)
         N_miss_members = jnp.transpose(NM, (1, 0))      # (M, N_rows)
 
