@@ -167,6 +167,13 @@ def save_results_hdf5(
         f.attrs["gw_path"]         = opts.gw_path
         f.attrs["gwselection_path"] = opts.gwselection_path
         f.attrs["survey_path"]     = opts.survey_path or ""
+        # Multitracer: number of catalogs and the full aligned path list; the
+        # scalar survey_path attr above is retained for single-catalog analyzers.
+        f.attrs["n_catalogs"]      = int(getattr(opts, "n_catalogs", 1))
+        _survey_paths = getattr(opts, "survey_paths", None)
+        if not _survey_paths:
+            _survey_paths = [opts.survey_path] if opts.survey_path else []
+        f.attrs["survey_paths"]    = ",".join(_survey_paths)
         if getattr(opts, "counterpart", None) is not None:
             counterpart_arr = np.asarray(opts.counterpart, dtype=float)
             f.create_dataset("counterparts", data=counterpart_arr, **kw)
