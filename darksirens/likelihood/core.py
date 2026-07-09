@@ -40,6 +40,14 @@ WL_BACKEND_DISABLED = -1
 WL_BACKEND_LOGNORMAL = 0
 WL_BACKEND_TABULATED = 1
 
+# Selection-integral WL treatment (static dispatch), mirroring
+# likelihood_with_clusters: STANDARD keeps the legacy un-marginalized
+# selection weight; LOGNORMAL applies the same Hermite mu-marginalization to
+# injection samples as the PE term (lognormal backend only — disabled or
+# tabulated backends fall through to STANDARD for backward compatibility).
+WL_SELECTION_STANDARD = 0
+WL_SELECTION_LOGNORMAL = 1
+
 
 def selection_prior_model(universe_model: str) -> str:
     """Redshift-prior model for the SELECTION integral of ``universe_model``.
@@ -75,6 +83,7 @@ def selection_prior_model(universe_model: str) -> str:
         "mark_model",
         "mark_names",
         "wl_backend",
+        "wl_selection",
         "lss_marginalize",
         "materialize_redshift_prior_state",
         "selection_neff_soft_guard",
@@ -110,6 +119,7 @@ def darksiren_log_likelihood(
     wl_z_grid: jnp.ndarray | None = None,
     wl_log_mu_grid: jnp.ndarray | None = None,
     wl_log_p_table: jnp.ndarray | None = None,
+    wl_selection: int = WL_SELECTION_STANDARD,
     lss_marginalize: bool = False,
     materialize_redshift_prior_state: bool = True,
     selection_neff_soft_guard: bool = False,
@@ -170,6 +180,13 @@ def darksiren_log_likelihood(
     # Weak-lensing dispatch (static): wl_enabled gates ALL WL machinery off for
     # every non-WL model, so they remain numerically identical to the non-WL code.
     wl_enabled = wl_backend != WL_BACKEND_DISABLED
+    # Selection-side WL marginalization: opt-in, lognormal backend only
+    # (same fallthrough semantics as likelihood_with_clusters — a disabled or
+    # tabulated backend keeps the exact legacy selection path).
+    wl_selection_enabled = (
+        wl_selection == WL_SELECTION_LOGNORMAL
+        and wl_backend == WL_BACKEND_LOGNORMAL
+    )
     if wl_enabled and universe_model != "spectral_sirens_wl":
         raise ValueError(
             f"wl_backend={wl_backend} requires universe_model='spectral_sirens_wl', "
@@ -471,10 +488,23 @@ def darksiren_log_likelihood(
             dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
             supported = (dL >= dL_lo) & (dL <= dL_hi)
             dL_c = jnp.clip(dL, dL_lo, dL_hi)
-            ldw = log_sample_weight(
-                m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
-                catalog, log_p_pop, _selection_prior,
-            )
+            if wl_selection_enabled:
+                # Injection distances are apparent distances too: magnification
+                # scatter changes detectability, so mu(Lambda) must be
+                # marginalized with the SAME WL kernel as the PE term or the
+                # selection normalization is inconsistent with the per-event
+                # weights (previously only available in the cluster wrapper).
+                ldw = log_sample_weight_wl_lognormal_hermite(
+                    m1det, q, dL_c, chieff, pix, prior_wt,
+                    cosmo, survey, pop_params, catalog,
+                    log_p_pop, _selection_prior,
+                    wl_a, wl_b, u_nodes, log_wH_nodes,
+                )
+            else:
+                ldw = log_sample_weight(
+                    m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
+                    catalog, log_p_pop, _selection_prior,
+                )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
         def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalog):

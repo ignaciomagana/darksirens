@@ -35,6 +35,8 @@ from darksirens.likelihood.core import (
     darksiren_log_likelihood,
     WL_BACKEND_DISABLED,
     WL_BACKEND_LOGNORMAL,
+    WL_SELECTION_STANDARD,
+    WL_SELECTION_LOGNORMAL,
 )
 from darksirens.likelihood import factory as likelihood_module
 from darksirens.gw.populations import get_fixed_population_params
@@ -128,7 +130,7 @@ class TestLikelihoodIntegration:
         }
 
     def _call(self, fixture, universe_model, wl_backend=WL_BACKEND_DISABLED,
-              wl_a=0.0, wl_b=0.0):
+              wl_a=0.0, wl_b=0.0, wl_selection=WL_SELECTION_STANDARD):
         pop_params = fixture["pop_params"]
         expected_len = len(get_fixed_population_params("powerlaw+peak"))
         assert pop_params.shape[0] > 0
@@ -143,6 +145,7 @@ class TestLikelihoodIntegration:
             sel_batch_size=None,
             wl_backend=wl_backend,
             wl_a=wl_a, wl_b=wl_b,
+            wl_selection=wl_selection,
         )
 
     def test_baseline_spectral_sirens_finite(self, fixture):
@@ -257,6 +260,84 @@ class TestLikelihoodIntegration:
                 wl_a=0.01, wl_b=1.0,
             )
 
+    # ------------------------------------------------------------------
+    # Selection-side WL marginalization (wl_selection)
+    # ------------------------------------------------------------------
+
+    def test_wl_selection_tiny_a_reduces_to_standard(self, fixture):
+        """At a → 0 the Hermite-marginalized selection weight reduces to the
+        standard one, so wl_selection must be inert (same argument as the PE
+        term's exact-reduction test)."""
+        ll_std = self._call(
+            fixture, "spectral_sirens_wl",
+            wl_backend=WL_BACKEND_LOGNORMAL, wl_a=1e-6, wl_b=1.0,
+            wl_selection=WL_SELECTION_STANDARD,
+        )
+        ll_sel = self._call(
+            fixture, "spectral_sirens_wl",
+            wl_backend=WL_BACKEND_LOGNORMAL, wl_a=1e-6, wl_b=1.0,
+            wl_selection=WL_SELECTION_LOGNORMAL,
+        )
+        assert jnp.isfinite(ll_std) and jnp.isfinite(ll_sel)
+        assert float(abs(ll_sel - ll_std)) < 1e-4
+
+    def test_wl_selection_changes_selection_at_moderate_a(self, fixture):
+        """At a=1e-2 the selection integral must respond to the WL kernel:
+        the PE term is identical between the two calls, so any difference is
+        purely the previously-missing selection-side marginalization."""
+        ll_std = self._call(
+            fixture, "spectral_sirens_wl",
+            wl_backend=WL_BACKEND_LOGNORMAL, wl_a=1e-2, wl_b=1.0,
+            wl_selection=WL_SELECTION_STANDARD,
+        )
+        ll_sel = self._call(
+            fixture, "spectral_sirens_wl",
+            wl_backend=WL_BACKEND_LOGNORMAL, wl_a=1e-2, wl_b=1.0,
+            wl_selection=WL_SELECTION_LOGNORMAL,
+        )
+        assert jnp.isfinite(ll_sel)
+        diff = float(abs(ll_sel - ll_std))
+        assert 1e-8 < diff < 5.0, (
+            f"|ll_sel - ll_std| = {diff} at a=1e-2 — selection-side WL is "
+            f"either inert or blowing up"
+        )
+
+    def test_wl_selection_residual_scales_linearly_in_a(self, fixture):
+        """The selection-side correction is O(s^2) = O(a·z^b), same as the PE
+        side: the ll(sel on) - ll(sel off) residual must scale ~linearly in a."""
+        diffs = []
+        for a in (1e-4, 1e-3, 1e-2):
+            ll_std = self._call(
+                fixture, "spectral_sirens_wl",
+                wl_backend=WL_BACKEND_LOGNORMAL, wl_a=a, wl_b=1.0,
+                wl_selection=WL_SELECTION_STANDARD,
+            )
+            ll_sel = self._call(
+                fixture, "spectral_sirens_wl",
+                wl_backend=WL_BACKEND_LOGNORMAL, wl_a=a, wl_b=1.0,
+                wl_selection=WL_SELECTION_LOGNORMAL,
+            )
+            diffs.append(float(ll_sel - ll_std))
+        ratio_10 = diffs[1] / diffs[0]
+        ratio_21 = diffs[2] / diffs[1]
+        assert 4.0 < abs(ratio_10) < 20.0, (
+            f"selection residuals {diffs}: a=1e-3/1e-4 ratio {ratio_10} (expected ~10)"
+        )
+        assert 4.0 < abs(ratio_21) < 20.0, (
+            f"selection residuals {diffs}: a=1e-2/1e-3 ratio {ratio_21} (expected ~10)"
+        )
+
+    def test_wl_selection_falls_through_when_backend_disabled(self, fixture):
+        """wl_selection=LOGNORMAL with a disabled backend keeps the exact
+        legacy path (mirrors the cluster wrapper's fallthrough semantics)."""
+        ll_base = self._call(fixture, "spectral_sirens")
+        ll_fall = self._call(
+            fixture, "spectral_sirens",
+            wl_backend=WL_BACKEND_DISABLED,
+            wl_selection=WL_SELECTION_LOGNORMAL,
+        )
+        assert float(abs(ll_fall - ll_base)) < 1e-12
+
 
 def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
     """Factory should translate data['wl_params'] into explicit core kwargs."""
@@ -304,6 +385,21 @@ def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
     assert captured["wl_backend"] == WL_BACKEND_LOGNORMAL
     assert float(captured["wl_a"]) == pytest.approx(1e-3)
     assert float(captured["wl_b"]) == pytest.approx(1.0)
+    # No --wl_selection on opts -> the legacy standard selection path.
+    assert captured["wl_selection"] == WL_SELECTION_STANDARD
+
+    # With opts.wl_selection="wl_lognormal" the factory must thread the
+    # lognormal selection code through to the core.
+    captured.clear()
+    opts_sel = type("Opts", (), {
+        "pop_model": "powerlaw+peak",
+        "universe_model": "spectral_sirens_wl",
+        "sel_batch_size": None,
+        "wl_selection": "wl_lognormal",
+    })()
+    like_sel = likelihood_module.make_likelihood(opts_sel, data, pop_params_fid=())
+    _ = like_sel(jnp.array([]))
+    assert captured["wl_selection"] == WL_SELECTION_LOGNORMAL
 
 
 def test_make_likelihood_spectral_sirens_wl_missing_params_raises(monkeypatch):

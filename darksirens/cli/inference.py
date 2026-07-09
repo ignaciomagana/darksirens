@@ -541,6 +541,12 @@ def main():
     g.add_argument("--lensing_wl_table_path", type=str, default=None,
                    help="Path to HDF5 table of log p_WL(mu|z) "
                         "(used with --lensing_wl_model tabulated).")
+    g.add_argument("--wl_selection", choices=["standard", "wl_lognormal"], default="standard",
+                   help="Selection-integral WL treatment (mirrors darksirens_inference_lensing): "
+                        "standard preserves the legacy un-marginalized selection weight; "
+                        "wl_lognormal applies the same lognormal/Hermite mu-marginalization to "
+                        "injection samples as the PE term (only with --lensing_wl_model lognormal; "
+                        "wl_a=0 reduces to standard).")
 
     opts = optp.parse_args()
 
