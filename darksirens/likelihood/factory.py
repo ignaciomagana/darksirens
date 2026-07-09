@@ -26,6 +26,8 @@ from darksirens.likelihood.core import (
     WL_BACKEND_DISABLED,
     WL_BACKEND_LOGNORMAL,
     WL_BACKEND_TABULATED,
+    WL_SELECTION_STANDARD,
+    WL_SELECTION_LOGNORMAL,
 )
 from darksirens.core.constants import H0_FID, OM0_FID, SURVEY_PARAMS_FID
 from darksirens.inference.parameters import (
@@ -369,6 +371,14 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 f"{backend}. Expected {WL_BACKEND_LOGNORMAL} (LOGNORMAL) or "
                 f"{WL_BACKEND_TABULATED} (TABULATED)."
             )
+    # Selection-side WL marginalization (opt-in; lognormal backend only —
+    # the core silently keeps the legacy selection path otherwise, mirroring
+    # the cluster wrapper's semantics).
+    wl_selection = (
+        WL_SELECTION_LOGNORMAL
+        if getattr(opts, "wl_selection", "standard") == "wl_lognormal"
+        else WL_SELECTION_STANDARD
+    )
 
     counterpart_pixel = data.get("counterpart_pixel")
     counterpart_pixels = (
@@ -617,6 +627,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 wl_z_grid=wl_z_grid,
                 wl_log_mu_grid=wl_log_mu_grid,
                 wl_log_p_table=wl_log_p_table,
+                wl_selection=wl_selection,
                 lss_marginalize=lss_marginalize,
                 materialize_redshift_prior_state=materialize_redshift_prior_state,
                 selection_neff_soft_guard=selection_neff_soft_guard,
@@ -649,6 +660,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             wl_z_grid=wl_z_grid,
             wl_log_mu_grid=wl_log_mu_grid,
             wl_log_p_table=wl_log_p_table,
+            wl_selection=wl_selection,
             lss_marginalize=lss_marginalize,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
