@@ -298,6 +298,10 @@ def _make_mixture_likelihood(
             mark_names=mark_names,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
+            # Forward lss_marginalize so core's K>=2 NotImplementedError guard
+            # is reachable for direct make_likelihood callers too (the CLI has
+            # its own _fatal guard).
+            lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
             n_catalogs=n_catalogs,
             mixture_surveys=tuple(surveys[1:]),
             mixture_em_catalogs_pe=mixture_em_catalogs_pe,

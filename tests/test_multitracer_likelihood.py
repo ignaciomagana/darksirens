@@ -342,24 +342,10 @@ def test_guard_mark_model_not_supported():
         ll(coord)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "LIBRARY-BUG: darksirens/likelihood/factory.py::_make_mixture_likelihood "
-        "never forwards opts.lss_marginalize to darksiren_log_likelihood's "
-        "lss_marginalize kwarg, so it always defaults to False and the "
-        "n_catalogs>=2 static guard `if lss_marginalize: raise "
-        "NotImplementedError(...)` in darksirens/likelihood/core.py is dead "
-        "code when reached via make_likelihood/_make_mixture_likelihood -- "
-        "opts.lss_marginalize=True is silently ignored instead of raising. "
-        "The CLI (darksirens/cli/inference.py) separately _fatal()s on "
-        "--lss_marginalize for a multi-catalog mixture, so end users going "
-        "through the CLI are protected; only direct make_likelihood() callers "
-        "are exposed. Documents the INTENDED behaviour (raise) so this test "
-        "flips to a hard pass once the kwarg is forwarded."
-    ),
-)
 def test_guard_lss_marginalize_not_supported():
+    """_make_mixture_likelihood forwards opts.lss_marginalize, so core's
+    K>=2 NotImplementedError guard is reachable for direct make_likelihood
+    callers (the CLI has its own _fatal guard on top)."""
     _pop_lower, _pop_upper, _pop_labels, pop_fid, _sampled, fixed = _pop_bits()
     data = dict(_shared_physics())
     data["apix"] = APIX1
