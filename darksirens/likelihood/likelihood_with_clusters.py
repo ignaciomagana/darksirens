@@ -51,9 +51,13 @@ from darksirens.likelihood.wl_weight import (
     log_sample_weight_wl_or_standard,
     log_sample_weight_wl_lognormal_hermite,
 )
-from darksirens.likelihood.cluster_likelihood import cluster_log_likelihood_pair
+from darksirens.likelihood.cluster_likelihood import (
+    cluster_log_likelihood_pair,
+    lensed_single_log_likelihood_event,
+)
 from darksirens.likelihood.cluster_selection import (
     compute_cluster_selection_term,
+    compute_lensed_single_selection_term,
     combined_selection_log_correction,
 )
 from darksirens.likelihood.pair_kde import PairKDE, _slice_event_kde_inside_jit
@@ -63,9 +67,9 @@ from darksirens.lensing.grids import (
 from darksirens.lensing.wlmagnification import (
     WLParams, make_lognormal_log_p_wl, make_tabulated_log_p_wl,
 )
-from darksirens.lensing.slmarks import SISLensParams
+from darksirens.lensing.slmarks import SISLensParams, tau_2_SIS
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
-from darksirens.utils.cosmology import dL_grid_bounds, dL_in_z_grid
+from darksirens.utils.cosmology import dL_grid_bounds, dL_in_z_grid, z_of_dL
 
 
 # Cluster-mode codes (static_argnames dispatch)
@@ -96,6 +100,19 @@ WL_SELECTION_LOGNORMAL = 1
 PAIR_MARKS_NONE = 0
 PAIR_MARKS_TIME = 1
 
+# Lensed-singleton policy. OFF preserves the legacy singleton channel exactly
+# (evidence: unlensed/WL only; selection: unlensed injections only) — the
+# generator's default protocol that DROPS exactly-one-detected images. MIXTURE
+# models the realistic protocol where a strongly lensed source with exactly
+# one detected image is observed as an ordinary singleton: the singleton
+# evidence becomes (1 - tau_2(z)) x [WL branch] + tau_2(z)-weighted
+# single-image branch with the analytic partner-censoring factor (fcpdet),
+# and the singleton selection integral gains the exactly-one-detected
+# lensed-injection subset. Enables the Mould-style per-event-only ablation
+# via cluster_mode=OFF + MIXTURE.
+SINGLETON_LENSING_OFF = 0
+SINGLETON_LENSING_MIXTURE = 1
+
 
 @partial(
     jax.jit,
@@ -114,6 +131,8 @@ PAIR_MARKS_TIME = 1
         "pair_marks",
         "pair_batch_size",
         "y_nodes_pair",
+        "singleton_lensing",
+        "y_nodes_single",
         "selection_neff_soft_guard",
     ],
 )
@@ -157,6 +176,10 @@ def darksiren_log_likelihood_with_clusters(
     pair_time_sigma: jnp.ndarray | None = None,
     pair_batch_size: int = 0,
     y_nodes_pair: int = _Y_NODES_FOR_CLUSTER_PAIR_LIKE,
+    singleton_lensing: int = SINGLETON_LENSING_OFF,
+    lensed_singles=None,               # LensedSingleImageSet (MIXTURE only)
+    fc_pdet_params=None,               # FCPdetParams (MIXTURE only)
+    y_nodes_single: int = 32,
     selection_neff_soft_guard: bool = False,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
@@ -208,6 +231,13 @@ def darksiren_log_likelihood_with_clusters(
         # legacy singleton-selection path.  In particular wl_backend=disabled
         # reduces to standard selection, as required for backward compatibility.
         wl_selection_enabled = False
+    if singleton_lensing == SINGLETON_LENSING_MIXTURE and (
+        lensed_singles is None or fc_pdet_params is None
+    ):
+        raise ValueError(
+            "singleton_lensing=MIXTURE requires lensed_singles (the "
+            "exactly-one-detected lensed-injection subset) and fc_pdet_params."
+        )
     if wl_enabled and universe_model != "spectral_sirens_wl":
         raise ValueError(
             f"wl_backend={wl_backend} requires universe_model='spectral_sirens_wl', "
@@ -296,6 +326,22 @@ def darksiren_log_likelihood_with_clusters(
         gw_sel, em_catalog_sel, log_weight_sel, Ndraw, nEvents,
         sel_batch_size=sel_batch_size,
     )
+    if singleton_lensing == SINGLETON_LENSING_MIXTURE:
+        # Observed singletons are a mixture of unlensed sources and lensed
+        # sources with exactly one detected image; mu^(1) must count both
+        # or the singleton normalization is inconsistent with the evidence
+        # mixture below. Independent MC estimators: means and variances add.
+        log_mu_1L, _Neff_1L, log_sigma2_1L = compute_lensed_single_selection_term(
+            lensed_singles, cosmo, survey, pop_params, em_catalog_sel,
+            sis_params, log_p_pop, log_prior_z_selection,
+        )
+        log_mu_1 = jnp.logaddexp(log_mu_1, log_mu_1L)
+        log_sigma2_1 = jnp.logaddexp(log_sigma2_1, log_sigma2_1L)
+        Neff_1 = jnp.where(
+            jnp.isfinite(log_mu_1) & jnp.isfinite(log_sigma2_1),
+            jnp.exp(2.0 * log_mu_1 - log_sigma2_1),
+            0.0,
+        )
 
     # ──────────────────────────────────────────────────────────────────
     # Cluster selection integral. Inert when cluster_mode == OFF —
@@ -359,6 +405,9 @@ def darksiren_log_likelihood_with_clusters(
             )
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
+    if singleton_lensing == SINGLETON_LENSING_MIXTURE:
+        y_nodes_s, log_wy_s = make_y_grid(y_nodes_single)
+
     def _pe_event_fn(_, event_idx):
         s = event_idx * nsamp
         sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
@@ -374,7 +423,34 @@ def darksiren_log_likelihood_with_clusters(
             catalog_ev,
         )
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
-        return None, -jnp.log(nsamp) + logsumexp(ldw)
+        if singleton_lensing != SINGLETON_LENSING_MIXTURE:
+            return None, -jnp.log(nsamp) + logsumexp(ldw)
+
+        # Mixture: (1 - tau_2(z)) x unlensed/WL branch + lensed-single branch.
+        # The (1 - tau_2) factor is evaluated per PE sample at the mu = 1
+        # apparent redshift; inside the WL branch the mu-dependence of tau_2
+        # is a cross term of order tau x s^2 (< 1e-5 at defaults) — stated
+        # approximation, negligible against the tau ~ 1e-3 channel weights.
+        dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
+        dL_ev = sl(gw_pe.dL)
+        z_app = z_of_dL(jnp.clip(dL_ev, dL_lo, dL_hi), H0, Om0, w0, wa)
+        tau_app = jnp.clip(tau_2_SIS(z_app, sis_params), 0.0, 1.0 - 1e-12)
+        ldw_unlensed = jnp.where(
+            jnp.isfinite(ldw), ldw + jnp.log1p(-tau_app), -jnp.inf
+        )
+        log_unlensed = -jnp.log(nsamp) + logsumexp(ldw_unlensed)
+        event_dict = {
+            "m1det": sl(gw_pe.m1det), "q": sl(gw_pe.q),
+            "dL": dL_ev, "chieff": sl(gw_pe.chieff),
+            "prior_wt": sl(gw_pe.prior_wt),
+            "valid": sl(gw_pe.valid), "pixels": sl(gw_pe.pixels),
+        }
+        log_lensed = lensed_single_log_likelihood_event(
+            event_dict, cosmo, survey, pop_params, catalog_ev,
+            sis_params, fc_pdet_params, log_p_pop, log_prior_z,
+            y_nodes_s, log_wy_s,
+        )
+        return None, jnp.logaddexp(log_unlensed, log_lensed)
 
     if cluster_mode == CLUSTER_MODE_J2:
         # Sum singletons only
@@ -489,6 +565,7 @@ def darksiren_log_likelihood_with_clusters(
             "pair_eval_shape_n": jnp.asarray(nsamp),
             "pair_eval_shape_y": jnp.asarray(y_nodes_pair),
             "wl_selection": jnp.asarray(wl_selection),
+            "singleton_lensing": jnp.asarray(singleton_lensing),
         }
     return logL_total
 

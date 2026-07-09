@@ -84,10 +84,46 @@ from darksirens.lensing.observed_catalog import write_observed_pe_attrs
 from scripts.mock_lensing.build_candidate_pairs_from_observed import build_candidate_pairs, _log_sky_overlap
 
 POP_NAME = "powerlaw+peak"
-THETA_PARAM_ORDER = [
+_MIXTURE_PARAM_ORDER = [
     "v1", "alpha", "mmin", "mmax", "dmmin", "dmmax",
-    "muG", "sigG", "beta", "muchi", "sigchi", "gamma",
+    "muG", "sigG", "beta", "muchi", "sigchi",
 ]
+# Backward-compatible default (power-law rate); truth.json records the
+# rate-aware order via _theta_param_order().
+THETA_PARAM_ORDER = _MIXTURE_PARAM_ORDER + ["gamma"]
+
+
+def set_pop_model(pop_name: str) -> None:
+    """Select the generator population model (main() calls this from --pop_model).
+
+    The mixture part must stay powerlaw+peak (the analytic rejection proposal
+    is tailored to it); the '@md' decoration swaps the redshift evolution for
+    the Madau-Dickinson-like peaked rate with (gamma, kappa, z_peak).
+    """
+    from darksirens.gw.populations.registry import split_rate_decoration
+    base, _ = split_rate_decoration(pop_name)
+    if base != "powerlaw+peak":
+        raise ValueError(
+            f"generate_mock_lensing supports the powerlaw+peak mixture only "
+            f"(got {pop_name!r}); the rejection proposal is tailored to it."
+        )
+    global POP_NAME
+    POP_NAME = pop_name
+
+
+def _rate_evolution() -> str:
+    from darksirens.gw.populations.registry import split_rate_decoration
+    return split_rate_decoration(POP_NAME)[1]
+
+
+def _n_rate_params() -> int:
+    return 3 if _rate_evolution() == "md" else 1
+
+
+def _theta_param_order() -> list:
+    if _rate_evolution() == "md":
+        return _MIXTURE_PARAM_ORDER + ["gamma", "kappa", "z_peak"]
+    return _MIXTURE_PARAM_ORDER + ["gamma"]
 
 
 # ============================================================
@@ -96,15 +132,21 @@ THETA_PARAM_ORDER = [
 def make_truth(seed, H0, Om0, sis, wl):
     """Pin all ground-truth hyperparameters by importing the fiducials."""
     theta = np.asarray(get_fixed_population_params(POP_NAME))
-    return dict(
+    n_rate = _n_rate_params()
+    truth = dict(
         pop_name=POP_NAME,
-        theta=theta,                       # 12-vector
-        gamma=float(theta[-1]),
+        rate_evolution=_rate_evolution(),
+        theta=theta,                       # mixture params + rate params
+        gamma=float(theta[-n_rate]),
         H0=float(H0), Om0=float(Om0), zMax=float(zMax),
         tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
         wl_a=float(wl.a), wl_b=float(wl.b),
         seed=int(seed),
     )
+    if n_rate == 3:
+        truth["kappa"] = float(theta[-2])
+        truth["z_peak"] = float(theta[-1])
+    return truth
 
 
 # ============================================================
@@ -113,7 +155,7 @@ def make_truth(seed, H0, Om0, sis, wl):
 def _mixture_density(m1, q, chi, theta):
     """Imported mass*pairing*spin density (no z factor). Vectorised."""
     model = get_model(POP_NAME)
-    tm = jnp.asarray(theta[:-1])           # drop gamma
+    tm = jnp.asarray(theta[:-_n_rate_params()])   # drop rate params
     return np.asarray(model.mixture(jnp.asarray(m1), jnp.asarray(q),
                                     jnp.asarray(chi), tm))
 
@@ -123,8 +165,8 @@ def _analytic_proposal(n, theta, rng):
 
     Returns draws AND the proposal density g(m1,q,chi) for the IS correction.
     """
-    v1, alpha, mmin, mmax, dmmin, dmmax, muG, sigG, beta, muchi, sigchi, gamma = \
-        [float(x) for x in theta]
+    v1, alpha, mmin, mmax, dmmin, dmmax, muG, sigG, beta, muchi, sigchi = \
+        [float(x) for x in theta[:11]]     # mixture params; rate tail unused here
 
     # --- m1: PL + Gaussian mixture (broadened slightly past the tapers) ---
     lo, hi = mmin - dmmin, mmax + dmmax
@@ -203,11 +245,24 @@ def sample_masses_spins(n, theta, rng, *, batch=100_000, max_iter=200):
 # ============================================================
 def _build_z_cdf(theta, H0, Om0, nz=4000):
     """Tabulate the normalized source-frame redshift PDF and its CDF using the
-    IMPORTED dV_of_z so the cosmology matches the likelihood."""
-    gamma = float(theta[-1])
+    IMPORTED dV_of_z so the cosmology matches the likelihood.
+
+    Rate evolution follows the generator population model: power law
+    (1+z)^(gamma-1), or for '@md' the Madau-Dickinson-like psi(z)/(1+z) with
+    the SAME (unnormalised) form as PopulationModel.log_p_pop, so mock truth
+    and inference share one definition.
+    """
     zg = np.linspace(1e-4, float(zMax), nz)
     dV = np.asarray(dV_of_z(jnp.asarray(zg), H0, Om0))
-    pdf = dV * (1.0 + zg) ** (gamma - 1.0)
+    if _rate_evolution() == "md":
+        gamma, kappa, z_pk = [float(x) for x in theta[-3:]]
+        log_rate = (gamma - 1.0) * np.log1p(zg) - np.logaddexp(
+            0.0, (gamma + kappa) * (np.log1p(zg) - np.log1p(z_pk))
+        )
+        pdf = dV * np.exp(log_rate)
+    else:
+        gamma = float(theta[-1])
+        pdf = dV * (1.0 + zg) ** (gamma - 1.0)
     pdf = np.where(np.isfinite(pdf) & (pdf > 0), pdf, 0.0)
     cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pdf[1:] + pdf[:-1]) * np.diff(zg))])
     cdf /= cdf[-1]
@@ -471,6 +526,11 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
             n_draw_sources=int(N), p_tag_per_source=p_tag,
             snr_image0=snr_p, snr_image1=snr_m, delta_t_obs=true_dt, true_delta_t=true_dt,
             log_sky_overlap=log_sky_overlap, p_tag_true=p_tag, tagged_pair=tagged_pair,
+            snr_model_attrs={
+                "fc_rho_thr": model.rho_thr,
+                "fc_r0": model.r0,
+                "fc_mc_bar": model.mc_bar,
+            },
         )
     return dict(n_sources=N, n_both=int(both.sum()),
                 pair_tag_model=pair_tag_model, pair_tag_prob=float(pair_tag_prob),
@@ -664,6 +724,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              n_wrong_candidate_pairs=0, candidate_pair_log_prior_odds=0.0,
              wrong_candidate_log_prior_odds=-5.0, time_delay_sigma_sec=3600.0,
              write_unified_observed_catalog=True, candidate_time_marks=True,
+             include_lensed_singletons=False,
              build_candidate_pairs_from_observed=False,
              validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0),
              write_legacy_pair_pe=False):
@@ -688,12 +749,30 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
 
     sing_candidates = np.where(det_s)[0]
     pair_candidates = np.where(dbl["both_detected"])[0]
+    one_det = dbl["det_plus"] ^ dbl["det_minus"]
+    lensed_sing_candidates = np.where(one_det)[0]
     n_singletons_detected_total = int(sing_candidates.size)
     n_pairs_both_detected_total = int(pair_candidates.size)
+    n_lensed_singletons_detected_total = int(lensed_sing_candidates.size)
+
+    # Realistic observation protocol (--include-lensed-singletons true):
+    # a strongly lensed source with exactly one detected image cannot be
+    # distinguished from an ordinary singleton, so it joins the singleton
+    # pool BEFORE the shuffle/caps — preserving the natural lensed fraction
+    # among observed singletons. Default (false) keeps the legacy protocol
+    # that drops these sources entirely (consistent with the OFF likelihood).
+    sing_is_lensed = np.zeros(sing_candidates.size, dtype=bool)
+    if include_lensed_singletons:
+        sing_candidates = np.concatenate([sing_candidates, lensed_sing_candidates])
+        sing_is_lensed = np.concatenate(
+            [sing_is_lensed, np.ones(lensed_sing_candidates.size, dtype=bool)]
+        )
 
     # Randomize before any truncation so the kept catalog is an unbiased subset
     # of the detected mock rather than the first sources in simulation order.
-    rng.shuffle(sing_candidates)
+    perm = rng.permutation(sing_candidates.size)
+    sing_candidates = sing_candidates[perm]
+    sing_is_lensed = sing_is_lensed[perm]
     rng.shuffle(pair_candidates)
 
     caps_applied = {"singletons": False, "pairs": False}
@@ -715,12 +794,15 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                 stacklevel=2,
             )
         sing_idx = sing_candidates[:n_sing_keep]
+        sing_idx_is_lensed = sing_is_lensed[:n_sing_keep]
         pair_src_idx = pair_candidates[:n_pair_keep]
     elif conditioning == "poisson_counts":
         sing_idx = sing_candidates
+        sing_idx_is_lensed = sing_is_lensed
         pair_src_idx = pair_candidates
         if max_sing_keep is not None and sing_idx.size > max_sing_keep:
             sing_idx = sing_idx[:max_sing_keep]
+            sing_idx_is_lensed = sing_idx_is_lensed[:max_sing_keep]
             caps_applied["singletons"] = True
         if max_pair_keep is not None and pair_src_idx.size > max_pair_keep:
             pair_src_idx = pair_src_idx[:max_pair_keep]
@@ -729,10 +811,16 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         raise ValueError(f"unknown conditioning mode: {conditioning}")
 
     # ---- PE: singletons + pairs ----
+    def _observed_singleton_mu(i, is_lensed):
+        if is_lensed:
+            return (marks["mu_plus"][i] if dbl["det_plus"][i]
+                    else marks["mu_minus"][i])
+        return marks["mu"][i]
+
     events = [make_event_pe(src["m1"][i], src["q"][i], src["z"][i], src["chi"][i],
-                            marks["mu"][i], model, nsamp, rng, H0, Om0,
+                            _observed_singleton_mu(i, lens), model, nsamp, rng, H0, Om0,
                             ra_true=src["ra_true"][i], dec_true=src["dec_true"][i])
-              for i in sing_idx]
+              for i, lens in zip(sing_idx, sing_idx_is_lensed)]
     write_gw_pe_file(events, os.path.join(out_dir, "mock_gw_pe.h5"), nsamp, H0, Om0)
 
     pairs = []
@@ -799,10 +887,19 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     event_records = []
     schema_events = []
     base_gps_time = 1234567890.0
-    for event_index, source_index in enumerate(sing_idx):
+    for event_index, (source_index, is_lensed) in enumerate(
+        zip(sing_idx, sing_idx_is_lensed)
+    ):
+        image_index = (
+            (0 if dbl["det_plus"][source_index] else 1) if is_lensed else None
+        )
         event_records.append(dict(
-            event_index=int(event_index), kind="singleton", source_index=int(source_index),
-            pair_index=None, image_index=None, truth_partner_event_index=None,
+            event_index=int(event_index),
+            kind="lensed_single_image" if is_lensed else "singleton",
+            source_index=int(source_index),
+            pair_index=None,
+            image_index=image_index,
+            truth_partner_event_index=None,
         ))
         schema_events.append(dict(
             event_index=int(event_index),
@@ -810,8 +907,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
             kind="singleton_or_image",
             gps_time=float(base_gps_time + event_index),
             truth_source_id=int(source_index),
-            truth_image_index=None,
-            truth_is_lensed_image=False,
+            truth_image_index=image_index,
+            truth_is_lensed_image=bool(is_lensed),
             ra_mean=float(events[event_index]["ra_mean"]),
             dec_mean=float(events[event_index]["dec_mean"]),
             sky_sigma_rad=float(events[event_index]["sky_sigma_rad"]),
@@ -957,10 +1054,13 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     # ---- truth.json (informational) ----
     truth_out = {k: (v.tolist() if isinstance(v, np.ndarray) else v)
                  for k, v in truth.items()}
-    truth_out["theta_param_order"] = THETA_PARAM_ORDER
+    truth_out["theta_param_order"] = _theta_param_order()
     truth_out.update(
         n_singletons_detected_total=n_singletons_detected_total,
         n_pairs_both_detected_total=n_pairs_both_detected_total,
+        n_lensed_singletons_detected_total=n_lensed_singletons_detected_total,
+        include_lensed_singletons=bool(include_lensed_singletons),
+        n_lensed_singletons_kept=int(np.sum(sing_idx_is_lensed)),
         n_singletons_kept=S,
         n_pairs_kept=P,
         caps_applied=caps_applied,
@@ -1062,6 +1162,12 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--outdir", default="data/mock_lensing", help="output directory")
+    p.add_argument("--pop_model", "--pop-model", dest="pop_model",
+                   choices=("powerlaw+peak", "powerlaw+peak@md"),
+                   default="powerlaw+peak",
+                   help="generator population: powerlaw+peak with a power-law "
+                        "(1+z)^(gamma-1) rate, or '@md' for the Madau-Dickinson "
+                        "peaked rate (gamma, kappa, z_peak)")
     p.add_argument("--seed", type=int, default=2026)
     p.add_argument("--nsamp", type=int, default=1000, help="PE samples per object")
     p.add_argument("--n-universe", type=int, default=120_000, help="source draws")
@@ -1103,6 +1209,13 @@ def parse_args():
                    help="log prior odds assigned to shuffled wrong candidate edges")
     p.add_argument("--candidate-time-marks", choices=("true", "false"), default="true",
                    help="write edge-level time-delay marks for true candidate edges")
+    p.add_argument("--include-lensed-singletons", "--include_lensed_singletons",
+                   dest="include_lensed_singletons",
+                   choices=("true", "false"), default="false",
+                   help="true adds strongly lensed sources with exactly one detected "
+                        "image to the observed singleton pool (realistic protocol; "
+                        "requires the sl_mixture singleton channel at inference); "
+                        "false keeps the legacy protocol that drops them")
     p.add_argument("--build_candidate_pairs_from_observed", "--build-candidate-pairs-from-observed",
                    choices=("true", "false"), default="false",
                    help="overwrite candidate_pairs.json with a graph scored from observed metadata/posteriors")
@@ -1117,6 +1230,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    set_pop_model(args.pop_model)
     sis = make_sis_lens_params(A_tau=args.tau_A, n_tau=args.tau_n)
     wl = make_lognormal_wl_params(a=args.wl_a, b=args.wl_b)
     manifest = assemble(
@@ -1134,6 +1248,7 @@ def main():
         time_delay_sigma_sec=args.time_delay_sigma_sec,
         write_unified_observed_catalog=args.write_unified_observed_catalog.lower() == "true",
         candidate_time_marks=args.candidate_time_marks.lower() == "true",
+        include_lensed_singletons=args.include_lensed_singletons.lower() == "true",
         build_candidate_pairs_from_observed=args.build_candidate_pairs_from_observed.lower() == "true",
         validation_sample_log10_tau_A=args.validation_sample_log10_tau_A,
         validation_log10_tau_A_prior=args.validation_log10_tau_A_prior,

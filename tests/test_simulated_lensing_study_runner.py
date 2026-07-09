@@ -504,3 +504,100 @@ def test_h_no_time_ambiguous_case_spec_controls_time_marks():
     stress = _case_spec("H_ambiguous_components", cfg)
     assert stress["pair_marks"] == "time"
     assert stress["pair_tag_model"] == "snr_time_sky"
+
+
+def test_dry_run_joint_population_overrides_thread_through_plan(tmp_path):
+    """The joint-campaign config keys must reach every generated command:
+    pop_model + lensed singletons + tau_A into the generator; pop_model +
+    fix_population + singleton_lensing into inference; the off control
+    inherits the population treatment (it IS the lensing-ignored ablation)
+    but never the lensing channels; the singles-only ablation gets the
+    Mould-style cluster-off + sl_mixture configuration."""
+    _workdir, plan = _run_dry_plan(
+        tmp_path,
+        cases=["B_true_pairs_clean_graph"],
+        overrides=(
+            'mock.pop_model="powerlaw+peak@md"',
+            "mock.include_lensed_singletons=true",
+            "mock.tau_A=0.002",
+            "inference.fix_population=false",
+            'inference.singleton_lensing="sl_mixture"',
+            "inference.run_singles_only_ablation=true",
+            'inference.prior_overrides={"$z_{\\\\rm peak}$": [0.5, 3.5]}',
+        ),
+    )
+    case = plan["cases"]["B_true_pairs_clean_graph"]
+    gen = " ".join(case["generate"])
+    inf = " ".join(case["inference"])
+    off = " ".join(case["off"])
+    singles = " ".join(case["singles_only"])
+
+    assert "--pop_model powerlaw+peak@md" in gen
+    assert "--include-lensed-singletons true" in gen
+    assert "--tau-A 0.002" in gen
+
+    assert "--pop_model powerlaw+peak@md" in inf
+    assert "--fix_population false" in inf
+    assert "--singleton_lensing sl_mixture" in inf
+    assert "--prior_overrides" in inf
+    # sl_mixture forces a certain pair tag in the case spec (CLI guard
+    # rejects tag models with probability < 1 in this mode).
+    assert "--pair_tag_model constant" in inf
+    assert "--pair_tag_constant 1.0" in inf
+
+    assert "--pop_model powerlaw+peak@md" in off
+    assert "--fix_population false" in off
+    assert "--cluster_mode off" in off
+    assert "--singleton_lensing sl_mixture" not in off
+
+    assert "--cluster_mode off" in singles
+    assert "--singleton_lensing sl_mixture" in singles
+    assert "--fix_population false" in singles
+    assert "--lensed_injections_path" in singles
+
+
+def test_dry_run_defaults_unchanged_without_joint_overrides(tmp_path):
+    """Without the new keys the plan is the legacy configuration."""
+    _workdir, plan = _run_dry_plan(tmp_path, cases=["B_true_pairs_clean_graph"])
+    case = plan["cases"]["B_true_pairs_clean_graph"]
+    gen = " ".join(case["generate"])
+    inf = " ".join(case["inference"])
+    assert "--pop_model powerlaw+peak" in gen
+    assert "@md" not in gen
+    assert "--include-lensed-singletons false" in gen
+    assert "--tau-A" not in gen
+    assert "--fix_population true" in inf
+    assert "--singleton_lensing off" in inf
+    assert "singles_only" not in case
+
+
+def test_hyperparameter_recovery_row_mapping():
+    from scripts.mock_lensing.run_simulated_lensing_study import (
+        hyperparameter_recovery_rows,
+        hyperparameter_truth_values,
+    )
+    import numpy as np
+
+    truth = {
+        "theta": list(np.arange(14.0)),  # positional stand-in vector
+        "tau_A": 1e-3,
+        "tau_n": 3.0,
+    }
+    vals = hyperparameter_truth_values(truth, "powerlaw+peak@md")
+    # Rate labels map positionally onto the truth theta tail.
+    assert vals[r"$\gamma$"] == 11.0
+    assert vals[r"$\kappa$"] == 12.0
+    assert vals[r"$z_{\rm peak}$"] == 13.0
+    assert vals["log10_tau_A"] == -3.0
+
+    attrs = {
+        "hyperparameter_summaries": {
+            r"$z_{\rm peak}$": {"mean": 13.1, "median": 13.0, "q05": 12.0, "q95": 14.0},
+            "log10_tau_A": {"mean": -3.4, "median": -3.5, "q05": -3.8, "q95": -3.2},
+        }
+    }
+    rows = hyperparameter_recovery_rows("caseX", "j2", attrs, vals)
+    by_label = {r["label"]: r for r in rows}
+    assert by_label[r"$z_{\rm peak}$"]["truth_in_90ci"] is True
+    assert by_label["log10_tau_A"]["truth_in_90ci"] is False
+    assert by_label["log10_tau_A"]["truth"] == -3.0

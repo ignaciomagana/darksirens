@@ -160,7 +160,14 @@ from darksirens.likelihood.likelihood_with_clusters import (
     WL_SELECTION_LOGNORMAL,
     PAIR_MARKS_NONE,
     PAIR_MARKS_TIME,
+    SINGLETON_LENSING_OFF,
+    SINGLETON_LENSING_MIXTURE,
 )
+from darksirens.lensing.lensed_injections import (
+    load_lensed_single_image_set,
+    read_fc_pdet_attrs,
+)
+from darksirens.lensing.fcpdet import make_fc_pdet_params
 
 
 def _pair_tag_log_probs_from_options(opts, lensed):
@@ -574,6 +581,40 @@ def _gate_suspicious_time_marks(opts, candidate_pairs_raw) -> None:
     raise SystemExit(f"suspicious candidate time marks: {message}")
 
 
+def _load_singleton_lensing_inputs(opts):
+    """Load the lensed-singleton channel inputs (sl_mixture), or inert Nones.
+
+    Requires --lensed_injections_path in EITHER cluster mode (the Mould-style
+    per-event-only ablation is cluster_mode=off + sl_mixture). Finn-Chernoff
+    detection constants come from the injection file's fc_* attrs, overridable
+    via --fc_rho_thr/--fc_r0/--fc_mc_bar.
+    """
+    if getattr(opts, "singleton_lensing", "off") != "sl_mixture":
+        return dict(lensed_singles=None, fc_pdet_params=None)
+    if not opts.lensed_injections_path:
+        raise SystemExit(
+            "--singleton_lensing sl_mixture requires --lensed_injections_path"
+        )
+    lensed_singles = load_lensed_single_image_set(opts.lensed_injections_path)
+    if lensed_singles.n_kept == 0:
+        raise SystemExit(
+            "--singleton_lensing sl_mixture: the lensed-injection file has no "
+            "exactly-one-detected sources; regenerate the campaign or use off."
+        )
+    attrs = read_fc_pdet_attrs(opts.lensed_injections_path)
+    rho_thr = getattr(opts, "fc_rho_thr", None) or attrs.get("fc_rho_thr")
+    r0 = getattr(opts, "fc_r0", None) or attrs.get("fc_r0")
+    mc_bar = getattr(opts, "fc_mc_bar", None) or attrs.get("fc_mc_bar")
+    if rho_thr is None or r0 is None or mc_bar is None:
+        raise SystemExit(
+            "--singleton_lensing sl_mixture: missing Finn-Chernoff detection "
+            "constants. The injection file lacks fc_rho_thr/fc_r0/fc_mc_bar "
+            "attrs (older generator); pass --fc_rho_thr/--fc_r0/--fc_mc_bar."
+        )
+    fc = make_fc_pdet_params(rho_thr=rho_thr, mc_bar=mc_bar, r0=r0)
+    return dict(lensed_singles=lensed_singles, fc_pdet_params=fc)
+
+
 def load_inputs(opts):
     """Load singleton PE + selection, and (for j2) the lensed injections + pair
     PE + partition. Returns the assembled inputs for the cluster likelihood."""
@@ -643,6 +684,7 @@ def load_inputs(opts):
             pair_time_delta_t_obs=jnp.zeros((0,), dtype=jnp.float64),
             pair_time_sigma=jnp.zeros((0,), dtype=jnp.float64),
             observed_catalog=observed_catalog_meta,
+            **_load_singleton_lensing_inputs(opts),
         )
 
     # --- j2: lensed injections + pair PE/metadata + partition(s) ---
@@ -1107,6 +1149,7 @@ def load_inputs(opts):
         observed_catalog_heuristic=bool(
             heuristic_unified_observed_catalog and not explicit_unified_observed_catalog
         ),
+        **_load_singleton_lensing_inputs(opts),
     )
 
 
@@ -1252,6 +1295,7 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
     attrs["cluster_mode"] = opts.cluster_mode
     attrs["wl_backend"] = opts.wl_backend
     attrs["wl_selection"] = opts.wl_selection
+    attrs["singleton_lensing"] = getattr(opts, "singleton_lensing", "off")
     attrs["n_events"] = int(inp["nEvents"])
     attrs["reference_partition_n_singletons"] = int(inp["n_singletons"])
     attrs["reference_partition_n_pairs"] = int(inp["n_pairs"])
@@ -1364,6 +1408,25 @@ def build_cluster_likelihood(
     universe_model = opts.universe_model
 
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
+    singleton_lensing = (
+        SINGLETON_LENSING_MIXTURE
+        if getattr(opts, "singleton_lensing", "off") == "sl_mixture"
+        else SINGLETON_LENSING_OFF
+    )
+    if (
+        singleton_lensing == SINGLETON_LENSING_MIXTURE
+        and cluster_mode == CLUSTER_MODE_J2
+        and log_p_tag is not None
+        and np.asarray(log_p_tag).size > 0
+        and not bool(np.all(np.asarray(log_p_tag) == 0.0))
+    ):
+        raise SystemExit(
+            "--singleton_lensing sl_mixture requires a certain pair tag "
+            "(pair_tag probability 1): untagged both-detected pairs would leak "
+            "into the singleton stream, which this channel does not model. "
+            "Use --pair_tag_model constant --pair_tag_constant 1.0 (study "
+            "runner: selection.pair_tag_model/selection.pair_tag_constant)."
+        )
 
     def loglike(coord):
         # decode() returns a 5-tuple (cosmo, survey, pop, sky, mark) on current
@@ -1420,6 +1483,10 @@ def build_cluster_likelihood(
                 ),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
+                singleton_lensing=singleton_lensing,
+                lensed_singles=inp.get("lensed_singles"),
+                fc_pdet_params=inp.get("fc_pdet_params"),
+                y_nodes_single=int(getattr(opts, "y_nodes_single", 32)),
                 selection_neff_soft_guard=bool(
                     getattr(opts, "selection_neff_soft_guard", False)
                 ),
@@ -1466,16 +1533,22 @@ def build_cluster_likelihood(
                             )
                         )
                     component_terms.append(tuple(terms))
-                return (
+                total = (
                     baseline
                     + _factorized_logsumexp_jax(component_terms, count_delta)
                     - inp["log_z_prior"]
                 )
+                # Prior-corner draws (e.g. a population box that empties the
+                # selection integral) give -inf corrections, whose deltas are
+                # NaN (-inf minus -inf) and would abort dynesty at live-point
+                # init. -inf is the correct sampler-facing value there.
+                return jnp.where(jnp.isfinite(total), total, -jnp.inf)
             terms = [
                 part["log_prior_weight"] + _eval_partition(part)
                 for part in inp["marginal_partitions"]
             ]
-            return jax_logsumexp(jnp.stack(terms)) - inp["log_z_prior"]
+            total = jax_logsumexp(jnp.stack(terms)) - inp["log_z_prior"]
+            return jnp.where(jnp.isfinite(total), total, -jnp.inf)
 
         return _eval_partition(inp)
     return loglike
@@ -1503,6 +1576,11 @@ def build_cluster_diagnostics(
     )
     universe_model = opts.universe_model
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
+    singleton_lensing = (
+        SINGLETON_LENSING_MIXTURE
+        if getattr(opts, "singleton_lensing", "off") == "sl_mixture"
+        else SINGLETON_LENSING_OFF
+    )
 
     def diagnostics(coord):
         coord = jnp.asarray(coord)
@@ -1553,6 +1631,10 @@ def build_cluster_diagnostics(
                 ),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
+                singleton_lensing=singleton_lensing,
+                lensed_singles=inp.get("lensed_singles"),
+                fc_pdet_params=inp.get("fc_pdet_params"),
+                y_nodes_single=int(getattr(opts, "y_nodes_single", 32)),
                 selection_neff_soft_guard=bool(
                     getattr(opts, "selection_neff_soft_guard", False)
                 ),
@@ -1762,6 +1844,7 @@ def build_cluster_diagnostics(
             cluster_mode=opts.cluster_mode,
             wl_backend=opts.wl_backend,
             wl_selection=opts.wl_selection,
+            singleton_lensing=getattr(opts, "singleton_lensing", "off"),
             pair_batch_size=getattr(opts, "pair_batch_size", 0),
             y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
             pe_max_per_pair=opts.pe_max_per_pair,
@@ -1886,6 +1969,25 @@ def build_parser():
         default="false",
         help="true downgrades the placeholder/synthetic time-mark hard error to a warning",
     )
+    p.add_argument(
+        "--singleton_lensing",
+        choices=["off", "sl_mixture"],
+        default="off",
+        help="off keeps the legacy singleton channel (drop-single-image protocol). "
+             "sl_mixture models observed singletons as a mixture of unlensed sources "
+             "and strongly lensed sources with exactly one detected image "
+             "(evidence mixture + exactly-one-detected selection subset + analytic "
+             "Finn-Chernoff partner censoring); requires --lensed_injections_path "
+             "and a mock generated with --include-lensed-singletons true.",
+    )
+    p.add_argument("--y_nodes_single", type=int, default=32,
+                   help="Gauss-Legendre y nodes for the lensed-singleton evidence")
+    p.add_argument("--fc_rho_thr", type=float, default=None,
+                   help="override the injection file's fc_rho_thr attr")
+    p.add_argument("--fc_r0", type=float, default=None,
+                   help="override the injection file's fc_r0 attr")
+    p.add_argument("--fc_mc_bar", type=float, default=None,
+                   help="override the injection file's fc_mc_bar attr")
     # fixing
     p.add_argument("--fix_cosmology", default="true")
     p.add_argument("--fix_survey", default="true")

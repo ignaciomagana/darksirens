@@ -51,6 +51,8 @@ this module (for registration, parameter specs, or fiducials) never imports
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -82,7 +84,12 @@ _JITTER_REL = 1e-4
 _KD_N = {"m1": 48, "q": 24, "chi": 24}     # coarse per-axis sizes for k-D norm
 _KD_SPAN = {"m1": (2.0, 100.0), "q": (0.02, 1.0), "chi": (-1.0, 1.0)}
 _ZNORM_N = 24
-_ZNORM_HI = 3.0
+# The z-normalisation interpolation grid is FROZEN above _ZNORM_HI: GP model
+# evaluations at z > _ZNORM_HI silently reuse the norm at the grid edge
+# (library-review SEV-3). Parametric models are unaffected (analytic in z).
+# For high-redshift GP studies (e.g. lensed sources with true z > 3) raise
+# DARKSIRENS_GP_ZNORM_HI together with DARKSIRENS_ZMAX; default unchanged.
+_ZNORM_HI = float(os.environ.get("DARKSIRENS_GP_ZNORM_HI", 3.0))
 
 
 def _coarse_axis_grid(axis: str):

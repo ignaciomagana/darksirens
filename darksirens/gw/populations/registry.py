@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Mapping, Optional, Tuple
 
 import jax.numpy as jnp
@@ -203,6 +203,34 @@ LEGACY_NAME_ALIASES = {
     "gwtc5_fiducial_brokenpowerlaw+2peaks": "gwtc5_fiducial_bpl2peaks",
     "gwtc5_brokenpowerlaw+2peaks": "gwtc5_fiducial_bpl2peaks",
 }
+
+
+# ============================================================
+# Rate-evolution decorations: "<base>@md" selects the Madau-Dickinson-like
+# peaked merger rate (gamma, kappa, z_peak) instead of the (1+z)^(gamma-1)
+# power law. The decoration travels inside the pop_model STRING so every
+# existing static-argument path (CLI -> factory -> jitted core) carries it
+# with no signature changes.
+# ============================================================
+
+RATE_DECORATIONS = ("md",)
+
+MD_RATE_FIDUCIALS = (2.7, 2.9, 1.9)
+"""Fiducial (gamma, kappa, z_peak) for '@md' models — Madau-Dickinson-like
+star-formation history values (rise ~(1+z)^2.7, fall ~(1+z)^-2.9, peak z~1.9)."""
+
+
+def split_rate_decoration(pop_model: str) -> tuple[str, str]:
+    """Split ``'<base>@<rate>'`` into (base model name, rate_evolution)."""
+    if "@" not in pop_model:
+        return pop_model, "powerlaw"
+    base, _, rate = pop_model.partition("@")
+    if rate not in RATE_DECORATIONS or not base:
+        raise ValueError(
+            f"Unknown rate-evolution decoration in pop_model {pop_model!r}; "
+            f"supported: {[f'<base>@{r}' for r in RATE_DECORATIONS]}"
+        )
+    return base, rate
 
 
 def _resolve_legacy(pop_model: str) -> str:
@@ -386,15 +414,20 @@ def _latex_name(
     shared_spin: bool = True,
     shared_gamma: bool = True,
 ) -> str:
-    if pop_model in MODEL_NAME_LATEX:
-        base = MODEL_NAME_LATEX[pop_model]
+    try:
+        base_name, rate = split_rate_decoration(pop_model)
+    except ValueError:
+        return pop_model
+    rate_decor = r"\;[\mathrm{MD}(z)]" if rate == "md" else ""
+    if base_name in MODEL_NAME_LATEX:
+        base = MODEL_NAME_LATEX[base_name]
     else:
         try:
-            ir = parse_model_name(pop_model)
+            ir = parse_model_name(base_name)
         except ModelNameError:
             return pop_model
         base = derive_latex([s.token for s in ir.slots])
-    return base + _sharing_decor(
+    return base + rate_decor + _sharing_decor(
         shared_beta=shared_beta,
         shared_spin=shared_spin,
         shared_gamma=shared_gamma,
@@ -496,10 +529,19 @@ def get_model(
     except KeyError:
         pass
 
-    name = _resolve_legacy(pop_model)
-    resolved_key = (name, *flags)
+    base, rate = split_rate_decoration(pop_model)
+    name = _resolve_legacy(base)
+    resolved_name = name if rate == "powerlaw" else f"{name}@{rate}"
+    resolved_key = (resolved_name, *flags)
     if name in _CUSTOM_MODEL_FACTORIES:
         model = _CUSTOM_MODEL_FACTORIES[name]()
+        if rate != "powerlaw":
+            if not isinstance(model, PopulationModel):
+                raise NotImplementedError(
+                    f"Rate decoration '@{rate}' is only supported for grammar "
+                    f"mixture models; {name!r} is a bespoke registered model."
+                )
+            model = replace(model, rate_evolution=rate)
     else:
         model = _build_mixture_model(
             name,
@@ -507,6 +549,8 @@ def get_model(
             shared_spin=flags[1],
             shared_gamma=flags[2],
         )
+        if rate != "powerlaw":
+            model = replace(model, rate_evolution=rate)
 
     _MODEL_REGISTRY[cache_key] = model
     _MODEL_REGISTRY[resolved_key] = model
@@ -524,12 +568,51 @@ def get_fixed_population_params(
     Return the fiducial population parameter vector for --fix_population=True.
 
     Ordering matches PopulationModel.param_specs exactly:
-        v_weights -> mass params -> pairing params -> spin params -> gamma
+        v_weights -> mass params -> pairing params -> spin params -> rate params
+
+    Rate params are the shared gamma (power law) or, for '@md'-decorated
+    models, the (gamma, kappa, z_peak) triple with MD_RATE_FIDUCIALS.
 
     Weight parameters are stick-breaking inputs (v_i), not direct fractions;
     curated weights are stored as human-readable fractions and converted here
     via _w_to_v.
     """
+    base_name, rate = split_rate_decoration(pop_model)
+    if rate == "md":
+        if not shared_gamma:
+            raise ValueError(
+                "rate_evolution='md' requires shared_gamma=True."
+            )
+        if _resolve_legacy(base_name) in _CUSTOM_FIDUCIALS:
+            raise NotImplementedError(
+                f"Rate decoration '@{rate}' is only supported for grammar "
+                f"mixture models; {base_name!r} is a bespoke registered model."
+            )
+        base_vec = _fixed_population_params_base(
+            base_name,
+            shared_beta=shared_beta,
+            shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
+        )
+        # Replace the trailing shared gamma with the MD triple.
+        return jnp.concatenate(
+            [base_vec[:-1], jnp.asarray(MD_RATE_FIDUCIALS, dtype=float)]
+        )
+    return _fixed_population_params_base(
+        base_name,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    )
+
+
+def _fixed_population_params_base(
+    pop_model: str,
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> jnp.ndarray:
     name = _resolve_legacy(pop_model)
 
     if name in _CUSTOM_FIDUCIALS:

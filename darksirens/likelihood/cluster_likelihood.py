@@ -305,3 +305,118 @@ def cluster_log_likelihood_pair(
 
     # Symmetric sum (1/2 because each assignment is one term of the average)
     return logsumexp(jnp.stack([log_branch_a, log_branch_b])) - jnp.log(2.0)
+
+
+# ============================================================================
+# Lensed-singleton (exactly-one-detected image) evidence channel
+# ============================================================================
+
+def _lensed_single_branch_log_integrand(
+    m1det: jnp.ndarray, q: jnp.ndarray, dL_app: jnp.ndarray, chieff: jnp.ndarray,
+    prior_wt: jnp.ndarray, valid: jnp.ndarray, pix: jnp.ndarray,
+    mu_det: jnp.ndarray,        # magnification of the DETECTED image at y-nodes (N_y,)
+    mu_partner: jnp.ndarray,    # magnification of the undetected partner (N_y,)
+    log_py: jnp.ndarray, log_wy: jnp.ndarray,
+    cosmo: CosmoParams, survey: SurveyParams, pop_params: jnp.ndarray,
+    catalog: EMCatalog, sis_params: SISLensParams, fc_params,
+    log_p_pop_fn: Callable, log_prior_z_fn: Callable,
+) -> jnp.ndarray:
+    """Per-(PE-sample, y-node) log-integrand for ONE image-identity branch of
+    the lensed-singleton channel: the observed event is a strongly lensed
+    image with magnification mu_det(y) whose partner image (mu_partner(y))
+    was NOT detected.
+
+    Identical structure to _pair_branch_log_integrand with the partner's
+    PE-KDE term replaced by the censoring factor log[1 - P_det(partner)]
+    (Finn-Chernoff analytic model — exact for the mock generator's rendering;
+    swap fcpdet for an emulator for real data).
+    """
+    from darksirens.lensing.fcpdet import log_one_minus_pdet_fc
+
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+
+    mu_d = mu_det[None, :]                            # (1, N_y)
+    mu_p = mu_partner[None, :]                        # (1, N_y)
+    dL_app_b = dL_app[:, None]                        # (N_pe, 1)
+    q_b = q[:, None]
+    chieff_b = chieff[:, None]
+
+    dL_true = dL_app_b * jnp.sqrt(mu_d)               # (N_pe, N_y)
+    in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)
+    z_s = z_of_dL(dL_true, H0, Om0, w0, wa)
+    z_s_safe = jnp.where(in_grid, z_s, 0.5)
+    m1src = m1det[:, None] / (1.0 + z_s_safe)
+
+    log_pp = log_p_pop_fn(m1src, q_b, z_s_safe, chieff_b, pop_params)
+    log_pz = log_prior_z_fn(
+        z_s_safe.reshape(-1),
+        jnp.broadcast_to(pix[:, None], m1src.shape).reshape(-1).astype(pix.dtype),
+        catalog,
+    ).reshape(z_s_safe.shape)
+    log_tau = jnp.log(tau_2_SIS(z_s_safe, sis_params))
+
+    # Partner censoring: apparent distance the partner WOULD have shown.
+    dL_partner = dL_of_z(z_s_safe, H0, Om0, w0, wa) / jnp.sqrt(mu_p)
+    log_miss = log_one_minus_pdet_fc(m1src, q_b, z_s_safe, dL_partner, fc_params)
+
+    log_J = _log_jac_app_to_src(z_s_safe, dL_true, mu_d, H0, Om0, w0, wa)
+    log_quad = log_py[None, :] + log_wy[None, :]
+
+    valid_b = (valid & (prior_wt > 0.0))[:, None]
+    log_pe_wt = jnp.where(valid_b, -jnp.log(prior_wt)[:, None], -jnp.inf)
+
+    log_integrand = (
+        log_pp + log_pz + log_tau + log_miss + log_J + log_pe_wt + log_quad
+    )
+    return jnp.where(
+        in_grid & valid_b & jnp.isfinite(log_integrand),
+        log_integrand,
+        -jnp.inf,
+    )
+
+
+def lensed_single_log_likelihood_event(
+    event: dict,           # {'m1det', 'q', 'dL', 'chieff', 'prior_wt', 'valid', 'pixels'}
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    pop_params: jnp.ndarray,
+    catalog: EMCatalog,
+    sis_params: SISLensParams,
+    fc_params,
+    log_p_pop_fn: Callable,
+    log_prior_z_fn: Callable,
+    y_nodes: jnp.ndarray,
+    log_wy: jnp.ndarray,
+) -> jnp.ndarray:
+    """log of the lensed-singleton evidence for one observed event:
+
+        dN_1L(d) = ∫ dθ dy  τ₂(z) p(y) Σ_{j∈{+,-}} p(d | θ, μ_j(y)) ·
+                   [1 - P_det(partner image)] · (population × volume terms)
+
+    The two image identities are DISTINCT outcomes of the same source, so
+    the branches are SUMMED (unlike the pair likelihood, which averages the
+    two assignments of the same observation). Returns -inf if both vanish.
+    """
+    mu_plus, mu_minus = mu_plus_minus_from_y(y_nodes)
+    log_py = log_p_y_SIS(y_nodes)
+    N = event["m1det"].shape[0]
+
+    common = dict(
+        m1det=event["m1det"], q=event["q"], dL_app=event["dL"],
+        chieff=event["chieff"], prior_wt=event["prior_wt"],
+        valid=event["valid"], pix=event["pixels"],
+        log_py=log_py, log_wy=log_wy,
+        cosmo=cosmo, survey=survey, pop_params=pop_params, catalog=catalog,
+        sis_params=sis_params, fc_params=fc_params,
+        log_p_pop_fn=log_p_pop_fn, log_prior_z_fn=log_prior_z_fn,
+    )
+    # Branch: detected image is mu_+ (partner mu_-), and vice versa.
+    log_int_plus = _lensed_single_branch_log_integrand(
+        mu_det=mu_plus, mu_partner=mu_minus, **common,
+    )
+    log_int_minus = _lensed_single_branch_log_integrand(
+        mu_det=mu_minus, mu_partner=mu_plus, **common,
+    )
+    log_branch_plus = logsumexp(log_int_plus) - jnp.log(N)
+    log_branch_minus = logsumexp(log_int_minus) - jnp.log(N)
+    return jnp.logaddexp(log_branch_plus, log_branch_minus)
