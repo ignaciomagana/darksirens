@@ -211,7 +211,7 @@ def _build_z_cdf(theta, H0, Om0, nz=4000):
     pdf = np.where(np.isfinite(pdf) & (pdf > 0), pdf, 0.0)
     cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pdf[1:] + pdf[:-1]) * np.diff(zg))])
     cdf /= cdf[-1]
-    return zg, pdf / np.trapezoid(pdf, zg), cdf
+    return zg, pdf / np.trapz(pdf, zg), cdf
 
 
 def sample_redshift(n, theta, rng, H0, Om0):
@@ -922,6 +922,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     }
     candidate_pairs["format_version"] = "candidate-pairs-1.0"
     candidate_pairs["pairs"] = candidate_pairs["candidate_pairs"]
+    # Flat constant log_prior_odds above: no mark values are folded in.
+    candidate_pairs["folded_mark_keys"] = []
     with open(os.path.join(out_dir, "candidate_pairs.json"), "w") as f:
         json.dump(candidate_pairs, f, indent=2)
     if build_candidate_pairs_from_observed:

@@ -21,6 +21,7 @@ from darksirens.lensing.partitions import (
     exact_partition_components,
     exact_partitions_componentwise,
     parse_edge_mark_keys,
+    parse_folded_mark_keys,
     validate_candidate_pairs,
 )
 from darksirens.likelihood.pair_kde import validate_pair_prior_wt
@@ -295,6 +296,15 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
                     errors.append(
                         f"candidate pair ({pair.i},{pair.j}) missing requested edge prior mark {key!r}"
                     )
+        folded_keys = set(parse_folded_mark_keys(data))
+        double_counted = sorted(k for k in prior_keys if k in folded_keys)
+        if double_counted:
+            errors.append(
+                f"edge_mark_prior_keys {double_counted} are already folded into "
+                f"log_prior_odds by the candidate-pair builder "
+                f"(folded_mark_keys={sorted(folded_keys)}); applying them again "
+                "would double-count the pairing prior"
+            )
         like_keys = set(parse_edge_mark_keys(_get(opts, "edge_mark_likelihood_keys")))
         if _get(opts, "pair_marks", "none") == "time":
             like_keys.add("time")

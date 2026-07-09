@@ -241,11 +241,18 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
                 edge.get("marks", {}).pop("delta_t_obs", None)
                 edge.get("marks", {}).pop("sigma_delta_t", None)
 
+    # Mark keys whose values are baked into log_prior_odds above; inference
+    # refuses to re-apply these via --edge_mark_prior_keys (double count).
+    folded_mark_keys = ["log_mass_distance_score"]
+    if include_sky_marks and float(sky_overlap_weight) != 0.0:
+        folded_mark_keys.append("log_sky_overlap")
+
     return {
         "format_version": FORMAT_VERSION,
         "n_events": n_events,
         "pairs": kept,
         "candidate_pairs": kept,  # Backward-compatible alias for existing inference releases.
+        "folded_mark_keys": folded_mark_keys,
         "builder": {
             "name": "build_candidate_pairs_from_observed",
             "gw_path": str(gw_path),

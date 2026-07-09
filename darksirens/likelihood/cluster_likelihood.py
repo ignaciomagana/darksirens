@@ -116,7 +116,11 @@ def _log_jac_app_to_src(z_s: jnp.ndarray,
     log_J : same shape as inputs
         Signed log-Jacobian; ADD to log-integrand.
     """
-    return -jnp.log1p(z_s) - jnp.log(ddL_of_z(z_s, dL_true, H0, Om0, w0, wa)) + 0.5 * jnp.log(mu)
+    # Clamp-then-mask: exotic CPL corners can make dL(z) non-monotonic
+    # (ddL <= 0); an unclamped log would NaN-poison the reverse pass even
+    # for cells the caller later masks out.
+    ddL = jnp.clip(ddL_of_z(z_s, dL_true, H0, Om0, w0, wa), 1e-30, None)
+    return -jnp.log1p(z_s) - jnp.log(ddL) + 0.5 * jnp.log(mu)
 
 
 def _pair_branch_log_integrand(

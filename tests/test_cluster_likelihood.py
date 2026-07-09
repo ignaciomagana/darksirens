@@ -683,3 +683,116 @@ def test_pair_batch_size_one_matches_unbatched():
     unbatched = jnp.sum(pair_values)
     batched, _ = _batched_pair_sum_for_test(pair_values, n_pairs=3, pair_batch_size=1)
     np.testing.assert_allclose(np.asarray(batched), np.asarray(unbatched), rtol=1e-12, atol=1e-12)
+
+
+def test_pair_kde_boundary_reflection_doubles_at_q_one():
+    """The q<=1 reflection estimator returns exactly log(2) more than the
+    unreflected kernel sum when queried at the boundary q=1 (each sample's
+    mirror kernel equals its direct kernel there). This is the fix for the
+    ~2x density deficit of a plain Gaussian KDE at the equal-mass boundary."""
+    from scipy.special import logsumexp as sp_lse
+
+    rng = np.random.default_rng(7)
+    N = 300
+    m1det = rng.normal(35.0, 3.0, N)
+    q = 1.0 - np.abs(rng.normal(0.0, 0.03, N))  # pile-up near q = 1
+    dL = rng.normal(1000.0, 100.0, N)
+    chieff = rng.normal(0.0, 0.1, N)
+    kde = make_pair_kde(m1det, q, dL, chieff, np.ones(N))
+
+    query = np.array([[35.0, 1.0, 1000.0, 0.0]])
+    samples = np.stack([m1det, q, dL, chieff], axis=-1)
+    h = np.asarray(np.exp(kde.log_h))
+    log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum()
+    diffs_sq = np.sum(((query[0] - samples) / h) ** 2, axis=-1)
+    log_unreflected = log_norm + sp_lse(-0.5 * diffs_sq) - np.log(N)
+
+    log_ours = np.asarray(log_eval_pair_kde(kde, jnp.asarray(query)))[0]
+    np.testing.assert_allclose(log_ours, log_unreflected + np.log(2.0), rtol=1e-12)
+
+
+def test_pair_kde_reflection_matches_mirrored_oracle_near_boundary():
+    """Full oracle check: the estimator must equal a numpy KDE evaluated with
+    the sample set augmented by its q-mirror about 1 (same weights, same
+    bandwidth, kernel mass restricted to the direct+mirror pair)."""
+    from scipy.special import logsumexp as sp_lse
+
+    rng = np.random.default_rng(11)
+    N = 250
+    m1det = rng.normal(35.0, 3.0, N)
+    q = np.clip(rng.uniform(0.85, 1.0, N), None, 1.0)
+    dL = rng.normal(1000.0, 100.0, N)
+    chieff = rng.normal(0.0, 0.1, N)
+    p_prop = rng.uniform(0.5, 2.0, N)
+    kde = make_pair_kde(m1det, q, dL, chieff, p_prop)
+
+    queries = np.array([
+        [35.0, 0.999, 1000.0, 0.0],
+        [34.0, 0.97, 950.0, 0.05],
+        [36.0, 0.90, 1100.0, -0.05],
+    ])
+    samples = np.stack([m1det, q, dL, chieff], axis=-1)
+    mirrored = samples.copy()
+    mirrored[:, 1] = 2.0 - mirrored[:, 1]
+    h = np.asarray(np.exp(kde.log_h))
+    log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum()
+    log_w = -np.log(p_prop)
+
+    log_ref = np.empty(queries.shape[0])
+    for k, q_pt in enumerate(queries):
+        direct = -0.5 * np.sum(((q_pt - samples) / h) ** 2, axis=-1)
+        mirror = -0.5 * np.sum(((q_pt - mirrored) / h) ** 2, axis=-1)
+        log_kernel = np.logaddexp(direct, mirror)
+        log_ref[k] = log_norm + sp_lse(log_kernel + log_w) - np.log(N)
+
+    log_ours = np.asarray(log_eval_pair_kde(kde, jnp.asarray(queries)))
+    np.testing.assert_allclose(log_ours, log_ref, rtol=1e-12, atol=1e-12)
+
+
+class TestJacobianClamp:
+    def test_log_jac_finite_when_ddL_nonpositive(self, monkeypatch):
+        """Exotic CPL corners can make dL(z) non-monotonic (ddL <= 0); the
+        Jacobian must clamp before the log so the value stays finite instead
+        of NaN-poisoning cells the caller later masks out."""
+        import darksirens.likelihood.cluster_likelihood as cl
+
+        def bad_ddL(z, dL, H0, Om0, w0=-1.0, wa=0.0):
+            return jnp.zeros_like(jnp.asarray(z)) - 1.0
+
+        monkeypatch.setattr(cl, "ddL_of_z", bad_ddL)
+        out = _log_jac_app_to_src(
+            jnp.asarray(0.5), jnp.asarray(1000.0), jnp.asarray(2.0),
+            H0Planck, Om0Planck,
+        )
+        assert np.isfinite(np.asarray(out))
+
+    def test_log_jac_gradient_finite_through_clamp(self, monkeypatch):
+        """Reverse-mode gradients through the clamped branch must be finite
+        (the pre-fix log(negative) produced NaN gradients even for masked
+        cells)."""
+        import darksirens.likelihood.cluster_likelihood as cl
+
+        def bad_ddL(z, dL, H0, Om0, w0=-1.0, wa=0.0):
+            return z - 10.0  # negative at any physical z
+
+        monkeypatch.setattr(cl, "ddL_of_z", bad_ddL)
+        grad = jax.grad(
+            lambda z: _log_jac_app_to_src(
+                z, jnp.asarray(1000.0), jnp.asarray(2.0), H0Planck, Om0Planck
+            )
+        )(jnp.asarray(0.5))
+        assert np.isfinite(np.asarray(grad))
+
+    def test_log_jac_unchanged_for_physical_cosmology(self):
+        """The clamp is inert on the physical branch."""
+        from darksirens.utils.cosmology import ddL_of_z
+
+        z = jnp.array([0.3, 0.7, 1.5])
+        dL_true = jnp.array([1500.0, 4000.0, 10000.0])
+        mu = jnp.array([2.0, 5.0, 0.5])
+        actual = _log_jac_app_to_src(z, dL_true, mu, H0Planck, Om0Planck)
+        expected = (
+            -jnp.log1p(z) - jnp.log(ddL_of_z(z, dL_true, H0Planck, Om0Planck))
+            + 0.5 * jnp.log(mu)
+        )
+        np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-12)

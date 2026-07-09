@@ -306,11 +306,31 @@ def log_eval_pair_kde(
     of π_PE(θ)/p_prop(θ), giving the wrong target. The standard
     darksirens singleton sample-weight formula confirms this — it has
     -log(prior_wt) per sample, NOT -log(prior_wt) + log(Σ 1/prior_wt).
+
+    Boundary correction at q = 1
+    ----------------------------
+    q has a hard physical boundary at 1 where equal-mass posteriors pile
+    up. A plain Gaussian kernel leaks half its mass past the boundary
+    there, underestimating the density by up to 2× as q → 1. We use the
+    standard reflection estimator: each sample also contributes a mirror
+    kernel about q = 1 (at 2 - q_t), which restores unit kernel mass on
+    q ≤ 1 and is exponentially negligible away from the boundary. No
+    change to log_norm is needed.
     """
     from jax.scipy.special import logsumexp
 
+    q_axis = PAIR_KDE_COORDS.index("q")
     diff = (theta_app[..., None, :] - kde.samples[None, :, :]) / jnp.exp(kde.log_h)
-    log_kernel = -0.5 * jnp.sum(diff * diff, axis=-1)             # (..., N)
+    sq = diff * diff                                              # (..., N, 4)
+    sq_rest = jnp.sum(sq, axis=-1) - sq[..., q_axis]              # (..., N)
+    # Mirror image of each sample's q about the boundary: 2 - q_t.
+    diff_q_ref = (
+        theta_app[..., q_axis][..., None] + kde.samples[None, :, q_axis] - 2.0
+    ) / jnp.exp(kde.log_h[q_axis])
+    log_kernel_q = jnp.logaddexp(
+        -0.5 * sq[..., q_axis], -0.5 * diff_q_ref * diff_q_ref
+    )
+    log_kernel = -0.5 * sq_rest + log_kernel_q                    # (..., N)
 
     log_w = kde.log_weights                                       # (N,)
     log_sum = logsumexp(log_kernel + log_w, axis=-1)              # (...,)
