@@ -43,6 +43,7 @@ configure_jax_runtime()
 import sys
 import json
 import datetime
+import math
 import warnings
 
 import jax
@@ -205,6 +206,13 @@ def resolve_survey_z_depth(cli_override, file_attr, zmax=None):
     if z is None:
         return None
     z = float(z)
+    if not math.isfinite(z) or z <= 0.0:
+        # NaN slips through every comparison guard (NaN > zmax is False) and
+        # would silently zero the whole missing-galaxy budget downstream
+        # (depth_mask = zgrid <= NaN is all-False); 0/negative likewise.
+        raise ValueError(
+            f"survey z_depth must be a finite positive redshift; got {z!r}."
+        )
     if z > zmax:
         msg = (
             f"z_depth={z:g} exceeds the redshift grid zMax={zmax:g}; clamping "
@@ -307,6 +315,10 @@ def run_completion_validation(
         w0=float(fixed_parameter_values.get("w0", -1.0)),
         wa=float(fixed_parameter_values.get("wa", 0.0)),
     )
+    # NOTE: this dry-run deliberately leaves z_depth at its default (None):
+    # completion_clip_diagnostics reports clip fractions of the completeness
+    # ratio only, which are z_depth-independent, so threading the resolved
+    # depth here would change nothing. Do not "fix" this without a reason.
     survey = SurveyParams(
         n0=10.0 ** survey_values["log10n0"],
         z50=survey_values["z50"],

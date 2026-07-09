@@ -261,3 +261,18 @@ def test_survey_params_z_depth_defaults_to_none_when_unresolved():
     coord = jnp.zeros((0,))
     _cosmo_out, survey, *_rest = decoder.decode(coord)
     assert survey.z_depth is None
+
+
+def test_z_depth_rejects_nonfinite_and_nonpositive():
+    """NaN passes every comparison-based guard (NaN > zmax is False) and would
+    silently zero the whole missing-galaxy budget (depth_mask all-False);
+    zero/negative likewise degenerate to 'fully complete'. The resolver must
+    reject them loudly instead (adversarial-review SEV-2 for PR #204)."""
+    from darksirens.cli.inference import resolve_survey_z_depth
+
+    for bad in (float("nan"), float("inf"), float("-inf"), 0.0, -0.5):
+        with pytest.raises(ValueError, match="finite positive redshift"):
+            resolve_survey_z_depth(bad, None)
+    # File-attr path is guarded identically.
+    with pytest.raises(ValueError, match="finite positive redshift"):
+        resolve_survey_z_depth(None, float("nan"))
