@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 from darksirens.gw.populations import pop_model_prior_parser
 from darksirens.sky import sky_model_prior_parser
@@ -36,6 +38,21 @@ _ACTIVE_SURVEY_PARAMS = {
     # comparisons against spectral_sirens (library review, CLI finding 1).
     "spectral_sirens_wl": (),
 }
+
+
+#: Matches the per-catalog ``_c{k}`` suffix appended to survey labels for the
+#: K-catalog mixture (e.g. ``log10n0_c2``).  ``k`` is any positive integer.
+_SURVEY_CATALOG_SUFFIX = re.compile(r"_c\d+$")
+
+
+def _survey_base_name(label: str) -> str:
+    """Strip a trailing ``_c{k}`` catalog suffix from a survey label.
+
+    Used so per-catalog suffixed survey labels (``log10n0_c2`` etc.) gate through
+    ``_ACTIVE_SURVEY_PARAMS`` exactly like their base labels.  For a base label
+    (no suffix) this is the identity, so the single-catalog path is unchanged.
+    """
+    return _SURVEY_CATALOG_SUFFIX.sub("", label)
 
 
 def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
@@ -137,6 +154,7 @@ def build_parameter_space(
     sky_model="isotropic",
     mark_model="none",
     mark_names=(),
+    n_catalogs: int = 1,
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
@@ -148,6 +166,13 @@ def build_parameter_space(
     fix_de
         When true, remove only the dark-energy cosmology labels (``w0`` and
         ``wa``) from sampling. ``fix_cosmology`` supersedes this flag.
+    n_catalogs
+        Number of EM catalogs in the redshift-prior mixture.  ``1`` (default)
+        is the single-catalog path and is left bit-for-bit unchanged.  For
+        ``K >= 2`` the space gains per-catalog suffixed survey blocks
+        (``log10n0_c2`` ... for catalogs ``2..K``) and the mixture-weight sticks
+        ``fcat_2 .. fcat_K`` (Beta(1, K-m+1) priors), appended before the
+        sky/mark blocks.  The 14-element return tuple arity is unchanged.
     """
     if prior_overrides is None:
         prior_overrides = {}
@@ -177,6 +202,10 @@ def build_parameter_space(
     survey_labels = ["log10n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde"]
     survey_lower = [-4.0, 0.05, 0.02, -3.0, 0.0, 0.0, 0.0]
     survey_upper = [-1.0, 4.5, 1.5, 3.0, 3.0, 1.0, 0.05]
+    # Preserve the default survey bounds for the per-catalog suffixed blocks
+    # (K >= 2); these copies are inert on the single-catalog path.
+    _survey_lower_defaults = list(survey_lower)
+    _survey_upper_defaults = list(survey_upper)
 
     # --- Sky (angular source distribution) ---
     # Appended after the survey block; ``isotropic`` contributes no parameters.
@@ -196,6 +225,12 @@ def build_parameter_space(
         set(cosmo_labels) | set(pop_labels) | set(survey_labels)
         | set(sky_labels) | set(mark_labels)
     )
+    # Multitracer: the per-catalog suffixed survey labels and the mixture-weight
+    # sticks are also valid override / fixed-value keys for K >= 2.  No-op for K=1.
+    if n_catalogs >= 2:
+        for k in range(2, n_catalogs + 1):
+            known_labels |= {f"{lbl}_c{k}" for lbl in survey_labels}
+        known_labels |= {f"fcat_{m}" for m in range(2, n_catalogs + 1)}
     unknown = [k for k in prior_overrides.keys() if k not in known_labels]
     if unknown:
         raise KeyError(
@@ -278,7 +313,7 @@ def build_parameter_space(
             for label, lo, hi in zip(
                 sampled_survey_labels, sampled_survey_lower, sampled_survey_upper
             )
-            if label in active_survey
+            if _survey_base_name(label) in active_survey
         ]
         if kept:
             sampled_survey_labels, sampled_survey_lower, sampled_survey_upper = map(
@@ -315,6 +350,61 @@ def build_parameter_space(
     else:
         n_survey_eff = 0
 
+    # Multitracer: per-catalog suffixed survey blocks (catalogs 2..K) followed by
+    # the mixture-weight sticks fcat_2..fcat_K, all appended AFTER the base survey
+    # block and BEFORE the sky/mark blocks so the single-catalog indices above are
+    # untouched.  The whole block is skipped for K = 1 (bit-identical path).
+    if n_catalogs >= 2:
+        for k in range(2, n_catalogs + 1):
+            suffixed_labels = [f"{lbl}_c{k}" for lbl in survey_labels]
+            c_lower, c_upper = apply_block_prior_overrides(
+                f"survey_c{k}",
+                suffixed_labels,
+                _survey_lower_defaults,
+                _survey_upper_defaults,
+                prior_overrides,
+            )
+            (
+                c_sampled_labels,
+                c_sampled_lower,
+                c_sampled_upper,
+            ) = filter_fixed_parameters(
+                suffixed_labels, c_lower, c_upper, fixed_parameter_values
+            )
+            # Suffix-aware active-survey gating: e.g. dark_sirens keeps only the
+            # {log10n0, delta, b_miss, sigma_kde} members of each catalog block.
+            if active_survey is not None:
+                kept = [
+                    (label, lo, hi)
+                    for label, lo, hi in zip(
+                        c_sampled_labels, c_sampled_lower, c_sampled_upper
+                    )
+                    if _survey_base_name(label) in active_survey
+                ]
+                if kept:
+                    c_sampled_labels, c_sampled_lower, c_sampled_upper = map(
+                        list, zip(*kept)
+                    )
+                else:
+                    c_sampled_labels, c_sampled_lower, c_sampled_upper = [], [], []
+            if not fix_survey:
+                labels += c_sampled_labels
+                lower += c_sampled_lower
+                upper += c_sampled_upper
+
+        # Mixture-weight sticks fcat_2..fcat_K (Uniform[0,1] bounds; the Beta(1,b)
+        # prior family is carried in prior_kinds below).  Sampled regardless of
+        # fix_survey; individually fixable via fixed_parameter_values.
+        fcat_labels = [f"fcat_{m}" for m in range(2, n_catalogs + 1)]
+        fcat_lower = [0.0] * len(fcat_labels)
+        fcat_upper = [1.0] * len(fcat_labels)
+        fcat_labels, fcat_lower, fcat_upper = filter_fixed_parameters(
+            fcat_labels, fcat_lower, fcat_upper, fixed_parameter_values
+        )
+        labels += fcat_labels
+        lower += fcat_lower
+        upper += fcat_upper
+
     # Sky block: appended last so existing cosmo/pop/survey indices are stable.
     # The chosen ``sky_model`` decides the parameters (none for ``isotropic``);
     # individually-fixed sky labels were already removed above.
@@ -342,6 +432,11 @@ def build_parameter_space(
         kind_map[lbl] = knd
     for lbl, knd in zip(mark_labels, mark_kinds):
         kind_map[lbl] = knd
+    # Multitracer: mixture-weight sticks carry a Beta(1, K-m+1) prior; the
+    # suffixed survey labels fall through to the default uniform kind via .get().
+    if n_catalogs >= 2:
+        for m in range(2, n_catalogs + 1):
+            kind_map[f"fcat_{m}"] = ("beta", 1.0, float(n_catalogs - m + 1))
     prior_kinds = [kind_map.get(lbl, ("uniform", None, None)) for lbl in labels]
 
     return (
@@ -366,7 +461,8 @@ def make_prior_transform(lower, upper, prior_kinds=None):
 
     ``prior_kinds`` is an optional list aligned to ``lower``/``upper`` of
     ``(kind, loc, scale)`` triples (kind in ``{"uniform", "normal",
-    "lognormal"}``).  ``None`` reproduces the legacy all-uniform affine map.
+    "lognormal", "beta"}``; ``"beta"`` is Beta(1, scale), the mixture-weight
+    stick).  ``None`` reproduces the legacy all-uniform affine map.
     Used by the nested samplers (dynesty/tinyns); numpyro builds its own prior
     via ``run_sampler``.  ``low``/``high`` always act as truncation bounds, so
     every kind maps the cube to ``[low, high]`` and the measure matches the
@@ -393,6 +489,10 @@ def make_prior_transform(lower, upper, prior_kinds=None):
     lo_j, hi_j = jnp.asarray(lower), jnp.asarray(upper)
     is_normal = jnp.asarray([k == "normal" for k in kinds])
     is_lognorm = jnp.asarray([k == "lognormal" for k in kinds])
+    # Mixture-weight sticks: Beta(1, b) with the closed-form inverse CDF
+    # x = 1 - (1 - u)^(1/b), b in the scale slot.  Support is [0, 1], matching
+    # the fcat bounds, so no truncation rescale is needed.
+    is_beta = jnp.asarray([k == "beta" for k in kinds])
 
     def _trunc_normal_ppf(u, a, b, mu, sg):
         # inverse CDF of N(mu, sg^2) truncated to [a, b]
@@ -411,8 +511,12 @@ def make_prior_transform(lower, upper, prior_kinds=None):
         log_lo = jnp.log(jnp.clip(lo_j, 1e-300, None))
         log_hi = jnp.log(jnp.clip(hi_j, 1e-300, None))
         lognormal = jnp.exp(_trunc_normal_ppf(u, log_lo, log_hi, loc, scale))
+        # Beta(1, b) closed-form PPF; scale defaults to 1 for non-beta params so
+        # this expression is finite everywhere (Beta(1,1) reduces to the identity).
+        beta = 1.0 - (1.0 - u) ** (1.0 / scale)
         out = jnp.where(is_normal, normal, uniform)
         out = jnp.where(is_lognorm, lognormal, out)
+        out = jnp.where(is_beta, beta, out)
         return out
 
     return prior_transform

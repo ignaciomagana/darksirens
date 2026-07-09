@@ -299,6 +299,11 @@ def run_sampler(method, likelihood, prior_transform, labels,
                     low=jnp.log(lower[i]), high=jnp.log(upper[i]))
                 return numpyro.sample(name, dist.TransformedDistribution(
                     base, dist.transforms.ExpTransform()))
+            if kind == "beta":
+                # Mixture-weight stick fcat_m ~ Beta(1, b); b in the scale slot.
+                # Matches make_prior_transform's closed-form Beta(1,b) PPF so NUTS
+                # and the nested samplers infer the same posterior.
+                return numpyro.sample(name, dist.Beta(1.0, float(kscale or 1.0)))
             return numpyro.sample(name, dist.Uniform(low=lower[i], high=upper[i]))
 
         def model():
