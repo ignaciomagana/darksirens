@@ -272,6 +272,21 @@ def run_sampler(method, likelihood, prior_transform, labels,
             raise ValueError(
                 "NumPyro sampler requires finite lower and upper prior bounds."
             )
+        # Truncated Beta (mixture-stick) bounds are supported by the nested
+        # samplers' closed-form PPF but not by numpyro's Beta site; validate
+        # EAGERLY here (concrete numpy values) rather than inside the traced
+        # model, so the error is clear and tracing never sees a float() cast.
+        if prior_kinds is not None:
+            _lo_np = np.asarray(lower_bound, dtype=float)
+            _hi_np = np.asarray(upper_bound, dtype=float)
+            for _i, (_kind, _kloc, _kscale) in enumerate(prior_kinds):
+                if _kind == "beta" and (_lo_np[_i] != 0.0 or _hi_np[_i] != 1.0):
+                    raise ValueError(
+                        f"Truncated Beta prior bounds [{_lo_np[_i]}, {_hi_np[_i]}] "
+                        f"for '{labels[_i]}' are not supported by the numpyro "
+                        "sampler; use dynesty/tinyns or keep the default [0, 1] "
+                        "bounds."
+                    )
         if not np.all(np.asarray(upper) > np.asarray(lower)):
             raise ValueError(
                 "NumPyro sampler requires every prior upper bound to exceed its "
@@ -306,13 +321,6 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 # transform supports truncated bounds; numpyro's Beta does not,
                 # so reject non-default bounds rather than silently sampling a
                 # different prior than dynesty/tinyns would.
-                if float(lower[i]) != 0.0 or float(upper[i]) != 1.0:
-                    raise ValueError(
-                        f"Truncated Beta prior bounds [{float(lower[i])}, "
-                        f"{float(upper[i])}] for '{name}' are not supported by "
-                        "the numpyro sampler; use dynesty/tinyns or keep the "
-                        "default [0, 1] bounds."
-                    )
                 return numpyro.sample(name, dist.Beta(1.0, float(kscale or 1.0)))
             return numpyro.sample(name, dist.Uniform(low=lower[i], high=upper[i]))
 
