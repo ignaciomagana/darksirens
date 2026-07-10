@@ -180,6 +180,7 @@ def darksiren_log_likelihood_with_clusters(
     pair_marks: int = PAIR_MARKS_NONE,
     pair_time_delta_t_obs: jnp.ndarray | None = None,
     pair_time_sigma: jnp.ndarray | None = None,
+    pair_time_t_obs_window_sec: jnp.ndarray | None = None,
     pair_batch_size: int = 0,
     y_nodes_pair: int = _Y_NODES_FOR_CLUSTER_PAIR_LIKE,
     singleton_lensing: int = SINGLETON_LENSING_OFF,
@@ -509,6 +510,7 @@ def darksiren_log_likelihood_with_clusters(
                 log_p_pop, log_prior_z, y_nodes, log_wy,
                 pair_marks=pair_marks,
                 delta_t_obs=dt_obs_k, sigma_delta_t=dt_sig_k,
+                t_obs_window_sec=pair_time_t_obs_window_sec,
             )
             return jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf)
 

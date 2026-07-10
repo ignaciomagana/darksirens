@@ -609,8 +609,9 @@ def test_true_time_delay_increases_pair_likelihood():
     sis = make_sis_lens_params(T0_seconds=4.32e5)
     true_dt = sis.T0 * y_true
     sigma = 2.0e4
-    good = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=true_dt, sigma_delta_t=sigma)
-    bad = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=true_dt + 8.0 * sigma, sigma_delta_t=sigma)
+    T_OBS = 365.25 * 86400.0
+    good = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=true_dt, sigma_delta_t=sigma, t_obs_window_sec=T_OBS)
+    bad = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=true_dt + 8.0 * sigma, sigma_delta_t=sigma, t_obs_window_sec=T_OBS)
     assert float(good) > float(bad)
 
 
@@ -621,8 +622,9 @@ def test_incompatible_time_delay_penalizes_shuffled_wrong_pair():
     y_nodes, log_wy = make_y_grid(32)
     sis = make_sis_lens_params(T0_seconds=4.32e5)
     sigma = 1.5e4
-    compatible = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=sis.T0 * 0.30, sigma_delta_t=sigma)
-    shuffled = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=sis.T0 * 0.90, sigma_delta_t=sigma)
+    T_OBS = 365.25 * 86400.0
+    compatible = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=sis.T0 * 0.30, sigma_delta_t=sigma, t_obs_window_sec=T_OBS)
+    shuffled = cluster_log_likelihood_pair(ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy, pair_marks=1, delta_t_obs=sis.T0 * 0.90, sigma_delta_t=sigma, t_obs_window_sec=T_OBS)
     assert float(compatible) > float(shuffled)
 
 
@@ -813,11 +815,13 @@ def test_time_delta_collapse_matches_dense_quadrature():
     sigma = 3600.0
     dt_obs = float(sis.T0) * y_true
 
+    T_OBS = 365.25 * 86400.0
     y_dense, log_wy_dense = make_y_grid(8192)
     ref = cluster_log_likelihood_pair(
         ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
         sis, _toy_log_p_pop, _toy_volume_prior, y_dense, log_wy_dense,
         pair_marks=1, delta_t_obs=jnp.asarray(dt_obs), sigma_delta_t=jnp.asarray(sigma),
+        t_obs_window_sec=T_OBS,
     )
     y_any, log_wy_any = make_y_grid(16)  # ignored by the collapse
     collapsed = cluster_log_likelihood_pair(
@@ -825,6 +829,7 @@ def test_time_delta_collapse_matches_dense_quadrature():
         sis, _toy_log_p_pop, _toy_volume_prior, y_any, log_wy_any,
         pair_marks=PAIR_MARKS_DELTA_COLLAPSE,
         delta_t_obs=jnp.asarray(dt_obs), sigma_delta_t=jnp.asarray(sigma),
+        t_obs_window_sec=T_OBS,
     )
     assert np.isfinite(float(collapsed))
     # Agreement to the O((sigma/T0)^2) collapse error + residual quadrature.
@@ -840,6 +845,7 @@ def test_time_delta_collapse_matches_dense_quadrature():
         ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
         sis, _toy_log_p_pop, _toy_volume_prior, y64, log_wy64,
         pair_marks=1, delta_t_obs=jnp.asarray(dt_obs), sigma_delta_t=jnp.asarray(sigma),
+        t_obs_window_sec=T_OBS,
     )
     assert abs(float(coarse) - float(ref)) > 0.05
 
@@ -860,6 +866,7 @@ def test_time_delta_collapse_annihilates_out_of_support():
         pair_marks=PAIR_MARKS_DELTA_COLLAPSE,
         delta_t_obs=jnp.asarray(40.0 * float(sis.T0)),  # months-scale separation
         sigma_delta_t=jnp.asarray(3600.0),
+        t_obs_window_sec=365.25 * 86400.0,
     )
     assert float(out) == float("-inf")
 
@@ -886,3 +893,52 @@ def test_pair_time_mark_impl_resolution():
     assert _resolve_pair_marks(opts(impl="delta"), broad) == PAIR_MARKS_TIME_DELTA
     assert _resolve_pair_marks(opts(marks="none"), sharp) == PAIR_MARKS_NONE
     assert _resolve_pair_marks(opts(), {"pair_time_sigma": []}) == PAIR_MARKS_TIME
+
+
+def test_time_mark_coincidence_odds_reward_true_pairs():
+    """A compatible days-scale delay in a year-long run must RAISE the pair
+    likelihood relative to no time marks — by exactly
+    ln p_L(dt) - ln p_U(dt) up to the collapse residual — instead of taxing
+    it by ~ln T0 (the G-pilot failure)."""
+    from darksirens.likelihood.cluster_likelihood import PAIR_MARKS_DELTA_COLLAPSE
+
+    y_true = 0.55
+    ev_i, ev_j = _synth_lensed_pair(y_true=y_true, n_pe=120, seed=43)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"], ev_j["prior_wt"])
+    sis = make_sis_lens_params(T0_seconds=4.32e5)
+    T_OBS = 365.25 * 86400.0
+    dt = float(sis.T0) * y_true
+    y_nodes, log_wy = make_y_grid(64)
+
+    no_marks = cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+        sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+    )
+    marked = cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+        sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+        pair_marks=PAIR_MARKS_DELTA_COLLAPSE,
+        delta_t_obs=jnp.asarray(dt), sigma_delta_t=jnp.asarray(3600.0),
+        t_obs_window_sec=T_OBS,
+    )
+    gain = float(marked) - float(no_marks)
+    assert gain > 0.0, f"time mark should reward the true pair, got {gain}"
+    # Expected: ln[(2 y*/T0) / (2 (T-dt)/T^2)] plus the (positive) effect of
+    # pinning y at its true value rather than integrating over (0,1).
+    floor = float(np.log((2 * y_true / float(sis.T0)) / (2 * (T_OBS - dt) / T_OBS**2)))
+    assert gain > floor - 1.0, (gain, floor)
+
+
+def test_time_mark_requires_observing_window():
+    ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=60, seed=44)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"], ev_j["prior_wt"])
+    sis = make_sis_lens_params()
+    y_nodes, log_wy = make_y_grid(16)
+    with pytest.raises(ValueError, match="t_obs_window_sec"):
+        cluster_log_likelihood_pair(
+            ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+            sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+            pair_marks=1, delta_t_obs=jnp.asarray(1e5), sigma_delta_t=jnp.asarray(3600.0),
+        )
