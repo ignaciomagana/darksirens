@@ -796,3 +796,93 @@ class TestJacobianClamp:
             + 0.5 * jnp.log(mu)
         )
         np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-12)
+
+
+def test_time_delta_collapse_matches_dense_quadrature():
+    """PAIR_MARKS_DELTA_COLLAPSE must reproduce the sharp-mark y-integral
+    that the Gaussian quadrature path only recovers with a DENSE grid.
+    Sharpness sigma/T0 ~ 0.008 (the production configuration that broke
+    the G pilot at 64 nodes)."""
+    from darksirens.likelihood.cluster_likelihood import PAIR_MARKS_DELTA_COLLAPSE
+
+    y_true = 0.62
+    ev_i, ev_j = _synth_lensed_pair(y_true=y_true, n_pe=120, seed=41)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"], ev_j["prior_wt"])
+    sis = make_sis_lens_params(T0_seconds=4.32e5)
+    sigma = 3600.0
+    dt_obs = float(sis.T0) * y_true
+
+    y_dense, log_wy_dense = make_y_grid(8192)
+    ref = cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+        sis, _toy_log_p_pop, _toy_volume_prior, y_dense, log_wy_dense,
+        pair_marks=1, delta_t_obs=jnp.asarray(dt_obs), sigma_delta_t=jnp.asarray(sigma),
+    )
+    y_any, log_wy_any = make_y_grid(16)  # ignored by the collapse
+    collapsed = cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+        sis, _toy_log_p_pop, _toy_volume_prior, y_any, log_wy_any,
+        pair_marks=PAIR_MARKS_DELTA_COLLAPSE,
+        delta_t_obs=jnp.asarray(dt_obs), sigma_delta_t=jnp.asarray(sigma),
+    )
+    assert np.isfinite(float(collapsed))
+    # Agreement to the O((sigma/T0)^2) collapse error + residual quadrature.
+    np.testing.assert_allclose(float(collapsed), float(ref), rtol=0, atol=5e-3)
+
+    # And the COARSE quadrature (the failing configuration) is measurably
+    # wrong — this is the bug the collapse fixes. The size of the coarse
+    # error depends on where y* falls relative to the node grid (0.2 nats
+    # here; multiple nats in the G pilot when the spike is straddled), so
+    # assert it exceeds an order of magnitude above the collapse tolerance.
+    y64, log_wy64 = make_y_grid(64)
+    coarse = cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+        sis, _toy_log_p_pop, _toy_volume_prior, y64, log_wy64,
+        pair_marks=1, delta_t_obs=jnp.asarray(dt_obs), sigma_delta_t=jnp.asarray(sigma),
+    )
+    assert abs(float(coarse) - float(ref)) > 0.05
+
+
+def test_time_delta_collapse_annihilates_out_of_support():
+    """A pair whose |Delta t| exceeds T0 has no SIS double solution: the
+    collapsed mark must return exactly -inf (analytic false-edge kill)."""
+    from darksirens.likelihood.cluster_likelihood import PAIR_MARKS_DELTA_COLLAPSE
+
+    ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=80, seed=42)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"], ev_j["prior_wt"])
+    sis = make_sis_lens_params(T0_seconds=4.32e5)
+    y_nodes, log_wy = make_y_grid(16)
+    out = cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+        sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+        pair_marks=PAIR_MARKS_DELTA_COLLAPSE,
+        delta_t_obs=jnp.asarray(40.0 * float(sis.T0)),  # months-scale separation
+        sigma_delta_t=jnp.asarray(3600.0),
+    )
+    assert float(out) == float("-inf")
+
+
+def test_pair_time_mark_impl_resolution():
+    """auto picks the delta collapse for sharp marks and quadrature for
+    broad ones; explicit flags override."""
+    from types import SimpleNamespace
+
+    from darksirens.cli.inference_lensing import _resolve_pair_marks
+    from darksirens.likelihood.likelihood_with_clusters import (
+        PAIR_MARKS_NONE, PAIR_MARKS_TIME, PAIR_MARKS_TIME_DELTA,
+    )
+
+    def opts(marks="time", impl="auto"):
+        return SimpleNamespace(pair_marks=marks, pair_time_mark_impl=impl,
+                               sl_tau_A=5e-4, sl_tau_n=3.0)
+
+    sharp = {"pair_time_sigma": np.array([3600.0, 3600.0])}   # sigma/T0 ~ 0.008
+    broad = {"pair_time_sigma": np.array([3600.0, 5.0e4])}    # max sigma/T0 ~ 0.12
+    assert _resolve_pair_marks(opts(), sharp) == PAIR_MARKS_TIME_DELTA
+    assert _resolve_pair_marks(opts(), broad) == PAIR_MARKS_TIME
+    assert _resolve_pair_marks(opts(impl="quadrature"), sharp) == PAIR_MARKS_TIME
+    assert _resolve_pair_marks(opts(impl="delta"), broad) == PAIR_MARKS_TIME_DELTA
+    assert _resolve_pair_marks(opts(marks="none"), sharp) == PAIR_MARKS_NONE
+    assert _resolve_pair_marks(opts(), {"pair_time_sigma": []}) == PAIR_MARKS_TIME

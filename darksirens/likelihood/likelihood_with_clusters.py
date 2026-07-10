@@ -99,6 +99,12 @@ WL_SELECTION_LOGNORMAL = 1
 
 PAIR_MARKS_NONE = 0
 PAIR_MARKS_TIME = 1
+# Delta-collapsed time mark: for sharp marks (sigma_dt << T0) the Gaussian
+# pins y more tightly than any practical quadrature resolves; the y-integral
+# is evaluated analytically at y* = dt/T0 (see cluster_likelihood
+# PAIR_MARKS_DELTA_COLLAPSE). Selected automatically by the CLI when
+# max(sigma_dt)/T0 is below the sharpness threshold.
+PAIR_MARKS_TIME_DELTA = 2
 
 # Lensed-singleton policy. OFF preserves the legacy singleton channel exactly
 # (evidence: unlensed/WL only; selection: unlensed injections only) — the
@@ -491,7 +497,7 @@ def darksiren_log_likelihood_with_clusters(
             ev_j = _extract_event(j)
             kde_i = _slice_event_kde_inside_jit(pair_kdes, i)
             kde_j = _slice_event_kde_inside_jit(pair_kdes, j)
-            if pair_marks == PAIR_MARKS_TIME:
+            if pair_marks in (PAIR_MARKS_TIME, PAIR_MARKS_TIME_DELTA):
                 dt_obs_k = pair_time_delta_t_obs[k]
                 dt_sig_k = pair_time_sigma[k]
             else:

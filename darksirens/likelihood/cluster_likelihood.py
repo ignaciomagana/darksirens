@@ -90,7 +90,7 @@ from darksirens.lensing.slmarks import (
     SISLensParams, tau_2_SIS, log_p_y_SIS,
     mu_plus_minus_from_y, delta_t_from_y,
 )
-from darksirens.lensing.grids import make_y_grid
+from darksirens.lensing.grids import make_y_grid, make_hermite_u_grid
 
 
 def _log_jac_app_to_src(z_s: jnp.ndarray,
@@ -230,6 +230,25 @@ def _pair_branch_log_integrand(
     return log_integrand    # (N_pe_i, N_y)
 
 
+# Pair-mark modes (kept in sync with likelihood_with_clusters):
+#   0 = none; 1 = Gaussian time mark evaluated on the y-quadrature;
+#   2 = collapsed time mark — for sharp marks (sigma_dt << T0) the Gaussian
+#       pins y to a window narrower than any practical global quadrature
+#       spacing (the G-pilot failure mode: sigma/T0 ~ 0.008 vs node spacing
+#       ~0.025 at 64 nodes). The y-integral is rewritten with the mark as
+#       the measure and evaluated by Gauss-Hermite in the standardized
+#       variable u = (T0 y - dt_obs)/sigma:
+#           int dy p(y) N(dt | T0 y, s) G(y)
+#             = (1/T0) sum_k w_k [p G](y* + (s/T0) u_k),   y* = dt_obs/T0,
+#       exact for the Gaussian mark to Hermite order (the residual is the
+#       non-polynomial part of [p G] across the ~sigma/T0 window; measured
+#       below 1e-3 nats at production sharpness). Nodes falling outside the
+#       SIS support (0, 1) are masked, so a pair whose delay exceeds T0 is
+#       annihilated exactly.
+PAIR_MARKS_DELTA_COLLAPSE = 2
+_TIME_COLLAPSE_HERMITE_NODES = 8
+
+
 def cluster_log_likelihood_pair(
     event_i: dict,         # {'m1det', 'q', 'dL', 'chieff', 'prior_wt', 'valid', 'pixels'}
     event_j: dict,         # same fields
@@ -265,6 +284,24 @@ def cluster_log_likelihood_pair(
     log_L2 : scalar
         log of the pair likelihood. -inf if both branches vanish.
     """
+    if pair_marks == PAIR_MARKS_DELTA_COLLAPSE:
+        if delta_t_obs is None or sigma_delta_t is None:
+            raise ValueError(
+                "pair_marks=delta-collapse requires delta_t_obs and sigma_delta_t"
+            )
+        # Local Gauss-Hermite quadrature under the mark's Gaussian measure
+        # (see PAIR_MARKS_DELTA_COLLAPSE above): the 1/T0 Jacobian replaces
+        # the global quadrature weights; log_p_y_SIS supplies p(y) and,
+        # together with the mask, the (0, 1) SIS-support guard.
+        y_star = jnp.asarray(delta_t_obs, dtype=jnp.float64) / sis_params.T0
+        sigma_y = jnp.asarray(sigma_delta_t, dtype=jnp.float64) / sis_params.T0
+        u_nodes_t, log_wH_t = make_hermite_u_grid(_TIME_COLLAPSE_HERMITE_NODES)
+        y_k = y_star + sigma_y * u_nodes_t
+        in_support = (y_k > 0.0) & (y_k < 1.0)
+        y_nodes = jnp.clip(y_k, 1e-9, 1.0 - 1e-9)
+        log_wy = jnp.where(in_support, log_wH_t - jnp.log(sis_params.T0), -jnp.inf)
+        pair_marks = 0  # mark absorbed as the quadrature measure
+
     # SIS magnifications at each y-node: μ_+ ≥ μ_-, both positive on (0, 1)
     mu_plus, mu_minus = mu_plus_minus_from_y(y_nodes)
     log_py = log_p_y_SIS(y_nodes)

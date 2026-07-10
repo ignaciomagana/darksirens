@@ -149,6 +149,7 @@ from darksirens.likelihood.pair_kde import (
     stack_pair_kdes,
     validate_pair_prior_wt,
 )
+from darksirens.likelihood.cluster_selection import combined_selection_log_correction
 from darksirens.likelihood.likelihood_with_clusters import (
     darksiren_log_likelihood_with_clusters,
     darksiren_likelihood_diagnostics_with_clusters,
@@ -160,6 +161,7 @@ from darksirens.likelihood.likelihood_with_clusters import (
     WL_SELECTION_LOGNORMAL,
     PAIR_MARKS_NONE,
     PAIR_MARKS_TIME,
+    PAIR_MARKS_TIME_DELTA,
     SINGLETON_LENSING_OFF,
     SINGLETON_LENSING_MIXTURE,
 )
@@ -1296,6 +1298,7 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
     attrs["wl_backend"] = opts.wl_backend
     attrs["wl_selection"] = opts.wl_selection
     attrs["singleton_lensing"] = getattr(opts, "singleton_lensing", "off")
+    attrs["pair_time_mark_impl"] = getattr(opts, "pair_time_mark_impl", "auto")
     attrs["n_events"] = int(inp["nEvents"])
     attrs["reference_partition_n_singletons"] = int(inp["n_singletons"])
     attrs["reference_partition_n_pairs"] = int(inp["n_pairs"])
@@ -1379,6 +1382,35 @@ def _print_diagnostics_summary(diagnostics):
     )
 
 
+_TIME_DELTA_SHARPNESS = 0.02  # max(sigma_dt)/T0 below this -> delta collapse
+
+
+def _resolve_pair_marks(opts, inp):
+    """Map the user-facing --pair_marks to the static implementation code.
+
+    For pair_marks=time, sharp marks (max sigma_dt / T0 below the sharpness
+    threshold) pin y more tightly than any practical quadrature resolves —
+    the G-pilot failure mode — so the y-integral is delta-collapsed
+    analytically (PAIR_MARKS_TIME_DELTA). --pair_time_mark_impl overrides.
+    """
+    if getattr(opts, "pair_marks", "none") != "time":
+        return PAIR_MARKS_NONE
+    impl = getattr(opts, "pair_time_mark_impl", "auto")
+    if impl == "quadrature":
+        return PAIR_MARKS_TIME
+    if impl == "delta":
+        return PAIR_MARKS_TIME_DELTA
+    sigmas = np.asarray(inp.get("pair_time_sigma", []), dtype=float)
+    if sigmas.size == 0:
+        return PAIR_MARKS_TIME
+    T0 = float(make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n).T0)
+    return (
+        PAIR_MARKS_TIME_DELTA
+        if float(np.max(sigmas)) / T0 < _TIME_DELTA_SHARPNESS
+        else PAIR_MARKS_TIME
+    )
+
+
 def build_cluster_likelihood(
     opts, inp, decoder, lens_sampled_labels=None, fixed_parameter_values=None
 ):
@@ -1400,11 +1432,7 @@ def build_cluster_likelihood(
         if opts.wl_selection == "wl_lognormal"
         else WL_SELECTION_STANDARD
     )
-    pair_marks = (
-        PAIR_MARKS_TIME
-        if getattr(opts, "pair_marks", "none") == "time"
-        else PAIR_MARKS_NONE
-    )
+    pair_marks = _resolve_pair_marks(opts, inp)
     universe_model = opts.universe_model
 
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
@@ -1507,9 +1535,35 @@ def build_cluster_likelihood(
                 baseline = baseline_raw["logL_total"]
                 baseline_content = _content_loglike(baseline_raw)
                 selection0 = baseline_raw["selection_correction_total"]
+                # Count-only selection deltas, CLOSED FORM. The selection
+                # integrals (mu, sigma^2 per channel) do not depend on the
+                # partition — only the marked-Poisson correction's counts do
+                # (the invariant build_cluster_diagnostics asserts against
+                # probe evaluations at every diagnostics call). Evaluating
+                # full likelihood probes per count (the previous approach)
+                # cost ~n_pairs extra likelihood evaluations PER SAMPLER CALL
+                # and one multi-GB XLA specialization per distinct
+                # (n_singletons, n_pairs) — the host-RAM OOM that killed
+                # paper-scale j2 on 58 GB nodes.
+                def _count_correction(n_sing, n_prs):
+                    return combined_selection_log_correction(
+                        baseline_raw["log_mu_singleton"],
+                        baseline_raw["log_sigma2_singleton"],
+                        baseline_raw["log_mu_cluster"],
+                        baseline_raw["log_sigma2_cluster"],
+                        n_singletons_observed=n_sing,
+                        n_clusters_observed=n_prs,
+                        soft_guard=bool(
+                            getattr(opts, "selection_neff_soft_guard", False)
+                        ),
+                    )
+
                 count_delta = jnp.stack(
                     [
-                        _selection_correction(part) - selection0
+                        _count_correction(
+                            int(part["n_singletons"]), int(part["n_pairs"])
+                        )
+                        - selection0
                         for part in inp["selection_probe_partitions"]
                     ]
                 )
@@ -1569,11 +1623,7 @@ def build_cluster_diagnostics(
         if opts.wl_selection == "wl_lognormal"
         else WL_SELECTION_STANDARD
     )
-    pair_marks = (
-        PAIR_MARKS_TIME
-        if getattr(opts, "pair_marks", "none") == "time"
-        else PAIR_MARKS_NONE
-    )
+    pair_marks = _resolve_pair_marks(opts, inp)
     universe_model = opts.universe_model
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
     singleton_lensing = (
@@ -1968,6 +2018,14 @@ def build_parser():
         "--allow_suspicious_time_marks",
         default="false",
         help="true downgrades the placeholder/synthetic time-mark hard error to a warning",
+    )
+    p.add_argument(
+        "--pair_time_mark_impl",
+        choices=["auto", "quadrature", "delta"],
+        default="auto",
+        help="time-mark y-integral implementation: auto delta-collapses when "
+             "max(sigma_dt)/T0 < 0.02 (sharp marks unresolvable by quadrature), "
+             "quadrature/delta force the respective path",
     )
     p.add_argument(
         "--singleton_lensing",
