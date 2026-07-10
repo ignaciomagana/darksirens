@@ -9,7 +9,10 @@ import jax.numpy as jnp
 from jax import lax
 import numpy as np
 
-from darksirens.redshift.completion import build_pixel_kde_cache
+from darksirens.redshift.completion import (
+    build_field_normalization_inputs,
+    build_pixel_kde_cache,
+)
 
 DARK_SIREN_CACHE_MODELS = {"dark_sirens"}
 
@@ -75,6 +78,11 @@ class CatalogViews:
     lss_completion_logq: jnp.ndarray | None = None
     lss_completion_logq_members: jnp.ndarray | None = None  # (M, n_pix|n_rows, n_grid)
     lss_completion_indexing: int = 0  # int enum: 0=auto, 1=compact, 2=global
+    # FIELD-convention sky-weighting normalization inputs (built from the FULL-sky
+    # catalog when ``opts.catalog_sky_weighting == "field"``; ``None`` otherwise).
+    field_dN_obs_s: jnp.ndarray | None = None  # (n_occupied, n_grid) f32
+    field_n_empty: jnp.ndarray | None = None   # scalar
+    field_N_obs_total: jnp.ndarray | None = None  # scalar
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -284,6 +292,29 @@ def prepare_catalog_views(
 
     delta_g_pix_z = barrier(_to_jax(data, "delta_g_pix_z"))
 
+    # FIELD-convention sky weighting: build the survey-GLOBAL normalization inputs
+    # from the FULL-sky catalog (occupied-pixel smoothed densities, empty-pixel
+    # count, total observed count) BEFORE compaction/drop_full_catalog.  Only for
+    # ``--catalog_sky_weighting field``; the conditional path leaves these None.
+    field_dN_obs_s = field_n_empty = field_N_obs_total = None
+    if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
+        if data.get("field_dN_obs_s") is not None:
+            # Caller-provided (already survey-global) field inputs -- symmetric with
+            # the caller-provided compact-view path; used by tests and any caller
+            # that precomputes them.
+            field_dN_obs_s = barrier(jnp.asarray(data["field_dN_obs_s"]))
+            field_n_empty = jnp.asarray(data["field_n_empty"], dtype=jnp.float64)
+            field_N_obs_total = jnp.asarray(data["field_N_obs_total"], dtype=jnp.float64)
+        elif all(v is not None for v in (full_z, full_w, full_n)):
+            fobs, n_empty, N_obs_total = build_field_normalization_inputs(
+                full_z, full_w, full_n
+            )
+            field_dN_obs_s = barrier(fobs)
+            field_n_empty = jnp.asarray(n_empty, dtype=jnp.float64)
+            field_N_obs_total = jnp.asarray(N_obs_total, dtype=jnp.float64)
+        # else: leave None -> the likelihood raises a clear scope error (field
+        # mode needs the full-sky catalog rows to count empty pixels).
+
     # Carry the (global) Q table HOST-side, unbarriered: likelihood.py slices it
     # to the per-view union pixels so only the compact block reaches the device.
     lss_completion_logq = data.get("lss_completion_logq")
@@ -421,4 +452,7 @@ def prepare_catalog_views(
         lss_completion_logq=lss_completion_logq,
         lss_completion_logq_members=lss_completion_logq_members,
         lss_completion_indexing=lss_completion_indexing,
+        field_dN_obs_s=field_dN_obs_s,
+        field_n_empty=field_n_empty,
+        field_N_obs_total=field_N_obs_total,
     )

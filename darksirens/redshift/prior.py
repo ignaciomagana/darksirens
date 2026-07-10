@@ -82,7 +82,11 @@ from darksirens.redshift.catalog import (
     eval_log_catalog_prior_state,
     CatalogKernelState,
 )
-from darksirens.redshift.completion import completion_curves, log_galaxy_measure_grid
+from darksirens.redshift.completion import (
+    completion_curves,
+    field_global_log_Z,
+    log_galaxy_measure_grid,
+)
 
 from darksirens.redshift.grid import zgrid
 
@@ -120,13 +124,29 @@ class CompletePriorState(NamedTuple):
     kernels: Any   # CatalogKernelState
     row_has: Any   # (N_rows,) bool — row contains at least one real galaxy
     log_pvol: Any  # (N_grid,) volume fallback for the ``volume`` policy
+    # FIELD-convention sky weighting (complete model): per-row log N_obs and the
+    # survey-GLOBAL log Sum_pix N_obs.  Unlike dark_sirens, the complete-model
+    # field normalizer is theta-INDEPENDENT (Z = Sum_pix N_obs, no missing-galaxy
+    # budget), so an empty pixel carries zero count weight -> -inf REGARDLESS of
+    # ``complete_empty_pixel_policy``.  Populated ALWAYS (both are cheap) and read
+    # only under ``catalog_sky_weighting == "field"``, so the conditional
+    # evaluator is bit-identical to the pre-existing code and the treedef is
+    # stable (no per-mode leaf structure change).
+    log_Nobs: Any = -jnp.inf         # (N_rows,) log real-galaxy count (-inf for empty rows)
+    log_N_obs_total: Any = 0.0       # scalar log Sum_all-pixels N_obs
 
 
 class DarkSirenPriorState(NamedTuple):
     kernels: Any   # CatalogKernelState
     log_Nobs: Any  # (N_rows,) log real-galaxy count (-inf for empty rows)
     dN_miss: Any   # (N_rows, N_grid) missing-galaxy density
-    log_Z: Any     # (N_rows,) log[N_obs + N_miss]
+    log_Z: Any     # (N_rows,) log[N_obs + N_miss]  (per-pixel "conditional" normalizer)
+    # FIELD-convention sky weighting: survey-GLOBAL log normalizer
+    # log Sum_all-pixels [N_obs + N_miss].  Populated (as a JAX scalar) only when
+    # ``catalog_sky_weighting == "field"``; kept at the constant ``0.0`` and never
+    # read in the default "conditional" mode, so the treedef is stable and the
+    # conditional evaluator is bit-identical to the pre-existing code.
+    log_Z_global: Any = 0.0
 
 
 class DarkSirenEnsemblePriorState(NamedTuple):
@@ -204,6 +224,7 @@ def prepare_redshift_prior_state(
     mark_names=(),
     *,
     materialize_state: bool = True,
+    catalog_sky_weighting: str = "conditional",
 ):
     """Build the per-proposal state for ``model``.  O(N_rows × N_grid).
 
@@ -212,6 +233,23 @@ def prepare_redshift_prior_state(
     ``dark_sirens`` (:mod:`darksirens.marks`): catalog galaxies are reweighted by
     a BBH-host efficiency ``h(m|eta)``.  ``mark_model="none"`` (default) is the
     legacy galaxy-count host model, bit-for-bit.
+
+    ``catalog_sky_weighting`` selects the ``dark_sirens`` redshift-prior
+    normalization convention (static; only consulted for ``model ==
+    "dark_sirens"``): ``"conditional"`` (default) normalizes each pixel by its
+    own ``Z[pix] = N_obs + N_miss`` (bit-identical legacy behaviour);
+    ``"field"`` instead stores a survey-GLOBAL ``log_Z_global`` so the K-catalog
+    mixture weight measures the host FRACTION (number-density / sky-clustering
+    contrast), the estimand fix motivated by the gws-agn campaign.  ``"field"``
+    is gated to the plain galaxy-count host model with the legacy dummy
+    overdensity (no marks, no Q_LSS ensemble/table).
+
+    NOTE (K=1): the global constant ``log_Z_global`` cancels between the PE
+    and selection terms of a single-catalog likelihood, so at K=1 field mode's
+    only effect is removing the per-pixel ``Z[pix]`` normalization; the global
+    normalizer bites only for K>=2 mixtures, where each catalog's ``Z_k``
+    enters its mixture branch non-cancelling. Do not expect K=1 field runs to
+    constrain n0 through ``log_Z_global``.
     """
     if model == "spectral_sirens":
         # NaN-guarded log: the volume grid is EXACTLY zero at z = 0, and a
@@ -229,14 +267,86 @@ def prepare_redshift_prior_state(
         return None  # per-event counterpart logic needs the live catalog
 
     if model == "dark_sirens_complete":
+        if catalog_sky_weighting not in ("conditional", "field"):
+            raise ValueError(
+                "catalog_sky_weighting must be 'conditional' or 'field', got "
+                f"{catalog_sky_weighting!r}."
+            )
         kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=True)
-        row_has = _row_counts(em_catalog) > 0.0
+        Nobs = _row_counts(em_catalog)
+        row_has = Nobs > 0.0
         vol = _precompute_volume_grid(cosmo)
         log_pvol = jnp.log(jnp.maximum(vol, jnp.finfo(vol.dtype).tiny))
-        state = CompletePriorState(kernels=kernels, row_has=row_has, log_pvol=log_pvol)
+        # FIELD convention (complete model, field mode only): the prior is a
+        # survey FIELD density weighting each occupied pixel by its share
+        # N_obs[pix] / N_obs_total of the total observed count.  The normalizer
+        # Z = Sum_all-pixels N_obs is theta-independent, so log_N_obs_total must be
+        # the FULL-sky total (``em_catalog.field_N_obs_total``, built by PR-3's
+        # build_field_normalization_inputs), not the compacted-row sum.  Both
+        # leaves are populated ALWAYS so the treedef is mode-independent; in the
+        # conditional path neither is read (bit-identical legacy behaviour).
+        log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1e-300)), -jnp.inf)
+        if catalog_sky_weighting == "field":
+            if em_catalog.field_N_obs_total is None:
+                raise ValueError(
+                    "catalog_sky_weighting='field' requires the survey-global "
+                    "field_N_obs_total on the (full-sky) complete-model catalog; "
+                    "build it via "
+                    "darksirens.redshift.completion.build_field_normalization_inputs."
+                )
+            log_N_obs_total = jnp.log(
+                jnp.maximum(
+                    jnp.asarray(em_catalog.field_N_obs_total, dtype=Nobs.dtype), 1e-300
+                )
+            )
+        else:
+            # Never read in conditional mode; a finite in-catalog total keeps the
+            # scalar leaf well-defined without requiring the field inputs.
+            log_N_obs_total = jnp.log(jnp.maximum(jnp.sum(Nobs), 1e-300))
+        state = CompletePriorState(
+            kernels=kernels, row_has=row_has, log_pvol=log_pvol,
+            log_Nobs=log_Nobs, log_N_obs_total=log_N_obs_total,
+        )
         return _maybe_materialize(state, materialize_state)
 
     if model == "dark_sirens":
+        is_field = catalog_sky_weighting == "field"
+        if catalog_sky_weighting not in ("conditional", "field"):
+            raise ValueError(
+                "catalog_sky_weighting must be 'conditional' or 'field', got "
+                f"{catalog_sky_weighting!r}."
+            )
+        if is_field:
+            # Field convention is the plain galaxy-count host model with the
+            # legacy dummy overdensity: no marks, no Q_LSS table/ensemble.  These
+            # are static (structure) checks, so they resolve once per trace.
+            if mark_model is not None and mark_model != "none":
+                raise NotImplementedError(
+                    "catalog_sky_weighting='field' is not supported with a marked-host "
+                    "model (mark_model); use 'conditional'."
+                )
+            if any(
+                getattr(em_catalog, name) is not None
+                for name in (
+                    "lss_completion_logq",
+                    "lss_completion_q",
+                    "lss_completion_logq_members",
+                    "lss_completion_q_members",
+                )
+            ):
+                raise NotImplementedError(
+                    "catalog_sky_weighting='field' is not supported with an "
+                    "LSS-completion Q_LSS table/ensemble; use 'conditional'."
+                )
+            if em_catalog.field_dN_obs_s is None:
+                raise ValueError(
+                    "catalog_sky_weighting='field' requires the survey-global field "
+                    "normalization inputs (field_dN_obs_s / field_n_empty / "
+                    "field_N_obs_total). Build them via "
+                    "darksirens.redshift.completion.build_field_normalization_inputs "
+                    "from the FULL-sky catalog (the union/full-catalog path)."
+                )
+
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
         curves = completion_curves(cosmo, survey, em_catalog)
 
@@ -274,6 +384,17 @@ def prepare_redshift_prior_state(
         # ensemble was supplied), so this matches the legacy behaviour exactly.
         Z = Nobs + curves.N_miss
         log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+        if is_field:
+            # Survey-GLOBAL normalizer log Sum_all-pixels[N_obs + N_miss].  The
+            # per-pixel numerator (log_Nobs, dN_miss) is UNCHANGED; only the
+            # denominator becomes global, turning the mixture weight into a host
+            # fraction.  Field mode is gated (above) to the no-ensemble path.
+            log_Z_global = field_global_log_Z(cosmo, survey, em_catalog)
+            state = DarkSirenPriorState(
+                kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss,
+                log_Z=log_Z, log_Z_global=log_Z_global,
+            )
+            return _maybe_materialize(state, materialize_state)
         if curves.dN_miss_members is None:
             state = DarkSirenPriorState(
                 kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z
@@ -314,7 +435,10 @@ def _grid_bracket(z):
     return idx, jnp.clip(t, 0.0, 1.0)
 
 
-def _eval_dark_scalar(z, pix, state: DarkSirenPriorState, em_catalog: EMCatalog):
+def _eval_dark_scalar(
+    z, pix, state: DarkSirenPriorState, em_catalog: EMCatalog,
+    catalog_sky_weighting: str = "conditional",
+):
     log_p_cat = eval_log_catalog_prior_state(z, pix, state.kernels, em_catalog)
     # NaN (out-of-grid z, degenerate kernels) must mean "impossible", never p=1.
     log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
@@ -326,16 +450,30 @@ def _eval_dark_scalar(z, pix, state: DarkSirenPriorState, em_catalog: EMCatalog)
     miss = _interp_row(state.dN_miss[pix, idx], state.dN_miss[pix, idx + 1], t)
     log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
 
-    return (
-        jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss) - state.log_Z[pix]
-    )
+    numerator = jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss)
+    # FIELD convention: normalize the per-pixel numerator by the survey-GLOBAL
+    # Z (static branch on the mode string) instead of the per-pixel Z[pix].
+    if catalog_sky_weighting == "field":
+        return numerator - state.log_Z_global
+    return numerator - state.log_Z[pix]
 
 
 def _eval_complete_scalar(
-    z, pix, state: CompletePriorState, survey: SurveyParams, em_catalog: EMCatalog
+    z, pix, state: CompletePriorState, survey: SurveyParams, em_catalog: EMCatalog,
+    catalog_sky_weighting: str = "conditional",
 ):
     log_p_cat = eval_log_catalog_prior_state(z, pix, state.kernels, em_catalog)
     log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+    if catalog_sky_weighting == "field":
+        # FIELD convention: survey field density weighting each occupied pixel by
+        # its share N_obs[pix] / N_obs_total of the total observed count:
+        #   log p(z, pix) = log p_cat(z|pix) + log N_obs[pix] - log N_obs_total.
+        # The normalizer Z = Sum_pix N_obs is theta-independent, so an EMPTY pixel
+        # carries zero count weight -> -inf REGARDLESS of
+        # complete_empty_pixel_policy (the volume fallback is a conditional-mode
+        # per-pixel construct with no place in the global field density).
+        field_val = log_p_cat + state.log_Nobs[pix] - state.log_N_obs_total
+        return jnp.where(state.row_has[pix], field_val, -jnp.inf)
     log_p_vol = jnp.interp(z, zgrid, state.log_pvol)
     empty_value = jnp.where(
         survey.complete_empty_pixel_policy == COMPLETE_EMPTY_PIXEL_POLICY_VOLUME,
@@ -353,8 +491,14 @@ def eval_redshift_prior_with_state(
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    catalog_sky_weighting: str = "conditional",
 ) -> jnp.ndarray:
-    """Vectorised log p(z | pix) using a prepared state.  O(N_max) / sample."""
+    """Vectorised log p(z | pix) using a prepared state.  O(N_max) / sample.
+
+    ``catalog_sky_weighting`` ("conditional" default) selects the ``dark_sirens``
+    normalization convention; it is a static string branch and is inert for every
+    other ``model``.
+    """
     if model == "spectral_sirens":
         return vmap(lambda z_i: jnp.interp(z_i, zgrid, state.log_pvol))(z)
 
@@ -363,12 +507,16 @@ def eval_redshift_prior_with_state(
 
     if model == "dark_sirens_complete":
         return vmap(
-            lambda z_i, p_i: _eval_complete_scalar(z_i, p_i, state, survey, em_catalog)
+            lambda z_i, p_i: _eval_complete_scalar(
+                z_i, p_i, state, survey, em_catalog, catalog_sky_weighting
+            )
         )(z, pix)
 
     if model == "dark_sirens":
         return vmap(
-            lambda z_i, p_i: _eval_dark_scalar(z_i, p_i, state, em_catalog)
+            lambda z_i, p_i: _eval_dark_scalar(
+                z_i, p_i, state, em_catalog, catalog_sky_weighting
+            )
         )(z, pix)
 
     raise ValueError(f"Unknown redshift prior model '{model}'.")

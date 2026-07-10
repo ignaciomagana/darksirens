@@ -71,7 +71,7 @@ from __future__ import annotations
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax import jit, vmap
+from jax import jit, lax, vmap
 from jax.scipy.special import ndtr
 from typing import NamedTuple
 
@@ -245,6 +245,96 @@ def build_pixel_kde_cache(
         pixel_to_cache_idx[int(p)] = i
 
     return dN_obs_kde, jnp.asarray(pixel_to_cache_idx, dtype=jnp.int32)
+
+
+# ------------------------------------------------------------
+# FIELD-convention sky-weighting: survey-global normalization inputs
+# ------------------------------------------------------------
+
+def build_field_normalization_inputs(
+    full_z: jnp.ndarray,
+    full_w: jnp.ndarray | None,
+    full_n: jnp.ndarray | None,
+    batch_size: int = 4096,
+) -> tuple[jnp.ndarray, int, float]:
+    """Host-side precompute for the FIELD-convention global normalizer.
+
+    Builds the survey-global ingredients consumed by :func:`field_global_log_Z`
+    to normalize the catalog redshift prior by the GLOBAL count
+    ``Z(theta) = Sum_all-pixels [N_obs,pix + N_miss,pix(theta)]`` instead of the
+    per-pixel ``Z[pix]``.  Called ONCE at startup (before compaction /
+    ``--drop_full_catalog``), over the FULL-sky catalog rows so empty pixels are
+    counted.
+
+    The observed density is the SAME smoothed per-galaxy KDE the in-likelihood
+    completion uses (``_kde_dndz_obs``, raw counts, matched truncated kernel),
+    so the per-pixel completeness ``C`` computed in ``field_global_log_Z``
+    reproduces exactly what ``_assemble_curves`` computes per occupied pixel.
+
+    Parameters
+    ----------
+    full_z : (N_pix, N_max_gals)
+        Full-sky padded galaxy redshifts (one row per HEALPix pixel).
+    full_w : (N_pix, N_max_gals) or None
+        Padded galaxy base weights (used only to mask padded slots when
+        ``full_n`` is absent).
+    full_n : (N_pix,) or None
+        Real-galaxy count per pixel.  Preferred padding mask and the source of
+        ``N_obs_total``; when ``None`` falls back to ``full_w > 0``.
+
+    Returns
+    -------
+    field_dN_obs_s : (n_occupied, N_grid) float32
+        Smoothed observed density for occupied pixels only (device array).
+    n_empty : int
+        Number of galaxy-free survey pixels (``N_pix - n_occupied``).
+    N_obs_total : float
+        Total observed real-galaxy count over ALL pixels.
+    """
+    full_z = np.asarray(full_z)
+    n_pix_total = int(full_z.shape[0])
+
+    if full_n is not None:
+        ngals_np = np.asarray(full_n).reshape(-1).astype(np.int64)
+        occupied = ngals_np > 0
+        N_obs_total = float(ngals_np.sum())
+    elif full_w is not None:
+        full_w_np = np.asarray(full_w)
+        per_pix = (full_w_np > 0.0).sum(axis=-1)
+        occupied = per_pix > 0
+        N_obs_total = float(per_pix.sum())
+    else:
+        raise ValueError(
+            "build_field_normalization_inputs requires either full_w or full_n "
+            "to mask padded galaxies and count observed galaxies."
+        )
+
+    occupied_pixels = np.nonzero(occupied)[0].astype(np.int32)
+    n_occ = int(occupied_pixels.size)
+    n_empty = int(n_pix_total - n_occ)
+
+    zgals_jax = jnp.asarray(full_z)
+    wgals_jax = None if full_w is None else jnp.asarray(full_w)
+    ngals_jax = None if full_n is None else jnp.asarray(full_n)
+
+    _batch_kde = jit(vmap(_kde_dndz_obs, in_axes=(0, None, None, None)))
+    dN_obs_s = np.empty((n_occ, zgrid.size), dtype=np.float64)
+    for start in range(0, n_occ, batch_size):
+        stop = min(start + batch_size, n_occ)
+        dN_obs_s[start:stop] = np.asarray(
+            _batch_kde(
+                jnp.asarray(occupied_pixels[start:stop], dtype=jnp.int32),
+                zgals_jax,
+                wgals_jax,
+                ngals_jax,
+            )
+        )
+
+    # Store as float32: for a full-sky (n_occupied, N_grid) table this halves the
+    # device footprint; it only feeds the GLOBAL normalizer (a survey-scale
+    # constant) so the f32 rounding is immaterial to the estimand.
+    field_dN_obs_s = jnp.asarray(dN_obs_s, dtype=jnp.float32)
+    return field_dN_obs_s, n_empty, N_obs_total
 
 
 # ------------------------------------------------------------
@@ -576,6 +666,91 @@ def completion_curves(
         f=f, dN_miss=dN_miss, C_eff=C_eff, N_miss=N_miss,
         dN_miss_members=dN_miss_members, N_miss_members=N_miss_members,
     )
+
+
+# ------------------------------------------------------------
+# FIELD-convention global normalizer Z(theta)
+# ------------------------------------------------------------
+
+def field_global_log_Z(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    chunk_size: int = 4096,
+) -> jnp.ndarray:
+    """log of the survey-GLOBAL FIELD normalizer for one parameter proposal.
+
+    ``Z(theta) = Sum_all-pixels [ N_obs,pix + N_miss,pix(theta) ]`` with, per
+    pixel, ``N_miss = integral (1 - C) dN_exp`` (missing-galaxy budget, LSS
+    factor == 1: the field convention is gated to the legacy dummy-overdensity /
+    no-Q_LSS regime).  Decomposed as
+
+        Z = N_obs_total
+            + Sum_occupied integral (1 - C_pix) dN_exp * depthmask
+            + n_empty * integral dN_exp * depthmask,
+
+    where empty pixels have ``C == 0`` (no observed galaxies) so their missing
+    budget is the full ``dN_exp``.  ``C`` reuses ``_row_C``'s exact recipe --
+    ``clip(dN_obs_s / where(dN_exp_smooth > 0, dN_exp_smooth, 1), 0, 1)`` -- and
+    ``dN_exp = survey.n0 * apix * g(z)`` is the identical grid used per pixel, so
+    the reduction is consistent with ``_assemble_curves`` term by term.  The
+    ``survey.z_depth`` bound is applied EXACTLY as in ``_assemble_curves``
+    (Python-level branch on the concrete ``z_depth``; ``None`` takes the untouched
+    full-grid expression).
+
+    Fully differentiable in ``theta`` (n0, cosmology, delta): the only frozen
+    input is ``field_dN_obs_s`` (a data constant).  No ``optimization_barrier``
+    is applied here.  The occupied-pixel reduction is chunked with ``lax.scan``
+    to bound peak memory at high nside.
+    """
+    grids = _precompute_grids(cosmo, survey, em_catalog)
+    dN_exp = grids.dN_exp                                    # (N_grid,) theta-dependent
+    dN_exp_safe = jnp.where(grids.dN_exp_smooth > 0.0, grids.dN_exp_smooth, 1.0)
+
+    field_obs = jnp.asarray(em_catalog.field_dN_obs_s)       # (n_occ, N_grid) f32 constant
+    n_occ = int(field_obs.shape[0])                          # static
+    N_obs_total = jnp.asarray(em_catalog.field_N_obs_total, dtype=dN_exp.dtype)
+    n_empty = jnp.asarray(em_catalog.field_n_empty, dtype=dN_exp.dtype)
+
+    # ``z_depth`` is concrete at trace time -> Python-level branch (mirrors
+    # ``_assemble_curves``); ``None`` never constructs a mask.
+    depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+
+    def _row_N_miss(obs_row):
+        obs_row = obs_row.astype(dN_exp.dtype)
+        C = jnp.clip(obs_row / dN_exp_safe, 0.0, 1.0)
+        dN_miss = (1.0 - C) * dN_exp
+        if depth_mask is not None:
+            dN_miss = jnp.where(depth_mask, dN_miss, 0.0)
+        return jnp.trapezoid(dN_miss, zgrid)
+
+    # Chunked scan over occupied rows: pad to a whole number of ``chunk_size``
+    # blocks and mask the padding so padded (all-zero) rows -- which would
+    # otherwise read as empty pixels with C == 0 -- contribute nothing.
+    pad = (-n_occ) % chunk_size
+    n_pad = n_occ + pad
+    obs_pad = jnp.pad(field_obs, ((0, pad), (0, 0)))
+    valid = jnp.arange(n_pad) < n_occ
+    n_chunks = n_pad // chunk_size if chunk_size > 0 else 0
+    obs_chunks = obs_pad.reshape(n_chunks, chunk_size, zgrid.size)
+    valid_chunks = valid.reshape(n_chunks, chunk_size)
+
+    def _body(acc, xs):
+        obs_c, val_c = xs
+        Nm = vmap(_row_N_miss)(obs_c)                        # (chunk,)
+        Nm = jnp.where(val_c, Nm, 0.0)
+        return acc + jnp.sum(Nm), None
+
+    occ_miss_total, _ = lax.scan(
+        _body, jnp.asarray(0.0, dtype=dN_exp.dtype), (obs_chunks, valid_chunks)
+    )
+
+    # Empty pixels: C == 0 -> dN_miss == dN_exp (same depth bound).
+    empty_dN_miss = dN_exp if depth_mask is None else jnp.where(depth_mask, dN_exp, 0.0)
+    empty_N_miss = jnp.trapezoid(empty_dN_miss, zgrid)
+
+    Z = N_obs_total + occ_miss_total + n_empty * empty_N_miss
+    return jnp.log(jnp.maximum(Z, 1e-300))
 
 
 # ------------------------------------------------------------
