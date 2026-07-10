@@ -184,6 +184,19 @@ class EMCatalog(NamedTuple):
     mark_logssfr: Any = None        # (N_rows, N_max_gals) | None
     mark_metallicity: Any = None    # (N_rows, N_max_gals) | None
     mark_color: Any = None          # (N_rows, N_max_gals) | None
+    # --- FIELD-convention sky-weighting normalization inputs (optional) --------
+    # Populated ONLY for ``--catalog_sky_weighting field`` (host-fraction
+    # estimand); ``None`` (default) leaves the conditional per-pixel normalizer
+    # path bit-identical.  They carry the survey-global ingredients needed to
+    # build the GLOBAL normalizer Z_k(theta) = Sum_all-pixels [N_obs + N_miss],
+    # replacing the per-pixel Z[pix] in the mixture weight so ``fcat_k`` measures
+    # the host FRACTION (number-density / sky-clustering contrast) rather than
+    # the per-pixel z-shape preference.  See
+    # :func:`darksirens.redshift.completion.build_field_normalization_inputs` and
+    # :func:`darksirens.redshift.completion.field_global_log_Z`.
+    field_dN_obs_s: Any = None       # (n_occupied, N_grid) float32 smoothed observed density
+    field_n_empty: Any = None        # scalar: number of empty (galaxy-free) survey pixels
+    field_N_obs_total: Any = None    # scalar: total observed real-galaxy count over ALL pixels
 
 
 class GWEvent(NamedTuple):

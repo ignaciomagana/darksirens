@@ -121,6 +121,21 @@ def _make_mixture_likelihood(
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
+    catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
+
+    def _bundle_field_inputs(bundle):
+        """Per-bundle FIELD-convention normalization inputs (survey-global),
+        precomputed by the loader (loaders.py) or supplied directly in tests.
+        Shared by the bundle's PE and selection EMCatalogs so their global Z is
+        the SAME value for the same theta (constants cancel structurally)."""
+        fobs = bundle.get("field_dN_obs_s")
+        if fobs is None:
+            return None, None, None
+        return (
+            barrier(jnp.asarray(fobs)),
+            jnp.asarray(bundle["field_n_empty"], dtype=jnp.float64),
+            jnp.asarray(bundle["field_N_obs_total"], dtype=jnp.float64),
+        )
 
     # Shared (catalog-independent) GW / selection physics arrays.
     m1det_pe = barrier(_to_jax(data, "m1det"))
@@ -180,6 +195,7 @@ def _make_mixture_likelihood(
         apix_k = bundle["apix"]
         lss_q_pe_k, lss_idx_pe_k = _compact_lss_q_for(views, views.unique_pixels_pe)
         lss_q_sel_k, lss_idx_sel_k = _compact_lss_q_for(views, views.unique_pixels_sel)
+        field_obs_k, field_ne_k, field_Nobs_k = _bundle_field_inputs(bundle)
 
         em_catalogs_pe.append(EMCatalog(
             apix=apix_k,
@@ -196,6 +212,9 @@ def _make_mixture_likelihood(
             bright_siren_sky_marginalized=False,
             lss_completion_logq=lss_q_pe_k,
             lss_completion_indexing=lss_idx_pe_k,
+            field_dN_obs_s=field_obs_k,
+            field_n_empty=field_ne_k,
+            field_N_obs_total=field_Nobs_k,
         ))
         em_catalogs_sel.append(EMCatalog(
             apix=apix_k,
@@ -212,6 +231,9 @@ def _make_mixture_likelihood(
             bright_siren_sky_marginalized=False,
             lss_completion_logq=lss_q_sel_k,
             lss_completion_indexing=lss_idx_sel_k,
+            field_dN_obs_s=field_obs_k,
+            field_n_empty=field_ne_k,
+            field_N_obs_total=field_Nobs_k,
         ))
         pe_pixel_cols.append(jnp.asarray(views.sample_to_unique_pe, dtype=jnp.int32))
         sel_pixel_cols.append(jnp.asarray(views.sample_to_unique_sel, dtype=jnp.int32))
@@ -309,6 +331,7 @@ def _make_mixture_likelihood(
             mixture_em_catalogs_pe=mixture_em_catalogs_pe,
             mixture_em_catalogs_sel=mixture_em_catalogs_sel,
             mixture_log_weights=log_w,
+            catalog_sky_weighting=catalog_sky_weighting,
         )
 
     return likelihood
@@ -337,6 +360,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
+    catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
 
     # Weak-lensing magnification backend (resolved up front, before the heavy
     # catalog-view prep, so a missing WL config fails fast).  All values are
@@ -545,6 +569,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             mark_logssfr=marks_pe["mark_logssfr"],
             mark_metallicity=marks_pe["mark_metallicity"],
             mark_color=marks_pe["mark_color"],
+            field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
+            field_n_empty=getattr(catalogs, "field_n_empty", None),
+            field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
         )
         em_catalog_sel = EMCatalog(
             apix=apix,
@@ -570,6 +597,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             mark_logssfr=marks_sel["mark_logssfr"],
             mark_metallicity=marks_sel["mark_metallicity"],
             mark_color=marks_sel["mark_color"],
+            field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
+            field_n_empty=getattr(catalogs, "field_n_empty", None),
+            field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
         )
 
         gw_pe = GWEvent(
@@ -631,6 +661,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 lss_marginalize=lss_marginalize,
                 materialize_redshift_prior_state=materialize_redshift_prior_state,
                 selection_neff_soft_guard=selection_neff_soft_guard,
+                catalog_sky_weighting=catalog_sky_weighting,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -664,6 +695,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             lss_marginalize=lss_marginalize,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
+            catalog_sky_weighting=catalog_sky_weighting,
         )
 
     return likelihood

@@ -3,11 +3,97 @@ pop_extractor.py
 ----------------
 make_pop_extractor(settings) — single source of truth for extracting the
 population parameter sub-vector from the flat sampled coordinate vector theta.
+
+Multitracer post-processing
+---------------------------
+``catalog_sticks_to_weights`` / ``fcat_to_component_fraction`` turn the sampled
+catalog-mixture sticks ``fcat_2 .. fcat_K`` into the interpretable per-catalog
+mixture weights ``w_1 .. w_K`` (host fractions under the FIELD convention),
+exactly reproducing the decoder's own ordering so a posterior chain of sticks
+maps to the same weights the likelihood saw.
 """
 
 from __future__ import annotations
 import jax.numpy as jnp
 from darksirens.gw.populations import pop_model_prior_parser, get_fixed_population_params
+from darksirens.inference.parameters import _sticks_to_log_weights
+
+
+def catalog_sticks_to_weights(v: jnp.ndarray) -> jnp.ndarray:
+    """Catalog-mixture sticks ``fcat_2..fcat_K`` -> weights ``[w_1, .., w_K]``.
+
+    Row-wise ``exp`` of :func:`darksirens.inference.parameters._sticks_to_log_weights`
+    — the SAME stick-breaking construction the likelihood decoder
+    (``ParameterDecoder.decode_mixture``, ``parameters.py``) applies to the sampled
+    sticks — so a posterior chain of sticks maps to exactly the weights the
+    likelihood mixture used.
+
+    Ordering (REMAINDER-FIRST): the returned weights are ``[w_1, w_2, ..., w_K]``
+    with ``w_1`` the stick-breaking *remainder* ``prod_j (1 - v_j)`` and
+    ``w_m = v_{m-1} * prod_{i<m-1}(1 - v_i)`` for ``m = 2..K``, i.e. ``fcat_m`` is
+    the stick ``v_{m-1}``.  This matches ``decode_mixture`` /
+    ``_sticks_to_log_weights`` and is DELIBERATELY NOT the population-grammar
+    stick helper (``darksirens.gw.populations.base._stick_breaking_weights``),
+    which orders the remainder LAST — a different convention that would permute
+    the catalogs.
+
+    K = 2 special case: there is a single stick ``fcat_2`` and the weights are
+    ``[1 - fcat_2, fcat_2]``, so ``w_2`` (the second catalog's host fraction)
+    IS ``fcat_2`` exactly.
+
+    Parameters
+    ----------
+    v : array, shape ``(K-1,)`` or ``(n_samples, K-1)``
+        The sampled catalog sticks ``fcat_2..fcat_K`` (each in ``[0, 1]``).  A 1-D
+        input is treated as a single sample; a 2-D input is mapped row-wise.
+
+    Returns
+    -------
+    weights : array, shape ``(K,)`` or ``(n_samples, K)``
+        The per-catalog mixture weights ``[w_1, .., w_K]`` (non-negative, each row
+        summing to 1).  Boundary sticks (exactly 0 or 1) yield a weight of exactly
+        0 for the emptied catalog, consistent with the ``-inf`` log-weight the
+        decoder feeds the mixture ``logsumexp``.
+    """
+    v = jnp.asarray(v)
+    if v.ndim == 0:
+        v = v[None]
+    if v.ndim == 1:
+        return jnp.exp(_sticks_to_log_weights(v))
+    if v.ndim == 2:
+        from jax import vmap
+        return jnp.exp(vmap(_sticks_to_log_weights)(v))
+    raise ValueError(
+        f"catalog_sticks_to_weights expects a (K-1,) or (n_samples, K-1) array; "
+        f"got ndim={v.ndim}."
+    )
+
+
+def fcat_to_component_fraction(weights: jnp.ndarray, component_index: int) -> jnp.ndarray:
+    """Select one catalog's mixture weight column: the population host fraction.
+
+    A trivial selector on the output of :func:`catalog_sticks_to_weights`, named
+    for its physical meaning: under the FIELD-convention catalog sky weighting the
+    mixture weight ``w_k`` is the fraction of GW HOSTS drawn from catalog ``k``'s
+    tracer population.  For the canonical AGN-vs-galaxy K=2 analysis
+    ``fcat_to_component_fraction(weights, 1)`` returns ``w_2`` — the AGN host
+    fraction ``f_agn`` (a.k.a. ``alpha_AGN``), the estimand of the gws-agn campaign.
+
+    Parameters
+    ----------
+    weights : array, shape ``(K,)`` or ``(n_samples, K)``
+        Per-catalog weights from :func:`catalog_sticks_to_weights`.
+    component_index : int
+        The 0-based catalog column to select (``0`` -> ``w_1``, ``1`` -> ``w_2``,
+        ...).  Negative indices count from the end, NumPy-style.
+
+    Returns
+    -------
+    fraction : array, shape ``()`` or ``(n_samples,)``
+        The selected catalog's host fraction, one value per sample.
+    """
+    weights = jnp.asarray(weights)
+    return weights[..., component_index]
 
 
 def make_pop_extractor(settings: dict):

@@ -68,6 +68,74 @@ def selection_prior_model(universe_model: str) -> str:
     return universe_model
 
 
+def _require_field_mode_scope(
+    universe_model, wl_enabled, lss_marginalize, mark_model, catalogs
+):
+    """Reject FIELD-convention sky weighting outside its supported scope.
+
+    All checks are static (universe/model strings, static bools, and pytree
+    STRUCTURE via ``is not None``), so they resolve once per trace -- mirroring
+    the K>=2 mixture ``NotImplementedError`` guards.  The estimand only holds
+    when the missing-galaxy budget carries no LSS modulation (dummy overdensity,
+    no Q_LSS), so those are rejected here.  Both ``dark_sirens`` and
+    ``dark_sirens_complete`` are supported under the field convention (the
+    complete-model field normalizer Z = Sum_pix N_obs is theta-independent).
+    """
+    if universe_model not in ("dark_sirens", "dark_sirens_complete"):
+        raise NotImplementedError(
+            "catalog_sky_weighting='field' supports universe_model in "
+            "{'dark_sirens', 'dark_sirens_complete'} only; got "
+            f"{universe_model!r}."
+        )
+    if wl_enabled:
+        raise NotImplementedError(
+            "catalog_sky_weighting='field' is not supported with weak lensing."
+        )
+    if lss_marginalize:
+        raise NotImplementedError(
+            "catalog_sky_weighting='field' is not supported with lss_marginalize."
+        )
+    if mark_model not in (None, "none"):
+        raise NotImplementedError(
+            "catalog_sky_weighting='field' is not supported with a marked-host "
+            "model (mark_model)."
+        )
+    for cat in catalogs:
+        if any(
+            getattr(cat, name) is not None
+            for name in (
+                "lss_completion_logq",
+                "lss_completion_q",
+                "lss_completion_logq_members",
+                "lss_completion_q_members",
+            )
+        ):
+            raise NotImplementedError(
+                "catalog_sky_weighting='field' is not supported with an "
+                "LSS-completion Q_LSS table/ensemble."
+            )
+        if cat.field_dN_obs_s is None:
+            raise ValueError(
+                "catalog_sky_weighting='field' requires the survey-global field "
+                "normalization inputs on every catalog (field_dN_obs_s / "
+                "field_n_empty / field_N_obs_total); build them from the FULL-sky "
+                "catalog via build_field_normalization_inputs."
+            )
+        # field_global_log_Z hard-codes lss = 1, so the numerator's overdensity
+        # modulation must be the legacy dummy (delta_g_pix_z shape (1, N_grid),
+        # guaranteed zero-valued upstream by the use_LSS=False CLI gate). The
+        # VALUE cannot be asserted here (delta_g is a tracer under jit); the
+        # static SHAPE is the jit-safe proxy. A real per-pixel delta_g with
+        # field mode would silently bias log10n0/delta by the un-modulated
+        # normalizer (measured 33% Z divergence in the adversarial review).
+        if cat.delta_g_pix_z is not None and cat.delta_g_pix_z.shape[0] != 1:
+            raise NotImplementedError(
+                "catalog_sky_weighting='field' requires the dummy (1, N_grid) "
+                "overdensity grid; a per-pixel delta_g is not supported "
+                "(field_global_log_Z assumes lss = 1)."
+            )
+
+
 @partial(
     jax.jit,
     static_argnames=[
@@ -88,6 +156,7 @@ def selection_prior_model(universe_model: str) -> str:
         "materialize_redshift_prior_state",
         "selection_neff_soft_guard",
         "n_catalogs",
+        "catalog_sky_weighting",
     ],
 )
 def darksiren_log_likelihood(
@@ -133,6 +202,11 @@ def darksiren_log_likelihood(
     mixture_em_catalogs_pe: tuple = (),
     mixture_em_catalogs_sel: tuple = (),
     mixture_log_weights: jnp.ndarray | None = None,
+    # --- catalog sky-weighting convention (dark_sirens only) ----------------
+    # "conditional" (default): per-pixel normalizer Z[pix] -- bit-identical
+    # legacy behaviour.  "field": survey-global normalizer so the mixture weight
+    # is the host FRACTION.  Static; gated to the plain galaxy-count host model.
+    catalog_sky_weighting: str = "conditional",
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
@@ -215,6 +289,19 @@ def darksiren_log_likelihood(
     selection_model = selection_prior_model(universe_model)
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
+    # FIELD-convention sky weighting scope gate (static; covers K = 1 and K >= 2).
+    if catalog_sky_weighting == "field":
+        _require_field_mode_scope(
+            universe_model, wl_enabled, lss_marginalize, mark_model,
+            (em_catalog_pe, em_catalog_sel)
+            + tuple(mixture_em_catalogs_pe) + tuple(mixture_em_catalogs_sel),
+        )
+    elif catalog_sky_weighting != "conditional":
+        raise ValueError(
+            "catalog_sky_weighting must be 'conditional' or 'field', got "
+            f"{catalog_sky_weighting!r}."
+        )
+
     # ------------------------------------------------------------------
     # K-catalog mixture branch (n_catalogs >= 2).  The redshift prior at the two
     # seams becomes log p_mix(z) = logsumexp_k(log w_k + log p_k(z, pix[:,k])),
@@ -222,10 +309,30 @@ def darksiren_log_likelihood(
     # times.  K = 1 falls through to the verbatim single-catalog body below.
     # ------------------------------------------------------------------
     if n_catalogs >= 2:
-        if universe_model != "dark_sirens":
+        if universe_model == "dark_sirens_complete":
+            # The complete-model catalog mixture is a COHERENT estimand only under
+            # the field (survey-global) normalizer: each catalog's complete prior
+            # is then a density over the SAME survey field, so the per-sample
+            # logsumexp mixes coherent quantities -- and, because that mixture is
+            # all--inf-safe, a populated catalog RESCUES a node where a sparse
+            # catalog's pixel is empty (-inf).  Under the conditional (per-pixel)
+            # normalizer every catalog's complete prior is separately normalized
+            # WITHIN its own pixel, so mixing them blends per-pixel-normalized
+            # densities -- an incoherent estimand, hence forbidden.
+            if catalog_sky_weighting != "field":
+                raise NotImplementedError(
+                    "The K-catalog mixture supports "
+                    "universe_model='dark_sirens_complete' only under "
+                    "catalog_sky_weighting='field'; the conditional (per-pixel) "
+                    "normalizer makes the complete-model mixture an incoherent "
+                    "estimand (mixing per-pixel-normalized complete priors)."
+                )
+        elif universe_model != "dark_sirens":
             raise NotImplementedError(
                 "The K-catalog mixture likelihood supports "
-                f"universe_model='dark_sirens' only; got {universe_model!r}."
+                "universe_model='dark_sirens' (any sky weighting) or "
+                "'dark_sirens_complete' (field sky weighting only); got "
+                f"{universe_model!r}."
             )
         if wl_enabled:
             raise NotImplementedError(
@@ -271,6 +378,7 @@ def darksiren_log_likelihood(
                 pe_model, cosmo, surveys_all[k], catalogs_pe_all[k],
                 mark_model="none",
                 materialize_state=materialize_redshift_prior_state,
+                catalog_sky_weighting=catalog_sky_weighting,
             )
             for k in range(n_catalogs)
         ]
@@ -279,6 +387,7 @@ def darksiren_log_likelihood(
                 selection_model, cosmo, surveys_all[k], catalogs_sel_all[k],
                 mark_model="none",
                 materialize_state=materialize_redshift_prior_state,
+                catalog_sky_weighting=catalog_sky_weighting,
             )
             for k in range(n_catalogs)
         ]
@@ -300,6 +409,7 @@ def darksiren_log_likelihood(
                 mixture_log_weights[k] + eval_redshift_prior_with_state(
                     pe_model, prior_states_univ[k], z, pix[:, k],
                     cosmo, surveys_all[k], catalogs[k],
+                    catalog_sky_weighting=catalog_sky_weighting,
                 )
                 for k in range(n_catalogs)
             ]
@@ -310,6 +420,7 @@ def darksiren_log_likelihood(
                 mixture_log_weights[k] + eval_redshift_prior_with_state(
                     selection_model, prior_states_sel[k], z, pix[:, k],
                     cosmo, surveys_all[k], catalogs[k],
+                    catalog_sky_weighting=catalog_sky_weighting,
                 )
                 for k in range(n_catalogs)
             ]
@@ -388,11 +499,13 @@ def darksiren_log_likelihood(
         pe_model, cosmo, survey, em_catalog_pe,
         mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
         materialize_state=materialize_redshift_prior_state,
+        catalog_sky_weighting=catalog_sky_weighting,
     )
     prior_state_sel = prepare_redshift_prior_state(
         selection_model, cosmo, survey, em_catalog_sel,
         mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
         materialize_state=materialize_redshift_prior_state,
+        catalog_sky_weighting=catalog_sky_weighting,
     )
 
     # WL quadrature plumbing — only allocated when wl_enabled (static).  Lognormal
@@ -428,12 +541,14 @@ def darksiren_log_likelihood(
         # logsumexp and is caught by the final isfinite check.
         def log_prior_z(z, pix, catalog):
             return eval_redshift_prior_with_state(
-                pe_model, prior_state_univ, z, pix, cosmo, survey, catalog
+                pe_model, prior_state_univ, z, pix, cosmo, survey, catalog,
+                catalog_sky_weighting=catalog_sky_weighting,
             )
 
         def log_prior_z_selection(z, pix, catalog):
             return eval_redshift_prior_with_state(
-                selection_model, prior_state_sel, z, pix, cosmo, survey, catalog
+                selection_model, prior_state_sel, z, pix, cosmo, survey, catalog,
+                catalog_sky_weighting=catalog_sky_weighting,
             )
 
         def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
@@ -573,19 +688,26 @@ def darksiren_log_likelihood(
         n_members = prior_state_univ.log_Z_members.shape[0]
         # Per-member states reuse the (Q-independent) kernels + log_Nobs and swap in
         # the member missing-galaxy density / normalisation; vmap over the M axis.
+        # ``log_Z_global`` is inert here (field mode is gated off for
+        # lss_marginalize); carry a broadcast scalar so the vmap in_axes pytree
+        # (member_axes) has a matching leaf.
         univ_members = DarkSirenPriorState(
             kernels=prior_state_univ.kernels, log_Nobs=prior_state_univ.log_Nobs,
             dN_miss=prior_state_univ.dN_miss_members, log_Z=prior_state_univ.log_Z_members,
+            log_Z_global=jnp.asarray(0.0),
         )
         sel_has_members = getattr(prior_state_sel, "dN_miss_members", None) is not None
         sel_members = (
             DarkSirenPriorState(
                 kernels=prior_state_sel.kernels, log_Nobs=prior_state_sel.log_Nobs,
                 dN_miss=prior_state_sel.dN_miss_members, log_Z=prior_state_sel.log_Z_members,
+                log_Z_global=jnp.asarray(0.0),
             )
             if sel_has_members else prior_state_sel
         )
-        member_axes = DarkSirenPriorState(kernels=None, log_Nobs=None, dN_miss=0, log_Z=0)
+        member_axes = DarkSirenPriorState(
+            kernels=None, log_Nobs=None, dN_miss=0, log_Z=0, log_Z_global=None
+        )
         ll_members = jax.vmap(
             _ll_given_states,
             in_axes=(member_axes, member_axes if sel_has_members else None),
