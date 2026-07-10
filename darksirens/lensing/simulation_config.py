@@ -41,6 +41,8 @@ SCHEMA: dict[str, dict[str, tuple[type | tuple[type, ...], Any, Any]]] = {
         "singleton_lensing": (str, {"off", "sl_mixture"}, None),
         "prior_overrides": (dict, None, None),
         "run_singles_only_ablation": (bool, None, None),
+        "pe_max_per_pair": (int, 1, None),
+        "sel_batch_size": (int, 1, None),
         "off_retry_on_nonfinite": (bool, None, None), "off_retry_n_unlensed_inj": (int, 1, None),
         "off_retry_nlive": (int, 1, None),
     },
@@ -51,7 +53,7 @@ DEFAULTS: dict[str, Any] = {
     "mock": {"n_universe": 4000, "n_singletons": 2, "n_lensed_pairs": 2, "nsamp": 48, "n_unlensed_inj": 1000, "n_lensed_inj": 1000, "conditioning": "fixed_counts", "pop_model": "powerlaw+peak", "include_lensed_singletons": False, "tau_A": None, "tau_n": None, "observation_times": "placeholder", "t_obs_days": 365.25},
     "candidate_graph": {"max_edges_per_event": 2, "max_total_edges": 8, "include_time_marks": True, "include_sky_marks": True, "include_mass_distance_score": True, "edge_mark_prior_keys": ["log_sky_overlap"]},
     "selection": {"pair_tag_model": "snr_time_sky", "pair_tag_constant": 1.0, "pair_tag_perturb_logit": 0.0},
-    "inference": {"partition_mode": "marginalize_exact", "partition_component_mode": "componentwise", "max_exact_partitions": 10000, "max_component_events": None, "max_component_edges": None, "max_component_partitions": 10000, "max_total_partitions": 10000, "sampler": "dynesty", "nlive": 32, "dlogz": 10.0, "pair_batch_size": 256, "y_nodes_pair": 64, "diagnostics_only": False, "fix_lens_rate": False, "fix_population": True, "singleton_lensing": "off", "prior_overrides": {}, "run_singles_only_ablation": False, "fixed_parameter_values": {"tau_n": 3.0}, "lens_prior_overrides": {"log10_tau_A": [-5.0, -2.5]}, "off_retry_on_nonfinite": False, "off_retry_n_unlensed_inj": None, "off_retry_nlive": None},
+    "inference": {"partition_mode": "marginalize_exact", "partition_component_mode": "componentwise", "max_exact_partitions": 10000, "max_component_events": None, "max_component_edges": None, "max_component_partitions": 10000, "max_total_partitions": 10000, "sampler": "dynesty", "nlive": 32, "dlogz": 10.0, "pair_batch_size": 256, "y_nodes_pair": 64, "diagnostics_only": False, "fix_lens_rate": False, "fix_population": True, "singleton_lensing": "off", "prior_overrides": {}, "run_singles_only_ablation": False, "pe_max_per_pair": None, "sel_batch_size": None, "fixed_parameter_values": {"tau_n": 3.0}, "lens_prior_overrides": {"log10_tau_A": [-5.0, -2.5]}, "off_retry_on_nonfinite": False, "off_retry_n_unlensed_inj": None, "off_retry_nlive": None},
     "study": {"cases": None, "seed": 2026, "profile": "tiny"},
 }
 

@@ -426,6 +426,7 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
            "--singleton_lensing", str(cfg.get("singleton_lensing", "off")),
            "--fix_lens_rate", fix_lens_rate, "--fixed_parameter_values", fixed_parameter_values, "--lens_prior_overrides", lens_prior_overrides,
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples, "--pe_max_per_pair", str(cfg["pe_max"]),
+           *(["--sel_batch_size", str(cfg["sel_batch_size"])] if cfg.get("sel_batch_size") else []),
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
            "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir)]
@@ -726,7 +727,7 @@ def main(argv: list[str] | None = None) -> int:
     args.dlogz = float(resolved_config["inference"]["dlogz"])
     args.diagnostics_only = bool(resolved_config["inference"]["diagnostics_only"])
     mock = resolved_config["mock"]; graph = resolved_config["candidate_graph"]; inf = resolved_config["inference"]
-    cfg = {"n_universe": mock["n_universe"], "n_sing": mock["n_singletons"], "n_pair": mock["n_lensed_pairs"], "nsamp": mock["nsamp"], "n_unlensed_inj": mock["n_unlensed_inj"], "n_lensed_inj": mock["n_lensed_inj"], "conditioning": mock["conditioning"], "pop_model": mock.get("pop_model", "powerlaw+peak"), "include_lensed_singletons": bool(mock.get("include_lensed_singletons", False)), "tau_A": mock.get("tau_A"), "tau_n": mock.get("tau_n"), "observation_times": mock.get("observation_times", "placeholder"), "t_obs_days": mock.get("t_obs_days", 365.25), "pe_max": min(mock["nsamp"], 512), "seed": resolved_config["study"]["seed"], **graph, **resolved_config["selection"], **inf}
+    cfg = {"n_universe": mock["n_universe"], "n_sing": mock["n_singletons"], "n_pair": mock["n_lensed_pairs"], "nsamp": mock["nsamp"], "n_unlensed_inj": mock["n_unlensed_inj"], "n_lensed_inj": mock["n_lensed_inj"], "conditioning": mock["conditioning"], "pop_model": mock.get("pop_model", "powerlaw+peak"), "include_lensed_singletons": bool(mock.get("include_lensed_singletons", False)), "tau_A": mock.get("tau_A"), "tau_n": mock.get("tau_n"), "observation_times": mock.get("observation_times", "placeholder"), "t_obs_days": mock.get("t_obs_days", 365.25), "pe_max": (inf.get("pe_max_per_pair") or min(mock["nsamp"], 512)), "seed": resolved_config["study"]["seed"], **graph, **resolved_config["selection"], **inf}
     work = Path(args.workdir).resolve(); work.mkdir(parents=True, exist_ok=True)
     write_config(work / "resolved_config.yaml", resolved_config)
     plan = build_plan(args, cfg, resolved_config, work)
