@@ -665,9 +665,21 @@ def main():
     opts.lss_completion = opts.lss_completions[0] if opts.lss_completions else None
 
     if opts.n_catalogs >= 2:
-        if opts.universe_model != "dark_sirens":
+        _sky_w = getattr(opts, "catalog_sky_weighting", "conditional")
+        if opts.universe_model == "dark_sirens_complete":
+            # Complete-model mixture is coherent only under the field
+            # (survey-global) normalizer; the conditional (per-pixel) normalizer
+            # would mix per-pixel-normalized complete priors (incoherent estimand).
+            if _sky_w != "field":
+                _fatal("A K>=2 mixture with --universe_model dark_sirens_complete "
+                       "requires --catalog_sky_weighting field; the conditional "
+                       "(per-pixel) normalizer makes the complete-model mixture an "
+                       "incoherent estimand (mixing per-pixel-normalized complete "
+                       "priors).")
+        elif opts.universe_model != "dark_sirens":
             _fatal("Multiple --survey_path catalogs (a K>=2 mixture) require "
-                   "--universe_model dark_sirens.")
+                   "--universe_model dark_sirens, or dark_sirens_complete with "
+                   "--catalog_sky_weighting field.")
         if getattr(opts, "use_LSS", False):
             _fatal("--use_LSS is not supported with a multi-catalog mixture.")
         if getattr(opts, "lss_marginalize", False):
@@ -687,10 +699,10 @@ def main():
     # missing-galaxy budget must carry no LSS modulation (delta_g / Q_LSS) or
     # marks, or the global normalizer and the per-pixel numerator diverge.
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
-        if opts.universe_model != "dark_sirens":
-            _fatal("--catalog_sky_weighting field supports --universe_model dark_sirens "
-                   f"only (got '{opts.universe_model}'; dark_sirens_complete field mode "
-                   "is a later PR).")
+        if opts.universe_model not in ("dark_sirens", "dark_sirens_complete"):
+            _fatal("--catalog_sky_weighting field supports --universe_model "
+                   "dark_sirens or dark_sirens_complete only (got "
+                   f"'{opts.universe_model}').")
         if getattr(opts, "use_LSS", False):
             _fatal("--catalog_sky_weighting field is not supported with --use_LSS.")
         if getattr(opts, "lss_marginalize", False):

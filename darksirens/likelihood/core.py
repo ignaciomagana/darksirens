@@ -77,14 +77,15 @@ def _require_field_mode_scope(
     STRUCTURE via ``is not None``), so they resolve once per trace -- mirroring
     the K>=2 mixture ``NotImplementedError`` guards.  The estimand only holds
     when the missing-galaxy budget carries no LSS modulation (dummy overdensity,
-    no Q_LSS), so those are rejected here; the ``dark_sirens_complete`` field
-    convention lands in a later PR.
+    no Q_LSS), so those are rejected here.  Both ``dark_sirens`` and
+    ``dark_sirens_complete`` are supported under the field convention (the
+    complete-model field normalizer Z = Sum_pix N_obs is theta-independent).
     """
-    if universe_model != "dark_sirens":
+    if universe_model not in ("dark_sirens", "dark_sirens_complete"):
         raise NotImplementedError(
-            "catalog_sky_weighting='field' supports universe_model='dark_sirens' "
-            f"only; got {universe_model!r} (dark_sirens_complete field mode is a "
-            "later PR)."
+            "catalog_sky_weighting='field' supports universe_model in "
+            "{'dark_sirens', 'dark_sirens_complete'} only; got "
+            f"{universe_model!r}."
         )
     if wl_enabled:
         raise NotImplementedError(
@@ -308,10 +309,30 @@ def darksiren_log_likelihood(
     # times.  K = 1 falls through to the verbatim single-catalog body below.
     # ------------------------------------------------------------------
     if n_catalogs >= 2:
-        if universe_model != "dark_sirens":
+        if universe_model == "dark_sirens_complete":
+            # The complete-model catalog mixture is a COHERENT estimand only under
+            # the field (survey-global) normalizer: each catalog's complete prior
+            # is then a density over the SAME survey field, so the per-sample
+            # logsumexp mixes coherent quantities -- and, because that mixture is
+            # all--inf-safe, a populated catalog RESCUES a node where a sparse
+            # catalog's pixel is empty (-inf).  Under the conditional (per-pixel)
+            # normalizer every catalog's complete prior is separately normalized
+            # WITHIN its own pixel, so mixing them blends per-pixel-normalized
+            # densities -- an incoherent estimand, hence forbidden.
+            if catalog_sky_weighting != "field":
+                raise NotImplementedError(
+                    "The K-catalog mixture supports "
+                    "universe_model='dark_sirens_complete' only under "
+                    "catalog_sky_weighting='field'; the conditional (per-pixel) "
+                    "normalizer makes the complete-model mixture an incoherent "
+                    "estimand (mixing per-pixel-normalized complete priors)."
+                )
+        elif universe_model != "dark_sirens":
             raise NotImplementedError(
                 "The K-catalog mixture likelihood supports "
-                f"universe_model='dark_sirens' only; got {universe_model!r}."
+                "universe_model='dark_sirens' (any sky weighting) or "
+                "'dark_sirens_complete' (field sky weighting only); got "
+                f"{universe_model!r}."
             )
         if wl_enabled:
             raise NotImplementedError(
