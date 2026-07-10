@@ -631,10 +631,15 @@ def load_inputs(opts):
     chieff = np.asarray(chieff)
     p_pe = np.asarray(p_pe)
     observed_catalog_meta = None
+    pair_time_t_obs_window_sec = None
     if getattr(opts, "observed_catalog_path", None):
         observed_catalog_meta = validate_observed_catalog_file(
             opts.observed_catalog_path
         )
+        with open(opts.observed_catalog_path, "r", encoding="utf-8") as _f:
+            _raw_catalog = json.load(_f)
+        if _raw_catalog.get("observation_times") == "uniform":
+            pair_time_t_obs_window_sec = float(_raw_catalog["t_obs_days"]) * 86400.0
         if int(observed_catalog_meta["n_events"]) != int(n_sing):
             raise SystemExit(
                 f"observed_catalog n_events={observed_catalog_meta['n_events']} "
@@ -685,6 +690,7 @@ def load_inputs(opts):
             lensed=None,
             pair_time_delta_t_obs=jnp.zeros((0,), dtype=jnp.float64),
             pair_time_sigma=jnp.zeros((0,), dtype=jnp.float64),
+            pair_time_t_obs_window_sec=pair_time_t_obs_window_sec,
             observed_catalog=observed_catalog_meta,
             **_load_singleton_lensing_inputs(opts),
         )
@@ -1147,6 +1153,7 @@ def load_inputs(opts):
             edge_prior_contributions if partition_mode == "marginalize_exact" else None
         ),
         edge_mark_prior_keys=list(parse_edge_mark_keys(getattr(opts, "edge_mark_prior_keys", None))),
+        pair_time_t_obs_window_sec=pair_time_t_obs_window_sec,
         observed_catalog=observed_catalog_meta,
         observed_catalog_heuristic=bool(
             heuristic_unified_observed_catalog and not explicit_unified_observed_catalog
@@ -1411,6 +1418,20 @@ def _resolve_pair_marks(opts, inp):
     )
 
 
+def _require_time_window(opts, inp):
+    """Time marks need the observing-run length for the coincidence odds."""
+    if (
+        getattr(opts, "pair_marks", "none") == "time"
+        and inp.get("pair_time_t_obs_window_sec") is None
+    ):
+        raise SystemExit(
+            "--pair_marks time requires an observed catalog with "
+            "observation_times='uniform' (t_obs_days): the time-mark "
+            "coincidence odds need the observing-run length. Regenerate the "
+            "mock with --observation-times uniform."
+        )
+
+
 def build_cluster_likelihood(
     opts, inp, decoder, lens_sampled_labels=None, fixed_parameter_values=None
 ):
@@ -1433,6 +1454,7 @@ def build_cluster_likelihood(
         else WL_SELECTION_STANDARD
     )
     pair_marks = _resolve_pair_marks(opts, inp)
+    _require_time_window(opts, inp)
     universe_model = opts.universe_model
 
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
@@ -1509,6 +1531,7 @@ def build_cluster_likelihood(
                     "pair_time_sigma",
                     inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
                 ),
+                pair_time_t_obs_window_sec=inp.get("pair_time_t_obs_window_sec"),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
                 singleton_lensing=singleton_lensing,
@@ -1624,6 +1647,7 @@ def build_cluster_diagnostics(
         else WL_SELECTION_STANDARD
     )
     pair_marks = _resolve_pair_marks(opts, inp)
+    _require_time_window(opts, inp)
     universe_model = opts.universe_model
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
     singleton_lensing = (
@@ -1679,6 +1703,7 @@ def build_cluster_diagnostics(
                     "pair_time_sigma",
                     inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
                 ),
+                pair_time_t_obs_window_sec=inp.get("pair_time_t_obs_window_sec"),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
                 singleton_lensing=singleton_lensing,

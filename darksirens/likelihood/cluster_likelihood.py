@@ -266,8 +266,23 @@ def cluster_log_likelihood_pair(
     pair_marks: int = 0,
     delta_t_obs: jnp.ndarray | None = None,
     sigma_delta_t: jnp.ndarray | None = None,
+    t_obs_window_sec: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Symmetric J=2 pair log-likelihood ``log L_2(d_i, d_j | λ, Θ)``.
+
+    Time marks are COINCIDENCE ODDS. A time mark contributes the ratio of
+    the observed |Δt| density under the lensed hypothesis to that under the
+    unlensed one — p(Δt|lensed)/p(Δt|unlensed) — not the lensed density
+    alone. The singleton branch of the partition posterior carries no
+    arrival-time terms, so charging the pair branch only the lensed density
+    p_L ~ 1/T0 silently taxes every pairing by ~ln T0 (≈13 nats at the SIS
+    default), which is what erased true-pair recovery in the G pilots. For
+    two independent events with arrivals uniform over an observing run of
+    length T, the unordered separation density is
+    p_U(Δt) = 2 (T − Δt) / T², so each time-marked pair branch adds
+    −ln p_U(Δt) alongside the lensed density (both mark modes). Requires
+    ``t_obs_window_sec`` (from the observed catalog's uniform observation
+    times).
 
     Symmetrizes over the two image-to-event assignments (i→+,j→- and
     i→-,j→+) by logsumexp. Each branch is itself a logsumexp over the
@@ -284,6 +299,19 @@ def cluster_log_likelihood_pair(
     log_L2 : scalar
         log of the pair likelihood. -inf if both branches vanish.
     """
+    log_inv_p_unlensed = jnp.asarray(0.0, dtype=jnp.float64)
+    if pair_marks in (1, PAIR_MARKS_DELTA_COLLAPSE):
+        if t_obs_window_sec is None:
+            raise ValueError(
+                "time marks require t_obs_window_sec (observing-run length) "
+                "for the unlensed arrival-coincidence denominator"
+            )
+        T = jnp.asarray(t_obs_window_sec, dtype=jnp.float64)
+        dt = jnp.abs(jnp.asarray(delta_t_obs, dtype=jnp.float64))
+        # p_U(dt) = 2 (T - dt) / T^2 for |dt| < T (unordered uniform pair)
+        p_u = jnp.clip(2.0 * (T - dt) / (T * T), 1e-300, None)
+        log_inv_p_unlensed = jnp.where(dt < T, -jnp.log(p_u), jnp.inf)
+
     if pair_marks == PAIR_MARKS_DELTA_COLLAPSE:
         if delta_t_obs is None or sigma_delta_t is None:
             raise ValueError(
@@ -299,8 +327,16 @@ def cluster_log_likelihood_pair(
         y_k = y_star + sigma_y * u_nodes_t
         in_support = (y_k > 0.0) & (y_k < 1.0)
         y_nodes = jnp.clip(y_k, 1e-9, 1.0 - 1e-9)
-        log_wy = jnp.where(in_support, log_wH_t - jnp.log(sis_params.T0), -jnp.inf)
+        log_wy = jnp.where(
+            in_support,
+            log_wH_t - jnp.log(sis_params.T0) + log_inv_p_unlensed,
+            -jnp.inf,
+        )
         pair_marks = 0  # mark absorbed as the quadrature measure
+    elif pair_marks == 1:
+        # Legacy quadrature mark: same coincidence denominator, applied to
+        # the shared y-weights (scalar per pair).
+        log_wy = log_wy + log_inv_p_unlensed
 
     # SIS magnifications at each y-node: μ_+ ≥ μ_-, both positive on (0, 1)
     mu_plus, mu_minus = mu_plus_minus_from_y(y_nodes)
