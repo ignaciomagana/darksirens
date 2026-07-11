@@ -396,10 +396,15 @@ def log_catalog_prior(
     ngal = None if em_catalog.ngals is None else em_catalog.ngals[pix]
 
     log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+    # Unit-mass kernel convention, matching the dark_sirens_complete prior
+    # state (prepare_redshift_prior_state): catalog counts already track
+    # hosts per redshift shell, so volume-weighted (True) kernels would
+    # double-count dV_c/dz for any catalog whose dN/dz follows the volume.
     log_kw, sig_eff = _row_kernel_state(
-        zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, True
+        zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, False
     )
-    return _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig_eff))
+    log_g_z = jnp.interp(z, zgrid, log_g_grid)
+    return log_g_z + _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig_eff))
 
 
 # Vectorised over (z, pix) pairs — both vmapped simultaneously so the
