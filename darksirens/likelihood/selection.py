@@ -32,8 +32,14 @@ Taylor expansion of log μ around its mean.
 Reliability criterion
 ~~~~~~~~~~~~~~~~~~~~~
 Farr (2019) recommends discarding proposals where N_eff < 4 N_obs
-(equivalently returning -inf).  We use the slightly more conservative
-threshold of 5 N_obs following Vitale et al. (2022).
+(equivalently returning -inf); Vitale et al. (2022) use 5 N_obs.  Both
+control the MEAN correction only.  Because the likelihood carries
+``-N_obs log mu``, the Monte-Carlo VARIANCE of the selection term is
+``Var[N_obs log mu] ~ N_obs^2 / N_eff`` — controlling it needs
+``N_eff >> N_obs^2``, which is strictly stronger than 5 N_obs once
+N_obs > 5.  We therefore guard on
+``N_eff > max(5 N_obs, N_obs^2 / max_selection_variance)`` with
+``max_selection_variance = 1`` by default (sigma(N_obs log mu) <= 1 nat).
 
 References
 ~~~~~~~~~~
@@ -107,12 +113,30 @@ def selection_log_correction(
     Neff: jnp.ndarray,
     nEvents: int,
     soft_guard: bool = False,
+    max_selection_variance: float = 1.0,
 ) -> jnp.ndarray:
     """
     Log selection correction term (Farr 2019 / Talbot & Golomb 2023).
 
-    Returns ``-inf`` when N_eff < 5 * N_obs (Vitale et al. 2022 criterion),
-    indicating the injection set is too sparse for a reliable estimate.
+    Returns ``-inf`` when the injection set is too sparse for a reliable
+    estimate, under BOTH criteria:
+
+    * ``N_eff <= 5 N_obs`` — the Vitale et al. (2022) floor on the MEAN
+      correction;
+    * ``N_eff <= N_obs^2 / max_selection_variance`` — a bound on the
+      VARIANCE of the total selection term: the likelihood carries
+      ``-N_obs log mu``, so a Monte-Carlo fluctuation ``sigma(log mu) ~
+      1/sqrt(N_eff)`` enters amplified by N_obs, with
+      ``Var[N_obs log mu] ~ N_obs^2 / N_eff``.  The 5 N_obs floor alone
+      does NOT control this at larger catalogs: at N_obs = 50 it admits
+      N_eff ~ 300, where an ordinary ~3.5 sigma dip in log mu across a
+      parameter grid (0.19 nats at N_eff ~ 350) becomes an e^{9.5}
+      likelihood spike — measured in end-to-end mock closures, where such
+      spikes carried 30-86% of the posterior mass in a single grid cell
+      and reproduced at the same parameter values across independent
+      event realizations sharing an injection set.  The default
+      ``max_selection_variance = 1.0`` caps sigma(N_obs log mu) at 1 nat.
+
     With ``soft_guard=True`` (gradient-based samplers) the hard wall is
     replaced by a steep smooth penalty — see the inline comment.
 
@@ -128,12 +152,14 @@ def selection_log_correction(
     log_mu : log of the selection integral estimate
     Neff   : effective sample size of the selection integral
     nEvents : number of observed GW events
+    max_selection_variance : cap on Var[N_obs log mu]; the variance
+        criterion is ``N_eff > N_obs^2 / max_selection_variance``.
 
     Returns
     -------
     Scalar log-likelihood contribution from the selection term.
     """
-    threshold = 5.0 * nEvents
+    threshold = max(5.0 * nEvents, nEvents**2 / max_selection_variance)
     too_sparse = Neff <= threshold
     if soft_guard:
         # Gradient-based samplers (NumPyro NUTS) cannot cross a hard -inf wall:
