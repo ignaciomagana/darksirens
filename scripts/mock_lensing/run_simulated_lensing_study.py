@@ -412,7 +412,11 @@ def off_control_nonfinite_warning(off_class: dict[str, str], off_run: Path | Non
 
 def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
     diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
-    max_samples = "0" if diagnostics_only else "5000"
+    # 0 = run to the dlogz criterion. The old hardcoded 5000-call cap
+    # silently truncated every pilot/production posterior ("sampling was
+    # stopped short"): ~5000 rwalk calls past init is ~200 iterations at
+    # nlive 512 — ESS ~ 1 at paper scale.
+    max_samples = "0" if diagnostics_only else str(cfg.get("max_samples") or 0)
     nlive = args.nlive or cfg["nlive"]
     fix_lens_rate = str(cfg.get("fix_lens_rate", False)).lower()
     fixed_parameter_values = json.dumps(cfg.get("fixed_parameter_values", {"tau_n": 3.0}))
@@ -447,7 +451,11 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
 
 def off_control_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
     diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
-    max_samples = "0" if diagnostics_only else "5000"
+    # 0 = run to the dlogz criterion. The old hardcoded 5000-call cap
+    # silently truncated every pilot/production posterior ("sampling was
+    # stopped short"): ~5000 rwalk calls past init is ~200 iterations at
+    # nlive 512 — ESS ~ 1 at paper scale.
+    max_samples = "0" if diagnostics_only else str(cfg.get("max_samples") or 0)
     nlive = args.nlive or cfg["nlive"]
     cmd = [sys.executable, "-m", "darksirens.cli.inference_lensing", "--gw_path", str(case_dir / "mock_observed_gw_pe.h5"),
            "--observed_catalog_path", str(case_dir / "observed_catalog.json"), "--gwselection_path", str(case_dir / "mock_gw_selection.h5"),
@@ -470,7 +478,11 @@ def singles_only_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: a
     sl_mixture), with the same population/lens-rate treatment as the main
     run. Requires a mock generated with include_lensed_singletons."""
     diagnostics_only = bool(cfg.get("diagnostics_only", args.diagnostics_only))
-    max_samples = "0" if diagnostics_only else "5000"
+    # 0 = run to the dlogz criterion. The old hardcoded 5000-call cap
+    # silently truncated every pilot/production posterior ("sampling was
+    # stopped short"): ~5000 rwalk calls past init is ~200 iterations at
+    # nlive 512 — ESS ~ 1 at paper scale.
+    max_samples = "0" if diagnostics_only else str(cfg.get("max_samples") or 0)
     nlive = args.nlive or cfg["nlive"]
     fix_lens_rate = str(cfg.get("fix_lens_rate", False)).lower()
     fixed_parameter_values = json.dumps(cfg.get("fixed_parameter_values", {"tau_n": 3.0}))
