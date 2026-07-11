@@ -272,7 +272,17 @@ def prepare_redshift_prior_state(
                 "catalog_sky_weighting must be 'conditional' or 'field', got "
                 f"{catalog_sky_weighting!r}."
             )
-        kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=True)
+        # Unit-mass kernels (volume_weighted=False): the complete-catalog host
+        # prior is the catalog's own (weighted) redshift distribution.  The
+        # catalog COUNTS already track candidate hosts per redshift shell, so
+        # additionally weighting each galaxy by g(z_i) = dV_c/dz (1+z)^delta
+        # (volume_weighted=True, d58af14) double-counts the volume element:
+        # any catalog with dN/dz ∝ dV_c/dz (volume-limited, or a uniform-in-
+        # comoving-volume null) gets an effective host prior ∝ (dV_c/dz)^2.
+        # Measured on a uniform-in-V_c null catalog, p_cat/(dV/dz) has
+        # log-log slope +0.94 with volume weighting and 0.00 without (see
+        # tests/test_complete_catalog_volume_convention.py).
+        kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=False)
         Nobs = _row_counts(em_catalog)
         row_has = Nobs > 0.0
         vol = _precompute_volume_grid(cosmo)
