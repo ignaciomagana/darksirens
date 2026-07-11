@@ -45,7 +45,10 @@ from jax.scipy.special import logsumexp
 
 from darksirens.redshift import get_redshift_prior
 from darksirens.gw.populations import pop_model_parser
-from darksirens.likelihood.selection import compute_selection_term, selection_log_correction
+from darksirens.likelihood.selection import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    compute_selection_term,
+)
 from darksirens.inference.utils import log_sample_weight
 from darksirens.likelihood.wl_weight import (
     log_sample_weight_wl_or_standard,
@@ -188,6 +191,7 @@ def darksiren_log_likelihood_with_clusters(
     fc_pdet_params=None,               # FCPdetParams (MIXTURE only)
     y_nodes_single: int = 32,
     selection_neff_soft_guard: bool = False,
+    max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
 
@@ -375,6 +379,7 @@ def darksiren_log_likelihood_with_clusters(
         n_singletons_observed=(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
         n_clusters_observed=(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
         soft_guard=selection_neff_soft_guard,
+        max_likelihood_variance=max_likelihood_variance,
     )
     log_mu_combined = jnp.logaddexp(log_mu_1, log_mu_2)
     log_sigma2_combined = jnp.logaddexp(log_sigma2_1, log_sigma2_2)

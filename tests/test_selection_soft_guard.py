@@ -19,7 +19,7 @@ from darksirens.likelihood.factory import _resolve_redshift_prior_materializatio
 
 N_EVENTS = 120
 # effective guard threshold: max(Vitale 5 N_obs floor, variance criterion
-# N_obs^2 / max_selection_variance) — at N=120 the variance criterion rules.
+# N_obs^2 / max_likelihood_variance) — at N=120 the variance criterion rules.
 THRESHOLD = max(5.0 * N_EVENTS, N_EVENTS**2 / 1.0)
 
 

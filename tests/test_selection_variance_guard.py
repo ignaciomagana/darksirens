@@ -1,17 +1,25 @@
-"""The selection-reliability guard must bound the VARIANCE of -N_obs log mu.
+"""The selection-reliability guard must bound the VARIANCE of the TOTAL
+log-likelihood estimator.
 
-The likelihood carries ``-N_obs log mu``; a Monte-Carlo fluctuation
-``sigma(log mu) ~ 1/sqrt(N_eff)`` therefore enters amplified by N_obs:
-``Var[N_obs log mu] ~ N_obs^2 / N_eff``.  The Vitale et al. 5 N_obs floor
-does not control this once N_obs > 5: at N_obs = 50 it admits N_eff ~ 300,
-where an ordinary ~3.5 sigma grid-scan dip in log mu (0.19 nats at
-N_eff ~ 350, measured) becomes an e^{9.5} likelihood spike — end-to-end
-mock closures showed single grid cells carrying 30-86% of the posterior
-mass, recurring at the same parameter values across independent event
-realizations sharing one injection set.
+The state-of-the-art criterion (Essick & Farr 2022; Talbot & Golomb 2023;
+GWTC-4.0/5.0) bounds ``sigma^2_lnL = Sum_i sigma^2_i + N_obs^2 / N_eff``,
+where ``Sum_i sigma^2_i`` is the summed per-event reweighting variance
+(``log_evidence_and_mc_variance``) and ``N_obs^2 / N_eff`` is the selection
+component: the likelihood carries ``-N_obs log mu``, so a Monte-Carlo
+fluctuation ``sigma(log mu) ~ 1/sqrt(N_eff)`` enters amplified by N_obs.
+The Vitale et al. 5 N_obs floor does not control this once N_obs > 5: at
+N_obs = 50 it admits N_eff ~ 300, where an ordinary ~3.5 sigma grid-scan
+dip in log mu (0.19 nats at N_eff ~ 350, measured) becomes an e^{9.5}
+likelihood spike — end-to-end mock closures showed single grid cells
+carrying 30-86% of the posterior mass, recurring at the same parameter
+values across independent event realizations sharing one injection set.
 
-The guard is ``N_eff > max(5 N_obs, N_obs^2 / max_selection_variance)``
-with ``max_selection_variance = 1`` (sigma(N_obs log mu) <= 1 nat).
+The guard is
+``N_eff > max(5 N_obs, N_obs^2 / (max_likelihood_variance - Sum_i sigma^2_i))``
+with ``max_likelihood_variance = 1`` (sigma(lnL) <= 1 nat) by default.  With
+``Sum_i sigma^2_i = 0`` (``pe_variance_sum=0``, the default) it reduces
+exactly to the selection-only bound ``N_eff > N_obs^2 / max_likelihood_variance``,
+so the three legacy tests below are unchanged.
 """
 
 import jax
@@ -42,12 +50,12 @@ def test_small_catalogs_keep_the_vitale_floor():
     assert np.isfinite(float(selection_log_correction(jnp.asarray(0.0), jnp.asarray(16.0), n)))
 
 
-def test_max_selection_variance_relaxes_the_criterion():
-    # Explicitly allowing more selection variance reproduces the legacy
+def test_max_likelihood_variance_relaxes_the_criterion():
+    # Explicitly allowing more total-likelihood variance reproduces the legacy
     # admission region (opt-out knob for exploratory runs).
     n = 50
     val = selection_log_correction(
-        jnp.asarray(0.0), jnp.asarray(300.0), n, max_selection_variance=10.0)
+        jnp.asarray(0.0), jnp.asarray(300.0), n, max_likelihood_variance=10.0)
     assert np.isfinite(float(val))  # threshold max(250, 2500/10=250) = 250 < 300
 
 

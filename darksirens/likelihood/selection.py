@@ -24,7 +24,7 @@ and N_eff is the effective sample size of the selection integral
 
 The coefficient N_obs(N_obs+3)/(2 N_eff) is the leading-order correction
 from the uncertainty in μ on the log-likelihood (see the derivation in
-the appendix of Talbot & Golomb 2023, arXiv:2209.02209, eq. A9).  This
+the appendix of Talbot & Golomb 2023, arXiv:2304.06138, eq. A9).  This
 is *not* the simpler N_obs²/(2 N_eff) term from the basic Farr (2019)
 expansion; the extra factor of 3 arises from the next-order term in the
 Taylor expansion of log μ around its mean.
@@ -33,20 +33,37 @@ Reliability criterion
 ~~~~~~~~~~~~~~~~~~~~~
 Farr (2019) recommends discarding proposals where N_eff < 4 N_obs
 (equivalently returning -inf); Vitale et al. (2022) use 5 N_obs.  Both
-control the MEAN correction only.  Because the likelihood carries
-``-N_obs log mu``, the Monte-Carlo VARIANCE of the selection term is
-``Var[N_obs log mu] ~ N_obs^2 / N_eff`` — controlling it needs
-``N_eff >> N_obs^2``, which is strictly stronger than 5 N_obs once
-N_obs > 5.  We therefore guard on
-``N_eff > max(5 N_obs, N_obs^2 / max_selection_variance)`` with
-``max_selection_variance = 1`` by default (sigma(N_obs log mu) <= 1 nat).
+control the MEAN correction only.  The state-of-the-art criterion
+(Essick & Farr 2022; Talbot & Golomb 2023; adopted by the GWTC-4.0 and
+GWTC-5.0 population analyses) instead bounds the Monte-Carlo variance of
+the TOTAL log-likelihood estimator,
+
+    σ²_lnL = Σ_i σ²_i  +  N_obs² σ²_sel  <=  max_likelihood_variance
+
+where σ²_i = Σ_j w_ij²/(Σ_j w_ij)² − 1/n_i is the per-event variance from
+reweighting n_i PE samples (``log_evidence_and_mc_variance``) and
+σ²_sel = Var[log μ] = 1/N_eff is the selection variance (this module's
+N_eff = μ²/Var(μ) already contains the −1/N_draw term, so N_obs²/N_eff
+is exactly the N_obs² σ²_sel component).  The likelihood carries
+``-N_obs log mu``, so selection noise enters amplified by N_obs;
+controlling it needs ``N_eff >> N_obs^2``, strictly stronger than
+5 N_obs once N_obs > 5.  We therefore guard on
+
+    N_eff > max(5 N_obs, N_obs² / (max_likelihood_variance − Σ_i σ²_i))
+
+with ``max_likelihood_variance = 1`` by default (σ(lnL) <= 1 nat, the
+GWTC-4.0/5.0 threshold), keeping the Vitale mean floor.  With
+``Σ_i σ²_i = 0`` this reduces exactly to the selection-only variance
+criterion ``N_eff > N_obs² / max_likelihood_variance``.
 
 References
 ~~~~~~~~~~
 - Farr, W.M. (2019). arXiv:1904.10879
 - Thrane & Talbot (2019). PASA 36, e010
-- Talbot & Golomb (2023). arXiv:2209.02209
+- Essick & Farr (2022). arXiv:2204.00461
+- Talbot & Golomb (2023). MNRAS 526, 3495. arXiv:2304.06138
 - Vitale et al. (2022). arXiv:2007.05579
+- GWTC-4.0 populations: arXiv:2508.18083; GWTC-5.0: arXiv:2605.27226
 """
 
 from __future__ import annotations
@@ -59,6 +76,22 @@ from jax.scipy.special import logsumexp
 from darksirens.utils.utils import logdiffexp
 from darksirens.core.types import GWEvent, EMCatalog
 from darksirens.likelihood.events import pad_gw_event_to_multiple
+
+# Single source of truth for the guard's default budget (the GWTC-4.0/5.0
+# threshold): argparse defaults and getattr fallbacks all reference this, so
+# CLI and programmatic callers cannot silently diverge.
+DEFAULT_MAX_LIKELIHOOD_VARIANCE = 1.0
+
+# Numerical floor for the remaining variance budget once the per-event
+# Monte-Carlo variances are subtracted: keeps the traced threshold finite
+# (the guard then rejects through the Neff comparison, never through NaN).
+# Its magnitude is load-bearing: with nEvents >= 1 the saturated threshold is
+# >= 1/_MIN_VARIANCE_BUDGET = 1e12, which must exceed any attainable Neff
+# (bounded by the injection-campaign size, <~ 1e9) so an over-budget proposal
+# is ALWAYS rejected.  Raising this epsilon without re-deriving that bound
+# can silently admit over-budget proposals; it also floors any requested
+# budget below 1e-12 (irrelevant in practice).
+_MIN_VARIANCE_BUDGET = 1e-12
 
 
 # ============================================================
@@ -108,37 +141,111 @@ def _lse_to_log_mu_neff(
     return log_mu, Neff, log_sigma2
 
 
+def log_evidence_and_mc_variance(
+    ldw: jnp.ndarray,
+    nsamp: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Per-event Monte-Carlo log-evidence and the variance of its log.
+
+    The per-event term of the hierarchical likelihood is the importance
+    average over the event's n PE samples,
+
+        ln Ẑ = -log n + logsumexp(ldw)
+
+    and the delta-method variance of ln Ẑ (Essick & Farr 2022,
+    arXiv:2204.00461; Talbot & Golomb 2023, arXiv:2304.06138, eqs 8-9) is
+
+        σ² = Σ_j w_j² / (Σ_j w_j)²  −  1/n
+
+    Masked/invalid samples enter as w = 0 draws and COUNT in n (they are
+    zero-weight members of the same PE sample set).  By Cauchy-Schwarz
+    σ² ∈ [0, 1 − 1/n]: 0 for uniform weights, 1 − 1/n when a single
+    sample carries all the weight.
+
+    An event whose samples ALL mask to -inf returns ``(-inf, 0.0)``: the
+    -inf log-evidence already kills the likelihood, and the variance must
+    stay finite so it cannot NaN-poison the total-variance guard.  The
+    aggregates are sanitized BEFORE the exp so the dead branch of the
+    ``jnp.where`` carries no NaN cotangent (both branches of a ``where``
+    are differentiated — the same reverse-mode NaN class documented in
+    ``_logsumexp_neginf_safe``).
+
+    Parameters
+    ----------
+    ldw : per-sample log importance weights (invalid samples at -inf)
+    nsamp : number of PE samples, INCLUDING masked ones
+
+    Returns
+    -------
+    log_evidence : scalar — ln Ẑ (-inf when all samples are masked)
+    variance     : scalar — σ² of ln Ẑ, in [0, 1 − 1/n]; 0.0 when ln Ẑ = -inf
+    """
+    # Shared finite mask for both reductions (isfinite(2x) == isfinite(x)):
+    # bit-identical to _logsumexp_neginf_safe applied to ldw and 2*ldw
+    # separately (either sentinel underflows to exactly zero weight), one
+    # nsamp-length isfinite/where/any pass cheaper inside the per-event scan.
+    finite = jnp.isfinite(ldw)
+    any_finite = jnp.any(finite)
+    safe = jnp.where(finite, ldw, -1e30)
+    lse = jnp.where(any_finite, logsumexp(safe), -jnp.inf)
+    lse2 = jnp.where(any_finite, logsumexp(2.0 * safe), -jnp.inf)
+    lse_safe = jnp.where(any_finite, lse, 0.0)
+    lse2_safe = jnp.where(any_finite, lse2, 0.0)
+    # exp(lse2 - 2*lse) - 1/n is algebraically 1/N_eff of _lse_to_log_mu_neff
+    # at Ndraw = nsamp; kept in this direct form for the all-masked NaN safety.
+    variance = jnp.where(
+        any_finite,
+        jnp.maximum(jnp.exp(lse2_safe - 2.0 * lse_safe) - 1.0 / nsamp, 0.0),
+        0.0,
+    )
+    return -jnp.log(nsamp) + lse, variance
+
+
 def selection_log_correction(
     log_mu: jnp.ndarray,
     Neff: jnp.ndarray,
     nEvents: int,
     soft_guard: bool = False,
-    max_selection_variance: float = 1.0,
+    max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    pe_variance_sum: jnp.ndarray | float = 0.0,
 ) -> jnp.ndarray:
     """
     Log selection correction term (Farr 2019 / Talbot & Golomb 2023).
 
-    Returns ``-inf`` when the injection set is too sparse for a reliable
-    estimate, under BOTH criteria:
+    Returns ``-inf`` when the Monte-Carlo estimate of the log-likelihood
+    is too noisy to trust, under BOTH criteria:
 
     * ``N_eff <= 5 N_obs`` — the Vitale et al. (2022) floor on the MEAN
       correction;
-    * ``N_eff <= N_obs^2 / max_selection_variance`` — a bound on the
-      VARIANCE of the total selection term: the likelihood carries
-      ``-N_obs log mu``, so a Monte-Carlo fluctuation ``sigma(log mu) ~
-      1/sqrt(N_eff)`` enters amplified by N_obs, with
-      ``Var[N_obs log mu] ~ N_obs^2 / N_eff``.  The 5 N_obs floor alone
-      does NOT control this at larger catalogs: at N_obs = 50 it admits
+    * ``σ²_lnL = pe_variance_sum + N_obs²/N_eff > max_likelihood_variance``
+      — the GWTC-4.0/5.0 bound on the VARIANCE of the TOTAL log-likelihood
+      estimator (Essick & Farr 2022; Talbot & Golomb 2023).
+      ``pe_variance_sum`` is Σ_i σ²_i over the per-event reweighting
+      variances (``log_evidence_and_mc_variance``); ``N_obs²/N_eff`` is
+      the selection component: the likelihood carries ``-N_obs log mu``,
+      so a Monte-Carlo fluctuation ``sigma(log mu) ~ 1/sqrt(N_eff)``
+      enters amplified by N_obs.  The 5 N_obs floor alone does NOT
+      control this at larger catalogs: at N_obs = 50 it admits
       N_eff ~ 300, where an ordinary ~3.5 sigma dip in log mu across a
       parameter grid (0.19 nats at N_eff ~ 350) becomes an e^{9.5}
       likelihood spike — measured in end-to-end mock closures, where such
       spikes carried 30-86% of the posterior mass in a single grid cell
       and reproduced at the same parameter values across independent
       event realizations sharing an injection set.  The default
-      ``max_selection_variance = 1.0`` caps sigma(N_obs log mu) at 1 nat.
+      ``max_likelihood_variance = 1.0`` caps sigma(lnL) at 1 nat, the
+      threshold adopted by the GWTC-4.0/5.0 population analyses.  With
+      ``pe_variance_sum = 0`` (the default) the criterion reduces exactly
+      to the selection-only bound ``N_eff > N_obs²/max_likelihood_variance``.
 
     With ``soft_guard=True`` (gradient-based samplers) the hard wall is
-    replaced by a steep smooth penalty — see the inline comment.
+    replaced by a steep smooth penalty — see the inline comment.  The
+    wall stays keyed on ``Neff/threshold``; the per-event variances enter
+    through the threshold, so it engages smoothly as the budget is spent.
+    Once ``pe_variance_sum`` exceeds the budget the threshold saturates at
+    ``N_obs²/1e-12`` (its gradient w.r.t. ``pe_variance_sum`` clamps to
+    zero there) and the wall repels through the ``Neff``/``log_mu``
+    channels at its validated full depth.
 
     The correction is:
 
@@ -152,15 +259,27 @@ def selection_log_correction(
     log_mu : log of the selection integral estimate
     Neff   : effective sample size of the selection integral
     nEvents : number of observed GW events
-    max_selection_variance : cap on Var[N_obs log mu]; the variance
-        criterion is ``N_eff > N_obs^2 / max_selection_variance``.
+    max_likelihood_variance : cap on the variance of the total
+        log-likelihood estimator, ``pe_variance_sum + N_obs²/N_eff``.
+    pe_variance_sum : Σ_i σ²_i, the summed per-event Monte-Carlo
+        variances of ``ln Ẑ_i`` (traced scalar or 0.0).  CAUTION: the
+        total-variance criterion is only enforced when the caller threads
+        this in; at the 0.0 default the guard silently reverts to the
+        selection-only bound (currently the case for the cluster/lensing
+        stack, whose per-pair variances arrive in a follow-up).
 
     Returns
     -------
     Scalar log-likelihood contribution from the selection term.
     """
-    threshold = max(5.0 * nEvents, nEvents**2 / max_selection_variance)
-    too_sparse = Neff <= threshold
+    n = float(nEvents)
+    # Remaining budget for the selection term after the per-event MC
+    # variances; jnp.maximum (not Python max): the threshold is traced
+    # whenever pe_variance_sum is.
+    budget = jnp.maximum(max_likelihood_variance - pe_variance_sum, _MIN_VARIANCE_BUDGET)
+    threshold = jnp.maximum(5.0 * n, (n * n) / budget)
+    # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.
+    too_sparse = ~(Neff > threshold)
     if soft_guard:
         # Gradient-based samplers (NumPyro NUTS) cannot cross a hard -inf wall:
         # every trajectory that brushes it is flagged divergent (the H1-profile
@@ -178,23 +297,27 @@ def selection_log_correction(
         # there. Above ~1.05x threshold the gate underflows and the branch is
         # numerically identical to the hard guard's valid branch. The 1/Neff
         # Taylor term is frozen at the threshold so it cannot blow up
-        # (positively) in the regime the wall is pushing away from.
+        # (positively) in the regime the wall is pushing away from.  NOTE:
+        # with nonzero pe_variance_sum the threshold is the TOTAL-variance
+        # boundary, inflated beyond the pure selection boundary N^2/max_var
+        # (up to N^2/1e-12 once the budget is exhausted) — the gate turn-on
+        # location and the frozen Taylor value move with it by design.
         x = Neff / threshold
         gate = jax.nn.softplus(200.0 * (1.0 - x) - 10.0)
-        reward_mag = nEvents * jax.nn.softplus(-log_mu)
+        reward_mag = n * jax.nn.softplus(-log_mu)
         wall = -gate * (100.0 + 2.0 * reward_mag)
         Neff_taylor = jnp.maximum(Neff, threshold)
         correction = (
-            -nEvents * log_mu
-            + nEvents * (3 + nEvents) / (2.0 * Neff_taylor)
+            -n * log_mu
+            + n * (3.0 + n) / (2.0 * Neff_taylor)
         )
         total = correction + wall
         # mu == 0 exactly (all-invalid injections): correction and wall are
         # +/-inf and their sum is NaN — collapse to the hard verdict.
         return jnp.where(jnp.isfinite(total), total, -jnp.inf)
     correction = (
-        -nEvents * log_mu
-        + nEvents * (3 + nEvents) / (2.0 * Neff)
+        -n * log_mu
+        + n * (3.0 + n) / (2.0 * Neff)
     )
     return jnp.where(too_sparse, -jnp.inf, correction)
 
