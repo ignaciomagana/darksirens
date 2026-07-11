@@ -7,6 +7,7 @@ import healpy as hp
 import jax
 import numpy as np
 
+from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.cli.common import _fixed_dark_energy_metadata
 from darksirens.inference.sampling import _json_safe_tinyns_value
 
@@ -221,6 +222,8 @@ def save_results_hdf5(
                 pass
         f.attrs["selection_neff_soft_guard"] = bool(
             getattr(opts, "selection_neff_soft_guard", False))
+        f.attrs["max_likelihood_variance"] = float(
+            getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
         f.attrs["nuts_warmup"]     = int(getattr(opts, "nuts_warmup", 0))
         f.attrs["nuts_samples"]    = int(getattr(opts, "nuts_samples", 0))
         f.attrs["nuts_chains"]     = int(getattr(opts, "nuts_chains", 0))

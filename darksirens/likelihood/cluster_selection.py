@@ -78,7 +78,10 @@ from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.lensing.lensed_injections import LensedInjectionSet
 from darksirens.lensing.slmarks import SISLensParams, tau_2_SIS
 from darksirens.utils.utils import logdiffexp
-from darksirens.likelihood.selection import selection_log_correction
+from darksirens.likelihood.selection import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_log_correction,
+)
 
 
 def _per_source_log_weight(
@@ -275,6 +278,8 @@ def combined_selection_log_correction(
     n_singletons_observed: int,
     n_clusters_observed: int,
     soft_guard: bool = False,
+    max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    pe_variance_sum=0.0,
 ) -> jnp.ndarray:
     """Master-likelihood selection-correction for the marked-Poisson
     singleton + J=2 cluster model.
@@ -308,6 +313,10 @@ def combined_selection_log_correction(
         Number of declared singleton events (events NOT in any pair).
     n_clusters_observed
         Number of declared candidate pair clusters.
+    max_likelihood_variance, pe_variance_sum
+        Total-log-likelihood variance budget per GWTC-4/5, forwarded to
+        ``selection_log_correction``; per-event/pair variance threading
+        arrives in a follow-up.
 
     Returns
     -------
@@ -342,5 +351,10 @@ def combined_selection_log_correction(
     # 100%-divergent-NUTS failure the main CLI was fixed for (library
     # review, lensing-stack finding 4).
     return selection_log_correction(
-        log_mu_tot, Neff_tot, n_tot, soft_guard=soft_guard
+        log_mu_tot,
+        Neff_tot,
+        n_tot,
+        soft_guard=soft_guard,
+        max_likelihood_variance=max_likelihood_variance,
+        pe_variance_sum=pe_variance_sum,
     )

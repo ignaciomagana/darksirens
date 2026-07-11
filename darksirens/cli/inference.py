@@ -60,6 +60,7 @@ from darksirens.gw.populations.utils import (
     normalization_grid_settings,
 )
 from darksirens.inference.data import load_all_data, validate_loaded_survey_shapes
+from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.factory import (
     _redshift_prior_materialization_reason,
     _resolve_redshift_prior_materialization,
@@ -500,6 +501,14 @@ def main():
             "whenever the soft guard ran."
         ),
     )
+    g.add_argument(
+        "--max_likelihood_variance", type=float, default=DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+        help=("Cap on the Monte-Carlo variance of the TOTAL log-likelihood "
+              "estimator, sigma^2_lnL = sum_i sigma^2_i + N_obs^2/Neff_sel "
+              "(Essick & Farr 2022; Talbot & Golomb 2023, arXiv:2304.06138; the "
+              "GWTC-4.0/5.0 population-analysis criterion, default 1.0). Proposals "
+              "exceeding it are guarded (hard -inf or the soft wall per "
+              "--selection_neff_guard). The Vitale 5 N_obs mean floor always applies."))
     g.add_argument("--prior_overrides", default=None, metavar="JSON")
     g.add_argument("--fixed_parameter_values", default=None, metavar="JSON")
     g.add_argument("--counterpart", nargs="+", metavar="RA_DEC_Z",
@@ -774,9 +783,17 @@ def main():
     )
     if opts.selection_neff_soft_guard:
         print(
-            "  [i] Sparse-selection Neff guard: SOFT (smooth wall for gradient-based "
+            "  [i] Sparse-selection guard: SOFT (smooth wall for gradient-based "
             f"sampling; mode={guard_mode}). Verify the posterior clears the "
-            "Neff <= 5 N_obs boundary post hoc."
+            "total-log-likelihood-variance criterion (sigma^2_lnL <= "
+            "max_likelihood_variance, and the Neff <= 5 N_obs floor) post hoc."
+        )
+    max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
+    if max_likelihood_variance != DEFAULT_MAX_LIKELIHOOD_VARIANCE:
+        print(
+            "  [i] Total-log-likelihood-variance cap: "
+            f"max_likelihood_variance={max_likelihood_variance} "
+            "(default 1.0 is the GWTC-4.0/5.0 criterion)."
         )
 
     if opts.universe_model == "bright_sirens":
