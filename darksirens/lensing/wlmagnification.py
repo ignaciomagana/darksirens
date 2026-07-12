@@ -39,6 +39,7 @@ References
 
 from __future__ import annotations
 
+import warnings
 from typing import NamedTuple, Any
 
 import jax
@@ -316,6 +317,23 @@ def make_tabulated_log_p_wl(
     z_grid = jnp.asarray(z_grid, dtype=jnp.float64)
     log_mu_grid = jnp.asarray(log_mu_grid, dtype=jnp.float64)
     log_p_table = jnp.asarray(log_p_table, dtype=jnp.float64)
+
+    # Known limitation (library review, lensing finding): a coarse log_mu_grid
+    # cannot resolve the narrow low-z p(mu|z) of the lognormal WL model, so the
+    # per-event mu-marginal integrates to ~0 for z <~ 0.3 and those events are
+    # silently dropped. This backend is NOT exposed by the CLI (which uses the
+    # validated Gauss-Hermite lognormal path). Warn so a direct-API caller
+    # verifies the mu-grid resolution before any production use.
+    if int(log_mu_grid.shape[-1]) < 64:
+        warnings.warn(
+            f"tabulated WL backend: log_mu_grid has {int(log_mu_grid.shape[-1])} "
+            "nodes, which under-resolves the narrow low-z p(mu|z) and can "
+            "silently drop z<~0.3 events (int p(mu|z) dmu ~ 0). Refine the "
+            "mu-grid or use the lognormal (Gauss-Hermite) WL backend, and "
+            "verify int p(mu|z) dmu ~ 1 across your z-grid.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     def log_p_wl_fn(mu: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
         log_mu = jnp.log(mu)

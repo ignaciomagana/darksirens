@@ -24,7 +24,7 @@ and N_eff is the effective sample size of the selection integral
 
 The coefficient N_obs(N_obs+3)/(2 N_eff) is the leading-order correction
 from the uncertainty in μ on the log-likelihood (see the derivation in
-the appendix of Talbot & Golomb 2023, arXiv:2209.02209, eq. A9).  This
+the appendix of Talbot & Golomb 2023, arXiv:2304.06138, eq. A9).  This
 is *not* the simpler N_obs²/(2 N_eff) term from the basic Farr (2019)
 expansion; the extra factor of 3 arises from the next-order term in the
 Taylor expansion of log μ around its mean.
@@ -45,7 +45,7 @@ References
 ~~~~~~~~~~
 - Farr, W.M. (2019). arXiv:1904.10879
 - Thrane & Talbot (2019). PASA 36, e010
-- Talbot & Golomb (2023). arXiv:2209.02209
+- Talbot & Golomb (2023). arXiv:2304.06138
 - Vitale et al. (2022). arXiv:2007.05579
 """
 

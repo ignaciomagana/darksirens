@@ -2474,15 +2474,23 @@ def main():
                 "format_version"
             ) or inp["observed_catalog"].get("pe_format_version")
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            # The partition diagnostics are evaluated ONCE at the prior midpoint,
+            # so the parameter-dependent quantities (expected/MAP pair counts,
+            # marginalized logL) are NOT posterior expectations. Prefix them
+            # prior_midpoint_* and stamp the eval point, mirroring results.hdf5
+            # -- bare names let a downstream tool read a pre-posterior number as
+            # the run's E[n_pairs]. Structural counts (n_partitions, ...) are
+            # eval-point-independent and stay bare.
             settings.update(
-                expected_n_pairs=float(diagnostics["expected_n_pairs"]),
-                map_n_pairs=int(diagnostics["map_partition"]["n_pairs"]),
+                partition_diagnostics_eval_point="prior_midpoint",
+                prior_midpoint_expected_n_pairs=float(diagnostics["expected_n_pairs"]),
+                prior_midpoint_map_n_pairs=int(diagnostics["map_partition"]["n_pairs"]),
+                prior_midpoint_logL_marginalized=float(diagnostics["logL_marginalized"]),
                 n_partitions=int(diagnostics["n_partitions"]),
                 approximate_total_partitions=int(diagnostics.get("approximate_total_partitions", diagnostics["n_partitions"])),
                 partition_component_mode=diagnostics.get("partition_component_mode"),
                 factorized_exact=bool(diagnostics.get("factorized_exact", False)),
                 global_partitions_enumerated=bool(diagnostics.get("global_partitions_enumerated", True)),
-                logL_marginalized=float(diagnostics["logL_marginalized"]),
             )
         _write_json(os.path.join(run_dir, "settings.json"), settings)
         save_tinyns_diagnostics_json(results, run_dir, opts)
