@@ -193,6 +193,154 @@ def sample_z_from_grid(
     return sample_histogram_1d(u, zgrid, log_cell_dens)
 
 
+# ── window-truncated samplers (per-event support boxes) ─────────────────────
+#
+# A single population-wide proposal starves narrow event posteriors (a
+# low-mass, low-z event may receive ~none of J draws).  These variants draw
+# from the SAME target restricted to a window [lo, hi], with the truncation
+# normaliser folded into the exact proposal density — plain importance
+# sampling with a better proposal, unbiased for any window that covers the
+# integrand's support.  Windows may be traced scalars (hyperparameter-
+# dependent), and the samplers are designed to be vmapped over events.
+
+
+def _hist_cdf_nodes(edges: jnp.ndarray, log_cell_dens: jnp.ndarray):
+    """Piecewise-linear CDF of a histogram density at the cell edges."""
+    log_mass = log_cell_dens + jnp.log(jnp.diff(edges))
+    log_norm = logsumexp(log_mass)
+    cdf = jnp.concatenate(
+        [jnp.zeros(1, dtype=log_mass.dtype), jnp.cumsum(jnp.exp(log_mass - log_norm))]
+    )
+    return cdf, log_norm
+
+
+def _hist_cdf_at(edges, cdf_nodes, log_cell_dens, log_norm, x):
+    """Exact histogram CDF evaluated at arbitrary x (linear within cells)."""
+    k = jnp.clip(jnp.searchsorted(edges, x, side="right") - 1, 0, edges.shape[0] - 2)
+    return jnp.clip(
+        cdf_nodes[k] + jnp.exp(log_cell_dens[k] - log_norm) * (x - edges[k]), 0.0, 1.0
+    )
+
+
+def sample_histogram_trunc(
+    u: jnp.ndarray,
+    edges: jnp.ndarray,
+    log_cell_dens: jnp.ndarray,
+    lo,
+    hi,
+) -> HistogramSample:
+    """Inverse-CDF draw from a histogram density truncated to [lo, hi].
+
+    ``log_s`` is the exact density of the truncated, renormalised proposal.
+    A window carrying (numerically) no target mass yields a huge ``log_s``
+    (tiny normaliser), so downstream ``log t - log s`` weights collapse to
+    -inf — the correct "population excludes this event" behaviour.
+    """
+    lo = jnp.clip(lo, edges[0], edges[-1])
+    hi = jnp.clip(hi, edges[0], edges[-1])
+    hi = jnp.maximum(hi, lo)
+
+    cdf_nodes, log_norm = _hist_cdf_nodes(edges, log_cell_dens)
+    F_lo = _hist_cdf_at(edges, cdf_nodes, log_cell_dens, log_norm, lo)
+    F_hi = _hist_cdf_at(edges, cdf_nodes, log_cell_dens, log_norm, hi)
+    span = jnp.maximum(F_hi - F_lo, jnp.finfo(cdf_nodes.dtype).tiny)
+
+    up = F_lo + u * span
+    K = edges.shape[0] - 1
+    k = jnp.clip(jnp.searchsorted(cdf_nodes, up, side="right") - 1, 0, K - 1)
+    denom = jnp.maximum(cdf_nodes[k + 1] - cdf_nodes[k], jnp.finfo(up.dtype).tiny)
+    frac = jnp.clip((up - cdf_nodes[k]) / denom, 0.0, 1.0)
+    x = jnp.clip(edges[k] + frac * (edges[k + 1] - edges[k]), lo, hi)
+
+    log_s = log_cell_dens[k] - log_norm - jnp.log(span)
+    return HistogramSample(x=x, cell=k, log_s=log_s, log_norm=log_norm)
+
+
+def sample_q_marginal_trunc(
+    u: jnp.ndarray,
+    m1_edges: jnp.ndarray,
+    q_edges: jnp.ndarray,
+    log_t_cells: jnp.ndarray,
+    q_win,
+) -> HistogramSample:
+    """q draw from the m1-marginalised target truncated to ``q_win``.
+
+    First stage of the chirp-band mass sampler: q comes from the full-m1
+    marginal (a proposal choice, corrected exactly downstream); the m1 stage
+    (:func:`sample_m1_given_q_trunc`) then applies per-draw m1 windows that
+    may depend on the drawn q (e.g. a chirp-mass band).  The caller owns any
+    density floor on ``log_t_cells``.
+    """
+    dm = jnp.diff(m1_edges)
+    dq = jnp.diff(q_edges)
+    log_mass = log_t_cells + jnp.log(dm)[:, None] + jnp.log(dq)[None, :]
+    log_col_dens = logsumexp(log_mass, axis=0) - jnp.log(dq)
+    return sample_histogram_trunc(u, q_edges, log_col_dens, q_win[0], q_win[1])
+
+
+def sample_m1_given_q_trunc(
+    u: jnp.ndarray,
+    m1_edges: jnp.ndarray,
+    log_t_cells: jnp.ndarray,
+    q_cells: jnp.ndarray,
+    m1_lo: jnp.ndarray,
+    m1_hi: jnp.ndarray,
+):
+    """m1 draw from the conditional t(m1 | q-cell), per-draw window [lo, hi].
+
+    Second stage of the chirp-band sampler: each draw j inverts the CDF of
+    column ``q_cells[j]`` of the target grid restricted to its own window
+    (e.g. the event's chirp-mass band at the drawn q and z).  Returns
+    ``(m1, log_s)`` with the exact truncated conditional density.
+    """
+    def _one(u_j, c_j, lo_j, hi_j):
+        out = sample_histogram_trunc(
+            u_j[None], m1_edges, log_t_cells[:, c_j], lo_j, hi_j
+        )
+        return out.x[0], out.log_s[0]
+
+    return jax.vmap(_one)(u, q_cells, m1_lo, m1_hi)
+
+
+def sample_mass_q_trunc(
+    u1: jnp.ndarray,
+    u2: jnp.ndarray,
+    m1_edges: jnp.ndarray,
+    q_edges: jnp.ndarray,
+    log_t_cells: jnp.ndarray,
+    m1_win,
+    q_win,
+) -> MassQSample:
+    """(m1, q) draw from the 2-D target truncated to a per-event box.
+
+    m1 comes from the full-q marginal truncated to ``m1_win``; q from the
+    selected row's conditional truncated to ``q_win``.  Both truncation
+    normalisers enter ``log_s`` exactly, so the estimator stays unbiased for
+    any box.
+    """
+    log_t_cells = _floored(log_t_cells)
+    dm = jnp.diff(m1_edges)
+    dq = jnp.diff(q_edges)
+    log_mass = log_t_cells + jnp.log(dm)[:, None] + jnp.log(dq)[None, :]
+    log_norm = logsumexp(log_mass)
+
+    # m1 marginal density per unit m1 (integrated over the FULL q range —
+    # a proposal choice; the q window enters through the conditional below).
+    log_row_dens = logsumexp(log_mass, axis=1) - jnp.log(dm)
+    row = sample_histogram_trunc(u1, m1_edges, log_row_dens, m1_win[0], m1_win[1])
+    r, m1 = row.cell, row.x
+
+    # q | row, truncated to q_win: vmap the 1-D truncated sampler over draws.
+    def _q_draw(u_j, dens_row):
+        out = sample_histogram_trunc(u_j[None], q_edges, dens_row, q_win[0], q_win[1])
+        return out.x[0], out.log_s[0]
+
+    q, log_s_q = jax.vmap(_q_draw)(u2, log_t_cells[r])
+
+    log_s = row.log_s + log_s_q
+    return MassQSample(m1=m1, q=q, log_s=log_s, log_norm=log_norm)
+
+
 # ── grid construction helpers (host- or trace-side) ─────────────────────────
 
 

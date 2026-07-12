@@ -41,19 +41,17 @@ import jax.numpy as jnp
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.core.constants import H0_FID, OM0_FID
 from darksirens.gw.flows import (
+    compute_support_boxes,
     ensemble_sample,
     load_flow_ensemble,
     make_ensemble_log_prob,
+    make_ensemble_log_prob_per_event,
 )
 from darksirens.gw.utils import load_gw_samples, load_selection_samples
 from darksirens.gw.populations.registry import get_fixed_population_params, get_model
 from darksirens.gw.populations.sampling import (
-    cell_centers,
     make_mass_q_edges,
     resolve_mass_grid_bounds,
-    sample_mass_q,
-    sample_z_from_grid,
-    truncnorm_sample,
 )
 from darksirens.likelihood.core import darksiren_log_likelihood
 from darksirens.likelihood.flow_events import (
@@ -61,16 +59,14 @@ from darksirens.likelihood.flow_events import (
     build_chi_eff_prior_table,
     build_flow_loglike,
     build_pe_dl_prior_table,
-    chi_eff_prior_logpdf,
 )
 from darksirens.likelihood.selection import log_evidence_and_mc_variance
 from darksirens.inference.utils import log_sample_weight
-from darksirens.redshift.grid import zgrid
 from darksirens.redshift.prior import (
     eval_redshift_prior_with_state,
     prepare_redshift_prior_state,
 )
-from darksirens.utils.cosmology import dL_grid_bounds, dL_of_z
+from darksirens.utils.cosmology import dL_grid_bounds
 
 
 LABELS = [r"$m_{1,\rm det}$", r"$m_{2,\rm det}$", r"$d_L$ [Mpc]", r"$\chi_{\rm eff}$"]
@@ -161,17 +157,23 @@ def main():
     m1_lo, m1_hi = resolve_mass_grid_bounds(model)
     m1_edges, q_edges = make_mass_q_edges(m1_lo, m1_hi)
     u_base = jax.random.uniform(
-        jax.random.PRNGKey(args.flows_seed), (args.flows_nsamp, 4), dtype=jnp.float64
+        jax.random.PRNGKey(args.flows_seed),
+        (nEvents, args.flows_nsamp, 4),
+        dtype=jnp.float64,
+    )
+    boxes = compute_support_boxes(
+        ens, key=jax.random.key(args.flows_seed + 1)
     )
 
     ll_flow = build_flow_loglike(
         model=model,
-        eval_logflows=make_ensemble_log_prob(ens),
+        eval_logflows=make_ensemble_log_prob_per_event(ens),
         group_params=ens.group_params(),
         u_base=u_base,
         m1_edges=m1_edges,
         q_edges=q_edges,
         pe_tables=pe_tables,
+        support_boxes=boxes,
         gw_sel=gw_sel,
         em_catalog_sel=catalog,
         Ndraw=Ndraw,
@@ -262,42 +264,10 @@ def main():
         lambda row: log_evidence_and_mc_variance(row, nsamp)
     )(ldw_pe.reshape(nEvents, nsamp))
 
-    # Flow-path per-event lnZ_i + ESS (same code path as build_flow_loglike).
-    tm = model.mixture_theta(theta)
-    M1, Q = jnp.meshgrid(cell_centers(m1_edges), cell_centers(q_edges), indexing="ij")
-    p_mq = model.mixture.mass_q_density(M1.reshape(-1), Q.reshape(-1), tm)
-    log_t_cells = jnp.where(
-        p_mq > 0, jnp.log(jnp.maximum(p_mq, 1e-300)), -jnp.inf
-    ).reshape(M1.shape)
-    mq = sample_mass_q(u_base[:, 0], u_base[:, 1], m1_edges, q_edges, log_t_cells)
-    ts = model.mixture.spin_theta(tm)
-    chi = truncnorm_sample(u_base[:, 2], ts[0], ts[1], -1.0, 1.0)
-    zsamp = sample_z_from_grid(
-        u_base[:, 3], zgrid, state.log_pvol + model.log_rate_z(zgrid, theta)
-    )
-    z = zsamp.x
-    m1det_j = mq.m1 * (1 + z)
-    m2det_j = mq.q * m1det_j
-    dL_j = dL_of_z(z, H0, Om0, w0, wa)
-    log_t = (
-        model.log_p_massspin(mq.m1, mq.q, chi.x, theta)
-        + model.log_rate_z(z, theta)
-        + jnp.interp(z, zgrid, state.log_pvol)
-    )
-    log_s = mq.log_s + chi.log_s + zsamp.log_s
-    log_pi = jnp.interp(jnp.log(dL_j), pe_tables.log_dl_grid, pe_tables.log_p_dl) + \
-        chi_eff_prior_logpdf(1 / (1 + mq.q), chi.x, pe_tables.chi_q_grid,
-                             pe_tables.chi_grid, pe_tables.chi_table)
-    base = log_t - log_s - log_pi
-    base = jnp.where(jnp.isfinite(base), base, -jnp.inf)
-    X_j = jnp.stack([m1det_j, m2det_j, dL_j, chi.x], axis=-1)
-    lf = eval_lf(ens.group_params(), X_j)
-    ldw_fl = jnp.where(jnp.isfinite(lf + base[None, :]), lf + base[None, :], -jnp.inf)
-    lnZ_fl, var_fl = jax.vmap(
-        lambda row: log_evidence_and_mc_variance(row, args.flows_nsamp)
-    )(ldw_fl)
-    w = np.exp(np.asarray(ldw_fl) - np.asarray(ldw_fl).max(axis=1, keepdims=True))
-    ess = (w.sum(axis=1) ** 2) / (w**2).sum(axis=1)
+    # Flow-path per-event lnZ_i + ESS: the SAME jitted code path the
+    # likelihood uses (event-windowed population proposal).
+    lnZ_fl, var_fl, ess_j = ll_flow.event_diagnostics(cosmo, survey, theta)
+    ess = np.asarray(ess_j)
 
     event_terms = {
         name: {

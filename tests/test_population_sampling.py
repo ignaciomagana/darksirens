@@ -176,3 +176,71 @@ def test_samplers_are_jittable(plp):
 
     m1, q, log_s = draw(U[:1024, 0], U[:1024, 1], log_t)
     assert np.isfinite(np.asarray(log_s)).all()
+
+
+def test_truncated_histogram_exactness():
+    from darksirens.gw.populations.sampling import sample_histogram_trunc
+
+    # Ramp target on [0, 2] truncated to [0.5, 1.2]: E_s[t/s] over the window
+    # must equal the window integral of t exactly (t = cell density itself).
+    edges = jnp.linspace(0.0, 2.0, 81)
+    dens = cell_centers(edges)
+    lo, hi = 0.5, 1.2
+    out = sample_histogram_trunc(U[:100_000, 0], edges, jnp.log(dens), lo, hi)
+    assert float(out.x.min()) >= lo and float(out.x.max()) <= hi
+    t_at = jnp.log(dens)[out.cell]
+    est = float(jnp.exp(
+        jax.scipy.special.logsumexp(t_at - out.log_s) - jnp.log(out.x.shape[0])
+    ))
+    # Exact window mass of the piecewise-constant density.
+    widths = jnp.diff(edges)
+    mass = float(jnp.sum(
+        dens * jnp.clip(jnp.minimum(edges[1:], hi) - jnp.maximum(edges[:-1], lo), 0.0, None)
+    ))
+    assert est == pytest.approx(mass, rel=1e-10)
+    # Per-draw (array) windows must work elementwise too.
+    los = jnp.full(1000, 0.3).at[::2].set(0.8)
+    his = jnp.full(1000, 1.5)
+    out2 = sample_histogram_trunc(U[:1000, 1], edges, jnp.log(dens), los, his)
+    x2 = np.asarray(out2.x)
+    assert (x2[::2] >= 0.8 - 1e-12).all() and (x2 >= 0.3 - 1e-12).all() and (x2 <= 1.5 + 1e-12).all()
+
+
+def test_chirp_band_two_stage_sampler_recovers_target_integral(plp):
+    from darksirens.gw.populations.sampling import (
+        _floored,
+        sample_m1_given_q_trunc,
+        sample_q_marginal_trunc,
+    )
+
+    model, theta, m1_edges, q_edges, log_t = plp
+    log_t_fl = _floored(log_t)
+    n = 100_000
+    q_win = (0.4, 0.95)
+    qs = sample_q_marginal_trunc(U[:n, 1], m1_edges, q_edges, log_t_fl, q_win)
+    # Per-draw m1 windows: a (fat) chirp band Mc in [8, 12] at z=0.
+    g = (1.0 + qs.x) ** 0.2 / qs.x**0.6
+    m1_lo, m1_hi = 8.0 * g, 12.0 * g
+    m1, log_s_m1 = sample_m1_given_q_trunc(
+        U[:n, 0], m1_edges, log_t_fl, qs.cell, m1_lo, m1_hi
+    )
+    assert bool(jnp.all(m1 >= m1_lo - 1e-9)) and bool(jnp.all(m1 <= m1_hi + 1e-9))
+
+    # Exact-reweight identity: E_s[t/s] = ∫∫_region t dm1 dq for the floored
+    # piecewise-constant target restricted to the sampled region.
+    tm = model.mixture_theta(theta)
+    p = model.mixture.mass_q_density(m1, qs.x, tm)
+    log_p = jnp.where(p > 0, jnp.log(jnp.maximum(p, 1e-300)), -jnp.inf)
+    est = float(jnp.exp(
+        jax.scipy.special.logsumexp(log_p - (qs.log_s + log_s_m1)) - jnp.log(n)
+    ))
+
+    # Brute-force reference on a fine grid over the same region.
+    m1g = jnp.geomspace(float(m1_edges[0]), float(m1_edges[-1]), 2048)
+    qg = jnp.linspace(q_win[0], q_win[1], 512)
+    M1, Q = jnp.meshgrid(m1g, qg, indexing="ij")
+    P = model.mixture.mass_q_density(M1.reshape(-1), Q.reshape(-1), tm).reshape(M1.shape)
+    G = (1.0 + Q) ** 0.2 / Q**0.6
+    band = (M1 >= 8.0 * G) & (M1 <= 12.0 * G)
+    ref = float(jnp.trapezoid(jnp.trapezoid(jnp.where(band, P, 0.0), qg, axis=1), m1g))
+    assert est == pytest.approx(ref, rel=5e-2)

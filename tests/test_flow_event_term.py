@@ -147,12 +147,14 @@ def setup(tmp_path_factory):
     m1_lo, m1_hi = resolve_mass_grid_bounds(model)
     m1_edges, q_edges = make_mass_q_edges(m1_lo, m1_hi, n_m1=256, n_q=128)
 
-    # Population-side sampling has ESS ~ 0.1% of J for a narrow event
-    # posterior (broad population target); J is large here so the flow-side
-    # MC error (~1/sqrt(ESS) ~ 0.06 per event) stays inside the tolerance
-    # of the cross-estimator check below.
-    J = 262_144
-    u_base = jax.random.uniform(jax.random.PRNGKey(0), (J, 4), dtype=jnp.float64)
+    # Event-windowed proposal: each event draws from the population target
+    # truncated to its support box, so a moderate J already gives per-event
+    # MC errors well inside the cross-estimator tolerance below.
+    J = 32_768
+    u_base = jax.random.uniform(
+        jax.random.PRNGKey(0), (ens.n_flows, J, 4), dtype=jnp.float64
+    )
+    boxes = flows_mod.compute_support_boxes(ens, key=jax.random.key(1))
 
     gw_sel = _make_gw_sel()
     catalog = _toy_catalog()
@@ -160,12 +162,13 @@ def setup(tmp_path_factory):
 
     ll_flow = build_flow_loglike(
         model=model,
-        eval_logflows=flows_mod.make_ensemble_log_prob(ens),
+        eval_logflows=flows_mod.make_ensemble_log_prob_per_event(ens),
         group_params=ens.group_params(),
         u_base=u_base,
         m1_edges=m1_edges,
         q_edges=q_edges,
         pe_tables=pe_tables,
+        support_boxes=boxes,
         gw_sel=gw_sel,
         em_catalog_sel=catalog,
         Ndraw=Ndraw,
@@ -309,14 +312,20 @@ def test_gradient_wrt_H0_finite(setup):
     # off (it has no differentiation rule) — same policy as the stored-PE
     # factory's materialization resolver.
     ens = setup["ens"]
+    edges = make_mass_q_edges(
+        *resolve_mass_grid_bounds(get_model("powerlaw+peak")), n_m1=128, n_q=64
+    )
     ll = build_flow_loglike(
         model=get_model("powerlaw+peak"),
-        eval_logflows=flows_mod.make_ensemble_log_prob(ens),
+        eval_logflows=flows_mod.make_ensemble_log_prob_per_event(ens),
         group_params=ens.group_params(),
-        u_base=jax.random.uniform(jax.random.PRNGKey(0), (8192, 4), dtype=jnp.float64),
-        m1_edges=make_mass_q_edges(*resolve_mass_grid_bounds(get_model("powerlaw+peak")), n_m1=128, n_q=64)[0],
-        q_edges=make_mass_q_edges(*resolve_mass_grid_bounds(get_model("powerlaw+peak")), n_m1=128, n_q=64)[1],
+        u_base=jax.random.uniform(
+            jax.random.PRNGKey(0), (ens.n_flows, 8192, 4), dtype=jnp.float64
+        ),
+        m1_edges=edges[0],
+        q_edges=edges[1],
         pe_tables=setup["pe_tables"],
+        support_boxes=flows_mod.compute_support_boxes(ens, key=jax.random.key(1)),
         gw_sel=setup["gw_sel"],
         em_catalog_sel=setup["catalog"],
         Ndraw=setup["Ndraw"],

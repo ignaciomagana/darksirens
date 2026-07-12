@@ -425,6 +425,12 @@ def main():
                    help="m1 cells of the (m1, q) population sampling grid.")
     g.add_argument("--flows_grid_nq", type=int, default=256,
                    help="q cells of the (m1, q) population sampling grid.")
+    g.add_argument("--flows_support_margin", type=float, default=0.25,
+                   help=("Per-event proposal window: expand each flow's "
+                         "sampled parameter range by this fraction per side "
+                         "(exactly corrected in the proposal density)."))
+    g.add_argument("--flows_support_nsamples", type=int, default=4096,
+                   help="Flow draws used to measure each event's support box.")
 
     g = optp.add_argument_group("Physical model")
     g.add_argument("--universe_model", default="spectral_sirens",

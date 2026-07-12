@@ -59,7 +59,8 @@ from darksirens.core.types import EMCatalog
 from darksirens.gw.flows import (
     SPECTRAL_COLUMNS,
     FlowEnsemble,
-    make_ensemble_log_prob,
+    compute_support_boxes,
+    make_ensemble_log_prob_per_event,
 )
 from darksirens.gw.populations.registry import get_model
 from darksirens.gw.populations.parametric import TruncatedGaussianSpin
@@ -67,9 +68,9 @@ from darksirens.gw.populations.sampling import (
     cell_centers,
     make_mass_q_edges,
     resolve_mass_grid_bounds,
-    sample_histogram_1d,
-    sample_mass_q,
-    sample_z_from_grid,
+    sample_histogram_trunc,
+    sample_m1_given_q_trunc,
+    sample_q_marginal_trunc,
     truncnorm_sample,
     _floored,
 )
@@ -90,7 +91,7 @@ from darksirens.redshift.prior import (
     prepare_redshift_prior_state,
 )
 from darksirens.core.types import GWEvent
-from darksirens.utils.cosmology import dL_grid_bounds, dL_of_z
+from darksirens.utils.cosmology import dL_grid_bounds, dL_of_z, z_of_dL
 
 
 # ── analytic PE prior pieces (host-side builders + in-jit evaluators) ───────
@@ -208,6 +209,7 @@ def build_flow_loglike(
     m1_edges: jnp.ndarray,
     q_edges: jnp.ndarray,
     pe_tables: PePriorTables,
+    support_boxes: dict,
     gw_sel: GWEvent,
     em_catalog_sel: EMCatalog,
     Ndraw: float,
@@ -223,6 +225,18 @@ def build_flow_loglike(
     structure) are closure-captured; array operands must already be
     barrier-wrapped by the caller.  See the module docstring for the
     estimator.
+
+    Event-windowed proposal: every event draws its own J points from the
+    population target truncated to its support box (``support_boxes`` from
+    :func:`darksirens.gw.flows.compute_support_boxes`; the dL window maps to
+    a z window under the CURRENT cosmology each call).  The truncation
+    normalisers enter the exact proposal density, so this is plain
+    importance sampling — unbiased for any box covering the flow's support —
+    and it rescues the effective sample size of narrow (low-mass / low-z)
+    events that a single population-wide proposal starves.
+
+    Shapes: ``u_base`` is (nEvents, J, 4); ``eval_logflows`` must be the
+    per-event variant (:func:`make_ensemble_log_prob_per_event`).
     """
     mixture = model.mixture
     if not model.has_additive_rate_split:
@@ -240,22 +254,140 @@ def build_flow_loglike(
     spin_is_truncnorm = isinstance(spin_component, TruncatedGaussianSpin)
     log_p_pop = model.log_p_pop
 
-    J = int(u_base.shape[0])
+    if u_base.ndim != 3 or u_base.shape[0] != nEvents or u_base.shape[2] != 4:
+        raise ValueError(
+            f"u_base must be (nEvents, J, 4); got {tuple(u_base.shape)} for "
+            f"nEvents={nEvents}."
+        )
+    J = int(u_base.shape[1])
     m1_centers = cell_centers(m1_edges)
     q_centers = cell_centers(q_edges)
     chi_edges = jnp.linspace(-1.0, 1.0, 513)
     chi_centers = cell_centers(chi_edges)
+    box_m1det = support_boxes["m1det"]  # (nEvents, 2)
+    box_q = support_boxes["q"]
+    box_dL = support_boxes["dL"]
+    box_chi = support_boxes["chieff"]
+    box_mc = support_boxes["mc_det"]
 
-    def _ll_flows_impl(cosmo, survey, pop_params):
-        H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
-
-        prior_state = prepare_redshift_prior_state(
+    def _prepare_state(cosmo, survey):
+        return prepare_redshift_prior_state(
             "spectral_sirens",
             cosmo,
             survey,
             em_catalog_sel,
             materialize_state=materialize_redshift_prior_state,
         )
+
+    def _event_ldw(cosmo, pop_params, prior_state):
+        """Per-event log importance weights ldw (nEvents, J) — the flow term."""
+        H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+
+        # -- population draws (source frame; common random numbers) --------
+        # Shared per-call ingredients: the mass-q target on the grid, the
+        # spin parameters, and the redshift target on the module zgrid.
+        tm = model.mixture_theta(pop_params)
+
+        M1, Q = jnp.meshgrid(m1_centers, q_centers, indexing="ij")
+        p_mq = mixture.mass_q_density(M1.reshape(-1), Q.reshape(-1), tm)
+        log_t_cells = jnp.where(
+            p_mq > 0.0,
+            jnp.log(jnp.maximum(p_mq, jnp.finfo(p_mq.dtype).tiny)),
+            -jnp.inf,
+        ).reshape(M1.shape)
+
+        ts = mixture.spin_theta(tm)
+        if not spin_is_truncnorm:
+            spin_norm = spin_component._norm(ts)
+            p_chi_cells = spin_component(chi_centers, ts, norm=spin_norm)
+            log_chi_cells = _floored(jnp.where(
+                p_chi_cells > 0.0,
+                jnp.log(jnp.maximum(p_chi_cells, jnp.finfo(p_chi_cells.dtype).tiny)),
+                -jnp.inf,
+            ))
+
+        log_pvol_nodes = prior_state.log_pvol
+        log_t_z_nodes = log_pvol_nodes + model.log_rate_z(zgrid, pop_params)
+        log_z_cell_dens = _floored(
+            jnp.logaddexp(log_t_z_nodes[:-1], log_t_z_nodes[1:]) - jnp.log(2.0)
+        )
+        dL_lo_g, dL_hi_g = dL_grid_bounds(H0, Om0, w0, wa)
+
+        log_t_cells_fl = _floored(log_t_cells)
+
+        def _event_draws(u_e, m1det_win, q_win, dL_win, chi_win, mc_win):
+            # z window from the event's dL window under the CURRENT cosmology.
+            z_lo = z_of_dL(jnp.clip(dL_win[0], dL_lo_g, dL_hi_g), H0, Om0, w0, wa)
+            z_hi = z_of_dL(jnp.clip(dL_win[1], dL_lo_g, dL_hi_g), H0, Om0, w0, wa)
+            zs = sample_histogram_trunc(u_e[:, 3], zgrid, log_z_cell_dens, z_lo, z_hi)
+            z = zs.x
+
+            # q from the m1-marginalised target, then m1 within the event's
+            # detector-frame CHIRP-MASS band at the drawn (q, z) — the thin
+            # constant-Mc ridge of well-measured events — intersected with
+            # the m1det box.  All windows are exactly corrected in log_s.
+            qs = sample_q_marginal_trunc(
+                u_e[:, 1], m1_edges, q_edges, log_t_cells_fl, q_win
+            )
+            q = qs.x
+            g_q = (1.0 + q) ** 0.2 / q**0.6  # m1 = Mc * g(q)
+            m1_lo_j = jnp.maximum(
+                mc_win[0] / (1.0 + z) * g_q, m1det_win[0] / (1.0 + z)
+            )
+            m1_hi_j = jnp.minimum(
+                mc_win[1] / (1.0 + z) * g_q, m1det_win[1] / (1.0 + z)
+            )
+            m1_hi_j = jnp.maximum(m1_hi_j, m1_lo_j)
+            m1src, log_s_m1 = sample_m1_given_q_trunc(
+                u_e[:, 0], m1_edges, log_t_cells_fl, qs.cell, m1_lo_j, m1_hi_j
+            )
+            log_s_mq = qs.log_s + log_s_m1
+
+            if spin_is_truncnorm:
+                chi = truncnorm_sample(u_e[:, 2], ts[0], ts[1], chi_win[0], chi_win[1])
+            else:
+                chi = sample_histogram_trunc(
+                    u_e[:, 2], chi_edges, log_chi_cells, chi_win[0], chi_win[1]
+                )
+            chieff, log_s_chi = chi.x, chi.log_s
+
+            m1det = m1src * (1.0 + z)
+            m2det = q * m1det
+            dL = dL_of_z(z, H0, Om0, w0, wa)
+
+            log_t = (
+                model.log_p_massspin(m1src, q, chieff, pop_params)
+                + model.log_rate_z(z, pop_params)
+                + jnp.interp(z, zgrid, log_pvol_nodes)
+            )
+            log_s = log_s_mq + log_s_chi + zs.log_s
+
+            log_pi_pe = jnp.interp(
+                jnp.log(dL), pe_tables.log_dl_grid, pe_tables.log_p_dl
+            ) + chi_eff_prior_logpdf(
+                1.0 / (1.0 + q),
+                chieff,
+                pe_tables.chi_q_grid,
+                pe_tables.chi_grid,
+                pe_tables.chi_table,
+            )
+
+            base = log_t - log_s - log_pi_pe
+            base = jnp.where(jnp.isfinite(base), base, -jnp.inf)
+            X = jnp.stack([m1det, m2det, dL, chieff], axis=-1)
+            return X, base
+
+        X, base = jax.vmap(_event_draws)(
+            u_base, box_m1det, box_q, box_dL, box_chi, box_mc
+        )  # (nEvents, J, 4), (nEvents, J)
+
+        logflows = eval_logflows(group_params, X)  # (nEvents, J)
+        ldw = logflows + base
+        return jnp.where(jnp.isfinite(ldw), ldw, -jnp.inf)
+
+    def _ll_flows_impl(cosmo, survey, pop_params):
+        H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+        prior_state = _prepare_state(cosmo, survey)
 
         def log_prior_z(z, pix, catalog):
             return eval_redshift_prior_with_state(
@@ -282,69 +414,7 @@ def build_flow_loglike(
             sel_batch_size=sel_batch_size,
         )
 
-        # -- population draws (source frame; common random numbers) --------
-        tm = model.mixture_theta(pop_params)
-
-        M1, Q = jnp.meshgrid(m1_centers, q_centers, indexing="ij")
-        p_mq = mixture.mass_q_density(M1.reshape(-1), Q.reshape(-1), tm)
-        log_t_cells = jnp.where(
-            p_mq > 0.0,
-            jnp.log(jnp.maximum(p_mq, jnp.finfo(p_mq.dtype).tiny)),
-            -jnp.inf,
-        ).reshape(M1.shape)
-        mq = sample_mass_q(u_base[:, 0], u_base[:, 1], m1_edges, q_edges, log_t_cells)
-        m1src, q = mq.m1, mq.q
-
-        ts = mixture.spin_theta(tm)
-        if spin_is_truncnorm:
-            chi = truncnorm_sample(u_base[:, 2], ts[0], ts[1], -1.0, 1.0)
-            chieff, log_s_chi = chi.x, chi.log_s
-        else:
-            spin_norm = spin_component._norm(ts)
-            p_chi_cells = spin_component(chi_centers, ts, norm=spin_norm)
-            log_chi_cells = jnp.where(
-                p_chi_cells > 0.0,
-                jnp.log(jnp.maximum(p_chi_cells, jnp.finfo(p_chi_cells.dtype).tiny)),
-                -jnp.inf,
-            )
-            chi = sample_histogram_1d(u_base[:, 2], chi_edges, _floored(log_chi_cells))
-            chieff, log_s_chi = chi.x, chi.log_s
-
-        log_pvol_nodes = prior_state.log_pvol
-        log_t_z_nodes = log_pvol_nodes + model.log_rate_z(zgrid, pop_params)
-        zs = sample_z_from_grid(u_base[:, 3], zgrid, log_t_z_nodes)
-        z = zs.x
-
-        # -- detector frame + weights --------------------------------------
-        m1det = m1src * (1.0 + z)
-        m2det = q * m1det
-        dL = dL_of_z(z, H0, Om0, w0, wa)
-
-        log_t = (
-            model.log_p_massspin(m1src, q, chieff, pop_params)
-            + model.log_rate_z(z, pop_params)
-            + jnp.interp(z, zgrid, log_pvol_nodes)
-        )
-        log_s = mq.log_s + log_s_chi + zs.log_s
-
-        log_pi_pe = jnp.interp(
-            jnp.log(dL), pe_tables.log_dl_grid, pe_tables.log_p_dl
-        ) + chi_eff_prior_logpdf(
-            1.0 / (1.0 + q),
-            chieff,
-            pe_tables.chi_q_grid,
-            pe_tables.chi_grid,
-            pe_tables.chi_table,
-        )
-
-        base = log_t - log_s - log_pi_pe
-        base = jnp.where(jnp.isfinite(base), base, -jnp.inf)
-
-        X = jnp.stack([m1det, m2det, dL, chieff], axis=-1)
-        logflows = eval_logflows(group_params, X)  # (nEvents, J)
-        ldw = logflows + base[None, :]
-        ldw = jnp.where(jnp.isfinite(ldw), ldw, -jnp.inf)
-
+        ldw = _event_ldw(cosmo, pop_params, prior_state)
         event_lls, event_vars = jax.vmap(
             lambda row: log_evidence_and_mc_variance(row, J)
         )(ldw)
@@ -359,7 +429,22 @@ def build_flow_loglike(
         ) + jnp.sum(event_lls)
         return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
 
-    return jax.jit(_ll_flows_impl)
+    def _event_diagnostics_impl(cosmo, survey, pop_params):
+        """Per-event lnZ_i, delta-method variance, and ESS (no selection)."""
+        prior_state = _prepare_state(cosmo, survey)
+        ldw = _event_ldw(cosmo, pop_params, prior_state)
+        event_lls, event_vars = jax.vmap(
+            lambda row: log_evidence_and_mc_variance(row, J)
+        )(ldw)
+        w = jnp.exp(ldw - jnp.max(ldw, axis=1, keepdims=True))
+        ess = jnp.sum(w, axis=1) ** 2 / jnp.maximum(
+            jnp.sum(w**2, axis=1), jnp.finfo(w.dtype).tiny
+        )
+        return event_lls, event_vars, ess
+
+    ll = jax.jit(_ll_flows_impl)
+    ll.event_diagnostics = jax.jit(_event_diagnostics_impl)
+    return ll
 
 
 # ── likelihood factory ───────────────────────────────────────────────────────
@@ -424,13 +509,23 @@ def make_flow_likelihood(
     )
 
     # ── static proposal machinery (host side, once) ─────────────────────
+    seed = int(getattr(opts, "flows_seed", 42))
     u_base = barrier(
         jax.random.uniform(
-            jax.random.PRNGKey(int(getattr(opts, "flows_seed", 42))),
-            (J, 4),
+            jax.random.PRNGKey(seed),
+            (nEvents, J, 4),
             dtype=jnp.float64,
         )
     )
+
+    # Per-event support boxes for the event-windowed population proposal.
+    boxes = compute_support_boxes(
+        ensemble,
+        key=jax.random.key(seed + 1),  # flowjax sampling needs typed keys
+        n=int(getattr(opts, "flows_support_nsamples", 4096)),
+        margin=float(getattr(opts, "flows_support_margin", 0.25)),
+    )
+    support_boxes = {k: barrier(v) for k, v in boxes.items()}
 
     m1_lo, m1_hi = resolve_mass_grid_bounds(model)
     m1_edges_h, q_edges_h = make_mass_q_edges(
@@ -456,7 +551,7 @@ def make_flow_likelihood(
     )
 
     # Flow ensemble: stacked params traced + barriered; statics in closure.
-    eval_logflows = make_ensemble_log_prob(ensemble)
+    eval_logflows = make_ensemble_log_prob_per_event(ensemble)
     group_params = tuple(
         jtu.tree_map(lambda a: barrier(a), g) for g in ensemble.group_params()
     )
@@ -518,6 +613,7 @@ def make_flow_likelihood(
         m1_edges=m1_edges,
         q_edges=q_edges,
         pe_tables=pe_tables,
+        support_boxes=support_boxes,
         gw_sel=gw_sel,
         em_catalog_sel=em_catalog_sel,
         Ndraw=Ndraw,

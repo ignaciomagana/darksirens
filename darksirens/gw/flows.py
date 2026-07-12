@@ -496,6 +496,91 @@ def make_ensemble_log_prob(ensemble: FlowEnsemble) -> Callable:
     return eval_logflows
 
 
+def make_ensemble_log_prob_per_event(ensemble: FlowEnsemble) -> Callable:
+    """Return ``eval_logflows(group_params, X) -> (n_flows, J)`` for PER-EVENT X.
+
+    Like :func:`make_ensemble_log_prob` but each flow scores its OWN batch:
+    ``X`` has shape ``(n_flows, J, D)`` and row i is evaluated only by flow i.
+    Used by the event-windowed population proposal, where every event draws
+    its own points.
+    """
+    statics = tuple(g.static for g in ensemble.groups)
+    index_arrays = tuple(np.asarray(g.indices, dtype=np.int32) for g in ensemble.groups)
+    n_flows = ensemble.n_flows
+
+    def eval_logflows(group_params: tuple, X: jnp.ndarray) -> jnp.ndarray:
+        if X.ndim != 3 or X.shape[0] != n_flows:
+            raise ValueError(
+                f"per-event X must be (n_flows, J, D); got {X.shape} for "
+                f"{n_flows} flows."
+            )
+        out = jnp.zeros((n_flows, X.shape[1]), dtype=X.dtype)
+        for params, static, idx in zip(group_params, statics, index_arrays):
+            group_flow = eqx.combine(params, static)
+            X_g = X[jnp.asarray(idx)]  # (G, J, D)
+
+            def _single(flow, x):
+                return flow.log_prob(x)
+
+            vals = eqx.filter_vmap(_single)(group_flow, X_g)  # (G, J)
+            out = out.at[jnp.asarray(idx)].set(vals)
+        return out
+
+    return eval_logflows
+
+
+def compute_support_boxes(
+    ensemble: FlowEnsemble,
+    key=None,
+    n: int = 4096,
+    margin: float = 0.25,
+) -> dict:
+    """Per-event support windows for the event-windowed population proposal.
+
+    Samples each flow and takes the per-dimension min/max, expanded by
+    ``margin`` times the sampled range on each side (chi_eff clipped to
+    [-1, 1], masses/distances floored at tiny positives).  The windows only
+    shape the PROPOSAL — the truncated samplers fold the window normaliser
+    into the exact proposal density, so any box covering the flow's support
+    leaves the estimator unbiased; ``margin`` trades a little efficiency for
+    tail coverage.
+
+    Returns a dict of (n_flows, 2) arrays: ``m1det``, ``q``, ``dL``,
+    ``chieff``.
+    """
+    if ensemble.columns != SPECTRAL_COLUMNS:
+        raise NotImplementedError(
+            "compute_support_boxes currently assumes the spectral 4-D layout."
+        )
+    key = jax.random.key(0) if key is None else key
+    s = np.asarray(ensemble_sample(ensemble, key, n))  # (n_flows, n, 4)
+    m1det, m2det, dL, chieff = s[..., 0], s[..., 1], s[..., 2], s[..., 3]
+    q = m2det / m1det
+    # Detector-frame chirp mass: well-measured events have razor-thin
+    # constant-Mc ridges in (m1det, m2det); the likelihood samples m1 inside
+    # this band (at the drawn q and z), which an axis-aligned box would miss.
+    mc_det = (m1det * m2det) ** 0.6 / (m1det + m2det) ** 0.2
+
+    def _box(arr, lo_floor=None, hi_ceil=None):
+        lo = arr.min(axis=1)
+        hi = arr.max(axis=1)
+        pad = margin * (hi - lo)
+        lo, hi = lo - pad, hi + pad
+        if lo_floor is not None:
+            lo = np.maximum(lo, lo_floor)
+        if hi_ceil is not None:
+            hi = np.minimum(hi, hi_ceil)
+        return jnp.asarray(np.stack([lo, hi], axis=1))
+
+    return {
+        "m1det": _box(m1det, lo_floor=0.1),
+        "q": _box(q, lo_floor=1e-4, hi_ceil=1.0),
+        "dL": _box(dL, lo_floor=0.1),
+        "chieff": _box(chieff, lo_floor=-1.0, hi_ceil=1.0),
+        "mc_det": _box(mc_det, lo_floor=0.1),
+    }
+
+
 def ensemble_sample(
     ensemble: FlowEnsemble, key, n: int
 ) -> jnp.ndarray:
