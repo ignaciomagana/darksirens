@@ -41,6 +41,35 @@ Installing the package exposes:
 
 Population mixtures are selected with `--pop_model` using a compositional name grammar. Tokens such as `powerlaw`, `brokenpowerlaw`, and `peak` can be combined directly (`powerlaw+peak`, `brokenpowerlaw+2peaks`, `2powerlaws+3peaks`), with curated names receiving physics-tuned priors and arbitrary grammar combinations using blueprint defaults. Use `--shared_beta`, `--shared_spin`, and `--shared_gamma` to choose shared (default) versus per-component pairing, spin, and redshift-evolution parameters. Mixture weights are sampled as stick-breaking parameters labeled `$v_i$`; copy the printed startup parameter table when passing population labels to `--prior_overrides` or `--fixed_parameter_values`.
 
+### Normalizing-flow single-event surrogates (spectral sirens)
+
+`darksirens_inference` can replace the stored PE samples with per-event
+normalizing-flow posterior surrogates: pass `--gw_flows_path <dir>` (a
+directory of `<EVENT>/<EVENT>_flow.npz` flowjax checkpoints, e.g. the
+unzipped `m1m2dLchi_eff/`) **instead of** `--gw_path` — exactly one of the
+two is required. The per-event evidence integral is then estimated by
+drawing `--flows_nsamp` source-frame points from the *current* population
+model at every likelihood call (fixed base uniforms from `--flows_seed`, so
+the likelihood stays deterministic and continuous in the hyperparameters)
+and scoring them with each event's flow `log_prob` divided by the analytic
+PE prior (uniform detector-frame masses × UniformSourceFrame distance prior
+under `--flows_pe_cosmology` × gwcat's 1-D isotropic `chi_eff` prior).
+Requires the `flows` extras (`pip install "darksirens[flows]"`, i.e.
+`flowjax`/`paramax`/`equinox`), jax x64, and currently supports
+`--universe_model spectral_sirens` only (6-D ra/dec flows for dark sirens
+are recognised by the loader but not implemented). Each event draws from
+the population target truncated to its own support windows (robust
+percentile boxes from flow samples, a detector-frame chirp-mass band, and a
+`chi_eff(q)` degeneracy band; `--flows_support_margin`), with every
+truncation folded exactly into the proposal density — plain importance
+sampling, unbiased for any window covering the flow support. On the 94-event
+O3+O4 ensemble this gives per-event ESS ~ 1-5% of `--flows_nsamp` (total
+lnL MC variance ~ 0.5 at J=16384, inside the default
+`--max_likelihood_variance` budget, at ~0.7 s/likelihood call on an A100).
+Per-event ln-evidence offsets against a stored-PE run are
+hyperparameter-independent constants (PE-prior normalisations) and do not
+affect the posterior.
+
 Incomplete-catalog dark-siren runs use a data-driven completion model rather than a parametric logistic rolloff: the observed per-pixel galaxy redshift KDE is divided by the identically smoothed expected `n0 * dV_c/dz * (1 + z)^delta` density, clipped to `[0, 1]`, and converted into an additive missing-galaxy density. `z50` and `w` remain in the survey parameter block for compatibility, but the current completion likelihood is controlled by `log10n0`, `delta`, `b_miss` (with fixed `alpha_miss = 1` unless overridden), and `sigma_kde`. Run `--validate_completion true` for dry-run clipping diagnostics before long dark-siren analyses.
 
 Two performance notes for wide-sky dark-siren runs (many pixels × many galaxies per pixel): the per-galaxy kernel-state build is automatically row-chunked above a size threshold, bounding device memory with no numerical change (`darksirens.redshift.catalog.configure_catalog_row_chunk`); and `--kernel_gl_nodes N` reduces the Gauss–Legendre node count of the per-galaxy kernel normalisation — exact to likelihood precision at `N = 4`–`8` for spectroscopic catalogs (`sigma_eff ≲ 5e-3`) and roughly `24/N`× faster, but do **not** reduce it for broad photo-z kernels.

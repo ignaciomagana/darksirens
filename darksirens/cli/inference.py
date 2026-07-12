@@ -402,12 +402,13 @@ def main():
     g.add_argument("--save_path",        default="./")
 
     g = optp.add_argument_group("Flow surrogates (with --gw_flows_path)")
-    g.add_argument("--flows_nsamp", type=int, default=4096,
-                   help=("Population draws J per likelihood call (common "
-                         "random numbers). Per-event effective sample size is "
-                         "roughly J x the population mass inside that event's "
-                         "posterior (~0.1%%), so prefer large J or a loosened "
-                         "--max_likelihood_variance."))
+    g.add_argument("--flows_nsamp", type=int, default=16384,
+                   help=("Population draws J per event per likelihood call "
+                         "(common random numbers, event-windowed proposal). "
+                         "Per-event ESS is typically 1-5%% of J on real "
+                         "events; the total-lnL variance guard "
+                         "(--max_likelihood_variance) rejects undersampled "
+                         "settings."))
     g.add_argument("--flows_seed", type=int, default=42,
                    help="Seed of the fixed base-uniform array (CRN).")
     g.add_argument("--flows_pattern", default="*/*_flow.npz",
