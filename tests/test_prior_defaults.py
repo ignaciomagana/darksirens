@@ -23,6 +23,35 @@ from darksirens.inference.prior import build_parameter_space
 from darksirens.utils.cosmology import w0PriorLower, w0PriorUpper, waPriorLower, waPriorUpper
 
 
+def test_dark_sirens_b_miss_dropped_when_lss_completion_active():
+    """A loaded Q_LSS completion table REPLACES the (1 + b_eff*delta_g)
+    local-overdensity factor, so b_miss no longer enters the likelihood. It must
+    then be dropped from the sampled block, else it is a phantom flat nuisance
+    dimension that offsets logZ and invalidates Bayes-factor comparisons."""
+
+    def _labels(lss_active):
+        labels, *_ = build_parameter_space(
+            "powerlaw+peak",
+            fix_population=True,
+            fix_cosmology=True,
+            fix_survey=False,
+            universe_model="dark_sirens",
+            lss_completion_active=lss_active,
+        )
+        return set(labels)
+
+    without_q = _labels(False)
+    with_q = _labels(True)
+
+    # Without a Q table, dark_sirens samples b_miss alongside log10n0/delta/sigma_kde.
+    assert "b_miss" in without_q
+    # With a Q table, only b_miss is dropped; log10n0/delta (which still feed
+    # _assemble_curves) and sigma_kde stay.
+    assert "b_miss" not in with_q
+    assert {"log10n0", "delta", "sigma_kde"} <= with_q
+    assert without_q - with_q == {"b_miss"}
+
+
 def test_survey_default_priors_are_physical_and_overridable():
     labels, lower, upper, *_ = build_parameter_space(
         "powerlaw+peak",
