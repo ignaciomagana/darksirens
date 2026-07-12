@@ -348,6 +348,15 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     and delegates the pure JIT likelihood evaluation to
     :func:`darksirens.likelihood.core.darksiren_log_likelihood`.
     """
+    # Flow-surrogate path: per-event normalizing flows replace the stored PE
+    # samples (mutually exclusive with --gw_path; validated by the CLI).
+    if data.get("flow_ensemble") is not None:
+        from darksirens.likelihood.flow_events import make_flow_likelihood
+
+        return make_flow_likelihood(
+            opts, data, pop_params_fid, fixed_parameter_values
+        )
+
     nEvents = data["nEvents"]
     nsamp = data["nsamp"]
     Ndraw = data["Ndraw"]
