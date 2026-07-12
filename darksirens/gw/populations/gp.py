@@ -52,6 +52,7 @@ this module (for registration, parameter specs, or fiducials) never imports
 from __future__ import annotations
 
 import os
+import math
 
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -83,13 +84,22 @@ _JITTER_REL = 1e-4
 # z-independent integrals use the full normalisation grids for accuracy.
 _KD_N = {"m1": 48, "q": 24, "chi": 24}     # coarse per-axis sizes for k-D norm
 _KD_SPAN = {"m1": (2.0, 100.0), "q": (0.02, 1.0), "chi": (-1.0, 1.0)}
-_ZNORM_N = 24
 # The z-normalisation interpolation grid is FROZEN above _ZNORM_HI: GP model
 # evaluations at z > _ZNORM_HI silently reuse the norm at the grid edge
 # (library-review SEV-3). Parametric models are unaffected (analytic in z).
-# For high-redshift GP studies (e.g. lensed sources with true z > 3) raise
-# DARKSIRENS_GP_ZNORM_HI together with DARKSIRENS_ZMAX; default unchanged.
-_ZNORM_HI = float(os.environ.get("DARKSIRENS_GP_ZNORM_HI", 3.0))
+# Coupling: an explicit DARKSIRENS_ZMAX now raises the GP ceiling with it, so a
+# single knob suffices for high-redshift GP studies (e.g. lensed z > 3
+# sources); DARKSIRENS_GP_ZNORM_HI still overrides explicitly. The default
+# (neither env var set) is unchanged at 3.0, and _ZNORM_N tracks _ZNORM_HI to
+# hold the node density fixed (24 nodes at 3.0), so default numerics are
+# bit-identical.
+if "DARKSIRENS_GP_ZNORM_HI" in os.environ:
+    _ZNORM_HI = float(os.environ["DARKSIRENS_GP_ZNORM_HI"])
+elif "DARKSIRENS_ZMAX" in os.environ:
+    _ZNORM_HI = max(3.0, float(os.environ["DARKSIRENS_ZMAX"]))
+else:
+    _ZNORM_HI = 3.0
+_ZNORM_N = max(24, int(round(8.0 * _ZNORM_HI)))
 
 
 def _coarse_axis_grid(axis: str):
@@ -153,10 +163,10 @@ class AxisCfg:
 
 # Default per-axis configurations (kernels: Matern-3/2 for m1, RBF elsewhere).
 _DEFAULT_AXES = {
-    "m1":  AxisCfg("m1",  "matern32", 10, 3.0,   100.0, float(jnp.log(0.15)), float(jnp.log(2.0))),
-    "q":   AxisCfg("q",   "rbf",       8, 0.10,    1.0, float(jnp.log(0.05)), float(jnp.log(0.8))),
-    "chi": AxisCfg("chi", "rbf",      10, -0.95,   0.95, float(jnp.log(0.05)), float(jnp.log(1.0))),
-    "z":   AxisCfg("z",   "rbf",       8, 0.0,     1.5, float(jnp.log(0.05)), float(jnp.log(0.8))),
+    "m1":  AxisCfg("m1",  "matern32", 10, 3.0,   100.0, math.log(0.15), math.log(2.0)),
+    "q":   AxisCfg("q",   "rbf",       8, 0.10,    1.0, math.log(0.05), math.log(0.8)),
+    "chi": AxisCfg("chi", "rbf",      10, -0.95,   0.95, math.log(0.05), math.log(1.0)),
+    "z":   AxisCfg("z",   "rbf",       8, 0.0,     1.5, math.log(0.05), math.log(0.8)),
 }
 
 # Shared prior bounds.
@@ -164,7 +174,7 @@ _B_MMIN  = (2.0, 10.0)
 _B_DMMIN = (0.01, 10.0)
 _B_MMAX  = (50.0, 100.0)
 _B_DMMAX = (0.01, 20.0)
-_B_LOGAMP = (float(jnp.log(0.1)), float(jnp.log(3.0)))
+_B_LOGAMP = (math.log(0.1), math.log(3.0))
 _B_ALPHA_GP = (-4.0, 12.0)     # m1 shape-mean slope
 _B_BETA_GP  = (-4.0, 12.0)     # q  shape-mean slope
 _B_ALPHA_MASS = (-4.0, 6.0)    # baseline power-law mass slope
@@ -419,6 +429,12 @@ class JointGPPopulation:
         prob-axis grid is used for multi-axis integrals under z-conditioning;
         single-axis and z-independent integrals use the full grids.
         """
+        if not self._prob_gp:
+            # Pure rate-axis GP (e.g. gp1d_z): no PROBABILITY axis to normalise
+            # over (z is a rate/evolution axis, handled by the baseline
+            # factors), so the prob-axis normalisation is unity. meshgrid() over
+            # an empty axis list would otherwise IndexError at flat[0].shape[0].
+            return jnp.ones_like(z) if self._z_in_gp else jnp.asarray(1.0)
         coarse = self._z_in_gp and len(self._prob_gp) >= 2
         if coarse:
             grids = [_coarse_axis_grid(a) for a in self._prob_gp]
@@ -659,8 +675,8 @@ _GPPOP_Z_EDGES = _gppop_edges(
     "DARKSIRENS_GPPOP_Z_EDGES", (0.0, 0.3, 0.7, 1.2))
 
 # Log length-scale prior bounds (coordinate units: ln-mass for mass, linear z).
-_B_GPPOP_LS_M = (float(jnp.log(0.1)), float(jnp.log(3.0)))
-_B_GPPOP_LS_Z = (float(jnp.log(0.05)), float(jnp.log(2.0)))
+_B_GPPOP_LS_M = (math.log(0.1), math.log(3.0))
+_B_GPPOP_LS_Z = (math.log(0.05), math.log(2.0))
 
 
 @dataclass
@@ -784,7 +800,14 @@ class BinnedGPPopulation:
                 + jnp.clip(k, 0, self._n_z - 1)
         else:
             flat = jnp.clip(tril, 0, self._n_tril - 1)
-        val = jnp.exp(logn[jnp.clip(flat, 0, self.M - 1)]) / (q * m1)
+        # Double-where the 1/(q*m1) divide: the (m1,q) norm mesh includes the
+        # q=0 grid node (get_q_grid()[0]==0) where valid is False, but a single
+        # outer where still lets reverse-mode differentiate the
+        # exp(logn)/0 = inf branch (0*inf = NaN cotangent), poisoning
+        # d/d(logn) at the fiducial. Guard the denominator so the inf never
+        # forms (cf. the safe-pow double-where at parametric.py:277).
+        safe_qm1 = jnp.where(valid, q * m1, 1.0)
+        val = jnp.exp(logn[jnp.clip(flat, 0, self.M - 1)]) / safe_qm1
         return jnp.where(valid, val, 0.0)
 
     def _mass_norm(self, logn):

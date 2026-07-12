@@ -24,6 +24,13 @@ MODELS = [
     "brokenpowerlaw+2peaks",
     "gwtc5_fiducial_bpl2peaks",
     "gp1d_m1",
+    # gppop: the (m1,q)-norm mesh hits the q=0 grid node; a single masked
+    # 1/(q*m1) divide gave a NaN reverse-mode gradient at the fiducial (23/26
+    # params) until the denominator was double-where'd.
+    "gppop",
+    # gp1d_z: a pure rate-axis GP has no probability axis; _normalise used to
+    # IndexError at flat[0] until short-circuited to unity.
+    "gp1d_z",
 ]
 
 # Some parametric test modules insert a tinygp STUB into sys.modules at import
@@ -68,7 +75,7 @@ def test_log_p_pop_gradient_finite_at_negative_beta(pop_model):
 
 @pytest.mark.parametrize("pop_model", MODELS)
 def test_log_p_pop_gradient_finite_at_zero_density(pop_model):
-    if pop_model == "gp1d_m1" and not HAVE_TINYGP:
+    if pop_model.startswith("gp") and not HAVE_TINYGP:
         pytest.skip("tinygp unavailable (or stubbed by a parametric test module)")
     log_p_pop = pop_model_parser(pop_model)
     theta = jnp.asarray(get_fixed_population_params(pop_model), dtype=float)
