@@ -628,6 +628,31 @@ def test_incompatible_time_delay_penalizes_shuffled_wrong_pair():
     assert float(compatible) > float(shuffled)
 
 
+def test_time_delay_exceeding_window_is_finite_not_annihilated():
+    """A valid SIS pair whose |dt| exceeds a short observing run must yield a
+    FINITE, coincidence-favoured likelihood -- not the +inf sentinel that a
+    downstream isfinite mask flips to -inf, silently ANNIHILATING the pair
+    (a bias toward no-lensing). p_U(dt)=2(T-dt)/T^2 -> 0 as |dt| -> T; the fix
+    clamps dt just below T so the odds stays large but finite."""
+    from darksirens.likelihood.cluster_likelihood import PAIR_MARKS_DELTA_COLLAPSE
+    ev_i, ev_j = _synth_lensed_pair(y_true=0.5, n_pe=160, seed=37)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"], ev_j["prior_wt"])
+    y_nodes, log_wy = make_y_grid(32)
+    sis = make_sis_lens_params(T0_seconds=4.32e5)
+    T_OBS = 0.3 * float(sis.T0)          # short run: window below the SIS scale
+    dt = 0.5 * float(sis.T0)             # y* = 0.5 in (0,1) but dt > T_OBS
+    sigma = 2.0e4
+    for mark in (1, PAIR_MARKS_DELTA_COLLAPSE):
+        ll = cluster_log_likelihood_pair(
+            ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1),
+            _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+            pair_marks=mark, delta_t_obs=jnp.asarray(dt),
+            sigma_delta_t=jnp.asarray(sigma), t_obs_window_sec=T_OBS,
+        )
+        assert np.isfinite(float(ll)), f"pair_marks={mark}: ll={float(ll)}"
+
+
 def _pair_value_for_batch_test(ev_i, ev_j):
     kde_i = make_pair_kde(
         np.asarray(ev_i["m1det"]), np.asarray(ev_i["q"]), np.asarray(ev_i["dL"]),

@@ -308,9 +308,17 @@ def cluster_log_likelihood_pair(
             )
         T = jnp.asarray(t_obs_window_sec, dtype=jnp.float64)
         dt = jnp.abs(jnp.asarray(delta_t_obs, dtype=jnp.float64))
-        # p_U(dt) = 2 (T - dt) / T^2 for |dt| < T (unordered uniform pair)
-        p_u = jnp.clip(2.0 * (T - dt) / (T * T), 1e-300, None)
-        log_inv_p_unlensed = jnp.where(dt < T, -jnp.log(p_u), jnp.inf)
+        # p_U(dt) = 2 (T - dt) / T^2: unordered separation density of two
+        # independent arrivals uniform on a run of length T. A physical pair has
+        # |dt| < T. If a recorded |dt| reaches/exceeds T (a mis-set window or a
+        # cross-run time base -- caught by the preflight guard), p_U -> 0 and the
+        # coincidence odds diverge. Clamp dt just below T so the reward stays
+        # LARGE BUT FINITE. The previous +inf sentinel was flipped to -inf by the
+        # caller's isfinite mask, silently ANNIHILATING an otherwise valid pair
+        # (a bias toward no-lensing) -- the opposite of "infinitely favoured".
+        dt = jnp.clip(dt, 0.0, T * (1.0 - 1e-9))
+        p_u = 2.0 * (T - dt) / (T * T)
+        log_inv_p_unlensed = -jnp.log(p_u)
 
     if pair_marks == PAIR_MARKS_DELTA_COLLAPSE:
         if delta_t_obs is None or sigma_delta_t is None:

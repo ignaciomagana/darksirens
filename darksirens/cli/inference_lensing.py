@@ -352,7 +352,10 @@ def _time_mark_arrays_for_partition_state(state, candidate_pairs):
                 f"({pair.i},{pair.j}) missing marks.delta_t_obs/sigma_delta_t "
                 "required by pair_marks=time"
             )
-        dt = float(pair.delta_t_obs)
+        # abs at the boundary: the SIS time-delay mark uses y* = dt/T0 (>= 0)
+        # and the coincidence denominator uses |dt|; a signed dt would drive the
+        # mark out of the (0,1) SIS support and silently annihilate the pair.
+        dt = abs(float(pair.delta_t_obs))
         sig = float(pair.sigma_delta_t)
         if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0:
             raise SystemExit(
@@ -818,11 +821,11 @@ def load_inputs(opts):
                             f"pair_marks=time requires delta_t_obs metadata for pair_{k}"
                         )
                     pair_time_delta_t_obs.append(
-                        float(
+                        abs(float(
                             g.attrs["delta_t_obs"]
                             if "delta_t_obs" in g.attrs
                             else np.asarray(g["delta_t_obs"])[()]
-                        )
+                        ))
                     )
                     if "sigma_delta_t" in g.attrs:
                         pair_time_sigma.append(float(g.attrs["sigma_delta_t"]))
@@ -850,12 +853,19 @@ def load_inputs(opts):
                             chieff=np.array(gi["chieff"]),
                             prior_wt=np.array(gi["prior_wt"]),
                         )
-                        if opts.pe_max_per_pair > 0:
-                            d = _downsample(d, opts.pe_max_per_pair, rng)
+                        # Normalize over the FULL sample set, THEN downsample
+                        # (deprecated legacy split-pair path; unreachable via the
+                        # unified catalog). Renormalizing AFTER downsampling would
+                        # divide by the subset sum and suppress each pairing by
+                        # ~log(nsamp/pe_max), the P1.5 bias the unified path avoids
+                        # (extract_event_samples_from_gw_pe: "do NOT renormalise
+                        # after downsampling").
                         d["prior_wt"] = _normalize_pair_image_prior_wt(
                             d["prior_wt"],
                             context=f"{pair_file_path}: pair_{k}/{name}/prior_wt",
                         )
+                        if opts.pe_max_per_pair > 0:
+                            d = _downsample(d, opts.pe_max_per_pair, rng)
                         imgs.append(d)
                     pairs.append(imgs)
                 pair_metadata_indices.append(meta_pair)
