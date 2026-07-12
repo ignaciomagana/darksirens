@@ -1239,3 +1239,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # Hard-exit on success: skip interpreter teardown, which can hang for hours
+    # on shared GPUs when the XLA/CUDA runtime blocks in its exit handlers.
+    # All outputs are written and closed inside main(); exceptions still
+    # propagate normally and yield a nonzero exit.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

@@ -40,7 +40,7 @@ BASE_DEFAULTS = dict(
     sample="rwalk", kernel="jax", vectorized=False, max_attempts=None,
     walks=5, step_scale=0.1, batch_size=128, min_accepts=1,
     replacement_chains=1, replacement_chain_schedule=None,
-    rwalk_proposal="isotropic", rwalk_cov_jitter=1e-12,
+    rwalk_proposal="isotropic",
     bound="none", bound_enlargement=1.25, bound_update_interval=100,
     bound_jitter=1e-12, bound_max_draws=None, multi_bound_max_ellipsoids=64,
     multi_bound_min_points=None, multi_bound_split_threshold=0.5,
@@ -79,8 +79,7 @@ def add_tinyns_arguments(parser_or_group, *, bool_type=None):
     g.add_argument("--tinyns_replacement_chains", type=int, default=None)
     g.add_argument("--tinyns_replacement_chain_schedule", type=str, default=None,
                    help="Comma-separated positive increasing schedule, e.g. '1,4,16,64'.")
-    g.add_argument("--tinyns_rwalk_proposal", choices=["isotropic", "live-cov"], default=None)
-    g.add_argument("--tinyns_rwalk_cov_jitter", type=float, default=None)
+    g.add_argument("--tinyns_rwalk_proposal", choices=["isotropic"], default=None)
     g.add_argument("--tinyns_bound", choices=["none", "single", "multi"], default=None)
     g.add_argument("--tinyns_bound_enlargement", type=float, default=None)
     g.add_argument("--tinyns_bound_update_interval", type=int, default=None)
@@ -112,7 +111,7 @@ class TinyNSConfig:
     sample: str; kernel: str; vectorized: bool; max_attempts: int
     walks: int; step_scale: float; batch_size: int; min_accepts: int
     replacement_chains: int; replacement_chain_schedule: tuple[int, ...] | None
-    rwalk_proposal: str; rwalk_cov_jitter: float
+    rwalk_proposal: str
     bound: str; bound_enlargement: float; bound_update_interval: int; bound_jitter: float; bound_max_draws: int | None
     multi_bound_max_ellipsoids: int; multi_bound_min_points: int | None; multi_bound_split_threshold: float; multi_bound_enlargement: float | None; multi_bound_overlap_correction: bool
     rwalk_seed: str; rwalk_seed_fallback: bool; bound_seed_kernel: str; allow_unused_bound: bool; fused_bound_rwalk: bool; bound_rebuild_on_failure: bool; bound_failure_rebuild_threshold: int
@@ -181,7 +180,7 @@ def validate_tinyns_config(c):
     if c.sample == "prior":
         if c.kernel == "jax": raise ValueError("TinyNS kernel='jax' is only valid with sample='rwalk'.")
         if c.replacement_chains != 1 or c.replacement_chain_schedule is not None or c.bound != "none" or c.jax_block_size != 1: raise ValueError("TinyNS sample='prior' requires replacement_chains=1, no chain schedule, bound='none', and jax_block_size=1.")
-        if _explicit(c, "walks", "step_scale", "batch_size", "min_accepts", "rwalk_proposal", "rwalk_cov_jitter"):
+        if _explicit(c, "walks", "step_scale", "batch_size", "min_accepts", "rwalk_proposal"):
             raise ValueError("TinyNS rwalk-only options cannot be set with sample='prior'.")
     if c.kernel == "jax" and c.sample != "rwalk": raise ValueError("TinyNS kernel='jax' is only valid with sample='rwalk'.")
     if c.replacement_chains != 1 and not (c.sample == "rwalk" and c.kernel == "jax"): raise ValueError("replacement_chains != 1 requires sample='rwalk' and kernel='jax'.")
@@ -205,7 +204,7 @@ def validate_tinyns_config(c):
 
 
 def tinyns_sampler_kwargs(c):
-    return {k: getattr(c, k) for k in ["sample","kernel","vectorized","max_attempts","walks","step_scale","batch_size","min_accepts","replacement_chains","replacement_chain_schedule","rwalk_proposal","rwalk_cov_jitter","bound","bound_enlargement","bound_update_interval","bound_jitter","bound_max_draws","multi_bound_max_ellipsoids","multi_bound_min_points","multi_bound_split_threshold","multi_bound_enlargement","multi_bound_overlap_correction","rwalk_seed","rwalk_seed_fallback","bound_seed_kernel","allow_unused_bound","fused_bound_rwalk","bound_rebuild_on_failure","bound_failure_rebuild_threshold","jax_vectorized","jax_block_size"]}
+    return {k: getattr(c, k) for k in ["sample","kernel","vectorized","max_attempts","walks","step_scale","batch_size","min_accepts","replacement_chains","replacement_chain_schedule","rwalk_proposal","bound","bound_enlargement","bound_update_interval","bound_jitter","bound_max_draws","multi_bound_max_ellipsoids","multi_bound_min_points","multi_bound_split_threshold","multi_bound_enlargement","multi_bound_overlap_correction","rwalk_seed","rwalk_seed_fallback","bound_seed_kernel","allow_unused_bound","fused_bound_rwalk","bound_rebuild_on_failure","bound_failure_rebuild_threshold","jax_vectorized","jax_block_size"]}
 
 def tinyns_run_kwargs(c):
     return dict(dlogz=c.dlogz, maxiter=None if c.max_samples is not None and c.max_samples <= 0 else c.max_samples, progress=c.show_progress, progress_interval=c.progress_interval, checkpoint_interval=c.checkpoint_interval)

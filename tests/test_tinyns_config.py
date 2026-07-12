@@ -14,7 +14,7 @@ def ns(**kw):
     names = [
         "sample","kernel","vectorized","max_attempts","walks","step_scale",
         "batch_size","min_accepts","replacement_chains","replacement_chain_schedule",
-        "rwalk_proposal","rwalk_cov_jitter","bound","bound_enlargement",
+        "rwalk_proposal","bound","bound_enlargement",
         "bound_update_interval","bound_jitter","bound_max_draws",
         "multi_bound_max_ellipsoids","multi_bound_min_points",
         "multi_bound_split_threshold","multi_bound_enlargement",
