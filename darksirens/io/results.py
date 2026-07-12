@@ -242,6 +242,9 @@ def save_results_hdf5(
         f.attrs["n_draw"]          = int(meta["n_draw"])
         f.attrs["total_runtime"]   = meta["total_runtime"]
         f.attrs["sampling_runtime"] = meta["sampling_runtime"]
+        # Flow-surrogate runs: JSON list of per-event flow names in row order.
+        if meta.get("flow_event_names_json"):
+            f.attrs["flow_event_names"] = meta["flow_event_names_json"]
         f.attrs["timestamp"]       = meta["timestamp"]
 
         logZ    = results.get("logZ")

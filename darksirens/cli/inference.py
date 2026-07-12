@@ -1276,7 +1276,9 @@ def main():
     if data.get("flow_event_names"):
         # Flow runs have no event names in a PE file: the ensemble's sorted
         # checkpoint order IS the event identity; persist it for diagnostics.
-        meta["flow_event_names"] = json.dumps(list(data["flow_event_names"]))
+        # (JSON-encoded, and keyed *_json so it does not shadow the plain list
+        # that settings.json serialises from opts.flow_event_names.)
+        meta["flow_event_names_json"] = json.dumps(list(data["flow_event_names"]))
 
     _section("Saving outputs")
     _row("Run directory", run_dir)
