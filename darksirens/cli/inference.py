@@ -1027,6 +1027,21 @@ def main():
                "provides none (expected datasets like LOGMSTAR/LOGSSFR).")
 
     _section("Building parameter space")
+    # A Q_LSS completion table (explicit --lss_completion path or an in-catalog
+    # /lss_completion group) REPLACES the b_miss local-overdensity factor, so
+    # b_miss must be dropped from the sampled dark_sirens block or it is a
+    # phantom flat nuisance dimension. Mirror the likelihood's Q-active test:
+    # any explicit path, or a table on any loaded catalog bundle.
+    _lss_bundles = data.get("catalogs") or []
+    lss_completion_active = (
+        any(v is not None for v in (getattr(opts, "lss_completions", None) or []))
+        or any(
+            b.get(k) is not None
+            for b in _lss_bundles
+            for k in ("lss_completion_logq", "lss_completion_q",
+                      "lss_completion_logq_members", "lss_completion_q_members")
+        )
+    )
     res = build_parameter_space(
         opts.pop_model,
         opts.fix_population,
@@ -1043,6 +1058,7 @@ def main():
         mark_model             = opts.mark_model,
         mark_names             = opts.mark_names,
         n_catalogs             = opts.n_catalogs,
+        lss_completion_active  = lss_completion_active,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]

@@ -473,6 +473,14 @@ def main(argv=None):
         print(f"    gp3d: converged={diagnostics.get('converged')} "
               f"n_iter={diagnostics.get('n_iter')} grad_inf={diagnostics.get('grad_inf'):.2e} "
               f"ls_z={diagnostics.get('ls_z_zeta'):.4f} z_ref={diagnostics.get('z_ref'):.3f}")
+    elif opts.mode == "radial":
+        n_conv = diagnostics.get("n_converged")
+        n_occ = diagnostics.get("n_occupied")
+        if n_conv is not None and n_occ:
+            frac = n_conv / n_occ if n_occ else float("nan")
+            flag = "" if n_conv == n_occ else "  [!] some pixel solves did not converge"
+            print(f"    radial: {n_conv}/{n_occ} occupied-pixel solves converged "
+                  f"({frac:.1%}){flag}")
     save_lss_completion_hdf5(
         opts.out, logq_map=logq_map, logq_members=logq_members,
         zgrid=np.asarray(zgrid), indexing=indexing, metadata=diagnostics,

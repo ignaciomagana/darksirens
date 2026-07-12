@@ -155,6 +155,7 @@ def build_parameter_space(
     mark_model="none",
     mark_names=(),
     n_catalogs: int = 1,
+    lss_completion_active: bool = False,
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
@@ -307,6 +308,15 @@ def build_parameter_space(
     # (e.g. completion parameters under the complete-catalog model). They stay
     # in ``survey_labels`` so the decoder still fills SurveyParams from fiducials.
     active_survey = _ACTIVE_SURVEY_PARAMS.get(universe_model)
+    if active_survey is not None and lss_completion_active and "b_miss" in active_survey:
+        # A loaded Q_LSS completion table REPLACES the (1 + b_eff*delta_g)
+        # local-overdensity factor in the missing-galaxy budget (see
+        # completion._completion_curves_row_q), so b_miss no longer enters the
+        # likelihood. Drop it from the sampled block, else it is a phantom flat
+        # nuisance dimension that offsets logZ and invalidates Bayes-factor
+        # comparisons (same failure class as the WL phantom-param note above).
+        # log10n0 / delta still feed _assemble_curves and remain sampled.
+        active_survey = tuple(p for p in active_survey if p != "b_miss")
     if active_survey is not None:
         kept = [
             (label, lo, hi)
