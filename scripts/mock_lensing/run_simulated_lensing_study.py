@@ -141,6 +141,13 @@ def _case_spec(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
         )
     elif name.startswith("H_"):
         spec.update(max_edges_per_event=3, max_total_edges=max(6, 3 * cfg["n_pair"]), edge_mark_prior_keys_csv="")
+    # Any time-marked case needs a physical |Delta t| on every edge, which only
+    # exists under uniform observation times (see G). C/D/E/H_ambiguous inherit
+    # pair_marks="time" from the base spec but were never switched to uniform, so
+    # they hard-fail the inference time-window guard under the default config.
+    # Force it here so every time case is runnable (G already sets it explicitly).
+    if spec.get("pair_marks") == "time" and "observation_times" not in spec:
+        spec["observation_times"] = "uniform"
     if cfg.get("singleton_lensing", "off") == "sl_mixture":
         # The lensed-singleton mixture requires a CERTAIN pair tag (CLI guard:
         # untagged both-detected pairs would leak into the singleton stream).
@@ -684,6 +691,22 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> Non
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore"); w.writeheader(); w.writerows(rows)
 
+def _case_seed_index(name: str) -> int:
+    """Subset-invariant, backward-compatible per-case seed index.
+
+    Uses the case's FIXED position in CASE_ORDER rather than its position in the
+    (possibly subset) selected_cases list, so ``--cases X`` in isolation
+    reproduces the same universe as X inside a full run. For a full CASE_ORDER
+    run this equals the old enumerate index, so existing campaigns are unchanged.
+    ``hash()`` is deliberately NOT used (it is salted by PYTHONHASHSEED).
+    """
+    try:
+        return CASE_ORDER.index(name)
+    except ValueError:
+        import hashlib
+        return 1000 + int(hashlib.md5(name.encode("utf-8")).hexdigest()[:6], 16) % 100000
+
+
 def build_plan(args: argparse.Namespace, cfg: dict[str, Any], resolved_config: dict[str, Any], work: Path) -> dict[str, Any]:
     cases = {}
     selected_cases = resolved_config["study"].get("cases") or CASE_ORDER
@@ -691,7 +714,8 @@ def build_plan(args: argparse.Namespace, cfg: dict[str, Any], resolved_config: d
         spec = _case_spec(name, cfg); cdir = work / "cases" / name; rdir = work / "runs" / name
         icmd = inference_cmd(cdir, rdir, spec, cfg, args)
         validate_known_inference_flags(icmd)
-        case_plan = {"spec": spec, "generate": generate_cmd(cdir, spec, cfg, args.seed + 101*n), "build_graph": build_graph_cmd(cdir, spec, args.seed + 1001*n), "preflight": preflight_cmd(icmd, rdir / "preflight.json"), "inference": icmd}
+        _sidx = _case_seed_index(name)  # subset-invariant per-case seed offset
+        case_plan = {"spec": spec, "generate": generate_cmd(cdir, spec, cfg, args.seed + 101*_sidx), "build_graph": build_graph_cmd(cdir, spec, args.seed + 1001*_sidx), "preflight": preflight_cmd(icmd, rdir / "preflight.json"), "inference": icmd}
         if args.run_off_controls:
             off_dir = work / "runs" / f"{name}__off"
             ocmd = off_control_cmd(cdir, off_dir, cfg, args)
