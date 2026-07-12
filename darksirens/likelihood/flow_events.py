@@ -269,6 +269,8 @@ def build_flow_loglike(
     box_dL = support_boxes["dL"]
     box_chi = support_boxes["chieff"]
     box_mc = support_boxes["mc_det"]
+    box_chi_ab = support_boxes["chi_ab"]      # chi ~ a + b q linear band
+    box_chi_resid = support_boxes["chi_resid"]
 
     def _prepare_state(cosmo, survey):
         return prepare_redshift_prior_state(
@@ -315,7 +317,8 @@ def build_flow_loglike(
 
         log_t_cells_fl = _floored(log_t_cells)
 
-        def _event_draws(u_e, m1det_win, q_win, dL_win, chi_win, mc_win):
+        def _event_draws(u_e, m1det_win, q_win, dL_win, chi_win, mc_win,
+                         chi_ab, chi_resid):
             # z window from the event's dL window under the CURRENT cosmology.
             z_lo = z_of_dL(jnp.clip(dL_win[0], dL_lo_g, dL_hi_g), H0, Om0, w0, wa)
             z_hi = z_of_dL(jnp.clip(dL_win[1], dL_lo_g, dL_hi_g), H0, Om0, w0, wa)
@@ -343,11 +346,21 @@ def build_flow_loglike(
             )
             log_s_mq = qs.log_s + log_s_m1
 
+            # chi_eff window: the (q, chi_eff) degeneracy band at the drawn q,
+            # intersected with the event's chi_eff box and [-1, 1].
+            chi_mid = chi_ab[0] + chi_ab[1] * q
+            chi_lo_j = jnp.clip(
+                jnp.maximum(chi_mid + chi_resid[0], chi_win[0]), -1.0, 1.0
+            )
+            chi_hi_j = jnp.clip(
+                jnp.minimum(chi_mid + chi_resid[1], chi_win[1]), -1.0, 1.0
+            )
+            chi_hi_j = jnp.maximum(chi_hi_j, chi_lo_j)
             if spin_is_truncnorm:
-                chi = truncnorm_sample(u_e[:, 2], ts[0], ts[1], chi_win[0], chi_win[1])
+                chi = truncnorm_sample(u_e[:, 2], ts[0], ts[1], chi_lo_j, chi_hi_j)
             else:
                 chi = sample_histogram_trunc(
-                    u_e[:, 2], chi_edges, log_chi_cells, chi_win[0], chi_win[1]
+                    u_e[:, 2], chi_edges, log_chi_cells, chi_lo_j, chi_hi_j
                 )
             chieff, log_s_chi = chi.x, chi.log_s
 
@@ -378,7 +391,8 @@ def build_flow_loglike(
             return X, base
 
         X, base = jax.vmap(_event_draws)(
-            u_base, box_m1det, box_q, box_dL, box_chi, box_mc
+            u_base, box_m1det, box_q, box_dL, box_chi, box_mc,
+            box_chi_ab, box_chi_resid,
         )  # (nEvents, J, 4), (nEvents, J)
 
         logflows = eval_logflows(group_params, X)  # (nEvents, J)

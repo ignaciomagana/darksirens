@@ -561,9 +561,19 @@ def compute_support_boxes(
     # this band (at the drawn q and z), which an axis-aligned box would miss.
     mc_det = (m1det * m2det) ** 0.6 / (m1det + m2det) ** 0.2
 
+    # Robust ranges: spline flows have occasional far-tail samples (a handful
+    # of draws can sit tens of sigma out), and a min/max box inflated by one
+    # outlier silently disables the window (measured: a Mc box 8x wider than
+    # the posterior collapses that event's ESS to ~1), and some flows carry
+    # genuinely fat spline tails. The [0.5, 99.5] percentile range plus the
+    # margin keeps >~99% of the posterior mass per dimension; the clipped
+    # tail mass biases ln Z_i at the <~1e-2 level, far below the per-event
+    # Monte-Carlo error, and the margin recovers most of it.
+    q_lo_pct, q_hi_pct = 0.5, 99.5
+
     def _box(arr, lo_floor=None, hi_ceil=None):
-        lo = arr.min(axis=1)
-        hi = arr.max(axis=1)
+        lo = np.percentile(arr, q_lo_pct, axis=1)
+        hi = np.percentile(arr, q_hi_pct, axis=1)
         pad = margin * (hi - lo)
         lo, hi = lo - pad, hi + pad
         if lo_floor is not None:
@@ -572,12 +582,29 @@ def compute_support_boxes(
             hi = np.minimum(hi, hi_ceil)
         return jnp.asarray(np.stack([lo, hi], axis=1))
 
+    # (q, chi_eff) degeneracy: many events constrain a chi_eff(q) combination
+    # far better than either alone; a per-draw chi_eff band around the
+    # per-event linear fit chi ~ a + b q (residual range +/- margin) lets the
+    # proposal ride that ridge.  Exactly corrected downstream like every
+    # other window.
+    qm = np.median(q, axis=1, keepdims=True)
+    cm = np.median(chieff, axis=1, keepdims=True)
+    qvar = np.median((q - qm) ** 2, axis=1)
+    b = np.median((q - qm) * (chieff - cm), axis=1) / np.maximum(qvar, 1e-12)
+    a = cm[:, 0] - b * qm[:, 0]
+    resid = chieff - (a[:, None] + b[:, None] * q)
+    r_lo = np.percentile(resid, 0.5, axis=1)
+    r_hi = np.percentile(resid, 99.5, axis=1)
+    pad = margin * (r_hi - r_lo)
+
     return {
         "m1det": _box(m1det, lo_floor=0.1),
         "q": _box(q, lo_floor=1e-4, hi_ceil=1.0),
         "dL": _box(dL, lo_floor=0.1),
         "chieff": _box(chieff, lo_floor=-1.0, hi_ceil=1.0),
         "mc_det": _box(mc_det, lo_floor=0.1),
+        "chi_ab": jnp.asarray(np.stack([a, b], axis=1)),
+        "chi_resid": jnp.asarray(np.stack([r_lo - pad, r_hi + pad], axis=1)),
     }
 
 
