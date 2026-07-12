@@ -321,14 +321,12 @@ class MixtureModel:
         """Total number of free mixture parameters."""
         return len(self.param_specs)
 
-    def component_densities(self, m1, q, chieff, theta):
-        """Return weighted source-density contributions for each component.
+    def _split_theta(self, theta):
+        """Split the flat mixture vector into weights and per-component slices.
 
-        The leading axis indexes mass-mixture components; summing over that
-        axis reproduces :meth:`__call__`.  Exposing contributions before the
-        mixture sum lets callers apply component-specific factors, such as a
-        per-component redshift evolution, without changing the source-density
-        parameter ordering.
+        Returns ``(w, tm_list, tp_list, ts_list)`` where ``w`` are the
+        stick-breaking mixture weights and the lists hold the mass, pairing,
+        and spin sub-vectors in component order.
         """
         n_w = self.n_weight_params
 
@@ -345,6 +343,34 @@ class MixtureModel:
             tp_list.append(theta[idx : idx + c.n_params]); idx += c.n_params
         for c in self.spin_components:
             ts_list.append(theta[idx : idx + c.n_params]); idx += c.n_params
+
+        return w, tm_list, tp_list, ts_list
+
+    def spin_theta(self, theta):
+        """Return the parameter slice of the shared spin component.
+
+        Only meaningful for shared-spin mixtures, where the population
+        factorises as ``p(m1, q) * p(chieff)``; callers that sample the
+        spin dimension separately (the flow-surrogate path) rely on this.
+        """
+        if not self.shared_spin:
+            raise NotImplementedError(
+                "spin_theta requires a shared spin component; per-component "
+                "spin models do not factorise out of the mass mixture."
+            )
+        _, _, _, ts_list = self._split_theta(theta)
+        return ts_list[0]
+
+    def component_densities(self, m1, q, chieff, theta):
+        """Return weighted source-density contributions for each component.
+
+        The leading axis indexes mass-mixture components; summing over that
+        axis reproduces :meth:`__call__`.  Exposing contributions before the
+        mixture sum lets callers apply component-specific factors, such as a
+        per-component redshift evolution, without changing the source-density
+        parameter ordering.
+        """
+        w, tm_list, tp_list, ts_list = self._split_theta(theta)
 
         # Normalisation integrals — depend only on theta, not on samples.
         # Lifted out of the per-sample loop; pairing norm stays inside (m1-dependent).
@@ -376,6 +402,41 @@ class MixtureModel:
             ))
 
         return jnp.stack(contributions, axis=0)
+
+    def mass_q_density(self, m1, q, theta):
+        """Mixture density with the shared spin factor removed.
+
+        Returns ``Σ_i w_i c_m,i(m1) c_p,i(q | m1)`` so that, for shared-spin
+        mixtures, ``mass_q_density * spin_density == __call__``.  The
+        flow-surrogate sampler draws (m1, q) from this 2-D density and chieff
+        from the shared spin component separately.
+        """
+        if not self.shared_spin:
+            raise NotImplementedError(
+                "mass_q_density requires a shared spin component; with "
+                "per-component spins the mass-q marginal is spin-coupled."
+            )
+        w, tm_list, tp_list, _ = self._split_theta(theta)
+
+        mass_norms = [c._norm(tm_list[i]) for i, c in enumerate(self.mass_components)]
+
+        total = 0.0
+        for i in range(self.k):
+            c_m = self.mass_components[i];    tm = tm_list[i]
+            c_p = self.pairing_components[0 if self.shared_pairing else i]
+            tp  = tp_list[0 if self.shared_pairing else i]
+
+            mmin, dmmin = M_LO, 0.01
+            if hasattr(c_m, "m_min_spec"):
+                mmin  = tm[c_m.param_specs.index(c_m.m_min_spec)]
+            if hasattr(c_m, "dm_min_spec"):
+                dmmin = tm[c_m.param_specs.index(c_m.dm_min_spec)]
+
+            total = total + w[i] * (
+                c_m(m1, tm, norm=mass_norms[i])
+                * c_p(m1, q, mmin, dmmin, tp)
+            )
+        return total
 
     def __call__(self, m1, q, chieff, theta):
         """Evaluate the normalised mixture density for source parameters."""
@@ -476,6 +537,64 @@ class PopulationModel:
         """Return lower bounds, upper bounds, and labels for all parameters."""
         return pack_specs(*self.param_specs)
 
+    @property
+    def has_additive_rate_split(self):
+        """Whether ``log_p_pop == log_p_massspin + log_rate_z`` holds.
+
+        True for shared redshift evolution (powerlaw with shared gamma, or
+        Madau-Dickinson); False for per-component gamma, where the z factor
+        couples to the mixture sum and no split exists.
+        """
+        return self.rate_evolution == "md" or self.shared_gamma or self.mixture.k == 1
+
+    def mixture_theta(self, theta):
+        """Return the mixture slice of the full parameter vector."""
+        if self.rate_evolution == "md":
+            return theta[:-3]
+        if self.shared_gamma or self.mixture.k == 1:
+            return theta[:-1]
+        return theta[: self.mixture.n_params]
+
+    def log_rate_z(self, z, theta):
+        """Log redshift-evolution factor of the population density.
+
+        The additive counterpart to :meth:`log_p_massspin`:
+        ``log_p_pop = log_p_massspin + log_rate_z`` whenever
+        :attr:`has_additive_rate_split` is True.
+        """
+        if self.rate_evolution == "md":
+            gamma = theta[-3]
+            kappa = theta[-2]
+            z_pk  = theta[-1]
+            # log[psi(z)/(1+z)] with psi the (unnormalised) Madau-Dickinson
+            # form; softplus keeps the turnover term stable at any slope.
+            log_turnover = jnp.logaddexp(
+                0.0, (gamma + kappa) * (jnp.log1p(z) - jnp.log1p(z_pk))
+            )
+            return (gamma - 1.0) * jnp.log1p(z) - log_turnover
+
+        if self.shared_gamma or self.mixture.k == 1:
+            gamma = theta[-1]
+            return (gamma - 1.0) * jnp.log1p(z)
+
+        raise NotImplementedError(
+            "log_rate_z is undefined for per-component redshift evolution: "
+            "the z factor does not separate from the mixture sum."
+        )
+
+    def log_p_massspin(self, m1, q, chieff, theta):
+        """Log source-parameter (mass, mass-ratio, spin) mixture density.
+
+        Sentinel: p = 0  →  log p = −jnp.inf, matching :meth:`log_p_pop`.
+        """
+        if not self.has_additive_rate_split:
+            raise NotImplementedError(
+                "log_p_massspin is undefined for per-component redshift "
+                "evolution: use log_p_pop."
+            )
+        p = self.mixture(m1, q, chieff, self.mixture_theta(theta))
+        return jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
+
     def log_p_pop(self, m1, q, z, chieff, theta):
         """
         Log population probability at (m1, q, z, chieff) under parameters theta.
@@ -484,26 +603,11 @@ class PopulationModel:
         −∞ propagates correctly through logsumexp / jnp.sum; the final
         jnp.isfinite guard in the likelihood rejects the proposal cleanly.
         """
-        if self.rate_evolution == "md":
-            tm    = theta[:-3]
-            gamma = theta[-3]
-            kappa = theta[-2]
-            z_pk  = theta[-1]
-            p     = self.mixture(m1, q, chieff, tm)
-            log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
-            # log[psi(z)/(1+z)] with psi the (unnormalised) Madau-Dickinson
-            # form; softplus keeps the turnover term stable at any slope.
-            log_turnover = jnp.logaddexp(
-                0.0, (gamma + kappa) * (jnp.log1p(z) - jnp.log1p(z_pk))
+        if self.has_additive_rate_split:
+            return (
+                self.log_p_massspin(m1, q, chieff, theta)
+                + self.log_rate_z(z, theta)
             )
-            return log_p + (gamma - 1.0) * jnp.log1p(z) - log_turnover
-
-        if self.shared_gamma or self.mixture.k == 1:
-            tm    = theta[:-1]
-            gamma = theta[-1]
-            p     = self.mixture(m1, q, chieff, tm)
-            log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
-            return log_p + (gamma - 1.0) * jnp.log1p(z)
 
         n_mix  = self.mixture.n_params
         tm     = theta[:n_mix]
