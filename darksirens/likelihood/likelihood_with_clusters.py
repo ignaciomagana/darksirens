@@ -331,6 +331,20 @@ def darksiren_log_likelihood_with_clusters(
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, _selection_prior,
             )
+        if singleton_lensing == SINGLETON_LENSING_MIXTURE:
+            # Poisson consistency: the singleton EVIDENCE suppresses the
+            # unlensed branch by (1 - tau_2(z)) (see the mixture branch of the
+            # PE reduction below), so mu_sel^(1) must integrate the SAME
+            # unlensed rate density (1 - tau_2) x p_pop x p_z x P_det. Without
+            # this factor mu_sel^(1) over-counts the unlensed contribution by
+            # ∫ tau_2 P_det p_pop p_z, an O(A_tau) term the same order as the
+            # lensed-single channel mu^(1L) added below — it biases the
+            # strong-lensing rate parameters (A_tau, n_tau). tau_2 is evaluated
+            # at the mu = 1 apparent redshift, mirroring the evidence side's
+            # stated approximation (the mu-dependence of tau_2 is O(tau x s^2)).
+            z_app_sel = z_of_dL(dL_c, H0, Om0, w0, wa)
+            tau_app_sel = jnp.clip(tau_2_SIS(z_app_sel, sis_params), 0.0, 1.0 - 1e-12)
+            ldw = ldw + jnp.log1p(-tau_app_sel)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
     log_mu_1, Neff_1, log_sigma2_1 = compute_selection_term(

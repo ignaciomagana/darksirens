@@ -394,6 +394,12 @@ def test_mixture_changes_likelihood_at_nonzero_tau(master_fixture):
 
 
 def test_mixture_singleton_selection_monotonic_in_tau(master_fixture):
+    # Fixture-specific sanity check: here the lensed-single term mu^(1L) grows
+    # with A_tau faster than the (1 - tau_2) suppression shrinks the unlensed
+    # part, so the combined mu_sel^(1) rises. This is NOT a physical guarantee
+    # (the net sign depends on the lensed-vs-unlensed detection efficiency);
+    # the Poisson-consistency guard is
+    # test_mixture_singleton_selection_applies_tau_suppression below.
     mus = []
     for A_tau in (1e-4, 1e-3, 1e-2):
         diag = _master_call(
@@ -402,6 +408,57 @@ def test_mixture_singleton_selection_monotonic_in_tau(master_fixture):
         )
         mus.append(float(diag["log_mu_singleton"]))
     assert mus[0] < mus[1] < mus[2]
+
+
+def test_mixture_singleton_selection_applies_tau_suppression(master_fixture):
+    """The (1 - tau_2) factor must suppress the UNLENSED part of mu_sel^(1).
+
+    Poisson-consistency regression guard. The singleton selection integral is
+    mu_sel^(1) = int (1 - tau_2) r_unlensed + mu^(1L); the unlensed part (the
+    MIXTURE total minus the lensed-single term) must sit strictly BELOW the OFF
+    selection integral, which carries no tau suppression. Buggy code that omits
+    the factor makes the two exactly equal.
+    """
+    from darksirens.gw.populations import pop_model_parser
+    from darksirens.redshift import get_redshift_prior
+
+    fx = master_fixture
+    A_tau = 1e-2  # large enough that the tau suppression is resolvable
+
+    # Reconstruct the master's internal lensed-single selection term mu^(1L)
+    # with the SAME public builders the master uses (pop_model_parser +
+    # get_redshift_prior("spectral_sirens"); see likelihood_with_clusters.py
+    # lines 229, 258-271, 355-358).
+    log_p_pop = pop_model_parser(pop_model="powerlaw+peak")
+    raw_sel = get_redshift_prior("spectral_sirens")
+    cosmo, survey = fx["cosmo"], fx["survey"]
+
+    def log_prior_z_selection(z, pix, catalog):
+        return raw_sel(z, pix, cosmo, survey, catalog)
+
+    sis = make_sis_lens_params(A_tau=A_tau, n_tau=3.0)
+    log_mu_1L, _, _ = compute_lensed_single_selection_term(
+        fx["singles"], cosmo, survey, fx["pop_params"], fx["catalog"],
+        sis, log_p_pop, log_prior_z_selection,
+    )
+    log_mu_1L = float(log_mu_1L)
+
+    log_mu_mix = float(_master_call(
+        fx, singleton_lensing=True, A_tau=A_tau, return_diagnostics=True,
+    )["log_mu_singleton"])
+    log_mu_off = float(_master_call(
+        fx, singleton_lensing=False, A_tau=A_tau, return_diagnostics=True,
+    )["log_mu_singleton"])
+
+    # Unlensed part of the MIXTURE selection = log(exp(mix) - exp(mu_1L)).
+    assert log_mu_1L < log_mu_mix  # the sum exceeds either addend
+    log_mu_unlensed_mix = log_mu_mix + float(
+        jnp.log1p(-jnp.exp(jnp.asarray(log_mu_1L - log_mu_mix)))
+    )
+    assert np.isfinite(log_mu_unlensed_mix)  # reconstruction is sane
+    # tau_2 > 0 strictly suppresses the unlensed selection below the OFF value
+    # (which omits the factor). On the pre-fix code these are equal.
+    assert log_mu_unlensed_mix < log_mu_off - 1e-6
 
 
 def test_mixture_requires_channel_inputs(master_fixture):
