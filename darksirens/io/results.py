@@ -179,7 +179,10 @@ def save_results_hdf5(
             f.attrs["fixed_wa"]    = float(de_meta["wa_value"])
         f.attrs["fix_population"]  = bool(opts.fix_population)
         f.attrs["fix_survey"]      = bool(opts.fix_survey)
-        f.attrs["gw_path"]         = opts.gw_path
+        # Exactly one of gw_path (stored PE) / gw_flows_path (flow surrogates)
+        # is set; record both so analyzers can tell the input mode apart.
+        f.attrs["gw_path"]         = opts.gw_path or ""
+        f.attrs["gw_flows_path"]   = getattr(opts, "gw_flows_path", None) or ""
         f.attrs["gwselection_path"] = opts.gwselection_path
         f.attrs["survey_path"]     = opts.survey_path or ""
         # Multitracer: number of catalogs and the full aligned path list; the
