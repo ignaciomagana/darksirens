@@ -13,3 +13,6 @@ dynesty
 seaborn
 numpyro
 gwcat @ git+https://github.com/ignaciomagana/gwcat.git@6b21398f139008b6ec83c14fdc27b25ec09e9962
+# Optional (flow-surrogate single-event posteriors, --gw_flows_path):
+#   pip install "flowjax>=17.1,<18" paramax "equinox>=0.11,<0.12"
+# (or: pip install "darksirens[flows]")

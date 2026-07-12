@@ -235,6 +235,54 @@ def load_gw_and_selection_inputs(opts) -> dict:
     )
 
 
+def load_flow_and_selection_inputs(opts) -> dict:
+    """Load per-event flow surrogates plus selection samples (no PE samples).
+
+    The flow-surrogate path replaces the gwcat PE store: single-event
+    posteriors come from ``--gw_flows_path`` (a directory of
+    ``<EVENT>/<EVENT>_flow.npz`` checkpoints) and the per-event term draws
+    from the population model at every likelihood call.  All PE-sample keys
+    are returned as None so downstream sky/catalog plumbing can skip them.
+    Event order/identity is the ensemble's sorted checkpoint order,
+    surfaced as ``flow_event_names``.
+    """
+    from darksirens.gw.flows import load_flow_ensemble
+
+    ensemble = load_flow_ensemble(
+        opts.gw_flows_path,
+        pattern=getattr(opts, "flows_pattern", "*/*_flow.npz"),
+        on_mismatch=getattr(opts, "flows_on_mismatch", "error"),
+    )
+    print(f"    - {ensemble.summary().splitlines()[0]}")
+
+    (
+        m1detsels, m2detsels, dLsels, chieffsels,
+        rasels, decsels, p_draw, Ndraw,
+    ) = load_selection_samples(opts.gwselection_path)
+
+    return dict(
+        m1det=None,
+        m2det=None,
+        dL=None,
+        chieff=None,
+        ra=None,
+        dec=None,
+        p_pe=None,
+        nEvents=ensemble.n_flows,
+        nsamp=int(getattr(opts, "flows_nsamp", 4096)),
+        flow_ensemble=ensemble,
+        flow_event_names=list(ensemble.names),
+        m1detsels=m1detsels,
+        m2detsels=m2detsels,
+        dLsels=dLsels,
+        chieffsels=chieffsels,
+        rasels=rasels,
+        decsels=decsels,
+        p_draw=p_draw,
+        Ndraw=Ndraw,
+    )
+
+
 def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
     """Compute HEALPix indices, sky vectors, and compact catalog views."""
     nside = catalog_inputs["nside"]
@@ -244,18 +292,28 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
     ngals = catalog_inputs["ngals"]
     counterpart_pixels = catalog_inputs["counterpart_pixels"]
 
-    pixels_pe = hp.ang2pix(nside, jnp.pi/2 - gw_inputs["dec"], gw_inputs["ra"])
+    # Flow-surrogate runs carry no PE samples (ra is None): the PE-side sky
+    # products stay None and only the selection side is computed.
+    has_pe = gw_inputs.get("ra") is not None
+
+    pixels_pe = (
+        hp.ang2pix(nside, jnp.pi/2 - gw_inputs["dec"], gw_inputs["ra"])
+        if has_pe else None
+    )
     pixels_sel = hp.ang2pix(nside, jnp.pi/2 - gw_inputs["decsels"], gw_inputs["rasels"])
 
     # Sky-direction unit vectors n̂ = (cos δ cos α, cos δ sin α, sin δ), retained
     # per sample for the angular/sky model.  Unlike ``pixels`` (whose resolution
     # collapses to nside=1 with no survey), these give the sky model full
     # angular resolution in every universe model, including GW-only runs.
-    nx_pe, ny_pe, nz_pe = (
-        jnp.cos(gw_inputs["dec"]) * jnp.cos(gw_inputs["ra"]),
-        jnp.cos(gw_inputs["dec"]) * jnp.sin(gw_inputs["ra"]),
-        jnp.sin(gw_inputs["dec"]),
-    )
+    if has_pe:
+        nx_pe, ny_pe, nz_pe = (
+            jnp.cos(gw_inputs["dec"]) * jnp.cos(gw_inputs["ra"]),
+            jnp.cos(gw_inputs["dec"]) * jnp.sin(gw_inputs["ra"]),
+            jnp.sin(gw_inputs["dec"]),
+        )
+    else:
+        nx_pe = ny_pe = nz_pe = None
     nx_sel, ny_sel, nz_sel = (
         jnp.cos(gw_inputs["decsels"]) * jnp.cos(gw_inputs["rasels"]),
         jnp.cos(gw_inputs["decsels"]) * jnp.sin(gw_inputs["rasels"]),
@@ -270,6 +328,12 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
     catalog_memory = None
 
     if zgals is not None:
+        if not has_pe:
+            raise NotImplementedError(
+                "Galaxy-catalog runs require PE-side sky positions; the "
+                "flow-surrogate path (no stored PE samples) supports "
+                "universe_model='spectral_sirens' only."
+            )
         required_pixels = (
             counterpart_pixels
             if opts.universe_model in BRIGHT_SIREN_MODELS and counterpart_pixels is not None

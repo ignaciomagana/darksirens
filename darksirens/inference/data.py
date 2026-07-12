@@ -13,7 +13,10 @@ def load_all_data(opts):
     Handles cases where survey_path might be None (non-dark sirens models).
     """
     catalog_inputs = loaders.load_or_build_catalog_inputs(opts)
-    gw_inputs = loaders.load_gw_and_selection_inputs(opts)
+    if getattr(opts, "gw_flows_path", None):
+        gw_inputs = loaders.load_flow_and_selection_inputs(opts)
+    else:
+        gw_inputs = loaders.load_gw_and_selection_inputs(opts)
 
     if opts.universe_model in BRIGHT_SIREN_MODELS and catalog_inputs["counterpart_zs"] is not None:
         if len(catalog_inputs["counterpart_zs"]) != int(gw_inputs["nEvents"]):
@@ -25,18 +28,23 @@ def load_all_data(opts):
 
     sky_inputs = loaders.compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs)
 
+    def _maybe_jnp(value):
+        return jnp.asarray(value) if value is not None else None
+
     # Pack into dictionary
     data = dict(
-        # GW PE samples
+        # GW PE samples (all None on the flow-surrogate path)
         m1det=gw_inputs["m1det"],
         m2det=gw_inputs["m2det"],
         dL=gw_inputs["dL"],
         chieff=gw_inputs["chieff"],
         p_pe=gw_inputs["p_pe"],
-        pixels_pe=jnp.asarray(sky_inputs["pixels_pe"]),
-        nx_pe=jnp.asarray(sky_inputs["nx_pe"]),
-        ny_pe=jnp.asarray(sky_inputs["ny_pe"]),
-        nz_pe=jnp.asarray(sky_inputs["nz_pe"]),
+        flow_ensemble=gw_inputs.get("flow_ensemble"),
+        flow_event_names=gw_inputs.get("flow_event_names"),
+        pixels_pe=_maybe_jnp(sky_inputs["pixels_pe"]),
+        nx_pe=_maybe_jnp(sky_inputs["nx_pe"]),
+        ny_pe=_maybe_jnp(sky_inputs["ny_pe"]),
+        nz_pe=_maybe_jnp(sky_inputs["nz_pe"]),
         zgals_pe=sky_inputs["zgals_pe"],
         dzgals_pe=sky_inputs["dzgals_pe"],
         wgals_pe=sky_inputs["wgals_pe"],

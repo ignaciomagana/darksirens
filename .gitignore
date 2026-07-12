@@ -185,3 +185,6 @@ cython_debug/
 
 *.h5
 *.hdf5
+
+# Flow-surrogate outputs / extracted checkpoints (branch darksirens_flows)
+flows/
