@@ -19,6 +19,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from darksirens.redshift.completion import build_pixel_kde_cache
+from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.catalog_views import barrier, prepare_catalog_views
 from darksirens.likelihood.events import pad_gw_event_to_multiple
 from darksirens.likelihood.core import (
@@ -121,6 +122,7 @@ def _make_mixture_likelihood(
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
+    max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
     catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
 
     def _bundle_field_inputs(bundle):
@@ -322,6 +324,7 @@ def _make_mixture_likelihood(
             mark_names=mark_names,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
+            max_likelihood_variance=max_likelihood_variance,
             # Forward lss_marginalize so core's K>=2 NotImplementedError guard
             # is reachable for direct make_likelihood callers too (the CLI has
             # its own _fatal guard).
@@ -360,6 +363,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
+    max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
     catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
 
     # Weak-lensing magnification backend (resolved up front, before the heavy
@@ -661,6 +665,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 lss_marginalize=lss_marginalize,
                 materialize_redshift_prior_state=materialize_redshift_prior_state,
                 selection_neff_soft_guard=selection_neff_soft_guard,
+                max_likelihood_variance=max_likelihood_variance,
                 catalog_sky_weighting=catalog_sky_weighting,
             )
         return darksiren_log_likelihood(
@@ -695,6 +700,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             lss_marginalize=lss_marginalize,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
+            max_likelihood_variance=max_likelihood_variance,
             catalog_sky_weighting=catalog_sky_weighting,
         )
 

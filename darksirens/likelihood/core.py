@@ -15,9 +15,13 @@ from darksirens.redshift.prior import (
     eval_redshift_prior_with_state,
     prepare_redshift_prior_state,
 )
-from darksirens.redshift.catalog import _logsumexp_neginf_safe
 from darksirens.gw.populations import pop_model_parser
-from darksirens.likelihood.selection import compute_selection_term, selection_log_correction
+from darksirens.likelihood.selection import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    compute_selection_term,
+    log_evidence_and_mc_variance,
+    selection_log_correction,
+)
 from darksirens.inference.utils import log_sample_weight
 from darksirens.likelihood.wl_weight import (
     log_sample_weight_wl_or_standard,
@@ -192,6 +196,10 @@ def darksiren_log_likelihood(
     lss_marginalize: bool = False,
     materialize_redshift_prior_state: bool = True,
     selection_neff_soft_guard: bool = False,
+    # Cap on the Monte-Carlo variance of the total log-likelihood estimator
+    # (per-event reweighting variances + N_obs^2/Neff_sel); traced on purpose
+    # (arithmetic only) so sensitivity scans do not recompile.
+    max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     # --- K-catalog mixture (dark_sirens only) -------------------------------
     # ``n_catalogs`` is static (jit specializes on the pytree structure); the
     # mixture operands are TRACED.  All default to the single-catalog values, so
@@ -460,9 +468,6 @@ def darksiren_log_likelihood(
                 sel_batch_size=sel_batch_size,
                 sky_log_weight_fn=sky_log_weight_fn,
             )
-            ll = selection_log_correction(
-                log_mu, Neff, nEvents, soft_guard=selection_neff_soft_guard
-            )
 
             def _pe_event_fn(_, event_idx):
                 s = event_idx * nsamp
@@ -478,9 +483,22 @@ def darksiren_log_likelihood(
                     catalogs_pe_all,
                 )
                 ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
-                return None, -jnp.log(nsamp) + _logsumexp_neginf_safe(ldw)
+                return None, log_evidence_and_mc_variance(ldw, nsamp)
 
-            _, event_lls = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
+            _, (event_lls, event_vars) = lax.scan(
+                _pe_event_fn, None, jnp.arange(nEvents)
+            )
+            # Guard on the TOTAL log-likelihood variance: the per-event
+            # reweighting variances spend part of the budget, so the
+            # correction must be evaluated after the event scan.
+            ll = selection_log_correction(
+                log_mu,
+                Neff,
+                nEvents,
+                soft_guard=selection_neff_soft_guard,
+                max_likelihood_variance=max_likelihood_variance,
+                pe_variance_sum=jnp.sum(event_vars),
+            )
             return ll + jnp.sum(event_lls)
 
         ll = _ll_given_states_mixture()
@@ -637,9 +655,6 @@ def darksiren_log_likelihood(
             sel_batch_size=sel_batch_size,
             sky_log_weight_fn=sky_log_weight_fn,
         )
-        ll = selection_log_correction(
-            log_mu, Neff, nEvents, soft_guard=selection_neff_soft_guard
-        )
 
         def _pe_event_fn(_, event_idx):
             s = event_idx * nsamp
@@ -668,9 +683,20 @@ def darksiren_log_likelihood(
             # NaN-safe reduction: an event whose samples ALL mask to -inf (the
             # sampler exploring, e.g., mmax below every sample of one event)
             # must contribute -inf, not a NaN backward softmax.
-            return None, -jnp.log(nsamp) + _logsumexp_neginf_safe(ldw)
+            return None, log_evidence_and_mc_variance(ldw, nsamp)
 
-        _, event_lls = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
+        _, (event_lls, event_vars) = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
+        # Guard on the TOTAL log-likelihood variance: the per-event
+        # reweighting variances spend part of the budget, so the correction
+        # must be evaluated after the event scan.
+        ll = selection_log_correction(
+            log_mu,
+            Neff,
+            nEvents,
+            soft_guard=selection_neff_soft_guard,
+            max_likelihood_variance=max_likelihood_variance,
+            pe_variance_sum=jnp.sum(event_vars),
+        )
         return ll + jnp.sum(event_lls)
 
     # LSS-completion marginalisation: logL = logsumexp_m logL(Λ; Q_m) − log M,

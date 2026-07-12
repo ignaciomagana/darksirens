@@ -106,6 +106,7 @@ from darksirens.inference.prior import build_parameter_space, make_prior_transfo
 from darksirens.inference.sampling import run_sampler
 from darksirens.io.results import save_tinyns_diagnostics_json, write_tinyns_metadata
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
+from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.factory import (
     _redshift_prior_materialization_reason,
     _resolve_redshift_prior_materialization,
@@ -1551,6 +1552,9 @@ def build_cluster_likelihood(
                 selection_neff_soft_guard=bool(
                     getattr(opts, "selection_neff_soft_guard", False)
                 ),
+                max_likelihood_variance=float(
+                    getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
+                ),
             )
 
         def _eval_partition(part):
@@ -1588,6 +1592,9 @@ def build_cluster_likelihood(
                         n_clusters_observed=n_prs,
                         soft_guard=bool(
                             getattr(opts, "selection_neff_soft_guard", False)
+                        ),
+                        max_likelihood_variance=float(
+                            getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
                         ),
                     )
 
@@ -1723,6 +1730,9 @@ def build_cluster_diagnostics(
                 selection_neff_soft_guard=bool(
                     getattr(opts, "selection_neff_soft_guard", False)
                 ),
+                max_likelihood_variance=float(
+                    getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
+                ),
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
@@ -1815,11 +1825,14 @@ def build_cluster_diagnostics(
                                 "correction is NON-FINITE at the evaluation point "
                                 f"(delta {local_selection_delta!r} vs "
                                 f"{count_delta[n_pairs]!r}) — typically the "
-                                "sparse-Neff guard (Neff <= 5 N_obs) firing at "
-                                "the prior midpoint. Increase the injection "
-                                "campaign (or use a profile whose Neff clears "
-                                "the threshold); the factorization check cannot "
-                                "run on -inf corrections."
+                                "reliability guard firing at the prior midpoint "
+                                "(the Neff <= 5 N_obs floor or the variance "
+                                "criterion Neff <= N_obs^2/max_likelihood_"
+                                "variance). Increase the injection campaign "
+                                "(or use a profile whose Neff clears the "
+                                "threshold, or relax --max_likelihood_variance "
+                                "for exploratory runs); the factorization "
+                                "check cannot run on -inf corrections."
                             )
                         if not np.isclose(
                             local_selection_delta,
@@ -2115,6 +2128,18 @@ def build_parser():
             "--sampler numpyro and hard otherwise."
         ),
     )
+    p.add_argument(
+        "--max_likelihood_variance", type=float, default=DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+        help=("Cap on the Monte-Carlo variance of the log-likelihood estimator "
+              "(Essick & Farr 2022; Talbot & Golomb 2023, arXiv:2304.06138; the "
+              "GWTC-4.0/5.0 criterion is sigma^2_lnL <= 1, the default). NOTE: "
+              "on this cluster/lensing stack the cap currently bounds the "
+              "SELECTION component only (N_obs^2/Neff_sel); the per-event/"
+              "per-pair variance term of the full sigma^2_lnL criterion is not "
+              "yet threaded here (follow-up; the main darksirens_inference CLI "
+              "enforces the full total). Proposals exceeding it are guarded "
+              "(hard -inf or the soft wall per --selection_neff_guard). The "
+              "Vitale 5 N_obs mean floor always applies."))
     # sampler
     p.add_argument("--sampler", required=True, choices=["tinyns", "dynesty", "numpyro"])
     p.add_argument("--nlive", type=int, default=2000)
@@ -2206,9 +2231,20 @@ def main():
     )
     if opts.selection_neff_soft_guard:
         print(
-            "  [i] Sparse-selection Neff guard: SOFT (smooth wall for "
+            "  [i] Sparse-selection guard: SOFT (smooth wall for "
             f"gradient-based sampling; mode={guard_mode}). Verify the "
-            "posterior clears the Neff <= 5 N_obs boundary post hoc.",
+            "posterior clears the selection-variance criterion "
+            "(N_obs^2/Neff <= max_likelihood_variance, and the Neff <= 5 N_obs "
+            "floor) post hoc. Per-event/pair variance is NOT yet included in "
+            "this stack's guard.",
+            flush=True,
+        )
+    max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
+    if max_likelihood_variance != DEFAULT_MAX_LIKELIHOOD_VARIANCE:
+        print(
+            "  [i] Selection-variance cap (this stack guards the selection "
+            f"component only): max_likelihood_variance={max_likelihood_variance} "
+            "(default 1.0 mirrors the GWTC-4.0/5.0 total criterion).",
             flush=True,
         )
 
@@ -2458,6 +2494,8 @@ def main():
                     pass
             f.attrs["selection_neff_soft_guard"] = bool(
                 getattr(opts, "selection_neff_soft_guard", False))
+            f.attrs["max_likelihood_variance"] = float(
+                getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
         settings.update(
             wl_a=float(opts.lensing_wl_a),
             wl_b=float(opts.lensing_wl_b),
