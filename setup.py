@@ -14,6 +14,9 @@ install_requires = [r for r in install_requires if not r.startswith("pytest")]
 extras_require = {
     "test": ["pytest"],
     "gp": ["tinygp"],
+    # Normalizing-flow single-event surrogates (--gw_flows_path). Lazy import
+    # in darksirens/gw/flows.py keeps these optional for everyone else.
+    "flows": ["flowjax>=17.1,<18", "paramax", "equinox>=0.11,<0.12"],
 }
 
 with open("README.md", "r") as fh:

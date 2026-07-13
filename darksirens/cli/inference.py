@@ -383,7 +383,14 @@ def main():
                           formatter_class=RawDescriptionHelpFormatter)
 
     g = optp.add_argument_group("Data")
-    g.add_argument("--gw_path",          required=True)
+    g.add_argument("--gw_path",          default=None,
+                   help=("gwcat-1.0 PE posterior-samples file. Exactly one of "
+                         "--gw_path / --gw_flows_path is required."))
+    g.add_argument("--gw_flows_path",    default=None,
+                   help=("Directory of per-event normalizing-flow checkpoints "
+                         "(<EVENT>/<EVENT>_flow.npz) replacing stored PE "
+                         "samples. Mutually exclusive with --gw_path; "
+                         "spectral_sirens only."))
     g.add_argument("--gwselection_path", required=True)
     g.add_argument("--survey_path",      default=None, nargs="+", metavar="PATH",
                    help=("Galaxy survey catalog(s). One path = current "
@@ -393,6 +400,38 @@ def main():
                          "blocks (_c{k} labels) and sampled stick weights "
                          "fcat_2..fcat_K (dark_sirens only)."))
     g.add_argument("--save_path",        default="./")
+
+    g = optp.add_argument_group("Flow surrogates (with --gw_flows_path)")
+    g.add_argument("--flows_nsamp", type=int, default=16384,
+                   help=("Population draws J per event per likelihood call "
+                         "(common random numbers, event-windowed proposal). "
+                         "Per-event ESS is typically 1-5%% of J on real "
+                         "events; the total-lnL variance guard "
+                         "(--max_likelihood_variance) rejects undersampled "
+                         "settings."))
+    g.add_argument("--flows_seed", type=int, default=42,
+                   help="Seed of the fixed base-uniform array (CRN).")
+    g.add_argument("--flows_pattern", default="*/*_flow.npz",
+                   help="Checkpoint glob relative to --gw_flows_path.")
+    g.add_argument("--flows_on_mismatch", default="error",
+                   choices=["error", "skip", "load"],
+                   help=("Structural-check policy for checkpoints that do not "
+                         "match the installed flowjax (version drift)."))
+    g.add_argument("--flows_chieff_amax", type=float, default=0.99,
+                   help="amax of the 1-D isotropic chi_eff PE prior.")
+    g.add_argument("--flows_pe_cosmology", default="67.74,0.3089",
+                   help=("'H0,Om0' of the PE prior cosmology (UniformSourceFrame "
+                         "distance prior), matching the PE release."))
+    g.add_argument("--flows_grid_nm", type=int, default=512,
+                   help="m1 cells of the (m1, q) population sampling grid.")
+    g.add_argument("--flows_grid_nq", type=int, default=256,
+                   help="q cells of the (m1, q) population sampling grid.")
+    g.add_argument("--flows_support_margin", type=float, default=0.25,
+                   help=("Per-event proposal window: expand each flow's "
+                         "sampled parameter range by this fraction per side "
+                         "(exactly corrected in the proposal density)."))
+    g.add_argument("--flows_support_nsamples", type=int, default=4096,
+                   help="Flow draws used to measure each event's support box.")
 
     g = optp.add_argument_group("Physical model")
     g.add_argument("--universe_model", default="spectral_sirens",
@@ -820,6 +859,43 @@ def main():
     _section("Validating configuration")
     GALAXY_AWARE = {"dark_sirens", "dark_sirens_complete"}
 
+    if bool(opts.gw_path) == bool(opts.gw_flows_path):
+        _fatal(
+            "Exactly one of --gw_path (stored PE samples) or --gw_flows_path "
+            "(per-event flow surrogates) is required."
+        )
+    if opts.gw_flows_path:
+        if not os.path.isdir(opts.gw_flows_path):
+            _fatal(f"--gw_flows_path is not a directory: {opts.gw_flows_path}")
+        if opts.universe_model != "spectral_sirens":
+            _fatal(
+                "--gw_flows_path currently supports --universe_model "
+                "spectral_sirens only. Dark sirens need 6-D flows with "
+                "(ra, dec) plus the per-pixel catalog redshift-prior sampler "
+                "(scaffolded: columns registry in darksirens/gw/flows.py, "
+                "z-target hook in likelihood/flow_events.py). "
+                f"Got '{opts.universe_model}'."
+            )
+        if not opts.shared_gamma:
+            _fatal("--gw_flows_path requires shared redshift evolution "
+                   "(--shared_gamma true).")
+        if not opts.shared_spin:
+            _fatal("--gw_flows_path requires a shared spin component "
+                   "(--shared_spin true).")
+        if opts.sky_model != "isotropic":
+            _fatal("--gw_flows_path supports --sky_model isotropic only.")
+        if getattr(opts, "mark_model", "none") not in (None, "none"):
+            _fatal("--gw_flows_path does not support a marked-host model.")
+        if opts.survey_path:
+            _fatal("--gw_flows_path (spectral sirens) does not use --survey_path.")
+        if opts.flows_nsamp <= 0:
+            _fatal("--flows_nsamp must be positive.")
+        if opts.sampler == "numpyro":
+            _warn(
+                "flows + NumPyro NUTS: the grid inverse-CDF samplers give "
+                "piecewise gradients; nested sampling is the validated path."
+            )
+
     if opts.universe_model == "bright_sirens" and opts.counterpart is None:
         _fatal("'bright_sirens' requires --counterpart RA DEC Z triplet(s) (angles in radians).")
     if opts.universe_model != "bright_sirens" and opts.counterpart is not None:
@@ -925,7 +1001,12 @@ def main():
     _row("JAX backend", jax.default_backend())
     _row("JAX devices",  ", ".join(str(d) for d in jax.devices()))
     print("  │")
-    _row("GW events path",  opts.gw_path)
+    if opts.gw_flows_path:
+        _row("GW flows path", opts.gw_flows_path)
+        _row("Flow draws J",  f"{opts.flows_nsamp:,} (seed {opts.flows_seed})")
+        _row("Flow PE cosmo", opts.flows_pe_cosmology)
+    else:
+        _row("GW events path",  opts.gw_path)
     _row("Selection path",  opts.gwselection_path)
     if opts.survey_path:
         if opts.n_catalogs == 1:
@@ -955,7 +1036,16 @@ def main():
     Ndraw   = data["Ndraw"]
     nside   = data.get("nside", "N/A")
 
-    _ok(f"GW posterior samples:   {nEvents} events × {nsamp} samples/event = {nEvents*nsamp:,} total")
+    if data.get("flow_event_names"):
+        # Persist the ensemble's event identity in settings.json (which
+        # serialises opts attributes) alongside the results.hdf5 meta.
+        opts.flow_event_names = list(data["flow_event_names"])
+        _ok(
+            f"Flow surrogates:        {nEvents} events × J={nsamp:,} population "
+            "draws/likelihood call"
+        )
+    else:
+        _ok(f"GW posterior samples:   {nEvents} events × {nsamp} samples/event = {nEvents*nsamp:,} total")
     _ok(f"Selection injections:   {int(Ndraw):,} total generated")
 
     if opts.survey_path:
@@ -1183,6 +1273,12 @@ def main():
         "sampling_runtime": str(wall_sampling),
         "timestamp":        timestamp,
     }
+    if data.get("flow_event_names"):
+        # Flow runs have no event names in a PE file: the ensemble's sorted
+        # checkpoint order IS the event identity; persist it for diagnostics.
+        # (JSON-encoded, and keyed *_json so it does not shadow the plain list
+        # that settings.json serialises from opts.flow_event_names.)
+        meta["flow_event_names_json"] = json.dumps(list(data["flow_event_names"]))
 
     _section("Saving outputs")
     _row("Run directory", run_dir)

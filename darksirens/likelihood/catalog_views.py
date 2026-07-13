@@ -231,7 +231,13 @@ def prepare_catalog_views(
     sample_to_unique_sel_raw = (
         sel_view.sample_to_unique if sel_view is not None else data.get("pixels_sel")
     )
-    sample_to_unique_pe = barrier(jnp.asarray(sample_to_unique_pe_raw, dtype=jnp.int32))
+    # The PE side is absent entirely on the flow-surrogate path (no stored PE
+    # samples): keep it None rather than crashing on jnp.asarray(None).
+    sample_to_unique_pe = (
+        barrier(jnp.asarray(sample_to_unique_pe_raw, dtype=jnp.int32))
+        if sample_to_unique_pe_raw is not None
+        else None
+    )
     sample_to_unique_sel = barrier(
         jnp.asarray(sample_to_unique_sel_raw, dtype=jnp.int32)
     )
