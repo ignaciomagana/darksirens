@@ -117,6 +117,8 @@ def main():
     ap.add_argument("--flows_seed", type=int, default=42)
     ap.add_argument("--fidelity_events", type=int, default=6)
     ap.add_argument("--pe_cosmology", default="67.74,0.3089")
+    ap.add_argument("--skip_fidelity", action="store_true",
+                    help="Skip the flow-vs-PE-sample fidelity plots.")
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -189,56 +191,57 @@ def main():
         )
 
     # ── fidelity: flow samples vs stored PE samples ─────────────────────
-    print("fidelity ...")
-    n_fid = 4096
-    fsamples = np.asarray(ensemble_sample(ens, jax.random.key(1), n_fid))
-    pe_blocks = {
-        "m1det": np.asarray(m1det).reshape(nEvents, nsamp),
-        "m2det": np.asarray(m2det).reshape(nEvents, nsamp),
-        "dL": np.asarray(dL).reshape(nEvents, nsamp),
-        "chieff": np.asarray(chieff).reshape(nEvents, nsamp),
-    }
-    X_pe = jnp.asarray(
-        np.stack([pe_blocks[k] for k in ("m1det", "m2det", "dL", "chieff")], axis=-1)
-    )  # (nEvents, nsamp, 4)
-    eval_lf = jax.jit(make_ensemble_log_prob(ens))
-    # Mean log flow density of each event's OWN PE samples (higher = better fit).
-    mean_lnp = []
-    for i in range(nEvents):
-        lp = eval_lf(ens.group_params(), X_pe[i])[i]
-        mean_lnp.append(float(jnp.mean(lp)))
-    fidelity = {
-        name: {"mean_flow_logpdf_of_pe_samples": v}
-        for name, v in zip(ens.names, mean_lnp)
-    }
-    with open(outdir / "fidelity_summary.json", "w") as f:
-        json.dump(fidelity, f, indent=1)
+    if not args.skip_fidelity:
+        print("fidelity ...")
+        n_fid = 4096
+        fsamples = np.asarray(ensemble_sample(ens, jax.random.key(1), n_fid))
+        pe_blocks = {
+            "m1det": np.asarray(m1det).reshape(nEvents, nsamp),
+            "m2det": np.asarray(m2det).reshape(nEvents, nsamp),
+            "dL": np.asarray(dL).reshape(nEvents, nsamp),
+            "chieff": np.asarray(chieff).reshape(nEvents, nsamp),
+        }
+        X_pe = jnp.asarray(
+            np.stack([pe_blocks[k] for k in ("m1det", "m2det", "dL", "chieff")], axis=-1)
+        )  # (nEvents, nsamp, 4)
+        eval_lf = jax.jit(make_ensemble_log_prob(ens))
+        # Mean log flow density of each event's OWN PE samples (higher = better fit).
+        mean_lnp = []
+        for i in range(nEvents):
+            lp = eval_lf(ens.group_params(), X_pe[i])[i]
+            mean_lnp.append(float(jnp.mean(lp)))
+        fidelity = {
+            name: {"mean_flow_logpdf_of_pe_samples": v}
+            for name, v in zip(ens.names, mean_lnp)
+        }
+        with open(outdir / "fidelity_summary.json", "w") as f:
+            json.dump(fidelity, f, indent=1)
 
-    # Corner-style overlays for a representative subset (worst + spread).
-    order = np.argsort(mean_lnp)
-    picks = sorted(set(
-        list(order[: max(1, args.fidelity_events // 2)])
-        + list(order[:: max(1, nEvents // max(1, args.fidelity_events // 2))])
-    ))[: args.fidelity_events]
-    for i in picks:
-        fig, axes = plt.subplots(1, 4, figsize=(16, 3.2))
-        for d in range(4):
-            pe_d = pe_blocks[list(pe_blocks)[d]][i]
-            lo, hi = np.percentile(pe_d, [0.2, 99.8])
-            span = hi - lo
-            bins = np.linspace(lo - 0.15 * span, hi + 0.15 * span, 60)
-            axes[d].hist(pe_d, bins=bins, density=True, alpha=0.45,
-                         label="PE samples", color="C0")
-            axes[d].hist(fsamples[i, :, d], bins=bins, density=True,
-                         histtype="step", lw=1.6, label="flow", color="C3")
-            axes[d].set_xlabel(LABELS[d])
-            axes[d].set_yticks([])
-        axes[0].legend(frameon=False, fontsize=8)
-        fig.suptitle(f"{ens.names[i]}  (mean flow logpdf of PE samples: "
-                     f"{mean_lnp[i]:.2f})")
-        fig.tight_layout()
-        fig.savefig(outdir / "fidelity" / f"{ens.names[i]}.png", dpi=140)
-        plt.close(fig)
+        # Corner-style overlays for a representative subset (worst + spread).
+        order = np.argsort(mean_lnp)
+        picks = sorted(set(
+            list(order[: max(1, args.fidelity_events // 2)])
+            + list(order[:: max(1, nEvents // max(1, args.fidelity_events // 2))])
+        ))[: args.fidelity_events]
+        for i in picks:
+            fig, axes = plt.subplots(1, 4, figsize=(16, 3.2))
+            for d in range(4):
+                pe_d = pe_blocks[list(pe_blocks)[d]][i]
+                lo, hi = np.percentile(pe_d, [0.2, 99.8])
+                span = hi - lo
+                bins = np.linspace(lo - 0.15 * span, hi + 0.15 * span, 60)
+                axes[d].hist(pe_d, bins=bins, density=True, alpha=0.45,
+                             label="PE samples", color="C0")
+                axes[d].hist(fsamples[i, :, d], bins=bins, density=True,
+                             histtype="step", lw=1.6, label="flow", color="C3")
+                axes[d].set_xlabel(LABELS[d])
+                axes[d].set_yticks([])
+            axes[0].legend(frameon=False, fontsize=8)
+            fig.suptitle(f"{ens.names[i]}  (mean flow logpdf of PE samples: "
+                         f"{mean_lnp[i]:.2f})")
+            fig.tight_layout()
+            fig.savefig(outdir / "fidelity" / f"{ens.names[i]}.png", dpi=140)
+            plt.close(fig)
 
     # ── per-event terms + flow ESS at the fiducial hyperparameters ──────
     print("per-event terms ...")
