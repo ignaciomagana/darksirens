@@ -28,7 +28,7 @@ BUILD = ROOT / "scripts" / "mock_lensing" / "build_candidate_pairs_from_observed
 PROFILES: dict[str, dict[str, int]] = {
     "tiny": dict(n_universe=4000, n_sing=2, n_pair=2, nsamp=48, n_unlensed_inj=1000, n_lensed_inj=1000, pe_max=48, default_nlive=32, max_total_edges=8),
     "small": dict(n_universe=12000, n_sing=8, n_pair=4, nsamp=96, n_unlensed_inj=4000, n_lensed_inj=5000, pe_max=96, default_nlive=80, max_total_edges=24),
-    "paper": dict(n_universe=120000, n_sing=200, n_pair=40, nsamp=1000, n_unlensed_inj=200000, n_lensed_inj=300000, pe_max=512, default_nlive=1000, max_total_edges=400),
+    "paper": dict(n_universe=120000, n_sing=200, n_pair=40, nsamp=1000, n_unlensed_inj=1000000, n_lensed_inj=300000, injection_proposal="matched", pe_max=512, default_nlive=1000, max_total_edges=400),
 }
 
 CASE_ORDER = [
@@ -236,6 +236,7 @@ def generate_cmd(case_dir: Path, spec: dict[str, Any], cfg: dict[str, Any], seed
            "--n-pair-keep", str(spec["n_pair"]), "--max-sing-keep", str(cfg["n_sing"]),
            "--max-pair-keep", str(spec["n_pair"]), "--nsamp", str(cfg["nsamp"]),
            "--n-unlensed-inj", str(cfg["n_unlensed_inj"]), "--n-lensed-inj", str(cfg["n_lensed_inj"]),
+           "--injection-proposal", str(cfg.get("injection_proposal", "broad")),
            "--pop_model", str(cfg.get("pop_model", "powerlaw+peak")),
            "--include-lensed-singletons", str(bool(cfg.get("include_lensed_singletons", False))).lower(),
            "--observation-times", str(spec.get("observation_times", cfg.get("observation_times", "placeholder"))),
@@ -438,6 +439,7 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
            "--fix_lens_rate", fix_lens_rate, "--fixed_parameter_values", fixed_parameter_values, "--lens_prior_overrides", lens_prior_overrides,
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples, "--pe_max_per_pair", str(cfg["pe_max"]),
            *(["--sel_batch_size", str(cfg["sel_batch_size"])] if cfg.get("sel_batch_size") else []),
+           *(["--selection_neff_guard", str(cfg["selection_neff_guard"])] if cfg.get("selection_neff_guard") else []),
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
            "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir)]
@@ -471,6 +473,7 @@ def off_control_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: ar
            "--fix_population", str(bool(cfg.get("fix_population", True))).lower(),
            "--fix_lens_rate", "true",
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples,
+           *(["--selection_neff_guard", str(cfg["selection_neff_guard"])] if cfg.get("selection_neff_guard") else []),
            "--seed", str(cfg["seed"]), "--save_path", str(run_dir)]
     if cfg.get("prior_overrides"):
         cmd.extend(["--prior_overrides", json.dumps(cfg["prior_overrides"])])
@@ -503,6 +506,7 @@ def singles_only_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: a
            "--fix_population", str(bool(cfg.get("fix_population", True))).lower(),
            "--fix_lens_rate", fix_lens_rate, "--fixed_parameter_values", fixed_parameter_values, "--lens_prior_overrides", lens_prior_overrides,
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples,
+           *(["--selection_neff_guard", str(cfg["selection_neff_guard"])] if cfg.get("selection_neff_guard") else []),
            "--seed", str(cfg["seed"]), "--save_path", str(run_dir)]
     if cfg.get("prior_overrides"):
         cmd.extend(["--prior_overrides", json.dumps(cfg["prior_overrides"])])

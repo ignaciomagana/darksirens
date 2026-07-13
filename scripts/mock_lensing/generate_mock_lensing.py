@@ -160,6 +160,49 @@ def _mixture_density(m1, q, chi, theta):
                                     jnp.asarray(chi), tm))
 
 
+def _analytic_proposal_density(m1, q, chi, theta):
+    """Density of the tailored (m1, q, chi) proposal — the SAME formulas the
+    draws in :func:`_analytic_proposal` come from, kept standalone so the
+    matched injection campaign can evaluate it at arbitrary points (mixture
+    pdraw). Vectorised; zero outside support.
+
+    Clip-atom caveat: draws clip the Gaussian peak and chi into their boxes
+    instead of redrawing; the leaked mass is <~5e-6 for generator-range
+    parameters, so the density treats the components as un-atomized pdfs.
+    """
+    v1, alpha, mmin, mmax, dmmin, dmmax, muG, sigG, beta, muchi, sigchi = \
+        [float(x) for x in theta[:11]]
+    lo, hi = mmin - dmmin, mmax + dmmax
+    w_peak = max(min(1.0 - v1, 0.95), 0.05)
+    a = 1.0 - alpha
+
+    m1 = np.asarray(m1, dtype=float)
+    q = np.asarray(q, dtype=float)
+    chi = np.asarray(chi, dtype=float)
+
+    if abs(a) > 1e-8:
+        pl_norm = (hi**a - lo**a) / a
+    else:
+        pl_norm = np.log(hi / lo)
+    m1_safe = np.where(m1 > 0, m1, 1.0)
+    g_pl = np.where((m1 >= lo) & (m1 <= hi), m1_safe**(-alpha) / pl_norm, 0.0)
+    sg = 1.5 * sigG
+    g_pk = np.exp(-0.5 * ((m1 - muG) / sg) ** 2) / (np.sqrt(2 * np.pi) * sg)
+    g_m1 = w_peak * g_pk + (1 - w_peak) * g_pl
+
+    bp1 = beta + 1.0
+    q_safe = np.where(q > 0, q, 1.0)
+    g_q = bp1 * q_safe**beta if abs(bp1) > 1e-8 else 1.0 / q_safe
+    g_q = np.where((q > 0) & (q <= 1.0), g_q, 0.0)
+
+    sgc = 1.3 * sigchi
+    Z = _norm.cdf((1 - muchi) / sgc) - _norm.cdf((-1 - muchi) / sgc)
+    g_chi = np.exp(-0.5 * ((chi - muchi) / sgc) ** 2) / (np.sqrt(2 * np.pi) * sgc * Z)
+    g_chi = np.where(np.abs(chi) <= 0.999, g_chi, 0.0)
+
+    return g_m1 * g_q * g_chi
+
+
 def _analytic_proposal(n, theta, rng):
     """Tailored proposal close to the imported mixture, for high acceptance.
 
@@ -180,35 +223,17 @@ def _analytic_proposal(n, theta, rng):
     m1 = np.where(use_peak, m_pk, m_pl)
     m1 = np.clip(m1, lo, hi)
 
-    def _pl_pdf(m):
-        if abs(a) > 1e-8:
-            norm = (hi**a - lo**a) / a
-        else:
-            norm = np.log(hi / lo)
-        return np.where((m >= lo) & (m <= hi), m**(-alpha) / norm, 0.0)
-
-    def _pk_pdf(m):
-        sg = 1.5 * sigG
-        return np.exp(-0.5 * ((m - muG) / sg) ** 2) / (np.sqrt(2 * np.pi) * sg)
-
-    g_m1 = w_peak * _pk_pdf(m1) + (1 - w_peak) * _pl_pdf(m1)
-
     # --- q: q ~ U^(1/(beta+1)) gives pdf prop q^beta on (0,1] ---
     bp1 = beta + 1.0
     uq = rng.uniform(size=n)
     q = uq ** (1.0 / bp1) if abs(bp1) > 1e-8 else np.exp(np.log(uq))
     q = np.clip(q, 1e-3, 1.0)
-    g_q = bp1 * q**beta if abs(bp1) > 1e-8 else 1.0 / q
-    g_q = np.where((q > 0) & (q <= 1.0), g_q, 0.0)
 
     # --- chi: truncated Gaussian(mu_chi, sigma_chi) ---
     chi = rng.normal(muchi, 1.3 * sigchi, n)   # slightly broadened
     chi = np.clip(chi, -0.999, 0.999)
-    sgc = 1.3 * sigchi
-    Z = _norm.cdf((1 - muchi) / sgc) - _norm.cdf((-1 - muchi) / sgc)
-    g_chi = np.exp(-0.5 * ((chi - muchi) / sgc) ** 2) / (np.sqrt(2 * np.pi) * sgc * Z)
 
-    g = g_m1 * g_q * g_chi
+    g = _analytic_proposal_density(m1, q, chi, theta)
     return m1, q, chi, g
 
 
@@ -403,28 +428,119 @@ def apply_selection_doubles(src, marks, model, rng):
 # ============================================================
 # STEP 4 - injection campaigns
 # ============================================================
-def generate_unlensed_injections(n_draw, model, rng, H0, Om0, *,
-                                 m1det_range=(3.0, 200.0), out_path=None):
-    """Unlensed singleton injections in the detector-frame proposal basis,
-    written in the ``gwcat-selection-1.0`` schema."""
-    m1lo, m1hi = m1det_range
-    m1det = rng.uniform(m1lo, m1hi, n_draw)
-    q = rng.uniform(0.0, 1.0, n_draw)
-    chieff = rng.uniform(-1.0, 1.0, n_draw)
-
-    # z from p_z(z) ∝ dV_c/dz on (0, zMax]; inverse-CDF
-    zg = np.linspace(1e-4, float(zMax), 4000)
+def _broad_z_table(H0, Om0, nz=4000):
+    """z proposal table of the broad campaign: pdf ∝ dV_c/dz on (0, zMax].
+    Returns (zg, cdf, Znorm); the exact density at arbitrary z is
+    dV_of_z(z)/Znorm (matching the historical pdraw convention exactly)."""
+    zg = np.linspace(1e-4, float(zMax), nz)
     dV = np.asarray(dV_of_z(jnp.asarray(zg), H0, Om0))
     cdf = np.concatenate([[0.0], np.cumsum(0.5 * (dV[1:] + dV[:-1]) * np.diff(zg))])
-    Znorm = cdf[-1]; cdf /= cdf[-1]
-    z = np.interp(rng.uniform(0, 1, n_draw), cdf, zg)
-    pz_of_z = np.asarray(dV_of_z(jnp.asarray(z), H0, Om0)) / Znorm
+    Znorm = cdf[-1]; cdf = cdf / Znorm
+    return zg, cdf, Znorm
 
-    dL = np.asarray(dL_of_z(jnp.asarray(z), H0, Om0))
-    ddL = np.asarray(ddL_of_z(jnp.asarray(z), jnp.asarray(dL), H0, Om0))
 
-    # proposal density in the canonical (m1det, q, dL) basis (physical scale kept)
-    p_draw = (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * (pz_of_z / ddL)
+def _detectability_tilted_z_table(theta, model, H0, Om0, nz=4000, n_msc=4096):
+    """z proposal table for the matched campaign: pdf ∝ p_z_astro(z) x
+    p̄_det(z), where p̄_det(z) is the Finn-Chernoff detection probability
+    averaged over fiducial-shaped (m1, q, chi) draws. This concentrates
+    injection draws where detected sources actually live — near-equal
+    importance weights at the truth, so Neff tracks the detected count
+    instead of collapsing (the flat proposal's Neff was ~10-20% of N_det
+    and fell an order of magnitude short of the GWTC-4/5 selection
+    variance criterion at 280 events).
+
+    Uses a fixed-seed private rng for the (m1,q,chi) average so the table
+    is deterministic and consumes nothing from the campaign stream.
+    """
+    zg, pdf_astro, _ = _build_z_cdf(theta, H0, Om0, nz=nz)
+    msc_rng = np.random.default_rng(714_2026)
+    m1, q, chi, _g = _analytic_proposal(n_msc, theta, msc_rng)
+    dLg = np.asarray(dL_of_z(jnp.asarray(zg), H0, Om0))
+    pbar = np.empty(nz)
+    for i in range(nz):
+        pbar[i] = float(np.mean(np.asarray(
+            model.p_det(m1, q, np.full(n_msc, zg[i]), np.full(n_msc, dLg[i]))
+        )))
+    pdf = pdf_astro * pbar
+    pdf = np.where(np.isfinite(pdf) & (pdf > 0), pdf, 0.0)
+    norm = np.trapz(pdf, zg)
+    pdf = pdf / norm
+    cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pdf[1:] + pdf[:-1]) * np.diff(zg))])
+    cdf = cdf / cdf[-1]
+    return zg, pdf, cdf
+
+
+MATCHED_FRACTION = 0.85
+
+
+def generate_unlensed_injections(n_draw, model, rng, H0, Om0, *,
+                                 m1det_range=(3.0, 200.0), out_path=None,
+                                 proposal="broad", theta=None):
+    """Unlensed singleton injections in the detector-frame proposal basis,
+    written in the ``gwcat-selection-1.0`` schema.
+
+    proposal="broad" (default): flat m1det x flat q x flat chieff x dV_c/dz —
+    the historical campaign; byte-identical output for a given rng state.
+
+    proposal="matched": defensive two-branch mixture — MATCHED_FRACTION of
+    draws use the fiducial-shaped (m1, q, chi) proposal with a
+    detectability-tilted z, the rest use the broad proposal (full prior
+    support). pdraw is the exact mixture density in the canonical
+    (m1det, q, dL, chieff) basis for every sample, so the estimator stays
+    unbiased while near-truth weights are near-equal (Neff ~ N_det).
+    """
+    m1lo, m1hi = m1det_range
+    zg_b, cdf_b, Znorm_b = _broad_z_table(H0, Om0)
+
+    if proposal == "broad":
+        m1det = rng.uniform(m1lo, m1hi, n_draw)
+        q = rng.uniform(0.0, 1.0, n_draw)
+        chieff = rng.uniform(-1.0, 1.0, n_draw)
+        z = np.interp(rng.uniform(0, 1, n_draw), cdf_b, zg_b)
+        pz_of_z = np.asarray(dV_of_z(jnp.asarray(z), H0, Om0)) / Znorm_b
+
+        dL = np.asarray(dL_of_z(jnp.asarray(z), H0, Om0))
+        ddL = np.asarray(ddL_of_z(jnp.asarray(z), jnp.asarray(dL), H0, Om0))
+
+        # proposal density in the canonical (m1det, q, dL) basis
+        p_draw = (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * (pz_of_z / ddL)
+    elif proposal == "matched":
+        if theta is None:
+            raise ValueError("proposal='matched' requires the truth theta.")
+        zg_t, pdf_t, cdf_t = _detectability_tilted_z_table(theta, model, H0, Om0)
+
+        nA = int(round(MATCHED_FRACTION * n_draw))
+        nC = n_draw - nA
+        # branch A: fiducial-shaped source frame + tilted z
+        m1A, qA, chiA, _gA = _analytic_proposal(nA, theta, rng)
+        zA = np.interp(rng.uniform(0, 1, nA), cdf_t, zg_t)
+        m1detA = m1A * (1.0 + zA)
+        # branch C: broad (full support)
+        m1detC = rng.uniform(m1lo, m1hi, nC)
+        qC = rng.uniform(0.0, 1.0, nC)
+        chiC = rng.uniform(-1.0, 1.0, nC)
+        zC = np.interp(rng.uniform(0, 1, nC), cdf_b, zg_b)
+
+        m1det = np.concatenate([m1detA, m1detC])
+        q = np.concatenate([qA, qC])
+        chieff = np.concatenate([chiA, chiC])
+        z = np.concatenate([zA, zC])
+
+        dL = np.asarray(dL_of_z(jnp.asarray(z), H0, Om0))
+        ddL = np.asarray(ddL_of_z(jnp.asarray(z), jnp.asarray(dL), H0, Om0))
+
+        # exact mixture density at EVERY sample, canonical (m1det, q, dL) basis
+        m1_src_all = m1det / (1.0 + z)
+        gA_msc = _analytic_proposal_density(m1_src_all, q, chieff, theta)
+        pdfA_z = np.interp(z, zg_t, pdf_t)
+        pA = gA_msc / (1.0 + z) * (pdfA_z / ddL)
+        pdfC_z = np.asarray(dV_of_z(jnp.asarray(z), H0, Om0)) / Znorm_b
+        inC = (m1det >= m1lo) & (m1det <= m1hi) & (q >= 0.0) & (q <= 1.0) \
+            & (np.abs(chieff) <= 1.0)
+        pC = np.where(inC, (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * (pdfC_z / ddL), 0.0)
+        p_draw = MATCHED_FRACTION * pA + (1.0 - MATCHED_FRACTION) * pC
+    else:
+        raise ValueError(f"unknown injection proposal {proposal!r}")
 
     # selection: Finn-Chernoff p_det at the (unlensed) apparent distance dL
     m1_src = m1det / (1.0 + z)
@@ -453,6 +569,9 @@ def generate_unlensed_injections(n_draw, model, rng, H0, Om0, *,
             f.attrs["cosmology_Om0"] = float(Om0)
             f.attrs["pop_model"] = POP_NAME
             f.attrs["rho_thr"] = float(model.rho_thr)
+            f.attrs["injection_proposal"] = str(proposal)
+            if proposal == "matched":
+                f.attrs["matched_fraction"] = float(MATCHED_FRACTION)
             for key in ("m1det", "m2det", "m1src", "m2src", "dL",
                         "chieff", "ra", "dec", "pdraw"):
                 f.create_dataset(key, data=d[key])
@@ -728,7 +847,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              observation_times="placeholder", t_obs_days=365.25,
              build_candidate_pairs_from_observed=False,
              validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0),
-             write_legacy_pair_pe=False):
+             write_legacy_pair_pe=False,
+             injection_proposal="broad"):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
     truth.update(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
@@ -880,7 +1000,9 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
 
     # ---- injection campaigns ----
     generate_unlensed_injections(n_unlensed_inj, model, rng, H0, Om0,
-                                 out_path=os.path.join(out_dir, "mock_gw_selection.h5"))
+                                 out_path=os.path.join(out_dir, "mock_gw_selection.h5"),
+                                 proposal=injection_proposal,
+                                 theta=truth["theta"])
     lensed_inj_summary, _ = generate_lensed_injections(
         n_lensed_inj, model, rng, H0, Om0,
         out_path=os.path.join(out_dir, "mock_lensed_injections.h5"),
@@ -1215,6 +1337,13 @@ def parse_args():
     p.add_argument("--max-pair-keep", type=int, default=None,
                    help="optional pair cap for --conditioning poisson_counts")
     p.add_argument("--n-unlensed-inj", type=int, default=200_000)
+    p.add_argument("--injection-proposal", choices=("broad", "matched"),
+                   default="broad",
+                   help="unlensed injection campaign proposal; 'matched' uses "
+                        "a fiducial-shaped + detectability-tilted mixture so "
+                        "selection Neff tracks the detected count (required "
+                        "for paper-scale catalogs under the selection "
+                        "variance guard)")
     p.add_argument("--n-lensed-inj", type=int, default=300_000, help="lensed source draws")
     p.add_argument("--rho-thr", type=float, default=8.0, help="network SNR threshold")
     p.add_argument("--horizon-mpc", type=float, default=3000.0, help="sets r0")
@@ -1283,6 +1412,7 @@ def main():
         max_pair_keep=args.max_pair_keep,
         rho_thr=args.rho_thr, horizon_Mpc=args.horizon_mpc,
         n_unlensed_inj=args.n_unlensed_inj, n_lensed_inj=args.n_lensed_inj,
+        injection_proposal=args.injection_proposal,
         H0=args.H0, Om0=args.Om0, sis=sis, wl=wl,
         pair_tag_model=args.pair_tag_model, pair_tag_prob=args.pair_tag_prob,
         n_wrong_candidate_pairs=args.n_wrong_candidate_pairs,
