@@ -1362,6 +1362,47 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
         )
 
 
+def _diagnostics_at_guard_clear_point(diagnostics_fn, mid, lower, upper, seed, n_draws=32):
+    """Evaluate the factorization diagnostics at a point the selection
+    reliability guard does not clip to -inf.
+
+    The prior midpoint is tried first; on paper-scale joint runs the guard
+    often fires there (extreme hyperparameters -> tiny selection Neff), which
+    makes the exactness cross-check impossible at that point even though the
+    sampler itself is fine (it concentrates where the guard is clear). Fall
+    back to seeded prior draws; if none of them clears the guard the sampler
+    would not find live points either, so re-raise the last error.
+    Returns (diagnostics, evaluation_point)."""
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    rng = np.random.default_rng(seed)
+    points = [np.asarray(mid, dtype=float)] + [
+        lower + (upper - lower) * rng.random(lower.shape) for _ in range(n_draws)
+    ]
+    last_exc = None
+    for k, point in enumerate(points):
+        try:
+            diagnostics = diagnostics_fn(jnp.asarray(point))
+            if k > 0:
+                print(
+                    f"  diagnostics point: prior draw {k} "
+                    "(reliability guard fired at the prior midpoint)",
+                    flush=True,
+                )
+            return diagnostics, point
+        except RuntimeError as exc:
+            if "NON-FINITE" not in str(exc):
+                raise
+            last_exc = exc
+    raise RuntimeError(
+        f"factorization diagnostics: no guard-clear evaluation point found in "
+        f"the prior midpoint + {n_draws} prior draws; the selection reliability "
+        "guard rejects essentially all of the prior. The sampler would not "
+        "initialize either — increase the injection campaign or relax "
+        "--max_likelihood_variance."
+    ) from last_exc
+
+
 def _print_diagnostics_summary(diagnostics):
     print("  likelihood diagnostics (prior midpoint):", flush=True)
     for key in (
@@ -2408,8 +2449,13 @@ def main():
         f"  logL(prior midpoint) = {v:.3f}  [compile {time.time()-t:.1f}s]", flush=True
     )
     try:
-        diagnostics = diagnostics_fn(jnp.asarray(mid))
-        _write_json(os.path.join(run_dir, "midpoint_diagnostics.json"), diagnostics)
+        diagnostics, diag_point = _diagnostics_at_guard_clear_point(
+            diagnostics_fn, mid, lower, upper, int(opts.seed)
+        )
+        _write_json(
+            os.path.join(run_dir, "midpoint_diagnostics.json"),
+            {**diagnostics, "evaluation_point": np.asarray(diag_point, dtype=float).tolist()},
+        )
     except Exception as exc:
         _write_failure(run_dir, "midpoint_diagnostics", exc, labels=labels, settings=settings)
         raise
