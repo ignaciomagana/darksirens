@@ -119,8 +119,9 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
     """Validate consolidated or legacy selection HDF5 inputs.
 
     Consolidated files use root ``format_version='lensing-selection-inputs-1.0'``.
-    Legacy simulation component files (``gwcat-selection-1.0`` and lensed
-    injection files) are accepted so existing split-pair simulations remain
+    Legacy simulation component files (``gwcat-selection-1.0`` /
+    ``gwcat-selection-2.0`` in the chi_eff spin basis, and lensed injection
+    files) are accepted so existing split-pair simulations remain
     preflightable while the new contract is adopted.
     """
 
@@ -133,7 +134,18 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
                 if "unlensed" not in f and "lensed" not in f:
                     raise ValueError("selection_inputs.h5 requires at least an 'unlensed' or 'lensed' group")
                 return {"format_version": fmt, "groups": groups, "warnings": warnings}
-            if fmt == "gwcat-selection-1.0":
+            if fmt in ("gwcat-selection-1.0", "gwcat-selection-2.0"):
+                # gwcat-2.0 selection files are only chi_eff-compatible in the
+                # "chieff" spin basis; the component / chieff_chip bases fold a
+                # different draw prior into pdraw and must be re-exported.
+                if fmt == "gwcat-selection-2.0":
+                    basis = _decode(f.attrs.get("spin_basis", ""))
+                    if basis != "chieff":
+                        raise ValueError(
+                            f"gwcat-2.0 selection file uses spin_basis={basis!r}; "
+                            "darksirens' likelihood is chi_eff-based, re-export with "
+                            "spin_basis='chieff'"
+                        )
                 for name in ("m1det", "m2det", "dL", "chieff", "pdraw"):
                     _finite_dataset(f, name)
                 warnings.append("legacy unlensed selection file accepted; prefer consolidated selection_inputs.h5")
