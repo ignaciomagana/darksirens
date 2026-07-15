@@ -81,6 +81,27 @@ def _require_hdf5_format(f, expected, conversion_hint):
             f"Unsupported GW catalog format {observed!r}. Expected {expected!r}. "
             f"{conversion_hint}"
         )
+    return observed
+
+
+def _require_chieff_spin_basis(f, path, reexport_hint):
+    """Reject a gwcat-2.0 export that is not written in the chi_eff spin basis.
+
+    gwcat-2.0 files carry a ``spin_basis`` attr in {"chieff", "component",
+    "chieff_chip"}.  Only the "chieff" basis is array-compatible with the
+    legacy 1.0 contract: the "component" and "chieff_chip" bases fold a
+    different spin-prior/draw factor into ``p_pe``/``pdraw`` and omit the
+    chi_eff-compat attrs.  darksirens' likelihood is chi_eff-based (its
+    population model uses a 1-D ``SpinModel``), so consuming those bases would
+    be silently wrong; reject them with an actionable error.
+    """
+    basis = _decode_hdf5_attr(f.attrs.get("spin_basis", ""))
+    if basis != "chieff":
+        raise RuntimeError(
+            f"gwcat-2.0 file {path!r} was exported with spin_basis={basis!r}, but "
+            "darksirens' likelihood is chi_eff-based and can only consume the "
+            f"'chieff' basis. {reexport_hint}"
+        )
 
 
 def _require_hdf5_members(f, datasets=(), attrs=(), conversion_hint=""):
@@ -103,11 +124,15 @@ def load_gw_samples(gw_path):
     """
     Load GW posterior samples from a gwcat HDF5 export.
 
-    ``gw_path`` must point to a file with ``format_version="gwcat-1.0"``
-    produced by ``gwcat.GWCatalog._to_darksirens_format(...)``.  The loader
-    intentionally rejects raw PE files and partially-populated HDF5 files so
-    that all catalog ingestion and coordinate conversions remain owned by
-    gwcat.
+    ``gw_path`` must point to a file with ``format_version`` in
+    {"gwcat-1.0", "gwcat-pe-2.0"} produced by
+    ``gwcat.GWCatalog._to_darksirens_format(...)`` / the versioned export
+    layer.  A ``gwcat-pe-2.0`` file is only accepted when its ``spin_basis``
+    attr is ``"chieff"`` (the sole basis array-compatible with darksirens'
+    chi_eff-based likelihood); the ``"component"`` and ``"chieff_chip"`` bases
+    are rejected with an actionable error.  The loader intentionally rejects
+    raw PE files and partially-populated HDF5 files so that all catalog
+    ingestion and coordinate conversions remain owned by gwcat.
 
     Returns
     -------
@@ -148,8 +173,20 @@ def load_gw_samples(gw_path):
         "chi_eff_amax",
     )
 
+    reexport_hint = (
+        "Re-export in the chi_eff basis, e.g. "
+        "gwcat ... --spin-basis chieff or GWCatalog.export(spin_basis=\"chieff\")."
+    )
+
     with h5py.File(gw_path, "r") as f:
-        _require_hdf5_format(f, ("gwcat-1.0", "observed-lensing-pe-1.0"), conversion_hint)
+        fmt = _require_hdf5_format(
+            f, ("gwcat-1.0", "observed-lensing-pe-1.0", "gwcat-pe-2.0"), conversion_hint
+        )
+        # gwcat-2.0 gate: reject non-chi_eff spin bases BEFORE the member
+        # checks so the failure names the incompatible basis rather than the
+        # (legitimately absent) chi_eff-compat attrs.
+        if fmt == "gwcat-pe-2.0":
+            _require_chieff_spin_basis(f, gw_path, reexport_hint)
         _require_hdf5_members(
             f,
             datasets=required_datasets,
@@ -218,13 +255,18 @@ def load_selection_samples(file):
     """
     Return detected GW selection samples from a gwcat HDF5 export.
 
-    ``file`` must point to a file with
-    ``format_version="gwcat-selection-1.0"`` produced by
-    ``gwcat.SelectionSet.to_darksirens(...)`` or
-    ``gwcat.CombinedSelectionSet.to_darksirens(...)``.  Raw LVK injection
-    files and darksirens mock-selection files are intentionally rejected so
-    that all catalog ingestion, FAR cuts, coordinate transforms, and draw
-    density conversions happen in gwcat.
+    ``file`` must point to a file with ``format_version`` in
+    {"gwcat-selection-1.0", "gwcat-selection-2.0"} produced by
+    ``gwcat.SelectionSet.to_darksirens(...)`` /
+    ``gwcat.CombinedSelectionSet.to_darksirens(...)`` or the versioned export
+    layer.  A ``gwcat-selection-2.0`` file is only accepted when its
+    ``spin_basis`` attr is ``"chieff"`` (the sole basis compatible with
+    darksirens' chi_eff-based likelihood); the ``"component"`` and
+    ``"chieff_chip"`` bases are rejected with an actionable error, and any
+    extra spin datasets (``a1, a2, cost1, cost2, chip``) are ignored.  Raw LVK
+    injection files and darksirens mock-selection files are intentionally
+    rejected so that all catalog ingestion, FAR cuts, coordinate transforms,
+    and draw density conversions happen in gwcat.
 
     Integration convention after gwcat preprocessing:
 
@@ -252,7 +294,11 @@ def load_selection_samples(file):
     conversion_hint = (
         "Use gwcat.SelectionSet.to_darksirens(...) or "
         "gwcat.CombinedSelectionSet.to_darksirens(...) to create a "
-        "gwcat-selection-1.0 file."
+        "gwcat-selection-1.0 / gwcat-selection-2.0 file."
+    )
+    reexport_hint = (
+        "Re-export in the chi_eff basis, e.g. "
+        "gwcat ... --spin-basis chieff or SelectionSet.export(spin_basis=\"chieff\")."
     )
     required_datasets = (
         "m1det",
@@ -268,7 +314,13 @@ def load_selection_samples(file):
     required_attrs = ("ndraw",)
 
     with h5py.File(file, "r") as f:
-        _require_hdf5_format(f, "gwcat-selection-1.0", conversion_hint)
+        fmt = _require_hdf5_format(
+            f, ("gwcat-selection-1.0", "gwcat-selection-2.0"), conversion_hint
+        )
+        # gwcat-2.0 gate: reject non-chi_eff spin bases before the member
+        # checks (extra spin datasets a1/a2/cost1/cost2/chip are ignored).
+        if fmt == "gwcat-selection-2.0":
+            _require_chieff_spin_basis(f, file, reexport_hint)
         _require_hdf5_members(
             f,
             datasets=required_datasets,
@@ -295,7 +347,9 @@ def load_selection_samples(file):
             pdraw_sel = pdraw_sel * np.exp(safe_log_p_chi)
 
         n_det = len(pdraw_sel)
-        print(f"    [gwcat selection] {n_det:,} detected injections  "
+        _basis = _decode_hdf5_attr(f.attrs.get("spin_basis", "chieff"))
+        print(f"    [gwcat selection] format={fmt} spin_basis={_basis}  "
+              f"{n_det:,} detected injections  "
               f"Ndraw={ndraw:,}  "
               f"H0={f.attrs.get('cosmology_H0', '?')}  "
               f"Om0={f.attrs.get('cosmology_Om0', '?')}")

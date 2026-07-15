@@ -384,14 +384,19 @@ def main():
 
     g = optp.add_argument_group("Data")
     g.add_argument("--gw_path",          default=None,
-                   help=("gwcat-1.0 PE posterior-samples file. Exactly one of "
+                   help=("gwcat PE posterior-samples file (format_version "
+                         "gwcat-1.0 or gwcat-pe-2.0; a 2.0 file must use "
+                         "spin_basis=chieff). Exactly one of "
                          "--gw_path / --gw_flows_path is required."))
     g.add_argument("--gw_flows_path",    default=None,
                    help=("Directory of per-event normalizing-flow checkpoints "
                          "(<EVENT>/<EVENT>_flow.npz) replacing stored PE "
                          "samples. Mutually exclusive with --gw_path; "
                          "spectral_sirens only."))
-    g.add_argument("--gwselection_path", required=True)
+    g.add_argument("--gwselection_path", required=True,
+                   help=("gwcat selection/injection file (format_version "
+                         "gwcat-selection-1.0 or gwcat-selection-2.0; a 2.0 "
+                         "file must use spin_basis=chieff)."))
     g.add_argument("--survey_path",      default=None, nargs="+", metavar="PATH",
                    help=("Galaxy survey catalog(s). One path = current "
                          "single-catalog behaviour. Multiple paths define a "
