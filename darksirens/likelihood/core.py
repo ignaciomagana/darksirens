@@ -311,10 +311,15 @@ def darksiren_log_likelihood(
         )
 
     # ------------------------------------------------------------------
-    # K-catalog mixture branch (n_catalogs >= 2).  The redshift prior at the two
-    # seams becomes log p_mix(z) = logsumexp_k(log w_k + log p_k(z, pix[:,k])),
-    # inserted at the prior level so the population term is not recomputed K
-    # times.  K = 1 falls through to the verbatim single-catalog body below.
+    # Unified K >= 1 catalog path.  The single-catalog operands are element 0
+    # of length-K tuples; catalogs 2..K arrive via the mixture_* operands.
+    # The redshift prior at the two seams becomes
+    # log p_mix(z) = logsumexp_k(log w_k + log p_k(z, pix[:, k])), inserted at
+    # the prior level so the population term is not recomputed K times.  K = 1
+    # takes a STATIC shortcut inside the same closures (no + log w_1, no
+    # single-element logsumexp), so it is bit-identical to the historical
+    # single-catalog body by construction -- pinned per feature cell by
+    # tests/test_unified_k1_golden.py.
     # ------------------------------------------------------------------
     if n_catalogs >= 2:
         if universe_model == "dark_sirens_complete":
@@ -375,156 +380,80 @@ def darksiren_log_likelihood(
                 f"sel={len(mixture_em_catalogs_sel)}."
             )
 
-        surveys_all = (survey,) + tuple(mixture_surveys)
-        catalogs_pe_all = (em_catalog_pe,) + tuple(mixture_em_catalogs_pe)
-        catalogs_sel_all = (em_catalog_sel,) + tuple(mixture_em_catalogs_sel)
+    surveys_all = (survey,) + tuple(mixture_surveys)
+    catalogs_pe_all = (em_catalog_pe,) + tuple(mixture_em_catalogs_pe)
+    catalogs_sel_all = (em_catalog_sel,) + tuple(mixture_em_catalogs_sel)
 
-        # Per-catalog prior states (marks off; guarded above).  pe_model and
-        # selection_model are both "dark_sirens" here.
-        prior_states_univ = [
-            prepare_redshift_prior_state(
-                pe_model, cosmo, surveys_all[k], catalogs_pe_all[k],
-                mark_model="none",
-                materialize_state=materialize_redshift_prior_state,
-                catalog_sky_weighting=catalog_sky_weighting,
-            )
-            for k in range(n_catalogs)
-        ]
-        prior_states_sel = [
-            prepare_redshift_prior_state(
-                selection_model, cosmo, surveys_all[k], catalogs_sel_all[k],
-                mark_model="none",
-                materialize_state=materialize_redshift_prior_state,
-                catalog_sky_weighting=catalog_sky_weighting,
-            )
-            for k in range(n_catalogs)
-        ]
+    def _pix_col(pix, k):
+        # GW pixel columns: (N,) for a single catalog (and every direct K=1
+        # caller), (N, K) for the stacked mixture.  Static ndim branch, so a
+        # 1-D direct caller never pays a reshape.
+        return pix[:, k] if pix.ndim == 2 else pix
 
-        def _mixture_logsumexp(lps):
-            # Per-sample logsumexp over the K catalogs.  Uses the codebase's
-            # all--inf-safe pattern (cf. _logsumexp_neginf_safe): a sample whose
-            # z is impossible under EVERY catalog yields exactly -inf with a
-            # zero (not NaN) backward pass, so jax.grad stays finite.
-            stacked = jnp.stack(lps, axis=0)            # (K, nsamp)
-            finite = jnp.isfinite(stacked)
-            safe = jnp.where(finite, stacked, -1e30)
-            return jnp.where(
-                jnp.any(finite, axis=0), logsumexp(safe, axis=0), -jnp.inf
-            )
+    def _mixture_logsumexp(lps):
+        # Per-sample logsumexp over the K catalogs.  Uses the codebase's
+        # all--inf-safe pattern (cf. _logsumexp_neginf_safe): a sample whose
+        # z is impossible under EVERY catalog yields exactly -inf with a
+        # zero (not NaN) backward pass, so jax.grad stays finite.
+        stacked = jnp.stack(lps, axis=0)            # (K, nsamp)
+        finite = jnp.isfinite(stacked)
+        safe = jnp.where(finite, stacked, -1e30)
+        return jnp.where(
+            jnp.any(finite, axis=0), logsumexp(safe, axis=0), -jnp.inf
+        )
 
-        def log_prior_z(z, pix, catalogs):
-            lps = [
-                mixture_log_weights[k] + eval_redshift_prior_with_state(
-                    pe_model, prior_states_univ[k], z, pix[:, k],
-                    cosmo, surveys_all[k], catalogs[k],
-                    catalog_sky_weighting=catalog_sky_weighting,
-                )
-                for k in range(n_catalogs)
-            ]
-            return _mixture_logsumexp(lps)
-
-        def log_prior_z_selection(z, pix, catalogs):
-            lps = [
-                mixture_log_weights[k] + eval_redshift_prior_with_state(
-                    selection_model, prior_states_sel[k], z, pix[:, k],
-                    cosmo, surveys_all[k], catalogs[k],
-                    catalog_sky_weighting=catalog_sky_weighting,
-                )
-                for k in range(n_catalogs)
-            ]
-            return _mixture_logsumexp(lps)
-
-        def _mixture_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs, prior_fn):
-            # Same clamped-distance treatment as the single-catalog weights:
-            # z_of_dL's NaN sentinel must never enter the arithmetic.  ``survey``
-            # is inert inside log_sample_weight (the per-catalog survey enters
-            # via the captured prior states), so catalog 1's survey is passed.
-            dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
-            supported = (dL >= dL_lo) & (dL <= dL_hi)
-            dL_c = jnp.clip(dL, dL_lo, dL_hi)
-            ldw = log_sample_weight(
-                m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
-                catalogs, log_p_pop, prior_fn,
-            )
-            return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
-
-        def _sel_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs):
-            return _mixture_weight(
-                m1det, q, dL, chieff, pix, prior_wt, catalogs, log_prior_z_selection
-            )
-
-        def _pe_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs):
-            return _mixture_weight(
-                m1det, q, dL, chieff, pix, prior_wt, catalogs, log_prior_z
-            )
-
-        def _ll_given_states_mixture():
-            log_mu, Neff, _log_sigma2 = compute_selection_term(
-                gw_sel,
-                catalogs_sel_all,
-                _sel_weight,
-                Ndraw,
-                nEvents,
-                sel_batch_size=sel_batch_size,
-                sky_log_weight_fn=sky_log_weight_fn,
-            )
-
-            def _pe_event_fn(_, event_idx):
-                s = event_idx * nsamp
-                sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
-                valid = sl(gw_pe.valid) & (sl(gw_pe.prior_wt) > 0.0)
-                ldw = _pe_weight(
-                    sl(gw_pe.m1det),
-                    sl(gw_pe.q),
-                    sl(gw_pe.dL),
-                    sl(gw_pe.chieff),
-                    sl(gw_pe.pixels),
-                    sl(gw_pe.prior_wt),
-                    catalogs_pe_all,
-                )
-                ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
-                return None, log_evidence_and_mc_variance(ldw, nsamp)
-
-            _, (event_lls, event_vars) = lax.scan(
-                _pe_event_fn, None, jnp.arange(nEvents)
-            )
-            # Guard on the TOTAL log-likelihood variance: the per-event
-            # reweighting variances spend part of the budget, so the
-            # correction must be evaluated after the event scan.
-            ll = selection_log_correction(
-                log_mu,
-                Neff,
-                nEvents,
-                soft_guard=selection_neff_soft_guard,
-                max_likelihood_variance=max_likelihood_variance,
-                pe_variance_sum=jnp.sum(event_vars),
-            )
-            return ll + jnp.sum(event_lls)
-
-        ll = _ll_given_states_mixture()
-        return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
-
-    # Per-proposal prior states: O(N_rows × N_grid) precomputation done ONCE
-    # here, then captured by the per-sample closures below.  Because the
-    # closures only *read* these arrays, neither the per-event ``lax.scan``
+    # Per-proposal, per-catalog prior states: O(N_rows × N_grid) precomputation
+    # done ONCE here, then captured by the per-sample closures below.  Because
+    # the closures only *read* these arrays, neither the per-event ``lax.scan``
     # nor the selection batching recomputes them (the state arrays are
     # loop-invariant operands of the scans).  For ``bright_sirens`` the state
     # is None and the evaluator uses the live per-event catalog.
-    # The marked-host model (eta) reweights the dark-siren catalog prior; pass it
-    # to both states so it is applied identically to the PE and selection terms
-    # (prepare ignores it for non-dark_sirens models).
-    prior_state_univ = prepare_redshift_prior_state(
-        pe_model, cosmo, survey, em_catalog_pe,
-        mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
-        materialize_state=materialize_redshift_prior_state,
-        catalog_sky_weighting=catalog_sky_weighting,
+    # The marked-host model (eta) reweights the dark-siren catalog prior; pass
+    # it to both states so it is applied identically to the PE and selection
+    # terms (prepare ignores it for non-dark_sirens models; at K >= 2 the guard
+    # above pins mark_model to "none", the legacy mixture semantics).
+    prior_states_univ = tuple(
+        prepare_redshift_prior_state(
+            pe_model, cosmo, surveys_all[k], catalogs_pe_all[k],
+            mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
+            materialize_state=materialize_redshift_prior_state,
+            catalog_sky_weighting=catalog_sky_weighting,
+        )
+        for k in range(n_catalogs)
     )
-    prior_state_sel = prepare_redshift_prior_state(
-        selection_model, cosmo, survey, em_catalog_sel,
-        mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
-        materialize_state=materialize_redshift_prior_state,
-        catalog_sky_weighting=catalog_sky_weighting,
+    prior_states_sel = tuple(
+        prepare_redshift_prior_state(
+            selection_model, cosmo, surveys_all[k], catalogs_sel_all[k],
+            mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
+            materialize_state=materialize_redshift_prior_state,
+            catalog_sky_weighting=catalog_sky_weighting,
+        )
+        for k in range(n_catalogs)
     )
+
+    def _eval_prior_mix(model, states, z, pix, catalogs):
+        """log p(z | pix) for ``model`` across the K-catalog mixture.
+
+        K = 1 is a STATIC shortcut -- the bare per-catalog evaluation with no
+        mixture weight and no logsumexp -- so the single-catalog compute graph
+        is exactly the historical one.  For K >= 2 the per-catalog log priors
+        are combined with the sampled log weights via the all--inf-safe
+        logsumexp above.
+        """
+        if n_catalogs == 1:
+            return eval_redshift_prior_with_state(
+                model, states[0], z, _pix_col(pix, 0), cosmo, surveys_all[0],
+                catalogs[0], catalog_sky_weighting=catalog_sky_weighting,
+            )
+        lps = [
+            mixture_log_weights[k] + eval_redshift_prior_with_state(
+                model, states[k], z, _pix_col(pix, k),
+                cosmo, surveys_all[k], catalogs[k],
+                catalog_sky_weighting=catalog_sky_weighting,
+            )
+            for k in range(n_catalogs)
+        ]
+        return _mixture_logsumexp(lps)
 
     # WL quadrature plumbing — only allocated when wl_enabled (static).  Lognormal
     # uses Gauss-Hermite in the standardized variable u=(ln mu - m(z))/s(z); the
@@ -550,27 +479,27 @@ def darksiren_log_likelihood(
         log_wH_nodes = jnp.zeros(1, dtype=jnp.float64)
         log_p_wl_fn = None
 
-    def _ll_given_states(prior_state_univ, prior_state_sel):
-        """Full log-likelihood (selection + PE) for ONE pair of redshift-prior
-        states.  Factored out so the LSS-completion ensemble can be marginalised
-        over (one call per Q_LSS member); for the default deterministic path it is
-        called exactly once, so the compute graph is unchanged."""
+    def _ll_given_states(states_univ, states_sel):
+        """Full log-likelihood (selection + PE) for ONE tuple-pair of
+        per-catalog redshift-prior states.  Factored out so the LSS-completion
+        ensemble can be marginalised over (one call per Q_LSS member); for the
+        default deterministic path it is called exactly once, so the compute
+        graph is unchanged."""
         # No finite guard on the redshift prior. -inf propagates correctly through
         # logsumexp and is caught by the final isfinite check.
-        def log_prior_z(z, pix, catalog):
-            return eval_redshift_prior_with_state(
-                pe_model, prior_state_univ, z, pix, cosmo, survey, catalog,
-                catalog_sky_weighting=catalog_sky_weighting,
-            )
+        def log_prior_z(z, pix, catalogs):
+            return _eval_prior_mix(pe_model, states_univ, z, pix, catalogs)
 
-        def log_prior_z_selection(z, pix, catalog):
-            return eval_redshift_prior_with_state(
-                selection_model, prior_state_sel, z, pix, cosmo, survey, catalog,
-                catalog_sky_weighting=catalog_sky_weighting,
-            )
+        def log_prior_z_selection(z, pix, catalogs):
+            return _eval_prior_mix(selection_model, states_sel, z, pix, catalogs)
 
-        def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
+        def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalogs):
             """PE per-sample weight; WL-marginalized when wl_enabled, else standard.
+
+            ``catalogs`` is the length-K tuple of per-catalog EMCatalogs; the
+            weight kernels pass it (and ``pix``) opaquely through to the
+            ``log_prior_z`` closure, which resolves the per-catalog mixture.
+            WL is statically K = 1 (guarded above).
 
             Returns -inf for distances outside the tabulated z(dL) support.  The
             angular factor g(n̂, z) is applied separately in ``_pe_event_fn`` (so WL
@@ -592,29 +521,29 @@ def darksiren_log_likelihood(
             if not wl_enabled:
                 ldw = log_sample_weight(
                     m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
-                    catalog, log_p_pop, log_prior_z,
+                    catalogs, log_p_pop, log_prior_z,
                 )
             elif wl_backend == WL_BACKEND_LOGNORMAL:
                 ldw = log_sample_weight_wl_lognormal_hermite(
                     m1det, q, dL_c, chieff, pix, prior_wt,
-                    cosmo, survey, pop_params, catalog,
+                    cosmo, survey, pop_params, catalogs,
                     log_p_pop, log_prior_z,
                     wl_a, wl_b, u_nodes, log_wH_nodes,
                 )
             else:
                 ldw = log_sample_weight_wl_or_standard(
                     m1det, q, dL_c, chieff, pix, prior_wt,
-                    cosmo, survey, pop_params, catalog,
+                    cosmo, survey, pop_params, catalogs,
                     log_p_pop, log_prior_z,
                     log_p_wl_fn, mu_nodes, log_w_nodes,
                     wl_enabled=wl_enabled,
                 )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-        def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalog):
+        def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs):
             """Selection weight in the canonical ``(m1det, q, dL, chieff)`` variables."""
-            def _selection_prior(z, pix, catalog):
-                return log_prior_z_selection(z, pix, catalog)
+            def _selection_prior(z, pix, catalogs):
+                return log_prior_z_selection(z, pix, catalogs)
 
             # Same clamped-distance treatment as the PE weights (see above):
             # z_of_dL's NaN sentinel must never enter the arithmetic.
@@ -629,26 +558,26 @@ def darksiren_log_likelihood(
                 # weights (previously only available in the cluster wrapper).
                 ldw = log_sample_weight_wl_lognormal_hermite(
                     m1det, q, dL_c, chieff, pix, prior_wt,
-                    cosmo, survey, pop_params, catalog,
+                    cosmo, survey, pop_params, catalogs,
                     log_p_pop, _selection_prior,
                     wl_a, wl_b, u_nodes, log_wH_nodes,
                 )
             else:
                 ldw = log_sample_weight(
                     m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
-                    catalog, log_p_pop, _selection_prior,
+                    catalogs, log_p_pop, _selection_prior,
                 )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-        def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalog):
+        def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalogs):
             """PE weight in the same ``(m1det, q, dL)`` variables as selection."""
             return _log_sample_weight_if_supported(
-                m1det, q, dL, chieff, pix, prior_wt, catalog
+                m1det, q, dL, chieff, pix, prior_wt, catalogs
             )
 
         log_mu, Neff, _log_sigma2 = compute_selection_term(
             gw_sel,
-            em_catalog_sel,
+            catalogs_sel_all,
             log_weight,
             Ndraw,
             nEvents,
@@ -661,7 +590,12 @@ def darksiren_log_likelihood(
             sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
             dL_ev = sl(gw_pe.dL)
             valid = sl(gw_pe.valid) & (sl(gw_pe.prior_wt) > 0.0)
-            catalog_ev = em_catalog_pe._replace(active_counterpart_index=event_idx)
+            # Per-event counterpart selection (bright sirens); the traced index
+            # is inert for catalogs without counterpart fields (dark models).
+            catalogs_ev = tuple(
+                c._replace(active_counterpart_index=event_idx)
+                for c in catalogs_pe_all
+            )
             ldw = log_weight_ev(
                 sl(gw_pe.m1det),
                 sl(gw_pe.q),
@@ -669,7 +603,7 @@ def darksiren_log_likelihood(
                 sl(gw_pe.chieff),
                 sl(gw_pe.pixels),
                 sl(gw_pe.prior_wt),
-                catalog_ev,
+                catalogs_ev,
             )
             # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
             # Clamped dL for the same reverse-NaN reason as the weight paths.
@@ -704,36 +638,40 @@ def darksiren_log_likelihood(
     # missing-galaxy field.  Opt-in (static); off by default so the deterministic
     # (posterior-mean Q) path is bit-for-bit unchanged.
     if lss_marginalize:
-        if getattr(prior_state_univ, "dN_miss_members", None) is None:
+        if getattr(prior_states_univ[0], "dN_miss_members", None) is None:
             raise ValueError(
                 "lss_marginalize=True requires an LSS-completion ENSEMBLE on the "
                 "PE catalog. Build Q_LSS with members "
                 "(darksirens_build_lognormal_completion --n-members M > 0) and pass it "
                 "via --lss_completion; only universe_model='dark_sirens' supports it."
             )
-        n_members = prior_state_univ.log_Z_members.shape[0]
-        # Per-member states reuse the (Q-independent) kernels + log_Nobs and swap in
-        # the member missing-galaxy density / normalisation; vmap over the M axis.
-        # ``log_Z_global`` is inert here (field mode is gated off for
-        # lss_marginalize); carry a broadcast scalar so the vmap in_axes pytree
-        # (member_axes) has a matching leaf.
-        univ_members = DarkSirenPriorState(
-            kernels=prior_state_univ.kernels, log_Nobs=prior_state_univ.log_Nobs,
-            dN_miss=prior_state_univ.dN_miss_members, log_Z=prior_state_univ.log_Z_members,
-            log_Z_global=jnp.asarray(0.0),
-        )
-        sel_has_members = getattr(prior_state_sel, "dN_miss_members", None) is not None
-        sel_members = (
-            DarkSirenPriorState(
-                kernels=prior_state_sel.kernels, log_Nobs=prior_state_sel.log_Nobs,
-                dN_miss=prior_state_sel.dN_miss_members, log_Z=prior_state_sel.log_Z_members,
+        n_members = prior_states_univ[0].log_Z_members.shape[0]
+        # Per-member states reuse the (Q-independent) kernels + log_Nobs and swap
+        # in the member missing-galaxy density / normalisation; ONE vmap over the
+        # shared member axis of every catalog's state (K = 1 today: the K >= 2
+        # guard above keeps the mixture off this path until the shared-member
+        # design lands).  ``log_Z_global`` is inert here (field mode is gated off
+        # for lss_marginalize); carry a broadcast scalar so the vmap in_axes
+        # pytree (member_axes) has a matching leaf.
+        def _member_states(state):
+            return DarkSirenPriorState(
+                kernels=state.kernels, log_Nobs=state.log_Nobs,
+                dN_miss=state.dN_miss_members, log_Z=state.log_Z_members,
                 log_Z_global=jnp.asarray(0.0),
             )
-            if sel_has_members else prior_state_sel
+
+        univ_members = tuple(_member_states(s) for s in prior_states_univ)
+        sel_has_members = (
+            getattr(prior_states_sel[0], "dN_miss_members", None) is not None
         )
-        member_axes = DarkSirenPriorState(
+        sel_members = (
+            tuple(_member_states(s) for s in prior_states_sel)
+            if sel_has_members else prior_states_sel
+        )
+        member_axes_one = DarkSirenPriorState(
             kernels=None, log_Nobs=None, dN_miss=0, log_Z=0, log_Z_global=None
         )
+        member_axes = (member_axes_one,) * n_catalogs
         ll_members = jax.vmap(
             _ll_given_states,
             in_axes=(member_axes, member_axes if sel_has_members else None),
@@ -743,6 +681,6 @@ def darksiren_log_likelihood(
         ll_members = jnp.where(jnp.isfinite(ll_members), ll_members, -jnp.inf)
         ll = logsumexp(ll_members) - jnp.log(n_members)
     else:
-        ll = _ll_given_states(prior_state_univ, prior_state_sel)
+        ll = _ll_given_states(prior_states_univ, prior_states_sel)
 
     return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)

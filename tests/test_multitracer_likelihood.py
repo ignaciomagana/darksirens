@@ -158,6 +158,26 @@ def _k1_value(z, fixed, pop_fid):
     return float(ll(jnp.asarray([_mid_pop()])))
 
 
+def test_k1_bundle_source_matches_flat_source():
+    """A single catalog supplied as ONE bundle (data["catalogs"] = [b]) must
+    reproduce the flat-data K=1 likelihood: same parameters (plain decoder, no
+    sticks), same value.  This is the unified builder's K=1 coherence contract
+    -- a K=1 config scales to K>=2 by appending a bundle, nothing else."""
+    _pop_lower, _pop_upper, _pop_labels, pop_fid, _sampled, fixed = _pop_bits()
+
+    val_flat = _k1_value(Z_A, fixed, pop_fid)
+
+    data = dict(_shared_physics())
+    data["apix"] = APIX1  # make_likelihood reads data["apix"] unconditionally
+    data["catalogs"] = [_bundle(APIX1, Z_A)]
+    opts = _base_opts(n_catalogs=1)
+    ll_bundle = make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
+    val_bundle = float(ll_bundle(jnp.asarray([_mid_pop()])))
+
+    assert np.isfinite(val_flat)
+    assert abs(val_bundle - val_flat) <= 1e-12
+
+
 def _k2_likelihood(z_a, z_b, fixed, pop_fid):
     data = dict(_shared_physics())
     data["apix"] = APIX1  # make_likelihood reads data["apix"] unconditionally

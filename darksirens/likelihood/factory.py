@@ -92,13 +92,15 @@ def _make_mixture_likelihood(
     fixed_parameter_values: dict | None,
     n_catalogs: int,
 ):
-    """Build the K-catalog mixture likelihood callable (dark_sirens, K >= 2).
+    """Build the bundle-source likelihood callable (galaxy-aware models, K >= 1).
 
     Each catalog in ``data["catalogs"]`` carries its OWN nside/apix, compact
     PE/selection views, KDE cache, and Q_LSS table; the GW posterior and
     selection *physics* arrays (masses, distances, spins, sky vectors) are shared
     across catalogs.  The per-catalog compact pixel maps are stacked into ``(N,
-    K)`` matrices and the mixture weights come from ``decode_mixture``.
+    K)`` matrices; for K >= 2 the mixture weights come from ``decode_mixture``,
+    while a single-bundle K = 1 run uses the plain decoder (same parameters as a
+    flat-data K = 1 run).
     """
     bundles = data.get("catalogs")
     if bundles is None or len(bundles) != n_catalogs:
@@ -286,14 +288,25 @@ def _make_mixture_likelihood(
     mixture_em_catalogs_sel = tuple(em_catalogs_sel[1:])
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
-        (
-            cosmo,
-            surveys,
-            pop_params,
-            sky_params,
-            mark_params,
-            log_w,
-        ) = parameter_decoder.decode_mixture(coord)
+        if n_catalogs >= 2:
+            (
+                cosmo,
+                surveys,
+                pop_params,
+                sky_params,
+                mark_params,
+                log_w,
+            ) = parameter_decoder.decode_mixture(coord)
+            survey_0 = surveys[0]
+            mixture_surveys = tuple(surveys[1:])
+        else:
+            # K = 1 bundle source: the plain decoder (no sticks, no per-catalog
+            # blocks) -- the same parameters a flat-data K=1 run samples.
+            cosmo, survey_0, pop_params, sky_params, mark_params = (
+                parameter_decoder.decode(coord)
+            )
+            mixture_surveys = ()
+            log_w = None
         if len(pop_params) != len(parameter_decoder.pop_labels):
             raise ValueError(
                 "Population parameter length mismatch before likelihood "
@@ -302,7 +315,7 @@ def _make_mixture_likelihood(
             )
         return darksiren_log_likelihood(
             cosmo,
-            surveys[0],
+            survey_0,
             pop_params,
             gw_pe,
             em_catalog_pe_0,
@@ -330,7 +343,7 @@ def _make_mixture_likelihood(
             # its own _fatal guard).
             lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
             n_catalogs=n_catalogs,
-            mixture_surveys=tuple(surveys[1:]),
+            mixture_surveys=mixture_surveys,
             mixture_em_catalogs_pe=mixture_em_catalogs_pe,
             mixture_em_catalogs_sel=mixture_em_catalogs_sel,
             mixture_log_weights=log_w,
@@ -437,11 +450,13 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         )
     )
 
-    # Multitracer: for K >= 2 the catalog-completed redshift prior becomes a
-    # per-catalog mixture; delegate to the dedicated builder and leave the
-    # single-catalog path below bit-identical.
+    # Bundle operand source: per-catalog bundles in data["catalogs"] (built by
+    # loaders.load_multitracer_catalog_bundles) for ANY K >= 1; required for
+    # K >= 2, where the catalog-completed redshift prior becomes a per-catalog
+    # mixture.  The flat-data path below stays for K = 1 callers without
+    # bundles and is bit-identical to the pre-unification behaviour.
     n_catalogs = int(getattr(opts, "n_catalogs", 1))
-    if n_catalogs >= 2:
+    if data.get("catalogs") is not None or n_catalogs >= 2:
         return _make_mixture_likelihood(
             opts, data, pop_params_fid, fixed_parameter_values, n_catalogs
         )
