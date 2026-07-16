@@ -1362,7 +1362,41 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
         )
 
 
-def _diagnostics_at_guard_clear_point(diagnostics_fn, mid, lower, upper, seed, n_draws=32):
+def _fiducial_candidate_point(labels, mid, lower, upper, opts, pop_params_fid):
+    """Sampled-space point at the registry fiducial (mock-generator truth).
+
+    The selection injection campaigns are sized at the fiducial population,
+    so the reliability guard is clear there by construction while random
+    prior draws concentrate the injection weights and collapse Neff. Labels
+    without a fiducial (cosmology/survey blocks) fall back to the midpoint;
+    the result is clipped strictly inside the prior box.
+    """
+    from darksirens.inference.prior import pop_model_prior_parser
+
+    _, _, pop_labels_all, _, _ = pop_model_prior_parser(opts.pop_model)
+    fid = {
+        lab: float(v)
+        for lab, v in zip(pop_labels_all, np.asarray(pop_params_fid, dtype=float))
+    }
+    try:
+        fid["log10_tau_A"] = float(np.log10(float(opts.sl_tau_A)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        fid["n_tau"] = float(opts.sl_tau_n)
+    except (TypeError, ValueError):
+        pass
+    mid = np.asarray(mid, dtype=float)
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    point = np.array([fid.get(lab, m) for lab, m in zip(labels, mid)], dtype=float)
+    eps = 1e-6 * (upper - lower)
+    return np.clip(point, lower + eps, upper - eps)
+
+
+def _diagnostics_at_guard_clear_point(
+    diagnostics_fn, mid, lower, upper, seed, n_draws=32, fiducial=None
+):
     """Evaluate the factorization diagnostics at a point the selection
     reliability guard does not clip to -inf.
 
@@ -1376,16 +1410,20 @@ def _diagnostics_at_guard_clear_point(diagnostics_fn, mid, lower, upper, seed, n
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
     rng = np.random.default_rng(seed)
-    points = [np.asarray(mid, dtype=float)] + [
-        lower + (upper - lower) * rng.random(lower.shape) for _ in range(n_draws)
+    points = [("prior midpoint", np.asarray(mid, dtype=float))]
+    if fiducial is not None:
+        points.append(("registry fiducial", np.asarray(fiducial, dtype=float)))
+    points += [
+        (f"prior draw {k + 1}", lower + (upper - lower) * rng.random(lower.shape))
+        for k in range(n_draws)
     ]
     last_exc = None
-    for k, point in enumerate(points):
+    for k, (name, point) in enumerate(points):
         try:
             diagnostics = diagnostics_fn(jnp.asarray(point))
             if k > 0:
                 print(
-                    f"  diagnostics point: prior draw {k} "
+                    f"  diagnostics point: {name} "
                     "(reliability guard fired at the prior midpoint)",
                     flush=True,
                 )
@@ -2449,8 +2487,11 @@ def main():
         f"  logL(prior midpoint) = {v:.3f}  [compile {time.time()-t:.1f}s]", flush=True
     )
     try:
+        fid_point = _fiducial_candidate_point(
+            labels, mid, lower, upper, opts, pop_params_fid
+        )
         diagnostics, diag_point = _diagnostics_at_guard_clear_point(
-            diagnostics_fn, mid, lower, upper, int(opts.seed)
+            diagnostics_fn, mid, lower, upper, int(opts.seed), fiducial=fid_point
         )
         _write_json(
             os.path.join(run_dir, "midpoint_diagnostics.json"),
