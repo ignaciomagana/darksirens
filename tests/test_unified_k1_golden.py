@@ -354,13 +354,28 @@ def _load_golden():
         return json.load(f)
 
 
+def _golden_backend_key():
+    """Golden-store key for the current device.
+
+    ``cpu`` stays the plain historical key; accelerators are keyed by the
+    concrete device kind (e.g. ``gpu:NVIDIA H100``) because XLA reduction
+    strategies differ between GPU generations at the ULP level, so one GPU
+    model's values must not masquerade as universal ``gpu`` goldens.
+    """
+    backend = jax.default_backend()
+    if backend == "cpu":
+        return "cpu"
+    kind = str(jax.devices()[0].device_kind).strip()
+    return f"{backend}:{kind}"
+
+
 # ---------------------------------------------------------------------------
 # Golden comparison
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", sorted(CELLS))
 def test_k1_golden(name):
-    backend = jax.default_backend()
+    backend = _golden_backend_key()
     values = _evaluate_cell(name)
     assert np.all(np.isfinite(values)), (name, values)
 
