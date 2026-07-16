@@ -251,12 +251,27 @@ def build_pixel_kde_cache(
 # FIELD-convention sky-weighting: survey-global normalization inputs
 # ------------------------------------------------------------
 
+class FieldNormalizationInputs(NamedTuple):
+    """Survey-global ingredients for the FIELD-convention normalizer.
+
+    ``dN_obs_s / n_empty / N_obs_total`` are the legacy trio;
+    ``occupied_pixels`` keys the per-pixel budget modulations
+    (:func:`build_field_lss_q_inputs`, :func:`build_field_delta_g_inputs`) to
+    the same row order as ``dN_obs_s``.
+    """
+
+    dN_obs_s: jnp.ndarray          # (n_occupied, N_grid) float32
+    n_empty: int
+    N_obs_total: float
+    occupied_pixels: np.ndarray    # (n_occupied,) int32, host-side
+
+
 def build_field_normalization_inputs(
     full_z: jnp.ndarray,
     full_w: jnp.ndarray | None,
     full_n: jnp.ndarray | None,
     batch_size: int = 4096,
-) -> tuple[jnp.ndarray, int, float]:
+) -> FieldNormalizationInputs:
     """Host-side precompute for the FIELD-convention global normalizer.
 
     Builds the survey-global ingredients consumed by :func:`field_global_log_Z`
@@ -284,12 +299,11 @@ def build_field_normalization_inputs(
 
     Returns
     -------
-    field_dN_obs_s : (n_occupied, N_grid) float32
-        Smoothed observed density for occupied pixels only (device array).
-    n_empty : int
-        Number of galaxy-free survey pixels (``N_pix - n_occupied``).
-    N_obs_total : float
-        Total observed real-galaxy count over ALL pixels.
+    FieldNormalizationInputs
+        ``dN_obs_s`` (n_occupied, N_grid) float32 smoothed observed density for
+        occupied pixels; ``n_empty`` galaxy-free pixel count; ``N_obs_total``
+        total observed real-galaxy count; ``occupied_pixels`` (n_occupied,)
+        int32 global pixel ids keying the per-pixel budget modulations.
     """
     full_z = np.asarray(full_z)
     n_pix_total = int(full_z.shape[0])
@@ -334,7 +348,112 @@ def build_field_normalization_inputs(
     # device footprint; it only feeds the GLOBAL normalizer (a survey-scale
     # constant) so the f32 rounding is immaterial to the estimand.
     field_dN_obs_s = jnp.asarray(dN_obs_s, dtype=jnp.float32)
-    return field_dN_obs_s, n_empty, N_obs_total
+    return FieldNormalizationInputs(
+        dN_obs_s=field_dN_obs_s,
+        n_empty=n_empty,
+        N_obs_total=N_obs_total,
+        occupied_pixels=occupied_pixels,
+    )
+
+
+def build_field_lss_q_inputs(
+    logq_map: jnp.ndarray,
+    occupied_pixels: np.ndarray,
+    n_pix_total: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Field-normalizer Q_LSS modulation rows from a GLOBAL log-Q table.
+
+    ``logq_map`` must be globally pixel-indexed with exactly ``n_pix_total``
+    rows (the field normalizer sums over the FULL sky, so a compact per-view
+    table cannot supply the empty-pixel budget).  Returns
+
+    - ``field_lss_q``: (n_occupied, N_grid) float32 LINEAR Q rows aligned with
+      ``FieldNormalizationInputs.occupied_pixels`` / ``field_dN_obs_s``;
+    - ``field_lss_q_empty_sum``: (N_grid,) float64 ``Sum_{p empty} Q_p(z)`` —
+      a data constant (Q is loaded data, never theta-dependent), the
+      empty-pixel budget curve (empty pixels have C == 0).
+    """
+    logq_np = np.asarray(logq_map, dtype=np.float64)
+    if logq_np.ndim != 2 or logq_np.shape[0] != int(n_pix_total):
+        raise ValueError(
+            "build_field_lss_q_inputs requires a GLOBAL (n_pix_total, N_grid) "
+            f"log-Q table; got shape {logq_np.shape} for n_pix_total="
+            f"{int(n_pix_total)}. The field normalizer sums the full sky, so a "
+            "compact per-view Q table cannot be used -- rebuild Q over the "
+            "full nside."
+        )
+    if logq_np.shape[1] != int(zgrid.size):
+        raise ValueError(
+            f"log-Q table has {logq_np.shape[1]} grid nodes but zgrid has "
+            f"{int(zgrid.size)}."
+        )
+    occ = np.asarray(occupied_pixels, dtype=np.int64).reshape(-1)
+    q = np.exp(logq_np)
+    occ_mask = np.zeros(int(n_pix_total), dtype=bool)
+    occ_mask[occ] = True
+    q_occ = jnp.asarray(q[occ], dtype=jnp.float32)
+    q_empty_sum = jnp.asarray(q[~occ_mask].sum(axis=0), dtype=jnp.float64)
+    return q_occ, q_empty_sum
+
+
+def build_field_lss_q_member_inputs(
+    logq_members: jnp.ndarray,
+    occupied_pixels: np.ndarray,
+    n_pix_total: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-member field-normalizer Q rows from a GLOBAL (M, n_pix, N_grid)
+    log-Q ensemble: the member analogue of :func:`build_field_lss_q_inputs`.
+
+    Returns ``(field_lss_q_members, field_lss_q_empty_sum_members)`` —
+    (M, n_occupied, N_grid) float32 and (M, N_grid) float64.
+    """
+    logq_np = np.asarray(logq_members, dtype=np.float64)
+    if logq_np.ndim != 3 or logq_np.shape[1] != int(n_pix_total):
+        raise ValueError(
+            "build_field_lss_q_member_inputs requires a GLOBAL "
+            "(M, n_pix_total, N_grid) log-Q ensemble; got shape "
+            f"{logq_np.shape} for n_pix_total={int(n_pix_total)}."
+        )
+    if logq_np.shape[2] != int(zgrid.size):
+        raise ValueError(
+            f"log-Q ensemble has {logq_np.shape[2]} grid nodes but zgrid has "
+            f"{int(zgrid.size)}."
+        )
+    occ = np.asarray(occupied_pixels, dtype=np.int64).reshape(-1)
+    q = np.exp(logq_np)
+    occ_mask = np.zeros(int(n_pix_total), dtype=bool)
+    occ_mask[occ] = True
+    q_occ = jnp.asarray(q[:, occ, :], dtype=jnp.float32)
+    q_empty_sum = jnp.asarray(q[:, ~occ_mask, :].sum(axis=1), dtype=jnp.float64)
+    return q_occ, q_empty_sum
+
+
+def build_field_delta_g_inputs(
+    delta_g_pix_z: jnp.ndarray,
+    occupied_pixels: np.ndarray,
+) -> jnp.ndarray:
+    """Field-normalizer overdensity rows: ``delta_g`` gathered to occupied pixels.
+
+    ``delta_g_pix_z`` must be the REAL per-pixel table (first axis == n_pix;
+    the (1, N_grid) dummy means "no modulation" and must not reach here).
+    Empty pixels carry ``delta_g == 0`` by construction
+    (:func:`compute_lss_overdensity`), so their budget factor is exactly 1 and
+    only the occupied rows are stored.
+    """
+    dg = np.asarray(delta_g_pix_z)
+    if dg.ndim != 2 or dg.shape[0] <= 1:
+        raise ValueError(
+            "build_field_delta_g_inputs requires the real per-pixel "
+            f"delta_g table; got shape {dg.shape} (the (1, N_grid) dummy "
+            "means no modulation)."
+        )
+    occ = np.asarray(occupied_pixels, dtype=np.int64).reshape(-1)
+    if occ.size and int(occ.max()) >= dg.shape[0]:
+        raise ValueError(
+            f"delta_g table has {dg.shape[0]} pixel rows but an occupied "
+            f"pixel index reaches {int(occ.max())}."
+        )
+    return jnp.asarray(dg[occ], dtype=jnp.float32)
 
 
 # ------------------------------------------------------------
@@ -681,16 +800,22 @@ def field_global_log_Z(
     """log of the survey-GLOBAL FIELD normalizer for one parameter proposal.
 
     ``Z(theta) = Sum_all-pixels [ N_obs,pix + N_miss,pix(theta) ]`` with, per
-    pixel, ``N_miss = integral (1 - C) dN_exp`` (missing-galaxy budget, LSS
-    factor == 1: the field convention is gated to the legacy dummy-overdensity /
-    no-Q_LSS regime).  Decomposed as
+    pixel, ``N_miss = integral (1 - C) dN_exp lss_p`` -- the SAME missing-galaxy
+    budget modulation as the per-pixel numerator:
 
-        Z = N_obs_total
-            + Sum_occupied integral (1 - C_pix) dN_exp * depthmask
-            + n_empty * integral dN_exp * depthmask,
+        lss_p = 1                                (legacy; no modulation inputs)
+        lss_p = Q_p(z)                           (``field_lss_q`` rows;
+                                                  empty-pixel budget is the data
+                                                  constant ``field_lss_q_empty_sum``)
+        lss_p = max(1 + b_eff*delta_g_p(z), 0)   (``field_delta_g`` rows;
+                                                  empty pixels carry delta_g == 0
+                                                  by construction, so lss = 1)
 
-    where empty pixels have ``C == 0`` (no observed galaxies) so their missing
-    budget is the full ``dN_exp``.  ``C`` reuses ``_row_C``'s exact recipe --
+    The reduction accumulates the (N_grid,) field missing CURVE
+    ``V(z; theta) = Sum_occ (1 - C_p)(z) lss_p(z) + V_empty(z)`` and integrates
+    ``dN_exp * V`` once -- the curve form is what lets a z-dependent factor
+    (Q, delta_g, and the marked-host ``mu_miss``) modulate the budget before
+    the quadrature.  ``C`` reuses ``_row_C``'s exact recipe --
     ``clip(dN_obs_s / where(dN_exp_smooth > 0, dN_exp_smooth, 1), 0, 1)`` -- and
     ``dN_exp = survey.n0 * apix * g(z)`` is the identical grid used per pixel, so
     the reduction is consistent with ``_assemble_curves`` term by term.  The
@@ -698,10 +823,37 @@ def field_global_log_Z(
     (Python-level branch on the concrete ``z_depth``; ``None`` takes the untouched
     full-grid expression).
 
-    Fully differentiable in ``theta`` (n0, cosmology, delta): the only frozen
-    input is ``field_dN_obs_s`` (a data constant).  No ``optimization_barrier``
-    is applied here.  The occupied-pixel reduction is chunked with ``lax.scan``
-    to bound peak memory at high nside.
+    Fully differentiable in ``theta`` (n0, cosmology, delta, and b_miss through
+    the delta_g mode): the frozen inputs are ``field_dN_obs_s`` and the
+    modulation rows (data constants).  The occupied-pixel reduction is chunked
+    with ``lax.scan`` to bound peak memory at high nside.
+    """
+    V_total, dN_exp, depth_mask = _field_missing_curve(
+        cosmo, survey, em_catalog, chunk_size=chunk_size
+    )
+    N_obs_total = jnp.asarray(em_catalog.field_N_obs_total, dtype=dN_exp.dtype)
+
+    integrand = dN_exp * V_total
+    if depth_mask is not None:
+        integrand = jnp.where(depth_mask, integrand, 0.0)
+    N_miss_total = jnp.trapezoid(integrand, zgrid)
+
+    Z = N_obs_total + N_miss_total
+    return jnp.log(jnp.maximum(Z, 1e-300))
+
+
+def _field_missing_curve(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    chunk_size: int = 4096,
+):
+    """The (N_grid,) field missing curve ``V(z; theta)`` plus its companions.
+
+    ``V = Sum_occ (1 - C_p)(z) lss_p(z) + V_empty(z)`` -- everything of the
+    survey-global missing budget EXCEPT the ``dN_exp`` quadrature, so callers
+    can insert a z-dependent factor (the marked-host ``mu_miss``) before
+    integrating.  Returns ``(V_total, dN_exp, depth_mask)``.
     """
     grids = _precompute_grids(cosmo, survey, em_catalog)
     dN_exp = grids.dN_exp                                    # (N_grid,) theta-dependent
@@ -709,20 +861,46 @@ def field_global_log_Z(
 
     field_obs = jnp.asarray(em_catalog.field_dN_obs_s)       # (n_occ, N_grid) f32 constant
     n_occ = int(field_obs.shape[0])                          # static
-    N_obs_total = jnp.asarray(em_catalog.field_N_obs_total, dtype=dN_exp.dtype)
     n_empty = jnp.asarray(em_catalog.field_n_empty, dtype=dN_exp.dtype)
+
+    # Static (pytree-structure) modulation dispatch, mirroring the numerator's
+    # rule: a Q table REPLACES the local-overdensity factor.
+    has_q = em_catalog.field_lss_q is not None
+    has_dg = em_catalog.field_delta_g is not None
+    if has_q and has_dg:
+        raise NotImplementedError(
+            "field_global_log_Z: field_lss_q and field_delta_g are mutually "
+            "exclusive (Q_LSS replaces the local-overdensity factor, matching "
+            "the per-pixel numerator)."
+        )
+    if has_q and em_catalog.field_lss_q_empty_sum is None:
+        raise ValueError(
+            "field_global_log_Z: field_lss_q requires field_lss_q_empty_sum "
+            "(the empty-pixel Q budget); build both via "
+            "build_field_lss_q_inputs."
+        )
+    if has_q:
+        mod_rows = jnp.asarray(em_catalog.field_lss_q)       # (n_occ, N_grid) f32
+    elif has_dg:
+        mod_rows = jnp.asarray(em_catalog.field_delta_g)     # (n_occ, N_grid) f32
+    else:
+        mod_rows = jnp.zeros((n_occ, 1), dtype=jnp.float32)  # inert placeholder
+    b_eff = survey.alpha_miss * survey.b_miss                # traced (delta_g mode)
 
     # ``z_depth`` is concrete at trace time -> Python-level branch (mirrors
     # ``_assemble_curves``); ``None`` never constructs a mask.
     depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
 
-    def _row_N_miss(obs_row):
+    def _row_V(obs_row, mod_row):
         obs_row = obs_row.astype(dN_exp.dtype)
         C = jnp.clip(obs_row / dN_exp_safe, 0.0, 1.0)
-        dN_miss = (1.0 - C) * dN_exp
-        if depth_mask is not None:
-            dN_miss = jnp.where(depth_mask, dN_miss, 0.0)
-        return jnp.trapezoid(dN_miss, zgrid)
+        if has_q:
+            lss = mod_row.astype(dN_exp.dtype)
+        elif has_dg:
+            lss = jnp.maximum(1.0 + b_eff * mod_row.astype(dN_exp.dtype), 0.0)
+        else:
+            lss = 1.0
+        return (1.0 - C) * lss                               # (N_grid,)
 
     # Chunked scan over occupied rows: pad to a whole number of ``chunk_size``
     # blocks and mask the padding so padded (all-zero) rows -- which would
@@ -730,27 +908,146 @@ def field_global_log_Z(
     pad = (-n_occ) % chunk_size
     n_pad = n_occ + pad
     obs_pad = jnp.pad(field_obs, ((0, pad), (0, 0)))
+    mod_pad = jnp.pad(mod_rows, ((0, pad), (0, 0)))
     valid = jnp.arange(n_pad) < n_occ
     n_chunks = n_pad // chunk_size if chunk_size > 0 else 0
     obs_chunks = obs_pad.reshape(n_chunks, chunk_size, zgrid.size)
+    mod_chunks = mod_pad.reshape(n_chunks, chunk_size, mod_rows.shape[1])
     valid_chunks = valid.reshape(n_chunks, chunk_size)
 
     def _body(acc, xs):
-        obs_c, val_c = xs
-        Nm = vmap(_row_N_miss)(obs_c)                        # (chunk,)
-        Nm = jnp.where(val_c, Nm, 0.0)
-        return acc + jnp.sum(Nm), None
+        obs_c, mod_c, val_c = xs
+        Vc = vmap(_row_V)(obs_c, mod_c)                      # (chunk, N_grid)
+        Vc = jnp.where(val_c[:, None], Vc, 0.0)
+        return acc + jnp.sum(Vc, axis=0), None
 
-    occ_miss_total, _ = lax.scan(
-        _body, jnp.asarray(0.0, dtype=dN_exp.dtype), (obs_chunks, valid_chunks)
+    V_occ, _ = lax.scan(
+        _body,
+        jnp.zeros(zgrid.size, dtype=dN_exp.dtype),
+        (obs_chunks, mod_chunks, valid_chunks),
     )
 
-    # Empty pixels: C == 0 -> dN_miss == dN_exp (same depth bound).
-    empty_dN_miss = dN_exp if depth_mask is None else jnp.where(depth_mask, dN_exp, 0.0)
-    empty_N_miss = jnp.trapezoid(empty_dN_miss, zgrid)
+    # Empty pixels: C == 0, so their budget curve is lss_p itself -- n_empty
+    # for the legacy/delta_g modes (delta_g == 0 on empty pixels), the data
+    # constant Sum_empty Q_p(z) for the Q mode.
+    if has_q:
+        V_empty = jnp.asarray(em_catalog.field_lss_q_empty_sum, dtype=dN_exp.dtype)
+    else:
+        V_empty = n_empty
 
-    Z = N_obs_total + occ_miss_total + n_empty * empty_N_miss
+    return V_occ + V_empty, dN_exp, depth_mask
+
+
+def field_global_log_Z_members(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+) -> jnp.ndarray:
+    """Per-member survey-GLOBAL normalizers ``log Z_m(theta)``, shape (M,).
+
+    One :func:`field_global_log_Z` evaluation per Q-ensemble member, sharing
+    everything except the member's Q rows / empty-pixel budget
+    (``field_lss_q_members`` / ``field_lss_q_empty_sum_members``).  Consumed by
+    the lss_marginalize member vmap in the likelihood core (each member state
+    carries its own global normalizer under the field convention).
+    """
+    q_members = em_catalog.field_lss_q_members
+    q_empty_members = em_catalog.field_lss_q_empty_sum_members
+    if q_members is None or q_empty_members is None:
+        raise ValueError(
+            "field_global_log_Z_members requires field_lss_q_members and "
+            "field_lss_q_empty_sum_members; build them via "
+            "build_field_lss_q_member_inputs."
+        )
+
+    def _one(q_m, q_empty_m):
+        cat_m = em_catalog._replace(
+            field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
+        )
+        return field_global_log_Z(cosmo, survey, cat_m)
+
+    return vmap(_one)(jnp.asarray(q_members), jnp.asarray(q_empty_members))
+
+
+def field_global_log_Z_marked(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    mu_miss: jnp.ndarray,
+    log_h_flat: jnp.ndarray,
+) -> jnp.ndarray:
+    """Marked-host survey-GLOBAL normalizer.
+
+    ``Z(theta, eta) = Sum_{i in obs, full sky} w_i h(m_i | eta)
+                      + integral mu_miss(z; eta) dN_exp(z) V(z; theta) dz``
+
+    -- the marked analogue of :func:`field_global_log_Z`: the observed term is
+    the full-sky marked mass (the marked kernel state rescales each pixel's
+    catalog mass from N_obs to Sum w_i h_i, so the global total must follow),
+    and the missing budget carries the SAME ``mu_miss(z | eta)`` factor as the
+    numerator's ``dN_miss``.  ``mu_miss`` and ``log_h_flat`` must be built from
+    the FULL-SKY flat marks (``field_mark_*``), so the PE and selection states
+    produce the SAME Z for the same (theta, eta) and the constants cancel
+    structurally between the two likelihood seams.
+    """
+    V_total, dN_exp, depth_mask = _field_missing_curve(cosmo, survey, em_catalog)
+
+    w_flat = jnp.asarray(em_catalog.field_mark_w, dtype=dN_exp.dtype)
+    h_flat = jnp.exp(jnp.asarray(log_h_flat, dtype=dN_exp.dtype))
+    S_obs = jnp.sum(w_flat * h_flat)
+
+    integrand = jnp.asarray(mu_miss, dtype=dN_exp.dtype) * dN_exp * V_total
+    if depth_mask is not None:
+        integrand = jnp.where(depth_mask, integrand, 0.0)
+    N_miss_total = jnp.trapezoid(integrand, zgrid)
+
+    Z = S_obs + N_miss_total
     return jnp.log(jnp.maximum(Z, 1e-300))
+
+
+def build_field_mark_inputs(
+    full_z: jnp.ndarray,
+    full_w: jnp.ndarray | None,
+    full_n: jnp.ndarray | None,
+    mark_tables: dict,
+    mark_names: tuple,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Flat FULL-SKY per-galaxy inputs for the MARKED field normalizer.
+
+    ``mark_tables`` maps mark name -> (N_pix, N_max) z-centred mark array (the
+    same ``attach_mark_inputs`` products the numerator uses); real (non-padded)
+    slots are selected by ``full_n`` (fallback ``full_w > 0``).  Returns
+    ``(field_mark_z, field_mark_w, field_mark_values)`` — (N_gal,), (N_gal,),
+    and (N_gal, n_marks) float32 with columns ordered by ``mark_names``.
+    """
+    z_np = np.asarray(full_z)
+    if full_n is not None:
+        n_np = np.asarray(full_n).reshape(-1).astype(np.int64)
+        real = np.arange(z_np.shape[1])[None, :] < n_np[:, None]
+    elif full_w is not None:
+        real = np.asarray(full_w) > 0.0
+    else:
+        raise ValueError(
+            "build_field_mark_inputs requires full_n or full_w to mask padded "
+            "galaxy slots."
+        )
+    z_flat = jnp.asarray(z_np[real], dtype=jnp.float32)
+    w_flat = jnp.asarray(
+        (np.asarray(full_w)[real] if full_w is not None
+         else np.ones(int(real.sum()))),
+        dtype=jnp.float32,
+    )
+    missing = [name for name in mark_names if mark_tables.get(name) is None]
+    if missing:
+        raise ValueError(
+            f"build_field_mark_inputs: marks {missing} not present in "
+            "mark_tables; the field normalizer needs every selected mark over "
+            "the full sky."
+        )
+    values = np.stack(
+        [np.asarray(mark_tables[name])[real] for name in mark_names], axis=1
+    )
+    return z_flat, w_flat, jnp.asarray(values, dtype=jnp.float32)
 
 
 # ------------------------------------------------------------

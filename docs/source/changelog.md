@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **Multitracer unification: one likelihood path, full feature parity at any
+  K.** The K=1 legacy body and the K>=2 mixture branch of
+  `darksiren_log_likelihood` are unified — K=1 is a length-1 mixture with a
+  static shortcut, verified **bit-exact** against pre-refactor golden values
+  for the full K=1 feature matrix (`tests/test_unified_k1_golden.py`).
+  Everything that worked at K=1 now composes with the K-catalog mixture:
+  per-catalog `--lss_completion` Q_LSS tables, per-catalog `--use_LSS`
+  overdensities (coupled to `b_miss_c{k}`), `--lss_marginalize` with one
+  SHARED member index across catalogs (matched LSS realizations, equal M
+  enforced), marked-host models with per-catalog `eta_<mark>_c{k}` blocks
+  (a markless catalog runs `h = 1`), anisotropic `--sky_model` choices, and
+  per-catalog `--validate_completion` diagnostics.  The FIELD-convention
+  survey-global normalizer now carries the SAME modulated missing budget as
+  the numerator (Q_LSS / delta_g / marked `mu_miss`, per ensemble member),
+  so `fcat_k` stays a coherent host fraction with every mode active.
+  `--catalog_sky_weighting` auto-resolves by K (conditional at K=1, field at
+  K>=2) and the two silent estimand traps are now fatal for `dark_sirens`:
+  explicit `field` at K=1 (the global normalizer cancels between the PE and
+  selection terms) and explicit `conditional` at K>=2 (the railing
+  z-shape-only `fcat`).  `dark_sirens_complete` keeps its pre-existing
+  special-case rules (K>=2 requires field; no marks).  `--mark_model` now
+  requires `--universe_model dark_sirens` at any K (other models silently
+  sampled phantom flat eta dimensions).  `darksirens_analyze` reports the
+  per-catalog host fractions `w_1..w_K` derived from the sampled sticks, and
+  `pop_extractor` rebuilds K>=2 / Q-active parameter spaces correctly
+  (`n_catalogs` / `lss_completion_active` are persisted in settings).
 - **Binned Gaussian-process population models (`gppop`, `gppop_mz`).** Added the
   nonparametric binned-GP rate model of Ray et al. 2023 (arXiv:2304.08046) as
   standalone population models in `darksirens.gw.populations.gp`. The rate is

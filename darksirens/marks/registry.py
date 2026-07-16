@@ -35,6 +35,16 @@ def mark_model_parser(mark_model: str, mark_names=()):
     return get_mark_model(mark_model, mark_names).log_h
 
 
+def mark_model_flat_parser(mark_model: str, mark_names=()):
+    """Return the ``log_h_flat(values, eta)`` callable for ``mark_model``.
+
+    ``values`` is a flat ``(N_gal, n_marks)`` matrix of z-centred marks with
+    columns ordered by ``mark_names`` — the field-normalizer full-sky inputs
+    (:func:`darksirens.redshift.completion.build_field_mark_inputs`).
+    """
+    return get_mark_model(mark_model, mark_names).log_h_flat
+
+
 def mark_model_prior_parser(mark_model: str, mark_names=()):
     """Return ``(lows, highs, labels, kinds, latex)`` for the ``eta`` block.
 

@@ -76,6 +76,11 @@ class ParameterDecoder:
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
     mark_params_fid: tuple[float, ...] = ()
+    # Per-catalog mark (eta) blocks for the K-catalog mixture: BASE label names
+    # per catalog (catalog 1 first == mark_labels; catalogs 2..K are sampled
+    # under the ``_c{k}`` suffix) and the matching fiducials.
+    mark_labels_by_catalog: tuple[tuple[str, ...], ...] = ()
+    mark_fid_by_catalog: tuple[tuple[float, ...], ...] = ()
     # Weak-lensing magnification model carried on SurveyParams (NOT a sampled
     # parameter); None for every non-WL universe model.
     wl_params: object | None = None
@@ -138,12 +143,15 @@ class ParameterDecoder:
     def decode_mixture(self, coord: jnp.ndarray):
         """Decode ``coord`` into the K-catalog mixture components.
 
-        Returns ``(cosmo, surveys, pop_params, sky_params, mark_params, log_w)``
-        where ``surveys`` is a length-``n_catalogs`` tuple of :class:`SurveyParams`
-        (catalog 1 identical to :meth:`decode`; catalogs ``2..K`` built from the
-        ``_c{k}`` suffixed survey labels, falling back to the shared fiducials,
-        with ``wl_params=None``) and ``log_w`` is the ``(K,)`` array of log mixture
-        weights from the sampled sticks ``fcat_2..fcat_K``.
+        Returns ``(cosmo, surveys, pop_params, sky_params, mark_params_all,
+        log_w)`` where ``surveys`` is a length-``n_catalogs`` tuple of
+        :class:`SurveyParams` (catalog 1 identical to :meth:`decode`; catalogs
+        ``2..K`` built from the ``_c{k}`` suffixed survey labels, falling back
+        to the shared fiducials, with ``wl_params=None``),
+        ``mark_params_all`` is the length-K tuple of per-catalog eta vectors
+        (element 0 == :meth:`decode`'s ``mark_params``; catalogs 2..K decoded
+        from the ``eta_<mark>_c{k}`` labels), and ``log_w`` is the ``(K,)``
+        array of log mixture weights from the sampled sticks ``fcat_2..fcat_K``.
         """
         # Catalog 1 (and cosmo/pop/sky/mark) reuse decode() verbatim, so the
         # first mixture component is bit-identical to the single-catalog decode.
@@ -176,6 +184,23 @@ class ParameterDecoder:
                 wl_params=None,
             ))
 
+        # Per-catalog eta blocks: catalog 1 is decode()'s vector verbatim;
+        # catalogs 2..K read the suffixed labels (fiducial eta = 0 fallback).
+        mark_params_all = [mark_params]
+        for k in range(2, self.n_catalogs + 1):
+            lbls = (
+                self.mark_labels_by_catalog[k - 1]
+                if len(self.mark_labels_by_catalog) >= k else ()
+            )
+            fids = (
+                self.mark_fid_by_catalog[k - 1]
+                if len(self.mark_fid_by_catalog) >= k else ()
+            )
+            mark_params_all.append(jnp.array([
+                _get(f"{lbl}_c{k}", fids[i] if i < len(fids) else 0.0)
+                for i, lbl in enumerate(lbls)
+            ]))
+
         # Sticks fcat_2..fcat_K are always present in the coordinate/fixed values
         # for K >= 2 (build_parameter_space appends them); the default is a
         # defensive fallback only.
@@ -183,7 +208,10 @@ class ParameterDecoder:
             _get(f"fcat_{m}", 0.0) for m in range(2, self.n_catalogs + 1)
         ])
         log_w = _sticks_to_log_weights(sticks)
-        return cosmo, tuple(surveys), pop_params, sky_params, mark_params, log_w
+        return (
+            cosmo, tuple(surveys), pop_params, sky_params,
+            tuple(mark_params_all), log_w,
+        )
 
 
 def build_parameter_decoder(
@@ -202,6 +230,12 @@ def build_parameter_decoder(
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     n_catalogs = int(getattr(opts, "n_catalogs", 1))
+    mark_names_by_catalog = getattr(opts, "mark_names_by_catalog", None)
+    if mark_names_by_catalog is None:
+        mark_names_by_catalog = (mark_names,) + ((),) * (n_catalogs - 1)
+    mark_names_by_catalog = tuple(
+        tuple(names or ()) for names in mark_names_by_catalog
+    )
     (
         sampled_labels,
         _lower,
@@ -233,6 +267,7 @@ def build_parameter_decoder(
         mark_model=mark_model,
         mark_names=mark_names,
         n_catalogs=n_catalogs,
+        mark_names_by_catalog=mark_names_by_catalog,
     )
 
     return ParameterDecoder(
@@ -253,7 +288,24 @@ def build_parameter_decoder(
         sky_labels=tuple(sky_labels),
         sky_params_fid=tuple(float(v) for v in get_fixed_sky_params(sky_model)),
         mark_labels=tuple(mark_labels),
-        mark_params_fid=tuple(float(v) for v in mark_fiducial(mark_model, mark_names)),
+        mark_params_fid=tuple(
+            float(v)
+            for v in mark_fiducial(
+                mark_model if mark_names_by_catalog[0] else "none",
+                mark_names_by_catalog[0],
+            )
+        ),
+        mark_labels_by_catalog=tuple(
+            tuple(f"eta_{name}" for name in names)
+            for names in mark_names_by_catalog
+        ),
+        mark_fid_by_catalog=tuple(
+            tuple(
+                float(v)
+                for v in mark_fiducial(mark_model if names else "none", names)
+            )
+            for names in mark_names_by_catalog
+        ),
         wl_params=(
             wl_params
             if getattr(opts, "universe_model", None) == "spectral_sirens_wl"

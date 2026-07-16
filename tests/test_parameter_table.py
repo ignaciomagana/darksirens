@@ -52,7 +52,14 @@ if "gwdistributions" not in sys.modules:
     sys.modules["gwdistributions.distributions.spin"] = spin_stub
 
 
-if "gwcat" not in sys.modules:
+# Stub gwcat ONLY when the real package is absent: keying on
+# ``"gwcat" not in sys.modules`` shadowed an INSTALLED gwcat for every later
+# test module in the same process (test_pdet_selection's crafted-pdraw test
+# then received the float-returning stub chi_eff_prior_logprob and died with
+# "'float' object is not subscriptable" whenever this file ran first).
+try:
+    import gwcat.spin  # noqa: F401  -- real package preferred over the stub
+except ImportError:
     gwcat_stub = types.ModuleType("gwcat")
     spin_stub = types.ModuleType("gwcat.spin")
 

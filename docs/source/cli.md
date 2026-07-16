@@ -33,7 +33,7 @@ darksirens_inference \
 
 - `--gw_path`: required GW posterior-sample HDF5 file.
 - `--gwselection_path`: required gwcat selection HDF5 file.
-- `--survey_path`: pixelated survey HDF5 file; required for dark-siren models.
+- `--survey_path`: one or more pixelated survey HDF5 files; required for dark-siren models. A single path is the classic single-catalog analysis; `K >= 2` paths run the K-catalog **multitracer mixture** (see [Multitracer catalog mixtures](#multitracer-catalog-mixtures-k--2)), sampling the per-catalog host fractions.
 - `--counterpart RA1 DEC1 Z1 [RA2 DEC2 Z2 ...]`: bright-siren counterpart coordinates and redshifts, one triplet per GW event in event order; RA and Dec use radians, matching the GW sample convention. Required for `--universe_model bright_sirens`.
 - `--counterpart_dz`: Gaussian redshift uncertainty assigned to the synthetic counterpart catalog entry; defaults to `1e-4`.
 - `--counterpart_nside`: HEALPix NSIDE for the synthetic counterpart catalog; defaults to `1`.
@@ -41,7 +41,7 @@ darksirens_inference \
 
 ### Physical-model options
 
-- `--universe_model`: one of `spectral_sirens`, `bright_sirens`, `dark_sirens`, or `dark_sirens_complete`.
+- `--universe_model`: one of `spectral_sirens`, `spectral_sirens_wl`, `bright_sirens`, `dark_sirens`, or `dark_sirens_complete`.
 - `--pop_model`: population model name. Parametric mixture names are parsed as a composition grammar: `+`-separated mass tokens (`powerlaw`, `brokenpowerlaw`, `peak`) with optional digit count prefixes, e.g. `powerlaw+peak`, `brokenpowerlaw+2peaks`, `2powerlaws+3peaks`. Any grammar composition works with blueprint-default priors; curated names additionally carry physics-tuned priors and fiducials. Bespoke names such as `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint`, `golomb_1g`, `golomb_1g+tail`, and `gwtc5_fiducial_bpl2peaks` are registered explicitly. See [Concepts → Population models](concepts.md#population-models).
 - `--shared_beta`: whether to use one shared beta/pairing distribution (`true`, default) or per-component beta parameters (`false`).
 - `--shared_spin`: whether to use one shared spin distribution (`true`, default) or per-component spin parameters (`false`).
@@ -57,9 +57,22 @@ darksirens_inference \
 
 ### Catalog options
 
-- `--use_LSS`: include large-scale-structure overdensity where supported.
-- `--validate_completion`: run a dry-run completion clipping diagnostic, save `completion_validation__*.json` under `--save_path`, and exit before likelihood construction or sampling. The diagnostic uses the same matched-kernel completeness ratio as the likelihood and reports clipping fractions for the raw ratio, LSS modulation, and effective completeness.
+- `--use_LSS`: include the large-scale-structure overdensity `delta_g(pix, z)` in the missing-galaxy budget (`max(1 + b_eff*delta_g, 0)`). With a K-catalog mixture, each catalog computes its own overdensity field from its own rows, coupled to its own sampled `b_miss` (`b_miss_c{k}` for catalogs 2..K).
+- `--catalog_sky_weighting {conditional,field}`: the dark-siren redshift-prior normalization convention. `conditional` normalizes each pixel by its own `Z[pix]` (the per-pixel z-shape estimand); `field` normalizes by the survey-global `Z(theta)` so a K>=2 mixture weight `fcat_k` measures the catalog's GW **host fraction** and `log10n0` becomes informative. **Unset auto-resolves by K** (conditional at K=1, field at K>=2); for `dark_sirens` the degenerate explicit combinations — `field` at K=1 (the global normalizer cancels between the PE and selection terms) and `conditional` at K>=2 (the railing z-shape-only `fcat` estimand) — are fatal. The field normalizer carries the SAME modulated missing budget as the numerator (Q_LSS, `delta_g`, marked-host `mu_miss`, per ensemble member under `--lss_marginalize`), so it composes with all catalog options below; it needs the full-sky rows (incompatible with `--drop_full_catalog`).
+- `--lss_completion PATH [PATH ...]`: precomputed LSS-conditioned lognormal completion table(s) `Q_LSS` replacing the legacy overdensity factor. With K catalogs pass 0 or exactly K paths, positionally aligned with `--survey_path` (`""` = no external completion for that catalog); one table is never broadcast across catalogs.
+- `--lss_marginalize`: fully-Bayesian marginalization over the Q_LSS ensemble, `logL = logsumexp_m logL(Q_m) - log M`. With a K-catalog mixture the marginalization uses **one shared member index** — member `m` of every catalog must sample the same LSS realization (build the per-catalog ensembles from matched realizations with equal `--n-members`, or the run aborts).
+- `--mark_model {none,loglinear}` and `--marks LIST`: the marked-host model (host efficiency `h(m|eta)` over z-centred galaxy marks). With a K-catalog mixture the marks are resolved **per catalog** from each survey file's datasets (`available ∩ --marks`): catalog 1 samples the unsuffixed `eta_<mark>` coefficients, catalogs 2..K sample `eta_<mark>_c{k}` blocks, and a catalog with no selected marks runs the plain galaxy-count host model (`h = 1`) inside the mixture.
+- `--validate_completion`: run a dry-run completion clipping diagnostic, save `completion_validation__*.json` under `--save_path`, and exit before likelihood construction or sampling. The diagnostic uses the same matched-kernel completeness ratio as the likelihood and reports clipping fractions for the raw ratio, LSS modulation, and effective completeness. With K catalogs one diagnostic runs per catalog (`completion_validation_c{k}__*.json`).
 - `--completion_validation_pixels`: maximum number of unique catalog pixels to inspect during `--validate_completion`; defaults to `64`.
+
+### Multitracer catalog mixtures (K >= 2)
+
+Passing `K >= 2` files to `--survey_path` runs the K-catalog mixture: the catalog-completed redshift prior becomes `log p_mix(z) = logsumexp_k [log w_k + log p_k(z, pix_k)]`, with per-catalog nside/pixelization, per-catalog survey nuisance blocks (`log10n0_c{k}`, `delta_c{k}`, `b_miss_c{k}`, `sigma_kde_c{k}`), and sampled stick-breaking weights `fcat_2..fcat_K` (Beta(1, K-m+1) priors; `w_2 = fcat_2` exactly at K=2).
+
+- **Estimand.** Under the (auto-resolved) `field` sky weighting, `w_k` is the fraction of GW hosts drawn from catalog `k`'s tracer population — e.g. the AGN host fraction `f_agn` for a GAL+AGN K=2 run. `darksirens_analyze` derives and plots `w_1..w_K` from the sampled sticks automatically (`catalog_weights_<tag>.{pdf,npy}`).
+- **Universe models.** `dark_sirens` (the general case) or `dark_sirens_complete` (special case: field weighting only). `spectral_sirens`, `spectral_sirens_wl`, and `bright_sirens` are inherently single-catalog.
+- **Composability.** Per-catalog Q_LSS tables, `--use_LSS` overdensities, `--lss_marginalize` ensembles (shared member index), marked-host models (per-catalog eta blocks), and anisotropic `--sky_model` choices (one population-level `g(n, z)` factor shared across catalogs) all compose with the mixture; the survey-global field normalizer carries the same modulated missing budget as each catalog's numerator.
+- **Weak lensing** (`spectral_sirens_wl`) and `--counterpart`/`bright_sirens` remain single-catalog.
 
 ### Sampler options
 

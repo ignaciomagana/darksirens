@@ -184,8 +184,9 @@ darksirens_inference \
 | Value | Description |
 | --- | --- |
 | `spectral_sirens` | GW-only spectral-siren inference. No survey catalog is required. |
-| `dark_sirens` | Incomplete-catalog dark-siren inference with survey completion modeling. Requires `--survey_path`. |
-| `dark_sirens_complete` | Complete-catalog dark-siren inference. Requires `--survey_path`. |
+| `spectral_sirens_wl` | Spectral sirens with weak-lensing magnification marginalization. No survey catalog is required. |
+| `dark_sirens` | Incomplete-catalog dark-siren inference with survey completion modeling. Requires `--survey_path` (one catalog, or K >= 2 for the multitracer mixture). |
+| `dark_sirens_complete` | Complete-catalog dark-siren inference. Requires `--survey_path`; a K >= 2 mixture uses the field sky weighting only (special case). |
 | `bright_sirens` | Bright-siren inference using known counterpart coordinates/redshifts via `--counterpart`. |
 
 ### Population-model names in CLI runs
@@ -243,6 +244,23 @@ darksirens_inference \
 ```
 
 The incomplete-catalog model combines catalog galaxies with an additive missing-galaxy density. Completion is estimated from a matched-kernel ratio: observed per-pixel galaxy counts are smoothed on the redshift grid with the same truncated Gaussian operator used for the expected `n0 * dV_c/dz * (1 + z)^delta` counts. The likelihood then adds `(1 - C) * dN_exp/dz`, optionally modulated by `max(1 + alpha_miss * b_miss * delta_g, 0)` when LSS information is enabled. `z50`, `w`, and `alpha_miss` are legacy/degenerate compatibility parameters that are not sampled for `dark_sirens` by default; `z50` and `w` do not impose a logistic rolloff in the current completion model.
+
+### Multitracer dark-siren workflow (K >= 2 catalogs)
+
+Pass multiple pixelated surveys to sample the per-catalog GW host fractions alongside cosmology and population:
+
+```bash
+darksirens_inference \
+  --gw_path gw_samples.h5 \
+  --gwselection_path selection.h5 \
+  --universe_model dark_sirens \
+  --survey_path galaxies.h5 agn.h5 \
+  --pop_model powerlaw+peak \
+  --sampler dynesty \
+  --save_path runs/dark_gal_agn
+```
+
+This K=2 run samples the usual cosmology/population block, TWO survey nuisance blocks (`log10n0`/`delta`/`b_miss`/`sigma_kde` and their `_c2` twins), and the mixture stick `fcat_2`. The sky-weighting convention auto-resolves to `field` (survey-global normalizer) so `fcat_2` **is** catalog 2's GW host fraction (`w_2 = f_agn` for a GAL+AGN pair); `darksirens_analyze` prints the 5/50/95% quantiles of the derived `w_1..w_K` and saves `catalog_weights_<tag>.{pdf,npy}`. Per-catalog `--lss_completion` tables (0 or K paths, `""` placeholders), `--use_LSS`, `--lss_marginalize` (equal-M ensembles over matched LSS realizations), `--mark_model` (per-catalog `eta` blocks), and anisotropic `--sky_model` choices all compose; see the CLI reference ("Multitracer catalog mixtures") for the rules.
 
 ### Complete-catalog dark-siren workflow
 

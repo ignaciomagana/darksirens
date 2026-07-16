@@ -158,6 +158,26 @@ def _k1_value(z, fixed, pop_fid):
     return float(ll(jnp.asarray([_mid_pop()])))
 
 
+def test_k1_bundle_source_matches_flat_source():
+    """A single catalog supplied as ONE bundle (data["catalogs"] = [b]) must
+    reproduce the flat-data K=1 likelihood: same parameters (plain decoder, no
+    sticks), same value.  This is the unified builder's K=1 coherence contract
+    -- a K=1 config scales to K>=2 by appending a bundle, nothing else."""
+    _pop_lower, _pop_upper, _pop_labels, pop_fid, _sampled, fixed = _pop_bits()
+
+    val_flat = _k1_value(Z_A, fixed, pop_fid)
+
+    data = dict(_shared_physics())
+    data["apix"] = APIX1  # make_likelihood reads data["apix"] unconditionally
+    data["catalogs"] = [_bundle(APIX1, Z_A)]
+    opts = _base_opts(n_catalogs=1)
+    ll_bundle = make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
+    val_bundle = float(ll_bundle(jnp.asarray([_mid_pop()])))
+
+    assert np.isfinite(val_flat)
+    assert abs(val_bundle - val_flat) <= 1e-12
+
+
 def _k2_likelihood(z_a, z_b, fixed, pop_fid):
     data = dict(_shared_physics())
     data["apix"] = APIX1  # make_likelihood reads data["apix"] unconditionally
@@ -322,35 +342,43 @@ def test_guard_universe_model_must_be_dark_sirens():
         ll(jnp.asarray([_mid_pop(), 0.3]))
 
 
-def test_guard_mark_model_not_supported():
+def test_marked_mixture_requires_per_catalog_mark_data():
+    """Marks at K>=2 are SUPPORTED via the per-catalog eta blocks
+    (tests/test_marks_multitracer.py), but a catalog whose bundle carries no
+    mark arrays for its selected marks fails with the clear missing-mark
+    error rather than a silent h=1 fallback."""
     _pop_lower, _pop_upper, _pop_labels, pop_fid, sampled, fixed = _pop_bits()
     data = dict(_shared_physics())
     data["apix"] = APIX1
     data["catalogs"] = [_bundle(APIX1, Z_A), _bundle(APIX1, Z_B)]
     opts = _base_opts(
         n_catalogs=2, mark_model="loglinear", mark_names=("logmstar",),
+        mark_names_by_catalog=(("logmstar",), ("logmstar",)),
     )
     labels, lower, upper, *_ = build_parameter_space(
         "powerlaw+peak", False, True, True,
         prior_overrides={sampled: [float(_pop_lower[0]), float(_pop_upper[0])]},
         fixed_parameter_values=fixed, universe_model="dark_sirens", n_catalogs=2,
         mark_model="loglinear", mark_names=("logmstar",),
+        mark_names_by_catalog=(("logmstar",), ("logmstar",)),
     )
     coord = jnp.asarray(0.5 * (np.asarray(lower) + np.asarray(upper)))
     ll = make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="mark"):
         ll(coord)
 
 
-def test_guard_lss_marginalize_not_supported():
-    """_make_mixture_likelihood forwards opts.lss_marginalize, so core's
-    K>=2 NotImplementedError guard is reachable for direct make_likelihood
-    callers (the CLI has its own _fatal guard on top)."""
+def test_lss_marginalize_without_members_raises_at_k2():
+    """lss_marginalize is SUPPORTED at K>=2 (shared member index), but every
+    catalog must carry a Q ensemble: bundles without members raise the clear
+    per-catalog error (functional replacement for the old blanket K>=2
+    NotImplementedError guard)."""
     _pop_lower, _pop_upper, _pop_labels, pop_fid, _sampled, fixed = _pop_bits()
     data = dict(_shared_physics())
     data["apix"] = APIX1
     data["catalogs"] = [_bundle(APIX1, Z_A), _bundle(APIX1, Z_B)]
-    opts = _base_opts(n_catalogs=2, lss_marginalize=True)
+    opts = _base_opts(n_catalogs=2, lss_marginalize=True,
+                      catalog_sky_weighting="conditional")
     ll = make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="ENSEMBLE on EVERY"):
         ll(jnp.asarray([_mid_pop(), 0.3]))

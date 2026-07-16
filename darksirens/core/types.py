@@ -197,6 +197,29 @@ class EMCatalog(NamedTuple):
     field_dN_obs_s: Any = None       # (n_occupied, N_grid) float32 smoothed observed density
     field_n_empty: Any = None        # scalar: number of empty (galaxy-free) survey pixels
     field_N_obs_total: Any = None    # scalar: total observed real-galaxy count over ALL pixels
+    # --- FIELD-normalizer budget modulations (optional; default None = lss=1) --
+    # Row-aligned with ``field_dN_obs_s`` via ``field_occupied_pixels`` so the
+    # global normalizer carries the SAME per-pixel missing-budget factor as the
+    # numerator: lss_p = Q_p(z) (deterministic Q_LSS) or
+    # max(1 + b_eff*delta_g_p(z), 0) (local overdensity; empty pixels carry
+    # delta_g == 0 by construction, so only occupied rows are stored).  Built by
+    # :func:`darksirens.redshift.completion.build_field_lss_q_inputs` /
+    # :func:`darksirens.redshift.completion.build_field_delta_g_inputs`.
+    field_occupied_pixels: Any = None   # (n_occupied,) int32 global pixel ids
+    field_lss_q: Any = None             # (n_occupied, N_grid) float32 LINEAR Q rows
+    field_lss_q_empty_sum: Any = None   # (N_grid,) float64 Sum_empty Q_p(z) (data constant)
+    field_delta_g: Any = None           # (n_occupied, N_grid) float32 delta_g rows
+    # Per-member field normalizer inputs (Q ensemble marginalization under the
+    # field convention): one modulation-row block + empty-pixel budget curve
+    # per ensemble member, built by build_field_lss_q_member_inputs.
+    field_lss_q_members: Any = None            # (M, n_occupied, N_grid) float32
+    field_lss_q_empty_sum_members: Any = None  # (M, N_grid) float64
+    # Marked-host field normalizer: flat FULL-SKY per-galaxy inputs so mu_miss
+    # and the observed marked mass Sum w_i h_i are view-independent (PE and
+    # selection share ONE global Z).  Built by build_field_mark_inputs.
+    field_mark_z: Any = None            # (N_gal_total,) float32 galaxy redshifts
+    field_mark_w: Any = None            # (N_gal_total,) float32 base weights
+    field_mark_values: Any = None       # (N_gal_total, n_marks) float32 z-centred marks
 
 
 class GWEvent(NamedTuple):

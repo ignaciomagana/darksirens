@@ -92,13 +92,15 @@ def _make_mixture_likelihood(
     fixed_parameter_values: dict | None,
     n_catalogs: int,
 ):
-    """Build the K-catalog mixture likelihood callable (dark_sirens, K >= 2).
+    """Build the bundle-source likelihood callable (galaxy-aware models, K >= 1).
 
     Each catalog in ``data["catalogs"]`` carries its OWN nside/apix, compact
     PE/selection views, KDE cache, and Q_LSS table; the GW posterior and
     selection *physics* arrays (masses, distances, spins, sky vectors) are shared
     across catalogs.  The per-catalog compact pixel maps are stacked into ``(N,
-    K)`` matrices and the mixture weights come from ``decode_mixture``.
+    K)`` matrices; for K >= 2 the mixture weights come from ``decode_mixture``,
+    while a single-bundle K = 1 run uses the plain decoder (same parameters as a
+    flat-data K = 1 run).
     """
     bundles = data.get("catalogs")
     if bundles is None or len(bundles) != n_catalogs:
@@ -120,6 +122,11 @@ def _make_mixture_likelihood(
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
+    _mnbc = getattr(opts, "mark_names_by_catalog", None)
+    mark_names_all = (
+        tuple(tuple(names or ()) for names in _mnbc) if _mnbc
+        else (mark_names,) + ((),) * (n_catalogs - 1)
+    )
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
     max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
@@ -129,14 +136,40 @@ def _make_mixture_likelihood(
         """Per-bundle FIELD-convention normalization inputs (survey-global),
         precomputed by the loader (loaders.py) or supplied directly in tests.
         Shared by the bundle's PE and selection EMCatalogs so their global Z is
-        the SAME value for the same theta (constants cancel structurally)."""
+        the SAME value for the same theta (constants cancel structurally).
+        Includes the budget-modulation rows (Q_LSS / delta_g) when present."""
         fobs = bundle.get("field_dN_obs_s")
         if fobs is None:
-            return None, None, None
-        return (
-            barrier(jnp.asarray(fobs)),
-            jnp.asarray(bundle["field_n_empty"], dtype=jnp.float64),
-            jnp.asarray(bundle["field_N_obs_total"], dtype=jnp.float64),
+            return dict(
+                field_dN_obs_s=None, field_n_empty=None, field_N_obs_total=None,
+                field_occupied_pixels=None, field_lss_q=None,
+                field_lss_q_empty_sum=None, field_delta_g=None,
+                field_lss_q_members=None, field_lss_q_empty_sum_members=None,
+                field_mark_z=None, field_mark_w=None, field_mark_values=None,
+            )
+
+        def _maybe(key, dtype=None):
+            val = bundle.get(key)
+            if val is None:
+                return None
+            arr = jnp.asarray(val) if dtype is None else jnp.asarray(val, dtype=dtype)
+            return barrier(arr)
+
+        return dict(
+            field_dN_obs_s=barrier(jnp.asarray(fobs)),
+            field_n_empty=jnp.asarray(bundle["field_n_empty"], dtype=jnp.float64),
+            field_N_obs_total=jnp.asarray(
+                bundle["field_N_obs_total"], dtype=jnp.float64
+            ),
+            field_occupied_pixels=_maybe("field_occupied_pixels", jnp.int32),
+            field_lss_q=_maybe("field_lss_q"),
+            field_lss_q_empty_sum=_maybe("field_lss_q_empty_sum"),
+            field_delta_g=_maybe("field_delta_g"),
+            field_lss_q_members=_maybe("field_lss_q_members"),
+            field_lss_q_empty_sum_members=_maybe("field_lss_q_empty_sum_members"),
+            field_mark_z=_maybe("field_mark_z"),
+            field_mark_w=_maybe("field_mark_w"),
+            field_mark_values=_maybe("field_mark_values"),
         )
 
     # Shared (catalog-independent) GW / selection physics arrays.
@@ -179,6 +212,25 @@ def _make_mixture_likelihood(
             )
         return barrier(full_j[up]), 1
 
+    def _compact_lss_members_for(views, unique_pixels):
+        # Per-catalog analogue of make_likelihood._compact_lss_members: slice
+        # this catalog's (M, n_pix, n_grid) Q ensemble to the view's pixels.
+        full = views.lss_completion_logq_members
+        if full is None:
+            return None
+        full_j = jnp.asarray(full)
+        idx = int(views.lss_completion_indexing or 0)
+        if idx == 1 or unique_pixels is None:
+            return barrier(full_j)
+        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
+        if int(jnp.max(up)) >= full_j.shape[1]:
+            raise ValueError(
+                f"LSS completion ensemble has {full_j.shape[1]} pixels but a "
+                f"catalog pixel index reaches {int(jnp.max(up))} (rebuild Q "
+                "over the full nside)."
+            )
+        return barrier(full_j[:, up])
+
     em_catalogs_pe = []
     em_catalogs_sel = []
     pe_pixel_cols = []
@@ -197,7 +249,32 @@ def _make_mixture_likelihood(
         apix_k = bundle["apix"]
         lss_q_pe_k, lss_idx_pe_k = _compact_lss_q_for(views, views.unique_pixels_pe)
         lss_q_sel_k, lss_idx_sel_k = _compact_lss_q_for(views, views.unique_pixels_sel)
-        field_obs_k, field_ne_k, field_Nobs_k = _bundle_field_inputs(bundle)
+        lss_qm_pe_k = _compact_lss_members_for(views, views.unique_pixels_pe)
+        lss_qm_sel_k = _compact_lss_members_for(views, views.unique_pixels_sel)
+        field_k = _bundle_field_inputs(bundle)
+
+        def _bundle_marks(unique_pixels):
+            # Gather this bundle's full-sky z-centred mark tables (loaded by
+            # load_multitracer_catalog_bundles) to the view's compact rows,
+            # mirroring make_likelihood._compact_marks.
+            from darksirens.marks import MARK_FIELDS as _MARK_FIELDS
+
+            out = {}
+            for field in _MARK_FIELDS.values():
+                full = bundle.get(field)
+                if full is None:
+                    out[field] = None
+                else:
+                    full_j = jnp.asarray(full)
+                    arr = (
+                        full_j if unique_pixels is None
+                        else full_j[jnp.asarray(unique_pixels)]
+                    )
+                    out[field] = barrier(arr)
+            return out
+
+        marks_pe_k = _bundle_marks(views.unique_pixels_pe)
+        marks_sel_k = _bundle_marks(views.unique_pixels_sel)
 
         em_catalogs_pe.append(EMCatalog(
             apix=apix_k,
@@ -213,10 +290,13 @@ def _make_mixture_likelihood(
             active_counterpart_index=0,
             bright_siren_sky_marginalized=False,
             lss_completion_logq=lss_q_pe_k,
+            lss_completion_logq_members=lss_qm_pe_k,
             lss_completion_indexing=lss_idx_pe_k,
-            field_dN_obs_s=field_obs_k,
-            field_n_empty=field_ne_k,
-            field_N_obs_total=field_Nobs_k,
+            mark_logmstar=marks_pe_k["mark_logmstar"],
+            mark_logssfr=marks_pe_k["mark_logssfr"],
+            mark_metallicity=marks_pe_k["mark_metallicity"],
+            mark_color=marks_pe_k["mark_color"],
+            **field_k,
         ))
         em_catalogs_sel.append(EMCatalog(
             apix=apix_k,
@@ -232,10 +312,13 @@ def _make_mixture_likelihood(
             active_counterpart_index=0,
             bright_siren_sky_marginalized=False,
             lss_completion_logq=lss_q_sel_k,
+            lss_completion_logq_members=lss_qm_sel_k,
             lss_completion_indexing=lss_idx_sel_k,
-            field_dN_obs_s=field_obs_k,
-            field_n_empty=field_ne_k,
-            field_N_obs_total=field_Nobs_k,
+            mark_logmstar=marks_sel_k["mark_logmstar"],
+            mark_logssfr=marks_sel_k["mark_logssfr"],
+            mark_metallicity=marks_sel_k["mark_metallicity"],
+            mark_color=marks_sel_k["mark_color"],
+            **field_k,
         ))
         pe_pixel_cols.append(jnp.asarray(views.sample_to_unique_pe, dtype=jnp.int32))
         sel_pixel_cols.append(jnp.asarray(views.sample_to_unique_sel, dtype=jnp.int32))
@@ -286,14 +369,27 @@ def _make_mixture_likelihood(
     mixture_em_catalogs_sel = tuple(em_catalogs_sel[1:])
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
-        (
-            cosmo,
-            surveys,
-            pop_params,
-            sky_params,
-            mark_params,
-            log_w,
-        ) = parameter_decoder.decode_mixture(coord)
+        if n_catalogs >= 2:
+            (
+                cosmo,
+                surveys,
+                pop_params,
+                sky_params,
+                mark_params_all,
+                log_w,
+            ) = parameter_decoder.decode_mixture(coord)
+            survey_0 = surveys[0]
+            mixture_surveys = tuple(surveys[1:])
+            mark_params = mark_params_all[0]
+        else:
+            # K = 1 bundle source: the plain decoder (no sticks, no per-catalog
+            # blocks) -- the same parameters a flat-data K=1 run samples.
+            cosmo, survey_0, pop_params, sky_params, mark_params = (
+                parameter_decoder.decode(coord)
+            )
+            mixture_surveys = ()
+            log_w = None
+            mark_params_all = (mark_params,)
         if len(pop_params) != len(parameter_decoder.pop_labels):
             raise ValueError(
                 "Population parameter length mismatch before likelihood "
@@ -302,7 +398,7 @@ def _make_mixture_likelihood(
             )
         return darksiren_log_likelihood(
             cosmo,
-            surveys[0],
+            survey_0,
             pop_params,
             gw_pe,
             em_catalog_pe_0,
@@ -322,15 +418,14 @@ def _make_mixture_likelihood(
             mark_model=mark_model,
             mark_params=mark_params,
             mark_names=mark_names,
+            mark_params_all=tuple(mark_params_all),
+            mark_names_all=mark_names_all,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
-            # Forward lss_marginalize so core's K>=2 NotImplementedError guard
-            # is reachable for direct make_likelihood callers too (the CLI has
-            # its own _fatal guard).
             lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
             n_catalogs=n_catalogs,
-            mixture_surveys=tuple(surveys[1:]),
+            mixture_surveys=mixture_surveys,
             mixture_em_catalogs_pe=mixture_em_catalogs_pe,
             mixture_em_catalogs_sel=mixture_em_catalogs_sel,
             mixture_log_weights=log_w,
@@ -437,11 +532,13 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         )
     )
 
-    # Multitracer: for K >= 2 the catalog-completed redshift prior becomes a
-    # per-catalog mixture; delegate to the dedicated builder and leave the
-    # single-catalog path below bit-identical.
+    # Bundle operand source: per-catalog bundles in data["catalogs"] (built by
+    # loaders.load_multitracer_catalog_bundles) for ANY K >= 1; required for
+    # K >= 2, where the catalog-completed redshift prior becomes a per-catalog
+    # mixture.  The flat-data path below stays for K = 1 callers without
+    # bundles and is bit-identical to the pre-unification behaviour.
     n_catalogs = int(getattr(opts, "n_catalogs", 1))
-    if n_catalogs >= 2:
+    if data.get("catalogs") is not None or n_catalogs >= 2:
         return _make_mixture_likelihood(
             opts, data, pop_params_fid, fixed_parameter_values, n_catalogs
         )
@@ -585,6 +682,13 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
             field_n_empty=getattr(catalogs, "field_n_empty", None),
             field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
+            field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
+            field_lss_q=getattr(catalogs, "field_lss_q", None),
+            field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
+            field_delta_g=getattr(catalogs, "field_delta_g", None),
+            field_mark_z=getattr(catalogs, "field_mark_z", None),
+            field_mark_w=getattr(catalogs, "field_mark_w", None),
+            field_mark_values=getattr(catalogs, "field_mark_values", None),
         )
         em_catalog_sel = EMCatalog(
             apix=apix,
@@ -613,6 +717,13 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
             field_n_empty=getattr(catalogs, "field_n_empty", None),
             field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
+            field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
+            field_lss_q=getattr(catalogs, "field_lss_q", None),
+            field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
+            field_delta_g=getattr(catalogs, "field_delta_g", None),
+            field_mark_z=getattr(catalogs, "field_mark_z", None),
+            field_mark_w=getattr(catalogs, "field_mark_w", None),
+            field_mark_values=getattr(catalogs, "field_mark_values", None),
         )
 
         gw_pe = GWEvent(

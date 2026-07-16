@@ -82,7 +82,7 @@ def _catalog_with_field(zgals, wgals, ngals, apix=1.0):
     """Build an EMCatalog carrying the field-normalization inputs (on-the-fly
     KDE fallback, ``dN_obs_kde=None`` -- the same recipe field_global_log_Z
     reproduces)."""
-    fobs, n_empty, N_obs_total = build_field_normalization_inputs(
+    fobs, n_empty, N_obs_total, _occ = build_field_normalization_inputs(
         jnp.asarray(zgals), jnp.asarray(wgals), jnp.asarray(ngals)
     )
     return EMCatalog(
@@ -376,7 +376,7 @@ def _field_bundle(apix, z, dz=0.02, nsamp=2, n_sel=8, n_empty=3):
         unique_pixels_sel=np.array([0], dtype=np.int32),
         sample_to_unique_sel=np.zeros(n_sel, dtype=np.int32),
     )
-    fobs, _ne, nobs = build_field_normalization_inputs(
+    fobs, _ne, nobs, _occ = build_field_normalization_inputs(
         jnp.asarray([[z]]), None, jnp.asarray([1], dtype=jnp.int32)
     )
     bundle["field_dN_obs_s"] = fobs
@@ -458,26 +458,49 @@ def test_k2_field_fcat_endpoints():
 # Scope gates
 # ---------------------------------------------------------------------------
 
-def test_field_gate_rejects_lss_and_marks():
+def test_field_gate_rejects_marks_ensemble_and_inconsistent_budgets():
     cosmo, survey = _cosmo(), _survey()
     zgals, _dz, wgals, ngals = _synthetic_full_sky()
 
-    # Marked-host model: rejected.
+    # Marked-host model WITHOUT the flat full-sky mark inputs: rejected (the
+    # marked global normalizer needs view-independent mu_miss / S_obs).
     cat_marks = _catalog_with_field(zgals, wgals, ngals)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="field_mark"):
         prepare_redshift_prior_state(
             "dark_sirens", cosmo, survey, cat_marks,
             mark_model="loglinear", mark_names=("logmstar",),
             catalog_sky_weighting="field",
         )
 
-    # LSS-completion Q_LSS table: rejected.
-    cat_q = cat_marks._replace(
+    # Q ENSEMBLE without the per-member survey-global rows: rejected with the
+    # build hint (numerator and per-member normalizers must share budgets).
+    cat_members = cat_marks._replace(
+        lss_completion_logq_members=jnp.zeros((2, zgals.shape[0], len(zgrid)))
+    )
+    with pytest.raises(ValueError, match="field_lss_q_members"):
+        prepare_redshift_prior_state(
+            "dark_sirens", cosmo, survey, cat_members, catalog_sky_weighting="field"
+        )
+
+    # Deterministic Q table WITHOUT the survey-global Q rows: the numerator
+    # and normalizer would carry different budgets -> rejected with a build hint.
+    cat_q_inconsistent = cat_marks._replace(
         lss_completion_logq=jnp.zeros((zgals.shape[0], len(zgrid)))
     )
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="field_lss_q"):
         prepare_redshift_prior_state(
-            "dark_sirens", cosmo, survey, cat_q, catalog_sky_weighting="field"
+            "dark_sirens", cosmo, survey, cat_q_inconsistent,
+            catalog_sky_weighting="field",
+        )
+
+    # Per-pixel delta_g WITHOUT the survey-global delta_g rows: rejected.
+    cat_dg_inconsistent = cat_marks._replace(
+        delta_g_pix_z=jnp.zeros((zgals.shape[0], len(zgrid)))
+    )
+    with pytest.raises(ValueError, match="field_delta_g"):
+        prepare_redshift_prior_state(
+            "dark_sirens", cosmo, survey, cat_dg_inconsistent,
+            catalog_sky_weighting="field",
         )
 
     # Missing field-normalization inputs: rejected (needs the full-sky catalog).

@@ -9,6 +9,10 @@ from darksirens.catalogs.io import load_survey
 
 from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import (
+    build_field_delta_g_inputs,
+    build_field_lss_q_inputs,
+    build_field_lss_q_member_inputs,
+    build_field_mark_inputs,
     build_field_normalization_inputs,
     compute_lss_overdensity,
 )
@@ -116,9 +120,11 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
     Each bundle is self-contained input to
     :func:`darksirens.likelihood.catalog_views.prepare_catalog_views`: its own
     ``nside``/``apix``, compact PE and selection views (built from the SAME GW
-    posterior / injection sky directions via a per-catalog ``hp.ang2pix``), a
-    dummy ``(1, N_grid)`` overdensity field (LSS is unsupported for the mixture),
-    and its deterministic Q_LSS table.
+    posterior / injection sky directions via a per-catalog ``hp.ang2pix``), its
+    own LSS overdensity field (computed per catalog under --use_LSS; the
+    memory-efficient dummy otherwise), its Q_LSS table/ensemble, its galaxy
+    marks, and -- under the field convention -- its survey-global
+    normalization inputs including the matching budget-modulation rows.
 
     ``opts.survey_paths`` is the aligned list of catalog paths;
     ``opts.lss_completions`` (if present) is positionally aligned, with ``""`` or
@@ -161,39 +167,113 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             up_se, s2u_se, zse, dzse, wse, nse,
         ) = _compact_catalog_for_pixels(pixels_sel, zgals, dzgals, wgals, ngals)
 
-        # Per-catalog deterministic Q_LSS (ensemble marginalisation is off for the
-        # mixture); a private namespace keeps the single-catalog loader contract.
+        # Per-catalog Q_LSS (deterministic table + optional ensemble when
+        # --lss_marginalize); a private namespace keeps the single-catalog
+        # loader contract.
         lss_ns = SimpleNamespace(
             survey_path=path,
             lss_completion=_lss_for(i),
             universe_model=opts.universe_model,
-            lss_marginalize=False,
+            lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
         )
         lss = maybe_load_lss_completion(lss_ns, zgrid=zgrid)
+
+        # Per-catalog galaxy marks (marked-host model): load + z-centre THIS
+        # catalog's selected marks from its own file, keyed by dataset name
+        # (mark_logmstar, ...).  The factory gathers them to the compact view
+        # rows; a catalog with an empty mark list runs the plain galaxy-count
+        # host model (h == 1) inside the mixture.
+        _mnbc = getattr(opts, "mark_names_by_catalog", None)
+        mark_names_k = (
+            tuple(_mnbc[i] or ()) if _mnbc and i < len(_mnbc) else ()
+        )
+        centred_marks_k = {}
+        if (getattr(opts, "mark_model", "none") not in (None, "none")
+                and mark_names_k):
+            from darksirens.catalogs.marks import load_and_center_survey_marks
+            from darksirens.marks import MARK_FIELDS
+
+            centred = load_and_center_survey_marks(path, zgals, ngals)
+            for name in mark_names_k:
+                key = MARK_FIELDS[name]
+                if key not in centred:
+                    raise ValueError(
+                        f"Catalog {i + 1} ({path}) does not provide the "
+                        f"selected mark '{name}' (dataset {key})."
+                    )
+                centred_marks_k[name] = centred[key]
+
+        # Per-catalog LSS overdensity: computed from THIS catalog's full-sky
+        # rows when --use_LSS (each tracer has its own clustering field and
+        # its own sampled b_miss_c{k}); the memory-efficient (1, N_grid) dummy
+        # otherwise.  A catalog carrying a Q_LSS table keeps the dummy: Q
+        # REPLACES the local-overdensity factor in the numerator.
+        if bool(getattr(opts, "use_LSS", False)) and _lss_for(i) is None:
+            delta_g_k = compute_lss_overdensity(
+                zgals, nside, wgals=wgals, ngals=ngals
+            )
+        else:
+            delta_g_k = jnp.zeros((1, len(zgrid)))
 
         bundle = dict(
             nside=nside,
             apix=apix,
             z_depth=z_depth,
             n_pix_catalog=npix,
-            delta_g_pix_z=jnp.zeros((1, len(zgrid))),
+            delta_g_pix_z=delta_g_k,
             zgals_pe=zpe, dzgals_pe=dzpe, wgals_pe=wpe, ngals_pe=npe,
             unique_pixels_pe=up_pe, sample_to_unique_pe=s2u_pe,
             zgals_sel=zse, dzgals_sel=dzse, wgals_sel=wse, ngals_sel=nse,
             unique_pixels_sel=up_se, sample_to_unique_sel=s2u_se,
         )
         bundle.update(lss)  # lss_completion_logq / _logq_members / _indexing
+        from darksirens.marks import MARK_FIELDS as _MF
+        for _name, _tbl in centred_marks_k.items():
+            bundle[_MF[_name]] = _tbl
 
         # FIELD-convention sky weighting: precompute this catalog's survey-global
         # normalization inputs from the FULL-sky rows (before they are dropped),
         # so the mixture weight measures the host FRACTION for each tracer.
         if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
-            fobs, n_empty, N_obs_total = build_field_normalization_inputs(
-                zgals, wgals, ngals
-            )
-            bundle["field_dN_obs_s"] = fobs
-            bundle["field_n_empty"] = n_empty
-            bundle["field_N_obs_total"] = N_obs_total
+            field = build_field_normalization_inputs(zgals, wgals, ngals)
+            bundle["field_dN_obs_s"] = field.dN_obs_s
+            bundle["field_n_empty"] = field.n_empty
+            bundle["field_N_obs_total"] = field.N_obs_total
+            bundle["field_occupied_pixels"] = field.occupied_pixels
+            # Budget-modulation rows: mirror this catalog's deterministic Q
+            # table into its survey-global normalizer so numerator and Z carry
+            # the SAME missing-galaxy budget (field_global_log_Z).
+            logq_full = bundle.get("lss_completion_logq")
+            q_full = bundle.get("lss_completion_q")
+            if logq_full is not None or q_full is not None:
+                logq_np = (
+                    np.asarray(logq_full)
+                    if logq_full is not None
+                    else np.log(np.maximum(np.asarray(q_full), 1e-300))
+                )
+                q_occ, q_empty_sum = build_field_lss_q_inputs(
+                    logq_np, field.occupied_pixels, npix
+                )
+                bundle["field_lss_q"] = q_occ
+                bundle["field_lss_q_empty_sum"] = q_empty_sum
+            logq_members = bundle.get("lss_completion_logq_members")
+            if logq_members is not None:
+                qm_occ, qm_empty_sum = build_field_lss_q_member_inputs(
+                    np.asarray(logq_members), field.occupied_pixels, npix
+                )
+                bundle["field_lss_q_members"] = qm_occ
+                bundle["field_lss_q_empty_sum_members"] = qm_empty_sum
+            if centred_marks_k:
+                fz, fw, fvals = build_field_mark_inputs(
+                    zgals, wgals, ngals, centred_marks_k, mark_names_k
+                )
+                bundle["field_mark_z"] = fz
+                bundle["field_mark_w"] = fw
+                bundle["field_mark_values"] = fvals
+            if np.asarray(delta_g_k).shape[0] > 1:
+                bundle["field_delta_g"] = build_field_delta_g_inputs(
+                    delta_g_k, field.occupied_pixels
+                )
 
         # Per-catalog completion validation (dry run) needs each catalog's own
         # per-sample GLOBAL pixel indices, which compaction otherwise discards.
@@ -202,6 +282,24 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             bundle["pixels_sel_full"] = pixels_sel
 
         bundles.append(bundle)
+
+    # SHARED-member-index contract: the K-catalog mixture marginalizes over ONE
+    # member index (member m of every catalog samples the same LSS
+    # realization), so the per-catalog ensembles must have equal M.
+    if bool(getattr(opts, "lss_marginalize", False)) and len(bundles) >= 2:
+        member_counts = {}
+        for path, bundle in zip(survey_paths, bundles):
+            members = bundle.get("lss_completion_logq_members")
+            if members is not None:
+                member_counts[path] = int(np.asarray(members).shape[0])
+        if len(set(member_counts.values())) > 1:
+            detail = ", ".join(f"{p}: M={m}" for p, m in member_counts.items())
+            raise ValueError(
+                "--lss_marginalize with a K-catalog mixture requires EQUAL "
+                "ensemble sizes across catalogs (a shared member index over "
+                f"matched LSS realizations); got {detail}. Rebuild the Q "
+                "ensembles with the same --n-members from matched realizations."
+            )
 
     return bundles
 

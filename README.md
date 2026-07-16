@@ -141,6 +141,17 @@ darksirens_inference --universe_model dark_sirens --survey_path catalog.h5 \
 
 Positive `eta_logmstar` means GW hosts prefer high-stellar-mass galaxies (old/long-delay-time), positive `eta_logssfr` prefers star-forming hosts (recent/short-delay); both `~0` means the host distribution is consistent with galaxy counts. The marked model **composes with `Q_LSS`** and stays fully deterministic (no galaxies are invented; the missing-galaxy efficiency reuses the observed marks). It applies to `dark_sirens`. *Out of scope (next steps):* an old+young mixture model, an LSS-conditioned missing-mark distribution, and channel-dependent marks tied to the GW population mixture.
 
+### Multitracer catalog mixtures (host fractions)
+
+Passing multiple catalogs to `--survey_path` runs the K-catalog mixture for `dark_sirens`: per-catalog survey blocks (`log10n0_c{k}`, `b_miss_c{k}`, ...), stick-breaking mixture weights `fcat_2..fcat_K`, and — under the auto-resolved survey-global (`field`) normalizer — the interpretable estimand `w_k` = the fraction of GW hosts drawn from catalog `k`'s tracer population (e.g. the AGN host fraction `f_agn` for a GAL+AGN pair):
+
+```bash
+darksirens_inference --universe_model dark_sirens \
+    --survey_path galaxies.h5 agn.h5  ...   # K=2: samples H0, ..., fcat_2 (= w_2 = f_agn)
+```
+
+Every single-catalog mode composes with the mixture — per-catalog `Q_LSS` tables, `--use_LSS` overdensities, `--lss_marginalize` (one shared member index over matched LSS realizations), per-catalog marked-host `eta` blocks, and anisotropic sky models — with the field normalizer carrying the same modulated missing budget as each catalog's numerator. `darksirens_analyze` reports the derived `w_1..w_K` posteriors. See `docs/source/cli.md` ("Multitracer catalog mixtures") for the full rules; `dark_sirens_complete` remains a special case (field weighting only, no marks).
+
 ## Minimal installation
 
 ```bash
