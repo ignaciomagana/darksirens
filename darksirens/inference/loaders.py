@@ -9,6 +9,7 @@ from darksirens.catalogs.io import load_survey
 
 from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import (
+    build_field_delta_g_inputs,
     build_field_lss_q_inputs,
     build_field_lss_q_member_inputs,
     build_field_mark_inputs,
@@ -119,9 +120,11 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
     Each bundle is self-contained input to
     :func:`darksirens.likelihood.catalog_views.prepare_catalog_views`: its own
     ``nside``/``apix``, compact PE and selection views (built from the SAME GW
-    posterior / injection sky directions via a per-catalog ``hp.ang2pix``), a
-    dummy ``(1, N_grid)`` overdensity field (LSS is unsupported for the mixture),
-    and its deterministic Q_LSS table.
+    posterior / injection sky directions via a per-catalog ``hp.ang2pix``), its
+    own LSS overdensity field (computed per catalog under --use_LSS; the
+    memory-efficient dummy otherwise), its Q_LSS table/ensemble, its galaxy
+    marks, and -- under the field convention -- its survey-global
+    normalization inputs including the matching budget-modulation rows.
 
     ``opts.survey_paths`` is the aligned list of catalog paths;
     ``opts.lss_completions`` (if present) is positionally aligned, with ``""`` or
@@ -200,12 +203,24 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
                     )
                 centred_marks_k[name] = centred[key]
 
+        # Per-catalog LSS overdensity: computed from THIS catalog's full-sky
+        # rows when --use_LSS (each tracer has its own clustering field and
+        # its own sampled b_miss_c{k}); the memory-efficient (1, N_grid) dummy
+        # otherwise.  A catalog carrying a Q_LSS table keeps the dummy: Q
+        # REPLACES the local-overdensity factor in the numerator.
+        if bool(getattr(opts, "use_LSS", False)) and _lss_for(i) is None:
+            delta_g_k = compute_lss_overdensity(
+                zgals, nside, wgals=wgals, ngals=ngals
+            )
+        else:
+            delta_g_k = jnp.zeros((1, len(zgrid)))
+
         bundle = dict(
             nside=nside,
             apix=apix,
             z_depth=z_depth,
             n_pix_catalog=npix,
-            delta_g_pix_z=jnp.zeros((1, len(zgrid))),
+            delta_g_pix_z=delta_g_k,
             zgals_pe=zpe, dzgals_pe=dzpe, wgals_pe=wpe, ngals_pe=npe,
             unique_pixels_pe=up_pe, sample_to_unique_pe=s2u_pe,
             zgals_sel=zse, dzgals_sel=dzse, wgals_sel=wse, ngals_sel=nse,
@@ -255,6 +270,10 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
                 bundle["field_mark_z"] = fz
                 bundle["field_mark_w"] = fw
                 bundle["field_mark_values"] = fvals
+            if np.asarray(delta_g_k).shape[0] > 1:
+                bundle["field_delta_g"] = build_field_delta_g_inputs(
+                    delta_g_k, field.occupied_pixels
+                )
 
         # Per-catalog completion validation (dry run) needs each catalog's own
         # per-sample GLOBAL pixel indices, which compaction otherwise discards.

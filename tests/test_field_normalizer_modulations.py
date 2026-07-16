@@ -554,6 +554,62 @@ def test_unequal_member_counts_raise_at_k2():
 
 
 # ---------------------------------------------------------------------------
+# use_LSS delta_g at K>=2 (per-catalog overdensity, per-catalog b_miss)
+# ---------------------------------------------------------------------------
+
+def _delta_g_bundle(dg_amp=None, nsamp=2, n_sel=8):
+    """Bundle with a REAL per-pixel delta_g table (empty pixels zeroed) and,
+    under field, the matching survey-global rows; the dummy when dg_amp None."""
+    bundle = _field_bundle(nsamp=nsamp, n_sel=n_sel)
+    if dg_amp is not None:
+        dg = np.array(_delta_g_table(amp=dg_amp))
+        occupied = np.asarray(bundle["field_occupied_pixels"])
+        empty = np.ones(12, dtype=bool)
+        empty[occupied] = False
+        dg[empty] = 0.0
+        bundle["delta_g_pix_z"] = jnp.asarray(dg)
+        bundle["field_delta_g"] = build_field_delta_g_inputs(dg, occupied)
+    return bundle
+
+
+def test_k2_duplicated_delta_g_equals_k1_delta_g_under_field():
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    val_k1 = float(_bundle_likelihood(
+        [_delta_g_bundle(dg_amp=0.4)], fixed, pop_fid, overrides
+    )(jnp.asarray([mid])))
+    assert np.isfinite(val_k1)
+    val_k2 = float(_bundle_likelihood(
+        [_delta_g_bundle(dg_amp=0.4), _delta_g_bundle(dg_amp=0.4)],
+        fixed, pop_fid, overrides,
+    )(jnp.asarray([mid, 0.37])))
+    assert abs(val_k2 - val_k1) <= 1e-12
+
+
+def test_delta_g_on_catalog_2_couples_to_b_miss_c2_only():
+    """delta_g enters through b_eff = alpha_miss * b_miss PER CATALOG: with a
+    real overdensity on catalog 2 only, varying the fixed b_miss_c2 moves the
+    likelihood while varying catalog 1's b_miss (dummy delta_g) does not."""
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    coord = None
+
+    def _val(extra_fixed):
+        f = dict(fixed)
+        f.update(extra_fixed)
+        ll = _bundle_likelihood(
+            [_delta_g_bundle(dg_amp=None), _delta_g_bundle(dg_amp=0.4)],
+            f, pop_fid, overrides,
+        )
+        return float(ll(jnp.asarray([mid, 0.5])))
+
+    base = _val({"b_miss": 1.0, "b_miss_c2": 1.0})
+    vary_c2 = _val({"b_miss": 1.0, "b_miss_c2": 2.5})
+    vary_c1 = _val({"b_miss": 2.5, "b_miss_c2": 1.0})
+    assert np.isfinite(base)
+    assert vary_c2 != base            # catalog 2's overdensity is live
+    assert vary_c1 == base            # dummy delta_g on catalog 1: b_miss inert
+
+
+# ---------------------------------------------------------------------------
 # Marked-host field normalizer (field_global_log_Z_marked)
 # ---------------------------------------------------------------------------
 

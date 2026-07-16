@@ -875,8 +875,6 @@ def main():
                    "spectral_sirens_wl / bright_sirens are inherently "
                    "single-catalog (catalog-free or counterpart-pinned) and "
                    "have no K>=2 mixture.")
-        if getattr(opts, "use_LSS", False):
-            _fatal("--use_LSS is not supported with a multi-catalog mixture.")
         # Marked-host models compose with the mixture via PER-CATALOG eta
         # blocks (eta_<mark> for catalog 1, eta_<mark>_c{k} for catalogs
         # 2..K).  Resolve each catalog's marks from its FILE's datasets here
