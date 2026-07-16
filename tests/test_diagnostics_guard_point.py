@@ -74,3 +74,47 @@ def test_unrelated_runtime_error_propagates_immediately():
     with pytest.raises(RuntimeError, match="not count-only"):
         _diagnostics_at_guard_clear_point(fn, MID, LOWER, UPPER, seed=7)
     assert len(calls) == 1
+
+
+def test_fiducial_candidate_tried_before_prior_draws():
+    calls = []
+
+    def fn(point):
+        calls.append(np.asarray(point))
+        if len(calls) == 1:
+            raise _guard_error()
+        return {"logL_total": 3.0}
+
+    fid = np.array([0.25, 0.5, 0.75])
+    diag, point = _diagnostics_at_guard_clear_point(
+        fn, MID, LOWER, UPPER, seed=7, fiducial=fid
+    )
+    assert np.allclose(point, fid)
+    assert len(calls) == 2
+
+
+def test_fiducial_candidate_point_maps_labels_and_clips():
+    from types import SimpleNamespace
+    from darksirens.cli.inference_lensing import _fiducial_candidate_point
+    from darksirens.gw.populations.registry import get_fixed_population_params
+    from darksirens.inference.prior import pop_model_prior_parser
+
+    pop_model = "powerlaw+peak@md"
+    fid_vec = np.asarray(get_fixed_population_params(pop_model), dtype=float)
+    _, _, pop_labels, _, _ = pop_model_prior_parser(pop_model)
+    labels = list(pop_labels) + ["log10_tau_A"]
+    n = len(labels)
+    lower = np.full(n, -100.0)
+    upper = np.full(n, 100.0)
+    mid = 0.5 * (lower + upper)
+    opts = SimpleNamespace(pop_model=pop_model, sl_tau_A=5e-4, sl_tau_n=3.0)
+    point = _fiducial_candidate_point(labels, mid, lower, upper, opts, fid_vec)
+    assert np.allclose(point[:-1], fid_vec)
+    assert np.isclose(point[-1], np.log10(5e-4))
+    # clipping: a fiducial outside the box lands strictly inside
+    tight_upper = np.full(n, 1.0)
+    tight_lower = np.full(n, -1.0)
+    clipped = _fiducial_candidate_point(
+        labels, 0.0 * mid, tight_lower, tight_upper, opts, fid_vec
+    )
+    assert np.all(clipped > tight_lower) and np.all(clipped < tight_upper)
