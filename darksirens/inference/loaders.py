@@ -9,6 +9,7 @@ from darksirens.catalogs.io import load_survey
 
 from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import (
+    build_field_lss_q_inputs,
     build_field_normalization_inputs,
     compute_lss_overdensity,
 )
@@ -188,12 +189,27 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         # normalization inputs from the FULL-sky rows (before they are dropped),
         # so the mixture weight measures the host FRACTION for each tracer.
         if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
-            fobs, n_empty, N_obs_total = build_field_normalization_inputs(
-                zgals, wgals, ngals
-            )
-            bundle["field_dN_obs_s"] = fobs
-            bundle["field_n_empty"] = n_empty
-            bundle["field_N_obs_total"] = N_obs_total
+            field = build_field_normalization_inputs(zgals, wgals, ngals)
+            bundle["field_dN_obs_s"] = field.dN_obs_s
+            bundle["field_n_empty"] = field.n_empty
+            bundle["field_N_obs_total"] = field.N_obs_total
+            bundle["field_occupied_pixels"] = field.occupied_pixels
+            # Budget-modulation rows: mirror this catalog's deterministic Q
+            # table into its survey-global normalizer so numerator and Z carry
+            # the SAME missing-galaxy budget (field_global_log_Z).
+            logq_full = bundle.get("lss_completion_logq")
+            q_full = bundle.get("lss_completion_q")
+            if logq_full is not None or q_full is not None:
+                logq_np = (
+                    np.asarray(logq_full)
+                    if logq_full is not None
+                    else np.log(np.maximum(np.asarray(q_full), 1e-300))
+                )
+                q_occ, q_empty_sum = build_field_lss_q_inputs(
+                    logq_np, field.occupied_pixels, npix
+                )
+                bundle["field_lss_q"] = q_occ
+                bundle["field_lss_q_empty_sum"] = q_empty_sum
 
         # Per-catalog completion validation (dry run) needs each catalog's own
         # per-sample GLOBAL pixel indices, which compaction otherwise discards.

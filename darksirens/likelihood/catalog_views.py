@@ -10,6 +10,8 @@ from jax import lax
 import numpy as np
 
 from darksirens.redshift.completion import (
+    build_field_delta_g_inputs,
+    build_field_lss_q_inputs,
     build_field_normalization_inputs,
     build_pixel_kde_cache,
 )
@@ -83,6 +85,14 @@ class CatalogViews:
     field_dN_obs_s: jnp.ndarray | None = None  # (n_occupied, n_grid) f32
     field_n_empty: jnp.ndarray | None = None   # scalar
     field_N_obs_total: jnp.ndarray | None = None  # scalar
+    # FIELD-normalizer budget modulations (survey-global rows aligned with
+    # field_dN_obs_s via field_occupied_pixels): Q_LSS rows / empty-pixel Q sum
+    # and per-pixel delta_g rows, so the global Z carries the SAME
+    # missing-galaxy budget as the numerator.
+    field_occupied_pixels: jnp.ndarray | None = None  # (n_occupied,) int32
+    field_lss_q: jnp.ndarray | None = None            # (n_occupied, n_grid) f32
+    field_lss_q_empty_sum: jnp.ndarray | None = None  # (n_grid,) f64
+    field_delta_g: jnp.ndarray | None = None          # (n_occupied, n_grid) f32
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -303,7 +313,10 @@ def prepare_catalog_views(
     # count, total observed count) BEFORE compaction/drop_full_catalog.  Only for
     # ``--catalog_sky_weighting field``; the conditional path leaves these None.
     field_dN_obs_s = field_n_empty = field_N_obs_total = None
+    field_occupied_pixels = field_lss_q = field_lss_q_empty_sum = None
+    field_delta_g = None
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
+        occupied_np = None
         if data.get("field_dN_obs_s") is not None:
             # Caller-provided (already survey-global) field inputs -- symmetric with
             # the caller-provided compact-view path; used by tests and any caller
@@ -311,15 +324,51 @@ def prepare_catalog_views(
             field_dN_obs_s = barrier(jnp.asarray(data["field_dN_obs_s"]))
             field_n_empty = jnp.asarray(data["field_n_empty"], dtype=jnp.float64)
             field_N_obs_total = jnp.asarray(data["field_N_obs_total"], dtype=jnp.float64)
+            if data.get("field_occupied_pixels") is not None:
+                occupied_np = np.asarray(
+                    data["field_occupied_pixels"], dtype=np.int32
+                )
         elif all(v is not None for v in (full_z, full_w, full_n)):
-            fobs, n_empty, N_obs_total = build_field_normalization_inputs(
-                full_z, full_w, full_n
-            )
-            field_dN_obs_s = barrier(fobs)
-            field_n_empty = jnp.asarray(n_empty, dtype=jnp.float64)
-            field_N_obs_total = jnp.asarray(N_obs_total, dtype=jnp.float64)
+            field = build_field_normalization_inputs(full_z, full_w, full_n)
+            field_dN_obs_s = barrier(field.dN_obs_s)
+            field_n_empty = jnp.asarray(field.n_empty, dtype=jnp.float64)
+            field_N_obs_total = jnp.asarray(field.N_obs_total, dtype=jnp.float64)
+            occupied_np = np.asarray(field.occupied_pixels, dtype=np.int32)
         # else: leave None -> the likelihood raises a clear scope error (field
         # mode needs the full-sky catalog rows to count empty pixels).
+
+        # Budget-modulation rows: mirror the numerator's Q table / per-pixel
+        # delta_g into the survey-global normalizer (field_global_log_Z), so
+        # both carry the SAME missing-galaxy budget.  Requires the GLOBAL Q
+        # table (compact per-view tables cannot supply the empty-pixel budget).
+        if occupied_np is not None:
+            logq_full = data.get("lss_completion_logq")
+            q_full = data.get("lss_completion_q")
+            if logq_full is not None or q_full is not None:
+                n_pix_total = int(
+                    data.get("n_pix_catalog", np.asarray(full_z).shape[0])
+                    if full_z is not None
+                    else data["n_pix_catalog"]
+                )
+                logq_np = (
+                    np.asarray(logq_full)
+                    if logq_full is not None
+                    else np.log(np.maximum(np.asarray(q_full), 1e-300))
+                )
+                q_occ, q_empty_sum = build_field_lss_q_inputs(
+                    logq_np, occupied_np, n_pix_total
+                )
+                field_lss_q = barrier(q_occ)
+                field_lss_q_empty_sum = barrier(q_empty_sum)
+            dg_full = data.get("delta_g_pix_z")
+            if dg_full is not None and np.asarray(dg_full).ndim == 2 \
+                    and np.asarray(dg_full).shape[0] > 1:
+                field_delta_g = barrier(
+                    build_field_delta_g_inputs(dg_full, occupied_np)
+                )
+            field_occupied_pixels = barrier(
+                jnp.asarray(occupied_np, dtype=jnp.int32)
+            )
 
     # Carry the (global) Q table HOST-side, unbarriered: likelihood.py slices it
     # to the per-view union pixels so only the compact block reaches the device.
@@ -461,4 +510,8 @@ def prepare_catalog_views(
         field_dN_obs_s=field_dN_obs_s,
         field_n_empty=field_n_empty,
         field_N_obs_total=field_N_obs_total,
+        field_occupied_pixels=field_occupied_pixels,
+        field_lss_q=field_lss_q,
+        field_lss_q_empty_sum=field_lss_q_empty_sum,
+        field_delta_g=field_delta_g,
     )

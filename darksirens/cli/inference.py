@@ -880,24 +880,20 @@ def main():
             _fatal("--sky_model must be 'isotropic' with a multi-catalog mixture "
                    f"(got '{opts.sky_model}').")
 
-    # FIELD-convention sky weighting scope (host-fraction estimand): gated to the
-    # plain dark_sirens galaxy-count host model over the full-sky catalog.  The
-    # missing-galaxy budget must carry no LSS modulation (delta_g / Q_LSS) or
-    # marks, or the global normalizer and the per-pixel numerator diverge.
+    # FIELD-convention sky weighting scope (host-fraction estimand).  The
+    # missing-galaxy budget modulations (deterministic Q_LSS, use_LSS delta_g)
+    # ARE supported: the survey-global normalizer carries the SAME per-pixel
+    # budget as the numerator (field_global_log_Z).  Marks and the Q ensemble
+    # (lss_marginalize) stay gated until their global normalizers land.
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         if opts.universe_model not in ("dark_sirens", "dark_sirens_complete"):
             _fatal("--catalog_sky_weighting field supports --universe_model "
                    "dark_sirens or dark_sirens_complete only (got "
                    f"'{opts.universe_model}').")
-        if getattr(opts, "use_LSS", False):
-            _fatal("--catalog_sky_weighting field is not supported with --use_LSS.")
         if getattr(opts, "lss_marginalize", False):
-            _fatal("--catalog_sky_weighting field is not supported with --lss_marginalize.")
-        if any(v is not None for v in (getattr(opts, "lss_completions", None) or [])):
-            _fatal("--catalog_sky_weighting field is not supported with --lss_completion "
-                   "(Q_LSS completion table). NOTE: a K>=2 mixture resolves to the "
-                   "field normalizer, so --lss_completion is unavailable at K>=2 "
-                   "until the field normalizer carries Q-modulated budgets.")
+            _fatal("--catalog_sky_weighting field is not supported with --lss_marginalize "
+                   "(the Q ENSEMBLE needs per-member global normalizers); use the "
+                   "deterministic --lss_completion table.")
         if getattr(opts, "mark_model", "none") not in (None, "none"):
             _fatal("--catalog_sky_weighting field is not supported with --mark_model.")
         if getattr(opts, "drop_full_catalog", False):

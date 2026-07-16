@@ -238,7 +238,7 @@ def build_clustered_mock(
     def _compact_bundle(full_z, full_n, full_w, dz):
         pe = _compact(pix_pe, full_z, full_n, full_w, dz)
         sel = _compact(pix_sel, full_z, full_n, full_w, dz)
-        fobs, ne, nobs = build_field_normalization_inputs(
+        fobs, ne, nobs, _occ = build_field_normalization_inputs(
             jnp.asarray(full_z), jnp.asarray(full_w), jnp.asarray(full_n))
         return dict(
             apix=apix, delta_g_pix_z=jnp.zeros((1, len(zgrid))),

@@ -1,0 +1,413 @@
+"""Modulated FIELD-convention global normalizer (PR-3 of the multitracer
+unification): ``field_global_log_Z`` accumulates the (N_grid,) field missing
+curve ``V(z;theta) = Sum_occ (1 - C_p)·lss_p(z) + Sum_empty lss_p(z)`` and
+integrates once, so the survey-global Z carries the SAME per-pixel budget
+modulation as the numerator:
+
+    lss_p = 1                                  (legacy)
+    lss_p = Q_p(z)                             (deterministic Q_LSS table)
+    lss_p = max(1 + b_eff·delta_g_p(z), 0)     (local overdensity)
+
+Empty pixels: delta_g == 0 by construction (lss = 1); the Q empty-pixel sum is
+a data constant (``field_lss_q_empty_sum``).
+
+Fixtures mirror tests/test_catalog_sky_weighting.py (tiny synthetic full sky,
+brute-force NumPy normalizer from first principles, x64 via conftest).
+"""
+import jax
+jax.config.update("jax_enable_x64", True)
+
+from types import SimpleNamespace
+
+import healpy as hp
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from darksirens.redshift import zgrid
+from darksirens.redshift.completion import (
+    _kde_dndz_obs,
+    _precompute_grids,
+    build_field_normalization_inputs,
+    build_field_delta_g_inputs,
+    build_field_lss_q_inputs,
+    field_global_log_Z,
+)
+from darksirens.redshift.prior import (
+    eval_redshift_prior_with_state,
+    prepare_redshift_prior_state,
+)
+from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+
+NG = len(zgrid)
+
+
+def _cosmo():
+    return CosmoParams(H0=67.74, Om0=0.3075, w0=-1.0, wa=0.0)
+
+
+def _survey(n0=1e-2, b_miss=1.0, alpha_miss=1.0, z_depth=None):
+    return SurveyParams(
+        n0=n0, z50=1.0, w=0.5, delta=0.0, b_miss=b_miss, alpha_miss=alpha_miss,
+        z_depth=z_depth,
+    )
+
+
+def _synthetic_full_sky(npix=12, maxg=3):
+    zgals = np.zeros((npix, maxg))
+    wgals = np.zeros((npix, maxg))
+    ngals = np.zeros(npix, dtype=np.int32)
+    occ = {1: [0.10], 3: [0.20, 0.25], 4: [0.15], 7: [0.30, 0.32, 0.28]}
+    for p, zs in occ.items():
+        for j, z in enumerate(zs):
+            zgals[p, j] = z
+            wgals[p, j] = 1.0
+        ngals[p] = len(zs)
+    dzgals = np.full((npix, maxg), 0.02)
+    return zgals, dzgals, wgals, ngals
+
+
+def _logq_table(npix=12):
+    """Global (npix, NG) log Q with distinct per-pixel structure."""
+    base = np.linspace(-0.4, 0.4, NG)
+    return np.array([base * np.cos(0.7 * p) for p in range(npix)])
+
+
+def _delta_g_table(npix=12, amp=0.6):
+    """Global (npix, NG) overdensity; empty pixels MUST carry delta_g = 0 (the
+    production compute_lss_overdensity convention) -- enforced by the caller."""
+    base = amp * np.sin(np.linspace(0.0, 4.0, NG))
+    return np.array([base * ((p % 5) - 2) / 2.0 for p in range(npix)])
+
+
+def _catalog(zgals, dzgals, wgals, ngals, apix=1.0, logq=None, delta_g=None):
+    """EMCatalog with field-normalization inputs (+ optional modulations)."""
+    field = build_field_normalization_inputs(
+        jnp.asarray(zgals), jnp.asarray(wgals), jnp.asarray(ngals)
+    )
+    occupied = np.asarray(field.occupied_pixels)
+    kwargs = dict(
+        apix=apix,
+        zgals=jnp.asarray(zgals),
+        dzgals=jnp.asarray(dzgals),
+        wgals=jnp.asarray(wgals),
+        ngals=jnp.asarray(ngals),
+        delta_g_pix_z=jnp.zeros((1, NG)),
+        dN_obs_kde=None,
+        pixel_to_cache_idx=None,
+        field_dN_obs_s=field.dN_obs_s,
+        field_n_empty=jnp.asarray(float(field.n_empty)),
+        field_N_obs_total=jnp.asarray(float(field.N_obs_total)),
+        field_occupied_pixels=jnp.asarray(occupied, dtype=jnp.int32),
+    )
+    if logq is not None:
+        q_occ, q_empty_sum = build_field_lss_q_inputs(
+            jnp.asarray(logq), occupied, int(zgals.shape[0])
+        )
+        kwargs["lss_completion_logq"] = jnp.asarray(logq)
+        kwargs["lss_completion_indexing"] = 2
+        kwargs["field_lss_q"] = q_occ
+        kwargs["field_lss_q_empty_sum"] = q_empty_sum
+    if delta_g is not None:
+        dg = np.array(delta_g)
+        empty = np.ones(zgals.shape[0], dtype=bool)
+        empty[occupied] = False
+        dg[empty] = 0.0  # production convention: empty pixels carry delta_g = 0
+        kwargs["delta_g_pix_z"] = jnp.asarray(dg)
+        kwargs["field_delta_g"] = build_field_delta_g_inputs(
+            jnp.asarray(dg), occupied
+        )
+    return EMCatalog(**kwargs)
+
+
+def _brute_force_Z(cosmo, survey, zgals, ngals, lss_fn, apix=1.0, z_depth=None):
+    """First-principles NumPy Z: per pixel N_obs + trapz((1-C)·dN_exp·lss·mask)."""
+    npix = zgals.shape[0]
+    cat = EMCatalog(
+        apix=apix, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(zgals),
+        wgals=None, ngals=jnp.asarray(ngals),
+        delta_g_pix_z=jnp.zeros((1, NG)), dN_obs_kde=None,
+        pixel_to_cache_idx=None,
+    )
+    grids = _precompute_grids(cosmo, survey, cat)
+    dN_exp = np.asarray(grids.dN_exp)
+    dN_exp_smooth = np.asarray(grids.dN_exp_smooth)
+    dN_exp_safe = np.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
+    zg = np.asarray(zgrid)
+    mask = np.ones_like(zg) if z_depth is None else (zg <= z_depth).astype(float)
+
+    Z = 0.0
+    for p in range(npix):
+        nobs = int(ngals[p])
+        Z += nobs
+        if nobs > 0:
+            obs = np.asarray(
+                _kde_dndz_obs(p, jnp.asarray(zgals), ngals=jnp.asarray(ngals))
+            )
+        else:
+            obs = np.zeros_like(zg)
+        C = np.clip(obs / dN_exp_safe, 0.0, 1.0)
+        Z += np.trapezoid((1.0 - C) * dN_exp * lss_fn(p) * mask, zg)
+    return Z
+
+
+# ---------------------------------------------------------------------------
+# Builder contracts
+# ---------------------------------------------------------------------------
+
+def test_field_inputs_carry_occupied_pixels():
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    field = build_field_normalization_inputs(
+        jnp.asarray(zgals), jnp.asarray(wgals), jnp.asarray(ngals)
+    )
+    assert list(np.asarray(field.occupied_pixels)) == [1, 3, 4, 7]
+    assert int(field.n_empty) == 8
+    assert float(field.N_obs_total) == 7.0
+    assert field.dN_obs_s.shape == (4, NG)
+
+
+def test_q_empty_sum_is_the_empty_pixel_Q_sum():
+    zgals, _, wgals, ngals = _synthetic_full_sky()
+    field = build_field_normalization_inputs(
+        jnp.asarray(zgals), jnp.asarray(wgals), jnp.asarray(ngals)
+    )
+    logq = _logq_table()
+    q_occ, q_empty_sum = build_field_lss_q_inputs(
+        jnp.asarray(logq), np.asarray(field.occupied_pixels), 12
+    )
+    occupied = set(np.asarray(field.occupied_pixels).tolist())
+    expected = np.sum(
+        [np.exp(logq[p]) for p in range(12) if p not in occupied], axis=0
+    )
+    np.testing.assert_allclose(np.asarray(q_empty_sum), expected, rtol=1e-6)
+    assert q_occ.shape == (4, NG)
+
+
+# ---------------------------------------------------------------------------
+# Brute-force parity per modulation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("z_depth", [None, 0.8])
+def test_field_Z_unmodulated_matches_bruteforce(z_depth):
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    cosmo, survey = _cosmo(), _survey(z_depth=z_depth)
+    cat = _catalog(zgals, dzgals, wgals, ngals)
+    Z_brute = _brute_force_Z(cosmo, survey, zgals, ngals, lambda p: 1.0,
+                             z_depth=z_depth)
+    logZ = float(field_global_log_Z(cosmo, survey, cat))
+    np.testing.assert_allclose(logZ, np.log(Z_brute), rtol=1e-6)
+
+
+@pytest.mark.parametrize("z_depth", [None, 0.8])
+def test_field_Z_qdet_matches_bruteforce(z_depth):
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    cosmo, survey = _cosmo(), _survey(z_depth=z_depth)
+    logq = _logq_table()
+    cat = _catalog(zgals, dzgals, wgals, ngals, logq=logq)
+    Z_brute = _brute_force_Z(
+        cosmo, survey, zgals, ngals, lambda p: np.exp(logq[p]), z_depth=z_depth
+    )
+    logZ = float(field_global_log_Z(cosmo, survey, cat))
+    np.testing.assert_allclose(logZ, np.log(Z_brute), rtol=1e-5)
+
+
+def test_field_Z_delta_g_matches_bruteforce_including_clamp():
+    """b_eff large enough that (1 + b_eff·delta_g) goes NEGATIVE for part of
+    the grid on some pixels -- the max(., 0) clamp must match brute force."""
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    cosmo, survey = _cosmo(), _survey(b_miss=2.0, alpha_miss=1.2)
+    dg = _delta_g_table()
+    occupied = [1, 3, 4, 7]
+    dg_eff = np.array(dg)
+    empty = np.ones(12, dtype=bool)
+    empty[occupied] = False
+    dg_eff[empty] = 0.0
+    b_eff = survey.alpha_miss * survey.b_miss
+    assert (1.0 + b_eff * dg_eff).min() < 0.0  # the clamp genuinely engages
+    cat = _catalog(zgals, dzgals, wgals, ngals, delta_g=dg)
+    Z_brute = _brute_force_Z(
+        cosmo, survey, zgals, ngals,
+        lambda p: np.maximum(1.0 + b_eff * dg_eff[p], 0.0),
+    )
+    logZ = float(field_global_log_Z(cosmo, survey, cat))
+    np.testing.assert_allclose(logZ, np.log(Z_brute), rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Prior-level: field - conditional shift identity under each modulation
+# ---------------------------------------------------------------------------
+
+def _prior_shift(cat_field, cat_cond, cosmo, survey):
+    """(field lp - conditional lp) and (log_Z[pix] - log_Z_global) per sample."""
+    z = jnp.asarray([0.10, 0.22, 0.31])
+    pix = jnp.asarray([1, 3, 7], dtype=jnp.int32)
+    lp = {}
+    states = {}
+    for name, cat, weighting in (
+        ("field", cat_field, "field"), ("cond", cat_cond, "conditional"),
+    ):
+        state = prepare_redshift_prior_state(
+            "dark_sirens", cosmo, survey, cat,
+            catalog_sky_weighting=weighting,
+        )
+        states[name] = state
+        lp[name] = eval_redshift_prior_with_state(
+            "dark_sirens", state, z, pix, cosmo, survey, cat,
+            catalog_sky_weighting=weighting,
+        )
+    shift = np.asarray(lp["field"] - lp["cond"])
+    expected = np.asarray(
+        states["cond"].log_Z[pix] - states["field"].log_Z_global
+    )
+    return shift, expected
+
+
+# ---------------------------------------------------------------------------
+# Likelihood-level: K>=2 mixture with per-catalog Q under the field normalizer
+# (fills the zero-coverage gap flagged in the unification review)
+# ---------------------------------------------------------------------------
+
+from darksirens.gw.populations import pop_model_prior_parser
+from darksirens.gw.populations.registry import get_fixed_population_params
+from darksirens.likelihood.factory import make_likelihood
+
+
+def _pop_bits():
+    pop_lower, pop_upper, pop_labels, _, _ = pop_model_prior_parser("powerlaw+peak")
+    pop_fid = get_fixed_population_params("powerlaw+peak")
+    sampled = pop_labels[0]
+    fixed = {
+        lbl: float(pop_fid[i]) for i, lbl in enumerate(pop_labels) if lbl != sampled
+    }
+    overrides = {sampled: [float(pop_lower[0]), float(pop_upper[0])]}
+    mid = 0.5 * (float(pop_lower[0]) + float(pop_upper[0]))
+    return pop_fid, overrides, fixed, mid
+
+
+def _shared_physics(nsamp=2, n_sel=8):
+    return dict(
+        nEvents=1, nsamp=nsamp, Ndraw=float(n_sel),
+        m1det=jnp.array([36.0, 38.0]), m2det=jnp.array([28.8, 30.4]),
+        dL=jnp.array([460.0, 500.0]), chieff=jnp.array([0.0, 0.02]),
+        p_pe=jnp.ones(nsamp),
+        m1detsels=jnp.linspace(34.0, 40.0, n_sel),
+        m2detsels=0.8 * jnp.linspace(34.0, 40.0, n_sel),
+        dLsels=jnp.linspace(430.0, 530.0, n_sel),
+        chieffsels=jnp.zeros(n_sel), p_draw=jnp.ones(n_sel),
+    )
+
+
+def _field_bundle(logq=None, nsamp=2, n_sel=8):
+    """One-catalog bundle over the 12-pixel synthetic sky with field inputs
+    (+ optional global Q table mirrored into the field normalizer)."""
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    pe_pix = np.array([7, 7], dtype=np.int32)[:nsamp]
+    sel_pix = np.array([1, 3, 4, 7, 1, 3, 4, 7], dtype=np.int32)[:n_sel]
+    up_pe, s2u_pe = np.unique(pe_pix, return_inverse=True)
+    up_se, s2u_se = np.unique(sel_pix, return_inverse=True)
+    field = build_field_normalization_inputs(
+        jnp.asarray(zgals), jnp.asarray(wgals), jnp.asarray(ngals)
+    )
+    bundle = dict(
+        nside=1, apix=hp.nside2pixarea(1), n_pix_catalog=12,
+        delta_g_pix_z=jnp.zeros((1, NG)),
+        zgals_pe=zgals[up_pe], dzgals_pe=dzgals[up_pe], wgals_pe=wgals[up_pe],
+        ngals_pe=ngals[up_pe],
+        unique_pixels_pe=up_pe.astype(np.int32),
+        sample_to_unique_pe=s2u_pe.astype(np.int32),
+        zgals_sel=zgals[up_se], dzgals_sel=dzgals[up_se], wgals_sel=wgals[up_se],
+        ngals_sel=ngals[up_se],
+        unique_pixels_sel=up_se.astype(np.int32),
+        sample_to_unique_sel=s2u_se.astype(np.int32),
+        field_dN_obs_s=field.dN_obs_s,
+        field_n_empty=field.n_empty,
+        field_N_obs_total=field.N_obs_total,
+        field_occupied_pixels=field.occupied_pixels,
+    )
+    if logq is not None:
+        q_occ, q_empty_sum = build_field_lss_q_inputs(
+            jnp.asarray(logq), field.occupied_pixels, 12
+        )
+        bundle["lss_completion_logq"] = jnp.asarray(logq)
+        bundle["lss_completion_indexing"] = 2
+        bundle["field_lss_q"] = q_occ
+        bundle["field_lss_q_empty_sum"] = q_empty_sum
+    return bundle
+
+
+def _bundle_likelihood(bundles, fixed, pop_fid, overrides):
+    data = dict(_shared_physics())
+    data["apix"] = hp.nside2pixarea(1)
+    data["catalogs"] = list(bundles)
+    opts = SimpleNamespace(
+        pop_model="powerlaw+peak",
+        universe_model="dark_sirens",
+        sel_batch_size=None,
+        fix_cosmology=True,
+        fix_population=False,
+        fix_survey=True,
+        prior_overrides=overrides,
+        fixed_parameter_values=fixed,
+        complete_empty_pixel_policy="volume",
+        bright_siren_sky_marginalized=False,
+        catalog_sky_weighting="field",
+        n_catalogs=len(bundles),
+    )
+    return make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
+
+
+def test_k2_duplicated_catalog_with_q_equals_k1_with_q_under_field():
+    """K=2 (A+Q, A+Q) at any fcat_2 == K=1 (A+Q): the Q-modulated field
+    normalizer must preserve the duplicated-catalog mixture identity."""
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    logq = _logq_table()
+
+    ll_k1 = _bundle_likelihood([_field_bundle(logq=logq)], fixed, pop_fid, overrides)
+    val_k1 = float(ll_k1(jnp.asarray([mid])))
+    assert np.isfinite(val_k1)
+
+    ll_k2 = _bundle_likelihood(
+        [_field_bundle(logq=logq), _field_bundle(logq=logq)],
+        fixed, pop_fid, overrides,
+    )
+    val_k2 = float(ll_k2(jnp.asarray([mid, 0.37])))
+    assert abs(val_k2 - val_k1) <= 1e-12
+
+
+def test_per_catalog_q_is_live_and_asymmetric_at_k2():
+    """Q on catalog 2 only changes the K=2 likelihood relative to no-Q, and
+    relative to Q-on-both: the per-catalog budgets are genuinely independent."""
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    logq = _logq_table()
+    coord = jnp.asarray([mid, 0.37])
+
+    val_no_q = float(_bundle_likelihood(
+        [_field_bundle(), _field_bundle()], fixed, pop_fid, overrides)(coord))
+    val_q_on_2 = float(_bundle_likelihood(
+        [_field_bundle(), _field_bundle(logq=logq)], fixed, pop_fid, overrides)(coord))
+    val_q_on_both = float(_bundle_likelihood(
+        [_field_bundle(logq=logq), _field_bundle(logq=logq)],
+        fixed, pop_fid, overrides)(coord))
+
+    assert np.isfinite(val_no_q) and np.isfinite(val_q_on_2)
+    assert val_q_on_2 != val_no_q
+    assert val_q_on_2 != val_q_on_both
+
+
+@pytest.mark.parametrize("modulation", ["qdet", "delta_g"])
+def test_field_conditional_shift_identity_under_modulation(modulation):
+    """field lp - conditional lp == log_Z[pix] - log_Z_global with the SAME
+    modulated numerator: the modulation must enter numerator and normalizer
+    consistently, leaving only the normalizer swap."""
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    cosmo, survey = _cosmo(), _survey()
+    if modulation == "qdet":
+        logq = _logq_table()
+        cat_field = _catalog(zgals, dzgals, wgals, ngals, logq=logq)
+        cat_cond = _catalog(zgals, dzgals, wgals, ngals, logq=logq)
+    else:
+        dg = _delta_g_table(amp=0.3)
+        cat_field = _catalog(zgals, dzgals, wgals, ngals, delta_g=dg)
+        cat_cond = _catalog(zgals, dzgals, wgals, ngals, delta_g=dg)
+    shift, expected = _prior_shift(cat_field, cat_cond, cosmo, survey)
+    np.testing.assert_allclose(shift, expected, rtol=1e-10)

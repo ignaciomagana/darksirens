@@ -108,15 +108,13 @@ def _require_field_mode_scope(
         if any(
             getattr(cat, name) is not None
             for name in (
-                "lss_completion_logq",
-                "lss_completion_q",
                 "lss_completion_logq_members",
                 "lss_completion_q_members",
             )
         ):
             raise NotImplementedError(
                 "catalog_sky_weighting='field' is not supported with an "
-                "LSS-completion Q_LSS table/ensemble."
+                "LSS-completion Q_LSS ENSEMBLE (lss_marginalize)."
             )
         if cat.field_dN_obs_s is None:
             raise ValueError(
@@ -125,18 +123,34 @@ def _require_field_mode_scope(
                 "field_n_empty / field_N_obs_total); build them from the FULL-sky "
                 "catalog via build_field_normalization_inputs."
             )
-        # field_global_log_Z hard-codes lss = 1, so the numerator's overdensity
-        # modulation must be the legacy dummy (delta_g_pix_z shape (1, N_grid),
-        # guaranteed zero-valued upstream by the use_LSS=False CLI gate). The
-        # VALUE cannot be asserted here (delta_g is a tracer under jit); the
-        # static SHAPE is the jit-safe proxy. A real per-pixel delta_g with
-        # field mode would silently bias log10n0/delta by the un-modulated
-        # normalizer (measured 33% Z divergence in the adversarial review).
-        if cat.delta_g_pix_z is not None and cat.delta_g_pix_z.shape[0] != 1:
-            raise NotImplementedError(
-                "catalog_sky_weighting='field' requires the dummy (1, N_grid) "
-                "overdensity grid; a per-pixel delta_g is not supported "
-                "(field_global_log_Z assumes lss = 1)."
+        # Budget-modulation consistency: a deterministic Q table or a real
+        # per-pixel delta_g must be mirrored by the survey-global field_* rows,
+        # or the numerator and the global normalizer would carry DIFFERENT
+        # missing-galaxy budgets (measured 33% Z divergence in the adversarial
+        # review of the unmodulated normalizer).  Static structure checks;
+        # prepare_redshift_prior_state enforces the same rules for direct
+        # callers.
+        if (
+            any(
+                getattr(cat, name) is not None
+                for name in ("lss_completion_logq", "lss_completion_q")
+            )
+            and cat.field_lss_q is None
+        ):
+            raise ValueError(
+                "catalog_sky_weighting='field' with a deterministic Q_LSS table "
+                "requires the survey-global Q rows (field_lss_q / "
+                "field_lss_q_empty_sum) built from the GLOBAL table."
+            )
+        if (
+            cat.delta_g_pix_z is not None
+            and cat.delta_g_pix_z.shape[0] != 1
+            and cat.field_delta_g is None
+        ):
+            raise ValueError(
+                "catalog_sky_weighting='field' with a per-pixel delta_g "
+                "overdensity requires the survey-global delta_g rows "
+                "(field_delta_g)."
             )
 
 

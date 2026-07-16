@@ -327,9 +327,13 @@ def prepare_redshift_prior_state(
                 f"{catalog_sky_weighting!r}."
             )
         if is_field:
-            # Field convention is the plain galaxy-count host model with the
-            # legacy dummy overdensity: no marks, no Q_LSS table/ensemble.  These
-            # are static (structure) checks, so they resolve once per trace.
+            # Field-convention scope: static (pytree-structure) checks, resolved
+            # once per trace.  The missing-galaxy budget modulations (Q_LSS
+            # table, per-pixel delta_g) ARE supported provided the matching
+            # survey-global field_* rows are present, so the numerator and the
+            # global normalizer carry the SAME budget (field_global_log_Z).
+            # The marked-host model stays gated until the marked global
+            # normalizer (Sum w_i h_i + mu_miss-modulated budget) lands.
             if mark_model is not None and mark_model != "none":
                 raise NotImplementedError(
                     "catalog_sky_weighting='field' is not supported with a marked-host "
@@ -338,15 +342,39 @@ def prepare_redshift_prior_state(
             if any(
                 getattr(em_catalog, name) is not None
                 for name in (
-                    "lss_completion_logq",
-                    "lss_completion_q",
                     "lss_completion_logq_members",
                     "lss_completion_q_members",
                 )
             ):
                 raise NotImplementedError(
                     "catalog_sky_weighting='field' is not supported with an "
-                    "LSS-completion Q_LSS table/ensemble; use 'conditional'."
+                    "LSS-completion Q_LSS ENSEMBLE (lss_marginalize); use "
+                    "'conditional' or the deterministic table."
+                )
+            has_q_table = any(
+                getattr(em_catalog, name) is not None
+                for name in ("lss_completion_logq", "lss_completion_q")
+            )
+            if has_q_table and em_catalog.field_lss_q is None:
+                raise ValueError(
+                    "catalog_sky_weighting='field' with a deterministic Q_LSS "
+                    "table requires the survey-global Q rows "
+                    "(field_lss_q / field_lss_q_empty_sum) built from the "
+                    "GLOBAL table via "
+                    "darksirens.redshift.completion.build_field_lss_q_inputs -- "
+                    "otherwise the global normalizer would carry a different "
+                    "missing-galaxy budget than the numerator."
+                )
+            has_real_delta_g = (
+                em_catalog.delta_g_pix_z is not None
+                and em_catalog.delta_g_pix_z.shape[0] != 1
+            )
+            if has_real_delta_g and em_catalog.field_delta_g is None:
+                raise ValueError(
+                    "catalog_sky_weighting='field' with a per-pixel delta_g "
+                    "overdensity requires the survey-global delta_g rows "
+                    "(field_delta_g) built via "
+                    "darksirens.redshift.completion.build_field_delta_g_inputs."
                 )
             if em_catalog.field_dN_obs_s is None:
                 raise ValueError(
@@ -398,7 +426,10 @@ def prepare_redshift_prior_state(
             # Survey-GLOBAL normalizer log Sum_all-pixels[N_obs + N_miss].  The
             # per-pixel numerator (log_Nobs, dN_miss) is UNCHANGED; only the
             # denominator becomes global, turning the mixture weight into a host
-            # fraction.  Field mode is gated (above) to the no-ensemble path.
+            # fraction.  field_global_log_Z carries the SAME budget modulation
+            # (Q_LSS / delta_g) as curves.dN_miss via the field_* rows; the
+            # ensemble path stays gated (above) until per-member global
+            # normalizers land.
             log_Z_global = field_global_log_Z(cosmo, survey, em_catalog)
             state = DarkSirenPriorState(
                 kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss,

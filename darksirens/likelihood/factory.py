@@ -131,14 +131,33 @@ def _make_mixture_likelihood(
         """Per-bundle FIELD-convention normalization inputs (survey-global),
         precomputed by the loader (loaders.py) or supplied directly in tests.
         Shared by the bundle's PE and selection EMCatalogs so their global Z is
-        the SAME value for the same theta (constants cancel structurally)."""
+        the SAME value for the same theta (constants cancel structurally).
+        Includes the budget-modulation rows (Q_LSS / delta_g) when present."""
         fobs = bundle.get("field_dN_obs_s")
         if fobs is None:
-            return None, None, None
-        return (
-            barrier(jnp.asarray(fobs)),
-            jnp.asarray(bundle["field_n_empty"], dtype=jnp.float64),
-            jnp.asarray(bundle["field_N_obs_total"], dtype=jnp.float64),
+            return dict(
+                field_dN_obs_s=None, field_n_empty=None, field_N_obs_total=None,
+                field_occupied_pixels=None, field_lss_q=None,
+                field_lss_q_empty_sum=None, field_delta_g=None,
+            )
+
+        def _maybe(key, dtype=None):
+            val = bundle.get(key)
+            if val is None:
+                return None
+            arr = jnp.asarray(val) if dtype is None else jnp.asarray(val, dtype=dtype)
+            return barrier(arr)
+
+        return dict(
+            field_dN_obs_s=barrier(jnp.asarray(fobs)),
+            field_n_empty=jnp.asarray(bundle["field_n_empty"], dtype=jnp.float64),
+            field_N_obs_total=jnp.asarray(
+                bundle["field_N_obs_total"], dtype=jnp.float64
+            ),
+            field_occupied_pixels=_maybe("field_occupied_pixels", jnp.int32),
+            field_lss_q=_maybe("field_lss_q"),
+            field_lss_q_empty_sum=_maybe("field_lss_q_empty_sum"),
+            field_delta_g=_maybe("field_delta_g"),
         )
 
     # Shared (catalog-independent) GW / selection physics arrays.
@@ -199,7 +218,7 @@ def _make_mixture_likelihood(
         apix_k = bundle["apix"]
         lss_q_pe_k, lss_idx_pe_k = _compact_lss_q_for(views, views.unique_pixels_pe)
         lss_q_sel_k, lss_idx_sel_k = _compact_lss_q_for(views, views.unique_pixels_sel)
-        field_obs_k, field_ne_k, field_Nobs_k = _bundle_field_inputs(bundle)
+        field_k = _bundle_field_inputs(bundle)
 
         em_catalogs_pe.append(EMCatalog(
             apix=apix_k,
@@ -216,9 +235,7 @@ def _make_mixture_likelihood(
             bright_siren_sky_marginalized=False,
             lss_completion_logq=lss_q_pe_k,
             lss_completion_indexing=lss_idx_pe_k,
-            field_dN_obs_s=field_obs_k,
-            field_n_empty=field_ne_k,
-            field_N_obs_total=field_Nobs_k,
+            **field_k,
         ))
         em_catalogs_sel.append(EMCatalog(
             apix=apix_k,
@@ -235,9 +252,7 @@ def _make_mixture_likelihood(
             bright_siren_sky_marginalized=False,
             lss_completion_logq=lss_q_sel_k,
             lss_completion_indexing=lss_idx_sel_k,
-            field_dN_obs_s=field_obs_k,
-            field_n_empty=field_ne_k,
-            field_N_obs_total=field_Nobs_k,
+            **field_k,
         ))
         pe_pixel_cols.append(jnp.asarray(views.sample_to_unique_pe, dtype=jnp.int32))
         sel_pixel_cols.append(jnp.asarray(views.sample_to_unique_sel, dtype=jnp.int32))
@@ -600,6 +615,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
             field_n_empty=getattr(catalogs, "field_n_empty", None),
             field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
+            field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
+            field_lss_q=getattr(catalogs, "field_lss_q", None),
+            field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
+            field_delta_g=getattr(catalogs, "field_delta_g", None),
         )
         em_catalog_sel = EMCatalog(
             apix=apix,
@@ -628,6 +647,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
             field_n_empty=getattr(catalogs, "field_n_empty", None),
             field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
+            field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
+            field_lss_q=getattr(catalogs, "field_lss_q", None),
+            field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
+            field_delta_g=getattr(catalogs, "field_delta_g", None),
         )
 
         gw_pe = GWEvent(

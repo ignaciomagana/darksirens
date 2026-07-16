@@ -235,10 +235,11 @@ def test_mark_model_requires_dark_sirens():
     assert "No such file" not in result.stderr
 
 
-def test_k2_lss_completion_unavailable_until_field_supports_q():
-    """K>=2 resolves to the field normalizer, which does not yet carry
-    Q-modulated budgets, so K>=2 + --lss_completion is rejected with a message
-    naming the interim limitation (lifted with the extended field normalizer)."""
+def test_k2_lss_completion_accepted_under_field_normalizer():
+    """K>=2 + per-catalog --lss_completion is a supported combination: the
+    field normalizer carries the Q-modulated missing budget, so validation
+    passes and the run proceeds to data loading (failing there on the dummy
+    paths, not in the guard block)."""
     result = _run([
         "--gw_path", "/nonexistent/gw.h5",
         "--gwselection_path", "/nonexistent/sel.h5",
@@ -248,4 +249,6 @@ def test_k2_lss_completion_unavailable_until_field_supports_q():
         "--sampler", "tinyns",
     ])
     assert result.returncode != 0
-    assert "field normalizer carries Q-modulated budgets" in result.stdout
+    assert "field (auto)" in result.stdout
+    assert "is not supported with --lss_completion" not in result.stdout
+    assert "FATAL: --lss_completion" not in result.stdout

@@ -122,7 +122,7 @@ def _field_bundle(apix, z, dz=0.02, nsamp=2, n_sel=8, n_empty=3):
         unique_pixels_sel=np.array([0], dtype=np.int32),
         sample_to_unique_sel=np.zeros(n_sel, dtype=np.int32),
     )
-    fobs, _ne, nobs = build_field_normalization_inputs(
+    fobs, _ne, nobs, _occ = build_field_normalization_inputs(
         jnp.asarray([[z]]), None, jnp.asarray([1], dtype=jnp.int32)
     )
     bundle["field_dN_obs_s"] = fobs
@@ -152,7 +152,7 @@ def _empty_pixel_bundle(apix, nsamp=2, n_sel=8, n_empty=3, N_obs_total=5.0):
     # field inputs from an occupied synthetic full-sky (galaxies elsewhere);
     # field_dN_obs_s is unread by the complete path but must be present for the
     # field-mode scope gate, and field_N_obs_total > 0 is the survey total.
-    fobs, _ne, _nobs = build_field_normalization_inputs(
+    fobs, _ne, _nobs, _occ = build_field_normalization_inputs(
         jnp.asarray([[0.20]]), None, jnp.asarray([1], dtype=jnp.int32)
     )
     bundle["field_dN_obs_s"] = fobs
@@ -219,7 +219,7 @@ def test_complete_field_empty_pixel_zero():
     zgals = np.array([[0.0, 0.0], [0.15, 0.0], [0.25, 0.30]])
     wgals = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
     ngals = np.array([0, 1, 2], dtype=np.int32)
-    fobs, n_empty, N_obs_total = build_field_normalization_inputs(
+    fobs, n_empty, N_obs_total, _occ = build_field_normalization_inputs(
         jnp.asarray(zgals), jnp.asarray(wgals), jnp.asarray(ngals)
     )
 
