@@ -266,8 +266,13 @@ def run_completion_validation(
     data: dict,
     prior_overrides: dict,
     fixed_parameter_values: dict,
+    suffix: str = "",
 ) -> str:
-    """Save a dry-run completion clipping diagnostic and return its path."""
+    """Save a dry-run completion clipping diagnostic and return its path.
+
+    ``suffix`` distinguishes per-catalog outputs for a K>=2 mixture run
+    (e.g. ``"_c2"`` -> ``completion_validation_c2__<ts>.json``).
+    """
     required = ["zgals_catalog", "dzgals_catalog", "wgals_catalog", "ngals_catalog"]
     if any(data.get(key) is None for key in required):
         # Backward-compatible tests/callers may use unsuffixed catalog keys.
@@ -363,10 +368,66 @@ def run_completion_validation(
 
     os.makedirs(opts.save_path, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    path = os.path.join(opts.save_path, f"completion_validation__{timestamp}.json")
+    path = os.path.join(
+        opts.save_path, f"completion_validation{suffix}__{timestamp}.json"
+    )
     with open(path, "w") as f:
         json.dump(diagnostics, f, indent=2)
     return path
+
+
+def run_completion_validation_multitracer(
+    opts,
+    data: dict,
+    prior_overrides: dict,
+    fixed_parameter_values: dict,
+) -> list:
+    """Per-catalog completion validation for a K>=2 mixture run.
+
+    Each catalog gets the SAME dry-run diagnostic as a single-catalog run:
+    the full survey rows are re-read host-side (bundles keep only compact
+    views) and paired with that catalog's own per-sample pixel indices,
+    stashed on the bundle by ``load_multitracer_catalog_bundles`` when
+    ``--validate_completion`` is set.  Returns one JSON path per catalog,
+    suffixed ``_c{k}``.
+    """
+    from darksirens.inference.loaders import load_survey
+
+    bundles = data.get("catalogs") or []
+    if len(bundles) != len(opts.survey_paths):
+        _fatal(
+            "Per-catalog completion validation needs one loaded bundle per "
+            f"--survey_path (got {len(bundles)} bundles for "
+            f"{len(opts.survey_paths)} paths)."
+        )
+    paths = []
+    for k, (survey_path, bundle) in enumerate(
+        zip(opts.survey_paths, bundles), start=1
+    ):
+        if bundle.get("pixels_pe_full") is None or bundle.get("pixels_sel_full") is None:
+            _fatal(
+                "Per-catalog completion validation requires the per-sample "
+                f"pixel indices for catalog {k}; the bundle loader stashes "
+                "them only when --validate_completion is set."
+            )
+        _, ngals, zgals, dzgals, wgals, _ = load_survey(survey_path, to_device=False)
+        data_k = dict(
+            zgals_catalog=zgals,
+            dzgals_catalog=dzgals,
+            wgals_catalog=wgals,
+            ngals_catalog=ngals,
+            pixels_pe=bundle["pixels_pe_full"],
+            pixels_sel=bundle["pixels_sel_full"],
+            apix=bundle["apix"],
+            n_pix_catalog=bundle["n_pix_catalog"],
+        )
+        paths.append(
+            run_completion_validation(
+                opts, data_k, prior_overrides, fixed_parameter_values,
+                suffix=f"_c{k}",
+            )
+        )
+    return paths
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -596,19 +657,23 @@ def main():
 
     g = optp.add_argument_group("Catalog")
     g.add_argument("--use_LSS",      type=str_to_bool, default=False, metavar="BOOL")
-    g.add_argument("--catalog_sky_weighting", default="conditional",
+    g.add_argument("--catalog_sky_weighting", default=None,
                    choices=["conditional", "field"],
                    help=("Catalog redshift-prior normalization convention (dark_sirens). "
-                         "'conditional' (default) normalizes each pixel by its own "
+                         "'conditional' normalizes each pixel by its own "
                          "Z[pix]=N_obs+N_miss -- bit-identical to the pre-existing behaviour "
                          "and the per-pixel z-shape estimand. 'field' normalizes by the "
                          "survey-GLOBAL Z(theta)=Sum_all-pixels[N_obs+N_miss], so a K>=2 "
                          "mixture weight fcat_k measures the host FRACTION (number-density / "
                          "sky-clustering contrast), empty pixels carry weight proportional to "
                          "their n0-implied missing count, and log10n0 becomes informative. "
-                         "Requires the full-sky catalog; incompatible with --use_LSS, "
+                         "Unset auto-resolves to the coherent convention for the run's K: "
+                         "conditional for a single catalog, field for a K>=2 mixture; for "
+                         "dark_sirens the degenerate explicit combinations (field at K=1, "
+                         "conditional at K>=2) are fatal. "
+                         "Field requires the full-sky catalog; incompatible with --use_LSS, "
                          "--lss_marginalize, --lss_completion, --mark_model, and "
-                         "universe models other than dark_sirens."))
+                         "universe models other than dark_sirens/dark_sirens_complete."))
     g.add_argument("--survey_z_depth", type=float, default=None, metavar="Z",
                    help=("Redshift depth bounding the completion missing-galaxy budget to "
                          "z <= z_depth instead of the full [0, DARKSIRENS_ZMAX] grid, avoiding "
@@ -740,6 +805,50 @@ def main():
     opts.survey_path = survey_paths[0] if survey_paths else None
     opts.lss_completion = opts.lss_completions[0] if opts.lss_completions else None
 
+    # ── Catalog sky-weighting resolution (estimand coherence) ──────
+    # The two dark-siren normalization conventions are DIFFERENT estimands and
+    # each is degenerate in the wrong K regime: at K=1 the field
+    # (survey-global) normalizer log_Z_global is one Lambda-dependent constant
+    # that cancels exactly between the PE and selection terms, so the
+    # number-density channel it exists for vanishes (NOTE (K=1) in
+    # darksirens/redshift/prior.py); at K>=2 the conditional (per-pixel)
+    # normalizer strips the number-density channel from the mixture weight and
+    # fcat rails on clustered catalogs (tests/test_multitracer_field_recovery.py).
+    # Unset resolves to the coherent convention for the run's K; the degenerate
+    # explicit combinations are fatal for dark_sirens.  dark_sirens_complete
+    # keeps its own pre-existing rules (K>=2 requires field, checked below;
+    # K=1 allows both -- its complete-catalog field density has no n0 budget).
+    opts.catalog_sky_weighting_source = (
+        "explicit" if opts.catalog_sky_weighting is not None else "auto"
+    )
+    if opts.catalog_sky_weighting is None:
+        opts.catalog_sky_weighting = (
+            "conditional" if opts.n_catalogs == 1 else "field"
+        )
+    if (opts.universe_model == "dark_sirens"
+            and opts.catalog_sky_weighting_source == "explicit"):
+        if opts.n_catalogs == 1 and opts.catalog_sky_weighting == "field":
+            _fatal(
+                "--catalog_sky_weighting field is degenerate with a single "
+                "catalog: the survey-global normalizer is one Lambda-dependent "
+                "constant that cancels exactly between the PE and selection "
+                "terms, so the number-density (log10n0) channel field mode "
+                "exists for vanishes. Omit the flag (K=1 resolves to "
+                "conditional), or add a second --survey_path catalog for a "
+                "host-fraction (field) analysis."
+            )
+        if opts.n_catalogs >= 2 and opts.catalog_sky_weighting == "conditional":
+            _fatal(
+                "--catalog_sky_weighting conditional is not a host-fraction "
+                "estimand for a K>=2 mixture: each catalog's prior is "
+                "normalized per pixel, so fcat_k carries no number-density / "
+                "sky-clustering information and rails to 1 on clustered "
+                "sparse-contrast catalogs (measured: "
+                "tests/test_multitracer_field_recovery.py). Omit the flag "
+                "(K>=2 resolves to field), which makes fcat_k the catalog-k "
+                "GW host fraction."
+            )
+
     if opts.n_catalogs >= 2:
         _sky_w = getattr(opts, "catalog_sky_weighting", "conditional")
         if opts.universe_model == "dark_sirens_complete":
@@ -755,7 +864,10 @@ def main():
         elif opts.universe_model != "dark_sirens":
             _fatal("Multiple --survey_path catalogs (a K>=2 mixture) require "
                    "--universe_model dark_sirens, or dark_sirens_complete with "
-                   "--catalog_sky_weighting field.")
+                   "--catalog_sky_weighting field. spectral_sirens / "
+                   "spectral_sirens_wl / bright_sirens are inherently "
+                   "single-catalog (catalog-free or counterpart-pinned) and "
+                   "have no K>=2 mixture.")
         if getattr(opts, "use_LSS", False):
             _fatal("--use_LSS is not supported with a multi-catalog mixture.")
         if getattr(opts, "lss_marginalize", False):
@@ -764,8 +876,6 @@ def main():
             _fatal("--mark_model is not supported with a multi-catalog mixture.")
         if opts.counterpart is not None:
             _fatal("--counterpart is not supported with a multi-catalog mixture.")
-        if getattr(opts, "validate_completion", False):
-            _fatal("--validate_completion is not supported with a multi-catalog mixture.")
         if getattr(opts, "sky_model", "isotropic") != "isotropic":
             _fatal("--sky_model must be 'isotropic' with a multi-catalog mixture "
                    f"(got '{opts.sky_model}').")
@@ -785,12 +895,25 @@ def main():
             _fatal("--catalog_sky_weighting field is not supported with --lss_marginalize.")
         if any(v is not None for v in (getattr(opts, "lss_completions", None) or [])):
             _fatal("--catalog_sky_weighting field is not supported with --lss_completion "
-                   "(Q_LSS completion table).")
+                   "(Q_LSS completion table). NOTE: a K>=2 mixture resolves to the "
+                   "field normalizer, so --lss_completion is unavailable at K>=2 "
+                   "until the field normalizer carries Q-modulated budgets.")
         if getattr(opts, "mark_model", "none") not in (None, "none"):
             _fatal("--catalog_sky_weighting field is not supported with --mark_model.")
         if getattr(opts, "drop_full_catalog", False):
             _fatal("--catalog_sky_weighting field needs the full-sky catalog rows to "
                    "count empty pixels; it is incompatible with --drop_full_catalog.")
+
+    # Marked-host model scope: the eta reweighting enters the dark_sirens
+    # catalog prior only (prepare_redshift_prior_state ignores marks for every
+    # other model), so any other universe_model would silently sample phantom
+    # flat eta dimensions with zero likelihood effect.
+    if (getattr(opts, "mark_model", "none") not in (None, "none")
+            and opts.universe_model != "dark_sirens"):
+        _fatal(f"--mark_model {opts.mark_model} requires --universe_model "
+               f"dark_sirens (got '{opts.universe_model}'): marks reweight the "
+               "dark-siren catalog prior and are inert for every other model, "
+               "leaving phantom flat eta dimensions in the sampled space.")
 
     # Persist the canonical names in settings while keeping opts.fix_cosmology
     # for backward-compatible internal callers and saved metadata.
@@ -1074,7 +1197,9 @@ def main():
             for _i, _p in enumerate(opts.survey_paths):
                 _row(f"  catalog {_i + 1}", _p)
         _row("Use LSS",      "yes" if opts.use_LSS else "no")
-        _row("Catalog sky weighting", getattr(opts, "catalog_sky_weighting", "conditional"))
+        _row("Catalog sky weighting",
+             f"{getattr(opts, 'catalog_sky_weighting', 'conditional')} "
+             f"({getattr(opts, 'catalog_sky_weighting_source', 'explicit')})")
     _row("Output root",     opts.save_path)
     if opts.sel_batch_size:
         _row("Sel. batch",   f"{opts.sel_batch_size:,} samples/batch")
@@ -1163,10 +1288,16 @@ def main():
 
     if opts.validate_completion:
         _section("Completion validation dry run")
-        validation_path = run_completion_validation(
-            opts, data, prior_overrides, fixed_parameter_values
-        )
-        _ok(f"completion_validation JSON → {validation_path}")
+        if opts.n_catalogs >= 2:
+            for validation_path in run_completion_validation_multitracer(
+                opts, data, prior_overrides, fixed_parameter_values
+            ):
+                _ok(f"completion_validation JSON → {validation_path}")
+        else:
+            validation_path = run_completion_validation(
+                opts, data, prior_overrides, fixed_parameter_values
+            )
+            _ok(f"completion_validation JSON → {validation_path}")
         _row("Action", "exiting before likelihood/sampling")
         _end()
         return
@@ -1207,6 +1338,9 @@ def main():
                       "lss_completion_logq_members", "lss_completion_q_members")
         )
     )
+    # Persist on opts (-> settings.json) so post-processing rebuilds the SAME
+    # parameter space (b_miss dropped when Q is active) as this run sampled.
+    opts.lss_completion_active = bool(lss_completion_active)
     res = build_parameter_space(
         opts.pop_model,
         opts.fix_population,

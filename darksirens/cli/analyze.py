@@ -549,6 +549,34 @@ def plot_cosmology_posterior(cosmo_samples_per_model, labels, params, figsize=No
     return fig
 
 
+def plot_catalog_weight_posteriors(weights, is_field=True, figsize=None):
+    """Overlay the per-catalog mixture-weight posteriors ``w_1 .. w_K``.
+
+    ``weights`` is the ``(n_samples, K)`` output of
+    :func:`darksirens.inference.pop_extractor.catalog_sticks_to_weights`.
+    Under the FIELD sky-weighting convention ``w_k`` is catalog ``k``'s GW
+    host fraction (``w_2`` = ``f_agn`` for the canonical GAL+AGN K=2 run).
+    """
+    weights = np.asarray(weights)
+    n_cat = weights.shape[1]
+    fig, ax = plt.subplots(1, 1, figsize=figsize or (7.0, 5.0))
+    for k in range(n_cat):
+        color = _PALETTE[k % len(_PALETTE)]
+        ax.hist(weights[:, k], bins=40, range=(0.0, 1.0), density=True,
+                histtype="stepfilled", alpha=0.25, color=color)
+        ax.hist(weights[:, k], bins=40, range=(0.0, 1.0), density=True,
+                histtype="step", color=color, lw=2.0, label=f"$w_{{{k + 1}}}$")
+    xlabel = ("catalog host fraction $w_k$" if is_field
+              else "catalog weight $w_k$ (conditional: z-shape preference)")
+    ax.set_xlabel(xlabel, fontsize=24)
+    ax.set_ylabel("posterior density", fontsize=22)
+    ax.set_xlim(0.0, 1.0)
+    ax.tick_params(labelsize=18)
+    ax.legend(fontsize=16, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
 def plot_model_evidences(labels, log10Zs, log10Zerrs, figsize=(10, 6)):
     log10Zs = np.asarray(log10Zs, dtype=float)
     errs = np.asarray([0.0 if e is None else e for e in log10Zerrs], dtype=float)
@@ -800,6 +828,38 @@ def main():
                     plt.close(fig)
             except (KeyError, ImportError) as exc:
                 print(f"  [sky] skipped sky plot for {tag}: {exc}")
+
+        # Multitracer host-fraction summaries — derive the per-catalog mixture
+        # weights w_1..w_K from the sampled sticks fcat_2..fcat_K with the
+        # decoder's own stick-breaking construction, so the interpretable
+        # estimand appears in the outputs without manual post-processing.
+        n_catalogs = int(settings.get("n_catalogs", 1) or 1)
+        fcat_cols = [f"fcat_{m}" for m in range(2, n_catalogs + 1)]
+        if (n_catalogs >= 2 and run_labels
+                and all(c in run_labels for c in fcat_cols)):
+            from darksirens.inference.pop_extractor import catalog_sticks_to_weights
+            tag = os.path.basename(os.path.normpath(run_dir)) or "run"
+            sticks = np.stack(
+                [_column(samples, run_labels, c) for c in fcat_cols], axis=1
+            )
+            weights = np.asarray(catalog_sticks_to_weights(sticks))
+            is_field = (
+                str(settings.get("catalog_sky_weighting", "conditional")) == "field"
+            )
+            qs = np.percentile(weights, [5.0, 50.0, 95.0], axis=0)
+            name = "host fraction" if is_field else "weight"
+            for k in range(n_catalogs):
+                print(f"  catalog {name} w_{k + 1} (5/50/95%) = "
+                      f"{qs[0, k]:.3f}/{qs[1, k]:.3f}/{qs[2, k]:.3f}")
+            if not is_field:
+                print("  [multitracer] NOTE: this run used the conditional "
+                      "normalizer, so w_k is a per-pixel z-shape preference "
+                      "weight, NOT a host fraction (field convention).")
+            fig = plot_catalog_weight_posteriors(weights, is_field=is_field)
+            fig.savefig(out(f"catalog_weights_{tag}.pdf"),
+                        bbox_inches="tight", dpi=300)
+            plt.close(fig)
+            np.save(out(f"catalog_weights_{tag}.npy"), weights)
 
         labels.append(settings.get("model_name", os.path.basename(os.path.normpath(run_dir))))
         del p_m1, p_m2, p_q, p_z, p_chi, p_m1m2
