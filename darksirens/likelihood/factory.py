@@ -122,6 +122,11 @@ def _make_mixture_likelihood(
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
+    _mnbc = getattr(opts, "mark_names_by_catalog", None)
+    mark_names_all = (
+        tuple(tuple(names or ()) for names in _mnbc) if _mnbc
+        else (mark_names,) + ((),) * (n_catalogs - 1)
+    )
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
     max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
@@ -140,6 +145,7 @@ def _make_mixture_likelihood(
                 field_occupied_pixels=None, field_lss_q=None,
                 field_lss_q_empty_sum=None, field_delta_g=None,
                 field_lss_q_members=None, field_lss_q_empty_sum_members=None,
+                field_mark_z=None, field_mark_w=None, field_mark_values=None,
             )
 
         def _maybe(key, dtype=None):
@@ -161,6 +167,9 @@ def _make_mixture_likelihood(
             field_delta_g=_maybe("field_delta_g"),
             field_lss_q_members=_maybe("field_lss_q_members"),
             field_lss_q_empty_sum_members=_maybe("field_lss_q_empty_sum_members"),
+            field_mark_z=_maybe("field_mark_z"),
+            field_mark_w=_maybe("field_mark_w"),
+            field_mark_values=_maybe("field_mark_values"),
         )
 
     # Shared (catalog-independent) GW / selection physics arrays.
@@ -244,6 +253,29 @@ def _make_mixture_likelihood(
         lss_qm_sel_k = _compact_lss_members_for(views, views.unique_pixels_sel)
         field_k = _bundle_field_inputs(bundle)
 
+        def _bundle_marks(unique_pixels):
+            # Gather this bundle's full-sky z-centred mark tables (loaded by
+            # load_multitracer_catalog_bundles) to the view's compact rows,
+            # mirroring make_likelihood._compact_marks.
+            from darksirens.marks import MARK_FIELDS as _MARK_FIELDS
+
+            out = {}
+            for field in _MARK_FIELDS.values():
+                full = bundle.get(field)
+                if full is None:
+                    out[field] = None
+                else:
+                    full_j = jnp.asarray(full)
+                    arr = (
+                        full_j if unique_pixels is None
+                        else full_j[jnp.asarray(unique_pixels)]
+                    )
+                    out[field] = barrier(arr)
+            return out
+
+        marks_pe_k = _bundle_marks(views.unique_pixels_pe)
+        marks_sel_k = _bundle_marks(views.unique_pixels_sel)
+
         em_catalogs_pe.append(EMCatalog(
             apix=apix_k,
             zgals=views.zgals_pe_catalog,
@@ -260,6 +292,10 @@ def _make_mixture_likelihood(
             lss_completion_logq=lss_q_pe_k,
             lss_completion_logq_members=lss_qm_pe_k,
             lss_completion_indexing=lss_idx_pe_k,
+            mark_logmstar=marks_pe_k["mark_logmstar"],
+            mark_logssfr=marks_pe_k["mark_logssfr"],
+            mark_metallicity=marks_pe_k["mark_metallicity"],
+            mark_color=marks_pe_k["mark_color"],
             **field_k,
         ))
         em_catalogs_sel.append(EMCatalog(
@@ -278,6 +314,10 @@ def _make_mixture_likelihood(
             lss_completion_logq=lss_q_sel_k,
             lss_completion_logq_members=lss_qm_sel_k,
             lss_completion_indexing=lss_idx_sel_k,
+            mark_logmstar=marks_sel_k["mark_logmstar"],
+            mark_logssfr=marks_sel_k["mark_logssfr"],
+            mark_metallicity=marks_sel_k["mark_metallicity"],
+            mark_color=marks_sel_k["mark_color"],
             **field_k,
         ))
         pe_pixel_cols.append(jnp.asarray(views.sample_to_unique_pe, dtype=jnp.int32))
@@ -335,11 +375,12 @@ def _make_mixture_likelihood(
                 surveys,
                 pop_params,
                 sky_params,
-                mark_params,
+                mark_params_all,
                 log_w,
             ) = parameter_decoder.decode_mixture(coord)
             survey_0 = surveys[0]
             mixture_surveys = tuple(surveys[1:])
+            mark_params = mark_params_all[0]
         else:
             # K = 1 bundle source: the plain decoder (no sticks, no per-catalog
             # blocks) -- the same parameters a flat-data K=1 run samples.
@@ -348,6 +389,7 @@ def _make_mixture_likelihood(
             )
             mixture_surveys = ()
             log_w = None
+            mark_params_all = (mark_params,)
         if len(pop_params) != len(parameter_decoder.pop_labels):
             raise ValueError(
                 "Population parameter length mismatch before likelihood "
@@ -376,12 +418,11 @@ def _make_mixture_likelihood(
             mark_model=mark_model,
             mark_params=mark_params,
             mark_names=mark_names,
+            mark_params_all=tuple(mark_params_all),
+            mark_names_all=mark_names_all,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
-            # Forward lss_marginalize so core's K>=2 NotImplementedError guard
-            # is reachable for direct make_likelihood callers too (the CLI has
-            # its own _fatal guard).
             lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
             n_catalogs=n_catalogs,
             mixture_surveys=mixture_surveys,

@@ -342,23 +342,29 @@ def test_guard_universe_model_must_be_dark_sirens():
         ll(jnp.asarray([_mid_pop(), 0.3]))
 
 
-def test_guard_mark_model_not_supported():
+def test_marked_mixture_requires_per_catalog_mark_data():
+    """Marks at K>=2 are SUPPORTED via the per-catalog eta blocks
+    (tests/test_marks_multitracer.py), but a catalog whose bundle carries no
+    mark arrays for its selected marks fails with the clear missing-mark
+    error rather than a silent h=1 fallback."""
     _pop_lower, _pop_upper, _pop_labels, pop_fid, sampled, fixed = _pop_bits()
     data = dict(_shared_physics())
     data["apix"] = APIX1
     data["catalogs"] = [_bundle(APIX1, Z_A), _bundle(APIX1, Z_B)]
     opts = _base_opts(
         n_catalogs=2, mark_model="loglinear", mark_names=("logmstar",),
+        mark_names_by_catalog=(("logmstar",), ("logmstar",)),
     )
     labels, lower, upper, *_ = build_parameter_space(
         "powerlaw+peak", False, True, True,
         prior_overrides={sampled: [float(_pop_lower[0]), float(_pop_upper[0])]},
         fixed_parameter_values=fixed, universe_model="dark_sirens", n_catalogs=2,
         mark_model="loglinear", mark_names=("logmstar",),
+        mark_names_by_catalog=(("logmstar",), ("logmstar",)),
     )
     coord = jnp.asarray(0.5 * (np.asarray(lower) + np.asarray(upper)))
     ll = make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="mark"):
         ll(coord)
 
 

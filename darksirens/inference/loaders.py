@@ -11,6 +11,7 @@ from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import (
     build_field_lss_q_inputs,
     build_field_lss_q_member_inputs,
+    build_field_mark_inputs,
     build_field_normalization_inputs,
     compute_lss_overdensity,
 )
@@ -174,6 +175,31 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         )
         lss = maybe_load_lss_completion(lss_ns, zgrid=zgrid)
 
+        # Per-catalog galaxy marks (marked-host model): load + z-centre THIS
+        # catalog's selected marks from its own file, keyed by dataset name
+        # (mark_logmstar, ...).  The factory gathers them to the compact view
+        # rows; a catalog with an empty mark list runs the plain galaxy-count
+        # host model (h == 1) inside the mixture.
+        _mnbc = getattr(opts, "mark_names_by_catalog", None)
+        mark_names_k = (
+            tuple(_mnbc[i] or ()) if _mnbc and i < len(_mnbc) else ()
+        )
+        centred_marks_k = {}
+        if (getattr(opts, "mark_model", "none") not in (None, "none")
+                and mark_names_k):
+            from darksirens.catalogs.marks import load_and_center_survey_marks
+            from darksirens.marks import MARK_FIELDS
+
+            centred = load_and_center_survey_marks(path, zgals, ngals)
+            for name in mark_names_k:
+                key = MARK_FIELDS[name]
+                if key not in centred:
+                    raise ValueError(
+                        f"Catalog {i + 1} ({path}) does not provide the "
+                        f"selected mark '{name}' (dataset {key})."
+                    )
+                centred_marks_k[name] = centred[key]
+
         bundle = dict(
             nside=nside,
             apix=apix,
@@ -186,6 +212,9 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             unique_pixels_sel=up_se, sample_to_unique_sel=s2u_se,
         )
         bundle.update(lss)  # lss_completion_logq / _logq_members / _indexing
+        from darksirens.marks import MARK_FIELDS as _MF
+        for _name, _tbl in centred_marks_k.items():
+            bundle[_MF[_name]] = _tbl
 
         # FIELD-convention sky weighting: precompute this catalog's survey-global
         # normalization inputs from the FULL-sky rows (before they are dropped),
@@ -219,6 +248,13 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
                 )
                 bundle["field_lss_q_members"] = qm_occ
                 bundle["field_lss_q_empty_sum_members"] = qm_empty_sum
+            if centred_marks_k:
+                fz, fw, fvals = build_field_mark_inputs(
+                    zgals, wgals, ngals, centred_marks_k, mark_names_k
+                )
+                bundle["field_mark_z"] = fz
+                bundle["field_mark_w"] = fw
+                bundle["field_mark_values"] = fvals
 
         # Per-catalog completion validation (dry run) needs each catalog's own
         # per-sample GLOBAL pixel indices, which compaction otherwise discards.

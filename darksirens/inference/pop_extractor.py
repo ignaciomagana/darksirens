@@ -190,6 +190,10 @@ def make_pop_extractor(settings: dict):
         # fixed_parameter_values (KeyError) for any K>=2 chain.
         n_catalogs             = int(settings.get("n_catalogs", 1) or 1),
         lss_completion_active  = bool(settings.get("lss_completion_active", False)),
+        mark_names_by_catalog  = (
+            tuple(tuple(n) for n in settings["mark_names_by_catalog"])
+            if settings.get("mark_names_by_catalog") else None
+        ),
     )
 
     label_to_coord_idx = {label: idx for idx, label in enumerate(labels)}

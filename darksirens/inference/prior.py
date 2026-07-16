@@ -156,6 +156,7 @@ def build_parameter_space(
     mark_names=(),
     n_catalogs: int = 1,
     lss_completion_active: bool = False,
+    mark_names_by_catalog=None,
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
@@ -215,11 +216,43 @@ def build_parameter_space(
 
     # --- Marks (BBH-host efficiency eta block) ---
     # Appended after the sky block; ``none`` contributes no parameters.  The
-    # eta coefficients are one per available mark (``mark_names``).
-    mark_lower, mark_upper, mark_labels, mark_kinds, _mark_latex = mark_model_prior_parser(
-        mark_model, mark_names
+    # eta coefficients are one per available mark, PER CATALOG:
+    # ``mark_names_by_catalog`` orders catalog 1 first (unsuffixed ``eta_<m>``
+    # labels, identical to the historical K=1 block) then catalogs 2..K
+    # (suffixed ``eta_<m>_c{k}`` blocks appended at the very end so every
+    # pre-existing label index is untouched).  The flat ``mark_names`` remains
+    # the K=1 / catalog-1 spelling.
+    if mark_names_by_catalog is None:
+        mark_names_by_catalog = (tuple(mark_names),) + ((),) * (n_catalogs - 1)
+    mark_names_by_catalog = tuple(
+        tuple(names) for names in mark_names_by_catalog
+    )
+    if len(mark_names_by_catalog) < n_catalogs:
+        mark_names_by_catalog = mark_names_by_catalog + ((),) * (
+            n_catalogs - len(mark_names_by_catalog)
+        )
+    def _mark_parser_for(names):
+        # A catalog with no marks contributes no eta parameters: dispatch to
+        # the null model rather than instantiating LogLinearMarks(()) (which
+        # rejects an empty mark list by design).
+        return mark_model_prior_parser(
+            mark_model if names else "none", names
+        )
+
+    mark_lower, mark_upper, mark_labels, mark_kinds, _mark_latex = (
+        _mark_parser_for(mark_names_by_catalog[0])
     )
     mark_lower, mark_upper = list(mark_lower), list(mark_upper)
+
+    # Per-catalog suffixed eta blocks (catalogs 2..K).
+    mark_blocks_ck = []
+    for _k in range(2, n_catalogs + 1):
+        _lo, _hi, _lbls, _knds, _ = _mark_parser_for(
+            mark_names_by_catalog[_k - 1]
+        )
+        mark_blocks_ck.append((
+            [f"{lbl}_c{_k}" for lbl in _lbls], list(_lo), list(_hi), list(_knds)
+        ))
 
     # Make sure all prior override keys are valid parameter labels
     known_labels = (
@@ -232,6 +265,8 @@ def build_parameter_space(
         for k in range(2, n_catalogs + 1):
             known_labels |= {f"{lbl}_c{k}" for lbl in survey_labels}
         known_labels |= {f"fcat_{m}" for m in range(2, n_catalogs + 1)}
+        for _lbls, _lo, _hi, _knds in mark_blocks_ck:
+            known_labels |= set(_lbls)
     unknown = [k for k in prior_overrides.keys() if k not in known_labels]
     if unknown:
         raise KeyError(
@@ -446,6 +481,17 @@ def build_parameter_space(
     upper += sampled_mark_upper
     n_mark_eff = len(sampled_mark_labels)
 
+    # Per-catalog suffixed eta blocks (catalogs 2..K), appended LAST so the
+    # K=1 label layout (and every earlier index) is untouched.
+    for _lbls, _lo, _hi, _knds in mark_blocks_ck:
+        _s_lbls, _s_lo, _s_hi = filter_fixed_parameters(
+            _lbls, _lo, _hi, fixed_parameter_values
+        )
+        labels += _s_lbls
+        lower += _s_lo
+        upper += _s_hi
+        n_mark_eff += len(_s_lbls)
+
     # Per-parameter prior family aligned to the final ``labels`` ordering.
     # Cosmology and survey blocks are uniform; the population block carries the
     # kinds reported by the parser (keyed by label, matching the codebase's
@@ -459,6 +505,9 @@ def build_parameter_space(
         kind_map[lbl] = knd
     for lbl, knd in zip(mark_labels, mark_kinds):
         kind_map[lbl] = knd
+    for _lbls, _lo, _hi, _knds in mark_blocks_ck:
+        for lbl, knd in zip(_lbls, _knds):
+            kind_map[lbl] = knd
     # Multitracer: mixture-weight sticks carry a Beta(1, K-m+1) prior; the
     # suffixed survey labels fall through to the default uniform kind via .get().
     if n_catalogs >= 2:

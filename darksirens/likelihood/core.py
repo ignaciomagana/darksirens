@@ -96,13 +96,19 @@ def _require_field_mode_scope(
             "catalog_sky_weighting='field' is not supported with weak lensing."
         )
     for cat in catalogs:
-        if (mark_model not in (None, "none")
+        cat_has_marks = any(
+            getattr(cat, name) is not None
+            for name in (
+                "mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color",
+            )
+        )
+        if (mark_model not in (None, "none") and cat_has_marks
                 and (cat.field_mark_values is None
                      or cat.field_mark_z is None
                      or cat.field_mark_w is None)):
             raise ValueError(
                 "catalog_sky_weighting='field' with a marked-host model "
-                "requires the flat FULL-SKY mark inputs on every catalog "
+                "requires the flat FULL-SKY mark inputs on every MARKED catalog "
                 "(field_mark_z / field_mark_w / field_mark_values); build them "
                 "via build_field_mark_inputs."
             )
@@ -173,6 +179,7 @@ def _require_field_mode_scope(
         "sky_model",
         "mark_model",
         "mark_names",
+        "mark_names_all",
         "wl_backend",
         "wl_selection",
         "lss_marginalize",
@@ -229,6 +236,13 @@ def darksiren_log_likelihood(
     mixture_em_catalogs_pe: tuple = (),
     mixture_em_catalogs_sel: tuple = (),
     mixture_log_weights: jnp.ndarray | None = None,
+    # Per-catalog marked-host operands.  ``mark_names_all`` is a STATIC tuple
+    # of per-catalog mark-name tuples; ``mark_params_all`` the matching traced
+    # eta vectors.  Empty (default) = derive from the single-catalog
+    # ``mark_names`` / ``mark_params`` (catalog 1 marked, catalogs 2..K
+    # unmarked) -- the exact legacy semantics.
+    mark_params_all: tuple = (),
+    mark_names_all: tuple = (),
     # --- catalog sky-weighting convention (dark_sirens only) ----------------
     # "conditional" (default): per-pixel normalizer Z[pix] -- bit-identical
     # legacy behaviour.  "field": survey-global normalizer so the mixture weight
@@ -370,9 +384,11 @@ def darksiren_log_likelihood(
             raise NotImplementedError(
                 "Weak lensing is not supported with the K-catalog mixture."
             )
-        if mark_model not in (None, "none"):
+        if mark_model not in (None, "none") and not mark_names_all:
             raise NotImplementedError(
-                "Marked-host models are not supported with the K-catalog mixture."
+                "Marked-host models with the K-catalog mixture require the "
+                "per-catalog mark operands (mark_names_all / mark_params_all); "
+                "the single-catalog mark_names/mark_params spelling is K=1-only."
             )
         if sky_model != "isotropic":
             raise NotImplementedError(
@@ -398,6 +414,28 @@ def darksiren_log_likelihood(
     surveys_all = (survey,) + tuple(mixture_surveys)
     catalogs_pe_all = (em_catalog_pe,) + tuple(mixture_em_catalogs_pe)
     catalogs_sel_all = (em_catalog_sel,) + tuple(mixture_em_catalogs_sel)
+
+    # Per-catalog mark operands: default to the legacy single-catalog spelling
+    # (catalog 1 carries the marks, catalogs 2..K are unmarked).
+    if not mark_names_all:
+        mark_names_all = (tuple(mark_names),) + ((),) * (n_catalogs - 1)
+    mark_names_all = tuple(tuple(names) for names in mark_names_all)
+    if len(mark_names_all) != n_catalogs:
+        raise ValueError(
+            f"mark_names_all must have n_catalogs={n_catalogs} entries; got "
+            f"{len(mark_names_all)}."
+        )
+    if not mark_params_all:
+        mark_params_all = (mark_params,) + (None,) * (n_catalogs - 1)
+    if len(mark_params_all) != n_catalogs:
+        raise ValueError(
+            f"mark_params_all must have n_catalogs={n_catalogs} entries; got "
+            f"{len(mark_params_all)}."
+        )
+
+    def _mark_model_for(k):
+        # A catalog with no marks runs the plain galaxy-count host model (h=1).
+        return mark_model if mark_names_all[k] else "none"
 
     def _pix_col(pix, k):
         # GW pixel columns: (N,) for a single catalog (and every direct K=1
@@ -430,7 +468,8 @@ def darksiren_log_likelihood(
     prior_states_univ = tuple(
         prepare_redshift_prior_state(
             pe_model, cosmo, surveys_all[k], catalogs_pe_all[k],
-            mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
+            mark_model=_mark_model_for(k), mark_params=mark_params_all[k],
+            mark_names=mark_names_all[k],
             materialize_state=materialize_redshift_prior_state,
             catalog_sky_weighting=catalog_sky_weighting,
         )
@@ -439,7 +478,8 @@ def darksiren_log_likelihood(
     prior_states_sel = tuple(
         prepare_redshift_prior_state(
             selection_model, cosmo, surveys_all[k], catalogs_sel_all[k],
-            mark_model=mark_model, mark_params=mark_params, mark_names=mark_names,
+            mark_model=_mark_model_for(k), mark_params=mark_params_all[k],
+            mark_names=mark_names_all[k],
             materialize_state=materialize_redshift_prior_state,
             catalog_sky_weighting=catalog_sky_weighting,
         )

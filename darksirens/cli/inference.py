@@ -877,8 +877,53 @@ def main():
                    "have no K>=2 mixture.")
         if getattr(opts, "use_LSS", False):
             _fatal("--use_LSS is not supported with a multi-catalog mixture.")
+        # Marked-host models compose with the mixture via PER-CATALOG eta
+        # blocks (eta_<mark> for catalog 1, eta_<mark>_c{k} for catalogs
+        # 2..K).  Resolve each catalog's marks from its FILE's datasets here
+        # (pre-load), so the bundle loader and the parameter space see the
+        # same ordered per-catalog lists.
         if getattr(opts, "mark_model", "none") not in (None, "none"):
-            _fatal("--mark_model is not supported with a multi-catalog mixture.")
+            import h5py as _h5py
+            from darksirens.marks import MARK_FIELDS as _MF_K2
+
+            _req = tuple(
+                s.strip() for s in (opts.marks or "").split(",") if s.strip()
+            ) or None
+            _by_catalog = []
+            for _p in opts.survey_paths:
+                try:
+                    with _h5py.File(_p, "r") as _f:
+                        _avail = tuple(
+                            n for n, ds in _MF_K2.items() if ds in _f
+                        )
+                except OSError as _exc:
+                    _fatal(f"Cannot open --survey_path '{_p}' to resolve "
+                           f"galaxy marks: {_exc}")
+                _by_catalog.append(
+                    tuple(n for n in (_req or _avail) if n in _avail)
+                )
+            if _req:
+                _missing_everywhere = [
+                    m for m in _req
+                    if all(m not in names for names in _by_catalog)
+                ]
+                if _missing_everywhere:
+                    _fatal(f"--marks requested {_missing_everywhere} but no "
+                           "catalog provides them.")
+            if all(not names for names in _by_catalog):
+                _fatal("--mark_model loglinear requires per-galaxy marks, but "
+                       "none of the catalogs provide any (expected datasets "
+                       "like MARK_LOGMSTAR/MARK_LOGSSFR).")
+            opts.mark_names_by_catalog = tuple(_by_catalog)
+            opts.mark_names = _by_catalog[0]
+            for _i, _names in enumerate(_by_catalog, start=1):
+                if _names:
+                    print(f"  [multitracer] catalog {_i} marks: "
+                          f"{', '.join(_names)}")
+                else:
+                    print(f"  [multitracer] catalog {_i} has NO selected "
+                          "marks -> plain galaxy-count host model (h = 1) "
+                          "inside the mixture.")
         if opts.counterpart is not None:
             _fatal("--counterpart is not supported with a multi-catalog mixture.")
         if getattr(opts, "sky_model", "isotropic") != "isotropic":
@@ -1304,19 +1349,24 @@ def main():
     # present in the catalog, optionally narrowed by --marks.  Stored on opts so
     # the decoder/likelihood see the same ordered list as the parameter space.
     from darksirens.marks import MARK_FIELDS as _MARK_FIELDS
-    _present_marks = tuple(n for n in _MARK_FIELDS if data.get(_MARK_FIELDS[n]) is not None)
-    if opts.marks:
-        _req = tuple(s.strip() for s in opts.marks.split(",") if s.strip())
-        _missing = [m for m in _req if m not in _present_marks]
-        if _missing:
-            _fatal(f"--marks requested {_missing} but the catalog provides "
-                   f"{list(_present_marks)}.")
-        opts.mark_names = _req
-    else:
-        opts.mark_names = _present_marks
-    if opts.mark_model != "none" and not opts.mark_names:
-        _fatal("--mark_model loglinear requires per-galaxy marks, but the catalog "
-               "provides none (expected datasets like LOGMSTAR/LOGSSFR).")
+    if opts.n_catalogs == 1:
+        _present_marks = tuple(n for n in _MARK_FIELDS if data.get(_MARK_FIELDS[n]) is not None)
+        if opts.marks:
+            _req = tuple(s.strip() for s in opts.marks.split(",") if s.strip())
+            _missing = [m for m in _req if m not in _present_marks]
+            if _missing:
+                _fatal(f"--marks requested {_missing} but the catalog provides "
+                       f"{list(_present_marks)}.")
+            opts.mark_names = _req
+        else:
+            opts.mark_names = _present_marks
+        if opts.mark_model != "none" and not opts.mark_names:
+            _fatal("--mark_model loglinear requires per-galaxy marks, but the catalog "
+                   "provides none (expected datasets like LOGMSTAR/LOGSSFR).")
+        opts.mark_names_by_catalog = (tuple(opts.mark_names),)
+    # K >= 2: opts.mark_names / opts.mark_names_by_catalog were resolved
+    # PRE-LOAD from each catalog file's datasets (see the multitracer guard
+    # block); the flat data dict carries no top-level marks for a mixture.
 
     _section("Building parameter space")
     # A Q_LSS completion table (explicit --lss_completion path or an in-catalog
@@ -1354,6 +1404,7 @@ def main():
         mark_names             = opts.mark_names,
         n_catalogs             = opts.n_catalogs,
         lss_completion_active  = lss_completion_active,
+        mark_names_by_catalog  = getattr(opts, "mark_names_by_catalog", None),
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
