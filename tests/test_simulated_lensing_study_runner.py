@@ -618,3 +618,31 @@ def test_dry_run_case_g_uses_uniform_observation_times(tmp_path):
     _workdir_b, plan_b = _run_dry_plan(tmp_path, cases=["B_true_pairs_clean_graph"], workdir_name="study_b")
     gen_b = " ".join(plan_b["cases"]["B_true_pairs_clean_graph"]["generate"])
     assert "--observation-times placeholder" in gen_b
+
+
+def test_injection_proposal_reaches_generator_command(tmp_path):
+    """mock.injection_proposal must be threaded from the resolved config into
+    the generator command. The paper profile declares "matched" (the broad
+    proposal collapses selection Neff at paper scale); the cfg flattening
+    used to drop the key, so every generated selection file silently fell
+    back to the broad campaign."""
+    workdir = tmp_path / "study_paper"
+    rc = main([
+        "--workdir", str(workdir), "--profile", "paper", "--dry_run", "true",
+        "--override", 'study.cases=["B_true_pairs_clean_graph"]',
+    ])
+    assert rc == 0
+    plan = json.loads((workdir / "validation_plan.json").read_text())
+    gen = plan["cases"]["B_true_pairs_clean_graph"]["generate"]
+    assert gen[gen.index("--injection-proposal") + 1] == "matched"
+    # tiny profile keeps the broad default...
+    _workdir_t, plan_t = _run_dry_plan(tmp_path, cases=["B_true_pairs_clean_graph"])
+    gen_t = plan_t["cases"]["B_true_pairs_clean_graph"]["generate"]
+    assert gen_t[gen_t.index("--injection-proposal") + 1] == "broad"
+    # ...and an explicit override still wins.
+    _workdir_o, plan_o = _run_dry_plan(
+        tmp_path, cases=["B_true_pairs_clean_graph"], workdir_name="study_override",
+        overrides=('mock.injection_proposal="matched"',),
+    )
+    gen_o = plan_o["cases"]["B_true_pairs_clean_graph"]["generate"]
+    assert gen_o[gen_o.index("--injection-proposal") + 1] == "matched"
