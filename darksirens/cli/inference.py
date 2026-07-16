@@ -879,7 +879,11 @@ def main():
         # blocks (eta_<mark> for catalog 1, eta_<mark>_c{k} for catalogs
         # 2..K).  Resolve each catalog's marks from its FILE's datasets here
         # (pre-load), so the bundle loader and the parameter space see the
-        # same ordered per-catalog lists.
+        # same ordered per-catalog lists.  mark_model == none still needs the
+        # empty defaults (the K=1 data-based resolution below is skipped for
+        # a mixture).
+        opts.mark_names = ()
+        opts.mark_names_by_catalog = ((),) * opts.n_catalogs
         if getattr(opts, "mark_model", "none") not in (None, "none"):
             import h5py as _h5py
             from darksirens.marks import MARK_FIELDS as _MF_K2
