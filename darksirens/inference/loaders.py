@@ -10,6 +10,7 @@ from darksirens.catalogs.io import load_survey
 from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import (
     build_field_lss_q_inputs,
+    build_field_lss_q_member_inputs,
     build_field_normalization_inputs,
     compute_lss_overdensity,
 )
@@ -162,13 +163,14 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             up_se, s2u_se, zse, dzse, wse, nse,
         ) = _compact_catalog_for_pixels(pixels_sel, zgals, dzgals, wgals, ngals)
 
-        # Per-catalog deterministic Q_LSS (ensemble marginalisation is off for the
-        # mixture); a private namespace keeps the single-catalog loader contract.
+        # Per-catalog Q_LSS (deterministic table + optional ensemble when
+        # --lss_marginalize); a private namespace keeps the single-catalog
+        # loader contract.
         lss_ns = SimpleNamespace(
             survey_path=path,
             lss_completion=_lss_for(i),
             universe_model=opts.universe_model,
-            lss_marginalize=False,
+            lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
         )
         lss = maybe_load_lss_completion(lss_ns, zgrid=zgrid)
 
@@ -210,6 +212,13 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
                 )
                 bundle["field_lss_q"] = q_occ
                 bundle["field_lss_q_empty_sum"] = q_empty_sum
+            logq_members = bundle.get("lss_completion_logq_members")
+            if logq_members is not None:
+                qm_occ, qm_empty_sum = build_field_lss_q_member_inputs(
+                    np.asarray(logq_members), field.occupied_pixels, npix
+                )
+                bundle["field_lss_q_members"] = qm_occ
+                bundle["field_lss_q_empty_sum_members"] = qm_empty_sum
 
         # Per-catalog completion validation (dry run) needs each catalog's own
         # per-sample GLOBAL pixel indices, which compaction otherwise discards.
@@ -218,6 +227,24 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             bundle["pixels_sel_full"] = pixels_sel
 
         bundles.append(bundle)
+
+    # SHARED-member-index contract: the K-catalog mixture marginalizes over ONE
+    # member index (member m of every catalog samples the same LSS
+    # realization), so the per-catalog ensembles must have equal M.
+    if bool(getattr(opts, "lss_marginalize", False)) and len(bundles) >= 2:
+        member_counts = {}
+        for path, bundle in zip(survey_paths, bundles):
+            members = bundle.get("lss_completion_logq_members")
+            if members is not None:
+                member_counts[path] = int(np.asarray(members).shape[0])
+        if len(set(member_counts.values())) > 1:
+            detail = ", ".join(f"{p}: M={m}" for p, m in member_counts.items())
+            raise ValueError(
+                "--lss_marginalize with a K-catalog mixture requires EQUAL "
+                "ensemble sizes across catalogs (a shared member index over "
+                f"matched LSS realizations); got {detail}. Rebuild the Q "
+                "ensembles with the same --n-members from matched realizations."
+            )
 
     return bundles
 

@@ -414,6 +414,146 @@ def test_field_conditional_shift_identity_under_modulation(modulation):
 
 
 # ---------------------------------------------------------------------------
+# Q-ensemble marginalization: per-member field Z + shared member index at K>=2
+# ---------------------------------------------------------------------------
+
+from darksirens.redshift.completion import (
+    build_field_lss_q_member_inputs,
+    field_global_log_Z_members,
+)
+
+
+def _logq_members_table(m=3, npix=12):
+    base = _logq_table(npix)
+    return np.stack([base * s for s in np.linspace(0.6, 1.4, m)], axis=0)
+
+
+def test_field_Z_members_matches_per_member_scalar():
+    """field_global_log_Z_members[m] == field_global_log_Z with member m's Q
+    rows installed as THE deterministic table -- one normalizer per member."""
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    cosmo, survey = _cosmo(), _survey()
+    logq_m = _logq_members_table()
+    cat = _catalog(zgals, dzgals, wgals, ngals, logq=logq_m[0])
+    occupied = np.asarray([1, 3, 4, 7])
+    qm_occ, qm_empty = build_field_lss_q_member_inputs(logq_m, occupied, 12)
+    cat = cat._replace(
+        field_lss_q_members=qm_occ, field_lss_q_empty_sum_members=qm_empty,
+        lss_completion_logq_members=jnp.asarray(logq_m),
+    )
+    per_member = np.asarray(field_global_log_Z_members(cosmo, survey, cat))
+    assert per_member.shape == (3,)
+    for m in range(3):
+        cat_m = _catalog(zgals, dzgals, wgals, ngals, logq=logq_m[m])
+        expected = float(field_global_log_Z(cosmo, survey, cat_m))
+        np.testing.assert_allclose(per_member[m], expected, rtol=1e-12)
+
+
+def _ensemble_bundle(logq_members, nsamp=2, n_sel=8):
+    """Bundle carrying a Q ensemble (mean table = member mean) + field inputs
+    incl. the per-member normalizer rows."""
+    logq_members = np.asarray(logq_members)
+    bundle = _field_bundle(logq=logq_members.mean(axis=0), nsamp=nsamp, n_sel=n_sel)
+    occ = np.asarray(bundle["field_occupied_pixels"])
+    qm_occ, qm_empty = build_field_lss_q_member_inputs(logq_members, occ, 12)
+    bundle["lss_completion_logq_members"] = jnp.asarray(logq_members)
+    bundle["field_lss_q_members"] = qm_occ
+    bundle["field_lss_q_empty_sum_members"] = qm_empty
+    return bundle
+
+
+def test_k2_duplicated_ensemble_equals_k1_ensemble_under_field():
+    """K=2 (A+ens, A+ens) with lss_marginalize == K=1 (A+ens) with
+    lss_marginalize at any fcat_2 (the duplicated-catalog identity must
+    commute with the shared member index)."""
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    logq_m = _logq_members_table()
+
+    data1 = dict(_shared_physics())
+    data1["apix"] = hp.nside2pixarea(1)
+    data1["catalogs"] = [_ensemble_bundle(logq_m)]
+    opts1 = SimpleNamespace(
+        pop_model="powerlaw+peak", universe_model="dark_sirens",
+        sel_batch_size=None, fix_cosmology=True, fix_population=False,
+        fix_survey=True, prior_overrides=overrides,
+        fixed_parameter_values=fixed, complete_empty_pixel_policy="volume",
+        bright_siren_sky_marginalized=False,
+        catalog_sky_weighting="field", n_catalogs=1, lss_marginalize=True,
+    )
+    from darksirens.likelihood.factory import make_likelihood as _mk
+    val_k1 = float(_mk(opts1, data1, pop_fid, fixed_parameter_values=fixed)(
+        jnp.asarray([mid])))
+    assert np.isfinite(val_k1)
+
+    data2 = dict(_shared_physics())
+    data2["apix"] = hp.nside2pixarea(1)
+    data2["catalogs"] = [_ensemble_bundle(logq_m), _ensemble_bundle(logq_m)]
+    opts2 = SimpleNamespace(**{**vars(opts1), "n_catalogs": 2})
+    val_k2 = float(_mk(opts2, data2, pop_fid, fixed_parameter_values=fixed)(
+        jnp.asarray([mid, 0.37])))
+    assert abs(val_k2 - val_k1) <= 1e-12
+
+
+def test_k2_marginalized_equals_logmeanexp_of_member_runs():
+    """K=2 lss_marginalize == logsumexp_m[ K=2 deterministic with member m's Q
+    as THE table (numerator AND field normalizer) ] - log M: the shared-member
+    construction is exactly the member average of coherent per-member runs."""
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    logq_m = _logq_members_table()
+    coord = jnp.asarray([mid, 0.37])
+
+    # _bundle_likelihood does not set lss_marginalize; build opts explicitly.
+    data = dict(_shared_physics())
+    data["apix"] = hp.nside2pixarea(1)
+    data["catalogs"] = [_ensemble_bundle(logq_m), _ensemble_bundle(logq_m)]
+    opts = SimpleNamespace(
+        pop_model="powerlaw+peak", universe_model="dark_sirens",
+        sel_batch_size=None, fix_cosmology=True, fix_population=False,
+        fix_survey=True, prior_overrides=overrides,
+        fixed_parameter_values=fixed, complete_empty_pixel_policy="volume",
+        bright_siren_sky_marginalized=False,
+        catalog_sky_weighting="field", n_catalogs=2, lss_marginalize=True,
+    )
+    from darksirens.likelihood.factory import make_likelihood as _mk
+    marg = float(_mk(opts, data, pop_fid, fixed_parameter_values=fixed)(coord))
+
+    member_vals = []
+    for m in range(logq_m.shape[0]):
+        member_vals.append(_bundle_likelihood(
+            [_field_bundle(logq=logq_m[m]), _field_bundle(logq=logq_m[m])],
+            fixed, pop_fid, overrides,
+        )(coord))
+    member_vals = np.asarray([float(v) for v in member_vals])
+    expected = float(
+        np.log(np.mean(np.exp(member_vals - member_vals.max())))
+        + member_vals.max()
+    )
+    np.testing.assert_allclose(marg, expected, atol=1e-9, rtol=0)
+
+
+def test_unequal_member_counts_raise_at_k2():
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    data = dict(_shared_physics())
+    data["apix"] = hp.nside2pixarea(1)
+    data["catalogs"] = [
+        _ensemble_bundle(_logq_members_table(m=2)),
+        _ensemble_bundle(_logq_members_table(m=3)),
+    ]
+    opts = SimpleNamespace(
+        pop_model="powerlaw+peak", universe_model="dark_sirens",
+        sel_batch_size=None, fix_cosmology=True, fix_population=False,
+        fix_survey=True, prior_overrides=overrides,
+        fixed_parameter_values=fixed, complete_empty_pixel_policy="volume",
+        bright_siren_sky_marginalized=False,
+        catalog_sky_weighting="field", n_catalogs=2, lss_marginalize=True,
+    )
+    from darksirens.likelihood.factory import make_likelihood as _mk
+    ll = _mk(opts, data, pop_fid, fixed_parameter_values=fixed)
+    with pytest.raises(ValueError, match="same M"):
+        ll(jnp.asarray([mid, 0.37]))
+
+
+# ---------------------------------------------------------------------------
 # Marked-host field normalizer (field_global_log_Z_marked)
 # ---------------------------------------------------------------------------
 

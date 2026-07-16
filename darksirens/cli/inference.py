@@ -674,8 +674,8 @@ def main():
                          "Field requires the full-sky catalog (incompatible with "
                          "--drop_full_catalog); composes with --lss_completion, --use_LSS "
                          "and --mark_model (the global normalizer carries the same "
-                         "modulated missing budget as the numerator); incompatible with "
-                         "--lss_marginalize and universe models other than "
+                         "modulated missing budget as the numerator, per member under "
+                         "--lss_marginalize); incompatible with universe models other than "
                          "dark_sirens/dark_sirens_complete."))
     g.add_argument("--survey_z_depth", type=float, default=None, metavar="Z",
                    help=("Redshift depth bounding the completion missing-galaxy budget to "
@@ -705,7 +705,11 @@ def main():
                          "the deterministic posterior-mean Q. Requires --lss_completion to "
                          "point at a file built with members "
                          "(darksirens-build-lognormal-completion --n-members M>0); "
-                         "dark_sirens only. Off (default) = deterministic Q, unchanged."))
+                         "dark_sirens only. Off (default) = deterministic Q, unchanged. "
+                         "For a K>=2 mixture the marginalisation uses ONE SHARED member "
+                         "index (member m of every catalog must sample the SAME LSS "
+                         "realization): build the per-catalog ensembles from matched "
+                         "realizations with equal --n-members, or the run aborts."))
 
     g = optp.add_argument_group("Sampler")
     g.add_argument("--sampler",      required=True, choices=["tinyns", "dynesty", "numpyro"])
@@ -873,8 +877,6 @@ def main():
                    "have no K>=2 mixture.")
         if getattr(opts, "use_LSS", False):
             _fatal("--use_LSS is not supported with a multi-catalog mixture.")
-        if getattr(opts, "lss_marginalize", False):
-            _fatal("--lss_marginalize is not supported with a multi-catalog mixture.")
         if getattr(opts, "mark_model", "none") not in (None, "none"):
             _fatal("--mark_model is not supported with a multi-catalog mixture.")
         if opts.counterpart is not None:
@@ -887,17 +889,13 @@ def main():
     # missing-galaxy budget modulations (deterministic Q_LSS, use_LSS delta_g)
     # and the marked-host model ARE supported: the survey-global normalizer
     # carries the SAME per-pixel budget as the numerator (field_global_log_Z /
-    # field_global_log_Z_marked).  The Q ensemble (lss_marginalize) stays
-    # gated until per-member global normalizers land.
+    # field_global_log_Z_marked; per-member normalizers under
+    # --lss_marginalize).
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         if opts.universe_model not in ("dark_sirens", "dark_sirens_complete"):
             _fatal("--catalog_sky_weighting field supports --universe_model "
                    "dark_sirens or dark_sirens_complete only (got "
                    f"'{opts.universe_model}').")
-        if getattr(opts, "lss_marginalize", False):
-            _fatal("--catalog_sky_weighting field is not supported with --lss_marginalize "
-                   "(the Q ENSEMBLE needs per-member global normalizers); use the "
-                   "deterministic --lss_completion table.")
         if getattr(opts, "drop_full_catalog", False):
             _fatal("--catalog_sky_weighting field needs the full-sky catalog rows to "
                    "count empty pixels; it is incompatible with --drop_full_catalog.")

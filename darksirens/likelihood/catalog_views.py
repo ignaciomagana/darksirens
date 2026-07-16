@@ -12,6 +12,7 @@ import numpy as np
 from darksirens.redshift.completion import (
     build_field_delta_g_inputs,
     build_field_lss_q_inputs,
+    build_field_lss_q_member_inputs,
     build_field_mark_inputs,
     build_field_normalization_inputs,
     build_pixel_kde_cache,
@@ -94,6 +95,8 @@ class CatalogViews:
     field_lss_q: jnp.ndarray | None = None            # (n_occupied, n_grid) f32
     field_lss_q_empty_sum: jnp.ndarray | None = None  # (n_grid,) f64
     field_delta_g: jnp.ndarray | None = None          # (n_occupied, n_grid) f32
+    field_lss_q_members: jnp.ndarray | None = None            # (M, n_occupied, n_grid) f32
+    field_lss_q_empty_sum_members: jnp.ndarray | None = None  # (M, n_grid) f64
     # Marked-host field normalizer: flat FULL-SKY per-galaxy inputs.
     field_mark_z: jnp.ndarray | None = None           # (N_gal_total,) f32
     field_mark_w: jnp.ndarray | None = None           # (N_gal_total,) f32
@@ -320,6 +323,7 @@ def prepare_catalog_views(
     field_dN_obs_s = field_n_empty = field_N_obs_total = None
     field_occupied_pixels = field_lss_q = field_lss_q_empty_sum = None
     field_delta_g = None
+    field_lss_q_members = field_lss_q_empty_sum_members = None
     field_mark_z = field_mark_w = field_mark_values = None
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         occupied_np = None
@@ -348,14 +352,15 @@ def prepare_catalog_views(
         # both carry the SAME missing-galaxy budget.  Requires the GLOBAL Q
         # table (compact per-view tables cannot supply the empty-pixel budget).
         if occupied_np is not None:
+            n_pix_total = int(
+                data.get(
+                    "n_pix_catalog",
+                    np.asarray(full_z).shape[0] if full_z is not None else 0,
+                )
+            )
             logq_full = data.get("lss_completion_logq")
             q_full = data.get("lss_completion_q")
             if logq_full is not None or q_full is not None:
-                n_pix_total = int(
-                    data.get("n_pix_catalog", np.asarray(full_z).shape[0])
-                    if full_z is not None
-                    else data["n_pix_catalog"]
-                )
                 logq_np = (
                     np.asarray(logq_full)
                     if logq_full is not None
@@ -366,6 +371,13 @@ def prepare_catalog_views(
                 )
                 field_lss_q = barrier(q_occ)
                 field_lss_q_empty_sum = barrier(q_empty_sum)
+            logq_members_full = data.get("lss_completion_logq_members")
+            if logq_members_full is not None:
+                qm_occ, qm_empty = build_field_lss_q_member_inputs(
+                    np.asarray(logq_members_full), occupied_np, n_pix_total
+                )
+                field_lss_q_members = barrier(qm_occ)
+                field_lss_q_empty_sum_members = barrier(qm_empty)
             dg_full = data.get("delta_g_pix_z")
             if dg_full is not None and np.asarray(dg_full).ndim == 2 \
                     and np.asarray(dg_full).shape[0] > 1:
@@ -540,6 +552,8 @@ def prepare_catalog_views(
         field_lss_q=field_lss_q,
         field_lss_q_empty_sum=field_lss_q_empty_sum,
         field_delta_g=field_delta_g,
+        field_lss_q_members=field_lss_q_members,
+        field_lss_q_empty_sum_members=field_lss_q_empty_sum_members,
         field_mark_z=field_mark_z,
         field_mark_w=field_mark_w,
         field_mark_values=field_mark_values,

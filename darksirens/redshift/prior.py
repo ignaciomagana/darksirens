@@ -86,6 +86,7 @@ from darksirens.redshift.completion import (
     completion_curves,
     field_global_log_Z,
     field_global_log_Z_marked,
+    field_global_log_Z_members,
     log_galaxy_measure_grid,
 )
 
@@ -166,6 +167,10 @@ class DarkSirenEnsemblePriorState(NamedTuple):
     log_Z: Any             # (N_rows,) scalar-compat log[N_obs + N_miss]
     dN_miss_members: Any   # (M, N_rows, N_grid) per-member missing-galaxy density
     log_Z_members: Any     # (M, N_rows) per-member log[N_obs + N_miss^m]
+    # FIELD-convention survey-global normalizers (None under conditional):
+    # the scalar-compat (posterior-mean-Q) global Z and the per-member ones.
+    log_Z_global: Any = None          # scalar log Z(theta) with the mean Q
+    log_Z_global_members: Any = None  # (M,) per-member log Z_m(theta)
 
 
 def _row_counts(em_catalog: EMCatalog) -> jnp.ndarray:
@@ -354,17 +359,20 @@ def prepare_redshift_prior_state(
                     "mu_miss and the observed marked mass must be "
                     "view-independent so PE and selection share one global Z."
                 )
-            if any(
+            has_q_members = any(
                 getattr(em_catalog, name) is not None
                 for name in (
                     "lss_completion_logq_members",
                     "lss_completion_q_members",
                 )
-            ):
-                raise NotImplementedError(
-                    "catalog_sky_weighting='field' is not supported with an "
-                    "LSS-completion Q_LSS ENSEMBLE (lss_marginalize); use "
-                    "'conditional' or the deterministic table."
+            )
+            if has_q_members and em_catalog.field_lss_q_members is None:
+                raise ValueError(
+                    "catalog_sky_weighting='field' with a Q_LSS ENSEMBLE "
+                    "requires the per-member survey-global Q rows "
+                    "(field_lss_q_members / field_lss_q_empty_sum_members) "
+                    "built from the GLOBAL ensemble via "
+                    "darksirens.redshift.completion.build_field_lss_q_member_inputs."
                 )
             has_q_table = any(
                 getattr(em_catalog, name) is not None
@@ -464,31 +472,45 @@ def prepare_redshift_prior_state(
         # ensemble was supplied), so this matches the legacy behaviour exactly.
         Z = Nobs + curves.N_miss
         log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
-        if is_field:
-            # Survey-GLOBAL normalizer log Sum_all-pixels[N_obs + N_miss].  The
-            # per-pixel numerator (log_Nobs, dN_miss) is UNCHANGED; only the
-            # denominator becomes global, turning the mixture weight into a host
-            # fraction.  field_global_log_Z carries the SAME budget modulation
-            # (Q_LSS / delta_g) as curves.dN_miss via the field_* rows; the
-            # ensemble path stays gated (above) until per-member global
-            # normalizers land.
-            log_Z_global = field_global_log_Z(cosmo, survey, em_catalog)
-            state = DarkSirenPriorState(
-                kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss,
-                log_Z=log_Z, log_Z_global=log_Z_global,
-            )
-            return _maybe_materialize(state, materialize_state)
         if curves.dN_miss_members is None:
+            if is_field:
+                # Survey-GLOBAL normalizer log Sum_all-pixels[N_obs + N_miss].
+                # The per-pixel numerator (log_Nobs, dN_miss) is UNCHANGED; only
+                # the denominator becomes global, turning the mixture weight
+                # into a host fraction.  field_global_log_Z carries the SAME
+                # budget modulation (Q_LSS / delta_g) as curves.dN_miss via the
+                # field_* rows.
+                log_Z_global = field_global_log_Z(cosmo, survey, em_catalog)
+                state = DarkSirenPriorState(
+                    kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss,
+                    log_Z=log_Z, log_Z_global=log_Z_global,
+                )
+                return _maybe_materialize(state, materialize_state)
             state = DarkSirenPriorState(
                 kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z
             )
             return _maybe_materialize(state, materialize_state)
         # Fixed LSS-completion ensemble present -> add per-member fields for the
-        # Bayesian redshift-prior diagnostic (the scalar fields above are unchanged).
+        # Bayesian redshift-prior diagnostic and the lss_marginalize member vmap
+        # (the scalar fields above are unchanged: posterior-mean Q).
         Z_members = Nobs[None, :] + curves.N_miss_members          # (M, N_rows)
         log_Z_members = jnp.where(
             Z_members > 0.0, jnp.log(jnp.maximum(Z_members, 1e-300)), 0.0
         )
+        if is_field:
+            # Per-member survey-global normalizers: member m's mixture weight
+            # divides by its OWN Z_m(theta), the field analogue of log_Z_members.
+            state = DarkSirenEnsemblePriorState(
+                kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss,
+                log_Z=log_Z,
+                dN_miss_members=curves.dN_miss_members,
+                log_Z_members=log_Z_members,
+                log_Z_global=field_global_log_Z(cosmo, survey, em_catalog),
+                log_Z_global_members=field_global_log_Z_members(
+                    cosmo, survey, em_catalog
+                ),
+            )
+            return _maybe_materialize(state, materialize_state)
         state = DarkSirenEnsemblePriorState(
             kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z,
             dN_miss_members=curves.dN_miss_members, log_Z_members=log_Z_members,

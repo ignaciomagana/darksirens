@@ -95,10 +95,6 @@ def _require_field_mode_scope(
         raise NotImplementedError(
             "catalog_sky_weighting='field' is not supported with weak lensing."
         )
-    if lss_marginalize:
-        raise NotImplementedError(
-            "catalog_sky_weighting='field' is not supported with lss_marginalize."
-        )
     for cat in catalogs:
         if (mark_model not in (None, "none")
                 and (cat.field_mark_values is None
@@ -110,16 +106,20 @@ def _require_field_mode_scope(
                 "(field_mark_z / field_mark_w / field_mark_values); build them "
                 "via build_field_mark_inputs."
             )
-        if any(
-            getattr(cat, name) is not None
-            for name in (
-                "lss_completion_logq_members",
-                "lss_completion_q_members",
+        if (
+            any(
+                getattr(cat, name) is not None
+                for name in (
+                    "lss_completion_logq_members",
+                    "lss_completion_q_members",
+                )
             )
+            and cat.field_lss_q_members is None
         ):
-            raise NotImplementedError(
-                "catalog_sky_weighting='field' is not supported with an "
-                "LSS-completion Q_LSS ENSEMBLE (lss_marginalize)."
+            raise ValueError(
+                "catalog_sky_weighting='field' with a Q_LSS ENSEMBLE requires "
+                "the per-member survey-global Q rows (field_lss_q_members / "
+                "field_lss_q_empty_sum_members) built from the GLOBAL ensemble."
             )
         if cat.field_dN_obs_s is None:
             raise ValueError(
@@ -369,10 +369,6 @@ def darksiren_log_likelihood(
         if wl_enabled:
             raise NotImplementedError(
                 "Weak lensing is not supported with the K-catalog mixture."
-            )
-        if lss_marginalize:
-            raise NotImplementedError(
-                "lss_marginalize is not supported with the K-catalog mixture."
             )
         if mark_model not in (None, "none"):
             raise NotImplementedError(
@@ -657,38 +653,66 @@ def darksiren_log_likelihood(
     # missing-galaxy field.  Opt-in (static); off by default so the deterministic
     # (posterior-mean Q) path is bit-for-bit unchanged.
     if lss_marginalize:
-        if getattr(prior_states_univ[0], "dN_miss_members", None) is None:
+        missing = [
+            k for k, s in enumerate(prior_states_univ)
+            if getattr(s, "dN_miss_members", None) is None
+        ]
+        if missing:
             raise ValueError(
-                "lss_marginalize=True requires an LSS-completion ENSEMBLE on the "
-                "PE catalog. Build Q_LSS with members "
+                "lss_marginalize=True requires an LSS-completion ENSEMBLE on "
+                f"EVERY PE catalog; catalog(s) {[k + 1 for k in missing]} have "
+                "none. Build Q_LSS with members "
                 "(darksirens_build_lognormal_completion --n-members M > 0) and pass it "
                 "via --lss_completion; only universe_model='dark_sirens' supports it."
             )
-        n_members = prior_states_univ[0].log_Z_members.shape[0]
+        member_counts = {
+            int(s.log_Z_members.shape[0]) for s in prior_states_univ
+        }
+        if len(member_counts) != 1:
+            raise ValueError(
+                "lss_marginalize with a K-catalog mixture marginalizes over a "
+                "SHARED member index (the catalogs sample the same LSS "
+                "realization), so every catalog's Q ensemble must have the "
+                f"same M; got per-catalog member counts {sorted(member_counts)}."
+            )
+        n_members = member_counts.pop()
+        is_field = catalog_sky_weighting == "field"
+
         # Per-member states reuse the (Q-independent) kernels + log_Nobs and swap
         # in the member missing-galaxy density / normalisation; ONE vmap over the
-        # shared member axis of every catalog's state (K = 1 today: the K >= 2
-        # guard above keeps the mixture off this path until the shared-member
-        # design lands).  ``log_Z_global`` is inert here (field mode is gated off
-        # for lss_marginalize); carry a broadcast scalar so the vmap in_axes
-        # pytree (member_axes) has a matching leaf.
+        # SHARED member axis of every catalog's state (the matched-realizations
+        # assumption: member m of every catalog samples the same LSS draw).
+        # Under the field convention each member also carries its OWN
+        # survey-global normalizer; under conditional the broadcast scalar keeps
+        # the vmap in_axes pytree (member_axes) leaf-aligned.
         def _member_states(state):
             return DarkSirenPriorState(
                 kernels=state.kernels, log_Nobs=state.log_Nobs,
                 dN_miss=state.dN_miss_members, log_Z=state.log_Z_members,
-                log_Z_global=jnp.asarray(0.0),
+                log_Z_global=(
+                    state.log_Z_global_members if is_field else jnp.asarray(0.0)
+                ),
             )
 
         univ_members = tuple(_member_states(s) for s in prior_states_univ)
-        sel_has_members = (
-            getattr(prior_states_sel[0], "dN_miss_members", None) is not None
-        )
+        sel_members_flags = [
+            getattr(s, "dN_miss_members", None) is not None
+            for s in prior_states_sel
+        ]
+        if any(sel_members_flags) and not all(sel_members_flags):
+            raise ValueError(
+                "lss_marginalize: the selection-side Q ensembles must be "
+                "present on ALL catalogs or NONE (mixed member structure "
+                "cannot share the member vmap)."
+            )
+        sel_has_members = all(sel_members_flags) and len(sel_members_flags) > 0
         sel_members = (
             tuple(_member_states(s) for s in prior_states_sel)
             if sel_has_members else prior_states_sel
         )
         member_axes_one = DarkSirenPriorState(
-            kernels=None, log_Nobs=None, dN_miss=0, log_Z=0, log_Z_global=None
+            kernels=None, log_Nobs=None, dN_miss=0, log_Z=0,
+            log_Z_global=(0 if is_field else None),
         )
         member_axes = (member_axes_one,) * n_catalogs
         ll_members = jax.vmap(

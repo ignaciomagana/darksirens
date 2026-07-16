@@ -209,6 +209,11 @@ class EMCatalog(NamedTuple):
     field_lss_q: Any = None             # (n_occupied, N_grid) float32 LINEAR Q rows
     field_lss_q_empty_sum: Any = None   # (N_grid,) float64 Sum_empty Q_p(z) (data constant)
     field_delta_g: Any = None           # (n_occupied, N_grid) float32 delta_g rows
+    # Per-member field normalizer inputs (Q ensemble marginalization under the
+    # field convention): one modulation-row block + empty-pixel budget curve
+    # per ensemble member, built by build_field_lss_q_member_inputs.
+    field_lss_q_members: Any = None            # (M, n_occupied, N_grid) float32
+    field_lss_q_empty_sum_members: Any = None  # (M, N_grid) float64
     # Marked-host field normalizer: flat FULL-SKY per-galaxy inputs so mu_miss
     # and the observed marked mass Sum w_i h_i are view-independent (PE and
     # selection share ONE global Z).  Built by build_field_mark_inputs.

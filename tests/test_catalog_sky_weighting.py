@@ -472,11 +472,12 @@ def test_field_gate_rejects_marks_ensemble_and_inconsistent_budgets():
             catalog_sky_weighting="field",
         )
 
-    # Q ENSEMBLE (lss_marginalize): rejected (per-member Z_global not built yet).
+    # Q ENSEMBLE without the per-member survey-global rows: rejected with the
+    # build hint (numerator and per-member normalizers must share budgets).
     cat_members = cat_marks._replace(
         lss_completion_logq_members=jnp.zeros((2, zgals.shape[0], len(zgrid)))
     )
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="field_lss_q_members"):
         prepare_redshift_prior_state(
             "dark_sirens", cosmo, survey, cat_members, catalog_sky_weighting="field"
         )

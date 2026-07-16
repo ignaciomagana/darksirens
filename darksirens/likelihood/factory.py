@@ -139,6 +139,7 @@ def _make_mixture_likelihood(
                 field_dN_obs_s=None, field_n_empty=None, field_N_obs_total=None,
                 field_occupied_pixels=None, field_lss_q=None,
                 field_lss_q_empty_sum=None, field_delta_g=None,
+                field_lss_q_members=None, field_lss_q_empty_sum_members=None,
             )
 
         def _maybe(key, dtype=None):
@@ -158,6 +159,8 @@ def _make_mixture_likelihood(
             field_lss_q=_maybe("field_lss_q"),
             field_lss_q_empty_sum=_maybe("field_lss_q_empty_sum"),
             field_delta_g=_maybe("field_delta_g"),
+            field_lss_q_members=_maybe("field_lss_q_members"),
+            field_lss_q_empty_sum_members=_maybe("field_lss_q_empty_sum_members"),
         )
 
     # Shared (catalog-independent) GW / selection physics arrays.
@@ -200,6 +203,25 @@ def _make_mixture_likelihood(
             )
         return barrier(full_j[up]), 1
 
+    def _compact_lss_members_for(views, unique_pixels):
+        # Per-catalog analogue of make_likelihood._compact_lss_members: slice
+        # this catalog's (M, n_pix, n_grid) Q ensemble to the view's pixels.
+        full = views.lss_completion_logq_members
+        if full is None:
+            return None
+        full_j = jnp.asarray(full)
+        idx = int(views.lss_completion_indexing or 0)
+        if idx == 1 or unique_pixels is None:
+            return barrier(full_j)
+        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
+        if int(jnp.max(up)) >= full_j.shape[1]:
+            raise ValueError(
+                f"LSS completion ensemble has {full_j.shape[1]} pixels but a "
+                f"catalog pixel index reaches {int(jnp.max(up))} (rebuild Q "
+                "over the full nside)."
+            )
+        return barrier(full_j[:, up])
+
     em_catalogs_pe = []
     em_catalogs_sel = []
     pe_pixel_cols = []
@@ -218,6 +240,8 @@ def _make_mixture_likelihood(
         apix_k = bundle["apix"]
         lss_q_pe_k, lss_idx_pe_k = _compact_lss_q_for(views, views.unique_pixels_pe)
         lss_q_sel_k, lss_idx_sel_k = _compact_lss_q_for(views, views.unique_pixels_sel)
+        lss_qm_pe_k = _compact_lss_members_for(views, views.unique_pixels_pe)
+        lss_qm_sel_k = _compact_lss_members_for(views, views.unique_pixels_sel)
         field_k = _bundle_field_inputs(bundle)
 
         em_catalogs_pe.append(EMCatalog(
@@ -234,6 +258,7 @@ def _make_mixture_likelihood(
             active_counterpart_index=0,
             bright_siren_sky_marginalized=False,
             lss_completion_logq=lss_q_pe_k,
+            lss_completion_logq_members=lss_qm_pe_k,
             lss_completion_indexing=lss_idx_pe_k,
             **field_k,
         ))
@@ -251,6 +276,7 @@ def _make_mixture_likelihood(
             active_counterpart_index=0,
             bright_siren_sky_marginalized=False,
             lss_completion_logq=lss_q_sel_k,
+            lss_completion_logq_members=lss_qm_sel_k,
             lss_completion_indexing=lss_idx_sel_k,
             **field_k,
         ))

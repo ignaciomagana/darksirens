@@ -362,15 +362,17 @@ def test_guard_mark_model_not_supported():
         ll(coord)
 
 
-def test_guard_lss_marginalize_not_supported():
-    """_make_mixture_likelihood forwards opts.lss_marginalize, so core's
-    K>=2 NotImplementedError guard is reachable for direct make_likelihood
-    callers (the CLI has its own _fatal guard on top)."""
+def test_lss_marginalize_without_members_raises_at_k2():
+    """lss_marginalize is SUPPORTED at K>=2 (shared member index), but every
+    catalog must carry a Q ensemble: bundles without members raise the clear
+    per-catalog error (functional replacement for the old blanket K>=2
+    NotImplementedError guard)."""
     _pop_lower, _pop_upper, _pop_labels, pop_fid, _sampled, fixed = _pop_bits()
     data = dict(_shared_physics())
     data["apix"] = APIX1
     data["catalogs"] = [_bundle(APIX1, Z_A), _bundle(APIX1, Z_B)]
-    opts = _base_opts(n_catalogs=2, lss_marginalize=True)
+    opts = _base_opts(n_catalogs=2, lss_marginalize=True,
+                      catalog_sky_weighting="conditional")
     ll = make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="ENSEMBLE on EVERY"):
         ll(jnp.asarray([_mid_pop(), 0.3]))

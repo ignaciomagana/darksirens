@@ -396,6 +396,38 @@ def build_field_lss_q_inputs(
     return q_occ, q_empty_sum
 
 
+def build_field_lss_q_member_inputs(
+    logq_members: jnp.ndarray,
+    occupied_pixels: np.ndarray,
+    n_pix_total: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-member field-normalizer Q rows from a GLOBAL (M, n_pix, N_grid)
+    log-Q ensemble: the member analogue of :func:`build_field_lss_q_inputs`.
+
+    Returns ``(field_lss_q_members, field_lss_q_empty_sum_members)`` —
+    (M, n_occupied, N_grid) float32 and (M, N_grid) float64.
+    """
+    logq_np = np.asarray(logq_members, dtype=np.float64)
+    if logq_np.ndim != 3 or logq_np.shape[1] != int(n_pix_total):
+        raise ValueError(
+            "build_field_lss_q_member_inputs requires a GLOBAL "
+            "(M, n_pix_total, N_grid) log-Q ensemble; got shape "
+            f"{logq_np.shape} for n_pix_total={int(n_pix_total)}."
+        )
+    if logq_np.shape[2] != int(zgrid.size):
+        raise ValueError(
+            f"log-Q ensemble has {logq_np.shape[2]} grid nodes but zgrid has "
+            f"{int(zgrid.size)}."
+        )
+    occ = np.asarray(occupied_pixels, dtype=np.int64).reshape(-1)
+    q = np.exp(logq_np)
+    occ_mask = np.zeros(int(n_pix_total), dtype=bool)
+    occ_mask[occ] = True
+    q_occ = jnp.asarray(q[:, occ, :], dtype=jnp.float32)
+    q_empty_sum = jnp.asarray(q[:, ~occ_mask, :].sum(axis=1), dtype=jnp.float64)
+    return q_occ, q_empty_sum
+
+
 def build_field_delta_g_inputs(
     delta_g_pix_z: jnp.ndarray,
     occupied_pixels: np.ndarray,
@@ -904,6 +936,37 @@ def _field_missing_curve(
         V_empty = n_empty
 
     return V_occ + V_empty, dN_exp, depth_mask
+
+
+def field_global_log_Z_members(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+) -> jnp.ndarray:
+    """Per-member survey-GLOBAL normalizers ``log Z_m(theta)``, shape (M,).
+
+    One :func:`field_global_log_Z` evaluation per Q-ensemble member, sharing
+    everything except the member's Q rows / empty-pixel budget
+    (``field_lss_q_members`` / ``field_lss_q_empty_sum_members``).  Consumed by
+    the lss_marginalize member vmap in the likelihood core (each member state
+    carries its own global normalizer under the field convention).
+    """
+    q_members = em_catalog.field_lss_q_members
+    q_empty_members = em_catalog.field_lss_q_empty_sum_members
+    if q_members is None or q_empty_members is None:
+        raise ValueError(
+            "field_global_log_Z_members requires field_lss_q_members and "
+            "field_lss_q_empty_sum_members; build them via "
+            "build_field_lss_q_member_inputs."
+        )
+
+    def _one(q_m, q_empty_m):
+        cat_m = em_catalog._replace(
+            field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
+        )
+        return field_global_log_Z(cosmo, survey, cat_m)
+
+    return vmap(_one)(jnp.asarray(q_members), jnp.asarray(q_empty_members))
 
 
 def field_global_log_Z_marked(
