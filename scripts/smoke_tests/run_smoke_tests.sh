@@ -147,6 +147,16 @@ add L-radial "LSS: radial lognormal Q_LSS" HAVE_QRAD \
 add L-gp3d   "LSS: 3-D angular-coupling Q_LSS" HAVE_QGP3D \
   "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --lss_completion $QGP3D --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/L-gp3d"
 
+# Multitracer K-catalog mixture (duplicated catalog exercises the full
+# CLI -> bundle loader -> mixture pipeline end-to-end; sky weighting
+# auto-resolves to field and fcat_2 is sampled alongside the population).
+add K2-field  "multitracer: K=2 duplicated catalog (auto field weighting)" HAVE_DARK \
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT $CAT --universe_model dark_sirens --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-field"
+add K2-marks  "multitracer: K=2 + per-catalog marked-host etas" HAVE_MARKS \
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CATM $CATM --universe_model dark_sirens --mark_model loglinear --marks logmstar,logssfr --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-marks"
+add K2-qlss   "multitracer: K=2 + per-catalog Q_LSS (field-modulated budget)" HAVE_QRAD \
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT $CAT --universe_model dark_sirens --lss_completion $QRAD $QRAD --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-qlss"
+
 # Lensing: strong-lensing clusters
 add X-cloff "SL clusters: singleton-only (cluster_mode off)" HAVE_BASE \
   "$LENS --gw_path $GWE --gwselection_path $SEL --cluster_mode off --wl_backend lognormal --pop_model powerlaw+peak --fix_cosmology true --fix_survey true --fix_population true $DYN --seed 1 --save_path $RUNS/X-cloff"
