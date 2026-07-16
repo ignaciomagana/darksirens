@@ -796,13 +796,39 @@ def field_global_log_Z(
     modulation rows (data constants).  The occupied-pixel reduction is chunked
     with ``lax.scan`` to bound peak memory at high nside.
     """
+    V_total, dN_exp, depth_mask = _field_missing_curve(
+        cosmo, survey, em_catalog, chunk_size=chunk_size
+    )
+    N_obs_total = jnp.asarray(em_catalog.field_N_obs_total, dtype=dN_exp.dtype)
+
+    integrand = dN_exp * V_total
+    if depth_mask is not None:
+        integrand = jnp.where(depth_mask, integrand, 0.0)
+    N_miss_total = jnp.trapezoid(integrand, zgrid)
+
+    Z = N_obs_total + N_miss_total
+    return jnp.log(jnp.maximum(Z, 1e-300))
+
+
+def _field_missing_curve(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    chunk_size: int = 4096,
+):
+    """The (N_grid,) field missing curve ``V(z; theta)`` plus its companions.
+
+    ``V = Sum_occ (1 - C_p)(z) lss_p(z) + V_empty(z)`` -- everything of the
+    survey-global missing budget EXCEPT the ``dN_exp`` quadrature, so callers
+    can insert a z-dependent factor (the marked-host ``mu_miss``) before
+    integrating.  Returns ``(V_total, dN_exp, depth_mask)``.
+    """
     grids = _precompute_grids(cosmo, survey, em_catalog)
     dN_exp = grids.dN_exp                                    # (N_grid,) theta-dependent
     dN_exp_safe = jnp.where(grids.dN_exp_smooth > 0.0, grids.dN_exp_smooth, 1.0)
 
     field_obs = jnp.asarray(em_catalog.field_dN_obs_s)       # (n_occ, N_grid) f32 constant
     n_occ = int(field_obs.shape[0])                          # static
-    N_obs_total = jnp.asarray(em_catalog.field_N_obs_total, dtype=dN_exp.dtype)
     n_empty = jnp.asarray(em_catalog.field_n_empty, dtype=dN_exp.dtype)
 
     # Static (pytree-structure) modulation dispatch, mirroring the numerator's
@@ -877,13 +903,88 @@ def field_global_log_Z(
     else:
         V_empty = n_empty
 
-    integrand = dN_exp * (V_occ + V_empty)
+    return V_occ + V_empty, dN_exp, depth_mask
+
+
+def field_global_log_Z_marked(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    mu_miss: jnp.ndarray,
+    log_h_flat: jnp.ndarray,
+) -> jnp.ndarray:
+    """Marked-host survey-GLOBAL normalizer.
+
+    ``Z(theta, eta) = Sum_{i in obs, full sky} w_i h(m_i | eta)
+                      + integral mu_miss(z; eta) dN_exp(z) V(z; theta) dz``
+
+    -- the marked analogue of :func:`field_global_log_Z`: the observed term is
+    the full-sky marked mass (the marked kernel state rescales each pixel's
+    catalog mass from N_obs to Sum w_i h_i, so the global total must follow),
+    and the missing budget carries the SAME ``mu_miss(z | eta)`` factor as the
+    numerator's ``dN_miss``.  ``mu_miss`` and ``log_h_flat`` must be built from
+    the FULL-SKY flat marks (``field_mark_*``), so the PE and selection states
+    produce the SAME Z for the same (theta, eta) and the constants cancel
+    structurally between the two likelihood seams.
+    """
+    V_total, dN_exp, depth_mask = _field_missing_curve(cosmo, survey, em_catalog)
+
+    w_flat = jnp.asarray(em_catalog.field_mark_w, dtype=dN_exp.dtype)
+    h_flat = jnp.exp(jnp.asarray(log_h_flat, dtype=dN_exp.dtype))
+    S_obs = jnp.sum(w_flat * h_flat)
+
+    integrand = jnp.asarray(mu_miss, dtype=dN_exp.dtype) * dN_exp * V_total
     if depth_mask is not None:
         integrand = jnp.where(depth_mask, integrand, 0.0)
     N_miss_total = jnp.trapezoid(integrand, zgrid)
 
-    Z = N_obs_total + N_miss_total
+    Z = S_obs + N_miss_total
     return jnp.log(jnp.maximum(Z, 1e-300))
+
+
+def build_field_mark_inputs(
+    full_z: jnp.ndarray,
+    full_w: jnp.ndarray | None,
+    full_n: jnp.ndarray | None,
+    mark_tables: dict,
+    mark_names: tuple,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Flat FULL-SKY per-galaxy inputs for the MARKED field normalizer.
+
+    ``mark_tables`` maps mark name -> (N_pix, N_max) z-centred mark array (the
+    same ``attach_mark_inputs`` products the numerator uses); real (non-padded)
+    slots are selected by ``full_n`` (fallback ``full_w > 0``).  Returns
+    ``(field_mark_z, field_mark_w, field_mark_values)`` — (N_gal,), (N_gal,),
+    and (N_gal, n_marks) float32 with columns ordered by ``mark_names``.
+    """
+    z_np = np.asarray(full_z)
+    if full_n is not None:
+        n_np = np.asarray(full_n).reshape(-1).astype(np.int64)
+        real = np.arange(z_np.shape[1])[None, :] < n_np[:, None]
+    elif full_w is not None:
+        real = np.asarray(full_w) > 0.0
+    else:
+        raise ValueError(
+            "build_field_mark_inputs requires full_n or full_w to mask padded "
+            "galaxy slots."
+        )
+    z_flat = jnp.asarray(z_np[real], dtype=jnp.float32)
+    w_flat = jnp.asarray(
+        (np.asarray(full_w)[real] if full_w is not None
+         else np.ones(int(real.sum()))),
+        dtype=jnp.float32,
+    )
+    missing = [name for name in mark_names if mark_tables.get(name) is None]
+    if missing:
+        raise ValueError(
+            f"build_field_mark_inputs: marks {missing} not present in "
+            "mark_tables; the field normalizer needs every selected mark over "
+            "the full sky."
+        )
+    values = np.stack(
+        [np.asarray(mark_tables[name])[real] for name in mark_names], axis=1
+    )
+    return z_flat, w_flat, jnp.asarray(values, dtype=jnp.float32)
 
 
 # ------------------------------------------------------------

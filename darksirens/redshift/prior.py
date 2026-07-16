@@ -85,6 +85,7 @@ from darksirens.redshift.catalog import (
 from darksirens.redshift.completion import (
     completion_curves,
     field_global_log_Z,
+    field_global_log_Z_marked,
     log_galaxy_measure_grid,
 )
 
@@ -180,6 +181,26 @@ _LOG_H_CLIP: float = 7.0
 _MU_MISS_NBINS: int = 40
 
 
+def _mu_miss_from_flat(zs: jnp.ndarray, h: jnp.ndarray, real: jnp.ndarray) -> jnp.ndarray:
+    """Shared core of the mu_miss estimator on FLAT per-galaxy arrays.
+
+    ``real`` is a {0,1} weight selecting genuine galaxies (1 everywhere for
+    the field-normalizer flat full-sky inputs, which are pre-masked).
+    """
+    # Keep ``z_hi`` as a JAX scalar (do NOT ``float()`` it): this runs inside
+    # the jitted likelihood, where the module ``zgrid`` constant is captured
+    # as a tracer, so a concrete ``float()`` raises ConcretizationTypeError.
+    # ``jnp.linspace`` accepts an array ``stop`` because ``num`` is static.
+    z_hi = zgrid[-1]
+    edges = jnp.linspace(0.0, z_hi, _MU_MISS_NBINS + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    b = jnp.clip(jnp.searchsorted(edges, zs, side="right") - 1, 0, _MU_MISS_NBINS - 1)
+    sum_h = jnp.zeros(_MU_MISS_NBINS).at[b].add(h * real)
+    cnt = jnp.zeros(_MU_MISS_NBINS).at[b].add(real)
+    mu_bin = jnp.where(cnt > 0.0, sum_h / jnp.where(cnt > 0.0, cnt, 1.0), 1.0)
+    return jnp.maximum(jnp.interp(zgrid, centers, mu_bin), 0.0)
+
+
 def _mu_miss_grid(em_catalog: EMCatalog, log_h: jnp.ndarray) -> jnp.ndarray:
     """Level-B missing-galaxy host efficiency ``mu_miss(z|eta) = E_obs[h | z]``.
 
@@ -199,19 +220,7 @@ def _mu_miss_grid(em_catalog: EMCatalog, log_h: jnp.ndarray) -> jnp.ndarray:
     else:
         real = (jnp.asarray(em_catalog.wgals) > 0.0).reshape(-1)
     real = real.astype(h.dtype)
-
-    # Keep ``z_hi`` as a JAX scalar (do NOT ``float()`` it): ``_mu_miss_grid`` runs
-    # inside the jitted likelihood, where the module ``zgrid`` constant is captured
-    # as a tracer, so a concrete ``float()`` raises ConcretizationTypeError.
-    # ``jnp.linspace`` accepts an array ``stop`` because ``num`` is static.
-    z_hi = zgrid[-1]
-    edges = jnp.linspace(0.0, z_hi, _MU_MISS_NBINS + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    b = jnp.clip(jnp.searchsorted(edges, zs, side="right") - 1, 0, _MU_MISS_NBINS - 1)
-    sum_h = jnp.zeros(_MU_MISS_NBINS).at[b].add(h * real)
-    cnt = jnp.zeros(_MU_MISS_NBINS).at[b].add(real)
-    mu_bin = jnp.where(cnt > 0.0, sum_h / jnp.where(cnt > 0.0, cnt, 1.0), 1.0)
-    return jnp.maximum(jnp.interp(zgrid, centers, mu_bin), 0.0)
+    return _mu_miss_from_flat(zs, h, real)
 
 
 def prepare_redshift_prior_state(
@@ -329,15 +338,21 @@ def prepare_redshift_prior_state(
         if is_field:
             # Field-convention scope: static (pytree-structure) checks, resolved
             # once per trace.  The missing-galaxy budget modulations (Q_LSS
-            # table, per-pixel delta_g) ARE supported provided the matching
-            # survey-global field_* rows are present, so the numerator and the
-            # global normalizer carry the SAME budget (field_global_log_Z).
-            # The marked-host model stays gated until the marked global
-            # normalizer (Sum w_i h_i + mu_miss-modulated budget) lands.
-            if mark_model is not None and mark_model != "none":
-                raise NotImplementedError(
-                    "catalog_sky_weighting='field' is not supported with a marked-host "
-                    "model (mark_model); use 'conditional'."
+            # table, per-pixel delta_g) and the marked-host model ARE supported
+            # provided the matching survey-global field_* inputs are present,
+            # so the numerator and the global normalizer carry the SAME budget
+            # (field_global_log_Z / field_global_log_Z_marked).
+            if (mark_model is not None and mark_model != "none"
+                    and (em_catalog.field_mark_values is None
+                         or em_catalog.field_mark_z is None
+                         or em_catalog.field_mark_w is None)):
+                raise ValueError(
+                    "catalog_sky_weighting='field' with a marked-host model "
+                    "requires the flat FULL-SKY mark inputs (field_mark_z / "
+                    "field_mark_w / field_mark_values) built via "
+                    "darksirens.redshift.completion.build_field_mark_inputs -- "
+                    "mu_miss and the observed marked mass must be "
+                    "view-independent so PE and selection share one global Z."
                 )
             if any(
                 getattr(em_catalog, name) is not None
@@ -403,12 +418,39 @@ def prepare_redshift_prior_state(
             kernels, log_N_host = marked_catalog_kernel_state(
                 cosmo, survey, em_catalog, log_h, log_g_grid=log_g_grid
             )
-            mu_miss = _mu_miss_grid(em_catalog, log_h)                  # (N_grid,)
+            if is_field:
+                # Field mode: mu_miss and the observed marked mass come from
+                # the FULL-SKY flat marks (field_mark_*), so the PE and
+                # selection states share ONE global normalizer for the same
+                # (theta, eta) and the numerator's missing budget matches it.
+                from darksirens.marks import mark_model_flat_parser
+                log_h_flat = jnp.clip(
+                    mark_model_flat_parser(mark_model, mark_names)(
+                        em_catalog.field_mark_values, mark_params
+                    ),
+                    -_LOG_H_CLIP, _LOG_H_CLIP,
+                )
+                mu_miss = _mu_miss_from_flat(
+                    jnp.asarray(em_catalog.field_mark_z),
+                    jnp.exp(log_h_flat),
+                    jnp.ones_like(log_h_flat),
+                )
+            else:
+                mu_miss = _mu_miss_grid(em_catalog, log_h)              # (N_grid,)
             dN_miss = curves.dN_miss * mu_miss[None, :]                 # (N_rows, N_grid)
             N_host_miss = jnp.trapezoid(dN_miss, zgrid, axis=-1)        # (N_rows,)
             N_host_obs = jnp.where(jnp.isfinite(log_N_host), jnp.exp(log_N_host), 0.0)
             Z = N_host_obs + N_host_miss
             log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+            if is_field:
+                log_Z_global = field_global_log_Z_marked(
+                    cosmo, survey, em_catalog, mu_miss, log_h_flat
+                )
+                state = DarkSirenPriorState(
+                    kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                    log_Z=log_Z, log_Z_global=log_Z_global,
+                )
+                return _maybe_materialize(state, materialize_state)
             state = DarkSirenPriorState(
                 kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss, log_Z=log_Z
             )

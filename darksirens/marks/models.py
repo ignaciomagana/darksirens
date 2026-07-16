@@ -74,6 +74,10 @@ class NoMarks:
     def log_h(self, em_catalog, eta):
         return jnp.zeros_like(jnp.asarray(em_catalog.zgals))
 
+    def log_h_flat(self, values, eta):
+        """``h = 1`` on a flat (N_gal, n_marks) value matrix."""
+        return jnp.zeros(jnp.asarray(values).shape[0])
+
 
 class LogLinearMarks:
     """``h = exp(Σ_k eta_k m_tilde_k)`` over the supplied (z-centred) marks.
@@ -115,3 +119,13 @@ class LogLinearMarks:
         for k, arr in enumerate(arrs):
             log_h = log_h + eta[k] * arr
         return log_h  # (N_rows, N_max_gals)
+
+    def log_h_flat(self, values, eta):
+        """Same log-linear form on a flat (N_gal, n_marks) value matrix.
+
+        ``values`` columns are ordered by ``self.mark_names`` (the field-
+        normalizer flat full-sky marks); returns ``(N_gal,)``.
+        """
+        values = jnp.asarray(values)
+        eta = jnp.asarray(eta, dtype=values.dtype)
+        return values @ eta

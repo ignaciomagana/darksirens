@@ -12,6 +12,7 @@ import numpy as np
 from darksirens.redshift.completion import (
     build_field_delta_g_inputs,
     build_field_lss_q_inputs,
+    build_field_mark_inputs,
     build_field_normalization_inputs,
     build_pixel_kde_cache,
 )
@@ -93,6 +94,10 @@ class CatalogViews:
     field_lss_q: jnp.ndarray | None = None            # (n_occupied, n_grid) f32
     field_lss_q_empty_sum: jnp.ndarray | None = None  # (n_grid,) f64
     field_delta_g: jnp.ndarray | None = None          # (n_occupied, n_grid) f32
+    # Marked-host field normalizer: flat FULL-SKY per-galaxy inputs.
+    field_mark_z: jnp.ndarray | None = None           # (N_gal_total,) f32
+    field_mark_w: jnp.ndarray | None = None           # (N_gal_total,) f32
+    field_mark_values: jnp.ndarray | None = None      # (N_gal_total, n_marks) f32
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -315,6 +320,7 @@ def prepare_catalog_views(
     field_dN_obs_s = field_n_empty = field_N_obs_total = None
     field_occupied_pixels = field_lss_q = field_lss_q_empty_sum = None
     field_delta_g = None
+    field_mark_z = field_mark_w = field_mark_values = None
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         occupied_np = None
         if data.get("field_dN_obs_s") is not None:
@@ -369,6 +375,26 @@ def prepare_catalog_views(
             field_occupied_pixels = barrier(
                 jnp.asarray(occupied_np, dtype=jnp.int32)
             )
+
+        # Marked-host field normalizer: flatten the FULL-SKY z-centred marks so
+        # mu_miss and the observed marked mass are view-independent (PE and
+        # selection share ONE global Z).  Needs the full arrays (pre-compaction).
+        mark_model = getattr(opts, "mark_model", "none")
+        mark_names = tuple(getattr(opts, "mark_names", ()) or ())
+        if (mark_model not in (None, "none") and mark_names
+                and full_z is not None):
+            from darksirens.marks import MARK_FIELDS
+
+            mark_tables = {
+                name: data.get(MARK_FIELDS[name]) for name in mark_names
+            }
+            if all(v is not None for v in mark_tables.values()):
+                fz, fw, fvals = build_field_mark_inputs(
+                    full_z, full_w, full_n, mark_tables, mark_names
+                )
+                field_mark_z = barrier(fz)
+                field_mark_w = barrier(fw)
+                field_mark_values = barrier(fvals)
 
     # Carry the (global) Q table HOST-side, unbarriered: likelihood.py slices it
     # to the per-view union pixels so only the compact block reaches the device.
@@ -514,4 +540,7 @@ def prepare_catalog_views(
         field_lss_q=field_lss_q,
         field_lss_q_empty_sum=field_lss_q_empty_sum,
         field_delta_g=field_delta_g,
+        field_mark_z=field_mark_z,
+        field_mark_w=field_mark_w,
+        field_mark_values=field_mark_values,
     )

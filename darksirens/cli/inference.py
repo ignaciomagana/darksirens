@@ -671,9 +671,12 @@ def main():
                          "conditional for a single catalog, field for a K>=2 mixture; for "
                          "dark_sirens the degenerate explicit combinations (field at K=1, "
                          "conditional at K>=2) are fatal. "
-                         "Field requires the full-sky catalog; incompatible with --use_LSS, "
-                         "--lss_marginalize, --lss_completion, --mark_model, and "
-                         "universe models other than dark_sirens/dark_sirens_complete."))
+                         "Field requires the full-sky catalog (incompatible with "
+                         "--drop_full_catalog); composes with --lss_completion, --use_LSS "
+                         "and --mark_model (the global normalizer carries the same "
+                         "modulated missing budget as the numerator); incompatible with "
+                         "--lss_marginalize and universe models other than "
+                         "dark_sirens/dark_sirens_complete."))
     g.add_argument("--survey_z_depth", type=float, default=None, metavar="Z",
                    help=("Redshift depth bounding the completion missing-galaxy budget to "
                          "z <= z_depth instead of the full [0, DARKSIRENS_ZMAX] grid, avoiding "
@@ -882,9 +885,10 @@ def main():
 
     # FIELD-convention sky weighting scope (host-fraction estimand).  The
     # missing-galaxy budget modulations (deterministic Q_LSS, use_LSS delta_g)
-    # ARE supported: the survey-global normalizer carries the SAME per-pixel
-    # budget as the numerator (field_global_log_Z).  Marks and the Q ensemble
-    # (lss_marginalize) stay gated until their global normalizers land.
+    # and the marked-host model ARE supported: the survey-global normalizer
+    # carries the SAME per-pixel budget as the numerator (field_global_log_Z /
+    # field_global_log_Z_marked).  The Q ensemble (lss_marginalize) stays
+    # gated until per-member global normalizers land.
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         if opts.universe_model not in ("dark_sirens", "dark_sirens_complete"):
             _fatal("--catalog_sky_weighting field supports --universe_model "
@@ -894,8 +898,6 @@ def main():
             _fatal("--catalog_sky_weighting field is not supported with --lss_marginalize "
                    "(the Q ENSEMBLE needs per-member global normalizers); use the "
                    "deterministic --lss_completion table.")
-        if getattr(opts, "mark_model", "none") not in (None, "none"):
-            _fatal("--catalog_sky_weighting field is not supported with --mark_model.")
         if getattr(opts, "drop_full_catalog", False):
             _fatal("--catalog_sky_weighting field needs the full-sky catalog rows to "
                    "count empty pixels; it is incompatible with --drop_full_catalog.")

@@ -462,9 +462,10 @@ def test_field_gate_rejects_marks_ensemble_and_inconsistent_budgets():
     cosmo, survey = _cosmo(), _survey()
     zgals, _dz, wgals, ngals = _synthetic_full_sky()
 
-    # Marked-host model: rejected (until the marked global normalizer lands).
+    # Marked-host model WITHOUT the flat full-sky mark inputs: rejected (the
+    # marked global normalizer needs view-independent mu_miss / S_obs).
     cat_marks = _catalog_with_field(zgals, wgals, ngals)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="field_mark"):
         prepare_redshift_prior_state(
             "dark_sirens", cosmo, survey, cat_marks,
             mark_model="loglinear", mark_names=("logmstar",),

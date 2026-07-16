@@ -99,12 +99,17 @@ def _require_field_mode_scope(
         raise NotImplementedError(
             "catalog_sky_weighting='field' is not supported with lss_marginalize."
         )
-    if mark_model not in (None, "none"):
-        raise NotImplementedError(
-            "catalog_sky_weighting='field' is not supported with a marked-host "
-            "model (mark_model)."
-        )
     for cat in catalogs:
+        if (mark_model not in (None, "none")
+                and (cat.field_mark_values is None
+                     or cat.field_mark_z is None
+                     or cat.field_mark_w is None)):
+            raise ValueError(
+                "catalog_sky_weighting='field' with a marked-host model "
+                "requires the flat FULL-SKY mark inputs on every catalog "
+                "(field_mark_z / field_mark_w / field_mark_values); build them "
+                "via build_field_mark_inputs."
+            )
         if any(
             getattr(cat, name) is not None
             for name in (

@@ -209,6 +209,12 @@ class EMCatalog(NamedTuple):
     field_lss_q: Any = None             # (n_occupied, N_grid) float32 LINEAR Q rows
     field_lss_q_empty_sum: Any = None   # (N_grid,) float64 Sum_empty Q_p(z) (data constant)
     field_delta_g: Any = None           # (n_occupied, N_grid) float32 delta_g rows
+    # Marked-host field normalizer: flat FULL-SKY per-galaxy inputs so mu_miss
+    # and the observed marked mass Sum w_i h_i are view-independent (PE and
+    # selection share ONE global Z).  Built by build_field_mark_inputs.
+    field_mark_z: Any = None            # (N_gal_total,) float32 galaxy redshifts
+    field_mark_w: Any = None            # (N_gal_total,) float32 base weights
+    field_mark_values: Any = None       # (N_gal_total, n_marks) float32 z-centred marks
 
 
 class GWEvent(NamedTuple):

@@ -17,6 +17,7 @@ from .registry import (
     MARK_MODEL_LATEX,
     get_mark_model,
     mark_model_parser,
+    mark_model_flat_parser,
     mark_model_prior_parser,
     mark_fiducial,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "MARK_MODEL_LATEX",
     "get_mark_model",
     "mark_model_parser",
+    "mark_model_flat_parser",
     "mark_model_prior_parser",
     "mark_fiducial",
 ]
