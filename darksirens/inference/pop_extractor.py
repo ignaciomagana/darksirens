@@ -184,6 +184,12 @@ def make_pop_extractor(settings: dict):
         sky_model              = settings.get("sky_model", "isotropic"),
         mark_model             = settings.get("mark_model", "none"),
         mark_names             = tuple(settings.get("mark_names", ()) or ()),
+        # K>=2 runs insert per-catalog `_c{k}` survey blocks and `fcat_*`
+        # sticks, and a Q-active run drops b_miss from the survey block;
+        # omitting these made build_parameter_space reject such labels in
+        # fixed_parameter_values (KeyError) for any K>=2 chain.
+        n_catalogs             = int(settings.get("n_catalogs", 1) or 1),
+        lss_completion_active  = bool(settings.get("lss_completion_active", False)),
     )
 
     label_to_coord_idx = {label: idx for idx, label in enumerate(labels)}

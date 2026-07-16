@@ -195,6 +195,12 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             bundle["field_n_empty"] = n_empty
             bundle["field_N_obs_total"] = N_obs_total
 
+        # Per-catalog completion validation (dry run) needs each catalog's own
+        # per-sample GLOBAL pixel indices, which compaction otherwise discards.
+        if getattr(opts, "validate_completion", False):
+            bundle["pixels_pe_full"] = pixels_pe
+            bundle["pixels_sel_full"] = pixels_sel
+
         bundles.append(bundle)
 
     return bundles
