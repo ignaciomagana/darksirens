@@ -390,11 +390,6 @@ def darksiren_log_likelihood(
                 "per-catalog mark operands (mark_names_all / mark_params_all); "
                 "the single-catalog mark_names/mark_params spelling is K=1-only."
             )
-        if sky_model != "isotropic":
-            raise NotImplementedError(
-                "Only the isotropic sky model is supported with the K-catalog "
-                f"mixture; got sky_model={sky_model!r}."
-            )
         if mixture_log_weights is None:
             raise ValueError(
                 "n_catalogs >= 2 requires mixture_log_weights (a (K,) array)."

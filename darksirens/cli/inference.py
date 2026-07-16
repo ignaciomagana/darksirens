@@ -924,9 +924,6 @@ def main():
                           "inside the mixture.")
         if opts.counterpart is not None:
             _fatal("--counterpart is not supported with a multi-catalog mixture.")
-        if getattr(opts, "sky_model", "isotropic") != "isotropic":
-            _fatal("--sky_model must be 'isotropic' with a multi-catalog mixture "
-                   f"(got '{opts.sky_model}').")
 
     # FIELD-convention sky weighting scope (host-fraction estimand).  The
     # missing-galaxy budget modulations (deterministic Q_LSS, use_LSS delta_g)

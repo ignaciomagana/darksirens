@@ -610,6 +610,71 @@ def test_delta_g_on_catalog_2_couples_to_b_miss_c2_only():
 
 
 # ---------------------------------------------------------------------------
+# Anisotropic sky models at K>=2 (population-level g(n,z), shared factor)
+# ---------------------------------------------------------------------------
+
+def _unit_dirs(n, phase):
+    ang = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False) + phase
+    nx = np.cos(ang) * np.sqrt(0.75)
+    ny = np.sin(ang) * np.sqrt(0.75)
+    nz = np.full(n, 0.5)
+    return jnp.asarray(nx), jnp.asarray(ny), jnp.asarray(nz)
+
+
+def _sky_likelihood(bundles, fixed, pop_fid, overrides):
+    data = dict(_shared_physics())
+    nx_pe, ny_pe, nz_pe = _unit_dirs(2, 0.1)
+    nx_sel, ny_sel, nz_sel = _unit_dirs(8, 0.7)
+    data.update(nx_pe=nx_pe, ny_pe=ny_pe, nz_pe=nz_pe,
+                nx_sel=nx_sel, ny_sel=ny_sel, nz_sel=nz_sel)
+    data["apix"] = hp.nside2pixarea(1)
+    data["catalogs"] = list(bundles)
+    opts = SimpleNamespace(
+        pop_model="powerlaw+peak", universe_model="dark_sirens",
+        sel_batch_size=None, fix_cosmology=True, fix_population=False,
+        fix_survey=True, prior_overrides=overrides,
+        fixed_parameter_values=fixed, complete_empty_pixel_policy="volume",
+        bright_siren_sky_marginalized=False,
+        catalog_sky_weighting="field", n_catalogs=len(bundles),
+        sky_model="dipole",
+    )
+    from darksirens.likelihood.factory import make_likelihood as _mk
+    return _mk(opts, data, pop_fid, fixed_parameter_values=fixed)
+
+
+def test_k2_duplicated_dipole_equals_k1_dipole():
+    """K=2 (A, A) + dipole == K=1 (A) + dipole at any fcat_2: the anisotropic
+    source-rate factor g(n) is population-level (one shared factor per
+    sample, outside the catalog logsumexp)."""
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    # Sampled coords K=1: [pop, d_x, d_y, d_z]; K=2 inserts fcat_2 before sky.
+    d = (0.12, -0.05, 0.08)
+    ll_k1 = _sky_likelihood([_field_bundle()], fixed, pop_fid, overrides)
+    val_k1 = float(ll_k1(jnp.asarray([mid, *d])))
+    assert np.isfinite(val_k1)
+    ll_k2 = _sky_likelihood(
+        [_field_bundle(), _field_bundle()], fixed, pop_fid, overrides
+    )
+    val_k2 = float(ll_k2(jnp.asarray([mid, 0.37, *d])))
+    assert abs(val_k2 - val_k1) <= 1e-12
+
+
+def test_dipole_parameters_are_live_at_k2():
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    ll = _sky_likelihood(
+        [_field_bundle(), _field_bundle()], fixed, pop_fid, overrides
+    )
+    v_iso = float(ll(jnp.asarray([mid, 0.37, 0.0, 0.0, 0.0])))
+    v_dip = float(ll(jnp.asarray([mid, 0.37, 0.2, 0.0, 0.0])))
+    assert np.isfinite(v_iso) and np.isfinite(v_dip)
+    assert v_iso != v_dip
+
+    g = jax.grad(lambda c: ll(c))(jnp.asarray([mid, 0.37, 0.1, 0.05, -0.02]))
+    assert np.all(np.isfinite(np.asarray(g)))
+    assert float(jnp.abs(g[2])) > 0.0
+
+
+# ---------------------------------------------------------------------------
 # Marked-host field normalizer (field_global_log_Z_marked)
 # ---------------------------------------------------------------------------
 
