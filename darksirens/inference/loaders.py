@@ -200,6 +200,50 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
     return bundles
 
 
+def _parse_pdet_cosmology(opts) -> tuple[float, float]:
+    """'H0,Om0' -> floats for the P_det emulator's injection-campaign cosmology."""
+    raw = getattr(opts, "pdet_cosmology", None)
+    if raw is None or raw == "":
+        from darksirens.gw.selection import PDET_INJ_H0, PDET_INJ_OM0
+
+        return float(PDET_INJ_H0), float(PDET_INJ_OM0)
+    if isinstance(raw, (tuple, list)):
+        h0, om0 = raw
+    else:
+        parts = str(raw).split(",")
+        if len(parts) != 2:
+            raise ValueError(
+                "--pdet_cosmology must be 'H0,Om0' (e.g. '67.9,0.3065'); "
+                f"got {raw!r}."
+            )
+        h0, om0 = parts
+    return float(h0), float(om0)
+
+
+def resolve_selection_inputs(opts):
+    """Selection inputs from exactly one source: injection HDF5 or P_det emulator.
+
+    Returns the 8-tuple ``(m1detsels, m2detsels, dLsels, chieffsels, rasels,
+    decsels, p_draw, Ndraw)`` shared by both sources.  ``--pdet_flow_path``
+    generates pseudo-injections from the emulator flow once at load time;
+    everything downstream (GWEvent packing, compute_selection_term, Neff
+    guards, batching) is source-agnostic.
+    """
+    if getattr(opts, "pdet_flow_path", None):
+        from darksirens.gw.selection import pseudo_injections_from_pdet_flow
+
+        h0, om0 = _parse_pdet_cosmology(opts)
+        return pseudo_injections_from_pdet_flow(
+            opts.pdet_flow_path,
+            nsamp=int(getattr(opts, "pdet_nsamp", 1_000_000)),
+            seed=int(getattr(opts, "pdet_seed", 42)),
+            H0=h0,
+            Om0=om0,
+            chieff_amax=float(getattr(opts, "pdet_chieff_amax", 0.99)),
+        )
+    return load_selection_samples(opts.gwselection_path)
+
+
 def load_gw_and_selection_inputs(opts) -> dict:
     """Load GW posterior and selection samples."""
     # Load GW posterior samples (Always required)
@@ -212,7 +256,7 @@ def load_gw_and_selection_inputs(opts) -> dict:
     (
         m1detsels, m2detsels, dLsels, chieffsels,
         rasels, decsels, p_draw, Ndraw,
-    ) = load_selection_samples(opts.gwselection_path)
+    ) = resolve_selection_inputs(opts)
 
     return dict(
         m1det=m1det,
@@ -258,7 +302,7 @@ def load_flow_and_selection_inputs(opts) -> dict:
     (
         m1detsels, m2detsels, dLsels, chieffsels,
         rasels, decsels, p_draw, Ndraw,
-    ) = load_selection_samples(opts.gwselection_path)
+    ) = resolve_selection_inputs(opts)
 
     return dict(
         m1det=None,

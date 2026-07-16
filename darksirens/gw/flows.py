@@ -55,7 +55,8 @@ except ModuleNotFoundError as _e:  # pragma: no cover - environment-dependent
         "darksirens.gw.flows requires the flow-surrogate extras "
         "(flowjax, paramax, equinox>=0.11). Install them with "
         "`pip install 'darksirens[flows]'` or "
-        "`pip install 'flowjax>=17.1,<18' paramax 'equinox>=0.11,<0.12'`."
+        "`pip install 'flowjax>=17.1,<18' paramax 'equinox>=0.11,<0.13'` "
+        "(jax>=0.6 environments need equinox>=0.12)."
     ) from _e
 
 
