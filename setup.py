@@ -16,7 +16,7 @@ extras_require = {
     "gp": ["tinygp"],
     # Normalizing-flow single-event surrogates (--gw_flows_path). Lazy import
     # in darksirens/gw/flows.py keeps these optional for everyone else.
-    "flows": ["flowjax>=17.1,<18", "paramax", "equinox>=0.11,<0.12"],
+    "flows": ["flowjax>=17.1,<18", "paramax", "equinox>=0.11,<0.13"],
 }
 
 with open("README.md", "r") as fh:

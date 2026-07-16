@@ -393,10 +393,11 @@ def main():
                          "(<EVENT>/<EVENT>_flow.npz) replacing stored PE "
                          "samples. Mutually exclusive with --gw_path; "
                          "spectral_sirens only."))
-    g.add_argument("--gwselection_path", required=True,
+    g.add_argument("--gwselection_path", default=None,
                    help=("gwcat selection/injection file (format_version "
                          "gwcat-selection-1.0 or gwcat-selection-2.0; a 2.0 "
-                         "file must use spin_basis=chieff)."))
+                         "file must use spin_basis=chieff). Exactly one of "
+                         "--gwselection_path / --pdet_flow_path is required."))
     g.add_argument("--survey_path",      default=None, nargs="+", metavar="PATH",
                    help=("Galaxy survey catalog(s). One path = current "
                          "single-catalog behaviour. Multiple paths define a "
@@ -437,6 +438,28 @@ def main():
                          "(exactly corrected in the proposal density)."))
     g.add_argument("--flows_support_nsamples", type=int, default=4096,
                    help="Flow draws used to measure each event's support box.")
+
+    g = optp.add_argument_group(
+        "Selection-function emulator (alternative to --gwselection_path)")
+    g.add_argument("--pdet_flow_path", default=None,
+                   help=("NF P_det emulator checkpoint (npz: found-injection "
+                         "flow + xi). Drives the selection integral through "
+                         "pseudo-injections drawn once at load time. Exactly "
+                         "one of --gwselection_path / --pdet_flow_path is "
+                         "required."))
+    g.add_argument("--pdet_nsamp", type=int, default=1_000_000,
+                   help=("Pseudo-injections drawn from the emulator flow at "
+                         "load (Ndraw = nsamp / xi)."))
+    g.add_argument("--pdet_seed", type=int, default=42,
+                   help="Seed of the emulator pseudo-injection draw.")
+    g.add_argument("--pdet_cosmology", default="67.9,0.3065",
+                   help=("'H0,Om0' of the injection-campaign cosmology used "
+                         "for z->dL and the Jacobian; must match the campaign "
+                         "the emulator was trained on."))
+    g.add_argument("--pdet_chieff_amax", type=float, default=0.99,
+                   help=("Reference amax of the chi_eff spin-prior swap; keep "
+                         "equal to --flows_chieff_amax and the injection-file "
+                         "convention."))
 
     g = optp.add_argument_group("Physical model")
     g.add_argument("--universe_model", default="spectral_sirens",
@@ -869,6 +892,30 @@ def main():
             "Exactly one of --gw_path (stored PE samples) or --gw_flows_path "
             "(per-event flow surrogates) is required."
         )
+    if bool(opts.gwselection_path) == bool(opts.pdet_flow_path):
+        _fatal(
+            "Exactly one of --gwselection_path (injection file) or "
+            "--pdet_flow_path (P_det emulator) is required."
+        )
+    if opts.pdet_flow_path:
+        # Orthogonal to the event source: valid with --gw_path or
+        # --gw_flows_path alike.
+        if not os.path.isfile(opts.pdet_flow_path):
+            _fatal(f"--pdet_flow_path is not a file: {opts.pdet_flow_path}")
+        if opts.pdet_nsamp <= 0:
+            _fatal("--pdet_nsamp must be positive.")
+        try:
+            _pdet_h0, _pdet_om0 = (float(v) for v in
+                                   str(opts.pdet_cosmology).split(","))
+        except ValueError:
+            _fatal("--pdet_cosmology must be 'H0,Om0' (e.g. '67.9,0.3065'); "
+                   f"got {opts.pdet_cosmology!r}.")
+        else:
+            if _pdet_h0 <= 0.0 or not (0.0 < _pdet_om0 < 1.0):
+                _fatal("--pdet_cosmology needs H0 > 0 and 0 < Om0 < 1; "
+                       f"got {opts.pdet_cosmology!r}.")
+        if not (0.0 < opts.pdet_chieff_amax <= 1.0):
+            _fatal("--pdet_chieff_amax must be in (0, 1].")
     if opts.gw_flows_path:
         if not os.path.isdir(opts.gw_flows_path):
             _fatal(f"--gw_flows_path is not a directory: {opts.gw_flows_path}")
@@ -1012,7 +1059,13 @@ def main():
         _row("Flow PE cosmo", opts.flows_pe_cosmology)
     else:
         _row("GW events path",  opts.gw_path)
-    _row("Selection path",  opts.gwselection_path)
+    if opts.pdet_flow_path:
+        _row("Pdet emulator",   opts.pdet_flow_path)
+        _row("Pdet draws M",    f"{opts.pdet_nsamp:,} (seed {opts.pdet_seed})")
+        _row("Pdet inj. cosmo", opts.pdet_cosmology)
+        _row("Pdet chieff amax", opts.pdet_chieff_amax)
+    else:
+        _row("Selection path",  opts.gwselection_path)
     if opts.survey_path:
         if opts.n_catalogs == 1:
             _row("Survey path",  opts.survey_path)

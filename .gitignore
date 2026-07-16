@@ -188,3 +188,10 @@ cython_debug/
 
 # Flow-surrogate outputs / extracted checkpoints (branch darksirens_flows)
 flows/
+
+# P_det emulator data products / references (distributed out-of-band, not via git)
+PDetO4NF.npz
+gw-nf-main.zip
+m1m2dLchi_eff.zip
+runs/
+FULL_INFERENCE_RUNS.md
