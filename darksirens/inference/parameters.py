@@ -94,6 +94,16 @@ class ParameterDecoder:
         values = resolve_parameter_values(
             coord, self.sampled_labels, self.fixed_parameter_values
         )
+        return self._decode_from_values(values)
+
+    def _decode_from_values(self, values: dict):
+        """Decode an already-resolved label dict into the single-catalog params.
+
+        Split out of :meth:`decode` so :meth:`decode_mixture` can resolve the
+        label dictionary exactly once (via ``resolve_parameter_values``) and
+        reuse it for both the catalog-1 component and the suffixed ``_c{k}``
+        blocks.  :meth:`decode`'s public behaviour is unchanged.
+        """
 
         def _get(label, default):
             return values[label] if label in values else default
@@ -153,13 +163,16 @@ class ParameterDecoder:
         from the ``eta_<mark>_c{k}`` labels), and ``log_w`` is the ``(K,)``
         array of log mixture weights from the sampled sticks ``fcat_2..fcat_K``.
         """
-        # Catalog 1 (and cosmo/pop/sky/mark) reuse decode() verbatim, so the
-        # first mixture component is bit-identical to the single-catalog decode.
-        cosmo, survey1, pop_params, sky_params, mark_params = self.decode(coord)
-
+        # Resolve the label dictionary EXACTLY ONCE and reuse it for both the
+        # catalog-1 component (via _decode_from_values, the shared body of
+        # decode()) and the suffixed _c{k} blocks below.  Catalog 1 is thus
+        # bit-identical to the single-catalog decode().
         coord = jnp.asarray(coord)
         values = resolve_parameter_values(
             coord, self.sampled_labels, self.fixed_parameter_values
+        )
+        cosmo, survey1, pop_params, sky_params, mark_params = (
+            self._decode_from_values(values)
         )
 
         def _get(label, default):

@@ -621,8 +621,14 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
 
     # --- observed density: O(1) cache lookup, or on-the-fly fallback ---
     if em_catalog.dN_obs_kde is not None:
-        cache_idx = em_catalog.pixel_to_cache_idx[global_pix]
-        dN_obs = em_catalog.dN_obs_kde[cache_idx]
+        # The KDE cache is built row-for-row with THIS catalog's ``unique_pixels``
+        # (every builder -- build_pixel_kde_cache, catalog_views, the CLI dry-run
+        # -- aligns ``dN_obs_kde[k]`` with row ``k``), so the historical
+        # ``pixel_to_cache_idx[global_pix]`` round-trip is exactly the identity
+        # ``k -> k``.  Index the cache directly by row and skip the dense
+        # ``pixel_to_cache_idx`` lookup entirely (12*nside^2 on the flat union
+        # path).  Pinned by tests/test_cache_row_indexing.py.
+        dN_obs = em_catalog.dN_obs_kde[row]
     else:
         dN_obs = _kde_dndz_obs(row, em_catalog.zgals, wgals=em_catalog.wgals, ngals=em_catalog.ngals)
 
@@ -1113,8 +1119,8 @@ def _completion_clip_fractions_for_pixel(
     global_pix = pix if em_catalog.unique_pixels is None else em_catalog.unique_pixels[pix]
 
     if em_catalog.dN_obs_kde is not None:
-        cache_idx = em_catalog.pixel_to_cache_idx[global_pix]
-        dN_obs = em_catalog.dN_obs_kde[cache_idx]
+        # Cache row == catalog row by construction (see _row_C); index directly.
+        dN_obs = em_catalog.dN_obs_kde[pix]
     else:
         dN_obs = _kde_dndz_obs(
             pix, em_catalog.zgals, wgals=em_catalog.wgals, ngals=em_catalog.ngals

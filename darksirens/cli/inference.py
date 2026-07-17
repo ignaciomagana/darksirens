@@ -303,7 +303,9 @@ def run_completion_validation(
     max_pixels = max(1, int(opts.completion_validation_pixels))
     unique_pixels = unique_pixels[:max_pixels]
 
-    dN_obs_kde, pixel_to_cache_idx = build_pixel_kde_cache(
+    # The completion code indexes the KDE cache directly by row (cache row k ==
+    # unique_pixels[k]); the dense pixel_to_cache_idx lookup is no longer used.
+    dN_obs_kde, _ = build_pixel_kde_cache(
         unique_pixels=unique_pixels,
         zgals=full_z,
         n_pix_catalog=int(data.get("n_pix_catalog", np.asarray(full_z).shape[0])),
@@ -345,7 +347,7 @@ def run_completion_validation(
             data.get("delta_g_pix_z", jnp.zeros((1, dN_obs_kde.shape[1])))
         ),
         dN_obs_kde=dN_obs_kde,
-        pixel_to_cache_idx=pixel_to_cache_idx,
+        pixel_to_cache_idx=None,
         unique_pixels=jnp.asarray(unique_pixels, dtype=jnp.int32),
     )
     diagnostics = completion_clip_diagnostics(
