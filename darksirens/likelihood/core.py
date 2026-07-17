@@ -76,6 +76,94 @@ def selection_prior_model(universe_model: str) -> str:
     return universe_model
 
 
+# EMCatalog leaves consumed by ``prepare_redshift_prior_state`` and its ENTIRE
+# call tree, enumerated by reading that tree (do NOT guess-extend this list):
+#   completion_curves -> _precompute_grids (apix),
+#       _resolve_lss_completion_row_tables (lss_completion_logq/q/_members),
+#       _row_C (unique_pixels, dN_obs_kde -- indexed directly by row, no longer
+#           via pixel_to_cache_idx; zgals/wgals/ngals on the uncached fallback),
+#       _assemble/_completion_curves_row (delta_g_pix_z);
+#   catalog_kernel_state / marked_catalog_kernel_state (zgals, dzgals, wgals, ngals);
+#   _row_counts (ngals, wgals);
+#   the mark parser _gather_marks (mark_logmstar/logssfr/metallicity/color; zgals);
+#   field_global_log_Z / _members / _marked (field_dN_obs_s, field_n_empty,
+#       field_N_obs_total, field_lss_q(+_empty_sum)(+_members), field_delta_g,
+#       field_mark_z/w/values).
+# The state is a PURE function of (model, cosmo, survey, mark params,
+# sky-weighting) plus these leaves, so two EMCatalogs sharing the SAME object for
+# every one of them yield the identical state.  Leaves prepare NEVER reads --
+# sample_to_unique_idx, the counterpart_* plumbing, active_counterpart_index,
+# bright_siren_sky_marginalized, pixel_to_cache_idx (dN_obs_kde is indexed
+# directly by row now -- see completion._row_C), and lss_completion_indexing
+# (consumed EAGERLY in the factory, before this call) -- are deliberately
+# EXCLUDED so a PE/selection pair that differs ONLY in those (the post-union
+# multitracer bundle, and the flat K=1 union path) can still share.
+_PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
+    "apix",
+    "zgals", "dzgals", "wgals", "ngals",
+    "delta_g_pix_z", "dN_obs_kde", "unique_pixels",
+    "lss_completion_logq", "lss_completion_q",
+    "lss_completion_logq_members", "lss_completion_q_members",
+    "mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color",
+    "field_dN_obs_s", "field_n_empty", "field_N_obs_total",
+    "field_lss_q", "field_lss_q_empty_sum",
+    "field_lss_q_members", "field_lss_q_empty_sum_members",
+    "field_delta_g",
+    "field_mark_z", "field_mark_w", "field_mark_values",
+)
+
+# Prior models whose STATE is EMCatalog-derived and thus dedup-eligible across
+# the PE / selection seams.  ``spectral_sirens`` (the WL and bright-siren
+# SELECTION model) is excluded so WL configs never share -- its state is a cheap
+# cosmo-only vector and its trace must stay untouched; ``bright_sirens`` returns
+# ``None`` and its PE model already differs from the spectral selection model.
+_SHAREABLE_PRIOR_MODELS = frozenset({"dark_sirens", "dark_sirens_complete"})
+
+
+def can_share_redshift_prior_state(pe_model, sel_model, cat_pe, cat_sel) -> bool:
+    """Whether the PE and selection redshift-prior states are provably identical.
+
+    True iff both seams resolve to the SAME dedup-eligible prior model AND every
+    EMCatalog field ``prepare_redshift_prior_state`` reads
+    (:data:`_PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS`) is the identical object
+    (``is``) in both catalogs.  In that case ``prepare_redshift_prior_state`` --
+    a pure function of the model, the (seam-shared) cosmo/survey/mark params and
+    those leaves -- returns the identical state, so it may be built ONCE and
+    reused for both seams.  Object identity (never value equality) keeps this
+    trace-safe and cheap and defaults to NOT sharing whenever any consumed field
+    differs.
+    """
+    if pe_model != sel_model or pe_model not in _SHAREABLE_PRIOR_MODELS:
+        return False
+    return all(
+        getattr(cat_pe, name) is getattr(cat_sel, name)
+        for name in _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS
+    )
+
+
+def redshift_prior_state_sharing(universe_model, catalogs_pe, catalogs_sel) -> tuple:
+    """Per-catalog PE/selection state-sharing verdict for ``universe_model``.
+
+    Called EAGERLY by the likelihood factory on the CONCRETE (pre-jit)
+    EMCatalogs -- the ``is`` identity ``can_share_redshift_prior_state`` relies on
+    is erased once each leaf becomes a distinct jit tracer, so the verdict is
+    resolved here and threaded into ``darksiren_log_likelihood`` as the static
+    ``share_prior_state_by_catalog`` tuple.  Mirrors that function's PE/selection
+    model resolution (``pe_model`` / ``selection_prior_model``).  Returns a tuple
+    of bools aligned with the catalog order (element k True => the PE and
+    selection redshift-prior states of catalog k are provably identical and may
+    be built once and reused for both seams).
+    """
+    pe_model = (
+        "spectral_sirens" if universe_model == "spectral_sirens_wl" else universe_model
+    )
+    sel_model = selection_prior_model(universe_model)
+    return tuple(
+        can_share_redshift_prior_state(pe_model, sel_model, cat_pe, cat_sel)
+        for cat_pe, cat_sel in zip(catalogs_pe, catalogs_sel)
+    )
+
+
 def _require_field_mode_scope(
     universe_model, wl_enabled, lss_marginalize, mark_model, catalogs
 ):
@@ -192,6 +280,7 @@ def _require_field_mode_scope(
         "selection_neff_soft_guard",
         "n_catalogs",
         "catalog_sky_weighting",
+        "share_prior_state_by_catalog",
     ],
 )
 def darksiren_log_likelihood(
@@ -261,6 +350,11 @@ def darksiren_log_likelihood(
     # legacy behaviour.  "field": survey-global normalizer so the mixture weight
     # is the host FRACTION.  Static; gated to the plain galaxy-count host model.
     catalog_sky_weighting: str = "conditional",
+    # Per-catalog redshift-prior-state sharing verdict, computed EAGERLY by the
+    # caller via ``redshift_prior_state_sharing`` (object identity is gone once
+    # each EMCatalog leaf is a jit tracer, so it must be decided pre-jit).  Empty
+    # (default) shares nothing -- every legacy caller keeps its exact trace.
+    share_prior_state_by_catalog: tuple = (),
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
@@ -473,26 +567,47 @@ def darksiren_log_likelihood(
     # it to both states so it is applied identically to the PE and selection
     # terms (prepare ignores it for non-dark_sirens models; at K >= 2 the guard
     # above pins mark_model to "none", the legacy mixture semantics).
-    prior_states_univ = tuple(
-        prepare_redshift_prior_state(
+    # PE / selection differ ONLY through (model, EMCatalog); cosmo, survey, mark
+    # params and sky-weighting are identical per catalog.  ``can_share_redshift_
+    # prior_state`` proves (EAGERLY, on the concrete EMCatalogs -- object
+    # identity is erased once each leaf becomes a distinct jit tracer, so the
+    # verdict CANNOT be recomputed here) that the two seams would build the SAME
+    # state.  The caller passes that per-catalog verdict as the static tuple
+    # ``share_prior_state_by_catalog`` (built via ``redshift_prior_state_sharing``
+    # from the pre-jit catalogs); where it is True we build the state ONCE and
+    # reuse the SAME object for both seams -- trace-level dedup that removes a
+    # genuinely duplicated subgraph with the materialize barrier ON and saves
+    # trace time with it OFF.  Default (empty tuple) shares nothing, so every
+    # caller that does not opt in (bright_sirens / WL, and any external caller)
+    # keeps its exact legacy trace.
+    univ_states = []
+    sel_states = []
+    for k in range(n_catalogs):
+        state_univ = prepare_redshift_prior_state(
             pe_model, cosmo, surveys_all[k], catalogs_pe_all[k],
             mark_model=_mark_model_for(k), mark_params=mark_params_all[k],
             mark_names=mark_names_all[k],
             materialize_state=materialize_redshift_prior_state,
             catalog_sky_weighting=catalog_sky_weighting,
         )
-        for k in range(n_catalogs)
-    )
-    prior_states_sel = tuple(
-        prepare_redshift_prior_state(
-            selection_model, cosmo, surveys_all[k], catalogs_sel_all[k],
-            mark_model=_mark_model_for(k), mark_params=mark_params_all[k],
-            mark_names=mark_names_all[k],
-            materialize_state=materialize_redshift_prior_state,
-            catalog_sky_weighting=catalog_sky_weighting,
+        share_k = (
+            k < len(share_prior_state_by_catalog)
+            and bool(share_prior_state_by_catalog[k])
         )
-        for k in range(n_catalogs)
-    )
+        if share_k:
+            state_sel = state_univ
+        else:
+            state_sel = prepare_redshift_prior_state(
+                selection_model, cosmo, surveys_all[k], catalogs_sel_all[k],
+                mark_model=_mark_model_for(k), mark_params=mark_params_all[k],
+                mark_names=mark_names_all[k],
+                materialize_state=materialize_redshift_prior_state,
+                catalog_sky_weighting=catalog_sky_weighting,
+            )
+        univ_states.append(state_univ)
+        sel_states.append(state_sel)
+    prior_states_univ = tuple(univ_states)
+    prior_states_sel = tuple(sel_states)
 
     def _eval_prior_mix(model, states, z, pix, catalogs):
         """log p(z | pix) for ``model`` across the K-catalog mixture.

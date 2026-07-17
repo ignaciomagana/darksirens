@@ -23,6 +23,7 @@ from darksirens.catalogs.compact import (
     _compact_catalog_for_pixels,
     validate_loaded_survey_shapes,
 )
+from darksirens.likelihood.catalog_views import unique_inference_pixels
 from darksirens.catalogs.counterparts import build_counterpart_catalog
 from darksirens.catalogs.lss import maybe_load_lss_completion
 from darksirens.catalogs.marks import load_and_center_survey_marks
@@ -160,12 +161,22 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         pixels_sel = np.asarray(
             hp.ang2pix(nside, np.pi / 2 - decsels, rasels), dtype=np.int32
         )
-        (
-            up_pe, s2u_pe, zpe, dzpe, wpe, npe,
-        ) = _compact_catalog_for_pixels(pixels_pe, zgals, dzgals, wgals, ngals)
-        (
-            up_se, s2u_se, zse, dzse, wse, nse,
-        ) = _compact_catalog_for_pixels(pixels_sel, zgals, dzgals, wgals, ngals)
+        # Compact ONCE over the PE-union-selection pixel set so this bundle's PE
+        # and selection views SHARE a single galaxy table (and, downstream, a
+        # single KDE cache and singly-compacted Q/mark rows), mirroring the flat
+        # single-catalog union path in
+        # ``catalog_views.prepare_catalog_views``.  Only the per-view
+        # sample->row maps differ; ``zgals_pe``/``unique_pixels_pe`` are the SAME
+        # objects as their ``_sel`` counterparts, which ``prepare_catalog_views``
+        # and ``factory`` detect (``is``) to alias the device arrays and build one
+        # cache per bundle instead of duplicating both across the two views.
+        union_pixels = unique_inference_pixels(pixels_pe, pixels_sel)
+        z_u = zgals[union_pixels]
+        dz_u = dzgals[union_pixels]
+        w_u = wgals[union_pixels]
+        n_u = ngals[union_pixels]
+        s2u_pe = np.searchsorted(union_pixels, pixels_pe).astype(np.int32, copy=False)
+        s2u_se = np.searchsorted(union_pixels, pixels_sel).astype(np.int32, copy=False)
 
         # Per-catalog Q_LSS (deterministic table + optional ensemble when
         # --lss_marginalize); a private namespace keeps the single-catalog
@@ -221,10 +232,10 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             z_depth=z_depth,
             n_pix_catalog=npix,
             delta_g_pix_z=delta_g_k,
-            zgals_pe=zpe, dzgals_pe=dzpe, wgals_pe=wpe, ngals_pe=npe,
-            unique_pixels_pe=up_pe, sample_to_unique_pe=s2u_pe,
-            zgals_sel=zse, dzgals_sel=dzse, wgals_sel=wse, ngals_sel=nse,
-            unique_pixels_sel=up_se, sample_to_unique_sel=s2u_se,
+            zgals_pe=z_u, dzgals_pe=dz_u, wgals_pe=w_u, ngals_pe=n_u,
+            unique_pixels_pe=union_pixels, sample_to_unique_pe=s2u_pe,
+            zgals_sel=z_u, dzgals_sel=dz_u, wgals_sel=w_u, ngals_sel=n_u,
+            unique_pixels_sel=union_pixels, sample_to_unique_sel=s2u_se,
         )
         bundle.update(lss)  # lss_completion_logq / _logq_members / _indexing
         from darksirens.marks import MARK_FIELDS as _MF

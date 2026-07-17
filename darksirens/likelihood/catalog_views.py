@@ -192,6 +192,19 @@ def prepare_catalog_views(
     pe_view = _ensure_compact(data, "pe", "pixels_pe")
     sel_view = _ensure_compact(data, "sel", "pixels_sel")
 
+    # Caller-provided union views: a multitracer bundle (loaders.py) compacts PE
+    # and selection ONCE over their pixel union, so both views reference the SAME
+    # galaxy table and unique-pixel array (only the per-view sample->row maps
+    # differ).  Detect it by identity so the barriered device arrays are aliased
+    # and a SINGLE KDE cache is built per bundle -- the compact-view analogue of
+    # the flat single-catalog ``union_unique_pixels`` path below.
+    caller_union_views = (
+        pe_view is not None
+        and sel_view is not None
+        and pe_view.zgals is sel_view.zgals
+        and pe_view.unique_pixels is sel_view.unique_pixels
+    )
+
     full_z, full_dz, full_w, full_n = _full_catalog_arrays(data)
 
     def _full_or_default(full_value):
@@ -213,23 +226,32 @@ def prepare_catalog_views(
         else None
     )
 
-    zgals_sel_catalog = barrier(
-        jnp.asarray(sel_view.zgals)
-        if sel_view is not None
-        else _full_or_default(full_z)
-    )
-    dzgals_sel_catalog = barrier(
-        _full_or_default(sel_view.dzgals if sel_view is not None else full_dz)
-    )
-    wgals_sel_catalog = barrier(
-        _full_or_default(sel_view.wgals if sel_view is not None else full_w)
-    )
-    ngals_sel_raw = sel_view.ngals if sel_view is not None else full_n
-    ngals_sel_catalog = (
-        barrier(jnp.asarray(ngals_sel_raw, dtype=jnp.int32))
-        if ngals_sel_raw is not None
-        else None
-    )
+    if caller_union_views:
+        # PE and selection share one galaxy table: alias the already-barriered
+        # PE device arrays so the two EMCatalogs carry IS-identical leaves (one
+        # device buffer per array, not two copies of the same values).
+        zgals_sel_catalog = zgals_pe_catalog
+        dzgals_sel_catalog = dzgals_pe_catalog
+        wgals_sel_catalog = wgals_pe_catalog
+        ngals_sel_catalog = ngals_pe_catalog
+    else:
+        zgals_sel_catalog = barrier(
+            jnp.asarray(sel_view.zgals)
+            if sel_view is not None
+            else _full_or_default(full_z)
+        )
+        dzgals_sel_catalog = barrier(
+            _full_or_default(sel_view.dzgals if sel_view is not None else full_dz)
+        )
+        wgals_sel_catalog = barrier(
+            _full_or_default(sel_view.wgals if sel_view is not None else full_w)
+        )
+        ngals_sel_raw = sel_view.ngals if sel_view is not None else full_n
+        ngals_sel_catalog = (
+            barrier(jnp.asarray(ngals_sel_raw, dtype=jnp.int32))
+            if ngals_sel_raw is not None
+            else None
+        )
 
     unique_pixels_pe_raw = pe_view.unique_pixels if pe_view is not None else None
     unique_pixels_sel_raw = sel_view.unique_pixels if sel_view is not None else None
@@ -239,9 +261,13 @@ def prepare_catalog_views(
         else None
     )
     unique_pixels_sel = (
-        barrier(jnp.asarray(unique_pixels_sel_raw, dtype=jnp.int32))
-        if unique_pixels_sel_raw is not None
-        else None
+        unique_pixels_pe
+        if caller_union_views
+        else (
+            barrier(jnp.asarray(unique_pixels_sel_raw, dtype=jnp.int32))
+            if unique_pixels_sel_raw is not None
+            else None
+        )
     )
     sample_to_unique_pe_raw = (
         pe_view.sample_to_unique if pe_view is not None else data.get("pixels_pe")
@@ -415,12 +441,17 @@ def prepare_catalog_views(
     lss_completion_indexing = int(data.get("lss_completion_indexing", 0))
 
     dN_obs_kde_pe = dN_obs_kde_sel = None
+    # The KDE cache is always built row-for-row with the catalog's unique_pixels,
+    # so the completion code indexes ``dN_obs_kde`` DIRECTLY by row (see
+    # completion._row_C): the dense ``pixel_to_cache_idx`` lookup (12*nside^2 on
+    # the flat union path) is a pure identity round-trip and is no longer built.
+    # The EMCatalog field is retained (None) for pytree/treedef stability.
     pixel_to_cache_idx_pe = pixel_to_cache_idx_sel = None
     cache_required = universe_model in DARK_SIREN_CACHE_MODELS
 
     if cache_required:
         if union_unique_pixels is not None:
-            dN_obs_kde_pe, pixel_to_cache_idx_pe = cache_builder(
+            dN_obs_kde_pe, _ = cache_builder(
                 unique_pixels=union_unique_pixels,
                 zgals=full_z,
                 n_pix_catalog=int(
@@ -430,7 +461,20 @@ def prepare_catalog_views(
                 ngals=full_n,
             )
             dN_obs_kde_sel = dN_obs_kde_pe
-            pixel_to_cache_idx_sel = pixel_to_cache_idx_pe
+        elif caller_union_views:
+            # Bundle union (loaders.py): PE and selection share one compact
+            # galaxy table, so build ONE cache over the union rows and alias it to
+            # both views -- the compact-view analogue of the flat
+            # ``union_unique_pixels`` branch above (one cache per bundle).
+            n_union_rows = int(np.asarray(pe_view.zgals).shape[0])
+            dN_obs_kde_pe, _ = cache_builder(
+                unique_pixels=np.arange(n_union_rows, dtype=np.int32),
+                zgals=pe_view.zgals,
+                n_pix_catalog=n_union_rows,
+                wgals=pe_view.wgals,
+                ngals=pe_view.ngals,
+            )
+            dN_obs_kde_sel = dN_obs_kde_pe
         else:
             pe_mask = (
                 None
@@ -482,47 +526,39 @@ def prepare_catalog_views(
             else:
                 n_pe_rows = int(np.asarray(pe_view.zgals).shape[0])
                 n_sel_rows = int(np.asarray(sel_view.zgals).shape[0])
-                dN_obs_kde_pe, pixel_to_cache_idx_pe = cache_builder(
+                # Row-for-row caches (row k == compact row k); the completion code
+                # indexes them by row, so no global re-key lookup is built.
+                dN_obs_kde_pe, _ = cache_builder(
                     unique_pixels=np.arange(n_pe_rows, dtype=np.int32),
                     zgals=pe_view.zgals,
                     n_pix_catalog=n_pe_rows,
                     wgals=pe_view.wgals,
                     ngals=pe_view.ngals,
                 )
-                dN_obs_kde_sel, pixel_to_cache_idx_sel = cache_builder(
+                dN_obs_kde_sel, _ = cache_builder(
                     unique_pixels=np.arange(n_sel_rows, dtype=np.int32),
                     zgals=sel_view.zgals,
                     n_pix_catalog=n_sel_rows,
                     wgals=sel_view.wgals,
                     ngals=sel_view.ngals,
                 )
-                # The KDE rows above are per *compact row*, but the completion
-                # code looks the cache up by GLOBAL HEALPix pixel whenever the
-                # catalog carries ``unique_pixels`` (it translates row ->
-                # global before indexing).  A row-sized lookup indexed by a
-                # global pixel id silently clamps out of bounds under JIT and
-                # returns the wrong pixel's KDE — so rebuild the lookup in the
-                # global key space here.  Without ``unique_pixels`` the rows
-                # themselves are the keys and the identity lookup is correct.
-                pixel_to_cache_idx_pe = _global_cache_lookup(
-                    pe_view.unique_pixels, n_pe_rows, pixel_to_cache_idx_pe
-                )
-                pixel_to_cache_idx_sel = _global_cache_lookup(
-                    sel_view.unique_pixels, n_sel_rows, pixel_to_cache_idx_sel
-                )
 
+    # When PE and selection share ONE cache (flat union or bundle union), barrier
+    # it ONCE and alias, so the two EMCatalogs carry IS-identical cache leaves
+    # (not two separately-barriered copies of the same values) -- required for the
+    # redshift-prior-state sharing in likelihood/core.py and one fewer device
+    # buffer.  ``is`` identity of the pre-barrier objects is the shared signal.
+    shared_cache = (
+        dN_obs_kde_pe is not None and dN_obs_kde_pe is dN_obs_kde_sel
+    )
     dN_obs_kde_pe = barrier(dN_obs_kde_pe) if dN_obs_kde_pe is not None else None
-    dN_obs_kde_sel = barrier(dN_obs_kde_sel) if dN_obs_kde_sel is not None else None
-    pixel_to_cache_idx_pe = (
-        barrier(jnp.asarray(pixel_to_cache_idx_pe, dtype=jnp.int32))
-        if pixel_to_cache_idx_pe is not None
-        else None
+    dN_obs_kde_sel = (
+        dN_obs_kde_pe
+        if shared_cache
+        else (barrier(dN_obs_kde_sel) if dN_obs_kde_sel is not None else None)
     )
-    pixel_to_cache_idx_sel = (
-        barrier(jnp.asarray(pixel_to_cache_idx_sel, dtype=jnp.int32))
-        if pixel_to_cache_idx_sel is not None
-        else None
-    )
+    # pixel_to_cache_idx is no longer built (see completion._row_C): the fields
+    # stay None so the EMCatalog treedef is unchanged.
 
     return CatalogViews(
         zgals_pe_catalog=zgals_pe_catalog,
