@@ -1,4 +1,5 @@
 import re
+from collections.abc import Sequence
 
 import numpy as np
 from darksirens.gw.populations import pop_model_prior_parser
@@ -155,7 +156,7 @@ def build_parameter_space(
     mark_model="none",
     mark_names=(),
     n_catalogs: int = 1,
-    lss_completion_active: bool = False,
+    lss_completion_active: bool | Sequence[bool] = False,
     mark_names_by_catalog=None,
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
@@ -175,11 +176,57 @@ def build_parameter_space(
         (``log10n0_c2`` ... for catalogs ``2..K``) and the mixture-weight sticks
         ``fcat_2 .. fcat_K`` (Beta(1, K-m+1) priors), appended before the
         sky/mark blocks.  The 14-element return tuple arity is unchanged.
+    lss_completion_active
+        Whether a loaded Q_LSS completion table is active PER CATALOG (a Q table
+        replaces the local ``(1 + alpha_miss*b_miss*delta_g)`` factor, so that
+        catalog's ``b_miss`` no longer enters the likelihood and is dropped from
+        its sampled survey block).  A scalar ``bool`` broadcasts to every catalog
+        (the legacy semantics); a sequence must have length exactly
+        ``n_catalogs`` and gates each catalog independently -- catalog ``k``'s
+        ``b_miss_c{k}`` is dropped iff element ``k-1`` is true.  This is
+        per-catalog because the likelihood chooses Q-vs-``b_miss`` per catalog
+        (``completion.field_lss_q is not None``), so a mixed config (Q on some
+        catalogs only) must keep ``b_miss_c{k}`` for the Q-free catalogs.
     """
     if prior_overrides is None:
         prior_overrides = {}
     if fixed_parameter_values is None:
         fixed_parameter_values = {}
+
+    # Normalize per-catalog Q_LSS activity to a length-n_catalogs tuple.  A
+    # scalar bool broadcasts to every catalog (legacy semantics, bit-identical
+    # to the pre-per-catalog path); a sequence gates each catalog independently
+    # and MUST have exactly n_catalogs entries.
+    if isinstance(lss_completion_active, Sequence) and not isinstance(
+        lss_completion_active, (str, bytes)
+    ):
+        lss_active_by_cat = tuple(bool(x) for x in lss_completion_active)
+        if len(lss_active_by_cat) != n_catalogs:
+            raise ValueError(
+                f"lss_completion_active given as a sequence of length "
+                f"{len(lss_active_by_cat)}, but n_catalogs={n_catalogs}; pass "
+                f"exactly one activity flag per catalog (or a single bool to "
+                f"broadcast)."
+            )
+    else:
+        lss_active_by_cat = (bool(lss_completion_active),) * n_catalogs
+
+    # The active-survey filter for a catalog: models absent from the map sample
+    # the full block (``None``); otherwise a Q-active catalog drops ``b_miss``
+    # from its set (see the block-gating note below).  ``cat_index`` is 0-based.
+    _base_active_survey = _ACTIVE_SURVEY_PARAMS.get(universe_model)
+
+    def _b_miss_dropped_for(cat_index):
+        return (
+            _base_active_survey is not None
+            and "b_miss" in _base_active_survey
+            and lss_active_by_cat[cat_index]
+        )
+
+    def _active_survey_for(cat_index):
+        if _base_active_survey is not None and _b_miss_dropped_for(cat_index):
+            return tuple(p for p in _base_active_survey if p != "b_miss")
+        return _base_active_survey
 
     # --- Cosmology ---
     cosmo_labels = ["H0", "Om0", "w0", "wa"]
@@ -281,6 +328,39 @@ def build_parameter_space(
             f"{sorted(known_labels)}"
         )
 
+    # Fail early on an explicit per-label b_miss override / fixed value for a
+    # catalog whose Q_LSS table drops that label: such an entry would otherwise
+    # be silently ignored (the label is not sampled and is not read from
+    # fixed_parameter_values by the decoder's SurveyParams fallback), a phantom
+    # config.  Block-level ``fix_survey`` is NOT affected (it fixes the whole
+    # block, not a named label), and a ``b_miss_c{k}`` for a Q-FREE catalog is
+    # still a legal sampled/fixed parameter.
+    def _b_miss_catalog_index(key):
+        if key == "b_miss":
+            return 0
+        m = re.fullmatch(r"b_miss_c(\d+)", key)
+        return int(m.group(1)) - 1 if m else None
+
+    for _source_name, _source in (
+        ("prior override", prior_overrides),
+        ("fixed value", fixed_parameter_values),
+    ):
+        for _key in _source:
+            _ci = _b_miss_catalog_index(_key)
+            if _ci is None or not (0 <= _ci < n_catalogs):
+                continue
+            if _b_miss_dropped_for(_ci):
+                raise ValueError(
+                    f"A {_source_name} was given for '{_key}', but catalog "
+                    f"{_ci + 1} has an active Q_LSS completion table: a Q_LSS "
+                    f"completion table replaces the local "
+                    f"(1 + alpha_miss*b_miss*delta_g) factor for this catalog, "
+                    f"so b_miss does not enter its likelihood and is not a "
+                    f"sampled parameter. Remove the {_source_name} for "
+                    f"'{_key}', or drop catalog {_ci + 1}'s --lss_completion "
+                    f"table."
+                )
+
     # Apply block overrides
     cosmo_lower, cosmo_upper = apply_block_prior_overrides(
         "cosmology", cosmo_labels, cosmo_lower, cosmo_upper, prior_overrides
@@ -342,16 +422,18 @@ def build_parameter_space(
     # Drop survey parameters that do not enter this universe model's likelihood
     # (e.g. completion parameters under the complete-catalog model). They stay
     # in ``survey_labels`` so the decoder still fills SurveyParams from fiducials.
-    active_survey = _ACTIVE_SURVEY_PARAMS.get(universe_model)
-    if active_survey is not None and lss_completion_active and "b_miss" in active_survey:
-        # A loaded Q_LSS completion table REPLACES the (1 + b_eff*delta_g)
-        # local-overdensity factor in the missing-galaxy budget (see
-        # completion._completion_curves_row_q), so b_miss no longer enters the
-        # likelihood. Drop it from the sampled block, else it is a phantom flat
-        # nuisance dimension that offsets logZ and invalidates Bayes-factor
-        # comparisons (same failure class as the WL phantom-param note above).
-        # log10n0 / delta still feed _assemble_curves and remain sampled.
-        active_survey = tuple(p for p in active_survey if p != "b_miss")
+    #
+    # Catalog 1's active set: a loaded Q_LSS completion table REPLACES the
+    # (1 + b_eff*delta_g) local-overdensity factor in the missing-galaxy budget
+    # (see completion._completion_curves_row_q), so b_miss no longer enters the
+    # likelihood. When catalog 1's Q is active it is dropped from the sampled
+    # block, else it is a phantom flat nuisance dimension that offsets logZ and
+    # invalidates Bayes-factor comparisons (same failure class as the WL
+    # phantom-param note above). log10n0 / delta still feed _assemble_curves and
+    # remain sampled.  Per-catalog Q activity (``_active_survey_for``) so a
+    # mixed config drops b_miss ONLY for the catalogs that actually carry a Q
+    # table.
+    active_survey = _active_survey_for(0)
     if active_survey is not None:
         kept = [
             (label, lo, hi)
@@ -418,13 +500,16 @@ def build_parameter_space(
             )
             # Suffix-aware active-survey gating: e.g. dark_sirens keeps only the
             # {log10n0, delta, b_miss, sigma_kde} members of each catalog block.
-            if active_survey is not None:
+            # PER-CATALOG Q activity: catalog k drops b_miss_c{k} iff its own Q
+            # table is active, so a Q-on-catalog-1-only config keeps b_miss_c2.
+            active_survey_k = _active_survey_for(k - 1)
+            if active_survey_k is not None:
                 kept = [
                     (label, lo, hi)
                     for label, lo, hi in zip(
                         c_sampled_labels, c_sampled_lower, c_sampled_upper
                     )
-                    if _survey_base_name(label) in active_survey
+                    if _survey_base_name(label) in active_survey_k
                 ]
                 if kept:
                     c_sampled_labels, c_sampled_lower, c_sampled_upper = map(
