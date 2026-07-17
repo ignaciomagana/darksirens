@@ -755,6 +755,10 @@ def main():
 
     g = optp.add_argument_group("Performance")
     g.add_argument("--sel_batch_size", type=int, default=None, metavar="N")
+    g.add_argument("--pe_event_block", type=int, default=None, metavar="N",
+                   help="events per PE-reduction chunk; None = all events in one "
+                        "vectorized block (fastest); set (e.g. 32) to bound memory "
+                        "for dense dark-siren catalogs.")
     g.add_argument("--drop_full_catalog", type=str_to_bool, default=False, metavar="BOOL",
                    help="Discard the dense full-sky (npix, n_max_gals) galaxy arrays after "
                         "compacting to inference pixels, keeping only the compact PE/selection "
@@ -1263,6 +1267,8 @@ def main():
     _row("Output root",     opts.save_path)
     if opts.sel_batch_size:
         _row("Sel. batch",   f"{opts.sel_batch_size:,} samples/batch")
+    if getattr(opts, "pe_event_block", None):
+        _row("PE event block", f"{opts.pe_event_block:,} events/chunk")
     if opts.drop_full_catalog:
         _row("Drop full catalog", "yes (compact views only)")
     _end()
