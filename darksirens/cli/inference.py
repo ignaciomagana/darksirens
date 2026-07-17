@@ -804,6 +804,18 @@ def main():
                    help="Mass-ratio-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_Q).")
     g.add_argument("--norm_nchi", type=int, default=None, metavar="N",
                    help="Spin-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_CHI).")
+    g.add_argument("--pairing_norm_grid", type=int, default=None, metavar="N",
+                   help="opt-in: interpolate the pairing model's per-sample "
+                        "q-normalization from an N-node m1 grid instead of exact "
+                        "per-sample integration (~1.3-1.6x faster likelihood "
+                        "calls measured). Accuracy at N=2048: ~1e-8 relative "
+                        "TYPICAL, up to ~2e-4 WORST-CASE for samples right at "
+                        "the m_min support edge (the normaliser has a log-kink "
+                        "there); halves ~4x per grid doubling. NOT recommended "
+                        "when the run sits near the selection variance guard "
+                        "boundary (a ~1e-4 logL perturbation can flip the hard "
+                        "-inf wall). Default: exact "
+                        "(env: DARKSIRENS_GW_PAIRING_M1_GRID).")
     g.add_argument("--kernel_gl_nodes", type=int, default=None, metavar="N",
                    help="Gauss-Legendre nodes for the per-galaxy kernel normalisation Z_i "
                         "(default 24). Spectroscopic catalogs (sigma_eff <~ 5e-3) are exact "
@@ -1026,6 +1038,7 @@ def main():
             n_mass=opts.norm_nmass,
             n_q=opts.norm_nq,
             n_chi=opts.norm_nchi,
+            pairing_m1_grid=opts.pairing_norm_grid,
         )
     except ValueError as e:
         _fatal(str(e))
@@ -1266,8 +1279,13 @@ def main():
     _row("  seed", opts.seed)
     print("  │")
     norm_grid = normalization_grid_settings()
+    _pairing_grid = (
+        "exact" if norm_grid.pairing_m1_grid is None
+        else f"grid({norm_grid.pairing_m1_grid})"
+    )
     _row("Norm grids", (
-        f"mass={norm_grid.n_mass}, q={norm_grid.n_q}, chi={norm_grid.n_chi}"
+        f"mass={norm_grid.n_mass}, q={norm_grid.n_q}, chi={norm_grid.n_chi}, "
+        f"pairing={_pairing_grid}"
     ))
     _row("JAX backend", jax.default_backend())
     _row("JAX devices",  ", ".join(str(d) for d in jax.devices()))
