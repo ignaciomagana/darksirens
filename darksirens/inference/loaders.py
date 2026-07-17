@@ -351,12 +351,12 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
                     "Pairing member m across independently built ensembles "
                     "marginalizes over an INDEPENDENT-fields product prior, not "
                     "the matched shared-field prior. Remedies: (1) rebuild the "
-                    "ensembles JOINTLY so they share one realization set (a single "
-                    "builder run stamping the same realization_set_id across "
-                    "files -- not yet supported by the single-survey "
-                    "darksirens-build-lognormal-completion), or (2) pass "
-                    "--allow_unverified_shared_lss_members to explicitly accept "
-                    "the independent-fields approximation."
+                    "ensembles JOINTLY with "
+                    "darksirens_build_joint_lognormal_completion (ONE builder run "
+                    "over all K catalogs infers a single shared LSS field and "
+                    "stamps the same realization_set_id across the K files), or "
+                    "(2) pass --allow_unverified_shared_lss_members to explicitly "
+                    "accept the independent-fields approximation."
                 )
 
         # Equal-M is the in-jit vmap requirement; still enforced even under the

@@ -29,6 +29,7 @@ Pipeline
 from __future__ import annotations
 
 import argparse
+from typing import NamedTuple
 
 import numpy as np
 import jax.numpy as jnp
@@ -216,6 +217,149 @@ def _build_completion_radial(
     return logq_map, logq_members, diagnostics
 
 
+class _GP3DSurveyAssembly(NamedTuple):
+    """Per-survey gp3d voxel inputs on the SHARED coarse solve grid ``z_s``.
+
+    Everything :func:`_build_completion_gp3d` (K=1) and
+    :func:`darksirens.cli.build_joint_lognormal_completion.build_joint_completion`
+    (K>=1) need to stack a survey into the low-rank Poisson-lognormal field: the
+    occupied-voxel geometry (``n_hat_occ``), the all-pixel output directions
+    (``n_hat_all``), the coarse-bin observed counts (``N_obs_vox``) and
+    bin-integrated expected observed base (``base_vox``), and the per-survey
+    coarse-z count profile (``counts_z``) that the joint ``z_ref`` weighting sums
+    over all surveys.
+    """
+    nside: int
+    n_pix: int
+    apix: float
+    occ: np.ndarray          # (n_occ,) occupied RING pixel indices
+    n_occ: int
+    n_hat_all: np.ndarray    # (n_pix, 3) all-pixel output directions
+    n_hat_occ: np.ndarray    # (n_occ, 3) occupied-voxel directions
+    N_obs_vox: np.ndarray    # (n_occ, G_s) coarse-bin histogram counts
+    base_vox: np.ndarray     # (n_occ, G_s) bin-integrated expected observed counts
+    counts_z: np.ndarray     # (G_s,) coarse-z count profile (for z_ref weighting)
+
+
+def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
+                           bias, mode="gp3d"):
+    """The gp3d diagnostics block every build (single or joint) records.
+
+    ``mode`` is ``"gp3d"`` for the single-survey builder and ``"gp3d_joint"``
+    for the joint multi-survey builder; the fiducial keys are what the inference
+    loader prints at Q load time (build-time cosmology/density/bias).
+    """
+    return {
+        "mode": mode, "nside": int(nside), "n_pix": int(n_pix),
+        "n_occupied": int(n_occ),
+        "lss_corr_length_mpc": float(survey.lss_corr_length_mpc),
+        "lss_sigma": amp, "lss_corr_length_ang": ls_sph,
+        # Fixed fiducials Q was built at (inference varies these; see load warning).
+        "fiducial_H0": float(cosmo.H0), "fiducial_Om0": float(cosmo.Om0),
+        "fiducial_w0": float(cosmo.w0), "fiducial_wa": float(cosmo.wa),
+        "fiducial_n0": float(survey.n0), "fiducial_delta": float(survey.delta),
+        "bias_b_miss": bias,
+    }
+
+
+def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
+    """Load a survey and assemble its gp3d voxel inputs on the shared ``z_s`` grid.
+
+    Extracted verbatim from the single-survey ``_build_completion_gp3d`` body so
+    the K=1 driver and the JOINT multi-survey builder share ONE assembly path
+    (bit-identical at K=1 — same operation order).  ``z_s``/``edges_s`` are the
+    SHARED coarse solve grid; they depend only on the package ``zgrid`` and
+    ``gp3d_nz_solve`` (never on the survey), so every survey in a joint fit lands
+    on the same radial bins.  ``survey`` carries this survey's own fiducial n0 /
+    delta (its expected-density normalisation); the field bias ``b_miss`` does
+    NOT enter the assembly (``_precompute_grids`` depends only on n0/delta/cosmo),
+    so a per-survey bias is applied later by scaling the design matrix.
+    """
+    import healpy as hp
+
+    nside, ngals, zgals, dzgals, wgals, _z_depth = load_survey(catalog_path)
+    n_pix = int(np.asarray(zgals).shape[0])
+    n_grid = int(zgrid.size)
+    apix = float(hp.nside2pixarea(int(nside)))
+
+    em = EMCatalog(
+        apix=apix, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(dzgals),
+        wgals=jnp.asarray(wgals), ngals=jnp.asarray(ngals),
+        delta_g_pix_z=jnp.zeros((1, n_grid)), dN_obs_kde=None, pixel_to_cache_idx=None,
+    )
+    grids = _precompute_grids(cosmo, survey, em)
+    dN_exp_density = np.asarray(grids.dN_exp, dtype=float)
+    dN_exp_smooth = np.asarray(grids.dN_exp_smooth, dtype=float)
+    safe_smooth = np.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
+    zgrid_np = np.asarray(zgrid, dtype=float)
+    ngals_np = np.asarray(ngals).astype(int)
+    zgals_np = np.asarray(zgals, dtype=float)
+
+    # All-pixel output directions (RING ordering — matches the catalog pixelation
+    # and the inference event->pixel mapping).
+    n_hat_all = np.asarray(
+        hp.pix2vec(int(nside), np.arange(n_pix), nest=False), dtype=float).T  # (n_pix, 3)
+
+    occ = np.nonzero(ngals_np > 0)[0]
+    n_occ = int(occ.size)
+    n_hat_occ = np.asarray(hp.pix2vec(int(nside), occ, nest=False), dtype=float).T  # (n_occ,3)
+
+    # Expected OBSERVED counts per coarse z-bin: integrate C(z) * dN_exp(z) over
+    # each bin on the fine grid, on the same footing as the histogram that fills
+    # N_obs_vox over the same bin. Point-evaluating C at the coarse node instead
+    # is catastrophic wherever the KDE support and the bin contents disagree
+    # (e.g. the z=0 node of a low-z-complete catalog: C(0) ~ KDE tail ~ 0 while
+    # the bin holds real galaxies, so the fit demands field values beyond
+    # field_clip and the solve saturates).
+    G_s = int(np.asarray(z_s).size)
+    dz_fine = np.diff(zgrid_np)
+    N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
+    base_vox = np.empty((n_occ, G_s), dtype=float)
+    for i, r in enumerate(occ):
+        dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+        prod = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0) * dN_exp_density
+        cum = np.concatenate([[0.0], np.cumsum(0.5 * (prod[1:] + prod[:-1]) * dz_fine)])
+        base_vox[i] = np.diff(np.interp(edges_s, zgrid_np, cum))
+        zs = zgals_np[r, : ngals_np[r]]
+        counts_s, _ = np.histogram(zs, bins=edges_s)
+        N_obs_vox[i] = counts_s
+
+    counts_z = N_obs_vox.sum(axis=0)
+    return _GP3DSurveyAssembly(
+        nside=int(nside), n_pix=n_pix, apix=apix, occ=occ, n_occ=n_occ,
+        n_hat_all=n_hat_all, n_hat_occ=n_hat_occ,
+        N_obs_vox=N_obs_vox, base_vox=base_vox, counts_z=counts_z,
+    )
+
+
+def _count_weighted_zref_lsz(counts_per_survey, z_s, cosmo, corr_length_mpc):
+    """Count-weighted reference redshift over one-or-many surveys, and the
+    ``zeta = log1p(z)``-units GP length ``ls_z`` at that redshift.
+
+    Map the fixed radial Mpc length into the kernel's zeta units at a
+    count-weighted reference redshift ``z_ref = sum(z_s * N) / sum(N)`` summed
+    over ALL surveys' coarse-z count profiles: ``ls_z = L_mpc * dzeta/dchi
+    |_{z_ref}``.  K=1 reduces to the single-survey arithmetic EXACTLY (one
+    summand added to a zero accumulator is a no-op in float; same formula, same
+    operation order).
+    """
+    z_s = np.asarray(z_s, dtype=float)
+    counts_z = np.zeros(int(z_s.size), dtype=float)
+    for c in counts_per_survey:
+        counts_z = counts_z + np.asarray(c, dtype=float)
+    z_ref = (float(np.sum(z_s * counts_z) / np.sum(counts_z))
+             if np.sum(counts_z) > 0 else 1.0)
+    eps = 1e-3
+    zlo, zhi = max(z_ref - eps, 0.0), z_ref + eps
+    dchi_dz = float(
+        (r_of_z(jnp.asarray(zhi), cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+         - r_of_z(jnp.asarray(zlo), cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa))
+        / (zhi - zlo)
+    )
+    ls_z = float(corr_length_mpc) / max((1.0 + z_ref) * dchi_dz, 1e-6)
+    return z_ref, ls_z
+
+
 def _build_completion_gp3d(
     catalog_path: str,
     *,
@@ -234,56 +378,41 @@ def _build_completion_gp3d(
     neighbours and pixels far from any data read as exactly Q = 1.  Output is the
     SAME global ``(n_pix, n_grid)`` log Q table contract as the radial builder, so
     the inference side is unchanged.
+
+    The per-survey voxel assembly (:func:`_assemble_gp3d_survey`) and the
+    ``z_ref``/``ls_z`` map (:func:`_count_weighted_zref_lsz`) are the SAME helpers
+    the joint multi-survey builder stacks over, so this K=1 path is one instance
+    of the joint fit.
     """
-    import healpy as hp
-
     M_SPH, M_Z = 32, 6
-
-    nside, ngals, zgals, dzgals, wgals, _z_depth = load_survey(catalog_path)
-    n_pix = int(np.asarray(zgals).shape[0])
-    n_grid = int(zgrid.size)
-    apix = float(hp.nside2pixarea(int(nside)))
 
     cosmo, survey = _fiducial_cosmo_survey(log10n0=log10n0, delta=delta)
     if lss_corr_length_ang is not None:
         survey = survey._replace(lss_corr_length_ang=float(lss_corr_length_ang))
 
-    em = EMCatalog(
-        apix=apix, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(dzgals),
-        wgals=jnp.asarray(wgals), ngals=jnp.asarray(ngals),
-        delta_g_pix_z=jnp.zeros((1, n_grid)), dN_obs_kde=None, pixel_to_cache_idx=None,
-    )
-    grids = _precompute_grids(cosmo, survey, em)
-    dN_exp_density = np.asarray(grids.dN_exp, dtype=float)
-    dN_exp_smooth = np.asarray(grids.dN_exp_smooth, dtype=float)
-    safe_smooth = np.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
-    zgrid_np = np.asarray(zgrid, dtype=float)
-    ngals_np = np.asarray(ngals).astype(int)
-    zgals_np = np.asarray(zgals, dtype=float)
-
     bias = float(survey.b_miss)
     amp = float(survey.lss_sigma)
     ls_sph = float(survey.lss_corr_length_ang)
+    zgrid_np = np.asarray(zgrid, dtype=float)
+    n_grid = int(zgrid.size)
 
-    # All-pixel output directions (RING ordering — matches the catalog pixelation
-    # and the inference event->pixel mapping).
-    n_hat_all = np.asarray(
-        hp.pix2vec(int(nside), np.arange(n_pix), nest=False), dtype=float).T  # (n_pix, 3)
+    # Coarse SOLVE z-grid: the field is low-rank in z (only M_z nodes), so a fine
+    # solve grid adds no resolvable radial signal.  Output is on the full zgrid.
+    # Survey-independent (depends only on zgrid and gp3d_nz_solve), so the joint
+    # builder shares it across surveys.
+    z_s = np.linspace(0.0, float(zgrid_np[-1]), int(gp3d_nz_solve))
+    edges_s = np.concatenate([[z_s[0]], 0.5 * (z_s[:-1] + z_s[1:]), [z_s[-1]]])
+    zeta_s = np.log1p(z_s)
+    G_s = int(z_s.size)
 
-    occ = np.nonzero(ngals_np > 0)[0]
-    n_occ = int(occ.size)
+    survey_data = _assemble_gp3d_survey(
+        catalog_path, cosmo=cosmo, survey=survey, z_s=z_s, edges_s=edges_s)
+    nside, n_pix, n_occ = survey_data.nside, survey_data.n_pix, survey_data.n_occ
 
     def _base_diag(extra):
-        d = {
-            "mode": "gp3d", "nside": int(nside), "n_pix": n_pix, "n_occupied": n_occ,
-            "lss_corr_length_mpc": float(survey.lss_corr_length_mpc),
-            "lss_sigma": amp, "lss_corr_length_ang": ls_sph,
-            # Fixed fiducials Q was built at (inference varies these; see load warning).
-            "fiducial_H0": float(cosmo.H0), "fiducial_Om0": float(cosmo.Om0),
-            "fiducial_w0": float(cosmo.w0), "fiducial_wa": float(cosmo.wa),
-            "fiducial_n0": float(survey.n0), "fiducial_delta": float(survey.delta),
-            "bias_b_miss": bias,
-        }
+        d = _gp3d_base_diagnostics(
+            cosmo, survey, nside=nside, n_pix=n_pix, n_occ=n_occ,
+            amp=amp, ls_sph=ls_sph, bias=bias)
         d.update(extra)
         return d
 
@@ -295,61 +424,25 @@ def _build_completion_gp3d(
                         if n_members and n_members > 0 else None)
         return logq_map, logq_members, _base_diag({})
 
-    # Coarse SOLVE z-grid: the field is low-rank in z (only M_z nodes), so a fine
-    # solve grid adds no resolvable radial signal.  Output is on the full zgrid.
-    z_s = np.linspace(0.0, float(zgrid_np[-1]), int(gp3d_nz_solve))
-    edges_s = np.concatenate([[z_s[0]], 0.5 * (z_s[:-1] + z_s[1:]), [z_s[-1]]])
-    zeta_s = np.log1p(z_s)
-    G_s = int(z_s.size)
-    n_hat_occ = np.asarray(hp.pix2vec(int(nside), occ, nest=False), dtype=float).T  # (n_occ,3)
-    # Expected OBSERVED counts per coarse z-bin: integrate C(z) * dN_exp(z) over
-    # each bin on the fine grid, on the same footing as the histogram that fills
-    # N_obs_vox over the same bin. Point-evaluating C at the coarse node instead
-    # is catastrophic wherever the KDE support and the bin contents disagree
-    # (e.g. the z=0 node of a low-z-complete catalog: C(0) ~ KDE tail ~ 0 while
-    # the bin holds real galaxies, so the fit demands field values beyond
-    # field_clip and the solve saturates).
-    dz_fine = np.diff(zgrid_np)
-    N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
-    base_vox = np.empty((n_occ, G_s), dtype=float)
-    for i, r in enumerate(occ):
-        dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        prod = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0) * dN_exp_density
-        cum = np.concatenate([[0.0], np.cumsum(0.5 * (prod[1:] + prod[:-1]) * dz_fine)])
-        base_vox[i] = np.diff(np.interp(edges_s, zgrid_np, cum))
-        zs = zgals_np[r, : ngals_np[r]]
-        counts_s, _ = np.histogram(zs, bins=edges_s)
-        N_obs_vox[i] = counts_s
-
-    # Map the fixed radial Mpc length into the kernel's zeta = log1p(z) units at a
-    # count-weighted reference redshift: ls_z = L_mpc * dzeta/dchi |_{z_ref}.
-    counts_z = N_obs_vox.sum(axis=0)
-    z_ref = (float(np.sum(z_s * counts_z) / np.sum(counts_z))
-             if np.sum(counts_z) > 0 else 1.0)
-    eps = 1e-3
-    zlo, zhi = max(z_ref - eps, 0.0), z_ref + eps
-    dchi_dz = float(
-        (r_of_z(jnp.asarray(zhi), cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
-         - r_of_z(jnp.asarray(zlo), cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa))
-        / (zhi - zlo)
-    )
-    ls_z = float(survey.lss_corr_length_mpc) / max((1.0 + z_ref) * dchi_dz, 1e-6)
+    z_ref, ls_z = _count_weighted_zref_lsz(
+        [survey_data.counts_z], z_s, cosmo, survey.lss_corr_length_mpc)
 
     # Low-rank operator over the occupied voxels.
     Zn, Zz = lowrank_inducing_nodes(n_inducing_sphere=M_SPH, n_inducing_z=M_Z)
     M = int(np.asarray(Zn).shape[0])
-    X_n = np.repeat(n_hat_occ, G_s, axis=0)                                # (n_occ*G_s, 3)
+    X_n = np.repeat(survey_data.n_hat_occ, G_s, axis=0)                    # (n_occ*G_s, 3)
     X_z = np.tile(zeta_s, n_occ)                                           # (n_occ*G_s,)
     Phi, L = build_lowrank_operator(Zn, Zz, X_n, X_z, amp=amp, ls_sph=ls_sph, ls_z=ls_z)
 
-    mp = poisson_lognormal_gp3d_map(N_obs_vox.ravel(), base_vox.ravel(), Phi, bias=bias)
+    mp = poisson_lognormal_gp3d_map(
+        survey_data.N_obs_vox.ravel(), survey_data.base_vox.ravel(), Phi, bias=bias)
 
     # Global all-pixel output table on the full package zgrid (chunked over
     # pixels): the Laplace posterior-mean E[Q] (empty pixels -> Q=1, near-data
     # pixels borrow), so H_chol is passed.
     logq_map = np.asarray(eval_logq_gp3d(
         mp["xi_map"], Zn, Zz, amp=amp, ls_sph=ls_sph, ls_z=ls_z,
-        n_hat_out=n_hat_all, z_out=zgrid_np, bias=bias,
+        n_hat_out=survey_data.n_hat_all, z_out=zgrid_np, bias=bias,
         pix_chunk=int(gp3d_pix_chunk), L=L, H_chol=mp["H_chol"],
     ), dtype=float)
     if not np.all(np.isfinite(logq_map)):
@@ -373,7 +466,7 @@ def _build_completion_gp3d(
             mp["xi_map"], mp["H_chol"], n_members=int(n_members), seed=int(seed))
         logq_members = np.asarray(eval_logq_gp3d(
             xi_mem, Zn, Zz, amp=amp, ls_sph=ls_sph, ls_z=ls_z,
-            n_hat_out=n_hat_all, z_out=zgrid_np, bias=bias,
+            n_hat_out=survey_data.n_hat_all, z_out=zgrid_np, bias=bias,
             pix_chunk=int(gp3d_pix_chunk), L=L,
         ), dtype=float)
         logq_members = np.where(np.isfinite(logq_members), logq_members, 0.0)
