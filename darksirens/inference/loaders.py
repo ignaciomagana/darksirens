@@ -284,9 +284,72 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         bundles.append(bundle)
 
     # SHARED-member-index contract: the K-catalog mixture marginalizes over ONE
-    # member index (member m of every catalog samples the same LSS
-    # realization), so the per-catalog ensembles must have equal M.
+    # member index (member m of every catalog samples the SAME LSS realization),
+    # so the per-catalog ensembles must (a) come from ONE matched realization
+    # set and (b) have equal M.  Provenance (a) is verified from the
+    # realization_set_id stamped by save_lss_completion_hdf5 -- two surveys'
+    # ensembles built in separate builder runs carry DISTINCT ids, so pairing
+    # member m across them marginalizes over an INDEPENDENT-fields product prior
+    # rather than the matched shared-field prior the estimator assumes.
     if bool(getattr(opts, "lss_marginalize", False)) and len(bundles) >= 2:
+        allow_unverified = bool(
+            getattr(opts, "allow_unverified_shared_lss_members", False)
+        )
+        prov_by_catalog = []
+        for path, bundle in zip(survey_paths, bundles):
+            prov = bundle.get("lss_completion_provenance") or {}
+            prov_by_catalog.append(
+                (prov.get("path") or path, prov.get("realization_set_id"))
+            )
+        ids = [rid for _p, rid in prov_by_catalog]
+        matched = all(rid is not None for rid in ids) and len(set(ids)) == 1
+        if not matched:
+            listing = "\n".join(
+                f"  - {p}: "
+                + (f"realization_set_id={rid}" if rid is not None
+                   else "LEGACY (no provenance)")
+                for p, rid in prov_by_catalog
+            )
+            if allow_unverified:
+                print(
+                    "\n"
+                    "  ##########################################################\n"
+                    "  ## [!!] --allow_unverified_shared_lss_members\n"
+                    "  ## The per-catalog Q_LSS ensembles do NOT share a verified\n"
+                    "  ## realization set. Treating the member pairing as\n"
+                    "  ## unverified: this marginalizes over an INDEPENDENT-fields\n"
+                    "  ## product prior across catalogs, NOT the matched\n"
+                    "  ## shared-field prior the estimator assumes. member m of\n"
+                    "  ## each catalog is an INDEPENDENT LSS draw, so\n"
+                    "  ## logsumexp_m logL(Q_m) - log M does not integrate the\n"
+                    "  ## single shared missing-galaxy field. Proceeding anyway.\n"
+                    "  ## per-catalog Q provenance:\n"
+                    + "\n".join(
+                        "  ## " + ln.lstrip() for ln in listing.splitlines()
+                    )
+                    + "\n"
+                    "  ##########################################################\n"
+                )
+            else:
+                raise ValueError(
+                    "--lss_marginalize with a K>=2 mixture marginalizes over ONE "
+                    "SHARED member index: member m of every catalog must sample "
+                    "the SAME LSS realization. The per-catalog Q_LSS ensembles do "
+                    "not share a verified realization set (equal, non-null "
+                    "realization_set_id):\n" + listing + "\n"
+                    "Pairing member m across independently built ensembles "
+                    "marginalizes over an INDEPENDENT-fields product prior, not "
+                    "the matched shared-field prior. Remedies: (1) rebuild the "
+                    "ensembles JOINTLY so they share one realization set (a single "
+                    "builder run stamping the same realization_set_id across "
+                    "files -- not yet supported by the single-survey "
+                    "darksirens-build-lognormal-completion), or (2) pass "
+                    "--allow_unverified_shared_lss_members to explicitly accept "
+                    "the independent-fields approximation."
+                )
+
+        # Equal-M is the in-jit vmap requirement; still enforced even under the
+        # allow_unverified path (mismatched but same-length ensembles proceed).
         member_counts = {}
         for path, bundle in zip(survey_paths, bundles):
             members = bundle.get("lss_completion_logq_members")

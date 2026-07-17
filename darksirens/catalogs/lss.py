@@ -10,6 +10,7 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
     lss_completion_logq = None
     lss_completion_logq_members = None
     lss_completion_indexing = 0  # int enum: 0=auto, 1=compact, 2=global
+    lss_completion_provenance = None  # ensemble-provenance for K>=2 verification
     lss_path = getattr(opts, "lss_completion", None)
     if lss_path is None and opts.survey_path is not None:
         try:
@@ -46,6 +47,16 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
         lss_completion_indexing = {"compact": 1, "global": 2}.get(
             str(loaded.get("indexing", "compact")), 0
         )
+        # Ensemble provenance travels with the loaded table so a K>=2 mixture
+        # can verify the per-catalog ensembles share a matched realization set
+        # before marginalizing over a shared member index (None values here mean
+        # a legacy file with no provenance attrs).
+        lss_completion_provenance = {
+            "path": lss_path,
+            "realization_set_id": loaded.get("realization_set_id"),
+            "member_content_sha256": loaded.get("member_content_sha256"),
+            "n_members": loaded.get("n_members"),
+        }
         if getattr(opts, "lss_marginalize", False):
             logq_m = loaded.get("logq_members")
             if logq_m is None:
@@ -88,4 +99,5 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
         "lss_completion_logq": lss_completion_logq,
         "lss_completion_logq_members": lss_completion_logq_members,
         "lss_completion_indexing": lss_completion_indexing,
+        "lss_completion_provenance": lss_completion_provenance,
     }
