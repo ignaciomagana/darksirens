@@ -28,6 +28,20 @@ def _env_int(name: str, default: int) -> int:
     return parsed
 
 
+def _env_int_opt(name: str, default: int | None) -> int | None:
+    """Optional int env var: unset -> ``default`` (which may be None)."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+    if parsed < 2:
+        raise ValueError(f"{name} must be >= 2, got {parsed}")
+    return parsed
+
+
 @dataclass(frozen=True)
 class NormalizationGridSettings:
     """Settings controlling GW-population normalisation quadrature grids.
@@ -36,11 +50,18 @@ class NormalizationGridSettings:
     trapezoid grids.  Values can be configured with ``configure_normalization_grids``
     or the environment variables ``DARKSIRENS_GW_N_MASS``,
     ``DARKSIRENS_GW_N_Q``, and ``DARKSIRENS_GW_N_CHI``.
+
+    ``pairing_m1_grid`` is an OPT-IN accuracy knob (default None = exact, env
+    ``DARKSIRENS_GW_PAIRING_M1_GRID``): when set to an int N the pairing model's
+    per-sample q-normalisation is interpolated from an N-node static m1 grid
+    instead of integrated exactly per sample (see ``get_pairing_m1_grid`` and
+    ``PairingModel.__call__``).
     """
 
     n_mass: int = _env_int("DARKSIRENS_GW_N_MASS", 500)
     n_q: int = _env_int("DARKSIRENS_GW_N_Q", 200)
     n_chi: int = _env_int("DARKSIRENS_GW_N_CHI", 200)
+    pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", None)
     m_lo: float = M_LO
     m_hi: float = M_HI
     q_lo: float = 0.0
@@ -54,6 +75,12 @@ class NormalizationGridSettings:
             if value < 2:
                 raise ValueError(f"{name} must be >= 2, got {value}")
             object.__setattr__(self, name, value)
+        # None = exact per-sample q-integration; an int is the m1-grid node count.
+        if self.pairing_m1_grid is not None:
+            pg = int(self.pairing_m1_grid)
+            if pg < 2:
+                raise ValueError(f"pairing_m1_grid must be >= 2 or None, got {pg}")
+            object.__setattr__(self, "pairing_m1_grid", pg)
         for lo_name, hi_name in (("m_lo", "m_hi"), ("q_lo", "q_hi"), ("chi_lo", "chi_hi")):
             lo = float(getattr(self, lo_name))
             hi = float(getattr(self, hi_name))
@@ -80,14 +107,26 @@ def configure_normalization_grids(
     n_mass: int | None = None,
     n_q: int | None = None,
     n_chi: int | None = None,
+    pairing_m1_grid: int | None = None,
 ) -> NormalizationGridSettings:
-    """Update cached normalisation-grid sizes and clear derived grids."""
+    """Update cached normalisation-grid sizes and clear derived grids.
+
+    Every argument follows the same convention: None leaves the current setting
+    (env var / dataclass default) untouched; a value overrides it.  To ENABLE the
+    opt-in pairing m1-grid pass an int for ``pairing_m1_grid``; leaving it None
+    keeps the exact per-sample q-normalisation (the default).
+    """
 
     global _NORMALIZATION_GRID_SETTINGS, N_MASS, N_Q, N_CHI
 
     updates = {
         key: value
-        for key, value in {"n_mass": n_mass, "n_q": n_q, "n_chi": n_chi}.items()
+        for key, value in {
+            "n_mass": n_mass,
+            "n_q": n_q,
+            "n_chi": n_chi,
+            "pairing_m1_grid": pairing_m1_grid,
+        }.items()
         if value is not None
     }
     if updates:
@@ -113,6 +152,7 @@ def _clear_grid_caches() -> None:
     get_q_grid.cache_clear()
     get_chi_grid.cache_clear()
     get_m1_q_mesh.cache_clear()
+    get_pairing_m1_grid.cache_clear()
 
 
 @lru_cache(maxsize=1)
@@ -136,6 +176,28 @@ def get_chi_grid():
 @lru_cache(maxsize=1)
 def get_m1_q_mesh():
     return jnp.meshgrid(get_mass_grid(), get_q_grid(), indexing="ij")
+
+
+@lru_cache(maxsize=1)
+def get_pairing_m1_grid():
+    """Static LOG-spaced m1 grid for the opt-in pairing q-normalisation.
+
+    Spans the SAME [m_lo, m_hi] bounds as :func:`get_mass_grid`, so it covers
+    every m1src the mass model can produce; log spacing clusters nodes at low
+    m1 where the pairing normaliser I(m1) turns on fastest.  Callers evaluate
+    I on these nodes once per proposal and interpolate per sample; m1 values
+    outside [m_lo, m_hi] are clamped to the ends by ``jnp.interp`` (harmless --
+    outside the mass support p(m1)=0 so the normaliser there is irrelevant).
+    Only meaningful when ``pairing_m1_grid`` is configured (not None).
+    """
+    s = normalization_grid_settings()
+    n = s.pairing_m1_grid
+    if n is None:
+        raise ValueError(
+            "get_pairing_m1_grid requires pairing_m1_grid to be configured; "
+            "it is None (exact per-sample q-normalisation)."
+        )
+    return jnp.exp(jnp.linspace(jnp.log(s.m_lo), jnp.log(s.m_hi), int(n)))
 
 
 # Backward-compatible aliases.  They reflect import-time/default settings;

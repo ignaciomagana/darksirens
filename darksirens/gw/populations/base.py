@@ -53,7 +53,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import jax.numpy as jnp
 
-from .utils import get_mass_grid, get_q_grid, get_chi_grid, M_LO
+from .utils import (
+    get_mass_grid,
+    get_q_grid,
+    get_chi_grid,
+    get_pairing_m1_grid,
+    normalization_grid_settings,
+    M_LO,
+)
 
 
 # ── Parameter bookkeeping ────────────────────────────────────────────────────
@@ -203,29 +210,65 @@ class PairingModel(ABC):
         ...
 
     def __call__(self, m1, q, m_min, dm_min, theta):
-        # PairingModel norm integrates over q for each m1 — sample-dependent,
-        # cannot be lifted out of the per-sample loop.
-        p       = self._eval_unnorm(m1, q, m_min, dm_min, theta)
-        m1_exp  = jnp.expand_dims(jnp.atleast_1d(m1), axis=-1)
+        p = self._eval_unnorm(m1, q, m_min, dm_min, theta)
+        # OPT-IN accuracy knob (STATIC branch on the module-global setting, read
+        # at trace time): default None keeps the EXACT per-sample q-integration
+        # below (bit-identical to the historical code path); an int precomputes
+        # the normaliser once on a static m1 grid and interpolates it per sample.
+        n_grid = normalization_grid_settings().pairing_m1_grid
+        if n_grid is None:
+            # PairingModel norm integrates over q for each m1 — sample-dependent,
+            # cannot be lifted out of the per-sample loop.
+            m1_exp  = jnp.expand_dims(jnp.atleast_1d(m1), axis=-1)
+            q_grid  = get_q_grid()
+            p_grid  = self._eval_unnorm(m1_exp, q_grid, m_min, dm_min, theta)
+            # Scale-invariant normalisation: for an m1 in the low-mass taper toe
+            # both p and its q-integral are ~exp(-500)-tiny; the RATIO is well
+            # conditioned, but a direct p / n has divide's VJP square n, which
+            # UNDERFLOWS to zero and turns the cotangent into inf -> NaN
+            # (measured: one bright-mock injection at m1src = m_min + 0.01
+            # poisoned the whole d logL/d(m_min, dm_min, beta) gradient).
+            # Factoring the row maximum out of the quadrature keeps every
+            # backward division at O(1) scale; the forward value is the same
+            # ratio up to association order (ULP-level).
+            scale   = jnp.max(p_grid, axis=-1, keepdims=True)
+            scale_s = jnp.where(scale > 0, scale, 1.0)
+            n_sc    = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
+            n_sc    = n_sc.reshape(jnp.shape(m1))
+            scale_m = scale_s[..., 0].reshape(jnp.shape(m1))
+            return jnp.where(
+                n_sc > 0, (p / scale_m) / jnp.where(n_sc > 0, n_sc, 1.0), 0.0
+            )
+        # GRID path: the q-support depends on m1 only through the m2 = q*m1 cut,
+        # so N(m1) = ∫ p_unnorm(m1, q) dq is a smooth 1-D function.  Precompute it
+        # ONCE per proposal on the static log-spaced m1 grid (N_grid x N_Q work,
+        # theta-traced) and interpolate log N in log m1 per sample.
+        m1_grid = get_pairing_m1_grid()                     # (N_grid,) static nodes
+        log_m1_grid = jnp.log(m1_grid)
         q_grid  = get_q_grid()
-        p_grid  = self._eval_unnorm(m1_exp, q_grid, m_min, dm_min, theta)
-        # Scale-invariant normalisation: for an m1 in the low-mass taper toe
-        # both p and its q-integral are ~exp(-500)-tiny; the RATIO is well
-        # conditioned, but a direct p / n has divide's VJP square n, which
-        # UNDERFLOWS to zero and turns the cotangent into inf -> NaN
-        # (measured: one bright-mock injection at m1src = m_min + 0.01
-        # poisoned the whole d logL/d(m_min, dm_min, beta) gradient).
-        # Factoring the row maximum out of the quadrature keeps every
-        # backward division at O(1) scale; the forward value is the same
-        # ratio up to association order (ULP-level).
+        # Same scale-factored quadrature as the exact branch, per grid node, so
+        # the grid normaliser never underflows while forming I = scale * n_sc.
+        p_grid  = self._eval_unnorm(m1_grid[:, None], q_grid[None, :],
+                                    m_min, dm_min, theta)    # (N_grid, N_Q)
         scale   = jnp.max(p_grid, axis=-1, keepdims=True)
         scale_s = jnp.where(scale > 0, scale, 1.0)
-        n_sc    = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
-        n_sc    = n_sc.reshape(jnp.shape(m1))
-        scale_m = scale_s[..., 0].reshape(jnp.shape(m1))
-        return jnp.where(
-            n_sc > 0, (p / scale_m) / jnp.where(n_sc > 0, n_sc, 1.0), 0.0
-        )
+        n_sc_g  = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
+        I_grid  = scale_s[..., 0] * n_sc_g                   # (N_grid,) normaliser
+        # Log-space with a tiny floor (the eval_dark_member_completion idiom): a
+        # zero-support node (I==0, i.e. m1<=m_min so p_unnorm==0 for every q)
+        # floors to log(1e-300) rather than -inf, keeping jnp.interp finite when
+        # a sample straddles the support edge.  A true -inf would poison interp
+        # (-inf + inf*t -> NaN); the floor is safe because a sample in that
+        # region has p==0 too, so the density below is exactly 0 either way.
+        log_I_grid = jnp.log(jnp.maximum(I_grid, 1e-300))
+        # Linear interp of log N in log m1 (jnp.interp clamps out-of-range x to
+        # the grid ends).  N = exp(log_I): density = p / N = p * exp(-log_I),
+        # a SINGLE reciprocal so the VJP never squares N (same reason the exact
+        # branch factors out scale_m).  Zero-support samples have p==0 exactly,
+        # so p * exp(-log_I) == 0, matching the exact branch's guarded 0.
+        log_I   = jnp.interp(jnp.log(jnp.atleast_1d(m1)), log_m1_grid, log_I_grid)
+        log_I   = log_I.reshape(jnp.shape(m1))
+        return p * jnp.exp(-log_I)
 
 
 class SpinModel(ABC):
