@@ -433,6 +433,35 @@ def run_completion_validation_multitracer(
     return paths
 
 
+def format_selection_guard_summary(
+    guard_mode, sampler, soft_guard, max_likelihood_variance
+):
+    """One-line, always-printed summary of the resolved sparse-selection guard.
+
+    Pure (string in, string out) so it is unit-testable without a full CLI
+    run.  ``guard_mode`` is the raw ``--selection_neff_guard`` value
+    ("auto"/"hard"/"soft"); ``soft_guard`` is the resolved boolean (which the
+    CLI derives from ``guard_mode`` and ``sampler``).  The returned line is
+    printed with the surrounding block's ``  [i] `` prefix.
+    """
+    resolved = "SOFT" if soft_guard else "HARD"
+    why = f"auto: {sampler}" if guard_mode == "auto" else "explicit"
+    criterion = (
+        "sigma^2_lnL = sum_i sigma_i^2 + N_obs^2/Neff_sel > "
+        f"{max_likelihood_variance} (--max_likelihood_variance)"
+    )
+    if soft_guard:
+        # SOFT never returns -inf; it replaces the wall with a smooth penalty
+        # and the posterior must be checked to clear the boundary post hoc.
+        action = f"smooth penalty wall as {criterion}; verify the posterior clears it post hoc"
+    else:
+        action = f"-inf when {criterion}"
+    return (
+        f"selection guard: {resolved} ({why}) — {action}; "
+        "Vitale floor Neff > 5*N_obs always applies"
+    )
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -752,6 +781,10 @@ def main():
     g.add_argument("--dynesty_diagnostics", type=str_to_bool, default=False, metavar="BOOL",
                    help="Write dynesty runplot/traceplot PDFs every 10 minutes to "
                         "<save_path>/dynesty_diagnostics/. Only used with --sampler dynesty.")
+    g.add_argument("--sampler_preflight", choices=["on", "off"], default="on",
+                   help="Probe 32 prior draws before nested sampling (dynesty/tinyns) and "
+                        "fail fast if the likelihood is -inf on all of them (usually the "
+                        "selection variance guard); 'off' skips the probe.")
 
     g = optp.add_argument_group("Performance")
     g.add_argument("--sel_batch_size", type=int, default=None, metavar="N")
@@ -1031,20 +1064,19 @@ def main():
         guard_mode == "soft"
         or (guard_mode == "auto" and opts.sampler == "numpyro")
     )
-    if opts.selection_neff_soft_guard:
-        print(
-            "  [i] Sparse-selection guard: SOFT (smooth wall for gradient-based "
-            f"sampling; mode={guard_mode}). Verify the posterior clears the "
-            "total-log-likelihood-variance criterion (sigma^2_lnL <= "
-            "max_likelihood_variance, and the Neff <= 5 N_obs floor) post hoc."
-        )
     max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
-    if max_likelihood_variance != DEFAULT_MAX_LIKELIHOOD_VARIANCE:
-        print(
-            "  [i] Total-log-likelihood-variance cap: "
-            f"max_likelihood_variance={max_likelihood_variance} "
-            "(default 1.0 is the GWTC-4.0/5.0 criterion)."
+    # Always print a compact, resolved guard summary (mode + why, cap, and the
+    # criterion) so the log records why the likelihood may return -inf; the
+    # cap and the soft-mode post-hoc caveat are folded into the one line.
+    print(
+        "  [i] "
+        + format_selection_guard_summary(
+            guard_mode,
+            opts.sampler,
+            opts.selection_neff_soft_guard,
+            max_likelihood_variance,
         )
+    )
 
     if opts.universe_model == "bright_sirens":
         # Bright sirens use a synthetic one-object catalog fixed by the

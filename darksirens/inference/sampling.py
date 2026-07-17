@@ -135,6 +135,100 @@ def print_tinyns_diagnostics(diag: dict) -> None:
             lines.append(f"{label}: {fmt(g(key))}{suffix}")
     print("\n".join(lines), flush=True)
 
+def _nested_sampler_preflight(likelihood, prior_transform, ndims, opts, n_probe=32):
+    """Probe the likelihood on a handful of prior draws before a nested sampler.
+
+    dynesty and tinyns both seed their run by rejection-sampling the unit cube
+    until they collect ``nlive`` points with a FINITE ``logL``.  When the
+    likelihood is ``-inf`` across the whole prior — most often the selection
+    variance guard firing at every draw (the GWTC-4.0/5.0 total-variance
+    criterion) — that loop never terminates and the run hangs silently at the
+    "find initial live points" step with nothing in the log to say why.
+
+    This draws ``n_probe`` points from the prior (through ``prior_transform``,
+    from an INDEPENDENT RNG seeded off ``opts.seed`` so the sampler's own RNG
+    stream is untouched and ``--seed`` reproducibility is preserved), evaluates
+    the likelihood on each, and:
+
+    * always prints ``preflight: k/N prior draws have finite logL`` with the
+      finite range and the elapsed wall time (its cost is ``n_probe``
+      likelihood calls);
+    * raises ``RuntimeError`` fail-fast when ``k == 0`` (the sampler would spin
+      forever), naming the guard criterion and the remedies;
+    * prints a loud, non-fatal warning when ``0 < k <= 3`` (initialization will
+      be slow), with the same remedies.
+
+    ``--sampler_preflight off`` bypasses the probe entirely.
+    """
+    import time
+
+    if getattr(opts, "sampler_preflight", "on") == "off":
+        return
+
+    remedies = (
+        "Remedies: --selection_neff_guard soft (finite penalized wall — the "
+        "sampler initializes and is pushed toward the region satisfying the "
+        "criterion); --max_likelihood_variance <cap> (accept a larger MC "
+        "variance — the measured sigma^2 at your best-fit point must be below "
+        "<cap>); python scripts/diagnose_selection_guard.py -- <your "
+        "darksirens_inference args> (measure sigma^2_lnL on your data and "
+        "report the smallest admitting cap). --sampler_preflight off skips "
+        "this probe."
+    )
+    criterion = (
+        "the selection variance guard (GWTC-4.0/5.0 total-log-likelihood "
+        "variance: -inf when sigma^2_lnL = sum_i sigma_i^2 + N_obs^2/Neff_sel "
+        "> max_likelihood_variance, plus the Vitale Neff > 5*N_obs floor)"
+    )
+
+    # Independent RNG: dynesty seeds its own np.random.default_rng(opts.seed)
+    # and this must not perturb that stream (test_dynesty_seed pins it).
+    seed = int(getattr(opts, "seed", 0))
+    rng = np.random.default_rng(seed ^ 0xC0FFEE)
+
+    t0 = time.perf_counter()
+    finite_vals = []
+    for _ in range(n_probe):
+        u = rng.random(ndims)
+        theta = prior_transform(jnp.asarray(u))
+        val = float(np.asarray(likelihood(jnp.asarray(theta))))
+        if np.isfinite(val):
+            finite_vals.append(val)
+    elapsed = time.perf_counter() - t0
+    k = len(finite_vals)
+
+    if k > 0:
+        detail = f" (finite logL in [{min(finite_vals):.4g}, {max(finite_vals):.4g}])"
+    else:
+        detail = ""
+    print(
+        f"[*] preflight: {k}/{n_probe} prior draws have finite logL{detail} "
+        f"[{elapsed:.2f} s]",
+        flush=True,
+    )
+
+    if k == 0:
+        raise RuntimeError(
+            f"Nested-sampler preflight: the likelihood is -inf on ALL {n_probe} "
+            "probed prior draws, so dynesty/tinyns would reject-sample forever "
+            "without ever finding an initial live point. The most common cause "
+            f"is {criterion}. {remedies}"
+        )
+
+    if k <= 3:
+        nlive = int(getattr(opts, "nlive", 0) or 0)
+        frac = k / n_probe
+        est = f"~{int(np.ceil(nlive / frac)):,}" if nlive > 0 else "many"
+        print(
+            "  [!] preflight WARNING: only "
+            f"{k}/{n_probe} prior draws are finite (finite fraction "
+            f"{100.0 * frac:.1f}%). The sampler must reject-sample about {est} "
+            f"draws to seed {nlive} live points, so initialization will be "
+            f"SLOW. If it stalls, consider: {remedies}",
+            flush=True,
+        )
+
+
 def run_sampler(method, likelihood, prior_transform, labels,
                 lower_bound, upper_bound, opts, prior_kinds=None):
     """
@@ -181,6 +275,14 @@ def run_sampler(method, likelihood, prior_transform, labels,
             "logZerr": 0.0,                             # delta prior => no MC error
             "log_likelihood": np.array([log_l_fixed], dtype=float),
         }
+
+    # --------------------------------------------------------
+    # Nested-sampler preflight (dynesty & tinyns share the hard -inf wall)
+    # --------------------------------------------------------
+    # numpyro runs its own gradient preflight below; skip it here.  The zero-
+    # free-params path above already returned, so ndims >= 1 by construction.
+    if method in ("dynesty", "tinyns"):
+        _nested_sampler_preflight(likelihood, prior_transform, ndims, opts)
 
     # --------------------------------------------------------
     # tinyns  (lightweight JAX nested sampler, dynesty-compatible)
