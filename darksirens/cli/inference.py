@@ -711,11 +711,13 @@ def main():
                          "dark_sirens only. Off (default) = deterministic Q, unchanged. "
                          "For a K>=2 mixture the marginalisation uses ONE SHARED member "
                          "index (member m of every catalog must sample the SAME LSS "
-                         "realization): build the per-catalog ensembles from matched "
-                         "realizations with equal --n-members, or the run aborts. "
+                         "realization): build the per-catalog ensembles jointly with "
+                         "darksirens_build_joint_lognormal_completion (equal --n-members), "
+                         "or the run aborts. "
                          "The matched-realizations requirement is verified from each "
                          "file's /lss_completion realization_set_id (they must be equal "
-                         "and non-null); rebuild them jointly to share one id, or pass "
+                         "and non-null); darksirens_build_joint_lognormal_completion "
+                         "stamps one shared id across the K files, or pass "
                          "--allow_unverified_shared_lss_members to accept the "
                          "independent-fields approximation."))
     g.add_argument("--allow_unverified_shared_lss_members", action="store_true",

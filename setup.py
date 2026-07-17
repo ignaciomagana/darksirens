@@ -43,6 +43,7 @@ setup(
             "darksirens_pixelate=darksirens.cli.pixelate:main",
             "darksirens_skymaps_to_samples=darksirens.cli.skymaps_to_samples:main",
             "darksirens_build_lognormal_completion=darksirens.cli.build_lognormal_completion:main",
+            "darksirens_build_joint_lognormal_completion=darksirens.cli.build_joint_lognormal_completion:main",
             "darksirens_diagnose_lognormal_completion=darksirens.cli.diagnose_lognormal_completion:main",
             "darksirens_inference_lensing=darksirens.cli.inference_lensing:main",
         ]
