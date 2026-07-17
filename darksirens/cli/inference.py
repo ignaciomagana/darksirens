@@ -1372,19 +1372,42 @@ def main():
     # /lss_completion group) REPLACES the b_miss local-overdensity factor, so
     # b_miss must be dropped from the sampled dark_sirens block or it is a
     # phantom flat nuisance dimension. Mirror the likelihood's Q-active test:
-    # any explicit path, or a table on any loaded catalog bundle.
+    # an explicit path, a table on this catalog's loaded bundle (K>=2), or (K=1
+    # flat path, no bundle) the in-catalog table already merged into flat data.
+    # PER-CATALOG Q activity: the likelihood chooses Q-vs-b_miss per catalog
+    # (completion.field_lss_q is not None), so b_miss must be dropped ONLY for
+    # the catalogs that actually carry a Q table.  A global OR would drop
+    # b_miss_c{k} for a Q-free catalog too (a silently frozen nuisance).
     _lss_bundles = data.get("catalogs") or []
-    lss_completion_active = (
-        any(v is not None for v in (getattr(opts, "lss_completions", None) or []))
-        or any(
-            b.get(k) is not None
-            for b in _lss_bundles
-            for k in ("lss_completion_logq", "lss_completion_q",
-                      "lss_completion_logq_members", "lss_completion_q_members")
-        )
+    _lss_explicit = list(getattr(opts, "lss_completions", None) or [])
+    _LSS_Q_KEYS = ("lss_completion_logq", "lss_completion_q",
+                   "lss_completion_logq_members", "lss_completion_q_members")
+
+    def _catalog_lss_active(i):
+        # Explicit --lss_completion path for catalog i (positionally aligned).
+        if i < len(_lss_explicit) and _lss_explicit[i] is not None:
+            return True
+        # K>=2: this catalog's own bundle carrying any Q table/ensemble.
+        if i < len(_lss_bundles):
+            b = _lss_bundles[i]
+            return any(b.get(k) is not None for k in _LSS_Q_KEYS)
+        # K=1 flat path: no per-catalog bundle, so an in-catalog /lss_completion
+        # group (or explicit table) landed in the flat data dict via
+        # attach_lss_inputs -> maybe_load_lss_completion; mirror the same key
+        # probe there so an in-catalog K=1 Q table also drops b_miss.
+        if not _lss_bundles:
+            return any(data.get(k) is not None for k in _LSS_Q_KEYS)
+        return False
+
+    lss_completion_active_by_catalog = tuple(
+        bool(_catalog_lss_active(i)) for i in range(opts.n_catalogs)
     )
-    # Persist on opts (-> settings.json) so post-processing rebuilds the SAME
-    # parameter space (b_miss dropped when Q is active) as this run sampled.
+    lss_completion_active = any(lss_completion_active_by_catalog)
+    # Persist BOTH on opts (-> settings.json) so post-processing rebuilds the
+    # SAME parameter space (b_miss dropped per catalog when Q is active) as this
+    # run sampled: the per-catalog tuple is authoritative, the scalar is the
+    # legacy back-compat fallback.
+    opts.lss_completion_active_by_catalog = lss_completion_active_by_catalog
     opts.lss_completion_active = bool(lss_completion_active)
     res = build_parameter_space(
         opts.pop_model,
@@ -1402,13 +1425,17 @@ def main():
         mark_model             = opts.mark_model,
         mark_names             = opts.mark_names,
         n_catalogs             = opts.n_catalogs,
-        lss_completion_active  = lss_completion_active,
+        lss_completion_active  = lss_completion_active_by_catalog,
         mark_names_by_catalog  = getattr(opts, "mark_names_by_catalog", None),
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
     fixed_parameter_statuses = res[10]
     prior_kinds = res[11]
+    # Record the exact sampler labels so build_parameter_decoder (inside
+    # make_likelihood) can fail fast if it re-derives a different set -- the
+    # P0.1 fail-fast net against any future CLI/decoder flag drift.
+    opts.expected_sampled_labels = tuple(labels)
 
     _, _, pop_labels_all, _, _ = pop_model_prior_parser(
         opts.pop_model,

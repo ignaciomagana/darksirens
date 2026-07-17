@@ -153,6 +153,17 @@ def make_pop_extractor(settings: dict):
     # guaranteed to agree on parameter ordering.
     from darksirens.inference.prior import build_parameter_space
 
+    # Per-catalog Q_LSS activity: prefer the authoritative per-catalog tuple the
+    # CLI records (a JSON round-trip yields a list -> tuple of bool); fall back
+    # to the legacy scalar bool for older settings.json without the new key.
+    # Threading the wrong flag would drop (or keep) b_miss inconsistently vs the
+    # sampled space and misalign the pop-coordinate indices.
+    _lss_by_cat = settings.get("lss_completion_active_by_catalog")
+    if _lss_by_cat is not None:
+        lss_completion_active = tuple(bool(x) for x in _lss_by_cat)
+    else:
+        lss_completion_active = bool(settings.get("lss_completion_active", False))
+
     (
         labels,          # ordered list of sampled labels
         _lower,
@@ -189,7 +200,7 @@ def make_pop_extractor(settings: dict):
         # omitting these made build_parameter_space reject such labels in
         # fixed_parameter_values (KeyError) for any K>=2 chain.
         n_catalogs             = int(settings.get("n_catalogs", 1) or 1),
-        lss_completion_active  = bool(settings.get("lss_completion_active", False)),
+        lss_completion_active  = lss_completion_active,
         mark_names_by_catalog  = (
             tuple(tuple(n) for n in settings["mark_names_by_catalog"])
             if settings.get("mark_names_by_catalog") else None

@@ -236,6 +236,14 @@ def build_parameter_decoder(
     mark_names_by_catalog = tuple(
         tuple(names or ()) for names in mark_names_by_catalog
     )
+    # Per-catalog Q_LSS activity (drops b_miss_c{k} from the catalogs carrying a
+    # Q table).  Prefer the CLI-resolved per-catalog tuple; fall back to the
+    # legacy scalar bool (broadcast to all catalogs) for older opts / callers
+    # that never set it -- this fallback is the P0.1 net so a decoder built from
+    # a scalar-only opts still matches the sampler labels for the K=1 Q case.
+    lss_completion_active = getattr(opts, "lss_completion_active_by_catalog", None)
+    if lss_completion_active is None:
+        lss_completion_active = getattr(opts, "lss_completion_active", False)
     (
         sampled_labels,
         _lower,
@@ -267,8 +275,25 @@ def build_parameter_decoder(
         mark_model=mark_model,
         mark_names=mark_names,
         n_catalogs=n_catalogs,
+        lss_completion_active=lss_completion_active,
         mark_names_by_catalog=mark_names_by_catalog,
     )
+
+    # Fail-fast net for CLI/decoder flag drift (the P0.1 bug class): the CLI
+    # records the exact sampler labels on opts; if the decoder re-derives a
+    # different set the two would silently disagree and resolve_parameter_values
+    # would crash at the first likelihood call.  Surface it here with both
+    # sequences instead.
+    expected = getattr(opts, "expected_sampled_labels", None)
+    if expected is not None and tuple(expected) != tuple(sampled_labels):
+        raise ValueError(
+            "Decoder sampled labels diverge from the CLI-resolved sampler "
+            "labels (a flag resolved differently between build_parameter_space "
+            "at the CLI and build_parameter_decoder -- e.g. per-catalog Q_LSS "
+            "activity or a fix_* flag).\n"
+            f"  CLI-resolved (sampler): {list(expected)}\n"
+            f"  decoder-resolved:       {list(sampled_labels)}"
+        )
 
     return ParameterDecoder(
         sampled_labels=tuple(sampled_labels),
