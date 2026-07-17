@@ -86,6 +86,7 @@ from darksirens.redshift.completion import (
     completion_curves,
     field_global_log_Z,
     field_global_log_Z_marked,
+    field_global_log_Z_marked_members,
     field_global_log_Z_members,
     log_galaxy_measure_grid,
 )
@@ -413,11 +414,15 @@ def prepare_redshift_prior_state(
 
         if mark_model is not None and mark_model != "none":
             # Marked-host model: galaxies reweighted by h(m|eta).  Built entirely
-            # here (the per-sample evaluator and DarkSirenPriorState are reused),
+            # here (the per-sample evaluator and the prior states are reused),
             # because dN_host_obs = N_host_obs * p_host(z) with p_host normalised.
             # Composes with Q_LSS: curves.dN_miss already carries any deterministic
             # (or posterior-mean) Q_LSS.  The Level-B missing branch multiplies it
-            # by mu_miss(z|eta) = E_obs[h|z].
+            # by mu_miss(z|eta) = E_obs[h|z].  With a Q_LSS ENSEMBLE the scalar
+            # fields stay the posterior-mean composition and per-member marked
+            # missing densities are added (a DarkSirenEnsemblePriorState) for the
+            # lss_marginalize member vmap, exactly mirroring the unmarked ensemble
+            # branch below.
             from darksirens.marks import mark_model_parser
             log_h = jnp.clip(
                 mark_model_parser(mark_model, mark_names)(em_catalog, mark_params),
@@ -454,6 +459,43 @@ def prepare_redshift_prior_state(
                 log_Z_global = field_global_log_Z_marked(
                     cosmo, survey, em_catalog, mu_miss, log_h_flat
                 )
+            if curves.dN_miss_members is not None:
+                # Marked LSS-completion ENSEMBLE (mirrors the unmarked ensemble
+                # design below): KEEP the scalar posterior-mean-Q fields above and
+                # ADD per-member marked missing densities / normalizers so the
+                # lss_marginalize member vmap (core._member_states) can swap them
+                # in per member.  ``mu_miss`` is pixel-independent (N_grid,), so it
+                # broadcasts across members exactly as it composes with the scalar
+                # posterior-mean dN_miss; the marked kernels / log_N_host are
+                # member-INDEPENDENT and broadcast under the vmap.  With
+                # lss_marginalize OFF only the scalar fields are read, so the
+                # likelihood value is unchanged (only the state TYPE changes).
+                dN_miss_members = curves.dN_miss_members * mu_miss[None, None, :]  # (M,N_rows,N_grid)
+                N_host_miss_members = jnp.trapezoid(dN_miss_members, zgrid, axis=-1)  # (M,N_rows)
+                Z_members = N_host_obs[None, :] + N_host_miss_members
+                log_Z_members = jnp.where(
+                    Z_members > 0.0, jnp.log(jnp.maximum(Z_members, 1e-300)), 0.0
+                )
+                if is_field:
+                    state = DarkSirenEnsemblePriorState(
+                        kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                        log_Z=log_Z,
+                        dN_miss_members=dN_miss_members,
+                        log_Z_members=log_Z_members,
+                        log_Z_global=log_Z_global,
+                        log_Z_global_members=field_global_log_Z_marked_members(
+                            cosmo, survey, em_catalog, mu_miss, log_h_flat
+                        ),
+                    )
+                    return _maybe_materialize(state, materialize_state)
+                state = DarkSirenEnsemblePriorState(
+                    kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                    log_Z=log_Z,
+                    dN_miss_members=dN_miss_members,
+                    log_Z_members=log_Z_members,
+                )
+                return _maybe_materialize(state, materialize_state)
+            if is_field:
                 state = DarkSirenPriorState(
                     kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
                     log_Z=log_Z, log_Z_global=log_Z_global,

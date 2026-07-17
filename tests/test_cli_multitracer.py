@@ -34,6 +34,25 @@ def test_cli_help_mentions_multi_catalog_survey_path_usage():
     assert "fcat_2" in result.stdout
 
 
+def test_cli_help_exposes_allow_unverified_shared_lss_members_flag():
+    """The additive store_true escape hatch for the K>=2 --lss_marginalize
+    provenance guard must appear in --help (argparse store_true => no metavar,
+    so it defaults False)."""
+    result = subprocess.run(
+        [sys.executable, "-m", "darksirens.cli.inference", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--allow_unverified_shared_lss_members" in result.stdout
+    # store_true flag: the usage line carries the bare flag (no VALUE metavar).
+    assert "--allow_unverified_shared_lss_members VALUE" not in result.stdout
+    # --lss_marginalize documents the matched-realizations / realization_set_id
+    # requirement that the flag bypasses.
+    assert "realization_set_id" in result.stdout
+
+
 def test_two_survey_paths_with_non_dark_sirens_universe_model_exits_nonzero():
     result = _run([
         "--gw_path", "/nonexistent/gw.h5",

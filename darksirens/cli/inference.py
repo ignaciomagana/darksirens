@@ -60,6 +60,7 @@ from darksirens.gw.populations.utils import (
     normalization_grid_settings,
 )
 from darksirens.inference.data import load_all_data, validate_loaded_survey_shapes
+from darksirens.inference.validation import validate_multitracer_run
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.factory import (
     _redshift_prior_materialization_reason,
@@ -709,7 +710,22 @@ def main():
                          "For a K>=2 mixture the marginalisation uses ONE SHARED member "
                          "index (member m of every catalog must sample the SAME LSS "
                          "realization): build the per-catalog ensembles from matched "
-                         "realizations with equal --n-members, or the run aborts."))
+                         "realizations with equal --n-members, or the run aborts. "
+                         "The matched-realizations requirement is verified from each "
+                         "file's /lss_completion realization_set_id (they must be equal "
+                         "and non-null); rebuild them jointly to share one id, or pass "
+                         "--allow_unverified_shared_lss_members to accept the "
+                         "independent-fields approximation."))
+    g.add_argument("--allow_unverified_shared_lss_members", action="store_true",
+                   default=False,
+                   help=("Bypass the K>=2 --lss_marginalize provenance check that the "
+                         "per-catalog Q_LSS ensembles share a matched realization set "
+                         "(equal, non-null realization_set_id). With this flag, catalogs "
+                         "whose ensembles were built independently are marginalized "
+                         "anyway, treating member m of each catalog as an INDEPENDENT LSS "
+                         "draw -- an independent-fields product prior, NOT the matched "
+                         "shared-field prior the estimator assumes. Emits a loud warning "
+                         "and proceeds; use only if you understand the approximation."))
 
     g = optp.add_argument_group("Sampler")
     g.add_argument("--sampler",      required=True, choices=["tinyns", "dynesty", "numpyro"])
@@ -1323,6 +1339,11 @@ def main():
                 _report_survey_z_depth(f"Catalog {_i + 1} z_depth", _resolved)
     else:
         opts.resolved_survey_z_depths = []
+
+    # Canonical post-load validation: assert the per-catalog config sequences
+    # resolved above agree with n_catalogs before anything downstream consumes
+    # them (single place; no behaviour change for a valid config).
+    validate_multitracer_run(opts, data)
 
     _end()
 
