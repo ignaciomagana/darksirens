@@ -131,6 +131,58 @@ def log_target_density_m1det_q_dL(
     )
 
 
+def log_target_density_base_and_z(
+    m1det: jnp.ndarray,
+    q: jnp.ndarray,
+    dL: jnp.ndarray,
+    chieff: jnp.ndarray,
+    pix: jnp.ndarray,
+    prior_wt: jnp.ndarray,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    pop_params: jnp.ndarray,
+    catalog: EMCatalog,
+    log_p_pop_fn,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Member-INDEPENDENT split of :func:`log_sample_weight`.
+
+    Returns ``(base, z)`` where
+
+        base = log p_pop(m1src, q, z, chieff | λ)
+             - log[d(dL)/dz] - log(1+z)
+             - log(prior_wt)
+
+    is everything :func:`log_sample_weight` computes EXCEPT the redshift-prior
+    contribution ``log_prior_z_fn(z, pix, catalog)``, and ``z = z_of_dL(dL)`` is
+    the redshift it derived.  The population term, Jacobian, and proposal
+    reweighting are independent of the LSS-completion member index; the ONLY
+    member-dependent piece of the per-sample weight is ``log p_z(z | pix, Θ)``,
+    which is additively separable:
+
+        log_sample_weight(...) = base + log_prior_z_fn(z, pix, catalog).
+
+    The factored LSS-marginalization path (``likelihood/core.py``) precomputes
+    ``base`` once and adds the member-dependent mixture prior per member, so the
+    O(N_max_gals) catalog-KDE work is not redone M times.  ``pix``, ``survey``
+    and ``catalog`` are accepted for signature parity with
+    :func:`log_target_density_m1det_q_dL`; only the population model, cosmology,
+    and ``prior_wt`` enter ``base``.
+
+    The arithmetic mirrors :func:`log_target_density_m1det_q_dL` /
+    :func:`log_sample_weight` with the prior-z term removed; ``base + log p_z``
+    reproduces the monolithic weight up to floating-point re-association only.
+    """
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+    z = z_of_dL(dL, H0, Om0, w0, wa)
+    m1src = m1det / (1.0 + z)
+    base = (
+        log_p_pop_fn(m1src, q, z, chieff, pop_params)
+        - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa)
+        - jnp.log(prior_wt)
+    )
+    return base, z
+
+
 def log_sample_weight(
     m1det: jnp.ndarray,
     q: jnp.ndarray,

@@ -605,6 +605,70 @@ def _eval_dark_scalar(
     return numerator - state.log_Z[pix]
 
 
+# ------------------------------------------------------------
+# Factored dark-siren evaluator (member-marginalization hot path)
+# ------------------------------------------------------------
+# ``_eval_dark_scalar`` fuses the member-INDEPENDENT observed-catalog work (the
+# O(N_max_gals) catalog KDE + the zgrid bracket) with the member-DEPENDENT
+# missing-galaxy completion (a 2-point gather + one logaddexp).  When the GW
+# likelihood marginalizes over an LSS-completion ensemble it evaluates the SAME
+# prior for every member, so vmapping the whole scalar over the member axis
+# redoes the KDE M times.  These two helpers split that work at the exact seam
+# so the KDE is done ONCE and only the completion is vmapped.  Together they are
+# op-for-op identical to ``_eval_dark_scalar`` (``eval_dark_member_completion``
+# consumes ``eval_dark_obs_bracket``'s output), so composing them reproduces the
+# monolithic evaluator per member up to floating-point re-association only.
+
+
+def eval_dark_obs_bracket(z, pix, state: DarkSirenPriorState, em_catalog: EMCatalog):
+    """Member-INDEPENDENT observed part of the dark-siren redshift prior.
+
+    Vectorized over samples like :func:`eval_redshift_prior_with_state`.
+    Reproduces ``_eval_dark_scalar`` up to (and including) the zgrid bracket:
+    the per-sample catalog KDE ``log p_cat`` (same ``nan_to_num``) and the
+    ``_grid_bracket`` index/weight.  Returns ``(A_obs, idx, t)`` with
+    ``A_obs = state.log_Nobs[pix] + log p_cat`` -- the piece that depends only
+    on the (Q-independent) kernels and ``log_Nobs`` broadcast across members.
+    """
+    def _one(z_i, pix_i):
+        log_p_cat = eval_log_catalog_prior_state(z_i, pix_i, state.kernels, em_catalog)
+        # NaN (out-of-grid z, degenerate kernels) must mean "impossible", never p=1.
+        log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+        idx, t = _grid_bracket(z_i)
+        return state.log_Nobs[pix_i] + log_p_cat, idx, t
+
+    return vmap(_one)(z, pix)
+
+
+def eval_dark_member_completion(
+    A_obs, idx, t, pix, dN_miss_m, log_Z_row_m_or_global, is_field: bool
+):
+    """Member-DEPENDENT completion of the dark-siren redshift prior.
+
+    Given the member-independent observed part ``A_obs`` and grid bracket
+    ``(idx, t)`` from :func:`eval_dark_obs_bracket`, plus member ``m``'s 2-D
+    missing-galaxy density ``dN_miss_m`` ``(N_rows, N_grid)`` and its
+    normalizer -- per-pixel ``log_Z`` rows ``(N_rows,)`` under the conditional
+    convention, or the scalar survey-global ``log_Z_global_m`` under the field
+    convention -- reproduce ``_eval_dark_scalar``'s completion ops exactly:
+
+        miss     = interp(dN_miss_m[pix, idx : idx+2], t)
+        log_miss = log(max(miss, tiny))   where miss > 0 else -inf
+        log p_z  = logaddexp(A_obs, log_miss) - normalizer.
+
+    Written for an arbitrary leading sample shape (advanced indexing over
+    ``pix``/``idx``), so vmapping over the stacked member axis of ``dN_miss_m``
+    (and the per-pixel ``log_Z`` rows) is trivial.  ``is_field`` is a static
+    Python bool selecting the survey-global vs per-pixel normalizer branch.
+    """
+    miss = _interp_row(dN_miss_m[pix, idx], dN_miss_m[pix, idx + 1], t)
+    log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
+    numerator = jnp.logaddexp(A_obs, log_miss)
+    if is_field:
+        return numerator - log_Z_row_m_or_global
+    return numerator - log_Z_row_m_or_global[pix]
+
+
 def _eval_complete_scalar(
     z, pix, state: CompletePriorState, survey: SurveyParams, em_catalog: EMCatalog,
     catalog_sky_weighting: str = "conditional",
