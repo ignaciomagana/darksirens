@@ -108,6 +108,13 @@ Passing `K >= 2` files to `--survey_path` runs the K-catalog mixture: the catalo
 - `--seed`: random seed.
 - `--show_progress`: enable or disable progress bars.
 - `--dynesty_diagnostics`: when using `--sampler dynesty`, write periodic runplot/traceplot PDF diagnostics under `<save_path>/dynesty_diagnostics/`.
+- `--selection_neff_guard`: sparse-selection validity guard: `auto` (default) resolves to a smooth `soft` wall for `numpyro` and the historical `hard` `-inf` wall for `dynesty`/`tinyns`; `hard`/`soft` force one. The resolved mode, the cap, and the criterion are printed on one always-on `selection guard: …` line at startup.
+- `--max_likelihood_variance`: cap (default `1.0`, the GWTC-4.0/5.0 criterion) on the Monte-Carlo variance of the total log-likelihood estimator, `sigma^2_lnL = sum_i sigma_i^2 + N_obs^2/Neff_sel`. Proposals above it are guarded (hard `-inf` or the soft wall); the Vitale `Neff > 5*N_obs` floor always applies.
+- `--sampler_preflight`: `on` (default) probes 32 prior draws before nested sampling (`dynesty`/`tinyns`) and prints `preflight: k/32 prior draws have finite logL`. If all 32 are `-inf` it raises immediately instead of letting the sampler reject-sample forever; `off` skips the probe.
+
+#### If dynesty cannot find initial live points
+
+`dynesty`/`tinyns` seed a run by rejection-sampling the prior until they collect `--nlive` points with a finite `logL`. When the selection variance guard (`sigma^2_lnL > --max_likelihood_variance`, or the `Neff > 5*N_obs` floor) returns `-inf` across the whole prior, that step hangs with nothing in the log. The `--sampler_preflight` probe now catches this up front — a `preflight: 0/32 prior draws have finite logL` message and a hard error naming the criterion. To recover, either switch to `--selection_neff_guard soft` (a finite penalized wall the sampler can initialize on and that pushes it toward the valid region) or raise `--max_likelihood_variance` to accept a larger Monte-Carlo variance. To measure `sigma^2_lnL` on your own data and get the smallest admitting cap, run `python scripts/diagnose_selection_guard.py -- <your darksirens_inference args>`.
 
 ### Performance options
 
