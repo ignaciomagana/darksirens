@@ -24,6 +24,7 @@ from darksirens.likelihood.catalog_views import barrier, prepare_catalog_views
 from darksirens.likelihood.events import pad_gw_event_to_multiple
 from darksirens.likelihood.core import (
     darksiren_log_likelihood,
+    redshift_prior_state_sharing,
     WL_BACKEND_DISABLED,
     WL_BACKEND_LOGNORMAL,
     WL_BACKEND_TABULATED,
@@ -247,10 +248,18 @@ def _make_mixture_likelihood(
         # apix across catalogs of different resolutions would silently bias the
         # per-pixel galaxy densities that enter the completion.
         apix_k = bundle["apix"]
+        # Bundle union (loaders.py compacts PE-union-selection once): the two
+        # views share one galaxy table / cache / unique-pixel array, so slice the
+        # Q table, Q ensemble and mark rows ONCE and alias them to both
+        # EMCatalogs (IS-identical leaves).  Detected by identity on the aliased
+        # view arrays; a non-union bundle (e.g. a hand-built test fixture with
+        # distinct PE/sel rows) keeps the separate per-view compaction below.
+        bundle_union = (
+            views.zgals_pe_catalog is views.zgals_sel_catalog
+            and views.unique_pixels_pe is views.unique_pixels_sel
+        )
         lss_q_pe_k, lss_idx_pe_k = _compact_lss_q_for(views, views.unique_pixels_pe)
-        lss_q_sel_k, lss_idx_sel_k = _compact_lss_q_for(views, views.unique_pixels_sel)
         lss_qm_pe_k = _compact_lss_members_for(views, views.unique_pixels_pe)
-        lss_qm_sel_k = _compact_lss_members_for(views, views.unique_pixels_sel)
         field_k = _bundle_field_inputs(bundle)
 
         def _bundle_marks(unique_pixels):
@@ -274,7 +283,16 @@ def _make_mixture_likelihood(
             return out
 
         marks_pe_k = _bundle_marks(views.unique_pixels_pe)
-        marks_sel_k = _bundle_marks(views.unique_pixels_sel)
+        if bundle_union:
+            lss_q_sel_k, lss_idx_sel_k = lss_q_pe_k, lss_idx_pe_k
+            lss_qm_sel_k = lss_qm_pe_k
+            marks_sel_k = marks_pe_k
+        else:
+            lss_q_sel_k, lss_idx_sel_k = _compact_lss_q_for(
+                views, views.unique_pixels_sel
+            )
+            lss_qm_sel_k = _compact_lss_members_for(views, views.unique_pixels_sel)
+            marks_sel_k = _bundle_marks(views.unique_pixels_sel)
 
         em_catalogs_pe.append(EMCatalog(
             apix=apix_k,
@@ -368,6 +386,14 @@ def _make_mixture_likelihood(
     mixture_em_catalogs_pe = tuple(em_catalogs_pe[1:])
     mixture_em_catalogs_sel = tuple(em_catalogs_sel[1:])
 
+    # Decide PE/selection state sharing EAGERLY (concrete EMCatalogs, before jit
+    # erases object identity): a union bundle's two views share every consumed
+    # leaf, so darksiren_log_likelihood builds each catalog's redshift-prior
+    # state once instead of twice.  Static (a tuple of bools).
+    share_prior_state_by_catalog = redshift_prior_state_sharing(
+        universe_model, em_catalogs_pe, em_catalogs_sel
+    )
+
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
         if n_catalogs >= 2:
             (
@@ -430,6 +456,7 @@ def _make_mixture_likelihood(
             mixture_em_catalogs_sel=mixture_em_catalogs_sel,
             mixture_log_weights=log_w,
             catalog_sky_weighting=catalog_sky_weighting,
+            share_prior_state_by_catalog=share_prior_state_by_catalog,
         )
 
     return likelihood
@@ -645,6 +672,86 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         wl_params=data.get("wl_params"),
     )
 
+    # The PE / selection EMCatalogs are coord-INDEPENDENT (every field is a
+    # static, already-barriered array), so build them ONCE here rather than on
+    # every likelihood call.  Building them eagerly also resolves the
+    # redshift-prior-state sharing verdict NOW, before jit erases the leaf object
+    # identity it depends on: on the flat union path PE and selection share every
+    # consumed leaf, so the state is built once instead of twice.
+    em_catalog_pe = EMCatalog(
+        apix=apix,
+        zgals=catalogs.zgals_pe_catalog,
+        dzgals=catalogs.dzgals_pe_catalog,
+        wgals=catalogs.wgals_pe_catalog,
+        ngals=catalogs.ngals_pe_catalog,
+        delta_g_pix_z=catalogs.delta_g_pix_z,
+        dN_obs_kde=catalogs.dN_obs_kde_pe,
+        pixel_to_cache_idx=catalogs.pixel_to_cache_idx_pe,
+        unique_pixels=catalogs.unique_pixels_pe,
+        sample_to_unique_idx=catalogs.sample_to_unique_pe,
+        counterpart_pixel=counterpart_pixel,
+        counterpart_pixels=counterpart_pixels,
+        counterpart_zs=counterpart_zs,
+        counterpart_dzs=counterpart_dzs,
+        active_counterpart_index=0,
+        bright_siren_sky_marginalized=bright_siren_sky_marginalized,
+        lss_completion_logq=lss_q_pe,
+        lss_completion_logq_members=lss_qm_pe,
+        lss_completion_indexing=lss_idx_pe,
+        mark_logmstar=marks_pe["mark_logmstar"],
+        mark_logssfr=marks_pe["mark_logssfr"],
+        mark_metallicity=marks_pe["mark_metallicity"],
+        mark_color=marks_pe["mark_color"],
+        field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
+        field_n_empty=getattr(catalogs, "field_n_empty", None),
+        field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
+        field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
+        field_lss_q=getattr(catalogs, "field_lss_q", None),
+        field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
+        field_delta_g=getattr(catalogs, "field_delta_g", None),
+        field_mark_z=getattr(catalogs, "field_mark_z", None),
+        field_mark_w=getattr(catalogs, "field_mark_w", None),
+        field_mark_values=getattr(catalogs, "field_mark_values", None),
+    )
+    em_catalog_sel = EMCatalog(
+        apix=apix,
+        zgals=catalogs.zgals_sel_catalog,
+        dzgals=catalogs.dzgals_sel_catalog,
+        wgals=catalogs.wgals_sel_catalog,
+        ngals=catalogs.ngals_sel_catalog,
+        delta_g_pix_z=catalogs.delta_g_pix_z,
+        dN_obs_kde=catalogs.dN_obs_kde_sel,
+        pixel_to_cache_idx=catalogs.pixel_to_cache_idx_sel,
+        unique_pixels=catalogs.unique_pixels_sel,
+        sample_to_unique_idx=catalogs.sample_to_unique_sel,
+        counterpart_pixel=counterpart_pixel,
+        counterpart_pixels=counterpart_pixels,
+        counterpart_zs=counterpart_zs,
+        counterpart_dzs=counterpart_dzs,
+        active_counterpart_index=0,
+        bright_siren_sky_marginalized=bright_siren_sky_marginalized,
+        lss_completion_logq=lss_q_sel,
+        lss_completion_logq_members=lss_qm_sel,
+        lss_completion_indexing=lss_idx_sel,
+        mark_logmstar=marks_sel["mark_logmstar"],
+        mark_logssfr=marks_sel["mark_logssfr"],
+        mark_metallicity=marks_sel["mark_metallicity"],
+        mark_color=marks_sel["mark_color"],
+        field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
+        field_n_empty=getattr(catalogs, "field_n_empty", None),
+        field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
+        field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
+        field_lss_q=getattr(catalogs, "field_lss_q", None),
+        field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
+        field_delta_g=getattr(catalogs, "field_delta_g", None),
+        field_mark_z=getattr(catalogs, "field_mark_z", None),
+        field_mark_w=getattr(catalogs, "field_mark_w", None),
+        field_mark_values=getattr(catalogs, "field_mark_values", None),
+    )
+    share_prior_state_by_catalog = redshift_prior_state_sharing(
+        universe_model, (em_catalog_pe,), (em_catalog_sel,)
+    )
+
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
         cosmo, survey, pop_params, sky_params, mark_params = parameter_decoder.decode(coord)
         if len(pop_params) != len(parameter_decoder.pop_labels):
@@ -654,77 +761,6 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 f"'{pop_model}' expects {len(parameter_decoder.pop_labels)}. "
                 "Verify parameter-space construction for this population model."
             )
-
-        em_catalog_pe = EMCatalog(
-            apix=apix,
-            zgals=catalogs.zgals_pe_catalog,
-            dzgals=catalogs.dzgals_pe_catalog,
-            wgals=catalogs.wgals_pe_catalog,
-            ngals=catalogs.ngals_pe_catalog,
-            delta_g_pix_z=catalogs.delta_g_pix_z,
-            dN_obs_kde=catalogs.dN_obs_kde_pe,
-            pixel_to_cache_idx=catalogs.pixel_to_cache_idx_pe,
-            unique_pixels=catalogs.unique_pixels_pe,
-            sample_to_unique_idx=catalogs.sample_to_unique_pe,
-            counterpart_pixel=counterpart_pixel,
-            counterpart_pixels=counterpart_pixels,
-            counterpart_zs=counterpart_zs,
-            counterpart_dzs=counterpart_dzs,
-            active_counterpart_index=0,
-            bright_siren_sky_marginalized=bright_siren_sky_marginalized,
-            lss_completion_logq=lss_q_pe,
-            lss_completion_logq_members=lss_qm_pe,
-            lss_completion_indexing=lss_idx_pe,
-            mark_logmstar=marks_pe["mark_logmstar"],
-            mark_logssfr=marks_pe["mark_logssfr"],
-            mark_metallicity=marks_pe["mark_metallicity"],
-            mark_color=marks_pe["mark_color"],
-            field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
-            field_n_empty=getattr(catalogs, "field_n_empty", None),
-            field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
-            field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
-            field_lss_q=getattr(catalogs, "field_lss_q", None),
-            field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
-            field_delta_g=getattr(catalogs, "field_delta_g", None),
-            field_mark_z=getattr(catalogs, "field_mark_z", None),
-            field_mark_w=getattr(catalogs, "field_mark_w", None),
-            field_mark_values=getattr(catalogs, "field_mark_values", None),
-        )
-        em_catalog_sel = EMCatalog(
-            apix=apix,
-            zgals=catalogs.zgals_sel_catalog,
-            dzgals=catalogs.dzgals_sel_catalog,
-            wgals=catalogs.wgals_sel_catalog,
-            ngals=catalogs.ngals_sel_catalog,
-            delta_g_pix_z=catalogs.delta_g_pix_z,
-            dN_obs_kde=catalogs.dN_obs_kde_sel,
-            pixel_to_cache_idx=catalogs.pixel_to_cache_idx_sel,
-            unique_pixels=catalogs.unique_pixels_sel,
-            sample_to_unique_idx=catalogs.sample_to_unique_sel,
-            counterpart_pixel=counterpart_pixel,
-            counterpart_pixels=counterpart_pixels,
-            counterpart_zs=counterpart_zs,
-            counterpart_dzs=counterpart_dzs,
-            active_counterpart_index=0,
-            bright_siren_sky_marginalized=bright_siren_sky_marginalized,
-            lss_completion_logq=lss_q_sel,
-            lss_completion_logq_members=lss_qm_sel,
-            lss_completion_indexing=lss_idx_sel,
-            mark_logmstar=marks_sel["mark_logmstar"],
-            mark_logssfr=marks_sel["mark_logssfr"],
-            mark_metallicity=marks_sel["mark_metallicity"],
-            mark_color=marks_sel["mark_color"],
-            field_dN_obs_s=getattr(catalogs, "field_dN_obs_s", None),
-            field_n_empty=getattr(catalogs, "field_n_empty", None),
-            field_N_obs_total=getattr(catalogs, "field_N_obs_total", None),
-            field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
-            field_lss_q=getattr(catalogs, "field_lss_q", None),
-            field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
-            field_delta_g=getattr(catalogs, "field_delta_g", None),
-            field_mark_z=getattr(catalogs, "field_mark_z", None),
-            field_mark_w=getattr(catalogs, "field_mark_w", None),
-            field_mark_values=getattr(catalogs, "field_mark_values", None),
-        )
 
         gw_pe = GWEvent(
             m1det=m1det_pe,
@@ -787,6 +823,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 selection_neff_soft_guard=selection_neff_soft_guard,
                 max_likelihood_variance=max_likelihood_variance,
                 catalog_sky_weighting=catalog_sky_weighting,
+                share_prior_state_by_catalog=share_prior_state_by_catalog,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -822,6 +859,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
             catalog_sky_weighting=catalog_sky_weighting,
+            share_prior_state_by_catalog=share_prior_state_by_catalog,
         )
 
     return likelihood

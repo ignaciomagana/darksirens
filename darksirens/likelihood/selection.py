@@ -326,6 +326,50 @@ def selection_log_correction(
 # Full selection term (batched or unbatched)
 # ============================================================
 
+def selection_reduce_from_ldw_provider(
+    ldw_provider,
+    N_sel: int,
+    Ndraw: float,
+    sel_batch_size: int | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Reduce fully-composed selection log-weights to ``(log_mu, Neff, log_sigma2)``.
+
+    ``ldw_provider(start, size) -> (size,)`` returns the FINAL, already-masked
+    selection log importance weights for the injection slice
+    ``[start, start + size)`` (i.e. the array ``_batch_lse`` computes just
+    before its ``logsumexp``).  This mirrors :func:`compute_selection_term`'s
+    reduction bit-for-bit -- the same per-batch ``(logsumexp(ldw),
+    logsumexp(2·ldw))`` accumulation, the same all-batches ``logsumexp``
+    combine (``logsumexp`` is additive across disjoint index sets), and the same
+    :func:`_lse_to_log_mu_neff` -- so a factored caller that recomputes the
+    per-member ldw through this helper matches the monolithic path's reduction.
+
+    Factored out (rather than delegated from :func:`compute_selection_term`) so
+    the existing public function's compute graph stays byte-identical; the
+    LSS-completion member marginalization uses this with a member-specific
+    provider that reuses the precomputed observed-catalog part.  When batching,
+    ``N_sel`` must already be a multiple of ``sel_batch_size`` (the caller pads
+    the injection arrays exactly as :func:`compute_selection_term` does).
+    """
+    if sel_batch_size is None:
+        ldw = ldw_provider(0, N_sel)
+        lse = logsumexp(ldw)
+        lse2 = logsumexp(2.0 * ldw)
+    else:
+        N_batches = N_sel // sel_batch_size
+
+        def _scan_fn(_, batch_idx):
+            start = batch_idx * sel_batch_size
+            ldw_b = ldw_provider(start, sel_batch_size)
+            return None, (logsumexp(ldw_b), logsumexp(2.0 * ldw_b))
+
+        _, (lse_all, lse2_all) = lax.scan(_scan_fn, None, jnp.arange(N_batches))
+        lse = logsumexp(lse_all)
+        lse2 = logsumexp(lse2_all)
+
+    return _lse_to_log_mu_neff(lse, lse2, Ndraw)
+
+
 def compute_selection_term(
     gw_sel: GWEvent,
     em_catalog_sel: EMCatalog,
