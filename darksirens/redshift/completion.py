@@ -1005,6 +1005,44 @@ def field_global_log_Z_marked(
     return jnp.log(jnp.maximum(Z, 1e-300))
 
 
+def field_global_log_Z_marked_members(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    mu_miss: jnp.ndarray,
+    log_h_flat: jnp.ndarray,
+) -> jnp.ndarray:
+    """Per-member MARKED survey-GLOBAL normalizers ``log Z_m(theta, eta)``, (M,).
+
+    The marked analogue of :func:`field_global_log_Z_members`: one
+    :func:`field_global_log_Z_marked` evaluation per Q-ensemble member, swapping
+    only the member's Q rows / empty-pixel budget (``field_lss_q_members`` /
+    ``field_lss_q_empty_sum_members``) into the missing curve.  The observed
+    marked mass ``Sum w_i h_i`` and the ``mu_miss(z | eta)`` factor are
+    member-INDEPENDENT (full-sky flat marks), so they are shared verbatim across
+    members -- reusing ``field_global_log_Z_marked`` guarantees the observed term
+    and mu_miss integrand are op-for-op identical to the scalar marked path.
+    Consumed by the lss_marginalize member vmap in the likelihood core (each
+    member state carries its own marked global normalizer under field weighting).
+    """
+    q_members = em_catalog.field_lss_q_members
+    q_empty_members = em_catalog.field_lss_q_empty_sum_members
+    if q_members is None or q_empty_members is None:
+        raise ValueError(
+            "field_global_log_Z_marked_members requires field_lss_q_members and "
+            "field_lss_q_empty_sum_members; build them via "
+            "build_field_lss_q_member_inputs."
+        )
+
+    def _one(q_m, q_empty_m):
+        cat_m = em_catalog._replace(
+            field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
+        )
+        return field_global_log_Z_marked(cosmo, survey, cat_m, mu_miss, log_h_flat)
+
+    return vmap(_one)(jnp.asarray(q_members), jnp.asarray(q_empty_members))
+
+
 def build_field_mark_inputs(
     full_z: jnp.ndarray,
     full_w: jnp.ndarray | None,
