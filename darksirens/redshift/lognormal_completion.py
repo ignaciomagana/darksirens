@@ -54,7 +54,10 @@ lazily so importing this module for the radial API never requires JAX.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import uuid
+
 import numpy as np
 
 
@@ -735,8 +738,20 @@ def save_lss_completion_hdf5(
     indexing: str = "compact",
     completion_kind: str | None = None,
     metadata: dict | None = None,
+    realization_set_id: str | None = None,
 ) -> str:
-    """Write a completion file with layout ``/lss_completion/{logq_map,logq_members,zgrid}``."""
+    """Write a completion file with layout ``/lss_completion/{logq_map,logq_members,zgrid}``.
+
+    A ``realization_set_id`` (a fresh ``uuid4().hex`` unless one is supplied)
+    is stamped on the ``/lss_completion`` group so a K>=2 mixture can verify
+    that per-catalog ensembles share ONE matched set of LSS realizations
+    before it marginalizes over a shared member index (see
+    ``load_multitracer_catalog_bundles``).  Pass an explicit
+    ``realization_set_id`` from a future JOINT multi-survey builder to stamp
+    the SAME id across several files.  When members are present the group also
+    carries a ``member_content_sha256`` (over the exact member bytes) and an
+    integer ``n_members`` for provenance.
+    """
     import h5py
 
     if logq_map is None and logq_members is None:
@@ -745,19 +760,28 @@ def save_lss_completion_hdf5(
         raise ValueError(f"indexing must be 'compact' or 'global', got {indexing!r}.")
     if completion_kind is None:
         completion_kind = "laplace_members" if logq_members is not None else "map"
+    if realization_set_id is None:
+        realization_set_id = uuid.uuid4().hex
 
     with h5py.File(path, "w") as f:
         grp = f.create_group("lss_completion")
         if logq_map is not None:
             grp.create_dataset("logq_map", data=np.asarray(logq_map, dtype=float))
         if logq_members is not None:
-            grp.create_dataset("logq_members", data=np.asarray(logq_members, dtype=float))
+            members_arr = np.asarray(logq_members, dtype=float)
+            grp.create_dataset("logq_members", data=members_arr)
         if zgrid is not None:
             grp.create_dataset("zgrid", data=np.asarray(zgrid, dtype=float))
         grp.attrs["indexing"] = indexing
         grp.attrs["model"] = "poisson_lognormal"
         grp.attrs["completion_kind"] = completion_kind
         grp.attrs["created_by"] = "darksirens.redshift.lognormal_completion"
+        grp.attrs["realization_set_id"] = realization_set_id
+        if logq_members is not None:
+            grp.attrs["member_content_sha256"] = hashlib.sha256(
+                np.ascontiguousarray(members_arr).tobytes()
+            ).hexdigest()
+            grp.attrs["n_members"] = int(members_arr.shape[0])
         if metadata:
             grp.attrs["diagnostics"] = json.dumps(metadata, default=str)
     return path
@@ -768,13 +792,16 @@ def load_lss_completion_hdf5(path: str) -> dict:
 
     Returns a dict with ``logq_map`` / ``logq_members`` / ``zgrid`` (any may be
     ``None``) plus ``indexing``, ``model``, ``completion_kind`` and parsed
-    ``diagnostics``.
+    ``diagnostics``.  The ensemble-provenance attrs ``realization_set_id`` /
+    ``member_content_sha256`` / ``n_members`` are returned as ``None`` when
+    absent (legacy files written before provenance stamping).
     """
     import h5py
 
     out = {"logq_map": None, "logq_members": None, "zgrid": None,
            "indexing": "compact", "model": None, "completion_kind": None,
-           "diagnostics": None}
+           "diagnostics": None, "realization_set_id": None,
+           "member_content_sha256": None, "n_members": None}
     with h5py.File(path, "r") as f:
         grp = f["lss_completion"] if "lss_completion" in f else f
         if "logq_map" in grp:
@@ -783,10 +810,13 @@ def load_lss_completion_hdf5(path: str) -> dict:
             out["logq_members"] = np.asarray(grp["logq_members"])
         if "zgrid" in grp:
             out["zgrid"] = np.asarray(grp["zgrid"])
-        for key in ("indexing", "model", "completion_kind"):
+        for key in ("indexing", "model", "completion_kind",
+                    "realization_set_id", "member_content_sha256"):
             if key in grp.attrs:
                 val = grp.attrs[key]
                 out[key] = val.decode() if isinstance(val, bytes) else str(val)
+        if "n_members" in grp.attrs:
+            out["n_members"] = int(grp.attrs["n_members"])
         if "diagnostics" in grp.attrs:
             raw = grp.attrs["diagnostics"]
             raw = raw.decode() if isinstance(raw, bytes) else raw
