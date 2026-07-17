@@ -120,6 +120,7 @@ def _make_mixture_likelihood(
     shared_gamma = bool(getattr(opts, "shared_gamma", True))
     universe_model = opts.universe_model
     sel_batch_size = getattr(opts, "sel_batch_size", None)
+    pe_event_block = getattr(opts, "pe_event_block", None)
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
@@ -439,6 +440,7 @@ def _make_mixture_likelihood(
             shared_spin=shared_spin,
             shared_gamma=shared_gamma,
             sel_batch_size=sel_batch_size,
+            pe_event_block=pe_event_block,
             sky_model=sky_model,
             sky_params=sky_params,
             mark_model=mark_model,
@@ -489,6 +491,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     shared_gamma = bool(getattr(opts, "shared_gamma", True))
     universe_model = opts.universe_model
     sel_batch_size = getattr(opts, "sel_batch_size", None)
+    pe_event_block = getattr(opts, "pe_event_block", None)
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
@@ -806,6 +809,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 pop_model,
                 universe_model,
                 sel_batch_size=sel_batch_size,
+                pe_event_block=pe_event_block,
                 sky_model=sky_model,
                 sky_params=sky_params,
                 mark_model=mark_model,
@@ -842,6 +846,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             shared_spin=shared_spin,
             shared_gamma=shared_gamma,
             sel_batch_size=sel_batch_size,
+            pe_event_block=pe_event_block,
             sky_model=sky_model,
             sky_params=sky_params,
             mark_model=mark_model,

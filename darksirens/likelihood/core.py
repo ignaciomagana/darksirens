@@ -268,6 +268,7 @@ def _require_field_mode_scope(
         "shared_gamma",
         "universe_model",
         "sel_batch_size",
+        "pe_event_block",
         "sky_model",
         "mark_model",
         "mark_names",
@@ -300,6 +301,15 @@ def darksiren_log_likelihood(
     shared_spin: bool = True,
     shared_gamma: bool = True,
     sel_batch_size: int | None = None,
+    # Events-axis block size for the per-event PE reduction (static).  None (the
+    # default) evaluates ALL events in ONE flattened, vectorized pass -- fastest,
+    # and the right choice for spectral sirens.  A finite value processes the
+    # events axis in ceil(nEvents / block) chunks, bounding the live per-sample
+    # intermediates to O(block x nsamp x N_max_gals) for dense dark-siren catalog
+    # KDEs when XLA fails to fuse.  block == 1 reproduces the historical per-event
+    # scan.  Inert (falls back to the exact per-event scan) whenever a catalog
+    # carries per-event bright-siren counterpart arrays.
+    pe_event_block: int | None = None,
     sky_model: str = "isotropic",
     sky_params: jnp.ndarray | None = None,
     mark_model: str = "none",
@@ -516,6 +526,30 @@ def darksiren_log_likelihood(
     surveys_all = (survey,) + tuple(mixture_surveys)
     catalogs_pe_all = (em_catalog_pe,) + tuple(mixture_em_catalogs_pe)
     catalogs_sel_all = (em_catalog_sel,) + tuple(mixture_em_catalogs_sel)
+
+    # Events-axis block size for the per-event PE reduction (all static Python).
+    # None => all events in one vectorized block (fastest); else chunks of
+    # ``block`` events, clipped to nEvents.  The per-sample weight kernels are
+    # elementwise in the sample axis (the catalog KDE / redshift prior vmap
+    # per-sample, the population term and Jacobians are pointwise), so a chunk of
+    # ``block`` events is evaluated in ONE flattened (block*nsamp,) call and
+    # reduced per event -- identical masked elements in identical order per row.
+    if pe_event_block is not None and pe_event_block < 1:
+        raise ValueError(
+            f"pe_event_block must be a positive integer or None; got {pe_event_block}."
+        )
+    pe_block = nEvents if pe_event_block is None else min(pe_event_block, nEvents)
+    # The per-event counterpart selection (bright sirens) sets
+    # ``active_counterpart_index`` per event, which the block path cannot express
+    # (it left at the inert default).  Presence of ANY per-event counterpart
+    # array on ANY PE catalog forces the exact per-event scan, keeping the bright
+    # path bit-identical to the historical body.
+    has_counterpart = any(
+        getattr(c, "counterpart_pixels", None) is not None
+        or getattr(c, "counterpart_zs", None) is not None
+        or getattr(c, "counterpart_dzs", None) is not None
+        for c in catalogs_pe_all
+    )
 
     # Per-catalog mark operands: default to the legacy single-catalog spelling
     # (catalog 1 carries the marks, catalogs 2..K are unmarked).
@@ -763,17 +797,29 @@ def darksiren_log_likelihood(
             sky_log_weight_fn=sky_log_weight_fn,
         )
 
-        def _pe_event_fn(_, event_idx):
-            s = event_idx * nsamp
-            sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
+        # ----- Per-event PE reduction -------------------------------------
+        # Each event contributes log Ẑ_i (importance average over its nsamp PE
+        # samples) and the delta-method variance σ²_i.  For catalogs WITHOUT
+        # per-event counterpart arrays the events axis is block-vectorized: a
+        # chunk of ``pe_block`` events is evaluated in ONE flattened
+        # (pe_block*nsamp,) call and reduced per event by a row-wise
+        # log_evidence_and_mc_variance (vmap), removing the 259-iteration
+        # sequential kernel-launch overhead of the per-event scan.  The masked
+        # elements and their per-row order are identical to the scan, so the
+        # per-event values are bit-compatible.  ``pe_block == 1`` reproduces the
+        # historical scan (minus the counterpart _replace); ``pe_block ==
+        # nEvents`` (the None default) is a single vectorized pass.  Bright
+        # sirens set active_counterpart_index per event, which the block path
+        # cannot express, so ``has_counterpart`` keeps the exact scan verbatim.
+
+        def _pe_chunk_ldw(s, n):
+            """Masked per-sample log-weights for the ``n`` contiguous PE samples
+            starting at flat index ``s`` (``n = m*nsamp`` for a chunk of ``m``
+            events).  No counterpart _replace -- the block path is only taken
+            when no PE catalog carries per-event counterpart arrays."""
+            sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, n)
             dL_ev = sl(gw_pe.dL)
             valid = sl(gw_pe.valid) & (sl(gw_pe.prior_wt) > 0.0)
-            # Per-event counterpart selection (bright sirens); the traced index
-            # is inert for catalogs without counterpart fields (dark models).
-            catalogs_ev = tuple(
-                c._replace(active_counterpart_index=event_idx)
-                for c in catalogs_pe_all
-            )
             ldw = log_weight_ev(
                 sl(gw_pe.m1det),
                 sl(gw_pe.q),
@@ -781,7 +827,7 @@ def darksiren_log_likelihood(
                 sl(gw_pe.chieff),
                 sl(gw_pe.pixels),
                 sl(gw_pe.prior_wt),
-                catalogs_ev,
+                catalogs_pe_all,
             )
             # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
             # Clamped dL for the same reverse-NaN reason as the weight paths.
@@ -791,13 +837,79 @@ def darksiren_log_likelihood(
                 ldw = ldw + log_g_sky(
                     sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
                 )
-            ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
-            # NaN-safe reduction: an event whose samples ALL mask to -inf (the
-            # sampler exploring, e.g., mmax below every sample of one event)
-            # must contribute -inf, not a NaN backward softmax.
-            return None, log_evidence_and_mc_variance(ldw, nsamp)
+            # NaN-safe reduction downstream: an event whose samples ALL mask to
+            # -inf must contribute -inf, not a NaN backward softmax.
+            return jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-        _, (event_lls, event_vars) = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
+        if has_counterpart:
+            # Bright sirens: active_counterpart_index is event-dependent, so keep
+            # the exact per-event scan (bit-identical to the historical body).
+            def _pe_event_fn(_, event_idx):
+                s = event_idx * nsamp
+                sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
+                dL_ev = sl(gw_pe.dL)
+                valid = sl(gw_pe.valid) & (sl(gw_pe.prior_wt) > 0.0)
+                catalogs_ev = tuple(
+                    c._replace(active_counterpart_index=event_idx)
+                    for c in catalogs_pe_all
+                )
+                ldw = log_weight_ev(
+                    sl(gw_pe.m1det),
+                    sl(gw_pe.q),
+                    dL_ev,
+                    sl(gw_pe.chieff),
+                    sl(gw_pe.pixels),
+                    sl(gw_pe.prior_wt),
+                    catalogs_ev,
+                )
+                if apply_sky:
+                    dL_lo_s, dL_hi_s = dL_grid_bounds(H0, Om0, w0, wa)
+                    z_ev = z_of_dL(jnp.clip(dL_ev, dL_lo_s, dL_hi_s), H0, Om0, w0, wa)
+                    ldw = ldw + log_g_sky(
+                        sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
+                    )
+                ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
+                return None, log_evidence_and_mc_variance(ldw, nsamp)
+
+            _, (event_lls, event_vars) = lax.scan(
+                _pe_event_fn, None, jnp.arange(nEvents)
+            )
+        else:
+            # Block-vectorized: ceil(nEvents/pe_block) chunks.  A static chunk
+            # plan -- ``n_full`` full chunks (via lax.scan when >1, or a direct
+            # call when exactly 1) plus one Python-level remainder chunk -- keeps
+            # every shape static with no dynamic padding mask.
+            block_samps = pe_block * nsamp
+            n_full = nEvents // pe_block
+            rem = nEvents - n_full * pe_block
+
+            def _reduce_events(s, m):
+                # s: flat sample start (traced or static); m: STATIC event count.
+                ldw = _pe_chunk_ldw(s, m * nsamp).reshape(m, nsamp)
+                return jax.vmap(
+                    lambda row: log_evidence_and_mc_variance(row, nsamp)
+                )(ldw)
+
+            parts = []
+            if n_full == 1:
+                parts.append(_reduce_events(0, pe_block))
+            elif n_full > 1:
+                def _chunk_scan(_, chunk_idx):
+                    return None, _reduce_events(chunk_idx * block_samps, pe_block)
+
+                _, stacked = lax.scan(_chunk_scan, None, jnp.arange(n_full))
+                # (n_full, pe_block) -> (n_full*pe_block,) preserving event order.
+                parts.append(
+                    jax.tree_util.tree_map(
+                        lambda a: a.reshape((n_full * pe_block,) + a.shape[2:]),
+                        stacked,
+                    )
+                )
+            if rem > 0:
+                parts.append(_reduce_events(n_full * block_samps, rem))
+
+            event_lls = jnp.concatenate([p[0] for p in parts])
+            event_vars = jnp.concatenate([p[1] for p in parts])
         # Guard on the TOTAL log-likelihood variance: the per-event
         # reweighting variances spend part of the budget, so the correction
         # must be evaluated after the event scan.
