@@ -983,11 +983,27 @@ def darksiren_log_likelihood(
             ]
             return _mixture_logsumexp(lps)
 
-        # --- PE precompute (member-independent), per event via lax.scan so the
-        # KDE peak memory stays O(nsamp x N_max_gals) exactly as _pe_event_fn. ---
-        def _pe_precompute(_, event_idx):
-            s = event_idx * nsamp
-            sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, nsamp)
+        # --- PE precompute (member-independent).  Block-vectorized over the
+        # events axis with the SAME static chunk plan as #252's deterministic
+        # per-event reduction in _ll_given_states above (mirrored here rather than
+        # shared so the deterministic-path code stays textually untouched): a
+        # chunk of ``m`` events is evaluated in ONE flattened (m*nsamp,) pass of
+        # the member-INDEPENDENT kernels and reshaped to (m, nsamp, ...).  Those
+        # kernels -- log_target_density_base_and_z, eval_dark_obs_bracket's
+        # per-sample vmap, and log_g_sky -- are elementwise in the sample axis, so
+        # a chunk is bit-identical to per-event evaluation (just reshaped), the
+        # same justification as the deterministic path.  ``pe_event_block`` (via
+        # pe_block) chooses the chunk size: None (default) => ALL events in one
+        # pass (no scan, fastest); a finite block bounds the KDE peak memory to
+        # O(block x nsamp x N_max_gals); block == 1 reproduces the historical
+        # per-event scan.  No counterpart concern here (lss_marginalize implies
+        # dark_sirens, statically asserted above), so no fallback branch. ---
+        def _pe_precompute_flat(s, n):
+            # Member-independent per-sample precompute over the ``n`` contiguous
+            # PE samples from flat index ``s`` (``n = m*nsamp`` for m events).
+            # Body identical to the historical per-event scan body; only the slice
+            # LENGTH differs (m*nsamp vs nsamp).
+            sl = lambda arr: lax.dynamic_slice_in_dim(arr, s, n)
             dL_ev = sl(gw_pe.dL)
             supported = (dL_ev >= dL_lo) & (dL_ev <= dL_hi)
             dL_c = jnp.clip(dL_ev, dL_lo, dL_hi)
@@ -1009,14 +1025,54 @@ def darksiren_log_likelihood(
             t = tuple(o[2] for o in obs)
             pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
             # Sky factor uses the SAME clamped-dL redshift as base (z_c); it is
-            # inserted AFTER the first mask, exactly as _pe_event_fn.
+            # inserted AFTER the first mask in _pe_member_terms, exactly as before.
             sky = (
                 log_g_sky(sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_c, sky_params)
                 if apply_sky else jnp.zeros_like(base)
             )
-            return None, (base, supported, valid, sky, A_obs, idx, t, pixk)
+            return (base, supported, valid, sky, A_obs, idx, t, pixk)
 
-        _, pe_pre = lax.scan(_pe_precompute, None, jnp.arange(nEvents))
+        def _pe_precompute_chunk(s, m):
+            # Evaluate m events (m*nsamp samples) in one flat pass, then split the
+            # leading axis back to (m, nsamp, ...) so the stacked pytree keeps the
+            # historical leaf shapes (nEvents, nsamp, ...) that _pe_member_terms
+            # consumes UNCHANGED.
+            flat = _pe_precompute_flat(s, m * nsamp)
+            return jax.tree_util.tree_map(
+                lambda a: a.reshape((m, nsamp) + a.shape[1:]), flat
+            )
+
+        block_samps = pe_block * nsamp
+        n_full = nEvents // pe_block
+        rem = nEvents - n_full * pe_block
+        parts = []
+        if n_full == 1:
+            parts.append(_pe_precompute_chunk(0, pe_block))
+        elif n_full > 1:
+            def _chunk_scan(_, chunk_idx):
+                return None, _pe_precompute_chunk(chunk_idx * block_samps, pe_block)
+
+            _, stacked = lax.scan(_chunk_scan, None, jnp.arange(n_full))
+            # (n_full, pe_block, nsamp, ...) -> (n_full*pe_block, nsamp, ...).
+            parts.append(
+                jax.tree_util.tree_map(
+                    lambda a: a.reshape((n_full * pe_block,) + a.shape[2:]),
+                    stacked,
+                )
+            )
+        if rem > 0:
+            parts.append(_pe_precompute_chunk(n_full * block_samps, rem))
+        # Concatenate full-chunk + remainder pytrees along the events axis,
+        # preserving global event order (== the historical arange(nEvents) scan
+        # order).  A single part (the None default and any exact-division block)
+        # needs no concatenate.
+        pe_pre = (
+            parts[0]
+            if len(parts) == 1
+            else jax.tree_util.tree_map(
+                lambda *ps: jnp.concatenate(ps, axis=0), *parts
+            )
+        )
 
         def _pe_member_terms(leaves):
             base, supported, valid, sky, A_obs, idx, t, pixk = pe_pre
