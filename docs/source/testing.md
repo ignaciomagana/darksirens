@@ -132,10 +132,10 @@ $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model powerlaw+peak \
     --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-spec
 
-# U-wl  spectral sirens + weak-lensing magnification (lognormal s^2(z)=a z^b)
-$RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
-    --universe_model spectral_sirens_wl --lensing_wl_model lognormal --lensing_wl_a 4e-3 --lensing_wl_b 1.5 \
-    --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-wl
+# U-wl  spectral sirens + weak-lensing magnification (lognormal s^2(z)=a z^b, via the lensing CLI)
+$RUN python -m darksirens.cli.inference_lensing --gw_path $GWE --gwselection_path $SEL \
+    --cluster_mode off --wl_backend lognormal --lensing_wl_a 4e-3 --lensing_wl_b 1.5 \
+    --pop_model powerlaw+peak --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-wl
 
 # U-dark  incomplete galaxy catalog
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \

@@ -52,7 +52,7 @@ import numpy as np
 import healpy as hp
 import h5py
 
-from argparse import ArgumentParser, RawDescriptionHelpFormatter
+from argparse import ArgumentParser, ArgumentTypeError, RawDescriptionHelpFormatter
 
 from darksirens.gw.populations import get_fixed_population_params, pop_model_prior_parser
 from darksirens.gw.populations.utils import (
@@ -462,6 +462,23 @@ def format_selection_guard_summary(
     )
 
 
+def _universe_model_arg(value):
+    """argparse ``type`` for --universe_model.
+
+    The weak-lensing (``spectral_sirens_wl``) universe model moved to the
+    ``darksirens_inference_lensing`` CLI. argparse runs ``type`` before
+    ``choices``, so intercept the retired value here and raise a migration
+    hint instead of the generic "invalid choice" message.
+    """
+    if value == "spectral_sirens_wl":
+        raise ArgumentTypeError(
+            "universe_model 'spectral_sirens_wl' moved to the lensing CLI; run "
+            "`darksirens_inference_lensing --cluster_mode off "
+            "--wl_backend lognormal|tabulated ...` instead."
+        )
+    return value
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -556,7 +573,8 @@ def main():
 
     g = optp.add_argument_group("Physical model")
     g.add_argument("--universe_model", default="spectral_sirens",
-                   choices=["spectral_sirens", "spectral_sirens_wl", "dark_sirens",
+                   type=_universe_model_arg,
+                   choices=["spectral_sirens", "dark_sirens",
                             "dark_sirens_complete", "bright_sirens"])
     g.add_argument(
         "--sky_model", default="isotropic",
@@ -822,25 +840,6 @@ def main():
                         "to likelihood precision at 4-8 nodes and the quadrature dominates "
                         "wide-sky dark-siren runs; do NOT reduce for broad photo-z kernels.")
 
-    g = optp.add_argument_group("Lensing")
-    g.add_argument("--lensing_wl_model", choices=["lognormal", "tabulated"], default="lognormal",
-                   help="Weak-lensing magnification PDF model "
-                        "(used only with --universe_model spectral_sirens_wl).")
-    g.add_argument("--lensing_wl_a", type=float, default=4e-3,
-                   help="Lognormal WL variance amplitude: s^2(z) = a*z^b. "
-                        "Default 4e-3 ~ Takahashi+11 fit at z<2.")
-    g.add_argument("--lensing_wl_b", type=float, default=1.5,
-                   help="Lognormal WL variance slope.")
-    g.add_argument("--lensing_wl_table_path", type=str, default=None,
-                   help="Path to HDF5 table of log p_WL(mu|z) "
-                        "(used with --lensing_wl_model tabulated).")
-    g.add_argument("--wl_selection", choices=["standard", "wl_lognormal"], default="standard",
-                   help="Selection-integral WL treatment (mirrors darksirens_inference_lensing): "
-                        "standard preserves the legacy un-marginalized selection weight; "
-                        "wl_lognormal applies the same lognormal/Hermite mu-marginalization to "
-                        "injection samples as the PE term (only with --lensing_wl_model lognormal; "
-                        "wl_a=0 reduces to standard).")
-
     opts = optp.parse_args()
 
     # ── Multitracer survey-path normalization ──────────────────────
@@ -941,7 +940,7 @@ def main():
             _fatal("Multiple --survey_path catalogs (a K>=2 mixture) require "
                    "--universe_model dark_sirens, or dark_sirens_complete with "
                    "--catalog_sky_weighting field. spectral_sirens / "
-                   "spectral_sirens_wl / bright_sirens are inherently "
+                   "bright_sirens are inherently "
                    "single-catalog (catalog-free or counterpart-pinned) and "
                    "have no K>=2 mixture.")
         # Marked-host models compose with the mixture via PER-CATALOG eta

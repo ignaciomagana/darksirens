@@ -50,9 +50,13 @@ Important data and model flags:
 * `--partition_mode fixed` uses one explicit `--partition_path`;
   `--partition_mode marginalize_exact` uses `--candidate_pairs_path` and
   `--max_exact_partitions` to exactly marginalise over a small candidate graph.
-* `--wl_backend {lognormal,disabled}` selects `spectral_sirens_wl` or ordinary
-  `spectral_sirens`; `--wl_selection {standard,wl_lognormal}` controls whether
-  singleton selection also receives the lognormal/Hermite WL treatment.
+* `--wl_backend {lognormal,tabulated,disabled}` selects `spectral_sirens_wl`
+  (lognormal or tabulated WL magnification) or ordinary `spectral_sirens`;
+  `tabulated` reads `--lensing_wl_table_path` (HDF5 with datasets `z_grid`,
+  `log_mu_grid`, `log_p_table` giving `log p_WL(mu|z)`).  This CLI is the sole
+  owner of the `spectral_sirens_wl` universe model.  `--wl_selection
+  {standard,wl_lognormal}` controls whether singleton selection also receives
+  the lognormal/Hermite WL treatment.
 * `--pair_marks {none,time}` optionally adds SIS time-delay marks from pair-PE
   metadata, with `--pair_time_sigma_sec` as a fallback uncertainty.
 * `--fix_lens_rate true` fixes `--sl_tau_A` and `--sl_tau_n`;

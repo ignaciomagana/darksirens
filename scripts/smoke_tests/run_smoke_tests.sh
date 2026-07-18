@@ -102,8 +102,8 @@ add(){ IDS+=("$1"); DESCS+=("$2"); PRECONDS+=("$3"); CMDS+=("$4"); }
 # Universe models
 add U-spec     "spectral_sirens (GW only)" ALWAYS \
   "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-spec"
-add U-wl       "spectral_sirens_wl (weak-lensing magnification)" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens_wl --lensing_wl_model lognormal --lensing_wl_a 4e-3 --lensing_wl_b 1.5 --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-wl"
+add U-wl       "spectral_sirens_wl (weak-lensing magnification, via lensing CLI)" ALWAYS \
+  "$LENS --gw_path $GWE --gwselection_path $SEL --cluster_mode off --wl_backend lognormal --lensing_wl_a 4e-3 --lensing_wl_b 1.5 --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-wl"
 add U-dark     "dark_sirens (incomplete catalog)" HAVE_DARK \
   "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-dark"
 add U-complete "dark_sirens_complete (complete catalog)" HAVE_DARK \

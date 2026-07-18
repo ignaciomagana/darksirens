@@ -184,7 +184,7 @@ darksirens_inference \
 | Value | Description |
 | --- | --- |
 | `spectral_sirens` | GW-only spectral-siren inference. No survey catalog is required. |
-| `spectral_sirens_wl` | Spectral sirens with weak-lensing magnification marginalization. No survey catalog is required. |
+| `spectral_sirens_wl` | Spectral sirens with weak-lensing magnification marginalization (no survey catalog). Run via the lensing CLI: `darksirens_inference_lensing --cluster_mode off --wl_backend lognormal\|tabulated` (no longer a `darksirens_inference` choice). |
 | `dark_sirens` | Incomplete-catalog dark-siren inference with survey completion modeling. Requires `--survey_path` (one catalog, or K >= 2 for the multitracer mixture). |
 | `dark_sirens_complete` | Complete-catalog dark-siren inference. Requires `--survey_path`; a K >= 2 mixture uses the field sky weighting only (special case). |
 | `bright_sirens` | Bright-siren inference using known counterpart coordinates/redshifts via `--counterpart`. |

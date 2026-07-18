@@ -135,7 +135,8 @@ built ([`em.prior`](reference/em.md)):
 - **`dark_sirens_complete`** — assumes a 100%-complete catalog.
 - **`bright_sirens`** — an EM counterpart pins the sky/redshift.
 - **`spectral_sirens_wl`** — spectral sirens with weak-lensing magnification
-  marginalisation ([`lensing`](reference/lensing.md)).
+  marginalisation ([`lensing`](reference/lensing.md)); run via the lensing CLI
+  (`darksirens_inference_lensing --cluster_mode off --wl_backend lognormal|tabulated`).
 
 For the dark-siren models the per-pixel redshift prior is assembled from an
 observed (catalog) term and a missing (incompleteness) term,
