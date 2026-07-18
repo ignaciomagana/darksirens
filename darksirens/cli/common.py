@@ -1,4 +1,6 @@
+import argparse
 import json
+import os
 import sys
 from argparse import ArgumentParser
 
@@ -7,30 +9,76 @@ import numpy as np
 from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
 
 # ── Formatting helpers ─────────────────────────────────────────────────────────
+#
+# The CLIs print a light box-drawing UI (rounded frames, status glyphs).  ANSI
+# colour is layered on ONLY when stdout is an interactive terminal and NO_COLOR
+# is unset, so a redirected SLURM ``.out`` log stays plain UTF-8 text.  Colour is
+# restricted to helper-exclusive elements — the horizontal frames, section
+# titles and status glyphs — while the vertical ``│`` content walls are left
+# uncoloured, so the many raw ``print("  │ ...")`` lines in the CLIs stay
+# visually consistent with rows emitted through ``_row``.
 
 W = 72
 
+# ANSI SGR parameters (joined by ';' within one escape sequence).
+_BOLD   = "1"
+_DIM    = "2"
+_RED    = "31"
+_GREEN  = "32"
+_YELLOW = "33"
+_ACCENT = "38;2;215;119;87"   # Claude coral (#d77757); truecolour, gated on isatty
+
+
+def _color_enabled() -> bool:
+    """Whether it is safe to emit ANSI colour on stdout.
+
+    Honours the ``NO_COLOR`` (disable) and ``FORCE_COLOR`` (enable) conventions
+    and otherwise requires an interactive, non-dumb terminal.  Evaluated live
+    per call so pytest's captured stdout and shell/SLURM redirection both yield
+    plain text without caching a stale decision.
+    """
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    try:
+        if not sys.stdout.isatty():
+            return False
+    except (AttributeError, ValueError):
+        # stdout is None, closed, or a stream without isatty() — colour is a
+        # cosmetic add-on, so degrade to plain text rather than crash the CLI.
+        return False
+    return os.environ.get("TERM") != "dumb"
+
+
+def _c(text: str, *codes: str) -> str:
+    """Wrap ``text`` in ANSI SGR ``codes`` when colour is enabled, else return it."""
+    if not codes or not _color_enabled():
+        return text
+    return f"\x1b[{';'.join(codes)}m{text}\x1b[0m"
+
+
 def _banner(text: str):
-    pad   = max(0, W - 4 - len(text))
-    left  = pad // 2
-    right = pad - left
-    print(f"{'─' * W}")
-    print(f"  {'·' * left} {text} {'·' * right}  ")
-    print(f"{'─' * W}")
+    rule = _c("─" * W, _DIM)
+    left = max(0, (W - len(text)) // 2)
+    print(rule)
+    print(f"{' ' * left}{_c(text, _BOLD, _ACCENT)}")
+    print(rule)
 
 def _section(title: str):
     print()
-    print(f"  ┌─ {title} {'─' * max(0, W - 6 - len(title))}┐")
+    fill = "─" * max(0, W - 6 - len(title))
+    print("  " + _c("╭─ ", _DIM) + _c(title, _BOLD, _ACCENT) + " " + _c(fill + "╮", _DIM))
 
 def _row(label: str, value, width: int = 26):
     print(f"  │  {label:<{width}} {value}")
 
 def _end():
-    print(f"  └{'─' * (W - 3)}┘")
+    print("  " + _c("╰" + "─" * (W - 3) + "╯", _DIM))
 
-def _ok(msg: str):   print(f"  ✓  {msg}")
-def _warn(msg: str): print(f"  ⚠  {msg}")
-def _err(msg: str):  print(f"  ✗  {msg}")
+def _ok(msg: str):   print(f"  {_c('✓', _GREEN)}  {msg}")
+def _warn(msg: str): print(f"  {_c('⚠', _YELLOW)}  {msg}")
+def _err(msg: str):  print(f"  {_c('✗', _RED, _BOLD)}  {msg}")
 
 def _fatal(msg: str):
     print()
@@ -95,8 +143,12 @@ def _format_option_value(value):
     return str(value)
 
 
-def _print_all_cli_options(optp: ArgumentParser, opts, *, normalization_grid: dict):
-    """Print every parsed CLI option in argparse group order."""
+def _print_all_cli_options(optp: ArgumentParser, opts, *, normalization_grid: dict | None = None):
+    """Print every parsed CLI option in argparse group order.
+
+    ``normalization_grid`` is optional: when None the ``[Derived]`` rows are
+    omitted (the lensing CLI has no GW-population normalization grid to report).
+    """
     _section("All CLI Options")
     first_group = True
     seen: set[str] = set()
@@ -128,9 +180,10 @@ def _print_all_cli_options(optp: ArgumentParser, opts, *, normalization_grid: di
         for dest in ungrouped:
             _row(f"  {dest}", _format_option_value(getattr(opts, dest)))
 
-    print("  │")
-    _row("[Derived]", "")
-    _row("  normalization_grid", _format_option_value(normalization_grid))
+    if normalization_grid is not None:
+        print("  │")
+        _row("[Derived]", "")
+        _row("  normalization_grid", _format_option_value(normalization_grid))
     _end()
 
 
@@ -144,6 +197,42 @@ def str_to_bool(value):
     if str(value).lower() in {"false", "f", "0", "no", "n"}:
         return False
     raise ValueError(f"Cannot parse '{value}' as boolean.")
+
+
+class DeprecatedSpellingAction(argparse.Action):
+    """Store like the default ``store`` action, warning on a deprecated spelling.
+
+    Register both the canonical and the deprecated option string(s) on ONE
+    ``add_argument`` call (canonical first) and pass ``deprecated=[...]`` naming
+    the backward-compatible spellings.  When argparse invokes the action through
+    a deprecated option string it prints one ``_warn`` line mapping the old
+    spelling to the canonical one; the canonical spelling is silent.  The value
+    is stored on the (unchanged) ``dest`` with plain store semantics, so this
+    composes with ``type=str_to_bool``, ``nargs="?"`` and ``const=True``.
+
+    Detection is exact against the option string argparse passes.  argparse
+    strips ``--flag=value`` to ``--flag`` and expands prefix abbreviations to the
+    full option string before calling the action, so matching the passed
+    ``option_string`` against the configured deprecated spellings covers the
+    ``--flag value``, ``--flag=value`` and abbreviated forms alike.
+    """
+
+    def __init__(self, option_strings, dest, deprecated=None, **kwargs):
+        self._deprecated = set(deprecated or ())
+        # Canonical spelling: the first option string that is not deprecated.
+        self._canonical = next(
+            (opt for opt in option_strings if opt not in self._deprecated),
+            option_strings[0],
+        )
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if option_string in self._deprecated:
+            _warn(
+                f"{option_string} is deprecated; use {self._canonical} "
+                "(same effect, unchanged setting)."
+            )
+        setattr(namespace, self.dest, values)
 
 
 def parse_json_arg(value: str | None, argname: str) -> dict:
@@ -187,3 +276,67 @@ def parse_counterpart_arg(value: list[str] | None) -> tuple[tuple[float, float, 
     return tuple(out)
 
 
+# ── Shared main() resolvers ─────────────────────────────────────────────────────
+
+def resolve_redshift_prior_barrier(opts, *, flush=False):
+    """Resolve the likelihood-internal redshift-prior optimization barrier.
+
+    Sets ``opts.materialize_redshift_prior_state`` /
+    ``opts.redshift_prior_barrier_resolved`` and prints the one-line
+    'Disabling ...' notice when ``--redshift_prior_barrier auto`` resolves to a
+    non-materialized (vmappable) state.  ``flush`` mirrors each caller's print
+    (the lensing CLI flushes; the main CLI does not).
+    """
+    from darksirens.likelihood.factory import (
+        _redshift_prior_materialization_reason,
+        _resolve_redshift_prior_materialization,
+    )
+
+    opts.materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
+    opts.redshift_prior_barrier_resolved = _redshift_prior_materialization_reason(
+        opts, opts.materialize_redshift_prior_state
+    )
+    if (
+        opts.redshift_prior_barrier == "auto"
+        and not opts.materialize_redshift_prior_state
+    ):
+        print(
+            "  [i] Disabling likelihood-internal redshift-prior optimization_barrier "
+            f"({opts.redshift_prior_barrier_resolved}).",
+            flush=flush,
+        )
+
+
+def resolve_selection_neff_guard(opts):
+    """Resolve the sparse-selection Neff guard mode and variance cap.
+
+    Sets ``opts.selection_neff_soft_guard`` and returns
+    ``(guard_mode, max_likelihood_variance)``.  Each CLI keeps its own printed
+    guard summary; only this resolution logic is shared.
+    """
+    from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+
+    guard_mode = getattr(opts, "selection_neff_guard", "auto")
+    opts.selection_neff_soft_guard = (
+        guard_mode == "soft"
+        or (guard_mode == "auto" and opts.sampler == "numpyro")
+    )
+    max_likelihood_variance = float(
+        getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
+    )
+    return guard_mode, max_likelihood_variance
+
+
+def run_cli(main_fn):
+    """Run a CLI ``main`` and hard-exit on success.
+
+    Skip interpreter teardown, which can hang for hours on shared GPUs when the
+    XLA/CUDA runtime blocks in its exit handlers (observed as a finished run
+    idling until the SLURM cgroup OOM-killed it).  All outputs are written and
+    closed inside ``main``; exceptions still propagate normally and yield a
+    nonzero exit.
+    """
+    main_fn()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

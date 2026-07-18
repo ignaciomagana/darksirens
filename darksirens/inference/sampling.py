@@ -253,7 +253,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
     # Zero free parameters
     # --------------------------------------------------------
     # Every block is fixed (e.g. --sky_model isotropic with
-    # --fix_population --fixed_cosmology, the null model of the sky
+    # --fix_population --fix_cosmology, the null model of the sky
     # ladder).  The prior is then a point mass at the fixed point, so the
     # evidence is exact: Z = L(theta_fixed)  =>  logZ = logL.  Evaluate the
     # likelihood once and short-circuit BEFORE any sampler dispatch:

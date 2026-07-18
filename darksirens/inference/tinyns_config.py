@@ -53,6 +53,23 @@ BASE_DEFAULTS = dict(
     checkpoint_path_out=None, progress_interval=100,
 )
 
+# Resolved-config keys the lensing CLI prints in its "TinyNS resolved config"
+# summary.  Kept here (next to TinyNSConfig) so the display list and the config
+# schema stay in one place; every key is a TinyNSConfig field (asserted in the
+# tests).
+TINYNS_RESOLVED_DISPLAY_KEYS = (
+    "preset",
+    "sample",
+    "kernel",
+    "rwalk_proposal",
+    "walks",
+    "step_scale",
+    "min_accepts",
+    "replacement_chains",
+    "max_attempts",
+    "jax_block_size",
+)
+
 
 def add_tinyns_arguments(parser_or_group, *, bool_type=None):
     """Register TinyNS CLI arguments with preset-safe defaults.

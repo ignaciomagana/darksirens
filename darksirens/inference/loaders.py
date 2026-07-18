@@ -84,7 +84,7 @@ def load_or_build_catalog_inputs(opts) -> dict:
         drop_full_catalog = getattr(opts, "drop_full_catalog", False)
         if drop_full_catalog and opts.use_LSS:
             raise ValueError(
-                "--drop_full_catalog is incompatible with --use_LSS: the LSS "
+                "--drop_full_catalog is incompatible with --use_lss: the LSS "
                 "overdensity field needs the full-sky galaxy rows."
             )
         nside, ngals, zgals, dzgals, wgals, z_depth = load_survey(
@@ -122,7 +122,7 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
     :func:`darksirens.likelihood.catalog_views.prepare_catalog_views`: its own
     ``nside``/``apix``, compact PE and selection views (built from the SAME GW
     posterior / injection sky directions via a per-catalog ``hp.ang2pix``), its
-    own LSS overdensity field (computed per catalog under --use_LSS; the
+    own LSS overdensity field (computed per catalog under --use_lss; the
     memory-efficient dummy otherwise), its Q_LSS table/ensemble, its galaxy
     marks, and -- under the field convention -- its survey-global
     normalization inputs including the matching budget-modulation rows.
@@ -215,7 +215,7 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
                 centred_marks_k[name] = centred[key]
 
         # Per-catalog LSS overdensity: computed from THIS catalog's full-sky
-        # rows when --use_LSS (each tracer has its own clustering field and
+        # rows when --use_lss (each tracer has its own clustering field and
         # its own sampled b_miss_c{k}); the memory-efficient (1, N_grid) dummy
         # otherwise.  A catalog carrying a Q_LSS table keeps the dummy: Q
         # REPLACES the local-overdensity factor in the numerator.

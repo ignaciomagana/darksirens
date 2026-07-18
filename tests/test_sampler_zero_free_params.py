@@ -2,7 +2,7 @@
 Regression test for ``run_sampler`` with zero free parameters.
 
 When every parameter block is fixed (e.g. ``--sky_model isotropic`` with
-``--fix_population --fixed_cosmology``, the null model of the sky ladder) the
+``--fix_population --fix_cosmology``, the null model of the sky ladder) the
 parameter space has ``ndim == 0``.  The prior is then a point mass at the fixed
 point, so the evidence is exact: ``Z = L(theta_fixed)`` ⇒ ``logZ = logL``.
 

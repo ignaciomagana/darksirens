@@ -35,9 +35,10 @@ def test_cli_help_mentions_multi_catalog_survey_path_usage():
 
 
 def test_cli_help_exposes_allow_unverified_shared_lss_members_flag():
-    """The additive store_true escape hatch for the K>=2 --lss_marginalize
-    provenance guard must appear in --help (argparse store_true => no metavar,
-    so it defaults False)."""
+    """The additive escape hatch for the K>=2 --lss_marginalize provenance guard
+    must appear in --help.  It is now a str_to_bool flag with an OPTIONAL value
+    (nargs='?', const=True), so the bare form still works and the usage line
+    carries the ``[BOOL]`` metavar (BC7)."""
     result = subprocess.run(
         [sys.executable, "-m", "darksirens.cli.inference", "--help"],
         check=True,
@@ -46,8 +47,10 @@ def test_cli_help_exposes_allow_unverified_shared_lss_members_flag():
     )
     assert result.returncode == 0
     assert "--allow_unverified_shared_lss_members" in result.stdout
-    # store_true flag: the usage line carries the bare flag (no VALUE metavar).
+    # Optional-value BOOL flag: the usage line shows the [BOOL] metavar; the
+    # legacy store_true-style VALUE metavar never appears.
     assert "--allow_unverified_shared_lss_members VALUE" not in result.stdout
+    assert "--allow_unverified_shared_lss_members [BOOL]" in result.stdout
     # --lss_marginalize documents the matched-realizations / realization_set_id
     # requirement that the flag bypasses.
     assert "realization_set_id" in result.stdout
