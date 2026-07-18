@@ -135,8 +135,7 @@ def _run_worker(args) -> int:
         return time.perf_counter() - t0
 
     dev = jax.devices()[0]
-    grad_fn = jax.grad(lambda c: likelihood(c).sum() if getattr(likelihood(c), "ndim", 0)
-                       else likelihood(c))
+    grad_fn = jax.grad(lambda c: jnp.sum(likelihood(c)))  # sum keeps it scalar
 
     v_compile = _compile(likelihood, coord)
     peak_value = int((dev.memory_stats() or {}).get("peak_bytes_in_use", 0))
