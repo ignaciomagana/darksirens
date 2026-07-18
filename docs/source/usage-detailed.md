@@ -260,7 +260,7 @@ darksirens_inference \
   --save_path runs/dark_gal_agn
 ```
 
-This K=2 run samples the usual cosmology/population block, TWO survey nuisance blocks (`log10n0`/`delta`/`b_miss`/`sigma_kde` and their `_c2` twins), and the mixture stick `fcat_2`. The sky-weighting convention auto-resolves to `field` (survey-global normalizer) so `fcat_2` **is** catalog 2's GW host fraction (`w_2 = f_agn` for a GAL+AGN pair); `darksirens_analyze` prints the 5/50/95% quantiles of the derived `w_1..w_K` and saves `catalog_weights_<tag>.{pdf,npy}`. Per-catalog `--lss_completion` tables (0 or K paths, `""` placeholders), `--use_LSS`, `--lss_marginalize` (equal-M ensembles over matched LSS realizations), `--mark_model` (per-catalog `eta` blocks), and anisotropic `--sky_model` choices all compose; see the CLI reference ("Multitracer catalog mixtures") for the rules.
+This K=2 run samples the usual cosmology/population block, TWO survey nuisance blocks (`log10n0`/`delta`/`b_miss`/`sigma_kde` and their `_c2` twins), and the mixture stick `fcat_2`. The sky-weighting convention auto-resolves to `field` (survey-global normalizer) so `fcat_2` **is** catalog 2's GW host fraction (`w_2 = f_agn` for a GAL+AGN pair); `darksirens_analyze` prints the 5/50/95% quantiles of the derived `w_1..w_K` and saves `catalog_weights_<tag>.{pdf,npy}`. Per-catalog `--lss_completion` tables (0 or K paths, `""` placeholders), `--use_lss`, `--lss_marginalize` (equal-M ensembles over matched LSS realizations), `--mark_model` (per-catalog `eta` blocks), and anisotropic `--sky_model` choices all compose; see the CLI reference ("Multitracer catalog mixtures") for the rules.
 
 ### Complete-catalog dark-siren workflow
 

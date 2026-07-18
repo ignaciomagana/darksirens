@@ -130,7 +130,7 @@ CAT=$DATA/catalog_pixelated_nside_8.h5
 # U-spec  spectral sirens (GW only)
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model powerlaw+peak \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-spec
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-spec
 
 # U-wl  spectral sirens + weak-lensing magnification (lognormal s^2(z)=a z^b, via the lensing CLI)
 $RUN python -m darksirens.cli.inference_lensing --gw_path $GWE --gwselection_path $SEL \
@@ -140,12 +140,12 @@ $RUN python -m darksirens.cli.inference_lensing --gw_path $GWE --gwselection_pat
 # U-dark  incomplete galaxy catalog
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens --pop_model powerlaw+peak \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-dark
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-dark
 
 # U-complete  complete-catalog formalism
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens_complete --pop_model powerlaw+peak \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-complete
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-complete
 
 # U-bright  EM counterparts (extract RA/Dec/z from bright_counterparts.json)
 CP=$($RUN python -c "import json;d=json.load(open('data/smoke_bright/bright_counterparts.json'));\
@@ -154,7 +154,7 @@ $RUN python -m darksirens.cli.inference \
     --gw_path data/smoke_bright/mock_bright_gw_events.h5 \
     --gwselection_path data/smoke_bright/mock_bright_gw_selection.h5 \
     --universe_model bright_sirens --counterpart $CP --counterpart_dz 1e-4 \
-    --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-bright
+    --pop_model powerlaw+peak --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/U-bright
 ```
 
 ### Population models
@@ -166,19 +166,19 @@ with numpyro (high dimensional). `powerlaw+peak` is covered by `U-spec`.
 # P-bpl2pk  broken power law + 2 peaks
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model brokenpowerlaw+2peaks \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/P-bpl2pk
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/P-bpl2pk
 
 # P-gp1d  1-D Gaussian-process mass function (tinygp)
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model gp1d_m1 \
-    --fixed_cosmology true --fix_survey true --sampler numpyro --nuts_warmup 10 --nuts_samples 10 --nuts_max_tree_depth 3 --save_path out/P-gp1d
+    --fix_cosmology true --fix_survey true --sampler numpyro --nuts_warmup 10 --nuts_samples 10 --nuts_max_tree_depth 3 --save_path out/P-gp1d
 
 # P-gppop  binned-GP population (tinygp). Uses dynesty (gradient-free): gppop
 # currently trips the numpyro/NUTS gradient preflight (NaN gradient at the
 # initial point) — a known issue to investigate; dynesty exercises the model.
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --universe_model spectral_sirens --pop_model gppop \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 80 --dlogz 10 --save_path out/P-gppop
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 80 --dlogz 10 --save_path out/P-gppop
 ```
 
 ### Sky-anisotropy models
@@ -190,13 +190,13 @@ free). The high-dimensional GP sky models use numpyro.
 for SKY in isotropic dipole multipole multipole_l3; do
   $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
       --universe_model spectral_sirens --sky_model $SKY --pop_model powerlaw+peak \
-      --fixed_cosmology true --fix_population true --fix_survey true \
+      --fix_cosmology true --fix_population true --fix_survey true \
       --sampler dynesty --nlive 60 --save_path out/S-$SKY
 done
 for SKY in sphere_gp sphere_gp_z overdensity_gp; do
   $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
       --universe_model spectral_sirens --sky_model $SKY --pop_model powerlaw+peak \
-      --fixed_cosmology true --fix_population true --fix_survey true \
+      --fix_cosmology true --fix_population true --fix_survey true \
       --sampler numpyro --nuts_warmup 10 --nuts_samples 10 --nuts_max_tree_depth 3 --save_path out/S-$SKY
 done
 ```
@@ -212,7 +212,7 @@ compare evidences with `scripts/run_sky_ladder.sh`.
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
     --survey_path $DATA/catalog_marked.h5 --universe_model dark_sirens \
     --mark_model loglinear --marks logmstar,logssfr --pop_model powerlaw+peak \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/M-loglin
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/M-loglin
 ```
 
 ### LSS-conditioned completion
@@ -220,16 +220,16 @@ $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL \
 ```bash
 # L-legacy  legacy local-overdensity factor
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
-    --universe_model dark_sirens --use_LSS true --pop_model powerlaw+peak \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-legacy
+    --universe_model dark_sirens --use_lss true --pop_model powerlaw+peak \
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-legacy
 
 # L-radial / L-gp3d  precomputed lognormal completion table
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens --lss_completion $DATA/q_radial.h5 --pop_model powerlaw+peak \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-radial
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-radial
 $RUN python -m darksirens.cli.inference --gw_path $GWE --gwselection_path $SEL --survey_path $CAT \
     --universe_model dark_sirens --lss_completion $DATA/q_gp3d.h5 --pop_model powerlaw+peak \
-    --fixed_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-gp3d
+    --fix_cosmology true --fix_survey true --sampler dynesty --nlive 60 --save_path out/L-gp3d
 ```
 
 ### Lensing
@@ -301,7 +301,7 @@ real issues worth fixing:
   bounds check does a concrete `int(unique_pixels.max())` on a *traced* array.
   The offline builder, table load, and `completion_curves` *eager* path all work
   (unit-tested); only the end-to-end traced consumption is broken. The legacy
-  `--use_LSS` factor (`L-legacy`) works.
+  `--use_lss` factor (`L-legacy`) works.
 - **`M-loglin` (FAIL).** The marked-host model trips the same eager-vs-traced
   boundary: `ConcretizationTypeError` in `completion.log_galaxy_measure_grid`
   under the jitted likelihood. (Plain `dark_sirens` on the same catalog passes.)
