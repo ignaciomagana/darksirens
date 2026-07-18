@@ -17,6 +17,7 @@ workflows
 mock-data
 testing
 configuration
+performance
 troubleshooting
 ```
 

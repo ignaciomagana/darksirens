@@ -52,8 +52,15 @@ _SMOKE_PE = ["16"]
 # ── worker: one likelihood build + timed value/grad in a clean process ───────────
 
 def _run_worker(args) -> int:
+    # Measure peak with the BFC allocator: memory_stats() exposes
+    # ``peak_bytes_in_use`` only under BFC, NOT under the 'platform' (cudaMalloc)
+    # allocator that ``configure_jax_runtime`` would otherwise set.  Preallocation
+    # stays off so bytes reflect real on-demand growth.  These must be set before
+    # any JAX import; ``configure_jax_runtime``'s setdefault() then leaves them.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "default")
     from darksirens.core.jax_config import configure_jax_runtime
-    configure_jax_runtime()  # XLA_PYTHON_CLIENT_PREALLOCATE=false -> real bytes_in_use
+    configure_jax_runtime()
 
     import contextlib
     import numpy as np

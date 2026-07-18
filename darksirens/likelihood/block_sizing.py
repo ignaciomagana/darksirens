@@ -52,18 +52,23 @@ from dataclasses import dataclass
 # catalog is loaded (dark sirens), whose per-injection / per-sample redshift-prior
 # state is heavier than the catalog-free spectral path.
 #
-# CONSTANTS_VERSION and the numbers below are PLACEHOLDERS until
-# scripts/benchmark_block_sizes.py fits them on real data; each is re-stamped
-# with the measured slope and the device it was measured on.  The policy logic
-# and its unit tests do NOT depend on the exact values (tests inject budgets and
-# assert structural properties), so placeholders keep the module importable and
-# the wiring testable ahead of the calibration run.
-CONSTANTS_VERSION = "uncalibrated-placeholder-2026-07-18"
+# The numbers below are CONSERVATIVE ESTIMATES, not slope-calibrated: a smoke run
+# on an A100-80GB confirmed only the anchor that a full single-pass value+grad of
+# the real spectral likelihood (N_sel=1,067,946; N_events=259; n_samp=4096) fits
+# within the ~0.7*free budget (~50 GB), so these are chosen so the model predicts
+# a full working set of ~40 GB — auto therefore keeps today's single pass on an
+# ample GPU and only blocks when free memory is genuinely tight.  Erring high is
+# deliberate: over-estimating bytes/unit over-blocks (slower, safe) rather than
+# under-blocks (OOM).  Run scripts/benchmark_block_sizes.py on a GPU and fit the
+# sel/pe peak-memory slopes to replace these with measured values (and re-stamp
+# CONSTANTS_VERSION with the device).  The policy tests inject budgets and assert
+# structural properties, so they are independent of these exact numbers.
+CONSTANTS_VERSION = "conservative-estimate-a100-2026-07-18"
 
-SEL_BYTES_PER_INJECTION = 512          # spectral / catalog-free selection integral
-SEL_BYTES_PER_INJECTION_CAT = 2048     # dark-siren selection integral (catalog state)
-PE_BYTES_PER_SAMPLE = 512              # spectral per-event PE reduction, per sample
-PE_BYTES_PER_SAMPLE_CAT = 2048         # dark-siren per-event PE reduction, per sample
+SEL_BYTES_PER_INJECTION = 30_000       # spectral / catalog-free selection integral
+SEL_BYTES_PER_INJECTION_CAT = 60_000   # dark-siren selection integral (catalog state)
+PE_BYTES_PER_SAMPLE = 6_000            # spectral per-event PE reduction, per sample
+PE_BYTES_PER_SAMPLE_CAT = 12_000       # dark-siren per-event PE reduction, per sample
 FIXED_OVERHEAD_BYTES = 2 * 1024**3     # jit constants, population grids, params
 
 # Floors: never chunk below these (below them the launch/padding overhead and
