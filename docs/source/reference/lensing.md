@@ -4,7 +4,10 @@ This page documents the **spectral-siren lensing** workflow.  The current
 lensing branch does two things:
 
 * `spectral_sirens_wl`: spectral-siren singleton inference with optional
-  weak-lensing magnification marginalisation (`--wl_backend lognormal`).
+  weak-lensing magnification marginalisation (`--wl_backend lognormal`, or
+  `--wl_backend tabulated` with `--lensing_wl_table_path` pointing at an HDF5
+  table of `log p_WL(mu|z)`; datasets `z_grid`, `log_mu_grid`, `log_p_table`).
+  This CLI is the sole owner of the `spectral_sirens_wl` universe model.
 * `spectral_sirens` / `spectral_sirens_wl` plus **J=2 strong-lensing clusters**:
   candidate pairs of multiply-imaged sirens are evaluated with the SIS pair
   likelihood and the lensed-injection cluster selection term

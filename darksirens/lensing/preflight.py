@@ -591,6 +591,14 @@ def run_lensing_preflight(opts) -> dict:
         warnings.append(
             "wl_selection=wl_lognormal is only meaningful with wl_backend=lognormal"
         )
+    if _get(opts, "wl_backend") == "tabulated":
+        table_path = _get(opts, "lensing_wl_table_path")
+        if not table_path:
+            errors.append(
+                "wl_backend=tabulated requires lensing_wl_table_path"
+            )
+        else:
+            _exists(table_path, errors, "lensing_wl_table_path")
     if _get(opts, "fix_lens_rate", True):
         if (
             not np.isfinite(float(_get(opts, "sl_tau_A", 0)))

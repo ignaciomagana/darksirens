@@ -41,7 +41,7 @@ darksirens_inference \
 
 ### Physical-model options
 
-- `--universe_model`: one of `spectral_sirens`, `spectral_sirens_wl`, `bright_sirens`, `dark_sirens`, or `dark_sirens_complete`.
+- `--universe_model`: one of `spectral_sirens`, `bright_sirens`, `dark_sirens`, or `dark_sirens_complete`. The weak-lensing model `spectral_sirens_wl` moved to the [lensing CLI](reference/lensing.md) — run `darksirens_inference_lensing --cluster_mode off --wl_backend lognormal|tabulated ...`.
 - `--pop_model`: population model name. Parametric mixture names are parsed as a composition grammar: `+`-separated mass tokens (`powerlaw`, `brokenpowerlaw`, `peak`) with optional digit count prefixes, e.g. `powerlaw+peak`, `brokenpowerlaw+2peaks`, `2powerlaws+3peaks`. Any grammar composition works with blueprint-default priors; curated names additionally carry physics-tuned priors and fiducials. Bespoke names such as `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint`, `golomb_1g`, `golomb_1g+tail`, and `gwtc5_fiducial_bpl2peaks` are registered explicitly. See [Concepts → Population models](concepts.md#population-models).
 - `--shared_beta`: whether to use one shared beta/pairing distribution (`true`, default) or per-component beta parameters (`false`).
 - `--shared_spin`: whether to use one shared spin distribution (`true`, default) or per-component spin parameters (`false`).
@@ -70,9 +70,9 @@ darksirens_inference \
 Passing `K >= 2` files to `--survey_path` runs the K-catalog mixture: the catalog-completed redshift prior becomes `log p_mix(z) = logsumexp_k [log w_k + log p_k(z, pix_k)]`, with per-catalog nside/pixelization, per-catalog survey nuisance blocks (`log10n0_c{k}`, `delta_c{k}`, `b_miss_c{k}`, `sigma_kde_c{k}`), and sampled stick-breaking weights `fcat_2..fcat_K` (Beta(1, K-m+1) priors; `w_2 = fcat_2` exactly at K=2).
 
 - **Estimand.** Under the (auto-resolved) `field` sky weighting, `w_k` is the fraction of GW hosts drawn from catalog `k`'s tracer population — e.g. the AGN host fraction `f_agn` for a GAL+AGN K=2 run. `darksirens_analyze` derives and plots `w_1..w_K` from the sampled sticks automatically (`catalog_weights_<tag>.{pdf,npy}`).
-- **Universe models.** `dark_sirens` (the general case) or `dark_sirens_complete` (special case: field weighting only). `spectral_sirens`, `spectral_sirens_wl`, and `bright_sirens` are inherently single-catalog.
+- **Universe models.** `dark_sirens` (the general case) or `dark_sirens_complete` (special case: field weighting only). `spectral_sirens` and `bright_sirens` are inherently single-catalog.
 - **Composability.** Per-catalog Q_LSS tables, `--use_LSS` overdensities, `--lss_marginalize` ensembles (shared member index), marked-host models (per-catalog eta blocks), and anisotropic `--sky_model` choices (one population-level `g(n, z)` factor shared across catalogs) all compose with the mixture; the survey-global field normalizer carries the same modulated missing budget as each catalog's numerator.
-- **Weak lensing** (`spectral_sirens_wl`) and `--counterpart`/`bright_sirens` remain single-catalog.
+- **Weak lensing** (the `spectral_sirens_wl` model, now driven by `darksirens_inference_lensing`) and `--counterpart`/`bright_sirens` remain single-catalog.
 
 #### Joint Q_LSS ensembles (`darksirens_build_joint_lognormal_completion`)
 

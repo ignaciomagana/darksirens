@@ -5,9 +5,10 @@ darksirens_inference_lensing.py
 Full hierarchical inference CLI for the darksirens **strong-lensing branch**,
 covering the joint singleton + J=2 cluster (pair) likelihood.
 
-The stock ``darksirens_inference`` runs the WL singleton channel
-(``--universe_model spectral_sirens_wl``) but has no flags for the cluster
-channel. This tool adds:
+This CLI is the **sole owner of the weak-lensing (``spectral_sirens_wl``)
+universe model**: the WL singleton channel selected via ``--wl_backend`` (the
+stock ``darksirens_inference`` no longer exposes ``spectral_sirens_wl``). It
+adds, on top of that WL singleton fit:
 
   * loading of the lensed-injection set + per-pair PE,
   * the cluster master likelihood (``darksiren_log_likelihood_with_clusters``),
@@ -24,7 +25,10 @@ Design notes
   numerically the commit-2 / branch singleton likelihood.
 * Joint run: ``--cluster_mode j2`` requires ``--lensed_injections_path`` and
   ``--pair_pe_path`` and a ``--partition_path`` (the candidate-pair list).
-* WL: ``--wl_backend {lognormal,disabled}`` with ``--lensing_wl_a/b`` and optional singleton-selection matching via ``--wl_selection``.
+* WL: ``--wl_backend {lognormal,tabulated,disabled}``; lognormal uses
+  ``--lensing_wl_a/b``, tabulated reads ``--lensing_wl_table_path`` (HDF5 with
+  ``z_grid``/``log_mu_grid``/``log_p_table``), with optional
+  singleton-selection matching via ``--wl_selection``.
 
 Examples
 --------
@@ -119,7 +123,10 @@ from darksirens.gw.samples import load_gw_samples, load_selection_samples
 
 # ── lensing / cluster pieces ─────────────────────────────────────────────────
 from darksirens.lensing.slmarks import make_sis_lens_params
-from darksirens.lensing.wlmagnification import make_lognormal_wl_params
+from darksirens.lensing.wlmagnification import (
+    make_lognormal_wl_params,
+    make_tabulated_wl_params,
+)
 from darksirens.lensing.lensed_injections import load_lensed_injections
 from darksirens.lensing.pair_tag_selection import (
     PAIR_TAG_SELECTION_MODEL_KINDS,
@@ -157,6 +164,7 @@ from darksirens.likelihood.likelihood_with_clusters import (
     CLUSTER_MODE_J2,
     CLUSTER_MODE_OFF,
     WL_BACKEND_LOGNORMAL,
+    WL_BACKEND_TABULATED,
     WL_BACKEND_DISABLED,
     WL_SELECTION_STANDARD,
     WL_SELECTION_LOGNORMAL,
@@ -587,6 +595,58 @@ def _gate_suspicious_time_marks(opts, candidate_pairs_raw) -> None:
     raise SystemExit(f"suspicious candidate time marks: {message}")
 
 
+def _derive_universe_model(wl_backend):
+    """Map --wl_backend to the library universe-model kind.
+
+    Both WL backends (lognormal and tabulated) drive the ``spectral_sirens_wl``
+    universe model; ``disabled`` falls back to plain ``spectral_sirens``.
+    """
+    return (
+        "spectral_sirens_wl"
+        if wl_backend in ("lognormal", "tabulated")
+        else "spectral_sirens"
+    )
+
+
+def _wl_backend_code(opts):
+    """Map the --wl_backend string to the library integer WL backend code."""
+    return {
+        "lognormal": WL_BACKEND_LOGNORMAL,
+        "tabulated": WL_BACKEND_TABULATED,
+        "disabled": WL_BACKEND_DISABLED,
+    }[opts.wl_backend]
+
+
+def _load_wl_table_arrays(opts):
+    """Load the tabulated-WL grids as jnp arrays for the cluster likelihood.
+
+    Returns an empty dict for every backend except ``tabulated`` (so it splats
+    inertly into the load_inputs bundles). For ``tabulated`` it reads the HDF5
+    table (datasets ``z_grid`` (Nz,), ``log_mu_grid`` (Nmu,),
+    ``log_p_table`` (Nz, Nmu)) and returns ``wl_z_grid``/``wl_log_mu_grid``/
+    ``wl_log_p_table``. Missing/unspecified --lensing_wl_table_path is a clean
+    SystemExit.
+    """
+    if getattr(opts, "wl_backend", None) != "tabulated":
+        return {}
+    path = getattr(opts, "lensing_wl_table_path", None)
+    if not path:
+        raise SystemExit(
+            "--wl_backend tabulated requires --lensing_wl_table_path"
+        )
+    if not os.path.exists(path):
+        raise SystemExit(f"--lensing_wl_table_path does not exist: {path}")
+    with h5py.File(path, "r") as f:
+        wl_z_grid = jnp.asarray(f["z_grid"][()], dtype=jnp.float64)
+        wl_log_mu_grid = jnp.asarray(f["log_mu_grid"][()], dtype=jnp.float64)
+        wl_log_p_table = jnp.asarray(f["log_p_table"][()], dtype=jnp.float64)
+    return dict(
+        wl_z_grid=wl_z_grid,
+        wl_log_mu_grid=wl_log_mu_grid,
+        wl_log_p_table=wl_log_p_table,
+    )
+
+
 def _load_singleton_lensing_inputs(opts):
     """Load the lensed-singleton channel inputs (sl_mixture), or inert Nones.
 
@@ -697,6 +757,7 @@ def load_inputs(opts):
             pair_time_t_obs_window_sec=pair_time_t_obs_window_sec,
             observed_catalog=observed_catalog_meta,
             **_load_singleton_lensing_inputs(opts),
+            **_load_wl_table_arrays(opts),
         )
 
     # --- j2: lensed injections + pair PE/metadata + partition(s) ---
@@ -1170,6 +1231,7 @@ def load_inputs(opts):
             heuristic_unified_observed_catalog and not explicit_unified_observed_catalog
         ),
         **_load_singleton_lensing_inputs(opts),
+        **_load_wl_table_arrays(opts),
     )
 
 
@@ -1314,6 +1376,7 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
     attrs["partition_mode"] = partition_mode
     attrs["cluster_mode"] = opts.cluster_mode
     attrs["wl_backend"] = opts.wl_backend
+    attrs["wl_table_path"] = str(getattr(opts, "lensing_wl_table_path", None) or "")
     attrs["wl_selection"] = opts.wl_selection
     attrs["singleton_lensing"] = getattr(opts, "singleton_lensing", "off")
     attrs["pair_time_mark_impl"] = getattr(opts, "pair_time_mark_impl", "auto")
@@ -1535,9 +1598,7 @@ def build_cluster_likelihood(
     lens_sampled_labels = list(lens_sampled_labels or [])
     fixed_parameter_values = dict(fixed_parameter_values or {})
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
-    wl_backend = (
-        WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
-    )
+    wl_backend = _wl_backend_code(opts)
     wl_selection = (
         WL_SELECTION_LOGNORMAL
         if opts.wl_selection == "wl_lognormal"
@@ -1609,6 +1670,9 @@ def build_cluster_likelihood(
                 wl_backend=wl_backend,
                 wl_a=opts.lensing_wl_a,
                 wl_b=opts.lensing_wl_b,
+                wl_z_grid=inp.get("wl_z_grid"),
+                wl_log_mu_grid=inp.get("wl_log_mu_grid"),
+                wl_log_p_table=inp.get("wl_log_p_table"),
                 wl_selection=wl_selection,
                 pair_marks=pair_marks,
                 pair_time_delta_t_obs=part.get(
@@ -1734,9 +1798,7 @@ def build_cluster_diagnostics(
     lens_sampled_labels = list(lens_sampled_labels or [])
     fixed_parameter_values = dict(fixed_parameter_values or {})
     cluster_mode = CLUSTER_MODE_J2 if opts.cluster_mode == "j2" else CLUSTER_MODE_OFF
-    wl_backend = (
-        WL_BACKEND_LOGNORMAL if opts.wl_backend == "lognormal" else WL_BACKEND_DISABLED
-    )
+    wl_backend = _wl_backend_code(opts)
     wl_selection = (
         WL_SELECTION_LOGNORMAL
         if opts.wl_selection == "wl_lognormal"
@@ -1787,6 +1849,9 @@ def build_cluster_diagnostics(
                 wl_backend=wl_backend,
                 wl_a=opts.lensing_wl_a,
                 wl_b=opts.lensing_wl_b,
+                wl_z_grid=inp.get("wl_z_grid"),
+                wl_log_mu_grid=inp.get("wl_log_mu_grid"),
+                wl_log_p_table=inp.get("wl_log_p_table"),
                 wl_selection=wl_selection,
                 pair_marks=pair_marks,
                 pair_time_delta_t_obs=(part or {}).get(
@@ -2093,7 +2158,16 @@ def build_parser():
     p.add_argument("--pop_model", default="powerlaw+peak")
     p.add_argument("--cluster_mode", choices=["off", "j2"], default="j2")
     p.add_argument(
-        "--wl_backend", choices=["lognormal", "disabled"], default="lognormal"
+        "--wl_backend",
+        choices=["lognormal", "tabulated", "disabled"],
+        default="lognormal",
+    )
+    p.add_argument(
+        "--lensing_wl_table_path",
+        type=str,
+        default=None,
+        help="Path to HDF5 table of log p_WL(mu|z) for --wl_backend tabulated. "
+        "Datasets: z_grid (Nz,), log_mu_grid (Nmu,), log_p_table (Nz, Nmu).",
     )
     p.add_argument(
         "--wl_selection",
@@ -2343,9 +2417,12 @@ def main():
     ):
         raise SystemExit("--edge_mark_prior_keys entries must be log_* marks")
 
-    opts.universe_model = (
-        "spectral_sirens_wl" if opts.wl_backend == "lognormal" else "spectral_sirens"
-    )
+    if opts.wl_backend == "tabulated" and not opts.lensing_wl_table_path:
+        raise SystemExit(
+            "--wl_backend tabulated requires --lensing_wl_table_path"
+        )
+
+    opts.universe_model = _derive_universe_model(opts.wl_backend)
 
     print(
         f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend} | wl_selection={opts.wl_selection}] ==="
@@ -2353,7 +2430,7 @@ def main():
     print(
         "  lensing hyperparameters: "
         f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, wl_selection={opts.wl_selection}, pair_marks={opts.pair_marks}, pair_tag_model={opts.pair_tag_model}, pair_tag_perturb_logit={opts.pair_tag_perturb_logit}, edge_mark_prior_keys={opts.edge_mark_prior_keys}, "
-        f"wl_a={opts.lensing_wl_a}, wl_b={opts.lensing_wl_b}, "
+        f"wl_a={opts.lensing_wl_a}, wl_b={opts.lensing_wl_b}, wl_table_path={opts.lensing_wl_table_path}, "
         f"fix_lens_rate={opts.fix_lens_rate}, sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
         flush=True,
     )
@@ -2460,7 +2537,15 @@ def main():
 
         # decoder carries the WL params so decode() returns a survey with wl_params set
         opts.prior_overrides = overrides  # decoder reads getattr(opts,'prior_overrides')
-        wl_params = make_lognormal_wl_params(a=opts.lensing_wl_a, b=opts.lensing_wl_b)
+        if opts.wl_backend == "tabulated":
+            _wl_arrays = _load_wl_table_arrays(opts)
+            wl_params = make_tabulated_wl_params(
+                _wl_arrays["wl_z_grid"],
+                _wl_arrays["wl_log_mu_grid"],
+                _wl_arrays["wl_log_p_table"],
+            )
+        else:
+            wl_params = make_lognormal_wl_params(a=opts.lensing_wl_a, b=opts.lensing_wl_b)
         decoder = build_parameter_decoder(
             opts,
             pop_params_fid,
