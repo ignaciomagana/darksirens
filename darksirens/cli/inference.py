@@ -64,6 +64,11 @@ from darksirens.inference.data import load_all_data, validate_loaded_survey_shap
 from darksirens.inference.validation import validate_multitracer_run
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.factory import make_likelihood
+from darksirens.likelihood.block_sizing import (
+    block_size_arg,
+    resolve_block_sizes,
+    format_block_size_request,
+)
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
 from darksirens.redshift.grid import zMax as _REDSHIFT_GRID_ZMAX
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
@@ -825,11 +830,18 @@ def build_parser():
                         "selection variance guard); 'off' skips the probe.")
 
     g = optp.add_argument_group("Performance")
-    g.add_argument("--sel_batch_size", type=int, default=None, metavar="N")
-    g.add_argument("--pe_event_block", type=int, default=None, metavar="N",
-                   help="events per PE-reduction chunk; None = all events in one "
-                        "vectorized block (fastest); set (e.g. 32) to bound memory "
-                        "for dense dark-siren catalogs.")
+    g.add_argument("--sel_batch_size", type=block_size_arg, default="auto",
+                   metavar="N|auto|off",
+                   help="Injections per selection-integral chunk. 'auto' (default) "
+                        "sizes the block from probed free device memory after the "
+                        "data load; 'off'/'none'/'0' forces a single pass (the "
+                        "historical default); a positive integer pins the block.")
+    g.add_argument("--pe_event_block", type=block_size_arg, default="auto",
+                   metavar="N|auto|off",
+                   help="Events per PE-reduction chunk. 'auto' (default) sizes from "
+                        "free memory; 'off'/'none'/'0' keeps all events in one "
+                        "vectorized block (fastest); a positive integer (e.g. 32) "
+                        "bounds memory for dense dark-siren catalogs.")
     g.add_argument("--drop_full_catalog", type=str_to_bool, default=False, metavar="BOOL",
                    help="Discard the dense full-sky (npix, n_max_gals) galaxy arrays after "
                         "compacting to inference pixels, keeping only the compact PE/selection "
@@ -1332,13 +1344,39 @@ def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
              f"{getattr(opts, 'catalog_sky_weighting', 'conditional')} "
              f"({getattr(opts, 'catalog_sky_weighting_source', 'explicit')})")
     _row("Output root",     opts.save_path)
-    if opts.sel_batch_size:
-        _row("Sel. batch",   f"{opts.sel_batch_size:,} samples/batch")
-    if getattr(opts, "pe_event_block", None):
-        _row("PE event block", f"{opts.pe_event_block:,} events/chunk")
+    _row("Sel. batch",     format_block_size_request(opts.sel_batch_size))
+    _row("PE event block", format_block_size_request(getattr(opts, "pe_event_block", None)))
     if opts.drop_full_catalog:
         _row("Drop full catalog", "yes (compact views only)")
     _end()
+
+
+def _resolve_and_report_block_sizes(opts, data):
+    """Resolve the 'auto' block-size knobs from a probed memory budget (post-load).
+
+    Mutates ``opts.sel_batch_size`` / ``opts.pe_event_block`` to concrete
+    ``int``/``None`` values and records the provenance on
+    ``opts.block_size_resolution`` (persisted via settings.json), so the factory,
+    flow builder and settings dump downstream all see plain ints/None.
+    """
+    _msel = data.get("m1detsels")
+    n_sel = int(np.asarray(_msel).shape[0]) if _msel is not None else 0
+    plan = resolve_block_sizes(
+        n_events=int(data.get("nEvents", 0)),
+        n_samp=int(data.get("nsamp", 0)),
+        n_sel=n_sel,
+        sel_requested=getattr(opts, "sel_batch_size", None),
+        pe_requested=getattr(opts, "pe_event_block", None),
+        has_catalog=bool(getattr(opts, "survey_path", None)),
+        flow_path=bool(getattr(opts, "gw_flows_path", None)),
+        backend=jax.default_backend(),
+    )
+    opts.sel_batch_size = plan.sel_batch_size
+    opts.pe_event_block = plan.pe_event_block
+    opts.block_size_resolution = plan.source
+    _sel = plan.sel_batch_size if plan.sel_batch_size is not None else "single pass"
+    _pe = plan.pe_event_block if plan.pe_event_block is not None else "single pass"
+    _ok(f"Block sizes [{plan.source}]: sel_batch_size={_sel}, pe_event_block={_pe}")
 
 
 def _load_and_report_data(opts):
@@ -1423,6 +1461,8 @@ def _load_and_report_data(opts):
     # resolved above agree with n_catalogs before anything downstream consumes
     # them (single place; no behaviour change for a valid config).
     validate_multitracer_run(opts, data)
+
+    _resolve_and_report_block_sizes(opts, data)
 
     _end()
     return data

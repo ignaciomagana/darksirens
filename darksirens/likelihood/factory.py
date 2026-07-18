@@ -22,6 +22,7 @@ from darksirens.redshift.completion import build_pixel_kde_cache
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.catalog_views import barrier, prepare_catalog_views
 from darksirens.likelihood.events import pad_gw_event_to_multiple
+from darksirens.likelihood.block_sizing import require_resolved_block_size
 from darksirens.likelihood.core import (
     darksiren_log_likelihood,
     redshift_prior_state_sharing,
@@ -119,8 +120,10 @@ def _make_mixture_likelihood(
     shared_spin = bool(getattr(opts, "shared_spin", True))
     shared_gamma = bool(getattr(opts, "shared_gamma", True))
     universe_model = opts.universe_model
-    sel_batch_size = getattr(opts, "sel_batch_size", None)
-    pe_event_block = getattr(opts, "pe_event_block", None)
+    sel_batch_size = require_resolved_block_size(
+        "sel_batch_size", getattr(opts, "sel_batch_size", None))
+    pe_event_block = require_resolved_block_size(
+        "pe_event_block", getattr(opts, "pe_event_block", None))
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
@@ -490,8 +493,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     shared_spin = bool(getattr(opts, "shared_spin", True))
     shared_gamma = bool(getattr(opts, "shared_gamma", True))
     universe_model = opts.universe_model
-    sel_batch_size = getattr(opts, "sel_batch_size", None)
-    pe_event_block = getattr(opts, "pe_event_block", None)
+    sel_batch_size = require_resolved_block_size(
+        "sel_batch_size", getattr(opts, "sel_batch_size", None))
+    pe_event_block = require_resolved_block_size(
+        "pe_event_block", getattr(opts, "pe_event_block", None))
     sky_model = getattr(opts, "sky_model", "isotropic")
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())

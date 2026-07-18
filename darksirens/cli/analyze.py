@@ -179,33 +179,10 @@ def _column(samples, labels, name):
 # ------------------------------------------------------------
 # Vectorized batched map ("jmap"): jit + vmap + automatic batch size
 # ------------------------------------------------------------
-def probe_device_memory_bytes(default_gb=4.0):
-    """Best-effort free-memory probe for the first JAX device.
-
-    Returns ``(bytes, source)``.  Uses ``device.memory_stats()`` when available
-    (GPU/TPU): ``bytes_limit - bytes_in_use`` if both present, else
-    ``bytes_limit`` / ``bytes_reservable_limit``.  Falls back to ``default_gb``
-    on the CPU backend or older jaxlib (where ``memory_stats`` returns ``None``
-    or lacks these keys).
-
-    Note: unless ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` is exported, JAX
-    preallocates a large fraction of the GPU and ``bytes_limit`` reports that
-    *pool* (still a safe ceiling for sizing — we stay within it).
-    """
-    try:
-        dev = jax.devices()[0]
-        stats = dev.memory_stats() or {}
-        limit = stats.get("bytes_limit")
-        if limit:
-            in_use = int(stats.get("bytes_in_use", 0) or 0)
-            free = max(int(limit) - in_use, int(0.1 * int(limit)))
-            return int(free), f"device:{dev.platform} bytes_limit-in_use"
-        res = stats.get("bytes_reservable_limit")
-        if res:
-            return int(res), f"device:{dev.platform} bytes_reservable_limit"
-    except Exception:
-        pass
-    return int(default_gb * 1e9), "fallback-default"
+# probe_device_memory_bytes now lives in darksirens.likelihood.block_sizing
+# (shared with the CLI block-size auto-sizer); re-exported here so existing
+# imports (e.g. tests/test_analyze_ppd_chunking.py) keep resolving unchanged.
+from darksirens.likelihood.block_sizing import probe_device_memory_bytes
 
 
 def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,

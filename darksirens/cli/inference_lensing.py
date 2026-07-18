@@ -115,6 +115,7 @@ from darksirens.inference.tinyns_config import (
     TINYNS_RESOLVED_DISPLAY_KEYS,
 )
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+from darksirens.likelihood.block_sizing import block_size_arg, resolve_block_sizes
 from darksirens.cli.common import (
     str_to_bool,
     parse_json_arg,
@@ -2335,7 +2336,12 @@ def build_parser():
         default=32,
         help="Gauss-Legendre y nodes for each J=2 pair likelihood",
     )
-    performance.add_argument("--sel_batch_size", type=int, default=None)
+    performance.add_argument(
+        "--sel_batch_size", type=block_size_arg, default="auto",
+        metavar="N|auto|off",
+        help="Injections per selection-integral chunk. 'auto' (default) sizes "
+             "the block from probed free device memory after the data load; "
+             "'off'/'none'/'0' forces a single pass; a positive integer pins it.")
     output = p.add_argument_group("Output")
     output.add_argument("--seed", type=int, default=42)
     output.add_argument("--show_progress", type=str_to_bool, nargs="?", const=True,
@@ -2352,6 +2358,40 @@ def build_parser():
         help="optional output path for preflight JSON (defaults to save_path/preflight.json when --preflight_only true)",
     )
     return p
+
+
+def _resolve_lensing_block_sizes(opts, inp, settings):
+    """Resolve the lensing selection block size from a probed memory budget.
+
+    The lensing CLI exposes only ``--sel_batch_size`` (no per-event PE knob).
+    The per-injection memory constants are those calibrated on the main
+    spectral/dark-siren selection integral (see docs/source/performance.md); the
+    lensing selection is the same order of magnitude, so they serve as a
+    reasonable default here — pin an integer to override.  Mutates ``opts`` and
+    the already-built ``settings`` dict so the final settings.json persists the
+    resolved value (the early settings write predates the data load).
+    """
+    import numpy as _np
+    import jax as _jax
+
+    gw_sel = inp.get("gw_sel")
+    n_sel = int(_np.asarray(gw_sel.m1det).shape[0]) if gw_sel is not None else 0
+    plan = resolve_block_sizes(
+        n_events=int(inp.get("nEvents", 0) or 0),
+        n_samp=int(inp.get("nsamp", 0) or 0),
+        n_sel=n_sel,
+        sel_requested=getattr(opts, "sel_batch_size", None),
+        pe_requested=None,          # lensing has no PE-event block knob
+        has_catalog=False,          # lensing selection carries no galaxy catalog
+        flow_path=False,
+        backend=_jax.default_backend(),
+    )
+    opts.sel_batch_size = plan.sel_batch_size
+    opts.block_size_resolution = plan.source
+    settings["sel_batch_size"] = plan.sel_batch_size
+    settings["block_size_resolution"] = plan.source
+    _sel = plan.sel_batch_size if plan.sel_batch_size is not None else "single pass"
+    print(f"  [i] sel_batch_size [{plan.source}]: {_sel}", flush=True)
 
 
 def main(argv=None):
@@ -2483,6 +2523,9 @@ def main(argv=None):
     except Exception as exc:
         _write_failure(run_dir, "load_inputs", exc, labels=labels, settings=settings)
         raise
+
+    _resolve_lensing_block_sizes(opts, inp, settings)
+
     if inp.get("observed_catalog_heuristic"):
         print(
             "  [warning] unified observed mode inferred by deprecated event-count heuristic",
