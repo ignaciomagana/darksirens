@@ -29,6 +29,11 @@ darksirens_inference \
   [options]
 ```
 
+### Option conventions
+
+- **Boolean flags** take an explicit value — `true`/`t`/`1`/`yes`/`y` or `false`/`f`/`0`/`no`/`n`, case-insensitive — and are shown as `BOOL` in `--help`. An unrecognized value is a hard parse error (exit code 2), not a silent `false`. A few flags (for example `--allow_unverified_shared_lss_members`) also accept a bare form, where `--flag` means `--flag true`.
+- **Deprecated spellings.** `--fix_cosmology`, `--fix_de`, and `--use_lss` are the canonical spellings. The older `--fixed_cosmology`, `--fixed_de`, and `--use_LSS` still work as aliases but print a one-line deprecation notice. The persisted settings keys are unchanged, so existing `settings.json` files and post-processing continue to load.
+
 ### Data options
 
 - `--gw_path`: required GW posterior-sample HDF5 file.
@@ -57,7 +62,7 @@ darksirens_inference \
 
 ### Catalog options
 
-- `--use_LSS`: include the large-scale-structure overdensity `delta_g(pix, z)` in the missing-galaxy budget (`max(1 + b_eff*delta_g, 0)`). With a K-catalog mixture, each catalog computes its own overdensity field from its own rows, coupled to its own sampled `b_miss` (`b_miss_c{k}` for catalogs 2..K).
+- `--use_lss`: include the large-scale-structure overdensity `delta_g(pix, z)` in the missing-galaxy budget (`max(1 + b_eff*delta_g, 0)`). With a K-catalog mixture, each catalog computes its own overdensity field from its own rows, coupled to its own sampled `b_miss` (`b_miss_c{k}` for catalogs 2..K).
 - `--catalog_sky_weighting {conditional,field}`: the dark-siren redshift-prior normalization convention. `conditional` normalizes each pixel by its own `Z[pix]` (the per-pixel z-shape estimand); `field` normalizes by the survey-global `Z(theta)` so a K>=2 mixture weight `fcat_k` measures the catalog's GW **host fraction** and `log10n0` becomes informative. **Unset auto-resolves by K** (conditional at K=1, field at K>=2); for `dark_sirens` the degenerate explicit combinations — `field` at K=1 (the global normalizer cancels between the PE and selection terms) and `conditional` at K>=2 (the railing z-shape-only `fcat` estimand) — are fatal. The field normalizer carries the SAME modulated missing budget as the numerator (Q_LSS, `delta_g`, marked-host `mu_miss`, per ensemble member under `--lss_marginalize`), so it composes with all catalog options below; it needs the full-sky rows (incompatible with `--drop_full_catalog`).
 - `--lss_completion PATH [PATH ...]`: precomputed LSS-conditioned lognormal completion table(s) `Q_LSS` replacing the legacy overdensity factor. With K catalogs pass 0 or exactly K paths, positionally aligned with `--survey_path` (`""` = no external completion for that catalog); one table is never broadcast across catalogs.
 - `--lss_marginalize`: fully-Bayesian marginalization over the Q_LSS ensemble, `logL = logsumexp_m logL(Q_m) - log M`. With a K-catalog mixture the marginalization uses **one shared member index** — member `m` of every catalog must sample the same LSS realization. Build the per-catalog ensembles jointly with `darksirens_build_joint_lognormal_completion` (see the joint-builder note below) so they share one `realization_set_id` and equal `--n-members`, or the run aborts (unless `--allow_unverified_shared_lss_members` accepts the independent-fields approximation).
@@ -71,7 +76,7 @@ Passing `K >= 2` files to `--survey_path` runs the K-catalog mixture: the catalo
 
 - **Estimand.** Under the (auto-resolved) `field` sky weighting, `w_k` is the fraction of GW hosts drawn from catalog `k`'s tracer population — e.g. the AGN host fraction `f_agn` for a GAL+AGN K=2 run. `darksirens_analyze` derives and plots `w_1..w_K` from the sampled sticks automatically (`catalog_weights_<tag>.{pdf,npy}`).
 - **Universe models.** `dark_sirens` (the general case) or `dark_sirens_complete` (special case: field weighting only). `spectral_sirens` and `bright_sirens` are inherently single-catalog.
-- **Composability.** Per-catalog Q_LSS tables, `--use_LSS` overdensities, `--lss_marginalize` ensembles (shared member index), marked-host models (per-catalog eta blocks), and anisotropic `--sky_model` choices (one population-level `g(n, z)` factor shared across catalogs) all compose with the mixture; the survey-global field normalizer carries the same modulated missing budget as each catalog's numerator.
+- **Composability.** Per-catalog Q_LSS tables, `--use_lss` overdensities, `--lss_marginalize` ensembles (shared member index), marked-host models (per-catalog eta blocks), and anisotropic `--sky_model` choices (one population-level `g(n, z)` factor shared across catalogs) all compose with the mixture; the survey-global field normalizer carries the same modulated missing budget as each catalog's numerator.
 - **Weak lensing** (the `spectral_sirens_wl` model, now driven by `darksirens_inference_lensing`) and `--counterpart`/`bright_sirens` remain single-catalog.
 
 #### Joint Q_LSS ensembles (`darksirens_build_joint_lognormal_completion`)
@@ -225,7 +230,7 @@ darksirens_inference \
   --tinyns_preset heavy_darksirens \
   --universe_model dark_sirens \
   --pop_model brokenpowerlaw+2peaks \
-  --fixed_cosmology true \
+  --fix_cosmology true \
   --fix_survey true \
   --nlive 2000 \
   --dlogz 0.11 \
@@ -270,7 +275,7 @@ python scripts/benchmark_tinyns_darksirens_short_budget.py \
   --max-samples 2000 \
   --seed 21 \
   --timeout-minutes 20 \
-  --extra-arg --fixed_cosmology --extra-arg true \
+  --extra-arg --fix_cosmology --extra-arg true \
   --extra-arg --fix_survey --extra-arg true
 ```
 

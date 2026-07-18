@@ -31,9 +31,9 @@ darksirens_inference \
   --tinyns_preset "$TINYNS_PRESET" \
   --universe_model dark_sirens \
   --pop_model brokenpowerlaw+2peaks \
-  --fixed_cosmology "$FIXED_COSMOLOGY" \
+  --fix_cosmology "$FIXED_COSMOLOGY" \
   --fix_survey "$FIX_SURVEY" \
-  --use_LSS "$USE_LSS" \
+  --use_lss "$USE_LSS" \
   --nlive "${NLIVE:-2000}" \
   --dlogz "${DLOGZ:-0.11}" \
   --max_samples "${MAX_SAMPLES:-0}" \

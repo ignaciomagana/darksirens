@@ -109,11 +109,19 @@ from darksirens.gw.populations.registry import get_fixed_population_params, get_
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
 from darksirens.io.results import save_tinyns_diagnostics_json, write_tinyns_metadata
-from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
+from darksirens.inference.tinyns_config import (
+    add_tinyns_arguments,
+    build_tinyns_config,
+    TINYNS_RESOLVED_DISPLAY_KEYS,
+)
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
-from darksirens.likelihood.factory import (
-    _redshift_prior_materialization_reason,
-    _resolve_redshift_prior_materialization,
+from darksirens.cli.common import (
+    str_to_bool,
+    parse_json_arg,
+    _print_all_cli_options,
+    resolve_redshift_prior_barrier,
+    resolve_selection_neff_guard,
+    run_cli,
 )
 from darksirens.inference.parameters import (
     build_parameter_decoder,
@@ -589,7 +597,7 @@ def _gate_suspicious_time_marks(opts, candidate_pairs_raw) -> None:
         f"(candidate_pairs_path={getattr(opts, 'candidate_pairs_path', None)}). "
         "Pass --allow_suspicious_time_marks true to proceed anyway."
     )
-    if _str2bool(getattr(opts, "allow_suspicious_time_marks", False)):
+    if str_to_bool(getattr(opts, "allow_suspicious_time_marks", False)):
         warnings.warn(message, RuntimeWarning)
         return
     raise SystemExit(f"suspicious candidate time marks: {message}")
@@ -2115,11 +2123,11 @@ def build_parser():
     p = argparse.ArgumentParser(
         description="darksirens lensing inference (singleton + J=2 cluster)"
     )
-    # data
-    p.add_argument("--gw_path", required=True)
-    p.add_argument("--gwselection_path", required=True)
-    p.add_argument("--lensed_injections_path", default=None)
-    p.add_argument(
+    data = p.add_argument_group("Data")
+    data.add_argument("--gw_path", required=True)
+    data.add_argument("--gwselection_path", required=True)
+    data.add_argument("--lensed_injections_path", default=None)
+    data.add_argument(
         "--pair_pe_path", default=None,
         help=(
             "DEPRECATED legacy split-pair layout: the mock generator stopped "
@@ -2129,98 +2137,98 @@ def build_parser():
             "(--observed_catalog_path + optional --pair_metadata_path)."
         ),
     )
-    p.add_argument(
+    data.add_argument(
         "--pair_metadata_path",
         default=None,
         help="Optional pair/candidate-edge metadata file. Preferred over --pair_pe_path in unified observed mode.",
     )
-    p.add_argument("--partition_path", default=None)
-    p.add_argument("--candidate_pairs_path", default=None)
-    p.add_argument(
+    data.add_argument("--partition_path", default=None)
+    data.add_argument("--candidate_pairs_path", default=None)
+    data.add_argument(
         "--observed_catalog_path",
         default=None,
         help="Explicit observed_catalog.json for unified observed lensing mode.",
     )
-    p.add_argument(
+    data.add_argument(
         "--partition_mode", choices=["fixed", "marginalize_exact"], default="fixed"
     )
-    p.add_argument("--max_exact_partitions", type=int, default=10000)
-    p.add_argument(
+    data.add_argument("--max_exact_partitions", type=int, default=10000)
+    data.add_argument(
         "--partition_component_mode",
         choices=["global", "componentwise"],
         default="componentwise",
     )
-    p.add_argument("--max_component_events", type=int, default=None)
-    p.add_argument("--max_component_edges", type=int, default=None)
-    p.add_argument("--max_component_partitions", type=int, default=None)
-    p.add_argument("--max_total_partitions", type=int, default=None)
-    # model
-    p.add_argument("--pop_model", default="powerlaw+peak")
-    p.add_argument("--cluster_mode", choices=["off", "j2"], default="j2")
-    p.add_argument(
+    data.add_argument("--max_component_events", type=int, default=None)
+    data.add_argument("--max_component_edges", type=int, default=None)
+    data.add_argument("--max_component_partitions", type=int, default=None)
+    data.add_argument("--max_total_partitions", type=int, default=None)
+    model = p.add_argument_group("Model")
+    model.add_argument("--pop_model", default="powerlaw+peak")
+    model.add_argument("--cluster_mode", choices=["off", "j2"], default="j2")
+    model.add_argument(
         "--wl_backend",
         choices=["lognormal", "tabulated", "disabled"],
         default="lognormal",
     )
-    p.add_argument(
+    model.add_argument(
         "--lensing_wl_table_path",
         type=str,
         default=None,
         help="Path to HDF5 table of log p_WL(mu|z) for --wl_backend tabulated. "
         "Datasets: z_grid (Nz,), log_mu_grid (Nmu,), log_p_table (Nz, Nmu).",
     )
-    p.add_argument(
+    model.add_argument(
         "--wl_selection",
         choices=["standard", "wl_lognormal"],
         default="standard",
         help="Singleton selection treatment. standard preserves legacy selection; wl_lognormal uses lognormal/Hermite WL marginalization for singleton injections when wl_backend=lognormal (wl_a=0 reduces to standard).",
     )
-    p.add_argument("--lensing_wl_a", type=float, default=4e-3)
-    p.add_argument("--lensing_wl_b", type=float, default=1.5)
-    p.add_argument("--sl_tau_A", type=float, default=5e-4)
-    p.add_argument("--sl_tau_n", type=float, default=3.0)
-    p.add_argument(
+    model.add_argument("--lensing_wl_a", type=float, default=4e-3)
+    model.add_argument("--lensing_wl_b", type=float, default=1.5)
+    model.add_argument("--sl_tau_A", type=float, default=5e-4)
+    model.add_argument("--sl_tau_n", type=float, default=3.0)
+    model.add_argument(
         "--fix_lens_rate",
-        default="true",
+        type=str_to_bool, default=True, metavar="BOOL",
         help="true fixes SIS optical-depth parameters to --sl_tau_A/--sl_tau_n; false samples lensing hyperparameters",
     )
-    p.add_argument(
+    model.add_argument(
         "--lens_prior_overrides",
         default=None,
         help='JSON dict of SIS lens prior overrides, e.g. {"log10_tau_A": [-6, -3]}',
     )
-    p.add_argument(
+    model.add_argument(
         "--pair_marks",
         choices=["none", "time"],
         default="none",
         help="Optional J=2 pair marks. 'time' uses candidate_pairs.json marks in marginalized mode or pair metadata in fixed mode.",
     )
-    p.add_argument(
+    model.add_argument(
         "--pair_time_sigma_sec",
         type=float,
         default=None,
         help="Fallback sigma_delta_t in seconds when pair time metadata omits sigma.",
     )
-    p.add_argument("--pair_tag_model", choices=PAIR_TAG_SELECTION_MODEL_KINDS, default="constant")
-    p.add_argument("--pair_tag_constant", type=float, default=1.0)
-    p.add_argument("--pair_tag_perturb_logit", type=float, default=0.0)
-    p.add_argument("--pair_tag_selection_path", default=None)
-    p.add_argument(
+    model.add_argument("--pair_tag_model", choices=PAIR_TAG_SELECTION_MODEL_KINDS, default="constant")
+    model.add_argument("--pair_tag_constant", type=float, default=1.0)
+    model.add_argument("--pair_tag_perturb_logit", type=float, default=0.0)
+    model.add_argument("--pair_tag_selection_path", default=None)
+    model.add_argument(
         "--edge_mark_prior_keys",
         default="",
         help="Comma-separated log_* candidate edge marks to add to edge log_prior_odds in exact marginalization.",
     )
-    p.add_argument(
+    model.add_argument(
         "--edge_mark_likelihood_keys",
         default="",
         help="Comma-separated edge mark likelihood keys. Only time/delta_t_obs is implemented in this PR.",
     )
-    p.add_argument(
+    model.add_argument(
         "--allow_suspicious_time_marks",
-        default="false",
+        type=str_to_bool, default=False, metavar="BOOL",
         help="true downgrades the placeholder/synthetic time-mark hard error to a warning",
     )
-    p.add_argument(
+    model.add_argument(
         "--pair_time_mark_impl",
         choices=["auto", "quadrature", "delta"],
         default="auto",
@@ -2228,7 +2236,7 @@ def build_parser():
              "max(sigma_dt)/T0 < 0.02 (sharp marks unresolvable by quadrature), "
              "quadrature/delta force the respective path",
     )
-    p.add_argument(
+    model.add_argument(
         "--singleton_lensing",
         choices=["off", "sl_mixture"],
         default="off",
@@ -2239,25 +2247,25 @@ def build_parser():
              "Finn-Chernoff partner censoring); requires --lensed_injections_path "
              "and a mock generated with --include-lensed-singletons true.",
     )
-    p.add_argument("--y_nodes_single", type=int, default=32,
+    model.add_argument("--y_nodes_single", type=int, default=32,
                    help="Gauss-Legendre y nodes for the lensed-singleton evidence")
-    p.add_argument("--fc_rho_thr", type=float, default=None,
+    model.add_argument("--fc_rho_thr", type=float, default=None,
                    help="override the injection file's fc_rho_thr attr")
-    p.add_argument("--fc_r0", type=float, default=None,
+    model.add_argument("--fc_r0", type=float, default=None,
                    help="override the injection file's fc_r0 attr")
-    p.add_argument("--fc_mc_bar", type=float, default=None,
+    model.add_argument("--fc_mc_bar", type=float, default=None,
                    help="override the injection file's fc_mc_bar attr")
-    # fixing
-    p.add_argument("--fix_cosmology", default="true")
-    p.add_argument("--fix_survey", default="true")
-    p.add_argument("--fix_population", default="false")
-    p.add_argument(
+    fixing = p.add_argument_group("Fixing")
+    fixing.add_argument("--fix_cosmology", type=str_to_bool, default=True, metavar="BOOL")
+    fixing.add_argument("--fix_survey", type=str_to_bool, default=True, metavar="BOOL")
+    fixing.add_argument("--fix_population", type=str_to_bool, default=False, metavar="BOOL")
+    fixing.add_argument(
         "--fixed_parameter_values", default=None, help="JSON dict of {label: value}"
     )
-    p.add_argument(
+    fixing.add_argument(
         "--prior_overrides", default=None, help="JSON dict of {label: [lo, hi]}"
     )
-    p.add_argument(
+    fixing.add_argument(
         "--redshift_prior_barrier",
         choices=["auto", "on", "off"],
         default="auto",
@@ -2268,7 +2276,7 @@ def build_parser():
             "Use 'on' only for non-vmapped samplers; use 'off' to force vmappable behavior."
         ),
     )
-    p.add_argument(
+    fixing.add_argument(
         "--selection_neff_guard",
         choices=["auto", "hard", "soft"],
         default="auto",
@@ -2281,7 +2289,7 @@ def build_parser():
             "--sampler numpyro and hard otherwise."
         ),
     )
-    p.add_argument(
+    fixing.add_argument(
         "--max_likelihood_variance", type=float, default=DEFAULT_MAX_LIKELIHOOD_VARIANCE,
         help=("Cap on the Monte-Carlo variance of the log-likelihood estimator "
               "(Essick & Farr 2022; Talbot & Golomb 2023, arXiv:2304.06138; the "
@@ -2293,50 +2301,52 @@ def build_parser():
               "enforces the full total). Proposals exceeding it are guarded "
               "(hard -inf or the soft wall per --selection_neff_guard). The "
               "Vitale 5 N_obs mean floor always applies."))
-    # sampler
-    p.add_argument("--sampler", required=True, choices=["tinyns", "dynesty", "numpyro"])
-    p.add_argument("--nlive", type=int, default=2000)
-    p.add_argument("--dlogz", type=float, default=0.1)
-    p.add_argument("--max_samples", type=int, default=2_000_000)
-    add_tinyns_arguments(p)
-    p.add_argument("--nuts_warmup", type=int, default=500)
-    p.add_argument("--nuts_samples", type=int, default=2000)
-    p.add_argument("--nuts_chains", type=int, default=4)
-    p.add_argument("--nuts_target_accept", type=float, default=0.8)
-    p.add_argument("--nuts_max_tree_depth", type=int, default=10)
-    p.add_argument("--nuts_chain_method", default="sequential",
+    sampler = p.add_argument_group("Sampler")
+    sampler.add_argument("--sampler", required=True, choices=["tinyns", "dynesty", "numpyro"])
+    sampler.add_argument("--nlive", type=int, default=2000)
+    sampler.add_argument("--dlogz", type=float, default=0.1)
+    sampler.add_argument("--max_samples", type=int, default=2_000_000)
+    add_tinyns_arguments(sampler)
+    sampler.add_argument("--nuts_warmup", type=int, default=500)
+    sampler.add_argument("--nuts_samples", type=int, default=2000)
+    sampler.add_argument("--nuts_chains", type=int, default=4)
+    sampler.add_argument("--nuts_target_accept", type=float, default=0.8)
+    sampler.add_argument("--nuts_max_tree_depth", type=int, default=10)
+    sampler.add_argument("--nuts_chain_method", default="sequential",
                    choices=["sequential", "parallel", "vectorized"])
-    p.add_argument("--nuts_init_tries", type=int, default=32)
-    # perf / memory
-    p.add_argument(
+    sampler.add_argument("--nuts_init_tries", type=int, default=32)
+    performance = p.add_argument_group("Performance")
+    performance.add_argument(
         "--pe_max_per_pair",
         type=int,
         default=400,
         help="down-sample PE per pair image (0=keep all). Controls "
         "the O(N_pe^2 N_y) pair-KDE memory.",
     )
-    p.add_argument(
+    performance.add_argument(
         "--pair_batch_size",
         type=int,
         default=0,
         help="candidate-pair batch size for J=2 likelihood scans (0 keeps legacy unbatched path)",
     )
-    p.add_argument(
+    performance.add_argument(
         "--y_nodes_pair",
         type=int,
         default=32,
         help="Gauss-Legendre y nodes for each J=2 pair likelihood",
     )
-    p.add_argument("--sel_batch_size", type=int, default=None)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--show_progress", action="store_true")
-    p.add_argument("--save_path", default="./")
-    p.add_argument(
+    performance.add_argument("--sel_batch_size", type=int, default=None)
+    output = p.add_argument_group("Output")
+    output.add_argument("--seed", type=int, default=42)
+    output.add_argument("--show_progress", type=str_to_bool, nargs="?", const=True,
+                        default=False, metavar="BOOL")
+    output.add_argument("--save_path", default="./")
+    output.add_argument(
         "--preflight_only",
-        default="false",
+        type=str_to_bool, default=False, metavar="BOOL",
         help="true runs lensing input preflight checks, writes JSON, and exits before compilation/sampling",
     )
-    p.add_argument(
+    output.add_argument(
         "--preflight_json",
         default=None,
         help="optional output path for preflight JSON (defaults to save_path/preflight.json when --preflight_only true)",
@@ -2344,44 +2354,20 @@ def build_parser():
     return p
 
 
-def _str2bool(v):
-    if isinstance(v, bool):
-        return v
-    return str(v).strip().lower() in ("true", "1", "yes", "y", "t")
-
-
-def main():
-    opts = build_parser().parse_args()
-    # build_parameter_space expects real bools (it does `if not fix_population:`)
-    opts.fix_cosmology = _str2bool(opts.fix_cosmology)
-    opts.fix_survey = _str2bool(opts.fix_survey)
-    opts.fix_population = _str2bool(opts.fix_population)
-    opts.fix_lens_rate = _str2bool(opts.fix_lens_rate)
-    opts.preflight_only = _str2bool(opts.preflight_only)
+def main(argv=None):
+    parser = build_parser()
+    opts = parser.parse_args(argv)
+    # Validate the JSON flags before the run directory is created so malformed
+    # JSON exits cleanly (code 1) rather than deep inside the run.
+    parse_json_arg(opts.fixed_parameter_values, "fixed_parameter_values")
+    parse_json_arg(opts.prior_overrides, "prior_overrides")
+    parse_json_arg(opts.lens_prior_overrides, "lens_prior_overrides")
     os.makedirs(opts.save_path, exist_ok=True)
     if opts.sampler == "tinyns":
         build_tinyns_config(opts)
-    opts.materialize_redshift_prior_state = _resolve_redshift_prior_materialization(
-        opts
-    )
-    opts.redshift_prior_barrier_resolved = _redshift_prior_materialization_reason(
-        opts, opts.materialize_redshift_prior_state
-    )
-    if (
-        opts.redshift_prior_barrier == "auto"
-        and not opts.materialize_redshift_prior_state
-    ):
-        print(
-            "  [i] Disabling likelihood-internal redshift-prior optimization_barrier "
-            f"({opts.redshift_prior_barrier_resolved}).",
-            flush=True,
-        )
+    resolve_redshift_prior_barrier(opts, flush=True)
 
-    guard_mode = getattr(opts, "selection_neff_guard", "auto")
-    opts.selection_neff_soft_guard = (
-        guard_mode == "soft"
-        or (guard_mode == "auto" and opts.sampler == "numpyro")
-    )
+    guard_mode, max_likelihood_variance = resolve_selection_neff_guard(opts)
     if opts.selection_neff_soft_guard:
         print(
             "  [i] Sparse-selection guard: SOFT (smooth wall for "
@@ -2392,7 +2378,6 @@ def main():
             "this stack's guard.",
             flush=True,
         )
-    max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
     if max_likelihood_variance != DEFAULT_MAX_LIKELIHOOD_VARIANCE:
         print(
             "  [i] Selection-variance cap (this stack guards the selection "
@@ -2423,6 +2408,10 @@ def main():
         )
 
     opts.universe_model = _derive_universe_model(opts.wl_backend)
+
+    # Log the fully-resolved CLI options in argparse group order (no GW-population
+    # normalization grid on this stack, so the [Derived] rows are omitted).
+    _print_all_cli_options(parser, opts)
 
     print(
         f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend} | wl_selection={opts.wl_selection}] ==="
@@ -2591,18 +2580,7 @@ def main():
     if opts.sampler == "tinyns":
         cfg = opts.tinyns_resolved_config
         print("  TinyNS resolved config:", flush=True)
-        for key in [
-            "preset",
-            "sample",
-            "kernel",
-            "rwalk_proposal",
-            "walks",
-            "step_scale",
-            "min_accepts",
-            "replacement_chains",
-            "max_attempts",
-            "jax_block_size",
-        ]:
+        for key in TINYNS_RESOLVED_DISPLAY_KEYS:
             print(f"    {key}: {cfg[key]}", flush=True)
         print(f"    dlogz: {opts.dlogz}", flush=True)
         print(f"    nlive: {opts.nlive}", flush=True)
@@ -2722,12 +2700,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    # Hard-exit on success: skip interpreter teardown, which can hang for hours
-    # on shared GPUs when the XLA/CUDA runtime blocks in its exit handlers
-    # (observed as a finished run idling until the SLURM cgroup OOM-killed it).
-    # All outputs are written and closed inside main(); exceptions still
-    # propagate normally and yield a nonzero exit.
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0)
+    run_cli(main)

@@ -150,7 +150,7 @@ darksirens_inference --universe_model dark_sirens \
     --survey_path galaxies.h5 agn.h5  ...   # K=2: samples H0, ..., fcat_2 (= w_2 = f_agn)
 ```
 
-Every single-catalog mode composes with the mixture — per-catalog `Q_LSS` tables, `--use_LSS` overdensities, `--lss_marginalize` (one shared member index over matched LSS realizations), per-catalog marked-host `eta` blocks, and anisotropic sky models — with the field normalizer carrying the same modulated missing budget as each catalog's numerator. `darksirens_analyze` reports the derived `w_1..w_K` posteriors. See `docs/source/cli.md` ("Multitracer catalog mixtures") for the full rules; `dark_sirens_complete` remains a special case (field weighting only, no marks).
+Every single-catalog mode composes with the mixture — per-catalog `Q_LSS` tables, `--use_lss` overdensities, `--lss_marginalize` (one shared member index over matched LSS realizations), per-catalog marked-host `eta` blocks, and anisotropic sky models — with the field normalizer carrying the same modulated missing budget as each catalog's numerator. `darksirens_analyze` reports the derived `w_1..w_K` posteriors. See `docs/source/cli.md` ("Multitracer catalog mixtures") for the full rules; `dark_sirens_complete` remains a special case (field weighting only, no marks).
 
 ## Minimal installation
 

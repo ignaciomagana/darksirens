@@ -26,7 +26,7 @@ python darksirens_inference.py \
     --tinyns_kernel     jax \
     --pop_model         brokenpowerlaw+2peaks \
     --universe_model    dark_sirens \
-    --fixed_cosmology   true \
+    --fix_cosmology     true \
 
 # Fix individual parameters via JSON:
     --fixed_parameter_values '{"$v_1$": 0.1}'
@@ -45,6 +45,7 @@ import json
 import datetime
 import math
 import warnings
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
@@ -62,11 +63,7 @@ from darksirens.gw.populations.utils import (
 from darksirens.inference.data import load_all_data, validate_loaded_survey_shapes
 from darksirens.inference.validation import validate_multitracer_run
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
-from darksirens.likelihood.factory import (
-    _redshift_prior_materialization_reason,
-    _resolve_redshift_prior_materialization,
-    make_likelihood,
-)
+from darksirens.likelihood.factory import make_likelihood
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
 from darksirens.redshift.grid import zMax as _REDSHIFT_GRID_ZMAX
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
@@ -96,6 +93,10 @@ from darksirens.cli.common import (
     str_to_bool,
     parse_json_arg,
     parse_counterpart_arg,
+    DeprecatedSpellingAction,
+    resolve_redshift_prior_barrier,
+    resolve_selection_neff_guard,
+    run_cli,
 )
 from darksirens.io.results import save_results_hdf5
 from darksirens.io.settings import save_settings_json
@@ -479,16 +480,30 @@ def _universe_model_arg(value):
     return value
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────
 
-def main():
-    t_start = datetime.datetime.now()
-    print()
-    _banner(f"DARK SIRENS  │  {t_start.strftime('%Y-%m-%d  %H:%M:%S')}")
-    print()
 
-    # ── Argument parsing ───────────────────────────────────────────
+@dataclass(frozen=True)
+class _ParameterSpace:
+    """What the likelihood/sampling/save phases need from the built space."""
+    labels: object
+    lower_bound: object
+    upper_bound: object
+    prior_kinds: object
+    prior_transform: object
+    pop_params_fid: object
+    n_pop_eff: object
+    n_cosmo_eff: object
+    n_survey_eff: object
+    model_name: object
 
+
+def build_parser():
+    """Construct the darksirens_inference ArgumentParser.
+
+    Extracted from main() so tooling can build the parser without running a
+    full inference; PR 3 depends on this contract (returns the parser).
+    """
     optp = ArgumentParser(description=__doc__,
                           formatter_class=RawDescriptionHelpFormatter)
 
@@ -646,14 +661,17 @@ def main():
         help="Use one shared redshift-evolution gamma; false gives one gamma per mass component.",
     )
     g.add_argument("--fix_population",  type=str_to_bool, default=False, metavar="BOOL")
-    g.add_argument("--fixed_cosmology", "--fix_cosmology", dest="fix_cosmology",
+    g.add_argument("--fix_cosmology", "--fixed_cosmology", dest="fix_cosmology",
+                   action=DeprecatedSpellingAction, deprecated=["--fixed_cosmology"],
                    type=str_to_bool, default=False, metavar="BOOL",
                    help=("Fix the full cosmology block (H0, Om0, w0, wa). "
-                         "--fix_cosmology is a backward-compatible alias."))
-    g.add_argument("--fixed_de",        dest="fix_de", type=str_to_bool,
-                   default=False, metavar="BOOL",
+                         "--fixed_cosmology is a deprecated alias."))
+    g.add_argument("--fix_de",          "--fixed_de", dest="fix_de",
+                   action=DeprecatedSpellingAction, deprecated=["--fixed_de"],
+                   type=str_to_bool, default=False, metavar="BOOL",
                    help=("Fix only dark-energy cosmology parameters (w0, wa); "
-                         "ignored when --fixed_cosmology is true."))
+                         "ignored when --fix_cosmology is true. "
+                         "--fixed_de is a deprecated alias."))
     g.add_argument("--fix_survey",      type=str_to_bool, default=False, metavar="BOOL")
     g.add_argument(
         "--redshift_prior_barrier",
@@ -706,7 +724,9 @@ def main():
                          "'volume' preserves the historical volume-prior robustness approximation."))
 
     g = optp.add_argument_group("Catalog")
-    g.add_argument("--use_LSS",      type=str_to_bool, default=False, metavar="BOOL")
+    g.add_argument("--use_lss", "--use_LSS", dest="use_LSS",
+                   action=DeprecatedSpellingAction, deprecated=["--use_LSS"],
+                   type=str_to_bool, default=False, metavar="BOOL")
     g.add_argument("--catalog_sky_weighting", default=None,
                    choices=["conditional", "field"],
                    help=("Catalog redshift-prior normalization convention (dark_sirens). "
@@ -722,7 +742,7 @@ def main():
                          "dark_sirens the degenerate explicit combinations (field at K=1, "
                          "conditional at K>=2) are fatal. "
                          "Field requires the full-sky catalog (incompatible with "
-                         "--drop_full_catalog); composes with --lss_completion, --use_LSS "
+                         "--drop_full_catalog); composes with --lss_completion, --use_lss "
                          "and --mark_model (the global normalizer carries the same "
                          "modulated missing budget as the numerator, per member under "
                          "--lss_marginalize); incompatible with universe models other than "
@@ -767,8 +787,8 @@ def main():
                          "stamps one shared id across the K files, or pass "
                          "--allow_unverified_shared_lss_members to accept the "
                          "independent-fields approximation."))
-    g.add_argument("--allow_unverified_shared_lss_members", action="store_true",
-                   default=False,
+    g.add_argument("--allow_unverified_shared_lss_members",
+                   type=str_to_bool, nargs="?", const=True, default=False, metavar="BOOL",
                    help=("Bypass the K>=2 --lss_marginalize provenance check that the "
                          "per-catalog Q_LSS ensembles share a matched realization set "
                          "(equal, non-null realization_set_id). With this flag, catalogs "
@@ -814,7 +834,7 @@ def main():
                    help="Discard the dense full-sky (npix, n_max_gals) galaxy arrays after "
                         "compacting to inference pixels, keeping only the compact PE/selection "
                         "views on device. Cuts startup GPU memory drastically for large nside. "
-                        "Incompatible with --use_LSS and bright-siren models, which need the "
+                        "Incompatible with --use_lss and bright-siren models, which need the "
                         "full-sky rows.")
     g.add_argument("--norm_nmass", type=int, default=None, metavar="N",
                    help="Mass-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_MASS).")
@@ -839,9 +859,10 @@ def main():
                         "(default 24). Spectroscopic catalogs (sigma_eff <~ 5e-3) are exact "
                         "to likelihood precision at 4-8 nodes and the quadrature dominates "
                         "wide-sky dark-siren runs; do NOT reduce for broad photo-z kernels.")
+    return optp
 
-    opts = optp.parse_args()
 
+def _normalize_multitracer_paths(opts):
     # ── Multitracer survey-path normalization ──────────────────────
     # --survey_path / --lss_completion accept multiple values (nargs="+"); a
     # single path reproduces the legacy single-catalog behaviour exactly.  We
@@ -880,6 +901,8 @@ def main():
     opts.survey_path = survey_paths[0] if survey_paths else None
     opts.lss_completion = opts.lss_completions[0] if opts.lss_completions else None
 
+
+def _resolve_catalog_sky_weighting(opts):
     # ── Catalog sky-weighting resolution (estimand coherence) ──────
     # The two dark-siren normalization conventions are DIFFERENT estimands and
     # each is degenerate in the wrong K regime: at K=1 the field
@@ -997,6 +1020,8 @@ def main():
         if opts.counterpart is not None:
             _fatal("--counterpart is not supported with a multi-catalog mixture.")
 
+
+def _validate_multitracer_config(opts):
     # FIELD-convention sky weighting scope (host-fraction estimand).  The
     # missing-galaxy budget modulations (deterministic Q_LSS, use_LSS delta_g)
     # and the marked-host model ARE supported: the survey-global normalizer
@@ -1023,6 +1048,8 @@ def main():
                "dark-siren catalog prior and are inert for every other model, "
                "leaving phantom flat eta dimensions in the sampled space.")
 
+
+def _canonicalize_fixed_flags(opts):
     # Persist the canonical names in settings while keeping opts.fix_cosmology
     # for backward-compatible internal callers and saved metadata.
     opts.fixed_cosmology = bool(opts.fix_cosmology)
@@ -1032,6 +1059,8 @@ def main():
         opts.fix_de = False
         opts.fixed_de = False
 
+
+def _configure_performance_grids(opts):
     try:
         configure_normalization_grids(
             n_mass=opts.norm_nmass,
@@ -1048,6 +1077,8 @@ def main():
             _fatal("--kernel_gl_nodes must be >= 2")
         configure_kernel_quadrature(opts.kernel_gl_nodes)
 
+
+def _parse_structured_options(opts):
     prior_overrides        = parse_json_arg(opts.prior_overrides,        "prior_overrides")
     fixed_parameter_values = parse_json_arg(opts.fixed_parameter_values, "fixed_parameter_values")
     opts.prior_overrides        = prior_overrides if prior_overrides else None
@@ -1055,32 +1086,19 @@ def main():
         fixed_parameter_values if fixed_parameter_values else None
     )
     opts.counterpart            = parse_counterpart_arg(opts.counterpart)
+    return prior_overrides, fixed_parameter_values
 
+
+def _resolve_sampler_config(opts):
     if opts.sampler == "tinyns":
         try:
             build_tinyns_config(opts)
         except ValueError as e:
             _fatal(str(e))
 
-    opts.materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
-    opts.redshift_prior_barrier_resolved = _redshift_prior_materialization_reason(
-        opts, opts.materialize_redshift_prior_state
-    )
-    if (
-        opts.redshift_prior_barrier == "auto"
-        and not opts.materialize_redshift_prior_state
-    ):
-        print(
-            "  [i] Disabling likelihood-internal redshift-prior optimization_barrier "
-            f"({opts.redshift_prior_barrier_resolved})."
-        )
+    resolve_redshift_prior_barrier(opts)
 
-    guard_mode = getattr(opts, "selection_neff_guard", "auto")
-    opts.selection_neff_soft_guard = (
-        guard_mode == "soft"
-        or (guard_mode == "auto" and opts.sampler == "numpyro")
-    )
-    max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
+    guard_mode, max_likelihood_variance = resolve_selection_neff_guard(opts)
     # Always print a compact, resolved guard summary (mode + why, cap, and the
     # criterion) so the log records why the likelihood may return -inf; the
     # cap and the soft-mode post-hoc caveat are folded into the one line.
@@ -1094,6 +1112,8 @@ def main():
         )
     )
 
+
+def _apply_bright_siren_overrides(opts):
     if opts.universe_model == "bright_sirens":
         # Bright sirens use a synthetic one-object catalog fixed by the
         # counterpart rather than survey-completion hyperparameters.
@@ -1107,12 +1127,8 @@ def main():
             )
             opts.sky_model = "isotropic"
 
-    _print_all_cli_options(
-        optp,
-        opts,
-        normalization_grid=normalization_grid_settings().to_dict(),
-    )
 
+def _validate_run_config(opts):
     # ── Validation ─────────────────────────────────────────────────
 
     _section("Validating configuration")
@@ -1194,7 +1210,7 @@ def main():
         _warn(f"--survey_path provided but '{opts.universe_model}' does not use it.")
     if getattr(opts, "_fixed_de_superseded", False):
         _warn(
-            "--fixed_cosmology supersedes --fixed_de; "
+            "--fix_cosmology supersedes --fix_de; "
             "dark energy is included in the fixed cosmology block."
         )
     if opts.fix_population and opts.fix_cosmology and opts.fix_survey:
@@ -1203,6 +1219,8 @@ def main():
     _ok("Configuration is valid.")
     _end()
 
+
+def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
     # ── Run configuration printout ─────────────────────────────────
 
     _section("Run Configuration")
@@ -1322,6 +1340,8 @@ def main():
         _row("Drop full catalog", "yes (compact views only)")
     _end()
 
+
+def _load_and_report_data(opts):
     # ── Load data ──────────────────────────────────────────────────
 
     _section("Loading data")
@@ -1405,7 +1425,10 @@ def main():
     validate_multitracer_run(opts, data)
 
     _end()
+    return data
 
+
+def _maybe_run_completion_validation(opts, data, prior_overrides, fixed_parameter_values):
     if opts.validate_completion:
         _section("Completion validation dry run")
         if opts.n_catalogs >= 2:
@@ -1420,8 +1443,11 @@ def main():
             _ok(f"completion_validation JSON → {validation_path}")
         _row("Action", "exiting before likelihood/sampling")
         _end()
-        return
+        return True
+    return False
 
+
+def _resolve_single_catalog_marks(opts, data):
     # ── Parameter space ────────────────────────────────────────────
 
     # Resolve the galaxy marks for the marked-host model (dark_sirens): those
@@ -1447,6 +1473,8 @@ def main():
     # PRE-LOAD from each catalog file's datasets (see the multitracer guard
     # block); the flat data dict carries no top-level marks for a mixture.
 
+
+def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_parameter_values):
     _section("Building parameter space")
     # A Q_LSS completion table (explicit --lss_completion path or an in-catalog
     # /lss_completion group) REPLACES the b_miss local-overdensity factor, so
@@ -1540,7 +1568,22 @@ def main():
         opts.fix_cosmology, opts.fix_de, opts.fix_population, opts.fix_survey,
         pop_params_fid, pop_labels_all,
     )
+    return _ParameterSpace(
+        labels=labels,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
+        prior_kinds=prior_kinds,
+        prior_transform=prior_transform,
+        pop_params_fid=pop_params_fid,
+        n_pop_eff=n_pop_eff,
+        n_cosmo_eff=n_cosmo_eff,
+        n_survey_eff=n_survey_eff,
+        model_name=model_name,
+    )
 
+
+def _build_likelihood(opts, data, pspace, fixed_parameter_values):
+    pop_params_fid = pspace.pop_params_fid
     # ── Build likelihood ───────────────────────────────────────────
 
     _section("Building likelihood")
@@ -1555,7 +1598,15 @@ def main():
     )
     _ok("Likelihood closure ready.")
     _end()
+    return likelihood
 
+
+def _run_sampling(opts, likelihood, pspace):
+    labels = pspace.labels
+    lower_bound = pspace.lower_bound
+    upper_bound = pspace.upper_bound
+    prior_kinds = pspace.prior_kinds
+    prior_transform = pspace.prior_transform
     # ── Sampling ───────────────────────────────────────────────────
 
     _section(f"Sampling  [{opts.sampler.upper()}]")
@@ -1597,7 +1648,21 @@ def main():
         zerr = float(logZerr) if logZerr is not None else float("nan")
         _ok(f"log Z = {float(logZ):.3f} ± {zerr:.3f}")
     _end()
+    return results, wall_sampling
 
+
+def _save_outputs(opts, data, results, pspace, fixed_parameter_values, prior_overrides, wall_sampling, t_start):
+    nEvents = data["nEvents"]
+    nsamp   = data["nsamp"]
+    Ndraw   = data["Ndraw"]
+    labels = pspace.labels
+    lower_bound = pspace.lower_bound
+    upper_bound = pspace.upper_bound
+    prior_kinds = pspace.prior_kinds
+    n_pop_eff = pspace.n_pop_eff
+    n_cosmo_eff = pspace.n_cosmo_eff
+    n_survey_eff = pspace.n_survey_eff
+    model_name = pspace.model_name
     # ── Save outputs ───────────────────────────────────────────────
 
     t_end     = datetime.datetime.now()
@@ -1678,12 +1743,46 @@ def main():
     print()
 
 
+def main(argv=None):
+    t_start = datetime.datetime.now()
+    print()
+    _banner(f"DARK SIRENS  │  {t_start.strftime('%Y-%m-%d  %H:%M:%S')}")
+    print()
+
+    optp = build_parser()
+    opts = optp.parse_args(argv)
+
+    _normalize_multitracer_paths(opts)
+    _resolve_catalog_sky_weighting(opts)
+    _validate_multitracer_config(opts)
+    _canonicalize_fixed_flags(opts)
+    _configure_performance_grids(opts)
+    prior_overrides, fixed_parameter_values = _parse_structured_options(opts)
+    _resolve_sampler_config(opts)
+    _apply_bright_siren_overrides(opts)
+    _print_all_cli_options(
+        optp,
+        opts,
+        normalization_grid=normalization_grid_settings().to_dict(),
+    )
+    _validate_run_config(opts)
+    _print_run_configuration(opts, prior_overrides, fixed_parameter_values)
+    data = _load_and_report_data(opts)
+    if _maybe_run_completion_validation(
+        opts, data, prior_overrides, fixed_parameter_values
+    ):
+        return
+    _resolve_single_catalog_marks(opts, data)
+    pspace = _build_and_report_parameter_space(
+        opts, data, prior_overrides, fixed_parameter_values
+    )
+    likelihood = _build_likelihood(opts, data, pspace, fixed_parameter_values)
+    results, wall_sampling = _run_sampling(opts, likelihood, pspace)
+    _save_outputs(
+        opts, data, results, pspace,
+        fixed_parameter_values, prior_overrides, wall_sampling, t_start,
+    )
+
+
 if __name__ == "__main__":
-    main()
-    # Hard-exit on success: skip interpreter teardown, which can hang for hours
-    # on shared GPUs when the XLA/CUDA runtime blocks in its exit handlers.
-    # All outputs are written and closed inside main(); exceptions still
-    # propagate normally and yield a nonzero exit.
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0)
+    run_cli(main)

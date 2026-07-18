@@ -101,61 +101,61 @@ add(){ IDS+=("$1"); DESCS+=("$2"); PRECONDS+=("$3"); CMDS+=("$4"); }
 
 # Universe models
 add U-spec     "spectral_sirens (GW only)" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-spec"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-spec"
 add U-wl       "spectral_sirens_wl (weak-lensing magnification, via lensing CLI)" ALWAYS \
   "$LENS --gw_path $GWE --gwselection_path $SEL --cluster_mode off --wl_backend lognormal --lensing_wl_a 4e-3 --lensing_wl_b 1.5 --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-wl"
 add U-dark     "dark_sirens (incomplete catalog)" HAVE_DARK \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-dark"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-dark"
 add U-complete "dark_sirens_complete (complete catalog)" HAVE_DARK \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens_complete --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-complete"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens_complete --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-complete"
 add U-bright   "bright_sirens (EM counterparts)" HAVE_BRIGHT \
-  "$INFER --gw_path $BGWE --gwselection_path $BSEL --universe_model bright_sirens --counterpart $CPARGS --counterpart_dz 1e-4 --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-bright"
+  "$INFER --gw_path $BGWE --gwselection_path $BSEL --universe_model bright_sirens --counterpart $CPARGS --counterpart_dz 1e-4 --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-bright"
 
 # Population models (spectral, fixed cosmology)
 add P-bpl2pk "pop: brokenpowerlaw+2peaks" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model brokenpowerlaw+2peaks --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/P-bpl2pk"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model brokenpowerlaw+2peaks --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/P-bpl2pk"
 add P-gp1d   "pop: gp1d_m1 (GP, needs tinygp)" HAVE_TINYGP \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model gp1d_m1 --fixed_cosmology true --fix_survey true $NUTS --seed 1 --save_path $RUNS/P-gp1d"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model gp1d_m1 --fix_cosmology true --fix_survey true $NUTS --seed 1 --save_path $RUNS/P-gp1d"
 add P-gppop  "pop: gppop (binned-GP, needs tinygp; dynesty=gradient-free)" HAVE_TINYGP \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model gppop --fixed_cosmology true --fix_survey true $DYN_HI --seed 1 --save_path $RUNS/P-gppop"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model gppop --fix_cosmology true --fix_survey true $DYN_HI --seed 1 --save_path $RUNS/P-gppop"
 
 # Sky models (spectral, fixed cosmology + population)
 add S-iso   "sky: isotropic" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model isotropic --pop_model powerlaw+peak --fixed_cosmology true --fix_population true --fix_survey true $DYN --seed 1 --save_path $RUNS/S-iso"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model isotropic --pop_model powerlaw+peak --fix_cosmology true --fix_population true --fix_survey true $DYN --seed 1 --save_path $RUNS/S-iso"
 add S-dip   "sky: dipole" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model dipole --pop_model powerlaw+peak --fixed_cosmology true --fix_population true --fix_survey true $DYN --seed 1 --save_path $RUNS/S-dip"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model dipole --pop_model powerlaw+peak --fix_cosmology true --fix_population true --fix_survey true $DYN --seed 1 --save_path $RUNS/S-dip"
 add S-mult  "sky: multipole (l<=2)" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model multipole --pop_model powerlaw+peak --fixed_cosmology true --fix_population true --fix_survey true $DYN --seed 1 --save_path $RUNS/S-mult"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model multipole --pop_model powerlaw+peak --fix_cosmology true --fix_population true --fix_survey true $DYN --seed 1 --save_path $RUNS/S-mult"
 add S-mult3 "sky: multipole_l3 (l<=3)" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model multipole_l3 --pop_model powerlaw+peak --fixed_cosmology true --fix_population true --fix_survey true $DYN --seed 1 --save_path $RUNS/S-mult3"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model multipole_l3 --pop_model powerlaw+peak --fix_cosmology true --fix_population true --fix_survey true $DYN --seed 1 --save_path $RUNS/S-mult3"
 add S-sgp   "sky: sphere_gp (GP on S^2)" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model sphere_gp --pop_model powerlaw+peak --fixed_cosmology true --fix_population true --fix_survey true $NUTS --seed 1 --save_path $RUNS/S-sgp"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model sphere_gp --pop_model powerlaw+peak --fix_cosmology true --fix_population true --fix_survey true $NUTS --seed 1 --save_path $RUNS/S-sgp"
 add S-sgpz  "sky: sphere_gp_z ((sphere x z) GP) [slow]" RUN_SLOW \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model sphere_gp_z --pop_model powerlaw+peak --fixed_cosmology true --fix_population true --fix_survey true $NUTS --seed 1 --save_path $RUNS/S-sgpz"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model sphere_gp_z --pop_model powerlaw+peak --fix_cosmology true --fix_population true --fix_survey true $NUTS --seed 1 --save_path $RUNS/S-sgpz"
 add S-od    "sky: overdensity_gp (3-D clustering) [slow]" RUN_SLOW \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model overdensity_gp --pop_model powerlaw+peak --fixed_cosmology true --fix_population true --fix_survey true $NUTS --seed 1 --save_path $RUNS/S-od"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --sky_model overdensity_gp --pop_model powerlaw+peak --fix_cosmology true --fix_population true --fix_survey true $NUTS --seed 1 --save_path $RUNS/S-od"
 
 # Marked-host model (dark sirens)
 add M-loglin "marks: loglinear (logmstar,logssfr)" HAVE_MARKS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CATM --universe_model dark_sirens --mark_model loglinear --marks logmstar,logssfr --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/M-loglin"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CATM --universe_model dark_sirens --mark_model loglinear --marks logmstar,logssfr --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/M-loglin"
 
 # LSS completion (dark sirens)
-add L-legacy "LSS: legacy delta_g (--use_LSS)" HAVE_DARK \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --use_LSS true --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/L-legacy"
+add L-legacy "LSS: legacy delta_g (--use_lss)" HAVE_DARK \
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --use_lss true --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/L-legacy"
 add L-radial "LSS: radial lognormal Q_LSS" HAVE_QRAD \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --lss_completion $QRAD --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/L-radial"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --lss_completion $QRAD --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/L-radial"
 add L-gp3d   "LSS: 3-D angular-coupling Q_LSS" HAVE_QGP3D \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --lss_completion $QGP3D --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/L-gp3d"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT --universe_model dark_sirens --lss_completion $QGP3D --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/L-gp3d"
 
 # Multitracer K-catalog mixture (duplicated catalog exercises the full
 # CLI -> bundle loader -> mixture pipeline end-to-end; sky weighting
 # auto-resolves to field and fcat_2 is sampled alongside the population).
 add K2-field  "multitracer: K=2 duplicated catalog (auto field weighting)" HAVE_DARK \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT $CAT --universe_model dark_sirens --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-field"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT $CAT --universe_model dark_sirens --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-field"
 add K2-marks  "multitracer: K=2 + per-catalog marked-host etas" HAVE_MARKS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CATM $CATM --universe_model dark_sirens --mark_model loglinear --marks logmstar,logssfr --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-marks"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CATM $CATM --universe_model dark_sirens --mark_model loglinear --marks logmstar,logssfr --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-marks"
 add K2-qlss   "multitracer: K=2 + per-catalog Q_LSS (field-modulated budget)" HAVE_QRAD \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT $CAT --universe_model dark_sirens --lss_completion $QRAD $QRAD --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-qlss"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --survey_path $CAT $CAT --universe_model dark_sirens --lss_completion $QRAD $QRAD --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/K2-qlss"
 
 # Lensing: strong-lensing clusters
 add X-cloff "SL clusters: singleton-only (cluster_mode off)" HAVE_BASE \
@@ -165,9 +165,9 @@ add X-cl2   "SL clusters: J=2 pairs (cluster_mode j2)" HAVE_LENS \
 
 # Samplers (tiny spectral case, fixed cosmology, free population)
 add R-dynesty "sampler: dynesty" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 3 --save_path $RUNS/R-dynesty"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 3 --save_path $RUNS/R-dynesty"
 add R-numpyro "sampler: numpyro (NUTS)" ALWAYS \
-  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $NUTS --seed 3 --save_path $RUNS/R-numpyro"
+  "$INFER --gw_path $GWE --gwselection_path $SEL --universe_model spectral_sirens --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $NUTS --seed 3 --save_path $RUNS/R-numpyro"
 
 # Analyze (posterior-predictive + sky-ladder Bayes factors)
 add A-analyze "analyze: spectra + Bayes-factor matrix (sky ladder)" HAVE_BASE \
@@ -211,7 +211,7 @@ it = d["counterparts"] if isinstance(d, dict) else d
 print(" ".join(f"{c['ra_rad']} {c['dec_rad']} {c['z']}" for c in it))
 PY
 )"
-  CMDS[4]="$INFER --gw_path $BGWE --gwselection_path $BSEL --universe_model bright_sirens --counterpart $CPARGS --counterpart_dz 1e-4 --pop_model powerlaw+peak --fixed_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-bright"
+  CMDS[4]="$INFER --gw_path $BGWE --gwselection_path $BSEL --universe_model bright_sirens --counterpart $CPARGS --counterpart_dz 1e-4 --pop_model powerlaw+peak --fix_cosmology true --fix_survey true $DYN --seed 1 --save_path $RUNS/U-bright"
 fi
 # Strong-lensing mock: standalone in-repo generator (writes the current gwcat
 # schema, so the files load through darksirens_inference_lensing's loaders).

@@ -11,7 +11,7 @@ FIX='{"$v_1$": 0.1, "$m_{\\min,\\rm PL}$": 5.0, "$m_{\\max,\\rm PL}$": 80.0, "$\
 COMMON=(--gwselection_path selection_o3o4ab_allsky.h5
         --universe_model spectral_sirens
         --pop_model powerlaw+peak
-        --fixed_cosmology true --fix_survey true
+        --fix_cosmology true --fix_survey true
         --sampler tinyns --nlive 300 --seed 7
         --save_path flows/runs)
 
@@ -37,7 +37,7 @@ case "${1:?usage: run_pair.sh A|B|C}" in
       --pdet_nsamp 1000000 --pdet_seed 42 \
       --universe_model spectral_sirens \
       --pop_model powerlaw+peak \
-      --fixed_cosmology true --fix_survey true \
+      --fix_cosmology true --fix_survey true \
       --sampler tinyns --nlive 300 --seed 7 \
       --save_path flows/runs \
       --fixed_parameter_values "$FIX"

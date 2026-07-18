@@ -164,7 +164,7 @@ def log_sample_weight_wl_marginalized(
     # Full CPL: dropping w0/wa here ran the WL mu-marginalisation in LambdaCDM
     # while the surrounding likelihood (clamp bounds, volume prior, pop z
     # terms) used the sampled w0/wa (library review, likelihood finding 2 /
-    # lensing finding 5): internally inconsistent for any --fixed_de false
+    # lensing finding 5): internally inconsistent for any --fix_de false
     # WL run.
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
@@ -331,7 +331,7 @@ def log_sample_weight_wl_lognormal_hermite(
     # Full CPL: dropping w0/wa here ran the WL mu-marginalisation in LambdaCDM
     # while the surrounding likelihood (clamp bounds, volume prior, pop z
     # terms) used the sampled w0/wa (library review, likelihood finding 2 /
-    # lensing finding 5): internally inconsistent for any --fixed_de false
+    # lensing finding 5): internally inconsistent for any --fix_de false
     # WL run.
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 

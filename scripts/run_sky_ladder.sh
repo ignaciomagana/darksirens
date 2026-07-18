@@ -69,7 +69,7 @@ for model in $SKY_MODELS; do
         --gw_path "$GW" --gwselection_path "$SEL" \
         --sampler "$SAMPLER" --nlive "$NLIVE" --seed "$SEED" \
         --universe_model spectral_sirens --pop_model powerlaw+peak \
-        --fixed_cosmology true $extra_fix \
+        --fix_cosmology true $extra_fix \
         --sky_model "$model" \
         --save_path "$SAVE"
     # The tool writes results.hdf5 into a timestamped subdir of --save_path.
