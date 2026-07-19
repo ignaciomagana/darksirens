@@ -880,7 +880,14 @@ def main():
 
     # ---- model comparison ----
     if any(z is not None for z in logZs):
-        fig = plot_model_evidences(labels, [0.0 if z is None else z for z in logZs], logZerrs)
+        # Only runs with an evidence estimate enter the bar chart: coercing a
+        # missing logZ to 0.0 would plot that run as the (fake) best model,
+        # since real log10 Z values are large and negative.
+        with_z = [(lbl, z, ze) for lbl, z, ze in zip(labels, logZs, logZerrs)
+                  if z is not None]
+        fig = plot_model_evidences([lbl for lbl, _, _ in with_z],
+                                   [z for _, z, _ in with_z],
+                                   [ze for _, _, ze in with_z])
         fig.savefig(out("model_evidences.pdf"), bbox_inches="tight", dpi=300)
         plt.close(fig)
         print("\n=== Model evidences (log10 Z) ===")

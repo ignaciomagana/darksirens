@@ -188,7 +188,7 @@ def _print_parameter_table(
     n_fix_ind   = len(fixed_parameter_values)
     n_fix_block = ((len(COSMO_FID) if fix_cosmology else len(DE_FID) if fix_de else 0)
                    + (len(pop_labels_all) if fix_population else 0)
-                   + (6 if fix_survey else 0))
+                   + (len(SURVEY_FID) if fix_survey else 0))
     _row("Free (sampled)",      n_free)
     if n_fix_ind:   _row("Fixed individually", n_fix_ind)
     if n_fix_block: _row("Fixed (block)",      n_fix_block)

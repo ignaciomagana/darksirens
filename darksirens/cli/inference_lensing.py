@@ -906,10 +906,15 @@ def load_inputs(opts):
                         )
                     elif opts.pair_time_sigma_sec is not None:
                         pair_time_sigma.append(float(opts.pair_time_sigma_sec))
-                    else:
+                    elif getattr(opts, "pair_marks", "none") == "time":
                         raise SystemExit(
                             f"pair_marks=time requires sigma_delta_t in pair_{k} or --pair_time_sigma_sec"
                         )
+                    else:
+                        # delta_t_obs present but no sigma anywhere: the run does
+                        # not use time marks, so drop this pair's mark instead of
+                        # aborting over metadata the likelihood never reads.
+                        pair_time_delta_t_obs.pop()
                 if not unified_observed_catalog:
                     for name in ("image0", "image1"):
                         if name not in g:
@@ -966,12 +971,23 @@ def load_inputs(opts):
                 raise SystemExit(
                     f"pair_marks=time requires candidate_pairs.json marks or pair metadata for fixed pair {pair}"
                 )
-            pair_time_delta_t_obs.append(float(meta.delta_t_obs))
-            pair_time_sigma.append(float(meta.sigma_delta_t))
+            # abs at the boundary, same as _time_mark_arrays_for_partition_state:
+            # the SIS mark uses y* = dt/T0 (>= 0) and a signed dt would silently
+            # annihilate the pair.
+            dt = abs(float(meta.delta_t_obs))
+            sig = float(meta.sigma_delta_t)
+            if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0:
+                raise SystemExit(
+                    f"fixed pair {pair} has invalid candidate_pairs.json "
+                    "marks.delta_t_obs/sigma_delta_t required by pair_marks=time"
+                )
+            pair_time_delta_t_obs.append(dt)
+            pair_time_sigma.append(sig)
 
     if (
         unified_observed_catalog
         and partition is not None
+        and getattr(opts, "pair_marks", "none") == "time"
         and len(pair_time_delta_t_obs) not in (0, int(partition.get("n_pairs", 0)))
     ):
         raise SystemExit(
@@ -1455,7 +1471,7 @@ def _fiducial_candidate_point(labels, mid, lower, upper, opts, pop_params_fid):
     except (TypeError, ValueError):
         pass
     try:
-        fid["n_tau"] = float(opts.sl_tau_n)
+        fid["tau_n"] = float(opts.sl_tau_n)
     except (TypeError, ValueError):
         pass
     mid = np.asarray(mid, dtype=float)
