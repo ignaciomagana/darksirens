@@ -67,6 +67,9 @@ def _banner(text: str):
 
 def _section(title: str):
     print()
+    max_title = W - 8  # keep at least one "─" of fill before the "╮" corner
+    if len(title) > max_title:
+        title = title[: max_title - 1] + "…"
     fill = "─" * max(0, W - 6 - len(title))
     print("  " + _c("╭─ ", _DIM) + _c(title, _BOLD, _ACCENT) + " " + _c(fill + "╮", _DIM))
 
