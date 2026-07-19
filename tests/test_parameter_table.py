@@ -115,8 +115,10 @@ def _render_table(
         (False, False, False, None),
         (True, False, False, 4),
         (False, True, False, 3),
-        (False, False, True, 6),
-        (True, True, True, 13),
+        # The survey block prints the 7 SURVEY_FID rows (log10n0, z50, w,
+        # delta, b_miss, alpha_miss, sigma_kde); the footer count matches.
+        (False, False, True, 7),
+        (True, True, True, 14),
     ],
 )
 def test_parameter_table_block_fixed_count_logic(

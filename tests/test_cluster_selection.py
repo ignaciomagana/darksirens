@@ -1111,12 +1111,14 @@ class TestWeakLensingSingletonSelection:
         ])
         assert opts.wl_selection == "standard"
 
-        src = inspect.getsource(inference_lensing.main)
-        assert 'f.attrs["wl_selection"] = opts.wl_selection' in src
-        # The generic settings-persistence loop was factored out of main()
-        # into _jsonable_settings (still `for k, v in vars(opts).items()`);
-        # assert main still routes the full opts through it.
-        assert "_jsonable_settings(opts)" in src
+        # main() is decomposed into phase functions; the wl_selection attr is
+        # written by the save phase and the full opts still route through
+        # _jsonable_settings (unchanged `for k, v in vars(opts).items()`)
+        # in the run-dir preparation phase.
+        save_src = inspect.getsource(inference_lensing._save_lensing_outputs)
+        assert 'f.attrs["wl_selection"] = opts.wl_selection' in save_src
+        prepare_src = inspect.getsource(inference_lensing._prepare_run_dir)
+        assert "_jsonable_settings(opts)" in prepare_src
         helper_src = inspect.getsource(inference_lensing._jsonable_settings)
         assert "for k, v in vars(opts).items()" in helper_src
 

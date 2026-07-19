@@ -117,6 +117,13 @@ from darksirens.inference.tinyns_config import (
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.block_sizing import block_size_arg, resolve_block_sizes
 from darksirens.cli.common import (
+    _banner,
+    _section,
+    _row,
+    _end,
+    _ok,
+    _warn,
+    _err,
     str_to_bool,
     parse_json_arg,
     _print_all_cli_options,
@@ -906,10 +913,15 @@ def load_inputs(opts):
                         )
                     elif opts.pair_time_sigma_sec is not None:
                         pair_time_sigma.append(float(opts.pair_time_sigma_sec))
-                    else:
+                    elif getattr(opts, "pair_marks", "none") == "time":
                         raise SystemExit(
                             f"pair_marks=time requires sigma_delta_t in pair_{k} or --pair_time_sigma_sec"
                         )
+                    else:
+                        # delta_t_obs present but no sigma anywhere: the run does
+                        # not use time marks, so drop this pair's mark instead of
+                        # aborting over metadata the likelihood never reads.
+                        pair_time_delta_t_obs.pop()
                 if not unified_observed_catalog:
                     for name in ("image0", "image1"):
                         if name not in g:
@@ -966,12 +978,23 @@ def load_inputs(opts):
                 raise SystemExit(
                     f"pair_marks=time requires candidate_pairs.json marks or pair metadata for fixed pair {pair}"
                 )
-            pair_time_delta_t_obs.append(float(meta.delta_t_obs))
-            pair_time_sigma.append(float(meta.sigma_delta_t))
+            # abs at the boundary, same as _time_mark_arrays_for_partition_state:
+            # the SIS mark uses y* = dt/T0 (>= 0) and a signed dt would silently
+            # annihilate the pair.
+            dt = abs(float(meta.delta_t_obs))
+            sig = float(meta.sigma_delta_t)
+            if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0:
+                raise SystemExit(
+                    f"fixed pair {pair} has invalid candidate_pairs.json "
+                    "marks.delta_t_obs/sigma_delta_t required by pair_marks=time"
+                )
+            pair_time_delta_t_obs.append(dt)
+            pair_time_sigma.append(sig)
 
     if (
         unified_observed_catalog
         and partition is not None
+        and getattr(opts, "pair_marks", "none") == "time"
         and len(pair_time_delta_t_obs) not in (0, int(partition.get("n_pairs", 0)))
     ):
         raise SystemExit(
@@ -1455,7 +1478,7 @@ def _fiducial_candidate_point(labels, mid, lower, upper, opts, pop_params_fid):
     except (TypeError, ValueError):
         pass
     try:
-        fid["n_tau"] = float(opts.sl_tau_n)
+        fid["tau_n"] = float(opts.sl_tau_n)
     except (TypeError, ValueError):
         pass
     mid = np.asarray(mid, dtype=float)
@@ -1494,10 +1517,9 @@ def _diagnostics_at_guard_clear_point(
         try:
             diagnostics = diagnostics_fn(jnp.asarray(point))
             if k > 0:
-                print(
-                    f"  diagnostics point: {name} "
-                    "(reliability guard fired at the prior midpoint)",
-                    flush=True,
+                _warn(
+                    f"diagnostics point: {name} "
+                    "(reliability guard fired at the prior midpoint)"
                 )
             return diagnostics, point
         except RuntimeError as exc:
@@ -1514,7 +1536,7 @@ def _diagnostics_at_guard_clear_point(
 
 
 def _print_diagnostics_summary(diagnostics):
-    print("  likelihood diagnostics (prior midpoint):", flush=True)
+    _section("Likelihood diagnostics")
     for key in (
         "logL_total",
         "selection_correction_total",
@@ -1527,28 +1549,23 @@ def _print_diagnostics_summary(diagnostics):
         "Neff_combined",
     ):
         if key in diagnostics:
-            print(f"    {key}: {diagnostics[key]}", flush=True)
+            _row(key, diagnostics[key])
+    print("  │")
     if diagnostics.get("partition_mode") == "marginalize_exact":
-        count_summary = (
-            f"    expected_n_singletons: {diagnostics.get('expected_n_singletons')}  "
-            f"expected_n_pairs: {diagnostics.get('expected_n_pairs')}  "
-            f"map_n_pairs: {diagnostics.get('map_partition', {}).get('n_pairs')}  "
-            f"n_partitions: {diagnostics.get('n_partitions')}  "
-        )
+        _row("expected_n_singletons", diagnostics.get("expected_n_singletons"))
+        _row("expected_n_pairs",      diagnostics.get("expected_n_pairs"))
+        _row("map_n_pairs",           diagnostics.get("map_partition", {}).get("n_pairs"))
+        _row("n_partitions",          diagnostics.get("n_partitions"))
     else:
-        count_summary = (
-            f"    n_singletons: {diagnostics.get('n_singletons')}  "
-            f"n_pairs: {diagnostics.get('n_pairs')}  "
-        )
-    print(
-        count_summary + f"pair_batch_size: {diagnostics.get('pair_batch_size')}  "
-        f"y_nodes_pair: {diagnostics.get('y_nodes_pair')}  "
-        f"pe_max_per_pair: {diagnostics.get('pe_max_per_pair')}  "
-        f"pair_eval_shape: {diagnostics.get('approximate_pair_evaluation_shape')}  "
-        f"cluster_mode: {diagnostics['cluster_mode']}  "
-        f"wl_backend: {diagnostics['wl_backend']}",
-        flush=True,
-    )
+        _row("n_singletons", diagnostics.get("n_singletons"))
+        _row("n_pairs",      diagnostics.get("n_pairs"))
+    _row("pair_batch_size", diagnostics.get("pair_batch_size"))
+    _row("y_nodes_pair",    diagnostics.get("y_nodes_pair"))
+    _row("pe_max_per_pair", diagnostics.get("pe_max_per_pair"))
+    _row("pair_eval_shape", diagnostics.get("approximate_pair_evaluation_shape"))
+    _row("cluster_mode",    diagnostics["cluster_mode"])
+    _row("wl_backend",      diagnostics["wl_backend"])
+    _end()
 
 
 _TIME_DELTA_SHARPNESS = 0.02  # max(sigma_dt)/T0 below this -> delta collapse
@@ -2391,18 +2408,20 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
     settings["sel_batch_size"] = plan.sel_batch_size
     settings["block_size_resolution"] = plan.source
     _sel = plan.sel_batch_size if plan.sel_batch_size is not None else "single pass"
-    print(f"  [i] sel_batch_size [{plan.source}]: {_sel}", flush=True)
+    _ok(f"Block size [{plan.source}]: sel_batch_size={_sel}")
 
 
-def main(argv=None):
-    parser = build_parser()
-    opts = parser.parse_args(argv)
-    # Validate the JSON flags before the run directory is created so malformed
-    # JSON exits cleanly (code 1) rather than deep inside the run.
+def _validate_json_options(opts):
+    """Validate the JSON flags before the run directory is created so malformed
+    JSON exits cleanly (code 1) rather than deep inside the run."""
     parse_json_arg(opts.fixed_parameter_values, "fixed_parameter_values")
     parse_json_arg(opts.prior_overrides, "prior_overrides")
     parse_json_arg(opts.lens_prior_overrides, "lens_prior_overrides")
-    os.makedirs(opts.save_path, exist_ok=True)
+
+
+def _resolve_lensing_run_config(opts):
+    """Resolve sampler/barrier/guard config, validate the edge-mark and WL
+    flags, and derive the universe model from the WL backend."""
     if opts.sampler == "tinyns":
         build_tinyns_config(opts)
     resolve_redshift_prior_barrier(opts, flush=True)
@@ -2449,48 +2468,74 @@ def main(argv=None):
 
     opts.universe_model = _derive_universe_model(opts.wl_backend)
 
-    # Log the fully-resolved CLI options in argparse group order (no GW-population
-    # normalization grid on this stack, so the [Derived] rows are omitted).
-    _print_all_cli_options(parser, opts)
 
-    print(
-        f"=== darksirens_inference_lensing  [{opts.cluster_mode} | wl={opts.wl_backend} | wl_selection={opts.wl_selection}] ==="
-    )
-    print(
-        "  lensing hyperparameters: "
-        f"cluster_mode={opts.cluster_mode}, wl_backend={opts.wl_backend}, wl_selection={opts.wl_selection}, pair_marks={opts.pair_marks}, pair_tag_model={opts.pair_tag_model}, pair_tag_perturb_logit={opts.pair_tag_perturb_logit}, edge_mark_prior_keys={opts.edge_mark_prior_keys}, "
-        f"wl_a={opts.lensing_wl_a}, wl_b={opts.lensing_wl_b}, wl_table_path={opts.lensing_wl_table_path}, "
-        f"fix_lens_rate={opts.fix_lens_rate}, sl_tau_A={opts.sl_tau_A}, sl_tau_n={opts.sl_tau_n}",
-        flush=True,
-    )
+def _print_run_configuration(opts):
+    _section("Run Configuration")
+    _row("Cluster mode",      opts.cluster_mode)
+    _row("Universe model",    opts.universe_model)
+    _row("Partition mode",    opts.partition_mode)
+    _row("Population model",  opts.pop_model)
+    print("  │")
+    _row("WL backend",        opts.wl_backend)
+    _row("WL selection",      opts.wl_selection)
+    _row("WL a, b",           f"{opts.lensing_wl_a}, {opts.lensing_wl_b}")
+    if opts.lensing_wl_table_path:
+        _row("WL table",      opts.lensing_wl_table_path)
+    print("  │")
+    _row("Pair marks",        opts.pair_marks)
+    _row("Pair tag model",    f"{opts.pair_tag_model} "
+                              f"(constant={opts.pair_tag_constant}, "
+                              f"perturb_logit={opts.pair_tag_perturb_logit})")
+    if opts.edge_mark_prior_keys:
+        _row("Edge prior marks", opts.edge_mark_prior_keys)
+    _row("Singleton lensing", opts.singleton_lensing)
+    print("  │")
+    _row("Fix lens rate",     "yes" if opts.fix_lens_rate else "no")
+    _row("SIS tau A, n",      f"{opts.sl_tau_A}, {opts.sl_tau_n}")
+    _row("Sampler",           opts.sampler)
+    _row("Seed",              opts.seed)
+    _row("Output root",       opts.save_path)
+    _row("JAX backend",       jax.default_backend())
+    _end()
 
+
+def _run_and_report_preflight(opts):
+    """Run preflight, report it in a frame, and exit on failure (or after
+    writing the JSON when ``--preflight_only``)."""
+    _section("Preflight")
     preflight = run_lensing_preflight(opts)
-    print(
-        "preflight summary:",
-        json.dumps(preflight["summary"], sort_keys=True),
-        flush=True,
-    )
+    # One machine-greppable JSON summary line, kept verbatim inside the frame.
+    print("  │  " + json.dumps(preflight["summary"], sort_keys=True))
+    print("  │")
     for warning in preflight["warnings"]:
-        print(f"  [preflight warning] {warning}", flush=True)
+        _warn(warning)
     for error in preflight["errors"]:
-        print(f"  [preflight error] {error}", flush=True)
+        _err(error)
+    if preflight["ok"]:
+        _ok("Preflight passed.")
     if opts.preflight_only:
         out_path = opts.preflight_json or os.path.join(opts.save_path, "preflight.json")
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(preflight, f, indent=2, allow_nan=False)
             f.write("\n")
-        print(f"wrote preflight JSON: {out_path}", flush=True)
+        _ok(f"preflight JSON  →  {out_path}")
+        _end()
         raise SystemExit(0 if preflight["ok"] else 2)
+    _end()
     if not preflight["ok"]:
         raise SystemExit(
             "preflight failed; fix input errors or run --preflight_only true for JSON details"
         )
 
+
+def _prepare_run_dir(opts):
+    """Create the run directory, split the fixed-parameter JSON, and write the
+    pre-load settings.json.  Returns (run_dir, settings, fixed, base_fixed,
+    lens_fixed)."""
     run_dir = _make_run_dir(opts)
     # Keep settings serialization equivalent to: for k, v in vars(opts).items()
     settings = _jsonable_settings(opts)
-    labels = []
     fixed = {}
     base_fixed = {}
     lens_fixed = {}
@@ -2512,32 +2557,42 @@ def main(argv=None):
         )
         _write_json(os.path.join(run_dir, "settings.json"), settings)
         _write_failure(
-            run_dir, "build_parameter_space", exc, labels=labels, settings=settings
+            run_dir, "build_parameter_space", exc, labels=[], settings=settings
         )
         raise
     _write_json(os.path.join(run_dir, "settings.json"), settings)
+    return run_dir, settings, fixed, base_fixed, lens_fixed
 
-    print("loading data ...", flush=True)
+
+def _load_and_report_inputs(opts, run_dir, settings):
+    """Load the singleton/pair inputs inside a framed section and resolve the
+    selection block size (post-load).  Returns the ``inp`` bundle."""
+    _section("Loading data")
+    print("  │", flush=True)
     try:
         inp = load_inputs(opts)
     except Exception as exc:
-        _write_failure(run_dir, "load_inputs", exc, labels=labels, settings=settings)
+        _write_failure(run_dir, "load_inputs", exc, labels=[], settings=settings)
         raise
 
-    _resolve_lensing_block_sizes(opts, inp, settings)
-
     if inp.get("observed_catalog_heuristic"):
-        print(
-            "  [warning] unified observed mode inferred by deprecated event-count heuristic",
-            flush=True,
-        )
-    print(
-        f"  events: {inp['nEvents']}  ({inp['n_singletons']} singletons "
-        f"+ {inp['n_pairs']} pairs)  nsamp/event={inp['nsamp']}",
-        flush=True,
+        _warn("unified observed mode inferred by deprecated event-count heuristic")
+    _ok(
+        f"GW events:              {inp['nEvents']} "
+        f"({inp['n_singletons']} singletons + {inp['n_pairs']} pairs)"
     )
+    _ok(f"PE samples/event:       {inp['nsamp']}")
+    _ok(f"Selection injections:   {int(inp['Ndraw']):,} total generated")
+    _resolve_lensing_block_sizes(opts, inp, settings)
+    _end()
+    return inp
 
-    # --- build parameter space + prior + decoder using branch machinery ---
+
+def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fixed):
+    """Build the base+lens parameter space, the decoder, and the likelihood /
+    diagnostics closures.  Returns (labels, lower, upper, prior_transform,
+    loglike, diagnostics_fn, pop_params_fid, lens_overrides)."""
+    labels = []
     try:
         overrides = json.loads(opts.prior_overrides) if opts.prior_overrides else {}
         lens_overrides = (
@@ -2565,7 +2620,14 @@ def main(argv=None):
         lower = np.concatenate([base_lower, lens_lower])
         upper = np.concatenate([base_upper, lens_upper])
         prior_transform = make_prior_transform(lower, upper)
-        print(f"  free parameters ({len(labels)}): {labels}", flush=True)
+        _section("Parameter Space")
+        print(f"  │    {'Parameter':<24} {'Lower':>12}  {'Upper':>12}")
+        print(f"  │    {'─' * 24} {'─' * 12}  {'─' * 12}")
+        for _lbl, _lo, _hi in zip(labels, lower, upper):
+            print(f"  │    {_lbl:<24} {_lo:>12.4g}  {_hi:>12.4g}")
+        print(f"  │    {'─' * 24} {'─' * 12}  {'─' * 12}")
+        _ok(f"Parameter space built:  {len(labels)} free dimensions")
+        _end()
 
         # decoder carries the WL params so decode() returns a survey with wl_params set
         opts.prior_overrides = overrides  # decoder reads getattr(opts,'prior_overrides')
@@ -2590,8 +2652,17 @@ def main(argv=None):
     except Exception as exc:
         _write_failure(run_dir, "build_parameter_space", exc, labels=labels, settings=settings)
         raise
+    return (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
+            pop_params_fid, lens_overrides)
 
-    # smoke eval at the prior midpoint so JIT compile errors surface early
+
+def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
+                           loglike, diagnostics_fn, pop_params_fid):
+    """Smoke-eval at the prior midpoint so JIT compile errors surface early,
+    then evaluate and persist the factorization diagnostics.  Returns
+    (mid, diagnostics)."""
+    _section("Building likelihood")
+    print("  │  JIT compiling at the prior midpoint...", flush=True)
     mid = 0.5 * (lower + upper)
     t = time.time()
     try:
@@ -2600,9 +2671,8 @@ def main(argv=None):
         _write_failure(run_dir, "midpoint_loglike", exc, labels=labels, settings=settings)
         raise
     _write_json(os.path.join(run_dir, "midpoint.json"), {"labels": labels, "values": np.asarray(mid, dtype=float).tolist(), "loglike": v})
-    print(
-        f"  logL(prior midpoint) = {v:.3f}  [compile {time.time()-t:.1f}s]", flush=True
-    )
+    _ok(f"logL(prior midpoint) = {v:.3f}  [compile {time.time() - t:.1f}s]")
+    _end()
     try:
         fid_point = _fiducial_candidate_point(
             labels, mid, lower, upper, opts, pop_params_fid
@@ -2618,21 +2688,30 @@ def main(argv=None):
         _write_failure(run_dir, "midpoint_diagnostics", exc, labels=labels, settings=settings)
         raise
     _print_diagnostics_summary(diagnostics)
+    return mid, diagnostics
 
-    # --- sample ---
+
+def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
+                          prior_transform, loglike):
+    """Run the sampler inside a framed section and return its results."""
+    _section(f"Sampling  [{opts.sampler.upper()}]")
+    _row("ndim", len(labels))
+    if opts.sampler in ("tinyns", "dynesty"):
+        _row("live points", opts.nlive)
+        _row("ΔlogZ stop",  opts.dlogz)
+        _row("max samples", opts.max_samples)
+    if opts.sampler == "numpyro":
+        _row("warmup",  opts.nuts_warmup)
+        _row("samples", opts.nuts_samples)
+        _row("chains",  opts.nuts_chains)
+    _row("seed", opts.seed)
     if opts.sampler == "tinyns":
         cfg = opts.tinyns_resolved_config
-        print("  TinyNS resolved config:", flush=True)
         for key in TINYNS_RESOLVED_DISPLAY_KEYS:
-            print(f"    {key}: {cfg[key]}", flush=True)
-        print(f"    dlogz: {opts.dlogz}", flush=True)
-        print(f"    nlive: {opts.nlive}", flush=True)
-        print(f"    max_samples: {opts.max_samples}", flush=True)
-        print(
-            f"    redshift_prior_barrier: {opts.redshift_prior_barrier_resolved}",
-            flush=True,
-        )
-    print(f"sampling with {opts.sampler} ...", flush=True)
+            _row(f"  {key}", cfg[key])
+        _row("  redshift_prior_barrier", opts.redshift_prior_barrier_resolved)
+    print("  │", flush=True)
+    t_sample_start = datetime.datetime.now()
     try:
         results = run_sampler(
             method=opts.sampler,
@@ -2646,8 +2725,27 @@ def main(argv=None):
     except Exception as exc:
         _write_failure(run_dir, "sampler", exc, labels=labels, settings=settings)
         raise
+    wall_sampling = datetime.datetime.now() - t_sample_start
+    print("  │")
+    _ok(f"Sampling complete.  Wall time: {wall_sampling}")
+    if results.get("logZ") is not None:
+        _zerr = results.get("logZerr")
+        _ok(
+            f"log Z = {float(results['logZ']):.3f}"
+            + (f" ± {float(_zerr):.3f}" if _zerr is not None else "")
+        )
+    _end()
+    return results
 
-    # --- save ---
+
+def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
+                          labels, mid, fixed, base_fixed, lens_fixed,
+                          lens_overrides):
+    """Persist samples/results/settings/diagnostics and the best-effort corner
+    plot inside a framed section."""
+    _section("Saving outputs")
+    _row("Run directory", run_dir)
+    print("  │")
     try:
         samples = np.asarray(results["samples"])
         np.save(os.path.join(run_dir, "samples.npy"), samples)
@@ -2729,7 +2827,11 @@ def main(argv=None):
     except Exception as exc:
         _write_failure(run_dir, "save", exc, labels=labels, settings=settings)
         raise
-    print(f"saved {samples.shape[0]} samples -> {run_dir}", flush=True)
+    _ok(f"samples.npy    →  {os.path.join(run_dir, 'samples.npy')}")
+    _ok(f"results.hdf5   →  {os.path.join(run_dir, 'results.hdf5')}")
+    _ok(f"settings.json  →  {os.path.join(run_dir, 'settings.json')}")
+    _ok(f"diagnostics    →  {os.path.join(run_dir, 'diagnostics.json')} (+ .hdf5)")
+    _ok(f"Posterior samples:  {samples.shape[0]:,}")
 
     # corner (best-effort)
     try:
@@ -2737,9 +2839,46 @@ def main(argv=None):
 
         fig = make_production_corner(samples, labels)
         fig.savefig(os.path.join(run_dir, "corner.pdf"), bbox_inches="tight", dpi=200)
-        print("  corner.pdf written", flush=True)
+        _ok(f"corner.pdf     →  {os.path.join(run_dir, 'corner.pdf')}")
     except Exception as e:
-        print(f"  corner skipped: {e}", flush=True)
+        _warn(f"Corner plot skipped: {e}")
+    _end()
+
+
+def main(argv=None):
+    t_start = datetime.datetime.now()
+    parser = build_parser()
+    opts = parser.parse_args(argv)
+    _validate_json_options(opts)
+    os.makedirs(opts.save_path, exist_ok=True)
+
+    print()
+    _banner(f"DARK SIRENS LENSING  │  {t_start.strftime('%Y-%m-%d  %H:%M:%S')}")
+    print()
+
+    _resolve_lensing_run_config(opts)
+    # Log the fully-resolved CLI options in argparse group order (no GW-population
+    # normalization grid on this stack, so the [Derived] rows are omitted).
+    _print_all_cli_options(parser, opts)
+    _print_run_configuration(opts)
+    _run_and_report_preflight(opts)
+    run_dir, settings, fixed, base_fixed, lens_fixed = _prepare_run_dir(opts)
+    inp = _load_and_report_inputs(opts, run_dir, settings)
+    (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
+     pop_params_fid, lens_overrides) = _build_space_and_closures(
+        opts, inp, run_dir, settings, base_fixed, lens_fixed)
+    mid, diagnostics = _smoke_test_likelihood(
+        opts, run_dir, settings, labels, lower, upper, loglike,
+        diagnostics_fn, pop_params_fid)
+    results = _run_lensing_sampling(
+        opts, run_dir, settings, labels, lower, upper, prior_transform, loglike)
+    _save_lensing_outputs(
+        opts, run_dir, settings, inp, results, diagnostics, labels, mid,
+        fixed, base_fixed, lens_fixed, lens_overrides)
+
+    print()
+    _banner(f"DONE  │  total wall time {datetime.datetime.now() - t_start}")
+    print()
 
 
 if __name__ == "__main__":

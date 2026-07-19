@@ -145,15 +145,16 @@ def _print_parameter_table(
         block_fixed_sections.append(("survey", SURVEY_FID))
 
     _section("Parameter Space")
+    rule = f"  │    {'─' * 24} {'─' * 12}  {'─' * 12}  {'─' * 20}"
 
     _row("Sampled parameters", "")
-    _row("Parameter", f"{'Lower':>12}  {'Upper':>12}  Status", width=24)
-    _row("─" * 24,    f"{'─' * 12}  {'─' * 12}  {'─' * 20}", width=24)
+    print(f"  │    {'Parameter':<24} {'Lower':>12}  {'Upper':>12}  Status")
+    print(rule)
     for label, lo, hi in zip(labels, lower_bound, upper_bound):
         note = "← overridden" if label in prior_overrides else ""
         print(f"  │    {label:<24} {lo:>12.4g}  {hi:>12.4g}  {note}")
 
-    _row("─" * 24, f"{'─' * 12}  {'─' * 12}  {'─' * 20}", width=24)
+    print(rule)
     _row("Individually fixed parameters", "")
     if fixed_parameter_values:
         for label, value in fixed_parameter_values.items():
@@ -169,7 +170,7 @@ def _print_parameter_table(
     else:
         print(f"  │    {'(none)':<24}")
 
-    _row("─" * 24, f"{'─' * 12}  {'─' * 12}  {'─' * 20}", width=24)
+    print(rule)
     _row("Block-fixed parameters", "")
     if block_fixed_sections:
         for block_name, fiducials in block_fixed_sections:
@@ -182,13 +183,13 @@ def _print_parameter_table(
     else:
         print(f"  │    {'(none)':<24}")
 
-    _row("─" * 24, f"{'─' * 12}  {'─' * 12}  {'─' * 20}", width=24)
+    print(rule)
 
     n_free = sum(1 for lo, hi in zip(lower_bound, upper_bound) if lo != hi)
     n_fix_ind   = len(fixed_parameter_values)
     n_fix_block = ((len(COSMO_FID) if fix_cosmology else len(DE_FID) if fix_de else 0)
                    + (len(pop_labels_all) if fix_population else 0)
-                   + (6 if fix_survey else 0))
+                   + (len(SURVEY_FID) if fix_survey else 0))
     _row("Free (sampled)",      n_free)
     if n_fix_ind:   _row("Fixed individually", n_fix_ind)
     if n_fix_block: _row("Fixed (block)",      n_fix_block)

@@ -34,6 +34,7 @@ from typing import NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
+from darksirens.cli.common import _banner, _section, _row, _end, _ok, _warn
 from darksirens.redshift import zgrid
 from darksirens.catalogs.io import load_survey
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
@@ -418,7 +419,7 @@ def _build_completion_gp3d(
 
     # Empty catalog: nothing to solve, Q == 1 everywhere.
     if n_occ == 0:
-        print("    [!] no occupied pixels — writing Q = 1 (logQ = 0) everywhere.")
+        _warn("no occupied pixels — writing Q = 1 (logQ = 0) everywhere.")
         logq_map = np.zeros((n_pix, n_grid), dtype=float)
         logq_members = (np.zeros((int(n_members), n_pix, n_grid), dtype=float)
                         if n_members and n_members > 0 else None)
@@ -447,7 +448,7 @@ def _build_completion_gp3d(
     ), dtype=float)
     if not np.all(np.isfinite(logq_map)):
         n_bad = int(np.sum(~np.isfinite(logq_map)))
-        print(f"    [!] {n_bad} non-finite logQ entries -> set to 0 (Q = 1).")
+        _warn(f"{n_bad} non-finite logQ entries -> set to 0 (Q = 1).")
         logq_map = np.where(np.isfinite(logq_map), logq_map, 0.0)
 
     sig2 = np.asarray(mp["sigma2_vox"], dtype=float)
@@ -547,12 +548,19 @@ def main(argv=None):
                         "catalog is global-HEALPix-pixel indexed (default).")
     opts = p.parse_args(argv)
 
+    print()
+    _banner("LSS LOGNORMAL COMPLETION")
+    print()
+
     indexing = opts.indexing
     if opts.mode == "gp3d" and indexing != "global":
-        print("    [!] gp3d builds a global all-pixel table; forcing indexing='global'.")
+        _warn("gp3d builds a global all-pixel table; forcing indexing='global'.")
         indexing = "global"
 
-    print(f"[*] Building LSS lognormal completion ({opts.mode}) from {opts.catalog}")
+    _section(f"Building  [{opts.mode}]")
+    _row("Catalog", opts.catalog)
+    _row("Members", opts.n_members)
+    _row("Seed", opts.seed)
     logq_map, logq_members, diagnostics = build_completion(
         opts.catalog, mode=opts.mode, n_members=opts.n_members, seed=opts.seed,
         prior_strength=opts.prior_strength, maxiter=opts.maxiter,
@@ -560,25 +568,28 @@ def main(argv=None):
         lss_corr_length_ang=opts.lss_corr_length_ang,
         log10n0=opts.log10n0, delta=opts.delta,
     )
-    print(f"    MAP logq_map shape {logq_map.shape}; "
-          f"members {'none' if logq_members is None else logq_members.shape}")
+    _ok(f"MAP logq_map shape {logq_map.shape}; "
+        f"members {'none' if logq_members is None else logq_members.shape}")
     if opts.mode == "gp3d":
-        print(f"    gp3d: converged={diagnostics.get('converged')} "
-              f"n_iter={diagnostics.get('n_iter')} grad_inf={diagnostics.get('grad_inf'):.2e} "
-              f"ls_z={diagnostics.get('ls_z_zeta'):.4f} z_ref={diagnostics.get('z_ref'):.3f}")
+        _ok(f"gp3d: converged={diagnostics.get('converged')} "
+            f"n_iter={diagnostics.get('n_iter')} grad_inf={diagnostics.get('grad_inf'):.2e} "
+            f"ls_z={diagnostics.get('ls_z_zeta'):.4f} z_ref={diagnostics.get('z_ref'):.3f}")
     elif opts.mode == "radial":
         n_conv = diagnostics.get("n_converged")
         n_occ = diagnostics.get("n_occupied")
         if n_conv is not None and n_occ:
             frac = n_conv / n_occ if n_occ else float("nan")
-            flag = "" if n_conv == n_occ else "  [!] some pixel solves did not converge"
-            print(f"    radial: {n_conv}/{n_occ} occupied-pixel solves converged "
-                  f"({frac:.1%}){flag}")
+            line = f"radial: {n_conv}/{n_occ} occupied-pixel solves converged ({frac:.1%})"
+            if n_conv == n_occ:
+                _ok(line)
+            else:
+                _warn(line + " — some pixel solves did not converge")
     save_lss_completion_hdf5(
         opts.out, logq_map=logq_map, logq_members=logq_members,
         zgrid=np.asarray(zgrid), indexing=indexing, metadata=diagnostics,
     )
-    print(f"[*] Wrote {opts.out}")
+    _ok(f"completion  →  {opts.out}")
+    _end()
 
 
 if __name__ == "__main__":

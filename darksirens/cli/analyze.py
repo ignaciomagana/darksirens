@@ -34,6 +34,7 @@ import matplotlib.colors
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from darksirens.cli.common import _banner, _section, _row, _end, _ok, _warn
 from darksirens.gw.populations import pop_model_parser
 from darksirens.inference.pop_extractor import make_pop_extractor
 from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
@@ -409,7 +410,7 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
     slab_pts = (grid_chunk if grid_chunk is not None else n_outer) * nz * nchi
     est_peak_gb = batch_size * slab_pts * 8 * (n_nodes + 16) / 1e9
     print(
-        f"    [ppd] grid={grid_points:,} pts  GP_nodes={n_nodes}  "
+        f"  │  [ppd] grid={grid_points:,} pts  GP_nodes={n_nodes}  "
         f"mem={max_mem_bytes / 1e9:.1f}GB ({mem_src})  batch={batch_size}  "
         f"slab_rows={grid_chunk if grid_chunk is not None else 'full'}  "
         f"~peak={est_peak_gb:.1f}GB"
@@ -574,11 +575,12 @@ def plot_model_evidences(labels, log10Zs, log10Zerrs, figsize=(10, 6)):
 
 
 def print_bayes_factors(labels, log10Zs):
-    print("\n=== Pairwise Bayes factors (log10) ===")
+    """Print pairwise Bayes-factor rows (framed by the caller's section)."""
     for i in range(len(labels)):
         for j in range(i + 1, len(labels)):
             if log10Zs[i] is not None and log10Zs[j] is not None:
-                print(f"{labels[i]} vs {labels[j]}:  log10 BF = {log10Zs[i] - log10Zs[j]:.3f}")
+                _row(f"{labels[i]} vs {labels[j]}",
+                     f"log10 BF = {log10Zs[i] - log10Zs[j]:.3f}", width=40)
 
 
 def _should_plot_bayes_factor_matrix(labels, log10Zs):
@@ -646,7 +648,7 @@ def overlay_observed_events(ax, settings):
                        label="observed (det-frame $m_1$)" if k == 0 else None)
         ax.legend(fontsize=16, frameon=False)
     except Exception as exc:  # noqa: BLE001 — overlay is best-effort
-        print(f"  [info] event overlay skipped: {exc}")
+        _warn(f"event overlay skipped: {exc}")
 
 
 # ------------------------------------------------------------
@@ -690,6 +692,10 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     out = lambda name: os.path.join(args.outdir, name)
 
+    print()
+    _banner("DARK SIRENS ANALYZE")
+    print()
+
     mgrid = np.linspace(args.mmin, args.mmax, args.nm)
     qgrid = np.linspace(0.01, 1.0, args.nq)
     zgrid = np.linspace(0.0, args.zmax, args.nz)
@@ -702,7 +708,7 @@ def main():
     first_settings = None
 
     for run_dir in args.run_dirs:
-        print(f"\n=== Processing model: {run_dir} ===")
+        _section(f"Model  ·  {run_dir}")
         settings, samples, logZ, logZerr = load_run(run_dir)
         first_settings = first_settings or settings
         run_labels = _labels_of(settings)
@@ -770,7 +776,7 @@ def main():
                     amp = summ["amplitude_quantiles"]
                     d = summ["mean_direction_deg"]
                     print(
-                        f"  sky dipole |d| (5/50/95%) = "
+                        f"  │  sky dipole |d| (5/50/95%) = "
                         f"{amp[0.05]:.3f}/{amp[0.5]:.3f}/{amp[0.95]:.3f}; "
                         f"dir (ra,dec)deg = ({d['ra']:.1f}, {d['dec']:.1f}); "
                         f"P(|d|<0.05) = {summ['P_amp_lt_0.05']:.2f}"
@@ -793,7 +799,7 @@ def main():
                 elif sky_model in ("multipole", "multipole_l3"):
                     summ = summarize_multipole_posterior(samples, run_labels, sky_model)
                     cl = summ["C_ell_quantiles"]
-                    print("  sky multipole C_l (median): " + ", ".join(
+                    print("  │  sky multipole C_l (median): " + ", ".join(
                         f"l={l}:{cl[l][0.5]:.3g}" for l in sorted(cl)))
                     fig = plot_multipole_cl(samples, run_labels, sky_model)
                     fig.savefig(out(f"sky_multipole_cl_{tag}.pdf"),
@@ -804,7 +810,7 @@ def main():
                     fig.savefig(out(f"sky_gp_map_{tag}.pdf"), bbox_inches="tight", dpi=300)
                     plt.close(fig)
             except (KeyError, ImportError) as exc:
-                print(f"  [sky] skipped sky plot for {tag}: {exc}")
+                _warn(f"skipped sky plot for {tag}: {exc}")
 
         # Multitracer host-fraction summaries — derive the per-catalog mixture
         # weights w_1..w_K from the sampled sticks fcat_2..fcat_K with the
@@ -826,12 +832,12 @@ def main():
             qs = np.percentile(weights, [5.0, 50.0, 95.0], axis=0)
             name = "host fraction" if is_field else "weight"
             for k in range(n_catalogs):
-                print(f"  catalog {name} w_{k + 1} (5/50/95%) = "
+                print(f"  │  catalog {name} w_{k + 1} (5/50/95%) = "
                       f"{qs[0, k]:.3f}/{qs[1, k]:.3f}/{qs[2, k]:.3f}")
             if not is_field:
-                print("  [multitracer] NOTE: this run used the conditional "
-                      "normalizer, so w_k is a per-pixel z-shape preference "
-                      "weight, NOT a host fraction (field convention).")
+                _warn("this run used the conditional normalizer, so w_k is a "
+                      "per-pixel z-shape preference weight, NOT a host "
+                      "fraction (field convention).")
             fig = plot_catalog_weight_posteriors(weights, is_field=is_field)
             fig.savefig(out(f"catalog_weights_{tag}.pdf"),
                         bbox_inches="tight", dpi=300)
@@ -839,6 +845,8 @@ def main():
             np.save(out(f"catalog_weights_{tag}.npy"), weights)
 
         labels.append(settings.get("model_name", os.path.basename(os.path.normpath(run_dir))))
+        _ok(f"Posterior predictive done:  {np.asarray(samples).shape[0]:,} samples")
+        _end()
         del p_m1, p_m2, p_q, p_z, p_chi, p_m1m2
         jax.clear_caches()
 
@@ -869,7 +877,8 @@ def main():
         fig.savefig(out("cosmology_posterior.pdf"), bbox_inches="tight", dpi=300)
         plt.close(fig)
     else:
-        print("\nCosmology was fixed in all runs; skipping cosmology posterior plot.")
+        print()
+        _warn("Cosmology was fixed in all runs; skipping cosmology posterior plot.")
 
     # ---- redshift distribution / rate ----
     fig = plot_1d_spectrum(zgrid, rate_per_model, labels, r"$z$",
@@ -880,21 +889,37 @@ def main():
 
     # ---- model comparison ----
     if any(z is not None for z in logZs):
-        fig = plot_model_evidences(labels, [0.0 if z is None else z for z in logZs], logZerrs)
+        # Only runs with an evidence estimate enter the bar chart: coercing a
+        # missing logZ to 0.0 would plot that run as the (fake) best model,
+        # since real log10 Z values are large and negative.
+        with_z = [(lbl, z, ze) for lbl, z, ze in zip(labels, logZs, logZerrs)
+                  if z is not None]
+        fig = plot_model_evidences([lbl for lbl, _, _ in with_z],
+                                   [z for _, z, _ in with_z],
+                                   [ze for _, _, ze in with_z])
         fig.savefig(out("model_evidences.pdf"), bbox_inches="tight", dpi=300)
         plt.close(fig)
-        print("\n=== Model evidences (log10 Z) ===")
+        _section("Model comparison")
+        _row("Model", "log10 Z", width=40)
         for label, z, ze in zip(labels, logZs, logZerrs):
-            print(f"{label:24s} log10Z = {z} ± {ze}")
+            _row(label,
+                 "no evidence estimate" if z is None else f"{z:.3f} ± "
+                 + (f"{ze:.3f}" if ze is not None else "n/a"),
+                 width=40)
+        print("  │")
         print_bayes_factors(labels, logZs)
+        _end()
         if _should_plot_bayes_factor_matrix(labels, logZs):
             fig = plot_bayes_factor_matrix(labels, logZs, logZerrs)
             fig.savefig(out("bayes_factors.pdf"), bbox_inches="tight", dpi=300)
             plt.close(fig)
     else:
-        print("\nNo evidence information found in any run; skipping model comparison.")
+        print()
+        _warn("No evidence information found in any run; skipping model comparison.")
 
-    print(f"\nFigures written to {os.path.abspath(args.outdir)}")
+    print()
+    _ok(f"Figures written to {os.path.abspath(args.outdir)}")
+    print()
 
 
 if __name__ == "__main__":
