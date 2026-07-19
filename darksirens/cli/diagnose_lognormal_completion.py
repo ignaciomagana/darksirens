@@ -138,7 +138,8 @@ def main(argv=None):
     out = os.path.join(opts.outdir, f"lss_completion_pixel{row}.pdf")
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
-    print(f"[*] Wrote {out}")
+    from darksirens.cli.common import _ok
+    _ok(f"lss_completion_pixel{row}.pdf  →  {out}")
 
 
 if __name__ == "__main__":

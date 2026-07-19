@@ -379,7 +379,8 @@ def main() -> None:
         ):
             f.create_dataset(name, data=arr.reshape(-1))
 
-    print(
+    from darksirens.cli.common import _ok
+    _ok(
         f"Wrote {out}: {nobs} events x {nsamp} samples "
         f"(m1det∈[{m1det_min:.1f},{m1det_max:.1f}], dL prior ∝ dL²)."
     )

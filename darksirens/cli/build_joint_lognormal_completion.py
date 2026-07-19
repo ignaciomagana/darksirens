@@ -47,6 +47,7 @@ import uuid
 
 import numpy as np
 
+from darksirens.cli.common import _banner, _section, _row, _end, _ok, _warn
 from darksirens.redshift import zgrid
 from darksirens.redshift.lognormal_completion import (
     lowrank_inducing_nodes,
@@ -166,7 +167,7 @@ def build_joint_completion(
     # still sharing the id (mirrors the single-survey empty shortcut). No shared
     # field is drawn, so joint_member_xi_sha256 is omitted.
     if total_occ == 0:
-        print("    [!] no occupied pixels in ANY catalog — writing Q = 1 "
+        _warn("no occupied pixels in ANY catalog — writing Q = 1 "
               "(logQ = 0) everywhere for all surveys.")
         results = []
         for k in range(K):
@@ -344,10 +345,13 @@ def main(argv=None):
             f"({len(opts.catalogs)}) in length; one output per input catalog."
         )
 
-    print(f"[*] Building JOINT LSS lognormal completion (gp3d) over "
-          f"{len(opts.catalogs)} catalogs:")
+    print()
+    _banner("JOINT LSS LOGNORMAL COMPLETION")
+    print()
+
+    _section(f"Building  [gp3d, {len(opts.catalogs)} catalogs]")
     for c, o in zip(opts.catalogs, opts.outs):
-        print(f"      {c}  ->  {o}")
+        _row(c, f"→  {o}", width=0)
     results = build_joint_completion(
         opts.catalogs, opts.outs,
         n_members=opts.n_members, seed=opts.seed,
@@ -358,16 +362,17 @@ def main(argv=None):
     )
     rid = results[0]["realization_set_id"] if results else None
     d0 = results[0]["diagnostics"] if results else {}
-    print(f"    shared realization_set_id={rid}")
+    _ok(f"shared realization_set_id={rid}")
     if "converged" in d0:
-        print(f"    joint gp3d: converged={d0.get('converged')} "
-              f"n_iter={d0.get('n_iter')} grad_inf={d0.get('grad_inf'):.2e} "
-              f"ls_z={d0.get('ls_z_zeta'):.4f} z_ref={d0.get('z_ref'):.3f}")
+        _ok(f"joint gp3d: converged={d0.get('converged')} "
+            f"n_iter={d0.get('n_iter')} grad_inf={d0.get('grad_inf'):.2e} "
+            f"ls_z={d0.get('ls_z_zeta'):.4f} z_ref={d0.get('z_ref'):.3f}")
     for r in results:
         m = r["logq_members"]
-        print(f"    wrote {r['out_path']}: logq_map {r['logq_map'].shape}; "
-              f"members {'none' if m is None else m.shape}; "
-              f"n_occupied={r['n_occupied']}")
+        _ok(f"{r['out_path']}: logq_map {r['logq_map'].shape}; "
+            f"members {'none' if m is None else m.shape}; "
+            f"n_occupied={r['n_occupied']}")
+    _end()
     return results
 
 

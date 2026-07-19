@@ -1,4 +1,3 @@
-import sys
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -7,6 +6,8 @@ import h5py
 import healpy as hp
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+
+from darksirens.cli.common import _banner, _section, _row, _end, _ok, _fatal
 
 #: Optional per-galaxy "mark" columns -> EMCatalog mark dataset name.  Read from
 #: the raw catalog if present (for the marked-host model); padded like zgals.
@@ -19,8 +20,8 @@ MARK_INPUT_COLUMNS = {
 
 def plot_diagnostics(counts, zs, npix, save_dir, nside):
     """Generates and saves diagnostic plots for the survey data."""
-    print("Generating diagnostic plots...")
-    
+    _section("Diagnostic plots")
+
     # 1. Skymap of Galaxies
     plt.figure(figsize=(10, 6))
     # Replace 0s with NaN so empty pixels show up as gray instead of the lowest color map value
@@ -51,8 +52,12 @@ def plot_diagnostics(counts, zs, npix, save_dir, nside):
     plt.grid(axis='y', alpha=0.3)
     plt.savefig(save_dir / f'pixel_occupancy_distribution_nside_{nside}.png', dpi=300)
     plt.close()
-    
-    print(f"Plots saved to {save_dir}")
+
+    _ok(f"skymap_density_nside_{nside}.png")
+    _ok(f"redshift_distribution_nside_{nside}.png")
+    _ok(f"pixel_occupancy_distribution_nside_{nside}.png")
+    _row("Directory", save_dir)
+    _end()
 
 def main(argv=None):
     optp = ArgumentParser(description="Process galaxy survey data into HEALPix pixels.")
@@ -78,15 +83,19 @@ def main(argv=None):
     save_dir = Path(opts.save_path)
     nside = opts.nside
 
+    print()
+    _banner("DARK SIRENS PIXELATE")
+    print()
+
     # 1. Validation
     if not survey_file.is_file():
-        print(f"ERROR: Survey file not found at {survey_file}")
-        sys.exit(1)
-    
+        _fatal(f"Survey file not found at {survey_file}")
+
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # 2. Load Data
-    print(f"Loading data from {survey_file}...")
+    _section("Loading survey")
+    _row("Input", survey_file)
     with h5py.File(survey_file, 'r') as f:
         ras = np.array(f['TARGET_RA']) * np.pi / 180
         decs = np.array(f['TARGET_DEC']) * np.pi / 180
@@ -98,23 +107,26 @@ def main(argv=None):
             for ds, col in MARK_INPUT_COLUMNS.items() if col in f
         }
     if marks_in:
-        print(f"Found mark columns: {sorted(marks_in)}")
+        _ok(f"Mark columns:           {', '.join(sorted(marks_in))}")
 
     ngals_total = len(ras)
-    print(f"Loaded {ngals_total} galaxies.")
+    _ok(f"Galaxies loaded:        {ngals_total:,}")
+    _end()
 
     # 3. Calculate HEALPix Indices
+    _section("Pixelating")
     npix = hp.nside2npix(nside)
+    _row("NSIDE", nside)
+    _row("Pixels", f"{npix:,}")
     ind = hp.ang2pix(nside, np.pi/2 - decs, ras)
 
     # Calculate counts per pixel instantly
     counts = np.bincount(ind, minlength=npix)
     maxgals = counts.max()
-    print(f"Maximum galaxies in a single pixel: {maxgals}")
+    _ok(f"Max galaxies/pixel:     {maxgals:,}")
 
     # 4. Pre-allocate dense arrays with padding values
     # Padding defaults: z=100, dz=1, w=0
-    print("Pre-allocating arrays...")
     cats_out = np.full((npix, maxgals), 100.0, dtype=zs.dtype)
     dzcats_out = np.full((npix, maxgals), 1.0, dtype=ddzs.dtype)
     dwcats_out = np.full((npix, maxgals), 0.0, dtype=wts.dtype)
@@ -122,7 +134,6 @@ def main(argv=None):
     marks_out = {ds: np.full((npix, maxgals), 0.0, dtype=float) for ds in marks_in}
 
     # 5. Fast Vectorized Grouping
-    print("Grouping galaxies into pixels...")
     sort_idx = np.argsort(ind)
     sorted_ind = ind[sort_idx]
 
@@ -147,9 +158,11 @@ def main(argv=None):
         for ds in marks_out:
             marks_out[ds][pix, :count] = sorted_marks[ds][start:end]
 
+    _end()
+
     # 6. Save outputs
     out_file = save_dir / f'catalog_pixelated_nside_{nside}.h5'
-    print(f"Saving to {out_file}...")
+    _section("Saving outputs")
     with h5py.File(out_file, 'w') as f:
         f.attrs['nside'] = nside
         if opts.z_depth is not None:
@@ -160,16 +173,20 @@ def main(argv=None):
         f.create_dataset('ngals', data=counts, compression='gzip', shuffle=True)
         for ds, arr in marks_out.items():
             f.create_dataset(ds, data=arr, compression='gzip', shuffle=True)
+    _ok(f"catalog  →  {out_file}")
     if marks_out:
-        print(f"Wrote mark datasets: {sorted(marks_out)}")
+        _ok(f"mark datasets: {', '.join(sorted(marks_out))}")
     if opts.z_depth is not None:
-        print(f"Wrote survey z_depth attribute: {opts.z_depth}")
-
-    print("Data processing complete!")
+        _ok(f"survey z_depth attribute: {opts.z_depth}")
+    _end()
 
     # 7. Plotting (Optional)
     if opts.add_plots:
         plot_diagnostics(counts, zs, npix, save_dir, nside)
+
+    print()
+    _banner("DONE")
+    print()
 
 if __name__ == "__main__":
     main()
