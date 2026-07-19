@@ -63,7 +63,7 @@ def _banner(text: str):
     left = max(0, (W - len(text)) // 2)
     print(rule)
     print(f"{' ' * left}{_c(text, _BOLD, _ACCENT)}")
-    print(rule)
+    print(rule, flush=True)
 
 def _section(title: str):
     print()
@@ -74,11 +74,13 @@ def _row(label: str, value, width: int = 26):
     print(f"  │  {label:<{width}} {value}")
 
 def _end():
-    print("  " + _c("╰" + "─" * (W - 3) + "╯", _DIM))
+    # Flush at every frame close so redirected SLURM .out logs stay live
+    # section-by-section on long runs (the glyph helpers flush line-by-line).
+    print("  " + _c("╰" + "─" * (W - 3) + "╯", _DIM), flush=True)
 
-def _ok(msg: str):   print(f"  {_c('✓', _GREEN)}  {msg}")
-def _warn(msg: str): print(f"  {_c('⚠', _YELLOW)}  {msg}")
-def _err(msg: str):  print(f"  {_c('✗', _RED, _BOLD)}  {msg}")
+def _ok(msg: str):   print(f"  {_c('✓', _GREEN)}  {msg}", flush=True)
+def _warn(msg: str): print(f"  {_c('⚠', _YELLOW)}  {msg}", flush=True)
+def _err(msg: str):  print(f"  {_c('✗', _RED, _BOLD)}  {msg}", flush=True)
 
 def _fatal(msg: str):
     print()
