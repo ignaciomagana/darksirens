@@ -2411,21 +2411,17 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
     _ok(f"Block size [{plan.source}]: sel_batch_size={_sel}")
 
 
-def main(argv=None):
-    t_start = datetime.datetime.now()
-    parser = build_parser()
-    opts = parser.parse_args(argv)
-    # Validate the JSON flags before the run directory is created so malformed
-    # JSON exits cleanly (code 1) rather than deep inside the run.
+def _validate_json_options(opts):
+    """Validate the JSON flags before the run directory is created so malformed
+    JSON exits cleanly (code 1) rather than deep inside the run."""
     parse_json_arg(opts.fixed_parameter_values, "fixed_parameter_values")
     parse_json_arg(opts.prior_overrides, "prior_overrides")
     parse_json_arg(opts.lens_prior_overrides, "lens_prior_overrides")
-    os.makedirs(opts.save_path, exist_ok=True)
 
-    print()
-    _banner(f"DARK SIRENS LENSING  │  {t_start.strftime('%Y-%m-%d  %H:%M:%S')}")
-    print()
 
+def _resolve_lensing_run_config(opts):
+    """Resolve sampler/barrier/guard config, validate the edge-mark and WL
+    flags, and derive the universe model from the WL backend."""
     if opts.sampler == "tinyns":
         build_tinyns_config(opts)
     resolve_redshift_prior_barrier(opts, flush=True)
@@ -2472,10 +2468,8 @@ def main(argv=None):
 
     opts.universe_model = _derive_universe_model(opts.wl_backend)
 
-    # Log the fully-resolved CLI options in argparse group order (no GW-population
-    # normalization grid on this stack, so the [Derived] rows are omitted).
-    _print_all_cli_options(parser, opts)
 
+def _print_run_configuration(opts):
     _section("Run Configuration")
     _row("Cluster mode",      opts.cluster_mode)
     _row("Universe model",    opts.universe_model)
@@ -2504,6 +2498,10 @@ def main(argv=None):
     _row("JAX backend",       jax.default_backend())
     _end()
 
+
+def _run_and_report_preflight(opts):
+    """Run preflight, report it in a frame, and exit on failure (or after
+    writing the JSON when ``--preflight_only``)."""
     _section("Preflight")
     preflight = run_lensing_preflight(opts)
     # One machine-greppable JSON summary line, kept verbatim inside the frame.
@@ -2530,10 +2528,14 @@ def main(argv=None):
             "preflight failed; fix input errors or run --preflight_only true for JSON details"
         )
 
+
+def _prepare_run_dir(opts):
+    """Create the run directory, split the fixed-parameter JSON, and write the
+    pre-load settings.json.  Returns (run_dir, settings, fixed, base_fixed,
+    lens_fixed)."""
     run_dir = _make_run_dir(opts)
     # Keep settings serialization equivalent to: for k, v in vars(opts).items()
     settings = _jsonable_settings(opts)
-    labels = []
     fixed = {}
     base_fixed = {}
     lens_fixed = {}
@@ -2555,17 +2557,22 @@ def main(argv=None):
         )
         _write_json(os.path.join(run_dir, "settings.json"), settings)
         _write_failure(
-            run_dir, "build_parameter_space", exc, labels=labels, settings=settings
+            run_dir, "build_parameter_space", exc, labels=[], settings=settings
         )
         raise
     _write_json(os.path.join(run_dir, "settings.json"), settings)
+    return run_dir, settings, fixed, base_fixed, lens_fixed
 
+
+def _load_and_report_inputs(opts, run_dir, settings):
+    """Load the singleton/pair inputs inside a framed section and resolve the
+    selection block size (post-load).  Returns the ``inp`` bundle."""
     _section("Loading data")
     print("  │", flush=True)
     try:
         inp = load_inputs(opts)
     except Exception as exc:
-        _write_failure(run_dir, "load_inputs", exc, labels=labels, settings=settings)
+        _write_failure(run_dir, "load_inputs", exc, labels=[], settings=settings)
         raise
 
     if inp.get("observed_catalog_heuristic"):
@@ -2578,8 +2585,14 @@ def main(argv=None):
     _ok(f"Selection injections:   {int(inp['Ndraw']):,} total generated")
     _resolve_lensing_block_sizes(opts, inp, settings)
     _end()
+    return inp
 
-    # --- build parameter space + prior + decoder using branch machinery ---
+
+def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fixed):
+    """Build the base+lens parameter space, the decoder, and the likelihood /
+    diagnostics closures.  Returns (labels, lower, upper, prior_transform,
+    loglike, diagnostics_fn, pop_params_fid, lens_overrides)."""
+    labels = []
     try:
         overrides = json.loads(opts.prior_overrides) if opts.prior_overrides else {}
         lens_overrides = (
@@ -2639,8 +2652,15 @@ def main(argv=None):
     except Exception as exc:
         _write_failure(run_dir, "build_parameter_space", exc, labels=labels, settings=settings)
         raise
+    return (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
+            pop_params_fid, lens_overrides)
 
-    # smoke eval at the prior midpoint so JIT compile errors surface early
+
+def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
+                           loglike, diagnostics_fn, pop_params_fid):
+    """Smoke-eval at the prior midpoint so JIT compile errors surface early,
+    then evaluate and persist the factorization diagnostics.  Returns
+    (mid, diagnostics)."""
     _section("Building likelihood")
     print("  │  JIT compiling at the prior midpoint...", flush=True)
     mid = 0.5 * (lower + upper)
@@ -2668,8 +2688,12 @@ def main(argv=None):
         _write_failure(run_dir, "midpoint_diagnostics", exc, labels=labels, settings=settings)
         raise
     _print_diagnostics_summary(diagnostics)
+    return mid, diagnostics
 
-    # --- sample ---
+
+def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
+                          prior_transform, loglike):
+    """Run the sampler inside a framed section and return its results."""
     _section(f"Sampling  [{opts.sampler.upper()}]")
     _row("ndim", len(labels))
     if opts.sampler in ("tinyns", "dynesty"):
@@ -2711,8 +2735,14 @@ def main(argv=None):
             + (f" ± {float(_zerr):.3f}" if _zerr is not None else "")
         )
     _end()
+    return results
 
-    # --- save ---
+
+def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
+                          labels, mid, fixed, base_fixed, lens_fixed,
+                          lens_overrides):
+    """Persist samples/results/settings/diagnostics and the best-effort corner
+    plot inside a framed section."""
     _section("Saving outputs")
     _row("Run directory", run_dir)
     print("  │")
@@ -2813,6 +2843,38 @@ def main(argv=None):
     except Exception as e:
         _warn(f"Corner plot skipped: {e}")
     _end()
+
+
+def main(argv=None):
+    t_start = datetime.datetime.now()
+    parser = build_parser()
+    opts = parser.parse_args(argv)
+    _validate_json_options(opts)
+    os.makedirs(opts.save_path, exist_ok=True)
+
+    print()
+    _banner(f"DARK SIRENS LENSING  │  {t_start.strftime('%Y-%m-%d  %H:%M:%S')}")
+    print()
+
+    _resolve_lensing_run_config(opts)
+    # Log the fully-resolved CLI options in argparse group order (no GW-population
+    # normalization grid on this stack, so the [Derived] rows are omitted).
+    _print_all_cli_options(parser, opts)
+    _print_run_configuration(opts)
+    _run_and_report_preflight(opts)
+    run_dir, settings, fixed, base_fixed, lens_fixed = _prepare_run_dir(opts)
+    inp = _load_and_report_inputs(opts, run_dir, settings)
+    (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
+     pop_params_fid, lens_overrides) = _build_space_and_closures(
+        opts, inp, run_dir, settings, base_fixed, lens_fixed)
+    mid, diagnostics = _smoke_test_likelihood(
+        opts, run_dir, settings, labels, lower, upper, loglike,
+        diagnostics_fn, pop_params_fid)
+    results = _run_lensing_sampling(
+        opts, run_dir, settings, labels, lower, upper, prior_transform, loglike)
+    _save_lensing_outputs(
+        opts, run_dir, settings, inp, results, diagnostics, labels, mid,
+        fixed, base_fixed, lens_fixed, lens_overrides)
 
     print()
     _banner(f"DONE  │  total wall time {datetime.datetime.now() - t_start}")
