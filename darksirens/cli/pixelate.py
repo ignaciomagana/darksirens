@@ -69,11 +69,13 @@ def main(argv=None):
         "--z_depth", type=float, default=None,
         help=(
             "Optional survey redshift depth: the redshift beyond which this "
-            "survey does not attempt to detect galaxies. Written as "
-            "f.attrs['z_depth'] and read by darksirens_inference to bound the "
-            "completion missing-galaxy budget to z <= z_depth instead of the "
-            "full [0, DARKSIRENS_ZMAX] grid. Omit for the legacy behaviour "
-            "(no attribute written; the full-grid budget is used)."
+            "survey catalogs no galaxies. Written as f.attrs['z_depth'] and read "
+            "by darksirens_inference as a COMPLETENESS PRIOR -- completeness is "
+            "zero beyond z_depth, so every modeled host there is uncatalogued "
+            "(missing), and the source prior above the depth is the plain "
+            "volumetric x population shape (NOT truncated to zero). Omit for the "
+            "legacy behaviour (no attribute written; completeness is estimated "
+            "over the full [0, DARKSIRENS_ZMAX] grid)."
         ),
     )
 

@@ -210,11 +210,11 @@ def resolve_survey_z_depth(cli_override, file_attr, zmax=None):
     Precedence: ``cli_override`` (the ``--survey_z_depth`` value, applied to
     every catalog when set) wins over ``file_attr`` (the per-catalog
     ``f.attrs['z_depth']`` written by ``darksirens_pixelate --z_depth``);
-    ``None`` means the legacy full-grid missing-galaxy budget
-    (:mod:`darksirens.redshift.completion`).  A resolved value above the
-    redshift grid ``zMax`` (:data:`darksirens.redshift.grid.zMax`) is
-    equivalent to no bound at all, so it is clamped to ``zMax`` with a
-    warning rather than silently accepted or rejected.
+    ``None`` means no depth prior -- completeness is estimated over the full
+    grid (:mod:`darksirens.redshift.completion`).  A resolved value at/above the
+    redshift grid ``zMax`` (:data:`darksirens.redshift.grid.zMax`) asserts full
+    coverage of the grid, i.e. no depth prior, so it is clamped to ``zMax`` with
+    a warning rather than silently accepted or rejected.
     """
     if zmax is None:
         zmax = _REDSHIFT_GRID_ZMAX
@@ -245,9 +245,10 @@ def _report_survey_z_depth(label: str, resolved) -> None:
     _ok(
         f"{label}: "
         + (
-            f"{resolved:g} (bounds missing-galaxy budget to z <= {resolved:g})"
+            f"{resolved:g} (completeness zero beyond z = {resolved:g}; "
+            "hosts there are missing, not nonexistent)"
             if resolved is not None
-            else "None -> full-grid budget (legacy)"
+            else "None -> completeness over the full grid (legacy)"
         )
     )
 
@@ -767,13 +768,15 @@ def build_parser():
                          "--lss_marginalize); incompatible with universe models other than "
                          "dark_sirens/dark_sirens_complete."))
     g.add_argument("--survey_z_depth", type=float, default=None, metavar="Z",
-                   help=("Redshift depth bounding the completion missing-galaxy budget to "
-                         "z <= z_depth instead of the full [0, DARKSIRENS_ZMAX] grid, avoiding "
-                         "the dilution of the catalog term by galaxies the survey was never "
-                         "designed to detect. Applies to ALL catalogs and overrides any "
+                   help=("Survey redshift depth as a COMPLETENESS PRIOR: completeness is zero "
+                         "beyond z_depth, so every modeled host there is uncatalogued (missing, "
+                         "NOT nonexistent) and the source prior above the depth is the plain "
+                         "volumetric x population shape. The observed catalog kernel is likewise "
+                         "zeroed beyond the depth. Applies to ALL catalogs and overrides any "
                          "per-catalog f.attrs['z_depth'] written by darksirens_pixelate "
-                         "--z_depth. Default None: per-catalog file attr if present, else the "
-                         "legacy full-grid budget (bit-identical to pre-existing behaviour)."))
+                         "--z_depth. Default None: per-catalog file attr if present, else "
+                         "completeness is estimated over the full [0, DARKSIRENS_ZMAX] grid "
+                         "(bit-identical to pre-existing behaviour)."))
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
                          "--save_path, and exit before building the likelihood."))

@@ -641,10 +641,23 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
 def _assemble_curves(C, lss, grids: _CompletionGrids, survey: SurveyParams):
     """Assemble the per-row completion outputs from ``C`` and the rate factor ``lss``.
 
-    ``survey.z_depth`` optionally bounds the missing-galaxy budget to
-    ``zgrid <= z_depth``: a survey is never designed to detect galaxies past
-    its own depth, so counting them as "missing" over the FULL grid up to
-    ``DARKSIRENS_ZMAX`` inflates ``N_miss`` and dilutes the catalog term.
+    ``survey.z_depth`` encodes prior knowledge that the EM survey does not
+    catalog galaxies past its own depth: beyond ``z_depth`` completeness is
+    exactly zero, so *every* modeled host there is uncatalogued (missing), and
+    the LSS overdensity ``delta_g`` (measured from the survey and undefined
+    outside its coverage) relaxes to the mean, ``lss -> 1``.  The missing
+    density therefore relaxes to the full expected count,
+
+        dN_miss(z) = (1 - C) dN_exp lss   for z <= z_depth,
+                   = dN_exp               for z >  z_depth,
+
+    i.e. the source prior above the depth in an empty pixel is the plain
+    volumetric x population shape ``dN_exp`` -- NOT zero.  ``z_depth`` is prior
+    knowledge about completeness, not an analysis cutoff: ``N_miss`` is
+    integrated over the FULL grid, and the diagnostics follow (``C_eff`` is 0
+    beyond the depth because ``dN_miss == dN_exp`` there, and ``f`` uses the
+    full-grid ``N_exp``).
+
     ``z_depth`` is a concrete Python float (or ``None``) at trace time --
     never a sampled/traced value -- so the branch below is a Python-level
     ``if``, resolved once per trace, not a ``jnp.where``/``lax.cond``.
@@ -665,18 +678,18 @@ def _assemble_curves(C, lss, grids: _CompletionGrids, survey: SurveyParams):
         f = 1.0 - N_miss / jnp.where(N_exp > 0.0, N_exp, 1.0)
         return f, dN_miss, C_eff, N_miss
 
-    # Bounded budget: zero the missing-galaxy density beyond the survey depth
-    # BEFORE the N_miss quadrature, and bound the N_exp used by the diagnostic
-    # f the same way so it stays consistent with the truncated N_miss (C_eff
-    # is unaffected -- it is already 1.0 wherever dN_miss is zeroed).
+    # Beyond the depth C := 0 and lss := 1, so the missing density relaxes to
+    # the full expected count dN_exp (hosts there are missing, not nonexistent).
     depth_mask = zgrid <= survey.z_depth
-    dN_miss = jnp.where(depth_mask, dN_miss, 0.0)
+    dN_miss = jnp.where(depth_mask, dN_miss, grids.dN_exp)
     N_miss = jnp.trapezoid(dN_miss, zgrid)
 
+    # Identical downstream to the None branch -- the only difference is the
+    # relaxed dN_miss above.  C_eff is 0 wherever dN_miss == dN_exp (beyond the
+    # depth), and f uses the full-grid N_exp.
     dN_exp_pos = jnp.where(grids.dN_exp > 0.0, grids.dN_exp, 1.0)
     C_eff = jnp.clip(1.0 - dN_miss / dN_exp_pos, 0.0, 1.0)
-    dN_exp_bounded = jnp.where(depth_mask, grids.dN_exp, 0.0)
-    N_exp = jnp.trapezoid(dN_exp_bounded, zgrid)
+    N_exp = jnp.trapezoid(grids.dN_exp, zgrid)
     f = 1.0 - N_miss / jnp.where(N_exp > 0.0, N_exp, 1.0)
     return f, dN_miss, C_eff, N_miss
 
@@ -728,17 +741,21 @@ def _completion_member_row(
 ):
     """Per-row ensemble missing densities for ``q_members_row`` ``(M, N_grid)``.
 
-    Mirrors the ``survey.z_depth`` missing-galaxy-budget bound applied in
+    Mirrors the ``survey.z_depth`` completeness prior applied in
     ``_assemble_curves`` (Python-level branch; ``z_depth`` is concrete at
     trace time, never a tracer) so the ensemble diagnostics stay consistent
-    with the deterministic ``dN_miss``/``N_miss`` curves.  ``z_depth is None``
-    takes the untouched original expression -- no mask is built.
+    with the deterministic ``dN_miss``/``N_miss`` curves: beyond the depth
+    C := 0 and lss := 1, so every member's missing density relaxes to the full
+    expected count ``dN_exp``.  ``z_depth is None`` takes the untouched original
+    expression -- no mask is built.
     """
     C, _ = _row_C(row, grids, em_catalog)
     dN_miss_m = (1.0 - C)[None, :] * grids.dN_exp[None, :] * q_members_row  # (M, N_grid)
     if survey.z_depth is not None:
         depth_mask = zgrid <= survey.z_depth
-        dN_miss_m = jnp.where(depth_mask[None, :], dN_miss_m, 0.0)
+        dN_miss_m = jnp.where(
+            depth_mask[None, :], dN_miss_m, grids.dN_exp[None, :]
+        )
     N_miss_m = jnp.trapezoid(dN_miss_m, zgrid, axis=-1)                     # (M,)
     return dN_miss_m, N_miss_m
 
@@ -825,24 +842,23 @@ def field_global_log_Z(
     ``clip(dN_obs_s / where(dN_exp_smooth > 0, dN_exp_smooth, 1), 0, 1)`` -- and
     ``dN_exp = survey.n0 * apix * g(z)`` is the identical grid used per pixel, so
     the reduction is consistent with ``_assemble_curves`` term by term.  The
-    ``survey.z_depth`` bound is applied EXACTLY as in ``_assemble_curves``
-    (Python-level branch on the concrete ``z_depth``; ``None`` takes the untouched
-    full-grid expression).
+    ``survey.z_depth`` completeness prior is applied EXACTLY as in
+    ``_assemble_curves`` (Python-level branch on the concrete ``z_depth``;
+    ``None`` takes the untouched full-grid expression): beyond the depth every
+    pixel has C == 0 and lss == 1, so ``V`` relaxes to the total pixel count and
+    the survey-global missing curve there is the full ``dN_exp`` per pixel.
 
     Fully differentiable in ``theta`` (n0, cosmology, delta, and b_miss through
     the delta_g mode): the frozen inputs are ``field_dN_obs_s`` and the
     modulation rows (data constants).  The occupied-pixel reduction is chunked
     with ``lax.scan`` to bound peak memory at high nside.
     """
-    V_total, dN_exp, depth_mask = _field_missing_curve(
+    V_total, dN_exp = _field_missing_curve(
         cosmo, survey, em_catalog, chunk_size=chunk_size
     )
     N_obs_total = jnp.asarray(em_catalog.field_N_obs_total, dtype=dN_exp.dtype)
 
-    integrand = dN_exp * V_total
-    if depth_mask is not None:
-        integrand = jnp.where(depth_mask, integrand, 0.0)
-    N_miss_total = jnp.trapezoid(integrand, zgrid)
+    N_miss_total = jnp.trapezoid(dN_exp * V_total, zgrid)
 
     Z = N_obs_total + N_miss_total
     return jnp.log(jnp.maximum(Z, 1e-300))
@@ -859,7 +875,10 @@ def _field_missing_curve(
     ``V = Sum_occ (1 - C_p)(z) lss_p(z) + V_empty(z)`` -- everything of the
     survey-global missing budget EXCEPT the ``dN_exp`` quadrature, so callers
     can insert a z-dependent factor (the marked-host ``mu_miss``) before
-    integrating.  Returns ``(V_total, dN_exp, depth_mask)``.
+    integrating.  Beyond ``survey.z_depth`` the curve is relaxed to the total
+    pixel count (every pixel has C == 0 and lss == 1 there), so the beyond-depth
+    completeness prior is already baked in and callers integrate ``dN_exp * V``
+    over the FULL grid.  Returns ``(V_total, dN_exp)``.
     """
     grids = _precompute_grids(cosmo, survey, em_catalog)
     dN_exp = grids.dN_exp                                    # (N_grid,) theta-dependent
@@ -892,10 +911,6 @@ def _field_missing_curve(
     else:
         mod_rows = jnp.zeros((n_occ, 1), dtype=jnp.float32)  # inert placeholder
     b_eff = survey.alpha_miss * survey.b_miss                # traced (delta_g mode)
-
-    # ``z_depth`` is concrete at trace time -> Python-level branch (mirrors
-    # ``_assemble_curves``); ``None`` never constructs a mask.
-    depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
 
     def _row_V(obs_row, mod_row):
         obs_row = obs_row.astype(dN_exp.dtype)
@@ -941,7 +956,17 @@ def _field_missing_curve(
     else:
         V_empty = n_empty
 
-    return V_occ + V_empty, dN_exp, depth_mask
+    V_total = V_occ + V_empty
+    # ``z_depth`` is concrete at trace time -> Python-level branch (mirrors
+    # ``_assemble_curves``); ``None`` never constructs a mask.  Beyond the depth
+    # every pixel (occupied and empty) has C == 0 and lss == 1, so the global
+    # missing curve relaxes to the total pixel count: the full expected
+    # population is uncatalogued there, not nonexistent.
+    if survey.z_depth is not None:
+        depth_mask = zgrid <= survey.z_depth
+        n_pix_total = n_occ + n_empty
+        V_total = jnp.where(depth_mask, V_total, n_pix_total)
+    return V_total, dN_exp
 
 
 def field_global_log_Z_members(
@@ -996,15 +1021,16 @@ def field_global_log_Z_marked(
     produce the SAME Z for the same (theta, eta) and the constants cancel
     structurally between the two likelihood seams.
     """
-    V_total, dN_exp, depth_mask = _field_missing_curve(cosmo, survey, em_catalog)
+    V_total, dN_exp = _field_missing_curve(cosmo, survey, em_catalog)
 
     w_flat = jnp.asarray(em_catalog.field_mark_w, dtype=dN_exp.dtype)
     h_flat = jnp.exp(jnp.asarray(log_h_flat, dtype=dN_exp.dtype))
     S_obs = jnp.sum(w_flat * h_flat)
 
+    # ``V_total`` already carries the beyond-depth relaxation (C == 0, lss == 1),
+    # where ``mu_miss`` defaults to the homogeneous 1 (no observed galaxies to
+    # inform the host efficiency), so the integrand is taken over the FULL grid.
     integrand = jnp.asarray(mu_miss, dtype=dN_exp.dtype) * dN_exp * V_total
-    if depth_mask is not None:
-        integrand = jnp.where(depth_mask, integrand, 0.0)
     N_miss_total = jnp.trapezoid(integrand, zgrid)
 
     Z = S_obs + N_miss_total

@@ -117,20 +117,30 @@ def test_field_fcat_scan_interior_argmax():
 
 
 def test_conditional_control_rails():
-    """SAME fixture, CONDITIONAL mode: the argmax rails to the TOP node (0.95).
-    This control pins that the interior field peak is produced by the FIX (the
-    field-convention global normalizer), not by the mock -- the conditional
-    per-pixel normalization loses the number-density channel and over-weights the
-    sparse AGN catalog, the campaign's fagn0.3 -> f=1 pathology."""
+    """SAME fixture, CONDITIONAL mode: the argmax rails into the high-f region,
+    clearly above the field mode's interior peak (~0.20).  This control pins that
+    the interior field peak is produced by the FIX (the field-convention global
+    normalizer), not by the mock -- the conditional per-pixel normalization loses
+    the number-density channel and over-weights the sparse AGN catalog, the
+    campaign's fagn0.3 -> f=1 pathology.
+
+    Under the corrected completeness physics (hosts beyond ``z_depth`` are
+    MISSING, not nonexistent), the AGN catalog's empty-pixel missing prior is the
+    FULL-grid volumetric shape rather than the old depth-truncated one, so
+    GAL-hosted events (z in [0.05, 0.30]) no longer see an empty-pixel prior
+    artificially coincident with the GAL prior and mildly disfavour the sparse
+    AGN catalog.  The conditional argmax therefore relaxes from the old top node
+    (0.95) to ~0.55 -- the pathology (railed well above the field's ~0.20
+    interior peak) is unchanged in kind, only in degree."""
     vals = _fcat_scan("conditional")
     assert np.all(np.isfinite(vals))
     argmax = float(FCAT_GRID[int(np.argmax(vals))])
-    # Platform-portable: assert the argmax RAILS into the high-f region
-    # (fagn -> 1 pathology), clearly distinct from the field mode's interior
-    # peak (~0.20). The exact top node is CPU-reproducible (0.95 across 5 seeds)
-    # but GPU reduction ordering can shift it a node or two down the near-flat
-    # high-f tail; the scientific claim is "railed high, not interior".
-    assert argmax >= 0.65, argmax
+    # Railed into the upper half of the fcat grid (~0.55 on this CPU mock),
+    # clearly distinct from the field mode's interior peak (~0.20). Threshold
+    # keeps a >=2-node margin below 0.55 for GPU reduction-ordering shifts down
+    # the near-flat high-f tail; the scientific claim is "railed high, not
+    # interior".
+    assert argmax >= 0.45, argmax
 
 
 # ---------------------------------------------------------------------------

@@ -442,7 +442,8 @@ def prepare_redshift_prior_state(
                 -_LOG_H_CLIP, _LOG_H_CLIP,
             )
             kernels, log_N_host = marked_catalog_kernel_state(
-                cosmo, survey, em_catalog, log_h, log_g_grid=log_g_grid
+                cosmo, survey, em_catalog, log_h, log_g_grid=log_g_grid,
+                z_depth=survey.z_depth,
             )
             if is_field:
                 # Field mode: mu_miss and the observed marked mass come from
@@ -519,7 +520,10 @@ def prepare_redshift_prior_state(
             )
             return _maybe_materialize(state, materialize_state)
 
-        kernels = catalog_kernel_state(cosmo, survey, em_catalog, log_g_grid=log_g_grid)
+        kernels = catalog_kernel_state(
+            cosmo, survey, em_catalog, log_g_grid=log_g_grid,
+            z_depth=survey.z_depth,
+        )
         Nobs = _row_counts(em_catalog)
         log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1e-300)), -jnp.inf)
         # Scalar-compatibility normalisation: curves.dN_miss / N_miss already

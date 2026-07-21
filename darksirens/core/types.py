@@ -51,9 +51,13 @@ class SurveyParams(NamedTuple):
     weak-lensing magnification model used by ``universe_model='spectral_sirens_wl'``.
 
     ``z_depth`` is an optional per-survey redshift depth (a concrete Python
-    float or ``None``, never a sampled/traced value) that bounds the
-    completion missing-galaxy budget to ``zgrid <= z_depth``: ``None`` means
-    the legacy full-grid missing-galaxy budget (:mod:`darksirens.redshift.completion`).
+    float or ``None``, never a sampled/traced value) encoding the survey's
+    completeness prior: beyond ``z_depth`` completeness is exactly zero, so every
+    modeled host there is uncatalogued (missing, not nonexistent) -- the source
+    prior above the depth relaxes to the volumetric x population shape and the
+    observed catalog kernel is zeroed there (:mod:`darksirens.redshift.completion`,
+    :mod:`darksirens.redshift.catalog`).  ``None`` means completeness is estimated
+    over the full grid (the legacy, bit-identical path).
     """
     n0: Any
     z50: Any

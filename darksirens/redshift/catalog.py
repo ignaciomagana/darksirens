@@ -48,7 +48,7 @@ import jax.numpy as jnp
 from jax import jit, lax, vmap
 from jax.scipy.special import logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
-from typing import NamedTuple
+from typing import NamedTuple, Any
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
@@ -167,21 +167,26 @@ def _map_rows(row_fn, args: tuple):
     return _post(out)
 
 
-def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid):
+def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
     """
-    log Z_i for one row: Z_i = ∫_0^zmax N(z; z_i, sig_i) g(z) dz.
+    log Z_i for one row: Z_i = ∫_0^{z_hi} N(z; z_i, sig_i) g(z) dz.
 
     Substituting u = Phi((z - z_i)/sig_i) maps the truncated integral to
     ∫_a^b g(z_i + sig_i * Phi^{-1}(u)) du with a = Phi(-z_i/sig),
-    b = Phi((zmax - z_i)/sig): truncation handled exactly, integrand
+    b = Phi((z_hi - z_i)/sig): truncation handled exactly, integrand
     smooth, Gauss–Legendre converges fast for any sigma.
+
+    ``z_hi`` is the upper truncation limit (default the grid ``zMax``).
+    Passing ``survey.z_depth`` yields the below-depth kernel mass Z_i^depth used
+    to renormalise the catalog prior when a survey depth is set (see
+    :func:`_renorm_log_kw_below_depth`).
     """
     a = ndtr(-zs / sig_eff)
-    b = ndtr((_ZMAX - zs) / sig_eff)
+    b = ndtr((z_hi - zs) / sig_eff)
     span = b - a                                            # (N_max,)
     u = a[..., None] + span[..., None] * _GL_X              # (N_max, K)
     u = jnp.clip(u, 1e-12, 1.0 - 1e-12)
-    z_node = jnp.clip(zs[..., None] + sig_eff[..., None] * ndtri(u), 0.0, _ZMAX)
+    z_node = jnp.clip(zs[..., None] + sig_eff[..., None] * ndtri(u), 0.0, z_hi)
     g = jnp.exp(
         jnp.interp(z_node.reshape(-1), zgrid, log_g_grid)
     ).reshape(z_node.shape)
@@ -189,7 +194,38 @@ def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid):
     return jnp.where(real & (Z > 0.0), jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
 
 
-def _row_kernel_state(zs, dzs, ws, ngal, sigma_kde, log_g_grid, volume_weighted=False):
+def _renorm_log_kw_below_depth(
+    log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
+):
+    """Renormalise per-galaxy kernel weights so the depth-truncated catalog
+    prior ``p_cat(z | pix)`` stays a proper density.
+
+    A magnitude-limited survey catalogs nothing past ``z_depth``, so the
+    per-sample evaluator (:func:`eval_log_catalog_prior_state`) zeroes
+    ``p_cat`` there.  Without a correction the mixture would then integrate to
+    its below-depth mass ``m < 1``, breaking the additive-density prior's
+    per-pixel unit normalisation (and, under the field convention, the match
+    between the numerator's catalog mass and the ``N_obs`` in the global
+    normalizer).  The mixture is therefore divided by
+
+        m = ∫_0^{z_depth} p_cat(z|pix) dz = Σ_i exp(log_kw_i) · Z_i^depth,
+
+    with ``Z_i^depth`` the same GL kernel norm truncated at ``z_depth``.  This
+    leaves ``N_obs`` (the per-pixel galaxy count) and the marked total
+    ``log_N_host`` untouched -- only the *shape* is renormalised -- so the
+    observed catalog branch integrates to ``N_obs`` below the depth.  Empty
+    rows (``log_kw ≡ -inf``) carry an inert ``m`` and are returned unchanged.
+    """
+    log_Z_depth = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=z_depth)
+    log_m = jnp.where(
+        has_galaxies, _logsumexp_neginf_safe(log_kw + log_Z_depth), 0.0
+    )
+    return jnp.where(real, log_kw - log_m, -jnp.inf)
+
+
+def _row_kernel_state(
+    zs, dzs, ws, ngal, sigma_kde, log_g_grid, volume_weighted=False, z_depth=None
+):
     """
     Per-galaxy kernel quantities for one row, under one of two host-weight
     conventions for the galaxy measure g(z) = dV_c/dz * (1+z)^delta:
@@ -224,6 +260,13 @@ def _row_kernel_state(zs, dzs, ws, ngal, sigma_kde, log_g_grid, volume_weighted=
     else:
         log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
         log_kw = jnp.where(real, log_w_norm - log_Z, -jnp.inf)
+        # ``z_depth`` (concrete Python float or None; never traced) renormalises
+        # the mixture to unit mass on [0, z_depth] so the depth-truncated prior
+        # stays proper.  ``None`` skips it entirely (bit-identical legacy path).
+        if z_depth is not None:
+            log_kw = _renorm_log_kw_below_depth(
+                log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
+            )
     return log_kw, sig_eff
 
 
@@ -233,6 +276,11 @@ class CatalogKernelState(NamedTuple):
     log_kw: jnp.ndarray      # (N_rows, N_max)
     sig_eff: jnp.ndarray     # (N_rows, N_max)
     volume_weighted: bool = False
+    # ``survey.z_depth`` (concrete Python float or None; never traced): when set,
+    # ``log_kw`` is already renormalised to unit mass on [0, z_depth] and the
+    # per-sample evaluator zeroes p_cat beyond it.  ``None`` means no depth
+    # truncation (the legacy, bit-identical path).
+    z_depth: Any = None
 
 
 def catalog_kernel_state(
@@ -241,8 +289,17 @@ def catalog_kernel_state(
     em_catalog: EMCatalog,
     log_g_grid: jnp.ndarray | None = None,
     volume_weighted: bool = False,
+    z_depth=None,
 ) -> CatalogKernelState:
-    """Precompute per-galaxy kernel quantities once per parameter proposal."""
+    """Precompute per-galaxy kernel quantities once per parameter proposal.
+
+    ``z_depth`` (a concrete Python float or ``None``) is the survey depth beyond
+    which the catalog asserts nothing: when set, each row's ``log_kw`` is
+    renormalised to unit mass on ``[0, z_depth]`` and stored on the returned
+    state so the evaluator zeroes ``p_cat`` there.  It is threaded ONLY from the
+    incomplete ``dark_sirens`` prior; the complete-catalog and bright-siren paths
+    pass ``None`` (they model the full universe, so there is no depth to bound).
+    """
     if log_g_grid is None:
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
     zgals, dzgals, wgals = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals
@@ -251,21 +308,23 @@ def catalog_kernel_state(
     if ngals is not None:
         log_kw, sig_eff = _map_rows(
             lambda zs, dzs, ws, ng: _row_kernel_state(
-                zs, dzs, ws, ng, survey.sigma_kde, log_g_grid, volume_weighted
+                zs, dzs, ws, ng, survey.sigma_kde, log_g_grid, volume_weighted,
+                z_depth,
             ),
             (zgals, dzgals, wgals, ngals),
         )
     else:
         log_kw, sig_eff = _map_rows(
             lambda zs, dzs, ws: _row_kernel_state(
-                zs, dzs, ws, None, survey.sigma_kde, log_g_grid, volume_weighted
+                zs, dzs, ws, None, survey.sigma_kde, log_g_grid, volume_weighted,
+                z_depth,
             ),
             (zgals, dzgals, wgals),
         )
 
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
-        volume_weighted=volume_weighted,
+        volume_weighted=volume_weighted, z_depth=z_depth,
     )
 
 
@@ -273,7 +332,9 @@ def catalog_kernel_state(
 # Marked-host kernel state (galaxy marks -> BBH-host efficiency)
 # ------------------------------------------------------------
 
-def _row_marked_kernel_state(zs, dzs, ws, log_h_row, ngal, sigma_kde, log_g_grid):
+def _row_marked_kernel_state(
+    zs, dzs, ws, log_h_row, ngal, sigma_kde, log_g_grid, z_depth=None
+):
     """Per-galaxy kernel quantities for one row using host-efficiency weights.
 
     Identical to :func:`_row_kernel_state` but the per-pixel-normalised weight is
@@ -293,6 +354,12 @@ def _row_marked_kernel_state(zs, dzs, ws, log_h_row, ngal, sigma_kde, log_g_grid
 
     log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
     log_kw = jnp.where(real, log_wh_norm - log_Z, -jnp.inf)
+    # Depth renormalisation acts on the marked mixture SHAPE only; log_N_host
+    # (the marked count Σ_i w_i h_i) is untouched, mirroring the unmarked path.
+    if z_depth is not None:
+        log_kw = _renorm_log_kw_below_depth(
+            log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
+        )
     log_N_host = jnp.where(has_galaxies, lse, -jnp.inf)
     return log_kw, sig_eff, log_N_host
 
@@ -303,13 +370,16 @@ def marked_catalog_kernel_state(
     em_catalog: EMCatalog,
     log_h: jnp.ndarray,
     log_g_grid: jnp.ndarray | None = None,
+    z_depth=None,
 ):
     """Marked per-galaxy kernel state + per-row marked total ``log_N_host``.
 
     ``log_h`` is ``(N_rows, N_max_gals)`` per-galaxy log host efficiency (from
     :mod:`darksirens.marks`).  Returns ``(CatalogKernelState, log_N_host)`` where
     the state's ``log_kw`` carries the marked (per-pixel-normalised) weights, so
-    the existing per-sample evaluator is reused unchanged.
+    the existing per-sample evaluator is reused unchanged.  ``z_depth`` behaves
+    exactly as in :func:`catalog_kernel_state` (renormalise the marked mixture to
+    unit mass on ``[0, z_depth]``; ``log_N_host`` is untouched).
     """
     if log_g_grid is None:
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
@@ -319,19 +389,21 @@ def marked_catalog_kernel_state(
     if ngals is not None:
         log_kw, sig_eff, log_N_host = _map_rows(
             lambda zs, dzs, ws, lh, ng: _row_marked_kernel_state(
-                zs, dzs, ws, lh, ng, survey.sigma_kde, log_g_grid
+                zs, dzs, ws, lh, ng, survey.sigma_kde, log_g_grid, z_depth
             ),
             (zgals, dzgals, wgals, log_h, ngals),
         )
     else:
         log_kw, sig_eff, log_N_host = _map_rows(
             lambda zs, dzs, ws, lh: _row_marked_kernel_state(
-                zs, dzs, ws, lh, None, survey.sigma_kde, log_g_grid
+                zs, dzs, ws, lh, None, survey.sigma_kde, log_g_grid, z_depth
             ),
             (zgals, dzgals, wgals, log_h),
         )
 
-    return CatalogKernelState(log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff), log_N_host
+    return CatalogKernelState(
+        log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff, z_depth=z_depth
+    ), log_N_host
 
 
 def _logsumexp_neginf_safe(terms):
@@ -368,7 +440,17 @@ def eval_log_catalog_prior_state(
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
     log_g_front = jnp.where(state.volume_weighted, 0.0, jnp.interp(z, zgrid, state.log_g_grid))
-    return log_g_front + log_mix
+    log_p_cat = log_g_front + log_mix
+    # Depth truncation: a magnitude-limited survey catalogs nothing past
+    # ``z_depth``, so p_cat asserts nothing there -- zero it (the missing branch
+    # supplies the full expected population beyond the depth).  ``z_depth`` is a
+    # concrete Python float or ``None`` (never traced), so this is a Python-level
+    # branch resolved once per trace; ``None`` leaves p_cat untouched (legacy).
+    # ``log_kw`` is already renormalised to unit mass on [0, z_depth], so p_cat
+    # stays a proper density.
+    if state.z_depth is not None:
+        log_p_cat = jnp.where(z <= state.z_depth, log_p_cat, -jnp.inf)
+    return log_p_cat
 
 
 @jit

@@ -15,10 +15,10 @@ def load_survey(survey_path, to_device=True):
 
     ``z_depth`` is the optional per-survey redshift depth written by
     ``darksirens_pixelate --z_depth`` (``f.attrs['z_depth']``): the redshift
-    beyond which the survey does not attempt to detect galaxies, used to
-    bound the completion missing-galaxy budget
-    (:mod:`darksirens.redshift.completion`).  ``None`` when the attribute is
-    absent (legacy full-grid budget).
+    beyond which the survey catalogs no galaxies, used as the completeness prior
+    (completeness is zero beyond it; hosts there are missing, not nonexistent --
+    :mod:`darksirens.redshift.completion`).  ``None`` when the attribute is
+    absent (completeness estimated over the full grid; legacy path).
     """
     asarray = jnp.asarray if to_device else np.asarray
     with h5py.File(survey_path, 'r') as f:
