@@ -53,6 +53,95 @@ def test_build_pixel_kde_cache_masks_empty_and_partially_padded_pixels():
     assert float(dN_obs_kde[pixel_to_cache_idx[1], 0]) < 1e-5
 
 
+def _padded_catalog(ngals_list, n_max_gals, seed=0):
+    """A padded (n_pix, n_max_gals) catalog with distinct real redshifts per
+    slot and zeros in the padded tail, so rows are separable and empty rows
+    (ngals == 0) contribute nothing."""
+    rng = np.random.default_rng(seed)
+    ngals = np.asarray(ngals_list, dtype=np.int32)
+    n_pix = ngals.size
+    zgals = np.zeros((n_pix, n_max_gals), dtype=np.float64)
+    for i, ng in enumerate(ngals):
+        if ng > 0:
+            zgals[i, :ng] = rng.uniform(0.05, 0.6, size=int(ng))
+    return jnp.asarray(zgals), jnp.asarray(ngals)
+
+
+def test_build_pixel_kde_cache_chunked_parity_with_remainder():
+    """Chunked build (incl. a partial remainder chunk) matches the single-shot
+    build and row-for-row direct _kde_dndz_obs calls."""
+    n_max_gals = 4
+    # 11 pixels, mixed ngals, two empty rows -> batch_size=4 gives 2 full
+    # chunks (8 rows) + a 3-row remainder.
+    ngals_list = [0, 1, 2, 3, 4, 2, 0, 3, 1, 4, 2]
+    zgals, ngals = _padded_catalog(ngals_list, n_max_gals, seed=1)
+    unique_pixels = np.arange(len(ngals_list), dtype=np.int32)
+
+    chunked, idx_chunked = build_pixel_kde_cache(
+        unique_pixels=unique_pixels,
+        zgals=zgals,
+        n_pix_catalog=len(ngals_list),
+        ngals=ngals,
+        batch_size=4,
+    )
+    single, idx_single = build_pixel_kde_cache(
+        unique_pixels=unique_pixels,
+        zgals=zgals,
+        n_pix_catalog=len(ngals_list),
+        ngals=ngals,
+        batch_size=1000,
+    )
+
+    # Chunking is a pure host-side partition of the same jit(vmap) row op, so
+    # the two builds agree to ~machine precision (GPU reduction tiling can
+    # differ at ulp level; don't assert bitwise).
+    np.testing.assert_allclose(
+        np.asarray(chunked), np.asarray(single), rtol=1e-12
+    )
+    # The pixel->cache-idx map is independent of chunking.
+    np.testing.assert_array_equal(
+        np.asarray(idx_chunked), np.asarray(idx_single)
+    )
+
+    # Row-for-row against direct _kde_dndz_obs (empty rows must be exactly 0).
+    for pix in unique_pixels:
+        expected = _kde_dndz_obs(int(pix), zgals, ngals=ngals)
+        np.testing.assert_allclose(
+            np.asarray(chunked[int(pix)]), np.asarray(expected), rtol=1e-12
+        )
+    assert np.all(np.asarray(chunked[0]) == 0.0)
+    assert np.all(np.asarray(chunked[6]) == 0.0)
+
+
+def test_build_pixel_kde_cache_chunk_plan_default_batch():
+    """A moderate synthetic build spanning multiple default (512) chunks plus a
+    remainder matches the unchunked build in shape and value."""
+    n_rows = 1030  # batch_size=512 -> 2 full chunks (1024) + 6-row remainder.
+    n_max_gals = 3
+    ngals_list = [(i % n_max_gals) + 1 for i in range(n_rows)]
+    zgals, ngals = _padded_catalog(ngals_list, n_max_gals, seed=2)
+    unique_pixels = np.arange(n_rows, dtype=np.int32)
+
+    chunked, _ = build_pixel_kde_cache(
+        unique_pixels=unique_pixels,
+        zgals=zgals,
+        n_pix_catalog=n_rows,
+        ngals=ngals,
+    )  # default batch_size=512
+    single, _ = build_pixel_kde_cache(
+        unique_pixels=unique_pixels,
+        zgals=zgals,
+        n_pix_catalog=n_rows,
+        ngals=ngals,
+        batch_size=2000,  # single shot
+    )
+
+    assert chunked.shape == (n_rows, zgrid.size)
+    np.testing.assert_allclose(
+        np.asarray(chunked), np.asarray(single), rtol=1e-12
+    )
+
+
 def test_completion_clip_diagnostics_reports_grid_fractions():
     from darksirens.redshift.completion import completion_clip_diagnostics
     from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog

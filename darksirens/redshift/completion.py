@@ -207,10 +207,14 @@ def build_pixel_kde_cache(
     n_pix_catalog: int,
     wgals: jnp.ndarray | None = None,
     ngals: jnp.ndarray | None = None,
+    batch_size: int = 512,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
     Precompute ``_kde_dndz_obs`` for all unique pixels.  Call once in
     ``make_likelihood`` before the JIT closure is built.
+
+    Computation is chunked (``batch_size`` pixels per JIT call) to bound
+    peak memory at high nside.
 
     Returns
     -------
@@ -229,16 +233,26 @@ def build_pixel_kde_cache(
             "build_pixel_kde_cache requires either wgals or ngals to mask padded galaxies"
         )
 
+    zgals_jax = jnp.asarray(zgals)
     wgals_jax = None if wgals is None else jnp.asarray(wgals)
     ngals_jax = None if ngals is None else jnp.asarray(ngals)
 
+    pix_idx = np.asarray(unique_pixels)
+    n_unique = int(pix_idx.size)
+
     _batch_kde = jit(vmap(_kde_dndz_obs, in_axes=(0, None, None, None)))
-    dN_obs_kde = _batch_kde(
-        jnp.asarray(unique_pixels, dtype=jnp.int32),
-        jnp.asarray(zgals),
-        wgals_jax,
-        ngals_jax,
-    )
+    dN_obs_kde = np.empty((n_unique, zgrid.size), dtype=np.float64)
+    for start in range(0, n_unique, batch_size):
+        stop = min(start + batch_size, n_unique)
+        dN_obs_kde[start:stop] = np.asarray(
+            _batch_kde(
+                jnp.asarray(pix_idx[start:stop], dtype=jnp.int32),
+                zgals_jax,
+                wgals_jax,
+                ngals_jax,
+            )
+        )
+    dN_obs_kde = jnp.asarray(dN_obs_kde)
 
     pixel_to_cache_idx = np.zeros(n_pix_catalog, dtype=np.int32)
     for i, p in enumerate(unique_pixels):
