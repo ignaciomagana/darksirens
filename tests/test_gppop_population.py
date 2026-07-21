@@ -143,3 +143,53 @@ def test_gppop_mz_redshift_binning():
     lp_out = model.log_p_pop(jnp.array([40.0]), jnp.array([0.5]),
                              jnp.array([5.0]), jnp.array([0.0]), theta)
     assert np.isneginf(np.asarray(lp_out)).all()
+
+
+def test_gppop_mz_carries_source_time_dilation():
+    """gppop_mz z-bins are the source-frame R(z); log_p_pop must apply the
+    1/(1+z) observer/source time dilation itself (the likelihood's log1p is the
+    detector-mass Jacobian, not dilation).  With a FLAT log-rate field (xi = 0,
+    all bins equal) the only z-dependence is that dilation, so densities at
+    z inside a common (m1, q) bin must scale as 1/(1+z): the pairwise log
+    differences equal -log((1+z_i)/(1+z_j))."""
+    _require_tinygp_transforms()
+    model = get_model("gppop_mz")
+    # Fiducial has xi = 0 -> logn = 0 in every bin -> flat source-frame rate.
+    theta = jnp.asarray(get_fixed_population_params("gppop_mz"))
+
+    m1, q, chi = jnp.array([40.0]), jnp.array([0.5]), jnp.array([0.0])
+    # z values sit in distinct z-bins (edges ...,0.3,0.7,1.2) but the mass/spin
+    # factors are identical, isolating the pure time-dilation z-dependence.
+    zs = [0.1, 0.5, 0.9]
+    lps = [float(model.log_p_pop(m1, q, jnp.array([z]), chi, theta)[0]) for z in zs]
+    assert np.all(np.isfinite(lps))
+
+    for a in range(len(zs)):
+        for b in range(len(zs)):
+            expected = -np.log((1.0 + zs[a]) / (1.0 + zs[b]))
+            np.testing.assert_allclose(lps[a] - lps[b], expected, atol=1e-10)
+
+    # Relative densities vs z = 0.1: {1, 1.1/1.5, 1.1/1.9}.
+    rel = [np.exp(lp - lps[0]) for lp in lps]
+    np.testing.assert_allclose(rel, [1.0, 1.1 / 1.5, 1.1 / 1.9], atol=1e-10)
+
+
+def test_gppop_mass_only_z_scaling_unchanged():
+    """The mass-only ``gppop`` branch (no z-bins) keeps the parametric rate
+    evolution (gamma - 1) * log1p(z) -- the fix touches only the z-bearing
+    branch.  With a fixed mass/spin point the z-dependence is exactly that."""
+    _require_tinygp_transforms()
+    model = get_model("gppop")
+    theta = jnp.asarray(get_fixed_population_params("gppop"))
+    names = [s.name for s in model.param_specs]
+    gamma = float(theta[names.index("gamma")])
+
+    m1, q, chi = jnp.array([40.0]), jnp.array([0.5]), jnp.array([0.0])
+    zs = [0.1, 0.5, 0.9]
+    lps = [float(model.log_p_pop(m1, q, jnp.array([z]), chi, theta)[0]) for z in zs]
+    assert np.all(np.isfinite(lps))
+
+    for a in range(len(zs)):
+        for b in range(len(zs)):
+            expected = (gamma - 1.0) * (np.log1p(zs[a]) - np.log1p(zs[b]))
+            np.testing.assert_allclose(lps[a] - lps[b], expected, atol=1e-10)
