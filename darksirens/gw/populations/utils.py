@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
@@ -56,6 +57,16 @@ class NormalizationGridSettings:
     per-sample q-normalisation is interpolated from an N-node static m1 grid
     instead of integrated exactly per sample (see ``get_pairing_m1_grid`` and
     ``PairingModel.__call__``).
+
+    ``pairing_m_hi`` is the UPPER bound of that opt-in pairing m1 grid.  It is a
+    SEPARATE knob from the mass-grid ceiling ``m_hi`` precisely so that sizing
+    the pairing grid to a mass model whose primary-mass support extends past
+    ``m_hi`` (e.g. ``gwtc5_fiducial_bpl2peaks`` with a fixed high-mass edge at
+    300 Msun) never perturbs the mass-normalisation grid of any other model.
+    ``jnp.interp`` clamps queries outside the grid ends, so a ceiling BELOW a
+    model's support would silently bias the pairing normaliser inside the
+    support; :func:`size_pairing_grid_to_support` /
+    :func:`assert_pairing_grid_covers_support` keep it truthful.
     """
 
     n_mass: int = _env_int("DARKSIRENS_GW_N_MASS", 500)
@@ -64,6 +75,7 @@ class NormalizationGridSettings:
     pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", None)
     m_lo: float = M_LO
     m_hi: float = M_HI
+    pairing_m_hi: float = M_HI
     q_lo: float = 0.0
     q_hi: float = 1.0
     chi_lo: float = -1.0
@@ -88,6 +100,12 @@ class NormalizationGridSettings:
                 raise ValueError(f"{hi_name} must be greater than {lo_name}: {lo} >= {hi}")
             object.__setattr__(self, lo_name, lo)
             object.__setattr__(self, hi_name, hi)
+        pairing_m_hi = float(self.pairing_m_hi)
+        if not pairing_m_hi > self.m_lo:
+            raise ValueError(
+                f"pairing_m_hi must be greater than m_lo: {self.m_lo} >= {pairing_m_hi}"
+            )
+        object.__setattr__(self, "pairing_m_hi", pairing_m_hi)
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -108,13 +126,17 @@ def configure_normalization_grids(
     n_q: int | None = None,
     n_chi: int | None = None,
     pairing_m1_grid: int | None = None,
+    pairing_m_hi: float | None = None,
 ) -> NormalizationGridSettings:
     """Update cached normalisation-grid sizes and clear derived grids.
 
     Every argument follows the same convention: None leaves the current setting
     (env var / dataclass default) untouched; a value overrides it.  To ENABLE the
     opt-in pairing m1-grid pass an int for ``pairing_m1_grid``; leaving it None
-    keeps the exact per-sample q-normalisation (the default).
+    keeps the exact per-sample q-normalisation (the default).  ``pairing_m_hi``
+    raises the opt-in pairing grid's upper bound (see
+    :func:`size_pairing_grid_to_support`); callers should normally use that
+    helper rather than setting the bound directly.
     """
 
     global _NORMALIZATION_GRID_SETTINGS, N_MASS, N_Q, N_CHI
@@ -126,6 +148,7 @@ def configure_normalization_grids(
             "n_q": n_q,
             "n_chi": n_chi,
             "pairing_m1_grid": pairing_m1_grid,
+            "pairing_m_hi": pairing_m_hi,
         }.items()
         if value is not None
     }
@@ -139,6 +162,61 @@ def configure_normalization_grids(
     N_Q = _NORMALIZATION_GRID_SETTINGS.n_q
     N_CHI = _NORMALIZATION_GRID_SETTINGS.n_chi
     return _NORMALIZATION_GRID_SETTINGS
+
+
+def size_pairing_grid_to_support(m1_support_max: float) -> NormalizationGridSettings:
+    """Grow the opt-in pairing m1 grid so it covers a mass model's m1 support.
+
+    No-op when the pairing grid is disabled (``pairing_m1_grid is None``) or the
+    current ``pairing_m_hi`` already covers ``m1_support_max``.  Otherwise the
+    upper bound is raised to ``m1_support_max`` and the node COUNT is scaled up
+    in proportion to the added log-range, so log spacing is preserved and the
+    per-node density (hence the documented interpolation accuracy near the
+    ``m_min`` log-kink) does NOT drop as the range grows.  The default ceiling
+    is never lowered, so models whose support ends at or below ``M_HI`` keep the
+    historical ``[m_lo, M_HI]`` grid bit-for-bit.
+    """
+    s = normalization_grid_settings()
+    if s.pairing_m1_grid is None:
+        return s
+    new_hi = max(s.pairing_m_hi, float(m1_support_max))
+    if new_hi <= s.pairing_m_hi:
+        return s
+    old_span = math.log(s.pairing_m_hi / s.m_lo)
+    new_span = math.log(new_hi / s.m_lo)
+    new_n = int(math.ceil(s.pairing_m1_grid * new_span / old_span))
+    return configure_normalization_grids(pairing_m1_grid=new_n, pairing_m_hi=new_hi)
+
+
+def assert_pairing_grid_covers_support(
+    m1_support_max: float, *, model_name: str = ""
+) -> None:
+    """Fail loudly if the opt-in pairing grid does not cover an m1 support.
+
+    Defense in depth against a silent ``jnp.interp`` clamp INSIDE the mass
+    model's support: with the grid enabled, any sample at
+    ``pairing_m_hi < m1 <= m1_support_max`` would reuse the endpoint normaliser
+    (measured up to ~0.4 in log density for ``gwtc5_fiducial_bpl2peaks`` at
+    m1=299 with a 200-node ceiling).  Raises ``ValueError`` so CLI callers can
+    surface it through their ``_fatal`` path.  No-op when the grid is disabled.
+    """
+    s = normalization_grid_settings()
+    if s.pairing_m1_grid is None:
+        return
+    support = float(m1_support_max)
+    # Tiny tolerance: a bound sized exactly to the support is fine.
+    if s.pairing_m_hi + 1.0e-6 < support:
+        who = f" of population model {model_name!r}" if model_name else ""
+        raise ValueError(
+            f"pairing-normalisation grid upper bound pairing_m_hi={s.pairing_m_hi} "
+            f"does not cover the primary-mass support{who} "
+            f"(m1_support_max={support}): samples with "
+            f"{s.pairing_m_hi} < m1 <= {support} would be clamped to the grid "
+            "endpoint by jnp.interp, silently biasing the pairing normaliser "
+            "inside the model support. Let the CLI size the grid "
+            "(size_pairing_grid_to_support) or disable --pairing_norm_grid "
+            "(exact per-sample q-normalisation)."
+        )
 
 
 @lru_cache(maxsize=8)
@@ -182,13 +260,17 @@ def get_m1_q_mesh():
 def get_pairing_m1_grid():
     """Static LOG-spaced m1 grid for the opt-in pairing q-normalisation.
 
-    Spans the SAME [m_lo, m_hi] bounds as :func:`get_mass_grid`, so it covers
-    every m1src the mass model can produce; log spacing clusters nodes at low
-    m1 where the pairing normaliser I(m1) turns on fastest.  Callers evaluate
-    I on these nodes once per proposal and interpolate per sample; m1 values
-    outside [m_lo, m_hi] are clamped to the ends by ``jnp.interp`` (harmless --
-    outside the mass support p(m1)=0 so the normaliser there is irrelevant).
-    Only meaningful when ``pairing_m1_grid`` is configured (not None).
+    Spans ``[m_lo, pairing_m_hi]``; log spacing clusters nodes at low m1 where
+    the pairing normaliser I(m1) turns on fastest.  Callers evaluate I on these
+    nodes once per proposal and interpolate per sample; ``jnp.interp`` CLAMPS m1
+    outside the bounds to the grid ends.  Clamping is harmless ONLY where the
+    mass model has no support (p(m1)=0 makes the normaliser there irrelevant),
+    so ``pairing_m_hi`` MUST cover the selected mass model's primary-mass
+    support -- otherwise a valid sample inside the support silently uses the
+    endpoint normaliser.  The CLI sizes ``pairing_m_hi`` to the model via
+    :func:`size_pairing_grid_to_support`; :func:`assert_pairing_grid_covers_support`
+    guards against an undersized grid.  Only meaningful when ``pairing_m1_grid``
+    is configured (not None).
     """
     s = normalization_grid_settings()
     n = s.pairing_m1_grid
@@ -197,7 +279,7 @@ def get_pairing_m1_grid():
             "get_pairing_m1_grid requires pairing_m1_grid to be configured; "
             "it is None (exact per-sample q-normalisation)."
         )
-    return jnp.exp(jnp.linspace(jnp.log(s.m_lo), jnp.log(s.m_hi), int(n)))
+    return jnp.exp(jnp.linspace(jnp.log(s.m_lo), jnp.log(s.pairing_m_hi), int(n)))
 
 
 # Backward-compatible aliases.  They reflect import-time/default settings;
