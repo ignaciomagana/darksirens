@@ -27,6 +27,14 @@ actually drives the per-event estimator in both distance and sky:
   * test_distance_localization_survives
   * test_sky_localization_survives
 
+A fourth block (SEAM) guards a second, previously-untested failure mode: the
+converter advertised producing importance samples "for the existing
+likelihood" but wrote a schema ``darksirens.gw.utils.load_gw_samples`` (the
+loader that actually feeds the likelihood) rejected outright -- missing
+``format_version``, ``m1src``/``m2src``, and the ``pe_cosmology_*`` /
+``chi_eff_*`` attrs. These tests exercise the real seam, converter output ->
+``load_gw_samples(...)``, instead of only inspecting the raw HDF5.
+
 The tests need only numpy + h5py + healpy (and, if present, ligo.skymap). They
 do NOT stand up the full inference pipeline, by design: the structural test is a
 tight, deterministic tripwire, and the behavioural tests use the same
@@ -38,12 +46,23 @@ from __future__ import annotations
 
 import importlib
 import sys
+import types
 
 import numpy as np
 import pytest
 
 hp = pytest.importorskip("healpy")
 h5py = pytest.importorskip("h5py")
+
+# ``darksirens.gw.utils`` imports tqdm at module import time; stub it so the
+# loader is importable without the optional progress-bar dependency (mirrors
+# tests/test_data_loader.py and tests/test_gwcat_v2_compat.py).
+_tqdm_stub = types.ModuleType("tqdm")
+_tqdm_stub.tqdm = lambda iterable=None, *args, **kwargs: iterable
+sys.modules.setdefault("tqdm", _tqdm_stub)
+
+from darksirens.gw.utils import load_gw_samples  # noqa: E402
+from darksirens.utils.cosmology import z_of_dL  # noqa: E402
 
 CONVERTER_MODULE = "darksirens.cli.skymaps_to_samples"
 
@@ -55,6 +74,8 @@ M1DET_MIN = 2.0
 M1DET_MAX = 250.0  # covers pop m_max ~100 up to z ~ 1.5
 Q_MIN = 0.05
 CHI_ABS_MAX = 0.99
+PE_H0 = 70.0  # fiducial PE cosmology passed explicitly (not the Planck15 default)
+PE_OM0 = 0.30
 
 MU_A, MU_B = 600.0, 1200.0  # well-separated event distances
 SIGMA = 80.0
@@ -113,6 +134,10 @@ def _run_converter(skymap_dir, output):
         str(Q_MIN),
         "--chi_abs_max",
         str(CHI_ABS_MAX),
+        "--pe_H0",
+        str(PE_H0),
+        "--pe_Om0",
+        str(PE_OM0),
     ]
     saved = sys.argv
     sys.argv = argv
@@ -140,15 +165,29 @@ def converted(tmp_path_factory):
 
     _run_converter(smdir, out)
 
+    # Direct-HDF5 read: still valid for the structural (raw p_pe/dL) tests
+    # below, and for reading the schema attrs the loader also requires.
     with h5py.File(out, "r") as f:
         nobs = int(f.attrs["nobs"])
         nsamp = int(f.attrs["nsamp"])
+        format_version = f.attrs["format_version"]
+        pe_H0 = float(f.attrs["pe_cosmology_H0"])
+        pe_Om0 = float(f.attrs["pe_cosmology_Om0"])
+        chi_eff_in_p_pe = bool(f.attrs["chi_eff_in_p_pe"])
+        chi_eff_amax = float(f.attrs["chi_eff_amax"])
         data = {
             k: np.asarray(f[k])
-            for k in ("ra", "dec", "dL", "m1det", "m2det", "chieff", "p_pe")
+            for k in (
+                "ra", "dec", "dL", "m1det", "m2det", "m1src", "m2src",
+                "chieff", "p_pe",
+            )
         }
 
     assert nobs == 2 and nsamp == NSAMP
+
+    # The actual seam under test: this is the call the CLI pipeline makes
+    # before the file ever reaches the likelihood. It must succeed.
+    loaded = load_gw_samples(out)
 
     def event(i):
         sl = slice(i * nsamp, (i + 1) * nsamp)
@@ -162,6 +201,15 @@ def converted(tmp_path_factory):
         "hotB": hotB,
         "mu": {"A": MU_A, "B": MU_B},
         "sigma": SIGMA,
+        "nobs": nobs,
+        "nsamp": nsamp,
+        "raw": data,
+        "loaded": loaded,
+        "format_version": format_version,
+        "pe_H0": pe_H0,
+        "pe_Om0": pe_Om0,
+        "chi_eff_in_p_pe": chi_eff_in_p_pe,
+        "chi_eff_amax": chi_eff_amax,
     }
 
 
@@ -278,3 +326,101 @@ def test_sky_localization_survives(converted):
     e_b = estimate(converted["B"])
     assert e_a > 0.0
     assert e_b == 0.0
+
+
+# ---------------------------------------------------------------------------
+# (4) SEAM — converter output must be accepted by load_gw_samples
+# ---------------------------------------------------------------------------
+#
+# BUG-1: the converter advertised producing importance samples "for the
+# existing likelihood", but load_gw_samples -- the loader that actually feeds
+# it -- rejected the file outright: no recognised format_version, and no
+# m1src/m2src/pe_cosmology_*/chi_eff_* members. These tests exercise the real
+# seam (converter output -> load_gw_samples) rather than only the raw HDF5.
+
+
+def test_format_version_is_loader_accepted(converted):
+    """The emitted format_version must be one load_gw_samples recognises.
+
+    gwcat-1.0 is the generic, non-lensing, chi_eff-basis PE contract -- the
+    same one darksirens' own mock-data generator
+    (scripts/mock_dark_sirens/generate_mock_data.py) uses for its GW event
+    file. It is the semantically correct choice here: this converter is
+    neither lensing-specific ("observed-lensing-pe-1.0") nor spin-basis
+    versioned ("gwcat-pe-2.0" requires a spin_basis attr for bases this
+    converter never produces).
+    """
+    assert converted["format_version"] == "gwcat-1.0"
+
+
+def test_load_gw_samples_accepts_converter_output(converted):
+    """converter output -> load_gw_samples(...) must succeed with consistent shapes.
+
+    This is the regression for BUG-1 itself: a converter file that fails here
+    can never reach the likelihood, no matter how correct its p_pe/dL sampling
+    is (which the tests above already guard separately).
+    """
+    m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = converted["loaded"]
+
+    assert nEvents == converted["nobs"] == 2
+    assert nsamp == converted["nsamp"] == NSAMP
+    n_total = nEvents * nsamp
+    for name, arr in (
+        ("m1det", m1det),
+        ("m2det", m2det),
+        ("dL", dL),
+        ("chieff", chieff),
+        ("ra", ra),
+        ("dec", dec),
+        ("p_pe", p_pe),
+    ):
+        arr = np.asarray(arr)
+        assert arr.shape == (n_total,), name
+        assert np.all(np.isfinite(arr)), name
+
+    # m1det/m2det/dL/chieff/ra/dec pass through the loader unchanged.
+    raw = converted["raw"]
+    np.testing.assert_array_equal(np.asarray(m1det), raw["m1det"])
+    np.testing.assert_array_equal(np.asarray(m2det), raw["m2det"])
+    np.testing.assert_array_equal(np.asarray(dL), raw["dL"])
+    np.testing.assert_array_equal(np.asarray(chieff), raw["chieff"])
+    np.testing.assert_array_equal(np.asarray(ra), raw["ra"])
+    np.testing.assert_array_equal(np.asarray(dec), raw["dec"])
+
+    # p_pe: mock_data=True means the loader leaves the chi_eff prior alone
+    # (no astrophysical reweight) but still renormalises per event.
+    p_pe_raw = raw["p_pe"].reshape(nEvents, nsamp)
+    p_pe_expected = (p_pe_raw / p_pe_raw.sum(axis=1, keepdims=True)).reshape(-1)
+    np.testing.assert_allclose(np.asarray(p_pe), p_pe_expected, rtol=1e-10)
+
+
+def test_m1src_m2src_round_trip_at_stated_cosmology(converted):
+    """m1src/m2src must satisfy m*src * (1+z) ≈ m*det at the stated PE cosmology.
+
+    ``z`` is recovered by inverting dL under (pe_cosmology_H0, pe_cosmology_Om0)
+    with the same z_of_dL grid inversion the converter itself used -- i.e. this
+    is a round-trip check, not an independent re-derivation of z.
+    """
+    assert converted["pe_H0"] == PE_H0
+    assert converted["pe_Om0"] == PE_OM0
+
+    raw = converted["raw"]
+    z = np.asarray(z_of_dL(raw["dL"], converted["pe_H0"], converted["pe_Om0"]))
+    assert np.all(np.isfinite(z))
+    assert np.all(z >= 0.0)
+
+    np.testing.assert_allclose(raw["m1src"] * (1.0 + z), raw["m1det"], rtol=1e-6)
+    np.testing.assert_allclose(raw["m2src"] * (1.0 + z), raw["m2det"], rtol=1e-6)
+
+
+def test_chi_eff_attrs_are_truthful(converted):
+    """chi_eff_in_p_pe/chi_eff_amax must describe how p_pe was actually built.
+
+    p_pe already includes g_chi, the flat proposal density over the sampled
+    chieff range (see test_ppe_is_prior_not_sampling_density above), so
+    chi_eff_in_p_pe must be True -- otherwise a non-mock loader path would
+    double-count the chi_eff prior. chi_eff_amax must match the sampling range
+    actually used (--chi_abs_max).
+    """
+    assert converted["chi_eff_in_p_pe"] is True
+    assert converted["chi_eff_amax"] == pytest.approx(CHI_ABS_MAX)

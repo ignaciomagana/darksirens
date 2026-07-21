@@ -8,6 +8,8 @@ import h5py
 import healpy as hp
 import numpy as np
 
+from darksirens.utils.cosmology import H0Planck, Om0Planck, dL_grid_bounds, z_of_dL
+
 try:
     from ligo.skymap.io import read_sky_map
 except Exception:  # pragma: no cover - optional dependency
@@ -87,6 +89,23 @@ except Exception:  # pragma: no cover - optional dependency
 #
 # Population bound defaults below mirror darksirens.gw.populations.registry
 # (M_MIN ∈ [2,10], M_MAX ∈ [50,100]); override if your model differs.
+#
+# OUTPUT SCHEMA
+# -------------
+# The output is written as ``format_version = "gwcat-1.0"`` (the generic,
+# non-lensing, chi_eff-basis PE contract — the same one darksirens' own mock
+# generator uses) so it loads directly through
+# ``darksirens.gw.utils.load_gw_samples`` without a separate conversion step.
+# That loader also requires source-frame masses ``m1src``/``m2src``, which a
+# mass-marginalised 3D skymap does not constrain. We obtain them by inverting
+# the *detector-frame* dL samples to redshift under a fiducial PE cosmology
+# (``--pe_H0``/``--pe_Om0``, default Planck15) via the same ``z_of_dL`` grid
+# inversion the likelihood itself uses (darksirens.utils.cosmology), then
+# m1src = m1det/(1+z), m2src = m2det/(1+z). This bookkeeping does not feed
+# back into p_pe or H0 inference: mock_data=True (below) makes the loader
+# treat p_pe as-is and skip the chi_eff-prior reweight that would otherwise
+# consume m1src/m2src, so the choice of fiducial PE cosmology is inert beyond
+# populating these two required datasets.
 # ============================================================================
 
 POP_M_MIN_DEFAULT = 2.0  # lower edge of the population m_min prior
@@ -274,6 +293,24 @@ def main() -> None:
         default=1024,
         help="Grid resolution for the dL ansatz inverse-CDF (default 1024).",
     )
+    # --- fiducial cosmology for the m1src/m2src bookkeeping datasets only ---
+    p.add_argument(
+        "--pe_H0",
+        type=float,
+        default=None,
+        help=(
+            "Fiducial H0 (km/s/Mpc) used ONLY to invert detector-frame dL samples "
+            "to redshift for the m1src/m2src datasets the loader requires. Does "
+            "NOT affect p_pe or H0 inference (mock_data=True; see OUTPUT SCHEMA "
+            "above). Default: Planck15."
+        ),
+    )
+    p.add_argument(
+        "--pe_Om0",
+        type=float,
+        default=None,
+        help="Fiducial Om0 for the same dL->z inversion as --pe_H0. Default: Planck15.",
+    )
     args = p.parse_args()
 
     # Resolve mass-range defaults that guarantee an unbiased mass marginalisation.
@@ -315,12 +352,20 @@ def main() -> None:
     dL = np.empty((nobs, nsamp))
     m1det = np.empty((nobs, nsamp))
     m2det = np.empty((nobs, nsamp))
+    m1src = np.empty((nobs, nsamp))
+    m2src = np.empty((nobs, nsamp))
     chieff = np.empty((nobs, nsamp))
     p_pe = np.empty((nobs, nsamp))
 
     log_m1_width = np.log(m1det_max / m1det_min)
     q_width = 1.0 - args.q_min
     chi_width = 2.0 * args.chi_abs_max
+
+    # Fiducial PE cosmology for the m1src/m2src bookkeeping datasets (see the
+    # OUTPUT SCHEMA note at the top of this file); inert for p_pe/H0 inference.
+    pe_H0 = H0Planck if args.pe_H0 is None else args.pe_H0
+    pe_Om0 = Om0Planck if args.pe_Om0 is None else args.pe_Om0
+    dL_lo, dL_hi = (float(x) for x in dL_grid_bounds(pe_H0, pe_Om0))
 
     for i, path in enumerate(files):
         prob, distmu, distsigma, nside = _read_skymap(path)
@@ -333,6 +378,11 @@ def main() -> None:
         dL_i = _sample_distance_ansatz(
             distmu[pix], distsigma[pix], rng, n_grid=args.n_dist_grid
         )
+        # z(dL) under the fiducial PE cosmology, reusing the likelihood's own
+        # grid inversion (darksirens.utils.cosmology.z_of_dL); clip to the
+        # grid support so an out-of-range dL sample yields a clamped z rather
+        # than the NaN-outside-grid sentinel.
+        z_i = np.asarray(z_of_dL(np.clip(dL_i, dL_lo, dL_hi), pe_H0, pe_Om0))
 
         # surrogate (uninformative) mass/spin draws
         u = rng.uniform(size=nsamp)
@@ -340,6 +390,8 @@ def main() -> None:
         q_i = rng.uniform(args.q_min, 1.0, size=nsamp)
         m2_i = q_i * m1_i
         chi_i = rng.uniform(-args.chi_abs_max, args.chi_abs_max, size=nsamp)
+        m1src_i = m1_i / (1.0 + z_i)
+        m2src_i = m2_i / (1.0 + z_i)
 
         # (2) p_pe = PE PRIOR in the (m1det, q, dL) basis.
         #     distance prior  π(dL) ∝ dL²   (cancels the ansatz dL²)
@@ -353,11 +405,16 @@ def main() -> None:
 
         ra[i], dec[i], dL[i] = ra_i, dec_i, dL_i
         m1det[i], m2det[i], chieff[i] = m1_i, m2_i, chi_i
+        m1src[i], m2src[i] = m1src_i, m2src_i
         p_pe[i] = p_pe_i
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(out, "w") as f:
+        # gwcat-1.0: the generic, non-lensing, chi_eff-basis PE contract (see
+        # the OUTPUT SCHEMA note above) — makes this file load directly
+        # through darksirens.gw.utils.load_gw_samples.
+        f.attrs["format_version"] = "gwcat-1.0"
         f.attrs["nobs"] = int(nobs)
         f.attrs["nsamp"] = int(nsamp)
         f.attrs["mock_data"] = (
@@ -368,12 +425,23 @@ def main() -> None:
         f.attrs["m1det_max"] = float(m1det_max)
         f.attrs["zmax"] = float(args.zmax)
         f.attrs["pe_distance_prior"] = "euclidean_dL2"
+        # Fiducial cosmology used ONLY for the m1src/m2src bookkeeping above;
+        # required by the loader but inert given mock_data=True.
+        f.attrs["pe_cosmology_H0"] = float(pe_H0)
+        f.attrs["pe_cosmology_Om0"] = float(pe_Om0)
+        # p_pe already includes g_chi, the flat proposal density over the
+        # sampled chieff range — the loader must NOT reapply an astrophysical
+        # chi_eff prior on top of it.
+        f.attrs["chi_eff_in_p_pe"] = True
+        f.attrs["chi_eff_amax"] = float(args.chi_abs_max)
         for name, arr in (
             ("ra", ra),
             ("dec", dec),
             ("dL", dL),
             ("m1det", m1det),
             ("m2det", m2det),
+            ("m1src", m1src),
+            ("m2src", m2src),
             ("chieff", chieff),
             ("p_pe", p_pe),
         ):
@@ -382,7 +450,8 @@ def main() -> None:
     from darksirens.cli.common import _ok
     _ok(
         f"Wrote {out}: {nobs} events x {nsamp} samples "
-        f"(m1det∈[{m1det_min:.1f},{m1det_max:.1f}], dL prior ∝ dL²)."
+        f"(m1det∈[{m1det_min:.1f},{m1det_max:.1f}], dL prior ∝ dL², "
+        f"pe_cosmology H0={pe_H0:.2f} Om0={pe_Om0:.3f})."
     )
 
 
