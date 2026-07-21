@@ -46,7 +46,7 @@ def _fiducial_drawn_catalog(path, log10n0_target_counts=MEAN_GALS, seed=7):
     )
     grids = B._precompute_grids(cosmo, survey, em0)
     dN_exp = np.asarray(grids.dN_exp, dtype=float)
-    T = float(np.trapezoid(dN_exp, zg)) if hasattr(np, "trapezoid") else float(np.trapz(dN_exp, zg))
+    T = float(np.trapezoid(dN_exp, zg))
     log10n0 = -2.0 + np.log10(log10n0_target_counts / T)
 
     # Inverse-CDF draws from dN_exp.

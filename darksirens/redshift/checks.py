@@ -56,7 +56,7 @@ from darksirens.redshift.prior import PRIOR_REGISTRY
 def _integrate(log_p: np.ndarray, z: np.ndarray) -> float:
     """Trapezoidal integral of exp(log_p) over z."""
     p = np.exp(np.where(np.isfinite(log_p), log_p, -np.inf))
-    return float(np.trapz(p, z))
+    return float(np.trapezoid(p, z))
 
 
 def _check_result(label: str, value: float, atol: float, verbose: bool) -> bool:

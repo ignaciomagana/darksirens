@@ -13,10 +13,3 @@ try:
     jax.config.update("jax_enable_x64", True)
 except ImportError:
     pass
-
-# numpy<2 compatibility for the whole suite: several tests use np.trapezoid
-# (added in numpy 2.0; np.trapz deprecated there). Production code uses
-# jnp.trapezoid, which exists in the pinned jax.
-import numpy as _np
-if not hasattr(_np, "trapezoid"):
-    _np.trapezoid = _np.trapz

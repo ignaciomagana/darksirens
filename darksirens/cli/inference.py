@@ -1733,6 +1733,30 @@ def _run_sampling(opts, likelihood, pspace):
     return results, wall_sampling
 
 
+def _make_run_dir(opts, timestamp):
+    """Create opts.save_path/<run_name>, disambiguating name collisions.
+
+    run_name embeds pop_model/universe_model/sampler/seed/timestamp
+    (second resolution); two same-config jobs (same seed too) launched
+    within the same second would otherwise collide under exist_ok=True
+    and later overwrite each other's results.hdf5. Retry with a
+    monotonically increasing numeric suffix instead.
+    """
+    run_name = (
+        f"{opts.pop_model}__{opts.universe_model}__{opts.sampler}"
+        f"__seed{opts.seed}__{timestamp}"
+    )
+    run_dir = os.path.join(opts.save_path, run_name)
+    suffix = 0
+    while True:
+        try:
+            os.makedirs(run_dir, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            suffix += 1
+            run_dir = os.path.join(opts.save_path, f"{run_name}-{suffix:02d}")
+
+
 def _save_outputs(opts, data, results, pspace, fixed_parameter_values, prior_overrides, wall_sampling, t_start):
     nEvents = data["nEvents"]
     nsamp   = data["nsamp"]
@@ -1749,9 +1773,7 @@ def _save_outputs(opts, data, results, pspace, fixed_parameter_values, prior_ove
 
     t_end     = datetime.datetime.now()
     timestamp = t_end.strftime("%Y-%m-%dT%H-%M-%S")
-    run_name  = f"{opts.pop_model}__{opts.universe_model}__{opts.sampler}__{timestamp}"
-    run_dir   = os.path.join(opts.save_path, run_name)
-    os.makedirs(run_dir, exist_ok=True)
+    run_dir   = _make_run_dir(opts, timestamp)
 
     meta = {
         "n_events":         nEvents,
