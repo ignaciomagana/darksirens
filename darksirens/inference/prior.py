@@ -361,7 +361,13 @@ def build_parameter_space(
                     f"table."
                 )
 
-    # Apply block overrides
+    # Apply block overrides.  EVERY block that carries sampled bounds is
+    # resolved here -- including the base mark block, the per-catalog suffixed
+    # mark/survey blocks, and the mixture sticks below -- BEFORE the canonical
+    # bounds map is built.  Previously mark/suffixed overrides were validated
+    # as known labels but never actually applied to their bounds (silently
+    # ignored), and fixed+override overlap on those labels raised a bare
+    # KeyError instead of the intended ValueError.
     cosmo_lower, cosmo_upper = apply_block_prior_overrides(
         "cosmology", cosmo_labels, cosmo_lower, cosmo_upper, prior_overrides
     )
@@ -374,7 +380,66 @@ def build_parameter_space(
     sky_lower, sky_upper = apply_block_prior_overrides(
         "sky", sky_labels, sky_lower, sky_upper, prior_overrides
     )
+    mark_lower, mark_upper = apply_block_prior_overrides(
+        "mark", mark_labels, mark_lower, mark_upper, prior_overrides
+    )
+    # Per-catalog suffixed eta blocks (catalogs 2..K): re-resolve each block's
+    # bounds against prior_overrides, labels/kinds untouched.
+    _mark_blocks_ck_overridden = []
+    for _k, (_lbls, _lo, _hi, _knds) in zip(range(2, n_catalogs + 1), mark_blocks_ck):
+        _lo, _hi = apply_block_prior_overrides(
+            f"mark_c{_k}", _lbls, _lo, _hi, prior_overrides
+        )
+        _mark_blocks_ck_overridden.append((_lbls, _lo, _hi, _knds))
+    mark_blocks_ck = _mark_blocks_ck_overridden
 
+    # Per-catalog suffixed survey blocks (catalogs 2..K), resolved here (bounds
+    # only -- not yet fixed-filtered or active-survey-gated) so the canonical
+    # bounds map below sees the final bounds for every suffixed survey label.
+    # Empty for K = 1 (range(2, 1) is empty), matching the bit-identical
+    # single-catalog path.  Each block starts from the pristine
+    # ``_survey_lower/upper_defaults``, not the (possibly overridden) base
+    # ``survey_lower``/``survey_upper``, so a base-label override never leaks
+    # into a suffixed catalog's bounds.
+    survey_blocks_ck = []
+    for k in range(2, n_catalogs + 1):
+        suffixed_labels = [f"{lbl}_c{k}" for lbl in survey_labels]
+        c_lower, c_upper = apply_block_prior_overrides(
+            f"survey_c{k}",
+            suffixed_labels,
+            _survey_lower_defaults,
+            _survey_upper_defaults,
+            prior_overrides,
+        )
+        survey_blocks_ck.append((suffixed_labels, c_lower, c_upper))
+
+    # Mixture-weight sticks fcat_2..fcat_K, resolved here for the same reason.
+    # Empty for K = 1.  Bounds act as TRUNCATION of the Beta(1, b) stick prior
+    # (make_prior_transform's truncated closed-form PPF); a fixed stick outside
+    # [0, 1] would silently become a -inf log weight, so both are rejected here.
+    fcat_labels = [f"fcat_{m}" for m in range(2, n_catalogs + 1)]
+    fcat_lower = [0.0] * len(fcat_labels)
+    fcat_upper = [1.0] * len(fcat_labels)
+    fcat_lower, fcat_upper = apply_block_prior_overrides(
+        "mixture", fcat_labels, fcat_lower, fcat_upper, prior_overrides
+    )
+    for _lbl, _lo, _hi in zip(fcat_labels, fcat_lower, fcat_upper):
+        if not (0.0 <= _lo < _hi <= 1.0):
+            raise ValueError(
+                f"{_lbl} prior bounds must satisfy 0 <= lo < hi <= 1 "
+                f"(a mixture stick); got [{_lo}, {_hi}]."
+            )
+        fixed_val = (fixed_parameter_values or {}).get(_lbl)
+        if fixed_val is not None and not (0.0 <= float(fixed_val) <= 1.0):
+            raise ValueError(
+                f"Fixed value for {_lbl} must lie in [0, 1]; got {fixed_val}."
+            )
+
+    # Canonical label -> bounds map covering every label the prior actually
+    # accepts: cosmology, population, survey (base + suffixed), sky, marks
+    # (base + suffixed), and the mixture sticks.  Used below so fixed+override
+    # overlap validation works for ANY accepted label, not just the
+    # cosmo/pop/survey/sky base set.
     all_bounds = {
         label: (float(lo), float(hi))
         for label, lo, hi in (
@@ -382,6 +447,18 @@ def build_parameter_space(
             + list(zip(pop_labels, pop_lower, pop_upper))
             + list(zip(survey_labels, survey_lower, survey_upper))
             + list(zip(sky_labels, sky_lower, sky_upper))
+            + list(zip(mark_labels, mark_lower, mark_upper))
+            + [
+                item
+                for suffixed_labels, c_lower, c_upper in survey_blocks_ck
+                for item in zip(suffixed_labels, c_lower, c_upper)
+            ]
+            + [
+                item
+                for _lbls, _lo, _hi, _knds in mark_blocks_ck
+                for item in zip(_lbls, _lo, _hi)
+            ]
+            + list(zip(fcat_labels, fcat_lower, fcat_upper))
         )
     }
     fixed_parameter_statuses = validate_fixed_parameter_overrides(
@@ -481,16 +558,13 @@ def build_parameter_space(
     # the mixture-weight sticks fcat_2..fcat_K, all appended AFTER the base survey
     # block and BEFORE the sky/mark blocks so the single-catalog indices above are
     # untouched.  The whole block is skipped for K = 1 (bit-identical path).
+    # Bounds for both were already resolved against prior_overrides above (and
+    # fed into the canonical bounds map); only fixed-parameter filtering and
+    # active-survey gating remain here.
     if n_catalogs >= 2:
-        for k in range(2, n_catalogs + 1):
-            suffixed_labels = [f"{lbl}_c{k}" for lbl in survey_labels]
-            c_lower, c_upper = apply_block_prior_overrides(
-                f"survey_c{k}",
-                suffixed_labels,
-                _survey_lower_defaults,
-                _survey_upper_defaults,
-                prior_overrides,
-            )
+        for k, (suffixed_labels, c_lower, c_upper) in zip(
+            range(2, n_catalogs + 1), survey_blocks_ck
+        ):
             (
                 c_sampled_labels,
                 c_sampled_lower,
@@ -525,26 +599,8 @@ def build_parameter_space(
         # Mixture-weight sticks fcat_2..fcat_K ([0,1] bounds; the Beta(1,b)
         # prior family is carried in prior_kinds below).  Sampled regardless of
         # fix_survey; individually fixable via fixed_parameter_values.  Bounds
-        # are overridable and act as TRUNCATION of the Beta(1,b) stick prior
-        # (make_prior_transform's truncated closed-form PPF); a fixed stick
-        # outside [0,1] would silently become a -inf log weight, so reject it.
-        fcat_labels = [f"fcat_{m}" for m in range(2, n_catalogs + 1)]
-        fcat_lower = [0.0] * len(fcat_labels)
-        fcat_upper = [1.0] * len(fcat_labels)
-        fcat_lower, fcat_upper = apply_block_prior_overrides(
-            "mixture", fcat_labels, fcat_lower, fcat_upper, prior_overrides
-        )
-        for _lbl, _lo, _hi in zip(fcat_labels, fcat_lower, fcat_upper):
-            if not (0.0 <= _lo < _hi <= 1.0):
-                raise ValueError(
-                    f"{_lbl} prior bounds must satisfy 0 <= lo < hi <= 1 "
-                    f"(a mixture stick); got [{_lo}, {_hi}]."
-                )
-            fixed_val = (fixed_parameter_values or {}).get(_lbl)
-            if fixed_val is not None and not (0.0 <= float(fixed_val) <= 1.0):
-                raise ValueError(
-                    f"Fixed value for {_lbl} must lie in [0, 1]; got {fixed_val}."
-                )
+        # were already resolved against prior_overrides and range-validated
+        # above (before the canonical bounds map was built).
         fcat_labels, fcat_lower, fcat_upper = filter_fixed_parameters(
             fcat_labels, fcat_lower, fcat_upper, fixed_parameter_values
         )
