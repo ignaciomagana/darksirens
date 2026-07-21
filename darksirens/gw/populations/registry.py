@@ -81,6 +81,7 @@ from .parametric import (
     GWTC5FiducialBPL2PeaksPopulationModel,
     TruncatedGaussianSpin,
 )
+from .utils import M_HI
 
 _LOG = logging.getLogger(__name__)
 
@@ -555,6 +556,33 @@ def get_model(
     _MODEL_REGISTRY[cache_key] = model
     _MODEL_REGISTRY[resolved_key] = model
     return model
+
+
+def _component_m1_support_max(component) -> float:
+    """Truthful m1 support of one mass component, defaulting to ``M_HI``."""
+    return float(getattr(component, "m1_support_max", M_HI))
+
+
+def population_m1_support_max(model) -> float:
+    """Largest primary mass at which ``model`` can have non-zero support.
+
+    Sizes the opt-in pairing normalisation grid (see
+    :func:`~darksirens.gw.populations.utils.size_pairing_grid_to_support`) so it
+    never clamps inside the model's support.  Handles the three model layouts in
+    the registry: grammar mixtures (``model.mixture.mass_components``), the
+    bespoke single-mass models (``model.mass_component`` -- e.g. the GWTC-5
+    fiducial BPL+2peaks, which reaches 300 Msun, and the Golomb models), and any
+    other object (GP populations), which fall back to the conventional ``M_HI``
+    ceiling that over-covers their sub-100 support.
+    """
+    mixture = getattr(model, "mixture", None)
+    mass_components = getattr(mixture, "mass_components", None)
+    if mass_components:
+        return max(_component_m1_support_max(c) for c in mass_components)
+    mass_component = getattr(model, "mass_component", None)
+    if mass_component is not None:
+        return _component_m1_support_max(mass_component)
+    return float(M_HI)
 
 
 def get_fixed_population_params(

@@ -60,6 +60,7 @@ from .utils import (
     get_pairing_m1_grid,
     normalization_grid_settings,
     M_LO,
+    M_HI,
 )
 
 
@@ -159,6 +160,19 @@ class MassComponent(ABC):
     def n_params(self) -> int:
         """Number of free parameters consumed by this component."""
         return len(self.param_specs)
+
+    @property
+    def m1_support_max(self) -> float:
+        """Largest primary mass at which this component can have non-zero density.
+
+        Used to size the opt-in pairing normalisation grid so it never clamps
+        inside the model's support (see
+        :func:`~darksirens.gw.populations.utils.size_pairing_grid_to_support`).
+        Defaults to the conventional ``M_HI`` ceiling; components whose support
+        extends higher (a fixed high-mass edge, or a sampled ``m_max`` prior
+        reaching past ``M_HI``) override this with a truthful value.
+        """
+        return float(M_HI)
 
     @abstractmethod
     def _eval_unnorm(self, m, theta):

@@ -73,6 +73,13 @@ class PowerLaw(MassComponent):
             self.dm_max_spec,
         ]
 
+    @property
+    def m1_support_max(self) -> float:
+        """Support ends at the sampled high-mass edge (``sfilter_high`` is 0 for
+        ``m >= m_max``), so the largest possible support is the ``m_max`` prior
+        upper bound."""
+        return float(self.m_max_spec.high)
+
     def _eval_unnorm(self, m, t):
         """Evaluate the tapered unnormalised density at detector-frame mass ``m``."""
         a, mmin, mmax, dmmin, dmmax = t[0], t[1], t[2], t[3], t[4]
@@ -119,6 +126,12 @@ class BrokenPowerLaw(MassComponent):
             self.dm_min_spec,
             self.dm_max_spec,
         ]
+
+    @property
+    def m1_support_max(self) -> float:
+        """Support ends at the sampled high-mass edge; the largest possible value
+        is the ``m_max`` prior upper bound."""
+        return float(self.m_max_spec.high)
 
     def _eval_unnorm(self, m, t):
         """Evaluate the smoothed, continuous broken power law at ``m``."""
@@ -208,6 +221,14 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
             self.lambda0_spec,
             self.lambda1_spec,
         ]
+
+    @property
+    def m1_support_max(self) -> float:
+        """Support runs up to the FIXED high-mass edge ``m_high`` (300 Msun by
+        default); the broken power law and both Gaussian peaks are cut to
+        ``m < m_high``.  This exceeds the default ``M_HI`` ceiling, so the
+        opt-in pairing grid must be sized to it."""
+        return float(self.m_high)
 
     def _bpl_raw(self, m, alpha1, alpha2, m_break, m1_low):
         below = (m >= m1_low) & (m < m_break)

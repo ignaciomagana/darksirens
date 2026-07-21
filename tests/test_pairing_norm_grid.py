@@ -45,10 +45,17 @@ import jax.numpy as jnp
 from dataclasses import replace as _dc_replace
 
 import darksirens.gw.populations.utils as U
-from darksirens.gw.populations.utils import get_q_grid, sfilter_low
+from darksirens.gw.populations.utils import (
+    get_q_grid,
+    sfilter_low,
+    normalization_grid_settings,
+    size_pairing_grid_to_support,
+    assert_pairing_grid_covers_support,
+)
 from darksirens.gw.populations.registry import (
     get_model,
     get_fixed_population_params,
+    population_m1_support_max,
 )
 
 
@@ -76,11 +83,16 @@ def _restore_grid_settings():
     _rewarm_default_grids()
 
 
-def _set_pairing_grid(n):
-    """Force pairing_m1_grid to ``n`` (int or None) and clear derived grids."""
-    U._NORMALIZATION_GRID_SETTINGS = _dc_replace(
-        U._NORMALIZATION_GRID_SETTINGS, pairing_m1_grid=n
-    )
+def _set_pairing_grid(n, m_hi=None):
+    """Force pairing_m1_grid to ``n`` (int or None) and clear derived grids.
+
+    ``m_hi`` (optional) also pins the pairing grid's upper bound; leaving it None
+    preserves whatever bound is currently configured (mirrors the module global).
+    """
+    kw = {"pairing_m1_grid": n}
+    if m_hi is not None:
+        kw["pairing_m_hi"] = float(m_hi)
+    U._NORMALIZATION_GRID_SETTINGS = _dc_replace(U._NORMALIZATION_GRID_SETTINGS, **kw)
     U._clear_grid_caches()
 
 
@@ -112,7 +124,7 @@ def _exact_pairing_norm_powerlaw(m1, mmin, dmmin, beta):
         p = np.where(q > 0, sq ** beta, 0.0)
         p = np.asarray(sfilter_low(m2, mmin, dmmin)) * p
         p = np.where(m2 < mmin, 0.0, p)
-        out[i] = np.trapz(p, q)
+        out[i] = np.trapezoid(p, q)  # np.trapz removed in NumPy 2.0
     return out
 
 
@@ -296,3 +308,198 @@ def test_settings_default_none_and_configure():
 def test_settings_rejects_lt_2():
     with pytest.raises(ValueError):
         _dc_replace(U._NORMALIZATION_GRID_SETTINGS, pairing_m1_grid=1)
+
+
+# ---------------------------------------------------------------------------
+# (6) PHY-5: the opt-in pairing grid must be sized to the SELECTED model's m1
+#     support.  gwtc5_fiducial_bpl2peaks supports m1 up to a FIXED 300-Msun edge
+#     -- above the historical 200-node ceiling -- so a grid capped at 200 silently
+#     clamps (jnp.interp) the pairing normaliser for every valid 200 < m1 <= 300
+#     sample.  The registry exposes the support (population_m1_support_max); the
+#     CLI sizes the grid to it (size_pairing_grid_to_support) and validates
+#     coverage (assert_pairing_grid_covers_support).
+# ---------------------------------------------------------------------------
+
+GWTC5 = get_model("gwtc5_fiducial_bpl2peaks")
+# gwtc5 param_specs order (see GWTC5FiducialBPL2PeaksPopulationModel.param_specs):
+#   0..6 mass BPL+2G, 7:m1_low 8:delta_m1 9:lambda0 10:lambda1
+#   11:beta_q 12:m2_low 13:delta_m2 14:mu_chi 15:sigma_chi 16:gamma
+_GW_BETA, _GW_M2LOW, _GW_DM2 = 11, 12, 13
+
+
+def _gwtc5_adverse_theta(delta_m2):
+    """Fiducial gwtc5 vector with the instruction's adverse pairing corner:
+    steepest allowed q slope (beta_q=-2) and m2_low=5, plus a chosen delta_m2."""
+    th = np.asarray(get_fixed_population_params("gwtc5_fiducial_bpl2peaks")).copy()
+    th[_GW_BETA] = -2.0
+    th[_GW_M2LOW] = 5.0
+    th[_GW_DM2] = float(delta_m2)
+    return jnp.asarray(th)
+
+
+def test_population_m1_support_max_values():
+    """gwtc5 reaches its fixed 300-Msun edge; a model whose support ends at/under
+    the historical ceiling keeps 200 (so its grid is unchanged, bit-for-bit)."""
+    assert population_m1_support_max(GWTC5) == 300.0
+    assert population_m1_support_max(MODEL) == 200.0  # powerlaw+peak
+
+
+def test_gwtc5_pairing_grid_sized_agrees_over_full_support():
+    """The FIX.  With the pairing grid sized to the model's 300-Msun support the
+    grid path matches the exact per-sample q-integration across the WHOLE m1 =
+    190..300 range; left at the pre-fix 200 ceiling the SAME grid clamps badly
+    above 200.
+
+    A SMOOTH secondary-mass taper (delta_m2=0.5) is used so the pairing
+    normaliser N(m1) is smooth: it isolates the clamp defect from the unrelated
+    q-quadrature staircase that a hard step (delta_m2=0) adds to a discontinuous
+    integrand -- that staircase is exercised separately below."""
+    theta = _gwtc5_adverse_theta(0.5)
+    rng = np.random.default_rng(20)
+    N = 4000
+    m1 = jnp.asarray(rng.uniform(190.0, 299.5, N))
+    q = jnp.asarray(rng.uniform(0.05, 1.0, N))
+    z = jnp.asarray(rng.uniform(0.01, 1.0, N))
+    chi = jnp.asarray(rng.uniform(-0.4, 0.4, N))
+
+    def lp():
+        return np.asarray(GWTC5.log_p_pop(m1, q, z, chi, theta))
+
+    _set_pairing_grid(None)
+    exact = lp()
+    fin = np.isfinite(exact)
+    assert fin.sum() > 1000
+
+    # Pre-fix: the historical 200-node ceiling clamps every 200 < m1 <= 300 sample.
+    _set_pairing_grid(2048, m_hi=200.0)
+    unsized = lp()
+    m1n = np.asarray(m1)
+    hi = fin & (m1n > 200.0)
+    assert np.abs(unsized[hi] - exact[hi]).max() > 0.1, "expected large pre-fix clamp error"
+
+    # Post-fix: size the grid to the model support (exactly what the CLI does).
+    _set_pairing_grid(2048, m_hi=200.0)
+    size_pairing_grid_to_support(population_m1_support_max(GWTC5))
+    assert normalization_grid_settings().pairing_m_hi == 300.0
+    sized = lp()
+    max_err = np.abs(sized[fin] - exact[fin]).max()
+    # Documented interpolation tolerance (measured ~2.4e-4 for these corners).
+    assert max_err < 1.0e-3, max_err
+
+
+def test_gwtc5_pairing_grid_clamp_error_reproduces_phy5():
+    """Reproduces PHY-5 with the instruction's exact adverse params (beta_q=-2,
+    m2_low=5, delta_m2=0): at the pre-fix 200 ceiling a valid sample at m1=299 --
+    inside the 300-Msun support -- silently uses the m1=200 normaliser, an
+    order-0.1+ log-density error that grows toward the top of the support.  Sizing
+    the grid to the support removes the clamp."""
+    theta = _gwtc5_adverse_theta(0.0)
+    m1 = jnp.asarray([201.0, 250.0, 299.0])
+    q = jnp.full(3, 0.9)
+    z = jnp.full(3, 0.1)
+    chi = jnp.zeros(3)
+
+    def lp():
+        return np.asarray(GWTC5.log_p_pop(m1, q, z, chi, theta))
+
+    _set_pairing_grid(None)
+    exact = lp()
+    assert np.all(np.isfinite(exact))
+
+    _set_pairing_grid(2048, m_hi=200.0)
+    clamp_err = np.abs(lp() - exact)
+    assert clamp_err[-1] > 0.1, clamp_err            # m1 = 299, deep in the gap
+    assert clamp_err[-1] > clamp_err[0]              # worse further past 200
+
+    _set_pairing_grid(2048, m_hi=200.0)
+    size_pairing_grid_to_support(300.0)
+    sized_err = np.abs(lp() - exact)
+    assert sized_err[-1] < clamp_err[-1]             # sizing removes the clamp
+
+
+def test_pairing_grid_validation_rejects_undersized_grid():
+    """assert_pairing_grid_covers_support fails loudly for an enabled grid whose
+    upper bound cannot cover a 300-Msun model, and is a no-op once the grid is
+    sized or disabled."""
+    _set_pairing_grid(2048, m_hi=200.0)
+    with pytest.raises(ValueError, match="does not cover"):
+        assert_pairing_grid_covers_support(300.0, model_name="gwtc5_fiducial_bpl2peaks")
+
+    size_pairing_grid_to_support(300.0)
+    assert_pairing_grid_covers_support(300.0)  # sized -> no raise
+
+    _set_pairing_grid(None, m_hi=200.0)
+    assert_pairing_grid_covers_support(300.0)  # disabled -> exact path, no raise
+
+
+def test_size_pairing_grid_scales_nodes_and_is_noop_when_covered():
+    """Sizing preserves log spacing and scales the node count up so density does
+    not drop; it is inert when the support already fits and when the grid is off."""
+    # Fits under the default ceiling -> untouched (historical grid, bit-for-bit).
+    _set_pairing_grid(2048, m_hi=200.0)
+    size_pairing_grid_to_support(200.0)
+    s = normalization_grid_settings()
+    assert s.pairing_m_hi == 200.0 and s.pairing_m1_grid == 2048
+
+    # Extending to 300 scales N in proportion to the added log-range.
+    size_pairing_grid_to_support(300.0)
+    s = normalization_grid_settings()
+    import math
+    expected_n = math.ceil(2048 * math.log(300.0 / s.m_lo) / math.log(200.0 / s.m_lo))
+    assert s.pairing_m_hi == 300.0 and s.pairing_m1_grid == expected_n
+
+    # Disabled grid -> sizing is inert (exact path ignores the bound).
+    _set_pairing_grid(None, m_hi=200.0)
+    size_pairing_grid_to_support(300.0)
+    assert normalization_grid_settings().pairing_m1_grid is None
+
+
+# ---------------------------------------------------------------------------
+# (7) Trace-safety of the cached grid builders.  The builders compute with jnp
+#     and are lru-cached; if the FIRST eval after a cache clear happens inside a
+#     jit trace (as it does for the lazily-normalising gwtc5 model, whose _norm
+#     first touches get_mass_grid inside the selection scan), a naive builder
+#     would cache a DynamicJaxprTracer that leaks into the next trace
+#     (jax.errors.UnexpectedTracerError).  ensure_compile_time_eval forces a
+#     concrete, trace-independent constant.  This mirrors the failure chain
+#     without running the CLI end-to-end.
+# ---------------------------------------------------------------------------
+
+def test_cold_cache_grids_do_not_leak_tracers_across_jits():
+    _set_pairing_grid(2048, m_hi=300.0)
+
+    # Host-side reference grids, built eagerly (outside any trace).
+    U._clear_grid_caches()
+    ref_mass = np.asarray(U.get_mass_grid())
+    ref_pair = np.asarray(U.get_pairing_m1_grid())
+
+    # Force COLD caches so the FIRST materialisation happens inside a trace.
+    U._clear_grid_caches()
+
+    @jax.jit
+    def first(x):
+        return (
+            x
+            + U.get_mass_grid().sum()
+            + U.get_q_grid().sum()
+            + U.get_chi_grid().sum()
+            + U.get_m1_q_mesh()[0].sum()
+            + U.get_pairing_m1_grid().sum()
+        )
+
+    r1 = float(first(1.0))
+
+    # A DIFFERENT jitted function reusing the same cached grids: pre-fix this
+    # raised UnexpectedTracerError because the cached value was a tracer from
+    # ``first``'s trace; post-fix the cached grids are concrete constants.
+    @jax.jit
+    def second(x):
+        return x * U.get_mass_grid().mean() + U.get_pairing_m1_grid().mean()
+
+    r2 = float(second(2.0))
+
+    assert np.isfinite(r1) and np.isfinite(r2)
+    # The grids cached from inside the trace are concrete and bit-identical to
+    # the host-side reference (ensure_compile_time_eval preserves x64 values).
+    assert np.array_equal(np.asarray(U.get_mass_grid()), ref_mass)
+    assert np.array_equal(np.asarray(U.get_pairing_m1_grid()), ref_pair)
