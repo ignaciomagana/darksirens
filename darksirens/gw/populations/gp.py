@@ -656,9 +656,12 @@ class AdditiveGPPopulation:
 # lower-triangular in (ln m1, ln m2) (m2 <= m1) following gppop, optionally
 # crossed with redshift bins.  The gppop rate density
 #     p(m1, m2, z) = n_bin * (dV_c/dz)/(1+z) / (m1 m2)
-# maps onto darksirens by dropping the (dV_c/dz)/(1+z) factor (supplied by the
-# redshift prior + the likelihood Jacobian) and converting (m1, m2) -> (m1, q)
-# via |dm2/dq| = m1, giving the source-frame shape  n_bin / (q m1).
+# maps onto darksirens by splitting the (dV_c/dz)/(1+z) factor across three
+# places: the redshift prior supplies dV_c/dz (volume.py), the likelihood's
+# log1p Jacobian accounts for the m1src -> m1det mass change of variables (NOT
+# time dilation; utils.py), and the 1/(1+z) source-time dilation is applied
+# here in ``log_p_pop`` (see the z-bearing branch).  The (m1, m2) -> (m1, q)
+# conversion via |dm2/dq| = m1 gives the source-frame shape  n_bin / (q m1).
 
 # Default bin edges (coarse for tractability; override via env vars).
 def _gppop_edges(env_name, default):
@@ -861,7 +864,11 @@ class BinnedGPPopulation:
         p = p_un * self._spin_density(chi, mu_chi, sig_chi)
         log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
         if self._has_z:
-            return log_p
+            # gppop_mz z-bins carry the source-frame R(z); apply the 1/(1+z)
+            # observer/source time dilation here (the likelihood's log1p is the
+            # detector-mass Jacobian, not dilation; cf. the parametric powerlaw
+            # (gamma - 1) whose -1 IS this factor).
+            return log_p - jnp.log1p(z)
         return log_p + (gamma - 1.0) * jnp.log1p(z)
 
 
