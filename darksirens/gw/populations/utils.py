@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 
 import jax.numpy as jnp
-from jax import jit
+from jax import ensure_compile_time_eval, jit
 
 # ======================================================================
 # Configurable normalisation grids
@@ -219,9 +219,21 @@ def assert_pairing_grid_covers_support(
         )
 
 
+# ── Trace-safe cached grids ──────────────────────────────────────────────────
+# The grid builders below are ``lru_cache``d and compute with ``jnp`` ops.  If
+# the FIRST call after a cache clear (``configure_normalization_grids`` clears
+# them) happens INSIDE a jit trace -- as it does for the lazily-normalising
+# ``gwtc5_fiducial_bpl2peaks`` model, whose ``_norm`` first touches
+# ``get_mass_grid`` inside the selection scan -- a naive ``jnp.linspace`` would
+# cache a ``DynamicJaxprTracer`` that then leaks into the next trace
+# (``jax.errors.UnexpectedTracerError``).  ``ensure_compile_time_eval`` forces
+# each builder to evaluate to a CONCRETE array (bit-identical to the plain
+# ``jnp`` result, x64 preserved), so the cached value is a trace-independent
+# constant that is safe to reuse across traces.
 @lru_cache(maxsize=8)
 def _linspace(lo: float, hi: float, n: int):
-    return jnp.linspace(lo, hi, int(n))
+    with ensure_compile_time_eval():
+        return jnp.linspace(lo, hi, int(n))
 
 
 def _clear_grid_caches() -> None:
@@ -253,7 +265,10 @@ def get_chi_grid():
 
 @lru_cache(maxsize=1)
 def get_m1_q_mesh():
-    return jnp.meshgrid(get_mass_grid(), get_q_grid(), indexing="ij")
+    # ensure_compile_time_eval so the meshgrid is concrete even when this cache
+    # is first filled inside a jit trace (see _linspace note).
+    with ensure_compile_time_eval():
+        return jnp.meshgrid(get_mass_grid(), get_q_grid(), indexing="ij")
 
 
 @lru_cache(maxsize=1)
@@ -279,7 +294,10 @@ def get_pairing_m1_grid():
             "get_pairing_m1_grid requires pairing_m1_grid to be configured; "
             "it is None (exact per-sample q-normalisation)."
         )
-    return jnp.exp(jnp.linspace(jnp.log(s.m_lo), jnp.log(s.pairing_m_hi), int(n)))
+    # ensure_compile_time_eval so a cold-cache first eval inside a jit trace
+    # yields a concrete constant, not a leaking tracer (see _linspace note).
+    with ensure_compile_time_eval():
+        return jnp.exp(jnp.linspace(jnp.log(s.m_lo), jnp.log(s.pairing_m_hi), int(n)))
 
 
 # Backward-compatible aliases.  They reflect import-time/default settings;

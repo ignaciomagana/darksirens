@@ -452,3 +452,54 @@ def test_size_pairing_grid_scales_nodes_and_is_noop_when_covered():
     _set_pairing_grid(None, m_hi=200.0)
     size_pairing_grid_to_support(300.0)
     assert normalization_grid_settings().pairing_m1_grid is None
+
+
+# ---------------------------------------------------------------------------
+# (7) Trace-safety of the cached grid builders.  The builders compute with jnp
+#     and are lru-cached; if the FIRST eval after a cache clear happens inside a
+#     jit trace (as it does for the lazily-normalising gwtc5 model, whose _norm
+#     first touches get_mass_grid inside the selection scan), a naive builder
+#     would cache a DynamicJaxprTracer that leaks into the next trace
+#     (jax.errors.UnexpectedTracerError).  ensure_compile_time_eval forces a
+#     concrete, trace-independent constant.  This mirrors the failure chain
+#     without running the CLI end-to-end.
+# ---------------------------------------------------------------------------
+
+def test_cold_cache_grids_do_not_leak_tracers_across_jits():
+    _set_pairing_grid(2048, m_hi=300.0)
+
+    # Host-side reference grids, built eagerly (outside any trace).
+    U._clear_grid_caches()
+    ref_mass = np.asarray(U.get_mass_grid())
+    ref_pair = np.asarray(U.get_pairing_m1_grid())
+
+    # Force COLD caches so the FIRST materialisation happens inside a trace.
+    U._clear_grid_caches()
+
+    @jax.jit
+    def first(x):
+        return (
+            x
+            + U.get_mass_grid().sum()
+            + U.get_q_grid().sum()
+            + U.get_chi_grid().sum()
+            + U.get_m1_q_mesh()[0].sum()
+            + U.get_pairing_m1_grid().sum()
+        )
+
+    r1 = float(first(1.0))
+
+    # A DIFFERENT jitted function reusing the same cached grids: pre-fix this
+    # raised UnexpectedTracerError because the cached value was a tracer from
+    # ``first``'s trace; post-fix the cached grids are concrete constants.
+    @jax.jit
+    def second(x):
+        return x * U.get_mass_grid().mean() + U.get_pairing_m1_grid().mean()
+
+    r2 = float(second(2.0))
+
+    assert np.isfinite(r1) and np.isfinite(r2)
+    # The grids cached from inside the trace are concrete and bit-identical to
+    # the host-side reference (ensure_compile_time_eval preserves x64 values).
+    assert np.array_equal(np.asarray(U.get_mass_grid()), ref_mass)
+    assert np.array_equal(np.asarray(U.get_pairing_m1_grid()), ref_pair)
