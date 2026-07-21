@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **`field` catalog sky-weighting is now the dark-siren default at every K.**
+  The default estimand is the JOINT catalog host-density estimand: the per-pixel
+  redshift-prior numerator is normalized by the survey-global `Z(theta)` instead
+  of the per-pixel `Z[pix]`, so RELATIVE angular host density is preserved — a
+  pixel with 100 candidate hosts now carries ~100x the angular weight of a pixel
+  with one (the previous K=1 `conditional` default re-normalized every pixel to
+  unit mass and silently discarded that contrast). `--catalog_sky_weighting
+  field` at K=1 is no longer fatal; `conditional` stays selectable as the
+  documented radial-only legacy estimand (bit-for-bit reproducible for older
+  runs). At K=1 the `log10n0` number-density channel (which enters through the
+  survey-global normalizer) cancels between the PE and selection terms, so
+  `log10n0` is only weakly identified there and marginalizes against its prior —
+  what field restores at K=1 is the angular host weighting. See
+  `tests/test_field_sky_weighting_host_density.py`.
 - **Multitracer unification: one likelihood path, full feature parity at any
   K.** The K=1 legacy body and the K>=2 mixture branch of
   `darksiren_log_likelihood` are unified — K=1 is a length-1 mixture with a
@@ -17,11 +31,9 @@
   survey-global normalizer now carries the SAME modulated missing budget as
   the numerator (Q_LSS / delta_g / marked `mu_miss`, per ensemble member),
   so `fcat_k` stays a coherent host fraction with every mode active.
-  `--catalog_sky_weighting` auto-resolves by K (conditional at K=1, field at
-  K>=2) and the two silent estimand traps are now fatal for `dark_sirens`:
-  explicit `field` at K=1 (the global normalizer cancels between the PE and
-  selection terms) and explicit `conditional` at K>=2 (the railing
-  z-shape-only `fcat`).  `dark_sirens_complete` keeps its pre-existing
+  `--catalog_sky_weighting` auto-resolves to `field` at every K (see the
+  dedicated entry above) and explicit `conditional` at K>=2 stays fatal for
+  `dark_sirens` (the railing z-shape-only `fcat`).  `dark_sirens_complete` keeps its pre-existing
   special-case rules (K>=2 requires field; no marks).  `--mark_model` now
   requires `--universe_model dark_sirens` at any K (other models silently
   sampled phantom flat eta dimensions).  `darksirens_analyze` reports the

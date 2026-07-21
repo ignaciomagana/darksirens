@@ -251,20 +251,33 @@ def prepare_redshift_prior_state(
 
     ``catalog_sky_weighting`` selects the ``dark_sirens`` redshift-prior
     normalization convention (static; only consulted for ``model ==
-    "dark_sirens"``): ``"conditional"`` (default) normalizes each pixel by its
-    own ``Z[pix] = N_obs + N_miss`` (bit-identical legacy behaviour);
-    ``"field"`` instead stores a survey-GLOBAL ``log_Z_global`` so the K-catalog
-    mixture weight measures the host FRACTION (number-density / sky-clustering
-    contrast), the estimand fix motivated by the gws-agn campaign.  ``"field"``
+    "dark_sirens"``).  ``"field"`` is the JOINT catalog host-density estimand
+    and the CLI default (all K): it stores a survey-GLOBAL ``log_Z_global`` and
+    normalizes the per-pixel numerator by it, so RELATIVE angular host density
+    is preserved -- a pixel with 100 candidate hosts carries ~100x the angular
+    weight of a pixel with 1 -- and for a K-catalog mixture the weight measures
+    the host FRACTION (number-density / sky-clustering contrast).  ``"field"``
     is gated to the plain galaxy-count host model with the legacy dummy
-    overdensity (no marks, no Q_LSS ensemble/table).
+    overdensity (no marks, no Q_LSS ensemble/table).  ``"conditional"`` is the
+    radial-only LEGACY estimand: it normalizes each pixel by its OWN ``Z[pix] =
+    N_obs + N_miss``, so every pixel integrates to unit mass and relative
+    angular host density is DISCARDED (bit-identical legacy behaviour; kept for
+    reproducing older single-catalog runs).  It is also this builder's SIGNATURE
+    default -- the safe fallback for programmatic callers that do not supply the
+    field-normalization inputs; the CLI resolves the user-facing default to
+    ``"field"`` (see ``_resolve_catalog_sky_weighting``).
 
-    NOTE (K=1): the global constant ``log_Z_global`` cancels between the PE
-    and selection terms of a single-catalog likelihood, so at K=1 field mode's
-    only effect is removing the per-pixel ``Z[pix]`` normalization; the global
-    normalizer bites only for K>=2 mixtures, where each catalog's ``Z_k``
-    enters its mixture branch non-cancelling. Do not expect K=1 field runs to
-    constrain n0 through ``log_Z_global``.
+    NOTE (K=1): the survey-global constant ``log_Z_global`` cancels between the
+    PE and selection terms of a single-catalog likelihood, so at K=1 the
+    NET difference field makes versus conditional is removing the per-pixel
+    ``Z[pix]`` normalization -- i.e. restoring the relative angular host
+    weighting.  Its dedicated number-density channel (log10n0 entering through
+    ``log_Z_global``) therefore vanishes at K=1; log10n0 keeps only the weak
+    identification it has in both modes, through the completeness ratio
+    ``C(z; n0)`` and the missing-branch amplitude ``dN_miss`` in the per-pixel
+    numerator, and otherwise marginalizes against its prior.  The global
+    normalizer bites for log10n0 only at K>=2, where each catalog's ``Z_k``
+    enters its mixture branch non-cancelling.
     """
     if model == "spectral_sirens":
         # NaN-guarded log: the volume grid is EXACTLY zero at z = 0, and a
@@ -706,9 +719,11 @@ def eval_redshift_prior_with_state(
 ) -> jnp.ndarray:
     """Vectorised log p(z | pix) using a prepared state.  O(N_max) / sample.
 
-    ``catalog_sky_weighting`` ("conditional" default) selects the ``dark_sirens``
-    normalization convention; it is a static string branch and is inert for every
-    other ``model``.
+    ``catalog_sky_weighting`` selects the ``dark_sirens`` normalization
+    convention; it is a static string branch and is inert for every other
+    ``model``.  The signature default ``"conditional"`` is the safe fallback for
+    callers that supply no field-normalization inputs; the CLI resolves the
+    user-facing default to ``"field"`` (the joint catalog host-density estimand).
     """
     if model == "spectral_sirens":
         return vmap(lambda z_i: jnp.interp(z_i, zgrid, state.log_pvol))(z)

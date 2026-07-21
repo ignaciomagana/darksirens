@@ -109,10 +109,12 @@ def test_single_survey_path_is_unaffected_by_multi_catalog_guards():
 # degenerate explicit combinations (dark_sirens only).
 # ---------------------------------------------------------------------------
 
-def test_explicit_field_at_k1_dark_sirens_exits_nonzero():
-    """field@K=1: the survey-global normalizer cancels between the PE and
-    selection terms (the n0 channel vanishes), so the explicit combination is
-    fatal for dark_sirens rather than a silently degenerate run."""
+def test_explicit_field_at_k1_dark_sirens_is_accepted():
+    """field@K=1: now ACCEPTED for dark_sirens (field is the default estimand).
+    The survey-global normalizer's log10n0 channel cancels at K=1, but field
+    restores the relative angular host weighting the conditional estimand
+    discards, so the run proceeds past the guard to data loading (failing there
+    on the dummy paths, not in the sky-weighting guard)."""
     result = _run([
         "--gw_path", "/nonexistent/gw.h5",
         "--gwselection_path", "/nonexistent/sel.h5",
@@ -122,9 +124,8 @@ def test_explicit_field_at_k1_dark_sirens_exits_nonzero():
         "--sampler", "tinyns",
     ])
     assert result.returncode != 0
-    assert "degenerate with a single" in result.stdout
-    assert "No such file" not in result.stdout
-    assert "No such file" not in result.stderr
+    assert "degenerate with a single" not in result.stdout
+    assert "field (explicit)" in result.stdout
 
 
 def test_explicit_conditional_at_k2_dark_sirens_exits_nonzero():
@@ -145,9 +146,10 @@ def test_explicit_conditional_at_k2_dark_sirens_exits_nonzero():
     assert "No such file" not in result.stderr
 
 
-def test_unset_weighting_resolves_conditional_at_k1():
-    """No --catalog_sky_weighting at K=1 resolves to conditional (printed in
-    the run configuration before data loading fails on the dummy paths)."""
+def test_unset_weighting_resolves_field_at_k1():
+    """No --catalog_sky_weighting at K=1 resolves to field -- the joint
+    catalog host-density estimand is now the default at every K (printed in the
+    run configuration before data loading fails on the dummy paths)."""
     result = _run([
         "--gw_path", "/nonexistent/gw.h5",
         "--gwselection_path", "/nonexistent/sel.h5",
@@ -156,7 +158,7 @@ def test_unset_weighting_resolves_conditional_at_k1():
         "--sampler", "tinyns",
     ])
     assert result.returncode != 0
-    assert "conditional (auto)" in result.stdout
+    assert "field (auto)" in result.stdout
 
 
 def test_unset_weighting_resolves_field_at_k2():

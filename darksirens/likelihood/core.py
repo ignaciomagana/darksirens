@@ -356,9 +356,13 @@ def darksiren_log_likelihood(
     mark_params_all: tuple = (),
     mark_names_all: tuple = (),
     # --- catalog sky-weighting convention (dark_sirens only) ----------------
-    # "conditional" (default): per-pixel normalizer Z[pix] -- bit-identical
-    # legacy behaviour.  "field": survey-global normalizer so the mixture weight
-    # is the host FRACTION.  Static; gated to the plain galaxy-count host model.
+    # "field": survey-global normalizer -> the JOINT catalog host-density
+    # estimand (relative angular host density preserved; mixture weight is the
+    # host FRACTION).  It is the CLI/user default at every K.  "conditional":
+    # per-pixel normalizer Z[pix] -- radial-only legacy estimand, bit-identical
+    # to pre-existing behaviour.  The signature default below stays "conditional"
+    # as the safe fallback for callers that supply no field-normalization inputs.
+    # Static; field is gated to the plain galaxy-count host model.
     catalog_sky_weighting: str = "conditional",
     # Per-catalog redshift-prior-state sharing verdict, computed EAGERLY by the
     # caller via ``redshift_prior_state_sharing`` (object identity is gone once

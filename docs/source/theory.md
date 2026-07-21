@@ -139,18 +139,47 @@ built ([`em.prior`](reference/em.md)):
   (`darksirens_inference_lensing --cluster_mode off --wl_backend lognormal|tabulated`).
 
 For the dark-siren models the per-pixel redshift prior is assembled from an
-observed (catalog) term and a missing (incompleteness) term,
+observed (catalog) term and a missing (incompleteness) term. The **default
+(`field`) estimand** — the *joint catalog host-density* estimand — normalizes
+the per-pixel numerator by the **survey-global** budget,
 
 $$
 p(z \mid \text{pix}) = \frac{N_{\rm obs}(\text{pix})\, p_{\rm cat}(z\mid\text{pix})
   + \mathrm{d}N_{\rm miss}(z\mid\text{pix})}
-  {N_{\rm obs}(\text{pix}) + N_{\rm miss}(\text{pix})},
+  {Z(\theta)},
+\qquad
+Z(\theta) = \sum_{\text{pix}'} \big[N_{\rm obs}(\text{pix}') + N_{\rm miss}(\text{pix}')\big],
 $$
 
 where $p_{\rm cat}$ is a per-galaxy redshift-kernel sum and $N_{\rm obs}$ is the
-catalog count in the pixel. To keep the JIT likelihood deterministic these
-states are precomputed once per proposal by `prepare_redshift_prior_state` and
-read by the traced `eval_redshift_prior_with_state`.
+catalog count in the pixel. Because the denominator is one survey-wide constant,
+the *relative* angular host density survives: a pixel with 100 candidate hosts
+carries $\sim\!100\times$ the angular weight of a pixel with one. For a
+$K\!\ge\!2$ mixture each catalog's $Z_k(\theta)$ turns the mixture weight
+$f_{\mathrm{cat},k}$ into the host *fraction* (number-density / sky-clustering
+contrast).
+
+The legacy **`conditional` estimand** (radial-only; selectable with
+`--catalog_sky_weighting conditional`, kept for reproducing older single-catalog
+runs) instead normalizes each pixel by its *own* budget,
+
+$$
+p_{\rm cond}(z \mid \text{pix}) = \frac{N_{\rm obs}(\text{pix})\, p_{\rm cat}(z\mid\text{pix})
+  + \mathrm{d}N_{\rm miss}(z\mid\text{pix})}
+  {N_{\rm obs}(\text{pix}) + N_{\rm miss}(\text{pix})},
+$$
+
+so *every* pixel integrates to unit mass and the relative angular host density
+is discarded — the two estimands differ only by a per-pixel constant in $z$
+(the same radial shape). At $K\!=\!1$ the survey-global constant $Z(\theta)$
+cancels between the PE and selection terms, so choosing `field` over
+`conditional` there amounts precisely to *restoring* that angular weighting;
+its dedicated number-density (`log10n0`) channel, which enters through
+$Z(\theta)$, is degenerate at $K\!=\!1$ and marginalizes against its prior.
+
+To keep the JIT likelihood deterministic these states are precomputed once per
+proposal by `prepare_redshift_prior_state` and read by the traced
+`eval_redshift_prior_with_state`.
 
 ### Catalog completeness and the missing branch
 
