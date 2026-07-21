@@ -60,8 +60,17 @@ from typing import Sequence
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 
+from darksirens.redshift.grid import zMax
+
 from .base import ParamSpec, pack_specs
-from .utils import get_mass_grid, get_q_grid, get_chi_grid, sfilter_low, sfilter_high
+from .utils import (
+    get_mass_grid,
+    get_q_grid,
+    get_chi_grid,
+    normalization_grid_settings,
+    sfilter_low,
+    sfilter_high,
+)
 
 
 # ============================================================
@@ -84,27 +93,68 @@ _JITTER_REL = 1e-4
 # z-independent integrals use the full normalisation grids for accuracy.
 _KD_N = {"m1": 48, "q": 24, "chi": 24}     # coarse per-axis sizes for k-D norm
 _KD_SPAN = {"m1": (2.0, 100.0), "q": (0.02, 1.0), "chi": (-1.0, 1.0)}
+_M1NORM_N = 64                             # log-m1 nodes for m1-conditional q-norm
 # The z-normalisation interpolation grid is FROZEN above _ZNORM_HI: GP model
 # evaluations at z > _ZNORM_HI silently reuse the norm at the grid edge
 # (library-review SEV-3). Parametric models are unaffected (analytic in z).
-# Coupling: an explicit DARKSIRENS_ZMAX now raises the GP ceiling with it, so a
-# single knob suffices for high-redshift GP studies (e.g. lensed z > 3
-# sources); DARKSIRENS_GP_ZNORM_HI still overrides explicitly. The default
-# (neither env var set) is unchanged at 3.0, and _ZNORM_N tracks _ZNORM_HI to
-# hold the node density fixed (24 nodes at 3.0), so default numerics are
-# bit-identical.
+# Coupling: the ceiling tracks the SHARED analysis redshift grid -- ``zMax`` from
+# :mod:`darksirens.redshift.grid` (itself set by DARKSIRENS_ZMAX, default 5.0) --
+# so the GP normaliser can never freeze below the redshifts the rest of the
+# pipeline samples (the old default of 3.0 silently froze z in (3, 5]).
+# DARKSIRENS_GP_ZNORM_HI still overrides explicitly; ``_ZNORM_N`` tracks
+# ``_ZNORM_HI`` to hold node density fixed (8/z-unit: 40 nodes at the z=5
+# default, 24 at the 3.0 floor).
 if "DARKSIRENS_GP_ZNORM_HI" in os.environ:
     _ZNORM_HI = float(os.environ["DARKSIRENS_GP_ZNORM_HI"])
-elif "DARKSIRENS_ZMAX" in os.environ:
-    _ZNORM_HI = max(3.0, float(os.environ["DARKSIRENS_ZMAX"]))
 else:
-    _ZNORM_HI = 3.0
+    _ZNORM_HI = max(3.0, float(zMax))
 _ZNORM_N = max(24, int(round(8.0 * _ZNORM_HI)))
 
 
 def _coarse_axis_grid(axis: str):
     lo, hi = _KD_SPAN[axis]
     return jnp.linspace(lo, hi, _KD_N[axis])
+
+
+def _m1norm_grid():
+    """Log-spaced m1 nodes for the m1-conditional q-normalisation.
+
+    The four ``q``-in-GP / ``m1``-not-in-GP models normalise the GP factor over
+    ``q`` (and ``chi``) *conditional on m1*: the ``m2 = q*m1`` secondary cut ties
+    the taper to the query m1, so the norm is a smooth 1-D function of m1 (like
+    the z-conditioning idiom).  It is tabulated on these nodes once per proposal
+    and interpolated in ``log m1`` per query (nodes are log-uniform).  The span
+    matches the mass normalisation grid (floored at 2.0, the ``m_min`` prior
+    lower bound, so every node can host a physical m2 = q*m1 >= m_min).
+    """
+    s = normalization_grid_settings()
+    return jnp.exp(jnp.linspace(jnp.log(max(s.m_lo, 2.0)),
+                                jnp.log(s.m_hi), _M1NORM_N))
+
+
+def _interp2_log(ltab, zg, m1g, z_q, m1_q):
+    """Bilinear, edge-clamped interpolation of a ``(Nz, Nm1)`` log-table.
+
+    Evaluates ``exp(bilerp(ltab))`` at the *paired* queries ``(z_q, m1_q)``
+    (both 1-D, same length) using ``jnp.searchsorted`` + clipped linear weights.
+    Memory is O(N_query) -- the table is gathered at the bracketing nodes, never
+    outer-producted against the queries -- and the map is differentiable exactly
+    like ``jnp.interp`` (grad flows through the table values and the edge-clamped
+    weights).  The m1 axis is interpolated in ``log m1`` because ``m1g`` is
+    log-uniform.
+    """
+    lm1g = jnp.log(m1g)
+    lm1q = jnp.log(jnp.clip(m1_q, _LOGSAFE, None))
+
+    iz = jnp.clip(jnp.searchsorted(zg, z_q) - 1, 0, zg.shape[0] - 2)
+    wz = jnp.clip((z_q - zg[iz]) / (zg[iz + 1] - zg[iz]), 0.0, 1.0)
+
+    im = jnp.clip(jnp.searchsorted(lm1g, lm1q) - 1, 0, lm1g.shape[0] - 2)
+    wm = jnp.clip((lm1q - lm1g[im]) / (lm1g[im + 1] - lm1g[im]), 0.0, 1.0)
+
+    top = ltab[iz, im] * (1.0 - wm) + ltab[iz, im + 1] * wm
+    bot = ltab[iz + 1, im] * (1.0 - wm) + ltab[iz + 1, im + 1] * wm
+    return jnp.exp(top * (1.0 - wz) + bot * wz)
 
 
 def _znorm_interp(eval_norm_fn, z_query):
@@ -391,7 +441,7 @@ class JointGPPopulation:
         p_gp_un = p_gp_un * self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
 
         norm = self._normalise(kern, alpha, alpha_gp, beta_gp,
-                               z, m_min, dm_min, m_max, dm_max)
+                               m1, z, m_min, dm_min, m_max, dm_max)
         p_gp = p_gp_un / jnp.where(norm > 0, norm, 1.0)
 
         # ---- baseline factors for non-GP probability axes ----
@@ -420,7 +470,7 @@ class JointGPPopulation:
         return s
 
     def _normalise(self, kern, alpha, alpha_gp, beta_gp,
-                   z, m_min, dm_min, m_max, dm_max):
+                   m1, z, m_min, dm_min, m_max, dm_max):
         """Integrate exp(f) * tapers over the probability axes.
 
         When z is a GP axis the field is z-dependent; the integral is then a
@@ -428,6 +478,18 @@ class JointGPPopulation:
         query redshifts (cost independent of the number of queries).  A coarse
         prob-axis grid is used for multi-axis integrals under z-conditioning;
         single-axis and z-independent integrals use the full grids.
+
+        m1-conditioning
+        ---------------
+        When ``q`` is a probability axis but ``m1`` is *not* a GP axis the field
+        is m1-independent, yet the ``m2 = q*m1`` secondary cut in ``_taper_cut``
+        still ties the integrand to the query m1 (with m1 absent the norm would
+        be evaluated at the placeholder ``phys["m1"] = 1``, cutting m2 = q <= 1 <
+        m_min and zeroing the whole grid).  The norm is then a smooth function of
+        m1 (and of z, when z is a GP axis): it is tabulated over an m1 grid and
+        interpolated in ``log m1`` per query, exactly like the z-conditioning.
+        The extra m1 axis multiplies only the taper broadcast and trapezoid --
+        never the GP kernel evaluation (the field is computed once as ``(G,)``).
         """
         if not self._prob_gp:
             # Pure rate-axis GP (e.g. gp1d_z): no PROBABILITY axis to normalise
@@ -446,6 +508,43 @@ class JointGPPopulation:
         phys = {a: jnp.ones(G) for a in AXIS_ORDER}
         for a, fv in zip(self._prob_gp, flat):
             phys[a] = fv
+
+        m1_cond = ("q" in self._prob_gp) and ("m1" not in self.gp_axes)
+        if m1_cond:
+            m1g = _m1norm_grid()                             # (Nm1,), log-uniform
+            grid_shape = [g.shape[0] for g in grids]
+
+            def _eval_norm(zval):
+                # Field is m1-independent on this branch: evaluate it once as
+                # (G,), then broadcast against the m1-dependent m2 = q*m1 cut.
+                cols = []
+                for a in self.gp_axes:
+                    if a == "z":
+                        cols.append(_to_coord("z", None, None, None, jnp.full(G, zval)))
+                    else:
+                        cols.append(_to_coord(a, phys["m1"], phys["q"], phys["chi"], None))
+                coords = jnp.stack(cols, axis=-1)
+                fg = _eval_field(coords, kern, self._Z, alpha,
+                                 self._mean_on_coords(coords, alpha_gp, beta_gp))
+                exp_field = jnp.exp(jnp.clip(fg, -_FIELD_CLIP, _FIELD_CLIP))   # (G,)
+                # m1 not in gp_axes -> _taper_cut skips its m1 branch and the q
+                # branch computes m2 = q*m1 on the (Nm1, G) lattice.
+                cut = self._taper_cut(m1g[:, None], phys["q"][None, :],
+                                      m_min, dm_min, m_max, dm_max)            # (Nm1, G)
+                val = exp_field[None, :] * cut                                 # (Nm1, G)
+                val = val.reshape([m1g.shape[0], *grid_shape])
+                return _grid_integrate(val, grids)                            # (Nm1,)
+
+            if self._z_in_gp:
+                import jax
+                zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
+                tab = jax.vmap(_eval_norm)(zg)                                # (Nz, Nm1)
+                ltab = jnp.log(jnp.where(tab > 0, tab, _LOGSAFE))
+                return _interp2_log(ltab, zg, m1g, z, m1)                     # (Nquery,)
+            tab = _eval_norm(0.0)                                             # (Nm1,)
+            ltab = jnp.log(jnp.where(tab > 0, tab, _LOGSAFE))
+            return jnp.exp(jnp.interp(
+                jnp.log(jnp.clip(m1, _LOGSAFE, None)), jnp.log(m1g), ltab))   # (Nquery,)
 
         def _eval_norm(zval):
             cols = []
