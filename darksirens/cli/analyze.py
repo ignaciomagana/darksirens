@@ -430,16 +430,30 @@ def summarize_ppd(ppd_samples, limits=(5, 95)):
     return np.asarray(median), np.asarray(lower), np.asarray(upper)
 
 
-def redshift_rate_samples(pz_samples, zgrid, h0_samples, om0=OM0_FID):
-    """dN/dz ∝ p_z(z) · (dV_c/dz)(z; H0) / (1+z), normalised per sample."""
-    zg = jnp.asarray(zgrid)
+def redshift_rate_samples(pz_samples, zgrid, h0_samples,
+                          om0_samples=OM0_FID, w0_samples=W0_FID, wa_samples=WA_FID):
+    """dN/dz ∝ p_z(z) · (dV_c/dz)(z; H0, Om0, w0, wa) / (1+z), normalised per sample.
 
-    def one(pz, h0):
-        rate = pz * dV_of_z(zg, h0, om0) / (1.0 + zg)
+    ``om0_samples`` / ``w0_samples`` / ``wa_samples`` accept either a per-sample
+    array (same length as ``h0_samples``) or a scalar broadcast across every
+    sample (the fiducial defaults, kept for backward compatibility with
+    H0-only callers). All four cosmology coordinates are vmapped through the
+    full ``dV_of_z`` so a sampled Om0/w0/wa actually reshapes the rate curve,
+    not just its (normalization-cancelling) H0 rescaling.
+    """
+    zg = jnp.asarray(zgrid)
+    n = jnp.asarray(h0_samples).shape[0]
+    om0_samples = jnp.broadcast_to(jnp.asarray(om0_samples), (n,))
+    w0_samples = jnp.broadcast_to(jnp.asarray(w0_samples), (n,))
+    wa_samples = jnp.broadcast_to(jnp.asarray(wa_samples), (n,))
+
+    def one(pz, h0, om0, w0, wa):
+        rate = pz * dV_of_z(zg, h0, om0, w0, wa) / (1.0 + zg)
         norm = jnp.trapezoid(rate, zg)
         return rate / jnp.where(norm > 0, norm, 1.0)
 
-    return np.asarray(jax.vmap(one)(jnp.asarray(pz_samples), jnp.asarray(h0_samples)))
+    return np.asarray(jax.vmap(one)(
+        jnp.asarray(pz_samples), jnp.asarray(h0_samples), om0_samples, w0_samples, wa_samples))
 
 
 # ------------------------------------------------------------
@@ -744,11 +758,30 @@ def main():
             name: _column(samples, run_labels, name) for name in COSMO_FID
         })
 
-        # Redshift distribution / detection rate dN/dz, using sampled H0 if present.
-        h0_col = _column(samples, run_labels, "H0")
-        h0_samples = h0_col if h0_col is not None else np.full(p_z.shape[0], H0_FID)
+        # Redshift distribution / detection rate dN/dz, using the run's full
+        # cosmology (H0, Om0, w0, wa) so the curve's SHAPE — not just an
+        # H0 rescaling that mostly cancels in the per-sample normalisation —
+        # reflects what was actually sampled/fixed. Per parameter: the sampled
+        # column if present, else this run's individually-fixed value
+        # (``fixed_parameter_values``, recovered from settings.json or the
+        # results.hdf5 ``fixed_labels``/``fixed_values`` datasets), else the
+        # fiducial — mirroring the decode-time fallback in
+        # ``inference/parameters.py``.
+        fixed_cosmo = settings.get("fixed_parameter_values") or {}
+
+        def _cosmo_samples(name):
+            col = _column(samples, run_labels, name)
+            if col is not None:
+                return col
+            return np.full(p_z.shape[0], fixed_cosmo.get(name, COSMO_FID[name]))
+
+        h0_samples = _cosmo_samples("H0")
+        om0_samples = _cosmo_samples("Om0")
+        w0_samples = _cosmo_samples("w0")
+        wa_samples = _cosmo_samples("wa")
         rate_per_model.append(summarize_ppd(
-            redshift_rate_samples(p_z, zgrid, h0_samples), limits))
+            redshift_rate_samples(p_z, zgrid, h0_samples, om0_samples, w0_samples, wa_samples),
+            limits))
 
         # GP-latent caterpillar (only for models with latents).
         if run_labels and latent_indices(run_labels):
