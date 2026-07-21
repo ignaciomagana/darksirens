@@ -74,7 +74,8 @@ def test_explicit_off_stays_none():
 
 
 def test_mixed_explicit_sel_auto_pe():
-    plan = _auto(80 * GB, sel=65536, pe=BLOCK_AUTO)
+    # Budget well above the calibrated single-pass footprint (~80 GB) so pe fits.
+    plan = _auto(400 * GB, sel=65536, pe=BLOCK_AUTO)
     assert plan.sel_batch_size == 65536      # explicit sel honoured
     assert plan.pe_event_block is None       # pe auto-resolves to single pass here
     assert plan.source in ("auto", "auto-single-pass")
@@ -91,7 +92,9 @@ def test_non_gpu_backend_single_pass(backend):
 # ── budget extremes ──────────────────────────────────────────────────────────────
 
 def test_huge_budget_single_pass():
-    plan = _auto(80 * GB)
+    # 400 GB is comfortably above the calibrated single-pass working set (~80 GB on
+    # the real spectral problem), so auto keeps the historical single pass.
+    plan = _auto(400 * GB)
     assert plan.sel_batch_size is None
     assert plan.pe_event_block is None
     assert plan.source == "auto-single-pass"
@@ -135,15 +138,18 @@ def test_monotonic_in_free_bytes():
     def _sel(free):
         s = _auto(free).sel_batch_size
         return N_SEL if s is None else s
-    budgets = [1 * GB, 2 * GB, 4 * GB, 8 * GB, 20 * GB, 80 * GB]
+    # Span the floor→single-pass transition: the low budgets floor the selection
+    # block; the top ones (above ~80 GB / 0.7) restore the single pass (== N_SEL).
+    budgets = [1 * GB, 4 * GB, 20 * GB, 80 * GB, 200 * GB, 400 * GB]
     sels = [_sel(b) for b in budgets]
     assert sels == sorted(sels)
 
 
 def test_catalog_block_le_no_catalog():
     # Catalog runs have a heavier per-injection footprint → smaller (or equal)
-    # selection block at the same budget.
-    free = 4 * GB
+    # selection block at the same budget.  Use a budget in the blocking regime
+    # (below the ~80 GB single-pass footprint) so the difference is exercised.
+    free = 105 * GB
     def _sel(has_cat):
         s = _auto(free, has_catalog=has_cat).sel_batch_size
         return N_SEL if s is None else s
@@ -165,7 +171,7 @@ def test_flow_forces_pe_none():
 def test_source_tags():
     assert _auto(1 * GB, sel=100, pe=10).source == "explicit"
     assert _auto(1 * GB, backend="cpu").source == "cpu"
-    assert _auto(80 * GB).source == "auto-single-pass"
+    assert _auto(400 * GB).source == "auto-single-pass"
     assert _auto(3 * GB).source == "auto"
 
 
