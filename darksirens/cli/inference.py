@@ -953,20 +953,37 @@ def _resolve_catalog_sky_weighting(opts):
     #                 rails on clustered catalogs (measured:
     #                 tests/test_multitracer_field_recovery.py), so it stays fatal
     #                 there for dark_sirens.
-    # Unset resolves to field for EVERY K.  At K=1 field's dedicated
-    # number-density channel -- the survey-global constant log_Z_global -- cancels
-    # between the PE and selection terms, so log10n0 is only weakly identified
-    # there (through the completeness ratio C(z;n0) and the missing-branch shape
-    # in the per-pixel numerator) and otherwise marginalizes against its prior;
-    # that is acceptable (NOTE (K=1) in darksirens/redshift/prior.py).  What field
-    # DOES restore at K=1 is the relative angular host weighting the conditional
-    # per-pixel normalizer discards.  dark_sirens_complete keeps its own
-    # pre-existing rules (K>=2 requires field, checked below; K=1 allows both).
+    # Unset resolves to field for EVERY K of the galaxy-aware models.  At K=1
+    # field's dedicated number-density channel -- the survey-global constant
+    # log_Z_global -- cancels between the PE and selection terms, so log10n0 is
+    # only weakly identified there (through the completeness ratio C(z;n0) and
+    # the missing-branch shape in the per-pixel numerator) and otherwise
+    # marginalizes against its prior; that is acceptable (NOTE (K=1) in
+    # darksirens/redshift/prior.py).  What field DOES restore at K=1 is the
+    # relative angular host weighting the conditional per-pixel normalizer
+    # discards.  dark_sirens_complete keeps its own pre-existing rules (K>=2
+    # requires field, checked below; K=1 allows both).
     opts.catalog_sky_weighting_source = (
         "explicit" if opts.catalog_sky_weighting is not None else "auto"
     )
     if opts.catalog_sky_weighting is None:
-        opts.catalog_sky_weighting = "field"
+        if opts.universe_model not in ("dark_sirens", "dark_sirens_complete"):
+            # Non-catalog models never evaluate the catalog prior; keep the
+            # inert legacy value so the field-scope validation stays quiet.
+            opts.catalog_sky_weighting = "conditional"
+        elif getattr(opts, "drop_full_catalog", False):
+            # field needs the full-sky rows to count empty pixels; honor the
+            # explicit memory request and keep the legacy estimand (an
+            # EXPLICIT field + drop_full_catalog request stays fatal below).
+            _warn(
+                "--drop_full_catalog requested: resolving unset "
+                "--catalog_sky_weighting to the legacy 'conditional' estimand "
+                "(the 'field' default needs the full-sky catalog rows). Drop "
+                "the flag to use the joint host-density estimand."
+            )
+            opts.catalog_sky_weighting = "conditional"
+        else:
+            opts.catalog_sky_weighting = "field"
     if (opts.universe_model == "dark_sirens"
             and opts.n_catalogs == 1
             and opts.catalog_sky_weighting == "field"):
