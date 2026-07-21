@@ -52,24 +52,36 @@ from dataclasses import dataclass
 # catalog is loaded (dark sirens), whose per-injection / per-sample redshift-prior
 # state is heavier than the catalog-free spectral path.
 #
-# The numbers below are CONSERVATIVE ESTIMATES, not slope-calibrated: a smoke run
-# on an A100-80GB confirmed only the anchor that a full single-pass value+grad of
-# the real spectral likelihood (N_sel=1,067,946; N_events=259; n_samp=4096) fits
-# within the ~0.7*free budget (~50 GB), so these are chosen so the model predicts
-# a full working set of ~40 GB — auto therefore keeps today's single pass on an
-# ample GPU and only blocks when free memory is genuinely tight.  Erring high is
-# deliberate: over-estimating bytes/unit over-blocks (slower, safe) rather than
-# under-blocks (OOM).  Run scripts/benchmark_block_sizes.py on a GPU and fit the
-# sel/pe peak-memory slopes to replace these with measured values (and re-stamp
-# CONSTANTS_VERSION with the device).  The policy tests inject budgets and assert
-# structural properties, so they are independent of these exact numbers.
-CONSTANTS_VERSION = "conservative-estimate-a100-2026-07-18"
+# MEASURED on an NVIDIA H100-80GB by scripts/benchmark_block_sizes.py --repeats 10
+# (2026-07-21; results in scripts/benchmarks/block_sizes_h100_80gb.json) for the real
+# spectral likelihood value+grad (N_sel=1,067,946; N_events=259; n_samp=4096, BFC
+# allocator, PREALLOCATE=false).  Two findings drove these numbers:
+#   1. A full single pass peaks at 78.8 GB — NOT the ~40 GB the old placeholder
+#      predicted.  That ~2x under-estimate would let auto keep a single pass that
+#      actually sits at ~92% of an 80 GB card; the calibrated model now predicts
+#      ~80 GB so auto blocks on any <~115 GB card (0.7*free rule).
+#   2. Peak is a NARROW BAND: min 70.4 GB (aggressive block) .. max 78.8 GB (single
+#      pass), only ~8 GB of spread, and mid-range sel blocks (sel=262144 -> 78.8 GB)
+#      can peak *above* the single pass — XLA fuses the single pass better than a
+#      scanned mid-range block.  So the two slopes are small: blocking this workload
+#      buys little, and the real lever is card size.  First OOM at sel_batch=524288.
+# The slopes are the reducible (min-block -> single-pass) marginals rounded up
+# (SEL 7,865 -> 8,000 /inj; PE 8,102 -> 9,000 /samp); FIXED absorbs the near-fixed
+# ~62 GB transient floor so the single-pass prediction (80.4 GB) sits just above the
+# measured 78.8 GB (err-high = over-block, safe, never under-block/OOM).  Erring high
+# also means medium problems may block needlessly (slower, safe); tiny problems are
+# unaffected (the min(FLOOR, n) clamp collapses them back to a single pass).
+# The _CAT (dark-siren / catalog) path was NOT measured here — its slopes stay a 2x
+# scaled estimate and FIXED is shared; re-run the benchmark with a catalog loaded to
+# calibrate that path.  Policy tests inject budgets and assert structural properties,
+# so they are independent of these exact numbers.
+CONSTANTS_VERSION = "measured-h100-80gb-2026-07-21"
 
-SEL_BYTES_PER_INJECTION = 30_000       # spectral / catalog-free selection integral
-SEL_BYTES_PER_INJECTION_CAT = 60_000   # dark-siren selection integral (catalog state)
-PE_BYTES_PER_SAMPLE = 6_000            # spectral per-event PE reduction, per sample
-PE_BYTES_PER_SAMPLE_CAT = 12_000       # dark-siren per-event PE reduction, per sample
-FIXED_OVERHEAD_BYTES = 2 * 1024**3     # jit constants, population grids, params
+SEL_BYTES_PER_INJECTION = 8_000        # spectral / catalog-free selection integral (measured 7,865)
+SEL_BYTES_PER_INJECTION_CAT = 16_000   # dark-siren selection integral (catalog state; 2x, UNMEASURED)
+PE_BYTES_PER_SAMPLE = 9_000            # spectral per-event PE reduction, per sample (measured 8,102)
+PE_BYTES_PER_SAMPLE_CAT = 18_000       # dark-siren per-event PE reduction, per sample (2x, UNMEASURED)
+FIXED_OVERHEAD_BYTES = 58 * 1024**3    # near-fixed transient floor (measured ~62 GB on the spectral path)
 
 # Floors: never chunk below these (below them the launch/padding overhead and
 # recompile churn cost more than the memory they save).
