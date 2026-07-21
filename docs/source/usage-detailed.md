@@ -485,8 +485,12 @@ Use higher-resolution grids for production runs with narrow mass, mass-ratio, or
 Each inference run creates a timestamped directory under `--save_path`:
 
 ```text
-<save_path>/<pop_model>__<universe_model>__<sampler>__YYYY-MM-DDTHH-MM-SS/
+<save_path>/<pop_model>__<universe_model>__<sampler>__seed<seed>__YYYY-MM-DDTHH-MM-SS/
 ```
+
+If that name is already taken (e.g. two identically-configured jobs started
+in the same second), a `-01`, `-02`, ... suffix is appended instead of
+reusing the existing directory.
 
 Expected contents include:
 

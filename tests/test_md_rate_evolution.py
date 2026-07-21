@@ -223,14 +223,14 @@ def test_generator_md_z_cdf_matches_analytic():
             (gamma - 1.0) * np.log1p(zg)
             - np.logaddexp(0.0, (gamma + kappa) * (np.log1p(zg) - np.log1p(z_pk)))
         )
-        expected /= np.trapz(expected, zg)
+        expected /= np.trapezoid(expected, zg)
         np.testing.assert_allclose(pdf, expected, rtol=1e-10, atol=1e-14)
         assert abs(cdf[-1] - 1.0) < 1e-12
 
         # Draws follow the tabulated CDF (moment check, generous tolerance).
         rng = np.random.default_rng(7)
         z, _ = gen.sample_redshift(200_000, theta_md, rng, H0Planck, Om0Planck)
-        z_mean_expected = np.trapz(zg * pdf, zg)
+        z_mean_expected = np.trapezoid(zg * pdf, zg)
         np.testing.assert_allclose(z.mean(), z_mean_expected, rtol=0.02)
     finally:
         gen.set_pop_model(old)

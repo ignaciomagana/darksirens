@@ -127,7 +127,7 @@ def _sample_sky(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarra
 # darksirens.gw.populations.utils.sfilter_low/sfilter_high (kept numpy-only so
 # this generator stays importable without jax / the darksirens package;
 # tests/test_mock_generator_taper.py asserts they match the jax originals).
-_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+_trapz = np.trapezoid
 
 # Normalisation grids mirror the inference defaults EXACTLY: mass on [1, 200]
 # Msun with N_MASS=500 nodes and mass ratio on [0, 1] with N_Q=200 nodes, i.e.

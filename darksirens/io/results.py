@@ -104,14 +104,15 @@ def save_results_hdf5(
     ├── log_weights     — (N_samples,) log importance weights  [if available]
     └── log_likelihood  — (N_samples,) per-sample log-likelihoods [if available]
     """
-    path = os.path.join(run_dir, "results.hdf5")
-    kw   = dict(compression="gzip", shuffle=True)
-    dt   = h5py.string_dtype(encoding="utf-8")
+    path     = os.path.join(run_dir, "results.hdf5")
+    tmp_path = path + ".tmp"
+    kw       = dict(compression="gzip", shuffle=True)
+    dt       = h5py.string_dtype(encoding="utf-8")
 
     samples = np.asarray(results["samples"])
     N, ndim = samples.shape
 
-    with h5py.File(path, "w") as f:
+    with h5py.File(tmp_path, "w") as f:
 
         # Samples and bounds
         f.create_dataset("samples",     data=samples,                          **kw)
@@ -183,7 +184,8 @@ def save_results_hdf5(
         # is set; record both so analyzers can tell the input mode apart.
         f.attrs["gw_path"]         = opts.gw_path or ""
         f.attrs["gw_flows_path"]   = getattr(opts, "gw_flows_path", None) or ""
-        f.attrs["gwselection_path"] = opts.gwselection_path
+        f.attrs["gwselection_path"] = opts.gwselection_path or ""
+        f.attrs["pdet_flow_path"]  = getattr(opts, "pdet_flow_path", None) or ""
         f.attrs["survey_path"]     = opts.survey_path or ""
         # Multitracer: number of catalogs and the full aligned path list; the
         # scalar survey_path attr above is retained for single-catalog analyzers.
@@ -264,6 +266,12 @@ def save_results_hdf5(
             "jax_devices":    [str(d) for d in jax.devices()],
             "python_version": sys.version,
         })
+
+    # Rename only after the file closes cleanly, so a failure mid-write (e.g.
+    # an attr with no native HDF5 equivalent) leaves the old results.hdf5, if
+    # any, untouched instead of a truncated one. os.replace is atomic on the
+    # same filesystem, which run_dir always is (tmp_path is a sibling).
+    os.replace(tmp_path, path)
 
     save_tinyns_diagnostics_json(results, run_dir, opts)
     return path
