@@ -256,3 +256,244 @@ def test_load_all_data_accepts_multiple_bright_siren_counterparts(monkeypatch):
     for pix in counterpart_pixels:
         assert pix in set(loaded["unique_pixels_pe"].tolist())
         assert pix in set(loaded["unique_pixels_sel"].tolist())
+
+
+# ---------------------------------------------------------------------------
+# PERF-3: K>=2 must not build the unused top-level single-catalog object, and
+# --drop_full_catalog must not be silently ignored for a multitracer mixture
+# (each catalog is loaded exactly ONCE, per bundle).
+# ---------------------------------------------------------------------------
+
+def _write_survey_file(path, nside, counts):
+    max_gals = int(counts.max())
+    zgals = np.zeros((len(counts), max_gals), dtype=float)
+    dzgals = np.ones((len(counts), max_gals), dtype=float) * 0.01
+    wgals = np.zeros((len(counts), max_gals), dtype=float)
+    for pix, n_gal in enumerate(counts):
+        if n_gal:
+            zgals[pix, :n_gal] = 0.01 * (pix + np.arange(n_gal) + 1)
+            wgals[pix, :n_gal] = 1.0
+    with h5py.File(path, "w") as f:
+        f.attrs["nside"] = nside
+        f.create_dataset("ngals", data=counts)
+        f.create_dataset("zgals", data=zgals)
+        f.create_dataset("dzgals", data=dzgals)
+        f.create_dataset("wgals", data=wgals)
+    return path
+
+
+def test_load_all_data_multitracer_drops_top_level_catalog_and_loads_each_path_once(
+    tmp_path, monkeypatch
+):
+    nside = 1
+    npix = hp.nside2npix(nside)
+    counts1 = np.zeros(npix, dtype=np.int32)
+    counts1[2] = 3
+    counts1[5] = 1
+    counts2 = np.zeros(npix, dtype=np.int32)
+    counts2[2] = 2
+    counts2[7] = 4
+
+    path1 = _write_survey_file(tmp_path / "survey1.hdf5", nside, counts1)
+    path2 = _write_survey_file(tmp_path / "survey2.hdf5", nside, counts2)
+
+    pe_pixels = np.array([5, 2], dtype=np.int32)
+    sel_pixels = np.array([7, 2], dtype=np.int32)
+    pe_ra, pe_dec = _angles_for_pixels(nside, pe_pixels)
+    sel_ra, sel_dec = _angles_for_pixels(nside, sel_pixels)
+
+    def fake_load_gw_samples(_path):
+        return (
+            np.array([36.0, 38.0]),
+            np.array([28.8, 30.4]),
+            np.array([460.0, 500.0]),
+            np.array([0.0, 0.02]),
+            pe_ra,
+            pe_dec,
+            np.ones(2),
+            1,
+            2,
+        )
+
+    def fake_load_selection_samples(_path):
+        return (
+            np.array([34.0, 40.0]),
+            np.array([27.2, 32.0]),
+            np.array([430.0, 530.0]),
+            np.zeros(2),
+            sel_ra,
+            sel_dec,
+            np.ones(2),
+            2,
+        )
+
+    monkeypatch.setattr(data_module.loaders, "load_gw_samples", fake_load_gw_samples)
+    monkeypatch.setattr(
+        data_module.loaders, "load_selection_samples", fake_load_selection_samples
+    )
+
+    load_calls = []
+    real_load_survey = data_module.loaders.load_survey
+
+    def spy_load_survey(survey_path, to_device=True):
+        load_calls.append(survey_path)
+        return real_load_survey(survey_path, to_device=to_device)
+
+    monkeypatch.setattr(data_module.loaders, "load_survey", spy_load_survey)
+
+    opts = SimpleNamespace(
+        universe_model="dark_sirens",
+        survey_path=str(path1),  # cli/inference.py sets this to survey_paths[0]
+        survey_paths=[str(path1), str(path2)],
+        n_catalogs=2,
+        gw_path="unused-gw.hdf5",
+        gwselection_path="unused-selection.hdf5",
+        use_LSS=False,
+        counterpart=None,
+        counterpart_nside=1,
+        counterpart_dz=0.01,
+        drop_full_catalog=True,
+        mark_model="none",
+    )
+
+    loaded = data_module.load_all_data(opts)
+
+    # (a) K>=2 never carries a full top-level catalog -- --drop_full_catalog is
+    # honored (there is nothing left for it to silently ignore).
+    for key in (
+        "zgals", "dzgals", "wgals", "ngals_catalog",
+        "zgals_catalog", "dzgals_catalog", "wgals_catalog",
+        "zgals_pe", "dzgals_pe", "wgals_pe", "ngals_pe",
+        "zgals_sel", "dzgals_sel", "wgals_sel", "ngals_sel",
+        "catalog_memory",
+    ):
+        assert loaded.get(key) is None, f"{key} should be None for a K>=2 mixture"
+
+    assert loaded.get("catalogs") is not None
+    assert len(loaded["catalogs"]) == 2
+
+    # (b) each catalog path is loaded exactly once -- no double-load of catalog 1
+    # via a wasted top-level load_or_build_catalog_inputs call.
+    assert load_calls.count(str(path1)) == 1
+    assert load_calls.count(str(path2)) == 1
+    assert len(load_calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# PERF-5: attach_mark_inputs must skip mark I/O entirely when mark_model is
+# "none" (the default) -- loading and z-centering every full-size mark table
+# is pure waste when no mark model is selected.
+# ---------------------------------------------------------------------------
+
+def test_attach_mark_inputs_skips_mark_io_when_mark_model_is_none(monkeypatch):
+    calls = []
+
+    def spy_load_and_center(survey_path, zgals, ngals, datasets=None):
+        calls.append((survey_path, datasets))
+        return {"mark_logmstar": np.zeros((1, 1))}
+
+    monkeypatch.setattr(
+        data_module.loaders, "load_and_center_survey_marks", spy_load_and_center
+    )
+
+    opts = SimpleNamespace(
+        survey_path="unused-survey.hdf5",
+        universe_model="dark_sirens",
+        mark_model="none",
+    )
+    data = {"zgals": np.zeros((1, 1)), "ngals_catalog": np.zeros(1)}
+
+    out = data_module.loaders.attach_mark_inputs(opts, data)
+
+    assert calls == []
+    for ds in ("mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color"):
+        assert out[ds] is None
+
+
+def test_attach_mark_inputs_loads_marks_when_mark_model_is_set(monkeypatch):
+    calls = []
+
+    def spy_load_and_center(survey_path, zgals, ngals, datasets=None):
+        calls.append((survey_path, datasets))
+        return {"mark_logmstar": np.ones((1, 1))}
+
+    monkeypatch.setattr(
+        data_module.loaders, "load_and_center_survey_marks", spy_load_and_center
+    )
+
+    opts = SimpleNamespace(
+        survey_path="unused-survey.hdf5",
+        universe_model="dark_sirens",
+        mark_model="loglinear",
+    )
+    data = {"zgals": np.zeros((1, 1)), "ngals_catalog": np.zeros(1)}
+
+    out = data_module.loaders.attach_mark_inputs(opts, data)
+
+    assert len(calls) == 1
+    assert calls[0][0] == "unused-survey.hdf5"
+    np.testing.assert_array_equal(out["mark_logmstar"], np.ones((1, 1)))
+
+
+def test_multitracer_bundle_loads_only_requested_mark_datasets(tmp_path, monkeypatch):
+    """The K>=2 marked path must not read mark datasets the mixture never
+    selected for that catalog (a cheap dataset-level filter on top of the
+    mark_model="none" fix above)."""
+    import darksirens.catalogs.marks as marks_module
+
+    nside = 1
+    npix = hp.nside2npix(nside)
+    counts = np.zeros(npix, dtype=np.int32)
+    counts[2] = 2
+    max_gals = 2
+    zgals = np.zeros((npix, max_gals))
+    zgals[2, :2] = [0.1, 0.2]
+    dzgals = np.ones((npix, max_gals)) * 0.01
+    wgals = np.zeros((npix, max_gals))
+    wgals[2, :2] = 1.0
+    mark_logmstar = np.zeros((npix, max_gals))
+    mark_logssfr = np.zeros((npix, max_gals))
+
+    path = tmp_path / "survey_marked.hdf5"
+    with h5py.File(path, "w") as f:
+        f.attrs["nside"] = nside
+        f.create_dataset("ngals", data=counts)
+        f.create_dataset("zgals", data=zgals)
+        f.create_dataset("dzgals", data=dzgals)
+        f.create_dataset("wgals", data=wgals)
+        f.create_dataset("mark_logmstar", data=mark_logmstar)
+        f.create_dataset("mark_logssfr", data=mark_logssfr)
+
+    captured = {}
+    real_load_survey_marks = marks_module.load_survey_marks
+
+    def spy_load_survey_marks(survey_path, datasets=None):
+        captured["datasets"] = datasets
+        return real_load_survey_marks(survey_path, datasets=datasets)
+
+    # load_and_center_survey_marks (catalogs/marks.py) calls load_survey_marks
+    # via a name bound in its OWN module namespace; patch it there so the
+    # local re-import inside load_multitracer_catalog_bundles picks it up.
+    monkeypatch.setattr(marks_module, "load_survey_marks", spy_load_survey_marks)
+
+    ra = np.zeros(2)
+    dec = np.zeros(2)
+    gw_inputs = dict(ra=ra, dec=dec, rasels=ra.copy(), decsels=dec.copy())
+
+    opts = SimpleNamespace(
+        universe_model="dark_sirens",
+        survey_paths=[str(path)],
+        lss_completions=[],
+        mark_model="loglinear",
+        mark_names_by_catalog=(("logmstar",),),
+        use_LSS=False,
+        lss_marginalize=False,
+        catalog_sky_weighting="conditional",
+        validate_completion=False,
+    )
+
+    bundles = data_module.loaders.load_multitracer_catalog_bundles(opts, gw_inputs)
+
+    assert captured["datasets"] == ("mark_logmstar",)
+    assert bundles[0].get("mark_logmstar") is not None
+    assert "mark_logssfr" not in bundles[0]

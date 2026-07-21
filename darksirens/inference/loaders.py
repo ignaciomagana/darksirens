@@ -204,7 +204,13 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             from darksirens.catalogs.marks import load_and_center_survey_marks
             from darksirens.marks import MARK_FIELDS
 
-            centred = load_and_center_survey_marks(path, zgals, ngals)
+            # Dataset-level filter: this catalog's file may carry marks beyond
+            # the ones selected for it (mark_names_k), so read/centre only the
+            # requested datasets instead of every mark table present.
+            centred = load_and_center_survey_marks(
+                path, zgals, ngals,
+                datasets=tuple(MARK_FIELDS[name] for name in mark_names_k),
+            )
             for name in mark_names_k:
                 key = MARK_FIELDS[name]
                 if key not in centred:
@@ -657,7 +663,15 @@ def attach_mark_inputs(opts, data) -> dict:
     # --------------------------------------------------------
     for _ds in ("mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color"):
         data[_ds] = None
-    if opts.survey_path is not None and opts.universe_model in GALAXY_AWARE_MODELS:
+    # mark_model="none" (the default) never reads the marked-host efficiency
+    # h(m|eta), so skip the mark I/O entirely: load_and_center_survey_marks
+    # loads and z-centers every full-size padded mark table present in the
+    # survey file (~0.83 GB per float64 mark at DESI-wide shape), which is
+    # pure waste when no mark model is selected.
+    mark_model = getattr(opts, "mark_model", "none")
+    if (mark_model not in (None, "none")
+            and opts.survey_path is not None
+            and opts.universe_model in GALAXY_AWARE_MODELS):
         data.update(
             load_and_center_survey_marks(
                 opts.survey_path, data["zgals"], data.get("ngals_catalog")

@@ -1,5 +1,6 @@
 # data.py
 
+import healpy as hp
 import jax.numpy as jnp
 
 from darksirens.catalogs.compact import validate_loaded_survey_shapes
@@ -12,7 +13,32 @@ def load_all_data(opts):
     Loads survey, GW posterior, and selection data.
     Handles cases where survey_path might be None (non-dark sirens models).
     """
-    catalog_inputs = loaders.load_or_build_catalog_inputs(opts)
+    n_catalogs = int(getattr(opts, "n_catalogs", 1))
+
+    if n_catalogs >= 2:
+        # Multitracer mixture (K >= 2): every catalog is loaded exactly ONCE,
+        # per bundle, by load_multitracer_catalog_bundles further below.
+        # opts.survey_path is set to survey_paths[0] for a K>=2 run (see
+        # cli/inference.py), so calling loaders.load_or_build_catalog_inputs(opts)
+        # here would load catalog 1's full-sky arrays a SECOND time into a
+        # top-level slot the mixture never reads (and one that
+        # maybe_drop_full_catalog -- a K==1-only step, see below -- never gets a
+        # chance to drop, since the old code returned before reaching it).
+        # Stub catalog_inputs the same way the no-survey case does (nside=1,
+        # no galaxy arrays) so the shared sky-vector / dict-building code below
+        # is identical for K=1 and K>=2, without ever touching a survey file.
+        catalog_inputs = dict(
+            nside=1,
+            npix=hp.nside2npix(1),
+            zgals=None, dzgals=None, wgals=None, ngals=None,
+            apix=0.0, z_depth=None,
+            counterpart_pixel=None, counterpart_pixels=None,
+            counterpart_zs=None, counterpart_dzs=None,
+            bright_siren_sky_marginalized=False,
+        )
+    else:
+        catalog_inputs = loaders.load_or_build_catalog_inputs(opts)
+
     if getattr(opts, "gw_flows_path", None):
         gw_inputs = loaders.load_flow_and_selection_inputs(opts)
     else:
@@ -97,16 +123,19 @@ def load_all_data(opts):
     validate_loaded_survey_shapes(data)
 
     nEvents_check = data.get("nEvents", "Unknown")
-    nside_check = data.get("nside", "N/A")
     print(f"    - Data loaded. Found {nEvents_check} GW events.")
-    print(f"    - HEALPix nside detected: {nside_check}")
+    if n_catalogs >= 2:
+        print(f"    - K={n_catalogs} multitracer mixture: HEALPix nside is per-catalog "
+              "(see catalog bundle loads below).")
+    else:
+        nside_check = data.get("nside", "N/A")
+        print(f"    - HEALPix nside detected: {nside_check}")
 
     # Multitracer: for K >= 2 attach the per-catalog compact bundles and skip the
     # top-level LSS / mark / weak-lensing inputs.  Q tables are loaded PER
     # BUNDLE inside load_multitracer_catalog_bundles; a top-level attach would
     # redundantly load catalog 1's table into an unused slot and print a
     # misleading "LSS completion loaded" line.
-    n_catalogs = int(getattr(opts, "n_catalogs", 1))
     if n_catalogs >= 2:
         data["catalogs"] = loaders.load_multitracer_catalog_bundles(opts, gw_inputs)
         for _ds in ("mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color"):
