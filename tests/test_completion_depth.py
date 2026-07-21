@@ -1,9 +1,21 @@
-"""Tests for the optional per-survey ``z_depth`` completion budget bound.
+"""Tests for the per-survey ``z_depth`` completeness prior.
 
-Covers (see the PR-2 plan):
+``z_depth`` encodes that the EM survey catalogs nothing past its depth:
+completeness is exactly zero beyond it and every modeled host there is
+uncatalogued (missing), NOT nonexistent.  Concretely, beyond ``z_depth`` the
+missing density relaxes to the full expected count ``dN_miss = dN_exp`` (C := 0,
+lss := 1) and the observed catalog kernel ``p_cat`` is zeroed (renormalised to
+stay a proper density below the depth).
+
+Covers:
   * ``darksirens.redshift.completion._assemble_curves``: ``z_depth=None`` is
-    bit-identical to the pre-existing full-grid missing-galaxy budget, and a
-    finite ``z_depth`` truncates ``N_miss``/``dN_miss`` to ``zgrid <= z_depth``.
+    bit-identical to the pre-existing full-grid budget; a finite ``z_depth``
+    relaxes ``dN_miss`` to ``dN_exp`` beyond it and integrates ``N_miss`` over
+    the FULL grid.
+  * ``darksirens.redshift.prior``: the assembled prior numerator above the depth
+    is the volumetric x population shape ``dN_exp`` (empty pixel), and a
+    cataloged galaxy whose photo-z leaks past the depth contributes nothing to
+    the prior above it (observed-KDE truncation).
   * ``darksirens.catalogs.io.load_survey``: optional ``f.attrs['z_depth']``
     round-trip.
   * ``darksirens.inference.parameters.build_parameter_decoder``: a resolved
@@ -25,7 +37,11 @@ import h5py
 import pytest
 
 from darksirens.redshift import zgrid
-from darksirens.redshift.completion import completion_curves
+from darksirens.redshift.completion import completion_curves, _precompute_grids
+from darksirens.redshift.prior import (
+    prepare_redshift_prior_state,
+    eval_redshift_prior_with_state,
+)
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.catalogs.io import load_survey
 
@@ -105,48 +121,171 @@ def test_z_depth_none_bit_identical():
     )
 
 
-def test_z_depth_truncates_missing_budget():
-    """A finite z_depth < zMax truncates N_miss to an independent numpy
-    trapezoid of dN_miss * (zgrid <= z_depth), and N_miss is monotone
-    non-decreasing as z_depth grows (dN_miss >= 0 everywhere: C in [0, 1] and
-    the LSS rate factor is clipped to be non-negative)."""
+def test_z_depth_relaxes_missing_budget_beyond_depth():
+    """Beyond a finite z_depth < zMax the missing density relaxes to the full
+    expected count (C := 0, lss := 1), so ``dN_miss == dN_exp`` there and
+    ``C_eff == 0``; below the depth ``dN_miss`` is unchanged from the completion
+    formula (== the z_depth=None curve).  ``N_miss`` is the FULL-grid quadrature
+    of this relaxed density."""
     cosmo = _cosmo()
     catalog = _catalog()
     zgrid_np = np.asarray(zgrid)
 
-    # The FULL (unmasked) dN_miss, established bit-identical to z_depth=None
-    # by test_z_depth_none_bit_identical, is the reference for the
-    # independent numpy quadrature below.
+    # The unbounded dN_miss (bit-identical to z_depth=None) is the below-depth
+    # reference; dN_exp is the volumetric x population shape it relaxes to.
     curves_full = completion_curves(cosmo, _survey(z_depth=None), catalog)
     dN_miss_full = np.asarray(curves_full.dN_miss)  # (N_rows, N_grid)
     assert np.all(dN_miss_full >= 0.0)
+    dN_exp = np.asarray(_precompute_grids(cosmo, _survey(z_depth=None), catalog).dN_exp)
 
     z_depth = float(zgrid_np[len(zgrid_np) // 3])
     assert z_depth < zgrid_np[-1]
 
     curves_bounded = completion_curves(cosmo, _survey(z_depth=z_depth), catalog)
-    N_miss_bounded = np.asarray(curves_bounded.N_miss)
-
-    mask = zgrid_np <= z_depth
-    expected = np.trapezoid(dN_miss_full * mask[None, :], zgrid_np, axis=-1)
-    np.testing.assert_allclose(N_miss_bounded, expected, rtol=1e-12, atol=1e-300)
-
-    # dN_miss itself must be exactly zeroed beyond z_depth.
     dN_miss_bounded = np.asarray(curves_bounded.dN_miss)
-    np.testing.assert_array_equal(dN_miss_bounded[:, ~mask], 0.0)
+    C_eff_bounded = np.asarray(curves_bounded.C_eff)
 
-    # Monotone non-decreasing in z_depth.
+    below = zgrid_np <= z_depth
+    above = ~below
+
+    # Below depth: unchanged from the completion formula.
+    np.testing.assert_array_equal(dN_miss_bounded[:, below], dN_miss_full[:, below])
+    # Beyond depth: relaxed to dN_exp (C := 0, lss := 1), for EVERY row.
+    for r in range(dN_miss_bounded.shape[0]):
+        np.testing.assert_allclose(dN_miss_bounded[r, above], dN_exp[above], rtol=1e-12)
+    # C_eff is exactly 0 wherever dN_miss == dN_exp (beyond the depth).
+    np.testing.assert_allclose(C_eff_bounded[:, above], 0.0, atol=1e-12)
+
+    # N_miss is the FULL-grid quadrature of the relaxed density.
+    expected = np.trapezoid(
+        np.where(above[None, :], dN_exp[None, :], dN_miss_full), zgrid_np, axis=-1
+    )
+    np.testing.assert_allclose(
+        np.asarray(curves_bounded.N_miss), expected, rtol=1e-12, atol=1e-300
+    )
+
+    # Monotone NON-INCREASING in z_depth: as the depth grows, more of the grid
+    # switches from the full dN_exp to the (<= dN_exp) completion density, so the
+    # retained-missing budget can only shrink.  (Row 1 has real galaxies; the
+    # fixture's delta_g == 0 => lss == 1 <= any completeness-reduced factor.)
     depths = [
         float(zgrid_np[len(zgrid_np) // 10]),
         float(zgrid_np[len(zgrid_np) // 3]),
         float(zgrid_np[2 * len(zgrid_np) // 3]),
         float(zgrid_np[-1]),
     ]
-    n_miss_row0 = []
-    for d in depths:
-        c = completion_curves(cosmo, _survey(z_depth=d), catalog)
-        n_miss_row0.append(float(np.asarray(c.N_miss)[1]))  # row 1 has real galaxies
-    assert all(a <= b + 1e-12 for a, b in zip(n_miss_row0, n_miss_row0[1:]))
+    n_miss_row1 = [
+        float(np.asarray(completion_curves(cosmo, _survey(z_depth=d), catalog).N_miss)[1])
+        for d in depths
+    ]
+    assert all(a >= b - 1e-12 for a, b in zip(n_miss_row1, n_miss_row1[1:]))
+    # At full depth the budget equals the z_depth=None (legacy) quadrature.
+    np.testing.assert_allclose(
+        n_miss_row1[-1], float(np.asarray(curves_full.N_miss)[1]), rtol=1e-12
+    )
+
+
+def test_z_depth_empty_pixel_prior_is_volumetric_beyond_depth():
+    """Empty-pixel regression: with z_depth set, the assembled prior numerator
+    above the depth is strictly positive and proportional to dN_exp (the
+    volumetric x population shape), and below the depth it is unchanged from the
+    completion formula (== dN_miss).  An empty pixel routes entirely to the
+    missing branch (N_obs = 0), so the numerator IS dN_miss."""
+    cosmo = _cosmo()
+    catalog = _catalog()  # row 0 is empty (ngals == 0)
+    zgrid_np = np.asarray(zgrid)
+    z_depth = float(zgrid_np[len(zgrid_np) // 3])
+
+    grids = _precompute_grids(cosmo, _survey(z_depth=z_depth), catalog)
+    dN_exp = np.asarray(grids.dN_exp)
+
+    state = prepare_redshift_prior_state(
+        "dark_sirens", cosmo, _survey(z_depth=z_depth), catalog,
+        materialize_state=False,
+    )
+    # Two samples straddling the depth, both in the empty pixel (row 0).
+    below = zgrid_np[zgrid_np <= z_depth]
+    above = zgrid_np[zgrid_np > z_depth]
+    z_lo = float(below[len(below) // 2])
+    z_hi = float(above[len(above) // 2])
+    z = jnp.asarray([z_lo, z_hi])
+    pix = jnp.asarray([0, 0], dtype=jnp.int32)
+
+    lp = np.asarray(eval_redshift_prior_with_state(
+        "dark_sirens", state, z, pix, cosmo, _survey(z_depth=z_depth), catalog
+    ))
+    assert np.all(np.isfinite(lp)), lp  # strictly positive density both sides
+
+    # The empty-pixel numerator is dN_miss / Z[pix]; above the depth dN_miss ==
+    # dN_exp, so exp(lp_above) is proportional to dN_exp evaluated at the sample.
+    # Compare the ratio of the two above-depth-vs-below-depth prior values with
+    # the corresponding dN_miss ratio (Z[pix] cancels).
+    dN_miss0 = np.asarray(state.dN_miss[0])
+    p_lo = float(np.interp(z_lo, zgrid_np, dN_miss0))
+    p_hi = float(np.interp(z_hi, zgrid_np, dN_miss0))
+    # dN_miss above depth is exactly dN_exp.
+    np.testing.assert_allclose(p_hi, float(np.interp(z_hi, zgrid_np, dN_exp)), rtol=1e-10)
+    np.testing.assert_allclose(
+        np.exp(lp[1] - lp[0]), p_hi / p_lo, rtol=1e-6
+    )
+
+
+def test_z_depth_observed_kde_contributes_nothing_beyond_depth():
+    """Observed-KDE regression: a cataloged galaxy whose photo-z mass leaks past
+    z_depth contributes nothing to the prior above the depth.  With N_miss
+    forced to zero (a fixture with no expected missing density is impossible, so
+    instead compare against a pure-missing baseline): concretely, above the
+    depth the numerator equals the missing branch alone -- the observed catalog
+    term p_cat is exactly zero there -- for a pixel whose single galaxy sits at
+    the depth edge with a broad kernel that leaks well past it."""
+    cosmo = _cosmo()
+    zgrid_np = np.asarray(zgrid)
+    z_depth = float(zgrid_np[len(zgrid_np) // 3])
+
+    # One occupied pixel; its galaxy sits AT the depth with a broad photo-z so a
+    # large fraction of its (untruncated) kernel mass lies beyond z_depth.
+    leaky = EMCatalog(
+        apix=1.0,
+        zgals=jnp.array([[z_depth, 0.0]]),
+        dzgals=jnp.array([[0.06, 1.0]]),
+        wgals=jnp.array([[1.0, 0.0]]),
+        ngals=jnp.array([1], dtype=jnp.int32),
+        delta_g_pix_z=jnp.zeros((1, 1)),
+        dN_obs_kde=None,
+        pixel_to_cache_idx=None,
+    )
+    state = prepare_redshift_prior_state(
+        "dark_sirens", cosmo, _survey(z_depth=z_depth), leaky,
+        materialize_state=False,
+    )
+
+    above = zgrid_np[zgrid_np > z_depth]
+    z_hi = float(above[len(above) // 2])
+    pix = jnp.asarray([0], dtype=jnp.int32)
+
+    # Prior above depth == missing-only branch (dN_miss / Z), i.e. the observed
+    # catalog term N_obs * p_cat drops out entirely.
+    lp = float(np.asarray(eval_redshift_prior_with_state(
+        "dark_sirens", state, jnp.asarray([z_hi]), pix, cosmo,
+        _survey(z_depth=z_depth), leaky,
+    ))[0])
+    dN_miss0 = np.asarray(state.dN_miss[0])
+    log_Z = float(state.log_Z[0])
+    expected_missing_only = float(np.log(np.interp(z_hi, zgrid_np, dN_miss0))) - log_Z
+    np.testing.assert_allclose(lp, expected_missing_only, rtol=1e-6)
+
+    # Sanity: the galaxy's raw (untruncated) kernel genuinely leaks past the
+    # depth, so the truncation is doing real work (not a no-op on this fixture).
+    from darksirens.redshift.catalog import (
+        catalog_kernel_state, eval_log_catalog_prior_state,
+    )
+    ker_untrunc = catalog_kernel_state(
+        cosmo, _survey(z_depth=None), leaky, z_depth=None
+    )
+    p_cat_above = float(eval_log_catalog_prior_state(
+        jnp.asarray(z_hi), jnp.asarray(0), ker_untrunc, leaky
+    ))
+    assert np.isfinite(p_cat_above)  # untruncated p_cat is nonzero above depth
 
 
 def test_z_depth_clamped_above_zmax_warns():

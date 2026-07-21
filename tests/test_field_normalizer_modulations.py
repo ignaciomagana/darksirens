@@ -121,7 +121,10 @@ def _catalog(zgals, dzgals, wgals, ngals, apix=1.0, logq=None, delta_g=None):
 
 
 def _brute_force_Z(cosmo, survey, zgals, ngals, lss_fn, apix=1.0, z_depth=None):
-    """First-principles NumPy Z: per pixel N_obs + trapz((1-C)·dN_exp·lss·mask)."""
+    """First-principles NumPy Z: per pixel ``N_obs + trapz(dN_miss)`` where the
+    missing density is ``(1-C)·dN_exp·lss`` below ``z_depth`` and the FULL
+    ``dN_exp`` (C := 0, lss := 1) beyond it -- hosts past the depth are missing,
+    not nonexistent."""
     npix = zgals.shape[0]
     cat = EMCatalog(
         apix=apix, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(zgals),
@@ -134,7 +137,7 @@ def _brute_force_Z(cosmo, survey, zgals, ngals, lss_fn, apix=1.0, z_depth=None):
     dN_exp_smooth = np.asarray(grids.dN_exp_smooth)
     dN_exp_safe = np.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
     zg = np.asarray(zgrid)
-    mask = np.ones_like(zg) if z_depth is None else (zg <= z_depth).astype(float)
+    below = np.ones_like(zg) if z_depth is None else (zg <= z_depth).astype(float)
 
     Z = 0.0
     for p in range(npix):
@@ -147,7 +150,8 @@ def _brute_force_Z(cosmo, survey, zgals, ngals, lss_fn, apix=1.0, z_depth=None):
         else:
             obs = np.zeros_like(zg)
         C = np.clip(obs / dN_exp_safe, 0.0, 1.0)
-        Z += np.trapezoid((1.0 - C) * dN_exp * lss_fn(p) * mask, zg)
+        dN_miss = below * (1.0 - C) * dN_exp * lss_fn(p) + (1.0 - below) * dN_exp
+        Z += np.trapezoid(dN_miss, zg)
     return Z
 
 
