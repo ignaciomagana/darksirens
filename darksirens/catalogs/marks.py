@@ -33,9 +33,16 @@ def _center_marks(raw_marks: dict, zgals, ngals) -> dict:
     return out
 
 
-def load_and_center_survey_marks(survey_path, zgals, ngals) -> dict:
-    """Load survey marks and return z-centred JAX arrays keyed by mark name."""
-    raw_marks = load_survey_marks(survey_path)
+def load_and_center_survey_marks(survey_path, zgals, ngals, datasets=None) -> dict:
+    """Load survey marks and return z-centred JAX arrays keyed by mark name.
+
+    ``datasets``, if given, restricts the read/centering to that subset of
+    dataset names (see :func:`darksirens.catalogs.io.load_survey_marks`) --
+    e.g. a K>=2 mixture catalog's requested marks only, so unrequested
+    per-galaxy mark tables (up to ~0.83 GB each at DESI-wide shape) are never
+    loaded or centred.
+    """
+    raw_marks = load_survey_marks(survey_path, datasets=datasets)
     if not raw_marks:
         return {}
     centered = _center_marks(raw_marks, zgals, ngals)

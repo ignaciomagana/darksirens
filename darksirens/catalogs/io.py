@@ -36,16 +36,23 @@ def load_survey(survey_path, to_device=True):
 MARK_DATASETS = ("mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color")
 
 
-def load_survey_marks(survey_path):
-    """Load any per-galaxy mark datasets present in the pixelated survey file.
+def load_survey_marks(survey_path, datasets=None):
+    """Load per-galaxy mark datasets present in the pixelated survey file.
 
     Returns ``{dataset_name: (npix, maxgals) ndarray}`` for whichever of
     :data:`MARK_DATASETS` exist (empty dict if none).  These are the *raw* marks;
     z-centering happens at load (``inference/data.py``).
+
+    ``datasets``, if given, restricts the read to that subset of
+    :data:`MARK_DATASETS` (e.g. a K>=2 mixture catalog's requested marks only)
+    so unrequested mark tables are never pulled off disk.  ``None`` (default)
+    loads every mark dataset present, for callers that need to auto-detect
+    which marks a catalog provides.
     """
+    wanted = MARK_DATASETS if datasets is None else tuple(datasets)
     out = {}
     with h5py.File(survey_path, 'r') as f:
-        for ds in MARK_DATASETS:
+        for ds in wanted:
             if ds in f:
                 out[ds] = np.asarray(f[ds])
     return out

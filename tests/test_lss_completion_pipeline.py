@@ -177,6 +177,9 @@ def test_pixelate_writes_marks_and_load_all_data_centers_them(tmp_path, monkeypa
         universe_model="dark_sirens", survey_path=cat,
         gw_path="x", gwselection_path="x", use_LSS=False,
         counterpart=None, counterpart_nside=1, counterpart_dz=0.01, lss_completion=None,
+        # attach_mark_inputs only loads/centres marks for a non-"none" mark
+        # model (PERF-5): exercise that path explicitly here.
+        mark_model="loglinear",
     )
     data = data_module.load_all_data(opts)
     cm = data["mark_logmstar"]
