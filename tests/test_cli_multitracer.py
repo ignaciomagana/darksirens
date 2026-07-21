@@ -175,6 +175,39 @@ def test_unset_weighting_resolves_field_at_k2():
     assert "field (auto)" in result.stdout
 
 
+def test_unset_weighting_stays_inert_for_non_catalog_models():
+    """spectral_sirens never evaluates the catalog prior, so the unset
+    weighting must resolve to the inert legacy value rather than field --
+    the field-scope validation would otherwise fatal every catalog-free run
+    (regression: the field-default rollout broke spectral_sirens entirely)."""
+    result = _run([
+        "--gw_path", "/nonexistent/gw.h5",
+        "--gwselection_path", "/nonexistent/sel.h5",
+        "--universe_model", "spectral_sirens",
+        "--sampler", "tinyns",
+    ])
+    assert result.returncode != 0
+    assert "field supports --universe_model" not in result.stdout
+
+
+def test_unset_weighting_with_drop_full_catalog_resolves_conditional():
+    """--drop_full_catalog is an explicit memory request incompatible with
+    field's empty-pixel counting; the AUTO default honors it by resolving to
+    conditional with a warning instead of a surprise fatal (an EXPLICIT
+    field + drop_full_catalog request stays fatal)."""
+    result = _run([
+        "--gw_path", "/nonexistent/gw.h5",
+        "--gwselection_path", "/nonexistent/sel.h5",
+        "--survey_path", "/nonexistent/catA.h5",
+        "--universe_model", "dark_sirens",
+        "--drop_full_catalog", "true",
+        "--sampler", "tinyns",
+    ])
+    assert result.returncode != 0
+    assert "conditional (auto)" in result.stdout
+    assert "incompatible with --drop_full_catalog" not in result.stdout
+
+
 def test_explicit_weighting_choices_remain_valid_in_coherent_regimes():
     """Explicit conditional@K=1 and explicit field@K=2 stay accepted (they are
     the coherent estimands) -- runs proceed to data loading and fail there."""
