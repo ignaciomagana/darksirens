@@ -89,6 +89,9 @@ from darksirens.redshift.completion import (
     field_global_log_Z_marked_members,
     field_global_log_Z_members,
     log_galaxy_measure_grid,
+    member_N_miss_integrals,
+    _member_q_eff_from_logq,
+    _resolve_member_logq_row,
 )
 
 from darksirens.redshift.grid import zgrid
@@ -159,14 +162,23 @@ class DarkSirenEnsemblePriorState(NamedTuple):
     scalar-compatibility fields — identical to what a plain
     :class:`DarkSirenPriorState` would carry — so ``eval_redshift_prior_with_state``
     (and hence the GW likelihood) behaves exactly as the mean prior and is
-    unaffected by the ensemble.  The member fields drive only the Bayesian
-    redshift-prior **diagnostic** (``eval_redshift_prior_members_with_state``).
+    unaffected by the ensemble.  The member fields drive the Bayesian
+    redshift-prior **diagnostic** (``eval_redshift_prior_members_with_state``) and
+    the ``lss_marginalize`` member vmap.
+
+    ``base_miss`` is the member-INDEPENDENT missing-density base ``(N_rows,
+    N_grid)`` (``(1 - C) dN_exp`` with the ``z_depth`` relaxation baked in, times
+    ``mu_miss`` in the marked model); member ``m``'s density is reconstructed on
+    the fly at query redshifts as ``base_miss * Q_eff_m`` -- so the state stores
+    ``O(N_rows x N_grid)`` here, NOT the ``O(M x N_rows x N_grid)`` cube.  The
+    per-member log-Q lives on the catalog (a resident data constant, gathered two
+    grid nodes at a time by ``eval_dark_member_completion``), never in this state.
     """
     kernels: Any           # CatalogKernelState
     log_Nobs: Any          # (N_rows,) log real-galaxy count (-inf for empty rows)
     dN_miss: Any           # (N_rows, N_grid) scalar-compat missing-galaxy density
     log_Z: Any             # (N_rows,) scalar-compat log[N_obs + N_miss]
-    dN_miss_members: Any   # (M, N_rows, N_grid) per-member missing-galaxy density
+    base_miss: Any         # (N_rows, N_grid) member-independent missing-density base
     log_Z_members: Any     # (M, N_rows) per-member log[N_obs + N_miss^m]
     # FIELD-convention survey-global normalizers (None under conditional):
     # the scalar-compat (posterior-mean-Q) global Z and the per-member ones.
@@ -473,19 +485,25 @@ def prepare_redshift_prior_state(
                 log_Z_global = field_global_log_Z_marked(
                     cosmo, survey, em_catalog, mu_miss, log_h_flat
                 )
-            if curves.dN_miss_members is not None:
+            if curves.base_miss is not None:
                 # Marked LSS-completion ENSEMBLE (mirrors the unmarked ensemble
                 # design below): KEEP the scalar posterior-mean-Q fields above and
-                # ADD per-member marked missing densities / normalizers so the
-                # lss_marginalize member vmap (core._member_states) can swap them
-                # in per member.  ``mu_miss`` is pixel-independent (N_grid,), so it
-                # broadcasts across members exactly as it composes with the scalar
+                # ADD the member-INDEPENDENT marked base curve + the compact
+                # per-member normalizers so the lss_marginalize member vmap
+                # reconstructs each member's marked density on the fly
+                # (``base_miss * Q_eff_m``), never storing the ``(M, N_rows,
+                # N_grid)`` cube.  ``mu_miss`` is pixel-independent (N_grid,) and
+                # folds into ``base_miss`` exactly as it composed with the scalar
                 # posterior-mean dN_miss; the marked kernels / log_N_host are
-                # member-INDEPENDENT and broadcast under the vmap.  With
+                # member-INDEPENDENT.  ``member_N_miss_integrals`` streams the
+                # (M, N_rows) missing-mass integrals over the members (chunked +
+                # rematerialised in reverse mode) from the SAME marked base.  With
                 # lss_marginalize OFF only the scalar fields are read, so the
                 # likelihood value is unchanged (only the state TYPE changes).
-                dN_miss_members = curves.dN_miss_members * mu_miss[None, None, :]  # (M,N_rows,N_grid)
-                N_host_miss_members = jnp.trapezoid(dN_miss_members, zgrid, axis=-1)  # (M,N_rows)
+                base_miss_marked = curves.base_miss * mu_miss[None, :]         # (N_rows,N_grid)
+                N_host_miss_members = member_N_miss_integrals(
+                    base_miss_marked, em_catalog, survey
+                )                                                              # (M,N_rows)
                 Z_members = N_host_obs[None, :] + N_host_miss_members
                 log_Z_members = jnp.where(
                     Z_members > 0.0, jnp.log(jnp.maximum(Z_members, 1e-300)), 0.0
@@ -494,7 +512,7 @@ def prepare_redshift_prior_state(
                     state = DarkSirenEnsemblePriorState(
                         kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
                         log_Z=log_Z,
-                        dN_miss_members=dN_miss_members,
+                        base_miss=base_miss_marked,
                         log_Z_members=log_Z_members,
                         log_Z_global=log_Z_global,
                         log_Z_global_members=field_global_log_Z_marked_members(
@@ -505,7 +523,7 @@ def prepare_redshift_prior_state(
                 state = DarkSirenEnsemblePriorState(
                     kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
                     log_Z=log_Z,
-                    dN_miss_members=dN_miss_members,
+                    base_miss=base_miss_marked,
                     log_Z_members=log_Z_members,
                 )
                 return _maybe_materialize(state, materialize_state)
@@ -531,7 +549,7 @@ def prepare_redshift_prior_state(
         # ensemble was supplied), so this matches the legacy behaviour exactly.
         Z = Nobs + curves.N_miss
         log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
-        if curves.dN_miss_members is None:
+        if curves.base_miss is None:
             if is_field:
                 # Survey-GLOBAL normalizer log Sum_all-pixels[N_obs + N_miss].
                 # The per-pixel numerator (log_Nobs, dN_miss) is UNCHANGED; only
@@ -562,7 +580,7 @@ def prepare_redshift_prior_state(
             state = DarkSirenEnsemblePriorState(
                 kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss,
                 log_Z=log_Z,
-                dN_miss_members=curves.dN_miss_members,
+                base_miss=curves.base_miss,
                 log_Z_members=log_Z_members,
                 log_Z_global=field_global_log_Z(cosmo, survey, em_catalog),
                 log_Z_global_members=field_global_log_Z_members(
@@ -572,7 +590,7 @@ def prepare_redshift_prior_state(
             return _maybe_materialize(state, materialize_state)
         state = DarkSirenEnsemblePriorState(
             kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z,
-            dN_miss_members=curves.dN_miss_members, log_Z_members=log_Z_members,
+            base_miss=curves.base_miss, log_Z_members=log_Z_members,
         )
         return _maybe_materialize(state, materialize_state)
 
@@ -658,27 +676,48 @@ def eval_dark_obs_bracket(z, pix, state: DarkSirenPriorState, em_catalog: EMCata
 
 
 def eval_dark_member_completion(
-    A_obs, idx, t, pix, dN_miss_m, log_Z_row_m_or_global, is_field: bool
+    A_obs, idx, t, pix, base_miss, member_logq, member_is_log,
+    log_Z_row_m_or_global, z_depth, is_field: bool,
 ):
-    """Member-DEPENDENT completion of the dark-siren redshift prior.
+    """Member-DEPENDENT completion of the dark-siren redshift prior (cube-free).
 
     Given the member-independent observed part ``A_obs`` and grid bracket
-    ``(idx, t)`` from :func:`eval_dark_obs_bracket`, plus member ``m``'s 2-D
-    missing-galaxy density ``dN_miss_m`` ``(N_rows, N_grid)`` and its
-    normalizer -- per-pixel ``log_Z`` rows ``(N_rows,)`` under the conditional
-    convention, or the scalar survey-global ``log_Z_global_m`` under the field
-    convention -- reproduce ``_eval_dark_scalar``'s completion ops exactly:
+    ``(idx, t)`` from :func:`eval_dark_obs_bracket`, reconstruct member ``m``'s
+    missing-galaxy density at the TWO bracket nodes ON THE FLY from the SHARED
+    member-independent base ``base_miss`` ``(N_rows, N_grid)`` and this member's
+    row-aligned RAW log-Q table ``member_logq`` ``(N_rows, N_grid)`` -- gathering
+    only ``base_miss[pix, idx:idx+2]`` and ``member_logq[pix, idx:idx+2]``, never
+    the full ``(M, N_rows, N_grid)`` cube.  The member factor is
+    ``Q_eff = exp(clip(logQ, ±_LOGQ_CLIP))`` relaxed to 1 beyond ``z_depth`` (a
+    concrete Python float or ``None``), and
 
-        miss     = interp(dN_miss_m[pix, idx : idx+2], t)
+        miss     = interp( base_miss * Q_eff  @ (idx, idx+1), t )
         log_miss = log(max(miss, tiny))   where miss > 0 else -inf
-        log p_z  = logaddexp(A_obs, log_miss) - normalizer.
+        log p_z  = logaddexp(A_obs, log_miss) - normalizer,
 
-    Written for an arbitrary leading sample shape (advanced indexing over
-    ``pix``/``idx``), so vmapping over the stacked member axis of ``dN_miss_m``
-    (and the per-pixel ``log_Z`` rows) is trivial.  ``is_field`` is a static
-    Python bool selecting the survey-global vs per-pixel normalizer branch.
+    which is BIT-IDENTICAL at grid nodes to the pre-existing cube evaluation
+    (``base_miss[·, j] = (1 - C) dN_exp`` below the depth, ``= dN_exp`` above,
+    and ``Q_eff`` is ``Q_m`` below / ``1`` above; their product is the old
+    ``dN_miss_m[·, j]`` node-for-node).  The normalizer is the per-pixel
+    ``log_Z`` rows ``(N_rows,)`` under the conditional convention, or the scalar
+    survey-global ``log_Z_global_m`` under the field convention.  Written for an
+    arbitrary leading sample shape (advanced indexing over ``pix``/``idx``), so
+    vmapping over the stacked member axis of ``member_logq`` (and the per-member
+    ``log_Z`` leaf) is trivial; ``base_miss`` is member-INDEPENDENT and passed
+    unbatched.  ``member_is_log`` / ``is_field`` are static Python bools.
     """
-    miss = _interp_row(dN_miss_m[pix, idx], dN_miss_m[pix, idx + 1], t)
+    b_lo = base_miss[pix, idx]
+    b_hi = base_miss[pix, idx + 1]
+    lq_lo = member_logq[pix, idx]
+    lq_hi = member_logq[pix, idx + 1]
+    if z_depth is None:
+        depth_lo = depth_hi = None
+    else:
+        depth_lo = zgrid[idx] <= z_depth
+        depth_hi = zgrid[idx + 1] <= z_depth
+    q_lo = _member_q_eff_from_logq(lq_lo, depth_lo, member_is_log)
+    q_hi = _member_q_eff_from_logq(lq_hi, depth_hi, member_is_log)
+    miss = _interp_row(b_lo * q_lo, b_hi * q_hi, t)
     log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
     numerator = jnp.logaddexp(A_obs, log_miss)
     if is_field:
@@ -752,20 +791,36 @@ def eval_redshift_prior_with_state(
     raise ValueError(f"Unknown redshift prior model '{model}'.")
 
 
-def _eval_dark_member_scalar(z, pix, m, state: "DarkSirenEnsemblePriorState", em_catalog):
+def _eval_dark_member_scalar(
+    z, pix, m, member_logq_all, member_is_log,
+    state: "DarkSirenEnsemblePriorState", survey: SurveyParams, em_catalog,
+):
     """log p_m(z | pix) for LSS-completion ensemble member ``m`` (diagnostic).
 
         p_m(z|pix) = [N_obs(pix) p_cat(z|pix) + dN_miss^m(z|pix)]
                      / [N_obs(pix) + N_miss^m(pix)].
+
+    ``dN_miss^m`` is reconstructed on the fly at the two bracket nodes from the
+    shared ``state.base_miss`` and member ``m``'s row of the RAW log-Q table
+    ``member_logq_all`` ``(M, N_rows, N_grid)`` (a resident data constant; the
+    ``[m]`` slice is a gather, not an ``(M, N_rows, N_grid)`` copy), identically
+    to :func:`eval_dark_member_completion`.
     """
     log_p_cat = eval_log_catalog_prior_state(z, pix, state.kernels, em_catalog)
     log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
     idx, t = _grid_bracket(z)
-    miss = _interp_row(
-        state.dN_miss_members[m, pix, idx],
-        state.dN_miss_members[m, pix, idx + 1],
-        t,
-    )
+    b_lo = state.base_miss[pix, idx]
+    b_hi = state.base_miss[pix, idx + 1]
+    lq_lo = member_logq_all[m, pix, idx]
+    lq_hi = member_logq_all[m, pix, idx + 1]
+    if survey.z_depth is None:
+        depth_lo = depth_hi = None
+    else:
+        depth_lo = zgrid[idx] <= survey.z_depth
+        depth_hi = zgrid[idx + 1] <= survey.z_depth
+    q_lo = _member_q_eff_from_logq(lq_lo, depth_lo, member_is_log)
+    q_hi = _member_q_eff_from_logq(lq_hi, depth_hi, member_is_log)
+    miss = _interp_row(b_lo * q_lo, b_hi * q_hi, t)
     log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
     return jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss) - state.log_Z_members[m, pix]
 
@@ -791,11 +846,18 @@ def eval_redshift_prior_members_with_state(
     z = jnp.asarray(z)
     pix = jnp.asarray(pix)
     if model == "dark_sirens" and isinstance(state, DarkSirenEnsemblePriorState):
-        M = int(state.dN_miss_members.shape[0])
+        M = int(state.log_Z_members.shape[0])
+        # Resolve the row-aligned RAW member log-Q ONCE (a view of the resident
+        # data constant on the hot path); each member's density is reconstructed
+        # from state.base_miss * Q_eff_m at the query brackets (no cube).
+        member_logq_all, member_is_log = _resolve_member_logq_row(em_catalog)
 
         def _per_member(m):
             return vmap(
-                lambda z_i, p_i: _eval_dark_member_scalar(z_i, p_i, m, state, em_catalog)
+                lambda z_i, p_i: _eval_dark_member_scalar(
+                    z_i, p_i, m, member_logq_all, member_is_log,
+                    state, survey, em_catalog,
+                )
             )(z, pix)
 
         return vmap(_per_member)(jnp.arange(M, dtype=jnp.int32))  # (M, len(z))

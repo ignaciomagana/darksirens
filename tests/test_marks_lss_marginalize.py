@@ -261,8 +261,10 @@ def test_marginalize_off_matches_posterior_mean_scalar_path():
 
 def test_marked_members_state_shape_and_broadcast():
     """prepare_redshift_prior_state with marks+members returns a
-    DarkSirenEnsemblePriorState whose dN_miss_members == curves.dN_miss_members *
-    mu_miss[None,None,:] (direct broadcast correctness)."""
+    DarkSirenEnsemblePriorState whose member-INDEPENDENT base curve is
+    curves.base_miss * mu_miss[None,:] (the (M,N_rows,N_grid) cube is no longer
+    materialised; each member's marked density is base_miss * Q_eff_m,
+    reconstructed at the query brackets)."""
     cat = _dark_catalog(logq_members=_members_table())
     eta = jnp.asarray([1.1])
     state = prepare_redshift_prior_state(
@@ -272,15 +274,18 @@ def test_marked_members_state_shape_and_broadcast():
     )
     assert isinstance(state, DarkSirenEnsemblePriorState)
     curves = completion_curves(COSMO, SURVEY, cat)
-    assert curves.dN_miss_members is not None
+    assert curves.base_miss is not None
     log_h = jnp.clip(
         mark_model_parser("loglinear", _MARK_NAMES)(cat, eta), -_LOG_H_CLIP, _LOG_H_CLIP
     )
     mu_miss = _mu_miss_grid(cat, log_h)
-    expected = np.asarray(curves.dN_miss_members) * np.asarray(mu_miss)[None, None, :]
-    np.testing.assert_allclose(np.asarray(state.dN_miss_members), expected, rtol=0, atol=0)
-    # Member axis is preserved; scalar-compat field is the posterior-mean compose.
-    assert state.dN_miss_members.shape == (_M, 2, NG)
+    # The marked base curve folds mu_miss into the member-independent base.
+    expected_base = np.asarray(curves.base_miss) * np.asarray(mu_miss)[None, :]
+    np.testing.assert_allclose(np.asarray(state.base_miss), expected_base, rtol=0, atol=0)
+    assert state.base_miss.shape == (2, NG)
+    # The compact per-member missing mass has the member axis; scalar-compat
+    # field is the posterior-mean compose.
+    assert state.log_Z_members.shape == (_M, 2)
     np.testing.assert_allclose(
         np.asarray(state.dN_miss),
         np.asarray(curves.dN_miss) * np.asarray(mu_miss)[None, :],

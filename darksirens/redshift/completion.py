@@ -499,16 +499,28 @@ def _precompute_grids(
 class CompletionCurves(NamedTuple):
     """Per-catalog-row completion outputs on ``zgrid``.
 
-    ``dN_miss_members`` / ``N_miss_members`` are populated only when the
-    catalog carries an LSS-completion *ensemble* (``lss_completion_*_members``);
-    they support the Bayesian redshift-prior diagnostic and default to ``None``
-    (the scalar API and the GW likelihood ignore them).
+    ``base_miss`` / ``N_miss_members`` are populated only when the catalog
+    carries an LSS-completion *ensemble* (``lss_completion_*_members``); they
+    support the Bayesian redshift-prior diagnostic and the ``lss_marginalize``
+    member vmap, and default to ``None`` (the scalar API and the deterministic GW
+    likelihood ignore them).
+
+    ``base_miss`` is the member-INDEPENDENT missing-density base ``(1 - C)
+    dN_exp`` (with the ``z_depth`` relaxation to ``dN_exp`` beyond the depth
+    already applied), so member ``m``'s missing density is exactly
+    ``base_miss * Q_eff_m`` with ``Q_eff_m == 1`` beyond the depth -- the full
+    ``(M, N_rows, N_grid)`` member cube is NEVER materialised; it is reconstructed
+    two grid nodes at a time at query redshifts (see
+    :func:`darksirens.redshift.prior.eval_dark_member_completion`).
+    ``N_miss_members`` is the grid-integrated per-member missing mass ``(M,
+    N_rows)`` -- a compact scalar table computed by the streamed
+    :func:`member_N_miss_integrals` (no cube).
     """
     f: jnp.ndarray        # (N_rows,) scalar number-weighted completeness (diagnostic)
     dN_miss: jnp.ndarray  # (N_rows, N_grid) missing-galaxy density [counts / unit z]
     C_eff: jnp.ndarray    # (N_rows, N_grid) effective completeness (diagnostic)
     N_miss: jnp.ndarray   # (N_rows,) integral of dN_miss
-    dN_miss_members: jnp.ndarray = None  # (M, N_rows, N_grid) | None
+    base_miss: jnp.ndarray = None        # (N_rows, N_grid) member-independent base | None
     N_miss_members: jnp.ndarray = None   # (M, N_rows) | None
 
 
@@ -521,6 +533,159 @@ class CompletionCurves(NamedTuple):
 _LOGQ_CLIP: float = 7.0
 
 
+def _check_lss_grid(arr):
+    """Static ``N_grid == zgrid.size`` check for a Q_LSS table (no interpolation)."""
+    if arr.shape[-1] != int(zgrid.size):
+        raise ValueError(
+            f"LSS completion table has N_grid={arr.shape[-1]} but the package "
+            f"zgrid has size {int(zgrid.size)}; the offline builder must use the "
+            "same redshift grid (no silent interpolation)."
+        )
+
+
+def _row_align_lss(table, row_axis, em_catalog: EMCatalog, n_rows: int):
+    """Align a Q_LSS table's ``row_axis`` to catalog row order.
+
+    Compact-vs-global is decided by STATIC shapes only (``K`` and ``n_rows`` are
+    concrete even under a trace, so nothing here concretises a tracer).  In the
+    jitted likelihood the table is ALWAYS already compact -- the factory slices
+    global->compact before the jit -- so ``K == n_rows`` and it is returned
+    untouched (the hot path; the returned object is a VIEW of the resident data
+    constant, so no ``(M, N_rows, N_grid)`` copy is made).  ``K != n_rows`` is
+    reachable ONLY on the eager path (a full global table handed straight to
+    ``completion_curves`` by a test or diagnostic), never under jit, so
+    ``unique_pixels`` is concrete here and the coverage check is safe.
+    """
+    K = table.shape[row_axis]
+    if K == n_rows:
+        return table
+    if em_catalog.unique_pixels is None:
+        idx = jnp.arange(n_rows, dtype=jnp.int32)
+    else:
+        idx = jnp.asarray(em_catalog.unique_pixels, dtype=jnp.int32)
+    if int(idx.max()) >= K:
+        raise ValueError(
+            f"global LSS completion table has {K} rows but a catalog pixel index "
+            f"reaches {int(idx.max())}; the table does not cover all catalog pixels "
+            "(rebuild Q over the full nside, or pass a compact table)."
+        )
+    return jnp.take(table, idx, axis=row_axis)
+
+
+def _to_q(logq_arr, q_arr):
+    """Clip-and-exp a Q_LSS table: ``exp(clip(logQ, ±_LOGQ_CLIP))``.
+
+    Accepts either a log table (``logq_arr``) or a linear table (``q_arr``, then
+    log it first).  Used for the (small, ``(N_rows, N_grid)``) DETERMINISTIC Q
+    only -- the member ensemble defers this to the 2-node gathers / streamed chunk
+    so no ``(M, N_rows, N_grid)`` intermediate is built.
+    """
+    if logq_arr is not None:
+        lq = jnp.clip(jnp.asarray(logq_arr, dtype=float), -_LOGQ_CLIP, _LOGQ_CLIP)
+    elif q_arr is not None:
+        lq = jnp.clip(
+            jnp.log(jnp.maximum(jnp.asarray(q_arr, dtype=float), 1e-300)),
+            -_LOGQ_CLIP, _LOGQ_CLIP,
+        )
+    else:
+        return None
+    return jnp.exp(lq)
+
+
+def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool):
+    """One member's completion factor ``Q_eff = exp(clip(logQ, ±_LOGQ_CLIP))``,
+    relaxed to ``1`` beyond ``survey.z_depth``.
+
+    ``logq_arr`` is a RAW (un-clipped, un-exponentiated) log table when
+    ``member_is_log`` else a linear-Q table (then log it first).  Bit-identical at
+    grid nodes to the pre-existing whole-table ``_to_q`` followed by the
+    ``_completion_member_row`` depth relaxation, but applied to whatever slice /
+    2-node gather the caller passes (never the full cube).  ``depth_mask`` is a
+    static ``(N_grid,)`` (or gathered ``(...,)``) boolean, or ``None`` when
+    ``z_depth is None`` (Q_eff is then just ``exp(clip(logQ))`` everywhere).
+    """
+    if not member_is_log:
+        logq_arr = jnp.log(jnp.maximum(logq_arr, 1e-300))
+    q = jnp.exp(jnp.clip(logq_arr, -_LOGQ_CLIP, _LOGQ_CLIP))
+    if depth_mask is None:
+        return q
+    return jnp.where(depth_mask, q, 1.0)
+
+
+def _resolve_member_logq_row(em_catalog: EMCatalog):
+    """Row-aligned RAW member log-Q table ``(M, N_rows, N_grid)`` + ``is_log`` flag.
+
+    Returns the ensemble table WITHOUT clipping or exponentiating -- both are
+    deferred to the 2-node gathers in the evaluator and to the per-member chunk in
+    :func:`member_N_miss_integrals` -- so no ``(M, N_rows, N_grid)`` intermediate
+    is ever built on the hot jit path (there the table is already compact and
+    row-aligned, ``K == N_rows``, and is returned untouched, a view of the
+    resident data constant).  ``member_is_log`` is ``True`` for a log-Q table and
+    ``False`` for a linear-Q table (then the consumer takes ``log`` at the gathered
+    nodes).  Returns ``(None, True)`` when the catalog carries no ensemble.
+    """
+    logq_m = em_catalog.lss_completion_logq_members
+    q_m = em_catalog.lss_completion_q_members
+    if logq_m is None and q_m is None:
+        return None, True
+    n_rows = em_catalog.zgals.shape[0]  # static int (shape) -- safe under trace
+    if logq_m is not None:
+        tab, is_log = jnp.asarray(logq_m, dtype=float), True
+    else:
+        tab, is_log = jnp.asarray(q_m, dtype=float), False
+    _check_lss_grid(tab)
+    return _row_align_lss(tab, 1, em_catalog, n_rows), is_log
+
+
+def _member_posterior_mean_q(logq_members_row, member_is_log: bool):
+    """Posterior-MEAN Q ``(N_rows, N_grid)`` = ``mean_m exp(clip(logQ_m))``.
+
+    Streamed with ``lax.scan`` over the M members so the ``(M, N_rows, N_grid)``
+    exponentiated cube is never materialised; bit-identical at grid nodes to the
+    old ``jnp.mean(exp(clip(logQ_members)), axis=member)``.  Q is theta-INDEPENDENT
+    (it is loaded data), so this carries no reverse-mode cost.  No depth relaxation
+    here -- the deterministic path applies ``z_depth`` downstream in
+    ``_assemble_curves`` exactly as before.
+    """
+    M = logq_members_row.shape[0]
+
+    def _body(acc, logq_m):
+        return acc + _member_q_eff_from_logq(logq_m, None, member_is_log), None
+
+    total, _ = lax.scan(
+        _body, jnp.zeros(logq_members_row.shape[1:], dtype=float), logq_members_row
+    )
+    return total / M
+
+
+def member_N_miss_integrals(base_miss, em_catalog: EMCatalog, survey: SurveyParams):
+    """Streamed per-member missing-mass integrals ``N_miss_members`` ``(M, N_rows)``.
+
+    ``N_miss[m, row] = integral base_miss[row] * Q_eff_m[row] dz`` on ``zgrid``,
+    computed WITHOUT ever materialising the ``(M, N_rows, N_grid)`` member density
+    cube: a ``lax.scan`` over the M ensemble members forms ONE member's ``(N_rows,
+    N_grid)`` density from the SHARED ``base_miss`` and that member's row-aligned
+    log-Q, integrates it to ``(N_rows,)``, and discards it.  The scan body is
+    ``jax.checkpoint``-wrapped so the reverse pass REMATERIALISES each member's
+    density instead of stacking ``(M, N_rows, N_grid)`` residuals -- keeping BOTH
+    the forward and backward peak at ``O(N_rows x N_grid) + O(M x N_rows)``, the
+    crux that lets ``--lss_marginalize`` scale.  ``base_miss`` already carries the
+    ``survey.z_depth`` relaxation (``== dN_exp`` beyond the depth) and ``Q_eff`` is
+    forced to ``1`` there, so the integrand is bit-identical at grid nodes to the
+    pre-existing ``_completion_member_row`` cube.
+    """
+    logq_members_row, member_is_log = _resolve_member_logq_row(em_catalog)
+    depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+
+    def _body(carry, logq_m):                 # logq_m: (N_rows, N_grid)
+        q_eff = _member_q_eff_from_logq(logq_m, depth_mask, member_is_log)
+        dN_m = base_miss * q_eff              # (N_rows, N_grid) -- transient, discarded
+        return carry, jnp.trapezoid(dN_m, zgrid, axis=-1)  # (N_rows,)
+
+    _, N = lax.scan(jax.checkpoint(_body), None, logq_members_row)  # (M, N_rows)
+    return N
+
+
 def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
     """Resolve the (optional) Q_LSS tables to **row order** for the vmap.
 
@@ -529,99 +694,43 @@ def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
     ``darksiren_log_likelihood``), so every ``em_catalog`` field is a tracer and no
     concrete ``int()``/``.max()`` may touch one.  The indexing-enum decode, the
     global->compact row gather and the pixel-coverage validation are already done
-    EAGERLY (host-side, before the jit) in
-    ``inference/likelihood.py::make_likelihood._compact_lss_q``, which delivers a
-    compact, row-aligned table.  Here we only consume it with static shapes.
+    EAGERLY (host-side, before the jit) in the factory, which delivers a compact,
+    row-aligned table.  Here we only consume it with static shapes.
 
-    Returns ``(q_row, q_members_row)``:
+    Returns ``(q_row, logq_members_row)``:
 
-    * ``q_row``           — ``(N_rows, N_grid)`` deterministic Q, or ``None``.
-    * ``q_members_row``   — ``(N_rows, M, N_grid)`` ensemble Q (row-major
-      leading axis, ready to vmap), or ``None``.
+    * ``q_row``            — ``(N_rows, N_grid)`` DETERMINISTIC Q (already clipped
+      + exponentiated), or ``None``.
+    * ``logq_members_row`` — ``(M, N_rows, N_grid)`` RAW ensemble LOG-Q (row-major,
+      NOT clipped/exponentiated -- deferred to the gathers / streamed chunk so no
+      cube is built), or ``None``.
 
-    Resolution rules: prefer ``logq`` over ``q``; clip ``logq`` to
+    Resolution: prefer ``logq`` over ``q`` for the deterministic table; clip to
     ``[-_LOGQ_CLIP, _LOGQ_CLIP]`` then exponentiate; validate ``N_grid ==
-    zgrid.size`` (no silent interpolation; a static-shape check).  A table whose
-    row axis already equals ``N_rows`` is used as-is (the normal jit path); a
-    non-compacted global table (only reachable on the eager *diagnostic* path,
-    never under jit) is gathered to row order via ``unique_pixels`` after an eager
-    pixel-coverage check.  If only an ensemble is supplied, the deterministic
-    ``q_row`` is the posterior-mean
-    Q so the scalar prior path still runs.  Q is **not** renormalised here — it is
-    a physical density ratio.
+    zgrid.size``.  If ONLY an ensemble is supplied, ``q_row`` is the posterior-mean
+    Q (streamed, no cube) so the scalar prior path still runs.  Q is **not**
+    renormalised -- it is a physical density ratio.  Callers that need the member
+    ``is_log`` flag call :func:`_resolve_member_logq_row` directly.
     """
     logq = em_catalog.lss_completion_logq
     q = em_catalog.lss_completion_q
-    logq_m = em_catalog.lss_completion_logq_members
-    q_m = em_catalog.lss_completion_q_members
-    if logq is None and q is None and logq_m is None and q_m is None:
+    logq_members_row, member_is_log = _resolve_member_logq_row(em_catalog)
+    if logq is None and q is None and logq_members_row is None:
         return None, None  # no Q table -> legacy local-overdensity path
 
     n_rows = em_catalog.zgals.shape[0]  # static int (shape) — safe under trace
 
-    def _to_q(logq_arr, q_arr):
-        if logq_arr is not None:
-            lq = jnp.clip(jnp.asarray(logq_arr, dtype=float), -_LOGQ_CLIP, _LOGQ_CLIP)
-        elif q_arr is not None:
-            lq = jnp.clip(
-                jnp.log(jnp.maximum(jnp.asarray(q_arr, dtype=float), 1e-300)),
-                -_LOGQ_CLIP, _LOGQ_CLIP,
-            )
-        else:
-            return None
-        return jnp.exp(lq)
-
-    def _check_grid(arr):
-        if arr.shape[-1] != int(zgrid.size):
-            raise ValueError(
-                f"LSS completion table has N_grid={arr.shape[-1]} but the package "
-                f"zgrid has size {int(zgrid.size)}; the offline builder must use the "
-                "same redshift grid (no silent interpolation)."
-            )
-
-    def _row_align(table, row_axis):
-        # Compact-vs-global is decided by STATIC shapes only (``K`` and ``n_rows``
-        # are concrete even under a trace, so nothing here concretises a tracer).
-        # In the jitted likelihood the table is ALWAYS already compact --
-        # make_likelihood._compact_lss_q slices global->compact before the jit -- so
-        # ``K == n_rows`` and we return it untouched (the hot path).
-        K = table.shape[row_axis]
-        if K == n_rows:
-            return table
-        # ``K != n_rows`` is reachable ONLY on the eager path (a full global table
-        # handed straight to completion_curves by a test or diagnostic), never under
-        # jit, so ``unique_pixels`` is concrete here and the coverage check is safe.
-        if em_catalog.unique_pixels is None:
-            idx = jnp.arange(n_rows, dtype=jnp.int32)
-        else:
-            idx = jnp.asarray(em_catalog.unique_pixels, dtype=jnp.int32)
-        if int(idx.max()) >= K:
-            raise ValueError(
-                f"global LSS completion table has {K} rows but a catalog pixel index "
-                f"reaches {int(idx.max())}; the table does not cover all catalog pixels "
-                "(rebuild Q over the full nside, or pass a compact table)."
-            )
-        return jnp.take(table, idx, axis=row_axis)
-
-    q_det = _to_q(logq, q)        # (K, N_grid) | None
-    q_mem = _to_q(logq_m, q_m)    # (M, K, N_grid) | None
-
+    q_det = _to_q(logq, q)  # (K, N_grid) | None
     q_row = None
     if q_det is not None:
-        _check_grid(q_det)
-        q_row = _row_align(q_det, 0)                       # (N_rows, N_grid)
+        _check_lss_grid(q_det)
+        q_row = _row_align_lss(q_det, 0, em_catalog, n_rows)   # (N_rows, N_grid)
+    elif logq_members_row is not None:
+        # Only an ensemble supplied: the deterministic branch uses the
+        # posterior-mean Q, streamed so the exponentiated member cube is not built.
+        q_row = _member_posterior_mean_q(logq_members_row, member_is_log)
 
-    q_members_row = None
-    if q_mem is not None:
-        _check_grid(q_mem)
-        q_mem_rows = _row_align(q_mem, 1)                  # (M, N_rows, N_grid)
-        q_members_row = jnp.transpose(q_mem_rows, (1, 0, 2))  # (N_rows, M, N_grid)
-
-    if q_row is None and q_members_row is not None:
-        # Only an ensemble supplied: deterministic branch uses posterior-mean Q.
-        q_row = jnp.mean(q_members_row, axis=1)            # (N_rows, N_grid)
-
-    return q_row, q_members_row
+    return q_row, logq_members_row
 
 
 def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
@@ -746,32 +855,29 @@ def _completion_curves_row_q(
     return _assemble_curves(C, q_row, grids, survey)
 
 
-def _completion_member_row(
+def _base_miss_row(
     row: int,
-    q_members_row: jnp.ndarray,
     grids: _CompletionGrids,
     survey: SurveyParams,
     em_catalog: EMCatalog,
 ):
-    """Per-row ensemble missing densities for ``q_members_row`` ``(M, N_grid)``.
+    """Member-INDEPENDENT missing-density base for one row: ``(1 - C) dN_exp``.
 
-    Mirrors the ``survey.z_depth`` completeness prior applied in
-    ``_assemble_curves`` (Python-level branch; ``z_depth`` is concrete at
-    trace time, never a tracer) so the ensemble diagnostics stay consistent
-    with the deterministic ``dN_miss``/``N_miss`` curves: beyond the depth
-    C := 0 and lss := 1, so every member's missing density relaxes to the full
-    expected count ``dN_exp``.  ``z_depth is None`` takes the untouched original
-    expression -- no mask is built.
+    Mirrors ``_assemble_curves``'s ``dN_miss`` with the LSS rate factor set to 1
+    (Q_LSS is applied per member as ``base_miss * Q_eff_m``).  The
+    ``survey.z_depth`` relaxation is baked in EXACTLY as in ``_assemble_curves``
+    (Python-level branch on the concrete ``z_depth``; ``None`` builds no mask):
+    beyond the depth C := 0 and lss := 1, so the base relaxes to the full expected
+    count ``dN_exp`` -- and because ``Q_eff`` is forced to 1 there too, every
+    member's density is ``dN_exp`` beyond the depth, matching the pre-existing
+    per-member cube node-for-node.
     """
     C, _ = _row_C(row, grids, em_catalog)
-    dN_miss_m = (1.0 - C)[None, :] * grids.dN_exp[None, :] * q_members_row  # (M, N_grid)
+    base = (1.0 - C) * grids.dN_exp
     if survey.z_depth is not None:
         depth_mask = zgrid <= survey.z_depth
-        dN_miss_m = jnp.where(
-            depth_mask[None, :], dN_miss_m, grids.dN_exp[None, :]
-        )
-    N_miss_m = jnp.trapezoid(dN_miss_m, zgrid, axis=-1)                     # (M,)
-    return dN_miss_m, N_miss_m
+        base = jnp.where(depth_mask, base, grids.dN_exp)
+    return base
 
 
 _completion_curves_rows_vmap = vmap(
@@ -780,8 +886,8 @@ _completion_curves_rows_vmap = vmap(
 _completion_curves_rows_q_vmap = vmap(
     _completion_curves_row_q, in_axes=(0, 0, None, None, None), out_axes=(0, 0, 0, 0)
 )
-_completion_member_rows_vmap = vmap(
-    _completion_member_row, in_axes=(0, 0, None, None, None), out_axes=(0, 0)
+_base_miss_rows_vmap = vmap(
+    _base_miss_row, in_axes=(0, None, None, None), out_axes=0
 )
 
 
@@ -796,13 +902,16 @@ def completion_curves(
     :func:`darksirens.redshift.prior.prepare_redshift_prior_state`.  When the catalog
     carries an LSS-conditioned lognormal completion table the per-row factor is
     ``Q_LSS`` (replacing the legacy ``max(1 + b_eff delta_g, 0)``); with an
-    ensemble it additionally returns member missing densities for diagnostics.
+    ensemble it additionally returns the member-INDEPENDENT ``base_miss`` curve and
+    the compact per-member ``N_miss_members`` scalar table (both cube-free) so the
+    member marginalisation / diagnostic can reconstruct each member's density on
+    the fly (``base_miss * Q_eff_m``) without ever storing ``(M, N_rows, N_grid)``.
     """
     grids = _precompute_grids(cosmo, survey, em_catalog)
     n_rows = em_catalog.zgals.shape[0]
     rows = jnp.arange(n_rows, dtype=jnp.int32)
 
-    q_row, q_members_row = _resolve_lss_completion_row_tables(em_catalog)
+    q_row, logq_members_row = _resolve_lss_completion_row_tables(em_catalog)
 
     if q_row is None:
         f, dN_miss, C_eff, N_miss = _completion_curves_rows_vmap(rows, grids, survey, em_catalog)
@@ -811,16 +920,15 @@ def completion_curves(
             rows, q_row, grids, survey, em_catalog
         )
 
-    dN_miss_members = None
+    base_miss = None
     N_miss_members = None
-    if q_members_row is not None:
-        dM, NM = _completion_member_rows_vmap(rows, q_members_row, grids, survey, em_catalog)
-        dN_miss_members = jnp.transpose(dM, (1, 0, 2))  # (M, N_rows, N_grid)
-        N_miss_members = jnp.transpose(NM, (1, 0))      # (M, N_rows)
+    if logq_members_row is not None:
+        base_miss = _base_miss_rows_vmap(rows, grids, survey, em_catalog)   # (N_rows, N_grid)
+        N_miss_members = member_N_miss_integrals(base_miss, em_catalog, survey)  # (M, N_rows)
 
     return CompletionCurves(
         f=f, dN_miss=dN_miss, C_eff=C_eff, N_miss=N_miss,
-        dN_miss_members=dN_miss_members, N_miss_members=N_miss_members,
+        base_miss=base_miss, N_miss_members=N_miss_members,
     )
 
 
