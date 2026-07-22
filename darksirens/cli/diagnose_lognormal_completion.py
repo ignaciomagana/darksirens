@@ -85,8 +85,18 @@ def main(argv=None):
         cat_ens = _full_catalog(opts.catalog, lss_completion_logq_members=jnp.asarray(logq_members),
                                 lss_completion_indexing=idx_enum)
         curves_ens = completion_curves(cosmo, survey, cat_ens)
+        # The (M, N_rows, N_grid) member cube is no longer materialised; each
+        # member's density is base_miss * Q_eff_m, reconstructed here for the plot
+        # (Q_eff = exp(clip(logQ, ±_LOGQ_CLIP)), relaxed to 1 beyond z_depth --
+        # node-for-node identical to the old cube row).
+        from darksirens.redshift.completion import _LOGQ_CLIP
+        base_row = np.asarray(curves_ens.base_miss[row])             # (NG,)
+        Q_eff = np.exp(np.clip(np.asarray(logq_members)[:, row, :], -_LOGQ_CLIP, _LOGQ_CLIP))
+        if survey.z_depth is not None:
+            _below = np.asarray(zgrid) <= survey.z_depth
+            Q_eff = np.where(_below[None, :], Q_eff, 1.0)
         Q_mem = np.exp(np.asarray(logq_members)[:, row, :])          # (M, NG)
-        dN_mem = np.asarray(curves_ens.dN_miss_members[:, row, :])   # (M, NG)
+        dN_mem = base_row[None, :] * Q_eff                           # (M, NG)
         Q_mean, Q_lo, Q_hi = Q_mem.mean(0), np.percentile(Q_mem, 16, 0), np.percentile(Q_mem, 84, 0)
         dN_mean = dN_mem.mean(0)
         dN_lo, dN_hi = np.percentile(dN_mem, 16, 0), np.percentile(dN_mem, 84, 0)

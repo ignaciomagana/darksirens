@@ -17,6 +17,11 @@ from darksirens.redshift.prior import (
     eval_redshift_prior_with_state,
     prepare_redshift_prior_state,
 )
+from darksirens.redshift.completion import (
+    _member_q_eff_from_logq,
+    _resolve_member_logq_row,
+)
+from darksirens.redshift.grid import zgrid
 from darksirens.gw.populations import pop_model_parser
 from darksirens.likelihood.selection import (
     DEFAULT_MAX_LIKELIHOOD_VARIANCE,
@@ -955,36 +960,54 @@ def darksiren_log_likelihood(
 
         dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
 
-        # Member-stacked leaves: per catalog (dN_miss_members, log_Z leaf).  These
-        # are the ONLY leaves carried into the member vmap (mirrors the reference
-        # member_axes_one: dN_miss=0, log_Z=0, log_Z_global=0-if-field).  The
+        # Member-stacked leaves: per catalog (row-aligned RAW member log-Q table,
+        # log_Z leaf).  These are the ONLY leaves carried into the member vmap;
+        # the member density is reconstructed on the fly from the SHARED (member-
+        # INDEPENDENT) ``base_miss`` curve so NO (M, N_rows, N_grid) cube is ever
+        # a state leaf or a vmap operand -- only the resident data-constant log-Q
+        # table (gathered two nodes at a time) and the compact log_Z leaf.  The
         # conditional normalizer is the (M, N_rows) per-pixel rows; the field
-        # normalizer is the (M,) survey-global scalars.
-        def _leaf_bundle(states):
-            return tuple(
-                (
-                    s.dN_miss_members,
-                    s.log_Z_global_members if is_field else s.log_Z_members,
-                )
-                for s in states
-            )
+        # normalizer is the (M,) survey-global scalars.  ``base_miss`` /
+        # ``member_is_log`` / ``z_depth`` are member-INDEPENDENT and captured as
+        # per-side closures (below), never batched.
+        def _member_leaf_bundle(states, catalogs):
+            out = []
+            for s, c in zip(states, catalogs):
+                logq_all, _ = _resolve_member_logq_row(c)  # (M, N_rows, N_grid) view
+                logZ = s.log_Z_global_members if is_field else s.log_Z_members
+                out.append((logq_all, logZ))
+            return tuple(out)
+
+        # ``base_miss`` is present only on ENSEMBLE states; the selection states
+        # may be plain (asymmetric PE-members / selection-no-members case), where
+        # these tuples are built but never read (the member reduction is hoisted),
+        # so ``getattr(..., None)`` keeps the trace from touching a missing leaf.
+        base_miss_univ = tuple(getattr(s, "base_miss", None) for s in prior_states_univ)
+        base_miss_sel = tuple(getattr(s, "base_miss", None) for s in prior_states_sel)
+        member_is_log_univ = tuple(
+            _resolve_member_logq_row(c)[1] for c in catalogs_pe_all
+        )
+        member_is_log_sel = tuple(
+            _resolve_member_logq_row(c)[1] for c in catalogs_sel_all
+        )
+        z_depth_all = tuple(surveys_all[k].z_depth for k in range(n_catalogs))
 
         # Per-catalog member completion -> per-sample log p_mix(z), reusing the
         # SAME K=1 static shortcut / K>=2 _mixture_logsumexp seam as
-        # _eval_prior_mix, but on the precomputed observed brackets.
-        def _log_p_mix(A_obs, idx, t, pixk, leaves):
-            if n_catalogs == 1:
-                dN_m, logZ_m = leaves[0]
+        # _eval_prior_mix, but on the precomputed observed brackets.  ``base_tup``
+        # / ``is_log_tup`` are the per-SIDE (PE vs selection) member-independent
+        # closures; ``leaves[k] = (member_logq_m, logZ_m)`` is the per-catalog
+        # member-axis leaf peeled by the outer vmap.
+        def _log_p_mix(A_obs, idx, t, pixk, leaves, base_tup, is_log_tup):
+            def _one(k):
+                member_logq_m, logZ_m = leaves[k]
                 return eval_dark_member_completion(
-                    A_obs[0], idx[0], t[0], pixk[0], dN_m, logZ_m, is_field
+                    A_obs[k], idx[k], t[k], pixk[k], base_tup[k],
+                    member_logq_m, is_log_tup[k], logZ_m, z_depth_all[k], is_field,
                 )
-            lps = [
-                mixture_log_weights[k] + eval_dark_member_completion(
-                    A_obs[k], idx[k], t[k], pixk[k],
-                    leaves[k][0], leaves[k][1], is_field,
-                )
-                for k in range(n_catalogs)
-            ]
+            if n_catalogs == 1:
+                return _one(0)
+            lps = [mixture_log_weights[k] + _one(k) for k in range(n_catalogs)]
             return _mixture_logsumexp(lps)
 
         # --- PE precompute (member-independent).  Block-vectorized over the
@@ -1080,7 +1103,9 @@ def darksiren_log_likelihood(
 
         def _pe_member_terms(leaves):
             base, supported, valid, sky, A_obs, idx, t, pixk = pe_pre
-            log_p_mix = _log_p_mix(A_obs, idx, t, pixk, leaves)   # (nEvents, nsamp)
+            log_p_mix = _log_p_mix(
+                A_obs, idx, t, pixk, leaves, base_miss_univ, member_is_log_univ
+            )   # (nEvents, nsamp)
             # Reproduce _pe_event_fn's mask ORDER with base playing ldw's role:
             #   ldw -> mask(supported & isfinite) -> +sky -> mask(valid & isfinite).
             ldw = base + log_p_mix
@@ -1181,7 +1206,7 @@ def darksiren_log_likelihood(
                         tuple(sl(a) for a in idx_a),
                         tuple(sl(a) for a in t_a),
                         tuple(sl(a) for a in pixk_a),
-                        leaves,
+                        leaves, base_miss_sel, member_is_log_sel,
                     )
                     # Reproduce log_weight's mask, then _batch_lse's +sky and mask.
                     ldw = sl(base_a) + log_p_mix
@@ -1210,9 +1235,9 @@ def darksiren_log_likelihood(
             )
             return ll_m + jnp.sum(event_lls)
 
-        univ_stack = _leaf_bundle(prior_states_univ)
+        univ_stack = _member_leaf_bundle(prior_states_univ, catalogs_pe_all)
         if sel_has_members:
-            sel_stack = _leaf_bundle(prior_states_sel)
+            sel_stack = _member_leaf_bundle(prior_states_sel, catalogs_sel_all)
             ll_members = jax.vmap(_member_ll, in_axes=(0, 0))(univ_stack, sel_stack)
         else:
             ll_members = jax.vmap(
@@ -1233,19 +1258,39 @@ def darksiren_log_likelihood(
         # assumption: member m of every catalog samples the same LSS draw).
         # Under the field convention each member also carries its OWN
         # survey-global normalizer; under conditional the broadcast scalar keeps
-        # the vmap in_axes pytree (member_axes) leaf-aligned.
-        def _member_states(state):
+        # the vmap in_axes pytree (member_axes) leaf-aligned.  The factored path
+        # never builds the (M, N_rows, N_grid) member cube; the reference path
+        # MATERIALISES it here (base_miss * Q_eff_members) DELIBERATELY -- this is
+        # the memory-heavy whole-likelihood pin, opt-in via lss_member_impl, so it
+        # is allowed to reconstruct the dense cube the factored path avoids.  The
+        # reconstruction is node-for-node identical to the factored bracket
+        # evaluation, so value + grad match to floating-point re-association.
+        def _member_cube(state, survey_k, cat):
+            logq_all, is_log = _resolve_member_logq_row(cat)  # (M, N_rows, N_grid)
+            depth_mask = (
+                None if survey_k.z_depth is None else (zgrid <= survey_k.z_depth)
+            )
+            q_eff = _member_q_eff_from_logq(logq_all, depth_mask, is_log)
+            return state.base_miss[None, :, :] * q_eff       # (M, N_rows, N_grid)
+
+        def _member_states(state, survey_k, cat):
             return DarkSirenPriorState(
                 kernels=state.kernels, log_Nobs=state.log_Nobs,
-                dN_miss=state.dN_miss_members, log_Z=state.log_Z_members,
+                dN_miss=_member_cube(state, survey_k, cat), log_Z=state.log_Z_members,
                 log_Z_global=(
                     state.log_Z_global_members if is_field else jnp.asarray(0.0)
                 ),
             )
 
-        univ_members = tuple(_member_states(s) for s in prior_states_univ)
+        univ_members = tuple(
+            _member_states(s, surveys_all[k], catalogs_pe_all[k])
+            for k, s in enumerate(prior_states_univ)
+        )
         sel_members = (
-            tuple(_member_states(s) for s in prior_states_sel)
+            tuple(
+                _member_states(s, surveys_all[k], catalogs_sel_all[k])
+                for k, s in enumerate(prior_states_sel)
+            )
             if sel_has_members else prior_states_sel
         )
         member_axes_one = DarkSirenPriorState(
@@ -1271,7 +1316,7 @@ def darksiren_log_likelihood(
     if lss_marginalize:
         missing = [
             k for k, s in enumerate(prior_states_univ)
-            if getattr(s, "dN_miss_members", None) is None
+            if getattr(s, "base_miss", None) is None
         ]
         if missing:
             raise ValueError(
@@ -1294,7 +1339,7 @@ def darksiren_log_likelihood(
         n_members = member_counts.pop()
         is_field = catalog_sky_weighting == "field"
         sel_members_flags = [
-            getattr(s, "dN_miss_members", None) is not None
+            getattr(s, "base_miss", None) is not None
             for s in prior_states_sel
         ]
         if any(sel_members_flags) and not all(sel_members_flags):

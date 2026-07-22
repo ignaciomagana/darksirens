@@ -62,7 +62,7 @@ def test_no_q_is_legacy_and_members_none():
     """With no Q table the ensemble fields are absent (backward-compatible)."""
     curves = completion_curves(COSMO, SURVEY_B0, _tiny_catalog())
     assert curves.dN_miss.shape == (2, NG)
-    assert curves.dN_miss_members is None
+    assert curves.base_miss is None
     assert curves.N_miss_members is None
 
 
@@ -127,8 +127,15 @@ def test_member_shapes_and_mean():
     )
     lm = jnp.full((3, 2, NG), np.log(2.0))
     m = completion_curves(COSMO, SURVEY_B0, _tiny_catalog(lss_completion_logq_members=lm))
-    assert m.dN_miss_members.shape == (3, 2, NG)
+    # The (M, N_rows, N_grid) member cube is no longer materialised; the state
+    # carries the member-INDEPENDENT (N_rows, N_grid) base curve and the compact
+    # (M, N_rows) missing-mass table instead (member m's density is
+    # base_miss * Q_eff_m, reconstructed at the query brackets).
+    assert m.base_miss.shape == (2, NG)
     assert m.N_miss_members.shape == (3, 2)
+    # base_miss * exp(logq=log 2) integrates to the member missing mass; with a
+    # constant Q = 2 every member equals 2 x the deterministic Q=1 curve.
+    assert float(jnp.max(jnp.abs(m.base_miss - q1.dN_miss))) < 1e-10
     # only members supplied -> deterministic dN_miss is the posterior-mean (= 2x here)
     assert float(jnp.max(jnp.abs(m.dN_miss - 2.0 * q1.dN_miss))) < 1e-10
 
