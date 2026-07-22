@@ -23,9 +23,16 @@ Design notes
 ------------
 * ``resolve_block_sizes`` is **pure** (no JAX, no device access): the caller
   passes a probed ``free_bytes`` and ``backend`` so the whole policy is unit
-  testable on CPU with injected budgets.  ``probe_device_memory_bytes`` (moved
-  here from ``cli/analyze.py`` so both share one probe) is the only
-  device-touching function and imports JAX lazily.
+  testable on CPU with injected budgets.  It emits a single **loud diagnostic**
+  only on the rare edge cases where the measured static state forces a block
+  below the usual floor, or leaves no residual budget at all (still deterministic
+  in its returned plan).  ``probe_device_memory_bytes`` (moved here from
+  ``cli/analyze.py`` so both share one probe) is the only device-touching
+  function and imports JAX lazily.
+* ``measure_static_state_bytes`` sums the size of the loaded device-resident
+  data-constants (duck-typed ``.nbytes``, no JAX import) and adds an analytic
+  estimate for the factory-built KDE caches / ``base_miss`` curves, so the peak
+  model sees the allocations that dominate real dark-siren runs.
 * The selection axis is blocked **first** (it dominates: ~1.07e6 injections),
   the PE axis only if a floored selection block still overflows.  Blocks are an
   **even split** (``k`` equal chunks) rounded up to a multiple of 256 rather
@@ -43,50 +50,97 @@ from dataclasses import dataclass
 #
 # Peak device bytes during one likelihood value+grad are modelled as
 #
-#     peak ≈ FIXED_OVERHEAD_BYTES
-#            + sel_batch  * SEL_BYTES_PER_INJECTION[_CAT]
-#            + pe_block   * n_samp * PE_BYTES_PER_SAMPLE[_CAT]
+#     peak ≈ TRUE_FIXED_BYTES                       (JAX/XLA runtime + workspace)
+#            + static_state_bytes                   (resident data-constants; MEASURED)
+#            + sel_batch  * sel_bpi(dims)           (transient selection working set)
+#            + pe_block   * n_samp * pe_bps(dims)   (transient PE-reduction working set)
 #
 # where ``sel_batch`` defaults to the full ``N_sel`` and ``pe_block`` to the full
-# ``N_events`` (a single pass).  The ``_CAT`` variants apply when a galaxy
-# catalog is loaded (dark sirens), whose per-injection / per-sample redshift-prior
-# state is heavier than the catalog-free spectral path.
+# ``N_events`` (a single pass).  ``static_state_bytes`` is the summed size of the
+# device-resident data-constants for THIS run (compact catalog views, KDE caches,
+# logQ member tables, marks, ...); the CLI measures the loaded arrays and adds an
+# analytic estimate for factory-built state (see :func:`measure_static_state_bytes`).
+# The two transient slopes scale with the dominant per-block dimensions — grid
+# nodes ``n_grid`` and, for catalog runs, galaxies-per-row and catalog count ``K`` —
+# RELATIVE to the calibration config, so the calibrated point is preserved (every
+# scale factor is 1 there).  The ``_CAT`` variants apply when a galaxy catalog is
+# loaded (dark sirens), whose per-injection / per-sample redshift-prior state is
+# heavier than the catalog-free spectral path.
 #
-# MEASURED on an NVIDIA H100-80GB by scripts/benchmark_block_sizes.py --repeats 10
-# (2026-07-21; results in scripts/benchmarks/block_sizes_h100_80gb.json) for the real
-# spectral likelihood value+grad (N_sel=1,067,946; N_events=259; n_samp=4096, BFC
-# allocator, PREALLOCATE=false).  Two findings drove these numbers:
+# ── Why the split (PERF-4) ──
+# The original model folded ALL static state into a single ``FIXED_OVERHEAD``
+# calibrated on ONE spectral (catalog-free) config, so the OOM-avoidance feature
+# was blind to the KDE caches / compact catalog views / logQ member tables that
+# DOMINATE real dark-siren runs.  ``FIXED_OVERHEAD`` is now DECOMPOSED into a
+# true-fixed runtime term plus that config's (tiny) static state, and the
+# configuration-dependent state is made explicit and measured.  The MEASURED
+# spectral slopes are UNCHANGED: this is an additive refinement, not a recalibration.
+#
+# MEASURED slopes (NVIDIA H100-80GB, scripts/benchmark_block_sizes.py --repeats 10,
+# 2026-07-21; scripts/benchmarks/block_sizes_h100_80gb.json) for the real spectral
+# likelihood value+grad (N_sel=1,067,946; N_events=259; n_samp=4096, BFC allocator,
+# PREALLOCATE=false).  Two findings drove these numbers (see a8ba5e7):
 #   1. A full single pass peaks at 78.8 GB — NOT the ~40 GB the old placeholder
-#      predicted.  That ~2x under-estimate would let auto keep a single pass that
-#      actually sits at ~92% of an 80 GB card; the calibrated model now predicts
-#      ~80 GB so auto blocks on any <~115 GB card (0.7*free rule).
-#   2. Peak is a NARROW BAND: min 70.4 GB (aggressive block) .. max 78.8 GB (single
-#      pass), only ~8 GB of spread, and mid-range sel blocks (sel=262144 -> 78.8 GB)
-#      can peak *above* the single pass — XLA fuses the single pass better than a
-#      scanned mid-range block.  So the two slopes are small: blocking this workload
-#      buys little, and the real lever is card size.  First OOM at sel_batch=524288.
+#      predicted; the calibrated model now predicts ~80 GB so auto blocks on any
+#      <~115 GB card (0.7*free rule).
+#   2. Peak is a NARROW BAND (min 70.4 .. max 78.8 GB), and mid-range sel blocks can
+#      peak *above* the single pass (XLA fuses the single pass better).  So the two
+#      slopes are small: blocking buys little, the real lever is card size.
 # The slopes are the reducible (min-block -> single-pass) marginals rounded up
-# (SEL 7,865 -> 8,000 /inj; PE 8,102 -> 9,000 /samp); FIXED absorbs the near-fixed
-# ~62 GB transient floor so the single-pass prediction (80.4 GB) sits just above the
-# measured 78.8 GB (err-high = over-block, safe, never under-block/OOM).  Erring high
-# also means medium problems may block needlessly (slower, safe); tiny problems are
-# unaffected (the min(FLOOR, n) clamp collapses them back to a single pass).
-# The _CAT (dark-siren / catalog) path was NOT measured here — its slopes stay a 2x
-# scaled estimate and FIXED is shared; re-run the benchmark with a catalog loaded to
-# calibrate that path.  Policy tests inject budgets and assert structural properties,
-# so they are independent of these exact numbers.
-CONSTANTS_VERSION = "measured-h100-80gb-2026-07-21"
+# (SEL 7,865 -> 8,000 /inj; PE 8,102 -> 9,000 /samp).  The _CAT (dark-siren) path
+# was NOT measured — its slopes stay a 2x scaled estimate, now normalised to a
+# reference catalog config (CAL_MAX_GALS_PER_ROW below).  Policy tests inject
+# budgets and assert structural properties, independent of these exact numbers.
+CONSTANTS_VERSION = "measured-h100-80gb-decomposed-2026-07-22"
 
 SEL_BYTES_PER_INJECTION = 8_000        # spectral / catalog-free selection integral (measured 7,865)
 SEL_BYTES_PER_INJECTION_CAT = 16_000   # dark-siren selection integral (catalog state; 2x, UNMEASURED)
 PE_BYTES_PER_SAMPLE = 9_000            # spectral per-event PE reduction, per sample (measured 8,102)
 PE_BYTES_PER_SAMPLE_CAT = 18_000       # dark-siren per-event PE reduction, per sample (2x, UNMEASURED)
-FIXED_OVERHEAD_BYTES = 58 * 1024**3    # near-fixed transient floor (measured ~62 GB on the spectral path)
+
+# ── FIXED-overhead decomposition (calibration-point preserving) ─────────────────
+# a8ba5e7 calibrated a single FIXED_OVERHEAD of 58 GiB on the spectral config so
+# the single-pass prediction sat just above the measured 78.8 GB peak:
+#     58 GiB (62.277 GB) + N_sel*8000 + N_events*n_samp*9000
+#       = 62.277 + 8.544 + 9.548  ≈ 80.37 GB   (err-high of the 78.8 GB measurement).
+# We keep that EXACT anchor and split it into a true-fixed runtime term and the
+# spectral config's own static state:
+#
+#     FIXED_OVERHEAD_BYTES  =  TRUE_FIXED_BYTES        +  STATIC_STATE_CAL_BYTES
+#     58 GiB                =  (JAX/XLA + workspace)    +  (spectral config inputs)
+#
+# The spectral calibration config has NO catalog, so its only static state is the
+# sample fields it loads: 5 float64 PE fields (m1det, m2det, dL, chieff, p_pe) of
+# shape (N_events, n_samp) and 5 float64 selection fields (m1detsels, m2detsels,
+# dLsels, chieffsels, p_draw) of shape (N_sel,).  With static_state_bytes set to
+# STATIC_STATE_CAL_BYTES and n_grid == CAL_N_GRID the new budget reproduces the old
+# one BIT-FOR-BIT:
+#     budget = f*free - TRUE_FIXED - STATIC_STATE_CAL == f*free - FIXED_OVERHEAD.
+FIXED_OVERHEAD_BYTES = 58 * 1024**3    # a8ba5e7 calibration anchor (retained; = TRUE_FIXED + STATIC_STATE_CAL)
+
+# Calibration-config dimensions — the reference the slopes and static state
+# normalise to (every scale factor below is 1.0 at these values).
+CAL_N_SEL = 1_067_946
+CAL_N_EVENTS = 259
+CAL_N_SAMP = 4096
+CAL_N_GRID = 1000                      # zgrid nodes at the default DARKSIRENS_ZMAX=5
+CAL_MAX_GALS_PER_ROW = 2113            # reference max galaxies / unique pixel for the _CAT slopes
+
+# Static state of the spectral calibration config: 5 f64 PE fields + 5 f64 sel fields.
+STATIC_STATE_CAL_BYTES = (
+    5 * 8 * CAL_N_EVENTS * CAL_N_SAMP      # PE samples: m1det, m2det, dL, chieff, p_pe
+    + 5 * 8 * CAL_N_SEL                    # selection:  m1detsels, m2detsels, dLsels, chieffsels, p_draw
+)                                          # ≈ 85.15 MB (0.0793 GiB)
+TRUE_FIXED_BYTES = FIXED_OVERHEAD_BYTES - STATIC_STATE_CAL_BYTES   # ≈ 57.92 GiB JAX/XLA + workspace
 
 # Floors: never chunk below these (below them the launch/padding overhead and
 # recompile churn cost more than the memory they save).
 SEL_MIN_BATCH = 32768
 PE_MIN_BLOCK = 8
+# Hard floor when even ``SEL_MIN_BATCH`` / ``PE_MIN_BLOCK`` overflow the residual
+# budget under the measured static state: we keep blocking (with a loud warning)
+# down to this many units rather than silently exceed the budget / OOM.
+BLOCK_HARD_MIN = 1
 
 # Fraction of probed free memory the working set may occupy (headroom for
 # fragmentation, transient copies, and — on a shared box — another process's
@@ -97,6 +151,8 @@ SAFETY_FACTOR = 0.7
 # Even-split blocks are rounded up to a multiple of this (keeps XLA tile shapes
 # friendly and minimises the padding of the final chunk for N_sel ~1e6).
 BLOCK_ROUND_TO = 256
+
+_GIB = 1024**3  # for human-readable diagnostics only
 
 # GPU-class backends that actually benefit from blocking; on everything else a
 # single pass is both correct and simplest (host RAM is large / not the bottleneck).
@@ -165,7 +221,8 @@ class BlockSizePlan:
     """Resolved block sizes plus a one-word provenance tag for the log/settings."""
     sel_batch_size: int | None
     pe_event_block: int | None
-    source: str  # "explicit" | "auto" | "auto-single-pass" | "cpu" | "flow"
+    # "explicit" | "auto" | "auto-single-pass" | "auto-floor-reduced" | "cpu" | "flow"
+    source: str
 
 
 def probe_device_memory_bytes(default_gb=4.0):
@@ -218,10 +275,167 @@ def _even_split_block(n_total: int, budget_bytes: float, bytes_per_unit: float,
     return min(block, n_total)
 
 
+def _loud(message: str) -> None:
+    """Print a single, hard-to-miss diagnostic for a block-sizing edge case."""
+    print(f"  [!] block-sizing: {message}")
+
+
+def _floored_block(n_total: int, place_budget: float, guard_room: float,
+                   bytes_per_unit: float, floor: int, name: str,
+                   static_state_bytes: float,
+                   round_to: int = BLOCK_ROUND_TO) -> tuple[int, bool]:
+    """Size a block of ``n_total`` units, reducing the floor only on true
+    static-state dominance.
+
+    Returns ``(block, floor_reduced)``.  Two distinct budgets are used, and the
+    distinction matters:
+
+    * ``place_budget`` = ``safety_factor*free - TRUE_FIXED - static`` chooses the
+      block size via :func:`_even_split_block`, floored at ``floor``.  This is the
+      calibration-preserving, deliberately conservative placement: when it is
+      negative (common for a catalog run whose spectral-calibrated ``TRUE_FIXED``
+      over-predicts the transient floor) the even split simply returns ``floor`` —
+      exactly the historical behavior.
+    * ``guard_room`` = ``safety_factor*free - static`` is the LAST-RESORT floor
+      guard, where ``static`` is the PENDING (not-yet-resident) static state the
+      probe is blind to (factory KDE caches / base_miss; the loaded arrays are
+      already reflected in ``free``).  It intentionally EXCLUDES ``TRUE_FIXED`` —
+      that term is the spectral value+grad's transient workspace floor (measured
+      without a catalog) and a known over-estimate of the catalog path's floor, so
+      letting it gate the minimum block would needlessly shrink blocks on runs that
+      fit fine.  The floor is only dropped when the pending static plus a floor-sized
+      block's working set will not fit the remaining device memory — genuine
+      static-state dominance — in which case we reduce to the largest feasible block
+      (down to :data:`BLOCK_HARD_MIN`) and warn loudly.  Erring toward a
+      smaller-but-feasible block never OOMs.
+    """
+    bytes_per_unit = max(1.0, float(bytes_per_unit))
+    floor = max(BLOCK_HARD_MIN, min(int(floor), int(n_total)))
+    if floor * bytes_per_unit <= guard_room:
+        # The floor's working set fits alongside the resident static state: honor
+        # the floor and size by the (safety-discounted) placement budget.
+        return _even_split_block(int(n_total), max(1.0, place_budget),
+                                 bytes_per_unit, floor=floor, round_to=round_to), False
+    # Even a floor-sized block will not fit next to the measured static state.
+    b_fit = int(max(0.0, guard_room) // bytes_per_unit)
+    reduced = max(BLOCK_HARD_MIN, min(floor, b_fit))
+    detail = (
+        "no device room after the measured static state"
+        if guard_room <= 0
+        else f"only {guard_room / _GIB:.2f} GiB left after static state"
+    )
+    _loud(
+        f"{name} floor {floor:,} × {bytes_per_unit:,.0f} B/unit does not fit — "
+        f"{detail} (static ≈ {static_state_bytes / _GIB:.1f} GiB dominates the "
+        f"device). Dropping the floor to {reduced:,}. The peak-memory model may be "
+        f"infeasible on this device — the run may still OOM."
+    )
+    return reduced, True
+
+
+def estimate_pending_static_bytes(data, *, n_grid: int, has_catalog: bool,
+                                  catalog_memory=None) -> int:
+    """Analytic estimate of the static state the FACTORY will allocate *after* the
+    block-size resolver runs — i.e. the piece the device probe is blind to.
+
+    The resolver runs AFTER the data load, so the loaded arrays are ALREADY
+    device-resident and hence already reflected in the probed ``free_bytes`` (they
+    dropped it).  What is NOT yet allocated is what the likelihood factory builds:
+
+    * **KDE cache** — ``build_pixel_kde_cache`` produces a ``(n_unique, n_grid)``
+      float64 table (8 B) per view; ``(unique_pe + unique_sel) * n_grid * 8``
+      (conservatively counts both even when the two views share one table).
+    * **base_miss** — the completion ensemble carries a ``(N_rows, n_grid)`` f64
+      curve per view (PE + sel); estimated from the loaded
+      ``lss_completion_logq_members`` row count when a completion ensemble is
+      present (the ``(M, N_rows, n_grid)`` member table itself is a LOADED array,
+      already resident — it is not counted here).
+
+    This is the quantity to subtract from the memory budget / reserve in the floor
+    guard; subtracting the already-resident loaded arrays too would double-count
+    them against ``free_bytes``.  Pure Python (no JAX import).
+    """
+    if not has_catalog:
+        return 0
+    cm = catalog_memory or (data.get("catalog_memory") if isinstance(data, dict) else None) or {}
+    n_unique = int(cm.get("unique_pe_pixels", 0)) + int(cm.get("unique_sel_pixels", 0))
+    if n_unique <= 0 and isinstance(data, dict):
+        # Best-effort fallback: derive union-row counts from the compact views.
+        for k in ("zgals_pe", "zgals_sel"):
+            shape = getattr(data.get(k), "shape", None)
+            if shape:
+                n_unique += int(shape[0])
+    pending = n_unique * int(n_grid) * 8         # KDE cache(s), f64
+
+    # base_miss (N_rows, n_grid) f64 per view (PE + sel) for a completion ensemble.
+    members = data.get("lss_completion_logq_members") if isinstance(data, dict) else None
+    shape = getattr(members, "shape", None)
+    if shape and len(shape) >= 2:
+        pending += 2 * int(shape[-2]) * int(n_grid) * 8
+    return int(pending)
+
+
+def measure_static_state_bytes(data, *, n_grid: int, has_catalog: bool,
+                               n_catalogs: int = 1, catalog_memory=None,
+                               drop_full_catalog: bool = False) -> int:
+    """Total static data-constant bytes for a loaded run (for the run-config report).
+
+    Sums the exact ``nbytes`` of every loaded device-resident array — deduplicated
+    by object identity (``data['zgals']`` and ``data['zgals_catalog']`` alias one
+    buffer; a bundle's PE and selection views alias one galaxy table) — PLUS the
+    analytic :func:`estimate_pending_static_bytes` for the factory-built KDE caches
+    / ``base_miss`` curves.  This is the human-facing "how big is the static state"
+    number; the resolver subtracts only the *pending* portion (see that function's
+    note on double-counting).  Pure Python: duck-types ``.nbytes``, no JAX import.
+    """
+    seen: set[int] = set()
+    total = 0
+
+    def _add(value):
+        nonlocal total
+        nbytes = getattr(value, "nbytes", None)
+        if nbytes is None:
+            return
+        key = id(value)
+        if key in seen:
+            return
+        seen.add(key)
+        total += int(nbytes)
+
+    def _walk(container):
+        if container is None:
+            return
+        values = container.values() if isinstance(container, dict) else container
+        for value in values:
+            if isinstance(value, dict) or isinstance(value, (list, tuple)):
+                _walk(value)
+            else:
+                _add(value)
+
+    if isinstance(data, dict):
+        # Top-level arrays (dedup by identity handles the zgals/zgals_catalog and
+        # PE/sel view aliasing).  Per-catalog bundles (K >= 2) are walked too.
+        for key, value in data.items():
+            if key == "catalogs":
+                _walk(value)  # list of per-catalog bundle dicts
+            elif isinstance(value, (dict, list, tuple)):
+                _walk(value)
+            else:
+                _add(value)
+
+    total += estimate_pending_static_bytes(
+        data, n_grid=n_grid, has_catalog=has_catalog, catalog_memory=catalog_memory)
+    return int(total)
+
+
 def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
                         sel_requested, pe_requested, has_catalog: bool,
-                        flow_path: bool, n_grid: int = 1000,
-                        free_bytes: int | None = None, backend: str | None = None,
+                        flow_path: bool, n_grid: int = CAL_N_GRID,
+                        max_gals_per_row: int = CAL_MAX_GALS_PER_ROW,
+                        n_catalogs: int = 1, static_state_bytes: float = 0.0,
+                        free_bytes: int | None = None,
+                        free_bytes_reliable: bool = True,
+                        backend: str | None = None,
                         safety_factor: float = SAFETY_FACTOR) -> BlockSizePlan:
     """Resolve ``(sel_batch_size, pe_event_block)`` from a memory budget.
 
@@ -229,11 +443,23 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
     (explicit, passes through), ``None`` (an explicit single pass), or
     :data:`BLOCK_AUTO` (resolve here).  Explicit values always win per knob.
 
-    Auto policy: on a non-GPU backend keep a single pass; else block the
-    selection axis first and the PE axis only if a floored selection block still
-    overflows ``safety_factor * free_bytes - FIXED_OVERHEAD_BYTES``.  A single
-    pass that already fits resolves to ``(None, None)`` — bit-identical to the
-    historical default.
+    The peak model is
+    ``TRUE_FIXED_BYTES + static_state_bytes + sel_batch*sel_bpi + pe_block*n_samp*pe_bps``;
+    the transient slopes ``sel_bpi`` / ``pe_bps`` scale with the dominant per-block
+    dimensions relative to the calibration config:
+
+    * ``n_grid / CAL_N_GRID`` on both slopes (more grid nodes → more work/bytes);
+    * for catalog runs, ``(max_gals_per_row / CAL_MAX_GALS_PER_ROW) * n_catalogs``
+      on the heavier ``_CAT`` slopes (more galaxies per row and a K-catalog
+      mixture both multiply the redshift-prior work).
+
+    Auto policy: on a non-GPU backend keep a single pass; else block the selection
+    axis first and the PE axis only if a floored selection block still overflows
+    ``safety_factor * free_bytes - TRUE_FIXED_BYTES - static_state_bytes``.  A
+    single pass that already fits resolves to ``(None, None)`` — bit-identical to
+    the historical default.  With ``static_state_bytes == STATIC_STATE_CAL_BYTES``,
+    ``n_grid == CAL_N_GRID`` and no catalog the budget equals the pre-decomposition
+    ``safety_factor*free - FIXED_OVERHEAD_BYTES`` exactly (calibration preserved).
     """
     sel_auto = sel_requested is BLOCK_AUTO
     pe_auto = pe_requested is BLOCK_AUTO
@@ -259,11 +485,50 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
         )
 
     if free_bytes is None:
-        free_bytes, _ = probe_device_memory_bytes()
-    budget = max(1.0, float(safety_factor) * float(free_bytes) - FIXED_OVERHEAD_BYTES)
+        free_bytes, _probe_src = probe_device_memory_bytes()
+        # A failed probe (no device memory_stats — common unless
+        # XLA_PYTHON_CLIENT_PREALLOCATE=false) returns a small default; it is NOT
+        # trustworthy evidence of memory pressure, so it must not trigger floor
+        # reduction (see below).  The placement budget still uses it and simply
+        # falls back to the floor — the historical behavior.
+        free_bytes_reliable = _probe_src != "fallback-default"
+    # ``static_state_bytes`` is the PENDING static state — what the factory will
+    # allocate after this probe (KDE caches / base_miss).  The already-loaded arrays
+    # are device-resident by now and thus already reflected in ``free_bytes``;
+    # subtracting them again would double-count.  (The CLI passes the pending
+    # estimate; unit tests may pass any reserve.)
+    static_state_bytes = max(0.0, float(static_state_bytes))
+    # Placement budget: safety-discounted, minus the transient value+grad floor and
+    # the pending static.  Drives even-split block sizing; when it goes negative
+    # (a catalog run whose spectral-calibrated TRUE_FIXED over-predicts the floor)
+    # the even split falls back to the floor — the historical behavior.
+    budget = max(
+        1.0,
+        float(safety_factor) * float(free_bytes) - TRUE_FIXED_BYTES - static_state_bytes,
+    )
+    # Floor-reduction guard: room for block working sets AFTER the pending static,
+    # EXCLUDING the (spectral-over-estimated) transient TRUE_FIXED.  Only a genuinely
+    # device-dominating static state reduces the minimum block (see _floored_block);
+    # otherwise the floor stands even when ``budget`` is negative.  An UNRELIABLE
+    # free-memory reading (failed probe) gives no basis to reduce, so the guard is
+    # disabled (guard_room = ∞) and the floor stands — matching the historical model.
+    guard_room = (
+        float(safety_factor) * float(free_bytes) - static_state_bytes
+        if free_bytes_reliable else math.inf
+    )
 
-    sel_bpi = SEL_BYTES_PER_INJECTION_CAT if has_catalog else SEL_BYTES_PER_INJECTION
-    pe_bps = PE_BYTES_PER_SAMPLE_CAT if has_catalog else PE_BYTES_PER_SAMPLE
+    # Dimension scaling of the transient slopes, relative to the calibration config.
+    grid_scale = max(1e-9, float(n_grid) / float(CAL_N_GRID))
+    if has_catalog:
+        cat_scale = (
+            max(1e-9, float(max_gals_per_row) / float(CAL_MAX_GALS_PER_ROW))
+            * max(1, int(n_catalogs))
+        )
+        sel_bpi = SEL_BYTES_PER_INJECTION_CAT * grid_scale * cat_scale
+        pe_bps = PE_BYTES_PER_SAMPLE_CAT * grid_scale * cat_scale
+    else:
+        sel_bpi = SEL_BYTES_PER_INJECTION * grid_scale
+        pe_bps = PE_BYTES_PER_SAMPLE * grid_scale
 
     # PE single-pass footprint (fixed unless we end up blocking PE below).
     pe_full_bytes = float(n_events) * float(n_samp) * pe_bps if not flow_path else 0.0
@@ -277,9 +542,11 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
         if sel_full_bytes <= sel_budget:
             sel = None                       # single pass fits → unchanged behavior
         else:
-            sel = _even_split_block(int(n_sel), max(1.0, sel_budget), sel_bpi,
-                                    floor=min(SEL_MIN_BATCH, int(n_sel)))
-            source = "auto"
+            sel, reduced = _floored_block(
+                int(n_sel), sel_budget, guard_room, sel_bpi,
+                floor=min(SEL_MIN_BATCH, int(n_sel)), name="selection",
+                static_state_bytes=static_state_bytes)
+            source = "auto-floor-reduced" if reduced else "auto"
 
     # ── PE axis (only if a floored selection block still overflows) ──
     if pe_auto and not flow_path:
@@ -289,10 +556,13 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
             pe = None                        # PE single pass fits alongside sel
         else:
             pe_budget = budget - sel_bytes_now
-            pe = _even_split_block(int(n_events), max(1.0, pe_budget),
-                                   float(n_samp) * pe_bps,
-                                   floor=min(PE_MIN_BLOCK, int(n_events)),
-                                   round_to=1)
-            source = "auto"
+            pe, reduced = _floored_block(
+                int(n_events), pe_budget, guard_room, float(n_samp) * pe_bps,
+                floor=min(PE_MIN_BLOCK, int(n_events)), name="PE",
+                static_state_bytes=static_state_bytes, round_to=1)
+            if reduced:
+                source = "auto-floor-reduced"
+            elif source != "auto-floor-reduced":
+                source = "auto"
 
     return BlockSizePlan(sel, pe, source)

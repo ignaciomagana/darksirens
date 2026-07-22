@@ -74,6 +74,9 @@ from darksirens.likelihood.factory import make_likelihood
 from darksirens.likelihood.block_sizing import (
     block_size_arg,
     resolve_block_sizes,
+    measure_static_state_bytes,
+    estimate_pending_static_bytes,
+    probe_device_memory_bytes,
     format_block_size_request,
 )
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
@@ -1435,6 +1438,67 @@ def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
     _end()
 
 
+def _block_sizing_inputs(opts, data):
+    """Derive the ``resolve_block_sizes`` inputs from loaded ``opts``/``data``.
+
+    Split out (and kept free of the device probe / mutation) so the CLI plumbing —
+    the dominant per-block dimensions and the MEASURED static-state bytes — can be
+    unit tested with a fake ``opts``/``data`` pair.  Returns a plain kwargs dict.
+
+    ``resolve_block_sizes`` runs at the end of the data load, BEFORE the likelihood
+    factory: the loaded arrays are already device-resident (reflected in the probed
+    free memory), so the resolver reserves only the PENDING factory-built state
+    (:func:`estimate_pending_static_bytes` — KDE caches / ``base_miss``).  The FULL
+    measured static (:func:`measure_static_state_bytes`) is returned alongside for
+    the run-config report only.
+    """
+    _msel = data.get("m1detsels")
+    n_sel = int(np.asarray(_msel).shape[0]) if _msel is not None else 0
+    has_catalog = bool(getattr(opts, "survey_path", None))
+    n_catalogs = int(getattr(opts, "n_catalogs", 1) or 1)
+
+    # n_grid: the shared redshift grid actually used everywhere downstream.
+    from darksirens.redshift.grid import zgrid
+    n_grid = int(np.asarray(zgrid).shape[0])
+
+    # Max galaxies per unique pixel — the row width that multiplies the catalog
+    # per-injection / per-sample redshift-prior work (1 for the catalog-free path).
+    catalog_memory = data.get("catalog_memory") or {}
+    max_gals = int(catalog_memory.get("max_galaxies_per_unique_pixel", 1) or 1)
+
+    # PENDING static (factory KDE caches / base_miss) is what the resolver reserves:
+    # the loaded arrays are already device-resident, hence already in the probed
+    # free_bytes (see block_sizing.estimate_pending_static_bytes).  The FULL measured
+    # static is carried alongside for the run-config report only.
+    pending_static_bytes = estimate_pending_static_bytes(
+        data, n_grid=n_grid, has_catalog=has_catalog,
+        catalog_memory=catalog_memory or None,
+    )
+    full_static_bytes = measure_static_state_bytes(
+        data,
+        n_grid=n_grid,
+        has_catalog=has_catalog,
+        n_catalogs=n_catalogs,
+        catalog_memory=catalog_memory or None,
+        drop_full_catalog=bool(getattr(opts, "drop_full_catalog", False)),
+    )
+    return dict(
+        n_events=int(data.get("nEvents", 0)),
+        n_samp=int(data.get("nsamp", 0)),
+        n_sel=n_sel,
+        sel_requested=getattr(opts, "sel_batch_size", None),
+        pe_requested=getattr(opts, "pe_event_block", None),
+        has_catalog=has_catalog,
+        flow_path=bool(getattr(opts, "gw_flows_path", None)),
+        n_grid=n_grid,
+        max_gals_per_row=max_gals,
+        n_catalogs=n_catalogs,
+        static_state_bytes=pending_static_bytes,
+        # Report-only extras (stripped before resolve_block_sizes):
+        static_state_full_bytes=full_static_bytes,
+    )
+
+
 def _resolve_and_report_block_sizes(opts, data):
     """Resolve the 'auto' block-size knobs from a probed memory budget (post-load).
 
@@ -1443,24 +1507,28 @@ def _resolve_and_report_block_sizes(opts, data):
     ``opts.block_size_resolution`` (persisted via settings.json), so the factory,
     flow builder and settings dump downstream all see plain ints/None.
     """
-    _msel = data.get("m1detsels")
-    n_sel = int(np.asarray(_msel).shape[0]) if _msel is not None else 0
+    kwargs = _block_sizing_inputs(opts, data)
+    full_static_bytes = kwargs.pop("static_state_full_bytes")
+    pending_static_bytes = kwargs["static_state_bytes"]
+    opts.block_size_static_state_bytes = int(full_static_bytes)
+    free_bytes, free_src = probe_device_memory_bytes()
     plan = resolve_block_sizes(
-        n_events=int(data.get("nEvents", 0)),
-        n_samp=int(data.get("nsamp", 0)),
-        n_sel=n_sel,
-        sel_requested=getattr(opts, "sel_batch_size", None),
-        pe_requested=getattr(opts, "pe_event_block", None),
-        has_catalog=bool(getattr(opts, "survey_path", None)),
-        flow_path=bool(getattr(opts, "gw_flows_path", None)),
-        backend=jax.default_backend(),
-    )
+        backend=jax.default_backend(), free_bytes=free_bytes,
+        free_bytes_reliable=(free_src != "fallback-default"), **kwargs)
     opts.sel_batch_size = plan.sel_batch_size
     opts.pe_event_block = plan.pe_event_block
     opts.block_size_resolution = plan.source
     _sel = plan.sel_batch_size if plan.sel_batch_size is not None else "single pass"
     _pe = plan.pe_event_block if plan.pe_event_block is not None else "single pass"
     _ok(f"Block sizes [{plan.source}]: sel_batch_size={_sel}, pe_event_block={_pe}")
+    _ok(
+        "Static state: "
+        f"{full_static_bytes / 1024**3:.3f} GiB total "
+        f"({pending_static_bytes / 1024**3:.3f} GiB pending/factory reserved); "
+        f"free {free_bytes / 1024**3:.1f} GiB ({free_src}); "
+        f"n_grid={kwargs['n_grid']}, max_gals/row={kwargs['max_gals_per_row']:,}, "
+        f"K={kwargs['n_catalogs']}"
+    )
 
 
 def _load_and_report_data(opts):
