@@ -162,9 +162,16 @@ def poisson_lognormal_map(
     dN_exp = np.broadcast_to(np.asarray(dN_exp, dtype=float), (n_rows, n_grid))
 
     sigma2 = _prior_sigma2(pk)
-    shift = 0.5 * bias * bias * sigma2
     b = float(bias)
     ps = float(prior_strength)
+    # Mean-one shift uses the EFFECTIVE prior variance sigma2/ps.  The prior
+    # imposed below is 0.5*ps*s^T C^-1 s, whose marginal variance is sigma2/ps,
+    # and the Laplace posterior variance (var_post, via H = ps/pk + ...) scales
+    # the same way; omitting the /ps divisor left the E[Q] mean-one/homogeneity
+    # cancellation exact ONLY at ps=1, so a data-free bin read Q<1 (a ~31%
+    # missing-density suppression at prior_strength=4, bias=1) for any other
+    # prior_strength.
+    shift = 0.5 * b * b * sigma2 / ps
 
     s_map = np.zeros((n_rows, n_grid), dtype=float)
     lam_map = np.zeros((n_rows, n_grid), dtype=float)
@@ -272,9 +279,16 @@ def laplace_lognormal_members(
     n_rows, n_grid = s_map.shape
     pk = np.asarray(power_spectrum, dtype=float)
     sigma2 = _prior_sigma2(pk)
-    shift = 0.5 * bias * bias * sigma2
     b = float(bias)
     ps = float(prior_strength)
+    # Mean-one shift uses the EFFECTIVE prior variance sigma2/ps.  The prior
+    # imposed below is 0.5*ps*s^T C^-1 s, whose marginal variance is sigma2/ps,
+    # and the Laplace posterior variance (var_post, via H = ps/pk + ...) scales
+    # the same way; omitting the /ps divisor left the E[Q] mean-one/homogeneity
+    # cancellation exact ONLY at ps=1, so a data-free bin read Q<1 (a ~31%
+    # missing-density suppression at prior_strength=4, bias=1) for any other
+    # prior_strength.
+    shift = 0.5 * b * b * sigma2 / ps
     M = int(n_members)
     rng = np.random.default_rng(seed)
 
