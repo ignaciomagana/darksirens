@@ -178,6 +178,13 @@ def load_gw_samples(gw_path):
         "gwcat ... --spin-basis chieff or GWCatalog.export(spin_basis=\"chieff\")."
     )
 
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError(
+            "load_gw_samples requires x64; call configure_jax_runtime() (or "
+            "jax.config.update('jax_enable_x64', True)) before loading. Under "
+            "float32 the PE weights lose precision in the selection-integral sum."
+        )
+
     with h5py.File(gw_path, "r") as f:
         fmt = _require_hdf5_format(
             f, ("gwcat-1.0", "observed-lensing-pe-1.0", "gwcat-pe-2.0"), conversion_hint
@@ -312,6 +319,13 @@ def load_selection_samples(file):
         "m2src",
     )
     required_attrs = ("ndraw",)
+
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError(
+            "load_selection_samples requires x64; call configure_jax_runtime() "
+            "(or jax.config.update('jax_enable_x64', True)) before loading. Under "
+            "float32 the draw weights lose precision in the selection-integral sum."
+        )
 
     with h5py.File(file, "r") as f:
         fmt = _require_hdf5_format(
