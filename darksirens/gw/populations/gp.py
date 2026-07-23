@@ -402,10 +402,11 @@ class JointGPPopulation:
     # -- evaluation --------------------------------------------------------
 
     def log_p_pop(self, m1, q, z, chieff, theta):
-        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
-        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
-        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
-        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
+        # Flatten arbitrarily-broadcastable inputs (e.g. the WL path's
+        # (Nsamp, Nnodes) mu-marginalisation mesh) to 1-D for the GP eval, then
+        # reshape the result back.  The GP field / _mean_on_coords assume 1-D
+        # coords, so a 2-D query previously crashed with a broadcast error.
+        m1, q, z, chi, _out_shape = _broadcast_logp_inputs(m1, q, z, chieff)
 
         # ---- unpack theta in param_specs order ----
         m_min, dm_min, m_max, dm_max = theta[0], theta[1], theta[2], theta[3]
@@ -455,7 +456,7 @@ class JointGPPopulation:
 
         p = p_gp * p_base
         log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
-        return log_p + (gamma - 1.0) * jnp.log1p(z)
+        return (log_p + (gamma - 1.0) * jnp.log1p(z)).reshape(_out_shape)
 
     # -- tapers / cut, applied identically to density and normalisation ----
 
@@ -497,7 +498,14 @@ class JointGPPopulation:
             # factors), so the prob-axis normalisation is unity. meshgrid() over
             # an empty axis list would otherwise IndexError at flat[0].shape[0].
             return jnp.ones_like(z) if self._z_in_gp else jnp.asarray(1.0)
-        coarse = self._z_in_gp and len(self._prob_gp) >= 2
+        # Coarsen the probability-axis normalisation grid whenever the full
+        # tensor grid would be intractable: any z-conditioned multi-prob-axis
+        # model (the full grid is retabulated per z node), OR any >=3-prob-axis
+        # model (e.g. gp3d_m1_q_chi: full 500x200x200 = 2e7 points x M nodes ~
+        # 128 GB, an OOM/hang on the first likelihood call).  A 2-prob-axis,
+        # z-free model (gp2d_q_chi, full 200x200 = 4e4) stays on the full grid,
+        # so its normalisation is unchanged.
+        coarse = (self._z_in_gp and len(self._prob_gp) >= 2) or len(self._prob_gp) >= 3
         if coarse:
             grids = [_coarse_axis_grid(a) for a in self._prob_gp]
         else:
@@ -679,10 +687,10 @@ class AdditiveGPPopulation:
 
     def log_p_pop(self, m1, q, z, chieff, theta):
         import jax
-        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
-        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
-        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
-        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
+        # Flatten broadcastable inputs (e.g. WL's (Nsamp, Nnodes) mesh) to 1-D;
+        # the per-term GP eval assumes 1-D coords (N = m1.shape[0]).  Reshape
+        # back at the end.  A 2-D query previously crashed with a broadcast error.
+        m1, q, z, chi, _out_shape = _broadcast_logp_inputs(m1, q, z, chieff)
         N = m1.shape[0]
 
         m_min, dm_min, m_max, dm_max = theta[0], theta[1], theta[2], theta[3]
@@ -736,7 +744,7 @@ class AdditiveGPPopulation:
         norm = jnp.exp(jnp.interp(z, zg, jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
         log_p_src = (jnp.log(jnp.where(pun > 0, pun, _LOGSAFE))
                      - jnp.log(jnp.where(norm > 0, norm, 1.0)))
-        return log_p_src + (gamma - 1.0) * jnp.log1p(z)
+        return (log_p_src + (gamma - 1.0) * jnp.log1p(z)).reshape(_out_shape)
 
     def _taper_cut(self, m1, q, m_min, dm_min, m_max, dm_max):
         s = sfilter_low(m1, m_min, dm_min) * sfilter_high(m1, m_max, dm_max)
