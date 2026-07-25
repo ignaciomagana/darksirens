@@ -11,6 +11,7 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
     lss_completion_logq_members = None
     lss_completion_indexing = 0  # int enum: 0=auto, 1=compact, 2=global
     lss_completion_provenance = None  # ensemble-provenance for K>=2 verification
+    lss_completion_fiducials = None   # build-time conditioning values (None = no Q)
     lss_path = getattr(opts, "lss_completion", None)
     if lss_path is None and opts.survey_path is not None:
         try:
@@ -88,16 +89,25 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
         ) if k in _diag}
         if _fid:
             print(f"    - Q_LSS build fiducials: {_fid}")
+        # Carry the build-time conditioning values out so the CLI can enforce
+        # them against the parameter space once it is known (the sampled-label
+        # set does not exist yet at load time).  See
+        # ``inference.q_provenance.check_lss_completion_provenance``.
+        lss_completion_fiducials = {
+            "path": lss_path,
+            **{k: float(v) for k, v in _fid.items()},
+        }
         print(
             "    [!] Q_LSS is FIXED at its build-time fiducials (cosmology, n0, "
-            "delta, bias); the inference will vary some of these. Q is a "
-            "radial completion field on the SAME zgrid (validated), interpreted "
-            "as a dimensionless density-ratio. Rebuild Q if your fiducials differ "
-            "substantially."
+            "delta, bias). Q is a radial completion field on the SAME zgrid "
+            "(validated), interpreted as a dimensionless density-ratio. The "
+            "parameters it is conditioned on may not be sampled — see the "
+            "provenance check below."
         )
     return {
         "lss_completion_logq": lss_completion_logq,
         "lss_completion_logq_members": lss_completion_logq_members,
+        "lss_completion_fiducials": lss_completion_fiducials,
         "lss_completion_indexing": lss_completion_indexing,
         "lss_completion_provenance": lss_completion_provenance,
     }

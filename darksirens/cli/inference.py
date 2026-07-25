@@ -85,6 +85,7 @@ from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
+from darksirens.inference.q_provenance import check_lss_completion_provenance
 from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
 
 warnings.simplefilter("ignore", FutureWarning)
@@ -1732,6 +1733,18 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
     fixed_parameter_statuses = res[10]
     prior_kinds = res[11]
+
+    # A prebuilt Q_LSS table is conditioned on build-time n0/delta/bias/cosmology;
+    # sampling or re-fixing those does not propagate into Q, it is absorbed as
+    # spurious redshift structure and biases H0. This is the first point where
+    # both the table's fiducials and the final sampled set are known.
+    _q_fiducials = data.get("lss_completion_fiducials")
+    if _q_fiducials is None:
+        for _b in _lss_bundles:
+            if _b.get("lss_completion_fiducials") is not None:
+                _q_fiducials = _b["lss_completion_fiducials"]
+                break
+    check_lss_completion_provenance(_q_fiducials, labels, fixed_parameter_values)
     # Record the exact sampler labels so build_parameter_decoder (inside
     # make_likelihood) can fail fast if it re-derives a different set -- the
     # P0.1 fail-fast net against any future CLI/decoder flag drift.
