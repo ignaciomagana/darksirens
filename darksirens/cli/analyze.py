@@ -432,7 +432,17 @@ def summarize_ppd(ppd_samples, limits=(5, 95)):
 
 def redshift_rate_samples(pz_samples, zgrid, h0_samples,
                           om0_samples=OM0_FID, w0_samples=W0_FID, wa_samples=WA_FID):
-    """dN/dz ∝ p_z(z) · (dV_c/dz)(z; H0, Om0, w0, wa) / (1+z), normalised per sample.
+    """dN/dz ∝ p_z(z) · (dV_c/dz)(z; H0, Om0, w0, wa), normalised per sample.
+
+    NO explicit 1/(1+z) here: the detector-frame time dilation is ALREADY inside
+    ``p_z``.  ``p_z`` is the posterior-predictive marginal of the population
+    density, and :meth:`PopulationModel.log_rate_z` returns ``(gamma - 1) *
+    log1p(z)`` — i.e. the merger-rate density R(z) ∝ (1+z)^gamma divided by
+    (1+z) — for the ``powerlaw`` evolution, and ``log[psi(z)/(1+z)]`` for
+    ``md``.  So ``p_z ∝ R(z)/(1+z)`` and the observed rate is simply
+    ``p_z · dV_c/dz``.  Dividing again would plot (1+z)^(gamma-2) dV_c/dz and
+    bias the curve low in redshift (median z shifts by -7% to -22% over
+    gamma = 4 to 1).
 
     ``om0_samples`` / ``w0_samples`` / ``wa_samples`` accept either a per-sample
     array (same length as ``h0_samples``) or a scalar broadcast across every
@@ -448,7 +458,7 @@ def redshift_rate_samples(pz_samples, zgrid, h0_samples,
     wa_samples = jnp.broadcast_to(jnp.asarray(wa_samples), (n,))
 
     def one(pz, h0, om0, w0, wa):
-        rate = pz * dV_of_z(zg, h0, om0, w0, wa) / (1.0 + zg)
+        rate = pz * dV_of_z(zg, h0, om0, w0, wa)
         norm = jnp.trapezoid(rate, zg)
         return rate / jnp.where(norm > 0, norm, 1.0)
 
