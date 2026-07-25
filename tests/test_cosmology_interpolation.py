@@ -169,3 +169,92 @@ def test_interpnd_scalar_head_generalises_beyond_the_cosmology_table():
     got = interpnd_scalar_head((0.7, 1.1, q), (ax0, ax1, tail), values, fill_value=jnp.nan)
     want = interpnd((0.7, 1.1, q), (ax0, ax1, tail), values, fill_value=jnp.nan)
     np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-13)
+
+
+# ============================================================================
+# Interpolation-grid node allocation
+# ============================================================================
+#
+# Node counts are chosen from the MEASURED midpoint error per axis, not by
+# habit. Multilinear interpolation is exact at nodes and worst at cell
+# midpoints, so these tests probe midpoints — the on-node tests above would
+# pass no matter how coarse the Om0/w0/wa axes were.
+
+from astropy.cosmology import Flatw0waCDM
+
+_Z_PROBE = np.array([0.01, 0.05, 0.1, 0.3, 0.5, 1.0, 2.0, 3.0, 4.5])
+
+
+def _dl_rel_error(Om0, w0, wa):
+    ref = Flatw0waCDM(
+        H0=_cosmo.H0Planck, Om0=Om0, w0=w0, wa=wa
+    ).luminosity_distance(_Z_PROBE).value
+    got = np.asarray(dL_of_z(jnp.asarray(_Z_PROBE), _cosmo.H0Planck, Om0, w0, wa))
+    return float(np.max(np.abs(got / ref - 1.0)))
+
+
+def _midpoint(grid, i):
+    g = np.asarray(grid)
+    return 0.5 * (g[i] + g[i + 1])
+
+
+def test_fiducial_cosmology_sits_exactly_on_grid_nodes():
+    """Why re-noding cannot perturb an H0-only run.
+
+    With the fiducial on a node the interpolation weight is exactly 0, so the
+    corner sum reduces to the tabulated column — which is built by the same
+    trapezoid on the same zgrid regardless of how many Om0/w0/wa nodes there
+    are. Fixed-cosmology results are therefore bitwise stable across changes
+    to these node counts.
+    """
+    assert np.min(np.abs(np.asarray(_cosmo.Om0grid) - _cosmo.Om0Planck)) == 0.0
+    assert np.min(np.abs(np.asarray(_cosmo.w0grid) - _cosmo.w0Fiducial)) == 0.0
+    assert np.min(np.abs(np.asarray(_cosmo.wagrid) - _cosmo.waFiducial)) == 0.0
+
+
+def test_midpoint_accuracy_budget_is_balanced_across_axes():
+    """No axis may dominate the error budget, and none may be over-resolved.
+
+    The z axis imposes a floor (linear-in-z interpolation of r(z)); an axis
+    resolved far below that floor is spending table memory for nothing, which
+    is what the Om0 axis was doing at 31 nodes (5.5e-5 midpoint against a
+    5.4e-5 floor) while w0 sat at 5.1e-4.
+    """
+    on_node = _dl_rel_error(_cosmo.Om0Planck, _cosmo.w0Fiducial, _cosmo.waFiducial)
+    om0_mid = _dl_rel_error(_midpoint(_cosmo.Om0grid, _cosmo.Om0grid.size // 2),
+                            _cosmo.w0Fiducial, _cosmo.waFiducial)
+    w0_mid = _dl_rel_error(_cosmo.Om0Planck,
+                           _midpoint(_cosmo.w0grid, _cosmo.w0grid.size // 2),
+                           _cosmo.waFiducial)
+    wa_mid = _dl_rel_error(_cosmo.Om0Planck, _cosmo.w0Fiducial,
+                           _midpoint(_cosmo.wagrid, _cosmo.wagrid.size // 2))
+
+    assert on_node < 1e-4
+    for name, err in (("Om0", om0_mid), ("w0", w0_mid), ("wa", wa_mid)):
+        assert err < 2.0e-4, f"{name} midpoint error {err:.2e} exceeds the budget"
+    # Balanced: no axis carries more than ~3x another. (Before re-noding the
+    # w0/Om0 ratio was ~9.)
+    worst, best = max(om0_mid, w0_mid, wa_mid), min(om0_mid, w0_mid, wa_mid)
+    assert worst / best < 3.0, f"unbalanced budget: {om0_mid=} {w0_mid=} {wa_mid=}"
+
+
+def test_worst_case_midpoint_error_over_the_physical_grid():
+    """Cell midpoints across the physical region (w0 < -0.3; w0 near or above
+    zero is unphysical and not worth budgeting accuracy for).
+
+    Strided rather than exhaustive — the full midpoint set is ~17k astropy
+    evaluations. The stride still visits both grid edges and the interior on
+    every axis, which is where the error extremes live (widest cells and the
+    strongest curvature in Om0 sit at the low-Om0/high-wa corner).
+    """
+    mids = lambda g: 0.5 * (np.asarray(g)[:-1] + np.asarray(g)[1:])
+    worst, arg = 0.0, None
+    for om in mids(_cosmo.Om0grid)[::3]:
+        for w0 in mids(_cosmo.w0grid)[::3]:
+            if w0 > -0.3:
+                continue
+            for wa in mids(_cosmo.wagrid)[::3]:
+                err = _dl_rel_error(om, w0, wa)
+                if err > worst:
+                    worst, arg = err, (om, w0, wa)
+    assert worst < 1.5e-3, f"worst-case midpoint error {worst:.2e} at {arg}"
