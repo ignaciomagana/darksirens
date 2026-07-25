@@ -225,19 +225,90 @@ class BlockSizePlan:
     source: str
 
 
+#: Environment override for the device memory budget, in GB.  Set this to pin
+#: the budget without touching the allocator (mirrors the analyze CLI's
+#: ``DARKSIRENS_ANALYZE_MAX_MEM_GB``).
+DEVICE_MEM_ENV_VAR = "DARKSIRENS_DEVICE_MEM_GB"
+
+
+def _nvidia_smi_free_bytes(device_index):
+    """Free bytes on GPU ``device_index`` via ``nvidia-smi``, or ``None``.
+
+    ``memory_stats()`` returns ``None`` under ``XLA_PYTHON_CLIENT_ALLOCATOR=
+    platform`` (which ``core.jax_config`` sets), so on a production CUDA run it
+    is the only probe that reports anything at all.  Deliberately subprocess and
+    not NVML: pynvml is not a declared dependency.
+
+    ``nvidia-smi`` indexes GPUs the same way CUDA does *after*
+    ``CUDA_VISIBLE_DEVICES`` filtering is undone, so the visible-device list is
+    applied here to map a JAX device index back to a physical one.
+    """
+    import os
+    import subprocess
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None and visible.strip():
+        entries = [e.strip() for e in visible.split(",") if e.strip()]
+        # A UUID-based list cannot be indexed positionally against nvidia-smi's
+        # integer indices; query by that UUID instead.
+        if device_index >= len(entries):
+            return None
+        target = entries[device_index]
+    else:
+        target = str(device_index)
+
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", f"--id={target}",
+             "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+    except Exception:
+        return None
+
+    line = out.strip().splitlines()[0].strip() if out.strip() else ""
+    try:
+        mib = float(line)
+    except ValueError:
+        return None
+    if not (mib > 0):
+        return None
+    return int(mib * 1024 * 1024)
+
+
 def probe_device_memory_bytes(default_gb=4.0):
     """Best-effort free-memory probe for the first JAX device.
 
-    Returns ``(bytes, source)``.  Uses ``device.memory_stats()`` when available
-    (GPU/TPU): ``bytes_limit - bytes_in_use`` if both present, else
-    ``bytes_limit`` / ``bytes_reservable_limit``.  Falls back to ``default_gb``
-    on the CPU backend or older jaxlib (where ``memory_stats`` returns ``None``
-    or lacks these keys).
+    Returns ``(bytes, source)``, trying in order:
 
-    Note: unless ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` is exported, JAX
-    preallocates a large fraction of the GPU and ``bytes_limit`` reports that
-    *pool* (still a safe ceiling for sizing — we stay within it).
+    1. ``$DARKSIRENS_DEVICE_MEM_GB`` — explicit override, always wins.
+    2. ``device.memory_stats()`` (GPU/TPU): ``bytes_limit - bytes_in_use`` if
+       both present, else ``bytes_limit`` / ``bytes_reservable_limit``.
+    3. ``nvidia-smi`` free memory, for CUDA devices.
+    4. ``default_gb``.
+
+    Step 3 exists because step 2 is INERT in production: ``core.jax_config``
+    sets ``XLA_PYTHON_CLIENT_ALLOCATOR=platform``, under which
+    ``memory_stats()`` returns ``None``.  Without it every CLI run fell through
+    to the 4 GB default on machines with far more — measured 4 GB reported
+    against 92.4 GB actually free on an H100 NVL — so memory-aware sizing never
+    engaged and the calibrated single-pass constants were never used.
+
+    Note: with ``memory_stats`` available and ``XLA_PYTHON_CLIENT_PREALLOCATE``
+    unset, JAX preallocates a large fraction of the GPU and ``bytes_limit``
+    reports that *pool* (still a safe ceiling for sizing — we stay within it).
     """
+    import os
+
+    override = os.environ.get(DEVICE_MEM_ENV_VAR)
+    if override:
+        try:
+            gb = float(override)
+            if gb > 0:
+                return int(gb * 1e9), f"env:{DEVICE_MEM_ENV_VAR}"
+        except ValueError:
+            pass
+
     try:
         import jax  # lazy: this module is imported by the (JAX-free) argparse layer
         dev = jax.devices()[0]
@@ -250,6 +321,10 @@ def probe_device_memory_bytes(default_gb=4.0):
         res = stats.get("bytes_reservable_limit")
         if res:
             return int(res), f"device:{dev.platform} bytes_reservable_limit"
+        if str(dev.platform).lower() in _GPU_BACKENDS:
+            free = _nvidia_smi_free_bytes(int(getattr(dev, "id", 0) or 0))
+            if free:
+                return int(free), "nvidia-smi memory.free"
     except Exception:
         pass
     return int(default_gb * 1e9), "fallback-default"
