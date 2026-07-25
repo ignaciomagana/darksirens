@@ -23,11 +23,37 @@ and N_eff is the effective sample size of the selection integral
     N_eff = μ² / Var(μ)   ≈   [Σ w_i]² / Σ w_i²
 
 The coefficient N_obs(N_obs+3)/(2 N_eff) is the leading-order correction
-from the uncertainty in μ on the log-likelihood (see the derivation in
-the appendix of Talbot & Golomb 2023, arXiv:2304.06138, eq. A9).  This
-is *not* the simpler N_obs²/(2 N_eff) term from the basic Farr (2019)
-expansion; the extra factor of 3 arises from the next-order term in the
-Taylor expansion of log μ around its mean.
+from the uncertainty in μ on the log-likelihood (Farr 2019, eq. 11).
+The "+3" is a PRIOR CONVENTION on μ, not a higher-order Taylor term —
+see the derivation below, and ``tests/test_selection_correction_coefficient.py``
+which pins it numerically.
+
+Derivation.  Marginalising the rate R out of the Poisson likelihood with
+the scale-free prior p(R) ∝ 1/R leaves L ∝ μ^{-N}.  Monte-Carlo error
+makes μ itself uncertain: μ ~ N(μ̂, σ²) with σ = μ̂/√N_eff.  Marginalising
+that uncertainty under a scale-invariant prior p(μ) ∝ 1/μ,
+
+    ⟨μ^{-N}⟩ / μ̂^{-N} = ⟨μ^{-N-1}⟩_G / ⟨μ^{-1}⟩_G
+                       = [1 + (N+1)(N+2)/(2 N_eff)] / [1 + 2/(2 N_eff)]
+                       = 1 + [(N+1)(N+2) − 2] / (2 N_eff)
+                       = 1 + N(N+3) / (2 N_eff),
+
+using ⟨μ^{-k}⟩_G/μ̂^{-k} ≈ 1 + k(k+1)σ²/(2μ̂²) for a Gaussian.  A FLAT
+prior on μ would instead give N(N+1)/(2 N_eff); the two differ at O(1/N)
+and the N(N+3) form is the one Farr (2019) states and that the reference
+implementation uses (``gwpopulation.vt.ResamplingVT.vt_factor``:
+``vt_factor = mu / exp((3 + n_events) / (2 n_effective))``, whose
+``-N log vt_factor`` is exactly the expression above).  The N_obs²/(2 N_eff)
+form sometimes quoted is the leading term only.
+
+CAUTION: gwpopulation deprecates this marginalisation ("we recommend not
+to use this as it is not completely understood if this uncertainty
+marginalization is correct") in favour of bounding the variance of the
+TOTAL log-likelihood — which is exactly the criterion this module already
+enforces as its primary guard (next section).  The correction below is
+kept because it is the community-standard closed form and is O(1/N_eff)
+inside the region the guard admits, but the guard, not the correction, is
+what protects the inference.
 
 Reliability criterion
 ~~~~~~~~~~~~~~~~~~~~~
@@ -251,8 +277,13 @@ def selection_log_correction(
 
         -N_obs * log μ  +  N_obs * (N_obs + 3) / (2 * N_eff)
 
-    The first term is the standard Poisson selection factor.  The second
-    is the leading uncertainty correction from Taylor-expanding log μ.
+    The first term is the standard Poisson selection factor.  The second is
+    the leading Monte-Carlo uncertainty correction of Farr (2019) eq. 11,
+    matching ``gwpopulation.vt.ResamplingVT.vt_factor``.  The ``+3`` follows
+    from marginalising μ under a scale-invariant p(μ) ∝ 1/μ — a flat prior
+    would give N_obs(N_obs+1) instead — NOT from a higher-order Taylor term;
+    the module docstring carries the derivation and
+    ``tests/test_selection_correction_coefficient.py`` pins it numerically.
 
     Parameters
     ----------
