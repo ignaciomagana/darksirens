@@ -3,7 +3,7 @@ from typing import Iterable, Optional, Sequence
 import jax.numpy as jnp
 from jax.scipy.ndimage import map_coordinates
 
-__all__ = ["interp2d", "interpnd", "CartesianGrid"]
+__all__ = ["interp2d", "interpnd", "interpnd_scalar_head", "CartesianGrid"]
 Array = jnp.ndarray
 
 
@@ -64,6 +64,42 @@ def interp2d(
     return z
 
 
+def _axis_weights(coord: Array, grid: Array):
+    """Bracketing indices, interpolation weight and out-of-range mask for one axis.
+
+    Shared by :func:`interpnd` and :func:`interpnd_scalar_head` so both paths
+    handle NaN and out-of-range coordinates identically.
+
+    Sanitize BEFORE computing weights: out-of-range (or NaN) queries are
+    answered by fill_value anyway, but if the weight itself is computed from
+    the raw coordinate the backward pass multiplies cotangents by non-finite
+    intermediates (mul's VJP scales by the stored operand), so a single
+    NaN/inf here poisons the WHOLE gradient even though the forward value is
+    correctly masked. Clamp for the arithmetic; keep the mask from the raw
+    coordinate.
+    """
+    bad = jnp.isnan(coord)
+    coord_c = jnp.where(bad, grid[0], jnp.clip(coord, grid[0], grid[-1]))
+    upper = jnp.clip(jnp.searchsorted(grid, coord_c, side="right"), 1, len(grid) - 1)
+    lower = upper - 1
+    denom = grid[upper] - grid[lower]
+    weight = (coord_c - grid[lower]) / denom
+    oob = bad | (coord < grid[0]) | (coord > grid[-1])
+    return lower, upper, weight, oob
+
+
+def _validate_grid(coords, points, values):
+    if len(coords) != len(points):
+        raise ValueError("coords and points must have the same length")
+    if values.ndim != len(points):
+        raise ValueError("values must have one dimension per interpolation axis")
+    for axis, grid in enumerate(points):
+        if grid.ndim != 1:
+            raise ValueError("all interpolation point arrays must be 1D")
+        if values.shape[axis] != grid.shape[0]:
+            raise ValueError("values shape must match the interpolation grids")
+
+
 def interpnd(
     coords: Sequence[Array],
     points: Sequence[Array],
@@ -76,17 +112,12 @@ def interpnd(
     coordinate arrays are broadcast together, so callers can mix scalar model
     parameters with vector-valued coordinates.  When ``fill_value`` is provided,
     any point outside at least one grid axis is filled instead of extrapolated.
-    """
-    if len(coords) != len(points):
-        raise ValueError("coords and points must have the same length")
-    if values.ndim != len(points):
-        raise ValueError("values must have one dimension per interpolation axis")
 
-    for axis, grid in enumerate(points):
-        if grid.ndim != 1:
-            raise ValueError("all interpolation point arrays must be 1D")
-        if values.shape[axis] != grid.shape[0]:
-            raise ValueError("values shape must match the interpolation grids")
+    When every coordinate except the last is a scalar,
+    :func:`interpnd_scalar_head` computes the same thing with far less memory
+    traffic — see its docstring.
+    """
+    _validate_grid(coords, points, values)
 
     coords = jnp.broadcast_arrays(*coords)
     lower_indices = []
@@ -95,23 +126,11 @@ def interpnd(
     oob = jnp.zeros(coords[0].shape, dtype=bool)
 
     for coord, grid in zip(coords, points):
-        # Sanitize BEFORE computing weights: out-of-range (or NaN) queries are
-        # answered by fill_value anyway, but if the weight itself is computed
-        # from the raw coordinate the backward pass multiplies cotangents by
-        # non-finite intermediates (mul's VJP scales by the stored operand),
-        # so a single NaN/inf here poisons the WHOLE gradient even though the
-        # forward value is correctly masked. Clamp for the arithmetic; keep
-        # the mask from the raw coordinate.
-        bad = jnp.isnan(coord)
-        coord_c = jnp.where(bad, grid[0], jnp.clip(coord, grid[0], grid[-1]))
-        upper = jnp.clip(jnp.searchsorted(grid, coord_c, side="right"), 1, len(grid) - 1)
-        lower = upper - 1
-        denom = grid[upper] - grid[lower]
-        weight = (coord_c - grid[lower]) / denom
+        lower, upper, weight, axis_oob = _axis_weights(coord, grid)
         lower_indices.append(lower)
         upper_indices.append(upper)
         weights.append(weight)
-        oob = oob | bad | (coord < grid[0]) | (coord > grid[-1])
+        oob = oob | axis_oob
 
     interpolated = jnp.zeros(coords[0].shape, dtype=values.dtype)
     for corner in range(1 << len(points)):
@@ -128,6 +147,84 @@ def interpnd(
 
     if fill_value is not None:
         interpolated = jnp.where(oob, fill_value, interpolated)
+
+    return interpolated
+
+
+def interpnd_scalar_head(
+    coords: Sequence[Array],
+    points: Sequence[Array],
+    values: Array,
+    fill_value: Optional[Array] = None,
+) -> Array:
+    """:func:`interpnd` for the case where all axes but the LAST are scalars.
+
+    Multilinear interpolation is a tensor product, so the axes may be contracted
+    in any order.  :func:`interpnd` broadcasts every coordinate to the query
+    shape and gathers ``2**ndim`` corners out of the full table — for a query of
+    N points that is ``2**ndim`` gathers of N elements each, scattered across
+    the whole (potentially very large) ``values`` array.
+
+    When the leading coordinates are scalars, contracting THEM first collapses
+    ``values`` to a single 1-D curve over the last axis, and only that curve is
+    indexed per query point.  For the cosmology distance table this replaces 16
+    gathers into a 54.7 MB array with 8 slices of a fixed row plus 2 gathers
+    into a 4 KB curve.  Measured on an H100 NVL (kernel-time dominated): 0.95x
+    at N=1e5, 1.64x at N=1e6, 1.95x at N=4e6, and 1.53x for the inference-shaped
+    vmap of 512 cosmologies x 2000 redshifts.  The win needs enough query points
+    to amortise building the curve — below ~1e5 it is a wash, which is why the
+    fallback path is kept rather than removed.
+
+    The result is the same number up to floating-point reassociation (the corner
+    sum is grouped differently); agreement is ~1e-15 relative in float64. NaN and
+    out-of-range handling is identical because both paths share
+    :func:`_axis_weights`.
+
+    Raises ``ValueError`` if any leading coordinate is not a scalar — callers
+    that cannot guarantee that should use :func:`interpnd`.
+    """
+    _validate_grid(coords, points, values)
+    if len(coords) < 2:
+        raise ValueError("interpnd_scalar_head needs at least two axes")
+
+    head, tail = coords[:-1], coords[-1]
+    head_grids, tail_grid = points[:-1], points[-1]
+    for axis, coord in enumerate(head):
+        if jnp.ndim(coord) != 0:
+            raise ValueError(
+                f"interpnd_scalar_head requires scalar leading coordinates; "
+                f"axis {axis} has ndim {jnp.ndim(coord)}. Use interpnd instead."
+            )
+
+    n_head = len(head)
+    lowers, uppers, weights = [], [], []
+    head_oob = jnp.asarray(False)
+    for coord, grid in zip(head, head_grids):
+        lower, upper, weight, axis_oob = _axis_weights(coord, grid)
+        lowers.append(lower)
+        uppers.append(upper)
+        weights.append(weight)
+        head_oob = head_oob | axis_oob
+
+    # Contract the scalar axes into a 1-D curve over the trailing axis.
+    curve = jnp.zeros(values.shape[-1], dtype=values.dtype)
+    for corner in range(1 << n_head):
+        corner_indices = []
+        corner_weight = jnp.asarray(1.0, dtype=values.dtype)
+        for axis in range(n_head):
+            if corner & (1 << axis):
+                corner_indices.append(uppers[axis])
+                corner_weight = corner_weight * weights[axis]
+            else:
+                corner_indices.append(lowers[axis])
+                corner_weight = corner_weight * (1.0 - weights[axis])
+        curve = curve + corner_weight * values[tuple(corner_indices)]
+
+    lower, upper, weight, tail_oob = _axis_weights(tail, tail_grid)
+    interpolated = curve[lower] * (1.0 - weight) + curve[upper] * weight
+
+    if fill_value is not None:
+        interpolated = jnp.where(head_oob | tail_oob, fill_value, interpolated)
 
     return interpolated
 

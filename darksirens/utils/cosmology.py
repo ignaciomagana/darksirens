@@ -23,7 +23,7 @@ from astropy.cosmology import Flatw0waCDM, Planck15
 from jax import jit
 from jax import numpy as jnp
 
-from darksirens.utils.interp2d import interpnd
+from darksirens.utils.interp2d import interpnd, interpnd_scalar_head
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -174,8 +174,24 @@ def r_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     and rescaled from the Planck reference Hubble constant to the requested
     ``H0``.  Values outside the tabulated grid are returned as ``NaN`` rather
     than extrapolated.
+
+    ``Om0``/``w0``/``wa`` are scalars on every likelihood path (they come from
+    a :class:`~darksirens.core.types.CosmoParams`, one cosmology per sample),
+    while ``z`` carries the sample axis.  In that case the three cosmology axes
+    are contracted into a 1-D ``r(z)`` curve BEFORE the redshift lookup, so the
+    per-point gathers hit a 4 KB curve instead of the 54.7 MB table — the same
+    number up to floating-point reassociation (~1e-15 relative), measured
+    0.95x/1.64x/1.95x at N = 1e5/1e6/4e6 on an H100 NVL (so: a wash on small
+    queries, ~1.6-2x on selection-integral-sized ones).  A non-scalar
+    cosmology coordinate (e.g. a vmap that maps over Om0 directly) falls back to
+    the general ``interpnd`` path.  ``jnp.ndim`` is a trace-time shape query, so
+    the branch is resolved at compile time and never appears in the graph.
     """
-    return interpnd(
+    if jnp.ndim(Om0) == 0 and jnp.ndim(w0) == 0 and jnp.ndim(wa) == 0:
+        interpolate = interpnd_scalar_head
+    else:
+        interpolate = interpnd
+    return interpolate(
         (Om0, w0, wa, z),
         (Om0grid, w0grid, wagrid, zgrid),
         rs,
