@@ -98,9 +98,14 @@ The Monte-Carlo selection correction (Farr 2019). `_lse_to_log_mu_neff`
 converts the log-sum-exp aggregates of the injection weights into
 $(\ln\mu, N_{\rm eff}, \ln\widehat\sigma^2_\mu)$, with
 $N_{\rm eff} = \mu^2/\widehat\sigma^2_\mu$ and $\ln\widehat\sigma^2_\mu$ the log
-Monte-Carlo variance of $\mu$. `selection_log_correction` applies the
-$N_{\rm eff} > 4\,N_{\rm obs}$ (Vitale et al. 2022) too-sparse veto, returning
-$-\infty$ otherwise. `compute_selection_term` evaluates the injection weights
+Monte-Carlo variance of $\mu$. `selection_log_correction` returns
+$-N_{\rm obs}\ln\mu + N_{\rm obs}(N_{\rm obs}+3)/(2N_{\rm eff})$ (Farr 2019,
+eq. 11 — the $+3$ is the scale-invariant-$\mu$ prior convention, not a
+higher-order Taylor term) and applies the too-sparse veto
+$N_{\rm eff} > \max(5N_{\rm obs},\, N_{\rm obs}^2/(\sigma^2_{\max}-\sum_i\sigma^2_i))$
+— the Vitale et al. (2022) mean floor together with the GWTC-4.0/5.0
+total-log-likelihood-variance bound — returning $-\infty$ otherwise.
+`compute_selection_term` evaluates the injection weights
 (optionally batched via `sel_batch_size`), accepts a `sky_log_weight_fn` hook for
 the angular factor, and returns the 3-tuple — the third element feeds the
 strong-lensing cluster combiner ([`lensing`](lensing.md)).

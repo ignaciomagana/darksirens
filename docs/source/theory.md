@@ -98,9 +98,32 @@ $$
 N_{\rm eff} = \frac{\mu^2}{\widehat\sigma^2_\mu}.
 $$
 
-The estimate is only trusted when $N_{\rm eff} > 4\,N_{\rm obs}$ (Vitale et al.
-2022); otherwise `selection_log_correction` returns $-\infty$, vetoing that
-proposal. The third return, $\ln\widehat\sigma^2_\mu$, is consumed by the
+`selection_log_correction` then returns
+
+$$
+-N_{\rm obs}\ln\mu \;+\; \frac{N_{\rm obs}(N_{\rm obs}+3)}{2 N_{\rm eff}},
+$$
+
+where the second term is the leading Monte-Carlo uncertainty correction of
+Farr (2019, eq. 11). The $+3$ comes from marginalising $\mu$ under a
+scale-invariant prior $p(\mu)\propto 1/\mu$ — a flat prior would give
+$N_{\rm obs}(N_{\rm obs}+1)$ — and matches the reference implementation in
+`gwpopulation`; it is *not* a higher-order Taylor term.
+
+The estimate is trusted only when
+
+$$
+N_{\rm eff} > \max\!\left(5 N_{\rm obs},\;
+  \frac{N_{\rm obs}^2}{\sigma^2_{\max} - \sum_i \sigma^2_i}\right),
+$$
+
+otherwise `selection_log_correction` returns $-\infty$, vetoing that proposal.
+The first branch is the Vitale et al. (2022) floor on the MEAN correction; the
+second bounds the variance of the TOTAL log-likelihood estimator (Essick &
+Farr 2022; Talbot & Golomb 2023), with $\sigma^2_{\max} = 1$ nat by default as
+adopted by the GWTC-4.0/5.0 population analyses. The second branch is strictly
+stronger than $5 N_{\rm obs}$ once $N_{\rm obs} > 5$. The third return,
+$\ln\widehat\sigma^2_\mu$, is consumed by the
 strong-lensing cluster combiner ([`lensing`](reference/lensing.md)); the
 single-event likelihood ignores it.
 
