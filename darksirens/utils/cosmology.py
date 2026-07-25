@@ -77,24 +77,62 @@ waPriorUpper = waFiducial + _WA_PRIOR_HALF_WIDTH
 _ZGRID_NODES = max(500, int(round(500 * np.log(zMax + 1.0) / np.log(6.0))))
 zgrid = np.expm1(np.linspace(np.log(1), np.log(zMax + 1), _ZGRID_NODES))
 
+# ── Node counts: allocated by measured interpolation error, not by habit ───────
+#
+# Multilinear interpolation is exact AT the nodes and worst at cell midpoints,
+# with error ~ (cell width)^2, so the accuracy budget should be spent where the
+# midpoint error actually is.  Measured against astropy's Flatw0waCDM over
+# z in [0.01, 4.5] (max relative error in dL):
+#
+#                        nodes   cell     midpoint err
+#     on-node floor        --     --        5.4e-5      <- set by the z axis
+#     Om0                  31    0.010      5.5e-5      <- AT the floor
+#     w0                   21    0.125      5.1e-4
+#     wa                   21    0.250      2.8e-4
+#     worst over the physical (w0 < -0.3) grid           2.96e-3
+#
+# The Om0 axis was resolved ~10x finer than it needed to be: its midpoint error
+# had already reached the floor imposed by interpolating r(z) linearly in z, so
+# extra Om0 nodes bought nothing while w0 and wa carried ~5x more error each.
+# Reallocating to 21/41/31 gives
+#
+#     Om0 21 (0.015), w0 41 (0.0625), wa 31 (0.167):
+#         w0 midpoint 1.18e-4, wa midpoint 1.17e-4, worst 9.74e-4  (3x better)
+#
+# for a 54.7 -> 106.8 MB table.  The separable interpolation path never touches
+# the full table (it contracts these three axes into a 500-node curve first), so
+# the size increase costs residency, not per-query bandwidth.
+#
+# NOTE these errors are ZERO at the nodes and maximal at midpoints, so they are
+# a ripple on the likelihood surface with the grid period, not a smooth bias.
+# The fiducial Om0, w0 = -1 and wa = 0 all remain EXACTLY on nodes under both
+# the old and new counts, and the interpolated output at fiducial cosmology is
+# bitwise identical between them — so H0-only and fixed-cosmology runs (which
+# is most of them, including the golden regression) are unaffected.  Only runs
+# that actually sample Om0/w0/wa see a change, and there the change is a
+# reduction in interpolation error.
+#
+# The residual 5.4e-5 floor is the z axis and cannot be reduced from here; it
+# would need a finer zgrid or a higher-order rule in z.
+
 Om0grid = jnp.linspace(
     Om0PriorLower - _OM0_GRID_PAD,
     Om0PriorUpper + _OM0_GRID_PAD,
-    31,
+    21,
 )
 """Matter-density coordinates of the distance interpolation grid."""
 
 w0grid = jnp.linspace(
     w0PriorLower - _W0_GRID_PAD,
     w0PriorUpper + _W0_GRID_PAD,
-    21,
+    41,
 )
 """CPL ``w0`` coordinates of the distance interpolation grid."""
 
 wagrid = jnp.linspace(
     waPriorLower - _WA_GRID_PAD,
     waPriorUpper + _WA_GRID_PAD,
-    21,
+    31,
 )
 """CPL ``wa`` coordinates of the distance interpolation grid."""
 
