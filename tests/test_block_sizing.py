@@ -458,3 +458,136 @@ def test_cli_block_sizing_inputs_plumbing():
     kw.pop("static_state_full_bytes")
     plan = resolve_block_sizes(free_bytes=200 * GB, backend="gpu", **kw)
     assert plan.source in ("auto", "auto-single-pass", "auto-floor-reduced")
+
+
+# ── free-memory probe: the platform-allocator fallback (issue #276) ──────────────
+#
+# ``core.jax_config`` sets XLA_PYTHON_CLIENT_ALLOCATOR=platform, under which
+# ``device.memory_stats()`` returns None. Before the nvidia-smi fallback every
+# production CLI run therefore fell through to the 4 GB default (measured: 4 GB
+# reported on an H100 NVL with 92.4 GB actually free), so memory-aware sizing —
+# and the calibrated single-pass constants — never engaged.
+
+class _FakeDevice:
+    def __init__(self, stats, platform="gpu", dev_id=0):
+        self._stats, self.platform, self.id = stats, platform, dev_id
+
+    def memory_stats(self):
+        return self._stats
+
+
+def _patch_devices(monkeypatch, device):
+    import jax
+    monkeypatch.setattr(jax, "devices", lambda *a, **k: [device])
+
+
+def test_probe_env_override_wins(monkeypatch):
+    from darksirens.likelihood.block_sizing import (
+        DEVICE_MEM_ENV_VAR, probe_device_memory_bytes,
+    )
+    monkeypatch.setenv(DEVICE_MEM_ENV_VAR, "12.5")
+    # Even with a working memory_stats, the explicit override takes priority.
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 99 * GB}))
+    assert probe_device_memory_bytes() == (int(12.5e9), f"env:{DEVICE_MEM_ENV_VAR}")
+
+
+@pytest.mark.parametrize("bad", ["", "not-a-number", "0", "-3"])
+def test_probe_env_override_ignored_when_unusable(monkeypatch, bad):
+    from darksirens.likelihood.block_sizing import (
+        DEVICE_MEM_ENV_VAR, probe_device_memory_bytes,
+    )
+    monkeypatch.setenv(DEVICE_MEM_ENV_VAR, bad)
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 40 * GB}))
+    nbytes, source = probe_device_memory_bytes()
+    assert source == "device:gpu bytes_limit-in_use" and nbytes == 40 * GB
+
+
+def test_probe_prefers_memory_stats_over_nvidia_smi(monkeypatch):
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 40 * GB, "bytes_in_use": 10 * GB}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes",
+                        lambda i: pytest.fail("nvidia-smi must not be reached"))
+    assert bs.probe_device_memory_bytes() == (30 * GB, "device:gpu bytes_limit-in_use")
+
+
+def test_probe_falls_back_to_nvidia_smi_when_memory_stats_is_none(monkeypatch):
+    """The platform-allocator case: memory_stats() -> None on a real GPU."""
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice(None))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: 92 * GB)
+    assert bs.probe_device_memory_bytes() == (92 * GB, "nvidia-smi memory.free")
+
+
+def test_probe_defaults_when_nvidia_smi_also_unavailable(monkeypatch):
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice(None))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: None)
+    assert bs.probe_device_memory_bytes(default_gb=4.0) == (4_000_000_000, "fallback-default")
+
+
+def test_probe_does_not_shell_out_on_cpu(monkeypatch):
+    """No nvidia-smi subprocess on a CPU-only host."""
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice(None, platform="cpu"))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes",
+                        lambda i: pytest.fail("must not shell out on CPU"))
+    assert bs.probe_device_memory_bytes()[1] == "fallback-default"
+
+
+def _fake_run(stdout, returncode=0):
+    from types import SimpleNamespace
+
+    def run(cmd, **kwargs):
+        if returncode:
+            raise RuntimeError("nvidia-smi failed")
+        return SimpleNamespace(stdout=stdout, returncode=0)
+    return run
+
+
+@pytest.mark.parametrize("stdout,expected", [
+    ("92433\n", int(92433 * 1024 * 1024)),
+    ("  92433  \n", int(92433 * 1024 * 1024)),
+    ("92433\n81920\n", int(92433 * 1024 * 1024)),   # first line only
+    ("", None),
+    ("[N/A]\n", None),
+    ("0\n", None),
+])
+def test_nvidia_smi_parsing(monkeypatch, stdout, expected):
+    import subprocess
+    from darksirens.likelihood.block_sizing import _nvidia_smi_free_bytes
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(subprocess, "run", _fake_run(stdout))
+    assert _nvidia_smi_free_bytes(0) == expected
+
+
+def test_nvidia_smi_missing_binary_returns_none(monkeypatch):
+    import subprocess
+    from darksirens.likelihood.block_sizing import _nvidia_smi_free_bytes
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(subprocess, "run", _fake_run("", returncode=1))
+    assert _nvidia_smi_free_bytes(0) is None
+
+
+def test_nvidia_smi_maps_through_cuda_visible_devices(monkeypatch):
+    """JAX device 0 is the FIRST entry of CUDA_VISIBLE_DEVICES, not GPU 0."""
+    import subprocess
+    from darksirens.likelihood.block_sizing import _nvidia_smi_free_bytes
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    seen = {}
+
+    def run(cmd, **kwargs):
+        from types import SimpleNamespace
+        seen["cmd"] = cmd
+        return SimpleNamespace(stdout="1024\n", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert _nvidia_smi_free_bytes(0) == 1024 * 1024 * 1024
+    assert "--id=3" in seen["cmd"]
+    _nvidia_smi_free_bytes(1)
+    assert "--id=1" in seen["cmd"]
+    # Out-of-range index must not silently query the wrong GPU.
+    assert _nvidia_smi_free_bytes(5) is None
