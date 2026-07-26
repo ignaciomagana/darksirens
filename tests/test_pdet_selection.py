@@ -20,6 +20,9 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 import jax
@@ -210,7 +213,7 @@ def test_load_pdet_flow_requires_x64(tiny_pdet_npz):
 def test_m1_prior_normalized_continuous_and_bounded():
     m = np.logspace(0.0, 3.0, 200001)
     p = np.exp(sel._gwtc4_log_p_m1(m))
-    assert np.trapezoid(p, m) == pytest.approx(1.0, rel=1e-6)
+    assert _trapezoid(p, m) == pytest.approx(1.0, rel=1e-6)
     for b in (3.0, 8.0, 50.0, 200.0):
         lo = np.exp(sel._gwtc4_log_p_m1(np.array([b * (1 - 1e-10)])))[0]
         hi = np.exp(sel._gwtc4_log_p_m1(np.array([b * (1 + 1e-10)])))[0]
@@ -228,7 +231,7 @@ def test_m2_prior_normalized_and_spot_value():
     m1 = 30.0
     m2 = np.linspace(1.0, m1, 100001)
     p = np.exp(sel._gwtc4_log_p_m2_given_m1(m2, np.full_like(m2, m1)))
-    assert np.trapezoid(p, m2) == pytest.approx(1.0, rel=1e-6)
+    assert _trapezoid(p, m2) == pytest.approx(1.0, rel=1e-6)
     # p(m2=2 | m1=10) = 2*2/(100-1) = 4/99
     got = np.exp(sel._gwtc4_log_p_m2_given_m1(np.array([2.0]), np.array([10.0])))
     assert got[0] == pytest.approx(4.0 / 99.0, rel=1e-12)
@@ -239,7 +242,7 @@ def test_m2_prior_normalized_and_spot_value():
 
 def test_spin_and_tilt_priors():
     a = np.linspace(0.0, 1.0, 100001)
-    assert np.trapezoid(np.exp(sel._gwtc4_log_p_spin_mag(a)), a) == pytest.approx(
+    assert _trapezoid(np.exp(sel._gwtc4_log_p_spin_mag(a)), a) == pytest.approx(
         1.0, rel=1e-6
     )
     # p(a=0) = 1/Z_a with Z_a = sqrt(pi)/(2 sqrt2) erf(sqrt2)
@@ -250,7 +253,7 @@ def test_spin_and_tilt_priors():
     assert np.isneginf(sel._gwtc4_log_p_spin_mag(np.array([1.001])))[0]
 
     ct = np.linspace(-1.0, 1.0, 100001)
-    assert np.trapezoid(np.exp(sel._gwtc4_log_p_cos_tilt(ct)), ct) == pytest.approx(
+    assert _trapezoid(np.exp(sel._gwtc4_log_p_cos_tilt(ct)), ct) == pytest.approx(
         1.0, rel=1e-6
     )
     assert np.exp(sel._gwtc4_log_p_cos_tilt(np.array([-1.0])))[0] == pytest.approx(
@@ -263,7 +266,7 @@ def test_spin_and_tilt_priors():
 
 def test_z_prior_normalized_and_zero_outside():
     z_grid, pdf = sel.build_injection_z_prior(n=20001)
-    assert np.trapezoid(pdf, z_grid) == pytest.approx(1.0, rel=1e-8)
+    assert _trapezoid(pdf, z_grid) == pytest.approx(1.0, rel=1e-8)
     logs = sel._gwtc4_log_p_z(np.array([-0.1, 3.5]), z_grid, pdf)
     assert np.all(np.isneginf(logs))
 

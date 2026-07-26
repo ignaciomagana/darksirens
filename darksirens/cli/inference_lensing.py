@@ -114,6 +114,7 @@ from darksirens.inference.checkpointing import (
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
 from darksirens.io.results import save_tinyns_diagnostics_json, write_tinyns_metadata
+from darksirens.io.settings import environment_block
 from darksirens.inference.tinyns_config import (
     add_tinyns_arguments,
     build_tinyns_config,
@@ -1405,10 +1406,15 @@ def _make_run_dir(opts):
 
 
 def _jsonable_settings(opts):
-    return {
+    settings = {
         k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
         for k, v in vars(opts).items()
     }
+    # Same code-identity + numerics block the main CLI writes (io/settings.py),
+    # so a lensing run is as attributable as a dark-siren one.  This file used
+    # to persist no `environment` key at all.
+    settings["environment"] = environment_block()
+    return settings
 
 
 def _write_json(path, payload, *, allow_nan=True):
@@ -2955,6 +2961,16 @@ def main(argv=None):
     print()
     _banner(f"DONE  │  total wall time {datetime.datetime.now() - t_start}")
     print()
+
+
+def console_main():
+    """``darksirens_inference_lensing`` console-script target.
+
+    Routes the installed script through ``run_cli`` so the console-script path
+    gets the same GPU teardown guard as
+    ``python -m darksirens.cli.inference_lensing``.
+    """
+    run_cli(main)
 
 
 if __name__ == "__main__":

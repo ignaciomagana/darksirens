@@ -1,0 +1,8 @@
+# Build-backend declaration only; project metadata stays in setup.py (it reads
+# requirements.txt at build time).  Without this file pip falls back to the
+# legacy setup.py path, where setuptools resolved build-time requirements
+# through easy_install/fetch_build_eggs — a network fetch in the middle of an
+# otherwise offline `pip install --no-deps .`.
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"

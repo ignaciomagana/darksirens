@@ -48,26 +48,76 @@ $RUN python -m pip install tinygp
 ```
 
 The tools are invoked as modules (`python -m darksirens.cli.<name>`) so they
-work regardless of whether the console scripts are on `PATH`.
+work regardless of whether the console scripts are on `PATH`. The two
+long-running drivers behave identically either way: `darksirens_inference` and
+`darksirens_inference_lensing` enter through `console_main`, which applies the
+same `run_cli` hard-exit that the `__main__` guard does (without it, CPython
+teardown can block in the CUDA exit handlers and leave a *finished* run idling
+until the SLURM cgroup kills it).
 
-## Tier 0 — pytest (fast)
+## Tier 0 — pytest (fast subset)
+
+**Run this before every commit.** It is the same list `.github/workflows/ci.yml`
+runs, read from `tests/fast_subset.txt` so the local gate and the CI gate cannot
+drift apart:
 
 ```bash
-# full suite, excluding the one known pre-existing failure
-$RUN python -m pytest tests/ --ignore=tests/test_fixed_parameter_coordinates.py -q
-
-# collection only (should report 0 errors)
-$RUN python -m pytest tests/ --collect-only -q
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu \
+  $RUN python -m pytest -q $(grep -v '^#' tests/fast_subset.txt)
 ```
 
-Expected non-failures to be aware of:
+Measured 2026-07-26 on a CPU-only box (CPython 3.11.10, jax 0.4.34, numpy
+1.26.4): **26 files, 127 passed, 1 skipped, 66 s**. Every file in it is verified
+green both standalone and in the batch, and none of them depends on the numpy
+major version. Collection over the whole tree is still a useful cheap check:
 
-- `tests/test_fixed_parameter_coordinates.py` — a **known pre-existing failure**
-  (a step-1 `build_parameter_space` omits `universe_model`); excluded above.
-- `tests/test_gppop_population.py` and other GP tests — **need `tinygp`**; they
-  fail/skip without it. With `tinygp` installed they run.
-- numpyro / jax-gated tests skip cleanly if those packages are absent (they are
-  present in `darksirens-dev`).
+```bash
+$RUN python -m pytest tests/ --collect-only -q     # should report 0 errors
+```
+
+**Do not run the full `tests/` tree CPU-only.** With `JAX_PLATFORMS=cpu` it has
+been observed to grow to ~258 GB RSS and get OOM-killed, and it competes with any
+SLURM job on the same node. The full tree is a **Tier 0b, GPU-only** gate:
+
+```bash
+# GPU box, nothing else running:
+$RUN python -m pytest tests/ -q
+```
+
+### Known pre-existing failures (not caused by your change)
+
+The previous version of this page claimed one known failure. There are several
+classes, so a contributor cannot tell a regression from the baseline without
+this list. Verified on master, 2026-07-26:
+
+- **numpy major-version split — no numpy version passes the whole tree.**
+  22 test files plus `darksirens/redshift/checks.py` and
+  `darksirens/gw/selection.py:236` call `np.trapezoid` (numpy ≥ 2 only), while
+  `tests/test_completion_depth.py:473` calls `np.trapz` (removed in numpy 2.0).
+  On the validated env (numpy 1.26.4, the numpy that `scipy 1.12` permits) the
+  `np.trapezoid` sites raise `AttributeError`; on a numpy-2 env the `np.trapz`
+  site does. Most visible in `tests/test_skymaps_to_samples.py` (11 errors),
+  `tests/test_pdet_selection.py` (4), `tests/test_analyze_ppd_chunking.py` (1).
+  Nothing in the Tier-0 subset touches either name.
+- **`tests/test_pdet_selection.py`** — 2 further failures independent of numpy
+  (`test_generation_invariants_and_drop_accounting`,
+  `test_ndraw_bookkeeping_pin`: `DID NOT WARN` — the expected `RuntimeWarning`
+  for out-of-support pseudo-injection rows is not emitted).
+- **Combined-run `sys.modules` pollution.** Several files install a **stub**
+  `tinygp` (and a stub `gwcat`) into `sys.modules` at import time, e.g.
+  `tests/test_parameter_table.py`. In a combined run that stub leaks into later
+  files, so GP-dependent tests can behave differently in a batch than
+  standalone; `tests/test_population_registry_golden.py` explicitly detects a
+  stub (no `__file__`) and skips rather than erroring.
+- **Backend-dependent block-size equivalence.** Some block/chunk equivalence
+  tests compare reductions that XLA reassociates differently per backend, so
+  they can pass on one device and flake on another.
+- `tests/test_gppop_population.py` and other GP tests **need real `tinygp`**;
+  they skip (or fail) without it. numpyro / jax-gated tests skip cleanly when
+  those packages are absent — both are present in `darksirens-dev`.
+- `tests/test_fixed_parameter_coordinates.py` used to be documented here as
+  *the* known failure. It passes today (14 passed), so the `--ignore` this page
+  used to prescribe is obsolete and has been dropped.
 
 ## Tier 1 — generating mock data
 

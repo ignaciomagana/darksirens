@@ -1,9 +1,31 @@
 # my folders
-data/
+# Anchored (leading slash) to the top-level 16 GB scratch dir ONLY.  The bare
+# `data/` pattern matched at every depth, which silently un-tracked
+# tests/data/population_registry_golden.json — the golden baseline for all 13
+# registered population mixtures — so its guard reported "skipped" on every
+# fresh clone instead of comparing anything.
+/data/
 
 # local strong-lensing simulation pipeline (not for upstream) + smoke-test outputs
 SIM_LENSING_donotpush/
 scripts/smoke_tests/_out/
+
+# SLURM job logs written next to the submit script.  Anchored to the repo root
+# on purpose: a bare *.err/*.out would also swallow logs kept alongside run
+# outputs deeper in the tree, and those are provenance, not clutter.  Without
+# these patterns 40+ log files sat in `git status`, one `git add -A` away from
+# being committed on top of a one-line fix.
+/*.err
+/*.out
+/slurm-*.out
+
+# Agent/session scratch: .claude/worktrees/ holds complete duplicate checkouts
+# (including full tests/ trees), which is a real `git add -A` hazard and makes
+# every repo-wide grep return hits in a second copy of the code.
+/.claude/
+
+# Local scratch dir
+/tmp/
 
 #other
 .vscode/
