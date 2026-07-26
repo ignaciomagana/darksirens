@@ -105,6 +105,7 @@ from darksirens.core.types import (
 )
 from darksirens.utils.cosmology import H0Planck, Om0Planck
 from darksirens.gw.populations.registry import get_fixed_population_params, get_model
+from darksirens.gw.populations.utils import normalization_grid_settings
 
 from darksirens.inference.checkpointing import (
     add_checkpoint_arguments,
@@ -130,6 +131,8 @@ from darksirens.cli.common import (
     _ok,
     _warn,
     _err,
+    add_normalization_grid_arguments,
+    configure_normalization_grids_for_model,
     str_to_bool,
     parse_json_arg,
     _print_all_cli_options,
@@ -2519,6 +2522,11 @@ def build_parser():
         help="Injections per selection-integral chunk. 'auto' (default) sizes "
              "the block from probed free device memory after the data load; "
              "'off'/'none'/'0' forces a single pass; a positive integer pins it.")
+    # The lensing likelihood evaluates the SAME PairingModel grid branch as the
+    # main CLI, and the pairing grid is a process-global setting read from the
+    # environment, so this stack inherited DARKSIRENS_GW_PAIRING_M1_GRID with no
+    # way to opt in or out and no coverage guard.
+    add_normalization_grid_arguments(performance)
     output = p.add_argument_group("Output")
     output.add_argument("--seed", type=int, default=42)
     output.add_argument("--show_progress", type=str_to_bool, nargs="?", const=True,
@@ -3082,9 +3090,18 @@ def main(argv=None):
     print()
 
     _resolve_lensing_run_config(opts)
-    # Log the fully-resolved CLI options in argparse group order (no GW-population
-    # normalization grid on this stack, so the [Derived] rows are omitted).
-    _print_all_cli_options(parser, opts)
+    # Resolve the GW-population normalisation grids and size the OPT-IN pairing
+    # m1 grid to --pop_model's primary-mass support.  This stack does evaluate
+    # the interpolated PairingModel branch -- the setting is process-global and
+    # read from the environment -- so skipping the guard let a lensing run with
+    # DARKSIRENS_GW_PAIRING_M1_GRID set silently clamp the q-normaliser above
+    # m1 = 200 for models whose support reaches 300 (PHY-5).
+    configure_normalization_grids_for_model(opts)
+    # Log the fully-resolved CLI options in argparse group order, including the
+    # resolved normalization grid (part of the run's provenance).
+    _print_all_cli_options(
+        parser, opts, normalization_grid=normalization_grid_settings().to_dict()
+    )
     _print_run_configuration(opts)
     _run_and_report_preflight(opts)
     run_dir, settings, fixed, base_fixed, lens_fixed = _prepare_run_dir(opts)

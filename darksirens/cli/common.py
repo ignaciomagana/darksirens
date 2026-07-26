@@ -152,7 +152,9 @@ def _print_all_cli_options(optp: ArgumentParser, opts, *, normalization_grid: di
     """Print every parsed CLI option in argparse group order.
 
     ``normalization_grid`` is optional: when None the ``[Derived]`` rows are
-    omitted (the lensing CLI has no GW-population normalization grid to report).
+    omitted.  Both inference CLIs pass it -- the pairing/normalisation grids are
+    process-global and env-configurable, so they are part of every run's
+    provenance regardless of which CLI resolved them.
     """
     _section("All CLI Options")
     first_group = True
@@ -282,6 +284,95 @@ def parse_counterpart_arg(value: list[str] | None) -> tuple[tuple[float, float, 
 
 
 # ── Shared main() resolvers ─────────────────────────────────────────────────────
+
+def add_normalization_grid_arguments(group):
+    """Attach the GW-population normalisation-grid flags to an argparse group.
+
+    Shared by BOTH inference CLIs.  The pairing grid in particular is a
+    process-global setting read from the environment at import of
+    ``gw/populations/utils.py``, so a CLI that does not expose the flags still
+    INHERITS ``DARKSIRENS_GW_PAIRING_M1_GRID`` and evaluates the same interpolated
+    ``PairingModel.__call__`` branch -- it just cannot opt in or out, and used to
+    skip the coverage guard entirely (PHY-5, one-twin fix).
+    """
+    group.add_argument(
+        "--norm_nmass", type=int, default=None, metavar="N",
+        help="Mass-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_MASS).")
+    group.add_argument(
+        "--norm_nq", type=int, default=None, metavar="N",
+        help="Mass-ratio-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_Q).")
+    group.add_argument(
+        "--norm_nchi", type=int, default=None, metavar="N",
+        help="Spin-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_CHI).")
+    group.add_argument(
+        "--pairing_norm_grid", type=int, default=None, metavar="N",
+        help="opt-in: interpolate the pairing model's per-sample "
+             "q-normalization from an N-node log-spaced m1 grid "
+             "instead of exact per-sample integration (~1.3-1.6x "
+             "faster likelihood calls measured). The grid's upper "
+             "bound is sized automatically to the selected model's "
+             "primary-mass support (e.g. 300 Msun for "
+             "gwtc5_fiducial_bpl2peaks), and N is scaled up with it so "
+             "node density is preserved -- so it never clamps inside "
+             "the support. Accuracy at N=2048: ~1e-8 relative TYPICAL, "
+             "up to ~2e-4 WORST-CASE for samples right at the m_min "
+             "support edge (the normaliser has a log-kink there); "
+             "halves ~4x per grid doubling. NOT recommended when the "
+             "run sits near the selection variance guard boundary "
+             "(a ~1e-4 logL perturbation can flip the hard -inf "
+             "wall). Default: exact "
+             "(env: DARKSIRENS_GW_PAIRING_M1_GRID).")
+    return group
+
+
+def configure_normalization_grids_for_model(opts):
+    """Configure the normalisation grids and size the opt-in pairing m1 grid.
+
+    Shared by both inference CLIs so the PHY-5 guard cannot be applied to one
+    twin only.  The opt-in pairing grid interpolates the q-normaliser on a static
+    m1 grid and ``jnp.interp`` CLAMPS out-of-range m1, so the grid's upper bound
+    must cover the selected model's primary-mass support or samples INSIDE the
+    support silently reuse the endpoint normaliser (measured +0.25 nat in
+    log p_pop at m1 = 250-299 for ``gwtc5_fiducial_bpl2peaks``, whose support
+    reaches 300 while the default pairing ceiling is M_HI = 200).  Size the grid
+    to the model, then assert coverage (defense in depth).
+
+    A malformed ``--pop_model`` is reported later by the standard model-building
+    path with its full registry-vocabulary message; don't pre-empt that here, so
+    only size when the model resolves.  Coverage problems raise ``ValueError``,
+    routed to ``_fatal``.
+    """
+    from darksirens.gw.populations import get_model, population_m1_support_max
+    from darksirens.gw.populations.utils import (
+        assert_pairing_grid_covers_support,
+        configure_normalization_grids,
+        normalization_grid_settings,
+        size_pairing_grid_to_support,
+    )
+
+    try:
+        configure_normalization_grids(
+            n_mass=getattr(opts, "norm_nmass", None),
+            n_q=getattr(opts, "norm_nq", None),
+            n_chi=getattr(opts, "norm_nchi", None),
+            pairing_m1_grid=getattr(opts, "pairing_norm_grid", None),
+        )
+        if normalization_grid_settings().pairing_m1_grid is not None:
+            try:
+                model = get_model(
+                    opts.pop_model,
+                    shared_beta=getattr(opts, "shared_beta", True),
+                    shared_spin=getattr(opts, "shared_spin", True),
+                    shared_gamma=getattr(opts, "shared_gamma", True),
+                )
+            except Exception:
+                return
+            support = population_m1_support_max(model)
+            size_pairing_grid_to_support(support)
+            assert_pairing_grid_covers_support(support, model_name=opts.pop_model)
+    except ValueError as exc:
+        _fatal(str(exc))
+
 
 def resolve_redshift_prior_barrier(opts, *, flush=False):
     """Resolve the likelihood-internal redshift-prior optimization barrier.
