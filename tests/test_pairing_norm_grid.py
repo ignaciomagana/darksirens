@@ -35,6 +35,9 @@ median tightly and report the max.
 Run with ``JAX_PLATFORMS=cpu``.
 """
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 pytest.importorskip("jax")
@@ -124,7 +127,7 @@ def _exact_pairing_norm_powerlaw(m1, mmin, dmmin, beta):
         p = np.where(q > 0, sq ** beta, 0.0)
         p = np.asarray(sfilter_low(m2, mmin, dmmin)) * p
         p = np.where(m2 < mmin, 0.0, p)
-        out[i] = np.trapezoid(p, q)  # np.trapz removed in NumPy 2.0
+        out[i] = _trapezoid(p, q)  # np.trapz removed in NumPy 2.0
     return out
 
 
