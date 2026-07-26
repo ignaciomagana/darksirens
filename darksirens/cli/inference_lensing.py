@@ -106,6 +106,11 @@ from darksirens.core.types import (
 from darksirens.utils.cosmology import H0Planck, Om0Planck
 from darksirens.gw.populations.registry import get_fixed_population_params, get_model
 
+from darksirens.inference.checkpointing import (
+    add_checkpoint_arguments,
+    find_resume_target,
+    resolve_checkpoint_plan,
+)
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
 from darksirens.io.results import save_tinyns_diagnostics_json, write_tinyns_metadata
@@ -1367,6 +1372,14 @@ def _write_diagnostics(run_dir, diagnostics):
                     f.attrs[key] = json.dumps(value, default=str)
 
 
+def _run_name_prefix(opts):
+    """Run-directory name minus the timestamp; also the --resume auto filter."""
+    return (
+        f"{opts.pop_model}__{opts.cluster_mode}__{opts.sampler}"
+        f"__seed{getattr(opts, 'seed', 'NA')}__"
+    )
+
+
 def _make_run_dir(opts):
     """Create opts.save_path/<run_name>, disambiguating name collisions.
 
@@ -1379,10 +1392,7 @@ def _make_run_dir(opts):
     cli/inference.py::_make_run_dir, which was already fixed for exactly this.
     """
     ts = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    run_name = (
-        f"{opts.pop_model}__{opts.cluster_mode}__{opts.sampler}"
-        f"__seed{getattr(opts, 'seed', 'NA')}__{ts}"
-    )
+    run_name = f"{_run_name_prefix(opts)}{ts}"
     run_dir = os.path.join(opts.save_path, run_name)
     suffix = 0
     while True:
@@ -2366,6 +2376,9 @@ def build_parser():
     sampler.add_argument("--nuts_chain_method", default="sequential",
                    choices=["sequential", "parallel", "vectorized"])
     sampler.add_argument("--nuts_init_tries", type=int, default=32)
+    # Shared with the main CLI (darksirens/inference/checkpointing.py): sampler
+    # checkpoints land in the run directory and --resume auto continues there.
+    add_checkpoint_arguments(sampler)
     performance = p.add_argument_group("Performance")
     performance.add_argument(
         "--pe_max_per_pair",
@@ -2566,7 +2579,17 @@ def _prepare_run_dir(opts):
     """Create the run directory, split the fixed-parameter JSON, and write the
     pre-load settings.json.  Returns (run_dir, settings, fixed, base_fixed,
     lens_fixed)."""
-    run_dir = _make_run_dir(opts)
+    # --resume continues inside the ORIGINAL run directory rather than opening a
+    # new one per SLURM attempt; resolve_checkpoint_plan then points the sampler
+    # at <run_dir>/checkpoint.<sampler>.* (see inference/checkpointing.py).
+    prefix = _run_name_prefix(opts)
+    resume_ckpt, resume_dir = find_resume_target(opts, opts.sampler, name_prefix=prefix)
+    run_dir = resume_dir or _make_run_dir(opts)
+    opts.run_dir = run_dir
+    plan = resolve_checkpoint_plan(opts, run_dir, name_prefix=prefix)
+    if resume_ckpt:
+        print(f"  [i] resuming run directory {run_dir}", flush=True)
+    print(f"  [i] checkpointing: {plan.summary()}", flush=True)
     # Keep settings serialization equivalent to: for k, v in vars(opts).items()
     settings = _jsonable_settings(opts)
     fixed = {}

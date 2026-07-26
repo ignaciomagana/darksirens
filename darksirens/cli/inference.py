@@ -31,6 +31,19 @@ python darksirens_inference.py \
 # Fix individual parameters via JSON:
     --fixed_parameter_values '{"$v_1$": 0.1}'
     --prior_overrides        '{"H0": [60.0, 80.0]}'
+
+Long runs / SLURM
+-----------------
+The run directory and its settings.json are created BEFORE sampling, and the
+sampler checkpoints into it every --checkpoint_interval seconds (default 1800;
+'off' disables).  Requeue the identical command with --resume auto to continue
+inside the same run directory:
+
+    --sampler dynesty --nlive 2000 --checkpoint_interval 1800 --resume auto
+
+Run-directory layout:  settings.json, checkpoint.<sampler>.{pkl,npz},
+samples.npy (written before results.hdf5), results.hdf5, corner.pdf,
+latents.pdf, dynesty_diagnostics/, and failure.json if the run dies.
 """
 
 import os
@@ -44,6 +57,7 @@ import sys
 import json
 import datetime
 import math
+import traceback
 import warnings
 from dataclasses import dataclass
 
@@ -82,6 +96,12 @@ from darksirens.likelihood.block_sizing import (
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
 from darksirens.redshift.grid import zMax as _REDSHIFT_GRID_ZMAX
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+from darksirens.inference.checkpointing import (
+    add_checkpoint_arguments,
+    find_resume_target,
+    parse_checkpoint_interval,
+    resolve_checkpoint_plan,
+)
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
@@ -844,11 +864,12 @@ def build_parser():
     g.add_argument("--show_progress",type=str_to_bool, default=True, metavar="BOOL")
     g.add_argument("--dynesty_diagnostics", type=str_to_bool, default=False, metavar="BOOL",
                    help="Write dynesty runplot/traceplot PDFs every 10 minutes to "
-                        "<save_path>/dynesty_diagnostics/. Only used with --sampler dynesty.")
+                        "<run_dir>/dynesty_diagnostics/. Only used with --sampler dynesty.")
     g.add_argument("--sampler_preflight", choices=["on", "off"], default="on",
                    help="Probe 32 prior draws before nested sampling (dynesty/tinyns) and "
                         "fail fast if the likelihood is -inf on all of them (usually the "
                         "selection variance guard); 'off' skips the probe.")
+    add_checkpoint_arguments(g)
 
     g = optp.add_argument_group("Performance")
     g.add_argument("--sel_batch_size", type=block_size_arg, default="auto",
@@ -1226,6 +1247,16 @@ def _resolve_sampler_config(opts):
             build_tinyns_config(opts)
         except ValueError as e:
             _fatal(str(e))
+
+    # Fail fast on a malformed --checkpoint_interval / --resume here, before the
+    # data load: a checkpoint flag that only errors out (or silently does
+    # nothing) once sampling starts is exactly the class of bug this feature
+    # exists to remove.
+    try:
+        find_resume_target(opts, opts.sampler, name_prefix=_run_name_prefix(opts))
+        parse_checkpoint_interval(opts.checkpoint_interval)
+    except ValueError as e:
+        _fatal(str(e))
 
     resolve_redshift_prior_barrier(opts)
 
@@ -1895,6 +1926,19 @@ def _run_sampling(opts, likelihood, pspace):
     return results, wall_sampling
 
 
+def _run_name_prefix(opts):
+    """Everything in the run-directory name except the timestamp.
+
+    Doubles as the ``--resume auto`` filter: one --save_path normally holds many
+    runs, so auto-resume only considers directories carrying THIS
+    configuration's prefix (model / universe / sampler / seed).
+    """
+    return (
+        f"{opts.pop_model}__{opts.universe_model}__{opts.sampler}"
+        f"__seed{opts.seed}__"
+    )
+
+
 def _make_run_dir(opts, timestamp):
     """Create opts.save_path/<run_name>, disambiguating name collisions.
 
@@ -1904,10 +1948,7 @@ def _make_run_dir(opts, timestamp):
     and later overwrite each other's results.hdf5. Retry with a
     monotonically increasing numeric suffix instead.
     """
-    run_name = (
-        f"{opts.pop_model}__{opts.universe_model}__{opts.sampler}"
-        f"__seed{opts.seed}__{timestamp}"
-    )
+    run_name = f"{_run_name_prefix(opts)}{timestamp}"
     run_dir = os.path.join(opts.save_path, run_name)
     suffix = 0
     while True:
@@ -1919,34 +1960,67 @@ def _make_run_dir(opts, timestamp):
             run_dir = os.path.join(opts.save_path, f"{run_name}-{suffix:02d}")
 
 
-def _save_outputs(opts, data, results, pspace, fixed_parameter_values, prior_overrides, wall_sampling, t_start):
-    nEvents = data["nEvents"]
-    nsamp   = data["nsamp"]
-    Ndraw   = data["Ndraw"]
-    labels = pspace.labels
-    lower_bound = pspace.lower_bound
-    upper_bound = pspace.upper_bound
-    prior_kinds = pspace.prior_kinds
-    n_pop_eff = pspace.n_pop_eff
-    n_cosmo_eff = pspace.n_cosmo_eff
-    n_survey_eff = pspace.n_survey_eff
-    model_name = pspace.model_name
-    # ── Save outputs ───────────────────────────────────────────────
+def _write_failure(run_dir, stage, exc, *, labels=None, settings=None):
+    """Best-effort ``failure.json`` next to whatever the run already wrote.
 
-    t_end     = datetime.datetime.now()
-    timestamp = t_end.strftime("%Y-%m-%dT%H-%M-%S")
-    run_dir   = _make_run_dir(opts, timestamp)
+    A run that dies at hour 47 used to leave NOTHING under --save_path: no run
+    directory, no settings, no traceback, so the only record of the
+    configuration was a SLURM .out log.  Mirrors
+    cli/inference_lensing.py::_write_failure, which already did this.
+    """
+    if not run_dir:
+        return
+    payload = {
+        "stage": stage,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "traceback": traceback.format_exc(),
+        "labels": list(labels or []),
+        "settings": settings or {},
+        "command": [sys.executable, "-m", "darksirens.cli.inference", *sys.argv[1:]],
+    }
+    try:
+        with open(os.path.join(run_dir, "failure.json"), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, default=str, allow_nan=True)
+            fh.write("\n")
+    except Exception as write_exc:      # never mask the real failure
+        _warn(f"Could not write failure.json: {write_exc}")
 
+
+class _failure_guard:
+    """Context manager recording ``failure.json`` for one pipeline stage."""
+
+    def __init__(self, run_dir, stage, *, labels=None, settings=None):
+        self.run_dir = run_dir
+        self.stage = stage
+        self.labels = labels
+        self.settings = settings
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc is not None and isinstance(exc, (Exception, KeyboardInterrupt)):
+            _write_failure(
+                self.run_dir, self.stage, exc,
+                labels=self.labels, settings=self.settings,
+            )
+        return False
+
+
+def _base_meta(opts, data, pspace, timestamp, wall_sampling=None, t_start=None,
+               t_end=None):
+    """The ``meta`` block shared by the pre-sampling and final settings writes."""
     meta = {
-        "n_events":         nEvents,
-        "n_samp_per_event": nsamp,
-        "n_draw":           int(Ndraw),
-        "n_pop_eff":        n_pop_eff,
-        "n_cosmo_eff":      n_cosmo_eff,
-        "n_survey_eff":     n_survey_eff,
-        "model_name":       model_name,
-        "total_runtime":    str(t_end - t_start),
-        "sampling_runtime": str(wall_sampling),
+        "n_events":         data["nEvents"],
+        "n_samp_per_event": data["nsamp"],
+        "n_draw":           int(data["Ndraw"]),
+        "n_pop_eff":        pspace.n_pop_eff,
+        "n_cosmo_eff":      pspace.n_cosmo_eff,
+        "n_survey_eff":     pspace.n_survey_eff,
+        "model_name":       pspace.model_name,
+        "total_runtime":    None if t_end is None else str(t_end - t_start),
+        "sampling_runtime": None if wall_sampling is None else str(wall_sampling),
         "timestamp":        timestamp,
     }
     if data.get("flow_event_names"):
@@ -1955,10 +2029,88 @@ def _save_outputs(opts, data, results, pspace, fixed_parameter_values, prior_ove
         # (JSON-encoded, and keyed *_json so it does not shadow the plain list
         # that settings.json serialises from opts.flow_event_names.)
         meta["flow_event_names_json"] = json.dumps(list(data["flow_event_names"]))
+    return meta
+
+
+def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides):
+    """Create the run directory and persist settings.json BEFORE sampling.
+
+    The run directory used to be created inside ``_save_outputs``, i.e. only
+    once the sampler had already returned.  Anything that killed the job during
+    sampling -- SLURM TIMEOUT, host-RAM OOM, a NaN raised inside the likelihood
+    -- therefore left --save_path completely empty, with no settings.json to
+    re-derive the configuration from and nowhere for a checkpoint or a
+    dynesty diagnostic plot to land.  The lensing CLI has created its run
+    directory pre-load since it was written; this brings the main CLI in line.
+
+    Also resolves the checkpoint/resume plan: ``--resume`` continues INSIDE the
+    original run directory instead of starting a new one, so a requeued SLURM
+    job accumulates one directory, not one per attempt.
+
+    Returns ``(run_dir, run_timestamp, settings_snapshot)``.
+    """
+    _section("Preparing run directory")
+    prefix = _run_name_prefix(opts)
+    resume_ckpt, resume_dir = find_resume_target(
+        opts, opts.sampler, name_prefix=prefix
+    )
+    run_timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    if resume_dir:
+        run_dir = resume_dir
+        _row("Resuming run", run_dir)
+        _row("From checkpoint", resume_ckpt)
+    else:
+        run_dir = _make_run_dir(opts, run_timestamp)
+    opts.run_dir = run_dir
+    plan = resolve_checkpoint_plan(opts, run_dir, name_prefix=prefix)
+    _row("Run directory", run_dir)
+    _row("Checkpointing", plan.summary())
+
+    meta = _base_meta(opts, data, pspace, run_timestamp)
+    meta["run_status"] = "sampling"
+    json_path = save_settings_json(
+        opts, run_dir, pspace.labels, pspace.lower_bound, pspace.upper_bound,
+        fixed_parameter_values, prior_overrides, meta,
+    )
+    _ok(f"settings.json  →  {json_path}")
+    _end()
+    settings_snapshot = {
+        "run_dir": run_dir,
+        "settings_json": json_path,
+        "sampler": opts.sampler,
+        "checkpoint_file": plan.path,
+        "resume_from": plan.resume_from,
+    }
+    return run_dir, run_timestamp, settings_snapshot
+
+
+def _save_outputs(opts, data, results, pspace, fixed_parameter_values, prior_overrides, wall_sampling, t_start, run_dir, run_timestamp):
+    labels = pspace.labels
+    lower_bound = pspace.lower_bound
+    upper_bound = pspace.upper_bound
+    prior_kinds = pspace.prior_kinds
+    # ── Save outputs ───────────────────────────────────────────────
+
+    t_end     = datetime.datetime.now()
+    meta = _base_meta(
+        opts, data, pspace, run_timestamp,
+        wall_sampling=wall_sampling, t_start=t_start, t_end=t_end,
+    )
+    meta["run_status"]     = "complete"
+    meta["end_timestamp"]  = t_end.strftime("%Y-%m-%dT%H-%M-%S")
 
     _section("Saving outputs")
     _row("Run directory", run_dir)
     print("  │")
+
+    # CHAIN FIRST.  Until this file existed the posterior lived only in the
+    # results dict in RAM, and the first thing written was the HDF5 -- so any
+    # failure in the save path (h5py attribute error, full filesystem, quota)
+    # destroyed a multi-day chain.  Mirrors the lensing CLI, which has always
+    # written samples.npy before results.hdf5 for this reason.
+    samples_path = os.path.join(run_dir, "samples.npy")
+    np.save(samples_path, np.asarray(results["samples"]))
+    _ok(f"samples.npy    →  {samples_path}")
 
     hdf5_path = save_results_hdf5(
         results, run_dir, labels, lower_bound, upper_bound,
@@ -2042,12 +2194,28 @@ def main(argv=None):
     pspace = _build_and_report_parameter_space(
         opts, data, prior_overrides, fixed_parameter_values
     )
-    likelihood = _build_likelihood(opts, data, pspace, fixed_parameter_values)
-    results, wall_sampling = _run_sampling(opts, likelihood, pspace)
-    _save_outputs(
-        opts, data, results, pspace,
-        fixed_parameter_values, prior_overrides, wall_sampling, t_start,
+    # Run directory + settings.json BEFORE the likelihood build and sampling:
+    # from here on every failure mode leaves a record on disk, the sampler has
+    # somewhere to checkpoint, and --resume has a directory to continue in.
+    run_dir, run_timestamp, settings = _prepare_run_dir(
+        opts, data, pspace, fixed_parameter_values, prior_overrides
     )
+
+    def guard(stage):
+        return _failure_guard(
+            run_dir, stage, labels=pspace.labels, settings=settings
+        )
+
+    with guard("build_likelihood"):
+        likelihood = _build_likelihood(opts, data, pspace, fixed_parameter_values)
+    with guard("sampler"):
+        results, wall_sampling = _run_sampling(opts, likelihood, pspace)
+    with guard("save"):
+        _save_outputs(
+            opts, data, results, pspace,
+            fixed_parameter_values, prior_overrides, wall_sampling, t_start,
+            run_dir, run_timestamp,
+        )
 
 
 if __name__ == "__main__":

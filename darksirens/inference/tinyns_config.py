@@ -49,9 +49,20 @@ BASE_DEFAULTS = dict(
     allow_unused_bound=False, fused_bound_rwalk=False,
     bound_rebuild_on_failure=True, bound_failure_rebuild_threshold=10,
     jax_vectorized=False, jax_block_size=32,
-    checkpoint_path=None, checkpoint_interval=None, resume_from=None,
+    checkpoint_path=None, checkpoint_interval=100, resume_from=None,
     checkpoint_path_out=None, progress_interval=100,
 )
+# checkpoint_interval MUST have a concrete default: tinyns' own signature is
+# ``checkpoint_interval: int = 100`` and tinyns_run_kwargs forwards the value
+# unconditionally, so leaving it None defeated that default and made
+# tinyns/run.py's ``if checkpoint_path is not None and checkpoint_interval <= 0``
+# raise ``TypeError: '<=' not supported between instances of 'NoneType' and
+# 'int'`` -- i.e. every --tinyns_checkpoint_path / --tinyns_resume_from run that
+# did not ALSO pass --tinyns_checkpoint_interval crashed after the data load,
+# likelihood build and preflight, before writing a single checkpoint.  The unit
+# is ITERATIONS (tinyns saves when iteration - last_saved >= interval), not
+# seconds; the wall-clock --checkpoint_interval flag only toggles tinyns
+# checkpointing on and places the file.
 
 # Resolved-config keys the lensing CLI prints in its "TinyNS resolved config"
 # summary.  Kept here (next to TinyNSConfig) so the display list and the config
@@ -116,9 +127,17 @@ def add_tinyns_arguments(parser_or_group, *, bool_type=None):
     g.add_argument("--tinyns_bound_failure_rebuild_threshold", type=int, default=None)
     g.add_argument("--tinyns_jax_vectorized", type=bool_type, default=None, metavar="BOOL")
     g.add_argument("--tinyns_jax_block_size", type=int, default=None)
-    g.add_argument("--tinyns_checkpoint_path", default=None)
-    g.add_argument("--tinyns_checkpoint_interval", type=int, default=None)
-    g.add_argument("--tinyns_resume_from", default=None)
+    g.add_argument("--tinyns_checkpoint_path", default=None,
+                   help="Explicit tinyns checkpoint file; overrides the "
+                        "<run_dir>/checkpoint.tinyns.npz that "
+                        "--checkpoint_interval places automatically.")
+    g.add_argument("--tinyns_checkpoint_interval", type=int, default=None,
+                   help="tinyns checkpoint cadence in ITERATIONS (default 100). "
+                        "tinyns saves per iteration, not per second, so this is "
+                        "the tinyns cadence knob; --checkpoint_interval "
+                        "(seconds) only enables/disables checkpointing here.")
+    g.add_argument("--tinyns_resume_from", default=None,
+                   help="Explicit tinyns checkpoint to resume; overrides --resume.")
     g.add_argument("--tinyns_checkpoint_path_out", default=None)
     g.add_argument("--tinyns_progress_interval", type=int, default=None)
 
@@ -216,7 +235,12 @@ def validate_tinyns_config(c):
     if c.bound != "multi" and _explicit(c, "multi_bound_max_ellipsoids", "multi_bound_min_points", "multi_bound_split_threshold", "multi_bound_enlargement", "multi_bound_overlap_correction"): raise ValueError("multi_bound_* options require --tinyns_bound multi.")
     if c.bound_update_interval <= 0 or c.bound_enlargement <= 0 or c.bound_jitter < 0: raise ValueError("bound_update_interval and bound_enlargement must be positive; bound_jitter must be >= 0.")
     if c.bound_failure_rebuild_threshold <= 0: raise ValueError("bound_failure_rebuild_threshold must be positive.")
-    if (c.checkpoint_path or c.resume_from or c.checkpoint_path_out) and c.checkpoint_interval is not None and c.checkpoint_interval <= 0: raise ValueError("checkpoint_interval must be positive when checkpointing is enabled.")
+    # Any checkpoint path at all means tinyns will evaluate
+    # ``checkpoint_interval <= 0``, so demand a positive int here rather than
+    # letting None/0 reach tinyns (None used to raise a bare TypeError).
+    if (c.checkpoint_path or c.resume_from or c.checkpoint_path_out) and (
+            c.checkpoint_interval is None or c.checkpoint_interval <= 0):
+        raise ValueError("checkpoint_interval must be a positive number of iterations when checkpointing is enabled.")
     if c.checkpoint_path and c.resume_from and not c.checkpoint_path_out: raise ValueError("When both resume_from and checkpoint_path are set, also set checkpoint_path_out to clarify resumed checkpoint output.")
 
 
@@ -224,4 +248,10 @@ def tinyns_sampler_kwargs(c):
     return {k: getattr(c, k) for k in ["sample","kernel","vectorized","max_attempts","walks","step_scale","batch_size","min_accepts","replacement_chains","replacement_chain_schedule","rwalk_proposal","bound","bound_enlargement","bound_update_interval","bound_jitter","bound_max_draws","multi_bound_max_ellipsoids","multi_bound_min_points","multi_bound_split_threshold","multi_bound_enlargement","multi_bound_overlap_correction","rwalk_seed","rwalk_seed_fallback","bound_seed_kernel","allow_unused_bound","fused_bound_rwalk","bound_rebuild_on_failure","bound_failure_rebuild_threshold","jax_vectorized","jax_block_size"]}
 
 def tinyns_run_kwargs(c):
-    return dict(dlogz=c.dlogz, maxiter=None if c.max_samples is not None and c.max_samples <= 0 else c.max_samples, progress=c.show_progress, progress_interval=c.progress_interval, checkpoint_interval=c.checkpoint_interval)
+    kwargs = dict(dlogz=c.dlogz, maxiter=None if c.max_samples is not None and c.max_samples <= 0 else c.max_samples, progress=c.show_progress, progress_interval=c.progress_interval)
+    # Belt-and-braces with the concrete BASE_DEFAULTS value: never forward None,
+    # which would override tinyns' own ``checkpoint_interval: int = 100`` default
+    # with a value its ``checkpoint_interval <= 0`` guard cannot compare.
+    if c.checkpoint_interval is not None:
+        kwargs["checkpoint_interval"] = int(c.checkpoint_interval)
+    return kwargs

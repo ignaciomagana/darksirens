@@ -1,6 +1,13 @@
+import os
+
 import numpy as np
 import jax
 import jax.numpy as jnp
+from darksirens.inference.checkpointing import (
+    install_dynesty_checkpointing,
+    plan_from_opts,
+    restore_dynesty_sampler,
+)
 from darksirens.inference.tinyns_config import build_tinyns_config, tinyns_run_kwargs, tinyns_sampler_kwargs
 
 _TINYNS_DIAGNOSTIC_FIELDS = (
@@ -134,6 +141,20 @@ def print_tinyns_diagnostics(diag: dict) -> None:
             suffix = " s" if key == "seconds" else ""
             lines.append(f"{label}: {fmt(g(key))}{suffix}")
     print("\n".join(lines), flush=True)
+
+def dynesty_diagnostics_dir(opts):
+    """Where ``--dynesty_diagnostics`` plots go: the PER-RUN directory.
+
+    They used to go to ``<save_path>/dynesty_diagnostics/`` with a plot counter
+    that restarts at 0 in every process, so two concurrent dynesty jobs sharing
+    one ``--save_path`` (the normal SLURM-array pattern) silently overwrote each
+    other's ``runplot_0001.pdf``/``traceplot_0001.pdf``.  ``opts.run_dir`` is
+    set by both CLIs before sampling starts; library callers that do not set it
+    keep the historical behaviour.
+    """
+    root = getattr(opts, "run_dir", None) or getattr(opts, "save_path", ".")
+    return os.path.join(root, "dynesty_diagnostics")
+
 
 def _nested_sampler_preflight(likelihood, prior_transform, ndims, opts, n_probe=32):
     """Probe the likelihood on a handful of prior draws before a nested sampler.
@@ -318,17 +339,52 @@ def run_sampler(method, likelihood, prior_transform, labels,
 
         key = jax.random.PRNGKey(config.seed)
         run_kwargs = tinyns_run_kwargs(config)
-        if config.resume_from:
+
+        # Checkpoint/resume policy: the shared --checkpoint_interval / --resume
+        # flags place a checkpoint in the run directory, while the legacy
+        # explicit --tinyns_checkpoint_path / --tinyns_resume_from still win so
+        # existing scripts behave exactly as before.  tinyns' own cadence is in
+        # ITERATIONS (config.checkpoint_interval, default 100) -- the seconds in
+        # --checkpoint_interval only decide whether checkpointing is on.
+        plan = plan_from_opts(opts, "tinyns")
+        checkpoint_path = config.checkpoint_path or (plan.path if plan.enabled else None)
+        resume_from = config.resume_from or plan.resume_from
+        checkpoint_path_out = config.checkpoint_path_out
+        if (
+            resume_from
+            and checkpoint_path_out is None
+            and checkpoint_path
+            and os.path.abspath(checkpoint_path) != os.path.abspath(resume_from)
+        ):
+            # Resuming a checkpoint that is not the file we are told to write:
+            # be explicit about the output so tinyns does not overwrite the
+            # source checkpoint (its default is checkpoint_path_out=source).
+            checkpoint_path_out = checkpoint_path
+
+        if resume_from:
+            print(
+                f"[*] tinyns resuming from checkpoint {resume_from} "
+                f"(writing {checkpoint_path_out or resume_from} every "
+                f"{config.checkpoint_interval} iterations)",
+                flush=True,
+            )
             result = sampler.resume(
-                config.resume_from,
+                resume_from,
                 **run_kwargs,
-                checkpoint_path_out=config.checkpoint_path_out,
+                checkpoint_path_out=checkpoint_path_out,
             )
         else:
+            if checkpoint_path:
+                print(
+                    f"[*] tinyns checkpointing to {checkpoint_path} every "
+                    f"{config.checkpoint_interval} iterations "
+                    "(resume with --resume auto)",
+                    flush=True,
+                )
             result = sampler.run(
                 key,
                 **run_kwargs,
-                checkpoint_path=config.checkpoint_path,
+                checkpoint_path=checkpoint_path,
             )
 
         # Equal-weight posterior samples (tinyns mirrors dynesty's resampler).
@@ -607,7 +663,6 @@ def run_sampler(method, likelihood, prior_transform, labels,
 
     elif method == "dynesty":
         import time
-        import os
         from dynesty import NestedSampler
         from dynesty.utils import resample_equal
         import dynesty.plotting as dyplot
@@ -643,7 +698,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
         if maxcall is not None and maxcall <= 0:
             maxcall = None
 
-        save_path = getattr(opts, "save_path", ".")
+        diag_dir = dynesty_diagnostics_dir(opts)
         enable_diag = bool(getattr(opts, "dynesty_diagnostics", False))
         diag_interval = 600  # 10 minutes in seconds
         _diag_index = [0]
@@ -655,8 +710,8 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 return
             _diag_index[0] += 1
             idx = _diag_index[0]
-            out_dir = os.path.join(save_path, "dynesty_diagnostics")
-            os.makedirs(out_dir, exist_ok=True)
+            os.makedirs(diag_dir, exist_ok=True)
+            out_dir = diag_dir
             try:
                 fig, _ = dyplot.runplot(res, label_kwargs={"fontsize": 10})
                 fig.savefig(os.path.join(out_dir, f"runplot_{idx:04d}.pdf"), bbox_inches="tight")
@@ -673,21 +728,77 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 print(f"[dynesty diag] traceplot failed: {e}", flush=True)
             print(f"[dynesty diag] wrote diagnostics #{idx} to {out_dir}", flush=True)
 
-        print(f"[*] Asking Dynesty to find {opts.nlive} initial live points. This may take a minute...", flush=True)
-        # Seeded RNG: without an explicit rstate dynesty draws fresh global
-        # NumPy entropy, so --seed had NO effect on dynesty runs while being
-        # recorded as the run seed in results.hdf5 (library review, CLI
-        # finding 2). tinyns and numpyro already honour opts.seed.
-        dynesty_rstate = np.random.default_rng(int(opts.seed))
-        sampler = NestedSampler(
-            dynesty_loglike,
-            dynesty_ptform,
-            ndims,
-            bound="multi",
-            sample="rwalk",
-            nlive=opts.nlive,
-            rstate=dynesty_rstate,
-        )
+        # ---- checkpoint / resume -------------------------------------------
+        # Without this a SLURM timeout, preemption or OOM after sampling
+        # started discarded the entire run (the failure mode that halted the
+        # July 2026 lensing campaign).  See darksirens/inference/checkpointing.py
+        # for why the checkpoint cannot simply pickle the JAX closures.
+        plan = plan_from_opts(opts, "dynesty")
+        if plan.resuming:
+            print(
+                f"[*] Restoring dynesty sampler from checkpoint {plan.resume_from}",
+                flush=True,
+            )
+            sampler = restore_dynesty_sampler(
+                plan.resume_from, dynesty_loglike, dynesty_ptform
+            )
+            if int(getattr(sampler, "ndim", ndims)) != ndims:
+                raise RuntimeError(
+                    f"Checkpoint {plan.resume_from} has ndim="
+                    f"{sampler.ndim} but this run has {ndims} free parameters; "
+                    "the configurations do not match."
+                )
+            if int(getattr(sampler, "nlive", opts.nlive)) != int(opts.nlive):
+                print(
+                    f"  [!] checkpoint nlive={sampler.nlive} differs from "
+                    f"--nlive {opts.nlive}; the checkpoint's value wins.",
+                    flush=True,
+                )
+            # Seed contract: the checkpoint carries the Generator that --seed
+            # created, so the resumed run continues that exact stream and never
+            # draws fresh entropy.  Do NOT re-seed here.
+            dynesty_rstate = sampler.rstate
+            print(
+                f"[*] Resumed at iteration {getattr(sampler, 'it', 0)} "
+                f"({getattr(sampler, 'ncall', 0)} likelihood calls already spent).",
+                flush=True,
+            )
+        else:
+            print(f"[*] Asking Dynesty to find {opts.nlive} initial live points. This may take a minute...", flush=True)
+            # Seeded RNG: without an explicit rstate dynesty draws fresh global
+            # NumPy entropy, so --seed had NO effect on dynesty runs while being
+            # recorded as the run seed in results.hdf5 (library review, CLI
+            # finding 2). tinyns and numpyro already honour opts.seed.
+            dynesty_rstate = np.random.default_rng(int(opts.seed))
+            sampler = NestedSampler(
+                dynesty_loglike,
+                dynesty_ptform,
+                ndims,
+                bound="multi",
+                sample="rwalk",
+                nlive=opts.nlive,
+                rstate=dynesty_rstate,
+            )
+
+        checkpoint_kwargs = {}
+        if plan.enabled:
+            install_dynesty_checkpointing(sampler)
+            checkpoint_kwargs = dict(
+                checkpoint_file=plan.path,
+                checkpoint_every=plan.interval_seconds,
+            )
+            print(
+                f"[*] Checkpointing to {plan.path} every "
+                f"{plan.interval_seconds:g} s (resume with --resume auto).",
+                flush=True,
+            )
+        elif plan.resuming:
+            print(
+                "  [!] --checkpoint_interval is off, so this resumed run is "
+                "itself unprotected: another kill loses everything since the "
+                "restored checkpoint.",
+                flush=True,
+            )
 
         if enable_diag:
             def _diag_thread_fn():
@@ -699,9 +810,10 @@ def run_sampler(method, likelihood, prior_transform, labels,
 
             diag_thread = threading.Thread(target=_diag_thread_fn, daemon=True)
             diag_thread.start()
-            print(f"[*] Diagnostic plots enabled — writing to {save_path}/dynesty_diagnostics/ every 10 min.", flush=True)
+            print(f"[*] Diagnostic plots enabled — writing to {diag_dir}/ every 10 min.", flush=True)
 
-        print(f"[*] Initial live points found! Starting main nested sampling loop...", flush=True)
+        if not plan.resuming:
+            print(f"[*] Initial live points found! Starting main nested sampling loop...", flush=True)
         if maxcall is not None:
             print(f"[*] Dynesty call cap: maxcall={maxcall}", flush=True)
         try:
@@ -709,6 +821,8 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 dlogz=opts.dlogz,
                 maxcall=maxcall,
                 print_progress=opts.show_progress,
+                resume=plan.resuming,
+                **checkpoint_kwargs,
             )
         finally:
             if enable_diag:
