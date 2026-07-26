@@ -58,6 +58,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import h5py
 from scipy.stats import norm as _norm
 
@@ -292,7 +295,7 @@ def _build_z_cdf(theta, H0, Om0, nz=4000):
     pdf = np.where(np.isfinite(pdf) & (pdf > 0), pdf, 0.0)
     cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pdf[1:] + pdf[:-1]) * np.diff(zg))])
     cdf /= cdf[-1]
-    return zg, pdf / np.trapezoid(pdf, zg), cdf
+    return zg, pdf / _trapezoid(pdf, zg), cdf
 
 
 def sample_redshift(n, theta, rng, H0, Om0):
@@ -464,7 +467,7 @@ def _detectability_tilted_z_table(theta, model, H0, Om0, nz=4000, n_msc=4096):
         )))
     pdf = pdf_astro * pbar
     pdf = np.where(np.isfinite(pdf) & (pdf > 0), pdf, 0.0)
-    norm = np.trapezoid(pdf, zg)
+    norm = _trapezoid(pdf, zg)
     pdf = pdf / norm
     cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pdf[1:] + pdf[:-1]) * np.diff(zg))])
     cdf = cdf / cdf[-1]
