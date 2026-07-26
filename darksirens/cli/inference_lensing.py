@@ -667,6 +667,35 @@ def _gate_suspicious_time_marks(opts, candidate_pairs_raw) -> None:
     raise SystemExit(f"suspicious candidate time marks: {message}")
 
 
+def _validate_partition_mode_against_cluster_mode(opts):
+    """Reject ``--cluster_mode off --partition_mode marginalize_exact``.
+
+    ``off`` is the singleton-only control: every observed event is its own
+    cluster, so there are no candidate pairs to marginalise over and the only
+    compatible partition is the all-singleton one ``--partition_mode fixed``
+    already evaluates.  The combination was not merely unimplemented, it was
+    silently accepted: load_inputs returns early for off mode BEFORE the
+    partition-mode requirement checks (so not even --candidate_pairs_path was
+    demanded) and run_lensing_preflight skips every partition check unless
+    cluster_mode == 'j2', so preflight reported ok, the run directory and
+    settings.json were written, the PE/selection load ran for minutes, and only
+    then did the likelihood closure -- which branches on the flag alone -- raise
+    KeyError: 'marginal_partitions' at the midpoint smoke test.  The natural way
+    in is copying the campaign's joint command and flipping only
+    --cluster_mode.
+    """
+    if (
+        getattr(opts, "cluster_mode", "j2") == "off"
+        and getattr(opts, "partition_mode", "fixed") == "marginalize_exact"
+    ):
+        raise SystemExit(
+            "--partition_mode marginalize_exact requires --cluster_mode j2 "
+            "(the off control is singleton-only: there are no candidate pairs "
+            "to marginalise over). Drop --partition_mode (or set it to fixed) "
+            "for the off control run."
+        )
+
+
 def _derive_universe_model(wl_backend):
     """Map --wl_backend to the library universe-model kind.
 
@@ -756,6 +785,12 @@ def _load_singleton_lensing_inputs(opts):
 def load_inputs(opts):
     """Load singleton PE + selection, and (for j2) the lensed injections + pair
     PE + partition. Returns the assembled inputs for the cluster likelihood."""
+    # BEFORE the off-mode early return below (whose bundle has no
+    # marginal_partitions / log_z_prior keys), so a direct library caller gets
+    # the same actionable error the CLI does instead of a KeyError from the
+    # likelihood closure.  main() already rejects this via
+    # _resolve_lensing_run_config; this is the second net.
+    _validate_partition_mode_against_cluster_mode(opts)
     rng = np.random.default_rng(opts.seed)
 
     # --- singleton PE (event-major flatten) ---
@@ -2574,6 +2609,8 @@ def _resolve_lensing_run_config(opts):
         raise SystemExit(
             "--wl_backend tabulated requires --lensing_wl_table_path"
         )
+
+    _validate_partition_mode_against_cluster_mode(opts)
 
     opts.universe_model = _derive_universe_model(opts.wl_backend)
 

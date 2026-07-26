@@ -387,3 +387,55 @@ def test_diagnostics_lens_values_use_a_generic_eval_point_stamp():
     assert out["diagnostics_point_lens_A_tau"] == pytest.approx(1e-4)
     assert out["diagnostics_point_lens_n_tau"] == pytest.approx(2.0)
     assert "lens_A_tau" not in out and "lens_n_tau" not in out
+
+
+# ---------------------------------------------------------------------------
+# --cluster_mode off + --partition_mode marginalize_exact
+# ---------------------------------------------------------------------------
+
+def test_off_mode_rejects_partition_marginalisation_before_the_data_load():
+    """The off control is singleton-only, so there are no candidate pairs to
+    marginalise.  The combination used to pass preflight, write the run
+    directory, spend minutes loading PE/selection, and only then raise
+    KeyError: 'marginal_partitions' at the midpoint smoke test -- load_inputs
+    returns early for off mode BEFORE the partition-mode requirement checks, and
+    the likelihood closure branches on the flag alone."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--partition_mode", "marginalize_exact")
+    assert opts.cluster_mode == "off"
+    with pytest.raises(SystemExit, match="requires --cluster_mode j2"):
+        cli._resolve_lensing_run_config(opts)
+
+
+def test_load_inputs_also_rejects_the_combination(monkeypatch):
+    """Second net for direct library callers, which never run
+    _resolve_lensing_run_config.  It must fire BEFORE any file is opened."""
+    import darksirens.cli.inference_lensing as cli
+
+    def _boom(*a, **k):
+        raise AssertionError("load_inputs opened data before validating flags")
+
+    monkeypatch.setattr(cli, "load_gw_samples", _boom)
+    opts = SimpleNamespace(
+        cluster_mode="off", partition_mode="marginalize_exact", seed=1,
+    )
+    with pytest.raises(SystemExit, match="requires --cluster_mode j2"):
+        cli.load_inputs(opts)
+
+
+@pytest.mark.parametrize(
+    "cluster_mode,partition_mode",
+    [("j2", "marginalize_exact"), ("j2", "fixed"), ("off", "fixed")],
+)
+def test_supported_cluster_partition_combinations_still_resolve(
+    cluster_mode, partition_mode
+):
+    """The guard must reject exactly one cell of the 2x2, not narrow the CLI."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts(
+        "--cluster_mode", cluster_mode, "--partition_mode", partition_mode
+    )
+    cli._resolve_lensing_run_config(opts)
+    assert opts.universe_model == "spectral_sirens_wl"
