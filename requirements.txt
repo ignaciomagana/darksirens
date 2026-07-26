@@ -1,18 +1,76 @@
-jax
-jaxlib
+# Runtime dependencies.
+#
+# The "env:" versions below are the ones measured in the validated campaign
+# environment (conda env `jax`, CPython 3.11.10, 2026-07-26) — the stack that
+# produced every published logZ.  Keep them in sync when the env moves; they are
+# the only record of which numerics stack a paper number came from besides the
+# per-run `environment` block in settings.json / results.hdf5.
+
+# jax floor: env 0.4.34.  Declared here (not in setup.py's setup_requires,
+# which pip ignores for resolution) so `pip install .` actually enforces it.
+jax>=0.4.34
+jaxlib>=0.4.34
+
+# env: 3.9.2
 matplotlib
-numpy>=2.0
+
+# numpy: env 1.26.4.  This was `numpy>=2.0`, which is unsatisfiable against the
+# installed scipy (scipy 1.12.0 declares numpy<1.29.0,>=1.22.4) — following the
+# documented `pip install -r requirements.txt` into the campaign env would have
+# upgraded numpy (and silently scipy) underneath an in-flight run.  The range
+# below admits both the validated 1.26 stack and a fresh numpy-2 install.
+numpy>=1.26,<3
+
+# Development dependency only: setup.py strips this from install_requires
+# (`darksirens[test]` installs it).
 pytest
-scipy
+
+# env: 1.12.0
+scipy>=1.11
+
+# env: 1.17.3
 healpy
-tinyns @ git+https://github.com/ignaciomagana/tinyns.git
+
+# tinyns is the default nested sampler: it produces every logZ / logZerr in the
+# campaign, so an unpinned `git+...` (whatever master happened to be that day)
+# meant published error bars with no record of which replacement chain or
+# logzerr estimator produced them.  Pinned to the commit in use, taken from the
+# editable install at /hildafs/projects/phy230014p/magana/src/tinyns
+# (verified present on origin/main).
+tinyns @ git+https://github.com/ignaciomagana/tinyns.git@3f9e1b2537f32b59f17ee9ce68b2d725681a024c
+
+# env: 3.12.1
 h5py
+
+# env: 6.1.4
 astropy
+
+# env: 4.66.5
 tqdm
+
+# env: 2.1.4
 dynesty
+
+# env: 0.12.2
 seaborn
+
+# env: 0.17.0
 numpyro
-gwcat @ git+https://github.com/ignaciomagana/gwcat.git@6b21398f139008b6ec83c14fdc27b25ec09e9962
+
+# gwcat writes the PE and selection inputs.  The previous pin (6b21398, 38
+# commits back) predates the whole v2 export layer: it has no `gwcat` CLI and
+# cannot produce or describe the `gwcat-pe-2.0` / `gwcat-selection-2.0` files
+# this code loads (darksirens/gw/utils.py), so the documented input-generation
+# step was impossible at that pin.  Pinned below to the commit actually in use,
+# the HEAD of the local checkout at /hildafs/projects/phy230014p/magana/src/gwcat.
+#
+# ACTION FOR THE MAINTAINER: that commit is not yet on origin (local master is
+# 16 commits ahead), so this line only resolves once it is pushed.  Until then
+# `pip install -r requirements.txt` fails loudly on gwcat instead of silently
+# installing a gwcat that cannot read the campaign's inputs.
+gwcat @ git+https://github.com/ignaciomagana/gwcat.git@3184bdb583f314d91ecae486436842ebe8e9f998
+
 # Optional (flow-surrogate single-event posteriors, --gw_flows_path):
-#   pip install "flowjax>=17.1,<18" paramax "equinox>=0.11,<0.12"
+#   pip install "flowjax>=17.1,<18" paramax "equinox>=0.11,<0.13"
 # (or: pip install "darksirens[flows]")
+# env: flowjax 17.2.1, paramax 0.0.5, equinox 0.11.10
