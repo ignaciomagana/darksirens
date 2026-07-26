@@ -69,6 +69,7 @@ import sys
 import json
 import time
 import argparse
+import dataclasses
 import datetime
 import traceback
 import warnings
@@ -151,11 +152,13 @@ from darksirens.inference.parameters import (
 from darksirens.gw.samples import load_gw_samples, load_selection_samples
 
 # ── lensing / cluster pieces ─────────────────────────────────────────────────
-from darksirens.lensing.slmarks import make_sis_lens_params
+from darksirens.lensing.slmarks import make_sis_lens_params, DEFAULT_T0_SECONDS
 from darksirens.lensing.wlmagnification import (
     make_lognormal_wl_params,
     make_tabulated_wl_params,
+    validate_wl_mu_quadrature,
 )
+from darksirens.lensing.grids import make_wl_mu_quadrature
 from darksirens.lensing.lensed_injections import load_lensed_injections
 from darksirens.lensing.pair_tag_selection import (
     PAIR_TAG_SELECTION_MODEL_KINDS,
@@ -167,6 +170,7 @@ from darksirens.lensing.observed_catalog import (
     validate_observed_catalog_file,
 )
 from darksirens.lensing.partitions import (
+    CandidatePair,
     PartitionState,
     exact_partitions_from_pairs,
     exact_partition_components,
@@ -183,6 +187,8 @@ from darksirens.lensing.marginal_diagnostics import (
     compute_marginalized_partition_diagnostics,
     compute_componentwise_factorized_partition_diagnostics,
     candidate_time_mark_suspicion,
+    sis_time_mark_support,
+    sis_time_mark_support_message,
 )
 from darksirens.likelihood.pair_kde import (
     make_pair_kde,
@@ -303,10 +309,18 @@ def _build_lens_parameter_space(opts, fixed_parameter_values, lens_prior_overrid
     return labels, np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
 
 
+def _sl_T0_seconds(opts) -> float:
+    """The configured SIS time-delay scale T0, in seconds."""
+    return float(getattr(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS)
+
+
 def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     """Construct ``SISLensParams`` from fixed CLI values or sampled lens coords."""
+    T0 = _sl_T0_seconds(opts)
     if getattr(opts, "fix_lens_rate", True):
-        return make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
+        return make_sis_lens_params(
+            A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n, T0_seconds=T0,
+        )
 
     values = {label: jnp.asarray(coord)[i] for i, label in enumerate(sampled_labels)}
     values.update(
@@ -314,7 +328,9 @@ def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     )
     log10_tau_A = values.get("log10_tau_A", np.log10(float(opts.sl_tau_A)))
     tau_n = values.get("tau_n", float(opts.sl_tau_n))
-    return make_sis_lens_params(A_tau=10.0**log10_tau_A, n_tau=tau_n)
+    return make_sis_lens_params(
+        A_tau=10.0**log10_tau_A, n_tau=tau_n, T0_seconds=T0,
+    )
 
 
 #: Which lens label each archived SIS optical-depth value is decoded from, so a
@@ -348,6 +364,10 @@ def _lens_settings_dict(
         fix_lens_rate=bool(getattr(opts, "fix_lens_rate", True)),
         sl_tau_A=float(opts.sl_tau_A),
         sl_tau_n=float(opts.sl_tau_n),
+        # T0 is a run-configuration constant (never sampled), so a bare name is
+        # correct here; the sampled A_tau/n_tau go through the per-parameter
+        # bare-vs-eval-point gate below.
+        sl_T0_sec=float(np.asarray(sis.T0)),
     )
     any_sampled = False
     for key, value in (
@@ -431,6 +451,91 @@ def _gw_event(m1det, m2det, dL, chieff, prior_wt):
     )
 
 
+def _event_gps_times_from_catalog(raw_catalog):
+    """Per-event arrival times (s) from an observed catalog, or None.
+
+    Only returned when EVERY event carries a finite ``gps_time``: the signed
+    arrival order is either known for the whole catalog or not used at all.
+    """
+    if not isinstance(raw_catalog, dict):
+        return None
+    events = raw_catalog.get("events")
+    if not isinstance(events, list) or not events:
+        return None
+    times = []
+    for ev in events:
+        t = (ev or {}).get("gps_time")
+        if t is None:
+            return None
+        try:
+            t = float(t)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(t):
+            return None
+        times.append(t)
+    return np.asarray(times, dtype=float)
+
+
+def _orient_time_marks(candidate_pairs, gps_times):
+    """Give each time mark the sign of ``t_j - t_i`` for its stored order.
+
+    For SIS the type-I minimum arrives BEFORE the type-II saddle
+    (Delta t = t_- - t_+ = T0 y > 0), so the two image-assignment branches of
+    the pair likelihood predict opposite signs of the observed delay and at
+    most one of them is compatible with the data. The recorded mark is a
+    MAGNITUDE (the candidate builder writes abs(t_i - t_j)), so we restore the
+    sign from the catalog's arrival times, keeping the mark's magnitude and
+    sigma untouched.
+
+    Returns ``(pairs, signed)``. ``signed`` is True only when every marked pair
+    could be oriented; otherwise the pairs are returned unchanged and the
+    likelihood keeps the legacy |dt|-in-both-branches behaviour.
+    """
+    if candidate_pairs is None:
+        return candidate_pairs, False
+    marked = [p for p in candidate_pairs if p.delta_t_obs is not None]
+    if not marked:
+        return candidate_pairs, False
+    if gps_times is None:
+        return candidate_pairs, False
+    n = int(gps_times.shape[0])
+    out = []
+    inconsistent = []
+    for p in candidate_pairs:
+        if p.delta_t_obs is None or not (0 <= int(p.i) < n and 0 <= int(p.j) < n):
+            out.append(p)
+            continue
+        dt_catalog = float(gps_times[int(p.j)] - gps_times[int(p.i)])
+        dt_mark = abs(float(p.delta_t_obs))
+        # Validate the convention instead of trusting it: the recorded mark
+        # magnitude must reproduce the catalog's arrival separation.
+        sig = abs(float(p.sigma_delta_t)) if p.sigma_delta_t is not None else 0.0
+        tol = max(5.0 * sig, 1e-6 * max(dt_mark, 1.0))
+        if abs(abs(dt_catalog) - dt_mark) > tol:
+            inconsistent.append((int(p.i), int(p.j), dt_mark, dt_catalog))
+        sign = 1.0 if dt_catalog >= 0.0 else -1.0
+        out.append(
+            CandidatePair(
+                p.i, p.j, p.log_prior_odds, p.label,
+                dataclasses.replace(p.marks, delta_t_obs=sign * dt_mark),
+            )
+        )
+    if inconsistent:
+        i, j, dt_mark, dt_catalog = inconsistent[0]
+        _warn(
+            f"{len(inconsistent)}/{len(marked)} time-marked candidate edges "
+            "disagree with the observed catalog's arrival times, e.g. edge "
+            f"({i},{j}): |marks.delta_t_obs| = {dt_mark:.6g} s vs "
+            f"|t_j - t_i| = {abs(dt_catalog):.6g} s. Using the mark's magnitude "
+            "with the catalog's arrival ORDER; verify the two agree on which "
+            "event came first."
+        )
+    # Every marked pair oriented iff every marked pair had in-range endpoints.
+    ok = all(0 <= int(p.i) < n and 0 <= int(p.j) < n for p in marked)
+    return (out, True) if ok else (candidate_pairs, False)
+
+
 def _time_mark_arrays_for_partition_state(state, candidate_pairs):
     """Return edge-level time marks ordered like ``state.pair_indices``."""
     dt_obs = []
@@ -443,10 +548,11 @@ def _time_mark_arrays_for_partition_state(state, candidate_pairs):
                 f"({pair.i},{pair.j}) missing marks.delta_t_obs/sigma_delta_t "
                 "required by pair_marks=time"
             )
-        # abs at the boundary: the SIS time-delay mark uses y* = dt/T0 (>= 0)
-        # and the coincidence denominator uses |dt|; a signed dt would drive the
-        # mark out of the (0,1) SIS support and silently annihilate the pair.
-        dt = abs(float(pair.delta_t_obs))
+        # The mark is passed through with whatever sign it carries. When
+        # _orient_time_marks resolved the arrival order from the catalog, that
+        # sign selects the image assignment (see cluster_log_likelihood_pair's
+        # pair_time_signed); otherwise it is already a magnitude.
+        dt = float(pair.delta_t_obs)
         sig = float(pair.sigma_delta_t)
         if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0:
             raise SystemExit(
@@ -737,6 +843,12 @@ def _load_wl_table_arrays(opts):
     ``log_p_table`` (Nz, Nmu)) and returns ``wl_z_grid``/``wl_log_mu_grid``/
     ``wl_log_p_table``. Missing/unspecified --lensing_wl_table_path is a clean
     SystemExit.
+
+    The loaded table is validated against the mu-quadrature the likelihood
+    actually integrates on (``make_wl_mu_quadrature``): a table narrower than
+    the quadrature's node spacing makes int p_WL(mu|z) dmu collapse to ~0 and
+    silently DELETES those events from the likelihood. That is a hard startup
+    error, never a silent rescale.
     """
     if getattr(opts, "wl_backend", None) != "tabulated":
         return {}
@@ -751,6 +863,14 @@ def _load_wl_table_arrays(opts):
         wl_z_grid = jnp.asarray(f["z_grid"][()], dtype=jnp.float64)
         wl_log_mu_grid = jnp.asarray(f["log_mu_grid"][()], dtype=jnp.float64)
         wl_log_p_table = jnp.asarray(f["log_p_table"][()], dtype=jnp.float64)
+    mu_nodes, log_w_nodes = make_wl_mu_quadrature()
+    try:
+        validate_wl_mu_quadrature(
+            mu_nodes, log_w_nodes, wl_z_grid, wl_log_mu_grid, wl_log_p_table,
+            context=f"--wl_backend tabulated ({path})",
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     return dict(
         wl_z_grid=wl_z_grid,
         wl_log_mu_grid=wl_log_mu_grid,
@@ -813,6 +933,7 @@ def load_inputs(opts):
     p_pe = np.asarray(p_pe)
     observed_catalog_meta = None
     pair_time_t_obs_window_sec = None
+    event_gps_times = None
     if getattr(opts, "observed_catalog_path", None):
         observed_catalog_meta = validate_observed_catalog_file(
             opts.observed_catalog_path
@@ -821,6 +942,10 @@ def load_inputs(opts):
             _raw_catalog = json.load(_f)
         if _raw_catalog.get("observation_times") == "uniform":
             pair_time_t_obs_window_sec = float(_raw_catalog["t_obs_days"]) * 86400.0
+            # Physical arrival times: the SIS arrival ORDER of a candidate pair
+            # is then known, which is what lets the time mark select the image
+            # assignment instead of rewarding both (see _orient_time_marks).
+            event_gps_times = _event_gps_times_from_catalog(_raw_catalog)
         if int(observed_catalog_meta["n_events"]) != int(n_sing):
             raise SystemExit(
                 f"observed_catalog n_events={observed_catalog_meta['n_events']} "
@@ -872,6 +997,7 @@ def load_inputs(opts):
             pair_time_delta_t_obs=jnp.zeros((0,), dtype=jnp.float64),
             pair_time_sigma=jnp.zeros((0,), dtype=jnp.float64),
             pair_time_t_obs_window_sec=pair_time_t_obs_window_sec,
+            pair_time_signed=False,
             observed_catalog=observed_catalog_meta,
             **_load_singleton_lensing_inputs(opts),
             **_load_wl_table_arrays(opts),
@@ -898,6 +1024,7 @@ def load_inputs(opts):
     candidate_pairs = None
     candidate_pairs_raw = None
     edge_prior_contributions = None
+    pair_time_signed = False
     if opts.candidate_pairs_path:
         candidate_data = json.load(
             open(opts.candidate_pairs_path, "r", encoding="utf-8")
@@ -911,6 +1038,12 @@ def load_inputs(opts):
             candidate_data, getattr(opts, "edge_mark_prior_keys", None)
         )
         _gate_suspicious_time_marks(opts, candidate_pairs_raw)
+        candidate_pairs, pair_time_signed = _orient_time_marks(
+            candidate_pairs, event_gps_times
+        )
+        candidate_pairs_raw, _ = _orient_time_marks(
+            candidate_pairs_raw, event_gps_times
+        )
     partition_pair_indices = []
     if partition is not None:
         partition_pair_indices = [
@@ -953,6 +1086,9 @@ def load_inputs(opts):
     pair_metadata_indices = []
     pair_time_delta_t_obs = []
     pair_time_sigma = []
+    # Whether every mark taken from the pair FILE could be given an arrival
+    # order. Starts True and is cleared by the first mark we cannot orient.
+    pair_file_time_signed = True
     if pair_file_path:
         with h5py.File(pair_file_path) as f:
             npairs = int(f.attrs.get("npairs", 0))
@@ -999,13 +1135,33 @@ def load_inputs(opts):
                         raise SystemExit(
                             f"pair_marks=time requires delta_t_obs metadata for pair_{k}"
                         )
-                    pair_time_delta_t_obs.append(
-                        abs(float(
-                            g.attrs["delta_t_obs"]
-                            if "delta_t_obs" in g.attrs
-                            else np.asarray(g["delta_t_obs"])[()]
-                        ))
+                    _dt_raw = float(
+                        g.attrs["delta_t_obs"]
+                        if "delta_t_obs" in g.attrs
+                        else np.asarray(g["delta_t_obs"])[()]
                     )
+                    # The pair file's delta_t_obs is written as
+                    # t(image1) - t(image0) with (image0, image1) =
+                    # (event_index_image0, event_index_image1), i.e. already
+                    # signed in the stored pair order. Only orient it when the
+                    # arrival times back that up; otherwise keep the magnitude
+                    # so the legacy both-branch behaviour is preserved.
+                    _dt_signed = None
+                    if meta_pair is not None and event_gps_times is not None:
+                        _n_ev = int(event_gps_times.shape[0])
+                        if 0 <= meta_pair[0] < _n_ev and 0 <= meta_pair[1] < _n_ev:
+                            _sign = (
+                                1.0
+                                if (event_gps_times[meta_pair[1]]
+                                    - event_gps_times[meta_pair[0]]) >= 0.0
+                                else -1.0
+                            )
+                            _dt_signed = _sign * abs(_dt_raw)
+                    if _dt_signed is None:
+                        pair_file_time_signed = False
+                        pair_time_delta_t_obs.append(abs(_dt_raw))
+                    else:
+                        pair_time_delta_t_obs.append(_dt_signed)
                     if "sigma_delta_t" in g.attrs:
                         pair_time_sigma.append(float(g.attrs["sigma_delta_t"]))
                     elif "sigma_delta_t" in g:
@@ -1053,6 +1209,10 @@ def load_inputs(opts):
                         imgs.append(d)
                     pairs.append(imgs)
                 pair_metadata_indices.append(meta_pair)
+    if pair_time_delta_t_obs:
+        # Marks came from the pair FILE; its orientation flag wins over the
+        # candidate-pairs one (which describes a source we did not use).
+        pair_time_signed = bool(pair_file_time_signed)
     P = (
         len(pairs)
         if not unified_observed_catalog
@@ -1079,10 +1239,13 @@ def load_inputs(opts):
                 raise SystemExit(
                     f"pair_marks=time requires candidate_pairs.json marks or pair metadata for fixed pair {pair}"
                 )
-            # abs at the boundary, same as _time_mark_arrays_for_partition_state:
-            # the SIS mark uses y* = dt/T0 (>= 0) and a signed dt would silently
-            # annihilate the pair.
-            dt = abs(float(meta.delta_t_obs))
+            # The mark's sign convention is "t_j - t_i for the mark's own
+            # (i, j)". Re-orient it to the order this partition stores the pair
+            # in, so the arrival-order branch selection in
+            # cluster_log_likelihood_pair refers to the right event.
+            dt = float(meta.delta_t_obs)
+            if pair_time_signed and (int(pair[0]), int(pair[1])) != (meta.i, meta.j):
+                dt = -dt
             sig = float(meta.sigma_delta_t)
             if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0:
                 raise SystemExit(
@@ -1372,6 +1535,9 @@ def load_inputs(opts):
         ),
         edge_mark_prior_keys=list(parse_edge_mark_keys(getattr(opts, "edge_mark_prior_keys", None))),
         pair_time_t_obs_window_sec=pair_time_t_obs_window_sec,
+        pair_time_signed=bool(
+            pair_time_signed and getattr(opts, "pair_marks", "none") == "time"
+        ),
         observed_catalog=observed_catalog_meta,
         observed_catalog_heuristic=bool(
             heuristic_unified_observed_catalog and not explicit_unified_observed_catalog
@@ -1746,7 +1912,7 @@ def _resolve_pair_marks(opts, inp):
         )
     if sigmas.size == 0:
         return PAIR_MARKS_TIME
-    T0 = float(make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n).T0)
+    T0 = _sl_T0_seconds(opts)
     return (
         PAIR_MARKS_TIME_DELTA
         if float(np.max(sigmas)) / T0 < _TIME_DELTA_SHARPNESS
@@ -1766,6 +1932,32 @@ def _require_time_window(opts, inp):
             "coincidence odds need the observing-run length. Regenerate the "
             "mock with --observation-times uniform."
         )
+
+
+def _require_time_marks_in_sis_support(opts, inp):
+    """Refuse to build a likelihood whose every time-marked pair is -inf.
+
+    ``y* = |dt| / T0`` must land inside the SIS support (0, 1). If every
+    candidate pair has ``y* >= 1``, the pair likelihood is exactly -inf for all
+    of them: fixed-partition runs cannot initialise live points, and
+    ``marginalize_exact`` runs report "no lensing" with certainty because the
+    true pairing carries zero weight at every parameter value. Preflight raises
+    the same error; this guard also covers runs that skip preflight.
+    """
+    if getattr(opts, "pair_marks", "none") != "time":
+        return
+    dt_values = list(np.asarray(inp.get("pair_time_delta_t_obs", []), dtype=float).ravel())
+    if not dt_values:
+        dt_values = [
+            p.delta_t_obs
+            for p in (inp.get("candidate_pairs") or [])
+            if getattr(p, "delta_t_obs", None) is not None
+        ]
+    support = sis_time_mark_support(dt_values, _sl_T0_seconds(opts))
+    if support["n_marked"] and support["all_out_of_support"]:
+        raise SystemExit(sis_time_mark_support_message(support))
+    if support["n_out_of_support"]:
+        _warn(sis_time_mark_support_message(support))
 
 
 def build_cluster_likelihood(
@@ -1789,6 +1981,7 @@ def build_cluster_likelihood(
     )
     pair_marks = _resolve_pair_marks(opts, inp)
     _require_time_window(opts, inp)
+    _require_time_marks_in_sis_support(opts, inp)
     universe_model = opts.universe_model
 
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
@@ -1875,6 +2068,7 @@ def build_cluster_likelihood(
                     inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
                 ),
                 pair_time_t_obs_window_sec=inp.get("pair_time_t_obs_window_sec"),
+                pair_time_signed=bool(inp.get("pair_time_signed", False)),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
                 singleton_lensing=singleton_lensing,
@@ -1995,6 +2189,7 @@ def build_cluster_diagnostics(
     )
     pair_marks = _resolve_pair_marks(opts, inp)
     _require_time_window(opts, inp)
+    _require_time_marks_in_sis_support(opts, inp)
     universe_model = opts.universe_model
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
     singleton_lensing = (
@@ -2057,6 +2252,7 @@ def build_cluster_diagnostics(
                     inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
                 ),
                 pair_time_t_obs_window_sec=inp.get("pair_time_t_obs_window_sec"),
+                pair_time_signed=bool(inp.get("pair_time_signed", False)),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
                 singleton_lensing=singleton_lensing,
@@ -2379,6 +2575,16 @@ def build_parser():
     model.add_argument("--sl_tau_A", type=float, default=5e-4)
     model.add_argument("--sl_tau_n", type=float, default=3.0)
     model.add_argument(
+        "--sl_T0_sec",
+        type=float,
+        default=DEFAULT_T0_SECONDS,
+        help="SIS time-delay scale T0 in seconds (Delta t = T0 * y). Default "
+        f"{DEFAULT_T0_SECONDS:.3g} s (~62 d) is the SIS scale at z_L=0.5, "
+        "z_s=1, sigma_v=200 km/s under this repo's cosmology. Candidate pairs "
+        "with |dt| >= T0 fall outside the SIS support y in (0,1) and get an "
+        "exactly -inf time-marked pair likelihood.",
+    )
+    model.add_argument(
         "--fix_lens_rate",
         type=str_to_bool, default=True, metavar="BOOL",
         help="true fixes SIS optical-depth parameters to --sl_tau_A/--sl_tau_n; false samples lensing hyperparameters",
@@ -2694,6 +2900,7 @@ def _print_run_configuration(opts):
     print("  │")
     _row("Fix lens rate",     "yes" if opts.fix_lens_rate else "no")
     _row("SIS tau A, n",      f"{opts.sl_tau_A}, {opts.sl_tau_n}")
+    _row("SIS T0", f"{_sl_T0_seconds(opts):.4g} s ({_sl_T0_seconds(opts) / 86400.0:.3g} d)")
     _row("Sampler",           opts.sampler)
     _row("Seed",              opts.seed)
     _row("Output root",       opts.save_path)

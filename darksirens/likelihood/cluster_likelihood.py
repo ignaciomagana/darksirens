@@ -267,6 +267,7 @@ def cluster_log_likelihood_pair(
     delta_t_obs: jnp.ndarray | None = None,
     sigma_delta_t: jnp.ndarray | None = None,
     t_obs_window_sec: jnp.ndarray | None = None,
+    pair_time_signed: bool = False,
 ) -> jnp.ndarray:
     """Symmetric J=2 pair log-likelihood ``log L_2(d_i, d_j | λ, Θ)``.
 
@@ -288,6 +289,37 @@ def cluster_log_likelihood_pair(
     i→-,j→+) by logsumexp. Each branch is itself a logsumexp over the
     PE samples of *the event mapped to μ_+* and the y-quadrature nodes;
     the *other* event's PE samples enter only through its KDE.
+
+    Arrival ORDER (``pair_time_signed``)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    For SIS the type-I minimum μ_+ = (1+y)/y **always** arrives before the
+    type-II saddle μ_- = (1-y)/y: the module's own delay is
+    Δt = t_- - t_+ = T_0 y > 0 (``slmarks``). So the two assignment branches
+    predict OPPOSITE signs of the observed delay, and at most one of them is
+    compatible with the data.
+
+    With ``pair_time_signed=True`` the caller guarantees ``delta_t_obs`` is
+    SIGNED with the convention ``Δt = t_j - t_i`` for the stored pair order
+    ``(i, j)``. Branch a (i is μ_+) is then evaluated at ``+Δt`` and branch b
+    (j is μ_+) at ``-Δt``, so the branch whose predicted arrival order
+    contradicts the data is masked out of the SIS support and contributes
+    nothing. Two things this fixes:
+
+      1. Normalization. With both branches evaluated at |Δt| (the legacy
+         behaviour) a determined pairing gets its likelihood counted TWICE,
+         i.e. +log 2 ≈ 0.69 nat too much per time-marked pair, and
+         ∫ L_2 over the ordered data space becomes 2 μ_sel^(2), breaking the
+         Poisson normalization the master likelihood assumes.
+      2. The ordering test itself. A false pairing in which the BRIGHTER
+         event arrives second should be suppressed to the (tiny) value of the
+         ordering-consistent branch; with |Δt| it instead gets ~half the
+         ordering-INconsistent branch, which can be orders of magnitude
+         larger — over-rewarding exactly the false pairings the arrival-order
+         constraint exists to reject.
+
+    ``pair_time_signed=False`` (the default) keeps the legacy |Δt|-in-both-
+    branches behaviour bit-for-bit, for data whose recorded mark carries no
+    trustworthy sign. The unlensed coincidence denominator always uses |Δt|.
 
     By symmetrization, we drive the PE-sample sum from BOTH events:
     branch 1 uses event-i's samples and event-j's KDE; branch 2 uses
@@ -320,6 +352,17 @@ def cluster_log_likelihood_pair(
         p_u = 2.0 * (T - dt) / (T * T)
         log_inv_p_unlensed = -jnp.log(p_u)
 
+    # Per-branch arrival-order orientation. Branch a assigns mu_+ to event i,
+    # so SIS predicts t_j - t_i = +T0 y; branch b assigns mu_+ to event j and
+    # predicts t_j - t_i = -T0 y. With a signed mark exactly one of these can
+    # be satisfied; without one, both branches see |dt| (legacy).
+    if pair_marks in (1, PAIR_MARKS_DELTA_COLLAPSE):
+        _dt_raw = jnp.asarray(delta_t_obs, dtype=jnp.float64)
+        dt_a = _dt_raw if pair_time_signed else jnp.abs(_dt_raw)
+        dt_b = -_dt_raw if pair_time_signed else jnp.abs(_dt_raw)
+    else:
+        dt_a = dt_b = delta_t_obs
+
     if pair_marks == PAIR_MARKS_DELTA_COLLAPSE:
         if delta_t_obs is None or sigma_delta_t is None:
             raise ValueError(
@@ -328,41 +371,57 @@ def cluster_log_likelihood_pair(
         # Local Gauss-Hermite quadrature under the mark's Gaussian measure
         # (see PAIR_MARKS_DELTA_COLLAPSE above): the 1/T0 Jacobian replaces
         # the global quadrature weights; log_p_y_SIS supplies p(y) and,
-        # together with the mask, the (0, 1) SIS-support guard.
-        y_star = jnp.asarray(delta_t_obs, dtype=jnp.float64) / sis_params.T0
+        # together with the mask, the (0, 1) SIS-support guard.  Built ONCE
+        # PER BRANCH, because y* = dt_branch/T0 carries the branch's predicted
+        # arrival order: the ordering-inconsistent branch lands at y* < 0 and
+        # every node is masked.
         sigma_y = jnp.asarray(sigma_delta_t, dtype=jnp.float64) / sis_params.T0
         u_nodes_t, log_wH_t = make_hermite_u_grid(_TIME_COLLAPSE_HERMITE_NODES)
-        y_k = y_star + sigma_y * u_nodes_t
-        in_support = (y_k > 0.0) & (y_k < 1.0)
-        y_nodes = jnp.clip(y_k, 1e-9, 1.0 - 1e-9)
-        log_wy = jnp.where(
-            in_support,
-            log_wH_t - jnp.log(sis_params.T0) + log_inv_p_unlensed,
-            -jnp.inf,
-        )
+
+        def _collapse_grid(dt_branch):
+            y_k = dt_branch / sis_params.T0 + sigma_y * u_nodes_t
+            in_support = (y_k > 0.0) & (y_k < 1.0)
+            return (
+                jnp.clip(y_k, 1e-9, 1.0 - 1e-9),
+                jnp.where(
+                    in_support,
+                    log_wH_t - jnp.log(sis_params.T0) + log_inv_p_unlensed,
+                    -jnp.inf,
+                ),
+            )
+
+        y_nodes_a, log_wy_a = _collapse_grid(dt_a)
+        y_nodes_b, log_wy_b = _collapse_grid(dt_b)
         pair_marks = 0  # mark absorbed as the quadrature measure
     elif pair_marks == 1:
         # Legacy quadrature mark: same coincidence denominator, applied to
-        # the shared y-weights (scalar per pair).
-        log_wy = log_wy + log_inv_p_unlensed
+        # the shared y-weights (scalar per pair). The branch orientation
+        # enters through delta_t_obs inside _pair_branch_log_integrand.
+        y_nodes_a = y_nodes_b = y_nodes
+        log_wy_a = log_wy_b = log_wy + log_inv_p_unlensed
+    else:
+        y_nodes_a = y_nodes_b = y_nodes
+        log_wy_a = log_wy_b = log_wy
 
     # SIS magnifications at each y-node: μ_+ ≥ μ_-, both positive on (0, 1)
-    mu_plus, mu_minus = mu_plus_minus_from_y(y_nodes)
-    log_py = log_p_y_SIS(y_nodes)
+    mu_plus_a, mu_minus_a = mu_plus_minus_from_y(y_nodes_a)
+    log_py_a = log_p_y_SIS(y_nodes_a)
+    mu_plus_b, mu_minus_b = mu_plus_minus_from_y(y_nodes_b)
+    log_py_b = log_p_y_SIS(y_nodes_b)
 
     # Branch σ_a: i→μ_+, j→μ_-. Drive over event-i PE samples; KDE event-j.
     log_int_a = _pair_branch_log_integrand(
         m1det_i=event_i["m1det"], q_i=event_i["q"], dL_app_i=event_i["dL"],
         chieff_i=event_i["chieff"], prior_wt_i=event_i["prior_wt"],
         valid_i=event_i["valid"], pix_i=event_i["pixels"],
-        mu_i=mu_plus, mu_j=mu_minus,
-        log_py=log_py, log_wy=log_wy,
+        mu_i=mu_plus_a, mu_j=mu_minus_a,
+        log_py=log_py_a, log_wy=log_wy_a,
         kde_j=kde_j,
         cosmo=cosmo, survey=survey, pop_params=pop_params, catalog=catalog,
         sis_params=sis_params,
         log_p_pop_fn=log_p_pop_fn, log_prior_z_fn=log_prior_z_fn,
-        pair_marks=pair_marks, delta_t_obs=delta_t_obs,
-        sigma_delta_t=sigma_delta_t, y_nodes=y_nodes,
+        pair_marks=pair_marks, delta_t_obs=dt_a,
+        sigma_delta_t=sigma_delta_t, y_nodes=y_nodes_a,
     )
     N_i = event_i["m1det"].shape[0]
     log_branch_a = logsumexp(log_int_a) - jnp.log(N_i)
@@ -372,14 +431,14 @@ def cluster_log_likelihood_pair(
         m1det_i=event_j["m1det"], q_i=event_j["q"], dL_app_i=event_j["dL"],
         chieff_i=event_j["chieff"], prior_wt_i=event_j["prior_wt"],
         valid_i=event_j["valid"], pix_i=event_j["pixels"],
-        mu_i=mu_plus, mu_j=mu_minus,
-        log_py=log_py, log_wy=log_wy,
+        mu_i=mu_plus_b, mu_j=mu_minus_b,
+        log_py=log_py_b, log_wy=log_wy_b,
         kde_j=kde_i,
         cosmo=cosmo, survey=survey, pop_params=pop_params, catalog=catalog,
         sis_params=sis_params,
         log_p_pop_fn=log_p_pop_fn, log_prior_z_fn=log_prior_z_fn,
-        pair_marks=pair_marks, delta_t_obs=delta_t_obs,
-        sigma_delta_t=sigma_delta_t, y_nodes=y_nodes,
+        pair_marks=pair_marks, delta_t_obs=dt_b,
+        sigma_delta_t=sigma_delta_t, y_nodes=y_nodes_b,
     )
     N_j = event_j["m1det"].shape[0]
     log_branch_b = logsumexp(log_int_b) - jnp.log(N_j)

@@ -52,6 +52,21 @@ from the LVK pair-id pipeline, multiply each kept-source weight by it
 before summing — the API exposes this via the ``log_p_tag_per_source``
 argument (default zero).
 
+Independent-orientation caveat
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The ``p_det^(1)(θ_app,+) · p_det^(1)(θ_app,-)`` product above (and the
+both-detected subset the estimator sums over) treats the two images'
+orientation factors as INDEPENDENT draws. The two images of one source share
+their inclination and polarization, so this holds only for a campaign that
+re-randomises orientation per image — which is what
+``scripts/mock_lensing/generate_mock_lensing.py`` renders, making the mock study
+self-consistent. Under a physically rendered campaign (one orientation per
+source) the correct efficiencies are P(both) = S(max(x_+, x_-)) and
+P(exactly image j) = S(x_j) - S(x_partner), which differ by up to ~2x — and the
+J=2 / lensed-singleton ratio is exactly what sets A_tau. See
+``darksirens.lensing.fcpdet`` for the measured numbers and for why the
+physically correct model is a partially-correlated one that is not implemented.
+
 N_eff condition
 ~~~~~~~~~~~~~~~
 Mandel-Farr-Gair: require N_eff > 5 · N_clusters_observed where

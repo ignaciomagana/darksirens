@@ -92,6 +92,21 @@ def make_log_mu_grid(
     return jnp.asarray(mu_nodes, dtype=jnp.float64), jnp.asarray(log_w, dtype=jnp.float64)
 
 
+# The ONE μ-quadrature the tabulated WL backend integrates on. Both likelihood
+# twins (``likelihood/core.py`` and ``likelihood/likelihood_with_clusters.py``)
+# and the CLI's startup validation read it from here, so a coverage check run at
+# load time provably tests the grid the sampler will use.
+WL_MU_QUADRATURE_NODES = 16
+WL_MU_QUADRATURE_LOG_MU_RANGE = (-0.6, 0.6)
+
+
+def make_wl_mu_quadrature() -> tuple:
+    """``(mu_nodes, log_weights)`` of the production tabulated-WL μ-quadrature."""
+    return make_log_mu_grid(
+        WL_MU_QUADRATURE_NODES, WL_MU_QUADRATURE_LOG_MU_RANGE
+    )
+
+
 def make_y_grid(n_nodes: int = 32) -> tuple:
     """Gauss-Legendre nodes in ``y ∈ (0, 1)`` for SIS marginalization.
 

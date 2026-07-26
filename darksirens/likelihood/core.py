@@ -36,16 +36,23 @@ from darksirens.likelihood.wl_weight import (
     log_sample_weight_wl_or_standard,
     log_sample_weight_wl_lognormal_hermite,
 )
-from darksirens.lensing.grids import make_log_mu_grid, make_hermite_u_grid
+from darksirens.lensing.grids import (
+    make_log_mu_grid,
+    make_hermite_u_grid,
+    WL_MU_QUADRATURE_NODES,
+    WL_MU_QUADRATURE_LOG_MU_RANGE,
+)
 from darksirens.lensing.wlmagnification import make_tabulated_log_p_wl
 from darksirens.sky import sky_model_parser
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import dL_grid_bounds, dL_in_z_grid, z_of_dL
 
 
-# Weak-lensing quadrature node counts / ranges.
-_WL_NMU_NODES = 16
-_WL_LOG_MU_RANGE = (-0.6, 0.6)
+# Weak-lensing quadrature node counts / ranges. The tabulated-backend mu grid
+# lives in lensing.grids so the CLI's startup coverage check validates the SAME
+# quadrature this module integrates on.
+_WL_NMU_NODES = WL_MU_QUADRATURE_NODES
+_WL_LOG_MU_RANGE = WL_MU_QUADRATURE_LOG_MU_RANGE
 _WL_HERMITE_NODES = 16
 
 # Backend codes for the static_argnames dispatch (weak-lensing magnification).

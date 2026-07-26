@@ -76,6 +76,7 @@ from darksirens.utils.cosmology import (
 # ---- imported truth: lensing ----
 from darksirens.lensing.slmarks import (
     tau_2_SIS, mu_plus_minus_from_y, make_sis_lens_params, delta_t_from_y,
+    DEFAULT_T0_SECONDS,
 )
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
 from darksirens.lensing.lensed_injections import save_lensed_injections
@@ -139,7 +140,7 @@ def make_truth(seed, H0, Om0, sis, wl):
         theta=theta,                       # mixture params + rate params
         gamma=float(theta[-n_rate]),
         H0=float(H0), Om0=float(Om0), zMax=float(zMax),
-        tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
+        tau_A=float(sis.A_tau), tau_n=float(sis.n_tau), T0_sec=float(sis.T0),
         wl_a=float(wl.a), wl_b=float(wl.b),
         seed=int(seed),
     )
@@ -580,7 +581,8 @@ def generate_unlensed_injections(n_draw, model, rng, H0, Om0, *,
 
 def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
                                m1src_range=(3.0, 120.0), out_path=None,
-                               pair_tag_model="none", pair_tag_prob=1.0):
+                               pair_tag_model="none", pair_tag_prob=1.0,
+                               sis=None):
     """Lensed J=2 injections in the SOURCE-frame proposal basis, written via the
     lensing per-image schema (``save_lensed_injections``)."""
     m1lo, m1hi = m1src_range
@@ -610,7 +612,12 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
 
     snr_p = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_p))
     snr_m = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_m))
-    true_dt = np.asarray(delta_t_from_y(jnp.asarray(y), make_sis_lens_params()), dtype=float)
+    # Render with the SAME SISLensParams the observed pairs use: T0 is now
+    # configurable, so a bare make_sis_lens_params() here would put the
+    # injection campaign's delays on a different time-delay scale from the
+    # observed catalog's.
+    sis_render = sis if sis is not None else make_sis_lens_params()
+    true_dt = np.asarray(delta_t_from_y(jnp.asarray(y), sis_render), dtype=float)
     log_sky_overlap = np.log(np.clip((np.minimum(snr_p, snr_m) / np.maximum(snr_p, snr_m)) ** 2, 1e-12, 1.0))
     normalized_model = "snr_time" if pair_tag_model == "min_snr_proxy" else pair_tag_model
     if normalized_model == "none":
@@ -1007,6 +1014,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         n_lensed_inj, model, rng, H0, Om0,
         out_path=os.path.join(out_dir, "mock_lensed_injections.h5"),
         pair_tag_model=pair_tag_model, pair_tag_prob=pair_tag_prob,
+        sis=sis,
     )
 
     # ---- partition (TRUE): [singletons 0..S-1, then pair images S+2k, S+2k+1] ----
@@ -1235,7 +1243,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         f"--partition_path {os.path.join(out_dir, 'partition.json')} "
         "--cluster_mode j2 --wl_backend lognormal --fix_cosmology true --fix_survey true "
         "--sampler tinyns --nlive 32 --max_samples 256 --pe_max_per_pair 16 "
-        f"--sl_tau_A {float(sis.A_tau)} --sl_tau_n {float(sis.n_tau)}"
+        f"--sl_tau_A {float(sis.A_tau)} --sl_tau_n {float(sis.n_tau)} "
+        f"--sl_T0_sec {float(sis.T0)}"
     )
     if validation_sample_log10_tau_A:
         lo, hi = (float(validation_log10_tau_A_prior[0]), float(validation_log10_tau_A_prior[1]))
@@ -1302,6 +1311,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                    pe_prior_convention="p_pe proportional to m1det * dL^2 in the (m1det, q, dL) basis",
                    cosmology=f"H0={H0}, Om0={Om0}",
                    tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
+                   T0_sec=float(sis.T0),
                    wl_a=float(wl.a), wl_b=float(wl.b)),
         validation=dict(
             sample_log10_tau_A=bool(validation_sample_log10_tau_A),
@@ -1351,6 +1361,9 @@ def parse_args():
     p.add_argument("--Om0", type=float, default=float(Om0Planck))
     p.add_argument("--tau-A", type=float, default=5.0e-4, help="SIS optical-depth amplitude")
     p.add_argument("--tau-n", type=float, default=3.0, help="SIS optical-depth z-power")
+    p.add_argument("--T0-sec", type=float, default=DEFAULT_T0_SECONDS,
+                   help="SIS time-delay scale T0 in seconds (Delta t = T0 * y); default "
+                        f"{DEFAULT_T0_SECONDS:.3g} s (~62 d) at z_L=0.5, z_s=1, sigma_v=200 km/s")
     p.add_argument("--wl-a", type=float, default=4.0e-3, help="WL lognormal variance amplitude")
     p.add_argument("--wl-b", type=float, default=1.5, help="WL lognormal variance z-power")
     p.add_argument("--pair-tag-model", choices=("none", "constant", "min_snr_proxy", "snr_time", "snr_time_sky"),
@@ -1403,7 +1416,8 @@ def parse_args():
 def main():
     args = parse_args()
     set_pop_model(args.pop_model)
-    sis = make_sis_lens_params(A_tau=args.tau_A, n_tau=args.tau_n)
+    sis = make_sis_lens_params(A_tau=args.tau_A, n_tau=args.tau_n,
+                              T0_seconds=args.T0_sec)
     wl = make_lognormal_wl_params(a=args.wl_a, b=args.wl_b)
     manifest = assemble(
         args.outdir, n_universe=args.n_universe, seed=args.seed, nsamp=args.nsamp,

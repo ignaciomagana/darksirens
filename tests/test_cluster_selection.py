@@ -646,6 +646,137 @@ class TestMasterLikelihoodReduction:
         assert float(diag["pair_logL_sum"]) == pytest.approx(0.0)
         assert jnp.isfinite(diag["logL_total"])
 
+    def _j2_diagnostics(self, fixture, *, A_tau, n_tau, cluster_mode_j2=True,
+                        singleton_lensing=None):
+        """Diagnostics for the shipped J2 + singleton_lensing=off configuration."""
+        from darksirens.likelihood.likelihood_with_clusters import (
+            darksiren_likelihood_diagnostics_with_clusters,
+            CLUSTER_MODE_J2, CLUSTER_MODE_OFF, SINGLETON_LENSING_OFF,
+        )
+        from darksirens.likelihood.pair_kde import make_pair_kde, stack_pair_kdes
+
+        n_pe = fixture["n_samp"]
+        gw_pe = fixture["gw_pe"]
+        kdes = []
+        for ev_idx in range(fixture["n_events"]):
+            s_lo, s_hi = ev_idx * n_pe, (ev_idx + 1) * n_pe
+            kdes.append(make_pair_kde(
+                m1det=np.asarray(gw_pe.m1det)[s_lo:s_hi],
+                q=np.asarray(gw_pe.q)[s_lo:s_hi],
+                dL_app=np.asarray(gw_pe.dL)[s_lo:s_hi],
+                chieff=np.asarray(gw_pe.chieff)[s_lo:s_hi],
+                prior_wt=np.asarray(gw_pe.prior_wt)[s_lo:s_hi],
+            ))
+        stacked = stack_pair_kdes(kdes)
+        camp = _synth_lensed_injection_campaign(n_sources=800, seed=1234)
+        inj = make_lensed_injection_set(
+            **{k: v for k, v in camp.items() if k != "n_both_detected"}
+        )
+        j2 = cluster_mode_j2
+        return darksiren_likelihood_diagnostics_with_clusters(
+            fixture["cosmo"], fixture["survey"], fixture["pop_params"],
+            gw_pe, fixture["catalog"],
+            fixture["gw_sel"], fixture["catalog"],
+            fixture["n_events"], n_pe, fixture["Ndraw"],
+            singleton_indices=(
+                jnp.asarray([2, 3], dtype=jnp.int32) if j2
+                else jnp.arange(fixture["n_events"], dtype=jnp.int32)
+            ),
+            pair_indices=(
+                jnp.asarray([[0, 1]], dtype=jnp.int32) if j2
+                else jnp.zeros((0, 2), dtype=jnp.int32)
+            ),
+            n_singletons=2 if j2 else fixture["n_events"],
+            n_pairs=1 if j2 else 0,
+            lensed_injections=inj if j2 else None,
+            pair_kdes=stacked if j2 else None,
+            sis_params=make_sis_lens_params(
+                A_tau=A_tau, n_tau=n_tau, T0_seconds=1.0
+            ),
+            log_p_tag_per_source=jnp.zeros(inj.n_kept),
+            pop_model="powerlaw+peak",
+            universe_model="spectral_sirens",
+            sel_batch_size=None,
+            cluster_mode=CLUSTER_MODE_J2 if j2 else CLUSTER_MODE_OFF,
+            singleton_lensing=(
+                SINGLETON_LENSING_OFF if singleton_lensing is None
+                else singleton_lensing
+            ),
+        )
+
+    def test_j2_singleton_channel_carries_the_unlensed_tau_factor(self, fixture):
+        """With cluster_mode=J2 the singleton channel must describe the UNLENSED
+        intensity (1 - tau_2) p_pop p_z, or the strongly lensed sources are
+        counted twice in the Poisson normalization.
+
+        Previously the (1 - tau_2) factor was applied only under
+        singleton_lensing=MIXTURE, so the shipped default
+        (cluster_mode=j2, singleton_lensing=off) added mu_sel^(2) on top of a
+        mu_sel^(1) that still counted the lensed sources as unlensed singletons.
+        The over-count is exactly ``int tau_2 P_det p_pop p_z``, and it is
+        A_tau/n_tau dependent, so it acts as a spurious optical-depth-dependent
+        term in ``-N_tot log(mu_tot)``.
+
+        With n_tau = 0 the factor is the CONSTANT (1 - A_tau), so both the
+        selection integral and the per-event singleton evidence must shift by
+        exactly log(1 - A_tau) — a machine-precision handle on the fix.
+        """
+        A = 0.3      # inflated optical depth so the effect is unmistakable
+        base = self._j2_diagnostics(fixture, A_tau=0.0, n_tau=0.0)
+        infl = self._j2_diagnostics(fixture, A_tau=A, n_tau=0.0)
+
+        shift = float(np.log1p(-A))
+        # Selection integral: mu_sel^(1) -> (1 - A) mu_sel^(1).
+        np.testing.assert_allclose(
+            float(infl["log_mu_singleton"]),
+            float(base["log_mu_singleton"]) + shift,
+            rtol=0.0, atol=1e-10,
+        )
+        # Per-event singleton evidence: the SAME factor, once per singleton, so
+        # the two sides describe one intensity.
+        n_sing = int(infl["n_singletons"])
+        np.testing.assert_allclose(
+            float(infl["singleton_logL_sum"]),
+            float(base["singleton_logL_sum"]) + n_sing * shift,
+            rtol=0.0, atol=1e-9,
+        )
+        assert bool(infl["unlensed_tau_suppression"])
+
+        # Quantify the double count that used to be there: the uncorrected
+        # mu_sel^(1) exceeded the correct one by exactly
+        # A * mu_sel^(1)_uncorrected = int tau_2 P_det p_pop p_z, i.e. a
+        # fraction A/(1-A) of the corrected singleton channel.
+        mu1 = np.exp(float(infl["log_mu_singleton"]))
+        mu1_uncorrected = mu1 / (1.0 - A)
+        over_count = mu1_uncorrected - mu1
+        np.testing.assert_allclose(over_count, A * mu1_uncorrected, rtol=1e-10)
+        np.testing.assert_allclose(over_count / mu1, A / (1.0 - A), rtol=1e-10)
+
+    def test_cluster_mode_off_keeps_the_unsuppressed_normalization(self, fixture):
+        """With no second channel (cluster_mode=OFF, singleton_lensing=off) the
+        unsuppressed integral IS the correct 'everything is a singleton'
+        normalization, so tau must not enter at all — this is what keeps the
+        commit-2 reduction bit-identical."""
+        base = self._j2_diagnostics(fixture, A_tau=0.0, n_tau=0.0,
+                                    cluster_mode_j2=False)
+        infl = self._j2_diagnostics(fixture, A_tau=0.3, n_tau=0.0,
+                                    cluster_mode_j2=False)
+        assert not bool(infl["unlensed_tau_suppression"])
+        assert float(base["log_mu_singleton"]) == float(infl["log_mu_singleton"])
+        assert float(base["singleton_logL_sum"]) == float(infl["singleton_logL_sum"])
+        assert float(base["logL_total"]) == float(infl["logL_total"])
+
+    def test_j2_reduces_to_unsuppressed_at_zero_optical_depth(self, fixture):
+        """At A_tau = 0 there are no lensed sources to double count, so the
+        J2 singleton channel must equal the unsuppressed one exactly."""
+        j2 = self._j2_diagnostics(fixture, A_tau=0.0, n_tau=3.0)
+        off = self._j2_diagnostics(fixture, A_tau=0.0, n_tau=3.0,
+                                   cluster_mode_j2=False)
+        np.testing.assert_allclose(
+            float(j2["log_mu_singleton"]), float(off["log_mu_singleton"]),
+            rtol=0.0, atol=1e-12,
+        )
+
     def test_cluster_mode_j2_runs_end_to_end(self, fixture):
         assert fixture["pop_params"].shape[0] > 0, "fixture pop_params must be non-empty for pop_model=powerlaw+peak"
         """Master likelihood with cluster_mode=J2 evaluates finite for a
@@ -1488,6 +1619,52 @@ def test_pair_tag_perturb_logit_changes_probability():
     base = make_pair_tag_selection_model("constant", constant=0.25)
     pert = make_pair_tag_selection_model("constant", constant=0.25, perturb_logit=1.0)
     np.testing.assert_raises(AssertionError, np.testing.assert_allclose, base.probability(), pert.probability())
+
+
+def test_pair_tag_probability_is_per_source_for_every_kind():
+    """Every kind returns an array shaped like the supplied fields.
+
+    The constant/none kinds used to return a 0-d array while the score-based
+    kinds returned (n,), so the mock generator's
+    ``tagged_pair[both] = rng.uniform(...) < p_tag[both]`` crashed with
+    ``IndexError: invalid index to scalar variable`` under
+    ``--pair-tag-model constant``.
+    """
+    from darksirens.lensing.pair_tag_selection import (
+        make_pair_tag_selection_model, PAIR_TAG_SELECTION_MODEL_KINDS,
+    )
+
+    n = 5
+    fields = dict(
+        snr_image0=np.linspace(9.0, 20.0, n),
+        snr_image1=np.linspace(8.5, 12.0, n),
+        delta_t_obs=np.linspace(1.0e3, 3.0e5, n),
+        log_sky_overlap=np.full(n, -0.7),
+    )
+    both = np.array([True, False, True, False, True])
+    kinds = [k for k in PAIR_TAG_SELECTION_MODEL_KINDS if k != "file"] + ["none"]
+    for kind in kinds:
+        model = make_pair_tag_selection_model(kind, constant=0.6)
+        p = model.probability(**fields)
+        assert p.shape == (n,), f"{kind}: got shape {p.shape}"
+        assert np.all((p >= 0.0) & (p <= 1.0))
+        # The generator indexes with a boolean mask; must not raise.
+        assert p[both].shape == (int(both.sum()),)
+        lp = model.log_probability(**fields)
+        assert lp.shape == (n,)
+        np.testing.assert_allclose(np.exp(lp), p, rtol=1e-12)
+    # No fields supplied: nothing to broadcast to, stays 0-d (the inference
+    # side calls it this way and broadcasts the log-weight itself).
+    assert np.shape(make_pair_tag_selection_model("constant", constant=0.6).probability()) == ()
+
+
+def test_pair_tag_log_probability_handles_zero_probability():
+    from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
+
+    model = make_pair_tag_selection_model("constant", constant=0.0)
+    lp = model.log_probability(snr_image0=np.zeros(3), snr_image1=np.zeros(3))
+    assert lp.shape == (3,)
+    assert np.all(np.isneginf(lp))
 
 
 def test_lensed_injection_loading_reads_pair_tag_fields():

@@ -206,17 +206,40 @@ def _bilinear_interp(
     return f0 * (1.0 - tz) + f1 * tz
 
 
+def _interp_table_broadcast(
+    mu: jnp.ndarray,
+    z: jnp.ndarray,
+    z_grid: jnp.ndarray,
+    log_mu_grid: jnp.ndarray,
+    log_p_table: jnp.ndarray,
+) -> jnp.ndarray:
+    """Bilinear interp of ``log_p_table`` at the broadcast of ``(mu, z)``.
+
+    ``mu`` and ``z`` are broadcast against each other FIRST (per the module's
+    documented contract) and only then flattened for the vmap.  Flattening the
+    two independently — as this did before — raised
+    ``vmap got inconsistent sizes`` for every shape pair that was merely
+    broadcast-compatible rather than identical, which is exactly the pattern
+    the production caller uses: ``wl_weight.log_sample_weight_wl_marginalized``
+    passes ``mu`` of shape (Nmu,) against ``z`` of shape (nsamp, Nmu).
+    """
+    mu_b, z_b = jnp.broadcast_arrays(
+        jnp.asarray(mu, dtype=jnp.float64), jnp.asarray(z, dtype=jnp.float64)
+    )
+    flat_lm = jnp.log(mu_b).reshape(-1)
+    flat_z = z_b.reshape(-1)
+    interp = vmap(
+        lambda zi, lmi: _bilinear_interp(zi, lmi, z_grid, log_mu_grid, log_p_table)
+    )
+    return interp(flat_z, flat_lm).reshape(mu_b.shape)
+
+
 @jit
 def _log_p_wl_tabulated(mu: jnp.ndarray, z: jnp.ndarray, p: WLParams) -> jnp.ndarray:
     """Bilinear interp in (z, ln μ) of the supplied log-p table."""
-    log_mu = jnp.log(mu)
-    # vmap the scalar bilinear interp over the flattened input
-    flat_z = z.reshape(-1)
-    flat_lm = log_mu.reshape(-1)
-    interp = vmap(
-        lambda zi, lmi: _bilinear_interp(zi, lmi, p.z_grid, p.log_mu_grid, p.log_p_table)
+    return _interp_table_broadcast(
+        mu, z, p.z_grid, p.log_mu_grid, p.log_p_table
     )
-    return interp(flat_z, flat_lm).reshape(mu.shape)
 
 
 # ============================================================================
@@ -321,9 +344,11 @@ def make_tabulated_log_p_wl(
     # Known limitation (library review, lensing finding): a coarse log_mu_grid
     # cannot resolve the narrow low-z p(mu|z) of the lognormal WL model, so the
     # per-event mu-marginal integrates to ~0 for z <~ 0.3 and those events are
-    # silently dropped. This backend is NOT exposed by the CLI (which uses the
-    # validated Gauss-Hermite lognormal path). Warn so a direct-API caller
-    # verifies the mu-grid resolution before any production use.
+    # silently dropped. The CLI DOES expose this backend
+    # (--wl_backend tabulated), so the crude node-count warning below is
+    # backed by the hard startup check in ``validate_wl_mu_quadrature``, which
+    # the lensing CLI runs on the loaded table against the very mu-quadrature
+    # the likelihood integrates on.
     if int(log_mu_grid.shape[-1]) < 64:
         warnings.warn(
             f"tabulated WL backend: log_mu_grid has {int(log_mu_grid.shape[-1])} "
@@ -336,13 +361,7 @@ def make_tabulated_log_p_wl(
         )
 
     def log_p_wl_fn(mu: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
-        log_mu = jnp.log(mu)
-        flat_z = z.reshape(-1)
-        flat_lm = log_mu.reshape(-1)
-        interp = vmap(
-            lambda zi, lmi: _bilinear_interp(zi, lmi, z_grid, log_mu_grid, log_p_table)
-        )
-        return interp(flat_z, flat_lm).reshape(mu.shape)
+        return _interp_table_broadcast(mu, z, z_grid, log_mu_grid, log_p_table)
 
     return log_p_wl_fn
 
@@ -363,3 +382,97 @@ def make_log_p_wl_from_params(p: WLParams):
         raise ValueError(
             f"Unknown WL backend {backend}. Use 0 (lognormal) or 1 (tabulated)."
         )
+
+
+# ============================================================================
+# Startup validation of the μ-quadrature against a tabulated table
+# ============================================================================
+#
+# The tabulated backend's mu-marginal is evaluated on a FIXED Gauss-Legendre
+# grid in ln mu (``grids.make_wl_mu_quadrature``), not on the table's own
+# log_mu_grid.  If the table's p_WL(mu | z) is narrower than that grid's node
+# spacing, the marginal
+#
+#     I(z) = int p_WL(mu | z) dmu ~= sum_l w_l mu_l p_WL(mu_l | z)
+#
+# silently collapses towards 0 and the affected events are DELETED from the
+# likelihood with no error.  The default 16-node grid on ln mu in (-0.6, 0.6)
+# gives I = 2e-5 at z = 0.1 and 5e-2 at z = 0.2 under the default lognormal
+# (a = 4e-3, b = 1.5).  Validate up front and fail loudly rather than
+# rescaling: a table whose marginal is off by a z-dependent factor is not
+# a PDF the sampler can be trusted with.
+
+
+def wl_mu_quadrature_coverage(
+    mu_nodes: jnp.ndarray,
+    log_w_nodes: jnp.ndarray,
+    z_grid: jnp.ndarray,
+    log_mu_grid: jnp.ndarray,
+    log_p_table: jnp.ndarray,
+    z_test: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """``∫ p_WL(μ|z) dμ`` on the supplied μ-quadrature, one value per test z.
+
+    Parameters
+    ----------
+    mu_nodes, log_w_nodes
+        The quadrature the likelihood integrates on, from
+        ``darksirens.lensing.grids.make_wl_mu_quadrature`` (nodes in μ,
+        log-weights for the ``ln μ`` interval — the extra ``ln μ`` from
+        ``dμ = μ d(ln μ)`` is added here).
+    z_grid, log_mu_grid, log_p_table
+        The tabulated backend's grids, as passed to
+        ``make_tabulated_log_p_wl``.
+    z_test
+        Redshifts at which to check the marginal. Defaults to ``z_grid``.
+
+    Returns
+    -------
+    coverage : (Nz_test,) array
+        ``∫ p_WL(μ|z) dμ``; should be ≈ 1 at every test redshift.
+    """
+    mu_nodes = jnp.asarray(mu_nodes, dtype=jnp.float64)
+    log_w_nodes = jnp.asarray(log_w_nodes, dtype=jnp.float64)
+    z_test = jnp.asarray(z_grid if z_test is None else z_test, dtype=jnp.float64)
+    log_p = _interp_table_broadcast(
+        mu_nodes[None, :], z_test[:, None], z_grid, log_mu_grid, log_p_table,
+    )                                                       # (Nz_test, Nmu)
+    log_integrand = log_w_nodes[None, :] + log_p + jnp.log(mu_nodes)[None, :]
+    return jnp.sum(jnp.exp(log_integrand), axis=-1)
+
+
+def validate_wl_mu_quadrature(
+    mu_nodes: jnp.ndarray,
+    log_w_nodes: jnp.ndarray,
+    z_grid: jnp.ndarray,
+    log_mu_grid: jnp.ndarray,
+    log_p_table: jnp.ndarray,
+    z_test: jnp.ndarray | None = None,
+    tol: float = 0.02,
+    context: str = "tabulated WL backend",
+) -> jnp.ndarray:
+    """Raise ``ValueError`` unless the μ-quadrature resolves the table.
+
+    Checks ``|∫ p_WL(μ|z) dμ - 1| <= tol`` at every test redshift. The failure
+    message names the worst redshift and its marginal so the caller can either
+    refine the table's μ-support or switch to the lognormal (Gauss-Hermite)
+    backend. Returns the coverage array on success.
+    """
+    coverage = wl_mu_quadrature_coverage(
+        mu_nodes, log_w_nodes, z_grid, log_mu_grid, log_p_table, z_test=z_test,
+    )
+    z_checked = jnp.asarray(z_grid if z_test is None else z_test, dtype=jnp.float64)
+    err = jnp.abs(coverage - 1.0)
+    worst = int(jnp.argmax(err))
+    if not bool(jnp.all(jnp.isfinite(coverage))) or float(err[worst]) > float(tol):
+        raise ValueError(
+            f"{context}: the mu-quadrature does not resolve p_WL(mu|z). "
+            f"int p_WL(mu|z) dmu = {float(coverage[worst]):.6g} at "
+            f"z = {float(z_checked[worst]):.4g} (tolerance |I - 1| <= {float(tol):g}; "
+            f"{int(jnp.sum(err > tol))}/{int(err.shape[0])} test redshifts fail). "
+            "Events at those redshifts would be silently deleted from the "
+            "likelihood. Widen/refine the table's log_mu support so the "
+            "quadrature interval brackets it, or use --wl_backend lognormal "
+            "(Gauss-Hermite in the standardized variable, resolution-independent)."
+        )
+    return coverage
