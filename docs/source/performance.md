@@ -29,10 +29,21 @@ in the same calibration run.
 residuals of both axes are live at once, so the two transient working sets add:
 
 ```
-peak ≈ TRUE_FIXED_BYTES + static_state_bytes
+peak ≈ GRAD_RUNTIME_FIXED_BYTES + scale · GRAD_WORKSET_FLOOR_BYTES
+       + static_state_bytes
        + sel_batch · SEL_BYTES_PER_INJECTION[_CAT] · scale
        + pe_block  · n_samp · PE_BYTES_PER_SAMPLE[_CAT] · scale
 ```
+
+Note the *fixed* term splits. The historical 58 GiB anchor was described as
+"JAX/XLA runtime + workspace" — dimension-independent — but a second `n_q` point
+shows only ~1.7 GB of it is: the single-pass peak is **26.89 GB at `n_q = 64`** and
+**78.77 GB at `n_q = 200`**, i.e. ~97 % of it is working set that scales with the
+dimensions like the slopes do. `GRAD_RUNTIME_FIXED_BYTES +
+GRAD_WORKSET_FLOOR_BYTES == TRUE_FIXED_BYTES` exactly, so at the calibration
+dimensions every plan is preserved bit-for-bit; the split only fixes the
+extrapolation. Before it, `--norm_nq 400` on a 141 GB card was promised a full
+single pass against a real ~155 GB peak.
 
 **Gradient-free path** (`needs_grad=False`, dynesty / tinyns) — measured on the
 H100 NVL, blocking *one* axis leaves the value peak untouched (5.648 → 5.695 GB)
@@ -70,10 +81,10 @@ Constants and estimators live in `darksirens/likelihood/block_sizing.py`.
 
 1. **Explicit wins.** An integer or `off` on a knob passes through unchanged.
 2. **Non-GPU backend** → single pass (host RAM is not the bottleneck).
-3. **Budget** = `SAFETY_FACTOR · free_bytes − true_fixed − static_state_bytes`
+3. **Budget** = `SAFETY_FACTOR · free_bytes − fixed − static_state_bytes`
    (`SAFETY_FACTOR = 0.7`, headroom for fragmentation / transient copies / a
-   shared box), where `true_fixed` is `TRUE_FIXED_BYTES` on the gradient path and
-   `TRUE_FIXED_VALUE_BYTES` on the gradient-free one.
+   shared box), where `fixed` is the (scaled) gradient fixed term above or
+   `TRUE_FIXED_VALUE_BYTES` on the gradient-free path.
 4. **Gradient path — selection axis first** (it dominates at ~10⁶ injections): if
    the full pass fits alongside the full PE pass, keep `None` (single pass); else
    split into `k = ceil(N_sel / B_fit)` **even** chunks, rounding the block up to a
@@ -111,7 +122,9 @@ The 88 GB dynesty row is the defect this split fixes: the gradient model chose
 * **Gradient slopes** — MEASURED on an H100-80GB (`scripts/benchmarks/block_sizes_h100_80gb.json`):
   SEL 7,865 → 8,000 B/injection, PE 8,102 → 9,000 B/sample, with the 58 GiB fixed
   anchor decomposed into `TRUE_FIXED_BYTES` plus the calibration config's own
-  static state so the calibration point is preserved bit-for-bit.
+  static state so the calibration point is preserved bit-for-bit; `TRUE_FIXED_BYTES`
+  is in turn split into 1.7 GB of runtime and a dimension-scaled working-set floor
+  from the `n_q = 64` / `n_q = 200` pair (26.89 / 78.77 GB).
 * **Value-only slopes** — MEASURED on an H100 NVL
   (`scripts/benchmarks/block_sizes_h100_80gb_value_only.json`, 15 configs): the
   two-point system `F + B·c = 0.703 GB` / `F + N_sel·c = 5.648 GB` gives

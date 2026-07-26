@@ -33,6 +33,7 @@ from darksirens.likelihood.block_sizing import (
     SAFETY_FACTOR,
     block_size_arg,
     resolve_block_sizes,
+    predicted_peak_bytes,
     measure_static_state_bytes,
     estimate_pending_static_bytes,
     sampler_block_sizing_profile,
@@ -725,23 +726,64 @@ def test_value_only_single_pass_on_a_small_gpu():
     assert _plan(16 * GB, needs_grad=True).sel_batch_size == SEL_MIN_BATCH
 
 
+def _predicted(**kw):
+    base = dict(n_events=N_EVENTS, n_samp=N_SAMP, n_sel=N_SEL, has_catalog=False)
+    base.update(kw)
+    return predicted_peak_bytes(**base)
+
+
 def test_value_only_model_brackets_the_measured_peaks():
     """Formula-level calibration check against the H100 NVL value-only sweep
     (scripts/benchmarks/block_sizes_h100_80gb_value_only.json): the model must be
     conservative (predict >= measured) but not wildly so."""
-    def predicted(sel, pe):
-        sel_term = (N_SEL if sel is None else sel) * SEL_BYTES_PER_INJECTION_VALUE
-        pe_term = ((N_EVENTS if pe is None else pe)
-                   * N_SAMP * PE_BYTES_PER_SAMPLE_VALUE)
-        return TRUE_FIXED_VALUE_BYTES + max(sel_term, pe_term)
-
     for (sel, pe), measured in [((None, None), 5.648e9),
                                 ((32768, None), 5.695e9),
                                 ((None, 8), 5.648e9),
-                                ((32768, 8), 0.703e9)]:
-        p = predicted(sel, pe)
+                                ((32768, 8), 0.703e9),
+                                ((65536, 16), 0.990e9),
+                                ((131072, 32), 1.187e9)]:
+        p = _predicted(needs_grad=False, sel_batch_size=sel, pe_event_block=pe)
         assert p >= measured, (sel, pe, p, measured)
         assert p <= 2.0 * measured, (sel, pe, p, measured)
+    # Sanity: the components are the ones documented, not an accident.
+    assert TRUE_FIXED_VALUE_BYTES < 1.1e9
+    assert SEL_BYTES_PER_INJECTION_VALUE == PE_BYTES_PER_SAMPLE_VALUE == 5_000
+
+
+def test_value_only_model_brackets_the_measured_n_q_sweep():
+    """The n_q term is calibrated too: MEASURED value peak at sel/pe = off/off vs
+    --norm_nq on the H100 NVL."""
+    for n_q, measured in ((32, 1.34e9), (64, 2.16e9), (100, 3.09e9),
+                          (200, 5.65e9), (400, 10.78e9), (800, 21.03e9)):
+        p = _predicted(needs_grad=False, n_q=n_q)
+        assert p >= measured, (n_q, p, measured)
+        assert p <= 2.0 * measured, (n_q, p, measured)
+
+
+def test_grad_model_brackets_the_two_measured_n_q_points():
+    """The value+GRAD single-pass peak is ~97% dimension-scaled working set, not a
+    58 GiB fixed term: MEASURED 26.89 GB at n_q=64 and 78.77 GB at n_q=200 on the
+    same config.  The split must reproduce both to ~10%, or the model promises a
+    single pass at raised --norm_nq against a peak twice the card."""
+    for n_q, measured in ((64, 26.89e9), (200, 78.77e9)):
+        p = _predicted(needs_grad=True, n_q=n_q,
+                       static_state_bytes=STATIC_STATE_CAL_BYTES)
+        assert 0.9 * measured <= p <= 1.15 * measured, (n_q, p, measured)
+    # A pure-fixed model (the pre-split behaviour) would have predicted ~68 GB at
+    # n_q=64 -- 2.5x the measured peak in the OPTIMISTIC direction once inverted
+    # into a budget, which is what let --norm_nq defeat the guard.
+    legacy_64 = TRUE_FIXED_BYTES + STATIC_STATE_CAL_BYTES + (
+        N_SEL * 8_000 + N_EVENTS * N_SAMP * 9_000) * 64 / CAL_N_Q
+    assert legacy_64 > 2.0 * 26.89e9
+
+
+def test_grad_fixed_split_preserves_the_calibration_anchor():
+    from darksirens.likelihood.block_sizing import (
+        GRAD_RUNTIME_FIXED_BYTES, GRAD_WORKSET_FLOOR_BYTES,
+    )
+    assert GRAD_RUNTIME_FIXED_BYTES + GRAD_WORKSET_FLOOR_BYTES == TRUE_FIXED_BYTES
+    # and the runtime part really is the small one
+    assert GRAD_RUNTIME_FIXED_BYTES < 0.05 * GRAD_WORKSET_FLOOR_BYTES
 
 
 def test_value_only_blocks_both_axes_together():

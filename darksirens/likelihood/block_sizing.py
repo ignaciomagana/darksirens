@@ -171,6 +171,36 @@ STATIC_STATE_CAL_BYTES = (
 )                                          # ≈ 85.15 MB (0.0793 GiB)
 TRUE_FIXED_BYTES = FIXED_OVERHEAD_BYTES - STATIC_STATE_CAL_BYTES   # ≈ 57.92 GiB JAX/XLA + workspace
 
+# ── TRUE_FIXED is mostly WORKING SET, not runtime (measured 2026-07-26) ─────────
+# ``TRUE_FIXED_BYTES`` was described as "JAX/XLA runtime + workspace", i.e. a term
+# INDEPENDENT of the problem dimensions, and only the (small, reducible) slopes were
+# scaled by them.  A second n_q point shows that is wrong by a factor of ~25:
+#
+#     value+grad single-pass peak, spectral config, H100 NVL, MEASURED
+#         n_q = 64   ->  26.89 GB      (scripts/.../grad_nq64, this repo)
+#         n_q = 200  ->  78.77 GB      (scripts/benchmarks/block_sizes_h100_80gb.json)
+#
+# Solving ``F + s*W = peak`` with s = n_q/200 gives W = 78.7 GB of DIMENSION-SCALED
+# working set and only F = 1.7 GB of genuinely fixed runtime — the peak is ~97 %
+# working set at the default n_q, not 77 % fixed.  Left unsplit, the model
+# under-predicts badly the moment any working-set dimension grows: at ``--norm_nq
+# 400`` on a 141 GB card it would still promise a full single pass against a real
+# ~155 GB peak.
+#
+# So TRUE_FIXED is split here, and the WORKSET part is scaled by the same factor as
+# the slopes.  The split is calibration-preserving BY CONSTRUCTION: at the
+# calibration dimensions every scale is 1.0, so
+# ``GRAD_RUNTIME_FIXED + 1.0*GRAD_WORKSET_FLOOR == TRUE_FIXED_BYTES`` exactly and
+# every block plan is bit-for-bit what it was.  It is also self-consistent with the
+# measurement: 1.7 + (60.6 + 8.54 + 9.55) = 80.4 GB at n_q=200 (the retained a8ba5e7
+# anchor) and 1.7 + 0.32*(60.6 + 18.09) = 26.9 GB at n_q=64 (the new point).
+#
+# NOTE the VALUE-only fixed term is NOT split: its measured n_q intercept really is
+# small and flat (0.52 GB from the 32/64/200-node sweep), which is exactly why
+# TRUE_FIXED_VALUE_BYTES is 1 GiB rather than tens of GB.
+GRAD_RUNTIME_FIXED_BYTES = 1_700_000_000
+GRAD_WORKSET_FLOOR_BYTES = TRUE_FIXED_BYTES - GRAD_RUNTIME_FIXED_BYTES
+
 # Floors: never chunk below these (below them the launch/padding overhead and
 # recompile churn cost more than the memory they save).
 SEL_MIN_BATCH = 32768
@@ -675,6 +705,102 @@ def measure_static_state_bytes(data, *, n_grid: int, has_catalog: bool,
     return int(total)
 
 
+def _slopes_and_fixed(*, has_catalog: bool, needs_grad: bool, n_grid: int,
+                      n_q: int, max_gals_per_row, n_catalogs: int,
+                      concurrent_evals: int, warn: bool = True):
+    """``(sel_bpi, pe_bps, fixed_bytes)`` of the peak model for these dimensions.
+
+    Factored out of :func:`resolve_block_sizes` so :func:`predicted_peak_bytes` and
+    the resolver cannot drift apart.  See ``resolve_block_sizes``' docstring for the
+    meaning of every scale factor.
+    """
+    grid_scale = max(1e-9, float(n_grid) / float(CAL_N_GRID))
+    # The q-quadrature is evaluated PER SAMPLE by the default (exact) pairing
+    # normaliser, so n_q multiplies both working sets.  With the opt-in
+    # ``--pairing_m1_grid`` the quadrature moves off the sample axis and this scale
+    # merely over-predicts (the safe direction).
+    q_scale = max(1e-9, float(n_q) / float(CAL_N_Q))
+    # A sampler that vmaps several proposals at once (tinyns replacement_chains)
+    # holds that many copies of every intermediate live simultaneously.
+    batch_scale = float(max(1, int(concurrent_evals)))
+    if has_catalog:
+        if max_gals_per_row is None or int(max_gals_per_row) <= 0:
+            # UNKNOWN row width on a catalog run: the caller could not determine
+            # the dimension (the K >= 2 stubbed top-level ``catalog_memory`` was
+            # the historical case, and it silently produced max_gals_per_row = 1).
+            # Scaling the heavier _CAT slopes BELOW the catalog-free ones would
+            # claim a dark-siren likelihood is ~1000x lighter per injection than
+            # the spectral config they were calibrated on, so fall back to the
+            # calibration reference (ratio 1.0) and say so.  An explicit small
+            # integer is TRUSTED — a genuinely sparse catalog really is lighter.
+            if warn:
+                _loud(
+                    f"has_catalog=True but max_gals_per_row={max_gals_per_row!r}: "
+                    "the caller could not supply the galaxies-per-unique-pixel "
+                    "dimension. Falling back to the calibration reference "
+                    f"({CAL_MAX_GALS_PER_ROW:,} galaxies/row) rather than scaling "
+                    "the _CAT slopes below the catalog-free ones."
+                )
+            gals_ratio = 1.0
+        else:
+            gals_ratio = max(
+                1e-9, float(max_gals_per_row) / float(CAL_MAX_GALS_PER_ROW))
+        cat_scale = gals_ratio * max(1, int(n_catalogs))
+        base_sel = (SEL_BYTES_PER_INJECTION_CAT if needs_grad
+                    else SEL_BYTES_PER_INJECTION_VALUE_CAT)
+        base_pe = (PE_BYTES_PER_SAMPLE_CAT if needs_grad
+                   else PE_BYTES_PER_SAMPLE_VALUE_CAT)
+    else:
+        cat_scale = 1.0
+        base_sel = (SEL_BYTES_PER_INJECTION if needs_grad
+                    else SEL_BYTES_PER_INJECTION_VALUE)
+        base_pe = (PE_BYTES_PER_SAMPLE if needs_grad
+                   else PE_BYTES_PER_SAMPLE_VALUE)
+    unit_scale = grid_scale * q_scale * cat_scale * batch_scale
+    # Fixed term of the peak model.  On the GRADIENT path only ~1.7 GB of the 57.9
+    # GiB is genuinely fixed runtime; the rest is the IRREDUCIBLE working-set floor
+    # and scales with the same dimensions as the slopes (MEASURED: the single-pass
+    # peak is 26.89 GB at n_q=64 and 78.77 GB at n_q=200).  At the calibration
+    # dimensions unit_scale == 1.0, so this is TRUE_FIXED_BYTES exactly and every
+    # historical plan is preserved bit-for-bit.  The gradient-free fixed term is a
+    # genuinely small, genuinely flat measured intercept and is NOT scaled.
+    if needs_grad:
+        fixed_bytes = (GRAD_RUNTIME_FIXED_BYTES
+                       + unit_scale * GRAD_WORKSET_FLOOR_BYTES)
+    else:
+        fixed_bytes = float(TRUE_FIXED_VALUE_BYTES)
+    return base_sel * unit_scale, base_pe * unit_scale, fixed_bytes
+
+
+def predicted_peak_bytes(*, n_events: int, n_samp: int, n_sel: int,
+                         sel_batch_size=None, pe_event_block=None,
+                         has_catalog: bool = False, needs_grad: bool = True,
+                         n_grid: int = CAL_N_GRID, n_q: int = CAL_N_Q,
+                         max_gals_per_row=CAL_MAX_GALS_PER_ROW,
+                         n_catalogs: int = 1, concurrent_evals: int = 1,
+                         static_state_bytes: float = 0.0,
+                         flow_path: bool = False) -> float:
+    """Peak device bytes the model predicts for a given plan.
+
+    ``sel_batch_size``/``pe_event_block`` of ``None`` mean a single pass over that
+    axis.  The two axes ADD on the gradient path (value + reverse-mode residuals of
+    both are live) and take the MAX on the gradient-free one (measured: blocking one
+    axis alone does not move the value peak).  Used by the resolver's calibration
+    tests; the resolver itself compares a budget rather than a peak, but both go
+    through :func:`_slopes_and_fixed` so they cannot drift.
+    """
+    sel_bpi, pe_bps, fixed_bytes = _slopes_and_fixed(
+        has_catalog=has_catalog, needs_grad=needs_grad, n_grid=n_grid, n_q=n_q,
+        max_gals_per_row=max_gals_per_row, n_catalogs=n_catalogs,
+        concurrent_evals=concurrent_evals, warn=False)
+    sel = float(n_sel if sel_batch_size is None else sel_batch_size) * sel_bpi
+    pe = (0.0 if flow_path else
+          float(n_events if pe_event_block is None else pe_event_block)
+          * float(n_samp) * pe_bps)
+    transient = sel + pe if needs_grad else max(sel, pe)
+    return float(fixed_bytes) + max(0.0, float(static_state_bytes)) + transient
+
+
 def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
                         sel_requested, pe_requested, has_catalog: bool,
                         flow_path: bool, n_grid: int = CAL_N_GRID,
@@ -692,20 +818,23 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
     (explicit, passes through), ``None`` (an explicit single pass), or
     :data:`BLOCK_AUTO` (resolve here).  Explicit values always win per knob.
 
-    The peak model is
+    The peak model (see :func:`predicted_peak_bytes`) is
 
-    * ``needs_grad=True`` (NumPyro NUTS) — ``TRUE_FIXED_BYTES + static +
-      sel_batch*sel_bpi + pe_block*n_samp*pe_bps``: the value and the reverse-mode
-      residuals of BOTH axes are live simultaneously, so the two transient working
-      sets ADD.  This is the historical, calibrated model, unchanged.
+    * ``needs_grad=True`` (NumPyro NUTS) — ``fixed + static + sel_batch*sel_bpi +
+      pe_block*n_samp*pe_bps``: the value and the reverse-mode residuals of BOTH
+      axes are live simultaneously, so the two transient working sets ADD.  ``fixed``
+      is ``GRAD_RUNTIME_FIXED_BYTES + scale*GRAD_WORKSET_FLOOR_BYTES``, i.e. the
+      irreducible part of the working set scales with the dimensions too; at the
+      calibration dimensions it equals ``TRUE_FIXED_BYTES`` exactly, so every
+      historical plan is preserved.
     * ``needs_grad=False`` (dynesty / tinyns) — ``TRUE_FIXED_VALUE_BYTES + static +
       max(sel_batch*sel_bpi, pe_block*n_samp*pe_bps)`` with the value-only slopes.
-      MEASURED: blocking one axis alone leaves the value peak unchanged (5.65 →
-      5.63 GB), because the unblocked axis's ``(N, n_q)`` intermediate still sets
-      it; blocking BOTH drops it to 0.70 GB.  A max, not a sum.
+      MEASURED: blocking one axis alone leaves the value peak unchanged (5.648 →
+      5.695 GB), because the unblocked axis's ``(N, n_q)`` intermediate still sets
+      it; blocking BOTH drops it to 0.703 GB.  A max, not a sum.
 
-    The transient slopes ``sel_bpi`` / ``pe_bps`` scale with the dominant per-block
-    dimensions relative to the calibration config:
+    The slopes ``sel_bpi`` / ``pe_bps`` (and, on the gradient path, the working-set
+    floor) scale with the dominant dimensions relative to the calibration config:
 
     * ``n_grid / CAL_N_GRID`` on both slopes (more grid nodes → more work/bytes);
     * ``n_q / CAL_N_Q`` on both slopes — the population q-quadrature is evaluated
@@ -767,20 +896,22 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
     # subtracting them again would double-count.  (The CLI passes the pending
     # estimate; unit tests may pass any reserve.)
     static_state_bytes = max(0.0, float(static_state_bytes))
-    # The gradient-free peak is 14x below the value+grad peak (5.59 vs 78.77 GB
-    # measured on the same config), so a gradient-free run gets the value-only
-    # fixed term as well as the value-only slopes below.
-    true_fixed = TRUE_FIXED_BYTES if needs_grad else TRUE_FIXED_VALUE_BYTES
-    # Placement budget: safety-discounted, minus the transient value+grad floor and
-    # the pending static.  Drives even-split block sizing; when it goes negative
-    # (a catalog run whose spectral-calibrated TRUE_FIXED over-predicts the floor)
-    # the even split falls back to the floor — the historical behavior.
+
+    sel_bpi, pe_bps, fixed_bytes = _slopes_and_fixed(
+        has_catalog=has_catalog, needs_grad=needs_grad, n_grid=n_grid, n_q=n_q,
+        max_gals_per_row=max_gals_per_row, n_catalogs=n_catalogs,
+        concurrent_evals=concurrent_evals)
+
+    # Placement budget: safety-discounted, minus that fixed term and the pending
+    # static.  Drives even-split block sizing; when it goes negative (a catalog run
+    # whose spectral-calibrated floor over-predicts) the even split falls back to the
+    # floor — the historical behavior.
     budget = max(
         1.0,
-        float(safety_factor) * float(free_bytes) - true_fixed - static_state_bytes,
+        float(safety_factor) * float(free_bytes) - fixed_bytes - static_state_bytes,
     )
     # Floor-reduction guard: room for block working sets AFTER the pending static,
-    # EXCLUDING the (spectral-over-estimated) transient TRUE_FIXED.  Only a genuinely
+    # EXCLUDING the (spectral-over-estimated) fixed term.  Only a genuinely
     # device-dominating static state reduces the minimum block (see _floored_block);
     # otherwise the floor stands even when ``budget`` is negative.  An UNRELIABLE
     # free-memory reading (failed probe) gives no basis to reduce, so the guard is
@@ -789,52 +920,6 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
         float(safety_factor) * float(free_bytes) - static_state_bytes
         if free_bytes_reliable else math.inf
     )
-
-    # Dimension scaling of the transient slopes, relative to the calibration config.
-    grid_scale = max(1e-9, float(n_grid) / float(CAL_N_GRID))
-    # The q-quadrature is evaluated PER SAMPLE by the default (exact) pairing
-    # normaliser, so n_q multiplies both working sets.  With the opt-in
-    # ``--pairing_m1_grid`` the quadrature moves off the sample axis and this scale
-    # merely over-predicts (the safe direction).
-    q_scale = max(1e-9, float(n_q) / float(CAL_N_Q))
-    # A sampler that vmaps several proposals at once (tinyns replacement_chains)
-    # holds that many copies of every intermediate live simultaneously.
-    batch_scale = float(max(1, int(concurrent_evals)))
-    if has_catalog:
-        if max_gals_per_row is None or int(max_gals_per_row) <= 0:
-            # UNKNOWN row width on a catalog run: the caller could not determine
-            # the dimension (the K >= 2 stubbed top-level ``catalog_memory`` was
-            # the historical case, and it silently produced max_gals_per_row = 1).
-            # Scaling the heavier _CAT slopes BELOW the catalog-free ones would
-            # claim a dark-siren likelihood is ~1000x lighter per injection than
-            # the spectral config they were calibrated on, so fall back to the
-            # calibration reference (ratio 1.0) and say so.  An explicit small
-            # integer is TRUSTED — a genuinely sparse catalog really is lighter.
-            _loud(
-                f"has_catalog=True but max_gals_per_row={max_gals_per_row!r}: the "
-                "caller could not supply the galaxies-per-unique-pixel dimension. "
-                f"Falling back to the calibration reference "
-                f"({CAL_MAX_GALS_PER_ROW:,} galaxies/row) rather than scaling the "
-                "_CAT slopes below the catalog-free ones."
-            )
-            gals_ratio = 1.0
-        else:
-            gals_ratio = max(
-                1e-9, float(max_gals_per_row) / float(CAL_MAX_GALS_PER_ROW))
-        cat_scale = gals_ratio * max(1, int(n_catalogs))
-        base_sel = (SEL_BYTES_PER_INJECTION_CAT if needs_grad
-                    else SEL_BYTES_PER_INJECTION_VALUE_CAT)
-        base_pe = (PE_BYTES_PER_SAMPLE_CAT if needs_grad
-                   else PE_BYTES_PER_SAMPLE_VALUE_CAT)
-    else:
-        cat_scale = 1.0
-        base_sel = (SEL_BYTES_PER_INJECTION if needs_grad
-                    else SEL_BYTES_PER_INJECTION_VALUE)
-        base_pe = (PE_BYTES_PER_SAMPLE if needs_grad
-                   else PE_BYTES_PER_SAMPLE_VALUE)
-    unit_scale = grid_scale * q_scale * cat_scale * batch_scale
-    sel_bpi = base_sel * unit_scale
-    pe_bps = base_pe * unit_scale
 
     # PE single-pass footprint (fixed unless we end up blocking PE below).
     pe_full_bytes = float(n_events) * float(n_samp) * pe_bps if not flow_path else 0.0
