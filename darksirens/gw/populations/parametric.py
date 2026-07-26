@@ -13,9 +13,11 @@ combine these specs into a single inference vector; the methods here therefore
 expect ``t`` to be ordered exactly as returned by ``param_specs``.
 """
 
+import math
 from dataclasses import dataclass
 
 import jax.numpy as jnp
+from jax.scipy.special import erf, erfc
 
 from .base import MassComponent, PairingModel, ParamSpec, SpinModel, pack_specs
 from .components import (
@@ -178,6 +180,89 @@ class Gaussian(MassComponent):
         return jnp.exp(-0.5 * ((m - mu) / sig) ** 2)
 
 
+# ── Analytic truncated-component normalisers ─────────────────────────────────
+# Components whose truncation edge is a SAMPLED parameter cannot be normalised by
+# a trapezoid over a fixed mass grid: the hard ``m >= m_low`` mask makes the
+# quadrature a step function of ``m_low`` (it jumps whenever the edge crosses a
+# node) and kills the ``d/dm_low`` channel entirely (a boolean mask has zero
+# derivative), while a grid with h = 0.6 Msun cannot resolve a peak with
+# sigma <~ h/2 at all.  The closed forms below are exact for every parameter
+# value and differentiable in the truncation edge.
+
+_SQRT2 = math.sqrt(2.0)
+_SQRT_PI_2 = math.sqrt(0.5 * math.pi)
+_NORM_SIGMA_FLOOR = 1.0e-12
+
+
+def _pos(n):
+    """Divide-safe normaliser: a zero/negative norm leaves the density untouched
+    (its numerator is zero there too), matching ``MassComponent.__call__``."""
+    return jnp.where(n > 0.0, n, 1.0)
+
+
+def truncated_gaussian_norm(mu, sigma, lo, hi):
+    r"""Exact :math:`\int_{lo}^{hi} \exp[-(m-\mu)^2/(2\sigma^2)]\,dm`.
+
+    Equals :math:`\sigma\sqrt{2\pi}\,[\Phi((hi-\mu)/\sigma) - \Phi((lo-\mu)/\sigma)]`.
+    The difference of CDFs is formed through ``erfc`` on whichever side keeps it
+    well conditioned (both arguments positive, both negative, or straddling), so
+    it stays accurate for a peak far outside ``[lo, hi]`` instead of cancelling
+    two values of 1.  Every branch is finite for any finite input -- ``erfc``
+    saturates at 0/2 -- so no ``where``-guard is needed and the gradients (which
+    carry a ``exp(-x^2)`` factor) underflow to 0 rather than blowing up.
+
+    A zero ``sigma`` is inside the GWTC-5 priors; it is floored to 1e-12 exactly
+    as the density is, so the pair (density, normaliser) stays consistent and the
+    component degenerates to a vanishing spike rather than 0/0.
+    """
+    s = jnp.maximum(sigma, _NORM_SIGMA_FLOOR)
+    a = (lo - mu) / (s * _SQRT2)
+    b = (hi - mu) / (s * _SQRT2)
+    diff = jnp.where(
+        a >= 0.0,
+        erfc(a) - erfc(b),
+        jnp.where(b <= 0.0, erfc(-b) - erfc(-a), erf(b) - erf(a)),
+    )
+    return s * _SQRT_PI_2 * jnp.maximum(diff, 0.0)
+
+
+def _powerlaw_segment_norm(lo, hi, m_break, alpha):
+    r"""Exact :math:`\int_{lo}^{hi} (m/m_{\rm break})^{-\alpha}\,dm` (0 if hi <= lo).
+
+    Written as :math:`m_b e^{uL_{lo}} \,\mathrm{expm1}(u d)/u` with
+    :math:`u = 1-\alpha`, :math:`L = \log(m/m_b)`, :math:`d = L_{hi} - L_{lo}`,
+    so the :math:`\alpha \to 1` limit is the removable one
+    (:math:`\to m_b \log(hi/lo)`); a short series replaces the ratio for
+    :math:`|ud| < 10^{-6}` to keep it finite AND differentiable in ``alpha``
+    there.
+    """
+    lo_s = jnp.maximum(lo, _NORM_SIGMA_FLOOR)
+    hi_s = jnp.maximum(hi, lo_s)
+    u = 1.0 - alpha
+    d = jnp.log(hi_s / lo_s)
+    ud = u * d
+    small = jnp.abs(ud) < 1.0e-6
+    ud_s = jnp.where(small, 1.0, ud)
+    ratio = jnp.where(small,
+                      d * (1.0 + 0.5 * ud + ud * ud / 6.0),
+                      d * jnp.expm1(ud_s) / ud_s)
+    seg = m_break * jnp.exp(u * jnp.log(lo_s / m_break)) * ratio
+    return jnp.where(hi > lo, seg, 0.0)
+
+
+def broken_powerlaw_norm(alpha1, alpha2, m_break, lo, hi):
+    r"""Exact normaliser of the two-slope power law on ``[lo, hi]``.
+
+    Matches ``(m/m_break)**-alpha1`` on ``[lo, min(m_break, hi))`` and
+    ``(m/m_break)**-alpha2`` on ``[max(m_break, lo), hi)``, i.e. exactly the
+    support the model's masks impose, for any ordering of ``lo``, ``m_break``
+    and ``hi``.
+    """
+    brk = jnp.clip(m_break, lo, hi)
+    return (_powerlaw_segment_norm(lo, brk, m_break, alpha1)
+            + _powerlaw_segment_norm(brk, hi, m_break, alpha2))
+
+
 @dataclass
 class GWTC5FiducialBPL2PeaksMass(MassComponent):
     r"""GWTC-5 fiducial Broken Power Law + 2 Peaks primary-mass model.
@@ -246,30 +331,76 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
         base_grid = get_mass_grid()
         return jnp.linspace(base_grid[0], self.m_high, base_grid.size)
 
-    def _grid_norm(self, values):
-        norm = jnp.trapezoid(values, self._mass_grid())
-        return jnp.where(norm > 0.0, norm, 1.0)
+    def _taper_window_grid(self, m1_low, delta_m1):
+        """Quadrature nodes across the low-mass taper window.
+
+        The nodes are placed RELATIVE to the window, ``m = m1_low + t*delta_m1``
+        with ``t`` uniform on [0, 1], so they follow the (sampled) window instead
+        of being crossed by it: the taper deficit in :meth:`_norm` is then a
+        smooth function of ``m1_low`` and ``delta_m1`` with no node-crossing
+        steps, and a zero-width window integrates to exactly 0.
+        """
+        t = jnp.linspace(0.0, 1.0, get_mass_grid().size)
+        width = jnp.maximum(jnp.minimum(m1_low + delta_m1, self.m_high) - m1_low, 0.0)
+        return m1_low + t * width
+
+    def _component_norms(self, t):
+        """Exact normalisers of the three components over ``[m1_low, m_high]``."""
+        alpha1, alpha2, m_break, mu1, sigma1, mu2, sigma2, m1_low = t[:8]
+        return (
+            broken_powerlaw_norm(alpha1, alpha2, m_break, m1_low, self.m_high),
+            truncated_gaussian_norm(mu1, sigma1, m1_low, self.m_high),
+            truncated_gaussian_norm(mu2, sigma2, m1_low, self.m_high),
+        )
+
+    def _mixture_pretaper(self, m, t):
+        """``sum_i lambda_i p_i(m)`` with each ``p_i`` EXACTLY normalised over
+        ``[m1_low, m_high]``; the caller applies the low-mass taper."""
+        alpha1, alpha2, m_break, mu1, sigma1, mu2, sigma2, m1_low = t[:8]
+        lambda0, lambda1 = t[9], t[10]
+        n_bpl, n_g1, n_g2 = self._component_norms(t)
+        bpl = self._bpl_raw(m, alpha1, alpha2, m_break, m1_low) / _pos(n_bpl)
+        g1 = self._trunc_gauss_raw(m, mu1, sigma1, m1_low) / _pos(n_g1)
+        g2 = self._trunc_gauss_raw(m, mu2, sigma2, m1_low) / _pos(n_g2)
+        return lambda0 * bpl + lambda1 * g1 + (1.0 - lambda0 - lambda1) * g2
 
     def _norm(self, theta) -> jnp.ndarray:
-        mass_grid = self._mass_grid()
-        return jnp.trapezoid(self._eval_unnorm(mass_grid, theta), mass_grid)
+        r"""Normalisation of the tapered mixture -- exact up to the taper window.
 
-    def _eval_unnorm(self, m, t):
-        alpha1, alpha2, m_break, mu1, sigma1, mu2, sigma2, m1_low, delta_m1, lambda0, lambda1 = t
-        mass_grid = self._mass_grid()
+        Each component is now normalised analytically over ``[m1_low, m_high]``,
+        so :math:`\int p_i\,dm = 1` exactly and the ONLY quadrature left is the
+        probability the low-mass taper removes,
 
-        bpl_grid = self._bpl_raw(mass_grid, alpha1, alpha2, m_break, m1_low)
-        g1_grid = self._trunc_gauss_raw(mass_grid, mu1, sigma1, m1_low)
-        g2_grid = self._trunc_gauss_raw(mass_grid, mu2, sigma2, m1_low)
+            D_i = \int_{m1_low}^{m1_low+\delta m_1} p_i(m)\,[1 - S(m)]\,dm,
 
-        bpl = self._bpl_raw(m, alpha1, alpha2, m_break, m1_low) / self._grid_norm(bpl_grid)
-        g1 = self._trunc_gauss_raw(m, mu1, sigma1, m1_low) / self._grid_norm(g1_grid)
-        g2 = self._trunc_gauss_raw(m, mu2, sigma2, m1_low) / self._grid_norm(g2_grid)
-
+        over a window-relative grid (see :meth:`_taper_window_grid`).  Each
+        ``1 - D_i`` is clipped to [0, 1] so an unresolvably narrow peak sitting
+        inside the taper window can never drive the normalisation negative.
+        """
+        alpha1, alpha2, m_break, mu1, sigma1, mu2, sigma2, m1_low, delta_m1, lambda0, lambda1 = theta
         lambda2 = 1.0 - lambda0 - lambda1
         valid_weights = (lambda0 >= 0.0) & (lambda1 >= 0.0) & (lambda2 >= 0.0)
-        mixture = lambda0 * bpl + lambda1 * g1 + lambda2 * g2
-        tapered = mixture * sfilter_low(m, m1_low, delta_m1)
+
+        n_bpl, n_g1, n_g2 = self._component_norms(theta)
+        m_w = self._taper_window_grid(m1_low, delta_m1)
+        cut = 1.0 - sfilter_low(m_w, m1_low, delta_m1)
+
+        def kept(raw, n):
+            deficit = jnp.trapezoid(raw * cut, m_w) / _pos(n)
+            return jnp.where(n > 0.0, jnp.clip(1.0 - deficit, 0.0, 1.0), 0.0)
+
+        total = (
+            lambda0 * kept(self._bpl_raw(m_w, alpha1, alpha2, m_break, m1_low), n_bpl)
+            + lambda1 * kept(self._trunc_gauss_raw(m_w, mu1, sigma1, m1_low), n_g1)
+            + lambda2 * kept(self._trunc_gauss_raw(m_w, mu2, sigma2, m1_low), n_g2)
+        )
+        return jnp.where(valid_weights, total, 0.0)
+
+    def _eval_unnorm(self, m, t):
+        m1_low, delta_m1, lambda0, lambda1 = t[7], t[8], t[9], t[10]
+        lambda2 = 1.0 - lambda0 - lambda1
+        valid_weights = (lambda0 >= 0.0) & (lambda1 >= 0.0) & (lambda2 >= 0.0)
+        tapered = self._mixture_pretaper(m, t) * sfilter_low(m, m1_low, delta_m1)
         return jnp.where(valid_weights, tapered, 0.0)
 
 

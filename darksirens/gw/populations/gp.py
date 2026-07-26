@@ -158,10 +158,32 @@ def _interp2_log(ltab, zg, m1g, z_q, m1_q):
 
 
 def _znorm_interp(eval_norm_fn, z_query):
-    """Evaluate the prob-axis normalisation on a z-grid and interpolate (log-space)."""
+    """Evaluate the prob-axis normalisation on a z-grid and interpolate (log-space).
+
+    SEQUENTIAL (``lax.map``, not ``vmap``) over the z nodes.  ``eval_norm_fn``
+    forms the explicit cross-kernel ``k(coords, Z)`` of shape (G, M) before its
+    matvec; batching that with ``vmap`` materialises the whole (N_z, G, M) cube at
+    once, which for the registered ``gp4d`` model (G = 48*24*24 = 27648 coarse
+    normalisation nodes, M = 10*8*10*8 = 6400 inducing points, N_z = 40 at the
+    default zMax = 5) is 40*27648*6400*8 B = 52.74 GiB of XLA scratch -- measured
+    as ``temp_size_in_bytes`` for a query of only 8 points, i.e. before any event
+    or injection data enters, so no ``--sel_batch_size``/auto-blocking setting can
+    reduce it: an immediate OOM on any GPU in the fleet.  ``lax.map`` keeps one
+    z node live (measured 2.64 GiB for gp4d, 20x less) and returns the same
+    stacked table -- bit-identical values -- matching the memory-safe idiom
+    AdditiveGPPopulation already uses for its own z grid.
+
+    ``jax.checkpoint`` is REQUIRED on the mapped body, not cosmetic: a scan
+    stores its per-iteration residuals for the transpose, so reverse mode
+    (``--sampler numpyro``) would otherwise keep every z node's (G, M) kernel on
+    the tape -- measured gp4d gradient scratch 756 GiB with a plain ``lax.map``
+    (583 GiB with the old ``vmap``).  Rematerialising each node's forward pass
+    instead brings it to 13.9 GiB, a 42x reduction against master, with the same
+    forward values and gradients.
+    """
     import jax
     zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
-    norms = jax.vmap(eval_norm_fn)(zg)
+    norms = jax.lax.map(jax.checkpoint(eval_norm_fn), zg)
     return jnp.exp(jnp.interp(z_query, zg, jnp.log(jnp.where(norms > 0, norms, _LOGSAFE))))
 
 
@@ -546,7 +568,10 @@ class JointGPPopulation:
             if self._z_in_gp:
                 import jax
                 zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
-                tab = jax.vmap(_eval_norm)(zg)                                # (Nz, Nm1)
+                # lax.map + checkpoint, not vmap: batching the (Nm1, G) lattice
+                # AND the (G, M) cross-kernel inside over all z nodes at once is
+                # what made gp4d need 52.7 GiB of scratch (see _znorm_interp).
+                tab = jax.lax.map(jax.checkpoint(_eval_norm), zg)              # (Nz, Nm1)
                 ltab = jnp.log(jnp.where(tab > 0, tab, _LOGSAFE))
                 return _interp2_log(ltab, zg, m1g, z, m1)                     # (Nquery,)
             tab = _eval_norm(0.0)                                             # (Nm1,)
