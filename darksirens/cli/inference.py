@@ -296,6 +296,58 @@ def _completion_validation_survey_values(
     return values
 
 
+#: Row axis of each Q_LSS table leaf carried on ``EMCatalog``.
+_LSS_TABLE_ROW_AXIS = {
+    "lss_completion_logq": 0,
+    "lss_completion_q": 0,
+    "lss_completion_logq_members": 1,
+    "lss_completion_q_members": 1,
+}
+
+
+def _completion_validation_lss_tables(data: dict, unique_pixels, n_pix_catalog: int):
+    """Q_LSS table leaves for the dry-run validation catalog, sliced to its rows.
+
+    ``completion_clip_diagnostics`` resolves the missing-galaxy rate factor FROM
+    THE CATALOG, so a validation catalog built without the loaded Q tables silently
+    takes the legacy ``delta_g`` branch and reports the delta_g-negativity fraction
+    (0 for the production dummy overdensity) instead of the ``+-7`` logQ clip
+    fraction the diagnostic exists to surface -- the run then looks clean while the
+    Q the likelihood will use is railed over much of the grid.
+
+    The tables are sliced HOST-side to the validation rows (mirroring the factory's
+    eager global->compact gather) so a full ``(M, n_pix, N_grid)`` ensemble never
+    reaches the device.  Returns ``(kwargs, provenance)``; ``provenance`` records
+    why nothing was attached so the JSON never implies a clean Q when the Q was
+    simply not readable:
+
+    * ``"none"`` -- the run carries no Q table (the legacy delta_g diagnostic is
+      the right one);
+    * ``"global_table_sliced"`` -- attached, rows gathered by global pixel;
+    * ``"compact_table_skipped"`` -- the table is a COMPACT per-view block
+      (``lss_completion_indexing == 1``, or its row count is not the full nside),
+      which carries no global pixel key, so the validation pixels cannot be
+      aligned to it.
+    """
+    pix = np.asarray(unique_pixels, dtype=np.int64).reshape(-1)
+    indexing = int(data.get("lss_completion_indexing", 0) or 0)
+    kwargs: dict[str, object] = {}
+    provenance = "none"
+    for key, axis in _LSS_TABLE_ROW_AXIS.items():
+        tab = data.get(key)
+        if tab is None:
+            continue
+        arr = np.asarray(tab)
+        if indexing == 1 or arr.shape[axis] != n_pix_catalog:
+            provenance = "compact_table_skipped"
+            continue
+        if n_pix_catalog != pix.size:
+            arr = np.take(arr, pix, axis=axis)
+        kwargs[key] = jnp.asarray(arr)
+        provenance = "global_table_sliced"
+    return kwargs, provenance
+
+
 def run_completion_validation(
     opts,
     data: dict,
@@ -362,6 +414,9 @@ def run_completion_validation(
     # completion_clip_diagnostics reports clip fractions of the completeness
     # ratio only, which are z_depth-independent, so threading the resolved
     # depth here would change nothing. Do not "fix" this without a reason.
+    # (With a Q_LSS table attached below, the reported logQ-clip fraction is the
+    # WHOLE-grid one; a depth-bounded run relaxes Q_eff -> 1 beyond the depth, so
+    # the number is an upper bound on the railing the likelihood will see.)
     survey = SurveyParams(
         n0=10.0 ** survey_values["log10n0"],
         z50=survey_values["z50"],
@@ -370,6 +425,9 @@ def run_completion_validation(
         b_miss=survey_values["b_miss"],
         alpha_miss=survey_values["alpha_miss"],
         sigma_kde=survey_values["sigma_kde"],
+    )
+    lss_kwargs, lss_attached = _completion_validation_lss_tables(
+        data, unique_pixels, int(data.get("n_pix_catalog", np.asarray(full_z).shape[0]))
     )
     em_catalog = EMCatalog(
         apix=data["apix"],
@@ -383,6 +441,7 @@ def run_completion_validation(
         dN_obs_kde=dN_obs_kde,
         pixel_to_cache_idx=None,
         unique_pixels=jnp.asarray(unique_pixels, dtype=jnp.int32),
+        **lss_kwargs,
     )
     diagnostics = completion_clip_diagnostics(
         cosmo=cosmo,
@@ -390,6 +449,7 @@ def run_completion_validation(
         em_catalog=em_catalog,
         max_pixels=max_pixels,
     )
+    diagnostics["lss_completion_attached"] = lss_attached
     diagnostics["survey_values"] = survey_values
     diagnostics["cosmology_values"] = {
         "H0": float(cosmo.H0),
@@ -458,6 +518,14 @@ def run_completion_validation_multitracer(
             apix=bundle["apix"],
             n_pix_catalog=bundle["n_pix_catalog"],
         )
+        # This catalog's OWN missing-galaxy rate factor: its Q_LSS table (or, with
+        # --use_lss and no Q, its per-pixel delta_g field).  Omitting them made
+        # every per-catalog dry run report the (1, N_grid) dummy overdensity, i.e.
+        # a 0.0 clip fraction, whatever the likelihood was actually going to use.
+        for key in ("delta_g_pix_z", "lss_completion_indexing",
+                    *_LSS_TABLE_ROW_AXIS):
+            if bundle.get(key) is not None:
+                data_k[key] = bundle[key]
         paths.append(
             run_completion_validation(
                 opts, data_k, prior_overrides, fixed_parameter_values,

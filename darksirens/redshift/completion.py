@@ -370,6 +370,102 @@ def build_field_normalization_inputs(
     )
 
 
+class FieldDepthInputs(NamedTuple):
+    """Flat FULL-SKY per-galaxy inputs for the DEPTH-truncated field normalizer.
+
+    Only needed when ``survey.z_depth`` is set: the global observed term then has
+    to be the depth-scaled count ``Sum_pix N_obs,pix * m_pix(theta)`` rather than
+    the raw ``N_obs_total`` (see :func:`field_observed_global_total`), and
+    ``m_pix`` depends on theta through the galaxy measure ``g(z)``, so the
+    per-galaxy kernel geometry must survive to the likelihood.
+    """
+
+    z: jnp.ndarray     # (N_gal_total,) float64 galaxy redshifts
+    dz: jnp.ndarray    # (N_gal_total,) float64 per-galaxy redshift sigma
+    c: jnp.ndarray     # (N_gal_total,) float64 N_obs,pix * w_i / Sum_{j in pix} w_j
+
+
+def build_field_depth_inputs(
+    full_z: jnp.ndarray,
+    full_dz: jnp.ndarray,
+    full_w: jnp.ndarray | None,
+    full_n: jnp.ndarray | None,
+) -> FieldDepthInputs:
+    """Host-side precompute for the DEPTH-consistent FIELD observed total.
+
+    With a survey depth the per-pixel numerator's observed branch integrates to
+    ``N_obs,pix * m_pix(theta)`` (``prior.py``'s ``Nobs * exp(log_depth_mass)``),
+    where
+
+        m_pix = Sum_{i in pix} (w_i / W_pix) * Z_i^depth / Z_i
+
+    is the catalog mixture's mass below the depth (``W_pix = Sum_j w_j``,
+    ``Z_i^depth / Z_i`` the truncated/full GL kernel norms of
+    :func:`darksirens.redshift.catalog._row_log_kernel_norms`).  The survey-global
+    normalizer must carry the SAME convention, so it needs
+
+        Sum_pix N_obs,pix * m_pix = Sum_{i, full sky} c_i * Z_i^depth / Z_i,
+        c_i = N_obs,pix(i) * w_i / W_pix(i),
+
+    a FLAT per-galaxy reduction (the pixel structure cancels).  ``c_i`` is
+    theta-INDEPENDENT and precomputed here; the ratio is theta-dependent (through
+    ``g(z)``, and through ``survey.sigma_kde`` in ``sigma_eff``) and is evaluated
+    per proposal by :func:`_field_depth_weighted_mass`.
+
+    Parameters mirror :func:`build_field_normalization_inputs` (FULL-sky padded
+    rows, one per HEALPix pixel) plus ``full_dz``, the padded per-galaxy sigma.
+    Real (non-padded) slots are selected by ``full_n`` (fallback ``full_w > 0``),
+    in the SAME row-major order as :func:`build_field_mark_inputs`, so the marked
+    normalizer can pair these ``z``/``dz`` with its own ``field_mark_w``.
+
+    Returns
+    -------
+    FieldDepthInputs
+        ``(z, dz, c)``, each ``(N_gal_total,)`` float64.  Kept at full precision
+        (not the f32 of ``dN_obs_s``): the ratio is exponentially sensitive to
+        ``(z_depth - z_i) / sigma_i``, and f64 keeps the global term bit-consistent
+        with the per-pixel numerator it must match.
+    """
+    z_np = np.asarray(full_z)
+    dz_np = np.asarray(full_dz)
+    if dz_np.shape != z_np.shape:
+        raise ValueError(
+            "build_field_depth_inputs: full_dz must have the same (N_pix, N_max) "
+            f"shape as full_z; got {dz_np.shape} vs {z_np.shape}."
+        )
+    if full_n is not None:
+        n_np = np.asarray(full_n).reshape(-1).astype(np.int64)
+        real = np.arange(z_np.shape[1])[None, :] < n_np[:, None]
+    elif full_w is not None:
+        real = np.asarray(full_w) > 0.0
+    else:
+        raise ValueError(
+            "build_field_depth_inputs requires full_n or full_w to mask padded "
+            "galaxy slots."
+        )
+
+    w_np = (
+        np.asarray(full_w, dtype=np.float64) if full_w is not None
+        else real.astype(np.float64)
+    )
+    w_np = np.where(real, w_np, 0.0)
+    # ``N_obs,pix`` is the real-galaxy COUNT (prior._row_counts), never the weight
+    # sum; ``W_pix`` is the weight sum the mixture normalises by.
+    n_obs_pix = (
+        np.asarray(full_n).reshape(-1).astype(np.float64) if full_n is not None
+        else real.sum(axis=-1).astype(np.float64)
+    )
+    W_pix = w_np.sum(axis=-1)
+    W_safe = np.where(W_pix > 0.0, W_pix, 1.0)
+    c_np = w_np * (n_obs_pix / W_safe)[:, None]
+
+    return FieldDepthInputs(
+        z=jnp.asarray(z_np[real], dtype=jnp.float64),
+        dz=jnp.asarray(dz_np[real], dtype=jnp.float64),
+        c=jnp.asarray(c_np[real], dtype=jnp.float64),
+    )
+
+
 def build_field_lss_q_inputs(
     logq_map: jnp.ndarray,
     occupied_pixels: np.ndarray,
@@ -936,11 +1032,165 @@ def completion_curves(
 # FIELD-convention global normalizer Z(theta)
 # ------------------------------------------------------------
 
+#: Galaxy-axis chunk for the flat below-depth mass reduction: (chunk, N_GL_nodes)
+#: intermediates, so 32k galaxies is ~6 MB at 24 nodes / f64.
+_FIELD_DEPTH_CHUNK: int = 1 << 15
+
+
+def _field_depth_weighted_mass(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    weights: jnp.ndarray,
+    chunk_size: int = _FIELD_DEPTH_CHUNK,
+) -> jnp.ndarray:
+    """``Sum_i weights_i * Z_i^depth / Z_i`` over the FLAT FULL-SKY galaxies.
+
+    The survey-global companion of ``kernels.log_depth_mass``: the per-galaxy
+    ratio of the below-depth to the full GL kernel norm, reusing
+    :func:`darksirens.redshift.catalog._row_log_kernel_norms` verbatim (SAME nodes,
+    SAME truncation, SAME ``sigma_eff`` floor) so the global observed term is
+    term-for-term the full-sky sum of the per-pixel numerator's depth-scaled count.
+
+    ``weights`` is ``(N_gal_total,)``, row-aligned with ``field_depth_z``:
+    ``field_depth_c`` for the plain galaxy-count host model, ``w_i h_i`` for the
+    marked one.  Differentiable in theta (cosmology + delta through ``g(z)``,
+    ``sigma_kde`` through ``sigma_eff``); chunked with ``lax.scan`` so the
+    ``(N_gal, N_nodes)`` quadrature intermediate never materialises whole.
+    """
+    # Deferred import: catalog.py imports log_galaxy_measure_grid from this module.
+    from darksirens.redshift.catalog import (
+        SIGMA_EFF_FLOOR,
+        _row_log_kernel_norms,
+    )
+
+    z_flat = em_catalog.field_depth_z
+    dz_flat = em_catalog.field_depth_dz
+    if z_flat is None or dz_flat is None:
+        raise ValueError(
+            "catalog_sky_weighting='field' with survey.z_depth set requires the "
+            "flat FULL-SKY depth inputs (field_depth_z / field_depth_dz / "
+            "field_depth_c) built via "
+            "darksirens.redshift.completion.build_field_depth_inputs -- without "
+            "them the global normalizer would count every above-depth catalogued "
+            "galaxy twice (once in N_obs_total, again in the missing budget) "
+            "while the per-pixel numerator counts it once."
+        )
+    z_flat = jnp.asarray(z_flat, dtype=zgrid.dtype)
+    dz_flat = jnp.asarray(dz_flat, dtype=zgrid.dtype)
+    w_flat = jnp.asarray(weights, dtype=zgrid.dtype)
+    if dz_flat.shape != z_flat.shape or w_flat.shape != z_flat.shape:
+        raise ValueError(
+            "field depth reduction: field_depth_z / field_depth_dz and the "
+            f"weights must be row-aligned (N_gal_total,); got {z_flat.shape}, "
+            f"{dz_flat.shape}, {w_flat.shape}. All three flat FULL-SKY arrays "
+            "must come from the SAME real-galaxy mask (build_field_depth_inputs "
+            "and build_field_mark_inputs use the same row-major order)."
+        )
+
+    log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+    n_gal = int(z_flat.shape[0])
+    chunk = int(chunk_size) if chunk_size and chunk_size > 0 else n_gal
+    chunk = max(1, min(chunk, max(n_gal, 1)))
+    pad = (-n_gal) % chunk
+    n_pad = n_gal + pad
+    z_pad = jnp.pad(z_flat, (0, pad))
+    dz_pad = jnp.pad(dz_flat, (0, pad))
+    w_pad = jnp.pad(w_flat, (0, pad))
+    valid = jnp.arange(n_pad) < n_gal
+    n_chunks = n_pad // chunk
+
+    def _body(acc, xs):
+        z_c, dz_c, w_c, val_c = xs
+        sig = jnp.maximum(
+            jnp.sqrt(dz_c ** 2 + survey.sigma_kde ** 2), SIGMA_EFF_FLOOR
+        )
+        log_Z_full = _row_log_kernel_norms(z_c, sig, val_c, log_g_grid)
+        log_Z_depth = _row_log_kernel_norms(
+            z_c, sig, val_c, log_g_grid, z_hi=survey.z_depth
+        )
+        ratio = jnp.where(val_c, jnp.exp(log_Z_depth - log_Z_full), 0.0)
+        return acc + jnp.sum(w_c * ratio), None
+
+    total, _ = lax.scan(
+        _body,
+        jnp.zeros((), dtype=zgrid.dtype),
+        (
+            z_pad.reshape(n_chunks, chunk),
+            dz_pad.reshape(n_chunks, chunk),
+            w_pad.reshape(n_chunks, chunk),
+            valid.reshape(n_chunks, chunk),
+        ),
+    )
+    return total
+
+
+def field_observed_global_total(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+) -> jnp.ndarray:
+    """Survey-GLOBAL observed host count in the NUMERATOR's depth convention.
+
+    ``survey.z_depth is None``: the raw full-sky galaxy count
+    ``field_N_obs_total`` (theta-independent; the legacy path, bit-identical).
+
+    ``survey.z_depth`` set: ``Sum_pix N_obs,pix * m_pix(theta)``, the depth-scaled
+    count that the per-pixel numerator uses (``prior.py``'s ``Nobs *
+    exp(kernels.log_depth_mass)``).  Using the raw total there counts every
+    above-depth catalogued galaxy TWICE -- once in ``N_obs_total``, again in the
+    missing budget, which ``_field_missing_curve`` relaxes to the full ``dN_exp``
+    beyond the depth.  On a 12-pixel full-sky fixture (9 occupied pixels, 6
+    galaxies each, half above ``z_depth=0.3``) the double count broke the
+    normalization identity ``Sum_pix integral p_field dz == 1``, driving the sky
+    mass to 0.64 at n0 = 1e-11 (the well-observed regime, where the observed count
+    is comparable to the missing budget).  At K=1 the whole ``log_Z_global``
+    cancels -- it enters the N per-event PE terms and the ``-N log mu`` selection
+    term the same number of times, whether or not it depends on theta -- so
+    single-catalog likelihood VALUES are bit-unchanged by this correction; at K>=2
+    each catalog's ``log_Z_global`` sits inside its own mixture branch and does
+    NOT cancel, so the double count became a spurious theta-dependent tilt on the
+    sampled host fractions.
+    """
+    if survey.z_depth is None:
+        return jnp.asarray(em_catalog.field_N_obs_total, dtype=zgrid.dtype)
+    if em_catalog.field_depth_c is None:
+        raise ValueError(
+            "catalog_sky_weighting='field' with survey.z_depth set requires "
+            "field_depth_c (the per-galaxy N_obs,pix * w_i / W_pix coefficients) "
+            "built via darksirens.redshift.completion.build_field_depth_inputs."
+        )
+    return _field_depth_weighted_mass(
+        cosmo, survey, em_catalog, jnp.asarray(em_catalog.field_depth_c)
+    )
+
+
+def field_marked_observed_global_total(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    log_h_flat: jnp.ndarray,
+) -> jnp.ndarray:
+    """Survey-GLOBAL observed MARKED mass in the numerator's depth convention.
+
+    ``Sum_{i, full sky} w_i h_i`` with no depth; with a depth, each galaxy's marked
+    mass is scaled by its below-depth kernel ratio, which is exactly the marked
+    amplitude ``exp(log_N_host + log_depth_mass)`` summed over the full sky (the
+    per-pixel marked mixture normalisation cancels).
+    """
+    w_flat = jnp.asarray(em_catalog.field_mark_w, dtype=zgrid.dtype)
+    h_flat = jnp.exp(jnp.asarray(log_h_flat, dtype=zgrid.dtype))
+    if survey.z_depth is None:
+        return jnp.sum(w_flat * h_flat)
+    return _field_depth_weighted_mass(cosmo, survey, em_catalog, w_flat * h_flat)
+
+
 def field_global_log_Z(
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
     chunk_size: int = 4096,
+    N_obs_total=None,
 ) -> jnp.ndarray:
     """log of the survey-GLOBAL FIELD normalizer for one parameter proposal.
 
@@ -968,17 +1218,27 @@ def field_global_log_Z(
     ``_assemble_curves`` (Python-level branch on the concrete ``z_depth``;
     ``None`` takes the untouched full-grid expression): beyond the depth every
     pixel has C == 0 and lss == 1, so ``V`` relaxes to the total pixel count and
-    the survey-global missing curve there is the full ``dN_exp`` per pixel.
+    the survey-global missing curve there is the full ``dN_exp`` per pixel.  The
+    observed term follows the SAME depth convention as the numerator (see
+    :func:`field_observed_global_total`): with a depth it is the depth-scaled
+    count ``Sum_pix N_obs,pix * m_pix(theta)``, so an above-depth catalogued
+    galaxy is represented ONCE, by the missing branch.
 
     Fully differentiable in ``theta`` (n0, cosmology, delta, and b_miss through
     the delta_g mode): the frozen inputs are ``field_dN_obs_s`` and the
     modulation rows (data constants).  The occupied-pixel reduction is chunked
     with ``lax.scan`` to bound peak memory at high nside.
+
+    ``N_obs_total`` may be passed precomputed: it is member-INDEPENDENT, so
+    :func:`field_global_log_Z_members` hoists the depth reduction out of its
+    member vmap instead of repeating it M times.
     """
     V_total, dN_exp = _field_missing_curve(
         cosmo, survey, em_catalog, chunk_size=chunk_size
     )
-    N_obs_total = jnp.asarray(em_catalog.field_N_obs_total, dtype=dN_exp.dtype)
+    if N_obs_total is None:
+        N_obs_total = field_observed_global_total(cosmo, survey, em_catalog)
+    N_obs_total = jnp.asarray(N_obs_total, dtype=dN_exp.dtype)
 
     N_miss_total = jnp.trapezoid(dN_exp * V_total, zgrid)
 
@@ -1103,6 +1363,9 @@ def field_global_log_Z_members(
     (``field_lss_q_members`` / ``field_lss_q_empty_sum_members``).  Consumed by
     the lss_marginalize member vmap in the likelihood core (each member state
     carries its own global normalizer under the field convention).
+
+    The observed term (``field_observed_global_total``, including the depth
+    reduction) is member-INDEPENDENT and is hoisted OUT of the member vmap.
     """
     q_members = em_catalog.field_lss_q_members
     q_empty_members = em_catalog.field_lss_q_empty_sum_members
@@ -1112,12 +1375,15 @@ def field_global_log_Z_members(
             "field_lss_q_empty_sum_members; build them via "
             "build_field_lss_q_member_inputs."
         )
+    N_obs_total = field_observed_global_total(cosmo, survey, em_catalog)
 
     def _one(q_m, q_empty_m):
         cat_m = em_catalog._replace(
             field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
         )
-        return field_global_log_Z(cosmo, survey, cat_m)
+        return field_global_log_Z(
+            cosmo, survey, cat_m, N_obs_total=N_obs_total
+        )
 
     return vmap(_one)(jnp.asarray(q_members), jnp.asarray(q_empty_members))
 
@@ -1128,10 +1394,11 @@ def field_global_log_Z_marked(
     em_catalog: EMCatalog,
     mu_miss: jnp.ndarray,
     log_h_flat: jnp.ndarray,
+    S_obs=None,
 ) -> jnp.ndarray:
     """Marked-host survey-GLOBAL normalizer.
 
-    ``Z(theta, eta) = Sum_{i in obs, full sky} w_i h(m_i | eta)
+    ``Z(theta, eta) = Sum_{i in obs, full sky} w_i h(m_i | eta) r_i(theta)
                       + integral mu_miss(z; eta) dN_exp(z) V(z; theta) dz``
 
     -- the marked analogue of :func:`field_global_log_Z`: the observed term is
@@ -1142,12 +1409,21 @@ def field_global_log_Z_marked(
     the FULL-SKY flat marks (``field_mark_*``), so the PE and selection states
     produce the SAME Z for the same (theta, eta) and the constants cancel
     structurally between the two likelihood seams.
+
+    ``r_i(theta)`` is the below-depth kernel-mass ratio, 1 when no
+    ``survey.z_depth`` is set: with a depth the numerator's marked amplitude is
+    ``exp(log_N_host + log_depth_mass)``, so the global marked mass must be
+    depth-scaled the same way (see :func:`field_marked_observed_global_total`).
+    ``S_obs`` may be passed precomputed -- it is member-INDEPENDENT, so
+    :func:`field_global_log_Z_marked_members` hoists it out of the member vmap.
     """
     V_total, dN_exp = _field_missing_curve(cosmo, survey, em_catalog)
 
-    w_flat = jnp.asarray(em_catalog.field_mark_w, dtype=dN_exp.dtype)
-    h_flat = jnp.exp(jnp.asarray(log_h_flat, dtype=dN_exp.dtype))
-    S_obs = jnp.sum(w_flat * h_flat)
+    if S_obs is None:
+        S_obs = field_marked_observed_global_total(
+            cosmo, survey, em_catalog, log_h_flat
+        )
+    S_obs = jnp.asarray(S_obs, dtype=dN_exp.dtype)
 
     # ``V_total`` already carries the beyond-depth relaxation (C == 0, lss == 1),
     # where ``mu_miss`` defaults to the homogeneous 1 (no observed galaxies to
@@ -1172,10 +1448,11 @@ def field_global_log_Z_marked_members(
     :func:`field_global_log_Z_marked` evaluation per Q-ensemble member, swapping
     only the member's Q rows / empty-pixel budget (``field_lss_q_members`` /
     ``field_lss_q_empty_sum_members``) into the missing curve.  The observed
-    marked mass ``Sum w_i h_i`` and the ``mu_miss(z | eta)`` factor are
-    member-INDEPENDENT (full-sky flat marks), so they are shared verbatim across
-    members -- reusing ``field_global_log_Z_marked`` guarantees the observed term
-    and mu_miss integrand are op-for-op identical to the scalar marked path.
+    marked mass (with its depth scaling) and the ``mu_miss(z | eta)`` factor are
+    member-INDEPENDENT (full-sky flat marks), so they are computed ONCE here and
+    shared verbatim across members -- reusing ``field_global_log_Z_marked``
+    guarantees the observed term and mu_miss integrand are op-for-op identical to
+    the scalar marked path.
     Consumed by the lss_marginalize member vmap in the likelihood core (each
     member state carries its own marked global normalizer under field weighting).
     """
@@ -1187,12 +1464,17 @@ def field_global_log_Z_marked_members(
             "field_lss_q_empty_sum_members; build them via "
             "build_field_lss_q_member_inputs."
         )
+    S_obs = field_marked_observed_global_total(
+        cosmo, survey, em_catalog, log_h_flat
+    )
 
     def _one(q_m, q_empty_m):
         cat_m = em_catalog._replace(
             field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
         )
-        return field_global_log_Z_marked(cosmo, survey, cat_m, mu_miss, log_h_flat)
+        return field_global_log_Z_marked(
+            cosmo, survey, cat_m, mu_miss, log_h_flat, S_obs=S_obs
+        )
 
     return vmap(_one)(jnp.asarray(q_members), jnp.asarray(q_empty_members))
 

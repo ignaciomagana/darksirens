@@ -93,7 +93,7 @@ def selection_prior_model(universe_model: str) -> str:
 #   the mark parser _gather_marks (mark_logmstar/logssfr/metallicity/color; zgals);
 #   field_global_log_Z / _members / _marked (field_dN_obs_s, field_n_empty,
 #       field_N_obs_total, field_lss_q(+_empty_sum)(+_members), field_delta_g,
-#       field_mark_z/w/values).
+#       field_mark_z/w/values, field_depth_z/dz/c under a survey depth).
 # The state is a PURE function of (model, cosmo, survey, mark params,
 # sky-weighting) plus these leaves, so two EMCatalogs sharing the SAME object for
 # every one of them yield the identical state.  Leaves prepare NEVER reads --
@@ -115,6 +115,7 @@ _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "field_lss_q_members", "field_lss_q_empty_sum_members",
     "field_delta_g",
     "field_mark_z", "field_mark_w", "field_mark_values",
+    "field_depth_z", "field_depth_dz", "field_depth_c",
 )
 
 # Prior models whose STATE is EMCatalog-derived and thus dedup-eligible across

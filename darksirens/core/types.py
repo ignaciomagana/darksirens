@@ -224,6 +224,18 @@ class EMCatalog(NamedTuple):
     field_mark_z: Any = None            # (N_gal_total,) float32 galaxy redshifts
     field_mark_w: Any = None            # (N_gal_total,) float32 base weights
     field_mark_values: Any = None       # (N_gal_total, n_marks) float32 z-centred marks
+    # DEPTH-truncated field normalizer: flat FULL-SKY per-galaxy kernel geometry
+    # so the survey-global OBSERVED term carries the same depth convention as the
+    # per-pixel numerator -- Sum_pix N_obs,pix * m_pix(theta), not the raw
+    # field_N_obs_total (which counts above-depth catalogued galaxies twice: once
+    # observed, again in the missing budget).  Populated ONLY when a
+    # ``survey.z_depth`` is active; built by
+    # :func:`darksirens.redshift.completion.build_field_depth_inputs`, consumed by
+    # :func:`darksirens.redshift.completion.field_observed_global_total`.  Same
+    # row-major galaxy order as the field_mark_* arrays.
+    field_depth_z: Any = None           # (N_gal_total,) float64 galaxy redshifts
+    field_depth_dz: Any = None          # (N_gal_total,) float64 per-galaxy sigma
+    field_depth_c: Any = None           # (N_gal_total,) float64 N_obs,pix*w_i/W_pix
 
 
 class GWEvent(NamedTuple):

@@ -10,6 +10,7 @@ from darksirens.catalogs.io import load_survey
 from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import (
     build_field_delta_g_inputs,
+    build_field_depth_inputs,
     build_field_lss_q_inputs,
     build_field_lss_q_member_inputs,
     build_field_mark_inputs,
@@ -23,7 +24,10 @@ from darksirens.catalogs.compact import (
     _compact_catalog_for_pixels,
     validate_loaded_survey_shapes,
 )
-from darksirens.likelihood.catalog_views import unique_inference_pixels
+from darksirens.likelihood.catalog_views import (
+    field_depth_inputs_required,
+    unique_inference_pixels,
+)
 from darksirens.catalogs.counterparts import build_counterpart_catalog
 from darksirens.catalogs.lss import maybe_load_lss_completion
 from darksirens.catalogs.marks import load_and_center_survey_marks
@@ -257,6 +261,19 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             bundle["field_n_empty"] = field.n_empty
             bundle["field_N_obs_total"] = field.N_obs_total
             bundle["field_occupied_pixels"] = field.occupied_pixels
+            # DEPTH-consistent global observed term: with a survey depth the raw
+            # field_N_obs_total counts every above-depth catalogued galaxy twice
+            # (once observed, again in the relaxed missing budget), so the
+            # normalizer needs the per-galaxy below-depth kernel geometry.  Built
+            # from the FULL-sky rows here -- the bundle is compacted below and the
+            # full rows are dropped.
+            if field_depth_inputs_required(opts, z_depth):
+                depth_inputs = build_field_depth_inputs(
+                    zgals, dzgals, wgals, ngals
+                )
+                bundle["field_depth_z"] = depth_inputs.z
+                bundle["field_depth_dz"] = depth_inputs.dz
+                bundle["field_depth_c"] = depth_inputs.c
             # Budget-modulation rows: mirror this catalog's deterministic Q
             # table into its survey-global normalizer so numerator and Z carry
             # the SAME missing-galaxy budget (field_global_log_Z).

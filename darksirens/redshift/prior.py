@@ -433,6 +433,21 @@ def prepare_redshift_prior_state(
                     "darksirens.redshift.completion.build_field_normalization_inputs "
                     "from the FULL-sky catalog (the union/full-catalog path)."
                 )
+            if survey.z_depth is not None and (
+                em_catalog.field_depth_z is None
+                or em_catalog.field_depth_dz is None
+                or em_catalog.field_depth_c is None
+            ):
+                raise ValueError(
+                    "catalog_sky_weighting='field' with a survey depth "
+                    f"(z_depth={survey.z_depth!r}) requires the flat FULL-SKY "
+                    "depth inputs (field_depth_z / field_depth_dz / "
+                    "field_depth_c) built via "
+                    "darksirens.redshift.completion.build_field_depth_inputs -- "
+                    "the global normalizer's OBSERVED term must carry the same "
+                    "depth scaling as the numerator (Sum_pix N_obs,pix * m_pix), "
+                    "or every above-depth catalogued galaxy is counted twice."
+                )
 
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
         curves = completion_curves(cosmo, survey, em_catalog)

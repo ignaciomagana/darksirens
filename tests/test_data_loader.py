@@ -497,3 +497,88 @@ def test_multitracer_bundle_loads_only_requested_mark_datasets(tmp_path, monkeyp
     assert captured["datasets"] == ("mark_logmstar",)
     assert bundles[0].get("mark_logmstar") is not None
     assert "mark_logssfr" not in bundles[0]
+
+
+def _write_depth_survey(path, nside=1, z_depth_attr=None):
+    """Tiny full-sky survey whose galaxies straddle a 0.3 depth."""
+    npix = hp.nside2npix(nside)
+    max_gals = 2
+    counts = np.zeros(npix, dtype=np.int32)
+    zgals = np.zeros((npix, max_gals))
+    dzgals = np.full((npix, max_gals), 0.02)
+    wgals = np.zeros((npix, max_gals))
+    for pix in (2, 5, 7):
+        counts[pix] = 2
+        zgals[pix, :2] = [0.10, 0.70]     # one below, one beyond the depth
+        wgals[pix, :2] = [1.0, 3.0]       # non-uniform: c_i = n_pix w_i / W_pix
+    with h5py.File(path, "w") as f:
+        f.attrs["nside"] = nside
+        if z_depth_attr is not None:
+            f.attrs["z_depth"] = float(z_depth_attr)
+        f.create_dataset("ngals", data=counts)
+        f.create_dataset("zgals", data=zgals)
+        f.create_dataset("dzgals", data=dzgals)
+        f.create_dataset("wgals", data=wgals)
+    return str(path), counts, zgals, dzgals, wgals
+
+
+def _depth_opts(paths, **overrides):
+    base = dict(
+        universe_model="dark_sirens",
+        survey_paths=list(paths),
+        lss_completions=[],
+        mark_model="none",
+        mark_names_by_catalog=None,
+        use_LSS=False,
+        lss_marginalize=False,
+        catalog_sky_weighting="field",
+        validate_completion=False,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.parametrize("via", ["cli_override", "file_attr"])
+def test_multitracer_bundles_carry_field_depth_inputs(tmp_path, via):
+    """FIELD weighting + a survey depth: each bundle must carry the flat FULL-SKY
+    depth inputs, from EITHER resolution source (--survey_z_depth or the
+    per-catalog f.attrs['z_depth']).  Without them the survey-global normalizer
+    would fall back to the raw N_obs_total and double count every above-depth
+    catalogued galaxy (the numerator scales N_obs by the below-depth mass), which
+    the likelihood now rejects loudly -- so the loader must build them where the
+    full-sky rows still exist, before compaction drops them."""
+    attr = 0.3 if via == "file_attr" else None
+    path, counts, zgals, _dz, wgals = _write_depth_survey(
+        tmp_path / "survey_depth.hdf5", z_depth_attr=attr
+    )
+    opts = _depth_opts([path], survey_z_depth=(0.3 if via == "cli_override" else None))
+    ra = np.zeros(2)
+    gw_inputs = dict(ra=ra, dec=ra.copy(), rasels=ra.copy(), decsels=ra.copy())
+
+    bundle = data_module.loaders.load_multitracer_catalog_bundles(opts, gw_inputs)[0]
+    n_gal = int(counts.sum())
+    for key in ("field_depth_z", "field_depth_dz", "field_depth_c"):
+        assert bundle.get(key) is not None, key
+        assert np.asarray(bundle[key]).shape == (n_gal,), key
+    # Row-major over occupied pixels, real slots only.
+    np.testing.assert_allclose(
+        np.asarray(bundle["field_depth_z"]), [0.10, 0.70] * 3, rtol=1e-12
+    )
+    # c_i = N_obs,pix * w_i / W_pix  ->  2 * [1, 3] / 4 = [0.5, 1.5]
+    np.testing.assert_allclose(
+        np.asarray(bundle["field_depth_c"]), [0.5, 1.5] * 3, rtol=1e-12
+    )
+
+
+def test_multitracer_bundles_omit_field_depth_inputs_without_a_depth(tmp_path):
+    """No depth in force -> the (N_gal_total,) f64 flat arrays are NOT built: they
+    are read only by the depth convention, and this is the memory contract that
+    keeps them off the device for every other run."""
+    path, *_ = _write_depth_survey(tmp_path / "survey_nodepth.hdf5")
+    opts = _depth_opts([path], survey_z_depth=None)
+    ra = np.zeros(2)
+    gw_inputs = dict(ra=ra, dec=ra.copy(), rasels=ra.copy(), decsels=ra.copy())
+    bundle = data_module.loaders.load_multitracer_catalog_bundles(opts, gw_inputs)[0]
+    assert bundle.get("field_dN_obs_s") is not None      # field inputs ARE built
+    for key in ("field_depth_z", "field_depth_dz", "field_depth_c"):
+        assert key not in bundle, key

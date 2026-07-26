@@ -11,6 +11,7 @@ import numpy as np
 
 from darksirens.redshift.completion import (
     build_field_delta_g_inputs,
+    build_field_depth_inputs,
     build_field_lss_q_inputs,
     build_field_lss_q_member_inputs,
     build_field_mark_inputs,
@@ -24,6 +25,27 @@ DARK_SIREN_CACHE_MODELS = {"dark_sirens"}
 def barrier(arr: jnp.ndarray) -> jnp.ndarray:
     """Apply the pre-JIT optimization barrier used by likelihood closures."""
     return lax.optimization_barrier(jnp.asarray(arr))
+
+
+def field_depth_inputs_required(opts, z_depth_attr) -> bool:
+    """Whether this catalog needs the flat FULL-SKY field DEPTH inputs.
+
+    True iff FIELD sky weighting is active AND a survey depth will be in force for
+    this catalog, in which case the survey-global normalizer's observed term must
+    be the depth-scaled count ``Sum_pix N_obs,pix * m_pix(theta)`` and needs the
+    per-galaxy kernel geometry (:func:`build_field_depth_inputs`).  The depth is in
+    force iff the ``--survey_z_depth`` CLI override or the per-catalog file
+    attribute is set -- the two inputs of ``cli.inference.resolve_survey_z_depth``,
+    whose result is non-None iff one of them is.  Checked here (rather than
+    building unconditionally) because the inputs are ``(N_gal_total,)`` f64 flat
+    arrays that only the depth convention reads.
+    """
+    if getattr(opts, "catalog_sky_weighting", "conditional") != "field":
+        return False
+    return (
+        getattr(opts, "survey_z_depth", None) is not None
+        or z_depth_attr is not None
+    )
 
 
 def _global_cache_lookup(unique_pixels, n_rows: int, identity_lookup):
@@ -101,6 +123,11 @@ class CatalogViews:
     field_mark_z: jnp.ndarray | None = None           # (N_gal_total,) f32
     field_mark_w: jnp.ndarray | None = None           # (N_gal_total,) f32
     field_mark_values: jnp.ndarray | None = None      # (N_gal_total, n_marks) f32
+    # DEPTH-truncated field normalizer: flat FULL-SKY per-galaxy kernel geometry,
+    # built ONLY when a survey depth is active (build_field_depth_inputs).
+    field_depth_z: jnp.ndarray | None = None          # (N_gal_total,) f64
+    field_depth_dz: jnp.ndarray | None = None         # (N_gal_total,) f64
+    field_depth_c: jnp.ndarray | None = None          # (N_gal_total,) f64
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -351,6 +378,7 @@ def prepare_catalog_views(
     field_delta_g = None
     field_lss_q_members = field_lss_q_empty_sum_members = None
     field_mark_z = field_mark_w = field_mark_values = None
+    field_depth_z = field_depth_dz = field_depth_c = None
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         occupied_np = None
         if data.get("field_dN_obs_s") is not None:
@@ -364,12 +392,37 @@ def prepare_catalog_views(
                 occupied_np = np.asarray(
                     data["field_occupied_pixels"], dtype=np.int32
                 )
+            # Depth inputs travel with them (the multitracer bundles are already
+            # compacted here, so they cannot be rebuilt from full-sky rows).
+            if data.get("field_depth_z") is not None:
+                field_depth_z = barrier(
+                    jnp.asarray(data["field_depth_z"], dtype=jnp.float64)
+                )
+                field_depth_dz = barrier(
+                    jnp.asarray(data["field_depth_dz"], dtype=jnp.float64)
+                )
+                field_depth_c = barrier(
+                    jnp.asarray(data["field_depth_c"], dtype=jnp.float64)
+                )
         elif all(v is not None for v in (full_z, full_w, full_n)):
             field = build_field_normalization_inputs(full_z, full_w, full_n)
             field_dN_obs_s = barrier(field.dN_obs_s)
             field_n_empty = jnp.asarray(field.n_empty, dtype=jnp.float64)
             field_N_obs_total = jnp.asarray(field.N_obs_total, dtype=jnp.float64)
             occupied_np = np.asarray(field.occupied_pixels, dtype=np.int32)
+            # DEPTH-consistent global observed term: with a survey depth the raw
+            # field_N_obs_total counts every above-depth catalogued galaxy twice
+            # (observed AND missing), so the normalizer needs the per-galaxy
+            # below-depth kernel geometry.  Built from the FULL-sky rows, before
+            # compaction / --drop_full_catalog, exactly like the mark inputs.
+            if field_depth_inputs_required(opts, data.get("z_depth")) \
+                    and full_dz is not None:
+                depth_inputs = build_field_depth_inputs(
+                    full_z, full_dz, full_w, full_n
+                )
+                field_depth_z = barrier(depth_inputs.z)
+                field_depth_dz = barrier(depth_inputs.dz)
+                field_depth_c = barrier(depth_inputs.c)
         # else: leave None -> the likelihood raises a clear scope error (field
         # mode needs the full-sky catalog rows to count empty pixels).
 
@@ -593,4 +646,7 @@ def prepare_catalog_views(
         field_mark_z=field_mark_z,
         field_mark_w=field_mark_w,
         field_mark_values=field_mark_values,
+        field_depth_z=field_depth_z,
+        field_depth_dz=field_depth_dz,
+        field_depth_c=field_depth_c,
     )

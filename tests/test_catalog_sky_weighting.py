@@ -35,9 +35,11 @@ from darksirens.redshift import zgrid
 from darksirens.redshift.completion import (
     _kde_dndz_obs,
     _precompute_grids,
+    build_field_depth_inputs,
     build_field_normalization_inputs,
     field_global_log_Z,
 )
+from darksirens.utils.cosmology import dV_of_z
 from darksirens.redshift.prior import (
     eval_redshift_prior_with_state,
     prepare_redshift_prior_state,
@@ -46,6 +48,11 @@ from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.gw.populations import pop_model_prior_parser
 from darksirens.gw.populations.registry import get_fixed_population_params
 from darksirens.likelihood.factory import make_likelihood
+
+# ``np.trapz`` was renamed ``np.trapezoid`` in NumPy 2; bind whichever the
+# installed version provides (identical algorithm) so the brute-force
+# assemblies below run on either.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
 
 
 # ---------------------------------------------------------------------------
@@ -78,17 +85,24 @@ def _synthetic_full_sky(npix=12, maxg=3, seed=0):
     return zgals, dzgals, wgals, ngals
 
 
-def _catalog_with_field(zgals, wgals, ngals, apix=1.0):
+def _catalog_with_field(zgals, wgals, ngals, apix=1.0, dzgals=None):
     """Build an EMCatalog carrying the field-normalization inputs (on-the-fly
     KDE fallback, ``dN_obs_kde=None`` -- the same recipe field_global_log_Z
-    reproduces)."""
+    reproduces), including the flat full-sky DEPTH inputs the global observed
+    term needs whenever a ``z_depth`` is in force."""
+    if dzgals is None:
+        dzgals = np.full_like(zgals, 0.02)
     fobs, n_empty, N_obs_total, _occ = build_field_normalization_inputs(
         jnp.asarray(zgals), jnp.asarray(wgals), jnp.asarray(ngals)
+    )
+    depth = build_field_depth_inputs(
+        jnp.asarray(zgals), jnp.asarray(dzgals), jnp.asarray(wgals),
+        jnp.asarray(ngals),
     )
     return EMCatalog(
         apix=apix,
         zgals=jnp.asarray(zgals),
-        dzgals=jnp.asarray(np.full_like(zgals, 0.02)),
+        dzgals=jnp.asarray(dzgals),
         wgals=jnp.asarray(wgals),
         ngals=jnp.asarray(ngals),
         delta_g_pix_z=jnp.zeros((1, len(zgrid))),
@@ -97,16 +111,81 @@ def _catalog_with_field(zgals, wgals, ngals, apix=1.0):
         field_dN_obs_s=fobs,
         field_n_empty=jnp.asarray(float(n_empty)),
         field_N_obs_total=jnp.asarray(float(N_obs_total)),
+        field_depth_z=depth.z,
+        field_depth_dz=depth.dz,
+        field_depth_c=depth.c,
     )
 
 
-def _brute_force_Z(cosmo, survey, zgals, ngals, apix=1.0, z_depth=None):
+def _log_g_numpy(cosmo, survey, zq):
+    """g(z) = dV_c/dz (1+z)^delta on an arbitrary NumPy grid."""
+    g = np.asarray(
+        dV_of_z(jnp.asarray(zq), cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+    ) * (1.0 + zq) ** survey.delta
+    return g
+
+
+def _kernel_mass_numpy(cosmo, survey, z_i, sig, z_hi, n=40001):
+    """``integral_0^{z_hi} N(z; z_i, sig) g(z) dz`` by dense NumPy quadrature.
+
+    Independent of the library's Gauss-Legendre substitution: a +-12 sigma window
+    (the discarded tails are ~1e-32 of the mass) sampled densely enough that the
+    trapezoid error is ~1e-12 relative.  The normalising 1/(sig sqrt(2pi)) is
+    dropped -- only ratios of these masses are used.
+    """
+    lo = max(0.0, z_i - 12.0 * sig)
+    hi = min(z_hi, z_i + 12.0 * sig)
+    if hi <= lo:
+        return 0.0
+    zq = np.linspace(lo, hi, n)
+    k = np.exp(-0.5 * ((zq - z_i) / sig) ** 2)
+    return float(_trapz(k * _log_g_numpy(cosmo, survey, zq), zq))
+
+
+def _below_depth_mass_numpy(cosmo, survey, zgals, dzgals, wgals, ngals, p, z_depth):
+    """``m_pix``: the catalog mixture's mass below ``z_depth`` for pixel ``p``.
+
+    ``m = Sum_i (w_i / W_pix) Z_i^depth / Z_i`` -- the quantity the per-pixel
+    numerator scales ``N_obs`` by (``kernels.log_depth_mass``), rebuilt here from
+    first principles in NumPy.
+    """
+    if z_depth is None:
+        return 1.0
+    zmax = float(np.asarray(zgrid)[-1])
+    n_real = int(ngals[p])
+    w = np.asarray(wgals, dtype=float)[p, :n_real]
+    zs = np.asarray(zgals, dtype=float)[p, :n_real]
+    dzs = np.asarray(dzgals, dtype=float)[p, :n_real]
+    sig = np.maximum(np.sqrt(dzs ** 2 + float(survey.sigma_kde) ** 2), 1e-4)
+    W = w.sum()
+    m = 0.0
+    for i in range(n_real):
+        full = _kernel_mass_numpy(cosmo, survey, zs[i], sig[i], zmax)
+        below = _kernel_mass_numpy(cosmo, survey, zs[i], sig[i], z_depth)
+        m += (w[i] / W) * (below / full)
+    return m
+
+
+def _brute_force_Z(cosmo, survey, zgals, ngals, apix=1.0, z_depth=None,
+                   dzgals=None, wgals=None):
     """Pure-NumPy global normalizer Z from first principles: per pixel
-    ``N_obs + trapz(dN_miss)`` with the missing density ``(1 - C) dN_exp`` below
-    ``z_depth`` and the FULL ``dN_exp`` (C := 0) beyond it (hosts past the depth
-    are missing, not nonexistent); ``C`` is computed independently via the
-    matched KDE / smoothed expected-count ratio."""
+    ``N_obs * m_pix + trapz(dN_miss)`` with the missing density
+    ``(1 - C) dN_exp`` below ``z_depth`` and the FULL ``dN_exp`` (C := 0) beyond
+    it (hosts past the depth are missing, not nonexistent); ``C`` is computed
+    independently via the matched KDE / smoothed expected-count ratio.
+
+    The observed term carries the NUMERATOR's depth convention: ``m_pix`` is the
+    catalog mixture's below-depth mass, so a galaxy catalogued beyond the depth is
+    represented ONCE, by the relaxed missing branch.  Multiplying by ``m_pix`` is
+    exactly what the pre-fix ``field_global_log_Z`` omitted -- it added the raw
+    ``N_obs``, double counting every above-depth galaxy.
+    """
     npix = zgals.shape[0]
+    if dzgals is None:
+        dzgals = np.full_like(zgals, 0.02)
+    if wgals is None:
+        wgals = (np.arange(zgals.shape[1])[None, :] < np.asarray(ngals)[:, None]
+                 ).astype(float)
     cat = EMCatalog(
         apix=apix, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(zgals),
         wgals=None, ngals=jnp.asarray(ngals),
@@ -123,8 +202,10 @@ def _brute_force_Z(cosmo, survey, zgals, ngals, apix=1.0, z_depth=None):
     Z = 0.0
     for p in range(npix):
         nobs = int(ngals[p])
-        Z += nobs
         if nobs > 0:
+            Z += nobs * _below_depth_mass_numpy(
+                cosmo, survey, zgals, dzgals, wgals, ngals, p, z_depth
+            )
             obs = np.asarray(
                 _kde_dndz_obs(p, jnp.asarray(zgals), ngals=jnp.asarray(ngals))
             )
@@ -132,7 +213,7 @@ def _brute_force_Z(cosmo, survey, zgals, ngals, apix=1.0, z_depth=None):
             obs = np.zeros_like(zg)
         C = np.clip(obs / dN_exp_safe, 0.0, 1.0)
         dN_miss = below * (1.0 - C) * dN_exp + (1.0 - below) * dN_exp
-        Z += np.trapezoid(dN_miss, zg)
+        Z += _trapz(dN_miss, zg)
     return Z
 
 
@@ -141,20 +222,180 @@ def _brute_force_Z(cosmo, survey, zgals, ngals, apix=1.0, z_depth=None):
 # ---------------------------------------------------------------------------
 
 def test_field_global_Z_matches_bruteforce():
+    """The depths cover all three regimes: no depth; a depth ABOVE every galaxy
+    (m == 1, the no-op z_depth asserts); and a depth BITING the catalog (galaxies
+    at 0.25/0.28/0.30/0.32 sit beyond 0.22), where the pre-fix normalizer added
+    the raw N_obs and the brute force adds N_obs * m_pix."""
     cosmo = _cosmo()
-    zgals, _dz, wgals, ngals = _synthetic_full_sky()
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
     apix = hp.nside2pixarea(1)
 
-    for z_depth in (None, float(np.asarray(zgrid)[len(zgrid) // 3])):
+    for z_depth in (None, float(np.asarray(zgrid)[len(zgrid) // 3]), 0.22):
         survey = _survey(n0=1e-2, z_depth=z_depth)
-        cat = _catalog_with_field(zgals, wgals, ngals, apix=apix)
+        cat = _catalog_with_field(zgals, wgals, ngals, apix=apix, dzgals=dzgals)
         Z = float(np.exp(np.asarray(field_global_log_Z(cosmo, survey, cat))))
-        Z_bf = _brute_force_Z(cosmo, survey, zgals, ngals, apix=apix, z_depth=z_depth)
+        Z_bf = _brute_force_Z(cosmo, survey, zgals, ngals, apix=apix,
+                              z_depth=z_depth, dzgals=dzgals, wgals=wgals)
         rel = abs(Z - Z_bf) / Z_bf
         # f32 field table -> the achieved tolerance is far tighter than the 1e-6
         # budget (the empty-pixel + total-count terms are exact f64), but assert
         # against the documented ceiling.
         assert rel <= 1e-6, (z_depth, Z, Z_bf, rel)
+
+
+def _deep_full_sky(npix=12, n_occ=9, n_gal=6, z_depth=0.3, seed=3):
+    """The F-1/F-2 fixture: 9 of 12 pixels occupied, 6 galaxies each, HALF of
+    them beyond ``z_depth`` -- the regime where the pre-fix global normalizer
+    counted the above-depth galaxies twice."""
+    rng = np.random.default_rng(seed)
+    zgals = np.zeros((npix, n_gal))
+    wgals = np.zeros((npix, n_gal))
+    ngals = np.zeros(npix, dtype=np.int32)
+    for p in range(n_occ):
+        below = rng.uniform(0.05, z_depth - 0.02, size=n_gal // 2)
+        above = rng.uniform(z_depth + 0.05, 0.9, size=n_gal - n_gal // 2)
+        zgals[p, :] = np.concatenate([below, above])
+        wgals[p, :] = 1.0
+        ngals[p] = n_gal
+    return zgals, np.full((npix, n_gal), 0.02), wgals, ngals
+
+
+def _sky_integrated_prior_mass(cosmo, survey, cat, npix):
+    """``Sum_pix integral p_field(z, pix) dz`` -- must be 1 for a FULL-SKY catalog.
+
+    The rows of ``cat`` ARE the sky (no compaction), so summing each row's prior
+    mass covers every pixel: occupied rows contribute their catalog + missing
+    branches, empty rows their pure missing branch.
+    """
+    state = prepare_redshift_prior_state(
+        "dark_sirens", cosmo, survey, cat, catalog_sky_weighting="field"
+    )
+    zg = np.asarray(zgrid)
+    total = 0.0
+    for p in range(npix):
+        lp = np.asarray(eval_redshift_prior_with_state(
+            "dark_sirens", state, jnp.asarray(zg),
+            jnp.full(zg.size, p, dtype=jnp.int32), cosmo, survey, cat,
+            catalog_sky_weighting="field",
+        ))
+        total += float(_trapz(np.exp(lp), zg))
+    return total, state
+
+
+@pytest.mark.parametrize("z_depth", [None, 0.3])
+def test_field_prior_integrates_to_unity_over_the_sky(z_depth):
+    """THE field-convention invariant: the prior is a density over (z, pixel), so
+    over a FULL-SKY catalog it must integrate to 1 -- for every n0 and with or
+    without a survey depth.
+
+    Regression for F-1/F-2: the global normalizer used the RAW
+    ``field_N_obs_total`` while the per-pixel numerator's observed branch
+    integrates to ``N_obs * m_pix``, so every above-depth catalogued galaxy was
+    counted once as observed and again in the (relaxed) missing budget.  On this
+    fixture the sky mass fell to 0.640 / 0.770 / 0.898 / 0.988 for
+    n0 = 1e-11 / 3e-11 / 1e-10 / 1e-9 -- worst exactly where the observed count is
+    comparable to the missing budget (the well-observed regime).  No pre-existing
+    test checked this identity.
+    """
+    cosmo = _cosmo()
+    zgals, dzgals, wgals, ngals = _deep_full_sky()
+    npix = zgals.shape[0]
+    apix = hp.nside2pixarea(1)
+    cat = _catalog_with_field(zgals, wgals, ngals, apix=apix, dzgals=dzgals)
+
+    for n0 in (1e-11, 3e-11, 1e-10, 1e-9, 1e-2):
+        survey = _survey(n0=n0, z_depth=z_depth)
+        mass, _state = _sky_integrated_prior_mass(cosmo, survey, cat, npix)
+        # 1e-3 covers the trapezoid error of integrating the sigma = 0.02 catalog
+        # kernels on the shared (log-spaced, ~0.0023-wide) zgrid; the defect this
+        # guards against is 36% at the first n0.
+        assert abs(mass - 1.0) < 1e-3, (z_depth, n0, mass)
+
+
+def test_field_depth_normalizer_is_jittable_and_differentiable():
+    """The depth-scaled observed term is a lax.scan over the flat full-sky
+    galaxies, so it must jit and carry finite reverse-mode gradients in every
+    channel it depends on -- including ``sigma_kde``, which the pre-fix constant
+    ``field_N_obs_total`` did not depend on at all."""
+    zgals, dzgals, wgals, ngals = _deep_full_sky()
+    cat = _catalog_with_field(zgals, wgals, ngals, apix=hp.nside2pixarea(1),
+                              dzgals=dzgals)
+
+    def f(H0, log10n0, delta, sigma_kde):
+        cosmo = CosmoParams(H0=H0, Om0=0.3075, w0=-1.0, wa=0.0)
+        survey = SurveyParams(
+            n0=10.0 ** log10n0, z50=1.0, w=0.5, delta=delta, b_miss=1.0,
+            alpha_miss=1.0, sigma_kde=sigma_kde, z_depth=0.3,
+        )
+        return field_global_log_Z(cosmo, survey, cat)
+
+    args = (67.74, -10.0, 0.2, 0.03)
+    assert np.isfinite(float(jax.jit(f)(*args)))
+    grads = jax.grad(f, argnums=(0, 1, 2, 3))(*args)
+    for i, g in enumerate(grads):
+        assert np.isfinite(float(g)) and float(g) != 0.0, (i, float(g))
+        a, b = list(args), list(args)
+        h = 1e-4 if i == 0 else 1e-5
+        a[i] += h
+        b[i] -= h
+        fd = (float(f(*a)) - float(f(*b))) / (2.0 * h)
+        np.testing.assert_allclose(float(g), fd, rtol=1e-5)
+
+
+def test_field_observed_total_is_the_full_sky_depth_scaled_count():
+    """Exact (1e-12) identity between the two halves of the fix: the survey-global
+    observed term equals ``Sum_pix N_obs,pix * exp(log_depth_mass_pix)``, the
+    per-pixel amplitude the numerator uses.  Non-uniform weights, so the flat
+    reduction's ``c_i = N_obs,pix * w_i / W_pix`` is exercised."""
+    from darksirens.redshift.catalog import catalog_kernel_state
+    from darksirens.redshift.completion import field_observed_global_total
+
+    cosmo = _cosmo()
+    zgals, dzgals, wgals, ngals = _deep_full_sky()
+    rng = np.random.default_rng(5)
+    wgals = np.where(wgals > 0.0, rng.uniform(0.3, 3.0, size=wgals.shape), 0.0)
+    cat = _catalog_with_field(zgals, wgals, ngals, dzgals=dzgals)
+
+    for z_depth in (None, 0.3):
+        survey = _survey(z_depth=z_depth)
+        got = float(field_observed_global_total(cosmo, survey, cat))
+        kernels = catalog_kernel_state(cosmo, survey, cat, z_depth=z_depth)
+        expect = float(np.sum(
+            np.asarray(ngals, dtype=float)
+            * np.exp(np.asarray(kernels.log_depth_mass))
+        ))
+        np.testing.assert_allclose(got, expect, rtol=1e-12)
+    # The depth genuinely bites: half the galaxies sit beyond it.
+    assert float(field_observed_global_total(cosmo, _survey(z_depth=0.3), cat)) \
+        < 0.6 * float(np.asarray(cat.field_N_obs_total))
+
+
+@pytest.mark.parametrize("z_depth", [None, 0.3])
+def test_field_global_Z_is_the_full_sky_sum_of_per_pixel_Z(z_depth):
+    """Exact algebraic form of the same invariant: for a full-sky catalog the
+    survey-global normalizer IS the sum of the per-pixel (conditional) ones.
+
+    Non-uniform galaxy weights, so the per-galaxy coefficient
+    ``c_i = N_obs,pix * w_i / W_pix`` in the flat depth reduction is genuinely
+    exercised (it is 1 only for unit weights).
+    """
+    cosmo = _cosmo()
+    zgals, dzgals, wgals, ngals = _deep_full_sky()
+    rng = np.random.default_rng(11)
+    wgals = np.where(wgals > 0.0, rng.uniform(0.3, 3.0, size=wgals.shape), 0.0)
+    apix = hp.nside2pixarea(1)
+    cat = _catalog_with_field(zgals, wgals, ngals, apix=apix, dzgals=dzgals)
+
+    for n0 in (1e-11, 1e-10, 1e-2):
+        survey = _survey(n0=n0, z_depth=z_depth)
+        Z_global = float(np.exp(np.asarray(field_global_log_Z(cosmo, survey, cat))))
+        st_cond = prepare_redshift_prior_state(
+            "dark_sirens", cosmo, survey, cat, catalog_sky_weighting="conditional"
+        )
+        Z_sum = float(np.sum(np.exp(np.asarray(st_cond.log_Z))))
+        rel = abs(Z_global - Z_sum) / Z_sum
+        # f32 field_dN_obs_s in the global completeness is the only difference.
+        assert rel <= 1e-6, (z_depth, n0, Z_global, Z_sum, rel)
 
 
 # ---------------------------------------------------------------------------
@@ -264,16 +505,23 @@ def _mid_pop():
     return 0.5 * (float(pop_lower[0]) + float(pop_upper[0]))
 
 
-def _full_sky_data(nsamp=2, n_sel=8):
+def _full_sky_data(nsamp=2, n_sel=8, deep=False):
     """test_selection_prior_model-style full-sky single-catalog data dict (the
-    union/full-catalog path, so make_likelihood builds field inputs itself)."""
+    union/full-catalog path, so make_likelihood builds field inputs itself).
+
+    ``deep=True`` adds a second galaxy per pixel BEYOND a 0.3 depth, so the
+    depth-scaled and raw observed totals differ by ~2x.
+    """
     nside = 1
     n_pix = hp.nside2npix(nside)
-    zgals = np.full((n_pix, 1), 0.10, dtype=float)
+    n_gal = 2 if deep else 1
+    zgals = np.full((n_pix, n_gal), 0.10, dtype=float)
     zgals[2, 0] = 0.28
-    dzgals = np.full((n_pix, 1), 0.02, dtype=float)
-    wgals = np.ones((n_pix, 1), dtype=float)
-    ngals = np.ones(n_pix, dtype=np.int32)
+    if deep:
+        zgals[:, 1] = 0.70
+    dzgals = np.full((n_pix, n_gal), 0.02, dtype=float)
+    wgals = np.ones((n_pix, n_gal), dtype=float)
+    ngals = np.full(n_pix, n_gal, dtype=np.int32)
     return {
         "nEvents": 1, "nsamp": nsamp, "Ndraw": float(n_sel),
         "apix": hp.nside2pixarea(nside), "nside": nside, "n_pix_catalog": n_pix,
@@ -338,6 +586,79 @@ def test_field_mode_changes_normalizer_and_grad_finite():
 
     grad = jax.grad(lambda c: ll_field(c))(jnp.asarray([_mid_pop()]))
     assert np.all(np.isfinite(np.asarray(grad)))
+
+
+def test_k1_field_likelihood_is_invariant_to_the_global_Z_convention():
+    """K=1 INVARIANCE: ``log_Z_global`` enters the per-event PE terms and the
+    ``-N log mu`` selection term the same number of times, so it cancels exactly.
+    The F-1/F-2 fix therefore must NOT move any single-catalog likelihood value --
+    only K>=2, where each catalog's ``Z_k`` sits inside its own mixture branch.
+
+    Verified by running the SAME configuration twice, once with the pre-fix global
+    observed term (the raw ``field_N_obs_total``, monkeypatched in) on a catalog
+    whose galaxies extend well past the depth -- a ~2x error in Z -- and asserting
+    the log-likelihood is unchanged.  ``darksiren_log_likelihood`` is a
+    MODULE-LEVEL ``jax.jit``, so its cache is keyed on static args + input avals,
+    NOT on the factory closure: without ``jax.clear_caches()`` the second build
+    silently reuses the first trace and this test would pass vacuously.  The spy
+    counter is the guard that it did not.
+    """
+    import darksirens.redshift.completion as completion
+
+    data = _full_sky_data(deep=True)
+    opts = _base_opts(
+        catalog_sky_weighting="field",
+        survey_z_depth=0.3, resolved_survey_z_depths=[0.3],
+    )
+    _ll, v_fixed = _single_ll_value(opts, dict(data))
+
+    fixed_fn = completion.field_observed_global_total
+    cosmo, survey = _cosmo(), _survey(z_depth=0.3)
+    cat = _catalog_with_field(
+        np.asarray(data["zgals"]), np.asarray(data["wgals"]),
+        np.asarray(data["ngals_catalog"]), apix=data["apix"],
+        dzgals=np.asarray(data["dzgals"]),
+    )
+    n_depth = float(fixed_fn(cosmo, survey, cat))
+    n_raw = float(np.asarray(cat.field_N_obs_total))
+    assert n_depth < 0.6 * n_raw, (n_depth, n_raw)   # the conventions differ a lot
+
+    calls = []
+
+    def _prefix_convention(_cosmo, _survey, em):
+        calls.append(1)
+        return jnp.asarray(em.field_N_obs_total, dtype=jnp.float64)
+
+    completion.field_observed_global_total = _prefix_convention
+    jax.clear_caches()
+    try:
+        _ll_b, v_prefix = _single_ll_value(opts, dict(data))
+    finally:
+        completion.field_observed_global_total = fixed_fn
+        jax.clear_caches()
+
+    assert calls, "the pre-fix convention was never traced (stale jit cache)"
+    assert np.isfinite(v_fixed)
+    # Analytic cancellation; only floating-point re-association separates them.
+    assert abs(v_fixed - v_prefix) <= 1e-9 * max(1.0, abs(v_fixed)), (
+        v_fixed, v_prefix
+    )
+
+
+def test_field_with_depth_requires_the_flat_depth_inputs():
+    """Loud failure instead of a silent double count: a field-mode catalog with a
+    survey depth but no ``field_depth_*`` arrays must be rejected."""
+    cosmo, survey = _cosmo(), _survey(z_depth=0.3)
+    zgals, dzgals, wgals, ngals = _deep_full_sky()
+    cat = _catalog_with_field(zgals, wgals, ngals, dzgals=dzgals)
+    cat = cat._replace(field_depth_z=None, field_depth_dz=None, field_depth_c=None)
+    with pytest.raises(ValueError, match="field_depth_z"):
+        prepare_redshift_prior_state(
+            "dark_sirens", cosmo, survey, cat, catalog_sky_weighting="field"
+        )
+    # ... and the normalizer itself refuses, not just the state gate.
+    with pytest.raises(ValueError, match="field_depth"):
+        field_global_log_Z(cosmo, survey, cat)
 
 
 # ---------------------------------------------------------------------------

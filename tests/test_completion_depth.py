@@ -33,6 +33,9 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import h5py
 import pytest
 
@@ -157,7 +160,7 @@ def test_z_depth_relaxes_missing_budget_beyond_depth():
     np.testing.assert_allclose(C_eff_bounded[:, above], 0.0, atol=1e-12)
 
     # N_miss is the FULL-grid quadrature of the relaxed density.
-    expected = np.trapezoid(
+    expected = _trapezoid(
         np.where(above[None, :], dN_exp[None, :], dN_miss_full), zgrid_np, axis=-1
     )
     np.testing.assert_allclose(

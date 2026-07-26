@@ -46,10 +46,17 @@ import jax.numpy as jnp
 import numpy as np
 
 from darksirens.redshift import zgrid
-from darksirens.redshift.completion import build_field_normalization_inputs
+from darksirens.redshift.completion import (
+    build_field_depth_inputs,
+    build_field_normalization_inputs,
+)
 from darksirens.gw.populations.registry import get_fixed_population_params
 from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
 from darksirens.utils.cosmology import dL_of_z, dV_of_z, ddL_of_z
+
+# ``np.trapz`` was renamed ``np.trapezoid`` in NumPy 2; bind whichever the
+# installed version provides (identical algorithm).
+_trapz = getattr(np, "trapezoid", None) or np.trapz
 
 POP_MODEL = "powerlaw+peak"
 POP_FID = get_fixed_population_params(POP_MODEL)
@@ -114,7 +121,8 @@ class ClusteredMock:
     def _bundle(self, which: str, field: bool) -> dict:
         b = dict(self._compact[which])
         if not field:
-            for k in ("field_dN_obs_s", "field_n_empty", "field_N_obs_total"):
+            for k in ("field_dN_obs_s", "field_n_empty", "field_N_obs_total",
+                      "field_depth_z", "field_depth_dz", "field_depth_c"):
                 b.pop(k, None)
         return b
 
@@ -203,7 +211,7 @@ def build_clustered_mock(
     dL_sel = np.asarray(dL_of_z(jnp.asarray(z_sel), H0_TRUE, OM0_FID, W0_FID, WA_FID))
 
     zgn = np.linspace(ev_lo, ev_hi, 2000)
-    vol_norm = float(np.trapezoid(
+    vol_norm = float(_trapz(
         np.asarray(dV_of_z(jnp.asarray(zgn), H0_TRUE, OM0_FID, W0_FID, WA_FID)), zgn))
     p_vol = np.asarray(dV_of_z(jnp.asarray(z_sel), H0_TRUE, OM0_FID, W0_FID, WA_FID)) / vol_norm
     p_vol = np.where((z_sel >= ev_lo) & (z_sel <= ev_hi), p_vol, 0.0)
@@ -240,6 +248,13 @@ def build_clustered_mock(
         sel = _compact(pix_sel, full_z, full_n, full_w, dz)
         fobs, ne, nobs, _occ = build_field_normalization_inputs(
             jnp.asarray(full_z), jnp.asarray(full_w), jnp.asarray(full_n))
+        # The scans run with a survey depth (resolved_survey_z_depths=Z_DEPTH), so
+        # the global normalizer's observed term is the DEPTH-SCALED count and needs
+        # the flat full-sky per-galaxy kernel geometry: photo-z kernels leak past
+        # the depth, so m_pix < 1 even though the mock samples galaxies below it.
+        depth = build_field_depth_inputs(
+            jnp.asarray(full_z), jnp.full_like(jnp.asarray(full_z), dz),
+            jnp.asarray(full_w), jnp.asarray(full_n))
         return dict(
             apix=apix, delta_g_pix_z=jnp.zeros((1, len(zgrid))),
             zgals_pe=pe["zgals"], dzgals_pe=pe["dzgals"], wgals_pe=pe["wgals"], ngals_pe=pe["ngals"],
@@ -247,6 +262,7 @@ def build_clustered_mock(
             zgals_sel=sel["zgals"], dzgals_sel=sel["dzgals"], wgals_sel=sel["wgals"], ngals_sel=sel["ngals"],
             unique_pixels_sel=sel["unique_pixels"], sample_to_unique_sel=sel["sample_to_unique"],
             field_dN_obs_s=fobs, field_n_empty=float(ne), field_N_obs_total=float(nobs),
+            field_depth_z=depth.z, field_depth_dz=depth.dz, field_depth_c=depth.c,
         )
 
     compact = {
