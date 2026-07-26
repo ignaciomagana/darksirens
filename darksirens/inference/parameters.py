@@ -289,6 +289,12 @@ def build_parameter_decoder(
         mark_names=mark_names,
         n_catalogs=n_catalogs,
         lss_completion_active=lss_completion_active,
+        # b_miss is dropped from the sampled survey block when --use_lss is off
+        # (delta_g is the all-zero dummy, so b_miss is inert); the decoder must
+        # re-derive the space under the SAME flag or the label sets diverge.
+        # CLI opts always carry use_LSS explicitly; the fallback mirrors the
+        # build_parameter_space signature default for direct/legacy callers.
+        use_lss=bool(getattr(opts, "use_LSS", True)),
         mark_names_by_catalog=mark_names_by_catalog,
     )
 
