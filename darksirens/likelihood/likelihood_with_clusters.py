@@ -112,9 +112,11 @@ PAIR_MARKS_TIME = 1
 # max(sigma_dt)/T0 is below the sharpness threshold.
 PAIR_MARKS_TIME_DELTA = 2
 
-# Lensed-singleton policy. OFF preserves the legacy singleton channel exactly
+# Lensed-singleton policy. OFF keeps the singleton channel purely unlensed
 # (evidence: unlensed/WL only; selection: unlensed injections only) — the
-# generator's default protocol that DROPS exactly-one-detected images. MIXTURE
+# generator's default protocol that DROPS exactly-one-detected images. Note
+# that OFF still gets the (1 - tau_2(z)) unlensed weight whenever a J=2 channel
+# is present; see _unlensed_tau_suppression_enabled. MIXTURE
 # models the realistic protocol where a strongly lensed source with exactly
 # one detected image is observed as an ordinary singleton: the singleton
 # evidence becomes (1 - tau_2(z)) x [WL branch] + tau_2(z)-weighted
@@ -124,6 +126,41 @@ PAIR_MARKS_TIME_DELTA = 2
 # via cluster_mode=OFF + MIXTURE.
 SINGLETON_LENSING_OFF = 0
 SINGLETON_LENSING_MIXTURE = 1
+
+
+def _unlensed_tau_suppression_enabled(cluster_mode: int, singleton_lensing: int) -> bool:
+    """Whether the singleton channel must carry the ``(1 - tau_2(z))`` factor.
+
+    The singleton channel describes UNLENSED sources. Whenever a separate
+    strongly-lensed channel is also summed into the Poisson normalization, the
+    singleton intensity must be the unlensed one, ``(1 - tau_2) p_pop p_z``, or
+    the strongly-lensed sources are counted twice: once in mu_sel^(1) (as if
+    unlensed at mu = 1) and again in the lensed channel, while the observed data
+    assign them only to the lensed channel.
+
+    That is true in two cases:
+
+    * ``singleton_lensing = MIXTURE`` -- the exactly-one-detected lensed
+      channel is added to mu_sel^(1) (any cluster_mode).
+    * ``cluster_mode = J2`` -- mu_sel^(2) is added to mu_tot. This case was
+      MISSING: with the shipped default (cluster_mode=j2, singleton_lensing=off)
+      mu_sel^(1) over-counted by ``int tau_2 P_det p_pop p_z``, an A_tau- and
+      n_tau-dependent error in the ``-N_tot log(mu_tot)`` term.
+
+    The mock generator confirms the convention: it draws
+    ``is_double ~ Bernoulli(tau_2(z))`` per source and routes only the
+    ``~is_double`` sources through the singleton detection pipeline, so the
+    rendered singleton channel is (1 - tau_2)-weighted by construction.
+
+    With ``cluster_mode = OFF`` and ``singleton_lensing = OFF`` there is no
+    second channel and the unsuppressed integral is the correct
+    "everything is a singleton" normalization -- the commit-2 reduction stays
+    bit-identical.
+    """
+    return (
+        singleton_lensing == SINGLETON_LENSING_MIXTURE
+        or cluster_mode == CLUSTER_MODE_J2
+    )
 
 
 @partial(
@@ -247,6 +284,9 @@ def darksiren_log_likelihood_with_clusters(
         # legacy singleton-selection path.  In particular wl_backend=disabled
         # reduces to standard selection, as required for backward compatibility.
         wl_selection_enabled = False
+    unlensed_tau_suppression = _unlensed_tau_suppression_enabled(
+        cluster_mode, singleton_lensing
+    )
     if singleton_lensing == SINGLETON_LENSING_MIXTURE and (
         lensed_singles is None or fc_pdet_params is None
     ):
@@ -336,15 +376,15 @@ def darksiren_log_likelihood_with_clusters(
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, _selection_prior,
             )
-        if singleton_lensing == SINGLETON_LENSING_MIXTURE:
+        if unlensed_tau_suppression:
             # Poisson consistency: the singleton EVIDENCE suppresses the
-            # unlensed branch by (1 - tau_2(z)) (see the mixture branch of the
-            # PE reduction below), so mu_sel^(1) must integrate the SAME
-            # unlensed rate density (1 - tau_2) x p_pop x p_z x P_det. Without
-            # this factor mu_sel^(1) over-counts the unlensed contribution by
+            # unlensed branch by (1 - tau_2(z)) (see the PE reduction below),
+            # so mu_sel^(1) must integrate the SAME unlensed rate density
+            # (1 - tau_2) x p_pop x p_z x P_det. Without this factor
+            # mu_sel^(1) over-counts the unlensed contribution by
             # ∫ tau_2 P_det p_pop p_z, an O(A_tau) term the same order as the
-            # lensed-single channel mu^(1L) added below — it biases the
-            # strong-lensing rate parameters (A_tau, n_tau). tau_2 is evaluated
+            # lensed channels added below — it biases the strong-lensing rate
+            # parameters (A_tau, n_tau). tau_2 is evaluated
             # at the mu = 1 apparent redshift, mirroring the evidence side's
             # stated approximation (the mu-dependence of tau_2 is O(tau x s^2)).
             z_app_sel = z_of_dL(dL_c, H0, Om0, w0, wa)
@@ -454,14 +494,17 @@ def darksiren_log_likelihood_with_clusters(
             catalog_ev,
         )
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
-        if singleton_lensing != SINGLETON_LENSING_MIXTURE:
+        if singleton_lensing != SINGLETON_LENSING_MIXTURE and not unlensed_tau_suppression:
             return None, -jnp.log(nsamp) + logsumexp(ldw)
 
-        # Mixture: (1 - tau_2(z)) x unlensed/WL branch + lensed-single branch.
+        # (1 - tau_2(z)) x unlensed/WL branch [+ lensed-single branch, MIXTURE].
         # The (1 - tau_2) factor is evaluated per PE sample at the mu = 1
         # apparent redshift; inside the WL branch the mu-dependence of tau_2
         # is a cross term of order tau x s^2 (< 1e-5 at defaults) — stated
         # approximation, negligible against the tau ~ 1e-3 channel weights.
+        # It must match the SAME factor applied to mu_sel^(1) above: the
+        # per-event evidence and the selection integral have to describe one
+        # intensity (see _unlensed_tau_suppression_enabled).
         dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
         dL_ev = sl(gw_pe.dL)
         z_app = z_of_dL(jnp.clip(dL_ev, dL_lo, dL_hi), H0, Om0, w0, wa)
@@ -470,6 +513,11 @@ def darksiren_log_likelihood_with_clusters(
             jnp.isfinite(ldw), ldw + jnp.log1p(-tau_app), -jnp.inf
         )
         log_unlensed = -jnp.log(nsamp) + logsumexp(ldw_unlensed)
+        if singleton_lensing != SINGLETON_LENSING_MIXTURE:
+            # J2 + singleton_lensing=off: the observed singletons are unlensed
+            # by protocol (the generator DROPS exactly-one-detected images), so
+            # the unlensed branch is the whole singleton evidence.
+            return None, log_unlensed
         event_dict = {
             "m1det": sl(gw_pe.m1det), "q": sl(gw_pe.q),
             "dL": dL_ev, "chieff": sl(gw_pe.chieff),
@@ -599,6 +647,7 @@ def darksiren_log_likelihood_with_clusters(
             "pair_eval_shape_y": jnp.asarray(y_nodes_pair),
             "wl_selection": jnp.asarray(wl_selection),
             "singleton_lensing": jnp.asarray(singleton_lensing),
+            "unlensed_tau_suppression": jnp.asarray(unlensed_tau_suppression),
         }
     return logL_total
 
