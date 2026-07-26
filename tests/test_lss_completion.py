@@ -6,6 +6,9 @@ Covers the deterministic/mean-Q consumption path in ``completion.py`` and
 (no field sampling); these tests only exercise fixed Q arrays.
 """
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 pytest.importorskip("jax")
@@ -185,7 +188,7 @@ def test_ensemble_member_priors_normalize():
         )
         assert lpm.shape == (4, NG)
         for m in range(4):
-            integ = np.trapezoid(np.exp(np.asarray(lpm[m])), np.asarray(zgrid))
+            integ = _trapezoid(np.exp(np.asarray(lpm[m])), np.asarray(zgrid))
             assert abs(integ - 1.0) < 5e-3, f"member {m} row {row}: ∫={integ}"
 
 
@@ -199,7 +202,7 @@ def test_ensemble_scalar_compat_is_finite_and_normalized():
     lp = eval_redshift_prior_with_state("dark_sirens", state, zgrid, pix, COSMO, SURVEY_B0, cat)
     assert lp.shape == (NG,)
     assert np.all(np.isfinite(np.asarray(lp)))
-    integ = np.trapezoid(np.exp(np.asarray(lp)), np.asarray(zgrid))
+    integ = _trapezoid(np.exp(np.asarray(lp)), np.asarray(zgrid))
     assert abs(integ - 1.0) < 5e-3
     # non-ensemble state -> members evaluator still returns a leading axis of 1
     plain = prepare_redshift_prior_state("dark_sirens", COSMO, SURVEY_B0, _prior_catalog())

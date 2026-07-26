@@ -15,6 +15,9 @@ import sys
 import types
 
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 # darksirens.gw.populations imports tinygp lazily; stub it so importing the
@@ -132,5 +135,5 @@ def test_marginals_are_normalised():
     )
     for grid, marg in [(mgrid, p_m1), (mgrid, p_m2), (qgrid, p_q),
                        (zgrid, p_z), (chigrid, p_chi)]:
-        integral = np.trapezoid(np.asarray(marg[0]), grid)
+        integral = _trapezoid(np.asarray(marg[0]), grid)
         np.testing.assert_allclose(integral, 1.0, rtol=1e-6, atol=1e-9)

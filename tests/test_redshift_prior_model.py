@@ -23,6 +23,9 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 from scipy.special import expit
 
@@ -126,7 +129,7 @@ def test_prior_normalises_per_pixel(sigmoid_setup):
                 cat,
             )
         )
-        assert abs(np.trapezoid(np.exp(lp), ZG) - 1.0) < 5e-3
+        assert abs(_trapezoid(np.exp(lp), ZG) - 1.0) < 5e-3
 
 
 def test_completeness_is_calibrated(sigmoid_setup):
@@ -150,7 +153,7 @@ def test_catalog_missing_odds_are_count_odds(sigmoid_setup):
         n_obs = float(cat.ngals[row])
         n_miss = float(curves.N_miss[row])
         z_norm = n_obs + n_miss
-        miss_frac = np.trapezoid(np.asarray(state.dN_miss[row]) / z_norm, ZG)
+        miss_frac = _trapezoid(np.asarray(state.dN_miss[row]) / z_norm, ZG)
         np.testing.assert_allclose(1.0 - miss_frac, n_obs / z_norm, atol=1e-9)
 
 
@@ -180,7 +183,7 @@ def test_tilted_kernels_carry_unit_mass():
             zgrid, jnp.zeros(ZG.size, jnp.int32), COSMO, survey, cat
         )
     )
-    assert abs(np.trapezoid(np.exp(lp), ZG) - 1.0) < 1e-3
+    assert abs(_trapezoid(np.exp(lp), ZG) - 1.0) < 1e-3
 
 
 def test_nan_maps_to_neg_inf_and_sigma_floor_keeps_galaxies():

@@ -49,6 +49,9 @@ if "tinygp" not in sys.modules:
     sys.modules["tinygp"] = tinygp_stub
 
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 from astropy.cosmology import Flatw0waCDM
 
@@ -81,7 +84,7 @@ def _reference_rate(pz_samples, zgrid, h0_samples, om0_samples, w0_samples, wa_s
         dv = np.asarray(dV_of_z(zg, float(h0_samples[i]), float(om0_arr[i]),
                                 float(w0_arr[i]), float(wa_arr[i])))
         rate = np.asarray(pz_samples[i]) * dv
-        norm = np.trapezoid(rate, zg)
+        norm = _trapezoid(rate, zg)
         out[i] = rate / norm if norm > 0 else rate
     return out
 
@@ -98,7 +101,7 @@ def _astropy_reference_rate(zgrid, gamma, H0=H0_FID, Om0=OM0_FID, w0=W0_FID, wa=
     rate = (1.0 + z) ** (gamma - 1.0) * dv
     if extra_time_dilation:
         rate = rate / (1.0 + z)
-    return rate / np.trapezoid(rate, z)
+    return rate / _trapezoid(rate, z)
 
 
 def _median(curve, z):
@@ -188,7 +191,7 @@ class TestNoDoubleCountedTimeDilation:
             H0=H0_FID, Om0=OM0_FID, w0=W0_FID, wa=WA_FID
         ).differential_comoving_volume(z).value
         want = psi / (1.0 + z) * dv
-        want = want / np.trapezoid(want, z)
+        want = want / _trapezoid(want, z)
         np.testing.assert_allclose(got, want, rtol=5e-4)
 
 
@@ -275,7 +278,7 @@ class TestRedshiftRateSamplesFullCosmology:
         for i in range(self.n_samples):
             dv = np.asarray(dV_of_z(legacy_zg, float(self.h0_samples[i]), OM0_FID))
             rate = np.asarray(self.pz_samples[i]) * dv
-            norm = np.trapezoid(rate, legacy_zg)
+            norm = _trapezoid(rate, legacy_zg)
             legacy[i] = rate / norm if norm > 0 else rate
         np.testing.assert_allclose(got, legacy, rtol=1e-6, atol=1e-10)
 
@@ -286,5 +289,5 @@ class TestRedshiftRateSamplesFullCosmology:
             w0_samples=np.full(self.n_samples, -0.8),
             wa_samples=np.full(self.n_samples, 0.1),
         )
-        integrals = np.trapezoid(rate, self.zgrid, axis=1)
+        integrals = _trapezoid(rate, self.zgrid, axis=1)
         np.testing.assert_allclose(integrals, 1.0, rtol=1e-6, atol=1e-9)

@@ -7,6 +7,9 @@ the binned-density behaviour (bin lookup, the (m1,q) Jacobian, normalization).
 """
 
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import jax.numpy as jnp
 import pytest
 

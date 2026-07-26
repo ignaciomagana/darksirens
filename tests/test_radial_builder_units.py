@@ -15,6 +15,9 @@ read Q = 1, not exp(-b^2 sigma^2 / 2).
 import healpy as hp
 import h5py
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 import darksirens.cli.build_lognormal_completion as B
@@ -46,7 +49,7 @@ def _fiducial_drawn_catalog(path, log10n0_target_counts=MEAN_GALS, seed=7):
     )
     grids = B._precompute_grids(cosmo, survey, em0)
     dN_exp = np.asarray(grids.dN_exp, dtype=float)
-    T = float(np.trapezoid(dN_exp, zg))
+    T = float(_trapezoid(dN_exp, zg))
     log10n0 = -2.0 + np.log10(log10n0_target_counts / T)
 
     # Inverse-CDF draws from dN_exp.
