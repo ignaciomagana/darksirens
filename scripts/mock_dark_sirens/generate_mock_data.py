@@ -27,6 +27,9 @@ from pathlib import Path
 import h5py
 import healpy as hp
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 from astropy.cosmology import Flatw0waCDM
 import astropy.units as u
 from scipy.integrate import cumulative_trapezoid
@@ -943,7 +946,7 @@ def _selection_injections(
 
 
 def _galaxy_count_from_density(n0: float, delta: float, grids: dict[str, np.ndarray]) -> int:
-    density_weighted_volume = jnp.trapezoid(grids["dvc_dz"] * (1.0 + grids["z"]) ** delta, grids["z"])
+    density_weighted_volume = j_trapezoid(grids["dvc_dz"] * (1.0 + grids["z"]) ** delta, grids["z"])
     return max(1, int(round(n0 * density_weighted_volume)))
 
 
