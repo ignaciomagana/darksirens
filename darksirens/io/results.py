@@ -10,6 +10,7 @@ import numpy as np
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.cli.common import _fixed_dark_energy_metadata
 from darksirens.inference.sampling import _json_safe_tinyns_value
+from darksirens.io.settings import environment_block
 
 # ── Data saving ────────────────────────────────────────────────────────────────
 
@@ -258,14 +259,9 @@ def save_results_hdf5(
         if prior_overrides:
             f.attrs["prior_overrides"] = json.dumps(prior_overrides)
 
-        f.attrs["environment"] = json.dumps({
-            "jax_version":    jax.__version__,
-            "numpy_version":  np.__version__,
-            "healpy_version": hp.__version__,
-            "jax_backend":    jax.default_backend(),
-            "jax_devices":    [str(d) for d in jax.devices()],
-            "python_version": sys.version,
-        })
+        # Same block as settings.json (code identity + numerics stack + argv),
+        # built centrally in io/settings.py so the two artifacts cannot drift.
+        f.attrs["environment"] = json.dumps(environment_block())
 
     # Rename only after the file closes cleanly, so a failure mid-write (e.g.
     # an attr with no native HDF5 equivalent) leaves the old results.hdf5, if
