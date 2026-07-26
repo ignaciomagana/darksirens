@@ -49,6 +49,13 @@ _SMOKE_SEL = ["off", "131072"]
 _SMOKE_PE = ["16"]
 
 
+def _requested(value):
+    """JSON-able form of a block-size REQUEST: None for 'off', the string for
+    'auto' (the resolver replaces it; the chosen value is reported separately as
+    ``resolved_*``), else the int."""
+    return None if value == "off" else (value if value == "auto" else int(value))
+
+
 # ── worker: one likelihood build + timed value/grad in a clean process ───────────
 
 def _run_worker(args) -> int:
@@ -94,11 +101,13 @@ def _run_worker(args) -> int:
         "--pop_model", "powerlaw+peak",
         "--fix_cosmology", "true",
         "--fix_survey", "true",
-        "--sampler", "numpyro",              # grad path = the memory-limiting case
+        "--sampler", args.sampler,
         "--redshift_prior_barrier", "off",   # vmappable (materialize=False)
         "--sel_batch_size", args.sel,
         "--pe_event_block", args.pe,
     ]
+    if args.norm_nq:
+        argv += ["--norm_nq", str(args.norm_nq)]
 
     with contextlib.redirect_stdout(sys.stderr):
         opts = build_parser().parse_args(argv)
@@ -135,28 +144,43 @@ def _run_worker(args) -> int:
         return time.perf_counter() - t0
 
     dev = jax.devices()[0]
-    grad_fn = jax.grad(lambda c: jnp.sum(likelihood(c)))  # sum keeps it scalar
 
     v_compile = _compile(likelihood, coord)
+    log_l = float(np.asarray(likelihood(coord)))
     peak_value = int((dev.memory_stats() or {}).get("peak_bytes_in_use", 0))
     v_warm = _median(likelihood, coord, args.repeats)
 
-    g_compile = _compile(grad_fn, coord)
-    g_warm = _median(grad_fn, coord, args.repeats)
-    stats = dev.memory_stats() or {}
-    peak = int(stats.get("peak_bytes_in_use", 0))          # = grad peak (conservative)
-    in_use = int(stats.get("bytes_in_use", 0))
+    # ``--mode value`` skips the value+grad pass entirely: that is the peak a
+    # GRADIENT-FREE sampler (dynesty / tinyns) actually incurs, and it is 14x
+    # below the value+grad peak on the real spectral problem, so measuring it
+    # separately is what calibrates the value-only constant set.
+    g_compile = g_warm = None
+    peak = peak_value
+    if args.mode == "both":
+        grad_fn = jax.grad(lambda c: jnp.sum(likelihood(c)))  # sum keeps it scalar
+        g_compile = _compile(grad_fn, coord)
+        g_warm = _median(grad_fn, coord, args.repeats)
+        peak = int((dev.memory_stats() or {}).get("peak_bytes_in_use", 0))
+    in_use = int((dev.memory_stats() or {}).get("bytes_in_use", 0))
 
     result = {
-        "sel_batch_size": None if args.sel == "off" else int(args.sel),
-        "pe_event_block": None if args.pe == "off" else int(args.pe),
+        "sel_batch_size": _requested(args.sel),
+        "pe_event_block": _requested(args.pe),
+        # What the resolver actually chose (differs from the request for 'auto').
+        "resolved_sel_batch_size": opts.sel_batch_size,
+        "resolved_pe_event_block": opts.pe_event_block,
+        "block_size_resolution": getattr(opts, "block_size_resolution", None),
+        "sampler": args.sampler,
+        "mode": args.mode,
+        "norm_nq": args.norm_nq or None,
+        "log_l": log_l,
         "peak_bytes": peak,
         "peak_value_bytes": peak_value,
         "bytes_in_use_end": in_use,
         "value_compile_s": round(v_compile, 4),
         "value_warm_ms": round(1e3 * v_warm, 4),
-        "grad_compile_s": round(g_compile, 4),
-        "grad_warm_ms": round(1e3 * g_warm, 4),
+        "grad_compile_s": None if g_compile is None else round(g_compile, 4),
+        "grad_warm_ms": None if g_warm is None else round(1e3 * g_warm, 4),
         "ndim": ndim,
         "n_sel": int(np.asarray(data["m1detsels"]).shape[0]),
         "n_events": int(data["nEvents"]),
@@ -175,7 +199,10 @@ def _run_config(sel, pe, args):
         sys.executable, os.path.abspath(__file__), "--worker",
         "--sel", sel, "--pe", pe, "--repeats", str(args.repeats),
         "--gw-path", args.gw_path, "--gwselection-path", args.gwselection_path,
+        "--sampler", args.sampler, "--mode", args.mode,
     ]
+    if args.norm_nq:
+        cmd += ["--norm-nq", str(args.norm_nq)]
     label = f"sel={sel:>8} pe={pe:>4}"
     t0 = time.perf_counter()
     try:
@@ -183,8 +210,8 @@ def _run_config(sel, pe, args):
                               timeout=args.per_config_timeout)
     except subprocess.TimeoutExpired:
         print(f"  {label}  -> TIMEOUT ({args.per_config_timeout}s)", flush=True)
-        return {"sel_batch_size": None if sel == "off" else int(sel),
-                "pe_event_block": None if pe == "off" else int(pe),
+        return {"sel_batch_size": _requested(sel),
+                "pe_event_block": _requested(pe),
                 "status": "timeout"}
     wall = time.perf_counter() - t0
     for line in proc.stdout.splitlines():
@@ -192,14 +219,18 @@ def _run_config(sel, pe, args):
             res = json.loads(line[len("BENCHMARK_RESULT: "):])
             res["status"] = "ok"
             res["config_wall_s"] = round(wall, 1)
+            timing = (f"grad {res['grad_warm_ms']:.1f} ms"
+                      if res.get("grad_warm_ms") is not None
+                      else f"value {res['value_warm_ms']:.1f} ms")
             print(f"  {label}  -> {res['peak_bytes']/1e9:6.3f} GB  "
-                  f"(grad {res['grad_warm_ms']:.1f} ms, {wall:.0f}s)", flush=True)
+                  f"({timing}, resolved sel={res['resolved_sel_batch_size']} "
+                  f"pe={res['resolved_pe_event_block']}, {wall:.0f}s)", flush=True)
             return res
     status = "oom" if "RESOURCE_EXHAUSTED" in proc.stderr else "error"
     tail = "\n".join(proc.stderr.strip().splitlines()[-3:])
     print(f"  {label}  -> {status.upper()}  (rc={proc.returncode})\n    {tail}", flush=True)
-    return {"sel_batch_size": None if sel == "off" else int(sel),
-            "pe_event_block": None if pe == "off" else int(pe),
+    return {"sel_batch_size": _requested(sel),
+            "pe_event_block": _requested(pe),
             "status": status, "stderr_tail": tail}
 
 
@@ -216,9 +247,17 @@ def _markdown(results):
 
 
 def _orchestrate(args):
-    sel_grid = _SMOKE_SEL if args.smoke else _SEL_GRID
-    pe_grid = _SMOKE_PE if args.smoke else _PE_GRID
-    configs = [(s, "off") for s in sel_grid] + [("off", p) for p in pe_grid if p != "off"]
+    if args.configs:
+        # Explicit "sel:pe" pairs, e.g. "auto:auto,off:off,32768:8" — the form
+        # used to compare an AUTO-resolved plan against a single pass.
+        configs = []
+        for entry in args.configs.split(","):
+            sel, _, pe = entry.strip().partition(":")
+            configs.append((sel or "off", pe or "off"))
+    else:
+        sel_grid = _SMOKE_SEL if args.smoke else _SEL_GRID
+        pe_grid = _SMOKE_PE if args.smoke else _PE_GRID
+        configs = [(s, "off") for s in sel_grid] + [("off", p) for p in pe_grid if p != "off"]
     # dedup (off,off) if present twice
     seen, uniq = set(), []
     for c in configs:
@@ -230,6 +269,8 @@ def _orchestrate(args):
     results = [_run_config(s, p, args) for s, p in uniq]
 
     meta = {"repeats": args.repeats, "smoke": args.smoke,
+            "sampler": args.sampler, "mode": args.mode,
+            "norm_nq": args.norm_nq or None, "configs": args.configs,
             "gw_path": args.gw_path, "gwselection_path": args.gwselection_path,
             "results": results}
     ok = [r for r in results if r["status"] == "ok"]
@@ -262,6 +303,20 @@ def main():
     ap.add_argument("--gw-path", default=_DEFAULT_GW)
     ap.add_argument("--gwselection-path", default=_DEFAULT_SEL)
     ap.add_argument("--repeats", type=int, default=10)
+    ap.add_argument("--sampler", default="numpyro",
+                    choices=["numpyro", "dynesty", "tinyns"],
+                    help="sampler passed to the CLI; selects the block-sizing "
+                         "constant set (numpyro = value+grad, dynesty/tinyns = "
+                         "value-only)")
+    ap.add_argument("--mode", default="both", choices=["both", "value"],
+                    help="'value' measures only the value pass (the peak a "
+                         "gradient-free sampler incurs); 'both' adds value+grad")
+    ap.add_argument("--norm-nq", type=int, default=None,
+                    help="--norm_nq passed to the CLI (population q-quadrature "
+                         "nodes; the axis that multiplies the selection working set)")
+    ap.add_argument("--configs", default=None,
+                    help="explicit 'sel:pe' pairs instead of the sweep grids, "
+                         "e.g. 'auto:auto,off:off'")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny grid to validate the harness")
     ap.add_argument("--per-config-timeout", type=int, default=900)

@@ -122,7 +122,11 @@ from darksirens.inference.tinyns_config import (
     TINYNS_RESOLVED_DISPLAY_KEYS,
 )
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
-from darksirens.likelihood.block_sizing import block_size_arg, resolve_block_sizes
+from darksirens.likelihood.block_sizing import (
+    block_size_arg,
+    resolve_block_sizes,
+    sampler_block_sizing_profile,
+)
 from darksirens.cli.common import (
     _banner,
     _section,
@@ -1814,6 +1818,14 @@ def build_cluster_likelihood(
         cosmo, survey, pop_params, _sky_params, _mark_params = _decode_base_parameters(
             decoder, coord
         )
+        # Decode the lens block ONCE per likelihood call.  It depends only on
+        # ``coord``, so calling it inside ``_call_partition`` re-ran the eager decode
+        # for every partition in the Python loop below — up to
+        # ``--max_exact_partitions`` times per evaluation under
+        # ``--partition_mode marginalize_exact``.
+        lens_params = _decode_lens_params(
+            coord, lens_sampled_labels, fixed_parameter_values, opts
+        )
 
         def _call_partition(part, *, diagnostics=False):
             fn = (
@@ -1838,9 +1850,7 @@ def build_cluster_likelihood(
                 part["n_pairs"],
                 inp["lensed"],
                 inp["pair_kdes"],
-                _decode_lens_params(
-                    coord, lens_sampled_labels, fixed_parameter_values, opts
-                ),
+                lens_params,
                 log_p_tag,
                 opts.pop_model,
                 universe_model,
@@ -1998,6 +2008,11 @@ def build_cluster_diagnostics(
         cosmo, survey, pop_params, _sky_params, _mark_params = _decode_base_parameters(
             decoder, coord
         )
+        # Decode the lens block once per call, not once per partition probe
+        # (mirrors the same hoist in build_cluster_loglike).
+        lens_params = _decode_lens_params(
+            coord, lens_sampled_labels, fixed_parameter_values, opts
+        )
 
         def _raw_for(singletons, pairs, n_singletons, n_pairs, part=None):
             return darksiren_likelihood_diagnostics_with_clusters(
@@ -2017,9 +2032,7 @@ def build_cluster_diagnostics(
                 n_pairs,
                 inp["lensed"],
                 inp["pair_kdes"],
-                _decode_lens_params(
-                    coord, lens_sampled_labels, fixed_parameter_values, opts
-                ),
+                lens_params,
                 log_p_tag,
                 opts.pop_model,
                 universe_model,
@@ -2559,8 +2572,17 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
     import numpy as _np
     import jax as _jax
 
+    from darksirens.gw.populations.utils import normalization_grid_settings
+
     gw_sel = inp.get("gw_sel")
     n_sel = int(_np.asarray(gw_sel.m1det).shape[0]) if gw_sel is not None else 0
+    # The default constants are the value+GRAD peak; the lensing campaign runs
+    # ``--sampler tinyns``, which never differentiates the likelihood, so it must
+    # get the value-only constant set (14x smaller peak on the calibration config)
+    # instead of being blocked into a 1.7-2.2x slower plan for memory it has spare
+    # of.  ``concurrent_evals`` covers tinyns' vmapped replacement chains.
+    needs_grad, concurrent_evals = sampler_block_sizing_profile(opts)
+    n_q = int(normalization_grid_settings().n_q)
     plan = resolve_block_sizes(
         n_events=int(inp.get("nEvents", 0) or 0),
         n_samp=int(inp.get("nsamp", 0) or 0),
@@ -2569,6 +2591,9 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
         pe_requested=None,          # lensing has no PE-event block knob
         has_catalog=False,          # lensing selection carries no galaxy catalog
         flow_path=False,
+        n_q=n_q,
+        needs_grad=needs_grad,
+        concurrent_evals=concurrent_evals,
         backend=_jax.default_backend(),
     )
     opts.sel_batch_size = plan.sel_batch_size
@@ -2577,6 +2602,13 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
     settings["block_size_resolution"] = plan.source
     _sel = plan.sel_batch_size if plan.sel_batch_size is not None else "single pass"
     _ok(f"Block size [{plan.source}]: sel_batch_size={_sel}")
+    _ok(
+        "Peak model: "
+        f"{'value+grad' if needs_grad else 'value-only'} "
+        f"({getattr(opts, 'sampler', '?')}"
+        + (f", {concurrent_evals} concurrent evals" if concurrent_evals > 1 else "")
+        + f"); n_q={n_q}"
+    )
 
 
 def _validate_json_options(opts):

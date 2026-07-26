@@ -395,3 +395,122 @@ def test_recommended_kde_window_bounds_block_counts():
         for c in np.linspace(zr[0], zr[-1], 500)
     ]
     assert max(counts) <= w_wide
+
+
+# ---------------------------------------------------------------------------
+# Traced (jit-argument) path: build-time attestation must arm windowing
+# ---------------------------------------------------------------------------
+# The production likelihood (darksiren_log_likelihood, module-level jit) takes
+# every EMCatalog as a traced ARGUMENT, so the evaluator's concrete sortedness
+# check cannot run and — before the attestation hook — the windowed path never
+# engaged where it matters most.  These tests pin the arming contract.
+
+
+def _tiny_sorted_catalog(n=20, seed=0):
+    zs = np.sort(np.random.default_rng(seed).uniform(0.05, 1.0, n))
+    return EMCatalog(
+        apix=1.0,
+        zgals=jnp.asarray(zs[None, :]),
+        dzgals=jnp.full((1, n), 0.01),
+        wgals=jnp.ones((1, n)),
+        ngals=jnp.asarray([n], dtype=jnp.int32),
+        delta_g_pix_z=jnp.zeros((1, 8)),
+        dN_obs_kde=None,
+        pixel_to_cache_idx=None,
+    )
+
+
+@pytest.fixture
+def _window8():
+    """Small static window + guaranteed-clean attestation state."""
+    import darksirens.redshift.catalog as C
+
+    old_attested = C._ROWS_SORTED_ATTESTED
+    C.configure_catalog_kde_window(size=8, n_sigma=8.0)
+    try:
+        yield C
+    finally:
+        C.configure_catalog_kde_window()
+        C._ROWS_SORTED_ATTESTED = old_attested
+
+
+def _traced_window_calls(C, cat, state):
+    """Trace the evaluator with catalog+state as jit ARGUMENTS; count window
+    searches and return (calls, value)."""
+    calls = [0]
+    orig = C._sorted_row_window_start
+
+    def spy(*a, **k):
+        calls[0] += 1
+        return orig(*a, **k)
+
+    C._sorted_row_window_start = spy
+    try:
+        f = jax.jit(
+            lambda z, pix, st, ct: C.eval_log_catalog_prior_state(z, pix, st, ct)
+        )
+        val = float(f(jnp.asarray(0.3), jnp.asarray(0, dtype=jnp.int32), state, cat))
+    finally:
+        C._sorted_row_window_start = orig
+    return calls[0], val
+
+
+def test_jit_argument_path_windows_only_after_attestation(_window8):
+    C = _window8
+    cat = _tiny_sorted_catalog()
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+    state = C.catalog_kernel_state(cosmo, survey, cat)
+
+    # Full-row reference (windowing off entirely).
+    C.configure_catalog_kde_window(size=None)
+    ref = float(C.eval_log_catalog_prior_state(
+        jnp.asarray(0.3), jnp.asarray(0, dtype=jnp.int32), state, cat
+    ))
+    C.configure_catalog_kde_window(size=8, n_sigma=8.0)
+
+    # Un-attested: traced catalogs cannot be verified -> full-row fallback.
+    C._ROWS_SORTED_ATTESTED = False
+    calls, val = _traced_window_calls(C, cat, state)
+    assert calls == 0
+    assert val == pytest.approx(ref, rel=1e-12)
+
+    # Attested with the concrete arrays -> the traced path windows.
+    assert C.attest_rows_sorted_for_windowing(cat) is True
+    calls, val = _traced_window_calls(C, cat, state)
+    assert calls == 1
+    assert val == pytest.approx(ref, rel=1e-10)
+
+
+def test_attestation_disarms_on_unsorted_catalog(_window8):
+    C = _window8
+    good = _tiny_sorted_catalog()
+    zs = np.asarray(good.zgals)[:, ::-1].copy()      # descending: violates invariant
+    bad = good._replace(zgals=jnp.asarray(zs))
+
+    assert C.attest_rows_sorted_for_windowing(good, bad) is False
+    assert C._ROWS_SORTED_ATTESTED is False
+
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+    state = C.catalog_kernel_state(cosmo, survey, bad)
+    calls, _ = _traced_window_calls(C, bad, state)
+    assert calls == 0   # disarmed: traced path stays on the full row
+
+
+def test_factory_attests_bound_catalog_views():
+    """Both likelihood factories must attest the concrete catalog views they
+    bind — without the call, the traced (jit-argument) production path never
+    windows.  Wiring pin: the call must appear at both operand-binding sites."""
+    import inspect
+
+    import darksirens.likelihood.factory as F
+
+    src = inspect.getsource(F)
+    assert src.count("attest_rows_sorted_for_windowing(") >= 2, (
+        "the factories no longer attest their bound catalog views; the "
+        "windowed catalog KDE will silently fall back to the full row in "
+        "production (catalogs cross the jit boundary as arguments)"
+    )

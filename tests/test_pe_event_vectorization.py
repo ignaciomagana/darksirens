@@ -272,9 +272,19 @@ def test_none_equals_one_value(name):
     v_none = float(ll_none(coord))
     v_one = float(ll_one(coord))
     assert np.isfinite(v_none), (name, v_none)
-    # Bit-for-bit: the flattened block evaluation reduces the identical masked
-    # elements in the identical per-row order as the per-event scan.
-    assert v_none == v_one, (name, v_none, v_one, v_none - v_one)
+    # The flattened block evaluation reduces the identical masked elements in the
+    # identical per-row order as the per-event scan, so this is exact up to XLA
+    # reassociation of the final reduction.  It WAS bit-for-bit while the sampler-
+    # facing closure ran eagerly around the jitted core; now that the closure is
+    # jitted too (factory._jit_likelihood_body), the whole call is one XLA module
+    # and the unblocked (pe_event_block=None) reduction reassociates by ~2 ULP on
+    # the catalog cells -- MEASURED -0.27199374534573906 vs -0.27199374534573195,
+    # i.e. 2.6e-14 relative.  The pe_event_block=1 value is unchanged to the bit.
+    # Same tolerance and rationale as the block=3 comparison below: 1e-12 is five
+    # orders below the ~1e-9 the repo already treats as benign compile-context
+    # reassociation, and eight below the >= 1e-4 a masking/ordering bug moves.
+    np.testing.assert_allclose(v_none, v_one, rtol=1e-12, atol=0.0,
+                               err_msg=f"{name}: None vs 1")
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +303,10 @@ def test_remainder_chunk_matches(name):
     v_one = float(ll_one(coord))
     v_three = float(ll_three(coord))
     assert np.isfinite(v_none), (name, v_none)
-    # None (one block of 7) reproduces the per-event scan (block=1) bit-for-bit.
-    assert v_none == v_one, (name, "none!=one", v_none, v_one)
+    # None (one block of 7) reproduces the per-event scan (block=1) up to the same
+    # ~ULP reassociation of the final reduction as test_none_equals_one_value.
+    np.testing.assert_allclose(v_none, v_one, rtol=1e-12, atol=0.0,
+                               err_msg=f"{name}: None vs 1")
     # block=3 splits 7 events into chunks of (3, 3, 1).  Each event's log Ẑ_i is
     # still computed from the identical masked samples in the identical order, so
     # the PER-EVENT values match bitwise; only the FINAL cross-event jnp.sum

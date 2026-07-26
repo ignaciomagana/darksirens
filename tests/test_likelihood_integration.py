@@ -383,8 +383,11 @@ def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
     like = likelihood_module.make_likelihood(opts, data, pop_params_fid=())
     _ = like(jnp.array([]))
     assert captured["wl_backend"] == WL_BACKEND_LOGNORMAL
-    assert float(captured["wl_a"]) == pytest.approx(1e-3)
-    assert float(captured["wl_b"]) == pytest.approx(1.0)
+    # The closure is jitted, so the WL scalars reaching the core are tracers; their
+    # concrete values are the factory's bound jit operands (index 4/5 = wl_a/wl_b).
+    assert float(like.operands[4]) == pytest.approx(1e-3)
+    assert float(like.operands[5]) == pytest.approx(1.0)
+    assert captured["wl_a"].shape == () and captured["wl_b"].shape == ()
     # No --wl_selection on opts -> the legacy standard selection path.
     assert captured["wl_selection"] == WL_SELECTION_STANDARD
 
@@ -456,3 +459,173 @@ def test_powerlaw_peak_fixture_population_vector_is_non_empty():
     """Guard fixture construction: powerlaw+peak must have non-empty pop params."""
     pop_params = jnp.asarray(get_fixed_population_params("powerlaw+peak"))
     assert pop_params.size > 0
+
+
+# ============================================================================
+# The factory closure: hoisted operands + jitted body (PERF-P2 / PERF-P5)
+# ============================================================================
+#
+# Only ``darksiren_log_likelihood`` used to be jitted; everything the returned
+# closure did around it ran EAGERLY on every sampler call, and dynesty calls that
+# closure once per live point.  Two defects lived there:
+#
+#   P-2  the flat K=1 path rebuilt the GW containers and re-ran
+#        ``pad_gw_event_to_multiple`` over the ~1e6-injection arrays on EVERY call,
+#        although none of it depends on ``coord`` (the K>=2 mixture path had always
+#        hoisted them -- an unpropagated twin);
+#   P-5  parameter decoding (~30 individual eager device ops) stayed outside any
+#        jit, measured at 7.7-13.8 ms of a 30-51 ms spectral call.
+#
+# The fix hoists the containers to build time and jits the body, passing the device
+# operands as ARGUMENTS (never closure captures -- see the note in
+# ``factory._jit_likelihood_body``: jax lowers a closed-over concrete array to a
+# ``dense<>`` HLO constant, which would embed the whole static state in the module).
+
+def _flat_spectral_run(n_sel=2048, n_events=2, nsamp=8):
+    """Minimal real (un-monkeypatched) flat K=1 spectral run for the factory."""
+    rng = np.random.default_rng(3)
+    total = n_events * nsamp
+    opts = type("Opts", (), {
+        "pop_model": "powerlaw+peak",
+        "universe_model": "spectral_sirens",
+        "sel_batch_size": None,
+        "fix_cosmology": True,
+        "fix_population": True,
+        "fix_survey": True,
+    })()
+    data = dict(
+        nEvents=n_events, nsamp=nsamp, Ndraw=float(n_sel), apix=1.0,
+        m1det=jnp.asarray(rng.uniform(25.0, 45.0, total)),
+        m2det=jnp.asarray(rng.uniform(12.0, 24.0, total)),
+        dL=jnp.asarray(rng.uniform(400.0, 2500.0, total)),
+        chieff=jnp.asarray(rng.uniform(-0.2, 0.2, total)),
+        p_pe=jnp.ones(total),
+        m1detsels=jnp.asarray(rng.uniform(20.0, 55.0, n_sel)),
+        m2detsels=jnp.asarray(rng.uniform(10.0, 28.0, n_sel)),
+        dLsels=jnp.asarray(rng.uniform(300.0, 2800.0, n_sel)),
+        chieffsels=jnp.asarray(rng.uniform(-0.2, 0.2, n_sel)),
+        p_draw=jnp.ones(n_sel),
+        pixels_pe=jnp.zeros(total, dtype=jnp.int32),
+        pixels_sel=jnp.zeros(n_sel, dtype=jnp.int32),
+        nx_pe=jnp.zeros(total), ny_pe=jnp.zeros(total), nz_pe=jnp.ones(total),
+        nx_sel=jnp.zeros(n_sel), ny_sel=jnp.zeros(n_sel), nz_sel=jnp.ones(n_sel),
+    )
+    return opts, data
+
+
+def test_make_likelihood_pads_selection_once_at_build_time(monkeypatch):
+    """P-2: ``pad_gw_event_to_multiple`` must run ONCE per factory build, not once
+    per likelihood call (it re-materialises ~11 arrays of the full injection set)."""
+    calls = []
+    real_pad = likelihood_module.pad_gw_event_to_multiple
+
+    def _counting_pad(event, multiple, **kw):
+        calls.append(multiple)
+        return real_pad(event, multiple, **kw)
+
+    monkeypatch.setattr(likelihood_module, "pad_gw_event_to_multiple", _counting_pad)
+
+    opts, data = _flat_spectral_run(n_sel=2000)
+    opts.sel_batch_size = 512                       # 2000 % 512 != 0 -> real padding
+    like = likelihood_module.make_likelihood(
+        opts, data, get_fixed_population_params(opts.pop_model))
+    assert calls == [512]                           # built once, before any call
+    coord = jnp.array([])
+    for _ in range(3):
+        like(coord)
+    assert calls == [512]                           # and never again
+
+
+def test_make_likelihood_binds_the_same_gw_operands_every_call():
+    """P-2: the GW containers are coord-independent, so every call must see the
+    IDENTICAL leaf buffers (no per-call ``jnp.ones_like`` / concatenate churn)."""
+    opts, data = _flat_spectral_run()
+    like = likelihood_module.make_likelihood(
+        opts, data, get_fixed_population_params(opts.pop_model))
+    gw_pe, _em_pe, gw_sel, _em_sel = like.operands[:4]
+    leaves_before = [id(leaf) for leaf in jax.tree_util.tree_leaves((gw_pe, gw_sel))]
+    like(jnp.array([]))
+    like(jnp.array([]))
+    gw_pe2, _e2, gw_sel2, _e3 = like.operands[:4]
+    assert [id(leaf) for leaf in jax.tree_util.tree_leaves((gw_pe2, gw_sel2))] == leaves_before
+
+
+def test_make_likelihood_body_is_jitted_and_compiles_once():
+    """P-5: the sampler-facing closure is jitted, and repeated calls at different
+    coordinates reuse ONE compilation (same shapes/dtypes every call)."""
+    opts, data = _flat_spectral_run()
+    opts.fix_population = False                     # give the coord a real dimension
+    pop_fid = get_fixed_population_params(opts.pop_model)
+    like = likelihood_module.make_likelihood(opts, data, pop_fid)
+    assert hasattr(like, "jitted_body")
+    like.jitted_body._clear_cache()
+    decoder = likelihood_module.build_parameter_decoder(
+        opts, pop_fid, fixed_parameter_values=None, wl_params=None)
+    ndim = len(decoder.sampled_labels)
+    assert ndim > 0
+    rng = np.random.default_rng(11)
+    fid = np.asarray(pop_fid, dtype=float)
+    for _ in range(4):
+        coord = jnp.asarray(fid[:ndim] * (1.0 + 0.01 * rng.normal(size=ndim)))
+        like(coord)
+    assert like.jitted_body._cache_size() == 1
+
+
+def test_jit_lowers_a_closed_over_array_to_an_hlo_constant():
+    """The premise behind passing the factory's operands as ARGUMENTS: a concrete
+    array captured by a jitted closure is lowered to a ``dense<>`` HLO constant, not
+    to a parameter, so the module text grows with the array (verified on jax 0.4.34
+    at ~8 bytes/element) and the buffer is duplicated in the executable."""
+    arr = jnp.arange(4096, dtype=jnp.float64)
+    closed = jax.jit(lambda x: jnp.sum(arr * x)).lower(jnp.float64(2.0)).as_text()
+    passed = jax.jit(lambda x, a: jnp.sum(a * x)).lower(jnp.float64(2.0), arr).as_text()
+    assert len(closed) > 8 * 4096          # array embedded in the module
+    assert len(passed) < 4096              # array is a parameter
+    assert "tensor<4096xf64>" in passed.split("\n")[1]   # ... of @main
+
+
+def test_make_likelihood_operands_are_jit_arguments_not_captures():
+    """P-5 guard: the device operands reach the jitted body as ARGUMENTS (jaxpr
+    invars), so the ~1e6-row GW arrays and multi-GB catalog tables are never
+    embedded in the module as constants."""
+    n_sel = 20000
+    opts, data = _flat_spectral_run(n_sel=n_sel)
+    like = likelihood_module.make_likelihood(
+        opts, data, get_fixed_population_params(opts.pop_model))
+    closed_jaxpr = jax.make_jaxpr(like.jitted_body)(jnp.array([]), like.operands)
+    invar_shapes = [tuple(v.aval.shape) for v in closed_jaxpr.jaxpr.invars]
+    # the 5 selection physics fields + q + valid + the 3 sky components
+    assert invar_shapes.count((n_sel,)) >= 5, invar_shapes
+    # and nothing of the operands' size was hoisted into the closed consts
+    const_sizes = [int(np.prod(c.shape)) for c in closed_jaxpr.consts
+                   if hasattr(c, "shape")]
+    assert all(size < n_sel for size in const_sizes), const_sizes
+
+
+def test_make_likelihood_jitted_matches_fully_eager():
+    """Equivalence: jitting the closure must not change the value.  ``disable_jit``
+    evaluates the SAME code path op-by-op on the host, so agreement to 1e-12
+    relative rules out a reassociation/short-circuit difference."""
+    opts, data = _flat_spectral_run()
+    like = likelihood_module.make_likelihood(
+        opts, data, get_fixed_population_params(opts.pop_model))
+    coord = jnp.array([])
+    jitted = float(like(coord))
+    with jax.disable_jit():
+        eager = float(like(coord))
+    assert np.isfinite(jitted)
+    np.testing.assert_allclose(jitted, eager, rtol=1e-12, atol=0.0)
+
+
+def test_make_likelihood_padded_plan_matches_single_pass():
+    """Equivalence across the hoisted padding: a padded, blocked selection pass must
+    reproduce the single pass (the padded rows carry ``valid=False``)."""
+    opts, data = _flat_spectral_run(n_sel=2000)
+    pop_fid = get_fixed_population_params(opts.pop_model)
+    opts.sel_batch_size = None
+    single = float(likelihood_module.make_likelihood(opts, data, pop_fid)(jnp.array([])))
+    opts_blocked, _ = _flat_spectral_run(n_sel=2000)
+    opts_blocked.sel_batch_size = 512               # 2000 % 512 = 464 padded rows
+    blocked = float(
+        likelihood_module.make_likelihood(opts_blocked, data, pop_fid)(jnp.array([])))
+    np.testing.assert_allclose(blocked, single, rtol=1e-9, atol=0.0)

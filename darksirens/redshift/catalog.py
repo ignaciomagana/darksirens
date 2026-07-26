@@ -46,6 +46,7 @@ from __future__ import annotations
 import weakref
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 from jax import jit, lax, vmap
 from jax.scipy.special import logsumexp, ndtr, ndtri
@@ -236,6 +237,42 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
 # Verified-sorted verdicts keyed by id(zgals); each entry pins nothing (a
 # weakref) and is revalidated if the id was recycled by a different array.
 _SORTED_ROWS_CACHE: dict = {}
+
+# Build-time attestation for jit-ARGUMENT catalogs.  The production likelihood
+# (darksiren_log_likelihood, a module-level jit) receives every EMCatalog as a
+# traced argument, so inside its trace _rows_sorted_for_windowing cannot verify
+# the concrete data and the evaluator would fall back to the full row — i.e.
+# the windowed hot path would NEVER engage where it matters most.  The
+# likelihood factory holds the concrete arrays at build time: it verifies every
+# catalog view it binds and arms this flag, which lets the evaluator window
+# TRACED catalogs too.  Process-global, last-attestation-wins; a factory build
+# with ANY unsorted view disarms it.  The concrete-array check still runs first
+# and never consults this flag, so eager/closure callers and the bitwise
+# unsorted-fallback contract are unaffected.
+_ROWS_SORTED_ATTESTED: bool = False
+
+
+def attest_rows_sorted_for_windowing(*em_catalogs) -> bool:
+    """Verify the z-sort invariant on CONCRETE catalogs and arm windowing for
+    the traced (jit-argument) evaluator path.
+
+    Call with every catalog view the likelihood will bind (PE, selection, and
+    all mixture views).  Returns the armed verdict: True only if every catalog
+    with per-galaxy rows verifiably satisfies the invariant.  Catalog views
+    without rows (``zgals is None``) are ignored rather than disarming.
+    """
+    global _ROWS_SORTED_ATTESTED
+    verdict = True
+    for cat in em_catalogs:
+        zgals = getattr(cat, "zgals", None)
+        ngals = getattr(cat, "ngals", None)
+        if zgals is None or ngals is None:
+            continue
+        if not _rows_sorted_for_windowing(zgals, ngals):
+            verdict = False
+            break
+    _ROWS_SORTED_ATTESTED = verdict
+    return verdict
 
 
 def _rows_sorted_for_windowing(zgals, ngals) -> bool:
@@ -668,7 +705,16 @@ def eval_log_catalog_prior_state(
         and em_catalog.ngals is not None
         and getattr(em_catalog.zgals, "ndim", 0) == 2
         and em_catalog.zgals.shape[1] > window
-        and _rows_sorted_for_windowing(em_catalog.zgals, em_catalog.ngals)
+        and (
+            _rows_sorted_for_windowing(em_catalog.zgals, em_catalog.ngals)
+            # Traced catalogs (jit arguments — the production likelihood path)
+            # cannot be verified here; the factory attests them at build time
+            # with the concrete arrays (attest_rows_sorted_for_windowing).
+            or (
+                _ROWS_SORTED_ATTESTED
+                and isinstance(em_catalog.zgals, jax.core.Tracer)
+            )
+        )
     )
     if use_window:
         pix_i = jnp.asarray(pix, dtype=jnp.int32)
