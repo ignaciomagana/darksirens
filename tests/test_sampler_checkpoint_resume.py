@@ -458,3 +458,98 @@ def test_main_cli_resume_reuses_the_original_run_dir(tmp_path):
     assert opts.resume_from_resolved == os.path.join(
         first, CHECKPOINT_BASENAMES["dynesty"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Full main() lifecycle: kill it during sampling, requeue with --resume auto
+# ---------------------------------------------------------------------------
+
+def _stub_pipeline(monkeypatch, likelihood):
+    """Stub only the data / parameter-space seams of the main CLI.
+
+    Everything this batch touched -- _prepare_run_dir, run_sampler's dynesty
+    branch, _failure_guard, _save_outputs -- then runs for real, including the
+    settings.json and results.hdf5 writes.  (The repo's mock-data generator
+    needs a newer numpy than this environment has, so the tiny synthetic
+    end-to-end run lives here instead of in scripts/smoke_tests.)
+    """
+    import darksirens.cli.inference as cli
+    from darksirens.inference.prior import make_prior_transform
+
+    data = {"nEvents": 5, "nsamp": 64, "Ndraw": 3000}
+    pspace = cli._ParameterSpace(
+        labels=list(LABELS), lower_bound=LOWER, upper_bound=UPPER,
+        prior_kinds=[("uniform", None, None)] * len(LABELS),
+        prior_transform=make_prior_transform(LOWER, UPPER),
+        pop_params_fid={}, n_pop_eff=0, n_cosmo_eff=len(LABELS), n_survey_eff=0,
+        model_name="synthetic",
+    )
+    monkeypatch.setattr(cli, "_load_and_report_data", lambda opts: data)
+    monkeypatch.setattr(cli, "_maybe_run_completion_validation",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_resolve_single_catalog_marks", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_build_and_report_parameter_space",
+                        lambda *a, **k: pspace)
+    monkeypatch.setattr(cli, "_build_likelihood", lambda *a, **k: likelihood)
+    return cli
+
+
+def _cli_args(tmp_path, extra=()):
+    gw = tmp_path / "gw.h5"
+    sel = tmp_path / "inj.h5"
+    for path in (gw, sel):
+        path.write_bytes(b"")
+    return [
+        "--sampler", "dynesty", "--gw_path", str(gw),
+        "--gwselection_path", str(sel), "--universe_model", "spectral_sirens",
+        "--save_path", str(tmp_path / "out"), "--nlive", "40", "--dlogz", "1.0",
+        "--seed", "17", "--show_progress", "false",
+        "--sampler_preflight", "off", "--checkpoint_interval", "0.001",
+        *extra,
+    ]
+
+
+def test_main_cli_killed_during_sampling_resumes_with_auto(tmp_path, monkeypatch):
+    """The production scenario end to end: a run dies mid-sampling, leaves a
+    settings.json / failure.json / checkpoint behind, and the identical command
+    plus --resume auto finishes it inside the SAME run directory."""
+    out = tmp_path / "out"
+    dying, _ = _loglike_that_dies_after(400)
+
+    cli = _stub_pipeline(monkeypatch, dying)
+    with pytest.raises(_SimulatedKill):
+        cli.main(_cli_args(tmp_path))
+
+    run_dirs = [d for d in out.iterdir() if d.is_dir()]
+    assert len(run_dirs) == 1, "the killed run left no run directory"
+    run_dir = run_dirs[0]
+    # A killed run is now diagnosable AND resumable.
+    assert (run_dir / "settings.json").is_file()
+    assert (run_dir / "failure.json").is_file()
+    assert (run_dir / CHECKPOINT_BASENAMES["dynesty"]).is_file()
+    with open(run_dir / "settings.json") as fh:
+        assert json.load(fh)["run_status"] == "sampling"
+    with open(run_dir / "failure.json") as fh:
+        failure = json.load(fh)
+    assert failure["stage"] == "sampler"
+    assert failure["error_type"] == "_SimulatedKill"
+    assert not (run_dir / "results.hdf5").exists()
+
+    # Requeue the identical command plus --resume auto.
+    cli = _stub_pipeline(monkeypatch, _loglike)
+    cli.main(_cli_args(tmp_path, ["--resume", "auto"]))
+
+    assert [d for d in out.iterdir() if d.is_dir()] == [run_dir], \
+        "the resumed run opened a second run directory"
+    assert (run_dir / "samples.npy").is_file()
+    assert (run_dir / "results.hdf5").is_file()
+    with open(run_dir / "settings.json") as fh:
+        final = json.load(fh)
+    assert final["run_status"] == "complete"
+    assert final["sampling_runtime"] is not None
+    assert final["resume_from_resolved"] == str(
+        run_dir / CHECKPOINT_BASENAMES["dynesty"]
+    )
+    # The chain is on disk independently of the HDF5.
+    chain = np.load(run_dir / "samples.npy")
+    assert chain.ndim == 2 and chain.shape[1] == len(LABELS)
