@@ -43,20 +43,40 @@ dependency.
 from __future__ import annotations
 
 import math
+import os
 
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 from jax.scipy.special import logsumexp
 
 from darksirens.gw.populations.base import ParamSpec, pack_specs
+from darksirens.redshift.grid import zMax as _ZMAX_GRID
 
 # Field clip mirrors the population GP: keeps exp(f) finite under wide xi.
 _FIELD_CLIP = 10.0
 _JITTER_REL = 1e-4
 _JITTER_ABS = 1e-9   # absolute floor; product kernels are more degeneracy-prone
-# Redshift normalisation grid for the 3-D models (cf. gp.py _ZNORM_N/_ZNORM_HI).
-_ZNORM_N = 24
-_ZNORM_HI = 3.0
+# Redshift normalisation grid for the 3-D models.
+#
+# The normaliser is tabulated on [0, _ZNORM_HI] and evaluated with jnp.interp,
+# which CLAMPS above the grid: any z > _ZNORM_HI silently reuses the norm at the
+# edge, so the models' defining contract (the sphere -- or volume -- average of
+# g is 1 at every z) is violated there.  This ceiling therefore has to track the
+# SHARED analysis redshift grid, ``zMax`` from darksirens.redshift.grid (set by
+# DARKSIRENS_ZMAX, default 5.0); the old hardcoded 3.0 silently froze z in
+# (3, 5], which is reachable because likelihood/core.py evaluates log_g_sky at
+# z_of_dL over the full grid and z_of_dL grows with H0 across its prior.
+#
+# This is the same defect and the same remedy as gw/populations/gp.py
+# (library-review SEV-3); the fix was applied there and not here, and the
+# "cf. gp.py" note that used to sit on these constants hid that.  ``_ZNORM_N``
+# tracks ``_ZNORM_HI`` to hold node density fixed (8 per unit z: 40 nodes at the
+# z=5 default, 24 at the 3.0 floor).
+if "DARKSIRENS_SKY_ZNORM_HI" in os.environ:
+    _ZNORM_HI = float(os.environ["DARKSIRENS_SKY_ZNORM_HI"])
+else:
+    _ZNORM_HI = max(3.0, float(_ZMAX_GRID))
+_ZNORM_N = max(24, int(round(8.0 * _ZNORM_HI)))
 
 
 def _sphere_rbf(A: jnp.ndarray, B: jnp.ndarray, amp: jnp.ndarray, ls: jnp.ndarray):
