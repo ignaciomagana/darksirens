@@ -1,0 +1,55 @@
+# Tier-0 fast subset: the pytest files that are verified green on a CPU-only
+# box and cheap enough to run before every commit.  Single source of truth —
+# docs/source/testing.md and .github/workflows/ci.yml both read this file, so
+# the documented gate and the CI gate cannot drift apart.
+#
+# Measured 2026-07-26 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
+#   26 files, 127 passed, 1 skipped, 66 s wall.
+#
+# Run it with:
+#   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu \
+#     python -m pytest -q $(grep -v '^#' tests/fast_subset.txt)
+#
+# Admission rules for this list:
+#   * green standalone AND green as part of this batch, on CPU;
+#   * no dependence on the numpy major version (nothing calling np.trapezoid or
+#     np.trapz — see the known-failure list in docs/source/testing.md);
+#   * seconds, not minutes: no sampler runs, no GPU, no large mocks.
+
+# ── import / refactor contracts ────────────────────────────────────────────
+tests/test_no_deleted_import_paths.py
+tests/test_refactor_imports.py
+tests/test_public_import_contract.py
+tests/test_packaging_contract.py
+
+# ── CLI plumbing, run dirs, artifacts ──────────────────────────────────────
+tests/test_cli_run_dir.py
+tests/test_cli_sigma_kernel_removed.py
+tests/test_dynesty_seed.py
+tests/test_simulation_config.py
+tests/test_results_saving.py
+tests/test_run_provenance.py
+tests/test_lensing_file_contract.py
+tests/test_flow_cli_validation.py
+tests/test_sampler_zero_free_params.py
+
+# ── selection term and its guards ──────────────────────────────────────────
+tests/test_selection_variance_guard.py
+tests/test_selection_soft_guard.py
+tests/test_selection_prior_model.py
+
+# ── priors, populations, parameter table ───────────────────────────────────
+tests/test_prior_defaults.py
+tests/test_parameter_table.py
+tests/test_bright_siren_prior.py
+tests/test_gwtc5_fiducial_bpl2peaks.py
+tests/test_population_registry_golden.py
+
+# ── catalogs, completion, multitracer ──────────────────────────────────────
+tests/test_completion_prior_strength.py
+tests/test_complete_catalog_empty_pixel_policy.py
+tests/test_pop_extractor_multitracer.py
+
+# ── analyze / post-processing ──────────────────────────────────────────────
+tests/test_analyze_fcat_weights.py
+tests/test_analyze_bayes_factors.py
