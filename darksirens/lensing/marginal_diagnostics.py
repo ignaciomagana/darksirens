@@ -546,9 +546,21 @@ def compute_marginalized_partition_diagnostics(
 
     pair_probs = np.zeros(len(candidates), dtype=float)
     singleton_probs = None
+    # The candidate endpoints alone do NOT bound the event count: a partition
+    # state's singleton_indices span every observed event (0..N_obs-1), so any
+    # event above the largest candidate endpoint would fancy-index past the end
+    # of singleton_probs (IndexError).  Widen with the states' own indices, the
+    # way compute_componentwise_factorized_partition_diagnostics already does --
+    # real campaign candidate files have n_events > max endpoint + 1 (events
+    # with no candidate partner at all).
     n_events = 0
     for c in candidates:
         n_events = max(n_events, c.i + 1, c.j + 1)
+    for state in states:
+        if state.singleton_indices.size:
+            n_events = max(n_events, int(np.max(state.singleton_indices)) + 1)
+        if state.pair_indices.size:
+            n_events = max(n_events, int(np.max(state.pair_indices)) + 1)
     if n_events:
         singleton_probs = np.zeros(n_events, dtype=float)
     for w, state in zip(post, states):

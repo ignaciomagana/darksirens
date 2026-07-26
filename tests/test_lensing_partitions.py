@@ -104,6 +104,33 @@ def test_diagnostics_include_component_summary():
     assert diag["component_max_p_pair"] == pytest.approx([0.5, 0.5])
 
 
+@pytest.mark.parametrize("component_mode", ["global", "componentwise"])
+def test_diagnostics_handle_events_above_the_largest_candidate_endpoint(component_mode):
+    """Regression: n_events was derived ONLY from the candidate endpoints, so
+    the singleton-probability accumulator was allocated too short whenever an
+    observed event had no candidate partner at all (real campaign candidate
+    files have n_events=280 with max endpoint 277) -> IndexError in the
+    midpoint-diagnostics phase, after the full data load.  The componentwise
+    twin already widened with the states' own indices."""
+    candidates = [CandidatePair(0, 1, 0.5), CandidatePair(2, 3, -0.3)]
+    n_events = 6  # events 4, 5 are candidate-free singletons in every partition
+    if component_mode == "global":
+        states = enumerate_compatible_partitions(n_events, candidates)
+    else:
+        states, _, _ = exact_partitions_componentwise(
+            n_events, candidates, max_total_partitions=100
+        )
+    diag = compute_marginalized_partition_diagnostics(
+        states, candidates, lambda s: float(s.n_pairs)
+    )
+    singleton_probs = diag["posterior_singleton_probability"]
+    assert len(singleton_probs) == n_events
+    # events 4 and 5 are singletons in every compatible partition
+    assert singleton_probs[4] == pytest.approx(1.0)
+    assert singleton_probs[5] == pytest.approx(1.0)
+    assert sum(singleton_probs) == pytest.approx(diag["expected_n_singletons"])
+
+
 
 def test_factorized_component_diagnostics_match_global_with_count_coupling():
     candidates = [CandidatePair(0, 1, math.log(2.0)), CandidatePair(2, 3, math.log(3.0))]
