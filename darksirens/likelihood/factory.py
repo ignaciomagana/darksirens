@@ -19,6 +19,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from darksirens.redshift.catalog import attest_rows_sorted_for_windowing
 from darksirens.redshift.completion import build_pixel_kde_cache
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.catalog_views import barrier, prepare_catalog_views
@@ -455,6 +456,15 @@ def _make_mixture_likelihood(
     operands = (
         gw_pe, em_catalog_pe_0, gw_sel, em_catalog_sel_0,
         mixture_em_catalogs_pe, mixture_em_catalogs_sel,
+    )
+
+    # Arm the windowed catalog-KDE evaluator for the traced path: the catalogs
+    # cross the jit boundary as ARGUMENTS, so the evaluator sees tracers and
+    # cannot verify the z-sort invariant itself — verify every bound view HERE,
+    # while the arrays are concrete (see catalog.attest_rows_sorted_for_windowing).
+    attest_rows_sorted_for_windowing(
+        em_catalog_pe_0, em_catalog_sel_0,
+        *mixture_em_catalogs_pe, *mixture_em_catalogs_sel,
     )
 
     def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
@@ -894,6 +904,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         gw_pe, em_catalog_pe, gw_sel, em_catalog_sel,
         wl_a, wl_b, wl_z_grid, wl_log_mu_grid, wl_log_p_table,
     )
+
+    # Same attestation as the mixture factory: window the traced catalogs only
+    # after verifying the concrete arrays here at build time.
+    attest_rows_sorted_for_windowing(em_catalog_pe, em_catalog_sel)
 
     def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
         (
