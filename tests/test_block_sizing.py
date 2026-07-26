@@ -23,14 +23,19 @@ from darksirens.likelihood.block_sizing import (
     CAL_N_EVENTS,
     CAL_N_SAMP,
     CAL_MAX_GALS_PER_ROW,
+    CAL_N_Q,
     FIXED_OVERHEAD_BYTES,
     TRUE_FIXED_BYTES,
+    TRUE_FIXED_VALUE_BYTES,
     STATIC_STATE_CAL_BYTES,
+    SEL_BYTES_PER_INJECTION_VALUE,
+    PE_BYTES_PER_SAMPLE_VALUE,
     SAFETY_FACTOR,
     block_size_arg,
     resolve_block_sizes,
     measure_static_state_bytes,
     estimate_pending_static_bytes,
+    sampler_block_sizing_profile,
 )
 
 # Real-data shapes (gwsamples_bbh_whitelist_all_events + selection_o3o4ab_allsky).
@@ -411,8 +416,366 @@ def test_measure_static_state_base_miss_from_members():
     }
     total = measure_static_state_bytes(
         data, n_grid=30, has_catalog=True, catalog_memory=data["catalog_memory"])
-    # members 3600 + KDE (2+2)*30*8=960 + base_miss 2*(5*30*8)=2400
-    assert total == 3600 + 960 + 2400
+    # loaded members 3600
+    #  + KDE (2+2)*30*8 = 960
+    #  + base_miss 2*(5*30*8) = 2400
+    #  + the ensemble's DEVICE copies, which the factory (not the loader) makes
+    #    because catalogs/lss.py loads logq_members as HOST numpy: the full
+    #    (M, N_rows, n_grid) transfer 3*5*30*8 = 3600, plus one compact
+    #    (M, n_union, n_grid) slice per view 2*3*4*30*8 = 5760.
+    assert total == 3600 + 960 + 2400 + 3600 + 5760
+
+
+# ── P-3: pending static counts what the FACTORY (not the loader) allocates ───────
+
+def test_pending_static_counts_union_galaxy_tables():
+    """``prepare_catalog_views`` rebuilds the union galaxy tables from the FULL-sky
+    rows at factory time, so a run that still carries them owes those bytes."""
+    cm = {"unique_pe_pixels": 3, "unique_sel_pixels": 5,
+          "max_galaxies_per_unique_pixel": 40}
+    base = {"zgals_pe": np.zeros((3, 40), np.float64), "catalog_memory": cm}
+    without_full = estimate_pending_static_bytes(
+        base, n_grid=20, has_catalog=True, catalog_memory=cm)
+    with_full = estimate_pending_static_bytes(
+        {**base, "zgals": np.zeros((100, 40), np.float64)},
+        n_grid=20, has_catalog=True, catalog_memory=cm)
+    kde = (3 + 5) * 20 * 8
+    assert without_full == kde                     # nothing to rebuild
+    # union rows (<= unique_pe + unique_sel = 8) x 40 galaxies x 3 f64 tables,
+    # plus the int32 ngals count vector.
+    assert with_full == kde + 8 * 40 * 3 * 8 + 8 * 4
+
+
+def test_pending_static_skips_union_tables_for_bundles():
+    """A K >= 2 bundle carries no full-sky rows (the loader compacted them), so the
+    factory rebuilds nothing for it."""
+    bundle = {
+        "zgals_pe": np.zeros((6, 30), np.float64),
+        "zgals_sel": np.zeros((6, 30), np.float64),
+        "zgals": np.zeros((100, 30), np.float64),  # must be IGNORED for a bundle
+    }
+    pending = estimate_pending_static_bytes(
+        {"catalogs": [bundle]}, n_grid=20, has_catalog=True)
+    assert pending == (6 + 6) * 20 * 8             # KDE caches only
+
+
+def test_pending_static_skips_device_resident_member_table():
+    """A member table already on the device is reflected in ``free_bytes``; only a
+    HOST table costs the factory a transfer + a compact slice."""
+    class _FakeDeviceArray:
+        def __init__(self, shape):
+            self.shape = shape
+            self.nbytes = int(np.prod(shape)) * 8
+
+        def devices(self):                          # the duck-typed device marker
+            return ("gpu:0",)
+
+    cm = {"unique_pe_pixels": 2, "unique_sel_pixels": 2}
+    host = estimate_pending_static_bytes(
+        {"lss_completion_logq_members": np.zeros((3, 5, 30), np.float64),
+         "catalog_memory": cm},
+        n_grid=30, has_catalog=True, catalog_memory=cm)
+    device = estimate_pending_static_bytes(
+        {"lss_completion_logq_members": _FakeDeviceArray((3, 5, 30)),
+         "catalog_memory": cm},
+        n_grid=30, has_catalog=True, catalog_memory=cm)
+    kde_and_base_miss = (2 + 2) * 30 * 8 + 2 * 5 * 30 * 8
+    assert device == kde_and_base_miss
+    assert host == kde_and_base_miss + 3 * 5 * 30 * 8 + 2 * 3 * 4 * 30 * 8
+    assert host > device
+
+
+def test_pending_static_counts_field_member_rows():
+    """The field convention adds an (M, n_occupied, n_grid) float32 table, also
+    built at factory time (K=1 flat path)."""
+    cm = {"unique_pe_pixels": 2, "unique_sel_pixels": 2}
+    data = {"lss_completion_logq_members": np.zeros((3, 5, 30), np.float64),
+            "catalog_memory": cm}
+    conditional = estimate_pending_static_bytes(
+        data, n_grid=30, has_catalog=True, catalog_memory=cm,
+        catalog_sky_weighting="conditional")
+    field = estimate_pending_static_bytes(
+        data, n_grid=30, has_catalog=True, catalog_memory=cm,
+        catalog_sky_weighting="field")
+    assert field - conditional == 3 * 5 * 30 * 4
+    # Already built by the loader (bundle path) -> not pending again.
+    assert estimate_pending_static_bytes(
+        {**data, "field_lss_q_members": np.zeros((3, 5, 30), np.float32)},
+        n_grid=30, has_catalog=True, catalog_memory=cm,
+        catalog_sky_weighting="field") == conditional
+
+
+def test_pending_static_walks_k2_bundles():
+    """K >= 2 keeps its catalogs per-bundle; the top level is empty by design, so a
+    bundle-blind estimate was silently 0 for every multitracer run."""
+    bundles = [
+        {"zgals_pe": np.zeros((4, 20), np.float64),
+         "zgals_sel": np.zeros((4, 20), np.float64)},
+        {"zgals_pe": np.zeros((7, 20), np.float64),
+         "zgals_sel": np.zeros((7, 20), np.float64)},
+    ]
+    data = {"catalog_memory": None, "zgals_pe": None, "catalogs": bundles}
+    pending = estimate_pending_static_bytes(data, n_grid=50, has_catalog=True)
+    assert pending == ((4 + 4) + (7 + 7)) * 50 * 8
+    assert pending > 0
+
+
+class _ShapeOnly:
+    """Array stand-in carrying only ``.shape``/``.nbytes`` (no allocation), so a
+    DESI-scale scenario can be exercised in a unit test."""
+
+    def __init__(self, shape, itemsize=8, device=False):
+        self.shape = tuple(shape)
+        self.nbytes = int(np.prod(shape)) * itemsize
+        if device:
+            self.devices = lambda: ("gpu:0",)
+
+
+def test_desi_scale_field_run_is_blocked_down_not_single_passed():
+    """P-3 end to end: a DESI-wide K=1 ``--lss_marginalize`` field run on a 141 GB
+    card.  With the old KDE+base_miss-only reserve (1.18 GB) the resolver believed a
+    full single pass fitted, while the factory actually allocates ~48 GB before the
+    first evaluation; with the corrected reserve the same call is blocked down."""
+    n_rows, n_grid, n_members, max_gals = 49152, 1000, 32, 2113
+    cm = {"unique_pe_pixels": n_rows // 2, "unique_sel_pixels": n_rows // 2,
+          "max_galaxies_per_unique_pixel": max_gals}
+    data = {
+        "zgals": _ShapeOnly((786432, max_gals), device=True),   # full-sky, retained
+        "zgals_pe": _ShapeOnly((n_rows, max_gals), device=True),
+        "zgals_sel": _ShapeOnly((n_rows, max_gals), device=True),
+        "lss_completion_logq_members": _ShapeOnly((n_members, n_rows, n_grid)),
+        "catalog_memory": cm,
+    }
+    pending = estimate_pending_static_bytes(
+        data, n_grid=n_grid, has_catalog=True, catalog_memory=cm,
+        catalog_sky_weighting="field")
+    legacy = 3 * n_rows * n_grid * 8               # KDE + base_miss only
+    assert legacy < 2e9 < 40e9 < pending < 60e9    # ~1.2 GB -> ~47.7 GB
+
+    def _plan(static):
+        return resolve_block_sizes(
+            n_events=259, n_samp=4096, n_sel=1_067_946,
+            sel_requested=BLOCK_AUTO, pe_requested=BLOCK_AUTO,
+            has_catalog=True, flow_path=False, n_grid=n_grid,
+            max_gals_per_row=max_gals, n_catalogs=1,
+            static_state_bytes=static, needs_grad=True,
+            free_bytes=141 * GB, backend="gpu")
+
+    assert _plan(legacy) == BlockSizePlan(None, None, "auto-single-pass")
+    blocked = _plan(pending)
+    assert blocked.sel_batch_size == SEL_MIN_BATCH
+    assert blocked.pe_event_block == PE_MIN_BLOCK
+
+
+def test_desi_scale_field_run_still_single_passes_for_dynesty():
+    """... and the two fixes compose: the same corrected ~48 GB reserve still leaves
+    a gradient-free run its single pass, because the value peak is ~10 GB not ~80."""
+    n_rows, n_grid, n_members, max_gals = 49152, 1000, 32, 2113
+    cm = {"unique_pe_pixels": n_rows // 2, "unique_sel_pixels": n_rows // 2,
+          "max_galaxies_per_unique_pixel": max_gals}
+    pending = estimate_pending_static_bytes(
+        {"zgals": _ShapeOnly((786432, max_gals), device=True),
+         "zgals_pe": _ShapeOnly((n_rows, max_gals), device=True),
+         "zgals_sel": _ShapeOnly((n_rows, max_gals), device=True),
+         "lss_completion_logq_members": _ShapeOnly((n_members, n_rows, n_grid)),
+         "catalog_memory": cm},
+        n_grid=n_grid, has_catalog=True, catalog_memory=cm,
+        catalog_sky_weighting="field")
+    plan = resolve_block_sizes(
+        n_events=259, n_samp=4096, n_sel=1_067_946,
+        sel_requested=BLOCK_AUTO, pe_requested=BLOCK_AUTO,
+        has_catalog=True, flow_path=False, n_grid=n_grid,
+        max_gals_per_row=max_gals, n_catalogs=1,
+        static_state_bytes=pending, needs_grad=False,
+        free_bytes=141 * GB, backend="gpu")
+    assert plan == BlockSizePlan(None, None, "auto-single-pass")
+
+
+# ── P-1/P-3 regression: the catalog slope must never fall below catalog-free ─────
+
+def test_unknown_max_gals_falls_back_to_calibration_reference(capsys):
+    """``max_gals_per_row=None`` (caller could not determine it) must NOT scale the
+    _CAT slopes below the catalog-free ones — the K >= 2 blindness that made a
+    2-catalog dark-siren run look ~1000x lighter per injection than spectral."""
+    free = 110 * GB
+    unknown = _sel_of(has_catalog=True, free_bytes=free, max_gals_per_row=None,
+                      n_catalogs=2)
+    out = capsys.readouterr().out
+    assert "block-sizing" in out and "max_gals_per_row=None" in out
+    reference = _sel_of(has_catalog=True, free_bytes=free,
+                        max_gals_per_row=CAL_MAX_GALS_PER_ROW, n_catalogs=2)
+    no_catalog = _sel_of(has_catalog=False, free_bytes=free)
+    assert unknown == reference             # falls back to the calibration point
+    assert unknown <= no_catalog            # never LIGHTER than the spectral path
+
+
+def test_k2_degenerate_inputs_would_single_pass_where_true_dims_block():
+    """P-1 end to end: the K=2 DESI+DES plan.  Fed the degenerate inputs the stubbed
+    top-level ``catalog_memory`` used to produce (max_gals/row = 1, pending static =
+    0) the resolver claims a full single pass fits; fed the real per-bundle
+    dimensions the identical call blocks.  The CLI-side fix is that
+    ``_block_sizing_inputs`` can no longer produce the degenerate pair (see
+    ``test_cli_block_sizing_inputs_k2_bundles``)."""
+    base = dict(n_events=N_EVENTS, n_samp=N_SAMP, n_sel=N_SEL,
+                sel_requested=BLOCK_AUTO, pe_requested=BLOCK_AUTO,
+                has_catalog=True, flow_path=False, n_grid=1000, n_catalogs=2,
+                needs_grad=True, free_bytes=141 * GB, backend="gpu")
+    degenerate = resolve_block_sizes(max_gals_per_row=1, static_state_bytes=0, **base)
+    assert degenerate == BlockSizePlan(None, None, "auto-single-pass")
+    real = resolve_block_sizes(max_gals_per_row=CAL_MAX_GALS_PER_ROW,
+                               static_state_bytes=786_000_000, **base)
+    assert real.sel_batch_size is not None and real.sel_batch_size < N_SEL
+    assert real.source == "auto"
+
+
+def test_explicit_small_max_gals_is_trusted():
+    # A genuinely sparse catalog really is lighter: an explicit int is honoured
+    # (and no warning is emitted) — only None triggers the fallback.
+    sparse = _sel_of(has_catalog=True, free_bytes=110 * GB, max_gals_per_row=1)
+    dense = _sel_of(has_catalog=True, free_bytes=110 * GB,
+                    max_gals_per_row=CAL_MAX_GALS_PER_ROW)
+    assert sparse >= dense
+
+
+# ── P-6: the population q-quadrature grid enters the peak model ──────────────────
+
+def test_monotonic_in_n_q():
+    # n_q multiplies the per-injection / per-sample working set (the default
+    # pairing normaliser integrates over q PER SAMPLE), so more nodes must never
+    # yield a larger selection block.  Before this term, --norm_nq 800 got the
+    # IDENTICAL plan to --norm_nq 200 against a 4x larger working set.
+    sels = [_sel_of(has_catalog=False, free_bytes=110 * GB, n_q=q)
+            for q in (32, 64, CAL_N_Q, 400, 800)]
+    assert sels == sorted(sels, reverse=True)
+    assert sels[0] > sels[-1]               # the term is not inert
+
+
+def test_n_q_scale_is_unity_at_the_calibration_point():
+    kw = dict(n_events=CAL_N_EVENTS, n_samp=CAL_N_SAMP, n_sel=CAL_N_SEL,
+              sel_requested=BLOCK_AUTO, pe_requested=BLOCK_AUTO,
+              has_catalog=False, flow_path=False, n_grid=CAL_N_GRID,
+              static_state_bytes=STATIC_STATE_CAL_BYTES,
+              free_bytes=100 * GB, backend="gpu")
+    assert resolve_block_sizes(**kw) == resolve_block_sizes(n_q=CAL_N_Q, **kw)
+
+
+# ── P-4: gradient-free samplers get the value-only peak model ────────────────────
+
+def test_sampler_block_sizing_profile():
+    from types import SimpleNamespace as NS
+    assert sampler_block_sizing_profile(NS(sampler="numpyro")) == (True, 1)
+    assert sampler_block_sizing_profile(NS(sampler="dynesty")) == (False, 1)
+    assert sampler_block_sizing_profile(NS(sampler="tinyns")) == (False, 1)
+    # tinyns vmaps the loglike over replacement_chains (and over the largest entry
+    # of a chain schedule), so that many evaluations are live at once.
+    assert sampler_block_sizing_profile(NS(
+        sampler="tinyns",
+        tinyns_resolved_config={"replacement_chains": 16},
+    )) == (False, 16)
+    assert sampler_block_sizing_profile(NS(
+        sampler="tinyns",
+        tinyns_resolved_config={"replacement_chains": 1,
+                                "replacement_chain_schedule": (1, 4, 64)},
+    )) == (False, 64)
+    # jax_block_size scans whole ITERATIONS (sequential) -> not a memory multiplier.
+    assert sampler_block_sizing_profile(NS(
+        sampler="tinyns", tinyns_resolved_config={"jax_block_size": 32},
+    )) == (False, 1)
+    # Unknown / missing sampler is treated as gradient-free but never batched.
+    assert sampler_block_sizing_profile(NS()) == (False, 1)
+
+
+def test_needs_grad_defaults_to_true():
+    # The default MUST stay the (calibrated) value+grad model so an un-updated
+    # caller keeps the conservative behaviour.
+    kw = dict(n_events=N_EVENTS, n_samp=N_SAMP, n_sel=N_SEL,
+              sel_requested=BLOCK_AUTO, pe_requested=BLOCK_AUTO,
+              has_catalog=False, flow_path=False,
+              free_bytes=95 * GB, backend="gpu")
+    assert resolve_block_sizes(**kw) == resolve_block_sizes(needs_grad=True, **kw)
+
+
+def _plan(free, **kw):
+    base = dict(n_events=N_EVENTS, n_samp=N_SAMP, n_sel=N_SEL,
+                sel_requested=BLOCK_AUTO, pe_requested=BLOCK_AUTO,
+                has_catalog=False, flow_path=False,
+                free_bytes=free, backend="gpu")
+    base.update(kw)
+    return resolve_block_sizes(**base)
+
+
+def test_value_only_single_pass_where_grad_model_blocks():
+    """The production defect: on the H100 NVL (88.1 GiB probed free) the value+grad
+    model blocks a dynesty run into (32768, 87) — MEASURED 49.3 ms/call for a
+    2.27 GB peak — where the single pass is 27.5 ms/call at 5.65 GB."""
+    free = int(88.1 * GB)
+    grad = _plan(free, needs_grad=True)
+    assert grad.sel_batch_size == SEL_MIN_BATCH and grad.pe_event_block is not None
+    value = _plan(free, needs_grad=False)
+    assert (value.sel_batch_size, value.pe_event_block) == (None, None)
+    assert value.source == "auto-single-pass"
+
+
+def test_value_only_single_pass_on_a_small_gpu():
+    # The measured value peak of the single pass is 5.65 GB, so any GPU with more
+    # than ~10 GB free needs no blocking at all for a gradient-free run.
+    assert _plan(16 * GB, needs_grad=False).sel_batch_size is None
+    assert _plan(16 * GB, needs_grad=False).pe_event_block is None
+    # ... while the value+grad model (rightly) blocks the same card hard.
+    assert _plan(16 * GB, needs_grad=True).sel_batch_size == SEL_MIN_BATCH
+
+
+def test_value_only_model_brackets_the_measured_peaks():
+    """Formula-level calibration check against the H100 NVL value-only sweep
+    (scripts/benchmarks/block_sizes_h100_80gb_value_only.json): the model must be
+    conservative (predict >= measured) but not wildly so."""
+    def predicted(sel, pe):
+        sel_term = (N_SEL if sel is None else sel) * SEL_BYTES_PER_INJECTION_VALUE
+        pe_term = ((N_EVENTS if pe is None else pe)
+                   * N_SAMP * PE_BYTES_PER_SAMPLE_VALUE)
+        return TRUE_FIXED_VALUE_BYTES + max(sel_term, pe_term)
+
+    for (sel, pe), measured in [((None, None), 5.648e9),
+                                ((32768, None), 5.695e9),
+                                ((None, 8), 5.648e9),
+                                ((32768, 8), 0.703e9)]:
+        p = predicted(sel, pe)
+        assert p >= measured, (sel, pe, p, measured)
+        assert p <= 2.0 * measured, (sel, pe, p, measured)
+
+
+def test_value_only_blocks_both_axes_together():
+    """Measured: blocking ONE axis alone leaves the value peak unchanged (5.648 ->
+    5.695 GB) because the unblocked axis's (N, n_q) intermediate still sets it.  So
+    the value-only policy must never return a sel-blocked / pe-single-pass plan."""
+    # A budget small enough that the selection axis must chunk.
+    plan = _plan(8 * GB, needs_grad=False)
+    assert plan.sel_batch_size is not None
+    assert plan.pe_event_block is not None
+
+
+def test_value_only_monotonic_in_free_bytes():
+    def _sel(free):
+        s = _plan(free, needs_grad=False).sel_batch_size
+        return N_SEL if s is None else s
+    sels = [_sel(f) for f in (2 * GB, 4 * GB, 8 * GB, 10 * GB, 40 * GB)]
+    assert sels == sorted(sels)
+
+
+def test_concurrent_evals_shrinks_blocks():
+    # tinyns replacement_chains vmaps the loglike, so every intermediate is
+    # batched: more concurrent evaluations must never yield a larger block.
+    def _sel(n):
+        s = _plan(40 * GB, needs_grad=False, concurrent_evals=n).sel_batch_size
+        return N_SEL if s is None else s
+    sels = [_sel(n) for n in (1, 2, 8, 16, 64)]
+    assert sels == sorted(sels, reverse=True)
+    assert sels[0] > sels[-1]
+
+
+def test_value_only_explicit_still_wins():
+    plan = _plan(40 * GB, needs_grad=False, sel_requested=65536, pe_requested=32)
+    assert plan == BlockSizePlan(65536, 32, "explicit")
 
 
 # ── CLI wiring: _block_sizing_inputs passes real values ──────────────────────────
@@ -435,7 +798,7 @@ def test_cli_block_sizing_inputs_plumbing():
     }
     opts = SimpleNamespace(
         survey_path="cat.h5", n_catalogs=1, gw_flows_path=None,
-        drop_full_catalog=False,
+        drop_full_catalog=False, sampler="numpyro",
         sel_batch_size=BLOCK_AUTO, pe_event_block=BLOCK_AUTO,
     )
     kw = _block_sizing_inputs(opts, data)
@@ -444,6 +807,8 @@ def test_cli_block_sizing_inputs_plumbing():
     assert kw["has_catalog"] is True
     assert kw["n_catalogs"] == 1
     assert kw["max_gals_per_row"] == 50
+    assert kw["n_q"] == CAL_N_Q
+    assert kw["needs_grad"] is True and kw["concurrent_evals"] == 1
     ng = int(np.asarray(zgrid).shape[0])
     assert kw["n_grid"] == ng
     # Resolver reserves the PENDING (factory) static: KDE cache (10+10)*n_grid*8,
@@ -458,6 +823,110 @@ def test_cli_block_sizing_inputs_plumbing():
     kw.pop("static_state_full_bytes")
     plan = resolve_block_sizes(free_bytes=200 * GB, backend="gpu", **kw)
     assert plan.source in ("auto", "auto-single-pass", "auto-floor-reduced")
+
+
+def test_cli_block_sizing_inputs_k2_bundles():
+    """A K >= 2 multitracer run has NO top-level catalog_memory / zgals_* (data.py
+    stubs catalog_inputs, so loaders never builds them) — the two dominant catalog
+    dimensions have to come from data['catalogs'] or the model is blind."""
+    pytest.importorskip("jax")
+    from types import SimpleNamespace
+    from darksirens.cli.inference import _block_sizing_inputs
+    from darksirens.redshift.grid import zgrid
+
+    bundles = [
+        {"zgals_pe": np.zeros((6, 2113), np.float64),
+         "zgals_sel": np.zeros((6, 2113), np.float64)},
+        {"zgals_pe": np.zeros((9, 800), np.float64),
+         "zgals_sel": np.zeros((9, 800), np.float64)},
+    ]
+    data = {
+        "m1detsels": np.zeros(1000, np.float64),
+        "nEvents": 5, "nsamp": 100,
+        "catalog_memory": None,           # stubbed away for K >= 2
+        "zgals_pe": None, "zgals_sel": None,
+        "catalogs": bundles,
+    }
+    opts = SimpleNamespace(
+        survey_path="cat1.h5", n_catalogs=2, gw_flows_path=None,
+        drop_full_catalog=False, sampler="dynesty",
+        sel_batch_size=BLOCK_AUTO, pe_event_block=BLOCK_AUTO,
+    )
+    kw = _block_sizing_inputs(opts, data)
+    ng = int(np.asarray(zgrid).shape[0])
+    assert kw["has_catalog"] is True and kw["n_catalogs"] == 2
+    # widest bundle row, NOT the silent 1 the stubbed catalog_memory produced
+    assert kw["max_gals_per_row"] == 2113
+    # per-bundle KDE caches, NOT 0
+    assert kw["static_state_bytes"] == ((6 + 6) + (9 + 9)) * ng * 8
+    assert kw["static_state_bytes"] > 0
+    # dynesty is gradient-free
+    assert kw["needs_grad"] is False
+
+
+def test_cli_block_sizing_inputs_tinyns_concurrency():
+    pytest.importorskip("jax")
+    from types import SimpleNamespace
+    from darksirens.cli.inference import _block_sizing_inputs
+
+    opts = SimpleNamespace(
+        survey_path=None, n_catalogs=1, gw_flows_path=None,
+        drop_full_catalog=False, sampler="tinyns",
+        tinyns_resolved_config={"replacement_chains": 16},
+        sel_batch_size=BLOCK_AUTO, pe_event_block=BLOCK_AUTO,
+    )
+    kw = _block_sizing_inputs(opts, {"m1detsels": np.zeros(10), "nEvents": 2,
+                                     "nsamp": 4})
+    assert kw["needs_grad"] is False and kw["concurrent_evals"] == 16
+
+
+def test_cli_block_sizing_inputs_reads_norm_nq():
+    pytest.importorskip("jax")
+    from types import SimpleNamespace
+    from darksirens.cli.inference import _block_sizing_inputs
+    from darksirens.gw.populations.utils import (
+        configure_normalization_grids, normalization_grid_settings,
+    )
+
+    original = normalization_grid_settings().n_q
+    try:
+        configure_normalization_grids(n_q=777)
+        opts = SimpleNamespace(
+            survey_path=None, n_catalogs=1, gw_flows_path=None,
+            drop_full_catalog=False, sampler="numpyro",
+            sel_batch_size=BLOCK_AUTO, pe_event_block=BLOCK_AUTO,
+        )
+        kw = _block_sizing_inputs(opts, {"m1detsels": np.zeros(10), "nEvents": 2,
+                                         "nsamp": 4})
+        assert kw["n_q"] == 777
+    finally:
+        configure_normalization_grids(n_q=original)
+
+
+def test_lensing_cli_threads_sampler_profile(monkeypatch):
+    """The lensing twin resolves its own block size; the halted lensing campaign
+    runs --sampler tinyns, which must get the value-only model too."""
+    pytest.importorskip("jax")
+    from types import SimpleNamespace
+    import darksirens.cli.inference_lensing as lens
+
+    seen = {}
+
+    def _fake_resolve(**kw):
+        seen.update(kw)
+        return BlockSizePlan(None, None, "auto-single-pass")
+
+    monkeypatch.setattr(lens, "resolve_block_sizes", _fake_resolve)
+    opts = SimpleNamespace(sampler="tinyns", sel_batch_size=BLOCK_AUTO,
+                           tinyns_resolved_config={"replacement_chains": 4})
+    inp = {"gw_sel": SimpleNamespace(m1det=np.zeros(500)),
+           "nEvents": 10, "nsamp": 64}
+    settings = {}
+    lens._resolve_lensing_block_sizes(opts, inp, settings)
+    assert seen["needs_grad"] is False
+    assert seen["concurrent_evals"] == 4
+    assert seen["n_q"] == CAL_N_Q
+    assert settings["sel_batch_size"] is None
 
 
 # ── free-memory probe: the platform-allocator fallback (issue #276) ──────────────

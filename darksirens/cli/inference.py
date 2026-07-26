@@ -85,6 +85,7 @@ from darksirens.likelihood.block_sizing import (
     estimate_pending_static_bytes,
     probe_device_memory_bytes,
     format_block_size_request,
+    sampler_block_sizing_profile,
 )
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
 from darksirens.redshift.grid import zMax as _REDSHIFT_GRID_ZMAX
@@ -1509,6 +1510,31 @@ def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
     _end()
 
 
+def _bundle_max_gals_per_row(data):
+    """Widest compact galaxy row across the per-catalog bundles (0 if none).
+
+    A K >= 2 multitracer run keeps its catalogs in ``data['catalogs']``, one bundle
+    each, and leaves the top-level ``catalog_memory`` / ``zgals_*`` slots empty on
+    purpose.  Each bundle's ``zgals_pe`` is the compact ``(n_union_rows, max_gals)``
+    table, so its second axis IS the per-injection redshift-prior row width the
+    block-size model needs.  Taking the max over bundles is the right aggregate:
+    the mixture evaluates every catalog on the same injection axis, so the widest
+    row bounds the per-injection working set (``n_catalogs`` carries the count).
+    """
+    bundles = data.get("catalogs") if isinstance(data, dict) else None
+    if not bundles:
+        return 0
+    widest = 0
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        for key in ("zgals_pe", "zgals_sel"):
+            shape = getattr(bundle.get(key), "shape", None)
+            if shape and len(shape) >= 2:
+                widest = max(widest, int(shape[1]))
+    return widest
+
+
 def _block_sizing_inputs(opts, data):
     """Derive the ``resolve_block_sizes`` inputs from loaded ``opts``/``data``.
 
@@ -1532,10 +1558,27 @@ def _block_sizing_inputs(opts, data):
     from darksirens.redshift.grid import zgrid
     n_grid = int(np.asarray(zgrid).shape[0])
 
+    # n_q: the population q-quadrature node count (--norm_nq / DARKSIRENS_GW_N_Q).
+    # The default pairing normaliser integrates over q PER SAMPLE, so this is the
+    # axis that multiplies the selection / PE working sets — the memory model was
+    # blind to it before, which made --norm_nq defeat the OOM guard entirely.
+    n_q = int(normalization_grid_settings().n_q)
+
     # Max galaxies per unique pixel — the row width that multiplies the catalog
     # per-injection / per-sample redshift-prior work (1 for the catalog-free path).
+    # For a K >= 2 multitracer run the TOP-LEVEL catalog_memory is absent by
+    # construction (inference/data.py stubs catalog_inputs with zgals=None, so
+    # loaders.compute_sky_pixels_and_vectors never builds it) and the real catalogs
+    # live per-bundle in data['catalogs'] — so aggregate the bundles' own compact
+    # row widths instead of silently falling back to 1.
+    # ``None`` means "could not determine": the resolver then falls back to the
+    # calibration reference with a loud warning, instead of the silent
+    # ``max_gals_per_row = 1`` that scaled the _CAT slopes ~2000x too light.
     catalog_memory = data.get("catalog_memory") or {}
-    max_gals = int(catalog_memory.get("max_galaxies_per_unique_pixel", 1) or 1)
+    max_gals = catalog_memory.get("max_galaxies_per_unique_pixel")
+    max_gals = int(max_gals) if max_gals else None
+    if max_gals is None:
+        max_gals = _bundle_max_gals_per_row(data) or None
 
     # PENDING static (factory KDE caches / base_miss) is what the resolver reserves:
     # the loaded arrays are already device-resident, hence already in the probed
@@ -1544,6 +1587,7 @@ def _block_sizing_inputs(opts, data):
     pending_static_bytes = estimate_pending_static_bytes(
         data, n_grid=n_grid, has_catalog=has_catalog,
         catalog_memory=catalog_memory or None,
+        catalog_sky_weighting=getattr(opts, "catalog_sky_weighting", "conditional"),
     )
     full_static_bytes = measure_static_state_bytes(
         data,
@@ -1552,7 +1596,9 @@ def _block_sizing_inputs(opts, data):
         n_catalogs=n_catalogs,
         catalog_memory=catalog_memory or None,
         drop_full_catalog=bool(getattr(opts, "drop_full_catalog", False)),
+        catalog_sky_weighting=getattr(opts, "catalog_sky_weighting", "conditional"),
     )
+    needs_grad, concurrent_evals = sampler_block_sizing_profile(opts)
     return dict(
         n_events=int(data.get("nEvents", 0)),
         n_samp=int(data.get("nsamp", 0)),
@@ -1562,9 +1608,12 @@ def _block_sizing_inputs(opts, data):
         has_catalog=has_catalog,
         flow_path=bool(getattr(opts, "gw_flows_path", None)),
         n_grid=n_grid,
+        n_q=n_q,
         max_gals_per_row=max_gals,
         n_catalogs=n_catalogs,
         static_state_bytes=pending_static_bytes,
+        needs_grad=needs_grad,
+        concurrent_evals=concurrent_evals,
         # Report-only extras (stripped before resolve_block_sizes):
         static_state_full_bytes=full_static_bytes,
     )
@@ -1597,8 +1646,19 @@ def _resolve_and_report_block_sizes(opts, data):
         f"{full_static_bytes / 1024**3:.3f} GiB total "
         f"({pending_static_bytes / 1024**3:.3f} GiB pending/factory reserved); "
         f"free {free_bytes / 1024**3:.1f} GiB ({free_src}); "
-        f"n_grid={kwargs['n_grid']}, max_gals/row={kwargs['max_gals_per_row']:,}, "
-        f"K={kwargs['n_catalogs']}"
+        f"n_grid={kwargs['n_grid']}, n_q={kwargs['n_q']}, "
+        f"max_gals/row="
+        + ("unknown" if kwargs["max_gals_per_row"] is None
+           else f"{kwargs['max_gals_per_row']:,}")
+        + f", K={kwargs['n_catalogs']}"
+    )
+    _ok(
+        "Peak model: "
+        f"{'value+grad' if kwargs['needs_grad'] else 'value-only'} "
+        f"({getattr(opts, 'sampler', '?')}"
+        + (f", {kwargs['concurrent_evals']} concurrent evals"
+           if kwargs["concurrent_evals"] > 1 else "")
+        + ")"
     )
 
 
