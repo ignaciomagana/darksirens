@@ -1490,6 +1490,52 @@ def test_pair_tag_perturb_logit_changes_probability():
     np.testing.assert_raises(AssertionError, np.testing.assert_allclose, base.probability(), pert.probability())
 
 
+def test_pair_tag_probability_is_per_source_for_every_kind():
+    """Every kind returns an array shaped like the supplied fields.
+
+    The constant/none kinds used to return a 0-d array while the score-based
+    kinds returned (n,), so the mock generator's
+    ``tagged_pair[both] = rng.uniform(...) < p_tag[both]`` crashed with
+    ``IndexError: invalid index to scalar variable`` under
+    ``--pair-tag-model constant``.
+    """
+    from darksirens.lensing.pair_tag_selection import (
+        make_pair_tag_selection_model, PAIR_TAG_SELECTION_MODEL_KINDS,
+    )
+
+    n = 5
+    fields = dict(
+        snr_image0=np.linspace(9.0, 20.0, n),
+        snr_image1=np.linspace(8.5, 12.0, n),
+        delta_t_obs=np.linspace(1.0e3, 3.0e5, n),
+        log_sky_overlap=np.full(n, -0.7),
+    )
+    both = np.array([True, False, True, False, True])
+    kinds = [k for k in PAIR_TAG_SELECTION_MODEL_KINDS if k != "file"] + ["none"]
+    for kind in kinds:
+        model = make_pair_tag_selection_model(kind, constant=0.6)
+        p = model.probability(**fields)
+        assert p.shape == (n,), f"{kind}: got shape {p.shape}"
+        assert np.all((p >= 0.0) & (p <= 1.0))
+        # The generator indexes with a boolean mask; must not raise.
+        assert p[both].shape == (int(both.sum()),)
+        lp = model.log_probability(**fields)
+        assert lp.shape == (n,)
+        np.testing.assert_allclose(np.exp(lp), p, rtol=1e-12)
+    # No fields supplied: nothing to broadcast to, stays 0-d (the inference
+    # side calls it this way and broadcasts the log-weight itself).
+    assert np.shape(make_pair_tag_selection_model("constant", constant=0.6).probability()) == ()
+
+
+def test_pair_tag_log_probability_handles_zero_probability():
+    from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
+
+    model = make_pair_tag_selection_model("constant", constant=0.0)
+    lp = model.log_probability(snr_image0=np.zeros(3), snr_image1=np.zeros(3))
+    assert lp.shape == (3,)
+    assert np.all(np.isneginf(lp))
+
+
 def test_lensed_injection_loading_reads_pair_tag_fields():
     camp = _synth_lensed_injection_campaign(n_sources=8, seed=24)
     n = camp["n_draw_sources"]
