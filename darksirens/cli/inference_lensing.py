@@ -168,7 +168,10 @@ from darksirens.lensing.partitions import (
     parse_edge_mark_keys,
     validate_candidate_pairs,
 )
-from darksirens.lensing.preflight import run_lensing_preflight
+from darksirens.lensing.preflight import (
+    fixed_partition_coverage_error,
+    run_lensing_preflight,
+)
 from darksirens.lensing.marginal_diagnostics import (
     compute_marginalized_partition_diagnostics,
     compute_componentwise_factorized_partition_diagnostics,
@@ -1304,6 +1307,19 @@ def load_inputs(opts):
         marginal_partitions = None
         partition_states = None
         log_z_prior = 0.0
+        # A fixed partition must partition the WHOLE observed catalog: the
+        # likelihood only touches the listed indices, so an uncovered event is
+        # silently dropped from the product while the run still reports the PE
+        # file's event count. Preflight checks this too; repeat it here so a
+        # --preflight_only false run (or a direct library caller) cannot slip past.
+        _coverage_error = fixed_partition_coverage_error(
+            list(map(int, partition["singleton_indices"]))
+            + [int(i) for i in np.asarray(partition["pair_indices"], dtype=int).reshape(-1)],
+            n_events_total,
+            path=opts.partition_path,
+        )
+        if _coverage_error is not None:
+            raise SystemExit(_coverage_error)
         fixed_singletons = jnp.asarray(partition["singleton_indices"], dtype=jnp.int32)
         fixed_pairs = jnp.asarray(partition["pair_indices"], dtype=jnp.int32)
         fixed_n_singletons = int(partition["n_singletons"])

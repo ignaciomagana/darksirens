@@ -1220,3 +1220,104 @@ def test_builder_uniform_mode_requires_catalog_sigma(tmp_path):
             max_edges_per_event=2, max_total_edges=4,
             include_time_marks=True, seed=1,
         )
+
+
+# ---------------------------------------------------------------------------
+# fixed-partition coverage
+# ---------------------------------------------------------------------------
+
+def _preflight_opts(tmp_path, partition_path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        gw_path=str(tmp_path / "gw.h5"),
+        gwselection_path=str(tmp_path / "sel.h5"),
+        lensed_injections_path=str(tmp_path / "linj.h5"),
+        partition_path=str(partition_path),
+        candidate_pairs_path=None,
+        observed_catalog_path=None,
+        pair_pe_path=None,
+        pair_metadata_path=str(tmp_path / "pair_meta.h5"),
+        cluster_mode="j2",
+        partition_mode="fixed",
+        pair_marks="time",
+        pair_time_sigma_sec=None,
+        max_exact_partitions=10000,
+        wl_selection="standard",
+        wl_backend="lognormal",
+        fix_lens_rate=True,
+        sl_tau_A=5e-4,
+        sl_tau_n=3.0,
+        lens_prior_overrides=None,
+    )
+
+
+def test_preflight_rejects_a_fixed_partition_that_drops_events(tmp_path):
+    """A fixed partition must partition the WHOLE observed catalog.  Shape,
+    count self-consistency, index range and duplicates were all checked, but not
+    coverage: the cluster likelihood only touches the listed indices, so an
+    uncovered event was silently excluded from the product while results.hdf5
+    still reported the PE file's n_events."""
+    import json
+
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    _minimal_gw(tmp_path / "gw.h5", n_events=4)
+    _minimal_selection(tmp_path / "sel.h5")
+    _minimal_lensed(tmp_path / "linj.h5")
+    _metadata_h5(tmp_path / "pair_meta.h5")
+    part = tmp_path / "partition.json"
+    part.write_text(
+        json.dumps(
+            {
+                "n_singletons": 1,
+                "n_pairs": 1,
+                "singleton_indices": [2],   # event 3 covered by nothing
+                "pair_indices": [[0, 1]],
+            }
+        )
+    )
+    report = run_lensing_preflight(_preflight_opts(tmp_path, part))
+    assert not report["ok"]
+    coverage = [e for e in report["errors"] if "does not cover every observed event" in e]
+    assert coverage, report["errors"]
+    assert "Missing: 3" in coverage[0]
+
+
+def test_preflight_accepts_a_covering_fixed_partition(tmp_path):
+    """The complementary cell: the same files with event 3 as a singleton pass."""
+    import json
+
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    _minimal_gw(tmp_path / "gw.h5", n_events=4)
+    _minimal_selection(tmp_path / "sel.h5")
+    _minimal_lensed(tmp_path / "linj.h5")
+    _metadata_h5(tmp_path / "pair_meta.h5")
+    part = tmp_path / "partition.json"
+    part.write_text(
+        json.dumps(
+            {
+                "n_singletons": 2,
+                "n_pairs": 1,
+                "singleton_indices": [2, 3],
+                "pair_indices": [[0, 1]],
+            }
+        )
+    )
+    report = run_lensing_preflight(_preflight_opts(tmp_path, part))
+    assert report["ok"], report
+
+
+def test_fixed_partition_coverage_error_lists_the_dropped_events():
+    from darksirens.lensing.preflight import fixed_partition_coverage_error
+
+    assert fixed_partition_coverage_error([0, 1, 2], 3) is None
+    assert fixed_partition_coverage_error([0, 1, 2], None) is None
+    msg = fixed_partition_coverage_error(list(range(90)), 100, path="p.json")
+    assert "10 of 100 events" in msg
+    assert "p.json" in msg
+    assert "Missing: 90, 91" in msg
+    # long lists are truncated rather than dumping thousands of indices
+    long_msg = fixed_partition_coverage_error([0], 100)
+    assert "(+79 more)" in long_msg
