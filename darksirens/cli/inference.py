@@ -897,6 +897,21 @@ def build_parser():
                         "(default 24). Spectroscopic catalogs (sigma_eff <~ 5e-3) are exact "
                         "to likelihood precision at 4-8 nodes and the quadrature dominates "
                         "wide-sky dark-siren runs; do NOT reduce for broad photo-z kernels.")
+    g.add_argument("--kde_window", type=int, default=None, metavar="W",
+                   help="Static window size for the per-sample catalog KDE: only the W "
+                        "galaxies nearest each sample's redshift are evaluated (rows are "
+                        "z-sorted at load). Default 1024 holds |delta log p_cat| < 1e-6 "
+                        "against the full row across the ENTIRE sampled sigma_kde prior "
+                        "[0, 0.05] on a review-scale 2113-galaxy row (~2x wall-clock, "
+                        "~2x peak transient on that shape); denser rows need a larger W — "
+                        "size it with darksirens.redshift.catalog.recommended_kde_window. "
+                        "0 disables windowing entirely (full-row escape hatch for A/B "
+                        "validation).")
+    g.add_argument("--kde_window_nsigma", type=float, default=None, metavar="X",
+                   help="Half-width multiplier for the KDE window: contributing galaxies "
+                        "are located within +/- X * max_row(sigma_eff) of the sample "
+                        "(default 8). The half-width is traced (sigma_kde is sampled); "
+                        "only the window SIZE W is static.")
     return optp
 
 
@@ -1154,6 +1169,22 @@ def _configure_performance_grids(opts):
         if opts.kernel_gl_nodes < 2:
             _fatal("--kernel_gl_nodes must be >= 2")
         configure_kernel_quadrature(opts.kernel_gl_nodes)
+
+    kde_window = getattr(opts, "kde_window", None)
+    kde_nsigma = getattr(opts, "kde_window_nsigma", None)
+    if kde_window is not None or kde_nsigma is not None:
+        from darksirens.redshift.catalog import configure_catalog_kde_window
+        kw = {}
+        if kde_window is not None:
+            if kde_window < 0:
+                _fatal("--kde_window must be >= 0 (0 disables windowing)")
+            kw["size"] = None if kde_window == 0 else kde_window
+        if kde_nsigma is not None:
+            kw["n_sigma"] = kde_nsigma
+        try:
+            configure_catalog_kde_window(**kw)
+        except ValueError as e:
+            _fatal(str(e))
 
 
 def _size_pairing_grid_to_selected_model(opts):
