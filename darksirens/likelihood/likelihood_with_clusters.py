@@ -141,6 +141,7 @@ SINGLETON_LENSING_MIXTURE = 1
         "return_diagnostics",
         "wl_selection",
         "pair_marks",
+        "pair_time_signed",
         "pair_batch_size",
         "y_nodes_pair",
         "singleton_lensing",
@@ -187,6 +188,7 @@ def darksiren_log_likelihood_with_clusters(
     pair_time_delta_t_obs: jnp.ndarray | None = None,
     pair_time_sigma: jnp.ndarray | None = None,
     pair_time_t_obs_window_sec: jnp.ndarray | None = None,
+    pair_time_signed: bool = False,
     pair_batch_size: int = 0,
     y_nodes_pair: int = _Y_NODES_FOR_CLUSTER_PAIR_LIKE,
     singleton_lensing: int = SINGLETON_LENSING_OFF,
@@ -533,6 +535,7 @@ def darksiren_log_likelihood_with_clusters(
                 pair_marks=pair_marks,
                 delta_t_obs=dt_obs_k, sigma_delta_t=dt_sig_k,
                 t_obs_window_sec=pair_time_t_obs_window_sec,
+                pair_time_signed=pair_time_signed,
             )
             return jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf)
 

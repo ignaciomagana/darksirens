@@ -69,6 +69,7 @@ import sys
 import json
 import time
 import argparse
+import dataclasses
 import datetime
 import traceback
 import warnings
@@ -169,6 +170,7 @@ from darksirens.lensing.observed_catalog import (
     validate_observed_catalog_file,
 )
 from darksirens.lensing.partitions import (
+    CandidatePair,
     PartitionState,
     exact_partitions_from_pairs,
     exact_partition_components,
@@ -449,6 +451,91 @@ def _gw_event(m1det, m2det, dL, chieff, prior_wt):
     )
 
 
+def _event_gps_times_from_catalog(raw_catalog):
+    """Per-event arrival times (s) from an observed catalog, or None.
+
+    Only returned when EVERY event carries a finite ``gps_time``: the signed
+    arrival order is either known for the whole catalog or not used at all.
+    """
+    if not isinstance(raw_catalog, dict):
+        return None
+    events = raw_catalog.get("events")
+    if not isinstance(events, list) or not events:
+        return None
+    times = []
+    for ev in events:
+        t = (ev or {}).get("gps_time")
+        if t is None:
+            return None
+        try:
+            t = float(t)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(t):
+            return None
+        times.append(t)
+    return np.asarray(times, dtype=float)
+
+
+def _orient_time_marks(candidate_pairs, gps_times):
+    """Give each time mark the sign of ``t_j - t_i`` for its stored order.
+
+    For SIS the type-I minimum arrives BEFORE the type-II saddle
+    (Delta t = t_- - t_+ = T0 y > 0), so the two image-assignment branches of
+    the pair likelihood predict opposite signs of the observed delay and at
+    most one of them is compatible with the data. The recorded mark is a
+    MAGNITUDE (the candidate builder writes abs(t_i - t_j)), so we restore the
+    sign from the catalog's arrival times, keeping the mark's magnitude and
+    sigma untouched.
+
+    Returns ``(pairs, signed)``. ``signed`` is True only when every marked pair
+    could be oriented; otherwise the pairs are returned unchanged and the
+    likelihood keeps the legacy |dt|-in-both-branches behaviour.
+    """
+    if candidate_pairs is None:
+        return candidate_pairs, False
+    marked = [p for p in candidate_pairs if p.delta_t_obs is not None]
+    if not marked:
+        return candidate_pairs, False
+    if gps_times is None:
+        return candidate_pairs, False
+    n = int(gps_times.shape[0])
+    out = []
+    inconsistent = []
+    for p in candidate_pairs:
+        if p.delta_t_obs is None or not (0 <= int(p.i) < n and 0 <= int(p.j) < n):
+            out.append(p)
+            continue
+        dt_catalog = float(gps_times[int(p.j)] - gps_times[int(p.i)])
+        dt_mark = abs(float(p.delta_t_obs))
+        # Validate the convention instead of trusting it: the recorded mark
+        # magnitude must reproduce the catalog's arrival separation.
+        sig = abs(float(p.sigma_delta_t)) if p.sigma_delta_t is not None else 0.0
+        tol = max(5.0 * sig, 1e-6 * max(dt_mark, 1.0))
+        if abs(abs(dt_catalog) - dt_mark) > tol:
+            inconsistent.append((int(p.i), int(p.j), dt_mark, dt_catalog))
+        sign = 1.0 if dt_catalog >= 0.0 else -1.0
+        out.append(
+            CandidatePair(
+                p.i, p.j, p.log_prior_odds, p.label,
+                dataclasses.replace(p.marks, delta_t_obs=sign * dt_mark),
+            )
+        )
+    if inconsistent:
+        i, j, dt_mark, dt_catalog = inconsistent[0]
+        _warn(
+            f"{len(inconsistent)}/{len(marked)} time-marked candidate edges "
+            "disagree with the observed catalog's arrival times, e.g. edge "
+            f"({i},{j}): |marks.delta_t_obs| = {dt_mark:.6g} s vs "
+            f"|t_j - t_i| = {abs(dt_catalog):.6g} s. Using the mark's magnitude "
+            "with the catalog's arrival ORDER; verify the two agree on which "
+            "event came first."
+        )
+    # Every marked pair oriented iff every marked pair had in-range endpoints.
+    ok = all(0 <= int(p.i) < n and 0 <= int(p.j) < n for p in marked)
+    return (out, True) if ok else (candidate_pairs, False)
+
+
 def _time_mark_arrays_for_partition_state(state, candidate_pairs):
     """Return edge-level time marks ordered like ``state.pair_indices``."""
     dt_obs = []
@@ -461,10 +548,11 @@ def _time_mark_arrays_for_partition_state(state, candidate_pairs):
                 f"({pair.i},{pair.j}) missing marks.delta_t_obs/sigma_delta_t "
                 "required by pair_marks=time"
             )
-        # abs at the boundary: the SIS time-delay mark uses y* = dt/T0 (>= 0)
-        # and the coincidence denominator uses |dt|; a signed dt would drive the
-        # mark out of the (0,1) SIS support and silently annihilate the pair.
-        dt = abs(float(pair.delta_t_obs))
+        # The mark is passed through with whatever sign it carries. When
+        # _orient_time_marks resolved the arrival order from the catalog, that
+        # sign selects the image assignment (see cluster_log_likelihood_pair's
+        # pair_time_signed); otherwise it is already a magnitude.
+        dt = float(pair.delta_t_obs)
         sig = float(pair.sigma_delta_t)
         if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0:
             raise SystemExit(
@@ -845,6 +933,7 @@ def load_inputs(opts):
     p_pe = np.asarray(p_pe)
     observed_catalog_meta = None
     pair_time_t_obs_window_sec = None
+    event_gps_times = None
     if getattr(opts, "observed_catalog_path", None):
         observed_catalog_meta = validate_observed_catalog_file(
             opts.observed_catalog_path
@@ -853,6 +942,10 @@ def load_inputs(opts):
             _raw_catalog = json.load(_f)
         if _raw_catalog.get("observation_times") == "uniform":
             pair_time_t_obs_window_sec = float(_raw_catalog["t_obs_days"]) * 86400.0
+            # Physical arrival times: the SIS arrival ORDER of a candidate pair
+            # is then known, which is what lets the time mark select the image
+            # assignment instead of rewarding both (see _orient_time_marks).
+            event_gps_times = _event_gps_times_from_catalog(_raw_catalog)
         if int(observed_catalog_meta["n_events"]) != int(n_sing):
             raise SystemExit(
                 f"observed_catalog n_events={observed_catalog_meta['n_events']} "
@@ -904,6 +997,7 @@ def load_inputs(opts):
             pair_time_delta_t_obs=jnp.zeros((0,), dtype=jnp.float64),
             pair_time_sigma=jnp.zeros((0,), dtype=jnp.float64),
             pair_time_t_obs_window_sec=pair_time_t_obs_window_sec,
+            pair_time_signed=False,
             observed_catalog=observed_catalog_meta,
             **_load_singleton_lensing_inputs(opts),
             **_load_wl_table_arrays(opts),
@@ -930,6 +1024,7 @@ def load_inputs(opts):
     candidate_pairs = None
     candidate_pairs_raw = None
     edge_prior_contributions = None
+    pair_time_signed = False
     if opts.candidate_pairs_path:
         candidate_data = json.load(
             open(opts.candidate_pairs_path, "r", encoding="utf-8")
@@ -943,6 +1038,12 @@ def load_inputs(opts):
             candidate_data, getattr(opts, "edge_mark_prior_keys", None)
         )
         _gate_suspicious_time_marks(opts, candidate_pairs_raw)
+        candidate_pairs, pair_time_signed = _orient_time_marks(
+            candidate_pairs, event_gps_times
+        )
+        candidate_pairs_raw, _ = _orient_time_marks(
+            candidate_pairs_raw, event_gps_times
+        )
     partition_pair_indices = []
     if partition is not None:
         partition_pair_indices = [
@@ -985,6 +1086,9 @@ def load_inputs(opts):
     pair_metadata_indices = []
     pair_time_delta_t_obs = []
     pair_time_sigma = []
+    # Whether every mark taken from the pair FILE could be given an arrival
+    # order. Starts True and is cleared by the first mark we cannot orient.
+    pair_file_time_signed = True
     if pair_file_path:
         with h5py.File(pair_file_path) as f:
             npairs = int(f.attrs.get("npairs", 0))
@@ -1031,13 +1135,33 @@ def load_inputs(opts):
                         raise SystemExit(
                             f"pair_marks=time requires delta_t_obs metadata for pair_{k}"
                         )
-                    pair_time_delta_t_obs.append(
-                        abs(float(
-                            g.attrs["delta_t_obs"]
-                            if "delta_t_obs" in g.attrs
-                            else np.asarray(g["delta_t_obs"])[()]
-                        ))
+                    _dt_raw = float(
+                        g.attrs["delta_t_obs"]
+                        if "delta_t_obs" in g.attrs
+                        else np.asarray(g["delta_t_obs"])[()]
                     )
+                    # The pair file's delta_t_obs is written as
+                    # t(image1) - t(image0) with (image0, image1) =
+                    # (event_index_image0, event_index_image1), i.e. already
+                    # signed in the stored pair order. Only orient it when the
+                    # arrival times back that up; otherwise keep the magnitude
+                    # so the legacy both-branch behaviour is preserved.
+                    _dt_signed = None
+                    if meta_pair is not None and event_gps_times is not None:
+                        _n_ev = int(event_gps_times.shape[0])
+                        if 0 <= meta_pair[0] < _n_ev and 0 <= meta_pair[1] < _n_ev:
+                            _sign = (
+                                1.0
+                                if (event_gps_times[meta_pair[1]]
+                                    - event_gps_times[meta_pair[0]]) >= 0.0
+                                else -1.0
+                            )
+                            _dt_signed = _sign * abs(_dt_raw)
+                    if _dt_signed is None:
+                        pair_file_time_signed = False
+                        pair_time_delta_t_obs.append(abs(_dt_raw))
+                    else:
+                        pair_time_delta_t_obs.append(_dt_signed)
                     if "sigma_delta_t" in g.attrs:
                         pair_time_sigma.append(float(g.attrs["sigma_delta_t"]))
                     elif "sigma_delta_t" in g:
@@ -1085,6 +1209,10 @@ def load_inputs(opts):
                         imgs.append(d)
                     pairs.append(imgs)
                 pair_metadata_indices.append(meta_pair)
+    if pair_time_delta_t_obs:
+        # Marks came from the pair FILE; its orientation flag wins over the
+        # candidate-pairs one (which describes a source we did not use).
+        pair_time_signed = bool(pair_file_time_signed)
     P = (
         len(pairs)
         if not unified_observed_catalog
@@ -1111,10 +1239,13 @@ def load_inputs(opts):
                 raise SystemExit(
                     f"pair_marks=time requires candidate_pairs.json marks or pair metadata for fixed pair {pair}"
                 )
-            # abs at the boundary, same as _time_mark_arrays_for_partition_state:
-            # the SIS mark uses y* = dt/T0 (>= 0) and a signed dt would silently
-            # annihilate the pair.
-            dt = abs(float(meta.delta_t_obs))
+            # The mark's sign convention is "t_j - t_i for the mark's own
+            # (i, j)". Re-orient it to the order this partition stores the pair
+            # in, so the arrival-order branch selection in
+            # cluster_log_likelihood_pair refers to the right event.
+            dt = float(meta.delta_t_obs)
+            if pair_time_signed and (int(pair[0]), int(pair[1])) != (meta.i, meta.j):
+                dt = -dt
             sig = float(meta.sigma_delta_t)
             if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0:
                 raise SystemExit(
@@ -1404,6 +1535,9 @@ def load_inputs(opts):
         ),
         edge_mark_prior_keys=list(parse_edge_mark_keys(getattr(opts, "edge_mark_prior_keys", None))),
         pair_time_t_obs_window_sec=pair_time_t_obs_window_sec,
+        pair_time_signed=bool(
+            pair_time_signed and getattr(opts, "pair_marks", "none") == "time"
+        ),
         observed_catalog=observed_catalog_meta,
         observed_catalog_heuristic=bool(
             heuristic_unified_observed_catalog and not explicit_unified_observed_catalog
@@ -1934,6 +2068,7 @@ def build_cluster_likelihood(
                     inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
                 ),
                 pair_time_t_obs_window_sec=inp.get("pair_time_t_obs_window_sec"),
+                pair_time_signed=bool(inp.get("pair_time_signed", False)),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
                 singleton_lensing=singleton_lensing,
@@ -2117,6 +2252,7 @@ def build_cluster_diagnostics(
                     inp.get("pair_time_sigma", jnp.zeros((0,), dtype=jnp.float64)),
                 ),
                 pair_time_t_obs_window_sec=inp.get("pair_time_t_obs_window_sec"),
+                pair_time_signed=bool(inp.get("pair_time_signed", False)),
                 pair_batch_size=getattr(opts, "pair_batch_size", 0),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
                 singleton_lensing=singleton_lensing,

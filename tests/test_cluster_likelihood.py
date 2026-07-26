@@ -962,6 +962,140 @@ def test_time_mark_coincidence_odds_reward_true_pairs():
     assert gain > floor - 1.0, (gain, floor)
 
 
+def _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt, *, signed,
+                         mode, sigma=3600.0, t_obs=365.25 * 86400.0):
+    from darksirens.likelihood.cluster_likelihood import PAIR_MARKS_DELTA_COLLAPSE
+
+    y_nodes, log_wy = make_y_grid(64)
+    return float(cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(),
+        sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+        pair_marks=(PAIR_MARKS_DELTA_COLLAPSE if mode == "delta" else 1),
+        delta_t_obs=jnp.asarray(dt), sigma_delta_t=jnp.asarray(sigma),
+        t_obs_window_sec=t_obs, pair_time_signed=signed,
+    ))
+
+
+def test_signed_time_mark_removes_the_pair_double_count():
+    """Both branches at |dt| counts a time-marked pair TWICE.
+
+    For SIS the type-I minimum always arrives before the type-II saddle, so the
+    two image-assignment branches predict opposite signs of the observed delay
+    and at most one is compatible with the data. Evaluating both at |dt| made
+    L_2 exactly 2x too large whenever the branches were comparable — a spurious
+    +log 2 = 0.693 nat per time-marked pair toward pairing, and
+    int L_2 = 2 mu_sel^(2), which breaks the Poisson normalization the master
+    likelihood assumes. Two IDENTICAL events make the branches exactly equal,
+    so the double-count is measurable to machine precision.
+    """
+    sis = make_sis_lens_params()
+    y_true = 0.55
+    dt = float(sis.T0) * y_true
+    ev, _ = _synth_lensed_pair(y_true=y_true, n_pe=120, seed=43)
+    kde = make_pair_kde(ev["m1det"], ev["q"], ev["dL"], ev["chieff"], ev["prior_wt"])
+
+    unsigned = _time_marked_pair_ll(ev, ev, kde, kde, sis, dt,
+                                    signed=False, mode="delta")
+    signed = _time_marked_pair_ll(ev, ev, kde, kde, sis, dt,
+                                  signed=True, mode="delta")
+    assert np.isfinite(unsigned) and np.isfinite(signed)
+    np.testing.assert_allclose(unsigned - signed, np.log(2.0), atol=1e-9)
+
+
+def test_signed_time_mark_enforces_the_sis_arrival_order():
+    """A pairing whose arrival order contradicts SIS must collapse to the
+    ordering-consistent branch, not be rewarded at the ordering-INconsistent
+    branch's (much larger) value.
+
+    The synthetic pair has event i = mu_+ (brighter). If the recorded arrival
+    order says i came SECOND (dt = t_j - t_i < 0), SIS requires j to be the
+    mu_+ image, i.e. only branch b survives — and branch b is strongly
+    disfavoured by the magnification data.
+    """
+    sis = make_sis_lens_params()
+    y_true = 0.55
+    dt = float(sis.T0) * y_true
+    ev_i, ev_j = _synth_lensed_pair(y_true=y_true, n_pe=120, seed=43)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"],
+                          ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"],
+                          ev_j["prior_wt"])
+
+    for mode, sigma in (("delta", 3600.0), ("quadrature", 3.0e5)):
+        kw = dict(mode=mode, sigma=sigma)
+        # Ordering CONSISTENT (brighter image first): unchanged — branch b was
+        # already negligible, so there is no penalty for a determined pairing.
+        ok_signed = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt,
+                                         signed=True, **kw)
+        ok_unsigned = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt,
+                                           signed=False, **kw)
+        np.testing.assert_allclose(ok_signed, ok_unsigned, atol=1e-8)
+
+        # Ordering INCONSISTENT (brighter image second): the |dt| code returns
+        # the SAME value as the consistent case — it never saw the order.
+        bad_unsigned = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, -dt,
+                                            signed=False, **kw)
+        bad_signed = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, -dt,
+                                          signed=True, **kw)
+        np.testing.assert_allclose(bad_unsigned, ok_unsigned, atol=1e-8)
+        over_reward = bad_unsigned - bad_signed
+        assert over_reward > 20.0, (mode, over_reward)
+
+
+def test_unsigned_time_marks_stay_sign_insensitive():
+    """pair_time_signed=False keeps the legacy behaviour bit-for-bit: the mark
+    enters only through |dt|, so flipping its sign changes nothing."""
+    sis = make_sis_lens_params()
+    dt = float(sis.T0) * 0.4
+    ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=80, seed=51)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"],
+                          ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"],
+                          ev_j["prior_wt"])
+    for mode, sigma in (("delta", 3600.0), ("quadrature", 3.0e5)):
+        pos = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt,
+                                   signed=False, mode=mode, sigma=sigma)
+        neg = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, -dt,
+                                   signed=False, mode=mode, sigma=sigma)
+        assert pos == neg
+
+
+def test_cli_orients_time_marks_from_catalog_arrival_times():
+    """The candidate builder writes abs(t_i - t_j); the CLI restores the sign
+    from the observed catalog's arrival times, keeping magnitude and sigma."""
+    from darksirens.cli.inference_lensing import (
+        _orient_time_marks, _event_gps_times_from_catalog,
+    )
+    from darksirens.lensing.partitions import CandidatePair, EdgeMarks
+
+    pairs = [
+        CandidatePair(0, 1, -1.0, None, EdgeMarks(delta_t_obs=100.0,
+                                                  sigma_delta_t=10.0)),
+        CandidatePair(1, 2, -1.0, None, EdgeMarks(delta_t_obs=300.0,
+                                                  sigma_delta_t=10.0)),
+    ]
+    # t = [0, 100, -200]: edge (0,1) is forward, edge (1,2) is backward.
+    catalog = {"events": [{"gps_time": 0.0}, {"gps_time": 100.0},
+                          {"gps_time": -200.0}]}
+    times = _event_gps_times_from_catalog(catalog)
+    np.testing.assert_allclose(times, [0.0, 100.0, -200.0])
+
+    oriented, signed = _orient_time_marks(pairs, times)
+    assert signed
+    assert oriented[0].delta_t_obs == 100.0
+    assert oriented[1].delta_t_obs == -300.0
+    assert oriented[0].sigma_delta_t == 10.0 and oriented[1].sigma_delta_t == 10.0
+
+    # No arrival times -> unchanged, and the likelihood stays in legacy mode.
+    unchanged, signed_none = _orient_time_marks(pairs, None)
+    assert not signed_none
+    assert unchanged is pairs
+    # A catalog missing any gps_time yields no times at all.
+    assert _event_gps_times_from_catalog(
+        {"events": [{"gps_time": 0.0}, {}]}
+    ) is None
+
+
 def test_time_mark_requires_observing_window():
     ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=60, seed=44)
     kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
