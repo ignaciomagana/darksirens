@@ -342,6 +342,36 @@ def test_partially_fixed_lens_block_splits_bare_and_prefixed_names(tmp_path):
         assert store["lens_parameters_eval_point"] == "prior_midpoint"
 
 
+def test_lensing_outputs_persist_logzerr(tmp_path):
+    """The lensing paper's central quantity is logZ(j2) - logZ(off); logZerr was
+    printed to stdout and dropped, so archived run directories carried no error
+    bar on the Bayes factor (the main CLI's save_results_hdf5 writes both)."""
+    attrs, settings, _lo, _hi = _run_save_phase(tmp_path, logZerr=0.21)
+    assert attrs["logZ"] == pytest.approx(-67.4497)
+    assert attrs["logZerr"] == pytest.approx(0.21)
+    assert settings["logZ"] == pytest.approx(-67.4497)
+    assert settings["logZerr"] == pytest.approx(0.21)
+
+
+def test_lensing_outputs_logzerr_is_nan_when_the_sampler_reports_none(tmp_path):
+    """Mirror io.results.save_results_hdf5: a missing error is NaN, not absent,
+    so the attr is always readable."""
+    attrs, settings, _lo, _hi = _run_save_phase(tmp_path, logZerr=None)
+    assert np.isnan(attrs["logZerr"])
+    assert settings["logZerr"] is None
+
+
+@pytest.mark.parametrize("sampler", ["tinyns", "dynesty"])
+def test_logzerr_persistence_is_not_gated_on_the_sampler(tmp_path, sampler):
+    """Both nested samplers report a logZ error, and the write is keyed on the
+    result dict rather than on --sampler, so neither can lose it."""
+    attrs, settings, _lo, _hi = _run_save_phase(
+        tmp_path, extra_args=("--sampler", sampler), logZerr=0.33
+    )
+    assert attrs["logZerr"] == pytest.approx(0.33)
+    assert settings["logZerr"] == pytest.approx(0.33)
+
+
 def test_diagnostics_lens_values_use_a_generic_eval_point_stamp():
     """build_cluster_diagnostics evaluates at whatever point cleared the
     reliability guard -- possibly a seeded prior draw -- so its sampled lens

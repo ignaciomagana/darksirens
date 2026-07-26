@@ -2925,6 +2925,16 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             _write_lens_settings_attrs(f.attrs, lens_settings)
             if results.get("logZ") is not None:
                 f.attrs["logZ"] = float(results["logZ"])
+                # logZerr existed only in the run.log, yet the lensing paper's
+                # central quantity is logZ(j2) - logZ(off): without the error the
+                # archived run directory cannot say whether a 2-3 nat difference
+                # is significant.  Mirrors io.results.save_results_hdf5 -- NaN
+                # rather than absent when the sampler reports no error, so the
+                # attr is always readable.
+                _zerr = results.get("logZerr")
+                f.attrs["logZerr"] = (
+                    float(_zerr) if _zerr is not None else float("nan")
+                )
             write_tinyns_metadata(f.attrs, results, opts)
             # NUTS health metadata, mirroring io.results.save_results_hdf5 —
             # divergence counts previously existed only in stdout for lensing
@@ -2949,6 +2959,16 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             fixed_parameter_values_lens=lens_fixed,
             **_lens_settings_dict(mid, labels, lens_fixed, opts),
         )
+        if results.get("logZ") is not None:
+            # Evidence AND its error in settings.json too, so a Bayes factor can
+            # be assembled from the run directories alone.  Both nested samplers
+            # report an error; numpyro reports no logZ at all and skips this.
+            settings["logZ"] = float(results["logZ"])
+            settings["logZerr"] = (
+                float(results["logZerr"])
+                if results.get("logZerr") is not None
+                else None
+            )
         if inp.get("observed_catalog"):
             settings["observed_catalog_path"] = inp["observed_catalog"].get("path")
             settings["observed_catalog_format_version"] = inp["observed_catalog"].get(
