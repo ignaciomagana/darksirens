@@ -151,7 +151,7 @@ from darksirens.inference.parameters import (
 from darksirens.gw.samples import load_gw_samples, load_selection_samples
 
 # ── lensing / cluster pieces ─────────────────────────────────────────────────
-from darksirens.lensing.slmarks import make_sis_lens_params
+from darksirens.lensing.slmarks import make_sis_lens_params, DEFAULT_T0_SECONDS
 from darksirens.lensing.wlmagnification import (
     make_lognormal_wl_params,
     make_tabulated_wl_params,
@@ -185,6 +185,8 @@ from darksirens.lensing.marginal_diagnostics import (
     compute_marginalized_partition_diagnostics,
     compute_componentwise_factorized_partition_diagnostics,
     candidate_time_mark_suspicion,
+    sis_time_mark_support,
+    sis_time_mark_support_message,
 )
 from darksirens.likelihood.pair_kde import (
     make_pair_kde,
@@ -305,10 +307,18 @@ def _build_lens_parameter_space(opts, fixed_parameter_values, lens_prior_overrid
     return labels, np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
 
 
+def _sl_T0_seconds(opts) -> float:
+    """The configured SIS time-delay scale T0, in seconds."""
+    return float(getattr(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS)
+
+
 def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     """Construct ``SISLensParams`` from fixed CLI values or sampled lens coords."""
+    T0 = _sl_T0_seconds(opts)
     if getattr(opts, "fix_lens_rate", True):
-        return make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n)
+        return make_sis_lens_params(
+            A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n, T0_seconds=T0,
+        )
 
     values = {label: jnp.asarray(coord)[i] for i, label in enumerate(sampled_labels)}
     values.update(
@@ -316,7 +326,9 @@ def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     )
     log10_tau_A = values.get("log10_tau_A", np.log10(float(opts.sl_tau_A)))
     tau_n = values.get("tau_n", float(opts.sl_tau_n))
-    return make_sis_lens_params(A_tau=10.0**log10_tau_A, n_tau=tau_n)
+    return make_sis_lens_params(
+        A_tau=10.0**log10_tau_A, n_tau=tau_n, T0_seconds=T0,
+    )
 
 
 #: Which lens label each archived SIS optical-depth value is decoded from, so a
@@ -350,6 +362,10 @@ def _lens_settings_dict(
         fix_lens_rate=bool(getattr(opts, "fix_lens_rate", True)),
         sl_tau_A=float(opts.sl_tau_A),
         sl_tau_n=float(opts.sl_tau_n),
+        # T0 is a run-configuration constant (never sampled), so a bare name is
+        # correct here; the sampled A_tau/n_tau go through the per-parameter
+        # bare-vs-eval-point gate below.
+        sl_T0_sec=float(np.asarray(sis.T0)),
     )
     any_sampled = False
     for key, value in (
@@ -1762,7 +1778,7 @@ def _resolve_pair_marks(opts, inp):
         )
     if sigmas.size == 0:
         return PAIR_MARKS_TIME
-    T0 = float(make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n).T0)
+    T0 = _sl_T0_seconds(opts)
     return (
         PAIR_MARKS_TIME_DELTA
         if float(np.max(sigmas)) / T0 < _TIME_DELTA_SHARPNESS
@@ -1782,6 +1798,32 @@ def _require_time_window(opts, inp):
             "coincidence odds need the observing-run length. Regenerate the "
             "mock with --observation-times uniform."
         )
+
+
+def _require_time_marks_in_sis_support(opts, inp):
+    """Refuse to build a likelihood whose every time-marked pair is -inf.
+
+    ``y* = |dt| / T0`` must land inside the SIS support (0, 1). If every
+    candidate pair has ``y* >= 1``, the pair likelihood is exactly -inf for all
+    of them: fixed-partition runs cannot initialise live points, and
+    ``marginalize_exact`` runs report "no lensing" with certainty because the
+    true pairing carries zero weight at every parameter value. Preflight raises
+    the same error; this guard also covers runs that skip preflight.
+    """
+    if getattr(opts, "pair_marks", "none") != "time":
+        return
+    dt_values = list(np.asarray(inp.get("pair_time_delta_t_obs", []), dtype=float).ravel())
+    if not dt_values:
+        dt_values = [
+            p.delta_t_obs
+            for p in (inp.get("candidate_pairs") or [])
+            if getattr(p, "delta_t_obs", None) is not None
+        ]
+    support = sis_time_mark_support(dt_values, _sl_T0_seconds(opts))
+    if support["n_marked"] and support["all_out_of_support"]:
+        raise SystemExit(sis_time_mark_support_message(support))
+    if support["n_out_of_support"]:
+        _warn(sis_time_mark_support_message(support))
 
 
 def build_cluster_likelihood(
@@ -1805,6 +1847,7 @@ def build_cluster_likelihood(
     )
     pair_marks = _resolve_pair_marks(opts, inp)
     _require_time_window(opts, inp)
+    _require_time_marks_in_sis_support(opts, inp)
     universe_model = opts.universe_model
 
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
@@ -2011,6 +2054,7 @@ def build_cluster_diagnostics(
     )
     pair_marks = _resolve_pair_marks(opts, inp)
     _require_time_window(opts, inp)
+    _require_time_marks_in_sis_support(opts, inp)
     universe_model = opts.universe_model
     log_p_tag = _pair_tag_log_probs_from_options(opts, inp["lensed"])
     singleton_lensing = (
@@ -2395,6 +2439,16 @@ def build_parser():
     model.add_argument("--sl_tau_A", type=float, default=5e-4)
     model.add_argument("--sl_tau_n", type=float, default=3.0)
     model.add_argument(
+        "--sl_T0_sec",
+        type=float,
+        default=DEFAULT_T0_SECONDS,
+        help="SIS time-delay scale T0 in seconds (Delta t = T0 * y). Default "
+        f"{DEFAULT_T0_SECONDS:.3g} s (~62 d) is the SIS scale at z_L=0.5, "
+        "z_s=1, sigma_v=200 km/s under this repo's cosmology. Candidate pairs "
+        "with |dt| >= T0 fall outside the SIS support y in (0,1) and get an "
+        "exactly -inf time-marked pair likelihood.",
+    )
+    model.add_argument(
         "--fix_lens_rate",
         type=str_to_bool, default=True, metavar="BOOL",
         help="true fixes SIS optical-depth parameters to --sl_tau_A/--sl_tau_n; false samples lensing hyperparameters",
@@ -2710,6 +2764,7 @@ def _print_run_configuration(opts):
     print("  │")
     _row("Fix lens rate",     "yes" if opts.fix_lens_rate else "no")
     _row("SIS tau A, n",      f"{opts.sl_tau_A}, {opts.sl_tau_n}")
+    _row("SIS T0", f"{_sl_T0_seconds(opts):.4g} s ({_sl_T0_seconds(opts) / 86400.0:.3g} d)")
     _row("Sampler",           opts.sampler)
     _row("Seed",              opts.seed)
     _row("Output root",       opts.save_path)
@@ -3031,7 +3086,17 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             f.attrs["wl_a"] = float(opts.lensing_wl_a)
             f.attrs["wl_b"] = float(opts.lensing_wl_b)
             lens_settings = _lens_settings_dict(mid, labels, lens_fixed, opts)
+<<<<<<< HEAD
             _write_lens_settings_attrs(f.attrs, lens_settings)
+=======
+            f.attrs["lens_labels"] = json.dumps(lens_settings["lens_labels"])
+            f.attrs["fix_lens_rate"] = bool(opts.fix_lens_rate)
+            f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
+            f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
+            f.attrs["sl_T0_sec"] = float(lens_settings["sl_T0_sec"])
+            f.attrs["lens_A_tau"] = float(lens_settings["lens_A_tau"])
+            f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
+>>>>>>> 425a50f (lensing: correct the SIS time-delay scale T0, expose it, and guard its support)
             if results.get("logZ") is not None:
                 f.attrs["logZ"] = float(results["logZ"])
                 # logZerr existed only in the run.log, yet the lensing paper's

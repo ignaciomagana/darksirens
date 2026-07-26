@@ -65,6 +65,61 @@ def candidate_time_mark_suspicion(candidate_pairs: Iterable[CandidatePair]) -> d
         "candidate_time_marks_warning": warning,
     }
 
+def sis_time_mark_support(delta_t_seconds: Iterable[float], T0_seconds: float) -> dict:
+    """Where the observed delays sit relative to the SIS support y ∈ (0, 1).
+
+    The time mark converts an observed delay to an impact parameter as
+    ``y* = |Δt| / T0``, and the SIS support is ``y ∈ (0, 1)``. A pair with
+    ``y* >= 1`` has EVERY collapse node masked, so its pair log-likelihood is
+    exactly -inf: in fixed-partition mode the master log-likelihood is -inf
+    everywhere (the sampler cannot initialise), and in ``marginalize_exact``
+    the pairing silently receives zero posterior weight at every parameter
+    value, i.e. the analysis reports "no lensing" by construction.
+
+    Returns
+    -------
+    dict with ``n_marked``, ``n_out_of_support``, ``all_out_of_support``,
+    ``max_y_star``, ``min_y_star`` and ``T0_seconds``.
+    """
+    dt = np.asarray([abs(float(x)) for x in delta_t_seconds if x is not None], dtype=float)
+    dt = dt[np.isfinite(dt)]
+    T0 = float(T0_seconds)
+    if dt.size == 0 or not np.isfinite(T0) or T0 <= 0.0:
+        return {
+            "n_marked": int(dt.size),
+            "n_out_of_support": 0,
+            "all_out_of_support": False,
+            "max_y_star": None,
+            "min_y_star": None,
+            "T0_seconds": T0,
+        }
+    y_star = dt / T0
+    n_out = int(np.sum(y_star >= 1.0))
+    return {
+        "n_marked": int(dt.size),
+        "n_out_of_support": n_out,
+        "all_out_of_support": bool(n_out == dt.size),
+        "max_y_star": float(np.max(y_star)),
+        "min_y_star": float(np.min(y_star)),
+        "T0_seconds": T0,
+    }
+
+
+def sis_time_mark_support_message(support: dict) -> str:
+    """Human-readable diagnosis of an out-of-support time-mark set."""
+    return (
+        "time-marked candidate pairs fall outside the SIS support y in (0, 1): "
+        f"{support['n_out_of_support']}/{support['n_marked']} pairs have "
+        f"y* = |dt|/T0 >= 1 (max y* = {support['max_y_star']:.4g}, "
+        f"min y* = {support['min_y_star']:.4g}, T0 = {support['T0_seconds']:.4g} s "
+        f"= {support['T0_seconds'] / 86400.0:.4g} d). Those pairs get an exactly "
+        "-inf time-marked pair likelihood, so the pairing is excluded by "
+        "construction. Raise --sl_T0_sec to the time-delay scale of the lens "
+        "population you are modelling (T0 = 2(1+z_L) theta_E^2 D_L D_S/(c D_LS); "
+        "5.36e6 s at z_L=0.5, z_s=1, sigma_v=200 km/s), or drop --pair_marks time."
+    )
+
+
 def partition_diagnostic_rows(diagnostics: dict, *, case: str = "", truth_edges: set[tuple[int, int]] | None = None) -> list[dict]:
     truth_edges = truth_edges or set()
     if diagnostics.get("global_partitions_enumerated") is False:

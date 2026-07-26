@@ -140,6 +140,86 @@ def test_resolve_pair_marks_explicit_impl_still_wins():
 
 
 # ---------------------------------------------------------------------------
+# SIS time-delay scale T0: configurability + support guard
+# ---------------------------------------------------------------------------
+
+def test_sl_T0_sec_is_a_cli_flag_threaded_into_sis_params():
+    """T0 was hard-wired: none of the three make_sis_lens_params call sites
+    could set it, so a real-data run could not move the SIS support edge."""
+    import darksirens.cli.inference_lensing as cli
+    from darksirens.lensing.slmarks import DEFAULT_T0_SECONDS
+
+    parser = cli.build_parser() if hasattr(cli, "build_parser") else None
+    opts = SimpleNamespace(fix_lens_rate=True, sl_tau_A=5e-4, sl_tau_n=3.0,
+                           sl_T0_sec=1.234e7)
+    sis = cli._decode_lens_params(None, [], {}, opts)
+    assert float(sis.T0) == 1.234e7
+
+    # Sampled-lens-rate branch threads it too.
+    opts_sampled = SimpleNamespace(fix_lens_rate=False, sl_tau_A=5e-4,
+                                   sl_tau_n=3.0, sl_T0_sec=1.234e7)
+    sis2 = cli._decode_lens_params(np.array([-3.0]), ["log10_tau_A"],
+                                   {"tau_n": 3.0}, opts_sampled)
+    assert float(sis2.T0) == 1.234e7
+
+    # Absent / None falls back to the physically-derived default.
+    assert cli._sl_T0_seconds(SimpleNamespace()) == DEFAULT_T0_SECONDS
+    assert cli._sl_T0_seconds(SimpleNamespace(sl_T0_sec=None)) == DEFAULT_T0_SECONDS
+    del parser
+
+
+def test_sis_time_mark_support_classifies_out_of_support_delays():
+    from darksirens.lensing.marginal_diagnostics import sis_time_mark_support
+
+    T0 = 5.36e6
+    day = 86400.0
+    inside = sis_time_mark_support([1 * day, 30 * day], T0)
+    assert inside["n_out_of_support"] == 0
+    assert not inside["all_out_of_support"]
+
+    mixed = sis_time_mark_support([1 * day, 90 * day], T0)
+    assert mixed["n_out_of_support"] == 1
+    assert not mixed["all_out_of_support"]
+
+    # Everything past T0: every pair likelihood is exactly -inf.
+    allout = sis_time_mark_support([70 * day, 90 * day, 200 * day], T0)
+    assert allout["all_out_of_support"]
+    assert allout["max_y_star"] > 1.0
+
+    # Sign is irrelevant (y* uses |dt|), and Nones are dropped.
+    signed = sis_time_mark_support([-30 * day, None], T0)
+    assert signed["n_marked"] == 1
+    assert signed["n_out_of_support"] == 0
+
+
+def test_likelihood_construction_refuses_all_out_of_support_time_marks():
+    """A GWTC-style month-scale candidate set under a too-small T0 must be a
+    loud error, not an -inf likelihood the sampler cannot initialise on."""
+    import darksirens.cli.inference_lensing as cli
+
+    day = 86400.0
+    opts = SimpleNamespace(pair_marks="time", sl_T0_sec=4.32e5)   # old 5-day T0
+    inp = {"pair_time_delta_t_obs": np.array([30 * day, 45 * day])}
+    with pytest.raises(SystemExit, match="outside the SIS support"):
+        cli._require_time_marks_in_sis_support(opts, inp)
+
+    # Raising T0 to the physical scale admits them.
+    opts_ok = SimpleNamespace(pair_marks="time", sl_T0_sec=5.36e6)
+    cli._require_time_marks_in_sis_support(opts_ok, inp)
+
+    # Falls back to candidate_pairs when inp carries no materialised marks
+    # (the marginalize_exact path).
+    inp_cand = {"candidate_pairs": [SimpleNamespace(i=0, j=1,
+                                                    delta_t_obs=30 * day,
+                                                    sigma_delta_t=3600.0)]}
+    with pytest.raises(SystemExit, match="outside the SIS support"):
+        cli._require_time_marks_in_sis_support(opts, inp_cand)
+
+    # Inert without time marks.
+    cli._require_time_marks_in_sis_support(SimpleNamespace(pair_marks="none"), inp)
+
+
+# ---------------------------------------------------------------------------
 # Ndraw_sources / n_draw_sources
 # ---------------------------------------------------------------------------
 

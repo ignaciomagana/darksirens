@@ -49,6 +49,7 @@ from darksirens.lensing.wlmagnification import (
 )
 from darksirens.lensing.slmarks import (
     SISLensParams,
+    DEFAULT_T0_SECONDS,
     make_sis_lens_params,
     tau_2_SIS,
     log_p_y_SIS,
@@ -76,6 +77,7 @@ __all__ = [
     "validate_wl_mu_quadrature",
     # SL marks
     "SISLensParams",
+    "DEFAULT_T0_SECONDS",
     "make_sis_lens_params",
     "tau_2_SIS",
     "log_p_y_SIS",

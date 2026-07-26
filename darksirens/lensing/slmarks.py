@@ -33,9 +33,11 @@ Time delay (Fermat principle for SIS):
                     = T_0(z_L, z_s) · y
 
 where ``T_0`` carries all the cosmology and lens-redshift dependence
-through angular-diameter distances. In commit 1 we treat T_0 as an
-externally supplied scalar; commit 2 will hook it up to the cosmology
-module so ``T_0(z_L, z_s | H_0, Ω_m)`` is computed self-consistently.
+through angular-diameter distances. We still treat T_0 as an externally
+supplied scalar (see ``DEFAULT_T0_SECONDS`` for the calibration and
+``make_sis_lens_params`` for how to override it); making it a
+sampled/marginalised function ``T_0(z_L, z_s, σ_v | H_0, Ω_m, w_0, w_a)``
+is the proper fix and is not done here.
 
 Optical depth τ_2(z_s)
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -79,6 +81,32 @@ from jax import jit
 # SIS lens-population container
 # ============================================================================
 
+# Fiducial SIS time-delay scale, in seconds.
+#
+# Derived from this module's own formula (see the header) with THIS repo's
+# cosmology (``utils.cosmology.r_of_z``, Planck15 defaults) at the reference
+# lens/source configuration z_L = 0.5, z_s = 1.0, σ_v = 200 km/s:
+#
+#     θ_E   = 4π (σ_v/c)² D_LS/D_S            = 0.493 arcsec
+#     T_0   = 2 (1 + z_L) θ_E² D_L D_S/(c D_LS) = 5.36e6 s = 62 days
+#
+# Neighbouring configurations: 5.06e6 s at z_L = 0.3; 7.09e6 s at z_s = 1.5;
+# 1.31e7 s at σ_v = 250 km/s.  The historical default of 4.32e5 s (5 days) is
+# ~12x too small — it corresponds to σ_v ≈ 107 km/s, i.e. a dwarf-galaxy lens,
+# not the σ_v ~ 200 km/s early-type population the optical depth is calibrated
+# to.  That matters because the time mark converts the observed delay to an
+# impact parameter as y* = |Δt|/T_0 and the SIS support is y ∈ (0, 1): with the
+# old default, EVERY candidate pair separated by more than 5 days received an
+# exactly -inf pair log-likelihood (see ``likelihood.cluster_likelihood``
+# PAIR_MARKS_DELTA_COLLAPSE), and GWTC-style lensing candidates are weeks to
+# months apart.
+#
+# This is a scalar stand-in for a distribution.  The physically complete model
+# marginalises T_0 over the lens redshift and the velocity-dispersion function
+# (or samples it as a hyperparameter); that is deliberately NOT done here.
+DEFAULT_T0_SECONDS = 5.36e6
+
+
 class SISLensParams(NamedTuple):
     """SIS lens-population parameters.
 
@@ -87,10 +115,9 @@ class SISLensParams(NamedTuple):
     A_tau, n_tau
         Optical-depth amplitude and power-law slope: τ_2(z) = A · z^n.
     T0
-        Time-delay scaling constant (seconds). In commit 1 this is a
-        single scalar (z-averaged); commit 2 will replace it with a
-        cosmology-aware function. Defaults to ~5 days in seconds at
-        z_s = 1 — order of magnitude only.
+        Time-delay scaling constant (seconds): Δt = T_0 · y. A single
+        z-averaged scalar, not a function of (z_L, z_s, σ_v) — see
+        ``DEFAULT_T0_SECONDS`` for the calibration and the caveat.
     """
     A_tau: Any
     n_tau: Any
@@ -100,7 +127,7 @@ class SISLensParams(NamedTuple):
 def make_sis_lens_params(
     A_tau: float = 5.0e-4,
     n_tau: float = 3.0,
-    T0_seconds: float = 4.32e5,
+    T0_seconds: float = DEFAULT_T0_SECONDS,
 ) -> SISLensParams:
     """Default SIS lens-population parameters.
 
@@ -110,8 +137,12 @@ def make_sis_lens_params(
         τ_2(z) = 5e-4 · z^3.  At z = 1 → τ ≈ 5e-4 (consistent with
         galaxy-scale SIS lensing optical depth in the literature).
     T0_seconds
-        4.32e5 s ≈ 5 days. Order-of-magnitude SIS time-delay scale at
-        z_s = 1 for σ_v ~ 200 km/s lenses.
+        ``DEFAULT_T0_SECONDS`` = 5.36e6 s ≈ 62 days: the SIS time-delay
+        scale at z_L = 0.5, z_s = 1.0, σ_v = 200 km/s under this repo's
+        cosmology. Override for a different lens population (the lensing
+        CLI exposes ``--sl_T0_sec``); a candidate pair with
+        |Δt| ≥ T0_seconds falls outside the SIS support y ∈ (0, 1) and its
+        time-marked pair likelihood is exactly -inf.
     """
     return SISLensParams(
         A_tau=jnp.asarray(A_tau, dtype=jnp.float64),
@@ -181,8 +212,9 @@ def y_from_mu_plus(mu_plus: jnp.ndarray) -> jnp.ndarray:
 def delta_t_from_y(y: jnp.ndarray, p: SISLensParams) -> jnp.ndarray:
     """SIS time delay: Δt = T_0 · y, in seconds.
 
-    Commit-1 form uses a constant T_0; commit 2 will replace with a
-    cosmology-and-lens-redshift-dependent prefactor.
+    Uses the constant ``p.T0``; a cosmology-and-lens-redshift-dependent
+    prefactor (marginalised over the lens redshift and the velocity-dispersion
+    function) is the physically complete form — see ``DEFAULT_T0_SECONDS``.
     """
     return p.T0 * y
 

@@ -901,7 +901,9 @@ def test_pair_time_mark_impl_resolution():
     broad ones; explicit flags override."""
     from types import SimpleNamespace
 
-    from darksirens.cli.inference_lensing import _resolve_pair_marks
+    from darksirens.cli.inference_lensing import (
+        _resolve_pair_marks, _sl_T0_seconds, _TIME_DELTA_SHARPNESS,
+    )
     from darksirens.likelihood.likelihood_with_clusters import (
         PAIR_MARKS_NONE, PAIR_MARKS_TIME, PAIR_MARKS_TIME_DELTA,
     )
@@ -910,8 +912,13 @@ def test_pair_time_mark_impl_resolution():
         return SimpleNamespace(pair_marks=marks, pair_time_mark_impl=impl,
                                sl_tau_A=5e-4, sl_tau_n=3.0)
 
-    sharp = {"pair_time_sigma": np.array([3600.0, 3600.0])}   # sigma/T0 ~ 0.008
-    broad = {"pair_time_sigma": np.array([3600.0, 5.0e4])}    # max sigma/T0 ~ 0.12
+    # Express the widths RELATIVE to T0: the rule is max(sigma)/T0 vs the
+    # sharpness threshold, and T0 is a configurable lens-population scale.
+    T0 = _sl_T0_seconds(opts())
+    sharp_sig = 0.4 * _TIME_DELTA_SHARPNESS * T0
+    broad_sig = 6.0 * _TIME_DELTA_SHARPNESS * T0
+    sharp = {"pair_time_sigma": np.array([sharp_sig, sharp_sig])}
+    broad = {"pair_time_sigma": np.array([sharp_sig, broad_sig])}
     assert _resolve_pair_marks(opts(), sharp) == PAIR_MARKS_TIME_DELTA
     assert _resolve_pair_marks(opts(), broad) == PAIR_MARKS_TIME
     assert _resolve_pair_marks(opts(impl="quadrature"), sharp) == PAIR_MARKS_TIME

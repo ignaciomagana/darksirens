@@ -13,7 +13,12 @@ from darksirens.lensing.observed_catalog import (
     observed_catalog_metadata_from_hdf5,
     validate_observed_catalog_file,
 )
-from darksirens.lensing.marginal_diagnostics import candidate_time_mark_suspicion
+from darksirens.lensing.marginal_diagnostics import (
+    candidate_time_mark_suspicion,
+    sis_time_mark_support,
+    sis_time_mark_support_message,
+)
+from darksirens.lensing.slmarks import DEFAULT_T0_SECONDS
 from darksirens.lensing.partitions import (
     apply_edge_mark_prior_keys,
     connected_components_from_candidate_pairs,
@@ -205,6 +210,7 @@ def _check_pair_pe(
             else:
                 npairs = int(f.attrs["npairs"])
             summary["n_pairs_pair_pe"] = npairs
+            pair_dt_values = []
             for k in range(npairs):
                 pname = f"pair_{k}"
                 if pname not in f:
@@ -243,6 +249,15 @@ def _check_pair_pe(
                             f"{pname} event-index metadata {pair} does not match partition pair {partition_pairs[k]}"
                         )
                 has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
+                if has_dt:
+                    try:
+                        pair_dt_values.append(float(
+                            g.attrs["delta_t_obs"]
+                            if "delta_t_obs" in g.attrs
+                            else np.asarray(g["delta_t_obs"])[()]
+                        ))
+                    except Exception as exc:
+                        errors.append(f"{pname} delta_t_obs not readable: {exc}")
                 has_sig = (
                     "sigma_delta_t" in g.attrs
                     or "sigma_delta_t" in g
@@ -302,6 +317,18 @@ def _check_pair_pe(
                             )
                         except Exception as exc:
                             errors.append(str(exc))
+            if _get(opts, "pair_marks", "none") == "time" and pair_dt_values:
+                # SIS support guard: y* = |dt|/T0 must be < 1 or the pair is
+                # annihilated (-inf) at every parameter value.
+                support = sis_time_mark_support(
+                    pair_dt_values,
+                    _get(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS,
+                )
+                summary["sis_time_mark_support_pair_pe"] = support
+                if support["all_out_of_support"]:
+                    errors.append(sis_time_mark_support_message(support))
+                elif support["n_out_of_support"]:
+                    warnings.append(sis_time_mark_support_message(support))
     except Exception as exc:
         errors.append(f"{label} not readable: {path}: {exc}")
 
@@ -364,6 +391,17 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
             summary.update(suspicion)
             if suspicion.get("candidate_time_marks_suspicious"):
                 warnings.append(str(suspicion.get("candidate_time_marks_warning")))
+            # SIS support guard: y* = |dt|/T0 must be < 1 or the pair is
+            # annihilated (-inf) at every parameter value.
+            support = sis_time_mark_support(
+                [p.delta_t_obs for p in pairs],
+                _get(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS,
+            )
+            summary["sis_time_mark_support"] = support
+            if support["all_out_of_support"] and support["n_marked"] > 0:
+                errors.append(sis_time_mark_support_message(support))
+            elif support["n_out_of_support"]:
+                warnings.append(sis_time_mark_support_message(support))
         effective_pairs = (
             apply_edge_mark_prior_keys(pairs, prior_keys) if not errors else pairs
         )

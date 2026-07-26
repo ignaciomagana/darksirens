@@ -321,6 +321,55 @@ class TestSISLens:
             rtol=1e-12,
         )
 
+    def test_default_T0_matches_the_sis_formula_in_this_cosmology(self):
+        """The default T0 must equal the module's own SIS formula at the
+        reference configuration, NOT a 5-day placeholder.
+
+        T0 = 2 (1+z_L) theta_E^2 D_L D_S / (c D_LS),
+        theta_E = 4 pi (sigma_v/c)^2 D_LS/D_S,
+        at z_L = 0.5, z_s = 1.0, sigma_v = 200 km/s with this repo's cosmology.
+        The historical 4.32e5 s (5 d) default is ~12x too small (it implies
+        sigma_v ~ 107 km/s), and because the time mark reads
+        y* = |dt|/T0 against the SIS support y in (0, 1), it gave an exactly
+        -inf pair likelihood to every candidate separated by more than 5 days.
+        """
+        from darksirens.lensing.slmarks import DEFAULT_T0_SECONDS
+        from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck
+
+        c_kms = 299792.458
+        c_ms = 2.99792458e8
+        mpc_m = 3.085677581491367e22
+        z_L, z_s, sigma_v = 0.5, 1.0, 200.0
+
+        r_L = float(r_of_z(z_L, H0Planck, Om0Planck))
+        r_S = float(r_of_z(z_s, H0Planck, Om0Planck))
+        D_L = r_L / (1.0 + z_L)
+        D_S = r_S / (1.0 + z_s)
+        D_LS = (r_S - r_L) / (1.0 + z_s)          # flat universe
+        theta_E = 4.0 * np.pi * (sigma_v / c_kms) ** 2 * D_LS / D_S
+        T0_expected = (
+            2.0 * (1.0 + z_L) * theta_E ** 2 * (D_L * D_S / D_LS) * mpc_m / c_ms
+        )
+
+        assert 5.0e6 < T0_expected < 5.7e6, T0_expected
+        np.testing.assert_allclose(DEFAULT_T0_SECONDS, T0_expected, rtol=2e-3)
+        assert float(make_sis_lens_params().T0) == DEFAULT_T0_SECONDS
+        # And the old default really was ~12x too small.
+        assert 10.0 < T0_expected / 4.32e5 < 14.0
+
+    def test_T0_is_overridable_and_sets_the_sis_support_edge(self):
+        """|dt| >= T0 is outside the SIS support y in (0, 1) — the regime that
+        annihilates a pair — and T0 is a constructor knob so a real-data run
+        can move that edge."""
+        p = make_sis_lens_params(T0_seconds=1.0e7)
+        assert float(p.T0) == 1.0e7
+        y_star = np.array([1.0, 5.0, 30.0, 90.0]) * 86400.0 / float(p.T0)
+        assert np.all(y_star[:3] < 1.0)      # up to 30 d now inside support
+        assert y_star[3] < 1.0               # 90 d too, at T0 = 1e7 s
+        # ... while the historical 5-day T0 excluded everything past 5 days.
+        y_star_old = np.array([5.5, 30.0, 90.0]) * 86400.0 / 4.32e5
+        assert np.all(y_star_old >= 1.0)
+
 
 # ============================================================================
 # Cluster I/O
