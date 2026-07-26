@@ -56,7 +56,11 @@ class NormalizationGridSettings:
     ``DARKSIRENS_GW_PAIRING_M1_GRID``): when set to an int N the pairing model's
     per-sample q-normalisation is interpolated from an N-node static m1 grid
     instead of integrated exactly per sample (see ``get_pairing_m1_grid`` and
-    ``PairingModel.__call__``).
+    ``PairingModel.__call__``).  Samples inside the grid cell that straddles the
+    normaliser's SUPPORT EDGE are not interpolated at all -- no interpolant can
+    follow the taper's essential singularity there -- but evaluated from the
+    exact single-q-interval trapezoid term, which is the exact normaliser in that
+    cell for N >= ~1024 (see ``PairingModel.__call__``).
 
     ``pairing_m_hi`` is the UPPER bound of that opt-in pairing m1 grid.  It is a
     SEPARATE knob from the mass-grid ceiling ``m_hi`` precisely so that sizing

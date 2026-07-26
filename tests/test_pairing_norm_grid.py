@@ -59,6 +59,7 @@ from darksirens.gw.populations.registry import (
     get_model,
     get_fixed_population_params,
     population_m1_support_max,
+    pop_model_prior_parser,
 )
 
 
@@ -622,3 +623,192 @@ def test_both_clis_size_an_explicitly_requested_pairing_grid(which):
     s = U.normalization_grid_settings()
     assert s.pairing_m1_grid > 1024
     assert s.pairing_m_hi >= 300.0
+
+
+# ---------------------------------------------------------------------------
+# (8) SUPPORT-EDGE CELLS.  The grid branch used to floor a zero-support node's
+#     normaliser at log(1e-300) and interpolate THROUGH it.  That is sound AT a
+#     zero-support node but not INSIDE the cell that straddles the support edge:
+#     there p_unnorm is small-but-nonzero while the interpolated log I is
+#     hundreds of nats too low, so p * exp(-log_I) explodes.
+#
+#     The edge is hit BY CONSTRUCTION for any mass component without an
+#     ``m_min_spec``: MixtureModel.component_densities then passes mmin = M_LO =
+#     1.0, which is exactly the pairing grid's first node, and
+#     sfilter_low(m, m_min) == 0 at m == m_min, so I(node 0) == 0 always.
+#
+#     Measured on master at the powerlaw+peak PRIOR MIDPOINT (m_min_PL = 6,
+#     dm_min = 5.005), m1 = 1.00102232, q = 0.999739:
+#         exact log_p_pop = -20.108858,  grid(2048) = +386.6989  (+406.8 nats)
+#         grid(1024) = +521.03, grid(4096) = +120.40, grid(8192) = -18.92
+#     which took one injection sample's log_mu from -4.485 to +360.4, Neff from
+#     11344 to 1.0, and logL from -1027.3 to -114483.4.
+#
+#     Post-fix the grid branch (a) never interpolates through the floor -- a
+#     zero node inherits the larger of its supported neighbours, a monotone
+#     UPPER bound on I inside that cell -- and (b) clamps log I from below by the
+#     rigorous single-term trapezoid bound
+#         I(m1) >= (dq/2) * (p_unnorm(m1, q_k) + p_unnorm(m1, q_{k+1}))
+#     for the sample's own bracketing q-nodes, which cannot overshoot the exact
+#     normaliser (a subset of its non-negative terms) and IS the exact
+#     normaliser inside the edge cell, where the whole q-support fits in one
+#     q-interval (cell width d log m1 = 2.6e-3 at N=2048 < dq = 5.0e-3).
+# ---------------------------------------------------------------------------
+
+def _powerlaw_peak_prior_midpoint():
+    lo, hi, *_ = pop_model_prior_parser("powerlaw+peak")
+    return jnp.asarray(0.5 * (np.asarray(lo) + np.asarray(hi)))
+
+
+# The finding's samples: inside the first grid cell (m1 just above M_LO = 1.0,
+# q ~ 1 so m2 = q*m1 is just above the peak component's mmin = M_LO).
+_EDGE_M1 = jnp.asarray([1.00102232, 1.0005, 1.002])
+_EDGE_Q = jnp.asarray([0.999739, 0.9999, 0.999])
+
+
+def test_support_edge_cell_matches_exact(capsys):
+    """The reported blow-up is gone: inside the support-edge cell the grid path
+    reproduces the exact per-sample q-integration to floating point, at every
+    grid size (the single-term bound IS the exact trapezoid there)."""
+    theta = _powerlaw_peak_prior_midpoint()
+    z = jnp.full(_EDGE_M1.size, 0.1)
+    chi = jnp.zeros(_EDGE_M1.size)
+
+    _set_pairing_grid(None)
+    exact = _logp(_EDGE_M1, _EDGE_Q, z, chi, theta)
+    assert np.all(np.isfinite(exact)), exact
+    np.testing.assert_allclose(exact, [-20.10885813, -21.73379221, -21.85632734],
+                               rtol=0, atol=1e-6)
+
+    worst = {}
+    for ng in (1024, 2048, 4096, 8192):
+        _set_pairing_grid(ng)
+        gr = _logp(_EDGE_M1, _EDGE_Q, z, chi, theta)
+        worst[ng] = float(np.abs(gr - exact).max())
+    with capsys.disabled():
+        print("\n[pairing_norm_grid] support-edge cell |Δlog_p_pop| "
+              "(was +406.8 nats at 2048):")
+        for ng, e in worst.items():
+            print(f"    grid={ng:5d}:  {e:.3e}")
+    for ng, e in worst.items():
+        assert e < 1e-6, (ng, e, worst)
+
+
+def test_support_edge_dense_sweep_bounded_and_one_sided(capsys):
+    """Dense sweep of the pairing density across the cells that straddle the
+    support edge, for several (m_min, dm_min, beta) corners.
+
+    Asserts what the fix guarantees: the support pattern matches the exact
+    branch exactly, and the grid density never EXCEEDS the exact density by more
+    than a small bounded amount (the pre-fix excess was up to +578.9 nats).  The
+    residual over-shoot comes from the single-term normaliser bound in cells
+    where the q-support spans slightly more than one q-interval, and it shrinks
+    with grid refinement."""
+    mix = MODEL.mixture
+    pair = mix.pairing_components[0]
+    # (mmin, dmmin, beta): peak component (mmin = M_LO), the PL component at the
+    # prior midpoint, a narrow taper, the steepest/flattest allowed q slopes.
+    corners = [(1.0, 0.01, 2.5), (6.0, 5.005, 2.5), (6.0, 0.05, 2.5),
+               (6.0, 0.05, -2.0), (3.5, 0.01, 7.0), (20.0, 3.0, 1.0)]
+    rows = []
+    for mmin, dmmin, beta in corners:
+        theta = jnp.asarray([beta])
+        for ng in (1024, 2048, 8192):
+            _set_pairing_grid(ng)
+            nodes = np.asarray(U.get_pairing_m1_grid())
+            j0 = int(np.searchsorted(nodes, mmin))
+            m1 = np.linspace(nodes[max(j0 - 2, 0)],
+                             nodes[min(j0 + 3, nodes.size - 1)], 201)
+            over, mism = -np.inf, 0
+            for qv in (0.5, 0.9, 0.99, 0.999, 1.0):
+                q = np.full(m1.shape, qv)
+                _set_pairing_grid(None)
+                ex = np.asarray(pair(jnp.asarray(m1), jnp.asarray(q),
+                                     mmin, dmmin, theta))
+                _set_pairing_grid(ng)
+                gr = np.asarray(pair(jnp.asarray(m1), jnp.asarray(q),
+                                     mmin, dmmin, theta))
+                mism += int(((ex > 0) != (gr > 0)).sum())
+                both = (ex > 0) & (gr > 0)
+                if both.any():
+                    over = max(over, float((np.log(gr[both]) - np.log(ex[both])).max()))
+            rows.append((mmin, dmmin, beta, ng, over, mism))
+    with capsys.disabled():
+        print("\n[pairing_norm_grid] support-edge sweep: max log(grid/exact) "
+              "(pre-fix up to +578.9):")
+        for mmin, dmmin, beta, ng, over, mism in rows:
+            print(f"    mmin={mmin:5} dm={dmmin:6} beta={beta:5} N={ng:5}: "
+                  f"over={over:+.3e}  zero-pattern-mismatches={mism}")
+    # Bounded (was e^{+578}), and tighter as the grid refines.  At N=1024 the
+    # m1-cell (d log m1 = 5.2e-3) is WIDER than one q-interval (5.0e-3), so the
+    # single-term bound can miss a second q-node inside the edge cell; from 2048
+    # up the cell is narrower than dq and the bound is tight.
+    tol = {1024: 3.0, 2048: 0.25, 8192: 1.0e-6}
+    for mmin, dmmin, beta, ng, over, mism in rows:
+        assert mism == 0, (mmin, dmmin, beta, ng, mism)
+        assert over < tol[ng], (mmin, dmmin, beta, ng, over)
+
+
+def test_support_edge_sample_does_not_corrupt_logmu_or_neff(capsys):
+    """Likelihood-level consequence of the fix.
+
+    A Monte-Carlo selection sum containing ONE support-edge sample: pre-fix that
+    single sample dominated the sum (log_mu -4.49 -> +360.4) and collapsed the
+    effective sample size (Neff 11344 -> 1.0000000011), which either produces a
+    nonsense logL (soft variance guard) or a spurious -inf (default hard guard).
+    Post-fix both agree with the exact path to ~1e-9."""
+    from jax.scipy.special import logsumexp
+
+    theta = _powerlaw_peak_prior_midpoint()
+    rng = np.random.default_rng(11)
+    n = 4000
+    m1 = np.concatenate([rng.uniform(6.0, 90.0, n - 1), [1.00102232]])
+    q = np.concatenate([rng.uniform(0.1, 1.0, n - 1), [0.999739]])
+    z = np.concatenate([rng.uniform(0.01, 1.5, n - 1), [0.1]])
+    chi = np.concatenate([rng.uniform(-0.5, 0.5, n - 1), [0.0]])
+    args = (jnp.asarray(m1), jnp.asarray(q), jnp.asarray(z), jnp.asarray(chi))
+
+    def summary(th, keep):
+        lp = MODEL.log_p_pop(*(a[:keep] for a in args), th)
+        log_mu = float(logsumexp(lp) - np.log(keep))
+        # Neff of the Monte-Carlo sum (the selection-variance guard's quantity).
+        neff = float(jnp.exp(2.0 * logsumexp(lp) - logsumexp(2.0 * lp)))
+        return log_mu, neff
+
+    _set_pairing_grid(None)
+    mu_ex, neff_ex = summary(theta, n)
+    mu_ex0, _ = summary(theta, n - 1)          # same set WITHOUT the edge sample
+    _set_pairing_grid(2048)
+    mu_gr, neff_gr = summary(theta, n)
+    mu_gr0, _ = summary(theta, n - 1)
+    with capsys.disabled():
+        print(f"\n[pairing_norm_grid] with one support-edge sample: "
+              f"log_mu exact={mu_ex:.10f} grid={mu_gr:.10f} | "
+              f"Neff exact={neff_ex:.4f} grid={neff_gr:.4f}")
+    # The residual grid-vs-exact discrepancy is the ORDINARY interpolation error
+    # of the other samples: including the edge sample changes it by < 1e-9, i.e.
+    # the edge sample itself contributes exactly what the exact path gives it.
+    assert abs(mu_gr - mu_ex) < 1e-5, (mu_gr, mu_ex)
+    assert abs((mu_gr - mu_ex) - (mu_gr0 - mu_ex0)) < 1e-9, (mu_gr - mu_ex,
+                                                             mu_gr0 - mu_ex0)
+    assert abs(neff_gr / neff_ex - 1.0) < 1e-4, (neff_gr, neff_ex)
+    # No collapse: pre-fix the single edge sample carried the whole sum (Neff -> 1).
+    assert neff_gr > 0.1 * n, neff_gr
+
+
+def test_support_edge_grid_path_gradients_are_finite():
+    """The edge-cell branches must not poison autodiff: the safe-log guard on the
+    single-term bound keeps 0 * inf out of the VJP."""
+    theta = _powerlaw_peak_prior_midpoint()
+    m1 = jnp.concatenate([_EDGE_M1, jnp.asarray([0.5, 6.0, 30.0, 199.0])])
+    q = jnp.concatenate([_EDGE_Q, jnp.asarray([0.9, 0.99, 0.7, 0.3])])
+    z = jnp.full(m1.size, 0.1)
+    chi = jnp.zeros(m1.size)
+
+    def total(th):
+        lp = MODEL.log_p_pop(m1, q, z, chi, th)
+        return jnp.sum(jnp.where(jnp.isfinite(lp), lp, 0.0))
+
+    _set_pairing_grid(2048)
+    g = np.asarray(jax.jit(jax.grad(total))(theta))
+    assert np.all(np.isfinite(g)), g

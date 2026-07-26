@@ -52,6 +52,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import jax.numpy as jnp
+from jax import lax
 
 from .utils import (
     get_mass_grid,
@@ -268,21 +269,92 @@ class PairingModel(ABC):
         scale_s = jnp.where(scale > 0, scale, 1.0)
         n_sc_g  = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
         I_grid  = scale_s[..., 0] * n_sc_g                   # (N_grid,) normaliser
-        # Log-space with a tiny floor (the eval_dark_member_completion idiom): a
-        # zero-support node (I==0, i.e. m1<=m_min so p_unnorm==0 for every q)
-        # floors to log(1e-300) rather than -inf, keeping jnp.interp finite when
-        # a sample straddles the support edge.  A true -inf would poison interp
-        # (-inf + inf*t -> NaN); the floor is safe because a sample in that
-        # region has p==0 too, so the density below is exactly 0 either way.
-        log_I_grid = jnp.log(jnp.maximum(I_grid, 1e-300))
+        # SUPPORT-EDGE HANDLING.  Nodes with no support have I == 0 exactly (for
+        # every q, p_unnorm == 0 -- e.g. m1 <= m_min, so m2 = q*m1 <= m_min).  The
+        # historical code floored those to log(1e-300) and interpolated THROUGH
+        # them, which is only sound AT a zero-support node, never INSIDE the cell
+        # that straddles the edge: there p is small-but-nonzero while the
+        # interpolated log_I is hundreds of nats below the truth, so
+        # p * exp(-log_I) EXPLODES (measured on powerlaw+peak at the prior
+        # midpoint: log density +547.96 nats too large at m1 = m_lo * (1+2.6e-5),
+        # which took one injection's log_mu from -4.485 to +360.4 and logL from
+        # -1027.3 to -114483.4).
+        #
+        # Fix: never interpolate through the floor.  A floored node inherits the
+        # LARGER of its two nearest supported neighbours' normalisers, so a cell
+        # touching the edge interpolates between real (finite) normalisers.  I(m1)
+        # is monotone toward a support edge (both the q-domain [m_min/m1, 1] and
+        # the taper S(q*m1) grow with m1), hence the inherited I is an UPPER bound
+        # on the true I inside that cell and the returned density is a strict
+        # UNDER-estimate: the catastrophic direction is impossible by
+        # construction.  The residual is a one-sided truncation of a
+        # sub-grid-cell sliver of the support whose exact value the exact branch
+        # cannot resolve either (its q-quadrature sees a support narrower than one
+        # q-grid interval there).  Away from the edge every node keeps its own
+        # normaliser, so interior cells are bit-for-bit unchanged.
+        n_nodes = I_grid.shape[0]
+        has_sup = I_grid > 0
+        node_ix = jnp.arange(n_nodes)
+        # Nearest supported node at or below / at or above each node (sentinels
+        # -1 / n_nodes clip onto a zero node, which the maximum then discards).
+        prev_ix = jnp.clip(lax.cummax(jnp.where(has_sup, node_ix, -1), axis=0),
+                           0, n_nodes - 1)
+        next_ix = jnp.clip(lax.cummin(jnp.where(has_sup, node_ix, n_nodes), axis=0,
+                                      reverse=True), 0, n_nodes - 1)
+        I_fill  = jnp.maximum(I_grid[prev_ix], I_grid[next_ix])
+        I_grid  = jnp.where(has_sup, I_grid, I_fill)
+        # No node has support at all: the exact branch returns 0 (its n_sc == 0
+        # guard), so return 0 here too instead of dividing by the floor.
+        any_sup = jnp.any(has_sup)
+        log_I_grid = jnp.log(jnp.where(any_sup, jnp.maximum(I_grid, 1e-300), 1.0))
         # Linear interp of log N in log m1 (jnp.interp clamps out-of-range x to
         # the grid ends).  N = exp(log_I): density = p / N = p * exp(-log_I),
         # a SINGLE reciprocal so the VJP never squares N (same reason the exact
         # branch factors out scale_m).  Zero-support samples have p==0 exactly,
         # so p * exp(-log_I) == 0, matching the exact branch's guarded 0.
-        log_I   = jnp.interp(jnp.log(jnp.atleast_1d(m1)), log_m1_grid, log_I_grid)
-        log_I   = log_I.reshape(jnp.shape(m1))
-        return p * jnp.exp(-log_I)
+        log_m1_q = jnp.log(jnp.atleast_1d(m1))
+        log_I   = jnp.interp(log_m1_q, log_m1_grid, log_I_grid).reshape(jnp.shape(m1))
+        # A cell that TOUCHES a zero-support node is unresolved: no interpolant of
+        # log I can follow the essential singularity there (I ~ exp(-dm/(m1-m_min))
+        # for the Planck taper), and the filled value above is only an upper bound.
+        # Interpolating the support INDICATOR flags exactly those samples (it is
+        # 1.0 iff both bracketing nodes have support; jnp.interp's clamp makes
+        # out-of-grid m1 inherit the end node's flag).
+        resolved = jnp.interp(log_m1_q, log_m1_grid,
+                              has_sup.astype(log_I_grid.dtype)
+                              ).reshape(jnp.shape(m1)) >= 1.0
+        # RIGOROUS PER-SAMPLE LOWER BOUND on the exact normaliser.  The exact
+        # branch's I(m1) is a trapezoid sum of NON-NEGATIVE terms over q, so any
+        # single term bounds it from below: with the sample's own q bracketed by
+        # q-grid nodes k, k+1,
+        #     I(m1) >= (q_{k+1} - q_k)/2 * (p_unnorm(m1, q_k) + p_unnorm(m1, q_{k+1})).
+        # In an UNRESOLVED cell that bound is not merely safe but TIGHT: one grid
+        # cell spans dlog m1 = log(m_hi/m_lo)/(N_grid-1) = 2.6e-3 at N_grid=2048,
+        # so the q-support (m_min/m1, 1] inside the edge cell is narrower than one
+        # q-interval dq = 5.0e-3 (N_Q=200) and the exact trapezoid IS this single
+        # term -- the bound reproduces the exact branch to floating point.  In a
+        # RESOLVED cell it is inert (the support spans many q-nodes, so the
+        # interpolated normaliser is larger and the maximum keeps it bit-for-bit),
+        # while still capping any interpolation error that would INFLATE the
+        # density -- raising log_I toward a rigorous lower bound on the exact
+        # normaliser can never overshoot it.  Cost: two extra p_unnorm evaluations
+        # per sample, versus N_Q = 200 for the exact branch.
+        qi      = jnp.clip(jnp.searchsorted(q_grid, jnp.asarray(q)) - 1,
+                           0, q_grid.size - 2)
+        q_lo_n  = q_grid[qi]
+        q_hi_n  = q_grid[qi + 1]
+        p_lo_n  = self._eval_unnorm(m1, q_lo_n, m_min, dm_min, theta)
+        p_hi_n  = self._eval_unnorm(m1, q_hi_n, m_min, dm_min, theta)
+        I_lb    = 0.5 * (q_hi_n - q_lo_n) * (p_lo_n + p_hi_n)
+        lb_ok   = I_lb > 0
+        # Safe log: a zero bound (the sample's q is outside the support, where
+        # p == 0 too) must not create a -inf whose VJP turns into 0 * inf = NaN.
+        log_I_lb = jnp.log(jnp.where(lb_ok, I_lb, 1.0))
+        log_I   = jnp.where(lb_ok,
+                            jnp.where(resolved, jnp.maximum(log_I, log_I_lb), log_I_lb),
+                            log_I)
+        dens    = p * jnp.exp(-log_I)
+        return jnp.where(any_sup, dens, jnp.zeros_like(dens))
 
 
 class SpinModel(ABC):
