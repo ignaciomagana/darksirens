@@ -201,6 +201,11 @@ def make_pop_extractor(settings: dict):
         # fixed_parameter_values (KeyError) for any K>=2 chain.
         n_catalogs             = int(settings.get("n_catalogs", 1) or 1),
         lss_completion_active  = lss_completion_active,
+        # Mirror the CLI/decoder use_lss gate: with --use_lss off, b_miss is
+        # dropped from the sampled survey block and must not shift labels here.
+        # Default True reproduces pre-gate archived runs, which sampled b_miss
+        # regardless of the flag (see issue #288).
+        use_lss                = bool(settings.get("use_LSS", True)),
         mark_names_by_catalog  = (
             tuple(tuple(n) for n in settings["mark_names_by_catalog"])
             if settings.get("mark_names_by_catalog") else None

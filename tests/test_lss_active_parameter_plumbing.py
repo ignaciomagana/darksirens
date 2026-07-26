@@ -337,3 +337,48 @@ def test_pop_extractor_prefers_by_catalog_list_over_scalar():
     theta = jnp.arange(len(labels), dtype=jnp.float64)
     expected = np.array([float(theta[labels.index(l)]) for l in pop_labels])
     np.testing.assert_allclose(np.asarray(extractor(theta)), expected)
+
+
+# ---------------------------------------------------------------------------
+# (g) use_lss threading: the CLI-default configuration must not trip the net
+# ---------------------------------------------------------------------------
+
+def test_use_lss_off_builder_and_decoder_agree():
+    """Regression (a439b98 follow-up): build_parameter_space grew a use_lss
+    gate that drops b_miss when --use_lss is off, threaded at the CLI call
+    site only.  build_parameter_decoder re-derived the space at the signature
+    default use_lss=True, so the DEFAULT dark_sirens configuration (--use_lss
+    off, --fix_survey off) tripped the expected_sampled_labels fail-fast net
+    inside make_likelihood before sampling could start."""
+    labels = _builder_labels(1, False, use_lss=False)
+    assert "b_miss" not in labels
+
+    opts = _decoder_opts(
+        1,
+        use_LSS=False,
+        lss_completion_active_by_catalog=(False,),
+        expected_sampled_labels=tuple(labels),
+    )
+    decoder = build_parameter_decoder(
+        opts, get_fixed_population_params(POP), fixed_parameter_values={}
+    )
+    assert list(decoder.sampled_labels) == list(labels)
+    assert "b_miss" not in decoder.sampled_labels
+
+
+def test_use_lss_on_keeps_b_miss_in_decoder():
+    """Complementary cell: --use_lss true keeps b_miss for a Q-free catalog,
+    and builder/decoder still agree under the explicit flag."""
+    labels = _builder_labels(1, False, use_lss=True)
+    assert "b_miss" in labels
+
+    opts = _decoder_opts(
+        1,
+        use_LSS=True,
+        lss_completion_active_by_catalog=(False,),
+        expected_sampled_labels=tuple(labels),
+    )
+    decoder = build_parameter_decoder(
+        opts, get_fixed_population_params(POP), fixed_parameter_values={}
+    )
+    assert "b_miss" in decoder.sampled_labels

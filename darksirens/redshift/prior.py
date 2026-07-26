@@ -478,7 +478,15 @@ def prepare_redshift_prior_state(
                 mu_miss = _mu_miss_grid(em_catalog, log_h)              # (N_grid,)
             dN_miss = curves.dN_miss * mu_miss[None, :]                 # (N_rows, N_grid)
             N_host_miss = jnp.trapezoid(dN_miss, zgrid, axis=-1)        # (N_rows,)
-            N_host_obs = jnp.where(jnp.isfinite(log_N_host), jnp.exp(log_N_host), 0.0)
+            # DEPTH-TRUNCATED CATALOG: the marked kernels were renormalised to
+            # unit mass on [0, z_depth], so the amplitude paired with them is
+            # the marked mass actually below the depth — the exact marked twin
+            # of the unmarked `Nobs * exp(log_depth_mass)` scaling below.
+            N_host_obs = jnp.where(
+                jnp.isfinite(log_N_host),
+                jnp.exp(log_N_host + kernels.log_depth_mass),
+                0.0,
+            )
             Z = N_host_obs + N_host_miss
             log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
             if is_field:
