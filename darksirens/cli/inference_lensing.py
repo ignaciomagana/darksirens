@@ -2957,5 +2957,15 @@ def main(argv=None):
     print()
 
 
+def console_main():
+    """``darksirens_inference_lensing`` console-script target.
+
+    Routes the installed script through ``run_cli`` so the console-script path
+    gets the same GPU teardown guard as
+    ``python -m darksirens.cli.inference_lensing``.
+    """
+    run_cli(main)
+
+
 if __name__ == "__main__":
     run_cli(main)

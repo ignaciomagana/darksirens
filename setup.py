@@ -1,8 +1,9 @@
 from setuptools import setup, find_packages
 
-__minimum_jax_version__ = '0.4.34'
-
-setup_requires = ['jax>=' + __minimum_jax_version__]
+# The jax floor lives in requirements.txt (hence install_requires) — it used to
+# be declared only via setup_requires, which pip ignores for dependency
+# resolution while still triggering a legacy easy_install egg fetch at build
+# time (fatal for an offline/no-network `pip install --no-deps .`).
 
 with open("requirements.txt", "r") as fh:
     install_requires = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
@@ -31,21 +32,26 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/ignaciomagana/darksirens",
-    setup_requires=setup_requires,
     install_requires=install_requires,
     extras_require=extras_require,
 
     packages=find_packages(include=["darksirens", "darksirens.*"]),
     entry_points={
+        # The two long-running GPU drivers enter through ``console_main`` (a
+        # ``run_cli`` wrapper), not ``main``: run_cli's os._exit(0) skips an
+        # interpreter teardown that can block for hours in the CUDA exit
+        # handlers on a shared GPU, leaving a finished run to idle until the
+        # SLURM cgroup OOM-kills it.  ``python -m`` gets that from the
+        # ``__main__`` guard; the console scripts need it spelled out here.
         "console_scripts": [
-            "darksirens_inference=darksirens.cli.inference:main",
+            "darksirens_inference=darksirens.cli.inference:console_main",
             "darksirens_analyze=darksirens.cli.analyze:main",
             "darksirens_pixelate=darksirens.cli.pixelate:main",
             "darksirens_skymaps_to_samples=darksirens.cli.skymaps_to_samples:main",
             "darksirens_build_lognormal_completion=darksirens.cli.build_lognormal_completion:main",
             "darksirens_build_joint_lognormal_completion=darksirens.cli.build_joint_lognormal_completion:main",
             "darksirens_diagnose_lognormal_completion=darksirens.cli.diagnose_lognormal_completion:main",
-            "darksirens_inference_lensing=darksirens.cli.inference_lensing:main",
+            "darksirens_inference_lensing=darksirens.cli.inference_lensing:console_main",
         ]
     },
     classifiers=[
