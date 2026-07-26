@@ -137,6 +137,25 @@ def _load_golden() -> dict:
     return json.loads(GOLDEN_PATH.read_text())
 
 
+# Relative tolerance for log_p_pop.  This comparison used to be exact `==`,
+# which made the guard permanently red — 11 of the 13 models disagree with the
+# golden file by 1-4 ULP (~1e-16 relative) on jax 0.4.34 / CPU, i.e. last-bit
+# XLA reassociation, not physics.  A red guard is an ignored guard, and this one
+# is the only check on the campaign's fiducial population.  1e-12 is ~4 orders
+# of magnitude above float64 noise and still ~10 orders below any physics change
+# worth catching (a shifted prior bound or peak location moves log_p_pop in the
+# 1e-2..1e0 range).  Bounds and fiducial vectors stay exact.
+_LOG_P_POP_RTOL = 1e-12
+
+
+def _log_p_pop_matches(got, want) -> bool:
+    # Non-finite entries are stored as strings ('inf', '-inf', 'nan') by
+    # _encode_float; those must still match exactly, including nan-for-nan.
+    if isinstance(got, str) or isinstance(want, str):
+        return got == want
+    return math.isclose(got, want, rel_tol=_LOG_P_POP_RTOL, abs_tol=0.0)
+
+
 @pytest.mark.skipif(REGEN, reason="regeneration run")
 @pytest.mark.parametrize("name", LEGACY_NAMES)
 def test_registry_matches_golden(name):
@@ -153,7 +172,7 @@ def test_registry_matches_golden(name):
     assert got["fiducial"] == want["fiducial"], f"{name}: fiducial vector diverged"
 
     for i, (g, w) in enumerate(zip(got["log_p_pop"], want["log_p_pop"])):
-        assert g == w, (
+        assert _log_p_pop_matches(g, w), (
             f"{name}: log_p_pop diverged at probe {i} ({_PROBES[i]}): "
             f"new={g!r} vs golden={w!r}"
         )

@@ -1,5 +1,10 @@
 # my folders
-data/
+# Anchored (leading slash) to the top-level 16 GB scratch dir ONLY.  The bare
+# `data/` pattern matched at every depth, which silently un-tracked
+# tests/data/population_registry_golden.json — the golden baseline for all 13
+# registered population mixtures — so its guard reported "skipped" on every
+# fresh clone instead of comparing anything.
+/data/
 
 # local strong-lensing simulation pipeline (not for upstream) + smoke-test outputs
 SIM_LENSING_donotpush/
