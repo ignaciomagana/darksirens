@@ -415,3 +415,102 @@ def test_z_depth_rejects_nonfinite_and_nonpositive():
     # File-attr path is guarded identically.
     with pytest.raises(ValueError, match="finite positive redshift"):
         resolve_survey_z_depth(None, float("nan"))
+
+
+# ============================================================================
+# z_depth must not double-count above-depth galaxies
+# ============================================================================
+#
+# `_renorm_log_kw_below_depth` renormalises the catalog mixture to unit mass on
+# [0, z_depth].  If the row's observed COUNT is left at the full N_obs, the host
+# probability of every above-depth galaxy is relocated onto the below-depth
+# redshifts -- while `_assemble_curves` counts those same galaxies again in the
+# missing branch, which relaxes to the full dN_exp above the depth.
+#
+# The invariant: setting z_depth only moves above-depth hosts into the missing
+# branch, so it must NOT change how much host probability sits below the depth.
+
+def _depth_row_catalog(zs, dz=0.02):
+    import jax.numpy as jnp
+
+    from darksirens.core.types import EMCatalog
+    from darksirens.redshift.grid import zgrid
+
+    n = len(zs)
+    nz = len(np.asarray(zgrid))
+    return EMCatalog(
+        apix=1.0,
+        zgals=jnp.asarray(np.asarray(zs)[None, :]),
+        dzgals=jnp.full((1, n), dz),
+        wgals=jnp.ones((1, n)),
+        ngals=jnp.asarray([n], dtype=jnp.int32),
+        delta_g_pix_z=jnp.zeros((1, nz)),
+        dN_obs_kde=jnp.zeros((1, nz)),
+        pixel_to_cache_idx=None,
+    )
+
+
+def _hosts_below(z_depth, zs, depth):
+    """N_eff * (catalog mass below `depth`) -- the host count the prior places
+    below the depth, i.e. exactly what multiplies p_cat in the numerator."""
+    import jax.numpy as jnp
+
+    from darksirens.core.types import CosmoParams, SurveyParams
+    from darksirens.redshift.catalog import (
+        catalog_kernel_state,
+        eval_log_catalog_prior_state,
+    )
+
+    cat = _depth_row_catalog(zs)
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+    state = catalog_kernel_state(cosmo, survey, cat, z_depth=z_depth)
+    zq = np.linspace(1e-4, depth, 4000)
+    lp = np.array([
+        float(eval_log_catalog_prior_state(jnp.asarray(z), 0, state, cat)) for z in zq
+    ])
+    shape_mass = np.trapz(np.exp(lp), zq)
+    n_eff = len(zs) * float(np.exp(np.asarray(state.log_depth_mass).ravel()[0]))
+    return n_eff * shape_mass
+
+
+def test_z_depth_does_not_inflate_below_depth_host_count():
+    zs = [0.10, 0.15, 0.22, 0.28, 0.45, 0.55, 0.62, 0.75, 0.85, 0.95]
+    depth = 0.3
+    untruncated = _hosts_below(None, zs, depth)
+    truncated = _hosts_below(depth, zs, depth)
+    # 4 of the 10 galaxies are below the depth; kernels of width 0.02 leak a
+    # little across it, so the reference is the untruncated value (~3.81), not 4.
+    assert untruncated == pytest.approx(truncated, rel=1e-6), (
+        f"z_depth changed the below-depth host count: {untruncated:.3f} -> "
+        f"{truncated:.3f}. Pre-fix this was 10.00 (a 2.6x over-weighting) "
+        "because the full N_obs was paired with a shape renormalised to unit "
+        "mass below the depth."
+    )
+    assert 3.0 < truncated < 4.5
+
+
+def test_depth_mass_is_unity_without_truncation():
+    """No depth -> the amplitude correction must be an exact no-op."""
+    import jax.numpy as jnp
+
+    from darksirens.core.types import CosmoParams, SurveyParams
+    from darksirens.redshift.catalog import catalog_kernel_state
+
+    cat = _depth_row_catalog([0.1, 0.2, 0.3])
+    state = catalog_kernel_state(
+        CosmoParams(H0=67.74, Om0=0.3075),
+        SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                     alpha_miss=0.0, sigma_kde=0.0),
+        cat, z_depth=None,
+    )
+    assert np.allclose(np.asarray(state.log_depth_mass), 0.0)
+
+
+def test_depth_above_all_galaxies_is_a_no_op():
+    """A depth beyond every catalogued galaxy leaves the count untouched."""
+    zs = [0.10, 0.15, 0.22, 0.28]
+    assert _hosts_below(2.0, zs, 0.5) == pytest.approx(
+        _hosts_below(None, zs, 0.5), rel=1e-6
+    )

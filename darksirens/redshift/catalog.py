@@ -210,17 +210,29 @@ def _renorm_log_kw_below_depth(
 
         m = ∫_0^{z_depth} p_cat(z|pix) dz = Σ_i exp(log_kw_i) · Z_i^depth,
 
-    with ``Z_i^depth`` the same GL kernel norm truncated at ``z_depth``.  This
-    leaves ``N_obs`` (the per-pixel galaxy count) and the marked total
-    ``log_N_host`` untouched -- only the *shape* is renormalised -- so the
-    observed catalog branch integrates to ``N_obs`` below the depth.  Empty
+    with ``Z_i^depth`` the same GL kernel norm truncated at ``z_depth``.  Empty
     rows (``log_kw ≡ -inf``) carry an inert ``m`` and are returned unchanged.
+
+    ``m`` is ALSO returned, and the caller MUST scale the row's observed count
+    by it.  Renormalising the shape without rescaling the amplitude would leave
+    the observed branch integrating to the full ``N_obs`` below the depth, i.e.
+    it would relocate the host probability of every above-depth catalogued
+    galaxy onto the below-depth redshifts -- while ``_assemble_curves`` is
+    simultaneously counting those same galaxies in the missing branch, which
+    relaxes to the FULL ``dN_exp`` above the depth.  Measured on a 10-galaxy row
+    with 4 galaxies below ``z_depth=0.3``, that placed 10.00 hosts below the
+    depth instead of 3.81 -- a 2.6x over-weighting of exactly the redshifts that
+    drive the dark-siren H0 constraint.  With ``N_obs -> N_obs * m`` the
+    observed branch integrates to the number of galaxies actually catalogued
+    below the depth, and the above-depth ones are represented once, by
+    ``dN_miss = dN_exp`` (the stated intent: hosts beyond the depth are
+    *missing*, not nonexistent).
     """
     log_Z_depth = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=z_depth)
     log_m = jnp.where(
         has_galaxies, _logsumexp_neginf_safe(log_kw + log_Z_depth), 0.0
     )
-    return jnp.where(real, log_kw - log_m, -jnp.inf)
+    return jnp.where(real, log_kw - log_m, -jnp.inf), log_m
 
 
 def _row_kernel_state(
@@ -241,12 +253,15 @@ def _row_kernel_state(
       The catalog is the full universe, so the host rate must track the number
       of candidate hosts per redshift shell.
 
-    Returns ``(log_kw, sig_eff)``; the evaluator's g(z) handling is selected by
-    the same ``volume_weighted`` flag carried on :class:`CatalogKernelState`.
+    Returns ``(log_kw, sig_eff, log_depth_mass)``; the evaluator's g(z) handling
+    is selected by the same ``volume_weighted`` flag carried on
+    :class:`CatalogKernelState`.  ``log_depth_mass`` is 0.0 (mass 1) whenever no
+    depth truncation applies.
     """
     real = _row_real_mask(zs, ws, ngal)
     sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
     log_w = jnp.where(real, jnp.log(jnp.maximum(ws, 1e-300)), -jnp.inf)
+    log_depth_mass = jnp.zeros((), dtype=sig_eff.dtype)
 
     if volume_weighted:
         log_w = log_w + jnp.where(real, jnp.interp(zs, zgrid, log_g_grid), 0.0)
@@ -263,11 +278,15 @@ def _row_kernel_state(
         # ``z_depth`` (concrete Python float or None; never traced) renormalises
         # the mixture to unit mass on [0, z_depth] so the depth-truncated prior
         # stays proper.  ``None`` skips it entirely (bit-identical legacy path).
+        # ``log_depth_mass`` is the mass the mixture had below the depth BEFORE
+        # renormalising; the caller must scale the row's observed count by it,
+        # or the galaxies above the depth are counted twice (see
+        # :func:`_renorm_log_kw_below_depth`).
         if z_depth is not None:
-            log_kw = _renorm_log_kw_below_depth(
+            log_kw, log_depth_mass = _renorm_log_kw_below_depth(
                 log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
             )
-    return log_kw, sig_eff
+    return log_kw, sig_eff, log_depth_mass
 
 
 class CatalogKernelState(NamedTuple):
@@ -276,6 +295,12 @@ class CatalogKernelState(NamedTuple):
     log_kw: jnp.ndarray      # (N_rows, N_max)
     sig_eff: jnp.ndarray     # (N_rows, N_max)
     volume_weighted: bool = False
+    #: (N_rows,) log of the mixture mass that lay below ``z_depth`` BEFORE the
+    #: shape was renormalised.  Callers scale the row's observed galaxy count by
+    #: it so the depth-truncated catalog branch integrates to the number of
+    #: galaxies actually catalogued below the depth.  All-zero when
+    #: ``z_depth is None``.
+    log_depth_mass: Any = 0.0
     # ``survey.z_depth`` (concrete Python float or None; never traced): when set,
     # ``log_kw`` is already renormalised to unit mass on [0, z_depth] and the
     # per-sample evaluator zeroes p_cat beyond it.  ``None`` means no depth
@@ -306,7 +331,7 @@ def catalog_kernel_state(
     ngals = em_catalog.ngals
 
     if ngals is not None:
-        log_kw, sig_eff = _map_rows(
+        log_kw, sig_eff, log_depth_mass = _map_rows(
             lambda zs, dzs, ws, ng: _row_kernel_state(
                 zs, dzs, ws, ng, survey.sigma_kde, log_g_grid, volume_weighted,
                 z_depth,
@@ -314,7 +339,7 @@ def catalog_kernel_state(
             (zgals, dzgals, wgals, ngals),
         )
     else:
-        log_kw, sig_eff = _map_rows(
+        log_kw, sig_eff, log_depth_mass = _map_rows(
             lambda zs, dzs, ws: _row_kernel_state(
                 zs, dzs, ws, None, survey.sigma_kde, log_g_grid, volume_weighted,
                 z_depth,
@@ -325,6 +350,7 @@ def catalog_kernel_state(
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
         volume_weighted=volume_weighted, z_depth=z_depth,
+        log_depth_mass=log_depth_mass,
     )
 
 
@@ -482,7 +508,7 @@ def log_catalog_prior(
     # state (prepare_redshift_prior_state): catalog counts already track
     # hosts per redshift shell, so volume-weighted (True) kernels would
     # double-count dV_c/dz for any catalog whose dN/dz follows the volume.
-    log_kw, sig_eff = _row_kernel_state(
+    log_kw, sig_eff, _log_depth_mass = _row_kernel_state(
         zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, False
     )
     log_g_z = jnp.interp(z, zgrid, log_g_grid)

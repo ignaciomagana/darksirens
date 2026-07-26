@@ -543,6 +543,17 @@ def prepare_redshift_prior_state(
             z_depth=survey.z_depth,
         )
         Nobs = _row_counts(em_catalog)
+        # DEPTH-TRUNCATED CATALOG: kernels.log_kw has been renormalised to unit
+        # mass on [0, z_depth], so the amplitude paired with it must be the
+        # number of galaxies actually catalogued BELOW the depth, not the full
+        # row count.  Using the full count relocates every above-depth galaxy's
+        # host probability onto the below-depth redshifts while _assemble_curves
+        # simultaneously counts those galaxies in the missing branch
+        # (dN_miss == dN_exp above the depth) -- a double count that measured
+        # 2.6x on a 10-galaxy row with z_depth=0.3.  Exactly a no-op (m = 1)
+        # when the catalog holds nothing above the depth, which is what
+        # z_depth asserts in the first place.
+        Nobs = Nobs * jnp.exp(kernels.log_depth_mass)
         log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1e-300)), -jnp.inf)
         # Scalar-compatibility normalisation: curves.dN_miss / N_miss already
         # carry the deterministic Q (or the posterior-mean Q when only an
