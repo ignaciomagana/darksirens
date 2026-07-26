@@ -27,6 +27,42 @@ P_det emulator.
 Parameters (rho_thr, r0, mc_bar) are recorded by the generator as
 ``fc_rho_thr`` / ``fc_r0`` / ``fc_mc_bar`` attrs on the lensed-injection
 file; ``r0 = rho_thr * horizon_Mpc / 32`` matches the generator's SNRModel.
+
+Orientation independence: a DOCUMENTED LIMITATION, not a derived result
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``log_one_minus_pdet_fc`` returns the Theta-MARGINALISED censoring probability
+at the partner image's threshold, i.e. it treats the partner's orientation
+factor as an INDEPENDENT draw from the detected image's. The two images of one
+source share their inclination and polarization, so this is only valid for a
+detection model (and an injection campaign) that re-randomises the orientation
+per image -- which is exactly what ``scripts/mock_lensing/generate_mock_lensing.py``
+does (two independent uniform draws per source, both for the singleton/double
+split and for the lensed-injection campaign). The mock study is therefore
+self-consistent, and ``tests/test_lensed_singleton_channel.py`` validates the
+analytic factor against a direct Monte Carlo of that rendering.
+
+It is NOT valid for a physically rendered campaign. With ONE orientation per
+source and thresholds x_+ < x_- (the fainter image needs a larger Theta),
+
+    P(both detected)     = S(x_-)                (not S(x_+) S(x_-))
+    P(exactly image j)   = S(x_j) - S(x_partner) (not S(x_j)[1 - S(x_partner)])
+
+Measured against a 4e6-sample Monte Carlo of both conventions, at
+(x_+, x_-) = (1, 2) the shared-Theta P(both) is 1.58x the independent one and
+P(exactly one) is 0.76x; at (1.5, 3) the ratios are 2.62x and 0.95x; at
+(0.8, 1.0) they are 1.36x and 0.24x. Since the J=2 / lensed-singleton ratio is
+what sets A_tau, swapping in a physically rendered campaign WITHOUT also
+replacing this censoring factor mis-normalises that channel ratio by up to ~2x.
+
+The correct model is neither of the two limits above. Finn-Chernoff Theta
+bundles the inclination and polarization (shared between the images) with the
+antenna response F_+(alpha, delta, t), F_x(alpha, delta, t), which at the SIS
+delay scale (T_0 ~ 62 d, so delays of days to months) samples an essentially
+independent Earth-rotation phase. Theta_+ and Theta_- are therefore PARTIALLY
+correlated, and getting P(both) right needs the joint p(Theta_+, Theta_-) from
+that decomposition plus a campaign rendered with one (iota, psi, alpha, delta)
+per source and two arrival times. That is a new model component and is
+deliberately not attempted here.
 """
 
 from __future__ import annotations
@@ -102,6 +138,13 @@ def log_one_minus_pdet_fc(
     -inf where the partner would certainly have been detected (x <= 0 is
     impossible for finite inputs; CDF -> 0 only as x -> 0, i.e. infinitely
     loud) — callers mask with jnp.where per the darksirens -inf convention.
+
+    INDEPENDENT-ORIENTATION assumption: this marginalises the partner's Theta
+    independently of the detected image's, which is correct only for a campaign
+    that re-randomises orientation per image (the mock generator does). See the
+    module docstring for the shared-orientation forms, the measured discrepancy
+    (up to ~2x on the J=2 / lensed-singleton ratio), and why the physically
+    correct model is a partially-correlated one that is not implemented here.
     """
     cdf = _theta_cdf(theta_threshold_fc(m1_src, q, z, dL_app, params))
     return jnp.where(

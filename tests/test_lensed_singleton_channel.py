@@ -164,6 +164,68 @@ def test_fc_pdet_matches_generator_snr_model():
     )
 
 
+def _draw_theta_fc(n, rng):
+    """Inverse-CDF draws of p(Theta) = 5 Theta (4-Theta)^3 / 256 on (0, 4)."""
+    from darksirens.lensing.fcpdet import _theta_cdf
+
+    grid = np.linspace(0.0, 4.0, 200_001)
+    cdf = np.asarray(_theta_cdf(jnp.asarray(grid)))
+    return np.interp(rng.uniform(0.0, 1.0, n), cdf, grid)
+
+
+@pytest.mark.parametrize("x_plus,x_minus", [(1.0, 2.0), (1.5, 3.0), (0.8, 1.0)])
+def test_pair_censoring_assumes_independent_image_orientations(x_plus, x_minus):
+    """Pin the INDEPENDENT-orientation convention the lensing stack is built on,
+    against a direct Monte Carlo of both conventions.
+
+    ``log_one_minus_pdet_fc`` marginalises the partner image's Theta
+    independently of the detected image's, and ``cluster_selection``'s pair
+    efficiency is the product p_det(+) p_det(-). That matches the mock
+    generator, which draws a separate uniform per image, so the mock study is
+    self-consistent -- and this test locks that agreement in.
+
+    It is NOT the physical model: the two images of one source share their
+    inclination and polarization, so with ONE Theta per source
+    P(both) = S(max(x_+, x_-)) and P(exactly one) = |S(x_+) - S(x_-)|. Both
+    conventions are measured here so the size of the gap (up to ~2.6x on
+    P(both)) is recorded in the repo. Fixing it needs a joint p(Theta_+,
+    Theta_-) -- Theta bundles the shared inclination with the Earth-rotation
+    antenna response, which decorrelates over the SIS day-to-month delays -- plus
+    a re-rendered injection campaign; see the fcpdet module docstring.
+    """
+    from darksirens.lensing.fcpdet import _theta_cdf
+
+    S_p = 1.0 - float(_theta_cdf(jnp.asarray(x_plus)))
+    S_m = 1.0 - float(_theta_cdf(jnp.asarray(x_minus)))
+    assert S_p > S_m          # the fainter image needs a larger Theta
+
+    rng = np.random.default_rng(20260726)
+    n = 400_000
+    th_p, th_m = _draw_theta_fc(n, rng), _draw_theta_fc(n, rng)
+    det_p, det_m = th_p > x_plus, th_m > x_minus
+
+    # The convention the code implements, validated against its own MC.
+    both_independent = float(np.mean(det_p & det_m))
+    one_independent = float(np.mean(det_p ^ det_m))
+    np.testing.assert_allclose(both_independent, S_p * S_m, atol=4e-3)
+    np.testing.assert_allclose(
+        one_independent, S_p * (1 - S_m) + (1 - S_p) * S_m, atol=4e-3,
+    )
+
+    # The shared-orientation alternative, also validated, and NOT what the
+    # code computes. If a future change adopts it, these must be updated
+    # deliberately and the injection campaign re-rendered to match.
+    th = _draw_theta_fc(n, rng)
+    both_shared = float(np.mean((th > x_plus) & (th > x_minus)))
+    one_shared = float(np.mean((th > x_plus) ^ (th > x_minus)))
+    np.testing.assert_allclose(both_shared, S_m, atol=4e-3)
+    np.testing.assert_allclose(one_shared, S_p - S_m, atol=4e-3)
+
+    assert both_shared > both_independent    # correlated pairs are commoner
+    assert one_shared < one_independent      # ... at the singletons' expense
+    assert both_shared / both_independent > 1.1
+
+
 def test_fc_pdet_limits_and_gradient():
     params = make_fc_pdet_params()
     # Very close/loud -> P_det ~ 1; very far -> P_det ~ 0
