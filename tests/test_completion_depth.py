@@ -473,7 +473,7 @@ def _hosts_below(z_depth, zs, depth):
     lp = np.array([
         float(eval_log_catalog_prior_state(jnp.asarray(z), 0, state, cat)) for z in zq
     ])
-    shape_mass = np.trapz(np.exp(lp), zq)
+    shape_mass = _trapezoid(np.exp(lp), zq)
     n_eff = len(zs) * float(np.exp(np.asarray(state.log_depth_mass).ravel()[0]))
     return n_eff * shape_mass
 

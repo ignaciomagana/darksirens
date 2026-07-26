@@ -30,6 +30,9 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 from darksirens.gw.populations.gp import build_gp_model, _ZNORM_HI

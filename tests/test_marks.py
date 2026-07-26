@@ -6,6 +6,9 @@ evaluator is reused.  ``mark_model="none"`` is the legacy galaxy-count model, an
 ``loglinear`` with ``eta=0`` + unit weights reduces to it exactly.
 """
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 pytest.importorskip("jax")
@@ -94,7 +97,7 @@ def test_eta_zero_unit_weights_reduces_to_unmarked():
 def test_marked_prior_normalizes_per_pixel():
     cat = _cat(logmstar=np.array([[0.6, -0.4, 0.0], [0.1, 0.0, 0.0]]))
     lp = _prior(cat, mark_model="loglinear", eta=[1.5], mark_names=("logmstar",))
-    integ = np.trapezoid(np.exp(lp), np.asarray(zgrid))
+    integ = _trapezoid(np.exp(lp), np.asarray(zgrid))
     assert abs(integ - 1.0) < 5e-3
 
 

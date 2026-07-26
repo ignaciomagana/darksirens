@@ -19,6 +19,9 @@ while the jitted path crashed).  Each test must raise on pre-fix code and return
 a finite, per-pixel-normalised ``p(z|pix)`` after the fix.
 """
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 pytest.importorskip("jax")
@@ -90,7 +93,7 @@ def _jit_prior_logp(cat, *, mark_model="none", eta=None, mark_names=()):
 def _assert_finite_normalized(lp):
     assert lp.shape == (NG,)
     assert np.all(np.isfinite(lp)), "log p(z|pix) has non-finite entries"
-    integ = np.trapezoid(np.exp(lp), np.asarray(zgrid))
+    integ = _trapezoid(np.exp(lp), np.asarray(zgrid))
     assert abs(integ - 1.0) < 5e-3, f"p(z|pix) not normalised: ∫={integ}"
 
 

@@ -17,6 +17,9 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 pytest.importorskip("healpy")
@@ -157,8 +160,8 @@ def _selection_is_neff(gen, b, grids, th):
 
     dvc, zg = grids["dvc_dz"], grids["z"]
     pz_t = (1.0 + zg) ** (th.gamma - 1.0) * dvc
-    pz_t = np.interp(z, zg, pz_t / np.trapezoid(pz_t, zg))
-    pz_p = np.interp(z, zg, dvc / np.trapezoid(dvc, zg))
+    pz_t = np.interp(z, zg, pz_t / _trapezoid(pz_t, zg))
+    pz_p = np.interp(z, zg, dvc / _trapezoid(dvc, zg))
 
     w = (p_ms / prop_mass) * (pz_t / pz_p)
     w = w[np.isfinite(w) & (w > 0.0)]

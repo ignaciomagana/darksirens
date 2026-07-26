@@ -130,7 +130,7 @@ def _sample_sky(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarra
 # darksirens.gw.populations.utils.sfilter_low/sfilter_high (kept numpy-only so
 # this generator stays importable without jax / the darksirens package;
 # tests/test_mock_generator_taper.py asserts they match the jax originals).
-_trapz = np.trapezoid
+_trapz = _trapezoid
 
 # Normalisation grids mirror the inference defaults EXACTLY: mass on [1, 200]
 # Msun with N_MASS=500 nodes and mass ratio on [0, 1] with N_Q=200 nodes, i.e.
@@ -946,7 +946,7 @@ def _selection_injections(
 
 
 def _galaxy_count_from_density(n0: float, delta: float, grids: dict[str, np.ndarray]) -> int:
-    density_weighted_volume = j_trapezoid(grids["dvc_dz"] * (1.0 + grids["z"]) ** delta, grids["z"])
+    density_weighted_volume = jnp.trapezoid(grids["dvc_dz"] * (1.0 + grids["z"]) ** delta, grids["z"])
     return max(1, int(round(n0 * density_weighted_volume)))
 
 

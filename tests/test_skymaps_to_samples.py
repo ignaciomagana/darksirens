@@ -49,6 +49,9 @@ import sys
 import types
 
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 hp = pytest.importorskip("healpy")
@@ -91,7 +94,7 @@ def _ansatz_norm(mu: float, sigma: float) -> float:
     d = np.linspace(0.0, mu + 12.0 * sigma, 40_000)
     z = (d - mu) / sigma
     normal_shape = np.exp(-0.5 * z * z)
-    z_norm = np.trapezoid(d * d * normal_shape, d)
+    z_norm = _trapezoid(d * d * normal_shape, d)
     return 1.0 / z_norm
 
 
@@ -279,9 +282,9 @@ def test_distance_samples_follow_dL2_ansatz(converted, ev):
 
     d = np.linspace(0.0, mu + 12.0 * sigma, 40_000)
     w = d * d * np.exp(-0.5 * ((d - mu) / sigma) ** 2)
-    z_norm = np.trapezoid(w, d)
-    mean_true = np.trapezoid(d * w, d) / z_norm
-    std_true = np.sqrt(np.trapezoid(d * d * w, d) / z_norm - mean_true**2)
+    z_norm = _trapezoid(w, d)
+    mean_true = _trapezoid(d * w, d) / z_norm
+    std_true = np.sqrt(_trapezoid(d * d * w, d) / z_norm - mean_true**2)
 
     mean_samp = e["dL"].mean()
     std_samp = e["dL"].std()
