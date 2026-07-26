@@ -3222,17 +3222,7 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             f.attrs["wl_a"] = float(opts.lensing_wl_a)
             f.attrs["wl_b"] = float(opts.lensing_wl_b)
             lens_settings = _lens_settings_dict(mid, labels, lens_fixed, opts)
-<<<<<<< HEAD
             _write_lens_settings_attrs(f.attrs, lens_settings)
-=======
-            f.attrs["lens_labels"] = json.dumps(lens_settings["lens_labels"])
-            f.attrs["fix_lens_rate"] = bool(opts.fix_lens_rate)
-            f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
-            f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
-            f.attrs["sl_T0_sec"] = float(lens_settings["sl_T0_sec"])
-            f.attrs["lens_A_tau"] = float(lens_settings["lens_A_tau"])
-            f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
->>>>>>> 425a50f (lensing: correct the SIS time-delay scale T0, expose it, and guard its support)
             if results.get("logZ") is not None:
                 f.attrs["logZ"] = float(results["logZ"])
                 # logZerr existed only in the run.log, yet the lensing paper's
