@@ -514,3 +514,81 @@ def test_depth_above_all_galaxies_is_a_no_op():
     assert _hosts_below(2.0, zs, 0.5) == pytest.approx(
         _hosts_below(None, zs, 0.5), rel=1e-6
     )
+
+
+# ---------------------------------------------------------------------------
+# marked twin: z_depth on marked_catalog_kernel_state (349b717 follow-up)
+# ---------------------------------------------------------------------------
+
+def test_marked_depth_state_is_arrays_and_evaluates_under_jit():
+    """Regression: 349b717 changed _renorm_log_kw_below_depth to return
+    (log_kw, log_m) and updated the unmarked twin only; the marked row builder
+    kept assigning the whole tuple to log_kw.  The state then built without
+    error (tuples survive pytree flattening) and the first jitted evaluation
+    died with TracerIntegerConversionError at state.log_kw[pix]."""
+    import jax
+
+    from darksirens.core.types import CosmoParams, SurveyParams
+    from darksirens.redshift.catalog import (
+        eval_log_catalog_prior_state,
+        marked_catalog_kernel_state,
+    )
+
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+    cat = _depth_row_catalog([0.10, 0.20, 0.45, 0.60])
+    state, log_N_host = marked_catalog_kernel_state(
+        cosmo, survey, cat, jnp.zeros_like(cat.zgals), z_depth=0.3
+    )
+    assert isinstance(state.log_kw, jnp.ndarray), type(state.log_kw)
+    assert state.log_kw.shape == cat.zgals.shape
+    assert np.asarray(state.log_depth_mass).shape == (1,)
+
+    f = jax.jit(jax.vmap(
+        lambda z, pix: eval_log_catalog_prior_state(z, pix, state, cat)
+    ))
+    lp = np.asarray(f(
+        jnp.asarray([0.10, 0.25]), jnp.asarray([0, 0], dtype=jnp.int32)
+    ))
+    assert np.all(np.isfinite(lp)), lp
+
+
+def test_marked_depth_amplitude_matches_unmarked_at_unit_marks():
+    """With log_h == 0 and unit weights the marked twin must reproduce the
+    unmarked depth treatment exactly: same renormalised kernels, same
+    below-depth mass, and a marked amplitude exp(log_N_host + log_depth_mass)
+    equal to the depth-scaled observed count.  Pre-fix the marked amplitude
+    kept the FULL marked mass, so every above-depth galaxy was counted in the
+    observed branch while _assemble_curves counted it again in the missing
+    branch (the double count 349b717 removed from the unmarked path)."""
+    from darksirens.core.types import CosmoParams, SurveyParams
+    from darksirens.redshift.catalog import (
+        catalog_kernel_state,
+        marked_catalog_kernel_state,
+    )
+
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+    zs = [0.10, 0.15, 0.22, 0.28, 0.45, 0.55, 0.62, 0.75, 0.85, 0.95]
+    cat = _depth_row_catalog(zs)
+    depth = 0.3
+
+    ref = catalog_kernel_state(cosmo, survey, cat, z_depth=depth)
+    state, log_N_host = marked_catalog_kernel_state(
+        cosmo, survey, cat, jnp.zeros_like(cat.zgals), z_depth=depth
+    )
+    np.testing.assert_allclose(
+        np.asarray(state.log_kw), np.asarray(ref.log_kw), rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        np.asarray(state.log_depth_mass), np.asarray(ref.log_depth_mass),
+        rtol=1e-12,
+    )
+    marked_amp = float(np.exp(np.asarray(log_N_host + state.log_depth_mass))[0])
+    unmarked_amp = float(len(zs) * np.exp(np.asarray(ref.log_depth_mass))[0])
+    assert marked_amp == pytest.approx(unmarked_amp, rel=1e-10)
+    # 4 of 10 galaxies sit below the depth (0.02-wide kernels leak a little),
+    # so the amplitude must be far below the raw count of 10.
+    assert 3.0 < marked_amp < 4.5

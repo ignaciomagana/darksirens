@@ -380,14 +380,19 @@ def _row_marked_kernel_state(
 
     log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
     log_kw = jnp.where(real, log_wh_norm - log_Z, -jnp.inf)
-    # Depth renormalisation acts on the marked mixture SHAPE only; log_N_host
-    # (the marked count Σ_i w_i h_i) is untouched, mirroring the unmarked path.
+    # Depth renormalisation mirrors the unmarked twin: the marked mixture SHAPE
+    # is renormalised to unit mass on [0, z_depth] and the below-depth mass is
+    # returned so the caller scales the row's marked amplitude by it — the
+    # marked count Σ_i w_i h_i alone would keep every above-depth galaxy's host
+    # probability while _assemble_curves counts those galaxies again in the
+    # missing branch (the double count 349b717 removed from the unmarked path).
+    log_depth_mass = jnp.zeros((), dtype=sig_eff.dtype)
     if z_depth is not None:
-        log_kw = _renorm_log_kw_below_depth(
+        log_kw, log_depth_mass = _renorm_log_kw_below_depth(
             log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
         )
     log_N_host = jnp.where(has_galaxies, lse, -jnp.inf)
-    return log_kw, sig_eff, log_N_host
+    return log_kw, sig_eff, log_N_host, log_depth_mass
 
 
 def marked_catalog_kernel_state(
@@ -404,8 +409,11 @@ def marked_catalog_kernel_state(
     :mod:`darksirens.marks`).  Returns ``(CatalogKernelState, log_N_host)`` where
     the state's ``log_kw`` carries the marked (per-pixel-normalised) weights, so
     the existing per-sample evaluator is reused unchanged.  ``z_depth`` behaves
-    exactly as in :func:`catalog_kernel_state` (renormalise the marked mixture to
-    unit mass on ``[0, z_depth]``; ``log_N_host`` is untouched).
+    exactly as in :func:`catalog_kernel_state`: the marked mixture is
+    renormalised to unit mass on ``[0, z_depth]`` and the state's
+    ``log_depth_mass`` carries the below-depth mass, by which the caller must
+    scale the marked amplitude ``exp(log_N_host)`` (see
+    :func:`_renorm_log_kw_below_depth`).
     """
     if log_g_grid is None:
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
@@ -413,14 +421,14 @@ def marked_catalog_kernel_state(
     ngals = em_catalog.ngals
 
     if ngals is not None:
-        log_kw, sig_eff, log_N_host = _map_rows(
+        log_kw, sig_eff, log_N_host, log_depth_mass = _map_rows(
             lambda zs, dzs, ws, lh, ng: _row_marked_kernel_state(
                 zs, dzs, ws, lh, ng, survey.sigma_kde, log_g_grid, z_depth
             ),
             (zgals, dzgals, wgals, log_h, ngals),
         )
     else:
-        log_kw, sig_eff, log_N_host = _map_rows(
+        log_kw, sig_eff, log_N_host, log_depth_mass = _map_rows(
             lambda zs, dzs, ws, lh: _row_marked_kernel_state(
                 zs, dzs, ws, lh, None, survey.sigma_kde, log_g_grid, z_depth
             ),
@@ -428,7 +436,8 @@ def marked_catalog_kernel_state(
         )
 
     return CatalogKernelState(
-        log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff, z_depth=z_depth
+        log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
+        log_depth_mass=log_depth_mass, z_depth=z_depth,
     ), log_N_host
 
 
