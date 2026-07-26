@@ -73,6 +73,10 @@ from pathlib import Path
 
 import numpy as np
 
+# numpy 2 renamed trapz -> trapezoid; the validated env floor is numpy 1.26,
+# which only has trapz.  Support both (requirements admit >=1.26,<3).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+
 # Column order of the 13-dim emulator flow; validated against the checkpoint
 # config on load.  theta[:, i] corresponds to PDET_COLUMNS[i].
 PDET_COLUMNS = (
@@ -233,7 +237,7 @@ def build_injection_z_prior(
         * 4.0
         * np.pi
     )
-    pdf_grid = dVdz / np.trapezoid(dVdz, z_grid)
+    pdf_grid = dVdz / _trapezoid(dVdz, z_grid)
     return z_grid, pdf_grid
 
 

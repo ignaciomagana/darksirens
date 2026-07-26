@@ -38,6 +38,10 @@ from __future__ import annotations
 
 import warnings
 import numpy as np
+
+# numpy 2 renamed trapz -> trapezoid; the validated env floor is numpy 1.26,
+# which only has trapz.  Support both (requirements admit >=1.26,<3).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import jax.numpy as jnp
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
@@ -56,7 +60,7 @@ from darksirens.redshift.prior import PRIOR_REGISTRY
 def _integrate(log_p: np.ndarray, z: np.ndarray) -> float:
     """Trapezoidal integral of exp(log_p) over z."""
     p = np.exp(np.where(np.isfinite(log_p), log_p, -np.inf))
-    return float(np.trapezoid(p, z))
+    return float(_trapezoid(p, z))
 
 
 def _check_result(label: str, value: float, atol: float, verbose: bool) -> bool:
