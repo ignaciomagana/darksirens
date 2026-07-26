@@ -716,6 +716,16 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
         field_lss_q=getattr(catalogs, "field_lss_q", None),
         field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
+        # PER-MEMBER survey-global Q rows: required by the field-convention
+        # scope guard (redshift/prior.py) whenever the catalog carries a Q
+        # ENSEMBLE.  prepare_catalog_views builds them; omitting them here made
+        # every K=1 `--lss_marginalize` run under the DEFAULT field weighting
+        # abort with "requires the per-member survey-global Q rows" before the
+        # first likelihood evaluation.
+        field_lss_q_members=getattr(catalogs, "field_lss_q_members", None),
+        field_lss_q_empty_sum_members=getattr(
+            catalogs, "field_lss_q_empty_sum_members", None
+        ),
         field_delta_g=getattr(catalogs, "field_delta_g", None),
         field_mark_z=getattr(catalogs, "field_mark_z", None),
         field_mark_w=getattr(catalogs, "field_mark_w", None),
@@ -751,6 +761,16 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_occupied_pixels=getattr(catalogs, "field_occupied_pixels", None),
         field_lss_q=getattr(catalogs, "field_lss_q", None),
         field_lss_q_empty_sum=getattr(catalogs, "field_lss_q_empty_sum", None),
+        # PER-MEMBER survey-global Q rows: required by the field-convention
+        # scope guard (redshift/prior.py) whenever the catalog carries a Q
+        # ENSEMBLE.  prepare_catalog_views builds them; omitting them here made
+        # every K=1 `--lss_marginalize` run under the DEFAULT field weighting
+        # abort with "requires the per-member survey-global Q rows" before the
+        # first likelihood evaluation.
+        field_lss_q_members=getattr(catalogs, "field_lss_q_members", None),
+        field_lss_q_empty_sum_members=getattr(
+            catalogs, "field_lss_q_empty_sum_members", None
+        ),
         field_delta_g=getattr(catalogs, "field_delta_g", None),
         field_mark_z=getattr(catalogs, "field_mark_z", None),
         field_mark_w=getattr(catalogs, "field_mark_w", None),

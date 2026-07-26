@@ -627,10 +627,32 @@ def attach_lss_inputs(opts, data) -> dict:
     nside_check = data.get("nside", "N/A")
 
     # --------------------------------------------------------
+    # LSS-conditioned lognormal completion table Q_LSS (optional)
+    # --------------------------------------------------------
+    # Loaded FIRST because a Q table REPLACES the local-overdensity factor:
+    # the numerator's rule is `max(1 + b_eff delta_g, 0)` OR Q, never both
+    # (redshift/completion.py:_completion_curves_row_q), and the field-convention
+    # normalizer enforces that as a hard invariant -- field_global_log_Z raises
+    # NotImplementedError if both field_lss_q and field_delta_g are populated.
+    # Building delta_g anyway made `--use_lss --lss_completion Q.h5` abort during
+    # the jit trace, AFTER the full catalog load and KDE-cache build, with a
+    # message about an internal field-normalizer invariant rather than about the
+    # offending flag combination.
+    data.update(maybe_load_lss_completion(opts, zgrid=zgrid))
+    _q_active = data.get("lss_completion_logq") is not None
+
+    # --------------------------------------------------------
     # LSS overdensity field (Handle memory carefully)
     # --------------------------------------------------------
     print(f"[*] Preparing LSS/Overdensity Field...")
-    if opts.universe_model in GALAXY_AWARE_MODELS and opts.use_LSS:
+    if opts.universe_model in GALAXY_AWARE_MODELS and opts.use_LSS and _q_active:
+        print(
+            "    - Q_LSS completion table is active: it REPLACES the "
+            "(1 + b_eff*delta_g) local-overdensity factor, so --use_lss is "
+            "redundant here and the overdensity grid is NOT built."
+        )
+        delta_g_pix_z = jnp.zeros((1, len(zgrid)))
+    elif opts.universe_model in GALAXY_AWARE_MODELS and opts.use_LSS:
         print(f"    - Calculating high-resolution overdensity grid...")
         delta_g_pix_z = compute_lss_overdensity(
             data["zgals"],
@@ -648,11 +670,6 @@ def attach_lss_inputs(opts, data) -> dict:
 
     # Append the LSS overdensity field to the returned dictionary
     data["delta_g_pix_z"] = delta_g_pix_z
-
-    # --------------------------------------------------------
-    # LSS-conditioned lognormal completion table Q_LSS (optional)
-    # --------------------------------------------------------
-    data.update(maybe_load_lss_completion(opts, zgrid=zgrid))
     return data
 
 
