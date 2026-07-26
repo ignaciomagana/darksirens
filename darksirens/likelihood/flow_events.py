@@ -638,7 +638,12 @@ def make_flow_likelihood(
         materialize_redshift_prior_state=materialize_redshift_prior_state,
     )
 
-    def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
+    # Jitted call body: ``parameter_decoder.decode(coord)`` used to run EAGERLY on
+    # every sampler evaluation (~30 individual device ops, ~6 ms measured), even
+    # though ``_ll_flows`` itself is jitted.  Folding the decode into the same trace
+    # removes that per-call dispatch; ``_ll_flows``' own operands are unchanged
+    # (they were, and remain, captured by that inner jit).
+    def _body(coord: jnp.ndarray) -> jnp.ndarray:
         cosmo, survey, pop_params, _sky_params, _mark_params = parameter_decoder.decode(
             coord
         )
@@ -650,7 +655,13 @@ def make_flow_likelihood(
             )
         return _ll_flows(cosmo, survey, pop_params)
 
+    _jitted = jax.jit(_body)
+
+    def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
+        return _jitted(coord)
+
     # Diagnostics hooks (host-side introspection; not used by samplers).
+    likelihood.jitted_body = _jitted
     likelihood.flow_event_names = list(ensemble.names)
     likelihood.flows_nsamp = J
     return likelihood

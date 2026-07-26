@@ -16,6 +16,7 @@ arrays are already abstract tracers and the barrier has no effect.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from darksirens.redshift.completion import build_pixel_kde_cache
@@ -85,6 +86,51 @@ def _redshift_prior_materialization_reason(opts, materialize: bool) -> str:
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
     val = data.get(key)
     return jnp.asarray(val) if val is not None else jnp.array([0.0])
+
+
+def _jit_likelihood_body(body, operands):
+    """Wrap a ``(coord, operands) -> logL`` body in ``jax.jit`` and bind ``operands``.
+
+    Why jit the factory's own closure at all
+    ----------------------------------------
+    Only the inner :func:`darksiren_log_likelihood` was jitted, so everything the
+    returned closure did around it ran EAGERLY — and ``dynesty`` calls that closure
+    once per live point (``inference/sampling.py``: ``float(np.asarray(
+    likelihood(jnp.asarray(theta))))``), i.e. ~1e5-1e6 times per run.  The eager
+    work is ``parameter_decoder.decode(coord)`` (~30 individual device ops: one
+    gather per sampled label, then ``jnp.array`` over the parameter sub-vectors)
+    plus, before the hoists above, the GW container rebuild and selection padding.
+    MEASURED on the H100 NVL: 7.7 ms of 30.1 ms for the spectral single pass, 13.8
+    of 51.3 ms at the production auto plan, 7.8 of 17.9 ms for a dark-siren mock.
+    ``tinyns`` and ``numpyro`` escape it because they trace the closure themselves;
+    this is a dynesty tax, and dynesty is the sampler of most production runs.
+
+    Why ``operands`` is an ARGUMENT and not a closure capture
+    --------------------------------------------------------
+    ``jax.jit`` lowers a closed-over concrete ``jax.Array`` to a ``dense<>`` HLO
+    **constant**, not to a parameter — verified on jax 0.4.34: the lowered module
+    text grows ~8 bytes per array element, so the ~1.07e6-row GW arrays alone would
+    add tens of MB of HLO (and a dark-siren catalog's multi-GB tables far more),
+    ballooning compile time and duplicating buffers that are already device
+    resident.  Threading them through as an argument keeps them exactly what they
+    are today for the inner jit: already-barriered, already-resident parameters.
+    The barrier contract in this module's docstring is preserved — the barriers are
+    applied eagerly at build time, before the arrays enter any jit.
+
+    Recompilation: ``coord`` is a 1-D float array of fixed length (the sampled
+    dimension) and ``operands`` is the same pytree of the same shapes/dtypes on
+    every call, so the traced signature is constant and the body compiles once.
+    """
+    jitted = jax.jit(body)
+
+    def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
+        return jitted(coord, operands)
+
+    # Host-side hook for tests/diagnostics that want to count compilations or reach
+    # the un-bound body.
+    likelihood.jitted_body = jitted
+    likelihood.operands = operands
+    return likelihood
 
 
 def _make_mixture_likelihood(
@@ -404,7 +450,18 @@ def _make_mixture_likelihood(
         universe_model, em_catalogs_pe, em_catalogs_sel
     )
 
-    def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
+    # Device operands travel as jit ARGUMENTS (see :func:`_jit_likelihood_body` for
+    # why closing over them would embed them as HLO constants instead).
+    operands = (
+        gw_pe, em_catalog_pe_0, gw_sel, em_catalog_sel_0,
+        mixture_em_catalogs_pe, mixture_em_catalogs_sel,
+    )
+
+    def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
+        (
+            gw_pe_, em_catalog_pe_0_, gw_sel_, em_catalog_sel_0_,
+            mixture_em_catalogs_pe_, mixture_em_catalogs_sel_,
+        ) = operands
         if n_catalogs >= 2:
             (
                 cosmo,
@@ -436,10 +493,10 @@ def _make_mixture_likelihood(
             cosmo,
             survey_0,
             pop_params,
-            gw_pe,
-            em_catalog_pe_0,
-            gw_sel,
-            em_catalog_sel_0,
+            gw_pe_,
+            em_catalog_pe_0_,
+            gw_sel_,
+            em_catalog_sel_0_,
             nEvents,
             nsamp,
             Ndraw,
@@ -463,14 +520,14 @@ def _make_mixture_likelihood(
             lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
             n_catalogs=n_catalogs,
             mixture_surveys=mixture_surveys,
-            mixture_em_catalogs_pe=mixture_em_catalogs_pe,
-            mixture_em_catalogs_sel=mixture_em_catalogs_sel,
+            mixture_em_catalogs_pe=mixture_em_catalogs_pe_,
+            mixture_em_catalogs_sel=mixture_em_catalogs_sel_,
             mixture_log_weights=log_w,
             catalog_sky_weighting=catalog_sky_weighting,
             share_prior_state_by_catalog=share_prior_state_by_catalog,
         )
 
-    return likelihood
+    return _jit_likelihood_body(_body, operands)
 
 
 def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: dict | None = None):
@@ -792,7 +849,57 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         universe_model, (em_catalog_pe,), (em_catalog_sel,)
     )
 
-    def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
+    # The GW containers are coord-INDEPENDENT too — every field is an
+    # already-barriered data constant — so build them, and apply the selection
+    # padding, ONCE here rather than on every likelihood call.  Building them
+    # inside the (eager) closure re-ran two ``jnp.ones_like`` allocations plus, via
+    # ``make_gw_event`` inside ``pad_gw_event_to_multiple``, 11 concatenates and 11
+    # optimization barriers over the ~1.07e6-injection arrays on EVERY sampler
+    # evaluation: 13.9 ms and 83 MB of identical fresh device buffers per call at
+    # the production ``sel_batch_size=32768`` (1,067,946 % 32768 != 0, so the
+    # padding never takes its early return).  ``_make_mixture_likelihood`` has
+    # always hoisted them; this is the unpropagated twin.
+    gw_pe = GWEvent(
+        m1det=m1det_pe,
+        m2det=m2det_pe,
+        dL=dL_pe,
+        chieff=chieff_pe,
+        prior_wt=p_pe,
+        pixels=pixels_pe,
+        q=q_pe,
+        valid=jnp.ones_like(dL_pe, dtype=bool),
+        nx=nx_pe,
+        ny=ny_pe,
+        nz=nz_pe,
+    )
+    gw_sel = GWEvent(
+        m1det=m1det_sel,
+        m2det=m2det_sel,
+        dL=dL_sel,
+        chieff=chieff_sel,
+        prior_wt=p_draw,
+        pixels=pixels_sel,
+        q=q_sel,
+        valid=jnp.ones_like(dL_sel, dtype=bool),
+        nx=nx_sel,
+        ny=ny_sel,
+        nz=nz_sel,
+    )
+    if sel_batch_size is not None:
+        gw_sel, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
+
+    # Device operands are passed as jit ARGUMENTS, never closed over — see
+    # :func:`_jit_likelihood_body`.
+    operands = (
+        gw_pe, em_catalog_pe, gw_sel, em_catalog_sel,
+        wl_a, wl_b, wl_z_grid, wl_log_mu_grid, wl_log_p_table,
+    )
+
+    def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
+        (
+            gw_pe_, em_catalog_pe_, gw_sel_, em_catalog_sel_,
+            wl_a_, wl_b_, wl_z_grid_, wl_log_mu_grid_, wl_log_p_table_,
+        ) = operands
         cosmo, survey, pop_params, sky_params, mark_params = parameter_decoder.decode(coord)
         if len(pop_params) != len(parameter_decoder.pop_labels):
             raise ValueError(
@@ -802,44 +909,15 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 "Verify parameter-space construction for this population model."
             )
 
-        gw_pe = GWEvent(
-            m1det=m1det_pe,
-            m2det=m2det_pe,
-            dL=dL_pe,
-            chieff=chieff_pe,
-            prior_wt=p_pe,
-            pixels=pixels_pe,
-            q=q_pe,
-            valid=jnp.ones_like(dL_pe, dtype=bool),
-            nx=nx_pe,
-            ny=ny_pe,
-            nz=nz_pe,
-        )
-        gw_sel = GWEvent(
-            m1det=m1det_sel,
-            m2det=m2det_sel,
-            dL=dL_sel,
-            chieff=chieff_sel,
-            prior_wt=p_draw,
-            pixels=pixels_sel,
-            q=q_sel,
-            valid=jnp.ones_like(dL_sel, dtype=bool),
-            nx=nx_sel,
-            ny=ny_sel,
-            nz=nz_sel,
-        )
-        if sel_batch_size is not None:
-            gw_sel, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
-
         if shared_beta and shared_spin and shared_gamma:
             return darksiren_log_likelihood(
                 cosmo,
                 survey,
                 pop_params,
-                gw_pe,
-                em_catalog_pe,
-                gw_sel,
-                em_catalog_sel,
+                gw_pe_,
+                em_catalog_pe_,
+                gw_sel_,
+                em_catalog_sel_,
                 nEvents,
                 nsamp,
                 Ndraw,
@@ -853,11 +931,11 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 mark_params=mark_params,
                 mark_names=mark_names,
                 wl_backend=wl_backend,
-                wl_a=wl_a,
-                wl_b=wl_b,
-                wl_z_grid=wl_z_grid,
-                wl_log_mu_grid=wl_log_mu_grid,
-                wl_log_p_table=wl_log_p_table,
+                wl_a=wl_a_,
+                wl_b=wl_b_,
+                wl_z_grid=wl_z_grid_,
+                wl_log_mu_grid=wl_log_mu_grid_,
+                wl_log_p_table=wl_log_p_table_,
                 wl_selection=wl_selection,
                 lss_marginalize=lss_marginalize,
                 materialize_redshift_prior_state=materialize_redshift_prior_state,
@@ -870,10 +948,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             cosmo,
             survey,
             pop_params,
-            gw_pe,
-            em_catalog_pe,
-            gw_sel,
-            em_catalog_sel,
+            gw_pe_,
+            em_catalog_pe_,
+            gw_sel_,
+            em_catalog_sel_,
             nEvents,
             nsamp,
             Ndraw,
@@ -890,11 +968,11 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             mark_params=mark_params,
             mark_names=mark_names,
             wl_backend=wl_backend,
-            wl_a=wl_a,
-            wl_b=wl_b,
-            wl_z_grid=wl_z_grid,
-            wl_log_mu_grid=wl_log_mu_grid,
-            wl_log_p_table=wl_log_p_table,
+            wl_a=wl_a_,
+            wl_b=wl_b_,
+            wl_z_grid=wl_z_grid_,
+            wl_log_mu_grid=wl_log_mu_grid_,
+            wl_log_p_table=wl_log_p_table_,
             wl_selection=wl_selection,
             lss_marginalize=lss_marginalize,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
@@ -904,4 +982,4 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             share_prior_state_by_catalog=share_prior_state_by_catalog,
         )
 
-    return likelihood
+    return _jit_likelihood_body(_body, operands)
