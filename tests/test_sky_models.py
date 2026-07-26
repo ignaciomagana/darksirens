@@ -409,3 +409,129 @@ def test_summarize_multipole_cl_matches_definition():
     c1 = float(np.sum(a[:3] ** 2)); c2 = float(np.sum(a[3:] ** 2))
     assert abs(summ["C_ell_quantiles"][1][0.5] - c1) < 1e-9
     assert abs(summ["C_ell_quantiles"][2][0.5] - c2) < 1e-9
+
+
+# ============================================================================
+# Mean-one measured OFF the normaliser's own nodes
+# ============================================================================
+#
+# test_sphere_gp_is_mean_one_on_quadrature and
+# test_sphere_gp_z_is_mean_one_per_shell average g over exactly the quadrature
+# directions (and, for the 3-D model, exactly the z-grid nodes) that _log_norm
+# divides by, so the result is 1 by construction -- their own comments say so.
+# They cannot see either approximation the normaliser actually makes: the finite
+# Fibonacci sphere quadrature, and the jnp.interp in z between the z-nodes.
+#
+# These tests use an INDEPENDENT sphere sample and z values strictly BETWEEN the
+# z-nodes, which is what the models' defining contract (<g> = 1 at every z)
+# actually claims.
+
+def _independent_sphere(n=8192):
+    """Fibonacci sphere offset from the model's own quadrature lattice."""
+    i = np.arange(n) + 0.5
+    phi = np.arccos(1.0 - 2.0 * i / n)
+    theta = np.pi * (1.0 + 5.0 ** 0.5) * i
+    return np.stack(
+        [np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)], -1
+    )
+
+
+def _mid_hyper_theta(model, seed):
+    """Prior-midpoint hyperparameters + random whitened latents."""
+    specs = model.param_specs
+    rng = np.random.default_rng(seed)
+    th = rng.normal(size=len(specs))
+    for i in range(3):
+        th[i] = 0.5 * (specs[i].low + specs[i].high)
+    return jnp.asarray(th)
+
+
+def test_sphere_gp_z_mean_one_between_z_nodes_and_off_quadrature():
+    """The real contract: <g> = 1 at every z, not just at the normaliser's nodes.
+
+    Regression for the frozen-normaliser bug: _ZNORM_HI was hardcoded to 3.0
+    while the analysis grid runs to zMax (default 5.0), and jnp.interp CLAMPS,
+    so z > 3 silently reused the z=3 normaliser. Measured deviation there was up
+    to 0.60 before the fix and <0.01 after. The on-node tests above are blind to
+    it because they only probe z-grid nodes, all of which sat below 3.
+    """
+    import darksirens.sky.models as sky_models
+
+    model = get_sky_model("sphere_gp_z")
+    S = jnp.asarray(_independent_sphere())
+    theta = _mid_hyper_theta(model, seed=11)
+
+    zg = np.asarray(model._zg)
+    # Strictly BETWEEN nodes, and spanning the full analysis range.
+    z_probe = list(0.5 * (zg[:-1] + zg[1:])[::4]) + [3.5, 4.0, 4.5, 4.9]
+    worst = 0.0
+    for z0 in z_probe:
+        zz = jnp.full(S.shape[0], float(z0))
+        g = jnp.exp(model.log_g_sky(S[:, 0], S[:, 1], S[:, 2], zz, theta))
+        worst = max(worst, abs(float(jnp.mean(g)) - 1.0))
+    assert worst < 0.02, f"sphere mean of g deviates from 1 by {worst:.4f}"
+
+
+def test_sky_z_normalisation_grid_covers_the_analysis_grid():
+    """The normaliser must not freeze below the redshifts the pipeline samples.
+
+    likelihood/core.py evaluates log_g_sky at z_of_dL over the full distance
+    range, and z_of_dL grows with H0 across its prior, so any ceiling below zMax
+    is reachable in an ordinary run.
+    """
+    import darksirens.sky.models as sky_models
+    from darksirens.redshift.grid import zMax
+
+    assert sky_models._ZNORM_HI >= float(zMax), (
+        f"sky z-normalisation ceiling {sky_models._ZNORM_HI} is below the "
+        f"analysis grid zMax={zMax}; g would be mis-normalised above it"
+    )
+    # Node density is held fixed as the ceiling moves (8 per unit z).
+    assert sky_models._ZNORM_N >= 8 * sky_models._ZNORM_HI - 1
+
+
+def test_sphere_gp_mean_one_off_quadrature():
+    """2-D model: independent sphere sample, prior-midpoint hyperparameters."""
+    model = get_sky_model("sphere_gp")
+    S = jnp.asarray(_independent_sphere())
+    specs = model.param_specs
+    rng = np.random.default_rng(12)
+    th = rng.normal(size=len(specs))
+    th[0] = 0.5 * (specs[0].low + specs[0].high)
+    th[1] = 0.5 * (specs[1].low + specs[1].high)
+    theta = jnp.asarray(th)
+    z = jnp.zeros(S.shape[0])
+    g = jnp.exp(model.log_g_sky(S[:, 0], S[:, 1], S[:, 2], z, theta))
+    assert abs(float(jnp.mean(g)) - 1.0) < 0.02
+
+
+def test_sphere_quadrature_resolves_the_prior_corner():
+    """Mean-one must hold across the WHOLE sampled prior, not just its middle.
+
+    A 192-node Fibonacci sphere under-resolves a high-amplitude,
+    short-length-scale field: at log_amp = max, log_ls_sphere = min the sphere
+    average of g was off by 25% -- inside the prior the sampler explores.
+    Convergence is non-monotonic (lattice aliasing), so the node count is chosen
+    to be reliably converged rather than merely better.
+    """
+    import darksirens.sky.models as sky_models
+
+    model = get_sky_model("sphere_gp_z")
+    specs = model.param_specs
+    rng = np.random.default_rng(0)
+    th = rng.normal(size=len(specs))
+    th[0] = specs[0].high     # max amplitude
+    th[1] = specs[1].low      # min sphere length scale
+    th[2] = 0.0
+    theta = jnp.asarray(th)
+
+    S = jnp.asarray(_independent_sphere())
+    worst = 0.0
+    for z0 in np.linspace(0.3, 4.9, 9):
+        zz = jnp.full(S.shape[0], float(z0))
+        g = jnp.exp(model.log_g_sky(S[:, 0], S[:, 1], S[:, 2], zz, theta))
+        worst = max(worst, abs(float(jnp.mean(g)) - 1.0))
+    assert worst < 0.02, (
+        f"mean-one violated by {worst:.4f} at the prior corner; the sphere "
+        f"quadrature ({sky_models._SPHERE_NQ} nodes) under-resolves the field"
+    )

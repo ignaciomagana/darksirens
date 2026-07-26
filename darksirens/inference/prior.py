@@ -56,6 +56,67 @@ def _survey_base_name(label: str) -> str:
     return _SURVEY_CATALOG_SUFFIX.sub("", label)
 
 
+def _validate_cosmology_within_interpolation_grid(
+    labels, lower, upper, fixed_parameter_values=None
+):
+    """Refuse cosmology bounds the tabulated distance grid cannot represent.
+
+    ``r_of_z`` interpolates a precomputed ``(Om0, w0, wa, z)`` table and returns
+    NaN outside it rather than extrapolating; the likelihood turns that into
+    ``logL = -inf``.  A prior bound outside the grid is therefore a SILENT prior
+    truncation, not an error: the sampler explores the intersection of the
+    requested prior with the grid while the run's settings.json and startup
+    table report the range the user asked for.  Two concrete consequences --
+    ``logZ`` is normalised against the wrong prior volume (so Bayes factors
+    against a differently-prior'd run are offset), and the marginal shows a hard
+    wall at the grid edge that reads as a data constraint.
+
+    Both the sampled bounds and any ``--fixed_parameter_values`` entry are
+    checked; the fixed case was previously unreachable by any validation
+    (``validate_fixed_parameter_overrides`` only inspects labels that are BOTH
+    fixed and overridden).  ``H0`` is exempt: it enters as an analytic rescaling
+    of the table, not as an interpolation axis.
+    """
+    from darksirens.utils.cosmology import Om0grid, w0grid, wagrid
+
+    grids = {"Om0": Om0grid, "w0": w0grid, "wa": wagrid}
+    fixed = {str(k): float(v) for k, v in (fixed_parameter_values or {}).items()}
+    problems = []
+
+    for label, lo, hi in zip(labels, lower, upper):
+        grid = grids.get(label)
+        if grid is None:
+            continue
+        g_lo, g_hi = float(grid[0]), float(grid[-1])
+        if label in fixed:
+            value = fixed[label]
+            if not (g_lo <= value <= g_hi):
+                problems.append(
+                    f"  - {label} fixed at {value:.6g}, outside the tabulated "
+                    f"grid [{g_lo:.6g}, {g_hi:.6g}] -> every sample would be -inf"
+                )
+            continue
+        if float(lo) < g_lo or float(hi) > g_hi:
+            problems.append(
+                f"  - {label} prior [{float(lo):.6g}, {float(hi):.6g}] extends "
+                f"outside the tabulated grid [{g_lo:.6g}, {g_hi:.6g}]"
+            )
+
+    if problems:
+        raise ValueError(
+            "Cosmology prior outside the distance interpolation grid.\n"
+            "darksirens.utils.cosmology tabulates comoving distance on a fixed "
+            "(Om0, w0, wa, z) grid and returns NaN outside it, which the "
+            "likelihood turns into -inf. The run would silently sample a "
+            "TRUNCATED prior while reporting the one you asked for, biasing logZ "
+            "and putting a spurious hard wall in the marginal.\n\n"
+            + "\n".join(problems)
+            + "\n\nFix by keeping the prior inside the tabulated range, or "
+            "rebuild the grid to cover it (the guard bands are set by "
+            "_OM0_GRID_PAD / _W0_GRID_PAD / _WA_GRID_PAD in utils/cosmology.py)."
+        )
+
+
 def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
     """Apply flat per-parameter prior overrides to a parameter block.
 
@@ -157,6 +218,7 @@ def build_parameter_space(
     mark_names=(),
     n_catalogs: int = 1,
     lss_completion_active: bool | Sequence[bool] = False,
+    use_lss: bool = True,
     mark_names_by_catalog=None,
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
@@ -217,10 +279,21 @@ def build_parameter_space(
     _base_active_survey = _ACTIVE_SURVEY_PARAMS.get(universe_model)
 
     def _b_miss_dropped_for(cat_index):
+        # b_miss enters the likelihood ONLY through the local-overdensity factor
+        # ``max(1 + b_eff*delta_g, 0)`` (redshift/completion.py).  It is inert in
+        # two cases, and sampling an inert parameter is not free: it is a phantom
+        # flat dimension that inflates the prior volume, offsets logZ and
+        # invalidates Bayes-factor comparisons (the same failure class already
+        # fixed for the WL block).
+        #   1. A Q_LSS table is active: Q REPLACES the overdensity factor.
+        #   2. --use_lss is off: delta_g is the all-zero (1, N_grid) dummy built
+        #      by inference/loaders.py, so the factor is identically 1 for ANY
+        #      b_eff.  This case was previously missed, so the CLI-default
+        #      dark_sirens run sampled b_miss with exactly zero effect.
         return (
             _base_active_survey is not None
             and "b_miss" in _base_active_survey
-            and lss_active_by_cat[cat_index]
+            and (lss_active_by_cat[cat_index] or not use_lss)
         )
 
     def _active_survey_for(cat_index):
@@ -370,6 +443,9 @@ def build_parameter_space(
     # KeyError instead of the intended ValueError.
     cosmo_lower, cosmo_upper = apply_block_prior_overrides(
         "cosmology", cosmo_labels, cosmo_lower, cosmo_upper, prior_overrides
+    )
+    _validate_cosmology_within_interpolation_grid(
+        cosmo_labels, cosmo_lower, cosmo_upper, fixed_parameter_values
     )
     pop_lower, pop_upper = apply_block_prior_overrides(
         "population", pop_labels, pop_lower, pop_upper, prior_overrides
