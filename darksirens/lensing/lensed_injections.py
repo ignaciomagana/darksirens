@@ -341,6 +341,25 @@ def make_lensed_injection_set(
     )
 
 
+
+def _read_n_draw_sources(attrs):
+    """Total source-frame draws, accepting either stamped attribute name.
+
+    The module docstring documents ``Ndraw_sources`` and ``preflight._check_lensed``
+    validates under either spelling, but the loaders read ``n_draw_sources``
+    unconditionally -- so a campaign file written to the documented schema passed
+    preflight and then raised KeyError here.  Accept both, and say which names
+    were expected when neither is present.
+    """
+    for key in ("n_draw_sources", "Ndraw_sources"):
+        if key in attrs:
+            return float(attrs[key])
+    raise KeyError(
+        "lensed-injection file has neither 'n_draw_sources' nor "
+        "'Ndraw_sources' in its attrs; one is required as the source-frame "
+        "draw normalisation."
+    )
+
 def load_lensed_injections(path: str) -> LensedInjectionSet:
     """Load a LensedInjectionSet from an HDF5 file.
 
@@ -380,7 +399,7 @@ def load_lensed_injections(path: str) -> LensedInjectionSet:
             detected=f["detected"][:],
             p_prop_src=f["p_prop_src"][:],
             p_prop_y=f["p_prop_y"][:],
-            n_draw_sources=int(f.attrs["n_draw_sources"]),
+            n_draw_sources=int(_read_n_draw_sources(f.attrs)),
             log_p_tag_per_source=log_p_tag,
             p_tag_per_source=p_tag,
             **optional,
@@ -515,7 +534,7 @@ def load_lensed_single_image_set(path: str) -> LensedSingleImageSet:
             p_prop_src=jnp.asarray(plus("p_prop_src")[one_det]),
             p_prop_y=jnp.asarray(plus("p_prop_y")[one_det]),
             valid=jnp.ones(int(one_det.sum()), dtype=bool),
-            n_draw_sources=jnp.asarray(float(f.attrs["n_draw_sources"]), dtype=jnp.float64),
+            n_draw_sources=jnp.asarray(_read_n_draw_sources(f.attrs), dtype=jnp.float64),
         )
 
 

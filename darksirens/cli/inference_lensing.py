@@ -1368,12 +1368,30 @@ def _write_diagnostics(run_dir, diagnostics):
 
 
 def _make_run_dir(opts):
+    """Create opts.save_path/<run_name>, disambiguating name collisions.
+
+    The name embeds pop_model/cluster_mode/sampler/seed/timestamp (second
+    resolution).  Without the seed, and under exist_ok=True, two jobs of the
+    same configuration launched in the same second -- routine in a SLURM array
+    that varies only --seed -- shared a directory and silently overwrote each
+    other's results.hdf5 / samples.npy / settings.json.  Retry with a
+    monotonically increasing numeric suffix instead, matching
+    cli/inference.py::_make_run_dir, which was already fixed for exactly this.
+    """
     ts = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    run_dir = os.path.join(
-        opts.save_path, f"{opts.pop_model}__{opts.cluster_mode}__{opts.sampler}__{ts}"
+    run_name = (
+        f"{opts.pop_model}__{opts.cluster_mode}__{opts.sampler}"
+        f"__seed{getattr(opts, 'seed', 'NA')}__{ts}"
     )
-    os.makedirs(run_dir, exist_ok=True)
-    return run_dir
+    run_dir = os.path.join(opts.save_path, run_name)
+    suffix = 0
+    while True:
+        try:
+            os.makedirs(run_dir, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            suffix += 1
+            run_dir = os.path.join(opts.save_path, f"{run_name}-{suffix:02d}")
 
 
 def _jsonable_settings(opts):
@@ -1587,6 +1605,21 @@ def _resolve_pair_marks(opts, inp):
     if impl == "delta":
         return PAIR_MARKS_TIME_DELTA
     sigmas = np.asarray(inp.get("pair_time_sigma", []), dtype=float)
+    if sigmas.size == 0:
+        # --partition_mode marginalize_exact keeps the per-edge widths in
+        # candidate_pairs and only materialises them PER PARTITION inside
+        # _runtime_part_from_state, so inp["pair_time_sigma"] is empty and the
+        # auto rule silently fell through to the quadrature implementation --
+        # the one this function exists to avoid for sharp marks.  Read the
+        # authoritative widths straight off the candidate pairs instead.
+        sigmas = np.asarray(
+            [
+                float(p.sigma_delta_t)
+                for p in (inp.get("candidate_pairs") or [])
+                if getattr(p, "sigma_delta_t", None) is not None
+            ],
+            dtype=float,
+        )
     if sigmas.size == 0:
         return PAIR_MARKS_TIME
     T0 = float(make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n).T0)
@@ -2619,7 +2652,22 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
         labels = base_labels + lens_labels
         lower = np.concatenate([base_lower, lens_lower])
         upper = np.concatenate([base_upper, lens_upper])
-        prior_transform = make_prior_transform(lower, upper)
+        # PRIOR FAMILIES: build_parameter_space returns per-parameter
+        # (kind, loc, scale) triples, and dropping them silently downgrades every
+        # non-uniform prior to uniform -- make_prior_transform's documented
+        # behaviour for prior_kinds=None is "the legacy all-uniform affine map".
+        # That matters because the whitened GP latents (population gp_* models
+        # and the GP sky models) declare prior_kind="normal", xi ~ N(0, 1): that
+        # unit-normal prior IS the GP regularisation, so sampling it flat changes
+        # the model, the posterior and the evidence. --pop_model is unrestricted
+        # here, so a GP model is reachable. The lensing-only SIS optical-depth
+        # parameters appended below are all uniform.
+        base_prior_kinds = list(space[11])
+        prior_kinds = base_prior_kinds + [("uniform", None, None)] * len(lens_labels)
+        assert len(prior_kinds) == len(labels), (
+            "prior_kinds must stay aligned with labels/lower/upper"
+        )
+        prior_transform = make_prior_transform(lower, upper, prior_kinds)
         _section("Parameter Space")
         print(f"  │    {'Parameter':<24} {'Lower':>12}  {'Upper':>12}")
         print(f"  │    {'─' * 24} {'─' * 12}  {'─' * 12}")
@@ -2653,7 +2701,7 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
         _write_failure(run_dir, "build_parameter_space", exc, labels=labels, settings=settings)
         raise
     return (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
-            pop_params_fid, lens_overrides)
+            pop_params_fid, lens_overrides, prior_kinds)
 
 
 def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
@@ -2692,7 +2740,7 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
 
 
 def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
-                          prior_transform, loglike):
+                          prior_transform, loglike, prior_kinds=None):
     """Run the sampler inside a framed section and return its results."""
     _section(f"Sampling  [{opts.sampler.upper()}]")
     _row("ndim", len(labels))
@@ -2721,6 +2769,10 @@ def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
             lower_bound=lower,
             upper_bound=upper,
             opts=opts,
+            # numpyro builds its own prior from these rather than using
+            # prior_transform, so they must be threaded here too or the NUTS
+            # path keeps sampling GP latents uniform.
+            prior_kinds=prior_kinds,
         )
     except Exception as exc:
         _write_failure(run_dir, "sampler", exc, labels=labels, settings=settings)
@@ -2865,13 +2917,14 @@ def main(argv=None):
     run_dir, settings, fixed, base_fixed, lens_fixed = _prepare_run_dir(opts)
     inp = _load_and_report_inputs(opts, run_dir, settings)
     (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
-     pop_params_fid, lens_overrides) = _build_space_and_closures(
+     pop_params_fid, lens_overrides, prior_kinds) = _build_space_and_closures(
         opts, inp, run_dir, settings, base_fixed, lens_fixed)
     mid, diagnostics = _smoke_test_likelihood(
         opts, run_dir, settings, labels, lower, upper, loglike,
         diagnostics_fn, pop_params_fid)
     results = _run_lensing_sampling(
-        opts, run_dir, settings, labels, lower, upper, prior_transform, loglike)
+        opts, run_dir, settings, labels, lower, upper, prior_transform, loglike,
+        prior_kinds=prior_kinds)
     _save_lensing_outputs(
         opts, run_dir, settings, inp, results, diagnostics, labels, mid,
         fixed, base_fixed, lens_fixed, lens_overrides)
