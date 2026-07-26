@@ -132,3 +132,95 @@ def test_single_catalog_json_name_unchanged(tmp_path):
     )
     path = run_completion_validation(opts, data, {}, {})
     assert os.path.basename(path).startswith("completion_validation__")
+
+
+# ---------------------------------------------------------------------------
+# Q_LSS awareness: the dry run must diagnose the factor the likelihood will use
+# ---------------------------------------------------------------------------
+
+def _saturating_logq(n_pix=NPIX):
+    """Global (n_pix, N_grid) log-Q that rails the +-7 clip over much of the grid."""
+    from darksirens.redshift import zgrid
+
+    z = np.asarray(zgrid)
+    return 9.0 * np.sin(6.0 * z)[None, :] * np.ones((n_pix, 1))
+
+
+def _k1_validation_data(tmp_path, seed=303):
+    import healpy as hp
+    from darksirens.inference.loaders import load_survey
+
+    p = tmp_path / "survey.h5"
+    _write_survey(p, seed)
+    _, ngals, zgals, dzgals, wgals, _ = load_survey(str(p), to_device=False)
+    return dict(
+        zgals_catalog=zgals, dzgals_catalog=dzgals, wgals_catalog=wgals,
+        ngals_catalog=ngals,
+        pixels_pe=np.array([0, 2, 4], dtype=np.int32),
+        pixels_sel=np.array([0, 2, 6], dtype=np.int32),
+        apix=hp.nside2pixarea(NSIDE),
+        n_pix_catalog=NPIX,
+    )
+
+
+def test_validation_diagnoses_the_attached_Q_LSS_table(tmp_path):
+    """Regression: the dry-run catalog was built WITHOUT the loaded Q_LSS table,
+    so completion_clip_diagnostics silently took the legacy delta_g branch and
+    reported a 0.0 clip fraction -- an operator checking a Q table before a
+    campaign saw "clean" while the Q was pinned at the +-7 logQ bound over much of
+    the redshift grid.  With the table attached the diagnostic must name Q_LSS as
+    the source and report a NON-ZERO clip fraction."""
+    opts = SimpleNamespace(
+        save_path=str(tmp_path / "out"), completion_validation_pixels=8
+    )
+    data = _k1_validation_data(tmp_path)
+
+    with open(run_completion_validation(opts, dict(data), {}, {})) as f:
+        blind = json.load(f)
+    assert blind["lss_source"] == "legacy_delta_g"
+    assert blind["lss_completion_attached"] == "none"
+    assert blind["mean_rho_miss_eff_clipped_fraction"] == 0.0
+
+    data_q = dict(data, lss_completion_logq=_saturating_logq(),
+                  lss_completion_indexing=2)
+    with open(run_completion_validation(opts, data_q, {}, {})) as f:
+        seeing = json.load(f)
+    assert seeing["lss_source"] == "Q_LSS"
+    assert seeing["lss_completion_attached"] == "global_table_sliced"
+    assert seeing["mean_rho_miss_eff_clipped_fraction"] > 0.1
+    # C_eff clips too, where Q > 1 pushes 1 - (1 - C) Q negative.
+    assert seeing["mean_C_eff_clipped_fraction"] > 0.0
+
+
+def test_validation_skips_and_reports_a_compact_Q_table(tmp_path):
+    """A COMPACT per-view Q block has no global pixel key, so it CANNOT be aligned
+    to the validation pixels; the JSON must say so rather than imply a clean Q."""
+    opts = SimpleNamespace(
+        save_path=str(tmp_path / "out"), completion_validation_pixels=8
+    )
+    data = dict(
+        _k1_validation_data(tmp_path),
+        lss_completion_logq=_saturating_logq(3), lss_completion_indexing=1,
+    )
+    with open(run_completion_validation(opts, data, {}, {})) as f:
+        diag = json.load(f)
+    assert diag["lss_completion_attached"] == "compact_table_skipped"
+    assert diag["lss_source"] == "legacy_delta_g"
+
+
+def test_per_catalog_validation_uses_each_bundles_own_Q(two_catalog_setup):
+    """The K>=2 twin was worse: ``data_k`` omitted the Q table AND delta_g, so a
+    --use_lss / --lss_completion mixture run got the (1, N_grid) dummy for every
+    catalog.  Catalog 1 here carries a saturating Q, catalog 2 none."""
+    opts, data = two_catalog_setup
+    data["catalogs"][0]["lss_completion_logq"] = _saturating_logq()
+    data["catalogs"][0]["lss_completion_indexing"] = 2
+    p1, p2 = run_completion_validation_multitracer(opts, data, {}, {})
+    with open(p1) as f:
+        d1 = json.load(f)
+    with open(p2) as f:
+        d2 = json.load(f)
+    assert d1["lss_source"] == "Q_LSS"
+    assert d1["mean_rho_miss_eff_clipped_fraction"] > 0.1
+    assert d2["lss_source"] == "legacy_delta_g"
+    assert d2["lss_completion_attached"] == "none"
