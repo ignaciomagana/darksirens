@@ -43,6 +43,8 @@ models and for tests.
 
 from __future__ import annotations
 
+import weakref
+
 import numpy as np
 import jax.numpy as jnp
 from jax import jit, lax, vmap
@@ -136,6 +138,188 @@ def _resolve_row_chunk(n_rows: int, n_max: int) -> int | None:
     if n_rows * n_max > _ROW_CHUNK_AUTO_THRESHOLD:
         return _ROW_CHUNK_SIZE
     return None
+
+
+# ------------------------------------------------------------
+# Windowed per-sample catalog KDE (issue #280)
+# ------------------------------------------------------------
+# ``eval_log_catalog_prior_state`` historically gathered the whole padded row
+# and evaluated a Gaussian for every galaxy in it, per sample: under vmap over
+# samples that materialises (N_samp, N_max) transients per event even though at
+# sigma_eff ~ 0.02 the kernel support is a few percent of the row's redshift
+# range.  When the catalog rows are z-sorted (the load-time invariant
+# established by ``darksirens.catalogs.io.sort_survey_rows_by_z``), a binary
+# search locates the galaxies within +/- n_sigma * max(sigma_eff) of the sample
+# and only a STATIC-size window of W galaxies is gathered and evaluated.
+#
+# W is static (jit-compatible); the half-width is a TRACED quantity derived
+# from the row's max sigma_eff (sigma_kde is a sampled parameter, so kernel
+# widths are not compile-time constants).  The window start is centred on the
+# in-range galaxy block, so when the block fits in W it is covered entirely,
+# when it overflows the truncation is symmetric, and when it is empty the
+# window straddles the insertion point (nearest galaxies on both sides keep
+# the far-tail evaluation finite).  Windows containing zero real galaxies go
+# through the same ``_logsumexp_neginf_safe`` path as empty full rows
+# (bit-identical -inf, finite gradients).
+_KDE_WINDOW_SIZE = 1024                # static window size W; None = full row
+_KDE_WINDOW_NSIGMA: float = 8.0        # half-width = n_sigma * max(sig_eff)
+
+
+def configure_catalog_kde_window(size=1024, n_sigma=8.0):
+    """Configure the windowed per-sample catalog-KDE evaluator.
+
+    Trace-time configuration: call BEFORE the first likelihood evaluation
+    (reconfiguring after a jit trace does not affect the compiled graph).
+
+    ``size`` is the static window length W (galaxies gathered per sample);
+    ``None`` disables windowing entirely — the full-row escape hatch for A/B
+    validation.  ``n_sigma`` scales the traced half-width
+    ``n_sigma * max_row(sigma_eff)`` used to locate contributing galaxies.
+    The default (W=1024, n_sigma=8) holds max |delta log p_cat| < 1e-6 against
+    the full-row evaluator across the ENTIRE sampled sigma_kde prior
+    [0, 0.05] on a realistic 2113-galaxy row (see
+    tests/test_catalog_kde_window.py); W=384 matches the external review's
+    fiducial-only table but is NOT safe at the wide end of the prior.
+
+    Windowing additionally requires rows verified z-sorted (see
+    ``_rows_sorted_for_windowing``); catalogs loaded with
+    ``load_survey(..., sort_rows_by_z=False)`` or built ad hoc fall back to
+    the full-row path automatically.
+    """
+    global _KDE_WINDOW_SIZE, _KDE_WINDOW_NSIGMA
+    if size is not None:
+        size = int(size)
+        if size < 2:
+            raise ValueError(f"KDE window size must be >= 2, got {size}")
+    n_sigma = float(n_sigma)
+    if not n_sigma > 0.0:
+        raise ValueError(f"KDE window n_sigma must be > 0, got {n_sigma}")
+    _KDE_WINDOW_SIZE = size
+    _KDE_WINDOW_NSIGMA = n_sigma
+
+
+def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
+    """Data-driven window size for :func:`configure_catalog_kde_window`.
+
+    Returns the maximum number of galaxies any interval of length
+    ``2 * n_sigma * max_row(sigma_eff)`` contains, over every row and every
+    interval position, evaluated at the WIDEST kernel the sampled prior
+    admits (``sigma_kde_max``; the prior upper bound in
+    ``darksirens/inference/prior.py``, 0.05 by default).  A window at least
+    this large keeps the nearest-neighbour truncation beyond ``n_sigma`` on
+    both sides for every sample; at the default ``n_sigma=6`` the truncated
+    kernel mass is < 2e-9 per galaxy, comfortably inside the 1e-6
+    |delta log p_cat| validation bar.  Host-side numpy diagnostic — run once
+    per catalog when sizing W, not in the hot path.
+    """
+    z = np.asarray(zgals)
+    ng = np.asarray(ngals)
+    dz = np.asarray(dzgals)
+    if z.ndim != 2:
+        raise ValueError("zgals must be (N_rows, N_max)")
+    worst = 0
+    for r in range(z.shape[0]):
+        n = int(ng[r])
+        if n < 2:
+            worst = max(worst, n)
+            continue
+        zr = np.sort(z[r, :n])
+        sig_max = float(
+            np.max(np.sqrt(dz[r, :n] ** 2 + float(sigma_kde_max) ** 2))
+        )
+        width = 2.0 * float(n_sigma) * max(sig_max, SIGMA_EFF_FLOOR)
+        hi = np.searchsorted(zr, zr + width, side="right")
+        worst = max(worst, int(np.max(hi - np.arange(n))))
+    return worst
+
+
+# Verified-sorted verdicts keyed by id(zgals); each entry pins nothing (a
+# weakref) and is revalidated if the id was recycled by a different array.
+_SORTED_ROWS_CACHE: dict = {}
+
+
+def _rows_sorted_for_windowing(zgals, ngals) -> bool:
+    """True iff ``zgals``/``ngals`` are CONCRETE arrays whose rows verifiably
+    satisfy the z-sort invariant (real prefix non-decreasing).
+
+    This is the trace-time gate for the windowed evaluator: it never trusts a
+    flag — the invariant is checked (once per array; verdicts cached by id +
+    weakref identity) on the actual data.  Traced arrays return False, so any
+    call path that feeds the catalog through a jit boundary as an argument
+    keeps the bit-identical full-row path.
+    """
+    if zgals is None or ngals is None:
+        return False
+    key = id(zgals)
+    entry = _SORTED_ROWS_CACHE.get(key)
+    if entry is not None:
+        ref, verdict = entry
+        if ref() is zgals:
+            return verdict
+        del _SORTED_ROWS_CACHE[key]
+    try:
+        z = np.asarray(zgals)
+        ng = np.asarray(ngals)
+    except Exception:
+        return False  # traced (or otherwise non-concrete) arrays
+    if z.ndim != 2 or ng.ndim != 1 or ng.shape[0] != z.shape[0]:
+        return False
+    cols = np.arange(1, z.shape[1])[None, :]
+    verdict = bool(np.all((np.diff(z, axis=1) >= 0) | (cols >= ng[:, None])))
+    try:
+        ref = weakref.ref(zgals)
+    except TypeError:
+        return verdict  # unlikely: not weakref-able -> verify every trace
+    _SORTED_ROWS_CACHE[key] = (ref, verdict)
+    return verdict
+
+
+def _sorted_row_window_start(zgals, pix, z, half, n_real, window):
+    """Start index of the W-galaxy window in row ``pix`` of z-sorted ``zgals``.
+
+    Binary-searches ONLY the real prefix ``[0, n_real)`` of the row (scalar
+    gathers per iteration; the padded tail is never consulted, so trailing
+    padding values need no sentinel).  With ``i_lo``/``i_hi``/``i_z`` the
+    insertion points of ``z - half`` / ``z + half`` / ``z``:
+
+    - block fits (``i_hi - i_lo <= W``): the window covers [i_lo, i_hi)
+      entirely, positioned as close to z-centred as that constraint allows
+      (``clip(i_z - W//2, i_hi - W, i_lo)``); an EMPTY block degenerates to a
+      pure straddle of the insertion point, keeping the nearest galaxies on
+      both sides so far-tail evaluations stay finite.
+    - block overflows W: nearest-neighbour truncation, ``i_z - W//2`` — the
+      W/2 index-nearest galaxies on each side of z (index order IS z order),
+      so the excluded terms on each side are z-farther than every included
+      one on that side.  Centring on the BLOCK midpoint instead would skew
+      the window into a dense cluster on one side and could exclude the
+      sample's own neighbourhood entirely.
+    """
+    n_max = zgals.shape[1]
+    # Fixed iteration count: each step halves [lo, hi); log2(n_max)+1 is
+    # enough to reach lo == hi from any initial span <= n_max.
+    n_iter = int(np.ceil(np.log2(max(int(n_max), 2)))) + 1
+    targets = jnp.stack([z - half, z, z + half])
+    lo0 = jnp.zeros((3,), dtype=jnp.int32)
+    hi0 = jnp.full((3,), jnp.asarray(n_real, dtype=jnp.int32))
+
+    def _body(_, lh):
+        lo, hi = lh
+        active = lo < hi
+        mid = (lo + hi) // 2
+        v = zgals[pix, mid]                     # (3,) scalar gathers
+        go_right = active & (v < targets)
+        lo = jnp.where(go_right, mid + 1, lo)
+        hi = jnp.where(active & ~go_right, mid, hi)
+        return lo, hi
+
+    lo, _ = lax.fori_loop(0, n_iter, _body, (lo0, hi0))
+    i_lo, i_z, i_hi = lo[0], lo[1], lo[2]
+    centred = i_z - window // 2
+    fits = (i_hi - i_lo) <= window
+    start = jnp.where(
+        fits, jnp.clip(centred, i_hi - window, i_lo), centred
+    )
+    return jnp.clip(start, 0, n_max - window)
 
 
 def _map_rows(row_fn, args: tuple):
@@ -306,6 +490,10 @@ class CatalogKernelState(NamedTuple):
     # per-sample evaluator zeroes p_cat beyond it.  ``None`` means no depth
     # truncation (the legacy, bit-identical path).
     z_depth: Any = None
+    #: (N_rows,) per-row max sigma_eff, the traced input to the windowed
+    #: evaluator's half-width ``n_sigma * sig_eff_row_max[pix]``.  ``None``
+    #: (e.g. a state built by hand) disables windowing for that state.
+    sig_eff_row_max: Any = None
 
 
 def catalog_kernel_state(
@@ -351,6 +539,7 @@ def catalog_kernel_state(
         log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
         volume_weighted=volume_weighted, z_depth=z_depth,
         log_depth_mass=log_depth_mass,
+        sig_eff_row_max=jnp.max(sig_eff, axis=1),
     )
 
 
@@ -438,6 +627,7 @@ def marked_catalog_kernel_state(
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
         log_depth_mass=log_depth_mass, z_depth=z_depth,
+        sig_eff_row_max=jnp.max(sig_eff, axis=1),
     ), log_N_host
 
 
@@ -464,12 +654,45 @@ def eval_log_catalog_prior_state(
     """
     log p_cat(z | pix) using a precomputed ``CatalogKernelState``.
 
-    O(N_max) per sample: one row gather, one Gaussian logpdf per galaxy,
-    one logsumexp, one 1-D interpolation for log g(z).
+    O(W) per sample on the windowed hot path (rows z-sorted, see
+    :func:`configure_catalog_kde_window`): a binary search over the row's real
+    prefix, one fused 2-D windowed gather per array, one Gaussian logpdf per
+    windowed galaxy, one logsumexp.  Falls back to the historical O(N_max)
+    full-row evaluation when windowing is disabled, the rows are not
+    verifiably sorted, or the row is not longer than the window.
     """
-    zs = em_catalog.zgals[pix]
-    log_kw = state.log_kw[pix]
-    sig = state.sig_eff[pix]
+    window = _KDE_WINDOW_SIZE
+    use_window = (
+        window is not None
+        and state.sig_eff_row_max is not None
+        and em_catalog.ngals is not None
+        and getattr(em_catalog.zgals, "ndim", 0) == 2
+        and em_catalog.zgals.shape[1] > window
+        and _rows_sorted_for_windowing(em_catalog.zgals, em_catalog.ngals)
+    )
+    if use_window:
+        pix_i = jnp.asarray(pix, dtype=jnp.int32)
+        n_real = em_catalog.ngals[pix_i]
+        half = _KDE_WINDOW_NSIGMA * state.sig_eff_row_max[pix_i]
+        start = _sorted_row_window_start(
+            em_catalog.zgals, pix_i, z, half, n_real, window
+        )
+
+        # Fused 2-D windowed gathers (contiguous dynamic slices; no index
+        # vector, never the full row).  Padded slots inside the window carry
+        # log_kw = -inf exactly as in the full row, so an all-padding window
+        # reduces through the SAME ``_logsumexp_neginf_safe`` -inf path
+        # (bit-identical, finite grads).
+        def _win(a):
+            return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
+
+        zs = _win(em_catalog.zgals)
+        log_kw = _win(state.log_kw)
+        sig = _win(state.sig_eff)
+    else:
+        zs = em_catalog.zgals[pix]
+        log_kw = state.log_kw[pix]
+        sig = state.sig_eff[pix]
     log_mix = _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig))
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
