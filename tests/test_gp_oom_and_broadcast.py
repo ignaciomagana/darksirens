@@ -12,6 +12,8 @@
    (``_broadcast_logp_inputs`` was defined but never called).  ``log_p_pop`` now
    flattens broadcastable inputs and reshapes the result back.
 """
+import sys
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -19,6 +21,25 @@ import pytest
 
 import darksirens.gw.populations.gp as gp
 from darksirens.gw.populations.gp import GP_MODEL_NAMES, build_gp_model
+
+
+@pytest.fixture(autouse=True)
+def _evict_tinygp_stub():
+    """Combined-run guard: several test files install a stub ``tinygp`` (a
+    bare module with no ``__file__``) into ``sys.modules`` at import time so
+    their own imports stay light, and in a batched run that stub leaks into
+    THIS file's lazy GP imports — every kernel construction then dies with
+    ``ImportError: cannot import name 'transforms' from 'tinygp' (unknown
+    location)`` even though the file is green standalone.  Evict any stub
+    (and its submodule entries) before each test so the real package imports;
+    files that want the stub re-install it at their own import time, and
+    already-bound references are unaffected."""
+    stub = sys.modules.get("tinygp")
+    if stub is not None and getattr(stub, "__file__", None) is None:
+        for key in [k for k in list(sys.modules)
+                    if k == "tinygp" or k.startswith("tinygp.")]:
+            del sys.modules[key]
+    yield
 
 
 def test_gp3d_m1_q_chi_evaluates_finite():
