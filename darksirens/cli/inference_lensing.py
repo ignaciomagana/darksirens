@@ -307,18 +307,68 @@ def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     return make_sis_lens_params(A_tau=10.0**log10_tau_A, n_tau=tau_n)
 
 
-def _lens_settings_dict(coord, sampled_labels, fixed_parameter_values, opts):
+#: Which lens label each archived SIS optical-depth value is decoded from, so a
+#: SAMPLED parameter's archived value can be named for the point it was
+#: evaluated at instead of masquerading as the run's value.
+_LENS_VALUE_SOURCE_LABEL = {"lens_A_tau": "log10_tau_A", "lens_n_tau": "tau_n"}
+
+
+def _lens_settings_dict(
+    coord, sampled_labels, fixed_parameter_values, opts, eval_point="prior_midpoint"
+):
+    """Archive the SIS optical-depth block for one evaluation point.
+
+    ``coord`` is a DIAGNOSTICS point (the prior midpoint, or a guard-clear prior
+    draw), never a posterior summary, so a SAMPLED lens parameter has no
+    run-level value here.  Writing it under the bare name ``lens_A_tau`` let a
+    downstream table read a pre-posterior number -- in practice
+    ``10**((lo+hi)/2)`` from the prior box, which tracks the prior bounds rather
+    than the data -- as "the SIS optical-depth normalisation of this run".
+    Mirror the partition-diagnostics convention: bare names ONLY when the value
+    genuinely equals the run's fixed value (``--fix_lens_rate true``, or the
+    label pinned via ``--fixed_parameter_values``), otherwise prefix with
+    ``{eval_point}_`` and stamp ``lens_parameters_eval_point``.
+    """
     sis = _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts)
-    return dict(
-        lens_labels=[
-            label for label in sampled_labels if label in LENS_PARAMETER_PRIORS
-        ],
+    lens_labels = [
+        label for label in sampled_labels if label in LENS_PARAMETER_PRIORS
+    ]
+    out = dict(
+        lens_labels=lens_labels,
         fix_lens_rate=bool(getattr(opts, "fix_lens_rate", True)),
         sl_tau_A=float(opts.sl_tau_A),
         sl_tau_n=float(opts.sl_tau_n),
-        lens_A_tau=float(np.asarray(sis.A_tau)),
-        lens_n_tau=float(np.asarray(sis.n_tau)),
     )
+    any_sampled = False
+    for key, value in (
+        ("lens_A_tau", float(np.asarray(sis.A_tau))),
+        ("lens_n_tau", float(np.asarray(sis.n_tau))),
+    ):
+        if _LENS_VALUE_SOURCE_LABEL[key] in lens_labels:
+            out[f"{eval_point}_{key}"] = value
+            any_sampled = True
+        else:
+            out[key] = value
+    if any_sampled:
+        out["lens_parameters_eval_point"] = str(eval_point)
+    return out
+
+
+def _write_lens_settings_attrs(attrs, lens_settings):
+    """Splat a ``_lens_settings_dict`` payload into an HDF5 attrs mapping.
+
+    A loop rather than fixed keys because whether ``lens_A_tau`` is bare or
+    ``{eval_point}_``-prefixed depends on which lens parameters are sampled.
+    """
+    for key, value in lens_settings.items():
+        if key == "lens_labels":
+            attrs["lens_labels"] = json.dumps(value)
+        elif isinstance(value, bool):
+            attrs[key] = bool(value)
+        elif isinstance(value, str):
+            attrs[key] = value
+        else:
+            attrs[key] = float(value)
 
 
 def _decode_base_parameters(decoder, coord):
@@ -2173,8 +2223,15 @@ def build_cluster_diagnostics(
                 int(inp["nsamp"]),
                 int(opts.y_nodes_pair),
             ],
+            # `coord` here is whatever point cleared the reliability guard --
+            # the prior midpoint, the registry fiducial, or a seeded prior draw
+            # -- so sampled lens values are named for that generic eval point.
             **_lens_settings_dict(
-                coord, lens_sampled_labels, fixed_parameter_values, opts
+                coord,
+                lens_sampled_labels,
+                fixed_parameter_values,
+                opts,
+                eval_point="diagnostics_point",
             ),
         )
         _add_off_control_nonfinite_diagnostics(out, opts=opts, inp=inp)
@@ -2865,12 +2922,7 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             f.attrs["wl_a"] = float(opts.lensing_wl_a)
             f.attrs["wl_b"] = float(opts.lensing_wl_b)
             lens_settings = _lens_settings_dict(mid, labels, lens_fixed, opts)
-            f.attrs["lens_labels"] = json.dumps(lens_settings["lens_labels"])
-            f.attrs["fix_lens_rate"] = bool(opts.fix_lens_rate)
-            f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
-            f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
-            f.attrs["lens_A_tau"] = float(lens_settings["lens_A_tau"])
-            f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
+            _write_lens_settings_attrs(f.attrs, lens_settings)
             if results.get("logZ") is not None:
                 f.attrs["logZ"] = float(results["logZ"])
             write_tinyns_metadata(f.attrs, results, opts)
