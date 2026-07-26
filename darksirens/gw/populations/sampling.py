@@ -31,7 +31,7 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import erf, erfinv, logsumexp
+from jax.scipy.special import erf, erfinv, log_ndtr, logsumexp
 
 
 # Relative floor applied to histogram cell densities: guarantees full grid
@@ -168,11 +168,37 @@ def truncnorm_sample(
     arg = jnp.clip(2.0 * up - 1.0, -1.0 + 1e-15, 1.0 - 1e-15)
     x = jnp.clip(mu + sigma * sqrt2 * erfinv(arg), lo, hi)
 
+    # log(span) computed IN LOG SPACE, not as log of the difference above.
+    # Once the window sits more than ~8.3 sigma from mu, Phi_lo and Phi_hi round
+    # to the same float and their difference underflows to exactly 0; the tiny
+    # floor then replaces the true span (e.g. 7.62e-24 at 10 sigma) with
+    # 2.2e-308, making -log(span) 708.4 instead of 53.2 -- log_s too LARGE by
+    # ~655 nats, which kills every draw for that event and punches a spurious
+    # hole in the likelihood surface.  Reachable because the truncation bounds
+    # here are the per-event support box, not a fixed [-1, 1]: mu_chi at a prior
+    # edge with sigma_chi at its floor puts mu tens of sigma outside a narrow box.
+    a = (lo - mu) / sigma
+    b = (hi - mu) / sigma
+    # Work in whichever tail keeps both endpoints on the same (lower) side, so
+    # the subtraction below is always between two log-CDFs of the same sign.
+    flip = a > 0.0
+    aa = jnp.where(flip, -b, a)
+    bb = jnp.where(flip, -a, b)
+    log_lo, log_hi = log_ndtr(aa), log_ndtr(bb)      # log_lo <= log_hi
+    # log(e^log_hi - e^log_lo) = log_hi + log(-expm1(log_lo - log_hi))
+    delta = jnp.minimum(log_lo - log_hi, -jnp.finfo(u.dtype).tiny)
+    log_span = log_hi + jnp.log(-jnp.expm1(delta))
+    # NO floor here.  log_ndtr is finite for any finite argument and delta <= 0
+    # keeps -expm1(delta) in (0, 1], so log_span is always finite -- including
+    # the degenerate lo == hi case, where it collapses to log_hi + log(tiny).
+    # Flooring at log(tiny) would clamp legitimately small spans: a window 70
+    # sigma out has a true log_span of -2456, and the floor would report -708.
+
     log_s = (
         -0.5 * ((x - mu) / sigma) ** 2
         - jnp.log(sigma)
         - 0.5 * jnp.log(2.0 * jnp.pi)
-        - jnp.log(span)
+        - log_span
     )
     return TruncNormSample(x=x, log_s=log_s)
 

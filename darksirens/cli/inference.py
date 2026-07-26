@@ -1727,6 +1727,9 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         mark_names             = opts.mark_names,
         n_catalogs             = opts.n_catalogs,
         lss_completion_active  = lss_completion_active_by_catalog,
+        # b_miss is inert when delta_g is the all-zero dummy (--use_lss off),
+        # so it must not be sampled as a phantom flat dimension.
+        use_lss                = bool(getattr(opts, "use_LSS", False)),
         mark_names_by_catalog  = getattr(opts, "mark_names_by_catalog", None),
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
