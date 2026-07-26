@@ -66,3 +66,39 @@ def validate_multitracer_run(opts, data) -> None:
                 f"{n_catalogs}; the K-catalog mixture needs one compact bundle "
                 "per survey path."
             )
+
+        # FIELD-convention mixtures require a COMMON pixelisation.
+        #
+        # Under catalog_sky_weighting='field' each catalog's redshift prior is a
+        # per-PIXEL probability MASS -- the numerator is normalised by the
+        # survey-global Z(theta) and never divided by the pixel solid angle
+        # (grep apix in redshift/prior.py: no hits).  The mixture combines those
+        # masses as logsumexp_k [log w_k + log p_k(z | pix_k)], so for one sky
+        # direction a catalog with larger pixels contributes proportionally more
+        # simply because its pixel subtends more solid angle.  The effective
+        # weight is w_k * Omega_k, not w_k, and the sampled host fraction
+        # f_cat,k absorbs the pixel-area ratio -- a silent bias with no
+        # diagnostic, since every individual catalog is self-consistent.
+        #
+        # Nothing else prevents this: each catalog loads its own nside from its
+        # own file and the factory deliberately uses per-catalog apix for the
+        # completion densities.  Rejecting the mixed-resolution case keeps the
+        # 'field' estimand exactly as documented (f_cat,k is the catalog's GW
+        # host fraction) and leaves every equal-nside run bit-identical.
+        weighting = str(getattr(opts, "catalog_sky_weighting", "") or "")
+        if weighting != "conditional":
+            nsides = [b.get("nside") for b in catalogs]
+            distinct = sorted({int(n) for n in nsides if n is not None})
+            if len(distinct) > 1:
+                raise ValueError(
+                    "K>=2 mixtures under 'field' sky weighting require all "
+                    "catalogs to share one HEALPix nside, but the loaded "
+                    f"bundles have nside={nsides}.\n"
+                    "The field estimand's per-pixel prior is a probability MASS, "
+                    "so mixing pixelisations weights each catalog by its pixel "
+                    "area: the effective mixture weight becomes w_k * Omega_k "
+                    "and the inferred host fraction f_cat is biased by the "
+                    "pixel-area ratio.\n"
+                    "Re-run darksirens_pixelate on the offending survey(s) at a "
+                    "common --nside."
+                )

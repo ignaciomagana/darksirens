@@ -172,3 +172,53 @@ def test_use_lss_without_q_table_still_builds_delta_g(monkeypatch):
             "wgals": np.zeros((NPIX, NG)), "ngals_catalog": np.zeros(NPIX)}
     out = loaders.attach_lss_inputs(opts, data)
     assert tuple(np.asarray(out["delta_g_pix_z"]).shape) == (NPIX, NZ)
+
+
+# ---------------------------------------------------------------------------
+# K>=2 field mixtures need one common pixelisation
+# ---------------------------------------------------------------------------
+
+def _opts(weighting, n_catalogs=2):
+    return SimpleNamespace(n_catalogs=n_catalogs, catalog_sky_weighting=weighting,
+                           mark_names_by_catalog=None, resolved_survey_z_depths=None)
+
+
+def _bundles(*nsides):
+    return {"catalogs": [{"nside": n} for n in nsides]}
+
+
+def test_field_mixture_rejects_mixed_nside():
+    """Per-pixel MASSES cannot be mixed across different pixel areas: the
+    effective mixture weight becomes w_k * Omega_k and f_cat absorbs the ratio."""
+    from darksirens.inference.validation import validate_multitracer_run
+
+    with pytest.raises(ValueError, match="common HEALPix nside|share one HEALPix nside"):
+        validate_multitracer_run(_opts("field"), _bundles(64, 256))
+
+
+def test_field_mixture_accepts_common_nside():
+    from darksirens.inference.validation import validate_multitracer_run
+
+    validate_multitracer_run(_opts("field"), _bundles(64, 64))
+
+
+def test_unset_weighting_defaults_to_field_and_is_guarded():
+    """Unset auto-resolves to field, so it must be guarded too."""
+    from darksirens.inference.validation import validate_multitracer_run
+
+    with pytest.raises(ValueError, match="nside"):
+        validate_multitracer_run(_opts(None), _bundles(64, 128))
+
+
+def test_conditional_weighting_is_unaffected():
+    """The legacy per-pixel-normalised estimand integrates each pixel to unit
+    mass, so pixel area cancels and mixed nside is not a bias there."""
+    from darksirens.inference.validation import validate_multitracer_run
+
+    validate_multitracer_run(_opts("conditional"), _bundles(64, 256))
+
+
+def test_single_catalog_is_unaffected():
+    from darksirens.inference.validation import validate_multitracer_run
+
+    validate_multitracer_run(_opts("field", n_catalogs=1), _bundles(64))

@@ -72,6 +72,17 @@ _JITTER_ABS = 1e-9   # absolute floor; product kernels are more degeneracy-prone
 # "cf. gp.py" note that used to sit on these constants hid that.  ``_ZNORM_N``
 # tracks ``_ZNORM_HI`` to hold node density fixed (8 per unit z: 40 nodes at the
 # z=5 default, 24 at the 3.0 floor).
+#: Sphere-average quadrature size for the mean-one normalisation of the GP sky
+#: models.  192 nodes under-resolve a high-amplitude, short-length-scale field:
+#: at the PRIOR CORNER (log_amp at its max, log_ls_sphere at its min) the sphere
+#: average of g departed from 1 by 25%, breaking the models' defining contract
+#: inside the sampled prior.  Convergence against an independent 8192-point
+#: sphere is non-monotonic (Fibonacci-lattice aliasing against the field's own
+#: structure) -- 192: 0.056, 384: 0.195, 768: 0.063, 1536: 0.0045, 3072: 0.0044
+#: -- so 1536 is the first count that is reliably converged rather than merely
+#: better.  Cost is one (Q, M) kernel matmul per proposal.
+_SPHERE_NQ = 1536
+
 if "DARKSIRENS_SKY_ZNORM_HI" in os.environ:
     _ZNORM_HI = float(os.environ["DARKSIRENS_SKY_ZNORM_HI"])
 else:
@@ -160,7 +171,7 @@ class SphereGPSky:
     def __init__(
         self,
         n_inducing: int = 48,
-        n_quad: int = 192,
+        n_quad: int = _SPHERE_NQ,
         log_amp_bounds: tuple[float, float] = (float(jnp.log(0.1)), float(jnp.log(3.0))),
         log_ls_bounds: tuple[float, float] = (float(jnp.log(0.15)), float(jnp.log(2.0))),
     ):
@@ -252,7 +263,7 @@ class _SphereZGPBase:
         self,
         n_inducing_sphere: int = 32,
         n_inducing_z: int = 6,
-        n_quad: int = 192,
+        n_quad: int = _SPHERE_NQ,
         z_node_hi: float = 3.0,
         log_amp_bounds: tuple[float, float] = (float(jnp.log(0.1)), float(jnp.log(3.0))),
         log_ls_sphere_bounds: tuple[float, float] = (float(jnp.log(0.15)), float(jnp.log(2.0))),

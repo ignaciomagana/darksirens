@@ -503,3 +503,35 @@ def test_sphere_gp_mean_one_off_quadrature():
     z = jnp.zeros(S.shape[0])
     g = jnp.exp(model.log_g_sky(S[:, 0], S[:, 1], S[:, 2], z, theta))
     assert abs(float(jnp.mean(g)) - 1.0) < 0.02
+
+
+def test_sphere_quadrature_resolves_the_prior_corner():
+    """Mean-one must hold across the WHOLE sampled prior, not just its middle.
+
+    A 192-node Fibonacci sphere under-resolves a high-amplitude,
+    short-length-scale field: at log_amp = max, log_ls_sphere = min the sphere
+    average of g was off by 25% -- inside the prior the sampler explores.
+    Convergence is non-monotonic (lattice aliasing), so the node count is chosen
+    to be reliably converged rather than merely better.
+    """
+    import darksirens.sky.models as sky_models
+
+    model = get_sky_model("sphere_gp_z")
+    specs = model.param_specs
+    rng = np.random.default_rng(0)
+    th = rng.normal(size=len(specs))
+    th[0] = specs[0].high     # max amplitude
+    th[1] = specs[1].low      # min sphere length scale
+    th[2] = 0.0
+    theta = jnp.asarray(th)
+
+    S = jnp.asarray(_independent_sphere())
+    worst = 0.0
+    for z0 in np.linspace(0.3, 4.9, 9):
+        zz = jnp.full(S.shape[0], float(z0))
+        g = jnp.exp(model.log_g_sky(S[:, 0], S[:, 1], S[:, 2], zz, theta))
+        worst = max(worst, abs(float(jnp.mean(g)) - 1.0))
+    assert worst < 0.02, (
+        f"mean-one violated by {worst:.4f} at the prior corner; the sphere "
+        f"quadrature ({sky_models._SPHERE_NQ} nodes) under-resolves the field"
+    )
