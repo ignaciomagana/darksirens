@@ -30,6 +30,7 @@ from darksirens.redshift.completion import (
     _precompute_grids,
     build_field_normalization_inputs,
     build_field_delta_g_inputs,
+    build_field_depth_inputs,
     build_field_lss_q_inputs,
     field_global_log_Z,
 )
@@ -40,6 +41,11 @@ from darksirens.redshift.prior import (
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 NG = len(zgrid)
+
+# ``np.trapz`` was renamed ``np.trapezoid`` in NumPy 2; bind whichever the
+# installed version provides (identical algorithm) so the brute-force
+# assemblies below run on either.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
 
 
 def _cosmo():
@@ -81,9 +87,17 @@ def _delta_g_table(npix=12, amp=0.6):
 
 
 def _catalog(zgals, dzgals, wgals, ngals, apix=1.0, logq=None, delta_g=None):
-    """EMCatalog with field-normalization inputs (+ optional modulations)."""
+    """EMCatalog with field-normalization inputs (+ optional modulations).
+
+    The flat full-sky DEPTH inputs are always attached: the global observed term
+    reads them whenever ``survey.z_depth`` is set (and ignores them otherwise).
+    """
     field = build_field_normalization_inputs(
         jnp.asarray(zgals), jnp.asarray(wgals), jnp.asarray(ngals)
+    )
+    depth = build_field_depth_inputs(
+        jnp.asarray(zgals), jnp.asarray(dzgals), jnp.asarray(wgals),
+        jnp.asarray(ngals),
     )
     occupied = np.asarray(field.occupied_pixels)
     kwargs = dict(
@@ -99,6 +113,9 @@ def _catalog(zgals, dzgals, wgals, ngals, apix=1.0, logq=None, delta_g=None):
         field_n_empty=jnp.asarray(float(field.n_empty)),
         field_N_obs_total=jnp.asarray(float(field.N_obs_total)),
         field_occupied_pixels=jnp.asarray(occupied, dtype=jnp.int32),
+        field_depth_z=depth.z,
+        field_depth_dz=depth.dz,
+        field_depth_c=depth.c,
     )
     if logq is not None:
         q_occ, q_empty_sum = build_field_lss_q_inputs(
@@ -151,7 +168,7 @@ def _brute_force_Z(cosmo, survey, zgals, ngals, lss_fn, apix=1.0, z_depth=None):
             obs = np.zeros_like(zg)
         C = np.clip(obs / dN_exp_safe, 0.0, 1.0)
         dN_miss = below * (1.0 - C) * dN_exp * lss_fn(p) + (1.0 - below) * dN_exp
-        Z += np.trapezoid(dN_miss, zg)
+        Z += _trapz(dN_miss, zg)
     return Z
 
 
@@ -711,10 +728,16 @@ def _marked_catalog(eta_active=True):
     return cat, zgals, wgals, ngals, marks
 
 
-def test_marked_field_Z_eta0_reduces_to_unmarked():
+@pytest.mark.parametrize("z_depth", [None, 0.22])
+def test_marked_field_Z_eta0_reduces_to_unmarked(z_depth):
     """eta = 0 (h == 1) with unit weights: the marked global Z equals the
-    unmarked one exactly (S_obs == N_obs_total; mu_miss == 1)."""
-    cosmo, survey = _cosmo(), _survey()
+    unmarked one exactly (S_obs == N_obs_total; mu_miss == 1).
+
+    Parametrized over a BITING depth (0.22 cuts the 0.25/0.28/0.30/0.32
+    galaxies): the marked observed mass must then be depth-scaled by exactly the
+    same per-galaxy kernel ratios as the unmarked count, or the two twins drift
+    apart -- the F-1/F-2 marked half."""
+    cosmo, survey = _cosmo(), _survey(z_depth=z_depth)
     cat, *_ = _marked_catalog()
     n_marks = 1
     log_h_flat = jnp.zeros(cat.field_mark_z.shape[0])
@@ -759,8 +782,51 @@ def test_marked_field_Z_matches_bruteforce_assembly():
             V += 1.0 - np.clip(obs / dN_exp_safe, 0.0, 1.0)
         else:
             V += 1.0
-    Z_bf = S_obs + np.trapezoid(np.asarray(mu_miss) * dN_exp * V, zg)
+    Z_bf = S_obs + _trapz(np.asarray(mu_miss) * dN_exp * V, zg)
     np.testing.assert_allclose(logZ, np.log(Z_bf), rtol=1e-5)
+
+
+def test_marked_field_observed_mass_is_the_full_sky_marked_amplitude():
+    """MARKED depth convention (F-1/F-2, marked half): the global observed term
+    must be the full-sky sum of the numerator's marked amplitudes
+    ``exp(log_N_host + log_depth_mass)`` -- not the undepth-scaled
+    ``Sum_i w_i h_i``, which counts every above-depth galaxy in the observed
+    branch while ``_field_missing_curve`` counts it again beyond the depth.
+    """
+    from darksirens.redshift.catalog import marked_catalog_kernel_state
+    from darksirens.redshift.completion import (
+        field_marked_observed_global_total,
+    )
+
+    cosmo, survey = _cosmo(), _survey(z_depth=0.22)
+    cat, zgals, wgals, ngals, marks = _marked_catalog()
+    eta = jnp.asarray([1.3])
+    log_h_flat = jnp.clip(cat.field_mark_values @ eta, -7.0, 7.0)
+    log_h_rows = jnp.clip(jnp.asarray(marks) * eta[0], -7.0, 7.0)
+
+    S_obs = float(field_marked_observed_global_total(
+        cosmo, survey, cat, log_h_flat
+    ))
+    # The per-pixel numerator's marked amplitude, summed over the FULL sky (the
+    # catalog rows ARE the sky here).
+    kernels, log_N_host = marked_catalog_kernel_state(
+        cosmo, survey, cat, log_h_rows, z_depth=survey.z_depth,
+    )
+    amp = np.where(
+        np.isfinite(np.asarray(log_N_host)),
+        np.exp(np.asarray(log_N_host + kernels.log_depth_mass)),
+        0.0,
+    )
+    # rtol 1e-6: the flat marks (field_mark_values/_w) are stored f32 by
+    # build_field_mark_inputs, so h_i differs from the f64 row marks at ~1e-8;
+    # the depth ratios themselves are f64 and exact (the unmarked twin matches to
+    # 1e-12, see test_catalog_sky_weighting).
+    np.testing.assert_allclose(S_obs, float(amp.sum()), rtol=1e-6)
+
+    # ... and it is strictly below the undepth-scaled marked mass (the pre-fix
+    # expression), i.e. the depth genuinely bites on this fixture.
+    S_raw = float(jnp.sum(jnp.asarray(cat.field_mark_w) * jnp.exp(log_h_flat)))
+    assert S_obs < 0.9 * S_raw, (S_obs, S_raw)
 
 
 def test_marked_field_conditional_shift_identity():

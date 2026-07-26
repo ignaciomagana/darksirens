@@ -151,6 +151,7 @@ def _make_mixture_likelihood(
                 field_lss_q_empty_sum=None, field_delta_g=None,
                 field_lss_q_members=None, field_lss_q_empty_sum_members=None,
                 field_mark_z=None, field_mark_w=None, field_mark_values=None,
+                field_depth_z=None, field_depth_dz=None, field_depth_c=None,
             )
 
         def _maybe(key, dtype=None):
@@ -175,6 +176,11 @@ def _make_mixture_likelihood(
             field_mark_z=_maybe("field_mark_z"),
             field_mark_w=_maybe("field_mark_w"),
             field_mark_values=_maybe("field_mark_values"),
+            # DEPTH-consistent global observed term (loaders build these only when
+            # a survey depth is active; see build_field_depth_inputs).
+            field_depth_z=_maybe("field_depth_z", jnp.float64),
+            field_depth_dz=_maybe("field_depth_dz", jnp.float64),
+            field_depth_c=_maybe("field_depth_c", jnp.float64),
         )
 
     # Shared (catalog-independent) GW / selection physics arrays.
@@ -730,6 +736,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_mark_z=getattr(catalogs, "field_mark_z", None),
         field_mark_w=getattr(catalogs, "field_mark_w", None),
         field_mark_values=getattr(catalogs, "field_mark_values", None),
+        field_depth_z=getattr(catalogs, "field_depth_z", None),
+        field_depth_dz=getattr(catalogs, "field_depth_dz", None),
+        field_depth_c=getattr(catalogs, "field_depth_c", None),
     )
     em_catalog_sel = EMCatalog(
         apix=apix,
@@ -775,6 +784,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_mark_z=getattr(catalogs, "field_mark_z", None),
         field_mark_w=getattr(catalogs, "field_mark_w", None),
         field_mark_values=getattr(catalogs, "field_mark_values", None),
+        field_depth_z=getattr(catalogs, "field_depth_z", None),
+        field_depth_dz=getattr(catalogs, "field_depth_dz", None),
+        field_depth_c=getattr(catalogs, "field_depth_c", None),
     )
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, (em_catalog_pe,), (em_catalog_sel,)
