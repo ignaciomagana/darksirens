@@ -2664,6 +2664,16 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
 
         # the branch parses "true"/"false" strings into bools internally via opts;
         # build_parameter_space takes the raw opts.fix_* values it was given.
+        #
+        # universe_model GATES THE SAMPLED SURVEY BLOCK (prior._ACTIVE_SURVEY_PARAMS).
+        # Omitting it made the filter skip entirely, so --fix_survey false sampled
+        # SEVEN flat survey nuisance dimensions (12 -> 19) that the decoder --
+        # which DOES read opts.universe_model, i.e. spectral_sirens_wl -- then
+        # discarded: _decode_base_parameters slices coord[:len(sampled_labels)]
+        # and the survey block sits past that prefix, so those coordinates never
+        # reached the likelihood.  Thread every flag build_parameter_decoder
+        # re-derives the space from, using its own getattr defaults, so the two
+        # derivations cannot diverge.
         space = build_parameter_space(
             opts.pop_model,
             opts.fix_population,
@@ -2671,6 +2681,9 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
             opts.fix_survey,
             prior_overrides=overrides,
             fixed_parameter_values=base_fixed,
+            fix_de=getattr(opts, "fix_de", getattr(opts, "fixed_de", False)),
+            universe_model=getattr(opts, "universe_model", None),
+            use_lss=bool(getattr(opts, "use_LSS", True)),
         )
         base_labels = list(space[0])
         base_lower = np.asarray(space[1])
@@ -2708,6 +2721,12 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
 
         # decoder carries the WL params so decode() returns a survey with wl_params set
         opts.prior_overrides = overrides  # decoder reads getattr(opts,'prior_overrides')
+        # Arm the P0.1 fail-fast net for this CLI too: record the BASE sampler
+        # labels (the lens-only optical-depth block is appended afterwards and is
+        # not part of the decoder's space) so build_parameter_decoder raises if it
+        # re-derives a different set.  Previously set only in cli/inference.py, so
+        # every lensing run sampled with the net disarmed.
+        opts.expected_sampled_labels = tuple(base_labels)
         if opts.wl_backend == "tabulated":
             _wl_arrays = _load_wl_table_arrays(opts)
             wl_params = make_tabulated_wl_params(

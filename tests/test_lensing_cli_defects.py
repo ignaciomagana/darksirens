@@ -157,3 +157,98 @@ def test_missing_ndraw_sources_names_both_spellings():
 
     with pytest.raises(KeyError, match="Ndraw_sources"):
         _read_n_draw_sources({})
+
+
+# ---------------------------------------------------------------------------
+# universe_model / expected_sampled_labels (phantom survey dimensions)
+# ---------------------------------------------------------------------------
+
+def _lensing_opts(*extra):
+    import darksirens.cli.inference_lensing as cli
+
+    return cli.build_parser().parse_args(
+        [
+            "--gw_path", "gw.h5",
+            "--gwselection_path", "sel.h5",
+            "--sampler", "tinyns",
+            "--cluster_mode", "off",
+            "--pop_model", "powerlaw+peak",
+            *extra,
+        ]
+    )
+
+
+def _space_and_decoder(opts, tmp_path, monkeypatch):
+    """Run the CLI's real space+decoder construction with the data-hungry
+    closure builders stubbed out."""
+    import darksirens.cli.inference_lensing as cli
+
+    monkeypatch.setattr(cli, "build_cluster_likelihood", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "build_cluster_diagnostics", lambda *a, **k: None)
+    out = cli._build_space_and_closures(
+        opts, {}, str(tmp_path), {}, {}, {}
+    )
+    return out[0]
+
+
+def test_lensing_space_matches_decoder_with_fix_survey_off(tmp_path, monkeypatch):
+    """universe_model gates the sampled survey block (prior._ACTIVE_SURVEY_PARAMS).
+    The lensing CLI omitted it, so --fix_survey false sampled seven flat survey
+    nuisance dimensions (12 -> 19) that the decoder -- which does read
+    opts.universe_model = spectral_sirens_wl -- dropped, and which
+    _decode_base_parameters therefore never read."""
+    import darksirens.cli.inference_lensing as cli
+    from darksirens.gw.populations import get_fixed_population_params
+    from darksirens.inference.parameters import build_parameter_decoder
+
+    opts = _lensing_opts("--fix_cosmology", "true", "--fix_survey", "false")
+    cli._resolve_lensing_run_config(opts)
+    assert opts.universe_model == "spectral_sirens_wl"
+
+    labels = _space_and_decoder(opts, tmp_path, monkeypatch)
+    decoder = build_parameter_decoder(
+        opts, get_fixed_population_params(opts.pop_model), fixed_parameter_values={}
+    )
+    # --fix_lens_rate defaults true, so the space is base-only here
+    assert list(labels) == list(decoder.sampled_labels)
+    for phantom in ("log10n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde"):
+        assert phantom not in labels
+
+
+def test_lensing_cli_arms_the_expected_sampled_labels_net(tmp_path, monkeypatch):
+    """The CLI must record the BASE sampler labels on opts so
+    build_parameter_decoder's fail-fast net catches any future flag drift; the
+    net was armed only in cli/inference.py, leaving every lensing run unguarded."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--fix_cosmology", "true", "--fix_survey", "false",
+                         "--fix_lens_rate", "false")
+    cli._resolve_lensing_run_config(opts)
+    labels = _space_and_decoder(opts, tmp_path, monkeypatch)
+
+    assert getattr(opts, "expected_sampled_labels", None) is not None
+    # lens-only labels are appended after the base block and are not part of the
+    # decoder's space, so the recorded net must exclude them
+    assert "log10_tau_A" in labels
+    assert "log10_tau_A" not in opts.expected_sampled_labels
+    assert list(opts.expected_sampled_labels) == [
+        lbl for lbl in labels if lbl not in cli.LENS_PARAMETER_PRIORS
+    ]
+
+
+def test_lensing_decoder_net_fires_on_injected_label_drift(tmp_path, monkeypatch):
+    """The armed net must actually raise, not just be present."""
+    import darksirens.cli.inference_lensing as cli
+    from darksirens.gw.populations import get_fixed_population_params
+    from darksirens.inference.parameters import build_parameter_decoder
+
+    opts = _lensing_opts("--fix_cosmology", "true", "--fix_survey", "false")
+    cli._resolve_lensing_run_config(opts)
+    _space_and_decoder(opts, tmp_path, monkeypatch)
+
+    opts.expected_sampled_labels = tuple(opts.expected_sampled_labels) + ("bogus",)
+    with pytest.raises(ValueError, match="diverge"):
+        build_parameter_decoder(
+            opts, get_fixed_population_params(opts.pop_model),
+            fixed_parameter_values={},
+        )
