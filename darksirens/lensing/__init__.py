@@ -44,6 +44,8 @@ from darksirens.lensing.wlmagnification import (
     make_lognormal_log_p_wl,
     make_tabulated_log_p_wl,
     make_log_p_wl_from_params,
+    wl_mu_quadrature_coverage,
+    validate_wl_mu_quadrature,
 )
 from darksirens.lensing.slmarks import (
     SISLensParams,
@@ -57,6 +59,7 @@ from darksirens.lensing.slmarks import (
 from darksirens.lensing.clusters import ClusterSet, load_clusters, save_clusters
 from darksirens.lensing.grids import (
     make_log_mu_grid,
+    make_wl_mu_quadrature,
     make_y_grid,
 )
 
@@ -69,6 +72,8 @@ __all__ = [
     "make_lognormal_log_p_wl",
     "make_tabulated_log_p_wl",
     "make_log_p_wl_from_params",
+    "wl_mu_quadrature_coverage",
+    "validate_wl_mu_quadrature",
     # SL marks
     "SISLensParams",
     "make_sis_lens_params",
@@ -83,5 +88,6 @@ __all__ = [
     "save_clusters",
     # Grids
     "make_log_mu_grid",
+    "make_wl_mu_quadrature",
     "make_y_grid",
 ]

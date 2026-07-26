@@ -134,17 +134,28 @@ def test_derive_universe_model_for_all_backends():
     assert lens_cli._derive_universe_model("disabled") == "spectral_sirens"
 
 
-def test_load_wl_table_arrays_roundtrip(tmp_path):
-    """Tabulated backend reads z_grid/log_mu_grid/log_p_table from HDF5."""
-    z_grid = np.array([0.1, 0.5, 1.0, 2.0])
-    log_mu_grid = np.array([-0.3, -0.1, 0.1, 0.3, 0.5])
-    rng = np.random.default_rng(0)
-    log_p_table = rng.normal(size=(z_grid.size, log_mu_grid.size))
-    path = tmp_path / "wl_table.h5"
+def _write_wl_table(path, a, b, nz=200, nmu=769, log_mu_half=2.0, z_lo=0.4):
+    """Write a lognormal p_WL(mu|z) table in the loader's HDF5 layout."""
+    import jax.numpy as jnp
+    from darksirens.lensing.wlmagnification import make_lognormal_log_p_wl
+
+    z_grid = np.linspace(z_lo, 3.0, nz)
+    log_mu_grid = np.linspace(-log_mu_half, log_mu_half, nmu)
+    ZZ, MM = np.meshgrid(z_grid, log_mu_grid, indexing="ij")
+    log_p_table = np.asarray(
+        make_lognormal_log_p_wl(a, b)(jnp.exp(jnp.asarray(MM)), jnp.asarray(ZZ))
+    )
     with h5py.File(path, "w") as f:
         f.create_dataset("z_grid", data=z_grid)
         f.create_dataset("log_mu_grid", data=log_mu_grid)
         f.create_dataset("log_p_table", data=log_p_table)
+    return z_grid, log_mu_grid, log_p_table
+
+
+def test_load_wl_table_arrays_roundtrip(tmp_path):
+    """Tabulated backend reads z_grid/log_mu_grid/log_p_table from HDF5."""
+    path = tmp_path / "wl_table.h5"
+    z_grid, log_mu_grid, log_p_table = _write_wl_table(path, a=0.02, b=1.0)
 
     opts = types.SimpleNamespace(
         wl_backend="tabulated", lensing_wl_table_path=str(path)
@@ -154,6 +165,24 @@ def test_load_wl_table_arrays_roundtrip(tmp_path):
     np.testing.assert_allclose(np.asarray(out["wl_z_grid"]), z_grid)
     np.testing.assert_allclose(np.asarray(out["wl_log_mu_grid"]), log_mu_grid)
     np.testing.assert_allclose(np.asarray(out["wl_log_p_table"]), log_p_table)
+
+
+def test_load_wl_table_arrays_rejects_unresolved_table(tmp_path):
+    """A table narrower than the 16-node ln-mu quadrature is a startup error.
+
+    The likelihood integrates the tabulated backend on a FIXED Gauss-Legendre
+    grid (ln mu in (-0.6, 0.6), 16 nodes). The shipped default lognormal width
+    (a=4e-3, b=1.5) is far narrower than the node spacing below z ~ 0.5, so
+    int p_WL(mu|z) dmu collapses towards 0 and those events would be silently
+    DELETED from the likelihood. Fail loudly instead.
+    """
+    path = tmp_path / "narrow_table.h5"
+    _write_wl_table(path, a=4.0e-3, b=1.5, z_lo=0.1)
+    opts = types.SimpleNamespace(
+        wl_backend="tabulated", lensing_wl_table_path=str(path)
+    )
+    with pytest.raises(SystemExit, match="does not resolve"):
+        lens_cli._load_wl_table_arrays(opts)
 
 
 def test_load_wl_table_arrays_empty_for_non_tabulated():

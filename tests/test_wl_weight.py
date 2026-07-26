@@ -53,8 +53,12 @@ from darksirens.likelihood.wl_weight import (
 from darksirens.lensing.wlmagnification import (
     make_lognormal_log_p_wl,
     make_tabulated_log_p_wl,
+    make_tabulated_wl_params,
+    log_p_wl,
+    wl_mu_quadrature_coverage,
+    validate_wl_mu_quadrature,
 )
-from darksirens.lensing.grids import make_log_mu_grid
+from darksirens.lensing.grids import make_log_mu_grid, make_wl_mu_quadrature
 from darksirens.redshift.volume import log_volume_prior_vmap
 
 
@@ -241,6 +245,136 @@ class TestJITCompat:
         out = jit_fn(m1det, q, dL, chieff, pix, prior_wt)
         assert out.shape == (6,)
         assert jnp.all(jnp.isfinite(out))
+
+
+# ============================================================================
+# 2b. Tabulated backend: (mu, z) broadcasting + mu-quadrature coverage
+# ============================================================================
+
+def _lognormal_table(a=0.02, b=1.0, nz=200, nmu=769, log_mu_half=2.0):
+    """Dense tabulation of the lognormal WL log-PDF on a (z, ln mu) grid."""
+    z_grid = jnp.linspace(0.05, 3.0, nz)
+    log_mu_grid = jnp.linspace(-log_mu_half, log_mu_half, nmu)
+    ZZ, MM = jnp.meshgrid(z_grid, log_mu_grid, indexing="ij")
+    table = make_lognormal_log_p_wl(a, b)(jnp.exp(MM), ZZ)
+    return z_grid, log_mu_grid, table
+
+
+class TestTabulatedBroadcast:
+    """The tabulated evaluators must honour the module's broadcasting contract.
+
+    Regression for the review finding that both tabulated evaluators flattened
+    ``mu`` and ``z`` INDEPENDENTLY before ``vmap``, so any broadcast-but-not-equal
+    shape pair raised ``vmap got inconsistent sizes``. The sole production caller
+    (``log_sample_weight_wl_marginalized``) passes mu (Nmu,) against
+    z (nsamp, Nmu), so ``--wl_backend tabulated`` crashed at the first
+    likelihood evaluation.
+    """
+
+    def test_closure_broadcasts_mu_nodes_against_sample_z(self):
+        z_grid, log_mu_grid, table = _lognormal_table()
+        fn = make_tabulated_log_p_wl(z_grid, log_mu_grid, table)
+        mu_nodes, _ = make_wl_mu_quadrature()               # (16,)
+        z = jnp.full((7, mu_nodes.shape[0]), 0.8)           # (7, 16)
+
+        out = fn(mu_nodes, z)
+        assert out.shape == (7, 16)
+        # Every row is the same z, so every row must be identical, and each
+        # must reproduce the lognormal the table was built from.
+        ref = make_lognormal_log_p_wl(0.02, 1.0)(mu_nodes, jnp.full((16,), 0.8))
+        assert np.allclose(np.asarray(out), np.asarray(ref)[None, :], atol=2e-3)
+
+    def test_closure_broadcasts_scalar_z(self):
+        z_grid, log_mu_grid, table = _lognormal_table()
+        fn = make_tabulated_log_p_wl(z_grid, log_mu_grid, table)
+        mu_nodes, _ = make_wl_mu_quadrature()
+        out = fn(mu_nodes, jnp.asarray(0.8))
+        assert out.shape == (16,)
+        assert np.all(np.isfinite(np.asarray(out)))
+
+    def test_free_dispatcher_broadcasts(self):
+        """The non-closure ``log_p_wl`` path broadcasts identically."""
+        z_grid, log_mu_grid, table = _lognormal_table()
+        params = make_tabulated_wl_params(z_grid, log_mu_grid, table)
+        mu_nodes, _ = make_wl_mu_quadrature()
+        z = jnp.full((5, mu_nodes.shape[0]), 1.3)
+        out = log_p_wl(mu_nodes, z, params)
+        assert out.shape == (5, 16)
+        fn = make_tabulated_log_p_wl(z_grid, log_mu_grid, table)
+        assert np.allclose(np.asarray(out), np.asarray(fn(mu_nodes, z)))
+
+    def test_production_entry_point_runs_with_tabulated_closure(self):
+        """``log_sample_weight_wl_or_standard(..., wl_enabled=True)`` — the exact
+        call the cluster/main likelihoods make — must run through the tabulated
+        closure and agree with the lognormal closure the table was built from."""
+        m1det, q, dL, chieff, pix, prior_wt = _toy_samples(n=9, seed=7)
+        cosmo = _toy_cosmo()
+        survey = _toy_survey()
+        catalog = _toy_catalog()
+        pop_params = jnp.array([])
+        z_grid, log_mu_grid, table = _lognormal_table(a=0.02, b=1.0)
+        mu_nodes, log_w = make_wl_mu_quadrature()
+
+        common = dict(
+            cosmo=cosmo, survey=survey, pop_params=pop_params, catalog=catalog,
+            log_p_pop_fn=_toy_log_p_pop, log_prior_z_fn=_toy_volume_prior,
+            mu_nodes=mu_nodes, log_w_nodes=log_w, wl_enabled=True,
+        )
+        out_tab = log_sample_weight_wl_or_standard(
+            m1det, q, dL, chieff, pix, prior_wt,
+            log_p_wl_fn=make_tabulated_log_p_wl(z_grid, log_mu_grid, table),
+            **common,
+        )
+        out_ln = log_sample_weight_wl_or_standard(
+            m1det, q, dL, chieff, pix, prior_wt,
+            log_p_wl_fn=make_lognormal_log_p_wl(0.02, 1.0),
+            **common,
+        )
+        assert out_tab.shape == (9,)
+        assert np.all(np.isfinite(np.asarray(out_tab)))
+        # Agreement is limited by the table's bilinear interpolation error.
+        assert np.allclose(np.asarray(out_tab), np.asarray(out_ln), atol=2e-2)
+
+
+class TestMuQuadratureCoverage:
+    """The 16-node ln-mu quadrature must be VALIDATED against the table, not
+    assumed: an under-resolved table makes int p_WL(mu|z) dmu collapse to ~0
+    and silently deletes those events from the likelihood."""
+
+    def test_coverage_is_unity_for_a_resolved_table(self):
+        z_grid, log_mu_grid, table = _lognormal_table(a=0.02, b=1.0)
+        mu_nodes, log_w = make_wl_mu_quadrature()
+        cov = wl_mu_quadrature_coverage(
+            mu_nodes, log_w, z_grid, log_mu_grid, table,
+            z_test=jnp.asarray([0.8, 1.5, 2.5]),
+        )
+        assert np.allclose(np.asarray(cov), 1.0, atol=2e-2)
+        # ... and the validator accepts it on the table's own z-grid.
+        validate_wl_mu_quadrature(
+            mu_nodes, log_w, z_grid, log_mu_grid, table,
+            z_test=jnp.asarray([0.8, 1.5, 2.5]),
+        )
+
+    def test_default_lognormal_width_is_unresolved_at_low_z(self):
+        """The SHIPPED default (a=4e-3, b=1.5) is far too narrow for the
+        16-node grid below z ~ 0.5 — the measured under-coverage that motivates
+        the hard startup check."""
+        z_grid, log_mu_grid, table = _lognormal_table(a=4.0e-3, b=1.5)
+        mu_nodes, log_w = make_wl_mu_quadrature()
+        cov = np.asarray(wl_mu_quadrature_coverage(
+            mu_nodes, log_w, z_grid, log_mu_grid, table,
+            z_test=jnp.asarray([0.1, 0.2, 0.3, 1.0]),
+        ))
+        assert cov[0] < 1e-3       # z = 0.1: event silently deleted
+        assert cov[1] < 0.2        # z = 0.2
+        assert cov[2] < 0.5        # z = 0.3
+        assert abs(cov[3] - 1.0) < 2e-2   # z = 1 is fine
+
+        with pytest.raises(ValueError, match="does not resolve"):
+            validate_wl_mu_quadrature(
+                mu_nodes, log_w, z_grid, log_mu_grid, table,
+                z_test=jnp.asarray([0.1, 0.2, 0.3, 1.0]),
+            )
 
 
 # ============================================================================

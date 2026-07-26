@@ -66,6 +66,7 @@ from darksirens.likelihood.cluster_selection import (
 from darksirens.likelihood.pair_kde import PairKDE, _slice_event_kde_inside_jit
 from darksirens.lensing.grids import (
     make_log_mu_grid, make_hermite_u_grid, make_y_grid,
+    WL_MU_QUADRATURE_NODES, WL_MU_QUADRATURE_LOG_MU_RANGE,
 )
 from darksirens.lensing.wlmagnification import (
     WLParams, make_lognormal_log_p_wl, make_tabulated_log_p_wl,
@@ -79,9 +80,11 @@ from darksirens.utils.cosmology import dL_grid_bounds, dL_in_z_grid, z_of_dL
 CLUSTER_MODE_OFF = 0          # singletons only — equivalent to commit 2
 CLUSTER_MODE_J2 = 1           # singletons + J=2 pairs
 
-# Quadrature node counts (same as commit 2 for WL; new for y)
-_WL_NMU_NODES = 16
-_WL_LOG_MU_RANGE = (-0.6, 0.6)
+# Quadrature node counts (same as commit 2 for WL; new for y). The tabulated
+# backend's mu grid is owned by lensing.grids so the CLI's startup coverage
+# check validates the SAME quadrature this module integrates on.
+_WL_NMU_NODES = WL_MU_QUADRATURE_NODES
+_WL_LOG_MU_RANGE = WL_MU_QUADRATURE_LOG_MU_RANGE
 _WL_HERMITE_NODES = 16
 _Y_NODES_FOR_CLUSTER_PAIR_LIKE = 32   # used inside L_2; finer than selection
                                        # since L_2 needs to localize y precisely

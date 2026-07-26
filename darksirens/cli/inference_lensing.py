@@ -155,7 +155,9 @@ from darksirens.lensing.slmarks import make_sis_lens_params
 from darksirens.lensing.wlmagnification import (
     make_lognormal_wl_params,
     make_tabulated_wl_params,
+    validate_wl_mu_quadrature,
 )
+from darksirens.lensing.grids import make_wl_mu_quadrature
 from darksirens.lensing.lensed_injections import load_lensed_injections
 from darksirens.lensing.pair_tag_selection import (
     PAIR_TAG_SELECTION_MODEL_KINDS,
@@ -737,6 +739,12 @@ def _load_wl_table_arrays(opts):
     ``log_p_table`` (Nz, Nmu)) and returns ``wl_z_grid``/``wl_log_mu_grid``/
     ``wl_log_p_table``. Missing/unspecified --lensing_wl_table_path is a clean
     SystemExit.
+
+    The loaded table is validated against the mu-quadrature the likelihood
+    actually integrates on (``make_wl_mu_quadrature``): a table narrower than
+    the quadrature's node spacing makes int p_WL(mu|z) dmu collapse to ~0 and
+    silently DELETES those events from the likelihood. That is a hard startup
+    error, never a silent rescale.
     """
     if getattr(opts, "wl_backend", None) != "tabulated":
         return {}
@@ -751,6 +759,14 @@ def _load_wl_table_arrays(opts):
         wl_z_grid = jnp.asarray(f["z_grid"][()], dtype=jnp.float64)
         wl_log_mu_grid = jnp.asarray(f["log_mu_grid"][()], dtype=jnp.float64)
         wl_log_p_table = jnp.asarray(f["log_p_table"][()], dtype=jnp.float64)
+    mu_nodes, log_w_nodes = make_wl_mu_quadrature()
+    try:
+        validate_wl_mu_quadrature(
+            mu_nodes, log_w_nodes, wl_z_grid, wl_log_mu_grid, wl_log_p_table,
+            context=f"--wl_backend tabulated ({path})",
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     return dict(
         wl_z_grid=wl_z_grid,
         wl_log_mu_grid=wl_log_mu_grid,
