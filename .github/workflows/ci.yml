@@ -1,0 +1,126 @@
+name: ci
+
+# CPU-only, deliberately conservative: this is the first automated gate the repo
+# has had, so it runs exactly what is verified green on a CPU box rather than
+# trying to cover the full suite (which grows to ~258 GB RSS under CPU-only JAX
+# and gets OOM-killed — see docs/source/testing.md, Tier 0b).
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same PR supersedes the previous run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Pinned to the validated campaign stack (see requirements.txt), so a green
+  # local Tier-0 run predicts a green CI run.  numpy is held below 2 on purpose:
+  # scipy 1.12 declares numpy<1.29, and the tree still contains both
+  # np.trapezoid and np.trapz call sites, so the numpy major version changes
+  # which tests fail.  The Tier-0 subset avoids both names.
+  PIP_DEPS: >-
+    "jax[cpu]==0.4.34"
+    "numpy==1.26.4"
+    "scipy==1.12.0"
+    "matplotlib==3.9.2"
+    "healpy==1.17.3"
+    "h5py==3.12.1"
+    "astropy==6.1.4"
+    "tqdm==4.66.5"
+    "dynesty==2.1.4"
+    "seaborn==0.12.2"
+    "numpyro==0.17.0"
+    "pytest==8.3.4"
+  JAX_PLATFORMS: cpu
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+
+jobs:
+  fast-tests:
+    name: Tier-0 fast subset (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Default fetch-depth=1 is enough: tests/test_run_provenance.py and
+      # tests/test_packaging_contract.py only need `git rev-parse HEAD`,
+      # `git status` and `git ls-files`, all of which work in a shallow clone
+      # (and both skip cleanly if git is unavailable).
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install the pinned CPU stack
+        # NOT `pip install -r requirements.txt`: that pulls gwcat and tinyns
+        # from git, which CI does not need (both are imported lazily and the
+        # subset stubs gwcat) and which would make this job depend on the
+        # availability of two other repositories.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ${{ env.PIP_DEPS }}
+
+      - name: Show the resolved stack
+        run: python -m pip list
+
+      - name: Tier-0 fast subset
+        # Same manifest docs/source/testing.md prescribes, so the documented
+        # local gate and this gate cannot drift.
+        run: |
+          FILES=$(grep -v '^#' tests/fast_subset.txt)
+          echo "running: $FILES"
+          python -m pytest -q --no-header -rf $FILES
+
+  packaging:
+    name: pip install . is importable
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install runtime deps, then the package with --no-deps
+        # --no-deps keeps this job about packaging only: it fails if a module
+        # directory is missing from the wheel, not if an index is slow.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ${{ env.PIP_DEPS }}
+          python -m pip install --no-deps .
+
+      - name: Import from the installed package, outside the checkout
+        # cd out of the repo first: from the checkout root the source tree
+        # shadows site-packages and the check would pass even with an empty
+        # wheel.  This is the check that would have caught darksirens.utils
+        # shipping zero modules.
+        working-directory: /tmp
+        run: |
+          python - <<'PY'
+          import darksirens
+          import darksirens.likelihood.core          # imports darksirens.utils.cosmology
+          import darksirens.utils.cosmology
+          import darksirens.utils.utils
+          import darksirens.inference.prior
+          print("darksirens", darksirens.__version__, "from", darksirens.__file__)
+          assert "site-packages" in darksirens.__file__, darksirens.__file__
+          PY
+
+      - name: Console scripts resolve
+        run: |
+          darksirens_inference --help > /dev/null
+          darksirens_inference_lensing --help > /dev/null
+          darksirens_analyze --help > /dev/null
+          darksirens_pixelate --help > /dev/null
+          darksirens_skymaps_to_samples --help > /dev/null
+          darksirens_build_lognormal_completion --help > /dev/null
+          darksirens_build_joint_lognormal_completion --help > /dev/null
+          darksirens_diagnose_lognormal_completion --help > /dev/null
