@@ -71,16 +71,9 @@ from argparse import ArgumentParser, ArgumentTypeError, RawDescriptionHelpFormat
 
 from darksirens.gw.populations import (
     get_fixed_population_params,
-    get_model,
     pop_model_prior_parser,
-    population_m1_support_max,
 )
-from darksirens.gw.populations.utils import (
-    assert_pairing_grid_covers_support,
-    configure_normalization_grids,
-    normalization_grid_settings,
-    size_pairing_grid_to_support,
-)
+from darksirens.gw.populations.utils import normalization_grid_settings
 from darksirens.inference.data import load_all_data, validate_loaded_survey_shapes
 from darksirens.inference.validation import validate_multitracer_run
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
@@ -126,6 +119,8 @@ from darksirens.cli.common import (
     _format_fixed_dark_energy_summary,
     _format_option_value,
     _print_all_cli_options,
+    add_normalization_grid_arguments,
+    configure_normalization_grids_for_model,
     str_to_bool,
     parse_json_arg,
     parse_counterpart_arg,
@@ -890,29 +885,7 @@ def build_parser():
                         "views on device. Cuts startup GPU memory drastically for large nside. "
                         "Incompatible with --use_lss and bright-siren models, which need the "
                         "full-sky rows.")
-    g.add_argument("--norm_nmass", type=int, default=None, metavar="N",
-                   help="Mass-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_MASS).")
-    g.add_argument("--norm_nq", type=int, default=None, metavar="N",
-                   help="Mass-ratio-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_Q).")
-    g.add_argument("--norm_nchi", type=int, default=None, metavar="N",
-                   help="Spin-grid size for GW-population normalisation (env: DARKSIRENS_GW_N_CHI).")
-    g.add_argument("--pairing_norm_grid", type=int, default=None, metavar="N",
-                   help="opt-in: interpolate the pairing model's per-sample "
-                        "q-normalization from an N-node log-spaced m1 grid "
-                        "instead of exact per-sample integration (~1.3-1.6x "
-                        "faster likelihood calls measured). The grid's upper "
-                        "bound is sized automatically to the selected model's "
-                        "primary-mass support (e.g. 300 Msun for "
-                        "gwtc5_fiducial_bpl2peaks), and N is scaled up with it so "
-                        "node density is preserved -- so it never clamps inside "
-                        "the support. Accuracy at N=2048: ~1e-8 relative TYPICAL, "
-                        "up to ~2e-4 WORST-CASE for samples right at the m_min "
-                        "support edge (the normaliser has a log-kink there); "
-                        "halves ~4x per grid doubling. NOT recommended when the "
-                        "run sits near the selection variance guard boundary "
-                        "(a ~1e-4 logL perturbation can flip the hard -inf "
-                        "wall). Default: exact "
-                        "(env: DARKSIRENS_GW_PAIRING_M1_GRID).")
+    add_normalization_grid_arguments(g)
     g.add_argument("--kernel_gl_nodes", type=int, default=None, metavar="N",
                    help="Gauss-Legendre nodes for the per-galaxy kernel normalisation Z_i "
                         "(default 24). Spectroscopic catalogs (sigma_eff <~ 5e-3) are exact "
@@ -1168,22 +1141,11 @@ def _canonicalize_fixed_flags(opts):
 
 
 def _configure_performance_grids(opts):
-    try:
-        configure_normalization_grids(
-            n_mass=opts.norm_nmass,
-            n_q=opts.norm_nq,
-            n_chi=opts.norm_nchi,
-            pairing_m1_grid=opts.pairing_norm_grid,
-        )
-        # The opt-in pairing grid interpolates the q-normaliser on a static m1
-        # grid; jnp.interp CLAMPS out-of-range m1, so its upper bound must cover
-        # the selected model's primary-mass support or samples inside the
-        # support silently reuse the endpoint normaliser (PHY-5).  Size the grid
-        # to the model, then assert coverage (defense in depth).
-        if normalization_grid_settings().pairing_m1_grid is not None:
-            _size_pairing_grid_to_selected_model(opts)
-    except ValueError as e:
-        _fatal(str(e))
+    # Normalisation grids + the PHY-5 pairing-grid coverage guard live in
+    # cli.common so the lensing CLI runs exactly the same resolution: the pairing
+    # grid is a process-global env-configurable setting that BOTH CLIs inherit,
+    # and it was guarded in this twin only.
+    configure_normalization_grids_for_model(opts)
 
     if opts.kernel_gl_nodes is not None:
         from darksirens.redshift.catalog import configure_kernel_quadrature
@@ -1206,28 +1168,6 @@ def _configure_performance_grids(opts):
             configure_catalog_kde_window(**kw)
         except ValueError as e:
             _fatal(str(e))
-
-
-def _size_pairing_grid_to_selected_model(opts):
-    """Grow the opt-in pairing m1 grid to the selected model's m1 support.
-
-    A malformed ``--pop_model`` is reported later by the standard model-building
-    path with its full registry-vocabulary message; don't pre-empt that here, so
-    only size when the model resolves.  ``size_``/``assert_`` raise ``ValueError``
-    on a genuine coverage problem, which the caller routes to ``_fatal``.
-    """
-    try:
-        model = get_model(
-            opts.pop_model,
-            shared_beta=opts.shared_beta,
-            shared_spin=opts.shared_spin,
-            shared_gamma=opts.shared_gamma,
-        )
-    except Exception:
-        return
-    support = population_m1_support_max(model)
-    size_pairing_grid_to_support(support)
-    assert_pairing_grid_covers_support(support, model_name=opts.pop_model)
 
 
 def _parse_structured_options(opts):

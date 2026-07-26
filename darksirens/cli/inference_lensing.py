@@ -105,6 +105,7 @@ from darksirens.core.types import (
 )
 from darksirens.utils.cosmology import H0Planck, Om0Planck
 from darksirens.gw.populations.registry import get_fixed_population_params, get_model
+from darksirens.gw.populations.utils import normalization_grid_settings
 
 from darksirens.inference.checkpointing import (
     add_checkpoint_arguments,
@@ -130,6 +131,8 @@ from darksirens.cli.common import (
     _ok,
     _warn,
     _err,
+    add_normalization_grid_arguments,
+    configure_normalization_grids_for_model,
     str_to_bool,
     parse_json_arg,
     _print_all_cli_options,
@@ -168,7 +171,10 @@ from darksirens.lensing.partitions import (
     parse_edge_mark_keys,
     validate_candidate_pairs,
 )
-from darksirens.lensing.preflight import run_lensing_preflight
+from darksirens.lensing.preflight import (
+    fixed_partition_coverage_error,
+    run_lensing_preflight,
+)
 from darksirens.lensing.marginal_diagnostics import (
     compute_marginalized_partition_diagnostics,
     compute_componentwise_factorized_partition_diagnostics,
@@ -307,18 +313,68 @@ def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     return make_sis_lens_params(A_tau=10.0**log10_tau_A, n_tau=tau_n)
 
 
-def _lens_settings_dict(coord, sampled_labels, fixed_parameter_values, opts):
+#: Which lens label each archived SIS optical-depth value is decoded from, so a
+#: SAMPLED parameter's archived value can be named for the point it was
+#: evaluated at instead of masquerading as the run's value.
+_LENS_VALUE_SOURCE_LABEL = {"lens_A_tau": "log10_tau_A", "lens_n_tau": "tau_n"}
+
+
+def _lens_settings_dict(
+    coord, sampled_labels, fixed_parameter_values, opts, eval_point="prior_midpoint"
+):
+    """Archive the SIS optical-depth block for one evaluation point.
+
+    ``coord`` is a DIAGNOSTICS point (the prior midpoint, or a guard-clear prior
+    draw), never a posterior summary, so a SAMPLED lens parameter has no
+    run-level value here.  Writing it under the bare name ``lens_A_tau`` let a
+    downstream table read a pre-posterior number -- in practice
+    ``10**((lo+hi)/2)`` from the prior box, which tracks the prior bounds rather
+    than the data -- as "the SIS optical-depth normalisation of this run".
+    Mirror the partition-diagnostics convention: bare names ONLY when the value
+    genuinely equals the run's fixed value (``--fix_lens_rate true``, or the
+    label pinned via ``--fixed_parameter_values``), otherwise prefix with
+    ``{eval_point}_`` and stamp ``lens_parameters_eval_point``.
+    """
     sis = _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts)
-    return dict(
-        lens_labels=[
-            label for label in sampled_labels if label in LENS_PARAMETER_PRIORS
-        ],
+    lens_labels = [
+        label for label in sampled_labels if label in LENS_PARAMETER_PRIORS
+    ]
+    out = dict(
+        lens_labels=lens_labels,
         fix_lens_rate=bool(getattr(opts, "fix_lens_rate", True)),
         sl_tau_A=float(opts.sl_tau_A),
         sl_tau_n=float(opts.sl_tau_n),
-        lens_A_tau=float(np.asarray(sis.A_tau)),
-        lens_n_tau=float(np.asarray(sis.n_tau)),
     )
+    any_sampled = False
+    for key, value in (
+        ("lens_A_tau", float(np.asarray(sis.A_tau))),
+        ("lens_n_tau", float(np.asarray(sis.n_tau))),
+    ):
+        if _LENS_VALUE_SOURCE_LABEL[key] in lens_labels:
+            out[f"{eval_point}_{key}"] = value
+            any_sampled = True
+        else:
+            out[key] = value
+    if any_sampled:
+        out["lens_parameters_eval_point"] = str(eval_point)
+    return out
+
+
+def _write_lens_settings_attrs(attrs, lens_settings):
+    """Splat a ``_lens_settings_dict`` payload into an HDF5 attrs mapping.
+
+    A loop rather than fixed keys because whether ``lens_A_tau`` is bare or
+    ``{eval_point}_``-prefixed depends on which lens parameters are sampled.
+    """
+    for key, value in lens_settings.items():
+        if key == "lens_labels":
+            attrs["lens_labels"] = json.dumps(value)
+        elif isinstance(value, bool):
+            attrs[key] = bool(value)
+        elif isinstance(value, str):
+            attrs[key] = value
+        else:
+            attrs[key] = float(value)
 
 
 def _decode_base_parameters(decoder, coord):
@@ -617,6 +673,35 @@ def _gate_suspicious_time_marks(opts, candidate_pairs_raw) -> None:
     raise SystemExit(f"suspicious candidate time marks: {message}")
 
 
+def _validate_partition_mode_against_cluster_mode(opts):
+    """Reject ``--cluster_mode off --partition_mode marginalize_exact``.
+
+    ``off`` is the singleton-only control: every observed event is its own
+    cluster, so there are no candidate pairs to marginalise over and the only
+    compatible partition is the all-singleton one ``--partition_mode fixed``
+    already evaluates.  The combination was not merely unimplemented, it was
+    silently accepted: load_inputs returns early for off mode BEFORE the
+    partition-mode requirement checks (so not even --candidate_pairs_path was
+    demanded) and run_lensing_preflight skips every partition check unless
+    cluster_mode == 'j2', so preflight reported ok, the run directory and
+    settings.json were written, the PE/selection load ran for minutes, and only
+    then did the likelihood closure -- which branches on the flag alone -- raise
+    KeyError: 'marginal_partitions' at the midpoint smoke test.  The natural way
+    in is copying the campaign's joint command and flipping only
+    --cluster_mode.
+    """
+    if (
+        getattr(opts, "cluster_mode", "j2") == "off"
+        and getattr(opts, "partition_mode", "fixed") == "marginalize_exact"
+    ):
+        raise SystemExit(
+            "--partition_mode marginalize_exact requires --cluster_mode j2 "
+            "(the off control is singleton-only: there are no candidate pairs "
+            "to marginalise over). Drop --partition_mode (or set it to fixed) "
+            "for the off control run."
+        )
+
+
 def _derive_universe_model(wl_backend):
     """Map --wl_backend to the library universe-model kind.
 
@@ -706,6 +791,12 @@ def _load_singleton_lensing_inputs(opts):
 def load_inputs(opts):
     """Load singleton PE + selection, and (for j2) the lensed injections + pair
     PE + partition. Returns the assembled inputs for the cluster likelihood."""
+    # BEFORE the off-mode early return below (whose bundle has no
+    # marginal_partitions / log_z_prior keys), so a direct library caller gets
+    # the same actionable error the CLI does instead of a KeyError from the
+    # likelihood closure.  main() already rejects this via
+    # _resolve_lensing_run_config; this is the second net.
+    _validate_partition_mode_against_cluster_mode(opts)
     rng = np.random.default_rng(opts.seed)
 
     # --- singleton PE (event-major flatten) ---
@@ -1219,6 +1310,19 @@ def load_inputs(opts):
         marginal_partitions = None
         partition_states = None
         log_z_prior = 0.0
+        # A fixed partition must partition the WHOLE observed catalog: the
+        # likelihood only touches the listed indices, so an uncovered event is
+        # silently dropped from the product while the run still reports the PE
+        # file's event count. Preflight checks this too; repeat it here so a
+        # --preflight_only false run (or a direct library caller) cannot slip past.
+        _coverage_error = fixed_partition_coverage_error(
+            list(map(int, partition["singleton_indices"]))
+            + [int(i) for i in np.asarray(partition["pair_indices"], dtype=int).reshape(-1)],
+            n_events_total,
+            path=opts.partition_path,
+        )
+        if _coverage_error is not None:
+            raise SystemExit(_coverage_error)
         fixed_singletons = jnp.asarray(partition["singleton_indices"], dtype=jnp.int32)
         fixed_pairs = jnp.asarray(partition["pair_indices"], dtype=jnp.int32)
         fixed_n_singletons = int(partition["n_singletons"])
@@ -2173,8 +2277,15 @@ def build_cluster_diagnostics(
                 int(inp["nsamp"]),
                 int(opts.y_nodes_pair),
             ],
+            # `coord` here is whatever point cleared the reliability guard --
+            # the prior midpoint, the registry fiducial, or a seeded prior draw
+            # -- so sampled lens values are named for that generic eval point.
             **_lens_settings_dict(
-                coord, lens_sampled_labels, fixed_parameter_values, opts
+                coord,
+                lens_sampled_labels,
+                fixed_parameter_values,
+                opts,
+                eval_point="diagnostics_point",
             ),
         )
         _add_off_control_nonfinite_diagnostics(out, opts=opts, inp=inp)
@@ -2411,6 +2522,11 @@ def build_parser():
         help="Injections per selection-integral chunk. 'auto' (default) sizes "
              "the block from probed free device memory after the data load; "
              "'off'/'none'/'0' forces a single pass; a positive integer pins it.")
+    # The lensing likelihood evaluates the SAME PairingModel grid branch as the
+    # main CLI, and the pairing grid is a process-global setting read from the
+    # environment, so this stack inherited DARKSIRENS_GW_PAIRING_M1_GRID with no
+    # way to opt in or out and no coverage guard.
+    add_normalization_grid_arguments(performance)
     output = p.add_argument_group("Output")
     output.add_argument("--seed", type=int, default=42)
     output.add_argument("--show_progress", type=str_to_bool, nargs="?", const=True,
@@ -2517,6 +2633,8 @@ def _resolve_lensing_run_config(opts):
         raise SystemExit(
             "--wl_backend tabulated requires --lensing_wl_table_path"
         )
+
+    _validate_partition_mode_against_cluster_mode(opts)
 
     opts.universe_model = _derive_universe_model(opts.wl_backend)
 
@@ -2664,6 +2782,16 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
 
         # the branch parses "true"/"false" strings into bools internally via opts;
         # build_parameter_space takes the raw opts.fix_* values it was given.
+        #
+        # universe_model GATES THE SAMPLED SURVEY BLOCK (prior._ACTIVE_SURVEY_PARAMS).
+        # Omitting it made the filter skip entirely, so --fix_survey false sampled
+        # SEVEN flat survey nuisance dimensions (12 -> 19) that the decoder --
+        # which DOES read opts.universe_model, i.e. spectral_sirens_wl -- then
+        # discarded: _decode_base_parameters slices coord[:len(sampled_labels)]
+        # and the survey block sits past that prefix, so those coordinates never
+        # reached the likelihood.  Thread every flag build_parameter_decoder
+        # re-derives the space from, using its own getattr defaults, so the two
+        # derivations cannot diverge.
         space = build_parameter_space(
             opts.pop_model,
             opts.fix_population,
@@ -2671,6 +2799,9 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
             opts.fix_survey,
             prior_overrides=overrides,
             fixed_parameter_values=base_fixed,
+            fix_de=getattr(opts, "fix_de", getattr(opts, "fixed_de", False)),
+            universe_model=getattr(opts, "universe_model", None),
+            use_lss=bool(getattr(opts, "use_LSS", True)),
         )
         base_labels = list(space[0])
         base_lower = np.asarray(space[1])
@@ -2708,6 +2839,12 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
 
         # decoder carries the WL params so decode() returns a survey with wl_params set
         opts.prior_overrides = overrides  # decoder reads getattr(opts,'prior_overrides')
+        # Arm the P0.1 fail-fast net for this CLI too: record the BASE sampler
+        # labels (the lens-only optical-depth block is appended afterwards and is
+        # not part of the decoder's space) so build_parameter_decoder raises if it
+        # re-derives a different set.  Previously set only in cli/inference.py, so
+        # every lensing run sampled with the net disarmed.
+        opts.expected_sampled_labels = tuple(base_labels)
         if opts.wl_backend == "tabulated":
             _wl_arrays = _load_wl_table_arrays(opts)
             wl_params = make_tabulated_wl_params(
@@ -2846,14 +2983,19 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             f.attrs["wl_a"] = float(opts.lensing_wl_a)
             f.attrs["wl_b"] = float(opts.lensing_wl_b)
             lens_settings = _lens_settings_dict(mid, labels, lens_fixed, opts)
-            f.attrs["lens_labels"] = json.dumps(lens_settings["lens_labels"])
-            f.attrs["fix_lens_rate"] = bool(opts.fix_lens_rate)
-            f.attrs["sl_tau_A"] = float(opts.sl_tau_A)
-            f.attrs["sl_tau_n"] = float(opts.sl_tau_n)
-            f.attrs["lens_A_tau"] = float(lens_settings["lens_A_tau"])
-            f.attrs["lens_n_tau"] = float(lens_settings["lens_n_tau"])
+            _write_lens_settings_attrs(f.attrs, lens_settings)
             if results.get("logZ") is not None:
                 f.attrs["logZ"] = float(results["logZ"])
+                # logZerr existed only in the run.log, yet the lensing paper's
+                # central quantity is logZ(j2) - logZ(off): without the error the
+                # archived run directory cannot say whether a 2-3 nat difference
+                # is significant.  Mirrors io.results.save_results_hdf5 -- NaN
+                # rather than absent when the sampler reports no error, so the
+                # attr is always readable.
+                _zerr = results.get("logZerr")
+                f.attrs["logZerr"] = (
+                    float(_zerr) if _zerr is not None else float("nan")
+                )
             write_tinyns_metadata(f.attrs, results, opts)
             # NUTS health metadata, mirroring io.results.save_results_hdf5 —
             # divergence counts previously existed only in stdout for lensing
@@ -2878,6 +3020,16 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             fixed_parameter_values_lens=lens_fixed,
             **_lens_settings_dict(mid, labels, lens_fixed, opts),
         )
+        if results.get("logZ") is not None:
+            # Evidence AND its error in settings.json too, so a Bayes factor can
+            # be assembled from the run directories alone.  Both nested samplers
+            # report an error; numpyro reports no logZ at all and skips this.
+            settings["logZ"] = float(results["logZ"])
+            settings["logZerr"] = (
+                float(results["logZerr"])
+                if results.get("logZerr") is not None
+                else None
+            )
         if inp.get("observed_catalog"):
             settings["observed_catalog_path"] = inp["observed_catalog"].get("path")
             settings["observed_catalog_format_version"] = inp["observed_catalog"].get(
@@ -2938,9 +3090,18 @@ def main(argv=None):
     print()
 
     _resolve_lensing_run_config(opts)
-    # Log the fully-resolved CLI options in argparse group order (no GW-population
-    # normalization grid on this stack, so the [Derived] rows are omitted).
-    _print_all_cli_options(parser, opts)
+    # Resolve the GW-population normalisation grids and size the OPT-IN pairing
+    # m1 grid to --pop_model's primary-mass support.  This stack does evaluate
+    # the interpolated PairingModel branch -- the setting is process-global and
+    # read from the environment -- so skipping the guard let a lensing run with
+    # DARKSIRENS_GW_PAIRING_M1_GRID set silently clamp the q-normaliser above
+    # m1 = 200 for models whose support reaches 300 (PHY-5).
+    configure_normalization_grids_for_model(opts)
+    # Log the fully-resolved CLI options in argparse group order, including the
+    # resolved normalization grid (part of the run's provenance).
+    _print_all_cli_options(
+        parser, opts, normalization_grid=normalization_grid_settings().to_dict()
+    )
     _print_run_configuration(opts)
     _run_and_report_preflight(opts)
     run_dir, settings, fixed, base_fixed, lens_fixed = _prepare_run_dir(opts)

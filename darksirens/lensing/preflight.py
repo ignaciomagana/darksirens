@@ -103,6 +103,40 @@ def _resolve_observed_catalog(opts, gw_n_events, errors, warnings, summary):
     return None
 
 
+def fixed_partition_coverage_error(used, n_events, *, path=None):
+    """Return an error string if a fixed partition does not cover every event.
+
+    A fixed partition must be a partition OF THE OBSERVED CATALOG: every event
+    index must appear exactly once, as a singleton or as one endpoint of a pair.
+    Shape, count self-consistency, index range and duplicates were all checked;
+    COVERAGE was not, and the cluster likelihood only ever touches the listed
+    indices.  An event in neither list is therefore silently excluded from the
+    product while the selection correction uses the reduced counts -- a
+    self-consistent inference on a SUBSET, reported over the PE file's event
+    count (results.hdf5 n_events comes from the PE file, the reference partition
+    counts from the partition).  A partition.json generated against an earlier or
+    truncated mock listing 0..89 against a 100-event PE file passed every check
+    and quietly analysed 90 events.  Returns ``None`` when the partition covers
+    everything or when the event count is unknown.
+    """
+    if n_events is None:
+        return None
+    limit = int(n_events)
+    missing = sorted(set(range(limit)) - {int(i) for i in used})
+    if not missing:
+        return None
+    shown = ", ".join(str(i) for i in missing[:20])
+    if len(missing) > 20:
+        shown += f", ... (+{len(missing) - 20} more)"
+    where = f" ({path})" if path else ""
+    return (
+        f"fixed partition does not cover every observed event{where}: "
+        f"{len(missing)} of {limit} events appear in neither singleton_indices "
+        f"nor pair_indices and would be SILENTLY DROPPED from the analysis "
+        f"while the run still reports n_events={limit}. Missing: {shown}"
+    )
+
+
 def _check_partition(path, n_events, errors, summary, *, observed_n_events=None):
     if not _exists(path, errors, "partition_path"):
         return []
@@ -133,6 +167,9 @@ def _check_partition(path, n_events, errors, summary, *, observed_n_events=None)
         )
     if len(set(used)) != len(used):
         errors.append("fixed partition uses at least one event more than once")
+    coverage_error = fixed_partition_coverage_error(used, limit)
+    if coverage_error is not None:
+        errors.append(coverage_error)
     summary["n_pairs_partition"] = int(pairs.shape[0]) if pairs.ndim == 2 else None
     return (
         [tuple(map(int, p)) for p in pairs.reshape((-1, 2))] if pairs.ndim == 2 else []

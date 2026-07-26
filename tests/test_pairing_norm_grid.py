@@ -35,6 +35,9 @@ median tightly and report the max.
 Run with ``JAX_PLATFORMS=cpu``.
 """
 import numpy as np
+
+# numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 pytest.importorskip("jax")
@@ -124,7 +127,7 @@ def _exact_pairing_norm_powerlaw(m1, mmin, dmmin, beta):
         p = np.where(q > 0, sq ** beta, 0.0)
         p = np.asarray(sfilter_low(m2, mmin, dmmin)) * p
         p = np.where(m2 < mmin, 0.0, p)
-        out[i] = np.trapezoid(p, q)  # np.trapz removed in NumPy 2.0
+        out[i] = _trapezoid(p, q)  # np.trapz removed in NumPy 2.0
     return out
 
 
@@ -503,3 +506,119 @@ def test_cold_cache_grids_do_not_leak_tracers_across_jits():
     # the host-side reference (ensure_compile_time_eval preserves x64 values).
     assert np.array_equal(np.asarray(U.get_mass_grid()), ref_mass)
     assert np.array_equal(np.asarray(U.get_pairing_m1_grid()), ref_pair)
+
+
+# ---------------------------------------------------------------------------
+# Both CLI entry points must apply the PHY-5 coverage guard
+# ---------------------------------------------------------------------------
+
+_WIDE_SUPPORT_MODEL = "gwtc5_fiducial_bpl2peaks"   # m1_support_max = 300 > M_HI
+
+
+def _cli_parsers():
+    """(name, parser, base argv) for both inference CLIs."""
+    from darksirens.cli import inference, inference_lensing
+
+    return [
+        (
+            "main",
+            inference.build_parser(),
+            ["--gw_path", "gw.h5", "--gwselection_path", "sel.h5",
+             "--universe_model", "spectral_sirens", "--sampler", "tinyns"],
+        ),
+        (
+            "lensing",
+            inference_lensing.build_parser(),
+            ["--gw_path", "gw.h5", "--gwselection_path", "sel.h5",
+             "--sampler", "tinyns", "--cluster_mode", "off"],
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "module_name,phase",
+    [
+        ("darksirens.cli.inference", "_configure_performance_grids"),
+        ("darksirens.cli.inference_lensing", "main"),
+    ],
+)
+def test_both_clis_wire_the_grid_resolver_into_their_startup_phase(module_name, phase):
+    """The shared resolver must actually be CALLED by both CLIs, not merely
+    importable -- the whole defect was one twin never calling it."""
+    import importlib
+    import inspect
+
+    module = importlib.import_module(module_name)
+    src = inspect.getsource(getattr(module, phase))
+    assert "configure_normalization_grids_for_model(opts)" in src
+
+
+@pytest.mark.parametrize("which", ["main", "lensing"])
+def test_both_clis_expose_the_normalization_grid_flags(which):
+    """The lensing CLI offered no --norm_*/--pairing_norm_grid knobs at all, so a
+    lensing run could not opt in to (or out of) the process-global setting it
+    inherits from DARKSIRENS_GW_PAIRING_M1_GRID."""
+    name, parser, base = next(x for x in _cli_parsers() if x[0] == which)
+    opts = parser.parse_args(base + ["--pairing_norm_grid", "512",
+                                     "--norm_nmass", "300", "--norm_nq", "150",
+                                     "--norm_nchi", "120"])
+    assert opts.pairing_norm_grid == 512
+    assert (opts.norm_nmass, opts.norm_nq, opts.norm_nchi) == (300, 150, 120)
+
+
+@pytest.mark.parametrize("which", ["main", "lensing"])
+def test_both_clis_size_an_inherited_pairing_grid_to_the_model_support(which):
+    """PHY-5, applied to one twin only: with the pairing grid enabled from the
+    ENVIRONMENT and a model whose m1 support reaches 300, the default ceiling of
+    M_HI = 200 makes jnp.interp reuse the m1 = 200 normaliser for the whole
+    200 < m1 <= 300 slice of the support (measured +0.25 nat in log p_pop).  The
+    main CLI sized the grid up; the lensing CLI had no equivalent call and its
+    comment claimed there was 'no GW-population normalization grid on this
+    stack'."""
+    from darksirens.cli.common import configure_normalization_grids_for_model
+    from darksirens.gw.populations import get_model, population_m1_support_max
+
+    _set_pairing_grid(2048, m_hi=200.0)
+    support = population_m1_support_max(get_model(_WIDE_SUPPORT_MODEL))
+    assert support > U.normalization_grid_settings().pairing_m_hi
+
+    name, parser, base = next(x for x in _cli_parsers() if x[0] == which)
+    opts = parser.parse_args(base + ["--pop_model", _WIDE_SUPPORT_MODEL])
+    configure_normalization_grids_for_model(opts)
+
+    s = U.normalization_grid_settings()
+    assert s.pairing_m_hi >= support
+    # node count scaled with the added log-range so density is preserved
+    assert s.pairing_m1_grid > 2048
+
+
+@pytest.mark.parametrize("which", ["main", "lensing"])
+def test_both_clis_leave_the_grid_disabled_when_nobody_opts_in(which):
+    """No env var, no flag -> exact per-sample q-integration, untouched."""
+    from darksirens.cli.common import configure_normalization_grids_for_model
+
+    _set_pairing_grid(None, m_hi=200.0)
+    name, parser, base = next(x for x in _cli_parsers() if x[0] == which)
+    opts = parser.parse_args(base + ["--pop_model", _WIDE_SUPPORT_MODEL])
+    configure_normalization_grids_for_model(opts)
+
+    s = U.normalization_grid_settings()
+    assert s.pairing_m1_grid is None
+    assert s.pairing_m_hi == 200.0
+
+
+@pytest.mark.parametrize("which", ["main", "lensing"])
+def test_both_clis_size_an_explicitly_requested_pairing_grid(which):
+    """The --pairing_norm_grid flag path is sized the same way as the env path."""
+    from darksirens.cli.common import configure_normalization_grids_for_model
+
+    _set_pairing_grid(None, m_hi=200.0)
+    name, parser, base = next(x for x in _cli_parsers() if x[0] == which)
+    opts = parser.parse_args(
+        base + ["--pop_model", _WIDE_SUPPORT_MODEL, "--pairing_norm_grid", "1024"]
+    )
+    configure_normalization_grids_for_model(opts)
+
+    s = U.normalization_grid_settings()
+    assert s.pairing_m1_grid > 1024
+    assert s.pairing_m_hi >= 300.0
