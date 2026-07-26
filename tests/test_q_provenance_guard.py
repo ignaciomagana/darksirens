@@ -65,9 +65,24 @@ def test_error_names_the_offending_parameter_and_the_build_value():
 
 
 def test_per_catalog_suffixed_labels_are_caught():
-    """log10n0_c2 must gate exactly like log10n0 (K>=2 mixtures)."""
+    """log10n0_c2 gates like log10n0 -- against CATALOG 2's OWN table.
+
+    This test previously passed a single table and asserted that log10n0_c2
+    raised. That encoded the defect: catalog 2's independent survey parameter
+    was being judged against catalog 1's build values, which both rejected the
+    supported "Q on catalog 1 only" setup and never verified catalog 2's table.
+    The suffixed label must be checked against the suffixed catalog's table.
+    """
     with pytest.raises(ValueError, match="log10n0_c2"):
-        check_lss_completion_provenance(_fiducials(), SAFE_LABELS + ["log10n0_c2"], {})
+        check_lss_completion_provenance(
+            [None, _fiducials(path="/tmp/q2.h5")],
+            SAFE_LABELS + ["log10n0_c2"], {},
+        )
+    # ...and with no table on catalog 2, it is none of the guard's business.
+    check_lss_completion_provenance(
+        [_fiducials(), None], SAFE_LABELS + ["log10n0_c2"],
+        {"log10n0": math.log10(1e-2), "delta": 0.0, "b_miss": 1.0},
+    )
 
 
 def test_multiple_offenders_are_all_reported():
@@ -178,3 +193,117 @@ def test_loader_returns_fiducials_key_even_without_a_table():
     out = maybe_load_lss_completion(opts, zgrid=zgrid)
     assert "lss_completion_fiducials" in out
     assert out["lss_completion_fiducials"] is None
+
+
+# ============================================================================
+# w0 / wa must actually be comparable (regression: loader dropped them)
+# ============================================================================
+#
+# The builder stamps fiducial_w0/fiducial_wa and _Q_CONDITIONED names them, but
+# the loader's forwarding whitelist omitted both, so the guard silently skipped
+# the comparison for the two dark-energy parameters it claims to protect.
+
+@pytest.mark.parametrize("param,key,build,bad", [
+    ("w0", "fiducial_w0", -1.0, -0.85),
+    ("wa", "fiducial_wa", 0.0, 0.4),
+])
+def test_fixed_w0_wa_mismatch_is_caught(param, key, build, bad):
+    fid = _fiducials(**{key: build})
+    check_lss_completion_provenance(fid, SAFE_LABELS, {param: build})   # matching -> ok
+    with pytest.raises(ValueError, match="Q_LSS provenance mismatch"):
+        check_lss_completion_provenance(fid, SAFE_LABELS, {param: bad})
+
+
+def test_loader_forwards_w0_wa_fiducials():
+    """The guard is only live if the loader actually hands these through."""
+    import inspect
+
+    from darksirens.catalogs import lss as lss_mod
+    from darksirens.inference.q_provenance import _Q_CONDITIONED
+
+    src = inspect.getsource(lss_mod.maybe_load_lss_completion)
+    for key in _Q_CONDITIONED.values():
+        assert f'"{key}"' in src, (
+            f"{key} is a Q-conditioning key but maybe_load_lss_completion does "
+            "not forward it, so the provenance check for it is dead code"
+        )
+
+
+# ============================================================================
+# Per-catalog validation for K >= 2
+# ============================================================================
+
+def test_per_catalog_survey_params_use_their_own_table():
+    """catalog 2's log10n0_c2 is checked against catalog 2's table, not 1's."""
+    cat1 = _fiducials(fiducial_n0=1e-2)
+    cat2 = _fiducials(fiducial_n0=1e-3, path="/tmp/q2.h5")
+    labels = SAFE_LABELS
+    # Each fixed to ITS OWN build value -> passes.
+    check_lss_completion_provenance(
+        [cat1, cat2], labels,
+        {"log10n0": math.log10(1e-2), "log10n0_c2": math.log10(1e-3)},
+    )
+    # Swapping them must be caught (previously both were compared to cat1).
+    with pytest.raises(ValueError, match="log10n0_c2"):
+        check_lss_completion_provenance(
+            [cat1, cat2], labels,
+            {"log10n0": math.log10(1e-2), "log10n0_c2": math.log10(1e-2)},
+        )
+
+
+def test_q_on_one_catalog_only_does_not_reject_the_other():
+    """The supported mixed config: catalog 1 has Q, catalog 2 does not.
+
+    Catalog 2 keeps sampling its own log10n0_c2/delta_c2, which must NOT be
+    judged against catalog 1's table.
+    """
+    check_lss_completion_provenance(
+        [_fiducials(), None],
+        SAFE_LABELS + ["log10n0_c2", "delta_c2", "b_miss_c2"],
+        {"log10n0": math.log10(1e-2), "delta": 0.0, "b_miss": 1.0},
+    )
+
+
+def test_second_catalogs_table_is_actually_verified():
+    """Catalog 2's own table must be checked, not skipped."""
+    cat2 = _fiducials(fiducial_n0=1e-3, path="/tmp/q2.h5")
+    with pytest.raises(ValueError, match="log10n0_c2"):
+        check_lss_completion_provenance(
+            [None, cat2], SAFE_LABELS + ["log10n0_c2"], {},
+        )
+
+
+def test_global_cosmology_checked_against_every_catalog_table():
+    """Om0/w0/wa are global, so EVERY catalog's table must agree with them."""
+    cat1 = _fiducials(fiducial_Om0=0.3075)
+    cat2 = _fiducials(fiducial_Om0=0.28, path="/tmp/q2.h5")
+    with pytest.raises(ValueError, match="catalog 2"):
+        check_lss_completion_provenance([cat1, cat2], SAFE_LABELS, {"Om0": 0.3075})
+
+
+def test_sampled_global_cosmology_reported_once_per_offending_table():
+    with pytest.raises(ValueError) as exc:
+        check_lss_completion_provenance(
+            [_fiducials(), _fiducials(path="/tmp/q2.h5")], SAFE_LABELS + ["Om0"], {},
+        )
+    assert "Om0" in str(exc.value)
+
+
+def test_bare_dict_still_accepted_for_single_catalog():
+    """Back-compat: a plain dict behaves exactly as before."""
+    check_lss_completion_provenance(_fiducials(), SAFE_LABELS, {})
+    with pytest.raises(ValueError, match="Q_LSS provenance mismatch"):
+        check_lss_completion_provenance(_fiducials(), SAFE_LABELS + ["delta"], {})
+
+
+def test_all_none_sequence_is_a_no_op():
+    check_lss_completion_provenance([None, None], SAFE_LABELS + ["log10n0"], {})
+
+
+def test_catalog_index_parsing():
+    from darksirens.inference.q_provenance import _catalog_index
+
+    assert _catalog_index("log10n0") == 0
+    assert _catalog_index("log10n0_c2") == 1
+    assert _catalog_index("log10n0_c10") == 9
+    assert _catalog_index("H0") == 0

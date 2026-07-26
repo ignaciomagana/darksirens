@@ -1738,12 +1738,17 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # sampling or re-fixing those does not propagate into Q, it is absorbed as
     # spurious redshift structure and biases H0. This is the first point where
     # both the table's fiducials and the final sampled set are known.
-    _q_fiducials = data.get("lss_completion_fiducials")
-    if _q_fiducials is None:
-        for _b in _lss_bundles:
-            if _b.get("lss_completion_fiducials") is not None:
-                _q_fiducials = _b["lss_completion_fiducials"]
-                break
+    # ONE ENTRY PER CATALOG, in catalog order. Survey parameters are per
+    # catalog (log10n0_c2 belongs to catalog 2), so passing a single table for a
+    # K>=2 mixture would check catalog 2..K's parameters against catalog 1's
+    # build values -- rejecting the supported "Q on one catalog only" setup and
+    # leaving the other catalogs' tables unverified.
+    if _lss_bundles:
+        _q_fiducials = [
+            _b.get("lss_completion_fiducials") for _b in _lss_bundles
+        ]
+    else:
+        _q_fiducials = [data.get("lss_completion_fiducials")]
     check_lss_completion_provenance(_q_fiducials, labels, fixed_parameter_values)
     # Record the exact sampler labels so build_parameter_decoder (inside
     # make_likelihood) can fail fast if it re-derives a different set -- the

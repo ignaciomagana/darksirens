@@ -83,8 +83,14 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
             f"indexing={loaded.get('indexing')}"
         )
         _diag = loaded.get("diagnostics") or {}
+        # NOTE: this whitelist is the INPUT to the provenance guard, so every
+        # key named in ``q_provenance._Q_CONDITIONED`` must appear here.
+        # fiducial_w0/fiducial_wa were previously missing, which silently made
+        # the guard dead code for the two dark-energy parameters it claims to
+        # protect (the builder stamps them; see build_lognormal_completion.py).
         _fid = {k: _diag[k] for k in (
-            "fiducial_H0", "fiducial_Om0", "fiducial_n0", "fiducial_delta",
+            "fiducial_H0", "fiducial_Om0", "fiducial_w0", "fiducial_wa",
+            "fiducial_n0", "fiducial_delta",
             "bias_b_miss", "lss_corr_length_mpc", "lss_sigma",
         ) if k in _diag}
         if _fid:
