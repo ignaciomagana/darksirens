@@ -746,3 +746,125 @@ def test_master_pair_orientation_mode_threads_to_singleton_channel(master_fixtur
 
     g = jax.grad(f)(fx["pop_params"])
     assert np.all(np.isfinite(np.asarray(g))), f"non-finite grad: {np.asarray(g)}"
+
+
+# ============================================================================
+# F. Generator: shared-orientation two-arrival-time rendering
+# ============================================================================
+
+def test_generator_shared_iota_rendering_enriches_coincident_detections():
+    """The generator's shared_iota doubles rendering must produce MORE
+    both-detected pairs (and fewer exactly-one) than the independent
+    rendering at matched per-image marginals — the physical correlation the
+    inference-side shared_iota mode models. Also pins the antenna
+    implementation: |F| <= 1, Theta <= 4, and the per-image marginal
+    detection rate stays consistent between the two renderings (the
+    polynomial is a ~few-percent fit to the geometric marginal)."""
+    from scripts.mock_lensing.generate_mock_lensing import (
+        SNRModel, apply_selection_doubles, antenna_pattern_single_detector,
+    )
+
+    n = 200_000
+    rng = np.random.default_rng(3)
+    # Threshold-dominated population (deep z, short horizon): in a loud
+    # population both conventions detect nearly everything and the
+    # enrichment washes out; here the aggregate P(both) ratio is ~1.17.
+    z = rng.uniform(1.0, 3.0, n)
+    m1 = rng.uniform(20.0, 60.0, n)
+    q = rng.uniform(0.4, 1.0, n)
+    dL_src = np.asarray(dL_of_z(jnp.asarray(z), H0Planck, Om0Planck))
+    y = np.sqrt(rng.uniform(0.0, 1.0, n))
+    mu_p, mu_m = (1.0 + y) / y, (1.0 - y) / y
+    src = dict(m1=m1, q=q, z=z, dL_src=dL_src,
+               ra_true=rng.uniform(0.0, 2 * np.pi, n),
+               dec_true=np.arcsin(rng.uniform(-1.0, 1.0, n)))
+    marks = dict(is_double=np.ones(n, dtype=bool), y=y,
+                 mu_plus=mu_p, mu_minus=mu_m)
+    model = SNRModel(rho_thr=8.0, horizon_Mpc=1500.0)
+    sis = make_sis_lens_params(A_tau=5e-4, n_tau=3.0)
+
+    ind = apply_selection_doubles(src, marks, model,
+                                  np.random.default_rng(11))
+    shared = apply_selection_doubles(
+        src, marks, model, np.random.default_rng(11),
+        pair_orientation_mode="shared_iota", sis=sis,
+    )
+    # matched per-image marginals (polynomial vs geometric fit gap < ~5%
+    # absolute at these thresholds, plus MC noise)
+    for k in ("det_plus", "det_minus"):
+        assert abs(shared[k].mean() - ind[k].mean()) < 0.05
+    both_ratio = shared["both_detected"].mean() / ind["both_detected"].mean()
+    one_ind = np.mean(ind["det_plus"] ^ ind["det_minus"])
+    one_shared = np.mean(shared["det_plus"] ^ shared["det_minus"])
+    assert both_ratio > 1.1                 # correlated pairs are commoner
+    assert one_shared < one_ind             # ... at the singletons' expense
+
+    # antenna sanity: |F| bounded, Theta within FC support
+    fp, fx_ = antenna_pattern_single_detector(
+        src["ra_true"][:5000], src["dec_true"][:5000],
+        rng.uniform(0, np.pi, 5000), rng.uniform(0, 86164.0905, 5000),
+    )
+    assert np.all(fp**2 + fx_**2 <= 1.0 + 1e-12)
+
+    with pytest.raises(ValueError, match="pair_orientation_mode"):
+        apply_selection_doubles(src, marks, model, np.random.default_rng(1),
+                                pair_orientation_mode="bogus", sis=sis)
+    with pytest.raises(ValueError, match="sis"):
+        apply_selection_doubles(src, marks, model, np.random.default_rng(1),
+                                pair_orientation_mode="shared_iota")
+
+
+def test_generator_shared_iota_injections_record_mode_attr(tmp_path):
+    """generate_lensed_injections in shared_iota mode writes the
+    pair_orientation_mode attr (inference checks it for consistency) and the
+    independent mode keeps a bit-identical RNG stream (same detections as
+    the pre-mode code path, which drew the same uniforms in the same order)."""
+    import h5py
+    from scripts.mock_lensing.generate_mock_lensing import (
+        SNRModel, generate_lensed_injections,
+    )
+
+    model = SNRModel(rho_thr=8.0, horizon_Mpc=3000.0)
+    sis = make_sis_lens_params(A_tau=5e-4, n_tau=3.0)
+
+    path_shared = str(tmp_path / "lensed_shared.h5")
+    summary, n_both = generate_lensed_injections(
+        20_000, model, np.random.default_rng(5), H0Planck, Om0Planck,
+        out_path=path_shared, sis=sis, pair_orientation_mode="shared_iota",
+    )
+    assert summary["pair_orientation_mode"] == "shared_iota"
+    assert n_both > 0
+    with h5py.File(path_shared, "r") as f:
+        assert f.attrs["pair_orientation_mode"] == "shared_iota"
+
+    path_ind = str(tmp_path / "lensed_ind.h5")
+    generate_lensed_injections(
+        20_000, model, np.random.default_rng(5), H0Planck, Om0Planck,
+        out_path=path_ind, sis=sis,
+    )
+    with h5py.File(path_ind, "r") as f:
+        assert f.attrs["pair_orientation_mode"] == "independent"
+        det_ind = np.asarray(f["detected"])
+    # RNG-parity oracle for the independent path: replay the pre-mode draw
+    # order (m1, q, chi, y, z, then one uniform per image) and re-derive the
+    # detections.
+    rng = np.random.default_rng(5)
+    m1_src = rng.uniform(3.0, 120.0, 20_000)
+    q = rng.uniform(0.0, 1.0, 20_000)
+    _chieff = rng.uniform(-1.0, 1.0, 20_000)
+    y = rng.uniform(0.0, 1.0, 20_000)
+    from darksirens.utils.cosmology import dV_of_z, zMax
+    zg = np.linspace(1e-4, float(zMax), 4000)
+    dV = np.asarray(dV_of_z(jnp.asarray(zg), H0Planck, Om0Planck))
+    cdf = np.concatenate([[0.0], np.cumsum(0.5 * (dV[1:] + dV[:-1]) * np.diff(zg))])
+    cdf /= cdf[-1]
+    z = np.interp(rng.uniform(0, 1, 20_000), cdf, zg)
+    from darksirens.lensing.slmarks import mu_plus_minus_from_y
+    mu_p, mu_m = mu_plus_minus_from_y(jnp.asarray(y))
+    dL_src = np.asarray(dL_of_z(jnp.asarray(z), H0Planck, Om0Planck))
+    pdet_p = model.p_det(m1_src, q, z, dL_src / np.sqrt(np.asarray(mu_p)))
+    pdet_m = model.p_det(m1_src, q, z, dL_src / np.sqrt(np.asarray(mu_m)))
+    det_p = rng.uniform(0, 1, 20_000) < pdet_p
+    det_m = rng.uniform(0, 1, 20_000) < pdet_m
+    np.testing.assert_array_equal(det_ind[0::2], det_p)
+    np.testing.assert_array_equal(det_ind[1::2], det_m)

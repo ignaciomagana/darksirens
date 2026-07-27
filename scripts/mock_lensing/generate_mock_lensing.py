@@ -82,6 +82,7 @@ from darksirens.lensing.slmarks import (
     DEFAULT_T0_SECONDS,
 )
 from darksirens.lensing.wlmagnification import make_lognormal_wl_params
+from darksirens.lensing.fcpdet import theta_fc_from_antenna
 from darksirens.lensing.lensed_injections import save_lensed_injections
 from darksirens.lensing.pair_tag_selection import make_pair_tag_selection_model
 from darksirens.lensing.observed_catalog import write_observed_pe_attrs
@@ -417,15 +418,105 @@ def apply_selection_singletons(src, marks, model, rng):
     return detected, dL_app, pdet
 
 
-def apply_selection_doubles(src, marks, model, rng):
+# ---- shared-orientation ('shared_iota') two-image rendering ----------------
+# One (iota, psi, alpha, delta) per SOURCE; the two images' antenna factors
+# are evaluated at arrival times t and t + delta_t(y), so their Finn-Chernoff
+# Thetas share the inclination exactly while the detector response
+# decorrelates over the day-to-month SIS delays. Theta comes from
+# darksirens.lensing.fcpdet.theta_fc_from_antenna — the SAME FC93 eq. 3.31
+# decomposition the inference-side 'shared_iota' tables are built from.
+_SIDEREAL_DAY_SECONDS = 86164.0905
+_DETECTOR_LATITUDE_RAD = np.deg2rad(46.455)   # generic mid-latitude (LHO-like)
+
+
+def antenna_pattern_single_detector(ra, dec, psi, t_sec):
+    """(F_+, F_x) of one L-shaped detector (arms along local North/East).
+
+    Equatorial-frame tensor contraction d:e_{+,x} with the detector tensor
+    rotated by the Earth-rotation angle Omega t (arbitrary epoch/longitude —
+    the mock sky is isotropic in right ascension, so only the rotation PHASE
+    DIFFERENCE between two arrivals matters). |F_+|, |F_x| <= 1; the
+    polarization-basis (parallactic) rotation is included automatically.
+    """
+    lst = (2.0 * np.pi / _SIDEREAL_DAY_SECONDS) * np.asarray(t_sec, dtype=float)
+    sin_lat = np.sin(_DETECTOR_LATITUDE_RAD)
+    cos_lat = np.cos(_DETECTOR_LATITUDE_RAD)
+    east = np.stack([-np.sin(lst), np.cos(lst), np.zeros_like(lst)], axis=-1)
+    north = np.stack(
+        [-sin_lat * np.cos(lst), -sin_lat * np.sin(lst),
+         np.full_like(lst, cos_lat)], axis=-1,
+    )
+    xarm, yarm = north, east
+    e1 = np.stack([np.sin(ra), -np.cos(ra), np.zeros_like(ra)], axis=-1)
+    e2 = np.stack(
+        [-np.sin(dec) * np.cos(ra), -np.sin(dec) * np.sin(ra), np.cos(dec)],
+        axis=-1,
+    )
+    cp, sp = np.cos(psi)[..., None], np.sin(psi)[..., None]
+    p_vec = e1 * cp + e2 * sp
+    q_vec = -e1 * sp + e2 * cp
+    xp_, xq = (xarm * p_vec).sum(-1), (xarm * q_vec).sum(-1)
+    yp, yq = (yarm * p_vec).sum(-1), (yarm * q_vec).sum(-1)
+    f_plus = 0.5 * (xp_**2 - xq**2 - yp**2 + yq**2)
+    f_cross = xp_ * xq - yp * yq
+    return f_plus, f_cross
+
+
+def _shared_orientation_thetas(ra, dec, psi, cos_iota, t_first, delta_t_sec):
+    """Finn-Chernoff Thetas of the two images of one source (shared
+    orientation, antenna at t and t + delta_t)."""
+    fp1, fx1 = antenna_pattern_single_detector(ra, dec, psi, t_first)
+    fp2, fx2 = antenna_pattern_single_detector(ra, dec, psi, t_first + delta_t_sec)
+    th1 = np.asarray(theta_fc_from_antenna(fp1, fx1, cos_iota))
+    th2 = np.asarray(theta_fc_from_antenna(fp2, fx2, cos_iota))
+    return th1, th2
+
+
+def apply_selection_doubles(src, marks, model, rng, *,
+                            pair_orientation_mode="independent", sis=None):
+    """Render the two images' detections.
+
+    'independent' (default): one uniform draw per IMAGE against the
+    orientation-marginalised p_det — the historical convention, matched by
+    the inference default --pair_orientation_mode independent. RNG stream is
+    bit-identical to the pre-mode code.
+
+    'shared_iota': one (iota, psi) per source plus the source's (ra, dec),
+    antenna at arrival times t and t + delta_t(y) — matched by
+    --pair_orientation_mode shared_iota at inference. Requires ``sis`` for
+    the SIS delay law delta_t = T0 * y.
+    """
     z = src["z"]; m1 = src["m1"]; q = src["q"]; dL_src = src["dL_src"]
     dbl = marks["is_double"]
     dL_app_p = dL_src / np.sqrt(np.where(dbl, marks["mu_plus"], 1.0))
     dL_app_m = dL_src / np.sqrt(np.where(dbl, marks["mu_minus"], 1.0))
-    pdet_p = np.where(dbl, model.p_det(m1, q, z, dL_app_p), 0.0)
-    pdet_m = np.where(dbl, model.p_det(m1, q, z, dL_app_m), 0.0)
-    det_p = dbl & (rng.uniform(0.0, 1.0, len(z)) < pdet_p)
-    det_m = dbl & (rng.uniform(0.0, 1.0, len(z)) < pdet_m)
+    if pair_orientation_mode == "independent":
+        pdet_p = np.where(dbl, model.p_det(m1, q, z, dL_app_p), 0.0)
+        pdet_m = np.where(dbl, model.p_det(m1, q, z, dL_app_m), 0.0)
+        det_p = dbl & (rng.uniform(0.0, 1.0, len(z)) < pdet_p)
+        det_m = dbl & (rng.uniform(0.0, 1.0, len(z)) < pdet_m)
+    elif pair_orientation_mode == "shared_iota":
+        if sis is None:
+            raise ValueError(
+                "apply_selection_doubles: shared_iota rendering needs the "
+                "SISLensParams for the time-delay law (pass sis=...)"
+            )
+        n = len(z)
+        psi = rng.uniform(0.0, np.pi, n)
+        cos_iota = rng.uniform(-1.0, 1.0, n)
+        t_first = rng.uniform(0.0, _SIDEREAL_DAY_SECONDS, n)
+        y_safe = np.where(dbl, marks["y"], 0.5)
+        dt = np.asarray(delta_t_from_y(jnp.asarray(y_safe), sis), dtype=float)
+        # mu_+ is the leading image: it arrives at t, the fainter at t + dt.
+        th_p, th_m = _shared_orientation_thetas(
+            src["ra_true"], src["dec_true"], psi, cos_iota, t_first, dt,
+        )
+        det_p = dbl & (th_p > model.theta_threshold(m1, q, z, dL_app_p))
+        det_m = dbl & (th_m > model.theta_threshold(m1, q, z, dL_app_m))
+    else:
+        raise ValueError(
+            f"unknown pair_orientation_mode: {pair_orientation_mode!r}"
+        )
     return dict(det_plus=det_p, det_minus=det_m, both_detected=det_p & det_m)
 
 
@@ -585,9 +676,17 @@ def generate_unlensed_injections(n_draw, model, rng, H0, Om0, *,
 def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
                                m1src_range=(3.0, 120.0), out_path=None,
                                pair_tag_model="none", pair_tag_prob=1.0,
-                               sis=None):
+                               sis=None, pair_orientation_mode="independent"):
     """Lensed J=2 injections in the SOURCE-frame proposal basis, written via the
-    lensing per-image schema (``save_lensed_injections``)."""
+    lensing per-image schema (``save_lensed_injections``).
+
+    ``pair_orientation_mode`` selects the detection rendering: 'independent'
+    (default; one uniform per image against the marginal p_det — the RNG
+    stream is bit-identical to the pre-mode code) or 'shared_iota' (one
+    (iota, psi, alpha, delta) per source, antenna at t and t + delta_t(y);
+    see ``apply_selection_doubles``). The mode is recorded as the
+    ``pair_orientation_mode`` file attr so inference can check consistency.
+    """
     m1lo, m1hi = m1src_range
     m1_src = rng.uniform(m1lo, m1hi, n_draw_sources)
     q = rng.uniform(0.0, 1.0, n_draw_sources)
@@ -607,20 +706,37 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
     mu_p, mu_m = mu_plus_minus_from_y(jnp.asarray(y))
     mu_p = np.asarray(mu_p); mu_m = np.asarray(mu_m)
     dL_src = np.asarray(dL_of_z(jnp.asarray(z), H0, Om0))
-    pdet_p = model.p_det(m1_src, q, z, dL_src / np.sqrt(mu_p))
-    pdet_m = model.p_det(m1_src, q, z, dL_src / np.sqrt(mu_m))
-    det_p = rng.uniform(0, 1, n_draw_sources) < pdet_p
-    det_m = rng.uniform(0, 1, n_draw_sources) < pdet_m
-    both = det_p & det_m
-
-    snr_p = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_p))
-    snr_m = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_m))
     # Render with the SAME SISLensParams the observed pairs use: T0 is now
     # configurable, so a bare make_sis_lens_params() here would put the
     # injection campaign's delays on a different time-delay scale from the
     # observed catalog's.
     sis_render = sis if sis is not None else make_sis_lens_params()
     true_dt = np.asarray(delta_t_from_y(jnp.asarray(y), sis_render), dtype=float)
+
+    if pair_orientation_mode == "independent":
+        pdet_p = model.p_det(m1_src, q, z, dL_src / np.sqrt(mu_p))
+        pdet_m = model.p_det(m1_src, q, z, dL_src / np.sqrt(mu_m))
+        det_p = rng.uniform(0, 1, n_draw_sources) < pdet_p
+        det_m = rng.uniform(0, 1, n_draw_sources) < pdet_m
+    elif pair_orientation_mode == "shared_iota":
+        ra = rng.uniform(0.0, 2 * np.pi, n_draw_sources)
+        dec = np.arcsin(rng.uniform(-1.0, 1.0, n_draw_sources))
+        psi = rng.uniform(0.0, np.pi, n_draw_sources)
+        cos_iota = rng.uniform(-1.0, 1.0, n_draw_sources)
+        t_first = rng.uniform(0.0, _SIDEREAL_DAY_SECONDS, n_draw_sources)
+        th_p, th_m = _shared_orientation_thetas(
+            ra, dec, psi, cos_iota, t_first, true_dt,
+        )
+        det_p = th_p > model.theta_threshold(m1_src, q, z, dL_src / np.sqrt(mu_p))
+        det_m = th_m > model.theta_threshold(m1_src, q, z, dL_src / np.sqrt(mu_m))
+    else:
+        raise ValueError(
+            f"unknown pair_orientation_mode: {pair_orientation_mode!r}"
+        )
+    both = det_p & det_m
+
+    snr_p = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_p))
+    snr_m = model.expected_snr_optimal(m1_src, q, z, dL_src / np.sqrt(mu_m))
     log_sky_overlap = np.log(np.clip((np.minimum(snr_p, snr_m) / np.maximum(snr_p, snr_m)) ** 2, 1e-12, 1.0))
     normalized_model = "snr_time" if pair_tag_model == "min_snr_proxy" else pair_tag_model
     if normalized_model == "none":
@@ -661,7 +777,10 @@ def generate_lensed_injections(n_draw_sources, model, rng, H0, Om0, *,
                 "fc_mc_bar": model.mc_bar,
             },
         )
+        with h5py.File(out_path, "a") as f:
+            f.attrs["pair_orientation_mode"] = str(pair_orientation_mode)
     return dict(n_sources=N, n_both=int(both.sum()),
+                pair_orientation_mode=str(pair_orientation_mode),
                 pair_tag_model=pair_tag_model, pair_tag_prob=float(pair_tag_prob),
                 mean_p_tag_both=float(np.mean(p_tag[both])) if np.any(both) else None), int(both.sum())
 
@@ -858,7 +977,8 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
              build_candidate_pairs_from_observed=False,
              validation_sample_log10_tau_A=False, validation_log10_tau_A_prior=(-7.0, -2.0),
              write_legacy_pair_pe=False,
-             injection_proposal="broad"):
+             injection_proposal="broad",
+             pair_orientation_mode="independent"):
     os.makedirs(out_dir, exist_ok=True)
     truth = make_truth(seed, H0, Om0, sis, wl)
     truth.update(rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
@@ -866,6 +986,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
                  n_sources_universe=n_universe, nsamp=nsamp,
                  conditioning=conditioning,
                  selection_model="Finn-Chernoff orientation-averaged p_det",
+                 pair_orientation_mode=str(pair_orientation_mode),
                  pe_prior_convention="p_pe proportional to m1det * dL^2 in the (m1det, q, dL) basis",
                  time_delay_sigma_sec=float(time_delay_sigma_sec))
 
@@ -876,7 +997,10 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     d = generate_step12(n_universe, seed, H0, Om0, sis, wl)
     src, marks = d["src"], d["marks"]
     det_s, _, _ = apply_selection_singletons(src, marks, model, rng)
-    dbl = apply_selection_doubles(src, marks, model, rng)
+    dbl = apply_selection_doubles(
+        src, marks, model, rng,
+        pair_orientation_mode=pair_orientation_mode, sis=sis,
+    )
 
     sing_candidates = np.where(det_s)[0]
     pair_candidates = np.where(dbl["both_detected"])[0]
@@ -1017,7 +1141,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         n_lensed_inj, model, rng, H0, Om0,
         out_path=os.path.join(out_dir, "mock_lensed_injections.h5"),
         pair_tag_model=pair_tag_model, pair_tag_prob=pair_tag_prob,
-        sis=sis,
+        sis=sis, pair_orientation_mode=pair_orientation_mode,
     )
 
     # ---- partition (TRUE): [singletons 0..S-1, then pair images S+2k, S+2k+1] ----
@@ -1101,6 +1225,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
     observed_catalog = dict(
         format_version="observed-lensing-catalog-1.0",
         event_indexing="global",
+        pair_orientation_mode=str(pair_orientation_mode),
         observation_times=str(observation_times),
         t_obs_days=float(t_obs_days),
         time_delay_sigma_sec=float(time_delay_sigma_sec),
@@ -1249,6 +1374,10 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         f"--sl_tau_A {float(sis.A_tau)} --sl_tau_n {float(sis.n_tau)} "
         f"--sl_T0_sec {float(sis.T0)}"
     )
+    if pair_orientation_mode != "independent":
+        tiny_recovery_command += (
+            f" --pair_orientation_mode {pair_orientation_mode}"
+        )
     if validation_sample_log10_tau_A:
         lo, hi = (float(validation_log10_tau_A_prior[0]), float(validation_log10_tau_A_prior[1]))
         fixed_json = json.dumps({"tau_n": float(sis.n_tau)})
@@ -1311,6 +1440,7 @@ def assemble(out_dir, *, n_universe, seed, nsamp, n_sing_keep, n_pair_keep,
         ),
         model=dict(pop_name=POP_NAME, rho_thr=rho_thr, horizon_Mpc=horizon_Mpc,
                    selection_model="Finn-Chernoff orientation-averaged p_det",
+                   pair_orientation_mode=str(pair_orientation_mode),
                    pe_prior_convention="p_pe proportional to m1det * dL^2 in the (m1det, q, dL) basis",
                    cosmology=f"H0={H0}, Om0={Om0}",
                    tau_A=float(sis.A_tau), tau_n=float(sis.n_tau),
@@ -1369,6 +1499,17 @@ def parse_args():
                         f"{DEFAULT_T0_SECONDS:.3g} s (~62 d) at z_L=0.5, z_s=1, sigma_v=200 km/s")
     p.add_argument("--wl-a", type=float, default=4.0e-3, help="WL lognormal variance amplitude")
     p.add_argument("--wl-b", type=float, default=1.5, help="WL lognormal variance z-power")
+    p.add_argument("--pair-orientation-mode", "--pair_orientation_mode",
+                   dest="pair_orientation_mode",
+                   choices=("independent", "shared_iota"),
+                   default="independent",
+                   help="two-image detection rendering: 'independent' draws one "
+                        "uniform per image against the orientation-marginalised "
+                        "p_det (legacy; bit-identical RNG stream); 'shared_iota' "
+                        "renders one (iota, psi, alpha, delta) per source with "
+                        "the antenna response at the two arrival times t and "
+                        "t + delta_t(y) — run inference with the MATCHING "
+                        "--pair_orientation_mode shared_iota")
     p.add_argument("--pair-tag-model", choices=("none", "constant", "min_snr_proxy", "snr_time", "snr_time_sky"),
                    default="none", help="mock-only pair-tag selection model for lensed injections")
     p.add_argument("--pair-tag-prob", type=float, default=1.0,
@@ -1431,6 +1572,7 @@ def main():
         n_unlensed_inj=args.n_unlensed_inj, n_lensed_inj=args.n_lensed_inj,
         injection_proposal=args.injection_proposal,
         H0=args.H0, Om0=args.Om0, sis=sis, wl=wl,
+        pair_orientation_mode=args.pair_orientation_mode,
         pair_tag_model=args.pair_tag_model, pair_tag_prob=args.pair_tag_prob,
         n_wrong_candidate_pairs=args.n_wrong_candidate_pairs,
         candidate_pair_log_prior_odds=args.candidate_pair_log_prior_odds,
