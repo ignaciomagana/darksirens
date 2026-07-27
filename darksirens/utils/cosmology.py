@@ -14,6 +14,10 @@ with guard bands so that sampler proposals at the edge of the allowed prior do
 not silently extrapolate.
 """
 
+import contextlib
+import contextvars
+import functools
+import inspect
 import os
 
 import astropy.constants as constants
@@ -187,6 +191,136 @@ rs = jnp.asarray(_build_cpl_distance_grid())
 """Comoving-distance table indexed by ``(Om0grid, w0grid, wagrid, zgrid)`` in Mpc."""
 
 
+# ── The table travels as a jit ARGUMENT, never as a closure capture ────────────
+#
+# ``jax.jit`` lowers a closed-over concrete ``jax.Array`` to a ``dense<>`` HLO
+# CONSTANT rather than to a parameter (jax 0.4.34), and a float64 literal costs
+# ~16 bytes of module text per element.  ``rs`` is 21x41x31x500 = 1.33e7 elements
+# / 106.8 MB, so every jit that reached it through a module-global closure carried
+# ~214 MB of literal per embedding.  MEASURED before this change: the production
+# spectral likelihood lowered to 427.5 MB of module text (two embeddings) and the
+# dark-siren mock to 443.6 MB (three) -- text that has to be built, serialised and
+# parsed by XLA on every compilation, and whose buffers are duplicated in the
+# executable even though the table is already device-resident.
+#
+# The fix is the pattern PR #296 applied to the likelihood operands: thread the
+# array through as an ARGUMENT.  Doing that by hand would mean adding a ``table``
+# parameter to ~45 call sites spread over a dozen modules (likelihood.core,
+# wl_weight, cluster_likelihood, inference.utils, redshift.*, sky.models, ...)
+# plus every intermediate signature between them, so instead the table is bound
+# DYNAMICALLY for the extent of a trace and re-materialised as an explicit
+# argument at each jit boundary by :func:`threads_distance_table`:
+#
+#   * the public entry points take the table as a real (keyword-only) parameter
+#     whose default is resolved OUTSIDE the jit, so an eager call hands XLA a
+#     device-resident parameter instead of a literal;
+#   * inside the jit the decorator re-binds the context variable to that jit's OWN
+#     tracer, so the deep call sites resolve a value that belongs to the trace
+#     they are in.
+#
+# The re-binding at every boundary is not cosmetic.  A ``jax.jit`` function that
+# closes over a tracer is not cached by its closure, and JAX's jaxpr-tracing cache
+# will happily replay a jaxpr whose consts are tracers from a DEAD trace --
+# reproduced on jax 0.4.34 as ``UnexpectedTracerError`` the first time the same
+# module-level jit is re-traced under a differently-shaped outer jit.  Any NEW
+# module-level jit that reaches the table must therefore be declared with
+# :func:`threads_distance_table` as well; a plain ``@jit`` that only reads the
+# context variable is the bug this note exists to prevent.
+#
+# The 1-D coordinate grids (``zgrid``, ``Om0grid``, ``w0grid``, ``wagrid``: 593
+# elements together, ~10 KB of text) are deliberately left as closures -- they are
+# five orders of magnitude below the table and threading them would buy nothing.
+
+_ACTIVE_DISTANCE_TABLE = contextvars.ContextVar(
+    "darksirens_active_distance_table", default=None
+)
+
+
+def distance_table():
+    """Return the comoving-distance table in force for the current trace.
+
+    Outside any :func:`bound_distance_table` scope this is the module-level
+    :data:`rs`; inside one it is the caller-supplied array (typically a tracer
+    standing for a jit argument).
+    """
+    active = _ACTIVE_DISTANCE_TABLE.get()
+    return rs if active is None else active
+
+
+def resolve_distance_table(table=None):
+    """``table`` if it was given, else the currently active table."""
+    return distance_table() if table is None else table
+
+
+@contextlib.contextmanager
+def bound_distance_table(table):
+    """Make ``table`` the active comoving-distance table for the enclosed scope.
+
+    ``None`` is a no-op, so callers can pass an unresolved argument through
+    without special-casing it.  Used at jit boundaries (see
+    :func:`threads_distance_table`) to hand the deep cosmology call sites the
+    tracer that belongs to their own trace.
+    """
+    if table is None:
+        yield
+        return
+    token = _ACTIVE_DISTANCE_TABLE.set(table)
+    try:
+        yield
+    finally:
+        _ACTIVE_DISTANCE_TABLE.reset(token)
+
+
+def threads_distance_table(**jit_kwargs):
+    """Jit ``fn`` with its ``distance_table`` parameter as a real jit ARGUMENT.
+
+    Replaces ``@partial(jax.jit, **jit_kwargs)`` on any function that reaches the
+    comoving-distance table.  The decorated function must declare a trailing
+    ``distance_table=None`` parameter; its body is otherwise untouched.
+
+    Two things happen around the original function:
+
+    ``outside`` the jit
+        the public wrapper resolves ``distance_table=None`` to the currently
+        active table (:func:`distance_table`) and passes it explicitly, so the
+        array is a parameter of the lowered module instead of a literal;
+    ``inside`` the jit
+        the table -- now this trace's own tracer -- is installed as the active
+        table, so nested cosmology calls and every deeper consumer pick it up
+        without carrying it in their signatures.
+
+    The jitted callable is exposed as ``.jitted`` for tests and diagnostics that
+    want ``lower()`` / ``_cache_size()``.
+    """
+
+    def decorate(fn):
+        signature = inspect.signature(fn)
+        if "distance_table" not in signature.parameters:
+            raise TypeError(
+                f"{fn.__qualname__} must declare a 'distance_table' parameter to "
+                "be decorated with threads_distance_table"
+            )
+
+        @functools.wraps(fn)
+        def _bind_then_call(*args, **kwargs):
+            table = signature.bind(*args, **kwargs).arguments.get("distance_table")
+            with bound_distance_table(table):
+                return fn(*args, **kwargs)
+
+        jitted = jax.jit(_bind_then_call, **jit_kwargs)
+
+        @functools.wraps(fn)
+        def public(*args, distance_table=None, **kwargs):
+            return jitted(
+                *args, distance_table=resolve_distance_table(distance_table), **kwargs
+            )
+
+        public.jitted = jitted
+        return public
+
+    return decorate
+
+
 @jit
 def E(z, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     """Return the dimensionless CPL expansion rate ``H(z) / H0``.
@@ -204,8 +338,8 @@ def E(z, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     return jnp.sqrt(Om0 * one_plus_z**3 + dark_energy)
 
 
-@jit
-def r_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
+@threads_distance_table()
+def r_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial, distance_table=None):
     """Return line-of-sight comoving distance at redshift ``z``.
 
     The distance is interpolated from the precomputed ``(Om0, w0, wa, z)`` grid
@@ -224,6 +358,11 @@ def r_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     cosmology coordinate (e.g. a vmap that maps over Om0 directly) falls back to
     the general ``interpnd`` path.  ``jnp.ndim`` is a trace-time shape query, so
     the branch is resolved at compile time and never appears in the graph.
+
+    ``distance_table`` is the comoving-distance grid to interpolate; leaving it
+    ``None`` picks up :func:`distance_table` (the module-level :data:`rs`, or
+    whatever an enclosing :func:`bound_distance_table` installed).  It is a jit
+    ARGUMENT, never a closure capture -- see the note above :data:`rs`.
     """
     if jnp.ndim(Om0) == 0 and jnp.ndim(w0) == 0 and jnp.ndim(wa) == 0:
         interpolate = interpnd_scalar_head
@@ -232,19 +371,20 @@ def r_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     return interpolate(
         (Om0, w0, wa, z),
         (Om0grid, w0grid, wagrid, zgrid),
-        rs,
+        distance_table,
         fill_value=jnp.nan,
     ) * (H0Planck / H0)
 
 
-@jit
-def dL_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
+@threads_distance_table()
+def dL_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial, distance_table=None):
     """Return luminosity distance for redshift ``z`` in Mpc."""
     return (1 + z) * r_of_z(z, H0, Om0, w0, wa)
 
 
-@jit
-def dL_grid_bounds(H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
+@threads_distance_table()
+def dL_grid_bounds(H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
+                   distance_table=None):
     """Return the luminosity-distance support covered by ``zgrid``.
 
     The pair ``(dL_min, dL_max)`` is useful for masking posterior samples before
@@ -255,15 +395,17 @@ def dL_grid_bounds(H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     return dL_grid[0], dL_grid[-1]
 
 
-@jit
-def dL_in_z_grid(dL, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
+@threads_distance_table()
+def dL_in_z_grid(dL, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
+                 distance_table=None):
     """Return a boolean mask for distances supported by the redshift grid."""
     dL_min, dL_max = dL_grid_bounds(H0, Om0, w0, wa)
     return (dL >= dL_min) & (dL <= dL_max)
 
 
-@jit
-def z_of_dL(dL, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
+@threads_distance_table()
+def z_of_dL(dL, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
+            distance_table=None):
     """Invert luminosity distance to redshift by one-dimensional interpolation.
 
     Unsupported distances are returned as ``NaN`` rather than extrapolated.  The
@@ -277,8 +419,9 @@ def z_of_dL(dL, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     return jnp.where(in_grid, z, jnp.nan)
 
 
-@jit
-def dV_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
+@threads_distance_table()
+def dV_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
+            distance_table=None):
     """Return the differential comoving-volume factor per steradian.
 
     The returned value is ``c * r(z)^2 / (H0 * E(z))`` in Mpc^3.  Angular pixel
