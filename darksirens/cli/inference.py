@@ -993,6 +993,16 @@ def build_parser():
                         "are located within +/- X * max_row(sigma_eff) of the sample "
                         "(default 8). The half-width is traced (sigma_kde is sampled); "
                         "only the window SIZE W is static.")
+    g.add_argument("--row_chunk", default=None, metavar="auto|off|N",
+                   help="Row-chunking for catalog kernel-state builds "
+                        "(lax.map over N-row chunks instead of one full vmap). "
+                        "'auto' (the default) chunks only above an internal size "
+                        "threshold; 'off' disables; an integer forces that chunk "
+                        "size. Measured on a DESI-scale slice on CPU, a forced "
+                        "512 was 5.1x faster and 1.7x lighter in peak RSS than "
+                        "the auto default -- for CPU-heavy catalog work, try "
+                        "--row_chunk 512. Trace-time config (applied before the "
+                        "first likelihood evaluation).")
     return optp
 
 
@@ -1255,6 +1265,20 @@ def _configure_performance_grids(opts):
             configure_catalog_kde_window(**kw)
         except ValueError as e:
             _fatal(str(e))
+
+    row_chunk = getattr(opts, "row_chunk", None)
+    if row_chunk is not None:
+        from darksirens.redshift.catalog import configure_catalog_row_chunk
+        text = str(row_chunk).strip().lower()
+        try:
+            if text == "auto":
+                configure_catalog_row_chunk("auto")
+            elif text in ("off", "none", "0"):
+                configure_catalog_row_chunk(None)
+            else:
+                configure_catalog_row_chunk(int(text))
+        except ValueError as e:
+            _fatal(f"--row_chunk {row_chunk!r}: {e}")
 
 
 def _parse_structured_options(opts):

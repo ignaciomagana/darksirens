@@ -153,3 +153,34 @@ def test_configure_kernel_quadrature_rejects_bad_counts():
         configure_kernel_quadrature(1)
     with pytest.raises(ValueError):
         configure_catalog_row_chunk(0)
+
+
+def test_cli_row_chunk_flag_wires_trace_time_config():
+    """--row_chunk must reach configure_catalog_row_chunk before the first
+    trace: 'auto' | 'off' | int, with garbage rejected loudly.  Added after
+    the DESI recon measured a forced chunk of 512 at 5.1x faster / 1.7x
+    lighter than the auto default on a real-catalog slice (CPU) with no way
+    to request it from the CLI."""
+    from types import SimpleNamespace
+
+    import pytest as _pytest
+
+    import darksirens.redshift.catalog as C
+    from darksirens.cli.inference import _configure_performance_grids
+
+    def _opts(chunk):
+        return SimpleNamespace(kernel_gl_nodes=None, kde_window=None,
+                               kde_window_nsigma=None, row_chunk=chunk)
+
+    old = C._ROW_CHUNK_MODE
+    try:
+        _configure_performance_grids(_opts("512"))
+        assert C._ROW_CHUNK_MODE == 512
+        _configure_performance_grids(_opts("off"))
+        assert C._ROW_CHUNK_MODE is None
+        _configure_performance_grids(_opts("auto"))
+        assert C._ROW_CHUNK_MODE == "auto"
+        with _pytest.raises(SystemExit):
+            _configure_performance_grids(_opts("sideways"))
+    finally:
+        C._ROW_CHUNK_MODE = old
