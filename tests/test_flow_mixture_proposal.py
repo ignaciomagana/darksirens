@@ -673,9 +673,17 @@ def test_operands_do_not_become_hlo_constants(setup):
     n_elem = sum(int(np.asarray(x).size) for x in jtu.tree_leaves(ll.operands))
     assert n_elem > 100_000, n_elem          # the test data must be big enough
 
-    clean = _constant_elements(ll.jitted_body.lower(*args, ll.operands))
+    clean = _constant_elements(
+        ll.jitted_body.lower(*args, ll.operands, ll.distance_table)
+    )
+    # Issue #305: the 21x41x31x500 comoving-distance table (13,345,500
+    # elements, ~214 MB of module text as a literal) must never lower as a
+    # constant here -- it rides as the trailing jit argument.
+    assert clean < 13_345_500, clean
     leaky = _constant_elements(
-        jax.jit(lambda c, s, p: ll.jitted_body(c, s, p, ll.operands)).lower(*args)
+        jax.jit(
+            lambda c, s, p: ll.jitted_body(c, s, p, ll.operands, ll.distance_table)
+        ).lower(*args)
     )
     assert leaky - clean > 0.9 * n_elem, (leaky, clean, n_elem)
 

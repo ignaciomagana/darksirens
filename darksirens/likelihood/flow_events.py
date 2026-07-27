@@ -106,6 +106,7 @@ from darksirens.redshift.prior import (
     prepare_redshift_prior_state,
 )
 from darksirens.core.types import GWEvent
+from darksirens.utils import cosmology
 from darksirens.utils.cosmology import dL_grid_bounds, dL_of_z, z_of_dL
 
 
@@ -737,19 +738,35 @@ def build_flow_loglike(
 
     # Operands travel as jit ARGUMENTS (see :class:`FlowOperands`); the public
     # callable keeps its 3-argument signature by binding them in a wrapper.
-    _jitted = jax.jit(_ll_flows_impl)
-    _jitted_diag = jax.jit(_event_diagnostics_impl)
+    # The comoving-distance table rides along the same way (issue #305 /
+    # PR #303's pattern): captured, it lowers as a ~214 MB dense<> constant in
+    # EACH of these jits; as an argument it is a device-resident parameter,
+    # installed as the active table for the trace so z_of_dL/dL_grid_bounds
+    # deep below resolve their own trace's tracer.
+    distance_table = cosmology.distance_table()
+
+    def _ll_flows_with_table(cosmo, survey, pop_params, ops, distance_table):
+        with cosmology.bound_distance_table(distance_table):
+            return _ll_flows_impl(cosmo, survey, pop_params, ops)
+
+    def _event_diagnostics_with_table(cosmo, survey, pop_params, ops, distance_table):
+        with cosmology.bound_distance_table(distance_table):
+            return _event_diagnostics_impl(cosmo, survey, pop_params, ops)
+
+    _jitted = jax.jit(_ll_flows_with_table)
+    _jitted_diag = jax.jit(_event_diagnostics_with_table)
 
     def ll(cosmo, survey, pop_params):
-        return _jitted(cosmo, survey, pop_params, operands)
+        return _jitted(cosmo, survey, pop_params, operands, distance_table)
 
     def event_diagnostics(cosmo, survey, pop_params):
-        return _jitted_diag(cosmo, survey, pop_params, operands)
+        return _jitted_diag(cosmo, survey, pop_params, operands, distance_table)
 
     ll.event_diagnostics = event_diagnostics
     ll.jitted_body = _jitted
     ll.jitted_event_diagnostics = _jitted_diag
     ll.operands = operands
+    ll.distance_table = distance_table
     ll.n_full_draws = J_full
     ll.w_full = w_eff
     return ll
@@ -941,7 +958,7 @@ def make_flow_likelihood(
     # ARGUMENT of this outer jit too: calling the bound wrapper here would close
     # the arrays over the outer trace and re-embed them as HLO constants, which is
     # exactly the leak :class:`FlowOperands` exists to close.
-    def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
+    def _body(coord: jnp.ndarray, operands, distance_table) -> jnp.ndarray:
         cosmo, survey, pop_params, _sky_params, _mark_params = parameter_decoder.decode(
             coord
         )
@@ -951,17 +968,21 @@ def make_flow_likelihood(
                 f"evaluation: decoded {len(pop_params)} values but pop_model "
                 f"'{pop_model}' expects {len(parameter_decoder.pop_labels)}."
             )
-        return _ll_flows.jitted_body(cosmo, survey, pop_params, operands)
+        return _ll_flows.jitted_body(
+            cosmo, survey, pop_params, operands, distance_table
+        )
 
     _jitted = jax.jit(_body)
     operands = _ll_flows.operands
+    distance_table = _ll_flows.distance_table
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
-        return _jitted(coord, operands)
+        return _jitted(coord, operands, distance_table)
 
     # Diagnostics hooks (host-side introspection; not used by samplers).
     likelihood.jitted_body = _jitted
     likelihood.operands = operands
+    likelihood.distance_table = distance_table
     likelihood.event_loglike = _ll_flows
     likelihood.flow_event_names = list(ensemble.names)
     likelihood.flows_nsamp = J
