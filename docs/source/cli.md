@@ -1,6 +1,20 @@
 # Command-line interface
 
-Installing the package exposes three console scripts.
+Installing the package exposes eight console scripts.
+
+| Command | Stage | What it does |
+|---------|-------|--------------|
+| [`darksirens_pixelate`](#darksirens_pixelate) | prepare | raw galaxy-survey HDF5 → dense HEALPix catalog |
+| [`darksirens_skymaps_to_samples`](#darksirens_skymaps_to_samples) | prepare | 3-D LVK skymap FITS → GW importance-sample `gwdata.h5` |
+| [`darksirens_build_lognormal_completion`](#darksirens_build_lognormal_completion) | prepare | offline LSS-conditioned completion field `Q_LSS(p, z)` |
+| [`darksirens_build_joint_lognormal_completion`](#multitracer-catalog-mixtures-k--2) | prepare | K matched `Q_LSS` ensembles from **one** shared latent field |
+| [`darksirens_diagnose_lognormal_completion`](#darksirens_diagnose_lognormal_completion) | prepare | per-pixel diagnostic plot of a completion file |
+| [`darksirens_inference`](#darksirens_inference) | run | spectral / bright / dark-siren hierarchical inference |
+| [`darksirens_inference_lensing`](#darksirens_inference_lensing) | run | weak-lensing and J=2 strong-lensing cluster inference |
+| [`darksirens_analyze`](#darksirens_analyze) | analyze | posterior-predictive summaries and plots from run directories |
+
+Each is also runnable as a module — `python -m darksirens.cli.<name>` — which is
+the form the repository's own driver scripts use.
 
 ## `darksirens_pixelate`
 
@@ -16,6 +30,123 @@ Options:
 - `--save_path`: output directory; defaults to the current directory.
 - `--nside`: HEALPix NSIDE; defaults to `64`.
 - `--add_plots`: create diagnostic skymap, redshift, and occupancy plots.
+- `--z_depth`: optional survey redshift depth — the redshift beyond which this
+  survey catalogs no galaxies. It is written as `f.attrs['z_depth']` and read by
+  `darksirens_inference` as a **completeness prior**: completeness is zero beyond
+  the depth, so every modeled host there is uncatalogued (missing), and the
+  source prior above the depth is the plain volumetric × population shape, NOT
+  truncated to zero. Omit it for the legacy behaviour (no attribute written;
+  completeness estimated over the full `[0, DARKSIRENS_ZMAX]` grid).
+
+## `darksirens_skymaps_to_samples`
+
+Convert a directory of 3-D LVK skymap FITS files into the GW importance-sample
+HDF5 (`gwdata.h5`) that `--gw_path` expects. This is the low-latency route: a
+public 3-D skymap carries the sky × luminosity-distance posterior but no mass or
+spin samples, so each event's `--nsamp` rows pair distance draws from the skymap's
+distance ansatz with **deliberately uninformative surrogate** mass/spin draws. The
+resulting file is flagged `mock_data=True`, and the surrogate proposal is divided
+out and reweighted to the sampled population downstream — so it constrains
+cosmology through distance and sky position, not through masses.
+
+```bash
+darksirens_skymaps_to_samples \
+  --skymap_dir skymaps/ \
+  --output data/gwdata_skymaps.h5 \
+  --nsamp 5000 --zmax 1.5 --seed 21
+```
+
+Options:
+
+- `--skymap_dir`, `--output`: required input directory and output `gwdata.h5`.
+- `--pattern`: glob for the skymap files inside `--skymap_dir` (default `*.fits*`).
+- `--nsamp`: samples per event (default `5000`). Larger values reduce the
+  surrogate-mass Monte-Carlo noise.
+- `--zmax`: maximum redshift of the analysis (default `1.5`). It sets the default
+  `--m1det_max`, which is what keeps the mass marginalization unbiased across the
+  whole `H0` prior — raise it with the analysis, not after the fact.
+- `--pop_m_min`, `--pop_m_max`: edges of the population mass prior the surrogate
+  must cover (defaults `2` and `100`). `--m1det_min` / `--m1det_max` override the
+  derived detector-frame bounds (`pop_m_min` and `pop_m_max * (1 + zmax)`).
+- `--q_min`, `--chi_abs_max`: surrogate mass-ratio and spin support (defaults
+  `0.05`, `0.99`).
+- `--n_dist_grid`: grid resolution of the distance-ansatz inverse CDF (default
+  `1024`).
+- `--pe_H0`, `--pe_Om0`: fiducial cosmology used **only** to invert detector-frame
+  `dL` samples into the `m1src`/`m2src` datasets the loader requires (Planck15 by
+  default). It does not enter `p_pe` and does not bias `H0`.
+- `--seed`: random seed for the surrogate draws.
+
+## `darksirens_build_lognormal_completion`
+
+Offline preprocessor for the LSS-conditioned lognormal completion field
+`Q_LSS(p, z)`: a Poisson-lognormal fit of the missing-galaxy density against the
+observed counts of a pixelated catalog, written once and then passed to inference
+with `--lss_completion`. It replaces the legacy `1 + b_eff*delta_g` overdensity
+factor with a field that has a posterior, so `--n-members > 0` produces a Laplace
+ensemble that `--lss_marginalize` can integrate over.
+
+```bash
+# deterministic (MAP) table, plus a 32-member ensemble for --lss_marginalize
+darksirens_build_lognormal_completion \
+  --catalog data/catalog_pixelated_nside_16.h5 \
+  --out data/q_radial.h5 --mode radial --n-members 0 --log10n0 -2.4
+
+darksirens_build_lognormal_completion \
+  --catalog data/catalog_pixelated_nside_16.h5 \
+  --out data/q_radial_ens.h5 --mode radial --n-members 32
+```
+
+Options:
+
+- `--catalog`, `--out`: required pixelated survey catalog (the `load_survey`
+  schema `darksirens_pixelate` writes) and output completion HDF5.
+- `--mode {radial,gp3d}`: `radial` (default) fits each pixel independently as a
+  1-D Poisson-lognormal; `gp3d` fits a 3-D angular-coupling low-rank field, so
+  **empty pixels borrow from their neighbours**. Only `gp3d` carries a shared
+  latent field, which is why the joint multi-survey builder below is `gp3d`-only.
+- `--n-members`: size of the Laplace/FFT-diagonal ensemble (default `32`; `0`
+  writes the MAP field alone). Anything meant for `--lss_marginalize` needs
+  `> 0`.
+- `--log10n0`, `--delta`: the expected comoving galaxy density
+  `n0 * (1+z)^delta` [Mpc^-3] the fit is conditioned on (defaults `-2.0`, `0.0`).
+  **Calibrate `--log10n0` to the catalog** (`N / (f_sky * V_c)`): a mis-set `n0`
+  is absorbed into `Q` as spurious redshift structure that biases `H0`. The
+  conditioning values are stamped into the output and enforced at run time — see
+  `--lss_completion` under [inference](#catalog-options).
+- `--indexing {compact,global}`: how inference indexes the `Q` rows. A full
+  survey catalog is global-HEALPix-pixel indexed (`global`, the default); `gp3d`
+  always writes `global`.
+- `--seed`, `--prior-strength`, `--maxiter`: ensemble seed (default `1234`),
+  prior strength (`1.0`), and solver iteration cap (`300`).
+- `--gp3d-nz-solve`, `--gp3d-pix-chunk`, `--lss-corr-length-ang`: `gp3d`-only
+  solve-grid size (`32`), pixel chunk for the all-pixel evaluation (`512`), and
+  an override of the angular correlation length (default: the `SurveyParams`
+  fiducial).
+
+## `darksirens_diagnose_lognormal_completion`
+
+Inspect one pixel of a completion file before trusting it in a run. Writes
+`<outdir>/lss_completion_pixel<PIXEL>.pdf`, a three-panel figure comparing the
+homogeneous reference (`Q = 1`), the MAP field, and — when the file carries an
+ensemble — the member 16–84% band, for: the completion factor `Q_LSS(p, z)`, the
+missing-galaxy density `dN_miss/dz`, and the resulting dark-siren redshift prior
+`p(z | p)`. A pixel whose `Q` band brackets 1 across the grid is telling you the
+LSS conditioning bought nothing there; a `Q` running away at high `z` is the
+classic mis-set `--log10n0` signature.
+
+```bash
+darksirens_diagnose_lognormal_completion \
+  --catalog data/catalog_pixelated_nside_16.h5 \
+  --lss-completion data/q_radial_ens.h5 \
+  --pixel 1234 --outdir figs
+```
+
+Options:
+
+- `--catalog`, `--lss-completion`: required catalog and completion file.
+- `--pixel`: required catalog row / global HEALPix pixel index to diagnose.
+- `--outdir`: output directory (default: the current directory).
 
 ## `darksirens_inference`
 
@@ -121,10 +252,197 @@ Passing `K >= 2` files to `--survey_path` runs the K-catalog mixture: the catalo
 
 `dynesty`/`tinyns` seed a run by rejection-sampling the prior until they collect `--nlive` points with a finite `logL`. When the selection variance guard (`sigma^2_lnL > --max_likelihood_variance`, or the `Neff > 5*N_obs` floor) returns `-inf` across the whole prior, that step hangs with nothing in the log. The `--sampler_preflight` probe now catches this up front — a `preflight: 0/32 prior draws have finite logL` message and a hard error naming the criterion. To recover, either switch to `--selection_neff_guard soft` (a finite penalized wall the sampler can initialize on and that pushes it toward the valid region) or raise `--max_likelihood_variance` to accept a larger Monte-Carlo variance. To measure `sigma^2_lnL` on your own data and get the smallest admitting cap, run `python scripts/diagnose_selection_guard.py -- <your darksirens_inference args>`.
 
+### Checkpoint and resume
+
+A production nested-sampling run is a multi-day job, and a SLURM `TIMEOUT`,
+preemption or OOM used to discard all of it. Checkpointing is therefore **on by
+default** and both nested samplers honour it; the flags are identical on
+`darksirens_inference` and `darksirens_inference_lensing`.
+
+- `--checkpoint_interval SECONDS|off`: seconds between sampler checkpoints
+  written **into the run directory** (default `1800`; `off`/`0` disables).
+  `dynesty` honours the wall-clock cadence exactly. `tinyns` checkpoints every
+  `--tinyns_checkpoint_interval` **iterations** (default `100`) and this flag
+  only enables or disables it.
+- `--resume auto|PATH|off`: restore a checkpointed run and continue it. `auto`
+  picks the most recently modified checkpoint under `--save_path` for this
+  sampler **and this configuration** (the model/sampler/seed run-directory
+  prefix), skips run directories that already hold a `results.hdf5`, and
+  continues inside that run directory. With nothing to resume it starts fresh
+  silently, so it is safe to hard-code in a submit script. `PATH` may be a run
+  directory or a checkpoint file and must exist. `off` (the default) always
+  starts fresh.
+- The resumed run continues the `--seed`-derived RNG stream carried in the
+  checkpoint rather than drawing fresh entropy, so a resumed chain is the chain
+  the uninterrupted run would have produced.
+- Explicit `--tinyns_checkpoint_path` / `--tinyns_resume_from` still win over
+  these flags, so existing tinyns scripts behave exactly as before.
+
+Requeue the identical command to continue a killed run:
+
+```bash
+darksirens_inference ... --sampler dynesty --nlive 2000 \
+  --checkpoint_interval 1800 --resume auto --save_path runs/full/A2-dark-joint
+```
+
 ### Performance options
 
 - `--sel_batch_size`: optional injection-selection batch size.
 - `--norm_nmass`, `--norm_nq`, `--norm_nchi`: mass, mass-ratio, and spin grid sizes used for GW-population normalization quadrature. They default to `500`, `200`, and `200`, respectively, and can also be set with `DARKSIRENS_GW_N_MASS`, `DARKSIRENS_GW_N_Q`, and `DARKSIRENS_GW_N_CHI`. The inference command prints the active values and saves them in `settings.json` under `normalization_grid`.
+- `--kde_window W`: static window size for the per-sample catalog KDE — only the `W` galaxies nearest each sample's redshift are evaluated (catalog rows are z-sorted at load). The default `W = 1024` holds `|delta log p_cat| < 1e-6` against the full row across the ENTIRE sampled `sigma_kde` prior `[0, 0.05]` on a review-scale 2113-galaxy row. **Denser rows need a larger `W`** — size it with `darksirens.redshift.catalog.recommended_kde_window`, which returns the largest galaxy count any window-width interval contains at the widest kernel the prior admits. `0` disables windowing entirely and evaluates the full row, the escape hatch for A/B validation.
+- `--kde_window_nsigma X`: half-width multiplier for that window — contributing galaxies lie within `± X * max_row(sigma_eff)` of the sample (default `8`). The half-width is traced, because `sigma_kde` is sampled; only the window SIZE `W` is static.
+
+## `darksirens_inference_lensing`
+
+Run the lensing likelihood: spectral sirens with weak-lensing magnification
+marginalization, optionally plus the **J=2 strong-lensing cluster** channel in
+which candidate pairs of multiply-imaged sirens are evaluated with the SIS pair
+likelihood against a lensed-injection cluster selection term. This CLI is the
+sole owner of the `spectral_sirens_wl` universe model, which moved here out of
+`darksirens_inference`. It deliberately does **not** implement galaxy-catalog
+dark sirens, LSS completion or catalog host probabilities; use
+`darksirens_inference` for those.
+
+The measurement it exists to produce is an evidence difference — the same data
+run with the pair channel on and off — so the two arms are run as a pair and
+`logZ` / `logZerr` are archived in `results.hdf5` and `settings.json`:
+
+```bash
+# J=2 arm: candidate pairs marginalized over partitions
+darksirens_inference_lensing \
+  --gw_path mock_observed_gw_pe.h5 \
+  --gwselection_path mock_gw_selection.h5 \
+  --observed_catalog_path observed_catalog.json \
+  --lensed_injections_path mock_lensed_injections.h5 \
+  --pair_metadata_path mock_pair_metadata.h5 \
+  --candidate_pairs_path candidate_pairs.json \
+  --cluster_mode j2 --partition_mode marginalize_exact \
+  --partition_component_mode componentwise --max_exact_partitions 10000 \
+  --wl_backend lognormal --pop_model powerlaw+peak \
+  --fix_cosmology true --fix_survey true --fix_population true \
+  --fix_lens_rate false --fixed_parameter_values '{"tau_n": 3.0}' \
+  --lens_prior_overrides '{"log10_tau_A": [-5.0, -2.5]}' \
+  --sampler tinyns --nlive 2000 --dlogz 0.1 --max_samples 0 \
+  --pe_max_per_pair 400 --checkpoint_interval 1800 --resume auto \
+  --seed 4001 --save_path runs/lensing/seed4001_j2
+
+# control arm: identical data and population treatment, pair channel off
+darksirens_inference_lensing \
+  --gw_path mock_observed_gw_pe.h5 \
+  --gwselection_path mock_gw_selection.h5 \
+  --observed_catalog_path observed_catalog.json \
+  --cluster_mode off --wl_backend lognormal --pop_model powerlaw+peak \
+  --fix_cosmology true --fix_survey true --fix_population true \
+  --fix_lens_rate true \
+  --sampler tinyns --nlive 2000 --dlogz 0.1 --max_samples 0 \
+  --checkpoint_interval 1800 --resume auto \
+  --seed 4001 --save_path runs/lensing/seed4001_off
+```
+
+### Data options
+
+- `--gw_path`, `--gwselection_path`: required GW posterior samples and gwcat
+  selection file.
+- `--observed_catalog_path`: the unified `observed_catalog.json` — the current
+  observed-mode entry point. `--pair_metadata_path` adds the pair/candidate-edge
+  metadata. (`--pair_pe_path` is the DEPRECATED split-pair layout; preflight's
+  event-index range check has never accepted it.)
+- `--lensed_injections_path`: lensed injections, required by `--cluster_mode j2`
+  and by `--singleton_lensing sl_mixture`.
+- `--candidate_pairs_path`, `--partition_path`: the candidate-edge graph used by
+  `--partition_mode marginalize_exact`, and the fixed image-assignment partition
+  used by `--partition_mode fixed`.
+- `--partition_mode {fixed,marginalize_exact}`: `fixed` (default) trusts one
+  supplied image assignment; `marginalize_exact` sums the likelihood over
+  partitions of the candidate graph, i.e. over which events really are images of
+  each other. `--partition_component_mode {global,componentwise}` (default
+  `componentwise`) factorizes that sum over disconnected components, which is
+  what makes it tractable; `--max_exact_partitions` (default `10000`),
+  `--max_component_events`, `--max_component_edges`,
+  `--max_component_partitions` and `--max_total_partitions` bound the
+  enumeration.
+
+### Model options
+
+- `--cluster_mode {off,j2}`: the pair channel (default `j2`). `off` is the
+  singleton-only control arm of the evidence comparison.
+- `--wl_backend {lognormal,tabulated,disabled}`: weak-lensing magnification
+  marginalization (default `lognormal`, with `--lensing_wl_a` / `--lensing_wl_b`
+  setting the `sigma_mu(z)` scale and slope, defaults `4e-3` and `1.5`).
+  `tabulated` reads `log p_WL(mu|z)` from `--lensing_wl_table_path`.
+- `--wl_selection {standard,wl_lognormal}`: singleton **selection** treatment
+  (default `standard`, which preserves the legacy selection). `wl_lognormal`
+  applies the same lognormal/Hermite WL marginalization to singleton injections;
+  `--lensing_wl_a 0` reduces it to `standard`.
+- `--pop_model`: population model (default `powerlaw+peak`; the same grammar as
+  the main CLI).
+- `--sl_tau_A`, `--sl_tau_n`, `--sl_T0_sec`: SIS optical-depth amplitude and
+  exponent (defaults `5e-4`, `3.0`) and the time-delay scale `T0` in seconds
+  (default `5.36e6`, ~62 d — the SIS scale at `z_L=0.5`, `z_s=1`,
+  `sigma_v=200 km/s` under this repo's cosmology). Candidate pairs with
+  `|dt| >= T0` fall outside the SIS support `y in (0,1)` and get an exactly
+  `-inf` time-marked pair likelihood.
+- `--fix_lens_rate BOOL`: `true` (default) pins the SIS optical depth to
+  `--sl_tau_A`/`--sl_tau_n`; `false` samples the lensing hyperparameters, with
+  `--lens_prior_overrides` supplying their bounds, e.g.
+  `'{"log10_tau_A": [-5.0, -2.5]}'`.
+- `--pair_marks {none,time}` and `--pair_time_sigma_sec`: the optional
+  time-delay mark on candidate pairs.
+  `--pair_time_mark_impl {auto,quadrature,delta}` chooses the `y`-integral
+  implementation — `auto` delta-collapses when `max(sigma_dt)/T0 < 0.02`, since
+  marks that sharp are unresolvable by the quadrature.
+  `--allow_suspicious_time_marks true` downgrades the placeholder/synthetic
+  time-mark hard error to a warning.
+- `--pair_tag_model {constant,snr_only,snr_sky,snr_time,snr_time_sky,file}`
+  with `--pair_tag_constant` / `--pair_tag_perturb_logit` /
+  `--pair_tag_selection_path`: the model for the probability that a true image
+  pair is tagged as a candidate.
+- `--edge_mark_prior_keys`, `--edge_mark_likelihood_keys`: comma-separated
+  candidate-edge marks folded into the edge log prior odds, and into the edge
+  likelihood, under exact marginalization.
+- `--singleton_lensing {off,sl_mixture}`: `off` (default) keeps the legacy
+  single-image protocol. `sl_mixture` models observed singletons as a mixture of
+  unlensed sources and strongly lensed sources with exactly one detected image
+  (evidence mixture + exactly-one-detected selection subset + analytic
+  Finn–Chernoff partner censoring); it needs `--lensed_injections_path` and a
+  mock built with lensed singletons. `--y_nodes_single` (default `32`) sets its
+  Gauss–Legendre `y` nodes, and `--fc_rho_thr` / `--fc_r0` / `--fc_mc_bar`
+  override the injection file's Finn–Chernoff attrs.
+- `--fix_cosmology` / `--fix_survey` (both default `true`) and
+  `--fix_population` (default `false`), plus `--fixed_parameter_values` and
+  `--prior_overrides` as JSON — same conventions as the main CLI.
+
+### Sampler, checkpoint, and performance options
+
+`--sampler` (required; `tinyns`, `dynesty` or `numpyro`), `--nlive` (default
+`2000`), `--dlogz` (default `0.1`), `--max_samples`, the whole `--tinyns_*` and
+`--nuts_*` families, `--selection_neff_guard`, `--redshift_prior_barrier`,
+`--sel_batch_size`, `--norm_n*`, `--pairing_norm_grid`, `--seed`,
+`--show_progress` and `--save_path` behave as they do on
+[`darksirens_inference`](#sampler-options), including
+[`--checkpoint_interval` and `--resume`](#checkpoint-and-resume). What is
+different or lensing-only:
+
+- `--pe_max_per_pair`: PE samples kept per pair image (default `400`; `0` keeps
+  all). This is the control on the `O(N_pe^2 N_y)` pair-KDE memory, and the
+  first thing to reduce when a J=2 run runs out of host memory.
+- `--pair_batch_size`: candidate-pair batch size for the J=2 likelihood scan
+  (`0`, the default, keeps the unbatched path).
+- `--y_nodes_pair`: Gauss–Legendre `y` nodes per J=2 pair likelihood (default
+  `32`).
+- `--max_likelihood_variance`: same flag and same default (`1.0`, the
+  GWTC-4.0/5.0 criterion), but on this cluster/lensing stack the cap currently
+  bounds the SELECTION component only (`N_obs^2/Neff_sel`) — the
+  per-event/per-pair variance term of the full `sigma^2_lnL` criterion is not
+  yet threaded here, whereas `darksirens_inference` enforces the full total.
+  The Vitale `Neff > 5*N_obs` mean floor applies on both.
+- `--preflight_only true`: run the lensing input preflight checks, write the
+  JSON (to `--preflight_json`, else `<save_path>/preflight.json`) and exit before
+  compilation or sampling. Cheap, and worth running before every long submission.
+
+See [Lensing: weak magnification & strong-lensing clusters](reference/lensing.md)
+for the physics, the mock generator, the file contract, and the validation
+drivers.
 
 ## `darksirens_analyze`
 

@@ -338,7 +338,8 @@ def test_lensing_decoder_net_fires_on_injected_label_drift(tmp_path, monkeypatch
 # archived lens optical depth / logZerr
 # ---------------------------------------------------------------------------
 
-def _run_save_phase(tmp_path, extra_args=(), lens_fixed=None, logZerr=0.21):
+def _run_save_phase(tmp_path, extra_args=(), lens_fixed=None, logZerr=0.21,
+                    dead_points=None):
     """Drive _save_lensing_outputs on a minimal fixed-partition bundle and read
     back (results.hdf5 attrs, settings.json)."""
     import json
@@ -362,6 +363,7 @@ def _run_save_phase(tmp_path, extra_args=(), lens_fixed=None, logZerr=0.21):
         "samples": np.zeros((3, len(labels))),
         "logZ": -67.4497,
         "logZerr": logZerr,
+        "dead_points": dead_points,
     }
     settings = {}
     cli._save_lensing_outputs(
@@ -450,6 +452,40 @@ def test_logzerr_persistence_is_not_gated_on_the_sampler(tmp_path, sampler):
     )
     assert attrs["logZerr"] == pytest.approx(0.33)
     assert settings["logZerr"] == pytest.approx(0.33)
+
+
+def test_lensing_outputs_persist_the_dead_point_record(tmp_path):
+    """The lensing CLI writes its own results.hdf5, so the additive dead-point
+    datasets (logl_dead/logwt_dead) have to be wired there too -- and it is the
+    CLI that most needs them, its headline being a logZ difference that an
+    evidence bootstrap has to be rebuilt from."""
+    import h5py
+
+    from darksirens.io.results import DEAD_POINT_SEMANTICS
+
+    logl = np.sort(np.linspace(-9.0, -1.0, 11))
+    logwt = np.linspace(-20.0, -3.0, 11)
+    _run_save_phase(tmp_path, dead_points={
+        "logl": logl, "logwt": logwt, "n_dead": 11, "n_live": 40,
+    })
+    with h5py.File(tmp_path / "results.hdf5", "r") as f:
+        np.testing.assert_allclose(f["logl_dead"][()], logl)
+        np.testing.assert_allclose(f["logwt_dead"][()], logwt)
+        assert f.attrs["n_dead"] == 11
+        assert f.attrs["n_live"] == 40
+        assert f.attrs["dead_points"] == DEAD_POINT_SEMANTICS
+        # Indexed by dead point, NOT by the 3 posterior samples above.
+        assert f["samples"].shape[0] == 3
+
+
+def test_lensing_outputs_without_dead_points_are_unchanged(tmp_path):
+    """numpyro lensing runs and every archived run predating the schema."""
+    import h5py
+
+    _run_save_phase(tmp_path)
+    with h5py.File(tmp_path / "results.hdf5", "r") as f:
+        assert "logl_dead" not in f and "logwt_dead" not in f
+        assert "n_dead" not in f.attrs and "dead_points" not in f.attrs
 
 
 def test_diagnostics_lens_values_use_a_generic_eval_point_stamp():

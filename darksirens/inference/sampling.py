@@ -26,6 +26,43 @@ _TINYNS_DIAGNOSTIC_FIELDS = (
 )
 
 
+def _dead_point_block(logl, logwt, n_live=None):
+    """Package a nested sampler's DEAD-POINT arrays for :mod:`darksirens.io.results`.
+
+    ``logl``/``logwt`` are indexed by retired live point, in retirement order,
+    NOT by posterior sample: the ``samples`` a run returns are the equal-weight
+    resample of these, drawn with replacement.  They are kept because logZ, the
+    logX shrinkage ladder, the information H, evidence bootstraps and dynesty
+    runplots are functions of the dead points alone and are unrecoverable once
+    the resample has been taken.
+
+    Returns ``None`` (and warns) when the sampler did not expose a usable pair,
+    so an unfamiliar result object costs a diagnostic, never the run: this is
+    called at the very end of a possibly multi-day job.
+    """
+    if logl is None or logwt is None:
+        # An older/unfamiliar sampler build that does not expose the record.
+        return None
+    try:
+        logl_arr = np.asarray(logl, dtype=float).ravel()
+        logwt_arr = np.asarray(logwt, dtype=float).ravel()
+    except (TypeError, ValueError) as exc:      # pragma: no cover - defensive
+        print(f"  [!] dead-point arrays unreadable ({exc}); not persisting them.",
+              flush=True)
+        return None
+    if logl_arr.size == 0 or logl_arr.shape != logwt_arr.shape:
+        print(
+            "  [!] dead-point logl/logwt have shapes "
+            f"{logl_arr.shape}/{logwt_arr.shape}; not persisting them.",
+            flush=True,
+        )
+        return None
+    block = {"logl": logl_arr, "logwt": logwt_arr, "n_dead": int(logl_arr.size)}
+    if n_live is not None:
+        block["n_live"] = int(n_live)
+    return block
+
+
 def _json_safe_tinyns_value(value):
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
@@ -396,6 +433,14 @@ def run_sampler(method, likelihood, prior_transform, labels,
             "logZ": float(result.logz),
             "logZerr": float(result.logzerr),
         }
+        # tinyns' result.logl/.logwt are the weighted dead-point record (dead
+        # points followed by the final live points); `samples` above is the
+        # equal-weight resample, whose length is the posterior ESS instead.
+        out["dead_points"] = _dead_point_block(
+            getattr(result, "logl", None),
+            getattr(result, "logwt", None),
+            n_live=getattr(result, "nlive", None),
+        )
         if hasattr(result, "diagnostics"):
             try:
                 out["tinyns_diagnostics"] = result.diagnostics()
@@ -846,10 +891,22 @@ def run_sampler(method, likelihood, prior_transform, labels,
         logZ = float(res.logz[-1])
         logZerr = float(res.logzerr[-1])
 
+        # dynesty's res.logl/res.logwt are per DEAD POINT (niter entries, the
+        # final live points already appended).  resample_equal above returns as
+        # many equal-weight rows as it was given, so n_samples happens to equal
+        # n_dead here -- the rows are still unrelated point sets.  "nlive" is
+        # absent from a dynamic run's Results (it carries samples_n instead).
+        dead_points = _dead_point_block(
+            res["logl"],
+            logw,
+            n_live=(int(res["nlive"]) if "nlive" in res else None),
+        )
+
         return {
             "samples": np.asarray(samples),
             "logZ": logZ,
-            "logZerr": logZerr
+            "logZerr": logZerr,
+            "dead_points": dead_points,
         }
 
     else:

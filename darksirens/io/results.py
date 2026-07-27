@@ -77,6 +77,75 @@ def save_tinyns_diagnostics_json(results: dict, run_dir: str, opts) -> str | Non
     return path
 
 
+# ── Nested-sampler dead points ─────────────────────────────────────────────────
+#
+# A nested sampler produces TWO different point sets and they must never be
+# confused:
+#
+#   * the DEAD points -- every live point the run retired, in retirement order,
+#     each carrying its own logL and its shrinkage-derived log importance weight
+#     logwt.  This is the raw nested-sampling record: logZ, the logX ladder, the
+#     information H, evidence bootstraps and dynesty runplots are all functions
+#     of it, and none of them can be recovered once it is discarded.
+#   * the EQUAL-WEIGHT posterior -- `samples`, obtained by resampling the dead
+#     points against exp(logwt).  Rows are drawn WITH REPLACEMENT, so row i of
+#     `samples` is unrelated to dead point i.
+#
+# The pre-existing (N_samples,) `log_weights` / `log_likelihood` datasets are
+# per POSTERIOR SAMPLE (numpyro writes them), so the dead-point arrays cannot be
+# stored under those names without silently changing what an existing reader
+# gets back.  They are therefore written additively under `logl_dead` /
+# `logwt_dead`, whose length contract is n_dead, NOT n_samples.  (For dynesty
+# the two happen to be numerically equal -- resample_equal returns as many rows
+# as it was given -- which is exactly why the alignment warning below matters;
+# for tinyns n_samples is the posterior ESS and the two differ outright.)
+DEAD_POINT_SEMANTICS = (
+    "Nested-sampling DEAD POINTS (dynesty/tinyns) in retirement order. "
+    "logl_dead and logwt_dead both have length n_dead = niter + n_live and are "
+    "NOT row-aligned with the 'samples' dataset, which is the equal-weight "
+    "resample of the posterior -- do not zip them, and do not assume "
+    "n_dead == n_samples even when the two numbers agree. Use these arrays to "
+    "re-derive logZ, the logX shrinkage ladder, the information H, evidence "
+    "bootstraps and runplots."
+)
+
+
+def write_dead_point_datasets(f, results: dict, dataset_kwargs=None) -> bool:
+    """Additively persist the nested-sampling dead-point record.
+
+    Writes, when ``results["dead_points"]`` is present (see
+    :func:`darksirens.inference.sampling._dead_point_block`):
+
+    * ``logl_dead``  — (n_dead,) dead-point log-likelihoods
+    * ``logwt_dead`` — (n_dead,) their unnormalized log importance weights
+    * ``attrs["n_dead"]``    — the length contract for both datasets
+    * ``attrs["n_live"]``    — live points the sampler ACTUALLY ran with, which
+      can differ from the requested ``nlive`` attr (a resumed run keeps the
+      checkpoint's value)
+    * ``attrs["dead_points"]`` — :data:`DEAD_POINT_SEMANTICS`
+
+    Nothing is written for numpyro (no dead points) or for old sampler versions
+    that do not expose the arrays. No existing dataset or attribute is touched.
+
+    Returns ``True`` if the datasets were written.
+    """
+    block = results.get("dead_points")
+    if not block:
+        return False
+    logl = np.asarray(block["logl"], dtype=float)
+    logwt = np.asarray(block["logwt"], dtype=float)
+    if logl.ndim != 1 or logl.shape != logwt.shape or logl.size == 0:
+        return False
+    kw = {} if dataset_kwargs is None else dict(dataset_kwargs)
+    f.create_dataset("logl_dead", data=logl, **kw)
+    f.create_dataset("logwt_dead", data=logwt, **kw)
+    f.attrs["n_dead"] = int(logl.size)
+    if block.get("n_live") is not None:
+        f.attrs["n_live"] = int(block["n_live"])
+    f.attrs["dead_points"] = DEAD_POINT_SEMANTICS
+    return True
+
+
 def save_results_hdf5(
     results:                dict,
     run_dir:                str,
@@ -103,7 +172,12 @@ def save_results_hdf5(
     ├── fixed_labels    — (N_fixed,) individually-fixed param labels
     ├── fixed_values    — (N_fixed,) their values
     ├── log_weights     — (N_samples,) log importance weights  [if available]
-    └── log_likelihood  — (N_samples,) per-sample log-likelihoods [if available]
+    ├── log_likelihood  — (N_samples,) per-sample log-likelihoods [if available]
+    ├── logl_dead       — (N_dead,) nested-sampler DEAD-POINT logL [if available]
+    └── logwt_dead      — (N_dead,) dead-point log importance weights [if avail.]
+
+    The two `*_dead` datasets are indexed by DEAD POINT, not by posterior
+    sample; see :data:`DEAD_POINT_SEMANTICS`.
     """
     path     = os.path.join(run_dir, "results.hdf5")
     tmp_path = path + ".tmp"
@@ -126,6 +200,10 @@ def save_results_hdf5(
             f.create_dataset("log_weights",    data=np.asarray(results["log_weights"]), **kw)
         if results.get("log_likelihood") is not None:
             f.create_dataset("log_likelihood", data=np.asarray(results["log_likelihood"]), **kw)
+
+        # Additive dead-point record (nested samplers only); indexed by dead
+        # point, never by posterior sample.
+        write_dead_point_datasets(f, results, dataset_kwargs=kw)
 
         # Individually-fixed parameters — store so post-processing can reconstruct
         # the full parameter vector without reading the settings JSON separately.
