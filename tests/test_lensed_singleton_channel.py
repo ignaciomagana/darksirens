@@ -494,6 +494,24 @@ def test_lensed_single_event_matches_numpy_oracle():
     expected = np.logaddexp(branch(mu_p, mu_m), branch(mu_m, mu_p))
     np.testing.assert_allclose(ours, expected, rtol=1e-8)
 
+    # Mode plumbing at the event level: the default is bit-identical to an
+    # explicit 'independent'; 'shared_iota' is finite, distinct, and its
+    # censoring is conditioned on the detected image (weaker suppression than
+    # the marginal when the detected image itself is near threshold).
+    ours_explicit = float(lensed_single_log_likelihood_event(
+        event, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, fc,
+        _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+        pair_orientation_mode="independent",
+    ))
+    assert ours_explicit == ours
+    ours_shared = float(lensed_single_log_likelihood_event(
+        event, _cosmo(), _survey(), jnp.zeros(1), _toy_catalog(), sis, fc,
+        _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+        pair_orientation_mode="shared_iota",
+    ))
+    assert np.isfinite(ours_shared)
+    assert ours_shared != ours
+
 
 # ============================================================================
 # E. Master likelihood: reduction, response, gradients
@@ -542,7 +560,7 @@ def master_fixture(tmp_path_factory):
 
 
 def _master_call(fx, *, singleton_lensing, A_tau, pop_params=None,
-                 return_diagnostics=False):
+                 return_diagnostics=False, pair_orientation_mode="independent"):
     from darksirens.likelihood.likelihood_with_clusters import (
         darksiren_log_likelihood_with_clusters,
         CLUSTER_MODE_OFF,
@@ -570,6 +588,7 @@ def _master_call(fx, *, singleton_lensing, A_tau, pop_params=None,
         fc_pdet_params=fx["fc"] if singleton_lensing else None,
         y_nodes_single=16,
         return_diagnostics=return_diagnostics,
+        pair_orientation_mode=pair_orientation_mode,
     )
 
 
@@ -686,6 +705,44 @@ def test_mixture_gradient_wrt_population_finite(master_fixture):
 
     def f(pop):
         return _master_call(fx, singleton_lensing=True, A_tau=1e-3, pop_params=pop)
+
+    g = jax.grad(f)(fx["pop_params"])
+    assert np.all(np.isfinite(np.asarray(g))), f"non-finite grad: {np.asarray(g)}"
+
+
+def test_master_pair_orientation_mode_threads_to_singleton_channel(master_fixture):
+    """--pair_orientation_mode reaches the lensed-singleton censoring factor
+    through the master likelihood: shared_iota changes the MIXTURE value, is
+    inert when the channel is OFF, rejects unknown modes, and keeps finite
+    population gradients (the shared_iota tables are piecewise-linear)."""
+    fx = master_fixture
+    ll_ind = float(_master_call(fx, singleton_lensing=True, A_tau=5e-3))
+    ll_shared = float(_master_call(
+        fx, singleton_lensing=True, A_tau=5e-3,
+        pair_orientation_mode="shared_iota",
+    ))
+    assert np.isfinite(ll_shared)
+    assert abs(ll_shared - ll_ind) > 1e-8
+
+    # OFF: the mode only affects the lensed-singleton channel, nothing else.
+    off_ind = float(_master_call(fx, singleton_lensing=False, A_tau=5e-3))
+    off_shared = float(_master_call(
+        fx, singleton_lensing=False, A_tau=5e-3,
+        pair_orientation_mode="shared_iota",
+    ))
+    np.testing.assert_allclose(off_shared, off_ind, rtol=0, atol=0)
+
+    with pytest.raises(ValueError, match="pair_orientation_mode"):
+        _master_call(
+            fx, singleton_lensing=True, A_tau=5e-3,
+            pair_orientation_mode="shared_orientation",
+        )
+
+    def f(pop):
+        return _master_call(
+            fx, singleton_lensing=True, A_tau=1e-3, pop_params=pop,
+            pair_orientation_mode="shared_iota",
+        )
 
     g = jax.grad(f)(fx["pop_params"])
     assert np.all(np.isfinite(np.asarray(g))), f"non-finite grad: {np.asarray(g)}"

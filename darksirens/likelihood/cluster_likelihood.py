@@ -460,6 +460,7 @@ def _lensed_single_branch_log_integrand(
     cosmo: CosmoParams, survey: SurveyParams, pop_params: jnp.ndarray,
     catalog: EMCatalog, sis_params: SISLensParams, fc_params,
     log_p_pop_fn: Callable, log_prior_z_fn: Callable,
+    pair_orientation_mode: str = "independent",
 ) -> jnp.ndarray:
     """Per-(PE-sample, y-node) log-integrand for ONE image-identity branch of
     the lensed-singleton channel: the observed event is a strongly lensed
@@ -467,11 +468,16 @@ def _lensed_single_branch_log_integrand(
     was NOT detected.
 
     Identical structure to _pair_branch_log_integrand with the partner's
-    PE-KDE term replaced by the censoring factor log[1 - P_det(partner)]
+    PE-KDE term replaced by the censoring factor log P(partner missed)
     (Finn-Chernoff analytic model — exact for the mock generator's rendering;
-    swap fcpdet for an emulator for real data).
+    swap fcpdet for an emulator for real data). ``pair_orientation_mode``
+    selects the censoring convention: 'independent' (default; the pinned
+    marginal log[1 - P_det(partner)], matching independently-rendered mocks)
+    or 'shared_iota' (the joint-orientation conditional
+    log P(partner missed | this image detected), for campaigns rendered with
+    one (iota, psi, alpha, delta) per source; see darksirens.lensing.fcpdet).
     """
-    from darksirens.lensing.fcpdet import log_one_minus_pdet_fc
+    from darksirens.lensing.fcpdet import log_pmiss_partner_fc
 
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
@@ -496,8 +502,13 @@ def _lensed_single_branch_log_integrand(
     log_tau = jnp.log(tau_2_SIS(z_s_safe, sis_params))
 
     # Partner censoring: apparent distance the partner WOULD have shown.
+    # The detected image's own apparent distance (the PE sample dL_app) only
+    # matters in shared_iota mode, via the shared-inclination conditioning.
     dL_partner = dL_of_z(z_s_safe, H0, Om0, w0, wa) / jnp.sqrt(mu_p)
-    log_miss = log_one_minus_pdet_fc(m1src, q_b, z_s_safe, dL_partner, fc_params)
+    log_miss = log_pmiss_partner_fc(
+        m1src, q_b, z_s_safe, dL_app_b, dL_partner, fc_params,
+        pair_orientation_mode=pair_orientation_mode,
+    )
 
     log_J = _log_jac_app_to_src(z_s_safe, dL_true, mu_d, H0, Om0, w0, wa)
     log_quad = log_py[None, :] + log_wy[None, :]
@@ -527,15 +538,19 @@ def lensed_single_log_likelihood_event(
     log_prior_z_fn: Callable,
     y_nodes: jnp.ndarray,
     log_wy: jnp.ndarray,
+    pair_orientation_mode: str = "independent",
 ) -> jnp.ndarray:
     """log of the lensed-singleton evidence for one observed event:
 
         dN_1L(d) = ∫ dθ dy  τ₂(z) p(y) Σ_{j∈{+,-}} p(d | θ, μ_j(y)) ·
-                   [1 - P_det(partner image)] · (population × volume terms)
+                   P(partner image missed) · (population × volume terms)
 
     The two image identities are DISTINCT outcomes of the same source, so
     the branches are SUMMED (unlike the pair likelihood, which averages the
     two assignments of the same observation). Returns -inf if both vanish.
+    ``pair_orientation_mode`` picks the censoring convention (see
+    ``_lensed_single_branch_log_integrand``); 'independent' is bit-identical
+    to the historical behaviour.
     """
     mu_plus, mu_minus = mu_plus_minus_from_y(y_nodes)
     log_py = log_p_y_SIS(y_nodes)
@@ -549,6 +564,7 @@ def lensed_single_log_likelihood_event(
         cosmo=cosmo, survey=survey, pop_params=pop_params, catalog=catalog,
         sis_params=sis_params, fc_params=fc_params,
         log_p_pop_fn=log_p_pop_fn, log_prior_z_fn=log_prior_z_fn,
+        pair_orientation_mode=pair_orientation_mode,
     )
     # Branch: detected image is mu_+ (partner mu_-), and vice versa.
     log_int_plus = _lensed_single_branch_log_integrand(

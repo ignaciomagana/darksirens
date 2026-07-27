@@ -555,3 +555,61 @@ def test_supported_cluster_partition_combinations_still_resolve(
     )
     cli._resolve_lensing_run_config(opts)
     assert opts.universe_model == "spectral_sirens_wl"
+
+
+# ---------------------------------------------------------------------------
+# pair_orientation_mode: flag surface + rendered-campaign consistency warning
+# ---------------------------------------------------------------------------
+
+def test_pair_orientation_mode_flag_defaults_to_independent():
+    """The joint-orientation model is opt-in: the default must stay
+    'independent' (existing mocks were rendered with independent per-image
+    draws) and unknown values must be rejected at parse time."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts()
+    assert opts.pair_orientation_mode == "independent"
+    opts = _lensing_opts("--pair_orientation_mode", "shared_iota")
+    assert opts.pair_orientation_mode == "shared_iota"
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["--gw_path", "g", "--gwselection_path", "s",
+             "--pair_orientation_mode", "shared_orientation"]
+        )
+
+
+def test_pair_orientation_mismatch_warns_against_rendered_campaign(tmp_path):
+    """Running --pair_orientation_mode against a campaign rendered with the
+    OTHER convention must warn (the J=2/lensed-singleton ratio that sets
+    A_tau is mis-normalised by up to ~2.6x); matched modes stay silent, and
+    attr-less legacy files count as 'independent'."""
+    import warnings as _warnings
+
+    import h5py
+    import darksirens.cli.inference_lensing as cli
+
+    path = str(tmp_path / "lensed.h5")
+    with h5py.File(path, "w") as f:
+        f.attrs["pair_orientation_mode"] = "shared_iota"
+
+    opts = _lensing_opts("--lensed_injections_path", path)
+    with pytest.warns(RuntimeWarning, match="pair_orientation_mode"):
+        cli._warn_pair_orientation_mismatch(opts)
+
+    opts = _lensing_opts("--lensed_injections_path", path,
+                         "--pair_orientation_mode", "shared_iota")
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        cli._warn_pair_orientation_mismatch(opts)
+
+    legacy = str(tmp_path / "legacy.h5")
+    with h5py.File(legacy, "w") as f:
+        pass
+    opts = _lensing_opts("--lensed_injections_path", legacy)
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        cli._warn_pair_orientation_mismatch(opts)
+    opts = _lensing_opts("--lensed_injections_path", legacy,
+                         "--pair_orientation_mode", "shared_iota")
+    with pytest.warns(RuntimeWarning, match="independent"):
+        cli._warn_pair_orientation_mismatch(opts)
