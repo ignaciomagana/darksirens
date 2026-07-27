@@ -100,7 +100,13 @@ from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.q_provenance import check_lss_completion_provenance
-from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
+from darksirens.core.constants import (
+    H0_FID,
+    OM0_FID,
+    SURVEY_PARAMS_FID_BY_NAME,
+    W0_FID,
+    WA_FID,
+)
 
 warnings.simplefilter("ignore", FutureWarning)
 
@@ -156,8 +162,9 @@ def _print_parameter_table(
     """
     COSMO_FID  = {"H0": H0_FID, "Om0": OM0_FID, "w0": W0_FID, "wa": WA_FID}
     DE_FID = {"w0": W0_FID, "wa": WA_FID}
-    SURVEY_FID = {"log10n0": -2.0, "z50": 1.0, "w": 0.5,
-                  "delta": 0.0, "b_miss": 1.0, "alpha_miss": 1.0, "sigma_kde": 0.0}
+    # The survey fiducials the decoder pins non-sampled SurveyParams fields at
+    # (core.constants is their single source; this table used to restate them).
+    SURVEY_FID = dict(SURVEY_PARAMS_FID_BY_NAME)
     pop_fid_map = {lbl: float(pop_params_fid[i])
                    for i, lbl in enumerate(pop_labels_all)}
 
