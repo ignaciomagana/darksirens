@@ -115,7 +115,11 @@ from darksirens.inference.checkpointing import (
 )
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
-from darksirens.io.results import save_tinyns_diagnostics_json, write_tinyns_metadata
+from darksirens.io.results import (
+    save_tinyns_diagnostics_json,
+    write_dead_point_datasets,
+    write_tinyns_metadata,
+)
 from darksirens.io.settings import environment_block
 from darksirens.inference.tinyns_config import (
     add_tinyns_arguments,
@@ -3208,6 +3212,13 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
         np.save(os.path.join(run_dir, "samples.npy"), samples)
         with h5py.File(os.path.join(run_dir, "results.hdf5"), "w") as f:
             f.create_dataset("samples", data=samples)
+            # Nested-sampler dead-point record (logl_dead/logwt_dead + n_dead /
+            # n_live attrs), additive and indexed by dead point rather than by
+            # posterior sample.  The lensing paper's central quantity is a
+            # logZ difference, so the raw evidence record is worth archiving:
+            # it is what an evidence bootstrap or a runplot has to be rebuilt
+            # from.  Mirrors io.results.save_results_hdf5.
+            write_dead_point_datasets(f, results)
             f.attrs["labels"] = json.dumps(labels)
             f.attrs["fixed_parameter_values_raw"] = json.dumps(fixed, default=str)
             f.attrs["fixed_parameter_values_base"] = json.dumps(base_fixed, default=str)
