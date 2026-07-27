@@ -882,6 +882,39 @@ def _load_wl_table_arrays(opts):
     )
 
 
+def _warn_pair_orientation_mismatch(opts):
+    """Warn when the inference-side --pair_orientation_mode differs from the
+    convention the lensed-injection campaign was rendered with.
+
+    The generator records ``pair_orientation_mode`` as a file attr (files
+    from older generators lack it and were always rendered 'independent').
+    A mismatch mis-normalises the J=2 / lensed-singleton channel ratio by up
+    to ~2.6x (see darksirens.lensing.fcpdet) — warn, don't fail, so ablation
+    studies remain possible on purpose.
+    """
+    path = getattr(opts, "lensed_injections_path", None)
+    if not path:
+        return
+    try:
+        with h5py.File(path, "r") as f:
+            file_mode = str(f.attrs.get("pair_orientation_mode", "independent"))
+    except OSError:
+        return
+    run_mode = getattr(opts, "pair_orientation_mode", "independent")
+    if file_mode != run_mode:
+        warnings.warn(
+            f"--pair_orientation_mode {run_mode!r} but the lensed-injection "
+            f"campaign {path!r} was rendered with {file_mode!r}. The pair "
+            "efficiencies (rendered flags) and the lensed-singleton censoring "
+            "factor now follow DIFFERENT orientation conventions — the "
+            "J=2/lensed-singleton channel ratio that sets A_tau is "
+            "mis-normalised by up to ~2.6x. Re-render the campaign or match "
+            "the flag.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
 def _load_singleton_lensing_inputs(opts):
     """Load the lensed-singleton channel inputs (sl_mixture), or inert Nones.
 
@@ -925,6 +958,7 @@ def load_inputs(opts):
     # likelihood closure.  main() already rejects this via
     # _resolve_lensing_run_config; this is the second net.
     _validate_partition_mode_against_cluster_mode(opts)
+    _warn_pair_orientation_mismatch(opts)
     rng = np.random.default_rng(opts.seed)
 
     # --- singleton PE (event-major flatten) ---
@@ -1723,6 +1757,9 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
     attrs["wl_table_path"] = str(getattr(opts, "lensing_wl_table_path", None) or "")
     attrs["wl_selection"] = opts.wl_selection
     attrs["singleton_lensing"] = getattr(opts, "singleton_lensing", "off")
+    attrs["pair_orientation_mode"] = getattr(
+        opts, "pair_orientation_mode", "independent"
+    )
     attrs["pair_time_mark_impl"] = getattr(opts, "pair_time_mark_impl", "auto")
     attrs["n_events"] = int(inp["nEvents"])
     attrs["reference_partition_n_singletons"] = int(inp["n_singletons"])
@@ -2085,6 +2122,9 @@ def build_cluster_likelihood(
                 max_likelihood_variance=float(
                     getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
                 ),
+                pair_orientation_mode=getattr(
+                    opts, "pair_orientation_mode", "independent"
+                ),
             )
 
         def _eval_partition(part):
@@ -2268,6 +2308,9 @@ def build_cluster_diagnostics(
                 ),
                 max_likelihood_variance=float(
                     getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
+                ),
+                pair_orientation_mode=getattr(
+                    opts, "pair_orientation_mode", "independent"
                 ),
             )
 
@@ -2479,6 +2522,9 @@ def build_cluster_diagnostics(
             wl_backend=opts.wl_backend,
             wl_selection=opts.wl_selection,
             singleton_lensing=getattr(opts, "singleton_lensing", "off"),
+            pair_orientation_mode=getattr(
+                opts, "pair_orientation_mode", "independent"
+            ),
             pair_batch_size=getattr(opts, "pair_batch_size", 0),
             y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
             pe_max_per_pair=opts.pe_max_per_pair,
@@ -2656,6 +2702,20 @@ def build_parser():
                    help="override the injection file's fc_r0 attr")
     model.add_argument("--fc_mc_bar", type=float, default=None,
                    help="override the injection file's fc_mc_bar attr")
+    model.add_argument(
+        "--pair_orientation_mode",
+        choices=["independent", "shared_iota"],
+        default="independent",
+        help="two-image orientation convention of the lensed-singleton "
+             "censoring factor. 'independent' (default) marginalises the "
+             "partner image's Finn-Chernoff Theta independently — matching "
+             "mocks rendered with independent per-image draws. 'shared_iota' "
+             "uses the joint-orientation model (shared inclination, antenna "
+             "decorrelated over the SIS time delay) — REQUIRES a campaign "
+             "generated with --pair-orientation-mode shared_iota; mixing "
+             "conventions mis-normalises the J=2/lensed-singleton ratio by "
+             "up to ~2.6x (see darksirens.lensing.fcpdet).",
+    )
     fixing = p.add_argument_group("Fixing")
     fixing.add_argument("--fix_cosmology", type=str_to_bool, default=True, metavar="BOOL")
     fixing.add_argument("--fix_survey", type=str_to_bool, default=True, metavar="BOOL")

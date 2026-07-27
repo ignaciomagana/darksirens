@@ -191,6 +191,7 @@ def _unlensed_tau_suppression_enabled(cluster_mode: int, singleton_lensing: int)
         "singleton_lensing",
         "y_nodes_single",
         "selection_neff_soft_guard",
+        "pair_orientation_mode",
     ],
 )
 def darksiren_log_likelihood_with_clusters(
@@ -241,9 +242,11 @@ def darksiren_log_likelihood_with_clusters(
     y_nodes_single: int = 32,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    pair_orientation_mode: str = "independent",
     # Comoving-distance interpolation table, threaded as a jit ARGUMENT and bound
     # as the active table for this trace (see ``utils.cosmology``).  None resolves
-    # to whatever is active in the CALLER's scope.
+    # to whatever is active in the CALLER's scope.  Must stay the TRAILING
+    # parameter (threads_distance_table contract).
     distance_table: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
@@ -304,6 +307,11 @@ def darksiren_log_likelihood_with_clusters(
         raise ValueError(
             "singleton_lensing=MIXTURE requires lensed_singles (the "
             "exactly-one-detected lensed-injection subset) and fc_pdet_params."
+        )
+    if pair_orientation_mode not in ("independent", "shared_iota"):
+        raise ValueError(
+            f"unknown pair_orientation_mode {pair_orientation_mode!r}; "
+            "expected 'independent' or 'shared_iota'"
         )
     if wl_enabled and universe_model != "spectral_sirens_wl":
         raise ValueError(
@@ -539,6 +547,7 @@ def darksiren_log_likelihood_with_clusters(
             event_dict, cosmo, survey, pop_params, catalog_ev,
             sis_params, fc_pdet_params, log_p_pop, log_prior_z,
             y_nodes_s, log_wy_s,
+            pair_orientation_mode=pair_orientation_mode,
         )
         return None, jnp.logaddexp(log_unlensed, log_lensed)
 
