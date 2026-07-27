@@ -19,6 +19,15 @@ only controls proposal quality, never correctness.  A relative density floor
 (``FLOOR_REL``) keeps every grid cell sampleable so support mismatches show
 up as small weights rather than silently missing probability mass.
 
+Every truncated sampler is paired with a ``*_logpdf`` evaluator that returns
+the same density at an ARBITRARY point, not just at points the sampler
+produced.  Mixture proposals need exactly that: a draw from component B must
+be scored under component A's density (see
+``darksirens/likelihood/flow_events.py``), and scoring it with the sampler's
+own returned ``log_s`` — the mistake that silently biases naive multiple-
+importance-sampling code — is impossible when the density is a standalone
+function of the point.
+
 Everything is pure ``jax.numpy`` with static shapes and runs inside the
 jitted likelihood body.
 """
@@ -147,6 +156,51 @@ class TruncNormSample(NamedTuple):
     log_s: jnp.ndarray      # exact normalised log density at x
 
 
+def truncnorm_log_span(mu, sigma, lo, hi):
+    """``log[Phi((hi-mu)/sigma) - Phi((lo-mu)/sigma)]``, stable in both tails.
+
+    Shared by :func:`truncnorm_sample` and :func:`truncnorm_logpdf` so the
+    sampler and its density can never drift apart.  See the sampler for why
+    the naive difference of CDFs is unusable here.
+    """
+    sigma = jnp.maximum(sigma, 1e-6)
+    a = (lo - mu) / sigma
+    b = (hi - mu) / sigma
+    # Work in whichever tail keeps both endpoints on the same (lower) side, so
+    # the subtraction below is always between two log-CDFs of the same sign.
+    flip = a > 0.0
+    aa = jnp.where(flip, -b, a)
+    bb = jnp.where(flip, -a, b)
+    log_lo, log_hi = log_ndtr(aa), log_ndtr(bb)      # log_lo <= log_hi
+    # log(e^log_hi - e^log_lo) = log_hi + log(-expm1(log_lo - log_hi))
+    tiny = jnp.finfo(jnp.result_type(float(0.0), log_hi)).tiny
+    delta = jnp.minimum(log_lo - log_hi, -tiny)
+    return log_hi + jnp.log(-jnp.expm1(delta))
+
+
+def truncnorm_logpdf(
+    x: jnp.ndarray,
+    mu: jnp.ndarray,
+    sigma: jnp.ndarray,
+    lo=-1.0,
+    hi=1.0,
+) -> jnp.ndarray:
+    """Exact log density of :func:`truncnorm_sample` at an arbitrary ``x``.
+
+    ``-inf`` outside ``[lo, hi]`` — the sampler cannot produce those points,
+    so a mixture partner scoring them under this component must see zero.
+    """
+    sigma = jnp.maximum(sigma, 1e-6)
+    log_span = truncnorm_log_span(mu, sigma, lo, hi)
+    logp = (
+        -0.5 * ((x - mu) / sigma) ** 2
+        - jnp.log(sigma)
+        - 0.5 * jnp.log(2.0 * jnp.pi)
+        - log_span
+    )
+    return jnp.where((x >= lo) & (x <= hi), logp, -jnp.inf)
+
+
 def truncnorm_sample(
     u: jnp.ndarray,
     mu: jnp.ndarray,
@@ -177,17 +231,7 @@ def truncnorm_sample(
     # hole in the likelihood surface.  Reachable because the truncation bounds
     # here are the per-event support box, not a fixed [-1, 1]: mu_chi at a prior
     # edge with sigma_chi at its floor puts mu tens of sigma outside a narrow box.
-    a = (lo - mu) / sigma
-    b = (hi - mu) / sigma
-    # Work in whichever tail keeps both endpoints on the same (lower) side, so
-    # the subtraction below is always between two log-CDFs of the same sign.
-    flip = a > 0.0
-    aa = jnp.where(flip, -b, a)
-    bb = jnp.where(flip, -a, b)
-    log_lo, log_hi = log_ndtr(aa), log_ndtr(bb)      # log_lo <= log_hi
-    # log(e^log_hi - e^log_lo) = log_hi + log(-expm1(log_lo - log_hi))
-    delta = jnp.minimum(log_lo - log_hi, -jnp.finfo(u.dtype).tiny)
-    log_span = log_hi + jnp.log(-jnp.expm1(delta))
+    log_span = truncnorm_log_span(mu, sigma, lo, hi)
     # NO floor here.  log_ndtr is finite for any finite argument and delta <= 0
     # keeps -expm1(delta) in (0, 1], so log_span is always finite -- including
     # the degenerate lo == hi case, where it collapses to log_hi + log(tiny).
@@ -248,6 +292,44 @@ def _hist_cdf_at(edges, cdf_nodes, log_cell_dens, log_norm, x):
     )
 
 
+def _hist_trunc_span(edges, cdf_nodes, log_cell_dens, log_norm, lo, hi):
+    """Clipped window and its CDF mass, shared by the sampler and the pdf."""
+    lo = jnp.clip(lo, edges[0], edges[-1])
+    hi = jnp.clip(hi, edges[0], edges[-1])
+    hi = jnp.maximum(hi, lo)
+    F_lo = _hist_cdf_at(edges, cdf_nodes, log_cell_dens, log_norm, lo)
+    F_hi = _hist_cdf_at(edges, cdf_nodes, log_cell_dens, log_norm, hi)
+    span = jnp.maximum(F_hi - F_lo, jnp.finfo(cdf_nodes.dtype).tiny)
+    return lo, hi, F_lo, span
+
+
+def _sample_histogram_trunc_tab(u, edges, log_cell_dens, cdf_nodes, log_norm, lo, hi):
+    """:func:`sample_histogram_trunc` with the CDF nodes supplied by the caller."""
+    lo, hi, F_lo, span = _hist_trunc_span(
+        edges, cdf_nodes, log_cell_dens, log_norm, lo, hi
+    )
+    up = F_lo + u * span
+    K = edges.shape[0] - 1
+    k = jnp.clip(jnp.searchsorted(cdf_nodes, up, side="right") - 1, 0, K - 1)
+    denom = jnp.maximum(cdf_nodes[k + 1] - cdf_nodes[k], jnp.finfo(up.dtype).tiny)
+    frac = jnp.clip((up - cdf_nodes[k]) / denom, 0.0, 1.0)
+    x = jnp.clip(edges[k] + frac * (edges[k + 1] - edges[k]), lo, hi)
+
+    log_s = log_cell_dens[k] - log_norm - jnp.log(span)
+    return HistogramSample(x=x, cell=k, log_s=log_s, log_norm=log_norm)
+
+
+def _histogram_trunc_logpdf_tab(x, edges, log_cell_dens, cdf_nodes, log_norm, lo, hi):
+    """:func:`histogram_trunc_logpdf` with the CDF nodes supplied by the caller."""
+    lo, hi, _F_lo, span = _hist_trunc_span(
+        edges, cdf_nodes, log_cell_dens, log_norm, lo, hi
+    )
+    K = edges.shape[0] - 1
+    k = jnp.clip(jnp.searchsorted(edges, x, side="right") - 1, 0, K - 1)
+    logp = log_cell_dens[k] - log_norm - jnp.log(span)
+    return jnp.where((x >= lo) & (x <= hi), logp, -jnp.inf)
+
+
 def sample_histogram_trunc(
     u: jnp.ndarray,
     edges: jnp.ndarray,
@@ -262,24 +344,40 @@ def sample_histogram_trunc(
     (tiny normaliser), so downstream ``log t - log s`` weights collapse to
     -inf — the correct "population excludes this event" behaviour.
     """
-    lo = jnp.clip(lo, edges[0], edges[-1])
-    hi = jnp.clip(hi, edges[0], edges[-1])
-    hi = jnp.maximum(hi, lo)
-
     cdf_nodes, log_norm = _hist_cdf_nodes(edges, log_cell_dens)
-    F_lo = _hist_cdf_at(edges, cdf_nodes, log_cell_dens, log_norm, lo)
-    F_hi = _hist_cdf_at(edges, cdf_nodes, log_cell_dens, log_norm, hi)
-    span = jnp.maximum(F_hi - F_lo, jnp.finfo(cdf_nodes.dtype).tiny)
+    return _sample_histogram_trunc_tab(
+        u, edges, log_cell_dens, cdf_nodes, log_norm, lo, hi
+    )
 
-    up = F_lo + u * span
-    K = edges.shape[0] - 1
-    k = jnp.clip(jnp.searchsorted(cdf_nodes, up, side="right") - 1, 0, K - 1)
-    denom = jnp.maximum(cdf_nodes[k + 1] - cdf_nodes[k], jnp.finfo(up.dtype).tiny)
-    frac = jnp.clip((up - cdf_nodes[k]) / denom, 0.0, 1.0)
-    x = jnp.clip(edges[k] + frac * (edges[k + 1] - edges[k]), lo, hi)
 
-    log_s = log_cell_dens[k] - log_norm - jnp.log(span)
-    return HistogramSample(x=x, cell=k, log_s=log_s, log_norm=log_norm)
+def histogram_trunc_logpdf(
+    x: jnp.ndarray,
+    edges: jnp.ndarray,
+    log_cell_dens: jnp.ndarray,
+    lo,
+    hi,
+) -> jnp.ndarray:
+    """Exact log density of :func:`sample_histogram_trunc` at arbitrary ``x``.
+
+    Piecewise constant on the grid cells, renormalised by the window's CDF
+    mass, and ``-inf`` strictly outside the (clipped) window.  Evaluating the
+    density here rather than reusing the sampler's returned ``log_s`` is what
+    lets a mixture proposal score EVERY draw under EVERY component.
+    """
+    cdf_nodes, log_norm = _hist_cdf_nodes(edges, log_cell_dens)
+    return _histogram_trunc_logpdf_tab(
+        x, edges, log_cell_dens, cdf_nodes, log_norm, lo, hi
+    )
+
+
+def q_marginal_log_dens(
+    m1_edges: jnp.ndarray, q_edges: jnp.ndarray, log_t_cells: jnp.ndarray
+) -> jnp.ndarray:
+    """(C,) log density per unit q of the m1-marginalised target."""
+    dm = jnp.diff(m1_edges)
+    dq = jnp.diff(q_edges)
+    log_mass = log_t_cells + jnp.log(dm)[:, None] + jnp.log(dq)[None, :]
+    return logsumexp(log_mass, axis=0) - jnp.log(dq)
 
 
 def sample_q_marginal_trunc(
@@ -297,11 +395,34 @@ def sample_q_marginal_trunc(
     may depend on the drawn q (e.g. a chirp-mass band).  The caller owns any
     density floor on ``log_t_cells``.
     """
-    dm = jnp.diff(m1_edges)
-    dq = jnp.diff(q_edges)
-    log_mass = log_t_cells + jnp.log(dm)[:, None] + jnp.log(dq)[None, :]
-    log_col_dens = logsumexp(log_mass, axis=0) - jnp.log(dq)
+    log_col_dens = q_marginal_log_dens(m1_edges, q_edges, log_t_cells)
     return sample_histogram_trunc(u, q_edges, log_col_dens, q_win[0], q_win[1])
+
+
+class ColumnCdfTables(NamedTuple):
+    """Per-q-column CDF nodes and normalisers of the m1 conditional.
+
+    ``cdf_nodes`` is (C, K+1) and ``log_norm`` is (C,).  Built ONCE per
+    likelihood call and reused by every draw of every event: the previous
+    code rebuilt a column's CDF inside a per-draw ``vmap`` (O(J*K) work per
+    event), which the mixture proposal would have paid three times over.
+    """
+
+    cdf_nodes: jnp.ndarray
+    log_norm: jnp.ndarray
+
+
+def build_column_cdf_tables(
+    m1_edges: jnp.ndarray, log_t_cells: jnp.ndarray
+) -> ColumnCdfTables:
+    """Tabulate the m1-conditional CDF of every q column of ``log_t_cells``."""
+    log_mass = log_t_cells + jnp.log(jnp.diff(m1_edges))[:, None]   # (K, C)
+    log_norm = logsumexp(log_mass, axis=0)                          # (C,)
+    cdf = jnp.cumsum(jnp.exp(log_mass - log_norm), axis=0)          # (K, C)
+    nodes = jnp.concatenate(
+        [jnp.zeros((1, cdf.shape[1]), dtype=cdf.dtype), cdf], axis=0
+    )                                                               # (K+1, C)
+    return ColumnCdfTables(cdf_nodes=nodes.T, log_norm=log_norm)
 
 
 def sample_m1_given_q_trunc(
@@ -311,21 +432,48 @@ def sample_m1_given_q_trunc(
     q_cells: jnp.ndarray,
     m1_lo: jnp.ndarray,
     m1_hi: jnp.ndarray,
+    tables: ColumnCdfTables | None = None,
 ):
     """m1 draw from the conditional t(m1 | q-cell), per-draw window [lo, hi].
 
     Second stage of the chirp-band sampler: each draw j inverts the CDF of
     column ``q_cells[j]`` of the target grid restricted to its own window
     (e.g. the event's chirp-mass band at the drawn q and z).  Returns
-    ``(m1, log_s)`` with the exact truncated conditional density.
+    ``(m1, log_s)`` with the exact truncated conditional density.  Pass
+    ``tables`` from :func:`build_column_cdf_tables` to reuse a precomputed
+    per-column CDF instead of rebuilding it per draw.
     """
+    tab = build_column_cdf_tables(m1_edges, log_t_cells) if tables is None else tables
+
     def _one(u_j, c_j, lo_j, hi_j):
-        out = sample_histogram_trunc(
-            u_j[None], m1_edges, log_t_cells[:, c_j], lo_j, hi_j
+        out = _sample_histogram_trunc_tab(
+            u_j[None], m1_edges, log_t_cells[:, c_j],
+            tab.cdf_nodes[c_j], tab.log_norm[c_j], lo_j, hi_j,
         )
         return out.x[0], out.log_s[0]
 
     return jax.vmap(_one)(u, q_cells, m1_lo, m1_hi)
+
+
+def m1_given_q_trunc_logpdf(
+    m1: jnp.ndarray,
+    m1_edges: jnp.ndarray,
+    log_t_cells: jnp.ndarray,
+    q_cells: jnp.ndarray,
+    m1_lo: jnp.ndarray,
+    m1_hi: jnp.ndarray,
+    tables: ColumnCdfTables | None = None,
+) -> jnp.ndarray:
+    """Exact log density of :func:`sample_m1_given_q_trunc` at arbitrary m1."""
+    tab = build_column_cdf_tables(m1_edges, log_t_cells) if tables is None else tables
+
+    def _one(x_j, c_j, lo_j, hi_j):
+        return _histogram_trunc_logpdf_tab(
+            x_j[None], m1_edges, log_t_cells[:, c_j],
+            tab.cdf_nodes[c_j], tab.log_norm[c_j], lo_j, hi_j,
+        )[0]
+
+    return jax.vmap(_one)(m1, q_cells, m1_lo, m1_hi)
 
 
 def sample_mass_q_trunc(
