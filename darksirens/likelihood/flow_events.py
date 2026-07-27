@@ -18,7 +18,8 @@ target the selection integral uses (mandatory: the population normalisation
 must cancel between the event terms and N_obs * log mu), s the exact
 density of the grid/analytic samplers (darksirens/gw/populations/sampling.py),
 and pi_PE the analytic PE prior in the flow's (m1det, m2det, dL, chieff)
-basis.
+basis.  Both flow_i and pi_PE are densities in that same basis, so no extra
+Jacobian appears in their ratio; the m2det <-> q basis factor m1det cancels.
 
 s is a two-component MIXTURE (issue #260),
 
@@ -29,8 +30,7 @@ population support at the current hyperparameters; every draw is scored under
 BOTH components.  A windowed-only proposal truncates the event integral to
 boxes measured from finite flow samples, and the omitted learned-flow tail
 mass depends on the hyperparameters, so it biases the posterior rather than
-shifting each ln Z_i by a constant.  See :func:`build_flow_loglike`.  Both flow_i and pi_PE are densities in that same basis, so no extra
-Jacobian appears in their ratio; the m2det <-> q basis factor m1det cancels.
+shifting each ln Z_i by a constant.  See :func:`build_flow_loglike`.
 
 pi_PE convention (must match gwcat's exported p_pe, verified against
 gwcat@3a61a24): uniform detector-frame component masses (constant),

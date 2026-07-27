@@ -246,12 +246,27 @@ def test_scoring_each_draw_only_under_its_own_component_is_biased():
     naive = (f / np.exp(log_q_naive)).mean()
     assert abs(naive - total) > 10 * 0.02, (naive, total)
 
-    # The exact mixture density is a density: E_q[1] = 1 by construction, so
-    # sum_j q_mix(x_j)/q_mix(x_j) = N identically -- the cheap self-check.
-    ident = np.exp(np.logaddexp(np.log1p(-w) + np.asarray(lq_win),
-                                np.log(w) + np.asarray(lq_full)) -
-                   np.asarray(log_q))
-    np.testing.assert_allclose(ident, 1.0, rtol=0, atol=1e-12)
+
+def test_mixture_density_integrates_to_one():
+    """``(1-w) q_win + w q_full`` must itself be a normalised density.
+
+    Quadrature over the whole domain, not a self-consistency identity: this
+    is what catches a missing truncation normaliser in either component.
+    """
+    edges = jnp.linspace(0.0, 10.0, 401)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    log_dens = jnp.log(jnp.exp(-0.5 * ((centers - 2.0) / 1.5) ** 2) + 0.05)
+    w, lo, hi = 0.1, 0.0, 4.0
+
+    def q_mix(x):
+        xs = jnp.asarray(x)
+        return np.asarray(jnp.exp(jnp.logaddexp(
+            np.log1p(-w) + histogram_trunc_logpdf(xs, edges, log_dens, lo, hi),
+            np.log(w) + histogram_trunc_logpdf(xs, edges, log_dens,
+                                               edges[0], edges[-1]),
+        )))
+
+    assert abs(_quad(q_mix, 0.0, 10.0, n=400_000) - 1.0) < 1e-4
 
 
 def test_resolve_full_draws_allocation():
