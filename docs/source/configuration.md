@@ -48,16 +48,16 @@ The fiducial dark-energy values `w0=-1` and `wa=0` reproduce flat ΛCDM. Use `--
 
 The dark-siren incompleteness model uses survey/completion parameters with these units and default prior ranges:
 
-| Parameter | Meaning and units | Default prior | Recommended use |
+| Parameter | Meaning and units | Default prior | Sampled for |
 | --- | --- | --- | --- |
-| `log10n0` | Base-10 logarithm of the comoving galaxy number density `n0` in `Mpc^-3`. The completion model multiplies `n0` by the HEALPix pixel solid angle and `dV_c/dz` in `Mpc^3 sr^-1 dz^-1`. | `[-4, -1]` | Keep near measured catalog densities; override explicitly for unusual luminosity cuts. |
-| `z50` | Redshift where the logistic survey rolloff is 50% complete. The completion grid covers `0 <= z <= 5`. | `[0.05, 4.5]` | Use a catalog-depth estimate when available. Avoid values at or beyond the grid edge. |
-| `w` | Logistic rolloff width in redshift units. | `[0.02, 1.5]` | Use narrower ranges for surveys with a well-characterized depth transition. |
-| `delta` | Power-law evolution of expected galaxy density, `n(z) = n0 (1+z)^delta`. | `[-3, 3]` | Broaden only with a catalog-specific justification. Merger-rate evolution is handled separately. |
-| `b_miss` | Bias amplitude for the LSS-modulated missing-galaxy density. Dimensionless. | `[0, 3]` | Fix to `1` or narrow around it unless testing LSS systematics. |
-| `alpha_miss` | Mixture between isotropic and LSS-modulated missing density. Dimensionless; `0` is isotropic, `1` is fully LSS-modulated. | `[0, 1]` | Use the full range for model uncertainty, or fix to `0` to disable LSS modulation. |
+| `log10n0` | Base-10 logarithm of the comoving galaxy number density `n0` in `Mpc^-3`. The completion model multiplies `n0` by the HEALPix pixel solid angle and `dV_c/dz` in `Mpc^3 sr^-1 dz^-1`. | `[-4, -1]` | `dark_sirens` |
+| `delta` | Power-law evolution of expected galaxy density, `n(z) = n0 (1+z)^delta`. | `[-3, 3]` | `dark_sirens` |
+| `b_miss` | Bias amplitude for the LSS-modulated missing-galaxy density. Dimensionless. | `[0, 3]` | `dark_sirens`, and only with `--use_lss true` and no `--lss_completion` table (otherwise the overdensity factor does not depend on it) |
+| `sigma_kde` | Extra redshift width added in quadrature to the catalog kernels. | `[0, 0.05]` | `dark_sirens`, `dark_sirens_complete` |
 
 The default survey priors are intentionally narrower than earlier broad exploratory bounds, because extremely large density or evolution ranges can make `C_iso`, `C_eff`, or `rho_miss_eff` clip over much of the redshift grid. If a fit truly requires broader bounds, pass explicit `--prior_overrides` for the affected survey labels and record the catalog-density units used to justify them.
+
+`z50`, `w` and `alpha_miss` are `SurveyParams` fields but are **not** sampled parameters and have no prior: `z50`/`w` are generative-truth fields of the mock generator (the dark-siren completeness is the data-driven kernel ratio and reads neither), and `alpha_miss` enters only through the exact product `alpha_miss * b_miss`, so it stays pinned at `1` and `b_miss` carries the modulation. Naming one in `--prior_overrides` is an error that says so; `--fixed_parameter_values` still pins the field (with a warning), which is how `alpha_miss = 0` disables LSS modulation.
 
 To validate a catalog/survey configuration without starting a sampler, run:
 

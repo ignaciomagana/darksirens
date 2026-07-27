@@ -17,9 +17,9 @@ class SurveyParams(NamedTuple):
     ``n0`` is the comoving galaxy number density [Mpc^-3] of the n(z) =
     n0 (1+z)^delta model; with the unit-mass completeness kernels it is
     directly comparable to physical catalog densities.  ``z50`` and ``w``
-    are legacy roll-off parameters retained for API compatibility: the
-    dark-siren completeness is the data-driven kernel ratio and does not
-    use them.  ``b_miss`` is the LSS bias of the missing-galaxy density;
+    are the mock generator's roll-off truth and are never sampled (they carry
+    no prior): the dark-siren completeness is the data-driven kernel ratio and
+    does not use them.  ``b_miss`` is the LSS bias of the missing-galaxy density;
     ``alpha_miss`` enters only through the exact product
     ``alpha_miss * b_miss`` (perfect degeneracy) and defaults to 1 so that
     ``b_miss`` alone carries the modulation.  ``sigma_kde`` broadens the

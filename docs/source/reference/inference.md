@@ -66,11 +66,17 @@ ordering.
 
 Builds the sampled parameter space and the prior transform. `build_parameter_space`
 assembles the cosmology, population, survey, sky, and mark blocks, returning the
-labels, bounds, per-parameter prior families, and the sky/mark label lists. Only
-the survey parameters in the per-model `_ACTIVE_SURVEY_PARAMS` allow-list are
-sampled (so fixed builder hyperparameters such as the LSS correlation lengths
-never become nuisance dimensions). `make_prior_transform` is the unit-cube →
-parameter inverse-CDF map, prior-family aware (uniform / normal / lognormal).
+labels, bounds, per-parameter prior families, and the sky/mark label lists. The
+survey block comes from one declarative registry (`_SURVEY_BLOCK`): each entry
+carries its bounds and the rule deciding whether it is sampled for the resolved
+`(universe_model, use_lss, Q_LSS activity)` configuration, and both the
+catalog-1 block and the per-catalog `_c{k}` blocks are derived from it. Fixed
+builder hyperparameters (the LSS correlation lengths) and the never-sampled
+`SurveyParams` fields (`z50`/`w`, generative-truth for the mock generator, and
+the degeneracy-pinned `alpha_miss`) carry no prior at all, so they can never
+become nuisance dimensions; naming one in `--prior_overrides` is an error that
+states why. `make_prior_transform` is the unit-cube → parameter inverse-CDF
+map, prior-family aware (uniform / normal / lognormal).
 
 ```{automodule} darksirens.inference.prior
 :members:

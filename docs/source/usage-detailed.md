@@ -243,7 +243,7 @@ darksirens_inference \
   --save_path runs/dark_powerlaw_peak
 ```
 
-The incomplete-catalog model combines catalog galaxies with an additive missing-galaxy density. Completion is estimated from a matched-kernel ratio: observed per-pixel galaxy counts are smoothed on the redshift grid with the same truncated Gaussian operator used for the expected `n0 * dV_c/dz * (1 + z)^delta` counts. The likelihood then adds `(1 - C) * dN_exp/dz`, optionally modulated by `max(1 + alpha_miss * b_miss * delta_g, 0)` when LSS information is enabled. `z50`, `w`, and `alpha_miss` are legacy/degenerate compatibility parameters that are not sampled for `dark_sirens` by default; `z50` and `w` do not impose a logistic rolloff in the current completion model.
+The incomplete-catalog model combines catalog galaxies with an additive missing-galaxy density. Completion is estimated from a matched-kernel ratio: observed per-pixel galaxy counts are smoothed on the redshift grid with the same truncated Gaussian operator used for the expected `n0 * dV_c/dz * (1 + z)^delta` counts. The likelihood then adds `(1 - C) * dN_exp/dz`, optionally modulated by `max(1 + alpha_miss * b_miss * delta_g, 0)` when LSS information is enabled. `z50`, `w`, and `alpha_miss` are `SurveyParams` fields that no universe model samples: they carry no prior at all (`z50` and `w` are mock-generator fields and impose no logistic rolloff in the current completion model; `alpha_miss` is exactly degenerate with `b_miss` and stays pinned at `1`).
 
 ### Multitracer dark-siren workflow (K >= 2 catalogs)
 
@@ -419,8 +419,8 @@ Incomplete-catalog dark-siren runs use survey/completion parameters.
 | Parameter | Meaning |
 | --- | --- |
 | `log10n0` | Base-10 logarithm of the comoving galaxy density normalization `n0` in the expected count model. |
-| `z50` | Legacy compatibility parameter; retained in settings/priors but not used by the matched-kernel completion likelihood. |
-| `w` | Legacy compatibility parameter; retained in settings/priors but not used as a logistic rolloff width. |
+| `z50` | Mock-generator field, never sampled: it carries no prior and is not used by the matched-kernel completion likelihood. |
+| `w` | Mock-generator field, never sampled: it carries no prior and is not used as a logistic rolloff width. |
 | `delta` | Power-law evolution of expected galaxy density, `n(z) = n0 * (1 + z)^delta`. |
 | `b_miss` | Bias amplitude for LSS-modulated missing galaxies. |
 | `alpha_miss` | Multiplies `b_miss` exactly; the model depends on `alpha_miss * b_miss`, so these two labels are degenerate and the default fixed value is `alpha_miss = 1`. |
