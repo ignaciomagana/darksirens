@@ -442,7 +442,8 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
            *(["--selection_neff_guard", str(cfg["selection_neff_guard"])] if cfg.get("selection_neff_guard") else []),
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
-           "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir)]
+           "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir),
+           "--resume", ("off" if diagnostics_only else str(getattr(args, "resume", "auto")))]
     if cfg.get("prior_overrides"):
         cmd.extend(["--prior_overrides", json.dumps(cfg["prior_overrides"])])
     for flag, key in (
@@ -474,7 +475,8 @@ def off_control_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: ar
            "--fix_lens_rate", "true",
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples,
            *(["--selection_neff_guard", str(cfg["selection_neff_guard"])] if cfg.get("selection_neff_guard") else []),
-           "--seed", str(cfg["seed"]), "--save_path", str(run_dir)]
+           "--seed", str(cfg["seed"]), "--save_path", str(run_dir),
+           "--resume", ("off" if diagnostics_only else str(getattr(args, "resume", "auto")))]
     if cfg.get("prior_overrides"):
         cmd.extend(["--prior_overrides", json.dumps(cfg["prior_overrides"])])
     if diagnostics_only:
@@ -507,7 +509,8 @@ def singles_only_cmd(case_dir: Path, run_dir: Path, cfg: dict[str, Any], args: a
            "--fix_lens_rate", fix_lens_rate, "--fixed_parameter_values", fixed_parameter_values, "--lens_prior_overrides", lens_prior_overrides,
            "--sampler", str(cfg["sampler"]), "--nlive", str(nlive), "--dlogz", str(cfg["dlogz"]), "--max_samples", max_samples,
            *(["--selection_neff_guard", str(cfg["selection_neff_guard"])] if cfg.get("selection_neff_guard") else []),
-           "--seed", str(cfg["seed"]), "--save_path", str(run_dir)]
+           "--seed", str(cfg["seed"]), "--save_path", str(run_dir),
+           "--resume", ("off" if diagnostics_only else str(getattr(args, "resume", "auto")))]
     if cfg.get("prior_overrides"):
         cmd.extend(["--prior_overrides", json.dumps(cfg["prior_overrides"])])
     if diagnostics_only:
@@ -746,6 +749,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--nlive", type=int)
     ap.add_argument("--dlogz", type=float, default=10.0)
     ap.add_argument("--diagnostics_only", type=_str2bool, default=False)
+    ap.add_argument("--resume", default="auto",
+                    help="Threaded to every inference leg (auto|PATH|off; default auto). "
+                         "'auto' makes a resubmitted study job CONTINUE each leg from its "
+                         "checkpoint instead of restarting it -- with nothing to resume it "
+                         "starts fresh, so it is safe as the default. Forced to 'off' for "
+                         "diagnostics-only legs so a throwaway 8-live-point pass can never "
+                         "adopt a real leg's checkpoint.")
     ap.add_argument("--reuse", type=_str2bool, default=False)
     ap.add_argument("--dry_run", type=_str2bool, default=False)
     ap.add_argument("--preflight_only", type=_str2bool, default=False)
