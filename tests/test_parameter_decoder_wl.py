@@ -14,8 +14,9 @@ def _stub_build_parameter_space(*args, **kwargs):
         (),
         0,
         (),  # pop_labels
-        # survey_labels (master's 7-parameter block, incl. sigma_kde)
-        ("log10n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde"),
+        # survey_labels: the sampleable survey block (the survey registry's
+        # labels; the decoder fills the rest of SurveyParams from fiducials)
+        ("log10n0", "delta", "b_miss", "sigma_kde"),
         (),
         0,
         0,
@@ -68,10 +69,9 @@ def test_decode_has_none_wl_params_for_non_wl_universe_model(monkeypatch):
 
 def test_wl_universe_model_samples_no_survey_block():
     """spectral_sirens_wl is catalog-free: with fix_survey=False it must NOT
-    sample the 7-parameter survey block (library review, CLI finding 1: the
-    missing _ACTIVE_SURVEY_PARAMS entry left 7 phantom flat dimensions in the
-    space, inflating 12 -> 19 dims and corrupting Bayes factors against
-    spectral_sirens)."""
+    sample any survey parameter (library review, CLI finding 1: the missing
+    universe-model entry left 7 phantom flat dimensions in the space, inflating
+    12 -> 19 dims and corrupting Bayes factors against spectral_sirens)."""
     from darksirens.inference.prior import build_parameter_space
 
     labels_wl, *_ = build_parameter_space(
@@ -93,16 +93,15 @@ def test_wl_universe_model_samples_no_survey_block():
 # decode_mixture (K-catalog multitracer mixture): ParameterDecoder.n_catalogs
 # and the module-level _sticks_to_log_weights are exercised via a decoder
 # built directly (no build_parameter_space stubbing needed -- decode_mixture
-# only reads self.survey_labels / self.sampled_labels / self.n_catalogs).
+# only reads self.sampled_labels / self.n_catalogs; the SurveyParams fields are
+# addressed by name against the shared fiducial table).
 # ---------------------------------------------------------------------------
 
 def _decoder_k2(sampled_labels, fixed_parameter_values=None):
-    survey_labels = ("log10n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde")
     return parameters_module.ParameterDecoder(
         sampled_labels=tuple(sampled_labels),
         fixed_parameter_values=fixed_parameter_values or {},
         pop_labels=(),
-        survey_labels=survey_labels,
         pop_params_fid=(),
         complete_empty_pixel_policy=0,
         n_catalogs=2,

@@ -34,7 +34,7 @@ from darksirens.likelihood.core import (
     WL_SELECTION_STANDARD,
     WL_SELECTION_LOGNORMAL,
 )
-from darksirens.core.constants import H0_FID, OM0_FID, SURVEY_PARAMS_FID
+from darksirens.core.constants import H0_FID, OM0_FID
 from darksirens.inference.parameters import (
     build_parameter_decoder,
     complete_empty_pixel_policy_code,

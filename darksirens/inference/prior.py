@@ -1,7 +1,10 @@
 import re
+import warnings
 from collections.abc import Sequence
+from typing import Callable, NamedTuple
 
 import numpy as np
+from darksirens.core.constants import SURVEY_PARAMS_FID_BY_NAME
 from darksirens.gw.populations import pop_model_prior_parser
 from darksirens.sky import sky_model_prior_parser
 from darksirens.marks import mark_model_prior_parser
@@ -14,31 +17,214 @@ from darksirens.utils.cosmology import (
     waPriorUpper,
 )
 
-#: Survey parameters that actually enter each universe model's likelihood.
-#: Parameters outside a model's set are not sampled (they would be flat nuisance
-#: dimensions); the decoder fills them from fiducial defaults.  Models absent
-#: from this map sample the full survey block.
-#:
-#: ``dark_sirens_complete`` assumes a 100%-complete catalog, so the completion /
-#: missing-galaxy parameters never enter its prior — only ``sigma_kde`` does.
-#:
-#: ``dark_sirens`` uses the ratio-only completeness estimator: there is no
-#: parametric roll-off, so ``z50`` and ``w`` do not enter the likelihood.
-#: ``alpha_miss`` and ``b_miss`` enter only through the exact product
-#: ``alpha_miss * b_miss`` (a perfect degeneracy), so only ``b_miss`` is
-#: sampled and ``alpha_miss`` stays at its fiducial of 1.
-_ACTIVE_SURVEY_PARAMS = {
-    "dark_sirens": ("log10n0", "delta", "b_miss", "sigma_kde"),
-    "dark_sirens_complete": ("sigma_kde",),
-    "spectral_sirens": (),
-    "bright_sirens": (),
-    # Catalog-free: no survey parameter enters the WL likelihood. Omitting the
-    # entry made the block filter skip entirely, so spectral_sirens_wl sampled
-    # SEVEN phantom flat nuisance dimensions (12 -> 19), slowing sampling and
-    # offsetting logZ by the extra prior volumes — invalidating Bayes-factor
-    # comparisons against spectral_sirens (library review, CLI finding 1).
-    "spectral_sirens_wl": (),
+# ---------------------------------------------------------------------------
+# Survey-parameter registry
+# ---------------------------------------------------------------------------
+# ONE declarative source of truth for the sampled survey block: an ordered
+# tuple of (label, bounds, activity rule).  ``build_parameter_space`` derives
+# the base block AND every per-catalog ``_c{k}`` block from it alone, and the
+# same rules produce the error messages for inert user config -- so a guard can
+# never disagree with the gating it is guarding (the failure mode of the old
+# build-the-full-block-then-filter design, which spawned four CLI-vs-decoder
+# drift bugs and one wrong-reason error message).
+#
+# The block is the SAMPLEABLE labels only.  ``z50``/``w``/``alpha_miss`` are
+# SurveyParams fields (see core/constants.SURVEY_PARAMS_FID_BY_NAME) that no
+# universe model ever samples; they live in ``_PINNED_SURVEY_PARAMS`` below and
+# never reach the prior at all.
+
+
+class _Inert(NamedTuple):
+    """Why a survey label is not sampled for the resolved configuration.
+
+    ``reason`` is a sentence fragment naming the true cause and ``remedy`` an
+    optional second way out; both are spliced into the guard messages verbatim.
+    ``fatal_when_fixed`` marks the gates for which even a
+    ``--fixed_parameter_values`` entry is an error rather than a warning: a
+    fixed value is normally harmless (the decoder pins the field at it), but a
+    b_miss pinned against an active Q_LSS table or a dummy delta_g asserts a
+    modulation the likelihood provably does not apply.
+    """
+
+    reason: str
+    fatal_when_fixed: bool = False
+    remedy: str = ""
+
+
+class _SurveyParam(NamedTuple):
+    """One sampleable survey label: its prior bounds and its activity rule.
+
+    ``inactive_reason(universe_model, use_lss, q_active, catalog)`` returns
+    ``None`` when the label IS sampled for that configuration, else the
+    :class:`_Inert` record explaining why it is not.  ``catalog`` is the 1-based
+    catalog number the label belongs to (1 for the unsuffixed block).
+    """
+
+    label: str
+    lower: float
+    upper: float
+    inactive_reason: Callable[[str | None, bool, bool, int], "_Inert | None"]
+
+
+#: Universe models the registry knows about.  Anything else (including ``None``)
+#: is unknown to the registry and samples the WHOLE block: the historical
+#: fallback for direct/library callers that never name a universe model.
+_REGISTERED_UNIVERSE_MODELS = frozenset({
+    "dark_sirens",
+    "dark_sirens_complete",
+    "spectral_sirens",
+    "bright_sirens",
+    "spectral_sirens_wl",
+})
+
+#: Models with no galaxy catalog in the likelihood: they sample NO survey
+#: parameter.  Omitting ``spectral_sirens_wl`` from the old allow-list made the
+#: block filter skip entirely, so it sampled SEVEN phantom flat nuisance
+#: dimensions (12 -> 19), slowing sampling and offsetting logZ by the extra
+#: prior volumes -- invalidating Bayes-factor comparisons against
+#: ``spectral_sirens`` (library review, CLI finding 1).
+_CATALOG_FREE_MODELS = frozenset({
+    "spectral_sirens", "bright_sirens", "spectral_sirens_wl",
+})
+
+
+def _catalog_free(universe_model):
+    return _Inert(
+        f"universe_model '{universe_model}' is catalog-free, so it samples no "
+        f"survey parameters at all (no galaxy catalog enters its likelihood; a "
+        f"survey label would be a phantom flat dimension that inflates the "
+        f"prior volume and offsets logZ)",
+        remedy="or run a universe_model that uses a galaxy catalog",
+    )
+
+
+_COMPLETE_CATALOG = _Inert(
+    "universe_model 'dark_sirens_complete' assumes a 100%-complete catalog, so "
+    "the completion / missing-galaxy parameters never enter its likelihood "
+    "(only sigma_kde does)",
+    remedy="or run universe_model 'dark_sirens', which models the missing galaxies",
+)
+
+
+def _completion_param_rule(universe_model, use_lss, q_active, catalog):
+    """Activity of the completion parameters (``log10n0``, ``delta``)."""
+    if universe_model in _CATALOG_FREE_MODELS:
+        return _catalog_free(universe_model)
+    if universe_model == "dark_sirens_complete":
+        return _COMPLETE_CATALOG
+    return None
+
+
+def _b_miss_rule(universe_model, use_lss, q_active, catalog):
+    """Activity of ``b_miss``: the completion rule plus the two LSS gates.
+
+    ``b_miss`` enters the likelihood ONLY through the local-overdensity factor
+    ``max(1 + alpha_miss*b_miss*delta_g, 0)`` (redshift/completion.py), so it is
+    additionally inert whenever that factor is not a function of it.
+    """
+    model_rule = _completion_param_rule(universe_model, use_lss, q_active, catalog)
+    if model_rule is not None:
+        return model_rule
+    if q_active:
+        # A Q_LSS table REPLACES the overdensity factor for this catalog.
+        return _Inert(
+            f"catalog {catalog} has an active Q_LSS completion table, which "
+            f"replaces the local (1 + alpha_miss*b_miss*delta_g) factor for "
+            f"that catalog, so b_miss does not enter its likelihood",
+            fatal_when_fixed=True,
+            remedy=f"or drop catalog {catalog}'s --lss_completion table",
+        )
+    if not use_lss:
+        # delta_g is the all-zero (1, N_grid) dummy built by inference/loaders.py,
+        # so the factor is identically 1 for ANY b_eff.  Missing this case made
+        # the CLI-default dark_sirens run sample b_miss with exactly zero effect.
+        return _Inert(
+            "b_miss is inert with --use_lss off: delta_g is the all-zero "
+            "(1, N_grid) dummy built by inference/loaders.py, so the "
+            "(1 + alpha_miss*b_miss*delta_g) factor is identically 1 for any "
+            "b_miss",
+            fatal_when_fixed=True,
+            remedy="or pass --use_lss true so delta_g carries a real overdensity field",
+        )
+    return None
+
+
+def _kde_rule(universe_model, use_lss, q_active, catalog):
+    """Activity of ``sigma_kde``: every catalog-based model broadens its kernels."""
+    if universe_model in _CATALOG_FREE_MODELS:
+        return _catalog_free(universe_model)
+    return None
+
+
+#: THE registry.  Order IS the sampled-block order.  ``log10n0`` is log10 of the
+#: comoving galaxy density in Mpc^-3, matching dV_of_z [Mpc^3 sr^-1 dz^-1] times
+#: the HEALPix pixel area.  The completion model's redshift grid spans
+#: 0 <= z <= 5; these defaults keep the survey rolloff inside that domain while
+#: avoiding the formerly ultra-broad density/evolution fits that could force
+#: heavy clipping throughout the completion grid.
+_SURVEY_BLOCK = (
+    _SurveyParam("log10n0", -4.0, -1.0, _completion_param_rule),
+    _SurveyParam("delta", -3.0, 3.0, _completion_param_rule),
+    _SurveyParam("b_miss", 0.0, 3.0, _b_miss_rule),
+    _SurveyParam("sigma_kde", 0.0, 0.05, _kde_rule),
+)
+
+#: SurveyParams fields that are recognised as parameter labels but are NEVER
+#: sampled by any universe model -- they carry no prior, no bounds and no block
+#: slot.  Recognised (rather than simply unknown) so that naming one in
+#: ``--prior_overrides`` / ``--fixed_parameter_values`` gets the true reason
+#: instead of a bare "unknown label" or, worse, silence.
+_PINNED_SURVEY_PARAMS = {
+    "z50": _Inert(
+        "'z50' is a generative-truth field of the mock generator "
+        "(scripts/mock_dark_sirens/generate_mock_data.py), not a likelihood "
+        "parameter: the dark-siren completeness is the data-driven kernel "
+        "ratio, so no likelihood reads SurveyParams.z50 and it is never "
+        "sampled for any universe model"
+    ),
+    "w": _Inert(
+        "'w' is a generative-truth field of the mock generator "
+        "(scripts/mock_dark_sirens/generate_mock_data.py), not a likelihood "
+        "parameter: the dark-siren completeness is the data-driven kernel "
+        "ratio, so no likelihood reads SurveyParams.w and it is never sampled "
+        "for any universe model"
+    ),
+    "alpha_miss": _Inert(
+        "'alpha_miss' enters only through the exact product alpha_miss*b_miss "
+        "(a perfect degeneracy), so it is pinned at its fiducial of 1 and "
+        "b_miss alone carries the modulation; it is never sampled for any "
+        "universe model"
+    ),
 }
+
+#: Every survey label the parameter machinery recognises, sampleable or pinned.
+_SURVEY_PARAM_LABELS = tuple(p.label for p in _SURVEY_BLOCK) + tuple(
+    _PINNED_SURVEY_PARAMS
+)
+
+# The registry and the SurveyParams fiducial table must name exactly the same
+# fields: the builder decides what is sampled, the decoder fills the rest from
+# the fiducials, and a name present in only one of them is precisely the drift
+# this registry exists to prevent.
+if set(_SURVEY_PARAM_LABELS) != set(SURVEY_PARAMS_FID_BY_NAME):
+    raise RuntimeError(
+        "Survey registry / fiducial table mismatch: "
+        f"{sorted(set(_SURVEY_PARAM_LABELS) ^ set(SURVEY_PARAMS_FID_BY_NAME))} "
+        "appears in only one of darksirens.inference.prior._SURVEY_BLOCK + "
+        "_PINNED_SURVEY_PARAMS and core.constants.SURVEY_PARAMS_FID_BY_NAME."
+    )
+
+
+def _survey_param_inactive_reason(spec, universe_model, use_lss, q_active, catalog):
+    """``spec``'s :class:`_Inert` for this configuration, or ``None`` if sampled.
+
+    A universe model the registry does not know about samples the whole block
+    (bounds and order as declared, no gating) -- the historical fallback for
+    callers that never name a universe model.
+    """
+    if universe_model not in _REGISTERED_UNIVERSE_MODELS:
+        return None
+    return spec.inactive_reason(universe_model, use_lss, q_active, catalog)
 
 
 #: Matches the per-catalog ``_c{k}`` suffix appended to survey labels for the
@@ -49,11 +235,17 @@ _SURVEY_CATALOG_SUFFIX = re.compile(r"_c\d+$")
 def _survey_base_name(label: str) -> str:
     """Strip a trailing ``_c{k}`` catalog suffix from a survey label.
 
-    Used so per-catalog suffixed survey labels (``log10n0_c2`` etc.) gate through
-    ``_ACTIVE_SURVEY_PARAMS`` exactly like their base labels.  For a base label
-    (no suffix) this is the identity, so the single-catalog path is unchanged.
+    Used so per-catalog suffixed survey labels (``log10n0_c2`` etc.) resolve
+    against the registry exactly like their base labels.  For a base label (no
+    suffix) this is the identity, so the single-catalog path is unchanged.
     """
     return _SURVEY_CATALOG_SUFFIX.sub("", label)
+
+
+def _survey_catalog_number(label: str) -> int:
+    """1-based catalog number encoded in a survey label's ``_c{k}`` suffix."""
+    match = _SURVEY_CATALOG_SUFFIX.search(label)
+    return 1 if match is None else int(match.group(0)[2:])
 
 
 def _validate_cosmology_within_interpolation_grid(
@@ -223,6 +415,16 @@ def build_parameter_space(
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
+    The survey block -- its labels, their order, their bounds and whether each
+    one is sampled for the resolved ``(universe_model, use_lss,
+    lss_completion_active)`` configuration -- is derived ENTIRELY from the
+    ``_SURVEY_BLOCK`` registry at the top of this module, for catalog 1 and for
+    every ``_c{k}`` catalog alike.  Naming a survey label in ``prior_overrides``
+    that the registry does not sample here is an error (it would silently do
+    nothing), and the error quotes the registry's own reason; ``z50``, ``w`` and
+    ``alpha_miss`` are :class:`~darksirens.core.types.SurveyParams` fields that
+    no model ever samples, so they carry no prior at all.
+
     Parameters
     ----------
     fix_cosmology
@@ -273,33 +475,56 @@ def build_parameter_space(
     else:
         lss_active_by_cat = (bool(lss_completion_active),) * n_catalogs
 
-    # The active-survey filter for a catalog: models absent from the map sample
-    # the full block (``None``); otherwise a Q-active catalog drops ``b_miss``
-    # from its set (see the block-gating note below).  ``cat_index`` is 0-based.
-    _base_active_survey = _ACTIVE_SURVEY_PARAMS.get(universe_model)
+    def _survey_inactive_reason(label):
+        """:class:`_Inert` for a (possibly ``_c{k}``-suffixed) survey label.
 
-    def _b_miss_dropped_for(cat_index):
-        # b_miss enters the likelihood ONLY through the local-overdensity factor
-        # ``max(1 + b_eff*delta_g, 0)`` (redshift/completion.py).  It is inert in
-        # two cases, and sampling an inert parameter is not free: it is a phantom
-        # flat dimension that inflates the prior volume, offsets logZ and
-        # invalidates Bayes-factor comparisons (the same failure class already
-        # fixed for the WL block).
-        #   1. A Q_LSS table is active: Q REPLACES the overdensity factor.
-        #   2. --use_lss is off: delta_g is the all-zero (1, N_grid) dummy built
-        #      by inference/loaders.py, so the factor is identically 1 for ANY
-        #      b_eff.  This case was previously missed, so the CLI-default
-        #      dark_sirens run sampled b_miss with exactly zero effect.
-        return (
-            _base_active_survey is not None
-            and "b_miss" in _base_active_survey
-            and (lss_active_by_cat[cat_index] or not use_lss)
+        ``None`` means the label IS sampled for this configuration.  Returns
+        ``None`` for anything that is not a survey label at all -- those are
+        handled by the unknown-label check.  This is the SAME rule the block
+        builder uses, so a guard message can never contradict the gating.
+        """
+        base = _survey_base_name(label)
+        catalog = _survey_catalog_number(label)
+        if not (1 <= catalog <= n_catalogs):
+            return None
+        pinned = _PINNED_SURVEY_PARAMS.get(base)
+        if pinned is not None:
+            return pinned
+        for spec in _SURVEY_BLOCK:
+            if spec.label == base:
+                return _survey_param_inactive_reason(
+                    spec,
+                    universe_model,
+                    use_lss,
+                    lss_active_by_cat[catalog - 1],
+                    catalog,
+                )
+        return None
+
+    def _survey_block_for(catalog):
+        """The sampled survey block for catalog ``catalog`` (1-based).
+
+        Registry order and bounds, ``_c{k}``-suffixed for catalogs >= 2, gated
+        by that catalog's OWN Q_LSS activity (the likelihood chooses
+        Q-vs-b_miss per catalog), with ``prior_overrides`` applied under the
+        catalog's own label spelling -- so a base-label override never leaks
+        into a suffixed catalog's bounds.
+        """
+        suffix = "" if catalog == 1 else f"_c{catalog}"
+        block = [
+            (spec.label + suffix, spec.lower, spec.upper)
+            for spec in _SURVEY_BLOCK
+            if _survey_inactive_reason(spec.label + suffix) is None
+        ]
+        labels_c = [item[0] for item in block]
+        lower_c, upper_c = apply_block_prior_overrides(
+            f"survey_c{catalog}" if suffix else "survey",
+            labels_c,
+            [item[1] for item in block],
+            [item[2] for item in block],
+            prior_overrides,
         )
-
-    def _active_survey_for(cat_index):
-        if _base_active_survey is not None and _b_miss_dropped_for(cat_index):
-            return tuple(p for p in _base_active_survey if p != "b_miss")
-        return _base_active_survey
+        return labels_c, lower_c, upper_c
 
     # --- Cosmology ---
     cosmo_labels = ["H0", "Om0", "w0", "wa"]
@@ -315,19 +540,12 @@ def build_parameter_space(
     )
 
     # --- Survey ---
-    # ``log10n0`` is log10 of the comoving galaxy density in Mpc^-3,
-    # matching dV_of_z [Mpc^3 sr^-1 dz^-1] times the HEALPix pixel area.
-    # The redshift grid used by the completion model spans 0 <= z <= 5;
-    # these defaults keep the survey rolloff inside that domain while avoiding
-    # the formerly ultra-broad density/evolution fits that could force heavy
-    # clipping throughout the completion grid.
-    survey_labels = ["log10n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde"]
-    survey_lower = [-4.0, 0.05, 0.02, -3.0, 0.0, 0.0, 0.0]
-    survey_upper = [-1.0, 4.5, 1.5, 3.0, 3.0, 1.0, 0.05]
-    # Preserve the default survey bounds for the per-catalog suffixed blocks
-    # (K >= 2); these copies are inert on the single-catalog path.
-    _survey_lower_defaults = list(survey_lower)
-    _survey_upper_defaults = list(survey_upper)
+    # Labels, order, bounds and per-configuration activity all come from the
+    # ``_SURVEY_BLOCK`` registry at the top of this module; nothing about the
+    # survey block is spelled out a second time here.  ``survey_labels`` is the
+    # SAMPLEABLE block definition (the returned value), while the actually
+    # sampled per-catalog blocks are built by ``_survey_block_for`` below.
+    survey_labels = [spec.label for spec in _SURVEY_BLOCK]
 
     # --- Sky (angular source distribution) ---
     # Appended after the survey block; ``isotropic`` contributes no parameters.
@@ -374,16 +592,19 @@ def build_parameter_space(
             [f"{lbl}_c{_k}" for lbl in _lbls], list(_lo), list(_hi), list(_knds)
         ))
 
-    # Make sure all prior override keys are valid parameter labels
+    # Make sure all prior override keys are valid parameter labels.  The survey
+    # side uses every RECOGNISED survey label -- sampleable or pinned -- so that
+    # naming a pinned label (z50/w/alpha_miss) reaches the survey guard below
+    # and gets the true reason, instead of a bare "unknown label".
     known_labels = (
-        set(cosmo_labels) | set(pop_labels) | set(survey_labels)
+        set(cosmo_labels) | set(pop_labels) | set(_SURVEY_PARAM_LABELS)
         | set(sky_labels) | set(mark_labels)
     )
     # Multitracer: the per-catalog suffixed survey labels and the mixture-weight
     # sticks are also valid override / fixed-value keys for K >= 2.  No-op for K=1.
     if n_catalogs >= 2:
         for k in range(2, n_catalogs + 1):
-            known_labels |= {f"{lbl}_c{k}" for lbl in survey_labels}
+            known_labels |= {f"{lbl}_c{k}" for lbl in _SURVEY_PARAM_LABELS}
         known_labels |= {f"fcat_{m}" for m in range(2, n_catalogs + 1)}
         for _lbls, _lo, _hi, _knds in mark_blocks_ck:
             known_labels |= set(_lbls)
@@ -401,38 +622,43 @@ def build_parameter_space(
             f"{sorted(known_labels)}"
         )
 
-    # Fail early on an explicit per-label b_miss override / fixed value for a
-    # catalog whose Q_LSS table drops that label: such an entry would otherwise
-    # be silently ignored (the label is not sampled and is not read from
-    # fixed_parameter_values by the decoder's SurveyParams fallback), a phantom
-    # config.  Block-level ``fix_survey`` is NOT affected (it fixes the whole
-    # block, not a named label), and a ``b_miss_c{k}`` for a Q-FREE catalog is
-    # still a legal sampled/fixed parameter.
-    def _b_miss_catalog_index(key):
-        if key == "b_miss":
-            return 0
-        m = re.fullmatch(r"b_miss_c(\d+)", key)
-        return int(m.group(1)) - 1 if m else None
-
+    # Fail early on per-label config naming a survey parameter that is INERT for
+    # the resolved configuration.  Such an entry is silently ignored otherwise (a
+    # phantom config): the label is not sampled, so an override changes nothing
+    # at all.  The reason is taken from the registry rule that did the gating, so
+    # it is always the TRUE one -- the old guard reported "catalog 1 has an
+    # active Q_LSS completion table" even when the real cause was --use_lss off.
+    #
+    # Block-level ``fix_survey`` is deliberately NOT a reason: it fixes the whole
+    # block rather than a named label, and pinning survey parameters to a Q
+    # table's build values under --fix_survey is the documented Q_LSS workflow.
     for _source_name, _source in (
         ("prior override", prior_overrides),
         ("fixed value", fixed_parameter_values),
     ):
         for _key in _source:
-            _ci = _b_miss_catalog_index(_key)
-            if _ci is None or not (0 <= _ci < n_catalogs):
+            _inert = _survey_inactive_reason(_key)
+            if _inert is None:
                 continue
-            if _b_miss_dropped_for(_ci):
-                raise ValueError(
-                    f"A {_source_name} was given for '{_key}', but catalog "
-                    f"{_ci + 1} has an active Q_LSS completion table: a Q_LSS "
-                    f"completion table replaces the local "
-                    f"(1 + alpha_miss*b_miss*delta_g) factor for this catalog, "
-                    f"so b_miss does not enter its likelihood and is not a "
-                    f"sampled parameter. Remove the {_source_name} for "
-                    f"'{_key}', or drop catalog {_ci + 1}'s --lss_completion "
-                    f"table."
-                )
+            _message = (
+                f"A {_source_name} was given for '{_key}', but it is not a "
+                f"sampled parameter of this configuration: {_inert.reason}.\n"
+                f"Remove the {_source_name} for '{_key}'"
+                + (f", {_inert.remedy}" if _inert.remedy else "")
+            )
+            if _source is prior_overrides or _inert.fatal_when_fixed:
+                # Overrides are ALWAYS an error: prior bounds on a parameter
+                # that is not sampled can only mislead.  Fixed values are an
+                # error only for the LSS gates (see _Inert.fatal_when_fixed).
+                raise ValueError(_message + ".")
+            # A fixed value on a never-sampled label is legitimate (it pins the
+            # SurveyParams field the decoder builds), so warn rather than break
+            # archived settings.json / mock scripts that pin generative truth.
+            warnings.warn(
+                _message + ", or leave it at the fiducial (the decoder pins "
+                "the SurveyParams field at the value either way).",
+                stacklevel=2,
+            )
 
     # Apply block overrides.  EVERY block that carries sampled bounds is
     # resolved here -- including the base mark block, the per-catalog suffixed
@@ -450,9 +676,6 @@ def build_parameter_space(
     pop_lower, pop_upper = apply_block_prior_overrides(
         "population", pop_labels, pop_lower, pop_upper, prior_overrides
     )
-    survey_lower, survey_upper = apply_block_prior_overrides(
-        "survey", survey_labels, survey_lower, survey_upper, prior_overrides
-    )
     sky_lower, sky_upper = apply_block_prior_overrides(
         "sky", sky_labels, sky_lower, sky_upper, prior_overrides
     )
@@ -469,25 +692,14 @@ def build_parameter_space(
         _mark_blocks_ck_overridden.append((_lbls, _lo, _hi, _knds))
     mark_blocks_ck = _mark_blocks_ck_overridden
 
-    # Per-catalog suffixed survey blocks (catalogs 2..K), resolved here (bounds
-    # only -- not yet fixed-filtered or active-survey-gated) so the canonical
-    # bounds map below sees the final bounds for every suffixed survey label.
-    # Empty for K = 1 (range(2, 1) is empty), matching the bit-identical
-    # single-catalog path.  Each block starts from the pristine
-    # ``_survey_lower/upper_defaults``, not the (possibly overridden) base
-    # ``survey_lower``/``survey_upper``, so a base-label override never leaks
-    # into a suffixed catalog's bounds.
-    survey_blocks_ck = []
-    for k in range(2, n_catalogs + 1):
-        suffixed_labels = [f"{lbl}_c{k}" for lbl in survey_labels]
-        c_lower, c_upper = apply_block_prior_overrides(
-            f"survey_c{k}",
-            suffixed_labels,
-            _survey_lower_defaults,
-            _survey_upper_defaults,
-            prior_overrides,
-        )
-        survey_blocks_ck.append((suffixed_labels, c_lower, c_upper))
+    # Survey blocks, one per catalog, straight from the registry: catalog 1 is
+    # the unsuffixed block and catalogs 2..K carry the ``_c{k}`` suffix (empty
+    # for K = 1, matching the bit-identical single-catalog path).  Each block is
+    # already gated by its own catalog's Q_LSS activity and has its own bounds
+    # overrides applied, so the canonical bounds map below sees final bounds and
+    # only fixed-parameter filtering remains.
+    survey_labels_1, survey_lower, survey_upper = _survey_block_for(1)
+    survey_blocks_ck = [_survey_block_for(k) for k in range(2, n_catalogs + 1)]
 
     # Mixture-weight sticks fcat_2..fcat_K, resolved here for the same reason.
     # Empty for K = 1.  Bounds act as TRUNCATION of the Beta(1, b) stick prior
@@ -521,7 +733,7 @@ def build_parameter_space(
         for label, lo, hi in (
             list(zip(cosmo_labels, cosmo_lower, cosmo_upper))
             + list(zip(pop_labels, pop_lower, pop_upper))
-            + list(zip(survey_labels, survey_lower, survey_upper))
+            + list(zip(survey_labels_1, survey_lower, survey_upper))
             + list(zip(sky_labels, sky_lower, sky_upper))
             + list(zip(mark_labels, mark_lower, mark_upper))
             + [
@@ -563,7 +775,7 @@ def build_parameter_space(
         pop_labels, pop_lower, pop_upper, fixed_parameter_values
     )
     sampled_survey_labels, sampled_survey_lower, sampled_survey_upper = filter_fixed_parameters(
-        survey_labels, survey_lower, survey_upper, fixed_parameter_values
+        survey_labels_1, survey_lower, survey_upper, fixed_parameter_values
     )
     sampled_sky_labels, sampled_sky_lower, sampled_sky_upper = filter_fixed_parameters(
         sky_labels, sky_lower, sky_upper, fixed_parameter_values
@@ -571,36 +783,6 @@ def build_parameter_space(
     sampled_mark_labels, sampled_mark_lower, sampled_mark_upper = filter_fixed_parameters(
         mark_labels, mark_lower, mark_upper, fixed_parameter_values
     )
-
-    # Drop survey parameters that do not enter this universe model's likelihood
-    # (e.g. completion parameters under the complete-catalog model). They stay
-    # in ``survey_labels`` so the decoder still fills SurveyParams from fiducials.
-    #
-    # Catalog 1's active set: a loaded Q_LSS completion table REPLACES the
-    # (1 + b_eff*delta_g) local-overdensity factor in the missing-galaxy budget
-    # (see completion._completion_curves_row_q), so b_miss no longer enters the
-    # likelihood. When catalog 1's Q is active it is dropped from the sampled
-    # block, else it is a phantom flat nuisance dimension that offsets logZ and
-    # invalidates Bayes-factor comparisons (same failure class as the WL
-    # phantom-param note above). log10n0 / delta still feed _assemble_curves and
-    # remain sampled.  Per-catalog Q activity (``_active_survey_for``) so a
-    # mixed config drops b_miss ONLY for the catalogs that actually carry a Q
-    # table.
-    active_survey = _active_survey_for(0)
-    if active_survey is not None:
-        kept = [
-            (label, lo, hi)
-            for label, lo, hi in zip(
-                sampled_survey_labels, sampled_survey_lower, sampled_survey_upper
-            )
-            if _survey_base_name(label) in active_survey
-        ]
-        if kept:
-            sampled_survey_labels, sampled_survey_lower, sampled_survey_upper = map(
-                list, zip(*kept)
-            )
-        else:
-            sampled_survey_labels, sampled_survey_lower, sampled_survey_upper = [], [], []
 
     labels = []
     lower = []
@@ -634,13 +816,11 @@ def build_parameter_space(
     # the mixture-weight sticks fcat_2..fcat_K, all appended AFTER the base survey
     # block and BEFORE the sky/mark blocks so the single-catalog indices above are
     # untouched.  The whole block is skipped for K = 1 (bit-identical path).
-    # Bounds for both were already resolved against prior_overrides above (and
-    # fed into the canonical bounds map); only fixed-parameter filtering and
-    # active-survey gating remain here.
+    # Each block came out of ``_survey_block_for`` already gated by its OWN
+    # catalog's Q_LSS activity (a Q-on-catalog-1-only config keeps b_miss_c2)
+    # with its bounds overrides applied; only fixed-parameter filtering remains.
     if n_catalogs >= 2:
-        for k, (suffixed_labels, c_lower, c_upper) in zip(
-            range(2, n_catalogs + 1), survey_blocks_ck
-        ):
+        for suffixed_labels, c_lower, c_upper in survey_blocks_ck:
             (
                 c_sampled_labels,
                 c_sampled_lower,
@@ -648,25 +828,6 @@ def build_parameter_space(
             ) = filter_fixed_parameters(
                 suffixed_labels, c_lower, c_upper, fixed_parameter_values
             )
-            # Suffix-aware active-survey gating: e.g. dark_sirens keeps only the
-            # {log10n0, delta, b_miss, sigma_kde} members of each catalog block.
-            # PER-CATALOG Q activity: catalog k drops b_miss_c{k} iff its own Q
-            # table is active, so a Q-on-catalog-1-only config keeps b_miss_c2.
-            active_survey_k = _active_survey_for(k - 1)
-            if active_survey_k is not None:
-                kept = [
-                    (label, lo, hi)
-                    for label, lo, hi in zip(
-                        c_sampled_labels, c_sampled_lower, c_sampled_upper
-                    )
-                    if _survey_base_name(label) in active_survey_k
-                ]
-                if kept:
-                    c_sampled_labels, c_sampled_lower, c_sampled_upper = map(
-                        list, zip(*kept)
-                    )
-                else:
-                    c_sampled_labels, c_sampled_lower, c_sampled_upper = [], [], []
             if not fix_survey:
                 labels += c_sampled_labels
                 lower += c_sampled_lower

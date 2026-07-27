@@ -53,6 +53,15 @@ def test_dark_sirens_b_miss_dropped_when_lss_completion_active():
 
 
 def test_survey_default_priors_are_physical_and_overridable():
+    """Default bounds of the whole sampleable survey block.
+
+    No ``universe_model`` is given, so the survey registry does not recognise
+    the model and the WHOLE block is sampled -- which is now exactly the four
+    sampleable labels.  ``z50``/``w``/``alpha_miss`` used to appear here as
+    flat rows that every real universe model filtered straight back out; they
+    are SurveyParams fields (generative-truth for the mock generator, and the
+    degeneracy-pinned alpha_miss) and no longer carry a prior at all.
+    """
     labels, lower, upper, *_ = build_parameter_space(
         "powerlaw+peak",
         fix_population=True,
@@ -61,12 +70,11 @@ def test_survey_default_priors_are_physical_and_overridable():
     )
     bounds = {label: (float(lo), float(hi)) for label, lo, hi in zip(labels, lower, upper)}
 
+    assert labels == ["log10n0", "delta", "b_miss", "sigma_kde"]
     assert bounds["log10n0"] == (-4.0, -1.0)
-    assert bounds["z50"] == (0.05, 4.5)
-    assert bounds["w"] == (0.02, 1.5)
     assert bounds["delta"] == (-3.0, 3.0)
     assert bounds["b_miss"] == (0.0, 3.0)
-    assert bounds["alpha_miss"] == (0.0, 1.0)
+    assert bounds["sigma_kde"] == (0.0, 0.05)
 
     labels, lower, upper, *_ = build_parameter_space(
         "powerlaw+peak",
@@ -199,9 +207,9 @@ def test_n_catalogs_2_dark_sirens_exposes_fcat2_with_beta_prior_kind():
 
 
 def test_n_catalogs_2_dark_sirens_only_exposes_active_suffixed_survey_labels():
-    """dark_sirens's _ACTIVE_SURVEY_PARAMS = {log10n0, delta, b_miss,
-    sigma_kde}; the suffix-aware gating (_survey_base_name) must apply the
-    SAME filter to the catalog-2 block, dropping z50_c2/w_c2/alpha_miss_c2."""
+    """dark_sirens samples {log10n0, delta, b_miss, sigma_kde} from the survey
+    registry; the catalog-2 block must be built from the SAME registry, so
+    z50_c2/w_c2/alpha_miss_c2 (never-sampled fields) cannot appear either."""
     labels, *_ = build_parameter_space(
         "powerlaw+peak",
         fix_population=True,

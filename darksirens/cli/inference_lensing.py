@@ -3086,9 +3086,10 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
         # the branch parses "true"/"false" strings into bools internally via opts;
         # build_parameter_space takes the raw opts.fix_* values it was given.
         #
-        # universe_model GATES THE SAMPLED SURVEY BLOCK (prior._ACTIVE_SURVEY_PARAMS).
-        # Omitting it made the filter skip entirely, so --fix_survey false sampled
-        # SEVEN flat survey nuisance dimensions (12 -> 19) that the decoder --
+        # universe_model GATES THE SAMPLED SURVEY BLOCK (the survey registry in
+        # inference/prior.py).  Omitting it left the model unrecognised, which
+        # samples the whole block, so --fix_survey false sampled SEVEN flat
+        # survey nuisance dimensions (12 -> 19) that the decoder --
         # which DOES read opts.universe_model, i.e. spectral_sirens_wl -- then
         # discarded: _decode_base_parameters slices coord[:len(sampled_labels)]
         # and the survey block sits past that prefix, so those coordinates never

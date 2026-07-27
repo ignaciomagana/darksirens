@@ -10,7 +10,7 @@ from darksirens.core.constants import (
     COMPLETE_EMPTY_PIXEL_POLICIES,
     H0_FID,
     OM0_FID,
-    SURVEY_PARAMS_FID,
+    SURVEY_PARAMS_FID_BY_NAME,
     W0_FID,
     WA_FID,
 )
@@ -55,6 +55,42 @@ def _sticks_to_log_weights(v: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([jnp.reshape(log_w_head, (1,)), log_w_tail])
 
 
+def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth, wl_params):
+    """Build one catalog's :class:`SurveyParams` from a resolved label dict.
+
+    ``values`` maps sampled + fixed labels to values; every
+    :class:`SurveyParams` field the parameter machinery addresses by name is
+    looked up under ``"<name><suffix>"`` (``suffix`` is ``""`` for catalog 1 and
+    ``"_c{k}"`` for catalog ``k >= 2``) and falls back to the shared fiducial in
+    :data:`SURVEY_PARAMS_FID_BY_NAME`.
+
+    Addressing the fields BY NAME is what keeps this in step with
+    ``build_parameter_space``: the sampled block is declared by the survey
+    registry in :mod:`darksirens.inference.prior` and holds only the labels a
+    given configuration samples, so a positional layout shared with the prior
+    would have to be re-derived here (and would silently mis-assign every field
+    after any block change).  ``log10n0`` is the only non-identity mapping: it
+    is log10 of the ``n0`` SurveyParams carries.
+    """
+    stacked = jnp.array([
+        values[f"{name}{suffix}"] if f"{name}{suffix}" in values else float(fiducial)
+        for name, fiducial in SURVEY_PARAMS_FID_BY_NAME.items()
+    ])
+    field = dict(zip(SURVEY_PARAMS_FID_BY_NAME, stacked))
+    return SurveyParams(
+        n0=10.0 ** field["log10n0"],
+        z50=field["z50"],
+        w=field["w"],
+        delta=field["delta"],
+        b_miss=field["b_miss"],
+        alpha_miss=field["alpha_miss"],
+        sigma_kde=field["sigma_kde"],
+        complete_empty_pixel_policy=complete_empty_pixel_policy,
+        z_depth=z_depth,
+        wl_params=wl_params,
+    )
+
+
 @dataclass(frozen=True)
 class ParameterDecoder:
     """Decode sampler coordinates into typed cosmology, survey, and population params."""
@@ -62,7 +98,6 @@ class ParameterDecoder:
     sampled_labels: tuple[str, ...]
     fixed_parameter_values: dict[str, float]
     pop_labels: tuple[str, ...]
-    survey_labels: tuple[str, ...]
     pop_params_fid: tuple[float, ...]
     complete_empty_pixel_policy: int
     # Resolved per-catalog survey redshift depth (CLI override > per-catalog
@@ -118,11 +153,6 @@ class ParameterDecoder:
             for i, label in enumerate(self.pop_labels)
         ])
 
-        sp = jnp.array([
-            _get(label, float(SURVEY_PARAMS_FID[i]))
-            for i, label in enumerate(self.survey_labels)
-        ])
-
         # Sky parameter sub-vector (empty for the isotropic model).
         sky_params = jnp.array([
             _get(label, self.sky_params_fid[i])
@@ -136,14 +166,9 @@ class ParameterDecoder:
         ])
 
         cosmo = CosmoParams(H0=H0, Om0=Om0, w0=w0, wa=wa)
-        survey = SurveyParams(
-            n0=10.0 ** sp[0],
-            z50=sp[1],
-            w=sp[2],
-            delta=sp[3],
-            b_miss=sp[4],
-            alpha_miss=sp[5],
-            sigma_kde=sp[6],
+        survey = _survey_params(
+            values,
+            "",
             complete_empty_pixel_policy=self.complete_empty_pixel_policy,
             z_depth=self.z_depths[0] if len(self.z_depths) >= 1 else None,
             wl_params=self.wl_params,
@@ -180,18 +205,9 @@ class ParameterDecoder:
 
         surveys = [survey1]
         for k in range(2, self.n_catalogs + 1):
-            sp_k = jnp.array([
-                _get(f"{label}_c{k}", float(SURVEY_PARAMS_FID[i]))
-                for i, label in enumerate(self.survey_labels)
-            ])
-            surveys.append(SurveyParams(
-                n0=10.0 ** sp_k[0],
-                z50=sp_k[1],
-                w=sp_k[2],
-                delta=sp_k[3],
-                b_miss=sp_k[4],
-                alpha_miss=sp_k[5],
-                sigma_kde=sp_k[6],
+            surveys.append(_survey_params(
+                values,
+                f"_c{k}",
                 complete_empty_pixel_policy=self.complete_empty_pixel_policy,
                 z_depth=self.z_depths[k - 1] if len(self.z_depths) >= k else None,
                 wl_params=None,
@@ -263,7 +279,10 @@ def build_parameter_decoder(
         _upper,
         _n_pop_eff,
         pop_labels,
-        survey_labels,
+        # The sampled survey block is re-derived above only to obtain
+        # ``sampled_labels``; the decoder addresses SurveyParams fields by name
+        # (see ``_survey_params``) and so needs no survey label list.
+        _survey_labels,
         _cosmo_labels,
         _n_cosmo_eff,
         _n_survey_eff,
@@ -318,7 +337,6 @@ def build_parameter_decoder(
         sampled_labels=tuple(sampled_labels),
         fixed_parameter_values=fixed_parameter_values,
         pop_labels=tuple(pop_labels),
-        survey_labels=tuple(survey_labels),
         pop_params_fid=tuple(float(v) for v in pop_params_fid),
         complete_empty_pixel_policy=complete_empty_pixel_policy_code(
             getattr(opts, "complete_empty_pixel_policy", "zero")

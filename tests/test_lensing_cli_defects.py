@@ -272,7 +272,8 @@ def _space_and_decoder(opts, tmp_path, monkeypatch):
 
 
 def test_lensing_space_matches_decoder_with_fix_survey_off(tmp_path, monkeypatch):
-    """universe_model gates the sampled survey block (prior._ACTIVE_SURVEY_PARAMS).
+    """universe_model gates the sampled survey block (the survey registry in
+    inference/prior.py).
     The lensing CLI omitted it, so --fix_survey false sampled seven flat survey
     nuisance dimensions (12 -> 19) that the decoder -- which does read
     opts.universe_model = spectral_sirens_wl -- dropped, and which
