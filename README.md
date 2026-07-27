@@ -28,13 +28,15 @@ The inference cosmology block samples a flat CPL dark-energy model with labels `
 
 ## Command-line tools
 
-Installing the package exposes:
+Installing the package exposes eight console scripts (each also runnable as `python -m darksirens.cli.<name>`); see [`docs/source/cli.md`](docs/source/cli.md) for the per-command options.
 
 - `darksirens_pixelate` — convert a raw galaxy survey HDF5 file into a pixelated HEALPix catalog.
 - `darksirens_inference` — run spectral-siren or dark-siren hierarchical inference.
+- `darksirens_inference_lensing` — run the lensing likelihood: weak-lensing magnification marginalization and the J=2 strong-lensing cluster channel (candidate image pairs under the SIS pair likelihood). Sole owner of the `spectral_sirens_wl` universe model.
 - `darksirens_analyze` — analyze saved inference products and posterior-predictive distributions.
 - `darksirens_skymaps_to_samples` — convert a directory of 3D skymap FITS files into GW posterior-like samples (`gwdata.h5`) with broad uninformative mass/spin surrogates for low-latency runs.
 - `darksirens_build_lognormal_completion` — **offline** preprocessor that builds an LSS-conditioned lognormal completion field `Q_LSS(p,z)` (see below) from a pixelated survey catalog.
+- `darksirens_build_joint_lognormal_completion` — **offline** joint builder for `K >= 2` catalogs: infers **one** latent LSS field from all of them (`gp3d`) and writes K matched `Q_LSS` ensembles sharing a single `realization_set_id`, which is what `--lss_marginalize` needs at `K >= 2`.
 - `darksirens_diagnose_lognormal_completion` — per-pixel diagnostic plots of `Q_LSS`, the missing-galaxy density, and the redshift prior.
 
 ## Population and completion models
