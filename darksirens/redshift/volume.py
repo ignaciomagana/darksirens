@@ -27,9 +27,9 @@ making the split explicit:
 """
 
 import jax.numpy as jnp
-from jax import jit, vmap
+from jax import vmap
 
-from darksirens.utils.cosmology import dV_of_z
+from darksirens.utils.cosmology import dV_of_z, threads_distance_table
 from darksirens.core.types import CosmoParams, SurveyParams
 
 from darksirens.redshift.grid import zgrid
@@ -52,8 +52,9 @@ def _precompute_volume_grid(cosmo: CosmoParams) -> jnp.ndarray:
     return pvol / jnp.trapezoid(pvol, zgrid)
 
 
-@jit
-def log_volume_prior(z: float, cosmo: CosmoParams, survey: SurveyParams) -> float:
+@threads_distance_table()
+def log_volume_prior(z: float, cosmo: CosmoParams, survey: SurveyParams,
+                     distance_table=None) -> float:
     """
     Log of the normalised comoving-volume redshift prior evaluated at z.
 
@@ -65,6 +66,9 @@ def log_volume_prior(z: float, cosmo: CosmoParams, survey: SurveyParams) -> floa
         Cosmological parameters (H0, Om0, w0, wa).
     survey : SurveyParams
         Accepted for API uniformity; not used here.
+    distance_table : optional
+        Comoving-distance interpolation table, threaded as a jit ARGUMENT (see
+        ``utils.cosmology``).  ``None`` resolves to the caller's active table.
 
     Returns
     -------
@@ -82,9 +86,14 @@ def log_volume_prior(z: float, cosmo: CosmoParams, survey: SurveyParams) -> floa
     )
 
 
-#: Vectorised over z-samples only; cosmo and survey are broadcast constants.
-#: Use this instead of manually vmapping to ensure the normalisation grid
-#: is computed once (via CSE / explicit hoist) regardless of call site.
-log_volume_prior_vmap = jit(
-    vmap(log_volume_prior, in_axes=(0, None, None), out_axes=0)
-)
+@threads_distance_table()
+def log_volume_prior_vmap(z, cosmo: CosmoParams, survey: SurveyParams,
+                          distance_table=None):
+    """Vectorised over z-samples only; cosmo and survey are broadcast constants.
+
+    Use this instead of manually vmapping to ensure the normalisation grid is
+    computed once (via CSE / explicit hoist) regardless of call site.  The
+    distance table is a jit argument of this boundary and reaches
+    ``log_volume_prior`` as an unmapped operand of the inner jit.
+    """
+    return vmap(log_volume_prior, in_axes=(0, None, None), out_axes=0)(z, cosmo, survey)

@@ -14,6 +14,7 @@ boundary, exercising:
     the sample-weight level)
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -30,6 +31,7 @@ PKG_ROOT = HERE.parent
 sys.path.insert(0, str(PKG_ROOT))
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog, GWEvent
+from darksirens.utils import cosmology
 from darksirens.utils.cosmology import H0Planck, Om0Planck
 from darksirens.likelihood.core import (
     darksiren_log_likelihood,
@@ -592,14 +594,75 @@ def test_make_likelihood_operands_are_jit_arguments_not_captures():
     opts, data = _flat_spectral_run(n_sel=n_sel)
     like = likelihood_module.make_likelihood(
         opts, data, get_fixed_population_params(opts.pop_model))
-    closed_jaxpr = jax.make_jaxpr(like.jitted_body)(jnp.array([]), like.operands)
+    closed_jaxpr = jax.make_jaxpr(like.jitted_body)(
+        jnp.array([]), like.operands, like.distance_table)
     invar_shapes = [tuple(v.aval.shape) for v in closed_jaxpr.jaxpr.invars]
     # the 5 selection physics fields + q + valid + the 3 sky components
     assert invar_shapes.count((n_sel,)) >= 5, invar_shapes
+    # ... and the cosmology distance table, the largest single operand of all
+    assert tuple(cosmology.rs.shape) in invar_shapes, invar_shapes
     # and nothing of the operands' size was hoisted into the closed consts
     const_sizes = [int(np.prod(c.shape)) for c in closed_jaxpr.consts
                    if hasattr(c, "shape")]
     assert all(size < n_sel for size in const_sizes), const_sizes
+
+
+# ── the cosmology distance table is an operand, not a literal ──────────────────
+#
+# ``utils.cosmology.rs`` is 21x41x31x500 float64 (1.33e7 elements, 106.8 MB).  As
+# a module global it was a closure capture of every likelihood jit and jax lowered
+# it to a ``dense<>`` literal at ~16 bytes of module text per element.  MEASURED on
+# an H100 NVL before the fix: 427.5 MB of lowered text for the production spectral
+# likelihood (two embeddings) and 443.6 MB for a dark-siren mock (three); after,
+# 0.44 MB and 16.6 MB, with first-call compile time 6.99 s -> 2.72 s and 7.15 s ->
+# 2.99 s and log-likelihoods bitwise identical at 12 / 8 prior draws.
+
+_TABLE_ELEMENTS = int(np.prod(cosmology.rs.shape))
+
+
+def _dense_literal_lengths(module_text):
+    """Text length of every ``dense<...>`` literal in a lowered StableHLO module.
+
+    Literals never contain '>' -- small ones are bracketed decimal lists, large
+    ones a single ``"0x...."`` hex blob -- so the non-greedy scan is exact.
+    """
+    return [len(m) for m in re.findall(r"dense<[^>]*>", module_text)]
+
+
+def test_spectral_likelihood_lowers_without_the_distance_table_as_a_literal():
+    """Regression guard for the 427 MB module: no ``dense<>`` literal in the
+    lowered likelihood may be big enough to BE the distance table, and the whole
+    module must stay far below what one embedding of it would cost."""
+    opts, data = _flat_spectral_run(n_sel=2048)
+    like = likelihood_module.make_likelihood(
+        opts, data, get_fixed_population_params(opts.pop_model))
+    text = like.jitted_body.lower(
+        jnp.array([]), like.operands, like.distance_table).as_text()
+
+    # A literal costs >= 8 bytes of text per f64 element (measured ~16 on jax
+    # 0.4.34), so anything at or above that bound is a table-sized constant.
+    one_embedding = 8 * _TABLE_ELEMENTS
+    assert max(_dense_literal_lengths(text), default=0) < one_embedding
+    assert len(text) < one_embedding // 10, len(text)
+    # and the table is a PARAMETER of @main instead
+    assert "21x41x31x500xf64" in text.split("\n")[1]
+
+
+def test_two_differently_shaped_builds_share_one_process():
+    """The distance table must reach every module-level jit as an ARGUMENT, not as
+    a context-variable read that gets closed over.
+
+    A ``@jit`` function that captures a tracer is not keyed on that capture, and
+    jax's jaxpr cache will replay it under a later, differently-shaped outer trace
+    -- ``UnexpectedTracerError`` on jax 0.4.34.  Two builds whose shapes differ
+    force exactly that re-trace of ``core.darksiren_log_likelihood``."""
+    pop_fid = get_fixed_population_params("powerlaw+peak")
+    values = []
+    for n_sel in (2048, 4096):
+        opts, data = _flat_spectral_run(n_sel=n_sel)
+        like = likelihood_module.make_likelihood(opts, data, pop_fid)
+        values.append(float(like(jnp.array([]))))
+    assert all(np.isfinite(v) for v in values), values
 
 
 def test_make_likelihood_jitted_matches_fully_eager():

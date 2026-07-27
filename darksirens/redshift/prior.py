@@ -69,10 +69,11 @@ every call.
 """
 
 import jax.numpy as jnp
-from jax import jit, lax, vmap
+from jax import lax, vmap
 from jax.scipy.special import logsumexp
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+from darksirens.utils.cosmology import threads_distance_table
 from typing import NamedTuple, Any
 
 from darksirens.redshift.volume import log_volume_prior_vmap, _precompute_volume_grid
@@ -903,26 +904,35 @@ def eval_redshift_prior_members_with_state(
 # ------------------------------------------------------------
 # One-shot prior implementations (registry; checks/tests/back-compat)
 # ------------------------------------------------------------
+#
+# ``threads_distance_table`` rather than ``@jit``: these reach the 106.8 MB
+# comoving-distance table (through ``log_volume_prior`` / the completion curves),
+# and the cluster likelihood resolves them through ``get_redshift_prior``, i.e.
+# from INSIDE an enclosing trace.  A plain ``@jit`` would close over the caller's
+# table tracer, which JAX neither keys its tracing cache on nor tolerates being
+# replayed from a dead trace.  See ``utils.cosmology``.
 
-@jit
+@threads_distance_table()
 def _log_prior_spectral_sirens(
     z: jnp.ndarray,
     pix: jnp.ndarray,
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    distance_table=None,
 ) -> jnp.ndarray:
     """GW-only prior: normalised comoving volume element."""
     return log_volume_prior_vmap(z, cosmo, survey)
 
 
-@jit
+@threads_distance_table()
 def _log_prior_complete_catalog(
     z: jnp.ndarray,
     pix: jnp.ndarray,
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    distance_table=None,
 ) -> jnp.ndarray:
     """
     Dark-siren prior under the complete-catalog assumption:
@@ -937,13 +947,14 @@ def _log_prior_complete_catalog(
     )
 
 
-@jit
+@threads_distance_table()
 def _log_prior_bright_sirens(
     z: jnp.ndarray,
     pix: jnp.ndarray,
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    distance_table=None,
 ) -> jnp.ndarray:
     """
     Bright-siren counterpart redshift likelihood with an optional sky gate.
@@ -998,13 +1009,14 @@ def _log_prior_bright_sirens(
     return jnp.where(sky_marginalized | in_counterpart_pixel, log_p_cp, -jnp.inf)
 
 
-@jit
+@threads_distance_table()
 def _log_prior_dark_sirens(
     z: jnp.ndarray,
     pix: jnp.ndarray,
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    distance_table=None,
 ) -> jnp.ndarray:
     """
     Dark-siren prior with catalog completion (the general case):

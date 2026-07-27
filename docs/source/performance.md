@@ -195,6 +195,32 @@ Two implementation constraints are load-bearing:
   capturing them would embed the entire static state in the module and duplicate
   already-resident buffers.
 
+The largest such array was not an operand at all but the comoving-distance
+interpolation table `utils.cosmology.rs` — 21×41×31×500 float64, 106.8 MB — which
+every likelihood reaches through `z_of_dL` / `dL_grid_bounds` far below the factory
+frame, and which was read as a module global. Measured on an H100 NVL:
+
+| lowered module | before | after |
+| --- | --- | --- |
+| spectral (real data, single pass) | 427.5 MB | 0.44 MB |
+| dark-siren mock | 443.6 MB | 16.6 MB |
+| XLA `generated_code_size` (spectral) | 107.5 MB | 0.70 MB |
+| first likelihood call (trace + lower + compile + run) | 6.90 s | 2.76 s |
+
+`argument_size` grows by exactly 106,764,000 bytes — the table moved from the
+generated code into the parameter list, and the buffer it now points at is the
+one that was already device-resident (`bytes_in_use` and peak are unchanged).
+Log-likelihoods are bitwise identical at 12 spectral and 8 dark-siren prior draws.
+
+The table is threaded by `utils.cosmology.threads_distance_table`, which replaces
+`@jax.jit` on every function that reaches it: the public wrapper resolves the
+table outside the jit and passes it as an argument, and inside the jit the
+decorator rebinds it as the active table so the ~45 deep call sites keep their
+signatures. **Any new module-level jit that reaches the table must use that
+decorator too** — a plain `@jit` that merely reads the active table closes over
+the caller's tracer, which JAX does not key its tracing cache on and will replay
+from a dead trace (`UnexpectedTracerError`, reproduced on jax 0.4.34).
+
 The lensing CLI's `loglike` is deliberately **not** jitted as a whole: under
 `--partition_mode marginalize_exact` it builds one likelihood call per partition in
 a Python loop, and fusing those into a single XLA program is exactly the

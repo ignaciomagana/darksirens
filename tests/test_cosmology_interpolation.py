@@ -1,3 +1,5 @@
+import re
+
 import jax
 jax.config.update("jax_enable_x64", True)
 
@@ -258,3 +260,83 @@ def test_worst_case_midpoint_error_over_the_physical_grid():
                 if err > worst:
                     worst, arg = err, (om, w0, wa)
     assert worst < 1.5e-3, f"worst-case midpoint error {worst:.2e} at {arg}"
+
+
+# ── the 106.8 MB distance table is a jit ARGUMENT, never an HLO literal ────────
+#
+# ``rs`` is 21x41x31x500 float64 = 1.33e7 elements.  jax lowers a closed-over
+# concrete array to a ``dense<>`` HLO constant at ~16 bytes of module text per f64
+# element (verified on jax 0.4.34), so while the table was read as a module global
+# every jit that touched it carried ~214 MB of literal.  MEASURED on an H100 NVL:
+# ``jax.jit(z_of_dL).lower(...).as_text()`` was 213.6 MB, the production spectral
+# likelihood 427.5 MB and a dark-siren mock 443.6 MB; after threading the table
+# through as an argument the same modules are 0.10 MB, 0.44 MB and 16.6 MB.
+
+_TABLE_ELEMENTS = int(np.prod(_cosmo.rs.shape))
+#: A ``dense<>`` literal of the table costs at LEAST this much module text.
+_ONE_EMBEDDING_CHARS = 8 * _TABLE_ELEMENTS
+
+
+def _dense_literal_lengths(module_text):
+    """Text length of every ``dense<...>`` literal in a lowered StableHLO module.
+
+    Literals never contain '>' — small ones are bracketed decimal lists, large
+    ones a single ``"0x…"`` hex blob — so the non-greedy scan is exact.
+    """
+    return [len(m) for m in re.findall(r"dense<[^>]*>", module_text)]
+
+
+@pytest.mark.parametrize(
+    "name", ["r_of_z", "dL_of_z", "dL_grid_bounds", "dL_in_z_grid", "z_of_dL",
+             "dV_of_z"],
+)
+def test_every_table_consuming_jit_takes_the_table_as_a_parameter(name):
+    """No cosmology jit may embed the distance table as a constant, and each must
+    declare it in the signature of ``@main``."""
+    fn = getattr(_cosmo, name)
+    dL_or_z = jnp.linspace(0.01, 3.0, 64) if name != "z_of_dL" else \
+        jnp.linspace(100.0, 5000.0, 64)
+    args = (70.0,) if name == "dL_grid_bounds" else (dL_or_z, 70.0)
+    text = fn.jitted.lower(*args, distance_table=_cosmo.rs).as_text()
+
+    assert max(_dense_literal_lengths(text), default=0) < _ONE_EMBEDDING_CHARS
+    assert len(text) < _ONE_EMBEDDING_CHARS // 100, len(text)
+    assert "21x41x31x500xf64" in text.split("\n")[1]   # a parameter of @main
+
+
+def test_the_literal_size_bound_has_teeth():
+    """Self-check for the threshold above: a jit that DOES close over the table
+    must blow through it, so the guard cannot pass by being generous."""
+    leaky = jax.jit(lambda z: jnp.sum(_cosmo.rs[0, 0, 0] * z))
+    text = leaky.lower(jnp.float64(1.0)).as_text()
+    assert max(_dense_literal_lengths(text)) > _ONE_EMBEDDING_CHARS
+
+
+def test_bound_distance_table_reaches_the_deep_call_sites():
+    """The dynamic binding is what lets ~45 call sites keep their signatures: a
+    table installed at a jit boundary must be the one the leaf interpolation
+    actually reads, and the binding must not leak out of its scope."""
+    plain = float(_cosmo.r_of_z(1.0, 70.0))
+    with _cosmo.bound_distance_table(2.0 * _cosmo.rs):
+        doubled = float(_cosmo.r_of_z(1.0, 70.0))
+        assert _cosmo.distance_table() is not _cosmo.rs
+    after = float(_cosmo.r_of_z(1.0, 70.0))
+
+    assert doubled == pytest.approx(2.0 * plain, rel=1e-12)
+    assert after == plain                       # bitwise: the scope was restored
+    assert _cosmo.distance_table() is _cosmo.rs
+
+
+def test_explicit_distance_table_overrides_the_active_one():
+    """An explicit ``distance_table=`` wins over both the binding and the default,
+    so callers that hold their own table never have to touch global state."""
+    with _cosmo.bound_distance_table(2.0 * _cosmo.rs):
+        explicit = float(_cosmo.r_of_z(1.0, 70.0, distance_table=_cosmo.rs))
+    assert explicit == float(_cosmo.r_of_z(1.0, 70.0))
+
+
+def test_threads_distance_table_rejects_a_function_without_the_parameter():
+    """The decorator is the contract, so declaring it wrong must fail loudly at
+    import time rather than silently fall back to the module global."""
+    with pytest.raises(TypeError, match="distance_table"):
+        _cosmo.threads_distance_table()(lambda z, H0: z * H0)
