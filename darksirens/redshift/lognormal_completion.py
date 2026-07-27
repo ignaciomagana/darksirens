@@ -124,7 +124,10 @@ def poisson_lognormal_map(
     *,
     bias: float = 1.0,
     prior_strength: float = 1.0,
-    maxiter: int = 300,
+    # 300 stopped every DESI-scale n_grid=1000 solve at the iteration cap
+    # (status=1, |grad|_inf ~ 21), under-relaxing logQ ~5x toward Q = 1; a
+    # converged solve stops early, so the high cap is free on small problems.
+    maxiter: int = 10000,
     logq_clip: float = 7.0,
 ) -> dict:
     """Per-pixel MAP of the 1-D Poisson-lognormal completion field.

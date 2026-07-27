@@ -97,7 +97,7 @@ def _build_completion_radial(
     n_members: int = 32,
     seed: int = 1234,
     prior_strength: float = 1.0,
-    maxiter: int = 300,
+    maxiter: int = 10000,
     log10n0=None,
     delta=None,
 ):
@@ -483,7 +483,7 @@ def build_completion(
     n_members: int = 32,
     seed: int = 1234,
     prior_strength: float = 1.0,
-    maxiter: int = 300,
+    maxiter: int = 10000,
     gp3d_nz_solve: int = 32,
     gp3d_pix_chunk: int = 512,
     lss_corr_length_ang=None,
@@ -523,7 +523,17 @@ def main(argv=None):
                    help="Number of Laplace/FFT-diagonal ensemble members (0 = MAP only).")
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--prior-strength", type=float, default=1.0)
-    p.add_argument("--maxiter", type=int, default=300)
+    # Each occupied pixel is an n_grid-dimensional (1000 on the package zgrid)
+    # L-BFGS-B MAP solve; 300 iterations stops ~5x short of the fixed point on a
+    # DESI-like nside=16 catalog (measured 0/2580 converged, |grad|_inf ~ 21,
+    # max|dlogQ| 1.36 vs the converged field), leaving a systematically
+    # under-relaxed, near-unity Q.  Converged solves stop early, so a high cap
+    # costs nothing on small problems.
+    p.add_argument("--maxiter", type=int, default=10000,
+                   help=("Max L-BFGS-B iterations per pixel MAP solve (default "
+                         "10000). Must exceed what an n_grid-dimensional solve "
+                         "needs, or logQ is silently under-relaxed toward 0 "
+                         "(Q -> 1), weakening the LSS completion."))
     p.add_argument("--mode", choices=["radial", "gp3d"], default="radial",
                    help="Completion model: 'radial' (default; independent per-pixel "
                         "1-D Poisson-lognormal) or 'gp3d' (3-D angular-coupling "
@@ -583,7 +593,9 @@ def main(argv=None):
             if n_conv == n_occ:
                 _ok(line)
             else:
-                _warn(line + " — some pixel solves did not converge")
+                _warn(line + f" — raise --maxiter (currently {opts.maxiter}); "
+                             "an unconverged solve under-relaxes logQ toward 0 "
+                             "(Q -> 1), silently weakening the LSS completion")
     save_lss_completion_hdf5(
         opts.out, logq_map=logq_map, logq_members=logq_members,
         zgrid=np.asarray(zgrid), indexing=indexing, metadata=diagnostics,
