@@ -40,6 +40,7 @@ from darksirens.inference.parameters import (
     complete_empty_pixel_policy_code,
 )
 from darksirens.core.types import EMCatalog, GWEvent
+from darksirens.utils import cosmology
 
 # Backward-compatible aliases for callers/tests that imported private helpers.
 _barrier = barrier
@@ -118,19 +119,38 @@ def _jit_likelihood_body(body, operands):
     The barrier contract in this module's docstring is preserved — the barriers are
     applied eagerly at build time, before the arrays enter any jit.
 
+    The cosmology table is an operand too
+    -------------------------------------
+    The same argument applies to the 106.8 MB comoving-distance table in
+    ``utils.cosmology``, which every likelihood reaches through ``z_of_dL`` /
+    ``dL_grid_bounds`` far below this frame.  It used to be a module global, i.e.
+    a closure capture of THIS jit, and cost 427.5 MB of lowered module text for
+    the production spectral likelihood (two ``dense<21x41x31x500xf64>`` literals
+    at ~16 bytes of text per element).  It now travels as the third jit argument
+    and is installed as the active table for the trace, so the ~45 cosmology call
+    sites resolve it without carrying it in their signatures.
+
     Recompilation: ``coord`` is a 1-D float array of fixed length (the sampled
-    dimension) and ``operands`` is the same pytree of the same shapes/dtypes on
-    every call, so the traced signature is constant and the body compiles once.
+    dimension), ``operands`` is the same pytree of the same shapes/dtypes on
+    every call, and ``distance_table`` is the same buffer, so the traced
+    signature is constant and the body compiles once.
     """
-    jitted = jax.jit(body)
+    distance_table = cosmology.distance_table()
+
+    def _body_with_tables(coord: jnp.ndarray, operands, distance_table):
+        with cosmology.bound_distance_table(distance_table):
+            return body(coord, operands)
+
+    jitted = jax.jit(_body_with_tables)
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
-        return jitted(coord, operands)
+        return jitted(coord, operands, distance_table)
 
     # Host-side hook for tests/diagnostics that want to count compilations or reach
     # the un-bound body.
     likelihood.jitted_body = jitted
     likelihood.operands = operands
+    likelihood.distance_table = distance_table
     return likelihood
 
 

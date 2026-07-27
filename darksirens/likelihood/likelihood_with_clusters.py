@@ -36,8 +36,6 @@ What this commit does NOT do
 
 from __future__ import annotations
 
-from functools import partial
-
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -73,7 +71,12 @@ from darksirens.lensing.wlmagnification import (
 )
 from darksirens.lensing.slmarks import SISLensParams, tau_2_SIS
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
-from darksirens.utils.cosmology import dL_grid_bounds, dL_in_z_grid, z_of_dL
+from darksirens.utils.cosmology import (
+    dL_grid_bounds,
+    dL_in_z_grid,
+    threads_distance_table,
+    z_of_dL,
+)
 
 
 # Cluster-mode codes (static_argnames dispatch)
@@ -163,8 +166,12 @@ def _unlensed_tau_suppression_enabled(cluster_mode: int, singleton_lensing: int)
     )
 
 
-@partial(
-    jax.jit,
+# ``threads_distance_table`` is ``jax.jit`` plus the contract that the 106.8 MB
+# comoving-distance table arrives as an ARGUMENT rather than a closed-over global
+# (a ``dense<>`` HLO constant worth ~214 MB of module text per embedding).  The
+# lensing CLI calls this jit directly, so it is the outermost boundary on that
+# path.  See ``utils.cosmology``.
+@threads_distance_table(
     static_argnames=[
         "nEvents",
         "nsamp",
@@ -234,6 +241,10 @@ def darksiren_log_likelihood_with_clusters(
     y_nodes_single: int = 32,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    # Comoving-distance interpolation table, threaded as a jit ARGUMENT and bound
+    # as the active table for this trace (see ``utils.cosmology``).  None resolves
+    # to whatever is active in the CALLER's scope.
+    distance_table: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Master log-likelihood with singleton + J=2 cluster channels.
 

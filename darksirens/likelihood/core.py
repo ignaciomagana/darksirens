@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from functools import partial
-
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -45,7 +43,12 @@ from darksirens.lensing.grids import (
 from darksirens.lensing.wlmagnification import make_tabulated_log_p_wl
 from darksirens.sky import sky_model_parser
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
-from darksirens.utils.cosmology import dL_grid_bounds, dL_in_z_grid, z_of_dL
+from darksirens.utils.cosmology import (
+    dL_grid_bounds,
+    dL_in_z_grid,
+    threads_distance_table,
+    z_of_dL,
+)
 
 
 # Weak-lensing quadrature node counts / ranges. The tabulated-backend mu grid
@@ -270,8 +273,12 @@ def _require_field_mode_scope(
             )
 
 
-@partial(
-    jax.jit,
+# ``threads_distance_table`` is ``jax.jit`` plus the contract that the 106.8 MB
+# comoving-distance table reaches this module as an ARGUMENT: without it, jax
+# lowers the closed-over table to a ``dense<>`` HLO constant and this one jit
+# carries ~214 MB of literal per embedding (measured 427.5 MB of module text for
+# the production spectral likelihood).  See ``utils.cosmology``.
+@threads_distance_table(
     static_argnames=[
         "nEvents",
         "nsamp",
@@ -382,6 +389,11 @@ def darksiren_log_likelihood(
     # each EMCatalog leaf is a jit tracer, so it must be decided pre-jit).  Empty
     # (default) shares nothing -- every legacy caller keeps its exact trace.
     share_prior_state_by_catalog: tuple = (),
+    # Comoving-distance interpolation table (``utils.cosmology.rs``), threaded as
+    # a jit ARGUMENT and bound as the active table for this trace.  None resolves
+    # to whatever is active in the CALLER's scope, so no call site has to know
+    # about it.
+    distance_table: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Return ``log p({d_i} | cosmo, survey, pop_params)``.
 
