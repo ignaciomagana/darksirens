@@ -226,6 +226,137 @@ def test_pair_censoring_assumes_independent_image_orientations(x_plus, x_minus):
     assert both_shared / both_independent > 1.1
 
 
+# ============================================================================
+# A2. The 'shared_iota' joint-orientation pair model vs direct Monte Carlo
+# ============================================================================
+
+def _draw_theta_geometric(rng, n, cos_iota):
+    """One image's Finn-Chernoff Theta from an isotropic antenna draw at the
+    GIVEN inclination — the exact FC93 eq. 3.31 decomposition, evaluated
+    through the SAME ``theta_fc_from_antenna`` the shared_iota tables and the
+    generator's shared-orientation rendering use (pins the convention)."""
+    from darksirens.lensing.fcpdet import theta_fc_from_antenna
+
+    u = rng.uniform(-1.0, 1.0, n)              # detector-frame cos(theta)
+    phi = rng.uniform(0.0, 2 * np.pi, n)       # detector-frame azimuth
+    psi = rng.uniform(0.0, 2 * np.pi, n)       # effective polarization
+    fp0 = 0.5 * (1.0 + u**2) * np.cos(2 * phi)
+    fx0 = u * np.sin(2 * phi)
+    fp = fp0 * np.cos(2 * psi) + fx0 * np.sin(2 * psi)
+    fx = -fp0 * np.sin(2 * psi) + fx0 * np.cos(2 * psi)
+    return np.asarray(theta_fc_from_antenna(
+        jnp.asarray(fp), jnp.asarray(fx), jnp.asarray(cos_iota)))
+
+
+def _dL_for_threshold(x, m1, q, z, params):
+    """Apparent distance whose Finn-Chernoff threshold is exactly x."""
+    from darksirens.lensing.fcpdet import _chirp_mass_det
+
+    mc = float(_chirp_mass_det(jnp.asarray(m1), jnp.asarray(q), jnp.asarray(z)))
+    return (
+        x * 8.0 * float(params.r0)
+        * (mc / float(params.mc_bar)) ** (5.0 / 6.0) / float(params.rho_thr)
+    )
+
+
+@pytest.mark.parametrize("x_plus,x_minus", [(1.0, 2.0), (1.5, 3.0), (0.8, 1.0)])
+def test_shared_iota_pair_model_matches_direct_mc(x_plus, x_minus):
+    """The 'shared_iota' P(both) / P(exactly one) must match a direct Monte
+    Carlo of the joint model (shared inclination, per-image independent
+    antenna draws — the |dt| >> hours Earth-rotation limit) to <= 1%
+    relative, and must land strictly BETWEEN the independent and fully-shared
+    limits OF THE SAME GEOMETRIC CONVENTION.
+
+    The limits are computed from the same Monte Carlo (not from the
+    polynomial fit): the exact geometric Theta marginal deviates from the
+    FC93 polynomial by up to ~2.4x in the far tail (S_geom(3) ~ 0.038 vs
+    S_poly(3) ~ 0.016), so polynomial-fit limits are not valid brackets for
+    the geometric joint model. 'independent'-mode code keeps the polynomial
+    exactly (see test_pair_orientation_independent_mode_is_bit_unchanged).
+    """
+    from darksirens.lensing.fcpdet import (
+        pdet_pair_both_fc, pdet_pair_exactly_one_fc, log_pmiss_partner_fc,
+    )
+
+    params = make_fc_pdet_params()
+    m1, q, z = 30.0, 0.8, 0.5
+    dL_p = jnp.asarray(_dL_for_threshold(x_plus, m1, q, z, params))
+    dL_m = jnp.asarray(_dL_for_threshold(x_minus, m1, q, z, params))
+    m1j, qj, zj = jnp.asarray(m1), jnp.asarray(q), jnp.asarray(z)
+
+    both_model = float(pdet_pair_both_fc(
+        m1j, qj, zj, dL_p, dL_m, params, pair_orientation_mode="shared_iota"))
+    one_model = float(pdet_pair_exactly_one_fc(
+        m1j, qj, zj, dL_p, dL_m, params, pair_orientation_mode="shared_iota"))
+
+    # Direct MC of the joint model: >= 4e6 sources, ONE cos(iota) per source,
+    # independent antenna draws per image (arrival times decorrelated).
+    rng = np.random.default_rng(20260727)
+    n = 4_000_000
+    cos_iota = rng.uniform(-1.0, 1.0, n)
+    th_1 = _draw_theta_geometric(rng, n, cos_iota)
+    th_2 = _draw_theta_geometric(rng, n, cos_iota)
+    det_1, det_2 = th_1 > x_plus, th_2 > x_minus
+
+    both_mc = float(np.mean(det_1 & det_2))
+    one_mc = float(np.mean(det_1 ^ det_2))
+    np.testing.assert_allclose(both_model, both_mc, rtol=1e-2)
+    np.testing.assert_allclose(one_model, one_mc, rtol=1e-2)
+
+    # Same-convention limits from the same draws: independent = product of
+    # the two images' marginals; fully shared = one Theta for both images.
+    both_indep = float(np.mean(det_1)) * float(np.mean(det_2))
+    one_indep = (
+        float(np.mean(det_1)) * float(np.mean(~det_2))
+        + float(np.mean(~det_1)) * float(np.mean(det_2))
+    )
+    both_full = float(np.mean(det_1 & (th_1 > x_minus)))
+    one_full = float(np.mean(det_1 ^ (th_1 > x_minus)))
+    assert both_indep < both_model < both_full
+    assert one_full < one_model < one_indep
+
+    # Conditional censoring factor of the lensed-singleton channel:
+    # P(partner missed | this image detected), against the MC conditional.
+    miss_model = float(jnp.exp(log_pmiss_partner_fc(
+        m1j, qj, zj, dL_p, dL_m, params, pair_orientation_mode="shared_iota")))
+    miss_mc = float(np.mean(det_1 & ~det_2)) / float(np.mean(det_1))
+    np.testing.assert_allclose(miss_model, miss_mc, rtol=1e-2)
+
+
+def test_pair_orientation_independent_mode_is_bit_unchanged():
+    """'independent' mode must be BIT-IDENTICAL to the pinned polynomial
+    forms — the new mode is opt-in, the default rendering stays untouched."""
+    from darksirens.lensing.fcpdet import (
+        pdet_pair_both_fc, pdet_pair_exactly_one_fc, log_pmiss_partner_fc,
+    )
+
+    params = make_fc_pdet_params()
+    rng = np.random.default_rng(7)
+    m1 = jnp.asarray(rng.uniform(5.0, 80.0, 200))
+    q = jnp.asarray(rng.uniform(0.2, 1.0, 200))
+    z = jnp.asarray(rng.uniform(0.05, 3.0, 200))
+    dL_d = jnp.asarray(rng.uniform(100.0, 30000.0, 200))
+    dL_p = jnp.asarray(rng.uniform(100.0, 30000.0, 200))
+
+    s_d = np.asarray(pdet_fc(m1, q, z, dL_d, params))
+    s_p = np.asarray(pdet_fc(m1, q, z, dL_p, params))
+    np.testing.assert_array_equal(
+        np.asarray(pdet_pair_both_fc(m1, q, z, dL_d, dL_p, params)),
+        s_d * s_p,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(pdet_pair_exactly_one_fc(m1, q, z, dL_d, dL_p, params)),
+        s_d * (1.0 - s_p) + (1.0 - s_d) * s_p,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(log_pmiss_partner_fc(m1, q, z, dL_d, dL_p, params)),
+        np.asarray(log_one_minus_pdet_fc(m1, q, z, dL_p, params)),
+    )
+    with pytest.raises(ValueError, match="pair_orientation_mode"):
+        log_pmiss_partner_fc(
+            m1, q, z, dL_d, dL_p, params, pair_orientation_mode="bogus")
+
+
 def test_fc_pdet_limits_and_gradient():
     params = make_fc_pdet_params()
     # Very close/loud -> P_det ~ 1; very far -> P_det ~ 0
