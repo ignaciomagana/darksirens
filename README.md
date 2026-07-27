@@ -59,12 +59,21 @@ under `--flows_pe_cosmology` × gwcat's 1-D isotropic `chi_eff` prior).
 Requires the `flows` extras (`pip install "darksirens[flows]"`, i.e.
 `flowjax`/`paramax`/`equinox`), jax x64, and currently supports
 `--universe_model spectral_sirens` only (6-D ra/dec flows for dark sirens
-are recognised by the loader but not implemented). Each event draws from
+are recognised but not implemented). Each event draws from
 the population target truncated to its own support windows (robust
 percentile boxes from flow samples, a detector-frame chirp-mass band, and a
 `chi_eff(q)` degeneracy band; `--flows_support_margin`), with every
-truncation folded exactly into the proposal density — plain importance
-sampling, unbiased for any window covering the flow support. On the 94-event
+truncation folded exactly into the proposal density. Those windows are
+measured from finitely many flow samples and therefore do NOT cover a
+spline flow's unbounded learned support, so the proposal is a two-component
+**mixture**: a fraction `--flows_wfull` (default 0.05) of each event's draws
+comes from the full population support instead, and every draw is weighted
+by the exact mixture density `(1-w) q_win + w q_full` — both components
+evaluated at both kinds of draw. Without it the event integral is truncated
+by a hyperparameter-dependent amount (a posterior bias, not a per-event
+constant; issue #260); with it the residual is ordinary Monte-Carlo error,
+visible to `--max_likelihood_variance`. `--flows_wfull 0` restores the old
+windowed-only estimator and warns. On the 94-event
 O3+O4 ensemble this gives per-event ESS ~ 1-5% of `--flows_nsamp` (total
 lnL MC variance ~ 0.5 at J=16384, inside the default
 `--max_likelihood_variance` budget, at ~0.7 s/likelihood call on an A100).

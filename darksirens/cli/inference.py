@@ -665,6 +665,17 @@ def build_parser():
                          "(exactly corrected in the proposal density)."))
     g.add_argument("--flows_support_nsamples", type=int, default=4096,
                    help="Flow draws used to measure each event's support box.")
+    # Literal, not an import: darksirens.likelihood.flow_events pulls in
+    # flowjax, and the parser must build without the flow extras installed.
+    # tests/test_flow_mixture_proposal.py pins this to DEFAULT_W_FULL.
+    g.add_argument("--flows_wfull", type=float, default=0.05,
+                   help=("Fraction of each event's draws taken from the FULL "
+                         "population support instead of its empirical support "
+                         "window (mixture proposal, issue #260). The exact "
+                         "mixture density enters every weight, so any value in "
+                         "[0, 1) is unbiased; 0 restores the windowed-only "
+                         "estimator, which truncates the event integral by a "
+                         "hyperparameter-dependent amount."))
 
     g = optp.add_argument_group(
         "Selection-function emulator (alternative to --gwselection_path)")
@@ -1360,6 +1371,16 @@ def _validate_run_config(opts):
             _fatal("--gw_flows_path (spectral sirens) does not use --survey_path.")
         if opts.flows_nsamp <= 0:
             _fatal("--flows_nsamp must be positive.")
+        if not (0.0 <= opts.flows_wfull < 1.0):
+            _fatal("--flows_wfull must be in [0, 1).")
+        if opts.flows_wfull == 0.0:
+            _warn(
+                "--flows_wfull 0 disables the full-population-support mixture "
+                "component: the event integral is then truncated to each "
+                "event's empirical support box by a hyperparameter-dependent "
+                "amount (issue #260). Evidence differences below that "
+                "systematic are unresolved."
+            )
         if opts.sampler == "numpyro":
             _warn(
                 "flows + NumPyro NUTS: the grid inverse-CDF samplers give "
@@ -1481,6 +1502,10 @@ def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
     if opts.gw_flows_path:
         _row("GW flows path", opts.gw_flows_path)
         _row("Flow draws J",  f"{opts.flows_nsamp:,} (seed {opts.flows_seed})")
+        _row("Flow proposal", (
+            f"window + {opts.flows_wfull:.3g} full support "
+            f"(margin {opts.flows_support_margin:g})"
+        ))
         _row("Flow PE cosmo", opts.flows_pe_cosmology)
     else:
         _row("GW events path",  opts.gw_path)
