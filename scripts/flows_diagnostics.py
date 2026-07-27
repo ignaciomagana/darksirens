@@ -55,6 +55,7 @@ from darksirens.gw.populations.sampling import (
 )
 from darksirens.likelihood.core import darksiren_log_likelihood
 from darksirens.likelihood.flow_events import (
+    DEFAULT_W_FULL,
     PePriorTables,
     build_chi_eff_prior_table,
     build_flow_loglike,
@@ -115,6 +116,9 @@ def main():
     ap.add_argument("--outdir", default="flows")
     ap.add_argument("--flows_nsamp", type=int, default=65536)
     ap.add_argument("--flows_seed", type=int, default=42)
+    ap.add_argument("--flows_wfull", type=float, default=DEFAULT_W_FULL,
+                    help=("Mixture fraction drawn from the full population "
+                          "support (issue #260); 0 = windowed-only."))
     ap.add_argument("--fidelity_events", type=int, default=6)
     ap.add_argument("--pe_cosmology", default="67.74,0.3089")
     ap.add_argument("--skip_fidelity", action="store_true",
@@ -180,6 +184,7 @@ def main():
         em_catalog_sel=catalog,
         Ndraw=Ndraw,
         nEvents=nEvents,
+        w_full=args.flows_wfull,
         max_likelihood_variance=1e9,  # diagnostics: never clamp
     )
 
