@@ -214,3 +214,20 @@ def test_build_occupied_only_and_uniform_chi(survey_path):
     empty = ng == 0
     assert empty.any()
     assert np.allclose(logq_map[empty], 0.0)       # empty pixels -> Q = 1
+
+
+def test_builder_maxiter_default_is_convergence_safe():
+    """The old default of 300 stopped EVERY DESI-scale n_grid=1000 pixel solve
+    at the iteration cap (0/2580 converged, |grad|_inf ~ 21), silently
+    under-relaxing logQ ~5x toward Q = 1 — a weakened completion with no
+    error.  Converged solves stop early, so the high cap is free for small
+    problems; this pins the default so it cannot quietly regress."""
+    import darksirens.cli.build_lognormal_completion as B
+    import darksirens.redshift.lognormal_completion as L
+    import inspect
+
+    parser = B.build_parser() if hasattr(B, "build_parser") else None
+    if parser is not None:
+        assert parser.get_default("maxiter") >= 10000
+    assert inspect.signature(B.build_completion).parameters["maxiter"].default >= 10000
+    assert inspect.signature(L.poisson_lognormal_map).parameters["maxiter"].default >= 10000
