@@ -530,6 +530,51 @@ def make_ensemble_log_prob_per_event(ensemble: FlowEnsemble) -> Callable:
     return eval_logflows
 
 
+#: Checkpoint config keys that may carry an event's ORIGINAL PE prior support
+#: (the window the posterior samples were drawn in).  Value is a mapping from
+#: column name to ``[lo, hi]``, e.g.
+#: ``{"pe_bounds": {"luminosity_distance": [10.0, 12000.0]}}``.
+PE_BOUNDS_KEYS = ("pe_bounds", "pe_prior_bounds")
+
+
+def pe_support_boxes(ensemble: FlowEnsemble) -> jnp.ndarray:
+    """Per-event ORIGINAL PE-prior support, ``(n_flows, data_dim, 2)``.
+
+    A trained flow has unbounded learned support in the directions its
+    constraint transform does not bound (detector-frame masses and distance),
+    so a mixture proposal that covers the whole population support can hand
+    finite importance weight to flow density in regions where the PE prior —
+    and therefore the true posterior — is exactly zero.  When a checkpoint
+    records its PE window (see :data:`PE_BOUNDS_KEYS`) the likelihood masks
+    those draws out; columns (and events) that do not record one get
+    ``(-inf, +inf)`` and behave exactly as before.
+    """
+    n, d = ensemble.n_flows, ensemble.data_dim
+    box = np.empty((n, d, 2), dtype=np.float64)
+    box[..., 0] = -np.inf
+    box[..., 1] = np.inf
+    for i, cfg in enumerate(ensemble.configs):
+        bounds = None
+        for k in PE_BOUNDS_KEYS:
+            if isinstance(cfg.get(k), dict):
+                bounds = cfg[k]
+                break
+        if bounds is None:
+            continue
+        for j, col in enumerate(ensemble.columns):
+            lohi = bounds.get(col)
+            if lohi is None:
+                continue
+            lo, hi = float(lohi[0]), float(lohi[1])
+            if not (hi > lo):
+                raise ValueError(
+                    f"Flow '{ensemble.names[i]}' declares PE bounds "
+                    f"{col}=[{lo}, {hi}]; the upper bound must exceed the lower."
+                )
+            box[i, j] = (lo, hi)
+    return jnp.asarray(box)
+
+
 def compute_support_boxes(
     ensemble: FlowEnsemble,
     key=None,
@@ -546,8 +591,17 @@ def compute_support_boxes(
     leaves the estimator unbiased; ``margin`` trades a little efficiency for
     tail coverage.
 
+    Boxes estimated from finite samples do NOT cover a spline flow's whole
+    (unbounded) support, so on their own they truncate the event integral by
+    a hyperparameter-dependent amount — issue #260.  The likelihood therefore
+    uses these windows as ONE component of a mixture proposal whose second
+    component covers the full population support; see
+    :func:`darksirens.likelihood.flow_events.build_flow_loglike`.
+
     Returns a dict of (n_flows, 2) arrays: ``m1det``, ``q``, ``dL``,
-    ``chieff``.
+    ``chieff``, ``mc_det``, plus the ``chi_ab`` / ``chi_resid`` band and the
+    ``pe_box`` (n_flows, data_dim, 2) PE-prior support from
+    :func:`pe_support_boxes`.
     """
     if ensemble.columns != SPECTRAL_COLUMNS:
         raise NotImplementedError(
@@ -555,6 +609,22 @@ def compute_support_boxes(
         )
     key = jax.random.key(0) if key is None else key
     s = np.asarray(ensemble_sample(ensemble, key, n))  # (n_flows, n, 4)
+    boxes = support_boxes_from_samples(s, margin=margin)
+    boxes["pe_box"] = pe_support_boxes(ensemble)
+    return boxes
+
+
+def support_boxes_from_samples(samples, margin: float = 0.25) -> dict:
+    """The window recipe of :func:`compute_support_boxes`, on raw samples.
+
+    ``samples`` is ``(n_events, n, 4)`` in the spectral column order.  Split
+    out so the windows can be built for anything that can be sampled — an
+    analytic stand-in density in a convergence study, a resampled posterior —
+    without a flowjax ``FlowEnsemble``.  Does NOT include ``pe_box``.
+    """
+    s = np.asarray(samples)
+    if s.ndim != 3 or s.shape[-1] != 4:
+        raise ValueError(f"samples must be (n_events, n, 4); got {s.shape}.")
     m1det, m2det, dL, chieff = s[..., 0], s[..., 1], s[..., 2], s[..., 3]
     q = m2det / m1det
     # Detector-frame chirp mass: well-measured events have razor-thin
