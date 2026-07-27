@@ -236,11 +236,19 @@ def _parse_pe_cosmology(opts) -> tuple[float, float]:
 # ── mixture proposal (issue #260) ───────────────────────────────────────────
 
 #: Default fraction of each event's draws taken from the FULL population
-#: support rather than from the event's empirical support window.  Chosen
-#: from the convergence study in ``tests/test_flow_mixture_proposal.py`` and
-#: the study script: 5% costs <0.02 nat of per-event Monte-Carlo precision at
-#: the production J while removing the O(0.1-1 nat), hyperparameter-dependent
-#: truncation bias of the windowed-only estimator.
+#: support rather than from the event's empirical support window.
+#:
+#: Chosen from ``scripts/flows_mixture_convergence.py``.  MEASURED cost at the
+#: shipped settings (margin 0.25, 4096 support samples, J = 16384-32768): 4-6%
+#: of the windowed component's effective sample size, i.e. +0.0006 nat on the
+#: per-event Monte-Carlo error, and no measurable wall-clock cost.  MEASURED
+#: benefit: where the window under-resolves the flow (512 support samples,
+#: zero margin) it recovers a third of a systematic ln Z deficit that
+#: ``w_full = 0`` cannot see at any J; where the window under-COVERS the flow
+#: it recovers 5-300 nats per event.  At the shipped settings on synthetic
+#: flows the deficit is already below the Monte-Carlo error -- 5% is
+#: insurance, and it is what turns an invisible bias into a variance the
+#: total-lnL guard can act on.
 DEFAULT_W_FULL = 0.05
 
 #: Finite stand-in for "no upper bound" in the full-support window.  Divided

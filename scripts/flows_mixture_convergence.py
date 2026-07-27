@@ -34,6 +34,29 @@ Two synthetic event families, both with a computable truth:
 Usage:
     python scripts/flows_mixture_convergence.py --outdir /tmp/mix260
     python scripts/flows_mixture_convergence.py --family heavytail --nu 3
+
+Result (2 events per family, J = 32768, reference at N = 2e6, CPU, 2026-07-27).
+Per-event ln Z minus the reference, summed over the two events:
+
+    family     theta    n_supp  margin   w=0     w=0.02   w=0.05   w=0.2   MC sig
+    spline     fid        4096    0.25   +0.040  +0.042   +0.047   +0.045   0.031
+    spline     tail       4096    0.25   +0.049  +0.048   +0.057   +0.079   0.037
+    heavytail  fid         512    0.00   -0.076  -0.070   -0.059   -0.026   0.023
+    heavytail  fid        4096    0.00   -0.050  -0.042   -0.034   -0.013   0.022
+    heavytail  fid       32768    0.00   -0.043  -0.035   -0.029   -0.005   0.023
+    heavytail  tail        512    0.00   -0.056  -0.057   -0.051   -0.040   0.030
+    heavytail  tail       4096    0.00   -0.030  -0.031   -0.028   -0.016   0.026
+
+At the SHIPPED window settings (margin 0.25) every estimator sits within
+1-2 sigma of the reference: the truncation deficit is real but below the
+Monte-Carlo error, and raising w_full does not move the answer.  Where the
+window under-resolves the flow (zero margin) the windowed-only estimator is
+systematically LOW at every support-sample count -- it does not converge away
+with more support samples, which is the signature of a truncation bias rather
+than a box-estimation error -- and w_full removes it monotonically.  The
+severe case (a window that under-COVERS the flow: -5 to -300 nats per event,
+rescued to <0.2 nats by w_full = 0.3) is in
+``tests/test_flow_mixture_proposal.py``.
 """
 
 from __future__ import annotations
