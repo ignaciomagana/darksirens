@@ -274,6 +274,26 @@ def test_dynesty_interrupted_run_resumes_to_completion(tmp_path):
     assert resumed_calls["n"] < reference_calls["n"]
 
 
+def test_resumed_dynesty_reports_the_actual_nlive(tmp_path):
+    """P2-19: on resume the checkpoint's live-point count wins over --nlive
+    (warned about), so the results must record the ACTUAL value the sampler
+    ran with, with the request kept beside it for provenance."""
+    run_dir = tmp_path / "run_nlive"
+    run_dir.mkdir()
+
+    dying, _ = _loglike_that_dies_after(400)
+    with pytest.raises(_SimulatedKill):
+        _run_dynesty(tmp_path, run_dir, dying)  # nlive=40 checkpoints
+
+    # Requeue asks for a DIFFERENT nlive; the checkpoint's 40 wins.
+    resumed = _run_dynesty(
+        tmp_path, run_dir, _loglike, resume=str(run_dir), nlive=64
+    )
+    assert resumed["nlive_actual"] == 40
+    # results.hdf5's actual-vs-requested attrs are pinned in
+    # tests/test_results_saving.py::test_nlive_actual_wins_over_the_request.
+
+
 def test_dynesty_resume_of_a_finished_run_is_idempotent(tmp_path):
     """Requeueing a job whose run already converged must not redo the run."""
     run_dir = tmp_path / "run"
@@ -369,6 +389,33 @@ def test_tinyns_checkpoints_without_an_explicit_interval_and_resumes(tmp_path):
     # It carried on from the checkpoint's 25 iterations rather than restarting.
     niter = resumed.get("tinyns_runtime_diagnostics", {}).get("niter")
     assert niter is None or niter > 25
+
+
+def test_tinyns_run_and_resample_keys_are_independent_streams(tmp_path):
+    """P2-20: the run key and the posterior-resample key must be distinct
+    split outputs of the seed key.  The old flow handed PRNGKey(seed) itself
+    to sampler.run and later split that SAME key for resampling — split() is
+    pure, so the resample stream overlapped whatever subkeys the sampler
+    derived internally.  Determinism contract: same seed => identical
+    samples; different seed => different resample."""
+    pytest.importorskip("tinyns")
+    import inspect
+
+    from darksirens.inference import sampling as sampling_mod
+
+    src = inspect.getsource(sampling_mod.run_sampler)
+    assert "run_key, resample_key = jax.random.split" in src, (
+        "run/resample keys must be split from the seed BEFORE the run"
+    )
+    assert "sampler.run(\n                run_key," in src
+
+    d1 = tmp_path / "a"; d1.mkdir()
+    d2 = tmp_path / "b"; d2.mkdir()
+    r1 = run_sampler("tinyns", _loglike, _ptform, LABELS, LOWER, UPPER,
+                     _tinyns_opts(tmp_path, d1))
+    r2 = run_sampler("tinyns", _loglike, _ptform, LABELS, LOWER, UPPER,
+                     _tinyns_opts(tmp_path, d2))
+    np.testing.assert_array_equal(r1["samples"], r2["samples"])
 
 
 # ---------------------------------------------------------------------------

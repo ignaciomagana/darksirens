@@ -374,7 +374,18 @@ def run_sampler(method, likelihood, prior_transform, labels,
             **tinyns_sampler_kwargs(config),
         )
 
-        key = jax.random.PRNGKey(config.seed)
+        # SPLIT the seed key into independent run/resampling streams up
+        # front.  The old flow handed `key` itself to sampler.run and later
+        # split the SAME key for posterior resampling: split() is a pure
+        # function, so whatever subkeys the sampler derived internally from
+        # `key` overlapped the resampling stream (reused randomness between
+        # the nested run and its equal-weight resample).  Deriving both from
+        # the seed BEFORE the run keeps the resample key identical for a
+        # fresh and a resumed run of the same configuration -- the
+        # interrupted-vs-uninterrupted bit-reproducibility contract -- and
+        # the resume fingerprint gate pins the seed, so an explicit resume
+        # cannot silently swap the lineage either.
+        run_key, resample_key = jax.random.split(jax.random.PRNGKey(config.seed))
         run_kwargs = tinyns_run_kwargs(config)
 
         # Checkpoint/resume policy: the shared --checkpoint_interval / --resume
@@ -419,13 +430,13 @@ def run_sampler(method, likelihood, prior_transform, labels,
                     flush=True,
                 )
             result = sampler.run(
-                key,
+                run_key,
                 **run_kwargs,
                 checkpoint_path=checkpoint_path,
             )
 
-        # Equal-weight posterior samples (tinyns mirrors dynesty's resampler).
-        key, resample_key = jax.random.split(key)
+        # Equal-weight posterior samples (tinyns mirrors dynesty's resampler),
+        # from the dedicated resample stream split above.
         samples = np.asarray(result.resample_equal(resample_key))
 
         out = {
@@ -907,6 +918,10 @@ def run_sampler(method, likelihood, prior_transform, labels,
             "logZ": logZ,
             "logZerr": logZerr,
             "dead_points": dead_points,
+            # The live-point count the sampler ACTUALLY ran with: a resumed
+            # run keeps the checkpoint's nlive over --nlive (warned above), so
+            # results.hdf5 must not record the request as if it were the state.
+            "nlive_actual": int(getattr(sampler, "nlive", opts.nlive)),
         }
 
     else:

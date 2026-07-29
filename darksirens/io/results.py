@@ -284,7 +284,13 @@ def save_results_hdf5(
             f.attrs["counterpart_dz"] = float(opts.counterpart_dz)
             f.attrs["counterpart_nside"] = int(opts.counterpart_nside)
             f.attrs["bright_siren_sky_marginalized"] = bool(opts.bright_siren_sky_marginalized)
-        f.attrs["nlive"]           = int(opts.nlive)
+        # ACTUAL live-point count first: a resumed dynesty run keeps the
+        # checkpoint's nlive regardless of what --nlive asked for, and every
+        # downstream diagnostic (ESS estimates, convergence heuristics) needs
+        # the value the sampler really ran with.  The request is kept beside
+        # it so a mismatch stays visible in provenance.
+        f.attrs["nlive"] = int(results.get("nlive_actual") or opts.nlive)
+        f.attrs["nlive_requested"] = int(opts.nlive)
         f.attrs["dlogz"]           = float(opts.dlogz)
         f.attrs["tinyns_sample"]   = str(getattr(opts, "tinyns_sample", ""))
         f.attrs["tinyns_kernel"]   = str(getattr(opts, "tinyns_kernel", ""))
