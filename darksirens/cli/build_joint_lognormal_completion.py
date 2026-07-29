@@ -111,8 +111,14 @@ def build_joint_completion(
     gp3d_pix_chunk: int = 512,
     lss_corr_length_ang=None,
     realization_set_id=None,
+    allow_unconverged: bool = False,
 ):
     """Jointly infer ONE LSS field from K catalogs and write K matched Q files.
+
+    Fail-closed contract: an unconverged shared solve, or non-finite logQ
+    output, aborts BEFORE any file is written (all K tables are computed
+    first, then saved) unless ``allow_unconverged`` explicitly accepts and
+    stamps the degraded artifact.
 
     Returns a list of per-file dicts (ordered as ``catalog_paths``) carrying the
     written ``out_path``, the shared ``realization_set_id``, the per-file
@@ -223,6 +229,15 @@ def build_joint_completion(
     Phi_stack = np.vstack(phi_blocks)
 
     mp = poisson_lognormal_gp3d_map(N_obs, base, Phi_stack, bias=1.0)
+    if not bool(mp["diagnostics"]["converged"]) and not allow_unconverged:
+        raise ValueError(
+            "joint gp3d solve did not converge (grad_inf="
+            f"{mp['diagnostics']['grad_inf']:.2e} after "
+            f"{mp['diagnostics']['n_iter']} iterations); refusing to write "
+            "any Q file — an unconverged completion silently under-relaxes "
+            "logQ toward 0 (Q -> 1) and weakens the LSS correction. Pass "
+            "--allow-unconverged only for a stamped research ablation."
+        )
 
     # ONE shared Laplace ensemble in the whitened latents: xi_m matched across
     # all K files by construction.
@@ -235,7 +250,9 @@ def build_joint_completion(
             np.ascontiguousarray(xi_members).tobytes()).hexdigest()
 
     sig2 = np.asarray(mp["sigma2_vox"], dtype=float)
-    results = []
+    # Compute ALL K tables before saving ANY of them: a failure mid-set must
+    # not leave a partial (and therefore unmatched) family of Q files.
+    pending = []
     for k in range(K):
         a, survey_k, b_k = assemblies[k], surveys[k], float(biases[k])
 
@@ -249,7 +266,7 @@ def build_joint_completion(
             n_hat_out=a.n_hat_all, z_out=zgrid_np, bias=b_k,
             pix_chunk=int(gp3d_pix_chunk), L=L_shared, H_chol=mp["H_chol"],
         ), dtype=float)
-        logq_map = np.where(np.isfinite(logq_map), logq_map, 0.0)
+        n_bad = int(np.sum(~np.isfinite(logq_map)))
 
         logq_members = None
         if make_members:
@@ -258,7 +275,20 @@ def build_joint_completion(
                 n_hat_out=a.n_hat_all, z_out=zgrid_np, bias=b_k,
                 pix_chunk=int(gp3d_pix_chunk), L=L_shared,
             ), dtype=float)
-            logq_members = np.where(np.isfinite(logq_members), logq_members, 0.0)
+            n_bad += int(np.sum(~np.isfinite(logq_members)))
+
+        if n_bad and not allow_unconverged:
+            raise ValueError(
+                f"{n_bad} non-finite logQ entries for '{out_paths[k]}'; "
+                "refusing to write any Q file — a substituted Q=1 cell is "
+                "indistinguishable from real homogeneity downstream. Pass "
+                "--allow-unconverged only for a stamped research ablation."
+            )
+        if n_bad:
+            logq_map = np.where(np.isfinite(logq_map), logq_map, 0.0)
+            if logq_members is not None:
+                logq_members = np.where(
+                    np.isfinite(logq_members), logq_members, 0.0)
 
         diag = _gp3d_base_diagnostics(
             cosmo, survey_k, nside=a.nside, n_pix=a.n_pix, n_occ=a.n_occ,
@@ -270,6 +300,11 @@ def build_joint_completion(
             "n_iter": int(mp["diagnostics"]["n_iter"]),
             "converged": bool(mp["diagnostics"]["converged"]),
             "grad_inf": float(mp["diagnostics"]["grad_inf"]),
+            # New-style convergence stamp: records that the fail-closed gate
+            # ran, and whether the operator overrode it (see the loader's
+            # _warn_if_unconverged for how these are consumed).
+            "allow_unconverged": bool(allow_unconverged),
+            "n_nonfinite_substituted": int(n_bad),
         })
         diag.update(_joint_diag_keys(k, K, catalog_paths, biases, seed))
         if make_members:
@@ -278,13 +313,18 @@ def build_joint_completion(
             # the cross-file field-level member-order provenance hash.
             diag["joint_member_xi_sha256"] = member_sha
 
+        pending.append(dict(
+            out_path=out_paths[k], diagnostics=diag, logq_map=logq_map,
+            logq_members=logq_members, n_occupied=a.n_occ))
+
+    results = []
+    for entry in pending:
         save_lss_completion_hdf5(
-            out_paths[k], logq_map=logq_map, logq_members=logq_members,
-            zgrid=zgrid_np, indexing="global", metadata=diag,
+            entry["out_path"], logq_map=entry["logq_map"],
+            logq_members=entry["logq_members"],
+            zgrid=zgrid_np, indexing="global", metadata=entry["diagnostics"],
             realization_set_id=rid)
-        results.append(dict(
-            out_path=out_paths[k], realization_set_id=rid, diagnostics=diag,
-            logq_map=logq_map, logq_members=logq_members, n_occupied=a.n_occ))
+        results.append(dict(entry, realization_set_id=rid))
     return results
 
 
@@ -322,6 +362,12 @@ def main(argv=None):
     p.add_argument("--lss-corr-length-ang", type=float, default=None,
                    help="Override the shared angular (chordal) correlation length; "
                         "default is the SurveyParams fiducial.")
+    p.add_argument("--allow-unconverged", action="store_true", default=False,
+                   help="Save the Q files even when the shared solve is "
+                        "unconverged or produced non-finite cells (substituted "
+                        "with Q=1). The override is stamped in the files' "
+                        "diagnostics and warned about at load time; research "
+                        "ablations only, never production.")
     p.add_argument("--realization-set-id", type=str, default=None,
                    help="Shared realization_set_id stamped on all K files "
                         "(default: a fresh uuid4 shared across the K outputs).")
@@ -352,14 +398,18 @@ def main(argv=None):
     _section(f"Building  [gp3d, {len(opts.catalogs)} catalogs]")
     for c, o in zip(opts.catalogs, opts.outs):
         _row(c, f"→  {o}", width=0)
-    results = build_joint_completion(
-        opts.catalogs, opts.outs,
-        n_members=opts.n_members, seed=opts.seed,
-        biases=opts.bias, log10n0s=opts.log10n0, deltas=opts.delta,
-        gp3d_nz_solve=opts.gp3d_nz_solve, gp3d_pix_chunk=opts.gp3d_pix_chunk,
-        lss_corr_length_ang=opts.lss_corr_length_ang,
-        realization_set_id=opts.realization_set_id,
-    )
+    try:
+        results = build_joint_completion(
+            opts.catalogs, opts.outs,
+            n_members=opts.n_members, seed=opts.seed,
+            biases=opts.bias, log10n0s=opts.log10n0, deltas=opts.delta,
+            gp3d_nz_solve=opts.gp3d_nz_solve, gp3d_pix_chunk=opts.gp3d_pix_chunk,
+            lss_corr_length_ang=opts.lss_corr_length_ang,
+            realization_set_id=opts.realization_set_id,
+            allow_unconverged=opts.allow_unconverged,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"FATAL: {exc}") from None
     rid = results[0]["realization_set_id"] if results else None
     d0 = results[0]["diagnostics"] if results else {}
     _ok(f"shared realization_set_id={rid}")

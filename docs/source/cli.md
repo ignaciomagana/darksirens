@@ -114,11 +114,18 @@ Options:
   is absorbed into `Q` as spurious redshift structure that biases `H0`. The
   conditioning values are stamped into the output and enforced at run time — see
   `--lss_completion` under [inference](#catalog-options).
-- `--indexing {compact,global}`: how inference indexes the `Q` rows. A full
-  survey catalog is global-HEALPix-pixel indexed (`global`, the default); `gp3d`
-  always writes `global`.
+- `--indexing {compact,global}`: how inference indexes the `Q` rows. Both build
+  modes emit a full global-HEALPix-pixel table, so `global` is the only stamp
+  the builder writes; a requested `compact` is forced back to `global` with a
+  warning (a mis-stamp would misindex `Q` rows at inference).
 - `--seed`, `--prior-strength`, `--maxiter`: ensemble seed (default `1234`),
-  prior strength (`1.0`), and solver iteration cap (`300`).
+  prior strength (`1.0`), and solver iteration cap (default `200000`; converged
+  solves self-terminate long before this, and an unconverged build **fails**
+  instead of writing a silently under-relaxed table).
+- `--allow-unconverged`: save the completion even when solves are unconverged
+  or produced non-finite cells (substituted with `Q = 1`). The override is
+  stamped in the file's diagnostics and warned about at load time — research
+  ablations only, never production.
 - `--gp3d-nz-solve`, `--gp3d-pix-chunk`, `--lss-corr-length-ang`: `gp3d`-only
   solve-grid size (`32`), pixel chunk for the all-pixel evaluation (`512`), and
   an override of the angular correlation length (default: the `SurveyParams`

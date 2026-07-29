@@ -56,7 +56,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
+import warnings
 
 import numpy as np
 
@@ -125,9 +127,12 @@ def poisson_lognormal_map(
     bias: float = 1.0,
     prior_strength: float = 1.0,
     # 300 stopped every DESI-scale n_grid=1000 solve at the iteration cap
-    # (status=1, |grad|_inf ~ 21), under-relaxing logQ ~5x toward Q = 1; a
-    # converged solve stops early, so the high cap is free on small problems.
-    maxiter: int = 10000,
+    # (status=1, |grad|_inf ~ 21), under-relaxing logQ ~5x toward Q = 1, and
+    # 10000 was still capped on near-empty pixels (measured: the 10000-iterate
+    # of a 4-galaxy pixel reads logQ 0.556 where the fixed point is 0.924).
+    # L-BFGS-B SELF-TERMINATES once converged, so the high cap only costs on
+    # solves that genuinely need it.
+    maxiter: int = 200000,
     logq_clip: float = 7.0,
 ) -> dict:
     """Per-pixel MAP of the 1-D Poisson-lognormal completion field.
@@ -179,6 +184,7 @@ def poisson_lognormal_map(
     s_map = np.zeros((n_rows, n_grid), dtype=float)
     lam_map = np.zeros((n_rows, n_grid), dtype=float)
     n_converged = 0
+    last_failure = None
 
     for r in range(n_rows):
         nobs = N_obs[r]
@@ -203,11 +209,22 @@ def poisson_lognormal_map(
 
         res = optimize.minimize(
             _neg_log_post, np.zeros(n_grid), jac=_grad, method="L-BFGS-B",
-            options={"maxiter": int(maxiter)},
+            # maxfun: scipy's DEFAULT (15000) silently capped every large
+            # --maxiter run.  L-BFGS-B stops with status=1 ("TOTAL NO. of f
+            # AND g EVALUATIONS EXCEEDS LIMIT") once function EVALUATIONS --
+            # not iterations -- reach 15000, i.e. around iteration ~12k at
+            # DESI scale, no matter how high maxiter was raised.  That is why
+            # raising maxiter beyond ~15k changed neither the result nor the
+            # wall time while res.success stayed False.  maxls (default 20)
+            # bounds evaluations per iteration, so 21*maxiter can never bind
+            # before maxiter itself does.
+            options={"maxiter": int(maxiter), "maxfun": 21 * int(maxiter)},
         )
         s_map[r] = res.x
         lam_map[r] = np.where(mask, np.exp(log_rate + (b * res.x - shift)), 0.0)
         n_converged += int(bool(res.success))
+        if not res.success:
+            last_failure = str(getattr(res, "message", ""))
 
     # Deterministic table = Laplace posterior-mean E[Q], using the SAME
     # FFT-diagonal Hessian approximation as `laplace_lognormal_members`, so the
@@ -239,6 +256,11 @@ def poisson_lognormal_map(
             "bias": b,
             "prior_strength": ps,
             "n_converged": int(n_converged),
+            "converged": bool(n_converged == n_rows),
+            # The message of the LAST unconverged solve: distinguishes an
+            # iteration-cap stop (raise --maxiter) from a line-search failure.
+            "last_failure_message": last_failure,
+            "maxiter": int(maxiter),
             "logq_clip": float(logq_clip),
         },
     }
@@ -768,6 +790,13 @@ def save_lss_completion_hdf5(
     the SAME id across several files.  When members are present the group also
     carries a ``member_content_sha256`` (over the exact member bytes) and an
     integer ``n_members`` for provenance.
+
+    Fail-closed contract: a table with non-finite entries is never written (a
+    NaN cell would silently poison the missing-density term of every event in
+    that pixel), and the file appears at ``path`` ATOMICALLY -- content is
+    written to a sibling temp file and renamed only after a successful flush,
+    so a died build can never leave a truncated artifact that a later
+    inference run trusts.
     """
     import h5py
 
@@ -775,32 +804,52 @@ def save_lss_completion_hdf5(
         raise ValueError("save_lss_completion_hdf5 needs logq_map and/or logq_members.")
     if indexing not in ("compact", "global"):
         raise ValueError(f"indexing must be 'compact' or 'global', got {indexing!r}.")
+    for name, arr in (("logq_map", logq_map), ("logq_members", logq_members)):
+        if arr is not None:
+            arr = np.asarray(arr, dtype=float)
+            n_bad = int(np.sum(~np.isfinite(arr)))
+            if n_bad:
+                raise ValueError(
+                    f"refusing to save {name} with {n_bad} non-finite entries: "
+                    "a NaN/inf logQ cell poisons the missing-density term for "
+                    "every event in its pixel. Fix the build (raise --maxiter, "
+                    "check the catalog) instead of persisting the artifact."
+                )
     if completion_kind is None:
         completion_kind = "laplace_members" if logq_members is not None else "map"
     if realization_set_id is None:
         realization_set_id = uuid.uuid4().hex
 
-    with h5py.File(path, "w") as f:
-        grp = f.create_group("lss_completion")
-        if logq_map is not None:
-            grp.create_dataset("logq_map", data=np.asarray(logq_map, dtype=float))
-        if logq_members is not None:
-            members_arr = np.asarray(logq_members, dtype=float)
-            grp.create_dataset("logq_members", data=members_arr)
-        if zgrid is not None:
-            grp.create_dataset("zgrid", data=np.asarray(zgrid, dtype=float))
-        grp.attrs["indexing"] = indexing
-        grp.attrs["model"] = "poisson_lognormal"
-        grp.attrs["completion_kind"] = completion_kind
-        grp.attrs["created_by"] = "darksirens.redshift.lognormal_completion"
-        grp.attrs["realization_set_id"] = realization_set_id
-        if logq_members is not None:
-            grp.attrs["member_content_sha256"] = hashlib.sha256(
-                np.ascontiguousarray(members_arr).tobytes()
-            ).hexdigest()
-            grp.attrs["n_members"] = int(members_arr.shape[0])
-        if metadata:
-            grp.attrs["diagnostics"] = json.dumps(metadata, default=str)
+    tmp_path = f"{path}.tmp-{os.getpid()}"
+    try:
+        with h5py.File(tmp_path, "w") as f:
+            grp = f.create_group("lss_completion")
+            if logq_map is not None:
+                grp.create_dataset("logq_map", data=np.asarray(logq_map, dtype=float))
+            if logq_members is not None:
+                members_arr = np.asarray(logq_members, dtype=float)
+                grp.create_dataset("logq_members", data=members_arr)
+            if zgrid is not None:
+                grp.create_dataset("zgrid", data=np.asarray(zgrid, dtype=float))
+            grp.attrs["indexing"] = indexing
+            grp.attrs["model"] = "poisson_lognormal"
+            grp.attrs["completion_kind"] = completion_kind
+            grp.attrs["created_by"] = "darksirens.redshift.lognormal_completion"
+            grp.attrs["realization_set_id"] = realization_set_id
+            if logq_members is not None:
+                grp.attrs["member_content_sha256"] = hashlib.sha256(
+                    np.ascontiguousarray(members_arr).tobytes()
+                ).hexdigest()
+                grp.attrs["n_members"] = int(members_arr.shape[0])
+            if metadata:
+                grp.attrs["diagnostics"] = json.dumps(metadata, default=str)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     return path
 
 
@@ -812,6 +861,16 @@ def load_lss_completion_hdf5(path: str) -> dict:
     ``diagnostics``.  The ensemble-provenance attrs ``realization_set_id`` /
     ``member_content_sha256`` / ``n_members`` are returned as ``None`` when
     absent (legacy files written before provenance stamping).
+
+    Validation: non-finite table content is rejected outright (one NaN cell
+    poisons every event in its pixel).  Convergence diagnostics are surfaced
+    as loud warnings rather than errors: a NEW-STYLE file (one carrying the
+    builder's ``allow_unconverged`` stamp) can only be unconverged through
+    that explicit, recorded override, and a LEGACY file's ``n_converged``
+    counter is unreliable -- the builder never set L-BFGS-B's ``maxfun``, so
+    scipy's default 15000-evaluation cap stopped large-``maxiter`` solves
+    with ``success=False`` near their fixed point, reading 0 converged for
+    tables that were in fact essentially converged.
     """
     import h5py
 
@@ -841,4 +900,60 @@ def load_lss_completion_hdf5(path: str) -> dict:
                 out["diagnostics"] = json.loads(raw)
             except Exception:
                 out["diagnostics"] = raw
+
+    for name in ("logq_map", "logq_members"):
+        arr = out[name]
+        if arr is not None and not np.all(np.isfinite(arr)):
+            n_bad = int(np.sum(~np.isfinite(np.asarray(arr))))
+            raise ValueError(
+                f"LSS completion '{path}' has {n_bad} non-finite {name} "
+                "entries; a NaN/inf logQ cell poisons the missing-density "
+                "term for every event in its pixel. Rebuild the completion."
+            )
+
+    _warn_if_unconverged(path, out.get("diagnostics"))
     return out
+
+
+def _warn_if_unconverged(path: str, diag) -> None:
+    """Surface builder convergence diagnostics at load time, loudly.
+
+    New-style files (builder stamped ``allow_unconverged``) can only be
+    unconverged through that explicit override -- warn that a research
+    ablation artifact is entering inference.  Legacy files' counters are
+    unreliable (see load_lss_completion_hdf5's docstring): warn without
+    rejecting, and say why the counter cannot be trusted, so a verified-good
+    production table keeps loading while the operator still sees the flag.
+    """
+    if not isinstance(diag, dict):
+        return
+    converged = diag.get("converged")
+    n_conv, n_occ = diag.get("n_converged"), diag.get("n_occupied")
+    looks_unconverged = (converged is False) or (
+        converged is None
+        and n_conv is not None and n_occ and int(n_conv) < int(n_occ)
+    )
+    if not looks_unconverged:
+        return
+    if "allow_unconverged" in diag:
+        if diag.get("allow_unconverged"):
+            warnings.warn(
+                f"LSS completion '{path}' was built UNCONVERGED under the "
+                "explicit --allow-unconverged override (research ablation "
+                "artifact). Do not use it for a production result.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        return
+    warnings.warn(
+        f"LSS completion '{path}' reports unconverged diagnostics "
+        f"(converged={converged!r}, n_converged={n_conv!r}/{n_occ!r}). This "
+        "file predates honest convergence accounting: its builder never set "
+        "L-BFGS-B's maxfun, so scipy's 15000-evaluation default stopped "
+        "large-maxiter solves with success=False near their fixed point and "
+        "the counter reads unconverged for tables that may be fine. Validate "
+        "the table (darksirens_diagnose_lognormal_completion) or rebuild it "
+        "with the current builder.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
