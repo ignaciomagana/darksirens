@@ -98,6 +98,7 @@ def _build_completion_radial(
     seed: int = 1234,
     prior_strength: float = 1.0,
     maxiter: int = 200000,
+    workers: int = 1,
     log10n0=None,
     delta=None,
 ):
@@ -180,6 +181,7 @@ def _build_completion_radial(
     mp = poisson_lognormal_map(
         N_obs_u, C_u, dN_exp_count_u, pk,
         bias=bias, prior_strength=prior_strength, maxiter=maxiter,
+        workers=workers,
     )
     # Map logQ back from uniform-χ to zgrid and scatter occupied rows into the
     # full (n_pix, n_grid) table (empties stay logQ = 0).
@@ -486,6 +488,7 @@ def build_completion(
     seed: int = 1234,
     prior_strength: float = 1.0,
     maxiter: int = 200000,
+    workers: int = 1,
     gp3d_nz_solve: int = 32,
     gp3d_pix_chunk: int = 512,
     lss_corr_length_ang=None,
@@ -502,7 +505,7 @@ def build_completion(
     if mode == "radial":
         return _build_completion_radial(
             catalog_path, n_members=n_members, seed=seed,
-            prior_strength=prior_strength, maxiter=maxiter,
+            prior_strength=prior_strength, maxiter=maxiter, workers=workers,
             log10n0=log10n0, delta=delta,
         )
     if mode == "gp3d":
@@ -537,6 +540,14 @@ def main(argv=None):
                          "200000; converged solves self-terminate long before "
                          "this). If the cap binds, the build fails rather than "
                          "silently under-relaxing logQ toward 0 (Q -> 1)."))
+    p.add_argument("--workers", type=int, default=1,
+                   help=("Parallel processes for the per-pixel MAP solves "
+                         "(1 = serial). The solves are independent, so this is "
+                         "exact and only changes wall time; at nside=128 (~69k "
+                         "occupied pixels) serial is ~42 h and 16-way is ~3 h. "
+                         "--mode radial ONLY; ignored by --mode gp3d, which "
+                         "solves one coupled field and chunks via "
+                         "--gp3d-pix-chunk instead."))
     p.add_argument("--mode", choices=["radial", "gp3d"], default="radial",
                    help="Completion model: 'radial' (default; independent per-pixel "
                         "1-D Poisson-lognormal) or 'gp3d' (3-D angular-coupling "
@@ -592,6 +603,7 @@ def main(argv=None):
     logq_map, logq_members, diagnostics = build_completion(
         opts.catalog, mode=opts.mode, n_members=opts.n_members, seed=opts.seed,
         prior_strength=opts.prior_strength, maxiter=opts.maxiter,
+        workers=opts.workers,
         gp3d_nz_solve=opts.gp3d_nz_solve, gp3d_pix_chunk=opts.gp3d_pix_chunk,
         lss_corr_length_ang=opts.lss_corr_length_ang,
         log10n0=opts.log10n0, delta=opts.delta,
