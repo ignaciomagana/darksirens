@@ -469,6 +469,25 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
             self.gamma_spec,
         ]
 
+    @property
+    def constraint_groups(self):
+        """Joint prior constraints for the constraint-preserving cube maps.
+
+        ``log_p_pop`` rejects lambda0 + lambda1 > 1 and m2_low > m1_low, but
+        rejection alone leaves 75% of the nominal unit cube with zero
+        likelihood: nested proposals waste 3 of 4 draws and the evidence is
+        shifted by log(1/4) relative to the normalized constrained prior.
+        Declaring the constraints here lets ``make_prior_transform`` map the
+        cube ONTO the constrained region (measure-preserving fold/sort), so
+        the sampled prior is the normalized uniform density on it; the
+        ``valid`` mask in ``log_p_pop`` remains as a backstop for samplers
+        that build their own prior (numpyro) and for overridden bounds.
+        """
+        return (
+            ("simplex", (r"$\lambda_0$", r"$\lambda_1$")),
+            ("ordered_le", (r"$m_{2,{\rm low}}$", r"$m_{1,{\rm low}}$")),
+        )
+
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
 

@@ -910,7 +910,81 @@ def build_parameter_space(
         mark_labels,
     )
 
-def make_prior_transform(lower, upper, prior_kinds=None):
+def resolve_joint_prior_constraints(
+    pop_model, labels, lower, upper, prior_kinds=None, *,
+    shared_beta=True, shared_spin=True, shared_gamma=True,
+):
+    """Index-resolved joint prior constraints for ``make_prior_transform``.
+
+    A population model may declare ``constraint_groups`` — joint conditions
+    its ``log_p_pop`` enforces by rejection (returning -inf), e.g. the
+    GWTC-5 fiducial model's ``lambda0 + lambda1 <= 1`` and
+    ``m2_low <= m1_low``.  Rejection alone leaves the invalid corner inside
+    the sampled prior: nested proposals waste those draws and the evidence
+    is shifted by the log prior fraction (log 1/4 for the two conditions
+    above).  This resolver turns the declarations into cube-space map specs
+    ``(kind, (i, j))`` over the FINAL sampled-label vector, applied by
+    ``make_prior_transform`` before the per-dimension maps.
+
+    A group is skipped (falling back to the rejection backstop, with a
+    warning) when any member label is not sampled, or when the members'
+    bounds/prior kinds break the map's measure-preservation requirements:
+    ``ordered_le`` needs identical uniform bounds on both members (sorting
+    then commutes with the shared monotone map), ``simplex`` needs exact
+    uniform [0, 1] bounds (the cube fold IS the parameter-space fold only
+    there).
+    """
+    from darksirens.gw.populations import get_model
+
+    try:
+        model = get_model(
+            pop_model, shared_beta=shared_beta, shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
+        )
+    except Exception:
+        return []
+    groups = getattr(model, "constraint_groups", None) or ()
+    if not groups:
+        return []
+
+    labels = [str(lab) for lab in labels]
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    resolved = []
+    for kind, group_labels in groups:
+        try:
+            idx = tuple(labels.index(str(lab)) for lab in group_labels)
+        except ValueError:
+            continue  # a member is fixed/absent; rejection handles the rest
+        uniform = prior_kinds is None or all(
+            prior_kinds[i][0] == "uniform" for i in idx
+        )
+        if kind == "ordered_le" and len(idx) == 2:
+            ok = uniform and (
+                lower[idx[0]] == lower[idx[1]] and upper[idx[0]] == upper[idx[1]]
+            )
+        elif kind == "simplex" and len(idx) == 2:
+            ok = uniform and all(
+                lower[i] == 0.0 and upper[i] == 1.0 for i in idx
+            )
+        else:
+            ok = False
+        if not ok:
+            warnings.warn(
+                f"joint prior constraint {kind}{tuple(group_labels)} cannot "
+                "be applied as a constraint-preserving cube map with these "
+                "bounds/prior kinds; falling back to rejection (the invalid "
+                "region keeps zero likelihood, proposals there are wasted, "
+                "and logZ carries the log prior-fraction offset).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+        resolved.append((str(kind), idx))
+    return resolved
+
+
+def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None):
     """Unit-cube -> parameter inverse-CDF transform, per-parameter prior-aware.
 
     ``prior_kinds`` is an optional list aligned to ``lower``/``upper`` of
@@ -922,16 +996,49 @@ def make_prior_transform(lower, upper, prior_kinds=None):
     every kind maps the cube to ``[low, high]`` and the measure matches the
     corresponding numpyro distribution.
 
+    ``joint_constraints`` (from :func:`resolve_joint_prior_constraints`) are
+    measure-preserving cube maps applied BEFORE the per-dimension transforms,
+    mapping the cube onto a model's jointly-constrained prior region instead
+    of leaving it to likelihood-side rejection:
+
+    * ``("ordered_le", (i, j))`` — sort, so parameter i <= parameter j.  Each
+      ordered pair has exactly two preimages, so a uniform cube maps to the
+      NORMALIZED uniform density on the ordered triangle.
+    * ``("simplex", (i, j))`` — the fold ``(u_i, u_j) -> (1-u_i, 1-u_j)``
+      when ``u_i + u_j > 1``; two preimages per point of the simplex, again
+      the normalized uniform density.
+
     Implementation note: dynesty wraps this with ``np.asarray(transform(
     jnp.asarray(u)))``, i.e. the transform always receives a JAX array, so
     ``jax.scipy.special`` is safe across all nested backends.
     """
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
+    joint_constraints = list(joint_constraints or [])
+
+    if joint_constraints:
+        import jax.numpy as _jnp
+
+        def _apply_joint(u):
+            u = _jnp.asarray(u)
+            for kind, idx in joint_constraints:
+                i, j = idx
+                ui, uj = u[..., i], u[..., j]
+                if kind == "ordered_le":
+                    new_i, new_j = _jnp.minimum(ui, uj), _jnp.maximum(ui, uj)
+                else:  # simplex
+                    over = (ui + uj) > 1.0
+                    new_i = _jnp.where(over, 1.0 - ui, ui)
+                    new_j = _jnp.where(over, 1.0 - uj, uj)
+                u = u.at[..., i].set(new_i).at[..., j].set(new_j)
+            return u
+    else:
+        def _apply_joint(u):
+            return u
 
     if prior_kinds is None or all(k[0] == "uniform" for k in prior_kinds):
         def prior_transform(u):
-            return u * (upper - lower) + lower
+            return _apply_joint(u) * (upper - lower) + lower
         return prior_transform
 
     import jax.numpy as jnp
@@ -959,7 +1066,7 @@ def make_prior_transform(lower, upper, prior_kinds=None):
         return mu + sg * x
 
     def prior_transform(u):
-        u = jnp.asarray(u)
+        u = _apply_joint(jnp.asarray(u))
         uniform = u * (hi_j - lo_j) + lo_j
         # normal: truncated to [lo, hi]
         normal = _trunc_normal_ppf(u, lo_j, hi_j, loc, scale)
