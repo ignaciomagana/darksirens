@@ -2622,9 +2622,24 @@ def build_parser():
     )
     model.add_argument(
         "--wl_selection",
-        choices=["standard", "wl_lognormal"],
-        default="standard",
-        help="Singleton selection treatment. standard preserves legacy selection; wl_lognormal uses lognormal/Hermite WL marginalization for singleton injections when wl_backend=lognormal (wl_a=0 reduces to standard).",
+        choices=["auto", "standard", "wl_lognormal"],
+        default="auto",
+        help="Singleton selection treatment. 'auto' (default) matches the "
+             "event-side --wl_backend (lognormal -> wl_lognormal, disabled -> "
+             "standard) so the hierarchical numerator and denominator share "
+             "one observation model; an explicit mismatched pair is fatal "
+             "unless --allow_mismatched_wl_selection. wl_lognormal uses "
+             "lognormal/Hermite WL marginalization for singleton injections "
+             "(wl_a=0 reduces to standard).",
+    )
+    model.add_argument(
+        "--allow_mismatched_wl_selection",
+        action="store_true",
+        default=False,
+        help="UNSAFE ablation switch: accept an event/selection WL pairing "
+             "that normalizes the hierarchy under a different observation "
+             "model than the per-event numerator (biases the posterior). The "
+             "override is recorded in settings.json.",
     )
     model.add_argument("--lensing_wl_a", type=float, default=4e-3)
     model.add_argument("--lensing_wl_b", type=float, default=1.5)
@@ -2942,9 +2957,86 @@ def _resolve_lensing_run_config(opts):
             "--wl_backend tabulated requires --lensing_wl_table_path"
         )
 
+    _resolve_wl_selection(opts)
     _validate_partition_mode_against_cluster_mode(opts)
 
     opts.universe_model = _derive_universe_model(opts.wl_backend)
+
+
+def _resolve_wl_selection(opts):
+    """Resolve ``--wl_selection auto`` and reject event/selection mismatches.
+
+    The per-event (numerator) WL treatment comes from ``--wl_backend``; the
+    hierarchical selection normalization (denominator) from
+    ``--wl_selection``.  Computing the two under DIFFERENT observation models
+    normalizes the hierarchy against a likelihood it is not using — the old
+    default did exactly that (lognormal events over standard selection) —
+    so ``auto`` picks the matched pair and an explicit mismatch is fatal
+    unless ``--allow_mismatched_wl_selection`` stamps a deliberate ablation.
+
+    ``--wl_backend tabulated`` has NO matched selection integral in this
+    stack: 'auto' refuses it outright, and running it mismatched requires
+    both explicit flags.  The one exact exception: ``lensing_wl_a == 0``
+    collapses the lognormal magnification kernel to a delta function, so
+    'standard' selection is then identical, not mismatched.
+    """
+    requested = str(opts.wl_selection)
+    # The pre-resolution request is provenance: settings.json serializes
+    # vars(opts), so both the ask and the answer are recorded.
+    opts.wl_selection_requested = requested
+    matched = {"lognormal": "wl_lognormal", "disabled": "standard"}
+
+    if requested == "auto":
+        resolved = matched.get(opts.wl_backend)
+        if resolved is None:
+            raise SystemExit(
+                "--wl_backend tabulated has no matched selection integral: "
+                "the event side would marginalize the tabulated p_WL(mu|z) "
+                "while selection stayed 'standard', normalizing the "
+                "hierarchy under a different observation model than the "
+                "numerator. Pass an explicit '--wl_selection standard "
+                "--allow_mismatched_wl_selection' only for a deliberately "
+                "mismatched ablation."
+            )
+        opts.wl_selection = resolved
+        return
+
+    mismatch = None
+    if requested == "wl_lognormal" and opts.wl_backend != "lognormal":
+        mismatch = (
+            f"--wl_selection wl_lognormal needs --wl_backend lognormal (got "
+            f"{opts.wl_backend!r}): selection would marginalize a WL kernel "
+            "the event side never applies."
+        )
+    elif requested == "standard" and opts.wl_backend == "lognormal" and (
+            float(opts.lensing_wl_a) != 0.0):
+        mismatch = (
+            "--wl_selection standard under --wl_backend lognormal (wl_a = "
+            f"{opts.lensing_wl_a}): events marginalize lognormal WL while "
+            "selection does not — the hierarchy is normalized under a "
+            "different observation model than the numerator."
+        )
+    elif requested == "standard" and opts.wl_backend == "tabulated":
+        mismatch = (
+            "--wl_selection standard under --wl_backend tabulated: events "
+            "marginalize the tabulated p_WL(mu|z) while selection does not."
+        )
+    if mismatch is None:
+        return
+    if getattr(opts, "allow_mismatched_wl_selection", False):
+        warnings.warn(
+            "MISMATCHED WL event/selection pairing accepted by "
+            "--allow_mismatched_wl_selection (ablation only, the posterior "
+            "is biased): " + mismatch,
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    raise SystemExit(
+        "FATAL: " + mismatch + " Use --wl_selection auto (the default), or "
+        "pass --allow_mismatched_wl_selection for a deliberately mismatched "
+        "ablation."
+    )
 
 
 def _print_run_configuration(opts):

@@ -1240,7 +1240,9 @@ class TestWeakLensingSingletonSelection:
             "--gwselection_path", "sel.h5",
             "--sampler", "tinyns",
         ])
-        assert opts.wl_selection == "standard"
+        # Parse-time default is 'auto'; _resolve_wl_selection later matches it
+        # to the event-side backend (see tests/test_wl_selection_matching.py).
+        assert opts.wl_selection == "auto"
 
         # main() is decomposed into phase functions; the wl_selection attr is
         # written by the save phase and the full opts still route through
