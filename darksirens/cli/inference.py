@@ -1972,6 +1972,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         opts.pop_model, labels, lower_bound, upper_bound, prior_kinds,
         shared_beta=opts.shared_beta, shared_spin=opts.shared_spin,
         shared_gamma=opts.shared_gamma,
+        sky_model=getattr(opts, "sky_model", None),
     )
     prior_transform = make_prior_transform(
         lower_bound, upper_bound, prior_kinds,
