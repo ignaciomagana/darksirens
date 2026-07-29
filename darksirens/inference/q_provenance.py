@@ -44,6 +44,29 @@ _Q_CONDITIONED = {
 #: Stamped but exempt — see the module docstring.
 _Q_EXEMPT = ("H0",)
 
+#: Parameters checked against the DECODER DEFAULT when neither sampled nor
+#: explicitly fixed.  ``b_miss`` is excluded: for a Q-active catalog the
+#: completion table REPLACES the local ``b_miss`` overdensity factor, so no
+#: inference-side b_miss value exists to disagree with the build bias.
+_DEFAULT_CHECKED = ("log10n0", "delta", "Om0", "w0", "wa")
+
+
+def _inference_default(param):
+    """The value the likelihood decoder uses for ``param`` when it is neither
+    sampled nor explicitly fixed — resolved from the SAME constants the
+    decoder reads (``darksirens.inference.parameters``), so this check and
+    the likelihood cannot drift apart."""
+    from darksirens.core.constants import (
+        OM0_FID,
+        SURVEY_PARAMS_FID_BY_NAME,
+        W0_FID,
+        WA_FID,
+    )
+
+    if param in ("Om0", "w0", "wa"):
+        return {"Om0": OM0_FID, "w0": W0_FID, "wa": WA_FID}[param]
+    return float(SURVEY_PARAMS_FID_BY_NAME[param])
+
 #: Fractional tolerance when comparing a fixed value against the build fiducial.
 _RTOL = 1e-6
 _ATOL = 1e-9
@@ -134,8 +157,11 @@ def check_lss_completion_provenance(
     ------
     ValueError
         If a conditioning parameter is sampled, or is fixed to a value that
-        differs from the build-time fiducial, or if the table predates the
-        fiducial stamping and so cannot be verified at all.
+        differs from the build-time fiducial, or is neither sampled nor
+        explicitly fixed while the decoder's package default differs from the
+        build-time fiducial (a custom-built table run against defaults), or
+        if the table predates the fiducial stamping and so cannot be verified
+        at all.
     """
     per_catalog = _normalise_fiducials(fiducials)
     if not any(f for f in per_catalog):
@@ -185,18 +211,35 @@ def check_lss_completion_provenance(
             if build_value is None:
                 continue
 
-            # Not sampled: held at a fixed value (explicit or fiducial default).
-            # Only an explicit override can disagree with the build value; an
-            # absent entry means the decoder uses the package fiducial, which is
-            # what the builder used too.
+            # Not sampled: held at a fixed value — explicit, or the decoder's
+            # package default when no entry names it.
+            explicit = False
             for label, value in fixed.items():
                 if _base_name(label) != param or _catalog_index(label) != owner:
                     continue
+                explicit = True
                 if abs(value - build_value) > (_ATOL + _RTOL * abs(build_value)):
                     problems.append(
                         f"  - {label}: fixed at {value:.6g}, but Q '{path}'{tag} "
                         f"was built at {param} = {build_value:.6g}"
                     )
+            if explicit or param not in _DEFAULT_CHECKED:
+                continue
+            # No explicit entry: the decoder falls back to the PACKAGE
+            # fiducial, which only equals the build value when the builder ran
+            # at defaults.  Assuming they matched (as this check used to) let
+            # a table built at a CALIBRATED n0 (e.g. --log10n0 -1.9457)
+            # combine with fix_survey=true + no fixed map: inference then ran
+            # at log10n0 = -2 against a Q fit at -1.9457 — precisely the
+            # mismatch-absorbed-into-Q bias this module exists to stop.
+            default = _inference_default(param)
+            if abs(default - build_value) > (_ATOL + _RTOL * abs(build_value)):
+                label = param if owner == 0 else f"{param}_c{owner + 1}"
+                problems.append(
+                    f"  - {label}: not sampled and not in the fixed map, so "
+                    f"inference uses the package default {default:.6g}, but Q "
+                    f"'{path}'{tag} was built at {param} = {build_value:.6g}"
+                )
 
     if problems:
         raise ValueError(

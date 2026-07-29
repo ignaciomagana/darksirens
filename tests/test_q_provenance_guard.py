@@ -157,10 +157,14 @@ def test_legacy_table_without_stamped_fiducials_raises():
 
 
 def test_partially_stamped_table_checks_what_it_can():
-    """Only n0 stamped: n0 is enforced, the unstamped ones cannot be compared
-    to a number but are still forbidden from being sampled."""
+    """Only n0 stamped: n0 is enforced (against an explicit pin OR the
+    decoder default), the unstamped ones cannot be compared to a number but
+    are still forbidden from being sampled."""
     partial = {"path": "/tmp/q.h5", "fiducial_n0": 1e-3}
-    check_lss_completion_provenance(partial, SAFE_LABELS, {})
+    check_lss_completion_provenance(partial, SAFE_LABELS, {"log10n0": -3.0})
+    with pytest.raises(ValueError, match="package default"):
+        # No pin: the decoder would run at the package default -2, not -3.
+        check_lss_completion_provenance(partial, SAFE_LABELS, {})
     with pytest.raises(ValueError, match="log10n0"):
         check_lss_completion_provenance(partial, SAFE_LABELS + ["log10n0"], {})
     with pytest.raises(ValueError, match="delta"):
@@ -174,6 +178,60 @@ def test_non_positive_stamped_n0_is_not_compared_as_a_log():
     check_lss_completion_provenance(bad, SAFE_LABELS, {"log10n0": -2.0})
     with pytest.raises(ValueError, match="not stamped"):
         check_lss_completion_provenance(bad, SAFE_LABELS + ["log10n0"], {})
+
+
+# ============================================================================
+# Custom build vs decoder defaults (review finding P1-11)
+# ============================================================================
+
+def test_custom_build_with_no_fixed_map_raises():
+    """The P1-11 defect: a table built at a CALIBRATED n0 (--log10n0 -1.9457)
+    plus fix_survey and NO explicit fixed map used to pass — while inference
+    silently ran at the package default log10n0 = -2 against a Q fit at
+    -1.9457, the exact mismatch-absorbed-into-Q bias this module stops."""
+    custom = _fiducials(fiducial_n0=10.0 ** -1.9457)
+    with pytest.raises(ValueError, match="package default"):
+        check_lss_completion_provenance(custom, SAFE_LABELS, {})
+    # Pinned to the build value: exactly the production configuration.
+    check_lss_completion_provenance(
+        custom, SAFE_LABELS, {"log10n0": -1.9457},
+    )
+
+
+@pytest.mark.parametrize("key,value,param", [
+    ("fiducial_delta", 0.7, "delta"),
+    ("fiducial_Om0", 0.29, "Om0"),
+    ("fiducial_w0", -0.9, "w0"),
+    ("fiducial_wa", 0.3, "wa"),
+])
+def test_every_defaulted_conditioning_parameter_is_compared(key, value, param):
+    with pytest.raises(ValueError, match=param):
+        check_lss_completion_provenance(
+            _fiducials(**{key: value}), SAFE_LABELS, {}
+        )
+
+
+def test_custom_bias_alone_does_not_trip_the_default_check():
+    """b_miss is excluded from the default comparison: for a Q-active catalog
+    the table REPLACES the local b_miss factor, so there is no inference-side
+    b_miss value to disagree with the build bias."""
+    check_lss_completion_provenance(
+        _fiducials(bias_b_miss=1.5), SAFE_LABELS, {}
+    )
+
+
+def test_default_check_names_the_suffixed_catalog_label():
+    with pytest.raises(ValueError, match="log10n0_c2"):
+        check_lss_completion_provenance(
+            [None, _fiducials(fiducial_n0=1e-3, path="/tmp/q2.h5")],
+            SAFE_LABELS, {},
+        )
+
+
+def test_defaults_matching_build_still_pass():
+    """A table built at package defaults keeps working with no fixed map —
+    the overwhelmingly common mock/test configuration."""
+    check_lss_completion_provenance(_fiducials(), SAFE_LABELS, {})
 
 
 # ============================================================================
