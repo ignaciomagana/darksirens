@@ -16,6 +16,7 @@ absent.
 
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -112,7 +113,7 @@ def test_load_pdet_flow_roundtrip(tiny_pdet_npz):
     from flowjax.distributions import Transformed
 
     orig = flows_mod.create_flow_from_config(_pdet_config(key=3))
-    with np.load(tiny_pdet_npz, allow_pickle=True) as data:
+    with np.load(tiny_pdet_npz, allow_pickle=False) as data:
         n = sum(1 for k in data.files if k.startswith("arr_"))
         leaves = [jnp.asarray(data[f"arr_{i}"]) for i in range(n)]
     arrays, static = eqx.partition(orig, eqx.is_array)
@@ -148,8 +149,49 @@ def test_transformations_bijection_semantics():
         sel._build_transformations_bijection(["log"] * 12, 13)
 
 
+class _PickleBomb:
+    """Payload whose *unpickling* deletes a canary file (see test below)."""
+
+    def __init__(self, canary):
+        self.canary = str(canary)
+
+    def __reduce__(self):
+        return (os.remove, (self.canary,))
+
+
+def test_load_pdet_flow_refuses_pickled_entries(tiny_pdet_npz, tmp_path):
+    """The emulator checkpoint is read with allow_pickle=False: an object entry
+    is refused before numpy ever runs the reduction."""
+    with np.load(tiny_pdet_npz, allow_pickle=False) as data:
+        config = json.loads(str(data["config_json"]))
+        n = sum(1 for k in data.files if k.startswith("arr_"))
+        leaves = [data[f"arr_{i}"] for i in range(n)]
+
+    canary = tmp_path / "canary.txt"
+    canary.write_text("the payload never ran")
+
+    bad_cfg = tmp_path / "bomb_config.npz"
+    np.savez(bad_cfg, *leaves,
+             config_json=np.array(_PickleBomb(canary), dtype=object))
+    with pytest.raises(ValueError, match="pickled object"):
+        sel.load_pdet_flow(bad_cfg)
+
+    bad_leaf = tmp_path / "bomb_leaf.npz"
+    np.savez(bad_leaf, np.array(_PickleBomb(canary), dtype=object), *leaves[1:],
+             config_json=json.dumps(config))
+    with pytest.raises(ValueError, match="pickled object"):
+        sel.load_pdet_flow(bad_leaf)
+
+    assert canary.exists(), "the checkpoint payload was unpickled"
+
+    numeric_cfg = tmp_path / "numeric_config.npz"
+    np.savez(numeric_cfg, *leaves, config_json=np.array(3.0))
+    with pytest.raises(ValueError, match="non-string config"):
+        sel.load_pdet_flow(numeric_cfg)
+
+
 def test_load_pdet_flow_rejects_structural_drift(tiny_pdet_npz, tmp_path):
-    with np.load(tiny_pdet_npz, allow_pickle=True) as data:
+    with np.load(tiny_pdet_npz, allow_pickle=False) as data:
         config = json.loads(str(data["config_json"]))
         n = sum(1 for k in data.files if k.startswith("arr_"))
         leaves = [data[f"arr_{i}"] for i in range(n)]
