@@ -334,8 +334,9 @@ def combined_selection_log_correction(
         Number of declared candidate pair clusters.
     max_likelihood_variance, pe_variance_sum
         Total-log-likelihood variance budget per GWTC-4/5, forwarded to
-        ``selection_log_correction``; per-event/pair variance threading
-        arrives in a follow-up.
+        ``selection_log_correction``. The cluster stack threads the summed
+        per-event and per-pair delta-method variances here, so the guard
+        bounds the TOTAL log-likelihood variance, not selection alone.
 
     Returns
     -------

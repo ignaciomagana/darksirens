@@ -3030,10 +3030,10 @@ def _resolve_lensing_run_config(opts):
         print(
             "  [i] Sparse-selection guard: SOFT (smooth wall for "
             f"gradient-based sampling; mode={guard_mode}). Verify the "
-            "posterior clears the selection-variance criterion "
-            "(N_obs^2/Neff <= max_likelihood_variance, and the Neff <= 5 N_obs "
-            "floor) post hoc. Per-event/pair variance is NOT yet included in "
-            "this stack's guard.",
+            "posterior clears the total-variance criterion "
+            "(pe_variance_sum + N_obs^2/Neff <= max_likelihood_variance, and "
+            "the Neff <= 5 N_obs floor) post hoc. Per-event and per-pair "
+            "importance variances are included in this stack's guard.",
             flush=True,
         )
     if max_likelihood_variance != DEFAULT_MAX_LIKELIHOOD_VARIANCE:
