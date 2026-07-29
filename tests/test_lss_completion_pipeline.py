@@ -133,6 +133,117 @@ def test_center_marks_zero_global_mean():
     assert abs(float(out[real].mean())) < 1e-10  # per-bin centering => zero global mean
 
 
+# ===========================================================================
+# Non-finite marks / weights (P2-12, P2-13)
+# ===========================================================================
+
+def test_center_marks_confines_a_stray_nan_to_its_own_slot():
+    """One non-finite mark must not contaminate its whole redshift bin.
+
+    ``_center_marks`` summed over every REAL slot with no finite mask, so a
+    single NaN made the bin mean NaN and therefore EVERY centred mark in that
+    bin -- i.e. every galaxy at that redshift across the whole sky -- NaN.
+
+    Contract (documented on ``_center_marks``): the per-bin mean is taken over
+    FINITE real marks only, and the offending slot itself stays NaN.  Upstream
+    (``darksirens_pixelate``) rejects such inputs; this mask is the backstop.
+    """
+    from darksirens.catalogs.marks import _center_marks
+    # Columns 0 and 1 share a z-bin; column 2 is in a far bin.
+    zg = np.array([[0.10, 0.12, 1.00], [0.11, 0.60, 1.10]])
+    ng = np.array([3, 3], dtype=np.int32)
+    M = np.array([[1.0, 3.0, 5.0], [np.nan, 7.0, 9.0]])
+
+    out = _center_marks({"m": M}, zg, ng)["m"]
+
+    # The poisoned bin's mean is over the FINITE members only: (1 + 3)/2 = 2.
+    np.testing.assert_allclose(out[0, 0], -1.0)
+    np.testing.assert_allclose(out[0, 1], 1.0)
+    # Only the offending slot is non-finite.
+    assert np.isnan(out[1, 0])
+    assert np.isfinite(out[np.array([[True, True, True], [False, True, True]])]).all()
+    # The clean far bin is untouched: mean of (5, 9) = 7.
+    np.testing.assert_allclose(out[0, 2], -2.0)
+    np.testing.assert_allclose(out[1, 2], 2.0)
+
+
+def _write_raw_catalog(path, *, n=40, weight=None, mark=None, seed=0):
+    """Minimal raw DESI-like survey file for the pixelate CLI."""
+    nside = 1
+    rng = np.random.default_rng(seed)
+    pix = rng.integers(0, hp.nside2npix(nside), size=n)
+    theta, phi = hp.pix2ang(nside, pix)
+    zs = rng.uniform(0.05, 0.8, size=n)
+    with h5py.File(path, "w") as f:
+        f.create_dataset("TARGET_RA", data=np.degrees(phi))
+        f.create_dataset("TARGET_DEC", data=np.degrees(np.pi / 2 - theta))
+        f.create_dataset("Z", data=zs)
+        f.create_dataset("ZERR", data=np.full(n, 0.001))
+        f.create_dataset("WEIGHT",
+                         data=np.ones(n) if weight is None else weight)
+        if mark is not None:
+            f.create_dataset("LOGMSTAR", data=mark)
+    return nside
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, np.nan, np.inf])
+def test_pixelate_rejects_invalid_real_galaxy_weights(tmp_path, bad):
+    """Zero/negative/non-finite WEIGHT for a REAL galaxy is a data error.
+
+    At runtime the weight becomes ``log(max(w, 1e-300))`` ~ -690 while the
+    galaxy still counts in ``ngals``, so the observed count and the KDE mixture
+    describe different galaxy sets (and with ``ngals`` absent, ``w > 0`` IS the
+    real-galaxy mask, so the galaxy silently becomes padding).
+    """
+    from darksirens.cli.pixelate import main as pixelate_main
+    n = 40
+    w = np.ones(n)
+    w[7] = bad
+    raw = tmp_path / "raw.h5"
+    nside = _write_raw_catalog(raw, n=n, weight=w)
+    with pytest.raises(SystemExit) as exc:
+        pixelate_main(["--survey_path", str(raw), "--save_path", str(tmp_path),
+                       "--nside", str(nside)])
+    assert exc.value.code == 1
+
+
+def test_pixelate_rejects_non_finite_marks(tmp_path):
+    from darksirens.cli.pixelate import main as pixelate_main
+    n = 40
+    mark = 10.0 + np.arange(n, dtype=float)
+    mark[3] = np.nan
+    raw = tmp_path / "raw.h5"
+    nside = _write_raw_catalog(raw, n=n, mark=mark)
+    with pytest.raises(SystemExit) as exc:
+        pixelate_main(["--survey_path", str(raw), "--save_path", str(tmp_path),
+                       "--nside", str(nside)])
+    assert exc.value.code == 1
+
+
+def test_pixelate_accepts_valid_inputs_and_pads_with_zero_weight(tmp_path):
+    """The validation must fire only on REAL galaxies: pixelate's own padding
+    slots carry w = 0 and mark = 0 by convention and must survive."""
+    from darksirens.cli.pixelate import main as pixelate_main
+    n = 40
+    raw = tmp_path / "raw.h5"
+    nside = _write_raw_catalog(
+        raw, n=n, weight=np.linspace(0.5, 2.0, n),
+        mark=10.0 + np.arange(n, dtype=float),
+    )
+    pixelate_main(["--survey_path", str(raw), "--save_path", str(tmp_path),
+                   "--nside", str(nside)])
+    out = tmp_path / f"catalog_pixelated_nside_{nside}.h5"
+    with h5py.File(out, "r") as f:
+        ngals = np.array(f["ngals"])
+        wgals = np.array(f["wgals"])
+        marks = np.array(f["mark_logmstar"])
+    real = np.arange(wgals.shape[1])[None, :] < ngals[:, None]
+    assert int(ngals.sum()) == n
+    assert np.all(wgals[real] > 0.0)
+    assert np.all(wgals[~real] == 0.0)          # padding keeps w = 0
+    assert np.all(np.isfinite(marks))
+
+
 def test_pixelate_writes_marks_and_load_all_data_centers_them(tmp_path, monkeypatch):
     from darksirens.cli.pixelate import main as pixelate_main
     from darksirens.catalogs.io import load_survey_marks

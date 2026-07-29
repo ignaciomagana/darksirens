@@ -39,8 +39,8 @@ from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import H0Planck, Om0Planck, dL_of_z
 from darksirens.redshift.volume import log_volume_prior_vmap
 from darksirens.likelihood.pair_kde import (
-    PairKDE, make_pair_kde, log_eval_pair_kde, _silverman_bandwidth_diag,
-    validate_pair_prior_wt,
+    PairKDE, PAIR_KDE_COORDS, make_pair_kde, log_eval_pair_kde,
+    _silverman_bandwidth_diag, validate_pair_prior_wt,
 )
 from darksirens.likelihood.cluster_likelihood import (
     cluster_log_likelihood_pair, _log_jac_app_to_src,
@@ -287,6 +287,94 @@ class TestPairKDE:
         out = jit_eval(kde, queries)
         assert out.shape == (1,)
         assert jnp.isfinite(out[0])
+
+    # ---- padding invariance (P2-03) -----------------------------------
+
+    @staticmethod
+    def _padded_pair(n_real=3, n_pad=2, seed=11):
+        """(unpadded KDE, KDE of the SAME samples padded with garbage).
+
+        The padding rows carry NaN/inf coordinates and NaN/zero p_prop -- the
+        shapes ``stack_pair_kdes`` produces when events have unequal N_pe.
+        """
+        rng = np.random.default_rng(seed)
+        cols = [rng.normal(35.0, 3.0, n_real), rng.normal(0.7, 0.05, n_real),
+                rng.normal(1000.0, 100.0, n_real), rng.normal(0.0, 0.1, n_real)]
+        prior_wt = rng.uniform(0.5, 2.0, n_real)
+        kde = make_pair_kde(*cols, prior_wt=prior_wt)
+
+        garbage = [
+            np.array([np.nan, 1.0e30])[:n_pad],
+            np.array([np.nan, -5.0])[:n_pad],
+            np.array([np.inf, 0.0])[:n_pad],
+            np.array([np.nan, 7.0])[:n_pad],
+        ]
+        cols_p = [np.concatenate([c, g]) for c, g in zip(cols, garbage)]
+        pw_p = np.concatenate([prior_wt, np.array([np.nan, 0.0])[:n_pad]])
+        valid = np.array([True] * n_real + [False] * n_pad)
+        kde_pad = make_pair_kde(*cols_p, prior_wt=pw_p, valid=valid)
+        return kde, kde_pad
+
+    def test_padding_does_not_change_the_density(self):
+        """Padding 3 samples to 5 must not move the density.
+
+        The evaluator masked the padded WEIGHTS but still divided by the padded
+        LENGTH, so every log density of a padded event was offset by
+        log(n_valid / N_pe) = -log(5/3) here -- a per-event constant that does
+        NOT cancel in the pair Bayes factor.
+        """
+        kde, kde_pad = self._padded_pair()
+        queries = jnp.asarray([
+            [35.0, 0.7, 1000.0, 0.0],
+            [40.0, 0.6, 1200.0, 0.1],
+            [28.0, 0.9, 700.0, -0.2],
+            [35.0, 0.99, 1000.0, 0.0],     # near the q = 1 reflection boundary
+        ])
+        got = np.asarray(log_eval_pair_kde(kde_pad, queries))
+        ref = np.asarray(log_eval_pair_kde(kde, queries))
+        assert np.all(np.isfinite(got)), f"NaN/inf leaked from padding: {got}"
+        np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-13)
+        # And the shift it used to have was exactly log(n_valid / N_pe).
+        assert abs(np.log(3.0 / 5.0)) > 0.5
+
+    def test_padding_does_not_poison_gradients(self):
+        """NaN coordinates in invalid rows must not reach the backward pass.
+
+        Masking only AFTER the component logpdf leaves the NaN on the
+        differentiable path, and a NaN survives a zero cotangent (mul's VJP
+        scales by the stored operand) -- the reverse-mode class documented at
+        ``redshift/catalog.py:_logsumexp_neginf_safe``.
+        """
+        _, kde_pad = self._padded_pair()
+        queries = jnp.asarray([[35.0, 0.7, 1000.0, 0.0], [40.0, 0.6, 1200.0, 0.1]])
+        g = jax.grad(lambda t: jnp.sum(log_eval_pair_kde(kde_pad, t)))(queries)
+        assert np.all(np.isfinite(np.asarray(g))), f"non-finite gradient: {g}"
+
+    def test_matches_scipy_gaussian_kde_on_unpadded_data(self):
+        """Absolute normalisation check against ``scipy.stats.gaussian_kde``.
+
+        scipy uses ``cov(data) * bw**2`` as its (full) bandwidth matrix, so we
+        whiten the samples to an exactly-identity empirical covariance and hand
+        scipy our Silverman factor: its bandwidth matrix is then exactly
+        ``diag(h_k**2)``, matching PairKDE's diagonal bandwidth.  The q column
+        is shifted far from the reflection boundary at q = 1 so the mirror
+        kernel is numerically absent (its argument is ~ -100 sigma).
+        """
+        rng = np.random.default_rng(17)
+        N, d = 300, 4
+        X = rng.normal(size=(N, d)) @ rng.normal(size=(d, d)) + rng.normal(size=d)
+        L = np.linalg.cholesky(np.cov(X.T, ddof=1))
+        U = (X - X.mean(axis=0)) @ np.linalg.inv(L).T   # empirical cov == I
+        U[:, PAIR_KDE_COORDS.index("q")] -= 60.0        # away from q = 1
+
+        factor = (4.0 / ((d + 2) * N)) ** (1.0 / (d + 4))
+        kde = make_pair_kde(*U.T, prior_wt=np.ones(N))
+        np.testing.assert_allclose(np.exp(np.asarray(kde.log_h)), factor, rtol=1e-10)
+
+        sp = gaussian_kde(U.T, bw_method=factor)
+        queries = U[:5] + 0.3
+        ours = np.exp(np.asarray(log_eval_pair_kde(kde, jnp.asarray(queries))))
+        np.testing.assert_allclose(ours, sp(queries.T), rtol=1e-8)
 
 
 # ============================================================================

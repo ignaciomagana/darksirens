@@ -310,7 +310,7 @@ n, z)$ with a **mean-one** angular density $g$, so isotropy is exactly $g\equiv
 - `dipole` — $g = 1 + \hat n\cdot \mathbf{d}$;
 - `multipole` / `multipole_l3` — $g = 1 + \sum_{\ell\ge1}\sum_m a_{\ell m}
   Y_{\ell m}(\hat n)$, yielding the angular power spectrum $C_\ell =
-  \sum_m a_{\ell m}^2$;
+  \frac{1}{2\ell+1}\sum_m a_{\ell m}^2$;
 - `sphere_gp` — a log-Gaussian random field on $S^2$,
   $g = e^{f(\hat n)}/\langle e^f\rangle$;
 - `sphere_gp_z` / `overdensity_gp` — a $(\text{sphere}\times z)$ GP with the

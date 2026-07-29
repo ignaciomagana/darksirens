@@ -102,7 +102,9 @@ class PairKDE(NamedTuple):
         log-evaluated density.
     valid : (N_pe,) bool
         Validity mask carried alongside samples (matches GWEvent.valid).
-        Padded entries get -inf weight in the kernel sum.
+        Padded entries are excluded from BOTH the kernel sum and the 1/N
+        normalization (see :func:`log_eval_pair_kde`), so padding a KDE to a
+        longer common ``N_pe`` leaves its density unchanged.
 
     Notes
     -----
@@ -201,12 +203,11 @@ def make_pair_kde(
     # Bandwidth from UNWEIGHTED posterior samples
     h = _silverman_bandwidth_diag(samples, valid=valid)
 
-    # KDE evaluation weights: 1/p_prop for the importance correction
-    log_w = np.where(
-        valid & (prior_wt > 0.0),
-        -np.log(prior_wt),
-        -np.inf,
-    )
+    # KDE evaluation weights: 1/p_prop for the importance correction.
+    # Padding slots commonly carry 0/NaN p_prop, so substitute a dummy before
+    # the log rather than taking log(0) and discarding the warning afterwards.
+    usable = valid & np.isfinite(prior_wt) & (prior_wt > 0.0)
+    log_w = np.where(usable, -np.log(np.where(usable, prior_wt, 1.0)), -np.inf)
     log_h = np.log(h)
     log_norm = -0.5 * _D * np.log(2.0 * np.pi) - log_h.sum()
 
@@ -307,6 +308,21 @@ def log_eval_pair_kde(
     darksirens singleton sample-weight formula confirms this — it has
     -log(prior_wt) per sample, NOT -log(prior_wt) + log(Σ 1/prior_wt).
 
+    Padding
+    -------
+    ``N`` in the 1/N above is the number of VALID samples, not the padded
+    array length: ``stack_pair_kdes`` requires a common ``N_pe``, so events
+    with fewer PE samples arrive padded, and normalizing by the padded length
+    would shift every log density of a padded event by ``log(n_valid/N_pe)``
+    (exactly -log(5/3) for 3 samples padded to 5) — a per-event constant that
+    does NOT cancel in the pair Bayes factor.  Padded rows' COORDINATES are
+    also sanitized to a finite dummy before the kernel arithmetic: they are
+    commonly NaN, and ``NaN + (-inf) = NaN`` poisons the logsumexp forward,
+    while masking only afterwards still poisons the BACKWARD pass (both
+    branches of a ``where`` are differentiated, and a NaN survives a zero
+    cotangent — the reverse-mode class documented at
+    ``redshift/catalog.py:_logsumexp_neginf_safe``).
+
     Boundary correction at q = 1
     ----------------------------
     q has a hard physical boundary at 1 where equal-mass posteriors pile
@@ -320,19 +336,36 @@ def log_eval_pair_kde(
     from jax.scipy.special import logsumexp
 
     q_axis = PAIR_KDE_COORDS.index("q")
-    diff = (theta_app[..., None, :] - kde.samples[None, :, :]) / jnp.exp(kde.log_h)
+    valid = jnp.asarray(kde.valid, dtype=bool)                    # (N,)
+    # Sanitize BEFORE any arithmetic (see "Padding" above): invalid rows carry
+    # no NaN/inf onto the differentiable path, so neither the forward
+    # logsumexp nor its transpose can be poisoned by padding.
+    samples = jnp.where(valid[:, None], kde.samples, 0.0)         # (N, 4)
+    log_w = jnp.where(valid, kde.log_weights, 0.0)                # (N,)
+
+    diff = (theta_app[..., None, :] - samples[None, :, :]) / jnp.exp(kde.log_h)
     sq = diff * diff                                              # (..., N, 4)
     sq_rest = jnp.sum(sq, axis=-1) - sq[..., q_axis]              # (..., N)
     # Mirror image of each sample's q about the boundary: 2 - q_t.
     diff_q_ref = (
-        theta_app[..., q_axis][..., None] + kde.samples[None, :, q_axis] - 2.0
+        theta_app[..., q_axis][..., None] + samples[None, :, q_axis] - 2.0
     ) / jnp.exp(kde.log_h[q_axis])
     log_kernel_q = jnp.logaddexp(
         -0.5 * sq[..., q_axis], -0.5 * diff_q_ref * diff_q_ref
     )
     log_kernel = -0.5 * sq_rest + log_kernel_q                    # (..., N)
 
-    log_w = kde.log_weights                                       # (N,)
-    log_sum = logsumexp(log_kernel + log_w, axis=-1)              # (...,)
-    log_N = jnp.log(jnp.asarray(kde.samples.shape[0], dtype=jnp.float64))
+    terms = jnp.where(valid, log_kernel + log_w, -jnp.inf)        # (..., N)
+    # All--inf-safe reduction (cf. ``_logsumexp_neginf_safe``): the -1e30
+    # sentinel underflows to exactly zero weight, so a row with any valid
+    # sample is bit-identical to a plain logsumexp, while an all-invalid row
+    # returns exactly -inf with finite gradients instead of a 0/0 softmax.
+    finite = jnp.isfinite(terms)
+    safe = jnp.where(finite, terms, -1e30)
+    log_sum = jnp.where(
+        jnp.any(finite, axis=-1), logsumexp(safe, axis=-1), -jnp.inf
+    )                                                             # (...,)
+    # Normalize by the number of VALID samples, not the padded length.
+    n_valid = jnp.sum(valid.astype(jnp.float64))
+    log_N = jnp.log(jnp.maximum(n_valid, 1.0))
     return kde.log_norm + log_sum - log_N

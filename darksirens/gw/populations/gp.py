@@ -973,10 +973,14 @@ class BinnedGPPopulation:
     # -- evaluation --------------------------------------------------------
 
     def log_p_pop(self, m1, q, z, chieff, theta):
-        m1 = jnp.atleast_1d(jnp.asarray(m1, dtype=float))
-        q   = jnp.broadcast_to(jnp.asarray(q, dtype=float), m1.shape)
-        z   = jnp.broadcast_to(jnp.asarray(z, dtype=float), m1.shape)
-        chi = jnp.broadcast_to(jnp.asarray(chieff, dtype=float), m1.shape)
+        # Same broadcast contract as JointGPPopulation / AdditiveGPPopulation:
+        # any broadcastable combination of scalars and arrays (including the WL
+        # path's (Nsamp, Nnodes) mesh), with the output reshaped back to the
+        # common shape -- so an all-scalar query returns a SCALAR.  Forcing the
+        # shape from m1 alone (``atleast_1d(m1)`` + ``broadcast_to(..., m1.shape)``)
+        # made a scalar m1 against vector q/z/chi a hard broadcast error and
+        # turned an all-scalar query into shape (1,).
+        m1, q, z, chi, _out_shape = _broadcast_logp_inputs(m1, q, z, chieff)
 
         # ---- unpack theta in param_specs order ----
         i = 0
@@ -1007,8 +1011,8 @@ class BinnedGPPopulation:
             # observer/source time dilation here (the likelihood's log1p is the
             # detector-mass Jacobian, not dilation; cf. the parametric powerlaw
             # (gamma - 1) whose -1 IS this factor).
-            return log_p - jnp.log1p(z)
-        return log_p + (gamma - 1.0) * jnp.log1p(z)
+            return (log_p - jnp.log1p(z)).reshape(_out_shape)
+        return (log_p + (gamma - 1.0) * jnp.log1p(z)).reshape(_out_shape)
 
 
 # ============================================================

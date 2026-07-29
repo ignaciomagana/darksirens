@@ -83,8 +83,15 @@ def summarize_dipole_posterior(samples, labels, quantiles=(0.05, 0.5, 0.95)):
 
 def summarize_multipole_posterior(samples, labels, sky_model="multipole",
                                   quantiles=(0.05, 0.5, 0.95)):
-    """Summarise a multipole run: the angular power spectrum ``C_ℓ = Σ_m a_lm²``
-    (per ℓ) and the per-coefficient quantiles.
+    """Summarise a multipole run: the angular power spectrum
+    ``C_ℓ = (1 / (2ℓ+1)) Σ_m a_lm²`` (per ℓ) and the per-coefficient quantiles.
+
+    The ``1/(2ℓ+1)`` is the conventional CMB/LSS normalisation — ``C_ℓ`` is the
+    power PER MODE, so it is the quantity that equals the isotropic variance of
+    the ``a_lm`` and is comparable across ℓ (``Σ_m a_lm²`` alone is the TOTAL
+    multipole power and grows with the ``2ℓ+1`` mode count even for a
+    scale-invariant field).  This function previously reported the total and
+    labelled it ``C_ℓ``.
 
     Returns a dict with ``C_ell_quantiles`` (``{ℓ: {q: value}}``),
     ``coeff_quantiles`` (``{name: {q: value}}``), and ``C_ell_samples``
@@ -106,7 +113,9 @@ def summarize_multipole_posterior(samples, labels, sky_model="multipole",
 
     cl_quant, cl_samples = {}, {}
     for ell, cols in sorted(by_l.items()):
-        cl = np.sum(samples[:, cols] ** 2, axis=1)     # C_ℓ per posterior sample
+        # C_ℓ per posterior sample: power PER MODE, i.e. divided by the
+        # 2ℓ+1 mode multiplicity (the conventional definition).
+        cl = np.sum(samples[:, cols] ** 2, axis=1) / (2.0 * ell + 1.0)
         cl_samples[ell] = cl
         cl_quant[ell] = {q: float(np.quantile(cl, q)) for q in quantiles}
     coeff_quant = {
@@ -235,8 +244,8 @@ def plot_sphere_gp_map(samples, labels, nside=16, max_draws=200,
 
 
 def plot_multipole_cl(samples, labels, sky_model="multipole", figsize=(7.0, 4.5)):
-    """Angular power spectrum ``C_ℓ = Σ_m a_lm²`` (posterior median + 5–95%) per
-    multipole ℓ.  Returns a matplotlib Figure."""
+    """Angular power spectrum ``C_ℓ = (1/(2ℓ+1)) Σ_m a_lm²`` (posterior median +
+    5–95%) per multipole ℓ.  Returns a matplotlib Figure."""
     import matplotlib.pyplot as plt
 
     summ = summarize_multipole_posterior(samples, labels, sky_model=sky_model)
@@ -250,7 +259,7 @@ def plot_multipole_cl(samples, labels, sky_model="multipole", figsize=(7.0, 4.5)
     ax.errorbar(ells, med, yerr=[lo, hi], fmt="o", capsize=5, color="C0")
     ax.set_xticks(ells)
     ax.set_xlabel(r"multipole $\ell$")
-    ax.set_ylabel(r"$C_\ell = \sum_m a_{\ell m}^2$")
+    ax.set_ylabel(r"$C_\ell = \frac{1}{2\ell+1}\sum_m a_{\ell m}^2$")
     ax.set_title("Angular power spectrum (posterior median, 5–95%)")
     ax.set_ylim(bottom=0.0)
     ax.grid(True, alpha=0.3)
