@@ -78,3 +78,28 @@ def test_save_results_hdf5_leaves_no_tmp_file_behind(tmp_path):
     )
     assert (tmp_path / "results.hdf5").exists()
     assert not (tmp_path / "results.hdf5.tmp").exists()
+
+
+def test_nlive_actual_wins_over_the_request(tmp_path):
+    """P2-19: a resumed dynesty run keeps the checkpoint's live-point count
+    over --nlive, so results.hdf5 must record the value the sampler ACTUALLY
+    ran with, with the request preserved beside it."""
+    results = _results()
+    results["nlive_actual"] = 40
+    save_results_hdf5(
+        results, str(tmp_path), ["x"], [0.0], [1.0], {}, {},
+        _opts(nlive=64, sampler="dynesty"), _meta(),
+    )
+    with h5py.File(tmp_path / "results.hdf5") as f:
+        assert int(f.attrs["nlive"]) == 40
+        assert int(f.attrs["nlive_requested"]) == 64
+
+
+def test_nlive_defaults_to_the_request_without_sampler_state(tmp_path):
+    save_results_hdf5(
+        _results(), str(tmp_path), ["x"], [0.0], [1.0], {}, {},
+        _opts(nlive=64), _meta(),
+    )
+    with h5py.File(tmp_path / "results.hdf5") as f:
+        assert int(f.attrs["nlive"]) == 64
+        assert int(f.attrs["nlive_requested"]) == 64
