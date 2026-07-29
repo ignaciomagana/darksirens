@@ -59,6 +59,7 @@ import json
 import os
 import uuid
 import warnings
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -183,12 +184,49 @@ def _map_solve_chunk(payload):
     return s_out, lam_out, n_converged, last_failure
 
 
-def _init_worker():
-    """Pin each worker to one BLAS/FFT thread so W processes don't oversubscribe."""
+_THREAD_PIN_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+
+
+@contextmanager
+def _pinned_parent_env():
+    """Export the one-thread pins in the PARENT while workers are spawned.
+
+    Spawn children re-exec python and inherit ``os.environ`` at exec time,
+    BEFORE any of their imports — so parent-side variables reach the child's
+    BLAS/OpenMP load, which is where eager builds size their (spin-waiting)
+    thread pools.  The parent's own values are restored afterwards; its
+    already-loaded libraries were sized long ago and are unaffected either
+    way.
+    """
     import os
 
-    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS"):
+    saved = {var: os.environ.get(var) for var in _THREAD_PIN_VARS}
+    for var in _THREAD_PIN_VARS:
+        os.environ[var] = "1"
+    try:
+        yield
+    finally:
+        for var, value in saved.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
+
+
+def _init_worker():
+    """Pin each worker to one BLAS/FFT thread so W processes don't oversubscribe.
+
+    Belt only — the braces are :func:`_pinned_parent_env` below.  A spawned
+    worker re-imports ``__main__`` (and numpy/BLAS with it) BEFORE the pool
+    initializer runs, and OpenBLAS sizes its spin-waiting thread pool at
+    library load from the environment, so setting the variables here is too
+    late for builds that read them eagerly (measured: 16 workers x ~20
+    spin-waiting OpenBLAS threads pushed a 20-core box to load ~160).
+    """
+    import os
+
+    for var in _THREAD_PIN_VARS:
         os.environ[var] = "1"
 
 
@@ -304,15 +342,16 @@ def poisson_lognormal_map(
             (N_obs[a:z], C[a:z], dN_exp[a:z], pk, b, ps, shift, maxiter)
             for a, z in spans
         ]
-        with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx,
-                                 initializer=_init_worker) as pool:
-            for (a, z), (s_blk, lam_blk, nconv, blk_failure) in zip(
-                    spans, pool.map(_map_solve_chunk, payloads)):
-                s_map[a:z] = s_blk
-                lam_map[a:z] = lam_blk
-                n_converged += int(nconv)
-                if blk_failure is not None:
-                    last_failure = blk_failure
+        with _pinned_parent_env():
+            with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx,
+                                     initializer=_init_worker) as pool:
+                for (a, z), (s_blk, lam_blk, nconv, blk_failure) in zip(
+                        spans, pool.map(_map_solve_chunk, payloads)):
+                    s_map[a:z] = s_blk
+                    lam_map[a:z] = lam_blk
+                    n_converged += int(nconv)
+                    if blk_failure is not None:
+                        last_failure = blk_failure
     else:
         for r in range(n_rows):
             s, lam, ok, message = _map_solve_row(
