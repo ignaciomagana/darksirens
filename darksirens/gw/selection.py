@@ -361,11 +361,30 @@ def sample_pdet_flow(flow, nsamp: int, seed: int, batch: int = 65536) -> np.ndar
     """Draw ``nsamp`` samples from the emulator flow, host-side, in batches.
 
     Returns a float64 numpy array of shape (nsamp, 13) in PDET_COLUMNS order.
+    ``batch`` must be a positive integer -- see the gate below for why a
+    silently-accepted 0 or negative value is worse than an error.
     """
     import jax
 
     if nsamp <= 0:
         raise ValueError(f"nsamp must be positive; got {nsamp}.")
+    # ``batch`` only ever reaches a min() inside the loop, so a bad value never
+    # raises on its own: batch=0 leaves ``remaining`` untouched and the loop
+    # spins forever (a silent hang in the middle of a selection build), and a
+    # negative batch makes ``remaining`` GROW. Gate it before entering.
+    if isinstance(batch, bool) or not isinstance(
+        batch, (int, float, np.integer, np.floating)
+    ):
+        raise ValueError(
+            f"batch must be a positive integer; got {batch!r} "
+            f"({type(batch).__name__})."
+        )
+    if isinstance(batch, (float, np.floating)) and (
+        not math.isfinite(batch) or float(batch) != int(batch)
+    ):
+        raise ValueError(f"batch must be a positive integer; got {batch!r}.")
+    if int(batch) < 1:
+        raise ValueError(f"batch must be a positive integer; got {batch!r}.")
     key = jax.random.key(int(seed))
     out = []
     remaining = int(nsamp)

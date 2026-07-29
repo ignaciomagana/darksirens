@@ -213,6 +213,48 @@ class TestLensedInjectionSetIO:
         # n_draw_sources preserved
         assert float(inj.n_draw_sources) == float(camp["n_draw_sources"])
 
+    def test_rejected_write_leaves_destination_byte_identical(self):
+        """A refused save must not touch ``path``, nor leave a temp behind.
+
+        The writer used to open ``path`` with mode "w" and only then check the
+        mutually exclusive pair-tag arguments, so the ValueError arrived with
+        the previous campaign already truncated to a partial HDF5.
+        """
+        camp = _synth_lensed_injection_campaign(n_sources=20, seed=3)
+        kwargs = {k: v for k, v in camp.items() if k != "n_both_detected"}
+        n_src = int(camp["n_draw_sources"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "inj.h5"
+            save_lensed_injections(path=str(path), **kwargs)
+            before = path.read_bytes()
+
+            # (a) the mutually exclusive pair-tag arguments.
+            both = dict(kwargs,
+                        log_p_tag_per_source=np.zeros(n_src),
+                        p_tag_per_source=np.ones(n_src))
+            with pytest.raises(ValueError, match="only one of"):
+                save_lensed_injections(path=str(path), **both)
+            assert path.read_bytes() == before
+            assert not list(Path(tmp).glob("*.tmp-*"))
+
+            # (b) a failure raised while materialising the payload.
+            bad_attr = dict(kwargs, n_draw_sources="not-an-int")
+            with pytest.raises((ValueError, TypeError)):
+                save_lensed_injections(path=str(path), **bad_attr)
+            assert path.read_bytes() == before
+            assert not list(Path(tmp).glob("*.tmp-*"))
+
+            bad_arr = dict(kwargs, mu=[[1.0, 2.0], [3.0]])
+            with pytest.raises((ValueError, TypeError)):
+                save_lensed_injections(path=str(path), **bad_arr)
+            assert path.read_bytes() == before
+            assert not list(Path(tmp).glob("*.tmp-*"))
+
+            # And a good write still lands, atomically, over the old file.
+            save_lensed_injections(path=str(path), **kwargs)
+            assert not list(Path(tmp).glob("*.tmp-*"))
+            assert load_lensed_injections(str(path)).n_kept == camp["n_both_detected"]
+
     def test_validation_rejects_inconsistent_source_fields(self):
         """If two images of the same source disagree on a source-level field
         (z_src), the loader should reject."""

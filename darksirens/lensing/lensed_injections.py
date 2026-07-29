@@ -58,6 +58,7 @@ See ``cluster_selection.py`` for the implementation.
 from __future__ import annotations
 
 from typing import NamedTuple, Any, Optional
+import os
 import numpy as np
 import jax.numpy as jnp
 import h5py
@@ -443,33 +444,62 @@ def save_lensed_injections(
     detection-model constants (e.g. fc_rho_thr / fc_r0 / fc_mc_bar) as file
     attrs so the lensed-singleton evidence channel can reproduce the exact
     partner-censoring factor (see darksirens.lensing.fcpdet).
+
+    Fail-closed contract (mirrors ``save_lss_completion_hdf5``): EVERY argument
+    is validated and materialised before any file is touched, and the result
+    appears at ``path`` ATOMICALLY -- content goes to a sibling temp file that
+    is renamed only after a clean close, and is unlinked on any failure.  The
+    writer used to open ``path`` with mode "w" first and check the mutually
+    exclusive pair-tag arguments afterwards, so a bad call DESTROYED an
+    existing campaign and left a half-written HDF5 in its place.
     """
-    with h5py.File(path, "w") as f:
-        f.create_dataset("source_id", data=np.asarray(source_id, dtype=np.int32))
-        f.create_dataset("image_id", data=np.asarray(image_id, dtype=np.int32))
-        f.create_dataset("m1_src", data=np.asarray(m1_src))
-        f.create_dataset("q_src", data=np.asarray(q_src))
-        f.create_dataset("z_src", data=np.asarray(z_src))
-        f.create_dataset("chieff", data=np.asarray(chieff))
-        f.create_dataset("y_source", data=np.asarray(y_source))
-        f.create_dataset("mu", data=np.asarray(mu))
-        f.create_dataset("detected", data=np.asarray(detected, dtype=bool))
-        f.create_dataset("p_prop_src", data=np.asarray(p_prop_src))
-        f.create_dataset("p_prop_y", data=np.asarray(p_prop_y))
-        if log_p_tag_per_source is not None and p_tag_per_source is not None:
-            raise ValueError("Pass only one of log_p_tag_per_source or p_tag_per_source")
-        if log_p_tag_per_source is not None:
-            f.create_dataset("log_p_tag_per_source", data=np.asarray(log_p_tag_per_source))
-            f.attrs["pair_tag_dataset"] = "log_p_tag_per_source"
-        elif p_tag_per_source is not None:
-            f.create_dataset("p_tag_per_source", data=np.asarray(p_tag_per_source))
-            f.attrs["pair_tag_dataset"] = "p_tag_per_source"
-        for name, arr in (("snr_image0", snr_image0), ("snr_image1", snr_image1), ("delta_t_obs", delta_t_obs), ("true_delta_t", true_delta_t), ("log_sky_overlap", log_sky_overlap), ("p_tag_true", p_tag_true), ("tagged_pair", tagged_pair)):
-            if arr is not None:
-                f.create_dataset(name, data=np.asarray(arr, dtype=bool) if name == "tagged_pair" else np.asarray(arr))
-        f.attrs["n_draw_sources"] = int(n_draw_sources)
-        for key, value in (snr_model_attrs or {}).items():
-            f.attrs[key] = float(value)
+    if log_p_tag_per_source is not None and p_tag_per_source is not None:
+        raise ValueError("Pass only one of log_p_tag_per_source or p_tag_per_source")
+
+    # np.asarray / int() / float() all raise on malformed input; build every
+    # dataset and attr up front so those failures also happen with no file
+    # opened, not with the destination already truncated.
+    datasets: list[tuple[str, np.ndarray]] = [
+        ("source_id", np.asarray(source_id, dtype=np.int32)),
+        ("image_id", np.asarray(image_id, dtype=np.int32)),
+        ("m1_src", np.asarray(m1_src)),
+        ("q_src", np.asarray(q_src)),
+        ("z_src", np.asarray(z_src)),
+        ("chieff", np.asarray(chieff)),
+        ("y_source", np.asarray(y_source)),
+        ("mu", np.asarray(mu)),
+        ("detected", np.asarray(detected, dtype=bool)),
+        ("p_prop_src", np.asarray(p_prop_src)),
+        ("p_prop_y", np.asarray(p_prop_y)),
+    ]
+    attrs: dict[str, Any] = {}
+    if log_p_tag_per_source is not None:
+        datasets.append(("log_p_tag_per_source", np.asarray(log_p_tag_per_source)))
+        attrs["pair_tag_dataset"] = "log_p_tag_per_source"
+    elif p_tag_per_source is not None:
+        datasets.append(("p_tag_per_source", np.asarray(p_tag_per_source)))
+        attrs["pair_tag_dataset"] = "p_tag_per_source"
+    for name, arr in (("snr_image0", snr_image0), ("snr_image1", snr_image1), ("delta_t_obs", delta_t_obs), ("true_delta_t", true_delta_t), ("log_sky_overlap", log_sky_overlap), ("p_tag_true", p_tag_true), ("tagged_pair", tagged_pair)):
+        if arr is not None:
+            datasets.append((name, np.asarray(arr, dtype=bool) if name == "tagged_pair" else np.asarray(arr)))
+    attrs["n_draw_sources"] = int(n_draw_sources)
+    for key, value in (snr_model_attrs or {}).items():
+        attrs[key] = float(value)
+
+    tmp_path = f"{path}.tmp-{os.getpid()}"
+    try:
+        with h5py.File(tmp_path, "w") as f:
+            for name, arr in datasets:
+                f.create_dataset(name, data=arr)
+            for key, value in attrs.items():
+                f.attrs[key] = value
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ============================================================================

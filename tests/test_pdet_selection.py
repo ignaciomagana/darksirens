@@ -240,6 +240,25 @@ def test_load_pdet_flow_rejects_newer_schema(tmp_path):
         sel.load_pdet_flow(path)
 
 
+@pytest.mark.parametrize(
+    "batch", [0, -1, -65536, True, False, 1.5, float("nan"), float("inf"), "64", None],
+)
+def test_sample_pdet_flow_rejects_bad_batch(batch):
+    """``batch`` only reaches a min() inside the draw loop, so a bad value used
+    to fail silently: batch=0 never decremented ``remaining`` (an unbounded
+    hang mid-build) and a negative batch made it grow."""
+    with pytest.raises(ValueError, match="batch must be a positive integer"):
+        # The gate fires before the flow is touched, hence the sentinel.
+        sel.sample_pdet_flow(object(), nsamp=8, seed=0, batch=batch)
+
+
+def test_sample_pdet_flow_batches_across_calls(tiny_pdet_npz):
+    """Positive control: a batch smaller than nsamp still draws nsamp rows."""
+    flow, _ = sel.load_pdet_flow(tiny_pdet_npz)
+    assert sel.sample_pdet_flow(flow, 7, 0, batch=3).shape == (7, 13)
+    assert sel.sample_pdet_flow(flow, 7, 0, batch=3.0).shape == (7, 13)
+
+
 def test_load_pdet_flow_requires_x64(tiny_pdet_npz):
     jax.config.update("jax_enable_x64", False)
     try:
