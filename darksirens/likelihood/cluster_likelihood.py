@@ -80,9 +80,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-import jax
 import jax.numpy as jnp
-from jax import lax, vmap
 from jax.scipy.special import logsumexp
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
@@ -92,7 +90,7 @@ from darksirens.lensing.slmarks import (
     SISLensParams, tau_2_prob, log_p_y_SIS,
     mu_plus_minus_from_y, delta_t_from_y,
 )
-from darksirens.lensing.grids import make_y_grid, make_hermite_u_grid
+from darksirens.lensing.grids import make_hermite_u_grid
 
 
 def _log_jac_app_to_src(z_s: jnp.ndarray,

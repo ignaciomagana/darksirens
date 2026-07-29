@@ -22,7 +22,6 @@ from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
 from darksirens.catalogs.compact import (
     _catalog_memory_diagnostics,
     _compact_catalog_for_pixels,
-    validate_loaded_survey_shapes,
 )
 from darksirens.likelihood.catalog_views import (
     field_depth_inputs_required,
@@ -669,7 +668,7 @@ def attach_lss_inputs(opts, data) -> dict:
     # --------------------------------------------------------
     # LSS overdensity field (Handle memory carefully)
     # --------------------------------------------------------
-    print(f"[*] Preparing LSS/Overdensity Field...")
+    print("[*] Preparing LSS/Overdensity Field...")
     if opts.universe_model in GALAXY_AWARE_MODELS and opts.use_LSS and _q_active:
         print(
             "    - Q_LSS completion table is active: it REPLACES the "
@@ -678,7 +677,7 @@ def attach_lss_inputs(opts, data) -> dict:
         )
         delta_g_pix_z = jnp.zeros((1, len(zgrid)))
     elif opts.universe_model in GALAXY_AWARE_MODELS and opts.use_LSS:
-        print(f"    - Calculating high-resolution overdensity grid...")
+        print("    - Calculating high-resolution overdensity grid...")
         delta_g_pix_z = compute_lss_overdensity(
             data["zgals"],
             nside_check,

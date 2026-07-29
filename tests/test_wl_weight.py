@@ -490,7 +490,6 @@ class TestNumpyReference:
         with no broadcasting tricks. Used to verify the JAX version line by
         line against an independent computation.
         """
-        from darksirens.utils.cosmology import z_of_dL, ddL_of_z, dL_in_z_grid
 
         out = np.zeros_like(np.asarray(m1det))
         H0, Om0 = float(cosmo.H0), float(cosmo.Om0)

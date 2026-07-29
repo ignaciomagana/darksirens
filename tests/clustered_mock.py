@@ -37,7 +37,7 @@ catalog-shape knobs never reshuffle the host assignments.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import healpy as hp

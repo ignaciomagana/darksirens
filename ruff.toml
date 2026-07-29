@@ -1,0 +1,24 @@
+# Pinned lint gate (review finding P3-03): errors and definite bugs only —
+# undefined names, syntax errors, unused imports/variables.  Style rules are
+# deliberately out of scope; this gate exists so dead-import debt and F821-class
+# bugs cannot re-accumulate, not to reformat the tree.
+#
+# Run locally with:  ruff check .
+# CI runs the same invocation (see .github/workflows/ci.yml).
+
+target-version = "py311"
+
+# Untracked research scratch directories are not part of the gate.
+# (extend-, not plain exclude: a bare exclude REPLACES ruff's defaults, which
+# cover .git — and one old branch ref here is literally named `...py`.)
+extend-exclude = ["working", "working_lensing", "codex_review_2026-07-21", ".claude"]
+
+[lint]
+select = ["F", "E9"]
+
+[lint.per-file-ignores]
+# Package __init__ files re-export their submodules' names on purpose.
+"**/__init__.py" = ["F401"]
+# Test files stub optional dependencies and import for availability probing.
+"tests/*" = ["F401", "F841"]
+"scripts/*" = ["F401"]

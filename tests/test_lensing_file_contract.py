@@ -33,7 +33,9 @@ def test_valid_contract_files_pass_without_truth_or_labels(tmp_path):
     sel = tmp_path / "selection_inputs.h5"
     with h5py.File(sel, "w") as f:
         f.attrs["format_version"] = "lensing-selection-inputs-1.0"
-        f.create_group("unlensed")
+        # A present group must carry its datasets: an EMPTY group used to be
+        # "contract valid" and then fail at load time (review P2-06).
+        f.create_group("unlensed").create_dataset("dL", data=np.ones(4))
     cfg = tmp_path / "run_config.json"; cfg.write_text(json.dumps({"format_version": "lensing-run-config-1.0"}))
 
     assert file_contract.validate_observed_gw_pe(pe)["ok"]

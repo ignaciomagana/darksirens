@@ -851,7 +851,6 @@ def build_parameter_space(
     labels += sampled_sky_labels
     lower += sampled_sky_lower
     upper += sampled_sky_upper
-    n_sky_eff = len(sampled_sky_labels)
 
     # Mark block: appended after sky so all earlier indices stay stable.
     labels += sampled_mark_labels

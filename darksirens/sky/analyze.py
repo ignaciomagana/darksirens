@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .registry import sky_model_prior_parser, get_sky_model
+from .registry import get_sky_model
 
 
 def _sky_column_indices(labels, sky_model):

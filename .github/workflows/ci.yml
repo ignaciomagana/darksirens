@@ -77,6 +77,22 @@ jobs:
           echo "running: $FILES"
           python -m pytest -q --no-header -rf $FILES
 
+  lint:
+    name: ruff (F + E9 gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Pinned so a rule-set change in a new ruff release cannot turn the gate
+      # red without a deliberate bump here and in the dev environment.
+      - run: python -m pip install "ruff==0.15.20"
+      # Configuration lives in ruff.toml (errors + definite bugs only); the
+      # tree is kept at zero findings, so any hit is a regression.
+      - run: ruff check .
+
   packaging:
     name: pip install . is importable
     runs-on: ubuntu-latest

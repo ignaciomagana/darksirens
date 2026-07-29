@@ -36,7 +36,6 @@ tests.
 
 from __future__ import annotations
 
-import warnings
 import numpy as np
 
 # numpy 2 renamed trapz -> trapezoid; the validated env floor is numpy 1.26,

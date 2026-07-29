@@ -29,7 +29,6 @@ from darksirens.lensing.partitions import (
     connected_components_from_candidate_pairs,
     enumerate_compatible_partitions,
     exact_partition_components,
-    exact_partitions_componentwise,
     parse_edge_mark_keys,
     parse_folded_mark_keys,
     validate_candidate_pairs,
