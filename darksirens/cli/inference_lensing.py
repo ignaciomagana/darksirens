@@ -223,8 +223,11 @@ from darksirens.likelihood.likelihood_with_clusters import (
     SINGLETON_LENSING_MIXTURE,
 )
 from darksirens.lensing.lensed_injections import (
+    DEFAULT_PAIR_ORIENTATION_MODE,
     load_lensed_single_image_set,
+    pair_orientation_mismatch_message,
     read_fc_pdet_attrs,
+    read_pair_orientation_mode,
 )
 from darksirens.lensing.fcpdet import make_fc_pdet_params
 
@@ -487,7 +490,7 @@ def _event_gps_times_from_catalog(raw_catalog):
     return np.asarray(times, dtype=float)
 
 
-def _orient_time_marks(candidate_pairs, gps_times):
+def _orient_time_marks(candidate_pairs, gps_times, opts=None):
     """Give each time mark the sign of ``t_j - t_i`` for its stored order.
 
     For SIS the type-I minimum arrives BEFORE the type-II saddle
@@ -498,6 +501,21 @@ def _orient_time_marks(candidate_pairs, gps_times):
     sign from the catalog's arrival times, keeping the mark's magnitude and
     sigma untouched.
 
+    Two inconsistencies are fatal here rather than warned about, because both
+    put a mark the run cannot justify into the time-marked pair likelihood:
+
+    * a non-finite ``delta_t_obs``/``sigma_delta_t`` (NaN/inf propagates
+      straight through the y-integral), and
+    * a mark magnitude that does not reproduce the catalog's arrival
+      separation -- the mark and the catalog then describe different events,
+      and the old behaviour silently kept the MARK's magnitude with the
+      CATALOG's sign, i.e. a delay no input actually claims.
+
+    ``--allow_time_mark_mismatch true`` downgrades both to loud warnings and
+    restores exactly that legacy behaviour, so deliberate ablations remain
+    possible.  A sign-only disagreement (magnitude agrees, stored order
+    reversed) is not an inconsistency: resolving it is this function's job.
+
     Returns ``(pairs, signed)``. ``signed`` is True only when every marked pair
     could be oriented; otherwise the pairs are returned unchanged and the
     likelihood keeps the legacy |dt|-in-both-branches behaviour.
@@ -507,6 +525,33 @@ def _orient_time_marks(candidate_pairs, gps_times):
     marked = [p for p in candidate_pairs if p.delta_t_obs is not None]
     if not marked:
         return candidate_pairs, False
+    allow_mismatch = str_to_bool(getattr(opts, "allow_time_mark_mismatch", False))
+    # Ahead of the gps_times gate below: a broken mark is broken whether or not
+    # the catalog can orient it.
+    nonfinite = [
+        (int(p.i), int(p.j), float(p.delta_t_obs),
+         float(p.sigma_delta_t) if p.sigma_delta_t is not None else float("nan"))
+        for p in marked
+        if not np.isfinite(float(p.delta_t_obs))
+        or (p.sigma_delta_t is not None and not np.isfinite(float(p.sigma_delta_t)))
+    ]
+    if nonfinite:
+        shown = ", ".join(
+            f"({i},{j}): delta_t_obs={dt:.6g}, sigma_delta_t={sig:.6g}"
+            for i, j, dt, sig in nonfinite[:5]
+        )
+        if len(nonfinite) > 5:
+            shown += f", ... (+{len(nonfinite) - 5} more)"
+        message = (
+            f"{len(nonfinite)}/{len(marked)} time-marked candidate edges carry a "
+            f"non-finite time mark: {shown}. A NaN/inf delay or width propagates "
+            "through the marked pair likelihood instead of being rejected. Fix "
+            "the candidate-pair file, or pass --allow_time_mark_mismatch true to "
+            "proceed anyway."
+        )
+        if not allow_mismatch:
+            raise SystemExit(f"non-finite candidate time marks: {message}")
+        _warn(message)
     if gps_times is None:
         return candidate_pairs, False
     n = int(gps_times.shape[0])
@@ -532,15 +577,24 @@ def _orient_time_marks(candidate_pairs, gps_times):
             )
         )
     if inconsistent:
-        i, j, dt_mark, dt_catalog = inconsistent[0]
-        _warn(
-            f"{len(inconsistent)}/{len(marked)} time-marked candidate edges "
-            "disagree with the observed catalog's arrival times, e.g. edge "
-            f"({i},{j}): |marks.delta_t_obs| = {dt_mark:.6g} s vs "
-            f"|t_j - t_i| = {abs(dt_catalog):.6g} s. Using the mark's magnitude "
-            "with the catalog's arrival ORDER; verify the two agree on which "
-            "event came first."
+        # Report the WORST edge, not the first: with many marked edges the first
+        # disagreement is rarely the informative one.
+        i, j, dt_mark, dt_catalog = max(
+            inconsistent, key=lambda e: abs(abs(e[3]) - e[2])
         )
+        message = (
+            f"{len(inconsistent)}/{len(marked)} time-marked candidate edges "
+            "disagree with the observed catalog's arrival times, worst edge "
+            f"({i},{j}): |marks.delta_t_obs| = {dt_mark:.6g} s vs "
+            f"|t_j - t_i| = {abs(dt_catalog):.6g} s. The mark and the catalog "
+            "therefore describe different events; --allow_time_mark_mismatch "
+            "true proceeds with the mark's magnitude and the catalog's arrival "
+            "ORDER, but verify first that the two agree on which event came "
+            "first."
+        )
+        if not allow_mismatch:
+            raise SystemExit(f"time-mark magnitude disagreement: {message}")
+        _warn(message)
     # Every marked pair oriented iff every marked pair had in-range endpoints.
     ok = all(0 <= int(p.i) < n and 0 <= int(p.j) < n for p in marked)
     return (out, True) if ok else (candidate_pairs, False)
@@ -888,37 +942,70 @@ def _load_wl_table_arrays(opts):
     )
 
 
-def _warn_pair_orientation_mismatch(opts):
-    """Warn when the inference-side --pair_orientation_mode differs from the
-    convention the lensed-injection campaign was rendered with.
+def _gate_pair_orientation_mismatch(opts):
+    """Refuse an inference-side --pair_orientation_mode the campaign was not
+    rendered with, while the affected channel is enabled.
 
-    The generator records ``pair_orientation_mode`` as a file attr (files
-    from older generators lack it and were always rendered 'independent').
-    A mismatch mis-normalises the J=2 / lensed-singleton channel ratio by up
-    to ~2.6x (see darksirens.lensing.fcpdet) — warn, don't fail, so ablation
-    studies remain possible on purpose.
+    The generator records ``pair_orientation_mode`` as a file attr (files from
+    older generators lack it and were always rendered 'independent').  The
+    runtime flag selects the lensed-singleton censoring factor, so a mismatch
+    mis-normalises the J=2 / lensed-singleton channel ratio that sets A_tau by
+    up to ~2.6x (see darksirens.lensing.fcpdet).
+
+    That ratio only enters the likelihood through the lensed-singleton channel,
+    so the verdict is gated on it:
+
+    * ``--singleton_lensing sl_mixture`` -- fatal, because the run's headline
+      lens-rate normalisation would be wrong by a factor no output records;
+    * ``off`` -- warning, the censoring factor is not evaluated at all.
+
+    ``--allow_pair_orientation_mismatch true`` downgrades the fatal case to a
+    loud warning so deliberate convention ablations remain possible.
     """
     path = getattr(opts, "lensed_injections_path", None)
     if not path:
         return
     try:
-        with h5py.File(path, "r") as f:
-            file_mode = str(f.attrs.get("pair_orientation_mode", "independent"))
+        campaign_mode = read_pair_orientation_mode(path)
     except OSError:
         return
-    run_mode = getattr(opts, "pair_orientation_mode", "independent")
-    if file_mode != run_mode:
+    _require_pair_orientation_match(opts, campaign_mode, path)
+
+
+def _require_pair_orientation_match(opts, campaign_mode, path):
+    """The verdict half of ``_gate_pair_orientation_mismatch``.
+
+    Split out so the lensed-singleton loader can re-check against the campaign
+    attrs IT read, at the point where the censoring factor is actually built,
+    instead of trusting a startup check on a path that may since have changed.
+    """
+    run_mode = getattr(
+        opts, "pair_orientation_mode", DEFAULT_PAIR_ORIENTATION_MODE
+    )
+    if campaign_mode == run_mode:
+        return
+    message = pair_orientation_mismatch_message(path, campaign_mode, run_mode)
+    channel_enabled = getattr(opts, "singleton_lensing", "off") == "sl_mixture"
+    if not channel_enabled:
         warnings.warn(
-            f"--pair_orientation_mode {run_mode!r} but the lensed-injection "
-            f"campaign {path!r} was rendered with {file_mode!r}. The pair "
-            "efficiencies (rendered flags) and the lensed-singleton censoring "
-            "factor now follow DIFFERENT orientation conventions — the "
-            "J=2/lensed-singleton channel ratio that sets A_tau is "
-            "mis-normalised by up to ~2.6x. Re-render the campaign or match "
-            "the flag.",
+            f"{message} (--singleton_lensing off, so the censoring factor is "
+            "not evaluated in this run.)",
             RuntimeWarning,
             stacklevel=2,
         )
+        return
+    if str_to_bool(getattr(opts, "allow_pair_orientation_mismatch", False)):
+        warnings.warn(
+            f"{message} Proceeding under --allow_pair_orientation_mismatch: "
+            "the lens-rate normalisation of this run is NOT trustworthy.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    raise SystemExit(
+        f"pair_orientation_mode mismatch: {message} Pass "
+        "--allow_pair_orientation_mismatch true to proceed anyway."
+    )
 
 
 def _load_singleton_lensing_inputs(opts):
@@ -935,7 +1022,13 @@ def _load_singleton_lensing_inputs(opts):
         raise SystemExit(
             "--singleton_lensing sl_mixture requires --lensed_injections_path"
         )
-    lensed_singles = load_lensed_single_image_set(opts.lensed_injections_path)
+    lensed_singles, campaign = load_lensed_single_image_set(
+        opts.lensed_injections_path, return_campaign_attrs=True
+    )
+    # Last net, at the point where the censoring factor enters the likelihood.
+    _require_pair_orientation_match(
+        opts, campaign["pair_orientation_mode"], opts.lensed_injections_path
+    )
     if lensed_singles.n_kept == 0:
         raise SystemExit(
             "--singleton_lensing sl_mixture: the lensed-injection file has no "
@@ -964,7 +1057,7 @@ def load_inputs(opts):
     # likelihood closure.  main() already rejects this via
     # _resolve_lensing_run_config; this is the second net.
     _validate_partition_mode_against_cluster_mode(opts)
-    _warn_pair_orientation_mismatch(opts)
+    _gate_pair_orientation_mismatch(opts)
     rng = np.random.default_rng(opts.seed)
 
     # --- singleton PE (event-major flatten) ---
@@ -1083,10 +1176,10 @@ def load_inputs(opts):
         )
         _gate_suspicious_time_marks(opts, candidate_pairs_raw)
         candidate_pairs, pair_time_signed = _orient_time_marks(
-            candidate_pairs, event_gps_times
+            candidate_pairs, event_gps_times, opts
         )
         candidate_pairs_raw, _ = _orient_time_marks(
-            candidate_pairs_raw, event_gps_times
+            candidate_pairs_raw, event_gps_times, opts
         )
     partition_pair_indices = []
     if partition is not None:
@@ -2682,6 +2775,13 @@ def build_parser():
         help="true downgrades the placeholder/synthetic time-mark hard error to a warning",
     )
     model.add_argument(
+        "--allow_time_mark_mismatch",
+        type=str_to_bool, nargs="?", const=True, default=False, metavar="BOOL",
+        help="true downgrades the non-finite / catalog-disagreeing time-mark "
+             "hard errors to warnings, keeping the legacy behaviour of using "
+             "the MARK's magnitude with the catalog's arrival order",
+    )
+    model.add_argument(
         "--pair_time_mark_impl",
         choices=["auto", "quadrature", "delta"],
         default="auto",
@@ -2721,6 +2821,14 @@ def build_parser():
              "generated with --pair-orientation-mode shared_iota; mixing "
              "conventions mis-normalises the J=2/lensed-singleton ratio by "
              "up to ~2.6x (see darksirens.lensing.fcpdet).",
+    )
+    model.add_argument(
+        "--allow_pair_orientation_mismatch",
+        type=str_to_bool, nargs="?", const=True, default=False, metavar="BOOL",
+        help="true downgrades the campaign-vs-runtime --pair_orientation_mode "
+             "hard error to a warning. Fatal by default only when "
+             "--singleton_lensing sl_mixture puts the censoring factor in the "
+             "likelihood; use for deliberate convention ablations only.",
     )
     fixing = p.add_argument_group("Fixing")
     fixing.add_argument("--fix_cosmology", type=str_to_bool, default=True, metavar="BOOL")

@@ -18,6 +18,11 @@ from darksirens.lensing.marginal_diagnostics import (
     sis_time_mark_support,
     sis_time_mark_support_message,
 )
+from darksirens.lensing.lensed_injections import (
+    DEFAULT_PAIR_ORIENTATION_MODE,
+    pair_orientation_mismatch_message,
+    read_pair_orientation_mode,
+)
 from darksirens.lensing.slmarks import DEFAULT_T0_SECONDS
 from darksirens.lensing.partitions import (
     apply_edge_mark_prior_keys,
@@ -36,6 +41,21 @@ from darksirens.lensing import file_contract
 
 def _get(opts: Any, name: str, default=None):
     return getattr(opts, name, default)
+
+
+def _flag(opts: Any, name: str) -> bool:
+    """A CLI boolean override, tolerating the string spellings argparse accepts.
+
+    Library callers hand preflight plain SimpleNamespaces, so an override may
+    arrive as "true" rather than True.
+    """
+    from darksirens.cli.common import str_to_bool
+
+    value = _get(opts, name, False)
+    try:
+        return bool(str_to_bool(value))
+    except ValueError:
+        return False
 
 
 def _read_json(path: str | Path):
@@ -251,13 +271,23 @@ def _check_pair_pe(
                 has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
                 if has_dt:
                     try:
-                        pair_dt_values.append(float(
+                        dt_value = float(
                             g.attrs["delta_t_obs"]
                             if "delta_t_obs" in g.attrs
                             else np.asarray(g["delta_t_obs"])[()]
-                        ))
+                        )
                     except Exception as exc:
                         errors.append(f"{pname} delta_t_obs not readable: {exc}")
+                    else:
+                        pair_dt_values.append(dt_value)
+                        # A non-finite delay is a broken mark, not a wide one:
+                        # it propagates NaN/-inf through the marked pair
+                        # likelihood, and the SIS support diagnostic below
+                        # drops it rather than judging it.
+                        if not np.isfinite(dt_value):
+                            errors.append(
+                                f"{pname} delta_t_obs must be finite, got {dt_value}"
+                            )
                 has_sig = (
                     "sigma_delta_t" in g.attrs
                     or "sigma_delta_t" in g
@@ -288,7 +318,10 @@ def _check_pair_pe(
                             )
                         )
                         if not np.isfinite(sig) or sig <= 0:
-                            errors.append(f"{pname} sigma_delta_t must be positive")
+                            errors.append(
+                                f"{pname} sigma_delta_t must be finite and "
+                                f"positive, got {sig}"
+                            )
                     except Exception as exc:
                         errors.append(f"{pname} sigma_delta_t not readable: {exc}")
                 if unified_observed_mode:
@@ -386,6 +419,21 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
                         "candidate pair "
                         f"({pair.i},{pair.j}) missing marks.delta_t_obs/sigma_delta_t "
                         "required by time edge-mark likelihood"
+                    )
+                elif not (
+                    np.isfinite(float(pair.delta_t_obs))
+                    and np.isfinite(float(pair.sigma_delta_t))
+                ):
+                    # Second net for pairs built in-process: the JSON path is
+                    # already finiteness-validated by validate_edge_marks, but a
+                    # library caller can construct CandidatePair directly, and
+                    # the support diagnostic below silently discards non-finite
+                    # delays instead of failing on them.
+                    errors.append(
+                        "candidate pair "
+                        f"({pair.i},{pair.j}) has non-finite time marks: "
+                        f"delta_t_obs={float(pair.delta_t_obs)}, "
+                        f"sigma_delta_t={float(pair.sigma_delta_t)}"
                     )
             suspicion = candidate_time_mark_suspicion(pairs)
             summary.update(suspicion)
@@ -515,6 +563,54 @@ def _check_lensed(path, errors, summary, opts=None):
                             errors.append(f"pair_tag_model={kind} requires finite values in {dname}")
     except Exception as exc:
         errors.append(f"lensed_injections_path not readable: {path}: {exc}")
+
+
+def _check_pair_orientation_mode(opts, errors, warnings, summary):
+    """Compare the campaign's rendered orientation convention to the runtime one.
+
+    The runtime ``pair_orientation_mode`` selects the lensed-singleton censoring
+    factor while the campaign's rendered detection flags set the pair
+    efficiencies; mixing the two conventions mis-normalises the
+    J=2/lensed-singleton channel ratio that sets A_tau by up to ~2.6x.  It is
+    an ERROR exactly when the lensed-singleton channel is enabled (and not
+    explicitly waived), a warning otherwise -- mirroring the runtime gate in
+    cli/inference_lensing._gate_pair_orientation_mismatch, so --preflight_only
+    cannot pass a configuration the run itself would refuse.
+
+    Deliberately NOT nested inside the cluster_mode=j2 block: the Mould-style
+    per-event ablation is cluster_mode=off + --singleton_lensing sl_mixture,
+    which is precisely the case where the mismatch bites.
+    """
+    path = _get(opts, "lensed_injections_path")
+    if not path or not Path(path).exists():
+        return
+    try:
+        campaign_mode = read_pair_orientation_mode(path)
+    except Exception as exc:
+        errors.append(
+            f"lensed_injections_path pair_orientation_mode not readable: {path}: {exc}"
+        )
+        return
+    run_mode = str(
+        _get(opts, "pair_orientation_mode", DEFAULT_PAIR_ORIENTATION_MODE)
+        or DEFAULT_PAIR_ORIENTATION_MODE
+    )
+    channel_enabled = _get(opts, "singleton_lensing", "off") == "sl_mixture"
+    summary["pair_orientation_mode_campaign"] = campaign_mode
+    summary["pair_orientation_mode_runtime"] = run_mode
+    summary["pair_orientation_mode_match"] = bool(campaign_mode == run_mode)
+    if campaign_mode == run_mode:
+        return
+    message = pair_orientation_mismatch_message(path, campaign_mode, run_mode)
+    if channel_enabled and not _flag(opts, "allow_pair_orientation_mismatch"):
+        errors.append(message)
+    elif channel_enabled:
+        warnings.append(f"{message} Waived by allow_pair_orientation_mismatch.")
+    else:
+        warnings.append(
+            f"{message} (singleton_lensing=off, so the censoring factor is not "
+            "evaluated in this run.)"
+        )
 
 
 def run_lensing_preflight(opts) -> dict:
@@ -659,6 +755,7 @@ def run_lensing_preflight(opts) -> dict:
             )
         else:
             summary["pair_metadata_from_candidate_pairs"] = True
+    _check_pair_orientation_mode(opts, errors, warnings, summary)
     if (
         _get(opts, "wl_selection") == "wl_lognormal"
         and _get(opts, "wl_backend") != "lognormal"

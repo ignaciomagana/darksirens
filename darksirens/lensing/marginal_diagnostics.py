@@ -78,15 +78,25 @@ def sis_time_mark_support(delta_t_seconds: Iterable[float], T0_seconds: float) -
 
     Returns
     -------
-    dict with ``n_marked``, ``n_out_of_support``, ``all_out_of_support``,
-    ``max_y_star``, ``min_y_star`` and ``T0_seconds``.
+    dict with ``n_marked``, ``n_nonfinite_delays``, ``n_out_of_support``,
+    ``all_out_of_support``, ``max_y_star``, ``min_y_star`` and ``T0_seconds``.
+
+    ``n_marked`` counts the FINITE delays the support verdict is computed from.
+    Non-finite delays cannot be placed relative to the support, so they are
+    excluded from that computation, but they are reported in
+    ``n_nonfinite_delays`` rather than dropped invisibly -- a NaN delay is a
+    broken mark, not an in-support one.
     """
-    dt = np.asarray([abs(float(x)) for x in delta_t_seconds if x is not None], dtype=float)
-    dt = dt[np.isfinite(dt)]
+    provided = [abs(float(x)) for x in delta_t_seconds if x is not None]
+    dt_all = np.asarray(provided, dtype=float)
+    finite = np.isfinite(dt_all)
+    n_nonfinite = int(dt_all.size - int(np.sum(finite)))
+    dt = dt_all[finite]
     T0 = float(T0_seconds)
     if dt.size == 0 or not np.isfinite(T0) or T0 <= 0.0:
         return {
             "n_marked": int(dt.size),
+            "n_nonfinite_delays": n_nonfinite,
             "n_out_of_support": 0,
             "all_out_of_support": False,
             "max_y_star": None,
@@ -97,6 +107,7 @@ def sis_time_mark_support(delta_t_seconds: Iterable[float], T0_seconds: float) -
     n_out = int(np.sum(y_star >= 1.0))
     return {
         "n_marked": int(dt.size),
+        "n_nonfinite_delays": n_nonfinite,
         "n_out_of_support": n_out,
         "all_out_of_support": bool(n_out == dt.size),
         "max_y_star": float(np.max(y_star)),

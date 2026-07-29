@@ -63,6 +63,11 @@ import jax.numpy as jnp
 import h5py
 
 
+# Campaigns predating the two-image orientation flag were all rendered with
+# independent per-image draws, so a missing attr means 'independent'.
+DEFAULT_PAIR_ORIENTATION_MODE = "independent"
+
+
 class LensedInjectionSet(NamedTuple):
     """Per-image lensed injection arrays + bookkeeping.
 
@@ -497,8 +502,47 @@ class LensedSingleImageSet(NamedTuple):
         return int(self.m1_src.shape[0])
 
 
-def load_lensed_single_image_set(path: str) -> LensedSingleImageSet:
-    """Load the exactly-one-detected per-source subset from an injection file."""
+def read_pair_orientation_mode(path: str) -> str:
+    """The two-image orientation convention the campaign was RENDERED with.
+
+    Single source of truth for the file attr and its legacy default, shared by
+    the lensing CLI's startup gate and by preflight so the two cannot disagree
+    about what an attr-less campaign means.
+    """
+    with h5py.File(path, "r") as f:
+        return str(
+            f.attrs.get("pair_orientation_mode", DEFAULT_PAIR_ORIENTATION_MODE)
+        )
+
+
+def pair_orientation_mismatch_message(path, campaign_mode, run_mode) -> str:
+    """Why a campaign/runtime orientation mismatch is not a cosmetic warning."""
+    return (
+        f"--pair_orientation_mode {run_mode!r} but the lensed-injection campaign "
+        f"{path!r} was rendered with {campaign_mode!r}. The pair efficiencies "
+        "(the campaign's rendered detection flags) and the analytic "
+        "lensed-singleton censoring factor then follow DIFFERENT orientation "
+        "conventions, so the J=2/lensed-singleton channel ratio that sets A_tau "
+        "is mis-normalised by up to ~2.6x (see darksirens.lensing.fcpdet). "
+        "Re-render the campaign with --pair-orientation-mode "
+        f"{run_mode!r}, or run with --pair_orientation_mode {campaign_mode!r}."
+    )
+
+
+def load_lensed_single_image_set(
+    path: str, *, return_campaign_attrs: bool = False
+):
+    """Load the exactly-one-detected per-source subset from an injection file.
+
+    With ``return_campaign_attrs`` the loader also returns the campaign's
+    rendering conventions as a plain dict (currently
+    ``pair_orientation_mode``).  They are deliberately NOT fields of
+    ``LensedSingleImageSet``: that NamedTuple is passed to
+    ``darksiren_log_likelihood_with_clusters`` as a traced JIT argument, and a
+    string leaf in the pytree is not a valid JAX type.  The subset view used to
+    drop the attr entirely, which is how a campaign/runtime orientation
+    mismatch could reach the likelihood unnoticed.
+    """
     with h5py.File(path, "r") as f:
         source_id = np.asarray(f["source_id"][:])
         image_id = np.asarray(f["image_id"][:])
@@ -522,7 +566,14 @@ def load_lensed_single_image_set(path: str) -> LensedSingleImageSet:
         image_is_plus = det_p[one_det]
         mu_p = plus("mu")[one_det]
         mu_m = minus("mu")[one_det]
-        return LensedSingleImageSet(
+        campaign_attrs = {
+            "pair_orientation_mode": str(
+                f.attrs.get(
+                    "pair_orientation_mode", DEFAULT_PAIR_ORIENTATION_MODE
+                )
+            ),
+        }
+        singles = LensedSingleImageSet(
             m1_src=jnp.asarray(plus("m1_src")[one_det]),
             q_src=jnp.asarray(plus("q_src")[one_det]),
             z_src=jnp.asarray(plus("z_src")[one_det]),
@@ -536,6 +587,7 @@ def load_lensed_single_image_set(path: str) -> LensedSingleImageSet:
             valid=jnp.ones(int(one_det.sum()), dtype=bool),
             n_draw_sources=jnp.asarray(_read_n_draw_sources(f.attrs), dtype=jnp.float64),
         )
+    return (singles, campaign_attrs) if return_campaign_attrs else singles
 
 
 def read_fc_pdet_attrs(path: str) -> dict:

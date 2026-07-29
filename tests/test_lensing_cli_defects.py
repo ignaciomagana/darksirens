@@ -579,38 +579,352 @@ def test_pair_orientation_mode_flag_defaults_to_independent():
         )
 
 
-def test_pair_orientation_mismatch_warns_against_rendered_campaign(tmp_path):
-    """Running --pair_orientation_mode against a campaign rendered with the
-    OTHER convention must warn (the J=2/lensed-singleton ratio that sets
-    A_tau is mis-normalised by up to ~2.6x); matched modes stay silent, and
-    attr-less legacy files count as 'independent'."""
-    import warnings as _warnings
-
+def _campaign_file(tmp_path, name, mode=None):
+    """A stub lensed-injection file carrying only the campaign attr."""
     import h5py
+
+    path = str(tmp_path / name)
+    with h5py.File(path, "w") as f:
+        if mode is not None:
+            f.attrs["pair_orientation_mode"] = mode
+    return path
+
+
+def test_pair_orientation_mismatch_is_fatal_with_the_singleton_channel_on(tmp_path):
+    """Running --pair_orientation_mode against a campaign rendered with the
+    OTHER convention mis-normalises the J=2/lensed-singleton ratio that sets
+    A_tau by up to ~2.6x. That ratio only enters through the lensed-singleton
+    channel, so the mismatch is FATAL while that channel is enabled and a
+    warning otherwise -- it used to be a warning either way and ran on."""
     import darksirens.cli.inference_lensing as cli
 
-    path = str(tmp_path / "lensed.h5")
-    with h5py.File(path, "w") as f:
-        f.attrs["pair_orientation_mode"] = "shared_iota"
-
-    opts = _lensing_opts("--lensed_injections_path", path)
-    with pytest.warns(RuntimeWarning, match="pair_orientation_mode"):
-        cli._warn_pair_orientation_mismatch(opts)
+    path = _campaign_file(tmp_path, "lensed.h5", "shared_iota")
 
     opts = _lensing_opts("--lensed_injections_path", path,
-                         "--pair_orientation_mode", "shared_iota")
-    with _warnings.catch_warnings():
-        _warnings.simplefilter("error")
-        cli._warn_pair_orientation_mismatch(opts)
+                         "--singleton_lensing", "sl_mixture")
+    with pytest.raises(SystemExit, match="pair_orientation_mode mismatch"):
+        cli._gate_pair_orientation_mismatch(opts)
 
-    legacy = str(tmp_path / "legacy.h5")
-    with h5py.File(legacy, "w") as f:
-        pass
-    opts = _lensing_opts("--lensed_injections_path", legacy)
+    # attr-less legacy files count as 'independent', so the mismatch is
+    # detected in the other direction too.
+    legacy = _campaign_file(tmp_path, "legacy.h5")
+    opts = _lensing_opts("--lensed_injections_path", legacy,
+                         "--pair_orientation_mode", "shared_iota",
+                         "--singleton_lensing", "sl_mixture")
+    with pytest.raises(SystemExit, match="independent"):
+        cli._gate_pair_orientation_mismatch(opts)
+
+
+def test_pair_orientation_mismatch_override_downgrades_to_a_warning(tmp_path):
+    """Deliberate convention ablations stay possible, loudly."""
+    import darksirens.cli.inference_lensing as cli
+
+    path = _campaign_file(tmp_path, "lensed.h5", "shared_iota")
+    opts = _lensing_opts("--lensed_injections_path", path,
+                         "--singleton_lensing", "sl_mixture",
+                         "--allow_pair_orientation_mismatch")
+    assert opts.allow_pair_orientation_mismatch is True
+    with pytest.warns(RuntimeWarning, match="NOT trustworthy"):
+        cli._gate_pair_orientation_mismatch(opts)
+
+
+def test_pair_orientation_mismatch_warns_when_the_channel_is_off(tmp_path):
+    """--singleton_lensing off never evaluates the censoring factor, so the
+    mismatch cannot bias the likelihood; matched modes stay silent."""
+    import warnings as _warnings
+
+    import darksirens.cli.inference_lensing as cli
+
+    path = _campaign_file(tmp_path, "lensed.h5", "shared_iota")
+    opts = _lensing_opts("--lensed_injections_path", path)
+    assert opts.singleton_lensing == "off"
+    with pytest.warns(RuntimeWarning, match="pair_orientation_mode"):
+        cli._gate_pair_orientation_mismatch(opts)
+
+    for extra in (("--singleton_lensing", "sl_mixture"), ()):
+        opts = _lensing_opts("--lensed_injections_path", path,
+                             "--pair_orientation_mode", "shared_iota", *extra)
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            cli._gate_pair_orientation_mismatch(opts)
+
+
+def test_preflight_reports_the_pair_orientation_mismatch(tmp_path):
+    """--preflight_only must not pass a configuration the run itself refuses."""
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    path = _campaign_file(tmp_path, "lensed.h5", "shared_iota")
+
+    def _report(*extra):
+        return run_lensing_preflight(
+            _lensing_opts("--lensed_injections_path", path, *extra)
+        )
+
+    on = _report("--singleton_lensing", "sl_mixture")
+    assert any("mis-normalised" in e for e in on["errors"])
+    assert on["summary"]["pair_orientation_mode_campaign"] == "shared_iota"
+    assert on["summary"]["pair_orientation_mode_runtime"] == "independent"
+    assert on["summary"]["pair_orientation_mode_match"] is False
+
+    waived = _report("--singleton_lensing", "sl_mixture",
+                     "--allow_pair_orientation_mismatch")
+    assert not any("mis-normalised" in e for e in waived["errors"])
+    assert any("mis-normalised" in w for w in waived["warnings"])
+
+    off = _report()
+    assert not any("mis-normalised" in e for e in off["errors"])
+    assert any("mis-normalised" in w for w in off["warnings"])
+
+    matched = _report("--pair_orientation_mode", "shared_iota",
+                      "--singleton_lensing", "sl_mixture")
+    assert not any("mis-normalised" in m
+                   for m in matched["errors"] + matched["warnings"])
+    assert matched["summary"]["pair_orientation_mode_match"] is True
+
+
+def _one_source_campaign(tmp_path, name, mode=None):
+    """A real one-source (exactly-one-detected) injection file."""
+    import h5py
+
+    from darksirens.lensing.lensed_injections import save_lensed_injections
+
+    path = str(tmp_path / name)
+    two = np.array([0.0, 0.0])
+    save_lensed_injections(
+        path,
+        source_id=np.array([0, 0]), image_id=np.array([0, 1]),
+        m1_src=two + 30.0, q_src=two + 0.8, z_src=two + 0.5,
+        chieff=two, y_source=two + 0.4, mu=np.array([3.0, 1.5]),
+        detected=np.array([True, False]),
+        p_prop_src=two + 1.0, p_prop_y=two + 1.0, n_draw_sources=7,
+        snr_model_attrs={"fc_rho_thr": 8.0, "fc_r0": 750.0, "fc_mc_bar": 1.22},
+    )
+    if mode is not None:
+        with h5py.File(path, "r+") as f:
+            f.attrs["pair_orientation_mode"] = mode
+    return path
+
+
+def test_singleton_subset_loader_preserves_the_campaign_attr(tmp_path):
+    """The exactly-one-detected subset view dropped pair_orientation_mode, so a
+    library caller had no way to check the convention it was rendered with. It
+    stays OUT of the NamedTuple (a str leaf is not a valid JIT argument) and
+    comes back alongside it."""
+    from darksirens.lensing.lensed_injections import load_lensed_single_image_set
+
+    path = _one_source_campaign(tmp_path, "campaign.h5", "shared_iota")
+    singles, campaign = load_lensed_single_image_set(
+        path, return_campaign_attrs=True
+    )
+    assert campaign["pair_orientation_mode"] == "shared_iota"
+    assert singles.n_kept == 1
+    # Default call is unchanged (and JIT-safe: no string leaf).
+    bare = load_lensed_single_image_set(path)
+    assert bare.n_kept == 1
+    assert not any(isinstance(leaf, str) for leaf in bare)
+
+    # An attr-less campaign reports the legacy convention, not None.
+    legacy = _one_source_campaign(tmp_path, "legacy_campaign.h5")
+    _, legacy_campaign = load_lensed_single_image_set(
+        legacy, return_campaign_attrs=True
+    )
+    assert legacy_campaign["pair_orientation_mode"] == "independent"
+
+
+def test_singleton_channel_loader_rechecks_the_campaign_attr(tmp_path):
+    """The preserved attr has to be USED where the censoring factor is built,
+    not only in the startup gate."""
+    import darksirens.cli.inference_lensing as cli
+
+    path = _one_source_campaign(tmp_path, "campaign.h5", "shared_iota")
+    opts = _lensing_opts("--lensed_injections_path", path,
+                         "--singleton_lensing", "sl_mixture")
+    with pytest.raises(SystemExit, match="pair_orientation_mode mismatch"):
+        cli._load_singleton_lensing_inputs(opts)
+
+    matched = _lensing_opts("--lensed_injections_path", path,
+                            "--singleton_lensing", "sl_mixture",
+                            "--pair_orientation_mode", "shared_iota")
+    loaded = cli._load_singleton_lensing_inputs(matched)
+    assert loaded["lensed_singles"].n_kept == 1
+    assert loaded["fc_pdet_params"] is not None
+
+
+# ---------------------------------------------------------------------------
+# time-mark magnitude / finiteness vs the observed catalog
+# ---------------------------------------------------------------------------
+
+def _time_marked_pairs(delta_t_obs, sigma_delta_t=10.0):
+    from darksirens.lensing.partitions import CandidatePair, EdgeMarks
+
+    return [
+        CandidatePair(0, 1, -1.0, None,
+                      EdgeMarks(delta_t_obs=delta_t_obs,
+                                sigma_delta_t=sigma_delta_t))
+    ]
+
+
+def _gps(*times):
+    return np.asarray(times, dtype=float)
+
+
+def test_time_mark_magnitude_disagreement_is_fatal():
+    """The mark magnitude must reproduce the catalog's arrival separation. It
+    used to warn and then feed the likelihood the MARK's magnitude with the
+    CATALOG's sign -- a delay neither input claims."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts()
+    assert opts.allow_time_mark_mismatch is False
+    with pytest.raises(SystemExit, match=r"\(0,1\)"):
+        cli._orient_time_marks(_time_marked_pairs(500.0), _gps(0.0, 100.0), opts)
+    # Fatal by default for direct library callers too (no opts at all).
+    with pytest.raises(SystemExit, match="time-mark magnitude disagreement"):
+        cli._orient_time_marks(_time_marked_pairs(500.0), _gps(0.0, 100.0))
+
+
+def test_time_mark_mismatch_override_keeps_the_legacy_orientation(capsys):
+    """--allow_time_mark_mismatch restores the old behaviour verbatim: the
+    mark's magnitude, the catalog's sign, and a loud warning."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--allow_time_mark_mismatch")
+    assert opts.allow_time_mark_mismatch is True
+
+    pairs, signed = cli._orient_time_marks(
+        _time_marked_pairs(500.0), _gps(0.0, 100.0), opts
+    )
+    assert signed
+    assert pairs[0].delta_t_obs == 500.0        # mark magnitude, catalog sign +
+    assert pairs[0].sigma_delta_t == 10.0
+    out = capsys.readouterr().out
+    assert "disagree with the observed catalog" in out and "(0,1)" in out
+
+    # Reversed arrival order -> same magnitude, negative sign.
+    flipped, _ = cli._orient_time_marks(
+        _time_marked_pairs(500.0), _gps(100.0, 0.0), opts
+    )
+    assert flipped[0].delta_t_obs == -500.0
+
+
+def test_time_mark_disagreement_reports_the_worst_edge(capsys):
+    """With several bad edges the first one is rarely the informative one."""
+    import darksirens.cli.inference_lensing as cli
+    from darksirens.lensing.partitions import CandidatePair, EdgeMarks
+
+    marks = lambda dt: EdgeMarks(delta_t_obs=dt, sigma_delta_t=10.0)
+    pairs = [
+        CandidatePair(0, 1, -1.0, None, marks(200.0)),   # off by 100 s
+        CandidatePair(1, 2, -1.0, None, marks(9000.0)),  # off by 8900 s
+    ]
+    with pytest.raises(SystemExit, match=r"worst edge \(1,2\)"):
+        cli._orient_time_marks(pairs, _gps(0.0, 100.0, 200.0), _lensing_opts())
+
+
+def test_nonfinite_time_marks_are_fatal_even_without_arrival_times():
+    """A NaN delay or width is broken whether or not the catalog can orient it;
+    it propagated straight into the marked pair likelihood before."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts()
+    for bad in (_time_marked_pairs(np.nan), _time_marked_pairs(np.inf),
+                _time_marked_pairs(100.0, sigma_delta_t=np.nan)):
+        with pytest.raises(SystemExit, match="non-finite candidate time marks"):
+            cli._orient_time_marks(bad, _gps(0.0, 100.0), opts)
+        # The check sits ahead of the "no arrival times -> nothing to do" exit.
+        with pytest.raises(SystemExit, match="non-finite candidate time marks"):
+            cli._orient_time_marks(bad, None, opts)
+
+    allowed = _lensing_opts("--allow_time_mark_mismatch")
+    pairs, signed = cli._orient_time_marks(
+        _time_marked_pairs(np.nan), _gps(0.0, 100.0), allowed
+    )
+    assert signed and np.isnan(pairs[0].delta_t_obs)
+
+
+def test_sign_only_time_mark_disagreement_is_corrected_silently(capsys):
+    """The magnitude agrees and only the stored order is reversed: resolving
+    that IS this function's job, so it must not be reported at all."""
+    import warnings as _warnings
+
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts()
     with _warnings.catch_warnings():
         _warnings.simplefilter("error")
-        cli._warn_pair_orientation_mismatch(opts)
-    opts = _lensing_opts("--lensed_injections_path", legacy,
-                         "--pair_orientation_mode", "shared_iota")
-    with pytest.warns(RuntimeWarning, match="independent"):
-        cli._warn_pair_orientation_mismatch(opts)
+        pairs, signed = cli._orient_time_marks(
+            _time_marked_pairs(100.0), _gps(100.0, 0.0), opts
+        )
+    assert signed
+    assert pairs[0].delta_t_obs == -100.0
+    assert capsys.readouterr().out == ""
+
+
+def test_sis_support_diagnostic_counts_discarded_nonfinite_delays():
+    """The support verdict is finite-only by construction; the non-finite
+    delays it cannot judge are now counted instead of vanishing."""
+    from darksirens.lensing.marginal_diagnostics import sis_time_mark_support
+
+    day = 86400.0
+    support = sis_time_mark_support([1 * day, np.nan, np.inf, None], 5.36e6)
+    assert support["n_marked"] == 1            # unchanged: finite delays only
+    assert support["n_nonfinite_delays"] == 2
+    assert support["n_out_of_support"] == 0
+
+    # Also present on the degenerate early-return branch.
+    empty = sis_time_mark_support([np.nan], 5.36e6)
+    assert empty["n_marked"] == 0 and empty["n_nonfinite_delays"] == 1
+    assert sis_time_mark_support([1 * day], 5.36e6)["n_nonfinite_delays"] == 0
+
+
+def test_preflight_rejects_nonfinite_candidate_time_marks(tmp_path, monkeypatch):
+    """Preflight collected candidate delta_t_obs without ever checking it was
+    finite; the SIS-support diagnostic then discarded the non-finite ones."""
+    import json
+
+    from darksirens.lensing import preflight
+    from darksirens.lensing.partitions import CandidatePair, EdgeMarks
+
+    opts = _lensing_opts("--pair_marks", "time")
+    path = tmp_path / "candidates.json"
+    path.write_text(json.dumps({
+        "n_events": 2,
+        "pairs": [{"i": 0, "j": 1, "log_prior_odds": -1.0,
+                   "marks": {"delta_t_obs": 1.0e5, "sigma_delta_t": 3600.0}}],
+    }))
+    errors, warns, summary = [], [], {}
+    preflight._check_candidates(str(path), 2, opts, errors, warns, summary)
+    assert not errors
+
+    # The JSON reader rejects non-finite marks itself, so reach the check the
+    # way a direct library caller does: with pairs built in-process.
+    bad = (CandidatePair(0, 1, -1.0, None,
+                         EdgeMarks(delta_t_obs=np.nan, sigma_delta_t=3600.0)),)
+    monkeypatch.setattr(preflight, "validate_candidate_pairs",
+                        lambda data: (2, bad))
+    errors, warns, summary = [], [], {}
+    preflight._check_candidates(str(path), 2, opts, errors, warns, summary)
+    assert any("non-finite time marks" in e for e in errors), errors
+
+
+def test_preflight_rejects_nonfinite_pair_pe_time_marks(tmp_path):
+    """The fixed-partition path reads delta_t_obs straight off the pair file."""
+    import h5py
+
+    from darksirens.lensing import preflight
+
+    path = str(tmp_path / "pairs.h5")
+    with h5py.File(path, "w") as f:
+        f.attrs["npairs"] = 1
+        g = f.create_group("pair_0")
+        g.attrs["event_index_image0"] = 0
+        g.attrs["event_index_image1"] = 1
+        g.attrs["delta_t_obs"] = np.nan
+        g.attrs["sigma_delta_t"] = np.nan
+
+    errors, warnings_, summary = [], [], {}
+    opts = _lensing_opts("--pair_marks", "time", "--partition_mode", "fixed")
+    preflight._check_pair_pe(path, 2, [(0, 1)], opts, errors, warnings_,
+                             summary, unified_observed_mode=True)
+    assert any("delta_t_obs must be finite" in e for e in errors), errors
+    assert any("sigma_delta_t must be finite" in e for e in errors), errors
