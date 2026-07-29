@@ -56,6 +56,22 @@ darksirens_skymaps_to_samples \
   --nsamp 5000 --zmax 1.5 --seed 21
 ```
 
+**The population must be held fixed.** Because the mass/spin coordinates are
+surrogates rather than posterior samples, fitting a population to them measures
+the surrogate proposal, and the mass/spin factors stop cancelling against the
+injection-based selection integral. The output therefore carries
+`requires_fixed_population = True`, and `darksirens_inference` refuses to start
+on it with `--fix_population false`:
+
+```bash
+darksirens_inference --gw_path data/gwdata_skymaps.h5 ... --fix_population true
+```
+
+Make sure the injection set's mass/spin draws are reweighted to that same fixed
+model. `--allow_skymap_population` downgrades the refusal to a loud warning for
+deliberate methodological studies; the population posterior of such a run is not
+a measurement.
+
 Options:
 
 - `--skymap_dir`, `--output`: required input directory and output `gwdata.h5`.
@@ -189,7 +205,13 @@ darksirens_inference \
 - `--shared_beta`: whether to use one shared beta/pairing distribution (`true`, default) or per-component beta parameters (`false`).
 - `--shared_spin`: whether to use one shared spin distribution (`true`, default) or per-component spin parameters (`false`).
 - `--shared_gamma`: whether to use one shared redshift-evolution gamma (`true`, default) or per-component gamma parameters (`false`).
-- `--fix_population`: fix all population parameters to fiducial values.
+- `--fix_population`: fix all population parameters to fiducial values. Required
+  when `--gw_path` is a `darksirens_skymaps_to_samples` product (it declares
+  `requires_fixed_population`); see
+  [`darksirens_skymaps_to_samples`](#darksirens_skymaps_to_samples).
+- `--allow_skymap_population`: downgrade that requirement from a startup refusal
+  to a loud warning. Methodological studies only — the population posterior of
+  such a run measures the surrogate proposal, not the astrophysical population.
 - `--fix_cosmology`: fix all cosmological parameters (`H0`, `Om0`, `w0`, `wa`) to fiducial values.
 - `--fix_de`: fix only the CPL dark-energy parameters (`w0=-1`, `wa=0`) while leaving `H0` and `Om0` available unless fixed separately.
 - `--fix_survey`: fix survey-completion parameters to fiducial values.

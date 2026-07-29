@@ -81,6 +81,12 @@ _NON_SEMANTIC_KEYS = frozenset({
     "dynesty_diagnostics",
     "preflight_only",
     "sampler_preflight",
+    # start-time gates: they decide whether a run is ALLOWED to begin, not what
+    # it targets.  --allow_skymap_population only suppresses the refusal to fit
+    # a population from skymap-surrogate mass/spin draws; the target difference
+    # it permits is carried by fix_population, which is semantic.  Keeping it
+    # out preserves the digest of every run that predates the flag.
+    "allow_skymap_population",
     # performance-only execution knobs
     "row_chunk",
     "gp3d_pix_chunk",

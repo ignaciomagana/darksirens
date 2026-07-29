@@ -12,10 +12,17 @@
 #   bash scripts/smoke_tests/run_smoke_tests.sh --cases U-spec,S-dip   # a subset
 #   bash scripts/smoke_tests/run_smoke_tests.sh --full     # realistic settings
 #   bash scripts/smoke_tests/run_smoke_tests.sh --slow     # also the ~10-20min GP-sky cases
-#   bash scripts/smoke_tests/run_smoke_tests.sh --pytest   # also run the pytest layer
-#   bash scripts/smoke_tests/run_smoke_tests.sh --keep     # keep the _out/ workdir
+#   bash scripts/smoke_tests/run_smoke_tests.sh --pytest   # also run the Tier-0 pytest layer
+#   bash scripts/smoke_tests/run_smoke_tests.sh --keep     # REUSE the previous run's workdir
 #
-# Env overrides: CONDA=<path to conda.exe>  ENV=<conda env>  NOBS NSIDE NLIVE
+# Exit status is 0 only if every layer passed: data preparation, the smoke cases
+# themselves, and (with --pytest) the Tier-0 manifest. A prep failure is a real
+# failure — it makes its dependent cases SKIP, which is not the same as passing.
+#
+# Env overrides: CONDA=<path to a conda executable>  ENV=<conda env>
+#                NOBS NSIDE NLIVE NGAL
+# With no CONDA (and none on PATH) commands run against the `python` already on
+# PATH, i.e. whatever environment is currently activated.
 # =============================================================================
 set -uo pipefail
 
@@ -24,7 +31,15 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 cd "$ROOT"
 
 # ---- configuration (overridable via env) ------------------------------------
-CONDA="${CONDA:-/c/Users/Alien/anaconda3/Scripts/conda.exe}"
+# Runner resolution: an explicit $CONDA wins, else a conda on PATH, else nothing
+# — in which case commands run against the `python` already on PATH so an
+# activated conda env / venv / module works with no configuration at all. (The
+# old default was one developer's Windows install path, which made every command
+# fail with "no such file" on every other machine.)
+CONDA="${CONDA:-}"
+[ -n "$CONDA" ] || CONDA="$(command -v conda 2>/dev/null || true)"
+USE_CONDA=0
+[ -n "$CONDA" ] && [ -x "$CONDA" ] && USE_CONDA=1
 ENV="${ENV:-darksirens-dev}"
 # Repo-root-RELATIVE output paths: the run cwd is the repo root, so both the
 # tools (h5py reads) and the local sim pipeline (Python os.makedirs writes)
@@ -44,7 +59,7 @@ while [ $# -gt 0 ]; do
     --pytest) DO_PYTEST=1 ;;
     --cases) ONLY="$2"; shift ;;
     --cases=*) ONLY="${1#*=}" ;;
-    -h|--help) sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -74,7 +89,18 @@ else
 fi
 
 # ---- helpers ----------------------------------------------------------------
-dsrun_eval() { "$CONDA" run --no-capture-output -n "$ENV" bash -c "${NORM_ENV:-} $1"; }
+# dsrun_raw   : run a command string in the target environment.
+# dsrun_eval  : same, prefixed with the smoke normalisation-grid env.
+# dsrun_stdin : run `python - <args>` reading its script from stdin (heredoc).
+dsrun_raw() {
+  if [ "$USE_CONDA" = 1 ]; then "$CONDA" run --no-capture-output -n "$ENV" bash -c "$1"
+  else bash -c "$1"; fi
+}
+dsrun_eval() { dsrun_raw "${NORM_ENV:-} $1"; }
+dsrun_stdin() {
+  if [ "$USE_CONDA" = 1 ]; then "$CONDA" run --no-capture-output -n "$ENV" python - "$@"
+  else python - "$@"; fi
+}
 hr() { printf '%s\n' "------------------------------------------------------------"; }
 
 # Tools (run as modules → PATH-independent; two console scripts aren't installed).
@@ -181,14 +207,30 @@ if [ "$DO_LIST" = 1 ]; then
 fi
 
 # ---- prep -------------------------------------------------------------------
-rm -rf "$OUT"; mkdir -p "$LOGS" "$RUNS" "$FIGS" "$DATA" "$BDATA"
-echo "darksirens smoke tests  |  env=$ENV  profile=$([ $FULL = 1 ] && echo full || echo smoke)  out=$OUT"
+# --keep REUSES the previous run's work dir (nothing is deleted, existing mocks
+# and logs are overwritten in place); without it the dir is rebuilt from scratch.
+if [ "$KEEP" = 1 ]; then
+  [ -d "$OUT" ] && echo "[keep] reusing the existing work dir $OUT (not deleted)"
+else
+  rm -rf "$OUT"
+fi
+mkdir -p "$LOGS" "$RUNS" "$FIGS" "$DATA" "$BDATA"
+if [ "$USE_CONDA" = 1 ]; then RUNNER="conda run -n $ENV"; else RUNNER="$(command -v python || echo python) (PATH)"; fi
+echo "darksirens smoke tests  |  runner=$RUNNER  profile=$([ $FULL = 1 ] && echo full || echo smoke)  out=$OUT"
 echo "tinygp / numpyro must be importable for GP / numpyro cases."; hr
 
 HAVE_BASE=0 HAVE_DARK=0 HAVE_BRIGHT=0 HAVE_QRAD=0 HAVE_QGP3D=0 HAVE_MARKS=0 HAVE_LENS=0 HAVE_TINYGP=0
+# Preparation failures are counted, not just recorded as an unset feature flag:
+# a failed mock generation makes every dependent case SKIP, and a run that only
+# SKIPs is not a run that passed.
+n_prep_fail=0
 prep() {  # name, cond-to-set, command
   printf '[prep] %-26s ' "$1"; local t0=$SECONDS
-  if dsrun_eval "$3" >"$LOGS/prep_$1.log" 2>&1; then echo "ok ($((SECONDS-t0))s)"; eval "$2=1"; else echo "FAILED (see $LOGS/prep_$1.log)"; fi
+  if dsrun_eval "$3" >"$LOGS/prep_$1.log" 2>&1; then
+    echo "ok ($((SECONDS-t0))s)"; eval "$2=1"
+  else
+    echo "FAILED (see $LOGS/prep_$1.log)"; n_prep_fail=$((n_prep_fail+1))
+  fi
 }
 
 dsrun_eval "python -c 'import tinygp'" >/dev/null 2>&1 && HAVE_TINYGP=1 || echo "[prep] tinygp not importable — GP cases will SKIP (pip install tinygp)"
@@ -196,7 +238,12 @@ dsrun_eval "python -c 'import tinygp'" >/dev/null 2>&1 && HAVE_TINYGP=1 || echo 
 # per-proposal precompute/JIT-compile fast); --n0 would scale with volume to ~1e5.
 if [ "$FULL" = 1 ]; then NGAL="${NGAL:-40000}"; else NGAL="${NGAL:-3000}"; fi
 prep mock_dark HAVE_BASE "$MOCK --outdir $DATA --seed 1 --n-galaxies $NGAL --nobs $NOBS --nsamp $NSAMP --ndraw $NDRAW --nside $NSIDE --zmax 0.1"
-[ -f "$CAT" ] && HAVE_DARK=1
+if [ -f "$CAT" ]; then
+  HAVE_DARK=1
+elif [ "$HAVE_BASE" = 1 ]; then
+  # Generator exited 0 but produced no catalog: still a preparation failure.
+  echo "[prep] mock_dark exited 0 but $CAT is missing"; n_prep_fail=$((n_prep_fail+1))
+fi
 [ "$HAVE_DARK" = 1 ] && prep marks HAVE_MARKS "python scripts/smoke_tests/make_marks.py --catalog $CAT --out $CATM"
 [ "$HAVE_DARK" = 1 ] && prep q_radial HAVE_QRAD "$BUILDQ --catalog $CAT --out $QRAD --mode radial --n-members 0"
 [ "$HAVE_DARK" = 1 ] && prep q_gp3d  HAVE_QGP3D "$BUILDQ --catalog $CAT --out $QGP3D --mode gp3d --n-members 0 --gp3d-pix-chunk 256"
@@ -204,7 +251,7 @@ prep mock_dark HAVE_BASE "$MOCK --outdir $DATA --seed 1 --n-galaxies $NGAL --nob
 # bright inference (which is counterpart-based, not catalog-based).
 prep mock_bright HAVE_BRIGHT "$BMOCK --outdir $BDATA --seed 2 --n0 1e-3 --nobs 3 --nsamp $NSAMP --ndraw $NDRAW --zmax 0.1"
 if [ "$HAVE_BRIGHT" = 1 ] && [ -f "$BCP" ]; then
-  CPARGS="$("$CONDA" run --no-capture-output -n "$ENV" python - "$BCP" <<'PY'
+  CPARGS="$(dsrun_stdin "$BCP" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 it = d["counterparts"] if isinstance(d, dict) else d
@@ -238,9 +285,19 @@ for i in "${!IDS[@]}"; do
 done
 
 # ---- optional pytest layer --------------------------------------------------
+# Runs the Tier-0 manifest tests/fast_subset.txt with the invocation documented
+# in that file's header (the single source of truth CI and docs also read), NOT
+# the whole tests/ tree. Its exit status is captured through the tail pipe with
+# PIPESTATUS and folded into the script's own status.
+pytest_fail=0
 if [ "$DO_PYTEST" = 1 ]; then
-  hr; echo "[pytest] Tier-0 unit/integration suite"
-  dsrun_eval "python -m pytest tests/ --ignore=tests/test_fixed_parameter_coordinates.py -q" 2>&1 | tail -8
+  hr; echo "[pytest] Tier-0 fast subset (tests/fast_subset.txt)"
+  # Single-quoted so the $(grep ...) is expanded by the runner's shell, and run
+  # through dsrun_raw so the coarse smoke normalisation grids do not leak in.
+  PYTEST_CMD='PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu python -m pytest -q $(grep -v "^#" tests/fast_subset.txt)'
+  dsrun_raw "$PYTEST_CMD" 2>&1 | tail -8
+  pytest_fail=${PIPESTATUS[0]}
+  if [ "$pytest_fail" -eq 0 ]; then echo "[pytest] PASS"; else echo "[pytest] FAIL (exit $pytest_fail)"; fi
 fi
 
 # ---- summary ----------------------------------------------------------------
@@ -250,6 +307,12 @@ for i in "${!IDS[@]}"; do
   printf '%-11s  %-5s  %-6s  %s\n' "${IDS[$i]}" "$st" "${TIMES[$i]:--}s" "${DESCS[$i]}"
 done
 hr
-echo "PASS=$n_pass  FAIL=$n_fail  SKIP=$n_skip   (logs in $LOGS)"
-[ "$KEEP" = 1 ] || echo "(_out kept; pass --keep to retain across runs, or delete $OUT)"
-[ "$n_fail" -eq 0 ]
+echo "PASS=$n_pass  FAIL=$n_fail  SKIP=$n_skip  PREP_FAIL=$n_prep_fail  PYTEST=$([ "$DO_PYTEST" = 1 ] && echo "$pytest_fail" || echo "not run")   (logs in $LOGS)"
+[ "$n_prep_fail" -eq 0 ] || echo "!! $n_prep_fail preparation step(s) failed — the cases that needed them SKIPped, they did not pass."
+if [ "$KEEP" = 1 ]; then
+  echo "($OUT was reused and updated in place)"
+else
+  echo "(outputs are in $OUT; the next run deletes it unless you pass --keep)"
+fi
+# Exit nonzero if ANY layer failed: preparation, smoke cases, or pytest.
+[ "$n_fail" -eq 0 ] && [ "$n_prep_fail" -eq 0 ] && [ "$pytest_fail" -eq 0 ]
