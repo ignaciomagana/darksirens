@@ -417,11 +417,15 @@ def darksiren_log_likelihood_with_clusters(
         gw_sel, em_catalog_sel, log_weight_sel, Ndraw, nEvents,
         sel_batch_size=sel_batch_size,
     )
+    log_mu_1L = jnp.asarray(-jnp.inf, dtype=jnp.float64)
+    log_sigma2_1L = jnp.asarray(-jnp.inf, dtype=jnp.float64)
     if singleton_lensing == SINGLETON_LENSING_MIXTURE:
         # Observed singletons are a mixture of unlensed sources and lensed
         # sources with exactly one detected image; mu^(1) must count both
         # or the singleton normalization is inconsistent with the evidence
-        # mixture below. Independent MC estimators: means and variances add.
+        # mixture below.  The unlensed injections are an independent campaign
+        # (means and variances add), but the lensed-single VARIANCE is
+        # combined with the J=2 term's below — the two share a campaign.
         log_mu_1L, _Neff_1L, log_sigma2_1L = compute_lensed_single_selection_term(
             lensed_singles, cosmo, survey, pop_params, em_catalog_sel,
             sis_params, log_p_pop, log_prior_z_selection,
@@ -451,6 +455,35 @@ def darksiren_log_likelihood_with_clusters(
         log_mu_2 = jnp.asarray(-jnp.inf, dtype=jnp.float64)
         Neff_2 = jnp.asarray(0.0, dtype=jnp.float64)
         log_sigma2_2 = jnp.asarray(-jnp.inf, dtype=jnp.float64)
+
+    # Correlated lensed-channel estimators (P2-07): the exactly-one-detected
+    # (1L) and both-detected (2) estimators are built from MUTUALLY EXCLUSIVE
+    # indicators over the SAME campaign draws, so their per-draw covariance is
+    # exactly -mu_1L*mu_2/N and Var(mu_1L + mu_2) = Var_1L + Var_2
+    # - 2*mu_1L*mu_2/N — algebraically the single-estimator variance of the
+    # union sum (non-negative by Cauchy-Schwarz over the N campaign draws).
+    # Treating them as independent overstated the total variance, biasing the
+    # MFG finite-sample correction and spuriously tripping the Neff guard.
+    # The adjustment is folded into the channel-2 slot; only the SUM of the
+    # two slots enters combined_selection_log_correction.
+    if (
+        singleton_lensing == SINGLETON_LENSING_MIXTURE
+        and cluster_mode == CLUSTER_MODE_J2
+        and lensed_injections is not None
+    ):
+        log_cov2 = (
+            jnp.log(2.0) + log_mu_1L + log_mu_2
+            - jnp.log(lensed_injections.n_draw_sources)
+        )
+        both_live = jnp.isfinite(log_sigma2_2) & jnp.isfinite(log_cov2)
+        # logdiffexp in-place, NaN-safe for dead channels: with either side
+        # -inf the correction is a no-op.
+        safe_hi = jnp.where(both_live, log_sigma2_2, 0.0)
+        safe_lo = jnp.where(both_live, jnp.minimum(log_cov2, safe_hi), -1.0)
+        corrected = safe_hi + jnp.log1p(
+            -jnp.exp(jnp.minimum(safe_lo - safe_hi, 0.0))
+        )
+        log_sigma2_2 = jnp.where(both_live, corrected, log_sigma2_2)
 
     # The combined selection correction is evaluated AFTER the singleton and
     # pair reductions below: the total-variance guard budgets the per-event

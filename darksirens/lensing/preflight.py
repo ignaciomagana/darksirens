@@ -639,18 +639,48 @@ def run_lensing_preflight(opts) -> dict:
         errors.extend([f"observed_gw_pe: {e}" for e in gw_report.get("errors", []) if "format_version" not in e])
         if any("format_version" in e for e in gw_report.get("errors", [])):
             warnings.extend([f"observed_gw_pe contract warning: {e}" for e in gw_report.get("errors", [])])
+    def _adopt_report(name, report):
+        """Store a file-contract sub-report AND surface its errors.
+
+        Reports used to be stashed in summary["file_contract"] without their
+        errors reaching the top-level list, so a preflight could print OK
+        while a stored report said otherwise (review P2-06).  Format-
+        recognition failures stay WARNINGS (same split the observed-PE
+        report gets above): the runtime loaders accept legacy files the
+        contract does not know, and the contract must not fail inputs the
+        run would load fine.
+        """
+        summary["file_contract"][name] = report
+        if not report.get("ok", True):
+            for e in report.get("errors", []):
+                if "format_version" in e:
+                    warnings.append(f"{name} contract warning: {e}")
+                else:
+                    errors.append(f"{name}: {e}")
+        return report
+
     if _get(opts, "observed_catalog_path"):
-        observed_report = file_contract.validate_observed_catalog(_get(opts, "observed_catalog_path"))
-        summary["file_contract"]["observed_catalog"] = observed_report
+        _adopt_report(
+            "observed_catalog",
+            file_contract.validate_observed_catalog(
+                _get(opts, "observed_catalog_path")
+            ),
+        )
     observed_meta = _resolve_observed_catalog(opts, n_events, errors, warnings, summary)
     observed_n_events = (
         int(observed_meta["n_events"]) if observed_meta is not None else None
     )
     _exists(_get(opts, "gwselection_path"), errors, "gwselection_path")
     if _get(opts, "gwselection_path"):
-        summary["file_contract"]["gwselection"] = file_contract.validate_selection_inputs(_get(opts, "gwselection_path"))
+        _adopt_report(
+            "gwselection",
+            file_contract.validate_selection_inputs(_get(opts, "gwselection_path")),
+        )
     if _get(opts, "selection_path"):
-        summary["file_contract"]["selection_inputs"] = file_contract.validate_selection_inputs(_get(opts, "selection_path"))
+        _adopt_report(
+            "selection_inputs",
+            file_contract.validate_selection_inputs(_get(opts, "selection_path")),
+        )
     partition_pairs = []
     unified_observed_mode = False
     if _get(opts, "cluster_mode") == "j2":

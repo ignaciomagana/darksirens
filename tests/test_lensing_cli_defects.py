@@ -30,9 +30,16 @@ def test_lensing_cli_threads_prior_kinds_to_transform_and_sampler():
     import darksirens.cli.inference_lensing as cli
 
     build_src = inspect.getsource(cli._build_space_and_closures)
-    assert "make_prior_transform(lower, upper, prior_kinds)" in build_src, (
+    assert "make_prior_transform(" in build_src and (
+        "lower, upper, prior_kinds" in build_src
+    ), (
         "make_prior_transform called without prior_kinds -> every non-uniform "
         "prior silently becomes uniform"
+    )
+    assert "joint_constraints=joint_constraints" in build_src, (
+        "make_prior_transform called without the resolved joint constraints "
+        "-> jointly-constrained models (GWTC-5 simplex/ordering, the dipole "
+        "ball) fall back to rejection sampling"
     )
     run_src = inspect.getsource(cli._run_lensing_sampling)
     assert "prior_kinds=prior_kinds" in run_src, (

@@ -590,6 +590,25 @@ def load_lensed_single_image_set(
         def minus(name):
             return np.asarray(f[name][:])[order][1::2]
 
+        # SAME source-level plus/minus consistency contract as the full
+        # loader (make_lensed_injection_set): the two images of one source
+        # must agree on every source-frame field.  The subset view used to
+        # skip this entirely, so a corrupt campaign that the pair channel
+        # would reject could still drive cluster-off / sl_mixture inference
+        # through its exactly-one-detected rows (review P2-10).
+        for name in ("m1_src", "q_src", "z_src", "chieff", "y_source",
+                     "p_prop_src", "p_prop_y"):
+            p_arr, m_arr = plus(name), minus(name)
+            if not np.allclose(p_arr, m_arr, rtol=1e-10, atol=1e-12):
+                n_bad = int(np.sum(
+                    ~np.isclose(p_arr, m_arr, rtol=1e-10, atol=1e-12)
+                ))
+                raise ValueError(
+                    f"Source-level field '{name}' inconsistent between μ_+ "
+                    f"and μ_- images for {n_bad} sources. Check injection "
+                    "writer."
+                )
+
         det_p = plus("detected").astype(bool)
         det_m = minus("detected").astype(bool)
         one_det = det_p ^ det_m

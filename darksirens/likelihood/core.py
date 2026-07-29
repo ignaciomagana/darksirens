@@ -567,6 +567,14 @@ def darksiren_log_likelihood(
         raise ValueError(
             f"pe_event_block must be a positive integer or None; got {pe_event_block}."
         )
+    if nEvents < 1:
+        # pe_block below becomes the block-plan divisor; nEvents = 0 reached
+        # it as a divide-by-zero. Selection-only inference is not a supported
+        # configuration, so fail with the configuration error instead.
+        raise ValueError(
+            f"darksiren_log_likelihood requires at least one event; got "
+            f"nEvents={nEvents}."
+        )
     pe_block = nEvents if pe_event_block is None else min(pe_event_block, nEvents)
     # The per-event counterpart selection (bright sirens) sets
     # ``active_counterpart_index`` per event, which the block path cannot express
