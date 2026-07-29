@@ -460,6 +460,86 @@ def test_main_cli_resume_reuses_the_original_run_dir(tmp_path):
     )
 
 
+def _test_pspace(upper=100.0):
+    from darksirens.cli.inference import _ParameterSpace
+
+    return _ParameterSpace(
+        labels=["H0"], lower_bound=[50.0], upper_bound=[upper],
+        prior_kinds=[("uniform", None, None)], prior_transform=None,
+        pop_params_fid={}, n_pop_eff=0, n_cosmo_eff=1, n_survey_eff=0,
+        model_name="test",
+    )
+
+
+def test_main_cli_resume_rejects_a_different_configuration(tmp_path):
+    """P0-01: the run-name prefix only carries model/sampler/seed, so before
+    the fingerprint gate a same-prefix run with different bounds, fixed
+    values, or inputs resumed silently -- mixing nested-sampling state from
+    two statistical targets into one output."""
+    from darksirens.cli.inference import build_parser, _prepare_run_dir
+
+    data = {"nEvents": 3, "nsamp": 4, "Ndraw": 5}
+    args = ["--sampler", "dynesty", "--save_path", str(tmp_path)]
+
+    first, _, _ = _prepare_run_dir(
+        build_parser().parse_args(args), data, _test_pspace(100.0), {}, {}
+    )
+    assert os.path.isfile(os.path.join(first, "run_fingerprint.json"))
+    # Pretend the first attempt checkpointed and was then killed.
+    open(os.path.join(first, CHECKPOINT_BASENAMES["dynesty"]), "wb").close()
+
+    # Same prefix, different prior bound: must refuse to resume.
+    with pytest.raises(SystemExit):
+        _prepare_run_dir(
+            build_parser().parse_args(args + ["--resume", "auto"]),
+            data, _test_pspace(120.0), {}, {},
+        )
+
+    # Same prefix, different fixed value: must refuse to resume.
+    with pytest.raises(SystemExit):
+        _prepare_run_dir(
+            build_parser().parse_args(args + ["--resume", "auto"]),
+            data, _test_pspace(100.0), {"Om0": 0.3}, {},
+        )
+
+    # --resume_force is the explicit, loud, expert override.
+    opts = build_parser().parse_args(
+        args + ["--resume", "auto", "--resume_force"]
+    )
+    with pytest.warns(RuntimeWarning, match="mismatch"):
+        second, _, _ = _prepare_run_dir(opts, data, _test_pspace(120.0), {}, {})
+    assert second == first
+
+
+def test_main_cli_resume_preserves_the_original_settings_json(tmp_path):
+    """The original settings.json is the record of the configuration that
+    created the checkpoint; a resume attempt must not overwrite it."""
+    from darksirens.cli.inference import build_parser, _prepare_run_dir
+
+    data = {"nEvents": 3, "nsamp": 4, "Ndraw": 5}
+    args = ["--sampler", "dynesty", "--save_path", str(tmp_path)]
+
+    first, _, _ = _prepare_run_dir(
+        build_parser().parse_args(args), data, _test_pspace(), {}, {}
+    )
+    open(os.path.join(first, CHECKPOINT_BASENAMES["dynesty"]), "wb").close()
+    with open(os.path.join(first, "settings.json")) as fh:
+        original = fh.read()
+
+    second, _, _ = _prepare_run_dir(
+        build_parser().parse_args(args + ["--resume", "auto"]),
+        data, _test_pspace(), {}, {},
+    )
+    assert second == first
+    with open(os.path.join(first, "settings.json")) as fh:
+        assert fh.read() == original, "resume overwrote the original settings.json"
+    resumes = [
+        name for name in os.listdir(first)
+        if name.startswith("settings.resume-") and name.endswith(".json")
+    ]
+    assert len(resumes) == 1, "each resume attempt must leave its own record"
+
+
 # ---------------------------------------------------------------------------
 # Full main() lifecycle: kill it during sampling, requeue with --resume auto
 # ---------------------------------------------------------------------------

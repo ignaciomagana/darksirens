@@ -275,6 +275,24 @@ default** and both nested samplers honour it; the flags are identical on
 - The resumed run continues the `--seed`-derived RNG stream carried in the
   checkpoint rather than drawing fresh entropy, so a resumed chain is the chain
   the uninterrupted run would have produced.
+- **Resume is fingerprint-gated.** Every run writes a `run_fingerprint.json`
+  recording its full semantic configuration: sampled labels, bounds and prior
+  families, fixed/overridden values, every model flag, sampler settings, the
+  seed, the normalization grids, and the **content** (SHA-256; sampled digest
+  above 1 GiB) of every input file. A resume refuses to restore sampler state
+  unless the fingerprint matches exactly — restoring under a different target
+  would silently mix samples and evidence from two statistical models.
+  Operational knobs (`--save_path`, checkpoint cadence, progress/diagnostic
+  flags, performance chunking) are excluded, so requeueing the identical
+  command always matches. A code change (new `git` commit) with an unchanged
+  configuration warns but proceeds, so a requeue can straddle a deployment.
+- `--resume_force`: **unsafe** override of the fingerprint gate, for
+  deliberate expert use and for continuing checkpoints created before
+  fingerprinting existed (which have no `run_fingerprint.json`). A forced
+  mismatch is warned about loudly; the output mixes two targets and is not a
+  science result.
+- A resume attempt never overwrites the original `settings.json`; each attempt
+  writes its own timestamped `settings.resume-<timestamp>.json` beside it.
 - Explicit `--tinyns_checkpoint_path` / `--tinyns_resume_from` still win over
   these flags, so existing tinyns scripts behave exactly as before.
 
