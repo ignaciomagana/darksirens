@@ -535,3 +535,77 @@ def test_sphere_quadrature_resolves_the_prior_corner():
         f"mean-one violated by {worst:.4f} at the prior corner; the sphere "
         f"quadrature ({sky_models._SPHERE_NQ} nodes) under-resolves the field"
     )
+
+
+# --------------------------------------------------------------------------
+# Global positivity (review finding P1-18)
+# --------------------------------------------------------------------------
+
+def test_dipole_rejects_super_unity_amplitude_globally():
+    """d = (1, 1, 1) has |d| = sqrt(3) > 1: ~21% of the sphere would go
+    negative, and the old pointwise clip turned the model into a positive-
+    part field with spherical mean ~1.077 while still claiming mean one.
+    The whole parameter point is now invalid."""
+    log_g_sky = sky_model_parser("dipole")
+    nx, ny, nz = _random_unit_vectors(512, seed=21)
+    d = jnp.array([1.0, 1.0, 1.0])
+    out = np.asarray(log_g_sky(nx, ny, nz, jnp.zeros_like(nx), d))
+    assert np.all(np.isneginf(out)), (
+        "super-unity dipole must be globally invalid, not pointwise-clipped"
+    )
+    # Just inside the ball: valid everywhere, mean one.
+    d_in = d / jnp.sqrt(3.0) * 0.99
+    g = jnp.exp(log_g_sky(*_random_unit_vectors(200_000, seed=22),
+                          jnp.zeros(200_000), d_in))
+    assert np.all(np.isfinite(np.asarray(g)))
+    assert abs(float(jnp.mean(g)) - 1.0) < 5e-3
+
+
+def test_multipole_rejects_globally_negative_fields():
+    """A coefficient corner whose field dips negative anywhere on the sphere
+    is invalid as a whole (constrained prior), not silently replaced by its
+    positive part."""
+    log_g_sky = sky_model_parser("multipole")
+    nx, ny, nz = _random_unit_vectors(64, seed=23)
+    z = jnp.zeros_like(nx)
+    a_corner = jnp.ones(8)  # box corner: g goes deeply negative in places
+    out = np.asarray(log_g_sky(nx, ny, nz, z, a_corner))
+    assert np.all(np.isneginf(out))
+    # Small coefficients: positive everywhere, finite everywhere, mean one.
+    rng = np.random.default_rng(24)
+    a_small = jnp.asarray(rng.uniform(-0.05, 0.05, size=8))
+    nx2, ny2, nz2 = _random_unit_vectors(200_000, seed=25)
+    g = jnp.exp(log_g_sky(nx2, ny2, nz2, jnp.zeros_like(nx2), a_small))
+    assert np.all(np.isfinite(np.asarray(g)))
+    assert abs(float(jnp.mean(g)) - 1.0) < 5e-3
+
+
+def test_dipole_ball_cube_map_covers_the_ball_uniformly():
+    """The nested samplers reach the dipole through the ball3 cube map: every
+    draw lands inside the unit ball (zero wasted proposals) with the uniform-
+    ball radial law E[r] = 3/4."""
+    from darksirens.inference.prior import (
+        build_parameter_space,
+        make_prior_transform,
+        resolve_joint_prior_constraints,
+    )
+
+    res = build_parameter_space(
+        "powerlaw+peak", True, True, True, fix_de=True,
+        universe_model="spectral_sirens", sky_model="dipole",
+    )
+    labels, lower, upper, kinds = list(res[0]), res[1], res[2], res[11]
+    assert labels == ["$d_x$", "$d_y$", "$d_z$"]
+    jc = resolve_joint_prior_constraints(
+        "powerlaw+peak", labels, lower, upper, kinds, sky_model="dipole"
+    )
+    assert jc == [("ball3", (0, 1, 2))]
+    transform = make_prior_transform(lower, upper, kinds, joint_constraints=jc)
+
+    u = jnp.asarray(np.random.default_rng(26).uniform(size=(5000, 3)))
+    d = np.asarray(jnp.stack([transform(u[k]) for k in range(5000)]))
+    r = np.linalg.norm(d, axis=1)
+    assert np.all(r <= 1.0 + 1e-12)
+    np.testing.assert_allclose(np.mean(r), 0.75, atol=0.01)
+    # Isotropy of the direction: component means vanish.
+    np.testing.assert_allclose(np.mean(d, axis=0), 0.0, atol=0.02)

@@ -913,6 +913,7 @@ def build_parameter_space(
 def resolve_joint_prior_constraints(
     pop_model, labels, lower, upper, prior_kinds=None, *,
     shared_beta=True, shared_spin=True, shared_gamma=True,
+    sky_model=None,
 ):
     """Index-resolved joint prior constraints for ``make_prior_transform``.
 
@@ -936,14 +937,25 @@ def resolve_joint_prior_constraints(
     """
     from darksirens.gw.populations import get_model
 
+    groups = []
     try:
         model = get_model(
             pop_model, shared_beta=shared_beta, shared_spin=shared_spin,
             shared_gamma=shared_gamma,
         )
+        groups.extend(getattr(model, "constraint_groups", None) or ())
     except Exception:
-        return []
-    groups = getattr(model, "constraint_groups", None) or ()
+        pass
+    if sky_model is not None:
+        from darksirens.sky import get_sky_model
+
+        try:
+            groups.extend(
+                getattr(get_sky_model(sky_model), "constraint_groups", None)
+                or ()
+            )
+        except Exception:
+            pass
     if not groups:
         return []
 
@@ -966,6 +978,12 @@ def resolve_joint_prior_constraints(
         elif kind == "simplex" and len(idx) == 2:
             ok = uniform and all(
                 lower[i] == 0.0 and upper[i] == 1.0 for i in idx
+            )
+        elif kind == "ball3" and len(idx) == 3:
+            # The polar map targets the UNIT ball in parameter space, so the
+            # component boxes must be exactly [-1, 1].
+            ok = uniform and all(
+                lower[i] == -1.0 and upper[i] == 1.0 for i in idx
             )
         else:
             ok = False
@@ -1007,6 +1025,9 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
     * ``("simplex", (i, j))`` — the fold ``(u_i, u_j) -> (1-u_i, 1-u_j)``
       when ``u_i + u_j > 1``; two preimages per point of the simplex, again
       the normalized uniform density.
+    * ``("ball3", (i, j, k))`` — polar map onto the uniform unit ball
+      (``r = u^(1/3)``), for parameters whose joint support is
+      ``|v| <= 1`` in a ``[-1, 1]^3`` box (the dipole vector).
 
     Implementation note: dynesty wraps this with ``np.asarray(transform(
     jnp.asarray(u)))``, i.e. the transform always receives a JAX array, so
@@ -1022,6 +1043,21 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
         def _apply_joint(u):
             u = _jnp.asarray(u)
             for kind, idx in joint_constraints:
+                if kind == "ball3":
+                    # Cube -> uniform unit ball (radius u^(1/3), polar angles
+                    # from the other two coords) -> back to the [-1, 1] cube
+                    # coordinates the per-dimension affine map expects.
+                    i, j, k = idx
+                    r = u[..., i] ** (1.0 / 3.0)
+                    cth = 2.0 * u[..., j] - 1.0
+                    sth = _jnp.sqrt(_jnp.maximum(1.0 - cth * cth, 0.0))
+                    phi = 2.0 * _jnp.pi * u[..., k]
+                    u = (
+                        u.at[..., i].set(0.5 * (r * sth * _jnp.cos(phi) + 1.0))
+                         .at[..., j].set(0.5 * (r * sth * _jnp.sin(phi) + 1.0))
+                         .at[..., k].set(0.5 * (r * cth + 1.0))
+                    )
+                    continue
                 i, j = idx
                 ui, uj = u[..., i], u[..., j]
                 if kind == "ordered_le":

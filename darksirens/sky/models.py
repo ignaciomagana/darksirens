@@ -45,6 +45,8 @@ from __future__ import annotations
 import math
 import os
 
+import numpy as np
+
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 from jax.scipy.special import logsumexp
@@ -135,8 +137,18 @@ class DipoleSky:
     r"""Pure dipole ``g(n̂) = 1 + n̂·d``, parameterised by the Cartesian dipole
     vector ``d = (d_x, d_y, d_z)`` (Isi, Farr & Varma 2023).  Isotropy ⟺ ``d=0``;
     the amplitude is ``|d|`` and the preferred direction is ``d/|d|``.  Mean-one
-    by construction; positivity (``g ≥ 0``) holds for ``|d| ≤ 1`` and is enforced
-    pointwise (``g ≤ 0`` ⇒ ``-inf``)."""
+    by construction; positivity (``g ≥ 0`` everywhere on the sphere) requires
+    ``|d| ≤ 1`` **globally**, so the prior lives on the unit BALL: the nested
+    samplers map their cube onto it (``constraint_groups`` -> the ``ball3``
+    cube map in ``make_prior_transform``), and ``log_g_sky`` rejects the
+    whole parameter point for ``|d| > 1`` as the backstop.
+
+    The old pointwise truncation (``g ≤ 0`` ⇒ ``-inf`` per direction, box
+    prior on the components) silently replaced the mean-one dipole with a
+    DIFFERENT model at ``|d| > 1``: the positive part of the dipole, whose
+    spherical mean exceeds one (~1.077 at ``d = (1,1,1)``) and whose density
+    is non-smooth on the nodal circle — ~21% of the sphere zeroed at that
+    corner while the model still claimed to be a mean-one dipole."""
 
     @property
     def param_specs(self):
@@ -146,13 +158,23 @@ class DipoleSky:
             ParamSpec(r"$d_z$", -1.0, 1.0, name="sky_dz"),
         ]
 
+    @property
+    def constraint_groups(self):
+        return (("ball3", (r"$d_x$", r"$d_y$", r"$d_z$")),)
+
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
 
     def log_g_sky(self, nx, ny, nz, z, theta):
         dx, dy, dz = theta[0], theta[1], theta[2]
         g = 1.0 + nx * dx + ny * dy + nz * dz
-        return jnp.where(g > 0.0, jnp.log(jnp.where(g > 0.0, g, 1.0)), -jnp.inf)
+        # Global validity: |d| <= 1 keeps g >= 0 on the whole sphere (equality
+        # only at the antipode of d when |d| = 1). Outside the ball the WHOLE
+        # point is invalid — pointwise positive-part clipping is a different,
+        # non-mean-one model (see the class docstring).
+        valid = (dx * dx + dy * dy + dz * dz) <= 1.0
+        logg = jnp.where(g > 0.0, jnp.log(jnp.where(g > 0.0, g, 1.0)), -jnp.inf)
+        return jnp.where(valid, logg, -jnp.inf)
 
 
 class SphereGPSky:
@@ -451,10 +473,22 @@ class MultipoleSky:
     isotropy (generalises the dipole, which is exactly ℓ=1).
 
     Mean-one by construction (every ℓ≥1 harmonic integrates to zero), so
-    ``a_lm = 0 ⇒ g ≡ 1``; positivity (``g ≥ 0``) is enforced pointwise.  With the
-    orthonormal harmonics the angular power spectrum is ``C_ℓ = Σ_m a_lm²``.
-    Purely angular — the ``z`` argument is ignored.
+    ``a_lm = 0 ⇒ g ≡ 1``; positivity (``g ≥ 0``) is enforced GLOBALLY on a
+    fixed Fibonacci-sphere quadrature grid: a coefficient point whose field
+    dips negative anywhere on the grid is rejected as a whole (``-inf``),
+    defining a constrained prior on the box.  The old pointwise truncation
+    silently swapped in a different model — the positive part of the field,
+    non-mean-one and non-smooth on its nodal lines — whenever a corner of
+    the box produced negative regions.  With the orthonormal harmonics the
+    angular power spectrum is ``C_ℓ = Σ_m a_lm²``.  Purely angular — the
+    ``z`` argument is ignored.
     """
+
+    # Directions of the global-positivity quadrature. ~2e3 quasi-uniform
+    # points resolve the smooth ℓ <= 3 harmonics' minima to ~1e-3 in g —
+    # adequate for a validity test on fields whose shortest angular scale is
+    # ~60 degrees.
+    _POSITIVITY_GRID_N = 2048
 
     def __init__(self, lmax: int = 2, a_bound: float = 1.0):
         if int(lmax) not in (1, 2, 3):
@@ -463,6 +497,21 @@ class MultipoleSky:
         self._a_bound = float(a_bound)
         self._lm = multipole_lm_indices(self._lmax)
         self._n_coeff = len(self._lm)                 # (lmax+1)^2 - 1
+        # Fibonacci sphere (golden-angle spiral): deterministic quasi-uniform
+        # directions, no healpy dependency at import time.
+        n = self._POSITIVITY_GRID_N
+        k = np.arange(n, dtype=float)
+        z_grid = 1.0 - (2.0 * k + 1.0) / n
+        phi = k * (np.pi * (3.0 - np.sqrt(5.0)))
+        s = np.sqrt(np.maximum(1.0 - z_grid * z_grid, 0.0))
+        self._Y_positivity = jnp.asarray(np.asarray(
+            _real_ylm(
+                jnp.asarray(s * np.cos(phi)),
+                jnp.asarray(s * np.sin(phi)),
+                jnp.asarray(z_grid),
+                self._lmax,
+            )
+        ))
 
     @property
     def param_specs(self):
@@ -478,4 +527,9 @@ class MultipoleSky:
     def log_g_sky(self, nx, ny, nz, z, theta):
         Y = _real_ylm(nx, ny, nz, self._lmax)         # (N, n_coeff)
         g = 1.0 + Y @ theta                           # (N,)
-        return jnp.where(g > 0.0, jnp.log(jnp.where(g > 0.0, g, 1.0)), -jnp.inf)
+        # Global positivity on the quadrature grid: reject the WHOLE
+        # coefficient point when the field dips negative anywhere, instead of
+        # zeroing that region pointwise (a different, non-mean-one model).
+        min_g = 1.0 + jnp.min(self._Y_positivity @ theta)
+        logg = jnp.where(g > 0.0, jnp.log(jnp.where(g > 0.0, g, 1.0)), -jnp.inf)
+        return jnp.where(min_g >= 0.0, logg, -jnp.inf)
