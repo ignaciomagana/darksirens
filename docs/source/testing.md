@@ -21,23 +21,38 @@ samplers), and prints a `PASS / FAIL / SKIP` table. Useful flags:
 bash scripts/smoke_tests/run_smoke_tests.sh --list             # list cases, run nothing
 bash scripts/smoke_tests/run_smoke_tests.sh --cases U-spec,S-dip   # run a subset
 bash scripts/smoke_tests/run_smoke_tests.sh --full             # realistic settings (slow)
-bash scripts/smoke_tests/run_smoke_tests.sh --pytest           # also run the pytest layer
-bash scripts/smoke_tests/run_smoke_tests.sh --keep             # keep the _out/ workdir
+bash scripts/smoke_tests/run_smoke_tests.sh --pytest           # also run the Tier-0 pytest layer
+bash scripts/smoke_tests/run_smoke_tests.sh --keep             # REUSE the previous run's _out/
 ```
 
 Per-case logs and run outputs land under `scripts/smoke_tests/_out/`. A case is
 **PASS** if its program exits 0 (the inference ran and wrote `results.hdf5`),
 **FAIL** if it errored (see the log), **SKIP** if a prerequisite is missing
-(e.g. `tinygp`, or the local strong-lensing inputs).
+(e.g. `tinygp`, or the local strong-lensing inputs). `_out/` is deleted and
+rebuilt at the start of every run unless you pass `--keep`.
+
+The summary line reports three independent failure counts, and the script exits
+nonzero if **any** of them is nonzero:
+
+* `FAIL` — smoke cases that ran and errored;
+* `PREP_FAIL` — mock-data preparation steps that failed. These make their
+  dependent cases `SKIP`, which is not the same as passing, so they are counted
+  as failures in their own right;
+* `PYTEST` — the exit status of the `--pytest` layer (`not run` without it),
+  which runs the Tier-0 manifest below.
 
 ## Environment
 
-Every command runs in the `darksirens-dev` conda environment. The smoke driver
-wraps calls for you; to run commands by hand, prefix them, e.g. on Windows:
+The smoke driver runs each command through `conda run -n $ENV` when a conda
+executable is available (`$CONDA`, else one on `PATH`) and otherwise through the
+`python` already on `PATH` — so an activated environment needs no configuration.
+Override either with the `CONDA` / `ENV` environment variables.
+
+To run commands by hand in an activated environment, just call them; to pin an
+environment explicitly:
 
 ```bash
-CONDA="/c/Users/Alien/anaconda3/Scripts/conda.exe"
-RUN="$CONDA run --no-capture-output -n darksirens-dev"
+RUN="conda run --no-capture-output -n darksirens-dev"
 $RUN python -m darksirens.cli.inference --help
 ```
 
