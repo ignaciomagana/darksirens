@@ -280,8 +280,23 @@ def _make_mixture_likelihood(
             return None, 0
         full_j = jnp.asarray(full)
         idx = int(views.lss_completion_indexing or 0)
-        if idx == 1 or unique_pixels is None:
-            return barrier(full_j), (1 if idx == 1 else idx)
+        if idx == 1:
+            # Stamped compact: rows must already be union-pixel-aligned (same
+            # pre-JIT validation as make_likelihood._compact_lss_q — a
+            # mis-stamped global table would be consumed positionally).
+            if unique_pixels is not None and int(full_j.shape[0]) != int(
+                    jnp.asarray(unique_pixels).shape[0]):
+                raise ValueError(
+                    f"LSS completion table is stamped 'compact' but has "
+                    f"{int(full_j.shape[0])} rows for "
+                    f"{int(jnp.asarray(unique_pixels).shape[0])} union pixels; "
+                    "a compact table must be row-aligned with this run's "
+                    "union pixel set. The builders always emit 'global' "
+                    "tables — rebuild the completion or fix the stamp."
+                )
+            return barrier(full_j), 1
+        if unique_pixels is None:
+            return barrier(full_j), idx
         up = jnp.asarray(unique_pixels, dtype=jnp.int32)
         if int(jnp.max(up)) >= full_j.shape[0]:
             raise ValueError(
@@ -298,7 +313,19 @@ def _make_mixture_likelihood(
             return None
         full_j = jnp.asarray(full)
         idx = int(views.lss_completion_indexing or 0)
-        if idx == 1 or unique_pixels is None:
+        if idx == 1:
+            if unique_pixels is not None and int(full_j.shape[1]) != int(
+                    jnp.asarray(unique_pixels).shape[0]):
+                raise ValueError(
+                    f"LSS completion ensemble is stamped 'compact' but has "
+                    f"{int(full_j.shape[1])} pixel rows for "
+                    f"{int(jnp.asarray(unique_pixels).shape[0])} union pixels; "
+                    "a compact ensemble must be row-aligned with this run's "
+                    "union pixel set. The builders always emit 'global' "
+                    "tables — rebuild the completion or fix the stamp."
+                )
+            return barrier(full_j)
+        if unique_pixels is None:
             return barrier(full_j)
         up = jnp.asarray(unique_pixels, dtype=jnp.int32)
         if int(jnp.max(up)) >= full_j.shape[1]:
@@ -688,9 +715,26 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             return None, 0
         full_j = jnp.asarray(full)
         idx = int(catalogs.lss_completion_indexing or 0)
-        if idx == 1 or unique_pixels is None:
-            # already compact, or a legacy full catalog (rows are global pixels)
-            return barrier(full_j), (1 if idx == 1 else idx)
+        if idx == 1:
+            # Stamped compact: rows must already be union-pixel-aligned. A
+            # mis-stamped GLOBAL table (all builders emit global) would have
+            # its rows consumed positionally as union rows — wrong Q per
+            # event when the shapes coincide, a traced-index crash when they
+            # don't — so the row count is validated here, before JIT.
+            if unique_pixels is not None and int(full_j.shape[0]) != int(
+                    jnp.asarray(unique_pixels).shape[0]):
+                raise ValueError(
+                    f"LSS completion table is stamped 'compact' but has "
+                    f"{int(full_j.shape[0])} rows for "
+                    f"{int(jnp.asarray(unique_pixels).shape[0])} union pixels; "
+                    "a compact table must be row-aligned with this run's "
+                    "union pixel set. The builders always emit 'global' "
+                    "tables — rebuild the completion or fix the stamp."
+                )
+            return barrier(full_j), 1
+        if unique_pixels is None:
+            # legacy full catalog (rows are global pixels)
+            return barrier(full_j), idx
         up = jnp.asarray(unique_pixels, dtype=jnp.int32)
         if int(jnp.max(up)) >= full_j.shape[0]:
             raise ValueError(
@@ -710,7 +754,21 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             return None
         full_j = jnp.asarray(full)
         idx = int(catalogs.lss_completion_indexing or 0)
-        if idx == 1 or unique_pixels is None:
+        if idx == 1:
+            # Same pre-JIT row-alignment validation as _compact_lss_q, on the
+            # ensemble's pixel axis.
+            if unique_pixels is not None and int(full_j.shape[1]) != int(
+                    jnp.asarray(unique_pixels).shape[0]):
+                raise ValueError(
+                    f"LSS completion ensemble is stamped 'compact' but has "
+                    f"{int(full_j.shape[1])} pixel rows for "
+                    f"{int(jnp.asarray(unique_pixels).shape[0])} union pixels; "
+                    "a compact ensemble must be row-aligned with this run's "
+                    "union pixel set. The builders always emit 'global' "
+                    "tables — rebuild the completion or fix the stamp."
+                )
+            return barrier(full_j)
+        if unique_pixels is None:
             return barrier(full_j)
         up = jnp.asarray(unique_pixels, dtype=jnp.int32)
         if int(jnp.max(up)) >= full_j.shape[1]:

@@ -79,9 +79,13 @@ def test_build_completion_shapes_finite(survey_path):
 def test_build_cli_then_load_into_inference(survey_path, tmp_path, monkeypatch):
     path, npix = survey_path
     qfile = str(tmp_path / "lss_completion.h5")
+    # No --maxiter: the CLI now refuses to save an unconverged build, so the
+    # test runs the solves to their (self-terminating) fixed point.
     build_main(["--catalog", path, "--out", qfile, "--n-members", "0",
-                "--maxiter", "30", "--indexing", "global"])
+                "--indexing", "global"])
     loaded = load_lss_completion_hdf5(qfile)
+    assert loaded["diagnostics"]["converged"] is True
+    assert loaded["diagnostics"]["allow_unconverged"] is False
     assert loaded["logq_map"].shape == (npix, NG)
     assert loaded["indexing"] == "global"
 
@@ -194,7 +198,7 @@ def test_diagnose_cli_smoke(survey_path, tmp_path):
     path, npix = survey_path
     qfile = str(tmp_path / "lss_completion.h5")
     build_main(["--catalog", path, "--out", qfile, "--n-members", "4",
-                "--maxiter", "30", "--seed", "3", "--indexing", "global"])
+                "--seed", "3", "--indexing", "global"])
     outdir = tmp_path / "figs"
     diagnose_main(["--catalog", path, "--lss-completion", qfile,
                    "--pixel", "2", "--outdir", str(outdir)])

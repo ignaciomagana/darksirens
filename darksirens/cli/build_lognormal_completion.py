@@ -97,7 +97,7 @@ def _build_completion_radial(
     n_members: int = 32,
     seed: int = 1234,
     prior_strength: float = 1.0,
-    maxiter: int = 10000,
+    maxiter: int = 200000,
     log10n0=None,
     delta=None,
 ):
@@ -446,10 +446,10 @@ def _build_completion_gp3d(
         n_hat_out=survey_data.n_hat_all, z_out=zgrid_np, bias=bias,
         pix_chunk=int(gp3d_pix_chunk), L=L, H_chol=mp["H_chol"],
     ), dtype=float)
-    if not np.all(np.isfinite(logq_map)):
-        n_bad = int(np.sum(~np.isfinite(logq_map)))
-        _warn(f"{n_bad} non-finite logQ entries -> set to 0 (Q = 1).")
-        logq_map = np.where(np.isfinite(logq_map), logq_map, 0.0)
+    # Non-finite cells are COUNTED here and gated in main(): substituting
+    # Q = 1 silently is indistinguishable from real homogeneity downstream,
+    # so it only happens under the explicit, stamped --allow-unconverged.
+    n_nonfinite_map = int(np.sum(~np.isfinite(logq_map)))
 
     sig2 = np.asarray(mp["sigma2_vox"], dtype=float)
     diagnostics = _base_diag({
@@ -459,6 +459,7 @@ def _build_completion_gp3d(
         "n_iter": int(mp["diagnostics"]["n_iter"]),
         "converged": bool(mp["diagnostics"]["converged"]),
         "grad_inf": float(mp["diagnostics"]["grad_inf"]),
+        "n_nonfinite_map": n_nonfinite_map,
     })
 
     logq_members = None
@@ -470,7 +471,8 @@ def _build_completion_gp3d(
             n_hat_out=survey_data.n_hat_all, z_out=zgrid_np, bias=bias,
             pix_chunk=int(gp3d_pix_chunk), L=L,
         ), dtype=float)
-        logq_members = np.where(np.isfinite(logq_members), logq_members, 0.0)
+        diagnostics["n_nonfinite_members"] = int(
+            np.sum(~np.isfinite(logq_members)))
         diagnostics["n_members"] = int(n_members)
 
     return logq_map, logq_members, diagnostics
@@ -483,7 +485,7 @@ def build_completion(
     n_members: int = 32,
     seed: int = 1234,
     prior_strength: float = 1.0,
-    maxiter: int = 10000,
+    maxiter: int = 200000,
     gp3d_nz_solve: int = 32,
     gp3d_pix_chunk: int = 512,
     lss_corr_length_ang=None,
@@ -526,14 +528,15 @@ def main(argv=None):
     # Each occupied pixel is an n_grid-dimensional (1000 on the package zgrid)
     # L-BFGS-B MAP solve; 300 iterations stops ~5x short of the fixed point on a
     # DESI-like nside=16 catalog (measured 0/2580 converged, |grad|_inf ~ 21,
-    # max|dlogQ| 1.36 vs the converged field), leaving a systematically
-    # under-relaxed, near-unity Q.  Converged solves stop early, so a high cap
-    # costs nothing on small problems.
-    p.add_argument("--maxiter", type=int, default=10000,
+    # max|dlogQ| 1.36 vs the converged field) and 10000 still capped near-empty
+    # pixels ~40% short (logQ 0.556 vs 0.924 at the fixed point).  L-BFGS-B
+    # self-terminates once converged, so the high cap only costs on solves that
+    # genuinely need it — and an unconverged build now FAILS instead of saving.
+    p.add_argument("--maxiter", type=int, default=200000,
                    help=("Max L-BFGS-B iterations per pixel MAP solve (default "
-                         "10000). Must exceed what an n_grid-dimensional solve "
-                         "needs, or logQ is silently under-relaxed toward 0 "
-                         "(Q -> 1), weakening the LSS completion."))
+                         "200000; converged solves self-terminate long before "
+                         "this). If the cap binds, the build fails rather than "
+                         "silently under-relaxing logQ toward 0 (Q -> 1)."))
     p.add_argument("--mode", choices=["radial", "gp3d"], default="radial",
                    help="Completion model: 'radial' (default; independent per-pixel "
                         "1-D Poisson-lognormal) or 'gp3d' (3-D angular-coupling "
@@ -554,8 +557,17 @@ def main(argv=None):
                    help="Override the expected-density evolution exponent "
                         "(1+z)^delta (default 0.0).")
     p.add_argument("--indexing", choices=["compact", "global"], default="global",
-                   help="How the inference should index the Q rows. A full survey "
-                        "catalog is global-HEALPix-pixel indexed (default).")
+                   help="How the inference should index the Q rows. Both build "
+                        "modes emit a full global (n_pix, n_grid) table, so "
+                        "'global' is the only stamp this builder writes; "
+                        "'compact' is accepted for script compatibility but "
+                        "forced back to 'global' with a warning.")
+    p.add_argument("--allow-unconverged", action="store_true", default=False,
+                   help="Save the completion even when solves are unconverged "
+                        "or produced non-finite cells (substituted with Q=1). "
+                        "The override is stamped in the file's diagnostics and "
+                        "warned about at load time; research ablations only, "
+                        "never production.")
     opts = p.parse_args(argv)
 
     print()
@@ -563,8 +575,14 @@ def main(argv=None):
     print()
 
     indexing = opts.indexing
-    if opts.mode == "gp3d" and indexing != "global":
-        _warn("gp3d builds a global all-pixel table; forcing indexing='global'.")
+    if indexing != "global":
+        # BOTH builders scatter occupied rows into the full (n_pix, n_grid)
+        # table. A 'compact' stamp makes the inference factory treat the rows
+        # as already union-pixel-aligned and skip the global gather — wrong
+        # rows (or a traced-index crash) at likelihood time.
+        _warn("this builder emits a global all-pixel table; forcing "
+              "indexing='global' (a 'compact' stamp would misindex Q rows "
+              "at inference).")
         indexing = "global"
 
     _section(f"Building  [{opts.mode}]")
@@ -596,6 +614,45 @@ def main(argv=None):
                 _warn(line + f" — raise --maxiter (currently {opts.maxiter}); "
                              "an unconverged solve under-relaxes logQ toward 0 "
                              "(Q -> 1), silently weakening the LSS completion")
+
+    # Fail-closed gate: an unconverged or non-finite completion is a science
+    # artifact downstream inference cannot distinguish from a solved field, so
+    # it is never written unless --allow-unconverged explicitly accepts it,
+    # and the override is stamped for the loader to warn about.
+    problems = []
+    if opts.mode == "radial":
+        n_conv = diagnostics.get("n_converged")
+        n_occ = diagnostics.get("n_occupied")
+        if n_occ and (n_conv is None or int(n_conv) < int(n_occ)):
+            problems.append(
+                f"{int(n_occ) - int(n_conv or 0)}/{int(n_occ)} occupied-pixel "
+                f"solves unconverged (last optimizer message: "
+                f"{diagnostics.get('last_failure_message')!r})"
+            )
+    elif not diagnostics.get("converged", False):
+        problems.append(
+            f"gp3d solve unconverged (grad_inf={diagnostics.get('grad_inf')})"
+        )
+    n_bad = int(diagnostics.get("n_nonfinite_map") or 0) + int(
+        diagnostics.get("n_nonfinite_members") or 0)
+    if n_bad:
+        problems.append(f"{n_bad} non-finite logQ cells")
+    diagnostics["allow_unconverged"] = bool(opts.allow_unconverged)
+    if problems and not opts.allow_unconverged:
+        raise SystemExit(
+            "FATAL: refusing to write '%s': %s. Raise --maxiter (currently "
+            "%d), or pass --allow-unconverged only for a stamped research "
+            "ablation. No artifact was written." % (
+                opts.out, "; ".join(problems), opts.maxiter)
+        )
+    if n_bad:
+        _warn(f"substituting Q = 1 for {n_bad} non-finite cells "
+              "(--allow-unconverged).")
+        logq_map = np.where(np.isfinite(logq_map), logq_map, 0.0)
+        if logq_members is not None:
+            logq_members = np.where(
+                np.isfinite(logq_members), logq_members, 0.0)
+        diagnostics["n_nonfinite_substituted"] = n_bad
     save_lss_completion_hdf5(
         opts.out, logq_map=logq_map, logq_members=logq_members,
         zgrid=np.asarray(zgrid), indexing=indexing, metadata=diagnostics,
