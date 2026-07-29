@@ -119,7 +119,11 @@ from darksirens.inference.run_fingerprint import (
     check_resume_fingerprint,
     save_run_fingerprint,
 )
-from darksirens.inference.prior import build_parameter_space, make_prior_transform
+from darksirens.inference.prior import (
+    build_parameter_space,
+    make_prior_transform,
+    resolve_joint_prior_constraints,
+)
 from darksirens.inference.sampling import run_sampler
 from darksirens.io.results import (
     save_tinyns_diagnostics_json,
@@ -3386,7 +3390,12 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
         assert len(prior_kinds) == len(labels), (
             "prior_kinds must stay aligned with labels/lower/upper"
         )
-        prior_transform = make_prior_transform(lower, upper, prior_kinds)
+        joint_constraints = resolve_joint_prior_constraints(
+            opts.pop_model, labels, lower, upper, prior_kinds,
+        )
+        prior_transform = make_prior_transform(
+            lower, upper, prior_kinds, joint_constraints=joint_constraints,
+        )
         _section("Parameter Space")
         print(f"  │    {'Parameter':<24} {'Lower':>12}  {'Upper':>12}")
         print(f"  │    {'─' * 24} {'─' * 12}  {'─' * 12}")

@@ -104,7 +104,11 @@ from darksirens.inference.run_fingerprint import (
 )
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
-from darksirens.inference.prior import build_parameter_space, make_prior_transform
+from darksirens.inference.prior import (
+    build_parameter_space,
+    make_prior_transform,
+    resolve_joint_prior_constraints,
+)
 from darksirens.inference.q_provenance import check_lss_completion_provenance
 from darksirens.core.constants import (
     H0_FID,
@@ -1964,7 +1968,15 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         shared_spin=opts.shared_spin,
         shared_gamma=opts.shared_gamma,
     )
-    prior_transform = make_prior_transform(lower_bound, upper_bound, prior_kinds)
+    joint_constraints = resolve_joint_prior_constraints(
+        opts.pop_model, labels, lower_bound, upper_bound, prior_kinds,
+        shared_beta=opts.shared_beta, shared_spin=opts.shared_spin,
+        shared_gamma=opts.shared_gamma,
+    )
+    prior_transform = make_prior_transform(
+        lower_bound, upper_bound, prior_kinds,
+        joint_constraints=joint_constraints,
+    )
 
     _ok(f"Parameter space built:  {len(labels)} free dimensions")
     _end()

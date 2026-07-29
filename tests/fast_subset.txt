@@ -29,6 +29,7 @@ tests/test_completion_convergence_gate.py
 tests/test_tau_probability.py
 tests/test_wl_selection_matching.py
 tests/test_population_support_contracts.py
+tests/test_joint_prior_constraints.py
 tests/test_cli_sigma_kernel_removed.py
 tests/test_dynesty_seed.py
 tests/test_simulation_config.py
