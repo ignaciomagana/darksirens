@@ -45,8 +45,10 @@ y is integrated by Gauss-Legendre on (0, 1) with 32 nodes (commit 1's
 edge near y = 0 (μ → ∞) and y = 1 (μ_- → 0), both of which are mitigated
 by the population prior strongly disfavouring extreme z_s.
 
-Strong-lensing optical depth τ_2(z_s) uses ``slmarks.tau_2_SIS`` from
-commit 1 (default A · z^n with A = 5×10⁻⁴, n = 3). T_0 / Δt are NOT
+Strong-lensing optical depth τ_2(z_s) enters through ``slmarks.tau_2_prob``
+(``A · z^n`` clipped to [0, 1-1e-12]): every channel consumes τ as the
+Bernoulli probability of multiple imaging, and the raw power law exceeds
+one at prior corners — see ``tau_2_prob``'s docstring. T_0 / Δt are NOT
 used in this commit — pure magnification-based pair likelihood. Time-
 delay marks are deferred to commit 3.5.
 
@@ -87,7 +89,7 @@ from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import z_of_dL, dL_of_z, ddL_of_z, dL_in_z_grid
 from darksirens.likelihood.pair_kde import PairKDE, log_eval_pair_kde
 from darksirens.lensing.slmarks import (
-    SISLensParams, tau_2_SIS, log_p_y_SIS,
+    SISLensParams, tau_2_prob, log_p_y_SIS,
     mu_plus_minus_from_y, delta_t_from_y,
 )
 from darksirens.lensing.grids import make_y_grid, make_hermite_u_grid
@@ -194,7 +196,7 @@ def _pair_branch_log_integrand(
     ).reshape(z_s_safe.shape)
 
     # SIS optical depth at z_s
-    log_tau = jnp.log(tau_2_SIS(z_s_safe, sis_params))
+    log_tau = jnp.log(tau_2_prob(z_s_safe, sis_params))
 
     # Jacobian and quadrature weights
     log_J = _log_jac_app_to_src(z_s_safe, dL_true_ij, mu_i_b, H0, Om0, w0, wa)
@@ -499,7 +501,7 @@ def _lensed_single_branch_log_integrand(
         jnp.broadcast_to(pix[:, None], m1src.shape).reshape(-1).astype(pix.dtype),
         catalog,
     ).reshape(z_s_safe.shape)
-    log_tau = jnp.log(tau_2_SIS(z_s_safe, sis_params))
+    log_tau = jnp.log(tau_2_prob(z_s_safe, sis_params))
 
     # Partner censoring: apparent distance the partner WOULD have shown.
     # The detected image's own apparent distance (the PE sample dL_app) only

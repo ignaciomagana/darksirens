@@ -95,7 +95,7 @@ from jax.scipy.special import logsumexp
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.lensing.lensed_injections import LensedInjectionSet
-from darksirens.lensing.slmarks import SISLensParams, tau_2_SIS
+from darksirens.lensing.slmarks import SISLensParams, tau_2_prob
 from darksirens.utils.utils import logdiffexp
 from darksirens.likelihood.selection import (
     DEFAULT_MAX_LIKELIHOOD_VARIANCE,
@@ -141,7 +141,7 @@ def _per_source_log_weight(
     )
 
     # SIS optical depth at z_s
-    log_tau = jnp.log(tau_2_SIS(injections.z_src, sis_params))
+    log_tau = jnp.log(tau_2_prob(injections.z_src, sis_params))
 
     # Impact-parameter prior p(y) = 2y
     log_py = jnp.log(2.0 * injections.y_source)
@@ -260,7 +260,7 @@ def compute_lensed_single_selection_term(
         jnp.zeros(singles.m1_src.shape[0], dtype=jnp.int32),
         catalog,
     )
-    log_tau = jnp.log(tau_2_SIS(singles.z_src, sis_params))
+    log_tau = jnp.log(tau_2_prob(singles.z_src, sis_params))
     log_py = jnp.log(2.0 * singles.y_source)
     log_p_prop = jnp.log(singles.p_prop_src) + jnp.log(singles.p_prop_y)
 
