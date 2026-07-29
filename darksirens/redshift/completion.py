@@ -68,6 +68,9 @@ should use ``completion_curves`` once per parameter proposal via
 
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -128,6 +131,47 @@ def _build_smoothing_operator() -> jnp.ndarray:
 
 # (N_grid, N_grid) ~8 MB float64; built once at import.
 _S_EXP: jnp.ndarray = _build_smoothing_operator()
+
+# Jit-boundary threading for _S_EXP, mirroring utils.cosmology's distance
+# table (issue #305's residual): a module-global concrete jax.Array captured
+# by a jit lowers as a dense<1000x1000xf64> HLO CONSTANT — ~16 MB of module
+# text per specialization — instead of a parameter.  Callers that jit a body
+# reaching _precompute_grids (likelihood/factory._jit_likelihood_body) pass
+# the operator as a jit argument and bind it for the trace; every deep call
+# site keeps reading it ambiently, so no signatures change below this frame.
+_ACTIVE_S_EXP = contextvars.ContextVar("darksirens_smoothing_operator")
+
+
+def smoothing_operator():
+    """The active expected-counts smoothing operator (default: `_S_EXP`)."""
+    return _ACTIVE_S_EXP.get(_S_EXP)
+
+
+@contextmanager
+def bound_smoothing_operator(operator):
+    """Make ``operator`` the active smoothing operator for the enclosed scope.
+
+    ``None`` is a no-op so callers can thread an unresolved argument through
+    without special-casing (same contract as ``bound_distance_table``).
+    """
+    if operator is None:
+        yield
+        return
+    token = _ACTIVE_S_EXP.set(operator)
+    try:
+        yield
+    finally:
+        _ACTIVE_S_EXP.reset(token)
+
+
+# Ride the SAME jit boundaries as the distance table: every
+# threads_distance_table-decorated function now resolves the active operator
+# at its call site and rebinds it inside its own trace, so a nested boundary
+# reached from inside an enclosing trace (the factory's outer jit binds a
+# TRACER here) passes the tracer as an argument instead of leaking it.
+from darksirens.utils.cosmology import register_ambient_jit_channel
+
+register_ambient_jit_channel(smoothing_operator, bound_smoothing_operator)
 
 
 # ------------------------------------------------------------
@@ -584,7 +628,7 @@ def _precompute_grids(
 ) -> _CompletionGrids:
     log_g = log_galaxy_measure_grid(cosmo, survey)
     dN_exp = survey.n0 * em_catalog.apix * jnp.exp(log_g)
-    dN_exp_smooth = _S_EXP @ dN_exp
+    dN_exp_smooth = smoothing_operator() @ dN_exp
     return _CompletionGrids(log_g=log_g, dN_exp=dN_exp, dN_exp_smooth=dN_exp_smooth)
 
 
