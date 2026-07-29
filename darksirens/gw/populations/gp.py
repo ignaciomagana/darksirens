@@ -767,7 +767,14 @@ class AdditiveGPPopulation:
         pun = jnp.exp(jnp.clip(F_q, -_FIELD_CLIP, _FIELD_CLIP)) * \
             self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
         norm = jnp.exp(jnp.interp(z, zg, jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
-        log_p_src = (jnp.log(jnp.where(pun > 0, pun, _LOGSAFE))
+        # The _LOGSAFE operand exists only to keep the dead branch of the
+        # where free of log(0) (both branches are differentiated); the
+        # RETURNED value outside the taper support must be -inf, exactly as
+        # the joint and binned GP models report it.  Returning log(_LOGSAFE)
+        # (~ -690, finite) instead gave zero-support points a nonzero density
+        # that importance reweighting happily integrates.
+        log_p_src = (jnp.where(pun > 0, jnp.log(jnp.where(pun > 0, pun, _LOGSAFE)),
+                               -jnp.inf)
                      - jnp.log(jnp.where(norm > 0, norm, 1.0)))
         return (log_p_src + (gamma - 1.0) * jnp.log1p(z)).reshape(_out_shape)
 

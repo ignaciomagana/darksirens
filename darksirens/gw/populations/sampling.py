@@ -40,7 +40,7 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import erf, erfinv, log_ndtr, logsumexp
+from jax.scipy.special import log_ndtr, logsumexp, ndtri
 
 
 # Relative floor applied to histogram cell densities: guarantees full grid
@@ -201,6 +201,32 @@ def truncnorm_logpdf(
     return jnp.where((x >= lo) & (x <= hi), logp, -jnp.inf)
 
 
+_HALF_LOG_2PI = 0.5 * float(np.log(2.0 * np.pi))
+
+
+def _ndtri_exp(t: jnp.ndarray) -> jnp.ndarray:
+    """Inverse of ``log_ndtr``: the z with ``log Φ(z) = t``, tail-stable.
+
+    ``ndtri(exp(t))`` dies once ``exp(t)`` underflows (t < ~-745) and loses
+    precision long before that; here a central/asymptotic initial guess is
+    polished by Newton on ``f(z) = log_ndtr(z) - t`` (both ``log_ndtr`` and
+    its derivative ``exp(logφ - logΦ)`` are stable arbitrarily far into the
+    lower tail).  Five unrolled iterations reach double precision from either
+    guess, and the unrolled loop keeps the function differentiable.
+    """
+    t = jnp.minimum(t, -1e-20)  # Φ(z) < 1 for finite z
+    p = jnp.exp(t)
+    z_central = ndtri(jnp.clip(p, 1e-300, 1.0 - 1e-16))
+    # z → -∞: log Φ(z) ≈ -z²/2 - log(-z) - log√(2π); one fixed-point pass.
+    r = jnp.maximum(-2.0 * t - 2.0 * _HALF_LOG_2PI, 1e-6)
+    z_tail = -jnp.sqrt(jnp.maximum(r - jnp.log(r), 1e-12))
+    z = jnp.where(t < -33.0, z_tail, z_central)
+    for _ in range(5):
+        log_phi = -0.5 * z * z - _HALF_LOG_2PI
+        z = z - (log_ndtr(z) - t) * jnp.exp(log_ndtr(z) - log_phi)
+    return z
+
+
 def truncnorm_sample(
     u: jnp.ndarray,
     mu: jnp.ndarray,
@@ -210,17 +236,32 @@ def truncnorm_sample(
 ) -> TruncNormSample:
     """Draw from a truncated Normal on [lo, hi] via the analytic inverse CDF."""
     sigma = jnp.maximum(sigma, 1e-6)
-    sqrt2 = jnp.sqrt(2.0)
 
-    def _Phi(x):
-        return 0.5 * (1.0 + erf((x - mu) / (sigma * sqrt2)))
-
-    Phi_lo, Phi_hi = _Phi(lo), _Phi(hi)
-    span = jnp.maximum(Phi_hi - Phi_lo, jnp.finfo(u.dtype).tiny)
-    up = Phi_lo + u * span
-    # Keep erfinv strictly inside (-1, 1).
-    arg = jnp.clip(2.0 * up - 1.0, -1.0 + 1e-15, 1.0 - 1e-15)
-    x = jnp.clip(mu + sigma * sqrt2 * erfinv(arg), lo, hi)
+    a = (lo - mu) / sigma
+    b = (hi - mu) / sigma
+    # Invert in LOG-CDF space, in whichever tail keeps both endpoints stable
+    # (the same reflection truncnorm_log_span uses).  The naive
+    # Phi_lo + u*(Phi_hi - Phi_lo) draw collapses once the window sits more
+    # than ~8.3 sigma out: both CDFs round to the SAME double, the span
+    # underflows, and every draw clips to the boundary — an atom the
+    # continuous log_s below never describes, so the importance estimator
+    # was internally inconsistent exactly where log_span had already been
+    # made tail-stable.  Here u = 0 maps to lo and u = 1 to hi exactly, and
+    # the quantile map stays continuous arbitrarily far into the tail.
+    flip = (a + b) > 0.0
+    aa = jnp.where(flip, -b, a)
+    bb = jnp.where(flip, -a, b)
+    log_cdf_lo = log_ndtr(aa)
+    log_cdf_hi = log_ndtr(bb)
+    # Reflection reverses orientation: the u-quantile of the original window
+    # is the (1-u)-quantile of the mirrored one.  Without this the flipped
+    # branch mapped u = 0 to hi, silently breaking the monotone u -> x
+    # common-random-numbers contract.
+    uu = jnp.where(flip, 1.0 - u, u)
+    # log[(1-uu)·Φ(aa) + uu·Φ(bb)]; logaddexp absorbs the uu ∈ {0,1} endpoints.
+    t = jnp.logaddexp(log_cdf_lo + jnp.log1p(-uu), log_cdf_hi + jnp.log(uu))
+    z = _ndtri_exp(t)
+    x = jnp.clip(mu + sigma * jnp.where(flip, -z, z), lo, hi)
 
     # log(span) computed IN LOG SPACE, not as log of the difference above.
     # Once the window sits more than ~8.3 sigma from mu, Phi_lo and Phi_hi round
@@ -554,7 +595,17 @@ def resolve_mass_grid_bounds(model) -> tuple[float, float]:
     def _min_lo(short, default=np.inf):
         return min((lo for lo, _ in by_name.get(short, [])), default=default)
 
-    m1_lo = min(2.0, _min_lo("m_min", default=2.0))
+    # The lower edge is the GLOBAL normalization floor M_LO, not the smallest
+    # sampled m_min: untruncated components (Gaussian peaks) are normalized
+    # over [M_LO, M_HI] and the generic pairing's fallback lower edge is M_LO,
+    # so a wide peak keeps finite target density down to m1 = M_LO. A proposal
+    # floored above that (the old min(2, m_min)) violated the importance-
+    # sampling requirement that the target's support be contained in the
+    # proposal's — draws could never land in M_LO <= m1 < 2. Overshooting is
+    # harmless (see above), so the floor is unconditional.
+    from darksirens.gw.populations.utils import M_LO
+
+    m1_lo = min(float(M_LO), _min_lo("m_min", default=float(M_LO)))
     m1_hi = max(
         200.0,
         _max_hi("m_max") + _max_hi("dm_max"),
