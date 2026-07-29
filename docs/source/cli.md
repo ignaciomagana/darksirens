@@ -446,7 +446,7 @@ drivers.
 
 ## `darksirens_analyze`
 
-Analyze saved inference products and compute posterior-predictive summaries. The analyzer reads the current `results.hdf5` output format (including root-level or grouped posterior samples) and still supports legacy `samples.npy` runs.
+Analyze saved inference products and compute posterior-predictive summaries. The analyzer reads the current `results.hdf5` output format (including root-level or grouped posterior samples) and falls back to the numeric `samples.npy` crash-recovery chain (metadata from `settings.json`, no evidence).
 
 ```bash
 darksirens_analyze [--run_dirs RUN_DIR [RUN_DIR ...]] [--mmin 1] [--mmax 100] [--nm 300]
@@ -461,6 +461,7 @@ Important options:
 - `--nchi`, `--chimin`, `--chimax`: spin grid configuration.
 - `--batch_size`: posterior-predictive evaluation batch size.
 - `--cred_lo`, `--cred_hi`: lower and upper credible intervals.
+- `--allow_legacy_pickle`: permit reading a very old pickled-dict `samples.npy`. This deserializes arbitrary Python from the file; only use it on files you trust.
 
 
 ## TinyNS presets
