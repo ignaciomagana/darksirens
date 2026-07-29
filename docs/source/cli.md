@@ -395,10 +395,16 @@ darksirens_inference_lensing \
   marginalization (default `lognormal`, with `--lensing_wl_a` / `--lensing_wl_b`
   setting the `sigma_mu(z)` scale and slope, defaults `4e-3` and `1.5`).
   `tabulated` reads `log p_WL(mu|z)` from `--lensing_wl_table_path`.
-- `--wl_selection {standard,wl_lognormal}`: singleton **selection** treatment
-  (default `standard`, which preserves the legacy selection). `wl_lognormal`
-  applies the same lognormal/Hermite WL marginalization to singleton injections;
-  `--lensing_wl_a 0` reduces it to `standard`.
+- `--wl_selection {auto,standard,wl_lognormal}`: singleton **selection**
+  treatment. `auto` (the default) matches the event-side `--wl_backend`
+  (`lognormal` → `wl_lognormal`, `disabled` → `standard`) so the hierarchical
+  numerator and denominator share one observation model; an explicit
+  mismatched pair is fatal unless `--allow_mismatched_wl_selection` records a
+  deliberate ablation. `wl_lognormal` applies the same lognormal/Hermite WL
+  marginalization to singleton injections; `--lensing_wl_a 0` reduces it to
+  `standard`. `tabulated` has no matched selection integral and is refused by
+  `auto`. The pre-resolution request and the resolved value are both recorded
+  in `settings.json`.
 - `--pop_model`: population model (default `powerlaw+peak`; the same grammar as
   the main CLI).
 - `--sl_tau_A`, `--sl_tau_n`, `--sl_T0_sec`: SIS optical-depth amplitude and
