@@ -531,6 +531,95 @@ class TestCombinedSelectionCorrection:
         np.testing.assert_allclose(float(got), expected, rtol=1e-10)
 
 
+class TestExactZeroSelectionVariance:
+    """``log_sigma2 = -inf`` is EXACT ZERO variance (infinite ESS), not an
+    invalid estimate.
+
+    The cluster stack gated ``N_eff`` on ``isfinite(log_mu) &
+    isfinite(log_sigma2)``, so a deterministic selection estimate -- the
+    zero-variance limit an analytic/fixed-population channel produces -- was
+    mapped to ``N_eff = 0``, tripped the sparse-N_eff guard and returned -inf
+    for a selection integral that is in fact known perfectly.  The standard
+    singleton path (``likelihood/selection.py:_lse_to_log_mu_neff``) gates on
+    ``log_mu`` alone and gets this right; the cluster path now mirrors it.
+    """
+
+    def test_neff_is_infinite_at_zero_variance(self):
+        from darksirens.likelihood.cluster_selection import _neff_from_log_mu_sigma2
+        neff = _neff_from_log_mu_sigma2(jnp.asarray(0.5), jnp.asarray(-jnp.inf))
+        assert jnp.isinf(neff) and neff > 0
+
+    def test_empty_channel_still_gives_zero_neff(self):
+        """log_mu = -inf (no weight at all) must stay N_eff = 0, not inf."""
+        from darksirens.likelihood.cluster_selection import _neff_from_log_mu_sigma2
+        neff = _neff_from_log_mu_sigma2(jnp.asarray(-jnp.inf), jnp.asarray(-jnp.inf))
+        assert float(neff) == 0.0
+
+    def test_nan_variance_is_still_rejected(self):
+        """A NaN variance must not be admitted: N_eff NaN -> ~(NaN > thr) -> guard."""
+        from darksirens.likelihood.cluster_selection import _neff_from_log_mu_sigma2
+        neff = _neff_from_log_mu_sigma2(jnp.asarray(0.5), jnp.asarray(jnp.nan))
+        assert jnp.isnan(neff)
+        got = combined_selection_log_correction(
+            jnp.asarray(0.5), jnp.asarray(jnp.nan),
+            jnp.asarray(-jnp.inf), jnp.asarray(-jnp.inf),
+            n_singletons_observed=10, n_clusters_observed=0,
+        )
+        assert jnp.isinf(got) and got < 0
+
+    def test_finite_variance_matches_the_closed_form(self):
+        """Non-degenerate inputs are unchanged: N_eff = mu^2 / sigma^2."""
+        from darksirens.likelihood.cluster_selection import _neff_from_log_mu_sigma2
+        neff = _neff_from_log_mu_sigma2(jnp.asarray(0.5), jnp.asarray(-8.0))
+        np.testing.assert_allclose(float(neff), float(np.exp(2 * 0.5 + 8.0)),
+                                   rtol=1e-12)
+
+    @pytest.mark.parametrize("soft_guard", [False, True])
+    def test_deterministic_estimator_gives_the_zero_variance_limit(self, soft_guard):
+        """A deterministic (zero-variance) selection estimate must return the
+        finite analytic limit of
+
+            -N log mu + N(N+3)/(2 N_eff)   as N_eff -> inf,
+
+        i.e. exactly ``-N log mu`` -- not -inf.
+        """
+        log_mu, N = 0.5, 10
+        got = combined_selection_log_correction(
+            jnp.asarray(log_mu), jnp.asarray(-jnp.inf),
+            jnp.asarray(-jnp.inf), jnp.asarray(-jnp.inf),
+            n_singletons_observed=N, n_clusters_observed=0,
+            soft_guard=soft_guard,
+        )
+        assert jnp.isfinite(got), "deterministic selection estimate returned -inf"
+        np.testing.assert_allclose(float(got), -N * log_mu, rtol=1e-12)
+
+    def test_zero_variance_cluster_channel_does_not_kill_a_finite_singleton(self):
+        """A deterministic cluster channel alongside a noisy singleton one must
+        leave the combined correction at the singleton's own N_eff."""
+        log_mu_1, log_sigma2_1 = jnp.asarray(np.log(2.0)), jnp.asarray(np.log(0.05))
+        log_mu_2 = jnp.asarray(np.log(0.3))
+        got = combined_selection_log_correction(
+            log_mu_1, log_sigma2_1, log_mu_2, jnp.asarray(-jnp.inf),
+            n_singletons_observed=5, n_clusters_observed=2,
+        )
+        mu_tot, N_tot = 2.3, 7
+        neff = mu_tot ** 2 / 0.05
+        expected = -N_tot * np.log(mu_tot) + N_tot * (3 + N_tot) / (2 * neff)
+        np.testing.assert_allclose(float(got), expected, rtol=1e-12)
+
+    def test_deterministic_gradient_is_finite(self):
+        """The zero-variance branch must not NaN-poison reverse mode."""
+        def f(lm):
+            return combined_selection_log_correction(
+                lm, jnp.asarray(-jnp.inf), jnp.asarray(-jnp.inf),
+                jnp.asarray(-jnp.inf), n_singletons_observed=10,
+                n_clusters_observed=0,
+            )
+        g = jax.grad(f)(jnp.asarray(0.5))
+        assert jnp.isfinite(g)
+        np.testing.assert_allclose(float(g), -10.0, rtol=1e-12)
+
+
 # ============================================================================
 # D. Master likelihood: exact reduction at cluster_mode=OFF
 # ============================================================================

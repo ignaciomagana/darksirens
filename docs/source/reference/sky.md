@@ -30,7 +30,8 @@ The model classes, each implementing the protocol
 - `MultipoleSky` — $g = 1 + \sum_{\ell=1}^{\ell_{\max}}\sum_m a_{\ell m}
   Y_{\ell m}(\hat n)$ using orthonormal real Cartesian harmonics; mean-one is
   automatic ($\ell\ge1$ integrate to zero) and the angular power spectrum is
-  $C_\ell = \sum_m a_{\ell m}^2$.
+  $C_\ell = \frac{1}{2\ell+1}\sum_m a_{\ell m}^2$ (power per mode, the
+  conventional normalisation).
 - `SphereGPSky` — a log-Gaussian random field on $S^2$,
   $g = e^{f(\hat n)}/\langle e^f\rangle$, with a whitened finite-rank GP
   (chordal-distance RBF kernel, Fibonacci-sphere inducing nodes); $\xi=0

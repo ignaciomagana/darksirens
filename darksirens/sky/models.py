@@ -432,7 +432,7 @@ def _real_ylm(nx, ny, nz, lmax):
 
     Explicit Cartesian-polynomial forms in the unit-vector components
     ``n̂ = (nx, ny, nz)``; normalised so ``∫ Y_lm Y_l'm' dΩ = δ`` (hence
-    ``C_ℓ = Σ_m a_lm²`` is the power per multipole).  Column order matches
+    ``C_ℓ = Σ_m a_lm² / (2ℓ+1)`` is the power per mode).  Column order matches
     ``[(ℓ, m) for ℓ in 1..lmax for m in -ℓ..ℓ]``.
     """
     pi = math.pi
@@ -480,7 +480,7 @@ class MultipoleSky:
     silently swapped in a different model — the positive part of the field,
     non-mean-one and non-smooth on its nodal lines — whenever a corner of
     the box produced negative regions.  With the orthonormal harmonics the
-    angular power spectrum is ``C_ℓ = Σ_m a_lm²``.  Purely angular — the
+    angular power spectrum is ``C_ℓ = Σ_m a_lm² / (2ℓ+1)``.  Purely angular — the
     ``z`` argument is ignored.
     """
 

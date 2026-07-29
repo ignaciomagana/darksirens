@@ -29,14 +29,28 @@ def interp2d(
 
     Returns:
         1D array `z` satisfying `z[i] = f(x[i], y[i])`.
+
+    Note:
+        The clamp acts on the QUERY COORDINATES, not just on the bracket
+        indices.  Clamping only the indices (as this did before) leaves the
+        interpolation weight outside [0, 1] and silently LINEARLY EXTRAPOLATES
+        off the edge cell: for `f = x + y` on the unit grid, the query
+        `(2, 0.5)` returned 2.5 instead of the clamped-edge value 1.5.  With
+        `fill_value` the out-of-bounds mask is still taken from the RAW
+        coordinates, so that behaviour is unchanged.
     """
     if xp.ndim != 1 or yp.ndim != 1:
         raise ValueError("xp and yp must be 1D arrays")
+    if xp.shape[0] < 2 or yp.shape[0] < 2:
+        raise ValueError("xp and yp must have at least 2 points each")
     if zp.shape != (xp.shape + yp.shape):
         raise ValueError("zp must be a 2D array with shape xp.shape + yp.shape")
 
-    ix = jnp.clip(jnp.searchsorted(xp, x, side="right"), 1, len(xp) - 1)
-    iy = jnp.clip(jnp.searchsorted(yp, y, side="right"), 1, len(yp) - 1)
+    x_c = jnp.clip(x, xp[0], xp[-1])
+    y_c = jnp.clip(y, yp[0], yp[-1])
+
+    ix = jnp.clip(jnp.searchsorted(xp, x_c, side="right"), 1, len(xp) - 1)
+    iy = jnp.clip(jnp.searchsorted(yp, y_c, side="right"), 1, len(yp) - 1)
 
     # Using Wikipedia's notation (https://en.wikipedia.org/wiki/Bilinear_interpolation)
     z_11 = zp[ix - 1, iy - 1]
@@ -44,14 +58,14 @@ def interp2d(
     z_12 = zp[ix - 1, iy]
     z_22 = zp[ix, iy]
 
-    z_xy1 = (xp[ix] - x) / (xp[ix] - xp[ix - 1]) * z_11 + (x - xp[ix - 1]) / (
+    z_xy1 = (xp[ix] - x_c) / (xp[ix] - xp[ix - 1]) * z_11 + (x_c - xp[ix - 1]) / (
         xp[ix] - xp[ix - 1]
     ) * z_21
-    z_xy2 = (xp[ix] - x) / (xp[ix] - xp[ix - 1]) * z_12 + (x - xp[ix - 1]) / (
+    z_xy2 = (xp[ix] - x_c) / (xp[ix] - xp[ix - 1]) * z_12 + (x_c - xp[ix - 1]) / (
         xp[ix] - xp[ix - 1]
     ) * z_22
 
-    z = (yp[iy] - y) / (yp[iy] - yp[iy - 1]) * z_xy1 + (y - yp[iy - 1]) / (
+    z = (yp[iy] - y_c) / (yp[iy] - yp[iy - 1]) * z_xy1 + (y_c - yp[iy - 1]) / (
         yp[iy] - yp[iy - 1]
     ) * z_xy2
 

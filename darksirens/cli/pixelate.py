@@ -111,6 +111,45 @@ def main(argv=None):
     if marks_in:
         _ok(f"Mark columns:           {', '.join(sorted(marks_in))}")
 
+    # Data-entry boundary validation.  Every row read here is a REAL galaxy
+    # (padding slots are created below, with w = 0 and mark = 0 by
+    # convention), so these checks never touch padding.
+    #
+    # WEIGHT: the runtime turns a survey weight into log w via
+    # ``log(max(w, 1e-300))`` (redshift/catalog.py), so a zero or negative
+    # weight does not error -- it becomes a ~-690 log-weight while the same
+    # galaxy still COUNTS in the row's observed number, leaving the count and
+    # mixture measures describing different galaxy sets.  With ngals absent the
+    # real-galaxy mask is literally ``w > 0``, so such a galaxy silently
+    # becomes padding instead.  Reject at the boundary.
+    bad_w = ~(np.isfinite(wts) & (wts > 0.0))
+    if bad_w.any():
+        n_bad = int(bad_w.sum())
+        _fatal(
+            f"WEIGHT must be finite and strictly positive for every galaxy; "
+            f"found {n_bad:,} bad value(s) out of {len(wts):,} "
+            f"(first offending index {int(np.argmax(bad_w))}, "
+            f"value {wts[bad_w][0]!r}). Zero/negative weights are floored to "
+            "log(1e-300) at runtime while the galaxy still counts in ngals, so "
+            "the observed count and the mixture would describe different "
+            "galaxy sets. Drop or fix those rows in the input catalog."
+        )
+    # MARKS: a single non-finite mark contaminates the mean of its whole
+    # redshift bin in ``_center_marks`` (catalogs/marks.py), i.e. every galaxy
+    # at that redshift across the sky.
+    for ds, arr in sorted(marks_in.items()):
+        bad_m = ~np.isfinite(arr)
+        if bad_m.any():
+            n_bad = int(bad_m.sum())
+            _fatal(
+                f"mark column '{MARK_INPUT_COLUMNS[ds]}' ({ds}) must be finite "
+                f"for every galaxy; found {n_bad:,} non-finite value(s) out of "
+                f"{arr.size:,} (first offending index "
+                f"{int(np.argmax(bad_m))}). A single NaN/inf poisons the mean "
+                "of its whole redshift bin when the marks are z-centred at "
+                "load time. Drop or fix those rows in the input catalog."
+            )
+
     ngals_total = len(ras)
     _ok(f"Galaxies loaded:        {ngals_total:,}")
     _end()

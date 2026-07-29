@@ -93,6 +93,58 @@ def make_lognormal_wl_params(a: float = 4.0e-3, b: float = 1.5) -> WLParams:
     )
 
 
+def _validate_tabulated_grids(
+    z_grid: jnp.ndarray,
+    log_mu_grid: jnp.ndarray,
+    log_p_table: jnp.ndarray,
+) -> tuple:
+    """Coerce + validate the tabulated backend's grids on EVERY entry path.
+
+    ``_bilinear_interp`` clamps queries to ``[grid[0], grid[-1]]`` and brackets
+    them with ``searchsorted``; both contracts silently break on a grid that is
+    not 1-D, finite, at least 2 points long and STRICTLY increasing (a
+    non-monotone grid makes ``searchsorted`` return an arbitrary cell, a
+    duplicated node makes the interpolation weight 0/0, and a single node
+    leaves no cell at all).  Validate once here so the ``WLParams`` constructor
+    and the JIT closure factory cannot diverge — the closure path used to skip
+    every check the constructor made.
+
+    Returns the coerced ``(z_grid, log_mu_grid, log_p_table)`` float64 arrays.
+    """
+    z_grid = jnp.asarray(z_grid, dtype=jnp.float64)
+    log_mu_grid = jnp.asarray(log_mu_grid, dtype=jnp.float64)
+    log_p_table = jnp.asarray(log_p_table, dtype=jnp.float64)
+
+    for name, grid in (("z_grid", z_grid), ("log_mu_grid", log_mu_grid)):
+        if grid.ndim != 1:
+            raise ValueError(f"{name} must be 1D, got shape {grid.shape}.")
+        if grid.shape[0] < 2:
+            raise ValueError(
+                f"{name} must have at least 2 points to bracket an "
+                f"interpolation cell, got {grid.shape[0]}."
+            )
+        if not bool(jnp.all(jnp.isfinite(grid))):
+            raise ValueError(f"{name} must be finite (no NaN/inf).")
+        if not bool(jnp.all(jnp.diff(grid) > 0.0)):
+            raise ValueError(
+                f"{name} must be STRICTLY increasing; got a non-increasing or "
+                "duplicated node (the bilinear bracket and its 1/(g1-g0) "
+                "weight are undefined there)."
+            )
+    if log_p_table.shape != (z_grid.shape[0], log_mu_grid.shape[0]):
+        raise ValueError(
+            f"log_p_table shape {log_p_table.shape} must equal "
+            f"(len(z_grid), len(log_mu_grid)) = "
+            f"({z_grid.shape[0]}, {log_mu_grid.shape[0]})."
+        )
+    if bool(jnp.any(jnp.isnan(log_p_table))):
+        raise ValueError(
+            "log_p_table must not contain NaN (-inf is allowed: it is a "
+            "legitimate log of zero probability)."
+        )
+    return z_grid, log_mu_grid, log_p_table
+
+
 def make_tabulated_wl_params(
     z_grid: jnp.ndarray,
     log_mu_grid: jnp.ndarray,
@@ -111,20 +163,9 @@ def make_tabulated_wl_params(
         in μ, evaluated at the gridded ln μ.  The interpolation is done
         in (z, ln μ) space because p_WL is smoother as a function of ln μ.
     """
-    z_grid = jnp.asarray(z_grid, dtype=jnp.float64)
-    log_mu_grid = jnp.asarray(log_mu_grid, dtype=jnp.float64)
-    log_p_table = jnp.asarray(log_p_table, dtype=jnp.float64)
-
-    if z_grid.ndim != 1:
-        raise ValueError(f"z_grid must be 1D, got shape {z_grid.shape}.")
-    if log_mu_grid.ndim != 1:
-        raise ValueError(f"log_mu_grid must be 1D, got shape {log_mu_grid.shape}.")
-    if log_p_table.shape != (z_grid.shape[0], log_mu_grid.shape[0]):
-        raise ValueError(
-            f"log_p_table shape {log_p_table.shape} must equal "
-            f"(len(z_grid), len(log_mu_grid)) = "
-            f"({z_grid.shape[0]}, {log_mu_grid.shape[0]})."
-        )
+    z_grid, log_mu_grid, log_p_table = _validate_tabulated_grids(
+        z_grid, log_mu_grid, log_p_table
+    )
 
     return WLParams(
         backend=1,
@@ -176,24 +217,35 @@ def _bilinear_interp(
     """Bilinear interpolation of ``table`` at points ``(z, log_mu)``.
 
     Out-of-range queries are clamped to the grid edges (constant
-    extrapolation). For weak-lensing tables the grid should be wide
-    enough that this is harmless; the caller is responsible.
+    extrapolation): the QUERY COORDINATES are clipped to
+    ``[grid[0], grid[-1]]`` before bracketing, so an out-of-range point
+    returns the boundary value exactly.  Clamping only the bracket INDICES
+    (as this did before) leaves the interpolation weight ``t`` outside
+    ``[0, 1]`` and silently LINEARLY EXTRAPOLATES off the edge cell — on a
+    2x2 linear table, ``z = -1`` returned -1.5 and ``z = 2`` returned 4.5
+    instead of the edge values, i.e. the documented clamp contract was not the
+    implemented behaviour.  Grids are validated (finite, >= 2 points, strictly
+    increasing) by :func:`_validate_tabulated_grids` on every construction
+    path, which is what makes ``grid[0]``/``grid[-1]`` the true range.
     """
     nz = z_grid.shape[0]
     nm = log_mu_grid.shape[0]
 
-    iz = jnp.clip(jnp.searchsorted(z_grid, z) - 1, 0, nz - 2)
-    im = jnp.clip(jnp.searchsorted(log_mu_grid, log_mu) - 1, 0, nm - 2)
+    z_c = jnp.clip(z, z_grid[0], z_grid[-1])
+    lm_c = jnp.clip(log_mu, log_mu_grid[0], log_mu_grid[-1])
+
+    iz = jnp.clip(jnp.searchsorted(z_grid, z_c) - 1, 0, nz - 2)
+    im = jnp.clip(jnp.searchsorted(log_mu_grid, lm_c) - 1, 0, nm - 2)
 
     z0 = z_grid[iz]
     z1 = z_grid[iz + 1]
     m0 = log_mu_grid[im]
     m1 = log_mu_grid[im + 1]
 
-    # Avoid 0/0 at duplicate grid points (shouldn't happen for strictly
-    # increasing grids, but be defensive).
-    tz = jnp.where(z1 > z0, (z - z0) / (z1 - z0), 0.0)
-    tm = jnp.where(m1 > m0, (log_mu - m0) / (m1 - m0), 0.0)
+    # Avoid 0/0 at duplicate grid points (rejected by the grid validation, but
+    # a hand-built WLParams can still reach here).
+    tz = jnp.where(z1 > z0, (z_c - z0) / (z1 - z0), 0.0)
+    tm = jnp.where(m1 > m0, (lm_c - m0) / (m1 - m0), 0.0)
 
     f00 = table[iz, im]
     f10 = table[iz + 1, im]
@@ -335,10 +387,15 @@ def make_tabulated_log_p_wl(
 
     Returns a callable ``log_p_wl_fn(mu, z) -> log p_WL(μ | z)`` with the
     interpolation table baked in.
+
+    Grids go through the SAME :func:`_validate_tabulated_grids` as
+    ``make_tabulated_wl_params``: this factory is the path the lensing CLI
+    actually takes (``make_log_p_wl_from_params`` delegates here), so skipping
+    the checks let a malformed table reach the likelihood unchecked.
     """
-    z_grid = jnp.asarray(z_grid, dtype=jnp.float64)
-    log_mu_grid = jnp.asarray(log_mu_grid, dtype=jnp.float64)
-    log_p_table = jnp.asarray(log_p_table, dtype=jnp.float64)
+    z_grid, log_mu_grid, log_p_table = _validate_tabulated_grids(
+        z_grid, log_mu_grid, log_p_table
+    )
 
     # Known limitation (library review, lensing finding): a coarse log_mu_grid
     # cannot resolve the narrow low-z p(mu|z) of the lognormal WL model, so the

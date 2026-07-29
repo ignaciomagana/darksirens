@@ -398,6 +398,13 @@ def test_multipole_l1_equals_dipole():
 
 
 def test_summarize_multipole_cl_matches_definition():
+    """C_ℓ is the power PER MODE: Σ_m a_lm² / (2ℓ+1).
+
+    The summary reported the TOTAL multipole power Σ_m a_lm² and labelled it
+    C_ℓ, which is not the conventional normalisation the docstring, the plot
+    axis and the docs all claim — and which is not comparable across ℓ (the
+    total grows with the 2ℓ+1 mode count even for a scale-invariant field).
+    """
     from darksirens.sky.analyze import summarize_multipole_posterior
 
     model = get_sky_model("multipole")
@@ -405,10 +412,37 @@ def test_summarize_multipole_cl_matches_definition():
     a = np.arange(1, 9, dtype=float) * 0.05                 # distinct a_lm
     samples = np.tile(a, (4, 1))
     summ = summarize_multipole_posterior(samples, labels, "multipole")
-    # C_1 = sum of first 3 squared; C_2 = sum of next 5 squared
-    c1 = float(np.sum(a[:3] ** 2)); c2 = float(np.sum(a[3:] ** 2))
+    # C_1 = sum of first 3 squared / 3; C_2 = sum of next 5 squared / 5
+    c1 = float(np.sum(a[:3] ** 2)) / 3.0
+    c2 = float(np.sum(a[3:] ** 2)) / 5.0
     assert abs(summ["C_ell_quantiles"][1][0.5] - c1) < 1e-9
     assert abs(summ["C_ell_quantiles"][2][0.5] - c2) < 1e-9
+    assert np.allclose(summ["C_ell_samples"][1], c1)
+
+
+def test_summarize_multipole_cl_of_a_pure_dipole():
+    """A pure dipole with known a_1m gives C_1 = Σ_m a_1m² / 3.
+
+    Cross-check against the physical amplitude: for g = 1 + n̂·d the
+    orthonormal-harmonic coefficients are a_1m = sqrt(4π/3) d_m, so
+    C_1 = (4π/3)|d|²/3 — the mean-square anisotropy per mode.
+    """
+    from darksirens.sky.analyze import summarize_multipole_posterior
+
+    model = get_sky_model("multipole")
+    labels = [s.label for s in model.param_specs]
+    d = np.array([0.3, -0.2, 0.1])
+    c = np.sqrt(4.0 * np.pi / 3.0)
+    a1 = np.array([c * d[1], c * d[2], c * d[0]])       # (m=-1, 0, +1)
+    samples = np.zeros((3, len(labels)))
+    samples[:, :3] = a1
+
+    summ = summarize_multipole_posterior(samples, labels, "multipole")
+    np.testing.assert_allclose(summ["C_ell_quantiles"][1][0.5],
+                               float(np.sum(a1 ** 2)) / 3.0, rtol=1e-12)
+    np.testing.assert_allclose(summ["C_ell_quantiles"][1][0.5],
+                               (4.0 * np.pi / 3.0) * float(d @ d) / 3.0, rtol=1e-12)
+    assert summ["C_ell_quantiles"][2][0.5] == 0.0
 
 
 # ============================================================================

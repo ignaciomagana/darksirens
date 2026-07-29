@@ -633,3 +633,135 @@ class TestNaNHandling:
             log_p_wl_fn, mu_nodes, log_w,
         )
         assert jnp.isinf(out[0]) and out[0] < 0
+
+
+# ============================================================================
+# Tabulated backend: the clamp contract and grid validation (P2-04)
+# ============================================================================
+
+class TestTabulatedClampAndValidation:
+    """``_bilinear_interp`` documents "out-of-range queries are clamped to the
+    grid edges", but it clamped only the bracket INDICES.  The interpolation
+    weight ``t = (x - x0)/(x1 - x0)`` was still built from the RAW coordinate,
+    so an out-of-range query linearly EXTRAPOLATED off the edge cell instead:
+    on a 2x2 linear table ``z = -1`` returned -1.5 and ``z = 2`` returned 4.5.
+    For a log-PDF table that is an unbounded extrapolated log-density feeding
+    ``exp`` in the mu-marginal, with no diagnostic.
+    """
+
+    @staticmethod
+    def _linear_table():
+        """f(z, log_mu) = z + log_mu on the unit square, as a 2x2 table."""
+        z_grid = jnp.asarray([0.0, 1.0])
+        log_mu_grid = jnp.asarray([0.0, 1.0])
+        table = jnp.asarray([[0.0, 1.0], [1.0, 2.0]])
+        return z_grid, log_mu_grid, table
+
+    @pytest.mark.parametrize(
+        "z, log_mu, expect",
+        [
+            (-1.0, 0.5, 0.5),    # below the z grid  -> z clamped to 0
+            (2.0, 0.5, 1.5),     # above the z grid  -> z clamped to 1
+            (0.5, -1.0, 0.5),    # below the mu grid -> log_mu clamped to 0
+            (0.5, 2.0, 1.5),     # above the mu grid -> log_mu clamped to 1
+            (-3.0, 4.0, 1.0),    # both axes out of range (corner)
+            (0.25, 0.75, 1.0),   # in range: unchanged
+        ],
+    )
+    def test_out_of_range_queries_return_boundary_values(self, z, log_mu, expect):
+        from darksirens.lensing.wlmagnification import _bilinear_interp
+        z_grid, log_mu_grid, table = self._linear_table()
+        got = float(_bilinear_interp(
+            jnp.asarray(z), jnp.asarray(log_mu), z_grid, log_mu_grid, table,
+        ))
+        assert got == pytest.approx(expect, abs=1e-12), (
+            f"query (z={z}, log_mu={log_mu}) gave {got}, expected the clamped "
+            f"value {expect} (extrapolation off the edge cell)"
+        )
+
+    def test_edges_are_exact_on_both_axes(self):
+        """The four grid corners must reproduce the table entries exactly."""
+        from darksirens.lensing.wlmagnification import _bilinear_interp
+        z_grid, log_mu_grid, table = self._linear_table()
+        for i, zv in enumerate(z_grid):
+            for j, mv in enumerate(log_mu_grid):
+                got = float(_bilinear_interp(zv, mv, z_grid, log_mu_grid, table))
+                assert got == pytest.approx(float(table[i, j]), abs=1e-12)
+
+    def test_clamped_closure_matches_the_free_dispatcher(self):
+        """Both tabulated entry points share the clamp."""
+        z_grid, log_mu_grid, table = _lognormal_table()
+        fn = make_tabulated_log_p_wl(z_grid, log_mu_grid, table)
+        params = make_tabulated_wl_params(z_grid, log_mu_grid, table)
+        mu = jnp.asarray([1.0, 1.0])
+        z_out = jnp.asarray([float(z_grid[0]) - 1.0, float(z_grid[-1]) + 1.0])
+        z_edge = jnp.asarray([float(z_grid[0]), float(z_grid[-1])])
+        np.testing.assert_allclose(
+            np.asarray(fn(mu, z_out)), np.asarray(fn(mu, z_edge)), rtol=0, atol=0)
+        np.testing.assert_allclose(
+            np.asarray(log_p_wl(mu, z_out, params)),
+            np.asarray(fn(mu, z_edge)), rtol=0, atol=0)
+
+    # -- grid validation on EVERY construction path --------------------------
+
+    _BAD_GRIDS = {
+        "single_point": (jnp.asarray([0.5]), jnp.asarray([0.0, 1.0]),
+                         jnp.zeros((1, 2)), "at least 2 points"),
+        "duplicated_node": (jnp.asarray([0.0, 0.0]), jnp.asarray([0.0, 1.0]),
+                            jnp.zeros((2, 2)), "STRICTLY increasing"),
+        "decreasing": (jnp.asarray([1.0, 0.0]), jnp.asarray([0.0, 1.0]),
+                       jnp.zeros((2, 2)), "STRICTLY increasing"),
+        "nan_node": (jnp.asarray([0.0, jnp.nan]), jnp.asarray([0.0, 1.0]),
+                     jnp.zeros((2, 2)), "finite"),
+        "mu_decreasing": (jnp.asarray([0.0, 1.0]), jnp.asarray([1.0, 0.0]),
+                          jnp.zeros((2, 2)), "STRICTLY increasing"),
+        "shape_mismatch": (jnp.asarray([0.0, 1.0]), jnp.asarray([0.0, 1.0]),
+                           jnp.zeros((2, 3)), "must equal"),
+        "nan_table": (jnp.asarray([0.0, 1.0]), jnp.asarray([0.0, 1.0]),
+                      jnp.full((2, 2), jnp.nan), "must not contain NaN"),
+    }
+
+    @pytest.mark.parametrize("case", sorted(_BAD_GRIDS))
+    @pytest.mark.parametrize("ctor", ["params", "closure"])
+    def test_malformed_grids_rejected_on_every_construction_path(self, case, ctor):
+        """``make_tabulated_log_p_wl`` -- the path the lensing CLI actually
+        takes via ``make_log_p_wl_from_params`` -- used to skip every check the
+        ``WLParams`` constructor made."""
+        z_grid, log_mu_grid, table, msg = self._BAD_GRIDS[case]
+        build = (make_tabulated_wl_params if ctor == "params"
+                 else make_tabulated_log_p_wl)
+        with pytest.raises(ValueError, match=msg):
+            build(z_grid, log_mu_grid, table)
+
+    def test_minus_inf_table_entries_are_allowed(self):
+        """-inf is a legitimate log of zero probability; only NaN is rejected."""
+        table = jnp.asarray([[0.0, -jnp.inf], [-jnp.inf, 0.0]])
+        make_tabulated_wl_params(jnp.asarray([0.0, 1.0]), jnp.asarray([0.0, 1.0]),
+                                 table)
+
+
+# ============================================================================
+# Generic bilinear helper: same clamp defect (P3-01)
+# ============================================================================
+
+def test_interp2d_clamps_query_coordinates_not_just_indices():
+    """``darksirens.utils.interp2d.interp2d`` documents the same clamp and had
+    the same index-only bug: for f = x + y on the unit grid, (2, 0.5) returned
+    2.5 (extrapolated) instead of the clamped 1.5."""
+    from darksirens.utils.interp2d import interp2d
+    xp = jnp.asarray([0.0, 1.0])
+    yp = jnp.asarray([0.0, 1.0])
+    zp = jnp.asarray([[0.0, 1.0], [1.0, 2.0]])          # f = x + y
+
+    for x, y, expect in [(2.0, 0.5, 1.5), (-1.0, 0.5, 0.5),
+                         (0.5, 2.0, 1.5), (0.5, -1.0, 0.5),
+                         (5.0, 5.0, 2.0), (-5.0, -5.0, 0.0),
+                         (0.25, 0.75, 1.0)]:
+        got = float(interp2d(jnp.asarray(x), jnp.asarray(y), xp, yp, zp))
+        assert got == pytest.approx(expect, abs=1e-12), (x, y, got, expect)
+
+    # fill_value still keys on the RAW coordinates, so its behaviour is unchanged.
+    assert float(interp2d(jnp.asarray(2.0), jnp.asarray(0.5), xp, yp, zp,
+                          fill_value=jnp.asarray(-9.0))) == pytest.approx(-9.0)
+    assert float(interp2d(jnp.asarray(0.25), jnp.asarray(0.75), xp, yp, zp,
+                          fill_value=jnp.asarray(-9.0))) == pytest.approx(1.0)

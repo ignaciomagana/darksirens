@@ -85,6 +85,81 @@ def test_gp_log_p_pop_handles_2d_inputs(name):
 
 
 # ===========================================================================
+# 2b. The BINNED GP models must honour the same broadcast contract (P2-15).
+# ===========================================================================
+# ``BinnedGPPopulation.log_p_pop`` fixed the output shape from ``m1`` alone
+# (``atleast_1d(m1)`` then ``broadcast_to(..., m1.shape)`` for q/z/chieff), so a
+# scalar m1 against a vector q/z/spin raised a hard broadcast error and an
+# all-scalar query returned shape (1,) instead of a scalar.  It now uses the
+# same ``_broadcast_logp_inputs`` helper as the other GP models.
+
+_BINNED_MODELS = [n for n in GP_MODEL_NAMES if n.startswith("gppop")]
+
+
+@pytest.mark.parametrize("name", _BINNED_MODELS)
+def test_binned_gp_all_scalar_query_returns_a_scalar(name):
+    m = build_gp_model(name)
+    th = jnp.asarray(m.fiducial())
+    out = m.log_p_pop(30.0, 0.8, 0.15, 0.0, th)
+    assert jnp.shape(out) == (), f"{name}: all-scalar query gave shape {out.shape}"
+    vec = m.log_p_pop(jnp.array([30.0]), jnp.array([0.8]), jnp.array([0.15]),
+                      jnp.array([0.0]), th)
+    assert bool(jnp.allclose(out, vec[0], equal_nan=True))
+
+
+@pytest.mark.parametrize("name", _BINNED_MODELS)
+def test_binned_gp_scalar_against_vector_axes(name):
+    """Scalar m1 with vector q/z/spin (and every other mixed combination) must
+    broadcast, not raise."""
+    m = build_gp_model(name)
+    th = jnp.asarray(m.fiducial())
+    qv = jnp.array([0.5, 0.7, 0.9])
+    zv = jnp.array([0.1, 0.2, 0.3])
+    cv = jnp.array([0.0, 0.1, -0.1])
+
+    got = m.log_p_pop(30.0, qv, zv, cv, th)
+    assert got.shape == (3,), f"{name}: scalar-m1 query gave shape {got.shape}"
+    ref = jnp.stack([m.log_p_pop(30.0, qv[i], zv[i], cv[i], th)
+                     for i in range(3)])
+    assert bool(jnp.allclose(got, ref, atol=1e-12, equal_nan=True))
+
+    # Vector m1 against scalar q/z/chi, the mirror case.
+    m1v = jnp.array([20.0, 30.0, 40.0])
+    got2 = m.log_p_pop(m1v, 0.7, 0.2, 0.0, th)
+    assert got2.shape == (3,)
+
+
+@pytest.mark.parametrize("name", _BINNED_MODELS)
+def test_binned_gp_handles_2d_mesh(name):
+    """A (Nsamp, Nnodes) mesh must match a column-wise 1-D evaluation."""
+    m = build_gp_model(name)
+    th = jnp.asarray(m.fiducial())
+    m1a = jnp.array([20.0, 30.0, 40.0])
+    qa = jnp.array([0.6, 0.7, 0.8])
+    za = jnp.array([0.1, 0.2, 0.3])
+    ca = jnp.array([0.0, 0.1, -0.1])
+    m1b = jnp.stack([m1a, m1a + 1.0], axis=1)          # (3, 2)
+    qb = jnp.stack([qa, qa], axis=1)
+    zb = jnp.stack([za, za], axis=1)
+    cb = jnp.stack([ca, ca], axis=1)
+
+    r2 = m.log_p_pop(m1b, qb, zb, cb, th)
+    assert r2.shape == (3, 2), f"{name}: 2-D query gave shape {r2.shape}"
+    ref = jnp.stack(
+        [m.log_p_pop(m1b[:, c], qb[:, c], zb[:, c], cb[:, c], th)
+         for c in range(m1b.shape[1])],
+        axis=1,
+    )
+    assert bool(jnp.allclose(r2, ref, atol=1e-9, equal_nan=True)), (
+        f"{name}: 2-D result does not match column-wise 1-D evaluation"
+    )
+
+    # A sparse predictive mesh (one non-trivial axis each) broadcasts too.
+    sparse = m.log_p_pop(m1a[:, None], qa[None, :], 0.2, 0.0, th)
+    assert sparse.shape == (3, 3)
+
+
+# ===========================================================================
 # 3. The z-conditional normaliser must not batch the z grid.
 # ===========================================================================
 # ``_znorm_interp`` evaluated the probability-axis normalisation with

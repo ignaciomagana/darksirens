@@ -481,6 +481,12 @@ def _row_kernel_state(
     """
     real = _row_real_mask(zs, ws, ngal)
     sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
+    # The 1e-300 floor is a numerical BACKSTOP only (it keeps padding slots from
+    # producing log(0) = -inf * 0 = NaN inside the traced reduction).  A real
+    # galaxy with w <= 0 is a data error, not something to floor: it would carry
+    # a ~-690 log-weight while still counting in ``ngal``, so the observed count
+    # and the mixture would measure different galaxy sets.  Such weights are
+    # rejected at the data-entry boundary by ``darksirens_pixelate``.
     log_w = jnp.where(real, jnp.log(jnp.maximum(ws, 1e-300)), -jnp.inf)
     log_depth_mass = jnp.zeros((), dtype=sig_eff.dtype)
 
@@ -598,6 +604,8 @@ def _row_marked_kernel_state(
     real = _row_real_mask(zs, ws, ngal)
     sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
 
+    # 1e-300: numerical backstop for padding slots only; real galaxies with
+    # w <= 0 are rejected by ``darksirens_pixelate`` (see _row_kernel_state).
     log_w = jnp.where(real, jnp.log(jnp.maximum(ws, 1e-300)), -jnp.inf)
     log_wh = jnp.where(real, log_w + log_h_row, -jnp.inf)   # log(w_i h_i)
     lse = logsumexp(log_wh)                                 # log Σ_i w_i h_i

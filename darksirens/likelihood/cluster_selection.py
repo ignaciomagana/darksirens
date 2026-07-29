@@ -102,6 +102,34 @@ from darksirens.likelihood.selection import (
 )
 
 
+def _neff_from_log_mu_sigma2(
+    log_mu: jnp.ndarray, log_sigma2: jnp.ndarray
+) -> jnp.ndarray:
+    """``N_eff = μ̂² / Var(μ̂)`` with the same semantics as the standard
+    singleton path (``likelihood/selection.py:_lse_to_log_mu_neff``).
+
+    Only ``log_mu`` finiteness gates the estimate.  ``log_sigma2 = -inf`` is
+    the EXACT-ZERO-VARIANCE case — a deterministic (or single-support)
+    selection estimate — whose effective sample size is INFINITE, not zero:
+    requiring ``isfinite(log_sigma2)`` (as the cluster stack did) mapped it to
+    ``N_eff = 0``, which trips the sparse-N_eff guard and returns ``-inf`` for
+    a selection integral that is in fact known perfectly.  ``log_mu = -inf``
+    (empty channel) still gives ``N_eff = 0`` so the too-sparse verdict fires,
+    and a NaN ``log_sigma2`` propagates to a NaN ``N_eff``, which the guard's
+    ``~(N_eff > threshold)`` also rejects.
+
+    Both branch arguments are sanitized before the ``exp`` so no NaN/inf rides
+    the dead branch of a ``where`` into the backward pass (see
+    ``redshift/catalog.py:_logsumexp_neginf_safe`` for that reverse-mode class).
+    """
+    finite_mu = jnp.isfinite(log_mu)
+    zero_var = log_sigma2 == -jnp.inf
+    log_mu_safe = jnp.where(finite_mu, log_mu, 0.0)
+    log_sigma2_safe = jnp.where(zero_var, 0.0, log_sigma2)
+    ratio = jnp.exp(2.0 * log_mu_safe - log_sigma2_safe)
+    return jnp.where(finite_mu, jnp.where(zero_var, jnp.inf, ratio), 0.0)
+
+
 def _per_source_log_weight(
     injections: LensedInjectionSet,
     cosmo: CosmoParams,
@@ -219,11 +247,7 @@ def compute_cluster_selection_term(
         jnp.isfinite(log_sum_w), log_var_term - 2.0 * log_n_draw, -jnp.inf
     )
 
-    Neff = jnp.where(
-        jnp.isfinite(log_mu) & jnp.isfinite(log_sigma2),
-        jnp.exp(2.0 * log_mu - log_sigma2),
-        0.0,
-    )
+    Neff = _neff_from_log_mu_sigma2(log_mu, log_sigma2)
     return log_mu, Neff, log_sigma2
 
 
@@ -280,11 +304,7 @@ def compute_lensed_single_selection_term(
         jnp.isfinite(log_sum_w), log_var_term - 2.0 * log_n_draw, -jnp.inf
     )
 
-    Neff = jnp.where(
-        jnp.isfinite(log_mu) & jnp.isfinite(log_sigma2),
-        jnp.exp(2.0 * log_mu - log_sigma2),
-        0.0,
-    )
+    Neff = _neff_from_log_mu_sigma2(log_mu, log_sigma2)
     return log_mu, Neff, log_sigma2
 
 
@@ -355,11 +375,9 @@ def combined_selection_log_correction(
     """
     log_mu_tot = jnp.logaddexp(log_mu_singleton, log_mu_cluster)
     log_sigma2_tot = jnp.logaddexp(log_sigma2_singleton, log_sigma2_cluster)
-    Neff_tot = jnp.where(
-        jnp.isfinite(log_mu_tot) & jnp.isfinite(log_sigma2_tot),
-        jnp.exp(2.0 * log_mu_tot - log_sigma2_tot),
-        0.0,
-    )
+    # Zero total variance (every contributing channel deterministic) means an
+    # INFINITE combined ESS -- see _neff_from_log_mu_sigma2.
+    Neff_tot = _neff_from_log_mu_sigma2(log_mu_tot, log_sigma2_tot)
     n_tot = int(n_singletons_observed) + int(n_clusters_observed)
     if n_tot <= 0:
         return jnp.asarray(0.0)
