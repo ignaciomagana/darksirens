@@ -130,3 +130,54 @@ def test_radial_deterministic_matches_member_mean(fiducial_catalog):
     mem = np.log(np.mean(np.exp(logq_members[:, occ_rows, :]), axis=0))
     err = np.abs(mem - det)
     assert float(np.median(err)) < 0.3, float(np.median(err))
+
+
+def test_parallel_row_solves_are_bitwise_identical_to_serial():
+    """``workers > 1`` must be an exact wall-clock optimisation, not an
+    approximation.
+
+    The per-pixel MAP solves are independent, so farming contiguous row blocks
+    out to a process pool cannot change a single bit of the result.  At DESI
+    nside=128 the serial loop over ~69k occupied pixels is ~42 h against ~3 h
+    16-way, so the parallel path is what makes a real Q table affordable -- and
+    a silent numerical difference there would be indistinguishable from the
+    under-relaxation the builder already warns about.
+
+    Workers are SPAWNED, so this test relies on pytest's own entry point being
+    ``__main__``-guarded (it is); see the ``workers`` note in
+    ``poisson_lognormal_map``.
+    """
+    from darksirens.redshift.lognormal_completion import (
+        gaussian_correlation_spectrum, poisson_lognormal_map)
+
+    rng = np.random.default_rng(3)
+    n_rows, n_grid = 6, 64
+    pk = gaussian_correlation_spectrum(n_grid, 4.0, 1.0)
+    dN_exp = np.abs(rng.normal(90.0, 30.0, n_grid)) + 1.0
+    C = np.clip(rng.uniform(0.0, 1.0, (n_rows, n_grid)), 0.0, 1.0)
+    N_obs = rng.poisson(C * dN_exp).astype(float)
+
+    serial = poisson_lognormal_map(N_obs, C, dN_exp, pk, maxiter=200, workers=1)
+    parallel = poisson_lognormal_map(N_obs, C, dN_exp, pk, maxiter=200, workers=3)
+
+    for key in ("s_map", "logq_map", "q_map", "lambda_map"):
+        assert np.array_equal(serial[key], parallel[key]), key
+    assert (serial["diagnostics"]["n_converged"]
+            == parallel["diagnostics"]["n_converged"])
+
+
+def test_parallel_row_solves_handle_more_workers_than_rows():
+    """``workers`` above the row count must not produce empty blocks or hang."""
+    from darksirens.redshift.lognormal_completion import (
+        gaussian_correlation_spectrum, poisson_lognormal_map)
+
+    rng = np.random.default_rng(5)
+    n_rows, n_grid = 2, 32
+    pk = gaussian_correlation_spectrum(n_grid, 3.0, 1.0)
+    dN_exp = np.abs(rng.normal(50.0, 10.0, n_grid)) + 1.0
+    C = np.clip(rng.uniform(0.0, 1.0, (n_rows, n_grid)), 0.0, 1.0)
+    N_obs = rng.poisson(C * dN_exp).astype(float)
+
+    serial = poisson_lognormal_map(N_obs, C, dN_exp, pk, maxiter=200, workers=1)
+    parallel = poisson_lognormal_map(N_obs, C, dN_exp, pk, maxiter=200, workers=8)
+    assert np.array_equal(serial["logq_map"], parallel["logq_map"])

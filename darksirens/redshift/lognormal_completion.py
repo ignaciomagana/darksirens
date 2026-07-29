@@ -118,6 +118,80 @@ def _prior_sigma2(power_spectrum: np.ndarray) -> float:
 # MAP
 # ------------------------------------------------------------
 
+def _map_solve_row(nobs, c_row, dN_exp_row, pk, bias, prior_strength, shift, maxiter):
+    """One pixel's 1-D Poisson-lognormal MAP solve.
+
+    Module-level (not a closure) so a process pool can pickle it; the row solves
+    are independent, which is what makes the loop below parallelisable.
+    """
+    optimize = _require_scipy()
+    n_grid = int(pk.size)
+    b, ps = float(bias), float(prior_strength)
+    rate_base = c_row * dN_exp_row                  # >= 0
+    mask = rate_base > 0.0
+    log_rate = np.where(mask, np.log(np.where(mask, rate_base, 1.0)), 0.0)
+
+    def _neg_log_post(s):
+        log_lam = log_rate + (b * s - shift)
+        lam = np.where(mask, np.exp(log_lam), 0.0)
+        data = np.sum(lam - nobs * np.where(mask, log_lam, 0.0))
+        sk = np.fft.fft(s)
+        prior = 0.5 * ps * np.sum((np.abs(sk) ** 2) / pk) / n_grid
+        return float(data + prior)
+
+    def _grad(s):
+        log_lam = log_rate + (b * s - shift)
+        lam = np.where(mask, np.exp(log_lam), 0.0)
+        g_data = np.where(mask, b * (lam - nobs), 0.0)
+        g_prior = ps * np.real(np.fft.ifft(np.fft.fft(s) / pk))
+        return g_data + g_prior
+
+    res = optimize.minimize(
+        _neg_log_post, np.zeros(n_grid), jac=_grad, method="L-BFGS-B",
+        # maxfun: scipy's DEFAULT (15000) silently capped every large
+        # --maxiter run.  L-BFGS-B stops with status=1 ("TOTAL NO. of f
+        # AND g EVALUATIONS EXCEEDS LIMIT") once function EVALUATIONS --
+        # not iterations -- reach 15000, i.e. around iteration ~12k at
+        # DESI scale, no matter how high maxiter was raised.  That is why
+        # raising maxiter beyond ~15k changed neither the result nor the
+        # wall time while res.success stayed False.  maxls (default 20)
+        # bounds evaluations per iteration, so 21*maxiter can never bind
+        # before maxiter itself does.
+        options={"maxiter": int(maxiter), "maxfun": 21 * int(maxiter)},
+    )
+    lam = np.where(mask, np.exp(log_rate + (b * res.x - shift)), 0.0)
+    ok = bool(res.success)
+    return res.x, lam, ok, (None if ok else str(getattr(res, "message", "")))
+
+
+def _map_solve_chunk(payload):
+    """Solve a contiguous block of rows — one process-pool task."""
+    N_obs, C, dN_exp, pk, bias, prior_strength, shift, maxiter = payload
+    n = C.shape[0]
+    s_out = np.empty((n, C.shape[1]), dtype=float)
+    lam_out = np.empty((n, C.shape[1]), dtype=float)
+    n_converged = 0
+    last_failure = None
+    for i in range(n):
+        s, lam, ok, message = _map_solve_row(
+            N_obs[i], C[i], dN_exp[i], pk, bias, prior_strength, shift, maxiter)
+        s_out[i] = s
+        lam_out[i] = lam
+        n_converged += int(ok)
+        if not ok:
+            last_failure = message
+    return s_out, lam_out, n_converged, last_failure
+
+
+def _init_worker():
+    """Pin each worker to one BLAS/FFT thread so W processes don't oversubscribe."""
+    import os
+
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS"):
+        os.environ[var] = "1"
+
+
 def poisson_lognormal_map(
     N_obs: np.ndarray,
     C: np.ndarray,
@@ -134,6 +208,7 @@ def poisson_lognormal_map(
     # solves that genuinely need it.
     maxiter: int = 200000,
     logq_clip: float = 7.0,
+    workers: int = 1,
 ) -> dict:
     """Per-pixel MAP of the 1-D Poisson-lognormal completion field.
 
@@ -151,13 +226,26 @@ def poisson_lognormal_map(
     bias, prior_strength, maxiter, logq_clip
         Linear bias of the field, prior precision scaling, optimiser iteration
         cap, and the symmetric clip applied to ``log Q``.
+    workers
+        Row solves to run in parallel processes (1 = serial, the default).  The
+        per-pixel solves are independent, so this is exact — only the wall clock
+        changes.  At DESI nside=128 there are ~69k occupied pixels at ~2.2 s
+        each, so the serial loop is ~42 h and a 16-way pool is ~3 h.
+
+        With ``workers > 1`` the call MUST sit behind
+        ``if __name__ == "__main__":`` in the calling program: workers are
+        spawned, so each one re-imports the caller's ``__main__``, and an
+        unguarded top-level call recursively spawns processes until CPython
+        aborts it.  ``workers=1`` has no such constraint.
 
     Returns
     -------
     dict with ``s_map``, ``logq_map``, ``q_map``, ``lambda_map`` (each
     ``(N_rows, N_grid)``) and ``diagnostics``.
     """
-    optimize = _require_scipy()
+    # Probe here, not only inside the row solve: with workers > 1 a missing
+    # scipy would otherwise surface as an opaque BrokenProcessPool from a child.
+    _require_scipy()
 
     N_obs = np.atleast_2d(np.asarray(N_obs, dtype=float))
     n_rows, n_grid = N_obs.shape
@@ -186,45 +274,54 @@ def poisson_lognormal_map(
     n_converged = 0
     last_failure = None
 
-    for r in range(n_rows):
-        nobs = N_obs[r]
-        rate_base = C[r] * dN_exp[r]            # >= 0
-        mask = rate_base > 0.0
-        log_rate = np.where(mask, np.log(np.where(mask, rate_base, 1.0)), 0.0)
+    n_workers = max(1, int(workers))
+    if n_workers > 1 and n_rows > 1:
+        # Independent per-row solves: farm contiguous blocks out to a process
+        # pool.  Several blocks per worker so the (data-dependent) per-row cost
+        # load-balances instead of stranding one slow block at the end.
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
 
-        def _neg_log_post(s):
-            log_lam = log_rate + (b * s - shift)
-            lam = np.where(mask, np.exp(log_lam), 0.0)
-            data = np.sum(lam - nobs * np.where(mask, log_lam, 0.0))
-            sk = np.fft.fft(s)
-            prior = 0.5 * ps * np.sum((np.abs(sk) ** 2) / pk) / n_grid
-            return float(data + prior)
-
-        def _grad(s):
-            log_lam = log_rate + (b * s - shift)
-            lam = np.where(mask, np.exp(log_lam), 0.0)
-            g_data = np.where(mask, b * (lam - nobs), 0.0)
-            g_prior = ps * np.real(np.fft.ifft(np.fft.fft(s) / pk))
-            return g_data + g_prior
-
-        res = optimize.minimize(
-            _neg_log_post, np.zeros(n_grid), jac=_grad, method="L-BFGS-B",
-            # maxfun: scipy's DEFAULT (15000) silently capped every large
-            # --maxiter run.  L-BFGS-B stops with status=1 ("TOTAL NO. of f
-            # AND g EVALUATIONS EXCEEDS LIMIT") once function EVALUATIONS --
-            # not iterations -- reach 15000, i.e. around iteration ~12k at
-            # DESI scale, no matter how high maxiter was raised.  That is why
-            # raising maxiter beyond ~15k changed neither the result nor the
-            # wall time while res.success stayed False.  maxls (default 20)
-            # bounds evaluations per iteration, so 21*maxiter can never bind
-            # before maxiter itself does.
-            options={"maxiter": int(maxiter), "maxfun": 21 * int(maxiter)},
-        )
-        s_map[r] = res.x
-        lam_map[r] = np.where(mask, np.exp(log_rate + (b * res.x - shift)), 0.0)
-        n_converged += int(bool(res.success))
-        if not res.success:
-            last_failure = str(getattr(res, "message", ""))
+        # NOT the default fork: this module is reachable from a live JAX process,
+        # and forking a multithreaded JAX runtime both warns and (measured) runs
+        # ~10x SLOWER than serial from thread contention in the children.
+        #
+        # Spawned workers start as clean interpreters that never touch the GPU.
+        #
+        # CALLER CONTRACT: with workers > 1 the call must be reachable only under
+        # `if __name__ == "__main__":`.  Every non-fork start method re-imports
+        # the caller's __main__ in each worker, so an unguarded top-level call
+        # re-enters this function in the child and recursively spawns until
+        # CPython's _check_not_importing_main aborts.  forkserver does NOT avoid
+        # this -- the check lives in multiprocessing.spawn.get_preparation_data,
+        # which forkserver uses too.  cli/build_lognormal_completion.py guards
+        # its main(), which is why the CLI path is safe.
+        mp_ctx = multiprocessing.get_context("spawn")
+        n_workers = min(n_workers, n_rows)
+        edges = np.linspace(0, n_rows, min(4 * n_workers, n_rows) + 1).astype(int)
+        spans = [(int(a), int(z)) for a, z in zip(edges[:-1], edges[1:]) if z > a]
+        payloads = [
+            (N_obs[a:z], C[a:z], dN_exp[a:z], pk, b, ps, shift, maxiter)
+            for a, z in spans
+        ]
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx,
+                                 initializer=_init_worker) as pool:
+            for (a, z), (s_blk, lam_blk, nconv, blk_failure) in zip(
+                    spans, pool.map(_map_solve_chunk, payloads)):
+                s_map[a:z] = s_blk
+                lam_map[a:z] = lam_blk
+                n_converged += int(nconv)
+                if blk_failure is not None:
+                    last_failure = blk_failure
+    else:
+        for r in range(n_rows):
+            s, lam, ok, message = _map_solve_row(
+                N_obs[r], C[r], dN_exp[r], pk, b, ps, shift, maxiter)
+            s_map[r] = s
+            lam_map[r] = lam
+            n_converged += int(ok)
+            if not ok:
+                last_failure = message
 
     # Deterministic table = Laplace posterior-mean E[Q], using the SAME
     # FFT-diagonal Hessian approximation as `laplace_lognormal_members`, so the
