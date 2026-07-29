@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """darksirens_analyze — post-process and plot one or more inference runs.
 
-Reads the current ``results.hdf5`` save format (legacy ``samples.npy`` is still
-accepted), recomputes posterior-predictive population distributions, and makes
-publication-quality figures:
+Reads the current ``results.hdf5`` save format (falling back to the numeric
+``samples.npy`` crash-recovery chain), recomputes posterior-predictive
+population distributions, and makes publication-quality figures:
 
   * 1-D posterior-predictive spectra p(m1), p(m2), p(q), p(z), p(chi)
   * 2-D joint p(m1, m2)
@@ -19,6 +19,7 @@ so the recompute works for every model type, including the GP / binned-GP
 import os
 import json
 import argparse
+import warnings
 
 import numpy as np
 import h5py
@@ -147,22 +148,58 @@ def _load_run_hdf5(run_dir):
     return settings, samples, logZ, logZerr
 
 
-def _load_run_npy(run_dir):
-    """Legacy loader for the deprecated samples.npy format."""
+def _load_run_npy(run_dir, allow_legacy_pickle=False):
+    """Read the ``samples.npy`` crash-recovery chain (or a legacy pickled dict).
+
+    Both inference CLIs write ``samples.npy`` *before* results.hdf5 as a bare
+    numeric (nsamples, ndim) recovery matrix, so that is the normal path here:
+    labels/bounds come from settings.json and there is no evidence to report.
+    Very old runs instead stored a pickled results dict; reading one deserializes
+    arbitrary Python, so it takes the explicit ``--allow_legacy_pickle`` opt-in.
+    """
+    path = os.path.join(run_dir, "samples.npy")
     settings = _load_settings(run_dir)
-    results = np.load(os.path.join(run_dir, "samples.npy"), allow_pickle=True).item()
-    return settings, results["samples"], results.get("logZ"), results.get("logZerr")
+    try:
+        samples = np.load(path, allow_pickle=False)
+    except ValueError as exc:
+        if "allow_pickle=False" not in str(exc):
+            raise
+        if not allow_legacy_pickle:
+            raise ValueError(
+                f"{path} is a legacy pickled results dict, not the numeric "
+                "recovery matrix written by the current CLIs. Reading it "
+                "executes arbitrary pickle; pass --allow_legacy_pickle to "
+                "darksirens_analyze if you trust this file."
+            ) from exc
+        warnings.warn(
+            f"Unpickling legacy {path} because --allow_legacy_pickle was "
+            "passed; this executes arbitrary code from the file.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        results = np.load(path, allow_pickle=True).item()
+        return settings, results["samples"], results.get("logZ"), results.get("logZerr")
+
+    samples = np.asarray(samples)
+    if samples.dtype.kind not in ("i", "u", "f") or samples.ndim != 2:
+        raise ValueError(
+            f"{path} holds a {samples.ndim}-D array of dtype {samples.dtype!s}; "
+            "expected the numeric (nsamples, ndim) recovery matrix."
+        )
+    # No evidence is stored alongside the chain: report it as absent rather
+    # than letting a caller mistake a stale/zero value for a real logZ.
+    return settings, samples, None, None
 
 
-def load_run(run_dir):
-    """Load a completed inference run (current HDF5, else legacy NPY)."""
+def load_run(run_dir, allow_legacy_pickle=False):
+    """Load a completed inference run (current HDF5, else samples.npy)."""
     if os.path.exists(os.path.join(run_dir, "results.hdf5")):
         return _load_run_hdf5(run_dir)
     if os.path.exists(os.path.join(run_dir, "samples.npy")):
-        return _load_run_npy(run_dir)
+        return _load_run_npy(run_dir, allow_legacy_pickle=allow_legacy_pickle)
     raise FileNotFoundError(
         f"No inference results found in {run_dir!r}; expected 'results.hdf5' "
-        "(current format) or 'samples.npy' (legacy format)."
+        "(current format) or 'samples.npy' (chain-only recovery / legacy format)."
     )
 
 
@@ -708,6 +745,10 @@ def _build_parser():
     p.add_argument("--sky_nside", type=int, default=16,
                    help="HEALPix nside for the sphere_gp posterior sky map.")
     p.add_argument("--outdir", default=".", help="Directory for output figures.")
+    p.add_argument("--allow_legacy_pickle", action="store_true",
+                   help="Permit reading a very old pickled-dict samples.npy. This "
+                        "deserializes arbitrary Python from the file (arbitrary code "
+                        "execution); only use it on files you trust.")
     return p
 
 
@@ -733,7 +774,9 @@ def main():
 
     for run_dir in args.run_dirs:
         _section(f"Model  ·  {run_dir}")
-        settings, samples, logZ, logZerr = load_run(run_dir)
+        settings, samples, logZ, logZerr = load_run(
+            run_dir, allow_legacy_pickle=args.allow_legacy_pickle
+        )
         first_settings = first_settings or settings
         run_labels = _labels_of(settings)
 

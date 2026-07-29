@@ -36,10 +36,13 @@ def test_bayes_factor_matrix_requires_two_evidences():
 def test_bayes_factor_matrix_is_plotted_for_model_pair():
     assert _should_plot_bayes_factor_matrix(["model a", "model b"], [-1.0, -2.0])
 
+import json
+
 import h5py
 import numpy as np
+import pytest
 
-from darksirens.cli.analyze import load_run
+from darksirens.cli.analyze import _build_parser, load_run
 
 
 def test_load_run_reads_current_results_hdf5_root_samples(tmp_path):
@@ -71,3 +74,40 @@ def test_load_run_reads_grouped_results_hdf5_samples_and_evidence_aliases(tmp_pa
     assert samples.shape == (4, 1)
     assert logz == 1.25
     assert logzerr == 0.25
+
+
+def test_load_run_reads_numeric_samples_npy_recovery_chain(tmp_path):
+    """The crash-recovery artifact both CLIs write before results.hdf5: a bare
+    numeric (nsamples, ndim) matrix, with metadata from settings.json."""
+    np.save(tmp_path / "samples.npy", np.array([[1.0, 2.0], [3.0, 4.0]]))
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"pop_model": "powerlaw", "labels": ["H0", "alpha"]})
+    )
+
+    settings, samples, logz, logzerr = load_run(str(tmp_path))
+
+    assert samples.shape == (2, 2)
+    assert settings["labels"] == ["H0", "alpha"]
+    # No evidence is stored next to the chain — it must read as absent.
+    assert logz is None and logzerr is None
+
+
+def test_load_run_requires_opt_in_for_legacy_pickled_samples_npy(tmp_path):
+    legacy = {"samples": np.zeros((5, 3)), "logZ": -7.0, "logZerr": 0.1}
+    np.save(tmp_path / "samples.npy", np.array(legacy, dtype=object))
+
+    with pytest.raises(ValueError, match="legacy pickled results dict"):
+        load_run(str(tmp_path))
+
+    with pytest.warns(RuntimeWarning, match="allow_legacy_pickle"):
+        _settings, samples, logz, logzerr = load_run(
+            str(tmp_path), allow_legacy_pickle=True
+        )
+    assert samples.shape == (5, 3)
+    assert logz == -7.0 and logzerr == 0.1
+
+
+def test_analyze_parser_defaults_legacy_pickle_off():
+    args = _build_parser().parse_args([])
+    assert args.allow_legacy_pickle is False
+    assert _build_parser().parse_args(["--allow_legacy_pickle"]).allow_legacy_pickle

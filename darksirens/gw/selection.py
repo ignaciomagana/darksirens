@@ -66,7 +66,6 @@ that x64 is enabled (darksirens does so globally in core/jax_config.py).
 
 from __future__ import annotations
 
-import json
 import math
 import warnings
 from pathlib import Path
@@ -297,6 +296,7 @@ def load_pdet_flow(path: str | Path):
     from darksirens.gw.flows import (
         check_checkpoint_matches_skeleton,
         load_flow,
+        read_checkpoint_config,
     )
 
     if not jax.config.jax_enable_x64:
@@ -307,8 +307,10 @@ def load_pdet_flow(path: str | Path):
         )
 
     path = Path(path)
-    with np.load(path, allow_pickle=True) as data:
-        config = json.loads(str(data["config_json"]))
+    # allow_pickle=False: the config is a JSON string, never a Python object
+    # (see darksirens.gw.flows on why the object path is refused outright).
+    with np.load(path, allow_pickle=False) as data:
+        config = read_checkpoint_config(data, path)
 
     cols = tuple(config.get("columns", ()))
     if cols != PDET_COLUMNS:

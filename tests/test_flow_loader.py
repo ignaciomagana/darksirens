@@ -10,6 +10,7 @@ against the real serialization contract without shipping binary fixtures.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -128,9 +129,67 @@ def test_ensemble_sample_shapes_and_support(flows_dir):
     assert (np.abs(s[..., 3]) <= 1).all()         # interval chi_eff
 
 
+class _PickleBomb:
+    """Payload whose *unpickling* deletes a canary file.
+
+    ``__reduce__`` is evaluated when the object is written (harmless); the
+    returned ``os.remove`` call only fires if something unpickles it.  The
+    canary surviving a rejected load is the assertion that the loaders never
+    reach numpy's object path.
+    """
+
+    def __init__(self, canary):
+        self.canary = str(canary)
+
+    def __reduce__(self):
+        return (os.remove, (self.canary,))
+
+
+def test_loader_refuses_pickled_checkpoint_entries(flows_dir, tmp_path):
+    src = flows_dir / "GW_TOY_A" / "GW_TOY_A_flow.npz"
+    with np.load(src, allow_pickle=False) as data:
+        config = json.loads(str(data["config_json"]))
+        n = sum(1 for k in data.files if k.startswith("arr_"))
+        leaves = [data[f"arr_{i}"] for i in range(n)]
+
+    canary = tmp_path / "canary.txt"
+    canary.write_text("the payload never ran")
+
+    # (a) config_json as a pickled object.
+    bad_cfg = tmp_path / "bomb_config.npz"
+    np.savez(bad_cfg, *leaves,
+             config_json=np.array(_PickleBomb(canary), dtype=object))
+    with pytest.raises(ValueError, match="pickled object"):
+        flows_mod.load_flow(bad_cfg)
+    with pytest.raises(ValueError, match="pickled object"):
+        flows_mod.check_checkpoint_matches_skeleton(bad_cfg)
+
+    # (b) a pickled object as an array leaf, with an honest config.
+    bad_leaf = tmp_path / "bomb_leaf.npz"
+    np.savez(bad_leaf, np.array(_PickleBomb(canary), dtype=object), *leaves[1:],
+             config_json=json.dumps(config))
+    with pytest.raises(ValueError, match="pickled object"):
+        flows_mod.load_flow(bad_leaf)
+    with pytest.raises(ValueError, match="pickled object"):
+        flows_mod.check_checkpoint_matches_skeleton(bad_leaf)
+
+    assert canary.exists(), "the checkpoint payload was unpickled"
+
+
+def test_loader_rejects_non_string_config(flows_dir, tmp_path):
+    src = flows_dir / "GW_TOY_A" / "GW_TOY_A_flow.npz"
+    with np.load(src, allow_pickle=False) as data:
+        n = sum(1 for k in data.files if k.startswith("arr_"))
+        leaves = [data[f"arr_{i}"] for i in range(n)]
+    bad = tmp_path / "numeric_config.npz"
+    np.savez(bad, *leaves, config_json=np.array(3.0))
+    with pytest.raises(ValueError, match="non-string config"):
+        flows_mod.load_flow(bad)
+
+
 def test_structural_check_rejects_drifted_checkpoint(flows_dir, tmp_path):
     src = flows_dir / "GW_TOY_A" / "GW_TOY_A_flow.npz"
-    with np.load(src, allow_pickle=True) as data:
+    with np.load(src, allow_pickle=False) as data:
         config = json.loads(str(data["config_json"]))
         n = sum(1 for k in data.files if k.startswith("arr_"))
         leaves = [data[f"arr_{i}"] for i in range(n)]

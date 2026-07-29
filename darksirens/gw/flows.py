@@ -11,7 +11,9 @@ independently) and shipped as ``<EVENT>/<EVENT>_flow.npz`` checkpoints:
 everything needed to rebuild the skeleton.  Loading therefore rebuilds the
 skeleton from the config with the *installed* flowjax and assigns the stored
 arrays positionally — a (shape, dtype) structural check guards against
-silent corruption from flowjax/equinox version drift.
+silent corruption from flowjax/equinox version drift.  Nothing in that format
+is a Python object, so checkpoints are read with ``allow_pickle=False``: a
+checkpoint is untrusted input and numpy's object path would execute code.
 
 Each flow is a ``triangular_spline_flow`` over a standard-Normal base,
 wrapped in ``Transformed(flow, non_trainable(Chain([Affine(Z_mean, Z_std),
@@ -157,6 +159,59 @@ def build_constrained_transform(d: int, constraints: dict) -> AbstractBijection:
 
 # ── checkpoint reconstruction ────────────────────────────────────────────────
 
+# The two readers below implement the pickle-free contract (module docstring):
+# they turn numpy's generic object-array refusal into an error that names the
+# file and the offending key, and reject the other shapes a foreign writer
+# could produce, so a non-conforming checkpoint fails on the format rather
+# than by being deserialized.
+
+
+def read_checkpoint_config(data: Any, path: str | Path) -> dict:
+    """Parse the ``config_json`` entry of an ``allow_pickle=False`` npz."""
+    try:
+        raw = data["config_json"]
+    except KeyError:
+        raise ValueError(
+            f"Checkpoint '{path}' has no 'config_json' entry; it is not a flow "
+            "checkpoint in the np.savez(leaves..., config_json=...) format."
+        ) from None
+    except ValueError as e:
+        # numpy's own allow_pickle refusal: the entry is a pickled object.
+        raise ValueError(
+            f"Checkpoint '{path}' stores 'config_json' as a pickled object "
+            "rather than a string (likely written by an old or foreign tool). "
+            "Refusing to unpickle it; re-export the checkpoint with a JSON "
+            "string config."
+        ) from e
+    if raw.dtype.kind not in ("U", "S") or raw.ndim != 0:
+        raise ValueError(
+            f"Checkpoint '{path}' stores non-string config: 'config_json' has "
+            f"dtype {raw.dtype!s} and shape {raw.shape}, expected a scalar "
+            "string (likely written by an old or foreign tool)."
+        )
+    text = raw.item()
+    if isinstance(text, bytes):
+        text = text.decode("utf-8")
+    return json.loads(text)
+
+
+def read_checkpoint_array(data: Any, key: str, path: str | Path) -> np.ndarray:
+    """Read one numeric leaf of an ``allow_pickle=False`` npz."""
+    try:
+        arr = data[key]
+    except ValueError as e:
+        raise ValueError(
+            f"Checkpoint '{path}' stores '{key}' as a pickled object rather "
+            "than a numeric array (likely written by an old or foreign tool). "
+            "Refusing to unpickle it."
+        ) from e
+    if arr.dtype.kind not in ("b", "i", "u", "f", "c"):
+        raise ValueError(
+            f"Checkpoint '{path}' stores '{key}' with dtype {arr.dtype!s}; "
+            "flow leaves must be numeric or boolean arrays."
+        )
+    return arr
+
 
 def create_flow_from_config(config: dict) -> Transformed:
     """Rebuild the untrained flow skeleton described by a checkpoint config.
@@ -212,13 +267,13 @@ def check_checkpoint_matches_skeleton(
     flowjax/equinox version drift between training and now).
     """
     path = Path(path)
-    with np.load(path, allow_pickle=True) as data:
-        config = json.loads(str(data["config_json"]))
+    with np.load(path, allow_pickle=False) as data:
+        config = read_checkpoint_config(data, path)
         n_file = sum(1 for k in data.files if k.startswith("arr_"))
-        file_specs = [
-            (tuple(data[f"arr_{i}"].shape), str(data[f"arr_{i}"].dtype))
-            for i in range(n_file)
-        ]
+        file_specs = []
+        for i in range(n_file):
+            arr = read_checkpoint_array(data, f"arr_{i}", path)
+            file_specs.append((tuple(arr.shape), str(arr.dtype)))
 
     skeleton = constructor_func(config)
     arrays, _ = eqx.partition(skeleton, eqx.is_array)
@@ -249,12 +304,15 @@ def load_flow(
     constructor_func: Callable[[dict], Any] = create_flow_from_config,
 ) -> tuple[Any, dict]:
     """Load a serialized flow checkpoint and reconstruct the model."""
-    with np.load(path, allow_pickle=True) as data:
-        config = json.loads(str(data["config_json"]))
+    with np.load(path, allow_pickle=False) as data:
+        config = read_checkpoint_config(data, path)
         skeleton = constructor_func(config)
         arrays, static = eqx.partition(skeleton, eqx.is_array)
         leaves, treedef = jtu.tree_flatten(arrays)
-        loaded = [jnp.asarray(data[f"arr_{i}"]) for i in range(len(leaves))]
+        loaded = [
+            jnp.asarray(read_checkpoint_array(data, f"arr_{i}", path))
+            for i in range(len(leaves))
+        ]
         flow = eqx.combine(jtu.tree_unflatten(treedef, loaded), static)
     return flow, config
 

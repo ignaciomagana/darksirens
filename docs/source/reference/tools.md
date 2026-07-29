@@ -88,7 +88,8 @@ population spectra ($p(m_1), p(m_2), p(q), p(z), p(\chi)$ and the 2-D
 $p(m_1, m_2)$) on a memory-safe chunked grid, plots cosmology posteriors and the
 detection-rate $\mathrm{d}N/\mathrm{d}z$, and compares models via relative
 evidences and the pairwise Bayes-factor matrix. `load_run` reads the current
-grouped `results.hdf5` (with a legacy `samples.npy` fallback).
+grouped `results.hdf5`, falling back to the numeric `samples.npy` recovery chain
+(a legacy pickled-dict `samples.npy` needs `--allow_legacy_pickle`).
 
 ```{automodule} darksirens.cli.analyze
 :members:

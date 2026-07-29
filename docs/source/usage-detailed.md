@@ -546,8 +546,9 @@ Important options:
 | `--batch_size` | auto | Posterior-predictive batch size. |
 | `--cred_lo` | `5.0` | Lower credible interval percentile. |
 | `--cred_hi` | `95.0` | Upper credible interval percentile. |
+| `--allow_legacy_pickle` | off | Unpickle a very old pickled-dict `samples.npy` (arbitrary code execution; trusted files only). |
 
-The analyzer reads current `results.hdf5` runs (including root-level or grouped posterior sample datasets), still supports legacy `samples.npy` runs, and produces posterior-predictive plots such as:
+The analyzer reads current `results.hdf5` runs (including root-level or grouped posterior sample datasets), falls back to the numeric `samples.npy` crash-recovery chain, and produces posterior-predictive plots such as:
 
 ```text
 pm1_all_models.pdf
