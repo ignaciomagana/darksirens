@@ -167,8 +167,36 @@ def tau_2_SIS(z: jnp.ndarray, p: SISLensParams) -> jnp.ndarray:
     ``z ≥ 0``).  Calling with ``z < 0`` returns NaN for non-integer
     ``n_tau``; the cluster likelihood is responsible for never passing
     negative redshifts.
+
+    ``A · z^n`` is an optical DEPTH and exceeds one at prior corners (the
+    CLI's box allows ``A = 1e-2, n = 6``, i.e. τ = 156 at z = 5).  Every
+    likelihood channel consumes it as the Bernoulli PROBABILITY that the
+    source is multiply imaged — use :func:`tau_2_prob` there, never a raw
+    ``log(tau_2_SIS(...))``.
     """
     return p.A_tau * jnp.power(z, p.n_tau)
+
+
+# One definition of "τ as a probability" for every likelihood channel.  The
+# ceiling stays strictly below 1 so the unlensed branch's log1p(-τ) is finite.
+TAU_PROB_MAX = 1.0 - 1e-12
+
+
+@jit
+def tau_2_prob(z: jnp.ndarray, p: SISLensParams) -> jnp.ndarray:
+    """τ₂ consumed as a probability: ``clip(tau_2_SIS, 0, 1 - 1e-12)``.
+
+    The pair evidence, the lensed selection terms, and the singleton
+    (un)lensed branches all weight by "P(multiply imaged | z_s)" and its
+    complement.  Before this helper the singleton terms clipped while the
+    pair/selection terms used the raw power law, so ONE parameter point
+    carried two incompatible "probabilities" across channels — inflating the
+    pair evidence relative to the (1-τ) suppression and biasing A_tau/n_tau
+    wherever the prior box reaches τ > 1.  Clipping is a plateau, not a
+    reparameterization: points with τ(z) ≥ 1 remain in the prior but can no
+    longer out-compete τ = 1, which is the most a probability can say.
+    """
+    return jnp.clip(tau_2_SIS(z, p), 0.0, TAU_PROB_MAX)
 
 
 # ============================================================================

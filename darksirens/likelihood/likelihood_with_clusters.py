@@ -69,7 +69,7 @@ from darksirens.lensing.grids import (
 from darksirens.lensing.wlmagnification import (
     WLParams, make_lognormal_log_p_wl, make_tabulated_log_p_wl,
 )
-from darksirens.lensing.slmarks import SISLensParams, tau_2_SIS
+from darksirens.lensing.slmarks import SISLensParams, tau_2_prob
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import (
     dL_grid_bounds,
@@ -407,7 +407,7 @@ def darksiren_log_likelihood_with_clusters(
             # at the mu = 1 apparent redshift, mirroring the evidence side's
             # stated approximation (the mu-dependence of tau_2 is O(tau x s^2)).
             z_app_sel = z_of_dL(dL_c, H0, Om0, w0, wa)
-            tau_app_sel = jnp.clip(tau_2_SIS(z_app_sel, sis_params), 0.0, 1.0 - 1e-12)
+            tau_app_sel = tau_2_prob(z_app_sel, sis_params)
             ldw = ldw + jnp.log1p(-tau_app_sel)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
@@ -527,7 +527,7 @@ def darksiren_log_likelihood_with_clusters(
         dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
         dL_ev = sl(gw_pe.dL)
         z_app = z_of_dL(jnp.clip(dL_ev, dL_lo, dL_hi), H0, Om0, w0, wa)
-        tau_app = jnp.clip(tau_2_SIS(z_app, sis_params), 0.0, 1.0 - 1e-12)
+        tau_app = tau_2_prob(z_app, sis_params)
         ldw_unlensed = jnp.where(
             jnp.isfinite(ldw), ldw + jnp.log1p(-tau_app), -jnp.inf
         )
