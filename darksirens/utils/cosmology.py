@@ -271,6 +271,23 @@ def bound_distance_table(table):
         _ACTIVE_DISTANCE_TABLE.reset(token)
 
 
+# Ambient arrays OTHER modules thread through the same jit boundaries as the
+# distance table (issue #305's residual): (resolve, bind) pairs, where
+# ``resolve()`` returns the currently-active value at the call site and
+# ``bind(value)`` is the context manager installing it for the trace.  Every
+# ambient jax.Array read from inside a jit has the same two failure modes the
+# distance table had — lowered as a multi-MB HLO constant when concrete, and
+# an UnexpectedTracerError when an enclosing trace bound a tracer and a
+# nested boundary re-traces — so any new one must ride this registry rather
+# than a bare module global.  Registration order is the threading order.
+_AMBIENT_JIT_CHANNELS: list = []
+
+
+def register_ambient_jit_channel(resolve, bind):
+    """Register an ambient array channel with every threads_* jit boundary."""
+    _AMBIENT_JIT_CHANNELS.append((resolve, bind))
+
+
 def threads_distance_table(**jit_kwargs):
     """Jit ``fn`` with its ``distance_table`` parameter as a real jit ARGUMENT.
 
@@ -302,9 +319,12 @@ def threads_distance_table(**jit_kwargs):
             )
 
         @functools.wraps(fn)
-        def _bind_then_call(*args, **kwargs):
+        def _bind_then_call(*args, _ambient_extras=(), **kwargs):
             table = signature.bind(*args, **kwargs).arguments.get("distance_table")
-            with bound_distance_table(table):
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(bound_distance_table(table))
+                for (_, bind), value in zip(_AMBIENT_JIT_CHANNELS, _ambient_extras):
+                    stack.enter_context(bind(value))
                 return fn(*args, **kwargs)
 
         jitted = jax.jit(_bind_then_call, **jit_kwargs)
@@ -312,7 +332,10 @@ def threads_distance_table(**jit_kwargs):
         @functools.wraps(fn)
         def public(*args, distance_table=None, **kwargs):
             return jitted(
-                *args, distance_table=resolve_distance_table(distance_table), **kwargs
+                *args,
+                distance_table=resolve_distance_table(distance_table),
+                _ambient_extras=tuple(res() for res, _ in _AMBIENT_JIT_CHANNELS),
+                **kwargs,
             )
 
         public.jitted = jitted

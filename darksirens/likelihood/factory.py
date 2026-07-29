@@ -20,7 +20,11 @@ import jax
 import jax.numpy as jnp
 
 from darksirens.redshift.catalog import attest_rows_sorted_for_windowing
-from darksirens.redshift.completion import build_pixel_kde_cache
+from darksirens.redshift.completion import (
+    bound_smoothing_operator,
+    build_pixel_kde_cache,
+    smoothing_operator as completion_smoothing_operator,
+)
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.catalog_views import barrier, prepare_catalog_views
 from darksirens.likelihood.events import pad_gw_event_to_multiple
@@ -135,21 +139,28 @@ def _jit_likelihood_body(body, operands):
     signature is constant and the body compiles once.
     """
     distance_table = cosmology.distance_table()
+    # Same treatment for the (1000, 1000) expected-counts smoothing operator
+    # (issue #305's residual): as a module-global capture it lowered as a
+    # dense<1000x1000xf64> constant, ~16 MB of module text per specialization.
+    smoothing_operator = completion_smoothing_operator()
 
-    def _body_with_tables(coord: jnp.ndarray, operands, distance_table):
-        with cosmology.bound_distance_table(distance_table):
+    def _body_with_tables(coord: jnp.ndarray, operands, distance_table,
+                          smoothing_operator):
+        with cosmology.bound_distance_table(distance_table), \
+                bound_smoothing_operator(smoothing_operator):
             return body(coord, operands)
 
     jitted = jax.jit(_body_with_tables)
 
     def likelihood(coord: jnp.ndarray) -> jnp.ndarray:
-        return jitted(coord, operands, distance_table)
+        return jitted(coord, operands, distance_table, smoothing_operator)
 
     # Host-side hook for tests/diagnostics that want to count compilations or reach
     # the un-bound body.
     likelihood.jitted_body = jitted
     likelihood.operands = operands
     likelihood.distance_table = distance_table
+    likelihood.smoothing_operator = smoothing_operator
     return likelihood
 
 
