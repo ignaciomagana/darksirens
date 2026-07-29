@@ -15,9 +15,7 @@ except RuntimeError:
 
 import jax
 
-from jax import random, jit, vmap, grad
 from jax import numpy as jnp
-from jax.lax import cond
 
 import numpy as np
 try:
@@ -30,9 +28,6 @@ except ModuleNotFoundError:
 
 import h5py
 
-from jax.scipy.special import logsumexp
-from scipy.interpolate import interp1d
-from scipy.stats import gaussian_kde
 _TQDM_MODULE = sys.modules.get("tqdm")
 if _TQDM_MODULE is not None and hasattr(_TQDM_MODULE, "tqdm"):
     tqdm = _TQDM_MODULE.tqdm

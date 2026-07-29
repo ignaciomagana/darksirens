@@ -718,7 +718,6 @@ def run_sampler(method, likelihood, prior_transform, labels,
     # --------------------------------------------------------
 
     elif method == "dynesty":
-        import time
         from dynesty import NestedSampler
         from dynesty.utils import resample_equal
         import dynesty.plotting as dyplot
@@ -869,7 +868,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
             print(f"[*] Diagnostic plots enabled — writing to {diag_dir}/ every 10 min.", flush=True)
 
         if not plan.resuming:
-            print(f"[*] Initial live points found! Starting main nested sampling loop...", flush=True)
+            print("[*] Initial live points found! Starting main nested sampling loop...", flush=True)
         if maxcall is not None:
             print(f"[*] Dynesty call cap: maxcall={maxcall}", flush=True)
         try:

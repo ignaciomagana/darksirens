@@ -42,7 +42,6 @@ from __future__ import annotations
 import warnings
 from typing import NamedTuple, Any
 
-import jax
 import jax.numpy as jnp
 from jax import jit, vmap
 from jax.scipy.stats import norm

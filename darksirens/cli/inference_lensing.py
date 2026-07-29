@@ -99,13 +99,10 @@ from scipy.special import logsumexp
 # ── branch machinery we reuse ────────────────────────────────────────────────
 from darksirens.redshift import zgrid
 from darksirens.core.types import (
-    CosmoParams,
-    SurveyParams,
     EMCatalog,
     GWEvent,
 )
-from darksirens.utils.cosmology import H0Planck, Om0Planck
-from darksirens.gw.populations.registry import get_fixed_population_params, get_model
+from darksirens.gw.populations.registry import get_fixed_population_params
 from darksirens.gw.populations.utils import normalization_grid_settings
 
 from darksirens.inference.checkpointing import (
@@ -161,7 +158,6 @@ from darksirens.cli.common import (
 )
 from darksirens.inference.parameters import (
     build_parameter_decoder,
-    complete_empty_pixel_policy_code,
 )
 from darksirens.gw.samples import load_gw_samples, load_selection_samples
 
@@ -191,7 +187,6 @@ from darksirens.lensing.partitions import (
     combine_component_partitions,
     prepare_candidate_pairs_for_partitioning,
     parse_edge_mark_keys,
-    validate_candidate_pairs,
 )
 from darksirens.lensing.preflight import (
     fixed_partition_coverage_error,

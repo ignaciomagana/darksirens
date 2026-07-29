@@ -6,7 +6,7 @@ from argparse import ArgumentParser
 
 import numpy as np
 
-from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
+from darksirens.core.constants import W0_FID, WA_FID
 
 # ── Formatting helpers ─────────────────────────────────────────────────────────
 #

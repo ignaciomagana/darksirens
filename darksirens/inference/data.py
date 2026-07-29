@@ -5,7 +5,7 @@ import jax.numpy as jnp
 
 from darksirens.catalogs.compact import validate_loaded_survey_shapes
 from darksirens.inference import loaders
-from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
+from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS
 
 
 def load_all_data(opts):

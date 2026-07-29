@@ -1,6 +1,5 @@
 """Core typed containers shared across darksirens packages."""
 from typing import NamedTuple, Any
-import jax.numpy as jnp
 
 
 class CosmoParams(NamedTuple):

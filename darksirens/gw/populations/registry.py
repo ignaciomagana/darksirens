@@ -68,7 +68,6 @@ from .components import (
 from .grammar import (
     ModelNameError,
     _stick_breaking_weights_np,  # noqa: F401  (re-exported for callers/tests)
-    _w_to_v,
     build_fiducial_vector,
     build_population_model,
     derive_latex,

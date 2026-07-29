@@ -81,8 +81,8 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu \
   $RUN python -m pytest -q $(grep -v '^#' tests/fast_subset.txt)
 ```
 
-Measured 2026-07-26 on a CPU-only box (CPython 3.11.10, jax 0.4.34, numpy
-1.26.4): **26 files, 127 passed, 1 skipped, 66 s**. Every file in it is verified
+Measured 2026-07-29 on a CPU-only box (CPython 3.11.10, jax 0.4.34, numpy
+1.26.4): **32 files, 214 passed, 1 skipped, ~3 min**. Every file in it is verified
 green both standalone and in the batch, and none of them depends on the numpy
 major version. Collection over the whole tree is still a useful cheap check:
 
@@ -352,22 +352,13 @@ $RUN python -m darksirens.cli.analyze \
 
 ## Known findings (current master)
 
-A default run reports **PASS for 18/22** non-slow cases (20/24 with `--slow`) —
-all universe models, all population models (parametric + GP + binned-GP), all
-sky models except the two slow GP ones, the legacy LSS factor, weak lensing, the
-singleton cluster path, both samplers, and analyze. The remaining cases surface
-real issues worth fixing:
+A default run reports **PASS for 21/22** non-slow cases (23/24 with `--slow`).
+The radial-Q (`L-radial`), GP3D-Q (`L-gp3d`) and marked-host (`M-loglin`)
+JIT-path failures documented here previously have been **fixed** — the Q-table
+resolver and the marked galaxy-measure grid are now trace-safe, and
+`tests/test_traced_prior_state.py` pins the end-to-end jitted consumption of
+both. The remaining known case:
 
-- **`L-radial`, `L-gp3d` (FAIL).** Loading a `Q_LSS` table and running it through
-  the **jitted** likelihood raises `ConcretizationTypeError` in
-  `darksirens.redshift.completion._resolve_lss_completion_row_tables` — the global-table
-  bounds check does a concrete `int(unique_pixels.max())` on a *traced* array.
-  The offline builder, table load, and `completion_curves` *eager* path all work
-  (unit-tested); only the end-to-end traced consumption is broken. The legacy
-  `--use_lss` factor (`L-legacy`) works.
-- **`M-loglin` (FAIL).** The marked-host model trips the same eager-vs-traced
-  boundary: `ConcretizationTypeError` in `completion.log_galaxy_measure_grid`
-  under the jitted likelihood. (Plain `dark_sirens` on the same catalog passes.)
 - **`X-cl2` (FAIL).** The strong-lensing cluster (J=2) end-to-end run depends on
   the local `SIM_LENSING_donotpush/` pipeline. With its `POP_NAME` updated to the
   current grammar it now *generates* the dataset, but the files use the
@@ -382,9 +373,10 @@ real issues worth fixing:
   dominates), so they are gated behind `--slow`/`--full`. The lower-rank
   `sphere_gp` (`S-sgp`) runs in ~80 s by default.
 
-The LSS-completion and marked-host failures share one root cause — both features
-were unit-tested through their *eager* entry points but never driven end-to-end
-through `@jit darksiren_log_likelihood`. Fixing them means making the Q-table
-resolver and the marked galaxy-measure grid trace-safe (no Python `int()`/concrete
-branching on traced catalog fields).
+The now-fixed LSS-completion and marked-host failures shared one root cause —
+both features were unit-tested through their *eager* entry points but never
+driven end-to-end through `@jit darksiren_log_likelihood`. The fix made the
+Q-table resolver and the marked galaxy-measure grid trace-safe (no Python
+`int()`/concrete branching on traced catalog fields); the moral survives them:
+new likelihood features need an end-to-end jitted test, not just eager units.
 

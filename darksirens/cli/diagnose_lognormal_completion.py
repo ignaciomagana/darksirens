@@ -21,7 +21,7 @@ import jax.numpy as jnp
 
 from darksirens.redshift import zgrid
 from darksirens.catalogs.io import load_survey
-from darksirens.core.types import EMCatalog, SurveyParams
+from darksirens.core.types import EMCatalog
 from darksirens.redshift.completion import completion_curves
 from darksirens.redshift.prior import (
     prepare_redshift_prior_state,

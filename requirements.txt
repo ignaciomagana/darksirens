@@ -64,10 +64,9 @@ numpyro
 # step was impossible at that pin.  Pinned below to the commit actually in use,
 # the HEAD of the local checkout at /hildafs/projects/phy230014p/magana/src/gwcat.
 #
-# ACTION FOR THE MAINTAINER: that commit is not yet on origin (local master is
-# 16 commits ahead), so this line only resolves once it is pushed.  Until then
-# `pip install -r requirements.txt` fails loudly on gwcat instead of silently
-# installing a gwcat that cannot read the campaign's inputs.
+# The pinned commit is reachable from origin (pushed 2026-07), so this line
+# resolves for a fresh clone; bump the pin deliberately when gwcat's schema
+# moves.
 gwcat @ git+https://github.com/ignaciomagana/gwcat.git@3184bdb583f314d91ecae486436842ebe8e9f998
 
 # Optional (flow-surrogate single-event posteriors, --gw_flows_path):

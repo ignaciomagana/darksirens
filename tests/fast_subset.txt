@@ -4,7 +4,7 @@
 # the documented gate and the CI gate cannot drift apart.
 #
 # Measured 2026-07-26 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
-#   26 files, 127 passed, 1 skipped, 66 s wall.
+#   32 files, 214 passed, 1 skipped, ~3 min wall (2026-07-29).
 #
 # Run it with:
 #   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu \

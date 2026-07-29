@@ -70,7 +70,6 @@ every call.
 
 import jax.numpy as jnp
 from jax import lax, vmap
-from jax.scipy.special import logsumexp
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import threads_distance_table
@@ -81,7 +80,6 @@ from darksirens.redshift.catalog import (
     catalog_kernel_state,
     marked_catalog_kernel_state,
     eval_log_catalog_prior_state,
-    CatalogKernelState,
 )
 from darksirens.redshift.completion import (
     completion_curves,

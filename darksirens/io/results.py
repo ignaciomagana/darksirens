@@ -1,10 +1,7 @@
 import json
 import os
-import sys
 
 import h5py
-import healpy as hp
-import jax
 import numpy as np
 
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE

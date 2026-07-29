@@ -8,7 +8,6 @@ from jax import lax
 from jax.scipy.special import logsumexp
 
 from darksirens.redshift.prior import (
-    DarkSirenEnsemblePriorState,
     DarkSirenPriorState,
     eval_dark_member_completion,
     eval_dark_obs_bracket,
@@ -45,7 +44,6 @@ from darksirens.sky import sky_model_parser
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import (
     dL_grid_bounds,
-    dL_in_z_grid,
     threads_distance_table,
     z_of_dL,
 )

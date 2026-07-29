@@ -72,7 +72,6 @@ from __future__ import annotations
 
 from typing import NamedTuple, Any
 
-import jax
 import jax.numpy as jnp
 from jax import jit
 

@@ -36,10 +36,8 @@ What this commit does NOT do
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 from jax import lax
-from jax.scipy.special import logsumexp
 
 from darksirens.redshift import get_redshift_prior
 from darksirens.gw.populations import pop_model_parser
@@ -63,19 +61,18 @@ from darksirens.likelihood.cluster_selection import (
     compute_lensed_single_selection_term,
     combined_selection_log_correction,
 )
-from darksirens.likelihood.pair_kde import PairKDE, _slice_event_kde_inside_jit
+from darksirens.likelihood.pair_kde import _slice_event_kde_inside_jit
 from darksirens.lensing.grids import (
     make_log_mu_grid, make_hermite_u_grid, make_y_grid,
     WL_MU_QUADRATURE_NODES, WL_MU_QUADRATURE_LOG_MU_RANGE,
 )
 from darksirens.lensing.wlmagnification import (
-    WLParams, make_lognormal_log_p_wl, make_tabulated_log_p_wl,
+    make_tabulated_log_p_wl,
 )
 from darksirens.lensing.slmarks import SISLensParams, tau_2_prob
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import (
     dL_grid_bounds,
-    dL_in_z_grid,
     threads_distance_table,
     z_of_dL,
 )

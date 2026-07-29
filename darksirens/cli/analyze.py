@@ -826,7 +826,10 @@ def main():
             col = _column(samples, run_labels, name)
             if col is not None:
                 return col
-            return np.full(p_z.shape[0], fixed_cosmo.get(name, COSMO_FID[name]))
+            # noqa comment: ruff cannot see that this closure only runs inside
+            # the loop iteration that bound p_z above (review-confirmed false
+            # positive, potato_review P3-03).
+            return np.full(p_z.shape[0], fixed_cosmo.get(name, COSMO_FID[name]))  # noqa: F821
 
         h0_samples = _cosmo_samples("H0")
         om0_samples = _cosmo_samples("Om0")
