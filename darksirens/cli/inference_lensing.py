@@ -113,6 +113,12 @@ from darksirens.inference.checkpointing import (
     find_resume_target,
     resolve_checkpoint_plan,
 )
+from darksirens.inference.run_fingerprint import (
+    ResumeFingerprintError,
+    build_run_fingerprint,
+    check_resume_fingerprint,
+    save_run_fingerprint,
+)
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
 from darksirens.inference.sampling import run_sampler
 from darksirens.io.results import (
@@ -3005,7 +3011,7 @@ def _run_and_report_preflight(opts):
 def _prepare_run_dir(opts):
     """Create the run directory, split the fixed-parameter JSON, and write the
     pre-load settings.json.  Returns (run_dir, settings, fixed, base_fixed,
-    lens_fixed)."""
+    lens_fixed, resume_dir) -- resume_dir is None for a fresh run."""
     # --resume continues inside the ORIGINAL run directory rather than opening a
     # new one per SLURM attempt; resolve_checkpoint_plan then points the sampler
     # at <run_dir>/checkpoint.<sampler>.* (see inference/checkpointing.py).
@@ -3013,10 +3019,23 @@ def _prepare_run_dir(opts):
     resume_ckpt, resume_dir = find_resume_target(opts, opts.sampler, name_prefix=prefix)
     run_dir = resume_dir or _make_run_dir(opts)
     opts.run_dir = run_dir
-    plan = resolve_checkpoint_plan(opts, run_dir, name_prefix=prefix)
+    plan = resolve_checkpoint_plan(
+        opts, run_dir, name_prefix=prefix, resume_from=resume_ckpt
+    )
     if resume_ckpt:
         print(f"  [i] resuming run directory {run_dir}", flush=True)
     print(f"  [i] checkpointing: {plan.summary()}", flush=True)
+    # A resumed run must NOT overwrite the original settings.json -- it is the
+    # record of the configuration that created the checkpoint being restored.
+    # Each resume attempt leaves its own timestamped settings file instead.
+    # The fingerprint gate itself runs in main() once the sampled labels and
+    # bounds exist (see _gate_or_stamp_resume_fingerprint).
+    settings_basename = (
+        "settings.json" if not resume_dir else
+        "settings.resume-"
+        + datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        + ".json"
+    )
     # Keep settings serialization equivalent to: for k, v in vars(opts).items()
     settings = _jsonable_settings(opts)
     fixed = {}
@@ -3038,13 +3057,49 @@ def _prepare_run_dir(opts):
             fixed_parameter_values_base={},
             fixed_parameter_values_lens={},
         )
-        _write_json(os.path.join(run_dir, "settings.json"), settings)
+        _write_json(os.path.join(run_dir, settings_basename), settings)
         _write_failure(
             run_dir, "build_parameter_space", exc, labels=[], settings=settings
         )
         raise
-    _write_json(os.path.join(run_dir, "settings.json"), settings)
-    return run_dir, settings, fixed, base_fixed, lens_fixed
+    _write_json(os.path.join(run_dir, settings_basename), settings)
+    return run_dir, settings, fixed, base_fixed, lens_fixed, resume_dir
+
+
+def _gate_or_stamp_resume_fingerprint(
+    opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed
+):
+    """Fingerprint gate: sampler state must never be restored under a
+    different statistical target (the P0-01 failure mode).
+
+    Runs here rather than in ``_prepare_run_dir`` because the sampled labels
+    and bounds only exist once ``_build_space_and_closures`` has returned.
+    That ordering is safe: a checkpoint file cannot exist before sampling
+    starts, so no restorable state ever predates the fresh run's stamp.
+    """
+    fingerprint = build_run_fingerprint(
+        opts,
+        labels=labels,
+        lower_bound=lower,
+        upper_bound=upper,
+        prior_kinds=prior_kinds,
+        prior_overrides=getattr(opts, "prior_overrides", None),
+        fixed_parameter_values=fixed,
+    )
+    if resume_dir:
+        try:
+            stored = check_resume_fingerprint(
+                run_dir, fingerprint,
+                force=bool(getattr(opts, "resume_force", False)),
+            )
+        except ResumeFingerprintError as exc:
+            raise SystemExit(str(exc)) from None
+        if stored is None:
+            # --resume_force accepted a fingerprint-less legacy run dir;
+            # stamp it now so later requeues are validated, not forced.
+            save_run_fingerprint(run_dir, fingerprint)
+    else:
+        save_run_fingerprint(run_dir, fingerprint)
 
 
 def _load_and_report_inputs(opts, run_dir, settings):
@@ -3415,11 +3470,16 @@ def main(argv=None):
     )
     _print_run_configuration(opts)
     _run_and_report_preflight(opts)
-    run_dir, settings, fixed, base_fixed, lens_fixed = _prepare_run_dir(opts)
+    run_dir, settings, fixed, base_fixed, lens_fixed, resume_dir = (
+        _prepare_run_dir(opts)
+    )
     inp = _load_and_report_inputs(opts, run_dir, settings)
     (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
      pop_params_fid, lens_overrides, prior_kinds) = _build_space_and_closures(
         opts, inp, run_dir, settings, base_fixed, lens_fixed)
+    _gate_or_stamp_resume_fingerprint(
+        opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed
+    )
     mid, diagnostics = _smoke_test_likelihood(
         opts, run_dir, settings, labels, lower, upper, loglike,
         diagnostics_fn, pop_params_fid)

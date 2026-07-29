@@ -135,7 +135,22 @@ def add_checkpoint_arguments(parser_or_group):
             "continues inside that run directory; with nothing to resume it "
             "starts fresh silently, so it is safe to hard-code in a SLURM "
             "submit script. PATH may be a run directory or a checkpoint file "
-            "and must exist. 'off' (default) always starts fresh."
+            "and must exist. 'off' (default) always starts fresh. Resuming "
+            "requires the run directory's run_fingerprint.json to match this "
+            "run's full semantic configuration (inputs by content, priors, "
+            "fixed values, model flags, sampler settings)."
+        ),
+    )
+    g.add_argument(
+        "--resume_force",
+        action="store_true",
+        default=False,
+        help=(
+            "UNSAFE: resume even when the checkpoint's run_fingerprint.json "
+            "is missing or does not match this configuration. The resumed "
+            "sampler state then mixes two statistical targets and the output "
+            "is not a science result. Exists for deliberate expert use and "
+            "for continuing checkpoints created before fingerprinting."
         ),
     )
 
@@ -226,17 +241,30 @@ def find_resume_target(opts, sampler, name_prefix=None):
     raise ValueError(f"--resume {spec!r} does not exist.")
 
 
-def resolve_checkpoint_plan(opts, run_dir, sampler=None, name_prefix=None) -> CheckpointPlan:
+_UNRESOLVED = object()
+
+
+def resolve_checkpoint_plan(
+    opts, run_dir, sampler=None, name_prefix=None, resume_from=_UNRESOLVED
+) -> CheckpointPlan:
     """Resolve the plan and record it on ``opts`` (so it reaches settings.json).
 
     ``find_resume_target`` must already have been consulted to pick
     ``run_dir`` — the resumed run continues inside its ORIGINAL run directory,
     so the checkpoint we write is the checkpoint we restored.
+
+    Callers that already resolved the resume target MUST pass it as
+    ``resume_from`` (a path or None).  The legacy default re-runs
+    ``find_resume_target``, and for ``--resume auto`` a second lookup can
+    resolve to a DIFFERENT directory than the one the caller committed to (a
+    newer checkpoint appearing between the two globs), silently splitting the
+    plan across two runs.
     """
     sampler = sampler or getattr(opts, "sampler", "")
     seconds = parse_checkpoint_interval(getattr(opts, "checkpoint_interval", None))
     basename = CHECKPOINT_BASENAMES.get(sampler)
-    resume_from, _ = find_resume_target(opts, sampler, name_prefix=name_prefix)
+    if resume_from is _UNRESOLVED:
+        resume_from, _ = find_resume_target(opts, sampler, name_prefix=name_prefix)
 
     enabled = bool(seconds > 0.0 and basename is not None and run_dir)
     path = os.path.join(run_dir, basename) if enabled else None

@@ -96,6 +96,12 @@ from darksirens.inference.checkpointing import (
     parse_checkpoint_interval,
     resolve_checkpoint_plan,
 )
+from darksirens.inference.run_fingerprint import (
+    ResumeFingerprintError,
+    build_run_fingerprint,
+    check_resume_fingerprint,
+    save_run_fingerprint,
+)
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
 from darksirens.inference.prior import build_parameter_space, make_prior_transform
@@ -2169,7 +2175,11 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
 
     Also resolves the checkpoint/resume plan: ``--resume`` continues INSIDE the
     original run directory instead of starting a new one, so a requeued SLURM
-    job accumulates one directory, not one per attempt.
+    job accumulates one directory, not one per attempt.  A resume is gated on
+    the run directory's ``run_fingerprint.json`` matching this run's semantic
+    configuration (see darksirens/inference/run_fingerprint.py), and preserves
+    the original ``settings.json``, writing a timestamped
+    ``settings.resume-*.json`` per attempt instead.
 
     Returns ``(run_dir, run_timestamp, settings_snapshot)``.
     """
@@ -2178,25 +2188,61 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
     resume_ckpt, resume_dir = find_resume_target(
         opts, opts.sampler, name_prefix=prefix
     )
+    # The full semantic identity of this run (inputs by content, priors,
+    # fixed values, model flags, sampler settings).  Restoring sampler state
+    # under a different target mixes two posteriors/logZ into one output, so
+    # a resume is gated on an exact fingerprint match (--resume_force to
+    # override deliberately).
+    fingerprint = build_run_fingerprint(
+        opts,
+        labels=pspace.labels,
+        lower_bound=pspace.lower_bound,
+        upper_bound=pspace.upper_bound,
+        prior_kinds=pspace.prior_kinds,
+        prior_overrides=prior_overrides,
+        fixed_parameter_values=fixed_parameter_values,
+    )
     run_timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     if resume_dir:
+        try:
+            stored = check_resume_fingerprint(
+                resume_dir, fingerprint,
+                force=bool(getattr(opts, "resume_force", False)),
+            )
+        except ResumeFingerprintError as exc:
+            _fatal(str(exc))
         run_dir = resume_dir
         _row("Resuming run", run_dir)
         _row("From checkpoint", resume_ckpt)
+        if stored is None:
+            # --resume_force accepted a fingerprint-less legacy run dir;
+            # stamp it now so later requeues are validated, not forced.
+            save_run_fingerprint(run_dir, fingerprint)
     else:
         run_dir = _make_run_dir(opts, run_timestamp)
     opts.run_dir = run_dir
-    plan = resolve_checkpoint_plan(opts, run_dir, name_prefix=prefix)
+    plan = resolve_checkpoint_plan(
+        opts, run_dir, name_prefix=prefix, resume_from=resume_ckpt
+    )
     _row("Run directory", run_dir)
     _row("Checkpointing", plan.summary())
 
     meta = _base_meta(opts, data, pspace, run_timestamp)
     meta["run_status"] = "sampling"
+    # A resumed run must NOT overwrite the original settings.json -- it is
+    # the record of the configuration that created the checkpoint.  Each
+    # resume attempt leaves its own timestamped settings file instead.
+    settings_basename = (
+        f"settings.resume-{run_timestamp}.json" if resume_dir else "settings.json"
+    )
     json_path = save_settings_json(
         opts, run_dir, pspace.labels, pspace.lower_bound, pspace.upper_bound,
         fixed_parameter_values, prior_overrides, meta,
+        basename=settings_basename,
     )
-    _ok(f"settings.json  →  {json_path}")
+    if not resume_dir:
+        save_run_fingerprint(run_dir, fingerprint)
+    _ok(f"{settings_basename}  →  {json_path}")
     _end()
     settings_snapshot = {
         "run_dir": run_dir,

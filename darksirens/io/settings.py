@@ -140,8 +140,15 @@ def save_settings_json(
     fixed_parameter_values: dict,
     prior_overrides:        dict,
     meta:                   dict,
+    basename:               str = "settings.json",
 ) -> str:
-    """Human-readable settings.json for easy inspection and re-runs."""
+    """Human-readable settings.json for easy inspection and re-runs.
+
+    ``basename`` lets a resumed run record its attempt as
+    ``settings.resume-<timestamp>.json`` without overwriting the original
+    ``settings.json`` -- the record of the configuration that created the
+    checkpoint being restored.
+    """
     d: dict = {}
 
     for key, val in vars(opts).items():
@@ -179,7 +186,7 @@ def save_settings_json(
 
     d["environment"] = environment_block()
 
-    path = os.path.join(run_dir, "settings.json")
+    path = os.path.join(run_dir, basename)
     with open(path, "w") as f:
         json.dump(d, f, indent=2, default=str)
     return path
