@@ -296,8 +296,9 @@ def selection_log_correction(
         variances of ``ln Ẑ_i`` (traced scalar or 0.0).  CAUTION: the
         total-variance criterion is only enforced when the caller threads
         this in; at the 0.0 default the guard silently reverts to the
-        selection-only bound (currently the case for the cluster/lensing
-        stack, whose per-pair variances arrive in a follow-up).
+        selection-only bound.  Both the standard core and the
+        cluster/lensing stack (per-event, lensed-singleton, and per-pair
+        variances) thread it.
 
     Returns
     -------

@@ -251,6 +251,35 @@ PAIR_MARKS_DELTA_COLLAPSE = 2
 _TIME_COLLAPSE_HERMITE_NODES = 8
 
 
+def _correlated_branch_variance(log_z_a, var_a, log_z_b, var_b):
+    """Delta-method variance of ``log((Z_a + Z_b)/c)`` from two branch
+    estimates, under the PERFECTLY-CORRELATED bound
+    ``(alpha_a*sigma_a + alpha_b*sigma_b)^2`` with ``alpha_x = Z_x/(Z_a+Z_b)``.
+
+    Correlated because the branches share randomness (the pair kernel's
+    branches reuse the same two events through each other's KDEs; the
+    singleton mixture's branches are driven by the SAME PE samples), and an
+    independent combination would understate the variance the total guard
+    exists to bound.  The constant ``c`` divides out of the delta method.
+
+    Reverse-mode discipline (see ``_logsumexp_neginf_safe``): both branches
+    of a ``where`` are differentiated, so ``-inf - -inf`` and ``sqrt(0)``
+    (infinite derivative) must never appear in the dead branch.
+    """
+    log_den = jnp.logaddexp(log_z_a, log_z_b)
+    den_ok = jnp.isfinite(log_den)
+    safe_den = jnp.where(den_ok, log_den, 0.0)
+    safe_a = jnp.where(jnp.isfinite(log_z_a), log_z_a, -1e3)
+    safe_b = jnp.where(jnp.isfinite(log_z_b), log_z_b, -1e3)
+    alpha_a = jnp.where(den_ok & jnp.isfinite(log_z_a),
+                        jnp.exp(jnp.minimum(safe_a - safe_den, 0.0)), 0.0)
+    alpha_b = jnp.where(den_ok & jnp.isfinite(log_z_b),
+                        jnp.exp(jnp.minimum(safe_b - safe_den, 0.0)), 0.0)
+    sig_a = jnp.where(var_a > 0.0, jnp.sqrt(jnp.maximum(var_a, 1e-300)), 0.0)
+    sig_b = jnp.where(var_b > 0.0, jnp.sqrt(jnp.maximum(var_b, 1e-300)), 0.0)
+    return jnp.square(alpha_a * sig_a + alpha_b * sig_b)
+
+
 def cluster_log_likelihood_pair(
     event_i: dict,         # {'m1det', 'q', 'dL', 'chieff', 'prior_wt', 'valid', 'pixels'}
     event_j: dict,         # same fields
@@ -270,8 +299,14 @@ def cluster_log_likelihood_pair(
     sigma_delta_t: jnp.ndarray | None = None,
     t_obs_window_sec: jnp.ndarray | None = None,
     pair_time_signed: bool = False,
+    return_mc_variance: bool = False,
 ) -> jnp.ndarray:
     """Symmetric J=2 pair log-likelihood ``log L_2(d_i, d_j | λ, Θ)``.
+
+    With ``return_mc_variance=True`` returns ``(log_L2, var)`` where ``var``
+    is the delta-method variance of ``log_L2`` under the PE-sample
+    randomness (see the reduction at the bottom); the default returns the
+    scalar unchanged, bit-compatible with every existing caller.
 
     Time marks are COINCIDENCE ODDS. A time mark contributes the ratio of
     the observed |Δt| density under the lensed hypothesis to that under the
@@ -446,7 +481,27 @@ def cluster_log_likelihood_pair(
     log_branch_b = logsumexp(log_int_b) - jnp.log(N_j)
 
     # Symmetric sum (1/2 because each assignment is one term of the average)
-    return logsumexp(jnp.stack([log_branch_a, log_branch_b])) - jnp.log(2.0)
+    log_L2 = logsumexp(jnp.stack([log_branch_a, log_branch_b])) - jnp.log(2.0)
+    if not return_mc_variance:
+        return log_L2
+
+    # Delta-method Monte-Carlo variance of log_L2.  The randomness is the
+    # driving PE sample set of each branch (the y axis is deterministic
+    # quadrature), so each branch is an importance mean over its per-sample
+    # weights w_s = sum_y exp(log_int[s, y]) and gets the standard
+    # sum(w^2)/(sum w)^2 - 1/N variance of its log.  The branches are
+    # combined with the PERFECTLY-CORRELATED bound
+    # (alpha_a*sigma_a + alpha_b*sigma_b)^2: they reuse the same two events
+    # through each other's KDEs, whose sampling noise the delta method does
+    # not see, so the independent combination would understate the variance
+    # this term exists to guard against.
+    from darksirens.likelihood.selection import log_evidence_and_mc_variance
+
+    _, var_a = log_evidence_and_mc_variance(logsumexp(log_int_a, axis=1), N_i)
+    _, var_b = log_evidence_and_mc_variance(logsumexp(log_int_b, axis=1), N_j)
+    return log_L2, _correlated_branch_variance(
+        log_branch_a, var_a, log_branch_b, var_b
+    )
 
 
 # ============================================================================
@@ -541,6 +596,7 @@ def lensed_single_log_likelihood_event(
     y_nodes: jnp.ndarray,
     log_wy: jnp.ndarray,
     pair_orientation_mode: str = "independent",
+    return_mc_variance: bool = False,
 ) -> jnp.ndarray:
     """log of the lensed-singleton evidence for one observed event:
 
@@ -577,4 +633,18 @@ def lensed_single_log_likelihood_event(
     )
     log_branch_plus = logsumexp(log_int_plus) - jnp.log(N)
     log_branch_minus = logsumexp(log_int_minus) - jnp.log(N)
-    return jnp.logaddexp(log_branch_plus, log_branch_minus)
+    log_z = jnp.logaddexp(log_branch_plus, log_branch_minus)
+    if not return_mc_variance:
+        return log_z
+    # Both image-identity branches are driven by the SAME N PE samples and
+    # SUMMED, so the whole channel is one importance mean over per-sample
+    # weights w_s = sum_y [exp(plus[s,y]) + exp(minus[s,y])] and the standard
+    # delta-method variance is exact for it (no cross-branch correlation
+    # bound needed, unlike the pair kernel).
+    from darksirens.likelihood.selection import log_evidence_and_mc_variance
+
+    rows = logsumexp(
+        jnp.concatenate([log_int_plus, log_int_minus], axis=1), axis=1
+    )
+    _, var = log_evidence_and_mc_variance(rows, N)
+    return log_z, var

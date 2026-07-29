@@ -46,6 +46,7 @@ from darksirens.gw.populations import pop_model_parser
 from darksirens.likelihood.selection import (
     DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     compute_selection_term,
+    log_evidence_and_mc_variance,
 )
 from darksirens.inference.utils import log_sample_weight
 from darksirens.likelihood.wl_weight import (
@@ -53,6 +54,7 @@ from darksirens.likelihood.wl_weight import (
     log_sample_weight_wl_lognormal_hermite,
 )
 from darksirens.likelihood.cluster_likelihood import (
+    _correlated_branch_variance,
     cluster_log_likelihood_pair,
     lensed_single_log_likelihood_event,
 )
@@ -450,15 +452,10 @@ def darksiren_log_likelihood_with_clusters(
         Neff_2 = jnp.asarray(0.0, dtype=jnp.float64)
         log_sigma2_2 = jnp.asarray(-jnp.inf, dtype=jnp.float64)
 
-    # Combined selection correction
-    selection_correction_total = combined_selection_log_correction(
-        log_mu_1, log_sigma2_1,
-        log_mu_2, log_sigma2_2,
-        n_singletons_observed=(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
-        n_clusters_observed=(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
-        soft_guard=selection_neff_soft_guard,
-        max_likelihood_variance=max_likelihood_variance,
-    )
+    # The combined selection correction is evaluated AFTER the singleton and
+    # pair reductions below: the total-variance guard budgets the per-event
+    # and per-pair importance-estimator variances alongside the selection
+    # variance (mirroring the standard core), so their sums must exist first.
     log_mu_combined = jnp.logaddexp(log_mu_1, log_mu_2)
     log_sigma2_combined = jnp.logaddexp(log_sigma2_1, log_sigma2_2)
     Neff_combined = jnp.where(
@@ -466,7 +463,7 @@ def darksiren_log_likelihood_with_clusters(
         jnp.exp(2.0 * log_mu_combined - log_sigma2_combined),
         0.0,
     )
-    ll = selection_correction_total
+    ll = jnp.asarray(0.0, dtype=jnp.float64)
 
     # ──────────────────────────────────────────────────────────────────
     # PE per-event term for singletons.
@@ -514,7 +511,7 @@ def darksiren_log_likelihood_with_clusters(
         )
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
         if singleton_lensing != SINGLETON_LENSING_MIXTURE and not unlensed_tau_suppression:
-            return None, -jnp.log(nsamp) + logsumexp(ldw)
+            return None, log_evidence_and_mc_variance(ldw, nsamp)
 
         # (1 - tau_2(z)) x unlensed/WL branch [+ lensed-single branch, MIXTURE].
         # The (1 - tau_2) factor is evaluated per PE sample at the mu = 1
@@ -531,33 +528,46 @@ def darksiren_log_likelihood_with_clusters(
         ldw_unlensed = jnp.where(
             jnp.isfinite(ldw), ldw + jnp.log1p(-tau_app), -jnp.inf
         )
-        log_unlensed = -jnp.log(nsamp) + logsumexp(ldw_unlensed)
+        log_unlensed, var_unlensed = log_evidence_and_mc_variance(
+            ldw_unlensed, nsamp
+        )
         if singleton_lensing != SINGLETON_LENSING_MIXTURE:
             # J2 + singleton_lensing=off: the observed singletons are unlensed
             # by protocol (the generator DROPS exactly-one-detected images), so
             # the unlensed branch is the whole singleton evidence.
-            return None, log_unlensed
+            return None, (log_unlensed, var_unlensed)
         event_dict = {
             "m1det": sl(gw_pe.m1det), "q": sl(gw_pe.q),
             "dL": dL_ev, "chieff": sl(gw_pe.chieff),
             "prior_wt": sl(gw_pe.prior_wt),
             "valid": sl(gw_pe.valid), "pixels": sl(gw_pe.pixels),
         }
-        log_lensed = lensed_single_log_likelihood_event(
+        log_lensed, var_lensed = lensed_single_log_likelihood_event(
             event_dict, cosmo, survey, pop_params, catalog_ev,
             sis_params, fc_pdet_params, log_p_pop, log_prior_z,
             y_nodes_s, log_wy_s,
             pair_orientation_mode=pair_orientation_mode,
+            return_mc_variance=True,
         )
-        return None, jnp.logaddexp(log_unlensed, log_lensed)
+        # Both branches are driven by the SAME PE samples, so their errors
+        # are correlated: combine with the perfectly-correlated bound.
+        var_mix = _correlated_branch_variance(
+            log_unlensed, var_unlensed, log_lensed, var_lensed
+        )
+        return None, (jnp.logaddexp(log_unlensed, log_lensed), var_mix)
 
     if cluster_mode == CLUSTER_MODE_J2:
         # Sum singletons only
-        _, event_lls = lax.scan(_pe_event_fn, None, singleton_indices)
+        _, (event_lls, event_vars) = lax.scan(
+            _pe_event_fn, None, singleton_indices
+        )
     else:
         # Legacy: sum all events
-        _, event_lls = lax.scan(_pe_event_fn, None, jnp.arange(nEvents))
+        _, (event_lls, event_vars) = lax.scan(
+            _pe_event_fn, None, jnp.arange(nEvents)
+        )
     singleton_logL_sum = jnp.sum(event_lls)
+    singleton_variance_sum = jnp.sum(event_vars)
     ll += singleton_logL_sum
 
     # ──────────────────────────────────────────────────────────────────
@@ -565,6 +575,7 @@ def darksiren_log_likelihood_with_clusters(
     # ──────────────────────────────────────────────────────────────────
     per_pair_logL_values = []
     pair_logL_sum = jnp.asarray(0.0, dtype=jnp.float64)
+    pair_variance_sum = jnp.asarray(0.0, dtype=jnp.float64)
     if cluster_mode == CLUSTER_MODE_J2 and n_pairs > 0:
         # y-grid for cluster pair likelihoods
         y_nodes, log_wy = make_y_grid(y_nodes_pair)
@@ -596,7 +607,7 @@ def darksiren_log_likelihood_with_clusters(
             else:
                 dt_obs_k = None
                 dt_sig_k = None
-            ll_pair = cluster_log_likelihood_pair(
+            ll_pair, var_pair = cluster_log_likelihood_pair(
                 ev_i, ev_j, kde_i, kde_j,
                 cosmo, survey, pop_params, em_catalog_pe, sis_params,
                 log_p_pop, log_prior_z, y_nodes, log_wy,
@@ -604,8 +615,12 @@ def darksiren_log_likelihood_with_clusters(
                 delta_t_obs=dt_obs_k, sigma_delta_t=dt_sig_k,
                 t_obs_window_sec=pair_time_t_obs_window_sec,
                 pair_time_signed=pair_time_signed,
+                return_mc_variance=True,
             )
-            return jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf)
+            return (
+                jnp.where(jnp.isfinite(ll_pair), ll_pair, -jnp.inf),
+                jnp.where(jnp.isfinite(var_pair), var_pair, 0.0),
+            )
 
         if pair_batch_size and pair_batch_size > 0:
             # Chunk candidate pairs into fixed-size batches and scan over the
@@ -616,16 +631,28 @@ def darksiren_log_likelihood_with_clusters(
 
             def _scan_pair(carry, k):
                 active = k < n_pairs
-                ll_pair_safe = lax.cond(
+                ll_pair_safe, var_pair_safe = lax.cond(
                     active,
                     _pair_loglike_at_index,
-                    lambda _: jnp.asarray(0.0, dtype=jnp.float64),
+                    lambda _: (
+                        jnp.asarray(0.0, dtype=jnp.float64),
+                        jnp.asarray(0.0, dtype=jnp.float64),
+                    ),
                     k,
                 )
-                return carry + ll_pair_safe, jnp.where(active, ll_pair_safe, -jnp.inf)
+                carry_ll, carry_var = carry
+                return (
+                    (carry_ll + ll_pair_safe, carry_var + var_pair_safe),
+                    jnp.where(active, ll_pair_safe, -jnp.inf),
+                )
 
-            pair_logL_sum, padded_pair_logL = lax.scan(
-                _scan_pair, jnp.asarray(0.0, dtype=jnp.float64), jnp.arange(n_padded)
+            (pair_logL_sum, pair_variance_sum), padded_pair_logL = lax.scan(
+                _scan_pair,
+                (
+                    jnp.asarray(0.0, dtype=jnp.float64),
+                    jnp.asarray(0.0, dtype=jnp.float64),
+                ),
+                jnp.arange(n_padded),
             )
             ll = ll + pair_logL_sum
             if return_diagnostics:
@@ -633,11 +660,29 @@ def darksiren_log_likelihood_with_clusters(
         else:
             # Legacy small-n path: iterate pairs at Python level (n_pairs is static).
             for k in range(n_pairs):
-                ll_pair_safe = _pair_loglike_at_index(k)
+                ll_pair_safe, var_pair_safe = _pair_loglike_at_index(k)
                 if return_diagnostics:
                     per_pair_logL_values.append(ll_pair_safe)
                 pair_logL_sum = pair_logL_sum + ll_pair_safe
+                pair_variance_sum = pair_variance_sum + var_pair_safe
                 ll = ll + ll_pair_safe
+
+    # Combined selection correction, with the per-event/per-pair
+    # importance-estimator variances spending part of the total-variance
+    # budget (they used to be silently excluded, so the advertised
+    # GWTC-4/5-style guard could pass a likelihood dominated by noisy event
+    # or pair estimators — review P1-09).
+    pe_variance_sum = singleton_variance_sum + pair_variance_sum
+    selection_correction_total = combined_selection_log_correction(
+        log_mu_1, log_sigma2_1,
+        log_mu_2, log_sigma2_2,
+        n_singletons_observed=(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
+        n_clusters_observed=(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
+        soft_guard=selection_neff_soft_guard,
+        max_likelihood_variance=max_likelihood_variance,
+        pe_variance_sum=pe_variance_sum,
+    )
+    ll = ll + selection_correction_total
 
     logL_total = jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
     if return_diagnostics:
@@ -657,6 +702,9 @@ def darksiren_log_likelihood_with_clusters(
             "Neff_combined": Neff_combined,
             "selection_correction_total": selection_correction_total,
             "singleton_logL_sum": singleton_logL_sum,
+            "singleton_variance_sum": singleton_variance_sum,
+            "pair_variance_sum": pair_variance_sum,
+            "pe_variance_sum": pe_variance_sum,
             "pair_logL_sum": pair_logL_sum,
             "per_pair_logL": per_pair_logL,
             "n_singletons": jnp.asarray(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
