@@ -228,8 +228,16 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         # rows when --use_lss (each tracer has its own clustering field and
         # its own sampled b_miss_c{k}); the memory-efficient (1, N_grid) dummy
         # otherwise.  A catalog carrying a Q_LSS table keeps the dummy: Q
-        # REPLACES the local-overdensity factor in the numerator.
-        if bool(getattr(opts, "use_LSS", False)) and _lss_for(i) is None:
+        # REPLACES the local-overdensity factor in the numerator.  The test is
+        # the LOADED table state, not the CLI path helper: an EMBEDDED
+        # /lss_completion group (auto-discovered by maybe_load_lss_completion
+        # from the survey file itself) arrives with _lss_for(i) None, and
+        # building delta_g anyway would populate both field inputs — the
+        # field-convention normalizer's hard mutual-exclusion invariant then
+        # aborts inside the jit trace (the K=1 flat path was fixed the same
+        # way; this is its mixture twin).
+        if bool(getattr(opts, "use_LSS", False)) and (
+                lss.get("lss_completion_logq") is None):
             delta_g_k = compute_lss_overdensity(
                 zgals, nside, wgals=wgals, ngals=ngals
             )

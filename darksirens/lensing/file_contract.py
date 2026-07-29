@@ -74,8 +74,15 @@ def validate_observed_gw_pe(path: str | Path) -> dict[str, Any]:
                 raise ValueError(f"observed GW PE event_indexing must be {EVENT_INDEXING!r}, got {indexing!r}")
             n_events = int(f.attrs.get("n_events", f.attrs.get("nobs", -1)))
             nsamp = int(f.attrs.get("nsamp", -1))
-            if n_events < 0 or nsamp <= 0:
-                raise ValueError("observed GW PE requires non-negative n_events and positive nsamp attrs")
+            if n_events < 1 or nsamp <= 0:
+                # Zero events used to be "contract valid" and then divided by
+                # zero in the likelihood's PE block plan (core.py pe_block);
+                # selection-only inference is not a supported configuration,
+                # so it is rejected here at the shared boundary.
+                raise ValueError(
+                    "observed GW PE requires at least one event (n_events >= 1) "
+                    "and positive nsamp attrs"
+                )
             expected = n_events * nsamp
             for name in ("m1det", "m2det", "dL", "chieff", "p_pe"):
                 _finite_dataset(f, name, size=expected)
@@ -133,6 +140,17 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
                 groups = list(f.keys())
                 if "unlensed" not in f and "lensed" not in f:
                     raise ValueError("selection_inputs.h5 requires at least an 'unlensed' or 'lensed' group")
+                # A present-but-empty group used to be "contract valid" and
+                # then fail (or normalize against nothing) at load time; the
+                # contract must be at least as strict as the loaders it
+                # gates (review P2-06).
+                for group_name in ("unlensed", "lensed"):
+                    if group_name in f and len(f[group_name].keys()) == 0:
+                        raise ValueError(
+                            f"selection_inputs.h5 group '{group_name}' is "
+                            "present but empty; a selection group must carry "
+                            "its injection datasets"
+                        )
                 return {"format_version": fmt, "groups": groups, "warnings": warnings}
             if fmt in ("gwcat-selection-1.0", "gwcat-selection-2.0"):
                 # gwcat-2.0 selection files are only chi_eff-compatible in the
