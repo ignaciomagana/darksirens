@@ -64,6 +64,10 @@ _tqdm_stub = types.ModuleType("tqdm")
 _tqdm_stub.tqdm = lambda iterable=None, *args, **kwargs: iterable
 sys.modules.setdefault("tqdm", _tqdm_stub)
 
+from darksirens.cli.skymaps_to_samples import (  # noqa: E402
+    SOURCE_TAG,
+    _sample_distance_ansatz,
+)
 from darksirens.gw.utils import load_gw_samples  # noqa: E402
 from darksirens.utils.cosmology import z_of_dL  # noqa: E402
 
@@ -178,6 +182,7 @@ def converted(tmp_path_factory):
         pe_Om0 = float(f.attrs["pe_cosmology_Om0"])
         chi_eff_in_p_pe = bool(f.attrs["chi_eff_in_p_pe"])
         chi_eff_amax = float(f.attrs["chi_eff_amax"])
+        file_attrs = dict(f.attrs)
         data = {
             k: np.asarray(f[k])
             for k in (
@@ -213,6 +218,7 @@ def converted(tmp_path_factory):
         "pe_Om0": pe_Om0,
         "chi_eff_in_p_pe": chi_eff_in_p_pe,
         "chi_eff_amax": chi_eff_amax,
+        "file_attrs": file_attrs,
     }
 
 
@@ -427,3 +433,146 @@ def test_chi_eff_attrs_are_truthful(converted):
     """
     assert converted["chi_eff_in_p_pe"] is True
     assert converted["chi_eff_amax"] == pytest.approx(CHI_ABS_MAX)
+
+
+# ---------------------------------------------------------------------------
+# (5) P1-16 — the distance sampler must never substitute another distribution
+# ---------------------------------------------------------------------------
+#
+# ``_sample_distance_ansatz`` evaluated dL²·exp(-z²/2) in LINEAR space. For a
+# pathological-but-allowed DISTMU < 0 the whole dL > 0 support sits |mu|/sigma
+# standard deviations into the Gaussian tail, so every grid weight of the row
+# underflowed to 0 -- and the "degenerate" branch silently replaced that event's
+# distance posterior with a UNIFORM draw on [0, 8 sigma] (mean ~4 sigma, where
+# the target concentrates near 0.06 sigma). The weights are now built in log
+# space and rescaled by each row's maximum, which cannot underflow, and a row
+# with no valid support raises instead of being substituted.
+
+
+def _reference_ansatz_quantiles(mu, sigma, q, n=2_000_000):
+    """Brute-force inverse CDF of dL²·N(dL; mu, sigma) on dL > 0, in log space.
+
+    Independent of the implementation under test: a very fine uniform grid over
+    a wide bracket, log-weights rescaled by their maximum (so the mu < 0 rows
+    are representable), cumulative-trapezoid CDF, linear interpolation.
+    """
+    d = np.linspace(1e-9, max(mu + 40.0 * sigma, 40.0 * sigma), n)
+    logw = 2.0 * np.log(d) - 0.5 * ((d - mu) / sigma) ** 2
+    w = np.exp(logw - logw.max())
+    cdf = np.concatenate([[0.0], np.cumsum(0.5 * (w[1:] + w[:-1]) * np.diff(d))])
+    cdf /= cdf[-1]
+    return np.interp(q, cdf, d)
+
+
+def test_negative_distmu_row_is_not_replaced_by_a_uniform_draw():
+    """mu = -50 sigma must sample the ansatz's near-zero mode, not U(0, 8 sigma)."""
+    sigma = 1.0
+    mu = -50.0 * sigma
+    n = 40_000
+    rng = np.random.default_rng(11)
+    dl = _sample_distance_ansatz(np.full(n, mu), np.full(n, sigma), rng)
+
+    assert np.all(np.isfinite(dl))
+    assert np.all(dl > 0.0)
+
+    med_true, p99_true = _reference_ansatz_quantiles(mu, sigma, [0.5, 0.99])
+    # The target concentrates at d ~ 2 sigma^2 / |mu|; the uniform fallback had
+    # a median of 4 sigma, so this separates the two by ~2 orders of magnitude.
+    assert med_true < 0.1 * sigma  # the reference itself is near zero
+    assert np.median(dl) < 0.5 * sigma
+    np.testing.assert_allclose(np.median(dl), med_true, rtol=0.05)
+    np.testing.assert_allclose(np.percentile(dl, 99), p99_true, rtol=0.05)
+    # Decisive against the uniform fallback: U(0, 8 sigma) puts ~94% of its mass
+    # above the true 99th percentile.
+    assert np.mean(dl > p99_true) < 0.05
+
+
+def test_ordinary_row_matches_brute_force_ansatz_quantiles():
+    """A normal row (mu=1000, sig=100) must track the analytic ansatz quantiles."""
+    mu, sigma = 1000.0, 100.0
+    n = 200_000
+    rng = np.random.default_rng(3)
+    dl = _sample_distance_ansatz(np.full(n, mu), np.full(n, sigma), rng)
+
+    q = np.array([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99])
+    got = np.percentile(dl, 100.0 * q)
+    want = _reference_ansatz_quantiles(mu, sigma, q)
+    # 1% covers the grid (rectangle-rule CDF) and Monte-Carlo error at n.
+    np.testing.assert_allclose(got, want, rtol=0.01)
+    # The dL² tilt: the ansatz mean sits above mu, unlike a plain Gaussian.
+    assert dl.mean() > mu + 0.1 * sigma
+
+
+def test_narrow_width_row_does_not_degenerate():
+    """sigma/mu = 1e-4 must still resolve the core, not quantise onto a few nodes."""
+    mu, sigma = 1000.0, 0.1
+    n = 100_000
+    rng = np.random.default_rng(5)
+    dl = _sample_distance_ansatz(np.full(n, mu), np.full(n, sigma), rng)
+
+    assert np.all(np.isfinite(dl))
+    np.testing.assert_allclose(dl.mean(), mu, atol=0.05 * sigma)
+    # A grid that spans [0, mu] leaves O(1) nodes inside the core and inflates
+    # the spread several-fold; the mode/width-adapted bracket recovers sigma.
+    np.testing.assert_allclose(dl.std(), sigma, rtol=0.05)
+    assert np.unique(dl).size > 0.5 * n  # not piled onto a handful of nodes
+
+
+def test_rows_are_sampled_independently_of_their_neighbours():
+    """Mixed (pathological, ordinary) rows in one call must not contaminate."""
+    sigma = 80.0
+    mu = np.array([-50.0 * sigma, 600.0, -50.0 * sigma, 1200.0])
+    rng = np.random.default_rng(7)
+    reps = 20_000
+    dl = _sample_distance_ansatz(
+        np.tile(mu, reps), np.full(4 * reps, sigma), rng
+    ).reshape(reps, 4)
+
+    assert np.median(dl[:, 0]) < 0.5 * sigma
+    assert np.median(dl[:, 2]) < 0.5 * sigma
+    np.testing.assert_allclose(
+        np.median(dl[:, 1]), _reference_ansatz_quantiles(600.0, sigma, 0.5), rtol=0.02
+    )
+    np.testing.assert_allclose(
+        np.median(dl[:, 3]), _reference_ansatz_quantiles(1200.0, sigma, 0.5), rtol=0.02
+    )
+
+
+def test_unsupported_row_raises_instead_of_substituting_a_distribution():
+    """An unrepresentable row must name itself, not silently become uniform."""
+    # DISTSIGMA = 0 with DISTMU < 0 collapses the bracket onto dL = 0, so every
+    # log-weight of that row is -inf. _read_skymap already drops such pixels, so
+    # this is malformed input reaching the sampler directly -- the point is that
+    # it is reported (with the offending row and its moments) rather than
+    # replaced by some other distribution.
+    with pytest.raises(ValueError, match=r"row 1"):
+        _sample_distance_ansatz(
+            np.array([600.0, -1.0]),
+            np.array([80.0, 0.0]),
+            np.random.default_rng(0),
+        )
+
+
+# ---------------------------------------------------------------------------
+# (6) P1-17 — the product must declare its fixed-population requirement
+# ---------------------------------------------------------------------------
+#
+# The module docstring has always said that population inference on these
+# surrogate mass/spin draws is invalid and that selection consistency needs a
+# FIXED population -- but nothing downstream could act on prose. The output now
+# carries a machine-readable ``requires_fixed_population`` attr that
+# darksirens.cli.inference validates before sampling starts (see
+# tests/test_skymap_population_guard.py).
+
+
+def test_output_declares_requires_fixed_population(converted):
+    attrs = converted["file_attrs"]
+    assert "requires_fixed_population" in attrs
+    assert bool(np.asarray(attrs["requires_fixed_population"]).item()) is True
+
+
+def test_output_source_tag_is_the_shared_constant(converted):
+    source = converted["file_attrs"]["source"]
+    if isinstance(source, bytes):
+        source = source.decode()
+    assert str(source) == SOURCE_TAG == "darksirens_skymaps_to_samples"

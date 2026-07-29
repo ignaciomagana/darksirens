@@ -106,10 +106,28 @@ except Exception:  # pragma: no cover - optional dependency
 # treat p_pe as-is and skip the chi_eff-prior reweight that would otherwise
 # consume m1src/m2src, so the choice of fiducial PE cosmology is inert beyond
 # populating these two required datasets.
+#
+# The file also carries two markers that make the SELECTION-CONSISTENCY caveat
+# above machine-enforceable instead of documentation-only:
+#
+#   source                     = "darksirens_skymaps_to_samples"
+#   requires_fixed_population  = True   (bool)
+#
+# darksirens_inference reads them during configuration validation and REFUSES to
+# start with a free population block (--fix_population false), because the
+# mass/spin coordinates in this file are surrogate draws carrying no
+# information: inferring a population from them fits the surrogate proposal, and
+# the mass/spin factors no longer cancel against the injection-based selection
+# integral. Run with --fix_population true, or pass --allow_skymap_population to
+# downgrade the refusal to a loud warning for a deliberate methodological study.
 # ============================================================================
 
 POP_M_MIN_DEFAULT = 2.0  # lower edge of the population m_min prior
 POP_M_MAX_DEFAULT = 100.0  # upper edge of the population m_max prior
+
+#: ``f.attrs["source"]`` stamped on every output file. darksirens.cli.inference
+#: imports this to recognise pre-``requires_fixed_population`` products.
+SOURCE_TAG = "darksirens_skymaps_to_samples"
 
 
 def _positive_int(value: str) -> int:
@@ -194,6 +212,41 @@ def _read_skymap(path: Path):
     return prob, distmu, distsigma, nside
 
 
+def _ansatz_grid_bounds(
+    mu: np.ndarray, sig: np.ndarray, n_widths: float = 10.0
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row [lo, hi] bracket of the dL²·N(dL; mu, sig) mass on dL > 0.
+
+    The target's log-density is f(d) = 2 ln d − ½ (d−mu)²/σ², so its mode solves
+    d² − mu·d − 2σ² = 0 and its local curvature gives a Laplace width:
+
+        mode = (mu + √(mu² + 8σ²)) / 2 ,   w = mode·σ / √(2σ² + mode²).
+
+    For the ordinary case mu ≫ σ this returns mode ≈ mu and w ≈ σ, i.e. the
+    plain ±n_widths·σ window. It matters for the two regimes a fixed [0, mu+8σ]
+    grid resolves badly:
+
+      * σ ≪ mu (e.g. σ/mu = 1e-4): a grid spanning [0, mu] puts O(1) nodes
+        inside the Gaussian core, so the inverse-CDF quantises the draw onto a
+        few nodes and inflates its spread by an order of magnitude.
+      * mu < 0 (allowed by the ansatz): the mass sits at d ≈ 2σ²/|mu| ≪ σ,
+        many hundreds of grid steps below the first node of a [0, 8σ] grid.
+
+    The positive root is evaluated in whichever algebraically equivalent form
+    avoids cancellation for the sign of mu, and √(mu² + 8σ²) via hypot so a
+    large mu/σ cannot overflow.
+    """
+    root = np.hypot(mu, np.sqrt(8.0) * sig)  # = sqrt(mu**2 + 8 sig**2)
+    # A degenerate row (sig == 0, or mu == sig == 0) makes these 0/0; it is left
+    # to propagate as NaN, which _sample_distance_ansatz reports naming the row.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mode = np.where(mu >= 0.0, 0.5 * (mu + root), 4.0 * sig * sig / (root - mu))
+        width = mode * sig / np.hypot(np.sqrt(2.0) * sig, mode)
+    lo = np.maximum(0.0, mode - n_widths * width)
+    hi = mode + n_widths * width
+    return lo, hi
+
+
 def _sample_distance_ansatz(
     mu: np.ndarray,
     sig: np.ndarray,
@@ -206,21 +259,47 @@ def _sample_distance_ansatz(
     pathological-but-allowed mu < 0 shape parameter and to sig ≪ mu.
     The DISTNORM normalisation is recomputed implicitly by normalising the CDF,
     so we never depend on the stored DISTNORM.
+
+    The grid weights are built in LOG space and rescaled per row by that row's
+    maximum before exponentiating. Evaluating dL²·exp(−½z²) directly underflows
+    every node of a row whenever the whole grid sits far in the Gaussian tail —
+    exactly what mu ≪ 0 does, since the entire dL > 0 support is then |mu|/σ
+    standard deviations out. The previous code detected the resulting all-zero
+    row and substituted a UNIFORM draw on [0, hi]: a silent replacement of the
+    event's distance posterior by a distribution with the wrong support, wrong
+    shape and a mean ~4σ where the target concentrates near 0.06σ. Rescaling by
+    the row maximum makes the same row perfectly well conditioned, so no
+    fallback distribution is needed and none is offered: a row that is still
+    degenerate is malformed input and raises.
     """
     mu = np.asarray(mu, dtype=float)
     sig = np.asarray(sig, dtype=float)
     n = mu.size
-    # Upper support: comfortably past the Gaussian core; guard mu<0.
-    hi = np.maximum(mu + 8.0 * sig, 8.0 * sig)
+    lo, hi = _ansatz_grid_bounds(mu, sig)
     u = np.linspace(0.0, 1.0, n_grid)[None, :]  # (1, n_grid)
-    dl = u * hi[:, None]  # (n, n_grid)
-    z = (dl - mu[:, None]) / sig[:, None]
-    pdf = dl * dl * np.exp(-0.5 * z * z)  # ∝ dL²·N, unnormalised
+    dl = lo[:, None] + u * (hi - lo)[:, None]  # (n, n_grid)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = (dl - mu[:, None]) / sig[:, None]
+        logw = 2.0 * np.log(dl)  # dl == 0 -> -inf, kept as such
+        logw -= 0.5 * z * z  # ∝ ln(dL²·N), unnormalised
+    del z
+    logw_max = np.max(logw, axis=1)
+    # A row is unusable only if EVERY node is -inf. Any dl > 0 node has a finite
+    # log-weight, so this means an empty/malformed bracket, not a hard sampling
+    # problem — report it instead of substituting some other distribution.
+    bad = ~np.isfinite(logw_max)
+    if np.any(bad):
+        j = int(np.flatnonzero(bad)[0])
+        raise ValueError(
+            f"distance ansatz has no valid support for row {j}: "
+            f"DISTMU={mu[j]!r}, DISTSIGMA={sig[j]!r} "
+            f"(grid [{lo[j]!r}, {hi[j]!r}], {n_grid} nodes). "
+            "Check the skymap's distance moments."
+        )
+    logw -= logw_max[:, None]
+    pdf = np.exp(logw, out=logw)  # rescaled weights, max 1 per row
     cdf = np.cumsum(pdf, axis=1)
-    tot = cdf[:, -1:]
-    # Degenerate rows (all-zero pdf): fall back to a uniform draw on [0, hi].
-    degenerate = (tot[:, 0] <= 0) | ~np.isfinite(tot[:, 0])
-    cdf = np.where(tot > 0, cdf / np.where(tot > 0, tot, 1.0), u)  # broadcast-safe
+    cdf /= cdf[:, -1:].copy()  # totals are >= 1 by construction (the max node is 1)
     r = rng.uniform(size=n)
     idx = np.clip((cdf < r[:, None]).sum(axis=1), 1, n_grid - 1)
     c0 = np.take_along_axis(cdf, (idx - 1)[:, None], axis=1)[:, 0]
@@ -229,7 +308,6 @@ def _sample_distance_ansatz(
     d1 = np.take_along_axis(dl, idx[:, None], axis=1)[:, 0]
     frac = np.where(c1 > c0, (r - c0) / np.where(c1 > c0, c1 - c0, 1.0), 0.0)
     out = d0 + frac * (d1 - d0)
-    out = np.where(degenerate, r * hi, out)
     return np.maximum(out, 1e-6)  # strictly positive for z(dL) inversion downstream
 
 
@@ -420,7 +498,12 @@ def main() -> None:
         f.attrs["mock_data"] = (
             True  # loader uses p_pe as-is (no extra spin-prior multiply)
         )
-        f.attrs["source"] = "darksirens_skymaps_to_samples"
+        f.attrs["source"] = SOURCE_TAG
+        # Machine-readable form of the selection-consistency requirement: the
+        # mass/spin draws here are uninformative surrogates, so the population
+        # (and the injection set reweighted to it) must be held FIXED. The
+        # inference CLI refuses a free population block on a file carrying this.
+        f.attrs["requires_fixed_population"] = True
         f.attrs["m1det_min"] = float(m1det_min)
         f.attrs["m1det_max"] = float(m1det_max)
         f.attrs["zmax"] = float(args.zmax)

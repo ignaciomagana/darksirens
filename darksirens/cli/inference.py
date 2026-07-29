@@ -787,6 +787,17 @@ def build_parser():
         help="Use one shared redshift-evolution gamma; false gives one gamma per mass component.",
     )
     g.add_argument("--fix_population",  type=str_to_bool, default=False, metavar="BOOL")
+    g.add_argument("--allow_skymap_population",
+                   type=str_to_bool, nargs="?", const=True, default=False,
+                   metavar="BOOL",
+                   help=("Bypass the refusal to run a FREE population block on a "
+                         "PE file written by darksirens_skymaps_to_samples "
+                         "(requires_fixed_population). Those files carry "
+                         "surrogate mass/spin draws in place of the coordinates "
+                         "a 3D skymap has marginalised away, so the population "
+                         "posterior measures the surrogate proposal and the "
+                         "selection integral stops cancelling it. Emits a loud "
+                         "warning and proceeds; for methodological studies only."))
     g.add_argument("--fix_cosmology", "--fixed_cosmology", dest="fix_cosmology",
                    action=DeprecatedSpellingAction, deprecated=["--fixed_cosmology"],
                    type=str_to_bool, default=False, metavar="BOOL",
@@ -1347,6 +1358,82 @@ def _apply_bright_siren_overrides(opts):
             opts.sky_model = "isotropic"
 
 
+def _gw_file_requires_fixed_population(gw_path):
+    """Whether a PE file declares that its population block must stay FIXED.
+
+    True for the products of ``darksirens_skymaps_to_samples``: a 3D skymap is
+    marginalised over masses and spins, so that converter fills those
+    coordinates with surrogate draws from a broad proposal and sets ``p_pe``
+    equal to the same proposal. They carry no information — the likelihood's
+    mass/spin factors only cancel if the population is held fixed AND the
+    injection set is reweighted to that same fixed model.
+
+    Recognised from either marker, so files written before the explicit attr
+    existed are still caught:
+
+      * ``requires_fixed_population = True`` (written since this guard landed);
+      * ``source == "darksirens_skymaps_to_samples"`` (always written).
+
+    Any file that cannot be opened or read as HDF5 returns False: this is a
+    marker probe, not a format check — ``load_gw_samples`` reports a missing or
+    malformed PE file with its own, better message.
+    """
+    from darksirens.cli.skymaps_to_samples import SOURCE_TAG
+
+    try:
+        with h5py.File(gw_path, "r") as f:
+            attrs = dict(f.attrs)
+    except Exception:
+        return False
+
+    if bool(np.asarray(attrs.get("requires_fixed_population", False)).item()):
+        return True
+    source = attrs.get("source", "")
+    if isinstance(source, bytes):
+        source = source.decode("utf-8", "replace")
+    return str(source) == SOURCE_TAG
+
+
+def _validate_skymap_surrogate_population(opts):
+    """Refuse to infer a population from skymap-surrogate mass/spin draws.
+
+    Runs at configuration time, before the data load and long before sampling,
+    so the failure costs seconds rather than a wasted allocation.
+    """
+    if not getattr(opts, "gw_path", None):
+        return
+    if not _gw_file_requires_fixed_population(opts.gw_path):
+        return
+
+    if getattr(opts, "fix_population", False):
+        _ok(
+            "GW file is a 3D-skymap surrogate product; population block is "
+            "fixed, as it requires."
+        )
+        return
+
+    message = (
+        f"{opts.gw_path} was written by darksirens_skymaps_to_samples and "
+        "declares requires_fixed_population. A 3D skymap is marginalised over "
+        "masses and spins, so that file's m1det/m2det/chieff samples are "
+        "ARTIFICIAL draws from a broad surrogate proposal, not posterior "
+        "samples. With --fix_population false those surrogates drive both the "
+        "population fit (which then measures the proposal) and the selection "
+        "integral (whose mass/spin factors no longer cancel), biasing the "
+        "cosmology that rides on them. Re-run with --fix_population true."
+    )
+    if str_to_bool(getattr(opts, "allow_skymap_population", False)):
+        _warn(
+            f"{message} Proceeding anyway under --allow_skymap_population: the "
+            "population posterior from this run is NOT a measurement."
+        )
+        return
+    _fatal(
+        f"{message} Pass --allow_skymap_population to override for a "
+        "deliberate methodological study."
+    )
+
+
 def _validate_run_config(opts):
     # ── Validation ─────────────────────────────────────────────────
 
@@ -1423,6 +1510,8 @@ def _validate_run_config(opts):
                 "flows + NumPyro NUTS: the grid inverse-CDF samplers give "
                 "piecewise gradients; nested sampling is the validated path."
             )
+
+    _validate_skymap_surrogate_population(opts)
 
     if opts.universe_model == "bright_sirens" and opts.counterpart is None:
         _fatal("'bright_sirens' requires --counterpart RA DEC Z triplet(s) (angles in radians).")
