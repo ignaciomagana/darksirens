@@ -59,6 +59,53 @@ def test_invalid_config_fails(tmp_path):
         sc.resolve_config(path)
 
 
+def test_unknown_profile_rejected_with_choices(tmp_path):
+    """A typo'd profile used to resolve to the TINY preset while the typo was
+    stamped into the run metadata: the run looked like 'paper' and was 1/30th
+    of its size."""
+    path = tmp_path / "typo.json"
+    path.write_text(json.dumps({"study": {"profile": "papre"}}))
+    with pytest.raises(ValueError, match=r"unknown study.profile 'papre'.*paper.*small.*tiny"):
+        sc.resolve_config(path)
+    # Same gate for the caller-supplied profile argument...
+    with pytest.raises(ValueError, match="unknown study.profile 'papre'"):
+        sc.resolve_config(None, profile="papre")
+    # ...and for an override, which cannot retro-select the base preset.
+    empty = tmp_path / "empty.json"
+    empty.write_text("{}")
+    with pytest.raises(ValueError, match="study.profile must be one of"):
+        sc.resolve_config(empty, ["study.profile=papre"])
+    # An explicit null profile still means "use the default".
+    nulled = tmp_path / "nulled.json"
+    nulled.write_text(json.dumps({"study": {"profile": None}}))
+    assert sc.resolve_config(nulled, profile="small")["mock"]["n_universe"] == 12000
+
+
+@pytest.mark.parametrize("override, match", [
+    ("mock.tau_A=true", "tau_A has invalid type bool"),
+    ("mock.t_obs_days=false", "t_obs_days has invalid type bool"),
+    ("mock.tau_A=NaN", "tau_A must be a finite number"),
+    ("mock.tau_n=Infinity", "tau_n must be a finite number"),
+    ("inference.dlogz=-Infinity", "dlogz must be a finite number"),
+])
+def test_numeric_overrides_reject_bool_and_nonfinite(tmp_path, override, match):
+    """``True`` is an int in Python and NaN loses every ``<`` comparison, so
+    both slipped through the type gate and the range gate untouched."""
+    path = tmp_path / "config.json"
+    path.write_text("{}")
+    with pytest.raises(ValueError, match=match):
+        sc.resolve_config(path, [override])
+
+
+def test_valid_numeric_overrides_still_accepted(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text("{}")
+    cfg = sc.resolve_config(path, ["mock.tau_A=0.0005", "mock.tau_n=3", "inference.dlogz=1.5"])
+    assert cfg["mock"]["tau_A"] == 0.0005
+    assert cfg["mock"]["tau_n"] == 3
+    assert cfg["inference"]["dlogz"] == 1.5
+
+
 def test_resolved_config_written_in_dry_run(tmp_path):
     repo = Path(__file__).resolve().parents[1]
     workdir = tmp_path / "study"

@@ -1428,8 +1428,10 @@ def _validate_run_config(opts):
         _fatal("'bright_sirens' requires --counterpart RA DEC Z triplet(s) (angles in radians).")
     if opts.universe_model != "bright_sirens" and opts.counterpart is not None:
         _warn("--counterpart is ignored unless --universe_model bright_sirens.")
-    if opts.counterpart_dz <= 0.0:
-        _fatal("--counterpart_dz must be positive.")
+    if not np.isfinite(opts.counterpart_dz) or opts.counterpart_dz <= 0.0:
+        # argparse's ``type=float`` happily parses 'nan'/'inf', and a bare
+        # ``<= 0`` lets both through to norm.logpdf() in redshift/prior.py.
+        _fatal("--counterpart_dz must be a finite positive number.")
     if opts.counterpart_nside < 1 or not hp.isnsideok(opts.counterpart_nside):
         _fatal("--counterpart_nside must be a valid positive HEALPix NSIDE.")
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,13 @@ PROFILE_DEFAULTS = {
     "paper": {**DEFAULTS, "mock": {**DEFAULTS["mock"], "n_universe": 120000, "n_singletons": 200, "n_lensed_pairs": 40, "nsamp": 1000, "n_unlensed_inj": 1000000, "n_lensed_inj": 300000, "injection_proposal": "matched"}, "candidate_graph": {**DEFAULTS["candidate_graph"], "max_total_edges": 400}, "inference": {**DEFAULTS["inference"], "nlive": 1000}},
 }
 
+# Range-check ``study.profile`` against the presets that actually exist.  The
+# patch is late because PROFILE_DEFAULTS is defined below SCHEMA.  Without it
+# an unknown name was accepted, stamped into the run metadata, and silently
+# resolved to the TINY defaults -- a typo'd 'papre' ran a 4000-source toy
+# under a "paper" label.
+SCHEMA["study"]["profile"] = (str, set(PROFILE_DEFAULTS), None)
+
 def _merge(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(a)
     for k, v in b.items():
@@ -123,14 +131,25 @@ def validate_config(config: dict[str, Any], *, allow_unknown: bool = False) -> N
             typ, min_or_allowed, _ = SCHEMA[section][key]
             if value is None:
                 continue
+            numeric = typ in (int, float) or (
+                isinstance(typ, tuple) and (int in typ or float in typ)
+            )
             if typ is bool:
                 ok = isinstance(value, bool)
-            elif typ is int:
-                ok = isinstance(value, int) and not isinstance(value, bool)
+            elif numeric:
+                # ``True`` IS an int in Python, so bool has to be excluded
+                # explicitly for every numeric key -- otherwise `tau_A: true`
+                # validates and silently configures the sim with tau_A = 1.0.
+                ok = isinstance(value, typ) and not isinstance(value, bool)
             else:
                 ok = isinstance(value, typ)
             if not ok:
                 errors.append(f"{section}.{key} has invalid type {type(value).__name__}"); continue
+            if numeric and isinstance(value, float) and not math.isfinite(value):
+                # json.loads accepts NaN/Infinity, and a NaN passes every
+                # ``value < minimum`` comparison below (all comparisons with
+                # NaN are False), so it would reach the simulation intact.
+                errors.append(f"{section}.{key} must be a finite number, got {value!r}"); continue
             if isinstance(min_or_allowed, set) and value not in min_or_allowed:
                 errors.append(f"{section}.{key} must be one of {sorted(min_or_allowed)}")
             elif isinstance(min_or_allowed, (int, float)) and float(value) < float(min_or_allowed):
@@ -140,8 +159,20 @@ def validate_config(config: dict[str, Any], *, allow_unknown: bool = False) -> N
 
 def resolve_config(path: str | Path | None, overrides: list[str] | None = None, *, profile: str | None = None, allow_unknown: bool = False) -> dict[str, Any]:
     raw = read_config(path) if path else {}
-    selected = raw.get("study", {}).get("profile", profile or DEFAULTS["study"]["profile"])
-    base = PROFILE_DEFAULTS.get(selected, DEFAULTS)
+    raw_study = raw.get("study") or {}
+    selected = raw_study.get("profile") if isinstance(raw_study, dict) else None
+    if selected is None:
+        selected = profile or DEFAULTS["study"]["profile"]
+    if not isinstance(selected, str) or selected not in PROFILE_DEFAULTS:
+        # Fail closed: the old ``PROFILE_DEFAULTS.get(selected, DEFAULTS)``
+        # answered a typo with the tiny preset while writing the typo into
+        # resolved_config/run_manifest, so the run LOOKED like the profile it
+        # was asked for and was a hundredth of its size.
+        raise ValueError(
+            f"unknown study.profile {selected!r}; valid choices are "
+            f"{sorted(PROFILE_DEFAULTS)}"
+        )
+    base = PROFILE_DEFAULTS[selected]
     cfg = _merge(base, raw)
     cfg = apply_overrides(cfg, overrides or [])
     validate_config(cfg, allow_unknown=allow_unknown)

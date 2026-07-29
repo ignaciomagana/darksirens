@@ -238,6 +238,77 @@ def test_unsupported_layouts_rejected(tmp_path):
         flows_mod.load_flow_ensemble(tmp_path)
 
 
+def test_data_dim_must_match_column_count(tmp_path):
+    """A 5-D checkpoint still advertising the 4-column spectral layout.
+
+    ``data_dim`` and ``columns`` each validated on their own, so only the PAIR
+    exposes the mislabelled config -- and the likelihood builds its design
+    matrix from ``columns`` while the flow consumes ``data_dim``.
+    """
+    cfg = _config(11)
+    cfg["data_dim"] = 5
+    cfg["Z_mean"] = [2.0, 3.5, 7.0, 0.0, 0.0]
+    cfg["Z_std"] = [0.8, 0.2, 0.3, 0.2, 1.0]
+    cfg["constraints"]["4"] = {"type": "real"}
+    assert len(cfg["columns"]) == 4
+    d = tmp_path / "GW_WIDE"
+    d.mkdir()
+    _save_flow(d / "GW_WIDE_flow.npz", flows_mod.create_flow_from_config(cfg), cfg)
+    with pytest.raises(ValueError, match=r"data_dim=5 but lists 4 columns"):
+        flows_mod.load_flow_ensemble(tmp_path)
+
+
+def test_ordered_positive_inverse_rejects_reversed_and_equal():
+    """Outside the open cone x[0] > ... > x[n-1] > 0 the point has no preimage.
+
+    Flooring the differences to 1e-10 handed those points a FINITE z and a
+    finite log|det|, i.e. a normalised-looking density where there is none.
+    NaN is the convention flowjax's AbstractTransformed._log_prob consumes
+    ("if log_prob is nan, we assume outside transform support") and what the
+    Exp/Sigmoid constraints beside it already produce.
+    """
+    op = flows_mod.OrderedPositiveN(3)
+    x = jnp.asarray([30.0, 12.0, 4.0])
+    z, log_det = op.inverse_and_log_det(x)
+    assert np.all(np.isfinite(np.asarray(z)))
+    assert np.isfinite(float(log_det))
+    # Still an exact inverse of the forward map on the support.
+    x_back, log_det_fwd = op.transform_and_log_det(z)
+    np.testing.assert_allclose(np.asarray(x_back), np.asarray(x), rtol=1e-12)
+    assert float(log_det_fwd) == pytest.approx(-float(log_det), rel=1e-12)
+
+    for bad in ([12.0, 30.0, 4.0], [12.0, 12.0, 4.0], [30.0, 12.0, 12.0],
+                [30.0, 12.0, 0.0], [30.0, 12.0, -4.0], [30.0, -12.0, -40.0]):
+        z_bad, ld_bad = op.inverse_and_log_det(jnp.asarray(bad))
+        assert np.all(np.isnan(np.asarray(z_bad))), bad
+        assert np.isnan(float(ld_bad)), bad
+
+
+def test_out_of_support_masses_have_minus_inf_log_prob(flows_dir):
+    ens = flows_mod.load_flow_ensemble(flows_dir)
+    flow, _ = flows_mod.load_flow(ens.paths[0])
+    X = jnp.asarray([
+        [40.0, 20.0, 1000.0, 0.1],    # in support
+        [20.0, 40.0, 1000.0, 0.1],    # m2 > m1: reversed
+        [30.0, 30.0, 1000.0, 0.1],    # m2 == m1: on the boundary
+        [40.0, -5.0, 1000.0, 0.1],    # m2 < 0
+    ])
+    lp = np.asarray(flow.log_prob(X))
+    assert np.isfinite(lp[0])
+    assert (lp[1:] == -np.inf).all()
+
+    # The ensemble kernel (vmapped, jitted) agrees.
+    eval_logflows = jax.jit(flows_mod.make_ensemble_log_prob(ens))
+    lp_ens = np.asarray(eval_logflows(ens.group_params(), X))
+    assert np.isfinite(lp_ens[:, 0]).all()
+    assert (lp_ens[:, 1:] == -np.inf).all()
+
+    # An in-support gradient must stay finite: the rejected branch injects its
+    # NaN as a constant, so no NaN reaches the differentiable path.
+    g = jax.grad(lambda m2: flow.log_prob(jnp.asarray([40.0, m2, 1000.0, 0.1])))
+    assert np.isfinite(float(g(jnp.asarray(20.0))))
+
+
 def test_unsupported_architecture_rejected():
     with pytest.raises(NotImplementedError):
         flows_mod.create_flow_from_config(

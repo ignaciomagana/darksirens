@@ -90,6 +90,17 @@ class OrderedPositiveN(AbstractBijection):
     """Maps z in R^n -> x[0] > x[1] > ... > x[n-1] > 0 via cumulative exp.
 
     The Jacobian is diagonal, so log|det J| = sum(z).
+
+    Support convention: the image of the forward map is the OPEN cone
+    ``x[0] > x[1] > ... > x[n-1] > 0``, so a point with an equal or reversed
+    pair has no preimage.  ``inverse_and_log_det`` returns NaN there, which is
+    how every stock flowjax bijection signals out-of-support input (``Exp``,
+    ``Sigmoid`` -- both used by the sibling constraints in the same chain --
+    just let ``log``/``logit`` produce NaN) and what
+    ``AbstractTransformed._log_prob`` is built to consume: it ends with
+    ``jnp.where(jnp.isnan(log_prob), -jnp.inf, log_prob)`` under the comment
+    "If log_prob is nan, we assume outside transform support".  So NaN out of
+    here IS -inf density, with no caller change needed.
     """
 
     shape: tuple
@@ -109,14 +120,31 @@ class OrderedPositiveN(AbstractBijection):
         return x, jnp.sum(z)
 
     def inverse_and_log_det(self, x, condition=None):
-        z = jnp.zeros_like(x)
-        z = z.at[-1].set(jnp.log(x[-1]))
-
-        def body(carry, k):
-            return carry.at[k].set(jnp.log(jnp.maximum(x[k] - x[k + 1], 1e-10))), None
-
-        z, _ = jax.lax.scan(body, z, jnp.arange(x.shape[0] - 2, -1, -1))
-        return z, -jnp.sum(z)
+        # The n independent coordinates of the inverse: the consecutive gaps
+        # plus the smallest element.  ``z[k] = log(gaps[k])`` elementwise --
+        # the previous lax.scan carried nothing and was a plain map.
+        gaps = jnp.concatenate([x[:-1] - x[1:], x[-1:]])
+        # Establish SUPPORT FIRST.  Flooring the gaps to 1e-10 handed an equal
+        # or reversed pair a finite z and a finite log|det|, i.e. a
+        # normalised-looking density at a point the forward map cannot reach,
+        # while the Exp/Sigmoid constraints beside it in the same chain
+        # correctly produced NaN -> -inf for their own out-of-support inputs.
+        in_support = jnp.all(gaps > 0)
+        # Keep the DIFFERENTIABLE path finite in the rejected branch: a NaN
+        # there survives a zero cotangent (0 * NaN = NaN) and would poison
+        # reverse-mode AD of the whole likelihood, so the NaN is injected as a
+        # constant by the where, never computed by the log.
+        safe = jnp.where(gaps > 0, gaps, 1.0)
+        # Numerical flooring only now that the gaps are known positive: it
+        # guards log() against underflowed-but-legitimate gaps, and can no
+        # longer manufacture a value outside the support.
+        z = jnp.concatenate(
+            [jnp.log(jnp.maximum(safe[:-1], 1e-10)), jnp.log(safe[-1:])]
+        )
+        return (
+            jnp.where(in_support, z, jnp.nan),
+            jnp.where(in_support, -jnp.sum(z), jnp.nan),
+        )
 
 
 def build_constrained_transform(d: int, constraints: dict) -> AbstractBijection:
@@ -493,6 +521,17 @@ def load_flow_ensemble(
         )
     columns = col_sets.pop()
     _validate_columns(columns)
+    data_dim = dims.pop()
+    if data_dim != len(columns):
+        # Each field is individually plausible, so only the PAIR reveals the
+        # mislabelled checkpoint.  Left unchecked, the likelihood assembles its
+        # design matrix with len(columns) channels and feeds it to a flow that
+        # wants data_dim -- either a shape error much later, or silently
+        # mis-assigned physical quantities where the widths happen to align.
+        raise ValueError(
+            f"Flow config declares data_dim={data_dim} but lists "
+            f"{len(columns)} columns {list(columns)}; the two must agree."
+        )
 
     # Group by exact pytree structure + array-leaf shapes so each group can
     # be stacked on a leading model axis and evaluated with one vmap kernel.
@@ -519,7 +558,7 @@ def load_flow_ensemble(
         paths=kept,
         groups=groups,
         columns=columns,
-        data_dim=dims.pop(),
+        data_dim=data_dim,
     )
     ens.skipped = skipped
     return ens

@@ -56,7 +56,9 @@ setup(
     },
     classifiers=[
       "Programming Language :: Python :: 3",
-      "License :: OSI Approved :: Apache Software License",
+      # Must match the shipped LICENSE file (MIT); the classifier is what
+      # pip/PyPI report, so a stale one mislabels every built wheel.
+      "License :: OSI Approved :: MIT License",
       "Operating System :: OS Independent",
     ],
     python_requires='>=3.11',

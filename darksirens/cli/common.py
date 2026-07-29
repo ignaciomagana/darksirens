@@ -277,8 +277,12 @@ def parse_counterpart_arg(value: list[str] | None) -> tuple[tuple[float, float, 
             _fatal("--counterpart RA must be in radians with 0 <= RA < 2π.")
         if not (-0.5 * np.pi <= dec <= 0.5 * np.pi):
             _fatal("--counterpart Dec must be in radians with -π/2 <= Dec <= π/2.")
-        if z <= 0.0:
-            _fatal("--counterpart redshift Z must be positive.")
+        if not np.isfinite(z) or z <= 0.0:
+            # NaN/inf slip past a bare ``z <= 0``: they reach
+            # ``norm.logpdf(z, counterpart_z, counterpart_dz)`` in
+            # redshift/prior.py and turn the bright-siren term into NaN or
+            # an all--inf likelihood far downstream, after the run started.
+            _fatal("--counterpart redshift Z must be a finite positive number.")
         out.append((ra, dec, z))
     return tuple(out)
 
