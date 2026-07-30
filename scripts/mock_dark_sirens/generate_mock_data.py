@@ -425,12 +425,92 @@ def _mass_spin_pdf(m1: np.ndarray, q: np.ndarray, chi: np.ndarray, pop: Populati
     return p_mass_pair * p_chi
 
 
+SNR_REF_DEFAULT = 11.5
+DETECTION_DATA_MODES = ("true", "observed")
+
+
 def _network_snr(m1: np.ndarray, m2: np.ndarray, z: np.ndarray, dl: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     mchirp = (m1 * m2) ** (3.0 / 5.0) / (m1 + m2) ** (1.0 / 5.0)
     mchirp_det = mchirp * (1.0 + z)
     projection = rng.beta(2.0, 5.0, size=len(np.atleast_1d(m1))) ** 0.5
-    rho_ref = 11.5
+    rho_ref = SNR_REF_DEFAULT
     return rho_ref * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * projection
+
+
+def _snr_from_detector_frame(m1det, m2det, dl, snr_ref: float = SNR_REF_DEFAULT):
+    """``_network_snr`` without the projection latent, from DETECTOR-frame masses.
+
+    ``_network_snr`` takes source-frame masses and multiplies the chirp mass by
+    (1+z), which is identically the detector-frame chirp mass -- so this is the
+    same amplitude model with ``projection = 1``.  Taking detector-frame masses
+    is what lets it be evaluated on OBSERVED quantities, where no redshift is
+    available."""
+    mchirp_det = (m1det * m2det) ** (3.0 / 5.0) / (m1det + m2det) ** (1.0 / 5.0)
+    return snr_ref * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl)
+
+
+def _pe_widths(m1det, m2det, dl, rho, dL_fractional_uncertainty,
+               m1det_fractional_uncertainty, m2det_fractional_uncertainty,
+               sky_uncertainty_deg):
+    """The measurement widths, as a dict, from an SNR that is already fixed.
+
+    ``rho`` must be a quantity the noise draw cannot depend on, or the width and
+    the data it scales become circular.  Callers in ``detection_data="observed"``
+    mode pass the OPTIMAL (projection-free, noise-free) SNR, which is a
+    deterministic function of the source parameters."""
+    frac_dl = (dL_fractional_uncertainty if dL_fractional_uncertainty is not None
+               else np.clip(1.8 / rho, 0.08, 0.35))
+    sigma_ang = np.deg2rad(sky_uncertainty_deg if sky_uncertainty_deg is not None
+                           else np.clip(35.0 / rho, 1.0, 12.0))
+    return {"sigma_dl": frac_dl * np.ones_like(np.asarray(dl, dtype=float)),
+            "sigma_ang": sigma_ang * np.ones_like(np.asarray(dl, dtype=float)),
+            "sig_m1": m1det_fractional_uncertainty * m1det,
+            "sig_m2": m2det_fractional_uncertainty * m2det}
+
+
+def _measure(rng, m1det, m2det, chi, dl, ra, dec, widths):
+    """ONE measurement of a source, in the parameterisation ``_posterior_samples``
+    inverts.  Clips are applied here so that the object a detection statistic is
+    computed from is bit-identically the object the posterior conditions on."""
+    n = np.asarray(dl, dtype=float).shape[0]
+    return {
+        "obs_dL": dl * np.exp(widths["sigma_dl"] * rng.normal(size=n)),
+        "obs_m1det": np.clip(rng.normal(m1det, widths["sig_m1"]), 2.0, None),
+        "obs_m2det": np.clip(rng.normal(m2det, widths["sig_m2"]), 1.0, None),
+        "obs_chieff": np.clip(rng.normal(chi, widths.get("sigma_chi", 0.08)), -1.0, 1.0),
+        "obs_ra": (ra + rng.normal(0.0, widths["sigma_ang"]
+                                   / np.maximum(np.cos(dec), 0.1))) % (2.0 * np.pi),
+        "obs_dec": np.clip(dec + rng.normal(0.0, widths["sigma_ang"]),
+                           -0.5 * np.pi, 0.5 * np.pi),
+        "obs_sigma_dl": widths["sigma_dl"],
+        "obs_sigma_ang": widths["sigma_ang"],
+        "obs_sig_m1": widths["sig_m1"],
+        "obs_sig_m2": widths["sig_m2"],
+    }
+
+
+def _detect_on_observation(rng, m1src, m2src, z, dl, ra, dec, chi, snr_threshold,
+                           snr_ref, dL_fractional_uncertainty,
+                           m1det_fractional_uncertainty,
+                           m2det_fractional_uncertainty, chieff_uncertainty,
+                           sky_uncertainty_deg):
+    """Detection as a DETERMINISTIC FUNCTION OF THE OBSERVED DATA.
+
+    Draws one measurement per source and thresholds the SNR computed from it.
+    Returns ``(detected, observation)``; the caller must hand that same
+    observation to the posterior, which is the whole point -- see the
+    ``detection_data`` discussion in ``_draw_events_until_detected``."""
+    m1det, m2det = m1src * (1.0 + z), m2src * (1.0 + z)
+    rho_opt = _snr_from_detector_frame(m1det, m2det, dl, SNR_REF_DEFAULT)
+    widths = _pe_widths(m1det, m2det, dl, rho_opt, dL_fractional_uncertainty,
+                        m1det_fractional_uncertainty, m2det_fractional_uncertainty,
+                        sky_uncertainty_deg)
+    widths["sigma_chi"] = chieff_uncertainty
+    obs = _measure(rng, m1det, m2det, chi, dl, ra, dec, widths)
+    rho_obs = _snr_from_detector_frame(obs["obs_m1det"], obs["obs_m2det"],
+                                       obs["obs_dL"], snr_ref)
+    obs["obs_snr"] = rho_obs
+    return rho_obs >= snr_threshold, obs
 
 
 def _generate_complete_catalog(
@@ -491,8 +571,50 @@ def _draw_events_until_detected(
     sky_g_max: float = 1.0,
     mark_weight=None,
     mark_g_max: float = 1.0,
+    detection_data: str = "true",
+    snr_ref: float = SNR_REF_DEFAULT,
+    pe_kwargs: dict | None = None,
 ) -> dict[str, np.ndarray]:
     """Draw detected events from the host catalog.
+
+    ``detection_data`` selects WHAT the SNR threshold is applied to.
+
+    * ``"true"`` (default, historical): ``_network_snr`` on the true parameters,
+      with a fresh ``Beta(2,5)**0.5`` projection latent per source.  The
+      posterior is then built from an independent noise draw.
+    * ``"observed"``: one measurement per source, thresholded on the SNR of that
+      measurement, and the same measurement handed to ``_posterior_samples``
+      (returned here under ``obs_*`` keys).
+
+    Why the distinction matters.  Population likelihoods -- darksirens' included
+    -- evaluate ``prod_i [int p(d_i|theta) p(theta|Lambda) dtheta] / mu^N``.  That
+    is the correct detected-set likelihood only when detection is a deterministic
+    function of the data, so that ``1[det(d_i)] = 1`` for observed events and
+    drops out of the numerator.  Under ``"true"`` the detection decision depends
+    on a latent ``w`` that never enters the data, and marginalising it leaves an
+    extra ``P(det|theta)`` INSIDE each event's integral:
+
+        p({d_i} | Lambda, det)
+            = prod_i [int p(d_i|theta) p(theta|Lambda) P(det|theta) dtheta] / mu.
+
+    So ``"true"`` mocks are not drawn from the model the inference assumes.
+    ``"observed"`` restores the premise, and with it the Malmquist scatter across
+    the threshold that a noise-free detection statistic cannot produce.
+
+    The projection latent CANNOT be retained under ``"observed"``: keeping it
+    would leave detection depending on a variable absent from the data, which is
+    a different mis-specification rather than a fix.  Dropping it raises the
+    detected fraction at fixed ``snr_ref`` (measured: 5.75x on the deep mock of
+    the gws-agn matched-mock experiment), so ``snr_ref`` should be recalibrated
+    if the detected population is to be held comparable -- for that mock,
+    ``snr_ref = 6.278`` reproduced the ``"true"`` arm's detected fraction.
+
+    Under ``"observed"`` the PE widths are taken from the OPTIMAL SNR (the
+    projection-free, noise-free amplitude), a deterministic function of the
+    source parameters, because a width derived from the noisy SNR would be
+    circular.
+
+    When ``sky_weight_fn(nx, ny, nz, z)`` is given, the detected sources follow a
 
     When ``sky_weight_fn(nx, ny, nz, z)`` is given, the detected sources follow a
     rate-modulated 3-D field ``g(n̂, z)`` via rejection on the host direction and
@@ -505,6 +627,10 @@ def _draw_events_until_detected(
     given, hosts are additionally accepted ∝ ``mark_weight[host]/mark_g_max`` —
     a *marked-host* preference recoverable by ``--mark_model loglinear``.
     """
+    if detection_data not in DETECTION_DATA_MODES:
+        raise ValueError(f"detection_data must be one of {DETECTION_DATA_MODES}, "
+                         f"got {detection_data!r}")
+    pe_kwargs = dict(pe_kwargs or {})
     kept: list[dict[str, np.ndarray]] = []
     while sum(len(x["z"]) for x in kept) < nobs:
         ntry = max(4 * nobs, 256)
@@ -517,8 +643,19 @@ def _draw_events_until_detected(
         q = _sample_q(rng, m1, pop, use_peak=use_peak)
         m2 = q * m1
         chi = _sample_chieff(rng, ntry, pop)
-        snr = _network_snr(m1, m2, z, dl, rng)
-        det = snr >= snr_threshold
+        obs = None
+        if detection_data == "observed":
+            det, obs = _detect_on_observation(
+                rng, m1, m2, z, dl, ra, dec, chi, snr_threshold, snr_ref,
+                pe_kwargs.get("dL_fractional_uncertainty"),
+                pe_kwargs.get("m1det_fractional_uncertainty", 0.08),
+                pe_kwargs.get("m2det_fractional_uncertainty", 0.10),
+                pe_kwargs.get("chieff_uncertainty", 0.08),
+                pe_kwargs.get("sky_uncertainty_deg"))
+            snr = obs["obs_snr"]
+        else:
+            snr = _network_snr(m1, m2, z, dl, rng)
+            det = snr >= snr_threshold
         # Inject the rate evolution: GW mergers per host galaxy ∝ (1+z)**(gamma-1)
         # — the source-frame rate (1+z)**gamma times the 1/(1+z) clock-dilation
         # factor.  Host galaxies themselves trace the comoving volume dV_c/dz
@@ -541,7 +678,12 @@ def _draw_events_until_detected(
             hh = mark_weight[host_idx]
             det = det & (rng.uniform(size=len(host_idx)) < np.clip(hh / mark_g_max, 0.0, 1.0))
         if np.any(det):
-            kept.append({k: v[det] for k, v in dict(z=z, ra=ra, dec=dec, dl=dl, m1=m1, m2=m2, q=q, chi=chi, snr=snr).items()})
+            block = dict(z=z, ra=ra, dec=dec, dl=dl, m1=m1, m2=m2, q=q, chi=chi, snr=snr)
+            if obs is not None:
+                # Carry the measurement forward so the posterior conditions on
+                # the very data the threshold was applied to.
+                block.update(obs)
+            kept.append({k: v[det] for k, v in block.items()})
     out = {k: np.concatenate([x[k] for x in kept])[:nobs] for k in kept[0]}
     return out
 
@@ -556,6 +698,7 @@ def _posterior_samples(
     chieff_uncertainty: float = 0.08,
     sky_uncertainty_deg: float | None = None,
     pe_centering: str = "observed",
+    use_recorded_observation: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Per-event posterior samples, plus the observation each one conditions on.
 
@@ -611,6 +754,17 @@ def _posterior_samples(
         raise ValueError(
             f"pe_centering must be 'observed' or 'truth', got {pe_centering!r}"
         )
+    if use_recorded_observation:
+        if pe_centering != "observed":
+            raise ValueError("use_recorded_observation requires pe_centering='observed'")
+        missing = [k for k in ("obs_dL", "obs_m1det", "obs_m2det", "obs_chieff",
+                               "obs_ra", "obs_dec", "obs_sigma_dl", "obs_sigma_ang",
+                               "obs_sig_m1", "obs_sig_m2") if k not in truth]
+        if missing:
+            raise ValueError(
+                "use_recorded_observation needs the measurement that the detection "
+                f"threshold was applied to; missing {missing}. Draw the events with "
+                "detection_data='observed'.")
     nobs = len(truth["z"])
     arrays = {"ra": [], "dec": [], "dL": [], "m1det": [], "m2det": [], "chieff": [], "p_pe": []}
     obs_keys = ("obs_dL", "obs_ra", "obs_dec", "obs_m1det", "obs_m2det", "obs_chieff")
@@ -636,17 +790,32 @@ def _posterior_samples(
             obs_values = (truth["dl"][i], truth["ra"][i], truth["dec"][i],
                           m1det, m2det, truth["chi"][i])
         else:
-            # One measurement per event ...
-            dl_obs = float(truth["dl"][i] * np.exp(frac_dl * rng.normal()))
-            ra_obs = float((truth["ra"][i]
-                            + rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1)))
-                           % (2.0 * np.pi))
-            dec_obs = float(np.clip(truth["dec"][i] + rng.normal(0.0, sigma_ang),
-                                    -0.5 * np.pi, 0.5 * np.pi))
-            m1_obs = float(np.clip(rng.normal(m1det, sig_m1), 2.0, None))
-            m2_obs = float(np.clip(rng.normal(m2det, sig_m2), 1.0, None))
-            chi_obs = float(np.clip(rng.normal(truth["chi"][i], chieff_uncertainty),
-                                    -1.0, 1.0))
+            if use_recorded_observation:
+                # The measurement the DETECTION THRESHOLD was applied to.  No new
+                # noise is drawn: reusing it is what makes the selection a
+                # function of the data this posterior conditions on.
+                dl_obs = float(truth["obs_dL"][i])
+                ra_obs = float(truth["obs_ra"][i])
+                dec_obs = float(truth["obs_dec"][i])
+                m1_obs = float(truth["obs_m1det"][i])
+                m2_obs = float(truth["obs_m2det"][i])
+                chi_obs = float(truth["obs_chieff"][i])
+                frac_dl = float(truth["obs_sigma_dl"][i])
+                sigma_ang = float(truth["obs_sigma_ang"][i])
+                sig_m1 = float(truth["obs_sig_m1"][i])
+                sig_m2 = float(truth["obs_sig_m2"][i])
+            else:
+                # One measurement per event ...
+                dl_obs = float(truth["dl"][i] * np.exp(frac_dl * rng.normal()))
+                ra_obs = float((truth["ra"][i]
+                                + rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1)))
+                               % (2.0 * np.pi))
+                dec_obs = float(np.clip(truth["dec"][i] + rng.normal(0.0, sigma_ang),
+                                        -0.5 * np.pi, 0.5 * np.pi))
+                m1_obs = float(np.clip(rng.normal(m1det, sig_m1), 2.0, None))
+                m2_obs = float(np.clip(rng.normal(m2det, sig_m2), 1.0, None))
+                chi_obs = float(np.clip(rng.normal(truth["chi"][i], chieff_uncertainty),
+                                        -1.0, 1.0))
             # ... then the flat-prior posterior GIVEN that measurement.
             dl = rng.lognormal(np.log(dl_obs) + frac_dl**2, frac_dl, nsamp)
             dra = rng.normal(0.0, sigma_ang / max(np.cos(dec_obs), 0.1), nsamp)
@@ -733,9 +902,19 @@ def _draw_selection_batch(
     snr_threshold: float,
     proposal: str = "population",
     m1det_range: tuple[float, float] = _M1DET_RANGE,
+    detection_data: str = "true",
+    snr_ref: float = SNR_REF_DEFAULT,
+    pe_kwargs: dict | None = None,
 ) -> dict[str, np.ndarray | int]:
     """Numpy reference selection draw (the JAX path in ``_selection_injections``
-    mirrors this exactly; tests pin this implementation)."""
+    mirrors this exactly; tests pin this implementation).
+
+    ``detection_data`` must match the events': mu(theta) is the probability that
+    a source at theta passes the SAME rule the data passed.  Stored coordinates
+    and ``pdraw`` stay the TRUE parameters in both modes -- mu is an integral
+    over true parameters, and only the detection decision sees the noise.  This
+    is what a real injection campaign does: true injected parameters, recovery
+    decided on noisy data."""
     z = _sample_uniform_comoving_z(rng, grids, ndraw)
     ra, dec = _sample_sky(rng, ndraw)
     dl = _interp_dl(z, grids)
@@ -768,8 +947,19 @@ def _draw_selection_batch(
     else:
         raise ValueError(f"Unknown proposal {proposal!r}; expected one of {SELECTION_PROPOSALS}")
     m2src = q * m1src
-    snr = _network_snr(m1src, m2src, z, dl, rng)
-    det = snr >= snr_threshold
+    if detection_data == "observed":
+        pk = dict(pe_kwargs or {})
+        det, _obs = _detect_on_observation(
+            rng, m1src, m2src, z, dl, ra, dec, chi, snr_threshold, snr_ref,
+            pk.get("dL_fractional_uncertainty"),
+            pk.get("m1det_fractional_uncertainty", 0.08),
+            pk.get("m2det_fractional_uncertainty", 0.10),
+            pk.get("chieff_uncertainty", 0.08), pk.get("sky_uncertainty_deg"))
+    elif detection_data == "true":
+        det = _network_snr(m1src, m2src, z, dl, rng) >= snr_threshold
+    else:
+        raise ValueError(f"detection_data must be one of {DETECTION_DATA_MODES}, "
+                         f"got {detection_data!r}")
 
     p_draw = _selection_pdraw(proposal, m1src, q, chi, z, grids, pop, m1det_range)
 
@@ -909,16 +1099,30 @@ def _make_population_mass_spin_sampler(pop: PopulationConfig):
 def _make_selection_kernel(grids: dict[str, np.ndarray], pop: PopulationConfig,
                            snr_threshold: float, proposal: str,
                            m1det_range: tuple[float, float] = _M1DET_RANGE,
-                           extra_detect=None):
+                           extra_detect=None, detection_data: str = "true",
+                           snr_ref: float = SNR_REF_DEFAULT,
+                           pe_kwargs: dict | None = None):
     """Return ``jit(vmap(sample_one))`` mapping a batch of PRNG keys to per-injection
     (m1src, q, chi, z, ra, dec, dL, det).  ``extra_detect(state) -> bool array`` adds a
-    further per-injection cut (e.g. the bright-siren EM selection)."""
+    further per-injection cut (e.g. the bright-siren EM selection).
+
+    ``detection_data="observed"`` mirrors the numpy reference
+    ``_draw_selection_batch``: a measurement is drawn per injection and the
+    threshold is applied to ITS SNR, while the returned coordinates stay the
+    TRUE parameters."""
     z_grid = jnp.asarray(grids["z"])
     dl_grid = jnp.asarray(grids["dl"])
     vc_cdf = jnp.asarray(grids["vc_cdf"])
     m1lo, m1hi = m1det_range
     uses_population = proposal in ("population", "population+uniform")
     samplers = _make_population_mass_spin_sampler(pop) if uses_population else None
+    if detection_data not in DETECTION_DATA_MODES:
+        raise ValueError(f"detection_data must be one of {DETECTION_DATA_MODES}, "
+                         f"got {detection_data!r}")
+    _pk = dict(pe_kwargs or {})
+    frac_dl_fixed = _pk.get("dL_fractional_uncertainty")
+    sig_m1_frac = _pk.get("m1det_fractional_uncertainty", 0.08)
+    sig_m2_frac = _pk.get("m2det_fractional_uncertainty", 0.10)
 
     def sample_one(key):
         ks = jax.random.split(key, 7)
@@ -950,9 +1154,22 @@ def _make_selection_kernel(grids: dict[str, np.ndarray], pop: PopulationConfig,
                 q = jnp.where(use_pop, q, q_u)
                 chi = jnp.where(use_pop, chi, chi_u)
         m2src = q * m1src
-        mchirp_det = (m1src * m2src) ** 0.6 / (m1src + m2src) ** 0.2 * (1.0 + z)
-        proj = jnp.sqrt(jax.random.beta(ks[6], 2.0, 5.0))
-        snr = 11.5 * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * proj
+        if detection_data == "observed":
+            m1det, m2det = m1src * (1.0 + z), m2src * (1.0 + z)
+            mchirp_det = (m1det * m2det) ** 0.6 / (m1det + m2det) ** 0.2
+            rho_opt = SNR_REF_DEFAULT * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl)
+            s_dl = (jnp.asarray(frac_dl_fixed) if frac_dl_fixed is not None
+                    else jnp.clip(1.8 / rho_opt, 0.08, 0.35))
+            kn = jax.random.split(jax.random.fold_in(key, 909), 3)
+            dl_obs = dl * jnp.exp(s_dl * jax.random.normal(kn[0]))
+            m1_obs = jnp.clip(m1det + sig_m1_frac * m1det * jax.random.normal(kn[1]), 2.0, None)
+            m2_obs = jnp.clip(m2det + sig_m2_frac * m2det * jax.random.normal(kn[2]), 1.0, None)
+            mchirp_obs = (m1_obs * m2_obs) ** 0.6 / (m1_obs + m2_obs) ** 0.2
+            snr = snr_ref * (mchirp_obs / 30.0) ** (5.0 / 6.0) * (1000.0 / dl_obs)
+        else:
+            mchirp_det = (m1src * m2src) ** 0.6 / (m1src + m2src) ** 0.2 * (1.0 + z)
+            proj = jnp.sqrt(jax.random.beta(ks[6], 2.0, 5.0))
+            snr = SNR_REF_DEFAULT * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * proj
         det = snr >= snr_threshold
         state = {"m1src": m1src, "q": q, "chi": chi, "z": z, "ra": ra, "dec": dec, "dL": dl}
         if extra_detect is not None:
@@ -1028,8 +1245,13 @@ def _selection_injections(
     verbose: bool = False,
     proposal: str = "population",
     m1det_range: tuple[float, float] = _M1DET_RANGE,
+    detection_data: str = "true",
+    snr_ref: float = SNR_REF_DEFAULT,
+    pe_kwargs: dict | None = None,
 ) -> dict[str, np.ndarray | int]:
-    kernel = _make_selection_kernel(grids, pop, float(snr_threshold), proposal, m1det_range)
+    kernel = _make_selection_kernel(grids, pop, float(snr_threshold), proposal,
+                                    m1det_range, detection_data=detection_data,
+                                    snr_ref=snr_ref, pe_kwargs=pe_kwargs)
     return _run_selection_chunks(
         rng, ndraw, grids, pop, proposal, batch_size, kernel,
         target_detections=target_detections, verbose=verbose,
@@ -1191,21 +1413,33 @@ def write_mock_data(args: argparse.Namespace) -> None:
     else:
         sky_weight_fn = None
 
+    # The measurement model, shared by the detection rule and the posterior when
+    # --detection-data observed: passing one dict keeps them from drifting apart.
+    pe_kwargs = {
+        "dL_fractional_uncertainty": args.dL_fractional_uncertainty,
+        "m1det_fractional_uncertainty": args.m1det_fractional_uncertainty,
+        "m2det_fractional_uncertainty": args.m2det_fractional_uncertainty,
+        "chieff_uncertainty": args.chieff_uncertainty,
+        "sky_uncertainty_deg": args.sky_uncertainty_deg,
+    }
+    if args.detection_data == "observed" and args.pe_centering != "observed":
+        raise SystemExit("--detection-data observed requires --pe-centering observed: "
+                         "the point of the mode is that the posterior conditions on "
+                         "the measurement the threshold was applied to.")
     truth = _draw_events_until_detected(
         rng, args.nobs, complete, grids, pop, args.snr_threshold,
         sky_weight_fn=sky_weight_fn, sky_g_max=sky_g_max,
         mark_weight=mark_weight, mark_g_max=mark_g_max,
+        detection_data=args.detection_data, snr_ref=args.snr_ref,
+        pe_kwargs=pe_kwargs,
     )
     post, pe_observations = _posterior_samples(
         rng,
         truth,
         args.nsamp,
-        dL_fractional_uncertainty=args.dL_fractional_uncertainty,
-        m1det_fractional_uncertainty=args.m1det_fractional_uncertainty,
-        m2det_fractional_uncertainty=args.m2det_fractional_uncertainty,
-        chieff_uncertainty=args.chieff_uncertainty,
-        sky_uncertainty_deg=args.sky_uncertainty_deg,
+        **pe_kwargs,
         pe_centering=args.pe_centering,
+        use_recorded_observation=(args.detection_data == "observed"),
     )
     z_pe = np.interp(post["dL"], grids["dl"], grids["z"])
     post["m1src"] = post["m1det"] / (1.0 + z_pe)
@@ -1230,6 +1464,9 @@ def write_mock_data(args: argparse.Namespace) -> None:
         target_detections=selection_target_detections,
         verbose=args.verbose,
         proposal=args.proposal,
+        detection_data=args.detection_data,
+        snr_ref=args.snr_ref,
+        pe_kwargs=pe_kwargs,
     )
 
     inv_pdraw = 1.0 / np.asarray(sel["pdraw"])
@@ -1242,6 +1479,8 @@ def write_mock_data(args: argparse.Namespace) -> None:
         "survey": asdict(survey),
         "snr_threshold": args.snr_threshold,
         "selection_proposal": args.proposal,
+        "detection_data": args.detection_data,
+        "snr_ref": args.snr_ref,
         "pop_model_for_inference": "powerlaw+peak",
         "shared_beta_for_inference": True,
         "shared_spin_for_inference": True,
@@ -1290,6 +1529,8 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["chi_eff_in_p_pe"] = True
         f.attrs["chi_eff_amax"] = 0.99
         f.attrs["pe_centering"] = str(args.pe_centering)
+        f.attrs["detection_data"] = str(args.detection_data)
+        f.attrs["snr_ref"] = float(args.snr_ref)
         f.attrs["pop_model"] = "powerlaw+peak"
         f.attrs["shared_beta"] = True
         f.attrs["shared_spin"] = True
@@ -1316,6 +1557,8 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["ndraw"] = int(sel["Ndraw"])
         f.attrs["Neff"] = selection_neff
         f.attrs["selection_proposal"] = args.proposal
+        f.attrs["detection_data"] = str(args.detection_data)
+        f.attrs["snr_ref"] = float(args.snr_ref)
         f.attrs["chi_eff_swap_applied"] = True
         f.attrs["chi_eff_amax"] = 0.99
         f.attrs["cosmology_H0"] = float(args.H0)
@@ -1405,6 +1648,25 @@ def parse_args() -> argparse.Namespace:
               "clouds centred on the true parameters; those are not the posterior of any "
               "measurement and bias the recovered distance scale at O(sigma^2). Use it "
               "only to reproduce mocks generated before this flag existed."))
+    parser.add_argument(
+        "--detection-data", choices=DETECTION_DATA_MODES, default="true",
+        help=("What the SNR threshold is applied to. 'true' (default, unchanged) "
+              "thresholds the true-parameter SNR with an independent Beta(2,5)**0.5 "
+              "projection latent, and the posterior then conditions on a SEPARATE "
+              "noise draw -- so detection depends on a variable that never enters "
+              "the data, which is not the model a population likelihood assumes "
+              "(it leaves an extra P(det|theta) inside each event's integral). "
+              "'observed' draws one measurement per source, thresholds ITS SNR, and "
+              "hands that same measurement to the posterior, so detection is a "
+              "deterministic function of the data. 'observed' drops the projection "
+              "latent (keeping it would reintroduce the same defect), which raises "
+              "the detected fraction ~5.8x at fixed --snr-ref; recalibrate --snr-ref "
+              "if the detected population must stay comparable. Left non-default "
+              "because it changes the event population of every existing mock."))
+    parser.add_argument("--snr-ref", type=_positive_float, default=SNR_REF_DEFAULT,
+                        help=("Amplitude scale of the detection statistic under "
+                              "--detection-data observed. Ignored by 'true', which "
+                              "pins the historical 11.5."))
     parser.add_argument("--dL-fractional-uncertainty", type=_positive_float, default=None)
     parser.add_argument("--m1det-fractional-uncertainty", type=_positive_float, default=0.08)
     parser.add_argument("--m2det-fractional-uncertainty", type=_positive_float, default=0.10)
