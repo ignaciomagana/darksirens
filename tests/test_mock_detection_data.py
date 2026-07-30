@@ -153,6 +153,36 @@ def test_dropping_the_projection_raises_the_detected_fraction(setup):
     assert f_obs > 3.0 * f_true
 
 
+def test_write_mock_data_end_to_end_observed(tmp_path, monkeypatch):
+    """The full CLI path in observed mode: the events file must be writable
+    (truth carries the recorded measurement AND the posterior echoes it -- the
+    obs_* datasets appear exactly once), and every stored event must pass the
+    threshold on its own recorded observation."""
+    import h5py
+
+    monkeypatch.setattr(sys, "argv", [
+        "generate_mock_data.py", "--outdir", str(tmp_path), "--seed", "5",
+        "--n-galaxies", "4000", "--nobs", "3", "--nsamp", "16",
+        "--nselection", "4000", "--nside", "8",
+        "--detection-data", "observed", "--snr-ref", "6.278"])
+    gmd.write_mock_data(gmd.parse_args())
+
+    with h5py.File(tmp_path / "mock_gw_events.h5") as f:
+        assert f.attrs["detection_data"] == "observed"
+        assert float(f.attrs["snr_ref"]) == 6.278
+        tg = f["truth"]
+        for k in ("obs_dL", "obs_m1det", "obs_m2det", "obs_chieff", "obs_ra",
+                  "obs_dec", "obs_sigma_dl", "obs_snr"):
+            assert k in tg, k
+        rho = gmd._snr_from_detector_frame(
+            tg["obs_m1det"][...], tg["obs_m2det"][...], tg["obs_dL"][...], 6.278)
+        np.testing.assert_allclose(rho, tg["obs_snr"][...], rtol=1e-12)
+        assert np.all(rho >= 8.0)
+
+    with h5py.File(tmp_path / "mock_gw_selection.h5") as f:
+        assert f.attrs["detection_data"] == "observed"
+
+
 # --------------------------------------------------------------------------
 # (c) the injection campaign applies the same rule, on TRUE coordinates
 # --------------------------------------------------------------------------

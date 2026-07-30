@@ -615,8 +615,6 @@ def _draw_events_until_detected(
     circular.
 
     When ``sky_weight_fn(nx, ny, nz, z)`` is given, the detected sources follow a
-
-    When ``sky_weight_fn(nx, ny, nz, z)`` is given, the detected sources follow a
     rate-modulated 3-D field ``g(n̂, z)`` via rejection on the host direction and
     redshift (accept ∝ ``g / sky_g_max``).  The host galaxy catalog and the
     selection injection set stay isotropic, so this injects a *pure source-rate*
@@ -1547,7 +1545,16 @@ def write_mock_data(args: argparse.Namespace) -> None:
             truth_group.create_dataset(key, data=val)
         # The measurements the posteriors condition on: provenance, and what a
         # closure test needs to separate measurement scatter from estimator bias.
+        # Under --detection-data observed the measurement already sits in
+        # ``truth`` (the detection step recorded it and the posterior
+        # conditioned on that same record), so those keys must not be written
+        # twice -- and if both sides hold a value it must be the same one.
         for key, val in pe_observations.items():
+            if key in truth:
+                assert np.array_equal(np.asarray(truth[key]), np.asarray(val)), (
+                    f"truth[{key!r}] disagrees with the observation the posterior "
+                    "conditioned on; detection and PE have drifted apart")
+                continue
             truth_group.create_dataset(key, data=val)
 
     sel_path = out / "mock_gw_selection.h5"
