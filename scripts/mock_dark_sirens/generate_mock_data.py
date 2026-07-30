@@ -555,26 +555,118 @@ def _posterior_samples(
     m2det_fractional_uncertainty: float = 0.10,
     chieff_uncertainty: float = 0.08,
     sky_uncertainty_deg: float | None = None,
-) -> dict[str, np.ndarray]:
+    pe_centering: str = "observed",
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Per-event posterior samples, plus the observation each one conditions on.
+
+    The mock's per-event term is an importance average over these samples with
+    ``p_pe`` as the sampling density, so the samples must be draws from the
+    posterior of an ACTUAL measurement under the prior ``p_pe`` declares.
+
+    ``pe_centering="observed"`` (default) builds them that way: one noisy
+    observation per event, then samples of the flat-prior posterior given it.
+
+    * Distance carries multiplicative noise, ``ln d_obs ~ N(ln d_true, s)``.  At
+      fixed ``d_obs`` the likelihood as a function of the true distance is
+      ``exp(-(ln d_obs - ln dL)^2 / 2 s^2)`` (its ``1/d_obs`` prefactor is
+      constant in ``dL``), so with a FLAT prior in ``dL`` the posterior is
+      ``p(dL | d_obs) ∝ exp(-(ln dL - ln d_obs)^2 / 2 s^2)``.  Substituting
+      ``u = ln dL`` picks up the volume factor ``e^u``, giving
+      ``u ~ N(ln d_obs + s^2, s^2)`` — i.e. draws are lognormal about ``d_obs``
+      shifted by ``+s^2``, NOT about the truth.
+    * The additively-measured quantities (masses, chi_eff, sky angles) have
+      Gaussian likelihoods of known width, so their flat-prior posteriors are
+      Gaussians centred on the OBSERVED value with that same width.
+
+    ``pe_centering="truth"`` reproduces the historical behaviour bit-for-bit
+    (same draw order, same values for a given ``rng`` state): clouds centred on
+    the true parameters, with the distance cloud's log-mean shifted by
+    ``-s^2/2``.  Those are not the posterior of any measurement, and using them
+    as if they were biases the recovered distance scale at O(s^2) — for the
+    distance channel that is a low bias in H0 of order ``s^2`` in fractional
+    terms, which is why the flag exists only for reproducing older mocks.
+
+    ``s`` is treated as known per event (taken from the true parameters) on both
+    the measurement and the posterior side, which keeps the Gaussian/lognormal
+    conjugacy exact; real parameter estimation infers the width from the data.
+
+    Not addressed here: ``p_pe = 1`` declares a prior flat in the drawn
+    variables ``(m1det, m2det, dL, chi_eff, ra, dec)``.  Whether the consuming
+    likelihood's canonical basis uses ``q = m2det/m1det`` instead of ``m2det``
+    — which would introduce an ``m1det`` Jacobian into ``p_pe`` — is a separate
+    convention question this change does not touch.
+
+    Returns
+    -------
+    samples : dict
+        Flat ``nobs * nsamp`` arrays in the gwcat PE layout, plus ``p_pe``.
+    observations : dict
+        Length-``nobs`` arrays of the per-event observed values the posteriors
+        condition on (``obs_dL``, ``obs_ra``, ``obs_dec``, ``obs_m1det``,
+        ``obs_m2det``, ``obs_chieff``).  Recorded for provenance and so tests
+        can compare the samples against the analytic posterior.  Under
+        ``pe_centering="truth"`` these are the true values.
+    """
+    if pe_centering not in ("observed", "truth"):
+        raise ValueError(
+            f"pe_centering must be 'observed' or 'truth', got {pe_centering!r}"
+        )
     nobs = len(truth["z"])
     arrays = {"ra": [], "dec": [], "dL": [], "m1det": [], "m2det": [], "chieff": [], "p_pe": []}
+    obs_keys = ("obs_dL", "obs_ra", "obs_dec", "obs_m1det", "obs_m2det", "obs_chieff")
+    observations = {k: np.empty(nobs, dtype=float) for k in obs_keys}
     for i in range(nobs):
         rho = truth["snr"][i]
         frac_dl = dL_fractional_uncertainty if dL_fractional_uncertainty is not None else np.clip(1.8 / rho, 0.08, 0.35)
-        dl = rng.lognormal(np.log(truth["dl"][i]) - 0.5 * frac_dl**2, frac_dl, nsamp)
         sigma_ang = np.deg2rad(sky_uncertainty_deg if sky_uncertainty_deg is not None else np.clip(35.0 / rho, 1.0, 12.0))
-        dra = rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1), nsamp)
-        ddec = rng.normal(0.0, sigma_ang, nsamp)
-        arrays["ra"].append((truth["ra"][i] + dra) % (2.0 * np.pi))
-        arrays["dec"].append(np.clip(truth["dec"][i] + ddec, -0.5 * np.pi, 0.5 * np.pi))
         m1det = truth["m1"][i] * (1.0 + truth["z"][i])
         m2det = truth["m2"][i] * (1.0 + truth["z"][i])
-        arrays["m1det"].append(np.clip(rng.normal(m1det, m1det_fractional_uncertainty * m1det, nsamp), 2.0, None))
-        arrays["m2det"].append(np.clip(rng.normal(m2det, m2det_fractional_uncertainty * m2det, nsamp), 1.0, None))
-        arrays["chieff"].append(np.clip(rng.normal(truth["chi"][i], chieff_uncertainty, nsamp), -1.0, 1.0))
+        sig_m1 = m1det_fractional_uncertainty * m1det
+        sig_m2 = m2det_fractional_uncertainty * m2det
+
+        if pe_centering == "truth":
+            # Historical path: draw order preserved so old mocks reproduce exactly.
+            dl = rng.lognormal(np.log(truth["dl"][i]) - 0.5 * frac_dl**2, frac_dl, nsamp)
+            dra = rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1), nsamp)
+            ddec = rng.normal(0.0, sigma_ang, nsamp)
+            ra_centre, dec_centre = truth["ra"][i], truth["dec"][i]
+            m1_draws = rng.normal(m1det, sig_m1, nsamp)
+            m2_draws = rng.normal(m2det, sig_m2, nsamp)
+            chi_draws = rng.normal(truth["chi"][i], chieff_uncertainty, nsamp)
+            obs_values = (truth["dl"][i], truth["ra"][i], truth["dec"][i],
+                          m1det, m2det, truth["chi"][i])
+        else:
+            # One measurement per event ...
+            dl_obs = float(truth["dl"][i] * np.exp(frac_dl * rng.normal()))
+            ra_obs = float((truth["ra"][i]
+                            + rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1)))
+                           % (2.0 * np.pi))
+            dec_obs = float(np.clip(truth["dec"][i] + rng.normal(0.0, sigma_ang),
+                                    -0.5 * np.pi, 0.5 * np.pi))
+            m1_obs = float(np.clip(rng.normal(m1det, sig_m1), 2.0, None))
+            m2_obs = float(np.clip(rng.normal(m2det, sig_m2), 1.0, None))
+            chi_obs = float(np.clip(rng.normal(truth["chi"][i], chieff_uncertainty),
+                                    -1.0, 1.0))
+            # ... then the flat-prior posterior GIVEN that measurement.
+            dl = rng.lognormal(np.log(dl_obs) + frac_dl**2, frac_dl, nsamp)
+            dra = rng.normal(0.0, sigma_ang / max(np.cos(dec_obs), 0.1), nsamp)
+            ddec = rng.normal(0.0, sigma_ang, nsamp)
+            ra_centre, dec_centre = ra_obs, dec_obs
+            m1_draws = rng.normal(m1_obs, sig_m1, nsamp)
+            m2_draws = rng.normal(m2_obs, sig_m2, nsamp)
+            chi_draws = rng.normal(chi_obs, chieff_uncertainty, nsamp)
+            obs_values = (dl_obs, ra_obs, dec_obs, m1_obs, m2_obs, chi_obs)
+
+        arrays["ra"].append((ra_centre + dra) % (2.0 * np.pi))
+        arrays["dec"].append(np.clip(dec_centre + ddec, -0.5 * np.pi, 0.5 * np.pi))
         arrays["dL"].append(dl)
+        arrays["m1det"].append(np.clip(m1_draws, 2.0, None))
+        arrays["m2det"].append(np.clip(m2_draws, 1.0, None))
+        arrays["chieff"].append(np.clip(chi_draws, -1.0, 1.0))
         arrays["p_pe"].append(np.ones(nsamp))
-    return {k: np.concatenate(v) for k, v in arrays.items()}
+        for key, val in zip(obs_keys, obs_values):
+            observations[key][i] = val
+    return {k: np.concatenate(v) for k, v in arrays.items()}, observations
 
 
 _M1DET_RANGE: tuple[float, float] = (2.0, 200.0)
@@ -1104,7 +1196,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
         sky_weight_fn=sky_weight_fn, sky_g_max=sky_g_max,
         mark_weight=mark_weight, mark_g_max=mark_g_max,
     )
-    post = _posterior_samples(
+    post, pe_observations = _posterior_samples(
         rng,
         truth,
         args.nsamp,
@@ -1113,6 +1205,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
         m2det_fractional_uncertainty=args.m2det_fractional_uncertainty,
         chieff_uncertainty=args.chieff_uncertainty,
         sky_uncertainty_deg=args.sky_uncertainty_deg,
+        pe_centering=args.pe_centering,
     )
     z_pe = np.interp(post["dL"], grids["dl"], grids["z"])
     post["m1src"] = post["m1det"] / (1.0 + z_pe)
@@ -1196,6 +1289,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["pe_cosmology_Om0"] = float(args.Om0)
         f.attrs["chi_eff_in_p_pe"] = True
         f.attrs["chi_eff_amax"] = 0.99
+        f.attrs["pe_centering"] = str(args.pe_centering)
         f.attrs["pop_model"] = "powerlaw+peak"
         f.attrs["shared_beta"] = True
         f.attrs["shared_spin"] = True
@@ -1209,6 +1303,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
             f.create_dataset(key, data=val, compression="gzip", shuffle=True)
         truth_group = f.create_group("truth")
         for key, val in truth.items():
+            truth_group.create_dataset(key, data=val)
+        # The measurements the posteriors condition on: provenance, and what a
+        # closure test needs to separate measurement scatter from estimator bias.
+        for key, val in pe_observations.items():
             truth_group.create_dataset(key, data=val)
 
     sel_path = out / "mock_gw_selection.h5"
@@ -1299,6 +1397,14 @@ def parse_args() -> argparse.Namespace:
     selection_targets = parser.add_mutually_exclusive_group()
     selection_targets.add_argument("--selection-target-detections", type=_positive_int, default=None)
     selection_targets.add_argument("--selection-per-observation-factor", type=_positive_float, default=None)
+    parser.add_argument(
+        "--pe-centering", choices=("observed", "truth"), default="observed",
+        help=("How per-event posterior samples are built. 'observed' (default) draws one "
+              "noisy measurement per event and then samples the flat-prior posterior "
+              "given it, which is what p_pe=1 declares. 'truth' reproduces the historical "
+              "clouds centred on the true parameters; those are not the posterior of any "
+              "measurement and bias the recovered distance scale at O(sigma^2). Use it "
+              "only to reproduce mocks generated before this flag existed."))
     parser.add_argument("--dL-fractional-uncertainty", type=_positive_float, default=None)
     parser.add_argument("--m1det-fractional-uncertainty", type=_positive_float, default=0.08)
     parser.add_argument("--m2det-fractional-uncertainty", type=_positive_float, default=0.10)
