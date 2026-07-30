@@ -471,19 +471,47 @@ def _pe_widths(m1det, m2det, dl, rho, dL_fractional_uncertainty,
 def _measure(rng, m1det, m2det, chi, dl, ra, dec, widths):
     """ONE measurement of a source, in the parameterisation ``_posterior_samples``
     inverts.  Clips are applied here so that the object a detection statistic is
-    computed from is bit-identically the object the posterior conditions on."""
+    computed from is bit-identically the object the posterior conditions on.
+
+    SEQUENTIAL SKY WIDTH: when ``widths["sigma_ang"]`` is None, the masses and
+    the distance are measured FIRST and the sky width is computed from those
+    OBSERVED values -- ``clip(35 / rho, 1, 12) deg`` with ``rho`` the
+    projection-free amplitude ``_snr_from_detector_frame`` of the observed
+    detector-frame masses and distance on the ``SNR_REF_DEFAULT`` scale --
+    before the sky offsets are drawn.  ``obs_sigma_ang`` is then a deterministic
+    function of the RECORDED data, so a fixed-width sky posterior built from it
+    is exact.  A TRUTH-derived sky width is not: ``sigma_ang ∝ dL/Mc_det^(5/6)``
+    is itself an observable carrying distance information, and freezing it at
+    its latent true value breaks the score identity of the detected-set
+    likelihood.  Measured on the gws-agn matched-mock campaign (20 x 1000-event
+    realisations, exact-likelihood oracle): the truth-derived width biases the
+    recovered H0 by -0.49 +- 0.08 km/s/Mpc even under the EXACT fixed-width
+    likelihood; deriving the width from the observed amplitude closes the bias
+    (-0.06 +- 0.07 over 20 fresh 1000-event realisations).  The mass widths ``frac * m_det,true`` share the same
+    latent structure at a much smaller measured level (-0.05 km/s/Mpc); they
+    are kept and documented rather than restructured here."""
     n = np.asarray(dl, dtype=float).shape[0]
+    obs_dL = dl * np.exp(widths["sigma_dl"] * rng.normal(size=n))
+    obs_m1det = np.clip(rng.normal(m1det, widths["sig_m1"]), 2.0, None)
+    obs_m2det = np.clip(rng.normal(m2det, widths["sig_m2"]), 1.0, None)
+    sigma_ang = widths["sigma_ang"]
+    if sigma_ang is None:
+        rho_obs_opt = _snr_from_detector_frame(obs_m1det, obs_m2det, obs_dL,
+                                               SNR_REF_DEFAULT)
+        sigma_ang = np.deg2rad(np.clip(35.0 / rho_obs_opt, 1.0, 12.0))
+    else:
+        sigma_ang = np.asarray(sigma_ang, dtype=float) * np.ones(n)
     return {
-        "obs_dL": dl * np.exp(widths["sigma_dl"] * rng.normal(size=n)),
-        "obs_m1det": np.clip(rng.normal(m1det, widths["sig_m1"]), 2.0, None),
-        "obs_m2det": np.clip(rng.normal(m2det, widths["sig_m2"]), 1.0, None),
+        "obs_dL": obs_dL,
+        "obs_m1det": obs_m1det,
+        "obs_m2det": obs_m2det,
         "obs_chieff": np.clip(rng.normal(chi, widths.get("sigma_chi", 0.08)), -1.0, 1.0),
-        "obs_ra": (ra + rng.normal(0.0, widths["sigma_ang"]
+        "obs_ra": (ra + rng.normal(0.0, sigma_ang
                                    / np.maximum(np.cos(dec), 0.1))) % (2.0 * np.pi),
-        "obs_dec": np.clip(dec + rng.normal(0.0, widths["sigma_ang"]),
+        "obs_dec": np.clip(dec + rng.normal(0.0, sigma_ang),
                            -0.5 * np.pi, 0.5 * np.pi),
         "obs_sigma_dl": widths["sigma_dl"],
-        "obs_sigma_ang": widths["sigma_ang"],
+        "obs_sigma_ang": sigma_ang,
         "obs_sig_m1": widths["sig_m1"],
         "obs_sig_m2": widths["sig_m2"],
     }
@@ -499,12 +527,23 @@ def _detect_on_observation(rng, m1src, m2src, z, dl, ra, dec, chi, snr_threshold
     Draws one measurement per source and thresholds the SNR computed from it.
     Returns ``(detected, observation)``; the caller must hand that same
     observation to the posterior, which is the whole point -- see the
-    ``detection_data`` discussion in ``_draw_events_until_detected``."""
+    ``detection_data`` discussion in ``_draw_events_until_detected``.
+
+    The sky width is NOT taken from the optimal (truth-derived) SNR: it is
+    derived sequentially from the observed masses and distance inside
+    ``_measure`` (``widths["sigma_ang"] = None``), so ``obs_sigma_ang`` is a
+    function of the recorded data and the fixed-width sky posterior is exact.
+    An explicit ``sky_uncertainty_deg`` (a data-independent constant) is passed
+    through unchanged."""
     m1det, m2det = m1src * (1.0 + z), m2src * (1.0 + z)
     rho_opt = _snr_from_detector_frame(m1det, m2det, dl, SNR_REF_DEFAULT)
     widths = _pe_widths(m1det, m2det, dl, rho_opt, dL_fractional_uncertainty,
                         m1det_fractional_uncertainty, m2det_fractional_uncertainty,
                         sky_uncertainty_deg)
+    if sky_uncertainty_deg is None:
+        # Sequential observable width (see _measure): the truth-derived
+        # sigma_ang is a latent-dependent observable and biases H0 low.
+        widths["sigma_ang"] = None
     widths["sigma_chi"] = chieff_uncertainty
     obs = _measure(rng, m1det, m2det, chi, dl, ra, dec, widths)
     rho_obs = _snr_from_detector_frame(obs["obs_m1det"], obs["obs_m2det"],
@@ -609,10 +648,16 @@ def _draw_events_until_detected(
     if the detected population is to be held comparable -- for that mock,
     ``snr_ref = 6.278`` reproduced the ``"true"`` arm's detected fraction.
 
-    Under ``"observed"`` the PE widths are taken from the OPTIMAL SNR (the
-    projection-free, noise-free amplitude), a deterministic function of the
-    source parameters, because a width derived from the noisy SNR would be
-    circular.
+    Under ``"observed"`` the distance/mass PE widths are taken from the OPTIMAL
+    SNR (the projection-free, noise-free amplitude), a deterministic function
+    of the source parameters; the SKY width is derived sequentially from the
+    OBSERVED masses and distance (see ``_measure``), because a truth-derived
+    sky width is itself a latent-dependent observable: it carries
+    ``dL/Mc_det^(5/6)`` information that a fixed-width posterior cannot
+    represent, and freezing it at the true value was measured to bias the
+    recovered H0 by -0.49 +- 0.08 km/s/Mpc (gws-agn matched-mock campaign,
+    exact-likelihood oracle, 20 x 1000 events) even with everything else
+    matched.
 
     When ``sky_weight_fn(nx, ny, nz, z)`` is given, the detected sources follow a
     rate-modulated 3-D field ``g(n̂, z)`` via rejection on the host direction and
