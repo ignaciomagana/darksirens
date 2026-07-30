@@ -233,3 +233,43 @@ def test_injection_true_mode_unchanged(setup):
     assert a["n_detected"] == b["n_detected"]
     np.testing.assert_array_equal(a["dL"], b["dL"])
     np.testing.assert_array_equal(a["pdraw"], b["pdraw"])
+
+
+# --------------------------------------------------------------------------
+# (d) the sky width is a function of the RECORDED data, not of the latent truth
+# --------------------------------------------------------------------------
+def test_sigma_ang_is_a_function_of_the_recorded_observation(setup):
+    """obs_sigma_ang must be recomputable from the stored observed masses and
+    distance alone -- the property that makes the fixed-width sky posterior the
+    exact flat-prior posterior of the recorded measurement."""
+    truth = _obs_events(setup)
+    rho = gmd._snr_from_detector_frame(truth["obs_m1det"], truth["obs_m2det"],
+                                       truth["obs_dL"], gmd.SNR_REF_DEFAULT)
+    want = np.deg2rad(np.clip(35.0 / rho, 1.0, 12.0))
+    np.testing.assert_allclose(truth["obs_sigma_ang"], want, rtol=1e-12)
+
+
+def test_sigma_ang_is_not_derived_from_the_latent_truth(setup):
+    """Regression against the truth-derived width: sigma_ang computed from the
+    TRUE parameters differs from the stored one wherever the clip is inactive.
+    A latent-dependent width is an observable the posterior cannot represent
+    and was measured to bias H0 by -0.49 km/s/Mpc on the matched mock."""
+    truth = _obs_events(setup)
+    m1det = truth["m1"] * (1.0 + truth["z"])
+    m2det = truth["m2"] * (1.0 + truth["z"])
+    rho_true = gmd._snr_from_detector_frame(m1det, m2det, truth["dl"],
+                                            gmd.SNR_REF_DEFAULT)
+    sig_true = np.deg2rad(np.clip(35.0 / rho_true, 1.0, 12.0))
+    unclipped = (truth["obs_sigma_ang"] > np.deg2rad(1.0) + 1e-12) \
+        & (truth["obs_sigma_ang"] < np.deg2rad(12.0) - 1e-12)
+    if unclipped.sum() >= 3:
+        assert not np.allclose(truth["obs_sigma_ang"][unclipped],
+                               sig_true[unclipped])
+
+
+def test_explicit_sky_uncertainty_is_passed_through(setup):
+    truth = _events(setup, 3, detection_data="observed", snr_ref=6.278,
+                    pe_kwargs={"dL_fractional_uncertainty": 0.10,
+                               "sky_uncertainty_deg": 3.0})
+    np.testing.assert_allclose(truth["obs_sigma_ang"], np.deg2rad(3.0),
+                               rtol=1e-12)
