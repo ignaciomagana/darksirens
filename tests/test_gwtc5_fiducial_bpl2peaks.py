@@ -47,8 +47,61 @@ def test_gwtc5_fiducial_bpl2peaks_table5_priors_and_fiducial_order():
     assert len(theta) == len(labels)
     assert labels[8] == r"$\delta m_1$"
     assert labels[13] == r"$\delta m_2$"
-    assert theta[8] == 3.0
-    assert theta[13] == 3.0
+    assert theta[8] == pytest.approx(3.5302)
+    assert theta[13] == pytest.approx(4.8128)
+
+
+#: Marginal posterior medians from the LVK GWTC-5.0 data release, run
+#: ``gwtc5_updated_default_mmax`` with the ``PowerLawRedshift`` arm (the one
+#: whose rate law matches this model's ``(1+z)^(gamma-1)``).  Ordered as
+#: ``param_specs``.  See the ``fiducial=`` comment in ``registry.py``.
+LVK_GWTC5_MEDIANS = (
+    1.4816, 5.4187, 37.451, 9.9109, 0.7841, 32.3273, 5.7263,
+    4.4856, 3.5302, 0.4004, 0.5457, 1.0438, 3.4633,
+    4.8128, 0.0633, 0.3654, 2.5439,
+)
+
+
+def test_gwtc5_fiducial_matches_lvk_release_medians():
+    """The fiducial vector is the published posterior, not round placeholders.
+
+    Guards the specific regression this replaced: ``gamma = 0.0`` asserted a
+    non-evolving comoving merger rate against a 3.6-sigma measurement, which
+    biases a dark-siren H0 through the source redshift distribution.
+    """
+    _, _, labels, _, _ = pop_model_prior_parser(MODEL)
+    theta = get_fixed_population_params(MODEL)
+
+    assert len(theta) == len(LVK_GWTC5_MEDIANS) == len(labels)
+    for label, value, expected in zip(labels, theta, LVK_GWTC5_MEDIANS):
+        assert value == pytest.approx(expected), label
+
+    # gamma is the release's ``lamb``; R(z) ~ (1+z)^gamma with no offset.
+    assert labels[16] == r"$\gamma$"
+    assert theta[16] == pytest.approx(2.5439)
+
+    # The mixture weights must stay on the simplex, and the 35 Msun peak must
+    # NOT carry the old equal-thirds weight -- the release puts ~5% there.
+    lambda0, lambda1 = float(theta[9]), float(theta[10])
+    second_peak = 1.0 - lambda0 - lambda1
+    assert 0.0 < second_peak < 1.0
+    assert second_peak == pytest.approx(0.0539, abs=5.0e-4)
+
+
+def test_gwtc5_fiducial_lies_within_the_release_priors():
+    """Every fiducial sits strictly inside its own Table 5 prior box.
+
+    ``m_2,low`` and ``mu_chi`` previously sat exactly ON their prior floors,
+    which is a degenerate starting point for a fixed-population run.
+    """
+    lower, upper, labels, _, _ = pop_model_prior_parser(MODEL)
+    theta = get_fixed_population_params(MODEL)
+
+    for label, lo, hi, value in zip(labels, lower, upper, theta):
+        assert lo < float(value) < hi, f"{label} = {value} not inside ({lo}, {hi})"
+
+    # Table 5 constrains m_2,low <= m_1,low; the medians must respect it.
+    assert float(theta[12]) <= float(theta[7])
 
 
 def test_gwtc5_fiducial_bpl2peaks_log_population_is_finite_and_enforces_constraints():
@@ -226,12 +279,34 @@ def test_density_is_continuous_in_m1_low_at_the_old_grid_nodes():
         # Pre-fix: -1.96e-2 and -1.88e-2 at the first two nodes.  Post-fix the
         # difference is just the smooth slope over 2e-6 in m1_low.
         assert abs(jump) < 1e-6, (node, jump)
-    # And the sweep is monotone/smooth: no cliff anywhere in the prior.
-    mls = np.linspace(3.05, 9.95, 300)
-    vals = np.array([_logp_at(np.concatenate([theta[:7], [ml], theta[8:]]))
-                     for ml in mls])
-    steps = np.abs(np.diff(vals))
-    assert steps.max() < 5e-3, (steps.max(), mls[np.argmax(steps)])
+    # And the sweep is smooth: no cliff anywhere in the prior.
+    #
+    # Table 5 constrains m_2,low <= m_1,low, so the model is correctly -inf
+    # below the fiducial m_2,low; start the sweep just inside the support
+    # rather than at a constant that happens to clear the old fiducial.
+    #
+    # The test is a REFINEMENT check rather than an absolute bound on the step.
+    # A bound like ``steps.max() < 5e-3`` conflates a cliff with a steep smooth
+    # slope: it depends on both the grid spacing and the fiducial.  Under the
+    # LVK-median fiducial the 10 Msun peak is narrow (sigma_1 = 0.78 against the
+    # old placeholder 2.0), so the taper crossing it gives a genuine smooth
+    # slope of 0.384 in log p per unit m1_low -- which trips a 5e-3 absolute
+    # bound at 300 points while being perfectly continuous.  Halving the spacing
+    # halves a smooth step and leaves a true discontinuity untouched, so the
+    # ratio is the discriminating quantity and is fiducial-independent.
+    lo_edge = float(theta[12]) + 1.0e-3
+
+    def _max_step(n):
+        mls = np.linspace(lo_edge, 9.95, n)
+        vals = np.array([_logp_at(np.concatenate([theta[:7], [ml], theta[8:]]))
+                         for ml in mls])
+        steps = np.abs(np.diff(vals))
+        assert np.all(np.isfinite(vals)), mls[~np.isfinite(vals)][:5]
+        return steps.max(), mls[np.argmax(steps)]
+
+    coarse, where = _max_step(300)
+    fine, _ = _max_step(600)
+    assert coarse / fine == pytest.approx(2.0, abs=0.3), (coarse, fine, where)
 
 
 def test_m1_low_gradient_matches_a_quadrature_reference():
