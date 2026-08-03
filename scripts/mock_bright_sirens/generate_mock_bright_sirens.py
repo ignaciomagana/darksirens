@@ -40,6 +40,95 @@ def _load_dark_mock_module():
 
 _dark = _load_dark_mock_module()
 
+SNR_REF_DEFAULT = 11.5
+
+
+def _network_snr(m1, m2, z, dl, rng):
+    """Semi-analytic network SNR with a ``Beta(2,5)**0.5`` projection latent.
+
+    Moved here from the dark-siren generator, which no longer has a
+    true-parameter detection rule: its threshold now acts on a recorded
+    ``rho_obs`` and the projection latent is gone (a detection decision that
+    depends on a variable absent from the data leaves an extra
+    ``P(det|theta)`` inside each event's integral).  The bright-siren mock
+    still uses the historical rule, so the historical implementation lives
+    with its only remaining consumer rather than in a module that no longer
+    contains it.
+    """
+    mchirp = (m1 * m2) ** (3.0 / 5.0) / (m1 + m2) ** (1.0 / 5.0)
+    mchirp_det = mchirp * (1.0 + z)
+    projection = rng.beta(2.0, 5.0, size=len(np.atleast_1d(m1))) ** 0.5
+    return SNR_REF_DEFAULT * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * projection
+
+
+def _legacy_posterior_samples(rng, truth, nsamp, dL_fractional_uncertainty=None,
+                              m1det_fractional_uncertainty=0.08,
+                              m2det_fractional_uncertainty=0.10,
+                              chieff_uncertainty=0.08,
+                              sky_uncertainty_deg=None):
+    """Flat-prior posterior samples of one noisy measurement per event.
+
+    Moved verbatim (draw order included) from the dark-siren generator's
+    ``_posterior_samples`` with ``pe_centering="observed"``, which the
+    all-observable rewrite of that generator removed.  The measurement is
+    independent per channel: ``ln d_obs ~ N(ln dL, s)`` and additive Gaussians
+    on the component masses / spin / sky, so the flat-prior posteriors are
+    ``ln dL ~ N(ln d_obs + s^2, s)`` (the flat-in-dL volume factor) and normals
+    centred on the observed value elsewhere.
+
+    ``p_pe`` is the PE PRIOR in darksirens' canonical integration basis, which
+    is ``(m1det, q, dL, chieff)`` and NOT ``(m1det, m2det, dL, chieff)`` --
+    see ``darksirens/inference/utils.py``, "Integration variables".  A prior
+    flat in the drawn variables ``(m1det, m2det, dL, chieff)`` therefore
+    carries the Jacobian ``|dm2det/dq| = m1det``, so ``p_pe ∝ m1det``; the
+    historical all-ones column mis-weighted the mass channel of every mock
+    this generator has ever produced.  darksirens renormalises ``p_pe`` per
+    event, so the column is stored normalised to mean 1 per event and only its
+    shape matters.
+    """
+    nobs = len(truth["z"])
+    arrays = {"ra": [], "dec": [], "dL": [], "m1det": [], "m2det": [],
+              "chieff": [], "p_pe": []}
+    for i in range(nobs):
+        rho = truth["snr"][i]
+        frac_dl = (dL_fractional_uncertainty if dL_fractional_uncertainty is not None
+                   else np.clip(1.8 / rho, 0.08, 0.35))
+        sigma_ang = np.deg2rad(sky_uncertainty_deg if sky_uncertainty_deg is not None
+                               else np.clip(35.0 / rho, 1.0, 12.0))
+        m1det = truth["m1"][i] * (1.0 + truth["z"][i])
+        m2det = truth["m2"][i] * (1.0 + truth["z"][i])
+        sig_m1 = m1det_fractional_uncertainty * m1det
+        sig_m2 = m2det_fractional_uncertainty * m2det
+
+        # One measurement per event ...
+        dl_obs = float(truth["dl"][i] * np.exp(frac_dl * rng.normal()))
+        ra_obs = float((truth["ra"][i]
+                        + rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1)))
+                       % (2.0 * np.pi))
+        dec_obs = float(np.clip(truth["dec"][i] + rng.normal(0.0, sigma_ang),
+                                -0.5 * np.pi, 0.5 * np.pi))
+        m1_obs = float(np.clip(rng.normal(m1det, sig_m1), 2.0, None))
+        m2_obs = float(np.clip(rng.normal(m2det, sig_m2), 1.0, None))
+        chi_obs = float(np.clip(rng.normal(truth["chi"][i], chieff_uncertainty),
+                                -1.0, 1.0))
+        # ... then the flat-prior posterior GIVEN that measurement.
+        dl = rng.lognormal(np.log(dl_obs) + frac_dl**2, frac_dl, nsamp)
+        dra = rng.normal(0.0, sigma_ang / max(np.cos(dec_obs), 0.1), nsamp)
+        ddec = rng.normal(0.0, sigma_ang, nsamp)
+        m1_draws = rng.normal(m1_obs, sig_m1, nsamp)
+        m2_draws = rng.normal(m2_obs, sig_m2, nsamp)
+        chi_draws = rng.normal(chi_obs, chieff_uncertainty, nsamp)
+
+        m1_samples = np.clip(m1_draws, 2.0, None)
+        arrays["ra"].append((ra_obs + dra) % (2.0 * np.pi))
+        arrays["dec"].append(np.clip(dec_obs + ddec, -0.5 * np.pi, 0.5 * np.pi))
+        arrays["dL"].append(dl)
+        arrays["m1det"].append(m1_samples)
+        arrays["m2det"].append(np.clip(m2_draws, 1.0, None))
+        arrays["chieff"].append(np.clip(chi_draws, -1.0, 1.0))
+        arrays["p_pe"].append(m1_samples / m1_samples.mean())
+    return {k: np.concatenate(v) for k, v in arrays.items()}
+
 
 def _joint_em_detected(rng, ra, dec, z, dl, survey):
     abs_mag = rng.normal(survey.absolute_mag_mean, survey.absolute_mag_sigma, len(z))
@@ -70,7 +159,7 @@ def _draw_bright_events_until_detected(rng, nobs, observed_catalog, grids, pop, 
         q = _dark._sample_q(rng, m1, pop, use_peak=use_peak)
         m2 = q * m1
         chi = _dark._sample_chieff(rng, ntry, pop)
-        snr = _dark._network_snr(m1, m2, z, dl, rng)
+        snr = _network_snr(m1, m2, z, dl, rng)
         det = snr >= snr_threshold
         # Match the dark-siren generator's source-frame rate evolution.  The
         # host catalog is uniform in comoving volume, so accepting hosts with
@@ -89,7 +178,7 @@ def _draw_bright_events_until_detected(rng, nobs, observed_catalog, grids, pop, 
 
 
 def _bright_posterior_samples(rng, truth, nsamp, **kwargs):
-    post = _dark._posterior_samples(rng, truth, nsamp, **kwargs)
+    post = _legacy_posterior_samples(rng, truth, nsamp, **kwargs)
     # Bright sirens have localized counterparts: every PE sample for an event
     # uses the same sky coordinates as the associated EM counterpart.
     for i, (ra, dec) in enumerate(zip(truth["ra"], truth["dec"])):
@@ -132,7 +221,7 @@ def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold,
             q = np.where(use_unif, rng.uniform(0.0, 1.0, ndraw), q)
             chi = np.where(use_unif, rng.uniform(-1.0, 1.0, ndraw), chi)
     m2src = q * m1src
-    gw_det = _dark._network_snr(m1src, m2src, z, dl, rng) >= snr_threshold
+    gw_det = _network_snr(m1src, m2src, z, dl, rng) >= snr_threshold
     em_det = _joint_em_detected(rng, ra, dec, z, dl, survey)
     det = gw_det & em_det
 
@@ -181,12 +270,27 @@ def _em_extra_detect(survey):
     return extra
 
 
+def _projection_snr_jax(key, state):
+    """The historical projection-latent network SNR, in JAX.
+
+    The dark-siren selection kernel's own statistic is the all-observable
+    ``rho_obs = rho_opt(theta) + N(0, sigma_rho)``.  The bright-siren events are
+    still drawn against :func:`_network_snr`, and mu(theta) has to be the
+    probability of passing the SAME rule the events passed, so the kernel's
+    statistic is overridden here rather than composed with it."""
+    m1src, q, z, dl = state["m1src"], state["q"], state["z"], state["dL"]
+    m2src = q * m1src
+    mchirp_det = (m1src * m2src) ** 0.6 / (m1src + m2src) ** 0.2 * (1.0 + z)
+    proj = jnp.sqrt(jax.random.beta(key, 2.0, 5.0))
+    return SNR_REF_DEFAULT * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * proj
+
+
 def _joint_selection_injections(rng, ndraw, grids, pop, survey, snr_threshold, batch_size,
                                 target_detections=None, verbose=False,
                                 proposal="population", m1det_range=_dark._M1DET_RANGE):
     kernel = _dark._make_selection_kernel(
         grids, pop, float(snr_threshold), proposal, m1det_range,
-        extra_detect=_em_extra_detect(survey),
+        extra_detect=_em_extra_detect(survey), snr_fn=_projection_snr_jax,
     )
     return _dark._run_selection_chunks(
         rng, ndraw, grids, pop, proposal, batch_size, kernel,
