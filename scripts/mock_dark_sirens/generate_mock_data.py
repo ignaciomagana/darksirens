@@ -9,9 +9,16 @@ The mock is intentionally simple and transparent:
   matches the inference model exactly (logistic-tapered primary-mass edges via
   ``sfilter_low``/``sfilter_high``, a Gaussian peak, ``S_low(m2)``-tapered mass
   ratio), with shared beta, truncated-Gaussian chi_eff, and gamma parameters;
-* GW detectability is a semi-analytic network-SNR threshold;
+* GW detectability is a threshold on a RECORDED signal-to-noise ratio,
+  ``rho_obs = rho_opt(theta) + N(0, sigma_rho) >= rho_th``, and every other
+  measurement width is a function of that same recorded number -- the
+  all-observable measurement family described under "THE MEASUREMENT FAMILY"
+  below.  The same measurement the threshold saw is what the posterior samples
+  condition on, and no recorded value or posterior sample is ever clipped;
 * the observed EM survey is produced by applying a footprint, redshift/magnitude
-  limits, and a smooth redshift-dependent completeness curve.
+  limits, and a smooth redshift-dependent completeness curve, and it sees a
+  REALISED photo-z ``z_obs`` rather than the true redshift it declares an error
+  on.
 
 The HDF5 files are written in the formats consumed by ``darksirens_inference``
 and ``darksirens_pixelate``/``load_survey``.
@@ -21,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -425,131 +433,303 @@ def _mass_spin_pdf(m1: np.ndarray, q: np.ndarray, chi: np.ndarray, pop: Populati
     return p_mass_pair * p_chi
 
 
+# =============================================================================
+# THE MEASUREMENT FAMILY -- all-observable, sequential, no latent-dependent width
+# =============================================================================
+# Every measurement width is a function of the RECORDED signal-to-noise ratio and
+# of nothing else.  This is the family of Fishbach, Holz & Farr (2018)
+# arXiv:1805.10270 eqs. 29-31, in the form released as ``GWMockCat`` (Farah,
+# Edelman, Zevin, Fishbach, Maria Ezquiaga, Farr & Holz 2023, ApJ 955, 107,
+# arXiv:2301.00834, App. A; git.ligo.org/amanda.farah/GWMockCat, CC0):
+#
+#     rho_obs = rho_opt(theta) + N(0, sigma_rho)      detection: rho_obs >= rho_th
+#     sigma_x = A_x * (rho_th / rho_obs)              for every other channel
+#
+# and the measurement basis is (ln Mc_det, ln q, rho, chi_eff, ra, dec).  Because
+# there is no projection latent, ``rho_opt`` is an exact function of (Mc_det, dL),
+# so that basis is a BIJECTION of (m1det, m2det, dL, chi_eff, ra, dec) and dL is
+# DERIVED from (Mc_det, rho) rather than measured on its own.
+#
+# Why the SNR has to be the distance coordinate.  Recording ``rho_obs`` AND
+# measuring ``dL`` through its own channel would leave the factor
+# ``N(rho_obs; rho_opt(theta), sigma_rho)`` in the true likelihood -- a
+# theta-dependent term the consuming likelihood, which only ever sees
+# (m1det, q, dL, chi_eff, sky) samples and ``p_pe``, cannot represent.  GWMockCat
+# does not do it either: it samples (Mc, eta, rho, Theta) and derives
+# ``dL = Theta rho_opt/rho`` (``transforms.py::redshift``).
+#
+# Why not a truth-scaled width.  ``N(obs; m, f m)`` carries a theta-dependent
+# normalisation ``1/(f m)``, so its flat-prior posterior is skewed by
+# construction and the ensemble mean of a non-linear functional of it need not
+# equal the functional at the truth.  Measured on the gws-agn matched-mock
+# campaign with the EXACT per-event posterior of that family, the detected-set
+# score identity E[C] = E[A] was violated at 11.3 sigma
+# (``(C - A)_pop = -1.274e-3 +- 0.113e-3``); under this family the same statistic
+# is ``+4.44e-4 +- 3.19e-4``, i.e. 1.4 sigma.  The same mechanism, in the sky
+# channel alone, was worth ``-0.49 +- 0.08 km/s/Mpc`` in recovered H0.
+#
+# Fishbach & Holz (2020) arXiv:1905.12669 App. B add a ``0.2 z/(1+z)`` term to
+# the chirp-mass width.  It is deliberately NOT adopted: it is a function of the
+# source's LATENT redshift, which is the defect above.  GWMockCat drops it too.
+MEASUREMENT_FAMILY = "all-observable-v3"
+P_PE_BASIS = ("rho/(dL m1det q): the PE prior, flat in "
+              "(ln Mc_det, ln q, rho, chi_eff), expressed in darksirens' "
+              "canonical (m1det, q, dL, chi_eff) integration basis; "
+              "normalised to mean 1 per event")
 SNR_REF_DEFAULT = 11.5
-DETECTION_DATA_MODES = ("true", "observed")
+# The sky-width amplitude scale.  ``sigma_ang = clip(SKY_A_DEG / rho_sigma, ...)``
+# with ``rho_sigma`` the amplitude on THIS reference, which is not necessarily the
+# reference the detection statistic uses.  Converting the recorded ``rho_obs``
+# from the detection scale to the sky scale is one factor,
+# ``rho_sigma = (SNR_REF_SIGMA / snr_ref) * rho_obs``; at the default
+# ``--snr-ref 11.5`` the factor is 1 and the width is the historical
+# ``clip(35 deg / rho_obs, 1, 12)``.  At the gws-agn campaign's detection scale
+# ``snr_ref = 6.278`` it is 1.83165, i.e. ``clip(19.1069 deg / rho_obs, 1, 12)``,
+# which realises the same width distribution.  Carry the factor explicitly or the
+# sky widths silently move by 1.83x.  (Delta Omega ~ rho^-2: Fairhurst 2009,
+# arXiv:0908.2356; Berry et al. 2015, ApJ 804, 114, arXiv:1411.6934.)
+SNR_REF_SIGMA = 11.5
+SKY_A_DEG = 35.0
+SKY_CLIP_DEG = (1.0, 12.0)
+# GWMockCat ``uncert_default``: sigma_rho = 1 additive on the SNR, and the width
+# of each other channel at rho_obs = the SNR threshold.
+SIGMA_RHO_DEFAULT = 1.0        # uncert_default["snr"]     (Fishbach+2018 eq. 29)
+A_MC_DEFAULT = 0.08            # uncert_default["mc"]
+A_CHI_DEFAULT = 0.20           # GWMockCat parser.py --Xeff_uncert
+# GWMockCat measures the SYMMETRIC mass ratio, sigma_eta = 0.022 (8/rho_obs), on
+# [0, 0.25].  That observation's truncated-normal normalisation depends on eta
+# itself, and with a beta=1 pairing against a 35 Msun peak the detected eta
+# median sits 0.17 sigma from the boundary -- so the censoring would be active
+# for the MEDIAN event.  ``ln q`` with an unbounded Gaussian and a prior
+# truncation at q <= 1 is the same physics with no theta-dependent
+# normalisation anywhere.  Converting, ``d eta/d ln q = q(1-q)/(1+q)^3`` gives
+# ``A_Q(q) = 0.022 (1+q)^3 / (q (1-q))`` = 0.63 at q = 0.75; the independent
+# GW150914 anchor (q = 0.86 +0.14/-0.21 at network rho ~ 24; Abbott et al. 2016,
+# PRL 116, 061102, arXiv:1602.03840) gives 0.20 * 24/8 = 0.60, which is adopted.
+A_Q_DEFAULT = 0.60
+COS_DEC_FLOOR = 0.1            # the RA-width floor, unchanged
+CHIEFF_RANGE = (-1.0, 1.0)     # PE PRIOR support -- never a clip on the DATA
 
 
-def _network_snr(m1: np.ndarray, m2: np.ndarray, z: np.ndarray, dl: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    mchirp = (m1 * m2) ** (3.0 / 5.0) / (m1 + m2) ** (1.0 / 5.0)
-    mchirp_det = mchirp * (1.0 + z)
-    projection = rng.beta(2.0, 5.0, size=len(np.atleast_1d(m1))) ** 0.5
-    rho_ref = SNR_REF_DEFAULT
-    return rho_ref * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * projection
+@dataclass(frozen=True)
+class MeasurementConfig:
+    """Every constant of the measurement family, in one object.
+
+    Passed identically to the event loop, the selection injections and the
+    posterior sampler, so the detection rule and the PE cannot drift apart.
+    """
+
+    snr_ref: float = SNR_REF_DEFAULT
+    snr_threshold: float = 8.0
+    sigma_rho: float = SIGMA_RHO_DEFAULT
+    a_mc: float = A_MC_DEFAULT
+    a_q: float = A_Q_DEFAULT
+    a_chi: float = A_CHI_DEFAULT
+    sky_a_deg: float = SKY_A_DEG
+    # A data-independent constant sky width, in degrees.  ``None`` uses the
+    # SNR-derived width; an explicit value is passed through unchanged and is
+    # still a function of data (a constant is), so the fixed-width sky
+    # posterior stays exact.
+    sky_uncertainty_deg: float | None = None
 
 
 def _snr_from_detector_frame(m1det, m2det, dl, snr_ref: float = SNR_REF_DEFAULT):
-    """``_network_snr`` without the projection latent, from DETECTOR-frame masses.
+    """The optimal (projection-free, noise-free) SNR from DETECTOR-frame masses.
 
-    ``_network_snr`` takes source-frame masses and multiplies the chirp mass by
-    (1+z), which is identically the detector-frame chirp mass -- so this is the
-    same amplitude model with ``projection = 1``.  Taking detector-frame masses
-    is what lets it be evaluated on OBSERVED quantities, where no redshift is
-    available."""
+    Detector-frame masses are what lets this be evaluated on OBSERVED
+    quantities, where no redshift is available."""
     mchirp_det = (m1det * m2det) ** (3.0 / 5.0) / (m1det + m2det) ** (1.0 / 5.0)
     return snr_ref * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl)
 
 
-def _pe_widths(m1det, m2det, dl, rho, dL_fractional_uncertainty,
-               m1det_fractional_uncertainty, m2det_fractional_uncertainty,
-               sky_uncertainty_deg):
-    """The measurement widths, as a dict, from an SNR that is already fixed.
-
-    ``rho`` must be a quantity the noise draw cannot depend on, or the width and
-    the data it scales become circular.  Callers in ``detection_data="observed"``
-    mode pass the OPTIMAL (projection-free, noise-free) SNR, which is a
-    deterministic function of the source parameters."""
-    frac_dl = (dL_fractional_uncertainty if dL_fractional_uncertainty is not None
-               else np.clip(1.8 / rho, 0.08, 0.35))
-    sigma_ang = np.deg2rad(sky_uncertainty_deg if sky_uncertainty_deg is not None
-                           else np.clip(35.0 / rho, 1.0, 12.0))
-    return {"sigma_dl": frac_dl * np.ones_like(np.asarray(dl, dtype=float)),
-            "sigma_ang": sigma_ang * np.ones_like(np.asarray(dl, dtype=float)),
-            "sig_m1": m1det_fractional_uncertainty * m1det,
-            "sig_m2": m2det_fractional_uncertainty * m2det}
+# --- the bijection (Mc_det, q, rho) <-> (m1det, m2det, dL) -------------------
+def _mc_of_m1q(m1det, q):
+    """Detector-frame chirp mass, ``Mc = m1 q^(3/5) / (1+q)^(1/5)``."""
+    return m1det * q ** 0.6 / (1.0 + q) ** 0.2
 
 
-def _measure(rng, m1det, m2det, chi, dl, ra, dec, widths):
-    """ONE measurement of a source, in the parameterisation ``_posterior_samples``
-    inverts.  Clips are applied here so that the object a detection statistic is
-    computed from is bit-identically the object the posterior conditions on.
+def _m1_of_mc_q(mc_det, q):
+    """Inverse of :func:`_mc_of_m1q`."""
+    return mc_det * (1.0 + q) ** 0.2 / q ** 0.6
 
-    SEQUENTIAL SKY WIDTH: when ``widths["sigma_ang"]`` is None, the masses and
-    the distance are measured FIRST and the sky width is computed from those
-    OBSERVED values -- ``clip(35 / rho, 1, 12) deg`` with ``rho`` the
-    projection-free amplitude ``_snr_from_detector_frame`` of the observed
-    detector-frame masses and distance on the ``SNR_REF_DEFAULT`` scale --
-    before the sky offsets are drawn.  ``obs_sigma_ang`` is then a deterministic
-    function of the RECORDED data, so a fixed-width sky posterior built from it
-    is exact.  A TRUTH-derived sky width is not: ``sigma_ang ∝ dL/Mc_det^(5/6)``
-    is itself an observable carrying distance information, and freezing it at
-    its latent true value breaks the score identity of the detected-set
-    likelihood.  Measured on the gws-agn matched-mock campaign (20 x 1000-event
-    realisations, exact-likelihood oracle): the truth-derived width biases the
-    recovered H0 by -0.49 +- 0.08 km/s/Mpc even under the EXACT fixed-width
-    likelihood; deriving the width from the observed amplitude closes the bias
-    (-0.06 +- 0.07 over 20 fresh 1000-event realisations).  The mass widths ``frac * m_det,true`` share the same
-    latent structure at a much smaller measured level (-0.05 km/s/Mpc); they
-    are kept and documented rather than restructured here."""
+
+def _rho_opt_of_mc_dl(mc_det, dl, snr_ref: float = SNR_REF_DEFAULT):
+    """:func:`_snr_from_detector_frame` written in the chirp mass, so the
+    bijection is explicit."""
+    return snr_ref * (mc_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl)
+
+
+def _dl_of_mc_rho(mc_det, rho, snr_ref: float = SNR_REF_DEFAULT):
+    """The inverse: the distance at which a source of chirp mass ``mc_det`` has
+    optimal SNR ``rho``.  This is what makes rho the distance coordinate."""
+    return 1000.0 * snr_ref * (mc_det / 30.0) ** (5.0 / 6.0) / rho
+
+
+def _sigma_ang_from_rho_obs(rho_obs, meas: MeasurementConfig):
+    """Sky width from the RECORDED SNR alone (see ``SNR_REF_SIGMA``)."""
+    if meas.sky_uncertainty_deg is not None:
+        return np.deg2rad(np.full(np.shape(rho_obs), float(meas.sky_uncertainty_deg)))
+    rho_sigma = (SNR_REF_SIGMA / meas.snr_ref) * np.asarray(rho_obs, dtype=float)
+    return np.deg2rad(np.clip(meas.sky_a_deg / rho_sigma, *SKY_CLIP_DEG))
+
+
+def _measurement_widths(rho_obs, meas: MeasurementConfig) -> dict[str, np.ndarray]:
+    """Every measurement width, from ``rho_obs`` and nothing else.
+
+    This is the property that makes the stored fixed-width posterior the EXACT
+    flat-prior posterior of the recorded measurement, and it is checkable from
+    the file alone: each stored width must be recomputable, bitwise, from the
+    stored ``obs_rho``.
+    """
+    rho = np.asarray(rho_obs, dtype=float)
+    k = meas.snr_threshold / rho
+    return {"sig_lnmc": meas.a_mc * k,
+            "sig_lnq": meas.a_q * k,
+            "sig_chieff": meas.a_chi * k,
+            "sigma_ang": _sigma_ang_from_rho_obs(rho, meas)}
+
+
+def _trunc_norm(rng, loc, scale, lo, hi, size=None):
+    """Exact truncated-normal draws by inverse CDF, ``Phi^-1(Phi(a) + u(Phi(b)-Phi(a)))``.
+
+    ``lo``/``hi`` may be +-inf.  This is the ONLY truncated sampler in the
+    generator, and it is used exclusively on the PE PRIOR -- never to censor a
+    recorded value.  Clipping a *sample* would put a point mass at the boundary,
+    which is not a density at all and which ``p_pe`` cannot describe.
+    """
+    from scipy.special import ndtr, ndtri
+    loc = np.asarray(loc, dtype=float)
+    scale = np.asarray(scale, dtype=float)
+    a = ndtr((np.asarray(lo, dtype=float) - loc) / scale)
+    b = ndtr((np.asarray(hi, dtype=float) - loc) / scale)
+    u = rng.random(size if size is not None else np.broadcast(loc, scale).shape)
+    return loc + scale * ndtri(np.clip(a + u * (b - a), 1e-300, 1.0 - 1e-16))
+
+
+def _measure(rng, m1det, m2det, chi, dl, ra, dec, meas: MeasurementConfig, *,
+             need_sky: bool = True):
+    """ONE measurement of a source.  The draw order IS the model; do not reorder.
+
+    1. ``rho_obs = rho_opt(theta) + N(0, sigma_rho)`` -- the detection statistic,
+       and the only channel whose width is not derived from data.
+    2. every other width, from ``rho_obs`` alone.
+    3. ``ln Mc_obs``, ``ln q_obs``, ``chi_eff_obs``, then ``dec_obs``, then
+       ``ra_obs``.  Declination is measured BEFORE right ascension and the RA
+       width is formed from the declination ALREADY RECORDED,
+       ``sigma_ra = sigma_ang / max(cos dec_obs, 0.1)`` -- the same expression
+       the posterior uses, so the stored posterior is the exact posterior of the
+       recorded measurement.  A ``cos(dec_true)`` width would be O(1) wrong near
+       the poles, exactly where the 12 deg cap also bites.
+
+    NOTHING recorded here is clipped or truncated.  Clipping the data makes the
+    measurement model censored -- the likelihood acquires a theta-dependent
+    normalisation ``P(obs = boundary | theta) = 1 - Phi(...)`` and the exact
+    flat-prior posterior stops being a simple normal.  Physical ranges
+    (``q <= 1``, ``rho > 0``, ``|chi_eff| <= 1``, ``|dec| <= pi/2``) are
+    statements about the PARAMETER and are imposed on the PE PRIOR instead (see
+    :func:`_posterior_samples`).  A recorded value is therefore allowed to lie
+    outside the physical range, and about 2 % of an isotropic sky sits within
+    the 12 deg sky cap of a pole, so censored declinations were not a corner
+    case.
+
+    ``need_sky=False`` draws only ``rho_obs`` -- which is the whole detection
+    rule -- and is what the selection injections use.
+    """
     n = np.asarray(dl, dtype=float).shape[0]
-    obs_dL = dl * np.exp(widths["sigma_dl"] * rng.normal(size=n))
-    obs_m1det = np.clip(rng.normal(m1det, widths["sig_m1"]), 2.0, None)
-    obs_m2det = np.clip(rng.normal(m2det, widths["sig_m2"]), 1.0, None)
-    sigma_ang = widths["sigma_ang"]
-    if sigma_ang is None:
-        rho_obs_opt = _snr_from_detector_frame(obs_m1det, obs_m2det, obs_dL,
-                                               SNR_REF_DEFAULT)
-        sigma_ang = np.deg2rad(np.clip(35.0 / rho_obs_opt, 1.0, 12.0))
-    else:
-        sigma_ang = np.asarray(sigma_ang, dtype=float) * np.ones(n)
-    return {
-        "obs_dL": obs_dL,
-        "obs_m1det": obs_m1det,
-        "obs_m2det": obs_m2det,
-        "obs_chieff": np.clip(rng.normal(chi, widths.get("sigma_chi", 0.08)), -1.0, 1.0),
-        "obs_ra": (ra + rng.normal(0.0, sigma_ang
-                                   / np.maximum(np.cos(dec), 0.1))) % (2.0 * np.pi),
-        "obs_dec": np.clip(dec + rng.normal(0.0, sigma_ang),
-                           -0.5 * np.pi, 0.5 * np.pi),
-        "obs_sigma_dl": widths["sigma_dl"],
-        "obs_sigma_ang": sigma_ang,
-        "obs_sig_m1": widths["sig_m1"],
-        "obs_sig_m2": widths["sig_m2"],
-    }
+    m1det = np.asarray(m1det, dtype=float)
+    m2det = np.asarray(m2det, dtype=float)
+    q_true = m2det / m1det
+    mc_det = _mc_of_m1q(m1det, q_true)
+    rho_true = _rho_opt_of_mc_dl(mc_det, dl, meas.snr_ref)
+    rho_obs = rho_true + meas.sigma_rho * rng.normal(size=n)
+    out = {"obs_rho": rho_obs,
+           "obs_snr": rho_obs,          # alias: the stored detection statistic
+           "snr_true": rho_true,
+           "obs_sigma_rho": np.full(n, float(meas.sigma_rho))}
+    if not need_sky:
+        return out
+    # ``rho_obs`` can be <= 0 for a proposal that is never detected, which would
+    # make the widths infinite.  Form them on a floored copy: every row that can
+    # be detected has rho_obs >= the threshold, so no stored width is affected
+    # and each one stays bitwise recomputable from the stored ``obs_rho``.
+    w = _measurement_widths(np.maximum(rho_obs, 1.0e-3), meas)
+    out["obs_sig_lnmc"] = w["sig_lnmc"]
+    out["obs_sig_lnq"] = w["sig_lnq"]
+    out["obs_sig_chieff"] = w["sig_chieff"]
+    out["obs_sigma_ang"] = w["sigma_ang"]
+    out["obs_lnmc"] = np.log(mc_det) + w["sig_lnmc"] * rng.normal(size=n)
+    out["obs_lnq"] = np.log(q_true) + w["sig_lnq"] * rng.normal(size=n)
+    out["obs_chieff"] = np.asarray(chi, dtype=float) + w["sig_chieff"] * rng.normal(size=n)
+    obs_dec = np.asarray(dec, dtype=float) + w["sigma_ang"] * rng.normal(size=n)
+    sig_ra = w["sigma_ang"] / np.maximum(np.cos(obs_dec), COS_DEC_FLOOR)
+    out["obs_dec"] = obs_dec
+    out["obs_sig_ra"] = sig_ra
+    out["obs_ra"] = (np.asarray(ra, dtype=float) + sig_ra * rng.normal(size=n)) % (2.0 * np.pi)
+    # Derived point estimates -- DIAGNOSTIC ONLY; the PE never reads them.  For a
+    # proposal whose rho_obs is near zero the widths blow up and these overflow;
+    # those rows are never detected and nothing downstream reads them, so the
+    # overflow is ignored rather than clipped (clipping would misrepresent what
+    # was recorded).
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        q_o = np.exp(out["obs_lnq"])
+        mc_o = np.exp(out["obs_lnmc"])
+        m1_o = _m1_of_mc_q(mc_o, q_o)
+        out["obs_m1det"] = m1_o
+        out["obs_m2det"] = q_o * m1_o
+        out["obs_dL"] = _dl_of_mc_rho(mc_o, np.maximum(rho_obs, 1.0e-3), meas.snr_ref)
+    return out
 
 
-def _detect_on_observation(rng, m1src, m2src, z, dl, ra, dec, chi, snr_threshold,
-                           snr_ref, dL_fractional_uncertainty,
-                           m1det_fractional_uncertainty,
-                           m2det_fractional_uncertainty, chieff_uncertainty,
-                           sky_uncertainty_deg):
-    """Detection as a DETERMINISTIC FUNCTION OF THE OBSERVED DATA.
+def _detect_on_observation(rng, m1src, m2src, z, dl, ra, dec, chi,
+                           meas: MeasurementConfig, *, need_sky: bool = True):
+    """Detection as a DETERMINISTIC FUNCTION OF ONE RECORDED NUMBER.
 
-    Draws one measurement per source and thresholds the SNR computed from it.
+    Draws one measurement per source and thresholds its recorded ``rho_obs``.
     Returns ``(detected, observation)``; the caller must hand that same
-    observation to the posterior, which is the whole point -- see the
-    ``detection_data`` discussion in ``_draw_events_until_detected``.
+    observation to the posterior, which is the whole point.
 
-    The sky width is NOT taken from the optimal (truth-derived) SNR: it is
-    derived sequentially from the observed masses and distance inside
-    ``_measure`` (``widths["sigma_ang"] = None``), so ``obs_sigma_ang`` is a
-    function of the recorded data and the fixed-width sky posterior is exact.
-    An explicit ``sky_uncertainty_deg`` (a data-independent constant) is passed
-    through unchanged."""
-    m1det, m2det = m1src * (1.0 + z), m2src * (1.0 + z)
-    rho_opt = _snr_from_detector_frame(m1det, m2det, dl, SNR_REF_DEFAULT)
-    widths = _pe_widths(m1det, m2det, dl, rho_opt, dL_fractional_uncertainty,
-                        m1det_fractional_uncertainty, m2det_fractional_uncertainty,
-                        sky_uncertainty_deg)
-    if sky_uncertainty_deg is None:
-        # Sequential observable width (see _measure): the truth-derived
-        # sigma_ang is a latent-dependent observable and biases H0 low.
-        widths["sigma_ang"] = None
-    widths["sigma_chi"] = chieff_uncertainty
-    obs = _measure(rng, m1det, m2det, chi, dl, ra, dec, widths)
-    rho_obs = _snr_from_detector_frame(obs["obs_m1det"], obs["obs_m2det"],
-                                       obs["obs_dL"], snr_ref)
-    obs["obs_snr"] = rho_obs
-    return rho_obs >= snr_threshold, obs
+    A population likelihood evaluates
+    ``prod_i [int p(d_i|theta) p(theta|Lambda) dtheta] / mu^N``, which is the
+    correct detected-set likelihood only when detection is a deterministic
+    function of the data, so that ``1[det(d_i)] = 1`` for observed events and
+    drops out of the numerator.  Thresholding a latent amplitude instead leaves
+    an extra ``P(det|theta)`` INSIDE each event's integral, i.e. the mock is not
+    drawn from the model the inference assumes.
+    """
+    obs = _measure(rng, m1src * (1.0 + z), m2src * (1.0 + z), chi, dl, ra, dec,
+                   meas, need_sky=need_sky)
+    return obs["obs_rho"] >= meas.snr_threshold, obs
+
+
+def _p_pe(m1det, q, dL, meas: MeasurementConfig):
+    """The PE PRIOR density in darksirens' canonical ``(m1det, q, dL, chi_eff)``
+    basis -- the number the consuming likelihood divides each sample by.
+
+    ``darksirens/inference/utils.py`` ("Integration variables") fixes the basis:
+    posterior samples and detected injections are integrated in
+    ``(m1det, q, dL, chi_eff, sky pixel)``, and any proposal density divided out
+    "must be expressed per unit m1det, per unit q, per Mpc of dL".
+
+    The PE prior is flat in ``y = (ln Mc_det, ln q, rho, chi_eff)``.  With
+    ``x = (m1det, q, dL, chi_eff)`` and ``A = 3/(5q) - 1/(5(1+q))``,
+
+        d(ln Mc, ln q, rho)/d(m1det, q, dL) =
+            [ 1/m1det          A            0       ]
+            [ 0                1/q          0       ]
+            [ (5/6) rho/m1det  (5/6) rho A  -rho/dL ]
+
+    whose determinant is ``-(rho/dL)/(m1det q)``, so
+
+        p_pe  ~  rho / (dL m1det q)  ~  Mc_det^(5/6) / (dL^2 m1det q).
+
+    ``chi_eff`` maps identically and the sky prior is flat in (ra, dec), so
+    neither contributes a factor.  darksirens renormalises ``p_pe`` per event,
+    so only the shape matters; the stored column is normalised to mean 1 per
+    event.
+    """
+    mc_det = _mc_of_m1q(m1det, q)
+    rho = _rho_opt_of_mc_dl(mc_det, dL, meas.snr_ref)
+    return rho / (dL * m1det * q)
 
 
 def _generate_complete_catalog(
@@ -558,12 +738,39 @@ def _generate_complete_catalog(
     grids: dict[str, np.ndarray],
     survey: SurveyConfig,
 ) -> dict[str, np.ndarray]:
+    """The complete catalog, with TWO redshift columns.
+
+    ``z`` is the true redshift: it drives the host draw, the event truth and
+    every generative step.  ``z_obs = z + N(0, zerr(z))`` is what the survey --
+    and therefore the likelihood -- actually sees, with ``zerr`` the very error
+    the survey block declares.
+
+    Realising the declared error is not cosmetic.  Copying the true redshifts
+    into the survey block while declaring a photo-z width makes the likelihood
+    smooth a comb that carries no error, so darksirens' per-galaxy kernel
+    ``g(z) N(z; z_g, sigma_g)/Z(z_g)`` is NOT the Bayesian posterior for the
+    host's true redshift.  Measured on the gws-agn matched mock, that internal
+    inconsistency was ``+6.383e-4 +- 0.836e-4``, i.e. 7.6 sigma; realising the
+    error left ``-5.49e-5 +- 9.19e-5``, 0.60 sigma.
+
+    ``z_obs`` may be negative for a galaxy at ``z ~ 0`` and is deliberately NOT
+    clipped: clipping re-introduces a censored observation, which is the same
+    defect in a different channel.  The realised count is reported instead.
+    """
     z = _sample_uniform_comoving_z(rng, grids, n_galaxies)
     ra, dec = _sample_sky(rng, n_galaxies)
     abs_mag = rng.normal(survey.absolute_mag_mean, survey.absolute_mag_sigma, n_galaxies)
     dl_pc = _interp_dl(z, grids) * 1.0e6
     app_mag = abs_mag + 5.0 * np.log10(np.maximum(dl_pc, 10.0) / 10.0)
-    return {"ra": ra, "dec": dec, "z": z, "abs_mag": abs_mag, "app_mag": app_mag}
+    zerr = _catalog_zerr(z, survey)
+    z_obs = z + zerr * rng.normal(size=n_galaxies)
+    return {"ra": ra, "dec": dec, "z": z, "z_obs": z_obs,
+            "abs_mag": abs_mag, "app_mag": app_mag}
+
+
+def _catalog_zerr(z: np.ndarray, survey: SurveyConfig) -> np.ndarray:
+    """The declared -- and now realised -- photo-z width at redshift ``z``."""
+    return survey.redshift_error_floor + survey.redshift_error_slope * (1.0 + np.asarray(z, dtype=float))
 
 
 def _apply_survey_selection(
@@ -579,14 +786,28 @@ def _apply_survey_selection(
 
 
 def _pixelate_catalog(ra: np.ndarray, dec: np.ndarray, z: np.ndarray, dz: np.ndarray, w: np.ndarray, nside: int, marks: dict | None = None) -> dict[str, np.ndarray]:
+    """Pack the survey into fixed-width HEALPix rows, padded at ``z = 100``.
+
+    The three pixelated arrays are float64 EXPLICITLY, and the writer asserts
+    it.  ``darksirens.redshift.completion._kde_dndz_obs`` builds the truncated
+    kernel mass in the catalog's storage dtype and clamps it at ``1e-300``,
+    while the kernel itself is promoted to the float64 z grid.  For a padded
+    slot the mass underflows to exactly 0 -- and ``1e-300`` is NOT representable
+    in float32, so the clamp cannot rescue it, ``0/0 = NaN``, the
+    ``* real_gal`` mask cannot remove a NaN, and every pixel row carrying any
+    padding comes back all-NaN.  The NaN reaches the survey-global normaliser
+    and the likelihood returns -inf in every cell of every grid.  Cheap
+    insurance against a failure mode that has cost a full dataset
+    regeneration once.
+    """
     npix = hp.nside2npix(nside)
     pix = hp.ang2pix(nside, np.pi / 2.0 - dec, ra)
     counts = np.bincount(pix, minlength=npix).astype(np.int32)
     max_gals = max(1, int(counts.max()))
-    zgals = np.full((npix, max_gals), 100.0)
-    dzgals = np.full((npix, max_gals), 1.0)
-    wgals = np.zeros((npix, max_gals))
-    markgals = {name: np.zeros((npix, max_gals)) for name in (marks or {})}
+    zgals = np.full((npix, max_gals), 100.0, dtype=np.float64)
+    dzgals = np.full((npix, max_gals), 1.0, dtype=np.float64)
+    wgals = np.zeros((npix, max_gals), dtype=np.float64)
+    markgals = {name: np.zeros((npix, max_gals), dtype=np.float64) for name in (marks or {})}
     offsets = np.zeros(npix, dtype=np.int32)
     for i, p in enumerate(pix):
         j = offsets[p]
@@ -610,54 +831,35 @@ def _draw_events_until_detected(
     sky_g_max: float = 1.0,
     mark_weight=None,
     mark_g_max: float = 1.0,
-    detection_data: str = "true",
-    snr_ref: float = SNR_REF_DEFAULT,
-    pe_kwargs: dict | None = None,
-) -> dict[str, np.ndarray]:
+    meas: MeasurementConfig | None = None,
+    rejected_keep: int = 0,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Draw detected events from the host catalog.
 
-    ``detection_data`` selects WHAT the SNR threshold is applied to.
+    One measurement is drawn per source and the threshold is applied to its
+    recorded ``rho_obs``; that same measurement is carried forward under
+    ``obs_*`` keys so ``_posterior_samples`` conditions on the very data the
+    threshold saw.  See :func:`_detect_on_observation` for why detection has to
+    be a function of the data, and :func:`_measure` for the measurement family.
 
-    * ``"true"`` (default, historical): ``_network_snr`` on the true parameters,
-      with a fresh ``Beta(2,5)**0.5`` projection latent per source.  The
-      posterior is then built from an independent noise draw.
-    * ``"observed"``: one measurement per source, thresholded on the SNR of that
-      measurement, and the same measurement handed to ``_posterior_samples``
-      (returned here under ``obs_*`` keys).
+    ``snr_threshold`` must equal ``meas.snr_threshold``; it is kept as an
+    explicit argument because it is the generator's headline knob.
 
-    Why the distinction matters.  Population likelihoods -- darksirens' included
-    -- evaluate ``prod_i [int p(d_i|theta) p(theta|Lambda) dtheta] / mu^N``.  That
-    is the correct detected-set likelihood only when detection is a deterministic
-    function of the data, so that ``1[det(d_i)] = 1`` for observed events and
-    drops out of the numerator.  Under ``"true"`` the detection decision depends
-    on a latent ``w`` that never enters the data, and marginalising it leaves an
-    extra ``P(det|theta)`` INSIDE each event's integral:
+    The detected fraction of this rule is NOT the detected fraction of a
+    true-parameter cut at the same ``--snr-ref``: dropping the projection latent
+    raises it by about 5.75x (measured on the deep mock of the gws-agn
+    matched-mock experiment), so ``--snr-ref`` needs recalibration if a detected
+    population is to be held comparable to a pre-existing one.  For that mock
+    ``--snr-ref 6.278`` reproduced the old arm's detected fraction.
 
-        p({d_i} | Lambda, det)
-            = prod_i [int p(d_i|theta) p(theta|Lambda) P(det|theta) dtheta] / mu.
-
-    So ``"true"`` mocks are not drawn from the model the inference assumes.
-    ``"observed"`` restores the premise, and with it the Malmquist scatter across
-    the threshold that a noise-free detection statistic cannot produce.
-
-    The projection latent CANNOT be retained under ``"observed"``: keeping it
-    would leave detection depending on a variable absent from the data, which is
-    a different mis-specification rather than a fix.  Dropping it raises the
-    detected fraction at fixed ``snr_ref`` (measured: 5.75x on the deep mock of
-    the gws-agn matched-mock experiment), so ``snr_ref`` should be recalibrated
-    if the detected population is to be held comparable -- for that mock,
-    ``snr_ref = 6.278`` reproduced the ``"true"`` arm's detected fraction.
-
-    Under ``"observed"`` the distance/mass PE widths are taken from the OPTIMAL
-    SNR (the projection-free, noise-free amplitude), a deterministic function
-    of the source parameters; the SKY width is derived sequentially from the
-    OBSERVED masses and distance (see ``_measure``), because a truth-derived
-    sky width is itself a latent-dependent observable: it carries
-    ``dL/Mc_det^(5/6)`` information that a fixed-width posterior cannot
-    represent, and freezing it at the true value was measured to bias the
-    recovered H0 by -0.49 +- 0.08 km/s/Mpc (gws-agn matched-mock campaign,
-    exact-likelihood oracle, 20 x 1000 events) even with everything else
-    matched.
+    ``rejected_keep`` records up to that many proposals that FAILED the SNR
+    threshold, with their own ``obs_rho`` and ``snr_true``.  Every stored
+    rejection must fail the threshold on its own recorded number, which is what
+    closes the loop on "detection is a deterministic function of the data";
+    together with the detected set it also exhibits the Malmquist scatter a
+    noise-free statistic cannot produce (detections whose TRUE SNR is below
+    threshold, and rejections whose TRUE SNR is above it -- both exactly zero
+    for a true-parameter cut).
 
     When ``sky_weight_fn(nx, ny, nz, z)`` is given, the detected sources follow a
     rate-modulated 3-D field ``g(n̂, z)`` via rejection on the host direction and
@@ -670,11 +872,13 @@ def _draw_events_until_detected(
     given, hosts are additionally accepted ∝ ``mark_weight[host]/mark_g_max`` —
     a *marked-host* preference recoverable by ``--mark_model loglinear``.
     """
-    if detection_data not in DETECTION_DATA_MODES:
-        raise ValueError(f"detection_data must be one of {DETECTION_DATA_MODES}, "
-                         f"got {detection_data!r}")
-    pe_kwargs = dict(pe_kwargs or {})
+    meas = meas or MeasurementConfig(snr_threshold=snr_threshold)
+    if float(meas.snr_threshold) != float(snr_threshold):
+        raise ValueError("snr_threshold and meas.snr_threshold disagree: "
+                         f"{snr_threshold} vs {meas.snr_threshold}")
     kept: list[dict[str, np.ndarray]] = []
+    rejected: list[dict[str, np.ndarray]] = []
+    n_rejected = 0
     while sum(len(x["z"]) for x in kept) < nobs:
         ntry = max(4 * nobs, 256)
         host_idx = rng.integers(0, len(catalog["z"]), ntry)
@@ -686,19 +890,19 @@ def _draw_events_until_detected(
         q = _sample_q(rng, m1, pop, use_peak=use_peak)
         m2 = q * m1
         chi = _sample_chieff(rng, ntry, pop)
-        obs = None
-        if detection_data == "observed":
-            det, obs = _detect_on_observation(
-                rng, m1, m2, z, dl, ra, dec, chi, snr_threshold, snr_ref,
-                pe_kwargs.get("dL_fractional_uncertainty"),
-                pe_kwargs.get("m1det_fractional_uncertainty", 0.08),
-                pe_kwargs.get("m2det_fractional_uncertainty", 0.10),
-                pe_kwargs.get("chieff_uncertainty", 0.08),
-                pe_kwargs.get("sky_uncertainty_deg"))
-            snr = obs["obs_snr"]
-        else:
-            snr = _network_snr(m1, m2, z, dl, rng)
-            det = snr >= snr_threshold
+        det, obs = _detect_on_observation(rng, m1, m2, z, dl, ra, dec, chi, meas)
+        snr = obs["obs_snr"]
+        if rejected_keep and n_rejected < rejected_keep:
+            # Rejected by the SNR RULE specifically -- before the rate/sky/mark
+            # acceptance factors below, which are a different rule.
+            miss = ~det
+            take = min(int(miss.sum()), rejected_keep - n_rejected)
+            if take:
+                idx = np.where(miss)[0][:take]
+                rejected.append({"obs_rho": obs["obs_rho"][idx],
+                                 "snr_true": obs["snr_true"][idx],
+                                 "z": z[idx]})
+                n_rejected += take
         # Inject the rate evolution: GW mergers per host galaxy ∝ (1+z)**(gamma-1)
         # — the source-frame rate (1+z)**gamma times the 1/(1+z) clock-dilation
         # factor.  Host galaxies themselves trace the comoving volume dV_c/dz
@@ -722,162 +926,117 @@ def _draw_events_until_detected(
             det = det & (rng.uniform(size=len(host_idx)) < np.clip(hh / mark_g_max, 0.0, 1.0))
         if np.any(det):
             block = dict(z=z, ra=ra, dec=dec, dl=dl, m1=m1, m2=m2, q=q, chi=chi, snr=snr)
-            if obs is not None:
-                # Carry the measurement forward so the posterior conditions on
-                # the very data the threshold was applied to.
-                block.update(obs)
+            # Carry the measurement forward so the posterior conditions on the
+            # very data the threshold was applied to.
+            block.update(obs)
             kept.append({k: v[det] for k, v in block.items()})
     out = {k: np.concatenate([x[k] for x in kept])[:nobs] for k in kept[0]}
-    return out
+    rej = ({k: np.concatenate([x[k] for x in rejected])[:rejected_keep]
+            for k in rejected[0]} if rejected else
+           {k: np.array([], dtype=float) for k in ("obs_rho", "snr_true", "z")})
+    return out, rej
 
 
 def _posterior_samples(
     rng: np.random.Generator,
     truth: dict[str, np.ndarray],
     nsamp: int,
-    dL_fractional_uncertainty: float | None = None,
-    m1det_fractional_uncertainty: float = 0.08,
-    m2det_fractional_uncertainty: float = 0.10,
-    chieff_uncertainty: float = 0.08,
-    sky_uncertainty_deg: float | None = None,
-    pe_centering: str = "observed",
-    use_recorded_observation: bool = False,
+    meas: MeasurementConfig,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """Per-event posterior samples, plus the observation each one conditions on.
+    """EXACT flat-prior posterior draws GIVEN the recorded measurement.
 
     The mock's per-event term is an importance average over these samples with
     ``p_pe`` as the sampling density, so the samples must be draws from the
-    posterior of an ACTUAL measurement under the prior ``p_pe`` declares.
+    posterior of an ACTUAL measurement under the prior ``p_pe`` declares, and
+    that measurement must be the one the detection threshold acted on.  No new
+    noise is drawn here: the ``obs_*`` columns ``_draw_events_until_detected``
+    recorded are read back, which is what makes the selection a function of the
+    data this posterior conditions on.
 
-    ``pe_centering="observed"`` (default) builds them that way: one noisy
-    observation per event, then samples of the flat-prior posterior given it.
+    The PE prior is flat in ``(ln Mc_det, ln q, rho, chi_eff, ra, dec)`` on the
+    physical support ``q <= 1, rho > 0, |chi_eff| <= 1, |dec| <= pi/2``.  Every
+    channel's likelihood is an UNBOUNDED Gaussian in exactly the variable the
+    prior is flat in, so every posterior is a (possibly prior-truncated) normal
+    about the OBSERVED value with the STORED width -- no shift, no skew:
 
-    * Distance carries multiplicative noise, ``ln d_obs ~ N(ln d_true, s)``.  At
-      fixed ``d_obs`` the likelihood as a function of the true distance is
-      ``exp(-(ln d_obs - ln dL)^2 / 2 s^2)`` (its ``1/d_obs`` prefactor is
-      constant in ``dL``), so with a FLAT prior in ``dL`` the posterior is
-      ``p(dL | d_obs) ∝ exp(-(ln dL - ln d_obs)^2 / 2 s^2)``.  Substituting
-      ``u = ln dL`` picks up the volume factor ``e^u``, giving
-      ``u ~ N(ln d_obs + s^2, s^2)`` — i.e. draws are lognormal about ``d_obs``
-      shifted by ``+s^2``, NOT about the truth.
-    * The additively-measured quantities (masses, chi_eff, sky angles) have
-      Gaussian likelihoods of known width, so their flat-prior posteriors are
-      Gaussians centred on the OBSERVED value with that same width.
+        ln Mc  ~ N(ln Mc_obs, sig_lnmc)
+        ln q   ~ N(ln q_obs,  sig_lnq )   truncated to ln q <= 0
+        rho    ~ N(rho_obs,   sigma_rho)  truncated to rho > 0 (inert at 8 sigma)
+        chi_eff~ N(chi_obs,   sig_chieff) truncated to [-1, 1]
+        dec    ~ N(dec_obs,   sigma_ang)  truncated to [-pi/2, pi/2]
+        ra     ~ wrapped N(ra_obs, sig_ra)
 
-    ``pe_centering="truth"`` reproduces the historical behaviour bit-for-bit
-    (same draw order, same values for a given ``rng`` state): clouds centred on
-    the true parameters, with the distance cloud's log-mean shifted by
-    ``-s^2/2``.  Those are not the posterior of any measurement, and using them
-    as if they were biases the recovered distance scale at O(s^2) — for the
-    distance channel that is a low bias in H0 of order ``s^2`` in fractional
-    terms, which is why the flag exists only for reproducing older mocks.
+    Every truncation is a PRIOR truncation drawn by exact inverse CDF
+    (:func:`_trunc_norm`); no sample is clipped, because a clip would put a
+    point mass at the boundary, which is not a density and which ``p_pe``
+    cannot describe.  The samples are then mapped through the bijection of
+    :func:`_mc_of_m1q` / :func:`_dl_of_mc_rho` to the storage basis, so
+    ``q <= 1`` holds for EVERY sample by construction -- an independent
+    ``(m1det, m2det)`` measurement put 18.4 % of its samples in the ``q > 1``
+    region the population prior sets to zero.
 
-    ``s`` is treated as known per event (taken from the true parameters) on both
-    the measurement and the posterior side, which keeps the Gaussian/lognormal
-    conjugacy exact; real parameter estimation infers the width from the data.
-
-    Not addressed here: ``p_pe = 1`` declares a prior flat in the drawn
-    variables ``(m1det, m2det, dL, chi_eff, ra, dec)``.  Whether the consuming
-    likelihood's canonical basis uses ``q = m2det/m1det`` instead of ``m2det``
-    — which would introduce an ``m1det`` Jacobian into ``p_pe`` — is a separate
-    convention question this change does not touch.
+    ``sigma`` is treated as known per event on both the measurement and the
+    posterior side, which keeps the conjugacy exact; real parameter estimation
+    infers the width from the data.  This is the standard mock-PE idealisation
+    (``GWMockCat`` makes it too).
 
     Returns
     -------
     samples : dict
         Flat ``nobs * nsamp`` arrays in the gwcat PE layout, plus ``p_pe``.
     observations : dict
-        Length-``nobs`` arrays of the per-event observed values the posteriors
-        condition on (``obs_dL``, ``obs_ra``, ``obs_dec``, ``obs_m1det``,
-        ``obs_m2det``, ``obs_chieff``).  Recorded for provenance and so tests
-        can compare the samples against the analytic posterior.  Under
-        ``pe_centering="truth"`` these are the true values.
+        The per-event recorded measurement the posteriors condition on, echoed
+        back so the writer can assert the detection side and the PE side hold
+        the same numbers.
     """
-    if pe_centering not in ("observed", "truth"):
+    missing = [k for k in ("obs_rho", "obs_lnmc", "obs_lnq", "obs_chieff",
+                           "obs_ra", "obs_dec", "obs_sigma_rho", "obs_sig_lnmc",
+                           "obs_sig_lnq", "obs_sig_chieff", "obs_sigma_ang",
+                           "obs_sig_ra") if k not in truth]
+    if missing:
         raise ValueError(
-            f"pe_centering must be 'observed' or 'truth', got {pe_centering!r}"
-        )
-    if use_recorded_observation:
-        if pe_centering != "observed":
-            raise ValueError("use_recorded_observation requires pe_centering='observed'")
-        missing = [k for k in ("obs_dL", "obs_m1det", "obs_m2det", "obs_chieff",
-                               "obs_ra", "obs_dec", "obs_sigma_dl", "obs_sigma_ang",
-                               "obs_sig_m1", "obs_sig_m2") if k not in truth]
-        if missing:
-            raise ValueError(
-                "use_recorded_observation needs the measurement that the detection "
-                f"threshold was applied to; missing {missing}. Draw the events with "
-                "detection_data='observed'.")
+            "the posterior must condition on the measurement the detection "
+            f"threshold was applied to; missing {missing}. Draw the events with "
+            "_draw_events_until_detected.")
     nobs = len(truth["z"])
-    arrays = {"ra": [], "dec": [], "dL": [], "m1det": [], "m2det": [], "chieff": [], "p_pe": []}
-    obs_keys = ("obs_dL", "obs_ra", "obs_dec", "obs_m1det", "obs_m2det", "obs_chieff")
-    observations = {k: np.empty(nobs, dtype=float) for k in obs_keys}
+    keys = ("ra", "dec", "dL", "m1det", "m2det", "chieff", "p_pe")
+    arrays: dict[str, list[np.ndarray]] = {k: [] for k in keys}
+    obs_keys = ("obs_rho", "obs_lnmc", "obs_lnq", "obs_chieff", "obs_ra", "obs_dec")
+    observations = {k: np.asarray(truth[k], dtype=float).copy() for k in obs_keys}
+    half_pi = 0.5 * np.pi
     for i in range(nobs):
-        rho = truth["snr"][i]
-        frac_dl = dL_fractional_uncertainty if dL_fractional_uncertainty is not None else np.clip(1.8 / rho, 0.08, 0.35)
-        sigma_ang = np.deg2rad(sky_uncertainty_deg if sky_uncertainty_deg is not None else np.clip(35.0 / rho, 1.0, 12.0))
-        m1det = truth["m1"][i] * (1.0 + truth["z"][i])
-        m2det = truth["m2"][i] * (1.0 + truth["z"][i])
-        sig_m1 = m1det_fractional_uncertainty * m1det
-        sig_m2 = m2det_fractional_uncertainty * m2det
+        s_mc = float(truth["obs_sig_lnmc"][i])
+        s_q = float(truth["obs_sig_lnq"][i])
+        s_ch = float(truth["obs_sig_chieff"][i])
+        s_an = float(truth["obs_sigma_ang"][i])
+        s_ra = float(truth["obs_sig_ra"][i])
+        s_rho = float(truth["obs_sigma_rho"][i])
 
-        if pe_centering == "truth":
-            # Historical path: draw order preserved so old mocks reproduce exactly.
-            dl = rng.lognormal(np.log(truth["dl"][i]) - 0.5 * frac_dl**2, frac_dl, nsamp)
-            dra = rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1), nsamp)
-            ddec = rng.normal(0.0, sigma_ang, nsamp)
-            ra_centre, dec_centre = truth["ra"][i], truth["dec"][i]
-            m1_draws = rng.normal(m1det, sig_m1, nsamp)
-            m2_draws = rng.normal(m2det, sig_m2, nsamp)
-            chi_draws = rng.normal(truth["chi"][i], chieff_uncertainty, nsamp)
-            obs_values = (truth["dl"][i], truth["ra"][i], truth["dec"][i],
-                          m1det, m2det, truth["chi"][i])
-        else:
-            if use_recorded_observation:
-                # The measurement the DETECTION THRESHOLD was applied to.  No new
-                # noise is drawn: reusing it is what makes the selection a
-                # function of the data this posterior conditions on.
-                dl_obs = float(truth["obs_dL"][i])
-                ra_obs = float(truth["obs_ra"][i])
-                dec_obs = float(truth["obs_dec"][i])
-                m1_obs = float(truth["obs_m1det"][i])
-                m2_obs = float(truth["obs_m2det"][i])
-                chi_obs = float(truth["obs_chieff"][i])
-                frac_dl = float(truth["obs_sigma_dl"][i])
-                sigma_ang = float(truth["obs_sigma_ang"][i])
-                sig_m1 = float(truth["obs_sig_m1"][i])
-                sig_m2 = float(truth["obs_sig_m2"][i])
-            else:
-                # One measurement per event ...
-                dl_obs = float(truth["dl"][i] * np.exp(frac_dl * rng.normal()))
-                ra_obs = float((truth["ra"][i]
-                                + rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1)))
-                               % (2.0 * np.pi))
-                dec_obs = float(np.clip(truth["dec"][i] + rng.normal(0.0, sigma_ang),
-                                        -0.5 * np.pi, 0.5 * np.pi))
-                m1_obs = float(np.clip(rng.normal(m1det, sig_m1), 2.0, None))
-                m2_obs = float(np.clip(rng.normal(m2det, sig_m2), 1.0, None))
-                chi_obs = float(np.clip(rng.normal(truth["chi"][i], chieff_uncertainty),
-                                        -1.0, 1.0))
-            # ... then the flat-prior posterior GIVEN that measurement.
-            dl = rng.lognormal(np.log(dl_obs) + frac_dl**2, frac_dl, nsamp)
-            dra = rng.normal(0.0, sigma_ang / max(np.cos(dec_obs), 0.1), nsamp)
-            ddec = rng.normal(0.0, sigma_ang, nsamp)
-            ra_centre, dec_centre = ra_obs, dec_obs
-            m1_draws = rng.normal(m1_obs, sig_m1, nsamp)
-            m2_draws = rng.normal(m2_obs, sig_m2, nsamp)
-            chi_draws = rng.normal(chi_obs, chieff_uncertainty, nsamp)
-            obs_values = (dl_obs, ra_obs, dec_obs, m1_obs, m2_obs, chi_obs)
+        lnmc = float(truth["obs_lnmc"][i]) + s_mc * rng.normal(size=nsamp)
+        lnq = _trunc_norm(rng, float(truth["obs_lnq"][i]), s_q, -np.inf, 0.0, nsamp)
+        rho = _trunc_norm(rng, float(truth["obs_rho"][i]), s_rho, 0.0, np.inf, nsamp)
+        chi = _trunc_norm(rng, float(truth["obs_chieff"][i]), s_ch,
+                          CHIEFF_RANGE[0], CHIEFF_RANGE[1], nsamp)
+        dec = _trunc_norm(rng, float(truth["obs_dec"][i]), s_an, -half_pi, half_pi, nsamp)
+        ra = (float(truth["obs_ra"][i]) + s_ra * rng.normal(size=nsamp)) % (2.0 * np.pi)
 
-        arrays["ra"].append((ra_centre + dra) % (2.0 * np.pi))
-        arrays["dec"].append(np.clip(dec_centre + ddec, -0.5 * np.pi, 0.5 * np.pi))
-        arrays["dL"].append(dl)
-        arrays["m1det"].append(np.clip(m1_draws, 2.0, None))
-        arrays["m2det"].append(np.clip(m2_draws, 1.0, None))
-        arrays["chieff"].append(np.clip(chi_draws, -1.0, 1.0))
-        arrays["p_pe"].append(np.ones(nsamp))
-        for key, val in zip(obs_keys, obs_values):
-            observations[key][i] = val
+        mc = np.exp(lnmc)
+        q = np.exp(lnq)
+        m1 = _m1_of_mc_q(mc, q)
+        m2 = q * m1
+        dL = _dl_of_mc_rho(mc, rho, meas.snr_ref)
+        # Evaluated on the STORED columns, not on the sampling intermediates, so
+        # the file is exactly self-consistent: a reader recomputing p_pe from
+        # (m1det, m2det, dL) reproduces the stored column bit for bit.
+        raw = _p_pe(m1, m2 / m1, dL, meas)
+
+        arrays["ra"].append(ra)
+        arrays["dec"].append(dec)
+        arrays["dL"].append(dL)
+        arrays["m1det"].append(m1)
+        arrays["m2det"].append(m2)
+        arrays["chieff"].append(chi)
+        arrays["p_pe"].append(raw / raw.mean())
     return {k: np.concatenate(v) for k, v in arrays.items()}, observations
 
 
@@ -945,19 +1104,21 @@ def _draw_selection_batch(
     snr_threshold: float,
     proposal: str = "population",
     m1det_range: tuple[float, float] = _M1DET_RANGE,
-    detection_data: str = "true",
-    snr_ref: float = SNR_REF_DEFAULT,
-    pe_kwargs: dict | None = None,
+    meas: MeasurementConfig | None = None,
 ) -> dict[str, np.ndarray | int]:
     """Numpy reference selection draw (the JAX path in ``_selection_injections``
     mirrors this exactly; tests pin this implementation).
 
-    ``detection_data`` must match the events': mu(theta) is the probability that
-    a source at theta passes the SAME rule the data passed.  Stored coordinates
-    and ``pdraw`` stay the TRUE parameters in both modes -- mu is an integral
-    over true parameters, and only the detection decision sees the noise.  This
-    is what a real injection campaign does: true injected parameters, recovery
-    decided on noisy data."""
+    The detection rule is the events': one ``rho_obs`` drawn per injection and
+    thresholded.  mu(theta) is the probability that a source at theta passes the
+    SAME rule the data passed.  Stored coordinates and ``pdraw`` stay the TRUE
+    parameters -- mu is an integral over true parameters, and only the detection
+    decision sees the noise.  This is what a real injection campaign does: true
+    injected parameters, recovery decided on noisy data.
+
+    Because ``P(det|theta) = Phi((rho_opt(theta) - rho_th)/sigma_rho)`` in closed
+    form, this rule also has an exact oracle a test can check the draw against."""
+    meas = meas or MeasurementConfig(snr_threshold=snr_threshold)
     z = _sample_uniform_comoving_z(rng, grids, ndraw)
     ra, dec = _sample_sky(rng, ndraw)
     dl = _interp_dl(z, grids)
@@ -990,19 +1151,10 @@ def _draw_selection_batch(
     else:
         raise ValueError(f"Unknown proposal {proposal!r}; expected one of {SELECTION_PROPOSALS}")
     m2src = q * m1src
-    if detection_data == "observed":
-        pk = dict(pe_kwargs or {})
-        det, _obs = _detect_on_observation(
-            rng, m1src, m2src, z, dl, ra, dec, chi, snr_threshold, snr_ref,
-            pk.get("dL_fractional_uncertainty"),
-            pk.get("m1det_fractional_uncertainty", 0.08),
-            pk.get("m2det_fractional_uncertainty", 0.10),
-            pk.get("chieff_uncertainty", 0.08), pk.get("sky_uncertainty_deg"))
-    elif detection_data == "true":
-        det = _network_snr(m1src, m2src, z, dl, rng) >= snr_threshold
-    else:
-        raise ValueError(f"detection_data must be one of {DETECTION_DATA_MODES}, "
-                         f"got {detection_data!r}")
+    # need_sky=False: the detection rule is the recorded rho_obs alone, so the
+    # sky/mass/spin channels of the measurement are never drawn for injections.
+    det, _obs = _detect_on_observation(rng, m1src, m2src, z, dl, ra, dec, chi,
+                                       meas, need_sky=False)
 
     p_draw = _selection_pdraw(proposal, m1src, q, chi, z, grids, pop, m1det_range)
 
@@ -1142,30 +1294,28 @@ def _make_population_mass_spin_sampler(pop: PopulationConfig):
 def _make_selection_kernel(grids: dict[str, np.ndarray], pop: PopulationConfig,
                            snr_threshold: float, proposal: str,
                            m1det_range: tuple[float, float] = _M1DET_RANGE,
-                           extra_detect=None, detection_data: str = "true",
-                           snr_ref: float = SNR_REF_DEFAULT,
-                           pe_kwargs: dict | None = None):
+                           extra_detect=None, meas: MeasurementConfig | None = None,
+                           snr_fn=None):
     """Return ``jit(vmap(sample_one))`` mapping a batch of PRNG keys to per-injection
-    (m1src, q, chi, z, ra, dec, dL, det).  ``extra_detect(state) -> bool array`` adds a
+    (m1src, q, chi, z, ra, dec, dL, det).  ``extra_detect(key, state) -> bool`` adds a
     further per-injection cut (e.g. the bright-siren EM selection).
 
-    ``detection_data="observed"`` mirrors the numpy reference
-    ``_draw_selection_batch``: a measurement is drawn per injection and the
-    threshold is applied to ITS SNR, while the returned coordinates stay the
-    TRUE parameters."""
+    The detection statistic mirrors the numpy reference ``_draw_selection_batch``
+    exactly: ``rho_obs = rho_opt(theta) + N(0, sigma_rho)``, thresholded, while
+    the returned coordinates stay the TRUE parameters.  ``snr_fn(key, state) ->
+    snr`` overrides that statistic for callers whose events use a different
+    detection rule (the bright-siren mock still uses a projection latent); the
+    override replaces the statistic rather than adding to it, so events and
+    injections cannot end up on different rules."""
+    meas = meas or MeasurementConfig(snr_threshold=snr_threshold)
     z_grid = jnp.asarray(grids["z"])
     dl_grid = jnp.asarray(grids["dl"])
     vc_cdf = jnp.asarray(grids["vc_cdf"])
     m1lo, m1hi = m1det_range
     uses_population = proposal in ("population", "population+uniform")
     samplers = _make_population_mass_spin_sampler(pop) if uses_population else None
-    if detection_data not in DETECTION_DATA_MODES:
-        raise ValueError(f"detection_data must be one of {DETECTION_DATA_MODES}, "
-                         f"got {detection_data!r}")
-    _pk = dict(pe_kwargs or {})
-    frac_dl_fixed = _pk.get("dL_fractional_uncertainty")
-    sig_m1_frac = _pk.get("m1det_fractional_uncertainty", 0.08)
-    sig_m2_frac = _pk.get("m2det_fractional_uncertainty", 0.10)
+    snr_ref = float(meas.snr_ref)
+    sigma_rho = float(meas.sigma_rho)
 
     def sample_one(key):
         ks = jax.random.split(key, 7)
@@ -1197,24 +1347,14 @@ def _make_selection_kernel(grids: dict[str, np.ndarray], pop: PopulationConfig,
                 q = jnp.where(use_pop, q, q_u)
                 chi = jnp.where(use_pop, chi, chi_u)
         m2src = q * m1src
-        if detection_data == "observed":
-            m1det, m2det = m1src * (1.0 + z), m2src * (1.0 + z)
-            mchirp_det = (m1det * m2det) ** 0.6 / (m1det + m2det) ** 0.2
-            rho_opt = SNR_REF_DEFAULT * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl)
-            s_dl = (jnp.asarray(frac_dl_fixed) if frac_dl_fixed is not None
-                    else jnp.clip(1.8 / rho_opt, 0.08, 0.35))
-            kn = jax.random.split(jax.random.fold_in(key, 909), 3)
-            dl_obs = dl * jnp.exp(s_dl * jax.random.normal(kn[0]))
-            m1_obs = jnp.clip(m1det + sig_m1_frac * m1det * jax.random.normal(kn[1]), 2.0, None)
-            m2_obs = jnp.clip(m2det + sig_m2_frac * m2det * jax.random.normal(kn[2]), 1.0, None)
-            mchirp_obs = (m1_obs * m2_obs) ** 0.6 / (m1_obs + m2_obs) ** 0.2
-            snr = snr_ref * (mchirp_obs / 30.0) ** (5.0 / 6.0) * (1000.0 / dl_obs)
-        else:
-            mchirp_det = (m1src * m2src) ** 0.6 / (m1src + m2src) ** 0.2 * (1.0 + z)
-            proj = jnp.sqrt(jax.random.beta(ks[6], 2.0, 5.0))
-            snr = SNR_REF_DEFAULT * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * proj
-        det = snr >= snr_threshold
         state = {"m1src": m1src, "q": q, "chi": chi, "z": z, "ra": ra, "dec": dec, "dL": dl}
+        if snr_fn is None:
+            mchirp_det = (m1src * m2src) ** 0.6 / (m1src + m2src) ** 0.2 * (1.0 + z)
+            rho_opt = snr_ref * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl)
+            snr = rho_opt + sigma_rho * jax.random.normal(ks[6])
+        else:
+            snr = snr_fn(ks[6], state)
+        det = snr >= snr_threshold
         if extra_detect is not None:
             det = jnp.logical_and(det, extra_detect(key, state))
         return {**state, "det": det}
@@ -1288,13 +1428,10 @@ def _selection_injections(
     verbose: bool = False,
     proposal: str = "population",
     m1det_range: tuple[float, float] = _M1DET_RANGE,
-    detection_data: str = "true",
-    snr_ref: float = SNR_REF_DEFAULT,
-    pe_kwargs: dict | None = None,
+    meas: MeasurementConfig | None = None,
 ) -> dict[str, np.ndarray | int]:
     kernel = _make_selection_kernel(grids, pop, float(snr_threshold), proposal,
-                                    m1det_range, detection_data=detection_data,
-                                    snr_ref=snr_ref, pe_kwargs=pe_kwargs)
+                                    m1det_range, meas=meas)
     return _run_selection_chunks(
         rng, ndraw, grids, pop, proposal, batch_size, kernel,
         target_detections=target_detections, verbose=verbose,
@@ -1355,12 +1492,17 @@ def write_mock_data(args: argparse.Namespace) -> None:
                   f"(pixel_sigma={args.mark_pixel_sigma}, scatter={args.mark_scatter}).")
 
     observed = _apply_survey_selection(rng, complete, survey)
-    zerr = survey.redshift_error_floor + survey.redshift_error_slope * (1.0 + complete["z"])
+    # The survey sees the REALISED photo-z, and declares the width of the model
+    # at the value it recorded: dz = zerr(z_obs).  The true redshift never
+    # leaves the complete catalog.
+    z_obs_survey = complete["z_obs"][observed]
+    zerr_survey = _catalog_zerr(z_obs_survey, survey)
+    n_negative_z_obs = int((z_obs_survey < 0.0).sum())
     weights = np.ones(observed.sum())
     mark_obs = ({name: complete[name][observed] for name in eta_true} if with_marks else None)
     pixelated = _pixelate_catalog(
-        complete["ra"][observed], complete["dec"][observed], complete["z"][observed],
-        zerr[observed], weights, args.nside, marks=mark_obs,
+        complete["ra"][observed], complete["dec"][observed], z_obs_survey,
+        zerr_survey, weights, args.nside, marks=mark_obs,
     )
 
     # Build the injected 3-D source-rate field g(n̂, z) as a product of optional
@@ -1456,34 +1598,25 @@ def write_mock_data(args: argparse.Namespace) -> None:
     else:
         sky_weight_fn = None
 
-    # The measurement model, shared by the detection rule and the posterior when
-    # --detection-data observed: passing one dict keeps them from drifting apart.
-    pe_kwargs = {
-        "dL_fractional_uncertainty": args.dL_fractional_uncertainty,
-        "m1det_fractional_uncertainty": args.m1det_fractional_uncertainty,
-        "m2det_fractional_uncertainty": args.m2det_fractional_uncertainty,
-        "chieff_uncertainty": args.chieff_uncertainty,
-        "sky_uncertainty_deg": args.sky_uncertainty_deg,
-    }
-    if args.detection_data == "observed" and args.pe_centering != "observed":
-        raise SystemExit("--detection-data observed requires --pe-centering observed: "
-                         "the point of the mode is that the posterior conditions on "
-                         "the measurement the threshold was applied to.")
-    truth = _draw_events_until_detected(
+    # The measurement model, shared by the detection rule, the selection
+    # injections and the posterior: passing one object keeps them from drifting
+    # apart.
+    meas = MeasurementConfig(
+        snr_ref=float(args.snr_ref),
+        snr_threshold=float(args.snr_threshold),
+        sigma_rho=float(args.snr_uncertainty),
+        a_mc=float(args.lnmc_uncertainty),
+        a_q=float(args.lnq_uncertainty),
+        a_chi=float(args.chieff_uncertainty),
+        sky_uncertainty_deg=args.sky_uncertainty_deg,
+    )
+    truth, rejected = _draw_events_until_detected(
         rng, args.nobs, complete, grids, pop, args.snr_threshold,
         sky_weight_fn=sky_weight_fn, sky_g_max=sky_g_max,
         mark_weight=mark_weight, mark_g_max=mark_g_max,
-        detection_data=args.detection_data, snr_ref=args.snr_ref,
-        pe_kwargs=pe_kwargs,
+        meas=meas, rejected_keep=int(args.record_rejected),
     )
-    post, pe_observations = _posterior_samples(
-        rng,
-        truth,
-        args.nsamp,
-        **pe_kwargs,
-        pe_centering=args.pe_centering,
-        use_recorded_observation=(args.detection_data == "observed"),
-    )
+    post, pe_observations = _posterior_samples(rng, truth, args.nsamp, meas)
     z_pe = np.interp(post["dL"], grids["dl"], grids["z"])
     post["m1src"] = post["m1det"] / (1.0 + z_pe)
     post["m2src"] = post["m2det"] / (1.0 + z_pe)
@@ -1507,9 +1640,7 @@ def write_mock_data(args: argparse.Namespace) -> None:
         target_detections=selection_target_detections,
         verbose=args.verbose,
         proposal=args.proposal,
-        detection_data=args.detection_data,
-        snr_ref=args.snr_ref,
-        pe_kwargs=pe_kwargs,
+        meas=meas,
     )
 
     inv_pdraw = 1.0 / np.asarray(sel["pdraw"])
@@ -1522,8 +1653,38 @@ def write_mock_data(args: argparse.Namespace) -> None:
         "survey": asdict(survey),
         "snr_threshold": args.snr_threshold,
         "selection_proposal": args.proposal,
-        "detection_data": args.detection_data,
         "snr_ref": args.snr_ref,
+        # Every constant of the measurement family, so a file is self-describing
+        # and every stored width is recomputable from the file alone.
+        "measurement": {
+            "family": MEASUREMENT_FAMILY,
+            "basis": "(ln Mc_det, ln q, rho, chi_eff, ra, dec)",
+            "detection": "rho_obs >= snr_threshold, rho_obs = rho_opt(theta) + N(0, sigma_rho)",
+            "width_law": "sigma_x = a_x * (snr_threshold / rho_obs)",
+            "snr_ref": float(meas.snr_ref),
+            "snr_threshold": float(meas.snr_threshold),
+            "sigma_rho": float(meas.sigma_rho),
+            "a_mc": float(meas.a_mc),
+            "a_q": float(meas.a_q),
+            "a_chi": float(meas.a_chi),
+            "sky_a_deg": float(meas.sky_a_deg),
+            "sky_clip_deg": list(SKY_CLIP_DEG),
+            "snr_ref_sigma": float(SNR_REF_SIGMA),
+            "cos_dec_floor": float(COS_DEC_FLOOR),
+            "sky_uncertainty_deg": (None if meas.sky_uncertainty_deg is None
+                                    else float(meas.sky_uncertainty_deg)),
+            "p_pe_basis": P_PE_BASIS,
+        },
+        # The declared photo-z error is REALISED: the catalog carries z (true)
+        # and z_obs, and the survey block pixelates on z_obs.  z_obs is not
+        # clipped, so the realised count of negative entries is recorded here.
+        "catalog_photoz": {
+            "realised": True,
+            "model": "z_obs = z + N(0, redshift_error_floor + redshift_error_slope (1+z))",
+            "survey_declares": "dz = zerr(z_obs)",
+            "n_negative_z_obs_in_survey": n_negative_z_obs,
+            "n_survey_galaxies": int(observed.sum()),
+        },
         "pop_model_for_inference": "powerlaw+peak",
         "shared_beta_for_inference": True,
         "shared_spin_for_inference": True,
@@ -1549,8 +1710,11 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["metadata_json"] = json.dumps(metadata)
         f.create_dataset("TARGET_RA", data=np.rad2deg(complete["ra"][observed]), compression="gzip", shuffle=True)
         f.create_dataset("TARGET_DEC", data=np.rad2deg(complete["dec"][observed]), compression="gzip", shuffle=True)
-        f.create_dataset("Z", data=complete["z"][observed], compression="gzip", shuffle=True)
-        f.create_dataset("ZERR", data=zerr[observed], compression="gzip", shuffle=True)
+        # Z is the OBSERVED redshift and ZERR its declared error: an EM survey
+        # table cannot carry a true redshift.  The true one stays in the
+        # complete catalog, which is the generator's own record.
+        f.create_dataset("Z", data=z_obs_survey, compression="gzip", shuffle=True)
+        f.create_dataset("ZERR", data=zerr_survey, compression="gzip", shuffle=True)
         f.create_dataset("WEIGHT", data=weights, compression="gzip", shuffle=True)
 
     pixel_path = out / f"catalog_pixelated_nside_{args.nside}.h5"
@@ -1559,6 +1723,12 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["mock_data"] = True
         f.attrs["metadata_json"] = json.dumps(metadata)
         for key, val in pixelated.items():
+            if key != "ngals":
+                assert val.dtype == np.float64, (
+                    f"pixelated {key!r} is {val.dtype}, not float64: "
+                    "_kde_dndz_obs clamps its truncated-kernel mass at 1e-300, "
+                    "which is not representable below float64, so every padded "
+                    "row would evaluate 0/0 = NaN (see _pixelate_catalog)")
             f.create_dataset(key, data=val, compression="gzip", shuffle=True)
 
     gw_path = out / "mock_gw_events.h5"
@@ -1571,9 +1741,11 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["pe_cosmology_Om0"] = float(args.Om0)
         f.attrs["chi_eff_in_p_pe"] = True
         f.attrs["chi_eff_amax"] = 0.99
-        f.attrs["pe_centering"] = str(args.pe_centering)
-        f.attrs["detection_data"] = str(args.detection_data)
+        f.attrs["measurement_family"] = MEASUREMENT_FAMILY
+        f.attrs["p_pe_basis"] = P_PE_BASIS
         f.attrs["snr_ref"] = float(args.snr_ref)
+        f.attrs["snr_threshold"] = float(args.snr_threshold)
+        f.attrs["sigma_rho"] = float(meas.sigma_rho)
         f.attrs["pop_model"] = "powerlaw+peak"
         f.attrs["shared_beta"] = True
         f.attrs["shared_spin"] = True
@@ -1588,12 +1760,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
         truth_group = f.create_group("truth")
         for key, val in truth.items():
             truth_group.create_dataset(key, data=val)
-        # The measurements the posteriors condition on: provenance, and what a
-        # closure test needs to separate measurement scatter from estimator bias.
-        # Under --detection-data observed the measurement already sits in
-        # ``truth`` (the detection step recorded it and the posterior
-        # conditioned on that same record), so those keys must not be written
-        # twice -- and if both sides hold a value it must be the same one.
+        # The measurement already sits in ``truth`` (the detection step recorded
+        # it and the posterior conditioned on that same record), so those keys
+        # must not be written twice -- and if both sides hold a value it must be
+        # the same one.
         for key, val in pe_observations.items():
             if key in truth:
                 assert np.array_equal(np.asarray(truth[key]), np.asarray(val)), (
@@ -1601,6 +1771,15 @@ def write_mock_data(args: argparse.Namespace) -> None:
                     "conditioned on; detection and PE have drifted apart")
                 continue
             truth_group.create_dataset(key, data=val)
+        # A sample of proposals the SNR rule REJECTED, with their own recorded
+        # rho_obs and their true amplitude.  Every row must fail the threshold
+        # on its own recorded number; together with the detected set these give
+        # the two Malmquist observables that are exactly zero for a
+        # true-parameter cut and strictly positive for a data-space one.
+        if len(rejected["obs_rho"]):
+            rej_group = f.create_group("rejected")
+            for key, val in rejected.items():
+                rej_group.create_dataset(key, data=val)
 
     sel_path = out / "mock_gw_selection.h5"
     with h5py.File(sel_path, "w") as f:
@@ -1609,8 +1788,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["ndraw"] = int(sel["Ndraw"])
         f.attrs["Neff"] = selection_neff
         f.attrs["selection_proposal"] = args.proposal
-        f.attrs["detection_data"] = str(args.detection_data)
+        f.attrs["measurement_family"] = MEASUREMENT_FAMILY
         f.attrs["snr_ref"] = float(args.snr_ref)
+        f.attrs["snr_threshold"] = float(args.snr_threshold)
+        f.attrs["sigma_rho"] = float(meas.sigma_rho)
         f.attrs["chi_eff_swap_applied"] = True
         f.attrs["chi_eff_amax"] = 0.99
         f.attrs["cosmology_H0"] = float(args.H0)
@@ -1625,7 +1806,8 @@ def write_mock_data(args: argparse.Namespace) -> None:
 
     print("Mock dark-sirens data written:")
     print(f"  complete catalog : {complete_path} ({n_galaxies:,} galaxies)")
-    print(f"  observed survey  : {raw_path} ({observed.sum():,} galaxies retained)")
+    print(f"  observed survey  : {raw_path} ({observed.sum():,} galaxies retained, "
+          f"photo-z realised, {n_negative_z_obs} with z_obs < 0 left unclipped)")
     print(f"  pixelated survey : {pixel_path} (nside={args.nside})")
     print(f"  GW posteriors    : {gw_path} ({args.nobs} events x {args.nsamp} samples)")
     print(f"  GW selection     : {sel_path} ({sel['n_detected']:,}/{sel['Ndraw']:,} detected injections, Neff={selection_neff:.1f})")
@@ -1645,7 +1827,41 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+# Flags whose behaviour the all-observable measurement family removed.  argparse's
+# bare "unrecognized arguments" would not tell a caller WHY, and these appear in
+# saved command lines and job scripts, so each one gets a pointer.
+_REMOVED_FLAGS = {
+    "--detection-data":
+        "the threshold always acts on the recorded rho_obs now; there is no "
+        "true-parameter detection rule to select. Recalibrate --snr-ref instead.",
+    "--pe-centering":
+        "posterior samples are always the exact flat-prior posterior of the "
+        "recorded measurement; truth-centred clouds are gone.",
+    "--dL-fractional-uncertainty":
+        "dL is no longer measured on its own -- it is DERIVED from (Mc_det, rho), "
+        "so the distance precision follows from --snr-uncertainty and "
+        "--lnmc-uncertainty (sigma_ln dL = sqrt((5/6 sigma_lnMc)^2 + "
+        "(sigma_rho/rho)^2)).",
+    "--m1det-fractional-uncertainty":
+        "component masses are no longer measured independently; the mass channel "
+        "is (ln Mc_det, ln q). Use --lnmc-uncertainty / --lnq-uncertainty.",
+    "--m2det-fractional-uncertainty":
+        "component masses are no longer measured independently; the mass channel "
+        "is (ln Mc_det, ln q). Use --lnmc-uncertainty / --lnq-uncertainty.",
+}
+
+
+def _reject_removed_flags(argv: list[str]) -> None:
+    for arg in argv:
+        name = arg.split("=", 1)[0]
+        if name in _REMOVED_FLAGS:
+            raise SystemExit(
+                f"{name} was removed with the all-observable measurement family: "
+                f"{_REMOVED_FLAGS[name]}")
+
+
 def parse_args() -> argparse.Namespace:
+    _reject_removed_flags(sys.argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outdir", default="data/mock_dark_sirens", help="Output directory for HDF5 products.")
     parser.add_argument("--seed", type=int, default=1234)
@@ -1692,38 +1908,44 @@ def parse_args() -> argparse.Namespace:
     selection_targets = parser.add_mutually_exclusive_group()
     selection_targets.add_argument("--selection-target-detections", type=_positive_int, default=None)
     selection_targets.add_argument("--selection-per-observation-factor", type=_positive_float, default=None)
-    parser.add_argument(
-        "--pe-centering", choices=("observed", "truth"), default="observed",
-        help=("How per-event posterior samples are built. 'observed' (default) draws one "
-              "noisy measurement per event and then samples the flat-prior posterior "
-              "given it, which is what p_pe=1 declares. 'truth' reproduces the historical "
-              "clouds centred on the true parameters; those are not the posterior of any "
-              "measurement and bias the recovered distance scale at O(sigma^2). Use it "
-              "only to reproduce mocks generated before this flag existed."))
-    parser.add_argument(
-        "--detection-data", choices=DETECTION_DATA_MODES, default="true",
-        help=("What the SNR threshold is applied to. 'true' (default, unchanged) "
-              "thresholds the true-parameter SNR with an independent Beta(2,5)**0.5 "
-              "projection latent, and the posterior then conditions on a SEPARATE "
-              "noise draw -- so detection depends on a variable that never enters "
-              "the data, which is not the model a population likelihood assumes "
-              "(it leaves an extra P(det|theta) inside each event's integral). "
-              "'observed' draws one measurement per source, thresholds ITS SNR, and "
-              "hands that same measurement to the posterior, so detection is a "
-              "deterministic function of the data. 'observed' drops the projection "
-              "latent (keeping it would reintroduce the same defect), which raises "
-              "the detected fraction ~5.8x at fixed --snr-ref; recalibrate --snr-ref "
-              "if the detected population must stay comparable. Left non-default "
-              "because it changes the event population of every existing mock."))
     parser.add_argument("--snr-ref", type=_positive_float, default=SNR_REF_DEFAULT,
-                        help=("Amplitude scale of the detection statistic under "
-                              "--detection-data observed. Ignored by 'true', which "
-                              "pins the historical 11.5."))
-    parser.add_argument("--dL-fractional-uncertainty", type=_positive_float, default=None)
-    parser.add_argument("--m1det-fractional-uncertainty", type=_positive_float, default=0.08)
-    parser.add_argument("--m2det-fractional-uncertainty", type=_positive_float, default=0.10)
-    parser.add_argument("--chieff-uncertainty", type=_positive_float, default=0.08)
-    parser.add_argument("--sky-uncertainty-deg", type=_positive_float, default=None)
+                        help=("Amplitude scale of the detection statistic: "
+                              "rho_opt = snr_ref (Mc_det/30)^(5/6) (1000 Mpc/dL). "
+                              "The threshold acts on rho_obs = rho_opt + N(0, "
+                              "--snr-uncertainty), with NO projection latent -- a "
+                              "detection decision that depends on a variable absent "
+                              "from the data leaves an extra P(det|theta) inside each "
+                              "event's integral. That raises the detected fraction "
+                              "~5.75x relative to a true-parameter cut at the same "
+                              "scale, so recalibrate this if a detected population "
+                              "must stay comparable to an older mock (snr_ref = 6.278 "
+                              "reproduced the old fraction on the gws-agn deep mock)."))
+    parser.add_argument("--snr-uncertainty", type=_positive_float,
+                        default=SIGMA_RHO_DEFAULT,
+                        help=("sigma_rho, the additive SNR noise: rho_obs = rho_opt + "
+                              "N(0, sigma_rho). GWMockCat's uncert_default['snr'] = 1."))
+    parser.add_argument("--lnmc-uncertainty", type=_positive_float, default=A_MC_DEFAULT,
+                        help=("Width of ln Mc_det at rho_obs = --snr-threshold; the "
+                              "realised width is this times (snr_threshold/rho_obs). "
+                              "GWMockCat's uncert_default['mc'] = 0.08."))
+    parser.add_argument("--lnq-uncertainty", type=_positive_float, default=A_Q_DEFAULT,
+                        help=("Width of ln q at rho_obs = --snr-threshold. 0.60 is the "
+                              "GW150914 anchor; see the A_Q calibration note in the "
+                              "measurement-family header."))
+    parser.add_argument("--chieff-uncertainty", type=_positive_float, default=A_CHI_DEFAULT,
+                        help=("Width of chi_eff at rho_obs = --snr-threshold (the width "
+                              "now scales as 1/rho_obs rather than being constant). "
+                              "GWMockCat's --Xeff_uncert = 0.20."))
+    parser.add_argument("--sky-uncertainty-deg", type=_positive_float, default=None,
+                        help=("Data-independent constant sky width, in degrees. Omit to "
+                              "derive it from the recorded SNR, "
+                              "clip(35 deg / ((11.5/snr_ref) rho_obs), 1, 12)."))
+    parser.add_argument("--record-rejected", type=int, default=0,
+                        help=("Record up to this many proposals REJECTED by the SNR "
+                              "threshold, with their own rho_obs and true amplitude, "
+                              "under 'rejected/' in the events file. 0 (default) writes "
+                              "none. Every stored row must fail the threshold on its own "
+                              "recorded number."))
     parser.add_argument("--sky-dipole-amp", type=float, default=0.0,
                         help="Inject a source-rate dipole |d| in [0,1) into the detected events "
                              "(g(n)=1+n.d); 0 (default) leaves the sky isotropic.")

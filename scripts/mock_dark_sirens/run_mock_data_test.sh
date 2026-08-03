@@ -51,11 +51,14 @@ INFERENCE_DLOGZ="${INFERENCE_DLOGZ:-0.1}"
 INFERENCE_MAX_SAMPLES="${INFERENCE_MAX_SAMPLES:-0}"
 INFERENCE_SEL_BATCH_SIZE="${INFERENCE_SEL_BATCH_SIZE:-256}"
 
-# Fractional/absolute widths used to generate mock GW PE samples.
-DL_FRAC_UNCERTAINTY="${DL_FRAC_UNCERTAINTY:-0.03}"
-M1DET_FRAC_UNCERTAINTY="${M1DET_FRAC_UNCERTAINTY:-0.03}"
-M2DET_FRAC_UNCERTAINTY="${M2DET_FRAC_UNCERTAINTY:-0.15}"
-CHIEFF_UNCERTAINTY="${CHIEFF_UNCERTAINTY:-0.08}"
+# Measurement-family knobs.  Every width except the SNR noise is quoted at
+# rho_obs = the SNR threshold and scales as 1/rho_obs from there; the defaults
+# are GWMockCat's.  There is no separate distance width: dL is derived from
+# (Mc_det, rho), so the distance precision follows from these two.
+SNR_UNCERTAINTY="${SNR_UNCERTAINTY:-1.0}"
+LNMC_UNCERTAINTY="${LNMC_UNCERTAINTY:-0.08}"
+LNQ_UNCERTAINTY="${LNQ_UNCERTAINTY:-0.60}"
+CHIEFF_UNCERTAINTY="${CHIEFF_UNCERTAINTY:-0.20}"
 SKY_UNCERTAINTY_DEG="${SKY_UNCERTAINTY_DEG:-0.5}"
 
 FIXED_SURVEY_JSON="${FIXED_SURVEY_JSON:-{\"log10n0\": ${LOG10N0}, \"z50\": ${SURVEY_Z50}, \"w\": ${SURVEY_WIDTH}, \"delta\": ${GALAXY_DENSITY_DELTA}, \"b_miss\": 1.0, \"alpha_miss\": 0.5}}"
@@ -110,9 +113,9 @@ python scripts/mock_dark_sirens/generate_mock_data.py \
   --ndraw "${NDRAW}" \
   --selection-batch-size "${SELECTION_BATCH_SIZE}" \
   ${selection_target_args} \
-  --dL-fractional-uncertainty "${DL_FRAC_UNCERTAINTY}" \
-  --m1det-fractional-uncertainty "${M1DET_FRAC_UNCERTAINTY}" \
-  --m2det-fractional-uncertainty "${M2DET_FRAC_UNCERTAINTY}" \
+  --snr-uncertainty "${SNR_UNCERTAINTY}" \
+  --lnmc-uncertainty "${LNMC_UNCERTAINTY}" \
+  --lnq-uncertainty "${LNQ_UNCERTAINTY}" \
   --chieff-uncertainty "${CHIEFF_UNCERTAINTY}" \
   --sky-uncertainty-deg "${SKY_UNCERTAINTY_DEG}" \
   --nside "${NSIDE}" \
