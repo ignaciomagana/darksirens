@@ -336,10 +336,30 @@ register_model(
     # alpha1, alpha2, mbreak, mu1, sigma1, mu2, sigma2,
     # m1_low, delta_m_1, lambda0, lambda1, beta_q, m2_low,
     # delta_m_2, mu_chi, sigma_chi, gamma.
+    #
+    # Marginal posterior MEDIANS from the LVK GWTC-5.0 data release, run
+    # ``gwtc5_updated_default_mmax`` (mass TwoPeakBrokenPowerLawSmoothed x
+    # redshift PowerLawRedshift x iid_spin_magnitude_gaussian), 8200 samples.
+    # The PowerLawRedshift arm is the matching one: this model's rate law is
+    # (1+z)^(gamma-1), i.e. R(z) ~ (1+z)^gamma, so ``gamma`` maps to the
+    # release's ``lamb`` with no offset (base.py, "Rate evolution").
+    #
+    # Cross-checked against the quoted values in arXiv:2605.27226 (GWTC-5.0
+    # population properties): alpha_1 1.48 [0.11, 2.52] vs 1.5 +1.0 -1.4;
+    # alpha_2 5.42 vs 5.4 +1.4 -1.6; break_mass 37.45 vs 37.5 +10.9 -7.8;
+    # beta_q 1.04 vs 1.0 +0.8 -0.7; gamma 2.54 vs kappa_z 2.5 +/- 0.7.
+    #
+    # These replace round placeholder values, five of which sat OUTSIDE the
+    # release's 90% credible interval -- most consequentially gamma = 0.0
+    # (a non-evolving comoving rate, 3.6 sigma from the measurement), which
+    # biases any dark-siren H0 through the source redshift distribution.
+    # lambda0/lambda1 are 96% anti-correlated, so the median pair implies a
+    # second-peak weight 1 - l0 - l1 = 0.054 against its own marginal median
+    # of 0.044 -- both well inside the simplex, and far from the old 1/3.
     fiducial=(
-        2.0, 4.0, 35.0, 10.0, 2.0, 35.0, 5.0,
-        5.0, 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0, 3.0,
-        3.0, 0.0, 0.10, 0.0,
+        1.4816, 5.4187, 37.451, 9.9109, 0.7841, 32.3273, 5.7263,
+        4.4856, 3.5302, 0.4004, 0.5457, 1.0438, 3.4633,
+        4.8128, 0.0633, 0.3654, 2.5439,
     ),
 )(GWTC5FiducialBPL2PeaksPopulationModel)
 
