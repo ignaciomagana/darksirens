@@ -25,6 +25,11 @@ Pipeline
    :func:`poisson_lognormal_map`; ``--mode gp3d`` -> ONE low-rank
    Poisson-lognormal field over occupied (pixel x z) voxels reusing the
    (sphere x z) GP, so empty pixels borrow angularly from their neighbours.
+6. Per-z mean-one budget renormalization of the output tables (MAP and each
+   member independently) under ``w = (1 - C) dN_exp`` over the fitted
+   footprint (:func:`renormalize_q_mean_one`), so Q only redistributes the
+   missing budget (default ON; ``--no-budget-renorm`` to skip; the choice and
+   the removed monopole are stamped in the HDF5 attrs).
 """
 from __future__ import annotations
 
@@ -44,6 +49,7 @@ from darksirens.redshift.lognormal_completion import (
     gaussian_correlation_spectrum,
     poisson_lognormal_map,
     laplace_lognormal_members,
+    renormalize_q_mean_one,
     save_lss_completion_hdf5,
     lowrank_inducing_nodes,
     build_lowrank_operator,
@@ -101,12 +107,17 @@ def _build_completion_radial(
     workers: int = 1,
     log10n0=None,
     delta=None,
+    budget_renorm: bool = True,
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
     The original LSS completion builder: an independent 1-D Poisson-lognormal
     field per occupied pixel on a uniform comoving-distance grid (no angular
     coupling).  See :func:`_build_completion_gp3d` for the 3-D upgrade.
+
+    ``budget_renorm`` (default ON) applies the per-z mean-one budget
+    renormalization (:func:`renormalize_q_mean_one`) to the output tables over
+    the occupied (fitted) rows, so Q only redistributes the missing budget.
     """
     import healpy as hp
 
@@ -166,13 +177,19 @@ def _build_completion_radial(
     n_occ = int(occ.size)
     C_u = np.empty((n_occ, n_grid), dtype=float)
     N_obs_u = np.zeros((n_occ, n_grid), dtype=float)
+    w_budget = np.empty((n_occ, n_grid), dtype=float)
     for i, r in enumerate(occ):
         dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
         # Expectation-weighted bin completeness: C_bin = int(C * dN_exp) / int(dN_exp),
         # so the solver's rate_base = C_u * dN_exp_count_u is exactly the
         # bin-integrated expected OBSERVED counts — the same footing as N_obs.
-        prod = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0) * dN_exp_density
+        C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
+        prod = C_fine * dN_exp_density
         C_u[i] = np.clip(_bin_integral(prod) / exp_safe, 0.0, 1.0)
+        # This pixel's missing-budget weight on the OUTPUT zgrid at the build
+        # fiducial: w_p(z) = (1 - C_p(z)) * dN_exp(z) — the same
+        # (1 - C) dN_exp the likelihood multiplies Q into (dN_miss).
+        w_budget[i] = (1.0 - C_fine) * dN_exp_density
         zs = zgals_np[r, : ngals_np[r]]
         counts_z, _ = np.histogram(zs, bins=edges)
         N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
@@ -217,6 +234,22 @@ def _build_completion_radial(
                 logq_members[m, r] = np.interp(chi, chi_u, lm_u[m, i])
         diagnostics.update(members["diagnostics"])
 
+    # Per-z mean-one budget renormalization over the FITTED FOOTPRINT (the
+    # occupied rows): the Laplace E[Q] carries a per-z monopole (var_post is
+    # largest where data are sparse -> spatially varying Jensen bias, measured
+    # +55% budget inflation), which would RESCALE the missing budget the
+    # likelihood forms as (1 - C) dN_exp Q.  After this, the total budget with
+    # Q equals the homogeneous budget identically at the build fiducial; each
+    # member is renormalized independently (placement uncertainty only, zero
+    # budget uncertainty).  Empty rows stay logQ = 0 (Q = 1) exactly.
+    if budget_renorm:
+        logq_map[occ], log_mono = renormalize_q_mean_one(logq_map[occ], w_budget)
+        if logq_members is not None:
+            logq_members[:, occ], _ = renormalize_q_mean_one(
+                logq_members[:, occ], w_budget)
+        diagnostics["budget_monopole_logq"] = log_mono
+    diagnostics["budget_renormalized"] = bool(budget_renorm)
+
     return logq_map, logq_members, diagnostics
 
 
@@ -230,7 +263,9 @@ class _GP3DSurveyAssembly(NamedTuple):
     (``n_hat_all``), the coarse-bin observed counts (``N_obs_vox``) and
     bin-integrated expected observed base (``base_vox``), and the per-survey
     coarse-z count profile (``counts_z``) that the joint ``z_ref`` weighting sums
-    over all surveys.
+    over all surveys.  ``w_budget`` is the fine-zgrid missing-budget weight
+    ``(1 - C_p) dN_exp`` of the occupied rows, consumed by the per-z mean-one
+    Q renormalization of the OUTPUT table (not by the solve).
     """
     nside: int
     n_pix: int
@@ -242,6 +277,7 @@ class _GP3DSurveyAssembly(NamedTuple):
     N_obs_vox: np.ndarray    # (n_occ, G_s) coarse-bin histogram counts
     base_vox: np.ndarray     # (n_occ, G_s) bin-integrated expected observed counts
     counts_z: np.ndarray     # (G_s,) coarse-z count profile (for z_ref weighting)
+    w_budget: np.ndarray     # (n_occ, n_grid) fine-zgrid (1 - C) dN_exp weights
 
 
 def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
@@ -318,11 +354,17 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
     dz_fine = np.diff(zgrid_np)
     N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
     base_vox = np.empty((n_occ, G_s), dtype=float)
+    w_budget = np.empty((n_occ, n_grid), dtype=float)
     for i, r in enumerate(occ):
         dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        prod = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0) * dN_exp_density
+        C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
+        prod = C_fine * dN_exp_density
         cum = np.concatenate([[0.0], np.cumsum(0.5 * (prod[1:] + prod[:-1]) * dz_fine)])
         base_vox[i] = np.diff(np.interp(edges_s, zgrid_np, cum))
+        # Fine-zgrid missing-budget weight (1 - C) dN_exp of this row, for the
+        # per-z mean-one renormalization of the OUTPUT table (same footing as
+        # the likelihood's dN_miss = (1 - C) dN_exp Q).
+        w_budget[i] = (1.0 - C_fine) * dN_exp_density
         zs = zgals_np[r, : ngals_np[r]]
         counts_s, _ = np.histogram(zs, bins=edges_s)
         N_obs_vox[i] = counts_s
@@ -332,6 +374,7 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
         nside=int(nside), n_pix=n_pix, apix=apix, occ=occ, n_occ=n_occ,
         n_hat_all=n_hat_all, n_hat_occ=n_hat_occ,
         N_obs_vox=N_obs_vox, base_vox=base_vox, counts_z=counts_z,
+        w_budget=w_budget,
     )
 
 
@@ -373,6 +416,7 @@ def _build_completion_gp3d(
     lss_corr_length_ang=None,
     log10n0=None,
     delta=None,
+    budget_renorm: bool = True,
 ):
     """3-D angular-coupling MAP + optional ensemble log Q tables.
 
@@ -419,13 +463,17 @@ def _build_completion_gp3d(
         d.update(extra)
         return d
 
-    # Empty catalog: nothing to solve, Q == 1 everywhere.
+    # Empty catalog: nothing to solve, Q == 1 everywhere.  The homogeneous
+    # table is trivially mean-one, so the budget stamp is honest as-is.
     if n_occ == 0:
         _warn("no occupied pixels — writing Q = 1 (logQ = 0) everywhere.")
         logq_map = np.zeros((n_pix, n_grid), dtype=float)
         logq_members = (np.zeros((int(n_members), n_pix, n_grid), dtype=float)
                         if n_members and n_members > 0 else None)
-        return logq_map, logq_members, _base_diag({})
+        extra = {"budget_renormalized": bool(budget_renorm)}
+        if budget_renorm:
+            extra["budget_monopole_logq"] = np.zeros(n_grid, dtype=float)
+        return logq_map, logq_members, _base_diag(extra)
 
     z_ref, ls_z = _count_weighted_zref_lsz(
         [survey_data.counts_z], z_s, cosmo, survey.lss_corr_length_mpc)
@@ -465,6 +513,7 @@ def _build_completion_gp3d(
     })
 
     logq_members = None
+    n_nonfinite_members = 0
     if n_members and n_members > 0:
         xi_mem = laplace_lognormal_gp3d_members(
             mp["xi_map"], mp["H_chol"], n_members=int(n_members), seed=int(seed))
@@ -473,9 +522,29 @@ def _build_completion_gp3d(
             n_hat_out=survey_data.n_hat_all, z_out=zgrid_np, bias=bias,
             pix_chunk=int(gp3d_pix_chunk), L=L,
         ), dtype=float)
-        diagnostics["n_nonfinite_members"] = int(
-            np.sum(~np.isfinite(logq_members)))
+        n_nonfinite_members = int(np.sum(~np.isfinite(logq_members)))
+        diagnostics["n_nonfinite_members"] = n_nonfinite_members
         diagnostics["n_members"] = int(n_members)
+
+    # Per-z mean-one budget renormalization over the FITTED FOOTPRINT (the
+    # occupied rows), same convention as the radial builder.  Empty pixels
+    # keep their posterior-mean value: far pixels read exactly Q = 1
+    # (homogeneous) and must not absorb the footprint's monopole; the
+    # borrowing halo just outside the footprint keeps its (small) angular
+    # tail unrenormalized.  Skipped when the eval produced non-finite cells
+    # (only reachable as a stamped --allow-unconverged research ablation): a
+    # NaN entering the per-z weighted mean would smear across every occupied
+    # row of that bin.
+    do_renorm = bool(budget_renorm) and (n_nonfinite_map + n_nonfinite_members) == 0
+    if do_renorm:
+        occ = survey_data.occ
+        logq_map[occ], log_mono = renormalize_q_mean_one(
+            logq_map[occ], survey_data.w_budget)
+        if logq_members is not None:
+            logq_members[:, occ], _ = renormalize_q_mean_one(
+                logq_members[:, occ], survey_data.w_budget)
+        diagnostics["budget_monopole_logq"] = log_mono
+    diagnostics["budget_renormalized"] = bool(do_renorm)
 
     return logq_map, logq_members, diagnostics
 
@@ -494,26 +563,29 @@ def build_completion(
     lss_corr_length_ang=None,
     log10n0=None,
     delta=None,
+    budget_renorm: bool = True,
 ):
     """Build the log Q completion tables from a survey catalog.
 
     ``mode="radial"`` (default) -> independent per-pixel 1-D Poisson-lognormal
     (:func:`_build_completion_radial`).  ``mode="gp3d"`` -> the 3-D
     angular-coupling low-rank field (:func:`_build_completion_gp3d`).  Both return
-    ``(logq_map, logq_members, diagnostics)`` with the SAME global table contract.
+    ``(logq_map, logq_members, diagnostics)`` with the SAME global table contract,
+    and both apply the per-z mean-one budget renormalization by default
+    (``budget_renorm``; the removed monopole is carried in the diagnostics).
     """
     if mode == "radial":
         return _build_completion_radial(
             catalog_path, n_members=n_members, seed=seed,
             prior_strength=prior_strength, maxiter=maxiter, workers=workers,
-            log10n0=log10n0, delta=delta,
+            log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
             catalog_path, n_members=n_members, seed=seed,
             gp3d_nz_solve=gp3d_nz_solve, gp3d_pix_chunk=gp3d_pix_chunk,
             lss_corr_length_ang=lss_corr_length_ang,
-            log10n0=log10n0, delta=delta,
+            log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
         )
     raise ValueError(f"Unknown build mode {mode!r}; expected 'radial' or 'gp3d'.")
 
@@ -579,6 +651,13 @@ def main(argv=None):
                         "The override is stamped in the file's diagnostics and "
                         "warned about at load time; research ablations only, "
                         "never production.")
+    p.add_argument("--no-budget-renorm", action="store_true", default=False,
+                   help="Skip the per-z mean-one budget renormalization of Q "
+                        "under the (1-C)*dN_exp weights (default ON). Without "
+                        "it Q's per-z monopole RESCALES the missing budget "
+                        "(measured +55% Jensen inflation for radial tables) "
+                        "instead of only redistributing it. The choice is "
+                        "stamped in the file; research ablations only.")
     opts = p.parse_args(argv)
 
     print()
@@ -607,6 +686,7 @@ def main(argv=None):
         gp3d_nz_solve=opts.gp3d_nz_solve, gp3d_pix_chunk=opts.gp3d_pix_chunk,
         lss_corr_length_ang=opts.lss_corr_length_ang,
         log10n0=opts.log10n0, delta=opts.delta,
+        budget_renorm=not opts.no_budget_renorm,
     )
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")
@@ -665,9 +745,15 @@ def main(argv=None):
             logq_members = np.where(
                 np.isfinite(logq_members), logq_members, 0.0)
         diagnostics["n_nonfinite_substituted"] = n_bad
+    # The removed budget monopole goes into its DEDICATED attr (with the
+    # boolean stamp), not the JSON diagnostics blob — the loader treats an
+    # absent stamp as a legacy (non-renormalized) table and warns.
+    budget_monopole = diagnostics.pop("budget_monopole_logq", None)
     save_lss_completion_hdf5(
         opts.out, logq_map=logq_map, logq_members=logq_members,
         zgrid=np.asarray(zgrid), indexing=indexing, metadata=diagnostics,
+        budget_renormalized=diagnostics.get("budget_renormalized"),
+        budget_monopole_logq=budget_monopole,
     )
     _ok(f"completion  →  {opts.out}")
     _end()

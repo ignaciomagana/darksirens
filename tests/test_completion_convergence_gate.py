@@ -177,6 +177,12 @@ def test_load_is_quiet_for_converged_files(tmp_path):
         diagnostics={"converged": True, "n_converged": 2, "n_occupied": 2,
                      "allow_unconverged": False},
     )
+    # S0b budget convention: a file WITHOUT the 'budget_renormalized' stamp is
+    # a legacy, non-renormalized Q table and now legitimately warns at load
+    # (see test_q_budget_renormalization.py). Quietness is the contract of a
+    # FULLY-stamped file, so stamp the (deliberate) budget choice here too.
+    with h5py.File(path, "a") as f:
+        f["lss_completion"].attrs["budget_renormalized"] = False
     with _warnings.catch_warnings():
         _warnings.simplefilter("error")
         out = load_lss_completion_hdf5(path)

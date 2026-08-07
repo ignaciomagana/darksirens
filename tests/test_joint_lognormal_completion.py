@@ -96,7 +96,13 @@ def test_k1_parity_bit_identical_to_single(tmp_path):
     _write_survey(cat, nside=2, pix_specs={0: (3, 0.5), 1: (3, 0.5)})
     kw = dict(seed=7, gp3d_nz_solve=12, gp3d_pix_chunk=8)
 
-    lm_s, le_s, _ = build_completion(cat, mode="gp3d", n_members=5, **kw)
+    # S0b: the single-survey builder now applies the per-z mean-one budget
+    # renormalization by default; the JOINT builder deliberately does not
+    # (its estimand — ONE shared field over K distinct footprints — needs its
+    # own weighting design, and its unstamped files warn at load). Parity is
+    # therefore pinned against the raw (budget_renorm=False) single build.
+    lm_s, le_s, _ = build_completion(cat, mode="gp3d", n_members=5,
+                                     budget_renorm=False, **kw)
     res = build_joint_completion([cat], [str(tmp_path / "A_out.h5")],
                                  n_members=5, biases=[1.0], **kw)
     lm_j, le_j = res[0]["logq_map"], res[0]["logq_members"]
