@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 
 from darksirens.core.constants import (
+    C_MODES,
     COMPLETE_EMPTY_PIXEL_POLICIES,
     H0_FID,
     OM0_FID,
@@ -25,6 +26,18 @@ def complete_empty_pixel_policy_code(policy: str | int) -> int:
     if isinstance(policy, str):
         return COMPLETE_EMPTY_PIXEL_POLICIES[policy]
     return int(policy)
+
+
+def c_mode_code(c_mode: str | int) -> int:
+    """Return the integer code stored on ``SurveyParams.c_mode``.
+
+    Decoded EAGERLY (host-side, pre-jit) like the empty-pixel policy so the
+    likelihood's trace-time branch (``darksirens.redshift.completion``) sees a
+    concrete Python int, never a string or a traced value.
+    """
+    if isinstance(c_mode, str):
+        return C_MODES[c_mode]
+    return int(c_mode)
 
 
 def _sticks_to_log_weights(v: jnp.ndarray) -> jnp.ndarray:
@@ -55,7 +68,8 @@ def _sticks_to_log_weights(v: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([jnp.reshape(log_w_head, (1,)), log_w_tail])
 
 
-def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth, wl_params):
+def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
+                   wl_params, c_mode=None):
     """Build one catalog's :class:`SurveyParams` from a resolved label dict.
 
     ``values`` maps sampled + fixed labels to values; every
@@ -88,6 +102,11 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth, wl_p
         complete_empty_pixel_policy=complete_empty_pixel_policy,
         z_depth=z_depth,
         wl_params=wl_params,
+        # STRUCTURAL normalisation (the z_depth pattern): per_pixel (0) is
+        # carried as None so the completion module's trace-time branch is a
+        # pytree-structure decision and survives darksiren_log_likelihood's
+        # jit boundary, where an int leaf becomes a value-unreadable tracer.
+        c_mode=(None if not c_mode else int(c_mode)),
     )
 
 
@@ -107,6 +126,11 @@ class ParameterDecoder:
     # catalog gets ``z_depth=None`` -- the legacy full-grid missing-galaxy
     # budget, bit-identical to the pre-existing behaviour.
     z_depths: tuple[float | None, ...] = ()
+    # Completeness estimator mode (int enum from C_MODES: 0=per_pixel legacy
+    # default, 1=aggregate), decoded eagerly from the CLI string.  Stored on
+    # every catalog's SurveyParams with per_pixel normalised to None (the
+    # z_depth structural pattern -- see _survey_params; never sampled).
+    c_mode: int = 0
     sky_labels: tuple[str, ...] = ()
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
@@ -172,6 +196,7 @@ class ParameterDecoder:
             complete_empty_pixel_policy=self.complete_empty_pixel_policy,
             z_depth=self.z_depths[0] if len(self.z_depths) >= 1 else None,
             wl_params=self.wl_params,
+            c_mode=self.c_mode,
         )
         return cosmo, survey, pop_params, sky_params, mark_params
 
@@ -211,6 +236,7 @@ class ParameterDecoder:
                 complete_empty_pixel_policy=self.complete_empty_pixel_policy,
                 z_depth=self.z_depths[k - 1] if len(self.z_depths) >= k else None,
                 wl_params=None,
+                c_mode=self.c_mode,
             ))
 
         # Per-catalog eta blocks: catalog 1 is decode()'s vector verbatim;
@@ -341,6 +367,9 @@ def build_parameter_decoder(
         complete_empty_pixel_policy=complete_empty_pixel_policy_code(
             getattr(opts, "complete_empty_pixel_policy", "zero")
         ),
+        # Absent on bare/legacy opts -> per_pixel (0), the bit-identical
+        # legacy completeness estimator.
+        c_mode=c_mode_code(getattr(opts, "c_mode", None) or "per_pixel"),
         # Resolved per-catalog survey z_depth (CLI --survey_z_depth override >
         # per-catalog file attr > None), computed host-side in the CLI before
         # the likelihood is built. Absent on bare/legacy ``opts`` (e.g. tests

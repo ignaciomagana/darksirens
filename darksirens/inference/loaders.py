@@ -189,6 +189,9 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
             lss_completion=_lss_for(i),
             universe_model=opts.universe_model,
             lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
+            # Thread the run's completeness mode so the per-catalog loader can
+            # hard-check each table's c_mode stamp against it.
+            c_mode=getattr(opts, "c_mode", None) or "per_pixel",
         )
         lss = maybe_load_lss_completion(lss_ns, zgrid=zgrid)
 

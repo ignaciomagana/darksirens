@@ -16,6 +16,11 @@ Pipeline
    (:func:`darksirens.redshift.completion._precompute_grids`,
    :func:`darksirens.redshift.completion._kde_dndz_obs`) under a *fiducial*
    cosmology/survey (the same fiducials the inference dry-run uses).
+   ``--c-mode aggregate`` swaps the per-pixel ``C`` for the ONE sky-aggregate
+   ``Cbar`` (the inference ``SurveyParams.c_mode=1`` estimator) and extends
+   the fit to EMPTY pixels as N_obs = 0 rows — the void information; the
+   choice is stamped in the output attrs and hard-checked at load against
+   the consuming survey's ``c_mode``.
 4. Build a per-pixel 1-D Gaussian-correlation power spectrum from the **fixed**
    SurveyParams/CosmoParams hyperparameters (correlation length in Mpc mapped to
    grid units via the comoving-distance grid; field amplitude ``lss_sigma``;
@@ -181,6 +186,7 @@ def _build_completion_radial(
     budget_renorm: bool = True,
     lss_corr_length_mpc=None,
     lss_sigma=None,
+    c_mode: str = "per_pixel",
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
@@ -190,10 +196,18 @@ def _build_completion_radial(
 
     ``budget_renorm`` (default ON) applies the per-z mean-one budget
     renormalization (:func:`renormalize_q_mean_one`) to the output tables over
-    the occupied (fitted) rows, so Q only redistributes the missing budget.
+    the fitted rows, so Q only redistributes the missing budget.
 
     ``lss_corr_length_mpc`` / ``lss_sigma`` override the fixed SurveyParams GP
     hyperparameters at build time (``None`` keeps the fiducials).
+
+    ``c_mode`` selects the completeness base the fit is residual to:
+    ``"per_pixel"`` (legacy default, bit-identical -- per-pixel matched-kernel
+    C, occupied rows only) or ``"aggregate"`` (ONE sky-aggregate ``Cbar``
+    matching the in-likelihood ``SurveyParams.c_mode=1`` estimator, and the
+    fit INCLUDES EMPTY PIXELS as N_obs = 0 rows against the nonzero base
+    ``Cbar dN_exp`` -- the void information; Q then targets the FULL observed
+    overdensity, not the sub-smoothing residual).
     """
     import healpy as hp
 
@@ -249,28 +263,67 @@ def _build_completion_radial(
     dN_exp_count_u = _bin_integral(dN_exp_density)               # (n_grid,)
     exp_safe = np.where(dN_exp_count_u > 0.0, dN_exp_count_u, 1.0)
 
-    # Build only OCCUPIED pixels (DESI footprints are mostly empty ⇒ huge speedup);
-    # empty pixels get logQ = 0 (Q = 1, homogeneous) by the zero-init below.
     occ = np.nonzero(ngals_np > 0)[0]
     n_occ = int(occ.size)
-    C_u = np.empty((n_occ, n_grid), dtype=float)
-    N_obs_u = np.zeros((n_occ, n_grid), dtype=float)
-    w_budget = np.empty((n_occ, n_grid), dtype=float)
-    for i, r in enumerate(occ):
-        dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        # Expectation-weighted bin completeness: C_bin = int(C * dN_exp) / int(dN_exp),
-        # so the solver's rate_base = C_u * dN_exp_count_u is exactly the
-        # bin-integrated expected OBSERVED counts — the same footing as N_obs.
-        C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
-        prod = C_fine * dN_exp_density
-        C_u[i] = np.clip(_bin_integral(prod) / exp_safe, 0.0, 1.0)
-        # This pixel's missing-budget weight on the OUTPUT zgrid at the build
-        # fiducial: w_p(z) = (1 - C_p(z)) * dN_exp(z) — the same
-        # (1 - C) dN_exp the likelihood multiplies Q into (dN_miss).
-        w_budget[i] = (1.0 - C_fine) * dN_exp_density
-        zs = zgals_np[r, : ngals_np[r]]
-        counts_z, _ = np.histogram(zs, bins=edges)
-        N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
+    if c_mode == "aggregate":
+        # AGGREGATE base: ONE sky-aggregate completeness curve
+        #   Cbar(z) = clip(Sum_p dN_obs_s(z|p) / (N_pix_total * dN_exp_smooth), 0, 1),
+        #   N_pix_total = round(4 pi / apix)  (occupied AND empty pixels),
+        # mirroring the in-likelihood aggregate estimator (completion.py's
+        # _precompute_grids at SurveyParams.c_mode=1), and the fit covers
+        # EVERY pixel: empty pixels enter as N_obs = 0 rows against the
+        # nonzero base Cbar * dN_exp -- that zero IS the void information the
+        # occupied-only fit never sees (deep voids read Q < 1 instead of the
+        # homogeneous Q = 1).  The occupied-only compact indexing of the
+        # legacy branch is untouched; the pixel list is extended explicitly.
+        fit = np.arange(n_pix)
+        n_fit = int(fit.size)
+        n_pix_total = int(np.round(4.0 * np.pi / apix))
+        dN_obs_sum = np.zeros(n_grid, dtype=float)
+        for r in occ:
+            dN_obs_sum += np.asarray(
+                _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+        Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
+        # Same expectation-weighted bin average as the per-pixel branch
+        # (C_bin = int(C * dN_exp) / int(dN_exp), the existing Jacobian
+        # treatment), so rate_base = Cbar_u * dN_exp_count_u is the
+        # bin-integrated expected OBSERVED counts, same footing as N_obs.
+        Cbar_u = np.clip(
+            _bin_integral(Cbar_fine * dN_exp_density) / exp_safe, 0.0, 1.0)
+        C_u = np.tile(Cbar_u, (n_fit, 1))
+        # One shared budget-weight row (1 - Cbar) dN_exp for EVERY pixel: the
+        # renormalization footprint is the whole fitted sky.
+        w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
+        N_obs_u = np.zeros((n_fit, n_grid), dtype=float)
+        for i, r in enumerate(fit):
+            if ngals_np[r] > 0:
+                zs = zgals_np[r, : ngals_np[r]]
+                counts_z, _ = np.histogram(zs, bins=edges)
+                N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
+    else:
+        # Build only OCCUPIED pixels (DESI footprints are mostly empty ⇒ huge
+        # speedup); empty pixels get logQ = 0 (Q = 1, homogeneous) by the
+        # zero-init below.
+        fit = occ
+        n_fit = n_occ
+        C_u = np.empty((n_occ, n_grid), dtype=float)
+        N_obs_u = np.zeros((n_occ, n_grid), dtype=float)
+        w_budget = np.empty((n_occ, n_grid), dtype=float)
+        for i, r in enumerate(occ):
+            dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            # Expectation-weighted bin completeness: C_bin = int(C * dN_exp) / int(dN_exp),
+            # so the solver's rate_base = C_u * dN_exp_count_u is exactly the
+            # bin-integrated expected OBSERVED counts — the same footing as N_obs.
+            C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
+            prod = C_fine * dN_exp_density
+            C_u[i] = np.clip(_bin_integral(prod) / exp_safe, 0.0, 1.0)
+            # This pixel's missing-budget weight on the OUTPUT zgrid at the build
+            # fiducial: w_p(z) = (1 - C_p(z)) * dN_exp(z) — the same
+            # (1 - C) dN_exp the likelihood multiplies Q into (dN_miss).
+            w_budget[i] = (1.0 - C_fine) * dN_exp_density
+            zs = zgals_np[r, : ngals_np[r]]
+            counts_z, _ = np.histogram(zs, bins=edges)
+            N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
 
     bias = float(survey.b_miss)
     mp = poisson_lognormal_map(
@@ -278,15 +331,20 @@ def _build_completion_radial(
         bias=bias, prior_strength=prior_strength, maxiter=maxiter,
         workers=workers,
     )
-    # Map logQ back from uniform-χ to zgrid and scatter occupied rows into the
-    # full (n_pix, n_grid) table (empties stay logQ = 0).
+    # Map logQ back from uniform-χ to zgrid and scatter the fitted rows into
+    # the full (n_pix, n_grid) table (unfitted rows stay logQ = 0; in
+    # aggregate mode every row is fitted).
     logq_map = np.zeros((n_pix, n_grid), dtype=float)
-    for i, r in enumerate(occ):
+    for i, r in enumerate(fit):
         logq_map[r] = np.interp(chi, chi_u, mp["logq_map"][i])
 
     diagnostics = dict(mp["diagnostics"])
     diagnostics.update({
-        "nside": int(nside), "n_pix": n_pix, "n_occupied": n_occ,
+        # "n_occupied" is the FITTED-row count (what n_converged is judged
+        # against): the occupied pixels in per_pixel mode, every pixel in
+        # aggregate mode (empty ones fit as N_obs = 0 rows).
+        "nside": int(nside), "n_pix": n_pix, "n_occupied": n_fit,
+        "c_mode": c_mode,
         "ell_grid_uniform_chi": ell_grid, "dchi_uniform_mpc": dchi_u,
         "lss_corr_length_mpc": float(survey.lss_corr_length_mpc),
         "lss_sigma": float(survey.lss_sigma),
@@ -297,6 +355,8 @@ def _build_completion_radial(
         "fiducial_n0": float(survey.n0), "fiducial_delta": float(survey.delta),
         "bias_b_miss": float(survey.b_miss),
     })
+    if c_mode == "aggregate":
+        diagnostics.update({"n_pix_total": n_pix_total, "n_occupied_data": n_occ})
 
     logq_members = None
     if n_members and n_members > 0:
@@ -304,27 +364,28 @@ def _build_completion_radial(
             mp["s_map"], mp["lambda_map"], pk,
             n_members=int(n_members), bias=bias, prior_strength=prior_strength, seed=int(seed),
         )
-        lm_u = members["logq_members"]                       # (M, n_occ, n_grid) on χ_u
+        lm_u = members["logq_members"]                       # (M, n_fit, n_grid) on χ_u
         M = int(n_members)
         logq_members = np.zeros((M, n_pix, n_grid), dtype=float)
-        for i, r in enumerate(occ):
+        for i, r in enumerate(fit):
             for m in range(M):
                 logq_members[m, r] = np.interp(chi, chi_u, lm_u[m, i])
         diagnostics.update(members["diagnostics"])
 
     # Per-z mean-one budget renormalization over the FITTED FOOTPRINT (the
-    # occupied rows): the Laplace E[Q] carries a per-z monopole (var_post is
-    # largest where data are sparse -> spatially varying Jensen bias, measured
-    # +55% budget inflation), which would RESCALE the missing budget the
-    # likelihood forms as (1 - C) dN_exp Q.  After this, the total budget with
-    # Q equals the homogeneous budget identically at the build fiducial; each
-    # member is renormalized independently (placement uncertainty only, zero
-    # budget uncertainty).  Empty rows stay logQ = 0 (Q = 1) exactly.
+    # occupied rows in per_pixel mode, the whole sky in aggregate mode): the
+    # Laplace E[Q] carries a per-z monopole (var_post is largest where data
+    # are sparse -> spatially varying Jensen bias, measured +55% budget
+    # inflation), which would RESCALE the missing budget the likelihood forms
+    # as (1 - C) dN_exp Q.  After this, the total budget with Q equals the
+    # homogeneous budget identically at the build fiducial; each member is
+    # renormalized independently (placement uncertainty only, zero budget
+    # uncertainty).  Unfitted rows stay logQ = 0 (Q = 1) exactly.
     if budget_renorm:
-        logq_map[occ], log_mono = renormalize_q_mean_one(logq_map[occ], w_budget)
+        logq_map[fit], log_mono = renormalize_q_mean_one(logq_map[fit], w_budget)
         if logq_members is not None:
-            logq_members[:, occ], _ = renormalize_q_mean_one(
-                logq_members[:, occ], w_budget)
+            logq_members[:, fit], _ = renormalize_q_mean_one(
+                logq_members[:, fit], w_budget)
         diagnostics["budget_monopole_logq"] = log_mono
     diagnostics["budget_renormalized"] = bool(budget_renorm)
 
@@ -342,13 +403,17 @@ class _GP3DSurveyAssembly(NamedTuple):
     bin-integrated expected observed base (``base_vox``), and the per-survey
     coarse-z count profile (``counts_z``) that the joint ``z_ref`` weighting sums
     over all surveys.  ``w_budget`` is the fine-zgrid missing-budget weight
-    ``(1 - C_p) dN_exp`` of the occupied rows, consumed by the per-z mean-one
+    ``(1 - C_p) dN_exp`` of the fitted rows, consumed by the per-z mean-one
     Q renormalization of the OUTPUT table (not by the solve).
+
+    ``occ`` / ``n_occ`` / ``n_hat_occ`` are the FITTED rows: the occupied RING
+    pixels for the legacy per-pixel base, EVERY pixel (empties as N_obs = 0
+    rows) for the aggregate base (``c_mode="aggregate"``).
     """
     nside: int
     n_pix: int
     apix: float
-    occ: np.ndarray          # (n_occ,) occupied RING pixel indices
+    occ: np.ndarray          # (n_occ,) fitted RING pixel indices
     n_occ: int
     n_hat_all: np.ndarray    # (n_pix, 3) all-pixel output directions
     n_hat_occ: np.ndarray    # (n_occ, 3) occupied-voxel directions
@@ -379,7 +444,8 @@ def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
     }
 
 
-def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
+def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
+                          c_mode: str = "per_pixel"):
     """Load a survey and assemble its gp3d voxel inputs on the shared ``z_s`` grid.
 
     Extracted verbatim from the single-survey ``_build_completion_gp3d`` body so
@@ -391,6 +457,13 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
     delta (its expected-density normalisation); the field bias ``b_miss`` does
     NOT enter the assembly (``_precompute_grids`` depends only on n0/delta/cosmo),
     so a per-survey bias is applied later by scaling the design matrix.
+
+    ``c_mode="aggregate"`` swaps the per-pixel completeness base for the ONE
+    sky-aggregate ``Cbar dN_exp`` and extends the voxel list to EVERY pixel
+    (empty pixels as N_obs = 0 rows -- the void information); the returned
+    ``occ``/``n_occ``/``n_hat_occ`` then describe the FITTED rows (the whole
+    sky).  The default keeps the legacy occupied-only assembly bit-identical
+    (the joint multi-survey builder never passes it).
     """
     import healpy as hp
 
@@ -419,7 +492,6 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
 
     occ = np.nonzero(ngals_np > 0)[0]
     n_occ = int(occ.size)
-    n_hat_occ = np.asarray(hp.pix2vec(int(nside), occ, nest=False), dtype=float).T  # (n_occ,3)
 
     # Expected OBSERVED counts per coarse z-bin: integrate C(z) * dN_exp(z) over
     # each bin on the fine grid, on the same footing as the histogram that fills
@@ -430,27 +502,61 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
     # field_clip and the solve saturates).
     G_s = int(np.asarray(z_s).size)
     dz_fine = np.diff(zgrid_np)
-    N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
-    base_vox = np.empty((n_occ, G_s), dtype=float)
-    w_budget = np.empty((n_occ, n_grid), dtype=float)
-    for i, r in enumerate(occ):
-        dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
-        prod = C_fine * dN_exp_density
-        cum = np.concatenate([[0.0], np.cumsum(0.5 * (prod[1:] + prod[:-1]) * dz_fine)])
-        base_vox[i] = np.diff(np.interp(edges_s, zgrid_np, cum))
-        # Fine-zgrid missing-budget weight (1 - C) dN_exp of this row, for the
-        # per-z mean-one renormalization of the OUTPUT table (same footing as
-        # the likelihood's dN_miss = (1 - C) dN_exp Q).
-        w_budget[i] = (1.0 - C_fine) * dN_exp_density
-        zs = zgals_np[r, : ngals_np[r]]
-        counts_s, _ = np.histogram(zs, bins=edges_s)
-        N_obs_vox[i] = counts_s
+
+    def _coarse_bin_integral(density_fine):
+        cum = np.concatenate([
+            [0.0],
+            np.cumsum(0.5 * (density_fine[1:] + density_fine[:-1]) * dz_fine),
+        ])
+        return np.diff(np.interp(edges_s, zgrid_np, cum))
+
+    if c_mode == "aggregate":
+        # AGGREGATE base (mirrors the radial builder and the in-likelihood
+        # SurveyParams.c_mode=1 estimator): one sky-aggregate Cbar, and the
+        # voxel list extends to EVERY pixel so empty pixels enter as
+        # N_obs = 0 rows against the nonzero base -- the void information.
+        fit = np.arange(n_pix)
+        n_fit = int(fit.size)
+        n_pix_total = int(np.round(4.0 * np.pi / apix))
+        dN_obs_sum = np.zeros(n_grid, dtype=float)
+        for r in occ:
+            dN_obs_sum += np.asarray(
+                _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+        Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
+        base_row = _coarse_bin_integral(Cbar_fine * dN_exp_density)
+        base_vox = np.tile(base_row, (n_fit, 1))
+        w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
+        N_obs_vox = np.zeros((n_fit, G_s), dtype=float)
+        for i, r in enumerate(fit):
+            if ngals_np[r] > 0:
+                zs = zgals_np[r, : ngals_np[r]]
+                counts_s, _ = np.histogram(zs, bins=edges_s)
+                N_obs_vox[i] = counts_s
+        n_hat_fit = n_hat_all
+    else:
+        fit = occ
+        n_fit = n_occ
+        n_hat_fit = np.asarray(
+            hp.pix2vec(int(nside), occ, nest=False), dtype=float).T  # (n_occ,3)
+        N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
+        base_vox = np.empty((n_occ, G_s), dtype=float)
+        w_budget = np.empty((n_occ, n_grid), dtype=float)
+        for i, r in enumerate(occ):
+            dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
+            base_vox[i] = _coarse_bin_integral(C_fine * dN_exp_density)
+            # Fine-zgrid missing-budget weight (1 - C) dN_exp of this row, for the
+            # per-z mean-one renormalization of the OUTPUT table (same footing as
+            # the likelihood's dN_miss = (1 - C) dN_exp Q).
+            w_budget[i] = (1.0 - C_fine) * dN_exp_density
+            zs = zgals_np[r, : ngals_np[r]]
+            counts_s, _ = np.histogram(zs, bins=edges_s)
+            N_obs_vox[i] = counts_s
 
     counts_z = N_obs_vox.sum(axis=0)
     return _GP3DSurveyAssembly(
-        nside=int(nside), n_pix=n_pix, apix=apix, occ=occ, n_occ=n_occ,
-        n_hat_all=n_hat_all, n_hat_occ=n_hat_occ,
+        nside=int(nside), n_pix=n_pix, apix=apix, occ=fit, n_occ=n_fit,
+        n_hat_all=n_hat_all, n_hat_occ=n_hat_fit,
         N_obs_vox=N_obs_vox, base_vox=base_vox, counts_z=counts_z,
         w_budget=w_budget,
     )
@@ -500,6 +606,7 @@ def _build_completion_gp3d(
     gp3d_nz_nodes: int = 6,
     gp3d_nsph_nodes: int = 32,
     gp3d_z_node_hi=None,
+    c_mode: str = "per_pixel",
 ):
     """3-D angular-coupling MAP + optional ensemble log Q tables.
 
@@ -522,6 +629,10 @@ def _build_completion_gp3d(
     3.0, which left ``zgrid[-1] > 3`` covered only by prior extrapolation.  The
     inducing grid must resolve ``ls_z`` (:func:`_gp3d_resolution_guard`, hard
     error) or the field silently collapses to the prior.
+
+    ``c_mode="aggregate"`` fits against the sky-aggregate base ``Cbar dN_exp``
+    over EVERY pixel (see :func:`_assemble_gp3d_survey`); the default keeps
+    the legacy occupied-only per-pixel base bit-identical.
     """
     M_SPH, M_Z = int(gp3d_nsph_nodes), int(gp3d_nz_nodes)
 
@@ -551,13 +662,15 @@ def _build_completion_gp3d(
     G_s = int(z_s.size)
 
     survey_data = _assemble_gp3d_survey(
-        catalog_path, cosmo=cosmo, survey=survey, z_s=z_s, edges_s=edges_s)
+        catalog_path, cosmo=cosmo, survey=survey, z_s=z_s, edges_s=edges_s,
+        c_mode=c_mode)
     nside, n_pix, n_occ = survey_data.nside, survey_data.n_pix, survey_data.n_occ
 
     def _base_diag(extra):
         d = _gp3d_base_diagnostics(
             cosmo, survey, nside=nside, n_pix=n_pix, n_occ=n_occ,
             amp=amp, ls_sph=ls_sph, bias=bias)
+        d["c_mode"] = c_mode
         d.update(extra)
         return d
 
@@ -633,8 +746,9 @@ def _build_completion_gp3d(
         diagnostics["n_members"] = int(n_members)
 
     # Per-z mean-one budget renormalization over the FITTED FOOTPRINT (the
-    # occupied rows), same convention as the radial builder.  Empty pixels
-    # keep their posterior-mean value: far pixels read exactly Q = 1
+    # occupied rows; in aggregate mode every pixel is fitted, so the footprint
+    # is the whole sky), same convention as the radial builder.  Unfitted
+    # pixels keep their posterior-mean value: far pixels read exactly Q = 1
     # (homogeneous) and must not absorb the footprint's monopole; the
     # borrowing halo just outside the footprint keeps its (small) angular
     # tail unrenormalized.  Skipped when the eval produced non-finite cells
@@ -675,6 +789,7 @@ def build_completion(
     gp3d_nz_nodes: int = 6,
     gp3d_nsph_nodes: int = 32,
     gp3d_z_node_hi=None,
+    c_mode: str = "per_pixel",
 ):
     """Build the log Q completion tables from a survey catalog.
 
@@ -689,13 +804,24 @@ def build_completion(
     hyperparameters in BOTH modes; the ``gp3d_*_nodes`` / ``gp3d_z_node_hi``
     inducing-grid knobs apply to ``mode="gp3d"`` only, which hard-errors when
     the grid cannot resolve ``ls_z`` (:func:`_gp3d_resolution_guard`).
+
+    ``c_mode`` selects the completeness base of the fit in BOTH modes:
+    ``"per_pixel"`` (legacy default, bit-identical) or ``"aggregate"`` (the
+    sky-aggregate ``Cbar`` base with empty pixels fit as N_obs = 0 rows).  The
+    table must be consumed under the SAME ``SurveyParams.c_mode`` -- the two
+    targets differ by the entire clustering signal -- so the mode is stamped
+    in the HDF5 attrs and hard-checked at load.
     """
+    if c_mode not in ("per_pixel", "aggregate"):
+        raise ValueError(
+            f"c_mode must be 'per_pixel' or 'aggregate', got {c_mode!r}.")
     if mode == "radial":
         return _build_completion_radial(
             catalog_path, n_members=n_members, seed=seed,
             prior_strength=prior_strength, maxiter=maxiter, workers=workers,
             log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
             lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
+            c_mode=c_mode,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
@@ -706,6 +832,7 @@ def build_completion(
             lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
             gp3d_nz_nodes=gp3d_nz_nodes, gp3d_nsph_nodes=gp3d_nsph_nodes,
             gp3d_z_node_hi=gp3d_z_node_hi,
+            c_mode=c_mode,
         )
     raise ValueError(f"Unknown build mode {mode!r}; expected 'radial' or 'gp3d'.")
 
@@ -776,6 +903,16 @@ def main(argv=None):
                         "BEHAVIOR CHANGE from the historical hardwired 3.0, "
                         "which left zgrid[-1] > 3 covered only by prior "
                         "extrapolation.")
+    p.add_argument("--c-mode", choices=["per_pixel", "aggregate"],
+                   default="per_pixel",
+                   help="Completeness base the fit is residual to (both modes). "
+                        "'per_pixel' (default): legacy per-pixel matched-kernel "
+                        "C, occupied pixels only. 'aggregate': ONE sky-aggregate "
+                        "Cbar (matching the inference c_mode=aggregate "
+                        "estimator), with EMPTY pixels included as N_obs=0 rows "
+                        "(voids are informative). Stamped in the HDF5 attrs; the "
+                        "inference hard-errors when the table's c_mode does not "
+                        "match the survey's.")
     p.add_argument("--log10n0", type=float, default=None,
                    help="Override log10 of the expected comoving galaxy density "
                         "[Mpc^-3] the fit is conditioned on (default -2.0). "
@@ -835,6 +972,7 @@ def main(argv=None):
         lss_corr_length_mpc=opts.lss_corr_length_mpc, lss_sigma=opts.lss_sigma,
         gp3d_nz_nodes=opts.gp3d_nz_nodes, gp3d_nsph_nodes=opts.gp3d_nsph_nodes,
         gp3d_z_node_hi=opts.gp3d_z_node_hi,
+        c_mode=opts.c_mode,
     )
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")
@@ -902,6 +1040,7 @@ def main(argv=None):
         zgrid=np.asarray(zgrid), indexing=indexing, metadata=diagnostics,
         budget_renormalized=diagnostics.get("budget_renormalized"),
         budget_monopole_logq=budget_monopole,
+        c_mode=opts.c_mode,
     )
     _ok(f"completion  →  {opts.out}")
     _end()

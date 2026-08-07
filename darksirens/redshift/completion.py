@@ -34,6 +34,31 @@ depth edge.  There is no parametric roll-off: the ratio itself is
 the completeness estimator (survey depth shows up as the data-driven
 decline of dN_obs_s).
 
+The estimator above is the PER-PIXEL mode (``survey.c_mode == 0``, the
+legacy default).  Its numerator is per-pixel while its denominator is
+isotropic, so C really estimates ``C_sel(z) * (1 + delta_obs(pix, z))``
+clipped to [0, 1]: the observed angular clustering is absorbed into the
+completeness, ``(1 - C)`` anti-tracks the true missing density, and
+overdense complete pixels clip at 1, silently discarding their excess.
+The opt-in AGGREGATE mode (``survey.c_mode == 1``) instead forms ONE
+sky-aggregate curve per proposal,
+
+    Cbar(z) = clip( Sum_p dN_obs_s(z|p) / (N_pix_total * dN_exp_s(z)), 0, 1 ),
+    N_pix_total = round(4 pi / apix)   (occupied AND empty pixels),
+
+broadcast to every pixel in place of the per-pixel C -- a radial-only
+budget ("C says HOW MUCH is missing"), with all angular structure carried
+by the mean-one Q field ("Q says WHERE it goes").  The field-convention
+global normalizer uses the SAME curve, so numerator and normalizer carry
+one budget.  ``z_depth`` semantics are unchanged (Cbar := 0 beyond the
+depth).  ``c_mode`` is resolved at trace time (structural, never sampled;
+see ``_is_aggregate_c_mode``).  Known
+caveat, deliberately not addressed here: Cbar is proportional to 1/n0
+through a single GLOBAL clip, so near full completeness the likelihood
+can be kinked in n0 (one clip boundary for the whole sky instead of
+per-pixel boundaries that engage pixel by pixel) -- flagged for the
+inference stage, watch sampler behaviour in n0.
+
 The missing-galaxy *density* (count units, per unit z) is
 
     dN_miss(z|pix) = (1 - C(z|pix)) * dN_exp(z) * max(1 + b_eff * delta_g(pix,z), 0),
@@ -90,6 +115,38 @@ from darksirens.redshift.grid import zgrid
 
 # Gaussian kernel width for the completeness ratio (both sides).
 _SIGMA_SMOOTH: float = 0.05
+
+# Completeness estimator mode (SurveyParams.c_mode; string names in
+# darksirens.core.constants.C_MODES).  Resolved once per trace -- a
+# Python-level branch exactly like ``z_depth``.
+C_MODE_PER_PIXEL: int = 0   # legacy default: per-pixel matched-kernel ratio
+C_MODE_AGGREGATE: int = 1   # one sky-aggregate Cbar(z) broadcast to all pixels
+
+
+def _is_aggregate_c_mode(c_mode) -> bool:
+    """Trace-safe decode of ``SurveyParams.c_mode`` -> aggregate?
+
+    The likelihood's module-level jit (``darksiren_log_likelihood``) takes the
+    survey as a pytree ARGUMENT, so any int leaf crosses that boundary as a
+    value-unreadable tracer.  The branch therefore rides the ``z_depth``
+    structural pattern: per_pixel is carried as ``None`` (the container
+    default; the parameter decoder normalises a concrete 0 to ``None`` before
+    any jit boundary) and aggregate as the int ``1``.  A concrete int is
+    decoded by value (so eager callers may pass 0 or 1 directly); a non-None
+    leaf whose value cannot be read is, by the normalisation contract, the
+    aggregate flag.
+    """
+    if c_mode is None:
+        return False
+    if isinstance(c_mode, (int, np.integer)):
+        return int(c_mode) == C_MODE_AGGREGATE
+    try:
+        return int(c_mode) == C_MODE_AGGREGATE   # concrete 0-d array
+    except jax.errors.ConcretizationTypeError:
+        # Traced leaf: value unreadable at trace time.  per_pixel never
+        # reaches a jit boundary as a leaf (normalised to None), so this is
+        # the aggregate flag.
+        return True
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
 _SQRT2PI: float = float(np.sqrt(2.0 * np.pi))
@@ -619,10 +676,64 @@ def build_field_delta_g_inputs(
 # ------------------------------------------------------------
 
 class _CompletionGrids(NamedTuple):
-    """Pixel-independent grids computed once per likelihood evaluation."""
+    """Pixel-independent grids computed once per likelihood evaluation.
+
+    ``C_bar_raw`` is the UNCLIPPED sky-aggregate completeness ratio, populated
+    only in aggregate mode (``survey.c_mode == C_MODE_AGGREGATE``); ``None``
+    (the per-pixel default) keeps the pytree structure -- and therefore every
+    downstream ``is not None`` branch -- static, so consumers dispatch on it at
+    trace time without touching ``survey.c_mode`` again.  Kept raw (one clip
+    site would hide the clip fraction from the diagnostics); consumers clip to
+    [0, 1] where they use it.
+    """
     log_g: jnp.ndarray          # (N_grid,) log galaxy measure
     dN_exp: jnp.ndarray         # (N_grid,) n0 * apix * g(z)
     dN_exp_smooth: jnp.ndarray  # (N_grid,) S-smoothed expected counts
+    C_bar_raw: jnp.ndarray = None  # (N_grid,) aggregate ratio (unclipped) | None
+
+
+def _aggregate_dN_obs_sum(em_catalog: EMCatalog) -> jnp.ndarray:
+    """Survey-total smoothed observed density ``Sum_p dN_obs_s(z|p)``, (N_grid,).
+
+    The aggregate numerator is a DATA CONSTANT (theta-independent) summed over
+    every pixel of the survey -- empty pixels contribute exactly zero, so any
+    row set covering all OCCUPIED pixels suffices.  Reuses the caches that
+    already exist rather than building a second one:
+
+    * ``field_dN_obs_s`` (field-convention rows, one per occupied pixel over
+      the FULL sky) when present -- the survey-complete row set by
+      construction;
+    * otherwise the catalog rows themselves, which are the full global pixel
+      set only when ``unique_pixels is None`` (legacy full catalogs / the
+      eager diagnostic path): the ``dN_obs_kde`` cache if built, else the
+      on-the-fly per-row KDE.
+
+    A COMPACT catalog without field inputs is refused: its rows are only the
+    PE-union-selection pixels, so occupied pixels outside the union would be
+    silently dropped from the numerator and bias Cbar low.  All branches are
+    pytree-structure (``None``-ness) decisions, resolved at trace time.
+    """
+    if em_catalog.field_dN_obs_s is not None:
+        return jnp.sum(
+            jnp.asarray(em_catalog.field_dN_obs_s, dtype=zgrid.dtype), axis=0
+        )
+    if em_catalog.unique_pixels is not None:
+        raise ValueError(
+            "c_mode='aggregate' on a COMPACT catalog requires the field-"
+            "convention observed rows (field_dN_obs_s, built over the FULL sky "
+            "by build_field_normalization_inputs): the compact rows cover only "
+            "the PE-union-selection pixels, so summing them would drop every "
+            "occupied pixel outside the union and bias Cbar low. Run with "
+            "--catalog_sky_weighting field (the default), which populates them."
+        )
+    if em_catalog.dN_obs_kde is not None:
+        return jnp.sum(em_catalog.dN_obs_kde, axis=0)
+    n_rows = em_catalog.zgals.shape[0]
+    rows = jnp.arange(n_rows, dtype=jnp.int32)
+    kde = vmap(_kde_dndz_obs, in_axes=(0, None, None, None))(
+        rows, em_catalog.zgals, em_catalog.wgals, em_catalog.ngals
+    )
+    return jnp.sum(kde, axis=0)
 
 
 def _precompute_grids(
@@ -654,6 +765,26 @@ def _precompute_grids(
     per trace; the ``None`` path builds no mask and takes the ORIGINAL
     expression untouched (bit-identical legacy behaviour, pinned by
     tests/test_completion_depth.py::test_z_depth_none_bit_identical).
+
+    ``survey.c_mode`` (structural at trace time -- ``None``/0 legacy
+    per-pixel, 1 aggregate; see :func:`_is_aggregate_c_mode` for how the flag
+    survives nested jit boundaries) selects the completeness estimator.  In
+    AGGREGATE mode this is the single formation site of the sky-aggregate
+    ratio
+
+        Cbar(z) = Sum_p dN_obs_s(z|p) / (N_pix_total * dN_exp_smooth(z)),
+        N_pix_total = round(4 pi / apix)   (occupied AND empty pixels),
+
+    stored UNCLIPPED on the grids bundle (consumers clip to [0, 1]); every C
+    consumer (the per-row curves, the field normalizer, the clip diagnostics)
+    then broadcasts this one curve in place of the per-pixel ratio, so the
+    numerator and the global normalizer carry the same budget by
+    construction.  The numerator is a data constant; the theta dependence is
+    the shared denominator, so Cbar is proportional to 1/n0 through ONE
+    global clip -- the likelihood can be kinked in n0 near full completeness
+    (module docstring caveat; flagged for the inference stage, not addressed
+    here).  ``c_mode == C_MODE_PER_PIXEL`` (the default) leaves the bundle's
+    ``C_bar_raw`` at ``None`` and every downstream path bit-identical.
     """
     log_g = log_galaxy_measure_grid(cosmo, survey)
     dN_exp = survey.n0 * em_catalog.apix * jnp.exp(log_g)
@@ -672,7 +803,20 @@ def _precompute_grids(
         # 1 beyond the depth: the discarded primal stays finite and its
         # gradient is exactly zero (data numerator / constant denominator).
         dN_exp_smooth = jnp.where(depth_mask, dN_exp_smooth, 1.0)
-    return _CompletionGrids(log_g=log_g, dN_exp=dN_exp, dN_exp_smooth=dN_exp_smooth)
+
+    C_bar_raw = None
+    if _is_aggregate_c_mode(survey.c_mode):
+        dN_obs_sum = _aggregate_dN_obs_sum(em_catalog)      # data constant
+        n_pix_total = jnp.round(4.0 * jnp.pi / em_catalog.apix)
+        # Same guarded denominator as _row_C (an exact-zero smooth is inert);
+        # beyond a concrete z_depth the smooth is already pinned to 1 above,
+        # and every consumer discards Cbar there anyway (C := 0 relax).
+        dN_exp_safe = jnp.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
+        C_bar_raw = dN_obs_sum / (n_pix_total * dN_exp_safe)
+    return _CompletionGrids(
+        log_g=log_g, dN_exp=dN_exp, dN_exp_smooth=dN_exp_smooth,
+        C_bar_raw=C_bar_raw,
+    )
 
 
 # ------------------------------------------------------------
@@ -922,8 +1066,16 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
     ``row`` is the compact catalog row index (== global HEALPix pixel for legacy
     full catalogs).  Returns ``(C, global_pix)``; depends on ``(row, Θ)`` only,
     never on a sample redshift.
+
+    AGGREGATE mode (``grids.C_bar_raw is not None``, a static pytree-structure
+    branch): the one sky-aggregate curve replaces the per-pixel ratio for
+    EVERY row -- the row's own observed KDE is not consulted, so the observed
+    angular clustering cannot enter the missing budget (it belongs to Q).
     """
     global_pix = row if em_catalog.unique_pixels is None else em_catalog.unique_pixels[row]
+
+    if grids.C_bar_raw is not None:
+        return jnp.clip(grids.C_bar_raw, 0.0, 1.0), global_pix
 
     # --- observed density: O(1) cache lookup, or on-the-fly fallback ---
     if em_catalog.dN_obs_kde is not None:
@@ -1300,7 +1452,11 @@ def field_global_log_Z(
     the quadrature.  ``C`` reuses ``_row_C``'s exact recipe --
     ``clip(dN_obs_s / where(dN_exp_smooth > 0, dN_exp_smooth, 1), 0, 1)`` -- and
     ``dN_exp = survey.n0 * apix * g(z)`` is the identical grid used per pixel, so
-    the reduction is consistent with ``_assemble_curves`` term by term.  The
+    the reduction is consistent with ``_assemble_curves`` term by term.  In
+    AGGREGATE mode (``survey.c_mode``) ``C`` is instead the SAME sky-aggregate
+    ``Cbar`` curve the per-row numerator uses -- one formation site,
+    ``_precompute_grids`` -- for occupied and empty pixels alike, so the global
+    normalizer and the numerator carry one budget.  The
     ``survey.z_depth`` completeness prior is applied EXACTLY as in
     ``_assemble_curves`` (Python-level branch on the concrete ``z_depth``;
     ``None`` takes the untouched full-grid expression): beyond the depth every
@@ -1350,12 +1506,19 @@ def _field_missing_curve(
     over the FULL grid.  The completeness denominator comes from
     ``_precompute_grids`` and therefore carries the depth-truncated smoothing
     ``S @ (dN_exp · 1[z <= z_depth])`` — identical to the per-pixel numerator
-    path, so C matches ``_row_C`` at the depth edge too.  Returns
-    ``(V_total, dN_exp)``.
+    path, so C matches ``_row_C`` at the depth edge too.  In AGGREGATE mode
+    (``survey.c_mode``) the grids carry the sky-aggregate ``Cbar`` and it
+    replaces the per-pixel ratio for every pixel, occupied AND empty (empty
+    pixels have ``C == Cbar`` too, not 0), so the global normalizer carries
+    exactly the budget the per-row numerator does -- the same single curve
+    from the same formation site.  Returns ``(V_total, dN_exp)``.
     """
     grids = _precompute_grids(cosmo, survey, em_catalog)
     dN_exp = grids.dN_exp                                    # (N_grid,) theta-dependent
     dN_exp_safe = jnp.where(grids.dN_exp_smooth > 0.0, grids.dN_exp_smooth, 1.0)
+    # AGGREGATE mode: static pytree-structure branch (mirrors _row_C).
+    aggregate = grids.C_bar_raw is not None
+    C_bar = jnp.clip(grids.C_bar_raw, 0.0, 1.0) if aggregate else None
 
     field_obs = jnp.asarray(em_catalog.field_dN_obs_s)       # (n_occ, N_grid) f32 constant
     n_occ = int(field_obs.shape[0])                          # static
@@ -1387,7 +1550,10 @@ def _field_missing_curve(
 
     def _row_V(obs_row, mod_row):
         obs_row = obs_row.astype(dN_exp.dtype)
-        C = jnp.clip(obs_row / dN_exp_safe, 0.0, 1.0)
+        if aggregate:
+            C = C_bar        # one survey curve; the row's own KDE is unused
+        else:
+            C = jnp.clip(obs_row / dN_exp_safe, 0.0, 1.0)
         if has_q:
             lss = mod_row.astype(dN_exp.dtype)
         elif has_dg:
@@ -1421,13 +1587,17 @@ def _field_missing_curve(
         (obs_chunks, mod_chunks, valid_chunks),
     )
 
-    # Empty pixels: C == 0, so their budget curve is lss_p itself -- n_empty
-    # for the legacy/delta_g modes (delta_g == 0 on empty pixels), the data
-    # constant Sum_empty Q_p(z) for the Q mode.
+    # Empty pixels: per-pixel C == 0, so their budget curve is lss_p itself --
+    # n_empty for the legacy/delta_g modes (delta_g == 0 on empty pixels), the
+    # data constant Sum_empty Q_p(z) for the Q mode.  In aggregate mode empty
+    # pixels carry C == Cbar like everyone else, so their curve is
+    # (1 - Cbar) * lss_p.
     if has_q:
         V_empty = jnp.asarray(em_catalog.field_lss_q_empty_sum, dtype=dN_exp.dtype)
     else:
         V_empty = n_empty
+    if aggregate:
+        V_empty = (1.0 - C_bar) * V_empty
 
     V_total = V_occ + V_empty
     # ``z_depth`` is concrete at trace time -> Python-level branch (mirrors
@@ -1639,16 +1809,23 @@ def _completion_clip_fractions_for_pixel(
     """
     global_pix = pix if em_catalog.unique_pixels is None else em_catalog.unique_pixels[pix]
 
-    if em_catalog.dN_obs_kde is not None:
-        # Cache row == catalog row by construction (see _row_C); index directly.
-        dN_obs = em_catalog.dN_obs_kde[pix]
+    if grids.C_bar_raw is not None:
+        # AGGREGATE mode: the raw ratio is the one sky-aggregate curve (same
+        # for every pixel), so the reported C-clip fraction is the fraction of
+        # the grid where the GLOBAL clip engages -- exactly the n0-kink
+        # exposure flagged in the module docstring.
+        C_raw = grids.C_bar_raw
     else:
-        dN_obs = _kde_dndz_obs(
-            pix, em_catalog.zgals, wgals=em_catalog.wgals, ngals=em_catalog.ngals
-        )
+        if em_catalog.dN_obs_kde is not None:
+            # Cache row == catalog row by construction (see _row_C); index directly.
+            dN_obs = em_catalog.dN_obs_kde[pix]
+        else:
+            dN_obs = _kde_dndz_obs(
+                pix, em_catalog.zgals, wgals=em_catalog.wgals, ngals=em_catalog.ngals
+            )
 
-    dN_exp_safe = jnp.where(grids.dN_exp_smooth > 0.0, grids.dN_exp_smooth, 1.0)
-    C_raw = dN_obs / dN_exp_safe
+        dN_exp_safe = jnp.where(grids.dN_exp_smooth > 0.0, grids.dN_exp_smooth, 1.0)
+        C_raw = dN_obs / dN_exp_safe
     C_clipped_mask = (C_raw < 0.0) | (C_raw > 1.0)
     C = jnp.clip(C_raw, 0.0, 1.0)
 

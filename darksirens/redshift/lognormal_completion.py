@@ -53,6 +53,13 @@ Caveats (the default **radial** completion, ``mode="radial"``):
   never rescales it (the total is C's and n0's job).  The removed monopole and
   a boolean stamp are recorded in the HDF5 attrs; unstamped (legacy) tables
   draw a loud warning at load.
+- Completeness target: the fit is residual to a completeness base, either the
+  legacy per-pixel ratio (``c_mode="per_pixel"``) or the opt-in sky-aggregate
+  ``Cbar`` with empty pixels included as N_obs = 0 rows (``c_mode="aggregate"``;
+  Q then carries the FULL observed overdensity, voids included).  The mode is
+  stamped in the HDF5 attrs (absent = legacy per_pixel) and must match the
+  consuming survey's ``c_mode`` — the two targets differ by the entire
+  clustering signal, so the inference loader hard-errors on a mismatch.
 
 The radial builder uses NumPy/SciPy only; the gp3d builder additionally uses
 JAX and the (sphere x z) GP of :mod:`darksirens.sky.models`, both imported
@@ -988,6 +995,7 @@ def save_lss_completion_hdf5(
     realization_set_id: str | None = None,
     budget_renormalized: bool | None = None,
     budget_monopole_logq: np.ndarray | None = None,
+    c_mode: str | None = None,
 ) -> str:
     """Write a completion file with layout ``/lss_completion/{logq_map,logq_members,zgrid}``.
 
@@ -999,6 +1007,14 @@ def save_lss_completion_hdf5(
     non-renormalized table and warns loudly.  Stamping ``True`` REQUIRES the
     removed curve (fail-closed provenance: a table claimed mean-one without
     the record of what was removed cannot be audited).
+
+    ``c_mode`` records which completeness estimator the fit was residual to:
+    ``"per_pixel"`` (the per-pixel matched-kernel base ``C_p dN_exp``) or
+    ``"aggregate"`` (the sky-aggregate base ``Cbar dN_exp``, empty pixels
+    included as N_obs = 0 rows).  ``None`` writes no attr, which the loader
+    reads as legacy ``per_pixel``.  The two targets differ by the entire
+    clustering signal, so the loader hard-errors when a table's ``c_mode``
+    does not match the consuming survey's.
 
     A ``realization_set_id`` (a fresh ``uuid4().hex`` unless one is supplied)
     is stamped on the ``/lss_completion`` group so a K>=2 mixture can verify
@@ -1056,6 +1072,10 @@ def save_lss_completion_hdf5(
                 "renormalization itself was fed a poisoned table. Fix the "
                 "build instead of persisting the artifact."
             )
+    if c_mode is not None and c_mode not in ("per_pixel", "aggregate"):
+        raise ValueError(
+            f"c_mode must be 'per_pixel' or 'aggregate', got {c_mode!r}."
+        )
 
     tmp_path = f"{path}.tmp-{os.getpid()}"
     try:
@@ -1077,6 +1097,8 @@ def save_lss_completion_hdf5(
                 grp.attrs["budget_renormalized"] = bool(budget_renormalized)
             if budget_monopole_logq is not None:
                 grp.attrs["budget_monopole_logq"] = budget_monopole_logq
+            if c_mode is not None:
+                grp.attrs["c_mode"] = c_mode
             if logq_members is not None:
                 grp.attrs["member_content_sha256"] = hashlib.sha256(
                     np.ascontiguousarray(members_arr).tobytes()
@@ -1105,7 +1127,10 @@ def load_lss_completion_hdf5(path: str) -> dict:
     attrs ``budget_renormalized`` / ``budget_monopole_logq`` follow the same
     convention — ``None`` when absent — but an absent ``budget_renormalized``
     additionally draws a loud warning: the table's Q then rescales the missing
-    budget (Jensen inflation) instead of only redistributing it.
+    budget (Jensen inflation) instead of only redistributing it.  ``c_mode``
+    is likewise ``None`` when absent, which consumers must read as legacy
+    ``"per_pixel"`` (every table written before the aggregate mode existed was
+    fit residual to the per-pixel base).
 
     Validation: non-finite table content is rejected outright (one NaN cell
     poisons every event in its pixel).  Convergence diagnostics are surfaced
@@ -1123,7 +1148,8 @@ def load_lss_completion_hdf5(path: str) -> dict:
            "indexing": "compact", "model": None, "completion_kind": None,
            "diagnostics": None, "realization_set_id": None,
            "member_content_sha256": None, "n_members": None,
-           "budget_renormalized": None, "budget_monopole_logq": None}
+           "budget_renormalized": None, "budget_monopole_logq": None,
+           "c_mode": None}
     with h5py.File(path, "r") as f:
         grp = f["lss_completion"] if "lss_completion" in f else f
         if "logq_map" in grp:
@@ -1133,7 +1159,7 @@ def load_lss_completion_hdf5(path: str) -> dict:
         if "zgrid" in grp:
             out["zgrid"] = np.asarray(grp["zgrid"])
         for key in ("indexing", "model", "completion_kind",
-                    "realization_set_id", "member_content_sha256"):
+                    "realization_set_id", "member_content_sha256", "c_mode"):
             if key in grp.attrs:
                 val = grp.attrs[key]
                 out[key] = val.decode() if isinstance(val, bytes) else str(val)
