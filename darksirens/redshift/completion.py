@@ -24,9 +24,13 @@ kernel of width ``_SIGMA_SMOOTH``, truncated to [0, zmax] and
 renormalised per source point.  The numerator is the per-galaxy KDE
 (each observed galaxy contributes a unit-mass truncated kernel); the
 denominator applies the identical operator to dN_exp/dz via quadrature
-on ``zgrid``.  Because the operator is linear and shared, a constant
-true completeness passes through the ratio exactly, including at the
-z = 0 boundary.  There is no parametric roll-off: the ratio itself is
+on ``zgrid``.  When the survey carries a concrete ``z_depth`` the
+expected side is truncated at the depth before smoothing
+(``S @ (dN_exp · 1[z <= z_depth])``), matching the support of the
+observed side, whose sources all lie below the depth.  Because the
+operator is linear and shared, a constant true completeness passes
+through the ratio exactly, including at the z = 0 boundary and at the
+depth edge.  There is no parametric roll-off: the ratio itself is
 the completeness estimator (survey depth shows up as the data-driven
 decline of dN_obs_s).
 
@@ -626,9 +630,48 @@ def _precompute_grids(
     survey: SurveyParams,
     em_catalog: EMCatalog,
 ) -> _CompletionGrids:
+    """Pixel-independent completion grids for one (cosmo, survey) proposal.
+
+    The completeness denominator must see the SAME support as the numerator:
+    the observed-galaxy KDE only ever receives sources below the survey depth
+    (nothing past ``z_depth`` is catalogued), so with a concrete ``z_depth``
+    the expected side is truncated at the depth BEFORE smoothing,
+
+        dN_exp_smooth = S @ (dN_exp · 1[z <= z_depth]).
+
+    Without the truncation the denominator keeps mass above the depth that the
+    numerator can never match, so C dips within ~2 sigma_smooth below the edge
+    and ``(1 - C) dN_exp`` spikes there (the closure experiment measured
+    exactly this artifact).  With it, a constant true completeness passes
+    through the ratio exactly up to the edge — the depth counterpart of the
+    z = 0 boundary treatment already built into the operator.  This is the
+    ONLY site that forms ``dN_exp_smooth``; the field-mode recompute
+    (``_field_missing_curve``) and the offline Q builder consume these grids,
+    so they inherit the same truncated denominator.
+
+    ``z_depth`` is a concrete Python float (or ``None``) at trace time — never
+    a sampled/traced value — so this is a Python-level branch resolved once
+    per trace; the ``None`` path builds no mask and takes the ORIGINAL
+    expression untouched (bit-identical legacy behaviour, pinned by
+    tests/test_completion_depth.py::test_z_depth_none_bit_identical).
+    """
     log_g = log_galaxy_measure_grid(cosmo, survey)
     dN_exp = survey.n0 * em_catalog.apix * jnp.exp(log_g)
-    dN_exp_smooth = smoothing_operator() @ dN_exp
+    if survey.z_depth is None:
+        dN_exp_smooth = smoothing_operator() @ dN_exp
+    else:
+        depth_mask = zgrid <= survey.z_depth
+        dN_exp_smooth = smoothing_operator() @ jnp.where(depth_mask, dN_exp, 0.0)
+        # Beyond the depth the ratio estimator is never data: every consumer
+        # discards C there (the depth prior relaxes to C := 0, lss := 1).  But
+        # the truncated smooth UNDERFLOWS to ~0 a few sigma past the edge, and
+        # a live ``obs / tiny`` division there feeds inf local Jacobians into
+        # the zero cotangents of the downstream clip/where -- 0 * inf = NaN in
+        # reverse mode (the standard JAX where-trap; the zero cotangent does
+        # not sanitise the discarded branch).  Pin the denominator to an inert
+        # 1 beyond the depth: the discarded primal stays finite and its
+        # gradient is exactly zero (data numerator / constant denominator).
+        dN_exp_smooth = jnp.where(depth_mask, dN_exp_smooth, 1.0)
     return _CompletionGrids(log_g=log_g, dN_exp=dN_exp, dN_exp_smooth=dN_exp_smooth)
 
 
@@ -1304,7 +1347,11 @@ def _field_missing_curve(
     integrating.  Beyond ``survey.z_depth`` the curve is relaxed to the total
     pixel count (every pixel has C == 0 and lss == 1 there), so the beyond-depth
     completeness prior is already baked in and callers integrate ``dN_exp * V``
-    over the FULL grid.  Returns ``(V_total, dN_exp)``.
+    over the FULL grid.  The completeness denominator comes from
+    ``_precompute_grids`` and therefore carries the depth-truncated smoothing
+    ``S @ (dN_exp · 1[z <= z_depth])`` — identical to the per-pixel numerator
+    path, so C matches ``_row_C`` at the depth edge too.  Returns
+    ``(V_total, dN_exp)``.
     """
     grids = _precompute_grids(cosmo, survey, em_catalog)
     dN_exp = grids.dN_exp                                    # (N_grid,) theta-dependent
