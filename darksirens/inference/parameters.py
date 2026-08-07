@@ -15,7 +15,7 @@ from darksirens.core.constants import (
     W0_FID,
     WA_FID,
 )
-from darksirens.core.types import CosmoParams, SurveyParams
+from darksirens.core.types import C_MODE_AGGREGATE_STRUCT, CosmoParams, SurveyParams
 from darksirens.inference.prior import build_parameter_space, resolve_parameter_values
 from darksirens.sky import get_fixed_sky_params
 from darksirens.marks import mark_fiducial
@@ -103,10 +103,12 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         z_depth=z_depth,
         wl_params=wl_params,
         # STRUCTURAL normalisation (the z_depth pattern): per_pixel (0) is
-        # carried as None so the completion module's trace-time branch is a
-        # pytree-structure decision and survives darksiren_log_likelihood's
-        # jit boundary, where an int leaf becomes a value-unreadable tracer.
-        c_mode=(None if not c_mode else int(c_mode)),
+        # carried as None and aggregate as the LEAF-LESS sentinel, so BOTH
+        # modes are pytree-structure decisions that survive
+        # darksiren_log_likelihood's jit boundary, where an int leaf becomes
+        # a value-unreadable tracer (which the completion module hard-errors
+        # on rather than guessing a mode).
+        c_mode=(C_MODE_AGGREGATE_STRUCT if c_mode else None),
     )
 
 
@@ -128,7 +130,8 @@ class ParameterDecoder:
     z_depths: tuple[float | None, ...] = ()
     # Completeness estimator mode (int enum from C_MODES: 0=per_pixel legacy
     # default, 1=aggregate), decoded eagerly from the CLI string.  Stored on
-    # every catalog's SurveyParams with per_pixel normalised to None (the
+    # every catalog's SurveyParams with per_pixel normalised to None and
+    # aggregate to the leaf-less C_MODE_AGGREGATE_STRUCT sentinel (the
     # z_depth structural pattern -- see _survey_params; never sampled).
     c_mode: int = 0
     sky_labels: tuple[str, ...] = ()

@@ -1213,27 +1213,42 @@ def _warn_if_unconverged(path: str, diag) -> None:
 
     New-style files (builder stamped ``allow_unconverged``) can only be
     unconverged through that explicit override -- warn that a research
-    ablation artifact is entering inference.  Legacy files' counters are
-    unreliable (see load_lss_completion_hdf5's docstring): warn without
-    rejecting, and say why the counter cannot be trusted, so a verified-good
-    production table keeps loading while the operator still sees the flag.
+    ablation artifact is entering inference.  Substituted non-finite cells
+    (``n_nonfinite_substituted``, only stampable under the same override) are
+    treated identically: the eval degraded even when the solve itself
+    converged, and the builder also skips the budget renormalization for such
+    tables, so a Jensen-inflated Q must not circulate silently.  Legacy files'
+    counters are unreliable (see load_lss_completion_hdf5's docstring): warn
+    without rejecting, and say why the counter cannot be trusted, so a
+    verified-good production table keeps loading while the operator still
+    sees the flag.
     """
     if not isinstance(diag, dict):
         return
     converged = diag.get("converged")
     n_conv, n_occ = diag.get("n_converged"), diag.get("n_occupied")
+    n_sub = int(diag.get("n_nonfinite_substituted") or 0)
     looks_unconverged = (converged is False) or (
         converged is None
         and n_conv is not None and n_occ and int(n_conv) < int(n_occ)
-    )
+    ) or n_sub > 0
     if not looks_unconverged:
         return
     if "allow_unconverged" in diag:
         if diag.get("allow_unconverged"):
+            parts = []
+            if n_sub == 0 or converged is False:
+                parts.append("unconverged solve")
+            if n_sub:
+                parts.append(
+                    f"{n_sub} non-finite logQ cells substituted with Q = 1, "
+                    "which also skips the budget renormalization"
+                )
             warnings.warn(
-                f"LSS completion '{path}' was built UNCONVERGED under the "
-                "explicit --allow-unconverged override (research ablation "
-                "artifact). Do not use it for a production result.",
+                f"LSS completion '{path}' was built under the explicit "
+                f"--allow-unconverged override ({'; '.join(parts)}). "
+                "Research ablation artifact; do not use it for a production "
+                "result.",
                 RuntimeWarning,
                 stacklevel=3,
             )

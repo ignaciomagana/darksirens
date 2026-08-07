@@ -48,7 +48,13 @@ _trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 import pytest
 
 from darksirens.core.constants import C_MODES
-from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import (
+    AggregateCMode,
+    C_MODE_AGGREGATE_STRUCT,
+    CosmoParams,
+    SurveyParams,
+    EMCatalog,
+)
 from darksirens.redshift import zgrid
 from darksirens.redshift.completion import (
     C_MODE_AGGREGATE,
@@ -283,6 +289,51 @@ def test_aggregate_is_jit_and_grad_compatible():
     assert np.isfinite(float(val)) and np.isfinite(float(g))
 
 
+def test_c_mode_traced_int_leaf_hard_errors_not_silent_aggregate():
+    """A concrete int c_mode on a survey passed THROUGH a jit boundary becomes
+    a value-unreadable tracer.  Before the structural sentinel the tracer
+    fallback silently evaluated as AGGREGATE -- so ``jit(f)(survey(c_mode=0))``
+    computed different physics than the eager ``c_mode=0`` (measured 1.2e-2 in
+    N_miss on a pixel-varying KDE).  Now BOTH traced ints are refused loudly
+    with the normalisation contract in the message."""
+    cosmo = _cosmo()
+    cat, _dN_exp, _smooth = _clustered_catalog(delta_g="dummy")
+
+    @jax.jit
+    def total_miss(survey):
+        return jnp.sum(completion_curves(cosmo, survey, cat).N_miss)
+
+    for bad in (C_MODE_PER_PIXEL, C_MODE_AGGREGATE):
+        with pytest.raises(ValueError, match="c_mode"):
+            total_miss(_survey(c_mode=bad))
+
+
+def test_c_mode_structural_conventions_survive_jit_boundary():
+    """The decoder's conventions cross the survey-as-argument jit boundary as
+    pytree STRUCTURE: the leaf-less sentinel selects aggregate (matching the
+    eager int-1 curves), and None stays per-pixel (matching the eager
+    default) -- on a clustered sky where the two modes measurably differ."""
+    cosmo = _cosmo()
+    cat, _dN_exp, _smooth = _clustered_catalog(delta_g="dummy")
+
+    @jax.jit
+    def n_miss(survey):
+        return completion_curves(cosmo, survey, cat).N_miss
+
+    agg_jit = np.asarray(n_miss(_survey(c_mode=C_MODE_AGGREGATE_STRUCT)))
+    agg_eager = np.asarray(
+        completion_curves(cosmo, _survey(c_mode=C_MODE_AGGREGATE), cat).N_miss)
+    np.testing.assert_allclose(agg_jit, agg_eager, rtol=1e-12)
+    # aggregate signature: one budget for the whole (constant-C0) sky
+    np.testing.assert_allclose(agg_jit, agg_jit[0], rtol=1e-12)
+
+    pp_jit = np.asarray(n_miss(_survey()))
+    pp_eager = np.asarray(completion_curves(cosmo, _survey(), cat).N_miss)
+    np.testing.assert_allclose(pp_jit, pp_eager, rtol=1e-12)
+    # and the two modes really differ on this clustered fixture
+    assert float(np.max(np.abs(pp_jit - agg_jit))) > 1e-3
+
+
 def test_aggregate_compact_catalog_without_field_rows_refuses():
     """A compact catalog (unique_pixels set) without field_dN_obs_s covers only
     the union pixels, so the aggregate numerator would silently under-count --
@@ -311,7 +362,10 @@ def test_decoder_threads_c_mode_onto_survey_params():
         fixed_parameter_values={})
     assert decoder.c_mode == C_MODE_AGGREGATE
     _cosmo_out, survey, *_ = decoder.decode(jnp.zeros((0,)))
-    assert survey.c_mode == C_MODE_AGGREGATE and isinstance(survey.c_mode, int)
+    # aggregate lands on SurveyParams as the STRUCTURAL leaf-less sentinel
+    # (never an int leaf, which would become a value-unreadable tracer at the
+    # darksiren_log_likelihood jit boundary)
+    assert isinstance(survey.c_mode, AggregateCMode)
 
     # bare/legacy opts (no c_mode attr) decode to the per-pixel default,
     # normalised to the STRUCTURAL None (survives jit boundaries)

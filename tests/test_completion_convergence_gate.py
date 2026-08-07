@@ -168,6 +168,21 @@ def test_load_warns_on_stamped_allow_unconverged(tmp_path):
         load_lss_completion_hdf5(path)
 
 
+def test_load_warns_on_substituted_nonfinite_even_when_converged(tmp_path):
+    """A CONVERGED solve whose eval still produced non-finite cells (saved with
+    Q = 1 substituted under --allow-unconverged, which also skips the budget
+    renormalization) must not load silently: the substituted table is a
+    research ablation artifact even though converged=True."""
+    path = str(tmp_path / "q.h5")
+    _write_raw_completion(
+        path, np.zeros((2, 8)),
+        diagnostics={"converged": True, "allow_unconverged": True,
+                     "n_nonfinite_substituted": 3},
+    )
+    with pytest.warns(RuntimeWarning, match="allow-unconverged"):
+        load_lss_completion_hdf5(path)
+
+
 def test_load_is_quiet_for_converged_files(tmp_path):
     import warnings as _warnings
 

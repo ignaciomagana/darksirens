@@ -63,9 +63,15 @@ from darksirens.cli.build_lognormal_completion import (
     _assemble_gp3d_survey,
     _count_weighted_zref_lsz,
     _gp3d_base_diagnostics,
+    _gp3d_resolution_guard,
 )
 
+# The joint builder's inducing grid is FIXED (no per-run node knobs): the
+# historical 32 x 6 (sphere x z) nodes up to z = 3.  The grid must still
+# resolve the shared ls_z (hard gate below); the CLI remedy is the shared
+# radial correlation length.
 M_SPH, M_Z = 32, 6
+Z_NODE_HI = 3.0
 
 
 def _broadcast_arity(values, K, name, *, default):
@@ -210,12 +216,33 @@ def build_joint_completion(
     z_ref, ls_z = _count_weighted_zref_lsz(
         [a.counts_z for a in assemblies], z_s, cosmo, corr_length_mpc)
 
+    # HARD gate before any solve -- the SAME S0c guard the single-survey
+    # builder runs on the identical configuration: a low-rank GP whose
+    # inducing-node spacing in zeta exceeds ls_z collapses to the prior while
+    # still stamping converged=True (Burt et al. 2019; the shipped 50 Mpc
+    # fiducial is ~30x under-resolved for the fixed 6-node grid and measured a
+    # fitted-vs-truth logQ slope of 0.04).  The joint inducing grid is fixed
+    # (M_SPH x M_Z up to Z_NODE_HI), so the message is re-anchored to the one
+    # knob this CLI has.
+    try:
+        zeta_spacing = _gp3d_resolution_guard(
+            z_node_hi=Z_NODE_HI, n_z_nodes=M_Z, ls_z=ls_z,
+            n_sph_nodes=M_SPH, ls_sph=ls_sph)
+    except ValueError as exc:
+        raise ValueError(
+            f"{exc} [JOINT builder: the inducing grid is fixed at "
+            f"M_sph={M_SPH} x M_z={M_Z} up to z_node_hi={Z_NODE_HI:g}, so "
+            "the only remedy here is raising --lss-corr-length-mpc until the "
+            "node spacing resolves ls_z.]"
+        ) from None
+
     # SHARED inducing nodes; one Cholesky L (identical hyperparams => identical
     # L). Stack the occupied surveys' voxel blocks with the bias-scaled design
     # Phi'_k = b_k * Phi_k and solve ONE joint Poisson-lognormal MAP with the
     # library solver UNCHANGED (bias=1.0; its default sigma2_vox = sum(Phi'^2)
     # is the per-survey-correct b_k^2 sigma^2_vox mean-one shift).
-    Zn, Zz = lowrank_inducing_nodes(n_inducing_sphere=M_SPH, n_inducing_z=M_Z)
+    Zn, Zz = lowrank_inducing_nodes(
+        n_inducing_sphere=M_SPH, n_inducing_z=M_Z, z_node_hi=Z_NODE_HI)
     M = int(np.asarray(Zn).shape[0])
 
     N_blocks, base_blocks, phi_blocks = [], [], []
@@ -304,6 +331,7 @@ def build_joint_completion(
             amp=amp, ls_sph=ls_sph, bias=b_k, mode="gp3d_joint")
         diag.update({
             "M_sph": M_SPH, "M_z": M_Z, "M": M, "gp3d_nz_solve": G_s,
+            "gp3d_z_node_hi": Z_NODE_HI, "zeta_node_spacing": zeta_spacing,
             "ls_z_zeta": ls_z, "z_ref": z_ref, "ls_sph_chordal": ls_sph,
             "sigma2_vox_min": float(sig2.min()), "sigma2_vox_max": float(sig2.max()),
             "n_iter": int(mp["diagnostics"]["n_iter"]),
@@ -374,7 +402,10 @@ def main(argv=None):
     p.add_argument("--lss-corr-length-mpc", type=float, default=None,
                    help="Override the shared radial GP correlation length [Mpc]; "
                         "default is the SurveyParams fiducial (50). Build-time "
-                        "only, never sampled.")
+                        "only, never sampled. The FIXED joint inducing grid "
+                        "(32 x 6 nodes up to z = 3) must resolve the mapped "
+                        "ls_z or the build hard-errors (the 50 Mpc fiducial "
+                        "does not).")
     p.add_argument("--lss-sigma", type=float, default=None,
                    help="Override the shared GP field amplitude; default is the "
                         "SurveyParams fiducial (1.0). Build-time only, never "

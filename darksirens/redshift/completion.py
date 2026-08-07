@@ -51,7 +51,8 @@ budget ("C says HOW MUCH is missing"), with all angular structure carried
 by the mean-one Q field ("Q says WHERE it goes").  The field-convention
 global normalizer uses the SAME curve, so numerator and normalizer carry
 one budget.  ``z_depth`` semantics are unchanged (Cbar := 0 beyond the
-depth).  ``c_mode`` is resolved at trace time (structural, never sampled;
+depth).  ``c_mode`` is resolved at trace time (structural, never sampled:
+``None`` per_pixel, the leaf-less ``AggregateCMode`` sentinel aggregate;
 see ``_is_aggregate_c_mode``).  Known
 caveat, deliberately not addressed here: Cbar is proportional to 1/n0
 through a single GLOBAL clip, so near full completeness the likelihood
@@ -108,7 +109,7 @@ from jax.scipy.special import ndtr
 from typing import NamedTuple
 
 from darksirens.utils.cosmology import dV_of_z
-from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import AggregateCMode, CosmoParams, SurveyParams, EMCatalog
 
 from darksirens.redshift.grid import zgrid
 
@@ -128,25 +129,39 @@ def _is_aggregate_c_mode(c_mode) -> bool:
 
     The likelihood's module-level jit (``darksiren_log_likelihood``) takes the
     survey as a pytree ARGUMENT, so any int leaf crosses that boundary as a
-    value-unreadable tracer.  The branch therefore rides the ``z_depth``
+    value-unreadable tracer.  BOTH modes therefore ride the ``z_depth``
     structural pattern: per_pixel is carried as ``None`` (the container
-    default; the parameter decoder normalises a concrete 0 to ``None`` before
-    any jit boundary) and aggregate as the int ``1``.  A concrete int is
-    decoded by value (so eager callers may pass 0 or 1 directly); a non-None
-    leaf whose value cannot be read is, by the normalisation contract, the
-    aggregate flag.
+    default) and aggregate as the leaf-less
+    :data:`darksirens.core.types.C_MODE_AGGREGATE_STRUCT` sentinel (an empty
+    NamedTuple -- pure pytree structure), which the parameter decoder stamps
+    on every production survey.  A concrete int is decoded by value (so eager
+    callers may pass 0 or 1 directly), but an int that DID cross a jit
+    boundary is unreadable here and is a HARD ERROR: assuming either mode
+    would silently swap the completeness estimator -- and with it the entire
+    clustering budget -- for a plain plumbing mistake (a concrete
+    ``c_mode=0`` traced through jit used to be evaluated as aggregate).
     """
     if c_mode is None:
         return False
+    if isinstance(c_mode, AggregateCMode):
+        return True
     if isinstance(c_mode, (int, np.integer)):
         return int(c_mode) == C_MODE_AGGREGATE
     try:
         return int(c_mode) == C_MODE_AGGREGATE   # concrete 0-d array
-    except jax.errors.ConcretizationTypeError:
-        # Traced leaf: value unreadable at trace time.  per_pixel never
-        # reaches a jit boundary as a leaf (normalised to None), so this is
-        # the aggregate flag.
-        return True
+    except jax.errors.ConcretizationTypeError as exc:
+        raise ValueError(
+            "SurveyParams.c_mode reached a jit boundary as a traced int "
+            "leaf, so its value cannot be read at trace time and the "
+            "completeness estimator cannot be selected (guessing would "
+            "silently swap the clustering budget). Carry c_mode "
+            "STRUCTURALLY across jit boundaries instead: None (or a "
+            "concrete int 0, eagerly) for per_pixel, "
+            "darksirens.core.types.C_MODE_AGGREGATE_STRUCT (or a concrete "
+            "int 1, eagerly) for aggregate. The parameter decoder "
+            "(darksirens.inference.parameters._survey_params) performs this "
+            "normalisation for production runs."
+        ) from exc
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
 _SQRT2PI: float = float(np.sqrt(2.0 * np.pi))
@@ -767,8 +782,9 @@ def _precompute_grids(
     tests/test_completion_depth.py::test_z_depth_none_bit_identical).
 
     ``survey.c_mode`` (structural at trace time -- ``None``/0 legacy
-    per-pixel, 1 aggregate; see :func:`_is_aggregate_c_mode` for how the flag
-    survives nested jit boundaries) selects the completeness estimator.  In
+    per-pixel, the ``C_MODE_AGGREGATE_STRUCT`` sentinel / eager 1 aggregate;
+    see :func:`_is_aggregate_c_mode` for how the flag survives nested jit
+    boundaries) selects the completeness estimator.  In
     AGGREGATE mode this is the single formation site of the sky-aggregate
     ratio
 
