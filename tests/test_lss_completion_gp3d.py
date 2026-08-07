@@ -29,6 +29,14 @@ from darksirens.redshift.lognormal_completion import (
 
 NG = int(zgrid.size)
 
+# S0c: gp3d builds hard-error when the radial inducing-node spacing in
+# zeta = log1p(z) exceeds ls_z (the Mpc correlation length mapped to zeta at
+# the count-weighted z_ref) — the 50 Mpc fiducial is ~30x under-resolved at
+# the historical 6-node grid and collapses to the prior (Burt et al. 2019).
+# End-to-end fixtures therefore build at a RESOLVED radial lengthscale; the
+# guard itself is tested in the "resolution guard + knob plumbing" section.
+RESOLVED_L_MPC = 3000.0
+
 
 # ------------------------------------------------------------
 # Kernel/node reuse + the mean-one / homogeneous limits
@@ -244,6 +252,7 @@ def test_gp3d_build_smoke_and_contract(tmp_path):
     npix = _write_tiny_survey(cat, nside=2)
     logq_map, logq_members, diag = build_completion(
         cat, mode="gp3d", n_members=4, seed=1, gp3d_nz_solve=16, gp3d_pix_chunk=8,
+        lss_corr_length_mpc=RESOLVED_L_MPC,
     )
     assert logq_map.shape == (npix, NG)
     assert np.all(np.isfinite(logq_map))
@@ -255,6 +264,10 @@ def test_gp3d_build_smoke_and_contract(tmp_path):
     for k in ("fiducial_H0", "bias_b_miss", "lss_corr_length_mpc", "lss_sigma",
               "lss_corr_length_ang"):
         assert k in diag
+    # S0c defaults: historical 32 x 6 inducing grid, but z_node_hi now spans
+    # the PACKAGE zgrid (documented behavior change from the hardwired 3.0).
+    assert diag["M_sph"] == 32 and diag["M_z"] == 6
+    assert diag["gp3d_z_node_hi"] == float(np.asarray(zgrid)[-1])
 
 
 def _write_lowz_survey(path, nside=2):
@@ -294,7 +307,8 @@ def test_gp3d_lowz_catalog_base_consistent(tmp_path):
     cat = str(tmp_path / "survey_lowz.h5")
     npix = _write_lowz_survey(cat, nside=2)
     logq_map, _, diag = build_completion(cat, mode="gp3d", n_members=0,
-                                         gp3d_nz_solve=16, gp3d_pix_chunk=8)
+                                         gp3d_nz_solve=16, gp3d_pix_chunk=8,
+                                         lss_corr_length_mpc=RESOLVED_L_MPC)
     assert diag["converged"], diag
     assert logq_map.shape[0] == npix
     assert np.all(np.isfinite(logq_map))
@@ -325,7 +339,8 @@ def test_gp3d_base_counts_anchored_to_histogram(tmp_path, monkeypatch):
 
     monkeypatch.setattr(B, "poisson_lognormal_gp3d_map", spy)
     B.build_completion(cat, mode="gp3d", n_members=0,
-                       gp3d_nz_solve=16, gp3d_pix_chunk=8)
+                       gp3d_nz_solve=16, gp3d_pix_chunk=8,
+                       lss_corr_length_mpc=RESOLVED_L_MPC)
     N, base = captured["N"], captured["base"]
     hold = N > 0
     assert hold.any()
@@ -357,7 +372,8 @@ def test_gp3d_output_consumable_by_inference(tmp_path):
     cat = str(tmp_path / "survey.h5")
     npix = _write_tiny_survey(cat, nside=2)
     logq_map, _, diag = build_completion(cat, mode="gp3d", n_members=0,
-                                         gp3d_nz_solve=16, gp3d_pix_chunk=8)
+                                         gp3d_nz_solve=16, gp3d_pix_chunk=8,
+                                         lss_corr_length_mpc=RESOLVED_L_MPC)
     out = str(tmp_path / "q_gp3d.h5")
     save_lss_completion_hdf5(out, logq_map=logq_map, zgrid=np.asarray(zgrid),
                              indexing="global", metadata=diag)
@@ -380,6 +396,133 @@ def test_gp3d_output_consumable_by_inference(tmp_path):
     curves = completion_curves(cosmo, survey, em)
     assert curves.dN_miss.shape == (2, NG)
     assert np.all(np.isfinite(np.asarray(curves.dN_miss)))
+
+
+# ------------------------------------------------------------
+# S0c: resolution guard + hyperparameter knob plumbing
+# ------------------------------------------------------------
+
+def test_resolution_guard_raises_at_underresolved_fiducial(tmp_path):
+    """The shipped 50 Mpc fiducial maps to ls_z ~ 0.01 in zeta at z_ref ~ 0.5
+    — ~30x below the 6-node spacing — so a default gp3d build must HARD ERROR
+    (not silently collapse to the prior), stating both numbers and the minimum
+    node count."""
+    pytest.importorskip("healpy")
+    from darksirens.cli.build_lognormal_completion import build_completion
+    cat = str(tmp_path / "survey.h5")
+    _write_tiny_survey(cat, nside=2)
+    with pytest.raises(ValueError, match="under-resolved") as ei:
+        build_completion(cat, mode="gp3d", n_members=0,
+                         gp3d_nz_solve=16, gp3d_pix_chunk=8)
+    msg = str(ei.value)
+    assert "ls_z" in msg and "zeta" in msg
+    assert "--gp3d-nz-nodes >=" in msg
+
+
+def test_resolution_guard_arithmetic(capsys):
+    """Direct guard checks: the pass/fail boundary is spacing = ls_z, the
+    suggested minimum node count actually resolves, and the sphere side only
+    WARNS (never raises)."""
+    from darksirens.cli.build_lognormal_completion import _gp3d_resolution_guard
+    z_hi, n_z = 3.0, 6
+    spacing = np.log1p(z_hi) / (n_z - 1)
+    # exactly-resolved radial grid passes and returns the spacing
+    got = _gp3d_resolution_guard(z_node_hi=z_hi, n_z_nodes=n_z, ls_z=spacing,
+                                 n_sph_nodes=32, ls_sph=1.0)
+    assert np.isclose(got, spacing)
+    capsys.readouterr()
+    # under-resolved raises, and the suggested minimum node count resolves
+    with pytest.raises(ValueError, match="under-resolved") as ei:
+        _gp3d_resolution_guard(z_node_hi=z_hi, n_z_nodes=n_z, ls_z=0.01,
+                               n_sph_nodes=32, ls_sph=1.0)
+    import re
+    min_nodes = int(re.search(r"--gp3d-nz-nodes >= (\d+)", str(ei.value)).group(1))
+    assert np.log1p(z_hi) / (min_nodes - 1) <= 0.01
+    # fewer than 2 radial nodes is rejected outright
+    with pytest.raises(ValueError, match="gp3d-nz-nodes"):
+        _gp3d_resolution_guard(z_node_hi=z_hi, n_z_nodes=1, ls_z=1.0,
+                               n_sph_nodes=32, ls_sph=1.0)
+    # sphere side: sqrt(4pi/M_sph) > ls_sph warns but does not raise
+    capsys.readouterr()
+    _gp3d_resolution_guard(z_node_hi=z_hi, n_z_nodes=n_z, ls_z=spacing,
+                           n_sph_nodes=32, ls_sph=0.2)
+    assert "sphere" in capsys.readouterr().out
+
+
+def test_gp3d_knob_plumbing_reaches_diagnostics(tmp_path):
+    """Non-default knobs must reach the builder: the inducing-grid shape, the
+    node range, and the overridden GP hyperparameters are all stamped in the
+    diagnostics (and hence the HDF5 provenance)."""
+    pytest.importorskip("healpy")
+    from darksirens.cli.build_lognormal_completion import build_completion
+    cat = str(tmp_path / "survey.h5")
+    _write_tiny_survey(cat, nside=2)
+    _, _, diag = build_completion(
+        cat, mode="gp3d", n_members=0, gp3d_nz_solve=12, gp3d_pix_chunk=8,
+        lss_corr_length_mpc=3000.0, lss_sigma=0.8,
+        gp3d_nz_nodes=5, gp3d_nsph_nodes=16, gp3d_z_node_hi=2.0,
+    )
+    assert diag["M_sph"] == 16 and diag["M_z"] == 5
+    assert diag["M"] == 16 * 5
+    assert diag["gp3d_z_node_hi"] == 2.0
+    assert diag["lss_corr_length_mpc"] == 3000.0
+    assert diag["lss_sigma"] == 0.8
+    assert np.isclose(diag["zeta_node_spacing"], np.log1p(2.0) / 4)
+    # ls_z is the mapped lengthscale actually used; it must resolve the grid
+    assert diag["zeta_node_spacing"] <= diag["ls_z_zeta"]
+
+
+def test_radial_knob_plumbing_reaches_builder(tmp_path):
+    """--lss-corr-length-mpc / --lss-sigma reach the RADIAL builder too: the
+    stamped hyperparameters follow the overrides and the uniform-chi grid
+    length ell_grid scales linearly with the Mpc correlation length; defaults
+    keep the SurveyParams fiducials (backward compatible)."""
+    pytest.importorskip("healpy")
+    from darksirens.cli.build_lognormal_completion import build_completion
+    cat = str(tmp_path / "survey.h5")
+    _write_tiny_survey(cat, nside=2)
+    kw = dict(mode="radial", n_members=0, maxiter=50)
+    _, _, d0 = build_completion(cat, **kw)
+    assert d0["lss_corr_length_mpc"] == 50.0   # SurveyParams fiducial
+    assert d0["lss_sigma"] == 1.0
+    _, _, d1 = build_completion(cat, lss_corr_length_mpc=100.0, lss_sigma=0.5, **kw)
+    assert d1["lss_corr_length_mpc"] == 100.0
+    assert d1["lss_sigma"] == 0.5
+    assert np.isclose(d1["ell_grid_uniform_chi"] / d0["ell_grid_uniform_chi"], 2.0)
+
+
+def test_cli_flags_reach_build_completion(tmp_path, monkeypatch):
+    """The five S0c argparse flags must be forwarded verbatim into
+    build_completion (spied; the build itself is not run)."""
+    pytest.importorskip("healpy")
+    import darksirens.cli.build_lognormal_completion as B
+    captured = {}
+
+    def spy(catalog_path, **kw):
+        captured.update(kw)
+        raise RuntimeError("spy stop")
+
+    monkeypatch.setattr(B, "build_completion", spy)
+    with pytest.raises(RuntimeError, match="spy stop"):
+        B.main(["--catalog", "cat.h5", "--out", str(tmp_path / "q.h5"),
+                "--mode", "gp3d",
+                "--lss-corr-length-mpc", "1234.0", "--lss-sigma", "0.7",
+                "--gp3d-nz-nodes", "17", "--gp3d-nsph-nodes", "9",
+                "--gp3d-z-node-hi", "2.5"])
+    assert captured["lss_corr_length_mpc"] == 1234.0
+    assert captured["lss_sigma"] == 0.7
+    assert captured["gp3d_nz_nodes"] == 17
+    assert captured["gp3d_nsph_nodes"] == 9
+    assert captured["gp3d_z_node_hi"] == 2.5
+    # defaults are backward-compatible: no override unless the flag is passed
+    captured.clear()
+    with pytest.raises(RuntimeError, match="spy stop"):
+        B.main(["--catalog", "cat.h5", "--out", str(tmp_path / "q.h5")])
+    assert captured["lss_corr_length_mpc"] is None
+    assert captured["lss_sigma"] is None
+    assert captured["gp3d_nz_nodes"] == 6
+    assert captured["gp3d_nsph_nodes"] == 32
+    assert captured["gp3d_z_node_hi"] is None  # -> zgrid[-1] inside the builder
 
 
 def test_lss_corr_length_ang_not_sampled():

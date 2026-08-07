@@ -197,7 +197,8 @@ def test_gp3d_build_budget_matches_homogeneous_per_z(tmp_path):
 
     logq_map, logq_members, diag = build_completion(
         cat, mode="gp3d", n_members=2, seed=5, gp3d_nz_solve=16,
-        gp3d_pix_chunk=8)
+        gp3d_pix_chunk=8,
+        lss_corr_length_mpc=3000.0)  # S0c: resolve the inducing grid (hard gate)
     assert diag["budget_renormalized"] is True
     with_q = np.sum(w * np.exp(logq_map[occ]), axis=0)
     np.testing.assert_allclose(with_q, homog, rtol=1e-10)

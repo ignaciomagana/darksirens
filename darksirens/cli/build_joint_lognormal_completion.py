@@ -59,6 +59,7 @@ from darksirens.redshift.lognormal_completion import (
 )
 from darksirens.cli.build_lognormal_completion import (
     _fiducial_cosmo_survey,
+    _apply_lss_overrides,
     _assemble_gp3d_survey,
     _count_weighted_zref_lsz,
     _gp3d_base_diagnostics,
@@ -110,6 +111,8 @@ def build_joint_completion(
     gp3d_nz_solve: int = 32,
     gp3d_pix_chunk: int = 512,
     lss_corr_length_ang=None,
+    lss_corr_length_mpc=None,
+    lss_sigma=None,
     realization_set_id=None,
     allow_unconverged: bool = False,
 ):
@@ -149,6 +152,10 @@ def build_joint_completion(
     G_s = int(z_s.size)
 
     cosmo, ref_survey = _fiducial_cosmo_survey()
+    # SHARED GP hyperparameter overrides (one latent field => one set); mirrors
+    # the single-survey builder's build-time-only knobs, never sampled.
+    ref_survey = _apply_lss_overrides(
+        ref_survey, lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma)
     amp = float(ref_survey.lss_sigma)
     ls_sph = (float(lss_corr_length_ang) if lss_corr_length_ang is not None
               else float(ref_survey.lss_corr_length_ang))
@@ -161,6 +168,8 @@ def build_joint_completion(
         _c, survey_k = _fiducial_cosmo_survey(log10n0=l10n0, delta=dlt)
         if lss_corr_length_ang is not None:
             survey_k = survey_k._replace(lss_corr_length_ang=float(lss_corr_length_ang))
+        survey_k = _apply_lss_overrides(
+            survey_k, lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma)
         surveys.append(survey_k)
         assemblies.append(_assemble_gp3d_survey(
             path, cosmo=cosmo, survey=survey_k, z_s=z_s, edges_s=edges_s))
@@ -362,6 +371,14 @@ def main(argv=None):
     p.add_argument("--lss-corr-length-ang", type=float, default=None,
                    help="Override the shared angular (chordal) correlation length; "
                         "default is the SurveyParams fiducial.")
+    p.add_argument("--lss-corr-length-mpc", type=float, default=None,
+                   help="Override the shared radial GP correlation length [Mpc]; "
+                        "default is the SurveyParams fiducial (50). Build-time "
+                        "only, never sampled.")
+    p.add_argument("--lss-sigma", type=float, default=None,
+                   help="Override the shared GP field amplitude; default is the "
+                        "SurveyParams fiducial (1.0). Build-time only, never "
+                        "sampled.")
     p.add_argument("--allow-unconverged", action="store_true", default=False,
                    help="Save the Q files even when the shared solve is "
                         "unconverged or produced non-finite cells (substituted "
@@ -405,6 +422,8 @@ def main(argv=None):
             biases=opts.bias, log10n0s=opts.log10n0, deltas=opts.delta,
             gp3d_nz_solve=opts.gp3d_nz_solve, gp3d_pix_chunk=opts.gp3d_pix_chunk,
             lss_corr_length_ang=opts.lss_corr_length_ang,
+            lss_corr_length_mpc=opts.lss_corr_length_mpc,
+            lss_sigma=opts.lss_sigma,
             realization_set_id=opts.realization_set_id,
             allow_unconverged=opts.allow_unconverged,
         )

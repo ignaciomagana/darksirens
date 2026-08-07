@@ -19,7 +19,16 @@ Pipeline
 4. Build a per-pixel 1-D Gaussian-correlation power spectrum from the **fixed**
    SurveyParams/CosmoParams hyperparameters (correlation length in Mpc mapped to
    grid units via the comoving-distance grid; field amplitude ``lss_sigma``;
-   bias ``b_miss``) — never CLI knobs, never marginalised.
+   bias ``b_miss``).  ``--lss-corr-length-mpc`` / ``--lss-sigma`` override the
+   fiducials AT BUILD TIME only — the values are stamped in the diagnostics and
+   are never sampled or marginalised in the inference (asserted by
+   tests/test_lss_completion_gp3d.py::test_lss_corr_length_ang_not_sampled).
+   The gp3d inducing grid is guarded: a build whose radial node spacing in
+   ``zeta = log1p z`` exceeds the GP lengthscale ``ls_z`` is a HARD ERROR
+   (:func:`_gp3d_resolution_guard`), because a low-rank GP with node spacing
+   much larger than the lengthscale collapses to the prior (Burt et al. 2019,
+   arXiv:1903.03571; the shipped 50 Mpc default measured a fitted-vs-truth
+   logQ slope of 0.04 on the closure experiment).
 5. Run the solver and save an HDF5 completion file (same table contract either
    way): ``--mode radial`` (default) -> independent per-pixel 1-D
    :func:`poisson_lognormal_map`; ``--mode gp3d`` -> ONE low-rank
@@ -79,6 +88,68 @@ def _fiducial_cosmo_survey(log10n0=None, delta=None):
     return cosmo, survey
 
 
+def _apply_lss_overrides(survey, *, lss_corr_length_mpc=None, lss_sigma=None):
+    """Build-time GP hyperparameter overrides (CLI knobs, NEVER sampled).
+
+    ``None`` keeps the SurveyParams fiducial (backward-compatible default);
+    the values actually used are stamped in the output diagnostics via the
+    (possibly replaced) ``survey`` container.
+    """
+    if lss_corr_length_mpc is not None:
+        survey = survey._replace(lss_corr_length_mpc=float(lss_corr_length_mpc))
+    if lss_sigma is not None:
+        survey = survey._replace(lss_sigma=float(lss_sigma))
+    return survey
+
+
+def _gp3d_resolution_guard(*, z_node_hi, n_z_nodes, ls_z, n_sph_nodes, ls_sph):
+    """Resolution gate on the gp3d inducing grid; returns the zeta node spacing.
+
+    A low-rank GP whose inducing-node spacing exceeds the kernel lengthscale
+    cannot represent the posterior and collapses to the prior (Burt et al.
+    2019, arXiv:1903.03571) — silently, with ``converged=True``: the shipped
+    50 Mpc fiducial was ~30x under-resolved and measured a fitted-vs-truth
+    logQ slope of 0.04 on the closure experiment.  So the radial side is a
+    HARD ERROR: spacing ``log1p(z_node_hi)/(M_z - 1)`` must not exceed
+    ``ls_z`` (the Mpc correlation length mapped to zeta units at the
+    count-weighted z_ref).  The sphere side only WARNS — the Fibonacci
+    spacing ``~ sqrt(4 pi / M_sph)`` (chordal, matching the chordal
+    ``ls_sph``) is a cruder estimate and the angular fiducial is not the
+    measured failure mode.
+    """
+    if int(n_z_nodes) < 2:
+        raise ValueError(
+            f"--gp3d-nz-nodes must be >= 2 (got {int(n_z_nodes)}): a single "
+            "radial inducing node cannot resolve any redshift structure."
+        )
+    zeta_hi = float(np.log1p(float(z_node_hi)))
+    spacing = zeta_hi / (int(n_z_nodes) - 1)
+    if spacing > float(ls_z):
+        min_nodes = int(np.ceil(zeta_hi / float(ls_z))) + 1
+        raise ValueError(
+            f"gp3d radial inducing grid is under-resolved: node spacing in "
+            f"zeta = log1p(z) is {spacing:.4g} ({int(n_z_nodes)} nodes up to "
+            f"z_node_hi = {float(z_node_hi):.4g}) but the GP lengthscale is "
+            f"ls_z = {float(ls_z):.4g} (lss_corr_length_mpc mapped to zeta at "
+            f"the count-weighted z_ref). A low-rank GP with node spacing > "
+            f"lengthscale collapses to the prior (Burt et al. 2019) while "
+            f"still reporting convergence. Pass --gp3d-nz-nodes >= "
+            f"{min_nodes}, or raise --lss-corr-length-mpc / lower "
+            f"--gp3d-z-node-hi until spacing <= ls_z."
+        )
+    d_sph = float(np.sqrt(4.0 * np.pi / max(int(n_sph_nodes), 1)))
+    if d_sph > float(ls_sph):
+        _warn(
+            f"gp3d sphere inducing grid may be under-resolved: Fibonacci node "
+            f"spacing ~ sqrt(4pi/M_sph) = {d_sph:.3g} exceeds the chordal "
+            f"angular lengthscale ls_sph = {float(ls_sph):.3g}; raise "
+            f"--gp3d-nsph-nodes (>= "
+            f"{int(np.ceil(4.0 * np.pi / float(ls_sph) ** 2))}) or the "
+            f"angular correlation length."
+        )
+    return spacing
+
+
 def _zgrid_bin_edges() -> np.ndarray:
     """Bin edges around the (non-uniform) ``zgrid`` points (midpoints)."""
     z = np.asarray(zgrid, dtype=float)
@@ -108,6 +179,8 @@ def _build_completion_radial(
     log10n0=None,
     delta=None,
     budget_renorm: bool = True,
+    lss_corr_length_mpc=None,
+    lss_sigma=None,
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
@@ -118,6 +191,9 @@ def _build_completion_radial(
     ``budget_renorm`` (default ON) applies the per-z mean-one budget
     renormalization (:func:`renormalize_q_mean_one`) to the output tables over
     the occupied (fitted) rows, so Q only redistributes the missing budget.
+
+    ``lss_corr_length_mpc`` / ``lss_sigma`` override the fixed SurveyParams GP
+    hyperparameters at build time (``None`` keeps the fiducials).
     """
     import healpy as hp
 
@@ -127,6 +203,8 @@ def _build_completion_radial(
     apix = float(hp.nside2pixarea(int(nside)))
 
     cosmo, survey = _fiducial_cosmo_survey(log10n0=log10n0, delta=delta)
+    survey = _apply_lss_overrides(
+        survey, lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma)
     em = EMCatalog(
         apix=apix, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(dzgals),
         wgals=jnp.asarray(wgals), ngals=jnp.asarray(ngals),
@@ -417,6 +495,11 @@ def _build_completion_gp3d(
     log10n0=None,
     delta=None,
     budget_renorm: bool = True,
+    lss_corr_length_mpc=None,
+    lss_sigma=None,
+    gp3d_nz_nodes: int = 6,
+    gp3d_nsph_nodes: int = 32,
+    gp3d_z_node_hi=None,
 ):
     """3-D angular-coupling MAP + optional ensemble log Q tables.
 
@@ -430,18 +513,33 @@ def _build_completion_gp3d(
     ``z_ref``/``ls_z`` map (:func:`_count_weighted_zref_lsz`) are the SAME helpers
     the joint multi-survey builder stacks over, so this K=1 path is one instance
     of the joint fit.
+
+    ``lss_corr_length_mpc`` / ``lss_sigma`` override the fixed SurveyParams GP
+    hyperparameters; ``gp3d_nz_nodes`` / ``gp3d_nsph_nodes`` size the inducing
+    grid (defaults keep the historical 6 x 32).  ``gp3d_z_node_hi`` sets the
+    top redshift of the radial inducing nodes; the default ``None`` resolves to
+    the PACKAGE ``zgrid[-1]`` — a BEHAVIOR CHANGE from the historical hardwired
+    3.0, which left ``zgrid[-1] > 3`` covered only by prior extrapolation.  The
+    inducing grid must resolve ``ls_z`` (:func:`_gp3d_resolution_guard`, hard
+    error) or the field silently collapses to the prior.
     """
-    M_SPH, M_Z = 32, 6
+    M_SPH, M_Z = int(gp3d_nsph_nodes), int(gp3d_nz_nodes)
 
     cosmo, survey = _fiducial_cosmo_survey(log10n0=log10n0, delta=delta)
     if lss_corr_length_ang is not None:
         survey = survey._replace(lss_corr_length_ang=float(lss_corr_length_ang))
+    survey = _apply_lss_overrides(
+        survey, lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma)
 
     bias = float(survey.b_miss)
     amp = float(survey.lss_sigma)
     ls_sph = float(survey.lss_corr_length_ang)
     zgrid_np = np.asarray(zgrid, dtype=float)
     n_grid = int(zgrid.size)
+    # Radial inducing-node range: default is the package zgrid max so the nodes
+    # span the full output grid (see the docstring behavior-change note).
+    z_node_hi = (float(zgrid_np[-1]) if gp3d_z_node_hi is None
+                 else float(gp3d_z_node_hi))
 
     # Coarse SOLVE z-grid: the field is low-rank in z (only M_z nodes), so a fine
     # solve grid adds no resolvable radial signal.  Output is on the full zgrid.
@@ -478,8 +576,15 @@ def _build_completion_gp3d(
     z_ref, ls_z = _count_weighted_zref_lsz(
         [survey_data.counts_z], z_s, cosmo, survey.lss_corr_length_mpc)
 
+    # HARD gate before any solve: an under-resolved inducing grid produces a
+    # prior-collapsed field that still stamps converged=True downstream.
+    zeta_spacing = _gp3d_resolution_guard(
+        z_node_hi=z_node_hi, n_z_nodes=M_Z, ls_z=ls_z,
+        n_sph_nodes=M_SPH, ls_sph=ls_sph)
+
     # Low-rank operator over the occupied voxels.
-    Zn, Zz = lowrank_inducing_nodes(n_inducing_sphere=M_SPH, n_inducing_z=M_Z)
+    Zn, Zz = lowrank_inducing_nodes(
+        n_inducing_sphere=M_SPH, n_inducing_z=M_Z, z_node_hi=z_node_hi)
     M = int(np.asarray(Zn).shape[0])
     X_n = np.repeat(survey_data.n_hat_occ, G_s, axis=0)                    # (n_occ*G_s, 3)
     X_z = np.tile(zeta_s, n_occ)                                           # (n_occ*G_s,)
@@ -504,6 +609,7 @@ def _build_completion_gp3d(
     sig2 = np.asarray(mp["sigma2_vox"], dtype=float)
     diagnostics = _base_diag({
         "M_sph": M_SPH, "M_z": M_Z, "M": M, "gp3d_nz_solve": G_s,
+        "gp3d_z_node_hi": z_node_hi, "zeta_node_spacing": zeta_spacing,
         "ls_z_zeta": ls_z, "z_ref": z_ref, "ls_sph_chordal": ls_sph,
         "sigma2_vox_min": float(sig2.min()), "sigma2_vox_max": float(sig2.max()),
         "n_iter": int(mp["diagnostics"]["n_iter"]),
@@ -564,6 +670,11 @@ def build_completion(
     log10n0=None,
     delta=None,
     budget_renorm: bool = True,
+    lss_corr_length_mpc=None,
+    lss_sigma=None,
+    gp3d_nz_nodes: int = 6,
+    gp3d_nsph_nodes: int = 32,
+    gp3d_z_node_hi=None,
 ):
     """Build the log Q completion tables from a survey catalog.
 
@@ -573,12 +684,18 @@ def build_completion(
     ``(logq_map, logq_members, diagnostics)`` with the SAME global table contract,
     and both apply the per-z mean-one budget renormalization by default
     (``budget_renorm``; the removed monopole is carried in the diagnostics).
+
+    ``lss_corr_length_mpc`` / ``lss_sigma`` override the fixed GP
+    hyperparameters in BOTH modes; the ``gp3d_*_nodes`` / ``gp3d_z_node_hi``
+    inducing-grid knobs apply to ``mode="gp3d"`` only, which hard-errors when
+    the grid cannot resolve ``ls_z`` (:func:`_gp3d_resolution_guard`).
     """
     if mode == "radial":
         return _build_completion_radial(
             catalog_path, n_members=n_members, seed=seed,
             prior_strength=prior_strength, maxiter=maxiter, workers=workers,
             log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
+            lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
@@ -586,6 +703,9 @@ def build_completion(
             gp3d_nz_solve=gp3d_nz_solve, gp3d_pix_chunk=gp3d_pix_chunk,
             lss_corr_length_ang=lss_corr_length_ang,
             log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
+            lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
+            gp3d_nz_nodes=gp3d_nz_nodes, gp3d_nsph_nodes=gp3d_nsph_nodes,
+            gp3d_z_node_hi=gp3d_z_node_hi,
         )
     raise ValueError(f"Unknown build mode {mode!r}; expected 'radial' or 'gp3d'.")
 
@@ -631,6 +751,31 @@ def main(argv=None):
     p.add_argument("--lss-corr-length-ang", type=float, default=None,
                    help="(gp3d) Override the fixed angular (chordal) correlation "
                         "length; default is the SurveyParams fiducial.")
+    p.add_argument("--lss-corr-length-mpc", type=float, default=None,
+                   help="Override the fixed radial GP correlation length [Mpc] "
+                        "(both modes; default is the SurveyParams fiducial, "
+                        "50). Build-time only, never sampled. In gp3d mode the "
+                        "inducing grid must resolve the mapped ls_z or the "
+                        "build hard-errors.")
+    p.add_argument("--lss-sigma", type=float, default=None,
+                   help="Override the fixed GP field amplitude (both modes; "
+                        "default is the SurveyParams fiducial, 1.0). "
+                        "Build-time only, never sampled.")
+    p.add_argument("--gp3d-nz-nodes", type=int, default=6,
+                   help="(gp3d) Number of radial inducing nodes M_z (default 6, "
+                        "the historical value). Node spacing in zeta = log1p(z) "
+                        "must not exceed ls_z (hard error otherwise).")
+    p.add_argument("--gp3d-nsph-nodes", type=int, default=32,
+                   help="(gp3d) Number of Fibonacci sphere inducing nodes M_sph "
+                        "(default 32, the historical value). A spacing "
+                        "sqrt(4pi/M_sph) above the chordal angular lengthscale "
+                        "draws a warning.")
+    p.add_argument("--gp3d-z-node-hi", type=float, default=None,
+                   help="(gp3d) Top redshift of the radial inducing nodes. "
+                        "Default: the package zgrid max (zgrid[-1]) — a "
+                        "BEHAVIOR CHANGE from the historical hardwired 3.0, "
+                        "which left zgrid[-1] > 3 covered only by prior "
+                        "extrapolation.")
     p.add_argument("--log10n0", type=float, default=None,
                    help="Override log10 of the expected comoving galaxy density "
                         "[Mpc^-3] the fit is conditioned on (default -2.0). "
@@ -687,6 +832,9 @@ def main(argv=None):
         lss_corr_length_ang=opts.lss_corr_length_ang,
         log10n0=opts.log10n0, delta=opts.delta,
         budget_renorm=not opts.no_budget_renorm,
+        lss_corr_length_mpc=opts.lss_corr_length_mpc, lss_sigma=opts.lss_sigma,
+        gp3d_nz_nodes=opts.gp3d_nz_nodes, gp3d_nsph_nodes=opts.gp3d_nsph_nodes,
+        gp3d_z_node_hi=opts.gp3d_z_node_hi,
     )
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")
