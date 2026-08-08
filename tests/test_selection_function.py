@@ -95,6 +95,24 @@ def test_fit_recovers_h_scaled_truth_independent_of_true_h0():
         assert naive < m0hat_true - 2.0 * sd[0]
 
 
+def test_fit_and_suffstats_apply_the_z_floor():
+    """Unclipped negative photo-z (deliberately written by the mock survey)
+    must be DROPPED loudly, not crash the fit via NaN distance moduli or
+    silently drag the MLE through DM -> -inf outliers."""
+    from darksirens.redshift.selection import magnitude_suffstats
+
+    rng = np.random.default_rng(41)
+    m, z = _synthetic_truncated_sample(rng, 2000, 70.0)
+    m2 = np.concatenate([m, [19.0, 18.5, 19.5]])
+    z2 = np.concatenate([z, [-0.01, 1e-4, 0.0]])
+    with pytest.warns(RuntimeWarning, match="dropped 3/"):
+        fit = fit_selection_from_mags(m2, z2, 22.5)
+    ref = fit_selection_from_mags(m, z, 22.5)
+    assert abs(fit.M0hat - ref.M0hat) < 1e-9   # identical after the drop
+    with pytest.warns(RuntimeWarning, match="dropped 3/"):
+        magnitude_suffstats(m2, z2, 22.5)
+
+
 def test_fit_rejects_sample_fainter_than_the_declared_limit():
     rng = np.random.default_rng(22)
     m, z = _synthetic_truncated_sample(rng, 500, 70.0)

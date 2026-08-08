@@ -114,7 +114,7 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         # becomes a value-unreadable tracer (which the completion module
         # hard-errors on rather than guessing a mode).
         c_mode={0: None, 1: C_MODE_AGGREGATE_STRUCT,
-                2: C_MODE_SELECTION_STRUCT}[int(c_mode)],
+                2: C_MODE_SELECTION_STRUCT}[int(c_mode or 0)],
         # Parametric-selection block: m_lim is a pinned truncation datum
         # (overridable via fixed values); M0hat / sigma_M are sampled leaves
         # under c_mode="selection" and fiducial-pinned otherwise.

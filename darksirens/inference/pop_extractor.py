@@ -210,6 +210,10 @@ def make_pop_extractor(settings: dict):
             tuple(tuple(n) for n in settings["mark_names_by_catalog"])
             if settings.get("mark_names_by_catalog") else None
         ),
+        # Selection mode gates M0hat/sigma_M into the sampled survey block;
+        # rebuilding without it would silently misalign any label AFTER the
+        # survey block for archived selection chains.
+        c_mode                 = settings.get("c_mode", "per_pixel") or "per_pixel",
     )
 
     label_to_coord_idx = {label: idx for idx, label in enumerate(labels)}

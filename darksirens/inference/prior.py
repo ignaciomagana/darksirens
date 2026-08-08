@@ -49,6 +49,10 @@ class _Inert(NamedTuple):
     reason: str
     fatal_when_fixed: bool = False
     remedy: str = ""
+    #: The fixed-value path is the ENDORSED way to set this label (e.g. the
+    #: m_lim truncation datum), so a fixed value draws no warning -- the CLI
+    #: itself inserts one under --selection_fit.
+    fixed_ok: bool = False
 
 
 class _SurveyParam(NamedTuple):
@@ -242,7 +246,8 @@ _PINNED_SURVEY_PARAMS = {
         "combination m_lim - M0hat is identified, so sampling both would be "
         "an exact flat direction; set it per run via "
         "--fixed_parameter_values (the decoder pins the field) and let "
-        "M0hat carry the sampled freedom"
+        "M0hat carry the sampled freedom",
+        fixed_ok=True,
     ),
 }
 
@@ -545,6 +550,16 @@ def build_parameter_space(
                 f"catalog (or a single string to broadcast).")
     else:
         c_mode_by_cat = (str(c_mode),) * n_catalogs
+    if n_catalogs >= 2 and any(m == "selection" for m in c_mode_by_cat):
+        # Fail-closed until per-catalog selection fits exist: the _c{k}
+        # labels would sample FLAT (the single-fit selection_prior anchors
+        # base labels only) and the theta-provenance loop would compare every
+        # catalog's table against one fit -- catalog k's selection would be
+        # silently unanchored.
+        raise ValueError(
+            "c_mode='selection' is single-catalog for now: a K>=2 mixture "
+            "needs one magnitude fit (and one anchored theta prior) per "
+            "catalog, which the selection-fit plumbing does not yet carry.")
 
     def _survey_inactive_reason(label):
         """:class:`_Inert` for a (possibly ``_c{k}``-suffixed) survey label.
@@ -711,6 +726,10 @@ def build_parameter_space(
         for _key in _source:
             _inert = _survey_inactive_reason(_key)
             if _inert is None:
+                continue
+            if _source is fixed_parameter_values and _inert.fixed_ok:
+                # Endorsed fixed-value path (e.g. the m_lim truncation datum,
+                # which --selection_fit itself pins): no warning.
                 continue
             _message = (
                 f"A {_source_name} was given for '{_key}', but it is not a "
@@ -978,8 +997,10 @@ def build_parameter_space(
         if lbl not in labels:
             reason = _survey_inactive_reason(lbl)
             why = f": {reason.reason}" if reason is not None else (
-                " (is it fixed via --fixed_parameter_values, or suffixed for "
-                "a catalog this run does not have?)")
+                " (is it fixed via --fixed_parameter_values, dropped by "
+                "fix_survey=True -- which fixes the whole block including "
+                "theta, incompatible with a selection-fit prior -- or "
+                "suffixed for a catalog this run does not have?)")
             raise ValueError(
                 f"selection_prior names '{lbl}', which is not sampled in "
                 f"this configuration{why}.")

@@ -168,6 +168,32 @@ def test_selection_prior_flips_kinds_and_fails_closed():
                               selection_prior={"M0hat": (-20.19, 0.02)})
 
 
+@pytest.mark.parametrize("universe_model", ["dark_sirens_complete",
+                                            "spectral_sirens",
+                                            "bright_sirens"])
+def test_selection_labels_inert_for_complete_and_catalog_free(universe_model):
+    labels = build_parameter_space("powerlaw+peak", True, True, False,
+                                   universe_model=universe_model,
+                                   use_lss=False, c_mode="selection")[0]
+    assert not ({"M0hat", "sigma_M"} & set(labels))
+
+
+def test_selection_labels_absent_under_fix_survey():
+    labels = build_parameter_space("powerlaw+peak", True, True, True,
+                                   universe_model="dark_sirens",
+                                   use_lss=False, c_mode="selection")[0]
+    assert not ({"M0hat", "sigma_M"} & set(labels))
+
+
+def test_selection_mode_rejects_multitracer_mixtures():
+    """K>=2 selection would sample _c{k} theta FLAT and compare every
+    catalog's table against one fit -- fail-closed until per-catalog fits."""
+    with pytest.raises(ValueError, match="single-catalog"):
+        build_parameter_space("powerlaw+peak", True, True, False,
+                              universe_model="dark_sirens", use_lss=False,
+                              n_catalogs=2, c_mode="selection")
+
+
 def test_builder_requires_and_rejects_fit_pairing():
     from darksirens.cli.build_lognormal_completion import _require_selection_fit
     with pytest.raises(ValueError, match="needs the offline magnitude fit"):

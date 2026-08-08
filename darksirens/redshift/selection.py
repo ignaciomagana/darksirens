@@ -122,6 +122,7 @@ def magnitude_suffstats(m, z, m_lim, n_bins=64, Om0=Om0Planck,
     for the joint-term cross-check (the Gaussian-prior path is the default;
     see the module docstring).
     """
+    m, z = _apply_z_floor(m, z, "magnitude_suffstats")
     Mhat = reference_absolute_mags(m, z, Om0, w0, wa)
     T = np.asarray(m_lim, dtype=float) - (np.asarray(m, dtype=float) - Mhat)
     edges = np.linspace(T.min() - 1e-9, T.max() + 1e-9, n_bins + 1)
@@ -206,6 +207,30 @@ class SelectionFit:
         }
 
 
+#: Redshift floor for the magnitude fit and suff-stats: recorded survey
+#: redshifts are PHOTOMETRIC and the mock generator deliberately leaves
+#: negative realizations unclipped, so z <= 0 gives NaN distance moduli
+#: (crashing the fit) and tiny positive z gives DM -> -inf outliers that
+#: silently drag the MLE.  Galaxies below the floor are DROPPED and counted;
+#: the un-modeled photo-z scatter at low z is a documented limitation.
+Z_FLOOR = 0.01
+
+
+def _apply_z_floor(m, z, where):
+    m = np.asarray(m, dtype=float)
+    z = np.asarray(z, dtype=float)
+    keep = np.isfinite(m) & np.isfinite(z) & (z >= Z_FLOOR)
+    n_drop = int((~keep).sum())
+    if n_drop:
+        import warnings
+
+        warnings.warn(
+            f"{where}: dropped {n_drop}/{m.size} galaxies below the "
+            f"z >= {Z_FLOOR} floor (photometric redshifts near/below zero "
+            "have no usable distance modulus).", RuntimeWarning)
+    return m[keep], z[keep]
+
+
 def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
                             Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
                             stratum="all"):
@@ -239,8 +264,11 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
 
     m = np.asarray(m, dtype=float)
     z = np.asarray(z, dtype=float)
-    if m.shape != z.shape or m.ndim != 1 or m.size < 10:
-        raise ValueError("need matching 1-D m, z with at least 10 galaxies")
+    if m.shape != z.shape or m.ndim != 1:
+        raise ValueError("need matching 1-D m, z arrays")
+    m, z = _apply_z_floor(m, z, "fit_selection_from_mags")
+    if m.size < 10:
+        raise ValueError("need at least 10 galaxies above the z floor")
     over = m > m_lim + 1e-9
     if over.any():
         raise ValueError(
