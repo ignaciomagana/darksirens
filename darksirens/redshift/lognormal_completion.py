@@ -1072,9 +1072,9 @@ def save_lss_completion_hdf5(
                 "renormalization itself was fed a poisoned table. Fix the "
                 "build instead of persisting the artifact."
             )
-    if c_mode is not None and c_mode not in ("per_pixel", "aggregate"):
+    if c_mode is not None and c_mode not in ("per_pixel", "aggregate", "selection"):
         raise ValueError(
-            f"c_mode must be 'per_pixel' or 'aggregate', got {c_mode!r}."
+            f"c_mode must be 'per_pixel', 'aggregate' or 'selection', got {c_mode!r}."
         )
 
     tmp_path = f"{path}.tmp-{os.getpid()}"
