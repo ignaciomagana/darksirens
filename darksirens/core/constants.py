@@ -31,3 +31,12 @@ SURVEY_PARAMS_FID_BY_NAME = {
 SURVEY_PARAMS_FID = tuple(SURVEY_PARAMS_FID_BY_NAME.values())
 
 COMPLETE_EMPTY_PIXEL_POLICIES = {"zero": 0, "volume": 1}
+
+#: Completeness estimator mode stored on ``SurveyParams.c_mode`` as an int enum
+#: (string -> code, decoded eagerly pre-jit like the empty-pixel policy).
+#: ``per_pixel`` (0, legacy default) is the per-pixel matched-kernel ratio;
+#: ``aggregate`` (1) is ONE sky-aggregate curve
+#: ``Cbar(z) = clip(Sum_p dN_obs_s(z|p) / (N_pix_total dN_exp_smooth(z)), 0, 1)``
+#: so the angular clustering of the observed galaxies stays out of the budget
+#: (see :mod:`darksirens.redshift.completion`).
+C_MODES = {"per_pixel": 0, "aggregate": 1}

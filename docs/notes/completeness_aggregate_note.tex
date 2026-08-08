@@ -1,0 +1,370 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1.05in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\dNobs}{dN^{\rm obs}_{s}}
+\newcommand{\dNexp}{dN^{\rm exp}}
+\newcommand{\dNexps}{dN^{\rm exp}_{s}}
+\newcommand{\dNmiss}{dN^{\rm miss}}
+\newcommand{\Cbar}{\bar{C}}
+\newcommand{\Qlss}{Q_{\rm LSS}}
+
+\title{\textbf{Separating the completeness budget from its spatial placement:\\
+the aggregate-$C$ completion in \texttt{darksirens}}\\[4pt]
+\large Technical note accompanying PR \#338 (\texttt{feat/completeness-aggregate-budget})}
+\author{Ignacio Maga\~na Hernandez}
+\date{August 8, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+The dark-siren redshift prior completes a magnitude-limited galaxy catalog with a
+missing-galaxy branch whose differential completeness $C$ was estimated per HEALPix
+pixel from the observed counts themselves. Because the estimator divides a per-pixel
+numerator by an isotropic expectation, it measures the product of the survey selection
+and the local galaxy overdensity, $C \simeq C_{\rm sel}(z)\,[1+\delta_{\rm obs}(p,z)]$,
+clipped to $[0,1]$: angular clustering is absorbed into the ``how much is missing''
+budget, and the predicted missing density \emph{anti-correlates} with the true one.
+This note derives the failure, documents the corrected estimators introduced in
+PR~\#338 --- a sky-aggregate budget $\Cbar(z)$ that reserves all spatial structure for
+the completion field $\Qlss(p,z)$, a per-redshift mean-one renormalization that makes
+the missing budget invariant to $Q$-fit noise by construction, a matched truncation of
+the expected counts at the survey depth, and a resolution guard on the low-rank
+Gaussian-process completion --- and quantifies every change on a closure experiment
+with known injected clustering and on an end-to-end $H_0$ scan of 300 mock dark
+sirens. All legacy behavior is preserved bit-for-bit at default settings; the new
+estimators are opt-in and provenance-locked.
+\end{abstract}
+
+\section{Setup and notation}
+
+Let $z_g$ denote the package redshift grid ($N_g$ log-spaced nodes on $[0, z_{\max}]$)
+and $p = 1,\dots,N_{\rm pix}$ the HEALPix pixels of solid angle
+$a_{\rm pix} = 4\pi/N_{\rm pix}$. The homogeneous expectation for the observable
+galaxy density per pixel per unit redshift is
+\begin{equation}
+\dNexp(z) \;=\; n_0\, a_{\rm pix}\, \frac{dV_c}{dz\,d\Omega}(z)\,(1+z)^{\delta},
+\label{eq:dnexp}
+\end{equation}
+with $n_0$ the comoving density and $\delta$ a phenomenological evolution index; both
+are sampled in the hierarchical likelihood. Every density that enters a ratio is
+smoothed by one linear operator $S$, built from unit-mass truncated Gaussian kernels
+of width $\sigma_s = 0.05$: the observed-galaxy KDE in pixel $p$ is
+\begin{equation}
+\dNobs(z\,|\,p) \;=\; \sum_{i \in p} \frac{\mathcal{N}(z;\, z_i, \sigma_s)}{M(z_i)},
+\qquad
+M(z_i) = \Phi\!\left(\tfrac{z_{\max}-z_i}{\sigma_s}\right) - \Phi\!\left(\tfrac{-z_i}{\sigma_s}\right),
+\label{eq:kde}
+\end{equation}
+and the matched expectation is $\dNexps = S\,\dNexp$. Because $S$ is shared and
+linear, a redshift-independent true completeness passes through the ratio exactly.
+
+The assembled per-pixel redshift prior is the in/out mixture
+\begin{equation}
+p(z\,|\,p) \;=\; \frac{N_{\rm obs}(p)\, p_{\rm cat}(z\,|\,p) \;+\; \dNmiss(z\,|\,p)}
+{N_{\rm obs}(p) + N_{\rm miss}(p)},
+\qquad
+N_{\rm miss}(p) = \int \dNmiss(z\,|\,p)\, dz ,
+\label{eq:prior}
+\end{equation}
+with $p_{\rm cat}$ the unit-normalized catalog kernel density and $N_{\rm obs}$ the
+observed count. In \emph{conditional} sky weighting every pixel carries unit mass; in
+\emph{field} weighting the denominator is replaced by the survey-global
+$Z = \sum_p [N_{\rm obs}(p) + N_{\rm miss}(p)]$, restoring relative angular host
+density. The missing branch is
+\begin{equation}
+\dNmiss(z\,|\,p) \;=\; \bigl[1 - C(z\,|\,p)\bigr]\, \dNexp(z)\, \ell(p, z),
+\label{eq:dnmiss}
+\end{equation}
+where the large-scale-structure factor $\ell$ is exactly one of
+\begin{equation}
+\ell(p,z) \;=\;
+\begin{cases}
+1 & \text{homogeneous},\\[2pt]
+\max\!\bigl(1 + b_{\rm eff}\,\delta_g(p,z),\, 0\bigr) & \text{legacy local overdensity},\\[2pt]
+\Qlss(p,z) = e^{\log Q(p,z)} & \text{precomputed completion field},
+\end{cases}
+\label{eq:lss}
+\end{equation}
+the latter two mutually exclusive. Beyond a declared survey depth $z_{\rm depth}$ the
+convention is $C \equiv 0$, $\ell \equiv 1$ (hosts are missing, not nonexistent).
+
+\section{The legacy per-pixel estimator and its failure modes}
+\label{sec:legacy}
+
+\subsection{Clustering absorption (the thinning degeneracy)}
+
+The legacy differential completeness is estimated per pixel,
+\begin{equation}
+C_{\rm pp}(z\,|\,p) \;=\;
+\mathrm{clip}\!\left(\frac{\dNobs(z\,|\,p)}{\dNexps(z)},\; 0,\; 1\right).
+\label{eq:cpp}
+\end{equation}
+The numerator is per-pixel data; the denominator is isotropic. Writing the observed
+density as selection times local structure,
+$\dNobs \simeq S\,[\,C_{\rm sel}\,\dNexp\,(1+\delta_{\rm obs})\,]$, the estimator
+returns
+\begin{equation}
+C_{\rm pp}(z\,|\,p) \;\simeq\;
+\mathrm{clip}\!\bigl( C_{\rm sel}(z)\,[1+\delta_{\rm obs}(p,z)],\, 0,\, 1 \bigr):
+\label{eq:cpp-absorb}
+\end{equation}
+the angular clustering of the \emph{observed} galaxies is absorbed into the
+completeness. This is the classical thinning (selection--density) degeneracy of an
+inhomogeneous Poisson process: from counts alone only the product
+$\lambda = \phi \cdot n$ is identifiable, and splitting it requires external
+structure. Galaxy surveys avoid counts-based completeness for precisely this reason
+(injection campaigns and survey-property templates are constructed to be independent
+of the real density field); among dark-siren pipelines the counts-based per-pixel
+construction appears in the DarkSirensStat mask/cone completeness, with the
+absorption pathology acknowledged there.
+
+Two immediate consequences follow from Eq.~\eqref{eq:cpp-absorb}. First, an overdense
+\emph{complete} pixel reads $C > 1$ and is clipped: its excess is silently discarded.
+Second, and structurally worse, the missing branch anti-tracks the truth: to first
+order in $\delta$,
+\begin{equation}
+1 - C_{\rm pp} \;\simeq\; (1 - C_{\rm sel}) - C_{\rm sel}\,\delta_{\rm obs},
+\end{equation}
+so a pixel with \emph{more} true (and hence more missing) galaxies is assigned
+\emph{fewer} predicted missing galaxies. On the closure mock (Sec.~\ref{sec:closure})
+the measured anomaly correlation of $\log \dNmiss$ against truth is $r = -0.43$ with
+slope $-0.62$. In the assembled prior~\eqref{eq:prior} the observed and missing
+branches then largely cancel the catalog's clustering (total-density slope $0.25$
+against truth), and because the completion field $\Qlss$ is fit to the \emph{same}
+counts residual to $C_{\rm pp}$ (its Poisson base is $C_{\rm pp}\,\dNexp$), it can
+only ever recover sub-smoothing structure --- measured slope $0.29$, against $0.77$
+for the crude legacy $\delta_g$ factor.
+
+\subsection{Jensen inflation of the missing budget}
+
+The completion tables store the Laplace posterior mean
+$\mathbb{E}[Q] = \exp( b\,s_{\rm MAP} - \text{shift} + \tfrac12 b^2 \sigma^2_{\rm post})$.
+The posterior variance $\sigma^2_{\rm post}$ is largest exactly where data are sparse,
+so the spatially varying lognormal factor $e^{\sigma^2/2}$ does not integrate away:
+on the mock the radial-mode missing budget is inflated by $+55\%$ relative to the
+homogeneous budget. The budget does not belong to $Q$ at all --- it is the job of
+$C$ and the sampled $n_0$.
+
+\subsection{Resolution collapse of the low-rank completion field}
+
+The 3-D completion field is a low-rank Gaussian process on (sphere $\times$
+$\zeta = \log(1+z)$) with $M_z$ inducing nodes spanning $[0, \zeta_{\rm hi}]$. The
+shipped hyperparameters fixed the correlation length at $50\,$Mpc, which maps to
+$\ell_\zeta = L\,({d\zeta}/{d\chi})|_{z_{\rm ref}} \approx 0.01$, roughly $30\times$
+\emph{below} the node spacing $\zeta_{\rm hi}/(M_z - 1) \approx 0.36$. In this regime
+a variational/low-rank GP posterior collapses toward its prior while the optimizer
+converges normally (Burt et al.\ 2019): the fitted field is nearly blind to real
+radial structure (measured fitted-vs-truth $\log Q$ slope $0.04$), with no
+configuration error raised and no CLI knob available to change the lengthscale.
+
+\subsection{Depth-edge mismatch}
+
+The galaxy kernels~\eqref{eq:kde} renormalize on $[0, z_{\max}]$ of the grid, while
+the expected side smoothed the \emph{untruncated} $\dNexp$. Just below a declared
+depth $z_{\rm depth}$ the numerator loses the kernel mass beyond the edge but the
+denominator does not, so $C$ dips and
+$\dNmiss = (1-C)\,\dNexp$ spikes within $\sim 2\sigma_s$ of the edge.
+
+\section{The corrected estimators (PR \#338)}
+\label{sec:new}
+
+\subsection{S0a: matched truncation at the survey depth}
+
+With a concrete $z_{\rm depth}$ the expected side is truncated identically to the
+observed side before smoothing,
+\begin{equation}
+\dNexps(z) \;=\; \bigl[S\,\bigl(\dNexp \cdot \mathbf{1}[z \le z_{\rm depth}]\bigr)\bigr](z),
+\end{equation}
+so a constant true completeness again passes through the ratio exactly at the edge
+(the same construction the $z=0$ boundary already used). Beyond the depth the
+denominator is pinned to an inert constant: the truncated smooth underflows there,
+and a live $\text{data}/\epsilon$ division feeds $0 \times \infty$ NaN cotangents
+through the downstream \texttt{clip}/\texttt{where} in reverse-mode differentiation
+even though every consumer discards $C$ beyond the depth. The $z_{\rm depth} = $
+\texttt{None} path is bit-identical to the legacy expression.
+
+\subsection{S0b: per-redshift mean-one budget renormalization}
+
+After any table build (radial or gp3d), with build-time weights
+$w_p(z) = [1 - C_p(z)]\,\dNexp(z)$ over the fitted footprint $\mathcal{F}$,
+\begin{equation}
+\log Q_p(z) \;\longleftarrow\; \log Q_p(z) \;-\;
+\log \frac{\sum_{p' \in \mathcal{F}} w_{p'}(z)\, Q_{p'}(z)}
+{\sum_{p' \in \mathcal{F}} w_{p'}(z)} ,
+\label{eq:renorm}
+\end{equation}
+applied to the MAP table \emph{and independently to every Laplace ensemble member}.
+The identity $\sum_p w_p Q_p = \sum_p w_p$ then holds exactly per redshift bin: $Q$
+becomes a pure \emph{redistribution} field, the missing budget with any $Q$ equals
+the homogeneous budget by construction (killing the $+55\%$ Jensen inflation
+identically), and the ensemble carries placement uncertainty but zero budget
+uncertainty --- the budget lives in $C$ and the sampled $n_0$, where it is
+marginalized. The removed monopole curve and a boolean stamp are recorded in the
+HDF5 provenance (fail-closed writer; loud loader warning for unstamped legacy
+tables). The invariant is defined over the \emph{fitted} footprint: occupied pixels
+for the per-pixel base, the whole sky for the aggregate base; the gp3d
+``borrowing halo'' evaluated onto unfitted pixels deliberately sits outside it.
+
+\subsection{S0c: hyperparameter exposure and the resolution guard}
+
+The builder gains \texttt{--lss-corr-length-mpc}, \texttt{--lss-sigma},
+\texttt{--gp3d-nz-nodes}, \texttt{--gp3d-nsph-nodes}, and \texttt{--gp3d-z-node-hi}
+(default moved from a hardwired $\zeta_{\rm hi} = \log 4$ to the grid maximum). A
+\emph{hard error} fires at build time when
+\begin{equation}
+\frac{\zeta_{\rm hi}}{M_z - 1} \;>\; \ell_\zeta ,
+\end{equation}
+stating both numbers and the minimum admissible $M_z$; the sphere side warns when
+$\sqrt{4\pi/M_{\rm sph}} > \ell_{\rm sph}$. The configuration that produced the
+slope-$0.04$ collapse can no longer build silently.
+
+\subsection{S1: the aggregate budget $\Cbar$}
+
+The opt-in mode \texttt{c\_mode="aggregate"} replaces the per-pixel
+ratio~\eqref{eq:cpp} by one sky-aggregate curve per likelihood proposal,
+\begin{equation}
+\boxed{\;\;
+\Cbar(z) \;=\;
+\mathrm{clip}\!\left(
+\frac{\displaystyle \sum_{p} \dNobs(z\,|\,p)}
+{\,N_{\rm pix}^{\rm tot}\; \dNexps(z)\,},\; 0,\; 1\right),
+\qquad
+N_{\rm pix}^{\rm tot} = \mathrm{round}\!\left(\frac{4\pi}{a_{\rm pix}}\right),
+\;\;}
+\label{eq:cbar}
+\end{equation}
+broadcast identically to every pixel (occupied \emph{and} empty) in both the
+conditional and field paths, so numerator and global normalizer carry the same
+budget by construction. The numerator is a $\theta$-independent data constant
+(reusing the existing full-sky KDE rows; a compact catalog without them is refused
+rather than silently under-counted); all parameter dependence enters through the
+shared denominator. Averaged over the footprint the density fluctuations cancel,
+$\sum_p \delta_p \approx 0$, so $\Cbar$ estimates the \emph{selection alone}: on the
+mock it matches the analytic generative selection to $0.3\%$ in median absolute
+deviation. The missing branch becomes
+\begin{equation}
+\dNmiss(z\,|\,p) \;=\; \bigl[1 - \Cbar(z)\bigr]\, \dNexp(z)\, \ell(p, z),
+\end{equation}
+with $(1-\Cbar)$ pixel-independent: the entire spatial signal is carried by $\ell$,
+whose correlation with the truth flips positive by construction. Correspondingly the
+completion-field fit conditions on the base $\Cbar\,\dNexp$ and \emph{includes empty
+pixels} as $N_{\rm obs} = 0$ rows against the nonzero base --- the zero count is the
+void information the occupied-only fit discarded. $Q$ now targets the full observed
+overdensity rather than the sub-smoothing residual. Tables record their
+\texttt{c\_mode} in provenance and consumption is fail-closed in both directions
+(the two targets differ by the whole clustering signal; mixing them double-counts or
+drops it).
+
+Two documented caveats. $\Cbar \propto 1/n_0$ through a single global clip, so the
+likelihood can be kinked in the sampled $n_0$ near full completeness. And the
+sky-aggregate assumption presumes isotropic survey depth; for genuinely anisotropic
+compilations the sanctioned extensions are stratified $\Cbar_k$ per depth region or
+a magnitude-based $C_{\rm sel}(z;\theta)$ fit from the per-galaxy magnitude
+likelihood (which is independent of the density field by thinning) --- staged as
+future work, not part of this PR.
+
+\subsection{Auxiliary fix: grid endpoint vs.\ distance table}
+
+Under a non-default \texttt{DARKSIRENS\_ZMAX}, XLA's and NumPy's
+$\mathrm{expm1}\circ\log$ can disagree by one ulp (e.g.\ at $z_{\max} = 0.52$), which
+left the redshift grid's last node \emph{above} the NumPy-built distance table; the
+out-of-range mask then returned $\mathrm{NaN}$ for $r(z_{\max})$ and poisoned every
+consumer of $\chi(z_g)$ (measured: an all-NaN radial $Q$ table, refused by the
+fail-closed writer). The endpoint is now clamped to the NumPy value when lower ---
+bit-inert at the default $z_{\max} = 5$.
+
+\section{Validation}
+\label{sec:closure}
+
+\subsection{Closure experiment (known injected clustering)}
+
+Mean-one lognormal truth field from the same low-rank GP family the builder fits
+(closure exact in principle), fiducial survey selection, $277$k galaxies, $800\,$Mpc
+correlation length, \texttt{nside}~16. Both modes rebuilt with resolved nodes
+($M_z = 12$ to $z = 0.5$, $M_{\rm sph} = 64$); the per-pixel column isolates the
+S0-only fixes (its anti-correlation is the structural defect S1 removes).
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+ & per-pixel $C$ (legacy + S0) & aggregate $\Cbar$ \\
+\midrule
+missing-branch spatial closure ($r$, slope) & $-0.44$, $-0.64$ & $\mathbf{+0.84}$ to $\mathbf{+0.85}$, $0.81$--$0.99$ \\
+assembled total-density slope (gp3d / radial / $\delta_g$) & $0.27$ / $0.26$ / $0.75$ & $\mathbf{0.92}$ / $\mathbf{0.99}$ / $1.07$ \\
+fitted-vs-truth $\log Q$ slope (gp3d) & $0.26$ \; ($0.04$ shipped) & $\mathbf{0.80}$ \\
+void voxels (true $Q \le 0.25$): median fitted $Q$ & $0.94$--$0.95$ & $\mathbf{0.32}$--$\mathbf{0.46}$ \\
+$Q$ missing budget vs.\ homogeneous & radial $+55\% \to$ equal & equal (by construction) \\
+depth-edge $\dNmiss$ spike & removed (S0a) & removed \\
+aggregate $C$ vs.\ generative selection & $0.3\%$ & $0.3\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Closure metrics before/after. Bold: the S1 architecture change. The
+$+8\%$ residual budget offset shared by \emph{all} configurations (including
+homogeneous) is the realization's sample-variance monopole
+($\langle Q_{\rm truth}\rangle_{\rm sky} \approx 0.89$ near depth) and belongs to
+the sampled $n_0$.}
+\end{table}
+
+\subsection{End-to-end $H_0$ scan}
+
+300 GW dark sirens hosted by the clustered catalog with a DAG-consistent pipeline
+(detection cut on the observed SNR; the PE conditions on the same recorded noise
+realization; $2\times 10^6$ selection injections share the statistic and threshold
+and are reweighted across trial $H_0$; selection $N_{\rm eff} > 12{,}000$ across the
+whole grid). Machinery closure gates passed before reading results: a fully
+generator-native mock recovers $H_0 = 67.0$ (truth $67.74$), and the complete-catalog
+gate on the clustered events gives $69.5 \pm 1.4$ ($+1.3\sigma$).
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+configuration & per-pixel $C$ & aggregate $\Cbar$ \\
+\midrule
+homogeneous      & $69.07 \pm 1.38$ \;($+1.0\sigma$) & $67.87 \pm 1.32$ \;($+0.1\sigma$) \\
+legacy $1+b\,\delta_g$ & $68.07 \pm 1.35$ \;($+0.2\sigma$) & $66.80 \pm 1.39$ \;($-0.7\sigma$) \\
+$Q$ radial       & $69.11 \pm 1.38$ \;($+1.0\sigma$) & $66.91 \pm 1.37$ \;($-0.6\sigma$) \\
+$Q$ gp3d         & $68.99 \pm 1.37$ \;($+0.9\sigma$) & $67.00 \pm 1.36$ \;($-0.5\sigma$) \\
+\bottomrule
+\end{tabular}
+\caption{Gaussian peak fits to the fine-grid $\ln\mathcal{L}(H_0)$ scans
+(truth $H_0 = 67.74$; survey block fixed at truth). Every configuration recovers
+truth within $\sim 1\sigma$ at $n = 300$: the ensemble $H_0$ is
+statistics-dominated at this depth. Because all scans share the same events, the
+$\sim 1.2\,\mathrm{km\,s^{-1}\,Mpc^{-1}}$ coherent offset between the per-pixel and
+aggregate families is nearly noise-free \emph{on this realization} but is a single
+draw; certifying it as a method bias requires coverage over disjoint realizations.
+At $n \sim 3000$ ($\sigma \approx 0.45$) the same shift would be a $3$--$4\sigma$
+systematic.}
+\end{table}
+
+\section{Compatibility and provenance summary}
+
+\begin{itemize}
+\item Legacy per-pixel mode remains the \textbf{default} and bit-identical
+(pinned by \texttt{test\_z\_depth\_none\_bit\_identical} and
+\texttt{test\_per\_pixel\_default\_bit\_identical}); \texttt{c\_mode} is structural
+at trace time (a leaf-less sentinel), and a jit-traced integer flag hard-errors
+rather than silently selecting a mode.
+\item $Q$ tables are stamped with \texttt{c\_mode} and the budget-renormalization
+state; consumption fail-closes on any mismatch, and unstamped legacy tables load as
+per-pixel with a loud warning.
+\item Deferred, in order: mixture-of-Laplace members over a marginal-likelihood
+hyperparameter grid (member coverage is still overconfident: $5\% \to 19\%$);
+post-renormalization $\pm 7$ clip-railing accounting;
+\texttt{--validate\_completion} under aggregate mode; stratified or magnitude-based
+$C_{\rm sel}$ for anisotropic-depth catalogs, with the selection parameters sampled
+inside the likelihood and entering the selection integral.
+\end{itemize}
+
+\end{document}

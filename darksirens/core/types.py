@@ -10,6 +10,30 @@ class CosmoParams(NamedTuple):
     wa: Any = 0.0
 
 
+class AggregateCMode(NamedTuple):
+    """STRUCTURAL spelling of the aggregate completeness mode.
+
+    ``SurveyParams.c_mode`` selects the completeness estimator at TRACE time
+    (never sampled), but the likelihood's module-level jit takes the survey as
+    a pytree ARGUMENT, so any int leaf crosses that boundary as a
+    value-unreadable tracer.  An instance of this EMPTY NamedTuple carries the
+    aggregate flag as pytree STRUCTURE instead: it flattens to zero leaves, so
+    (like the ``None`` that spells per_pixel) it is part of the treedef and
+    survives every jit boundary, and ``isinstance`` decodes it inside any
+    trace.  A traced int leaf on ``c_mode`` is a HARD ERROR in
+    :func:`darksirens.redshift.completion._is_aggregate_c_mode` -- guessing a
+    mode there would silently swap the whole clustering budget.
+
+    NOTE: as an empty tuple this object is FALSY -- test with ``isinstance``
+    (or ``is C_MODE_AGGREGATE_STRUCT``), never truthiness.
+    """
+
+
+#: Singleton structural aggregate flag stored on ``SurveyParams.c_mode`` by
+#: the parameter decoder (eager callers may still pass the concrete int 1).
+C_MODE_AGGREGATE_STRUCT = AggregateCMode()
+
+
 class SurveyParams(NamedTuple):
     """Parameters dictating galaxy survey completeness and selection.
 
@@ -57,6 +81,26 @@ class SurveyParams(NamedTuple):
     observed catalog kernel is zeroed there (:mod:`darksirens.redshift.completion`,
     :mod:`darksirens.redshift.catalog`).  ``None`` means completeness is estimated
     over the full grid (the legacy, bit-identical path).
+
+    ``c_mode`` selects the completeness estimator, encoded by the int enum
+    :data:`darksirens.core.constants.C_MODES` and decoded eagerly pre-jit like
+    ``complete_empty_pixel_policy``: ``per_pixel`` (0, the legacy DEFAULT,
+    bit-identical -- the per-pixel matched-kernel ratio) or ``aggregate`` (1,
+    ONE sky-aggregate curve ``Cbar(z)`` per proposal, broadcast to every
+    pixel, so the observed angular clustering cannot be absorbed into the
+    missing budget; see :mod:`darksirens.redshift.completion`).  Storage
+    convention (the ``z_depth`` pattern): per_pixel is carried as ``None``
+    (the default), aggregate as the leaf-less
+    :data:`C_MODE_AGGREGATE_STRUCT` sentinel -- BOTH modes are then
+    STRUCTURAL (part of the pytree treedef), so they survive nested jit
+    boundaries where an int leaf becomes a value-unreadable tracer
+    (``darksiren_log_likelihood`` takes the survey as a jit argument).
+    Concrete ints ``0``/``1`` are also accepted EAGERLY; an int leaf that
+    does cross a jit boundary is a hard error (never silently decoded as
+    either mode).  Never sampled/traced by intent.  A survey's
+    ``c_mode`` must match the ``c_mode`` any prebuilt Q table was fit under
+    (hard-checked at load; the two targets differ by the entire clustering
+    signal).
     """
     n0: Any
     z50: Any
@@ -71,6 +115,7 @@ class SurveyParams(NamedTuple):
     lss_corr_length_ang: Any = 0.2
     wl_params: Any = None
     z_depth: Any = None
+    c_mode: Any = None         # None/0=per_pixel (legacy), C_MODE_AGGREGATE_STRUCT/1=aggregate; structural, never traced
 
 
 class EMCatalog(NamedTuple):

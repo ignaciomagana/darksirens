@@ -47,6 +47,19 @@ Caveats (the default **radial** completion, ``mode="radial"``):
   alone).
 - Built at fixed fiducial cosmology/survey parameters; the GW likelihood consumes
   the deterministic/posterior-mean ``Q`` (not the fully-marginalised ensemble).
+- Budget convention: shipped tables are per-z mean-one renormalized under the
+  missing-budget weights ``(1 - C) dN_exp`` over the fitted footprint
+  (:func:`renormalize_q_mean_one`) — ``Q`` only PLACES the missing budget,
+  never rescales it (the total is C's and n0's job).  The removed monopole and
+  a boolean stamp are recorded in the HDF5 attrs; unstamped (legacy) tables
+  draw a loud warning at load.
+- Completeness target: the fit is residual to a completeness base, either the
+  legacy per-pixel ratio (``c_mode="per_pixel"``) or the opt-in sky-aggregate
+  ``Cbar`` with empty pixels included as N_obs = 0 rows (``c_mode="aggregate"``;
+  Q then carries the FULL observed overdensity, voids included).  The mode is
+  stamped in the HDF5 attrs (absent = legacy per_pixel) and must match the
+  consuming survey's ``c_mode`` — the two targets differ by the entire
+  clustering signal, so the inference loader hard-errors on a mismatch.
 
 The radial builder uses NumPy/SciPy only; the gp3d builder additionally uses
 JAX and the (sphere x z) GP of :mod:`darksirens.sky.models`, both imported
@@ -483,6 +496,72 @@ def laplace_lognormal_members(
 
 
 # ------------------------------------------------------------
+# Per-z mean-one budget renormalization ("C says how much, Q says where")
+# ------------------------------------------------------------
+
+def renormalize_q_mean_one(logq: np.ndarray, weights: np.ndarray):
+    """Per-z mean-one renormalization of a ``logQ`` table under budget weights.
+
+    The GW likelihood forms the missing density as ``dN_miss = (1 - C) dN_exp Q``
+    (see :mod:`darksirens.redshift.completion`), so any per-z monopole in ``Q``
+    RESCALES the total missing budget instead of only redistributing it — the
+    Laplace posterior-mean ``E[Q] = exp(b s + b^2 var_post / 2 - shift)`` carries
+    exactly such a monopole because ``var_post`` is largest where data are sparse
+    (spatially varying Jensen bias; measured +55% budget inflation for radial
+    tables).  The budget is C's and n0's job; ``Q`` only places it.  This helper
+    enforces that division of labour by construction::
+
+        logQ_p(z) -= log[ sum_p w_p(z) Q_p(z) / sum_p w_p(z) ]
+
+    with the caller-supplied weights ``w_p(z) = (1 - C_p(z)) * dN_exp(z)``
+    evaluated at the build-time fiducial, summed over the FITTED FOOTPRINT
+    (the rows supplied here — the pixels the builder actually fit, never the
+    full sky: out-of-footprint pixels' homogeneous budget must not absorb the
+    footprint's monopole).  Afterwards ``sum_p w_p Q_p == sum_p w_p`` holds
+    per z-bin to float precision.
+
+    Parameters
+    ----------
+    logq : (n_rows, n_grid) or (n_members, n_rows, n_grid)
+        MAP table, or a member cube — each member is renormalized
+        INDEPENDENTLY (its own monopole), so members carry placement
+        uncertainty but zero budget uncertainty.
+    weights : (n_rows, n_grid)
+        Non-negative budget weights over the fitted footprint.
+
+    Returns
+    -------
+    (logq_renorm, log_monopole)
+        ``log_monopole`` is the removed per-z curve, shaped ``(n_grid,)`` for a
+        MAP table and ``(n_members, n_grid)`` for a member cube.  Bins with
+        ``sum_p w_p(z) == 0`` (completeness saturates everywhere, no missing
+        budget to place) are left unchanged (``log_monopole = 0`` there).
+    """
+    lq = np.asarray(logq, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    if lq.ndim not in (2, 3):
+        raise ValueError(
+            f"logq must be (n_rows, n_grid) or (n_members, n_rows, n_grid); "
+            f"got shape {lq.shape}.")
+    if w.shape != lq.shape[-2:]:
+        raise ValueError(
+            f"weights shape {w.shape} does not match the logq table's "
+            f"(n_rows, n_grid) = {lq.shape[-2:]}.")
+    if np.any(w < 0.0):
+        raise ValueError(
+            "budget weights must be non-negative: w_p = (1 - C_p) * dN_exp "
+            "with C in [0, 1] and dN_exp >= 0.")
+    wsum = np.sum(w, axis=0)                                    # (n_grid,)
+    ok = wsum > 0.0
+    safe_wsum = np.where(ok, wsum, 1.0)
+    # exp(logq) is bounded by the builder's logq_clip (|logQ| <= ~7), so the
+    # weighted sum neither overflows nor underflows to an all-zero bin.
+    mono = np.sum(w * np.exp(lq), axis=-2) / safe_wsum          # (..., n_grid)
+    log_mono = np.where(ok, np.log(np.where(mono > 0.0, mono, 1.0)), 0.0)
+    return lq - log_mono[..., None, :], log_mono
+
+
+# ------------------------------------------------------------
 # 3-D angular-coupling (mode="gp3d"): ONE low-rank Poisson-lognormal field over
 # occupied (pixel x z) voxels, reusing the (sphere x z) GP
 # ------------------------------------------------------------
@@ -914,8 +993,28 @@ def save_lss_completion_hdf5(
     completion_kind: str | None = None,
     metadata: dict | None = None,
     realization_set_id: str | None = None,
+    budget_renormalized: bool | None = None,
+    budget_monopole_logq: np.ndarray | None = None,
+    c_mode: str | None = None,
 ) -> str:
     """Write a completion file with layout ``/lss_completion/{logq_map,logq_members,zgrid}``.
+
+    ``budget_renormalized`` records whether the tables were per-z mean-one
+    renormalized under the missing-budget weights ``(1 - C) dN_exp`` (see
+    :func:`renormalize_q_mean_one`), and ``budget_monopole_logq`` is the
+    removed per-z monopole curve of the MAP table.  ``None`` (the default)
+    writes NO stamp — the loader then treats the file as a legacy,
+    non-renormalized table and warns loudly.  Stamping ``True`` REQUIRES the
+    removed curve (fail-closed provenance: a table claimed mean-one without
+    the record of what was removed cannot be audited).
+
+    ``c_mode`` records which completeness estimator the fit was residual to:
+    ``"per_pixel"`` (the per-pixel matched-kernel base ``C_p dN_exp``) or
+    ``"aggregate"`` (the sky-aggregate base ``Cbar dN_exp``, empty pixels
+    included as N_obs = 0 rows).  ``None`` writes no attr, which the loader
+    reads as legacy ``per_pixel``.  The two targets differ by the entire
+    clustering signal, so the loader hard-errors when a table's ``c_mode``
+    does not match the consuming survey's.
 
     A ``realization_set_id`` (a fresh ``uuid4().hex`` unless one is supplied)
     is stamped on the ``/lss_completion`` group so a K>=2 mixture can verify
@@ -955,6 +1054,28 @@ def save_lss_completion_hdf5(
         completion_kind = "laplace_members" if logq_members is not None else "map"
     if realization_set_id is None:
         realization_set_id = uuid.uuid4().hex
+    if budget_renormalized and budget_monopole_logq is None:
+        raise ValueError(
+            "budget_renormalized=True requires budget_monopole_logq: the "
+            "removed per-z monopole curve is the provenance record of what "
+            "the renormalization took out of Q; a table stamped mean-one "
+            "without it cannot be audited. Pass the curve returned by "
+            "renormalize_q_mean_one."
+        )
+    if budget_monopole_logq is not None:
+        budget_monopole_logq = np.asarray(budget_monopole_logq, dtype=float)
+        n_bad = int(np.sum(~np.isfinite(budget_monopole_logq)))
+        if n_bad:
+            raise ValueError(
+                f"refusing to save budget_monopole_logq with {n_bad} "
+                "non-finite entries: a NaN/inf monopole means the "
+                "renormalization itself was fed a poisoned table. Fix the "
+                "build instead of persisting the artifact."
+            )
+    if c_mode is not None and c_mode not in ("per_pixel", "aggregate"):
+        raise ValueError(
+            f"c_mode must be 'per_pixel' or 'aggregate', got {c_mode!r}."
+        )
 
     tmp_path = f"{path}.tmp-{os.getpid()}"
     try:
@@ -972,6 +1093,12 @@ def save_lss_completion_hdf5(
             grp.attrs["completion_kind"] = completion_kind
             grp.attrs["created_by"] = "darksirens.redshift.lognormal_completion"
             grp.attrs["realization_set_id"] = realization_set_id
+            if budget_renormalized is not None:
+                grp.attrs["budget_renormalized"] = bool(budget_renormalized)
+            if budget_monopole_logq is not None:
+                grp.attrs["budget_monopole_logq"] = budget_monopole_logq
+            if c_mode is not None:
+                grp.attrs["c_mode"] = c_mode
             if logq_members is not None:
                 grp.attrs["member_content_sha256"] = hashlib.sha256(
                     np.ascontiguousarray(members_arr).tobytes()
@@ -996,7 +1123,14 @@ def load_lss_completion_hdf5(path: str) -> dict:
     ``None``) plus ``indexing``, ``model``, ``completion_kind`` and parsed
     ``diagnostics``.  The ensemble-provenance attrs ``realization_set_id`` /
     ``member_content_sha256`` / ``n_members`` are returned as ``None`` when
-    absent (legacy files written before provenance stamping).
+    absent (legacy files written before provenance stamping).  The budget
+    attrs ``budget_renormalized`` / ``budget_monopole_logq`` follow the same
+    convention — ``None`` when absent — but an absent ``budget_renormalized``
+    additionally draws a loud warning: the table's Q then rescales the missing
+    budget (Jensen inflation) instead of only redistributing it.  ``c_mode``
+    is likewise ``None`` when absent, which consumers must read as legacy
+    ``"per_pixel"`` (every table written before the aggregate mode existed was
+    fit residual to the per-pixel base).
 
     Validation: non-finite table content is rejected outright (one NaN cell
     poisons every event in its pixel).  Convergence diagnostics are surfaced
@@ -1013,7 +1147,9 @@ def load_lss_completion_hdf5(path: str) -> dict:
     out = {"logq_map": None, "logq_members": None, "zgrid": None,
            "indexing": "compact", "model": None, "completion_kind": None,
            "diagnostics": None, "realization_set_id": None,
-           "member_content_sha256": None, "n_members": None}
+           "member_content_sha256": None, "n_members": None,
+           "budget_renormalized": None, "budget_monopole_logq": None,
+           "c_mode": None}
     with h5py.File(path, "r") as f:
         grp = f["lss_completion"] if "lss_completion" in f else f
         if "logq_map" in grp:
@@ -1023,12 +1159,17 @@ def load_lss_completion_hdf5(path: str) -> dict:
         if "zgrid" in grp:
             out["zgrid"] = np.asarray(grp["zgrid"])
         for key in ("indexing", "model", "completion_kind",
-                    "realization_set_id", "member_content_sha256"):
+                    "realization_set_id", "member_content_sha256", "c_mode"):
             if key in grp.attrs:
                 val = grp.attrs[key]
                 out[key] = val.decode() if isinstance(val, bytes) else str(val)
         if "n_members" in grp.attrs:
             out["n_members"] = int(grp.attrs["n_members"])
+        if "budget_renormalized" in grp.attrs:
+            out["budget_renormalized"] = bool(grp.attrs["budget_renormalized"])
+        if "budget_monopole_logq" in grp.attrs:
+            out["budget_monopole_logq"] = np.asarray(
+                grp.attrs["budget_monopole_logq"], dtype=float)
         if "diagnostics" in grp.attrs:
             raw = grp.attrs["diagnostics"]
             raw = raw.decode() if isinstance(raw, bytes) else raw
@@ -1047,6 +1188,22 @@ def load_lss_completion_hdf5(path: str) -> dict:
                 "term for every event in its pixel. Rebuild the completion."
             )
 
+    if out["budget_renormalized"] is None:
+        # Same tolerate-but-warn policy as the legacy convergence counters: a
+        # verified-good table keeps loading while the operator sees the flag.
+        warnings.warn(
+            f"LSS completion '{path}' carries no 'budget_renormalized' stamp "
+            "(legacy table, or a builder that does not renormalize): its Q "
+            "was NOT renormalized to the per-z mean-one budget convention, so "
+            "the total missing budget can be RESCALED by Q's per-z monopole "
+            "(measured +55% Jensen inflation for radial tables) instead of "
+            "only redistributed. Rebuild with the current "
+            "darksirens_build_lognormal_completion, which renormalizes by "
+            "default.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     _warn_if_unconverged(path, out.get("diagnostics"))
     return out
 
@@ -1056,27 +1213,42 @@ def _warn_if_unconverged(path: str, diag) -> None:
 
     New-style files (builder stamped ``allow_unconverged``) can only be
     unconverged through that explicit override -- warn that a research
-    ablation artifact is entering inference.  Legacy files' counters are
-    unreliable (see load_lss_completion_hdf5's docstring): warn without
-    rejecting, and say why the counter cannot be trusted, so a verified-good
-    production table keeps loading while the operator still sees the flag.
+    ablation artifact is entering inference.  Substituted non-finite cells
+    (``n_nonfinite_substituted``, only stampable under the same override) are
+    treated identically: the eval degraded even when the solve itself
+    converged, and the builder also skips the budget renormalization for such
+    tables, so a Jensen-inflated Q must not circulate silently.  Legacy files'
+    counters are unreliable (see load_lss_completion_hdf5's docstring): warn
+    without rejecting, and say why the counter cannot be trusted, so a
+    verified-good production table keeps loading while the operator still
+    sees the flag.
     """
     if not isinstance(diag, dict):
         return
     converged = diag.get("converged")
     n_conv, n_occ = diag.get("n_converged"), diag.get("n_occupied")
+    n_sub = int(diag.get("n_nonfinite_substituted") or 0)
     looks_unconverged = (converged is False) or (
         converged is None
         and n_conv is not None and n_occ and int(n_conv) < int(n_occ)
-    )
+    ) or n_sub > 0
     if not looks_unconverged:
         return
     if "allow_unconverged" in diag:
         if diag.get("allow_unconverged"):
+            parts = []
+            if n_sub == 0 or converged is False:
+                parts.append("unconverged solve")
+            if n_sub:
+                parts.append(
+                    f"{n_sub} non-finite logQ cells substituted with Q = 1, "
+                    "which also skips the budget renormalization"
+                )
             warnings.warn(
-                f"LSS completion '{path}' was built UNCONVERGED under the "
-                "explicit --allow-unconverged override (research ablation "
-                "artifact). Do not use it for a production result.",
+                f"LSS completion '{path}' was built under the explicit "
+                f"--allow-unconverged override ({'; '.join(parts)}). "
+                "Research ablation artifact; do not use it for a production "
+                "result.",
                 RuntimeWarning,
                 stacklevel=3,
             )

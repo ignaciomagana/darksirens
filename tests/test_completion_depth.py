@@ -127,9 +127,15 @@ def test_z_depth_none_bit_identical():
 def test_z_depth_relaxes_missing_budget_beyond_depth():
     """Beyond a finite z_depth < zMax the missing density relaxes to the full
     expected count (C := 0, lss := 1), so ``dN_miss == dN_exp`` there and
-    ``C_eff == 0``; below the depth ``dN_miss`` is unchanged from the completion
-    formula (== the z_depth=None curve).  ``N_miss`` is the FULL-grid quadrature
-    of this relaxed density."""
+    ``C_eff == 0``; below the depth ``dN_miss`` follows the completion formula
+    with the DEPTH-TRUNCATED denominator ``S @ (dN_exp · 1[z <= z_depth])``
+    (S0a): far from the edge that matches the z_depth=None curve, while within
+    a few smoothing sigmas of the edge the truncation can only REMOVE
+    denominator mass, so C rises and ``dN_miss`` falls relative to the
+    untruncated curve (the pre-fix behaviour was a C dip / dN_miss spike
+    there).  ``N_miss`` is the FULL-grid quadrature of this relaxed density."""
+    from darksirens.redshift.completion import _SIGMA_SMOOTH
+
     cosmo = _cosmo()
     catalog = _catalog()
     zgrid_np = np.asarray(zgrid)
@@ -151,17 +157,32 @@ def test_z_depth_relaxes_missing_budget_beyond_depth():
     below = zgrid_np <= z_depth
     above = ~below
 
-    # Below depth: unchanged from the completion formula.
-    np.testing.assert_array_equal(dN_miss_bounded[:, below], dN_miss_full[:, below])
+    # Below depth, FAR from the edge (> 10 sigma_smooth): the truncated
+    # denominator loses only kernel mass ~exp(-0.5 (d/sigma)^2), far below the
+    # f64 ulp of the retained sum, so the completion formula is unchanged.
+    far_below = zgrid_np <= z_depth - 10.0 * _SIGMA_SMOOTH
+    assert far_below.any()
+    np.testing.assert_array_equal(
+        dN_miss_bounded[:, far_below], dN_miss_full[:, far_below]
+    )
+    # Whole below-depth region: the truncation only REMOVES denominator mass,
+    # so C >= C_untruncated and dN_miss <= the untruncated curve (up to
+    # rounding) -- the depth edge can no longer SPIKE the missing density.
+    np.testing.assert_array_less(
+        dN_miss_bounded[:, below],
+        dN_miss_full[:, below] * (1.0 + 1e-12) + 1e-300,
+    )
     # Beyond depth: relaxed to dN_exp (C := 0, lss := 1), for EVERY row.
     for r in range(dN_miss_bounded.shape[0]):
         np.testing.assert_allclose(dN_miss_bounded[r, above], dN_exp[above], rtol=1e-12)
     # C_eff is exactly 0 wherever dN_miss == dN_exp (beyond the depth).
     np.testing.assert_allclose(C_eff_bounded[:, above], 0.0, atol=1e-12)
 
-    # N_miss is the FULL-grid quadrature of the relaxed density.
+    # N_miss is the FULL-grid quadrature of the relaxed density (the relaxed
+    # branch is dN_exp; the retained branch is the truncated-denominator
+    # completion density asserted against dN_miss_full above).
     expected = _trapezoid(
-        np.where(above[None, :], dN_exp[None, :], dN_miss_full), zgrid_np, axis=-1
+        np.where(above[None, :], dN_exp[None, :], dN_miss_bounded), zgrid_np, axis=-1
     )
     np.testing.assert_allclose(
         np.asarray(curves_bounded.N_miss), expected, rtol=1e-12, atol=1e-300
@@ -319,6 +340,79 @@ def test_z_depth_clamped_above_zmax_warns():
         warnings.simplefilter("error")
         resolved_ok = resolve_survey_z_depth(0.5 * zmax, None, zmax=zmax)
     assert resolved_ok == 0.5 * zmax
+
+
+def test_z_depth_edge_constant_completeness_no_dip_no_spike():
+    """S0a depth-edge truncation: a constant-true-completeness survey with a
+    concrete ``z_depth`` passes through the completeness ratio EXACTLY at the
+    depth edge -- no C dip, no dN_miss spike within 2 smoothing sigmas below it.
+
+    Mechanism: the observed-galaxy kernels renormalise on [0, zmax], so the
+    numerator loses mass approaching the edge (no sources exist above the
+    depth to smooth back down).  Pre-fix the denominator ``S @ dN_exp``
+    integrated the full grid, so C dipped just below the edge and
+    ``(1 - C) dN_exp`` spiked -- the closure experiment measured exactly this
+    artifact.  With the truncated denominator ``S @ (dN_exp · 1[z <= z_depth])``
+    both sides share the same support and the constant passes through.
+
+    The synthetic survey is the infinite-galaxy limit of a constant-C0 thinning
+    of the expected counts below the depth: its smoothed observed density is
+    ``C0 · S @ (dN_exp · 1[z <= z_depth])`` (each galaxy kernel IS the
+    operator's per-source kernel), injected via ``dN_obs_kde``.
+    """
+    from darksirens.redshift.completion import _SIGMA_SMOOTH, smoothing_operator
+
+    cosmo = _cosmo()
+    zgrid_np = np.asarray(zgrid)
+    z_depth = float(zgrid_np[2 * len(zgrid_np) // 3])   # concrete, interior
+    C0 = 0.7
+
+    survey = _survey(z_depth=z_depth)
+    catalog = EMCatalog(
+        apix=1.0,
+        zgals=jnp.zeros((1, 2)),
+        dzgals=jnp.full((1, 2), 0.02),
+        wgals=jnp.ones((1, 2)),
+        ngals=jnp.array([2], dtype=jnp.int32),
+        delta_g_pix_z=jnp.zeros((1, 1)),   # lss == 1: pure completeness test
+        dN_obs_kde=jnp.zeros((1, zgrid_np.size)),
+        pixel_to_cache_idx=None,
+    )
+    grids = _precompute_grids(cosmo, survey, catalog)
+    dN_exp = np.asarray(grids.dN_exp)
+    depth_mask = zgrid_np <= z_depth
+
+    S = smoothing_operator()
+    dN_obs = C0 * (S @ jnp.asarray(dN_exp * depth_mask))
+    catalog = catalog._replace(dN_obs_kde=dN_obs[None, :])
+
+    curves = completion_curves(cosmo, survey, catalog)
+    C_eff = np.asarray(curves.C_eff)[0]        # == C below the depth (lss == 1)
+    dN_miss = np.asarray(curves.dN_miss)[0]
+
+    # Bands: within 2 sigma_smooth below the edge (the pre-fix artifact zone)
+    # vs the same survey far from the edge (> 6 sigma below, away from z = 0).
+    near = (zgrid_np > z_depth - 2.0 * _SIGMA_SMOOTH) & depth_mask
+    far = (zgrid_np > 0.3) & (zgrid_np <= z_depth - 6.0 * _SIGMA_SMOOTH)
+    assert near.any() and far.any()
+
+    # No dip: C is the constant C0 right up to the edge, matching the
+    # far-from-edge value node-for-node.
+    np.testing.assert_allclose(C_eff[far], C0, rtol=1e-12)
+    np.testing.assert_allclose(C_eff[near], C0, rtol=1e-12)
+    np.testing.assert_allclose(
+        C_eff[near], np.mean(C_eff[far]), rtol=1e-12
+    )
+    # No spike: the missing density stays at (1 - C0) dN_exp through the edge.
+    np.testing.assert_allclose(
+        dN_miss[near], (1.0 - C0) * dN_exp[near], rtol=1e-12
+    )
+
+    # Counterfactual teeth: the UNTRUNCATED denominator (the pre-fix recipe)
+    # genuinely dips on this fixture -- at the edge the truncated smooth is
+    # roughly half the full one -- so the assertions above are not vacuous.
+    C_untrunc = np.clip(np.asarray(dN_obs) / np.asarray(S @ jnp.asarray(dN_exp)), 0.0, 1.0)
+    assert C_untrunc[near].min() < 0.9 * C0
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,28 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
     if lss_path is not None and opts.universe_model in GALAXY_AWARE_MODELS:
         from darksirens.redshift.lognormal_completion import load_lss_completion_hdf5
         loaded = load_lss_completion_hdf5(lss_path)
+        # c_mode provenance, fail-closed: Q is fit RESIDUAL to a completeness
+        # base -- the per-pixel ratio (which absorbs the observed angular
+        # clustering) or the sky-aggregate Cbar (which leaves the full
+        # clustering to Q).  The two targets differ by the entire clustering
+        # signal, so consuming one as the other double-counts or drops it.
+        # An absent attr is a legacy table: always per-pixel-base.
+        table_c_mode = loaded.get("c_mode") or "per_pixel"
+        survey_c_mode = str(getattr(opts, "c_mode", None) or "per_pixel")
+        if table_c_mode != survey_c_mode:
+            raise ValueError(
+                f"LSS completion c_mode mismatch: table '{lss_path}' was built "
+                f"against the {table_c_mode!r} completeness base"
+                + (" (no c_mode attr: legacy per-pixel-base table)"
+                   if loaded.get("c_mode") is None else "")
+                + f", but this run's survey uses c_mode={survey_c_mode!r}. Q is "
+                "the fit residual to its completeness base, and the two bases "
+                "differ by the entire observed clustering signal -- consuming a "
+                "per-pixel-base table in aggregate mode double-counts the "
+                "clustering, and the reverse drops it. Rebuild the table with "
+                f"darksirens_build_lognormal_completion --c-mode "
+                f"{survey_c_mode}, or run with --c_mode {table_c_mode}."
+            )
         logq = loaded.get("logq_map")
         if logq is None:
             raise ValueError(

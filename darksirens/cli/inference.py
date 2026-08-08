@@ -902,6 +902,24 @@ def build_parser():
                          "--z_depth. Default None: per-catalog file attr if present, else "
                          "completeness is estimated over the full [0, DARKSIRENS_ZMAX] grid "
                          "(bit-identical to pre-existing behaviour)."))
+    g.add_argument("--c_mode", default="per_pixel",
+                   choices=["per_pixel", "aggregate"],
+                   help=("Completeness estimator mode (dark_sirens). 'per_pixel' "
+                         "(default): the legacy per-pixel matched-kernel ratio, "
+                         "bit-identical to pre-existing behaviour -- its numerator "
+                         "absorbs the observed angular clustering into C, so "
+                         "(1 - C) anti-tracks the true missing density. "
+                         "'aggregate': ONE sky-aggregate curve Cbar(z) per "
+                         "proposal, broadcast to every pixel (occupied and "
+                         "empty), so C carries only the radial budget and all "
+                         "angular structure is Q's job; the field-convention "
+                         "global normalizer uses the same curve. Requires "
+                         "--catalog_sky_weighting field (the default) for "
+                         "compact catalogs, and any --lss_completion table must "
+                         "be built with the matching darksirens_build_"
+                         "lognormal_completion --c-mode (hard-checked at load: "
+                         "the two bases differ by the entire clustering "
+                         "signal)."))
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
                          "--save_path, and exit before building the likelihood."))

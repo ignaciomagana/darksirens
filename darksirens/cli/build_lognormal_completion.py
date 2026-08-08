@@ -16,15 +16,34 @@ Pipeline
    (:func:`darksirens.redshift.completion._precompute_grids`,
    :func:`darksirens.redshift.completion._kde_dndz_obs`) under a *fiducial*
    cosmology/survey (the same fiducials the inference dry-run uses).
+   ``--c-mode aggregate`` swaps the per-pixel ``C`` for the ONE sky-aggregate
+   ``Cbar`` (the inference ``SurveyParams.c_mode=1`` estimator) and extends
+   the fit to EMPTY pixels as N_obs = 0 rows — the void information; the
+   choice is stamped in the output attrs and hard-checked at load against
+   the consuming survey's ``c_mode``.
 4. Build a per-pixel 1-D Gaussian-correlation power spectrum from the **fixed**
    SurveyParams/CosmoParams hyperparameters (correlation length in Mpc mapped to
    grid units via the comoving-distance grid; field amplitude ``lss_sigma``;
-   bias ``b_miss``) — never CLI knobs, never marginalised.
+   bias ``b_miss``).  ``--lss-corr-length-mpc`` / ``--lss-sigma`` override the
+   fiducials AT BUILD TIME only — the values are stamped in the diagnostics and
+   are never sampled or marginalised in the inference (asserted by
+   tests/test_lss_completion_gp3d.py::test_lss_corr_length_ang_not_sampled).
+   The gp3d inducing grid is guarded: a build whose radial node spacing in
+   ``zeta = log1p z`` exceeds the GP lengthscale ``ls_z`` is a HARD ERROR
+   (:func:`_gp3d_resolution_guard`), because a low-rank GP with node spacing
+   much larger than the lengthscale collapses to the prior (Burt et al. 2019,
+   arXiv:1903.03571; the shipped 50 Mpc default measured a fitted-vs-truth
+   logQ slope of 0.04 on the closure experiment).
 5. Run the solver and save an HDF5 completion file (same table contract either
    way): ``--mode radial`` (default) -> independent per-pixel 1-D
    :func:`poisson_lognormal_map`; ``--mode gp3d`` -> ONE low-rank
    Poisson-lognormal field over occupied (pixel x z) voxels reusing the
    (sphere x z) GP, so empty pixels borrow angularly from their neighbours.
+6. Per-z mean-one budget renormalization of the output tables (MAP and each
+   member independently) under ``w = (1 - C) dN_exp`` over the fitted
+   footprint (:func:`renormalize_q_mean_one`), so Q only redistributes the
+   missing budget (default ON; ``--no-budget-renorm`` to skip; the choice and
+   the removed monopole are stamped in the HDF5 attrs).
 """
 from __future__ import annotations
 
@@ -44,6 +63,7 @@ from darksirens.redshift.lognormal_completion import (
     gaussian_correlation_spectrum,
     poisson_lognormal_map,
     laplace_lognormal_members,
+    renormalize_q_mean_one,
     save_lss_completion_hdf5,
     lowrank_inducing_nodes,
     build_lowrank_operator,
@@ -71,6 +91,68 @@ def _fiducial_cosmo_survey(log10n0=None, delta=None):
         b_miss=1.0, alpha_miss=1.0, sigma_kde=0.0,
     )  # lss_corr_length_mpc / lss_sigma take their container defaults
     return cosmo, survey
+
+
+def _apply_lss_overrides(survey, *, lss_corr_length_mpc=None, lss_sigma=None):
+    """Build-time GP hyperparameter overrides (CLI knobs, NEVER sampled).
+
+    ``None`` keeps the SurveyParams fiducial (backward-compatible default);
+    the values actually used are stamped in the output diagnostics via the
+    (possibly replaced) ``survey`` container.
+    """
+    if lss_corr_length_mpc is not None:
+        survey = survey._replace(lss_corr_length_mpc=float(lss_corr_length_mpc))
+    if lss_sigma is not None:
+        survey = survey._replace(lss_sigma=float(lss_sigma))
+    return survey
+
+
+def _gp3d_resolution_guard(*, z_node_hi, n_z_nodes, ls_z, n_sph_nodes, ls_sph):
+    """Resolution gate on the gp3d inducing grid; returns the zeta node spacing.
+
+    A low-rank GP whose inducing-node spacing exceeds the kernel lengthscale
+    cannot represent the posterior and collapses to the prior (Burt et al.
+    2019, arXiv:1903.03571) — silently, with ``converged=True``: the shipped
+    50 Mpc fiducial was ~30x under-resolved and measured a fitted-vs-truth
+    logQ slope of 0.04 on the closure experiment.  So the radial side is a
+    HARD ERROR: spacing ``log1p(z_node_hi)/(M_z - 1)`` must not exceed
+    ``ls_z`` (the Mpc correlation length mapped to zeta units at the
+    count-weighted z_ref).  The sphere side only WARNS — the Fibonacci
+    spacing ``~ sqrt(4 pi / M_sph)`` (chordal, matching the chordal
+    ``ls_sph``) is a cruder estimate and the angular fiducial is not the
+    measured failure mode.
+    """
+    if int(n_z_nodes) < 2:
+        raise ValueError(
+            f"--gp3d-nz-nodes must be >= 2 (got {int(n_z_nodes)}): a single "
+            "radial inducing node cannot resolve any redshift structure."
+        )
+    zeta_hi = float(np.log1p(float(z_node_hi)))
+    spacing = zeta_hi / (int(n_z_nodes) - 1)
+    if spacing > float(ls_z):
+        min_nodes = int(np.ceil(zeta_hi / float(ls_z))) + 1
+        raise ValueError(
+            f"gp3d radial inducing grid is under-resolved: node spacing in "
+            f"zeta = log1p(z) is {spacing:.4g} ({int(n_z_nodes)} nodes up to "
+            f"z_node_hi = {float(z_node_hi):.4g}) but the GP lengthscale is "
+            f"ls_z = {float(ls_z):.4g} (lss_corr_length_mpc mapped to zeta at "
+            f"the count-weighted z_ref). A low-rank GP with node spacing > "
+            f"lengthscale collapses to the prior (Burt et al. 2019) while "
+            f"still reporting convergence. Pass --gp3d-nz-nodes >= "
+            f"{min_nodes}, or raise --lss-corr-length-mpc / lower "
+            f"--gp3d-z-node-hi until spacing <= ls_z."
+        )
+    d_sph = float(np.sqrt(4.0 * np.pi / max(int(n_sph_nodes), 1)))
+    if d_sph > float(ls_sph):
+        _warn(
+            f"gp3d sphere inducing grid may be under-resolved: Fibonacci node "
+            f"spacing ~ sqrt(4pi/M_sph) = {d_sph:.3g} exceeds the chordal "
+            f"angular lengthscale ls_sph = {float(ls_sph):.3g}; raise "
+            f"--gp3d-nsph-nodes (>= "
+            f"{int(np.ceil(4.0 * np.pi / float(ls_sph) ** 2))}) or the "
+            f"angular correlation length."
+        )
+    return spacing
 
 
 def _zgrid_bin_edges() -> np.ndarray:
@@ -101,12 +183,31 @@ def _build_completion_radial(
     workers: int = 1,
     log10n0=None,
     delta=None,
+    budget_renorm: bool = True,
+    lss_corr_length_mpc=None,
+    lss_sigma=None,
+    c_mode: str = "per_pixel",
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
     The original LSS completion builder: an independent 1-D Poisson-lognormal
     field per occupied pixel on a uniform comoving-distance grid (no angular
     coupling).  See :func:`_build_completion_gp3d` for the 3-D upgrade.
+
+    ``budget_renorm`` (default ON) applies the per-z mean-one budget
+    renormalization (:func:`renormalize_q_mean_one`) to the output tables over
+    the fitted rows, so Q only redistributes the missing budget.
+
+    ``lss_corr_length_mpc`` / ``lss_sigma`` override the fixed SurveyParams GP
+    hyperparameters at build time (``None`` keeps the fiducials).
+
+    ``c_mode`` selects the completeness base the fit is residual to:
+    ``"per_pixel"`` (legacy default, bit-identical -- per-pixel matched-kernel
+    C, occupied rows only) or ``"aggregate"`` (ONE sky-aggregate ``Cbar``
+    matching the in-likelihood ``SurveyParams.c_mode=1`` estimator, and the
+    fit INCLUDES EMPTY PIXELS as N_obs = 0 rows against the nonzero base
+    ``Cbar dN_exp`` -- the void information; Q then targets the FULL observed
+    overdensity, not the sub-smoothing residual).
     """
     import healpy as hp
 
@@ -116,6 +217,8 @@ def _build_completion_radial(
     apix = float(hp.nside2pixarea(int(nside)))
 
     cosmo, survey = _fiducial_cosmo_survey(log10n0=log10n0, delta=delta)
+    survey = _apply_lss_overrides(
+        survey, lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma)
     em = EMCatalog(
         apix=apix, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(dzgals),
         wgals=jnp.asarray(wgals), ngals=jnp.asarray(ngals),
@@ -160,22 +263,67 @@ def _build_completion_radial(
     dN_exp_count_u = _bin_integral(dN_exp_density)               # (n_grid,)
     exp_safe = np.where(dN_exp_count_u > 0.0, dN_exp_count_u, 1.0)
 
-    # Build only OCCUPIED pixels (DESI footprints are mostly empty ⇒ huge speedup);
-    # empty pixels get logQ = 0 (Q = 1, homogeneous) by the zero-init below.
     occ = np.nonzero(ngals_np > 0)[0]
     n_occ = int(occ.size)
-    C_u = np.empty((n_occ, n_grid), dtype=float)
-    N_obs_u = np.zeros((n_occ, n_grid), dtype=float)
-    for i, r in enumerate(occ):
-        dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        # Expectation-weighted bin completeness: C_bin = int(C * dN_exp) / int(dN_exp),
-        # so the solver's rate_base = C_u * dN_exp_count_u is exactly the
-        # bin-integrated expected OBSERVED counts — the same footing as N_obs.
-        prod = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0) * dN_exp_density
-        C_u[i] = np.clip(_bin_integral(prod) / exp_safe, 0.0, 1.0)
-        zs = zgals_np[r, : ngals_np[r]]
-        counts_z, _ = np.histogram(zs, bins=edges)
-        N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
+    if c_mode == "aggregate":
+        # AGGREGATE base: ONE sky-aggregate completeness curve
+        #   Cbar(z) = clip(Sum_p dN_obs_s(z|p) / (N_pix_total * dN_exp_smooth), 0, 1),
+        #   N_pix_total = round(4 pi / apix)  (occupied AND empty pixels),
+        # mirroring the in-likelihood aggregate estimator (completion.py's
+        # _precompute_grids at SurveyParams.c_mode=1), and the fit covers
+        # EVERY pixel: empty pixels enter as N_obs = 0 rows against the
+        # nonzero base Cbar * dN_exp -- that zero IS the void information the
+        # occupied-only fit never sees (deep voids read Q < 1 instead of the
+        # homogeneous Q = 1).  The occupied-only compact indexing of the
+        # legacy branch is untouched; the pixel list is extended explicitly.
+        fit = np.arange(n_pix)
+        n_fit = int(fit.size)
+        n_pix_total = int(np.round(4.0 * np.pi / apix))
+        dN_obs_sum = np.zeros(n_grid, dtype=float)
+        for r in occ:
+            dN_obs_sum += np.asarray(
+                _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+        Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
+        # Same expectation-weighted bin average as the per-pixel branch
+        # (C_bin = int(C * dN_exp) / int(dN_exp), the existing Jacobian
+        # treatment), so rate_base = Cbar_u * dN_exp_count_u is the
+        # bin-integrated expected OBSERVED counts, same footing as N_obs.
+        Cbar_u = np.clip(
+            _bin_integral(Cbar_fine * dN_exp_density) / exp_safe, 0.0, 1.0)
+        C_u = np.tile(Cbar_u, (n_fit, 1))
+        # One shared budget-weight row (1 - Cbar) dN_exp for EVERY pixel: the
+        # renormalization footprint is the whole fitted sky.
+        w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
+        N_obs_u = np.zeros((n_fit, n_grid), dtype=float)
+        for i, r in enumerate(fit):
+            if ngals_np[r] > 0:
+                zs = zgals_np[r, : ngals_np[r]]
+                counts_z, _ = np.histogram(zs, bins=edges)
+                N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
+    else:
+        # Build only OCCUPIED pixels (DESI footprints are mostly empty ⇒ huge
+        # speedup); empty pixels get logQ = 0 (Q = 1, homogeneous) by the
+        # zero-init below.
+        fit = occ
+        n_fit = n_occ
+        C_u = np.empty((n_occ, n_grid), dtype=float)
+        N_obs_u = np.zeros((n_occ, n_grid), dtype=float)
+        w_budget = np.empty((n_occ, n_grid), dtype=float)
+        for i, r in enumerate(occ):
+            dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            # Expectation-weighted bin completeness: C_bin = int(C * dN_exp) / int(dN_exp),
+            # so the solver's rate_base = C_u * dN_exp_count_u is exactly the
+            # bin-integrated expected OBSERVED counts — the same footing as N_obs.
+            C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
+            prod = C_fine * dN_exp_density
+            C_u[i] = np.clip(_bin_integral(prod) / exp_safe, 0.0, 1.0)
+            # This pixel's missing-budget weight on the OUTPUT zgrid at the build
+            # fiducial: w_p(z) = (1 - C_p(z)) * dN_exp(z) — the same
+            # (1 - C) dN_exp the likelihood multiplies Q into (dN_miss).
+            w_budget[i] = (1.0 - C_fine) * dN_exp_density
+            zs = zgals_np[r, : ngals_np[r]]
+            counts_z, _ = np.histogram(zs, bins=edges)
+            N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
 
     bias = float(survey.b_miss)
     mp = poisson_lognormal_map(
@@ -183,15 +331,20 @@ def _build_completion_radial(
         bias=bias, prior_strength=prior_strength, maxiter=maxiter,
         workers=workers,
     )
-    # Map logQ back from uniform-χ to zgrid and scatter occupied rows into the
-    # full (n_pix, n_grid) table (empties stay logQ = 0).
+    # Map logQ back from uniform-χ to zgrid and scatter the fitted rows into
+    # the full (n_pix, n_grid) table (unfitted rows stay logQ = 0; in
+    # aggregate mode every row is fitted).
     logq_map = np.zeros((n_pix, n_grid), dtype=float)
-    for i, r in enumerate(occ):
+    for i, r in enumerate(fit):
         logq_map[r] = np.interp(chi, chi_u, mp["logq_map"][i])
 
     diagnostics = dict(mp["diagnostics"])
     diagnostics.update({
-        "nside": int(nside), "n_pix": n_pix, "n_occupied": n_occ,
+        # "n_occupied" is the FITTED-row count (what n_converged is judged
+        # against): the occupied pixels in per_pixel mode, every pixel in
+        # aggregate mode (empty ones fit as N_obs = 0 rows).
+        "nside": int(nside), "n_pix": n_pix, "n_occupied": n_fit,
+        "c_mode": c_mode,
         "ell_grid_uniform_chi": ell_grid, "dchi_uniform_mpc": dchi_u,
         "lss_corr_length_mpc": float(survey.lss_corr_length_mpc),
         "lss_sigma": float(survey.lss_sigma),
@@ -202,6 +355,8 @@ def _build_completion_radial(
         "fiducial_n0": float(survey.n0), "fiducial_delta": float(survey.delta),
         "bias_b_miss": float(survey.b_miss),
     })
+    if c_mode == "aggregate":
+        diagnostics.update({"n_pix_total": n_pix_total, "n_occupied_data": n_occ})
 
     logq_members = None
     if n_members and n_members > 0:
@@ -209,13 +364,30 @@ def _build_completion_radial(
             mp["s_map"], mp["lambda_map"], pk,
             n_members=int(n_members), bias=bias, prior_strength=prior_strength, seed=int(seed),
         )
-        lm_u = members["logq_members"]                       # (M, n_occ, n_grid) on χ_u
+        lm_u = members["logq_members"]                       # (M, n_fit, n_grid) on χ_u
         M = int(n_members)
         logq_members = np.zeros((M, n_pix, n_grid), dtype=float)
-        for i, r in enumerate(occ):
+        for i, r in enumerate(fit):
             for m in range(M):
                 logq_members[m, r] = np.interp(chi, chi_u, lm_u[m, i])
         diagnostics.update(members["diagnostics"])
+
+    # Per-z mean-one budget renormalization over the FITTED FOOTPRINT (the
+    # occupied rows in per_pixel mode, the whole sky in aggregate mode): the
+    # Laplace E[Q] carries a per-z monopole (var_post is largest where data
+    # are sparse -> spatially varying Jensen bias, measured +55% budget
+    # inflation), which would RESCALE the missing budget the likelihood forms
+    # as (1 - C) dN_exp Q.  After this, the total budget with Q equals the
+    # homogeneous budget identically at the build fiducial; each member is
+    # renormalized independently (placement uncertainty only, zero budget
+    # uncertainty).  Unfitted rows stay logQ = 0 (Q = 1) exactly.
+    if budget_renorm:
+        logq_map[fit], log_mono = renormalize_q_mean_one(logq_map[fit], w_budget)
+        if logq_members is not None:
+            logq_members[:, fit], _ = renormalize_q_mean_one(
+                logq_members[:, fit], w_budget)
+        diagnostics["budget_monopole_logq"] = log_mono
+    diagnostics["budget_renormalized"] = bool(budget_renorm)
 
     return logq_map, logq_members, diagnostics
 
@@ -230,18 +402,25 @@ class _GP3DSurveyAssembly(NamedTuple):
     (``n_hat_all``), the coarse-bin observed counts (``N_obs_vox``) and
     bin-integrated expected observed base (``base_vox``), and the per-survey
     coarse-z count profile (``counts_z``) that the joint ``z_ref`` weighting sums
-    over all surveys.
+    over all surveys.  ``w_budget`` is the fine-zgrid missing-budget weight
+    ``(1 - C_p) dN_exp`` of the fitted rows, consumed by the per-z mean-one
+    Q renormalization of the OUTPUT table (not by the solve).
+
+    ``occ`` / ``n_occ`` / ``n_hat_occ`` are the FITTED rows: the occupied RING
+    pixels for the legacy per-pixel base, EVERY pixel (empties as N_obs = 0
+    rows) for the aggregate base (``c_mode="aggregate"``).
     """
     nside: int
     n_pix: int
     apix: float
-    occ: np.ndarray          # (n_occ,) occupied RING pixel indices
+    occ: np.ndarray          # (n_occ,) fitted RING pixel indices
     n_occ: int
     n_hat_all: np.ndarray    # (n_pix, 3) all-pixel output directions
     n_hat_occ: np.ndarray    # (n_occ, 3) occupied-voxel directions
     N_obs_vox: np.ndarray    # (n_occ, G_s) coarse-bin histogram counts
     base_vox: np.ndarray     # (n_occ, G_s) bin-integrated expected observed counts
     counts_z: np.ndarray     # (G_s,) coarse-z count profile (for z_ref weighting)
+    w_budget: np.ndarray     # (n_occ, n_grid) fine-zgrid (1 - C) dN_exp weights
 
 
 def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
@@ -265,7 +444,8 @@ def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
     }
 
 
-def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
+def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
+                          c_mode: str = "per_pixel"):
     """Load a survey and assemble its gp3d voxel inputs on the shared ``z_s`` grid.
 
     Extracted verbatim from the single-survey ``_build_completion_gp3d`` body so
@@ -277,6 +457,13 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
     delta (its expected-density normalisation); the field bias ``b_miss`` does
     NOT enter the assembly (``_precompute_grids`` depends only on n0/delta/cosmo),
     so a per-survey bias is applied later by scaling the design matrix.
+
+    ``c_mode="aggregate"`` swaps the per-pixel completeness base for the ONE
+    sky-aggregate ``Cbar dN_exp`` and extends the voxel list to EVERY pixel
+    (empty pixels as N_obs = 0 rows -- the void information); the returned
+    ``occ``/``n_occ``/``n_hat_occ`` then describe the FITTED rows (the whole
+    sky).  The default keeps the legacy occupied-only assembly bit-identical
+    (the joint multi-survey builder never passes it).
     """
     import healpy as hp
 
@@ -305,7 +492,6 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
 
     occ = np.nonzero(ngals_np > 0)[0]
     n_occ = int(occ.size)
-    n_hat_occ = np.asarray(hp.pix2vec(int(nside), occ, nest=False), dtype=float).T  # (n_occ,3)
 
     # Expected OBSERVED counts per coarse z-bin: integrate C(z) * dN_exp(z) over
     # each bin on the fine grid, on the same footing as the histogram that fills
@@ -316,22 +502,63 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s):
     # field_clip and the solve saturates).
     G_s = int(np.asarray(z_s).size)
     dz_fine = np.diff(zgrid_np)
-    N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
-    base_vox = np.empty((n_occ, G_s), dtype=float)
-    for i, r in enumerate(occ):
-        dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        prod = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0) * dN_exp_density
-        cum = np.concatenate([[0.0], np.cumsum(0.5 * (prod[1:] + prod[:-1]) * dz_fine)])
-        base_vox[i] = np.diff(np.interp(edges_s, zgrid_np, cum))
-        zs = zgals_np[r, : ngals_np[r]]
-        counts_s, _ = np.histogram(zs, bins=edges_s)
-        N_obs_vox[i] = counts_s
+
+    def _coarse_bin_integral(density_fine):
+        cum = np.concatenate([
+            [0.0],
+            np.cumsum(0.5 * (density_fine[1:] + density_fine[:-1]) * dz_fine),
+        ])
+        return np.diff(np.interp(edges_s, zgrid_np, cum))
+
+    if c_mode == "aggregate":
+        # AGGREGATE base (mirrors the radial builder and the in-likelihood
+        # SurveyParams.c_mode=1 estimator): one sky-aggregate Cbar, and the
+        # voxel list extends to EVERY pixel so empty pixels enter as
+        # N_obs = 0 rows against the nonzero base -- the void information.
+        fit = np.arange(n_pix)
+        n_fit = int(fit.size)
+        n_pix_total = int(np.round(4.0 * np.pi / apix))
+        dN_obs_sum = np.zeros(n_grid, dtype=float)
+        for r in occ:
+            dN_obs_sum += np.asarray(
+                _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+        Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
+        base_row = _coarse_bin_integral(Cbar_fine * dN_exp_density)
+        base_vox = np.tile(base_row, (n_fit, 1))
+        w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
+        N_obs_vox = np.zeros((n_fit, G_s), dtype=float)
+        for i, r in enumerate(fit):
+            if ngals_np[r] > 0:
+                zs = zgals_np[r, : ngals_np[r]]
+                counts_s, _ = np.histogram(zs, bins=edges_s)
+                N_obs_vox[i] = counts_s
+        n_hat_fit = n_hat_all
+    else:
+        fit = occ
+        n_fit = n_occ
+        n_hat_fit = np.asarray(
+            hp.pix2vec(int(nside), occ, nest=False), dtype=float).T  # (n_occ,3)
+        N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
+        base_vox = np.empty((n_occ, G_s), dtype=float)
+        w_budget = np.empty((n_occ, n_grid), dtype=float)
+        for i, r in enumerate(occ):
+            dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
+            base_vox[i] = _coarse_bin_integral(C_fine * dN_exp_density)
+            # Fine-zgrid missing-budget weight (1 - C) dN_exp of this row, for the
+            # per-z mean-one renormalization of the OUTPUT table (same footing as
+            # the likelihood's dN_miss = (1 - C) dN_exp Q).
+            w_budget[i] = (1.0 - C_fine) * dN_exp_density
+            zs = zgals_np[r, : ngals_np[r]]
+            counts_s, _ = np.histogram(zs, bins=edges_s)
+            N_obs_vox[i] = counts_s
 
     counts_z = N_obs_vox.sum(axis=0)
     return _GP3DSurveyAssembly(
-        nside=int(nside), n_pix=n_pix, apix=apix, occ=occ, n_occ=n_occ,
-        n_hat_all=n_hat_all, n_hat_occ=n_hat_occ,
+        nside=int(nside), n_pix=n_pix, apix=apix, occ=fit, n_occ=n_fit,
+        n_hat_all=n_hat_all, n_hat_occ=n_hat_fit,
         N_obs_vox=N_obs_vox, base_vox=base_vox, counts_z=counts_z,
+        w_budget=w_budget,
     )
 
 
@@ -373,6 +600,13 @@ def _build_completion_gp3d(
     lss_corr_length_ang=None,
     log10n0=None,
     delta=None,
+    budget_renorm: bool = True,
+    lss_corr_length_mpc=None,
+    lss_sigma=None,
+    gp3d_nz_nodes: int = 6,
+    gp3d_nsph_nodes: int = 32,
+    gp3d_z_node_hi=None,
+    c_mode: str = "per_pixel",
 ):
     """3-D angular-coupling MAP + optional ensemble log Q tables.
 
@@ -386,18 +620,37 @@ def _build_completion_gp3d(
     ``z_ref``/``ls_z`` map (:func:`_count_weighted_zref_lsz`) are the SAME helpers
     the joint multi-survey builder stacks over, so this K=1 path is one instance
     of the joint fit.
+
+    ``lss_corr_length_mpc`` / ``lss_sigma`` override the fixed SurveyParams GP
+    hyperparameters; ``gp3d_nz_nodes`` / ``gp3d_nsph_nodes`` size the inducing
+    grid (defaults keep the historical 6 x 32).  ``gp3d_z_node_hi`` sets the
+    top redshift of the radial inducing nodes; the default ``None`` resolves to
+    the PACKAGE ``zgrid[-1]`` — a BEHAVIOR CHANGE from the historical hardwired
+    3.0, which left ``zgrid[-1] > 3`` covered only by prior extrapolation.  The
+    inducing grid must resolve ``ls_z`` (:func:`_gp3d_resolution_guard`, hard
+    error) or the field silently collapses to the prior.
+
+    ``c_mode="aggregate"`` fits against the sky-aggregate base ``Cbar dN_exp``
+    over EVERY pixel (see :func:`_assemble_gp3d_survey`); the default keeps
+    the legacy occupied-only per-pixel base bit-identical.
     """
-    M_SPH, M_Z = 32, 6
+    M_SPH, M_Z = int(gp3d_nsph_nodes), int(gp3d_nz_nodes)
 
     cosmo, survey = _fiducial_cosmo_survey(log10n0=log10n0, delta=delta)
     if lss_corr_length_ang is not None:
         survey = survey._replace(lss_corr_length_ang=float(lss_corr_length_ang))
+    survey = _apply_lss_overrides(
+        survey, lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma)
 
     bias = float(survey.b_miss)
     amp = float(survey.lss_sigma)
     ls_sph = float(survey.lss_corr_length_ang)
     zgrid_np = np.asarray(zgrid, dtype=float)
     n_grid = int(zgrid.size)
+    # Radial inducing-node range: default is the package zgrid max so the nodes
+    # span the full output grid (see the docstring behavior-change note).
+    z_node_hi = (float(zgrid_np[-1]) if gp3d_z_node_hi is None
+                 else float(gp3d_z_node_hi))
 
     # Coarse SOLVE z-grid: the field is low-rank in z (only M_z nodes), so a fine
     # solve grid adds no resolvable radial signal.  Output is on the full zgrid.
@@ -409,29 +662,42 @@ def _build_completion_gp3d(
     G_s = int(z_s.size)
 
     survey_data = _assemble_gp3d_survey(
-        catalog_path, cosmo=cosmo, survey=survey, z_s=z_s, edges_s=edges_s)
+        catalog_path, cosmo=cosmo, survey=survey, z_s=z_s, edges_s=edges_s,
+        c_mode=c_mode)
     nside, n_pix, n_occ = survey_data.nside, survey_data.n_pix, survey_data.n_occ
 
     def _base_diag(extra):
         d = _gp3d_base_diagnostics(
             cosmo, survey, nside=nside, n_pix=n_pix, n_occ=n_occ,
             amp=amp, ls_sph=ls_sph, bias=bias)
+        d["c_mode"] = c_mode
         d.update(extra)
         return d
 
-    # Empty catalog: nothing to solve, Q == 1 everywhere.
+    # Empty catalog: nothing to solve, Q == 1 everywhere.  The homogeneous
+    # table is trivially mean-one, so the budget stamp is honest as-is.
     if n_occ == 0:
         _warn("no occupied pixels — writing Q = 1 (logQ = 0) everywhere.")
         logq_map = np.zeros((n_pix, n_grid), dtype=float)
         logq_members = (np.zeros((int(n_members), n_pix, n_grid), dtype=float)
                         if n_members and n_members > 0 else None)
-        return logq_map, logq_members, _base_diag({})
+        extra = {"budget_renormalized": bool(budget_renorm)}
+        if budget_renorm:
+            extra["budget_monopole_logq"] = np.zeros(n_grid, dtype=float)
+        return logq_map, logq_members, _base_diag(extra)
 
     z_ref, ls_z = _count_weighted_zref_lsz(
         [survey_data.counts_z], z_s, cosmo, survey.lss_corr_length_mpc)
 
+    # HARD gate before any solve: an under-resolved inducing grid produces a
+    # prior-collapsed field that still stamps converged=True downstream.
+    zeta_spacing = _gp3d_resolution_guard(
+        z_node_hi=z_node_hi, n_z_nodes=M_Z, ls_z=ls_z,
+        n_sph_nodes=M_SPH, ls_sph=ls_sph)
+
     # Low-rank operator over the occupied voxels.
-    Zn, Zz = lowrank_inducing_nodes(n_inducing_sphere=M_SPH, n_inducing_z=M_Z)
+    Zn, Zz = lowrank_inducing_nodes(
+        n_inducing_sphere=M_SPH, n_inducing_z=M_Z, z_node_hi=z_node_hi)
     M = int(np.asarray(Zn).shape[0])
     X_n = np.repeat(survey_data.n_hat_occ, G_s, axis=0)                    # (n_occ*G_s, 3)
     X_z = np.tile(zeta_s, n_occ)                                           # (n_occ*G_s,)
@@ -456,6 +722,7 @@ def _build_completion_gp3d(
     sig2 = np.asarray(mp["sigma2_vox"], dtype=float)
     diagnostics = _base_diag({
         "M_sph": M_SPH, "M_z": M_Z, "M": M, "gp3d_nz_solve": G_s,
+        "gp3d_z_node_hi": z_node_hi, "zeta_node_spacing": zeta_spacing,
         "ls_z_zeta": ls_z, "z_ref": z_ref, "ls_sph_chordal": ls_sph,
         "sigma2_vox_min": float(sig2.min()), "sigma2_vox_max": float(sig2.max()),
         "n_iter": int(mp["diagnostics"]["n_iter"]),
@@ -465,6 +732,7 @@ def _build_completion_gp3d(
     })
 
     logq_members = None
+    n_nonfinite_members = 0
     if n_members and n_members > 0:
         xi_mem = laplace_lognormal_gp3d_members(
             mp["xi_map"], mp["H_chol"], n_members=int(n_members), seed=int(seed))
@@ -473,9 +741,30 @@ def _build_completion_gp3d(
             n_hat_out=survey_data.n_hat_all, z_out=zgrid_np, bias=bias,
             pix_chunk=int(gp3d_pix_chunk), L=L,
         ), dtype=float)
-        diagnostics["n_nonfinite_members"] = int(
-            np.sum(~np.isfinite(logq_members)))
+        n_nonfinite_members = int(np.sum(~np.isfinite(logq_members)))
+        diagnostics["n_nonfinite_members"] = n_nonfinite_members
         diagnostics["n_members"] = int(n_members)
+
+    # Per-z mean-one budget renormalization over the FITTED FOOTPRINT (the
+    # occupied rows; in aggregate mode every pixel is fitted, so the footprint
+    # is the whole sky), same convention as the radial builder.  Unfitted
+    # pixels keep their posterior-mean value: far pixels read exactly Q = 1
+    # (homogeneous) and must not absorb the footprint's monopole; the
+    # borrowing halo just outside the footprint keeps its (small) angular
+    # tail unrenormalized.  Skipped when the eval produced non-finite cells
+    # (only reachable as a stamped --allow-unconverged research ablation): a
+    # NaN entering the per-z weighted mean would smear across every occupied
+    # row of that bin.
+    do_renorm = bool(budget_renorm) and (n_nonfinite_map + n_nonfinite_members) == 0
+    if do_renorm:
+        occ = survey_data.occ
+        logq_map[occ], log_mono = renormalize_q_mean_one(
+            logq_map[occ], survey_data.w_budget)
+        if logq_members is not None:
+            logq_members[:, occ], _ = renormalize_q_mean_one(
+                logq_members[:, occ], survey_data.w_budget)
+        diagnostics["budget_monopole_logq"] = log_mono
+    diagnostics["budget_renormalized"] = bool(do_renorm)
 
     return logq_map, logq_members, diagnostics
 
@@ -494,26 +783,56 @@ def build_completion(
     lss_corr_length_ang=None,
     log10n0=None,
     delta=None,
+    budget_renorm: bool = True,
+    lss_corr_length_mpc=None,
+    lss_sigma=None,
+    gp3d_nz_nodes: int = 6,
+    gp3d_nsph_nodes: int = 32,
+    gp3d_z_node_hi=None,
+    c_mode: str = "per_pixel",
 ):
     """Build the log Q completion tables from a survey catalog.
 
     ``mode="radial"`` (default) -> independent per-pixel 1-D Poisson-lognormal
     (:func:`_build_completion_radial`).  ``mode="gp3d"`` -> the 3-D
     angular-coupling low-rank field (:func:`_build_completion_gp3d`).  Both return
-    ``(logq_map, logq_members, diagnostics)`` with the SAME global table contract.
+    ``(logq_map, logq_members, diagnostics)`` with the SAME global table contract,
+    and both apply the per-z mean-one budget renormalization by default
+    (``budget_renorm``; the removed monopole is carried in the diagnostics).
+
+    ``lss_corr_length_mpc`` / ``lss_sigma`` override the fixed GP
+    hyperparameters in BOTH modes; the ``gp3d_*_nodes`` / ``gp3d_z_node_hi``
+    inducing-grid knobs apply to ``mode="gp3d"`` only, which hard-errors when
+    the grid cannot resolve ``ls_z`` (:func:`_gp3d_resolution_guard`).
+
+    ``c_mode`` selects the completeness base of the fit in BOTH modes:
+    ``"per_pixel"`` (legacy default, bit-identical) or ``"aggregate"`` (the
+    sky-aggregate ``Cbar`` base with empty pixels fit as N_obs = 0 rows).  The
+    table must be consumed under the SAME ``SurveyParams.c_mode`` -- the two
+    targets differ by the entire clustering signal -- so the mode is stamped
+    in the HDF5 attrs and hard-checked at load.
     """
+    if c_mode not in ("per_pixel", "aggregate"):
+        raise ValueError(
+            f"c_mode must be 'per_pixel' or 'aggregate', got {c_mode!r}.")
     if mode == "radial":
         return _build_completion_radial(
             catalog_path, n_members=n_members, seed=seed,
             prior_strength=prior_strength, maxiter=maxiter, workers=workers,
-            log10n0=log10n0, delta=delta,
+            log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
+            lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
+            c_mode=c_mode,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
             catalog_path, n_members=n_members, seed=seed,
             gp3d_nz_solve=gp3d_nz_solve, gp3d_pix_chunk=gp3d_pix_chunk,
             lss_corr_length_ang=lss_corr_length_ang,
-            log10n0=log10n0, delta=delta,
+            log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
+            lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
+            gp3d_nz_nodes=gp3d_nz_nodes, gp3d_nsph_nodes=gp3d_nsph_nodes,
+            gp3d_z_node_hi=gp3d_z_node_hi,
+            c_mode=c_mode,
         )
     raise ValueError(f"Unknown build mode {mode!r}; expected 'radial' or 'gp3d'.")
 
@@ -559,6 +878,41 @@ def main(argv=None):
     p.add_argument("--lss-corr-length-ang", type=float, default=None,
                    help="(gp3d) Override the fixed angular (chordal) correlation "
                         "length; default is the SurveyParams fiducial.")
+    p.add_argument("--lss-corr-length-mpc", type=float, default=None,
+                   help="Override the fixed radial GP correlation length [Mpc] "
+                        "(both modes; default is the SurveyParams fiducial, "
+                        "50). Build-time only, never sampled. In gp3d mode the "
+                        "inducing grid must resolve the mapped ls_z or the "
+                        "build hard-errors.")
+    p.add_argument("--lss-sigma", type=float, default=None,
+                   help="Override the fixed GP field amplitude (both modes; "
+                        "default is the SurveyParams fiducial, 1.0). "
+                        "Build-time only, never sampled.")
+    p.add_argument("--gp3d-nz-nodes", type=int, default=6,
+                   help="(gp3d) Number of radial inducing nodes M_z (default 6, "
+                        "the historical value). Node spacing in zeta = log1p(z) "
+                        "must not exceed ls_z (hard error otherwise).")
+    p.add_argument("--gp3d-nsph-nodes", type=int, default=32,
+                   help="(gp3d) Number of Fibonacci sphere inducing nodes M_sph "
+                        "(default 32, the historical value). A spacing "
+                        "sqrt(4pi/M_sph) above the chordal angular lengthscale "
+                        "draws a warning.")
+    p.add_argument("--gp3d-z-node-hi", type=float, default=None,
+                   help="(gp3d) Top redshift of the radial inducing nodes. "
+                        "Default: the package zgrid max (zgrid[-1]) — a "
+                        "BEHAVIOR CHANGE from the historical hardwired 3.0, "
+                        "which left zgrid[-1] > 3 covered only by prior "
+                        "extrapolation.")
+    p.add_argument("--c-mode", choices=["per_pixel", "aggregate"],
+                   default="per_pixel",
+                   help="Completeness base the fit is residual to (both modes). "
+                        "'per_pixel' (default): legacy per-pixel matched-kernel "
+                        "C, occupied pixels only. 'aggregate': ONE sky-aggregate "
+                        "Cbar (matching the inference c_mode=aggregate "
+                        "estimator), with EMPTY pixels included as N_obs=0 rows "
+                        "(voids are informative). Stamped in the HDF5 attrs; the "
+                        "inference hard-errors when the table's c_mode does not "
+                        "match the survey's.")
     p.add_argument("--log10n0", type=float, default=None,
                    help="Override log10 of the expected comoving galaxy density "
                         "[Mpc^-3] the fit is conditioned on (default -2.0). "
@@ -579,6 +933,13 @@ def main(argv=None):
                         "The override is stamped in the file's diagnostics and "
                         "warned about at load time; research ablations only, "
                         "never production.")
+    p.add_argument("--no-budget-renorm", action="store_true", default=False,
+                   help="Skip the per-z mean-one budget renormalization of Q "
+                        "under the (1-C)*dN_exp weights (default ON). Without "
+                        "it Q's per-z monopole RESCALES the missing budget "
+                        "(measured +55% Jensen inflation for radial tables) "
+                        "instead of only redistributing it. The choice is "
+                        "stamped in the file; research ablations only.")
     opts = p.parse_args(argv)
 
     print()
@@ -607,6 +968,11 @@ def main(argv=None):
         gp3d_nz_solve=opts.gp3d_nz_solve, gp3d_pix_chunk=opts.gp3d_pix_chunk,
         lss_corr_length_ang=opts.lss_corr_length_ang,
         log10n0=opts.log10n0, delta=opts.delta,
+        budget_renorm=not opts.no_budget_renorm,
+        lss_corr_length_mpc=opts.lss_corr_length_mpc, lss_sigma=opts.lss_sigma,
+        gp3d_nz_nodes=opts.gp3d_nz_nodes, gp3d_nsph_nodes=opts.gp3d_nsph_nodes,
+        gp3d_z_node_hi=opts.gp3d_z_node_hi,
+        c_mode=opts.c_mode,
     )
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")
@@ -665,9 +1031,16 @@ def main(argv=None):
             logq_members = np.where(
                 np.isfinite(logq_members), logq_members, 0.0)
         diagnostics["n_nonfinite_substituted"] = n_bad
+    # The removed budget monopole goes into its DEDICATED attr (with the
+    # boolean stamp), not the JSON diagnostics blob — the loader treats an
+    # absent stamp as a legacy (non-renormalized) table and warns.
+    budget_monopole = diagnostics.pop("budget_monopole_logq", None)
     save_lss_completion_hdf5(
         opts.out, logq_map=logq_map, logq_members=logq_members,
         zgrid=np.asarray(zgrid), indexing=indexing, metadata=diagnostics,
+        budget_renormalized=diagnostics.get("budget_renormalized"),
+        budget_monopole_logq=budget_monopole,
+        c_mode=opts.c_mode,
     )
     _ok(f"completion  →  {opts.out}")
     _end()

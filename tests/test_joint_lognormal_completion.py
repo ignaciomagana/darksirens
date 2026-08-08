@@ -94,9 +94,23 @@ def test_k1_parity_bit_identical_to_single(tmp_path):
     bit-for-bit (logq_map, logq_members, zgrid) in the SAME process/backend."""
     cat = str(tmp_path / "A.h5")
     _write_survey(cat, nside=2, pix_specs={0: (3, 0.5), 1: (3, 0.5)})
-    kw = dict(seed=7, gp3d_nz_solve=12, gp3d_pix_chunk=8)
+    # S0c: the shared radial lengthscale must RESOLVE the 6-node inducing grid
+    # (the single builder hard-errors otherwise), so parity is pinned at
+    # 3000 Mpc rather than the under-resolved 50 Mpc fiducial.
+    kw = dict(seed=7, gp3d_nz_solve=12, gp3d_pix_chunk=8,
+              lss_corr_length_mpc=3000.0)
 
-    lm_s, le_s, _ = build_completion(cat, mode="gp3d", n_members=5, **kw)
+    # S0b: the single-survey builder now applies the per-z mean-one budget
+    # renormalization by default; the JOINT builder deliberately does not
+    # (its estimand — ONE shared field over K distinct footprints — needs its
+    # own weighting design, and its unstamped files warn at load). Parity is
+    # therefore pinned against the raw (budget_renorm=False) single build.
+    # S0c: the JOINT builder also keeps its hardwired z_node_hi = 3.0 inducing
+    # grid, so the single build pins gp3d_z_node_hi=3.0 (its own default moved
+    # to the package zgrid max).
+    lm_s, le_s, _ = build_completion(cat, mode="gp3d", n_members=5,
+                                     budget_renorm=False, gp3d_z_node_hi=3.0,
+                                     **kw)
     res = build_joint_completion([cat], [str(tmp_path / "A_out.h5")],
                                  n_members=5, biases=[1.0], **kw)
     lm_j, le_j = res[0]["logq_map"], res[0]["logq_members"]
@@ -137,7 +151,8 @@ def test_shared_field_borrowing_cross_survey(tmp_path):
     res = build_joint_completion(
         [catA, catB], [str(tmp_path / "Ao.h5"), str(tmp_path / "Bo.h5")],
         n_members=0, gp3d_nz_solve=16, gp3d_pix_chunk=8,
-        log10n0s=[_OVERDENSE_LOG10N0])   # 1-value broadcast to both
+        log10n0s=[_OVERDENSE_LOG10N0],   # 1-value broadcast to both
+        lss_corr_length_mpc=3000.0)      # S0c: resolve the inducing grid (hard gate)
     qA, qB = res[0]["logq_map"], res[1]["logq_map"]
     jz = int(np.argmax(qA[0]))            # A's field-peak redshift bin
 
@@ -147,7 +162,8 @@ def test_shared_field_borrowing_cross_survey(tmp_path):
 
     lmB_single, _, _ = build_completion(
         catB, mode="gp3d", n_members=0, gp3d_nz_solve=16, gp3d_pix_chunk=8,
-        log10n0=_OVERDENSE_LOG10N0)
+        log10n0=_OVERDENSE_LOG10N0,
+        lss_corr_length_mpc=3000.0)  # S0c: resolve the inducing grid (hard gate)
     assert abs(lmB_single[0, jz]) < 1e-3     # B alone: no data near d -> Q ~ 1
     assert abs(lmB_single[midfar, jz]) < 1e-3
 
@@ -160,7 +176,7 @@ def test_shared_field_borrowing_cross_survey(tmp_path):
     res2 = build_joint_completion(
         [catA, catB1], [str(tmp_path / "Ao2.h5"), str(tmp_path / "B1o.h5")],
         n_members=0, gp3d_nz_solve=16, gp3d_pix_chunk=8,
-        log10n0s=[_OVERDENSE_LOG10N0])
+        log10n0s=[_OVERDENSE_LOG10N0], lss_corr_length_mpc=3000.0)
     qB1 = res2[1]["logq_map"]
     assert qB1.shape == (12, NG)                     # B kept its own nside
     jz2 = int(np.argmax(res2[0]["logq_map"][0]))
@@ -185,7 +201,8 @@ def test_matched_members_shared_realization(tmp_path):
     outA, outB = str(tmp_path / "Ao.h5"), str(tmp_path / "Bo.h5")
     res = build_joint_completion(
         [catA, catB], [outA, outB], n_members=8, seed=123,
-        gp3d_nz_solve=16, gp3d_pix_chunk=8, log10n0s=[_OVERDENSE_LOG10N0])
+        gp3d_nz_solve=16, gp3d_pix_chunk=8, log10n0s=[_OVERDENSE_LOG10N0],
+        lss_corr_length_mpc=3000.0)  # S0c: resolve the inducing grid (hard gate)
     memA, memB = res[0]["logq_members"], res[1]["logq_members"]
     jz = int(np.argmax(res[0]["logq_map"][0]))
 
@@ -248,7 +265,8 @@ def _two_joint_surveys(tmp_path, n_members=4):
     q1 = str(tmp_path / "q1.h5")
     q2 = str(tmp_path / "q2.h5")
     build_joint_completion([s1, s2], [q1, q2], n_members=n_members, seed=5,
-                           gp3d_nz_solve=10, gp3d_pix_chunk=8)
+                           gp3d_nz_solve=10, gp3d_pix_chunk=8,
+                           lss_corr_length_mpc=3000.0)  # S0c: resolve the grid
     return s1, s2, q1, q2
 
 
@@ -273,7 +291,8 @@ def test_loader_control_separate_single_builds_still_raise(tmp_path):
     q1, q2 = str(tmp_path / "q1.h5"), str(tmp_path / "q2.h5")
     for cat, out in ((s1, q1), (s2, q2)):
         lm, le, dg = build_completion(cat, mode="gp3d", n_members=4, seed=1,
-                                      gp3d_nz_solve=10, gp3d_pix_chunk=8)
+                                      gp3d_nz_solve=10, gp3d_pix_chunk=8,
+                                      lss_corr_length_mpc=3000.0)  # S0c gate
         from darksirens.redshift.lognormal_completion import save_lss_completion_hdf5
         save_lss_completion_hdf5(out, logq_map=lm, logq_members=le,
                                  zgrid=_Z, indexing="global", metadata=dg)
@@ -368,7 +387,8 @@ def test_arity_broadcast_and_error(tmp_path):
     # per-survey biases/n0/delta of length K
     res = build_joint_completion(
         [catA, catB], outs, n_members=0, gp3d_nz_solve=8, gp3d_pix_chunk=8,
-        biases=[1.0, 2.0], log10n0s=[-2.0, -3.0], deltas=[0.0, 0.5])
+        biases=[1.0, 2.0], log10n0s=[-2.0, -3.0], deltas=[0.0, 0.5],
+        lss_corr_length_mpc=3000.0)  # S0c: resolve the inducing grid (hard gate)
     assert res[0]["diagnostics"]["bias_b_miss"] == 1.0
     assert res[1]["diagnostics"]["bias_b_miss"] == 2.0
     assert res[0]["diagnostics"]["fiducial_delta"] == 0.0
@@ -402,6 +422,22 @@ def test_empty_joint_writes_unity_with_shared_id(tmp_path):
     assert dA["realization_set_id"] == dB["realization_set_id"] is not None
     assert float(np.max(np.abs(dA["logq_map"]))) == 0.0
     assert dA["diagnostics"]["mode"] == "gp3d_joint"
+
+
+def test_joint_underresolved_inducing_grid_hard_errors(tmp_path):
+    """S0c on the JOINT path: the shipped 50 Mpc fiducial is ~30x under-
+    resolved for the fixed 6-node inducing grid, and used to produce a prior-
+    collapsed field stamped converged=True on a production path with no error
+    or warning (the single-survey builder hard-errors on the identical
+    configuration).  Now the same hard gate fires BEFORE any solve, so no Q
+    file is ever written."""
+    catA = str(tmp_path / "A.h5")
+    _write_survey(catA, nside=1, pix_specs={0: (3, 0.3)}, seed=1)
+    out = str(tmp_path / "Ao.h5")
+    with pytest.raises(ValueError, match="under-resolved"):
+        build_joint_completion([catA], [out], n_members=0,
+                               gp3d_nz_solve=8, gp3d_pix_chunk=8)
+    assert not (tmp_path / "Ao.h5").exists(), "the gate must not leave an artifact"
 
 
 def test_radial_mode_rejected(tmp_path):
@@ -438,6 +474,7 @@ def test_cli_main_smoke_writes_matched_files(tmp_path):
         "--catalogs", catA, catB, "--outs", outA, outB,
         "--n-members", "3", "--seed", "9", "--gp3d-nz-solve", "10",
         "--gp3d-pix-chunk", "8", "--bias", "1.0", "--realization-set-id", rid,
+        "--lss-corr-length-mpc", "3000",  # S0c: resolve the inducing grid
     ])
     dA = load_lss_completion_hdf5(outA)
     dB = load_lss_completion_hdf5(outB)
