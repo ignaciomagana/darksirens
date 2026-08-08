@@ -86,3 +86,28 @@ def test_gw_loaders_require_x64():
         "print('guards_fired', n)"
     )
     assert out.splitlines()[-1] == "guards_fired 2"
+
+
+def test_zmax_override_endpoint_covered_by_distance_table():
+    """DARKSIRENS_ZMAX overrides where jnp's expm1(log(.)) lands one ulp above
+    numpy's (e.g. 0.52) must still give finite r(z) at the LAST zgrid node:
+    the cosmology table is built with numpy, and an endpoint above it turns
+    into NaN chi that poisons every consumer (measured: an all-NaN radial Q
+    table). Runs in a subprocess because both grids freeze at import."""
+    import subprocess
+    import sys
+
+    code = (
+        "import jax; jax.config.update('jax_enable_x64', True)\n"
+        "import numpy as np, jax.numpy as jnp\n"
+        "from darksirens.redshift.grid import zgrid, zMax\n"
+        "from darksirens.utils.cosmology import (r_of_z, H0Planck, Om0Planck,"
+        " w0Fiducial, waFiducial)\n"
+        "assert abs(zMax - 0.52) < 1e-12\n"
+        "chi = np.asarray(r_of_z(jnp.asarray(zgrid), H0Planck, Om0Planck,"
+        " w0Fiducial, waFiducial))\n"
+        "assert np.isfinite(chi).all(), f'{(~np.isfinite(chi)).sum()} NaN chi'\n"
+    )
+    import os
+    env = dict(os.environ, DARKSIRENS_ZMAX="0.52")
+    subprocess.run([sys.executable, "-c", code], check=True, env=env)
