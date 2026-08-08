@@ -106,6 +106,51 @@ def reference_absolute_mags(m, z, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     return np.asarray(m, dtype=float) - dm
 
 
+def magnitude_suffstats(m, z, m_lim, n_bins=64, Om0=Om0Planck,
+                        w0=w0Fiducial, wa=waFiducial):
+    """Compress the magnitude sample into per-truncation-bin statistics.
+
+    The truncated-Gaussian likelihood has a PER-GALAXY truncation
+    ``T_i = m_lim - DM(z_i; H0=100)``, so the naive (N, sum x, sum x^2)
+    reduction is not exact.  Binning galaxies by T restores a finite
+    representation: within a bin the truncation is approximated by the
+    bin-mean T, and the joint likelihood becomes a sum of per-bin terms in
+    (N_b, sum Mhat_b, sum Mhat_b^2, T_b) -- exact in the fine-bin limit
+    (the approximation error is O(bin width^2) in log Phi's curvature).
+
+    This is the cheap exact-enough carrier of the FULL magnitude likelihood
+    for the joint-term cross-check (the Gaussian-prior path is the default;
+    see the module docstring).
+    """
+    Mhat = reference_absolute_mags(m, z, Om0, w0, wa)
+    T = np.asarray(m_lim, dtype=float) - (np.asarray(m, dtype=float) - Mhat)
+    edges = np.linspace(T.min() - 1e-9, T.max() + 1e-9, n_bins + 1)
+    idx = np.clip(np.digitize(T, edges) - 1, 0, n_bins - 1)
+    stats = {"n": np.zeros(n_bins), "sum": np.zeros(n_bins),
+             "sumsq": np.zeros(n_bins), "T": np.zeros(n_bins)}
+    np.add.at(stats["n"], idx, 1.0)
+    np.add.at(stats["sum"], idx, Mhat)
+    np.add.at(stats["sumsq"], idx, Mhat ** 2)
+    np.add.at(stats["T"], idx, T)
+    keep = stats["n"] > 0
+    return {k: v[keep] for k, v in stats.items()} | {
+        "T": stats["T"][keep] / stats["n"][keep]}
+
+
+def magnitude_loglike_from_stats(M0hat, sigma_M, stats):
+    """Truncated-Gaussian magnitude log-likelihood from the binned statistics.
+
+    ``sum_b [ -N_b log sigma - (S2_b - 2 mu S1_b + N_b mu^2)/(2 sigma^2)
+              - N_b log Phi((T_b - mu)/sigma) ]``  (+ const).
+    JAX-differentiable in (M0hat, sigma_M); usable as an explicit joint term.
+    """
+    n, s1, s2, T = (jnp.asarray(stats[k]) for k in ("n", "sum", "sumsq", "T"))
+    mu, sig = M0hat, sigma_M
+    quad = (s2 - 2.0 * mu * s1 + n * mu ** 2) / (2.0 * sig ** 2)
+    log_trunc = jnp.log(jnp.maximum(ndtr((T - mu) / sig), 1e-300))
+    return jnp.sum(-n * jnp.log(sig) - quad - n * log_trunc)
+
+
 def load_selection_fit_json(path):
     """Load and validate a ``darksirens_fit_selection`` JSON; return the
     single-stratum theta dict ``{family, m_lim, M0hat, sigma_M, cov, ...}``.
