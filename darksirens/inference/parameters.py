@@ -15,7 +15,12 @@ from darksirens.core.constants import (
     W0_FID,
     WA_FID,
 )
-from darksirens.core.types import C_MODE_AGGREGATE_STRUCT, CosmoParams, SurveyParams
+from darksirens.core.types import (
+    C_MODE_AGGREGATE_STRUCT,
+    C_MODE_SELECTION_STRUCT,
+    CosmoParams,
+    SurveyParams,
+)
 from darksirens.inference.prior import build_parameter_space, resolve_parameter_values
 from darksirens.sky import get_fixed_sky_params
 from darksirens.marks import mark_fiducial
@@ -103,12 +108,19 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         z_depth=z_depth,
         wl_params=wl_params,
         # STRUCTURAL normalisation (the z_depth pattern): per_pixel (0) is
-        # carried as None and aggregate as the LEAF-LESS sentinel, so BOTH
-        # modes are pytree-structure decisions that survive
-        # darksiren_log_likelihood's jit boundary, where an int leaf becomes
-        # a value-unreadable tracer (which the completion module hard-errors
-        # on rather than guessing a mode).
-        c_mode=(C_MODE_AGGREGATE_STRUCT if c_mode else None),
+        # carried as None, aggregate (1) and selection (2) as their LEAF-LESS
+        # sentinels, so EVERY mode is a pytree-structure decision that
+        # survives darksiren_log_likelihood's jit boundary, where an int leaf
+        # becomes a value-unreadable tracer (which the completion module
+        # hard-errors on rather than guessing a mode).
+        c_mode={0: None, 1: C_MODE_AGGREGATE_STRUCT,
+                2: C_MODE_SELECTION_STRUCT}[int(c_mode)],
+        # Parametric-selection block: m_lim is a pinned truncation datum
+        # (overridable via fixed values); M0hat / sigma_M are sampled leaves
+        # under c_mode="selection" and fiducial-pinned otherwise.
+        m_lim=field["m_lim"],
+        M0hat=field["M0hat"],
+        sigma_M=field["sigma_M"],
     )
 
 
@@ -344,6 +356,10 @@ def build_parameter_decoder(
         # build_parameter_space signature default for direct/legacy callers.
         use_lss=bool(getattr(opts, "use_LSS", True)),
         mark_names_by_catalog=mark_names_by_catalog,
+        # The selection parameters are gated on c_mode exactly as b_miss is on
+        # use_lss: the decoder must re-derive the space under the same mode.
+        c_mode=getattr(opts, "c_mode", "per_pixel") or "per_pixel",
+        selection_prior=getattr(opts, "selection_prior", None),
     )
 
     # Fail-fast net for CLI/decoder flag drift (the P0.1 bug class): the CLI

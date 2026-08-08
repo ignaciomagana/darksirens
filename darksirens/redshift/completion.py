@@ -109,7 +109,13 @@ from jax.scipy.special import ndtr
 from typing import NamedTuple
 
 from darksirens.utils.cosmology import dV_of_z
-from darksirens.core.types import AggregateCMode, CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import (
+    AggregateCMode,
+    CosmoParams,
+    EMCatalog,
+    SelectionCMode,
+    SurveyParams,
+)
 
 from darksirens.redshift.grid import zgrid
 
@@ -122,6 +128,7 @@ _SIGMA_SMOOTH: float = 0.05
 # Python-level branch exactly like ``z_depth``.
 C_MODE_PER_PIXEL: int = 0   # legacy default: per-pixel matched-kernel ratio
 C_MODE_AGGREGATE: int = 1   # one sky-aggregate Cbar(z) broadcast to all pixels
+C_MODE_SELECTION: int = 2   # parametric C_sel(z; m_lim, M0hat, sigma_M)
 
 
 def _is_aggregate_c_mode(c_mode) -> bool:
@@ -141,14 +148,32 @@ def _is_aggregate_c_mode(c_mode) -> bool:
     clustering budget -- for a plain plumbing mistake (a concrete
     ``c_mode=0`` traced through jit used to be evaluated as aggregate).
     """
+    return _decode_c_mode(c_mode) == C_MODE_AGGREGATE
+
+
+def _is_selection_c_mode(c_mode) -> bool:
+    """Trace-safe decode of ``SurveyParams.c_mode`` -> parametric selection?
+
+    Same structural contract as :func:`_is_aggregate_c_mode`; the selection
+    mode rides :data:`darksirens.core.types.C_MODE_SELECTION_STRUCT`.
+    """
+    return _decode_c_mode(c_mode) == C_MODE_SELECTION
+
+
+def _decode_c_mode(c_mode) -> int:
+    """Decode any legal ``c_mode`` spelling to its int code; hard-error on
+    a traced int (guessing would silently swap the completeness estimator
+    -- and with it the entire clustering budget)."""
     if c_mode is None:
-        return False
+        return C_MODE_PER_PIXEL
     if isinstance(c_mode, AggregateCMode):
-        return True
+        return C_MODE_AGGREGATE
+    if isinstance(c_mode, SelectionCMode):
+        return C_MODE_SELECTION
     if isinstance(c_mode, (int, np.integer)):
-        return int(c_mode) == C_MODE_AGGREGATE
+        return int(c_mode)
     try:
-        return int(c_mode) == C_MODE_AGGREGATE   # concrete 0-d array
+        return int(c_mode)                       # concrete 0-d array
     except jax.errors.ConcretizationTypeError as exc:
         raise ValueError(
             "SurveyParams.c_mode reached a jit boundary as a traced int "
@@ -158,7 +183,10 @@ def _is_aggregate_c_mode(c_mode) -> bool:
             "STRUCTURALLY across jit boundaries instead: None (or a "
             "concrete int 0, eagerly) for per_pixel, "
             "darksirens.core.types.C_MODE_AGGREGATE_STRUCT (or a concrete "
-            "int 1, eagerly) for aggregate. The parameter decoder "
+            "int 1, eagerly) for aggregate, and "
+            "darksirens.core.types.C_MODE_SELECTION_STRUCT (or a concrete "
+            "int 2, eagerly) for the parametric selection mode. The "
+            "parameter decoder "
             "(darksirens.inference.parameters._survey_params) performs this "
             "normalisation for production runs."
         ) from exc
@@ -821,7 +849,24 @@ def _precompute_grids(
         dN_exp_smooth = jnp.where(depth_mask, dN_exp_smooth, 1.0)
 
     C_bar_raw = None
-    if _is_aggregate_c_mode(survey.c_mode):
+    if _is_selection_c_mode(survey.c_mode):
+        # Parametric magnitude-limited selection: no counts enter the budget
+        # at all.  M0hat is h-scaled (M0 - 5 log10 h), so the +5 log10 h
+        # restored here cancels the -5 log10 h inside DM(z) EXACTLY (dL is
+        # exactly proportional to 1/H0) and the curve carries no H0
+        # information -- the M*-H0 firewall, pinned by
+        # tests/test_completion_selection_mode.py.  Phi is in [0, 1], so the
+        # consumers' clip is a no-op, and beyond a concrete z_depth they
+        # relax C := 0 exactly as in the other modes.  Formed here, in the
+        # single C_bar_raw slot, so every consumer (_row_C,
+        # _field_missing_curve, diagnostics) works unchanged.  Deferred import:
+        # selection.py is a leaf module (utils.cosmology only), imported here
+        # rather than at module top to keep completion's import graph flat.
+        from darksirens.redshift.selection import c_sel_gaussian
+        C_bar_raw = c_sel_gaussian(
+            zgrid, survey.m_lim, survey.M0hat, survey.sigma_M,
+            cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+    elif _is_aggregate_c_mode(survey.c_mode):
         dN_obs_sum = _aggregate_dN_obs_sum(em_catalog)      # data constant
         n_pix_total = jnp.round(4.0 * jnp.pi / em_catalog.apix)
         # Same guarded denominator as _row_C (an exact-zero smooth is inert);

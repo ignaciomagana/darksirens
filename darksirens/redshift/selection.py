@@ -106,6 +106,39 @@ def reference_absolute_mags(m, z, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     return np.asarray(m, dtype=float) - dm
 
 
+def load_selection_fit_json(path):
+    """Load and validate a ``darksirens_fit_selection`` JSON; return the
+    single-stratum theta dict ``{family, m_lim, M0hat, sigma_M, cov, ...}``.
+
+    Multi-stratum payloads are rejected here for now: the single-survey
+    builder and the K=1 likelihood carry one theta; per-stratum consumption
+    arrives with real-catalog ingestion.
+    """
+    import json
+
+    with open(path) as f:
+        payload = json.load(f)
+    fmt = payload.get("format_version")
+    if fmt != "darksirens-selection-fit-1.0":
+        raise ValueError(
+            f"{path}: unknown selection-fit format {fmt!r} (expected "
+            "darksirens-selection-fit-1.0 from darksirens_fit_selection).")
+    strata = payload.get("strata") or []
+    if len(strata) != 1:
+        raise NotImplementedError(
+            f"{path}: {len(strata)} strata; the single-survey consumers "
+            "carry exactly one selection stratum for now.")
+    s = dict(strata[0])
+    for key in ("family", "m_lim", "M0hat", "sigma_M", "cov"):
+        if key not in s:
+            raise ValueError(f"{path}: stratum missing required key {key!r}.")
+    if s["family"] != "gaussian":
+        raise NotImplementedError(
+            f"{path}: family {s['family']!r}; consumers support the gaussian "
+            "family for now.")
+    return s
+
+
 @dataclass
 class SelectionFit:
     """One stratum's fitted Gaussian-LF selection parameters."""

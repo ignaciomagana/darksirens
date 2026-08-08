@@ -34,6 +34,21 @@ class AggregateCMode(NamedTuple):
 C_MODE_AGGREGATE_STRUCT = AggregateCMode()
 
 
+class SelectionCMode(NamedTuple):
+    """Leaf-less structural flag for ``c_mode="selection"``.
+
+    Same design as :class:`AggregateCMode`: zero pytree leaves, so the mode is
+    part of the treedef and survives every jit boundary; ``isinstance``
+    decodes it inside any trace, and a traced int on ``c_mode`` is a hard
+    error in the completion module.  FALSY as an empty tuple -- test with
+    ``isinstance``, never truthiness.
+    """
+
+
+#: Singleton structural selection flag (eager callers may pass the int 2).
+C_MODE_SELECTION_STRUCT = SelectionCMode()
+
+
 class SurveyParams(NamedTuple):
     """Parameters dictating galaxy survey completeness and selection.
 
@@ -115,7 +130,15 @@ class SurveyParams(NamedTuple):
     lss_corr_length_ang: Any = 0.2
     wl_params: Any = None
     z_depth: Any = None
-    c_mode: Any = None         # None/0=per_pixel (legacy), C_MODE_AGGREGATE_STRUCT/1=aggregate; structural, never traced
+    c_mode: Any = None         # None/0=per_pixel (legacy), C_MODE_AGGREGATE_STRUCT/1=aggregate, C_MODE_SELECTION_STRUCT/2=selection; structural, never traced
+    # Parametric selection-function block (consumed only under
+    # c_mode="selection"; see darksirens/redshift/selection.py).  m_lim is a
+    # fixed truncation datum; M0hat (h-scaled, = M0 - 5 log10 h) and sigma_M
+    # are SAMPLED under the magnitude-fit Gaussian prior -- plain traced
+    # leaves, unlike the structural flags above.
+    m_lim: Any = 24.0
+    M0hat: Any = -20.2
+    sigma_M: Any = 1.0
 
 
 class EMCatalog(NamedTuple):

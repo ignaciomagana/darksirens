@@ -331,11 +331,14 @@ def test_registry_and_fiducial_table_cover_the_same_fields():
 
 
 def test_registry_declares_the_block_order_and_bounds():
+    # Selection labels (M0hat, sigma_M) appended LAST so pre-existing
+    # coordinate indices never move; they sample only under c_mode="selection".
     assert [spec.label for spec in _SURVEY_BLOCK] == [
-        "log10n0", "delta", "b_miss", "sigma_kde",
+        "log10n0", "delta", "b_miss", "sigma_kde", "M0hat", "sigma_M",
     ]
     assert [(spec.lower, spec.upper) for spec in _SURVEY_BLOCK] == [
         (-4.0, -1.0), (-3.0, 3.0), (0.0, 3.0), (0.0, 0.05),
+        (-23.0, -18.0), (0.05, 3.0),
     ]
 
 
