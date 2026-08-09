@@ -90,6 +90,34 @@ H0_REF = 100.0
 #: hard-checked).
 M_FAINT_OFFSET_DEFAULT = 5.0
 
+#: Floor of the legal ``M_faint_offset`` range.  NEGATIVE offsets are legal:
+#: they declare a BRIGHT-truncated modelled population (``M_faint`` bright-ward
+#: of M*, e.g. a mock whose luminosities are drawn above a cut ``x_cut L*``
+#: with ``x_cut = 10^{-0.4 M_faint_offset} > 1``) -- the denominator
+#: ``Gamma(alpha+1, x_faint)`` is finite for every real offset because
+#: ``x_faint = 10^{-0.4 offset}`` is strictly positive either way.  The floor
+#: is NUMERICAL, not physical: by ``x_faint ~ 630`` (offset = -7) the
+#: ``e^{-x_faint}`` factor is within a decade of the f64 underflow wall at
+#: ``x ~ 745`` and :func:`_upper_gamma_scaled`'s recurrence difference has
+#: shed ~``log10(x_faint)`` leading digits, so past it the curve would
+#: degrade silently instead of failing.
+_M_FAINT_OFFSET_MIN = -7.0
+
+
+def _validate_m_faint_offset(value, where):
+    """Shared legality check of the protocol constant (see the floor above)."""
+    v = float(value)
+    if not np.isfinite(v) or v <= _M_FAINT_OFFSET_MIN:
+        raise ValueError(
+            f"{where}: M_faint_offset={value} must be finite and greater "
+            f"than {_M_FAINT_OFFSET_MIN}. Negative offsets are legal -- they "
+            "declare a BRIGHT-truncated modelled population (M_faint = "
+            "Mstar_hat + M_faint_offset bright-ward of M*) -- but below the "
+            "floor the completeness denominator Gamma(alpha+1, "
+            "10^(-0.4 offset)) underflows f64 and the curve would degrade "
+            "silently.")
+    return v
+
 #: Per-family theta carried by a selection-fit stratum, in the order the
 #: Q-table provenance check and the ``selection_<name>`` stamps use.  Single
 #: source of truth for cli/build_lognormal_completion.py, cli/inference.py and
@@ -234,6 +262,15 @@ def c_sel_schechter(z, m_lim, Mstar_hat, alpha, M_faint_offset, H0,
     The result is clipped into [0, 1]: ``x_lim < x_faint`` means the survey
     reaches FAINTER than the modelled population and is complete there.
 
+    ``M_faint_offset`` may be NEGATIVE: that declares a BRIGHT-truncated
+    modelled population (``M_faint`` bright-ward of M*, i.e. luminosities
+    drawn above ``x_cut = 10^{-0.4 M_faint_offset} > 1`` in ``L*`` units --
+    the mock-with-a-luminosity-cut case).  Nothing in the ratio changes:
+    ``x_faint`` stays strictly positive, the denominator counts the truncated
+    population, and the clip handles the (now larger) complete regime.  The
+    legality floor is :data:`_M_FAINT_OFFSET_MIN` (f64 underflow of
+    ``e^{-x_faint}``), enforced by the fit/loader/CLI walls, not here.
+
     Below ``alpha = _ALPHA_MIN`` the curve is NaN, not a number: that is the
     edge of the recurrence's one lift, and a silent wrong answer there would
     read as an identically COMPLETE survey -- the one failure mode with no
@@ -362,11 +399,7 @@ def _validate_stratum(path, s):
                 "recurrence step off gammaincc's positive-argument domain, so "
                 "alpha + 2 > 0 is the edge of the spelling (every measured "
                 "galaxy faint-end slope is well inside it).")
-        if float(s["M_faint_offset"]) <= 0.0:
-            raise ValueError(
-                f"{path}: M_faint_offset={float(s['M_faint_offset'])} must be "
-                "positive -- the faint cutoff M_faint = Mstar_hat + "
-                "M_faint_offset lies FAINT-ward of M*.")
+        _validate_m_faint_offset(s["M_faint_offset"], str(path))
     return s
 
 
@@ -481,11 +514,7 @@ class SelectionFit:
                     f"alpha={float(self.alpha)} is at or below the "
                     f"{_ALPHA_MIN} floor: c_sel_schechter's upper-gamma "
                     "recurrence carries alpha + 2 > 0.")
-            if float(self.M_faint_offset) <= 0.0:
-                raise ValueError(
-                    f"M_faint_offset={float(self.M_faint_offset)} must be "
-                    "positive: M_faint = Mstar_hat + M_faint_offset lies "
-                    "faint-ward of M*.")
+            _validate_m_faint_offset(self.M_faint_offset, "SelectionFit")
             if tuple(self.k_corr_coeffs):
                 raise ValueError(
                     "the schechter family carries no K(z) template (the "
@@ -578,11 +607,23 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
                 "in-likelihood; fit the gaussian family with "
                 "--k_corr_coeffs, or extend c_sel_schechter (and its "
                 "H0-invariance pin) first.")
-        if float(M_faint_offset) <= 0.0:
+        _validate_m_faint_offset(M_faint_offset, "fit_selection_from_mags")
+        if float(M_faint_offset) < 0.0 and m_faint_cut is None:
+            # A bright-truncated protocol is a POPULATION claim: no galaxies
+            # exist faint-ward of M_faint < M*.  Fitting such a sample with
+            # an un-cut faint end does not fail -- the MLE quietly inverts
+            # the slope (alpha driven positive, M* dragged faint) to explain
+            # the missing faint counts, so the mismatch must be refused, not
+            # warned about.
             raise ValueError(
-                f"M_faint_offset={float(M_faint_offset)} must be positive: "
-                "the faint cutoff M_faint = Mstar_hat + M_faint_offset lies "
-                "FAINT-ward of M*.")
+                f"M_faint_offset={float(M_faint_offset)} declares a BRIGHT-"
+                "truncated modelled population (M_faint = Mstar_hat + "
+                "M_faint_offset bright-ward of M*: nothing exists past the "
+                "cut), but no m_faint_cut was declared, so the fit would "
+                "model an LF with no faint edge against a sample that has "
+                "one -- the MLE then inverts the faint-end slope instead of "
+                "failing. Pass --m_faint_cut at the population's edge (the "
+                "h-scaled absolute magnitude of the truncation).")
     elif m_faint_cut is not None:
         raise NotImplementedError(
             f"m_faint_cut={float(m_faint_cut)} is a schechter-family option: "
@@ -869,7 +910,7 @@ def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
     budget = {}
     for d in (-d_offset, 0.0, d_offset):
         off = float(M_faint_offset) + d
-        if off <= 0.0:
+        if off <= _M_FAINT_OFFSET_MIN:
             continue
         c = float(c_sel_schechter(z_med, m_lim, Mstar_hat, alpha, off, H0_REF,
                                   Om0, w0, wa))

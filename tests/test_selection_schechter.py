@@ -357,12 +357,14 @@ def test_alpha_domain_survives_prior_overrides_and_fixed_values():
         assert float(good.min()) < 1.0 and float(good.max()) <= 1.0
 
 
-def test_fixed_faint_offset_must_be_positive():
-    """M_faint_offset is pinned, so it has no bounds to validate against; the
-    faint cutoff must still lie faint-ward of M*."""
+def test_fixed_faint_offset_legality_wall():
+    """M_faint_offset is pinned, so it has no bounds to validate against; its
+    legality wall is the shared one: any finite value above the -7 underflow
+    floor -- NEGATIVE included (a bright-truncated modelled population)."""
     _schechter_space(fixed_parameter_values={"M_faint_offset": 4.0})
-    with pytest.raises(ValueError, match="M_faint_offset must be positive"):
-        _schechter_space(fixed_parameter_values={"M_faint_offset": -1.0})
+    _schechter_space(fixed_parameter_values={"M_faint_offset": -1.0})
+    with pytest.raises(ValueError, match="M_faint_offset"):
+        _schechter_space(fixed_parameter_values={"M_faint_offset": -7.5})
 
 
 def test_selection_fit_json_roundtrip_schechter(tmp_path):
@@ -743,3 +745,132 @@ def test_decoder_threads_family_and_pins_the_offset():
 def test_fiducial_and_module_default_offsets_agree():
     assert SURVEY_PARAMS_FID_BY_NAME["M_faint_offset"] == M_FAINT_OFFSET_DEFAULT
     assert CONST_SELECTION_FAMILIES == SELECTION_FAMILIES
+
+
+# ------------------------------------------------------------------
+# Bright-truncated Schechter (negative M_faint_offset)
+# ------------------------------------------------------------------
+#
+# A NEGATIVE offset declares a population truncated BRIGHT-ward of M*
+# (luminosities drawn above x_cut = 10^{-0.4 offset} > 1 in L* units --
+# a mock with a luminosity cut, e.g. one that sets its number density by
+# integrating the LF down to exactly x_cut).  The gamma ratio needs no
+# change (x_faint stays positive); the guards were the only wall, and the
+# floor that replaces them is the f64 underflow of e^{-x_faint} at
+# offset <= -7.
+
+#: The gws-agn mock's construction, to the digit: x_cut chosen so the
+#: integrated density hits 1e-3 Mpc^-3.
+X_CUT = 1.0907900366549803
+OFFSET_BRIGHT = -2.5 * np.log10(X_CUT)          # = -0.09435... mag
+
+
+def test_negative_offset_curve_is_finite_and_matches_quadrature():
+    """c_sel_schechter with the bright-ward cutoff equals the quadrature
+    gamma ratio at every z, stays in [0, 1], and clips to exactly 1 where
+    the survey out-reaches the truncated population."""
+    from scipy.integrate import quad
+
+    a = -1.07 + 1.0                       # the mock's faint-end slope
+    zs = np.array([0.02, 0.1, 0.3, 0.6])
+    dm = np.asarray(distance_modulus(jnp.asarray(zs), H0_REF))
+    x_lim = 10.0 ** (-0.4 * (M_LIM - dm - MSTAR_TRUE))
+    x_faint = 10.0 ** (-0.4 * OFFSET_BRIGHT)
+    np.testing.assert_allclose(x_faint, X_CUT, rtol=1e-12)
+
+    got = np.asarray(c_sel_schechter(
+        jnp.asarray(zs), M_LIM, MSTAR_TRUE, -1.07, OFFSET_BRIGHT, H0_REF))
+    assert np.all(np.isfinite(got)) and np.all((got >= 0) & (got <= 1))
+
+    den = quad(lambda t: t ** (a - 1.0) * np.exp(-t), x_faint, 80.0,
+               limit=400)[0]
+    for j, xl in enumerate(x_lim):
+        want = min(quad(lambda t: t ** (a - 1.0) * np.exp(-t), xl, 80.0,
+                        limit=400)[0] / den, 1.0)
+        np.testing.assert_allclose(float(got[j]), want, atol=1e-10)
+    # Near z -> 0 the survey sees far past the bright cutoff: exactly 1.
+    assert float(c_sel_schechter(0.001, M_LIM, MSTAR_TRUE, -1.07,
+                                 OFFSET_BRIGHT, H0_REF)) == 1.0
+
+
+def test_negative_offset_legal_below_floor_refused_everywhere(tmp_path):
+    """The offset's legality wall is the SAME everywhere: negative is fine,
+    the -7 underflow floor and non-finite values are refused -- at JSON
+    validation, at construction, at the fit entry, and on a bare
+    --fixed_parameter_values entry."""
+    from darksirens.redshift.selection import _validate_stratum
+
+    ok = {"family": "schechter", "m_lim": 21.5, "Mstar_hat": -20.5,
+          "alpha": -1.07, "M_faint_offset": OFFSET_BRIGHT,
+          "cov": np.eye(2).tolist()}
+    assert _validate_stratum(tmp_path / "f.json", dict(ok))[
+        "M_faint_offset"] == OFFSET_BRIGHT
+    SelectionFit(family="schechter", m_lim=21.5, Mstar_hat=-20.5,
+                 alpha=-1.07, M_faint_offset=OFFSET_BRIGHT, cov=np.eye(2))
+
+    for bad in (-7.0, -20.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="M_faint_offset"):
+            _validate_stratum(tmp_path / "f.json",
+                              dict(ok, M_faint_offset=bad))
+        with pytest.raises(ValueError, match="M_faint_offset"):
+            SelectionFit(family="schechter", m_lim=21.5, Mstar_hat=-20.5,
+                         alpha=-1.07, M_faint_offset=bad, cov=np.eye(2))
+
+    # Fixed-value path: negative accepted, floor refused.
+    kw = dict(universe_model="dark_sirens", use_lss=False,
+              c_mode="selection", selection_family="schechter")
+    build_parameter_space("powerlaw+peak", True, True, False,
+                          fixed_parameter_values={
+                              "M_faint_offset": OFFSET_BRIGHT}, **kw)
+    with pytest.raises(ValueError, match="M_faint_offset"):
+        build_parameter_space("powerlaw+peak", True, True, False,
+                              fixed_parameter_values={
+                                  "M_faint_offset": -8.0}, **kw)
+
+
+def _truncated_schechter_sample(rng, n, mstar, alpha, x_cut, x_max=60.0):
+    """Draw x = L/L* from x^alpha e^-x on [x_cut, x_max] by numeric
+    inverse-CDF, return absolute magnitudes."""
+    grid = np.geomspace(x_cut, x_max, 20000)
+    pdf = grid ** alpha * np.exp(-grid)
+    cdf = np.concatenate([[0.0], np.cumsum(
+        0.5 * (pdf[1:] + pdf[:-1]) * np.diff(grid))])
+    cdf /= cdf[-1]
+    x = np.interp(rng.uniform(size=n), cdf, grid)
+    return mstar - 2.5 * np.log10(x)
+
+
+def test_bright_truncated_fit_recovers_generative_truth():
+    """The closed loop: a sample drawn from EXACTLY the model -- a Schechter
+    truncated at x_cut > 1 -- fitted with the matching negative offset and
+    the m_faint_cut at the population's edge, recovers (Mstar_hat, alpha)
+    within a few Laplace sd.  Without the cut the same call is REFUSED
+    (an un-cut faint end against a truncated sample inverts the slope
+    instead of failing -- measured at alpha = +3.2 on the real mock)."""
+    rng = np.random.default_rng(7)
+    n = 40000
+    alpha_true = -1.07
+    M = _truncated_schechter_sample(rng, n, MSTAR_TRUE, alpha_true, X_CUT)
+    z = rng.uniform(0.05, 0.30, size=n)
+    dm = np.asarray(distance_modulus(jnp.asarray(z), H0_REF))
+    m = M + dm
+    m_lim = float(np.max(m)) + 0.1      # deep survey: pure LF truncation
+    m_faint_cut = MSTAR_TRUE + OFFSET_BRIGHT + 1e-9
+
+    with pytest.raises(ValueError, match="m_faint_cut"):
+        fit_selection_from_mags(m, z, m_lim, family="schechter",
+                                M_faint_offset=OFFSET_BRIGHT)
+
+    fit = fit_selection_from_mags(m, z, m_lim, family="schechter",
+                                  M_faint_offset=OFFSET_BRIGHT,
+                                  m_faint_cut=m_faint_cut)
+    sd = np.sqrt(np.diag(np.asarray(fit.cov)))
+    assert abs(fit.Mstar_hat - MSTAR_TRUE) < 5.0 * sd[0], (
+        fit.Mstar_hat, sd[0])
+    assert abs(fit.alpha - alpha_true) < 5.0 * sd[1], (fit.alpha, sd[1])
+    assert fit.M_faint_offset == OFFSET_BRIGHT
+    # ... and the consumed curve at the fitted theta is finite and sane.
+    c = np.asarray(c_sel_schechter(
+        jnp.asarray([0.05, 0.2, 0.5]), 21.0, fit.Mstar_hat, fit.alpha,
+        fit.M_faint_offset, H0_REF))
+    assert np.all(np.isfinite(c)) and np.all((c >= 0) & (c <= 1))

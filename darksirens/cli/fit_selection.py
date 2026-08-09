@@ -19,6 +19,11 @@ is exactly independent of the true H0 (h-scaled convention) and of the galaxy
 density field (thinning): clustering cannot leak into the fitted selection.
 The recorded (photometric) redshifts are used as-is; their scatter inflates
 ``sigma_M`` slightly and is a documented limitation, not corrected here.
+
+Runs fine on CPU in seconds at catalog sizes: the optimizer is numpy/scipy,
+and the only JAX entry point is ``distance_modulus`` inside
+``reference_absolute_mags`` -- but that import alone grabs a GPU when one is
+visible, so on a shared node run with ``JAX_PLATFORMS=cpu``.
 """
 from __future__ import annotations
 
@@ -67,7 +72,12 @@ def main(argv=None):
                         "fixes the completeness denominator only, so the "
                         "Q-table build and the inference run must carry the "
                         "SAME value, and the fit reports the missing-galaxy "
-                        "budget it buys at +/-1 mag rather than fitting it.")
+                        "budget it buys at +/-1 mag rather than fitting it. "
+                        "May be NEGATIVE for a BRIGHT-truncated population "
+                        "(M_faint bright-ward of M*, e.g. a mock with a "
+                        "luminosity cut above L*); a negative offset REQUIRES "
+                        "--m_faint_cut at the population's edge, or the MLE "
+                        "would invert the faint-end slope.")
     p.add_argument("--m_faint_cut", type=float, default=None,
                    help="Optional h-scaled absolute-magnitude cut Mhat <= "
                         "m_faint_cut applied to the FIT sample (schechter "
@@ -218,9 +228,11 @@ def main(argv=None):
                  f"{fit.meta['frac_complete_at_m_faint']:.3f} of the sample is "
                  f"complete to M_faint={fit.meta['m_faint_implied']:.4f}; "
                  f"{fit.meta['n_gal_faintward_of_m_faint']:,} galaxies lie "
-                 "faint-ward of it (outside the modelled population -- raise "
-                 "--m_faint_offset and REBUILD the Q table, or declare "
-                 "--m_faint_cut, if that count is not negligible)")
+                 "faint-ward of it (outside the modelled population -- move "
+                 "--m_faint_offset faint-ward and REBUILD the Q table, or "
+                 "declare --m_faint_cut, if that count is not negligible; a "
+                 "NEGATIVE offset declares a bright-truncated population and "
+                 "then requires the cut)")
     _end()
 
     # A single stratum stays byte-compatible with the 1.0 consumers; only a

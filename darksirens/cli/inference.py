@@ -2301,14 +2301,17 @@ def _resolve_selection_fits(opts, data, fixed_parameter_values):
     and pins ``m_lim{sfx}`` per catalog in ``fixed_parameter_values``.
 
     Also stamps ``opts.selection_family`` (SCALAR: the fits' shared
-    luminosity-function family, ``"gaussian"`` when no fit is given).  The
-    schechter family is single-catalog for now: its ``M_faint_offset``
-    protocol constant is pinned unsuffixed (one completeness denominator per
-    run), so per-catalog schechter anchoring has no defined semantics yet --
-    refused fail-closed below.
+    luminosity-function family, ``"gaussian"`` when no fit is given).  A
+    K >= 2 mixture must be HOMOGENEOUS in the LF: every fit declares the
+    SAME family (mixed families are refused -- the completeness bases would
+    differ by the whole LF shape), and a schechter mixture must additionally
+    share ONE ``M_faint_offset`` (the protocol constant is pinned unsuffixed:
+    one completeness denominator per run; per-catalog offsets are refused
+    both here and in the prior validation).
     """
     from darksirens.redshift.selection import (
         SELECTION_SAMPLED_FIELDS,
+        SELECTION_THETA_FIELDS,
         load_selection_fit_strata,
     )
 
@@ -2325,6 +2328,8 @@ def _resolve_selection_fits(opts, data, fixed_parameter_values):
     _check_stratum_map_pairing(opts)
 
     fits = []
+    _run_family = None      # family of the first catalog with a fit
+    _run_offset = None      # the run's ONE schechter M_faint_offset
     for k, (path, mode) in enumerate(zip(paths, modes), start=1):
         sfx = "" if k == 1 else f"_c{k}"
         if path is None:
@@ -2352,17 +2357,21 @@ def _resolve_selection_fits(opts, data, fixed_parameter_values):
         _sel = _strata[0]     # reference stratum: prior center + m_lim datum
         # The fit declares the luminosity-function family; the stratified
         # sub-branch below is reachable for gaussian only (loader-enforced).
+        # A mixture must be HOMOGENEOUS: the run's family is a scalar (one
+        # C_sel shape for every catalog), so the first fit sets it and every
+        # later fit must agree.
         _family = str(_sel.get("family", "gaussian"))
-        if _family != "gaussian" and opts.n_catalogs >= 2:
+        if _run_family is None:
+            _run_family = _family
+        elif _family != _run_family:
             _fatal(
                 f"catalog {k}: --selection_fit {path} declares the "
-                f"'{_family}' family, but a K>=2 mixture is gaussian-only "
-                "for now: the schechter M_faint_offset protocol constant is "
-                "pinned unsuffixed (one completeness denominator per run), "
-                "so per-catalog schechter anchoring has no defined "
-                "semantics yet. Run the schechter fit single-catalog, or "
-                "use gaussian fits for the mixture.")
-        opts.selection_family = _family
+                f"'{_family}' family but catalog(s) before it fitted "
+                f"'{_run_family}': a mixture's catalogs share one "
+                "luminosity-function family (the completeness bases would "
+                "otherwise differ by the whole LF shape, not a parameter). "
+                "Refit the catalogs under one family.")
+        opts.selection_family = _run_family
         _map_sha = None
         if len(_strata) > 1:
             if not getattr(opts, "stratum_map", None):
@@ -2409,15 +2418,33 @@ def _resolve_selection_fits(opts, data, fixed_parameter_values):
             _theta_eff = _resolve_selection_fit_pins(
                 _sel, _family, fixed_parameter_values)
         else:
-            # k >= 2 is gaussian-only (refused above), so the only pin is
-            # the suffixed m_lim datum.
+            # k >= 2: the suffixed m_lim datum is this catalog's own pin;
+            # everything else in the family's theta is the fit's.
             fixed_parameter_values.setdefault(
                 f"m_lim{sfx}", float(_sel["m_lim"]))
             _theta_eff = {
                 "m_lim": float(fixed_parameter_values[f"m_lim{sfx}"]),
-                "M0hat": float(_sel["M0hat"]),
-                "sigma_M": float(_sel["sigma_M"]),
+                **{n: float(_sel[n])
+                   for n in SELECTION_THETA_FIELDS[_family]
+                   if n != "m_lim"},
             }
+        if _family == "schechter":
+            # ONE completeness denominator per run: the shared protocol
+            # constant is pinned UNSUFFIXED by catalog 1's pins fold above
+            # (the decoder broadcasts it to every suffixed catalog), so
+            # every fit must carry the same offset -- a per-catalog offset
+            # has no defined semantics.
+            if _run_offset is None:
+                _run_offset = float(_theta_eff["M_faint_offset"])
+            elif abs(float(_sel["M_faint_offset"]) - _run_offset) > 1e-9:
+                _fatal(
+                    f"catalog {k}: --selection_fit {path} carries "
+                    f"M_faint_offset={float(_sel['M_faint_offset'])} but the "
+                    f"run's shared protocol constant is {_run_offset}: a "
+                    "schechter mixture integrates ONE completeness "
+                    "denominator (M_faint = Mstar_hat + M_faint_offset), so "
+                    "every catalog's fit must be run with the same "
+                    "--m_faint_offset. Refit with a common value.")
         fits.append({
             "catalog": k,
             "path": str(path),

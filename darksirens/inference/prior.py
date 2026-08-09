@@ -689,17 +689,29 @@ def build_parameter_space(
             f"unknown selection_family {selection_family!r}; the survey "
             f"registry carries {sorted(SELECTION_SAMPLED_FIELDS)}.")
     if selection_family == "schechter":
+        # M_faint_offset is ONE protocol constant per run: a suffixed pin
+        # would give catalog k its own completeness denominator, which has no
+        # defined semantics (a K >= 2 schechter mixture is HOMOGENEOUS --
+        # same-family fits with EQUAL offsets, enforced by the CLI resolver).
+        for _key in (fixed_parameter_values or {}):
+            if _key != "M_faint_offset" and _survey_base_name(
+                    _key) == "M_faint_offset":
+                raise ValueError(
+                    f"fixed value for '{_key}': M_faint_offset is ONE "
+                    "protocol constant per run (a single completeness "
+                    "denominator shared by every catalog), so per-catalog "
+                    "offsets are refused; pin the shared 'M_faint_offset' "
+                    "unsuffixed.")
         # M_faint_offset is PINNED, never sampled, so it has no bounds to be
-        # validated against -- and the fit-side and JSON-side positivity checks
-        # do not see a bare --fixed_parameter_values entry.  A non-positive
-        # offset puts the faint cutoff BRIGHT-ward of M*, inverting the
-        # completeness denominator.
+        # validated against -- and the fit-side and JSON-side legality checks
+        # do not see a bare --fixed_parameter_values entry.  Negative offsets
+        # are legal (a BRIGHT-truncated modelled population); the floor and
+        # finiteness rule is the ONE shared wall in redshift/selection.py.
         _offset = (fixed_parameter_values or {}).get("M_faint_offset")
-        if _offset is not None and not float(_offset) > 0.0:
-            raise ValueError(
-                f"Fixed value for M_faint_offset must be positive; got "
-                f"{_offset}: the Schechter faint cutoff "
-                "M_faint = Mstar_hat + M_faint_offset lies FAINT-ward of M*.")
+        if _offset is not None:
+            from darksirens.redshift.selection import _validate_m_faint_offset
+
+            _validate_m_faint_offset(_offset, "fixed_parameter_values")
 
     #: 1-based catalog numbers running the parametric selection completeness.
     #: The magnitude-fit anchoring rule below is stated against THIS tuple (not
