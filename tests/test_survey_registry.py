@@ -331,14 +331,21 @@ def test_registry_and_fiducial_table_cover_the_same_fields():
 
 
 def test_registry_declares_the_block_order_and_bounds():
-    # Selection labels (M0hat, sigma_M) appended LAST so pre-existing
-    # coordinate indices never move; they sample only under c_mode="selection".
+    # Selection labels appended LAST so pre-existing coordinate indices never
+    # move: the gaussian pair (M0hat, sigma_M) samples only under
+    # c_mode="selection", the schechter pair (Mstar_hat, alpha) only under
+    # c_mode="selection" WITH selection_family="schechter", so at most one
+    # pair is ever live and the block length is unchanged either way.
     assert [spec.label for spec in _SURVEY_BLOCK] == [
         "log10n0", "delta", "b_miss", "sigma_kde", "M0hat", "sigma_M",
+        "Mstar_hat", "alpha",
     ]
     assert [(spec.lower, spec.upper) for spec in _SURVEY_BLOCK] == [
         (-4.0, -1.0), (-3.0, 3.0), (0.0, 3.0), (0.0, 0.05),
         (-23.0, -18.0), (0.05, 3.0),
+        # alpha's floor is truncation with margin off the alpha = -1
+        # singularity of the pinned regularized upper-gamma ratio.
+        (-23.0, -18.0), (-0.95, 0.0),
     ]
 
 
