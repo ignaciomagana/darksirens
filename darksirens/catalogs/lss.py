@@ -128,13 +128,23 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
         # against the --selection_fit template.
         _fid.update({k: _diag[k] for k in _diag
                      if k.startswith("selection_kcorr_c")})
+        # Stratified-base stamps: per-stratum thetas (selection_s{j}_*) and
+        # the stratum count are floats; the stratum-map sha256 is a STRING
+        # and must bypass the float coercion below.  Compared in the CLI
+        # against the run's multi-stratum fit + --stratum_map.
+        import re as _re
+
+        _fid.update({k: _diag[k] for k in _diag
+                     if _re.match(r"selection_s\d+_", k)
+                     or k == "selection_n_strata"})
         # Non-numeric provenance: the luminosity-function family of a
-        # selection base is a NAME, not a value, and must not reach the
-        # float() coercion below.  The CLI compares it against the run's
-        # family before it compares any theta (the two bases differ by the
-        # whole LF shape).
-        _fid_str = {k: str(_diag[k]) for k in ("selection_family",)
-                    if k in _diag}
+        # selection base is a NAME (and the stratum-map hash a hex digest),
+        # not a value, and must not reach the float() coercion below.  The
+        # CLI compares the family against the run's family before it
+        # compares any theta (the two bases differ by the whole LF shape).
+        _fid_str = {k: str(_diag[k]) for k in _diag
+                    if k in ("selection_family",
+                             "selection_stratum_map_sha256")}
         if _fid or _fid_str:
             print(f"    - Q_LSS build fiducials: {_fid | _fid_str}")
         # Carry the build-time conditioning values out so the CLI can enforce

@@ -306,11 +306,14 @@ def test_alpha_domain_is_refused_everywhere(tmp_path):
     with pytest.raises(ValueError, match="alpha"):
         SelectionFit(family="schechter", m_lim=21.5, Mstar_hat=-20.0,
                      alpha=-2.5, M_faint_offset=5.0, cov=np.eye(2))
-    with pytest.raises(ValueError, match="outside the sampled bounds"):
+    # The all-or-nothing anchoring rule wants Mstar_hat anchored too; the
+    # bounds refusal under test fires per label, before that rule.
+    with pytest.raises(ValueError, match="outside its sampling bounds"):
         build_parameter_space(
             "powerlaw+peak", True, True, False, universe_model="dark_sirens",
             use_lss=False, c_mode="selection", selection_family="schechter",
-            selection_prior={"alpha": (-2.5, 0.01)})
+            selection_prior={"Mstar_hat": (-20.0, 0.05),
+                             "alpha": (-2.5, 0.01)})
 
     # A real-catalog slope loads, constructs and priors cleanly.
     ok = dict(bad, alpha=-1.21)
@@ -318,7 +321,8 @@ def test_alpha_domain_is_refused_everywhere(tmp_path):
     build_parameter_space(
         "powerlaw+peak", True, True, False, universe_model="dark_sirens",
         use_lss=False, c_mode="selection", selection_family="schechter",
-        selection_prior={"alpha": (-1.21, 0.03)})
+        selection_prior={"Mstar_hat": (-20.0, 0.05),
+                         "alpha": (-1.21, 0.03)})
 
 
 def _schechter_space(**kw):
@@ -571,9 +575,12 @@ def test_qtable_family_mismatch_is_fatal():
 
     class Opts:
         selection_family = "schechter"
-        selection_fit_theta = {"m_lim": 21.5, "Mstar_hat": -20.31,
-                               "alpha": -0.68, "M_faint_offset": 5.0}
-        selection_fit_kcorr = ()
+        selection_fits = [{
+            "family": "schechter",
+            "theta": {"m_lim": 21.5, "Mstar_hat": -20.31,
+                      "alpha": -0.68, "M_faint_offset": 5.0},
+            "k_corr_coeffs": [], "strata_fit": None,
+            "stratum_map_sha256": None}]
 
     with pytest.raises(SystemExit):                 # gaussian table, schechter run
         cli._check_selection_qtable_theta([gauss_fid], Opts())
@@ -591,8 +598,11 @@ def test_qtable_family_mismatch_is_fatal():
     # A pre-stamp gaussian table still verifies against a gaussian run.
     class GOpts:
         selection_family = "gaussian"
-        selection_fit_theta = {"m_lim": 21.0, "M0hat": -20.9, "sigma_M": 0.9}
-        selection_fit_kcorr = ()
+        selection_fits = [{
+            "family": "gaussian",
+            "theta": {"m_lim": 21.0, "M0hat": -20.9, "sigma_M": 0.9},
+            "k_corr_coeffs": [], "strata_fit": None,
+            "stratum_map_sha256": None}]
 
     cli._check_selection_qtable_theta(
         [{k: v for k, v in gauss_fid.items() if k != "selection_family"}],
@@ -607,8 +617,7 @@ def test_family_mismatch_beats_the_no_fit_ablation_escape_hatch():
 
     class NoFit:                       # the sanctioned wide-open ablation
         selection_family = "gaussian"
-        selection_fit_theta = None
-        selection_fit_kcorr = ()
+        selection_fits = [None]
 
     schech_fid = {"path": "qt.h5", "selection_family": "schechter",
                   "selection_m_lim": 21.5, "selection_Mstar_hat": -20.31,
@@ -658,8 +667,10 @@ def test_selection_fit_pins_protocol_constant_over_explicit_fixed_value():
 
     class Opts:
         selection_family = "schechter"
-        selection_fit_theta = theta
-        selection_fit_kcorr = ()
+        selection_fits = [{
+            "family": "schechter", "theta": theta,
+            "k_corr_coeffs": [], "strata_fit": None,
+            "stratum_map_sha256": None}]
 
     with pytest.raises(SystemExit):
         cli._check_selection_qtable_theta(

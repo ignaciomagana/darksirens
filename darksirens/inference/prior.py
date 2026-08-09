@@ -636,9 +636,19 @@ def build_parameter_space(
     selection_family
         Luminosity-function family of the ``c_mode="selection"`` curve:
         ``"gaussian"`` (the default; samples ``M0hat``/``sigma_M``) or
-        ``"schechter"`` (samples ``Mstar_hat``/``alpha``).  A SCALAR, not a
-        per-catalog sequence, because ``c_mode="selection"`` is already refused
-        for ``K >= 2`` mixtures below.
+        ``"schechter"`` (samples ``Mstar_hat``/``alpha``).  A SCALAR shared
+        by every catalog running the selection mode -- mixed-family mixtures
+        are refused at the CLI resolver (one fit family per run), so a
+        per-catalog family cannot arise here.
+    selection_prior
+        Magnitude-fit Gaussian priors ``{label: (loc, scale)}`` that flip the
+        SAMPLED selection labels from flat to a truncated normal.  Labels are
+        per catalog: ``M0hat``/``sigma_M`` for catalog 1 and
+        ``M0hat_c{k}``/``sigma_M_c{k}`` for catalogs ``2..K``, each anchored by
+        THAT catalog's own offline fit.  All-or-nothing: a run that anchors any
+        selection label must anchor every sampled one (a partially anchored
+        mixture leaves an unconstrained completeness nuisance); ``None`` leaves
+        every catalog flat within bounds (the wide-open ablation).
     """
     if prior_overrides is None:
         prior_overrides = {}
@@ -690,16 +700,14 @@ def build_parameter_space(
                 f"Fixed value for M_faint_offset must be positive; got "
                 f"{_offset}: the Schechter faint cutoff "
                 "M_faint = Mstar_hat + M_faint_offset lies FAINT-ward of M*.")
-    if n_catalogs >= 2 and any(m == "selection" for m in c_mode_by_cat):
-        # Fail-closed until per-catalog selection fits exist: the _c{k}
-        # labels would sample FLAT (the single-fit selection_prior anchors
-        # base labels only) and the theta-provenance loop would compare every
-        # catalog's table against one fit -- catalog k's selection would be
-        # silently unanchored.
-        raise ValueError(
-            "c_mode='selection' is single-catalog for now: a K>=2 mixture "
-            "needs one magnitude fit (and one anchored theta prior) per "
-            "catalog, which the selection-fit plumbing does not yet carry.")
+
+    #: 1-based catalog numbers running the parametric selection completeness.
+    #: The magnitude-fit anchoring rule below is stated against THIS tuple (not
+    #: against n_catalogs), so a future per-catalog c_mode needs no change here.
+    selection_catalogs = tuple(
+        k for k in range(1, n_catalogs + 1)
+        if c_mode_by_cat[k - 1] == "selection"
+    )
 
     def _survey_inactive_reason(label):
         """:class:`_Inert` for a (possibly ``_c{k}``-suffixed) survey label.
@@ -1160,22 +1168,66 @@ def build_parameter_space(
             raise ValueError(
                 f"selection_prior for '{lbl}' needs finite loc and positive "
                 f"scale, got ({loc}, {scale}).")
-        # The prior is a TRUNCATED normal: a center outside the sampled bounds
-        # puts the whole fit outside the support (e.g. a fitted alpha = -1.95
-        # against the -1.9 registry floor), which the PPF would silently pin to
-        # an edge instead of failing.
+        # The Gaussian is TRUNCATED to this label's bounds, and a fit center
+        # outside them freezes the parameter instead of refusing: the PPF
+        # evaluates ndtr at |z| >~ 40 on both edges, so Phi_a == Phi_b == 1
+        # and every unit-cube value maps to the same near-edge constant.  The
+        # >5-sd reach warning downstream cannot catch it (it fires on every
+        # legal anchored run, where the box is ~5 mag and the fit sd ~1e-2).
+        # Reachable per catalog now that heterogeneous tracers -- a bright
+        # cluster sample and a deep photo-z catalog -- share one registry box.
         _i = labels.index(lbl)
-        if not (lower[_i] <= loc <= upper[_i]):
+        if not (lower[_i] < loc < upper[_i]):
             raise ValueError(
-                f"selection_prior for '{lbl}' is centred at {loc}, which lies "
-                f"outside the sampled bounds [{lower[_i]}, {upper[_i]}]: the "
-                f"prior is truncated to those bounds, so the fit's own "
-                f"optimum would carry zero prior mass. Widen the bounds via "
-                f"--prior_overrides, or refit -- except for 'alpha', whose "
-                f"lower bound is the alpha > -2 DOMAIN of the pinned "
-                f"c_sel_schechter and is refused below "
-                f"{_ALPHA_MIN} however it is set.")
+                f"selection_prior centers '{lbl}' at {loc}, outside its "
+                f"sampling bounds [{lower[_i]}, {upper[_i]}]: the truncated "
+                f"Gaussian would collapse to a single constant at the nearer "
+                f"bound, silently freezing this catalog's completeness base "
+                f"instead of sampling the fit.\nWiden the box to bracket the "
+                f"fit, e.g. --prior_overrides '{{\"{lbl}\": "
+                f"[{min(lower[_i], loc - 5.0 * scale):g}, "
+                f"{max(upper[_i], loc + 5.0 * scale):g}]}}', or check that "
+                f"this catalog's darksirens_fit_selection JSON is the right "
+                f"one for it. Exception: 'alpha's lower bound is the "
+                f"alpha > -2 DOMAIN of the pinned c_sel_schechter and is "
+                f"refused below {_ALPHA_MIN} however it is set."
+            )
         kind_map[lbl] = ("normal", float(loc), float(scale))
+
+    # Fail-closed anchoring: with ANY magnitude fit in play, EVERY sampled
+    # selection label must carry its own fit-anchored prior.  A partially
+    # anchored mixture is the silent failure this replaces the old K>=2
+    # refusal with: catalog k's M0hat_c{k}/sigma_M_c{k} would sample FLAT
+    # across the 5-mag truncation box while catalog 1 sits inside ~1e-2 mag
+    # of its fit, so the mixture's whole missing-galaxy budget is set by an
+    # unconstrained nuisance that no data in the run constrains.  Supplying
+    # NO fit at all stays legal for every K (the deliberate wide-open
+    # ablation, identical to the single-catalog behaviour).
+    if selection_prior:
+        unanchored = [
+            lbl
+            for k in selection_catalogs
+            # Family-driven label set (M0hat/sigma_M vs Mstar_hat/alpha), so
+            # a schechter run's anchoring rule covers ITS sampled labels.
+            for lbl in (
+                f"{base}{'' if k == 1 else f'_c{k}'}"
+                for base in _sampled_bases
+            )
+            if lbl in labels and lbl not in selection_prior
+        ]
+        if unanchored:
+            raise ValueError(
+                f"selection_prior anchors only part of this run's "
+                f"c_mode='selection' block: {unanchored} are SAMPLED but "
+                f"carry no magnitude-fit prior, so they would sample flat "
+                f"across their truncation bounds while the anchored labels "
+                f"sit within the fit's ~1e-2 mag uncertainty -- the mixture's "
+                f"missing-galaxy budget would be set by an unconstrained "
+                f"nuisance.\nPass one darksirens_fit_selection JSON PER "
+                f"CATALOG (--selection_fit fitA.json,fitB.json, in "
+                f"--survey_path order), or drop --selection_fit entirely for "
+                f"the wide-open ablation on every catalog."
+            )
     prior_kinds = [kind_map.get(lbl, ("uniform", None, None)) for lbl in labels]
 
     return (

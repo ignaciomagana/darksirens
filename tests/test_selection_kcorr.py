@@ -11,6 +11,7 @@ M0hat by the mean K -- the failure mode real-catalog ingestion must alarm on;
 """
 
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -141,16 +142,17 @@ def test_qtable_kcorr_firewall_mismatch_is_fatal():
            "selection_M0hat": -20.9, "selection_sigma_M": 0.9,
            "selection_kcorr_c1": 0.39, "selection_kcorr_c2": 0.11}
 
-    class Opts:
-        selection_fit_theta = {"m_lim": 21.0, "M0hat": -20.9, "sigma_M": 0.9}
-        selection_fit_kcorr = (0.39,)          # count mismatch vs the stamp
+    def _opts(kcorr):
+        # The firewall reads ONE per-catalog fit record per Q-table fiducial.
+        return SimpleNamespace(selection_fits=[{
+            "catalog": 1, "path": "fit.json",
+            "theta": {"m_lim": 21.0, "M0hat": -20.9, "sigma_M": 0.9},
+            "k_corr_coeffs": list(kcorr), "strata_fit": None,
+            "strata_struct": None, "stratum_map": None,
+            "stratum_map_sha256": None, "prior": {}}])
 
-    with pytest.raises(SystemExit):
-        cli._check_selection_qtable_theta([fid], Opts())
-
-    Opts.selection_fit_kcorr = (0.39, 0.11)    # exact match passes
-    cli._check_selection_qtable_theta([fid], Opts())
-
-    Opts.selection_fit_kcorr = (0.39, 0.12)    # value mismatch
-    with pytest.raises(SystemExit):
-        cli._check_selection_qtable_theta([fid], Opts())
+    with pytest.raises(SystemExit):            # count mismatch vs the stamp
+        cli._check_selection_qtable_theta([fid], _opts((0.39,)))
+    cli._check_selection_qtable_theta([fid], _opts((0.39, 0.11)))   # match
+    with pytest.raises(SystemExit):            # value mismatch
+        cli._check_selection_qtable_theta([fid], _opts((0.39, 0.12)))

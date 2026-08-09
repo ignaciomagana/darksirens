@@ -593,31 +593,49 @@ def _resolve_selection_fit_pins(sel, family, fixed_parameter_values):
 
 
 def _check_selection_qtable_theta(q_fiducials, opts):
-    """Fail-closed theta provenance of c_mode=selection Q tables.
+    """Fail-closed theta provenance of c_mode=selection Q tables, PER CATALOG.
+
+    ``q_fiducials`` is one entry per catalog in catalog order; catalog k's
+    table is checked against catalog k's OWN magnitude fit
+    (``opts.selection_fits[k-1]``).  Checking every table against one fit was
+    the single-catalog assumption this replaces: with per-catalog fits, a
+    catalog-2 table built on catalog 1's theta must be caught, and a legal
+    "Q on catalog 1 only" config must still pass.
 
     theta is SAMPLED by design (exempt from the pinned-to-build rule, like
     H0), but a table's FIXED C_sel base must come from the SAME offline fit
-    that centers this run's theta prior: first the luminosity-function FAMILY
-    (the two bases differ by the whole LF shape, not a parameter), then that
-    family's theta compared to 1e-6, then the K(z) template compared
-    elementwise INCLUDING the coefficient count (a pre-K table -- no
-    ``selection_kcorr_c*`` stamps -- is only consistent with a K = 0 fit).
+    that centers that catalog's theta prior: first the luminosity-function
+    FAMILY (the two bases differ by the whole LF shape, not a parameter),
+    then that family's theta compared to 1e-6, then the K(z) template
+    compared elementwise INCLUDING the coefficient count (a pre-K table --
+    no ``selection_kcorr_c*`` stamps -- is only consistent with a K = 0 fit).
 
-    The FAMILY check runs before the no---selection_fit escape hatch, because
-    that hatch only widens theta WITHIN the run's family: the run's family is
-    itself set by --selection_fit alone, so a schechter-stamped table with no
-    fit means the likelihood forms a GAUSSIAN C_sel against a schechter fixed
+    The FAMILY check runs before the no-fit escape hatch, because that hatch
+    only widens theta WITHIN the run's family: the run's family is itself
+    set by --selection_fit alone, so a schechter-stamped table with no fit
+    means the likelihood forms a GAUSSIAN C_sel against a schechter fixed
     budget -- a mismatch no configuration can make consistent, and therefore
     an error rather than the sanctioned wide-open ablation.  Only the
-    same-family, no-fit case warns.
+    same-family, no-fit case warns (deliberate-ablation escape hatch).
 
-    ``opts.selection_fit_theta`` is the EFFECTIVE theta (the fit's, with any
+    Each fit record's ``theta`` is the EFFECTIVE theta (the fit's, with any
     --fixed_parameter_values pin folded in), so an overridden m_lim is
     compared against the stamp the likelihood will actually contradict.
     """
     from darksirens.redshift.selection import SELECTION_THETA_FIELDS
 
-    for _fid in q_fiducials:
+    fits = getattr(opts, "selection_fits", None)
+    if fits is None:
+        fits = [None] * len(q_fiducials)
+    fits = list(fits)
+    if len(fits) != len(q_fiducials):
+        _fatal(
+            f"selection-fit provenance: {len(fits)} per-catalog fits against "
+            f"{len(q_fiducials)} Q-table fiducial records; both are indexed "
+            "by catalog order, so a length mismatch means the theta firewall "
+            "would compare a table against another catalog's fit."
+        )
+    for _k, (_fid, _fit) in enumerate(zip(q_fiducials, fits), start=1):
         # Activation on EITHER family's magnitude center: keying on
         # selection_M0hat alone would silently skip every schechter table.
         if not _fid or not ({"selection_M0hat", "selection_Mstar_hat"}
@@ -627,12 +645,13 @@ def _check_selection_qtable_theta(q_fiducials, opts):
         # built before the family tag existed.
         _tab_family = str(_fid.get("selection_family") or (
             "schechter" if "selection_Mstar_hat" in _fid else "gaussian"))
-        _run_family = getattr(opts, "selection_family", None) or "gaussian"
-        _theta = getattr(opts, "selection_fit_theta", None)
+        _run_family = (str(_fit.get("family", "gaussian")) if _fit
+                       else getattr(opts, "selection_family", None)
+                       or "gaussian")
         if _tab_family != _run_family:
             _fatal(
-                f"Q table {_fid.get('path')}'s fixed C_sel base is a "
-                f"'{_tab_family}' curve but this run forms the "
+                f"catalog {_k}: Q table {_fid.get('path')}'s fixed C_sel "
+                f"base is a '{_tab_family}' curve but this run forms the "
                 f"'{_run_family}' family in-likelihood; the two completeness "
                 "bases differ by the whole LF shape, not by a parameter, so "
                 "the table's fixed (1 - C_sel) dN_exp budget and the sampled "
@@ -641,43 +660,51 @@ def _check_selection_qtable_theta(q_fiducials, opts):
                    f"there is no run in which a '{_tab_family}' table is "
                    "consistent without one: pass the --selection_fit this "
                    "table was built with."
-                   if _theta is None else
+                   if _fit is None else
                    " Rebuild the table from this fit (or point "
                    "--selection_fit at the fit the table was built with).")
             )
-        if _theta is None:
+        if _fit is None:
             _warn(
-                f"Q table was built on a c_mode=selection '{_tab_family}' "
-                "base at theta_hat=("
+                f"catalog {_k}: Q table was built on a c_mode=selection "
+                f"'{_tab_family}' base at theta_hat=("
                 + ", ".join(
                     f"{_n}={float(_fid[f'selection_{_n}']):.4f}"
                     for _n in SELECTION_THETA_FIELDS[_tab_family]
                     if f"selection_{_n}" in _fid)
-                + ") but no --selection_fit anchors this run's theta prior: "
+                + f") but no --selection_fit entry anchors catalog {_k}'s "
+                "theta prior: "
                 "the table's fixed base and the wide-open sampled theta are "
                 "only consistent as a deliberate ablation."
             )
             continue
+        _theta = _fit["theta"]
+        _run_k = tuple(_fit["k_corr_coeffs"] or ())
+        _run_strata = [tuple(s) for s in (_fit["strata_fit"] or ())] or None
+        _run_sha = _fit["stratum_map_sha256"] or ""
+        # Family-driven key set: a schechter base is verified on
+        # (m_lim, Mstar_hat, alpha, M_faint_offset), a gaussian one on
+        # (m_lim, M0hat, sigma_M).
         for _name in SELECTION_THETA_FIELDS[_run_family]:
             _key = f"selection_{_name}"
             if _key not in _fid:
                 _fatal(
-                    f"Q table {_fid.get('path')} carries no {_key} stamp, so "
-                    f"its fixed '{_run_family}' C_sel base cannot be verified "
-                    "against --selection_fit. Rebuild the table with the "
-                    "current darksirens_build_lognormal_completion."
+                    f"catalog {_k}: Q table {_fid.get('path')} carries no "
+                    f"{_key} stamp, so its fixed '{_run_family}' C_sel base "
+                    "cannot be verified against --selection_fit. Rebuild the "
+                    "table with the current "
+                    "darksirens_build_lognormal_completion."
                 )
             if abs(_theta[_name] - float(_fid[_key])) > 1e-6:
                 _fatal(
-                    f"Q table {_fid.get('path')} was built at "
+                    f"catalog {_k}: Q table {_fid.get('path')} was built at "
                     f"{_name}={float(_fid[_key]):.6f} but --selection_fit "
                     f"gives {_name}={_theta[_name]:.6f}: the table's fixed "
-                    "C_sel base and this run's theta prior must come from "
-                    "the SAME darksirens_fit_selection output. Rebuild the "
-                    "table with the current fit (or point --selection_fit "
+                    "C_sel base and this catalog's theta prior must come "
+                    "from the SAME darksirens_fit_selection output. Rebuild "
+                    "the table with the current fit (or point --selection_fit "
                     "at the fit the table was built with)."
                 )
-        _run_k = tuple(getattr(opts, "selection_fit_kcorr", None) or ())
         _tab_k = []
         _j = 1
         while f"selection_kcorr_c{_j}" in _fid:
@@ -687,12 +714,57 @@ def _check_selection_qtable_theta(q_fiducials, opts):
         if len(_tab_k) != len(_run_k) or any(
                 abs(a - b) > 1e-9 for a, b in zip(_tab_k, _run_k)):
             _fatal(
-                f"Q table {_fid.get('path')} was built with K(z) "
-                f"coefficients {list(_tab_k)} but --selection_fit carries "
-                f"{list(_run_k)}: the fixed C_sel base and the run's "
+                f"catalog {_k}: Q table {_fid.get('path')} was built with "
+                f"K(z) coefficients {list(_tab_k)} but --selection_fit "
+                f"carries {list(_run_k)}: the fixed C_sel base and the run's "
                 "selection model must share the SAME K-correction "
                 "template. Rebuild the table from the current fit."
             )
+        # Stratified base: the run's fit strata and stratum map must match
+        # what the table was built with, per stratum and by map hash -- a
+        # mismatch means the table's per-pixel base rows disagree with the
+        # numerator's routing.  A stratified RUN against an unstamped
+        # (single-stratum-base) table, or vice versa, is equally fatal.
+        _tab_n = int(_fid.get("selection_n_strata", 0) or 0)
+        if _run_strata and not _tab_n:
+            _fatal(
+                f"catalog {_k}: Q table {_fid.get('path')} was built on a "
+                "SINGLE-stratum C_sel base but this run's --selection_fit is "
+                "stratified: rebuild the table with --stratum-map (the "
+                "stratified builder base) or run with the single-stratum fit."
+            )
+        if _tab_n and not _run_strata:
+            _fatal(
+                f"catalog {_k}: Q table {_fid.get('path')} was built on a "
+                f"stratified C_sel base ({_tab_n} strata) but this run "
+                "carries a single-stratum --selection_fit: point "
+                "--selection_fit/--stratum_map at the fit and map the table "
+                "was built with."
+            )
+        if _run_strata and _tab_n:
+            if _tab_n != len(_run_strata):
+                _fatal(
+                    f"catalog {_k}: Q table {_fid.get('path')}: {_tab_n} "
+                    f"strata stamped but the run's fit carries "
+                    f"{len(_run_strata)}."
+                )
+            for _j, (_ml, _m0, _sg) in enumerate(_run_strata):
+                for _nm, _val in (("m_lim", _ml), ("M0hat", _m0),
+                                  ("sigma_M", _sg)):
+                    _tv = float(_fid.get(f"selection_s{_j}_{_nm}", np.nan))
+                    if not np.isfinite(_tv) or abs(_tv - _val) > 1e-6:
+                        _fatal(
+                            f"catalog {_k}: Q table {_fid.get('path')}: "
+                            f"stratum {_j} {_nm}={_tv:.6f} but the run's fit "
+                            f"gives {_val:.6f}; rebuild from the current fit."
+                        )
+            _tab_sha = str(_fid.get("selection_stratum_map_sha256", ""))
+            if _tab_sha != str(_run_sha):
+                _fatal(
+                    f"catalog {_k}: Q table {_fid.get('path')} was built with "
+                    "a different stratum map (sha256 mismatch); the per-pixel "
+                    "base routing must be identical between build and run."
+                )
 
 
 def format_selection_guard_summary(
@@ -1074,23 +1146,34 @@ def build_parser():
                          "within bounds otherwise) and m_lim is a fixed "
                          "truncation datum settable via "
                          "--fixed_parameter_values."))
-    g.add_argument("--selection_fit", default=None,
+    g.add_argument("--selection_fit", default=None, metavar="JSON[,JSON...]",
                    help=("selection_fit.json from darksirens_fit_selection "
-                         "(c_mode=selection only). The fit DECLARES the "
-                         "luminosity-function family: gaussian (sampled "
-                         "M0hat/sigma_M) or schechter (sampled "
+                         "(c_mode=selection only), ONE PER CATALOG as a "
+                         "comma-separated list in --survey_path order (a "
+                         "single path for a single catalog). Each fit "
+                         "DECLARES the luminosity-function family: gaussian "
+                         "(sampled M0hat/sigma_M) or schechter (sampled "
                          "Mstar_hat/alpha, which additionally pins the "
                          "M_faint_offset protocol constant -- a "
                          "--fixed_parameter_values entry may restate it but "
-                         "never change it). Its theta_hat "
-                         "becomes the center and its marginal Laplace sds the "
-                         "widths of truncated-normal priors on those sampled "
-                         "labels, and m_lim is pinned to the fitted stratum's "
-                         "datum unless --fixed_parameter_values overrides it. "
-                         "Any --lss_completion table must have been built with "
-                         "the SAME fit (family + theta_hat stamped and "
-                         "hard-checked at load). Omit for flat-within-bounds "
-                         "selection priors (the wide-open ablation)."))
+                         "never change it); every fit in a run must declare "
+                         "the SAME family. Catalog k's fit anchors ITS OWN "
+                         "labels: theta_hat becomes the center and the "
+                         "marginal Laplace sds the widths of truncated-normal "
+                         "priors on that family's sampled labels (e.g. "
+                         "M0hat_c{k}/sigma_M_c{k} for gaussian catalogs "
+                         "k>=2), and m_lim (m_lim_c{k}) is pinned "
+                         "to that fit's datum unless --fixed_parameter_values "
+                         "overrides it. A single path is NEVER broadcast "
+                         "across catalogs. Use \"\" as a placeholder for a "
+                         "catalog with no fit -- fatal while that catalog "
+                         "runs c_mode=selection, since its theta would sample "
+                         "flat while the others are anchored. Catalog k's "
+                         "--lss_completion table must have been built with "
+                         "catalog k's fit (family + theta_hat stamped and "
+                         "hard-checked at load). Omit the flag entirely for "
+                         "flat-within-bounds selection priors on every "
+                         "catalog (the wide-open ablation)."))
     g.add_argument("--stratum_map", default=None,
                    help=("HDF5 file with a full-sky 'stratum_map' dataset "
                          "(RING, at the SURVEY's nside) assigning every pixel "
@@ -1101,7 +1184,9 @@ def build_parser():
                          "the SAMPLED common-mode (M0hat, sigma_M), and the "
                          "global normalizer decomposes the empty-pixel "
                          "budget per stratum. Off-footprint pixels must "
-                         "carry the map builder's documented policy label."))
+                         "carry the map builder's documented policy label. "
+                         "Single-catalog only (a K>=2 mixture cannot route "
+                         "per-catalog stratum maps)."))
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
                          "--save_path, and exit before building the likelihood."))
@@ -1263,6 +1348,67 @@ def _normalize_multitracer_paths(opts):
     opts.lss_completions = [v if v not in (None, "") else None for v in lss_values]
     opts.survey_path = survey_paths[0] if survey_paths else None
     opts.lss_completion = opts.lss_completions[0] if opts.lss_completions else None
+
+    _normalize_selection_fit_paths(opts)
+
+
+def _normalize_selection_fit_paths(opts):
+    """--selection_fit -> opts.selection_fit_paths, one entry per catalog.
+
+    Comma-separated, positionally aligned with --survey_path; "" is a
+    placeholder for a catalog with no fit.  A single path is NEVER broadcast
+    across K catalogs: each catalog's magnitude fit is a property of ITS
+    survey's depth and luminosity function, and sharing one would pin every
+    catalog's completeness base to the first catalog's selection -- the same
+    reasoning that makes --lss_completion per catalog.
+    """
+    raw = getattr(opts, "selection_fit", None)
+    if raw in (None, ""):
+        opts.selection_fit_paths = [None] * opts.n_catalogs
+        # Still assert the map pairing: --stratum_map with NO fit anywhere
+        # must be refused pre-load too, or the docstring's "before any
+        # catalog is read" promise silently narrows to fit-carrying runs.
+        _check_stratum_map_pairing(opts)
+        return
+    entries = [s.strip() for s in str(raw).split(",")]
+    if len(entries) != opts.n_catalogs:
+        _fatal(
+            f"--selection_fit has {len(entries)} comma-separated entries but "
+            f"n_catalogs={opts.n_catalogs}; pass exactly one magnitude fit "
+            "per --survey_path, in the same order (use \"\" as a placeholder "
+            "for a catalog with no fit). A single fit is not broadcast: it "
+            "would pin every catalog's completeness base to the first "
+            "catalog's selection."
+        )
+    opts.selection_fit_paths = [e or None for e in entries]
+    _check_stratum_map_pairing(opts)
+
+
+def _check_stratum_map_pairing(opts):
+    """--stratum_map is legal only alongside a SINGLE-catalog magnitude fit.
+
+    Both checks are pure opts arithmetic, so they run here (pre-load, first
+    thing in ``main``) rather than at fit-resolution time: a mixture must be
+    refused before any catalog is read, not after.  Which strata a fit
+    actually carries is only knowable once the JSON is opened, so the
+    single-stratum-fit-with-a-map direction stays in ``_resolve_selection_fits``.
+    """
+    if not getattr(opts, "stratum_map", None):
+        return
+    if not any(p is not None for p in getattr(opts, "selection_fit_paths", ())):
+        _fatal("--stratum_map without --selection_fit: the stratum map only "
+               "routes a multi-stratum selection fit's per-stratum curves.")
+    if opts.n_catalogs >= 2:
+        # The full-sky map is attached to the SHARED data bundle while a K>=2
+        # mixture builds each catalog's views from its OWN bundle
+        # (likelihood/factory.py -> prepare_catalog_views), so the map would
+        # never reach catalog k's EMCatalog and its per-stratum empty-pixel
+        # budget would be missing.
+        _fatal("--stratum_map is single-catalog: a K>=2 mixture builds each "
+               "catalog's views from its own bundle, so the shared full-sky "
+               "stratum map never reaches catalog k and its per-stratum "
+               "empty-pixel budget would be missing. Use single-stratum fits "
+               "for a mixture, or run the stratified fit single-catalog.")
 
 
 def _resolve_catalog_sky_weighting(opts):
@@ -2125,6 +2271,222 @@ def _maybe_run_completion_validation(opts, data, prior_overrides, fixed_paramete
     return False
 
 
+def _selection_c_mode_by_catalog(opts):
+    """Per-catalog completeness mode.
+
+    --c_mode is a single choice today (one estimator for the run), so this
+    broadcasts; it accepts a sequence so that a future per-catalog flag needs
+    no change in the pairing rules below, which are all stated per catalog.
+    """
+    mode = getattr(opts, "c_mode", "per_pixel") or "per_pixel"
+    if isinstance(mode, str):
+        return (mode,) * int(getattr(opts, "n_catalogs", 1))
+    return tuple(str(m) for m in mode)
+
+
+def _resolve_selection_fits(opts, data, fixed_parameter_values):
+    """Load each catalog's --selection_fit and stamp the per-catalog state.
+
+    Stamps on ``opts`` (all length-n_catalogs, all JSON-serialisable so
+    settings.json records exactly what anchored the run):
+
+    * ``selection_fits``            -- per catalog record dict or None (the
+                                       SINGLE source of truth; the Q-table
+                                       theta firewall reads only this)
+    * ``selection_prior``           -- FLAT {suffixed label: (loc, sd)} for
+                                       build_parameter_space, or None
+    * ``selection_kcorr_by_catalog``  -- structural K(z) template per catalog
+    * ``selection_strata_by_catalog`` -- structural stratum offsets per catalog
+
+    and pins ``m_lim{sfx}`` per catalog in ``fixed_parameter_values``.
+
+    Also stamps ``opts.selection_family`` (SCALAR: the fits' shared
+    luminosity-function family, ``"gaussian"`` when no fit is given).  The
+    schechter family is single-catalog for now: its ``M_faint_offset``
+    protocol constant is pinned unsuffixed (one completeness denominator per
+    run), so per-catalog schechter anchoring has no defined semantics yet --
+    refused fail-closed below.
+    """
+    from darksirens.redshift.selection import (
+        SELECTION_SAMPLED_FIELDS,
+        load_selection_fit_strata,
+    )
+
+    modes = _selection_c_mode_by_catalog(opts)
+    # Always recorded in settings.json so post-processing rebuilds the SAME
+    # label ordering (the family gates which theta the survey block carries).
+    opts.selection_family = "gaussian"
+    paths = (getattr(opts, "selection_fit_paths", None)
+             or [None] * opts.n_catalogs)
+    _any_fit = any(p is not None for p in paths)
+    # The --stratum_map x (no fit) and --stratum_map x (K>=2) pairings fire
+    # pre-load in main(); re-asserted here so a direct call to the resolver is
+    # guarded identically.
+    _check_stratum_map_pairing(opts)
+
+    fits = []
+    for k, (path, mode) in enumerate(zip(paths, modes), start=1):
+        sfx = "" if k == 1 else f"_c{k}"
+        if path is None:
+            if mode == "selection" and _any_fit:
+                _others = [j for j, p in enumerate(paths, start=1)
+                           if p is not None]
+                _fatal(
+                    f"catalog {k} runs c_mode='selection' but --selection_fit "
+                    f"gives it no magnitude fit while catalog(s) {_others} "
+                    f"are anchored: its M0hat{sfx} / sigma_M{sfx} would "
+                    "sample flat across the truncation bounds while the "
+                    "anchored catalogs sit inside ~1e-2 mag of their fits, "
+                    "so this mixture's missing-galaxy budget would be set by "
+                    "an unconstrained nuisance. Pass one fit per catalog, or "
+                    "drop --selection_fit for the wide-open ablation on "
+                    "every catalog."
+                )
+            fits.append(None)
+            continue
+        if mode != "selection":
+            _fatal(f"--selection_fit entry {k} given but catalog {k} runs "
+                   f"--c_mode '{mode}': the fit parameterizes the "
+                   "c_mode=selection completeness only.")
+        _strata = load_selection_fit_strata(path)
+        _sel = _strata[0]     # reference stratum: prior center + m_lim datum
+        # The fit declares the luminosity-function family; the stratified
+        # sub-branch below is reachable for gaussian only (loader-enforced).
+        _family = str(_sel.get("family", "gaussian"))
+        if _family != "gaussian" and opts.n_catalogs >= 2:
+            _fatal(
+                f"catalog {k}: --selection_fit {path} declares the "
+                f"'{_family}' family, but a K>=2 mixture is gaussian-only "
+                "for now: the schechter M_faint_offset protocol constant is "
+                "pinned unsuffixed (one completeness denominator per run), "
+                "so per-catalog schechter anchoring has no defined "
+                "semantics yet. Run the schechter fit single-catalog, or "
+                "use gaussian fits for the mixture.")
+        opts.selection_family = _family
+        _map_sha = None
+        if len(_strata) > 1:
+            if not getattr(opts, "stratum_map", None):
+                _fatal(f"--selection_fit carries {len(_strata)} strata but no "
+                       "--stratum_map assigns pixels to them; pass the map "
+                       "the strata were defined on.")
+            # A prebuilt Q table is allowed with a stratified fit ONLY when
+            # it was built on the SAME stratified base (per-stratum thetas +
+            # stratum-map hash stamped); verified below in
+            # _check_selection_qtable_theta once the table fiducials load.
+            import hashlib as _hashlib
+            _h = _hashlib.sha256()
+            with open(opts.stratum_map, "rb") as _fmap:
+                for _chunk in iter(lambda: _fmap.read(1 << 20), b""):
+                    _h.update(_chunk)
+            _map_sha = _h.hexdigest()
+            # Common-mode + fixed offsets: stratum 0 is the reference (the
+            # sampled M0hat/sigma_M ARE its theta); stratum s carries the
+            # fixed, fit-measured offsets. The strata must share one K
+            # template -- the common mode is defined against a single curve.
+            for _s in _strata[1:]:
+                if tuple(_s["k_corr_coeffs"]) != tuple(_sel["k_corr_coeffs"]):
+                    _fatal("per-stratum K(z) templates differ inside "
+                           f"{path}; strata must share one template (refit "
+                           "with a common --k_corr_coeffs).")
+            _note = (f"stratified selection: {len(_strata)} strata; sampled "
+                     "(M0hat, sigma_M) = stratum "
+                     f"'{_sel.get('stratum', '0')}' common mode, offsets "
+                     "fixed at the fit values (measured at ~1e-3 mag from "
+                     "the full catalog)")
+            print(f"    - {_note}")
+        elif getattr(opts, "stratum_map", None):
+            _fatal("--stratum_map given but the --selection_fit carries a "
+                   "single stratum; drop the map or refit with --strata.")
+        _sd = np.sqrt(np.diag(np.asarray(_sel["cov"], dtype=float)))
+        # Prior centers, sds and the provenance theta are all FAMILY-DRIVEN,
+        # off the one table in redshift/selection.py, so the sd order can
+        # never drift from the covariance's row/column order.
+        _fields = SELECTION_SAMPLED_FIELDS[_family]
+        if k == 1:
+            # Folds every --fixed_parameter_values pin (m_lim; the schechter
+            # M_faint_offset protocol constant) into the EFFECTIVE theta the
+            # Q-table firewall compares.
+            _theta_eff = _resolve_selection_fit_pins(
+                _sel, _family, fixed_parameter_values)
+        else:
+            # k >= 2 is gaussian-only (refused above), so the only pin is
+            # the suffixed m_lim datum.
+            fixed_parameter_values.setdefault(
+                f"m_lim{sfx}", float(_sel["m_lim"]))
+            _theta_eff = {
+                "m_lim": float(fixed_parameter_values[f"m_lim{sfx}"]),
+                "M0hat": float(_sel["M0hat"]),
+                "sigma_M": float(_sel["sigma_M"]),
+            }
+        fits.append({
+            "catalog": k,
+            "path": str(path),
+            "family": _family,
+            "theta": _theta_eff,
+            "k_corr_coeffs": [float(c)
+                              for c in (_sel.get("k_corr_coeffs") or ())],
+            "strata_fit": ([[float(s["m_lim"]), float(s["M0hat"]),
+                             float(s["sigma_M"])] for s in _strata]
+                           if len(_strata) > 1 else None),
+            "strata_struct": ([[float(s["m_lim"]),
+                                float(s["M0hat"]) - float(_sel["M0hat"]),
+                                float(s["sigma_M"]) / float(_sel["sigma_M"])]
+                               for s in _strata] if len(_strata) > 1 else None),
+            "stratum_map": (str(opts.stratum_map)
+                            if len(_strata) > 1 else None),
+            "stratum_map_sha256": (_map_sha if len(_strata) > 1 else None),
+            "prior": {f"{f}{sfx}": [float(_sel[f]), float(_sd[i])]
+                      for i, f in enumerate(_fields)},
+        })
+        print(f"    - catalog {k} selection fit [{_family}]: {path} -- "
+              + ", ".join(f"{f}{sfx}={_sel[f]:.3f} ± {_sd[i]:.3f}"
+                          for i, f in enumerate(_fields))
+              + f", m_lim{sfx} pinned at "
+              f"{fixed_parameter_values[f'm_lim{sfx}']:.3f}")
+
+    # The three consumer views are DERIVED here, in one place, so they cannot
+    # drift from the per-catalog records they are projections of.
+    opts.selection_fits = fits
+    opts.selection_prior = {
+        lbl: tuple(v)
+        for f in fits if f for lbl, v in f["prior"].items()
+    } or None
+    opts.selection_kcorr_by_catalog = [
+        (tuple(f["k_corr_coeffs"]) or None) if f else None for f in fits
+    ]
+    opts.selection_strata_by_catalog = [
+        ([tuple(s) for s in f["strata_struct"]] if f and f["strata_struct"]
+         else None) for f in fits
+    ]
+
+    if not any(opts.selection_strata_by_catalog):
+        return
+    # Attach the full-sky stratum map to the data bundle so
+    # prepare_catalog_views can build the per-stratum empty-pixel budgets
+    # alongside the field-normalization inputs.  Single-catalog only (the
+    # K>=2 refusal above), so catalog 1's strata are the run's strata.
+    import h5py as _h5py
+    _struct = opts.selection_strata_by_catalog[0]
+    with _h5py.File(opts.stratum_map, "r") as _f:
+        if "stratum_map" not in _f:
+            _fatal(f"{opts.stratum_map}: no 'stratum_map' dataset.")
+        _smap = np.asarray(_f["stratum_map"], dtype=np.int32)
+    _npix_survey = 12 * int(data["nside"]) ** 2
+    if _smap.shape[0] != _npix_survey:
+        _fatal(
+            f"stratum map covers {_smap.shape[0]} pixels but the "
+            f"survey nside={data['nside']} sky has {_npix_survey}; "
+            "regenerate the map at the survey nside (RING).")
+    _n_strata_map = int(_smap.max()) + 1
+    if _smap.min() < 0 or _n_strata_map != len(_struct):
+        _fatal(
+            f"stratum map labels span [{int(_smap.min())}, "
+            f"{int(_smap.max())}] but the fit carries "
+            f"{len(_struct)} strata; every "
+            "pixel needs a label in [0, S) matching the fit.")
+    data["pixel_stratum_map"] = _smap
+
+
 def _resolve_single_catalog_marks(opts, data):
     # ── Parameter space ────────────────────────────────────────────
 
@@ -2196,102 +2558,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     opts.lss_completion_active_by_catalog = lss_completion_active_by_catalog
     opts.lss_completion_active = bool(lss_completion_active)
 
-    # Selection-fit Gaussian prior (c_mode=selection): theta_hat centers +
-    # marginal Laplace sds become truncated-normal priors on the SAMPLED
-    # M0hat/sigma_M, and the fitted stratum's m_lim pins the truncation datum
-    # unless the user overrides it explicitly.  Persisted on opts so
-    # post-processing (build_parameter_decoder) re-derives the SAME space.
-    opts.selection_prior = None
-    # Always recorded in settings.json so post-processing rebuilds the SAME
-    # label ordering (the family gates which theta the survey block carries).
-    opts.selection_family = "gaussian"
-    if getattr(opts, "stratum_map", None) and not getattr(
-            opts, "selection_fit", None):
-        _fatal("--stratum_map without --selection_fit: the stratum map only "
-               "routes a multi-stratum selection fit's per-stratum curves.")
-    if getattr(opts, "selection_fit", None):
-        if opts.c_mode != "selection":
-            _fatal("--selection_fit given but --c_mode is "
-                   f"'{opts.c_mode}': the fit parameterizes the "
-                   "c_mode=selection completeness only.")
-        from darksirens.redshift.selection import load_selection_fit_strata
-        _strata = load_selection_fit_strata(opts.selection_fit)
-        _sel = _strata[0]     # reference stratum: prior center + m_lim datum
-        # The fit declares the luminosity-function family; the stratified
-        # sub-branch below is reachable for gaussian only (loader-enforced).
-        opts.selection_family = str(_sel.get("family", "gaussian"))
-        if len(_strata) > 1:
-            if not getattr(opts, "stratum_map", None):
-                _fatal(f"--selection_fit carries {len(_strata)} strata but no "
-                       "--stratum_map assigns pixels to them; pass the map "
-                       "the strata were defined on.")
-            if getattr(opts, "lss_completion", None):
-                _fatal("stratified selection with a prebuilt Q table is not "
-                       "supported yet: the builder's C_sel base is single-"
-                       "stratum, so the table would carry the wrong fixed "
-                       "budget. Run without --lss_completion (homogeneous "
-                       "missing branch) until the stratified builder lands.")
-            # Common-mode + fixed offsets: stratum 0 is the reference (the
-            # sampled M0hat/sigma_M ARE its theta); stratum s carries the
-            # fixed, fit-measured offsets. Consistency of the shared K
-            # template across strata is enforced below.
-            for _s in _strata[1:]:
-                if tuple(_s["k_corr_coeffs"]) != tuple(_sel["k_corr_coeffs"]):
-                    _fatal("per-stratum K(z) templates differ inside "
-                           f"{opts.selection_fit}; strata must share one "
-                           "template (refit with a common --k_corr_coeffs).")
-            opts.selection_strata_struct = tuple(
-                (float(_s["m_lim"]),
-                 float(_s["M0hat"]) - float(_sel["M0hat"]),
-                 float(_s["sigma_M"]) / float(_sel["sigma_M"]))
-                for _s in _strata)
-            _note = (f"stratified selection: {len(_strata)} strata; sampled "
-                     "(M0hat, sigma_M) = stratum "
-                     f"'{_sel.get('stratum', '0')}' common mode, offsets "
-                     "fixed at the fit values (measured at ~1e-3 mag from "
-                     "the full catalog)")
-            print(f"    - {_note}")
-        elif getattr(opts, "stratum_map", None):
-            _fatal("--stratum_map given but the --selection_fit carries a "
-                   "single stratum; drop the map or refit with --strata.")
-        # Prior centers, pins and the Q-table provenance theta are all
-        # FAMILY-DRIVEN, off the one table in redshift/selection.py, so the sd
-        # order can never drift from the covariance's row/column order.
-        from darksirens.redshift.selection import SELECTION_SAMPLED_FIELDS
-        _fields = SELECTION_SAMPLED_FIELDS[opts.selection_family]
-        _sd = np.sqrt(np.diag(np.asarray(_sel["cov"], dtype=float)))
-        opts.selection_prior = {f: (float(_sel[f]), float(_sd[i]))
-                                for i, f in enumerate(_fields)}
-        # Fixed K(z) template of the fit (structural on SurveyParams via the
-        # decoder; empty tuple = K = 0, the pre-K behaviour, and the only
-        # legal value for a schechter fit).
-        opts.selection_fit_kcorr = tuple(_sel.get("k_corr_coeffs") or ())
-        opts.selection_fit_theta = _resolve_selection_fit_pins(
-            _sel, opts.selection_family, fixed_parameter_values)
-        if getattr(opts, "selection_strata_struct", None):
-            # Attach the full-sky stratum map to the data bundle so
-            # prepare_catalog_views can build the per-stratum empty-pixel
-            # budgets alongside the field-normalization inputs.
-            import h5py as _h5py
-            with _h5py.File(opts.stratum_map, "r") as _f:
-                if "stratum_map" not in _f:
-                    _fatal(f"{opts.stratum_map}: no 'stratum_map' dataset.")
-                _smap = np.asarray(_f["stratum_map"], dtype=np.int32)
-            _npix_survey = 12 * int(data["nside"]) ** 2
-            if _smap.shape[0] != _npix_survey:
-                _fatal(
-                    f"stratum map covers {_smap.shape[0]} pixels but the "
-                    f"survey nside={data['nside']} sky has {_npix_survey}; "
-                    "regenerate the map at the survey nside (RING).")
-            _n_strata_map = int(_smap.max()) + 1
-            if _smap.min() < 0 or _n_strata_map != len(
-                    opts.selection_strata_struct):
-                _fatal(
-                    f"stratum map labels span [{int(_smap.min())}, "
-                    f"{int(_smap.max())}] but the fit carries "
-                    f"{len(opts.selection_strata_struct)} strata; every "
-                    "pixel needs a label in [0, S) matching the fit.")
-            data["pixel_stratum_map"] = _smap
+    _resolve_selection_fits(opts, data, fixed_parameter_values)
 
     res = build_parameter_space(
         opts.pop_model,

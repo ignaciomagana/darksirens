@@ -59,10 +59,7 @@ from darksirens.catalogs.io import load_survey
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial
 from darksirens.redshift.completion import _precompute_grids, _kde_dndz_obs
-from darksirens.redshift.selection import (
-    SELECTION_THETA_FIELDS,
-    load_selection_fit_json,
-)
+from darksirens.redshift.selection import SELECTION_THETA_FIELDS
 from darksirens.redshift.lognormal_completion import (
     gaussian_correlation_spectrum,
     poisson_lognormal_map,
@@ -155,6 +152,66 @@ def _selection_theta_stamp(selection_fit):
     return {"selection_family": family,
             **{f"selection_{k}": float(selection_fit[k])
                for k in SELECTION_THETA_FIELDS[family]}}
+
+
+def _selection_cbar_fine_strata(selection_strata, cosmo):
+    """Per-stratum ``C_sel(zgrid; theta_hat_s)`` stack, (S, n_grid).
+
+    Each stratum's curve is evaluated at its OWN fitted theta (the builder
+    needs no common-mode decomposition -- that convention lives in the
+    sampled likelihood); the K(z) template is shared across strata (enforced
+    at the CLI).
+    """
+    return np.stack([_selection_cbar_fine(s, cosmo) for s in selection_strata])
+
+
+def _load_stratum_map(path, nside, n_strata):
+    """Load and validate a full-sky RING stratum map at the survey nside."""
+    import h5py
+
+    with h5py.File(path, "r") as f:
+        if "stratum_map" not in f:
+            raise ValueError(f"{path}: no 'stratum_map' dataset.")
+        smap = np.asarray(f["stratum_map"], dtype=np.int64)
+    n_pix = 12 * int(nside) ** 2
+    if smap.shape[0] != n_pix:
+        raise ValueError(
+            f"{path}: stratum map covers {smap.shape[0]} pixels but the "
+            f"survey nside={nside} sky has {n_pix}; regenerate the map at "
+            "the survey nside (RING).")
+    if smap.min() < 0 or int(smap.max()) + 1 != int(n_strata):
+        raise ValueError(
+            f"{path}: labels span [{int(smap.min())}, {int(smap.max())}] but "
+            f"the selection fit carries {n_strata} strata; every pixel needs "
+            "a label in [0, S).")
+    return smap
+
+
+def _stratum_map_sha256(path):
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _selection_strata_stamp(selection_strata, stratum_map_sha):
+    """Provenance stamps for a stratified selection base.
+
+    Flat scalar keys per stratum (the float whitelist machinery carries
+    them) plus the stratum-map file hash: the inference hard-errors when a
+    stratified run's fit strata or map differ from what the table was built
+    with -- the per-pixel base rows would silently disagree otherwise.
+    """
+    out = {"selection_n_strata": float(len(selection_strata)),
+           "selection_stratum_map_sha256": str(stratum_map_sha)}
+    for j, s in enumerate(selection_strata):
+        out[f"selection_s{j}_m_lim"] = float(s["m_lim"])
+        out[f"selection_s{j}_M0hat"] = float(s["M0hat"])
+        out[f"selection_s{j}_sigma_M"] = float(s["sigma_M"])
+    return out
 
 
 def _selection_kcorr_stamp(selection_fit):
@@ -266,6 +323,9 @@ def _build_completion_radial(
     lss_sigma=None,
     c_mode: str = "per_pixel",
     selection_fit=None,
+    selection_strata=None,
+    stratum_map=None,
+    stratum_map_sha=None,
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
@@ -362,7 +422,18 @@ def _build_completion_radial(
         fit = np.arange(n_pix)
         n_fit = int(fit.size)
         n_pix_total = int(np.round(4.0 * np.pi / apix))
-        if c_mode == "selection":
+        if c_mode == "selection" and selection_strata is not None:
+            # STRATIFIED base: one C_sel curve per stratum, routed per pixel
+            # by the stratum map -- mirrors the in-likelihood
+            # SurveyParams.selection_strata consumption, so the table's fixed
+            # base carries the same per-pixel budget the numerator does.
+            Cfine_s = _selection_cbar_fine_strata(selection_strata, cosmo)
+            Cu_s = np.stack([
+                np.clip(_bin_integral(cf * dN_exp_density) / exp_safe, 0.0, 1.0)
+                for cf in Cfine_s])
+            C_u = Cu_s[stratum_map[fit]]
+            w_budget = ((1.0 - Cfine_s) * dN_exp_density)[stratum_map[fit]]
+        elif c_mode == "selection":
             Cbar_fine = _selection_cbar_fine(selection_fit, cosmo)
         else:
             dN_obs_sum = np.zeros(n_grid, dtype=float)
@@ -370,16 +441,17 @@ def _build_completion_radial(
                 dN_obs_sum += np.asarray(
                     _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
             Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
-        # Same expectation-weighted bin average as the per-pixel branch
-        # (C_bin = int(C * dN_exp) / int(dN_exp), the existing Jacobian
-        # treatment), so rate_base = Cbar_u * dN_exp_count_u is the
-        # bin-integrated expected OBSERVED counts, same footing as N_obs.
-        Cbar_u = np.clip(
-            _bin_integral(Cbar_fine * dN_exp_density) / exp_safe, 0.0, 1.0)
-        C_u = np.tile(Cbar_u, (n_fit, 1))
-        # One shared budget-weight row (1 - Cbar) dN_exp for EVERY pixel: the
-        # renormalization footprint is the whole fitted sky.
-        w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
+        if not (c_mode == "selection" and selection_strata is not None):
+            # Same expectation-weighted bin average as the per-pixel branch
+            # (C_bin = int(C * dN_exp) / int(dN_exp), the existing Jacobian
+            # treatment), so rate_base = Cbar_u * dN_exp_count_u is the
+            # bin-integrated expected OBSERVED counts, same footing as N_obs.
+            Cbar_u = np.clip(
+                _bin_integral(Cbar_fine * dN_exp_density) / exp_safe, 0.0, 1.0)
+            C_u = np.tile(Cbar_u, (n_fit, 1))
+            # One shared budget-weight row (1 - Cbar) dN_exp for EVERY pixel:
+            # the renormalization footprint is the whole fitted sky.
+            w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
         N_obs_u = np.zeros((n_fit, n_grid), dtype=float)
         for i, r in enumerate(fit):
             if ngals_np[r] > 0:
@@ -450,6 +522,8 @@ def _build_completion_radial(
         diagnostics.update({
             **_selection_theta_stamp(selection_fit),
             **_selection_kcorr_stamp(selection_fit),
+            **(_selection_strata_stamp(selection_strata, stratum_map_sha)
+               if selection_strata is not None else {}),
         })
 
     logq_members = None
@@ -539,7 +613,8 @@ def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
 
 
 def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
-                          c_mode: str = "per_pixel", selection_fit=None):
+                          c_mode: str = "per_pixel", selection_fit=None,
+                          selection_strata=None, stratum_map=None):
     """Load a survey and assemble its gp3d voxel inputs on the shared ``z_s`` grid.
 
     Extracted verbatim from the single-survey ``_build_completion_gp3d`` body so
@@ -613,18 +688,29 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
         fit = np.arange(n_pix)
         n_fit = int(fit.size)
         n_pix_total = int(np.round(4.0 * np.pi / apix))
-        if c_mode == "selection":
-            Cbar_fine = _selection_cbar_fine(selection_fit, cosmo)
+        if c_mode == "selection" and selection_strata is not None:
+            # STRATIFIED base: per-stratum C_sel curves routed per pixel by
+            # the stratum map (mirrors the radial branch and the in-likelihood
+            # SurveyParams.selection_strata consumption).
+            Cfine_s = _selection_cbar_fine_strata(selection_strata, cosmo)
+            base_s = np.stack([
+                _coarse_bin_integral(cf * dN_exp_density) for cf in Cfine_s])
+            base_vox = base_s[stratum_map[fit]]
+            w_budget = ((1.0 - Cfine_s) * dN_exp_density)[stratum_map[fit]]
         else:
-            dN_obs_sum = np.zeros(n_grid, dtype=float)
-            for r in occ:
-                dN_obs_sum += np.asarray(
-                    _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-            Cbar_fine = np.clip(
-                dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
-        base_row = _coarse_bin_integral(Cbar_fine * dN_exp_density)
-        base_vox = np.tile(base_row, (n_fit, 1))
-        w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
+            if c_mode == "selection":
+                Cbar_fine = _selection_cbar_fine(selection_fit, cosmo)
+            else:
+                dN_obs_sum = np.zeros(n_grid, dtype=float)
+                for r in occ:
+                    dN_obs_sum += np.asarray(
+                        _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals),
+                        dtype=float)
+                Cbar_fine = np.clip(
+                    dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
+            base_row = _coarse_bin_integral(Cbar_fine * dN_exp_density)
+            base_vox = np.tile(base_row, (n_fit, 1))
+            w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
         N_obs_vox = np.zeros((n_fit, G_s), dtype=float)
         for i, r in enumerate(fit):
             if ngals_np[r] > 0:
@@ -707,6 +793,9 @@ def _build_completion_gp3d(
     gp3d_z_node_hi=None,
     c_mode: str = "per_pixel",
     selection_fit=None,
+    selection_strata=None,
+    stratum_map=None,
+    stratum_map_sha=None,
 ):
     """3-D angular-coupling MAP + optional ensemble log Q tables.
 
@@ -763,7 +852,8 @@ def _build_completion_gp3d(
 
     survey_data = _assemble_gp3d_survey(
         catalog_path, cosmo=cosmo, survey=survey, z_s=z_s, edges_s=edges_s,
-        c_mode=c_mode, selection_fit=selection_fit)
+        c_mode=c_mode, selection_fit=selection_fit,
+        selection_strata=selection_strata, stratum_map=stratum_map)
     nside, n_pix, n_occ = survey_data.nside, survey_data.n_pix, survey_data.n_occ
 
     def _base_diag(extra):
@@ -775,6 +865,8 @@ def _build_completion_gp3d(
             d.update({
                 **_selection_theta_stamp(selection_fit),
                 **_selection_kcorr_stamp(selection_fit),
+                **(_selection_strata_stamp(selection_strata, stratum_map_sha)
+                   if selection_strata is not None else {}),
             })
         d.update(extra)
         return d
@@ -896,6 +988,9 @@ def build_completion(
     gp3d_z_node_hi=None,
     c_mode: str = "per_pixel",
     selection_fit=None,
+    selection_strata=None,
+    stratum_map=None,
+    stratum_map_sha=None,
 ):
     """Build the log Q completion tables from a survey catalog.
 
@@ -930,6 +1025,8 @@ def build_completion(
             log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
             lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
             c_mode=c_mode, selection_fit=selection_fit,
+            selection_strata=selection_strata, stratum_map=stratum_map,
+            stratum_map_sha=stratum_map_sha,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
@@ -941,6 +1038,8 @@ def build_completion(
             gp3d_nz_nodes=gp3d_nz_nodes, gp3d_nsph_nodes=gp3d_nsph_nodes,
             gp3d_z_node_hi=gp3d_z_node_hi,
             c_mode=c_mode, selection_fit=selection_fit,
+            selection_strata=selection_strata, stratum_map=stratum_map,
+            stratum_map_sha=stratum_map_sha,
         )
     raise ValueError(f"Unknown build mode {mode!r}; expected 'radial' or 'gp3d'.")
 
@@ -1038,6 +1137,15 @@ def main(argv=None):
     p.add_argument("--delta", type=float, default=None,
                    help="Override the expected-density evolution exponent "
                         "(1+z)^delta (default 0.0).")
+    p.add_argument("--stratum-map", default=None,
+                   help="HDF5 file with a full-sky 'stratum_map' dataset "
+                        "(RING, at the catalog's nside). Required by, and "
+                        "only legal with, a MULTI-stratum --selection-fit "
+                        "(darksirens-selection-fit-1.1): each pixel's C_sel "
+                        "base row uses its own stratum's theta_hat, and the "
+                        "map's sha256 + per-stratum thetas are stamped so "
+                        "the inference can verify the table against the "
+                        "run's fit and map.")
     p.add_argument("--indexing", choices=["compact", "global"], default="global",
                    help="How the inference should index the Q rows. Both build "
                         "modes emit a full global (n_pix, n_grid) table, so "
@@ -1075,8 +1183,40 @@ def main(argv=None):
         indexing = "global"
 
     selection_fit = None
+    selection_strata = None
+    stratum_map = None
+    stratum_map_sha = None
     if opts.selection_fit is not None:
-        selection_fit = load_selection_fit_json(opts.selection_fit)
+        from darksirens.redshift.selection import load_selection_fit_strata
+
+        strata = load_selection_fit_strata(opts.selection_fit)
+        selection_fit = strata[0]       # reference stratum (stamps, banner)
+        if len(strata) > 1:
+            if opts.stratum_map is None:
+                raise ValueError(
+                    f"--selection-fit carries {len(strata)} strata but no "
+                    "--stratum-map assigns pixels to them; pass the map the "
+                    "strata were defined on.")
+            for s in strata[1:]:
+                if tuple(s["k_corr_coeffs"]) != tuple(strata[0]["k_corr_coeffs"]):
+                    raise ValueError(
+                        f"per-stratum K(z) templates differ inside "
+                        f"{opts.selection_fit}; strata must share one "
+                        "template (refit with a common --k_corr_coeffs).")
+            selection_strata = strata
+            import h5py
+
+            with h5py.File(opts.catalog, "r") as f:
+                _nside_cat = int(f.attrs["nside"])
+            stratum_map = _load_stratum_map(
+                opts.stratum_map, _nside_cat, len(strata))
+            stratum_map_sha = _stratum_map_sha256(opts.stratum_map)
+        elif opts.stratum_map is not None:
+            raise ValueError(
+                "--stratum-map given but the --selection-fit carries a "
+                "single stratum; drop the map or refit with --strata.")
+    elif getattr(opts, "stratum_map", None) is not None:
+        raise ValueError("--stratum-map without --selection-fit.")
 
     _section(f"Building  [{opts.mode}]")
     _row("Catalog", opts.catalog)
@@ -1088,6 +1228,10 @@ def main(argv=None):
         _row(f"Selection theta_hat [{_family}]",
              "  ".join(f"{k}={float(selection_fit[k]):.4f}"
                        for k in SELECTION_THETA_FIELDS[_family]))
+        if selection_strata is not None:
+            _row("Strata",
+                 f"{len(selection_strata)} (per-pixel base via "
+                 f"{opts.stratum_map})")
     logq_map, logq_members, diagnostics = build_completion(
         opts.catalog, mode=opts.mode, n_members=opts.n_members, seed=opts.seed,
         prior_strength=opts.prior_strength, maxiter=opts.maxiter,
@@ -1100,6 +1244,8 @@ def main(argv=None):
         gp3d_nz_nodes=opts.gp3d_nz_nodes, gp3d_nsph_nodes=opts.gp3d_nsph_nodes,
         gp3d_z_node_hi=opts.gp3d_z_node_hi,
         c_mode=opts.c_mode, selection_fit=selection_fit,
+        selection_strata=selection_strata, stratum_map=stratum_map,
+        stratum_map_sha=stratum_map_sha,
     )
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")

@@ -44,6 +44,18 @@ def validate_multitracer_run(opts, data) -> None:
                 "pass 0 or exactly n_catalogs completion paths."
             )
 
+    # Positionally-aligned per-catalog magnitude fits (0 or exactly
+    # n_catalogs; None entries mark unanchored catalogs).
+    selection_fit_paths = getattr(opts, "selection_fit_paths", None)
+    if selection_fit_paths is not None:
+        if len(selection_fit_paths) not in (0, n_catalogs):
+            raise ValueError(
+                "selection_fit_paths has "
+                f"{len(selection_fit_paths)} entries but "
+                f"n_catalogs={n_catalogs}; each catalog resolves exactly one "
+                "magnitude fit (None where it has no fit)."
+            )
+
     # Per-catalog mark selections (resolved pre-load for K>=2; None for a bare
     # or K=1 opts before mark resolution -- skipped by the None guard).
     mark_names_by_catalog = getattr(opts, "mark_names_by_catalog", None)
