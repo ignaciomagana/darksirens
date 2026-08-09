@@ -47,6 +47,7 @@ tests/test_selection_kcorr.py
 tests/test_selection_schechter.py
 tests/test_selection_strata.py
 tests/test_percatalog_selection.py
+tests/test_multitracer_selection.py
 tests/test_completion_stratified.py
 
 # ── priors, populations, parameter table ───────────────────────────────────
