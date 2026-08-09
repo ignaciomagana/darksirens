@@ -34,7 +34,8 @@ def set_publication_style():
 # the whitened r"$\xi_i$" parameters (name "xi_i").
 COSMOLOGY_LABELS = ("H0", "Om0", "w0", "wa")
 SURVEY_LABELS = ("log10n0", "z50", "w", "delta", "b_miss", "alpha_miss",
-                 "sigma_kde", "m_lim", "M0hat", "sigma_M")
+                 "sigma_kde", "m_lim", "M0hat", "sigma_M",
+                 "Mstar_hat", "alpha", "M_faint_offset")
 
 
 def is_latent_label(label):
