@@ -33,7 +33,8 @@ def set_publication_style():
 # parameters carry LaTeX labels (e.g. r"$\alpha$"); GP/binned-GP latents are
 # the whitened r"$\xi_i$" parameters (name "xi_i").
 COSMOLOGY_LABELS = ("H0", "Om0", "w0", "wa")
-SURVEY_LABELS = ("log10n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde")
+SURVEY_LABELS = ("log10n0", "z50", "w", "delta", "b_miss", "alpha_miss",
+                 "sigma_kde", "m_lim", "M0hat", "sigma_M")
 
 
 def is_latent_label(label):

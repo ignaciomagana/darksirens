@@ -59,6 +59,7 @@ from darksirens.catalogs.io import load_survey
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial
 from darksirens.redshift.completion import _precompute_grids, _kde_dndz_obs
+from darksirens.redshift.selection import load_selection_fit_json
 from darksirens.redshift.lognormal_completion import (
     gaussian_correlation_spectrum,
     poisson_lognormal_map,
@@ -105,6 +106,40 @@ def _apply_lss_overrides(survey, *, lss_corr_length_mpc=None, lss_sigma=None):
     if lss_sigma is not None:
         survey = survey._replace(lss_sigma=float(lss_sigma))
     return survey
+
+
+def _selection_cbar_fine(selection_fit, cosmo):
+    """``C_sel(zgrid; theta_hat)`` for the parametric completeness base.
+
+    Evaluated at the builder's fiducial cosmology; since ``M0hat`` is h-scaled
+    the curve is exactly H0-invariant, so the fiducial choice carries no H0
+    imprint (Om0/w0/wa enter weakly through the distance shape, same footing
+    as every other fixed build fiducial).  The Q table is conditioned on this
+    FIXED theta_hat while the likelihood samples theta around it -- the same
+    first-order convention as the fixed-fiducial n0/delta, guarded at load by
+    the theta_hat-vs-prior-center provenance check.
+    """
+    from darksirens.redshift.selection import c_sel_gaussian
+
+    return np.asarray(c_sel_gaussian(
+        jnp.asarray(zgrid), float(selection_fit["m_lim"]),
+        float(selection_fit["M0hat"]), float(selection_fit["sigma_M"]),
+        cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa), dtype=float)
+
+
+def _require_selection_fit(c_mode, selection_fit):
+    """Fail-closed pairing of ``c_mode='selection'`` with a fit payload."""
+    if c_mode == "selection" and selection_fit is None:
+        raise ValueError(
+            "c_mode='selection' needs the offline magnitude fit "
+            "(--selection-fit selection_fit.json, written by "
+            "darksirens_fit_selection): the parametric base "
+            "C_sel(z; theta_hat) dN_exp has no counts-based fallback.")
+    if c_mode != "selection" and selection_fit is not None:
+        raise ValueError(
+            f"--selection-fit given but c_mode='{c_mode}': the fit "
+            "parameterizes the c_mode='selection' base only; a mismatch "
+            "would stamp provenance the consumer check cannot honor.")
 
 
 def _gp3d_resolution_guard(*, z_node_hi, n_z_nodes, ls_z, n_sph_nodes, ls_sph):
@@ -187,6 +222,7 @@ def _build_completion_radial(
     lss_corr_length_mpc=None,
     lss_sigma=None,
     c_mode: str = "per_pixel",
+    selection_fit=None,
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
@@ -265,25 +301,32 @@ def _build_completion_radial(
 
     occ = np.nonzero(ngals_np > 0)[0]
     n_occ = int(occ.size)
-    if c_mode == "aggregate":
-        # AGGREGATE base: ONE sky-aggregate completeness curve
-        #   Cbar(z) = clip(Sum_p dN_obs_s(z|p) / (N_pix_total * dN_exp_smooth), 0, 1),
-        #   N_pix_total = round(4 pi / apix)  (occupied AND empty pixels),
-        # mirroring the in-likelihood aggregate estimator (completion.py's
-        # _precompute_grids at SurveyParams.c_mode=1), and the fit covers
-        # EVERY pixel: empty pixels enter as N_obs = 0 rows against the
-        # nonzero base Cbar * dN_exp -- that zero IS the void information the
+    if c_mode in ("aggregate", "selection"):
+        # SKY-UNIFORM base: ONE completeness curve for every pixel, and the
+        # fit covers EVERY pixel: empty pixels enter as N_obs = 0 rows against
+        # the nonzero base C * dN_exp -- that zero IS the void information the
         # occupied-only fit never sees (deep voids read Q < 1 instead of the
         # homogeneous Q = 1).  The occupied-only compact indexing of the
         # legacy branch is untouched; the pixel list is extended explicitly.
+        #   aggregate:  Cbar(z) = clip(Sum_p dN_obs_s(z|p)
+        #                              / (N_pix_total * dN_exp_smooth), 0, 1),
+        #               N_pix_total = round(4 pi / apix)  (occupied AND empty),
+        #               mirroring the in-likelihood SurveyParams.c_mode=1
+        #               estimator;
+        #   selection:  the PARAMETRIC C_sel(z; theta_hat) from the offline
+        #               magnitude fit -- no counts enter the budget at all
+        #               (mirrors SurveyParams.c_mode=2).
         fit = np.arange(n_pix)
         n_fit = int(fit.size)
         n_pix_total = int(np.round(4.0 * np.pi / apix))
-        dN_obs_sum = np.zeros(n_grid, dtype=float)
-        for r in occ:
-            dN_obs_sum += np.asarray(
-                _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
+        if c_mode == "selection":
+            Cbar_fine = _selection_cbar_fine(selection_fit, cosmo)
+        else:
+            dN_obs_sum = np.zeros(n_grid, dtype=float)
+            for r in occ:
+                dN_obs_sum += np.asarray(
+                    _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
         # Same expectation-weighted bin average as the per-pixel branch
         # (C_bin = int(C * dN_exp) / int(dN_exp), the existing Jacobian
         # treatment), so rate_base = Cbar_u * dN_exp_count_u is the
@@ -355,8 +398,18 @@ def _build_completion_radial(
         "fiducial_n0": float(survey.n0), "fiducial_delta": float(survey.delta),
         "bias_b_miss": float(survey.b_miss),
     })
-    if c_mode == "aggregate":
+    if c_mode in ("aggregate", "selection"):
         diagnostics.update({"n_pix_total": n_pix_total, "n_occupied_data": n_occ})
+    if c_mode == "selection":
+        # theta_hat provenance: the consumer hard-errors when the table's
+        # build theta does not match the --selection_fit prior center fed to
+        # the inference (a stale table would carry the WRONG fixed base).
+        diagnostics.update({
+            "selection_m_lim": float(selection_fit["m_lim"]),
+            "selection_M0hat": float(selection_fit["M0hat"]),
+            "selection_sigma_M": float(selection_fit["sigma_M"]),
+            "selection_family": str(selection_fit.get("family", "gaussian")),
+        })
 
     logq_members = None
     if n_members and n_members > 0:
@@ -445,7 +498,7 @@ def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
 
 
 def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
-                          c_mode: str = "per_pixel"):
+                          c_mode: str = "per_pixel", selection_fit=None):
     """Load a survey and assemble its gp3d voxel inputs on the shared ``z_s`` grid.
 
     Extracted verbatim from the single-survey ``_build_completion_gp3d`` body so
@@ -510,19 +563,24 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
         ])
         return np.diff(np.interp(edges_s, zgrid_np, cum))
 
-    if c_mode == "aggregate":
-        # AGGREGATE base (mirrors the radial builder and the in-likelihood
-        # SurveyParams.c_mode=1 estimator): one sky-aggregate Cbar, and the
-        # voxel list extends to EVERY pixel so empty pixels enter as
-        # N_obs = 0 rows against the nonzero base -- the void information.
+    if c_mode in ("aggregate", "selection"):
+        # SKY-UNIFORM base (mirrors the radial builder and the in-likelihood
+        # SurveyParams.c_mode=1/2 estimators): one shared completeness curve
+        # -- the counts aggregate Cbar or the parametric C_sel(z; theta_hat)
+        # -- and the voxel list extends to EVERY pixel so empty pixels enter
+        # as N_obs = 0 rows against the nonzero base: the void information.
         fit = np.arange(n_pix)
         n_fit = int(fit.size)
         n_pix_total = int(np.round(4.0 * np.pi / apix))
-        dN_obs_sum = np.zeros(n_grid, dtype=float)
-        for r in occ:
-            dN_obs_sum += np.asarray(
-                _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
-        Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
+        if c_mode == "selection":
+            Cbar_fine = _selection_cbar_fine(selection_fit, cosmo)
+        else:
+            dN_obs_sum = np.zeros(n_grid, dtype=float)
+            for r in occ:
+                dN_obs_sum += np.asarray(
+                    _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            Cbar_fine = np.clip(
+                dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
         base_row = _coarse_bin_integral(Cbar_fine * dN_exp_density)
         base_vox = np.tile(base_row, (n_fit, 1))
         w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
@@ -607,6 +665,7 @@ def _build_completion_gp3d(
     gp3d_nsph_nodes: int = 32,
     gp3d_z_node_hi=None,
     c_mode: str = "per_pixel",
+    selection_fit=None,
 ):
     """3-D angular-coupling MAP + optional ensemble log Q tables.
 
@@ -663,7 +722,7 @@ def _build_completion_gp3d(
 
     survey_data = _assemble_gp3d_survey(
         catalog_path, cosmo=cosmo, survey=survey, z_s=z_s, edges_s=edges_s,
-        c_mode=c_mode)
+        c_mode=c_mode, selection_fit=selection_fit)
     nside, n_pix, n_occ = survey_data.nside, survey_data.n_pix, survey_data.n_occ
 
     def _base_diag(extra):
@@ -671,6 +730,13 @@ def _build_completion_gp3d(
             cosmo, survey, nside=nside, n_pix=n_pix, n_occ=n_occ,
             amp=amp, ls_sph=ls_sph, bias=bias)
         d["c_mode"] = c_mode
+        if c_mode == "selection":
+            d.update({
+                "selection_m_lim": float(selection_fit["m_lim"]),
+                "selection_M0hat": float(selection_fit["M0hat"]),
+                "selection_sigma_M": float(selection_fit["sigma_M"]),
+                "selection_family": str(selection_fit.get("family", "gaussian")),
+            })
         d.update(extra)
         return d
 
@@ -790,6 +856,7 @@ def build_completion(
     gp3d_nsph_nodes: int = 32,
     gp3d_z_node_hi=None,
     c_mode: str = "per_pixel",
+    selection_fit=None,
 ):
     """Build the log Q completion tables from a survey catalog.
 
@@ -812,16 +879,18 @@ def build_completion(
     targets differ by the entire clustering signal -- so the mode is stamped
     in the HDF5 attrs and hard-checked at load.
     """
-    if c_mode not in ("per_pixel", "aggregate"):
+    if c_mode not in ("per_pixel", "aggregate", "selection"):
         raise ValueError(
-            f"c_mode must be 'per_pixel' or 'aggregate', got {c_mode!r}.")
+            f"c_mode must be 'per_pixel', 'aggregate' or 'selection', "
+            f"got {c_mode!r}.")
+    _require_selection_fit(c_mode, selection_fit)
     if mode == "radial":
         return _build_completion_radial(
             catalog_path, n_members=n_members, seed=seed,
             prior_strength=prior_strength, maxiter=maxiter, workers=workers,
             log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
             lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
-            c_mode=c_mode,
+            c_mode=c_mode, selection_fit=selection_fit,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
@@ -832,7 +901,7 @@ def build_completion(
             lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
             gp3d_nz_nodes=gp3d_nz_nodes, gp3d_nsph_nodes=gp3d_nsph_nodes,
             gp3d_z_node_hi=gp3d_z_node_hi,
-            c_mode=c_mode,
+            c_mode=c_mode, selection_fit=selection_fit,
         )
     raise ValueError(f"Unknown build mode {mode!r}; expected 'radial' or 'gp3d'.")
 
@@ -903,16 +972,25 @@ def main(argv=None):
                         "BEHAVIOR CHANGE from the historical hardwired 3.0, "
                         "which left zgrid[-1] > 3 covered only by prior "
                         "extrapolation.")
-    p.add_argument("--c-mode", choices=["per_pixel", "aggregate"],
+    p.add_argument("--c-mode", choices=["per_pixel", "aggregate", "selection"],
                    default="per_pixel",
                    help="Completeness base the fit is residual to (both modes). "
                         "'per_pixel' (default): legacy per-pixel matched-kernel "
                         "C, occupied pixels only. 'aggregate': ONE sky-aggregate "
                         "Cbar (matching the inference c_mode=aggregate "
                         "estimator), with EMPTY pixels included as N_obs=0 rows "
-                        "(voids are informative). Stamped in the HDF5 attrs; the "
-                        "inference hard-errors when the table's c_mode does not "
-                        "match the survey's.")
+                        "(voids are informative). 'selection': the PARAMETRIC "
+                        "C_sel(z; theta_hat) from --selection-fit (no counts in "
+                        "the budget; empty pixels included like aggregate). "
+                        "Stamped in the HDF5 attrs; the inference hard-errors "
+                        "when the table's c_mode does not match the survey's.")
+    p.add_argument("--selection-fit", default=None,
+                   help="selection_fit.json from darksirens_fit_selection "
+                        "(required by, and only legal with, --c-mode "
+                        "selection). theta_hat is stamped into the table "
+                        "provenance; the inference hard-errors when it does "
+                        "not match the --selection_fit prior center it runs "
+                        "with (a stale table carries the wrong fixed base).")
     p.add_argument("--log10n0", type=float, default=None,
                    help="Override log10 of the expected comoving galaxy density "
                         "[Mpc^-3] the fit is conditioned on (default -2.0). "
@@ -957,10 +1035,19 @@ def main(argv=None):
               "at inference).")
         indexing = "global"
 
+    selection_fit = None
+    if opts.selection_fit is not None:
+        selection_fit = load_selection_fit_json(opts.selection_fit)
+
     _section(f"Building  [{opts.mode}]")
     _row("Catalog", opts.catalog)
     _row("Members", opts.n_members)
     _row("Seed", opts.seed)
+    if selection_fit is not None:
+        _row("Selection theta_hat",
+             f"m_lim={selection_fit['m_lim']:.3f} "
+             f"M0hat={selection_fit['M0hat']:.4f} "
+             f"sigma_M={selection_fit['sigma_M']:.4f}")
     logq_map, logq_members, diagnostics = build_completion(
         opts.catalog, mode=opts.mode, n_members=opts.n_members, seed=opts.seed,
         prior_strength=opts.prior_strength, maxiter=opts.maxiter,
@@ -972,7 +1059,7 @@ def main(argv=None):
         lss_corr_length_mpc=opts.lss_corr_length_mpc, lss_sigma=opts.lss_sigma,
         gp3d_nz_nodes=opts.gp3d_nz_nodes, gp3d_nsph_nodes=opts.gp3d_nsph_nodes,
         gp3d_z_node_hi=opts.gp3d_z_node_hi,
-        c_mode=opts.c_mode,
+        c_mode=opts.c_mode, selection_fit=selection_fit,
     )
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")

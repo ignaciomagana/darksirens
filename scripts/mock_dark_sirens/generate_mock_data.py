@@ -1500,9 +1500,14 @@ def write_mock_data(args: argparse.Namespace) -> None:
     n_negative_z_obs = int((z_obs_survey < 0.0).sum())
     weights = np.ones(observed.sum())
     mark_obs = ({name: complete[name][observed] for name in eta_true} if with_marks else None)
+    # Apparent magnitudes ride the same padded-column mechanism as marks but
+    # under the gal_* registry (catalogs/io.py GALPROP_DATASETS): offline
+    # consumers only (selection-function fit, Q-table builder), never sampled.
+    extra_cols = {"gal_app_mag": complete["app_mag"][observed]}
     pixelated = _pixelate_catalog(
         complete["ra"][observed], complete["dec"][observed], z_obs_survey,
-        zerr_survey, weights, args.nside, marks=mark_obs,
+        zerr_survey, weights, args.nside,
+        marks={**(mark_obs or {}), **extra_cols},
     )
 
     # Build the injected 3-D source-rate field g(n̂, z) as a product of optional
@@ -1716,6 +1721,11 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.create_dataset("Z", data=z_obs_survey, compression="gzip", shuffle=True)
         f.create_dataset("ZERR", data=zerr_survey, compression="gzip", shuffle=True)
         f.create_dataset("WEIGHT", data=weights, compression="gzip", shuffle=True)
+        # The survey DOES measure apparent magnitudes (they define its own
+        # selection); the absolute magnitude stays in the complete catalog --
+        # an EM survey cannot know it without assuming a cosmology.
+        f.create_dataset("APP_MAG", data=complete["app_mag"][observed],
+                         compression="gzip", shuffle=True)
 
     pixel_path = out / f"catalog_pixelated_nside_{args.nside}.h5"
     with h5py.File(pixel_path, "w") as f:

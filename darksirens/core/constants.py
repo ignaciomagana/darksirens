@@ -25,6 +25,14 @@ SURVEY_PARAMS_FID_BY_NAME = {
     "b_miss": 1.0,
     "alpha_miss": 1.0,
     "sigma_kde": 0.0,
+    # Parametric selection-function block (active only under
+    # c_mode="selection").  M0hat is the h-SCALED absolute-magnitude center
+    # M0 - 5 log10 h -- the convention that makes C_sel exactly H0-invariant
+    # (darksirens/redshift/selection.py); m_lim is a truncation DATUM of the
+    # selection protocol, never sampled (only m_lim - M0hat is identified).
+    "m_lim": 24.0,
+    "M0hat": -20.2,
+    "sigma_M": 1.0,
 }
 
 #: Legacy positional spelling of :data:`SURVEY_PARAMS_FID_BY_NAME` (same order).
@@ -39,4 +47,8 @@ COMPLETE_EMPTY_PIXEL_POLICIES = {"zero": 0, "volume": 1}
 #: ``Cbar(z) = clip(Sum_p dN_obs_s(z|p) / (N_pix_total dN_exp_smooth(z)), 0, 1)``
 #: so the angular clustering of the observed galaxies stays out of the budget
 #: (see :mod:`darksirens.redshift.completion`).
-C_MODES = {"per_pixel": 0, "aggregate": 1}
+#: ``selection`` (2) is the PARAMETRIC magnitude-limited completeness
+#: ``C_sel(z) = Phi((m_lim - M0 - DM(z)) / sigma_M)`` evaluated from sampled
+#: h-scaled LF parameters -- no counts enter the budget at all (the
+#: clustering-safe channel; see darksirens/redshift/selection.py).
+C_MODES = {"per_pixel": 0, "aggregate": 1, "selection": 2}

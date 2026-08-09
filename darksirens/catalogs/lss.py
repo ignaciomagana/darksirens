@@ -114,6 +114,10 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
             "fiducial_H0", "fiducial_Om0", "fiducial_w0", "fiducial_wa",
             "fiducial_n0", "fiducial_delta",
             "bias_b_miss", "lss_corr_length_mpc", "lss_sigma",
+            # Parametric-selection base (c_mode="selection" tables): the
+            # theta_hat the fixed base was built at, checked in the CLI
+            # against the --selection_fit prior center.
+            "selection_m_lim", "selection_M0hat", "selection_sigma_M",
         ) if k in _diag}
         if _fid:
             print(f"    - Q_LSS build fiducials: {_fid}")

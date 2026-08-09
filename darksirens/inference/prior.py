@@ -49,6 +49,10 @@ class _Inert(NamedTuple):
     reason: str
     fatal_when_fixed: bool = False
     remedy: str = ""
+    #: The fixed-value path is the ENDORSED way to set this label (e.g. the
+    #: m_lim truncation datum), so a fixed value draws no warning -- the CLI
+    #: itself inserts one under --selection_fit.
+    fixed_ok: bool = False
 
 
 class _SurveyParam(NamedTuple):
@@ -106,7 +110,8 @@ _COMPLETE_CATALOG = _Inert(
 )
 
 
-def _completion_param_rule(universe_model, use_lss, q_active, catalog):
+def _completion_param_rule(universe_model, use_lss, q_active, catalog,
+                           c_mode="per_pixel"):
     """Activity of the completion parameters (``log10n0``, ``delta``)."""
     if universe_model in _CATALOG_FREE_MODELS:
         return _catalog_free(universe_model)
@@ -115,14 +120,43 @@ def _completion_param_rule(universe_model, use_lss, q_active, catalog):
     return None
 
 
-def _b_miss_rule(universe_model, use_lss, q_active, catalog):
+def _selection_rule(universe_model, use_lss, q_active, catalog,
+                    c_mode="per_pixel"):
+    """Activity of the parametric-selection parameters (``M0hat``, ``sigma_M``).
+
+    They enter the likelihood ONLY through the parametric completeness curve
+    ``C_sel(z) = Phi((m_lim - M0 - DM(z))/sigma_M)`` that
+    ``c_mode="selection"`` forms in place of the counts-based estimators
+    (redshift/completion.py), so under any other c_mode they are provably
+    inert -- and a fixed value there asserts a selection model the likelihood
+    does not apply.
+    """
+    model_rule = _completion_param_rule(
+        universe_model, use_lss, q_active, catalog, c_mode=c_mode)
+    if model_rule is not None:
+        return model_rule
+    if c_mode != "selection":
+        return _Inert(
+            f"catalog {catalog} runs c_mode='{c_mode}', whose completeness "
+            f"estimator is counts-based and never reads the parametric "
+            f"selection parameters (M0hat, sigma_M); they enter only the "
+            f"C_sel(z) curve that c_mode='selection' forms",
+            fatal_when_fixed=True,
+            remedy="or run with --c_mode selection",
+        )
+    return None
+
+
+def _b_miss_rule(universe_model, use_lss, q_active, catalog,
+                 c_mode="per_pixel"):
     """Activity of ``b_miss``: the completion rule plus the two LSS gates.
 
     ``b_miss`` enters the likelihood ONLY through the local-overdensity factor
     ``max(1 + alpha_miss*b_miss*delta_g, 0)`` (redshift/completion.py), so it is
     additionally inert whenever that factor is not a function of it.
     """
-    model_rule = _completion_param_rule(universe_model, use_lss, q_active, catalog)
+    model_rule = _completion_param_rule(
+        universe_model, use_lss, q_active, catalog, c_mode=c_mode)
     if model_rule is not None:
         return model_rule
     if q_active:
@@ -149,7 +183,8 @@ def _b_miss_rule(universe_model, use_lss, q_active, catalog):
     return None
 
 
-def _kde_rule(universe_model, use_lss, q_active, catalog):
+def _kde_rule(universe_model, use_lss, q_active, catalog,
+              c_mode="per_pixel"):
     """Activity of ``sigma_kde``: every catalog-based model broadens its kernels."""
     if universe_model in _CATALOG_FREE_MODELS:
         return _catalog_free(universe_model)
@@ -167,6 +202,15 @@ _SURVEY_BLOCK = (
     _SurveyParam("delta", -3.0, 3.0, _completion_param_rule),
     _SurveyParam("b_miss", 0.0, 3.0, _b_miss_rule),
     _SurveyParam("sigma_kde", 0.0, 0.05, _kde_rule),
+    # Parametric-selection block, appended LAST so pre-existing coordinate
+    # indices never move.  Bounds are truncation only: the information comes
+    # from the magnitude-fit Gaussian prior (--selection_fit), which flips
+    # these labels' prior kind to a truncated normal at build time; without a
+    # fit they sample flat within bounds (the deliberate wide-open ablation).
+    # sigma_M's floor keeps Phi from degenerating to a step (PPF/gradients
+    # misbehave at sigma -> 0).  M0hat is h-SCALED (M0 - 5 log10 h).
+    _SurveyParam("M0hat", -23.0, -18.0, _selection_rule),
+    _SurveyParam("sigma_M", 0.05, 3.0, _selection_rule),
 )
 
 #: SurveyParams fields that are recognised as parameter labels but are NEVER
@@ -195,6 +239,16 @@ _PINNED_SURVEY_PARAMS = {
         "b_miss alone carries the modulation; it is never sampled for any "
         "universe model"
     ),
+    "m_lim": _Inert(
+        "'m_lim' is the truncation DATUM of the selection protocol, not an "
+        "uncertain parameter: inside C_sel(z) = "
+        "Phi((m_lim - M0hat - 5log10(h) - DM(z))/sigma_M) only the "
+        "combination m_lim - M0hat is identified, so sampling both would be "
+        "an exact flat direction; set it per run via "
+        "--fixed_parameter_values (the decoder pins the field) and let "
+        "M0hat carry the sampled freedom",
+        fixed_ok=True,
+    ),
 }
 
 #: Every survey label the parameter machinery recognises, sampleable or pinned.
@@ -215,16 +269,25 @@ if set(_SURVEY_PARAM_LABELS) != set(SURVEY_PARAMS_FID_BY_NAME):
     )
 
 
-def _survey_param_inactive_reason(spec, universe_model, use_lss, q_active, catalog):
+def _survey_param_inactive_reason(spec, universe_model, use_lss, q_active,
+                                  catalog, c_mode="per_pixel"):
     """``spec``'s :class:`_Inert` for this configuration, or ``None`` if sampled.
 
-    A universe model the registry does not know about samples the whole block
-    (bounds and order as declared, no gating) -- the historical fallback for
-    callers that never name a universe model.
+    A universe model the registry does not know about samples the whole
+    LEGACY block (bounds and order as declared, no gating) -- the historical
+    fallback for callers that never name a universe model.  The parametric
+    selection parameters are the exception: they are gated on ``c_mode``
+    regardless of the universe model (an unknown model without
+    c_mode="selection" would otherwise sample two phantom flat dimensions --
+    exactly the prior-volume inflation this registry exists to prevent).
     """
     if universe_model not in _REGISTERED_UNIVERSE_MODELS:
+        if spec.inactive_reason is _selection_rule:
+            return spec.inactive_reason(None, use_lss, q_active, catalog,
+                                        c_mode=c_mode)
         return None
-    return spec.inactive_reason(universe_model, use_lss, q_active, catalog)
+    return spec.inactive_reason(universe_model, use_lss, q_active, catalog,
+                                c_mode=c_mode)
 
 
 #: Matches the per-catalog ``_c{k}`` suffix appended to survey labels for the
@@ -412,6 +475,8 @@ def build_parameter_space(
     lss_completion_active: bool | Sequence[bool] = False,
     use_lss: bool = True,
     mark_names_by_catalog=None,
+    c_mode: "str | Sequence[str]" = "per_pixel",
+    selection_prior=None,
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
@@ -475,6 +540,27 @@ def build_parameter_space(
     else:
         lss_active_by_cat = (bool(lss_completion_active),) * n_catalogs
 
+    # Normalize per-catalog c_mode the same way (a scalar string broadcasts).
+    if isinstance(c_mode, Sequence) and not isinstance(c_mode, (str, bytes)):
+        c_mode_by_cat = tuple(str(x) for x in c_mode)
+        if len(c_mode_by_cat) != n_catalogs:
+            raise ValueError(
+                f"c_mode given as a sequence of length {len(c_mode_by_cat)}, "
+                f"but n_catalogs={n_catalogs}; pass exactly one mode per "
+                f"catalog (or a single string to broadcast).")
+    else:
+        c_mode_by_cat = (str(c_mode),) * n_catalogs
+    if n_catalogs >= 2 and any(m == "selection" for m in c_mode_by_cat):
+        # Fail-closed until per-catalog selection fits exist: the _c{k}
+        # labels would sample FLAT (the single-fit selection_prior anchors
+        # base labels only) and the theta-provenance loop would compare every
+        # catalog's table against one fit -- catalog k's selection would be
+        # silently unanchored.
+        raise ValueError(
+            "c_mode='selection' is single-catalog for now: a K>=2 mixture "
+            "needs one magnitude fit (and one anchored theta prior) per "
+            "catalog, which the selection-fit plumbing does not yet carry.")
+
     def _survey_inactive_reason(label):
         """:class:`_Inert` for a (possibly ``_c{k}``-suffixed) survey label.
 
@@ -498,6 +584,7 @@ def build_parameter_space(
                     use_lss,
                     lss_active_by_cat[catalog - 1],
                     catalog,
+                    c_mode=c_mode_by_cat[catalog - 1],
                 )
         return None
 
@@ -639,6 +726,10 @@ def build_parameter_space(
         for _key in _source:
             _inert = _survey_inactive_reason(_key)
             if _inert is None:
+                continue
+            if _source is fixed_parameter_values and _inert.fixed_ok:
+                # Endorsed fixed-value path (e.g. the m_lim truncation datum,
+                # which --selection_fit itself pins): no warning.
                 continue
             _message = (
                 f"A {_source_name} was given for '{_key}', but it is not a "
@@ -890,6 +981,34 @@ def build_parameter_space(
     if n_catalogs >= 2:
         for m in range(2, n_catalogs + 1):
             kind_map[f"fcat_{m}"] = ("beta", 1.0, float(n_catalogs - m + 1))
+    # Selection-fit Gaussian priors: ``selection_prior = {label: (loc, scale)}``
+    # (labels may carry the _c{k} suffix) flips those SAMPLED selection labels
+    # from the flat default to a truncated normal -- the offline magnitude
+    # fit's marginal Laplace sds.  Without a fit the labels stay flat within
+    # bounds (the deliberate wide-open ablation).  Fail-closed: a prior for a
+    # label that is not sampled in this configuration is a config error, not
+    # a silent no-op.
+    for lbl, (loc, scale) in (selection_prior or {}).items():
+        if _survey_base_name(lbl) not in ("M0hat", "sigma_M"):
+            raise ValueError(
+                f"selection_prior names '{lbl}', but only the sampled "
+                f"selection parameters M0hat / sigma_M (optionally "
+                f"_c{{k}}-suffixed) accept a magnitude-fit Gaussian prior.")
+        if lbl not in labels:
+            reason = _survey_inactive_reason(lbl)
+            why = f": {reason.reason}" if reason is not None else (
+                " (is it fixed via --fixed_parameter_values, dropped by "
+                "fix_survey=True -- which fixes the whole block including "
+                "theta, incompatible with a selection-fit prior -- or "
+                "suffixed for a catalog this run does not have?)")
+            raise ValueError(
+                f"selection_prior names '{lbl}', which is not sampled in "
+                f"this configuration{why}.")
+        if not (np.isfinite(loc) and np.isfinite(scale) and scale > 0):
+            raise ValueError(
+                f"selection_prior for '{lbl}' needs finite loc and positive "
+                f"scale, got ({loc}, {scale}).")
+        kind_map[lbl] = ("normal", float(loc), float(scale))
     prior_kinds = [kind_map.get(lbl, ("uniform", None, None)) for lbl in labels]
 
     return (

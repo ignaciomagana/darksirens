@@ -18,6 +18,13 @@ MARK_INPUT_COLUMNS = {
     "mark_color": "GR_COLOR",
 }
 
+#: Optional per-galaxy PROPERTY columns (not marks): padded identically but
+#: registered under ``darksirens.catalogs.io.GALPROP_DATASETS`` -- offline
+#: consumers only (selection-function fit, Q-table builder); never sampled.
+GALPROP_INPUT_COLUMNS = {
+    "gal_app_mag": "APP_MAG",
+}
+
 def plot_diagnostics(counts, zs, npix, save_dir, nside):
     """Generates and saves diagnostic plots for the survey data."""
     _section("Diagnostic plots")
@@ -108,8 +115,14 @@ def main(argv=None):
             ds: np.array(f[col], dtype=float)
             for ds, col in MARK_INPUT_COLUMNS.items() if col in f
         }
+        galprops_in = {
+            ds: np.array(f[col], dtype=float)
+            for ds, col in GALPROP_INPUT_COLUMNS.items() if col in f
+        }
     if marks_in:
         _ok(f"Mark columns:           {', '.join(sorted(marks_in))}")
+    if galprops_in:
+        _ok(f"Galaxy-property columns: {', '.join(sorted(galprops_in))}")
 
     # Data-entry boundary validation.  Every row read here is a REAL galaxy
     # (padding slots are created below, with w = 0 and mark = 0 by
@@ -149,6 +162,21 @@ def main(argv=None):
                 "of its whole redshift bin when the marks are z-centred at "
                 "load time. Drop or fix those rows in the input catalog."
             )
+    # GALAXY PROPERTIES: every stored slot must be a real measurement -- the
+    # 0.0 padding is only distinguishable from data via ngals, so a NaN here
+    # cannot be repaired downstream (the selection fit would either crash or
+    # silently drop it depending on the reader).
+    for ds, arr in sorted(galprops_in.items()):
+        bad_p = ~np.isfinite(arr)
+        if bad_p.any():
+            n_bad = int(bad_p.sum())
+            _fatal(
+                f"galaxy-property column '{GALPROP_INPUT_COLUMNS[ds]}' ({ds}) "
+                f"must be finite for every galaxy; found {n_bad:,} non-finite "
+                f"value(s) out of {arr.size:,} (first offending index "
+                f"{int(np.argmax(bad_p))}). Drop or fix those rows in the "
+                "input catalog."
+            )
 
     ngals_total = len(ras)
     _ok(f"Galaxies loaded:        {ngals_total:,}")
@@ -171,8 +199,10 @@ def main(argv=None):
     cats_out = np.full((npix, maxgals), 100.0, dtype=zs.dtype)
     dzcats_out = np.full((npix, maxgals), 1.0, dtype=ddzs.dtype)
     dwcats_out = np.full((npix, maxgals), 0.0, dtype=wts.dtype)
-    # Marks padded with 0 (masked downstream by ngals; centred at load).
-    marks_out = {ds: np.full((npix, maxgals), 0.0, dtype=float) for ds in marks_in}
+    # Marks and galaxy properties padded with 0 (masked downstream by ngals;
+    # marks are centred at load, properties are consumed raw offline).
+    extras_in = {**marks_in, **galprops_in}
+    marks_out = {ds: np.full((npix, maxgals), 0.0, dtype=float) for ds in extras_in}
 
     # 5. Fast Vectorized Grouping
     sort_idx = np.argsort(ind)
@@ -182,7 +212,7 @@ def main(argv=None):
     sorted_zs = zs[sort_idx]
     sorted_ddzs = ddzs[sort_idx]
     sorted_wts = wts[sort_idx]
-    sorted_marks = {ds: arr[sort_idx] for ds, arr in marks_in.items()}
+    sorted_marks = {ds: arr[sort_idx] for ds, arr in extras_in.items()}
 
     # Find the boundary indices for each unique pixel
     unique_pix, start_indices = np.unique(sorted_ind, return_index=True)
@@ -215,8 +245,10 @@ def main(argv=None):
         for ds, arr in marks_out.items():
             f.create_dataset(ds, data=arr, compression='gzip', shuffle=True)
     _ok(f"catalog  →  {out_file}")
-    if marks_out:
-        _ok(f"mark datasets: {', '.join(sorted(marks_out))}")
+    if marks_in:
+        _ok(f"mark datasets: {', '.join(sorted(marks_in))}")
+    if galprops_in:
+        _ok(f"galaxy-property datasets: {', '.join(sorted(galprops_in))}")
     if opts.z_depth is not None:
         _ok(f"survey z_depth attribute: {opts.z_depth}")
     _end()

@@ -903,7 +903,7 @@ def build_parser():
                          "completeness is estimated over the full [0, DARKSIRENS_ZMAX] grid "
                          "(bit-identical to pre-existing behaviour)."))
     g.add_argument("--c_mode", default="per_pixel",
-                   choices=["per_pixel", "aggregate"],
+                   choices=["per_pixel", "aggregate", "selection"],
                    help=("Completeness estimator mode (dark_sirens). 'per_pixel' "
                          "(default): the legacy per-pixel matched-kernel ratio, "
                          "bit-identical to pre-existing behaviour -- its numerator "
@@ -919,7 +919,24 @@ def build_parser():
                          "be built with the matching darksirens_build_"
                          "lognormal_completion --c-mode (hard-checked at load: "
                          "the two bases differ by the entire clustering "
-                         "signal)."))
+                         "signal). 'selection': the PARAMETRIC magnitude-"
+                         "limited completeness C_sel(z; m_lim, M0hat, sigma_M) "
+                         "-- no counts in the budget at all; M0hat/sigma_M are "
+                         "SAMPLED (under the --selection_fit Gaussian prior "
+                         "when given, flat within bounds otherwise) and m_lim "
+                         "is a fixed truncation datum settable via "
+                         "--fixed_parameter_values."))
+    g.add_argument("--selection_fit", default=None,
+                   help=("selection_fit.json from darksirens_fit_selection "
+                         "(c_mode=selection only). Its theta_hat becomes the "
+                         "center and its marginal Laplace sds the widths of "
+                         "truncated-normal priors on the sampled M0hat / "
+                         "sigma_M, and m_lim is pinned to the fitted stratum's "
+                         "datum unless --fixed_parameter_values overrides it. "
+                         "Any --lss_completion table must have been built with "
+                         "the SAME fit (theta_hat stamped and hard-checked at "
+                         "load). Omit for flat-within-bounds selection priors "
+                         "(the wide-open ablation)."))
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
                          "--save_path, and exit before building the likelihood."))
@@ -2013,6 +2030,27 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # legacy back-compat fallback.
     opts.lss_completion_active_by_catalog = lss_completion_active_by_catalog
     opts.lss_completion_active = bool(lss_completion_active)
+
+    # Selection-fit Gaussian prior (c_mode=selection): theta_hat centers +
+    # marginal Laplace sds become truncated-normal priors on the SAMPLED
+    # M0hat/sigma_M, and the fitted stratum's m_lim pins the truncation datum
+    # unless the user overrides it explicitly.  Persisted on opts so
+    # post-processing (build_parameter_decoder) re-derives the SAME space.
+    opts.selection_prior = None
+    if getattr(opts, "selection_fit", None):
+        if opts.c_mode != "selection":
+            _fatal("--selection_fit given but --c_mode is "
+                   f"'{opts.c_mode}': the fit parameterizes the "
+                   "c_mode=selection completeness only.")
+        from darksirens.redshift.selection import load_selection_fit_json
+        _sel = load_selection_fit_json(opts.selection_fit)
+        _sd = np.sqrt(np.diag(np.asarray(_sel["cov"], dtype=float)))
+        opts.selection_prior = {"M0hat": (float(_sel["M0hat"]), float(_sd[0])),
+                                "sigma_M": (float(_sel["sigma_M"]), float(_sd[1]))}
+        opts.selection_fit_theta = {k: float(_sel[k])
+                                    for k in ("m_lim", "M0hat", "sigma_M")}
+        fixed_parameter_values.setdefault("m_lim", float(_sel["m_lim"]))
+
     res = build_parameter_space(
         opts.pop_model,
         opts.fix_population,
@@ -2034,6 +2072,8 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         # so it must not be sampled as a phantom flat dimension.
         use_lss                = bool(getattr(opts, "use_LSS", False)),
         mark_names_by_catalog  = getattr(opts, "mark_names_by_catalog", None),
+        c_mode                 = opts.c_mode,
+        selection_prior        = opts.selection_prior,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]
@@ -2056,6 +2096,54 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     else:
         _q_fiducials = [data.get("lss_completion_fiducials")]
     check_lss_completion_provenance(_q_fiducials, labels, fixed_parameter_values)
+
+    # Selection-base Q tables: theta is SAMPLED by design (exempt from the
+    # pinned-to-build rule, like H0), but the table's FIXED base must have
+    # been built from the SAME offline fit that centers this run's theta
+    # prior -- a stale table silently carries the wrong completeness base.
+    for _fid in _q_fiducials:
+        if not _fid or "selection_M0hat" not in _fid:
+            continue
+        _theta = getattr(opts, "selection_fit_theta", None)
+        if _theta is None:
+            _warn(
+                "Q table was built on a c_mode=selection base at "
+                f"theta_hat=(m_lim={_fid['selection_m_lim']:.4f}, "
+                f"M0hat={_fid['selection_M0hat']:.4f}, "
+                f"sigma_M={_fid['selection_sigma_M']:.4f}) but no "
+                "--selection_fit anchors this run's theta prior: the table's "
+                "fixed base and the wide-open sampled theta are only "
+                "consistent as a deliberate ablation."
+            )
+            continue
+        for _name, _key in (("m_lim", "selection_m_lim"),
+                            ("M0hat", "selection_M0hat"),
+                            ("sigma_M", "selection_sigma_M")):
+            if abs(_theta[_name] - float(_fid[_key])) > 1e-6:
+                _fatal(
+                    f"Q table {_fid.get('path')} was built at "
+                    f"{_name}={float(_fid[_key]):.6f} but --selection_fit "
+                    f"gives {_name}={_theta[_name]:.6f}: the table's fixed "
+                    "C_sel base and this run's theta prior must come from "
+                    "the SAME darksirens_fit_selection output. Rebuild the "
+                    "table with the current fit (or point --selection_fit "
+                    "at the fit the table was built with)."
+                )
+    # Prior wider than the base is first-order-consistent only near theta_hat:
+    # warn when the sampled bounds reach beyond +-5 prior sds of the center.
+    if getattr(opts, "selection_prior", None):
+        for _lbl, (_loc, _sd) in opts.selection_prior.items():
+            if _lbl in labels:
+                _i = labels.index(_lbl)
+                _reach = max(abs(upper_bound[_i] - _loc),
+                             abs(_loc - lower_bound[_i]))
+                if _reach > 5.0 * _sd:
+                    _warn(
+                        f"{_lbl}: sampling bounds reach {_reach:.3f} from the "
+                        f"fit center ({_reach/_sd:.0f} prior sds); the Q "
+                        "table's fixed C_sel base is only first-order "
+                        "consistent near theta_hat."
+                    )
     # Record the exact sampler labels so build_parameter_decoder (inside
     # make_likelihood) can fail fast if it re-derives a different set -- the
     # P0.1 fail-fast net against any future CLI/decoder flag drift.

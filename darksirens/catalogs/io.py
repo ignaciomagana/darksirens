@@ -102,6 +102,15 @@ def load_survey(survey_path, to_device=True, sort_rows_by_z=True):
 #: (padded ``(npix, maxgals)`` arrays), keyed by the EMCatalog field name.
 MARK_DATASETS = ("mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_color")
 
+#: Per-galaxy PROPERTY datasets (padded like marks) that are NOT marks: they
+#: never enter the sampled likelihood and never enroll in the marked-host
+#: model -- they exist for OFFLINE consumers only (the selection-function fit
+#: and the Q-table builder).  Kept in a separate registry precisely so a
+#: catalog carrying magnitudes cannot silently become a "marked" catalog.
+#: Padding value is 0.0 (an absurd apparent magnitude): every reader MUST mask
+#: real slots via ``ngals`` (``arange < ngal``), never by value.
+GALPROP_DATASETS = ("gal_app_mag",)
+
 
 def load_survey_marks(survey_path, datasets=None, sort_rows_by_z=True):
     """Load per-galaxy mark datasets present in the pixelated survey file.
@@ -138,3 +147,18 @@ def load_survey_marks(survey_path, datasets=None, sort_rows_by_z=True):
                 for ds, arr in out.items()
             }
     return out
+
+
+def load_survey_galprops(survey_path, datasets=None, sort_rows_by_z=True):
+    """Load per-galaxy property datasets (:data:`GALPROP_DATASETS`).
+
+    Same padded layout and row z-sort permutation as
+    :func:`load_survey_marks` (the permutation is re-derived from this file's
+    ``zgals``/``ngals``, so properties stay co-indexed with the sorted galaxy
+    arrays) -- but from the separate non-mark registry, so requesting
+    galaxy properties can never enroll a catalog into the marked-host model.
+    Real slots must be masked via ``ngals``; the 0.0 padding is not a value.
+    """
+    wanted = GALPROP_DATASETS if datasets is None else tuple(datasets)
+    return load_survey_marks(
+        survey_path, datasets=wanted, sort_rows_by_z=sort_rows_by_z)

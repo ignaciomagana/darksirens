@@ -118,7 +118,7 @@ def _clustered_catalog(delta_g="dummy"):
 # ---------------------------------------------------------------------------
 
 def test_c_mode_enum_and_default():
-    assert C_MODES == {"per_pixel": 0, "aggregate": 1}
+    assert C_MODES == {"per_pixel": 0, "aggregate": 1, "selection": 2}
     assert C_MODE_PER_PIXEL == 0 and C_MODE_AGGREGATE == 1
     # the container default IS the legacy mode -- every existing caller that
     # never sets c_mode keeps the bit-identical per-pixel estimator.  It is

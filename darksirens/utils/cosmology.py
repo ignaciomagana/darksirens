@@ -406,6 +406,24 @@ def dL_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial, distance_table=N
 
 
 @threads_distance_table()
+def distance_modulus(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
+                     distance_table=None):
+    """Distance modulus ``DM(z) = 5 log10(dL / 10 pc)`` (dL tabulated in Mpc).
+
+    Because the distance table is interpolated in (Om0, w0, wa, z) and scaled
+    by the single factor ``H0Planck / H0`` (see :func:`r_of_z`), ``dL`` is
+    EXACTLY proportional to ``1/H0`` and therefore
+    ``DM(z; H0) = DM(z; H0=100) - 5 log10(H0 / 100)`` to float precision --
+    the property that lets an h-scaled absolute magnitude
+    ``M0hat = M0 - 5 log10 h`` cancel H0 out of any selection function built
+    from ``m_lim - M0 - DM(z)``.  ``z = 0`` (dL -> 0) is guarded so the
+    modulus underflows to a large negative number instead of -inf.
+    """
+    dL = dL_of_z(z, H0, Om0, w0, wa)
+    return 5.0 * jnp.log10(jnp.maximum(dL, 1e-12) * 1.0e5)
+
+
+@threads_distance_table()
 def dL_grid_bounds(H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
                    distance_table=None):
     """Return the luminosity-distance support covered by ``zgrid``.
