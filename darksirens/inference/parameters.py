@@ -407,7 +407,10 @@ def build_parameter_decoder(
         ("selection_fit_kcorr", "selection_kcorr_by_catalog"),
         ("selection_strata_struct", "selection_strata_by_catalog"),
     ):
-        if getattr(opts, _retired, None) is not None:
+        # Truthiness, not `is not None`: every archived pre-per-catalog
+        # settings.json recorded selection_fit_kcorr == [] for a K=0-template
+        # run, and an empty retired value carries the same meaning as absent.
+        if getattr(opts, _retired, None):
             raise ValueError(
                 f"opts.{_retired} is retired: the selection fit is now per "
                 f"catalog. Set opts.{_now} to a length-n_catalogs sequence "

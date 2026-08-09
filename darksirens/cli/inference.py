@@ -1259,6 +1259,10 @@ def _normalize_selection_fit_paths(opts):
     raw = getattr(opts, "selection_fit", None)
     if raw in (None, ""):
         opts.selection_fit_paths = [None] * opts.n_catalogs
+        # Still assert the map pairing: --stratum_map with NO fit anywhere
+        # must be refused pre-load too, or the docstring's "before any
+        # catalog is read" promise silently narrows to fit-carrying runs.
+        _check_stratum_map_pairing(opts)
         return
     entries = [s.strip() for s in str(raw).split(",")]
     if len(entries) != opts.n_catalogs:
