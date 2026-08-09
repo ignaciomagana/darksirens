@@ -129,8 +129,11 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
         # the stratum count are floats; the stratum-map sha256 is a STRING
         # and must bypass the float coercion below.  Compared in the CLI
         # against the run's multi-stratum fit + --stratum_map.
+        import re as _re
+
         _fid.update({k: _diag[k] for k in _diag
-                     if k.startswith("selection_s") or k == "selection_n_strata"})
+                     if _re.match(r"selection_s\d+_", k)
+                     or k == "selection_n_strata"})
         _fid_str = {k: str(_diag[k]) for k in _diag
                     if k == "selection_stratum_map_sha256"}
         if _fid:
