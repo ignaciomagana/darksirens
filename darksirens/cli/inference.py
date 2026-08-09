@@ -551,6 +551,64 @@ def run_completion_validation_multitracer(
     return paths
 
 
+def _check_selection_qtable_theta(q_fiducials, opts):
+    """Fail-closed theta provenance of c_mode=selection Q tables.
+
+    theta is SAMPLED by design (exempt from the pinned-to-build rule, like
+    H0), but a table's FIXED C_sel base must come from the SAME offline fit
+    that centers this run's theta prior: (m_lim, M0hat, sigma_M) compared to
+    1e-6 and the K(z) template compared elementwise INCLUDING the coefficient
+    count (a pre-K table -- no ``selection_kcorr_c*`` stamps -- is only
+    consistent with a K = 0 fit).  A selection-stamped table with no
+    --selection_fit at all draws a loud warning (deliberate-ablation escape
+    hatch), not an error.
+    """
+    for _fid in q_fiducials:
+        if not _fid or "selection_M0hat" not in _fid:
+            continue
+        _theta = getattr(opts, "selection_fit_theta", None)
+        if _theta is None:
+            _warn(
+                "Q table was built on a c_mode=selection base at "
+                f"theta_hat=(m_lim={_fid['selection_m_lim']:.4f}, "
+                f"M0hat={_fid['selection_M0hat']:.4f}, "
+                f"sigma_M={_fid['selection_sigma_M']:.4f}) but no "
+                "--selection_fit anchors this run's theta prior: the table's "
+                "fixed base and the wide-open sampled theta are only "
+                "consistent as a deliberate ablation."
+            )
+            continue
+        for _name, _key in (("m_lim", "selection_m_lim"),
+                            ("M0hat", "selection_M0hat"),
+                            ("sigma_M", "selection_sigma_M")):
+            if abs(_theta[_name] - float(_fid[_key])) > 1e-6:
+                _fatal(
+                    f"Q table {_fid.get('path')} was built at "
+                    f"{_name}={float(_fid[_key]):.6f} but --selection_fit "
+                    f"gives {_name}={_theta[_name]:.6f}: the table's fixed "
+                    "C_sel base and this run's theta prior must come from "
+                    "the SAME darksirens_fit_selection output. Rebuild the "
+                    "table with the current fit (or point --selection_fit "
+                    "at the fit the table was built with)."
+                )
+        _run_k = tuple(getattr(opts, "selection_fit_kcorr", None) or ())
+        _tab_k = []
+        _j = 1
+        while f"selection_kcorr_c{_j}" in _fid:
+            _tab_k.append(float(_fid[f"selection_kcorr_c{_j}"]))
+            _j += 1
+        _tab_k = tuple(_tab_k)
+        if len(_tab_k) != len(_run_k) or any(
+                abs(a - b) > 1e-9 for a, b in zip(_tab_k, _run_k)):
+            _fatal(
+                f"Q table {_fid.get('path')} was built with K(z) "
+                f"coefficients {list(_tab_k)} but --selection_fit carries "
+                f"{list(_run_k)}: the fixed C_sel base and the run's "
+                "selection model must share the SAME K-correction "
+                "template. Rebuild the table from the current fit."
+            )
+
+
 def format_selection_guard_summary(
     guard_mode, sampler, soft_guard, max_likelihood_variance
 ):
@@ -2049,6 +2107,9 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
                                 "sigma_M": (float(_sel["sigma_M"]), float(_sd[1]))}
         opts.selection_fit_theta = {k: float(_sel[k])
                                     for k in ("m_lim", "M0hat", "sigma_M")}
+        # Fixed K(z) template of the fit (structural on SurveyParams via the
+        # decoder; empty tuple = K = 0, the pre-K behaviour).
+        opts.selection_fit_kcorr = tuple(_sel.get("k_corr_coeffs") or ())
         fixed_parameter_values.setdefault("m_lim", float(_sel["m_lim"]))
 
     res = build_parameter_space(
@@ -2101,34 +2162,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # pinned-to-build rule, like H0), but the table's FIXED base must have
     # been built from the SAME offline fit that centers this run's theta
     # prior -- a stale table silently carries the wrong completeness base.
-    for _fid in _q_fiducials:
-        if not _fid or "selection_M0hat" not in _fid:
-            continue
-        _theta = getattr(opts, "selection_fit_theta", None)
-        if _theta is None:
-            _warn(
-                "Q table was built on a c_mode=selection base at "
-                f"theta_hat=(m_lim={_fid['selection_m_lim']:.4f}, "
-                f"M0hat={_fid['selection_M0hat']:.4f}, "
-                f"sigma_M={_fid['selection_sigma_M']:.4f}) but no "
-                "--selection_fit anchors this run's theta prior: the table's "
-                "fixed base and the wide-open sampled theta are only "
-                "consistent as a deliberate ablation."
-            )
-            continue
-        for _name, _key in (("m_lim", "selection_m_lim"),
-                            ("M0hat", "selection_M0hat"),
-                            ("sigma_M", "selection_sigma_M")):
-            if abs(_theta[_name] - float(_fid[_key])) > 1e-6:
-                _fatal(
-                    f"Q table {_fid.get('path')} was built at "
-                    f"{_name}={float(_fid[_key]):.6f} but --selection_fit "
-                    f"gives {_name}={_theta[_name]:.6f}: the table's fixed "
-                    "C_sel base and this run's theta prior must come from "
-                    "the SAME darksirens_fit_selection output. Rebuild the "
-                    "table with the current fit (or point --selection_fit "
-                    "at the fit the table was built with)."
-                )
+    _check_selection_qtable_theta(_q_fiducials, opts)
     # Prior wider than the base is first-order-consistent only near theta_hat:
     # warn when the sampled bounds reach beyond +-5 prior sds of the center.
     if getattr(opts, "selection_prior", None):

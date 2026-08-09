@@ -45,7 +45,22 @@ def main(argv=None):
     p.add_argument("--family", default="gaussian", choices=["gaussian"],
                    help="Luminosity-function family (schechter ships with "
                         "real-catalog ingestion).")
+    p.add_argument("--k_corr_coeffs", default=None,
+                   help="Comma-separated polynomial coefficients c1[,c2,...] "
+                        "of a fixed K-correction template K(z) = sum_j c_j "
+                        "z**j applied to the OBSERVED magnitudes (no constant "
+                        "term: c0 is exactly degenerate with M0hat). Default: "
+                        "no K-correction.")
     opts = p.parse_args(argv)
+
+    k_corr_coeffs = None
+    if opts.k_corr_coeffs:
+        try:
+            k_corr_coeffs = tuple(
+                float(c) for c in opts.k_corr_coeffs.split(",") if c.strip())
+        except ValueError:
+            _fatal(f"--k_corr_coeffs is not a comma-separated float list: "
+                   f"{opts.k_corr_coeffs!r}")
 
     survey = Path(opts.survey_path)
     out = Path(opts.out) if opts.out else survey.parent / "selection_fit.json"
@@ -75,10 +90,13 @@ def main(argv=None):
 
     _section("Fitting truncated luminosity function")
     # Single stratum for now; the strata seam is the per-galaxy mask above.
-    fit = fit_selection_from_mags(m, z, opts.m_lim, family=opts.family)
+    fit = fit_selection_from_mags(m, z, opts.m_lim, family=opts.family,
+                                  k_corr_coeffs=k_corr_coeffs)
     sd = np.sqrt(np.diag(fit.cov))
     _row("family", fit.family)
     _row("m_lim (fixed datum)", f"{fit.m_lim:.4f}")
+    if k_corr_coeffs:
+        _row("K(z) coeffs", ", ".join(f"{c:.5g}" for c in k_corr_coeffs))
     _row("M0hat", f"{fit.M0hat:.5f} +/- {sd[0]:.5f}  (h-scaled: M0 - 5 log10 h)")
     _row("sigma_M", f"{fit.sigma_M:.5f} +/- {sd[1]:.5f}")
     _end()

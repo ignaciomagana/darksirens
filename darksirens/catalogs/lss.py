@@ -119,6 +119,12 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
             # against the --selection_fit prior center.
             "selection_m_lim", "selection_M0hat", "selection_sigma_M",
         ) if k in _diag}
+        # K(z) template coefficients of a selection base (variable count,
+        # stamped per coefficient as selection_kcorr_c1, c2, ...); absent on
+        # pre-K tables, meaning K = 0.  Compared elementwise in the CLI
+        # against the --selection_fit template.
+        _fid.update({k: _diag[k] for k in _diag
+                     if k.startswith("selection_kcorr_c")})
         if _fid:
             print(f"    - Q_LSS build fiducials: {_fid}")
         # Carry the build-time conditioning values out so the CLI can enforce

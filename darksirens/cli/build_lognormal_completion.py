@@ -124,7 +124,22 @@ def _selection_cbar_fine(selection_fit, cosmo):
     return np.asarray(c_sel_gaussian(
         jnp.asarray(zgrid), float(selection_fit["m_lim"]),
         float(selection_fit["M0hat"]), float(selection_fit["sigma_M"]),
-        cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa), dtype=float)
+        cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
+        k_corr_coeffs=tuple(selection_fit.get("k_corr_coeffs") or ())),
+        dtype=float)
+
+
+def _selection_kcorr_stamp(selection_fit):
+    """Per-coefficient provenance keys for the fit's fixed K(z) template.
+
+    Stamped as scalar ``selection_kcorr_c{j}`` attrs (j from 1) so the float
+    whitelist machinery carries them; absent keys mean K = 0 (pre-K tables
+    load unchanged).  The inference CLI compares them elementwise against the
+    --selection_fit template.
+    """
+    coeffs = tuple(selection_fit.get("k_corr_coeffs") or ())
+    return {f"selection_kcorr_c{j}": float(c)
+            for j, c in enumerate(coeffs, start=1)}
 
 
 def _require_selection_fit(c_mode, selection_fit):
@@ -409,6 +424,7 @@ def _build_completion_radial(
             "selection_M0hat": float(selection_fit["M0hat"]),
             "selection_sigma_M": float(selection_fit["sigma_M"]),
             "selection_family": str(selection_fit.get("family", "gaussian")),
+            **_selection_kcorr_stamp(selection_fit),
         })
 
     logq_members = None
@@ -736,6 +752,7 @@ def _build_completion_gp3d(
                 "selection_M0hat": float(selection_fit["M0hat"]),
                 "selection_sigma_M": float(selection_fit["sigma_M"]),
                 "selection_family": str(selection_fit.get("family", "gaussian")),
+                **_selection_kcorr_stamp(selection_fit),
             })
         d.update(extra)
         return d

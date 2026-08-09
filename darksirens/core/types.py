@@ -139,6 +139,13 @@ class SurveyParams(NamedTuple):
     m_lim: Any = 24.0
     M0hat: Any = -20.2
     sigma_M: Any = 1.0
+    # Fixed K-correction template K(z) = sum_j c_j z**j applied to the
+    # selection curve's observed-frame magnitudes (no constant term -- c0 is
+    # exactly degenerate with M0hat).  STRUCTURAL like z_depth/c_mode: a
+    # hashable tuple of floats or None (= K = 0, the legacy path); never
+    # sampled or traced.  Must match the template the selection fit and any
+    # prebuilt Q table were computed with (provenance-checked at load).
+    k_corr_coeffs: Any = None
 
 
 class EMCatalog(NamedTuple):
