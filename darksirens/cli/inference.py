@@ -556,31 +556,59 @@ def _check_selection_qtable_theta(q_fiducials, opts):
 
     theta is SAMPLED by design (exempt from the pinned-to-build rule, like
     H0), but a table's FIXED C_sel base must come from the SAME offline fit
-    that centers this run's theta prior: (m_lim, M0hat, sigma_M) compared to
-    1e-6 and the K(z) template compared elementwise INCLUDING the coefficient
-    count (a pre-K table -- no ``selection_kcorr_c*`` stamps -- is only
-    consistent with a K = 0 fit).  A selection-stamped table with no
-    --selection_fit at all draws a loud warning (deliberate-ablation escape
-    hatch), not an error.
+    that centers this run's theta prior: first the luminosity-function FAMILY
+    (the two bases differ by the whole LF shape, not a parameter), then that
+    family's theta compared to 1e-6, then the K(z) template compared
+    elementwise INCLUDING the coefficient count (a pre-K table -- no
+    ``selection_kcorr_c*`` stamps -- is only consistent with a K = 0 fit).  A
+    selection-stamped table with no --selection_fit at all draws a loud
+    warning (deliberate-ablation escape hatch), not an error.
     """
+    from darksirens.redshift.selection import SELECTION_THETA_FIELDS
+
     for _fid in q_fiducials:
-        if not _fid or "selection_M0hat" not in _fid:
+        # Activation on EITHER family's magnitude center: keying on
+        # selection_M0hat alone would silently skip every schechter table.
+        if not _fid or not ({"selection_M0hat", "selection_Mstar_hat"}
+                            & _fid.keys()):
             continue
+        # The stamp when present; inferred from the theta keys for tables
+        # built before the family tag existed.
+        _tab_family = str(_fid.get("selection_family") or (
+            "schechter" if "selection_Mstar_hat" in _fid else "gaussian"))
+        _run_family = getattr(opts, "selection_family", None) or "gaussian"
         _theta = getattr(opts, "selection_fit_theta", None)
         if _theta is None:
             _warn(
-                "Q table was built on a c_mode=selection base at "
-                f"theta_hat=(m_lim={_fid['selection_m_lim']:.4f}, "
-                f"M0hat={_fid['selection_M0hat']:.4f}, "
-                f"sigma_M={_fid['selection_sigma_M']:.4f}) but no "
-                "--selection_fit anchors this run's theta prior: the table's "
-                "fixed base and the wide-open sampled theta are only "
-                "consistent as a deliberate ablation."
+                f"Q table was built on a c_mode=selection '{_tab_family}' "
+                "base at theta_hat=("
+                + ", ".join(
+                    f"{_n}={float(_fid[f'selection_{_n}']):.4f}"
+                    for _n in SELECTION_THETA_FIELDS[_tab_family]
+                    if f"selection_{_n}" in _fid)
+                + ") but no --selection_fit anchors this run's theta prior: "
+                "the table's fixed base and the wide-open sampled theta are "
+                "only consistent as a deliberate ablation."
             )
             continue
-        for _name, _key in (("m_lim", "selection_m_lim"),
-                            ("M0hat", "selection_M0hat"),
-                            ("sigma_M", "selection_sigma_M")):
+        if _tab_family != _run_family:
+            _fatal(
+                f"Q table {_fid.get('path')}'s fixed C_sel base is a "
+                f"'{_tab_family}' curve but this run samples the "
+                f"'{_run_family}' family; the two completeness bases differ "
+                "by the whole LF shape, not by a parameter. Rebuild the table "
+                "from this fit (or point --selection_fit at the fit the table "
+                "was built with)."
+            )
+        for _name in SELECTION_THETA_FIELDS[_run_family]:
+            _key = f"selection_{_name}"
+            if _key not in _fid:
+                _fatal(
+                    f"Q table {_fid.get('path')} carries no {_key} stamp, so "
+                    f"its fixed '{_run_family}' C_sel base cannot be verified "
+                    "against --selection_fit. Rebuild the table with the "
+                    "current darksirens_build_lognormal_completion."
+                )
             if abs(_theta[_name] - float(_fid[_key])) > 1e-6:
                 _fatal(
                     f"Q table {_fid.get('path')} was built at "
@@ -978,23 +1006,31 @@ def build_parser():
                          "lognormal_completion --c-mode (hard-checked at load: "
                          "the two bases differ by the entire clustering "
                          "signal). 'selection': the PARAMETRIC magnitude-"
-                         "limited completeness C_sel(z; m_lim, M0hat, sigma_M) "
-                         "-- no counts in the budget at all; M0hat/sigma_M are "
-                         "SAMPLED (under the --selection_fit Gaussian prior "
-                         "when given, flat within bounds otherwise) and m_lim "
-                         "is a fixed truncation datum settable via "
+                         "limited completeness C_sel(z; theta) -- no counts in "
+                         "the budget at all; the LUMINOSITY-FUNCTION FAMILY "
+                         "comes from --selection_fit (gaussian: sampled "
+                         "M0hat/sigma_M; schechter: sampled Mstar_hat/alpha), "
+                         "and without a fit the run is the wide-open gaussian "
+                         "ablation. theta is SAMPLED (under the "
+                         "--selection_fit Gaussian prior when given, flat "
+                         "within bounds otherwise) and m_lim is a fixed "
+                         "truncation datum settable via "
                          "--fixed_parameter_values."))
     g.add_argument("--selection_fit", default=None,
                    help=("selection_fit.json from darksirens_fit_selection "
-                         "(c_mode=selection only). Its theta_hat becomes the "
-                         "center and its marginal Laplace sds the widths of "
-                         "truncated-normal priors on the sampled M0hat / "
-                         "sigma_M, and m_lim is pinned to the fitted stratum's "
+                         "(c_mode=selection only). The fit DECLARES the "
+                         "luminosity-function family: gaussian (sampled "
+                         "M0hat/sigma_M) or schechter (sampled "
+                         "Mstar_hat/alpha, which additionally pins the "
+                         "M_faint_offset protocol constant). Its theta_hat "
+                         "becomes the center and its marginal Laplace sds the "
+                         "widths of truncated-normal priors on those sampled "
+                         "labels, and m_lim is pinned to the fitted stratum's "
                          "datum unless --fixed_parameter_values overrides it. "
                          "Any --lss_completion table must have been built with "
-                         "the SAME fit (theta_hat stamped and hard-checked at "
-                         "load). Omit for flat-within-bounds selection priors "
-                         "(the wide-open ablation)."))
+                         "the SAME fit (family + theta_hat stamped and "
+                         "hard-checked at load). Omit for flat-within-bounds "
+                         "selection priors (the wide-open ablation)."))
     g.add_argument("--stratum_map", default=None,
                    help=("HDF5 file with a full-sky 'stratum_map' dataset "
                          "(RING, at the SURVEY's nside) assigning every pixel "
@@ -2106,6 +2142,9 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # unless the user overrides it explicitly.  Persisted on opts so
     # post-processing (build_parameter_decoder) re-derives the SAME space.
     opts.selection_prior = None
+    # Always recorded in settings.json so post-processing rebuilds the SAME
+    # label ordering (the family gates which theta the survey block carries).
+    opts.selection_family = "gaussian"
     if getattr(opts, "stratum_map", None) and not getattr(
             opts, "selection_fit", None):
         _fatal("--stratum_map without --selection_fit: the stratum map only "
@@ -2118,6 +2157,9 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         from darksirens.redshift.selection import load_selection_fit_strata
         _strata = load_selection_fit_strata(opts.selection_fit)
         _sel = _strata[0]     # reference stratum: prior center + m_lim datum
+        # The fit declares the luminosity-function family; the stratified
+        # sub-branch below is reachable for gaussian only (loader-enforced).
+        opts.selection_family = str(_sel.get("family", "gaussian"))
         if len(_strata) > 1:
             if not getattr(opts, "stratum_map", None):
                 _fatal(f"--selection_fit carries {len(_strata)} strata but no "
@@ -2152,15 +2194,29 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         elif getattr(opts, "stratum_map", None):
             _fatal("--stratum_map given but the --selection_fit carries a "
                    "single stratum; drop the map or refit with --strata.")
+        # Prior centers, pins and the Q-table provenance theta are all
+        # FAMILY-DRIVEN, off the one table in redshift/selection.py, so the sd
+        # order can never drift from the covariance's row/column order.
+        from darksirens.redshift.selection import (
+            SELECTION_SAMPLED_FIELDS, SELECTION_THETA_FIELDS,
+        )
+        _fields = SELECTION_SAMPLED_FIELDS[opts.selection_family]
         _sd = np.sqrt(np.diag(np.asarray(_sel["cov"], dtype=float)))
-        opts.selection_prior = {"M0hat": (float(_sel["M0hat"]), float(_sd[0])),
-                                "sigma_M": (float(_sel["sigma_M"]), float(_sd[1]))}
-        opts.selection_fit_theta = {k: float(_sel[k])
-                                    for k in ("m_lim", "M0hat", "sigma_M")}
+        opts.selection_prior = {f: (float(_sel[f]), float(_sd[i]))
+                                for i, f in enumerate(_fields)}
+        opts.selection_fit_theta = {
+            k: float(_sel[k])
+            for k in SELECTION_THETA_FIELDS[opts.selection_family]}
         # Fixed K(z) template of the fit (structural on SurveyParams via the
-        # decoder; empty tuple = K = 0, the pre-K behaviour).
+        # decoder; empty tuple = K = 0, the pre-K behaviour, and the only
+        # legal value for a schechter fit).
         opts.selection_fit_kcorr = tuple(_sel.get("k_corr_coeffs") or ())
         fixed_parameter_values.setdefault("m_lim", float(_sel["m_lim"]))
+        if opts.selection_family == "schechter":
+            # PROTOCOL constant of the schechter model: the fit, the Q-table
+            # base and the likelihood must carry the same faint-end cutoff.
+            fixed_parameter_values.setdefault(
+                "M_faint_offset", float(_sel["M_faint_offset"]))
         if getattr(opts, "selection_strata_struct", None):
             # Attach the full-sky stratum map to the data bundle so
             # prepare_catalog_views can build the per-stratum empty-pixel
@@ -2209,6 +2265,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         mark_names_by_catalog  = getattr(opts, "mark_names_by_catalog", None),
         c_mode                 = opts.c_mode,
         selection_prior        = opts.selection_prior,
+        selection_family       = opts.selection_family,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]

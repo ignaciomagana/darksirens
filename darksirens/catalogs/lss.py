@@ -116,8 +116,11 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
             "bias_b_miss", "lss_corr_length_mpc", "lss_sigma",
             # Parametric-selection base (c_mode="selection" tables): the
             # theta_hat the fixed base was built at, checked in the CLI
-            # against the --selection_fit prior center.
+            # against the --selection_fit prior center.  Mirrors
+            # redshift/selection.SELECTION_THETA_FIELDS (both families).
             "selection_m_lim", "selection_M0hat", "selection_sigma_M",
+            "selection_Mstar_hat", "selection_alpha",
+            "selection_M_faint_offset",
         ) if k in _diag}
         # K(z) template coefficients of a selection base (variable count,
         # stamped per coefficient as selection_kcorr_c1, c2, ...); absent on
@@ -125,8 +128,15 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
         # against the --selection_fit template.
         _fid.update({k: _diag[k] for k in _diag
                      if k.startswith("selection_kcorr_c")})
-        if _fid:
-            print(f"    - Q_LSS build fiducials: {_fid}")
+        # Non-numeric provenance: the luminosity-function family of a
+        # selection base is a NAME, not a value, and must not reach the
+        # float() coercion below.  The CLI compares it against the run's
+        # family before it compares any theta (the two bases differ by the
+        # whole LF shape).
+        _fid_str = {k: str(_diag[k]) for k in ("selection_family",)
+                    if k in _diag}
+        if _fid or _fid_str:
+            print(f"    - Q_LSS build fiducials: {_fid | _fid_str}")
         # Carry the build-time conditioning values out so the CLI can enforce
         # them against the parameter space once it is known (the sampled-label
         # set does not exist yet at load time).  See
@@ -134,6 +144,7 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
         lss_completion_fiducials = {
             "path": lss_path,
             **{k: float(v) for k, v in _fid.items()},
+            **_fid_str,
         }
         print(
             "    [!] Q_LSS is FIXED at its build-time fiducials (cosmology, n0, "

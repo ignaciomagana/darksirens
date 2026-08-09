@@ -59,7 +59,10 @@ from darksirens.catalogs.io import load_survey
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial
 from darksirens.redshift.completion import _precompute_grids, _kde_dndz_obs
-from darksirens.redshift.selection import load_selection_fit_json
+from darksirens.redshift.selection import (
+    SELECTION_THETA_FIELDS,
+    load_selection_fit_json,
+)
 from darksirens.redshift.lognormal_completion import (
     gaussian_correlation_spectrum,
     poisson_lognormal_map,
@@ -111,14 +114,25 @@ def _apply_lss_overrides(survey, *, lss_corr_length_mpc=None, lss_sigma=None):
 def _selection_cbar_fine(selection_fit, cosmo):
     """``C_sel(zgrid; theta_hat)`` for the parametric completeness base.
 
-    Evaluated at the builder's fiducial cosmology; since ``M0hat`` is h-scaled
-    the curve is exactly H0-invariant, so the fiducial choice carries no H0
-    imprint (Om0/w0/wa enter weakly through the distance shape, same footing
-    as every other fixed build fiducial).  The Q table is conditioned on this
-    FIXED theta_hat while the likelihood samples theta around it -- the same
+    Evaluated at the builder's fiducial cosmology; since ``M0hat``
+    (``Mstar_hat`` for the schechter family) is h-scaled, the curve is exactly
+    H0-invariant either way, so the fiducial choice carries no H0 imprint
+    (Om0/w0/wa enter weakly through the distance shape, same footing as every
+    other fixed build fiducial).  The Q table is conditioned on this FIXED
+    theta_hat while the likelihood samples theta around it -- the same
     first-order convention as the fixed-fiducial n0/delta, guarded at load by
     the theta_hat-vs-prior-center provenance check.
     """
+    family = str(selection_fit.get("family", "gaussian"))
+    if family == "schechter":
+        from darksirens.redshift.selection import c_sel_schechter
+
+        return np.asarray(c_sel_schechter(
+            jnp.asarray(zgrid), float(selection_fit["m_lim"]),
+            float(selection_fit["Mstar_hat"]), float(selection_fit["alpha"]),
+            float(selection_fit["M_faint_offset"]),
+            cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa), dtype=float)
+
     from darksirens.redshift.selection import c_sel_gaussian
 
     return np.asarray(c_sel_gaussian(
@@ -127,6 +141,20 @@ def _selection_cbar_fine(selection_fit, cosmo):
         cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
         k_corr_coeffs=tuple(selection_fit.get("k_corr_coeffs") or ())),
         dtype=float)
+
+
+def _selection_theta_stamp(selection_fit):
+    """Q-table provenance stamp of the fit's FIXED theta, family-driven.
+
+    ONE source for both builder paths; the key set is
+    ``SELECTION_THETA_FIELDS[family]`` (so a gaussian table stamps exactly the
+    pre-schechter keys) plus the family tag itself, which the inference CLI
+    compares against the run's family before comparing any theta.
+    """
+    family = str(selection_fit.get("family", "gaussian"))
+    return {"selection_family": family,
+            **{f"selection_{k}": float(selection_fit[k])
+               for k in SELECTION_THETA_FIELDS[family]}}
 
 
 def _selection_kcorr_stamp(selection_fit):
@@ -420,10 +448,7 @@ def _build_completion_radial(
         # build theta does not match the --selection_fit prior center fed to
         # the inference (a stale table would carry the WRONG fixed base).
         diagnostics.update({
-            "selection_m_lim": float(selection_fit["m_lim"]),
-            "selection_M0hat": float(selection_fit["M0hat"]),
-            "selection_sigma_M": float(selection_fit["sigma_M"]),
-            "selection_family": str(selection_fit.get("family", "gaussian")),
+            **_selection_theta_stamp(selection_fit),
             **_selection_kcorr_stamp(selection_fit),
         })
 
@@ -748,10 +773,7 @@ def _build_completion_gp3d(
         d["c_mode"] = c_mode
         if c_mode == "selection":
             d.update({
-                "selection_m_lim": float(selection_fit["m_lim"]),
-                "selection_M0hat": float(selection_fit["M0hat"]),
-                "selection_sigma_M": float(selection_fit["sigma_M"]),
-                "selection_family": str(selection_fit.get("family", "gaussian")),
+                **_selection_theta_stamp(selection_fit),
                 **_selection_kcorr_stamp(selection_fit),
             })
         d.update(extra)
@@ -1061,10 +1083,11 @@ def main(argv=None):
     _row("Members", opts.n_members)
     _row("Seed", opts.seed)
     if selection_fit is not None:
-        _row("Selection theta_hat",
-             f"m_lim={selection_fit['m_lim']:.3f} "
-             f"M0hat={selection_fit['M0hat']:.4f} "
-             f"sigma_M={selection_fit['sigma_M']:.4f}")
+        # Family-driven: a schechter fit carries no M0hat/sigma_M at all.
+        _family = str(selection_fit.get("family", "gaussian"))
+        _row(f"Selection theta_hat [{_family}]",
+             "  ".join(f"{k}={float(selection_fit[k]):.4f}"
+                       for k in SELECTION_THETA_FIELDS[_family]))
     logq_map, logq_members, diagnostics = build_completion(
         opts.catalog, mode=opts.mode, n_members=opts.n_members, seed=opts.seed,
         prior_strength=opts.prior_strength, maxiter=opts.maxiter,

@@ -8,7 +8,10 @@ writes a selection JSON consumed by
 * ``darksirens_build_lognormal_completion --c-mode selection --selection-fit``
   (the Q-table base is ``C_sel(z; theta_hat) dN_exp``), and
 * ``darksirens_inference --selection_fit`` (theta_hat and the marginal
-  Laplace sds become the Gaussian prior on the SAMPLED ``M0hat``/``sigma_M``).
+  Laplace sds become the Gaussian prior on the SAMPLED theta -- ``M0hat``/
+  ``sigma_M`` for the gaussian family, ``Mstar_hat``/``alpha`` for the
+  schechter one, which additionally pins the ``M_faint_offset`` protocol
+  constant).
 
 The fit works in reference absolute magnitudes ``m - DM(z; H0=100)``, so it
 is exactly independent of the true H0 (h-scaled convention) and of the galaxy
@@ -28,7 +31,12 @@ import numpy as np
 
 from darksirens.catalogs.io import load_survey, load_survey_galprops
 from darksirens.cli.common import _banner, _end, _fatal, _ok, _row, _section
-from darksirens.redshift.selection import fit_selection_from_mags
+from darksirens.redshift.selection import (
+    M_FAINT_OFFSET_DEFAULT,
+    SELECTION_FAMILIES,
+    SELECTION_SAMPLED_FIELDS,
+    fit_selection_from_mags,
+)
 
 
 def main(argv=None):
@@ -42,9 +50,24 @@ def main(argv=None):
     p.add_argument("--out", default=None,
                    help="Output JSON path (default: selection_fit.json next "
                         "to the survey file).")
-    p.add_argument("--family", default="gaussian", choices=["gaussian"],
-                   help="Luminosity-function family (schechter ships with "
-                        "real-catalog ingestion).")
+    p.add_argument("--family", default="gaussian",
+                   choices=list(SELECTION_FAMILIES),
+                   help="Luminosity-function family of the selection model: "
+                        "'schechter' is the real-catalog LF (samples "
+                        "Mstar_hat, alpha; no K(z) template, single stratum); "
+                        "'gaussian' is the mock program's truncated-normal "
+                        "magnitude model (samples M0hat, sigma_M).")
+    p.add_argument("--m_faint_offset", type=float,
+                   default=M_FAINT_OFFSET_DEFAULT,
+                   help="Schechter faint-end cutoff as an offset from M*: "
+                        "M_faint = Mstar_hat + offset [mag] (default "
+                        f"{M_FAINT_OFFSET_DEFAULT} = 0.01 L*). A PROTOCOL "
+                        "constant, not a fitted parameter: it fixes the "
+                        "completeness denominator, so the Q-table build and "
+                        "the inference run must carry the SAME value. The fit "
+                        "REFUSES samples reaching fainter than Mstar_hat + "
+                        "offset (the MLE would be pinned at the support "
+                        "boundary).")
     p.add_argument("--k_corr_coeffs", default=None,
                    help="Comma-separated polynomial coefficients c1[,c2,...] "
                         "of a fixed K-correction template K(z) = sum_j c_j "
@@ -62,6 +85,22 @@ def main(argv=None):
                         "'label:m_lim,label:m_lim' (e.g. '0:19.5,1:21.0'); "
                         "strata not listed use --m_lim. Only with --strata.")
     opts = p.parse_args(argv)
+
+    if opts.family == "schechter":
+        # Both are structural limits of the pinned c_sel_schechter, refused
+        # here so a long fit never produces an unconsumable payload.
+        if opts.k_corr_coeffs:
+            _fatal("--family schechter with --k_corr_coeffs: the pinned "
+                   "c_sel_schechter carries no K(z) template, so the fitted "
+                   "theta could not be consumed in-likelihood. Fit the "
+                   "gaussian family with --k_corr_coeffs, or extend "
+                   "c_sel_schechter (and its H0-invariance pin) first.")
+        if opts.strata or opts.m_lim_per_stratum:
+            _fatal("--family schechter with --strata/--m_lim_per_stratum: the "
+                   "stratified in-likelihood curve stack is built from the "
+                   "gaussian common-mode + offset decomposition and has no "
+                   "schechter counterpart. Fit each stratum as its own "
+                   "single-stratum schechter file, or use --family gaussian.")
 
     k_corr_coeffs = None
     if opts.k_corr_coeffs:
@@ -130,6 +169,7 @@ def main(argv=None):
         m_lim_s = m_lim_by.get(int(name) if name != "all" else -1, opts.m_lim)
         fit = fit_selection_from_mags(m[mask], z[mask], m_lim_s,
                                       family=opts.family, stratum=name,
+                                      M_faint_offset=opts.m_faint_offset,
                                       k_corr_coeffs=k_corr_coeffs)
         fits.append(fit)
         sd = np.sqrt(np.diag(fit.cov))
@@ -137,8 +177,16 @@ def main(argv=None):
         _row("  m_lim (fixed datum)", f"{fit.m_lim:.4f}")
         if k_corr_coeffs:
             _row("  K(z) coeffs", ", ".join(f"{c:.5g}" for c in k_corr_coeffs))
-        _row("  M0hat", f"{fit.M0hat:.5f} +/- {sd[0]:.5f}  (h-scaled)")
-        _row("  sigma_M", f"{fit.sigma_M:.5f} +/- {sd[1]:.5f}")
+        # Driven by SELECTION_SAMPLED_FIELDS so the sd row order can never
+        # drift from the covariance's row/column order.
+        for i, name_ in enumerate(SELECTION_SAMPLED_FIELDS[fit.family]):
+            scaled = "  (h-scaled)" if name_ in ("M0hat", "Mstar_hat") else ""
+            _row(f"  {name_}",
+                 f"{float(getattr(fit, name_)):.5f} +/- {sd[i]:.5f}{scaled}")
+        if fit.family == "schechter":
+            _row("  M_faint_offset",
+                 f"{fit.M_faint_offset:.4f}  (fixed protocol constant; "
+                 "must match the Q-table build and the inference run)")
     _end()
 
     # A single stratum stays byte-compatible with the 1.0 consumers; only a
