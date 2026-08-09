@@ -199,6 +199,42 @@ def test_alpha_domain_is_refused_everywhere(tmp_path):
             selection_prior={"alpha": (-1.2, 0.01)})
 
 
+def _schechter_space(**kw):
+    return build_parameter_space(
+        "powerlaw+peak", True, True, False, universe_model="dark_sirens",
+        use_lss=False, c_mode="selection", selection_family="schechter", **kw)
+
+
+def test_alpha_domain_survives_prior_overrides_and_fixed_values():
+    """The alpha > -1 wall is not a taste bound: --prior_overrides and
+    --fixed_parameter_values both route around the registry floor, and below
+    the wall gammaincc's a <= 0 branch makes C_sel silently identically 1."""
+    _schechter_space(prior_overrides={"alpha": [-0.98, -0.2]})     # inside
+
+    with pytest.raises(ValueError, match="not widenable"):
+        _schechter_space(prior_overrides={"alpha": [-1.5, -0.2]})
+    with pytest.raises(ValueError, match="not widenable"):
+        _schechter_space(fixed_parameter_values={"alpha": -1.2})
+
+    # The wall the bounds protect: without it the curve reads as a perfectly
+    # complete survey rather than announcing it is out of domain.
+    cosmo = _cosmo()
+    bad = np.asarray(c_sel_schechter(zgrid, 21.5, -20.31, -1.2, 5.0, cosmo.H0,
+                                     cosmo.Om0, cosmo.w0, cosmo.wa))
+    assert np.all(np.isnan(bad))
+    good = np.asarray(c_sel_schechter(zgrid, 21.5, -20.31, -0.68, 5.0,
+                                      cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa))
+    assert np.all(np.isfinite(good)) and float(good.min()) < 1.0
+
+
+def test_fixed_faint_offset_must_be_positive():
+    """M_faint_offset is pinned, so it has no bounds to validate against; the
+    faint cutoff must still lie faint-ward of M*."""
+    _schechter_space(fixed_parameter_values={"M_faint_offset": 4.0})
+    with pytest.raises(ValueError, match="M_faint_offset must be positive"):
+        _schechter_space(fixed_parameter_values={"M_faint_offset": -1.0})
+
+
 def test_selection_fit_json_roundtrip_schechter(tmp_path):
     fit = SelectionFit(family="schechter", m_lim=21.5, Mstar_hat=-20.31,
                        alpha=-0.68, M_faint_offset=5.0,
@@ -435,6 +471,76 @@ def test_qtable_family_mismatch_is_fatal():
     cli._check_selection_qtable_theta(
         [{k: v for k, v in gauss_fid.items() if k != "selection_family"}],
         GOpts())
+
+
+def test_family_mismatch_beats_the_no_fit_ablation_escape_hatch():
+    """Without --selection_fit the run's family can only be gaussian, so a
+    schechter-stamped table has no consistent configuration: the wide-open
+    ablation widens theta WITHIN a family, it does not change the LF."""
+    from darksirens.cli import inference as cli
+
+    class NoFit:                       # the sanctioned wide-open ablation
+        selection_family = "gaussian"
+        selection_fit_theta = None
+        selection_fit_kcorr = ()
+
+    schech_fid = {"path": "qt.h5", "selection_family": "schechter",
+                  "selection_m_lim": 21.5, "selection_Mstar_hat": -20.31,
+                  "selection_alpha": -0.68, "selection_M_faint_offset": 5.0}
+    with pytest.raises(SystemExit):
+        cli._check_selection_qtable_theta([schech_fid], NoFit())
+
+    # Same table with no family stamp at all: the family is INFERRED from the
+    # theta keys, so the pre-tag tables are walled too.
+    with pytest.raises(SystemExit):
+        cli._check_selection_qtable_theta(
+            [{k: v for k, v in schech_fid.items() if k != "selection_family"}],
+            NoFit())
+
+    # A gaussian table with no fit stays a warning: same family, wider theta.
+    gauss_fid = {"path": "qt.h5", "selection_family": "gaussian",
+                 "selection_m_lim": 21.0, "selection_M0hat": -20.9,
+                 "selection_sigma_M": 0.9}
+    cli._check_selection_qtable_theta([gauss_fid], NoFit())
+
+
+def test_selection_fit_pins_protocol_constant_over_explicit_fixed_value():
+    """m_lim is a per-run datum the fit defaults; M_faint_offset is a protocol
+    constant an explicit --fixed_parameter_values may only restate."""
+    from darksirens.cli import inference as cli
+
+    sel = {"family": "schechter", "m_lim": 21.5, "Mstar_hat": -20.31,
+           "alpha": -0.68, "M_faint_offset": 5.0}
+
+    fixed = {}
+    assert cli._resolve_selection_fit_pins(sel, "schechter", fixed) == {
+        "m_lim": 21.5, "Mstar_hat": -20.31, "alpha": -0.68,
+        "M_faint_offset": 5.0}
+    assert fixed == {"m_lim": 21.5, "M_faint_offset": 5.0}
+
+    # A restated offset is fine; a different one changes the LF the likelihood
+    # integrates while every provenance stamp still agrees.
+    cli._resolve_selection_fit_pins(sel, "schechter", {"M_faint_offset": 5.0})
+    with pytest.raises(SystemExit):
+        cli._resolve_selection_fit_pins(sel, "schechter",
+                                        {"M_faint_offset": 4.0})
+
+    # An overridden m_lim IS allowed, and the returned theta is the EFFECTIVE
+    # one, so the Q-table check sees the value the likelihood will use.
+    theta = cli._resolve_selection_fit_pins(sel, "schechter", {"m_lim": 21.0})
+    assert theta["m_lim"] == 21.0
+
+    class Opts:
+        selection_family = "schechter"
+        selection_fit_theta = theta
+        selection_fit_kcorr = ()
+
+    with pytest.raises(SystemExit):
+        cli._check_selection_qtable_theta(
+            [{"path": "qt.h5", "selection_family": "schechter",
+              "selection_m_lim": 21.5, "selection_Mstar_hat": -20.31,
+              "selection_alpha": -0.68, "selection_M_faint_offset": 5.0}],
+            Opts())
 
 
 def test_builder_stamp_and_cbar_dispatch_by_family():

@@ -8,7 +8,7 @@ from darksirens.core.constants import SURVEY_PARAMS_FID_BY_NAME
 from darksirens.gw.populations import pop_model_prior_parser
 from darksirens.sky import sky_model_prior_parser
 from darksirens.marks import mark_model_prior_parser
-from darksirens.redshift.selection import SELECTION_SAMPLED_FIELDS
+from darksirens.redshift.selection import _ALPHA_MIN, SELECTION_SAMPLED_FIELDS
 from darksirens.utils.cosmology import (
     Om0PriorLower,
     Om0PriorUpper,
@@ -273,7 +273,9 @@ _SURVEY_BLOCK = (
     # Schechter FAINT-END SLOPE (not the degenerate alpha_miss next door), and
     # its -0.95 floor is truncation with margin off the alpha = -1 singularity
     # where Gamma(alpha+1) diverges and the pinned regularized form is
-    # undefined.
+    # undefined.  That margin is taste; the wall itself is not, so
+    # _validate_schechter_alpha_domain refuses any override (or fixed value)
+    # that reaches _ALPHA_MIN.
     _SurveyParam("Mstar_hat", -23.0, -18.0, _selection_schechter_rule),
     _SurveyParam("alpha", -0.95, 0.0, _selection_schechter_rule),
 )
@@ -318,7 +320,8 @@ _PINNED_SURVEY_PARAMS = {
         "model, not an uncertain parameter: it defines the faint-end cutoff "
         "M_faint = Mstar_hat + M_faint_offset that fixes the completeness "
         "denominator, so the offline fit, the Q-table base and the likelihood "
-        "must all carry the same value; --selection_fit pins it from the fit",
+        "must all carry the same value; --selection_fit pins it from the fit "
+        "and refuses a --fixed_parameter_values entry that contradicts it",
         fixed_ok=True,
     ),
 }
@@ -481,6 +484,41 @@ def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
     return lower_out, upper_out
 
 
+def _validate_schechter_alpha_domain(labels, lower, upper,
+                                     fixed_parameter_values=None):
+    """Refuse a Schechter faint-end slope at or below the ``alpha > -1`` wall.
+
+    ``alpha``'s registry floor is a DOMAIN bound, not a matter of taste: JAX's
+    ``gammaincc`` returns 1.0 for a non-positive first argument, so at
+    ``alpha <= -1`` the numerator and denominator of ``c_sel_schechter`` both
+    collapse and the curve reads as an identically complete survey.  Bounds
+    are freely settable through ``--prior_overrides`` -- which the
+    selection-prior guard below even RECOMMENDS -- and a fixed ``alpha``
+    bypasses the bounds entirely, so both paths are walled here.  ``labels``
+    carries ``alpha`` only under ``c_mode="selection"`` +
+    ``selection_family="schechter"`` (the registry rule), so this is inert for
+    every other configuration.
+    """
+    fixed = fixed_parameter_values or {}
+    for label, lo, hi in zip(labels, lower, upper):
+        if _survey_base_name(label) != "alpha":
+            continue
+        for what, value in (("prior lower bound", lo),
+                            ("fixed value", fixed.get(label))):
+            if value is not None and float(value) <= _ALPHA_MIN:
+                raise ValueError(
+                    f"{label} {what} of {float(value)} is at or below the "
+                    f"{_ALPHA_MIN} floor: the pinned c_sel_schechter is the "
+                    "REGULARIZED upper incomplete gamma ratio, whose "
+                    "Gamma(alpha+1) cancellation is defined only for "
+                    "alpha + 1 > 0, and below the wall the curve silently "
+                    "becomes a perfectly complete survey. This floor is not "
+                    "widenable -- a catalog whose faint-end slope is steeper "
+                    "than -1 needs a different completeness model, not a "
+                    f"wider prior (bounds [{float(lo)}, {float(hi)}])."
+                )
+
+
 def validate_fixed_parameter_overrides(all_bounds, prior_overrides, fixed_parameter_values):
     """Validate and annotate labels that are both fixed and prior-overridden."""
     statuses = {}
@@ -639,6 +677,18 @@ def build_parameter_space(
         raise ValueError(
             f"unknown selection_family {selection_family!r}; the survey "
             f"registry carries {sorted(SELECTION_SAMPLED_FIELDS)}.")
+    if selection_family == "schechter":
+        # M_faint_offset is PINNED, never sampled, so it has no bounds to be
+        # validated against -- and the fit-side and JSON-side positivity checks
+        # do not see a bare --fixed_parameter_values entry.  A non-positive
+        # offset puts the faint cutoff BRIGHT-ward of M*, inverting the
+        # completeness denominator.
+        _offset = (fixed_parameter_values or {}).get("M_faint_offset")
+        if _offset is not None and not float(_offset) > 0.0:
+            raise ValueError(
+                f"Fixed value for M_faint_offset must be positive; got "
+                f"{_offset}: the Schechter faint cutoff "
+                "M_faint = Mstar_hat + M_faint_offset lies FAINT-ward of M*.")
     if n_catalogs >= 2 and any(m == "selection" for m in c_mode_by_cat):
         # Fail-closed until per-catalog selection fits exist: the _c{k}
         # labels would sample FLAT (the single-fit selection_prior anchors
@@ -700,6 +750,9 @@ def build_parameter_space(
             [item[1] for item in block],
             [item[2] for item in block],
             prior_overrides,
+        )
+        _validate_schechter_alpha_domain(
+            labels_c, lower_c, upper_c, fixed_parameter_values
         )
         return labels_c, lower_c, upper_c
 
@@ -1117,8 +1170,10 @@ def build_parameter_space(
                 f"outside the sampled bounds [{lower[_i]}, {upper[_i]}]: the "
                 f"prior is truncated to those bounds, so the fit's own "
                 f"optimum would carry zero prior mass. Widen the bounds via "
-                f"--prior_overrides, or refit -- for 'alpha' the lower bound "
-                f"is the alpha > -1 domain of the pinned c_sel_schechter.")
+                f"--prior_overrides, or refit -- except for 'alpha', whose "
+                f"lower bound is the alpha > -1 DOMAIN of the pinned "
+                f"c_sel_schechter and is refused below "
+                f"{_ALPHA_MIN} however it is set.")
         kind_map[lbl] = ("normal", float(loc), float(scale))
     prior_kinds = [kind_map.get(lbl, ("uniform", None, None)) for lbl in labels]
 

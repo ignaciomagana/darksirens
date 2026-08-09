@@ -101,7 +101,10 @@ SELECTION_FAMILIES = tuple(SELECTION_THETA_FIELDS)      # ("gaussian", "schechte
 _FAINT_WALL_MARGIN = 0.05
 
 #: ``alpha + 1`` floor: the regularized upper-gamma ratio the pinned curve uses
-#: is undefined at ``alpha <= -1`` (Gamma(alpha+1) diverges).
+#: is undefined at ``alpha <= -1`` (Gamma(alpha+1) diverges).  Enforced by the
+#: offline fit, by the JSON loader, by the sampled ``alpha`` bounds
+#: (inference/prior.py, which refuses a --prior_overrides floor at or below it)
+#: and, as the last wall, by :func:`c_sel_schechter` itself.
 _ALPHA_MIN = -0.99
 
 
@@ -160,14 +163,24 @@ def c_sel_schechter(z, m_lim, Mstar_hat, alpha, M_faint_offset, H0,
     regularized form used here is finite for ``alpha + 1 > 0`` arguments and
     clipped into [0, 1].  API pinned for real catalogs; the mock program
     exercises the Gaussian family.
+
+    Outside that domain the curve is NaN, not a number: ``gammaincc`` returns
+    1.0 for a non-positive first argument, so numerator and denominator would
+    both collapse and ``C_sel(z)`` would read as an identically COMPLETE
+    survey -- the one failure mode that produces no visible symptom.  NaN
+    propagates to ``logL = -inf`` the way an off-grid cosmology does.  This is
+    the last wall, not the first: the offline fit, the JSON loader and the
+    sampled ``alpha`` bounds all refuse ``alpha <= _ALPHA_MIN`` up front.
     """
     dm = distance_modulus(z, H0, Om0, w0, wa)
     Mstar = m0_absolute(Mstar_hat, H0)
     x_lim = 10.0 ** (-0.4 * (m_lim - dm - Mstar))
     x_faint = 10.0 ** (-0.4 * M_faint_offset)
-    num = gammaincc(alpha + 1.0, x_lim)
-    den = gammaincc(alpha + 1.0, x_faint)
-    return jnp.clip(num / jnp.maximum(den, 1e-300), 0.0, 1.0)
+    a = alpha + 1.0
+    num = gammaincc(a, x_lim)
+    den = gammaincc(a, x_faint)
+    ratio = jnp.clip(num / jnp.maximum(den, 1e-300), 0.0, 1.0)
+    return jnp.where(a > 0.0, ratio, jnp.nan)
 
 
 def reference_absolute_mags(m, z, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
