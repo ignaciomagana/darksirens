@@ -128,6 +128,11 @@ class CatalogViews:
     field_depth_z: jnp.ndarray | None = None          # (N_gal_total,) f64
     field_depth_dz: jnp.ndarray | None = None         # (N_gal_total,) f64
     field_depth_c: jnp.ndarray | None = None          # (N_gal_total,) f64
+    # Stratified selection (SurveyParams.selection_strata): full-sky pixel ->
+    # stratum lookup + per-stratum empty-pixel budgets (see EMCatalog docs).
+    pixel_stratum_map: jnp.ndarray | None = None        # (n_pix_total,) int32
+    empty_stratum_counts: jnp.ndarray | None = None     # (S,) f64
+    field_lss_q_empty_sum_strata: jnp.ndarray | None = None  # (S, n_grid) f64
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -379,6 +384,8 @@ def prepare_catalog_views(
     field_lss_q_members = field_lss_q_empty_sum_members = None
     field_mark_z = field_mark_w = field_mark_values = None
     field_depth_z = field_depth_dz = field_depth_c = None
+    pixel_stratum_map = empty_stratum_counts = None
+    field_lss_q_empty_sum_strata = None
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         occupied_np = None
         if data.get("field_dN_obs_s") is not None:
@@ -466,6 +473,43 @@ def prepare_catalog_views(
             field_occupied_pixels = barrier(
                 jnp.asarray(occupied_np, dtype=jnp.int32)
             )
+
+            # Stratified selection: full-sky stratum map (attached to the data
+            # bundle by the CLI from --stratum_map) + the per-stratum
+            # decomposition of the empty-pixel budget the stratified global
+            # normalizer needs (completion._field_missing_curve).
+            strat_full = data.get("pixel_stratum_map")
+            if strat_full is not None:
+                strat_np = np.asarray(strat_full, dtype=np.int32)
+                if strat_np.shape[0] != n_pix_total:
+                    raise ValueError(
+                        f"pixel_stratum_map covers {strat_np.shape[0]} pixels "
+                        f"but the catalog sky has {n_pix_total}; the map must "
+                        "be full-sky at the survey nside."
+                    )
+                if strat_np.min() < 0:
+                    raise ValueError(
+                        "pixel_stratum_map contains negative labels; the map "
+                        "builder must assign every pixel a stratum in [0, S) "
+                        "(off-footprint pixels get the documented policy "
+                        "label, e.g. the majority stratum)."
+                    )
+                n_strata = int(strat_np.max()) + 1
+                empty_mask = np.ones(n_pix_total, dtype=bool)
+                empty_mask[occupied_np] = False
+                empty_stratum_counts = barrier(jnp.asarray(
+                    np.bincount(strat_np[empty_mask], minlength=n_strata)
+                    .astype(np.float64)))
+                pixel_stratum_map = barrier(jnp.asarray(strat_np))
+                if field_lss_q_empty_sum is not None:
+                    # Per-stratum twin of the empty-pixel Q budget, from the
+                    # same global (log)Q table.
+                    q_lin = np.exp(np.clip(logq_np, -700.0, 700.0))
+                    sums = np.zeros((n_strata, q_lin.shape[1]))
+                    for s in range(n_strata):
+                        rows = empty_mask & (strat_np == s)
+                        sums[s] = q_lin[rows].sum(axis=0)
+                    field_lss_q_empty_sum_strata = barrier(jnp.asarray(sums))
 
         # Marked-host field normalizer: flatten the FULL-SKY z-centred marks so
         # mu_miss and the observed marked mass are view-independent (PE and
@@ -649,4 +693,7 @@ def prepare_catalog_views(
         field_depth_z=field_depth_z,
         field_depth_dz=field_depth_dz,
         field_depth_c=field_depth_c,
+        pixel_stratum_map=pixel_stratum_map,
+        empty_stratum_counts=empty_stratum_counts,
+        field_lss_q_empty_sum_strata=field_lss_q_empty_sum_strata,
     )

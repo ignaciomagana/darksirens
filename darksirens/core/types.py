@@ -146,6 +146,18 @@ class SurveyParams(NamedTuple):
     # sampled or traced.  Must match the template the selection fit and any
     # prebuilt Q table were computed with (provenance-checked at load).
     k_corr_coeffs: Any = None
+    # Multi-stratum selection (c_mode="selection" only).  STRUCTURAL tuple of
+    # per-stratum entries ``(m_lim_s, dM0hat_s, sigma_ratio_s)`` -- stratum s
+    # uses ``C_sel_s = Phi((m_lim_s - (M0hat + dM0hat_s) - DM - K) /
+    # (sigma_M * sigma_ratio_s))``, so the SAMPLED (M0hat, sigma_M) carry the
+    # common mode (stratum 0 by convention: dM0hat_0 = 0, sigma_ratio_0 = 1)
+    # while the inter-stratum offsets are FIXED data from the offline fit
+    # (measured at ~1e-3 mag from the full catalog -- negligible against the
+    # sampled common-mode uncertainty; sampling every stratum's theta is the
+    # documented follow-up if that ever changes).  ``None`` = single stratum,
+    # the bit-identical legacy path.  Consumers index the (S, N_grid) curve
+    # stack via ``EMCatalog.pixel_stratum_map``.
+    selection_strata: Any = None
 
 
 class EMCatalog(NamedTuple):
@@ -310,6 +322,19 @@ class EMCatalog(NamedTuple):
     field_depth_z: Any = None           # (N_gal_total,) float64 galaxy redshifts
     field_depth_dz: Any = None          # (N_gal_total,) float64 per-galaxy sigma
     field_depth_c: Any = None           # (N_gal_total,) float64 N_obs,pix*w_i/W_pix
+    # Multi-stratum selection (SurveyParams.selection_strata): full-sky pixel ->
+    # stratum lookup plus the per-stratum decomposition of the empty-pixel
+    # budget.  ``pixel_stratum_map`` covers EVERY global pixel (the map builder
+    # assigns off-footprint pixels a documented policy label, e.g. the majority
+    # stratum) so numerator gathers and the global normalizer share one
+    # assignment.  ``empty_stratum_counts[s]`` counts empty pixels per stratum
+    # (data constant, replaces the scalar ``field_n_empty`` inside the
+    # stratified V_empty); ``field_lss_q_empty_sum_strata[s]`` is
+    # ``Sum_{empty pixels in s} Q_p(z)`` (the stratified twin of
+    # ``field_lss_q_empty_sum``).
+    pixel_stratum_map: Any = None       # (n_pix_total,) int32 stratum per pixel
+    empty_stratum_counts: Any = None    # (S,) float64 empty-pixel count per stratum
+    field_lss_q_empty_sum_strata: Any = None  # (S, N_grid) float64
 
 
 class GWEvent(NamedTuple):
