@@ -109,7 +109,10 @@ MARK_DATASETS = ("mark_logmstar", "mark_logssfr", "mark_metallicity", "mark_colo
 #: catalog carrying magnitudes cannot silently become a "marked" catalog.
 #: Padding value is 0.0 (an absurd apparent magnitude): every reader MUST mask
 #: real slots via ``ngals`` (``arange < ngal``), never by value.
-GALPROP_DATASETS = ("gal_app_mag",)
+#: ``gal_stratum`` carries an integer stratum label per galaxy (imaging side
+#: or m_th stratum) as a padded float table; -pad 0.0 is NOT a label, mask by
+#: ``ngals`` like every galprop.
+GALPROP_DATASETS = ("gal_app_mag", "gal_stratum")
 
 
 def load_survey_marks(survey_path, datasets=None, sort_rows_by_z=True):
