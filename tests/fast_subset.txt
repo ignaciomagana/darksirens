@@ -43,6 +43,7 @@ tests/test_sampler_zero_free_params.py
 tests/test_selection_variance_guard.py
 tests/test_selection_soft_guard.py
 tests/test_selection_prior_model.py
+tests/test_selection_kcorr.py
 
 # ── priors, populations, parameter table ───────────────────────────────────
 tests/test_prior_defaults.py

@@ -863,9 +863,13 @@ def _precompute_grids(
         # selection.py is a leaf module (utils.cosmology only), imported here
         # rather than at module top to keep completion's import graph flat.
         from darksirens.redshift.selection import c_sel_gaussian
+        # k_corr_coeffs is STRUCTURAL (hashable tuple or None, never traced),
+        # so the K(z) branch inside c_sel_gaussian is a Python-level decision
+        # and the None path stays bit-identical to the pre-K behaviour.
         C_bar_raw = c_sel_gaussian(
             zgrid, survey.m_lim, survey.M0hat, survey.sigma_M,
-            cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+            cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
+            k_corr_coeffs=survey.k_corr_coeffs)
     elif _is_aggregate_c_mode(survey.c_mode):
         dN_obs_sum = _aggregate_dN_obs_sum(em_catalog)      # data constant
         n_pix_total = jnp.round(4.0 * jnp.pi / em_catalog.apix)

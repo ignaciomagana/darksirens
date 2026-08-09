@@ -27,9 +27,19 @@ Strata.  Real compilations have direction-dependent depth; the fit accepts a
 stratum label per galaxy and returns one ``theta`` per stratum sharing the LF
 shape convention.  The mock program uses a single stratum.
 
+K-corrections.  Real surveys select on OBSERVED-frame apparent magnitude
+``m_obs = M0 + DM(z) + K(z) + scatter`` while ``M0`` is rest-frame, so the
+selection curve and the fit both accept a fixed K(z) template as polynomial
+coefficients ``k_corr_coeffs = (c1, c2, ...)`` meaning ``K(z) = sum_j c_j
+z^j``.  There is deliberately NO constant term: a c0 is exactly degenerate
+with ``M0hat`` (both shift the mean magnitude at every z), so the template
+is pinned to ``K(0) = 0``.  K depends only on z and a fixed reference color
+-- no h enters -- so the H0 firewall below is untouched.  ``None``/empty
+coefficients reproduce the K = 0 behaviour bit-identically.
+
 Not covered here (documented limits): photometric-error convolution of the
-magnitude likelihood, K-corrections, extinction -- real-catalog ingestion
-concerns layered on top of these primitives.
+magnitude likelihood, per-galaxy (color-dependent) K-corrections, extinction
+-- the catalog is expected to carry dereddened magnitudes.
 """
 from __future__ import annotations
 
@@ -55,18 +65,39 @@ def m0_absolute(M0hat, H0):
     return M0hat + 5.0 * jnp.log10(H0 / H0_REF)
 
 
+def k_of_z(z, k_corr_coeffs, xp=jnp):
+    """Polynomial K-correction template ``K(z) = sum_j c_j z^j`` (no c0).
+
+    ``k_corr_coeffs`` is ``(c1, c2, ...)``; ``None`` or empty means K = 0.
+    ``xp`` selects the array module so the same helper serves the JAX
+    likelihood path and the numpy offline fit.
+    """
+    if not k_corr_coeffs:
+        return None
+    z = xp.asarray(z)
+    out = xp.zeros_like(z)
+    for c in reversed(tuple(k_corr_coeffs)):
+        out = z * (c + out)
+    return out
+
+
 def c_sel_gaussian(z, m_lim, M0hat, sigma_M, H0, Om0=Om0Planck,
-                   w0=w0Fiducial, wa=waFiducial):
-    """Gaussian-LF selection ``P(m <= m_lim | z) = Phi((m_lim - M0 - DM)/sigma)``.
+                   w0=w0Fiducial, wa=waFiducial, k_corr_coeffs=None):
+    """Gaussian-LF selection ``P(m <= m_lim | z) = Phi((m_lim - M0 - DM - K)/sigma)``.
 
     ``M0hat`` is h-scaled; the ``+5 log10 h`` restored here cancels the
     ``-5 log10 h`` inside ``DM`` exactly, so the returned curve is
     H0-invariant to float precision (pinned by
     tests/test_selection_function.py).  At ``z -> 0`` the modulus diverges
     negatively and ``C -> 1``: a magnitude limit misses nothing nearby.
+    ``k_corr_coeffs`` (structural, never traced) adds the fixed K(z)
+    template; ``None`` is the K = 0 legacy path, bit-identical.
     """
     dm = distance_modulus(z, H0, Om0, w0, wa)
     M0 = m0_absolute(M0hat, H0)
+    kz = k_of_z(z, k_corr_coeffs)
+    if kz is not None:
+        dm = dm + kz
     return ndtr((m_lim - M0 - dm) / sigma_M)
 
 
@@ -94,19 +125,24 @@ def c_sel_schechter(z, m_lim, Mstar_hat, alpha, M_faint_offset, H0,
     return jnp.clip(num / jnp.maximum(den, 1e-300), 0.0, 1.0)
 
 
-def reference_absolute_mags(m, z, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
-    """``Mhat_i = m_i - DM(z_i; H0=100)`` -- h-scaled absolute magnitudes.
+def reference_absolute_mags(m, z, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
+                            k_corr_coeffs=None):
+    """``Mhat_i = m_i - DM(z_i; H0=100) - K(z_i)`` -- h-scaled absolute mags.
 
-    Independent of the true H0: with ``m = M0 + scatter + DM(z; H0_true)``,
-    ``Mhat = M0 - 5 log10 h_true + scatter = M0hat + scatter`` exactly.
+    Independent of the true H0: with ``m = M0 + scatter + DM(z; H0_true) +
+    K(z)``, ``Mhat = M0 - 5 log10 h_true + scatter = M0hat + scatter``
+    exactly (K cancels its own template, contributing no h).
     """
     dm = np.asarray(distance_modulus(jnp.asarray(z, dtype=float), H0_REF,
                                      Om0, w0, wa))
+    kz = k_of_z(z, k_corr_coeffs, xp=np)
+    if kz is not None:
+        dm = dm + kz
     return np.asarray(m, dtype=float) - dm
 
 
 def magnitude_suffstats(m, z, m_lim, n_bins=64, Om0=Om0Planck,
-                        w0=w0Fiducial, wa=waFiducial):
+                        w0=w0Fiducial, wa=waFiducial, k_corr_coeffs=None):
     """Compress the magnitude sample into per-truncation-bin statistics.
 
     The truncated-Gaussian likelihood has a PER-GALAXY truncation
@@ -122,7 +158,7 @@ def magnitude_suffstats(m, z, m_lim, n_bins=64, Om0=Om0Planck,
     see the module docstring).
     """
     m, z = _apply_z_floor(m, z, "magnitude_suffstats")
-    Mhat = reference_absolute_mags(m, z, Om0, w0, wa)
+    Mhat = reference_absolute_mags(m, z, Om0, w0, wa, k_corr_coeffs)
     T = np.asarray(m_lim, dtype=float) - (np.asarray(m, dtype=float) - Mhat)
     edges = np.linspace(T.min() - 1e-9, T.max() + 1e-9, n_bins + 1)
     idx = np.clip(np.digitize(T, edges) - 1, 0, n_bins - 1)
@@ -181,6 +217,8 @@ def load_selection_fit_json(path):
         raise NotImplementedError(
             f"{path}: family {s['family']!r}; consumers support the gaussian "
             "family for now.")
+    # Optional K(z) template; absent in pre-K fit files -> K = 0.
+    s["k_corr_coeffs"] = tuple(float(c) for c in s.get("k_corr_coeffs") or ())
     return s
 
 
@@ -195,6 +233,7 @@ class SelectionFit:
     cov: np.ndarray          # (2, 2) Laplace covariance of (M0hat, sigma_M)
     n_gal: int
     stratum: str = "all"
+    k_corr_coeffs: tuple = ()
     meta: dict = field(default_factory=dict)
 
     def to_jsonable(self) -> dict:
@@ -202,7 +241,9 @@ class SelectionFit:
             "family": self.family, "m_lim": self.m_lim,
             "M0hat": self.M0hat, "sigma_M": self.sigma_M,
             "cov": np.asarray(self.cov).tolist(), "n_gal": self.n_gal,
-            "stratum": self.stratum, "meta": dict(self.meta),
+            "stratum": self.stratum,
+            "k_corr_coeffs": [float(c) for c in self.k_corr_coeffs],
+            "meta": dict(self.meta),
         }
 
 
@@ -232,7 +273,7 @@ def _apply_z_floor(m, z, where):
 
 def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
                             Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
-                            stratum="all"):
+                            stratum="all", k_corr_coeffs=None):
     """Truncated-LF maximum likelihood for one stratum (offline, numpy/scipy).
 
     The data are per-galaxy apparent magnitudes ``m_i`` at redshifts ``z_i``
@@ -275,8 +316,8 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
             f"m_lim={m_lim}: the truncation datum does not describe this "
             "sample (wrong m_lim, or the survey is not magnitude-limited).")
 
-    Mhat = reference_absolute_mags(m, z, Om0, w0, wa)
-    T = m_lim - (m - Mhat)          # = m_lim - DM(z; H0_REF), per galaxy
+    Mhat = reference_absolute_mags(m, z, Om0, w0, wa, k_corr_coeffs)
+    T = m_lim - (m - Mhat)          # = m_lim - DM(z; H0_REF) - K(z), per galaxy
 
     def nll(theta):
         mu, log_sig = theta
@@ -316,6 +357,7 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
     return SelectionFit(
         family="gaussian", m_lim=float(m_lim), M0hat=float(mu_hat),
         sigma_M=sig_hat, cov=cov, n_gal=int(m.size), stratum=str(stratum),
+        k_corr_coeffs=tuple(float(c) for c in (k_corr_coeffs or ())),
         meta={"Om0": float(Om0), "w0": float(w0), "wa": float(wa),
               "H0_ref": H0_REF, "nll": float(res.fun)},
     )

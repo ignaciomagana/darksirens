@@ -74,7 +74,7 @@ def _sticks_to_log_weights(v: jnp.ndarray) -> jnp.ndarray:
 
 
 def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
-                   wl_params, c_mode=None):
+                   wl_params, c_mode=None, k_corr_coeffs=None):
     """Build one catalog's :class:`SurveyParams` from a resolved label dict.
 
     ``values`` maps sampled + fixed labels to values; every
@@ -121,6 +121,9 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         m_lim=field["m_lim"],
         M0hat=field["M0hat"],
         sigma_M=field["sigma_M"],
+        # Fixed K(z) template of the selection curve -- STRUCTURAL (hashable
+        # tuple or None, the z_depth pattern), never sampled.
+        k_corr_coeffs=k_corr_coeffs,
     )
 
 
@@ -146,6 +149,10 @@ class ParameterDecoder:
     # aggregate to the leaf-less C_MODE_AGGREGATE_STRUCT sentinel (the
     # z_depth structural pattern -- see _survey_params; never sampled).
     c_mode: int = 0
+    # Fixed K-correction template of the parametric selection curve
+    # (structural tuple of polynomial coefficients or None = K=0); carried
+    # onto every catalog's SurveyParams, never sampled.
+    k_corr_coeffs: tuple[float, ...] | None = None
     sky_labels: tuple[str, ...] = ()
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
@@ -212,6 +219,7 @@ class ParameterDecoder:
             z_depth=self.z_depths[0] if len(self.z_depths) >= 1 else None,
             wl_params=self.wl_params,
             c_mode=self.c_mode,
+            k_corr_coeffs=self.k_corr_coeffs,
         )
         return cosmo, survey, pop_params, sky_params, mark_params
 
@@ -252,6 +260,7 @@ class ParameterDecoder:
                 z_depth=self.z_depths[k - 1] if len(self.z_depths) >= k else None,
                 wl_params=None,
                 c_mode=self.c_mode,
+                k_corr_coeffs=self.k_corr_coeffs,
             ))
 
         # Per-catalog eta blocks: catalog 1 is decode()'s vector verbatim;
@@ -389,6 +398,12 @@ def build_parameter_decoder(
         # Absent on bare/legacy opts -> per_pixel (0), the bit-identical
         # legacy completeness estimator.
         c_mode=c_mode_code(getattr(opts, "c_mode", None) or "per_pixel"),
+        # Fixed K(z) template of the selection curve, resolved by the CLI from
+        # the --selection_fit JSON; absent/empty -> None (K = 0, legacy).
+        k_corr_coeffs=(
+            tuple(float(c)
+                  for c in getattr(opts, "selection_fit_kcorr", None) or ())
+            or None),
         # Resolved per-catalog survey z_depth (CLI --survey_z_depth override >
         # per-catalog file attr > None), computed host-side in the CLI before
         # the likelihood is built. Absent on bare/legacy ``opts`` (e.g. tests
