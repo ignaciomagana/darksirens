@@ -214,6 +214,11 @@ def make_pop_extractor(settings: dict):
         # rebuilding without it would silently misalign any label AFTER the
         # survey block for archived selection chains.
         c_mode                 = settings.get("c_mode", "per_pixel") or "per_pixel",
+        # The selection FAMILY gates which theta labels the survey block carries
+        # (M0hat/sigma_M vs Mstar_hat/alpha); rebuilding without it would
+        # misalign every label after the survey block for archived schechter
+        # chains.
+        selection_family       = settings.get("selection_family", "gaussian") or "gaussian",
     )
 
     label_to_coord_idx = {label: idx for idx, label in enumerate(labels)}
