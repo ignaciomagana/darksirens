@@ -40,7 +40,6 @@ import numpy as np
 from jax.scipy.special import gammaincc, ndtr
 
 from darksirens.utils.cosmology import (
-    H0Planck,
     Om0Planck,
     distance_modulus,
     w0Fiducial,
