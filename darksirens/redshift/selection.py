@@ -37,6 +37,15 @@ is pinned to ``K(0) = 0``.  K depends only on z and a fixed reference color
 -- no h enters -- so the H0 firewall below is untouched.  ``None``/empty
 coefficients reproduce the K = 0 behaviour bit-identically.
 
+Luminosity-function families.  ``gaussian`` (the mock program) models the
+absolute magnitudes as an upper-truncated Gaussian; ``schechter`` (the
+real-catalog family) models them as a Schechter LF truncated faint-ward at
+``M_faint = Mstar_hat + M_faint_offset``.  The Schechter family carries NO
+K(z) template -- the pinned :func:`c_sel_schechter` takes none, so a
+K-corrected Schechter fit could not be consumed in-likelihood -- and its
+faint-end slope is restricted to ``alpha > -1``, the domain on which the
+regularized upper incomplete gamma ratio the curve uses is defined.
+
 Not covered here (documented limits): photometric-error convolution of the
 magnitude likelihood, per-galaxy (color-dependent) K-corrections, extinction
 -- the catalog is expected to carry dereddened magnitudes.
@@ -58,6 +67,42 @@ from darksirens.utils.cosmology import (
 
 #: Reference Hubble constant of the h-scaled magnitude convention.
 H0_REF = 100.0
+
+#: Faint-end integration cutoff of the Schechter family, as an offset from
+#: M*: ``M_faint = Mstar_hat + M_faint_offset``.  A magnitude DIFFERENCE, so it
+#: carries no h and never touches the H0 firewall.  5.0 mag = 0.01 L*.  It is a
+#: PROTOCOL constant, not a fitted parameter: it defines what counts as "a
+#: galaxy" and therefore fixes the completeness denominator, so the fit, the
+#: Q-table base and the likelihood must all carry the SAME value (stamped and
+#: hard-checked).
+M_FAINT_OFFSET_DEFAULT = 5.0
+
+#: Per-family theta carried by a selection-fit stratum, in the order the
+#: Q-table provenance check and the ``selection_<name>`` stamps use.  Single
+#: source of truth for cli/build_lognormal_completion.py, cli/inference.py and
+#: catalogs/lss.py.
+SELECTION_THETA_FIELDS = {
+    "gaussian": ("m_lim", "M0hat", "sigma_M"),
+    "schechter": ("m_lim", "Mstar_hat", "alpha", "M_faint_offset"),
+}
+
+#: The SAMPLED coordinates of each family, in the row/column order of
+#: :attr:`SelectionFit.cov`.  The inference CLI reads the marginal Laplace sds
+#: off the diagonal in exactly this order.
+SELECTION_SAMPLED_FIELDS = {
+    "gaussian": ("M0hat", "sigma_M"),
+    "schechter": ("Mstar_hat", "alpha"),
+}
+
+SELECTION_FAMILIES = tuple(SELECTION_THETA_FIELDS)      # ("gaussian", "schechter")
+
+#: Minimum margin [mag] between the fitted faint cutoff and the faintest galaxy
+#: in the sample before the MLE is declared pinned at the support boundary.
+_FAINT_WALL_MARGIN = 0.05
+
+#: ``alpha + 1`` floor: the regularized upper-gamma ratio the pinned curve uses
+#: is undefined at ``alpha <= -1`` (Gamma(alpha+1) diverges).
+_ALPHA_MIN = -0.99
 
 
 def m0_absolute(M0hat, H0):
@@ -195,17 +240,50 @@ _SELECTION_FIT_FORMATS = ("darksirens-selection-fit-1.0",
                           "darksirens-selection-fit-1.1")
 
 
+#: Keys every stratum of a given family must carry: the family tag, the fixed
+#: truncation datum, that family's own theta and the Laplace covariance.
+_STRATUM_REQUIRED = {
+    "gaussian": ("family", "m_lim", "M0hat", "sigma_M", "cov"),
+    "schechter": ("family", "m_lim", "Mstar_hat", "alpha", "M_faint_offset",
+                  "cov"),
+}
+
+
 def _validate_stratum(path, s):
     s = dict(s)
-    for key in ("family", "m_lim", "M0hat", "sigma_M", "cov"):
+    if "family" not in s:
+        raise ValueError(f"{path}: stratum missing required key 'family'.")
+    family = s["family"]
+    if family not in _STRATUM_REQUIRED:
+        raise NotImplementedError(
+            f"{path}: family {family!r}; consumers support "
+            f"{list(SELECTION_FAMILIES)}.")
+    for key in _STRATUM_REQUIRED[family]:
         if key not in s:
             raise ValueError(f"{path}: stratum missing required key {key!r}.")
-    if s["family"] != "gaussian":
-        raise NotImplementedError(
-            f"{path}: family {s['family']!r}; consumers support the gaussian "
-            "family for now.")
     # Optional K(z) template; absent in pre-K fit files -> K = 0.
     s["k_corr_coeffs"] = tuple(float(c) for c in s.get("k_corr_coeffs") or ())
+    if family == "schechter":
+        if s["k_corr_coeffs"]:
+            raise NotImplementedError(
+                f"{path}: a schechter fit carries a K(z) template "
+                f"{list(s['k_corr_coeffs'])}, but the pinned c_sel_schechter "
+                "takes no k_corr_coeffs, so the template could not be applied "
+                "in-likelihood; refit the gaussian family with "
+                "--k_corr_coeffs, or extend c_sel_schechter (and its "
+                "H0-invariance pin) first.")
+        if float(s["alpha"]) <= _ALPHA_MIN:
+            raise ValueError(
+                f"{path}: alpha={float(s['alpha'])} is at or below the "
+                f"{_ALPHA_MIN} floor; c_sel_schechter is built from the "
+                "REGULARIZED upper incomplete gamma, whose Gamma(alpha+1) "
+                "cancellation is defined only for alpha + 1 > 0, so steeper "
+                "faint-end slopes are outside the pinned curve's domain.")
+        if float(s["M_faint_offset"]) <= 0.0:
+            raise ValueError(
+                f"{path}: M_faint_offset={float(s['M_faint_offset'])} must be "
+                "positive -- the faint cutoff M_faint = Mstar_hat + "
+                "M_faint_offset lies FAINT-ward of M*.")
     return s
 
 
@@ -252,32 +330,100 @@ def load_selection_fit_strata(path):
     strata = payload.get("strata") or []
     if not strata:
         raise ValueError(f"{path}: no strata in selection-fit payload.")
-    return [_validate_stratum(path, s) for s in strata]
+    out = [_validate_stratum(path, s) for s in strata]
+    families = {s["family"] for s in out}
+    if len(families) > 1:
+        raise NotImplementedError(
+            f"{path}: strata mix the {sorted(families)} luminosity-function "
+            "families; one fit describes ONE population model, and the "
+            "in-likelihood curve stack is built from a single family.")
+    if len(out) > 1 and families != {"gaussian"}:
+        raise NotImplementedError(
+            f"{path}: multi-stratum fits are gaussian-only for now (got "
+            f"{len(out)} strata of family {sorted(families)[0]!r}); the "
+            "stratified in-likelihood curve stack "
+            "(SurveyParams.selection_strata) is built from the gaussian "
+            "common-mode + offset decomposition, which has no schechter "
+            "counterpart. Fit the strata separately, or fit the whole "
+            "catalog as one schechter stratum.")
+    return out
 
 
 @dataclass
 class SelectionFit:
-    """One stratum's fitted Gaussian-LF selection parameters."""
+    """One stratum's fitted selection parameters (gaussian or schechter LF).
+
+    The FIELD ORDER of the gaussian block is frozen (positional construction
+    is part of the API); the schechter fields are appended with defaults and
+    the per-family required set is enforced in :meth:`__post_init__` -- the
+    same contract :func:`_validate_stratum` applies to a loaded payload.
+    """
 
     family: str
     m_lim: float
-    M0hat: float
-    sigma_M: float
-    cov: np.ndarray          # (2, 2) Laplace covariance of (M0hat, sigma_M)
-    n_gal: int
+    M0hat: float | None = None
+    sigma_M: float | None = None
+    #: (2, 2) Laplace covariance in ``SELECTION_SAMPLED_FIELDS[family]`` order.
+    cov: np.ndarray | None = None
+    n_gal: int = 0
     stratum: str = "all"
     k_corr_coeffs: tuple = ()
     meta: dict = field(default_factory=dict)
+    Mstar_hat: float | None = None
+    alpha: float | None = None
+    M_faint_offset: float | None = None
+
+    def __post_init__(self):
+        if self.family not in SELECTION_THETA_FIELDS:
+            raise NotImplementedError(
+                f"unknown selection family {self.family!r}; supported: "
+                f"{list(SELECTION_FAMILIES)}.")
+        if self.cov is None:
+            raise ValueError(
+                f"SelectionFit(family={self.family!r}) needs the Laplace "
+                "covariance of "
+                f"{list(SELECTION_SAMPLED_FIELDS[self.family])}; it is what "
+                "becomes the sampled theta prior.")
+        required = set(SELECTION_THETA_FIELDS[self.family]) | set(
+            SELECTION_SAMPLED_FIELDS[self.family])
+        for name in sorted(required):
+            if getattr(self, name) is None:
+                raise ValueError(
+                    f"SelectionFit(family={self.family!r}) is missing {name!r}"
+                    f" (the family carries "
+                    f"{list(SELECTION_THETA_FIELDS[self.family])}).")
+        if self.family == "schechter":
+            if float(self.alpha) <= _ALPHA_MIN:
+                raise ValueError(
+                    f"alpha={float(self.alpha)} is at or below the "
+                    f"{_ALPHA_MIN} floor: c_sel_schechter uses the REGULARIZED "
+                    "upper incomplete gamma, defined only for alpha + 1 > 0.")
+            if float(self.M_faint_offset) <= 0.0:
+                raise ValueError(
+                    f"M_faint_offset={float(self.M_faint_offset)} must be "
+                    "positive: M_faint = Mstar_hat + M_faint_offset lies "
+                    "faint-ward of M*.")
+            if tuple(self.k_corr_coeffs):
+                raise ValueError(
+                    "the schechter family carries no K(z) template (the "
+                    "pinned c_sel_schechter takes no k_corr_coeffs), so a "
+                    "K-corrected schechter fit could not be consumed "
+                    "in-likelihood.")
 
     def to_jsonable(self) -> dict:
-        return {
-            "family": self.family, "m_lim": self.m_lim,
-            "M0hat": self.M0hat, "sigma_M": self.sigma_M,
+        """Payload dict: ``family``, ``m_lim``, the family's own theta, then
+        the shared tail.  For the gaussian family this reproduces the
+        pre-schechter key order exactly (pinned by a test)."""
+        out = {"family": self.family, "m_lim": self.m_lim}
+        for name in SELECTION_THETA_FIELDS[self.family][1:]:      # m_lim first
+            out[name] = getattr(self, name)
+        out.update({
             "cov": np.asarray(self.cov).tolist(), "n_gal": self.n_gal,
             "stratum": self.stratum,
             "k_corr_coeffs": [float(c) for c in self.k_corr_coeffs],
             "meta": dict(self.meta),
-        }
+        })
+        return out
 
 
 #: Redshift floor for the magnitude fit and suff-stats: recorded survey
@@ -305,6 +451,7 @@ def _apply_z_floor(m, z, where):
 
 
 def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
+                            M_faint_offset=M_FAINT_OFFSET_DEFAULT,
                             Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
                             stratum="all", k_corr_coeffs=None):
     """Truncated-LF maximum likelihood for one stratum (offline, numpy/scipy).
@@ -312,13 +459,19 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
     The data are per-galaxy apparent magnitudes ``m_i`` at redshifts ``z_i``
     with a KNOWN hard limit ``m_i <= m_lim`` (the truncation datum of the
     selection protocol -- not a fitted parameter: inside the selection curve
-    only the combination ``m_lim - M0hat`` is identified, so fitting both
-    is an exact flat direction).  In reference absolute magnitudes the model
-    is an upper-truncated Gaussian with per-galaxy truncation
-    ``T_i = m_lim - DM(z_i; H0=100)``:
+    only the combination ``m_lim - M0hat`` / ``m_lim - Mstar_hat`` is
+    identified, so fitting both is an exact flat direction).  In reference
+    absolute magnitudes the per-galaxy truncation is
+    ``T_i = m_lim - DM(z_i; H0=100)`` and the model is
 
-        L(theta) = prod_i  phi((Mhat_i - M0hat)/sigma) / sigma
-                           / Phi((T_i - M0hat)/sigma) .
+    * ``family="gaussian"``: an upper-truncated Gaussian,
+
+          L(theta) = prod_i  phi((Mhat_i - M0hat)/sigma) / sigma
+                             / Phi((T_i - M0hat)/sigma) ,
+
+    * ``family="schechter"``: a Schechter LF truncated faint-ward at
+      ``M_faint = Mstar_hat + M_faint_offset`` (see
+      :func:`_fit_schechter_truncated` for the closed-form normalization).
 
     Returns the MLE and the Laplace covariance from the numerical Hessian at
     the optimum (finite differences of the exact gradient-free objective).
@@ -326,14 +479,23 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
     independent of the galaxy density field (thinning), which is what makes
     the fitted selection clustering-safe.
     """
-    from scipy.optimize import minimize
-    from scipy.stats import norm
-
-    if family != "gaussian":
+    if family not in SELECTION_FAMILIES:
         raise NotImplementedError(
-            f"offline fit implemented for the gaussian family only (got "
-            f"{family!r}); the schechter curve is API-pinned for real-catalog "
-            "ingestion, whose fit ships with that stage.")
+            f"unknown selection family {family!r}; the offline fit implements "
+            f"{list(SELECTION_FAMILIES)}.")
+    if family == "schechter":
+        if k_corr_coeffs:
+            raise NotImplementedError(
+                "the pinned c_sel_schechter carries no K(z) template, so a "
+                "K-corrected Schechter fit could not be consumed "
+                "in-likelihood; fit the gaussian family with "
+                "--k_corr_coeffs, or extend c_sel_schechter (and its "
+                "H0-invariance pin) first.")
+        if float(M_faint_offset) <= 0.0:
+            raise ValueError(
+                f"M_faint_offset={float(M_faint_offset)} must be positive: "
+                "the faint cutoff M_faint = Mstar_hat + M_faint_offset lies "
+                "FAINT-ward of M*.")
 
     m = np.asarray(m, dtype=float)
     z = np.asarray(z, dtype=float)
@@ -351,6 +513,21 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
 
     Mhat = reference_absolute_mags(m, z, Om0, w0, wa, k_corr_coeffs)
     T = m_lim - (m - Mhat)          # = m_lim - DM(z; H0_REF) - K(z), per galaxy
+
+    if family == "schechter":
+        return _fit_schechter_truncated(
+            Mhat, T, m_lim, float(M_faint_offset), stratum=stratum,
+            Om0=Om0, w0=w0, wa=wa)
+    return _fit_gaussian_truncated(
+        Mhat, T, m_lim, stratum=stratum, k_corr_coeffs=k_corr_coeffs,
+        Om0=Om0, w0=w0, wa=wa)
+
+
+def _fit_gaussian_truncated(Mhat, T, m_lim, *, stratum, k_corr_coeffs,
+                            Om0, w0, wa):
+    """Upper-truncated-Gaussian MLE + Laplace covariance in (M0hat, sigma_M)."""
+    from scipy.optimize import minimize
+    from scipy.stats import norm
 
     def nll(theta):
         mu, log_sig = theta
@@ -389,8 +566,147 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
 
     return SelectionFit(
         family="gaussian", m_lim=float(m_lim), M0hat=float(mu_hat),
-        sigma_M=sig_hat, cov=cov, n_gal=int(m.size), stratum=str(stratum),
+        sigma_M=sig_hat, cov=cov, n_gal=int(Mhat.size), stratum=str(stratum),
         k_corr_coeffs=tuple(float(c) for c in (k_corr_coeffs or ())),
         meta={"Om0": float(Om0), "w0": float(w0), "wa": float(wa),
               "H0_ref": H0_REF, "nll": float(res.fun)},
+    )
+
+
+def _fit_schechter_truncated(Mhat, T, m_lim, M_faint_offset, *, stratum,
+                             Om0, w0, wa):
+    """Truncated-Schechter MLE + Laplace covariance in (Mstar_hat, alpha).
+
+    Work in reference absolute magnitudes ``Mhat_i = m_i - DM(z_i; H0=100)``
+    (K refused: the pinned curve carries no template).  With
+    ``x(M) = 10^{-0.4 (M - Mstar_hat)} = L/L*`` and ``a = alpha + 1``, the
+    Schechter LF in magnitude space is
+
+        f(M) ∝ x(M)^{alpha+1} exp(-x(M)) ,
+        x_i = 10^{-0.4 (Mhat_i - Mstar_hat)}
+
+    The modelled population is truncated faint-ward at
+    ``M_faint = Mstar_hat + M_faint_offset`` (``x_faint =
+    10^{-0.4 M_faint_offset}``, parameter-free), and galaxy ``i`` is only
+    detectable if ``Mhat_i <= T_i = m_lim - DM(z_i; H0=100)``
+    (``x_lim,i = 10^{-0.4 (T_i - Mstar_hat)}``).  The per-galaxy support is
+    therefore ``M <= U_i = min(T_i, M_faint)``, i.e.
+    ``x >= x_{U,i} = max(x_lim,i, x_faint)``, and the normalization integral
+    is closed-form:
+
+        ∫_{-inf}^{U_i} f(M) dM = Gamma(a) Q(a, x_{U,i}) / (0.4 ln10)
+
+    with ``Q`` the REGULARIZED upper incomplete gamma
+    (``scipy.special.gammaincc``).  Hence
+
+        log p(Mhat_i | Mstar_hat, alpha)
+            = log(0.4 ln10) + a log x_i - x_i
+              - [ lgamma(a) + log Q(a, x_{U,i}) ]
+            with  log x_i = 0.4 ln10 (Mstar_hat - Mhat_i)
+
+        NLL(Mstar_hat, alpha) = - sum_i log p(Mhat_i | .)
+
+    ``x_faint`` is independent of ``Mstar_hat`` (M* cancels) -- the same
+    cancellation that makes the consumed curve H0-invariant.  The
+    ``max(x_lim, x_faint)`` is a kink, but it bites only for galaxies with
+    ``T_i ≈ M_faint`` (measure ~0), so the finite-difference Hessian below is
+    unaffected in practice.  ``log Q`` is floored at ``log(1e-300)`` (the
+    house idiom of :func:`magnitude_loglike_from_stats`); an actually-zero Q at
+    the optimum is a hard error, not a floor.  The z-distribution never enters
+    (thinning), so the fit is clustering-safe exactly as the gaussian one is.
+    """
+    from scipy.optimize import minimize
+    from scipy.special import gammaincc, gammaln
+
+    ln10 = np.log(10.0)
+    n_gal = int(Mhat.size)
+    Mhat_max = float(Mhat.max())
+    x_faint = 10.0 ** (-0.4 * M_faint_offset)
+    log_pref = np.log(0.4 * ln10)
+
+    def _x_upper(Mstar):
+        return np.maximum(10.0 ** (-0.4 * (T - Mstar)), x_faint)
+
+    def nll(theta):
+        # Optimizer coordinates (Mstar_hat, u) with alpha = exp(u) - 1, so
+        # a = alpha + 1 = exp(u) > 0 stays inside the regularized-gamma domain
+        # by construction (the trick the gaussian fit uses for sigma > 0).
+        Mstar, u = float(theta[0]), float(theta[1])
+        if Mstar + M_faint_offset < Mhat_max:
+            return np.inf          # the sample falsifies the modelled support
+        a = np.exp(u)
+        log_x = 0.4 * ln10 * (Mstar - Mhat)
+        x = np.exp(log_x)
+        log_norm = gammaln(a) + np.log(np.maximum(gammaincc(a, _x_upper(Mstar)),
+                                                  1e-300))
+        val = -np.sum(a * log_x - x - log_norm) - n_gal * log_pref
+        return val if np.isfinite(val) else np.inf
+
+    # Bright decile as the M* scale, lifted off the support wall so the first
+    # simplex is finite.
+    Mstar0 = max(float(np.percentile(Mhat, 10.0)),
+                 Mhat_max - M_faint_offset + 0.1)
+    u0 = np.log(0.5)                                   # alpha0 = -0.5
+    res = minimize(nll, np.array([Mstar0, u0]), method="Nelder-Mead",
+                   options={"xatol": 1e-8, "fatol": 1e-10, "maxiter": 20000})
+    if not res.success:
+        raise RuntimeError(f"selection fit did not converge: {res.message}")
+    Mstar_hat = float(res.x[0])
+    alpha_hat = float(np.exp(res.x[1]) - 1.0)
+
+    margin = Mstar_hat + M_faint_offset - Mhat_max
+    if margin < _FAINT_WALL_MARGIN:
+        n_beyond = int(np.sum(Mhat > Mstar_hat + M_faint_offset))
+        raise RuntimeError(
+            f"schechter fit is pinned at the support boundary: the fitted "
+            f"faint cutoff M_faint = {Mstar_hat + M_faint_offset:.4f} sits "
+            f"{margin:.4f} mag from the faintest galaxy in the sample "
+            f"({Mhat_max:.4f}), with {n_beyond} galaxies beyond it. The "
+            "survey reaches fainter than the modelled population, so the MLE "
+            "is not interior: either raise --m_faint_offset (and REBUILD the "
+            "Q table -- the completeness denominator moves with it) or apply "
+            "a matching absolute-magnitude cut to the catalog.")
+    if alpha_hat <= _ALPHA_MIN:
+        raise RuntimeError(
+            f"schechter fit reached alpha={alpha_hat:.4f}, at or below the "
+            f"{_ALPHA_MIN} floor: c_sel_schechter is built from the "
+            "REGULARIZED upper incomplete gamma, whose Gamma(alpha+1) "
+            "cancellation is defined only for alpha + 1 > 0, so steeper "
+            "faint-end slopes are outside what the pinned curve can carry.")
+    a_hat = alpha_hat + 1.0
+    q_hat = gammaincc(a_hat, _x_upper(Mstar_hat))
+    if np.any(q_hat <= 0.0):
+        raise RuntimeError(
+            f"{int(np.sum(q_hat <= 0.0))} galaxies have an UNDERFLOWING "
+            "normalization Q(alpha+1, x_lim) = 0 at the optimum: the declared "
+            f"m_lim={float(m_lim)} puts them so far into the bright tail that "
+            "the truncated Schechter assigns them no probability mass. The "
+            "declared limit cannot describe this sample.")
+
+    # Laplace covariance in the REPORTED coordinates (Mstar_hat, alpha): the
+    # same reparametrized-Hessian structure as the gaussian's nll_sig.
+    def nll_alpha(p):
+        return nll(np.array([p[0], np.log(p[1] + 1.0)]))
+
+    x0 = np.array([Mstar_hat, alpha_hat])
+    h = np.array([1e-4, 1e-3])          # alpha's per-galaxy curvature is ~10x weaker
+    H = np.zeros((2, 2))
+    for i in range(2):
+        for j in range(2):
+            ei = np.eye(2)[i] * h[i]
+            ej = np.eye(2)[j] * h[j]
+            H[i, j] = (nll_alpha(x0 + ei + ej) - nll_alpha(x0 + ei - ej)
+                       - nll_alpha(x0 - ei + ej) + nll_alpha(x0 - ei - ej)
+                       ) / (4.0 * h[i] * h[j])
+    cov = np.linalg.inv(H)
+    if not np.all(np.isfinite(cov)) or cov[0, 0] <= 0 or cov[1, 1] <= 0:
+        raise RuntimeError("selection-fit Hessian is not positive definite")
+
+    return SelectionFit(
+        family="schechter", m_lim=float(m_lim), Mstar_hat=Mstar_hat,
+        alpha=alpha_hat, M_faint_offset=float(M_faint_offset), cov=cov,
+        n_gal=n_gal, stratum=str(stratum), k_corr_coeffs=(),
+        meta={"Om0": float(Om0), "w0": float(w0), "wa": float(wa),
+              "H0_ref": H0_REF, "nll": float(res.fun),
+              "faint_wall_margin": float(margin)},
     )
