@@ -8,7 +8,11 @@ writes a selection JSON consumed by
 * ``darksirens_build_lognormal_completion --c-mode selection --selection-fit``
   (the Q-table base is ``C_sel(z; theta_hat) dN_exp``), and
 * ``darksirens_inference --selection_fit`` (theta_hat and the marginal
-  Laplace sds become the Gaussian prior on the SAMPLED ``M0hat``/``sigma_M``).
+  Laplace sds become the Gaussian prior on the SAMPLED theta -- ``M0hat``/
+  ``sigma_M`` for the gaussian family, ``Mstar_hat``/``alpha`` for the
+  schechter one, which additionally pins the ``M_faint_offset`` protocol
+  constant -- unfitted by construction, so the fit prints the missing-galaxy
+  budget it buys at +/-1 mag instead of pretending the magnitudes chose it).
 
 The fit works in reference absolute magnitudes ``m - DM(z; H0=100)``, so it
 is exactly independent of the true H0 (h-scaled convention) and of the galaxy
@@ -28,7 +32,12 @@ import numpy as np
 
 from darksirens.catalogs.io import load_survey, load_survey_galprops
 from darksirens.cli.common import _banner, _end, _fatal, _ok, _row, _section
-from darksirens.redshift.selection import fit_selection_from_mags
+from darksirens.redshift.selection import (
+    M_FAINT_OFFSET_DEFAULT,
+    SELECTION_FAMILIES,
+    SELECTION_SAMPLED_FIELDS,
+    fit_selection_from_mags,
+)
 
 
 def main(argv=None):
@@ -42,9 +51,32 @@ def main(argv=None):
     p.add_argument("--out", default=None,
                    help="Output JSON path (default: selection_fit.json next "
                         "to the survey file).")
-    p.add_argument("--family", default="gaussian", choices=["gaussian"],
-                   help="Luminosity-function family (schechter ships with "
-                        "real-catalog ingestion).")
+    p.add_argument("--family", default="gaussian",
+                   choices=list(SELECTION_FAMILIES),
+                   help="Luminosity-function family of the selection model: "
+                        "'schechter' is the real-catalog LF (samples "
+                        "Mstar_hat, alpha; no K(z) template, single stratum); "
+                        "'gaussian' is the mock program's truncated-normal "
+                        "magnitude model (samples M0hat, sigma_M).")
+    p.add_argument("--m_faint_offset", type=float,
+                   default=M_FAINT_OFFSET_DEFAULT,
+                   help="Schechter faint-end cutoff as an offset from M*: "
+                        "M_faint = Mstar_hat + offset [mag] (default "
+                        f"{M_FAINT_OFFSET_DEFAULT} = 0.01 L*). A PROTOCOL "
+                        "constant that the magnitudes CANNOT constrain: it "
+                        "fixes the completeness denominator only, so the "
+                        "Q-table build and the inference run must carry the "
+                        "SAME value, and the fit reports the missing-galaxy "
+                        "budget it buys at +/-1 mag rather than fitting it.")
+    p.add_argument("--m_faint_cut", type=float, default=None,
+                   help="Optional h-scaled absolute-magnitude cut Mhat <= "
+                        "m_faint_cut applied to the FIT sample (schechter "
+                        "only). A parameter-free analysis cut, so the fitted "
+                        "theta keeps a regular interior optimum; use it to fit "
+                        "only the part of the catalog the modelled population "
+                        "is meant to describe. Independent of "
+                        "--m_faint_offset: the two agree only if you make "
+                        "them.")
     p.add_argument("--k_corr_coeffs", default=None,
                    help="Comma-separated polynomial coefficients c1[,c2,...] "
                         "of a fixed K-correction template K(z) = sum_j c_j "
@@ -62,6 +94,26 @@ def main(argv=None):
                         "'label:m_lim,label:m_lim' (e.g. '0:19.5,1:21.0'); "
                         "strata not listed use --m_lim. Only with --strata.")
     opts = p.parse_args(argv)
+
+    if opts.family == "schechter":
+        # Both are structural limits of the pinned c_sel_schechter, refused
+        # here so a long fit never produces an unconsumable payload.
+        if opts.k_corr_coeffs:
+            _fatal("--family schechter with --k_corr_coeffs: the pinned "
+                   "c_sel_schechter carries no K(z) template, so the fitted "
+                   "theta could not be consumed in-likelihood. Fit the "
+                   "gaussian family with --k_corr_coeffs, or extend "
+                   "c_sel_schechter (and its H0-invariance pin) first.")
+        if opts.strata or opts.m_lim_per_stratum:
+            _fatal("--family schechter with --strata/--m_lim_per_stratum: the "
+                   "stratified in-likelihood curve stack is built from the "
+                   "gaussian common-mode + offset decomposition and has no "
+                   "schechter counterpart. Fit each stratum as its own "
+                   "single-stratum schechter file, or use --family gaussian.")
+    elif opts.m_faint_cut is not None:
+        _fatal("--m_faint_cut is a --family schechter option: the gaussian LF "
+               "is already normalizable faint-ward, so its fit has no "
+               "absolute-magnitude cut to declare.")
 
     k_corr_coeffs = None
     if opts.k_corr_coeffs:
@@ -130,6 +182,8 @@ def main(argv=None):
         m_lim_s = m_lim_by.get(int(name) if name != "all" else -1, opts.m_lim)
         fit = fit_selection_from_mags(m[mask], z[mask], m_lim_s,
                                       family=opts.family, stratum=name,
+                                      M_faint_offset=opts.m_faint_offset,
+                                      m_faint_cut=opts.m_faint_cut,
                                       k_corr_coeffs=k_corr_coeffs)
         fits.append(fit)
         sd = np.sqrt(np.diag(fit.cov))
@@ -137,8 +191,36 @@ def main(argv=None):
         _row("  m_lim (fixed datum)", f"{fit.m_lim:.4f}")
         if k_corr_coeffs:
             _row("  K(z) coeffs", ", ".join(f"{c:.5g}" for c in k_corr_coeffs))
-        _row("  M0hat", f"{fit.M0hat:.5f} +/- {sd[0]:.5f}  (h-scaled)")
-        _row("  sigma_M", f"{fit.sigma_M:.5f} +/- {sd[1]:.5f}")
+        # Driven by SELECTION_SAMPLED_FIELDS so the sd row order can never
+        # drift from the covariance's row/column order.
+        for i, name_ in enumerate(SELECTION_SAMPLED_FIELDS[fit.family]):
+            scaled = "  (h-scaled)" if name_ in ("M0hat", "Mstar_hat") else ""
+            _row(f"  {name_}",
+                 f"{float(getattr(fit, name_)):.5f} +/- {sd[i]:.5f}{scaled}")
+        if fit.family == "schechter":
+            _row("  M_faint_offset",
+                 f"{fit.M_faint_offset:.4f}  (fixed protocol constant; "
+                 "must match the Q-table build and the inference run)")
+            if fit.meta.get("m_faint_cut") is not None:
+                _row("  m_faint_cut",
+                     f"{fit.meta['m_faint_cut']:.4f}  (h-scaled; dropped "
+                     f"{fit.meta['n_gal_cut_faintward']:,} galaxies "
+                     "faint-ward of it)")
+            # The one number the magnitudes cannot supply, printed next to the
+            # ones they do: the offset never entered the likelihood above, yet
+            # it multiplies the whole out-of-catalog weight downstream.
+            budget = fit.meta["missing_budget_vs_offset"]
+            _row("  1 - C_sel  vs offset",
+                 f"at z={fit.meta['z_budget_ref']:.4f}: "
+                 + ",  ".join(f"{k} mag -> {v:.4f}"
+                              for k, v in budget.items()))
+            _row("  faint end",
+                 f"{fit.meta['frac_complete_at_m_faint']:.3f} of the sample is "
+                 f"complete to M_faint={fit.meta['m_faint_implied']:.4f}; "
+                 f"{fit.meta['n_gal_faintward_of_m_faint']:,} galaxies lie "
+                 "faint-ward of it (outside the modelled population -- raise "
+                 "--m_faint_offset and REBUILD the Q table, or declare "
+                 "--m_faint_cut, if that count is not negligible)")
     _end()
 
     # A single stratum stays byte-compatible with the 1.0 consumers; only a

@@ -18,6 +18,7 @@ from darksirens.core.constants import (
 from darksirens.core.types import (
     C_MODE_AGGREGATE_STRUCT,
     C_MODE_SELECTION_STRUCT,
+    SELECTION_FAMILY_SCHECHTER_STRUCT,
     CosmoParams,
     SurveyParams,
 )
@@ -133,7 +134,7 @@ def _as_per_catalog_strata(raw, n_catalogs, where):
 
 def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
                    wl_params, c_mode=None, k_corr_coeffs=None,
-                   selection_strata=None):
+                   selection_strata=None, selection_family=None):
     """Build one catalog's :class:`SurveyParams` from a resolved label dict.
 
     ``values`` maps sampled + fixed labels to values; every
@@ -184,6 +185,19 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         # tuple or None, the z_depth pattern), never sampled.
         k_corr_coeffs=k_corr_coeffs,
         selection_strata=selection_strata,
+        # Luminosity-function family, STRUCTURAL by the same argument as
+        # c_mode: gaussian (the legacy default) is carried as None and
+        # schechter as the leaf-less sentinel, so the family survives the
+        # likelihood's jit boundary as pytree structure.
+        selection_family={"gaussian": None,
+                          "schechter": SELECTION_FAMILY_SCHECHTER_STRUCT}[
+                              str(selection_family or "gaussian")],
+        # Schechter block: Mstar_hat/alpha are sampled leaves under the
+        # schechter family and fiducial-pinned otherwise; M_faint_offset is a
+        # pinned protocol constant (--selection_fit sets it from the fit).
+        Mstar_hat=field["Mstar_hat"],
+        alpha=field["alpha"],
+        M_faint_offset=field["M_faint_offset"],
     )
 
 
@@ -220,6 +234,13 @@ class ParameterDecoder:
     # selection_strata).  K >= 2 with a stratified fit is refused in
     # build_parameter_decoder -- see the guard there.
     selection_strata: tuple[tuple | None, ...] = ()
+    # Luminosity-function family of the c_mode="selection" curve
+    # ("gaussian"/"schechter").  A SCALAR shared by every catalog (mixed-
+    # family mixtures are refused at the CLI resolver).  STRUCTURAL on
+    # SurveyParams (None vs the leaf-less sentinel); re-derived by
+    # build_parameter_decoder from opts and never sampled -- it gates which
+    # theta labels the survey block carries.
+    selection_family: str = "gaussian"
     sky_labels: tuple[str, ...] = ()
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
@@ -307,6 +328,7 @@ class ParameterDecoder:
             c_mode=self.c_mode,
             k_corr_coeffs=_kc1,
             selection_strata=_st1,
+            selection_family=self.selection_family,
         )
         return cosmo, survey, pop_params, sky_params, mark_params
 
@@ -350,6 +372,7 @@ class ParameterDecoder:
                 c_mode=self.c_mode,
                 k_corr_coeffs=_kc,
                 selection_strata=_st,
+                selection_family=self.selection_family,
             ))
 
         # Per-catalog eta blocks: catalog 1 is decode()'s vector verbatim;
@@ -450,6 +473,10 @@ def build_parameter_decoder(
     lss_completion_active = getattr(opts, "lss_completion_active_by_catalog", None)
     if lss_completion_active is None:
         lss_completion_active = getattr(opts, "lss_completion_active", False)
+    # The LF family gates which theta labels the survey block carries
+    # (M0hat/sigma_M vs Mstar_hat/alpha); the decoder must re-derive the space
+    # under the SAME family or the label sets diverge.
+    selection_family = str(getattr(opts, "selection_family", None) or "gaussian")
     (
         sampled_labels,
         _lower,
@@ -496,6 +523,7 @@ def build_parameter_decoder(
         # use_lss: the decoder must re-derive the space under the same mode.
         c_mode=getattr(opts, "c_mode", "per_pixel") or "per_pixel",
         selection_prior=getattr(opts, "selection_prior", None),
+        selection_family=selection_family,
     )
 
     # Fail-fast net for CLI/decoder flag drift (the P0.1 bug class): the CLI
@@ -532,6 +560,7 @@ def build_parameter_decoder(
         # Structural per-stratum offsets from a multi-stratum fit (1.1 JSON)
         # + --stratum_map, per catalog; None = single stratum (legacy).
         selection_strata=_strata_by_cat,
+        selection_family=selection_family,
         # Resolved per-catalog survey z_depth (CLI --survey_z_depth override >
         # per-catalog file attr > None), computed host-side in the CLI before
         # the likelihood is built. Absent on bare/legacy ``opts`` (e.g. tests

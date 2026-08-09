@@ -551,6 +551,47 @@ def run_completion_validation_multitracer(
     return paths
 
 
+def _resolve_selection_fit_pins(sel, family, fixed_parameter_values):
+    """Fold a --selection_fit's PINNED constants into ``fixed_parameter_values``
+    and return the EFFECTIVE theta the likelihood will run at.
+
+    The two pinned fields are not the same kind of thing.  ``m_lim`` is the
+    per-run truncation DATUM -- the fit only supplies a default, and a run may
+    legitimately declare a shallower limit -- so it is a ``setdefault``.
+    ``M_faint_offset`` is a PROTOCOL constant of the Schechter model: it fixes
+    the completeness DENOMINATOR (what counts as a galaxy), so the fit, the
+    Q-table base and the likelihood must integrate the same faint end, and an
+    explicit ``--fixed_parameter_values`` entry may only restate it.  Under
+    ``setdefault`` such an entry silently won over the fit while every
+    provenance stamp still agreed.
+
+    The returned theta is the fit's, with every ``--fixed_parameter_values``
+    pin folded in, so :func:`_check_selection_qtable_theta` compares the Q
+    table's stamps against what the likelihood ACTUALLY uses (an overridden
+    m_lim the table was not built with is the same stale-base mismatch).
+    """
+    from darksirens.redshift.selection import SELECTION_THETA_FIELDS
+
+    fixed_parameter_values.setdefault("m_lim", float(sel["m_lim"]))
+    if family == "schechter":
+        offset_fit = float(sel["M_faint_offset"])
+        offset_cli = fixed_parameter_values.get("M_faint_offset")
+        if offset_cli is not None and abs(float(offset_cli) - offset_fit) > 1e-9:
+            _fatal(
+                f"--fixed_parameter_values M_faint_offset={float(offset_cli)} "
+                f"contradicts the --selection_fit's "
+                f"M_faint_offset={offset_fit}: the faint cutoff "
+                "M_faint = Mstar_hat + M_faint_offset is a PROTOCOL constant "
+                "fixing the completeness denominator, not a per-run knob, so "
+                "the fit, any Q-table base and the likelihood must all "
+                "integrate the same luminosity function. Drop the override, "
+                "or refit with darksirens_fit_selection --m_faint_offset "
+                f"{float(offset_cli)}.")
+        fixed_parameter_values["M_faint_offset"] = offset_fit
+    return {name: float(fixed_parameter_values.get(name, sel[name]))
+            for name in SELECTION_THETA_FIELDS[family]}
+
+
 def _check_selection_qtable_theta(q_fiducials, opts):
     """Fail-closed theta provenance of c_mode=selection Q tables, PER CATALOG.
 
@@ -563,12 +604,26 @@ def _check_selection_qtable_theta(q_fiducials, opts):
 
     theta is SAMPLED by design (exempt from the pinned-to-build rule, like
     H0), but a table's FIXED C_sel base must come from the SAME offline fit
-    that centers that catalog's theta prior: (m_lim, M0hat, sigma_M) compared
-    to 1e-6 and the K(z) template elementwise INCLUDING the coefficient count
-    (a pre-K table -- no ``selection_kcorr_c*`` stamps -- is only consistent
-    with a K = 0 fit).  A selection-stamped table with no fit for THAT catalog
-    draws a loud warning (deliberate-ablation escape hatch), not an error.
+    that centers that catalog's theta prior: first the luminosity-function
+    FAMILY (the two bases differ by the whole LF shape, not a parameter),
+    then that family's theta compared to 1e-6, then the K(z) template
+    compared elementwise INCLUDING the coefficient count (a pre-K table --
+    no ``selection_kcorr_c*`` stamps -- is only consistent with a K = 0 fit).
+
+    The FAMILY check runs before the no-fit escape hatch, because that hatch
+    only widens theta WITHIN the run's family: the run's family is itself
+    set by --selection_fit alone, so a schechter-stamped table with no fit
+    means the likelihood forms a GAUSSIAN C_sel against a schechter fixed
+    budget -- a mismatch no configuration can make consistent, and therefore
+    an error rather than the sanctioned wide-open ablation.  Only the
+    same-family, no-fit case warns (deliberate-ablation escape hatch).
+
+    Each fit record's ``theta`` is the EFFECTIVE theta (the fit's, with any
+    --fixed_parameter_values pin folded in), so an overridden m_lim is
+    compared against the stamp the likelihood will actually contradict.
     """
+    from darksirens.redshift.selection import SELECTION_THETA_FIELDS
+
     fits = getattr(opts, "selection_fits", None)
     if fits is None:
         fits = [None] * len(q_fiducials)
@@ -581,15 +636,44 @@ def _check_selection_qtable_theta(q_fiducials, opts):
             "would compare a table against another catalog's fit."
         )
     for _k, (_fid, _fit) in enumerate(zip(q_fiducials, fits), start=1):
-        if not _fid or "selection_M0hat" not in _fid:
+        # Activation on EITHER family's magnitude center: keying on
+        # selection_M0hat alone would silently skip every schechter table.
+        if not _fid or not ({"selection_M0hat", "selection_Mstar_hat"}
+                            & _fid.keys()):
             continue
+        # The stamp when present; inferred from the theta keys for tables
+        # built before the family tag existed.
+        _tab_family = str(_fid.get("selection_family") or (
+            "schechter" if "selection_Mstar_hat" in _fid else "gaussian"))
+        _run_family = (str(_fit.get("family", "gaussian")) if _fit
+                       else getattr(opts, "selection_family", None)
+                       or "gaussian")
+        if _tab_family != _run_family:
+            _fatal(
+                f"catalog {_k}: Q table {_fid.get('path')}'s fixed C_sel "
+                f"base is a '{_tab_family}' curve but this run forms the "
+                f"'{_run_family}' family in-likelihood; the two completeness "
+                "bases differ by the whole LF shape, not by a parameter, so "
+                "the table's fixed (1 - C_sel) dN_exp budget and the sampled "
+                "completeness would carry different luminosity functions."
+                + (" The run's family comes from --selection_fit alone, so "
+                   f"there is no run in which a '{_tab_family}' table is "
+                   "consistent without one: pass the --selection_fit this "
+                   "table was built with."
+                   if _fit is None else
+                   " Rebuild the table from this fit (or point "
+                   "--selection_fit at the fit the table was built with).")
+            )
         if _fit is None:
             _warn(
-                f"catalog {_k}: Q table was built on a c_mode=selection base "
-                f"at theta_hat=(m_lim={_fid['selection_m_lim']:.4f}, "
-                f"M0hat={_fid['selection_M0hat']:.4f}, "
-                f"sigma_M={_fid['selection_sigma_M']:.4f}) but no "
-                f"--selection_fit entry anchors catalog {_k}'s theta prior: "
+                f"catalog {_k}: Q table was built on a c_mode=selection "
+                f"'{_tab_family}' base at theta_hat=("
+                + ", ".join(
+                    f"{_n}={float(_fid[f'selection_{_n}']):.4f}"
+                    for _n in SELECTION_THETA_FIELDS[_tab_family]
+                    if f"selection_{_n}" in _fid)
+                + f") but no --selection_fit entry anchors catalog {_k}'s "
+                "theta prior: "
                 "the table's fixed base and the wide-open sampled theta are "
                 "only consistent as a deliberate ablation."
             )
@@ -598,9 +682,19 @@ def _check_selection_qtable_theta(q_fiducials, opts):
         _run_k = tuple(_fit["k_corr_coeffs"] or ())
         _run_strata = [tuple(s) for s in (_fit["strata_fit"] or ())] or None
         _run_sha = _fit["stratum_map_sha256"] or ""
-        for _name, _key in (("m_lim", "selection_m_lim"),
-                            ("M0hat", "selection_M0hat"),
-                            ("sigma_M", "selection_sigma_M")):
+        # Family-driven key set: a schechter base is verified on
+        # (m_lim, Mstar_hat, alpha, M_faint_offset), a gaussian one on
+        # (m_lim, M0hat, sigma_M).
+        for _name in SELECTION_THETA_FIELDS[_run_family]:
+            _key = f"selection_{_name}"
+            if _key not in _fid:
+                _fatal(
+                    f"catalog {_k}: Q table {_fid.get('path')} carries no "
+                    f"{_key} stamp, so its fixed '{_run_family}' C_sel base "
+                    "cannot be verified against --selection_fit. Rebuild the "
+                    "table with the current "
+                    "darksirens_build_lognormal_completion."
+                )
             if abs(_theta[_name] - float(_fid[_key])) > 1e-6:
                 _fatal(
                     f"catalog {_k}: Q table {_fid.get('path')} was built at "
@@ -1042,32 +1136,44 @@ def build_parser():
                          "lognormal_completion --c-mode (hard-checked at load: "
                          "the two bases differ by the entire clustering "
                          "signal). 'selection': the PARAMETRIC magnitude-"
-                         "limited completeness C_sel(z; m_lim, M0hat, sigma_M) "
-                         "-- no counts in the budget at all; M0hat/sigma_M are "
-                         "SAMPLED (under the --selection_fit Gaussian prior "
-                         "when given, flat within bounds otherwise) and m_lim "
-                         "is a fixed truncation datum settable via "
+                         "limited completeness C_sel(z; theta) -- no counts in "
+                         "the budget at all; the LUMINOSITY-FUNCTION FAMILY "
+                         "comes from --selection_fit (gaussian: sampled "
+                         "M0hat/sigma_M; schechter: sampled Mstar_hat/alpha), "
+                         "and without a fit the run is the wide-open gaussian "
+                         "ablation. theta is SAMPLED (under the "
+                         "--selection_fit Gaussian prior when given, flat "
+                         "within bounds otherwise) and m_lim is a fixed "
+                         "truncation datum settable via "
                          "--fixed_parameter_values."))
     g.add_argument("--selection_fit", default=None, metavar="JSON[,JSON...]",
                    help=("selection_fit.json from darksirens_fit_selection "
                          "(c_mode=selection only), ONE PER CATALOG as a "
                          "comma-separated list in --survey_path order (a "
-                         "single path for a single catalog). Catalog k's fit "
-                         "anchors ITS OWN labels: theta_hat becomes the "
-                         "center and the marginal Laplace sds the widths of "
-                         "truncated-normal priors on M0hat/sigma_M "
-                         "(M0hat_c{k}/sigma_M_c{k} for k>=2), and m_lim "
-                         "(m_lim_c{k}) is pinned to that fit's datum unless "
-                         "--fixed_parameter_values overrides it. A single "
-                         "path is NEVER broadcast across catalogs. Use \"\" "
-                         "as a placeholder for a catalog with no fit -- fatal "
-                         "while that catalog runs c_mode=selection, since its "
-                         "theta would sample flat while the others are "
-                         "anchored. Catalog k's --lss_completion table must "
-                         "have been built with catalog k's fit (theta_hat "
-                         "stamped and hard-checked at load). Omit the flag "
-                         "entirely for flat-within-bounds selection priors on "
-                         "every catalog (the wide-open ablation)."))
+                         "single path for a single catalog). Each fit "
+                         "DECLARES the luminosity-function family: gaussian "
+                         "(sampled M0hat/sigma_M) or schechter (sampled "
+                         "Mstar_hat/alpha, which additionally pins the "
+                         "M_faint_offset protocol constant -- a "
+                         "--fixed_parameter_values entry may restate it but "
+                         "never change it); every fit in a run must declare "
+                         "the SAME family. Catalog k's fit anchors ITS OWN "
+                         "labels: theta_hat becomes the center and the "
+                         "marginal Laplace sds the widths of truncated-normal "
+                         "priors on that family's sampled labels (e.g. "
+                         "M0hat_c{k}/sigma_M_c{k} for gaussian catalogs "
+                         "k>=2), and m_lim (m_lim_c{k}) is pinned "
+                         "to that fit's datum unless --fixed_parameter_values "
+                         "overrides it. A single path is NEVER broadcast "
+                         "across catalogs. Use \"\" as a placeholder for a "
+                         "catalog with no fit -- fatal while that catalog "
+                         "runs c_mode=selection, since its theta would sample "
+                         "flat while the others are anchored. Catalog k's "
+                         "--lss_completion table must have been built with "
+                         "catalog k's fit (family + theta_hat stamped and "
+                         "hard-checked at load). Omit the flag entirely for "
+                         "flat-within-bounds selection priors on every "
+                         "catalog (the wide-open ablation)."))
     g.add_argument("--stratum_map", default=None,
                    help=("HDF5 file with a full-sky 'stratum_map' dataset "
                          "(RING, at the SURVEY's nside) assigning every pixel "
@@ -2193,10 +2299,23 @@ def _resolve_selection_fits(opts, data, fixed_parameter_values):
     * ``selection_strata_by_catalog`` -- structural stratum offsets per catalog
 
     and pins ``m_lim{sfx}`` per catalog in ``fixed_parameter_values``.
+
+    Also stamps ``opts.selection_family`` (SCALAR: the fits' shared
+    luminosity-function family, ``"gaussian"`` when no fit is given).  The
+    schechter family is single-catalog for now: its ``M_faint_offset``
+    protocol constant is pinned unsuffixed (one completeness denominator per
+    run), so per-catalog schechter anchoring has no defined semantics yet --
+    refused fail-closed below.
     """
-    from darksirens.redshift.selection import load_selection_fit_strata
+    from darksirens.redshift.selection import (
+        SELECTION_SAMPLED_FIELDS,
+        load_selection_fit_strata,
+    )
 
     modes = _selection_c_mode_by_catalog(opts)
+    # Always recorded in settings.json so post-processing rebuilds the SAME
+    # label ordering (the family gates which theta the survey block carries).
+    opts.selection_family = "gaussian"
     paths = (getattr(opts, "selection_fit_paths", None)
              or [None] * opts.n_catalogs)
     _any_fit = any(p is not None for p in paths)
@@ -2231,6 +2350,19 @@ def _resolve_selection_fits(opts, data, fixed_parameter_values):
                    "c_mode=selection completeness only.")
         _strata = load_selection_fit_strata(path)
         _sel = _strata[0]     # reference stratum: prior center + m_lim datum
+        # The fit declares the luminosity-function family; the stratified
+        # sub-branch below is reachable for gaussian only (loader-enforced).
+        _family = str(_sel.get("family", "gaussian"))
+        if _family != "gaussian" and opts.n_catalogs >= 2:
+            _fatal(
+                f"catalog {k}: --selection_fit {path} declares the "
+                f"'{_family}' family, but a K>=2 mixture is gaussian-only "
+                "for now: the schechter M_faint_offset protocol constant is "
+                "pinned unsuffixed (one completeness denominator per run), "
+                "so per-catalog schechter anchoring has no defined "
+                "semantics yet. Run the schechter fit single-catalog, or "
+                "use gaussian fits for the mixture.")
+        opts.selection_family = _family
         _map_sha = None
         if len(_strata) > 1:
             if not getattr(opts, "stratum_map", None):
@@ -2266,11 +2398,31 @@ def _resolve_selection_fits(opts, data, fixed_parameter_values):
             _fatal("--stratum_map given but the --selection_fit carries a "
                    "single stratum; drop the map or refit with --strata.")
         _sd = np.sqrt(np.diag(np.asarray(_sel["cov"], dtype=float)))
+        # Prior centers, sds and the provenance theta are all FAMILY-DRIVEN,
+        # off the one table in redshift/selection.py, so the sd order can
+        # never drift from the covariance's row/column order.
+        _fields = SELECTION_SAMPLED_FIELDS[_family]
+        if k == 1:
+            # Folds every --fixed_parameter_values pin (m_lim; the schechter
+            # M_faint_offset protocol constant) into the EFFECTIVE theta the
+            # Q-table firewall compares.
+            _theta_eff = _resolve_selection_fit_pins(
+                _sel, _family, fixed_parameter_values)
+        else:
+            # k >= 2 is gaussian-only (refused above), so the only pin is
+            # the suffixed m_lim datum.
+            fixed_parameter_values.setdefault(
+                f"m_lim{sfx}", float(_sel["m_lim"]))
+            _theta_eff = {
+                "m_lim": float(fixed_parameter_values[f"m_lim{sfx}"]),
+                "M0hat": float(_sel["M0hat"]),
+                "sigma_M": float(_sel["sigma_M"]),
+            }
         fits.append({
             "catalog": k,
             "path": str(path),
-            "theta": {n: float(_sel[n])
-                      for n in ("m_lim", "M0hat", "sigma_M")},
+            "family": _family,
+            "theta": _theta_eff,
             "k_corr_coeffs": [float(c)
                               for c in (_sel.get("k_corr_coeffs") or ())],
             "strata_fit": ([[float(s["m_lim"]), float(s["M0hat"]),
@@ -2283,15 +2435,14 @@ def _resolve_selection_fits(opts, data, fixed_parameter_values):
             "stratum_map": (str(opts.stratum_map)
                             if len(_strata) > 1 else None),
             "stratum_map_sha256": (_map_sha if len(_strata) > 1 else None),
-            "prior": {f"M0hat{sfx}": [float(_sel["M0hat"]), float(_sd[0])],
-                      f"sigma_M{sfx}": [float(_sel["sigma_M"]),
-                                        float(_sd[1])]},
+            "prior": {f"{f}{sfx}": [float(_sel[f]), float(_sd[i])]
+                      for i, f in enumerate(_fields)},
         })
-        fixed_parameter_values.setdefault(f"m_lim{sfx}", float(_sel["m_lim"]))
-        print(f"    - catalog {k} selection fit: {path} -- "
-              f"M0hat{sfx}={_sel['M0hat']:.3f} ± {_sd[0]:.3f}, "
-              f"sigma_M{sfx}={_sel['sigma_M']:.3f} ± {_sd[1]:.3f}, "
-              f"m_lim{sfx} pinned at {_sel['m_lim']:.3f}")
+        print(f"    - catalog {k} selection fit [{_family}]: {path} -- "
+              + ", ".join(f"{f}{sfx}={_sel[f]:.3f} ± {_sd[i]:.3f}"
+                          for i, f in enumerate(_fields))
+              + f", m_lim{sfx} pinned at "
+              f"{fixed_parameter_values[f'm_lim{sfx}']:.3f}")
 
     # The three consumer views are DERIVED here, in one place, so they cannot
     # drift from the per-catalog records they are projections of.
@@ -2432,6 +2583,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         mark_names_by_catalog  = getattr(opts, "mark_names_by_catalog", None),
         c_mode                 = opts.c_mode,
         selection_prior        = opts.selection_prior,
+        selection_family       = opts.selection_family,
     )
     labels, lower_bound, upper_bound = res[0], res[1], res[2]
     n_pop_eff, n_cosmo_eff, n_survey_eff, model_name = res[3], res[7], res[8], res[9]

@@ -8,6 +8,7 @@ from darksirens.core.constants import SURVEY_PARAMS_FID_BY_NAME
 from darksirens.gw.populations import pop_model_prior_parser
 from darksirens.sky import sky_model_prior_parser
 from darksirens.marks import mark_model_prior_parser
+from darksirens.redshift.selection import _ALPHA_MIN, SELECTION_SAMPLED_FIELDS
 from darksirens.utils.cosmology import (
     Om0PriorLower,
     Om0PriorUpper,
@@ -111,7 +112,7 @@ _COMPLETE_CATALOG = _Inert(
 
 
 def _completion_param_rule(universe_model, use_lss, q_active, catalog,
-                           c_mode="per_pixel"):
+                           c_mode="per_pixel", selection_family="gaussian"):
     """Activity of the completion parameters (``log10n0``, ``delta``)."""
     if universe_model in _CATALOG_FREE_MODELS:
         return _catalog_free(universe_model)
@@ -120,26 +121,20 @@ def _completion_param_rule(universe_model, use_lss, q_active, catalog,
     return None
 
 
-def _selection_rule(universe_model, use_lss, q_active, catalog,
-                    c_mode="per_pixel"):
-    """Activity of the parametric-selection parameters (``M0hat``, ``sigma_M``).
+def _selection_c_mode_gate(catalog, c_mode, theta_names):
+    """Shared ``c_mode != 'selection'`` refusal for both LF families.
 
-    They enter the likelihood ONLY through the parametric completeness curve
-    ``C_sel(z) = Phi((m_lim - M0 - DM(z))/sigma_M)`` that
-    ``c_mode="selection"`` forms in place of the counts-based estimators
-    (redshift/completion.py), so under any other c_mode they are provably
-    inert -- and a fixed value there asserts a selection model the likelihood
-    does not apply.
+    The selection theta enter the likelihood ONLY through the parametric
+    completeness curve ``c_mode="selection"`` forms in place of the
+    counts-based estimators (redshift/completion.py), so under any other mode
+    they are provably inert -- and a fixed value there asserts a selection
+    model the likelihood does not apply.
     """
-    model_rule = _completion_param_rule(
-        universe_model, use_lss, q_active, catalog, c_mode=c_mode)
-    if model_rule is not None:
-        return model_rule
     if c_mode != "selection":
         return _Inert(
             f"catalog {catalog} runs c_mode='{c_mode}', whose completeness "
             f"estimator is counts-based and never reads the parametric "
-            f"selection parameters (M0hat, sigma_M); they enter only the "
+            f"selection parameters ({theta_names}); they enter only the "
             f"C_sel(z) curve that c_mode='selection' forms",
             fatal_when_fixed=True,
             remedy="or run with --c_mode selection",
@@ -147,8 +142,64 @@ def _selection_rule(universe_model, use_lss, q_active, catalog,
     return None
 
 
+def _selection_rule(universe_model, use_lss, q_active, catalog,
+                    c_mode="per_pixel", selection_family="gaussian"):
+    """Activity of the GAUSSIAN-family selection parameters (``M0hat``, ``sigma_M``).
+
+    They enter the likelihood ONLY through
+    ``C_sel(z) = Phi((m_lim - M0 - DM(z))/sigma_M)``, so they are inert under
+    any other ``c_mode`` and under any other luminosity-function family.
+    """
+    model_rule = _completion_param_rule(
+        universe_model, use_lss, q_active, catalog, c_mode=c_mode)
+    if model_rule is not None:
+        return model_rule
+    gate = _selection_c_mode_gate(catalog, c_mode, "M0hat, sigma_M")
+    if gate is not None:
+        return gate
+    if selection_family != "gaussian":
+        return _Inert(
+            f"catalog {catalog} runs the '{selection_family}' selection "
+            f"family, whose C_sel(z) is built from (Mstar_hat, alpha); the "
+            f"gaussian LF parameters (M0hat, sigma_M) never enter its "
+            f"likelihood",
+            fatal_when_fixed=True,
+            remedy="or point --selection_fit at a gaussian fit",
+        )
+    return None
+
+
+def _selection_schechter_rule(universe_model, use_lss, q_active, catalog,
+                              c_mode="per_pixel", selection_family="gaussian"):
+    """Activity of the SCHECHTER-family selection parameters.
+
+    ``Mstar_hat`` (h-scaled M*) and ``alpha`` (the faint-end slope, NOT the
+    degenerate ``alpha_miss``) enter only through
+    ``C_sel(z) = Gamma(alpha+1, x_lim(z)) / Gamma(alpha+1, x_faint)``, which
+    the likelihood forms only under ``c_mode="selection"`` with the schechter
+    family selected.
+    """
+    model_rule = _completion_param_rule(
+        universe_model, use_lss, q_active, catalog, c_mode=c_mode)
+    if model_rule is not None:
+        return model_rule
+    gate = _selection_c_mode_gate(catalog, c_mode, "Mstar_hat, alpha")
+    if gate is not None:
+        return gate
+    if selection_family != "schechter":
+        return _Inert(
+            f"catalog {catalog} runs the '{selection_family}' selection "
+            f"family, whose C_sel(z) is built from (M0hat, sigma_M); the "
+            f"Schechter faint-end parameters (Mstar_hat, alpha) never enter "
+            f"its likelihood",
+            fatal_when_fixed=True,
+            remedy="or point --selection_fit at a schechter fit",
+        )
+    return None
+
+
 def _b_miss_rule(universe_model, use_lss, q_active, catalog,
-                 c_mode="per_pixel"):
+                 c_mode="per_pixel", selection_family="gaussian"):
     """Activity of ``b_miss``: the completion rule plus the two LSS gates.
 
     ``b_miss`` enters the likelihood ONLY through the local-overdensity factor
@@ -184,7 +235,7 @@ def _b_miss_rule(universe_model, use_lss, q_active, catalog,
 
 
 def _kde_rule(universe_model, use_lss, q_active, catalog,
-              c_mode="per_pixel"):
+              c_mode="per_pixel", selection_family="gaussian"):
     """Activity of ``sigma_kde``: every catalog-based model broadens its kernels."""
     if universe_model in _CATALOG_FREE_MODELS:
         return _catalog_free(universe_model)
@@ -211,6 +262,23 @@ _SURVEY_BLOCK = (
     # misbehave at sigma -> 0).  M0hat is h-SCALED (M0 - 5 log10 h).
     _SurveyParam("M0hat", -23.0, -18.0, _selection_rule),
     _SurveyParam("sigma_M", 0.05, 3.0, _selection_rule),
+    # Schechter block, appended LAST so no pre-existing coordinate index moves.
+    # THE LABEL-ORDERING STATEMENT: for every configuration that is not
+    # c_mode="selection" + selection_family="schechter" these two labels are
+    # INERT and filtered out, so the emitted label list is byte-identical to
+    # the pre-schechter one (including every downstream sky/mark/fcat_* offset);
+    # in a schechter run M0hat/sigma_M drop and these two take their place, so
+    # the survey block LENGTH is unchanged and every later block keeps its
+    # offsets too.  Mstar_hat is h-SCALED (M* - 5 log10 h); ``alpha`` is the
+    # Schechter FAINT-END SLOPE (not the degenerate alpha_miss next door).  Its
+    # -1.9 floor spans every measured galaxy faint-end slope (2MASS K -1.02,
+    # SDSS r -1.05, GLADE B -1.21) with margin off _ALPHA_MIN = -2, the edge of
+    # the one recurrence step c_sel_schechter takes to reach alpha + 1 <= 0.
+    # The margin is taste; the wall itself is not, so
+    # _validate_schechter_alpha_domain refuses any override (or fixed value)
+    # that reaches _ALPHA_MIN.
+    _SurveyParam("Mstar_hat", -23.0, -18.0, _selection_schechter_rule),
+    _SurveyParam("alpha", -1.9, 0.0, _selection_schechter_rule),
 )
 
 #: SurveyParams fields that are recognised as parameter labels but are NEVER
@@ -241,12 +309,20 @@ _PINNED_SURVEY_PARAMS = {
     ),
     "m_lim": _Inert(
         "'m_lim' is the truncation DATUM of the selection protocol, not an "
-        "uncertain parameter: inside C_sel(z) = "
-        "Phi((m_lim - M0hat - 5log10(h) - DM(z))/sigma_M) only the "
-        "combination m_lim - M0hat is identified, so sampling both would be "
-        "an exact flat direction; set it per run via "
-        "--fixed_parameter_values (the decoder pins the field) and let "
-        "M0hat carry the sampled freedom",
+        "uncertain parameter: inside C_sel(z) only the combination "
+        "m_lim - M0hat (gaussian) / m_lim - Mstar_hat (schechter) is "
+        "identified, so sampling both would be an exact flat direction; set "
+        "it per run via --fixed_parameter_values (the decoder pins the field) "
+        "and let the LF magnitude center carry the sampled freedom",
+        fixed_ok=True,
+    ),
+    "M_faint_offset": _Inert(
+        "'M_faint_offset' is a PROTOCOL constant of the Schechter selection "
+        "model, not an uncertain parameter: it defines the faint-end cutoff "
+        "M_faint = Mstar_hat + M_faint_offset that fixes the completeness "
+        "denominator, so the offline fit, the Q-table base and the likelihood "
+        "must all carry the same value; --selection_fit pins it from the fit "
+        "and refuses a --fixed_parameter_values entry that contradicts it",
         fixed_ok=True,
     ),
 }
@@ -270,24 +346,29 @@ if set(_SURVEY_PARAM_LABELS) != set(SURVEY_PARAMS_FID_BY_NAME):
 
 
 def _survey_param_inactive_reason(spec, universe_model, use_lss, q_active,
-                                  catalog, c_mode="per_pixel"):
+                                  catalog, c_mode="per_pixel",
+                                  selection_family="gaussian"):
     """``spec``'s :class:`_Inert` for this configuration, or ``None`` if sampled.
 
     A universe model the registry does not know about samples the whole
     LEGACY block (bounds and order as declared, no gating) -- the historical
     fallback for callers that never name a universe model.  The parametric
-    selection parameters are the exception: they are gated on ``c_mode``
-    regardless of the universe model (an unknown model without
-    c_mode="selection" would otherwise sample two phantom flat dimensions --
-    exactly the prior-volume inflation this registry exists to prevent).
+    selection parameters are the exception: they are gated on ``c_mode`` (and
+    on the LF family) regardless of the universe model (an unknown model
+    without c_mode="selection" would otherwise sample four phantom flat
+    dimensions -- exactly the prior-volume inflation this registry exists to
+    prevent).
     """
     if universe_model not in _REGISTERED_UNIVERSE_MODELS:
-        if spec.inactive_reason is _selection_rule:
+        if spec.inactive_reason in (_selection_rule,
+                                    _selection_schechter_rule):
             return spec.inactive_reason(None, use_lss, q_active, catalog,
-                                        c_mode=c_mode)
+                                        c_mode=c_mode,
+                                        selection_family=selection_family)
         return None
     return spec.inactive_reason(universe_model, use_lss, q_active, catalog,
-                                c_mode=c_mode)
+                                c_mode=c_mode,
+                                selection_family=selection_family)
 
 
 #: Matches the per-catalog ``_c{k}`` suffix appended to survey labels for the
@@ -404,6 +485,41 @@ def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
     return lower_out, upper_out
 
 
+def _validate_schechter_alpha_domain(labels, lower, upper,
+                                     fixed_parameter_values=None):
+    """Refuse a Schechter faint-end slope at or below the ``alpha > -2`` wall.
+
+    ``alpha``'s registry floor is a DOMAIN bound, not a matter of taste:
+    ``c_sel_schechter`` reaches negative ``alpha + 1`` with ONE recurrence step
+    off ``gammaincc``'s positive-argument domain, so ``alpha + 2 > 0`` is where
+    the spelling ends and below it the curve is NaN rather than a number.
+    Bounds are freely settable through ``--prior_overrides`` -- which the
+    selection-prior guard below even RECOMMENDS -- and a fixed ``alpha``
+    bypasses the bounds entirely, so both paths are walled here.  ``labels``
+    carries ``alpha`` only under ``c_mode="selection"`` +
+    ``selection_family="schechter"`` (the registry rule), so this is inert for
+    every other configuration.
+    """
+    fixed = fixed_parameter_values or {}
+    for label, lo, hi in zip(labels, lower, upper):
+        if _survey_base_name(label) != "alpha":
+            continue
+        for what, value in (("prior lower bound", lo),
+                            ("fixed value", fixed.get(label))):
+            if value is not None and float(value) <= _ALPHA_MIN:
+                raise ValueError(
+                    f"{label} {what} of {float(value)} is at or below the "
+                    f"{_ALPHA_MIN} floor: the pinned c_sel_schechter reaches "
+                    "alpha + 1 <= 0 with one recurrence step off gammaincc's "
+                    "positive-argument domain, so alpha + 2 > 0 is the edge of "
+                    "the spelling and below it the curve is NaN. This floor is "
+                    "not widenable, and it is not a physics limit either: "
+                    "every measured galaxy faint-end slope (2MASS K -1.02, "
+                    "SDSS r -1.05, GLADE B -1.21) sits well inside it "
+                    f"(bounds [{float(lo)}, {float(hi)}])."
+                )
+
+
 def validate_fixed_parameter_overrides(all_bounds, prior_overrides, fixed_parameter_values):
     """Validate and annotate labels that are both fixed and prior-overridden."""
     statuses = {}
@@ -477,6 +593,7 @@ def build_parameter_space(
     mark_names_by_catalog=None,
     c_mode: "str | Sequence[str]" = "per_pixel",
     selection_prior=None,
+    selection_family: str = "gaussian",
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
@@ -516,6 +633,13 @@ def build_parameter_space(
         per-catalog because the likelihood chooses Q-vs-``b_miss`` per catalog
         (``completion.field_lss_q is not None``), so a mixed config (Q on some
         catalogs only) must keep ``b_miss_c{k}`` for the Q-free catalogs.
+    selection_family
+        Luminosity-function family of the ``c_mode="selection"`` curve:
+        ``"gaussian"`` (the default; samples ``M0hat``/``sigma_M``) or
+        ``"schechter"`` (samples ``Mstar_hat``/``alpha``).  A SCALAR shared
+        by every catalog running the selection mode -- mixed-family mixtures
+        are refused at the CLI resolver (one fit family per run), so a
+        per-catalog family cannot arise here.
     selection_prior
         Magnitude-fit Gaussian priors ``{label: (loc, scale)}`` that flip the
         SAMPLED selection labels from flat to a truncated normal.  Labels are
@@ -559,6 +683,23 @@ def build_parameter_space(
                 f"catalog (or a single string to broadcast).")
     else:
         c_mode_by_cat = (str(c_mode),) * n_catalogs
+    selection_family = str(selection_family or "gaussian")
+    if selection_family not in SELECTION_SAMPLED_FIELDS:
+        raise ValueError(
+            f"unknown selection_family {selection_family!r}; the survey "
+            f"registry carries {sorted(SELECTION_SAMPLED_FIELDS)}.")
+    if selection_family == "schechter":
+        # M_faint_offset is PINNED, never sampled, so it has no bounds to be
+        # validated against -- and the fit-side and JSON-side positivity checks
+        # do not see a bare --fixed_parameter_values entry.  A non-positive
+        # offset puts the faint cutoff BRIGHT-ward of M*, inverting the
+        # completeness denominator.
+        _offset = (fixed_parameter_values or {}).get("M_faint_offset")
+        if _offset is not None and not float(_offset) > 0.0:
+            raise ValueError(
+                f"Fixed value for M_faint_offset must be positive; got "
+                f"{_offset}: the Schechter faint cutoff "
+                "M_faint = Mstar_hat + M_faint_offset lies FAINT-ward of M*.")
 
     #: 1-based catalog numbers running the parametric selection completeness.
     #: The magnitude-fit anchoring rule below is stated against THIS tuple (not
@@ -592,6 +733,7 @@ def build_parameter_space(
                     lss_active_by_cat[catalog - 1],
                     catalog,
                     c_mode=c_mode_by_cat[catalog - 1],
+                    selection_family=selection_family,
                 )
         return None
 
@@ -617,6 +759,9 @@ def build_parameter_space(
             [item[1] for item in block],
             [item[2] for item in block],
             prior_overrides,
+        )
+        _validate_schechter_alpha_domain(
+            labels_c, lower_c, upper_c, fixed_parameter_values
         )
         return labels_c, lower_c, upper_c
 
@@ -995,12 +1140,20 @@ def build_parameter_space(
     # bounds (the deliberate wide-open ablation).  Fail-closed: a prior for a
     # label that is not sampled in this configuration is a config error, not
     # a silent no-op.
+    _sampled_bases = SELECTION_SAMPLED_FIELDS[selection_family]
     for lbl, (loc, scale) in (selection_prior or {}).items():
-        if _survey_base_name(lbl) not in ("M0hat", "sigma_M"):
+        if _survey_base_name(lbl) not in _sampled_bases:
+            _other = next(
+                (f for f, names in SELECTION_SAMPLED_FIELDS.items()
+                 if _survey_base_name(lbl) in names), None)
             raise ValueError(
-                f"selection_prior names '{lbl}', but only the sampled "
-                f"selection parameters M0hat / sigma_M (optionally "
-                f"_c{{k}}-suffixed) accept a magnitude-fit Gaussian prior.")
+                f"selection_prior names '{lbl}', but the "
+                f"'{selection_family}' selection family samples only "
+                f"{list(_sampled_bases)} (optionally _c{{k}}-suffixed)"
+                + (f"; '{_survey_base_name(lbl)}' belongs to the '{_other}' "
+                   f"family, so the fit and the run disagree about the "
+                   f"luminosity function" if _other else "")
+                + ".")
         if lbl not in labels:
             reason = _survey_inactive_reason(lbl)
             why = f": {reason.reason}" if reason is not None else (
@@ -1035,7 +1188,9 @@ def build_parameter_space(
                 f"[{min(lower[_i], loc - 5.0 * scale):g}, "
                 f"{max(upper[_i], loc + 5.0 * scale):g}]}}', or check that "
                 f"this catalog's darksirens_fit_selection JSON is the right "
-                f"one for it."
+                f"one for it. Exception: 'alpha's lower bound is the "
+                f"alpha > -2 DOMAIN of the pinned c_sel_schechter and is "
+                f"refused below {_ALPHA_MIN} however it is set."
             )
         kind_map[lbl] = ("normal", float(loc), float(scale))
 
@@ -1052,9 +1207,11 @@ def build_parameter_space(
         unanchored = [
             lbl
             for k in selection_catalogs
+            # Family-driven label set (M0hat/sigma_M vs Mstar_hat/alpha), so
+            # a schechter run's anchoring rule covers ITS sampled labels.
             for lbl in (
-                f"M0hat{'' if k == 1 else f'_c{k}'}",
-                f"sigma_M{'' if k == 1 else f'_c{k}'}",
+                f"{base}{'' if k == 1 else f'_c{k}'}"
+                for base in _sampled_bases
             )
             if lbl in labels and lbl not in selection_prior
         ]

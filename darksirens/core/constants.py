@@ -33,6 +33,15 @@ SURVEY_PARAMS_FID_BY_NAME = {
     "m_lim": 24.0,
     "M0hat": -20.2,
     "sigma_M": 1.0,
+    # Schechter block of the same selection channel (active only under
+    # c_mode="selection" + selection_family="schechter").  Mstar_hat is
+    # h-SCALED like M0hat; alpha is the faint-end slope (kept above -2, the
+    # edge of the one recurrence step the curve's upper-gamma ratio takes).
+    # M_faint_offset is a PROTOCOL constant, never sampled: it must equal
+    # darksirens.redshift.selection.M_FAINT_OFFSET_DEFAULT (pinned by a test).
+    "Mstar_hat": -20.5,
+    "alpha": -0.7,
+    "M_faint_offset": 5.0,
 }
 
 #: Legacy positional spelling of :data:`SURVEY_PARAMS_FID_BY_NAME` (same order).
@@ -52,3 +61,10 @@ COMPLETE_EMPTY_PIXEL_POLICIES = {"zero": 0, "volume": 1}
 #: h-scaled LF parameters -- no counts enter the budget at all (the
 #: clustering-safe channel; see darksirens/redshift/selection.py).
 C_MODES = {"per_pixel": 0, "aggregate": 1, "selection": 2}
+
+#: Luminosity-function families of the ``c_mode="selection"`` curve, in CLI
+#: ``choices=`` order.  Lightweight spelling of
+#: ``darksirens.redshift.selection.SELECTION_FAMILIES`` (which owns the
+#: per-family theta tables) for callers that must not import the JAX module;
+#: a test pins the two agree.
+SELECTION_FAMILIES = ("gaussian", "schechter")
