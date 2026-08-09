@@ -9,6 +9,7 @@ every mismatch direction, including stratified-run x unstamped-table.
 """
 
 import json
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -171,33 +172,86 @@ def _fid(n_strata=None, sha="abc", strata=None):
 def test_firewall_strata_and_map_hash():
     from darksirens.cli import inference as cli
 
-    class Opts:
-        selection_fit_theta = {"m_lim": 21.0, "M0hat": -20.8, "sigma_M": 0.8}
-        selection_fit_kcorr = ()
-        selection_strata_fit = (THETA0, THETA1)
-        stratum_map_sha256 = "abc"
+    def _opts(strata_fit, map_sha):
+        # One per-catalog fit record per Q-table fiducial (catalog order).
+        return SimpleNamespace(selection_fits=[{
+            "catalog": 1, "path": "fit.json",
+            "theta": {"m_lim": 21.0, "M0hat": -20.8, "sigma_M": 0.8},
+            "k_corr_coeffs": [],
+            "strata_fit": ([list(s) for s in strata_fit]
+                           if strata_fit else None),
+            "strata_struct": None, "stratum_map": None,
+            "stratum_map_sha256": map_sha, "prior": {}}])
+
+    Opts = _opts([THETA0, THETA1], "abc")
 
     good = _fid(2, "abc", [THETA0, THETA1])
-    cli._check_selection_qtable_theta([good], Opts())        # passes
+    cli._check_selection_qtable_theta([good], Opts)          # passes
 
     with pytest.raises(SystemExit):                          # unstamped table
-        cli._check_selection_qtable_theta([_fid()], Opts())
+        cli._check_selection_qtable_theta([_fid()], Opts)
     with pytest.raises(SystemExit):                          # map hash mismatch
         cli._check_selection_qtable_theta(
-            [_fid(2, "OTHER", [THETA0, THETA1])], Opts())
+            [_fid(2, "OTHER", [THETA0, THETA1])], Opts)
     with pytest.raises(SystemExit):                          # theta mismatch
         cli._check_selection_qtable_theta(
-            [_fid(2, "abc", [THETA0, (20.5, -20.4, 0.9)])], Opts())
+            [_fid(2, "abc", [THETA0, (20.5, -20.4, 0.9)])], Opts)
     with pytest.raises(SystemExit):                          # count mismatch
         cli._check_selection_qtable_theta(
-            [_fid(3, "abc", [THETA0, THETA1, THETA1])], Opts())
+            [_fid(3, "abc", [THETA0, THETA1, THETA1])], Opts)
 
-    class OptsSingle:                                        # stamped table,
-        selection_fit_theta = {"m_lim": 21.0, "M0hat": -20.8,  # single run
-                               "sigma_M": 0.8}
-        selection_fit_kcorr = ()
-        selection_strata_fit = None
-        stratum_map_sha256 = None
-
+    # Stamped (stratified) table against a single-stratum run.
     with pytest.raises(SystemExit):
-        cli._check_selection_qtable_theta([good], OptsSingle())
+        cli._check_selection_qtable_theta([good], _opts(None, None))
+
+
+def test_stamped_table_round_trips_through_the_loader(catalog, tmp_path):
+    """The firewall must be reachable from a REAL file, not only hand-built fids.
+
+    The stratum-map sha256 is a string stamped under a ``selection_s`` name, so
+    a loader that float()-coerces every ``selection_s*`` stamp makes every
+    stratified table unloadable -- and the CLI's map-hash check unreachable in
+    production.  Build -> save -> maybe_load_lss_completion -> firewall.
+    """
+    from darksirens.catalogs.lss import maybe_load_lss_completion
+    from darksirens.cli import inference as cli
+    from darksirens.redshift.lognormal_completion import save_lss_completion_hdf5
+
+    d, _ = catalog
+    _write_fit(d / "fit_rt.json", [THETA0, THETA1])
+    _write_map(d / "map_rt.h5", np.arange(NPIX) % 2)
+    logq, _, diag = _build(d / "cat.h5", d / "fit_rt.json", d / "map_rt.h5")
+    qpath = str(tmp_path / "q_strat.h5")
+    save_lss_completion_hdf5(qpath, logq_map=np.asarray(logq),
+                             zgrid=np.asarray(zgrid), c_mode="selection",
+                             metadata=diag)
+
+    opts = SimpleNamespace(lss_completion=qpath, survey_path=None,
+                           universe_model="dark_sirens", c_mode="selection",
+                           lss_marginalize=False)
+    fid = maybe_load_lss_completion(opts, zgrid=zgrid)["lss_completion_fiducials"]
+
+    sha = _stratum_map_sha256_of(d / "map_rt.h5")
+    assert fid["selection_stratum_map_sha256"] == sha
+    assert fid["selection_n_strata"] == 2.0
+    assert fid["selection_s1_M0hat"] == THETA1[1]
+
+    def _opts(map_sha):
+        return SimpleNamespace(selection_fits=[{
+            "catalog": 1, "path": "fit.json",
+            "theta": {"m_lim": THETA0[0], "M0hat": THETA0[1],
+                      "sigma_M": THETA0[2]},
+            "k_corr_coeffs": [],
+            "strata_fit": [list(THETA0), list(THETA1)],
+            "strata_struct": None, "stratum_map": None,
+            "stratum_map_sha256": map_sha, "prior": {}}])
+
+    cli._check_selection_qtable_theta([fid], _opts(sha))
+    with pytest.raises(SystemExit):
+        cli._check_selection_qtable_theta([fid], _opts("not-the-map"))
+
+
+def _stratum_map_sha256_of(path):
+    from darksirens.cli.build_lognormal_completion import _stratum_map_sha256
+
+    return _stratum_map_sha256(path)

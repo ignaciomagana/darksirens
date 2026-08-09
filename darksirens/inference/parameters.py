@@ -73,6 +73,64 @@ def _sticks_to_log_weights(v: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([jnp.reshape(log_w_head, (1,)), log_w_tail])
 
 
+def _as_per_catalog_kcorr(raw, n_catalogs, where):
+    """Normalize a per-catalog K(z) template list to a structural tuple.
+
+    ``raw`` is one entry per catalog: a coefficient sequence, or None/empty
+    for K = 0.  The pre-per-catalog FLAT coefficient tuple is rejected rather
+    than reinterpreted -- read as per-catalog it would silently hand catalog 1
+    a one-coefficient template and catalog 2 another, i.e. run the wrong
+    selection curve with no diagnostic.
+    """
+    if not raw:
+        return (None,) * n_catalogs
+    entries = list(raw)
+    if any(isinstance(e, (int, float)) for e in entries):
+        raise ValueError(
+            f"{where} is a FLAT K(z) coefficient sequence {tuple(entries)}; "
+            "it is per catalog since the per-catalog selection fits landed. "
+            "Wrap it as one entry per catalog, e.g. "
+            f"[{tuple(float(c) for c in entries)}] for a single catalog."
+        )
+    if len(entries) != n_catalogs:
+        raise ValueError(
+            f"{where} has {len(entries)} entries but n_catalogs="
+            f"{n_catalogs}; pass exactly one K(z) template per catalog "
+            "(None for a catalog with no magnitude fit)."
+        )
+    return tuple(
+        (tuple(float(c) for c in e) or None) if e else None for e in entries
+    )
+
+
+def _as_per_catalog_strata(raw, n_catalogs, where):
+    """Normalize per-catalog structural stratum offsets; reject the flat form."""
+    if not raw:
+        return (None,) * n_catalogs
+    entries = list(raw)
+    if any(
+        e is not None
+        and len(tuple(e)) == 3
+        and all(isinstance(x, (int, float)) for x in tuple(e))
+        for e in entries
+    ):
+        raise ValueError(
+            f"{where} is a FLAT ((m_lim, dM0hat, sigma_ratio), ...) stratum "
+            "tuple; it is per catalog since the per-catalog selection fits "
+            "landed. Wrap it as one entry per catalog (None where a catalog "
+            "has no stratified fit)."
+        )
+    if len(entries) != n_catalogs:
+        raise ValueError(
+            f"{where} has {len(entries)} entries but n_catalogs="
+            f"{n_catalogs}; pass exactly one stratum block per catalog."
+        )
+    return tuple(
+        (tuple(tuple(float(x) for x in s) for s in e) or None) if e else None
+        for e in entries
+    )
+
+
 def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
                    wl_params, c_mode=None, k_corr_coeffs=None,
                    selection_strata=None):
@@ -151,14 +209,17 @@ class ParameterDecoder:
     # aggregate to the leaf-less C_MODE_AGGREGATE_STRUCT sentinel (the
     # z_depth structural pattern -- see _survey_params; never sampled).
     c_mode: int = 0
-    # Fixed K-correction template of the parametric selection curve
-    # (structural tuple of polynomial coefficients or None = K=0); carried
-    # onto every catalog's SurveyParams, never sampled.
-    k_corr_coeffs: tuple[float, ...] | None = None
+    # Fixed K(z) template of the parametric selection curve, PER CATALOG:
+    # entry k-1 is catalog k's tuple of polynomial coefficients, or None
+    # (K = 0 / no magnitude fit).  Carried onto that catalog's SurveyParams,
+    # never sampled.  An empty tuple means every catalog gets None (legacy).
+    k_corr_coeffs: tuple[tuple[float, ...] | None, ...] = ()
     # Structural per-stratum selection offsets ((m_lim_s, dM0hat_s,
-    # sigma_ratio_s), ...) or None = single stratum; fixed data from the
-    # offline fit, never sampled (see SurveyParams.selection_strata).
-    selection_strata: tuple | None = None
+    # sigma_ratio_s), ...) PER CATALOG, or None = single stratum; fixed data
+    # from that catalog's offline fit, never sampled (SurveyParams.
+    # selection_strata).  K >= 2 with a stratified fit is refused in
+    # build_parameter_decoder -- see the guard there.
+    selection_strata: tuple[tuple | None, ...] = ()
     sky_labels: tuple[str, ...] = ()
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
@@ -174,6 +235,24 @@ class ParameterDecoder:
     # Number of EM catalogs in the redshift-prior mixture.  1 (default) is the
     # single-catalog path; ``decode_mixture`` is only meaningful for K >= 2.
     n_catalogs: int = 1
+
+    def __post_init__(self):
+        # Normalize + shape-check here so a DIRECT ParameterDecoder(...) gets
+        # the same firewall as the build_parameter_decoder path.
+        object.__setattr__(self, "k_corr_coeffs", _as_per_catalog_kcorr(
+            self.k_corr_coeffs, self.n_catalogs,
+            "ParameterDecoder(k_corr_coeffs=...)"))
+        object.__setattr__(self, "selection_strata", _as_per_catalog_strata(
+            self.selection_strata, self.n_catalogs,
+            "ParameterDecoder(selection_strata=...)"))
+
+    def _selection_templates(self, catalog):
+        """Catalog ``catalog`` (1-based) structural (k_corr_coeffs, strata)."""
+        n = len(self.k_corr_coeffs)
+        kc = self.k_corr_coeffs[catalog - 1] if n >= catalog else None
+        m = len(self.selection_strata)
+        st = self.selection_strata[catalog - 1] if m >= catalog else None
+        return kc, st
 
     def decode(self, coord: jnp.ndarray):
         """Return ``(cosmo, survey, pop_params, sky_params, mark_params)`` for ``coord``."""
@@ -218,6 +297,7 @@ class ParameterDecoder:
         ])
 
         cosmo = CosmoParams(H0=H0, Om0=Om0, w0=w0, wa=wa)
+        _kc1, _st1 = self._selection_templates(1)
         survey = _survey_params(
             values,
             "",
@@ -225,8 +305,8 @@ class ParameterDecoder:
             z_depth=self.z_depths[0] if len(self.z_depths) >= 1 else None,
             wl_params=self.wl_params,
             c_mode=self.c_mode,
-            k_corr_coeffs=self.k_corr_coeffs,
-            selection_strata=self.selection_strata,
+            k_corr_coeffs=_kc1,
+            selection_strata=_st1,
         )
         return cosmo, survey, pop_params, sky_params, mark_params
 
@@ -260,6 +340,7 @@ class ParameterDecoder:
 
         surveys = [survey1]
         for k in range(2, self.n_catalogs + 1):
+            _kc, _st = self._selection_templates(k)
             surveys.append(_survey_params(
                 values,
                 f"_c{k}",
@@ -267,8 +348,8 @@ class ParameterDecoder:
                 z_depth=self.z_depths[k - 1] if len(self.z_depths) >= k else None,
                 wl_params=None,
                 c_mode=self.c_mode,
-                k_corr_coeffs=self.k_corr_coeffs,
-                selection_strata=self.selection_strata,
+                k_corr_coeffs=_kc,
+                selection_strata=_st,
             ))
 
         # Per-catalog eta blocks: catalog 1 is decode()'s vector verbatim;
@@ -317,6 +398,44 @@ def build_parameter_decoder(
     mark_model = getattr(opts, "mark_model", "none")
     mark_names = tuple(getattr(opts, "mark_names", ()) or ())
     n_catalogs = int(getattr(opts, "n_catalogs", 1))
+
+    # Retired scalar spellings of the selection-fit state.  They were
+    # catalog-1-shaped; reading one now would pin every catalog of a mixture
+    # to catalog 1's K(z) template / strata, which is precisely the silent
+    # cross-wiring the per-catalog plumbing removes.
+    for _retired, _now in (
+        ("selection_fit_kcorr", "selection_kcorr_by_catalog"),
+        ("selection_strata_struct", "selection_strata_by_catalog"),
+    ):
+        # Truthiness, not `is not None`: every archived pre-per-catalog
+        # settings.json recorded selection_fit_kcorr == [] for a K=0-template
+        # run, and an empty retired value carries the same meaning as absent.
+        if getattr(opts, _retired, None):
+            raise ValueError(
+                f"opts.{_retired} is retired: the selection fit is now per "
+                f"catalog. Set opts.{_now} to a length-n_catalogs sequence "
+                f"(entry k-1 = catalog k's value, None where a catalog has "
+                f"no magnitude fit)."
+            )
+
+    _kcorr_by_cat = _as_per_catalog_kcorr(
+        getattr(opts, "selection_kcorr_by_catalog", None), n_catalogs,
+        "opts.selection_kcorr_by_catalog")
+    _strata_by_cat = _as_per_catalog_strata(
+        getattr(opts, "selection_strata_by_catalog", None), n_catalogs,
+        "opts.selection_strata_by_catalog")
+    if n_catalogs >= 2 and any(s is not None for s in _strata_by_cat):
+        raise ValueError(
+            "Stratified c_mode='selection' is single-catalog: the full-sky "
+            "stratum map is attached to the SHARED data bundle "
+            "(data['pixel_stratum_map']) while a K>=2 mixture builds each "
+            "catalog's views from its OWN bundle "
+            "(likelihood/factory.py -> prepare_catalog_views), so the map "
+            "never reaches catalog k's EMCatalog and its per-stratum "
+            "empty-pixel budget would be missing. Use single-stratum fits "
+            "for a mixture, or run the stratified fit single-catalog."
+        )
+
     mark_names_by_catalog = getattr(opts, "mark_names_by_catalog", None)
     if mark_names_by_catalog is None:
         mark_names_by_catalog = (mark_names,) + ((),) * (n_catalogs - 1)
@@ -406,18 +525,13 @@ def build_parameter_decoder(
         # Absent on bare/legacy opts -> per_pixel (0), the bit-identical
         # legacy completeness estimator.
         c_mode=c_mode_code(getattr(opts, "c_mode", None) or "per_pixel"),
-        # Fixed K(z) template of the selection curve, resolved by the CLI from
-        # the --selection_fit JSON; absent/empty -> None (K = 0, legacy).
-        k_corr_coeffs=(
-            tuple(float(c)
-                  for c in getattr(opts, "selection_fit_kcorr", None) or ())
-            or None),
+        # Fixed K(z) template of the selection curve PER CATALOG, resolved by
+        # the CLI from each catalog's --selection_fit JSON; absent -> None
+        # everywhere (K = 0, legacy).
+        k_corr_coeffs=_kcorr_by_cat,
         # Structural per-stratum offsets from a multi-stratum fit (1.1 JSON)
-        # + --stratum_map; None = single stratum (legacy).
-        selection_strata=(
-            tuple(tuple(float(x) for x in s)
-                  for s in getattr(opts, "selection_strata_struct", None) or ())
-            or None),
+        # + --stratum_map, per catalog; None = single stratum (legacy).
+        selection_strata=_strata_by_cat,
         # Resolved per-catalog survey z_depth (CLI --survey_z_depth override >
         # per-catalog file attr > None), computed host-side in the CLI before
         # the likelihood is built. Absent on bare/legacy ``opts`` (e.g. tests
