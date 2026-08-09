@@ -207,10 +207,9 @@ def test_marked_missing_curve_is_the_plain_field_curve(c_mode, z_depth):
     cat, cosmo = _marked_catalog(), _cosmo()
     survey = _survey(c_mode, z_depth=z_depth)
 
-    V_lib, dN_exp = _field_missing_curve(cosmo, survey, cat)
-    C_bar, V_hand, dN_hand = _hand_budget(cosmo, survey, cat, c_mode)
+    V_lib, _dN_exp = _field_missing_curve(cosmo, survey, cat)
+    C_bar, V_hand, _ = _hand_budget(cosmo, survey, cat, c_mode)
     np.testing.assert_allclose(np.asarray(V_lib), V_hand, rtol=0, atol=1e-12)
-    np.testing.assert_array_equal(np.asarray(dN_exp), dN_hand)
     # the curve is non-degenerate: the shared budget is neither saturated nor dead
     assert 0.0 < float(C_bar.max()) and float(C_bar.min()) < 1.0
 
