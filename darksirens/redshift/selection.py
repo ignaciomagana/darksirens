@@ -39,12 +39,25 @@ coefficients reproduce the K = 0 behaviour bit-identically.
 
 Luminosity-function families.  ``gaussian`` (the mock program) models the
 absolute magnitudes as an upper-truncated Gaussian; ``schechter`` (the
-real-catalog family) models them as a Schechter LF truncated faint-ward at
-``M_faint = Mstar_hat + M_faint_offset``.  The Schechter family carries NO
-K(z) template -- the pinned :func:`c_sel_schechter` takes none, so a
-K-corrected Schechter fit could not be consumed in-likelihood -- and its
-faint-end slope is restricted to ``alpha > -1``, the domain on which the
-regularized upper incomplete gamma ratio the curve uses is defined.
+real-catalog family) models them as a Schechter LF whose completeness
+denominator is integrated down to ``M_faint = Mstar_hat + M_faint_offset``.
+The Schechter family carries NO K(z) template -- the pinned
+:func:`c_sel_schechter` takes none, so a K-corrected Schechter fit could not
+be consumed in-likelihood.
+
+Where the faint cutoff does and does not act.  ``C_sel(z)`` is a RATIO of
+upper incomplete gammas, ``Gamma(a, x_lim(z)) / Gamma(a, x_faint)`` with
+``a = alpha + 1``; both arguments are strictly positive, so both integrals
+converge for every real ``alpha``.  The cutoff exists to make the DENOMINATOR
+-- the count of "all galaxies" -- finite when ``alpha <= -1``; the detected
+side never needed it, because detection itself truncates at ``M_lim(z)``.
+The offline fit uses exactly that: it normalizes each galaxy against its own
+detection limit (plus an optional PARAMETER-FREE absolute-magnitude cut), so
+its support edge never moves with the fitted ``Mstar_hat`` and the MLE stays
+a regular interior optimum instead of an order statistic.  The corollary is
+stated in :func:`_fit_schechter_truncated` and stamped into the fit's
+``meta``: ``M_faint_offset`` is a pure PROTOCOL constant that the magnitudes
+cannot constrain, while it multiplies the whole out-of-catalog budget.
 
 Not covered here (documented limits): photometric-error convolution of the
 magnitude likelihood, per-galaxy (color-dependent) K-corrections, extinction
@@ -56,7 +69,7 @@ from dataclasses import dataclass, field
 
 import jax.numpy as jnp
 import numpy as np
-from jax.scipy.special import gammaincc, ndtr
+from jax.scipy.special import gammaincc, gammaln, ndtr
 
 from darksirens.utils.cosmology import (
     Om0Planck,
@@ -96,16 +109,33 @@ SELECTION_SAMPLED_FIELDS = {
 
 SELECTION_FAMILIES = tuple(SELECTION_THETA_FIELDS)      # ("gaussian", "schechter")
 
-#: Minimum margin [mag] between the fitted faint cutoff and the faintest galaxy
-#: in the sample before the MLE is declared pinned at the support boundary.
-_FAINT_WALL_MARGIN = 0.05
-
-#: ``alpha + 1`` floor: the regularized upper-gamma ratio the pinned curve uses
-#: is undefined at ``alpha <= -1`` (Gamma(alpha+1) diverges).  Enforced by the
+#: Faint-end slope floor.  NOT the physics: ``Gamma(a, x_lim)/Gamma(a, x_faint)``
+#: is finite for every real ``a = alpha + 1`` because both arguments are
+#: strictly positive.  It is the SPELLING that has a domain -- ``gammaincc``
+#: implements the REGULARIZED ratio, defined only for a positive first argument
+#: -- and :func:`_upper_gamma_scaled` buys back one unit of it with the
+#: ``Gamma(a+1, x) = a Gamma(a, x) + x^a e^-x`` recurrence, so the family
+#: carries ``alpha > -2``.  That covers every measured galaxy faint-end slope
+#: (2MASS K -1.02, SDSS r -1.05, GLADE B -1.21) with margin.  Enforced by the
 #: offline fit, by the JSON loader, by the sampled ``alpha`` bounds
 #: (inference/prior.py, which refuses a --prior_overrides floor at or below it)
 #: and, as the last wall, by :func:`c_sel_schechter` itself.
-_ALPHA_MIN = -0.99
+_ALPHA_MIN = -2.0
+
+#: ``|alpha + 1|`` below which the recurrence's REMOVABLE singularity is nudged
+#: aside.  ``Gamma(a, x)`` is entire in ``a`` at fixed ``x > 0``, so ``C_sel``
+#: is analytic through ``alpha = -1``; only the ``a Gamma(a, x)`` spelling
+#: reads 0/0 there.  1e-6 keeps ~10 digits in the recurrence's difference and
+#: moves the curve by O(1e-6) -- orders below any completeness the likelihood
+#: resolves -- so the alpha ~ -1.0 slopes of real K/r-band LFs evaluate
+#: normally instead of hitting a wall.
+_A_NEAR_ZERO = 1e-6
+
+#: Fraction of the fit sample whose own detection limit already reaches past
+#: the modelled faint cutoff, above which an undeclared ``m_faint_cut`` is
+#: worth a warning: over that sub-sample the fit's LF has no faint edge while
+#: the completion's does.
+_DEEP_WARN = 0.02
 
 
 def m0_absolute(M0hat, H0):
@@ -149,38 +179,78 @@ def c_sel_gaussian(z, m_lim, M0hat, sigma_M, H0, Om0=Om0Planck,
     return ndtr((m_lim - M0 - dm) / sigma_M)
 
 
+def _a_off_zero(a, xp=jnp):
+    """Nudge ``a = alpha + 1`` off the removable singularity at ``a = 0``.
+
+    Idempotent, so a caller that needs both ``a Gamma(a, x)`` and ``a`` itself
+    (the offline fit divides one by the other) gets the SAME nudged value from
+    two independent calls.  See :data:`_A_NEAR_ZERO` for why nudging rather
+    than walling is the honest treatment.
+    """
+    return xp.where(xp.abs(a) < _A_NEAR_ZERO, _A_NEAR_ZERO, a)
+
+
+def _upper_gamma_scaled(a, x, xp=jnp):
+    """``a * Gamma(a, x)`` -- the UNREGULARIZED upper incomplete gamma, pole
+    factored out, valid for ``a > -1`` (i.e. ``alpha > -2``).
+
+    ``Gamma(a+1, x) = a Gamma(a, x) + x^a e^{-x}`` exactly, so
+
+        a * Gamma(a, x) = Gamma(a+1) Q(a+1, x) - x^a e^{-x}
+
+    is evaluated entirely inside ``gammaincc``'s ``a + 1 > 0`` domain even
+    where the TARGET ``a`` is zero or negative -- which is where every real
+    galaxy faint-end slope lives.  The leading ``a`` is deliberately left in
+    the result: :func:`c_sel_schechter` forms a ratio at fixed ``a``, in which
+    it cancels exactly, so the curve has no pole at ``alpha = -1`` at all,
+    only the removable singularity :func:`_a_off_zero` steps around.  ``xp``
+    selects the array module (the :func:`k_of_z` idiom) so the JAX curve and
+    the numpy offline fit share one implementation and one convention.
+    """
+    if xp is np:
+        from scipy.special import gammaincc as _gammaincc, gammaln as _gammaln
+    else:
+        _gammaincc, _gammaln = gammaincc, gammaln
+    a = _a_off_zero(a, xp)
+    return (xp.exp(_gammaln(a + 1.0)) * _gammaincc(a + 1.0, x)
+            - x ** a * xp.exp(-x))
+
+
 def c_sel_schechter(z, m_lim, Mstar_hat, alpha, M_faint_offset, H0,
                     Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
-    """Schechter-LF selection via regularized upper incomplete gamma ratios.
+    """Schechter-LF selection: a ratio of UPPER INCOMPLETE GAMMAS.
 
     ``C_sel(z) = Gamma(alpha+1, x_lim(z)) / Gamma(alpha+1, x_faint)`` with
-    ``x = L/L* = 10^{-0.4 (M - M*)}``, ``M_lim(z) = m_lim - DM(z)`` and a
-    faint-end integration cutoff ``M_faint = M* + M_faint_offset`` (the
-    Schechter integrand diverges faint-ward for ``alpha <= -1``; the cutoff is
-    part of the model and must match the population the completion assumes).
-    ``Mstar_hat`` is h-scaled like ``M0hat``.  Requires ``alpha > -1`` for the
-    unregularized-at-zero ratio to stay finite at bright limits; the
-    regularized form used here is finite for ``alpha + 1 > 0`` arguments and
-    clipped into [0, 1].  API pinned for real catalogs; the mock program
-    exercises the Gaussian family.
+    ``x = L/L* = 10^{-0.4 (M - M*)}``, ``M_lim(z) = m_lim - DM(z)`` and the
+    faint-end integration cutoff ``M_faint = M* + M_faint_offset``.  Both
+    arguments are strictly positive, so BOTH integrals converge for every real
+    ``alpha``: the cutoff is what keeps the denominator -- the count of every
+    galaxy the completeness answers for -- finite once ``alpha <= -1``, and
+    the numerator never needed it.  Written through
+    :func:`_upper_gamma_scaled`, whose ``Gamma(a)`` factors cancel in the
+    ratio, so the curve carries the ``alpha ~ -1.0 to -1.3`` slopes real
+    catalogs measure.  ``Mstar_hat`` is h-scaled like ``M0hat``.
 
-    Outside that domain the curve is NaN, not a number: ``gammaincc`` returns
-    1.0 for a non-positive first argument, so numerator and denominator would
-    both collapse and ``C_sel(z)`` would read as an identically COMPLETE
-    survey -- the one failure mode that produces no visible symptom.  NaN
-    propagates to ``logL = -inf`` the way an off-grid cosmology does.  This is
-    the last wall, not the first: the offline fit, the JSON loader and the
-    sampled ``alpha`` bounds all refuse ``alpha <= _ALPHA_MIN`` up front.
+    The result is clipped into [0, 1]: ``x_lim < x_faint`` means the survey
+    reaches FAINTER than the modelled population and is complete there.
+
+    Below ``alpha = _ALPHA_MIN`` the curve is NaN, not a number: that is the
+    edge of the recurrence's one lift, and a silent wrong answer there would
+    read as an identically COMPLETE survey -- the one failure mode with no
+    visible symptom.  NaN propagates to ``logL = -inf`` the way an off-grid
+    cosmology does.  This is the last wall, not the first: the offline fit,
+    the JSON loader and the sampled ``alpha`` bounds all refuse
+    ``alpha <= _ALPHA_MIN`` up front.
     """
     dm = distance_modulus(z, H0, Om0, w0, wa)
     Mstar = m0_absolute(Mstar_hat, H0)
     x_lim = 10.0 ** (-0.4 * (m_lim - dm - Mstar))
     x_faint = 10.0 ** (-0.4 * M_faint_offset)
     a = alpha + 1.0
-    num = gammaincc(a, x_lim)
-    den = gammaincc(a, x_faint)
-    ratio = jnp.clip(num / jnp.maximum(den, 1e-300), 0.0, 1.0)
-    return jnp.where(a > 0.0, ratio, jnp.nan)
+    num = _upper_gamma_scaled(a, x_lim)
+    den = _upper_gamma_scaled(a, x_faint)
+    ratio = jnp.clip(num / den, 0.0, 1.0)
+    return jnp.where(alpha > _ALPHA_MIN, ratio, jnp.nan)
 
 
 def reference_absolute_mags(m, z, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
@@ -288,10 +358,10 @@ def _validate_stratum(path, s):
         if float(s["alpha"]) <= _ALPHA_MIN:
             raise ValueError(
                 f"{path}: alpha={float(s['alpha'])} is at or below the "
-                f"{_ALPHA_MIN} floor; c_sel_schechter is built from the "
-                "REGULARIZED upper incomplete gamma, whose Gamma(alpha+1) "
-                "cancellation is defined only for alpha + 1 > 0, so steeper "
-                "faint-end slopes are outside the pinned curve's domain.")
+                f"{_ALPHA_MIN} floor; c_sel_schechter reaches a <= 0 with ONE "
+                "recurrence step off gammaincc's positive-argument domain, so "
+                "alpha + 2 > 0 is the edge of the spelling (every measured "
+                "galaxy faint-end slope is well inside it).")
         if float(s["M_faint_offset"]) <= 0.0:
             raise ValueError(
                 f"{path}: M_faint_offset={float(s['M_faint_offset'])} must be "
@@ -409,8 +479,8 @@ class SelectionFit:
             if float(self.alpha) <= _ALPHA_MIN:
                 raise ValueError(
                     f"alpha={float(self.alpha)} is at or below the "
-                    f"{_ALPHA_MIN} floor: c_sel_schechter uses the REGULARIZED "
-                    "upper incomplete gamma, defined only for alpha + 1 > 0.")
+                    f"{_ALPHA_MIN} floor: c_sel_schechter's upper-gamma "
+                    "recurrence carries alpha + 2 > 0.")
             if float(self.M_faint_offset) <= 0.0:
                 raise ValueError(
                     f"M_faint_offset={float(self.M_faint_offset)} must be "
@@ -465,6 +535,7 @@ def _apply_z_floor(m, z, where):
 
 def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
                             M_faint_offset=M_FAINT_OFFSET_DEFAULT,
+                            m_faint_cut=None,
                             Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
                             stratum="all", k_corr_coeffs=None):
     """Truncated-LF maximum likelihood for one stratum (offline, numpy/scipy).
@@ -482,9 +553,12 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
           L(theta) = prod_i  phi((Mhat_i - M0hat)/sigma) / sigma
                              / Phi((T_i - M0hat)/sigma) ,
 
-    * ``family="schechter"``: a Schechter LF truncated faint-ward at
-      ``M_faint = Mstar_hat + M_faint_offset`` (see
-      :func:`_fit_schechter_truncated` for the closed-form normalization).
+    * ``family="schechter"``: a Schechter LF normalized against each galaxy's
+      own detection limit, plus the optional parameter-free absolute-magnitude
+      cut ``m_faint_cut`` (h-scaled, applied to ``Mhat``).  See
+      :func:`_fit_schechter_truncated` for the closed-form normalization and
+      for why ``M_faint_offset`` -- the completeness DENOMINATOR's protocol
+      constant -- is not and cannot be fitted from magnitudes.
 
     Returns the MLE and the Laplace covariance from the numerical Hessian at
     the optimum (finite differences of the exact gradient-free objective).
@@ -509,6 +583,11 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
                 f"M_faint_offset={float(M_faint_offset)} must be positive: "
                 "the faint cutoff M_faint = Mstar_hat + M_faint_offset lies "
                 "FAINT-ward of M*.")
+    elif m_faint_cut is not None:
+        raise NotImplementedError(
+            f"m_faint_cut={float(m_faint_cut)} is a schechter-family option: "
+            "the gaussian LF is already normalizable faint-ward, so its fit "
+            "has no absolute-magnitude cut to declare.")
 
     m = np.asarray(m, dtype=float)
     z = np.asarray(z, dtype=float)
@@ -528,9 +607,25 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
     T = m_lim - (m - Mhat)          # = m_lim - DM(z; H0_REF) - K(z), per galaxy
 
     if family == "schechter":
+        if m_faint_cut is not None:
+            # A PARAMETER-FREE cut, so the sample it defines does not move with
+            # the fitted theta: this is the whole reason the MLE below is a
+            # regular interior optimum rather than an order statistic.
+            keep = Mhat <= float(m_faint_cut)
+            n_cut = int((~keep).sum())
+            if int(keep.sum()) < 10:
+                raise ValueError(
+                    f"m_faint_cut={float(m_faint_cut)} leaves "
+                    f"{int(keep.sum())} of {Mhat.size} galaxies (need at least "
+                    "10): the cut is brighter than essentially the whole "
+                    "sample.")
+            Mhat, T, z = Mhat[keep], T[keep], z[keep]
+        else:
+            n_cut = 0
         return _fit_schechter_truncated(
-            Mhat, T, m_lim, float(M_faint_offset), stratum=stratum,
-            Om0=Om0, w0=w0, wa=wa)
+            Mhat, T, z, m_lim, float(M_faint_offset),
+            None if m_faint_cut is None else float(m_faint_cut),
+            n_cut=n_cut, stratum=stratum, Om0=Om0, w0=w0, wa=wa)
     return _fit_gaussian_truncated(
         Mhat, T, m_lim, stratum=stratum, k_corr_coeffs=k_corr_coeffs,
         Om0=Om0, w0=w0, wa=wa)
@@ -586,9 +681,9 @@ def _fit_gaussian_truncated(Mhat, T, m_lim, *, stratum, k_corr_coeffs,
     )
 
 
-def _fit_schechter_truncated(Mhat, T, m_lim, M_faint_offset, *, stratum,
-                             Om0, w0, wa):
-    """Truncated-Schechter MLE + Laplace covariance in (Mstar_hat, alpha).
+def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
+                             *, n_cut, stratum, Om0, w0, wa):
+    """Detection-truncated Schechter MLE + Laplace covariance in (Mstar_hat, alpha).
 
     Work in reference absolute magnitudes ``Mhat_i = m_i - DM(z_i; H0=100)``
     (K refused: the pinned curve carries no template).  With
@@ -598,108 +693,108 @@ def _fit_schechter_truncated(Mhat, T, m_lim, M_faint_offset, *, stratum,
         f(M) ∝ x(M)^{alpha+1} exp(-x(M)) ,
         x_i = 10^{-0.4 (Mhat_i - Mstar_hat)}
 
-    The modelled population is truncated faint-ward at
-    ``M_faint = Mstar_hat + M_faint_offset`` (``x_faint =
-    10^{-0.4 M_faint_offset}``, parameter-free), and galaxy ``i`` is only
-    detectable if ``Mhat_i <= T_i = m_lim - DM(z_i; H0=100)``
-    (``x_lim,i = 10^{-0.4 (T_i - Mstar_hat)}``).  The per-galaxy support is
-    therefore ``M <= U_i = min(T_i, M_faint)``, i.e.
-    ``x >= x_{U,i} = max(x_lim,i, x_faint)``, and the normalization integral
-    is closed-form:
+    Galaxy ``i`` enters the catalog only if ``Mhat_i <= T_i = m_lim -
+    DM(z_i; H0=100)``, and -- when the caller declares one -- only if
+    ``Mhat_i <= m_faint_cut``.  Both edges are PARAMETER-FREE numbers, so the
+    per-galaxy support ``M <= U_i = min(T_i, m_faint_cut)`` does not move with
+    the fitted theta and the MLE is a regular interior optimum.  In ``x`` the
+    support is ``x >= x_{U,i} = max(x_lim,i, x_cut)`` and the normalization is
+    closed-form:
 
-        ∫_{-inf}^{U_i} f(M) dM = Gamma(a) Q(a, x_{U,i}) / (0.4 ln10)
+        ∫_{-inf}^{U_i} f(M) dM = Gamma(a, x_{U,i}) / (0.4 ln10)
 
-    with ``Q`` the REGULARIZED upper incomplete gamma
-    (``scipy.special.gammaincc``).  Hence
+    with ``Gamma(a, .)`` the UNREGULARIZED upper incomplete gamma, finite for
+    every real ``a`` because ``x_{U,i} > 0`` (:func:`_upper_gamma_scaled`
+    carries it).  Hence
 
         log p(Mhat_i | Mstar_hat, alpha)
-            = log(0.4 ln10) + a log x_i - x_i
-              - [ lgamma(a) + log Q(a, x_{U,i}) ]
+            = log(0.4 ln10) + a log x_i - x_i - log Gamma(a, x_{U,i})
             with  log x_i = 0.4 ln10 (Mstar_hat - Mhat_i)
 
         NLL(Mstar_hat, alpha) = - sum_i log p(Mhat_i | .)
 
-    ``x_faint`` is independent of ``Mstar_hat`` (M* cancels) -- the same
-    cancellation that makes the consumed curve H0-invariant.  The
-    ``max(x_lim, x_faint)`` is a kink, but it bites only for galaxies with
-    ``T_i ≈ M_faint`` (measure ~0), so the finite-difference Hessian below is
-    unaffected in practice.  ``log Q`` is floored at ``log(1e-300)`` (the
-    house idiom of :func:`magnitude_loglike_from_stats`); an actually-zero Q at
-    the optimum is a hard error, not a floor.  The z-distribution never enters
-    (thinning), so the fit is clustering-safe exactly as the gaussian one is.
+    What is deliberately ABSENT: the model's faint cutoff ``M_faint =
+    Mstar_hat + M_faint_offset``.  Putting it in the fit would make the
+    support edge a function of the parameter being fitted, whose MLE is then
+    an order statistic pinned to the faintest galaxy -- and it would refuse
+    every catalog that reaches past 10^{-0.4 M_faint_offset} L*, which is most
+    of them at low z.  The cutoff belongs to the completeness DENOMINATOR, not
+    to the detected-magnitude distribution, so it is carried as the protocol
+    constant it is and stamped unfitted into ``meta``:
+
+        meta["m_faint_offset_constrained"] = False
+
+    together with the missing-galaxy budget it buys at +/-1 mag, because that
+    budget multiplies the entire out-of-catalog weight downstream.  Declare
+    ``m_faint_cut`` to fit only the part of the sample the modelled population
+    is meant to describe; it is an analysis cut on the FIT, independent of
+    ``M_faint_offset``, and the two agree only if the caller makes them.
+
+    The z-distribution never enters (thinning), so the fit is clustering-safe
+    exactly as the gaussian one is.
     """
     from scipy.optimize import minimize
-    from scipy.special import gammaincc, gammaln
 
     ln10 = np.log(10.0)
     n_gal = int(Mhat.size)
-    Mhat_max = float(Mhat.max())
-    x_faint = 10.0 ** (-0.4 * M_faint_offset)
     log_pref = np.log(0.4 * ln10)
 
-    def _x_upper(Mstar):
-        return np.maximum(10.0 ** (-0.4 * (T - Mstar)), x_faint)
+    def _norm(Mstar, a):
+        """``Gamma(a, x_U)`` per galaxy -- the truncated LF's normalization.
+
+        ``_upper_gamma_scaled`` returns ``a Gamma(a, x)``; the same nudged
+        ``a`` divides it back out, so the pair is exact at every ``a`` and
+        merely loses the leading digits of the recurrence's difference as
+        ``a -> 0``.
+        """
+        a_s = _a_off_zero(a, np)
+        x_u = 10.0 ** (-0.4 * (T - Mstar))
+        if m_faint_cut is not None:
+            x_u = np.maximum(x_u, 10.0 ** (-0.4 * (m_faint_cut - Mstar)))
+        return _upper_gamma_scaled(a_s, x_u, xp=np) / a_s
 
     def nll(theta):
-        # Optimizer coordinates (Mstar_hat, u) with alpha = exp(u) - 1, so
-        # a = alpha + 1 = exp(u) > 0 stays inside the regularized-gamma domain
-        # by construction (the trick the gaussian fit uses for sigma > 0).
+        # Optimizer coordinates (Mstar_hat, u) with alpha = exp(u) + _ALPHA_MIN,
+        # so the curve's domain holds by construction and the optimizer cannot
+        # walk out of it (the trick the gaussian fit uses for sigma > 0).
         Mstar, u = float(theta[0]), float(theta[1])
-        if Mstar + M_faint_offset < Mhat_max:
-            return np.inf          # the sample falsifies the modelled support
-        a = np.exp(u)
+        a = np.exp(u) + _ALPHA_MIN + 1.0
+        gam = _norm(Mstar, a)
+        if not np.all(np.isfinite(gam)) or np.any(gam <= 0.0):
+            return np.inf
         log_x = 0.4 * ln10 * (Mstar - Mhat)
-        x = np.exp(log_x)
-        log_norm = gammaln(a) + np.log(np.maximum(gammaincc(a, _x_upper(Mstar)),
-                                                  1e-300))
-        val = -np.sum(a * log_x - x - log_norm) - n_gal * log_pref
+        val = -np.sum(a * log_x - np.exp(log_x) - np.log(gam)) - n_gal * log_pref
         return val if np.isfinite(val) else np.inf
 
-    # Bright decile as the M* scale, lifted off the support wall so the first
-    # simplex is finite.
-    Mstar0 = max(float(np.percentile(Mhat, 10.0)),
-                 Mhat_max - M_faint_offset + 0.1)
-    u0 = np.log(0.5)                                   # alpha0 = -0.5
+    Mstar0 = float(np.percentile(Mhat, 10.0))          # the bright decile scale
+    u0 = np.log(-_ALPHA_MIN - 0.7)                     # alpha0 = -0.7
     res = minimize(nll, np.array([Mstar0, u0]), method="Nelder-Mead",
                    options={"xatol": 1e-8, "fatol": 1e-10, "maxiter": 20000})
     if not res.success:
         raise RuntimeError(f"selection fit did not converge: {res.message}")
     Mstar_hat = float(res.x[0])
-    alpha_hat = float(np.exp(res.x[1]) - 1.0)
-
-    margin = Mstar_hat + M_faint_offset - Mhat_max
-    if margin < _FAINT_WALL_MARGIN:
-        n_beyond = int(np.sum(Mhat > Mstar_hat + M_faint_offset))
-        raise RuntimeError(
-            f"schechter fit is pinned at the support boundary: the fitted "
-            f"faint cutoff M_faint = {Mstar_hat + M_faint_offset:.4f} sits "
-            f"{margin:.4f} mag from the faintest galaxy in the sample "
-            f"({Mhat_max:.4f}), with {n_beyond} galaxies beyond it. The "
-            "survey reaches fainter than the modelled population, so the MLE "
-            "is not interior: either raise --m_faint_offset (and REBUILD the "
-            "Q table -- the completeness denominator moves with it) or apply "
-            "a matching absolute-magnitude cut to the catalog.")
+    alpha_hat = float(np.exp(res.x[1]) + _ALPHA_MIN)
     if alpha_hat <= _ALPHA_MIN:
         raise RuntimeError(
             f"schechter fit reached alpha={alpha_hat:.4f}, at or below the "
-            f"{_ALPHA_MIN} floor: c_sel_schechter is built from the "
-            "REGULARIZED upper incomplete gamma, whose Gamma(alpha+1) "
-            "cancellation is defined only for alpha + 1 > 0, so steeper "
-            "faint-end slopes are outside what the pinned curve can carry.")
-    a_hat = alpha_hat + 1.0
-    q_hat = gammaincc(a_hat, _x_upper(Mstar_hat))
-    if np.any(q_hat <= 0.0):
+            f"{_ALPHA_MIN} floor: c_sel_schechter reaches a <= 0 with one "
+            "recurrence step off gammaincc's positive-argument domain, so "
+            "alpha + 2 > 0 is the edge of the spelling. A sample this steep "
+            "is not a faint-end slope any survey measures -- check m_lim and "
+            "the redshifts before widening anything.")
+    gam_hat = _norm(Mstar_hat, alpha_hat + 1.0)
+    if np.any(gam_hat <= 0.0):
         raise RuntimeError(
-            f"{int(np.sum(q_hat <= 0.0))} galaxies have an UNDERFLOWING "
-            "normalization Q(alpha+1, x_lim) = 0 at the optimum: the declared "
-            f"m_lim={float(m_lim)} puts them so far into the bright tail that "
-            "the truncated Schechter assigns them no probability mass. The "
-            "declared limit cannot describe this sample.")
+            f"{int(np.sum(gam_hat <= 0.0))} galaxies have an UNDERFLOWING "
+            "normalization Gamma(alpha+1, x_lim) = 0 at the optimum: the "
+            f"declared m_lim={float(m_lim)} puts them so far into the bright "
+            "tail that the truncated Schechter assigns them no probability "
+            "mass. The declared limit cannot describe this sample.")
 
     # Laplace covariance in the REPORTED coordinates (Mstar_hat, alpha): the
     # same reparametrized-Hessian structure as the gaussian's nll_sig.
     def nll_alpha(p):
-        return nll(np.array([p[0], np.log(p[1] + 1.0)]))
+        return nll(np.array([p[0], np.log(p[1] - _ALPHA_MIN)]))
 
     x0 = np.array([Mstar_hat, alpha_hat])
     h = np.array([1e-4, 1e-3])          # alpha's per-galaxy curvature is ~10x weaker
@@ -715,11 +810,75 @@ def _fit_schechter_truncated(Mhat, T, m_lim, M_faint_offset, *, stratum,
     if not np.all(np.isfinite(cov)) or cov[0, 0] <= 0 or cov[1, 1] <= 0:
         raise RuntimeError("selection-fit Hessian is not positive definite")
 
+    diag = _faint_end_diagnostics(Mstar_hat, alpha_hat, M_faint_offset, m_lim,
+                                 Mhat, T, z, Om0, w0, wa)
+    if m_faint_cut is None and diag["frac_complete_at_m_faint"] > _DEEP_WARN:
+        import warnings
+
+        # Not fatal: whether the real population ends at M_faint is a modelling
+        # claim, not something these magnitudes can settle.  But an undeclared
+        # cut here means the fit models an LF with NO faint edge over a
+        # sub-sample where the completion assumes one, which biases M* bright
+        # and alpha shallow (both by many sd at these fractions).
+        warnings.warn(
+            f"schechter fit: {diag['frac_complete_at_m_faint']:.1%} of the "
+            f"sample is complete past M_faint = {diag['m_faint_implied']:.3f} "
+            "(the survey sees fainter than the modelled population there), and "
+            "no m_faint_cut was declared, so the fit assumed an LF with no "
+            "faint edge over that sub-sample. Pass m_faint_cut (a "
+            "PARAMETER-FREE h-scaled absolute magnitude, e.g. the implied "
+            "M_faint) to fit only the population the completeness answers "
+            "for.", RuntimeWarning)
+
     return SelectionFit(
         family="schechter", m_lim=float(m_lim), Mstar_hat=Mstar_hat,
         alpha=alpha_hat, M_faint_offset=float(M_faint_offset), cov=cov,
         n_gal=n_gal, stratum=str(stratum), k_corr_coeffs=(),
         meta={"Om0": float(Om0), "w0": float(w0), "wa": float(wa),
               "H0_ref": H0_REF, "nll": float(res.fun),
-              "faint_wall_margin": float(margin)},
+              "m_faint_cut": (None if m_faint_cut is None
+                              else float(m_faint_cut)),
+              "n_gal_cut_faintward": int(n_cut), **diag},
     )
+
+
+def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
+                          Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
+                          d_offset=1.0):
+    """What the magnitudes say -- and cannot say -- about the faint cutoff.
+
+    ``M_faint_offset`` never enters :func:`_fit_schechter_truncated`'s
+    likelihood, yet it sets the ``Gamma(a, x_faint)`` denominator of the
+    consumed curve and therefore the whole missing-galaxy budget.  This
+    records that asymmetry in numbers a reviewer can act on:
+
+    * ``m_faint_offset_constrained``: always False, stated rather than implied;
+    * ``n_gal_faintward_of_m_faint``: galaxies the catalog holds that the
+      modelled population does not contain (a cutoff too bright for this
+      survey);
+    * ``frac_complete_at_m_faint``: fraction of the sample whose own detection
+      limit already reaches past the cutoff, i.e. where ``C_sel = 1`` and the
+      cutoff is doing all the work;
+    * ``missing_budget_vs_offset``: ``1 - C_sel(z_med)`` at the declared offset
+      and at +/- ``d_offset`` mag, evaluated through the consumed
+      :func:`c_sel_schechter` itself, so the protocol's leverage on the budget
+      is visible next to the fitted theta.
+    """
+    m_faint = Mstar_hat + M_faint_offset
+    z_med = float(np.median(np.asarray(z, dtype=float)))
+    budget = {}
+    for d in (-d_offset, 0.0, d_offset):
+        off = float(M_faint_offset) + d
+        if off <= 0.0:
+            continue
+        c = float(c_sel_schechter(z_med, m_lim, Mstar_hat, alpha, off, H0_REF,
+                                  Om0, w0, wa))
+        budget[f"{off:.2f}"] = 1.0 - c
+    return {
+        "m_faint_offset_constrained": False,
+        "m_faint_implied": float(m_faint),
+        "n_gal_faintward_of_m_faint": int(np.sum(np.asarray(Mhat) > m_faint)),
+        "frac_complete_at_m_faint": float(np.mean(np.asarray(T) > m_faint)),
+        "z_budget_ref": z_med,
+        "missing_budget_vs_offset": budget,
+    }

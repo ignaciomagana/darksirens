@@ -5,10 +5,13 @@ consumed schechter curve -- ``Mstar_hat`` is h-scaled exactly like ``M0hat``
 and ``M_faint_offset`` is a magnitude DIFFERENCE, so no h survives anywhere in
 ``C_sel``; (b) recovery of the h-scaled truth from a DAG-consistent truncated
 sample (draw the population, then apply the same cut the likelihood normalizes
-against); (c) the family firewalls -- ``alpha > -1`` domain, the
-``M_faint_offset`` protocol constant, no K(z), single stratum, and the
-Q-table-vs-run family check; and (d) that every gaussian path is bit-identical
-to the pre-schechter code, including the emitted label ordering.
+against), INCLUDING the ``alpha ~ -1.0 to -1.3`` faint-end slopes real
+catalogs measure and the deep regime where the survey reaches past the
+modelled faint cutoff; (c) the family firewalls -- the ``alpha > -2``
+spelling domain, the ``M_faint_offset`` protocol constant and the diagnostics
+that say so out loud, no K(z), single stratum, and the Q-table-vs-run family
+check; and (d) that every gaussian path is bit-identical to the pre-schechter
+code, including the emitted label ordering.
 """
 
 import json
@@ -67,19 +70,29 @@ def _schechter_truncated_sample(rng, n, h0_true, Mstar_true=MSTAR_TRUE,
                                 offset=OFFSET, zlo=0.08, zhi=0.5):
     """DAG-consistent mock: draw the modelled population, THEN cut at m_lim.
 
-    The population is the Schechter LF truncated at ``M <= Mstar + offset``
-    (the same faint cutoff the likelihood normalizes against), sampled through
-    the exact inverse-CDF of the truncated Gamma in ``x = L/L*``.  ``zlo`` is
-    chosen so that ``m_lim - DM(z)`` stays BRIGHT-ward of the faint cutoff at
-    every redshift: the survey must not reach fainter than the modelled
-    population, which is precisely the configuration the fit's support guard
-    demands.
+    The population is the Schechter LF truncated at ``M <= Mstar + offset``,
+    sampled through the exact inverse-CDF of the truncated Gamma in
+    ``x = L/L*`` for ``alpha > -1`` and by rejection off the pure power law
+    below it (``gammainccinv`` is the regularized spelling and stops at
+    ``a > 0``; the LF does not).  The default ``zlo`` keeps ``m_lim - DM(z)``
+    bright-ward of the faint cutoff at every redshift; ``zlo=0.004`` reaches
+    past it, which is the DEEP configuration a real low-z catalog is always in.
     """
     a = alpha_true + 1.0
     x_faint = 10.0 ** (-0.4 * offset)
-    z = rng.uniform(zlo ** 1.5, zhi ** 1.5, size=40 * n) ** (1.0 / 1.5)
-    u = rng.uniform(size=z.size)
-    x = gammainccinv(a, u * gammaincc(a, x_faint))     # truncated Gamma, x >= x_faint
+    N = 40 * n
+    z = rng.uniform(zlo ** 1.5, zhi ** 1.5, size=N) ** (1.0 / 1.5)
+    if a > 0.0:
+        x = gammainccinv(a, rng.uniform(size=N) * gammaincc(a, x_faint))
+    else:
+        x_hi, chunks, got = 40.0, [], 0
+        while got < N:
+            v = rng.uniform(size=2 * N)
+            xx = (x_faint ** a + v * (x_hi ** a - x_faint ** a)) ** (1.0 / a)
+            xx = xx[rng.uniform(size=xx.size) < np.exp(-xx)]
+            chunks.append(xx)
+            got += xx.size
+        x = np.concatenate(chunks)[:N]
     M = Mstar_true - 2.5 * np.log10(x)
     m = M + np.asarray(distance_modulus(jnp.asarray(z), h0_true))
     keep = m <= m_lim
@@ -142,29 +155,95 @@ def test_schechter_fit_recovers_h_scaled_truth_independent_of_true_h0():
         assert np.all(np.linalg.eigvalsh(cov) > 0)
 
 
+def test_schechter_fit_recovers_the_faint_end_slopes_real_catalogs_measure():
+    """alpha ~ -1.0 to -1.3 -- 2MASS K, SDSS r, GLADE B -- must FIT.
+
+    Every real galaxy LF is steeper than -1, so a Schechter channel that
+    cannot reach there cannot fit a real catalog.  The curve is the ratio of
+    UNREGULARIZED upper incomplete gammas, finite for any alpha because both
+    arguments are positive; only the regularized spelling stops at alpha = -1.
+    """
+    for alpha_true in (-1.02, -1.1, -1.25):
+        rng = np.random.default_rng(7)
+        m, z = _schechter_truncated_sample(rng, 4000, 70.0,
+                                           alpha_true=alpha_true)
+        fit = fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                                      M_faint_offset=OFFSET)
+        sd = np.sqrt(np.diag(fit.cov))
+        mstar_true = MSTAR_TRUE - 5.0 * np.log10(70.0 / H0_REF)
+        assert abs(fit.alpha - alpha_true) < 4.0 * sd[1], (
+            f"alpha_true={alpha_true}: {fit.alpha} +/- {sd[1]}")
+        assert abs(fit.Mstar_hat - mstar_true) < 4.0 * sd[0]
+
+
 def test_schechter_fit_truncation_is_doing_work():
-    """Normalizing against the faint cutoff ONLY (no per-galaxy m_lim
-    truncation) is biased by many sd -- the truncation carries real signal."""
+    """Normalizing against a limit no galaxy reaches (the untruncated LF)
+    is biased by many sd -- the per-galaxy truncation carries real signal."""
     rng = np.random.default_rng(7)
     m, z = _schechter_truncated_sample(rng, 4000, 70.0)
     fit = fit_selection_from_mags(m, z, M_LIM, family="schechter",
                                   M_faint_offset=OFFSET)
     sd = np.sqrt(np.diag(fit.cov))
-    # A limit far fainter than any galaxy makes x_lim << x_faint for every
-    # galaxy, so the per-galaxy support collapses to the untruncated one.
+    # A limit far fainter than any galaxy makes x_lim -> 0 for every galaxy,
+    # so the per-galaxy support collapses to the untruncated one.
     naive = fit_selection_from_mags(m, z, 99.0, family="schechter",
                                     M_faint_offset=OFFSET)
     assert abs(naive.Mstar_hat - fit.Mstar_hat) > 5.0 * sd[0]
     assert abs(naive.alpha - fit.alpha) > 5.0 * sd[1]
 
 
-def test_schechter_fit_refuses_sample_fainter_than_the_faint_cutoff():
-    """A cutoff the sample reaches past pins the MLE at the support wall."""
+def test_schechter_fit_survives_a_survey_that_reaches_the_faint_cutoff():
+    """The DEEP regime -- ``m_lim - DM(z)`` fainter than ``Mstar + offset`` --
+    is the one every low-z catalog is in, and it must FIT.
+
+    ``M_faint = Mstar_hat + M_faint_offset`` is a parameter-dependent support
+    edge whose MLE would be an order statistic, so it is kept out of the fit
+    likelihood entirely; the only support edges are the per-galaxy detection
+    limit and the optional parameter-free ``m_faint_cut``.
+    """
+    rng = np.random.default_rng(7)
+    m, z = _schechter_truncated_sample(rng, 4000, 70.0, alpha_true=-1.25,
+                                       zlo=0.004)
+    mstar_true = MSTAR_TRUE - 5.0 * np.log10(70.0 / H0_REF)
+    fit = fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                                  M_faint_offset=OFFSET,
+                                  m_faint_cut=mstar_true + OFFSET)
+    sd = np.sqrt(np.diag(fit.cov))
+    assert fit.meta["frac_complete_at_m_faint"] > 0.05, (
+        "the fixture no longer exercises the deep regime")
+    assert abs(fit.alpha - (-1.25)) < 4.0 * sd[1]
+    assert abs(fit.Mstar_hat - mstar_true) < 4.0 * sd[0]
+    assert fit.meta["m_faint_cut"] == mstar_true + OFFSET
+
+    # A cutoff the sample reaches far past no longer refuses the fit: it is a
+    # denominator convention, so it is reported, not enforced -- but a deep
+    # sample with no declared cut is a modelling gap and says so.
+    with pytest.warns(RuntimeWarning, match="m_faint_cut"):
+        tight = fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                                        M_faint_offset=1.5)
+    assert tight.meta["n_gal_faintward_of_m_faint"] > 0
+    assert tight.meta["m_faint_cut"] is None
+
+
+def test_m_faint_offset_leaves_the_fit_alone_and_says_so():
+    """The protocol constant cannot be fitted from magnitudes, so the fit is
+    bit-identical across offsets -- and stamps the budget it silently buys."""
     rng = np.random.default_rng(7)
     m, z = _schechter_truncated_sample(rng, 2000, 70.0)
-    with pytest.raises(RuntimeError, match="support boundary"):
-        fit_selection_from_mags(m, z, M_LIM, family="schechter",
-                                M_faint_offset=1.5)
+    fits = [fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                                    M_faint_offset=off)
+            for off in (4.0, 5.0, 6.0)]
+    for f_ in fits[1:]:
+        assert f_.Mstar_hat == fits[0].Mstar_hat
+        assert f_.alpha == fits[0].alpha
+        assert f_.meta["nll"] == fits[0].meta["nll"]
+        assert f_.meta["m_faint_offset_constrained"] is False
+
+    # ... while the missing-galaxy budget it multiplies moves a lot.
+    budget = [f_.meta["missing_budget_vs_offset"][f"{off:.2f}"]
+              for f_, off in zip(fits, (4.0, 5.0, 6.0))]
+    assert budget[0] < budget[1] < budget[2]
+    assert budget[2] - budget[0] > 0.05, budget
 
 
 def test_schechter_fit_refuses_k_corr_template():
@@ -178,25 +257,68 @@ def test_schechter_fit_refuses_k_corr_template():
                                 M_faint_offset=-1.0)
     with pytest.raises(NotImplementedError, match="unknown selection family"):
         fit_selection_from_mags(m, z, M_LIM, family="lognormal")
+    with pytest.raises(NotImplementedError, match="m_faint_cut"):
+        fit_selection_from_mags(m, z, M_LIM, m_faint_cut=-18.0)
+
+
+def test_upper_gamma_ratio_matches_quadrature_below_alpha_minus_one():
+    """The curve is the UNREGULARIZED ratio, so alpha <= -1 is ordinary.
+
+    Gamma(a, x_lim)/Gamma(a, x_faint) is finite for any real a because both
+    arguments are strictly positive; the regularized spelling's Gamma(a)
+    cancels exactly.  Quadrature is the referee.
+    """
+    from scipy.integrate import quad
+
+    from darksirens.redshift.selection import _upper_gamma_scaled
+
+    x_faint = 0.01
+    for alpha in (-1.02, -1.1, -1.25, -1.5, -1.9, -0.7):
+        a = alpha + 1.0
+        den = quad(lambda t: t ** (a - 1.0) * np.exp(-t), x_faint, 80.0,
+                   limit=400)[0]
+        for x_lim in (0.02, 0.1, 0.3, 1.0):
+            num = quad(lambda t: t ** (a - 1.0) * np.exp(-t), x_lim, 80.0,
+                       limit=400)[0]
+            got = (float(_upper_gamma_scaled(a, x_lim))
+                   / float(_upper_gamma_scaled(a, x_faint)))
+            assert abs(got - num / den) < 1e-8 * max(num / den, 1e-3), (
+                f"alpha={alpha} x_lim={x_lim}: {got} vs {num / den}")
+
+    # alpha = -1 exactly is a REMOVABLE singularity, not a wall: the nudge
+    # keeps the curve continuous and finite through it.
+    at_wall = float(_upper_gamma_scaled(0.0, 0.1)) / float(
+        _upper_gamma_scaled(0.0, x_faint))
+    just_off = float(_upper_gamma_scaled(-1e-3, 0.1)) / float(
+        _upper_gamma_scaled(-1e-3, x_faint))
+    assert np.isfinite(at_wall) and abs(at_wall - just_off) < 1e-3
 
 
 def test_alpha_domain_is_refused_everywhere(tmp_path):
-    """alpha <= -0.99 is refused at JSON validation, at construction, and by
-    the prior bounds -- Gamma(alpha+1) diverges at alpha = -1."""
+    """alpha <= -2 is refused at JSON validation, at construction, and by the
+    prior bounds -- that is where the recurrence's one lift runs out."""
     from darksirens.redshift.selection import _validate_stratum
 
     bad = {"family": "schechter", "m_lim": 21.5, "Mstar_hat": -20.0,
-           "alpha": -1.2, "M_faint_offset": 5.0, "cov": np.eye(2).tolist()}
+           "alpha": -2.5, "M_faint_offset": 5.0, "cov": np.eye(2).tolist()}
     with pytest.raises(ValueError, match="alpha"):
         _validate_stratum(tmp_path / "f.json", bad)
     with pytest.raises(ValueError, match="alpha"):
         SelectionFit(family="schechter", m_lim=21.5, Mstar_hat=-20.0,
-                     alpha=-1.2, M_faint_offset=5.0, cov=np.eye(2))
+                     alpha=-2.5, M_faint_offset=5.0, cov=np.eye(2))
     with pytest.raises(ValueError, match="outside the sampled bounds"):
         build_parameter_space(
             "powerlaw+peak", True, True, False, universe_model="dark_sirens",
             use_lss=False, c_mode="selection", selection_family="schechter",
-            selection_prior={"alpha": (-1.2, 0.01)})
+            selection_prior={"alpha": (-2.5, 0.01)})
+
+    # A real-catalog slope loads, constructs and priors cleanly.
+    ok = dict(bad, alpha=-1.21)
+    assert _validate_stratum(tmp_path / "f.json", ok)["alpha"] == -1.21
+    build_parameter_space(
+        "powerlaw+peak", True, True, False, universe_model="dark_sirens",
+        use_lss=False, c_mode="selection", selection_family="schechter",
+        selection_prior={"alpha": (-1.21, 0.03)})
 
 
 def _schechter_space(**kw):
@@ -206,25 +328,29 @@ def _schechter_space(**kw):
 
 
 def test_alpha_domain_survives_prior_overrides_and_fixed_values():
-    """The alpha > -1 wall is not a taste bound: --prior_overrides and
-    --fixed_parameter_values both route around the registry floor, and below
-    the wall gammaincc's a <= 0 branch makes C_sel silently identically 1."""
-    _schechter_space(prior_overrides={"alpha": [-0.98, -0.2]})     # inside
+    """The alpha > -2 wall is not a taste bound: --prior_overrides and
+    --fixed_parameter_values both route around the registry floor, and past
+    the wall the recurrence has no more lifts to give."""
+    _schechter_space(prior_overrides={"alpha": [-1.95, -0.2]})     # inside
+    _schechter_space(fixed_parameter_values={"alpha": -1.21})      # GLADE B
 
     with pytest.raises(ValueError, match="not widenable"):
-        _schechter_space(prior_overrides={"alpha": [-1.5, -0.2]})
+        _schechter_space(prior_overrides={"alpha": [-2.5, -0.2]})
     with pytest.raises(ValueError, match="not widenable"):
-        _schechter_space(fixed_parameter_values={"alpha": -1.2})
+        _schechter_space(fixed_parameter_values={"alpha": -2.2})
 
-    # The wall the bounds protect: without it the curve reads as a perfectly
-    # complete survey rather than announcing it is out of domain.
+    # The wall the bounds protect announces itself rather than reading as a
+    # perfectly complete survey; INSIDE it, every real faint-end slope works.
     cosmo = _cosmo()
-    bad = np.asarray(c_sel_schechter(zgrid, 21.5, -20.31, -1.2, 5.0, cosmo.H0,
+    bad = np.asarray(c_sel_schechter(zgrid, 21.5, -20.31, -2.2, 5.0, cosmo.H0,
                                      cosmo.Om0, cosmo.w0, cosmo.wa))
     assert np.all(np.isnan(bad))
-    good = np.asarray(c_sel_schechter(zgrid, 21.5, -20.31, -0.68, 5.0,
-                                      cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa))
-    assert np.all(np.isfinite(good)) and float(good.min()) < 1.0
+    for alpha in (-1.02, -1.05, -1.21, -0.68):
+        good = np.asarray(c_sel_schechter(zgrid, 21.5, -20.31, alpha, 5.0,
+                                          cosmo.H0, cosmo.Om0, cosmo.w0,
+                                          cosmo.wa))
+        assert np.all(np.isfinite(good)), alpha
+        assert float(good.min()) < 1.0 and float(good.max()) <= 1.0
 
 
 def test_fixed_faint_offset_must_be_positive():

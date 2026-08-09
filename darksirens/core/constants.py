@@ -35,8 +35,8 @@ SURVEY_PARAMS_FID_BY_NAME = {
     "sigma_M": 1.0,
     # Schechter block of the same selection channel (active only under
     # c_mode="selection" + selection_family="schechter").  Mstar_hat is
-    # h-SCALED like M0hat; alpha is the faint-end slope (kept above -1, the
-    # domain of the regularized upper-gamma ratio the curve uses).
+    # h-SCALED like M0hat; alpha is the faint-end slope (kept above -2, the
+    # edge of the one recurrence step the curve's upper-gamma ratio takes).
     # M_faint_offset is a PROTOCOL constant, never sampled: it must equal
     # darksirens.redshift.selection.M_FAINT_OFFSET_DEFAULT (pinned by a test).
     "Mstar_hat": -20.5,

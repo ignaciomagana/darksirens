@@ -343,9 +343,10 @@ def test_registry_declares_the_block_order_and_bounds():
     assert [(spec.lower, spec.upper) for spec in _SURVEY_BLOCK] == [
         (-4.0, -1.0), (-3.0, 3.0), (0.0, 3.0), (0.0, 0.05),
         (-23.0, -18.0), (0.05, 3.0),
-        # alpha's floor is truncation with margin off the alpha = -1
-        # singularity of the pinned regularized upper-gamma ratio.
-        (-23.0, -18.0), (-0.95, 0.0),
+        # alpha's floor is truncation with margin off _ALPHA_MIN = -2, the
+        # edge of the one recurrence step c_sel_schechter's upper-gamma ratio
+        # takes; it spans every measured galaxy faint-end slope.
+        (-23.0, -18.0), (-1.9, 0.0),
     ]
 
 

@@ -270,14 +270,15 @@ _SURVEY_BLOCK = (
     # in a schechter run M0hat/sigma_M drop and these two take their place, so
     # the survey block LENGTH is unchanged and every later block keeps its
     # offsets too.  Mstar_hat is h-SCALED (M* - 5 log10 h); ``alpha`` is the
-    # Schechter FAINT-END SLOPE (not the degenerate alpha_miss next door), and
-    # its -0.95 floor is truncation with margin off the alpha = -1 singularity
-    # where Gamma(alpha+1) diverges and the pinned regularized form is
-    # undefined.  That margin is taste; the wall itself is not, so
+    # Schechter FAINT-END SLOPE (not the degenerate alpha_miss next door).  Its
+    # -1.9 floor spans every measured galaxy faint-end slope (2MASS K -1.02,
+    # SDSS r -1.05, GLADE B -1.21) with margin off _ALPHA_MIN = -2, the edge of
+    # the one recurrence step c_sel_schechter takes to reach alpha + 1 <= 0.
+    # The margin is taste; the wall itself is not, so
     # _validate_schechter_alpha_domain refuses any override (or fixed value)
     # that reaches _ALPHA_MIN.
     _SurveyParam("Mstar_hat", -23.0, -18.0, _selection_schechter_rule),
-    _SurveyParam("alpha", -0.95, 0.0, _selection_schechter_rule),
+    _SurveyParam("alpha", -1.9, 0.0, _selection_schechter_rule),
 )
 
 #: SurveyParams fields that are recognised as parameter labels but are NEVER
@@ -486,13 +487,13 @@ def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
 
 def _validate_schechter_alpha_domain(labels, lower, upper,
                                      fixed_parameter_values=None):
-    """Refuse a Schechter faint-end slope at or below the ``alpha > -1`` wall.
+    """Refuse a Schechter faint-end slope at or below the ``alpha > -2`` wall.
 
-    ``alpha``'s registry floor is a DOMAIN bound, not a matter of taste: JAX's
-    ``gammaincc`` returns 1.0 for a non-positive first argument, so at
-    ``alpha <= -1`` the numerator and denominator of ``c_sel_schechter`` both
-    collapse and the curve reads as an identically complete survey.  Bounds
-    are freely settable through ``--prior_overrides`` -- which the
+    ``alpha``'s registry floor is a DOMAIN bound, not a matter of taste:
+    ``c_sel_schechter`` reaches negative ``alpha + 1`` with ONE recurrence step
+    off ``gammaincc``'s positive-argument domain, so ``alpha + 2 > 0`` is where
+    the spelling ends and below it the curve is NaN rather than a number.
+    Bounds are freely settable through ``--prior_overrides`` -- which the
     selection-prior guard below even RECOMMENDS -- and a fixed ``alpha``
     bypasses the bounds entirely, so both paths are walled here.  ``labels``
     carries ``alpha`` only under ``c_mode="selection"`` +
@@ -508,14 +509,14 @@ def _validate_schechter_alpha_domain(labels, lower, upper,
             if value is not None and float(value) <= _ALPHA_MIN:
                 raise ValueError(
                     f"{label} {what} of {float(value)} is at or below the "
-                    f"{_ALPHA_MIN} floor: the pinned c_sel_schechter is the "
-                    "REGULARIZED upper incomplete gamma ratio, whose "
-                    "Gamma(alpha+1) cancellation is defined only for "
-                    "alpha + 1 > 0, and below the wall the curve silently "
-                    "becomes a perfectly complete survey. This floor is not "
-                    "widenable -- a catalog whose faint-end slope is steeper "
-                    "than -1 needs a different completeness model, not a "
-                    f"wider prior (bounds [{float(lo)}, {float(hi)}])."
+                    f"{_ALPHA_MIN} floor: the pinned c_sel_schechter reaches "
+                    "alpha + 1 <= 0 with one recurrence step off gammaincc's "
+                    "positive-argument domain, so alpha + 2 > 0 is the edge of "
+                    "the spelling and below it the curve is NaN. This floor is "
+                    "not widenable, and it is not a physics limit either: "
+                    "every measured galaxy faint-end slope (2MASS K -1.02, "
+                    "SDSS r -1.05, GLADE B -1.21) sits well inside it "
+                    f"(bounds [{float(lo)}, {float(hi)}])."
                 )
 
 
@@ -1160,8 +1161,8 @@ def build_parameter_space(
                 f"selection_prior for '{lbl}' needs finite loc and positive "
                 f"scale, got ({loc}, {scale}).")
         # The prior is a TRUNCATED normal: a center outside the sampled bounds
-        # puts the whole fit outside the support (e.g. a fitted alpha = -1.1
-        # against the -0.95 domain floor), which the PPF would silently pin to
+        # puts the whole fit outside the support (e.g. a fitted alpha = -1.95
+        # against the -1.9 registry floor), which the PPF would silently pin to
         # an edge instead of failing.
         _i = labels.index(lbl)
         if not (lower[_i] <= loc <= upper[_i]):
@@ -1171,7 +1172,7 @@ def build_parameter_space(
                 f"prior is truncated to those bounds, so the fit's own "
                 f"optimum would carry zero prior mass. Widen the bounds via "
                 f"--prior_overrides, or refit -- except for 'alpha', whose "
-                f"lower bound is the alpha > -1 DOMAIN of the pinned "
+                f"lower bound is the alpha > -2 DOMAIN of the pinned "
                 f"c_sel_schechter and is refused below "
                 f"{_ALPHA_MIN} however it is set.")
         kind_map[lbl] = ("normal", float(loc), float(scale))
