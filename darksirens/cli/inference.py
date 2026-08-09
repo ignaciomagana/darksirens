@@ -607,6 +607,50 @@ def _check_selection_qtable_theta(q_fiducials, opts):
                 "selection model must share the SAME K-correction "
                 "template. Rebuild the table from the current fit."
             )
+        # Stratified base: the run's fit strata and stratum map must match
+        # what the table was built with, per stratum and by map hash -- a
+        # mismatch means the table's per-pixel base rows disagree with the
+        # numerator's routing.  A stratified RUN against an unstamped
+        # (single-stratum-base) table, or vice versa, is equally fatal.
+        _run_strata = getattr(opts, "selection_strata_fit", None)
+        _tab_n = int(_fid.get("selection_n_strata", 0) or 0)
+        if _run_strata and not _tab_n:
+            _fatal(
+                f"Q table {_fid.get('path')} was built on a SINGLE-stratum "
+                "C_sel base but this run's --selection_fit is stratified: "
+                "rebuild the table with --stratum-map (the stratified "
+                "builder base) or run with the single-stratum fit."
+            )
+        if _tab_n and not _run_strata:
+            _fatal(
+                f"Q table {_fid.get('path')} was built on a stratified "
+                f"C_sel base ({_tab_n} strata) but this run carries a "
+                "single-stratum --selection_fit: point --selection_fit/"
+                "--stratum_map at the fit and map the table was built with."
+            )
+        if _run_strata and _tab_n:
+            if _tab_n != len(_run_strata):
+                _fatal(
+                    f"Q table {_fid.get('path')}: {_tab_n} strata stamped "
+                    f"but the run's fit carries {len(_run_strata)}."
+                )
+            for _j, (_ml, _m0, _sg) in enumerate(_run_strata):
+                for _nm, _val in (("m_lim", _ml), ("M0hat", _m0),
+                                  ("sigma_M", _sg)):
+                    _tv = float(_fid.get(f"selection_s{_j}_{_nm}", np.nan))
+                    if not np.isfinite(_tv) or abs(_tv - _val) > 1e-6:
+                        _fatal(
+                            f"Q table {_fid.get('path')}: stratum {_j} "
+                            f"{_nm}={_tv:.6f} but the run's fit gives "
+                            f"{_val:.6f}; rebuild from the current fit."
+                        )
+            _tab_sha = str(_fid.get("selection_stratum_map_sha256", ""))
+            if _tab_sha != str(getattr(opts, "stratum_map_sha256", "")):
+                _fatal(
+                    f"Q table {_fid.get('path')} was built with a different "
+                    "stratum map (sha256 mismatch); the per-pixel base "
+                    "routing must be identical between build and run."
+                )
 
 
 def format_selection_guard_summary(
@@ -2123,12 +2167,19 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
                 _fatal(f"--selection_fit carries {len(_strata)} strata but no "
                        "--stratum_map assigns pixels to them; pass the map "
                        "the strata were defined on.")
-            if getattr(opts, "lss_completion", None):
-                _fatal("stratified selection with a prebuilt Q table is not "
-                       "supported yet: the builder's C_sel base is single-"
-                       "stratum, so the table would carry the wrong fixed "
-                       "budget. Run without --lss_completion (homogeneous "
-                       "missing branch) until the stratified builder lands.")
+            # A prebuilt Q table is allowed with a stratified fit ONLY when
+            # it was built on the SAME stratified base (per-stratum thetas +
+            # stratum-map hash stamped); verified below in
+            # _check_selection_qtable_theta once the table fiducials load.
+            import hashlib as _hashlib
+            _h = _hashlib.sha256()
+            with open(opts.stratum_map, "rb") as _fmap:
+                for _chunk in iter(lambda: _fmap.read(1 << 20), b""):
+                    _h.update(_chunk)
+            opts.stratum_map_sha256 = _h.hexdigest()
+            opts.selection_strata_fit = tuple(
+                (float(_s["m_lim"]), float(_s["M0hat"]), float(_s["sigma_M"]))
+                for _s in _strata)
             # Common-mode + fixed offsets: stratum 0 is the reference (the
             # sampled M0hat/sigma_M ARE its theta); stratum s carries the
             # fixed, fit-measured offsets. Consistency of the shared K
