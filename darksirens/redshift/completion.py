@@ -53,7 +53,11 @@ global normalizer uses the SAME curve, so numerator and normalizer carry
 one budget.  ``z_depth`` semantics are unchanged (Cbar := 0 beyond the
 depth).  ``c_mode`` is resolved at trace time (structural, never sampled:
 ``None`` per_pixel, the leaf-less ``AggregateCMode`` sentinel aggregate;
-see ``_is_aggregate_c_mode``).  Known
+see ``_is_aggregate_c_mode``).  Under ``c_mode="selection"`` a second
+structural flag, ``survey.selection_family`` (``None`` gaussian, the
+leaf-less ``SchechterSelectionFamily`` sentinel schechter; see
+``_decode_selection_family``), picks which luminosity function forms the
+parametric curve -- both land in the same ``C_bar_raw`` slot.  Known
 caveat, deliberately not addressed here: Cbar is proportional to 1/n0
 through a single GLOBAL clip, so near full completeness the likelihood
 can be kinked in n0 (one clip boundary for the whole sky instead of
@@ -113,6 +117,7 @@ from darksirens.core.types import (
     AggregateCMode,
     CosmoParams,
     EMCatalog,
+    SchechterSelectionFamily,
     SelectionCMode,
     SurveyParams,
 )
@@ -190,6 +195,40 @@ def _decode_c_mode(c_mode) -> int:
             "(darksirens.inference.parameters._survey_params) performs this "
             "normalisation for production runs."
         ) from exc
+
+
+#: Luminosity-function families of the parametric selection curve; the theta
+#: tables live in :mod:`darksirens.redshift.selection`.
+_SELECTION_FAMILIES = ("gaussian", "schechter")
+
+
+def _decode_selection_family(selection_family) -> str:
+    """Trace-safe decode of ``SurveyParams.selection_family`` -> family name.
+
+    Structural like ``c_mode``: ``None`` (gaussian, the legacy default) or the
+    leaf-less :data:`darksirens.core.types.SELECTION_FAMILY_SCHECHTER_STRUCT`
+    sentinel; eager strings are accepted for host-side callers.  Anything else
+    -- notably a traced leaf -- is a HARD ERROR: guessing the family would
+    silently swap the entire completeness curve.
+    """
+    if selection_family is None:
+        return "gaussian"
+    if isinstance(selection_family, SchechterSelectionFamily):
+        return "schechter"
+    if isinstance(selection_family, str) and selection_family in _SELECTION_FAMILIES:
+        return selection_family
+    raise ValueError(
+        "SurveyParams.selection_family could not be decoded at trace time "
+        f"(got {type(selection_family).__name__}); guessing would silently "
+        "swap the entire C_sel(z) luminosity-function shape. Carry the family "
+        "STRUCTURALLY: None for the gaussian default, "
+        "darksirens.core.types.SELECTION_FAMILY_SCHECHTER_STRUCT for "
+        "schechter (the eager strings 'gaussian'/'schechter' are accepted "
+        "host-side only). The parameter decoder "
+        "(darksirens.inference.parameters._survey_params) performs this "
+        "normalisation for production runs."
+    )
+
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
 _SQRT2PI: float = float(np.sqrt(2.0 * np.pi))
@@ -854,40 +893,67 @@ def _precompute_grids(
     C_bar_raw = None
     if _is_selection_c_mode(survey.c_mode):
         # Parametric magnitude-limited selection: no counts enter the budget
-        # at all.  M0hat is h-scaled (M0 - 5 log10 h), so the +5 log10 h
-        # restored here cancels the -5 log10 h inside DM(z) EXACTLY (dL is
-        # exactly proportional to 1/H0) and the curve carries no H0
-        # information -- the M*-H0 firewall, pinned by
-        # tests/test_completion_selection_mode.py.  Phi is in [0, 1], so the
-        # consumers' clip is a no-op, and beyond a concrete z_depth they
-        # relax C := 0 exactly as in the other modes.  Formed here, in the
-        # single C_bar_raw slot, so every consumer (_row_C,
+        # at all.  The h-scaled magnitude center (M0hat / Mstar_hat) means the
+        # +5 log10 h restored inside the curve cancels the -5 log10 h inside
+        # DM(z) EXACTLY (dL is exactly proportional to 1/H0), so the curve
+        # carries no H0 information -- the M*-H0 firewall, pinned by
+        # tests/test_completion_selection_mode.py and
+        # tests/test_selection_schechter.py.  Both families return values in
+        # [0, 1], so the consumers' clip is a no-op, and beyond a concrete
+        # z_depth they relax C := 0 exactly as in the other modes.  Formed
+        # here, in the single C_bar_raw slot, so every consumer (_row_C,
         # _field_missing_curve, diagnostics) works unchanged.  Deferred import:
         # selection.py is a leaf module (utils.cosmology only), imported here
         # rather than at module top to keep completion's import graph flat.
-        from darksirens.redshift.selection import c_sel_gaussian
-        # k_corr_coeffs is STRUCTURAL (hashable tuple or None, never traced),
-        # so the K(z) branch inside c_sel_gaussian is a Python-level decision
-        # and the None path stays bit-identical to the pre-K behaviour.
-        if survey.selection_strata is not None:
-            # Stratified selection: one curve per stratum, stacked (S, N_grid).
-            # The SAMPLED (M0hat, sigma_M) are the common mode; each stratum's
-            # STRUCTURAL (m_lim_s, dM0hat_s, sigma_ratio_s) offsets are fixed
-            # data from the offline fit (see SurveyParams.selection_strata).
-            # S is small (2-4) and static, so a Python loop traces S curves.
-            C_bar_raw = jnp.stack([
-                c_sel_gaussian(
-                    zgrid, m_lim_s, survey.M0hat + dm0_s,
-                    survey.sigma_M * sig_ratio_s,
+        family = _decode_selection_family(survey.selection_family)
+        if family == "schechter":
+            # C_sel(z) = Gamma(a, x_lim(z)) / Gamma(a, x_faint), a = alpha + 1,
+            # faint cutoff M_faint = Mstar_hat + M_faint_offset (a magnitude
+            # DIFFERENCE, so it carries no h either).
+            if survey.selection_strata is not None:
+                raise NotImplementedError(
+                    "stratified selection is gaussian-only: the per-stratum "
+                    "curve stack is built from the (dM0hat, sigma_ratio) "
+                    "common-mode decomposition, which has no schechter "
+                    "counterpart. Fit and run the strata separately, or use "
+                    "the gaussian family.")
+            if survey.k_corr_coeffs:
+                raise NotImplementedError(
+                    "the schechter selection curve carries no K(z) template "
+                    f"(got k_corr_coeffs={tuple(survey.k_corr_coeffs)}): "
+                    "c_sel_schechter would silently DROP it, so the run would "
+                    "apply a different selection model than the fit. Use the "
+                    "gaussian family for K-corrected surveys.")
+            from darksirens.redshift.selection import c_sel_schechter
+            C_bar_raw = c_sel_schechter(
+                zgrid, survey.m_lim, survey.Mstar_hat, survey.alpha,
+                survey.M_faint_offset, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+        else:
+            from darksirens.redshift.selection import c_sel_gaussian
+            # k_corr_coeffs is STRUCTURAL (hashable tuple or None, never
+            # traced), so the K(z) branch inside c_sel_gaussian is a
+            # Python-level decision and the None path stays bit-identical to
+            # the pre-K behaviour.
+            if survey.selection_strata is not None:
+                # Stratified selection: one curve per stratum, stacked
+                # (S, N_grid).  The SAMPLED (M0hat, sigma_M) are the common
+                # mode; each stratum's STRUCTURAL (m_lim_s, dM0hat_s,
+                # sigma_ratio_s) offsets are fixed data from the offline fit
+                # (see SurveyParams.selection_strata).  S is small (2-4) and
+                # static, so a Python loop traces S curves.
+                C_bar_raw = jnp.stack([
+                    c_sel_gaussian(
+                        zgrid, m_lim_s, survey.M0hat + dm0_s,
+                        survey.sigma_M * sig_ratio_s,
+                        cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
+                        k_corr_coeffs=survey.k_corr_coeffs)
+                    for (m_lim_s, dm0_s, sig_ratio_s) in survey.selection_strata
+                ])
+            else:
+                C_bar_raw = c_sel_gaussian(
+                    zgrid, survey.m_lim, survey.M0hat, survey.sigma_M,
                     cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
                     k_corr_coeffs=survey.k_corr_coeffs)
-                for (m_lim_s, dm0_s, sig_ratio_s) in survey.selection_strata
-            ])
-        else:
-            C_bar_raw = c_sel_gaussian(
-                zgrid, survey.m_lim, survey.M0hat, survey.sigma_M,
-                cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
-                k_corr_coeffs=survey.k_corr_coeffs)
     elif _is_aggregate_c_mode(survey.c_mode):
         dN_obs_sum = _aggregate_dN_obs_sum(em_catalog)      # data constant
         n_pix_total = jnp.round(4.0 * jnp.pi / em_catalog.apix)

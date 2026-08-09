@@ -49,6 +49,21 @@ class SelectionCMode(NamedTuple):
 C_MODE_SELECTION_STRUCT = SelectionCMode()
 
 
+class SchechterSelectionFamily(NamedTuple):
+    """Leaf-less structural flag for ``SurveyParams.selection_family='schechter'``.
+
+    Same design as :class:`AggregateCMode`/:class:`SelectionCMode`: zero pytree
+    leaves, so the family is part of the treedef and ``isinstance``-decodable
+    inside any trace.  FALSY as an empty tuple -- test with ``isinstance``,
+    never truthiness.
+    """
+
+
+#: Singleton structural schechter-family flag (eager callers may pass the
+#: string "schechter"); ``None`` spells the gaussian default.
+SELECTION_FAMILY_SCHECHTER_STRUCT = SchechterSelectionFamily()
+
+
 class SurveyParams(NamedTuple):
     """Parameters dictating galaxy survey completeness and selection.
 
@@ -115,7 +130,11 @@ class SurveyParams(NamedTuple):
     either mode).  Never sampled/traced by intent.  A survey's
     ``c_mode`` must match the ``c_mode`` any prebuilt Q table was fit under
     (hard-checked at load; the two targets differ by the entire clustering
-    signal).
+    signal).  Under ``c_mode="selection"``, ``selection_family`` picks the
+    luminosity-function family that forms ``C_sel(z)`` -- carried the same
+    STRUCTURAL way (``None`` = gaussian, the leaf-less
+    :data:`SELECTION_FAMILY_SCHECHTER_STRUCT` = schechter) and likewise
+    hard-checked against a prebuilt Q table's stamped family.
     """
     n0: Any
     z50: Any
@@ -158,6 +177,18 @@ class SurveyParams(NamedTuple):
     # the bit-identical legacy path.  Consumers index the (S, N_grid) curve
     # stack via ``EMCatalog.pixel_stratum_map``.
     selection_strata: Any = None
+    # Luminosity-function family of the parametric selection curve (c_mode=
+    # "selection" only).  STRUCTURAL like c_mode: None = gaussian (the default,
+    # bit-identical legacy path), SELECTION_FAMILY_SCHECHTER_STRUCT = schechter;
+    # eager strings accepted host-side.  Never sampled or traced.
+    selection_family: Any = None
+    # Schechter block, consumed only under selection_family="schechter":
+    # Mstar_hat is h-scaled (M* - 5 log10 h) and alpha is the faint-end slope --
+    # both SAMPLED; M_faint_offset is a fixed PROTOCOL constant like m_lim (a
+    # magnitude DIFFERENCE, so it carries no h and leaves the firewall intact).
+    Mstar_hat: Any = -20.5
+    alpha: Any = -0.7
+    M_faint_offset: Any = 5.0
 
 
 class EMCatalog(NamedTuple):
