@@ -1015,7 +1015,7 @@ def main(argv=None):
                    help="Skip the per-z mean-one budget renormalization of Q "
                         "under the (1-C)*dN_exp weights (default ON). Without "
                         "it Q's per-z monopole RESCALES the missing budget "
-                        "(measured +55% Jensen inflation for radial tables) "
+                        "(measured +55%% Jensen inflation for radial tables) "
                         "instead of only redistributing it. The choice is "
                         "stamped in the file; research ablations only.")
     opts = p.parse_args(argv)
