@@ -365,3 +365,193 @@ def test_two_real_fit_jsons_through_resolver_to_likelihood(tmp_path):
                   if lbl.endswith("_c2") else defaults[base])
         v = float(ll(_coord(**{lbl: center + 0.3})))
         assert np.isfinite(v) and v != v0, (lbl, v, v0)
+
+
+# ---------------------------------------------------------------------------
+# Homogeneous-Schechter K=2 mixtures (same family, ONE M_faint_offset)
+# ---------------------------------------------------------------------------
+#
+# A K>=2 schechter mixture is legal exactly when it is HOMOGENEOUS: every
+# catalog's fit declares family="schechter" with the SAME M_faint_offset --
+# one LF, one flux limit, ONE completeness denominator (e.g. an AGN tracer
+# carrying its host galaxy's apparent magnitude next to the galaxy catalog it
+# came from).  Mixed families and per-catalog offsets stay refused.
+
+import json  # noqa: E402  (test-section-local import, matches file style)
+
+import pytest  # noqa: E402
+
+MSTAR_1 = -20.5
+MSTAR_2 = -19.8
+OFFSET = 4.0
+SCHECHTER_PINS = {"m_lim": 20.0, "m_lim_c2": 20.0, "M_faint_offset": OFFSET}
+
+
+def _write_schechter_fit(path, m_lim, Mstar_hat, alpha, offset):
+    from darksirens.redshift.selection import SelectionFit
+
+    fit = SelectionFit(family="schechter", m_lim=m_lim, Mstar_hat=Mstar_hat,
+                       alpha=alpha, M_faint_offset=offset,
+                       cov=np.eye(2) * 4e-4, n_gal=1000)
+    path.write_text(json.dumps({
+        "format_version": "darksirens-selection-fit-1.0",
+        "strata": [fit.to_jsonable()]}))
+    return str(path)
+
+
+def test_homogeneous_schechter_resolver_and_refusals(tmp_path):
+    """Two schechter fits with the SHARED offset resolve to the per-catalog
+    anchored space (Mstar_hat/alpha + _c2, m_lim pins, ONE unsuffixed
+    M_faint_offset pin); a mismatched offset and a mixed-family mixture are
+    both fatal."""
+    from darksirens.cli import inference as cli
+    from darksirens.redshift.selection import SelectionFit
+
+    p1 = _write_schechter_fit(tmp_path / "fitA.json", 20.0, MSTAR_1, -1.2,
+                              OFFSET)
+    p2 = _write_schechter_fit(tmp_path / "fitB.json", 19.5, MSTAR_2, -0.9,
+                              OFFSET)
+
+    fixed = {}
+    ropts = SimpleNamespace(n_catalogs=2, c_mode="selection",
+                            selection_fit_paths=[p1, p2], stratum_map=None)
+    cli._resolve_selection_fits(ropts, {}, fixed)
+
+    assert ropts.selection_family == "schechter"
+    assert set(ropts.selection_prior) == {
+        "Mstar_hat", "alpha", "Mstar_hat_c2", "alpha_c2"}
+    assert ropts.selection_prior["Mstar_hat"][0] == MSTAR_1
+    assert ropts.selection_prior["Mstar_hat_c2"][0] == MSTAR_2
+    # ONE protocol constant, pinned UNSUFFIXED; per-catalog m_lim data.
+    assert fixed == {"m_lim": 20.0, "M_faint_offset": OFFSET,
+                     "m_lim_c2": 19.5}
+    assert [f["family"] for f in ropts.selection_fits] == ["schechter"] * 2
+    assert ropts.selection_fits[1]["theta"]["M_faint_offset"] == OFFSET
+
+    # A different offset in catalog 2's fit is a different completeness
+    # denominator -- fatal.
+    p2bad = _write_schechter_fit(tmp_path / "fitBbad.json", 19.5, MSTAR_2,
+                                 -0.9, OFFSET + 1.0)
+    with pytest.raises(SystemExit):
+        cli._resolve_selection_fits(
+            SimpleNamespace(n_catalogs=2, c_mode="selection",
+                            selection_fit_paths=[p1, p2bad],
+                            stratum_map=None), {}, {})
+
+    # Mixed families are refused whichever order they arrive in.
+    gfit = SelectionFit(family="gaussian", m_lim=20.0, M0hat=-20.9,
+                        sigma_M=0.9, cov=np.eye(2) * 4e-4, n_gal=1000)
+    pg = tmp_path / "fitG.json"
+    pg.write_text(json.dumps({
+        "format_version": "darksirens-selection-fit-1.0",
+        "strata": [gfit.to_jsonable()]}))
+    for pair in ([p1, str(pg)], [str(pg), p1]):
+        with pytest.raises(SystemExit):
+            cli._resolve_selection_fits(
+                SimpleNamespace(n_catalogs=2, c_mode="selection",
+                                selection_fit_paths=pair,
+                                stratum_map=None), {}, {})
+
+
+def test_shared_offset_reaches_every_catalogs_survey_params():
+    """The decoder trap this feature had to defuse: the generic suffixed
+    lookup falls back to the REGISTRY FIDUCIAL, so without the shared-pin
+    broadcast catalog 2 would integrate a different completeness denominator
+    than catalog 1.  Pin a non-fiducial offset unsuffixed and require BOTH
+    catalogs' SurveyParams to carry it -- and the suffixed spelling to be
+    refused outright."""
+    from darksirens.core.constants import SURVEY_PARAMS_FID_BY_NAME
+
+    assert OFFSET != SURVEY_PARAMS_FID_BY_NAME["M_faint_offset"]
+
+    pop_fid, _overrides, _fixed, _mid = _pop_bits()
+    fixed = dict(SCHECHTER_PINS)
+    opts = _sel_opts(2, None, fixed, fix_population=True, fix_survey=False,
+                     selection_family="schechter")
+    dec = build_parameter_decoder(opts, pop_fid, fixed_parameter_values=fixed)
+    labels = list(dec.sampled_labels)
+    for lbl in ("Mstar_hat", "alpha", "Mstar_hat_c2", "alpha_c2", "fcat_2"):
+        assert lbl in labels, (lbl, labels)
+    assert "M0hat" not in labels and "M0hat_c2" not in labels
+
+    defaults = {"log10n0": -2.5, "delta": 0.3, "sigma_kde": 0.01,
+                "Mstar_hat": MSTAR_1, "alpha": -1.2, "fcat_2": 0.3}
+    defaults_c2 = {"Mstar_hat": MSTAR_2, "alpha": -0.9}
+
+    def _val(lbl):
+        base = lbl[:-3] if lbl.endswith("_c2") else lbl
+        return (defaults_c2.get(base, defaults[base])
+                if lbl.endswith("_c2") else defaults[base])
+
+    coord = jnp.asarray([float(_val(lbl)) for lbl in labels])
+    surveys = dec.decode_mixture(coord)[1]
+    assert float(surveys[0].M_faint_offset) == OFFSET
+    assert float(surveys[1].M_faint_offset) == OFFSET       # the trap pin
+    assert float(surveys[0].Mstar_hat) == MSTAR_1
+    assert float(surveys[1].Mstar_hat) == MSTAR_2
+
+    from darksirens.inference.prior import build_parameter_space
+    with pytest.raises(ValueError, match="per-catalog offsets are refused"):
+        build_parameter_space(
+            "powerlaw+peak", True, True, False, n_catalogs=2,
+            universe_model="dark_sirens", use_lss=False, c_mode="selection",
+            selection_family="schechter",
+            fixed_parameter_values={"M_faint_offset_c2": 4.0})
+
+
+def test_k2_homogeneous_schechter_end_to_end():
+    """The gws-agn arm: a K=2 homogeneous-schechter selection likelihood
+    evaluates finite, collapses to the K=1 schechter value exactly for
+    identical catalogs at identical theta, and catalog 2's Mstar_hat_c2 is
+    live."""
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    fixed_k1 = dict(fixed, m_lim=20.0, M_faint_offset=OFFSET)
+    data = dict(_shared_physics())
+    data["apix"] = APIX
+    data["catalogs"] = [_bundle_a()]
+    opts = _sel_opts(1, overrides, fixed_k1, selection_family="schechter")
+    ll_k1 = make_likelihood(opts, data, pop_fid,
+                            fixed_parameter_values=fixed_k1)
+    val_k1 = float(ll_k1(jnp.asarray([mid])))
+    assert np.isfinite(val_k1)
+
+    for w in (0.25, 0.9):
+        val_k2 = _k2_value([_bundle_a(), _bundle_a()], SCHECHTER_PINS, [w],
+                           selection_family="schechter")
+        assert abs(val_k2 - val_k1) <= 5e-9, (w, val_k2, val_k1)
+
+    # Distinct catalogs: catalog 2's own Mstar_hat_c2 moves the likelihood.
+    base = _k2_value([_bundle_a(), _bundle_b()],
+                     dict(SCHECHTER_PINS, Mstar_hat=MSTAR_1,
+                          Mstar_hat_c2=MSTAR_1), [0.3],
+                     selection_family="schechter")
+    moved = _k2_value([_bundle_a(), _bundle_b()],
+                      dict(SCHECHTER_PINS, Mstar_hat=MSTAR_1,
+                           Mstar_hat_c2=MSTAR_2), [0.3],
+                      selection_family="schechter")
+    assert np.isfinite(base) and np.isfinite(moved)
+    assert base != moved
+
+
+def test_k2_schechter_bright_truncated_offset_composes():
+    """A NEGATIVE shared M_faint_offset (bright-truncated population, the
+    gws-agn mock's construction) composes with the K=2 homogeneous-schechter
+    mixture: the shared pin reaches both catalogs, the likelihood is finite,
+    and identical catalogs still collapse to the K=1 value exactly."""
+    offset = -0.0944                     # the mock's x_cut = 1.0908 L*
+    pins = {"m_lim": 20.0, "m_lim_c2": 20.0, "M_faint_offset": offset}
+
+    pop_fid, overrides, fixed, mid = _pop_bits()
+    fixed_k1 = dict(fixed, m_lim=20.0, M_faint_offset=offset)
+    data = dict(_shared_physics())
+    data["apix"] = APIX
+    data["catalogs"] = [_bundle_a()]
+    opts = _sel_opts(1, overrides, fixed_k1, selection_family="schechter")
+    ll_k1 = make_likelihood(opts, data, pop_fid,
+                            fixed_parameter_values=fixed_k1)
+    val_k1 = float(ll_k1(jnp.asarray([mid])))
+    assert np.isfinite(val_k1)
+
+    val_k2 = _k2_value([_bundle_a(), _bundle_a()], pins, [0.4],
+                       selection_family="schechter")
+    assert abs(val_k2 - val_k1) <= 5e-9, (val_k2, val_k1)

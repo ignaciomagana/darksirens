@@ -156,6 +156,16 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         for name, fiducial in SURVEY_PARAMS_FID_BY_NAME.items()
     ])
     field = dict(zip(SURVEY_PARAMS_FID_BY_NAME, stacked))
+    # M_faint_offset is ONE protocol constant per run (a single completeness
+    # denominator; a K >= 2 schechter mixture is HOMOGENEOUS by construction
+    # -- same-family fits with equal offsets, enforced by the CLI resolver --
+    # and per-catalog offsets are refused in the prior validation).  The
+    # generic ``name{suffix}`` lookup above would silently hand catalog k the
+    # REGISTRY FIDUCIAL denominator while catalog 1 carries the fit's, so a
+    # suffixed catalog falls back to the run's unsuffixed pin first.
+    if suffix and f"M_faint_offset{suffix}" not in values \
+            and "M_faint_offset" in values:
+        field["M_faint_offset"] = values["M_faint_offset"]
     return SurveyParams(
         n0=10.0 ** field["log10n0"],
         z50=field["z50"],
