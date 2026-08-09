@@ -56,6 +56,7 @@ tests/test_population_registry_golden.py
 
 # ── catalogs, completion, multitracer ──────────────────────────────────────
 tests/test_completion_prior_strength.py
+tests/test_marks_c_mode.py
 tests/test_complete_catalog_empty_pixel_policy.py
 tests/test_pop_extractor_multitracer.py
 
