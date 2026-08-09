@@ -185,13 +185,19 @@ def test_selection_labels_absent_under_fix_survey():
     assert not ({"M0hat", "sigma_M"} & set(labels))
 
 
-def test_selection_mode_rejects_multitracer_mixtures():
-    """K>=2 selection would sample _c{k} theta FLAT and compare every
-    catalog's table against one fit -- fail-closed until per-catalog fits."""
-    with pytest.raises(ValueError, match="single-catalog"):
-        build_parameter_space("powerlaw+peak", True, True, False,
-                              universe_model="dark_sirens", use_lss=False,
-                              n_catalogs=2, c_mode="selection")
+def test_selection_mode_k2_requires_a_fit_per_catalog():
+    """K>=2 selection is supported once EVERY catalog carries its own
+    anchored fit; a partially anchored mixture leaves catalog k's theta
+    flat and stays fatal."""
+    kw = dict(universe_model="dark_sirens", use_lss=False, n_catalogs=2,
+              c_mode="selection")
+    labels = build_parameter_space("powerlaw+peak", True, True, False, **kw)[0]
+    assert {"M0hat", "sigma_M", "M0hat_c2", "sigma_M_c2"} <= set(labels)
+    with pytest.raises(ValueError, match="M0hat_c2"):
+        build_parameter_space(
+            "powerlaw+peak", True, True, False,
+            selection_prior={"M0hat": (-20.2, 0.02), "sigma_M": (1.0, 0.02)},
+            **kw)
 
 
 def test_builder_requires_and_rejects_fit_pairing():
