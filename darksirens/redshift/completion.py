@@ -732,7 +732,10 @@ class _CompletionGrids(NamedTuple):
     log_g: jnp.ndarray          # (N_grid,) log galaxy measure
     dN_exp: jnp.ndarray         # (N_grid,) n0 * apix * g(z)
     dN_exp_smooth: jnp.ndarray  # (N_grid,) S-smoothed expected counts
-    C_bar_raw: jnp.ndarray = None  # (N_grid,) aggregate ratio (unclipped) | None
+    # (N_grid,) aggregate/selection curve, OR (S, N_grid) stratified-selection
+    # stack (indexed by EMCatalog.pixel_stratum_map), OR None (per-pixel).
+    # The ndim is static under jit, so consumers branch on it at trace time.
+    C_bar_raw: jnp.ndarray = None
 
 
 def _aggregate_dN_obs_sum(em_catalog: EMCatalog) -> jnp.ndarray:
@@ -866,10 +869,25 @@ def _precompute_grids(
         # k_corr_coeffs is STRUCTURAL (hashable tuple or None, never traced),
         # so the K(z) branch inside c_sel_gaussian is a Python-level decision
         # and the None path stays bit-identical to the pre-K behaviour.
-        C_bar_raw = c_sel_gaussian(
-            zgrid, survey.m_lim, survey.M0hat, survey.sigma_M,
-            cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
-            k_corr_coeffs=survey.k_corr_coeffs)
+        if survey.selection_strata is not None:
+            # Stratified selection: one curve per stratum, stacked (S, N_grid).
+            # The SAMPLED (M0hat, sigma_M) are the common mode; each stratum's
+            # STRUCTURAL (m_lim_s, dM0hat_s, sigma_ratio_s) offsets are fixed
+            # data from the offline fit (see SurveyParams.selection_strata).
+            # S is small (2-4) and static, so a Python loop traces S curves.
+            C_bar_raw = jnp.stack([
+                c_sel_gaussian(
+                    zgrid, m_lim_s, survey.M0hat + dm0_s,
+                    survey.sigma_M * sig_ratio_s,
+                    cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
+                    k_corr_coeffs=survey.k_corr_coeffs)
+                for (m_lim_s, dm0_s, sig_ratio_s) in survey.selection_strata
+            ])
+        else:
+            C_bar_raw = c_sel_gaussian(
+                zgrid, survey.m_lim, survey.M0hat, survey.sigma_M,
+                cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa,
+                k_corr_coeffs=survey.k_corr_coeffs)
     elif _is_aggregate_c_mode(survey.c_mode):
         dN_obs_sum = _aggregate_dN_obs_sum(em_catalog)      # data constant
         n_pix_total = jnp.round(4.0 * jnp.pi / em_catalog.apix)
@@ -1140,6 +1158,10 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
     global_pix = row if em_catalog.unique_pixels is None else em_catalog.unique_pixels[row]
 
     if grids.C_bar_raw is not None:
+        if grids.C_bar_raw.ndim == 2:
+            # Stratified selection: this pixel's stratum picks its curve.
+            stratum = em_catalog.pixel_stratum_map[global_pix]
+            return jnp.clip(grids.C_bar_raw[stratum], 0.0, 1.0), global_pix
         return jnp.clip(grids.C_bar_raw, 0.0, 1.0), global_pix
 
     # --- observed density: O(1) cache lookup, or on-the-fly fallback ---
@@ -1583,7 +1605,19 @@ def _field_missing_curve(
     dN_exp_safe = jnp.where(grids.dN_exp_smooth > 0.0, grids.dN_exp_smooth, 1.0)
     # AGGREGATE mode: static pytree-structure branch (mirrors _row_C).
     aggregate = grids.C_bar_raw is not None
+    # Stratified selection carries an (S, N_grid) stack; ndim is static.
+    stratified = aggregate and grids.C_bar_raw.ndim == 2
     C_bar = jnp.clip(grids.C_bar_raw, 0.0, 1.0) if aggregate else None
+    if stratified:
+        if em_catalog.pixel_stratum_map is None:
+            raise ValueError(
+                "stratified selection (SurveyParams.selection_strata) needs "
+                "EMCatalog.pixel_stratum_map to assign occupied rows and "
+                "empty pixels to strata."
+            )
+        # Per-occupied-row stratum, aligned with field_dN_obs_s rows.
+        strat_occ = jnp.asarray(em_catalog.pixel_stratum_map)[
+            jnp.asarray(em_catalog.field_occupied_pixels)]
 
     field_obs = jnp.asarray(em_catalog.field_dN_obs_s)       # (n_occ, N_grid) f32 constant
     n_occ = int(field_obs.shape[0])                          # static
@@ -1613,9 +1647,11 @@ def _field_missing_curve(
         mod_rows = jnp.zeros((n_occ, 1), dtype=jnp.float32)  # inert placeholder
     b_eff = survey.alpha_miss * survey.b_miss                # traced (delta_g mode)
 
-    def _row_V(obs_row, mod_row):
+    def _row_V(obs_row, mod_row, strat_row):
         obs_row = obs_row.astype(dN_exp.dtype)
-        if aggregate:
+        if stratified:
+            C = C_bar[strat_row]     # this row's stratum curve
+        elif aggregate:
             C = C_bar        # one survey curve; the row's own KDE is unused
         else:
             C = jnp.clip(obs_row / dN_exp_safe, 0.0, 1.0)
@@ -1634,22 +1670,26 @@ def _field_missing_curve(
     n_pad = n_occ + pad
     obs_pad = jnp.pad(field_obs, ((0, pad), (0, 0)))
     mod_pad = jnp.pad(mod_rows, ((0, pad), (0, 0)))
+    strat_rows = (strat_occ.astype(jnp.int32) if stratified
+                  else jnp.zeros(n_occ, dtype=jnp.int32))
+    strat_pad = jnp.pad(strat_rows, (0, pad))
     valid = jnp.arange(n_pad) < n_occ
     n_chunks = n_pad // chunk_size if chunk_size > 0 else 0
     obs_chunks = obs_pad.reshape(n_chunks, chunk_size, zgrid.size)
     mod_chunks = mod_pad.reshape(n_chunks, chunk_size, mod_rows.shape[1])
+    strat_chunks = strat_pad.reshape(n_chunks, chunk_size)
     valid_chunks = valid.reshape(n_chunks, chunk_size)
 
     def _body(acc, xs):
-        obs_c, mod_c, val_c = xs
-        Vc = vmap(_row_V)(obs_c, mod_c)                      # (chunk, N_grid)
+        obs_c, mod_c, strat_c, val_c = xs
+        Vc = vmap(_row_V)(obs_c, mod_c, strat_c)             # (chunk, N_grid)
         Vc = jnp.where(val_c[:, None], Vc, 0.0)
         return acc + jnp.sum(Vc, axis=0), None
 
     V_occ, _ = lax.scan(
         _body,
         jnp.zeros(zgrid.size, dtype=dN_exp.dtype),
-        (obs_chunks, mod_chunks, valid_chunks),
+        (obs_chunks, mod_chunks, strat_chunks, valid_chunks),
     )
 
     # Empty pixels: per-pixel C == 0, so their budget curve is lss_p itself --
@@ -1657,12 +1697,41 @@ def _field_missing_curve(
     # data constant Sum_empty Q_p(z) for the Q mode.  In aggregate mode empty
     # pixels carry C == Cbar like everyone else, so their curve is
     # (1 - Cbar) * lss_p.
-    if has_q:
-        V_empty = jnp.asarray(em_catalog.field_lss_q_empty_sum, dtype=dN_exp.dtype)
+    if stratified:
+        # Per-stratum decomposition: empty pixels in stratum s carry the
+        # stratum's own curve, so V_empty = Sum_s (1 - Cbar_s) * budget_s with
+        # budget_s = n_empty_s (no Q) or Sum_{empty in s} Q_p(z) (Q mode).
+        # Collapsing this to one curve would put the WRONG completeness on
+        # every empty pixel outside the reference stratum -- the numerator and
+        # normalizer would then carry different budgets.
+        if has_q:
+            if em_catalog.field_lss_q_empty_sum_strata is None:
+                raise ValueError(
+                    "stratified selection with a Q table needs "
+                    "EMCatalog.field_lss_q_empty_sum_strata (per-stratum "
+                    "empty-pixel Q budgets); build them alongside "
+                    "field_lss_q_empty_sum from the stratum map."
+                )
+            budget_s = jnp.asarray(em_catalog.field_lss_q_empty_sum_strata,
+                                   dtype=dN_exp.dtype)      # (S, N_grid)
+        else:
+            if em_catalog.empty_stratum_counts is None:
+                raise ValueError(
+                    "stratified selection needs "
+                    "EMCatalog.empty_stratum_counts (per-stratum empty-pixel "
+                    "counts) for the global normalizer."
+                )
+            budget_s = jnp.asarray(em_catalog.empty_stratum_counts,
+                                   dtype=dN_exp.dtype)[:, None]  # (S, 1)
+        V_empty = jnp.sum((1.0 - C_bar) * budget_s, axis=0)
     else:
-        V_empty = n_empty
-    if aggregate:
-        V_empty = (1.0 - C_bar) * V_empty
+        if has_q:
+            V_empty = jnp.asarray(em_catalog.field_lss_q_empty_sum,
+                                  dtype=dN_exp.dtype)
+        else:
+            V_empty = n_empty
+        if aggregate:
+            V_empty = (1.0 - C_bar) * V_empty
 
     V_total = V_occ + V_empty
     # ``z_depth`` is concrete at trace time -> Python-level branch (mirrors
@@ -1878,8 +1947,12 @@ def _completion_clip_fractions_for_pixel(
         # AGGREGATE mode: the raw ratio is the one sky-aggregate curve (same
         # for every pixel), so the reported C-clip fraction is the fraction of
         # the grid where the GLOBAL clip engages -- exactly the n0-kink
-        # exposure flagged in the module docstring.
-        C_raw = grids.C_bar_raw
+        # exposure flagged in the module docstring.  Stratified selection
+        # reports this pixel's stratum curve.
+        if grids.C_bar_raw.ndim == 2:
+            C_raw = grids.C_bar_raw[em_catalog.pixel_stratum_map[global_pix]]
+        else:
+            C_raw = grids.C_bar_raw
     else:
         if em_catalog.dN_obs_kde is not None:
             # Cache row == catalog row by construction (see _row_C); index directly.

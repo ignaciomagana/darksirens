@@ -23,6 +23,10 @@ MARK_INPUT_COLUMNS = {
 #: consumers only (selection-function fit, Q-table builder); never sampled.
 GALPROP_INPUT_COLUMNS = {
     "gal_app_mag": "APP_MAG",
+    # Integer stratum label per galaxy (e.g. imaging side or m_th stratum),
+    # carried as a padded float dataset like every galprop; consumed by
+    # darksirens_fit_selection --strata for per-stratum selection fits.
+    "gal_stratum": "STRATUM",
 }
 
 def plot_diagnostics(counts, zs, npix, save_dir, nside):

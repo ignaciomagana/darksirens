@@ -51,6 +51,16 @@ def main(argv=None):
                         "z**j applied to the OBSERVED magnitudes (no constant "
                         "term: c0 is exactly degenerate with M0hat). Default: "
                         "no K-correction.")
+    p.add_argument("--strata", action="store_true",
+                   help="Fit one theta PER STRATUM using the survey's "
+                        "gal_stratum labels (pixelated from a STRATUM "
+                        "column). Writes a multi-entry strata JSON "
+                        "(format 1.1 when more than one stratum is present; "
+                        "a single stratum stays 1.0-compatible).")
+    p.add_argument("--m_lim_per_stratum", default=None,
+                   help="Optional per-stratum magnitude limits as "
+                        "'label:m_lim,label:m_lim' (e.g. '0:19.5,1:21.0'); "
+                        "strata not listed use --m_lim. Only with --strata.")
     opts = p.parse_args(argv)
 
     k_corr_coeffs = None
@@ -86,24 +96,58 @@ def main(argv=None):
     m = mag[real]
     z = zg[real]
     _ok(f"Galaxies: {m.size:,} in {int((ng > 0).sum()):,} occupied pixels")
+
+    # Per-galaxy stratum labels (only under --strata).
+    labels = None
+    if opts.strata:
+        if "gal_stratum" not in props:
+            _fatal("--strata needs a gal_stratum dataset; re-pixelate from a "
+                   "raw catalog carrying a STRATUM column "
+                   "(darksirens_pixelate).")
+        labels = np.asarray(props["gal_stratum"])[real].astype(np.int64)
+        uniq = np.unique(labels)
+        _ok(f"Strata: {uniq.size} "
+            f"({', '.join(str(int(u)) for u in uniq)})")
+    elif opts.m_lim_per_stratum:
+        _fatal("--m_lim_per_stratum requires --strata.")
     _end()
+
+    m_lim_by = {}
+    if opts.m_lim_per_stratum:
+        try:
+            for item in opts.m_lim_per_stratum.split(","):
+                lbl, val = item.split(":")
+                m_lim_by[int(lbl)] = float(val)
+        except ValueError:
+            _fatal("--m_lim_per_stratum must look like '0:19.5,1:21.0' "
+                   f"(got {opts.m_lim_per_stratum!r})")
 
     _section("Fitting truncated luminosity function")
-    # Single stratum for now; the strata seam is the per-galaxy mask above.
-    fit = fit_selection_from_mags(m, z, opts.m_lim, family=opts.family,
-                                  k_corr_coeffs=k_corr_coeffs)
-    sd = np.sqrt(np.diag(fit.cov))
-    _row("family", fit.family)
-    _row("m_lim (fixed datum)", f"{fit.m_lim:.4f}")
-    if k_corr_coeffs:
-        _row("K(z) coeffs", ", ".join(f"{c:.5g}" for c in k_corr_coeffs))
-    _row("M0hat", f"{fit.M0hat:.5f} +/- {sd[0]:.5f}  (h-scaled: M0 - 5 log10 h)")
-    _row("sigma_M", f"{fit.sigma_M:.5f} +/- {sd[1]:.5f}")
+    fits = []
+    groups = ([("all", np.ones(m.size, dtype=bool))] if labels is None else
+              [(str(int(u)), labels == u) for u in np.unique(labels)])
+    for name, mask in groups:
+        m_lim_s = m_lim_by.get(int(name) if name != "all" else -1, opts.m_lim)
+        fit = fit_selection_from_mags(m[mask], z[mask], m_lim_s,
+                                      family=opts.family, stratum=name,
+                                      k_corr_coeffs=k_corr_coeffs)
+        fits.append(fit)
+        sd = np.sqrt(np.diag(fit.cov))
+        _row("stratum", f"{name}  (n={fit.n_gal:,})")
+        _row("  m_lim (fixed datum)", f"{fit.m_lim:.4f}")
+        if k_corr_coeffs:
+            _row("  K(z) coeffs", ", ".join(f"{c:.5g}" for c in k_corr_coeffs))
+        _row("  M0hat", f"{fit.M0hat:.5f} +/- {sd[0]:.5f}  (h-scaled)")
+        _row("  sigma_M", f"{fit.sigma_M:.5f} +/- {sd[1]:.5f}")
     _end()
 
+    # A single stratum stays byte-compatible with the 1.0 consumers; only a
+    # genuinely multi-entry payload advances the format version.
+    fmt = ("darksirens-selection-fit-1.0" if len(fits) == 1
+           else "darksirens-selection-fit-1.1")
     payload = {
-        "format_version": "darksirens-selection-fit-1.0",
-        "strata": [fit.to_jsonable()],
+        "format_version": fmt,
+        "strata": [f_.to_jsonable() for f_ in fits],
         "survey_path": str(survey),
         "survey_sha256": hashlib.sha256(survey.read_bytes()).hexdigest(),
         "created_utc": datetime.now(timezone.utc).isoformat(),

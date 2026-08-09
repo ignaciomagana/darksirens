@@ -44,6 +44,8 @@ tests/test_selection_variance_guard.py
 tests/test_selection_soft_guard.py
 tests/test_selection_prior_model.py
 tests/test_selection_kcorr.py
+tests/test_selection_strata.py
+tests/test_completion_stratified.py
 
 # ── priors, populations, parameter table ───────────────────────────────────
 tests/test_prior_defaults.py

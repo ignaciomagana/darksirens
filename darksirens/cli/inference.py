@@ -995,6 +995,17 @@ def build_parser():
                          "the SAME fit (theta_hat stamped and hard-checked at "
                          "load). Omit for flat-within-bounds selection priors "
                          "(the wide-open ablation)."))
+    g.add_argument("--stratum_map", default=None,
+                   help=("HDF5 file with a full-sky 'stratum_map' dataset "
+                         "(RING, at the SURVEY's nside) assigning every pixel "
+                         "a selection stratum in [0, S). Required by, and "
+                         "only legal with, a MULTI-stratum --selection_fit "
+                         "(darksirens-selection-fit-1.1): stratum s uses the "
+                         "fit's per-stratum (m_lim_s, theta_s) offsets around "
+                         "the SAMPLED common-mode (M0hat, sigma_M), and the "
+                         "global normalizer decomposes the empty-pixel "
+                         "budget per stratum. Off-footprint pixels must "
+                         "carry the map builder's documented policy label."))
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
                          "--save_path, and exit before building the likelihood."))
@@ -2095,13 +2106,52 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # unless the user overrides it explicitly.  Persisted on opts so
     # post-processing (build_parameter_decoder) re-derives the SAME space.
     opts.selection_prior = None
+    if getattr(opts, "stratum_map", None) and not getattr(
+            opts, "selection_fit", None):
+        _fatal("--stratum_map without --selection_fit: the stratum map only "
+               "routes a multi-stratum selection fit's per-stratum curves.")
     if getattr(opts, "selection_fit", None):
         if opts.c_mode != "selection":
             _fatal("--selection_fit given but --c_mode is "
                    f"'{opts.c_mode}': the fit parameterizes the "
                    "c_mode=selection completeness only.")
-        from darksirens.redshift.selection import load_selection_fit_json
-        _sel = load_selection_fit_json(opts.selection_fit)
+        from darksirens.redshift.selection import load_selection_fit_strata
+        _strata = load_selection_fit_strata(opts.selection_fit)
+        _sel = _strata[0]     # reference stratum: prior center + m_lim datum
+        if len(_strata) > 1:
+            if not getattr(opts, "stratum_map", None):
+                _fatal(f"--selection_fit carries {len(_strata)} strata but no "
+                       "--stratum_map assigns pixels to them; pass the map "
+                       "the strata were defined on.")
+            if getattr(opts, "lss_completion", None):
+                _fatal("stratified selection with a prebuilt Q table is not "
+                       "supported yet: the builder's C_sel base is single-"
+                       "stratum, so the table would carry the wrong fixed "
+                       "budget. Run without --lss_completion (homogeneous "
+                       "missing branch) until the stratified builder lands.")
+            # Common-mode + fixed offsets: stratum 0 is the reference (the
+            # sampled M0hat/sigma_M ARE its theta); stratum s carries the
+            # fixed, fit-measured offsets. Consistency of the shared K
+            # template across strata is enforced below.
+            for _s in _strata[1:]:
+                if tuple(_s["k_corr_coeffs"]) != tuple(_sel["k_corr_coeffs"]):
+                    _fatal("per-stratum K(z) templates differ inside "
+                           f"{opts.selection_fit}; strata must share one "
+                           "template (refit with a common --k_corr_coeffs).")
+            opts.selection_strata_struct = tuple(
+                (float(_s["m_lim"]),
+                 float(_s["M0hat"]) - float(_sel["M0hat"]),
+                 float(_s["sigma_M"]) / float(_sel["sigma_M"]))
+                for _s in _strata)
+            _note = (f"stratified selection: {len(_strata)} strata; sampled "
+                     "(M0hat, sigma_M) = stratum "
+                     f"'{_sel.get('stratum', '0')}' common mode, offsets "
+                     "fixed at the fit values (measured at ~1e-3 mag from "
+                     "the full catalog)")
+            print(f"    - {_note}")
+        elif getattr(opts, "stratum_map", None):
+            _fatal("--stratum_map given but the --selection_fit carries a "
+                   "single stratum; drop the map or refit with --strata.")
         _sd = np.sqrt(np.diag(np.asarray(_sel["cov"], dtype=float)))
         opts.selection_prior = {"M0hat": (float(_sel["M0hat"]), float(_sd[0])),
                                 "sigma_M": (float(_sel["sigma_M"]), float(_sd[1]))}
@@ -2111,6 +2161,30 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         # decoder; empty tuple = K = 0, the pre-K behaviour).
         opts.selection_fit_kcorr = tuple(_sel.get("k_corr_coeffs") or ())
         fixed_parameter_values.setdefault("m_lim", float(_sel["m_lim"]))
+        if getattr(opts, "selection_strata_struct", None):
+            # Attach the full-sky stratum map to the data bundle so
+            # prepare_catalog_views can build the per-stratum empty-pixel
+            # budgets alongside the field-normalization inputs.
+            import h5py as _h5py
+            with _h5py.File(opts.stratum_map, "r") as _f:
+                if "stratum_map" not in _f:
+                    _fatal(f"{opts.stratum_map}: no 'stratum_map' dataset.")
+                _smap = np.asarray(_f["stratum_map"], dtype=np.int32)
+            _npix_survey = 12 * int(data["nside"]) ** 2
+            if _smap.shape[0] != _npix_survey:
+                _fatal(
+                    f"stratum map covers {_smap.shape[0]} pixels but the "
+                    f"survey nside={data['nside']} sky has {_npix_survey}; "
+                    "regenerate the map at the survey nside (RING).")
+            _n_strata_map = int(_smap.max()) + 1
+            if _smap.min() < 0 or _n_strata_map != len(
+                    opts.selection_strata_struct):
+                _fatal(
+                    f"stratum map labels span [{int(_smap.min())}, "
+                    f"{int(_smap.max())}] but the fit carries "
+                    f"{len(opts.selection_strata_struct)} strata; every "
+                    "pixel needs a label in [0, S) matching the fit.")
+            data["pixel_stratum_map"] = _smap
 
     res = build_parameter_space(
         opts.pop_model,

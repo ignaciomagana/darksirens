@@ -894,6 +894,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_depth_z=getattr(catalogs, "field_depth_z", None),
         field_depth_dz=getattr(catalogs, "field_depth_dz", None),
         field_depth_c=getattr(catalogs, "field_depth_c", None),
+        pixel_stratum_map=getattr(catalogs, "pixel_stratum_map", None),
+        empty_stratum_counts=getattr(catalogs, "empty_stratum_counts", None),
+        field_lss_q_empty_sum_strata=getattr(
+            catalogs, "field_lss_q_empty_sum_strata", None),
     )
     em_catalog_sel = EMCatalog(
         apix=apix,
@@ -942,6 +946,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_depth_z=getattr(catalogs, "field_depth_z", None),
         field_depth_dz=getattr(catalogs, "field_depth_dz", None),
         field_depth_c=getattr(catalogs, "field_depth_c", None),
+        pixel_stratum_map=getattr(catalogs, "pixel_stratum_map", None),
+        empty_stratum_counts=getattr(catalogs, "empty_stratum_counts", None),
+        field_lss_q_empty_sum_strata=getattr(
+            catalogs, "field_lss_q_empty_sum_strata", None),
     )
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, (em_catalog_pe,), (em_catalog_sel,)

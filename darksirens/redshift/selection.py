@@ -187,29 +187,16 @@ def magnitude_loglike_from_stats(M0hat, sigma_M, stats):
     return jnp.sum(-n * jnp.log(sig) - quad - n * log_trunc)
 
 
-def load_selection_fit_json(path):
-    """Load and validate a ``darksirens_fit_selection`` JSON; return the
-    single-stratum theta dict ``{family, m_lim, M0hat, sigma_M, cov, ...}``.
+#: Selection-fit JSON formats this module reads: 1.0 is the single-stratum
+#: original; 1.1 adds multi-entry ``strata`` (written by
+#: ``darksirens_fit_selection --strata`` when more than one stratum is fit --
+#: a single-stratum output stays byte-compatible 1.0).
+_SELECTION_FIT_FORMATS = ("darksirens-selection-fit-1.0",
+                          "darksirens-selection-fit-1.1")
 
-    Multi-stratum payloads are rejected here for now: the single-survey
-    builder and the K=1 likelihood carry one theta; per-stratum consumption
-    arrives with real-catalog ingestion.
-    """
-    import json
 
-    with open(path) as f:
-        payload = json.load(f)
-    fmt = payload.get("format_version")
-    if fmt != "darksirens-selection-fit-1.0":
-        raise ValueError(
-            f"{path}: unknown selection-fit format {fmt!r} (expected "
-            "darksirens-selection-fit-1.0 from darksirens_fit_selection).")
-    strata = payload.get("strata") or []
-    if len(strata) != 1:
-        raise NotImplementedError(
-            f"{path}: {len(strata)} strata; the single-survey consumers "
-            "carry exactly one selection stratum for now.")
-    s = dict(strata[0])
+def _validate_stratum(path, s):
+    s = dict(s)
     for key in ("family", "m_lim", "M0hat", "sigma_M", "cov"):
         if key not in s:
             raise ValueError(f"{path}: stratum missing required key {key!r}.")
@@ -220,6 +207,52 @@ def load_selection_fit_json(path):
     # Optional K(z) template; absent in pre-K fit files -> K = 0.
     s["k_corr_coeffs"] = tuple(float(c) for c in s.get("k_corr_coeffs") or ())
     return s
+
+
+def _load_selection_fit_payload(path):
+    import json
+
+    with open(path) as f:
+        payload = json.load(f)
+    fmt = payload.get("format_version")
+    if fmt not in _SELECTION_FIT_FORMATS:
+        raise ValueError(
+            f"{path}: unknown selection-fit format {fmt!r} (expected one of "
+            f"{_SELECTION_FIT_FORMATS} from darksirens_fit_selection).")
+    return payload
+
+
+def load_selection_fit_json(path):
+    """Load and validate a ``darksirens_fit_selection`` JSON; return the
+    single-stratum theta dict ``{family, m_lim, M0hat, sigma_M, cov, ...}``.
+
+    Multi-stratum payloads are rejected HERE by contract: the single-survey
+    builder and the K=1 likelihood carry one theta.  Multi-stratum consumers
+    use :func:`load_selection_fit_strata`.
+    """
+    payload = _load_selection_fit_payload(path)
+    strata = payload.get("strata") or []
+    if len(strata) != 1:
+        raise NotImplementedError(
+            f"{path}: {len(strata)} strata; this consumer carries exactly one "
+            "selection stratum (use load_selection_fit_strata for the "
+            "stratified path).")
+    return _validate_stratum(path, strata[0])
+
+
+def load_selection_fit_strata(path):
+    """Load a selection-fit JSON as a LIST of validated stratum dicts.
+
+    Accepts both the 1.0 single-stratum format and the 1.1 multi-stratum
+    format; every entry carries the same keys as
+    :func:`load_selection_fit_json`'s return.  Strata are returned in file
+    order (the fit CLI writes them sorted by stratum label).
+    """
+    payload = _load_selection_fit_payload(path)
+    strata = payload.get("strata") or []
+    if not strata:
+        raise ValueError(f"{path}: no strata in selection-fit payload.")
+    return [_validate_stratum(path, s) for s in strata]
 
 
 @dataclass

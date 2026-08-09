@@ -74,7 +74,8 @@ def _sticks_to_log_weights(v: jnp.ndarray) -> jnp.ndarray:
 
 
 def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
-                   wl_params, c_mode=None, k_corr_coeffs=None):
+                   wl_params, c_mode=None, k_corr_coeffs=None,
+                   selection_strata=None):
     """Build one catalog's :class:`SurveyParams` from a resolved label dict.
 
     ``values`` maps sampled + fixed labels to values; every
@@ -124,6 +125,7 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         # Fixed K(z) template of the selection curve -- STRUCTURAL (hashable
         # tuple or None, the z_depth pattern), never sampled.
         k_corr_coeffs=k_corr_coeffs,
+        selection_strata=selection_strata,
     )
 
 
@@ -153,6 +155,10 @@ class ParameterDecoder:
     # (structural tuple of polynomial coefficients or None = K=0); carried
     # onto every catalog's SurveyParams, never sampled.
     k_corr_coeffs: tuple[float, ...] | None = None
+    # Structural per-stratum selection offsets ((m_lim_s, dM0hat_s,
+    # sigma_ratio_s), ...) or None = single stratum; fixed data from the
+    # offline fit, never sampled (see SurveyParams.selection_strata).
+    selection_strata: tuple | None = None
     sky_labels: tuple[str, ...] = ()
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
@@ -220,6 +226,7 @@ class ParameterDecoder:
             wl_params=self.wl_params,
             c_mode=self.c_mode,
             k_corr_coeffs=self.k_corr_coeffs,
+            selection_strata=self.selection_strata,
         )
         return cosmo, survey, pop_params, sky_params, mark_params
 
@@ -261,6 +268,7 @@ class ParameterDecoder:
                 wl_params=None,
                 c_mode=self.c_mode,
                 k_corr_coeffs=self.k_corr_coeffs,
+                selection_strata=self.selection_strata,
             ))
 
         # Per-catalog eta blocks: catalog 1 is decode()'s vector verbatim;
@@ -403,6 +411,12 @@ def build_parameter_decoder(
         k_corr_coeffs=(
             tuple(float(c)
                   for c in getattr(opts, "selection_fit_kcorr", None) or ())
+            or None),
+        # Structural per-stratum offsets from a multi-stratum fit (1.1 JSON)
+        # + --stratum_map; None = single stratum (legacy).
+        selection_strata=(
+            tuple(tuple(float(x) for x in s)
+                  for s in getattr(opts, "selection_strata_struct", None) or ())
             or None),
         # Resolved per-catalog survey z_depth (CLI --survey_z_depth override >
         # per-catalog file attr > None), computed host-side in the CLI before
