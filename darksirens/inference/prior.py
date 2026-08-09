@@ -516,6 +516,15 @@ def build_parameter_space(
         per-catalog because the likelihood chooses Q-vs-``b_miss`` per catalog
         (``completion.field_lss_q is not None``), so a mixed config (Q on some
         catalogs only) must keep ``b_miss_c{k}`` for the Q-free catalogs.
+    selection_prior
+        Magnitude-fit Gaussian priors ``{label: (loc, scale)}`` that flip the
+        SAMPLED selection labels from flat to a truncated normal.  Labels are
+        per catalog: ``M0hat``/``sigma_M`` for catalog 1 and
+        ``M0hat_c{k}``/``sigma_M_c{k}`` for catalogs ``2..K``, each anchored by
+        THAT catalog's own offline fit.  All-or-nothing: a run that anchors any
+        selection label must anchor every sampled one (a partially anchored
+        mixture leaves an unconstrained completeness nuisance); ``None`` leaves
+        every catalog flat within bounds (the wide-open ablation).
     """
     if prior_overrides is None:
         prior_overrides = {}
@@ -550,16 +559,14 @@ def build_parameter_space(
                 f"catalog (or a single string to broadcast).")
     else:
         c_mode_by_cat = (str(c_mode),) * n_catalogs
-    if n_catalogs >= 2 and any(m == "selection" for m in c_mode_by_cat):
-        # Fail-closed until per-catalog selection fits exist: the _c{k}
-        # labels would sample FLAT (the single-fit selection_prior anchors
-        # base labels only) and the theta-provenance loop would compare every
-        # catalog's table against one fit -- catalog k's selection would be
-        # silently unanchored.
-        raise ValueError(
-            "c_mode='selection' is single-catalog for now: a K>=2 mixture "
-            "needs one magnitude fit (and one anchored theta prior) per "
-            "catalog, which the selection-fit plumbing does not yet carry.")
+
+    #: 1-based catalog numbers running the parametric selection completeness.
+    #: The magnitude-fit anchoring rule below is stated against THIS tuple (not
+    #: against n_catalogs), so a future per-catalog c_mode needs no change here.
+    selection_catalogs = tuple(
+        k for k in range(1, n_catalogs + 1)
+        if c_mode_by_cat[k - 1] == "selection"
+    )
 
     def _survey_inactive_reason(label):
         """:class:`_Inert` for a (possibly ``_c{k}``-suffixed) survey label.
@@ -1009,6 +1016,39 @@ def build_parameter_space(
                 f"selection_prior for '{lbl}' needs finite loc and positive "
                 f"scale, got ({loc}, {scale}).")
         kind_map[lbl] = ("normal", float(loc), float(scale))
+
+    # Fail-closed anchoring: with ANY magnitude fit in play, EVERY sampled
+    # selection label must carry its own fit-anchored prior.  A partially
+    # anchored mixture is the silent failure this replaces the old K>=2
+    # refusal with: catalog k's M0hat_c{k}/sigma_M_c{k} would sample FLAT
+    # across the 5-mag truncation box while catalog 1 sits inside ~1e-2 mag
+    # of its fit, so the mixture's whole missing-galaxy budget is set by an
+    # unconstrained nuisance that no data in the run constrains.  Supplying
+    # NO fit at all stays legal for every K (the deliberate wide-open
+    # ablation, identical to the single-catalog behaviour).
+    if selection_prior:
+        unanchored = [
+            lbl
+            for k in selection_catalogs
+            for lbl in (
+                f"M0hat{'' if k == 1 else f'_c{k}'}",
+                f"sigma_M{'' if k == 1 else f'_c{k}'}",
+            )
+            if lbl in labels and lbl not in selection_prior
+        ]
+        if unanchored:
+            raise ValueError(
+                f"selection_prior anchors only part of this run's "
+                f"c_mode='selection' block: {unanchored} are SAMPLED but "
+                f"carry no magnitude-fit prior, so they would sample flat "
+                f"across their truncation bounds while the anchored labels "
+                f"sit within the fit's ~1e-2 mag uncertainty -- the mixture's "
+                f"missing-galaxy budget would be set by an unconstrained "
+                f"nuisance.\nPass one darksirens_fit_selection JSON PER "
+                f"CATALOG (--selection_fit fitA.json,fitB.json, in "
+                f"--survey_path order), or drop --selection_fit entirely for "
+                f"the wide-open ablation on every catalog."
+            )
     prior_kinds = [kind_map.get(lbl, ("uniform", None, None)) for lbl in labels]
 
     return (
