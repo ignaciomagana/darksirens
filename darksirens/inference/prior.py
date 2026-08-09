@@ -1015,6 +1015,28 @@ def build_parameter_space(
             raise ValueError(
                 f"selection_prior for '{lbl}' needs finite loc and positive "
                 f"scale, got ({loc}, {scale}).")
+        # The Gaussian is TRUNCATED to this label's bounds, and a fit center
+        # outside them freezes the parameter instead of refusing: the PPF
+        # evaluates ndtr at |z| >~ 40 on both edges, so Phi_a == Phi_b == 1
+        # and every unit-cube value maps to the same near-edge constant.  The
+        # >5-sd reach warning downstream cannot catch it (it fires on every
+        # legal anchored run, where the box is ~5 mag and the fit sd ~1e-2).
+        # Reachable per catalog now that heterogeneous tracers -- a bright
+        # cluster sample and a deep photo-z catalog -- share one registry box.
+        _i = labels.index(lbl)
+        if not (lower[_i] < loc < upper[_i]):
+            raise ValueError(
+                f"selection_prior centers '{lbl}' at {loc}, outside its "
+                f"sampling bounds [{lower[_i]}, {upper[_i]}]: the truncated "
+                f"Gaussian would collapse to a single constant at the nearer "
+                f"bound, silently freezing this catalog's completeness base "
+                f"instead of sampling the fit.\nWiden the box to bracket the "
+                f"fit, e.g. --prior_overrides '{{\"{lbl}\": "
+                f"[{min(lower[_i], loc - 5.0 * scale):g}, "
+                f"{max(upper[_i], loc + 5.0 * scale):g}]}}', or check that "
+                f"this catalog's darksirens_fit_selection JSON is the right "
+                f"one for it."
+            )
         kind_map[lbl] = ("normal", float(loc), float(scale))
 
     # Fail-closed anchoring: with ANY magnitude fit in play, EVERY sampled

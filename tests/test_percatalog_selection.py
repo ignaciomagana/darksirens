@@ -16,7 +16,10 @@ from darksirens.inference.parameters import (
     ParameterDecoder,
     build_parameter_decoder,
 )
-from darksirens.inference.prior import build_parameter_space
+from darksirens.inference.prior import (
+    build_parameter_space,
+    make_prior_transform,
+)
 
 _KW = dict(universe_model="dark_sirens", use_lss=False)
 _ANCHOR1 = {"M0hat": (-20.19, 0.02), "sigma_M": (1.0, 0.015)}
@@ -108,6 +111,55 @@ def test_k1_selection_space_is_bit_identical():
     assert res[0] == flat[0]
     assert np.array_equal(res[1], flat[1])
     assert np.array_equal(res[2], flat[2])
+
+
+def test_fit_center_outside_the_truncation_box_is_fatal():
+    """A bright tracer whose fit lands outside the shared registry box.
+
+    Every catalog's M0hat shares one (-23, -18) box, so a per-catalog fit can
+    legitimately fall outside it; truncating there would freeze the parameter
+    rather than sample it, so it must be refused with the widening remedy.
+    """
+    prior = {**_ANCHOR1, "M0hat_c2": (-24.0, 0.02), "sigma_M_c2": (0.7, 0.011)}
+    with pytest.raises(ValueError, match="M0hat_c2") as exc:
+        build_parameter_space("powerlaw+peak", True, True, False,
+                              n_catalogs=2, c_mode="selection",
+                              selection_prior=prior, **_KW)
+    msg = str(exc.value)
+    assert "--prior_overrides" in msg and "M0hat_c2" in msg
+    # The quoted remedy brackets the fit's +-5 sd without shrinking the box.
+    assert "[-24.1, -18]" in msg
+
+
+@pytest.mark.parametrize("loc", [-23.0, -18.0])
+def test_fit_center_exactly_on_a_bound_is_fatal(loc):
+    """Closed bounds still give a degenerate half-truncated Gaussian."""
+    with pytest.raises(ValueError, match="outside its sampling bounds"):
+        build_parameter_space("powerlaw+peak", True, True, False,
+                              c_mode="selection",
+                              selection_prior={"M0hat": (loc, 0.02),
+                                               "sigma_M": (1.0, 0.015)},
+                              **_KW)
+
+
+def test_widened_box_admits_the_out_of_box_fit_and_samples_it():
+    prior = {**_ANCHOR1, "M0hat_c2": (-24.0, 0.02), "sigma_M_c2": (0.7, 0.011)}
+    labels, lo, hi, *rest = build_parameter_space(
+        "powerlaw+peak", True, True, False, n_catalogs=2, c_mode="selection",
+        selection_prior=prior, prior_overrides={"M0hat_c2": [-24.1, -18.0]},
+        **_KW)
+    i = labels.index("M0hat_c2")
+    assert (lo[i], hi[i]) == (-24.1, -18.0)
+    assert rest[8][i] == ("normal", -24.0, 0.02)
+    # And the transform actually varies across the cube -- the freeze the
+    # guard exists to prevent.
+    u = np.full(len(labels), 0.5)
+    transform = make_prior_transform(lo, hi, rest[8])
+    lo_val = float(np.asarray(transform(np.where(
+        np.arange(len(labels)) == i, 0.02, u)))[i])
+    hi_val = float(np.asarray(transform(np.where(
+        np.arange(len(labels)) == i, 0.98, u)))[i])
+    assert hi_val - lo_val > 0.05
 
 
 # ── decoder ────────────────────────────────────────────────────────
