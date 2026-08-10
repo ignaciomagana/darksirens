@@ -738,7 +738,23 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
     DM(z_i; H0=100)``, and -- when the caller declares one -- only if
     ``Mhat_i <= m_faint_cut``.  Both edges are PARAMETER-FREE numbers, so the
     per-galaxy support ``M <= U_i = min(T_i, m_faint_cut)`` does not move with
-    the fitted theta and the MLE is a regular interior optimum.  In ``x`` the
+    the fitted theta and the MLE is a regular interior optimum.
+
+    KNOWN LIMITATION (photo-z scatter vs a sharp edge): both edges are
+    NOISELESS-observable assumptions on ``Mhat``, but a photometric redshift
+    propagates ``sigma_z`` into ``Mhat`` through the distance modulus.  For
+    the detection edge this only inflates the fitted widths slightly (the
+    gaussian family's documented behaviour); for ``m_faint_cut`` the fit
+    DEGRADES once ``sd(Mhat_obs - Mhat_true)`` is comparable to the
+    truncation depth ``|M_faint - M*|``: galaxies scatter across the edge,
+    the cut removes the ones that scattered faint-ward, and the edge-biased
+    survivors pull (Mstar_hat, alpha) coherently -- measured at +3.2 / +4.3
+    sd on a mock whose scatter was 92% of a 0.094 mag truncation, mispricing
+    the transition-zone missing budget (1 - C_sel) by up to ~2.5x.  Fit on
+    spectroscopic (or, for mocks, TRUE) redshifts when the truncation is
+    shallow; the principled photo-z treatment is a scatter-convolved
+    normalization, not a widened cut (which trades the sharp bias for an
+    unpropagatable contamination bias).  In ``x`` the
     support is ``x >= x_{U,i} = max(x_lim,i, x_cut)`` and the normalization is
     closed-form:
 
@@ -780,8 +796,45 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
     n_gal = int(Mhat.size)
     log_pref = np.log(0.4 * ln10)
 
+    # --- sufficient statistics: the per-galaxy magnitude terms are EXACT ---
+    #
+    #   sum_i a log x_i = a 0.4 ln10 (N Mstar - sum_i Mhat_i)
+    #   sum_i x_i       = 10^{0.4 Mstar} * sum_i 10^{-0.4 Mhat_i}
+    #
+    # so only the per-galaxy normalization ``log Gamma(a, x(U_i))`` with the
+    # PARAMETER-FREE support edge ``U_i = min(T_i, m_faint_cut)`` needs
+    # compression: ``max(x_lim,i, x_cut) = 10^{-0.4 (U_i - Mstar)}`` exactly
+    # (both edges scale with the same ``10^{0.4 Mstar}``), and ``U`` is binned
+    # the way :func:`magnitude_suffstats` bins ``T`` for the gaussian family
+    # (bin-mean edge per bin; error ``O(bin width^2)`` in log Phi curvature,
+    # here ``O(bin width^2)`` in log Gamma curvature -- far below the Laplace
+    # sd at 64 bins over a <~ 1 mag U range).  The cost per NLL evaluation
+    # drops from N to n_bins ``gammaincc`` calls: the difference between
+    # seconds and hours at the N ~ 10^6 of real catalogs (measured >2 h
+    # unconverged at 8e5 galaxies on the per-galaxy spelling).
+    S1 = float(np.sum(Mhat))
+    S_L = float(np.sum(10.0 ** (-0.4 * Mhat)))
+    U = T if m_faint_cut is None else np.minimum(T, float(m_faint_cut))
+    n_bins = 64
+    _lo, _hi = float(np.min(U)), float(np.max(U))
+    if _hi - _lo < 1e-12:
+        # Degenerate support (every galaxy shares one edge, e.g. a deep
+        # survey where the faint cut dominates everywhere): exact, one bin.
+        U_b = np.array([_lo])
+        N_b = np.array([float(n_gal)])
+    else:
+        _edges = np.linspace(_lo - 1e-9, _hi + 1e-9, n_bins + 1)
+        _idx = np.clip(np.digitize(U, _edges) - 1, 0, n_bins - 1)
+        N_b = np.zeros(n_bins)
+        _U_sum = np.zeros(n_bins)
+        np.add.at(N_b, _idx, 1.0)
+        np.add.at(_U_sum, _idx, U)
+        _keep = N_b > 0
+        U_b = _U_sum[_keep] / N_b[_keep]
+        N_b = N_b[_keep]
+
     def _norm(Mstar, a):
-        """``Gamma(a, x_U)`` per galaxy -- the truncated LF's normalization.
+        """``Gamma(a, x(U_b))`` on the bin-mean support edges.
 
         ``_upper_gamma_scaled`` returns ``a Gamma(a, x)``; the same nudged
         ``a`` divides it back out, so the pair is exact at every ``a`` and
@@ -789,9 +842,7 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
         ``a -> 0``.
         """
         a_s = _a_off_zero(a, np)
-        x_u = 10.0 ** (-0.4 * (T - Mstar))
-        if m_faint_cut is not None:
-            x_u = np.maximum(x_u, 10.0 ** (-0.4 * (m_faint_cut - Mstar)))
+        x_u = 10.0 ** (-0.4 * (U_b - Mstar))
         return _upper_gamma_scaled(a_s, x_u, xp=np) / a_s
 
     def nll(theta):
@@ -803,14 +854,23 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
         gam = _norm(Mstar, a)
         if not np.all(np.isfinite(gam)) or np.any(gam <= 0.0):
             return np.inf
-        log_x = 0.4 * ln10 * (Mstar - Mhat)
-        val = -np.sum(a * log_x - np.exp(log_x) - np.log(gam)) - n_gal * log_pref
+        val = -(a * 0.4 * ln10 * (n_gal * Mstar - S1)
+                - 10.0 ** (0.4 * Mstar) * S_L
+                - float(np.sum(N_b * np.log(gam)))
+                + n_gal * log_pref)
         return val if np.isfinite(val) else np.inf
 
     Mstar0 = float(np.percentile(Mhat, 10.0))          # the bright decile scale
     u0 = np.log(-_ALPHA_MIN - 0.7)                     # alpha0 = -0.7
+    # fatol is ABSOLUTE while the NLL scales with N: at N ~ 10^6 the float64
+    # resolution of the objective (eps * |NLL| ~ 1e-10) sits ON the old
+    # 1e-10 tolerance, so Nelder-Mead could never satisfy it and ground to
+    # maxiter. Scale it with N; theta precision is xatol's job (1e-8 mag,
+    # orders below any Laplace sd).
     res = minimize(nll, np.array([Mstar0, u0]), method="Nelder-Mead",
-                   options={"xatol": 1e-8, "fatol": 1e-10, "maxiter": 20000})
+                   options={"xatol": 1e-8,
+                            "fatol": 1e-9 * max(1.0, float(n_gal)),
+                            "maxiter": 20000})
     if not res.success:
         raise RuntimeError(f"selection fit did not converge: {res.message}")
     Mstar_hat = float(res.x[0])
@@ -826,11 +886,12 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
     gam_hat = _norm(Mstar_hat, alpha_hat + 1.0)
     if np.any(gam_hat <= 0.0):
         raise RuntimeError(
-            f"{int(np.sum(gam_hat <= 0.0))} galaxies have an UNDERFLOWING "
-            "normalization Gamma(alpha+1, x_lim) = 0 at the optimum: the "
-            f"declared m_lim={float(m_lim)} puts them so far into the bright "
-            "tail that the truncated Schechter assigns them no probability "
-            "mass. The declared limit cannot describe this sample.")
+            f"{int(np.sum(N_b[gam_hat <= 0.0]))} galaxies have an "
+            "UNDERFLOWING normalization Gamma(alpha+1, x_lim) = 0 at the "
+            f"optimum: the declared m_lim={float(m_lim)} puts them so far "
+            "into the bright tail that the truncated Schechter assigns them "
+            "no probability mass. The declared limit cannot describe this "
+            "sample.")
 
     # Laplace covariance in the REPORTED coordinates (Mstar_hat, alpha): the
     # same reparametrized-Hessian structure as the gaussian's nll_sig.
