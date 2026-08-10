@@ -265,3 +265,51 @@ def test_legacy_table_without_stamp_warns_loudly(tmp_path):
     assert d["budget_monopole_logq"] is None
     # the table itself still loads (tolerate, never reject)
     assert d["logq_map"].shape == (2, NG)
+
+
+def test_post_renorm_railing_stamped_and_surfaced(tmp_path):
+    """Deferred review MINOR: the builder stamps the post-renorm clip-railing
+    provenance (count / fraction / abs max over the FITTED rows), and the
+    loader surfaces a loud warning when the shipped fraction is
+    non-negligible -- a railing cell's Q was chosen by the clip, not the
+    data."""
+    from darksirens.cli.build_lognormal_completion import (
+        _stamp_post_renorm_railing,
+    )
+
+    rng = np.random.default_rng(3)
+    lq = rng.normal(0.0, 1.0, size=(8, NG))
+    lq[0, :20] = 7.0                   # twenty cells on the wall (> 1e-3)
+    diag = {"logq_clip": 7.0}
+    _stamp_post_renorm_railing(diag, lq)
+    assert diag["post_renorm_logq_rail_count"] == 20
+    assert diag["post_renorm_logq_rail_frac"] == 20 / lq.size
+    assert diag["post_renorm_logq_abs_max"] == 7.0
+
+    # Members stamped separately when present.
+    members = np.zeros((3, 8, NG))
+    members[1, 0, 0] = -7.5
+    _stamp_post_renorm_railing(diag, lq, members)
+    assert diag["post_renorm_logq_rail_frac_members"] == 1 / members.size
+
+    # Loader: a heavy railing fraction warns loudly; a clean table is quiet.
+    mono = np.zeros(NG)
+    noisy = str(tmp_path / "railing.h5")
+    save_lss_completion_hdf5(
+        noisy, logq_map=lq, zgrid=np.asarray(zgrid),
+        budget_renormalized=True, budget_monopole_logq=mono,
+        metadata=diag)
+    with pytest.warns(RuntimeWarning, match="rail"):
+        load_lss_completion_hdf5(noisy)
+
+    clean = str(tmp_path / "clean.h5")
+    lq2 = rng.normal(0.0, 0.5, size=(8, NG))
+    diag2 = {"logq_clip": 7.0}
+    _stamp_post_renorm_railing(diag2, lq2)
+    save_lss_completion_hdf5(
+        clean, logq_map=lq2, zgrid=np.asarray(zgrid),
+        budget_renormalized=True, budget_monopole_logq=mono,
+        metadata=diag2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        load_lss_completion_hdf5(clean)

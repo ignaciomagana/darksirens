@@ -1204,6 +1204,27 @@ def load_lss_completion_hdf5(path: str) -> dict:
             stacklevel=2,
         )
 
+    # Post-renorm clip-railing provenance (deferred review MINOR): a shipped
+    # cell at/beyond the solve's |logQ| clip means the CLIP, not the data,
+    # chose that Q value.  Sparse railing is tolerable (the clip exists as a
+    # numerical wall); a non-negligible fraction means the solve saturated
+    # and the table should be rebuilt with a wider clip or more iterations.
+    _diag = out.get("diagnostics")
+    if isinstance(_diag, dict):
+        _rail = _diag.get("post_renorm_logq_rail_frac")
+        if _rail is not None and float(_rail) > 1e-3:
+            warnings.warn(
+                f"LSS completion '{path}': {float(_rail):.2%} of the fitted "
+                f"post-renorm logQ cells rail at/beyond the solve's "
+                f"|logQ| <= {_diag.get('logq_clip', 7.0)} clip (abs max "
+                f"{_diag.get('post_renorm_logq_abs_max')}): those Q values "
+                "were chosen by the clip, not the data. Rebuild with more "
+                "--maxiter (or inspect the catalog) if this footprint "
+                "matters.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     _warn_if_unconverged(path, out.get("diagnostics"))
     return out
 

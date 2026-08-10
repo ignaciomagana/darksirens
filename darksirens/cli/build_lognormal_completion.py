@@ -214,6 +214,35 @@ def _selection_strata_stamp(selection_strata, stratum_map_sha):
     return out
 
 
+def _stamp_post_renorm_railing(diagnostics, logq_fit, logq_members_fit=None):
+    """Post-renorm clip-railing provenance (deferred review MINOR).
+
+    The solvers clip ``|logQ| <= logq_clip`` BEFORE the per-z mean-one budget
+    renormalization; the renorm then SHIFTS every row of a z-bin by that bin's
+    log-monopole, so cells that were sitting on the clip wall move off it (or
+    past it) and the shipped table's extremes are no longer the clip value.
+    A table whose post-renorm cells still rail at/beyond the clip is a table
+    whose solve saturated -- the clip, not the data, chose those Q values --
+    and that must be auditable from the file alone.  Stamped over the FITTED
+    rows only (unfitted rows are exactly logQ = 0 and would dilute the
+    fraction).
+    """
+    clip = float(diagnostics.get("logq_clip", 7.0))
+    lq = np.asarray(logq_fit, dtype=float)
+    n_tot = int(lq.size)
+    n_rail = int(np.sum(np.abs(lq) >= clip)) if n_tot else 0
+    diagnostics["post_renorm_logq_rail_count"] = n_rail
+    diagnostics["post_renorm_logq_rail_frac"] = (
+        n_rail / n_tot if n_tot else 0.0)
+    diagnostics["post_renorm_logq_abs_max"] = (
+        float(np.abs(lq).max()) if n_tot else 0.0)
+    if logq_members_fit is not None:
+        lm = np.asarray(logq_members_fit, dtype=float)
+        n_m = int(lm.size)
+        diagnostics["post_renorm_logq_rail_frac_members"] = (
+            int(np.sum(np.abs(lm) >= clip)) / n_m if n_m else 0.0)
+
+
 def _selection_kcorr_stamp(selection_fit):
     """Per-coefficient provenance keys for the fit's fixed K(z) template.
 
@@ -555,6 +584,9 @@ def _build_completion_radial(
             logq_members[:, fit], _ = renormalize_q_mean_one(
                 logq_members[:, fit], w_budget)
         diagnostics["budget_monopole_logq"] = log_mono
+        _stamp_post_renorm_railing(
+            diagnostics, logq_map[fit],
+            logq_members[:, fit] if logq_members is not None else None)
     diagnostics["budget_renormalized"] = bool(budget_renorm)
 
     return logq_map, logq_members, diagnostics
@@ -961,6 +993,9 @@ def _build_completion_gp3d(
             logq_members[:, occ], _ = renormalize_q_mean_one(
                 logq_members[:, occ], survey_data.w_budget)
         diagnostics["budget_monopole_logq"] = log_mono
+        _stamp_post_renorm_railing(
+            diagnostics, logq_map[occ],
+            logq_members[:, occ] if logq_members is not None else None)
     diagnostics["budget_renormalized"] = bool(do_renorm)
 
     return logq_map, logq_members, diagnostics
