@@ -89,7 +89,14 @@ from darksirens.likelihood.block_sizing import (
 )
 from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
 from darksirens.redshift.grid import zMax as _REDSHIFT_GRID_ZMAX
-from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
+from darksirens.core.types import (
+    C_MODE_AGGREGATE_STRUCT,
+    C_MODE_SELECTION_STRUCT,
+    SELECTION_FAMILY_SCHECHTER_STRUCT,
+    CosmoParams,
+    EMCatalog,
+    SurveyParams,
+)
 from darksirens.inference.checkpointing import (
     add_checkpoint_arguments,
     find_resume_target,
@@ -433,6 +440,62 @@ def run_completion_validation(
     # (With a Q_LSS table attached below, the reported logQ-clip fraction is the
     # WHOLE-grid one; a depth-bounded run relaxes Q_eff -> 1 beyond the depth, so
     # the number is an upper bound on the railing the likelihood will see.)
+    #
+    # c_mode-aware (deferred review MINOR): the dry run must diagnose the
+    # SAME completeness estimator the likelihood will form.  Without the mode
+    # (and, for c_mode=selection, the theta/family/K(z)/strata block) the
+    # validation silently reported the legacy per-pixel ratio's clipping for
+    # every run -- an aggregate/selection run then looked clean while its
+    # actual budget was never inspected.  _precompute_grids is mode-generic;
+    # only this SurveyParams needs to carry the structure.
+    _c_mode = str(getattr(opts, "c_mode", None) or "per_pixel")
+    _k_catalog = int(suffix[2:]) if suffix.startswith("_c") else 1
+    _mode_kwargs: dict = {}
+    if _c_mode == "aggregate":
+        _mode_kwargs["c_mode"] = C_MODE_AGGREGATE_STRUCT
+    elif _c_mode == "selection":
+        # Resolve the per-catalog fit state through the SAME resolver the
+        # run uses (idempotent: pins are setdefault, stamps overwrite), so
+        # theta / family / K(z) / strata cannot drift from the likelihood's.
+        if getattr(opts, "selection_fits", None) is None:
+            _resolve_selection_fits(opts, data, fixed_parameter_values)
+        _fits = opts.selection_fits or []
+        _fit = _fits[_k_catalog - 1] if len(_fits) >= _k_catalog else None
+        _family = str(getattr(opts, "selection_family", None) or "gaussian")
+        _theta = dict(_fit["theta"]) if _fit else {}
+
+        def _tval(name):
+            # fixed value > fit's effective theta > registry fiducial: the
+            # dry run sits where the likelihood's theta prior is centered
+            # (theta is SAMPLED in the real run; this is a representative
+            # point, exactly like the cosmology above).
+            _sfx_key = f"{name}{suffix}" if suffix else name
+            if _sfx_key in fixed_parameter_values:
+                return float(fixed_parameter_values[_sfx_key])
+            if name in _theta:
+                return float(_theta[name])
+            if name == "M_faint_offset" and \
+                    "M_faint_offset" in fixed_parameter_values:
+                return float(fixed_parameter_values["M_faint_offset"])
+            return float(SURVEY_PARAMS_FID_BY_NAME[name])
+
+        _mode_kwargs = dict(
+            c_mode=C_MODE_SELECTION_STRUCT,
+            selection_family=(SELECTION_FAMILY_SCHECHTER_STRUCT
+                              if _family == "schechter" else None),
+            m_lim=_tval("m_lim"),
+            M0hat=_tval("M0hat"),
+            sigma_M=_tval("sigma_M"),
+            Mstar_hat=_tval("Mstar_hat"),
+            alpha=_tval("alpha"),
+            M_faint_offset=_tval("M_faint_offset"),
+            k_corr_coeffs=((tuple(_fit["k_corr_coeffs"]) or None)
+                           if _fit else None),
+            selection_strata=(
+                tuple(tuple(float(x) for x in s)
+                      for s in _fit["strata_struct"])
+                if _fit and _fit.get("strata_struct") else None),
+        )
     survey = SurveyParams(
         n0=10.0 ** survey_values["log10n0"],
         z50=survey_values["z50"],
@@ -441,10 +504,30 @@ def run_completion_validation(
         b_miss=survey_values["b_miss"],
         alpha_miss=survey_values["alpha_miss"],
         sigma_kde=survey_values["sigma_kde"],
+        **_mode_kwargs,
     )
     lss_kwargs, lss_attached = _completion_validation_lss_tables(
         data, unique_pixels, int(data.get("n_pix_catalog", np.asarray(full_z).shape[0]))
     )
+    if _c_mode == "aggregate":
+        # The aggregate Cbar sums the OBSERVED rows over the whole sky, which
+        # a compact catalog carries as the field-convention inputs; build them
+        # from the full-sky rows exactly as the loader does.
+        from darksirens.redshift.completion import (
+            build_field_normalization_inputs,
+        )
+
+        _field = build_field_normalization_inputs(
+            jnp.asarray(full_z), jnp.asarray(full_w),
+            jnp.asarray(full_n, dtype=jnp.int32))
+        lss_kwargs = dict(
+            lss_kwargs,
+            field_dN_obs_s=_field.dN_obs_s,
+            field_n_empty=jnp.asarray(float(_field.n_empty)),
+            field_N_obs_total=jnp.asarray(float(_field.N_obs_total)),
+            field_occupied_pixels=jnp.asarray(
+                np.asarray(_field.occupied_pixels), dtype=jnp.int32),
+        )
     em_catalog = EMCatalog(
         apix=data["apix"],
         zgals=jnp.asarray(full_z[unique_pixels]),
@@ -466,6 +549,14 @@ def run_completion_validation(
         max_pixels=max_pixels,
     )
     diagnostics["lss_completion_attached"] = lss_attached
+    diagnostics["c_mode"] = _c_mode
+    if _c_mode == "selection":
+        diagnostics["selection_theta_used"] = {
+            k: float(getattr(survey, k))
+            for k in ("m_lim", "M0hat", "sigma_M",
+                      "Mstar_hat", "alpha", "M_faint_offset")}
+        diagnostics["selection_family"] = str(
+            getattr(opts, "selection_family", None) or "gaussian")
     diagnostics["survey_values"] = survey_values
     diagnostics["cosmology_values"] = {
         "H0": float(cosmo.H0),

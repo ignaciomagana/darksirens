@@ -224,3 +224,110 @@ def test_per_catalog_validation_uses_each_bundles_own_Q(two_catalog_setup):
     assert d1["mean_rho_miss_eff_clipped_fraction"] > 0.1
     assert d2["lss_source"] == "legacy_delta_g"
     assert d2["lss_completion_attached"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# c_mode awareness (deferred review MINOR): the dry run must diagnose the
+# SAME completeness estimator the likelihood will form
+# ---------------------------------------------------------------------------
+
+def _k1_data(tmp_path, seed=404):
+    import healpy as hp
+    from darksirens.inference.loaders import load_survey
+
+    p = tmp_path / "survey.h5"
+    _write_survey(p, seed)
+    _, ngals, zgals, dzgals, wgals, _ = load_survey(str(p), to_device=False)
+    return dict(
+        zgals_catalog=zgals, dzgals_catalog=dzgals, wgals_catalog=wgals,
+        ngals_catalog=ngals,
+        pixels_pe=np.array([0, 2, 4], dtype=np.int32),
+        pixels_sel=np.array([0, 2, 6], dtype=np.int32),
+        apix=hp.nside2pixarea(NSIDE),
+        n_pix_catalog=NPIX,
+    )
+
+
+def _spy_survey(monkeypatch):
+    """Capture the SurveyParams the dry run hands to the diagnostics."""
+    from darksirens.cli import inference as cli
+
+    seen = []
+    real = cli.completion_clip_diagnostics
+
+    def spy(*, cosmo, survey, em_catalog, max_pixels):
+        seen.append(survey)
+        return real(cosmo=cosmo, survey=survey, em_catalog=em_catalog,
+                    max_pixels=max_pixels)
+
+    monkeypatch.setattr(cli, "completion_clip_diagnostics", spy)
+    return seen
+
+
+def test_validation_survey_carries_the_runs_c_mode(tmp_path, monkeypatch):
+    """per_pixel (legacy default) keeps c_mode=None; aggregate and selection
+    runs hand the diagnostics a survey carrying THEIR estimator's structure
+    -- previously every mode was silently validated as per_pixel."""
+    import json as _json
+
+    from darksirens.core.types import (
+        C_MODE_AGGREGATE_STRUCT, C_MODE_SELECTION_STRUCT,
+    )
+
+    seen = _spy_survey(monkeypatch)
+    base = dict(save_path=str(tmp_path / "out"),
+                completion_validation_pixels=8)
+
+    opts = SimpleNamespace(**base)                      # legacy: no c_mode
+    run_completion_validation(opts, _k1_data(tmp_path, 404), {}, {})
+    assert seen[-1].c_mode is None
+
+    opts = SimpleNamespace(**base, c_mode="aggregate")
+    p_agg = run_completion_validation(opts, _k1_data(tmp_path, 405), {}, {})
+    assert seen[-1].c_mode is C_MODE_AGGREGATE_STRUCT
+    assert _json.load(open(p_agg))["c_mode"] == "aggregate"
+
+    # Wide-open selection (no fit): theta at the registry fiducials, m_lim
+    # overridable through the fixed values exactly as in the likelihood.
+    opts = SimpleNamespace(**base, c_mode="selection", n_catalogs=1,
+                           selection_fit_paths=[None], stratum_map=None)
+    p_sel = run_completion_validation(
+        opts, _k1_data(tmp_path, 406), {}, {"m_lim": 19.5})
+    sv = seen[-1]
+    assert sv.c_mode is C_MODE_SELECTION_STRUCT
+    assert float(sv.m_lim) == 19.5
+    d = _json.load(open(p_sel))
+    assert d["c_mode"] == "selection"
+    assert d["selection_theta_used"]["m_lim"] == 19.5
+    assert d["selection_family"] == "gaussian"
+
+
+def test_validation_selection_theta_comes_from_the_fit(tmp_path, monkeypatch):
+    """With a --selection_fit, the dry run resolves the SAME per-catalog fit
+    records the likelihood uses: theta at the fit's effective values, the
+    K(z) template threaded, m_lim pinned from the fit's datum."""
+    import json as _json
+
+    from darksirens.redshift.selection import SelectionFit
+
+    fit = SelectionFit(family="gaussian", m_lim=20.25, M0hat=-20.4,
+                       sigma_M=0.85, cov=np.eye(2) * 4e-4, n_gal=1000,
+                       k_corr_coeffs=(0.7,))
+    fp = tmp_path / "fit.json"
+    fp.write_text(_json.dumps({
+        "format_version": "darksirens-selection-fit-1.0",
+        "strata": [fit.to_jsonable()]}))
+
+    seen = _spy_survey(monkeypatch)
+    opts = SimpleNamespace(
+        save_path=str(tmp_path / "out"), completion_validation_pixels=8,
+        c_mode="selection", n_catalogs=1,
+        selection_fit_paths=[str(fp)], stratum_map=None)
+    fixed = {}
+    run_completion_validation(opts, _k1_data(tmp_path, 407), {}, fixed)
+    sv = seen[-1]
+    assert float(sv.m_lim) == 20.25          # pinned from the fit's datum
+    assert float(sv.M0hat) == -20.4
+    assert float(sv.sigma_M) == 0.85
+    assert sv.k_corr_coeffs == (0.7,)
+    assert fixed["m_lim"] == 20.25           # the same pin the run gets
