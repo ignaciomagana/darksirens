@@ -874,3 +874,24 @@ def test_bright_truncated_fit_recovers_generative_truth():
         jnp.asarray([0.05, 0.2, 0.5]), 21.0, fit.Mstar_hat, fit.alpha,
         fit.M_faint_offset, H0_REF))
     assert np.all(np.isfinite(c)) and np.all((c >= 0) & (c <= 1))
+
+
+def test_schechter_fit_scales_to_catalog_size():
+    """The suffstats compression: a real-catalog-scale fit (4e5 galaxies,
+    bright-truncated, cut declared) CONVERGES and recovers truth -- the
+    per-galaxy spelling ground to maxiter (>2 h measured at 8e5) because
+    every NLL evaluation paid N gammaincc calls and the absolute fatol sat
+    below the N-scaled objective's float64 resolution."""
+    rng = np.random.default_rng(23)
+    n = 400_000
+    M = _truncated_schechter_sample(rng, n, MSTAR_TRUE, -1.07, X_CUT)
+    z = rng.uniform(0.05, 0.30, size=n)
+    m = M + np.asarray(distance_modulus(jnp.asarray(z), H0_REF))
+    fit = fit_selection_from_mags(m, z, float(np.max(m)) + 0.1,
+                                  family="schechter",
+                                  M_faint_offset=OFFSET_BRIGHT,
+                                  m_faint_cut=MSTAR_TRUE + OFFSET_BRIGHT + 1e-9)
+    sd = np.sqrt(np.diag(np.asarray(fit.cov)))
+    assert abs(fit.Mstar_hat - MSTAR_TRUE) < 5.0 * sd[0]
+    assert abs(fit.alpha - (-1.07)) < 5.0 * sd[1]
+    assert sd[0] < 0.02 and sd[1] < 0.04      # catalog-scale precision

@@ -224,15 +224,29 @@ def main(argv=None):
                  f"at z={fit.meta['z_budget_ref']:.4f}: "
                  + ",  ".join(f"{k} mag -> {v:.4f}"
                               for k, v in budget.items()))
+            # With a declared cut the faint-ward count is INFORMATIONAL (the
+            # fitted Mstar_hat moves the implied M_faint a little off the
+            # parameter-free cut, so a few galaxies sit between the two --
+            # protocol-vs-fit-support slack, not a problem); without one it
+            # is actionable advice.
+            _n_fw = fit.meta["n_gal_faintward_of_m_faint"]
+            if opts.m_faint_cut is not None:
+                _advice = (f" (between the declared --m_faint_cut="
+                           f"{float(opts.m_faint_cut):.4f} and the FITTED "
+                           "Mstar_hat + offset: benign fit-vs-protocol slack "
+                           "of the edge, not contamination -- the cut "
+                           "already bounded the fit sample)")
+            else:
+                _advice = (" (outside the modelled population -- move "
+                           "--m_faint_offset faint-ward and REBUILD the Q "
+                           "table, or declare --m_faint_cut, if that count "
+                           "is not negligible; a NEGATIVE offset declares a "
+                           "bright-truncated population and then requires "
+                           "the cut)")
             _row("  faint end",
                  f"{fit.meta['frac_complete_at_m_faint']:.3f} of the sample is "
                  f"complete to M_faint={fit.meta['m_faint_implied']:.4f}; "
-                 f"{fit.meta['n_gal_faintward_of_m_faint']:,} galaxies lie "
-                 "faint-ward of it (outside the modelled population -- move "
-                 "--m_faint_offset faint-ward and REBUILD the Q table, or "
-                 "declare --m_faint_cut, if that count is not negligible; a "
-                 "NEGATIVE offset declares a bright-truncated population and "
-                 "then requires the cut)")
+                 f"{_n_fw:,} galaxies lie faint-ward of it" + _advice)
     _end()
 
     # A single stratum stays byte-compatible with the 1.0 consumers; only a
