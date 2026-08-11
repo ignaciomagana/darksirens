@@ -1599,3 +1599,59 @@ def test_loader_refuses_index_free_pair_time_marks_in_fixed_mode():
     src = inspect.getsource(cli.load_inputs)
     assert "carries a time mark but no " in src
     assert 'and partition_mode == "fixed"' in src
+
+
+# ---------------------------------------------------------------------------
+# lensed channels are valid only at the campaign's fiducial cosmology (F-031)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("channel_args", [
+    ("--cluster_mode", "j2", "--candidate_pairs_path", "cand.json"),
+    ("--singleton_lensing", "sl_mixture"),
+])
+def test_sampling_cosmology_is_refused_with_a_lensed_channel(channel_args):
+    """The lensed selection terms reweight source-frame campaign columns whose
+    detection flags were rendered at the campaign's fiducial cosmology, so they
+    are valid only there; the file records no fiducial cosmology and H0 arrives
+    traced, so a runtime check is impossible. Gate on the flags."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--fix_cosmology", "false", *channel_args)
+    with pytest.raises(SystemExit, match="fix_cosmology false is not valid"):
+        cli._resolve_lensing_run_config(opts)
+
+
+def test_sampling_cosmology_is_allowed_without_a_lensed_channel():
+    """The unlensed singleton campaign is stored in the detector frame, so its
+    selection estimator is valid for any cosmology."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--fix_cosmology", "false")   # cluster_mode off
+    cli._resolve_lensing_run_config(opts)              # no raise
+    assert opts.fix_cosmology is False
+
+
+def test_lensed_channels_still_run_with_fixed_cosmology():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts(
+        "--fix_cosmology", "true", "--cluster_mode", "j2",
+        "--candidate_pairs_path", "cand.json",
+    )
+    cli._resolve_lensing_run_config(opts)              # no raise
+
+
+def test_load_inputs_is_the_second_net_for_the_cosmology_gate(monkeypatch):
+    """A direct library caller gets the same refusal, before any data is read."""
+    import darksirens.cli.inference_lensing as cli
+
+    def _boom(*a, **k):
+        raise AssertionError("load_inputs opened data before validating flags")
+
+    monkeypatch.setattr(cli, "load_gw_samples", _boom)
+    opts = SimpleNamespace(
+        cluster_mode="j2", partition_mode="fixed", singleton_lensing="off",
+        fix_cosmology=False, seed=1,
+    )
+    with pytest.raises(SystemExit, match="fix_cosmology false is not valid"):
+        cli.load_inputs(opts)

@@ -471,6 +471,11 @@ darksirens_inference_lensing \
 - `--fix_cosmology` / `--fix_survey` (both default `true`) and
   `--fix_population` (default `false`), plus `--fixed_parameter_values` and
   `--prior_overrides` as JSON — same conventions as the main CLI.
+  `--fix_cosmology false` is refused whenever a lensed-injection channel is on
+  (`--cluster_mode j2` or `--singleton_lensing sl_mixture`): those selection
+  terms reweight source-frame campaign columns whose detection flags were
+  rendered at the campaign's fiducial cosmology, so they are valid only there,
+  and the campaign file records no fiducial cosmology for a runtime check.
 
 ### Sampler, checkpoint, and performance options
 

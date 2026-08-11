@@ -925,6 +925,50 @@ def _validate_partition_mode_against_cluster_mode(opts):
         )
 
 
+def _validate_fixed_cosmology_for_lensed_channels(opts):
+    """Reject ``--fix_cosmology false`` while a lensed-injection channel is on.
+
+    Both lensed selection channels (``compute_lensed_pair_selection_term`` for
+    ``--cluster_mode j2`` and ``compute_lensed_single_selection_term`` for
+    ``--singleton_lensing sl_mixture``) reweight SOURCE-FRAME campaign columns,
+    and the detection efficiency enters ONLY through subset membership — the
+    per-image flags rendered at generation time.  Detection is a function of the
+    observables (m1_det, dL_app = dL(z)/sqrt(mu)) and hence of cosmology, so at
+    fixed (m1_src, q, z, y) a change in H0/w0/wa changes P_det while the stored
+    flags cannot follow: the estimators are valid only AT THE CAMPAIGN'S
+    FIDUCIAL COSMOLOGY (cluster_selection module docstring, "Frozen detection
+    realization").  The unlensed singleton campaign is stored in the detector
+    frame and IS valid for any cosmology, so sampling cosmology puts the two
+    channels of mu_tot on different selection conventions and gives the ratio
+    that sets A_tau a spurious cosmology dependence.
+
+    This cannot be caught at runtime: the campaign file keeps only the selected
+    subsets and records no fiducial cosmology, and H0 arrives traced.  Gate it
+    on the flags instead (review F-031; every in-repo lensing invocation already
+    passes ``--fix_cosmology true``, the default).
+    """
+    if getattr(opts, "fix_cosmology", True):
+        return
+    channels = []
+    if getattr(opts, "cluster_mode", "off") == "j2":
+        channels.append("--cluster_mode j2")
+    if getattr(opts, "singleton_lensing", "off") == "sl_mixture":
+        channels.append("--singleton_lensing sl_mixture")
+    if not channels:
+        return
+    raise SystemExit(
+        f"--fix_cosmology false is not valid with {' and '.join(channels)}: the "
+        "lensed-injection selection terms reweight source-frame campaign columns "
+        "whose detection flags were rendered at the campaign's fiducial "
+        "cosmology, so they are only valid there (the file records no fiducial "
+        "cosmology and H0 arrives traced, so this cannot be checked at "
+        "runtime). Sampling cosmology would give mu_sel^(2)/mu_sel^(1) — the "
+        "ratio that sets A_tau — a spurious cosmology dependence. Run with "
+        "--fix_cosmology true (the default), or use --cluster_mode off "
+        "--singleton_lensing off for a cosmology-sampling control."
+    )
+
+
 def _derive_universe_model(wl_backend):
     """Map --wl_backend to the library universe-model kind.
 
@@ -1118,6 +1162,7 @@ def load_inputs(opts):
     # likelihood closure.  main() already rejects this via
     # _resolve_lensing_run_config; this is the second net.
     _validate_partition_mode_against_cluster_mode(opts)
+    _validate_fixed_cosmology_for_lensed_channels(opts)
     _gate_pair_orientation_mismatch(opts)
     rng = np.random.default_rng(opts.seed)
 
@@ -3015,7 +3060,12 @@ def build_parser():
              "likelihood; use for deliberate convention ablations only.",
     )
     fixing = p.add_argument_group("Fixing")
-    fixing.add_argument("--fix_cosmology", type=str_to_bool, default=True, metavar="BOOL")
+    fixing.add_argument(
+        "--fix_cosmology", type=str_to_bool, default=True, metavar="BOOL",
+        help="false samples H0/Om0/w0/wa. REFUSED with --cluster_mode j2 or "
+             "--singleton_lensing sl_mixture: the lensed-injection selection "
+             "terms are valid only at the campaign's fiducial cosmology.",
+    )
     fixing.add_argument("--fix_survey", type=str_to_bool, default=True, metavar="BOOL")
     fixing.add_argument("--fix_population", type=str_to_bool, default=False, metavar="BOOL")
     fixing.add_argument(
@@ -3255,6 +3305,7 @@ def _resolve_lensing_run_config(opts):
 
     _resolve_wl_selection(opts)
     _validate_partition_mode_against_cluster_mode(opts)
+    _validate_fixed_cosmology_for_lensed_channels(opts)
 
     opts.universe_model = _derive_universe_model(opts.wl_backend)
 
@@ -3629,8 +3680,8 @@ def _cross_check_loglike_against_diagnostics(loglike, diagnostics, point, *, opt
     Under ``--partition_mode marginalize_exact --partition_component_mode
     componentwise`` (the default) the sampler path does NOT read the master
     likelihood's selection correction: it rebuilds the count-only term in
-    closed form (``build_cluster_likelihood._count_correction``) and the
-    master's value cancels out of the factorized total.  Nothing tied the two
+    closed form (``_count_correction_closed_form``) and the master's value
+    cancels out of the factorized total.  Nothing tied the two
     together, so a closed form missing the total-variance budget produced a
     sampler likelihood ~1e4 nats away from every other evaluation path with no
     symptom at all (review F-001).  One extra likelihood call at startup —
@@ -3657,8 +3708,11 @@ def _cross_check_loglike_against_diagnostics(loglike, diagnostics, point, *, opt
             "sampler log-likelihood disagrees with the partition diagnostics at "
             f"the SAME evaluation point: loglike={value!r} vs diagnostics "
             f"{'logL_marginalized' if 'logL_marginalized' in diagnostics else 'logL_total'}"
-            f"={reference!r} (tol {tol:.3g}). Under "
-            "--partition_component_mode componentwise the sampler rebuilds the "
+            f"={reference!r} (tol {tol:.3g}; --partition_mode "
+            f"{getattr(opts, 'partition_mode', 'fixed')} "
+            "--partition_component_mode "
+            f"{getattr(opts, 'partition_component_mode', 'componentwise')}). "
+            "Under componentwise factorization the sampler rebuilds the "
             "count-only selection correction in closed form while the "
             "diagnostics take it from the master likelihood; a mismatch means "
             "the two are no longer the same statistical target, so posterior "
