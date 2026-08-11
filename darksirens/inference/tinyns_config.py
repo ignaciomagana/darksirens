@@ -159,6 +159,26 @@ class TinyNSConfig:
         d = asdict(self); d["replacement_chain_schedule"] = list(self.replacement_chain_schedule) if self.replacement_chain_schedule else None; d["explicit"] = list(self.explicit); return d
 
 
+#: Resolved-config fields that do NOT change the statistical target: the
+#: checkpoint/resume machinery and the progress printing.  ``build_run_fingerprint``
+#: filters ``vars(opts)`` against ``run_fingerprint._NON_SEMANTIC_KEYS`` at the TOP
+#: level only, so mirroring these onto ``opts.tinyns_resolved_config`` re-admitted
+#: values the fingerprint had deliberately excluded (``show_progress``,
+#: ``tinyns_checkpoint_interval``) through the nested dict -- a SLURM requeue that
+#: changed the tinyns checkpoint cadence or toggled the progress bar then hit the
+#: fatal resume-fingerprint mismatch instead of resuming.  Kept out of the mirror
+#: (the dataclass still carries them; the flags themselves are recorded top-level
+#: in settings.json).
+_NON_SEMANTIC_RESOLVED_KEYS = (
+    "checkpoint_path",
+    "checkpoint_interval",
+    "resume_from",
+    "checkpoint_path_out",
+    "show_progress",
+    "progress_interval",
+)
+
+
 def parse_chain_schedule(raw):
     if raw in (None, ""):
         return None
@@ -201,9 +221,20 @@ def build_tinyns_config(opts):
     validate_tinyns_config(cfg)
     # Keep individual CLI override attributes unchanged so repeated resolution
     # remains idempotent and omitted flags stay distinguishable from explicit
-    # overrides. Store the complete resolved config separately for printing and
-    # result metadata.
-    setattr(opts, "tinyns_resolved_config", cfg.to_json_dict())
+    # overrides. Store the resolved config separately for printing and result
+    # metadata, MINUS the non-semantic checkpoint/progress fields: this dict is
+    # fingerprinted wholesale by build_run_fingerprint (see
+    # _NON_SEMANTIC_RESOLVED_KEYS).
+    mirror = cfg.to_json_dict()
+    for key in _NON_SEMANTIC_RESOLVED_KEYS:
+        mirror.pop(key, None)
+    # ``explicit`` records WHICH flags were passed, so a non-semantic flag's
+    # mere presence there would change the digest just as its value did.
+    mirror["explicit"] = [
+        name for name in mirror["explicit"]
+        if name not in _NON_SEMANTIC_RESOLVED_KEYS
+    ]
+    setattr(opts, "tinyns_resolved_config", mirror)
     return cfg
 
 
