@@ -105,11 +105,12 @@ def test_dark_sirens_likelihood_evaluates_once_before_sampling():
     value = likelihood(jnp.array([]))
     assert value.shape == ()
     assert not bool(jnp.isnan(value))
-    # Reference value re-pinned after PR #191 restored the catalog-consistent
-    # selection integral for the dark-siren models (library review P0.2): the
-    # deliberate selection change moved the value from 0.016464023225528157 by
-    # ~7e-3 relative, exactly the "model/logic regression" scale this pin is
-    # designed to catch, but the pin was not updated with the PR. Computed on
+    # Reference value re-pinned after the review-fixes population corrections
+    # (PR #359): the fiducial rate slope moved from gamma = 0 to the measured
+    # kappa_z = 2.5 and the mass normalisers switched to the closed forms,
+    # deliberately moving this value from 0.016343376536779530 by ~5e-2
+    # relative. Previous re-pin: PR #191 (catalog-consistent selection
+    # integral), 0.016464023225528157 -> 0.016343376536779530. Computed on
     # jax 0.10.1 / CPU (GPU agrees within the tolerance).
     #
     # Tolerance: model/logic regressions move this value at the >= 1e-4
@@ -118,7 +119,7 @@ def test_dark_sirens_likelihood_evaluates_once_before_sampling():
     # rtol = 1e-7 separates the two cleanly and is order-independent.
     # The previous 1e-12 pin also drifted ~1e-4 across jax *versions*,
     # so re-pin the constant when CI changes jax rather than loosening.
-    np.testing.assert_allclose(float(value), 0.016343376536779530, rtol=1e-7)
+    np.testing.assert_allclose(float(value), 0.015520039551940812, rtol=1e-7)
 
 
 def test_make_likelihood_does_not_mutate_data_when_compacting_catalogs():
