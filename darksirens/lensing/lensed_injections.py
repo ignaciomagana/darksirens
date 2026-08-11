@@ -12,7 +12,7 @@ pipeline. The on-disk representation is a flat (per-image) HDF5:
 
   source_id      (N_img,) int32     groups images by underlying source
   image_id       (N_img,) int32     0 = μ_+ (type-I), 1 = μ_- (type-II)
-  m1_src         (N_img,)           detector-frame source mass [M☉]
+  m1_src         (N_img,)           source-frame primary mass [M☉]
                                     (constant within a source_id group)
   q_src          (N_img,)           mass ratio (same for both images)
   z_src          (N_img,)           source redshift (same for both images)
@@ -27,6 +27,17 @@ pipeline. The on-disk representation is a flat (per-image) HDF5:
                                     (same for both images of a source)
 
   attrs: Ndraw_sources              total source-frame draws (detected + undetected)
+
+Frames
+------
+``m1_src``, ``q_src``, ``z_src`` and ``chieff`` are ALL source-frame, and
+``p_prop_src`` must be the normalized proposal density in exactly those
+source-frame coordinates.  The consumers rely on this: the population term
+is evaluated as ``p_pop(m1_src, q_src, z_src, chieff)`` (a source-frame
+model) and ``fcpdet`` applies the ``(1 + z_src)`` redshifting itself to get
+the detector-frame chirp mass.  Writing ``m1_det = m1_src·(1 + z)`` here
+biases the J = 2 and lensed-singleton selection integrals by a
+redshift-dependent mass shift that no downstream check can see.
 
 This is the natural product of an injection campaign that draws sources
 from p_prop_src · p_prop_y, computes both images, and renders each.
