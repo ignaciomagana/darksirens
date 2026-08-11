@@ -398,6 +398,35 @@ def test_selection_fit_json_roundtrip_schechter(tmp_path):
         load_selection_fit_strata(p)
 
 
+def test_loader_refuses_a_foreign_background_cosmology(tmp_path):
+    """The h-scaled zero point absorbs H0 exactly, NOT Om0/w0/wa: those change
+    the SHAPE of DM(z), so a fit measured at another background is not the fit
+    the run consumes.  Nothing downstream read the stamp, so the mismatch was
+    silently accepted."""
+    from darksirens.utils.cosmology import Om0Planck
+
+    fit = SelectionFit(family="gaussian", m_lim=21.0, M0hat=-20.9,
+                       sigma_M=0.9, cov=np.eye(2) * 1e-4, n_gal=1000,
+                       meta={"Om0": float(Om0Planck), "w0": -1.0, "wa": 0.0})
+    payload = {"format_version": "darksirens-selection-fit-1.0",
+               "strata": [fit.to_jsonable()]}
+    p = tmp_path / "fit.json"
+    p.write_text(json.dumps(payload))
+    assert load_selection_fit_json(p)["M0hat"] == -20.9      # fiducial: fine
+
+    for key, bad in (("Om0", 0.25), ("w0", -0.8), ("wa", 0.3)):
+        s = dict(payload["strata"][0])
+        s["meta"] = {**s["meta"], key: bad}
+        p.write_text(json.dumps({**payload, "strata": [s]}))
+        with pytest.raises(ValueError, match=key):
+            load_selection_fit_json(p)
+
+    # Pre-stamp fits carry no background keys and stay loadable.
+    s = dict(payload["strata"][0], meta={})
+    p.write_text(json.dumps({**payload, "strata": [s]}))
+    assert load_selection_fit_json(p)["M0hat"] == -20.9
+
+
 def test_gaussian_jsonable_key_order_is_unchanged():
     """Payload compatibility: the gaussian key order is frozen."""
     fit = SelectionFit(family="gaussian", m_lim=21.0, M0hat=-20.9,

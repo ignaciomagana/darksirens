@@ -23,6 +23,24 @@ completeness budget, never the Hubble constant.  The offline fit likewise
 works in reference absolute magnitudes ``Mhat_i = m_i - DM(z_i; H0=100)``,
 which equal ``M0hat + scatter`` independent of the (unknown) true H0.
 
+What the firewall does NOT cover: Om0, w0, wa.  The cancellation above is exact
+for H0 alone, because ``dL`` is exactly proportional to ``1/H0``.  The remaining
+background parameters change the SHAPE of ``DM(z)``, and only its z-INDEPENDENT
+part is absorbable by the fitted zero point, so the offline fit's background is a
+provenance datum, not a free choice: it is stamped into ``meta`` and checked
+against the package fiducial when a fit is loaded
+(:func:`_validate_fit_background`).  The residual that remains once the fit and
+the run share that fiducial is the genuinely z-dependent piece swept out by
+SAMPLING Om0/w0/wa: at H0 = 100, ``DM`` moves by 0.012 mag at z = 0.05 and
+0.110 mag at z = 0.5 between Om0 = 0.25 and 0.40 (0.021 / 0.134 mag between
+w0 = -0.8 and -1.2), i.e. ~0.1 mag of non-absorbable shape across a
+z = 0.05-0.5 catalog, against a Laplace sd of ~0.02 mag at catalog scale.  A
+selection-mode run that samples the dark-energy parameters over their full prior
+therefore carries a completeness zero point anchored at the fiducial rather than
+re-fitted per proposal; removing it needs the fit sample's redshift distribution
+persisted and the mean ``DM`` offset applied inside the curves, not a wider
+prior.
+
 Strata.  Real compilations have direction-dependent depth; the fit accepts a
 stratum label per galaxy and returns one ``theta`` per stratum sharing the LF
 shape convention.  The mock program uses a single stratum.
@@ -369,6 +387,43 @@ _STRATUM_REQUIRED = {
 }
 
 
+#: Tolerance of the loaded fit's background-cosmology provenance check.  The
+#: stamp is a float64 round-trip of the fiducial constant, so anything above
+#: rounding is a different background.
+_BACKGROUND_ATOL = 1e-9
+
+#: The background the consumed curves are anchored at: the sampled cosmology's
+#: prior centre, and the default the offline fit runs at.
+_FIT_BACKGROUND = (("Om0", Om0Planck), ("w0", w0Fiducial), ("wa", waFiducial))
+
+
+def _validate_fit_background(where, meta):
+    """Refuse a fit whose stamped background is not the run's fiducial.
+
+    The h-scaled zero point absorbs H0 EXACTLY (module docstring), but Om0/w0/wa
+    change the shape of ``DM(z)``, and only the z-independent part of that change
+    is absorbable by the fitted ``M0hat``/``Mstar_hat``.  A fit measured at
+    another background is therefore not the fit this run consumes -- ``c_sel_*``
+    is evaluated at the run's cosmology while the zero point stays anchored where
+    it was measured -- and nothing downstream reads the stamp, so the mismatch
+    would be silent.  Fits written before the stamp existed carry no keys and
+    are accepted unchanged.
+    """
+    for key, fiducial in _FIT_BACKGROUND:
+        if key not in meta:
+            continue
+        value = float(meta[key])
+        if abs(value - float(fiducial)) > _BACKGROUND_ATOL:
+            raise ValueError(
+                f"{where}: the fit was measured at {key}={value} but this "
+                f"package's background is {key}={float(fiducial)}. The h-scaled "
+                "zero point absorbs H0 exactly, NOT Om0/w0/wa: they change the "
+                "shape of DM(z), so the fitted M0hat/Mstar_hat does not carry "
+                "over (~0.1 mag of non-absorbable residual across a "
+                "z = 0.05-0.5 catalog, several times the fit's own Laplace sd). "
+                "Refit the magnitudes at the fiducial background.")
+
+
 def _validate_stratum(path, s):
     s = dict(s)
     if "family" not in s:
@@ -381,6 +436,7 @@ def _validate_stratum(path, s):
     for key in _STRATUM_REQUIRED[family]:
         if key not in s:
             raise ValueError(f"{path}: stratum missing required key {key!r}.")
+    _validate_fit_background(str(path), s.get("meta") or {})
     # Optional K(z) template; absent in pre-K fit files -> K = 0.
     s["k_corr_coeffs"] = tuple(float(c) for c in s.get("k_corr_coeffs") or ())
     if family == "schechter":
