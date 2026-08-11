@@ -79,6 +79,43 @@ def test_flows_missing_directory_exits_nonzero():
     assert "not a directory" in result.stdout
 
 
+def _pdet_flows_args(tmp_path, *extra):
+    """--gw_flows_path + --pdet_flow_path (exactly one selection source)."""
+    pdet = tmp_path / "pdet_flow.npz"
+    pdet.write_bytes(b"not a real checkpoint")
+    flows = tmp_path / "flows"
+    flows.mkdir()
+    return [
+        "--gw_flows_path", str(flows),
+        "--pdet_flow_path", str(pdet),
+        "--universe_model", "spectral_sirens",
+        "--sampler", "tinyns",
+    ] + list(extra)
+
+
+def test_flows_chieff_amax_out_of_range_exits_nonzero(tmp_path):
+    result = _run(_pdet_flows_args(tmp_path, "--flows_chieff_amax", "1.5"))
+    assert result.returncode != 0
+    assert "--flows_chieff_amax must be in (0, 1]" in result.stdout
+
+
+def test_mismatched_chieff_amax_between_flows_and_pdet_exits_nonzero(tmp_path):
+    """The chi_eff PE prior is divided out of the event flows and baked into the
+    pseudo-injection p_draw: two different amax leave a chi_eff/q-dependent
+    residual in the hierarchical ratio, so the pair must be equal."""
+    result = _run(_pdet_flows_args(tmp_path, "--pdet_chieff_amax", "1.0"))
+    assert result.returncode != 0
+    assert "--flows_chieff_amax 0.99 != --pdet_chieff_amax 1.0" in result.stdout
+    assert "same reference convention" in result.stdout.lower()
+
+
+def test_matching_chieff_amax_passes_the_cross_check(tmp_path):
+    """Equal values (the shared default) sail past the guard and fail later."""
+    result = _run(_pdet_flows_args(tmp_path, "--pdet_chieff_amax", "0.99"))
+    assert result.returncode != 0
+    assert "!= --pdet_chieff_amax" not in result.stdout
+
+
 def test_gw_path_only_passes_flow_guards():
     """A stored-PE run must sail past the flow guards (and die later on IO)."""
     result = _run(BASE + [

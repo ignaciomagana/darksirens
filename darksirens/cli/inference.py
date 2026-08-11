@@ -2088,6 +2088,28 @@ def _validate_run_config(opts):
                 "amount (issue #260). Evidence differences below that "
                 "systematic are unresolved."
             )
+        if not (0.0 < opts.flows_chieff_amax <= 1.0):
+            _fatal("--flows_chieff_amax must be in (0, 1].")
+        if opts.pdet_flow_path and abs(
+                float(opts.flows_chieff_amax)
+                - float(opts.pdet_chieff_amax)) > 1e-12:
+            # The chi_eff PE prior is DIVIDED OUT of every flow density
+            # (numerator) with --flows_chieff_amax and BAKED INTO the
+            # pseudo-injection p_draw (denominator) with --pdet_chieff_amax.
+            # Both sides marginalize the 4-D spin nuisance under the SAME
+            # amax-truncated reference conditional, so two different amax
+            # values leave a chi_eff- and q-dependent residual that does not
+            # cancel between the events and the injections.
+            _fatal(
+                f"--flows_chieff_amax {opts.flows_chieff_amax} != "
+                f"--pdet_chieff_amax {opts.pdet_chieff_amax}: the chi_eff PE "
+                "prior divided out of each event flow (numerator) and the one "
+                "baked into the emulator pseudo-injections' p_draw "
+                "(denominator) must be the SAME reference convention, or the "
+                "hierarchical ratio carries a chi_eff/mass-ratio-dependent "
+                "reweighting of the selection function. Set both to the "
+                "injection-file convention."
+            )
         if opts.sampler == "numpyro":
             _warn(
                 "flows + NumPyro NUTS: the grid inverse-CDF samplers give "
