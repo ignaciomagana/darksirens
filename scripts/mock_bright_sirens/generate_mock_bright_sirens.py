@@ -255,6 +255,9 @@ def write_mock_data(args):
 
     inv_pdraw = 1.0 / np.asarray(sel["pdraw"])
     selection_neff = float(inv_pdraw.sum() ** 2 / np.square(inv_pdraw).sum()) if len(inv_pdraw) else 0.0
+    # Neff of the estimator the pipeline runs (weights p_pop/pdraw), not of the
+    # flat-numerator one -- the number the variance guard is keyed to.
+    selection_neff_fiducial = _dark._selection_neff_at_fiducial(sel, grids, pop)
     metadata = {
         "seed": args.seed,
         "cosmology": {"H0": args.H0, "Om0": args.Om0, "w0": args.w0, "wa": args.wa},
@@ -335,6 +338,8 @@ def write_mock_data(args):
         f.attrs["mock_data"] = True
         f.attrs["ndraw"] = int(sel["Ndraw"])
         f.attrs["Neff"] = selection_neff
+        f.attrs["Neff_flat"] = selection_neff
+        f.attrs["Neff_fiducial"] = selection_neff_fiducial
         f.attrs["selection_proposal"] = args.proposal
         f.attrs["chi_eff_swap_applied"] = True
         f.attrs["chi_eff_amax"] = 0.99
@@ -367,7 +372,9 @@ def write_mock_data(args):
     print(f"  observed survey  : {raw_path} ({observed_mask.sum():,} galaxies retained, "
           f"photo-z realised, {n_negative_z_obs} with z_obs < 0 left unclipped)")
     print(f"  GW posteriors    : {gw_path} ({args.nobs} events x {args.nsamp} samples)")
-    print(f"  GW+EM selection  : {sel_path} ({sel['n_detected']:,}/{sel['Ndraw']:,} detected injections, Neff={selection_neff:.1f})")
+    print(f"  GW+EM selection  : {sel_path} ({sel['n_detected']:,}/{sel['Ndraw']:,} detected "
+          f"injections, Neff_fiducial={selection_neff_fiducial:.1f} [governs the variance "
+          f"guard], Neff_flat={selection_neff:.1f})")
     print(f"  counterparts     : {counterpart_path}")
 
 

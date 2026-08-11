@@ -416,3 +416,66 @@ def test_sample_q_uses_the_mixture_low_mass_edge(gen):
     mask = pdf > 0.05 * pdf.max()
     rel = np.abs(dens[mask] - pdf[mask]) / pdf[mask]
     assert np.median(rel) < 0.1, f"sampled q off its pair pdf: median rel {np.median(rel):.3f}"
+
+
+def test_uniform_branch_pdraw_carries_its_support_indicator(gen):
+    """``_p_uniform`` is 0 outside the uniform branch's own box.
+
+    Otherwise the ``population+uniform`` mixture pdraw is overstated (by up to a
+    factor 10) for a population-branch draw whose detector-frame mass lands
+    outside ``m1det_range``, which understates the importance weight and biases
+    mu low.  Latent with the shipped config; live as soon as the range narrows."""
+    grids = gen._cosmology_grids(gen._build_cosmology(67.74, 0.3075, -1.0, 0.0), zmax=0.3)
+    pop = gen.PopulationConfig()
+    narrow = (10.0, 30.0)                       # m1det window the draws straddle
+
+    m1src = np.array([5.0, 20.0, 60.0])         # below / inside / above
+    q = np.array([0.8, 0.8, 0.8])
+    chi = np.zeros(3)
+    z = np.array([0.05, 0.05, 0.05])
+    m1det = m1src * (1.0 + z)
+
+    p_unif = np.asarray(gen._selection_pdraw("uniform", m1src, q, chi, z, grids, pop,
+                                             m1det_range=narrow))
+    inside = (m1det >= narrow[0]) & (m1det <= narrow[1])
+    assert inside.tolist() == [False, True, False]
+    assert p_unif[~inside].max() <= 1.0e-300     # the pdraw floor, i.e. zero
+    assert p_unif[inside].min() > 1.0e-300
+
+    # ... and the mixture is then exactly the population branch out there.
+    p_mix = np.asarray(gen._selection_pdraw("population+uniform", m1src, q, chi, z,
+                                            grids, pop, m1det_range=narrow))
+    p_pop = np.asarray(gen._selection_pdraw("population", m1src, q, chi, z, grids, pop,
+                                            m1det_range=narrow))
+    # (both are floored at 1e-300 where the population density vanishes too)
+    np.testing.assert_allclose(p_mix[~inside], 0.9 * p_pop[~inside],
+                               rtol=1e-9, atol=1e-299)
+
+
+def test_fiducial_selection_neff_is_not_the_flat_one(gen):
+    """The variance guard is keyed to Neff of ``p_pop/pdraw``, not of ``1/pdraw``."""
+    grids = gen._cosmology_grids(gen._build_cosmology(67.74, 0.3075, -1.0, 0.0), zmax=0.3)
+    pop = gen.PopulationConfig()
+    b = gen._draw_selection_batch(np.random.default_rng(5), 40_000, grids, pop,
+                                  snr_threshold=8.0, proposal="population+uniform")
+    neff_fid = gen._selection_neff_at_fiducial(b, grids, pop)
+    inv = 1.0 / np.asarray(b["pdraw"])
+    neff_flat = float(inv.sum() ** 2 / np.square(inv).sum())
+    assert neff_fid > 0.0
+    assert not np.isclose(neff_fid, neff_flat, rtol=0.2)
+
+    # Recompute from the stored columns: same weights, same answer.
+    m1src = np.asarray(b["m1src"])
+    z = np.asarray(b["m1det"]) / m1src - 1.0
+    q = np.asarray(b["m2src"]) / m1src
+    rate = (1.0 + grids["z"]) ** (pop.gamma - 1.0)
+    pz = (np.interp(z, grids["z"], grids["dvc_dz"]) * (1.0 + z) ** (pop.gamma - 1.0)
+          / _trapezoid(grids["dvc_dz"] * rate, grids["z"]))
+    ddldz = np.interp(z, grids["z"], np.gradient(grids["dl"], grids["z"]))
+    w = (gen._mass_spin_pdf(m1src, q, np.asarray(b["chieff"]), pop) * pz
+         / (ddldz * (1.0 + z)) / (4.0 * np.pi)) / np.asarray(b["pdraw"])
+    np.testing.assert_allclose(neff_fid, w.sum() ** 2 / np.square(w).sum(), rtol=1e-9)
+
+    # Empty selection sets report 0 rather than dividing by zero.
+    empty = {k: np.array([]) for k in ("pdraw", "m1src", "m1det", "m2src", "chieff")}
+    assert gen._selection_neff_at_fiducial(empty, grids, pop) == 0.0
