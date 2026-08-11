@@ -13,14 +13,31 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
     lss_completion_provenance = None  # ensemble-provenance for K>=2 verification
     lss_completion_fiducials = None   # build-time conditioning values (None = no Q)
     lss_path = getattr(opts, "lss_completion", None)
+    lss_requested = lss_path is not None
     if lss_path is None and opts.survey_path is not None:
-        try:
-            import h5py
-            with h5py.File(opts.survey_path, "r") as _f:
-                if "lss_completion" in _f:
-                    lss_path = opts.survey_path
-        except Exception:
-            lss_path = None
+        # Probe the survey file for an embedded /lss_completion group.  This
+        # deliberately does NOT swallow read failures: Q REPLACES the
+        # (1 + alpha_miss*b_miss*delta_g) local-overdensity factor and supplies
+        # the missing-galaxy budget, so a survey that could not be opened
+        # (Lustre lock contention, a stale handle, a concurrent writer, an
+        # h5py/HDF5 mismatch) must not be turned into a silent "non-LSS run" --
+        # that biases H0 while leaving no diagnostic in the run directory and a
+        # fingerprint identical to a correct run.  The survey is a mandatory
+        # HDF5 input (catalogs/io.load_survey opens the same file), so letting
+        # the error propagate costs nothing that was going to work anyway.
+        import h5py
+        with h5py.File(opts.survey_path, "r") as _f:
+            if "lss_completion" in _f:
+                lss_path = opts.survey_path
+    if lss_requested and opts.universe_model not in GALAXY_AWARE_MODELS:
+        raise ValueError(
+            f"--lss_completion {lss_path!r} was given, but --universe_model "
+            f"{opts.universe_model!r} has no galaxy catalog to complete "
+            f"(galaxy-aware models: {', '.join(sorted(GALAXY_AWARE_MODELS))}). "
+            "The table would be silently ignored, so the run would not target "
+            "the completeness model it was asked for; drop --lss_completion or "
+            "switch to a galaxy-aware universe model."
+        )
     if lss_path is not None and opts.universe_model in GALAXY_AWARE_MODELS:
         from darksirens.redshift.lognormal_completion import load_lss_completion_hdf5
         loaded = load_lss_completion_hdf5(lss_path)

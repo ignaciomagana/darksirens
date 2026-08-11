@@ -338,3 +338,56 @@ def test_validate_survey_free_empty_z_depths_passes():
     skips the length check (n_catalogs defaults to 1)."""
     opts = SimpleNamespace(n_catalogs=1, resolved_survey_z_depths=[])
     validate_multitracer_run(opts, {})
+
+
+# ---------------------------------------------------------------------------
+# Q auto-discovery must fail loud, never degrade to a silent non-LSS run
+# (review finding F-040)
+# ---------------------------------------------------------------------------
+
+def _single_opts(survey_path, lss_completion, universe_model="dark_sirens"):
+    return SimpleNamespace(
+        survey_path=survey_path, lss_completion=lss_completion,
+        universe_model=universe_model, lss_marginalize=False,
+    )
+
+
+def test_unreadable_survey_probe_raises_instead_of_dropping_q(tmp_path):
+    """An unreadable survey must not be reported as "no embedded Q table".
+
+    Q REPLACES the (1 + alpha_miss*b_miss*delta_g) factor and supplies the
+    missing-galaxy budget, so swallowing an HDF5 read failure (Lustre lock
+    contention, a stale handle, a concurrent writer) silently changes the
+    completeness model: lss_completion_fiducials stays None, so the whole
+    Q_LSS provenance guard early-returns, and the run directory carries no
+    diagnostic at all.
+    """
+    from darksirens.catalogs.lss import maybe_load_lss_completion
+
+    broken = tmp_path / "not_hdf5.h5"
+    broken.write_bytes(b"this is not an HDF5 file")
+    with pytest.raises(OSError):
+        maybe_load_lss_completion(_single_opts(str(broken), None), zgrid=zgrid)
+
+
+def test_survey_without_the_group_is_still_a_clean_non_lss_run(tmp_path):
+    """The one benign case: a readable survey that genuinely carries no
+    /lss_completion group loads with no Q and no error."""
+    from darksirens.catalogs.lss import maybe_load_lss_completion
+
+    survey = _write_survey(tmp_path / "survey.h5", seed=3)
+    out = maybe_load_lss_completion(_single_opts(survey, None), zgrid=zgrid)
+    assert out["lss_completion_logq"] is None
+    assert out["lss_completion_fiducials"] is None
+
+
+def test_explicit_q_with_a_non_galaxy_aware_model_raises(tmp_path):
+    """--lss_completion with a model that has no galaxy catalog silently did
+    nothing, so the run did not target the completeness model it was given."""
+    from darksirens.catalogs.lss import maybe_load_lss_completion
+
+    q = _save_q(tmp_path / "q.h5", seed=1, with_members=False)
+    with pytest.raises(ValueError, match="no galaxy catalog"):
+        maybe_load_lss_completion(
+            _single_opts(None, q, universe_model="spectral_sirens"), zgrid=zgrid
+        )
