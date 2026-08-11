@@ -536,3 +536,38 @@ def test_lss_corr_length_ang_not_sampled():
     assert not any(("lss_corr" in l) or ("lss_sigma" in l) for l in labels)
     for fixed in ("lss_corr_length_ang", "lss_corr_length_mpc", "lss_sigma"):
         assert fixed not in survey_labels
+
+
+def test_gp3d_empty_catalog_writes_unity_table(tmp_path):
+    """An empty (or fully masked) catalog must write the honest Q = 1 table the
+    n_occ == 0 shortcut builds.
+
+    The shortcut returned diagnostics with no 'converged'/'grad_inf', so main()
+    raised TypeError formatting None, and with the format fixed the fail-closed
+    gate would then have declared the trivial solve unconverged (review F-112).
+    """
+    pytest.importorskip("healpy")
+    import h5py
+    import healpy as hp
+    from darksirens.cli.build_lognormal_completion import main as build_main
+    from darksirens.redshift.lognormal_completion import load_lss_completion_hdf5
+
+    nside = 1
+    npix = hp.nside2npix(nside)
+    cat = str(tmp_path / "empty.h5")
+    with h5py.File(cat, "w") as f:
+        f.attrs["nside"] = nside
+        f.create_dataset("zgals", data=np.full((npix, 1), 100.0))
+        f.create_dataset("ngals", data=np.zeros(npix, dtype=np.int32))
+        f.create_dataset("dzgals", data=np.full((npix, 1), 0.01))
+        f.create_dataset("wgals", data=np.zeros((npix, 1)))
+    out = str(tmp_path / "q_empty.h5")
+    build_main(["--catalog", cat, "--out", out, "--mode", "gp3d",
+                "--n-members", "2", "--gp3d-nz-solve", "8",
+                "--lss-corr-length-mpc", str(RESOLVED_L_MPC)])
+    d = load_lss_completion_hdf5(out)
+    assert float(np.max(np.abs(np.asarray(d["logq_map"])))) == 0.0
+    assert float(np.max(np.abs(np.asarray(d["logq_members"])))) == 0.0
+    assert d["diagnostics"]["converged"] is True
+    assert d["diagnostics"]["n_occupied"] == 0
+    assert d["budget_renormalized"] is True

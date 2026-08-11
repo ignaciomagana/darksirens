@@ -971,7 +971,16 @@ def _build_completion_gp3d(
         logq_map = np.zeros((n_pix, n_grid), dtype=float)
         logq_members = (np.zeros((int(n_members), n_pix, n_grid), dtype=float)
                         if n_members and n_members > 0 else None)
-        extra = {"budget_renormalized": bool(budget_renorm)}
+        # Stamp the TRIVIAL solve honestly: main() formats grad_inf and gates
+        # on `converged`, so leaving them out crashed the banner on None and
+        # would then have refused to write the honest Q = 1 table this branch
+        # just built (the radial path handles the same case fine).
+        extra = {"budget_renormalized": bool(budget_renorm),
+                 "converged": True, "n_iter": 0, "grad_inf": 0.0,
+                 "n_nonfinite_map": 0}
+        if n_members and n_members > 0:
+            extra["n_members"] = int(n_members)
+            extra["n_nonfinite_members"] = 0
         if budget_renorm:
             extra["budget_monopole_logq"] = np.zeros(n_grid, dtype=float)
         return logq_map, logq_members, _base_diag(extra)
@@ -1362,9 +1371,15 @@ def main(argv=None):
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")
     if opts.mode == "gp3d":
+        # Tolerant of absent keys: the empty-catalog shortcut has no ls_z / z_ref
+        # (no solve ran), and formatting a missing key must not crash the build.
+        def _fmt(key, spec):
+            value = diagnostics.get(key)
+            return "n/a" if value is None else format(value, spec)
+
         _ok(f"gp3d: converged={diagnostics.get('converged')} "
-            f"n_iter={diagnostics.get('n_iter')} grad_inf={diagnostics.get('grad_inf'):.2e} "
-            f"ls_z={diagnostics.get('ls_z_zeta'):.4f} z_ref={diagnostics.get('z_ref'):.3f}")
+            f"n_iter={diagnostics.get('n_iter')} grad_inf={_fmt('grad_inf', '.2e')} "
+            f"ls_z={_fmt('ls_z_zeta', '.4f')} z_ref={_fmt('z_ref', '.3f')}")
     elif opts.mode == "radial":
         n_conv = diagnostics.get("n_converged")
         n_occ = diagnostics.get("n_occupied")
