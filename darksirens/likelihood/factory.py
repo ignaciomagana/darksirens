@@ -898,6 +898,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         empty_stratum_counts=getattr(catalogs, "empty_stratum_counts", None),
         field_lss_q_empty_sum_strata=getattr(
             catalogs, "field_lss_q_empty_sum_strata", None),
+        field_lss_q_empty_sum_strata_members=getattr(
+            catalogs, "field_lss_q_empty_sum_strata_members", None),
     )
     em_catalog_sel = EMCatalog(
         apix=apix,
@@ -950,6 +952,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         empty_stratum_counts=getattr(catalogs, "empty_stratum_counts", None),
         field_lss_q_empty_sum_strata=getattr(
             catalogs, "field_lss_q_empty_sum_strata", None),
+        field_lss_q_empty_sum_strata_members=getattr(
+            catalogs, "field_lss_q_empty_sum_strata_members", None),
     )
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, (em_catalog_pe,), (em_catalog_sel,)

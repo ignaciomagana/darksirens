@@ -133,6 +133,7 @@ class CatalogViews:
     pixel_stratum_map: jnp.ndarray | None = None        # (n_pix_total,) int32
     empty_stratum_counts: jnp.ndarray | None = None     # (S,) f64
     field_lss_q_empty_sum_strata: jnp.ndarray | None = None  # (S, n_grid) f64
+    field_lss_q_empty_sum_strata_members: jnp.ndarray | None = None  # (M, S, n_grid) f64
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -385,7 +386,7 @@ def prepare_catalog_views(
     field_mark_z = field_mark_w = field_mark_values = None
     field_depth_z = field_depth_dz = field_depth_c = None
     pixel_stratum_map = empty_stratum_counts = None
-    field_lss_q_empty_sum_strata = None
+    field_lss_q_empty_sum_strata = field_lss_q_empty_sum_strata_members = None
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         occupied_np = None
         if data.get("field_dN_obs_s") is not None:
@@ -510,6 +511,30 @@ def prepare_catalog_views(
                         rows = empty_mask & (strat_np == s)
                         sums[s] = q_lin[rows].sum(axis=0)
                     field_lss_q_empty_sum_strata = barrier(jnp.asarray(sums))
+                if field_lss_q_empty_sum_members is not None:
+                    # PER-MEMBER twin: the stratified branch of
+                    # completion._field_missing_curve reads ONLY the strata
+                    # budget, so without this every ensemble member's global
+                    # normalizer would carry the DETERMINISTIC empty-pixel
+                    # budget while its numerator carries member m's Q --
+                    # marginalizing over inconsistent estimands.  Streamed
+                    # member by member over the EMPTY rows only, so the full
+                    # (M, n_pix, n_grid) linear ensemble is never materialized.
+                    logqm_np = np.asarray(logq_members_full)
+                    strat_empty = strat_np[empty_mask]
+                    rows_by_s = [strat_empty == s for s in range(n_strata)]
+                    sums_m = np.zeros(
+                        (logqm_np.shape[0], n_strata, logqm_np.shape[2])
+                    )
+                    for m in range(logqm_np.shape[0]):
+                        q_lin_m = np.exp(
+                            np.clip(logqm_np[m][empty_mask], -700.0, 700.0)
+                        )
+                        for s in range(n_strata):
+                            sums_m[m, s] = q_lin_m[rows_by_s[s]].sum(axis=0)
+                    field_lss_q_empty_sum_strata_members = barrier(
+                        jnp.asarray(sums_m)
+                    )
 
         # Marked-host field normalizer: flatten the FULL-SKY z-centred marks so
         # mu_miss and the observed marked mass are view-independent (PE and
@@ -696,4 +721,5 @@ def prepare_catalog_views(
         pixel_stratum_map=pixel_stratum_map,
         empty_stratum_counts=empty_stratum_counts,
         field_lss_q_empty_sum_strata=field_lss_q_empty_sum_strata,
+        field_lss_q_empty_sum_strata_members=field_lss_q_empty_sum_strata_members,
     )
