@@ -291,6 +291,24 @@ def _eval_field(coords, kern, nodes, alpha, mean):
     return mean + kqz @ alpha
 
 
+def _eval_field_clipped(coords, kern, nodes, alpha, mean):
+    """``mean + clip(GP deviation, -_FIELD_CLIP, _FIELD_CLIP)``.
+
+    Only the DEVIATION is bounded.  Clipping the SUM would truncate the
+    parametric mean, whose dynamic range is exactly what ``alpha_gp``/``beta_gp``
+    are meant to control: at the shipped fiducial (alpha_gp = 4) the mean
+    ``-alpha_gp log m1`` reaches -_FIELD_CLIP at m1 = exp(10/4) = 12.2 Msun, so
+    every ``mean_mode="shape"`` model was FLAT in m1 above ~12 Msun instead of
+    ~m^-4 (measured d log p / d log m1 = -0.07 between 20 and 40 Msun), with the
+    same clip in the normaliser hiding it.  The mean is analytic and finite over
+    the whole prior box (|mu| <= 12 log(200) + 12 log(1/0.01) ~ 119 nats), so it
+    needs no guard; the deviation, which the whitened latent can drive anywhere,
+    keeps one.
+    """
+    dev = kern(coords, nodes) @ alpha
+    return mean + jnp.clip(dev, -_FIELD_CLIP, _FIELD_CLIP)
+
+
 def _grid_integrate(values, grids):
     """Nested trapezoid of ``values`` over the listed 1-D ``grids`` (trailing axes)."""
     out = values
@@ -458,9 +476,9 @@ class JointGPPopulation:
         alpha = _alpha_from_xi(L, xi)
 
         coords_q = jnp.stack([_to_coord(a, m1, q, chi, z) for a in self.gp_axes], axis=-1)
-        f_q = _eval_field(coords_q, kern, self._Z, alpha,
-                          self._mean_on_coords(coords_q, alpha_gp, beta_gp))
-        p_gp_un = jnp.exp(jnp.clip(f_q, -_FIELD_CLIP, _FIELD_CLIP))
+        f_q = _eval_field_clipped(coords_q, kern, self._Z, alpha,
+                                  self._mean_on_coords(coords_q, alpha_gp, beta_gp))
+        p_gp_un = jnp.exp(f_q)
         p_gp_un = p_gp_un * self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
 
         norm = self._normalise(kern, alpha, alpha_gp, beta_gp,
@@ -554,9 +572,9 @@ class JointGPPopulation:
                     else:
                         cols.append(_to_coord(a, phys["m1"], phys["q"], phys["chi"], None))
                 coords = jnp.stack(cols, axis=-1)
-                fg = _eval_field(coords, kern, self._Z, alpha,
-                                 self._mean_on_coords(coords, alpha_gp, beta_gp))
-                exp_field = jnp.exp(jnp.clip(fg, -_FIELD_CLIP, _FIELD_CLIP))   # (G,)
+                fg = _eval_field_clipped(coords, kern, self._Z, alpha,
+                                         self._mean_on_coords(coords, alpha_gp, beta_gp))
+                exp_field = jnp.exp(fg)                                        # (G,)
                 # m1 not in gp_axes -> _taper_cut skips its m1 branch and the q
                 # branch computes m2 = q*m1 on the (Nm1, G) lattice.
                 cut = self._taper_cut(m1g[:, None], phys["q"][None, :],
@@ -587,9 +605,9 @@ class JointGPPopulation:
                 else:
                     cols.append(_to_coord(a, phys["m1"], phys["q"], phys["chi"], None))
             coords = jnp.stack(cols, axis=-1)
-            fg = _eval_field(coords, kern, self._Z, alpha,
-                             self._mean_on_coords(coords, alpha_gp, beta_gp))
-            val = jnp.exp(jnp.clip(fg, -_FIELD_CLIP, _FIELD_CLIP))
+            fg = _eval_field_clipped(coords, kern, self._Z, alpha,
+                                     self._mean_on_coords(coords, alpha_gp, beta_gp))
+            val = jnp.exp(fg)
             val = val * self._taper_cut(phys["m1"], phys["q"],
                                         m_min, dm_min, m_max, dm_max)
             return _grid_integrate(val.reshape([g.shape[0] for g in grids]), grids)
