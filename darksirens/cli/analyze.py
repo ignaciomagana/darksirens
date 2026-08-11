@@ -239,9 +239,12 @@ def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
     simultaneously-live grid-sized reduction buffers are what OOMs.
 
     Returns ``slab_rows=None`` for small grids (``grid_points <=
-    full_grid_max``) so the caller takes the cheaper full-grid path; otherwise a
-    concrete slab size.  ``batch_size`` / ``grid_chunk`` overrides are honoured
-    (``grid_chunk`` sets ``slab_rows`` directly).
+    full_grid_max``) *whose full plane also fits the budget* so the caller takes
+    the cheaper full-grid path; otherwise a concrete slab size.  The size test
+    matters for the GP models: at ``n_nodes = 6400`` even a 65k-point grid needs
+    215 GB at ``batch = 64``, so a grid-size-only shortcut would OOM on exactly
+    the model class this planner exists for.  ``batch_size`` / ``grid_chunk``
+    overrides are honoured (``grid_chunk`` sets ``slab_rows`` directly).
     """
     budget = max(1.0, float(safe_frac) * float(max_mem_bytes))
     n_outer = max(1, int(n_outer))
@@ -257,9 +260,6 @@ def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
     if grid_chunk is not None:
         return b, max(1, min(int(grid_chunk), n_outer))
 
-    if grid_points <= full_grid_max:
-        return b, None                       # small grid: full path is cheap
-
     def _slab_for(bb):
         return int(budget // max(bb * plane * dtype_bytes * (nn + n_live), 1))
 
@@ -267,6 +267,8 @@ def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
     while c < slab_floor and b > 1:          # GP eval term too costly at this batch
         b = max(1, b // 2)
         c = _slab_for(b)
+    if grid_points <= full_grid_max and c >= n_outer:
+        return b, None                       # small grid AND full plane in budget
     c = max(1, min(c, n_outer))
     return b, c
 

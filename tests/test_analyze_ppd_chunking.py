@@ -78,6 +78,20 @@ def test_plan_ppd_sizing_no_chunk_for_parametric_small_grid():
     assert batch >= 1
 
 
+def test_plan_ppd_sizing_chunks_small_grid_when_gp_nodes_blow_the_budget():
+    # grid_points = 1024*8*8 = 65536 <= full_grid_max, but with 6400 inducing
+    # nodes the full plane needs ~215 GB at batch=64: the small-grid shortcut
+    # must not bypass the memory model.
+    n_outer, nz, nchi, n_nodes = 1024, 8, 8, 6400
+    budget, safe_frac, n_live, dtype = 8e9, 0.4, 16, 8
+    batch, slab = plan_ppd_sizing(
+        nsamples=200, n_outer=n_outer, nz=nz, nchi=nchi, n_nodes=n_nodes,
+        max_mem_bytes=budget, safe_frac=safe_frac, n_live=n_live, dtype_bytes=dtype,
+    )
+    assert slab is not None and 1 <= slab <= n_outer
+    assert batch * slab * nz * nchi * dtype * (n_nodes + n_live) <= safe_frac * budget
+
+
 def test_plan_ppd_sizing_honors_overrides():
     batch, slab = plan_ppd_sizing(
         nsamples=100, n_outer=1000, nz=32, nchi=24, n_nodes=10,
