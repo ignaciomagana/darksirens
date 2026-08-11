@@ -57,6 +57,7 @@ from darksirens.likelihood.cluster_likelihood import (
     lensed_single_log_likelihood_event,
 )
 from darksirens.likelihood.cluster_selection import (
+    _neff_from_log_mu_sigma2,
     compute_cluster_selection_term,
     compute_lensed_single_selection_term,
     combined_selection_log_correction,
@@ -433,11 +434,7 @@ def darksiren_log_likelihood_with_clusters(
         )
         log_mu_1 = jnp.logaddexp(log_mu_1, log_mu_1L)
         log_sigma2_1 = jnp.logaddexp(log_sigma2_1, log_sigma2_1L)
-        Neff_1 = jnp.where(
-            jnp.isfinite(log_mu_1) & jnp.isfinite(log_sigma2_1),
-            jnp.exp(2.0 * log_mu_1 - log_sigma2_1),
-            0.0,
-        )
+        Neff_1 = _neff_from_log_mu_sigma2(log_mu_1, log_sigma2_1)
 
     # ──────────────────────────────────────────────────────────────────
     # Cluster selection integral. Inert when cluster_mode == OFF —
@@ -492,11 +489,12 @@ def darksiren_log_likelihood_with_clusters(
     # variance (mirroring the standard core), so their sums must exist first.
     log_mu_combined = jnp.logaddexp(log_mu_1, log_mu_2)
     log_sigma2_combined = jnp.logaddexp(log_sigma2_1, log_sigma2_2)
-    Neff_combined = jnp.where(
-        jnp.isfinite(log_mu_combined) & jnp.isfinite(log_sigma2_combined),
-        jnp.exp(2.0 * log_mu_combined - log_sigma2_combined),
-        0.0,
-    )
+    # Same helper the gate itself uses (combined_selection_log_correction), so
+    # the reported N_eff cannot disagree with the one the guard acted on: the
+    # inline copy required isfinite(log_sigma2) and so reported N_eff = 0 for an
+    # exactly-known (zero-variance) selection integral alongside a finite
+    # logL_total, which reads as a contradiction during triage.
+    Neff_combined = _neff_from_log_mu_sigma2(log_mu_combined, log_sigma2_combined)
     ll = jnp.asarray(0.0, dtype=jnp.float64)
 
     # ──────────────────────────────────────────────────────────────────
@@ -705,7 +703,9 @@ def darksiren_log_likelihood_with_clusters(
     # importance-estimator variances spending part of the total-variance
     # budget (they used to be silently excluded, so the advertised
     # GWTC-4/5-style guard could pass a likelihood dominated by noisy event
-    # or pair estimators — review P1-09).
+    # or pair estimators — review P1-09). The pair term is a LOWER BOUND: it
+    # sees each branch's driving PE samples but not the partner event's KDE
+    # sampling noise (cluster_log_likelihood_pair, review F-096).
     pe_variance_sum = singleton_variance_sum + pair_variance_sum
     selection_correction_total = combined_selection_log_correction(
         log_mu_1, log_sigma2_1,

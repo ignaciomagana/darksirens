@@ -607,6 +607,64 @@ class TestExactZeroSelectionVariance:
         expected = -N_tot * np.log(mu_tot) + N_tot * (3 + N_tot) / (2 * neff)
         np.testing.assert_allclose(float(got), expected, rtol=1e-12)
 
+    def test_reported_neff_combined_matches_the_shared_helper(self):
+        """The DIAGNOSTIC N_eff must use the same zero-variance semantics as the
+        gate.
+
+        ``Neff_combined`` was recomputed inline with the
+        ``isfinite(log_sigma2)`` gate this helper exists to replace, so an
+        exactly-known selection integral (log_sigma2 = -inf, infinite ESS) was
+        reported as N_eff = 0 next to a finite logL_total -- a contradiction for
+        anyone triaging a run, since ``Neff_combined`` is an exported run-health
+        key.  Identical injections with Ndraw = N_sel make the estimator exactly
+        deterministic.
+        """
+        from darksirens.likelihood.likelihood_with_clusters import (
+            darksiren_likelihood_diagnostics_with_clusters,
+            CLUSTER_MODE_OFF, WL_BACKEND_DISABLED,
+        )
+
+        rng = np.random.default_rng(0)
+        n_events, n_samp, n_sel = 4, 200, 8
+        total = n_events * n_samp
+        gw_pe = GWEvent(
+            m1det=jnp.asarray(rng.uniform(20.0, 60.0, total)),
+            m2det=jnp.asarray(rng.uniform(10.0, 30.0, total)),
+            dL=jnp.asarray(rng.uniform(400.0, 3000.0, total)),
+            chieff=jnp.asarray(rng.uniform(-0.3, 0.3, total)),
+            prior_wt=jnp.asarray(rng.uniform(0.5, 1.5, total)),
+            pixels=jnp.zeros(total, dtype=jnp.int32),
+            q=jnp.asarray(rng.uniform(0.3, 1.0, total)),
+            valid=jnp.ones(total, dtype=jnp.bool_),
+        )
+        const = lambda v: jnp.full(n_sel, v)
+        gw_sel = GWEvent(
+            m1det=const(35.0), m2det=const(25.0), dL=const(1500.0),
+            chieff=const(0.0), prior_wt=const(1.0),
+            pixels=jnp.zeros(n_sel, dtype=jnp.int32), q=const(0.7),
+            valid=jnp.ones(n_sel, dtype=jnp.bool_),
+        )
+        diag = darksiren_likelihood_diagnostics_with_clusters(
+            _cosmo(), _survey(), get_fixed_population_params("powerlaw+peak"),
+            gw_pe, _toy_catalog(), gw_sel, _toy_catalog(),
+            n_events, n_samp, float(n_sel),
+            singleton_indices=jnp.arange(n_events, dtype=jnp.int32),
+            pair_indices=jnp.zeros((0, 2), dtype=jnp.int32),
+            n_singletons=n_events, n_pairs=0,
+            lensed_injections=None, pair_kdes=None,
+            sis_params=make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0),
+            log_p_tag_per_source=jnp.zeros(0),
+            pop_model="powerlaw+peak", universe_model="spectral_sirens",
+            sel_batch_size=None, cluster_mode=CLUSTER_MODE_OFF,
+            wl_backend=WL_BACKEND_DISABLED,
+        )
+        assert float(diag["log_sigma2_singleton"]) == -np.inf
+        assert np.isfinite(float(diag["logL_total"]))
+        assert np.isinf(float(diag["Neff_singleton"]))
+        assert np.isinf(float(diag["Neff_combined"])), (
+            "zero-variance selection integral reported as a dead N_eff"
+        )
+
     def test_deterministic_gradient_is_finite(self):
         """The zero-variance branch must not NaN-poison reverse mode."""
         def f(lm):
