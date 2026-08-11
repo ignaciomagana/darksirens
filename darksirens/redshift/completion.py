@@ -2397,8 +2397,10 @@ def selection_budget_audit(
     C = np.clip(np.asarray(grids.C_bar_raw, dtype=float), 0.0, 1.0)
     dN_exp = np.asarray(grids.dN_exp, dtype=float)
     zg = np.asarray(zgrid, dtype=float)
-    obs_per_pix = np.trapz(C * dN_exp, zg, axis=-1)   # scalar, or (S,)
-    exp_per_pix = float(np.trapz(dN_exp, zg))
+    # jnp.trapezoid to match every other quadrature in this module (numpy 1.26
+    # has no np.trapezoid and np.trapz is deprecated in numpy 2).
+    obs_per_pix = np.asarray(jnp.trapezoid(C * dN_exp, zg, axis=-1))  # () or (S,)
+    exp_per_pix = float(jnp.trapezoid(dN_exp, zg))
     smap = (None if em_catalog.pixel_stratum_map is None
             else np.asarray(em_catalog.pixel_stratum_map).reshape(-1))
     if C.ndim == 2 and smap is not None:
