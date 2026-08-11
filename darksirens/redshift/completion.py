@@ -1565,10 +1565,13 @@ def field_marked_observed_global_total(
 ) -> jnp.ndarray:
     """Survey-GLOBAL observed MARKED mass in the numerator's depth convention.
 
-    ``Sum_{i, full sky} w_i h_i`` with no depth; with a depth, each galaxy's marked
-    mass is scaled by its below-depth kernel ratio, which is exactly the marked
-    amplitude ``exp(log_N_host + log_depth_mass)`` summed over the full sky (the
-    per-pixel marked mixture normalisation cancels).
+    ``Sum_{i, full sky} w_hat_i h_i`` with no depth; with a depth, each galaxy's
+    marked mass is scaled by its below-depth kernel ratio, which is exactly the
+    marked amplitude ``exp(log_N_host + log_depth_mass)`` summed over the full sky
+    (the per-pixel marked mixture normalisation cancels).  ``w_hat`` is
+    ``field_mark_w``'s COUNT-renormalised weight (``build_field_mark_inputs``), so
+    this reproduces the numerator's ``N_obs,pix * <h>_w,pix`` convention and is
+    invariant under a global rescaling of the catalog WEIGHT column.
     """
     w_flat = jnp.asarray(em_catalog.field_mark_w, dtype=zgrid.dtype)
     h_flat = jnp.exp(jnp.asarray(log_h_flat, dtype=zgrid.dtype))
@@ -2001,6 +2004,15 @@ def build_field_mark_inputs(
     slots are selected by ``full_n`` (fallback ``full_w > 0``).  Returns
     ``(field_mark_z, field_mark_w, field_mark_values)`` — (N_gal,), (N_gal,),
     and (N_gal, n_marks) float32 with columns ordered by ``mark_names``.
+
+    ``field_mark_w`` carries the COUNT-renormalised weights
+    ``w_hat_i = N_obs,pix * w_i / Σ_{j in pix} w_j`` (identically 1 for a
+    unit-weight catalog), so the flat sum ``Σ_i w_hat_i h_i`` that
+    :func:`field_marked_observed_global_total` forms is exactly the numerator's
+    per-pixel amplitude ``N_obs,pix * <h>_w,pix`` summed over the sky (see
+    :func:`darksirens.redshift.catalog._row_marked_kernel_state`) -- the raw
+    weights would make the global observed budget scale with the arbitrary
+    WEIGHT normalisation while the missing budget stayed a count.
     """
     z_np = np.asarray(full_z)
     if full_n is not None:
@@ -2014,11 +2026,15 @@ def build_field_mark_inputs(
             "galaxy slots."
         )
     z_flat = jnp.asarray(z_np[real], dtype=jnp.float32)
-    w_flat = jnp.asarray(
-        (np.asarray(full_w)[real] if full_w is not None
-         else np.ones(int(real.sum()))),
-        dtype=jnp.float32,
-    )
+    if full_w is None:
+        w_hat = np.ones(int(real.sum()))
+    else:
+        w_np = np.where(real, np.asarray(full_w, dtype=np.float64), 0.0)
+        w_sum = w_np.sum(axis=1)                       # (N_pix,)
+        n_obs = real.sum(axis=1).astype(np.float64)    # (N_pix,)
+        scale = np.where(w_sum > 0.0, n_obs / np.where(w_sum > 0.0, w_sum, 1.0), 0.0)
+        w_hat = (w_np * scale[:, None])[real]
+    w_flat = jnp.asarray(w_hat, dtype=jnp.float32)
     missing = [name for name in mark_names if mark_tables.get(name) is None]
     if missing:
         raise ValueError(

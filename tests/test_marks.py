@@ -175,3 +175,39 @@ def test_marked_prior_normalizes_per_pixel_under_depth():
         )
         integ = _trapezoid(np.exp(lp), np.asarray(zgrid))
         assert abs(integ - 1.0) < 5e-3
+
+
+# ------------------------------------------------------------
+# Amplitude units: count x <h>_w, not the raw weighted mass
+# ------------------------------------------------------------
+# The catalog:missing odds are COUNT odds (module docstring of redshift/prior.py),
+# so the marked amplitude must be invariant under WEIGHT -> c*WEIGHT: the raw
+# Sum_i w_i h_i let a luminosity-weighted catalog (L/L_sun ~ 1e10) swamp the
+# missing branch and switch the completeness correction off silently.
+
+def _cat_weighted(logmstar, scale=1.0, vary=True):
+    """``_cat`` with non-unit (optionally per-galaxy varying) weights."""
+    cat = _cat(logmstar=logmstar)
+    w = np.zeros((2, 3))
+    w[0, :2] = [1.0, 3.0] if vary else [1.0, 1.0]
+    w[1, :1] = 2.0 if vary else 1.0
+    return cat._replace(wgals=jnp.asarray(w * scale))
+
+
+def test_marked_prior_is_invariant_to_the_weight_scale():
+    logm = np.array([[0.6, -0.4, 0.0], [0.1, 0.0, 0.0]])
+    base = _prior(_cat_weighted(logm, scale=1.0), mark_model="loglinear",
+                  eta=[1.5], mark_names=("logmstar",))
+    scaled = _prior(_cat_weighted(logm, scale=1e10), mark_model="loglinear",
+                    eta=[1.5], mark_names=("logmstar",))
+    assert np.max(np.abs(np.exp(base) - np.exp(scaled))) < 1e-9
+
+
+def test_eta_zero_reduces_to_unmarked_with_non_unit_weights():
+    """The eta = 0 reduction must not need unit weights (only h == 1)."""
+    logm = np.array([[0.5, -0.5, 0.0], [0.2, 0.0, 0.0]])
+    cat = _cat_weighted(logm, scale=7.0)
+    base = _prior(cat, mark_model="none")
+    marked0 = _prior(cat, mark_model="loglinear", eta=[0.0],
+                     mark_names=("logmstar",))
+    assert np.max(np.abs(np.exp(base) - np.exp(marked0))) < 1e-9

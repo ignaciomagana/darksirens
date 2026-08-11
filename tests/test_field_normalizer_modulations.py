@@ -985,3 +985,61 @@ def test_missing_budget_rows_are_still_built_from_the_global_table(monkeypatch):
     assert calls == {"det": 1, "members": 1}
     assert views.field_lss_q is not None
     assert views.field_lss_q_members is not None
+
+def test_marked_field_observed_mass_is_weight_scale_invariant():
+    """The global marked observed term must follow the numerator's COUNT x <h>_w
+    amplitude convention for NON-unit weights too.
+
+    ``build_field_mark_inputs`` therefore emits count-renormalised weights
+    ``w_hat = N_obs,pix * w / Sum_pix w``: with the raw WEIGHT column the global
+    observed budget scaled with the arbitrary weight normalisation (a
+    luminosity-weighted catalog by ~1e10) while the missing budget stayed a
+    count.
+    """
+    from darksirens.redshift.catalog import marked_catalog_kernel_state
+    from darksirens.redshift.completion import (
+        build_field_depth_inputs,
+        field_marked_observed_global_total,
+    )
+
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    # Per-galaxy varying, wildly scaled weights (a luminosity column).
+    rng = np.random.default_rng(11)
+    wgals = np.where(wgals > 0.0, rng.uniform(0.5, 5.0, wgals.shape) * 1e9, 0.0)
+    marks = _mark_table()
+    cat = _catalog(zgals, dzgals, wgals, ngals)
+    fz, fw, fvals = build_field_mark_inputs(
+        zgals, wgals, ngals, {"logmstar": marks}, ("logmstar",)
+    )
+    depth = build_field_depth_inputs(
+        jnp.asarray(zgals), jnp.asarray(dzgals), jnp.asarray(wgals),
+        jnp.asarray(ngals),
+    )
+    cat = cat._replace(
+        mark_logmstar=jnp.asarray(marks),
+        field_mark_z=fz, field_mark_w=fw, field_mark_values=fvals,
+        field_depth_z=depth.z, field_depth_dz=depth.dz, field_depth_c=depth.c,
+    )
+    eta = jnp.asarray([1.3])
+    log_h_flat = jnp.clip(jnp.asarray(fvals) @ eta, -7.0, 7.0)
+    log_h_rows = jnp.clip(jnp.asarray(marks) * eta[0], -7.0, 7.0)
+
+    cosmo = _cosmo()
+    for z_depth in (None, 0.22):
+        survey = _survey(z_depth=z_depth)
+        S_obs = float(field_marked_observed_global_total(
+            cosmo, survey, cat, log_h_flat
+        ))
+        kernels, log_N_host = marked_catalog_kernel_state(
+            cosmo, survey, cat, log_h_rows, z_depth=z_depth,
+        )
+        amp = np.where(
+            np.isfinite(np.asarray(log_N_host)),
+            np.exp(np.asarray(log_N_host + kernels.log_depth_mass)),
+            0.0,
+        )
+        # rtol 1e-6: the flat marks are stored f32 (see the test above).
+        np.testing.assert_allclose(S_obs, float(amp.sum()), rtol=1e-6)
+        # The budget is a COUNT budget: 7 observed galaxies, not ~1e9.
+        assert S_obs < 100.0
+
