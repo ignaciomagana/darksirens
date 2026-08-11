@@ -571,3 +571,26 @@ def test_gp3d_empty_catalog_writes_unity_table(tmp_path):
     assert d["diagnostics"]["converged"] is True
     assert d["diagnostics"]["n_occupied"] == 0
     assert d["budget_renormalized"] is True
+
+
+def test_gp3d_stamps_the_allsky_budget_residual(tmp_path):
+    """The per-z mean-one renormalization covers the FITTED rows only, while the
+    borrowing halo keeps Q != 1 against the FULL homogeneous budget weight
+    (an unfitted pixel is empty, so C = 0). That residual must be auditable from
+    the file rather than left unmeasured (review F-113)."""
+    pytest.importorskip("healpy")
+    from darksirens.cli.build_lognormal_completion import build_completion
+
+    cat = str(tmp_path / "survey.h5")
+    npix = _write_tiny_survey(cat, nside=2)
+    logq_map, _members, diag = build_completion(
+        cat, mode="gp3d", n_members=0, seed=1, gp3d_nz_solve=16,
+        gp3d_pix_chunk=8, lss_corr_length_mpc=RESOLVED_L_MPC)
+
+    assert diag["budget_renormalized"] is True
+    assert diag["budget_residual_allsky_n_unfitted"] == npix - diag["n_occupied"]
+    resid = diag["budget_residual_allsky_at_max"]
+    dev = diag["budget_residual_allsky_max_abs_dev"]
+    assert dev == pytest.approx(abs(resid - 1.0), rel=1e-12)
+    assert 0.0 <= dev < 5.0
+    assert 0.0 <= diag["budget_residual_allsky_z_at_max"] <= float(np.asarray(zgrid)[-1])

@@ -249,6 +249,62 @@ def _selection_strata_stamp(selection_strata, stratum_map_sha):
     return out
 
 
+def _stamp_allsky_budget_residual(diagnostics, logq_map, occ, w_budget,
+                                  dN_exp_density, *, row_chunk=4096):
+    """All-sky budget residual left by renormalizing the FITTED rows only.
+
+    ``renormalize_q_mean_one`` enforces ``sum_{p in fit} w_p Q_p == sum_{p in
+    fit} w_p`` per z-bin.  In gp3d mode the output table covers ALL pixels and
+    the borrowing halo just outside the footprint has ``Q != 1`` BY DESIGN --
+    that is the mode's selling point -- while its in-likelihood budget weight is
+    the FULL homogeneous ``(1 - C) dN_exp = dN_exp`` (an unfitted pixel is empty,
+    so ``C = 0``): the largest weights on the sky.  Nothing renormalizes those,
+    so the halo can add budget the renormalization was introduced to remove.
+    Measure it:
+
+        residual(z) = sum_all w_p Q_p(z) / sum_all w_p(z),
+
+    with ``w = w_budget`` on the fitted rows and ``dN_exp`` elsewhere; 1 means
+    the halo is budget-neutral.  Stamped as scalars (the extremum and its
+    redshift) and warned about past a few percent.  The radial builder is immune
+    (its unfitted rows are exactly ``logQ = 0``) but the audit is honest there
+    too.
+    """
+    lq = np.asarray(logq_map, dtype=float)
+    n_pix, n_grid = lq.shape
+    w_fit = np.asarray(w_budget, dtype=float)
+    dN_exp = np.asarray(dN_exp_density, dtype=float)
+    unfit = np.ones(n_pix, dtype=bool)
+    unfit[np.asarray(occ, dtype=np.int64)] = False
+    n_unfit = int(unfit.sum())
+
+    num = (w_fit * np.exp(lq[occ])).sum(axis=0)
+    den = w_fit.sum(axis=0) + float(n_unfit) * dN_exp
+    if n_unfit:
+        rows = np.nonzero(unfit)[0]
+        for start in range(0, n_unfit, int(row_chunk)):
+            blk = rows[start:start + int(row_chunk)]
+            num = num + dN_exp * np.exp(lq[blk]).sum(axis=0)
+    ok = den > 0.0
+    resid = np.ones(n_grid, dtype=float)
+    resid[ok] = num[ok] / den[ok]
+    j = int(np.argmax(np.abs(resid - 1.0)))
+    diagnostics["budget_residual_allsky_max_abs_dev"] = float(abs(resid[j] - 1.0))
+    diagnostics["budget_residual_allsky_at_max"] = float(resid[j])
+    diagnostics["budget_residual_allsky_z_at_max"] = float(
+        np.asarray(zgrid, dtype=float)[j])
+    diagnostics["budget_residual_allsky_n_unfitted"] = n_unfit
+    if abs(resid[j] - 1.0) > 0.05:
+        _warn(
+            f"all-sky missing budget is off by {100 * (resid[j] - 1.0):+.1f}% at "
+            f"z = {float(np.asarray(zgrid)[j]):.3f}: the per-z mean-one "
+            f"renormalization covers the {len(np.asarray(occ))} FITTED rows, but "
+            f"{n_unfit} unfitted pixels carry the full homogeneous budget weight "
+            "with a borrowed Q != 1. Q is meant to place the missing budget, not "
+            "rescale it -- check the footprint/halo geometry (or the angular "
+            "correlation length) before using this table.")
+
+
 def _stamp_post_renorm_railing(diagnostics, logq_fit, logq_members_fit=None):
     """Post-renorm clip-railing provenance (deferred review MINOR).
 
@@ -668,6 +724,9 @@ class _GP3DSurveyAssembly(NamedTuple):
     counts_z: np.ndarray     # (G_s,) coarse-z count profile (for z_ref weighting)
     w_budget: np.ndarray     # (n_occ, n_grid) fine-zgrid (1 - C) dN_exp weights
     z_depth: float = None    # resolved completeness depth (None = no depth prior)
+    # (n_grid,) homogeneous dN_exp/dz at the build fiducial: the budget weight of
+    # an UNFITTED (empty, C = 0) pixel, for the all-sky budget audit.
+    dN_exp_density: np.ndarray = None
 
 
 def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
@@ -833,6 +892,7 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
         n_hat_all=n_hat_all, n_hat_occ=n_hat_fit,
         N_obs_vox=N_obs_vox, base_vox=base_vox, counts_z=counts_z,
         w_budget=w_budget, z_depth=survey.z_depth,
+        dN_exp_density=dN_exp_density,
     )
 
 
@@ -1067,6 +1127,11 @@ def _build_completion_gp3d(
             diagnostics, logq_map[occ],
             logq_members[:, occ] if logq_members is not None else None)
     diagnostics["budget_renormalized"] = bool(do_renorm)
+    if (n_nonfinite_map + n_nonfinite_members) == 0:
+        # Audit what the unrenormalized borrowing halo adds to the budget.
+        _stamp_allsky_budget_residual(
+            diagnostics, logq_map, survey_data.occ, survey_data.w_budget,
+            survey_data.dN_exp_density)
 
     return logq_map, logq_members, diagnostics
 
