@@ -478,9 +478,41 @@ def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
             raise ValueError(
                 f"Override for '{label}' in block '{block_name}' must be [lower, upper]."
             )
+        lo, hi = bounds
+        # An unordered (or non-finite) box is never what the user meant, and it
+        # is not caught downstream: make_prior_transform's affine map traverses
+        # [lower, upper] backwards without complaint, and the cosmology grid
+        # guard's `lo < g_lo or hi > g_hi` test PASSES for a swapped pair even
+        # when the sampled interval lies entirely outside the tabulated grid --
+        # exactly the silent prior truncation that guard exists to prevent.
+        # (Only the numpyro backend checks upper > lower, so the nested samplers
+        # would run and every reported bound would be inverted.)
+        try:
+            lo_f, hi_f = float(lo), float(hi)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Override for '{label}' in block '{block_name}' must be two "
+                f"finite numbers, got [{lo!r}, {hi!r}]."
+            ) from None
+        if not (np.isfinite(lo_f) and np.isfinite(hi_f)):
+            raise ValueError(
+                f"Override for '{label}' in block '{block_name}' must be finite, "
+                f"got [{lo_f}, {hi_f}]."
+            )
+        if lo_f >= hi_f:
+            raise ValueError(
+                f"Override for '{label}' in block '{block_name}' must satisfy "
+                f"lower < upper, got [{lo_f}, {hi_f}]."
+                + (
+                    " A zero-width prior pins the parameter; use "
+                    "--fixed_parameter_values for that."
+                    if lo_f == hi_f
+                    else ""
+                )
+            )
         idx = label_to_index[label]
-        lower_out[idx] = bounds[0]
-        upper_out[idx] = bounds[1]
+        lower_out[idx] = lo
+        upper_out[idx] = hi
 
     return lower_out, upper_out
 
@@ -521,17 +553,34 @@ def _validate_schechter_alpha_domain(labels, lower, upper,
 
 
 def validate_fixed_parameter_overrides(all_bounds, prior_overrides, fixed_parameter_values):
-    """Validate and annotate labels that are both fixed and prior-overridden."""
+    """Range-check EVERY fixed label, and annotate the ones also overridden.
+
+    The bounds a fixed value bypasses are not cosmetic -- ``sigma_M``'s 0.05
+    floor keeps Phi from degenerating to a step, and a NEGATIVE ``sigma_M``
+    silently inverts the parametric completeness C_sel(z) so completeness rises
+    with distance -- so a ``--fixed_parameter_values`` entry is checked against
+    its resolved bounds whether or not the label was also prior-overridden
+    (previously only the fixed AND overridden intersection was inspected, which
+    left every pinned-only label unguarded).  Labels absent from ``all_bounds``
+    are the never-sampled pinned ones (``m_lim``, ``M_faint_offset``, ``z50``,
+    ``w``, ``alpha_miss``); they carry no bounds and keep their dedicated
+    validators.
+    """
     statuses = {}
-    for label in fixed_parameter_values.keys() & prior_overrides.keys():
+    for label, value in fixed_parameter_values.items():
+        if label not in all_bounds:
+            continue
         lower, upper = all_bounds[label]
-        fixed_value = float(fixed_parameter_values[label])
+        fixed_value = float(value)
+        overridden = label in prior_overrides
         if fixed_value < lower or fixed_value > upper:
+            which = "overridden prior bounds" if overridden else "prior bounds"
             raise ValueError(
                 f"Fixed value for '{label}' ({fixed_value}) is outside the "
-                f"overridden prior bounds [{lower}, {upper}]."
+                f"{which} [{lower}, {upper}]."
             )
-        statuses[label] = "fixed; override ignored"
+        if overridden:
+            statuses[label] = "fixed; override ignored"
     return statuses
 
 
