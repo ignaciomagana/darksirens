@@ -998,7 +998,20 @@ def _log_prior_bright_sirens(
 
         sky_marginalized = jnp.asarray(em_catalog.bright_siren_sky_marginalized)
         in_counterpart_pixel = global_pix == counterpart_pixel
-        log_p_cp = norm.logpdf(z, counterpart_z, counterpart_dz)
+        # EM measurement likelihood TIMES the population's redshift density.
+        # ``selection_prior_model`` routes bright_sirens' mu(Lambda) through
+        # ``spectral_sirens``, i.e. sources are drawn from the normalised
+        # dV_c/dz volume prior, and the population term contributes only
+        # (1+z)^(gamma-1) -- so without this factor the numerator and mu use
+        # different p(z | Lambda) and the estimator is biased by the missing
+        # volumetric weight (a Gaussian N(z; z0, sigma) reweighted by z^2 shifts
+        # its effective mean by 2 sigma^2 / z0: ~4.6% at sigma/z0 = 15%, the
+        # GW170817 peculiar-velocity regime).  The normalisation of
+        # log_volume_prior_vmap cancels against the selection term, so only its
+        # z-shape matters; the legacy fallback branch below already carries the
+        # galaxy measure g(z) = dV_c/dz (1+z)^delta for the same reason.
+        log_p_cp = norm.logpdf(z, counterpart_z, counterpart_dz) + \
+            log_volume_prior_vmap(z, cosmo, survey)
         return jnp.where(sky_marginalized | in_counterpart_pixel, log_p_cp, -jnp.inf)
 
     counterpart_pixel = em_catalog.counterpart_pixel
