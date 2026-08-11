@@ -306,3 +306,24 @@ def test_global_Q_too_few_rows_raises():
     )
     with pytest.raises(ValueError, match="reaches|does not cover"):
         completion_curves(COSMO, SURVEY_B0, cat)
+
+
+def test_legacy_delta_g_floor_warns_about_budget_inflation():
+    """The legacy factor max(1 + b_eff delta_g, 0) is mean-one over the sky ONLY
+    while the floor is inert; every floored cell inflates the TOTAL missing
+    budget (not just its placement), and unlike the Q path there is no
+    renormalization to undo it -- so the diagnostic must say so (review F-119)."""
+    import warnings
+
+    # b_miss = 2 with delta_g = -0.8 -> 1 + b_eff delta_g = -0.6 -> floored.
+    survey = SurveyParams(n0=1e-2, z50=0.3, w=0.1, delta=0.0, b_miss=2.0,
+                          alpha_miss=1.0)
+    cat = _tiny_catalog(delta_g_pix_z=jnp.full((2, NG), -0.8))
+    with pytest.warns(RuntimeWarning, match="INFLATES the total missing"):
+        diag = completion_clip_diagnostics(COSMO, survey, cat)
+    assert diag["lss_source"] == "legacy_delta_g"
+    assert diag["max_rho_miss_eff_clipped_fraction"] == 1.0
+    # An inert floor must stay silent.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        completion_clip_diagnostics(COSMO, SURVEY_B0, _tiny_catalog())

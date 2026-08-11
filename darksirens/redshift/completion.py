@@ -107,6 +107,19 @@ The missing-galaxy *density* (count units, per unit z) is
 with ``b_eff = alpha_miss * b_miss``.  (``alpha_miss`` and ``b_miss``
 enter the model only through this product — they are exactly degenerate —
 so only ``b_miss`` is sampled and ``alpha_miss`` defaults to 1.)
+``compute_lss_overdensity`` builds ``delta_g`` with an exactly zero
+full-sky mean, so ``Sum_p (1 + b_eff delta_g_p) == N_pix`` and the factor
+is a pure REDISTRIBUTION of the budget set by ``(1 - C)`` and ``n0``.
+The ``max(..., 0)`` floor breaks that identity wherever
+``b_eff delta_g < -1`` (reachable for ``b_miss > 1``, since
+``delta_g >= -1``): the total missing count then EXCEEDS
+``(1 - C) N_exp N_pix``, i.e. the floor inflates the physical budget and
+with it the inferred completeness and the observed-vs-missing odds that
+carry the dark-siren information.  The Q path removes exactly this
+failure mode by construction (``lognormal_completion.renormalize_q_mean_one``,
+which measured +55% budget inflation from an unrenormalized monopole);
+the legacy ``delta_g`` factor has no counterpart, so
+``completion_clip_diagnostics`` warns whenever the floor engages at all.
 ``dN_miss`` carries the same (1+z)^delta evolution as dN_exp, and is the
 quantity the assembled redshift prior adds to the catalog counts; see
 ``darksirens/redshift/prior.py``.
@@ -2323,6 +2336,23 @@ def completion_clip_diagnostics(
         summary[f"mean_{field}"] = float(vals.mean()) if vals.size else 0.0
         summary[f"max_{field}"] = float(vals.max()) if vals.size else 0.0
 
+    if q_row is None and summary["max_rho_miss_eff_clipped_fraction"] > 0.0:
+        # The legacy factor's floor is not a numerical guard here: it changes
+        # the BUDGET.  delta_g is mean-zero over the sky, so the unfloored
+        # factor sums to N_pix exactly (pure redistribution); every floored
+        # cell adds missing galaxies that (1 - C) and n0 never authorised.
+        warnings.warn(
+            "legacy delta_g missing-galaxy factor is floored at zero on "
+            f"{summary['max_rho_miss_eff_clipped_fraction']:.1%} of the grid "
+            f"(worst pixel of {summary['n_pixels_checked']} checked): "
+            "1 + alpha_miss*b_miss*delta_g < 0 there, which breaks the "
+            "mean-one property of delta_g and INFLATES the total missing "
+            "budget instead of only redistributing it (the Q path renormalizes "
+            "for exactly this reason; the delta_g path has no counterpart). "
+            "Lower b_miss's prior ceiling or use an LSS completion table.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     summary.update(_kernel_match_diagnostics(em_catalog))
     return summary
 
