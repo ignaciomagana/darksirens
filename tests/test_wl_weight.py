@@ -49,6 +49,7 @@ from darksirens.inference.utils import log_sample_weight
 from darksirens.likelihood.wl_weight import (
     log_sample_weight_wl_marginalized,
     log_sample_weight_wl_or_standard,
+    log_sample_weight_wl_lognormal_hermite,
 )
 from darksirens.lensing.wlmagnification import (
     make_lognormal_log_p_wl,
@@ -58,7 +59,9 @@ from darksirens.lensing.wlmagnification import (
     wl_mu_quadrature_coverage,
     validate_wl_mu_quadrature,
 )
-from darksirens.lensing.grids import make_log_mu_grid, make_wl_mu_quadrature
+from darksirens.lensing.grids import (
+    make_log_mu_grid, make_wl_mu_quadrature, make_hermite_u_grid,
+)
 from darksirens.redshift.volume import log_volume_prior_vmap
 
 
@@ -636,6 +639,58 @@ class TestNaNHandling:
 
 
 # ============================================================================
+# 5b. Gradient safety of the Hermite kernel at wl_a = 0
+# ============================================================================
+
+class TestHermiteGradientAtZeroWLA:
+    """``--lensing_wl_a 0`` is advertised as the exact 'reduces to standard'
+    ablation, so its GRADIENT has to be usable by NUTS too.
+
+    Regression: ``s = jnp.sqrt(s2)`` at ``s2 = wl_a·z^b = 0`` has derivative
+    inf, and ``ds2/dz_app = 0`` when ``wl_a = 0``, so the reverse pass returned
+    ``inf * 0 = NaN`` for every cosmology gradient through ``z_app`` while the
+    value stayed correct. Only the gradient was broken, so nothing caught it.
+    """
+
+    @staticmethod
+    def _scalar_ll(H0, wl_a):
+        cosmo = CosmoParams(H0=H0, Om0=Om0Planck)
+        u_nodes, log_wH = make_hermite_u_grid(16)
+        m1det, q, dL, chieff, pix, prior_wt = _toy_samples(n=5, seed=3)
+        return jnp.sum(log_sample_weight_wl_lognormal_hermite(
+            m1det, q, dL, chieff, pix, prior_wt,
+            cosmo, _toy_survey(), jnp.array([]), _toy_catalog(),
+            _toy_log_p_pop, _toy_volume_prior,
+            wl_a, jnp.asarray(1.5), u_nodes, log_wH,
+        ))
+
+    def test_cosmology_gradient_is_finite_at_wl_a_zero(self):
+        g = jax.grad(self._scalar_ll)(jnp.asarray(H0Planck), jnp.asarray(0.0))
+        assert np.isfinite(float(g)), (
+            f"d(log w)/dH0 = {float(g)} at wl_a = 0 — the sqrt(s2) reverse pass "
+            f"needs the double-where"
+        )
+
+    def test_cosmology_gradient_matches_finite_differences(self):
+        h = 1e-4
+        a0 = jnp.asarray(0.0)
+        fd = float(
+            self._scalar_ll(jnp.asarray(H0Planck + h), a0)
+            - self._scalar_ll(jnp.asarray(H0Planck - h), a0)
+        ) / (2.0 * h)
+        ad = float(jax.grad(self._scalar_ll)(jnp.asarray(H0Planck), a0))
+        assert ad == pytest.approx(fd, rel=1e-5, abs=1e-9)
+
+    def test_value_at_wl_a_zero_is_unchanged_and_continuous(self):
+        """The guard must not perturb the value: wl_a = 0 still equals the
+        s → 0 limit of the kernel."""
+        v0 = float(self._scalar_ll(jnp.asarray(H0Planck), jnp.asarray(0.0)))
+        v_eps = float(self._scalar_ll(jnp.asarray(H0Planck), jnp.asarray(1e-300)))
+        assert v0 == v_eps
+        assert np.isfinite(v0)
+
+
+# ============================================================================
 # Tabulated backend: the clamp contract and grid validation (P2-04)
 # ============================================================================
 
@@ -738,6 +793,44 @@ class TestTabulatedClampAndValidation:
         table = jnp.asarray([[0.0, -jnp.inf], [-jnp.inf, 0.0]])
         make_tabulated_wl_params(jnp.asarray([0.0, 1.0]), jnp.asarray([0.0, 1.0]),
                                  table)
+
+    def test_closure_builds_inside_jit_with_traced_grids(self):
+        """``validate=False`` builds the closure from TRACERS.
+
+        Regression: both production likelihoods build this closure inside their
+        own ``jax.jit`` body, with the grids as tracers (they cannot be
+        static_argnames), so the unconditional ``bool(jnp.all(...))`` value
+        checks raised ``TracerBoolConversionError`` at the first likelihood
+        evaluation and ``--wl_backend tabulated`` could not run at all.
+        """
+        z_grid, log_mu_grid, table = _lognormal_table()
+        mu = jnp.asarray([0.9, 1.0, 1.1])
+        z = jnp.asarray([0.4, 0.8, 1.6])
+
+        @jax.jit
+        def f(zg, lmg, tab, mu, z):
+            fn = make_tabulated_log_p_wl(zg, lmg, tab, validate=False)
+            return fn(mu, z)
+
+        out = f(z_grid, log_mu_grid, table, mu, z)
+        assert np.all(np.isfinite(np.asarray(out)))
+        ref = make_tabulated_log_p_wl(z_grid, log_mu_grid, table)(mu, z)
+        np.testing.assert_allclose(np.asarray(out), np.asarray(ref),
+                                   rtol=1e-14, atol=0)
+
+    def test_shape_checks_still_run_without_value_validation(self):
+        """``validate=False`` drops only the checks that need concrete values;
+        the shape/ndim contract is static and stays enforced."""
+        with pytest.raises(ValueError, match="must equal"):
+            make_tabulated_log_p_wl(
+                jnp.asarray([0.0, 1.0]), jnp.asarray([0.0, 1.0]),
+                jnp.zeros((2, 3)), validate=False,
+            )
+        with pytest.raises(ValueError, match="at least 2 points"):
+            make_tabulated_log_p_wl(
+                jnp.asarray([0.5]), jnp.asarray([0.0, 1.0]),
+                jnp.zeros((1, 2)), validate=False,
+            )
 
 
 # ============================================================================

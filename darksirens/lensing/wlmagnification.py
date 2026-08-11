@@ -75,6 +75,19 @@ class WLParams(NamedTuple):
     log_p_table: Any       # (Nz, Nmu)  — log p_WL on (z, ln μ) grid
 
 
+def _sqrt_grad_safe(s2: jnp.ndarray) -> jnp.ndarray:
+    """``sqrt(s2)`` with a finite REVERSE pass at ``s2 == 0``.
+
+    ``d sqrt(s2) / d s2 = inf`` at the origin, so the unguarded chain through
+    ``s2 = a·z^b`` returns ``inf * 0 = NaN`` for every gradient w.r.t. z (hence
+    w.r.t. the cosmology) whenever ``a = 0`` — the advertised "reduces to the
+    unlensed model" ablation.  The standard double-``where`` keeps the value
+    unchanged and zeroes the cotangent instead.
+    """
+    pos = s2 > 0.0
+    return jnp.where(pos, jnp.sqrt(jnp.where(pos, s2, 1.0)), 0.0)
+
+
 def make_lognormal_wl_params(a: float = 4.0e-3, b: float = 1.5) -> WLParams:
     """Lognormal WL parameters with default Takahashi+11-calibrated constants.
 
@@ -93,21 +106,16 @@ def make_lognormal_wl_params(a: float = 4.0e-3, b: float = 1.5) -> WLParams:
     )
 
 
-def _validate_tabulated_grids(
+def _coerce_tabulated_grids(
     z_grid: jnp.ndarray,
     log_mu_grid: jnp.ndarray,
     log_p_table: jnp.ndarray,
 ) -> tuple:
-    """Coerce + validate the tabulated backend's grids on EVERY entry path.
+    """Coerce the grids to float64 and check SHAPES only (trace-safe).
 
-    ``_bilinear_interp`` clamps queries to ``[grid[0], grid[-1]]`` and brackets
-    them with ``searchsorted``; both contracts silently break on a grid that is
-    not 1-D, finite, at least 2 points long and STRICTLY increasing (a
-    non-monotone grid makes ``searchsorted`` return an arbitrary cell, a
-    duplicated node makes the interpolation weight 0/0, and a single node
-    leaves no cell at all).  Validate once here so the ``WLParams`` constructor
-    and the JIT closure factory cannot diverge — the closure path used to skip
-    every check the constructor made.
+    Every check here reads static metadata (``ndim``/``shape``), so this is
+    safe to call on tracers inside ``jit``.  The value checks that need
+    concrete data live in :func:`_validate_tabulated_grids`.
 
     Returns the coerced ``(z_grid, log_mu_grid, log_p_table)`` float64 arrays.
     """
@@ -123,6 +131,44 @@ def _validate_tabulated_grids(
                 f"{name} must have at least 2 points to bracket an "
                 f"interpolation cell, got {grid.shape[0]}."
             )
+    if log_p_table.shape != (z_grid.shape[0], log_mu_grid.shape[0]):
+        raise ValueError(
+            f"log_p_table shape {log_p_table.shape} must equal "
+            f"(len(z_grid), len(log_mu_grid)) = "
+            f"({z_grid.shape[0]}, {log_mu_grid.shape[0]})."
+        )
+    return z_grid, log_mu_grid, log_p_table
+
+
+def _validate_tabulated_grids(
+    z_grid: jnp.ndarray,
+    log_mu_grid: jnp.ndarray,
+    log_p_table: jnp.ndarray,
+) -> tuple:
+    """Coerce + validate the tabulated backend's grids on every EAGER path.
+
+    ``_bilinear_interp`` clamps queries to ``[grid[0], grid[-1]]`` and brackets
+    them with ``searchsorted``; both contracts silently break on a grid that is
+    not 1-D, finite, at least 2 points long and STRICTLY increasing (a
+    non-monotone grid makes ``searchsorted`` return an arbitrary cell, a
+    duplicated node makes the interpolation weight 0/0, and a single node
+    leaves no cell at all).  Validate once here so the ``WLParams`` constructor
+    and the eager closure-factory path cannot diverge — the closure path used
+    to skip every check the constructor made.
+
+    The value checks below concretize their arguments (``bool(jnp.all(...))``),
+    so this function must only be called on CONCRETE arrays.  Callers that
+    build the closure from tracers (the jitted likelihood bodies) use
+    :func:`_coerce_tabulated_grids` instead; their tables are validated
+    eagerly at load time by the CLI.
+
+    Returns the coerced ``(z_grid, log_mu_grid, log_p_table)`` float64 arrays.
+    """
+    z_grid, log_mu_grid, log_p_table = _coerce_tabulated_grids(
+        z_grid, log_mu_grid, log_p_table
+    )
+
+    for name, grid in (("z_grid", z_grid), ("log_mu_grid", log_mu_grid)):
         if not bool(jnp.all(jnp.isfinite(grid))):
             raise ValueError(f"{name} must be finite (no NaN/inf).")
         if not bool(jnp.all(jnp.diff(grid) > 0.0)):
@@ -131,12 +177,6 @@ def _validate_tabulated_grids(
                 "duplicated node (the bilinear bracket and its 1/(g1-g0) "
                 "weight are undefined there)."
             )
-    if log_p_table.shape != (z_grid.shape[0], log_mu_grid.shape[0]):
-        raise ValueError(
-            f"log_p_table shape {log_p_table.shape} must equal "
-            f"(len(z_grid), len(log_mu_grid)) = "
-            f"({z_grid.shape[0]}, {log_mu_grid.shape[0]})."
-        )
     if bool(jnp.any(jnp.isnan(log_p_table))):
         raise ValueError(
             "log_p_table must not contain NaN (-inf is allowed: it is a "
@@ -195,7 +235,7 @@ def _log_p_wl_lognormal(mu: jnp.ndarray, z: jnp.ndarray, p: WLParams) -> jnp.nda
     """
     z_safe = jnp.maximum(z, 1.0e-3)
     s2 = p.a * jnp.power(z_safe, p.b)
-    s = jnp.sqrt(s2)
+    s = _sqrt_grad_safe(s2)
     m = -0.5 * s2
 
     log_mu = jnp.log(mu)
@@ -370,7 +410,7 @@ def make_lognormal_log_p_wl(a: jnp.ndarray, b: jnp.ndarray):
     def log_p_wl_fn(mu: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
         z_safe = jnp.maximum(z, 1.0e-3)
         s2 = a_jx * jnp.power(z_safe, b_jx)
-        s = jnp.sqrt(s2)
+        s = _sqrt_grad_safe(s2)
         m = -0.5 * s2
         log_mu = jnp.log(mu)
         return norm.logpdf(log_mu, loc=m, scale=s) - log_mu
@@ -382,18 +422,31 @@ def make_tabulated_log_p_wl(
     z_grid: jnp.ndarray,
     log_mu_grid: jnp.ndarray,
     log_p_table: jnp.ndarray,
+    validate: bool = True,
 ):
     """Build a JIT-friendly tabulated log-PDF closure.
 
     Returns a callable ``log_p_wl_fn(mu, z) -> log p_WL(μ | z)`` with the
     interpolation table baked in.
 
-    Grids go through the SAME :func:`_validate_tabulated_grids` as
-    ``make_tabulated_wl_params``: this factory is the path the lensing CLI
-    actually takes (``make_log_p_wl_from_params`` delegates here), so skipping
-    the checks let a malformed table reach the likelihood unchecked.
+    On the eager path the grids go through the SAME
+    :func:`_validate_tabulated_grids` as ``make_tabulated_wl_params``: this
+    factory is also what ``make_log_p_wl_from_params`` delegates to, so
+    skipping the checks let a malformed table reach the likelihood unchecked.
+
+    Parameters
+    ----------
+    validate
+        Set ``False`` when the closure is built INSIDE a ``jit`` body from
+        traced grids (the two production likelihood factories do this — the
+        grid arrays cannot be static argnames).  The value checks concretize
+        their arguments and raise ``TracerBoolConversionError`` under tracing;
+        with ``validate=False`` only the trace-safe shape checks run and the
+        table's values are the caller's responsibility (the lensing CLI
+        validates them eagerly at load time).
     """
-    z_grid, log_mu_grid, log_p_table = _validate_tabulated_grids(
+    _prepare = _validate_tabulated_grids if validate else _coerce_tabulated_grids
+    z_grid, log_mu_grid, log_p_table = _prepare(
         z_grid, log_mu_grid, log_p_table
     )
 
