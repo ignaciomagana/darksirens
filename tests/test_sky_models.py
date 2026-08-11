@@ -693,3 +693,46 @@ def test_dipole_ball_cube_map_covers_the_ball_uniformly():
     np.testing.assert_allclose(np.mean(r), 0.75, atol=0.01)
     # Isotropy of the direction: component means vanish.
     np.testing.assert_allclose(np.mean(d, axis=0), 0.0, atol=0.02)
+
+
+# ============================================================================
+# Registry construction is trace-safe (review finding F-079)
+# ============================================================================
+
+@pytest.mark.parametrize("name", [n for n in SKY_MODEL_NAMES if n != "isotropic"])
+def test_registry_construction_inside_a_trace_is_safe(name):
+    """The likelihood resolves the sky model INSIDE its jit body, so the first
+    use of a model can build its geometry while a trace is active.
+
+    Before the fix, ``sphere_gp`` cached TRACERS in the process-global registry
+    (the first call returned a correct number, the next re-trace died with an
+    UnexpectedTracerError) and ``sphere_gp_z`` / ``overdensity_gp`` /
+    ``multipole*`` failed on a concretization inside their constructors.
+    Production was protected only by the prior decoder happening to warm the
+    registry first.
+    """
+    import jax
+
+    from darksirens.sky import registry as sky_registry
+
+    cached = sky_registry._SKY_REGISTRY.pop(name, None)
+    try:
+        @jax.jit
+        def total(x):
+            model = sky_registry.get_sky_model(name)
+            log_g = sky_registry.sky_model_parser(name)(
+                x, jnp.zeros_like(x), jnp.zeros_like(x), jnp.zeros_like(x),
+                get_fixed_sky_params(name),
+            )
+            return jnp.sum(log_g) + jnp.sum(x) + float(len(model.param_specs))
+
+        first = float(total(jnp.ones(3)))
+        # Nothing cached may be a tracer, or it escapes into every later trace.
+        for value in vars(sky_registry._SKY_REGISTRY[name]).values():
+            assert not isinstance(value, jax.core.Tracer)
+        # A re-trace (new batch shape) is where an escaped tracer would surface.
+        second = float(total(jnp.ones(4)))
+        assert np.isfinite(first) and np.isfinite(second)
+    finally:
+        if cached is not None:
+            sky_registry._SKY_REGISTRY[name] = cached
