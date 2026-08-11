@@ -139,6 +139,37 @@ def main(argv=None):
     # mixture measures describing different galaxy sets.  With ngals absent the
     # real-galaxy mask is literally ``w > 0``, so such a galaxy silently
     # becomes padding instead.  Reject at the boundary.
+    # Z / ZERR: real catalogs carry failure sentinels (Z = -1, ZERR = -1) and
+    # occasional NaNs.  A non-positive z survives every downstream guard -- it
+    # keeps the row z-sort invariant (a monotone real prefix stays monotone) and
+    # becomes a catalog member with a nonsense distance modulus and a negative
+    # comoving volume in the catalog KDE; a NaN z only surfaces much later, as
+    # ``sort_survey_rows_by_z``'s AssertionError inside a different tool; a
+    # non-positive dz is rescued only by chance, via SIGMA_EFF_FLOOR.  Also
+    # reject z >= 100, the padding sentinel this tool writes below.
+    bad_z = ~(np.isfinite(zs) & (zs > 0.0) & (zs < 100.0))
+    if bad_z.any():
+        n_bad = int(bad_z.sum())
+        _fatal(
+            f"Z must be finite, strictly positive and below the 100.0 padding "
+            f"sentinel for every galaxy; found {n_bad:,} bad value(s) out of "
+            f"{len(zs):,} (first offending index {int(np.argmax(bad_z))}, "
+            f"value {zs[bad_z][0]!r}). Failure sentinels (Z = -1) and NaNs pass "
+            "every downstream guard and become real catalog members with a "
+            "nonsense distance modulus. Drop or fix those rows in the input "
+            "catalog."
+        )
+    bad_dz = ~(np.isfinite(ddzs) & (ddzs >= 0.0))
+    if bad_dz.any():
+        n_bad = int(bad_dz.sum())
+        _fatal(
+            f"ZERR must be finite and non-negative for every galaxy; found "
+            f"{n_bad:,} bad value(s) out of {len(ddzs):,} (first offending "
+            f"index {int(np.argmax(bad_dz))}, value {ddzs[bad_dz][0]!r}). A "
+            "negative or NaN photo-z width is only rescued by chance, by the "
+            "kernel's SIGMA_EFF_FLOOR. Drop or fix those rows in the input "
+            "catalog."
+        )
     bad_w = ~(np.isfinite(wts) & (wts > 0.0))
     if bad_w.any():
         n_bad = int(bad_w.sum())
