@@ -43,6 +43,28 @@ def _env_int_opt(name: str, default: int | None) -> int | None:
     return parsed
 
 
+def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
+    """Smallest pairing m1-grid size whose cells are narrower than one q-interval.
+
+    The opt-in grid's support-edge cell is guarded by a SINGLE q-interval
+    trapezoid term (``PairingModel.__call__``).  That guard is only close to the
+    true normaliser while the q-support inside the edge cell,
+    ``1 - m_min/m1 < 1 - exp(-dlog m1)``, fits in one q-interval, i.e.
+
+        log(pairing_m_hi / m_lo) / (N_grid - 1)  <=  1 / (n_q - 1).
+
+    Nothing enforced that coupling, so a small ``--pairing_norm_grid`` (or a
+    FINER ``--norm_nq``, which naively should be more accurate) silently
+    reintroduced the blow-up the guard exists to prevent: measured at N_grid = 64
+    with the default n_q = 200, ``PowerLawPairing`` densities inside the first
+    supported cell were 6.1e8 x (+20 nats) above a 2e6-node reference.  Settings
+    therefore RAISE the node count to this floor -- the same auto-sizing policy
+    as :func:`size_pairing_grid_to_support`, and cheap (1024 -> 1056 at the
+    defaults, O(N_grid * n_q) work per proposal).
+    """
+    return 1 + int(math.ceil(math.log(pairing_m_hi / m_lo) * (int(n_q) - 1)))
+
+
 @dataclass(frozen=True)
 class NormalizationGridSettings:
     """Settings controlling GW-population normalisation quadrature grids.
@@ -110,6 +132,11 @@ class NormalizationGridSettings:
                 f"pairing_m_hi must be greater than m_lo: {self.m_lo} >= {pairing_m_hi}"
             )
         object.__setattr__(self, "pairing_m_hi", pairing_m_hi)
+        if self.pairing_m1_grid is not None:
+            object.__setattr__(self, "pairing_m1_grid",
+                               max(int(self.pairing_m1_grid),
+                                   _min_pairing_m1_grid(self.m_lo, pairing_m_hi,
+                                                        self.n_q)))
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
