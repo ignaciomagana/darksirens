@@ -222,6 +222,24 @@ def prepare_catalog_views(
     cache_builder=build_pixel_kde_cache,
 ) -> CatalogViews:
     """Compact catalogs, build sample-to-unique maps, and prebuild KDE caches."""
+    # The LINEAR Q tables are not plumbed to the NUMERATOR: ``CatalogViews``
+    # carries only the log forms and both factories compact only those, so a
+    # linear-only data dict would give a Q-modulated field normalizer (the
+    # budget rows below accept either form) with an UNMODULATED numerator --
+    # precisely the numerator/denominator budget mismatch field_global_log_Z's
+    # mutual-exclusion guard exists to prevent, and invisible to it.  Reject at
+    # this single seam rather than letting the two disagree.
+    for _linear_key in ("lss_completion_q", "lss_completion_q_members"):
+        if data.get(_linear_key) is not None:
+            raise ValueError(
+                f"data['{_linear_key}'] is not supported by the likelihood "
+                "factory: supply the LOG table instead "
+                "('lss_completion_logq' / 'lss_completion_logq_members', which "
+                "is what every builder emits). The linear table reaches only "
+                "the field normalizer's missing-galaxy budget, never the "
+                "per-pixel numerator, so the two seams would carry different "
+                "budgets."
+            )
     pe_view = _ensure_compact(data, "pe", "pixels_pe")
     sel_view = _ensure_compact(data, "sel", "pixels_sel")
 
@@ -460,14 +478,11 @@ def prepare_catalog_views(
                 data.get("field_lss_q_members") is not None
                 and data.get("field_lss_q_empty_sum_members") is not None
             )
+            # Only the LOG form reaches here (the linear keys are rejected at the
+            # top of this function, since they never reach the numerator).
             logq_full = data.get("lss_completion_logq")
-            q_full = data.get("lss_completion_q")
-            if logq_full is not None or q_full is not None:
-                logq_np = (
-                    np.asarray(logq_full)
-                    if logq_full is not None
-                    else np.log(np.maximum(np.asarray(q_full), 1e-300))
-                )
+            if logq_full is not None:
+                logq_np = np.asarray(logq_full)
                 if have_q_rows:
                     field_lss_q = barrier(jnp.asarray(data["field_lss_q"]))
                     field_lss_q_empty_sum = barrier(

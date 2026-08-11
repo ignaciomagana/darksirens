@@ -222,3 +222,22 @@ def test_single_catalog_is_unaffected():
     from darksirens.inference.validation import validate_multitracer_run
 
     validate_multitracer_run(_opts("field", n_catalogs=1), _bundles(64))
+
+
+# ---------------------------------------------------------------------------
+# The LINEAR Q table is not plumbed to the numerator
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "key", ["lss_completion_q", "lss_completion_q_members"])
+def test_linear_q_table_is_rejected_by_the_view_builder(key):
+    """prepare_catalog_views fed the linear table would build a Q-modulated
+    FIELD normalizer while the numerator (which reads only the log forms) fell
+    back to the legacy overdensity branch -- a silent budget mismatch.  It must
+    be refused with the log-table hint instead."""
+    from darksirens.likelihood.catalog_views import prepare_catalog_views
+
+    data = {key: np.ones((NPIX, NZ))}
+    opts = SimpleNamespace(catalog_sky_weighting="field")
+    with pytest.raises(ValueError, match=key):
+        prepare_catalog_views(opts, data, "dark_sirens", None)
