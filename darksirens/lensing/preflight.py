@@ -383,9 +383,7 @@ def _check_pair_pe(
                 # the pair (-inf at every parameter value) only once the mark's
                 # own width no longer reaches into the support -- and the
                 # quadrature mark never annihilates at all.
-                support = _sis_support(
-                    opts, pair_dt_values, pair_sigma_values
-                )
+                support = _sis_support(opts, pair_dt_values, pair_sigma_values)
                 summary["sis_time_mark_support_pair_pe"] = support
                 if support["all_annihilated"]:
                     errors.append(sis_time_mark_support_message(support))

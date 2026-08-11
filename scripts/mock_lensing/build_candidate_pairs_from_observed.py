@@ -4,6 +4,17 @@
 The builder scores unordered event pairs using only observed catalog metadata and
 posterior samples.  Truth metadata, when present, is used only to attach optional
 validation labels and never to decide which edges are kept.
+
+The resulting ``log_prior_odds`` is a heuristic built FROM THE DATA the pair
+likelihood also evaluates (the mass/distance/spin compatibility score
+approximates the same PE-sample overlap the pair term integrates), so it is not
+an independent pairing prior: it tilts the pairing posterior toward edges the
+likelihood already favours.  This is acceptable for a simulation-only edge
+proposal, but every term folded into the score is declared in
+``folded_mark_keys`` so inference can refuse to apply it twice.  The one term
+that is exactly duplicated by a mark likelihood -- the arrival-time coincidence
+tilt versus the SIS time mark -- is left out of the score whenever the file
+exports time marks.
 """
 from __future__ import annotations
 
