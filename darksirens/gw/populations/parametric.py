@@ -11,6 +11,15 @@ The ``ParamSpec`` fields stored on every dataclass describe the ordering,
 labels, and prior bounds of the component parameters.  Registry constructors
 combine these specs into a single inference vector; the methods here therefore
 expect ``t`` to be ordered exactly as returned by ``param_specs``.
+
+Frame convention
+----------------
+Every mass argument in this module is a SOURCE-frame mass in solar masses -- the
+normalisation grids are source-frame, and the callers pass source-frame masses
+(e.g. ``model.log_p_massspin(m1src, q, chieff, ...)`` in
+:mod:`darksirens.likelihood.flow_events`).  The detector-frame conversion and its
+``(1 + z)`` mass Jacobian are the likelihood's responsibility, never a
+component's.
 """
 
 import math
