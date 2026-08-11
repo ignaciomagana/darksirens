@@ -106,3 +106,25 @@ def test_p_cat_check_honours_survey_z_depth():
     assert all(check_catalog_prior_normalization(
         cosmo, _survey(z_depth=z_depth), catalog, jnp.array([0, 1]),
         verbose=False).values())
+
+
+def test_nan_prior_cannot_pass_a_normalisation_check():
+    """NaN is the failure mode these checks exist to catch: ``_integrate`` used
+    to map every non-finite log_p to -inf, turning NaN into a density of exactly
+    0 -- so a NaN-poisoned prior integrated to slightly LESS than 1 and PASSED.
+    """
+    from darksirens.redshift.checks import _check_result, _integrate
+
+    z = np.linspace(0.0, 1.0, 11)
+    log_p = np.zeros_like(z)                     # p = 1 on [0, 1]: integral 1
+    assert _integrate(log_p, z) == pytest.approx(1.0)
+
+    poisoned = log_p.copy()
+    poisoned[5] = np.nan
+    assert np.isnan(_integrate(poisoned, z))
+    assert not _check_result("poisoned", _integrate(poisoned, z), 0.05, False)
+
+    # -inf stays a legitimately zero density, not a failure.
+    zeroed = log_p.copy()
+    zeroed[5] = -np.inf
+    assert np.isfinite(_integrate(zeroed, z))

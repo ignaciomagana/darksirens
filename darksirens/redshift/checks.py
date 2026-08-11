@@ -68,8 +68,18 @@ DEFAULT_CHECK_MODELS = ("spectral_sirens", "dark_sirens_complete", "dark_sirens"
 # ------------------------------------------------------------
 
 def _integrate(log_p: np.ndarray, z: np.ndarray) -> float:
-    """Trapezoidal integral of exp(log_p) over z."""
-    p = np.exp(np.where(np.isfinite(log_p), log_p, -np.inf))
+    """Trapezoidal integral of exp(log_p) over z; NaN in, NaN out.
+
+    ``-inf`` is a legitimately zero density and exponentiates to 0.  NaN is
+    NOT: it is the failure mode these checks exist to catch, so it must not be
+    laundered into a density of 0 -- that made a NaN-poisoned prior integrate to
+    slightly LESS than 1 and PASS the tolerance.  Returning NaN makes
+    ``_check_result``'s ``abs(value - 1) <= atol`` False, i.e. a loud FAIL.
+    """
+    log_p = np.asarray(log_p, dtype=float)
+    if np.isnan(log_p).any():
+        return float("nan")
+    p = np.exp(np.where(np.isneginf(log_p), -np.inf, log_p))
     return float(_trapezoid(p, z))
 
 
