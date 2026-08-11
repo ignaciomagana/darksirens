@@ -310,8 +310,6 @@ def selection_log_correction(
     # whenever pe_variance_sum is.
     budget = jnp.maximum(max_likelihood_variance - pe_variance_sum, _MIN_VARIANCE_BUDGET)
     threshold = jnp.maximum(5.0 * n, (n * n) / budget)
-    # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.
-    too_sparse = ~(Neff > threshold)
     if soft_guard:
         # Gradient-based samplers (NumPyro NUTS) cannot cross a hard -inf wall:
         # every trajectory that brushes it is flagged divergent (the H1-profile
@@ -344,9 +342,14 @@ def selection_log_correction(
             + n * (3.0 + n) / (2.0 * Neff_taylor)
         )
         total = correction + wall
-        # mu == 0 exactly (all-invalid injections): correction and wall are
-        # +/-inf and their sum is NaN — collapse to the hard verdict.
+        # This collapse -- not the hard branch's ``too_sparse`` -- is the soft
+        # path's NaN guarantee: mu == 0 exactly (all-invalid injections) makes
+        # correction and wall +/-inf and their sum NaN, and a NaN Neff or
+        # threshold propagates through x -> gate -> wall to a NaN total.  Either
+        # way, collapse to the hard verdict.
         return jnp.where(jnp.isfinite(total), total, -jnp.inf)
+    # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.
+    too_sparse = ~(Neff > threshold)
     correction = (
         -n * log_mu
         + n * (3.0 + n) / (2.0 * Neff)
