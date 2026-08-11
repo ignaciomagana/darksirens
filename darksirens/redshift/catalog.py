@@ -282,7 +282,7 @@ def attest_rows_sorted_for_windowing(*em_catalogs) -> bool:
         if not _rows_sorted_for_windowing(zgals, ngals):
             verdict = False
             break
-        shapes.add(tuple(np.asarray(zgals).shape))
+        shapes.add(tuple(zgals.shape))
     _ROWS_SORTED_ATTESTED = verdict
     _ATTESTED_ROW_SHAPES = frozenset(shapes) if verdict else frozenset()
     return verdict
