@@ -12,7 +12,7 @@ Given two GW events (d_i, d_j) declared a candidate J=2 cluster, with
 SIS image magnifications μ_+(y) = (1+y)/y, μ_-(y) = (1-y)/y for impact
 parameter y ∈ (0, 1) and p(y) = 2y, the pair likelihood is:
 
-    L_2(d_i, d_j | λ, Θ) = (1/2) Σ_σ ∫ dy p(y) (1/N_i) Σ_s
+    L_2(d_i, d_j | λ, Θ) = Σ_σ ∫ dy p(y) (1/N_i) Σ_s
         τ_2(z_s(s,y))
         · p_pop(θ_src(s,y) | λ)
         · p_z(z_s(s,y) | Θ)
@@ -20,7 +20,16 @@ parameter y ∈ (0, 1) and p(y) = 2y, the pair likelihood is:
         · |J_app→src(z_s, dL_true, μ_σ(i)(y))|
 
 where σ runs over the two image-assignment orderings (i→+,j→- and
-i→-,j→+), s indexes event-i PE samples, and:
+i→-,j→+) — SUMMED, not averaged: the observed datum is the UNORDERED pair
+{d_i, d_j}, and the two assignments are distinct microstates of it, so the
+intensity at the observed pair is the sum. That is also the convention that
+integrates to the cluster selection integral it is normalized against: with
+g_a(d_1,d_2) the (i→+, j→-) branch and g_b = g_a(d_2,d_1), each of
+∫∫ g_a dd_1 dd_2 and ∫∫ g_b is μ_sel^(2) (which counts every both-detected
+source once), and the unordered-space integral of their sum is
+(1/2)(μ_sel^(2) + μ_sel^(2)) = μ_sel^(2). Averaging instead would make the
+pair channel's intensity a factor 2 below the -N_tot log(μ_tot) penalty
+built from it. s indexes event-i PE samples, and:
 
     dL_true(s,y)         = dL_app^(s) · √μ_σ(i)(y)
     z_s(s,y)             = z(dL_true)
@@ -342,19 +351,15 @@ def cluster_log_likelihood_pair(
     ``(i, j)``. Branch a (i is μ_+) is then evaluated at ``+Δt`` and branch b
     (j is μ_+) at ``-Δt``, so the branch whose predicted arrival order
     contradicts the data is masked out of the SIS support and contributes
-    nothing. Two things this fixes:
-
-      1. Normalization. With both branches evaluated at |Δt| (the legacy
-         behaviour) a determined pairing gets its likelihood counted TWICE,
-         i.e. +log 2 ≈ 0.69 nat too much per time-marked pair, and
-         ∫ L_2 over the ordered data space becomes 2 μ_sel^(2), breaking the
-         Poisson normalization the master likelihood assumes.
-      2. The ordering test itself. A false pairing in which the BRIGHTER
-         event arrives second should be suppressed to the (tiny) value of the
-         ordering-consistent branch; with |Δt| it instead gets ~half the
-         ordering-INconsistent branch, which can be orders of magnitude
-         larger — over-rewarding exactly the false pairings the arrival-order
-         constraint exists to reject.
+    nothing. What this buys is the ordering test itself: a false pairing in
+    which the BRIGHTER event arrives second should be suppressed to the (tiny)
+    value of the ordering-consistent branch, whereas with |Δt| it gets the
+    ordering-INconsistent branch, which can be orders of magnitude larger —
+    over-rewarding exactly the false pairings the arrival-order constraint
+    exists to reject. Both conventions are correctly normalized (each pairs its
+    numerator with the matching unlensed reference density, above); a
+    determined pairing simply gains the log 2 that resolving the sign takes
+    away from the unlensed reference.
 
     ``pair_time_signed=False`` (the default) keeps the legacy |Δt|-in-both-
     branches behaviour, for data whose recorded mark carries no trustworthy
@@ -491,8 +496,10 @@ def cluster_log_likelihood_pair(
     N_j = event_j["m1det"].shape[0]
     log_branch_b = logsumexp(log_int_b) - jnp.log(N_j)
 
-    # Symmetric sum (1/2 because each assignment is one term of the average)
-    log_L2 = logsumexp(jnp.stack([log_branch_a, log_branch_b])) - jnp.log(2.0)
+    # Symmetric SUM over the two image-to-event assignments: they are distinct
+    # microstates of the same unordered observation, and only the sum integrates
+    # to mu_sel^(2) over the unordered pair space (see the module docstring).
+    log_L2 = logsumexp(jnp.stack([log_branch_a, log_branch_b]))
     if not return_mc_variance:
         return log_L2
 
@@ -615,8 +622,8 @@ def lensed_single_log_likelihood_event(
                    P(partner image missed) · (population × volume terms)
 
     The two image identities are DISTINCT outcomes of the same source, so
-    the branches are SUMMED (unlike the pair likelihood, which averages the
-    two assignments of the same observation). Returns -inf if both vanish.
+    the branches are SUMMED (as are the pair likelihood's two image-to-event
+    assignments, by the same argument). Returns -inf if both vanish.
     ``pair_orientation_mode`` picks the censoring convention (see
     ``_lensed_single_branch_log_integrand``); 'independent' is bit-identical
     to the historical behaviour.

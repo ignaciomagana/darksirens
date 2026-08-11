@@ -677,6 +677,62 @@ class TestNumpyReference:
         np.testing.assert_allclose(log_branch_jax, log_branch_np, rtol=1e-9, atol=1e-12)
 
 
+def test_pair_likelihood_sums_the_two_image_assignments():
+    """log L_2 is the SUM over the two image-to-event assignments, not their
+    average.
+
+    The observed datum is the UNORDERED pair {d_i, d_j} and the two assignments
+    (i→μ_+ vs j→μ_+) are distinct microstates of it, so the J=2 intensity at the
+    observed pair is g_a + g_b. That is also the only convention consistent with
+    the normalization it is charged against: each branch integrates to
+    mu_sel^(2) over the ordered data space, so the sum integrates to exactly
+    mu_sel^(2) over the unordered one, matching the -N_tot log(mu_tot) penalty
+    built from compute_cluster_selection_term. Averaging cost every pair
+    log 2 = 0.693 nat, which is NOT a constant when partitions with different
+    pair counts are compared (--partition_mode marginalize_exact) or when the
+    j2 and off evidences are differenced.
+    """
+    from darksirens.likelihood.cluster_likelihood import _pair_branch_log_integrand
+    from jax.scipy.special import logsumexp
+
+    ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=60, seed=52)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"],
+                          ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"],
+                          ev_j["prior_wt"])
+    y_nodes, log_wy = make_y_grid(16)
+    sis = make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0)
+    mu_p, mu_m = mu_plus_minus_from_y(y_nodes)
+    log_py = log_p_y_SIS(y_nodes)
+    common = dict(
+        mu_i=mu_p, mu_j=mu_m, log_py=log_py, log_wy=log_wy,
+        cosmo=_cosmo(), survey=_survey(), pop_params=jnp.zeros(1),
+        catalog=_toy_catalog(), sis_params=sis,
+        log_p_pop_fn=_toy_log_p_pop, log_prior_z_fn=_toy_volume_prior,
+    )
+    branches = []
+    for drv, kde_other in ((ev_i, kde_j), (ev_j, kde_i)):
+        log_int = _pair_branch_log_integrand(
+            m1det_i=drv["m1det"], q_i=drv["q"], dL_app_i=drv["dL"],
+            chieff_i=drv["chieff"], prior_wt_i=drv["prior_wt"],
+            valid_i=drv["valid"], pix_i=drv["pixels"],
+            kde_j=kde_other, **common,
+        )
+        branches.append(
+            float(logsumexp(log_int) - jnp.log(drv["m1det"].shape[0]))
+        )
+    expected = float(np.logaddexp(*branches))
+
+    got = float(cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1),
+        _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+    ))
+    np.testing.assert_allclose(got, expected, rtol=1e-12)
+    # ...and therefore never BELOW either single assignment, as the average
+    # convention was for any pair with one dominant assignment.
+    assert got >= max(branches)
+
+
 def test_pair_marks_none_matches_legacy_likelihood():
     ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=120, seed=30)
     kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
