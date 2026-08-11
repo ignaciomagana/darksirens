@@ -214,7 +214,21 @@ def _mu_miss_from_flat(zs: jnp.ndarray, h: jnp.ndarray, real: jnp.ndarray) -> jn
     b = jnp.clip(jnp.searchsorted(edges, zs, side="right") - 1, 0, _MU_MISS_NBINS - 1)
     sum_h = jnp.zeros(_MU_MISS_NBINS).at[b].add(h * real)
     cnt = jnp.zeros(_MU_MISS_NBINS).at[b].add(real)
-    mu_bin = jnp.where(cnt > 0.0, sum_h / jnp.where(cnt > 0.0, cnt, 1.0), 1.0)
+    # Bins with no observed galaxy fall back to the catalog-WIDE mean efficiency,
+    # NOT to 1.  With centred marks Jensen gives <h> >= 1 (7.4 at eta*sd(m) = 2,
+    # and the +-_LOG_H_CLIP clip admits e^7), so a homogeneous default made the
+    # missing density drop by that factor across ONE 0.125-wide bin at the
+    # catalog's coverage edge -- exactly where (1 - C) dN_exp is largest.  Worse,
+    # it made eta shift the catalog:missing ODDS even for marks with no redshift
+    # structure at all: the observed amplitude carries <h>_w while the
+    # beyond-coverage missing budget carried 1.  With the mean as the default a
+    # z-INDEPENDENT mark gives mu_miss == <h> everywhere, which cancels between
+    # the two branches, so eta stays a pure SHAPE parameter (the correct null)
+    # and the curve is continuous across the coverage edge and across z_depth.
+    mu_global = jnp.where(
+        jnp.sum(cnt) > 0.0, jnp.sum(sum_h) / jnp.maximum(jnp.sum(cnt), 1.0), 1.0
+    )
+    mu_bin = jnp.where(cnt > 0.0, sum_h / jnp.where(cnt > 0.0, cnt, 1.0), mu_global)
     return jnp.maximum(jnp.interp(zgrid, centers, mu_bin), 0.0)
 
 
@@ -224,8 +238,10 @@ def _mu_miss_grid(em_catalog: EMCatalog, log_h: jnp.ndarray) -> jnp.ndarray:
     The deterministic estimator of the *expected* host efficiency of the
     unobserved galaxies along the line of sight: the z-binned mean of
     ``h = exp(log_h)`` over the catalog's **observed** galaxies, interpolated to
-    ``zgrid``.  Empty/out-of-range z-bins default to 1 (homogeneous), so the
-    missing branch is only modulated where the catalog carries mark information.
+    ``zgrid``.  Empty/out-of-range z-bins default to the catalog-WIDE mean
+    efficiency (see :func:`_mu_miss_from_flat`), so the missing branch is
+    modulated in SHAPE only where the catalog carries local mark information and
+    a z-independent mark cancels between the observed and missing branches.
     No galaxies are invented — this reuses the observed marks (consistent with
     the deterministic-likelihood principle of the LSS completion).
     """
@@ -471,11 +487,22 @@ def prepare_redshift_prior_state(
                 cosmo, survey, em_catalog, log_h, log_g_grid=log_g_grid,
                 z_depth=survey.z_depth,
             )
-            if is_field:
-                # Field mode: mu_miss and the observed marked mass come from
-                # the FULL-SKY flat marks (field_mark_*), so the PE and
-                # selection states share ONE global normalizer for the same
-                # (theta, eta) and the numerator's missing budget matches it.
+            has_flat_marks = (
+                em_catalog.field_mark_values is not None
+                and em_catalog.field_mark_z is not None
+            )
+            if is_field or has_flat_marks:
+                # mu_miss and the observed marked mass come from the FULL-SKY
+                # flat marks (field_mark_*), so the PE and selection states
+                # share ONE global normalizer for the same (theta, eta) and the
+                # numerator's missing budget matches it.  Field mode REQUIRES
+                # these inputs (checked above); the conditional path uses them
+                # whenever they are attached, because mu_miss is a survey-level
+                # host-efficiency curve and NOT a property of whichever pixels
+                # the current view happens to hold -- the view-level estimator
+                # below gives the PE and selection seams different modulations
+                # when their views differ (see require_view_independent_mu_miss
+                # in likelihood/core.py, which refuses that combination).
                 from darksirens.marks import mark_model_flat_parser
                 log_h_flat = jnp.clip(
                     mark_model_flat_parser(mark_model, mark_names)(
@@ -495,11 +522,18 @@ def prepare_redshift_prior_state(
             # DEPTH-TRUNCATED CATALOG: the marked kernels were renormalised to
             # unit mass on [0, z_depth], so the amplitude paired with them is
             # the marked mass actually below the depth — the exact marked twin
-            # of the unmarked `Nobs * exp(log_depth_mass)` scaling below.
-            N_host_obs = jnp.where(
+            # of the unmarked `Nobs * exp(log_depth_mass)` scaling below.  The
+            # SAME depth-scaled amplitude is stored on the state as `log_Nobs`
+            # (the numerator's observed amplitude), not just used for Z: keeping
+            # the raw `log_N_host` there over-weighted the catalog branch by
+            # 1/m_pix and broke the per-pixel unit normalisation.
+            log_N_host_depth = jnp.where(
                 jnp.isfinite(log_N_host),
-                jnp.exp(log_N_host + kernels.log_depth_mass),
-                0.0,
+                log_N_host + kernels.log_depth_mass,
+                -jnp.inf,
+            )
+            N_host_obs = jnp.where(
+                jnp.isfinite(log_N_host_depth), jnp.exp(log_N_host_depth), 0.0
             )
             Z = N_host_obs + N_host_miss
             log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
@@ -532,7 +566,7 @@ def prepare_redshift_prior_state(
                 )
                 if is_field:
                     state = DarkSirenEnsemblePriorState(
-                        kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                        kernels=kernels, log_Nobs=log_N_host_depth, dN_miss=dN_miss,
                         log_Z=log_Z,
                         base_miss=base_miss_marked,
                         log_Z_members=log_Z_members,
@@ -543,7 +577,7 @@ def prepare_redshift_prior_state(
                     )
                     return _maybe_materialize(state, materialize_state)
                 state = DarkSirenEnsemblePriorState(
-                    kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                    kernels=kernels, log_Nobs=log_N_host_depth, dN_miss=dN_miss,
                     log_Z=log_Z,
                     base_miss=base_miss_marked,
                     log_Z_members=log_Z_members,
@@ -551,12 +585,12 @@ def prepare_redshift_prior_state(
                 return _maybe_materialize(state, materialize_state)
             if is_field:
                 state = DarkSirenPriorState(
-                    kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                    kernels=kernels, log_Nobs=log_N_host_depth, dN_miss=dN_miss,
                     log_Z=log_Z, log_Z_global=log_Z_global,
                 )
                 return _maybe_materialize(state, materialize_state)
             state = DarkSirenPriorState(
-                kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss, log_Z=log_Z
+                kernels=kernels, log_Nobs=log_N_host_depth, dN_miss=dN_miss, log_Z=log_Z
             )
             return _maybe_materialize(state, materialize_state)
 
@@ -827,6 +861,7 @@ def eval_redshift_prior_with_state(
 def _eval_dark_member_scalar(
     z, pix, m, member_logq_all, member_is_log,
     state: "DarkSirenEnsemblePriorState", survey: SurveyParams, em_catalog,
+    catalog_sky_weighting: str = "conditional",
 ):
     """log p_m(z | pix) for LSS-completion ensemble member ``m`` (diagnostic).
 
@@ -855,7 +890,15 @@ def _eval_dark_member_scalar(
     q_hi = _member_q_eff_from_logq(lq_hi, depth_hi, member_is_log)
     miss = _interp_row(b_lo * q_lo, b_hi * q_hi, t)
     log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
-    return jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss) - state.log_Z_members[m, pix]
+    numerator = jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss)
+    # Same normalizer selection as the likelihood's member path
+    # (``_factored_member_marginalization`` picks log_Z_global_members under
+    # field): normalizing a field-mode run per pixel would report a prior the
+    # run never evaluated, with the relative angular host weighting field mode
+    # exists to preserve divided away.
+    if catalog_sky_weighting == "field":
+        return numerator - state.log_Z_global_members[m]
+    return numerator - state.log_Z_members[m, pix]
 
 
 def eval_redshift_prior_members_with_state(
@@ -866,6 +909,7 @@ def eval_redshift_prior_members_with_state(
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    catalog_sky_weighting: str = "conditional",
 ) -> jnp.ndarray:
     """Per-member log p_m(z | pix) for a fixed LSS-completion ensemble.
 
@@ -875,10 +919,28 @@ def eval_redshift_prior_members_with_state(
     For non-ensemble states (or other models) it returns shape ``(1, len(z))``
     using the scalar (posterior-mean) prior, so callers can always index a
     leading member axis.
+
+    ``catalog_sky_weighting`` selects the same normalization convention the
+    likelihood uses (``state.log_Z_global_members[m]`` under ``"field"``, the
+    per-pixel ``state.log_Z_members[m, pix]`` under ``"conditional"``) and is
+    forwarded to the non-ensemble fall-through, so the diagnostic characterises
+    the prior the run actually sampled.  The default matches this module's other
+    entry points.
     """
     z = jnp.asarray(z)
     pix = jnp.asarray(pix)
+    if catalog_sky_weighting not in ("conditional", "field"):
+        raise ValueError(
+            "catalog_sky_weighting must be 'conditional' or 'field', got "
+            f"{catalog_sky_weighting!r}."
+        )
     if model == "dark_sirens" and isinstance(state, DarkSirenEnsemblePriorState):
+        if catalog_sky_weighting == "field" and state.log_Z_global_members is None:
+            raise ValueError(
+                "catalog_sky_weighting='field' needs the per-member survey-global "
+                "normalizers (log_Z_global_members); build the state with "
+                "prepare_redshift_prior_state(..., catalog_sky_weighting='field')."
+            )
         M = int(state.log_Z_members.shape[0])
         # Resolve the row-aligned RAW member log-Q ONCE (a view of the resident
         # data constant on the hot path); each member's density is reconstructed
@@ -889,13 +951,15 @@ def eval_redshift_prior_members_with_state(
             return vmap(
                 lambda z_i, p_i: _eval_dark_member_scalar(
                     z_i, p_i, m, member_logq_all, member_is_log,
-                    state, survey, em_catalog,
+                    state, survey, em_catalog, catalog_sky_weighting,
                 )
             )(z, pix)
 
         return vmap(_per_member)(jnp.arange(M, dtype=jnp.int32))  # (M, len(z))
 
-    lp = eval_redshift_prior_with_state(model, state, z, pix, cosmo, survey, em_catalog)
+    lp = eval_redshift_prior_with_state(
+        model, state, z, pix, cosmo, survey, em_catalog, catalog_sky_weighting
+    )
     return jnp.reshape(lp, (1, -1))
 
 
@@ -980,7 +1044,20 @@ def _log_prior_bright_sirens(
 
         sky_marginalized = jnp.asarray(em_catalog.bright_siren_sky_marginalized)
         in_counterpart_pixel = global_pix == counterpart_pixel
-        log_p_cp = norm.logpdf(z, counterpart_z, counterpart_dz)
+        # EM measurement likelihood TIMES the population's redshift density.
+        # ``selection_prior_model`` routes bright_sirens' mu(Lambda) through
+        # ``spectral_sirens``, i.e. sources are drawn from the normalised
+        # dV_c/dz volume prior, and the population term contributes only
+        # (1+z)^(gamma-1) -- so without this factor the numerator and mu use
+        # different p(z | Lambda) and the estimator is biased by the missing
+        # volumetric weight (a Gaussian N(z; z0, sigma) reweighted by z^2 shifts
+        # its effective mean by 2 sigma^2 / z0: ~4.6% at sigma/z0 = 15%, the
+        # GW170817 peculiar-velocity regime).  The normalisation of
+        # log_volume_prior_vmap cancels against the selection term, so only its
+        # z-shape matters; the legacy fallback branch below already carries the
+        # galaxy measure g(z) = dV_c/dz (1+z)^delta for the same reason.
+        log_p_cp = norm.logpdf(z, counterpart_z, counterpart_dz) + \
+            log_volume_prior_vmap(z, cosmo, survey)
         return jnp.where(sky_marginalized | in_counterpart_pixel, log_p_cp, -jnp.inf)
 
     counterpart_pixel = em_catalog.counterpart_pixel

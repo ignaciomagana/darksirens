@@ -682,7 +682,24 @@ def _row_marked_kernel_state(
         log_kw, log_depth_mass = _renorm_log_kw_below_depth(
             log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
         )
-    log_N_host = jnp.where(has_galaxies, lse, -jnp.inf)
+    # AMPLITUDE CONVENTION (redshift/prior.py's module docstring): the
+    # catalog:missing odds are COUNT odds, so the marked amplitude is the
+    # observed COUNT times the weighted-mean host efficiency,
+    #
+    #     N_host = N_obs * <h>_w = N_obs * Σ_i w_i h_i / Σ_i w_i,
+    #
+    # not the raw Σ_i w_i h_i.  The raw mass carries the arbitrary scale of the
+    # WEIGHT column (a luminosity-weighted catalog with L/L_sun ~ 1e10 made the
+    # observed branch dominate the missing one by ~1e10 and silently switched the
+    # completeness correction off), and the missing branch it is paired against
+    # -- (1 - C) dN_exp * mu_miss with mu_miss = E_obs[h|z] -- carries no weight
+    # factor at all.  This form is invariant under w -> c*w and is EXACTLY the
+    # unmarked count at h == 1, so eta = 0 reduces to the galaxy-count model for
+    # any weights.  ``field_marked_observed_global_total`` uses the same
+    # convention through ``build_field_mark_inputs``' count-renormalised weights.
+    log_N_obs = jnp.log(jnp.maximum(jnp.sum(real.astype(sig_eff.dtype)), 1e-300))
+    log_w_tot = logsumexp(log_w)
+    log_N_host = jnp.where(has_galaxies, log_N_obs + lse - log_w_tot, -jnp.inf)
     return log_kw, sig_eff, log_N_host, log_depth_mass
 
 

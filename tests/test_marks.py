@@ -118,3 +118,138 @@ def test_marked_reweights_toward_high_mark_galaxy():
 def test_missing_mark_field_errors():
     with pytest.raises(ValueError, match="mark_logmstar is None|requested"):
         _prior(_cat(), mark_model="loglinear", eta=[1.0], mark_names=("logmstar",))
+
+
+# ------------------------------------------------------------
+# Depth truncation: the marked amplitude must carry log_depth_mass
+# ------------------------------------------------------------
+# The kernels are renormalised to unit mass on [0, z_depth], so the marked
+# observed amplitude paired with them is exp(log_N_host + log_depth_mass) --
+# exactly the unmarked `Nobs * exp(log_depth_mass)` scaling.  Storing the raw
+# log_N_host in the state over-weighted the catalog branch by 1/m_pix and broke
+# the per-pixel unit normalisation.  Row 0 of ``_cat`` has one galaxy below and
+# one above z_depth=0.25, so m = 1/2 there.
+# A small pixel area / low n0 keeps N_miss ~ O(1): with the production-sized
+# missing budget (N_miss ~ 1e9) a 2x error in an O(1) observed amplitude is
+# numerically invisible.
+_SURVEY_DEPTH = SurveyParams(
+    n0=1e-9, z50=0.3, w=0.1, delta=0.0, b_miss=0.0, alpha_miss=1.0, z_depth=0.25,
+)
+
+
+def _cat_small_apix(logmstar):
+    return _cat(logmstar=logmstar)._replace(apix=1e-4)
+
+
+def _prior_depth(cat, mark_model="none", eta=None, mark_names=(), row=0):
+    state = prepare_redshift_prior_state(
+        "dark_sirens", COSMO, _SURVEY_DEPTH, cat,
+        mark_model=mark_model,
+        mark_params=(None if eta is None else jnp.asarray(eta)),
+        mark_names=mark_names,
+    )
+    pix = jnp.full(NG, row, jnp.int32)
+    lp = eval_redshift_prior_with_state(
+        "dark_sirens", state, zgrid, pix, COSMO, _SURVEY_DEPTH, cat
+    )
+    return np.asarray(lp)
+
+
+def test_marked_amplitude_carries_depth_mass():
+    """eta=0 + unit weights reduces to the unmarked model WITH a survey depth."""
+    cat = _cat_small_apix(np.array([[0.5, -0.5, 0.0], [0.2, 0.0, 0.0]]))
+    for row in (0, 1):
+        base = _prior_depth(cat, mark_model="none", row=row)
+        marked0 = _prior_depth(
+            cat, mark_model="loglinear", eta=[0.0], mark_names=("logmstar",), row=row
+        )
+        assert np.max(np.abs(np.exp(base) - np.exp(marked0))) < 1e-9
+
+
+def test_marked_prior_normalizes_per_pixel_under_depth():
+    """The depth-truncated marked prior still integrates to 1 per pixel."""
+    cat = _cat_small_apix(np.array([[0.6, -0.4, 0.0], [0.1, 0.0, 0.0]]))
+    for row in (0, 1):
+        lp = _prior_depth(
+            cat, mark_model="loglinear", eta=[1.5], mark_names=("logmstar",), row=row
+        )
+        integ = _trapezoid(np.exp(lp), np.asarray(zgrid))
+        assert abs(integ - 1.0) < 5e-3
+
+
+# ------------------------------------------------------------
+# Amplitude units: count x <h>_w, not the raw weighted mass
+# ------------------------------------------------------------
+# The catalog:missing odds are COUNT odds (module docstring of redshift/prior.py),
+# so the marked amplitude must be invariant under WEIGHT -> c*WEIGHT: the raw
+# Sum_i w_i h_i let a luminosity-weighted catalog (L/L_sun ~ 1e10) swamp the
+# missing branch and switch the completeness correction off silently.
+
+def _cat_weighted(logmstar, scale=1.0, vary=True):
+    """``_cat`` with non-unit (optionally per-galaxy varying) weights."""
+    cat = _cat(logmstar=logmstar)
+    w = np.zeros((2, 3))
+    w[0, :2] = [1.0, 3.0] if vary else [1.0, 1.0]
+    w[1, :1] = 2.0 if vary else 1.0
+    return cat._replace(wgals=jnp.asarray(w * scale))
+
+
+def test_marked_prior_is_invariant_to_the_weight_scale():
+    logm = np.array([[0.6, -0.4, 0.0], [0.1, 0.0, 0.0]])
+    base = _prior(_cat_weighted(logm, scale=1.0), mark_model="loglinear",
+                  eta=[1.5], mark_names=("logmstar",))
+    scaled = _prior(_cat_weighted(logm, scale=1e10), mark_model="loglinear",
+                    eta=[1.5], mark_names=("logmstar",))
+    assert np.max(np.abs(np.exp(base) - np.exp(scaled))) < 1e-9
+
+
+def test_eta_zero_reduces_to_unmarked_with_non_unit_weights():
+    """The eta = 0 reduction must not need unit weights (only h == 1)."""
+    logm = np.array([[0.5, -0.5, 0.0], [0.2, 0.0, 0.0]])
+    cat = _cat_weighted(logm, scale=7.0)
+    base = _prior(cat, mark_model="none")
+    marked0 = _prior(cat, mark_model="loglinear", eta=[0.0],
+                     mark_names=("logmstar",))
+    assert np.max(np.abs(np.exp(base) - np.exp(marked0))) < 1e-9
+
+
+# ------------------------------------------------------------
+# mu_miss outside the catalog's redshift coverage
+# ------------------------------------------------------------
+
+def test_mu_miss_is_continuous_and_reduces_to_the_mean_outside_coverage():
+    """Uninformed z-bins take the catalog-wide mean efficiency, not 1.
+
+    With centred marks Jensen gives <h> >= 1, so the old homogeneous default made
+    the missing density drop by that factor across ONE 0.125-wide bin at the
+    catalog's coverage edge -- and made eta shift the catalog:missing odds even
+    for marks with no redshift structure.
+    """
+    from darksirens.redshift.prior import _mu_miss_from_flat
+
+    rng = np.random.default_rng(0)
+    zs = rng.uniform(0.01, 0.30, 20000)          # coverage stops at z = 0.3
+    h = np.exp(np.clip(2.0 * rng.normal(0.0, 1.0, zs.size), -7.0, 7.0))
+    mu = np.asarray(_mu_miss_from_flat(
+        jnp.asarray(zs), jnp.asarray(h), jnp.ones(zs.size)
+    ))
+    z = np.asarray(zgrid)
+    mean_h = float(h.mean())
+    assert mean_h > 3.0                          # the Jensen factor is large here
+    # No cliff across the coverage edge, and far outside it mu_miss is the mean.
+    assert abs(mu[np.searchsorted(z, 0.25)] / mu[np.searchsorted(z, 0.40)] - 1.0) < 0.1
+    assert abs(mu[np.searchsorted(z, 3.0)] / mean_h - 1.0) < 1e-6
+
+
+def test_z_independent_marks_leave_the_prior_unchanged():
+    """A mark with no redshift structure must not move the prior at all.
+
+    h is then a constant that multiplies BOTH branches (amplitude N_obs*<h>_w and
+    dN_miss*mu_miss), so it cancels in p(z|pix) -- eta is a pure SHAPE parameter.
+    """
+    cat = _cat(logmstar=np.full((2, 3), 0.7))
+    base = _prior(cat, mark_model="none")
+    for eta in (0.5, 2.0, -1.0):
+        marked = _prior(cat, mark_model="loglinear", eta=[eta],
+                        mark_names=("logmstar",))
+        assert np.max(np.abs(np.exp(base) - np.exp(marked))) < 1e-9, eta

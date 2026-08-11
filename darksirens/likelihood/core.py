@@ -209,6 +209,67 @@ def redshift_prior_state_sharing(universe_model, catalogs_pe, catalogs_sel) -> t
     )
 
 
+def require_view_independent_mu_miss(
+    mark_model, mark_names_by_catalog, catalog_sky_weighting,
+    catalogs_pe, catalogs_sel,
+) -> None:
+    """Refuse a marked-host model whose ``mu_miss(z|eta)`` would differ between
+    the PE and the selection seam.
+
+    Every other quantity the marked dark-siren prior builds is per-ROW (kernels,
+    dN_miss, Z[pix]), so restricting a view to a subset of pixels leaves it
+    unchanged.  ``mu_miss(z|eta) = E_obs[h|z]`` is the one AGGREGATE: a single
+    ``(N_grid,)`` curve estimated by z-binning ``h`` over the galaxies present in
+    the EMCatalog it is handed (``_mu_miss_grid``), so its value depends on WHICH
+    pixels the view holds.  When the PE and selection catalogs are compacted over
+    different pixel sets the hierarchical likelihood then divides a numerator
+    carrying ``mu_miss^PE`` by a beta carrying ``mu_miss^sel``: the population
+    prior no longer cancels between the two seams, biasing eta and (through the
+    missing-galaxy budget) H0.  This is the conditional-mode twin of the guard
+    field mode already carries, which demands the view-independent full-sky flat
+    marks for exactly this reason.
+
+    Called EAGERLY on the concrete (pre-jit) EMCatalogs, like
+    :func:`redshift_prior_state_sharing`.  Two escapes: the flat FULL-SKY marks
+    (``field_mark_z`` / ``field_mark_values``), which
+    ``prepare_redshift_prior_state`` uses for ``mu_miss`` in BOTH conventions
+    when present, or PE/selection views over the same pixel set (the union views
+    every in-repo loader builds).
+    """
+    import numpy as np
+
+    if mark_model in (None, "none") or catalog_sky_weighting == "field":
+        return
+    for k, (cat_pe, cat_sel) in enumerate(zip(catalogs_pe, catalogs_sel)):
+        names = (
+            mark_names_by_catalog[k] if k < len(mark_names_by_catalog) else ()
+        )
+        if not names:
+            continue  # h == 1 for this catalog: the plain galaxy-count model
+        if cat_pe.field_mark_values is not None and cat_pe.field_mark_z is not None:
+            continue  # mu_miss comes from the view-INDEPENDENT full-sky marks
+        pe_pixels, sel_pixels = cat_pe.unique_pixels, cat_sel.unique_pixels
+        same_view = (
+            (pe_pixels is None and sel_pixels is None)
+            or (
+                pe_pixels is not None and sel_pixels is not None
+                and np.array_equal(np.asarray(pe_pixels), np.asarray(sel_pixels))
+            )
+        )
+        if not same_view:
+            raise ValueError(
+                f"catalog_sky_weighting='conditional' with mark_model="
+                f"{mark_model!r} requires the PE and selection views of catalog "
+                f"{k + 1} to cover the SAME pixels, or the flat FULL-SKY mark "
+                "inputs (field_mark_z / field_mark_values) built via "
+                "darksirens.redshift.completion.build_field_mark_inputs: "
+                "mu_miss(z|eta) is a survey-level aggregate over the galaxies in "
+                "the view, so two different views give the PE numerator and the "
+                "selection beta different missing-galaxy modulations and the "
+                "population prior no longer cancels between them."
+            )
+
+
 def _require_field_mode_scope(universe_model, wl_enabled, mark_model, catalogs):
     """Reject FIELD-convention sky weighting outside its supported scope.
 

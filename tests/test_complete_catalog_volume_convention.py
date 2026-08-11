@@ -101,3 +101,47 @@ def test_complete_prior_tracks_volume_prior_on_uniform_catalog():
         f"complete-catalog prior does not track dV_c/dz on a uniform-in-volume "
         f"catalog: log-log ratio slope {slope:+.3f} (double-counted volume?)"
     )
+
+
+def test_complete_prior_depends_on_delta_with_photometric_redshifts():
+    """``delta`` is an ACTIVE parameter of the complete-catalog likelihood.
+
+    g(z) = dV_c/dz (1+z)^delta is the interim prior on each galaxy's true
+    redshift: the kernels are divided by Z_i = integral N(z; z_i, sig_eff) g(z) dz
+    and the evaluator reapplies g(z) as a front factor.  The two cancel only as
+    sig_eff -> 0, so with photometric dzgals the prior tilts with delta -- which
+    is why inference/prior.py must NOT declare delta inert for this model.
+    """
+    zg = np.array([[0.10, 0.30, 100.0], [0.20, 100.0, 100.0]])
+    ng = np.array([2, 1], dtype=np.int32)
+    wg = np.array([[1.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    cosmo = _cosmo()
+    zq = jnp.asarray([0.10, 0.30])
+
+    def _p(dz_value, delta):
+        survey = _survey()._replace(delta=delta)
+        cat = EMCatalog(
+            apix=1.0,
+            zgals=jnp.asarray(zg),
+            dzgals=jnp.full((2, 3), dz_value),
+            wgals=jnp.asarray(wg),
+            ngals=jnp.asarray(ng),
+            delta_g_pix_z=jnp.zeros((1, 8)),
+            dN_obs_kde=None,
+            pixel_to_cache_idx=None,
+        )
+        state = prepare_redshift_prior_state(
+            "dark_sirens_complete", cosmo, survey, cat
+        )
+        return np.exp(np.asarray(eval_redshift_prior_with_state(
+            "dark_sirens_complete", state, zq,
+            jnp.zeros(2, dtype=jnp.int32), cosmo, survey, cat)))
+
+    # Spectroscopic: g(z) cancels to <0.5% (effectively inert).
+    spec = _p(1e-3, 3.0) / _p(1e-3, 0.0)
+    assert np.all(np.abs(spec - 1.0) < 5e-3)
+    # Photometric: a several-per-cent tilt that also VARIES across z, so it is
+    # not absorbed by any normalisation.
+    photo = _p(0.05, 3.0) / _p(0.05, 0.0)
+    assert np.max(np.abs(photo - 1.0)) > 0.02
+    assert abs(photo[0] - photo[1]) > 0.02
