@@ -288,7 +288,8 @@ def _nested_sampler_preflight(likelihood, prior_transform, ndims, opts, n_probe=
 
 
 def run_sampler(method, likelihood, prior_transform, labels,
-                lower_bound, upper_bound, opts, prior_kinds=None):
+                lower_bound, upper_bound, opts, prior_kinds=None,
+                joint_constraints=None):
     """
     method: "tinyns", "dynesty", or "numpyro"
     likelihood: function(coord) -> logL (expects 1D array)
@@ -296,6 +297,9 @@ def run_sampler(method, likelihood, prior_transform, labels,
     labels: list of parameter names
     lower_bound, upper_bound: arrays
     opts: argparse namespace
+    joint_constraints: index-resolved joint prior constraints ALREADY applied by
+        ``prior_transform``'s cube maps (nested samplers); the numpyro model
+        builds independent per-parameter sites, so they are only reported there
 
     Returns a dict:
         {
@@ -545,11 +549,39 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 "lower bound."
             )
 
+        # JOINT prior constraints (dipole unit ball, mixture simplex,
+        # ordered_le) are reparameterized away by make_prior_transform's cube
+        # maps, so the nested samplers propose only inside the constrained
+        # region.  The sites below are INDEPENDENT per parameter, so here the
+        # same region is carved out by likelihood-side rejection instead: the
+        # posterior is the same measure (uniform on the constrained set either
+        # way), but NUTS must integrate against a hard -inf wall whose gradient
+        # is NaN, so divergences become structural rather than diagnostic.  Say
+        # so instead of leaving the operator to read it out of the divergence
+        # fraction.
+        if joint_constraints:
+            print(
+                "  [!] joint prior constraints "
+                + ", ".join(f"{kind}{tuple(idx)}"
+                            for kind, idx in joint_constraints)
+                + " are enforced for NUTS by likelihood-side REJECTION (the "
+                "nested samplers reparameterize them into the unit cube "
+                "instead). The posterior is the same truncated measure, but "
+                "the -inf boundary has no gradient: expect a structurally "
+                "elevated divergence fraction and reduced ESS. Prefer "
+                "--sampler dynesty/tinyns for "
+                + ", ".join(sorted({kind for kind, _ in joint_constraints}))
+                + " models.",
+                flush=True,
+            )
+
         def _site(i, name):
-            # Per-parameter prior, matching make_prior_transform's measure so
-            # nested and NUTS infer the same posterior.  "normal" gives whitened
-            # GP latents the unit-scale geometry NUTS needs (Option A); low/high
-            # act as truncation bounds for every kind.
+            # Per-parameter prior, matching make_prior_transform's PER-DIMENSION
+            # measure so nested and NUTS infer the same posterior.  Any JOINT
+            # constraint is NOT reproduced here (see the note above): it is left
+            # to likelihood-side rejection.  "normal" gives whitened GP latents
+            # the unit-scale geometry NUTS needs (Option A); low/high act as
+            # truncation bounds for every kind.
             kind, kloc, kscale = ("uniform", None, None)
             if prior_kinds is not None:
                 kind, kloc, kscale = prior_kinds[i]

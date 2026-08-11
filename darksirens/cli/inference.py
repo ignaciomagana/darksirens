@@ -1044,6 +1044,11 @@ class _ParameterSpace:
     n_cosmo_eff: object
     n_survey_eff: object
     model_name: object
+    # Index-resolved joint prior constraints applied by make_prior_transform's
+    # cube maps (empty when the model declares none); carried so the samplers
+    # can see which constraints the transform -- and only the transform --
+    # enforces.
+    joint_constraints: object = ()
 
 
 def build_parser():
@@ -2970,6 +2975,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         n_cosmo_eff=n_cosmo_eff,
         n_survey_eff=n_survey_eff,
         model_name=model_name,
+        joint_constraints=tuple(joint_constraints or ()),
     )
 
 
@@ -3021,6 +3027,7 @@ def _run_sampling(opts, likelihood, pspace):
         prior_transform=prior_transform, labels=labels,
         lower_bound=lower_bound, upper_bound=upper_bound, opts=opts,
         prior_kinds=prior_kinds,
+        joint_constraints=getattr(pspace, "joint_constraints", ()),
     )
     t_sample_end  = datetime.datetime.now()
     wall_sampling = t_sample_end - t_sample_start
