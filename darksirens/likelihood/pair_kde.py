@@ -343,15 +343,26 @@ def log_eval_pair_kde(
     samples = jnp.where(valid[:, None], kde.samples, 0.0)         # (N, 4)
     log_w = jnp.where(valid, kde.log_weights, 0.0)                # (N,)
 
-    diff = (theta_app[..., None, :] - samples[None, :, :]) / jnp.exp(kde.log_h)
-    sq = diff * diff                                              # (..., N, 4)
-    sq_rest = jnp.sum(sq, axis=-1) - sq[..., q_axis]              # (..., N)
+    # Accumulate the squared distance coordinate BY coordinate.  A (..., N, 4)
+    # difference array is 4x the (..., N) reduction it feeds -- at the caller's
+    # (N_pe_i, N_y, 4) query with N_pe = 400, N_y = 64 that is 327 MB per
+    # temporary -- and building ``sq_rest`` as ``sum(sq) - sq[q_axis]`` also
+    # cancelled the other three coordinates away whenever the q term dominated
+    # the sum by many orders of magnitude.
+    h = jnp.exp(kde.log_h)                                        # (4,)
+    sq_rest = jnp.zeros(())
+    for k in range(_D):
+        if k == q_axis:
+            continue
+        d_k = (theta_app[..., k][..., None] - samples[:, k]) / h[k]
+        sq_rest = sq_rest + d_k * d_k                             # (..., N)
+    diff_q = (theta_app[..., q_axis][..., None] - samples[:, q_axis]) / h[q_axis]
     # Mirror image of each sample's q about the boundary: 2 - q_t.
     diff_q_ref = (
-        theta_app[..., q_axis][..., None] + samples[None, :, q_axis] - 2.0
-    ) / jnp.exp(kde.log_h[q_axis])
+        theta_app[..., q_axis][..., None] + samples[:, q_axis] - 2.0
+    ) / h[q_axis]
     log_kernel_q = jnp.logaddexp(
-        -0.5 * sq[..., q_axis], -0.5 * diff_q_ref * diff_q_ref
+        -0.5 * diff_q * diff_q, -0.5 * diff_q_ref * diff_q_ref
     )
     log_kernel = -0.5 * sq_rest + log_kernel_q                    # (..., N)
 

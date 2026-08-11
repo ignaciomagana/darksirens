@@ -272,6 +272,32 @@ class TestPairKDE:
             f"expected < 0.3 statistical noise"
         )
 
+    def test_log_eval_broadcasts_without_a_trailing_coordinate_axis(self):
+        """Query shape (..., 4) -> (...), with no (..., N, 4) intermediate.
+
+        The kernel accumulates the squared distance coordinate by coordinate:
+        the old (..., N, 4) difference array was 4x the size of the (..., N)
+        reduction it feeds (327 MB per temporary at the production N_pe = 400,
+        N_y = 64), and its ``sum(sq) - sq[q_axis]`` also cancelled the other
+        three coordinates away when the q term dominated the sum.
+        """
+        rng = np.random.default_rng(5)
+        N = 64
+        kde = make_pair_kde(
+            m1det=rng.normal(35, 3, N), q=rng.normal(0.7, 0.05, N),
+            dL_app=rng.normal(1000, 100, N), chieff=rng.normal(0, 0.1, N),
+            prior_wt=np.ones(N),
+        )
+        pt = np.array([35.0, 0.7, 1000.0, 0.0])
+        assert np.asarray(log_eval_pair_kde(kde, jnp.asarray(pt))).shape == ()
+        for shape in [(3,), (2, 5)]:
+            q = jnp.asarray(np.broadcast_to(pt, shape + (4,)))
+            got = np.asarray(log_eval_pair_kde(kde, q))
+            assert got.shape == shape
+            np.testing.assert_allclose(
+                got, float(log_eval_pair_kde(kde, jnp.asarray(pt))), rtol=1e-12
+            )
+
     def test_jit_compiles(self):
         rng = np.random.default_rng(3)
         N = 200
