@@ -32,6 +32,7 @@ from darksirens.likelihood.block_sizing import require_resolved_block_size
 from darksirens.likelihood.core import (
     darksiren_log_likelihood,
     redshift_prior_state_sharing,
+    require_view_independent_mu_miss,
     WL_BACKEND_DISABLED,
     WL_BACKEND_LOGNORMAL,
     WL_BACKEND_TABULATED,
@@ -539,6 +540,12 @@ def _make_mixture_likelihood(
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, em_catalogs_pe, em_catalogs_sel
     )
+    # Same eager, pre-jit vantage point: refuse a marked-host model whose
+    # view-level mu_miss(z|eta) would differ between the two seams.
+    require_view_independent_mu_miss(
+        mark_model, mark_names_all, catalog_sky_weighting,
+        em_catalogs_pe, em_catalogs_sel,
+    )
 
     # Device operands travel as jit ARGUMENTS (see :func:`_jit_likelihood_body` for
     # why closing over them would embed them as HLO constants instead).
@@ -1011,6 +1018,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     )
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, (em_catalog_pe,), (em_catalog_sel,)
+    )
+    require_view_independent_mu_miss(
+        mark_model, (mark_names,), catalog_sky_weighting,
+        (em_catalog_pe,), (em_catalog_sel,),
     )
 
     # The GW containers are coord-INDEPENDENT too — every field is an

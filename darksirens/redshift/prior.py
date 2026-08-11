@@ -471,11 +471,22 @@ def prepare_redshift_prior_state(
                 cosmo, survey, em_catalog, log_h, log_g_grid=log_g_grid,
                 z_depth=survey.z_depth,
             )
-            if is_field:
-                # Field mode: mu_miss and the observed marked mass come from
-                # the FULL-SKY flat marks (field_mark_*), so the PE and
-                # selection states share ONE global normalizer for the same
-                # (theta, eta) and the numerator's missing budget matches it.
+            has_flat_marks = (
+                em_catalog.field_mark_values is not None
+                and em_catalog.field_mark_z is not None
+            )
+            if is_field or has_flat_marks:
+                # mu_miss and the observed marked mass come from the FULL-SKY
+                # flat marks (field_mark_*), so the PE and selection states
+                # share ONE global normalizer for the same (theta, eta) and the
+                # numerator's missing budget matches it.  Field mode REQUIRES
+                # these inputs (checked above); the conditional path uses them
+                # whenever they are attached, because mu_miss is a survey-level
+                # host-efficiency curve and NOT a property of whichever pixels
+                # the current view happens to hold -- the view-level estimator
+                # below gives the PE and selection seams different modulations
+                # when their views differ (see require_view_independent_mu_miss
+                # in likelihood/core.py, which refuses that combination).
                 from darksirens.marks import mark_model_flat_parser
                 log_h_flat = jnp.clip(
                     mark_model_flat_parser(mark_model, mark_names)(
