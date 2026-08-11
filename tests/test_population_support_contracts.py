@@ -117,6 +117,27 @@ def test_mass_grid_lower_bound_reaches_global_normalization_floor():
     assert m1_hi >= 200.0
 
 
+def test_mass_grid_upper_bound_covers_a_declared_support_without_named_specs():
+    """The proposal box must cover the model's DECLARED support.
+
+    The bounds are derived by string-matching ``ParamSpec.name`` suffixes, and the
+    bespoke models build their specs without ``name=``: every lookup then returns
+    its default and the box collapsed to the hardcoded (1, 200) even for
+    ``gwtc5_fiducial_bpl2peaks``, whose support runs to a fixed 300 Msun.
+    """
+    from darksirens.gw.populations.registry import (
+        get_model,
+        population_m1_support_max,
+    )
+    from darksirens.gw.populations.sampling import resolve_mass_grid_bounds
+
+    model = get_model("gwtc5_fiducial_bpl2peaks")
+    support = population_m1_support_max(model)
+    assert support == 300.0
+    _, m1_hi = resolve_mass_grid_bounds(model)
+    assert m1_hi >= support, (m1_hi, support)
+
+
 # ---------------------------------------------------------------------------
 # The mixture's low-mass edge is a MODEL parameter, not the quadrature floor
 # ---------------------------------------------------------------------------
