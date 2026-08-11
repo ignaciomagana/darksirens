@@ -161,3 +161,40 @@ def test_marginals_are_normalised():
                        (zgrid, p_z), (chigrid, p_chi)]:
         integral = _trapezoid(np.asarray(marg[0]), grid)
         np.testing.assert_allclose(integral, 1.0, rtol=1e-6, atol=1e-9)
+
+
+# --------------------------------------------------------------------------
+# A degenerate (zero-density) posterior sample must not NaN the whole figure
+# --------------------------------------------------------------------------
+
+def test_zero_density_sample_yields_zero_curves_not_nan():
+    """A constraint-violating draw (e.g. parametric.py's ``valid`` mask forces
+    p = 0 everywhere) integrates to exactly 0 on the grid.  Unguarded ``/=``
+    normalisations turn that into 0/0 = NaN, and jnp.median/jnp.percentile
+    propagate NaN — one bad sample out of thousands would blank the credible band
+    of every model in the figure, silently."""
+    from darksirens.cli.analyze import make_single_theta_predictive, summarize_ppd
+
+    settings = {"pop_model": "powerlaw", "fix_population": True,
+                "shared_beta": True, "shared_spin": True, "shared_gamma": True}
+    mgrid = np.linspace(6.0, 50.0, 8)
+    qgrid = np.linspace(0.05, 1.0, 5)
+    zgrid = np.linspace(0.0, 1.5, 4)
+    chigrid = np.linspace(-1.0, 1.0, 3)
+
+    def dead_model(m1, q, z, chi, theta):
+        return jnp.full(jnp.shape(m1), -jnp.inf)      # p = 0 everywhere
+
+    for grid_chunk in (None, 3):
+        fn = make_single_theta_predictive(dead_model, settings, mgrid, qgrid, zgrid,
+                                          chigrid, grid_chunk=grid_chunk)
+        for arr in fn(jnp.zeros(1)):
+            arr = np.asarray(arr)
+            assert np.all(np.isfinite(arr)), grid_chunk
+            assert np.all(arr == 0.0), grid_chunk
+
+    # ... and the summary of a stack containing one dead sample is unaffected.
+    good = np.tile(np.linspace(0.1, 1.0, 8), (4, 1))
+    stack = np.vstack([good, np.zeros((1, 8))])
+    med, lo, hi = summarize_ppd(stack)
+    assert np.all(np.isfinite(med)) and np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))

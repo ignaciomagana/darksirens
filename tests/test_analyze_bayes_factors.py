@@ -111,3 +111,24 @@ def test_analyze_parser_defaults_legacy_pickle_off():
     args = _build_parser().parse_args([])
     assert args.allow_legacy_pickle is False
     assert _build_parser().parse_args(["--allow_legacy_pickle"]).allow_legacy_pickle
+
+
+def test_evidence_bars_carry_the_error_on_the_DIFFERENCE():
+    """The bars are log BFs against the best model, so the error must be the
+    combined hypot(err_i, err_best) — the same combination the pairwise matrix
+    prints — and the reference model's own bar cannot carry an error bar."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import numpy as np
+
+    from darksirens.cli.analyze import plot_model_evidences
+
+    log10Zs = [-10.0, -8.0, -12.0]
+    errs = [0.3, 0.4, 0.5]
+    fig = plot_model_evidences(["a", "best", "c"], log10Zs, errs)
+    ax = fig.axes[0]
+    (segments,) = [c.get_segments() for c in ax.collections]
+    heights = [np.abs(seg[1][1] - seg[0][1]) / 2.0 for seg in segments]
+    want = [np.hypot(0.3, 0.4), 0.0, np.hypot(0.5, 0.4)]
+    np.testing.assert_allclose(sorted(heights), sorted(want), rtol=1e-9, atol=1e-12)
+    matplotlib.pyplot.close(fig)

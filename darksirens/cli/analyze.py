@@ -258,6 +258,14 @@ def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
         b = max(1, min(batch_cap, int(nsamples)))
 
     if grid_chunk is not None:
+        if int(grid_chunk) >= n_outer:
+            # Clamping silently to n_outer IS the full-grid path, i.e. chunking
+            # off -- the opposite of what a user passing this flag wants.  It is
+            # the usual symptom of reading the value as flattened 4-D grid points
+            # (nm*nq*nz*nchi) rather than outer-plane rows (nm*nq).
+            _warn(f"--grid_chunk={int(grid_chunk)} >= nm*nq={n_outer}: one slab "
+                  "covers the whole (m1, q) plane, so chunking is disabled. The "
+                  "flag counts ROWS of that plane, not flattened 4-D grid points.")
         return b, max(1, min(int(grid_chunk), n_outer))
 
     def _slab_for(bb):
@@ -408,15 +416,24 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
         I_z = I_z.reshape(nm, nq, nchi)
 
         # 1-D marginals: outer (m1, q) integrals of the inner (z, chi) integrals.
+        # Every normalisation is guarded like the 2-D joint below: a sample whose
+        # density integrates to exactly 0 on this grid (a constraint-violating
+        # parametric draw, an underflowed GP field, or a --mmin/--mmax/--zmax
+        # window that misses the model support) would otherwise give 0/0 = NaN,
+        # and jnp.median/jnp.percentile in summarize_ppd propagate NaN — one bad
+        # draw out of thousands would blank the whole credible band, silently.
+        def _normed(p, grid):
+            """Normalise a 1-D marginal, leaving an all-zero curve alone."""
+            z = jnp.trapezoid(p, grid)
+            return p / jnp.where(z > 0, z, 1.0)
+
         p_m1q = I_zc                                          # ∫∫ p dz dchi
-        p_m1 = jnp.trapezoid(p_m1q, qgrid, axis=1)
-        p_m1 /= jnp.trapezoid(p_m1, mgrid)
-        p_q = jnp.trapezoid(p_m1q, mgrid, axis=0)
-        p_q /= jnp.trapezoid(p_q, qgrid)
-        p_z = jnp.trapezoid(jnp.trapezoid(I_c, qgrid, axis=1), mgrid, axis=0)
-        p_z /= jnp.trapezoid(p_z, zgrid)
-        p_chi = jnp.trapezoid(jnp.trapezoid(I_z, qgrid, axis=1), mgrid, axis=0)
-        p_chi /= jnp.trapezoid(p_chi, chigrid)
+        p_m1 = _normed(jnp.trapezoid(p_m1q, qgrid, axis=1), mgrid)
+        p_q = _normed(jnp.trapezoid(p_m1q, mgrid, axis=0), qgrid)
+        p_z = _normed(jnp.trapezoid(jnp.trapezoid(I_c, qgrid, axis=1), mgrid, axis=0),
+                      zgrid)
+        p_chi = _normed(jnp.trapezoid(jnp.trapezoid(I_z, qgrid, axis=1), mgrid, axis=0),
+                        chigrid)
 
         # 2-D joint p(m1, m2): map q→m2 on p(m1, q).
         p_interp = jax.vmap(
@@ -425,8 +442,7 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
         p_m1m2 = p_interp * jac * valid
         norm_2d = jnp.trapezoid(jnp.trapezoid(p_m1m2, mgrid, axis=0), mgrid, axis=0)
         p_m1m2 = jnp.where(norm_2d > 0, p_m1m2 / norm_2d, p_m1m2)
-        p_m2 = jnp.trapezoid(p_m1m2, mgrid, axis=0)
-        p_m2 /= jnp.trapezoid(p_m2, mgrid)
+        p_m2 = _normed(jnp.trapezoid(p_m1m2, mgrid, axis=0), mgrid)
 
         return p_m1, p_m2, p_q, p_z, p_chi, p_m1m2
 
@@ -639,12 +655,19 @@ def plot_catalog_weight_posteriors(weights, is_field=True, figsize=None):
 def plot_model_evidences(labels, log10Zs, log10Zerrs, figsize=(10, 6)):
     log10Zs = np.asarray(log10Zs, dtype=float)
     errs = np.asarray([0.0 if e is None else e for e in log10Zerrs], dtype=float)
-    delta = log10Zs - np.max(log10Zs)
+    # The bars are log Bayes factors AGAINST THE BEST MODEL, so the uncertainty is
+    # the one on the difference — hypot(err_i, err_best), the same combination
+    # plot_bayes_factor_matrix uses — not the single-model error on log10 Z.  The
+    # reference model's own bar is exactly 0 and carries no error.
+    best = int(np.argmax(log10Zs))
+    delta = log10Zs - log10Zs[best]
+    delta_err = np.hypot(errs, errs[best])
+    delta_err[best] = 0.0
 
     fig, ax = plt.subplots(figsize=figsize)
     xs = np.arange(len(labels))
     colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(labels))]
-    ax.bar(xs, delta, yerr=errs, color=colors, alpha=0.85, capsize=5)
+    ax.bar(xs, delta, yerr=delta_err, color=colors, alpha=0.85, capsize=5)
     ax.axhline(0.0, color="black", lw=1.5, ls="--")
     ax.set_xticks(xs)
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=16)
@@ -751,8 +774,10 @@ def _build_parser():
     p.add_argument("--batch_size", type=int, default=None,
                    help="Per-sample batch size; auto-chosen from device memory if unset.")
     p.add_argument("--grid_chunk", type=int, default=None,
-                   help="Flattened-grid points per density-evaluation chunk; auto-chosen "
-                        "from device memory if unset (bounds the GP kernel tensor).")
+                   help="Rows of the flattened (m1, q) outer plane per density-evaluation "
+                        "slab (nm*nq rows in total, NOT flattened 4-D grid points); "
+                        "auto-chosen from device memory if unset (bounds the GP kernel "
+                        "tensor). A value >= nm*nq disables chunking.")
     p.add_argument("--max_mem_gb", type=float, default=None,
                    help="Memory budget in GB for posterior-predictive sizing; probes the "
                         "JAX device if unset (env DARKSIRENS_ANALYZE_MAX_MEM_GB also works).")
