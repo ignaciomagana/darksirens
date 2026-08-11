@@ -44,6 +44,7 @@ if "tinygp" not in sys.modules:
 jnp = pytest.importorskip("jax.numpy")
 
 from darksirens.cli.analyze import (
+    gp_node_count,
     plan_ppd_sizing,
     probe_device_memory_bytes,
     posterior_predictive,
@@ -98,6 +99,15 @@ def test_plan_ppd_sizing_honors_overrides():
         max_mem_bytes=8e9, batch_size=3, grid_chunk=11,
     )
     assert batch == 3 and slab == 11
+
+
+def test_gp_node_count_covers_the_additive_family():
+    # The additive models keep their nodes per ANOVA term (no top-level ``M``),
+    # so a bare getattr(model, "M", 0) probe would size their slab as parametric.
+    assert gp_node_count(pop_model_parser("powerlaw")) == 0
+    assert gp_node_count(pop_model_parser("gp4d")) == 6400
+    assert gp_node_count(pop_model_parser("gp4d_additive")) == 268
+    assert gp_node_count(pop_model_parser("gp_separable")) == 28
 
 
 def test_probe_device_memory_positive():

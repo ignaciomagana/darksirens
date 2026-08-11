@@ -273,6 +273,24 @@ def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
     return b, c
 
 
+def gp_node_count(pop_model):
+    """Total inducing-node count behind a bound ``log_p_pop`` (0 for parametric).
+
+    ``JointGPPopulation`` / ``BinnedGPPopulation`` expose one flat node block as
+    ``M``; the additive family (``gp_separable``, ``gp4d_additive``) carries one
+    block per ANOVA term in ``_term_meta`` and has no top-level ``M``, so sum
+    those — reading ``M`` alone silently sizes the PPD slab as if the per-query
+    kernel tensor did not exist (~18x too large for ``gp4d_additive``).
+    """
+    model = getattr(pop_model, "__self__", None)
+    if model is None:
+        return 0
+    M = int(getattr(model, "M", 0) or 0)
+    if M:
+        return M
+    return int(sum(int(t["M"]) for t in getattr(model, "_term_meta", ()) or ()))
+
+
 def batched_map(fn, samples, batch_size):
     """Apply ``fn`` to each row of ``samples`` via jit(vmap), batched.
 
@@ -432,7 +450,7 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
     n_outer = int(nm * nq)
     grid_points = int(nm * nq * nz * nchi)
     # GP inducing-node count (drives the (pts x M) eval cost); 0 for parametric.
-    n_nodes = int(getattr(getattr(pop_model, "__self__", None), "M", 0) or 0)
+    n_nodes = gp_node_count(pop_model)
 
     if max_mem_gb is not None:
         max_mem_bytes, mem_src = float(max_mem_gb) * 1e9, "cli:--max_mem_gb"
