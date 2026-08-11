@@ -158,6 +158,25 @@ def test_stratified_missing_map_requires_stratum_inputs():
         _field_missing_curve(_cosmo(), sv, em)
 
 
+def test_out_of_range_stratum_label_is_refused():
+    """A label >= S must fail loudly: a JAX out-of-bounds gather CLAMPS, so the
+    pixel would silently take stratum S-1's completeness curve (review F-065)."""
+    em = _em(stratum_map=np.full(12, 2, dtype=np.int32))   # S = 2 -> labels 0,1
+    sv = _survey(selection_strata=STRATA)
+    with pytest.raises(ValueError, match="labels span"):
+        _precompute_grids(_cosmo(), sv, em)
+
+
+def test_empty_stratum_budget_arity_mismatch_is_refused():
+    """``V_empty = sum_s (1 - Cbar_s) budget_s`` broadcasts, so a 1-row budget
+    against S curves would over-count the empty-sky budget S-fold (F-065)."""
+    em = _em(stratum_map=_alternating_map())
+    em = em._replace(empty_stratum_counts=jnp.asarray([3.0]))   # 1 row, S = 2
+    sv = _survey(selection_strata=STRATA)
+    with pytest.raises(ValueError, match="stratum rows"):
+        _field_missing_curve(_cosmo(), sv, em)
+
+
 def test_h0_firewall_survives_stratification():
     em = _em(stratum_map=_alternating_map())
     a = _precompute_grids(_cosmo(50.0), _survey(selection_strata=STRATA), em)

@@ -100,17 +100,15 @@ def test_k1_parity_bit_identical_to_single(tmp_path):
     kw = dict(seed=7, gp3d_nz_solve=12, gp3d_pix_chunk=8,
               lss_corr_length_mpc=3000.0)
 
-    # S0b: the single-survey builder now applies the per-z mean-one budget
-    # renormalization by default; the JOINT builder deliberately does not
-    # (its estimand — ONE shared field over K distinct footprints — needs its
-    # own weighting design, and its unstamped files warn at load). Parity is
-    # therefore pinned against the raw (budget_renorm=False) single build.
+    # Both builders now apply the per-z mean-one budget renormalization by
+    # default, per survey under that survey's own (1 - C) dN_exp weights, so
+    # parity is pinned against the DEFAULT single build (review F-049: the
+    # joint builder used to ship Jensen-inflated, unstamped tables).
     # S0c: the JOINT builder also keeps its hardwired z_node_hi = 3.0 inducing
     # grid, so the single build pins gp3d_z_node_hi=3.0 (its own default moved
     # to the package zgrid max).
     lm_s, le_s, _ = build_completion(cat, mode="gp3d", n_members=5,
-                                     budget_renorm=False, gp3d_z_node_hi=3.0,
-                                     **kw)
+                                     gp3d_z_node_hi=3.0, **kw)
     res = build_joint_completion([cat], [str(tmp_path / "A_out.h5")],
                                  n_members=5, biases=[1.0], **kw)
     lm_j, le_j = res[0]["logq_map"], res[0]["logq_members"]
@@ -125,6 +123,45 @@ def test_k1_parity_bit_identical_to_single(tmp_path):
     assert d["indexing"] == "global"
     assert d["diagnostics"]["mode"] == "gp3d_joint"
     assert d["diagnostics"]["joint_n_surveys"] == 1
+    # F-049: the joint files carry the budget stamp + the removed monopole, so
+    # the loader no longer treats them as legacy (unrenormalized) tables.
+    assert d["budget_renormalized"] is True
+    assert d["budget_monopole_logq"].shape == (NG,)
+
+
+def test_joint_budget_renorm_enforces_mean_one_per_survey(tmp_path):
+    """Each survey's fitted rows satisfy sum_p w_p Q_p == sum_p w_p per z-bin
+    under that survey's OWN (1 - C) dN_exp weights (review F-049): Q places the
+    missing budget, C and n0 set it.  --no-budget-renorm keeps the raw E[Q]."""
+    from darksirens.cli.build_lognormal_completion import _assemble_gp3d_survey
+
+    catA = str(tmp_path / "A.h5")
+    catB = str(tmp_path / "B.h5")
+    _write_survey(catA, nside=1, pix_specs={0: (8, 0.4)}, seed=1)
+    _write_survey(catB, nside=1, pix_specs={2: (6, 0.5), 8: (4, 0.3)}, seed=2)
+    outs = [str(tmp_path / "Ao.h5"), str(tmp_path / "Bo.h5")]
+    kw = dict(n_members=0, gp3d_nz_solve=10, gp3d_pix_chunk=8,
+              log10n0s=[_OVERDENSE_LOG10N0], lss_corr_length_mpc=3000.0)
+
+    res = build_joint_completion([catA, catB], outs, **kw)
+    raw = build_joint_completion(
+        [catA, catB], [str(tmp_path / "Ar.h5"), str(tmp_path / "Br.h5")],
+        budget_renorm=False, **kw)
+
+    z_s = np.linspace(0.0, float(_Z[-1]), 10)
+    edges_s = np.concatenate([[z_s[0]], 0.5 * (z_s[:-1] + z_s[1:]), [z_s[-1]]])
+    cosmo, _ = J._fiducial_cosmo_survey()
+    for k, cat in enumerate((catA, catB)):
+        _, survey_k = J._fiducial_cosmo_survey(log10n0=_OVERDENSE_LOG10N0)
+        a = _assemble_gp3d_survey(cat, cosmo=cosmo, survey=survey_k,
+                                  z_s=z_s, edges_s=edges_s)
+        w = a.w_budget                                   # (n_occ, NG)
+        q = np.exp(res[k]["logq_map"][a.occ])
+        num, den = (w * q).sum(axis=0), w.sum(axis=0)
+        ok = den > 0
+        np.testing.assert_allclose(num[ok] / den[ok], 1.0, rtol=1e-10)
+        q_raw = np.exp(raw[k]["logq_map"][a.occ])
+        assert np.max(np.abs((w * q_raw).sum(axis=0)[ok] / den[ok] - 1.0)) > 1e-6
 
 
 # ===========================================================================

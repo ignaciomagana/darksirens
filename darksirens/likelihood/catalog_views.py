@@ -10,6 +10,7 @@ from jax import lax
 import numpy as np
 
 from darksirens.redshift.completion import (
+    _LOGQ_CLIP,
     build_field_delta_g_inputs,
     build_field_depth_inputs,
     build_field_lss_q_inputs,
@@ -549,7 +550,10 @@ def prepare_catalog_views(
                 if field_lss_q_empty_sum is not None:
                     # Per-stratum twin of the empty-pixel Q budget, from the
                     # same global (log)Q table.
-                    q_lin = np.exp(np.clip(logq_np, -700.0, 700.0))
+                    # SAME clip as the numerator (_to_q) and the whole-sky Q
+                    # rows: the per-stratum empty budget must carry the same
+                    # missing-galaxy total, not the raw table's tail.
+                    q_lin = np.exp(np.clip(logq_np, -_LOGQ_CLIP, _LOGQ_CLIP))
                     sums = np.zeros((n_strata, q_lin.shape[1]))
                     for s in range(n_strata):
                         rows = empty_mask & (strat_np == s)

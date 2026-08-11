@@ -528,6 +528,15 @@ def run_completion_validation(
             field_occupied_pixels=jnp.asarray(
                 np.asarray(_field.occupied_pixels), dtype=jnp.int32),
         )
+    if data.get("pixel_stratum_map") is not None:
+        # Stratified selection routes each pixel to its own C_sel curve by
+        # GLOBAL pixel, so the map stays full-sky (unsliced) like the run's.
+        # Without it the dry run cannot form the stratified estimator at all.
+        lss_kwargs = dict(
+            lss_kwargs,
+            pixel_stratum_map=jnp.asarray(
+                np.asarray(data["pixel_stratum_map"], dtype=np.int32)),
+        )
     em_catalog = EMCatalog(
         apix=data["apix"],
         zgals=jnp.asarray(full_z[unique_pixels]),
@@ -557,6 +566,34 @@ def run_completion_validation(
                       "Mstar_hat", "alpha", "M_faint_offset")}
         diagnostics["selection_family"] = str(
             getattr(opts, "selection_family", None) or "gaussian")
+        # The selection completeness never sees a galaxy count, so the missing
+        # budget amplitude (proportional to n0/H0^3) is identified only by its
+        # prior. Record the model-vs-observed counts so a prior-driven budget is
+        # auditable, and say so loudly when they disagree grossly.
+        from darksirens.redshift.completion import selection_budget_audit
+
+        _n_full = np.asarray(full_n).reshape(-1)
+        _audit = selection_budget_audit(
+            cosmo, survey, em_catalog,
+            N_obs_total=float(_n_full.sum()),
+            n_occupied=int((_n_full > 0).sum()),
+            n_pix_total=int(data.get("n_pix_catalog", _n_full.size)),
+        )
+        diagnostics["selection_budget_audit"] = _audit
+        _ratio = float(_audit["selection_model_over_observed_footprint"])
+        if not (1.0 / 3.0 < _ratio < 3.0):
+            _warn(
+                f"c_mode=selection budget audit: the model predicts "
+                f"{_audit['selection_model_N_obs_footprint']:.3g} catalogued "
+                f"galaxies over the footprint but the catalog holds "
+                f"{_audit['N_obs_total']:.3g} (ratio {_ratio:.3g}). The "
+                "selection completeness carries no counts, so the missing "
+                "budget is proportional to n0/H0^3 with nothing in the "
+                "likelihood calibrating it: at this (log10n0, delta, theta) the "
+                "in-vs-out-of-catalog odds -- and therefore the H0 information "
+                "-- are set by the log10n0 prior, not by the data. Recalibrate "
+                "log10n0 to N/(f_sky V_c) or narrow its prior."
+            )
     diagnostics["survey_values"] = survey_values
     diagnostics["cosmology_values"] = {
         "H0": float(cosmo.H0),
@@ -681,6 +718,93 @@ def _resolve_selection_fit_pins(sel, family, fixed_parameter_values):
         fixed_parameter_values["M_faint_offset"] = offset_fit
     return {name: float(fixed_parameter_values.get(name, sel[name]))
             for name in SELECTION_THETA_FIELDS[family]}
+
+
+def _check_aggregate_requires_q(opts, lss_active_by_catalog):
+    """``--c_mode aggregate`` is only meaningful with a full-sky Q table.
+
+    Aggregate mode replaces the per-pixel completeness with ONE sky curve
+    ``Cbar(z) = Sum_p dN_obs_s / (N_pix_total dN_exp_s)`` -- normalised over the
+    WHOLE SPHERE, so for a footprint survey ``Cbar ~ f_sky C_footprint`` --
+    broadcast to every pixel.  The design intends the mean-one ``Q`` field to
+    put that budget back where the galaxies are ("C says HOW MUCH is missing, Q
+    says WHERE it goes"), and the aggregate Q builder fits the full sky for
+    exactly that reason.  With no Q table the missing density falls back to the
+    legacy ``delta_g`` factor (or 1), both of which are mean-one over the sky
+    and therefore CANNOT encode a footprint: inside the footprint the prior then
+    claims ``1 - f_sky C_foot`` of hosts are uncatalogued (75% at f_sky = 0.25
+    with a locally complete catalog), diluting the very pixels that carry the
+    localization information.
+    """
+    if str(getattr(opts, "c_mode", None) or "per_pixel") != "aggregate":
+        return
+    missing = [k for k, active in enumerate(lss_active_by_catalog, start=1)
+               if not active]
+    if missing:
+        _fatal(
+            "--c_mode aggregate requires an --lss_completion table for every "
+            f"catalog (catalog(s) {missing} have none). Aggregate mode "
+            "normalises the completeness over the WHOLE SKY and delegates all "
+            "angular structure to the mean-one Q field, so without a full-sky Q "
+            "a footprint survey's missing budget is diluted by f_sky inside its "
+            "own footprint -- the legacy delta_g factor is mean-one over the sky "
+            "and cannot encode a footprint. Build Q with "
+            "darksirens_build_lognormal_completion --c-mode aggregate, or run "
+            "--c_mode per_pixel."
+        )
+
+
+def _check_q_table_z_depth(q_fiducials, opts):
+    """Fail-closed depth provenance of Q tables, PER CATALOG.
+
+    ``z_depth`` sets the completeness DENOMINATOR: with a depth,
+    ``_precompute_grids`` forms ``S @ (dN_exp 1[z <= z_depth])``, and without it
+    the denominator keeps mass above the depth the numerator can never match, so
+    C is biased low (and ``(1 - C) dN_exp`` high) over roughly the last ~0.1 in
+    z below the edge.  Q is the fit RESIDUAL to that base, so a table built at a
+    different depth than the run resolves places the missing galaxies against
+    the wrong completeness near the survey edge.  The builder stamps
+    ``fiducial_z_depth`` (absent = no depth prior at build time, or a table
+    predating the stamp), and this run's per-catalog depth is
+    ``opts.resolved_survey_z_depths``.
+    """
+    depths = list(getattr(opts, "resolved_survey_z_depths", None) or [])
+    for _k, _fid in enumerate(q_fiducials, start=1):
+        if not _fid:
+            continue
+        run_depth = depths[_k - 1] if len(depths) >= _k else None
+        tab_depth = _fid.get("fiducial_z_depth")
+        if tab_depth is not None and run_depth is not None:
+            if abs(float(tab_depth) - float(run_depth)) > 1e-9:
+                _fatal(
+                    f"catalog {_k}: Q table {_fid.get('path')} was built with "
+                    f"z_depth={float(tab_depth):g} but this run resolves "
+                    f"z_depth={float(run_depth):g}. The depth truncates the "
+                    "completeness denominator the field was fit residual to, "
+                    "so the table's Q would be consumed against a different "
+                    "C near the survey edge. Rebuild with "
+                    "darksirens_build_lognormal_completion --z-depth "
+                    f"{float(run_depth):g}, or run with --survey_z_depth "
+                    f"{float(tab_depth):g}."
+                )
+        elif tab_depth is None and run_depth is not None:
+            _warn(
+                f"catalog {_k}: Q table {_fid.get('path')} carries no "
+                f"fiducial_z_depth stamp but this run truncates completeness "
+                f"at z_depth={float(run_depth):g}. The table was almost "
+                "certainly fit against an UNTRUNCATED denominator, which "
+                "biases C low (and the missing budget high) just below the "
+                "depth. Rebuild it with the current builder, which reads the "
+                "catalog's z_depth attr."
+            )
+        elif tab_depth is not None and run_depth is None:
+            _fatal(
+                f"catalog {_k}: Q table {_fid.get('path')} was built with "
+                f"z_depth={float(tab_depth):g} but this run applies NO depth "
+                "prior: the table's completeness base is truncated and the "
+                "run's is not. Pass --survey_z_depth "
+                f"{float(tab_depth):g} (or rebuild the table without a depth)."
+            )
 
 
 def _check_selection_qtable_theta(q_fiducials, opts):
@@ -2675,6 +2799,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # legacy back-compat fallback.
     opts.lss_completion_active_by_catalog = lss_completion_active_by_catalog
     opts.lss_completion_active = bool(lss_completion_active)
+    _check_aggregate_requires_q(opts, lss_completion_active_by_catalog)
 
     _resolve_selection_fits(opts, data, fixed_parameter_values)
 
@@ -2730,6 +2855,10 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # been built from the SAME offline fit that centers this run's theta
     # prior -- a stale table silently carries the wrong completeness base.
     _check_selection_qtable_theta(_q_fiducials, opts)
+    # The completeness depth is Q-conditioning too (it truncates the base the
+    # field is residual to), but it is not a sampled parameter, so it cannot
+    # ride q_provenance's label machinery.
+    _check_q_table_z_depth(_q_fiducials, opts)
     # Prior wider than the base is first-order-consistent only near theta_hat:
     # warn when the sampled bounds reach beyond +-5 prior sds of the center.
     if getattr(opts, "selection_prior", None):

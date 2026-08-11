@@ -316,6 +316,36 @@ def test_diagnose_cli_smoke(survey_path, tmp_path):
     assert (outdir / "lss_completion_pixel2.pdf").exists()
 
 
+def test_diagnose_cli_uses_the_files_build_fiducials(survey_path, tmp_path, capsys):
+    """The diagnostic must reconstruct the completeness base from the FILE's
+    stamps (review F-052): it used to call _fiducial_cosmo_survey() with no
+    arguments, so a table built at a calibrated n0 was validated against
+    n0 = 1e-2 -- a different base than the one inference consumes."""
+    path, npix = survey_path
+    qfile = str(tmp_path / "q_n0.h5")
+    build_main(["--catalog", path, "--out", qfile, "--n-members", "0",
+                "--log10n0", "-1.4", "--delta", "0.5"])
+    diagnose_main(["--catalog", path, "--lss-completion", qfile,
+                   "--pixel", "2", "--outdir", str(tmp_path / "figs")])
+    out = capsys.readouterr().out
+    assert "n0=0.0398107" in out.replace(" ", "").replace("n0=", "n0=")
+    assert "delta=0.5000" in out
+
+
+def test_diagnose_cli_refuses_unstamped_table(survey_path, tmp_path):
+    """A table without build stamps cannot be diagnosed at defaults."""
+    from darksirens.redshift.lognormal_completion import save_lss_completion_hdf5
+
+    path, npix = survey_path
+    qfile = str(tmp_path / "q_bare.h5")
+    save_lss_completion_hdf5(qfile, logq_map=np.zeros((npix, NG)),
+                             zgrid=np.asarray(zgrid), indexing="global",
+                             metadata={"nside": 1})
+    with pytest.raises(SystemExit, match="fiducial_n0"):
+        diagnose_main(["--catalog", path, "--lss-completion", qfile,
+                       "--pixel", "2", "--outdir", str(tmp_path / "figs")])
+
+
 def test_build_occupied_only_and_uniform_chi(survey_path):
     """Tier-2: build only occupied pixels (empties -> logQ=0) on a uniform-chi grid."""
     path, npix = survey_path

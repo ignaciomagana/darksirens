@@ -445,6 +445,90 @@ def test_load_survey_reads_z_depth(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# builder: the completeness base is truncated at the catalog's own z_depth
+# ---------------------------------------------------------------------------
+
+def _depth_survey(path, z_depth=None, seed=0):
+    """A load_survey catalog with galaxies well below ``z_depth``."""
+    npix, maxg = 12, 6
+    rng = np.random.default_rng(seed)
+    zgals = np.full((npix, maxg), 100.0)
+    dzgals = np.full((npix, maxg), 0.01)
+    wgals = np.zeros((npix, maxg))
+    ngals = np.zeros(npix, dtype=np.int32)
+    for p in (0, 3, 7):
+        zgals[p] = np.clip(0.25 + 0.05 * rng.standard_normal(maxg), 0.02, 0.45)
+        wgals[p] = 1.0
+        ngals[p] = maxg
+    with h5py.File(path, "w") as f:
+        f.attrs["nside"] = 1
+        f.create_dataset("zgals", data=zgals)
+        f.create_dataset("dzgals", data=dzgals)
+        f.create_dataset("wgals", data=wgals)
+        f.create_dataset("ngals", data=ngals)
+        if z_depth is not None:
+            f.attrs["z_depth"] = float(z_depth)
+
+
+def test_builder_truncates_completeness_base_at_catalog_z_depth(tmp_path, monkeypatch):
+    """The offline Q builder must see the catalog's ``z_depth``.
+
+    Both builders used to discard ``load_survey``'s depth, so Q was fit residual
+    to an UNtruncated denominator while the likelihood uses the truncated one:
+    C came out biased low (and the missing budget high) just below the edge --
+    exactly the artifact the truncation was added to remove.  Compare the
+    completeness the solver is handed with and without the attr, and check the
+    provenance stamp.
+    """
+    import darksirens.cli.build_lognormal_completion as B
+
+    Z_DEPTH = 0.6
+    with_depth = str(tmp_path / "with_depth.h5")
+    no_depth = str(tmp_path / "no_depth.h5")
+    _depth_survey(with_depth, z_depth=Z_DEPTH)
+    _depth_survey(no_depth, z_depth=None)
+
+    captured = {}
+    orig = B.poisson_lognormal_map
+
+    def spy(N_obs, C, dN_exp, pk, **kw):
+        captured.setdefault("C", []).append(np.asarray(C, dtype=float))
+        return orig(N_obs, C, dN_exp, pk, **kw)
+
+    monkeypatch.setattr(B, "poisson_lognormal_map", spy)
+    _, _, diag_d = B.build_completion(with_depth, mode="radial", n_members=0,
+                                      maxiter=3)
+    _, _, diag_n = B.build_completion(no_depth, mode="radial", n_members=0,
+                                      maxiter=3)
+    C_depth, C_none = captured["C"]
+
+    assert diag_d["fiducial_z_depth"] == pytest.approx(Z_DEPTH)
+    assert "fiducial_z_depth" not in diag_n
+
+    # Truncating the denominator RAISES C within ~2 sigma_smooth below the edge
+    # (the untruncated denominator carries mass the numerator can never match).
+    z = np.asarray(zgrid)
+    from darksirens.redshift.completion import _SIGMA_SMOOTH
+    edge = (z > Z_DEPTH - 2.0 * _SIGMA_SMOOTH) & (z <= Z_DEPTH)
+    # The solver grid is uniform in chi, so compare on the same rows/columns.
+    assert C_depth.shape == C_none.shape
+    assert C_depth.sum() > C_none.sum()
+    assert not np.allclose(C_depth, C_none)
+    # Beyond the depth the truncated base is inert (C ~ 0 there).
+    assert C_depth[:, edge].sum() >= C_none[:, edge].sum()
+
+
+def test_builder_z_depth_cli_override_beats_catalog_attr(tmp_path):
+    import darksirens.cli.build_lognormal_completion as B
+
+    path = str(tmp_path / "with_depth.h5")
+    _depth_survey(path, z_depth=0.6)
+    _, _, diag = B.build_completion(path, mode="radial", n_members=0,
+                                    maxiter=3, z_depth=1.1)
+    assert diag["fiducial_z_depth"] == pytest.approx(1.1)
+
+
+# ---------------------------------------------------------------------------
 # inference/parameters.py: resolved z_depth threads to SurveyParams
 # ---------------------------------------------------------------------------
 
