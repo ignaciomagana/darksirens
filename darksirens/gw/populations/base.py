@@ -224,19 +224,46 @@ class PairingModel(ABC):
         """Evaluate the unnormalised conditional mass-ratio density."""
         ...
 
+    @staticmethod
+    def _support_nodes(m1, m_min):
+        r"""Support-relative q nodes and their spacing.
+
+        The q-support is ``(q_cut, 1]`` with ``q_cut = m_min/m1``: it depends on a
+        SAMPLED parameter and on the query m1.  Nodes are therefore placed
+        RELATIVE to the support, ``q = q_cut + t (1 - q_cut)`` with ``t`` the
+        unit-interval node set ``get_q_grid()`` (``[q_lo, q_hi] = [0, 1]``), so
+        they follow the edge instead of being crossed by it -- the same trick
+        ``GWTC5FiducialBPL2PeaksMass._taper_window_grid`` uses for the mass taper.
+
+        With the historical FIXED grid the normaliser
+        ``N(m1) = int p(q|m1) dq`` was a staircase in both ``m1`` and ``m_min``
+        (it only changed when ``q_cut`` crossed a node): measured on
+        ``PowerLawPairing`` at m_min = 5, dm_min = 0.01, q = 0.9,
+        ``p(q|m1)`` was bit-identical over m1 in [60, 62] while the true N grows
+        3%, and ``d log p/d m_min`` was 0 almost everywhere with spurious +1.37
+        spikes wherever a node happened to land inside the taper window (against a
+        true value of ~0.03).  Support-relative nodes also spend every node inside
+        the support, so the edge itself is resolved for any m1.
+        """
+        t     = get_q_grid()                        # uniform nodes on [0, 1]
+        q_cut = jnp.clip(m_min / m1, 0.0, 1.0)
+        width = 1.0 - q_cut
+        return q_cut[..., None] + t * width[..., None], width, 1.0 / (t.size - 1)
+
     def __call__(self, m1, q, m_min, dm_min, theta):
         p = self._eval_unnorm(m1, q, m_min, dm_min, theta)
         # OPT-IN accuracy knob (STATIC branch on the module-global setting, read
         # at trace time): default None keeps the EXACT per-sample q-integration
-        # below (bit-identical to the historical code path); an int precomputes
-        # the normaliser once on a static m1 grid and interpolates it per sample.
+        # below; an int precomputes the normaliser once on a static m1 grid and
+        # interpolates it per sample.
         n_grid = normalization_grid_settings().pairing_m1_grid
         if n_grid is None:
             # PairingModel norm integrates over q for each m1 — sample-dependent,
             # cannot be lifted out of the per-sample loop.
-            m1_exp  = jnp.expand_dims(jnp.atleast_1d(m1), axis=-1)
-            q_grid  = get_q_grid()
-            p_grid  = self._eval_unnorm(m1_exp, q_grid, m_min, dm_min, theta)
+            m1_a    = jnp.atleast_1d(m1)
+            q_nodes, width, dt = self._support_nodes(m1_a, m_min)
+            p_grid  = self._eval_unnorm(m1_a[..., None], q_nodes,
+                                       m_min, dm_min, theta)
             # Scale-invariant normalisation: for an m1 in the low-mass taper toe
             # both p and its q-integral are ~exp(-500)-tiny; the RATIO is well
             # conditioned, but a direct p / n has divide's VJP square n, which
@@ -248,7 +275,9 @@ class PairingModel(ABC):
             # ratio up to association order (ULP-level).
             scale   = jnp.max(p_grid, axis=-1, keepdims=True)
             scale_s = jnp.where(scale > 0, scale, 1.0)
-            n_sc    = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
+            # Uniform in t, so the trapezoid is dt-spaced and the support width
+            # (which carries the m1 / m_min dependence) factors out.
+            n_sc    = jnp.trapezoid(p_grid / scale_s, dx=dt, axis=-1) * width
             n_sc    = n_sc.reshape(jnp.shape(m1))
             scale_m = scale_s[..., 0].reshape(jnp.shape(m1))
             return jnp.where(
@@ -261,13 +290,15 @@ class PairingModel(ABC):
         m1_grid = get_pairing_m1_grid()                     # (N_grid,) static nodes
         log_m1_grid = jnp.log(m1_grid)
         q_grid  = get_q_grid()
-        # Same scale-factored quadrature as the exact branch, per grid node, so
-        # the grid normaliser never underflows while forming I = scale * n_sc.
-        p_grid  = self._eval_unnorm(m1_grid[:, None], q_grid[None, :],
+        # Same scale-factored, SUPPORT-RELATIVE quadrature as the exact branch,
+        # per grid node, so the grid normaliser never underflows while forming
+        # I = scale * n_sc and agrees with the exact branch node-for-node.
+        q_nodes_g, width_g, dt = self._support_nodes(m1_grid, m_min)
+        p_grid  = self._eval_unnorm(m1_grid[:, None], q_nodes_g,
                                     m_min, dm_min, theta)    # (N_grid, N_Q)
         scale   = jnp.max(p_grid, axis=-1, keepdims=True)
         scale_s = jnp.where(scale > 0, scale, 1.0)
-        n_sc_g  = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
+        n_sc_g  = jnp.trapezoid(p_grid / scale_s, dx=dt, axis=-1) * width_g
         I_grid  = scale_s[..., 0] * n_sc_g                   # (N_grid,) normaliser
         # SUPPORT-EDGE HANDLING.  Nodes with no support have I == 0 exactly (for
         # every q, p_unnorm == 0 -- e.g. m1 <= m_min, so m2 = q*m1 <= m_min).  The
@@ -323,22 +354,24 @@ class PairingModel(ABC):
         resolved = jnp.interp(log_m1_q, log_m1_grid,
                               has_sup.astype(log_I_grid.dtype)
                               ).reshape(jnp.shape(m1)) >= 1.0
-        # RIGOROUS PER-SAMPLE LOWER BOUND on the exact normaliser.  The exact
-        # branch's I(m1) is a trapezoid sum of NON-NEGATIVE terms over q, so any
-        # single term bounds it from below: with the sample's own q bracketed by
-        # q-grid nodes k, k+1,
-        #     I(m1) >= (q_{k+1} - q_k)/2 * (p_unnorm(m1, q_k) + p_unnorm(m1, q_{k+1})).
-        # In an UNRESOLVED cell that bound is not merely safe but TIGHT: one grid
-        # cell spans dlog m1 = log(m_hi/m_lo)/(N_grid-1) = 2.6e-3 at N_grid=2048,
-        # so the q-support (m_min/m1, 1] inside the edge cell is narrower than one
-        # q-interval dq = 5.0e-3 (N_Q=200) and the exact trapezoid IS this single
-        # term -- the bound reproduces the exact branch to floating point.  In a
-        # RESOLVED cell it is inert (the support spans many q-nodes, so the
-        # interpolated normaliser is larger and the maximum keeps it bit-for-bit),
-        # while still capping any interpolation error that would INFLATE the
-        # density -- raising log_I toward a rigorous lower bound on the exact
-        # normaliser can never overshoot it.  Cost: two extra p_unnorm evaluations
-        # per sample, versus N_Q = 200 for the exact branch.
+        # PER-SAMPLE EDGE GUARD on the normaliser, evaluated on the FIXED q grid
+        # (its nodes are static, so this costs two p_unnorm evaluations per sample
+        # against N_Q = 200 for the exact branch).  With the sample's own q
+        # bracketed by q-grid nodes k, k+1,
+        #     I_lb = (q_{k+1} - q_k)/2 * (p_unnorm(m1, q_k) + p_unnorm(m1, q_{k+1})).
+        # In an UNRESOLVED cell this is within a factor of two of the true
+        # normaliser FROM BELOW: one m1 cell spans dlog m1 = log(m_hi/m_lo)/(N_grid-1)
+        # = 2.6e-3 at N_grid = 2048, so the q-support (m_min/m1, 1] inside the edge
+        # cell is narrower than one q-interval dq = 5.0e-3 (N_Q = 200) -- a coupling
+        # NormalizationGridSettings now enforces -- hence q_k <= m_min/m1 (so
+        # p_unnorm(m1, q_k) = 0, q_{k+1} = 1) and
+        #     I = int_{q_cut}^{1} p dq <= (1 - q_cut) p(1) <= dq p(1) = 2 I_lb.
+        # The density can therefore overshoot by at most 0.7 nats there, while the
+        # unbounded direction (log_I hundreds of nats below the truth, +547 nats of
+        # density) is impossible.  In a RESOLVED cell the guard is inert (the
+        # support spans many q-nodes, so the interpolated normaliser is larger and
+        # the maximum keeps it bit-for-bit) while still capping any interpolation
+        # error that would INFLATE the density.
         qi      = jnp.clip(jnp.searchsorted(q_grid, jnp.asarray(q)) - 1,
                            0, q_grid.size - 2)
         q_lo_n  = q_grid[qi]

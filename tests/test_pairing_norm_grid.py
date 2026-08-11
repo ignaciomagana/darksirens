@@ -333,11 +333,15 @@ _GW_BETA, _GW_M2LOW, _GW_DM2 = 11, 12, 13
 
 def _gwtc5_adverse_theta(delta_m2):
     """Fiducial gwtc5 vector with the instruction's adverse pairing corner:
-    steepest allowed q slope (beta_q=-2) and m2_low=5, plus a chosen delta_m2."""
+    steepest allowed q slope (beta_q=-2) and the largest m2_low the model's
+    ``m2_low <= m1_low`` constraint allows at the release-median m1_low = 4.4856
+    (the instruction's 5.0 predates that fiducial and makes ``valid`` False, i.e.
+    log_p_pop = -inf everywhere), plus a chosen delta_m2."""
     th = np.asarray(get_fixed_population_params("gwtc5_fiducial_bpl2peaks")).copy()
     th[_GW_BETA] = -2.0
-    th[_GW_M2LOW] = 5.0
+    th[_GW_M2LOW] = 4.0
     th[_GW_DM2] = float(delta_m2)
+    assert th[_GW_M2LOW] <= th[7], (th[_GW_M2LOW], th[7])
     return jnp.asarray(th)
 
 
@@ -632,13 +636,14 @@ def test_both_clis_size_an_explicitly_requested_pairing_grid(which):
 #     there p_unnorm is small-but-nonzero while the interpolated log I is
 #     hundreds of nats too low, so p * exp(-log_I) explodes.
 #
-#     The edge is hit BY CONSTRUCTION for any mass component without an
-#     ``m_min_spec``: MixtureModel.component_densities then passes mmin = M_LO =
-#     1.0, which is exactly the pairing grid's first node, and
-#     sfilter_low(m, m_min) == 0 at m == m_min, so I(node 0) == 0 always.
+#     The edge is hit by any sample sitting inside the m1 cell that straddles the
+#     mixture's low-mass edge (m1 slightly above m_min, q ~ 1 so m2 = q*m1 is
+#     slightly above m_min), where sfilter_low(m, m_min) == 0 at m == m_min makes
+#     the node below the edge carry I == 0.
 #
-#     Measured on master at the powerlaw+peak PRIOR MIDPOINT (m_min_PL = 6,
-#     dm_min = 5.005), m1 = 1.00102232, q = 0.999739:
+#     Measured on master at the powerlaw+peak PRIOR MIDPOINT (m_min = 6,
+#     dm_min = 5.005) for the equivalent samples at the then-current M_LO = 1
+#     pairing floor, m1 = 1.00102232, q = 0.999739:
 #         exact log_p_pop = -20.108858,  grid(2048) = +386.6989  (+406.8 nats)
 #         grid(1024) = +521.03, grid(4096) = +120.40, grid(8192) = -18.92
 #     which took one injection sample's log_mu from -4.485 to +360.4, Neff from
@@ -647,12 +652,15 @@ def test_both_clis_size_an_explicitly_requested_pairing_grid(which):
 #     Post-fix the grid branch (a) never interpolates through the floor -- a
 #     zero node inherits the larger of its supported neighbours, a monotone
 #     UPPER bound on I inside that cell -- and (b) clamps log I from below by the
-#     rigorous single-term trapezoid bound
+#     single-term trapezoid bound on the FIXED q grid
 #         I(m1) >= (dq/2) * (p_unnorm(m1, q_k) + p_unnorm(m1, q_{k+1}))
-#     for the sample's own bracketing q-nodes, which cannot overshoot the exact
-#     normaliser (a subset of its non-negative terms) and IS the exact
-#     normaliser inside the edge cell, where the whole q-support fits in one
-#     q-interval (cell width d log m1 = 2.6e-3 at N=2048 < dq = 5.0e-3).
+#     for the sample's own bracketing q-nodes.  With the edge-cell q-support
+#     narrower than one q-interval (cell width d log m1 = 2.6e-3 at N=2048 < dq =
+#     5.0e-3, a coupling NormalizationGridSettings enforces) that bound is within a
+#     factor of two of the true normaliser FROM BELOW, so the grid density in the
+#     edge cell is at most ~0.7 nats above and a couple of nats below the exact
+#     branch's support-relative quadrature -- bounded and one-sided, never the
+#     hundreds-of-nats explosion.
 # ---------------------------------------------------------------------------
 
 def _powerlaw_peak_prior_midpoint():
@@ -660,38 +668,43 @@ def _powerlaw_peak_prior_midpoint():
     return jnp.asarray(0.5 * (np.asarray(lo) + np.asarray(hi)))
 
 
-# The finding's samples: inside the first grid cell (m1 just above M_LO = 1.0,
-# q ~ 1 so m2 = q*m1 is just above the peak component's mmin = M_LO).
-_EDGE_M1 = jnp.asarray([1.00102232, 1.0005, 1.002])
+# The finding's samples, at the mixture's low-mass edge: inside the grid cell that
+# straddles m_min (m1 just above m_min, q ~ 1 so m2 = q*m1 is just above m_min).
+_EDGE_MMIN = 6.0                  # powerlaw+peak prior-midpoint m_min
+_EDGE_M1 = jnp.asarray([1.00102232, 1.0005, 1.002]) * _EDGE_MMIN
 _EDGE_Q = jnp.asarray([0.999739, 0.9999, 0.999])
 
 
-def test_support_edge_cell_matches_exact(capsys):
+def test_support_edge_cell_is_bounded_and_one_sided(capsys):
     """The reported blow-up is gone: inside the support-edge cell the grid path
-    reproduces the exact per-sample q-integration to floating point, at every
-    grid size (the single-term bound IS the exact trapezoid there)."""
+    stays within a couple of nats of the exact per-sample q-integration and never
+    exceeds it, at every grid size (the fixed-grid single-term bound is within a
+    factor of two of the exact support-relative normaliser from below)."""
     theta = _powerlaw_peak_prior_midpoint()
+    assert float(theta[_I_MMIN]) == _EDGE_MMIN
     z = jnp.full(_EDGE_M1.size, 0.1)
     chi = jnp.zeros(_EDGE_M1.size)
 
     _set_pairing_grid(None)
     exact = _logp(_EDGE_M1, _EDGE_Q, z, chi, theta)
     assert np.all(np.isfinite(exact)), exact
-    np.testing.assert_allclose(exact, [-20.10885813, -21.73379221, -21.85632734],
+    np.testing.assert_allclose(exact, [-10.60412986, -9.89268181, -11.26923722],
                                rtol=0, atol=1e-6)
 
     worst = {}
     for ng in (1024, 2048, 4096, 8192):
         _set_pairing_grid(ng)
         gr = _logp(_EDGE_M1, _EDGE_Q, z, chi, theta)
-        worst[ng] = float(np.abs(gr - exact).max())
+        assert np.all(np.isfinite(gr)), (ng, gr)
+        worst[ng] = (float((gr - exact).max()), float((gr - exact).min()))
     with capsys.disabled():
-        print("\n[pairing_norm_grid] support-edge cell |Δlog_p_pop| "
+        print("\n[pairing_norm_grid] support-edge cell Δlog_p_pop (max | min) "
               "(was +406.8 nats at 2048):")
-        for ng, e in worst.items():
-            print(f"    grid={ng:5d}:  {e:.3e}")
-    for ng, e in worst.items():
-        assert e < 1e-6, (ng, e, worst)
+        for ng, (hi_e, lo_e) in worst.items():
+            print(f"    grid={ng:5d}:  {hi_e:+.3e} | {lo_e:+.3e}")
+    for ng, (hi_e, lo_e) in worst.items():
+        assert hi_e < 0.7, (ng, worst)          # never inflated
+        assert lo_e > -3.0, (ng, worst)         # and bounded from below
 
 
 def test_support_edge_dense_sweep_bounded_and_one_sided(capsys):
