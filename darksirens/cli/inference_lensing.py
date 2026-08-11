@@ -253,8 +253,9 @@ def _pair_tag_log_probs_from_options(opts, lensed):
     missing = []
     fields = {}
     for name in model.required_fields:
-        attr = "delta_t_obs" if name in ("delta_t_obs", "true_delta_t") else name
-        arr = np.asarray(getattr(lensed, attr))
+        # required_fields is the single source of truth for the field name; the
+        # true_delta_t alias is resolved by the loader, not here.
+        arr = np.asarray(getattr(lensed, name))
         if arr.size == 0 or np.all(~np.isfinite(arr)):
             missing.append(name)
         fields[name] = arr

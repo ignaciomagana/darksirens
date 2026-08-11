@@ -675,9 +675,22 @@ def _check_lensed(path, errors, summary, opts=None):
             elif kind != "constant":
                 model = make_pair_tag_selection_model(kind, constant=float(_get(opts, "pair_tag_constant", 1.0)), perturb_logit=float(_get(opts, "pair_tag_perturb_logit", 0.0) or 0.0))
                 for req in model.required_fields:
-                    dname = "delta_t_obs" if req in ("delta_t_obs", "true_delta_t") else req
-                    if dname not in f:
-                        errors.append(f"pair_tag_model={kind} requires lensed injection dataset {dname}")
+                    # load_lensed_injections resolves the delay as
+                    # "delta_t_obs if present else true_delta_t", so a campaign
+                    # that stores only true_delta_t scores fine and must not be
+                    # refused here. Validate the dataset the LOADER would pick,
+                    # in the loader's preference order -- checking the finite
+                    # true_delta_t of a file whose delta_t_obs is all-NaN would
+                    # pass a configuration the run then exits on.
+                    candidates = (
+                        ("delta_t_obs", "true_delta_t") if req == "delta_t_obs" else (req,)
+                    )
+                    dname = next((c for c in candidates if c in f), None)
+                    if dname is None:
+                        errors.append(
+                            f"pair_tag_model={kind} requires lensed injection dataset "
+                            + " or ".join(candidates)
+                        )
                     else:
                         arr = np.asarray(f[dname], dtype=float)
                         if arr.size == 0 or np.all(~np.isfinite(arr)):
