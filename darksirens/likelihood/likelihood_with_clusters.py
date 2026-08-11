@@ -701,7 +701,9 @@ def darksiren_log_likelihood_with_clusters(
     # importance-estimator variances spending part of the total-variance
     # budget (they used to be silently excluded, so the advertised
     # GWTC-4/5-style guard could pass a likelihood dominated by noisy event
-    # or pair estimators — review P1-09).
+    # or pair estimators — review P1-09). The pair term is a LOWER BOUND: it
+    # sees each branch's driving PE samples but not the partner event's KDE
+    # sampling noise (cluster_log_likelihood_pair, review F-096).
     pe_variance_sum = singleton_variance_sum + pair_variance_sum
     selection_correction_total = combined_selection_log_correction(
         log_mu_1, log_sigma2_1,

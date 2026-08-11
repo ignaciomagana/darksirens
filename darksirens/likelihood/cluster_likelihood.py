@@ -315,6 +315,19 @@ def cluster_log_likelihood_pair(
     randomness (see the reduction at the bottom); the default returns the
     scalar unchanged, bit-compatible with every existing caller.
 
+    ``var`` bounds only the DRIVING-sample component. Each branch's partner
+    event enters through its Gaussian KDE, whose own sampling error the delta
+    method cannot see, and that term is not sub-dominant in the regime the
+    total-log-likelihood guard exists for: when the predicted apparent point
+    falls in the tail of the partner's KDE (the false-pair configurations the
+    channel must reject) the kernel sum is carried by one or two nearest
+    samples and log p̂ has O(1) scatter. The perfectly-correlated branch
+    combination bounds the CROSS term between branches, not the missing
+    KDE-side term. So a pair whose log-likelihood is Monte-Carlo noise can
+    still pass a budget that advertises sigma(lnL) <= 1 nat; catching that
+    needs a per-pair kernel-ESS diagnostic (or the ESS folded into the same
+    delta-method algebra), which this estimator does not provide.
+
     Time marks are COINCIDENCE ODDS. A time mark contributes the ratio of
     the observed |Δt| density under the lensed hypothesis to that under the
     unlensed one — p(Δt|lensed)/p(Δt|unlensed) — not the lensed density

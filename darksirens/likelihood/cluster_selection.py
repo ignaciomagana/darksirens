@@ -394,7 +394,11 @@ def combined_selection_log_correction(
         Total-log-likelihood variance budget per GWTC-4/5, forwarded to
         ``selection_log_correction``. The cluster stack threads the summed
         per-event and per-pair delta-method variances here, so the guard
-        bounds the TOTAL log-likelihood variance, not selection alone.
+        bounds the TOTAL log-likelihood variance, not selection alone. Caveat:
+        the per-pair term covers only each branch's DRIVING sample set — the
+        partner event's KDE sampling noise is invisible to it (see
+        ``cluster_likelihood.cluster_log_likelihood_pair``), so for the pair
+        channel the budget is spent against a lower bound on the true variance.
 
     Returns
     -------
