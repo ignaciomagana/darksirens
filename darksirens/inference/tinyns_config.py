@@ -266,11 +266,15 @@ def validate_tinyns_config(c):
     if c.bound != "multi" and _explicit(c, "multi_bound_max_ellipsoids", "multi_bound_min_points", "multi_bound_split_threshold", "multi_bound_enlargement", "multi_bound_overlap_correction"): raise ValueError("multi_bound_* options require --tinyns_bound multi.")
     if c.bound_update_interval <= 0 or c.bound_enlargement <= 0 or c.bound_jitter < 0: raise ValueError("bound_update_interval and bound_enlargement must be positive; bound_jitter must be >= 0.")
     if c.bound_failure_rebuild_threshold <= 0: raise ValueError("bound_failure_rebuild_threshold must be positive.")
-    # Any checkpoint path at all means tinyns will evaluate
-    # ``checkpoint_interval <= 0``, so demand a positive int here rather than
-    # letting None/0 reach tinyns (None used to raise a bare TypeError).
-    if (c.checkpoint_path or c.resume_from or c.checkpoint_path_out) and (
-            c.checkpoint_interval is None or c.checkpoint_interval <= 0):
+    # UNCONDITIONAL: run_sampler also enables tinyns checkpointing from the
+    # shared --checkpoint_interval plan (sampling.py: config.checkpoint_path or
+    # plan.path), which is invisible here -- so gating on the CONFIG-level paths
+    # let --tinyns_checkpoint_interval 0 through to tinyns' own
+    # ``checkpoint_interval <= 0`` guard, i.e. a crash after the catalog load,
+    # KDE-cache build and likelihood trace.  The field always has a concrete
+    # default (BASE_DEFAULTS: 100), so demanding a positive int costs nothing
+    # and fails at _resolve_sampler_config time instead.
+    if c.checkpoint_interval is None or c.checkpoint_interval <= 0:
         raise ValueError("checkpoint_interval must be a positive number of iterations when checkpointing is enabled.")
     if c.checkpoint_path and c.resume_from and not c.checkpoint_path_out: raise ValueError("When both resume_from and checkpoint_path are set, also set checkpoint_path_out to clarify resumed checkpoint output.")
 

@@ -362,6 +362,21 @@ def test_tinyns_config_rejects_nonpositive_interval_with_a_checkpoint():
         ))
 
 
+@pytest.mark.parametrize("interval", [0, -5])
+def test_tinyns_config_rejects_nonpositive_interval_without_a_config_path(
+        interval):
+    """The guard used to require a CONFIG-level checkpoint path, but
+    run_sampler also enables tinyns checkpointing from the shared
+    --checkpoint_interval plan (invisible to the validator): with only
+    --tinyns_checkpoint_interval 0 the value reached tinyns and raised after the
+    catalog load, KDE-cache build and likelihood trace."""
+    with pytest.raises(ValueError, match="checkpoint_interval must be a positive"):
+        build_tinyns_config(SimpleNamespace(
+            tinyns_checkpoint_interval=interval,
+            nlive=10, dlogz=0.1, max_samples=10, seed=0, show_progress=False,
+        ))
+
+
 def test_tinyns_checkpoints_without_an_explicit_interval_and_resumes(tmp_path):
     """End-to-end: this whole test used to die with the C-1 TypeError before
     the first nested-sampling iteration."""
