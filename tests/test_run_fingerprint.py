@@ -70,6 +70,15 @@ def test_operational_knobs_do_not_change_the_digest():
         save_path="/a/completely/different/save",
         show_progress=True,
         dynesty_diagnostics=True,
+        # memory-probed block sizes: resolved from live free VRAM before the
+        # fingerprint is built, so they differ between two nodes / two requeues
+        sel_batch_size=4096,
+        block_size_static_state_bytes=1 << 33,
+        # legacy tinyns checkpoint flags (they also name the evolving checkpoint)
+        tinyns_checkpoint_path="/some/run/checkpoint.tinyns.npz",
+        tinyns_checkpoint_path_out="/some/run/checkpoint.tinyns.npz",
+        tinyns_resume_from="/some/run/checkpoint.tinyns.npz",
+        tinyns_progress_interval=50,
     )
     for key, value in operational.items():
         changed = _fingerprint(_opts(**{key: value}))
@@ -77,6 +86,20 @@ def test_operational_knobs_do_not_change_the_digest():
             f"operational knob {key!r} changed the fingerprint digest; this "
             "would break every SLURM requeue that toggles it"
         )
+
+
+def test_legacy_tinyns_checkpoint_is_never_hashed_as_an_input(tmp_path):
+    """--tinyns_resume_from names the run's OWN checkpoint, whose bytes are
+    rewritten every --tinyns_checkpoint_interval iterations: hashing it as an
+    input file made the digest unstable between two consecutive resume attempts,
+    so the gate was guaranteed to reject."""
+    ckpt = tmp_path / "checkpoint.tinyns.npz"
+    ckpt.write_bytes(b"\x00" * 64)
+    reference = _fingerprint(_opts(tinyns_resume_from=str(ckpt)))
+    ckpt.write_bytes(b"\x01" * 128)          # sampler wrote a new checkpoint
+    assert _fingerprint(_opts(tinyns_resume_from=str(ckpt)))["digest"] == (
+        reference["digest"]
+    )
 
 
 def test_underscore_attributes_are_ignored():
@@ -124,6 +147,64 @@ def test_input_file_content_is_fingerprinted(tmp_path):
     payload.write_bytes(b"\x00" * 63 + b"\x01")
     regenerated = _fingerprint(_opts(gw_path=str(payload)))
     assert regenerated["digest"] != reference["digest"]
+
+
+def test_redshift_normalization_domain_is_fingerprinted(monkeypatch):
+    """DARKSIRENS_ZMAX / *_ZNORM_HI change the integration domain of the
+    redshift prior, the missing-galaxy budget and the selection integral -- i.e.
+    both the numerator and beta -- so a requeue that resolves them differently
+    must NOT be accepted against its own checkpoint."""
+    from darksirens.redshift import grid as zgrid_module
+    import darksirens.sky.models as sky_models
+
+    reference = _fingerprint()
+    block = reference["semantic"]["redshift_grid"]
+    assert block["zMax"] == pytest.approx(float(zgrid_module.zMax))
+    assert block["n_nodes"] == len(zgrid_module.zgrid)
+    assert block["sky_znorm_hi"] == pytest.approx(float(sky_models._ZNORM_HI))
+
+    monkeypatch.setattr(zgrid_module, "zMax", float(zgrid_module.zMax) + 1.0)
+    assert _fingerprint()["digest"] != reference["digest"]
+    monkeypatch.undo()
+
+    monkeypatch.setattr(sky_models, "_ZNORM_HI", float(sky_models._ZNORM_HI) + 1.0)
+    assert _fingerprint()["digest"] != reference["digest"]
+
+
+def test_environment_block_records_the_darksirens_env(monkeypatch):
+    """An archived logZ must be attributable to the zMax that produced it."""
+    from darksirens.io.settings import environment_block
+
+    monkeypatch.setenv("DARKSIRENS_ZMAX", "2.5")
+    env = environment_block()["darksirens_env"]
+    assert env["DARKSIRENS_ZMAX"] == "2.5"
+    assert all(key.startswith("DARKSIRENS_") for key in env)
+
+
+def test_flow_ensemble_directory_content_is_fingerprinted(tmp_path):
+    """--gw_flows_path is a DIRECTORY, and for a flow-surrogate run those
+    checkpoints ARE the PE likelihood: a retrained ensemble, or one event
+    added/removed, must not pass the gate as an identical configuration."""
+    flows = tmp_path / "flows"
+    for name in ("EV1", "EV2"):
+        (flows / name).mkdir(parents=True)
+        (flows / name / f"{name}_flow.npz").write_bytes(b"\x00" * 32)
+
+    opts = dict(gw_flows_path=str(flows), flows_pattern="*/*_flow.npz")
+    reference = _fingerprint(_opts(**opts))
+    slots = reference["semantic"]["data_files"]
+    assert sum(k.startswith("gw_flows_path/") for k in slots) == 2
+    assert _fingerprint(_opts(**opts))["digest"] == reference["digest"]
+
+    # One checkpoint retrained in place (same path, same size).
+    (flows / "EV2" / "EV2_flow.npz").write_bytes(b"\x00" * 31 + b"\x01")
+    assert _fingerprint(_opts(**opts))["digest"] != reference["digest"]
+
+    # An event added to the ensemble changes the event identity (sorted order).
+    (flows / "EV2" / "EV2_flow.npz").write_bytes(b"\x00" * 32)
+    (flows / "EV3").mkdir()
+    (flows / "EV3" / "EV3_flow.npz").write_bytes(b"\x00" * 32)
+    assert _fingerprint(_opts(**opts))["digest"] != reference["digest"]
 
 
 def test_list_valued_path_options_are_fingerprinted(tmp_path):
@@ -222,3 +303,22 @@ def test_resolve_checkpoint_plan_honours_the_callers_resume_target(tmp_path):
     # And the caller's explicit target wins over a fresh glob.
     plan = resolve_checkpoint_plan(opts, str(run_dir), resume_from=str(ckpt))
     assert plan.resume_from == str(ckpt)
+
+
+def test_forced_mismatch_fingerprint_can_be_stamped_beside_the_stored_one(tmp_path):
+    """A --resume_force run across a MISMATCH keeps the checkpoint's fingerprint
+    (its true record) and records its own configuration beside it, so the
+    directory never advertises only a configuration that did not produce its
+    results.hdf5."""
+    stored = _fingerprint()
+    save_run_fingerprint(str(tmp_path), stored)
+    current = _fingerprint(_opts(seed=18))
+    path = save_run_fingerprint(
+        str(tmp_path), current, basename="run_fingerprint.forced-TS.json"
+    )
+    assert os.path.basename(path) == "run_fingerprint.forced-TS.json"
+    with open(os.path.join(tmp_path, FINGERPRINT_BASENAME)) as f:
+        assert json.load(f)["digest"] == stored["digest"]
+    with open(path) as f:
+        assert json.load(f)["digest"] == current["digest"]
+    assert not any(p.endswith(".tmp") for p in os.listdir(tmp_path))

@@ -44,7 +44,9 @@ code mismatch warns instead of failing.
 
 from __future__ import annotations
 
+import glob
 import hashlib
+import importlib
 import json
 import os
 import tempfile
@@ -76,8 +78,18 @@ _NON_SEMANTIC_KEYS = frozenset({
     "resume_from_resolved",
     "run_dir",
     "save_path",
+    # legacy tinyns-specific checkpoint flags (sampling.py still honours them
+    # over the shared plan).  They differ between a submission and its resume
+    # exactly like resume_from_resolved -- and worse, once sampling has started
+    # they name an EXISTING file, so the data_files scan below would hash the
+    # checkpoint itself, whose bytes are rewritten every
+    # --tinyns_checkpoint_interval iterations.
+    "tinyns_checkpoint_path",
+    "tinyns_checkpoint_path_out",
+    "tinyns_resume_from",
     # presentation / diagnostics
     "show_progress",
+    "tinyns_progress_interval",
     "dynesty_diagnostics",
     "preflight_only",
     "sampler_preflight",
@@ -95,6 +107,12 @@ _NON_SEMANTIC_KEYS = frozenset({
     "pe_block",
     "pe_event_block",
     "selection_block",
+    # ... including the two other values _resolve_and_report_block_sizes writes
+    # back onto opts from a LIVE device-memory probe: a requeue landing on a GPU
+    # with a different resident footprint resolves a different sel_batch_size (or
+    # None), which would refuse the resume instead of continuing it.
+    "sel_batch_size",
+    "block_size_static_state_bytes",
     "max_component_partitions",
     "max_total_partitions",
     "tinyns_checkpoint_interval",
@@ -159,6 +177,64 @@ def _iter_file_candidates(value):
                 yield v
 
 
+def _add_flow_ensemble_identity(sem_opts, data_files):
+    """Content identity for the flow-surrogate ensemble under ``gw_flows_path``.
+
+    ``--gw_flows_path`` names a DIRECTORY, so the generic ``os.path.isfile``
+    scan above records only its path string -- yet for a flow-surrogate run the
+    per-event checkpoints ARE the PE likelihood (they replace the stored
+    posterior samples), and the ensemble's sorted checkpoint order IS the event
+    identity.  Retraining the ensemble in place, adding or removing an event,
+    or resuming against a partially written directory would otherwise pass the
+    resume gate silently.  Only this option is walked: a generic directory walk
+    could recurse into an arbitrarily large data root.
+    """
+    flows_dir = sem_opts.get("gw_flows_path")
+    if not isinstance(flows_dir, str) or not os.path.isdir(flows_dir):
+        return
+    pattern = sem_opts.get("flows_pattern") or "*/*_flow.npz"
+    for path in sorted(glob.glob(os.path.join(flows_dir, str(pattern)))):
+        if os.path.isfile(path):
+            rel = os.path.relpath(path, flows_dir)
+            data_files[f"gw_flows_path/{rel}"] = _file_identity(path)
+
+
+def _redshift_grid_identity():
+    """Resolved redshift-normalisation domain: the other env-driven target.
+
+    ``normalization_grid_settings()`` below covers the mass/q/chi quadrature,
+    but three environment knobs change the statistical target and were recorded
+    nowhere: ``DARKSIRENS_ZMAX`` sets the shared ``zgrid`` -- the integration
+    domain of the redshift prior, the missing-galaxy budget and the selection
+    integral, i.e. both the likelihood numerator and beta -- while
+    ``DARKSIRENS_GP_ZNORM_HI`` / ``DARKSIRENS_SKY_ZNORM_HI`` set the ceilings
+    above which the GP-population and sky-model z-normalisers freeze.  A
+    requeue whose submit environment resolves any of them differently would
+    otherwise restore state whose stored logL came from a different target.
+    Read through the modules (not os.environ) so the recorded values are the
+    ones actually in force.
+    """
+    out = {}
+    try:
+        from darksirens.redshift import grid as _grid
+        out["zMax"] = float(_grid.zMax)
+        out["n_nodes"] = int(len(_grid.zgrid))
+        out["z_last"] = float(_grid.zgrid[-1])
+    except Exception:  # pragma: no cover - never expected in a CLI process
+        return None
+    for module_name, prefix in (
+        ("darksirens.gw.populations.gp", "gp_znorm"),
+        ("darksirens.sky.models", "sky_znorm"),
+    ):
+        try:
+            module = importlib.import_module(module_name)
+            out[f"{prefix}_hi"] = float(module._ZNORM_HI)
+            out[f"{prefix}_n"] = int(module._ZNORM_N)
+        except Exception:  # pragma: no cover - optional import failure
+            out[f"{prefix}_hi"] = None
+    return out
+
+
 def build_run_fingerprint(
     opts,
     *,
@@ -186,6 +262,7 @@ def build_run_fingerprint(
             if os.path.isfile(cand):
                 slot = key if j == 0 else f"{key}[{j}]"
                 data_files[slot] = _file_identity(cand)
+    _add_flow_ensemble_identity(sem_opts, data_files)
 
     # The normalization grids are process-global, environment-driven inputs
     # to the population normalizers -- as semantic as any CLI flag.
@@ -196,6 +273,7 @@ def build_run_fingerprint(
         norm_grid = None
 
     semantic = {
+        "redshift_grid": _redshift_grid_identity(),
         "labels": [str(lab) for lab in labels],
         "lower_bound": [float(x) for x in lower_bound],
         "upper_bound": [float(x) for x in upper_bound],
@@ -227,11 +305,17 @@ def build_run_fingerprint(
     }
 
 
-def save_run_fingerprint(run_dir: str, fingerprint: dict) -> str:
-    """Atomically write ``run_fingerprint.json`` into ``run_dir``."""
-    path = os.path.join(run_dir, FINGERPRINT_BASENAME)
+def save_run_fingerprint(run_dir: str, fingerprint: dict, *, basename=None) -> str:
+    """Atomically write ``run_fingerprint.json`` into ``run_dir``.
+
+    ``basename`` overrides the filename, which a ``--resume_force`` run across a
+    MISMATCH uses to record its own configuration beside (not over) the stored
+    fingerprint of the run that created the checkpoint.
+    """
+    basename = basename or FINGERPRINT_BASENAME
+    path = os.path.join(run_dir, basename)
     fd, tmp = tempfile.mkstemp(
-        prefix=FINGERPRINT_BASENAME + ".", suffix=".tmp", dir=run_dir
+        prefix=basename + ".", suffix=".tmp", dir=run_dir
     )
     try:
         with os.fdopen(fd, "w") as f:
