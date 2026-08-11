@@ -643,7 +643,8 @@ def test_make_likelihood_operands_are_jit_arguments_not_captures():
     like = likelihood_module.make_likelihood(
         opts, data, get_fixed_population_params(opts.pop_model))
     closed_jaxpr = jax.make_jaxpr(like.jitted_body)(
-        jnp.array([]), like.operands, like.distance_table)
+        jnp.array([]), like.operands, like.distance_table,
+        like.smoothing_operator)
     invar_shapes = [tuple(v.aval.shape) for v in closed_jaxpr.jaxpr.invars]
     # the 5 selection physics fields + q + valid + the 3 sky components
     assert invar_shapes.count((n_sel,)) >= 5, invar_shapes
@@ -685,7 +686,8 @@ def test_spectral_likelihood_lowers_without_the_distance_table_as_a_literal():
     like = likelihood_module.make_likelihood(
         opts, data, get_fixed_population_params(opts.pop_model))
     text = like.jitted_body.lower(
-        jnp.array([]), like.operands, like.distance_table).as_text()
+        jnp.array([]), like.operands, like.distance_table,
+        like.smoothing_operator).as_text()
 
     # A literal costs >= 8 bytes of text per f64 element (measured ~16 on jax
     # 0.4.34), so anything at or above that bound is a table-sized constant.
