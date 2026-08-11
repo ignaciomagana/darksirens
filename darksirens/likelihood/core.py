@@ -64,8 +64,12 @@ WL_BACKEND_TABULATED = 1
 # Selection-integral WL treatment (static dispatch), mirroring
 # likelihood_with_clusters: STANDARD keeps the legacy un-marginalized
 # selection weight; LOGNORMAL applies the same Hermite mu-marginalization to
-# injection samples as the PE term (lognormal backend only — disabled or
-# tabulated backends fall through to STANDARD for backward compatibility).
+# injection samples as the PE term.  LOGNORMAL needs the lognormal event-side
+# backend: with WL DISABLED there is no magnification scatter to marginalize, so
+# STANDARD *is* the marginalized weight and the request falls through; with the
+# TABULATED backend there is no matched selection integral in this stack, so the
+# fallthrough would silently normalize the hierarchy under a different
+# observation model than the numerator and is refused below.
 WL_SELECTION_STANDARD = 0
 WL_SELECTION_LOGNORMAL = 1
 
@@ -94,23 +98,21 @@ def selection_prior_model(universe_model: str) -> str:
 #   completion_curves -> _precompute_grids (apix),
 #       _resolve_lss_completion_row_tables (lss_completion_logq/q/_members),
 #       _row_C (unique_pixels, dN_obs_kde -- indexed directly by row, no longer
-#           via pixel_to_cache_idx; zgals/wgals/ngals on the uncached fallback),
+#           via pixel_to_cache_idx; zgals/wgals/ngals on the uncached fallback;
+#           pixel_stratum_map under a STRATIFIED aggregate curve stack),
 #       _assemble/_completion_curves_row (delta_g_pix_z);
 #   catalog_kernel_state / marked_catalog_kernel_state (zgals, dzgals, wgals, ngals);
 #   _row_counts (ngals, wgals);
 #   the mark parser _gather_marks (mark_logmstar/logssfr/metallicity/color; zgals);
-#   field_global_log_Z / _members / _marked (field_dN_obs_s, field_n_empty,
-#       field_N_obs_total, field_lss_q(+_empty_sum)(+_members), field_delta_g,
-#       field_mark_z/w/values, field_depth_z/dz/c under a survey depth).
+#   field_global_log_Z / _members / _marked -> _field_missing_curve
+#       (field_dN_obs_s, field_n_empty, field_N_obs_total,
+#       field_lss_q(+_empty_sum)(+_members), field_delta_g, field_mark_z/w/values,
+#       field_depth_z/dz/c under a survey depth; pixel_stratum_map,
+#       field_occupied_pixels, field_lss_q_empty_sum_strata and
+#       empty_stratum_counts under a STRATIFIED selection).
 # The state is a PURE function of (model, cosmo, survey, mark params,
 # sky-weighting) plus these leaves, so two EMCatalogs sharing the SAME object for
-# every one of them yield the identical state.  Leaves prepare NEVER reads --
-# sample_to_unique_idx, the counterpart_* plumbing, active_counterpart_index,
-# bright_siren_sky_marginalized, pixel_to_cache_idx (dN_obs_kde is indexed
-# directly by row now -- see completion._row_C), and lss_completion_indexing
-# (consumed EAGERLY in the factory, before this call) -- are deliberately
-# EXCLUDED so a PE/selection pair that differs ONLY in those (the post-union
-# multitracer bundle, and the flat K=1 union path) can still share.
+# every one of them yield the identical state.
 _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "apix",
     "zgals", "dzgals", "wgals", "ngals",
@@ -124,6 +126,34 @@ _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "field_delta_g",
     "field_mark_z", "field_mark_w", "field_mark_values",
     "field_depth_z", "field_depth_dz", "field_depth_c",
+    "pixel_stratum_map", "field_occupied_pixels",
+    "empty_stratum_counts", "field_lss_q_empty_sum_strata",
+)
+
+# Leaves prepare NEVER reads -- sample_to_unique_idx, the counterpart_* plumbing,
+# active_counterpart_index, bright_siren_sky_marginalized, pixel_to_cache_idx
+# (dN_obs_kde is indexed directly by row now -- see completion._row_C), and
+# lss_completion_indexing (consumed EAGERLY in the factory, before this call) --
+# are deliberately EXCLUDED so a PE/selection pair that differs ONLY in those
+# (the post-union multitracer bundle, and the flat K=1 union path) can still share.
+_PREPARE_STATE_EXCLUDED_EMCATALOG_FIELDS = (
+    "sample_to_unique_idx",
+    "counterpart_pixel", "counterpart_pixels", "counterpart_zs", "counterpart_dzs",
+    "active_counterpart_index", "bright_siren_sky_marginalized",
+    "pixel_to_cache_idx", "lss_completion_indexing",
+)
+
+# What ``can_share_redshift_prior_state`` actually compares: EVERY EMCatalog leaf
+# except the deliberately-excluded ones.  Derived (not hand-listed) so a leaf
+# added to EMCatalog and read by a new completion path defaults to NOT sharing
+# instead of silently sharing -- the earlier hand-maintained consumed list had
+# fallen four leaves behind the stratified-completion tree.  Superset of
+# :data:`_PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS`, and equal to it whenever that
+# enumeration is complete (pinned by
+# tests/test_redshift_prior_state_sharing.py).
+_PREPARE_STATE_COMPARED_EMCATALOG_FIELDS = tuple(
+    name for name in EMCatalog._fields
+    if name not in _PREPARE_STATE_EXCLUDED_EMCATALOG_FIELDS
 )
 
 # Prior models whose STATE is EMCatalog-derived and thus dedup-eligible across
@@ -138,20 +168,20 @@ def can_share_redshift_prior_state(pe_model, sel_model, cat_pe, cat_sel) -> bool
     """Whether the PE and selection redshift-prior states are provably identical.
 
     True iff both seams resolve to the SAME dedup-eligible prior model AND every
-    EMCatalog field ``prepare_redshift_prior_state`` reads
-    (:data:`_PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS`) is the identical object
-    (``is``) in both catalogs.  In that case ``prepare_redshift_prior_state`` --
-    a pure function of the model, the (seam-shared) cosmo/survey/mark params and
-    those leaves -- returns the identical state, so it may be built ONCE and
-    reused for both seams.  Object identity (never value equality) keeps this
-    trace-safe and cheap and defaults to NOT sharing whenever any consumed field
-    differs.
+    EMCatalog field that could feed ``prepare_redshift_prior_state``
+    (:data:`_PREPARE_STATE_COMPARED_EMCATALOG_FIELDS`, i.e. all of them bar the
+    leaves prepare provably never reads) is the identical object (``is``) in both
+    catalogs.  In that case ``prepare_redshift_prior_state`` -- a pure function of
+    the model, the (seam-shared) cosmo/survey/mark params and those leaves --
+    returns the identical state, so it may be built ONCE and reused for both
+    seams.  Object identity (never value equality) keeps this trace-safe and
+    cheap and defaults to NOT sharing whenever any compared field differs.
     """
     if pe_model != sel_model or pe_model not in _SHAREABLE_PRIOR_MODELS:
         return False
     return all(
         getattr(cat_pe, name) is getattr(cat_sel, name)
-        for name in _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS
+        for name in _PREPARE_STATE_COMPARED_EMCATALOG_FIELDS
     )
 
 
@@ -178,16 +208,17 @@ def redshift_prior_state_sharing(universe_model, catalogs_pe, catalogs_sel) -> t
     )
 
 
-def _require_field_mode_scope(
-    universe_model, wl_enabled, lss_marginalize, mark_model, catalogs
-):
+def _require_field_mode_scope(universe_model, wl_enabled, mark_model, catalogs):
     """Reject FIELD-convention sky weighting outside its supported scope.
 
     All checks are static (universe/model strings, static bools, and pytree
     STRUCTURE via ``is not None``), so they resolve once per trace -- mirroring
-    the K>=2 mixture ``NotImplementedError`` guards.  The estimand only holds
-    when the missing-galaxy budget carries no LSS modulation (dummy overdensity,
-    no Q_LSS), so those are rejected here.  Both ``dark_sirens`` and
+    the K>=2 mixture ``NotImplementedError`` guards.  LSS modulation of the
+    missing-galaxy budget (a deterministic Q_LSS table, a Q ensemble, or a real
+    per-pixel delta_g) IS supported -- including under ``lss_marginalize`` --
+    but only when the survey-global ``field_*`` rows mirror it, so the per-pixel
+    numerator and the global normalizer carry the SAME budget; that mirroring is
+    what the per-catalog checks below require.  Both ``dark_sirens`` and
     ``dark_sirens_complete`` are supported under the field convention (the
     complete-model field normalizer Z = Sum_pix N_obs is theta-independent).
     """
@@ -439,13 +470,25 @@ def darksiren_log_likelihood(
     # Weak-lensing dispatch (static): wl_enabled gates ALL WL machinery off for
     # every non-WL model, so they remain numerically identical to the non-WL code.
     wl_enabled = wl_backend != WL_BACKEND_DISABLED
-    # Selection-side WL marginalization: opt-in, lognormal backend only
-    # (same fallthrough semantics as likelihood_with_clusters — a disabled or
-    # tabulated backend keeps the exact legacy selection path).
+    # Selection-side WL marginalization: opt-in, lognormal backend only.  A
+    # DISABLED backend keeps the exact legacy selection path (no WL anywhere, so
+    # STANDARD is exact); the TABULATED backend has no matched selection integral
+    # here, so silently downgrading it to STANDARD would leave mu(Lambda)
+    # marginalized under a different observation model than the per-event weights
+    # — a static configuration error, not a fallthrough.
     wl_selection_enabled = (
         wl_selection == WL_SELECTION_LOGNORMAL
         and wl_backend == WL_BACKEND_LOGNORMAL
     )
+    if wl_selection == WL_SELECTION_LOGNORMAL and wl_backend == WL_BACKEND_TABULATED:
+        raise ValueError(
+            "wl_selection=WL_SELECTION_LOGNORMAL requires "
+            "wl_backend=WL_BACKEND_LOGNORMAL; the tabulated backend has no "
+            "matched selection integral, so the Hermite mu-marginalization the "
+            "PE term applies cannot be applied to the injections. Use the "
+            "lognormal backend, or pass wl_selection=WL_SELECTION_STANDARD for a "
+            "deliberately mismatched ablation."
+        )
     if wl_enabled and universe_model != "spectral_sirens_wl":
         raise ValueError(
             f"wl_backend={wl_backend} requires universe_model='spectral_sirens_wl', "
@@ -477,7 +520,7 @@ def darksiren_log_likelihood(
     # FIELD-convention sky weighting scope gate (static; covers K = 1 and K >= 2).
     if catalog_sky_weighting == "field":
         _require_field_mode_scope(
-            universe_model, wl_enabled, lss_marginalize, mark_model,
+            universe_model, wl_enabled, mark_model,
             (em_catalog_pe, em_catalog_sel)
             + tuple(mixture_em_catalogs_pe) + tuple(mixture_em_catalogs_sel),
         )
@@ -964,7 +1007,7 @@ def darksiren_log_likelihood(
         )
         return ll + jnp.sum(event_lls)
 
-    def _factored_member_marginalization(n_members, is_field, sel_has_members):
+    def _factored_member_marginalization(n_members, is_field):
         """FACTORED LSS-completion marginalisation (default under lss_marginalize).
 
         Numerically equal to ``_reference_member_marginalization`` up to
@@ -1010,12 +1053,10 @@ def darksiren_log_likelihood(
                 out.append((logq_all, logZ))
             return tuple(out)
 
-        # ``base_miss`` is present only on ENSEMBLE states; the selection states
-        # may be plain (asymmetric PE-members / selection-no-members case), where
-        # these tuples are built but never read (the member reduction is hoisted),
-        # so ``getattr(..., None)`` keeps the trace from touching a missing leaf.
-        base_miss_univ = tuple(getattr(s, "base_miss", None) for s in prior_states_univ)
-        base_miss_sel = tuple(getattr(s, "base_miss", None) for s in prior_states_sel)
+        # ``base_miss`` is present only on ENSEMBLE states, which the guard in the
+        # ``lss_marginalize`` block above requires on BOTH seams.
+        base_miss_univ = tuple(s.base_miss for s in prior_states_univ)
+        base_miss_sel = tuple(s.base_miss for s in prior_states_sel)
         member_is_log_univ = tuple(
             _resolve_member_logq_row(c)[1] for c in catalogs_pe_all
         )
@@ -1147,118 +1188,92 @@ def darksiren_log_likelihood(
             ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
             return jax.vmap(lambda row: log_evidence_and_mc_variance(row, nsamp))(ldw)
 
-        # --- Selection: when the selection side carries NO member ensemble,
-        # log_mu/Neff are member-INDEPENDENT, so compute them ONCE (hoisted out of
-        # the vmap) with the existing compute_selection_term + log_weight closure
-        # -- identical to the reference's per-member-identical recomputation. ---
-        if not sel_has_members:
-            def _selection_prior(z, pix, catalogs):
-                return _eval_prior_mix(
-                    selection_model, prior_states_sel, z, pix, catalogs
-                )
-
-            def _log_weight_sel(m1det, q, dL, chieff, pix, prior_wt, catalogs):
-                supported = (dL >= dL_lo) & (dL <= dL_hi)
-                dL_c = jnp.clip(dL, dL_lo, dL_hi)
-                ldw = log_sample_weight(
-                    m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
-                    catalogs, log_p_pop, _selection_prior,
-                )
-                return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
-
-            log_mu_fixed, Neff_fixed, _ = compute_selection_term(
-                gw_sel, catalogs_sel_all, _log_weight_sel, Ndraw, nEvents,
-                sel_batch_size=sel_batch_size, sky_log_weight_fn=sky_log_weight_fn,
-            )
+        # --- Selection: the member reduction. Pad the injections (batched)
+        # exactly as compute_selection_term, then precompute the member-
+        # INDEPENDENT per-injection quantities ONCE (a batched scan bounds the KDE
+        # peak memory to O(sel_batch_size x N_max_gals)); the per-member reduction
+        # re-slices these cheaply. ---
+        if sel_batch_size is not None:
+            gw_sel_p, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
         else:
-            # Pad the injections (batched) exactly as compute_selection_term, then
-            # precompute the member-INDEPENDENT per-injection quantities ONCE (a
-            # batched scan bounds the KDE peak memory to O(sel_batch_size x
-            # N_max_gals)); the per-member reduction re-slices these cheaply.
-            if sel_batch_size is not None:
-                gw_sel_p, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
-            else:
-                gw_sel_p = gw_sel
-            N_sel_p = gw_sel_p.dL.shape[0]
+            gw_sel_p = gw_sel
+        N_sel_p = gw_sel_p.dL.shape[0]
 
-            def _sel_precompute(start, size):
+        def _sel_precompute(start, size):
+            sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
+            dL_b = sl(gw_sel_p.dL)
+            supported = (dL_b >= dL_lo) & (dL_b <= dL_hi)
+            dL_c = jnp.clip(dL_b, dL_lo, dL_hi)
+            valid = sl(gw_sel_p.valid) & (sl(gw_sel_p.prior_wt) > 0.0)
+            base, z_c = log_target_density_base_and_z(
+                sl(gw_sel_p.m1det), sl(gw_sel_p.q), dL_c, sl(gw_sel_p.chieff),
+                sl(gw_sel_p.pixels), sl(gw_sel_p.prior_wt),
+                cosmo, survey, pop_params, catalogs_sel_all[0], log_p_pop,
+            )
+            pix_all = sl(gw_sel_p.pixels)
+            obs = tuple(
+                eval_dark_obs_bracket(
+                    z_c, _pix_col(pix_all, k), prior_states_sel[k],
+                    catalogs_sel_all[k],
+                )
+                for k in range(n_catalogs)
+            )
+            A_obs = tuple(o[0] for o in obs)
+            idx = tuple(o[1] for o in obs)
+            t = tuple(o[2] for o in obs)
+            pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
+            # _sky_weight clamps dL internally, matching _batch_lse (which
+            # passes the UNCLAMPED dL_b to sky_log_weight_fn).
+            sky = (
+                sky_log_weight_fn(
+                    sl(gw_sel_p.nx), sl(gw_sel_p.ny), sl(gw_sel_p.nz), dL_b
+                )
+                if apply_sky else jnp.zeros_like(base)
+            )
+            return base, supported, valid, sky, A_obs, idx, t, pixk
+
+        if sel_batch_size is None:
+            sel_pre = _sel_precompute(0, N_sel_p)
+        else:
+            N_batches = N_sel_p // sel_batch_size
+
+            def _pre_scan(_, b):
+                return None, _sel_precompute(b * sel_batch_size, sel_batch_size)
+
+            _, sel_pre_stacked = lax.scan(_pre_scan, None, jnp.arange(N_batches))
+            # (N_batches, batch, ...) -> (N_sel_p, ...) preserving order.
+            sel_pre = jax.tree_util.tree_map(
+                lambda a: a.reshape((N_sel_p,) + a.shape[2:]), sel_pre_stacked
+            )
+
+        def _sel_member_reduction(leaves):
+            base_a, sup_a, val_a, sky_a, A_obs_a, idx_a, t_a, pixk_a = sel_pre
+
+            def _provider(start, size):
                 sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
-                dL_b = sl(gw_sel_p.dL)
-                supported = (dL_b >= dL_lo) & (dL_b <= dL_hi)
-                dL_c = jnp.clip(dL_b, dL_lo, dL_hi)
-                valid = sl(gw_sel_p.valid) & (sl(gw_sel_p.prior_wt) > 0.0)
-                base, z_c = log_target_density_base_and_z(
-                    sl(gw_sel_p.m1det), sl(gw_sel_p.q), dL_c, sl(gw_sel_p.chieff),
-                    sl(gw_sel_p.pixels), sl(gw_sel_p.prior_wt),
-                    cosmo, survey, pop_params, catalogs_sel_all[0], log_p_pop,
+                log_p_mix = _log_p_mix(
+                    tuple(sl(a) for a in A_obs_a),
+                    tuple(sl(a) for a in idx_a),
+                    tuple(sl(a) for a in t_a),
+                    tuple(sl(a) for a in pixk_a),
+                    leaves, base_miss_sel, member_is_log_sel,
                 )
-                pix_all = sl(gw_sel_p.pixels)
-                obs = tuple(
-                    eval_dark_obs_bracket(
-                        z_c, _pix_col(pix_all, k), prior_states_sel[k],
-                        catalogs_sel_all[k],
-                    )
-                    for k in range(n_catalogs)
-                )
-                A_obs = tuple(o[0] for o in obs)
-                idx = tuple(o[1] for o in obs)
-                t = tuple(o[2] for o in obs)
-                pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
-                # _sky_weight clamps dL internally, matching _batch_lse (which
-                # passes the UNCLAMPED dL_b to sky_log_weight_fn).
-                sky = (
-                    sky_log_weight_fn(
-                        sl(gw_sel_p.nx), sl(gw_sel_p.ny), sl(gw_sel_p.nz), dL_b
-                    )
-                    if apply_sky else jnp.zeros_like(base)
-                )
-                return base, supported, valid, sky, A_obs, idx, t, pixk
+                # Reproduce log_weight's mask, then _batch_lse's +sky and mask.
+                ldw = sl(base_a) + log_p_mix
+                ldw = jnp.where(sl(sup_a) & jnp.isfinite(ldw), ldw, -jnp.inf)
+                if apply_sky:
+                    ldw = ldw + sl(sky_a)
+                ldw = jnp.where(sl(val_a) & jnp.isfinite(ldw), ldw, -jnp.inf)
+                return ldw
 
-            if sel_batch_size is None:
-                sel_pre = _sel_precompute(0, N_sel_p)
-            else:
-                N_batches = N_sel_p // sel_batch_size
-
-                def _pre_scan(_, b):
-                    return None, _sel_precompute(b * sel_batch_size, sel_batch_size)
-
-                _, sel_pre_stacked = lax.scan(_pre_scan, None, jnp.arange(N_batches))
-                # (N_batches, batch, ...) -> (N_sel_p, ...) preserving order.
-                sel_pre = jax.tree_util.tree_map(
-                    lambda a: a.reshape((N_sel_p,) + a.shape[2:]), sel_pre_stacked
-                )
-
-            def _sel_member_reduction(leaves):
-                base_a, sup_a, val_a, sky_a, A_obs_a, idx_a, t_a, pixk_a = sel_pre
-
-                def _provider(start, size):
-                    sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
-                    log_p_mix = _log_p_mix(
-                        tuple(sl(a) for a in A_obs_a),
-                        tuple(sl(a) for a in idx_a),
-                        tuple(sl(a) for a in t_a),
-                        tuple(sl(a) for a in pixk_a),
-                        leaves, base_miss_sel, member_is_log_sel,
-                    )
-                    # Reproduce log_weight's mask, then _batch_lse's +sky and mask.
-                    ldw = sl(base_a) + log_p_mix
-                    ldw = jnp.where(sl(sup_a) & jnp.isfinite(ldw), ldw, -jnp.inf)
-                    if apply_sky:
-                        ldw = ldw + sl(sky_a)
-                    ldw = jnp.where(sl(val_a) & jnp.isfinite(ldw), ldw, -jnp.inf)
-                    return ldw
-
-                return selection_reduce_from_ldw_provider(
-                    _provider, N_sel_p, Ndraw, sel_batch_size
-                )
+            return selection_reduce_from_ldw_provider(
+                _provider, N_sel_p, Ndraw, sel_batch_size
+            )
 
         # --- THE member vmap: carries ONLY member-stacked leaves. ---
         def _member_ll(univ_leaves, sel_leaves):
             event_lls, event_vars = _pe_member_terms(univ_leaves)
-            if sel_has_members:
-                log_mu_m, Neff_m, _ = _sel_member_reduction(sel_leaves)
-            else:
-                log_mu_m, Neff_m = log_mu_fixed, Neff_fixed
+            log_mu_m, Neff_m, _ = _sel_member_reduction(sel_leaves)
             ll_m = selection_log_correction(
                 log_mu_m, Neff_m, nEvents,
                 soft_guard=selection_neff_soft_guard,
@@ -1268,18 +1283,13 @@ def darksiren_log_likelihood(
             return ll_m + jnp.sum(event_lls)
 
         univ_stack = _member_leaf_bundle(prior_states_univ, catalogs_pe_all)
-        if sel_has_members:
-            sel_stack = _member_leaf_bundle(prior_states_sel, catalogs_sel_all)
-            ll_members = jax.vmap(_member_ll, in_axes=(0, 0))(univ_stack, sel_stack)
-        else:
-            ll_members = jax.vmap(
-                lambda ul: _member_ll(ul, None), in_axes=(0,)
-            )(univ_stack)
+        sel_stack = _member_leaf_bundle(prior_states_sel, catalogs_sel_all)
+        ll_members = jax.vmap(_member_ll, in_axes=(0, 0))(univ_stack, sel_stack)
 
         ll_members = jnp.where(jnp.isfinite(ll_members), ll_members, -jnp.inf)
         return logsumexp(ll_members) - jnp.log(n_members)
 
-    def _reference_member_marginalization(n_members, is_field, sel_has_members):
+    def _reference_member_marginalization(n_members, is_field):
         """REFERENCE LSS-completion marginalisation: the historical
         whole-likelihood vmap (each member redoes the entire ``_ll_given_states``,
         including the observed-catalog KDE).  Retained verbatim as the numerical
@@ -1318,12 +1328,9 @@ def darksiren_log_likelihood(
             _member_states(s, surveys_all[k], catalogs_pe_all[k])
             for k, s in enumerate(prior_states_univ)
         )
-        sel_members = (
-            tuple(
-                _member_states(s, surveys_all[k], catalogs_sel_all[k])
-                for k, s in enumerate(prior_states_sel)
-            )
-            if sel_has_members else prior_states_sel
+        sel_members = tuple(
+            _member_states(s, surveys_all[k], catalogs_sel_all[k])
+            for k, s in enumerate(prior_states_sel)
         )
         member_axes_one = DarkSirenPriorState(
             kernels=None, log_Nobs=None, dN_miss=0, log_Z=0,
@@ -1331,8 +1338,7 @@ def darksiren_log_likelihood(
         )
         member_axes = (member_axes_one,) * n_catalogs
         ll_members = jax.vmap(
-            _ll_given_states,
-            in_axes=(member_axes, member_axes if sel_has_members else None),
+            _ll_given_states, in_axes=(member_axes, member_axes),
         )(
             univ_members, sel_members
         )
@@ -1374,18 +1380,30 @@ def darksiren_log_likelihood(
             getattr(s, "base_miss", None) is not None
             for s in prior_states_sel
         ]
-        if any(sel_members_flags) and not all(sel_members_flags):
+        # The member average is a marginalization ONLY if numerator and
+        # denominator are evaluated on the SAME Q member: each event's evidence
+        # carries 1/Z_m from the member's redshift-prior normalizer, and it
+        # cancels against mu(Q_m)^{-N_obs}.  Against a mean-Q mu it does not
+        # cancel, leaving L_m ~ (Zbar/Z_m)^{N_obs} -- with N_obs ~ 10^2 a 1%
+        # spread in Z_m tilts the logsumexp by e^{2.6} per member, so the
+        # "average" collapses onto the smallest-Z_m member.  Reject the
+        # asymmetric structure instead of silently returning that number.
+        missing_sel = [k + 1 for k, f in enumerate(sel_members_flags) if not f]
+        if missing_sel:
             raise ValueError(
-                "lss_marginalize: the selection-side Q ensembles must be "
-                "present on ALL catalogs or NONE (mixed member structure "
-                "cannot share the member vmap)."
+                "lss_marginalize=True requires the LSS-completion ENSEMBLE on "
+                f"EVERY SELECTION catalog too; catalog(s) {missing_sel} have "
+                "none. The per-member redshift-prior normalizer Z_m cancels only "
+                "against mu(Q_m); pairing member numerators with a "
+                "posterior-mean-Q mu makes the member average a Z_m^{-N_obs}-"
+                "weighted pick, not a marginalization. Build the selection "
+                "catalog's Q_LSS with the same members as the PE catalog's."
             )
-        sel_has_members = all(sel_members_flags) and len(sel_members_flags) > 0
 
         if lss_member_impl == "factored":
-            ll = _factored_member_marginalization(n_members, is_field, sel_has_members)
+            ll = _factored_member_marginalization(n_members, is_field)
         elif lss_member_impl == "reference":
-            ll = _reference_member_marginalization(n_members, is_field, sel_has_members)
+            ll = _reference_member_marginalization(n_members, is_field)
         else:
             raise ValueError(
                 "lss_member_impl must be 'factored' or 'reference', got "

@@ -377,6 +377,17 @@ class TestLikelihoodIntegration:
         )
         assert float(abs(ll_fall - ll_base)) < 1e-12
 
+    def test_wl_selection_lognormal_under_tabulated_backend_raises(self, fixture):
+        """The tabulated backend has NO matched selection integral: silently
+        downgrading to STANDARD would normalize mu(Lambda) under a different
+        observation model than the per-event weights, so it must be fatal."""
+        with pytest.raises(ValueError, match="tabulated backend"):
+            self._call(
+                fixture, "spectral_sirens_wl",
+                wl_backend=WL_BACKEND_TABULATED,
+                wl_selection=WL_SELECTION_LOGNORMAL,
+            )
+
 
 def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
     """Factory should translate data['wl_params'] into explicit core kwargs."""
