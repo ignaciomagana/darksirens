@@ -106,6 +106,41 @@ def test_strata_cli_fits_per_stratum_and_writes_1_1(tmp_path):
         load_selection_fit_json(out)
 
 
+def test_fit_selection_keeps_the_dense_survey_on_the_host(tmp_path, monkeypatch):
+    """The fit is pure numpy/scipy, so the dense (npix, maxgals) tables must not
+    be pushed to a device (several GB each at catalog nside)."""
+    from darksirens.cli import fit_selection as fs
+
+    rng = np.random.default_rng(11)
+    raw = tmp_path / "raw.h5"
+    _write_raw_two_strata(raw, rng, n=20000)
+    surv = _pixelate(raw, tmp_path)
+
+    seen = {}
+    orig = fs.load_survey
+
+    def _spy(path, *a, **kw):
+        seen["to_device"] = kw.get("to_device", True if not a else a[0])
+        out = orig(path, *a, **kw)
+        seen["types"] = [type(x) for x in out[1:5]]
+        return out
+
+    monkeypatch.setattr(fs, "load_survey", _spy)
+    fs.main(["--survey_path", str(surv), "--m_lim", "21.0",
+             "--out", str(tmp_path / "fit.json")])
+    assert seen["to_device"] is False
+    assert all(t is np.ndarray for t in seen["types"])
+
+
+def test_survey_sha256_is_streamed_and_matches_read_bytes(tmp_path):
+    from darksirens.cli.fit_selection import _survey_sha256
+    import hashlib
+
+    blob = tmp_path / "blob.bin"
+    blob.write_bytes(np.random.default_rng(13).bytes(3 << 20))
+    assert _survey_sha256(blob) == hashlib.sha256(blob.read_bytes()).hexdigest()
+
+
 def test_single_stratum_output_stays_1_0(tmp_path):
     from darksirens.cli.fit_selection import main as fit_main
     from darksirens.redshift.selection import (

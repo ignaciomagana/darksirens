@@ -102,8 +102,9 @@ def _gw(n_events, n_samp, seed, n_rows):
                    prior_wt=prior_wt, pixels=pixels, q=m2det / m1det, valid=valid)
 
 
-def _make_call(nEvents, nsamp, N_sel, N_rows, M, K, impl, materialize, sel_batch_size):
-    cat = _dark_catalog(N_rows, M, seed=1)
+def _make_call(nEvents, nsamp, N_sel, N_rows, M, K, impl, materialize, sel_batch_size,
+               gals_per_row=4):
+    cat = _dark_catalog(N_rows, M, gals_per_row=gals_per_row, seed=1)
     gw_pe = _gw(nEvents, nsamp, seed=0, n_rows=N_rows)
     gw_sel = _gw(N_sel, 1, seed=10, n_rows=N_rows)
     common = dict(
@@ -147,12 +148,6 @@ def _time_median(fn, arg, repeats):
     return float(np.median(ts))
 
 
-def _time_compile(fn, arg):
-    t0 = time.perf_counter()
-    fn(arg).block_until_ready()
-    return time.perf_counter() - t0
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--nEvents", type=int, default=8)
@@ -188,7 +183,8 @@ def main():
             for impl in ("reference", "factored"):
                 call = _make_call(args.nEvents, args.nsamp, args.N_sel, args.N_rows,
                                   M, K, impl, materialize=True,
-                                  sel_batch_size=args.sel_batch_size)
+                                  sel_batch_size=args.sel_batch_size,
+                                  gals_per_row=args.gals)
                 res[("value", impl)] = 1e3 * _time_median(
                     call, POP.at[0].set(float(POP[0])), args.repeats
                 )
@@ -196,7 +192,8 @@ def main():
             for impl in ("reference", "factored"):
                 call = _make_call(args.nEvents, args.nsamp, args.N_sel, args.N_rows,
                                   M, K, impl, materialize=False,
-                                  sel_batch_size=args.sel_batch_size)
+                                  sel_batch_size=args.sel_batch_size,
+                                  gals_per_row=args.gals)
                 gfn = jax.grad(lambda p0, c=call: c(POP.at[0].set(p0)))
                 res[("grad", impl)] = 1e3 * _time_median(gfn, float(POP[0]), args.repeats)
 

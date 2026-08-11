@@ -264,7 +264,7 @@ does not cap Dynesty likelihood calls unless you set a positive
 
 ## Bright-siren mock data
 
-A separate bright-siren mock workflow is available under `scripts/mock_bright_sirens` so the dark-siren mock scripts remain unchanged. It generates a complete galaxy population, applies an EM survey selection, draws GW events from galaxies with detectable counterparts, fixes the PE sky samples to the counterpart positions, and writes joint GW+EM selection injections for multi-event bright-siren inference.
+A separate bright-siren mock workflow is available under `scripts/mock_bright_sirens` so the dark-siren mock scripts remain unchanged. It generates a complete galaxy population, applies an EM survey selection, draws GW events from galaxies with detectable counterparts, fixes the PE sky samples to the counterpart positions, and writes joint GW+EM selection injections for multi-event bright-siren inference. It uses the same all-observable measurement family as the dark-siren generator (detection thresholds a recorded `rho_obs`, every width follows from that recorded number), realises the survey photo-z and the counterpart redshift error it declares, and takes the same `--snr-ref` / `--snr-uncertainty` / `--lnmc-uncertainty` / `--lnq-uncertainty` / `--chieff-uncertainty` knobs.
 
 ```bash
 bash scripts/mock_bright_sirens/run_mock_bright_sirens_test.sh

@@ -111,3 +111,72 @@ def test_analyze_parser_defaults_legacy_pickle_off():
     args = _build_parser().parse_args([])
     assert args.allow_legacy_pickle is False
     assert _build_parser().parse_args(["--allow_legacy_pickle"]).allow_legacy_pickle
+
+
+def test_evidence_bars_carry_the_error_on_the_DIFFERENCE():
+    """The bars are log BFs against the best model, so the error must be the
+    combined hypot(err_i, err_best) — the same combination the pairwise matrix
+    prints — and the reference model's own bar cannot carry an error bar."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import numpy as np
+
+    from darksirens.cli.analyze import plot_model_evidences
+
+    log10Zs = [-10.0, -8.0, -12.0]
+    errs = [0.3, 0.4, 0.5]
+    fig = plot_model_evidences(["a", "best", "c"], log10Zs, errs)
+    ax = fig.axes[0]
+    (segments,) = [c.get_segments() for c in ax.collections]
+    heights = [np.abs(seg[1][1] - seg[0][1]) / 2.0 for seg in segments]
+    want = [np.hypot(0.3, 0.4), 0.0, np.hypot(0.5, 0.4)]
+    np.testing.assert_allclose(sorted(heights), sorted(want), rtol=1e-9, atol=1e-12)
+    matplotlib.pyplot.close(fig)
+
+
+def test_event_overlay_is_drawn_in_the_source_frame(tmp_path):
+    """``p_m1`` is a source-frame density, so the rug must be m1det/(1+z), not
+    m1det: at these distances the raw detector-frame median sits tens of percent
+    to the right of where its event belongs."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import numpy as np
+    import h5py
+
+    from darksirens.cli.analyze import COSMO_FID, overlay_observed_events
+    from darksirens.utils.cosmology import z_of_dL
+
+    nEvents, nsamp = 2, 8
+    m1det = np.repeat(np.array([40.0, 60.0]), nsamp)
+    dL = np.repeat(np.array([1500.0, 4000.0]), nsamp)
+    path = tmp_path / "gw.h5"
+    with h5py.File(path, "w") as f:
+        f.attrs["format_version"] = "gwcat-1.0"
+        f.attrs["mock_data"] = True
+        f.attrs["nobs"] = nEvents
+        f.attrs["nsamp"] = nsamp
+        f.attrs["pe_cosmology_H0"] = COSMO_FID["H0"]
+        f.attrs["pe_cosmology_Om0"] = COSMO_FID["Om0"]
+        f.attrs["chi_eff_in_p_pe"] = True
+        f.attrs["chi_eff_amax"] = 0.99
+        f.create_dataset("m1det", data=m1det)
+        f.create_dataset("m2det", data=0.8 * m1det)
+        f.create_dataset("m1src", data=m1det)
+        f.create_dataset("m2src", data=0.8 * m1det)
+        f.create_dataset("dL", data=dL)
+        f.create_dataset("chieff", data=np.zeros_like(m1det))
+        f.create_dataset("ra", data=np.zeros_like(m1det))
+        f.create_dataset("dec", data=np.zeros_like(m1det))
+        f.create_dataset("p_pe", data=np.ones_like(m1det))
+
+    fig, ax = matplotlib.pyplot.subplots()
+    overlay_observed_events(ax, {"gw_path": str(path)})
+    drawn = sorted(line.get_xdata()[0] for line in ax.lines)
+    z = np.asarray(z_of_dL(np.array([1500.0, 4000.0]), COSMO_FID["H0"],
+                           COSMO_FID["Om0"], COSMO_FID["w0"], COSMO_FID["wa"]))
+    want = sorted(np.array([40.0, 60.0]) / (1.0 + z))
+    np.testing.assert_allclose(drawn, want, rtol=1e-6)
+    assert drawn[-1] < 60.0 - 1e-6          # ... and NOT the detector-frame value
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert any("source-frame" in t for t in labels)
+    matplotlib.pyplot.close(fig)

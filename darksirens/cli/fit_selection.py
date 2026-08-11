@@ -45,6 +45,20 @@ from darksirens.redshift.selection import (
 )
 
 
+def _survey_sha256(path):
+    """Streaming sha256 of the survey file (same idiom as the completion CLI).
+
+    ``Path.read_bytes()`` would materialise the whole dense padded catalog --
+    several GB at catalog nside -- at the very end of the run, i.e. it could
+    MemoryError after the fit has already succeeded.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--survey_path", required=True,
@@ -144,7 +158,11 @@ def main(argv=None):
     _row("Input", survey)
     if not survey.is_file():
         _fatal(f"survey file not found: {survey}")
-    nside, ngals, zgals, dzgals, wgals, z_depth = load_survey(survey)
+    # to_device=False: this CLI is pure numpy/scipy and only reads zgals/ngals,
+    # so there is no reason to push the dense (npix, maxgals) tables (several GB
+    # each at catalog nside) onto a device we never compute on.
+    _nside, ngals, zgals, _dzgals, _wgals, _z_depth = load_survey(
+        survey, to_device=False)
     props = load_survey_galprops(survey)
     if "gal_app_mag" not in props:
         _fatal("survey carries no gal_app_mag dataset; re-pixelate from a "
@@ -257,7 +275,7 @@ def main(argv=None):
         "format_version": fmt,
         "strata": [f_.to_jsonable() for f_ in fits],
         "survey_path": str(survey),
-        "survey_sha256": hashlib.sha256(survey.read_bytes()).hexdigest(),
+        "survey_sha256": _survey_sha256(survey),
         "created_utc": datetime.now(timezone.utc).isoformat(),
     }
     with open(out, "w") as f:

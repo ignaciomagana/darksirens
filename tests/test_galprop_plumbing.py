@@ -77,6 +77,28 @@ def test_galprops_do_not_enroll_as_marks(tmp_path):
     assert set(GALPROP_DATASETS).isdisjoint(MARK_DATASETS)
 
 
+@pytest.mark.parametrize("column,index,value", [
+    ("Z", 3, -1.0),          # survey failure sentinel
+    ("Z", 5, 0.0),
+    ("Z", 9, np.nan),
+    ("Z", 11, 100.0),        # the padding sentinel this tool writes
+    ("ZERR", 4, -1.0),
+    ("ZERR", 6, np.nan),
+])
+def test_bad_redshift_or_zerr_rejected_at_boundary(tmp_path, column, index, value):
+    rng = np.random.default_rng(17)
+    raw = tmp_path / "survey.h5"
+    _write_survey(raw, rng)
+    with h5py.File(raw, "a") as f:
+        col = np.asarray(f[column])
+        col[index] = value
+        del f[column]
+        f.create_dataset(column, data=col)
+    with pytest.raises(SystemExit):
+        pixelate.main(["--survey_path", str(raw), "--save_path", str(tmp_path),
+                       "--nside", "4"])
+
+
 def test_nonfinite_magnitude_rejected_at_boundary(tmp_path):
     rng = np.random.default_rng(13)
     raw = tmp_path / "survey.h5"

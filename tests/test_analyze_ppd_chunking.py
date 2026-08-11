@@ -44,6 +44,7 @@ if "tinygp" not in sys.modules:
 jnp = pytest.importorskip("jax.numpy")
 
 from darksirens.cli.analyze import (
+    gp_node_count,
     plan_ppd_sizing,
     probe_device_memory_bytes,
     posterior_predictive,
@@ -78,12 +79,35 @@ def test_plan_ppd_sizing_no_chunk_for_parametric_small_grid():
     assert batch >= 1
 
 
+def test_plan_ppd_sizing_chunks_small_grid_when_gp_nodes_blow_the_budget():
+    # grid_points = 1024*8*8 = 65536 <= full_grid_max, but with 6400 inducing
+    # nodes the full plane needs ~215 GB at batch=64: the small-grid shortcut
+    # must not bypass the memory model.
+    n_outer, nz, nchi, n_nodes = 1024, 8, 8, 6400
+    budget, safe_frac, n_live, dtype = 8e9, 0.4, 16, 8
+    batch, slab = plan_ppd_sizing(
+        nsamples=200, n_outer=n_outer, nz=nz, nchi=nchi, n_nodes=n_nodes,
+        max_mem_bytes=budget, safe_frac=safe_frac, n_live=n_live, dtype_bytes=dtype,
+    )
+    assert slab is not None and 1 <= slab <= n_outer
+    assert batch * slab * nz * nchi * dtype * (n_nodes + n_live) <= safe_frac * budget
+
+
 def test_plan_ppd_sizing_honors_overrides():
     batch, slab = plan_ppd_sizing(
         nsamples=100, n_outer=1000, nz=32, nchi=24, n_nodes=10,
         max_mem_bytes=8e9, batch_size=3, grid_chunk=11,
     )
     assert batch == 3 and slab == 11
+
+
+def test_gp_node_count_covers_the_additive_family():
+    # The additive models keep their nodes per ANOVA term (no top-level ``M``),
+    # so a bare getattr(model, "M", 0) probe would size their slab as parametric.
+    assert gp_node_count(pop_model_parser("powerlaw")) == 0
+    assert gp_node_count(pop_model_parser("gp4d")) == 6400
+    assert gp_node_count(pop_model_parser("gp4d_additive")) == 268
+    assert gp_node_count(pop_model_parser("gp_separable")) == 28
 
 
 def test_probe_device_memory_positive():
@@ -137,3 +161,40 @@ def test_marginals_are_normalised():
                        (zgrid, p_z), (chigrid, p_chi)]:
         integral = _trapezoid(np.asarray(marg[0]), grid)
         np.testing.assert_allclose(integral, 1.0, rtol=1e-6, atol=1e-9)
+
+
+# --------------------------------------------------------------------------
+# A degenerate (zero-density) posterior sample must not NaN the whole figure
+# --------------------------------------------------------------------------
+
+def test_zero_density_sample_yields_zero_curves_not_nan():
+    """A constraint-violating draw (e.g. parametric.py's ``valid`` mask forces
+    p = 0 everywhere) integrates to exactly 0 on the grid.  Unguarded ``/=``
+    normalisations turn that into 0/0 = NaN, and jnp.median/jnp.percentile
+    propagate NaN — one bad sample out of thousands would blank the credible band
+    of every model in the figure, silently."""
+    from darksirens.cli.analyze import make_single_theta_predictive, summarize_ppd
+
+    settings = {"pop_model": "powerlaw", "fix_population": True,
+                "shared_beta": True, "shared_spin": True, "shared_gamma": True}
+    mgrid = np.linspace(6.0, 50.0, 8)
+    qgrid = np.linspace(0.05, 1.0, 5)
+    zgrid = np.linspace(0.0, 1.5, 4)
+    chigrid = np.linspace(-1.0, 1.0, 3)
+
+    def dead_model(m1, q, z, chi, theta):
+        return jnp.full(jnp.shape(m1), -jnp.inf)      # p = 0 everywhere
+
+    for grid_chunk in (None, 3):
+        fn = make_single_theta_predictive(dead_model, settings, mgrid, qgrid, zgrid,
+                                          chigrid, grid_chunk=grid_chunk)
+        for arr in fn(jnp.zeros(1)):
+            arr = np.asarray(arr)
+            assert np.all(np.isfinite(arr)), grid_chunk
+            assert np.all(arr == 0.0), grid_chunk
+
+    # ... and the summary of a stack containing one dead sample is unaffected.
+    good = np.tile(np.linspace(0.1, 1.0, 8), (4, 1))
+    stack = np.vstack([good, np.zeros((1, 8))])
+    med, lo, hi = summarize_ppd(stack)
+    assert np.all(np.isfinite(med)) and np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))

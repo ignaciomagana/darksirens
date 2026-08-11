@@ -381,8 +381,6 @@ def test_every_posterior_channel_is_its_exact_analytic_posterior(calibration):
         "lnq": (np.log(q), sub_obs["obs_lnq"], sub_obs["obs_sig_lnq"], -np.inf, 0.0),
         "chieff": (post["chieff"].reshape(n, -1), sub_obs["obs_chieff"],
                    sub_obs["obs_sig_chieff"], -1.0, 1.0),
-        "dec": (post["dec"].reshape(n, -1), sub_obs["obs_dec"],
-                sub_obs["obs_sigma_ang"], -0.5 * np.pi, 0.5 * np.pi),
     }
     for name, (sample, loc, scale, lo, hi) in channels.items():
         pvals = []
@@ -392,6 +390,35 @@ def test_every_posterior_channel_is_its_exact_analytic_posterior(calibration):
             pvals.append(stats.kstest(sample[i], ref.cdf).pvalue)
         # pooled: the per-event p-values are themselves uniform under the null
         assert stats.kstest(pvals, "uniform").pvalue > 1e-3, name
+
+    # The sky is the one channel whose prior is NOT flat in the sampled variable:
+    # it is isotropic (flat per steradian, the measure the likelihood integrates
+    # the sky in), so the exact posterior is cos(dec) N(dec_obs, sigma_ang)
+    # truncated to [-pi/2, pi/2].  A plain truncated normal there would be the
+    # posterior of a prior flat in dec, whose per-steradian density is
+    # const/cos(dec) -- a measure p_pe does not declare.
+    dec_samples = post["dec"].reshape(n, -1)
+    grid = np.linspace(-0.5 * np.pi, 0.5 * np.pi, 200_001)
+    pvals = []
+    for i in range(n):
+        w = np.cos(grid) * np.exp(
+            -0.5 * ((grid - sub_obs["obs_dec"][i]) / sub_obs["obs_sigma_ang"][i]) ** 2)
+        cdf = np.cumsum(w)
+        cdf /= cdf[-1]
+        pvals.append(stats.kstest(dec_samples[i],
+                                  lambda v: np.interp(v, grid, cdf)).pvalue)
+    assert stats.kstest(pvals, "uniform").pvalue > 1e-3, "dec"
+    # ... and the flat-in-dec reference FAILS, which is what makes this a test.
+    flat_pvals = [
+        stats.kstest(dec_samples[i],
+                     stats.truncnorm(
+                         (-0.5 * np.pi - sub_obs["obs_dec"][i]) / sub_obs["obs_sigma_ang"][i],
+                         (0.5 * np.pi - sub_obs["obs_dec"][i]) / sub_obs["obs_sigma_ang"][i],
+                         loc=sub_obs["obs_dec"][i], scale=sub_obs["obs_sigma_ang"][i]).cdf
+                     ).pvalue
+        for i in range(n)
+    ]
+    assert stats.kstest(flat_pvals, "uniform").pvalue < 1e-3
     # the rho channel is the one whose truncation at rho > 0 is inert at 8 sigma
     rho = gmd._rho_opt_of_mc_dl(
         gmd._mc_of_m1q(post["m1det"], post["m2det"] / post["m1det"]),

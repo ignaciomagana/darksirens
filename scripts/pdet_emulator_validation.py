@@ -9,8 +9,11 @@ scripts/flows_diagnostics.py.  Four gates:
               via --gwnf_src), and p_det = xi * q_flow / p_inj from the
               wrapped reconstruction.  Prints paste-ready constants for
               tests/test_pdet_selection.py::test_golden_parity_with_gwnf.
-(b) xi      — E_{p_inj}[p_det] == xi within Monte-Carlo error (draws from
-              the ANALYTIC injection prior via inverse-CDF sampling).
+(b) xi      — E_{p_inj}[p_det] == xi*(1 - leak) within Monte-Carlo error
+              (draws from the ANALYTIC injection prior via inverse-CDF
+              sampling; ``leak`` is the flow mass outside the injection
+              prior's support, ~1%, measured with the production drop mask —
+              without it the gate's verdict is a function of --n_pinj).
 (c) marginals — pseudo-injection detector-frame marginals vs the found
               injections in the selection HDF5 (quantile errors + overlay
               PNG).  Expected close but not identical: the h5 mixes ~8% O3
@@ -207,7 +210,37 @@ def gate_a_golden(flow, xi, z_grid, z_pdf, gwnf_src):
     return theta, log_pinj, pdet
 
 
-def gate_b_xi(flow, xi, z_grid, z_pdf, n_pinj):
+def flow_support_leakage(flow_path, nsamp, seed=17):
+    """Flow probability mass OUTSIDE the injection prior's support.
+
+    Estimated with the PRODUCTION support definition -- the drop fraction of
+    ``pseudo_injections_from_pdet_flow``, whose draws are exactly flow draws --
+    so this number cannot drift away from the mask the selection path applies.
+    Returns ``None`` when the pseudo-injection path is unavailable (it needs
+    gwcat), in which case gate (b) reports only its raw n_sigma.
+    """
+    try:
+        kept = sel.pseudo_injections_from_pdet_flow(
+            flow_path, nsamp=int(nsamp), seed=int(seed))
+    except Exception as exc:  # noqa: BLE001 - diagnostic, never fatal
+        print(f"(leakage estimate unavailable: {exc})")
+        return None
+    return 1.0 - len(np.asarray(kept[0])) / float(nsamp)
+
+
+def gate_b_xi(flow, xi, z_grid, z_pdf, n_pinj, flow_path=None, leak_nsamp=200_000):
+    """E_{p_inj}[xi q/p_inj] == xi -- corrected for the flow's out-of-support mass.
+
+    The identity holds only if ``q`` integrates to 1 over the injection prior's
+    SUPPORT:  E_{p_inj}[xi q/p_inj] = xi * int_supp q dtheta = xi (1 - leak).
+    The spline flow has full R^13 support and the selection path budgets ~1%
+    leakage, and that is a FIXED RELATIVE bias while ``mc_sigma`` shrinks as
+    1/sqrt(n_pinj) -- so a raw ``|E - xi| < 4 mc_sigma`` gate passes or fails
+    according to the sample count rather than the emulator's quality, and
+    raising --n_pinj to sharpen the test makes a CORRECT emulator fail.  The
+    target is therefore ``xi (1 - leak)`` with the leakage's own Monte-Carlo
+    error folded in; both the raw and the corrected n_sigma are reported.
+    """
     print("\n=== gate (b): E_pinj[p_det] vs xi ===")
     theta = sample_pinj(n_pinj, z_grid, z_pdf)
     log_pinj = log_pinj_full(theta, z_grid, z_pdf)
@@ -215,14 +248,28 @@ def gate_b_xi(flow, xi, z_grid, z_pdf, n_pinj):
     pdet = xi * np.exp(log_q - log_pinj)
     est = pdet.mean()
     mc_sigma = pdet.std(ddof=1) / np.sqrt(len(pdet))
-    nsig = abs(est - xi) / mc_sigma
+    nsig_raw = abs(est - xi) / mc_sigma
+
+    leak = None if flow_path is None else flow_support_leakage(flow_path, leak_nsamp)
+    if leak is None:
+        target, sigma, nsig = xi, mc_sigma, nsig_raw
+    else:
+        target = xi * (1.0 - leak)
+        leak_sigma = xi * np.sqrt(max(leak * (1.0 - leak), 0.0) / leak_nsamp)
+        sigma = float(np.hypot(mc_sigma, leak_sigma))
+        nsig = abs(est - target) / sigma
+        print(f"flow out-of-support mass: leak = {leak:.4%} "
+              f"-> target xi(1-leak) = {target:.6e}")
     print(f"E[p_det] = {est:.6e}  (xi = {xi:.6e})  MC sigma = {mc_sigma:.2e}  "
-          f"-> {nsig:.2f} sigma;  max p_det = {pdet.max():.3f}  "
-          f"P(p_det > 1) = {(pdet > 1).mean():.2e}")
+          f"-> raw {nsig_raw:.2f} sigma, leakage-corrected {nsig:.2f} sigma;  "
+          f"max p_det = {pdet.max():.3f}  P(p_det > 1) = {(pdet > 1).mean():.2e}")
     ok = nsig < 4.0
-    print(f"gate (b) {'PASSED' if ok else 'FAILED'} (|E - xi| < 4 MC sigma)")
-    return {"E_pdet": float(est), "xi": float(xi),
-            "mc_sigma": float(mc_sigma), "n_sigma": float(nsig), "ok": bool(ok)}
+    print(f"gate (b) {'PASSED' if ok else 'FAILED'} "
+          "(|E - xi(1-leak)| < 4 sigma, MC + leakage)")
+    return {"E_pdet": float(est), "xi": float(xi), "target": float(target),
+            "leak": None if leak is None else float(leak),
+            "mc_sigma": float(mc_sigma), "sigma": float(sigma),
+            "n_sigma_raw": float(nsig_raw), "n_sigma": float(nsig), "ok": bool(ok)}
 
 
 def gate_c_marginals(pseudo, h5_tuple, outdir):
@@ -352,6 +399,9 @@ def main():
                          "p_inj check in gate (a).")
     ap.add_argument("--gates", default="abcd")
     ap.add_argument("--n_pinj", type=int, default=2_000_000)
+    ap.add_argument("--leak_nsamp", type=int, default=200_000,
+                    help="Flow draws used to estimate the out-of-support mass "
+                         "that gate (b) corrects for (default 200k).")
     ap.add_argument("--pdet_nsamp", type=int, default=1_000_000)
     ap.add_argument("--pdet_seed", type=int, default=42)
     ap.add_argument("--n_pop", type=int, default=50)
@@ -369,7 +419,9 @@ def main():
     if "a" in args.gates:
         gate_a_golden(flow, xi, z_grid, z_pdf, args.gwnf_src)
     if "b" in args.gates:
-        results["b"] = gate_b_xi(flow, xi, z_grid, z_pdf, args.n_pinj)
+        results["b"] = gate_b_xi(flow, xi, z_grid, z_pdf, args.n_pinj,
+                                 flow_path=args.pdet_flow_path,
+                                 leak_nsamp=args.leak_nsamp)
 
     if "c" in args.gates or "d" in args.gates:
         pseudo = sel.pseudo_injections_from_pdet_flow(

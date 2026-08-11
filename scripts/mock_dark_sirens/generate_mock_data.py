@@ -466,8 +466,11 @@ def _mass_spin_pdf(m1: np.ndarray, q: np.ndarray, chi: np.ndarray, pop: Populati
 # source's LATENT redshift, which is the defect above.  GWMockCat drops it too.
 MEASUREMENT_FAMILY = "all-observable-v3"
 P_PE_BASIS = ("rho/(dL m1det q): the PE prior, flat in "
-              "(ln Mc_det, ln q, rho, chi_eff), expressed in darksirens' "
-              "canonical (m1det, q, dL, chi_eff) integration basis; "
+              "(ln Mc_det, ln q, rho, chi_eff) and ISOTROPIC on the sky (flat "
+              "per steradian, i.e. in (ra, sin dec) -- the measure the "
+              "likelihood integrates the sky in, so the sky contributes no "
+              "factor), expressed in darksirens' canonical "
+              "(m1det, q, dL, chi_eff) integration basis; "
               "normalised to mean 1 per event")
 SNR_REF_DEFAULT = 11.5
 # The sky-width amplitude scale.  ``sigma_ang = clip(SKY_A_DEG / rho_sigma, ...)``
@@ -599,6 +602,54 @@ def _trunc_norm(rng, loc, scale, lo, hi, size=None):
     return loc + scale * ndtri(np.clip(a + u * (b - a), 1e-300, 1.0 - 1e-16))
 
 
+def _iso_dec_posterior(rng, dec_obs, sigma, nsamp):
+    """Exact posterior draws of ``dec`` under an ISOTROPIC sky prior.
+
+    The sky prior is flat PER STERADIAN -- flat in ``(ra, sin dec)`` -- which is
+    the measure the consuming likelihood integrates in (``darksirens.sky.models``
+    normalises ``g`` as ``int g dOmega/4pi = 1`` and the per-pixel redshift prior
+    is a per-equal-area-pixel object).  With a Gaussian ``dec`` likelihood the
+    exact posterior is therefore
+
+        p(dec | dec_obs) ~ cos(dec) N(dec; dec_obs, sigma),   |dec| <= pi/2
+
+    NOT the plain truncated normal, which is the posterior of a prior flat in
+    ``dec``.  A prior flat in ``dec`` has per-steradian density ``const/cos(dec)``,
+    so the sky measures would not cancel in ``p_target/p_pe`` and every event's
+    effective sky posterior would tilt pole-ward by ``~ sigma^2 tan|dec|`` -- with
+    the 12 deg width cap that is ~4 deg at |dec| = 60 deg, i.e. ~0.36 sigma of the
+    localisation, mis-weighting which pixel's galaxies dominate the event and
+    injecting a spurious l=2-like signal into exactly the channels
+    ``--sky-dipole-amp`` / ``--sky-quadrupole-amp`` / ``--sky-blob-amp`` exist to
+    validate.  Keeping the prior isotropic instead leaves ``p_pe`` sky-free (see
+    :func:`_p_pe`) and matches what real PE does.
+
+    Drawn by rejection against the truncated normal with acceptance ``cos(dec)``
+    (<= 1), which is EXACT -- no reweighting, no clipping, no duplicated draws.
+    """
+    half_pi = 0.5 * np.pi
+    out = np.empty(int(nsamp), dtype=float)
+    filled = 0
+    # Oversample by the inverse acceptance at the observation so the pole-adjacent
+    # events (about 2 % of an isotropic sky sits within the 12 deg cap of a pole)
+    # do not need many passes.
+    over = 1.0 / max(np.cos(float(dec_obs)), 0.02)
+    for _ in range(10_000):
+        need = int(nsamp) - filled
+        if need <= 0:
+            break
+        cand = _trunc_norm(rng, float(dec_obs), float(sigma), -half_pi, half_pi,
+                           int(np.ceil(need * over)) + 8)
+        acc = cand[rng.random(cand.shape) < np.cos(cand)][:need]
+        out[filled:filled + acc.size] = acc
+        filled += acc.size
+    if filled < int(nsamp):
+        raise RuntimeError(
+            "the isotropic-prior declination posterior did not fill: "
+            f"dec_obs={dec_obs}, sigma={sigma} (both are within a hair of a pole?)")
+    return out
+
+
 def _measure(rng, m1det, m2det, chi, dl, ra, dec, meas: MeasurementConfig, *,
              need_sky: bool = True):
     """ONE measurement of a source.  The draw order IS the model; do not reorder.
@@ -715,8 +766,13 @@ def _p_pe(m1det, q, dL, meas: MeasurementConfig):
 
         p_pe  ~  rho / (dL m1det q)  ~  Mc_det^(5/6) / (dL^2 m1det q).
 
-    ``chi_eff`` maps identically and the sky prior is flat in (ra, dec), so
-    neither contributes a factor.  darksirens renormalises ``p_pe`` per event,
+    ``chi_eff`` maps identically, and the sky prior is ISOTROPIC -- flat per
+    steradian, which is exactly the measure the likelihood integrates the sky in
+    (``int g dOmega/4pi = 1``; per-equal-area-pixel redshift priors) -- so its
+    density is constant there and neither contributes a factor.  A prior flat in
+    ``dec`` would NOT be constant per steradian (``const/cos dec``) and would owe
+    this column a ``1/cos(dec)`` factor; :func:`_iso_dec_posterior` keeps the
+    prior isotropic instead.  darksirens renormalises ``p_pe`` per event,
     so only the shape matters; the stored column is normalised to mean 1 per
     event.
     """
@@ -946,17 +1002,19 @@ def _posterior_samples(
     recorded are read back, which is what makes the selection a function of the
     data this posterior conditions on.
 
-    The PE prior is flat in ``(ln Mc_det, ln q, rho, chi_eff, ra, dec)`` on the
-    physical support ``q <= 1, rho > 0, |chi_eff| <= 1, |dec| <= pi/2``.  Every
-    channel's likelihood is an UNBOUNDED Gaussian in exactly the variable the
-    prior is flat in, so every posterior is a (possibly prior-truncated) normal
-    about the OBSERVED value with the STORED width -- no shift, no skew:
+    The PE prior is flat in ``(ln Mc_det, ln q, rho, chi_eff)`` and ISOTROPIC on
+    the sky (flat in ``(ra, sin dec)`` -- the per-steradian measure the likelihood
+    integrates in, see :func:`_iso_dec_posterior`), on the physical support
+    ``q <= 1, rho > 0, |chi_eff| <= 1, |dec| <= pi/2``.  Every non-sky channel's
+    likelihood is an UNBOUNDED Gaussian in exactly the variable the prior is flat
+    in, so those posteriors are (possibly prior-truncated) normals about the
+    OBSERVED value with the STORED width -- no shift, no skew:
 
         ln Mc  ~ N(ln Mc_obs, sig_lnmc)
         ln q   ~ N(ln q_obs,  sig_lnq )   truncated to ln q <= 0
         rho    ~ N(rho_obs,   sigma_rho)  truncated to rho > 0 (inert at 8 sigma)
         chi_eff~ N(chi_obs,   sig_chieff) truncated to [-1, 1]
-        dec    ~ N(dec_obs,   sigma_ang)  truncated to [-pi/2, pi/2]
+        dec    ~ cos(dec) N(dec_obs, sigma_ang) on [-pi/2, pi/2]   (isotropic prior)
         ra     ~ wrapped N(ra_obs, sig_ra)
 
     Every truncation is a PRIOR truncation drawn by exact inverse CDF
@@ -1010,7 +1068,7 @@ def _posterior_samples(
         rho = _trunc_norm(rng, float(truth["obs_rho"][i]), s_rho, 0.0, np.inf, nsamp)
         chi = _trunc_norm(rng, float(truth["obs_chieff"][i]), s_ch,
                           CHIEFF_RANGE[0], CHIEFF_RANGE[1], nsamp)
-        dec = _trunc_norm(rng, float(truth["obs_dec"][i]), s_an, -half_pi, half_pi, nsamp)
+        dec = _iso_dec_posterior(rng, float(truth["obs_dec"][i]), s_an, nsamp)
         ra = (float(truth["obs_ra"][i]) + s_ra * rng.normal(size=nsamp)) % (2.0 * np.pi)
 
         mc = np.exp(lnmc)
@@ -1070,8 +1128,19 @@ def _selection_pdraw(
 
     def _p_uniform():
         # m1det drawn directly (no source->detector Jacobian); p(dL)=p_z(z)|dz/ddL|.
+        # The support indicator only matters for the MIXTURE: a population-branch
+        # draw whose detector-frame mass lands outside [m1lo, m1hi] (or whose q /
+        # chi lands outside the uniform branch's box) has p_uniform = 0 EXACTLY,
+        # so dropping it overstates pdraw there by up to a factor 10, understates
+        # the importance weight and biases mu low.  Unreachable with the shipped
+        # config (m1src <= 80 and (1+z) <= 1.08 at the default --zmax), and a live
+        # bias the moment m1det_range narrows, --zmax rises or pop.mmax grows.
+        m1det = np.asarray(m1src, dtype=float) * (1.0 + np.asarray(z, dtype=float))
+        inside = ((m1det >= m1lo * (1.0 - 1.0e-12))
+                  & (m1det <= m1hi * (1.0 + 1.0e-12))
+                  & (q >= 0.0) & (q <= 1.0) & (np.abs(chi) <= 1.0))
         p_dL = pz / np.maximum(ddldz, 1.0e-300)
-        return (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
+        return inside * (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
 
     def _p_population():
         # m1det = (1+z) m1src, dL = dL(z): Jacobian (m1src,q,z)->(m1det,q,dL) is (1+z) dL'(z).
@@ -1087,6 +1156,47 @@ def _selection_pdraw(
     else:
         raise ValueError(f"Unknown proposal {proposal!r}; expected one of {SELECTION_PROPOSALS}")
     return np.maximum(p_draw, 1.0e-300)
+
+
+def _selection_neff_at_fiducial(
+    sel: dict,
+    grids: dict[str, np.ndarray],
+    pop: PopulationConfig,
+) -> float:
+    """Effective sample size of the SELECTION INTEGRAL the pipeline runs.
+
+    ``Neff`` of ``w = 1/pdraw`` is the effective size of an integral with a
+    CONSTANT numerator; the quantity the variance guard is keyed to
+    (``darksirens.likelihood.selection``: ``threshold = max(5 N_obs, N_obs^2 /
+    budget)``) is ``Neff`` of ``w = p_pop(theta|Lambda)/pdraw`` at the population
+    point.  Under the ``population`` proposal the two differ qualitatively --
+    ``1/pdraw`` is largest exactly where the population density is largest -- so
+    the flat number can look healthy while the real selection Neff at the fiducial
+    collapses, and a campaign sized off it will hit the -inf guard at run time.
+
+    Evaluated at the FIDUCIAL population: the mass/spin density times the
+    population redshift distribution ``dV_c/dz (1+z)^(gamma-1)``, in the same
+    ``(m1det, q, dL, chi_eff, sky)`` coordinates ``_selection_pdraw`` uses.
+    """
+    pdraw = np.asarray(sel["pdraw"], dtype=float)
+    if pdraw.size == 0:
+        return 0.0
+    m1src = np.asarray(sel["m1src"], dtype=float)
+    m1det = np.asarray(sel["m1det"], dtype=float)
+    z = m1det / np.maximum(m1src, 1.0e-300) - 1.0
+    q = np.asarray(sel["m2src"], dtype=float) / np.maximum(m1src, 1.0e-300)
+    chi = np.asarray(sel["chieff"], dtype=float)
+
+    rate = (1.0 + grids["z"]) ** (pop.gamma - 1.0)
+    pz = (np.interp(z, grids["z"], grids["dvc_dz"]) * (1.0 + z) ** (pop.gamma - 1.0)
+          / _trapz(grids["dvc_dz"] * rate, grids["z"]))
+    ddldz = np.interp(z, grids["z"], np.gradient(grids["dl"], grids["z"]))
+    jac = ddldz * (1.0 + z)
+    p_fid = (_mass_spin_pdf(m1src, q, chi, pop) * pz
+             / np.maximum(jac, 1.0e-300) / (4.0 * np.pi))
+    w = p_fid / pdraw
+    denom = float(np.square(w).sum())
+    return float(w.sum() ** 2 / denom) if denom > 0 else 0.0
 
 
 def _draw_selection_batch(
@@ -1642,6 +1752,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
 
     inv_pdraw = 1.0 / np.asarray(sel["pdraw"])
     selection_neff = float(inv_pdraw.sum() ** 2 / np.square(inv_pdraw).sum()) if len(inv_pdraw) else 0.0
+    # The number the variance guard is actually keyed to (see
+    # _selection_neff_at_fiducial); the flat one above can look healthy while this
+    # one collapses under the ``population`` proposal.
+    selection_neff_fiducial = _selection_neff_at_fiducial(sel, grids, pop)
 
     metadata = {
         "seed": args.seed,
@@ -1788,7 +1902,11 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["format_version"] = "gwcat-selection-1.0"
         f.attrs["mock_data"] = True
         f.attrs["ndraw"] = int(sel["Ndraw"])
+        # ``Neff`` is kept as the historical FLAT-numerator number so old readers
+        # stay valid; ``Neff_fiducial`` is the one that governs the guard.
         f.attrs["Neff"] = selection_neff
+        f.attrs["Neff_flat"] = selection_neff
+        f.attrs["Neff_fiducial"] = selection_neff_fiducial
         f.attrs["selection_proposal"] = args.proposal
         f.attrs["measurement_family"] = MEASUREMENT_FAMILY
         f.attrs["snr_ref"] = float(args.snr_ref)
@@ -1812,7 +1930,9 @@ def write_mock_data(args: argparse.Namespace) -> None:
           f"photo-z realised, {n_negative_z_obs} with z_obs < 0 left unclipped)")
     print(f"  pixelated survey : {pixel_path} (nside={args.nside})")
     print(f"  GW posteriors    : {gw_path} ({args.nobs} events x {args.nsamp} samples)")
-    print(f"  GW selection     : {sel_path} ({sel['n_detected']:,}/{sel['Ndraw']:,} detected injections, Neff={selection_neff:.1f})")
+    print(f"  GW selection     : {sel_path} ({sel['n_detected']:,}/{sel['Ndraw']:,} detected "
+          f"injections, Neff_fiducial={selection_neff_fiducial:.1f} [governs the variance "
+          f"guard], Neff_flat={selection_neff:.1f})")
 
 
 def _positive_int(value: str) -> int:

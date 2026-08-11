@@ -576,3 +576,88 @@ def test_output_source_tag_is_the_shared_constant(converted):
     if isinstance(source, bytes):
         source = source.decode()
     assert str(source) == SOURCE_TAG == "darksirens_skymaps_to_samples"
+
+
+# ---------------------------------------------------------------------------
+# (6) The unbiasedness bound is derived from the data, not from --zmax
+# ---------------------------------------------------------------------------
+#
+# F(z;H0) = 1 -- the converter's whole argument for an unbiased mass
+# marginalisation -- requires the surrogate detector-frame mass window to cover
+# pop_m_max*(1+z) at every z the run can reach. The bound used to be checked
+# only against the user-declared --zmax (default 1.5), while the sampled
+# distances at the top of the H0 prior can land far beyond it.
+
+
+def _run_converter_far_event(skymap_dir, output, extra=()):
+    mod = importlib.import_module(CONVERTER_MODULE)
+    # A distant event: mu = 8 Gpc sits above z = 1.5 once H0 is at the top of
+    # darksirens' H0 prior (120), while --zmax keeps its 1.5 default.
+    _write_toy_3d_skymap(skymap_dir / "far.fits", NSIDE,
+                         np.arange(0, hp.nside2npix(NSIDE) // 8), 8000.0, 400.0)
+    argv = ["darksirens_skymaps_to_samples",
+            "--skymap_dir", str(skymap_dir), "--output", str(output),
+            "--nsamp", "2000", "--seed", str(SEED),
+            "--pe_H0", str(PE_H0), "--pe_Om0", str(PE_OM0), *extra]
+    saved = sys.argv
+    sys.argv = argv
+    try:
+        with pytest.warns(UserWarning, match="sampled distances reach"):
+            mod.main()
+    finally:
+        sys.argv = saved
+    with h5py.File(output, "r") as f:
+        return dict(f.attrs)
+
+
+def test_mass_window_covers_the_redshift_the_data_actually_reach(tmp_path):
+    attrs = _run_converter_far_event(tmp_path, tmp_path / "gwdata.h5")
+    z_reached = float(attrs["zmax_reached"])
+    assert float(attrs["zmax_declared"]) == 1.5
+    assert z_reached > 1.5                      # the point of the test
+    assert float(attrs["h0_max"]) == 120.0
+    # The default window is sized from the reached z, and the stamped zmax is
+    # the z it really guarantees (not the declaration).
+    pop_m_max = 100.0
+    assert float(attrs["m1det_max"]) >= pop_m_max * (1.0 + z_reached) - 1e-9
+    assert float(attrs["zmax"]) >= z_reached - 1e-9
+
+
+def test_narrowed_mass_window_is_flagged_against_the_reached_redshift(tmp_path):
+    with pytest.warns(UserWarning, match="BIAS H0"):
+        attrs = _run_converter_far_event(
+            tmp_path, tmp_path / "gwdata.h5",
+            extra=("--m1det_max", "250.0"),      # covers only z ~ 1.5
+        )
+    # The stamped zmax reports what the narrowed window really guarantees.
+    assert float(attrs["zmax"]) < float(attrs["zmax_reached"])
+    assert abs(float(attrs["zmax"]) - 1.5) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# (7) The sky support is the pixel's AREA, not its centre
+# ---------------------------------------------------------------------------
+
+
+def test_samples_spread_inside_their_skymap_pixel(converted):
+    """Every sample used to sit exactly on a pixel centre, so an analysis at a
+    finer nside than the skymap saw only the fine pixels containing those
+    centres.  The samples must be spread over the pixel's solid angle, while
+    still belonging to the pixel they were drawn from."""
+    nside = converted["nside"]
+    for ev, hot in (("A", converted["hotA"]), ("B", converted["hotB"])):
+        e = converted[ev]
+        pix = _pix_of(e, nside)
+        assert set(np.unique(pix)).issubset(set(hot.tolist()))   # containment
+        centres = np.asarray(hp.pix2ang(nside, pix, nest=False))
+        theta = 0.5 * np.pi - e["dec"]
+        # Not on the centre: the offsets are a real fraction of the pixel scale.
+        offset = np.abs(theta - centres[0])
+        assert np.median(offset) > 0.05 * hp.nside2resol(nside)
+        # ... and finer-nside pixels are populated many-to-one per coarse pixel.
+        fine = hp.ang2pix(4 * nside, theta, e["ra"], nest=False)
+        assert np.unique(fine).size > np.unique(pix).size
+
+
+def test_output_records_the_skymap_resolution(converted):
+    assert int(converted["file_attrs"]["skymap_nside"]) == NSIDE

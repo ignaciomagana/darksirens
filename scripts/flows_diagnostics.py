@@ -108,6 +108,40 @@ def _gw_event_from(m1det, m2det, dL, chieff, prior_wt):
     )
 
 
+def _assert_store_matches_ensemble(store_path, ens):
+    """Refuse a PE store whose event ORDER differs from the flow ensemble's.
+
+    Every product below joins the two lists BY POSITION -- the fidelity plots
+    score event i's PE samples with flow i, and event_terms.json labels
+    ``lnZ_pe[i]`` with ``ens.names[i]`` -- while the two orderings are
+    independent (lexicographic checkpoint order vs the store's own
+    ``event_names`` attr).  A permuted store with the same event count looks
+    exactly like "the flows are a poor fit", i.e. like the failure this script
+    exists to detect.
+    """
+    import h5py
+
+    with h5py.File(store_path, "r") as f:
+        raw = f.attrs.get("event_names")
+    if raw is None:
+        raise SystemExit(
+            f"{store_path} carries no 'event_names' attr, so its event order "
+            "cannot be checked against the flow ensemble's (lexicographic "
+            "checkpoint order). Build the store with scripts/subset_pe_store.py, "
+            "which stamps the flow order it selected.")
+    names = [n.decode() if isinstance(n, bytes) else str(n) for n in raw]
+    if names != list(ens.names):
+        raise SystemExit(
+            "PE store event order does not match the flow ensemble order; every "
+            "per-event comparison below joins them BY POSITION, so the report "
+            "would be a permuted comparison (which looks like poor flow "
+            "fidelity).\n"
+            f"  store    : {names}\n"
+            f"  ensemble : {list(ens.names)}\n"
+            "Rebuild the store with scripts/subset_pe_store.py --flows "
+            "<the same checkpoint dir>.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--flows", required=True)
@@ -142,6 +176,7 @@ def main():
         args.pe_store
     )
     assert nEvents == ens.n_flows, (nEvents, ens.n_flows)
+    _assert_store_matches_ensemble(args.pe_store, ens)
     gw_pe = _gw_event_from(m1det, m2det, dL, chieff, p_pe)
 
     (m1s, m2s, dLs, chis, _ras, _decs, p_draw, Ndraw) = load_selection_samples(
