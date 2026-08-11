@@ -1004,3 +1004,104 @@ def test_preflight_rejects_nonfinite_pair_pe_time_marks(tmp_path):
                              summary, unified_observed_mode=True)
     assert any("delta_t_obs must be finite" in e for e in errors), errors
     assert any("sigma_delta_t must be finite" in e for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# closed-form count correction vs the master likelihood's variance budget
+# (review F-001)
+# ---------------------------------------------------------------------------
+
+def test_factorized_count_correction_threads_the_baseline_pe_variance():
+    """The sampler-facing selection correction on the DEFAULT componentwise
+    marginalize_exact path is the closed form, not the master likelihood's
+    value: ``selection0`` cancels exactly out of
+    ``baseline + LSE_k(dp_k + count_delta_k)``.  So the closed form has to
+    carry the same total-variance budget, or the guard silently reverts to the
+    selection-only bound."""
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    src = inspect.getsource(cli.build_cluster_likelihood)
+    assert 'pe_variance_sum=baseline_raw["pe_variance_sum"]' in src, (
+        "_count_correction calls combined_selection_log_correction without "
+        "pe_variance_sum -> the factorized sampler path enforces the "
+        "selection-only threshold N_obs^2/max_likelihood_variance while every "
+        "other path enforces the total-variance criterion"
+    )
+
+
+def test_dropping_pe_variance_really_moves_the_guard():
+    """Establishes the stake: the omitted argument is not cosmetic."""
+    from darksirens.likelihood.cluster_selection import (
+        combined_selection_log_correction,
+    )
+
+    # A point inside the band n^2/max_var < Neff < n^2/(max_var - pe_var):
+    # guarded once the per-event variances spend half the budget, admitted
+    # without them.
+    n_sing, n_prs = 30, 0
+    log_mu = -3.0
+    log_sigma2 = 2.0 * log_mu - np.log(1100.0)          # Neff = mu^2/sigma^2
+    kw = dict(
+        n_singletons_observed=n_sing,
+        n_clusters_observed=n_prs,
+        max_likelihood_variance=1.0,
+    )
+    neg = -np.inf
+    hard_without = float(combined_selection_log_correction(
+        log_mu, log_sigma2, neg, neg, pe_variance_sum=0.0, **kw))
+    hard_with = float(combined_selection_log_correction(
+        log_mu, log_sigma2, neg, neg, pe_variance_sum=0.5, **kw))
+    assert np.isfinite(hard_without) and hard_with == -np.inf
+
+    soft_without = float(combined_selection_log_correction(
+        log_mu, log_sigma2, neg, neg, soft_guard=True,
+        pe_variance_sum=0.0, **kw))
+    soft_with = float(combined_selection_log_correction(
+        log_mu, log_sigma2, neg, neg, soft_guard=True,
+        pe_variance_sum=0.5, **kw))
+    assert soft_without - soft_with > 1e3, (soft_without, soft_with)
+
+
+def test_loglike_diagnostics_cross_check_accepts_agreement():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts()
+    point = np.zeros(3)
+    value = cli._cross_check_loglike_against_diagnostics(
+        lambda c: -12.5, {"logL_marginalized": -12.5 + 1e-12}, point, opts=opts
+    )
+    assert np.isclose(value, -12.5)
+    # both guarded is agreement, not a mismatch
+    assert cli._cross_check_loglike_against_diagnostics(
+        lambda c: -np.inf, {"logL_marginalized": -np.inf}, point, opts=opts
+    ) == -np.inf
+
+
+@pytest.mark.parametrize("diag", [
+    {"logL_marginalized": -12.5},          # finite disagreement
+    {"logL_marginalized": -np.inf},        # diagnostics guarded, sampler not
+])
+def test_loglike_diagnostics_cross_check_catches_divergent_paths(diag):
+    """This is the check that would have caught F-001: the closed form and the
+    master likelihood must evaluate the same target at the same point."""
+    import darksirens.cli.inference_lensing as cli
+
+    with pytest.raises(RuntimeError, match="disagrees with the partition diagnostics"):
+        cli._cross_check_loglike_against_diagnostics(
+            lambda c: 90.0, diag, np.zeros(3), opts=_lensing_opts()
+        )
+
+
+def test_smoke_test_runs_the_cross_check_at_the_diagnostics_point():
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    src = inspect.getsource(cli._smoke_test_likelihood)
+    assert "_cross_check_loglike_against_diagnostics(" in src
+    assert "loglike, diagnostics, diag_point" in src, (
+        "the cross-check must use the point the diagnostics were actually "
+        "evaluated at, not the prior midpoint"
+    )

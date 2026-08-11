@@ -2288,6 +2288,23 @@ def build_cluster_likelihood(
                 # and one multi-GB XLA specialization per distinct
                 # (n_singletons, n_pairs) — the host-RAM OOM that killed
                 # paper-scale j2 on 58 GB nodes.
+                # ``selection0`` CANCELS EXACTLY out of ``baseline +
+                # LSE_k(dp_k + count_delta_k)`` (it is the same scalar in the
+                # baseline and in every delta), so the closed form below IS the
+                # sampler-facing selection correction — the master
+                # likelihood's value never reaches the sampler on this path.
+                # It therefore has to carry the same total-variance budget:
+                # without ``pe_variance_sum`` the guard reverted to the
+                # selection-only bound N_obs^2/max_likelihood_variance and the
+                # band N^2/max_var < Neff < N^2/(max_var - pe_var) went
+                # unguarded (review F-001; the exact defect P1-09 /
+                # tests/test_cluster_pe_variance_guard.py added the threading
+                # for). The baseline's pe_variance_sum is the right scalar: it
+                # keeps the invariant count_delta[0] == 0 that the
+                # factorization assumes, and the partition dependence of
+                # pair_variance_sum is what build_cluster_diagnostics'
+                # count-only cross-check verifies is negligible at the
+                # evaluation point.
                 def _count_correction(n_sing, n_prs):
                     return combined_selection_log_correction(
                         baseline_raw["log_mu_singleton"],
@@ -2302,6 +2319,7 @@ def build_cluster_likelihood(
                         max_likelihood_variance=float(
                             getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
                         ),
+                        pe_variance_sum=baseline_raw["pe_variance_sum"],
                     )
 
                 count_delta = jnp.stack(
@@ -2920,14 +2938,15 @@ def build_parser():
         "--max_likelihood_variance", type=float, default=DEFAULT_MAX_LIKELIHOOD_VARIANCE,
         help=("Cap on the Monte-Carlo variance of the log-likelihood estimator "
               "(Essick & Farr 2022; Talbot & Golomb 2023, arXiv:2304.06138; the "
-              "GWTC-4.0/5.0 criterion is sigma^2_lnL <= 1, the default). NOTE: "
-              "on this cluster/lensing stack the cap currently bounds the "
-              "SELECTION component only (N_obs^2/Neff_sel); the per-event/"
-              "per-pair variance term of the full sigma^2_lnL criterion is not "
-              "yet threaded here (follow-up; the main darksirens_inference CLI "
-              "enforces the full total). Proposals exceeding it are guarded "
-              "(hard -inf or the soft wall per --selection_neff_guard). The "
-              "Vitale 5 N_obs mean floor always applies."))
+              "GWTC-4.0/5.0 criterion is sigma^2_lnL <= 1, the default). The cap "
+              "bounds the TOTAL sigma^2_lnL = pe_variance_sum + "
+              "N_obs^2/Neff_sel: the summed per-event, lensed-singleton and "
+              "per-pair importance variances spend the budget before the "
+              "selection term, on every evaluation path (fixed partition, both "
+              "--partition_component_mode settings, and the diagnostics). "
+              "Proposals exceeding it are guarded (hard -inf or the soft wall "
+              "per --selection_neff_guard). The Vitale 5 N_obs mean floor "
+              "always applies."))
     sampler = p.add_argument_group("Sampler")
     sampler.add_argument("--sampler", required=True, choices=["tinyns", "dynesty", "numpyro"])
     sampler.add_argument("--nlive", type=int, default=2000)
@@ -3075,8 +3094,9 @@ def _resolve_lensing_run_config(opts):
         )
     if max_likelihood_variance != DEFAULT_MAX_LIKELIHOOD_VARIANCE:
         print(
-            "  [i] Selection-variance cap (this stack guards the selection "
-            f"component only): max_likelihood_variance={max_likelihood_variance} "
+            "  [i] Total-log-likelihood variance cap (per-event and per-pair "
+            "importance variances included): "
+            f"max_likelihood_variance={max_likelihood_variance} "
             "(default 1.0 mirrors the GWTC-4.0/5.0 total criterion).",
             flush=True,
         )
@@ -3471,6 +3491,55 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
             pop_params_fid, lens_overrides, prior_kinds)
 
 
+def _cross_check_loglike_against_diagnostics(loglike, diagnostics, point, *, opts):
+    """Pin the sampler-facing log-likelihood to the diagnostics total AT THE
+    SAME POINT, and return the checked value.
+
+    Under ``--partition_mode marginalize_exact --partition_component_mode
+    componentwise`` (the default) the sampler path does NOT read the master
+    likelihood's selection correction: it rebuilds the count-only term in
+    closed form (``build_cluster_likelihood._count_correction``) and the
+    master's value cancels out of the factorized total.  Nothing tied the two
+    together, so a closed form missing the total-variance budget produced a
+    sampler likelihood ~1e4 nats away from every other evaluation path with no
+    symptom at all (review F-001).  One extra likelihood call at startup —
+    already-compiled shapes, so it is essentially free — makes that class of
+    divergence loud.
+    """
+    reference = diagnostics.get("logL_marginalized", diagnostics.get("logL_total"))
+    if reference is None:
+        return None
+    reference = float(reference)
+    value = float(loglike(jnp.asarray(point)))
+    # Both guarded to -inf is agreement; ``==`` (not isclose) so that case,
+    # and an exact match, short-circuit before the finite comparison.
+    if value == reference:
+        _ok(f"logL(diagnostics point) = {value:.6g}  ==  diagnostics total")
+        return value
+    tol = 1e-6 + 1e-9 * abs(reference)
+    if (
+        not np.isfinite(value)
+        or not np.isfinite(reference)
+        or abs(value - reference) > tol
+    ):
+        raise RuntimeError(
+            "sampler log-likelihood disagrees with the partition diagnostics at "
+            f"the SAME evaluation point: loglike={value!r} vs diagnostics "
+            f"{'logL_marginalized' if 'logL_marginalized' in diagnostics else 'logL_total'}"
+            f"={reference!r} (tol {tol:.3g}). Under "
+            "--partition_component_mode componentwise the sampler rebuilds the "
+            "count-only selection correction in closed form while the "
+            "diagnostics take it from the master likelihood; a mismatch means "
+            "the two are no longer the same statistical target, so posterior "
+            "and logZ would not correspond to the reported diagnostics."
+        )
+    _ok(
+        f"logL(diagnostics point) = {value:.6g}  ==  diagnostics total "
+        f"(|Δ| = {abs(value - reference):.3g})"
+    )
+    return value
+
+
 def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
                            loglike, diagnostics_fn, pop_params_fid):
     """Smoke-eval at the prior midpoint so JIT compile errors surface early,
@@ -3501,6 +3570,16 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
         )
     except Exception as exc:
         _write_failure(run_dir, "midpoint_diagnostics", exc, labels=labels, settings=settings)
+        raise
+    try:
+        _cross_check_loglike_against_diagnostics(
+            loglike, diagnostics, diag_point, opts=opts
+        )
+    except Exception as exc:
+        _write_failure(
+            run_dir, "loglike_diagnostics_cross_check", exc,
+            labels=labels, settings=settings,
+        )
         raise
     _print_diagnostics_summary(diagnostics)
     return mid, diagnostics
