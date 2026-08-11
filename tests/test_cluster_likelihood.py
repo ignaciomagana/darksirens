@@ -272,6 +272,75 @@ class TestPairKDE:
             f"expected < 0.3 statistical noise"
         )
 
+    def test_bandwidth_scale_is_a_plain_multiplier_on_silverman(self):
+        """The knob for the smoothing bias documented in the module docstring.
+
+        At d = 4 Silverman gives h ~ 0.35 sigma almost independently of N, so
+        the estimand is pi_PE/p_prop convolved with a 0.35-sigma Gaussian --
+        which inflates the tails, and only the LENSED branch is smoothed.
+        ``bandwidth_scale`` must be an exact multiplier so that rerunning a
+        candidate pair at 1.0 and 0.5 measures that bias.
+        """
+        rng = np.random.default_rng(23)
+        N = 8000
+        mu = np.array([35.0, 0.7, 1000.0, 0.0])
+        sig = np.array([3.0, 0.05, 100.0, 0.1])
+        samples = mu + sig * rng.normal(size=(N, 4))
+        h_full = _silverman_bandwidth_diag(samples)
+        h_half = _silverman_bandwidth_diag(samples, bandwidth_scale=0.5)
+        np.testing.assert_allclose(h_half, 0.5 * h_full, rtol=1e-14)
+        with pytest.raises(ValueError, match="bandwidth_scale must be positive"):
+            _silverman_bandwidth_diag(samples, bandwidth_scale=0.0)
+
+        kde_full = make_pair_kde(*samples.T, prior_wt=np.ones(N))
+        kde_half = make_pair_kde(*samples.T, prior_wt=np.ones(N),
+                                 bandwidth_scale=0.5)
+        np.testing.assert_allclose(np.asarray(kde_half.log_h),
+                                   np.asarray(kde_full.log_h) - np.log(2.0),
+                                   rtol=1e-14)
+        np.testing.assert_allclose(float(kde_half.log_norm),
+                                   float(kde_full.log_norm) + 4.0 * np.log(2.0),
+                                   rtol=1e-14)
+
+        # And the inflation is real: 3 sigma out in one coordinate, the
+        # Silverman KDE sits ABOVE the true Gaussian density it estimates
+        # (analytically +0.21 nats here, the rest is estimator noise).
+        delta = np.array([3.0, 0.0, 0.0, 0.0]) * sig
+        lp = float(log_eval_pair_kde(kde_full, jnp.asarray(mu + delta)))
+        log_truth = float(np.sum(-0.5 * (delta / sig) ** 2
+                                - 0.5 * np.log(2.0 * np.pi * sig**2)))
+        assert lp - log_truth > 0.1, (lp, log_truth)
+
+    def test_degenerate_coordinate_warns_and_names_it(self):
+        """A constant coordinate is a documented policy, not a silent epsilon.
+
+        ``sigma_k = 0`` (zero-spin PE, a fixed mock parameter) floors the
+        bandwidth to a delta, which both rejects any displaced query and adds
+        +18.4 nats to ``log_norm`` -- an offset that does NOT cancel in the pair
+        Bayes factor.  It must at least say so, and name the coordinate.
+        """
+        from darksirens.likelihood.pair_kde import DEGENERATE_H
+
+        rng = np.random.default_rng(17)
+        N = 200
+        samples = np.stack([
+            rng.normal(35.0, 3.0, N),
+            rng.normal(0.7, 0.05, N),
+            rng.normal(1000.0, 100.0, N),
+            np.zeros(N),                       # chi_eff pinned by the PE run
+        ], axis=-1)
+        with pytest.warns(UserWarning, match="chieff"):
+            h = _silverman_bandwidth_diag(samples)
+        assert h[3] == DEGENERATE_H
+        assert (h[:3] > 0.0).all()
+
+        # Non-degenerate samples must stay silent.
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _silverman_bandwidth_diag(samples[:, [0, 1, 2, 0]])
+
     def test_log_eval_broadcasts_without_a_trailing_coordinate_axis(self):
         """Query shape (..., 4) -> (...), with no (..., N, 4) intermediate.
 

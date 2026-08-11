@@ -29,6 +29,27 @@ and avoids any detector→source Jacobian gymnastics at evaluation time.
 The Jacobian of the apparent→source map at fixed μ is applied at the
 likelihood level (cluster_likelihood.py), exactly as in commit 2's
 wl_weight.py.
+
+Bandwidth
+~~~~~~~~~
+Silverman's rule is AMISE-optimal for DENSITY ESTIMATION, and at d = 4 its
+exponent 1/(d+4) = 1/8 makes it almost N-independent: h = 0.45 σ_k at
+N = 400 (the ``--pe_max_per_pair 400`` production setting), 0.37 σ_k at
+N = 2000.  The estimand is therefore not π_PE/p_prop but its convolution
+with a ~0.4 σ Gaussian in every coordinate, which INFLATES the tails: for a
+Gaussian marginal the smoothed/true density ratio at separation Δ is
+
+    (σ/√(σ² + h²)) · exp[(Δ²/2) h²/(σ²(σ² + h²))]
+
+= 0.91 at Δ = 0 and 1.9× at Δ = 3 σ for h = 0.45 σ, per coordinate.  Only the
+LENSED branch uses a KDE (cluster_likelihood.py's pair integrand); the
+singleton/unlensed weight is an unsmoothed PE sum, so the smoothing bias does
+NOT cancel in the pair Bayes factor and it favours widely separated (false)
+pairs.  ``make_pair_kde(..., bandwidth_scale=...)`` exists to measure and
+control that: rebuild a candidate pair at 1.0 and 0.5 and compare the pair
+log Bayes factor — a shift of order nats means the kernel, not the physics, is
+setting the answer.  The default is left at the published rule; changing it is
+a validation exercise, not a code fix.
 """
 
 from __future__ import annotations
@@ -41,6 +62,11 @@ import jax.numpy as jnp
 # Coordinate axes carried through the KDE in canonical order.
 PAIR_KDE_COORDS = ("m1det", "q", "dL_app", "chieff")
 _D = 4   # KDE dimensionality (fixed for this analysis)
+
+#: Bandwidth used for a coordinate with zero sample spread. See
+#: :func:`_silverman_bandwidth_diag` — this is a documented degenerate-dimension
+#: policy, not a numerical epsilon.
+DEGENERATE_H = 1.0e-8
 
 
 def validate_pair_prior_wt(
@@ -128,13 +154,30 @@ class PairKDE(NamedTuple):
 def _silverman_bandwidth_diag(
     samples: np.ndarray,
     valid: np.ndarray | None = None,
+    bandwidth_scale: float = 1.0,
 ) -> np.ndarray:
     """Silverman's rule for diagonal Gaussian KDE in d dimensions.
 
-    h_k = (4 / ((d + 2) N))^(1/(d+4)) · σ_k
+    h_k = scale · (4 / ((d + 2) N))^(1/(d+4)) · σ_k
 
     σ_k is the unweighted standard deviation along axis k over valid
-    samples. N is the count of valid samples.
+    samples. N is the count of valid samples. ``bandwidth_scale`` multiplies
+    the rule (see the module docstring's "Bandwidth" note for why one would
+    want it below 1).
+
+    Degenerate coordinates
+    ~~~~~~~~~~~~~~~~~~~~~~
+    A coordinate with σ_k = 0 (χ_eff pinned by a zero-spin PE run, a single
+    surviving q value after aggressive downsampling, a mock with one parameter
+    fixed) cannot support a KDE, and the ``DEGENERATE_H`` floor below is a
+    PHYSICS decision dressed as a numerical safety net: it makes the kernel a
+    delta in that coordinate — any query displaced by more than ~1e-8 gets zero
+    density, annihilating the whole pair branch — and it adds
+    ``-log(1e-8) = +18.4`` nats to ``log_norm``, a per-event offset that does NOT
+    cancel in the pair Bayes factor (the unlensed branch uses no KDE).  It is
+    kept so a synthetic PE product still runs, but it warns and names the
+    coordinate: the caller should drop that dimension from the pair kernel or
+    supply real samples.
     """
     n, d = samples.shape
     if valid is None:
@@ -144,11 +187,32 @@ def _silverman_bandwidth_diag(
         raise ValueError(
             f"PairKDE: need at least 2 valid samples, got {n_valid}."
         )
+    if not (bandwidth_scale > 0.0):
+        raise ValueError(
+            f"PairKDE: bandwidth_scale must be positive; got {bandwidth_scale}."
+        )
     s = samples[valid]
     sigma = s.std(axis=0, ddof=1)
     factor = (4.0 / ((d + 2) * n_valid)) ** (1.0 / (d + 4))
-    h = factor * sigma
-    h = np.where(h > 0.0, h, 1.0e-8)
+    h = float(bandwidth_scale) * factor * sigma
+    degenerate = ~(h > 0.0)
+    if degenerate.any():
+        import warnings
+
+        names = [
+            PAIR_KDE_COORDS[k] if k < len(PAIR_KDE_COORDS) else str(k)
+            for k in np.flatnonzero(degenerate)
+        ]
+        warnings.warn(
+            f"PairKDE: zero sample spread in coordinate(s) {names} over "
+            f"{n_valid} valid PE samples; falling back to a delta-like "
+            f"bandwidth h={DEGENERATE_H:g} there. The kernel then rejects any "
+            "query displaced from the constant value, and log_norm carries "
+            f"{-np.log(DEGENERATE_H):.1f} nats per degenerate coordinate that do "
+            "NOT cancel in the pair Bayes factor. Drop the dimension or supply "
+            "real samples."
+        )
+    h = np.where(degenerate, DEGENERATE_H, h)
     return h
 
 
@@ -159,6 +223,7 @@ def make_pair_kde(
     chieff: np.ndarray,
     prior_wt: np.ndarray,
     valid: np.ndarray | None = None,
+    bandwidth_scale: float = 1.0,
 ) -> PairKDE:
     """Build a PairKDE for one event.
 
@@ -174,6 +239,12 @@ def make_pair_kde(
         Optional structural mask (matches GWEvent.valid). Defaults to all
         True. Padded samples are excluded from the bandwidth fit and
         masked out at evaluation time.
+    bandwidth_scale
+        Multiplier on Silverman's bandwidth (default 1.0, i.e. the rule as
+        published). Lowering it trades variance for the tail bias quantified
+        in the module docstring's "Bandwidth" note; rebuilding a candidate
+        pair's KDEs at 1.0 and 0.5 and comparing the pair log Bayes factor is
+        the sensitivity check that note asks for.
 
     Returns
     -------
@@ -201,7 +272,9 @@ def make_pair_kde(
     prior_wt = validate_pair_prior_wt(prior_wt, valid, context="make_pair_kde prior_wt")
 
     # Bandwidth from UNWEIGHTED posterior samples
-    h = _silverman_bandwidth_diag(samples, valid=valid)
+    h = _silverman_bandwidth_diag(
+        samples, valid=valid, bandwidth_scale=bandwidth_scale
+    )
 
     # KDE evaluation weights: 1/p_prop for the importance correction.
     # Padding slots commonly carry 0/NaN p_prop, so substitute a dummy before
