@@ -678,17 +678,29 @@ class JointGPPopulation:
 
 @dataclass
 class AdditiveGPPopulation:
-    """Functional-ANOVA decomposition: ``f = sum_terms f_term`` (each centred).
+    """Additive decomposition: ``f = sum_terms f_term``.
 
     Probability axes are ``{m1, q, chi}``; ``z`` enters only through interaction
     terms that include it (conditioning).  Each term is an independent whitened
-    rank-M GP with its own amplitude, length scales, and ``xi``, constrained to
-    integrate to zero over its own axes (sum-to-zero -- required for ANOVA
-    identifiability, else per-term contributions are not separable).
+    rank-M GP with its own amplitude, length scales, and ``xi``, and is ZERO-MEAN
+    (unlike :class:`JointGPPopulation`, this family has no parametric
+    ``alpha_gp``/``beta_gp`` shape mean, so its prior is centred on a density that
+    is flat in every probability axis -- the same convention the binned
+    :class:`BinnedGPPopulation` uses).
+
+    Identifiability: each term's grand mean over the coarse probability grid is
+    subtracted before exponentiating, which keeps ``exp(F)`` at O(1) scale.  It is
+    NOT the functional-ANOVA sum-to-zero projection and is not claimed to be: a
+    per-term CONSTANT cancels identically against the normaliser ``Z(z)`` computed
+    from the same centred field, so it has no effect on the likelihood.  The real
+    degeneracy -- an interaction term such as ``f_{m1,q}`` spanning functions that
+    are nearly constant in ``q`` and so duplicating ``f_{m1}`` -- is left to the
+    N(0, 1) latent priors, which keep the posterior proper (long ridges in the
+    latent space, not an improper posterior).  Projecting each interaction onto the
+    orthogonal complement of the main effects' spans would remove it.
     """
 
     terms: tuple = (("m1",), ("q",), ("chi",), ("m1", "q"), ("m1", "z"), ("chi", "z"))
-    mean_mode: str = "shape"
     axes_cfg: dict = field(default_factory=lambda: dict(_DEFAULT_AXES))
     latex: str = "GP add"
 
@@ -776,8 +788,8 @@ class AdditiveGPPopulation:
         G = flatg["m1"].shape[0]
         taper_grid = self._taper_cut(flatg["m1"], flatg["q"], m_min, dm_min, m_max, dm_max)
 
-        # Per z-grid node: per-term sum-to-zero constant c_term(z) and the
-        # prob-axis normalisation Z(z).  Smooth in z -> interpolate to queries.
+        # Per z-grid node: per-term centring constant c_term(z) and the prob-axis
+        # normalisation Z(z).  Smooth in z -> interpolate to queries.
         def _grid_quant(zval):
             cs = []
             F = jnp.zeros(G)
@@ -790,19 +802,32 @@ class AdditiveGPPopulation:
             Z = _grid_integrate(pg.reshape([g.shape[0] for g in grids]), grids)
             return Z, jnp.stack(cs)
 
-        zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
-        Zg, Cg_terms = jax.lax.map(_grid_quant, zg)        # (nz,), (nz, n_terms)
+        if self._z_in_gp:
+            zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
+            # jax.checkpoint is REQUIRED, not cosmetic (see _znorm_interp): a scan
+            # keeps its per-iteration residuals for the transpose, so reverse mode
+            # would otherwise tape every z node's (G, M) cross-kernel for all six
+            # terms.
+            Zg, Cg_terms = jax.lax.map(jax.checkpoint(_grid_quant), zg)
+            c_at = [jnp.interp(z, zg, Cg_terms[:, j]) for j in range(len(term_built))]
+            norm = jnp.exp(jnp.interp(z, zg,
+                                      jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
+        else:
+            # No term carries z (e.g. gp_separable), so _grid_quant is constant in
+            # z: evaluate it ONCE instead of mapping _ZNORM_N identical nodes and
+            # interpolating a constant.
+            Z0, C0 = _grid_quant(0.0)
+            c_at = [C0[j] for j in range(len(term_built))]
+            norm = jnp.where(Z0 > 0, Z0, 1.0)
 
         # Query points (direct evaluation; centring constants interpolated in z).
         qphys = {"m1": m1, "q": q, "chi": chi}
         F_q = jnp.zeros(N)
         for j, (meta, kern, alpha) in enumerate(term_built):
             fpt = self._term_eval(meta, kern, alpha, qphys, z, N)
-            c_at = jnp.interp(z, zg, Cg_terms[:, j])
-            F_q = F_q + (fpt - c_at)
+            F_q = F_q + (fpt - c_at[j])
         pun = jnp.exp(jnp.clip(F_q, -_FIELD_CLIP, _FIELD_CLIP)) * \
             self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
-        norm = jnp.exp(jnp.interp(z, zg, jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
         # The _LOGSAFE operand exists only to keep the dead branch of the
         # where free of log(0) (both branches are differentiated); the
         # RETURNED value outside the taper support must be -inf, exactly as
@@ -1104,13 +1129,15 @@ _reg("gp3d_q_chi_z",  _joint(("q", "chi", "z"),  "GP q,chi,z"),  "GP q,chi,z")
 # 4-D joint
 _reg("gp4d", _joint(("m1", "q", "chi", "z"), "GP 4D"), "GP 4D")
 # Separable null: independent 1-D GP per probability axis, no interactions
+# ``mode`` is accepted and ignored: the additive family is zero-mean, so
+# ``@shape``/``@zero`` decorations name the same model.
 _reg("gp_separable",
      lambda mode="shape": AdditiveGPPopulation(
-         terms=(("m1",), ("q",), ("chi",)), mean_mode=mode, latex="GP sep"),
+         terms=(("m1",), ("q",), ("chi",)), latex="GP sep"),
      "GP sep")
 # Additive (functional ANOVA): mains + m1q + m1z + chiz interactions
 _reg("gp4d_additive",
-     lambda mode="shape": AdditiveGPPopulation(mean_mode=mode, latex="GP add"),
+     lambda mode="shape": AdditiveGPPopulation(latex="GP add"),
      "GP add")
 # Binned GP (gppop): mass-only and full (m1, m2, z)
 _reg("gppop",
