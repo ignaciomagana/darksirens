@@ -159,3 +159,19 @@ def test_marginalize_without_ensemble_raises():
     """Requesting marginalisation on a catalog without members fails loudly."""
     with pytest.raises(ValueError, match="ENSEMBLE|members"):
         _ll(_dark_catalog(logq=np.zeros((2, NG))), marginalize=True)
+
+
+def test_marginalize_with_mean_q_selection_catalog_raises():
+    """PE ensemble against a deterministic (posterior-mean-Q) SELECTION catalog
+    is not a marginalisation: each member's numerator carries 1/Z_m, which
+    cancels only against mu(Q_m), so the member average would become a
+    Z_m^{-N_obs}-weighted pick of the smallest-Z_m member."""
+    cat_pe = _dark_catalog(logq_members=_members_table())
+    cat_sel = _dark_catalog(logq=np.zeros((2, NG)))
+    with pytest.raises(ValueError, match="SELECTION catalog"):
+        darksiren_log_likelihood(
+            COSMO, SURVEY, POP, _GW_PE, cat_pe, _GW_SEL, cat_sel,
+            _N_EV, _N_SAMP, float(_N_SEL),
+            pop_model="powerlaw+peak", universe_model="dark_sirens",
+            sel_batch_size=None, lss_marginalize=True,
+        )

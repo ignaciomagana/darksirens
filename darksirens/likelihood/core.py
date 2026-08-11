@@ -984,7 +984,7 @@ def darksiren_log_likelihood(
         )
         return ll + jnp.sum(event_lls)
 
-    def _factored_member_marginalization(n_members, is_field, sel_has_members):
+    def _factored_member_marginalization(n_members, is_field):
         """FACTORED LSS-completion marginalisation (default under lss_marginalize).
 
         Numerically equal to ``_reference_member_marginalization`` up to
@@ -1030,12 +1030,10 @@ def darksiren_log_likelihood(
                 out.append((logq_all, logZ))
             return tuple(out)
 
-        # ``base_miss`` is present only on ENSEMBLE states; the selection states
-        # may be plain (asymmetric PE-members / selection-no-members case), where
-        # these tuples are built but never read (the member reduction is hoisted),
-        # so ``getattr(..., None)`` keeps the trace from touching a missing leaf.
-        base_miss_univ = tuple(getattr(s, "base_miss", None) for s in prior_states_univ)
-        base_miss_sel = tuple(getattr(s, "base_miss", None) for s in prior_states_sel)
+        # ``base_miss`` is present only on ENSEMBLE states, which the guard in the
+        # ``lss_marginalize`` block above requires on BOTH seams.
+        base_miss_univ = tuple(s.base_miss for s in prior_states_univ)
+        base_miss_sel = tuple(s.base_miss for s in prior_states_sel)
         member_is_log_univ = tuple(
             _resolve_member_logq_row(c)[1] for c in catalogs_pe_all
         )
@@ -1167,118 +1165,92 @@ def darksiren_log_likelihood(
             ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
             return jax.vmap(lambda row: log_evidence_and_mc_variance(row, nsamp))(ldw)
 
-        # --- Selection: when the selection side carries NO member ensemble,
-        # log_mu/Neff are member-INDEPENDENT, so compute them ONCE (hoisted out of
-        # the vmap) with the existing compute_selection_term + log_weight closure
-        # -- identical to the reference's per-member-identical recomputation. ---
-        if not sel_has_members:
-            def _selection_prior(z, pix, catalogs):
-                return _eval_prior_mix(
-                    selection_model, prior_states_sel, z, pix, catalogs
-                )
-
-            def _log_weight_sel(m1det, q, dL, chieff, pix, prior_wt, catalogs):
-                supported = (dL >= dL_lo) & (dL <= dL_hi)
-                dL_c = jnp.clip(dL, dL_lo, dL_hi)
-                ldw = log_sample_weight(
-                    m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
-                    catalogs, log_p_pop, _selection_prior,
-                )
-                return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
-
-            log_mu_fixed, Neff_fixed, _ = compute_selection_term(
-                gw_sel, catalogs_sel_all, _log_weight_sel, Ndraw, nEvents,
-                sel_batch_size=sel_batch_size, sky_log_weight_fn=sky_log_weight_fn,
-            )
+        # --- Selection: the member reduction. Pad the injections (batched)
+        # exactly as compute_selection_term, then precompute the member-
+        # INDEPENDENT per-injection quantities ONCE (a batched scan bounds the KDE
+        # peak memory to O(sel_batch_size x N_max_gals)); the per-member reduction
+        # re-slices these cheaply. ---
+        if sel_batch_size is not None:
+            gw_sel_p, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
         else:
-            # Pad the injections (batched) exactly as compute_selection_term, then
-            # precompute the member-INDEPENDENT per-injection quantities ONCE (a
-            # batched scan bounds the KDE peak memory to O(sel_batch_size x
-            # N_max_gals)); the per-member reduction re-slices these cheaply.
-            if sel_batch_size is not None:
-                gw_sel_p, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
-            else:
-                gw_sel_p = gw_sel
-            N_sel_p = gw_sel_p.dL.shape[0]
+            gw_sel_p = gw_sel
+        N_sel_p = gw_sel_p.dL.shape[0]
 
-            def _sel_precompute(start, size):
+        def _sel_precompute(start, size):
+            sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
+            dL_b = sl(gw_sel_p.dL)
+            supported = (dL_b >= dL_lo) & (dL_b <= dL_hi)
+            dL_c = jnp.clip(dL_b, dL_lo, dL_hi)
+            valid = sl(gw_sel_p.valid) & (sl(gw_sel_p.prior_wt) > 0.0)
+            base, z_c = log_target_density_base_and_z(
+                sl(gw_sel_p.m1det), sl(gw_sel_p.q), dL_c, sl(gw_sel_p.chieff),
+                sl(gw_sel_p.pixels), sl(gw_sel_p.prior_wt),
+                cosmo, survey, pop_params, catalogs_sel_all[0], log_p_pop,
+            )
+            pix_all = sl(gw_sel_p.pixels)
+            obs = tuple(
+                eval_dark_obs_bracket(
+                    z_c, _pix_col(pix_all, k), prior_states_sel[k],
+                    catalogs_sel_all[k],
+                )
+                for k in range(n_catalogs)
+            )
+            A_obs = tuple(o[0] for o in obs)
+            idx = tuple(o[1] for o in obs)
+            t = tuple(o[2] for o in obs)
+            pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
+            # _sky_weight clamps dL internally, matching _batch_lse (which
+            # passes the UNCLAMPED dL_b to sky_log_weight_fn).
+            sky = (
+                sky_log_weight_fn(
+                    sl(gw_sel_p.nx), sl(gw_sel_p.ny), sl(gw_sel_p.nz), dL_b
+                )
+                if apply_sky else jnp.zeros_like(base)
+            )
+            return base, supported, valid, sky, A_obs, idx, t, pixk
+
+        if sel_batch_size is None:
+            sel_pre = _sel_precompute(0, N_sel_p)
+        else:
+            N_batches = N_sel_p // sel_batch_size
+
+            def _pre_scan(_, b):
+                return None, _sel_precompute(b * sel_batch_size, sel_batch_size)
+
+            _, sel_pre_stacked = lax.scan(_pre_scan, None, jnp.arange(N_batches))
+            # (N_batches, batch, ...) -> (N_sel_p, ...) preserving order.
+            sel_pre = jax.tree_util.tree_map(
+                lambda a: a.reshape((N_sel_p,) + a.shape[2:]), sel_pre_stacked
+            )
+
+        def _sel_member_reduction(leaves):
+            base_a, sup_a, val_a, sky_a, A_obs_a, idx_a, t_a, pixk_a = sel_pre
+
+            def _provider(start, size):
                 sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
-                dL_b = sl(gw_sel_p.dL)
-                supported = (dL_b >= dL_lo) & (dL_b <= dL_hi)
-                dL_c = jnp.clip(dL_b, dL_lo, dL_hi)
-                valid = sl(gw_sel_p.valid) & (sl(gw_sel_p.prior_wt) > 0.0)
-                base, z_c = log_target_density_base_and_z(
-                    sl(gw_sel_p.m1det), sl(gw_sel_p.q), dL_c, sl(gw_sel_p.chieff),
-                    sl(gw_sel_p.pixels), sl(gw_sel_p.prior_wt),
-                    cosmo, survey, pop_params, catalogs_sel_all[0], log_p_pop,
+                log_p_mix = _log_p_mix(
+                    tuple(sl(a) for a in A_obs_a),
+                    tuple(sl(a) for a in idx_a),
+                    tuple(sl(a) for a in t_a),
+                    tuple(sl(a) for a in pixk_a),
+                    leaves, base_miss_sel, member_is_log_sel,
                 )
-                pix_all = sl(gw_sel_p.pixels)
-                obs = tuple(
-                    eval_dark_obs_bracket(
-                        z_c, _pix_col(pix_all, k), prior_states_sel[k],
-                        catalogs_sel_all[k],
-                    )
-                    for k in range(n_catalogs)
-                )
-                A_obs = tuple(o[0] for o in obs)
-                idx = tuple(o[1] for o in obs)
-                t = tuple(o[2] for o in obs)
-                pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
-                # _sky_weight clamps dL internally, matching _batch_lse (which
-                # passes the UNCLAMPED dL_b to sky_log_weight_fn).
-                sky = (
-                    sky_log_weight_fn(
-                        sl(gw_sel_p.nx), sl(gw_sel_p.ny), sl(gw_sel_p.nz), dL_b
-                    )
-                    if apply_sky else jnp.zeros_like(base)
-                )
-                return base, supported, valid, sky, A_obs, idx, t, pixk
+                # Reproduce log_weight's mask, then _batch_lse's +sky and mask.
+                ldw = sl(base_a) + log_p_mix
+                ldw = jnp.where(sl(sup_a) & jnp.isfinite(ldw), ldw, -jnp.inf)
+                if apply_sky:
+                    ldw = ldw + sl(sky_a)
+                ldw = jnp.where(sl(val_a) & jnp.isfinite(ldw), ldw, -jnp.inf)
+                return ldw
 
-            if sel_batch_size is None:
-                sel_pre = _sel_precompute(0, N_sel_p)
-            else:
-                N_batches = N_sel_p // sel_batch_size
-
-                def _pre_scan(_, b):
-                    return None, _sel_precompute(b * sel_batch_size, sel_batch_size)
-
-                _, sel_pre_stacked = lax.scan(_pre_scan, None, jnp.arange(N_batches))
-                # (N_batches, batch, ...) -> (N_sel_p, ...) preserving order.
-                sel_pre = jax.tree_util.tree_map(
-                    lambda a: a.reshape((N_sel_p,) + a.shape[2:]), sel_pre_stacked
-                )
-
-            def _sel_member_reduction(leaves):
-                base_a, sup_a, val_a, sky_a, A_obs_a, idx_a, t_a, pixk_a = sel_pre
-
-                def _provider(start, size):
-                    sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
-                    log_p_mix = _log_p_mix(
-                        tuple(sl(a) for a in A_obs_a),
-                        tuple(sl(a) for a in idx_a),
-                        tuple(sl(a) for a in t_a),
-                        tuple(sl(a) for a in pixk_a),
-                        leaves, base_miss_sel, member_is_log_sel,
-                    )
-                    # Reproduce log_weight's mask, then _batch_lse's +sky and mask.
-                    ldw = sl(base_a) + log_p_mix
-                    ldw = jnp.where(sl(sup_a) & jnp.isfinite(ldw), ldw, -jnp.inf)
-                    if apply_sky:
-                        ldw = ldw + sl(sky_a)
-                    ldw = jnp.where(sl(val_a) & jnp.isfinite(ldw), ldw, -jnp.inf)
-                    return ldw
-
-                return selection_reduce_from_ldw_provider(
-                    _provider, N_sel_p, Ndraw, sel_batch_size
-                )
+            return selection_reduce_from_ldw_provider(
+                _provider, N_sel_p, Ndraw, sel_batch_size
+            )
 
         # --- THE member vmap: carries ONLY member-stacked leaves. ---
         def _member_ll(univ_leaves, sel_leaves):
             event_lls, event_vars = _pe_member_terms(univ_leaves)
-            if sel_has_members:
-                log_mu_m, Neff_m, _ = _sel_member_reduction(sel_leaves)
-            else:
-                log_mu_m, Neff_m = log_mu_fixed, Neff_fixed
+            log_mu_m, Neff_m, _ = _sel_member_reduction(sel_leaves)
             ll_m = selection_log_correction(
                 log_mu_m, Neff_m, nEvents,
                 soft_guard=selection_neff_soft_guard,
@@ -1288,18 +1260,13 @@ def darksiren_log_likelihood(
             return ll_m + jnp.sum(event_lls)
 
         univ_stack = _member_leaf_bundle(prior_states_univ, catalogs_pe_all)
-        if sel_has_members:
-            sel_stack = _member_leaf_bundle(prior_states_sel, catalogs_sel_all)
-            ll_members = jax.vmap(_member_ll, in_axes=(0, 0))(univ_stack, sel_stack)
-        else:
-            ll_members = jax.vmap(
-                lambda ul: _member_ll(ul, None), in_axes=(0,)
-            )(univ_stack)
+        sel_stack = _member_leaf_bundle(prior_states_sel, catalogs_sel_all)
+        ll_members = jax.vmap(_member_ll, in_axes=(0, 0))(univ_stack, sel_stack)
 
         ll_members = jnp.where(jnp.isfinite(ll_members), ll_members, -jnp.inf)
         return logsumexp(ll_members) - jnp.log(n_members)
 
-    def _reference_member_marginalization(n_members, is_field, sel_has_members):
+    def _reference_member_marginalization(n_members, is_field):
         """REFERENCE LSS-completion marginalisation: the historical
         whole-likelihood vmap (each member redoes the entire ``_ll_given_states``,
         including the observed-catalog KDE).  Retained verbatim as the numerical
@@ -1338,12 +1305,9 @@ def darksiren_log_likelihood(
             _member_states(s, surveys_all[k], catalogs_pe_all[k])
             for k, s in enumerate(prior_states_univ)
         )
-        sel_members = (
-            tuple(
-                _member_states(s, surveys_all[k], catalogs_sel_all[k])
-                for k, s in enumerate(prior_states_sel)
-            )
-            if sel_has_members else prior_states_sel
+        sel_members = tuple(
+            _member_states(s, surveys_all[k], catalogs_sel_all[k])
+            for k, s in enumerate(prior_states_sel)
         )
         member_axes_one = DarkSirenPriorState(
             kernels=None, log_Nobs=None, dN_miss=0, log_Z=0,
@@ -1351,8 +1315,7 @@ def darksiren_log_likelihood(
         )
         member_axes = (member_axes_one,) * n_catalogs
         ll_members = jax.vmap(
-            _ll_given_states,
-            in_axes=(member_axes, member_axes if sel_has_members else None),
+            _ll_given_states, in_axes=(member_axes, member_axes),
         )(
             univ_members, sel_members
         )
@@ -1394,18 +1357,30 @@ def darksiren_log_likelihood(
             getattr(s, "base_miss", None) is not None
             for s in prior_states_sel
         ]
-        if any(sel_members_flags) and not all(sel_members_flags):
+        # The member average is a marginalization ONLY if numerator and
+        # denominator are evaluated on the SAME Q member: each event's evidence
+        # carries 1/Z_m from the member's redshift-prior normalizer, and it
+        # cancels against mu(Q_m)^{-N_obs}.  Against a mean-Q mu it does not
+        # cancel, leaving L_m ~ (Zbar/Z_m)^{N_obs} -- with N_obs ~ 10^2 a 1%
+        # spread in Z_m tilts the logsumexp by e^{2.6} per member, so the
+        # "average" collapses onto the smallest-Z_m member.  Reject the
+        # asymmetric structure instead of silently returning that number.
+        missing_sel = [k + 1 for k, f in enumerate(sel_members_flags) if not f]
+        if missing_sel:
             raise ValueError(
-                "lss_marginalize: the selection-side Q ensembles must be "
-                "present on ALL catalogs or NONE (mixed member structure "
-                "cannot share the member vmap)."
+                "lss_marginalize=True requires the LSS-completion ENSEMBLE on "
+                f"EVERY SELECTION catalog too; catalog(s) {missing_sel} have "
+                "none. The per-member redshift-prior normalizer Z_m cancels only "
+                "against mu(Q_m); pairing member numerators with a "
+                "posterior-mean-Q mu makes the member average a Z_m^{-N_obs}-"
+                "weighted pick, not a marginalization. Build the selection "
+                "catalog's Q_LSS with the same members as the PE catalog's."
             )
-        sel_has_members = all(sel_members_flags) and len(sel_members_flags) > 0
 
         if lss_member_impl == "factored":
-            ll = _factored_member_marginalization(n_members, is_field, sel_has_members)
+            ll = _factored_member_marginalization(n_members, is_field)
         elif lss_member_impl == "reference":
-            ll = _reference_member_marginalization(n_members, is_field, sel_has_members)
+            ll = _reference_member_marginalization(n_members, is_field)
         else:
             raise ValueError(
                 "lss_member_impl must be 'factored' or 'reference', got "

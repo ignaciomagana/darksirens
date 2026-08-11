@@ -12,9 +12,10 @@ sky factor, and the O(N_max_gals) observed-catalog KDE) and vmaps ONLY the cheap
 missing-galaxy completion over the M ensemble members; the reference re-runs the
 entire per-member likelihood.  They must agree to floating-point re-association
 on BOTH the value AND ``jax.grad`` -- ``rtol=1e-12`` -- across the K=1/K>=2 x
-conditional/field x unmarked/marked feature matrix, the asymmetric
-PE-members / selection-no-members structure, selection batching, and an ACTIVE
-selection variance / soft guard.
+conditional/field x unmarked/marked feature matrix, selection batching, and an
+ACTIVE selection variance / soft guard.  Both impls must also REFUSE the
+asymmetric PE-members / selection-no-members structure (the per-member
+normalizer does not cancel against a mean-Q mu).
 
 Conditional cases build inputs at the direct ``darksiren_log_likelihood`` level
 (as tests/test_lss_marginalization.py does); field cases reuse the validated
@@ -185,14 +186,17 @@ def test_k1_marked_conditional_grad_through_eta():
     _direct_ab(build, 1.3, "k1_marked_conditional")
 
 
-def test_asymmetric_pe_members_sel_no_members():
-    """PE catalog carries the ensemble, selection catalog does NOT -> the
-    factored path HOISTS the (member-independent) selection term while still
-    marginalizing the PE term."""
+def test_asymmetric_pe_members_sel_no_members_is_rejected():
+    """PE catalog carries the ensemble, selection catalog does NOT: each member's
+    numerator carries 1/Z_m, which cancels only against mu(Q_m), so pairing it
+    with a posterior-mean-Q mu makes the member average a Z_m^{-N_obs}-weighted
+    pick instead of a marginalization.  Both impls must refuse it (this used to
+    be silently supported by hoisting the selection term out of the vmap)."""
     cat_pe = L._dark_catalog(logq_members=L._members_table())
     cat_sel = L._dark_catalog(logq=np.zeros((2, NG)))  # deterministic, no members
-    _direct_ab(_core_k1(cat_pe, cat_sel, marginalize=True), float(L.POP[0]),
-               "asymmetric")
+    for impl in ("factored", "reference"):
+        with pytest.raises(ValueError, match="SELECTION catalog"):
+            _core_k1(cat_pe, cat_sel, marginalize=True)(impl)(float(L.POP[0]))
 
 
 def test_selection_soft_guard_active():
@@ -302,7 +306,7 @@ if __name__ == "__main__":  # pragma: no cover - manual margin dump
     for fn in [
         test_k1_conditional, test_k1_conditional_batched_selection,
         test_k1_marked_conditional_grad_through_eta,
-        test_asymmetric_pe_members_sel_no_members,
+        test_asymmetric_pe_members_sel_no_members_is_rejected,
         test_selection_soft_guard_active, test_selection_hard_guard_both_neg_inf,
         test_k2_conditional_grad_through_mixture_weight,
         test_k1_field, test_k2_field, test_k2_one_marked_one_unmarked_field,
