@@ -126,6 +126,38 @@ def test_input_file_content_is_fingerprinted(tmp_path):
     assert regenerated["digest"] != reference["digest"]
 
 
+def test_redshift_normalization_domain_is_fingerprinted(monkeypatch):
+    """DARKSIRENS_ZMAX / *_ZNORM_HI change the integration domain of the
+    redshift prior, the missing-galaxy budget and the selection integral -- i.e.
+    both the numerator and beta -- so a requeue that resolves them differently
+    must NOT be accepted against its own checkpoint."""
+    from darksirens.redshift import grid as zgrid_module
+    import darksirens.sky.models as sky_models
+
+    reference = _fingerprint()
+    block = reference["semantic"]["redshift_grid"]
+    assert block["zMax"] == pytest.approx(float(zgrid_module.zMax))
+    assert block["n_nodes"] == len(zgrid_module.zgrid)
+    assert block["sky_znorm_hi"] == pytest.approx(float(sky_models._ZNORM_HI))
+
+    monkeypatch.setattr(zgrid_module, "zMax", float(zgrid_module.zMax) + 1.0)
+    assert _fingerprint()["digest"] != reference["digest"]
+    monkeypatch.undo()
+
+    monkeypatch.setattr(sky_models, "_ZNORM_HI", float(sky_models._ZNORM_HI) + 1.0)
+    assert _fingerprint()["digest"] != reference["digest"]
+
+
+def test_environment_block_records_the_darksirens_env(monkeypatch):
+    """An archived logZ must be attributable to the zMax that produced it."""
+    from darksirens.io.settings import environment_block
+
+    monkeypatch.setenv("DARKSIRENS_ZMAX", "2.5")
+    env = environment_block()["darksirens_env"]
+    assert env["DARKSIRENS_ZMAX"] == "2.5"
+    assert all(key.startswith("DARKSIRENS_") for key in env)
+
+
 def test_flow_ensemble_directory_content_is_fingerprinted(tmp_path):
     """--gw_flows_path is a DIRECTORY, and for a flow-surrogate run those
     checkpoints ARE the PE likelihood: a retrained ensemble, or one event

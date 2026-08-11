@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import importlib
 import json
 import os
 import tempfile
@@ -182,6 +183,42 @@ def _add_flow_ensemble_identity(sem_opts, data_files):
             data_files[f"gw_flows_path/{rel}"] = _file_identity(path)
 
 
+def _redshift_grid_identity():
+    """Resolved redshift-normalisation domain: the other env-driven target.
+
+    ``normalization_grid_settings()`` below covers the mass/q/chi quadrature,
+    but three environment knobs change the statistical target and were recorded
+    nowhere: ``DARKSIRENS_ZMAX`` sets the shared ``zgrid`` -- the integration
+    domain of the redshift prior, the missing-galaxy budget and the selection
+    integral, i.e. both the likelihood numerator and beta -- while
+    ``DARKSIRENS_GP_ZNORM_HI`` / ``DARKSIRENS_SKY_ZNORM_HI`` set the ceilings
+    above which the GP-population and sky-model z-normalisers freeze.  A
+    requeue whose submit environment resolves any of them differently would
+    otherwise restore state whose stored logL came from a different target.
+    Read through the modules (not os.environ) so the recorded values are the
+    ones actually in force.
+    """
+    out = {}
+    try:
+        from darksirens.redshift import grid as _grid
+        out["zMax"] = float(_grid.zMax)
+        out["n_nodes"] = int(len(_grid.zgrid))
+        out["z_last"] = float(_grid.zgrid[-1])
+    except Exception:  # pragma: no cover - never expected in a CLI process
+        return None
+    for module_name, prefix in (
+        ("darksirens.gw.populations.gp", "gp_znorm"),
+        ("darksirens.sky.models", "sky_znorm"),
+    ):
+        try:
+            module = importlib.import_module(module_name)
+            out[f"{prefix}_hi"] = float(module._ZNORM_HI)
+            out[f"{prefix}_n"] = int(module._ZNORM_N)
+        except Exception:  # pragma: no cover - optional import failure
+            out[f"{prefix}_hi"] = None
+    return out
+
+
 def build_run_fingerprint(
     opts,
     *,
@@ -220,6 +257,7 @@ def build_run_fingerprint(
         norm_grid = None
 
     semantic = {
+        "redshift_grid": _redshift_grid_identity(),
         "labels": [str(lab) for lab in labels],
         "lower_bound": [float(x) for x in lower_bound],
         "upper_bound": [float(x) for x in upper_bound],
