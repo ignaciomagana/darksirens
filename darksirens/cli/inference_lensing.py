@@ -62,7 +62,7 @@ from __future__ import annotations
 # JAX memory configuration (before any JAX import)
 from darksirens.core.jax_config import configure_jax_runtime
 
-configure_jax_runtime(mem_fraction="0.90")
+configure_jax_runtime()
 
 import os
 import sys

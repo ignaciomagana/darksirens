@@ -4,6 +4,10 @@ import multiprocessing as mp
 import os
 import sys
 
+# Same two knobs, same values, as core.jax_config.configure_jax_runtime (which
+# also enables x64; this module must not, so it only sets the env).  setdefault
+# on both sides means the effective configuration is order-independent as long
+# as the two stay in sync.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
 
