@@ -49,7 +49,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit, lax, vmap
-from jax.scipy.special import logsumexp, ndtr, ndtri
+from jax.scipy.special import log_ndtr, logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
 from typing import NamedTuple, Any
 
@@ -388,6 +388,18 @@ def _map_rows(row_fn, args: tuple):
     return _post(out)
 
 
+def _log_ndtr_span(lo, hi):
+    """``log(Phi(hi) - Phi(lo))`` without the f64 underflow of the difference.
+
+    ``ndtr`` returns exactly 0 past ~39 sigma, so the plain difference
+    underflows for any truncation that deep into a tail; ``log_ndtr`` stays
+    finite for arbitrarily deep ones.  The ``-1e-16`` clamp keeps the result
+    finite (and its gradient defined) when the two limits coincide.
+    """
+    log_lo, log_hi = log_ndtr(lo), log_ndtr(hi)
+    return log_hi + jnp.log(-jnp.expm1(jnp.minimum(log_lo - log_hi, -1e-16)))
+
+
 def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
     """
     log Z_i for one row: Z_i = ∫_0^{z_hi} N(z; z_i, sig_i) g(z) dz.
@@ -411,8 +423,25 @@ def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
     g = jnp.exp(
         jnp.interp(z_node.reshape(-1), zgrid, log_g_grid)
     ).reshape(z_node.shape)
-    Z = span * (g * _GL_W).sum(axis=-1)                     # (N_max,)
-    return jnp.where(real & (Z > 0.0), jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+    Zg = (g * _GL_W).sum(axis=-1)                           # (N_max,)
+    Z = span * Zg
+    # ``span`` underflows to exactly 0 in f64 once BOTH ndtr tails do (the
+    # truncation limit >~39 sigma_eff from the galaxy), which is routine on the
+    # depth path (``z_hi = z_depth``) for a REAL galaxy above the depth -- with
+    # spectroscopic sig_eff at the floor it is the rule, not the exception.
+    # Those rows are recovered in log space, where the truncated mass is exact:
+    # returning the padding fallback (0.0) instead would declare UNIT kernel
+    # mass below the truncation for a galaxy that has essentially none, and the
+    # depth-mass consumer would pick up that galaxy's whole weight.  Rows with a
+    # resolvable ``span`` keep the direct (bit-identical) spelling.
+    ok = Z > 0.0
+    log_Z = jnp.where(
+        ok,
+        jnp.log(jnp.where(ok, Z, 1.0)),
+        _log_ndtr_span(-zs / sig_eff, (z_hi - zs) / sig_eff)
+        + jnp.log(jnp.maximum(Zg, 1e-300)),
+    )
+    return jnp.where(real, log_Z, 0.0)
 
 
 def _renorm_log_kw_below_depth(
