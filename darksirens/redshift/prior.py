@@ -845,6 +845,7 @@ def eval_redshift_prior_with_state(
 def _eval_dark_member_scalar(
     z, pix, m, member_logq_all, member_is_log,
     state: "DarkSirenEnsemblePriorState", survey: SurveyParams, em_catalog,
+    catalog_sky_weighting: str = "conditional",
 ):
     """log p_m(z | pix) for LSS-completion ensemble member ``m`` (diagnostic).
 
@@ -873,7 +874,15 @@ def _eval_dark_member_scalar(
     q_hi = _member_q_eff_from_logq(lq_hi, depth_hi, member_is_log)
     miss = _interp_row(b_lo * q_lo, b_hi * q_hi, t)
     log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
-    return jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss) - state.log_Z_members[m, pix]
+    numerator = jnp.logaddexp(state.log_Nobs[pix] + log_p_cat, log_miss)
+    # Same normalizer selection as the likelihood's member path
+    # (``_factored_member_marginalization`` picks log_Z_global_members under
+    # field): normalizing a field-mode run per pixel would report a prior the
+    # run never evaluated, with the relative angular host weighting field mode
+    # exists to preserve divided away.
+    if catalog_sky_weighting == "field":
+        return numerator - state.log_Z_global_members[m]
+    return numerator - state.log_Z_members[m, pix]
 
 
 def eval_redshift_prior_members_with_state(
@@ -884,6 +893,7 @@ def eval_redshift_prior_members_with_state(
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
+    catalog_sky_weighting: str = "conditional",
 ) -> jnp.ndarray:
     """Per-member log p_m(z | pix) for a fixed LSS-completion ensemble.
 
@@ -893,10 +903,28 @@ def eval_redshift_prior_members_with_state(
     For non-ensemble states (or other models) it returns shape ``(1, len(z))``
     using the scalar (posterior-mean) prior, so callers can always index a
     leading member axis.
+
+    ``catalog_sky_weighting`` selects the same normalization convention the
+    likelihood uses (``state.log_Z_global_members[m]`` under ``"field"``, the
+    per-pixel ``state.log_Z_members[m, pix]`` under ``"conditional"``) and is
+    forwarded to the non-ensemble fall-through, so the diagnostic characterises
+    the prior the run actually sampled.  The default matches this module's other
+    entry points.
     """
     z = jnp.asarray(z)
     pix = jnp.asarray(pix)
+    if catalog_sky_weighting not in ("conditional", "field"):
+        raise ValueError(
+            "catalog_sky_weighting must be 'conditional' or 'field', got "
+            f"{catalog_sky_weighting!r}."
+        )
     if model == "dark_sirens" and isinstance(state, DarkSirenEnsemblePriorState):
+        if catalog_sky_weighting == "field" and state.log_Z_global_members is None:
+            raise ValueError(
+                "catalog_sky_weighting='field' needs the per-member survey-global "
+                "normalizers (log_Z_global_members); build the state with "
+                "prepare_redshift_prior_state(..., catalog_sky_weighting='field')."
+            )
         M = int(state.log_Z_members.shape[0])
         # Resolve the row-aligned RAW member log-Q ONCE (a view of the resident
         # data constant on the hot path); each member's density is reconstructed
@@ -907,13 +935,15 @@ def eval_redshift_prior_members_with_state(
             return vmap(
                 lambda z_i, p_i: _eval_dark_member_scalar(
                     z_i, p_i, m, member_logq_all, member_is_log,
-                    state, survey, em_catalog,
+                    state, survey, em_catalog, catalog_sky_weighting,
                 )
             )(z, pix)
 
         return vmap(_per_member)(jnp.arange(M, dtype=jnp.int32))  # (M, len(z))
 
-    lp = eval_redshift_prior_with_state(model, state, z, pix, cosmo, survey, em_catalog)
+    lp = eval_redshift_prior_with_state(
+        model, state, z, pix, cosmo, survey, em_catalog, catalog_sky_weighting
+    )
     return jnp.reshape(lp, (1, -1))
 
 

@@ -1043,3 +1043,70 @@ def test_marked_field_observed_mass_is_weight_scale_invariant():
         # The budget is a COUNT budget: 7 observed galaxies, not ~1e9.
         assert S_obs < 100.0
 
+def test_member_diagnostic_follows_the_weighting_convention():
+    """``eval_redshift_prior_members_with_state`` must normalize the way the
+    likelihood does.
+
+    The likelihood's member path selects ``log_Z_global_members`` under field
+    (``_factored_member_marginalization``); the diagnostic used to divide by the
+    per-pixel ``log_Z_members`` unconditionally, so a field-mode run's Bayesian
+    prior diagnostic reported a per-pixel-normalized prior the run never
+    evaluated -- with the relative angular host weighting divided away.
+    """
+    from darksirens.redshift.prior import (
+        eval_redshift_prior_members_with_state,
+        eval_redshift_prior_with_state,
+        prepare_redshift_prior_state,
+    )
+
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    cosmo, survey = _cosmo(), _survey()
+    logq_m = _logq_members_table(m=1)
+    cat = _catalog(zgals, dzgals, wgals, ngals, logq=logq_m[0])
+    occupied = np.asarray([1, 3, 4, 7])
+    qm_occ, qm_empty = build_field_lss_q_member_inputs(logq_m, occupied, 12)
+    cat = cat._replace(
+        field_lss_q_members=qm_occ, field_lss_q_empty_sum_members=qm_empty,
+        lss_completion_logq_members=jnp.asarray(logq_m),
+    )
+    pix = jnp.full(NG, 3, jnp.int32)
+
+    for mode in ("conditional", "field"):
+        state = prepare_redshift_prior_state(
+            "dark_sirens", cosmo, survey, cat, catalog_sky_weighting=mode
+        )
+        # M = 1: the single member IS the deterministic table, so the member
+        # diagnostic must reproduce the scalar evaluator in BOTH conventions.
+        lpm = np.asarray(eval_redshift_prior_members_with_state(
+            "dark_sirens", state, zgrid, pix, cosmo, survey, cat,
+            catalog_sky_weighting=mode,
+        ))
+        lp = np.asarray(eval_redshift_prior_with_state(
+            "dark_sirens", state, zgrid, pix, cosmo, survey, cat,
+            catalog_sky_weighting=mode,
+        ))
+        assert lpm.shape == (1, NG)
+        np.testing.assert_allclose(lpm[0], lp, rtol=1e-10)
+
+    # The two conventions are genuinely different curves (the field normalizer
+    # keeps the pixel's relative angular host weight).
+    state_f = prepare_redshift_prior_state(
+        "dark_sirens", cosmo, survey, cat, catalog_sky_weighting="field"
+    )
+    lpm_f = np.asarray(eval_redshift_prior_members_with_state(
+        "dark_sirens", state_f, zgrid, pix, cosmo, survey, cat,
+        catalog_sky_weighting="field",
+    ))
+    lpm_c = np.asarray(eval_redshift_prior_members_with_state(
+        "dark_sirens", state_f, zgrid, pix, cosmo, survey, cat,
+        catalog_sky_weighting="conditional",
+    ))
+    assert not np.allclose(lpm_f, lpm_c)
+
+    # A field request on a conditional state has no per-member global normalizer.
+    state_c = prepare_redshift_prior_state("dark_sirens", cosmo, survey, cat)
+    with pytest.raises(ValueError, match="log_Z_global_members"):
+        eval_redshift_prior_members_with_state(
+            "dark_sirens", state_c, zgrid, pix, cosmo, survey, cat,
+            catalog_sky_weighting="field",
+        )
