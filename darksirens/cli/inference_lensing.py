@@ -196,6 +196,8 @@ from darksirens.lensing.marginal_diagnostics import (
     compute_marginalized_partition_diagnostics,
     compute_componentwise_factorized_partition_diagnostics,
     candidate_time_mark_suspicion,
+    resolve_sis_time_mark_impl,
+    SIS_TIME_MARK_SHARPNESS,
     sis_time_mark_support,
     sis_time_mark_support_message,
 )
@@ -251,8 +253,9 @@ def _pair_tag_log_probs_from_options(opts, lensed):
     missing = []
     fields = {}
     for name in model.required_fields:
-        attr = "delta_t_obs" if name in ("delta_t_obs", "true_delta_t") else name
-        arr = np.asarray(getattr(lensed, attr))
+        # required_fields is the single source of truth for the field name; the
+        # true_delta_t alias is resolved by the loader, not here.
+        arr = np.asarray(getattr(lensed, name))
         if arr.size == 0 or np.all(~np.isfinite(arr)):
             missing.append(name)
         fields[name] = arr
@@ -2027,7 +2030,9 @@ def _print_diagnostics_summary(diagnostics):
     _end()
 
 
-_TIME_DELTA_SHARPNESS = 0.02  # max(sigma_dt)/T0 below this -> delta collapse
+# max(sigma_dt)/T0 below this -> delta collapse (shared with the SIS-support
+# diagnostic, which resolves the same rule).
+_TIME_DELTA_SHARPNESS = SIS_TIME_MARK_SHARPNESS
 
 
 def _resolve_pair_marks(opts, inp):
@@ -2063,10 +2068,10 @@ def _resolve_pair_marks(opts, inp):
         )
     if sigmas.size == 0:
         return PAIR_MARKS_TIME
-    T0 = _sl_T0_seconds(opts)
+    # Same auto rule the SIS-support diagnostic resolves the mark with.
     return (
         PAIR_MARKS_TIME_DELTA
-        if float(np.max(sigmas)) / T0 < _TIME_DELTA_SHARPNESS
+        if resolve_sis_time_mark_impl(impl, sigmas, _sl_T0_seconds(opts)) == "delta"
         else PAIR_MARKS_TIME
     )
 
@@ -2088,24 +2093,45 @@ def _require_time_window(opts, inp):
 def _require_time_marks_in_sis_support(opts, inp):
     """Refuse to build a likelihood whose every time-marked pair is -inf.
 
-    ``y* = |dt| / T0`` must land inside the SIS support (0, 1). If every
-    candidate pair has ``y* >= 1``, the pair likelihood is exactly -inf for all
-    of them: fixed-partition runs cannot initialise live points, and
-    ``marginalize_exact`` runs report "no lensing" with certainty because the
-    true pairing carries zero weight at every parameter value. Preflight raises
-    the same error; this guard also covers runs that skip preflight.
+    ``y* = |dt| / T0`` must land inside the SIS support (0, 1), but the mark's
+    own width decides whether an out-of-support delay is actually annihilated:
+    the delta-collapse mark masks every node only once
+    ``y* - u_max sigma_dt/T0 >= 1``, and the quadrature mark never masks at all.
+    Only the annihilated case is fatal (fixed-partition runs cannot initialise
+    live points, and ``marginalize_exact`` runs report "no lensing" with
+    certainty because the true pairing carries zero weight at every parameter
+    value); the rest is a warning. Preflight raises the same error; this guard
+    also covers runs that skip preflight.
     """
     if getattr(opts, "pair_marks", "none") != "time":
         return
     dt_values = list(np.asarray(inp.get("pair_time_delta_t_obs", []), dtype=float).ravel())
+    sigma_values = list(np.asarray(inp.get("pair_time_sigma", []), dtype=float).ravel())
     if not dt_values:
-        dt_values = [
-            p.delta_t_obs
+        marked = [
+            p
             for p in (inp.get("candidate_pairs") or [])
             if getattr(p, "delta_t_obs", None) is not None
         ]
-    support = sis_time_mark_support(dt_values, _sl_T0_seconds(opts))
-    if support["n_marked"] and support["all_out_of_support"]:
+        dt_values = [p.delta_t_obs for p in marked]
+        sigma_values = [getattr(p, "sigma_delta_t", None) for p in marked]
+    T0 = _sl_T0_seconds(opts)
+    # Per-delay widths when they line up, otherwise the widest known one (the
+    # lenient direction: a false fatal is worse than a missed one here).
+    sigmas = (
+        sigma_values
+        if len(sigma_values) == len(dt_values)
+        else (max((s for s in sigma_values if s is not None), default=None))
+    )
+    support = sis_time_mark_support(
+        dt_values,
+        T0,
+        sigma_delta_t_seconds=sigmas,
+        mark_impl=resolve_sis_time_mark_impl(
+            getattr(opts, "pair_time_mark_impl", "auto"), sigma_values, T0
+        ),
+    )
+    if support["n_marked"] and support["all_annihilated"]:
         raise SystemExit(sis_time_mark_support_message(support))
     if support["n_out_of_support"]:
         _warn(sis_time_mark_support_message(support))

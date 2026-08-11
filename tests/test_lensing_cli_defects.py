@@ -226,6 +226,75 @@ def test_likelihood_construction_refuses_all_out_of_support_time_marks():
     cli._require_time_marks_in_sis_support(SimpleNamespace(pair_marks="none"), inp)
 
 
+def test_sis_support_verdict_credits_the_mark_width_and_implementation():
+    """y* >= 1 alone does NOT annihilate a pair: the delta-collapse mark
+    integrates over its own Gaussian width (nodes out to u_max sigma_dt/T0) and
+    the quadrature mark never masks at all, so the fatal verdict must be the
+    width-aware one."""
+    from darksirens.lensing.marginal_diagnostics import (
+        SIS_TIME_COLLAPSE_U_MAX,
+        resolve_sis_time_mark_impl,
+        sis_time_mark_support,
+    )
+
+    T0 = 5.36e6
+    sigma = 0.01 * T0  # sharp -> delta-collapse implementation
+    assert resolve_sis_time_mark_impl("auto", [sigma], T0) == "delta"
+    assert SIS_TIME_COLLAPSE_U_MAX == pytest.approx(4.1445, abs=1e-3)
+
+    # Just past the edge: part of the mark measure still lands in (0, 1).
+    near = sis_time_mark_support(
+        [1.02 * T0], T0, sigma_delta_t_seconds=sigma, mark_impl="delta"
+    )
+    assert near["all_out_of_support"] and not near["all_annihilated"]
+    assert near["n_annihilated"] == 0
+
+    # Far enough that every collapse node is masked: still fatal.
+    far = sis_time_mark_support(
+        [1.10 * T0], T0, sigma_delta_t_seconds=sigma, mark_impl="delta"
+    )
+    assert far["all_annihilated"] and far["n_annihilated"] == 1
+
+    # The quadrature mark is finite everywhere, so nothing is annihilated.
+    quad = sis_time_mark_support(
+        [6.0 * T0], T0, sigma_delta_t_seconds=0.1 * T0, mark_impl="quadrature"
+    )
+    assert quad["n_out_of_support"] == 1 and not quad["all_annihilated"]
+
+    # Unknown widths keep the strict width-free verdict.
+    strict = sis_time_mark_support([1.02 * T0], T0)
+    assert strict["all_annihilated"] and resolve_sis_time_mark_impl("auto", [], T0) is None
+
+
+def test_sis_support_guard_does_not_abort_a_finite_near_boundary_likelihood(capsys):
+    """The guard used to kill runs whose pair likelihood was merely suppressed."""
+    import darksirens.cli.inference_lensing as cli
+
+    T0 = 5.36e6
+    opts = SimpleNamespace(pair_marks="time", sl_T0_sec=T0, pair_time_mark_impl="auto")
+    near = {
+        "pair_time_delta_t_obs": np.array([1.02 * T0]),
+        "pair_time_sigma": np.array([0.01 * T0]),
+    }
+    cli._require_time_marks_in_sis_support(opts, near)
+    assert "outside the SIS support" in capsys.readouterr().out
+
+    # Deep out of support with the same sharp mark is still fatal.
+    far = {
+        "pair_time_delta_t_obs": np.array([1.5 * T0]),
+        "pair_time_sigma": np.array([0.01 * T0]),
+    }
+    with pytest.raises(SystemExit, match="outside the SIS support"):
+        cli._require_time_marks_in_sis_support(opts, far)
+
+    # With the quadrature implementation the mark is finite: warn, do not abort.
+    quad = SimpleNamespace(
+        pair_marks="time", sl_T0_sec=T0, pair_time_mark_impl="quadrature"
+    )
+    cli._require_time_marks_in_sis_support(quad, far)
+    assert "outside the SIS support" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # Ndraw_sources / n_draw_sources
 # ---------------------------------------------------------------------------

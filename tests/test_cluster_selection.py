@@ -1867,6 +1867,54 @@ def test_preflight_catches_missing_snr_time_sky_fields(tmp_path):
     assert any("log_sky_overlap" in e for e in report["errors"])
 
 
+def test_preflight_accepts_a_true_delta_t_only_campaign(tmp_path):
+    """The loader resolves the delay as "delta_t_obs if present else
+    true_delta_t", so a campaign storing only true_delta_t scores fine;
+    preflight used to hard-fail it. The finiteness check must follow the
+    loader's preference order, not pick whichever dataset looks better."""
+    from argparse import Namespace
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    camp = _synth_lensed_injection_campaign(n_sources=4, seed=225)
+    n = camp["n_draw_sources"]
+    base = {k: v for k, v in camp.items() if k not in ("n_both_detected",)}
+    snr = dict(
+        snr_image0=np.linspace(8, 12, n),
+        snr_image1=np.linspace(7, 11, n),
+        log_sky_overlap=np.linspace(-2, 0, n),
+    )
+    inj_path = tmp_path / "inj_true_dt.h5"
+    save_lensed_injections(
+        path=str(inj_path), **base, **snr, true_delta_t=np.linspace(10, 20, n)
+    )
+
+    def _report(path):
+        return run_lensing_preflight(Namespace(
+            cluster_mode="j2", partition_mode="marginalize_exact", pair_marks="none",
+            edge_mark_prior_keys="", edge_mark_likelihood_keys="", gw_path=None,
+            gwselection_path=str(path), lensed_injections_path=str(path),
+            candidate_pairs_path=None, observed_catalog_path=None,
+            pair_tag_model="snr_time", pair_tag_constant=1.0,
+            pair_tag_perturb_logit=0.0,
+        ))
+
+    assert not any("delta_t_obs" in e for e in _report(inj_path)["errors"])
+    # ... and the run really does score it, so the acceptance is not vacuous.
+    inj = load_lensed_injections(str(inj_path))
+    assert np.all(np.isfinite(np.asarray(inj.delta_t_obs)))
+
+    # An all-NaN delta_t_obs still fails even next to a finite true_delta_t:
+    # the loader prefers delta_t_obs and the run exits on it.
+    nan_path = tmp_path / "inj_nan_dt.h5"
+    save_lensed_injections(
+        path=str(nan_path), **base, **snr,
+        delta_t_obs=np.full(n, np.nan), true_delta_t=np.linspace(10, 20, n),
+    )
+    assert any(
+        "requires finite values in delta_t_obs" in e for e in _report(nan_path)["errors"]
+    )
+
+
 def test_selection_correction_changes_with_pair_tag_model():
     camp = _synth_lensed_injection_campaign(n_sources=60, seed=26)
     inj1 = make_lensed_injection_set(**{k: v for k, v in camp.items() if k not in ("n_both_detected",)})

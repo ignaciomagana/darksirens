@@ -65,21 +65,76 @@ def candidate_time_mark_suspicion(candidate_pairs: Iterable[CandidatePair]) -> d
         "candidate_time_marks_warning": warning,
     }
 
-def sis_time_mark_support(delta_t_seconds: Iterable[float], T0_seconds: float) -> dict:
+# Reach of the delta-collapse mark's local Gauss-Hermite grid, in units of
+# sigma_delta_t: the outermost node of the sqrt(2)-rescaled physicists' rule at
+# cluster_likelihood._TIME_COLLAPSE_HERMITE_NODES nodes.  Keep the node count in
+# sync with that module.
+_TIME_COLLAPSE_HERMITE_NODES = 8
+SIS_TIME_COLLAPSE_U_MAX = float(
+    np.sqrt(2.0)
+    * np.polynomial.hermite.hermgauss(_TIME_COLLAPSE_HERMITE_NODES)[0][-1]
+)
+# max(sigma_delta_t)/T0 below this resolves to the delta-collapse mark; mirrors
+# cli/inference_lensing._TIME_DELTA_SHARPNESS.
+SIS_TIME_MARK_SHARPNESS = 0.02
+
+
+def resolve_sis_time_mark_impl(
+    impl: str | None, sigma_delta_t_seconds: Iterable[float] | None, T0_seconds: float
+) -> str | None:
+    """Resolve ``--pair_time_mark_impl`` to ``"delta"``/``"quadrature"``.
+
+    Returns ``None`` when the ``auto`` rule cannot be applied because no finite
+    positive mark width is known; callers then have no basis for crediting the
+    mark's width and keep the strict (width-free) support verdict.
+    """
+    impl = str(impl or "auto")
+    if impl in ("delta", "quadrature"):
+        return impl
+    sig = np.asarray(
+        [] if sigma_delta_t_seconds is None else list(sigma_delta_t_seconds),
+        dtype=float,
+    )
+    sig = sig[np.isfinite(sig) & (sig > 0.0)]
+    T0 = float(T0_seconds)
+    if sig.size == 0 or not np.isfinite(T0) or T0 <= 0.0:
+        return None
+    return "delta" if float(np.max(sig)) / T0 < SIS_TIME_MARK_SHARPNESS else "quadrature"
+
+
+def sis_time_mark_support(
+    delta_t_seconds: Iterable[float],
+    T0_seconds: float,
+    *,
+    sigma_delta_t_seconds: float | Iterable[float] | None = None,
+    mark_impl: str | None = None,
+) -> dict:
     """Where the observed delays sit relative to the SIS support y ∈ (0, 1).
 
     The time mark converts an observed delay to an impact parameter as
-    ``y* = |Δt| / T0``, and the SIS support is ``y ∈ (0, 1)``. A pair with
-    ``y* >= 1`` has EVERY collapse node masked, so its pair log-likelihood is
-    exactly -inf: in fixed-partition mode the master log-likelihood is -inf
-    everywhere (the sampler cannot initialise), and in ``marginalize_exact``
-    the pairing silently receives zero posterior weight at every parameter
-    value, i.e. the analysis reports "no lensing" by construction.
+    ``y* = |Δt| / T0``, and the SIS support is ``y ∈ (0, 1)``.  A pair with
+    ``y* >= 1`` sits past the support edge, but that alone does NOT annihilate
+    it: the delta-collapse mark integrates over the mark's own Gaussian measure
+    on the grid ``y_k = Δt/T0 + (σ_Δt/T0) u_k``, so every node is masked (pair
+    log-likelihood exactly -inf) only once
+    ``y* - SIS_TIME_COLLAPSE_U_MAX σ_Δt/T0 >= 1``; and the quadrature mark
+    (``mark_impl="quadrature"``) is a plain Gaussian in ``Δt - T0 y`` that never
+    masks, merely suppresses.  ``all_annihilated`` is therefore the condition
+    callers must treat as fatal -- an exactly -inf master log-likelihood in
+    fixed-partition mode (the sampler cannot initialise), or zero posterior
+    weight for the pairing at every parameter value in ``marginalize_exact``,
+    i.e. "no lensing" by construction.  ``all_out_of_support`` is the weaker
+    ``y* >= 1`` verdict, worth a warning.
+
+    ``sigma_delta_t_seconds`` may be a scalar or a per-delay sequence aligned
+    with ``delta_t_seconds``; widths that are absent or not finite-positive get
+    no credit (the width-free ``y* >= 1`` criterion).
 
     Returns
     -------
     dict with ``n_marked``, ``n_nonfinite_delays``, ``n_out_of_support``,
-    ``all_out_of_support``, ``max_y_star``, ``min_y_star`` and ``T0_seconds``.
+    ``all_out_of_support``, ``n_annihilated``, ``all_annihilated``,
+    ``max_y_star``, ``min_y_star``, ``mark_impl``, ``u_max`` and ``T0_seconds``.
 
     ``n_marked`` counts the FINITE delays the support verdict is computed from.
     Non-finite delays cannot be placed relative to the support, so they are
@@ -87,45 +142,96 @@ def sis_time_mark_support(delta_t_seconds: Iterable[float], T0_seconds: float) -
     ``n_nonfinite_delays`` rather than dropped invisibly -- a NaN delay is a
     broken mark, not an in-support one.
     """
-    provided = [abs(float(x)) for x in delta_t_seconds if x is not None]
-    dt_all = np.asarray(provided, dtype=float)
+    delays = list(delta_t_seconds)
+    if sigma_delta_t_seconds is None:
+        sigmas: list = [None] * len(delays)
+    elif np.ndim(sigma_delta_t_seconds) == 0:
+        sigmas = [sigma_delta_t_seconds] * len(delays)
+    else:
+        sigmas = list(sigma_delta_t_seconds)
+        if len(sigmas) != len(delays):
+            raise ValueError(
+                "sigma_delta_t_seconds must be a scalar or aligned with delta_t_seconds"
+            )
+    provided = [
+        (abs(float(dt)), float(sig) if sig is not None else 0.0)
+        for dt, sig in zip(delays, sigmas)
+        if dt is not None
+    ]
+    dt_all = np.asarray([p[0] for p in provided], dtype=float)
+    sig_all = np.asarray([p[1] for p in provided], dtype=float)
     finite = np.isfinite(dt_all)
     n_nonfinite = int(dt_all.size - int(np.sum(finite)))
     dt = dt_all[finite]
+    sig = np.where(np.isfinite(sig_all) & (sig_all > 0.0), sig_all, 0.0)[finite]
     T0 = float(T0_seconds)
+    u_max = 0.0 if mark_impl == "quadrature" else SIS_TIME_COLLAPSE_U_MAX
     if dt.size == 0 or not np.isfinite(T0) or T0 <= 0.0:
         return {
             "n_marked": int(dt.size),
             "n_nonfinite_delays": n_nonfinite,
             "n_out_of_support": 0,
             "all_out_of_support": False,
+            "n_annihilated": 0,
+            "all_annihilated": False,
             "max_y_star": None,
             "min_y_star": None,
+            "mark_impl": mark_impl,
+            "u_max": u_max,
             "T0_seconds": T0,
         }
     y_star = dt / T0
     n_out = int(np.sum(y_star >= 1.0))
+    # The quadrature mark is finite everywhere, so nothing is annihilated.
+    n_annihilated = (
+        0
+        if mark_impl == "quadrature"
+        else int(np.sum(y_star - u_max * sig / T0 >= 1.0))
+    )
     return {
         "n_marked": int(dt.size),
         "n_nonfinite_delays": n_nonfinite,
         "n_out_of_support": n_out,
         "all_out_of_support": bool(n_out == dt.size),
+        "n_annihilated": n_annihilated,
+        "all_annihilated": bool(n_annihilated == dt.size),
         "max_y_star": float(np.max(y_star)),
         "min_y_star": float(np.min(y_star)),
+        "mark_impl": mark_impl,
+        "u_max": u_max,
         "T0_seconds": T0,
     }
 
 
 def sis_time_mark_support_message(support: dict) -> str:
     """Human-readable diagnosis of an out-of-support time-mark set."""
+    n_annihilated = int(support.get("n_annihilated", support["n_out_of_support"]))
+    u_max = float(support.get("u_max", 0.0))
+    if support.get("mark_impl") == "quadrature":
+        verdict = (
+            "The quadrature time mark stays finite there, but its Gaussian in "
+            "dt - T0 y suppresses those pairings by many nats, so the pairing is "
+            "effectively excluded. "
+        )
+    elif n_annihilated:
+        verdict = (
+            f"{n_annihilated}/{support['n_marked']} pairs have their whole mark "
+            f"measure outside the support (y* - {u_max:.4g} sigma_dt/T0 >= 1), "
+            "i.e. an exactly -inf time-marked pair likelihood, so the pairing is "
+            "excluded by construction. "
+        )
+    else:
+        verdict = (
+            f"Their mark measure still reaches inside (y* - {u_max:.4g} "
+            "sigma_dt/T0 < 1), so the pair likelihood is finite but suppressed. "
+        )
     return (
         "time-marked candidate pairs fall outside the SIS support y in (0, 1): "
         f"{support['n_out_of_support']}/{support['n_marked']} pairs have "
         f"y* = |dt|/T0 >= 1 (max y* = {support['max_y_star']:.4g}, "
         f"min y* = {support['min_y_star']:.4g}, T0 = {support['T0_seconds']:.4g} s "
-        f"= {support['T0_seconds'] / 86400.0:.4g} d). Those pairs get an exactly "
-        "-inf time-marked pair likelihood, so the pairing is excluded by "
-        "construction. Raise --sl_T0_sec to the time-delay scale of the lens "
+        f"= {support['T0_seconds'] / 86400.0:.4g} d). " + verdict +
+        "Raise --sl_T0_sec to the time-delay scale of the lens "
         "population you are modelling (T0 = 2(1+z_L) theta_E^2 D_L D_S/(c D_LS); "
         "5.36e6 s at z_L=0.5, z_s=1, sigma_v=200 km/s), or drop --pair_marks time."
     )
@@ -599,6 +705,24 @@ def compute_marginalized_partition_diagnostics(
     if log_z_partition_prior is None:
         log_z_partition_prior = float(logsumexp(log_prior))
     log_norm = float(logsumexp(log_prior + logL))
+    if not np.isfinite(log_norm):
+        # Every partition (including the all-singleton baseline) is annihilated
+        # at this parameter point -- typically the selection reliability guard
+        # clipping the correction to -inf. -inf - (-inf) would hand back NaN
+        # posteriors, NaN expected_n_pairs and map_partition_index = 0 as though
+        # state 0 had been selected, and those NaNs get persisted verbatim to
+        # diagnostics.json/hdf5 and results.hdf5. Raise instead, tagged
+        # NON-FINITE so _diagnostics_at_guard_clear_point retries at another
+        # evaluation point exactly as it does for the factorized branch.
+        raise RuntimeError(
+            "exact partition marginalization: every partition log-likelihood is "
+            f"NON-FINITE at the evaluation point (log_norm={log_norm!r}, "
+            f"n_partitions={len(states)}) — typically the selection reliability "
+            "guard firing at the prior midpoint (the Neff <= 5 N_obs floor or "
+            "the variance criterion Neff <= N_obs^2/max_likelihood_variance). "
+            "The partition posterior is undefined there; increase the injection "
+            "campaign or relax --max_likelihood_variance for exploratory runs."
+        )
     log_post = log_prior + logL - log_norm
     post = np.exp(log_post)
     map_idx = int(np.argmax(log_post))

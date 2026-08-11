@@ -200,6 +200,42 @@ def test_map_partition_uses_highest_posterior_log_weight():
     assert diag["map_partition"]["pair_indices"] == [[0, 1], [2, 3]]
 
 
+def test_fully_annihilated_partition_set_raises_instead_of_nan_posteriors():
+    """-inf - (-inf) used to hand back all-NaN partition posteriors, NaN
+    expected_n_pairs and map_partition_index = 0 as though state 0 had been
+    selected, and those NaNs were persisted to diagnostics/results files."""
+    candidates = [CandidatePair(0, 1, 0.0)]
+    states = enumerate_compatible_partitions(2, candidates)
+    for loglike in (lambda _s: -np.inf, lambda _s: np.nan):
+        with pytest.raises(RuntimeError, match="NON-FINITE") as excinfo:
+            compute_marginalized_partition_diagnostics(states, candidates, loglike)
+
+    # The tag is the contract the CLI's guard-clear-point retry keys on, so
+    # global-mode diagnostics now retry another evaluation point (the
+    # factorized branch already did) instead of writing NaNs.
+    from darksirens.cli.inference_lensing import _diagnostics_at_guard_clear_point
+
+    calls = []
+
+    def _fn(point):
+        calls.append(np.asarray(point))
+        if len(calls) == 1:
+            raise excinfo.value
+        return {"logL_total": 1.0}
+
+    diag, _ = _diagnostics_at_guard_clear_point(
+        _fn, np.full(2, 0.5), np.zeros(2), np.ones(2), seed=5
+    )
+    assert diag == {"logL_total": 1.0} and len(calls) == 2
+
+    # A single annihilated partition among finite ones is still fine.
+    ok = compute_marginalized_partition_diagnostics(
+        states, candidates, lambda s: -np.inf if s.n_pairs else 0.0
+    )
+    assert ok["partition_posterior_probability"][0] == pytest.approx(1.0)
+    assert ok["expected_n_pairs"] == pytest.approx(0.0)
+
+
 def test_expected_n_pairs_equals_sum_of_candidate_pair_probabilities():
     candidates = [CandidatePair(0, 1, 0.2), CandidatePair(1, 2, -0.1)]
     states = enumerate_compatible_partitions(3, candidates)
@@ -420,6 +456,87 @@ def test_candidate_pairs_marks_suffice_for_marginalized_preflight(tmp_path):
     report = run_lensing_preflight(opts)
     assert report["ok"], report
 
+
+
+def test_fixed_time_marks_may_live_in_candidate_pairs(tmp_path):
+    """unified + partition_mode=fixed + pair_marks=time with the marks in
+    candidate_pairs.json is a supported runtime path (the mark_by_edge fallback),
+    but preflight hard-failed it with "missing pair_pe_path" and never validated
+    the marks the run actually consumes."""
+    from types import SimpleNamespace
+    import json
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    gw = tmp_path / "gw.h5"
+    sel = tmp_path / "sel.h5"
+    linj = tmp_path / "linj.h5"
+    part = tmp_path / "partition.json"
+    cand = tmp_path / "candidate_pairs.json"
+    obs = tmp_path / "observed_catalog.json"
+    _minimal_gw(gw)
+    _minimal_selection(sel)
+    _minimal_lensed(linj)
+    _partition(part)
+    obs.write_text(
+        '{"format_version":"observed-lensing-catalog-1.0","event_indexing":"global",'
+        '"n_events":2,"events":[{"event_index":0,"event_id":"e0"},'
+        '{"event_index":1,"event_id":"e1"}]}'
+    )
+
+    def _write_cand(marks):
+        cand.write_text(
+            json.dumps(
+                {
+                    "n_events": 2,
+                    "candidate_pairs": [
+                        {"i": 0, "j": 1, "log_prior_odds": 0.0, "marks": marks}
+                    ],
+                }
+            )
+        )
+
+    _write_cand({"delta_t_obs": 12345.6, "sigma_delta_t": 3600.0})
+    opts = SimpleNamespace(
+        gw_path=str(gw),
+        gwselection_path=str(sel),
+        lensed_injections_path=str(linj),
+        partition_path=str(part),
+        candidate_pairs_path=str(cand),
+        observed_catalog_path=str(obs),
+        pair_pe_path=None,
+        pair_metadata_path=None,
+        cluster_mode="j2",
+        partition_mode="fixed",
+        pair_marks="time",
+        pair_time_sigma_sec=None,
+        max_exact_partitions=10000,
+        wl_selection="standard",
+        wl_backend="lognormal",
+        fix_lens_rate=True,
+        sl_tau_A=5e-4,
+        sl_tau_n=3.0,
+        lens_prior_overrides=None,
+    )
+    report = run_lensing_preflight(opts)
+    assert report["ok"], report
+    assert report["summary"]["fixed_pair_marks_from_candidate_pairs"] is True
+    assert report["summary"]["sis_time_mark_support"]["n_marked"] == 1
+
+    # The marks the fixed-mode run consumes are now checked in preflight too:
+    # a partition edge outside the candidate graph is a precise error, not
+    # "missing pair_pe_path".
+    _write_cand({})
+    report = run_lensing_preflight(opts)
+    assert not report["ok"]
+    assert any(
+        "carry no candidate_pairs.json marks" in e for e in report["errors"]
+    ), report["errors"]
+
+    # Placeholder-looking marks warn here rather than only at runtime.
+    _write_cand({"delta_t_obs": 1.0, "sigma_delta_t": 1.0})
+    report = run_lensing_preflight(opts)
+    assert report["ok"], report
+    assert any("placeholder" in w for w in report["warnings"])
 
 
 def test_componentwise_preflight_warns_on_total_cap_but_global_fails(tmp_path):
@@ -1010,10 +1127,17 @@ def test_observed_builder_records_folded_mark_keys(tmp_path):
         max_total_edges=2,
         seed=6,
     )
-    # Mass-distance score is always folded into log_prior_odds by the builder.
-    assert data["folded_mark_keys"] == ["log_mass_distance_score"]
+    # Mass-distance score is always folded into log_prior_odds by the builder;
+    # the time-coincidence tilt is folded only because this build exports no
+    # delta_t_obs mark for the time-mark likelihood to reuse.
+    assert data["folded_mark_keys"] == [
+        "log_mass_distance_score",
+        "log_time_coincidence",
+    ]
     with pytest.raises(ValueError, match="double-count"):
         prepare_candidate_pairs_for_partitioning(data, "log_mass_distance_score")
+    with pytest.raises(ValueError, match="double-count"):
+        prepare_candidate_pairs_for_partitioning(data, "log_time_coincidence")
     # Sky overlap is folded only when it carries nonzero weight in the score.
     data_weighted = build_candidate_pairs(
         gw_path=gw,
@@ -1026,12 +1150,143 @@ def test_observed_builder_records_folded_mark_keys(tmp_path):
     assert set(data_weighted["folded_mark_keys"]) == {
         "log_mass_distance_score",
         "log_sky_overlap",
+        "log_time_coincidence",
     }
     with pytest.raises(ValueError, match="double-count"):
         prepare_candidate_pairs_for_partitioning(data_weighted, "log_sky_overlap")
     # The default study configuration (log_sky_overlap requested, weight 0)
     # must keep working.
     prepare_candidate_pairs_for_partitioning(data, "log_sky_overlap")
+
+
+def _uniform_times_catalog(path, times, sigma_sec=3600.0):
+    import json
+
+    events = [
+        dict(
+            event_index=k, event_id=f"ev{k:03d}", kind="singleton_or_image",
+            gps_time=t, truth_source_id=k, truth_image_index=None,
+            truth_is_lensed_image=False,
+            ra_mean=0.1 * k, dec_mean=0.05 * k, sky_sigma_rad=0.01,
+            ra_true=0.1 * k, dec_true=0.05 * k,
+        )
+        for k, t in enumerate(times)
+    ]
+    path.write_text(
+        json.dumps(
+            dict(
+                format_version="observed-lensing-catalog-1.0",
+                event_indexing="global",
+                observation_times="uniform",
+                t_obs_days=365.25,
+                time_delay_sigma_sec=sigma_sec,
+                n_events=len(times),
+                events=events,
+            )
+        )
+    )
+    return path
+
+
+def test_builder_drops_folded_time_score_when_time_marks_are_exported(tmp_path):
+    """The observed |Delta t| may enter log_prior_odds OR the time-mark
+    likelihood, never both: the coincidence tilt is folded only when the file
+    exports no delta_t_obs mark, and the tilt is declared in folded_mark_keys
+    so preflight can act on it."""
+    from scripts.mock_lensing.build_candidate_pairs_from_observed import (
+        build_candidate_pairs,
+    )
+
+    gw = _observed_gw(tmp_path / "gw.h5", n_events=3)
+    base = 1234567890.0
+    cat = _uniform_times_catalog(
+        tmp_path / "observed_catalog.json", [base, base + 4321.0, base + 98765.0]
+    )
+    common = dict(
+        gw_path=gw, observed_catalog_path=cat,
+        max_edges_per_event=2, max_total_edges=10, seed=7,
+    )
+    marked = build_candidate_pairs(include_time_marks=True, **common)
+    unmarked = build_candidate_pairs(include_time_marks=False, **common)
+
+    assert "log_time_coincidence" not in marked["folded_mark_keys"]
+    assert "log_time_coincidence" in unmarked["folded_mark_keys"]
+    by_edge = {(e["i"], e["j"]): e for e in unmarked["pairs"]}
+    assert marked["pairs"] and len(by_edge) == len(marked["pairs"])
+    for edge in marked["pairs"]:
+        marks = edge["marks"]
+        assert "delta_t_obs" in marks and "log_time_coincidence" in marks
+        assert marks["log_time_coincidence"] < 0.0  # nonzero tilt, so it matters
+        folded = by_edge[(edge["i"], edge["j"])]["log_prior_odds"]
+        assert folded - edge["log_prior_odds"] == pytest.approx(
+            0.25 * marks["log_time_coincidence"], abs=1e-9
+        )
+
+
+def test_preflight_flags_time_double_count_from_folded_or_requested_time_marks(tmp_path):
+    """The folded-mark guard only compares folded keys against the requested
+    prior keys, so a time term baked into log_prior_odds was invisible to it
+    while pair_marks=time scored the same delay again."""
+    import json
+    from types import SimpleNamespace
+
+    from darksirens.lensing.preflight import _check_candidates
+
+    data = {
+        "format_version": "candidate-pairs-1.0",
+        "n_events": 2,
+        "candidate_pairs": [
+            {
+                "i": 0,
+                "j": 1,
+                "log_prior_odds": -3.0,
+                "marks": {
+                    "delta_t_obs": 12345.0,
+                    "sigma_delta_t": 3600.0,
+                    "log_mass_distance_score": -1.0,
+                    "log_time_coincidence": -0.5,
+                },
+            }
+        ],
+        "folded_mark_keys": ["log_mass_distance_score", "log_time_coincidence"],
+    }
+    path = tmp_path / "candidate_pairs.json"
+    path.write_text(json.dumps(data))
+    opts = SimpleNamespace(
+        edge_mark_prior_keys="",
+        edge_mark_likelihood_keys="",
+        pair_marks="time",
+    )
+    errors: list = []
+    _check_candidates(str(path), 2, opts, errors, [], {})
+    assert any("double-counts the arrival-time separation" in e for e in errors)
+
+    # Without the folded time term the same file is fine.
+    data["folded_mark_keys"] = ["log_mass_distance_score"]
+    path.write_text(json.dumps(data))
+    errors_ok: list = []
+    _check_candidates(str(path), 2, opts, errors_ok, [], {})
+    assert not errors_ok
+
+    # ... unless the user requests the time-derived mark as a pairing prior.
+    opts_prior = SimpleNamespace(
+        edge_mark_prior_keys="log_time_coincidence",
+        edge_mark_likelihood_keys="",
+        pair_marks="time",
+    )
+    errors_prior: list = []
+    _check_candidates(str(path), 2, opts_prior, errors_prior, [], {})
+    assert any("double-counts the arrival-time separation" in e for e in errors_prior)
+
+    # Inert when the time-mark likelihood is off.
+    opts_off = SimpleNamespace(
+        edge_mark_prior_keys="log_time_coincidence",
+        edge_mark_likelihood_keys="",
+        pair_marks="none",
+    )
+    errors_off: list = []
+    _check_candidates(str(path), 2, opts_off, errors_off, [], {})
+    assert not errors_off
 
 
 def test_preflight_flags_folded_edge_mark_double_count(tmp_path):

@@ -898,6 +898,15 @@ an apparent-distance/magnification compatibility proxy, and optional effective
 spin consistency.  These observable scores determine `log_prior_odds`; truth is
 not consulted for inclusion or ranking.
 
+The GPS-time separation enters `log_prior_odds` as a coincidence tilt
+(`log_time_coincidence`) **only** when `--include_time_marks false`, i.e. when the
+file exports no `delta_t_obs` mark.  With time marks exported, the SIS time-mark
+likelihood scores the same `|Delta t|` through its coincidence odds, so folding
+the tilt into the prior as well would count the arrival-time separation twice;
+preflight rejects that combination.  Whatever the builder does fold is declared
+in the top-level `folded_mark_keys` list, and `--edge_mark_prior_keys` refuses to
+re-apply those marks.
+
 When `--include_truth_labels true` is used and truth fields exist in the
 simulated `observed_catalog.json`, each edge receives a validation-only `label`:
 `"true"` for two lensed images with the same `truth_source_id`, and `"wrong"`
