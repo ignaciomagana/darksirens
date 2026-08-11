@@ -381,13 +381,6 @@ def run_sampler(method, likelihood, prior_transform, labels,
         def tinyns_ptform(u):
             return jnp.asarray(prior_transform(jnp.asarray(u)))
 
-        # dynesty's call cap (--max_samples) doubles as tinyns' iteration
-        # cap; one nested-sampling iteration retires ~one live point, so the
-        # budget is comparable.  0/None means "run to the dlogz criterion".
-        maxiter = getattr(opts, "max_samples", None)
-        if maxiter is not None and maxiter <= 0:
-            maxiter = None
-
         config = build_tinyns_config(opts)
         sampler = NestedSampler(
             tinyns_loglike,
@@ -410,6 +403,28 @@ def run_sampler(method, likelihood, prior_transform, labels,
         # cannot silently swap the lineage either.
         run_key, resample_key = jax.random.split(jax.random.PRNGKey(config.seed))
         run_kwargs = tinyns_run_kwargs(config)
+
+        # --max_samples reaches tinyns as ``maxiter`` (ITERATIONS) and dynesty as
+        # ``maxcall`` (likelihood CALLS): tinyns exposes no call cap, and one
+        # rwalk iteration costs walks x max_active_chains evaluations (5 for the
+        # 'recommended' preset, 1280 for heavy_darksirens).  The two budgets are
+        # therefore NOT comparable, so print the resolved cap and its call
+        # equivalent rather than leaving the reader to infer it from the flag.
+        _maxiter = run_kwargs.get("maxiter")
+        if _maxiter is None:
+            print("[*] tinyns iteration cap: none (runs to the dlogz "
+                  "criterion)", flush=True)
+        else:
+            _max_active = (max(config.replacement_chain_schedule)
+                           if config.replacement_chain_schedule
+                           else int(config.replacement_chains))
+            print(
+                f"[*] tinyns iteration cap: maxiter={int(_maxiter):,} "
+                f"(--max_samples), i.e. up to ~{int(_maxiter) * int(config.walks) * _max_active:,} "
+                f"likelihood calls at walks={config.walks} x "
+                f"{_max_active} chain(s)",
+                flush=True,
+            )
 
         # Checkpoint/resume policy: the shared --checkpoint_interval / --resume
         # flags place a checkpoint in the run directory, while the legacy

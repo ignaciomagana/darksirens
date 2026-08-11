@@ -1451,7 +1451,13 @@ def build_parser():
     g.add_argument("--dlogz",        type=float, default=0.1)
     g.add_argument("--max_samples",  type=int,   default=1_000_000,
                    help="Max call/iteration budget for nested samplers "
-                        "(dynesty call cap, tinyns iteration cap); 0 = unlimited.")
+                        "(dynesty call cap, tinyns iteration cap); 0 = unlimited. "
+                        "The UNITS differ: tinyns has no call cap and one rwalk "
+                        "iteration costs walks x max_active_chains likelihood "
+                        "evaluations (5 for --tinyns_preset recommended, 1280 for "
+                        "heavy_darksirens), so the same number buys far more "
+                        "compute there -- the resolved cap and its call "
+                        "equivalent are printed at sampler start.")
     add_tinyns_arguments(g, bool_type=str_to_bool)
     g.add_argument("--nuts_warmup",  type=int,   default=500)
     g.add_argument("--nuts_samples", type=int,   default=1000)

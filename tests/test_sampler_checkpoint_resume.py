@@ -391,6 +391,24 @@ def test_tinyns_checkpoints_without_an_explicit_interval_and_resumes(tmp_path):
     assert niter is None or niter > 25
 
 
+def test_tinyns_prints_the_resolved_iteration_cap_and_call_equivalent(
+        tmp_path, capsys):
+    """--max_samples is dynesty's CALL cap but tinyns' ITERATION cap, and one
+    rwalk iteration costs walks x max_active_chains evaluations, so the same
+    number buys a different budget per sampler.  The resolved cap and its call
+    equivalent must be in the log (the old code left a dead `maxiter` local and
+    a comment claiming the two budgets were comparable)."""
+    pytest.importorskip("tinyns")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    opts = _tinyns_opts(tmp_path, run_dir, max_samples=20)
+    run_sampler("tinyns", _loglike, _ptform, LABELS, LOWER, UPPER, opts)
+    out = capsys.readouterr().out
+    assert "tinyns iteration cap: maxiter=20 (--max_samples)" in out
+    # recommended preset: walks=5, replacement_chains=1 -> 100 calls.
+    assert "up to ~100 likelihood calls" in out
+
+
 def test_tinyns_run_and_resample_keys_are_independent_streams(tmp_path):
     """P2-20: the run key and the posterior-resample key must be distinct
     split outputs of the seed key.  The old flow handed PRNGKey(seed) itself
