@@ -587,6 +587,15 @@ def validate_fixed_parameter_overrides(all_bounds, prior_overrides, fixed_parame
     are the never-sampled pinned ones (``m_lim``, ``M_faint_offset``, ``z50``,
     ``w``, ``alpha_miss``); they carry no bounds and keep their dedicated
     validators.
+
+    Severity is intent-keyed.  A fixed value outside bounds the caller ALSO
+    overrode is a self-contradiction (the override names the range they want,
+    the fixed value ignores it) and raises.  Outside the DEFAULT bounds it only
+    warns: fixing removes the label from sampling entirely, and pinning a
+    parameter beyond its sampling range is a legitimate ablation device (e.g.
+    the field-recovery campaign pins ``log10n0 = -11`` to null the AGN
+    missing-galaxy budget); the warning still surfaces the sign/typo hazards
+    above.
     """
     statuses = {}
     for label, value in fixed_parameter_values.items():
@@ -596,11 +605,20 @@ def validate_fixed_parameter_overrides(all_bounds, prior_overrides, fixed_parame
         fixed_value = float(value)
         overridden = label in prior_overrides
         if fixed_value < lower or fixed_value > upper:
-            which = "overridden prior bounds" if overridden else "prior bounds"
-            raise ValueError(
+            if overridden:
+                raise ValueError(
+                    f"Fixed value for '{label}' ({fixed_value}) is outside the "
+                    f"overridden prior bounds [{lower}, {upper}]."
+                )
+            warnings.warn(
                 f"Fixed value for '{label}' ({fixed_value}) is outside the "
-                f"{which} [{lower}, {upper}]."
+                f"default prior bounds [{lower}, {upper}]. The label is pinned, "
+                "not sampled, so this is accepted -- but check it is a "
+                "deliberate ablation, not a sign or unit slip.",
+                stacklevel=2,
             )
+            statuses[label] = "fixed; outside default prior bounds"
+            continue
         if overridden:
             statuses[label] = "fixed; override ignored"
     return statuses
