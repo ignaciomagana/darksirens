@@ -1998,7 +1998,14 @@ def _member_empty_strata_rows(survey: SurveyParams, em_catalog: EMCatalog):
             "per-member normalizers would reuse the deterministic "
             "empty-pixel budget."
         )
-    return jnp.asarray(rows)
+    rows = jnp.asarray(rows)
+    # Same broadcast hazard as the deterministic budget, one axis over: the
+    # stratum axis of the (M, S, N_grid) member stack must span exactly S.
+    _check_empty_budget_arity(
+        rows.shape[1:], len(survey.selection_strata),
+        "field_lss_q_empty_sum_strata_members",
+    )
+    return rows
 
 
 def _replace_member_q(em_catalog, q_m, q_empty_m, q_strata_m):
