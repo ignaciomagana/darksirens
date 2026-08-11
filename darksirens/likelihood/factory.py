@@ -753,8 +753,24 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             )
         return barrier(full_j[up]), 1
 
+    # Flat union path: prepare_catalog_views aliases the PE and selection views
+    # onto ONE union galaxy table / unique-pixel array, so every per-view slice
+    # below is a pure function of the SAME arguments.  Slice ONCE and alias, as
+    # _make_mixture_likelihood's ``bundle_union`` does: the redshift-prior-state
+    # sharing verdict tests ``is`` identity on exactly these leaves, so
+    # re-slicing collapsed sharing to False -- and doubled the (M, N_rows,
+    # N_grid) prior-state precomputation -- on every run carrying a Q table, a Q
+    # ensemble or marks.  Detected by identity, never by value.
+    union_views = (
+        catalogs.unique_pixels_pe is catalogs.unique_pixels_sel
+        and catalogs.zgals_pe_catalog is catalogs.zgals_sel_catalog
+    )
+
     lss_q_pe, lss_idx_pe = _compact_lss_q(catalogs.unique_pixels_pe)
-    lss_q_sel, lss_idx_sel = _compact_lss_q(catalogs.unique_pixels_sel)
+    lss_q_sel, lss_idx_sel = (
+        (lss_q_pe, lss_idx_pe) if union_views
+        else _compact_lss_q(catalogs.unique_pixels_sel)
+    )
 
     # Slice the (optional) Q_LSS ENSEMBLE (M, n_pix, n_grid) to each view's union
     # pixels the same way, for the fully-Bayesian marginalisation (--lss_marginalize).
@@ -789,7 +805,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         return barrier(full_j[:, up])
 
     lss_qm_pe = _compact_lss_members(catalogs.unique_pixels_pe)
-    lss_qm_sel = _compact_lss_members(catalogs.unique_pixels_sel)
+    lss_qm_sel = (
+        lss_qm_pe if union_views
+        else _compact_lss_members(catalogs.unique_pixels_sel)
+    )
     lss_marginalize = bool(getattr(opts, "lss_marginalize", False))
 
     # Per-galaxy marks: gathered to the compact catalog rows using the SAME
@@ -810,7 +829,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         return out
 
     marks_pe = _compact_marks(catalogs.unique_pixels_pe)
-    marks_sel = _compact_marks(catalogs.unique_pixels_sel)
+    marks_sel = (
+        marks_pe if union_views
+        else _compact_marks(catalogs.unique_pixels_sel)
+    )
 
     m1det_pe = barrier(_to_jax(data, "m1det"))
     m2det_pe = barrier(_to_jax(data, "m2det"))
