@@ -456,7 +456,10 @@ darksirens_inference_lensing \
   pair is tagged as a candidate.
 - `--edge_mark_prior_keys`, `--edge_mark_likelihood_keys`: comma-separated
   candidate-edge marks folded into the edge log prior odds, and into the edge
-  likelihood, under exact marginalization.
+  likelihood, under exact marginalization.  The only implemented likelihood
+  mark is the arrival-time one, and it is switched on by `--pair_marks time`;
+  requesting `time`/`delta_t_obs` as a likelihood key without `--pair_marks
+  time` is refused rather than run without the time term.
 - `--singleton_lensing {off,sl_mixture}`: `off` (default) keeps the legacy
   single-image protocol. `sl_mixture` models observed singletons as a mixture of
   unlensed sources and strongly lensed sources with exactly one detected image

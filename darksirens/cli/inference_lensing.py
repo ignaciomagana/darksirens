@@ -2925,7 +2925,11 @@ def build_parser():
     model.add_argument(
         "--edge_mark_likelihood_keys",
         default="",
-        help="Comma-separated edge mark likelihood keys. Only time/delta_t_obs is implemented in this PR.",
+        help="Comma-separated edge mark likelihood keys. Only time/delta_t_obs "
+             "is implemented in this PR, and it is not a route of its own: the "
+             "marked pair likelihood is switched on by --pair_marks time, so "
+             "requesting a time-like key without it is a fatal error rather "
+             "than a silently inert flag.",
     )
     model.add_argument(
         "--allow_suspicious_time_marks",
@@ -3189,15 +3193,32 @@ def _resolve_lensing_run_config(opts):
             flush=True,
         )
 
+    edge_like_keys = parse_edge_mark_keys(opts.edge_mark_likelihood_keys)
     unsupported_edge_like = [
-        k
-        for k in parse_edge_mark_keys(opts.edge_mark_likelihood_keys)
-        if k not in ("time", "delta_t_obs")
+        k for k in edge_like_keys if k not in ("time", "delta_t_obs")
     ]
     if unsupported_edge_like:
         raise NotImplementedError(
             "edge_mark_likelihood_keys only supports time/delta_t_obs in this PR; "
             f"unsupported keys: {unsupported_edge_like}"
+        )
+    # The ONLY switch that puts arrival-time information into the pair
+    # likelihood is --pair_marks time (_resolve_pair_marks branches on it
+    # alone); the likelihood keys reach only the placeholder-mark gate and the
+    # preflight summary. So `--edge_mark_likelihood_keys time --pair_marks none`
+    # used to run with no time term at all while settings.json and the preflight
+    # summary recorded the key as honoured -- and could even abort on
+    # "suspicious candidate time marks" for marks nothing would have read
+    # (review F-007). Resolve the two through one predicate instead.
+    if set(edge_like_keys) & {"time", "delta_t_obs"} and (
+        getattr(opts, "pair_marks", "none") != "time"
+    ):
+        raise SystemExit(
+            "--edge_mark_likelihood_keys "
+            f"{','.join(edge_like_keys)} requires --pair_marks time: the marked "
+            "pair likelihood is enabled by --pair_marks alone, so this "
+            "combination would discard the arrival-time term while recording it "
+            "as used. Add --pair_marks time (or drop the likelihood key)."
         )
     if any(
         not k.startswith("log_")

@@ -993,10 +993,12 @@ Edge marks have two roles:
   simulation use sky-overlap and mass-distance compatibility as interpretable
   edge-prior contributions while preserving the base `log_prior_odds` field.
 * **Likelihood marks** are requested with `--edge_mark_likelihood_keys`.  In
-  this PR, only the existing time-delay likelihood is implemented, via
-  `pair_marks=time` or the `time`/`delta_t_obs` likelihood key.  Other
-  likelihood marks are parsed and rejected with a clear not-implemented error
-  until corresponding likelihood terms are added.
+  this PR, only the existing time-delay likelihood is implemented, and it is
+  enabled by `--pair_marks time` — the likelihood key is a declaration, not an
+  alternative route, so `--edge_mark_likelihood_keys time` without
+  `--pair_marks time` is a fatal error rather than a run with no arrival-time
+  term.  Other likelihood marks are parsed and rejected with a clear
+  not-implemented error until corresponding likelihood terms are added.
 
 By default, no extra edge marks are used: existing `log_prior_odds` behavior is
 unchanged, and time marks affect the likelihood only when the run requests the

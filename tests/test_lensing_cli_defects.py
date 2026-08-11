@@ -1491,3 +1491,38 @@ def test_smoke_test_threads_the_diagnostics_point_label_out():
     main_src = inspect.getsource(cli.main)
     assert "diagnostics_point_label=diag_label" in main_src
     assert "diagnostics_point=diag_point" in main_src
+
+
+# ---------------------------------------------------------------------------
+# --edge_mark_likelihood_keys must not be silently inert (review F-007)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("key", ["time", "delta_t_obs"])
+def test_time_likelihood_key_without_pair_marks_time_is_fatal(key):
+    """Only --pair_marks time enables the marked pair likelihood, so the flag
+    that advertises the arrival-time term must not run without it: the run was
+    statistically valid but discarded the strongest discriminant against false
+    pairings while settings.json recorded the key as honoured."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--edge_mark_likelihood_keys", key)
+    with pytest.raises(SystemExit, match="requires --pair_marks time"):
+        cli._resolve_lensing_run_config(opts)
+
+
+def test_time_likelihood_key_with_pair_marks_time_resolves():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts(
+        "--edge_mark_likelihood_keys", "time", "--pair_marks", "time",
+    )
+    cli._resolve_lensing_run_config(opts)          # no raise
+    assert opts.pair_marks == "time"
+
+
+def test_unsupported_edge_likelihood_keys_still_raise_not_implemented():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--edge_mark_likelihood_keys", "log_sky_overlap")
+    with pytest.raises(NotImplementedError):
+        cli._resolve_lensing_run_config(opts)
