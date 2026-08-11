@@ -198,6 +198,23 @@ def chi_eff_prior_prob(
     return v0 * (1.0 - q_f) + v1 * q_f
 
 
+def chi_eff_prior_in_support(
+    chieff: jnp.ndarray, chi_grid: jnp.ndarray
+) -> jnp.ndarray:
+    """True where the tabulated chi_eff prior actually HAS support.
+
+    ``jnp.interp`` clamps out-of-range inputs to the end of the grid — gwcat's
+    own behaviour, kept in :func:`chi_eff_prior_prob` for the port — so
+    ``|chi_eff| > amax`` returns the table's BOUNDARY column instead of zero.
+    That column is only zero to the accuracy of gwcat's convolution (57 of the
+    200 q rows of the shipped amax=0.99 table are positive there, down to
+    1e-12), so ``p_chi > 0.0`` alone does not reject a region where the PE prior
+    — and hence the PE posterior — is exactly zero, and ``-log p_chi`` would
+    hand such a draw 10-28 nats of spurious importance weight.
+    """
+    return (chieff >= chi_grid[0]) & (chieff <= chi_grid[-1])
+
+
 def chi_eff_prior_logpdf(
     q_frac: jnp.ndarray,
     chieff: jnp.ndarray,
@@ -407,8 +424,9 @@ def build_flow_loglike(
     not an ignorable per-event constant.  The full component is derived from
     the population model's OWN support at the proposal's hyperparameters (the
     mass grid box from ``resolve_mass_grid_bounds``, q over the grid, chi_eff
-    over [-1, 1], z over ``zgrid``), never from the empirical boxes, so the
-    proposal covers every point where the target ``t`` is non-zero.
+    over the PE prior's +/-amax, z over ``zgrid``), never from the empirical
+    boxes, so the proposal covers every point where the target ``t`` is
+    non-zero.
 
     ``w_full`` trades a little effective sample size (the windowed component
     is far better matched to a narrow event posterior) for tail coverage.
@@ -585,15 +603,17 @@ def build_flow_loglike(
             return lz + lq + lm1 + lchi
 
         # Full population-support component: the model's OWN support at these
-        # hyperparameters (mass grid box, q grid, chi_eff on [-1, 1], the whole
-        # zgrid) — never the empirical boxes.  ``t`` vanishes outside it, so
-        # this component covers the entire integrand.
+        # hyperparameters (mass grid box, q grid, chi_eff over the PE prior's
+        # own support, the whole zgrid) — never the empirical boxes.  ``t``
+        # vanishes outside it, so this component covers the entire integrand;
+        # beyond the chi_eff table's +/-amax the PE prior is zero, so the
+        # integrand is too and draws spent there would only be masked away.
         win_full = _Win(
             z_lo=zgrid[0], z_hi=zgrid[-1],
             q_lo=q_edges_[0], q_hi=q_edges_[-1],
             m1det_lo=jnp.asarray(0.0), m1det_hi=jnp.asarray(_UNBOUNDED),
             mc_lo=jnp.asarray(0.0), mc_hi=jnp.asarray(_UNBOUNDED),
-            chi_lo=jnp.asarray(-1.0), chi_hi=jnp.asarray(1.0),
+            chi_lo=pe_tab.chi_grid[0], chi_hi=pe_tab.chi_grid[-1],
             chi_a=jnp.asarray(0.0), chi_b=jnp.asarray(0.0),
             chi_r_lo=jnp.asarray(-2.0), chi_r_hi=jnp.asarray(2.0),
         )
@@ -658,11 +678,15 @@ def build_flow_loglike(
             # hand e^50 of importance weight to whatever the flow extrapolates
             # there.  Unreachable for the windowed component (its chi window
             # hugs the posterior), reachable for the full-support component —
-            # this is the tightening issue #260 calls for.  ``pe_box`` adds any
-            # PE window the checkpoint recorded (+/-inf when it did not).
+            # this is the tightening issue #260 calls for.  Beyond amax the
+            # tabulated ``p_chi`` is clamped, not zero, so the grid range is
+            # tested explicitly (:func:`chi_eff_prior_in_support`).  ``pe_box``
+            # adds any PE window the checkpoint recorded (+/-inf when it did not).
             X = jnp.stack([m1det, m2det, dL, chieff], axis=-1)
-            pe_ok = (p_chi > 0.0) & jnp.all(
-                (X >= pe_box[:, 0]) & (X <= pe_box[:, 1]), axis=-1
+            pe_ok = (
+                (p_chi > 0.0)
+                & chi_eff_prior_in_support(chieff, pe_tab.chi_grid)
+                & jnp.all((X >= pe_box[:, 0]) & (X <= pe_box[:, 1]), axis=-1)
             )
 
             base = log_t - log_s - log_pi_pe
@@ -730,9 +754,19 @@ def build_flow_loglike(
         event_lls, event_vars = jax.vmap(
             lambda row: log_evidence_and_mc_variance(row, J)
         )(ldw)
-        w = jnp.exp(ldw - jnp.max(ldw, axis=1, keepdims=True))
-        ess = jnp.sum(w, axis=1) ** 2 / jnp.maximum(
-            jnp.sum(w**2, axis=1), jnp.finfo(w.dtype).tiny
+        # An event the current hyperparameters exclude has an all -inf row (and
+        # ln Z_i = -inf, as log_evidence_and_mc_variance reports).  Shifting by
+        # its own max would then be -inf - (-inf) = nan, so the diagnostic that
+        # should say WHICH event died reported nan instead of ESS = 0 — and one
+        # nan poisons any host-side mean/percentile over events.
+        any_finite = jnp.any(jnp.isfinite(ldw), axis=1)
+        mx = jnp.where(any_finite, jnp.max(ldw, axis=1), 0.0)[:, None]
+        w = jnp.exp(ldw - mx)
+        ess = jnp.where(
+            any_finite,
+            jnp.sum(w, axis=1) ** 2
+            / jnp.maximum(jnp.sum(w**2, axis=1), jnp.finfo(w.dtype).tiny),
+            0.0,
         )
         return event_lls, event_vars, ess
 
