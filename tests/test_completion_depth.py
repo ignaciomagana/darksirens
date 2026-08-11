@@ -613,6 +613,54 @@ def test_depth_above_all_galaxies_is_a_no_op():
     )
 
 
+def test_deeply_truncated_kernel_norm_does_not_read_as_unit_mass():
+    """A real galaxy far above the truncation has ~ZERO kernel mass below it.
+
+    Both ``ndtr`` tails underflow to exactly 0 once the limit is >~39 sigma_eff
+    away, so the direct span ``Phi(hi) - Phi(lo)`` is 0 and the pre-fix code
+    fell through to the padding fallback, reporting log Z = 0 (UNIT mass) for a
+    galaxy with essentially none.  Spectroscopic sigma_eff (the 1e-4 floor)
+    reaches that regime for every galaxy a few thousandths above the depth, so
+    the depth-mass consumer picked up their whole weight.
+    """
+    import jax.numpy as jnp
+
+    from darksirens.redshift.catalog import _row_log_kernel_norms
+    from darksirens.redshift.completion import log_galaxy_measure_grid
+    from jax.scipy.special import log_ndtr
+
+    cosmo = _cosmo()
+    survey = _survey()
+    log_g = log_galaxy_measure_grid(cosmo, survey)
+    z_depth = 0.3
+    zs = jnp.array([0.10, 0.28, 0.45, 0.95])
+    real = jnp.array([True, True, True, True])
+
+    for sig in (0.005, 1e-4):
+        sig_eff = jnp.full(zs.shape, sig)
+        log_Z_full = np.asarray(_row_log_kernel_norms(zs, sig_eff, real, log_g))
+        log_Z_depth = np.asarray(
+            _row_log_kernel_norms(zs, sig_eff, real, log_g, z_hi=z_depth)
+        )
+        assert np.all(np.isfinite(log_Z_depth))
+        # Below-depth mass never exceeds the full-grid mass, and the galaxies
+        # above the depth are suppressed by many hundreds of e-folds.
+        assert np.all(log_Z_depth <= log_Z_full + 1e-12)
+        assert np.all(log_Z_depth[2:] < log_Z_full[2:] - 100.0), log_Z_depth
+        # Deep in the tail the mass is Phi((z_depth - z_gal)/sig) * g(z_depth).
+        expect = float(log_ndtr((z_depth - zs[-1]) / sig)) + float(
+            jnp.interp(z_depth, zgrid, log_g)
+        )
+        assert log_Z_depth[-1] == pytest.approx(expect, rel=1e-9)
+
+    # Padding slots keep the inert 0.0 that keeps log(0) * 0 out of the
+    # traced reduction.
+    padded = np.asarray(_row_log_kernel_norms(
+        jnp.array([0.10, 0.0]), jnp.array([0.01, 1e-4]),
+        jnp.array([True, False]), log_g, z_hi=0.05))
+    assert padded[1] == 0.0
+
+
 # ---------------------------------------------------------------------------
 # marked twin: z_depth on marked_catalog_kernel_state (349b717 follow-up)
 # ---------------------------------------------------------------------------

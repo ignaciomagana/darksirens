@@ -23,6 +23,24 @@ completeness budget, never the Hubble constant.  The offline fit likewise
 works in reference absolute magnitudes ``Mhat_i = m_i - DM(z_i; H0=100)``,
 which equal ``M0hat + scatter`` independent of the (unknown) true H0.
 
+What the firewall does NOT cover: Om0, w0, wa.  The cancellation above is exact
+for H0 alone, because ``dL`` is exactly proportional to ``1/H0``.  The remaining
+background parameters change the SHAPE of ``DM(z)``, and only its z-INDEPENDENT
+part is absorbable by the fitted zero point, so the offline fit's background is a
+provenance datum, not a free choice: it is stamped into ``meta`` and checked
+against the package fiducial when a fit is loaded
+(:func:`_validate_fit_background`).  The residual that remains once the fit and
+the run share that fiducial is the genuinely z-dependent piece swept out by
+SAMPLING Om0/w0/wa: at H0 = 100, ``DM`` moves by 0.012 mag at z = 0.05 and
+0.110 mag at z = 0.5 between Om0 = 0.25 and 0.40 (0.021 / 0.134 mag between
+w0 = -0.8 and -1.2), i.e. ~0.1 mag of non-absorbable shape across a
+z = 0.05-0.5 catalog, against a Laplace sd of ~0.02 mag at catalog scale.  A
+selection-mode run that samples the dark-energy parameters over their full prior
+therefore carries a completeness zero point anchored at the fiducial rather than
+re-fitted per proposal; removing it needs the fit sample's redshift distribution
+persisted and the mean ``DM`` offset applied inside the curves, not a wider
+prior.
+
 Strata.  Real compilations have direction-dependent depth; the fit accepts a
 stratum label per galaxy and returns one ``theta`` per stratum sharing the LF
 shape convention.  The mock program uses a single stratum.
@@ -164,6 +182,14 @@ _A_NEAR_ZERO = 1e-6
 #: worth a warning: over that sub-sample the fit's LF has no faint edge while
 #: the completion's does.
 _DEEP_WARN = 0.02
+
+#: Separation |m_faint_cut - (Mstar_hat + M_faint_offset)| above which the
+#: analysis cut and the completeness denominator's protocol constant are worth a
+#: warning.  They are independent numbers that agree only if the caller makes
+#: them agree, and the offset between them mis-prices the whole out-of-catalog
+#: budget: ``missing_budget_vs_offset`` moves by ~0.05 per magnitude, so a few
+#: tenths is where the mismatch stops being fit-vs-protocol slack of the edge.
+_CUT_VS_PROTOCOL_WARN = 0.3
 
 
 def m0_absolute(M0hat, H0):
@@ -369,6 +395,78 @@ _STRATUM_REQUIRED = {
 }
 
 
+#: Tolerance of the loaded fit's background-cosmology provenance check.  The
+#: stamp is a float64 round-trip of the fiducial constant, so anything above
+#: rounding is a different background.
+_BACKGROUND_ATOL = 1e-9
+
+#: The background the consumed curves are anchored at: the sampled cosmology's
+#: prior centre, and the default the offline fit runs at.
+_FIT_BACKGROUND = (("Om0", Om0Planck), ("w0", w0Fiducial), ("wa", waFiducial))
+
+
+def _validate_fit_background(where, meta):
+    """Refuse a fit whose stamped background is not the run's fiducial.
+
+    The h-scaled zero point absorbs H0 EXACTLY (module docstring), but Om0/w0/wa
+    change the shape of ``DM(z)``, and only the z-independent part of that change
+    is absorbable by the fitted ``M0hat``/``Mstar_hat``.  A fit measured at
+    another background is therefore not the fit this run consumes -- ``c_sel_*``
+    is evaluated at the run's cosmology while the zero point stays anchored where
+    it was measured -- and nothing downstream reads the stamp, so the mismatch
+    would be silent.  Fits written before the stamp existed carry no keys and
+    are accepted unchanged.
+    """
+    for key, fiducial in _FIT_BACKGROUND:
+        if key not in meta:
+            continue
+        value = float(meta[key])
+        if abs(value - float(fiducial)) > _BACKGROUND_ATOL:
+            raise ValueError(
+                f"{where}: the fit was measured at {key}={value} but this "
+                f"package's background is {key}={float(fiducial)}. The h-scaled "
+                "zero point absorbs H0 exactly, NOT Om0/w0/wa: they change the "
+                "shape of DM(z), so the fitted M0hat/Mstar_hat does not carry "
+                "over (~0.1 mag of non-absorbable residual across a "
+                "z = 0.05-0.5 catalog, several times the fit's own Laplace sd). "
+                "Refit the magnitudes at the fiducial background.")
+
+
+def _validate_sampled_prior_numerics(where, family, cov, sigma_M):
+    """Numeric legality of the quantities that BECOME the sampled theta prior.
+
+    ``cov`` is consumed POSITIONALLY -- the inference CLI reads the marginal
+    Laplace sds off its diagonal in ``SELECTION_SAMPLED_FIELDS[family]`` order --
+    so a wrong-shape matrix silently mis-maps the priors, a negative diagonal
+    entry yields a NaN prior sd, and a 1x1 matrix raises an opaque IndexError far
+    from the file that caused it.  ``sigma_M`` divides the gaussian selection
+    curve: 0 turns it into a step function and a negative value INVERTS it (a
+    survey MORE complete at high z), with no error anywhere downstream.  The fit
+    path is safe by construction (it optimises log sigma and rejects a non-PD
+    Hessian); this wall is for hand-edited, merged or externally generated JSON.
+    """
+    n = len(SELECTION_SAMPLED_FIELDS[family])
+    fields = list(SELECTION_SAMPLED_FIELDS[family])
+    C = np.asarray(cov, dtype=float)
+    if C.shape != (n, n) or not np.all(np.isfinite(C)):
+        raise ValueError(
+            f"{where}: cov must be a finite ({n}, {n}) matrix in {fields} "
+            f"order (the sampled theta of the {family!r} family); got shape "
+            f"{C.shape}.")
+    scale = max(1.0, float(np.max(np.abs(C))))
+    if (not np.allclose(C, C.T, rtol=0.0, atol=1e-10 * scale)
+            or float(np.min(np.linalg.eigvalsh(C))) <= 0.0):
+        raise ValueError(
+            f"{where}: cov is not symmetric positive definite; it becomes the "
+            f"Gaussian prior on {fields}, whose sds are the square roots of its "
+            "diagonal.")
+    if family == "gaussian" and not float(sigma_M) > 0.0:
+        raise ValueError(
+            f"{where}: sigma_M={sigma_M} must be positive -- c_sel_gaussian "
+            "divides by it, so 0 makes the selection curve a step function and "
+            "a negative width inverts it (completeness RISING with redshift).")
+
+
 def _validate_stratum(path, s):
     s = dict(s)
     if "family" not in s:
@@ -381,6 +479,9 @@ def _validate_stratum(path, s):
     for key in _STRATUM_REQUIRED[family]:
         if key not in s:
             raise ValueError(f"{path}: stratum missing required key {key!r}.")
+    _validate_fit_background(str(path), s.get("meta") or {})
+    _validate_sampled_prior_numerics(str(path), family, s["cov"],
+                                    s.get("sigma_M"))
     # Optional K(z) template; absent in pre-K fit files -> K = 0.
     s["k_corr_coeffs"] = tuple(float(c) for c in s.get("k_corr_coeffs") or ())
     if family == "schechter":
@@ -508,6 +609,9 @@ class SelectionFit:
                     f"SelectionFit(family={self.family!r}) is missing {name!r}"
                     f" (the family carries "
                     f"{list(SELECTION_THETA_FIELDS[self.family])}).")
+        _validate_sampled_prior_numerics(
+            f"SelectionFit(family={self.family!r})", self.family, self.cov,
+            self.sigma_M)
         if self.family == "schechter":
             if float(self.alpha) <= _ALPHA_MIN:
                 raise ValueError(
@@ -660,13 +764,21 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
                     f"{int(keep.sum())} of {Mhat.size} galaxies (need at least "
                     "10): the cut is brighter than essentially the whole "
                     "sample.")
+            # Keep the PRE-cut arrays: the faint-end diagnostics answer a
+            # question about the CATALOG ("how many galaxies does it hold that
+            # the modelled population does not contain?"), which the cut sample
+            # cannot answer -- after the cut that count is identically 0 by
+            # construction whenever the cut sits faint-ward of M_faint.
+            Mhat_all, T_all = Mhat, T
             Mhat, T, z = Mhat[keep], T[keep], z[keep]
         else:
             n_cut = 0
+            Mhat_all = T_all = None
         return _fit_schechter_truncated(
             Mhat, T, z, m_lim, float(M_faint_offset),
             None if m_faint_cut is None else float(m_faint_cut),
-            n_cut=n_cut, stratum=stratum, Om0=Om0, w0=w0, wa=wa)
+            n_cut=n_cut, stratum=stratum, Om0=Om0, w0=w0, wa=wa,
+            Mhat_all=Mhat_all, T_all=T_all)
     return _fit_gaussian_truncated(
         Mhat, T, m_lim, stratum=stratum, k_corr_coeffs=k_corr_coeffs,
         Om0=Om0, w0=w0, wa=wa)
@@ -686,8 +798,16 @@ def _fit_gaussian_truncated(Mhat, T, m_lim, *, stratum, k_corr_coeffs,
         return -np.sum(norm.logpdf(resid) - np.log(sig) - log_trunc)
 
     theta0 = np.array([np.median(Mhat), np.log(max(np.std(Mhat), 1e-3))])
+    # fatol is ABSOLUTE while this NLL scales with N, so at catalog size the old
+    # 1e-10 sat BELOW the objective's own float64 resolution (eps * |NLL| ~ 2.8e-10
+    # at N = 1e6) and the stop was the accidental bit-identity of the simplex
+    # values rather than a meaningful criterion.  Scaled as in the schechter twin;
+    # measured at N = 1e6 / 2e6 it reaches the identical MLE (8 decimals) in ~40%
+    # fewer evaluations.  Theta precision is xatol's job.
     res = minimize(nll, theta0, method="Nelder-Mead",
-                   options={"xatol": 1e-8, "fatol": 1e-10, "maxiter": 20000})
+                   options={"xatol": 1e-8,
+                            "fatol": 1e-9 * max(1.0, float(Mhat.size)),
+                            "maxiter": 20000})
     if not res.success:
         raise RuntimeError(f"selection fit did not converge: {res.message}")
     mu_hat, log_sig_hat = res.x
@@ -723,7 +843,8 @@ def _fit_gaussian_truncated(Mhat, T, m_lim, *, stratum, k_corr_coeffs,
 
 
 def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
-                             *, n_cut, stratum, Om0, w0, wa):
+                             *, n_cut, stratum, Om0, w0, wa,
+                             Mhat_all=None, T_all=None):
     """Detection-truncated Schechter MLE + Laplace covariance in (Mstar_hat, alpha).
 
     Work in reference absolute magnitudes ``Mhat_i = m_i - DM(z_i; H0=100)``
@@ -913,7 +1034,29 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
         raise RuntimeError("selection-fit Hessian is not positive definite")
 
     diag = _faint_end_diagnostics(Mstar_hat, alpha_hat, M_faint_offset, m_lim,
-                                 Mhat, T, z, Om0, w0, wa)
+                                 Mhat, T, z, Om0, w0, wa,
+                                 Mhat_all=Mhat_all, T_all=T_all,
+                                 m_faint_cut=m_faint_cut)
+    if (m_faint_cut is not None
+            and abs(diag["m_faint_cut_vs_m_faint"]) > _CUT_VS_PROTOCOL_WARN):
+        import warnings
+
+        # The analysis cut and the completeness denominator's protocol constant
+        # are independent numbers that only agree if the caller makes them
+        # agree.  Where they disagree the fit describes one population and
+        # ``1 - C_sel`` prices another, so the out-of-catalog budget is
+        # mis-priced by whatever the offset between them buys (see
+        # ``missing_budget_vs_offset``, ~0.05 of budget per magnitude).
+        warnings.warn(
+            f"schechter fit: the declared m_faint_cut = {float(m_faint_cut):.3f} "
+            f"sits {diag['m_faint_cut_vs_m_faint']:+.3f} mag from the implied "
+            f"M_faint = {diag['m_faint_implied']:.3f} (Mstar_hat + "
+            f"M_faint_offset). The cut bounds the FIT sample while M_faint sets "
+            "the completeness denominator: at this separation the two describe "
+            "different populations and the out-of-catalog budget (1 - C_sel) is "
+            "priced for the wrong one. Move --m_faint_cut onto the implied "
+            "M_faint, or --m_faint_offset onto the cut (and REBUILD the Q "
+            "table).", RuntimeWarning)
     if m_faint_cut is None and diag["frac_complete_at_m_faint"] > _DEEP_WARN:
         import warnings
 
@@ -946,7 +1089,8 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
 
 def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
                           Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
-                          d_offset=1.0):
+                          d_offset=1.0, Mhat_all=None, T_all=None,
+                          m_faint_cut=None):
     """What the magnitudes say -- and cannot say -- about the faint cutoff.
 
     ``M_faint_offset`` never enters :func:`_fit_schechter_truncated`'s
@@ -965,6 +1109,17 @@ def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
       and at +/- ``d_offset`` mag, evaluated through the consumed
       :func:`c_sel_schechter` itself, so the protocol's leverage on the budget
       is visible next to the fitted theta.
+
+    ``Mhat``/``T`` are the FIT sample, so with an ``m_faint_cut`` declared the
+    two count-based fields above describe the cut sample -- the faint-ward count
+    is then the slack between the parameter-free cut and the FITTED ``M_faint``,
+    and is identically 0 whenever the cut sits faint-ward of it, while the
+    complete fraction is biased low (the cut preferentially removes intrinsically
+    faint galaxies, which live at low z where ``T`` is faintest).  The
+    ``*_precut`` twins carry the catalog-level answers (``Mhat_all``/``T_all``,
+    the arrays before the cut), and ``m_faint_cut_vs_m_faint`` states the
+    separation between the analysis cut and the protocol constant, which is what
+    silently mis-prices the out-of-catalog budget when the two disagree.
     """
     m_faint = Mstar_hat + M_faint_offset
     z_med = float(np.median(np.asarray(z, dtype=float)))
@@ -976,7 +1131,7 @@ def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
         c = float(c_sel_schechter(z_med, m_lim, Mstar_hat, alpha, off, H0_REF,
                                   Om0, w0, wa))
         budget[f"{off:.2f}"] = 1.0 - c
-    return {
+    out = {
         "m_faint_offset_constrained": False,
         "m_faint_implied": float(m_faint),
         "n_gal_faintward_of_m_faint": int(np.sum(np.asarray(Mhat) > m_faint)),
@@ -984,3 +1139,15 @@ def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
         "z_budget_ref": z_med,
         "missing_budget_vs_offset": budget,
     }
+    # With no cut the fit sample IS the catalog, so the twins are the same
+    # numbers; they are still stamped so a consumer never has to know which
+    # branch produced the file.
+    _Mhat_all = Mhat if Mhat_all is None else Mhat_all
+    _T_all = T if T_all is None else T_all
+    out["n_gal_faintward_of_m_faint_precut"] = int(
+        np.sum(np.asarray(_Mhat_all) > m_faint))
+    out["frac_complete_at_m_faint_precut"] = float(
+        np.mean(np.asarray(_T_all) > m_faint))
+    out["m_faint_cut_vs_m_faint"] = (
+        None if m_faint_cut is None else float(m_faint_cut) - float(m_faint))
+    return out

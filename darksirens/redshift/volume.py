@@ -32,7 +32,7 @@ from jax import vmap
 from darksirens.utils.cosmology import dV_of_z, threads_distance_table
 from darksirens.core.types import CosmoParams, SurveyParams
 
-from darksirens.redshift.grid import zgrid
+from darksirens.redshift.grid import log_interp_zgrid, zgrid
 
 
 def _precompute_volume_grid(cosmo: CosmoParams) -> jnp.ndarray:
@@ -81,8 +81,14 @@ def log_volume_prior(z: float, cosmo: CosmoParams, survey: SurveyParams,
     # (redshift/prior.py); this one-shot registry path is used by the
     # WL/cluster likelihood and checks.py. log(tiny) is numerically identical
     # downstream (exp underflows to exactly zero weight).
-    return jnp.interp(
-        z, zgrid, jnp.log(jnp.maximum(pvol_norm, jnp.finfo(pvol_norm.dtype).tiny))
+    #
+    # The sentinel must not be LINEARLY interpolated in log space, though: node 0
+    # sits at z = 0 and node 1 at z ~ 1.8e-3, so a straight line between -708 and
+    # the physical ~+12 is a 300-decade ramp across the first cell (p(9e-4)
+    # returned exp(-361) instead of the true density).  ``log_interp_zgrid``
+    # follows dV_c/dz ∝ z^2 there instead.
+    return log_interp_zgrid(
+        z, jnp.log(jnp.maximum(pvol_norm, jnp.finfo(pvol_norm.dtype).tiny))
     )
 
 

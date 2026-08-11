@@ -15,6 +15,7 @@ code, including the emitted label ordering.
 """
 
 import json
+import warnings
 
 import numpy as np
 import pytest
@@ -225,6 +226,56 @@ def test_schechter_fit_survives_a_survey_that_reaches_the_faint_cutoff():
     assert tight.meta["m_faint_cut"] is None
 
 
+def test_faint_end_diagnostics_describe_the_catalog_not_just_the_cut_sample():
+    """With a cut declared, the count-based diagnostics used to describe ONLY
+    the cut sample -- so the faint-ward count was identically 0 in exactly the
+    configuration the warning text recommends, while advertising itself as
+    "galaxies the catalog holds that the modelled population does not contain".
+    The pre-cut twins answer that question, and the cut-vs-protocol separation
+    is stated instead of implied."""
+    rng = np.random.default_rng(7)
+    m, z = _schechter_truncated_sample(rng, 4000, 70.0, alpha_true=-1.25,
+                                       zlo=0.004)
+    mstar_true = MSTAR_TRUE - 5.0 * np.log10(70.0 / H0_REF)
+    # A tight cutoff the CATALOG reaches well past, with the cut declared ON it:
+    # the clean configuration the un-cut warning recommends.
+    offset = 1.5
+    cut = mstar_true + offset
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fit = fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                                      M_faint_offset=offset, m_faint_cut=cut)
+    assert not [w for w in caught if "sits" in str(w.message)]
+    meta = fit.meta
+    # The cut sample holds only the fit-vs-protocol slack of the edge (24
+    # galaxies between the cut and the FITTED M_faint); the catalog holds 2060.
+    assert meta["n_gal_faintward_of_m_faint_precut"] > 20 * max(
+        meta["n_gal_faintward_of_m_faint"], 1)
+    # The cut removes intrinsically faint galaxies, which sit at low z where the
+    # detection limit is faintest, so the cut sample's complete fraction is
+    # biased low relative to the catalog's.
+    assert (meta["frac_complete_at_m_faint_precut"]
+            > meta["frac_complete_at_m_faint"])
+    assert meta["m_faint_cut_vs_m_faint"] == pytest.approx(
+        cut - meta["m_faint_implied"])
+    assert abs(meta["m_faint_cut_vs_m_faint"]) < 0.3      # fit-vs-protocol slack
+
+    # A cut far from the implied M_faint prices the budget for a different
+    # population than the one fitted, and now says so.
+    with pytest.warns(RuntimeWarning, match="sits"):
+        fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                               M_faint_offset=offset,
+                               m_faint_cut=cut + 1.5)
+
+    # No cut: the twins are the same numbers, and the separation is undefined.
+    with pytest.warns(RuntimeWarning, match="m_faint_cut"):
+        uncut = fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                                        M_faint_offset=offset)
+    assert (uncut.meta["n_gal_faintward_of_m_faint_precut"]
+            == uncut.meta["n_gal_faintward_of_m_faint"])
+    assert uncut.meta["m_faint_cut_vs_m_faint"] is None
+
+
 def test_m_faint_offset_leaves_the_fit_alone_and_says_so():
     """The protocol constant cannot be fitted from magnitudes, so the fit is
     bit-identical across offsets -- and stamps the budget it silently buys."""
@@ -396,6 +447,74 @@ def test_selection_fit_json_roundtrip_schechter(tmp_path):
     p.write_text(json.dumps(multi))
     with pytest.raises(NotImplementedError, match="gaussian-only"):
         load_selection_fit_strata(p)
+
+
+def test_cov_and_sigma_M_legality_is_enforced_at_load_and_construction(tmp_path):
+    """The Laplace covariance IS the sampled prior and is read positionally off
+    its diagonal, and sigma_M divides c_sel_gaussian -- so both need the same
+    numeric wall at the loader and the constructor, not just a key-presence
+    check."""
+    from darksirens.redshift.selection import _validate_stratum
+
+    good = {"family": "gaussian", "m_lim": 21.0, "M0hat": -20.9,
+            "sigma_M": 0.9, "cov": (np.eye(2) * 1e-4).tolist()}
+    assert _validate_stratum(tmp_path / "f.json", good)["sigma_M"] == 0.9
+
+    # Wrong shape: a 3x3 would silently mis-map the (M0hat, sigma_M) sds; a 1x1
+    # raised an opaque IndexError inside the inference CLI instead.
+    for bad_cov in ((np.eye(3) * 1e-4).tolist(), [[1e-4]]):
+        with pytest.raises(ValueError, match="cov"):
+            _validate_stratum(tmp_path / "f.json", dict(good, cov=bad_cov))
+    # Non-positive / non-finite / asymmetric: no Gaussian prior to be had.
+    for bad_cov in ([[1e-4, 0.0], [0.0, -1e-4]],
+                    [[1e-4, 0.0], [0.0, 0.0]],
+                    [[1e-4, 1e-2], [0.0, 1e-4]],
+                    [[1e-4, 0.0], [0.0, float("nan")]]):
+        with pytest.raises(ValueError, match="cov"):
+            _validate_stratum(tmp_path / "f.json", dict(good, cov=bad_cov))
+        with pytest.raises(ValueError, match="cov"):
+            SelectionFit(family="gaussian", m_lim=21.0, M0hat=-20.9,
+                         sigma_M=0.9, cov=np.asarray(bad_cov, dtype=float))
+
+    for bad_sig in (0.0, -0.9):
+        with pytest.raises(ValueError, match="sigma_M"):
+            _validate_stratum(tmp_path / "f.json", dict(good, sigma_M=bad_sig))
+        with pytest.raises(ValueError, match="sigma_M"):
+            SelectionFit(family="gaussian", m_lim=21.0, M0hat=-20.9,
+                         sigma_M=bad_sig, cov=np.eye(2) * 1e-4)
+
+    # A correlated, positive-definite covariance is legal.
+    ok = [[1e-4, 5e-5], [5e-5, 1e-4]]
+    assert _validate_stratum(tmp_path / "f.json", dict(good, cov=ok))
+
+
+def test_loader_refuses_a_foreign_background_cosmology(tmp_path):
+    """The h-scaled zero point absorbs H0 exactly, NOT Om0/w0/wa: those change
+    the SHAPE of DM(z), so a fit measured at another background is not the fit
+    the run consumes.  Nothing downstream read the stamp, so the mismatch was
+    silently accepted."""
+    from darksirens.utils.cosmology import Om0Planck
+
+    fit = SelectionFit(family="gaussian", m_lim=21.0, M0hat=-20.9,
+                       sigma_M=0.9, cov=np.eye(2) * 1e-4, n_gal=1000,
+                       meta={"Om0": float(Om0Planck), "w0": -1.0, "wa": 0.0})
+    payload = {"format_version": "darksirens-selection-fit-1.0",
+               "strata": [fit.to_jsonable()]}
+    p = tmp_path / "fit.json"
+    p.write_text(json.dumps(payload))
+    assert load_selection_fit_json(p)["M0hat"] == -20.9      # fiducial: fine
+
+    for key, bad in (("Om0", 0.25), ("w0", -0.8), ("wa", 0.3)):
+        s = dict(payload["strata"][0])
+        s["meta"] = {**s["meta"], key: bad}
+        p.write_text(json.dumps({**payload, "strata": [s]}))
+        with pytest.raises(ValueError, match=key):
+            load_selection_fit_json(p)
+
+    # Pre-stamp fits carry no background keys and stay loadable.
+    s = dict(payload["strata"][0], meta={})
+    p.write_text(json.dumps({**payload, "strata": [s]}))
+    assert load_selection_fit_json(p)["M0hat"] == -20.9
 
 
 def test_gaussian_jsonable_key_order_is_unchanged():

@@ -35,3 +35,23 @@ import numpy as _np
 
 zgrid = zgrid.at[-1].set(
     jnp.minimum(zgrid[-1], float(_np.expm1(_np.log(zMax + 1.0)))))
+
+
+def log_interp_zgrid(z, log_grid):
+    """Interpolate a LOG-valued grid on ``zgrid``, with the z -> 0 power law.
+
+    ``zgrid[0]`` is exactly 0, where ``dV_c/dz`` vanishes, so node 0 of any log
+    grid built from the volume element is a FLOOR SENTINEL (``log(tiny)`` =
+    -708, ``log(1e-300)`` = -690.8) rather than a value.  Linear interpolation of
+    the LOG array across the first cell then ramps ~300 decades from that
+    sentinel up to the physical value at ``zgrid[1]``: at z = 9e-4 it
+    underestimates the density by e^-339, i.e. deletes it (a nearby galaxy's host
+    weight, or a PE sample's volume prior).  Since ``dV_c/dz ∝ z^2`` as z -> 0,
+    take the power law off node 1 below the first node -- exact to O(z) there,
+    and the ``maximum(z, tiny)`` keeps the value and its gradient finite at
+    z = 0, which is what the sentinel was introduced for.
+    """
+    z1 = zgrid[1]
+    below = log_grid[1] + 2.0 * jnp.log(
+        jnp.maximum(z, jnp.finfo(zgrid.dtype).tiny) / z1)
+    return jnp.where(z < z1, below, jnp.interp(z, zgrid, log_grid))
