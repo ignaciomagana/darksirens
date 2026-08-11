@@ -57,6 +57,63 @@ def test_members_mean_one_data_free_pixel(ps):
     )
 
 
+@pytest.mark.parametrize("frac", [0.4, 0.9])
+def test_jensen_term_is_per_bin_not_a_row_scalar(frac):
+    """E[Q]'s Jensen term must use each bin's OWN curvature.
+
+    With a row-scalar curvature (``median(lambda_row)``) a row whose
+    completeness support covers under half its bins has median lambda = 0, so
+    var_post is pinned at the prior variance, ``+0.5 b^2 var`` cancels the
+    mean-one shift in EVERY bin, and the data-rich bins come out inflated by
+    exp(0.5 b^2 sigma^2 / ps) = 1.65 here -- with the inflation switching on and
+    off with the covered fraction, i.e. a discontinuous pixel-to-pixel
+    misplacement of missing galaxies at fixed z.  Per bin: data-rich bins read
+    logQ ~ b s - shift and data-free bins read ~ b s.
+    """
+    n = 160
+    pk = np.full(n, 1.0)                       # sigma^2 = 1
+    n_act = int(frac * n)
+    C = np.zeros(n)
+    C[:n_act] = 0.8
+    dN_exp = np.full(n, 40.0)                  # data-rich where C > 0
+    N_obs = np.zeros((1, n))
+    N_obs[0, :n_act] = C[:n_act] * dN_exp[:n_act]
+    out = poisson_lognormal_map(N_obs[0][None, :], C[None, :], dN_exp, pk,
+                                bias=1.0, prior_strength=1.0, maxiter=500)
+    logq = np.asarray(out["logq_map"])[0]
+    s = np.asarray(out["s_map"])[0]
+    shift = 0.5                                # 0.5 * b^2 * sigma^2 / ps
+    # Data-rich bins: the posterior variance collapses, so the Jensen term does
+    # NOT cancel the shift (it did, exactly, with the row-median curvature).
+    assert np.mean(logq[:n_act] - s[:n_act]) < -0.9 * shift
+    # Data-free bins keep the full prior variance -> the shift cancels -> Q = 1
+    # far from data.
+    assert abs(np.mean(logq[n_act:] - s[n_act:])) < 0.05
+
+
+def test_member_spread_is_per_bin_and_tracks_the_mean_table():
+    """The ensemble mean must reproduce the deterministic E[Q] table, and the
+    per-member spread must be tighter in data-rich bins than in data-free ones."""
+    n = 96
+    pk = np.full(n, 0.25)
+    n_act = n // 3
+    C = np.zeros(n)
+    C[:n_act] = 0.9
+    dN_exp = np.full(n, 60.0)
+    N_obs = np.zeros((1, n))
+    N_obs[0, :n_act] = C[:n_act] * dN_exp[:n_act]
+    mp = poisson_lognormal_map(N_obs, C[None, :], dN_exp, pk, bias=1.0,
+                               prior_strength=1.0, maxiter=500)
+    mem = laplace_lognormal_members(mp["s_map"], mp["lambda_map"], pk,
+                                    n_members=4000, bias=1.0,
+                                    prior_strength=1.0, seed=1)
+    q_mean = np.log(np.mean(np.asarray(mem["q_members"]), axis=0))[0]
+    np.testing.assert_allclose(q_mean, np.asarray(mp["logq_map"])[0],
+                               atol=0.05)
+    sd = np.asarray(mem["logq_members"])[:, 0, :].std(axis=0)
+    assert sd[:n_act].mean() < 0.5 * sd[n_act:].mean()
+
+
 def test_map_default_prior_strength_unchanged():
     # ps=1 is the pre-fix behaviour: the fix must be a no-op there.
     n_grid = 48

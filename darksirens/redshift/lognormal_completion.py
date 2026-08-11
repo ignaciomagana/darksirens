@@ -30,8 +30,10 @@ index lattice — ``C`` is represented by its circulant eigenvalues ``P`` (the
 Cholesky.  ``sigma_s^2 = mean(P)`` is the marginal field variance.
 
 The Laplace ensemble draws approximate posterior samples around the MAP with an
-**FFT-diagonal** Hessian ``H(k) ~= prior_strength / P(k) + bias^2 median(lambda_map)``
-— a robust, deterministic-given-seed approximation (not a full BORG sampler).
+**FFT-diagonal** Hessian ``H(k) ~= prior_strength / P(k) + bias^2 lambda_v``
+evaluated at each bin's own rate (a local-circulant approximation; see
+:func:`_laplace_diag_variance`) — a robust, deterministic-given-seed
+approximation (not a full BORG sampler).
 
 Caveats (the default **radial** completion, ``mode="radial"``):
 - The field is independent **per pixel** — no angular coupling between
@@ -478,11 +480,17 @@ def laplace_lognormal_members(
     """Approximate posterior ensemble of ``Q`` around the MAP.
 
     **FFT-diagonal Laplace approximation** (not a full BORG sampler): the
-    per-pixel Hessian is approximated as ``H(k) ~= prior_strength / P(k) +
-    bias^2 median(lambda_map_row)``, residuals are drawn with circulant
-    covariance ``H^{-1}`` via the exact spectral synthesis
-    ``delta_s = Re ifft( sqrt(1/H) * fft(white) )``, added to ``s_map``, and
-    ``log Q`` is clipped.  Deterministic given ``seed``.
+    residual's CORRELATION comes from the row's stationary Hessian ``H(k) ~=
+    prior_strength / P(k) + bias^2 median(lambda_map_row)`` via the exact
+    spectral synthesis ``delta_s = Re ifft( sqrt(1/H) * fft(white) )``, and its
+    marginal SPREAD is then rescaled bin by bin to the per-bin Laplace variance
+    :func:`_laplace_diag_variance` (the same curvature the deterministic
+    posterior-mean table uses), so data-rich bins are tight and data-free bins
+    relax to the prior instead of every bin sharing one row scalar.  The
+    rescaling is exactly 1 where a row's ``lambda`` is uniform, and it keeps
+    ``mean_m Q_m == E[Q]`` of ``poisson_lognormal_map`` to Jensen order.  The
+    residual is added to ``s_map`` and ``log Q`` is clipped.  Deterministic
+    given ``seed``.
 
     Returns ``{"logq_members", "q_members", "logq_mean", "diagnostics"}`` with
     member arrays shaped ``(M, N_rows, N_grid)``.
@@ -510,15 +518,20 @@ def laplace_lognormal_members(
     M = int(n_members)
     rng = np.random.default_rng(seed)
 
+    var_post = _laplace_diag_variance(lambda_map, pk, b, ps)   # (n_rows, n_grid)
     logq_members = np.empty((M, n_rows, n_grid), dtype=float)
     for r in range(n_rows):
         lam_scale = float(np.median(lambda_map[r]))
         H = ps / pk + (b * b) * lam_scale          # (N_grid,) FFT-diagonal Hessian
         inv_eig = 1.0 / np.maximum(H, 1e-30)        # circulant eigenvalues of H^{-1}
         sqrt_eig = np.sqrt(inv_eig)
+        # Per-bin marginal spread on top of that stationary correlation: the
+        # draw's own variance is mean(inv_eig), so rescale it to var_post[r].
+        var_draw = float(np.mean(inv_eig))
+        scale = np.sqrt(var_post[r] / max(var_draw, 1e-300))
         for m in range(M):
             g = rng.standard_normal(n_grid)
-            delta_s = np.real(np.fft.ifft(sqrt_eig * np.fft.fft(g)))
+            delta_s = scale * np.real(np.fft.ifft(sqrt_eig * np.fft.fft(g)))
             logq_members[m, r] = np.clip(b * (s_map[r] + delta_s) - shift, -logq_clip, logq_clip)
 
     q_members = np.exp(logq_members)
