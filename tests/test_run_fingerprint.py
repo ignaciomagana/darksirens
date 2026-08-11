@@ -126,6 +126,32 @@ def test_input_file_content_is_fingerprinted(tmp_path):
     assert regenerated["digest"] != reference["digest"]
 
 
+def test_flow_ensemble_directory_content_is_fingerprinted(tmp_path):
+    """--gw_flows_path is a DIRECTORY, and for a flow-surrogate run those
+    checkpoints ARE the PE likelihood: a retrained ensemble, or one event
+    added/removed, must not pass the gate as an identical configuration."""
+    flows = tmp_path / "flows"
+    for name in ("EV1", "EV2"):
+        (flows / name).mkdir(parents=True)
+        (flows / name / f"{name}_flow.npz").write_bytes(b"\x00" * 32)
+
+    opts = dict(gw_flows_path=str(flows), flows_pattern="*/*_flow.npz")
+    reference = _fingerprint(_opts(**opts))
+    slots = reference["semantic"]["data_files"]
+    assert sum(k.startswith("gw_flows_path/") for k in slots) == 2
+    assert _fingerprint(_opts(**opts))["digest"] == reference["digest"]
+
+    # One checkpoint retrained in place (same path, same size).
+    (flows / "EV2" / "EV2_flow.npz").write_bytes(b"\x00" * 31 + b"\x01")
+    assert _fingerprint(_opts(**opts))["digest"] != reference["digest"]
+
+    # An event added to the ensemble changes the event identity (sorted order).
+    (flows / "EV2" / "EV2_flow.npz").write_bytes(b"\x00" * 32)
+    (flows / "EV3").mkdir()
+    (flows / "EV3" / "EV3_flow.npz").write_bytes(b"\x00" * 32)
+    assert _fingerprint(_opts(**opts))["digest"] != reference["digest"]
+
+
 def test_list_valued_path_options_are_fingerprinted(tmp_path):
     a = tmp_path / "a.h5"
     b = tmp_path / "b.h5"

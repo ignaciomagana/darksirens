@@ -44,6 +44,7 @@ code mismatch warns instead of failing.
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -159,6 +160,28 @@ def _iter_file_candidates(value):
                 yield v
 
 
+def _add_flow_ensemble_identity(sem_opts, data_files):
+    """Content identity for the flow-surrogate ensemble under ``gw_flows_path``.
+
+    ``--gw_flows_path`` names a DIRECTORY, so the generic ``os.path.isfile``
+    scan above records only its path string -- yet for a flow-surrogate run the
+    per-event checkpoints ARE the PE likelihood (they replace the stored
+    posterior samples), and the ensemble's sorted checkpoint order IS the event
+    identity.  Retraining the ensemble in place, adding or removing an event,
+    or resuming against a partially written directory would otherwise pass the
+    resume gate silently.  Only this option is walked: a generic directory walk
+    could recurse into an arbitrarily large data root.
+    """
+    flows_dir = sem_opts.get("gw_flows_path")
+    if not isinstance(flows_dir, str) or not os.path.isdir(flows_dir):
+        return
+    pattern = sem_opts.get("flows_pattern") or "*/*_flow.npz"
+    for path in sorted(glob.glob(os.path.join(flows_dir, str(pattern)))):
+        if os.path.isfile(path):
+            rel = os.path.relpath(path, flows_dir)
+            data_files[f"gw_flows_path/{rel}"] = _file_identity(path)
+
+
 def build_run_fingerprint(
     opts,
     *,
@@ -186,6 +209,7 @@ def build_run_fingerprint(
             if os.path.isfile(cand):
                 slot = key if j == 0 else f"{key}[{j}]"
                 data_files[slot] = _file_identity(cand)
+    _add_flow_ensemble_identity(sem_opts, data_files)
 
     # The normalization grids are process-global, environment-driven inputs
     # to the population normalizers -- as semantic as any CLI flag.
