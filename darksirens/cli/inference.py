@@ -720,6 +720,40 @@ def _resolve_selection_fit_pins(sel, family, fixed_parameter_values):
             for name in SELECTION_THETA_FIELDS[family]}
 
 
+def _check_aggregate_requires_q(opts, lss_active_by_catalog):
+    """``--c_mode aggregate`` is only meaningful with a full-sky Q table.
+
+    Aggregate mode replaces the per-pixel completeness with ONE sky curve
+    ``Cbar(z) = Sum_p dN_obs_s / (N_pix_total dN_exp_s)`` -- normalised over the
+    WHOLE SPHERE, so for a footprint survey ``Cbar ~ f_sky C_footprint`` --
+    broadcast to every pixel.  The design intends the mean-one ``Q`` field to
+    put that budget back where the galaxies are ("C says HOW MUCH is missing, Q
+    says WHERE it goes"), and the aggregate Q builder fits the full sky for
+    exactly that reason.  With no Q table the missing density falls back to the
+    legacy ``delta_g`` factor (or 1), both of which are mean-one over the sky
+    and therefore CANNOT encode a footprint: inside the footprint the prior then
+    claims ``1 - f_sky C_foot`` of hosts are uncatalogued (75% at f_sky = 0.25
+    with a locally complete catalog), diluting the very pixels that carry the
+    localization information.
+    """
+    if str(getattr(opts, "c_mode", None) or "per_pixel") != "aggregate":
+        return
+    missing = [k for k, active in enumerate(lss_active_by_catalog, start=1)
+               if not active]
+    if missing:
+        _fatal(
+            "--c_mode aggregate requires an --lss_completion table for every "
+            f"catalog (catalog(s) {missing} have none). Aggregate mode "
+            "normalises the completeness over the WHOLE SKY and delegates all "
+            "angular structure to the mean-one Q field, so without a full-sky Q "
+            "a footprint survey's missing budget is diluted by f_sky inside its "
+            "own footprint -- the legacy delta_g factor is mean-one over the sky "
+            "and cannot encode a footprint. Build Q with "
+            "darksirens_build_lognormal_completion --c-mode aggregate, or run "
+            "--c_mode per_pixel."
+        )
+
+
 def _check_q_table_z_depth(q_fiducials, opts):
     """Fail-closed depth provenance of Q tables, PER CATALOG.
 
@@ -2765,6 +2799,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # legacy back-compat fallback.
     opts.lss_completion_active_by_catalog = lss_completion_active_by_catalog
     opts.lss_completion_active = bool(lss_completion_active)
+    _check_aggregate_requires_q(opts, lss_completion_active_by_catalog)
 
     _resolve_selection_fits(opts, data, fixed_parameter_values)
 
