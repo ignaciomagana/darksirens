@@ -93,7 +93,7 @@ from darksirens.redshift.completion import (
     _resolve_member_logq_row,
 )
 
-from darksirens.redshift.grid import zgrid
+from darksirens.redshift.grid import log_interp_zgrid, zgrid
 
 
 COMPLETE_EMPTY_PIXEL_POLICY_ZERO = 0
@@ -808,7 +808,7 @@ def _eval_complete_scalar(
         # per-pixel construct with no place in the global field density).
         field_val = log_p_cat + state.log_Nobs[pix] - state.log_N_obs_total
         return jnp.where(state.row_has[pix], field_val, -jnp.inf)
-    log_p_vol = jnp.interp(z, zgrid, state.log_pvol)
+    log_p_vol = log_interp_zgrid(z, state.log_pvol)
     empty_value = jnp.where(
         survey.complete_empty_pixel_policy == COMPLETE_EMPTY_PIXEL_POLICY_VOLUME,
         log_p_vol,
@@ -836,7 +836,7 @@ def eval_redshift_prior_with_state(
     user-facing default to ``"field"`` (the joint catalog host-density estimand).
     """
     if model == "spectral_sirens":
-        return vmap(lambda z_i: jnp.interp(z_i, zgrid, state.log_pvol))(z)
+        return vmap(lambda z_i: log_interp_zgrid(z_i, state.log_pvol))(z)
 
     if model == "bright_sirens":
         return _log_prior_bright_sirens(z, pix, cosmo, survey, em_catalog)
