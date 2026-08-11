@@ -34,6 +34,22 @@ depth edge.  There is no parametric roll-off: the ratio itself is
 the completeness estimator (survey depth shows up as the data-driven
 decline of dN_obs_s).
 
+That exactness holds for the *observed* redshifts as given: the
+numerator smooths the per-galaxy POINT ESTIMATES ``zgals`` and ignores
+their uncertainties ``dzgals``, so for a photometric catalog the
+observed side is effectively convolved with ``sqrt(_SIGMA_SMOOTH^2 +
+dz^2)`` while the denominator keeps ``_SIGMA_SMOOTH``.  Wherever
+``dN_exp/dz`` has curvature the ratio then picks up a bias of order
+``dz^2/2 * (dN_exp)''/dN_exp`` — a few percent in C for ``dz ~
+_SIGMA_SMOOTH``, which is an O(50%) *relative* error on the ``(1 - C)``
+missing branch of a nearly complete pixel, and of opposite sign either
+side of the ``dV_c/dz`` turnover.  The estimator is therefore matched
+only for ``dz << _SIGMA_SMOOTH`` (spectroscopic depth);
+``completion_clip_diagnostics`` measures ``max(dz)/_SIGMA_SMOOTH`` per
+run and warns when it is not small.  Fixing it properly needs a
+per-galaxy kernel on BOTH sides (a dz-mixture denominator), not a wider
+numerator alone.
+
 The estimator above is the PER-PIXEL mode (``survey.c_mode == 0``, the
 legacy default).  Its numerator is per-pixel while its denominator is
 isotropic, so C really estimates ``C_sel(z) * (1 + delta_obs(pix, z))``
@@ -63,6 +79,26 @@ through a single GLOBAL clip, so near full completeness the likelihood
 can be kinked in n0 (one clip boundary for the whole sky instead of
 per-pixel boundaries that engage pixel by pixel) -- flagged for the
 inference stage, watch sampler behaviour in n0.
+
+Under ``c_mode == 2`` (``"selection"``) the completeness is the
+parametric ``C_sel(z; m_lim, M0hat/Mstar_hat, ...)``, which by
+construction never sees a galaxy count.  The missing density is then
+
+    dN_miss = (1 - C_sel(z)) n0 apix dV_c/dz (1+z)^delta,
+
+strictly proportional to ``n0`` and (since ``r`` is proportional to
+``1/H0`` and ``dV_c/dz = c r^2 / (H0 E)``) to ``H0^-3``, while the
+observed branch ``N_obs`` is a pure count.  The mixture weight
+``N_miss : N_obs`` -- how much of the host probability is the catalog,
+i.e. the strength of the catalog's H0 information -- is therefore set by
+the sampled ``10^log10n0 / H0^3`` with NOTHING in the likelihood
+calibrating it (``log10n0`` is sampled flat over three decades), and
+unlike the counts-based modes there is no ``C <= 1`` clip to force
+``dN_miss -> 0`` where the catalog is complete.  Nothing enforces the
+internal consistency ``dN_obs_s(z) ~ C_sel(z) n0 apix g(z)``, so the
+completeness of a selection run is prior-driven.  Audit it with
+:func:`selection_budget_audit` (the ``--validate_completion`` dry run
+stamps its numbers and warns on a gross mismatch).
 
 The missing-galaxy *density* (count units, per unit z) is
 
@@ -103,6 +139,7 @@ should use ``completion_curves`` once per parameter proposal via
 from __future__ import annotations
 
 import contextvars
+import warnings
 from contextlib import contextmanager
 
 import numpy as np
@@ -358,6 +395,15 @@ def _kde_dndz_obs(
     expected counts.  Raw *counts* are used (no luminosity weights): this
     keeps the numerator the direct counterpart of n0·apix·g(z).
     ``wgals``/``ngals`` serve only to mask padded slots.
+
+    The kernel width is the FIXED ``_SIGMA_SMOOTH`` for every galaxy —
+    ``dzgals`` deliberately does not enter, because the denominator applies
+    one shared operator and a per-galaxy numerator width would unmatch the
+    ratio (module docstring: the completeness estimator is matched only for
+    ``dz << _SIGMA_SMOOTH``; the run diagnostics report the ratio).  This is
+    NOT the catalog's own redshift kernel — see
+    ``darksirens.redshift.catalog``, whose observed-host kernel does use
+    ``sigma_eff = sqrt(dz^2 + sigma_kde^2)``.
 
     Safe to vmap over ``pix`` with ``in_axes=(0, None, None, None)``.
     """
@@ -669,6 +715,15 @@ def build_field_lss_q_inputs(
     - ``field_lss_q_empty_sum``: (N_grid,) float64 ``Sum_{p empty} Q_p(z)`` —
       a data constant (Q is loaded data, never theta-dependent), the
       empty-pixel budget curve (empty pixels have C == 0).
+
+    ``logQ`` is clipped to ``±_LOGQ_CLIP`` before exponentiating, EXACTLY as the
+    per-pixel numerator's :func:`_to_q` does: the shipped tables are not bounded
+    by the builder's clip (it is applied BEFORE the per-z mean-one renorm, which
+    then shifts every row of a bin by its log-monopole — see
+    ``cli/build_lognormal_completion._stamp_post_renorm_railing``), so an
+    unclipped normalizer would integrate a LARGER missing budget than the
+    numerator on railed cells and break the field convention's
+    ``Sum_pix integral p_field dz == 1`` identity.
     """
     logq_np = np.asarray(logq_map, dtype=np.float64)
     if logq_np.ndim != 2 or logq_np.shape[0] != int(n_pix_total):
@@ -685,7 +740,7 @@ def build_field_lss_q_inputs(
             f"{int(zgrid.size)}."
         )
     occ = np.asarray(occupied_pixels, dtype=np.int64).reshape(-1)
-    q = np.exp(logq_np)
+    q = np.exp(np.clip(logq_np, -_LOGQ_CLIP, _LOGQ_CLIP))
     occ_mask = np.zeros(int(n_pix_total), dtype=bool)
     occ_mask[occ] = True
     q_occ = jnp.asarray(q[occ], dtype=jnp.float32)
@@ -702,7 +757,9 @@ def build_field_lss_q_member_inputs(
     log-Q ensemble: the member analogue of :func:`build_field_lss_q_inputs`.
 
     Returns ``(field_lss_q_members, field_lss_q_empty_sum_members)`` —
-    (M, n_occupied, N_grid) float32 and (M, N_grid) float64.
+    (M, n_occupied, N_grid) float32 and (M, N_grid) float64.  Clipped to
+    ``±_LOGQ_CLIP`` like the deterministic rows and the numerator's
+    :func:`_member_q_eff_from_logq`.
     """
     logq_np = np.asarray(logq_members, dtype=np.float64)
     if logq_np.ndim != 3 or logq_np.shape[1] != int(n_pix_total):
@@ -717,7 +774,7 @@ def build_field_lss_q_member_inputs(
             f"{int(zgrid.size)}."
         )
     occ = np.asarray(occupied_pixels, dtype=np.int64).reshape(-1)
-    q = np.exp(logq_np)
+    q = np.exp(np.clip(logq_np, -_LOGQ_CLIP, _LOGQ_CLIP))
     occ_mask = np.zeros(int(n_pix_total), dtype=bool)
     occ_mask[occ] = True
     q_occ = jnp.asarray(q[:, occ, :], dtype=jnp.float32)
@@ -819,6 +876,59 @@ def _aggregate_dN_obs_sum(em_catalog: EMCatalog) -> jnp.ndarray:
         rows, em_catalog.zgals, em_catalog.wgals, em_catalog.ngals
     )
     return jnp.sum(kde, axis=0)
+
+
+def _check_stratum_labels(em_catalog: EMCatalog, n_strata: int) -> None:
+    """Bound-check the stratum labels against the curve stack (host-side only).
+
+    A JAX out-of-bounds gather CLAMPS instead of raising, so a pixel labelled
+    ``s >= S`` would silently carry stratum ``S-1``'s completeness curve for the
+    whole run.  The production loader already refuses a map whose labels do not
+    span exactly ``[0, S)`` (``cli/inference._resolve_selection_fits``), so this
+    is the module's own belt for library/diagnostic callers -- and it can only
+    run where the map is concrete: inside a trace the labels are unreadable and
+    the check is skipped.
+    """
+    smap = em_catalog.pixel_stratum_map
+    if smap is None:
+        raise ValueError(
+            "stratified selection (SurveyParams.selection_strata) needs "
+            "EMCatalog.pixel_stratum_map to assign pixels to strata."
+        )
+    try:
+        hi = int(np.asarray(smap).max())
+        lo = int(np.asarray(smap).min())
+    except (jax.errors.TracerArrayConversionError,
+            jax.errors.ConcretizationTypeError):
+        return
+    if lo < 0 or hi >= int(n_strata):
+        raise ValueError(
+            f"EMCatalog.pixel_stratum_map labels span [{lo}, {hi}] but "
+            f"SurveyParams.selection_strata carries {int(n_strata)} strata: "
+            "every pixel needs a label in [0, S). An out-of-range label is not "
+            "an error at gather time -- JAX clamps it -- so the pixel would "
+            "silently be assigned another stratum's completeness curve."
+        )
+
+
+def _check_empty_budget_arity(shape, n_strata: int, name: str) -> None:
+    """The per-stratum empty-pixel budget must have exactly S rows.
+
+    ``V_empty = sum_s (1 - Cbar_s) * budget_s`` BROADCASTS: a budget with one
+    row (a stratum map that happens to label every pixel 0, while the fit
+    carries S curves) would apply that single empty-pixel count to EVERY
+    stratum curve and over-count the empty-sky missing budget S-fold, with no
+    error raised.  Shapes are static, so this costs nothing under jit.
+    """
+    if int(shape[0]) != int(n_strata):
+        raise ValueError(
+            f"EMCatalog.{name} has {int(shape[0])} stratum rows but "
+            f"SurveyParams.selection_strata carries {int(n_strata)}: the "
+            "global normalizer sums (1 - Cbar_s) * budget_s over strata, so a "
+            "mismatched arity silently broadcasts one stratum's empty-pixel "
+            "budget onto every curve. Rebuild the per-stratum budgets from the "
+            "same stratum map the fit was defined on."
+        )
 
 
 def _precompute_grids(
@@ -949,6 +1059,7 @@ def _precompute_grids(
                         k_corr_coeffs=survey.k_corr_coeffs)
                     for (m_lim_s, dm0_s, sig_ratio_s) in survey.selection_strata
                 ])
+                _check_stratum_labels(em_catalog, len(survey.selection_strata))
             else:
                 C_bar_raw = c_sel_gaussian(
                     zgrid, survey.m_lim, survey.M0hat, survey.sigma_M,
@@ -1678,12 +1789,10 @@ def _field_missing_curve(
     stratified = aggregate and grids.C_bar_raw.ndim == 2
     C_bar = jnp.clip(grids.C_bar_raw, 0.0, 1.0) if aggregate else None
     if stratified:
-        if em_catalog.pixel_stratum_map is None:
-            raise ValueError(
-                "stratified selection (SurveyParams.selection_strata) needs "
-                "EMCatalog.pixel_stratum_map to assign occupied rows and "
-                "empty pixels to strata."
-            )
+        # S is static (the curve stack's leading axis), so the label bound and
+        # the empty-pixel budget arity are both checkable at trace time.
+        n_strata = int(grids.C_bar_raw.shape[0])
+        _check_stratum_labels(em_catalog, n_strata)
         # Per-occupied-row stratum, aligned with field_dN_obs_s rows.
         strat_occ = jnp.asarray(em_catalog.pixel_stratum_map)[
             jnp.asarray(em_catalog.field_occupied_pixels)]
@@ -1783,6 +1892,8 @@ def _field_missing_curve(
                 )
             budget_s = jnp.asarray(em_catalog.field_lss_q_empty_sum_strata,
                                    dtype=dN_exp.dtype)      # (S, N_grid)
+            _check_empty_budget_arity(
+                budget_s.shape, n_strata, "field_lss_q_empty_sum_strata")
         else:
             if em_catalog.empty_stratum_counts is None:
                 raise ValueError(
@@ -1792,6 +1903,8 @@ def _field_missing_curve(
                 )
             budget_s = jnp.asarray(em_catalog.empty_stratum_counts,
                                    dtype=dN_exp.dtype)[:, None]  # (S, 1)
+            _check_empty_budget_arity(
+                budget_s.shape, n_strata, "empty_stratum_counts")
         V_empty = jnp.sum((1.0 - C_bar) * budget_s, axis=0)
     else:
         if has_q:
@@ -2179,7 +2292,124 @@ def completion_clip_diagnostics(
         summary[f"mean_{field}"] = float(vals.mean()) if vals.size else 0.0
         summary[f"max_{field}"] = float(vals.max()) if vals.size else 0.0
 
+    summary.update(_kernel_match_diagnostics(em_catalog))
     return summary
+
+
+def selection_budget_audit(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    N_obs_total: float,
+    n_occupied: int,
+    n_pix_total: int,
+) -> dict[str, float]:
+    """Audit the ``c_mode='selection'`` missing budget against the actual counts.
+
+    Under the counts-based estimators the missing density is data-anchored:
+    ``(1 - C) dN_exp ~ dN_exp - dN_obs_s`` where ``0 < C < 1``, and the clip at
+    ``C = 1`` forces it to zero where the survey is complete.  Under
+    ``c_mode='selection'`` no count enters the completeness at all, so the budget
+    amplitude is exactly ``(1 - C_sel) n0 apix dV_c/dz (1+z)^delta`` -- linear in
+    ``n0``, proportional to ``H0^-3``, and identified only by the ``log10n0``
+    prior (module docstring).  The consistency the likelihood never imposes is
+
+        N_obs_total  ~  Sum_p integral C_sel(z) dN_exp(z) dz,
+
+    which this evaluates at the run's (theta, n0, delta, cosmology): a
+    ``model / observed`` ratio far from 1 means the sampled budget amplitude is
+    inconsistent with the catalog it is completing, and the resulting host
+    fractions -- and therefore the H0 posterior width -- are prior-driven.
+
+    ``n_occupied`` is the footprint (pixels with at least one galaxy) and
+    ``n_pix_total`` the whole sky; both predictions are reported because the
+    truth sits between them for a sparsely populated footprint.  Returns a flat
+    float dict (JSON-friendly for the run provenance).
+    """
+    if not _is_selection_c_mode(survey.c_mode):
+        raise ValueError(
+            "selection_budget_audit applies to c_mode='selection' only: the "
+            "counts-based estimators anchor the budget to dN_obs by "
+            "construction."
+        )
+    grids = _precompute_grids(cosmo, survey, em_catalog)
+    C = np.clip(np.asarray(grids.C_bar_raw, dtype=float), 0.0, 1.0)
+    dN_exp = np.asarray(grids.dN_exp, dtype=float)
+    zg = np.asarray(zgrid, dtype=float)
+    obs_per_pix = np.trapz(C * dN_exp, zg, axis=-1)   # scalar, or (S,)
+    exp_per_pix = float(np.trapz(dN_exp, zg))
+    smap = (None if em_catalog.pixel_stratum_map is None
+            else np.asarray(em_catalog.pixel_stratum_map).reshape(-1))
+    if C.ndim == 2 and smap is not None:
+        # Stratified: weight each stratum's curve by its share of the sky, and of
+        # the footprint when the occupied set is known (else scale by the
+        # footprint fraction, which is exact for a stratum-independent mask).
+        w_all = np.bincount(smap, minlength=C.shape[0]).astype(float)
+        if em_catalog.field_occupied_pixels is not None:
+            occ = np.asarray(em_catalog.field_occupied_pixels).reshape(-1)
+            w_occ = np.bincount(smap[occ], minlength=C.shape[0]).astype(float)
+        else:
+            w_occ = w_all * (float(n_occupied) / max(float(n_pix_total), 1.0))
+        model_footprint = float(np.sum(w_occ * obs_per_pix))
+        model_sky = float(np.sum(w_all * obs_per_pix))
+    else:
+        # One curve (or a stratified stack with no routing available: then the
+        # stratum mean is the only defensible summary).
+        per_pix = float(np.mean(obs_per_pix))
+        model_footprint = float(n_occupied) * per_pix
+        model_sky = float(n_pix_total) * per_pix
+    N_obs_total = float(N_obs_total)
+    N_exp_sky = float(n_pix_total) * exp_per_pix
+    return {
+        "N_obs_total": N_obs_total,
+        "selection_model_N_obs_footprint": model_footprint,
+        "selection_model_N_obs_sky": model_sky,
+        "selection_model_over_observed_footprint": (
+            model_footprint / N_obs_total if N_obs_total > 0 else float("inf")),
+        # The completeness the catalog+model actually imply, for the record.
+        "implied_completeness": (N_obs_total / N_exp_sky if N_exp_sky > 0
+                                 else float("nan")),
+    }
+
+
+def _kernel_match_diagnostics(em_catalog: EMCatalog) -> dict[str, float]:
+    """How well the completeness numerator's fixed kernel matches the catalog.
+
+    The ratio ``C = dN_obs_s / dN_exp_s`` is exact for a constant true
+    completeness only because ONE operator smooths both sides — but the
+    numerator smooths the redshift POINT ESTIMATES, so a catalog whose
+    ``dzgals`` are comparable to ``_SIGMA_SMOOTH`` is effectively smoothed with
+    ``sqrt(_SIGMA_SMOOTH^2 + dz^2)`` on the observed side only (module
+    docstring).  Report the ratio and warn when it is not small: the residual
+    bias in C is a few percent there, which is an O(50%) relative error on the
+    ``(1 - C)`` missing branch of a nearly complete pixel.
+    """
+    dz = np.asarray(em_catalog.dzgals, dtype=float)
+    ng = np.asarray(em_catalog.ngals).reshape(-1)
+    real = np.arange(dz.shape[-1])[None, :] < ng[:, None]
+    dz_max = float(np.max(dz[real])) if bool(real.any()) else 0.0
+    dz_mean = float(np.mean(dz[real])) if bool(real.any()) else 0.0
+    ratio = dz_max / _SIGMA_SMOOTH
+    if ratio > 0.5:
+        warnings.warn(
+            f"completeness kernel mismatch: the catalog's largest per-galaxy "
+            f"redshift sigma is {dz_max:.4g} = {ratio:.2f} x the completeness "
+            f"smoothing width _SIGMA_SMOOTH = {_SIGMA_SMOOTH:g}. The "
+            "matched-kernel ratio C = dN_obs_s / dN_exp_s smooths the observed "
+            "POINT ESTIMATES, so the observed side carries the extra dz "
+            "convolution and the denominator does not: C is biased by a few "
+            "percent wherever dN_exp/dz has curvature, i.e. by O(50%) "
+            "relatively on the (1 - C) missing branch of a nearly complete "
+            "pixel. Treat the completion of this catalog as approximate.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    return {
+        "sigma_smooth": float(_SIGMA_SMOOTH),
+        "max_dz": dz_max,
+        "mean_dz": dz_mean,
+        "max_dz_over_sigma_smooth": ratio,
+    }
 
 
 # ------------------------------------------------------------

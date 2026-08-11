@@ -528,6 +528,15 @@ def run_completion_validation(
             field_occupied_pixels=jnp.asarray(
                 np.asarray(_field.occupied_pixels), dtype=jnp.int32),
         )
+    if data.get("pixel_stratum_map") is not None:
+        # Stratified selection routes each pixel to its own C_sel curve by
+        # GLOBAL pixel, so the map stays full-sky (unsliced) like the run's.
+        # Without it the dry run cannot form the stratified estimator at all.
+        lss_kwargs = dict(
+            lss_kwargs,
+            pixel_stratum_map=jnp.asarray(
+                np.asarray(data["pixel_stratum_map"], dtype=np.int32)),
+        )
     em_catalog = EMCatalog(
         apix=data["apix"],
         zgals=jnp.asarray(full_z[unique_pixels]),
@@ -557,6 +566,34 @@ def run_completion_validation(
                       "Mstar_hat", "alpha", "M_faint_offset")}
         diagnostics["selection_family"] = str(
             getattr(opts, "selection_family", None) or "gaussian")
+        # The selection completeness never sees a galaxy count, so the missing
+        # budget amplitude (proportional to n0/H0^3) is identified only by its
+        # prior. Record the model-vs-observed counts so a prior-driven budget is
+        # auditable, and say so loudly when they disagree grossly.
+        from darksirens.redshift.completion import selection_budget_audit
+
+        _n_full = np.asarray(full_n).reshape(-1)
+        _audit = selection_budget_audit(
+            cosmo, survey, em_catalog,
+            N_obs_total=float(_n_full.sum()),
+            n_occupied=int((_n_full > 0).sum()),
+            n_pix_total=int(data.get("n_pix_catalog", _n_full.size)),
+        )
+        diagnostics["selection_budget_audit"] = _audit
+        _ratio = float(_audit["selection_model_over_observed_footprint"])
+        if not (1.0 / 3.0 < _ratio < 3.0):
+            _warn(
+                f"c_mode=selection budget audit: the model predicts "
+                f"{_audit['selection_model_N_obs_footprint']:.3g} catalogued "
+                f"galaxies over the footprint but the catalog holds "
+                f"{_audit['N_obs_total']:.3g} (ratio {_ratio:.3g}). The "
+                "selection completeness carries no counts, so the missing "
+                "budget is proportional to n0/H0^3 with nothing in the "
+                "likelihood calibrating it: at this (log10n0, delta, theta) the "
+                "in-vs-out-of-catalog odds -- and therefore the H0 information "
+                "-- are set by the log10n0 prior, not by the data. Recalibrate "
+                "log10n0 to N/(f_sky V_c) or narrow its prior."
+            )
     diagnostics["survey_values"] = survey_values
     diagnostics["cosmology_values"] = {
         "H0": float(cosmo.H0),

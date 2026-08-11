@@ -208,3 +208,34 @@ def test_builder_requires_and_rejects_fit_pairing():
         _require_selection_fit("aggregate", {"m_lim": 24.0})
     _require_selection_fit("selection", {"m_lim": 24.0})   # legal
     _require_selection_fit("per_pixel", None)              # legal
+
+
+# ===========================================================================
+# The selection budget carries no data anchor (review F-081)
+# ===========================================================================
+
+def test_selection_budget_audit_tracks_n0_and_rejects_counts_modes():
+    """Under c_mode='selection' the missing budget is proportional to n0 with
+    nothing in the likelihood calibrating it, so the audit's model-vs-observed
+    ratio must move linearly with n0 -- that IS the unanchored amplitude."""
+    from darksirens.redshift.completion import selection_budget_audit
+
+    em = _em()
+    ng = np.asarray(em.ngals)
+    kw = dict(N_obs_total=float(ng.sum()), n_occupied=int((ng > 0).sum()),
+              n_pix_total=int(ng.size))
+    sv = _survey(c_mode=C_MODE_SELECTION_STRUCT, **THETA)
+    a = selection_budget_audit(_cosmo(), sv, em, **kw)
+    b = selection_budget_audit(
+        _cosmo(), sv._replace(n0=10.0 * sv.n0), em, **kw)
+    assert b["selection_model_over_observed_footprint"] == pytest.approx(
+        10.0 * a["selection_model_over_observed_footprint"], rel=1e-10)
+    assert a["N_obs_total"] == float(ng.sum())
+    assert 0.0 < a["implied_completeness"]
+    # H0^-3 scaling of the budget amplitude (r ~ 1/H0, dV_c/dz ~ r^2/(H0 E)):
+    c = selection_budget_audit(_cosmo(2 * 67.74), sv, em, **kw)
+    assert (c["selection_model_N_obs_sky"]
+            < 0.2 * a["selection_model_N_obs_sky"])
+    # The counts-based estimators anchor the budget themselves -> not applicable.
+    with pytest.raises(ValueError, match="c_mode='selection'"):
+        selection_budget_audit(_cosmo(), _survey(), em, **kw)
