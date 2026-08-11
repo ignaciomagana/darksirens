@@ -295,28 +295,48 @@ def _report_survey_z_depth(label: str, resolved) -> None:
     )
 
 
+def _completion_validation_point(
+    fiducials: dict,
+    prior_overrides: dict,
+    fixed_parameter_values: dict,
+) -> dict[str, float]:
+    """Representative dry-run point: fixed > prior-override midpoint > fiducial.
+
+    Shared by the survey and the cosmology blocks so the diagnostic cannot sit at
+    a fiducial the sampler never visits: the clip fractions are ratios of
+    ``dN_obs`` to ``dN_exp = n0 apix exp(log_galaxy_measure_grid(cosmo, survey))``,
+    i.e. cosmology-dependent through the comoving volume element, so a run with
+    e.g. ``--prior_overrides '{"H0": [40, 55]}'`` carries ~2x the volume per unit
+    z of Planck15 and can rail C where the fiducial point reports 0 clipping.
+    """
+    values = dict(fiducials)
+    for label in values:
+        if label in (prior_overrides or {}):
+            lo, hi = prior_overrides[label]
+            values[label] = 0.5 * (float(lo) + float(hi))
+        if label in (fixed_parameter_values or {}):
+            values[label] = float(fixed_parameter_values[label])
+    return values
+
+
 def _completion_validation_survey_values(
     prior_overrides: dict,
     fixed_parameter_values: dict,
 ) -> dict[str, float]:
     """Choose representative survey values for dry-run clipping diagnostics."""
-    fid = {
-        "log10n0": -2.0,
-        "z50": 1.0,
-        "w": 0.5,
-        "delta": 0.0,
-        "b_miss": 1.0,
-        "alpha_miss": 1.0,
-        "sigma_kde": 0.0,
-    }
-    values = dict(fid)
-    for label in values:
-        if label in prior_overrides:
-            lo, hi = prior_overrides[label]
-            values[label] = 0.5 * (float(lo) + float(hi))
-        if label in fixed_parameter_values:
-            values[label] = float(fixed_parameter_values[label])
-    return values
+    return _completion_validation_point(
+        {
+            "log10n0": -2.0,
+            "z50": 1.0,
+            "w": 0.5,
+            "delta": 0.0,
+            "b_miss": 1.0,
+            "alpha_miss": 1.0,
+            "sigma_kde": 0.0,
+        },
+        prior_overrides,
+        fixed_parameter_values,
+    )
 
 
 #: Row axis of each Q_LSS table leaf carried on ``EMCatalog``.
@@ -340,35 +360,47 @@ def _completion_validation_lss_tables(data: dict, unique_pixels, n_pix_catalog: 
 
     The tables are sliced HOST-side to the validation rows (mirroring the factory's
     eager global->compact gather) so a full ``(M, n_pix, N_grid)`` ensemble never
-    reaches the device.  Returns ``(kwargs, provenance)``; ``provenance`` records
-    why nothing was attached so the JSON never implies a clean Q when the Q was
-    simply not readable:
+    reaches the device.  Returns ``(kwargs, provenance, provenance_by_key)``;
+    the provenance records why nothing was attached so the JSON never implies a
+    clean Q when the Q was simply not readable.  Per leaf:
 
-    * ``"none"`` -- the run carries no Q table (the legacy delta_g diagnostic is
-      the right one);
     * ``"global_table_sliced"`` -- attached, rows gathered by global pixel;
     * ``"compact_table_skipped"`` -- the table is a COMPACT per-view block
       (``lss_completion_indexing == 1``, or its row count is not the full nside),
       which carries no global pixel key, so the validation pixels cannot be
       aligned to it.
+
+    The back-compatible scalar summarises those: ``"none"`` when the run carries
+    no Q table at all (the legacy delta_g diagnostic is the right one), the
+    common per-leaf value when every present leaf agrees, and ``"partial"`` for a
+    MIXED outcome -- which a single last-write-wins scalar reported as whichever
+    leaf happened to come last in ``_LSS_TABLE_ROW_AXIS`` order, so a reader
+    could not tell which leaf the clip fraction came from.
     """
     pix = np.asarray(unique_pixels, dtype=np.int64).reshape(-1)
     indexing = int(data.get("lss_completion_indexing", 0) or 0)
     kwargs: dict[str, object] = {}
-    provenance = "none"
+    by_key: dict[str, str] = {}
     for key, axis in _LSS_TABLE_ROW_AXIS.items():
         tab = data.get(key)
         if tab is None:
             continue
         arr = np.asarray(tab)
         if indexing == 1 or arr.shape[axis] != n_pix_catalog:
-            provenance = "compact_table_skipped"
+            by_key[key] = "compact_table_skipped"
             continue
         if n_pix_catalog != pix.size:
             arr = np.take(arr, pix, axis=axis)
         kwargs[key] = jnp.asarray(arr)
-        provenance = "global_table_sliced"
-    return kwargs, provenance
+        by_key[key] = "global_table_sliced"
+    outcomes = set(by_key.values())
+    if not outcomes:
+        provenance = "none"
+    elif len(outcomes) == 1:
+        provenance = outcomes.pop()
+    else:
+        provenance = "partial"
+    return kwargs, provenance, by_key
 
 
 def run_completion_validation(
@@ -425,13 +457,21 @@ def run_completion_validation(
     survey_values = _completion_validation_survey_values(
         prior_overrides, fixed_parameter_values
     )
-    # Completion validation is a dry run, so unsampled cosmological values must
-    # be represented by the fixed/fiducial values used by the likelihood decoder.
+    # Completion validation is a dry run, so the cosmology is a REPRESENTATIVE
+    # point on the same fixed > prior-override midpoint > fiducial precedence as
+    # the survey block above (the clip fractions are cosmology-dependent through
+    # the comoving volume element, so pinning Planck15 under an H0 override
+    # certified a completeness budget the run never forms).  W0_FID/WA_FID rather
+    # than literals so the dry run cannot drift from the decoder.
+    cosmology_values = _completion_validation_point(
+        {"H0": H0_FID, "Om0": OM0_FID, "w0": W0_FID, "wa": WA_FID},
+        prior_overrides, fixed_parameter_values,
+    )
     cosmo = CosmoParams(
-        H0=float(fixed_parameter_values.get("H0", H0_FID)),
-        Om0=float(fixed_parameter_values.get("Om0", OM0_FID)),
-        w0=float(fixed_parameter_values.get("w0", -1.0)),
-        wa=float(fixed_parameter_values.get("wa", 0.0)),
+        H0=float(cosmology_values["H0"]),
+        Om0=float(cosmology_values["Om0"]),
+        w0=float(cosmology_values["w0"]),
+        wa=float(cosmology_values["wa"]),
     )
     # NOTE: this dry-run deliberately leaves z_depth at its default (None):
     # completion_clip_diagnostics reports clip fractions of the completeness
@@ -506,7 +546,7 @@ def run_completion_validation(
         sigma_kde=survey_values["sigma_kde"],
         **_mode_kwargs,
     )
-    lss_kwargs, lss_attached = _completion_validation_lss_tables(
+    lss_kwargs, lss_attached, lss_attached_by_key = _completion_validation_lss_tables(
         data, unique_pixels, int(data.get("n_pix_catalog", np.asarray(full_z).shape[0]))
     )
     if _c_mode == "aggregate":
@@ -558,6 +598,9 @@ def run_completion_validation(
         max_pixels=max_pixels,
     )
     diagnostics["lss_completion_attached"] = lss_attached
+    # Per-leaf provenance: the scalar above cannot express a MIXED outcome, so a
+    # reader could not tell which Q leaf the reported clip fraction came from.
+    diagnostics["lss_completion_attached_by_key"] = lss_attached_by_key or None
     diagnostics["c_mode"] = _c_mode
     if _c_mode == "selection":
         diagnostics["selection_theta_used"] = {
