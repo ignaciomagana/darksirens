@@ -40,94 +40,28 @@ def _load_dark_mock_module():
 
 _dark = _load_dark_mock_module()
 
-SNR_REF_DEFAULT = 11.5
+SNR_REF_DEFAULT = _dark.SNR_REF_DEFAULT
 
-
-def _network_snr(m1, m2, z, dl, rng):
-    """Semi-analytic network SNR with a ``Beta(2,5)**0.5`` projection latent.
-
-    Moved here from the dark-siren generator, which no longer has a
-    true-parameter detection rule: its threshold now acts on a recorded
-    ``rho_obs`` and the projection latent is gone (a detection decision that
-    depends on a variable absent from the data leaves an extra
-    ``P(det|theta)`` inside each event's integral).  The bright-siren mock
-    still uses the historical rule, so the historical implementation lives
-    with its only remaining consumer rather than in a module that no longer
-    contains it.
-    """
-    mchirp = (m1 * m2) ** (3.0 / 5.0) / (m1 + m2) ** (1.0 / 5.0)
-    mchirp_det = mchirp * (1.0 + z)
-    projection = rng.beta(2.0, 5.0, size=len(np.atleast_1d(m1))) ** 0.5
-    return SNR_REF_DEFAULT * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * projection
-
-
-def _legacy_posterior_samples(rng, truth, nsamp, dL_fractional_uncertainty=None,
-                              m1det_fractional_uncertainty=0.08,
-                              m2det_fractional_uncertainty=0.10,
-                              chieff_uncertainty=0.08,
-                              sky_uncertainty_deg=None):
-    """Flat-prior posterior samples of one noisy measurement per event.
-
-    Moved verbatim (draw order included) from the dark-siren generator's
-    ``_posterior_samples`` with ``pe_centering="observed"``, which the
-    all-observable rewrite of that generator removed.  The measurement is
-    independent per channel: ``ln d_obs ~ N(ln dL, s)`` and additive Gaussians
-    on the component masses / spin / sky, so the flat-prior posteriors are
-    ``ln dL ~ N(ln d_obs + s^2, s)`` (the flat-in-dL volume factor) and normals
-    centred on the observed value elsewhere.
-
-    ``p_pe`` is the PE PRIOR in darksirens' canonical integration basis, which
-    is ``(m1det, q, dL, chieff)`` and NOT ``(m1det, m2det, dL, chieff)`` --
-    see ``darksirens/inference/utils.py``, "Integration variables".  A prior
-    flat in the drawn variables ``(m1det, m2det, dL, chieff)`` therefore
-    carries the Jacobian ``|dm2det/dq| = m1det``, so ``p_pe ∝ m1det``; the
-    historical all-ones column mis-weighted the mass channel of every mock
-    this generator has ever produced.  darksirens renormalises ``p_pe`` per
-    event, so the column is stored normalised to mean 1 per event and only its
-    shape matters.
-    """
-    nobs = len(truth["z"])
-    arrays = {"ra": [], "dec": [], "dL": [], "m1det": [], "m2det": [],
-              "chieff": [], "p_pe": []}
-    for i in range(nobs):
-        rho = truth["snr"][i]
-        frac_dl = (dL_fractional_uncertainty if dL_fractional_uncertainty is not None
-                   else np.clip(1.8 / rho, 0.08, 0.35))
-        sigma_ang = np.deg2rad(sky_uncertainty_deg if sky_uncertainty_deg is not None
-                               else np.clip(35.0 / rho, 1.0, 12.0))
-        m1det = truth["m1"][i] * (1.0 + truth["z"][i])
-        m2det = truth["m2"][i] * (1.0 + truth["z"][i])
-        sig_m1 = m1det_fractional_uncertainty * m1det
-        sig_m2 = m2det_fractional_uncertainty * m2det
-
-        # One measurement per event ...
-        dl_obs = float(truth["dl"][i] * np.exp(frac_dl * rng.normal()))
-        ra_obs = float((truth["ra"][i]
-                        + rng.normal(0.0, sigma_ang / max(np.cos(truth["dec"][i]), 0.1)))
-                       % (2.0 * np.pi))
-        dec_obs = float(np.clip(truth["dec"][i] + rng.normal(0.0, sigma_ang),
-                                -0.5 * np.pi, 0.5 * np.pi))
-        m1_obs = float(np.clip(rng.normal(m1det, sig_m1), 2.0, None))
-        m2_obs = float(np.clip(rng.normal(m2det, sig_m2), 1.0, None))
-        chi_obs = float(np.clip(rng.normal(truth["chi"][i], chieff_uncertainty),
-                                -1.0, 1.0))
-        # ... then the flat-prior posterior GIVEN that measurement.
-        dl = rng.lognormal(np.log(dl_obs) + frac_dl**2, frac_dl, nsamp)
-        dra = rng.normal(0.0, sigma_ang / max(np.cos(dec_obs), 0.1), nsamp)
-        ddec = rng.normal(0.0, sigma_ang, nsamp)
-        m1_draws = rng.normal(m1_obs, sig_m1, nsamp)
-        m2_draws = rng.normal(m2_obs, sig_m2, nsamp)
-        chi_draws = rng.normal(chi_obs, chieff_uncertainty, nsamp)
-
-        m1_samples = np.clip(m1_draws, 2.0, None)
-        arrays["ra"].append((ra_obs + dra) % (2.0 * np.pi))
-        arrays["dec"].append(np.clip(dec_obs + ddec, -0.5 * np.pi, 0.5 * np.pi))
-        arrays["dL"].append(dl)
-        arrays["m1det"].append(m1_samples)
-        arrays["m2det"].append(np.clip(m2_draws, 1.0, None))
-        arrays["chieff"].append(np.clip(chi_draws, -1.0, 1.0))
-        arrays["p_pe"].append(m1_samples / m1_samples.mean())
-    return {k: np.concatenate(v) for k, v in arrays.items()}
+# MEASUREMENT FAMILY.  The bright-siren PE and detection rule are the dark
+# generator's all-observable family (``_dark.MEASUREMENT_FAMILY``), used through
+# ``_dark._detect_on_observation`` / ``_dark._posterior_samples``: the threshold
+# acts on a RECORDED ``rho_obs = rho_opt(theta) + N(0, sigma_rho)`` and every
+# measurement width is a function of that recorded number alone.
+#
+# The historical bright rule -- widths scaled by the LATENT truth
+# (``0.08 m1det_true``) and a threshold on a latent Beta(2,5)^0.5 projection
+# amplitude -- is not kept, not even behind a flag: the sibling generator
+# measured both defects on a matched campaign (the detected-set score identity
+# E[C] = E[A] violated at 11.3 sigma, and -0.49 +- 0.08 km/s/Mpc of recovered H0
+# from the sky channel alone), so any closure run on it would validate against a
+# biased truth.  See the measurement-family header in
+# scripts/mock_dark_sirens/generate_mock_data.py for the derivations.
+#
+# Only the sky channel differs: a bright siren's EM counterpart localises it
+# exactly, so every PE sample of an event carries the counterpart's direction
+# (:func:`_bright_posterior_samples`) instead of a width-``sigma_ang`` cloud.
+# ``p_pe`` carries no sky factor either way (the prior is flat in the sky), so
+# the stored column stays the exact PE prior of the recorded measurement.
 
 
 def _joint_em_detected(rng, ra, dec, z, dl, survey):
@@ -141,44 +75,34 @@ def _joint_em_detected(rng, ra, dec, z, dl, survey):
     return footprint & depth & (rng.uniform(size=len(z)) < completeness)
 
 
-def _draw_bright_events_until_detected(rng, nobs, observed_catalog, grids, pop, survey, snr_threshold):
-    kept = []
-    n_available = len(observed_catalog["z"])
-    if n_available == 0:
-        raise RuntimeError("EM selection retained no galaxies; increase n0/zmax or loosen survey settings.")
-    while sum(len(x["z"]) for x in kept) < nobs:
-        ntry = max(4 * nobs, 256)
-        host_idx = rng.integers(0, n_available, ntry)
-        z = observed_catalog["z"][host_idx]
-        ra = observed_catalog["ra"][host_idx]
-        dec = observed_catalog["dec"][host_idx]
-        dl = _dark._interp_dl(z, grids)
-        m1 = _dark._sample_powerlaw_peak_m1(rng, ntry, pop)
-        q = _dark._sample_q(rng, m1, pop)
-        m2 = q * m1
-        chi = _dark._sample_chieff(rng, ntry, pop)
-        snr = _network_snr(m1, m2, z, dl, rng)
-        det = snr >= snr_threshold
-        # Match the dark-siren generator's source-frame rate evolution.  The
-        # host catalog is uniform in comoving volume, so accepting hosts with
-        # probability proportional to (1+z)**(gamma-1) makes the bright-siren
-        # population use the same redshift convention as the inference model.
-        # With the registry-fixed powerlaw+peak fiducial, gamma=0; if the shared
-        # PopulationConfig is ever changed deliberately, bright mocks follow it
-        # automatically instead of silently using a different redshift truth.
-        zmax_grid = float(grids["z"][-1])
-        rate_gmax = max(1.0, (1.0 + zmax_grid) ** (pop.gamma - 1.0))
-        rate_acc = (1.0 + z) ** (pop.gamma - 1.0) / rate_gmax
-        det = det & (rng.uniform(size=len(z)) < rate_acc)
-        if np.any(det):
-            kept.append({k: v[det] for k, v in dict(z=z, ra=ra, dec=dec, dl=dl, m1=m1, m2=m2, q=q, chi=chi, snr=snr).items()})
-    return {k: np.concatenate([x[k] for x in kept])[:nobs] for k in kept[0]}
+def _draw_bright_events_until_detected(rng, nobs, observed_catalog, grids, pop,
+                                      meas):
+    """Detected bright-siren events from the EM-observed host catalog.
+
+    Delegates to the dark generator's ``_draw_events_until_detected``, i.e. the
+    threshold acts on the RECORDED ``rho_obs`` and the measurement it thresholded
+    is carried forward under ``obs_*`` so the PE conditions on the very data the
+    selection saw.  The host-acceptance rate factor ``(1+z)**(gamma-1)`` (which
+    makes the detected events follow the inference population's redshift model)
+    lives there too, so the two generators cannot drift apart.
+    """
+    if len(observed_catalog["z"]) == 0:
+        raise RuntimeError("EM selection retained no galaxies; increase n0/zmax "
+                           "or loosen survey settings.")
+    truth, _rejected = _dark._draw_events_until_detected(
+        rng, nobs, observed_catalog, grids, pop, meas.snr_threshold, meas=meas,
+    )
+    return truth
 
 
-def _bright_posterior_samples(rng, truth, nsamp, **kwargs):
-    post = _legacy_posterior_samples(rng, truth, nsamp, **kwargs)
-    # Bright sirens have localized counterparts: every PE sample for an event
-    # uses the same sky coordinates as the associated EM counterpart.
+def _bright_posterior_samples(rng, truth, nsamp, meas):
+    """Exact flat-prior posteriors of the recorded measurement, with EM sky.
+
+    ``_dark._posterior_samples`` conditions on the ``obs_*`` columns recorded by
+    the event loop; the sky samples are then replaced by the associated EM
+    counterpart's direction, which is what a bright siren's localisation is.
+    """
+    post, _observations = _dark._posterior_samples(rng, truth, nsamp, meas)
     for i, (ra, dec) in enumerate(zip(truth["ra"], truth["dec"])):
         sl = slice(i * nsamp, (i + 1) * nsamp)
         post["ra"][sl] = ra
@@ -186,12 +110,16 @@ def _bright_posterior_samples(rng, truth, nsamp, **kwargs):
     return post
 
 
-def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold,
+def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, meas,
                                 proposal="population", m1det_range=_dark._M1DET_RANGE):
     """Numpy reference joint GW+EM selection draw (the JAX path mirrors it).  See
     generate_mock_data._draw_selection_batch for the ``proposal`` semantics; the EM
-    footprint/depth/completeness cut multiplies the GW-SNR detection mask, and pdraw
-    is unchanged (the EM selection is part of the selection function, not the proposal)."""
+    footprint/depth/completeness cut multiplies the GW detection mask, and pdraw
+    is unchanged (the EM selection is part of the selection function, not the proposal).
+
+    The GW cut is ``_dark._detect_on_observation``, i.e. the SAME recorded-rho_obs
+    rule the events passed -- mu(theta) must be the probability of passing the
+    event rule, so the two can never be allowed to differ."""
     z = _dark._sample_uniform_comoving_z(rng, grids, ndraw)
     ra, dec = _dark._sample_sky(rng, ndraw)
     dl = _dark._interp_dl(z, grids)
@@ -217,7 +145,8 @@ def _draw_joint_selection_batch(rng, ndraw, grids, pop, survey, snr_threshold,
             q = np.where(use_unif, rng.uniform(0.0, 1.0, ndraw), q)
             chi = np.where(use_unif, rng.uniform(-1.0, 1.0, ndraw), chi)
     m2src = q * m1src
-    gw_det = _network_snr(m1src, m2src, z, dl, rng) >= snr_threshold
+    gw_det, _obs = _dark._detect_on_observation(
+        rng, m1src, m2src, z, dl, ra, dec, chi, meas, need_sky=False)
     em_det = _joint_em_detected(rng, ra, dec, z, dl, survey)
     det = gw_det & em_det
 
@@ -266,27 +195,15 @@ def _em_extra_detect(survey):
     return extra
 
 
-def _projection_snr_jax(key, state):
-    """The historical projection-latent network SNR, in JAX.
-
-    The dark-siren selection kernel's own statistic is the all-observable
-    ``rho_obs = rho_opt(theta) + N(0, sigma_rho)``.  The bright-siren events are
-    still drawn against :func:`_network_snr`, and mu(theta) has to be the
-    probability of passing the SAME rule the events passed, so the kernel's
-    statistic is overridden here rather than composed with it."""
-    m1src, q, z, dl = state["m1src"], state["q"], state["z"], state["dL"]
-    m2src = q * m1src
-    mchirp_det = (m1src * m2src) ** 0.6 / (m1src + m2src) ** 0.2 * (1.0 + z)
-    proj = jnp.sqrt(jax.random.beta(key, 2.0, 5.0))
-    return SNR_REF_DEFAULT * (mchirp_det / 30.0) ** (5.0 / 6.0) * (1000.0 / dl) * proj
-
-
-def _joint_selection_injections(rng, ndraw, grids, pop, survey, snr_threshold, batch_size,
+def _joint_selection_injections(rng, ndraw, grids, pop, survey, meas, batch_size,
                                 target_detections=None, verbose=False,
                                 proposal="population", m1det_range=_dark._M1DET_RANGE):
+    # No snr_fn override: the kernel's own statistic is the recorded
+    # ``rho_obs = rho_opt(theta) + N(0, sigma_rho)``, which is exactly the rule
+    # the bright events are now drawn against.
     kernel = _dark._make_selection_kernel(
-        grids, pop, float(snr_threshold), proposal, m1det_range,
-        extra_detect=_em_extra_detect(survey), snr_fn=_projection_snr_jax,
+        grids, pop, float(meas.snr_threshold), proposal, m1det_range,
+        extra_detect=_em_extra_detect(survey), meas=meas,
     )
     return _dark._run_selection_chunks(
         rng, ndraw, grids, pop, proposal, batch_size, kernel,
@@ -302,6 +219,11 @@ def write_mock_data(args):
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
 
+    meas = _dark.MeasurementConfig(
+        snr_ref=args.snr_ref, snr_threshold=args.snr_threshold,
+        sigma_rho=args.snr_uncertainty, a_mc=args.lnmc_uncertainty,
+        a_q=args.lnq_uncertainty, a_chi=args.chieff_uncertainty,
+    )
     cosmo = _dark._build_cosmology(args.H0, args.Om0, args.w0, args.wa)
     grids = _dark._cosmology_grids(cosmo, float(args.zmax))
     n_galaxies = _dark._galaxy_count_from_density(args.n0, args.galaxy_density_delta, grids)
@@ -309,17 +231,9 @@ def write_mock_data(args):
     observed_mask = _dark._apply_survey_selection(rng, complete, survey)
     observed_catalog = {k: v[observed_mask] for k, v in complete.items()}
 
-    truth = _draw_bright_events_until_detected(rng, args.nobs, observed_catalog, grids, pop, survey, args.snr_threshold)
-    post = _bright_posterior_samples(
-        rng,
-        truth,
-        args.nsamp,
-        dL_fractional_uncertainty=args.dL_fractional_uncertainty,
-        m1det_fractional_uncertainty=args.m1det_fractional_uncertainty,
-        m2det_fractional_uncertainty=args.m2det_fractional_uncertainty,
-        chieff_uncertainty=args.chieff_uncertainty,
-        sky_uncertainty_deg=0.0,
-    )
+    truth = _draw_bright_events_until_detected(
+        rng, args.nobs, observed_catalog, grids, pop, meas)
+    post = _bright_posterior_samples(rng, truth, args.nsamp, meas)
     z_pe = np.interp(post["dL"], grids["dl"], grids["z"])
     post["m1src"] = post["m1det"] / (1.0 + z_pe)
     post["m2src"] = post["m2det"] / (1.0 + z_pe)
@@ -335,7 +249,7 @@ def write_mock_data(args):
         else int(np.ceil(args.ndraw / args.nbatches))
     )
     sel = _joint_selection_injections(
-        rng, args.ndraw, grids, pop, survey, args.snr_threshold, selection_batch_size,
+        rng, args.ndraw, grids, pop, survey, meas, selection_batch_size,
         target_detections=target, verbose=args.verbose, proposal=args.proposal,
     )
 
@@ -347,7 +261,15 @@ def write_mock_data(args):
         "population": asdict(pop),
         "survey": asdict(survey),
         "snr_threshold": args.snr_threshold,
+        "measurement_family": _dark.MEASUREMENT_FAMILY,
+        "measurement": asdict(meas),
+        "p_pe_basis": _dark.P_PE_BASIS,
         "selection_proposal": args.proposal,
+        "redshifts": {
+            "survey": "Z = z_obs = z + N(0, redshift_error_floor + "
+                      "redshift_error_slope (1+z)); ZERR = zerr(z_obs)",
+            "counterpart": "z = z_true + N(0, counterpart_dz)",
+        },
         "universe_model_for_inference": "bright_sirens",
         "pop_model_for_inference": "powerlaw+peak",
         "shared_beta_for_inference": True,
@@ -364,15 +286,26 @@ def write_mock_data(args):
             f.create_dataset(key, data=val, compression="gzip", shuffle=True)
 
     raw_path = out / "mock_survey_raw.h5"
-    zerr = survey.redshift_error_floor + survey.redshift_error_slope * (1.0 + complete["z"])
+    # The survey records the REALISED photo-z and declares the width of the model
+    # at the value it recorded, dz = zerr(z_obs) -- exactly as the dark generator
+    # does (_generate_complete_catalog / _catalog_zerr).  Writing the TRUE
+    # redshift while declaring a width makes the likelihood smooth a comb that
+    # carries no error, so the per-galaxy kernel g(z) N(z; z_g, sigma_g)/Z(z_g)
+    # is not the Bayesian posterior for the host's redshift; that inconsistency
+    # measured 7.6 sigma on a matched dark-siren mock.  z_obs is deliberately not
+    # clipped (clipping re-introduces a censored observation); the realised
+    # negative count is reported instead.
+    z_obs_survey = complete["z_obs"][observed_mask]
+    zerr_survey = _dark._catalog_zerr(z_obs_survey, survey)
+    n_negative_z_obs = int((z_obs_survey < 0.0).sum())
     with h5py.File(raw_path, "w") as f:
         f.attrs["mock_data"] = True
         f.attrs["description"] = "Observed EM survey used to select possible bright-siren counterparts."
         f.attrs["metadata_json"] = json.dumps(metadata)
         f.create_dataset("TARGET_RA", data=np.rad2deg(complete["ra"][observed_mask]), compression="gzip", shuffle=True)
         f.create_dataset("TARGET_DEC", data=np.rad2deg(complete["dec"][observed_mask]), compression="gzip", shuffle=True)
-        f.create_dataset("Z", data=complete["z"][observed_mask], compression="gzip", shuffle=True)
-        f.create_dataset("ZERR", data=zerr[observed_mask], compression="gzip", shuffle=True)
+        f.create_dataset("Z", data=z_obs_survey, compression="gzip", shuffle=True)
+        f.create_dataset("ZERR", data=zerr_survey, compression="gzip", shuffle=True)
         f.create_dataset("WEIGHT", data=np.ones(int(observed_mask.sum())), compression="gzip", shuffle=True)
 
     gw_path = out / "mock_bright_gw_events.h5"
@@ -415,22 +348,52 @@ def write_mock_data(args):
         for key in ["m1det", "m2det", "m1src", "m2src", "dL", "chieff", "ra", "dec", "pdraw"]:
             f.create_dataset(key, data=sel[key], compression="gzip", shuffle=True)
 
+    # The counterpart redshift is a MEASUREMENT of width --counterpart-dz, and for
+    # a bright-siren analysis it is the channel that sets H0: handing the exact
+    # true redshift to a likelihood that convolves it with counterpart_dz is the
+    # same zero-error-comb inconsistency as the survey block above, in the one
+    # place it matters most.  Realise the declared error.
+    z_counterpart = np.asarray(truth["z"], dtype=float) + args.counterpart_dz * rng.normal(
+        size=len(truth["z"]))
     counterparts = [
         {"ra_rad": float(ra), "dec_rad": float(dec), "z": float(z), "counterpart_dz": args.counterpart_dz}
-        for ra, dec, z in zip(truth["ra"], truth["dec"], truth["z"])
+        for ra, dec, z in zip(truth["ra"], truth["dec"], z_counterpart)
     ]
     counterpart_path = out / "bright_counterparts.json"
     counterpart_path.write_text(json.dumps({"counterparts": counterparts, "metadata": metadata}, indent=2))
 
     print("Mock bright-siren data written:")
     print(f"  complete catalog : {complete_path} ({n_galaxies:,} galaxies)")
-    print(f"  observed survey  : {raw_path} ({observed_mask.sum():,} galaxies retained)")
+    print(f"  observed survey  : {raw_path} ({observed_mask.sum():,} galaxies retained, "
+          f"photo-z realised, {n_negative_z_obs} with z_obs < 0 left unclipped)")
     print(f"  GW posteriors    : {gw_path} ({args.nobs} events x {args.nsamp} samples)")
     print(f"  GW+EM selection  : {sel_path} ({sel['n_detected']:,}/{sel['Ndraw']:,} detected injections, Neff={selection_neff:.1f})")
     print(f"  counterparts     : {counterpart_path}")
 
 
+_REMOVED_FLAGS = {
+    "--dL-fractional-uncertainty":
+        "dL is no longer measured on its own -- it is DERIVED from (Mc_det, rho), "
+        "so the distance precision follows from --snr-uncertainty and "
+        "--lnmc-uncertainty.",
+    "--m1det-fractional-uncertainty":
+        "component masses are no longer measured independently (and a "
+        "truth-scaled width is not a measurement at all); the mass channel is "
+        "(ln Mc_det, ln q). Use --lnmc-uncertainty / --lnq-uncertainty.",
+    "--m2det-fractional-uncertainty":
+        "component masses are no longer measured independently (and a "
+        "truth-scaled width is not a measurement at all); the mass channel is "
+        "(ln Mc_det, ln q). Use --lnmc-uncertainty / --lnq-uncertainty.",
+}
+
+
 def parse_args():
+    for arg in sys.argv[1:]:
+        name = arg.split("=", 1)[0]
+        if name in _REMOVED_FLAGS:
+            raise SystemExit(
+                f"{name} was removed with the all-observable measurement family: "
+                f"{_REMOVED_FLAGS[name]}")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outdir", default="data/mock_bright_sirens")
     parser.add_argument("--seed", type=int, default=5678)
@@ -465,10 +428,25 @@ def parse_args():
     targets = parser.add_mutually_exclusive_group()
     targets.add_argument("--selection-target-detections", type=_dark._positive_int, default=None)
     targets.add_argument("--selection-per-observation-factor", type=_dark._positive_float, default=None)
-    parser.add_argument("--dL-fractional-uncertainty", type=_dark._positive_float, default=0.10)
-    parser.add_argument("--m1det-fractional-uncertainty", type=_dark._positive_float, default=0.08)
-    parser.add_argument("--m2det-fractional-uncertainty", type=_dark._positive_float, default=0.10)
-    parser.add_argument("--chieff-uncertainty", type=_dark._positive_float, default=0.08)
+    # Measurement family (identical to the dark generator's; see its --snr-ref /
+    # --snr-uncertainty / --lnmc-uncertainty / --lnq-uncertainty help).
+    parser.add_argument("--snr-ref", type=_dark._positive_float,
+                        default=_dark.SNR_REF_DEFAULT,
+                        help="Amplitude scale of the detection statistic "
+                             "rho_opt = snr_ref (Mc_det/30)^(5/6) (1000 Mpc/dL).")
+    parser.add_argument("--snr-uncertainty", type=_dark._positive_float,
+                        default=_dark.SIGMA_RHO_DEFAULT,
+                        help="sigma_rho, the additive SNR noise: "
+                             "rho_obs = rho_opt + N(0, sigma_rho).")
+    parser.add_argument("--lnmc-uncertainty", type=_dark._positive_float,
+                        default=_dark.A_MC_DEFAULT,
+                        help="Width of ln Mc_det at rho_obs = --snr-threshold.")
+    parser.add_argument("--lnq-uncertainty", type=_dark._positive_float,
+                        default=_dark.A_Q_DEFAULT,
+                        help="Width of ln q at rho_obs = --snr-threshold.")
+    parser.add_argument("--chieff-uncertainty", type=_dark._positive_float,
+                        default=_dark.A_CHI_DEFAULT,
+                        help="Width of chi_eff at rho_obs = --snr-threshold.")
     parser.add_argument("--counterpart-dz", type=_dark._positive_float, default=1.0e-4)
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
