@@ -742,8 +742,16 @@ def _fit_gaussian_truncated(Mhat, T, m_lim, *, stratum, k_corr_coeffs,
         return -np.sum(norm.logpdf(resid) - np.log(sig) - log_trunc)
 
     theta0 = np.array([np.median(Mhat), np.log(max(np.std(Mhat), 1e-3))])
+    # fatol is ABSOLUTE while this NLL scales with N, so at catalog size the old
+    # 1e-10 sat BELOW the objective's own float64 resolution (eps * |NLL| ~ 2.8e-10
+    # at N = 1e6) and the stop was the accidental bit-identity of the simplex
+    # values rather than a meaningful criterion.  Scaled as in the schechter twin;
+    # measured at N = 1e6 / 2e6 it reaches the identical MLE (8 decimals) in ~40%
+    # fewer evaluations.  Theta precision is xatol's job.
     res = minimize(nll, theta0, method="Nelder-Mead",
-                   options={"xatol": 1e-8, "fatol": 1e-10, "maxiter": 20000})
+                   options={"xatol": 1e-8,
+                            "fatol": 1e-9 * max(1.0, float(Mhat.size)),
+                            "maxiter": 20000})
     if not res.success:
         raise RuntimeError(f"selection fit did not converge: {res.message}")
     mu_hat, log_sig_hat = res.x
