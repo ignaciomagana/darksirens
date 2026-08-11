@@ -567,6 +567,18 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
         the sampled prior is the normalized uniform density on it; the
         ``valid`` mask in ``log_p_pop`` remains as a backstop for samplers
         that build their own prior (numpyro) and for overridden bounds.
+
+        Deliberate deviation from Table 5: ``ordered_le`` is a SORT, so the
+        implemented joint prior is the uniform density on the ordered triangle
+        ``{3 <= m2_low <= m1_low <= 10}``, whose m1_low marginal is
+        ``p(m1_low) ~ (m1_low - 3)``.  Table 5 quotes the CONDITIONAL
+        ``m1_low ~ U(3, 10)``, ``m2_low ~ U(3, m1_low)``, i.e. the joint density
+        ``1/(7 (m1_low - 3))`` -- so this prior is 2x Table 5's density at
+        m1_low = 10 and 0.14x at 3.5, pushing the minimum BH mass up (and with it
+        the low-mass end of the selection function).  Reproducing Table 5 exactly
+        needs a conditional cube map (``m2_low = 3 + u (m1_low - 3)``) in
+        :func:`~darksirens.inference.prior.make_prior_transform`; until then the
+        fiducial vector, not the prior shape, is what this model pins.
         """
         return (
             ("simplex", (r"$\lambda_0$", r"$\lambda_1$")),
