@@ -79,6 +79,37 @@ def validate_multitracer_run(opts, data) -> None:
                 "per survey path."
             )
 
+        # DEPTH consistency between the loader and the decoder.
+        #
+        # Whether catalog k's field-convention normalizer gets the
+        # depth-consistent observed term is decided in the LOADER, from
+        # ``field_depth_inputs_required(opts, z_depth)`` (the CLI override or the
+        # survey file's own z_depth attr).  Whether the likelihood APPLIES a
+        # depth is decided independently in ``ParameterDecoder``, from
+        # ``opts.resolved_survey_z_depths`` with a silent ``or ()`` fallback to
+        # "no depth on any catalog".  Nothing compared the two: a bundle carrying
+        # field_depth_z with survey.z_depth None makes field_global_log_Z take its
+        # depth-free branch on the RAW field_N_obs_total, which counts every
+        # above-depth catalogued galaxy twice (completion.py's note), while also
+        # dropping the C := 0 relaxation beyond the depth.  The reverse direction
+        # is already caught in-jit (redshift/prior.py), so assert this one here.
+        for k, bundle in enumerate(catalogs, start=1):
+            has_depth_inputs = bundle.get("field_depth_z") is not None
+            resolved = (z_depths[k - 1]
+                        if z_depths and len(z_depths) >= k else None)
+            if has_depth_inputs and resolved is None:
+                raise ValueError(
+                    f"catalog {k} carries the field-convention DEPTH inputs "
+                    "(field_depth_z) but this run resolved no survey depth for "
+                    "it (resolved_survey_z_depths"
+                    f"={list(z_depths) if z_depths else []}). The global "
+                    "normalizer would then use the RAW field_N_obs_total, which "
+                    "counts every above-depth catalogued galaxy twice, and the "
+                    "completeness would not relax beyond the depth. Resolve the "
+                    "per-catalog depth (cli.inference.resolve_survey_z_depth) "
+                    "before building the likelihood, or pass --survey_z_depth."
+                )
+
         # FIELD-convention mixtures require a COMMON pixelisation.
         #
         # Under catalog_sky_weighting='field' each catalog's redshift prior is a

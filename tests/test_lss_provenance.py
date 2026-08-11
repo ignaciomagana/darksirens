@@ -423,3 +423,22 @@ def test_explicit_q_with_a_non_galaxy_aware_model_raises(tmp_path):
         maybe_load_lss_completion(
             _single_opts(None, q, universe_model="spectral_sirens"), zgrid=zgrid
         )
+
+def test_validate_depth_inputs_without_a_resolved_depth_raises():
+    """The loader builds a bundle's field DEPTH inputs from the file attr / CLI
+    override, while the decoder applies a depth only from
+    opts.resolved_survey_z_depths (silent `or ()` fallback).  A bundle carrying
+    field_depth_z with no resolved depth makes the global normalizer use the RAW
+    field_N_obs_total -- every above-depth galaxy counted twice."""
+    opts = SimpleNamespace(n_catalogs=2, resolved_survey_z_depths=[])
+    data = {"catalogs": [{"nside": 64, "field_depth_z": np.zeros(3)},
+                         {"nside": 64}]}
+    with pytest.raises(ValueError, match="field_depth_z"):
+        validate_multitracer_run(opts, data)
+
+
+def test_validate_depth_inputs_with_a_resolved_depth_passes():
+    opts = SimpleNamespace(n_catalogs=2, resolved_survey_z_depths=[0.5, None])
+    data = {"catalogs": [{"nside": 64, "field_depth_z": np.zeros(3)},
+                         {"nside": 64}]}
+    validate_multitracer_run(opts, data)
