@@ -1064,17 +1064,20 @@ def _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt, *, signed,
     ))
 
 
-def test_signed_time_mark_removes_the_pair_double_count():
-    """Both branches at |dt| counts a time-marked pair TWICE.
+def test_signed_and_unsigned_time_marks_agree_when_the_sign_is_uninformative():
+    """The coincidence denominator must live in the same space as the mark.
 
-    For SIS the type-I minimum always arrives before the type-II saddle, so the
-    two image-assignment branches predict opposite signs of the observed delay
-    and at most one is compatible with the data. Evaluating both at |dt| made
-    L_2 exactly 2x too large whenever the branches were comparable — a spurious
-    +log 2 = 0.693 nat per time-marked pair toward pairing, and
-    int L_2 = 2 mu_sel^(2), which breaks the Poisson normalization the master
-    likelihood assumes. Two IDENTICAL events make the branches exactly equal,
-    so the double-count is measurable to machine precision.
+    With a SIGNED mark only the ordering-consistent branch survives and the
+    numerator is a density in dt = t_j - t_i over R, whose unlensed reference is
+    the triangular (T - |dt|)/T^2. With the folded |dt| convention BOTH branches
+    contribute at the same |dt| (the two arrival orders are distinct
+    configurations of the same folded observable) and the reference is the
+    doubled 2 (T - |dt|)/T^2. The two factors of 2 cancel, so for two IDENTICAL
+    events — where the branches are exactly equal and the sign therefore carries
+    no information — the two conventions must give the SAME coincidence odds.
+    Charging the folded reference against a signed numerator (the previous
+    behaviour) instead taxed every signed pair by log 2 = 0.693 nat, i.e. it
+    PENALIZED observing an arrival order consistent with SIS.
     """
     sis = make_sis_lens_params()
     y_true = 0.55
@@ -1087,7 +1090,7 @@ def test_signed_time_mark_removes_the_pair_double_count():
     signed = _time_marked_pair_ll(ev, ev, kde, kde, sis, dt,
                                   signed=True, mode="delta")
     assert np.isfinite(unsigned) and np.isfinite(signed)
-    np.testing.assert_allclose(unsigned - signed, np.log(2.0), atol=1e-9)
+    np.testing.assert_allclose(unsigned - signed, 0.0, atol=1e-9)
 
 
 def test_signed_time_mark_enforces_the_sis_arrival_order():
@@ -1111,13 +1114,16 @@ def test_signed_time_mark_enforces_the_sis_arrival_order():
 
     for mode, sigma in (("delta", 3600.0), ("quadrature", 3.0e5)):
         kw = dict(mode=mode, sigma=sigma)
-        # Ordering CONSISTENT (brighter image first): unchanged — branch b was
-        # already negligible, so there is no penalty for a determined pairing.
+        # Ordering CONSISTENT (brighter image first): the magnification data
+        # already made branch b negligible, so knowing the order confirms the
+        # only viable assignment and the pair GAINS the log 2 that the unlensed
+        # reference loses when the sign is resolved (P(consistent order |
+        # unlensed) = 1/2).
         ok_signed = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt,
                                          signed=True, **kw)
         ok_unsigned = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt,
                                            signed=False, **kw)
-        np.testing.assert_allclose(ok_signed, ok_unsigned, atol=1e-8)
+        np.testing.assert_allclose(ok_signed - ok_unsigned, np.log(2.0), atol=1e-6)
 
         # Ordering INCONSISTENT (brighter image second): the |dt| code returns
         # the SAME value as the consistent case — it never saw the order.

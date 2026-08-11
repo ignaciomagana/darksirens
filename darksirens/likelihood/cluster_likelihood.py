@@ -314,11 +314,15 @@ def cluster_log_likelihood_pair(
     p_L ~ 1/T0 silently taxes every pairing by ~ln T0 (≈13 nats at the SIS
     default), which is what erased true-pair recovery in the G pilots. For
     two independent events with arrivals uniform over an observing run of
-    length T, the unordered separation density is
-    p_U(Δt) = 2 (T − Δt) / T², so each time-marked pair branch adds
-    −ln p_U(Δt) alongside the lensed density (both mark modes). Requires
-    ``t_obs_window_sec`` (from the observed catalog's uniform observation
-    times).
+    length T, the SIGNED separation Δt = t_j − t_i has the triangular density
+    p_U(Δt) = (T − |Δt|) / T², and the folded |Δt| has twice that,
+    2 (T − |Δt|) / T². Each time-marked pair branch adds −ln p_U(Δt) alongside
+    the lensed density (both mark modes), using the convention that matches
+    the mark: the folded density for ``pair_time_signed=False`` (whose
+    numerator sums the two arrival-order configurations at the same |Δt|) and
+    the signed one for ``pair_time_signed=True`` (whose surviving branch is a
+    density in Δt over R). Requires ``t_obs_window_sec`` (from the observed
+    catalog's uniform observation times).
 
     Symmetrizes over the two image-to-event assignments (i→+,j→- and
     i→-,j→+) by logsumexp. Each branch is itself a logsumexp over the
@@ -353,8 +357,10 @@ def cluster_log_likelihood_pair(
          constraint exists to reject.
 
     ``pair_time_signed=False`` (the default) keeps the legacy |Δt|-in-both-
-    branches behaviour bit-for-bit, for data whose recorded mark carries no
-    trustworthy sign. The unlensed coincidence denominator always uses |Δt|.
+    branches behaviour, for data whose recorded mark carries no trustworthy
+    sign; the coincidence denominator then uses the FOLDED density, so that
+    for two events whose branches are equal (the sign carries no information)
+    the signed and unsigned odds agree exactly.
 
     By symmetrization, we drive the PE-sample sum from BOTH events:
     branch 1 uses event-i's samples and event-j's KDE; branch 2 uses
@@ -384,7 +390,14 @@ def cluster_log_likelihood_pair(
         # caller's isfinite mask, silently ANNIHILATING an otherwise valid pair
         # (a bias toward no-lensing) -- the opposite of "infinitely favoured".
         dt = jnp.clip(dt, 0.0, T * (1.0 - 1e-9))
-        p_u = 2.0 * (T - dt) / (T * T)
+        # The reference density must live in the SAME space as the observable
+        # the numerator is a density in. With a signed mark the per-branch
+        # Gaussian N(dt | T0 y, sigma) is normalized over dt in R, so the
+        # unlensed reference is the SIGNED (triangular) separation density
+        # (T - |dt|)/T^2; folding it onto |dt| doubles it, and charging the
+        # folded density against a signed numerator cost every signed pair an
+        # extra log 2 of coincidence odds.
+        p_u = (1.0 if pair_time_signed else 2.0) * (T - dt) / (T * T)
         log_inv_p_unlensed = -jnp.log(p_u)
 
     # Per-branch arrival-order orientation. Branch a assigns mu_+ to event i,
