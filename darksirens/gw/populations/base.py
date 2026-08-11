@@ -490,6 +490,30 @@ class MixtureModel:
         _, _, _, ts_list = self._split_theta(theta)
         return ts_list[0]
 
+    def _low_mass_edge(self, tm_list):
+        """Mixture-level secondary-mass cut ``(m_min, dm_min)``.
+
+        The first mass component that declares a low-mass edge sets it.  A
+        component that declares none (the Gaussian ``peak``, which has no taper
+        parameters) inherits THIS edge rather than the quadrature floor
+        ``M_LO``: the secondary of a peak-component binary is drawn from the
+        same black-hole population as every other component, so its floor is a
+        sampled model parameter, not the normalisation grid's lower bound.
+        Falling back to ``M_LO`` there made the low-mass edge of most of the
+        fiducial population a quadrature knob and admitted 1 Msun secondaries
+        (measured on ``powerlaw+peak`` at the registered fiducial:
+        P(m2 < m_min = 5) = 0.019 at beta = 1 and 0.41 at beta = -1).
+        ``(M_LO, 0.01)`` survives only for a mixture in which NO component
+        declares an edge.
+        """
+        for j, c in enumerate(self.mass_components):
+            if hasattr(c, "m_min_spec"):
+                tm = tm_list[j]
+                dmmin = (tm[c.param_specs.index(c.dm_min_spec)]
+                         if hasattr(c, "dm_min_spec") else 0.01)
+                return tm[c.param_specs.index(c.m_min_spec)], dmmin
+        return M_LO, 0.01
+
     def component_densities(self, m1, q, chieff, theta):
         """Return weighted source-density contributions for each component.
 
@@ -509,6 +533,8 @@ class MixtureModel:
             for i, c in enumerate(self.spin_components)
         ]
 
+        edge = self._low_mass_edge(tm_list)
+
         contributions = []
         for i in range(self.k):
             c_m  = self.mass_components[i];    tm = tm_list[i]
@@ -518,7 +544,7 @@ class MixtureModel:
             ts   = ts_list[0 if self.shared_spin else i]
             s_idx = 0 if self.shared_spin else i
 
-            mmin, dmmin = M_LO, 0.01
+            mmin, dmmin = edge
             if hasattr(c_m, "m_min_spec"):
                 mmin  = tm[c_m.param_specs.index(c_m.m_min_spec)]
             if hasattr(c_m, "dm_min_spec"):
@@ -548,6 +574,7 @@ class MixtureModel:
         w, tm_list, tp_list, _ = self._split_theta(theta)
 
         mass_norms = [c._norm(tm_list[i]) for i, c in enumerate(self.mass_components)]
+        edge = self._low_mass_edge(tm_list)
 
         total = 0.0
         for i in range(self.k):
@@ -555,7 +582,7 @@ class MixtureModel:
             c_p = self.pairing_components[0 if self.shared_pairing else i]
             tp  = tp_list[0 if self.shared_pairing else i]
 
-            mmin, dmmin = M_LO, 0.01
+            mmin, dmmin = edge
             if hasattr(c_m, "m_min_spec"):
                 mmin  = tm[c_m.param_specs.index(c_m.m_min_spec)]
             if hasattr(c_m, "dm_min_spec"):

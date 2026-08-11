@@ -239,8 +239,8 @@ def test_injection_detected_fraction_matches_the_pdet_oracle(setup):
     z = gmd._sample_uniform_comoving_z(rng2, grids, n)
     _ra, _dec = gmd._sample_sky(rng2, n)
     dl = gmd._interp_dl(z, grids)
-    m1src, use_peak = gmd._sample_powerlaw_peak_m1(rng2, n, pop, return_component=True)
-    q = gmd._sample_q(rng2, m1src, pop, use_peak=use_peak)
+    m1src = gmd._sample_powerlaw_peak_m1(rng2, n, pop)
+    q = gmd._sample_q(rng2, m1src, pop)
     rho_opt = gmd._snr_from_detector_frame(m1src * (1.0 + z), q * m1src * (1.0 + z),
                                            dl, MEAS.snr_ref)
     expected = float(ndtr((rho_opt - THRESH) / MEAS.sigma_rho).mean())
