@@ -506,6 +506,56 @@ def test_sphere_gp_z_mean_one_between_z_nodes_and_off_quadrature():
     assert worst < 0.02, f"sphere mean of g deviates from 1 by {worst:.4f}"
 
 
+def test_sphere_gp_z_mean_one_at_the_z_length_scale_prior_floor():
+    """<g> = 1 between nodes must hold at the SHORTEST z length scale the prior
+    allows, not only at mid-prior hyperparameters.
+
+    Regression for the coarse-normaliser bug: the normaliser was tabulated on 40
+    nodes uniform in physical z (dz = 0.128) while the field's coordinate is
+    zeta = log1p(z) and log_ls_z reaches down to log(0.05) -- i.e. genuine
+    structure ~2.5x finer than the node spacing.  Measured mean-one violation
+    BETWEEN nodes was 4.8% at mid hyperparameters and 116% at the prior corner
+    (shell mean ranging over [0.71, 2.16]); the on-node tests above are blind to
+    it because linear interpolation is exact there.
+    """
+    model = get_sky_model("sphere_gp_z")
+    specs = model.param_specs
+    S = jnp.asarray(_independent_sphere())
+    zeta_g = np.asarray(model._zeta_g)
+    # Strictly BETWEEN nodes, in the coordinate the nodes are uniform in.
+    z_probe = np.expm1(0.5 * (zeta_g[:-1] + zeta_g[1:]))[::7]
+
+    for seed in (0, 1, 2):
+        rng = np.random.default_rng(seed)
+        th = rng.normal(size=len(specs))
+        th[0] = specs[0].high      # max amplitude
+        th[1] = specs[1].low       # min sphere length scale
+        th[2] = specs[2].low       # min z length scale  <- the unpinned corner
+        theta = jnp.asarray(th)
+        worst = 0.0
+        for z0 in z_probe:
+            zz = jnp.full(S.shape[0], float(z0))
+            g = jnp.exp(model.log_g_sky(S[:, 0], S[:, 1], S[:, 2], zz, theta))
+            worst = max(worst, abs(float(jnp.mean(g)) - 1.0))
+        assert worst < 0.10, (
+            f"per-shell mean-one violated by {worst:.4f} at the prior corner "
+            f"(seed {seed}); the z-normalisation grid under-resolves ls_z"
+        )
+
+
+def test_sky_z_normalisation_grid_resolves_the_z_kernel():
+    """The normalisation nodes are uniform in zeta = log1p(z) (the coordinate the
+    z-kernel acts on) and spaced at most a third of the shortest prior length
+    scale, so the interpolated normaliser can follow the field."""
+    model = get_sky_model("sphere_gp_z")
+    zeta_g = np.asarray(model._zeta_g)
+    d_zeta = np.diff(zeta_g)
+    np.testing.assert_allclose(d_zeta, d_zeta[0], rtol=1e-9)
+    ls_z_min = float(np.exp(model.param_specs[2].low))
+    assert d_zeta[0] <= ls_z_min / 3.0
+    np.testing.assert_allclose(np.asarray(model._zg), np.expm1(zeta_g), rtol=1e-12)
+
+
 def test_sky_z_normalisation_grid_covers_the_analysis_grid():
     """The normaliser must not freeze below the redshifts the pipeline samples.
 

@@ -73,7 +73,10 @@ _JITTER_ABS = 1e-9   # absolute floor; product kernels are more degeneracy-prone
 # (library-review SEV-3); the fix was applied there and not here, and the
 # "cf. gp.py" note that used to sit on these constants hid that.  ``_ZNORM_N``
 # tracks ``_ZNORM_HI`` to hold node density fixed (8 per unit z: 40 nodes at the
-# z=5 default, 24 at the 3.0 floor).
+# z=5 default, 24 at the 3.0 floor); for the (sphere x z) models it is only a
+# FLOOR -- they size their own grid to the z-kernel's shortest prior length scale
+# (see ``_SphereZGPBase.__init__``), which the 8-per-unit-z density does not
+# resolve.
 #: Sphere-average quadrature size for the mean-one normalisation of the GP sky
 #: models.  192 nodes under-resolve a high-amplitude, short-length-scale field:
 #: at the PRIOR CORNER (log_amp at its max, log_ls_sphere at its min) the sphere
@@ -301,8 +304,26 @@ class _SphereZGPBase:
         self._Zz = jnp.tile(zeta_nodes, self._M_sph)                 # (M,)
         self._Zq = _fibonacci_sphere(int(n_quad))                    # (Q, 3) sphere quad
         self._Q = int(n_quad)
-        self._zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)           # (Nzg,) physical z
-        self._zeta_g = jnp.log1p(self._zg)                          # (Nzg,)
+        # Normalisation grid laid out in the FIELD's own coordinate zeta =
+        # log1p(z) and resolved to the z-kernel.  A grid uniform in PHYSICAL z
+        # (40 nodes over [0, 5], dz = 0.128) is ~2.5x coarser than the shortest
+        # correlation length the prior allows (ls_z down to 0.05 in zeta units),
+        # so between nodes the interpolated normaliser was arbitrarily wrong and
+        # the defining contract (sphere -- or volume -- average of g is 1 at
+        # every z) failed by up to 116% at the prior corner, measured against an
+        # independent 8192-point sphere.  Unlike a constant error in g, a
+        # z-DEPENDENT one does not cancel between the per-event term and beta:
+        # it is a spurious grid-periodic modulation of the effective redshift
+        # distribution the sampler can trade against real structure (H0, gamma).
+        # Spacing d_zeta <= ls_z_min/3 brings the same corner to ~3%; cost is
+        # linear in Nzg in the (Nzg, Q) einsum, which is not the bottleneck.
+        zeta_hi = math.log1p(_ZNORM_HI)
+        n_zg = max(
+            _ZNORM_N,
+            int(math.ceil(3.0 * zeta_hi / float(np.exp(log_ls_z_bounds[0])))) + 1,
+        )
+        self._zeta_g = jnp.linspace(0.0, zeta_hi, n_zg)              # (Nzg,)
+        self._zg = jnp.expm1(self._zeta_g)                           # (Nzg,) physical z
         self._log_amp_bounds = log_amp_bounds
         self._log_ls_sphere_bounds = log_ls_sphere_bounds
         self._log_ls_z_bounds = log_ls_z_bounds
@@ -388,8 +409,11 @@ class SphereZGPSky(_SphereZGPBase):
     def _log_norm(self, fq, z):
         # log ⟨exp f(·, z_g)⟩_sphere on the z-grid, interpolated to the query z
         # (the gp.py ``_znorm_interp`` idiom).  NaN z → NaN (passes through).
+        # Interpolated in zeta = log1p(z), where the nodes are uniform and the
+        # z-kernel acts, so the interpolant resolves the field's own structure.
         log_norm_g = logsumexp(fq, axis=1) - jnp.log(self._Q)        # (Nzg,)
-        return jnp.interp(z, self._zg, log_norm_g)                   # (N,)
+        zeta = jnp.log1p(jnp.clip(z, 0.0, None))                    # (N,)
+        return jnp.interp(zeta, self._zeta_g, log_norm_g)            # (N,)
 
 
 class OverdensityGP3D(_SphereZGPBase):
@@ -413,6 +437,11 @@ class OverdensityGP3D(_SphereZGPBase):
         )
         w = jnp.asarray(dV_of_z(self._zg, H0Planck, Om0Planck, w0Fiducial, waFiducial))
         w = jnp.maximum(w, 0.0)
+        # The nodes are uniform in zeta = log1p(z), not in z, so the Riemann sum
+        # over the volume needs the dz/dzeta = (1 + z) Jacobian; without it the
+        # low-z shells are over-weighted and the volume average of g drifts from
+        # 1 by up to 7% (measured against a dense reference quadrature).
+        w = w * (1.0 + self._zg)
         self._log_vol_w = jnp.log(w) - jnp.log(jnp.sum(w))          # (Nzg,)
 
     def _log_norm(self, fq, z):
