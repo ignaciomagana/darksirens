@@ -1333,6 +1333,28 @@ def load_inputs(opts):
                         raise SystemExit(
                             f"pair_marks=time requires delta_t_obs metadata for pair_{k}"
                         )
+                    # The marks below are appended in pair-FILE order and the
+                    # master likelihood reads them POSITIONALLY against the
+                    # partition's pair rows, so without the event indices
+                    # nothing checks that pair_k describes partition pair k:
+                    # a differently-ordered metadata file hands every pair
+                    # another pair's |dt| (wrong y* = |dt|/T0, wrong
+                    # coincidence-odds denominator) and only the length is
+                    # verified (review F-014). Every in-repo writer emits the
+                    # attrs; require them.
+                    if (
+                        meta_pair is None
+                        and getattr(opts, "pair_marks", "none") == "time"
+                        and partition_mode == "fixed"
+                        and partition_pair_indices
+                    ):
+                        raise SystemExit(
+                            f"pair_{k} carries a time mark but no "
+                            "event_index_image0/event_index_image1: with "
+                            "--pair_marks time --partition_mode fixed the marks "
+                            "are consumed in partition pair order, so they "
+                            "cannot be aligned to the partition's pairs"
+                        )
                     _dt_raw = float(
                         g.attrs["delta_t_obs"]
                         if "delta_t_obs" in g.attrs

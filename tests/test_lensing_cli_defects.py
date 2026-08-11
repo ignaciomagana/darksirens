@@ -1526,3 +1526,76 @@ def test_unsupported_edge_likelihood_keys_still_raise_not_implemented():
     opts = _lensing_opts("--edge_mark_likelihood_keys", "log_sky_overlap")
     with pytest.raises(NotImplementedError):
         cli._resolve_lensing_run_config(opts)
+
+
+# ---------------------------------------------------------------------------
+# per-pair time marks must be verifiably aligned to the partition (review F-014)
+# ---------------------------------------------------------------------------
+
+def test_preflight_requires_event_indices_for_positional_time_marks(tmp_path):
+    """Per-pair marks are consumed POSITIONALLY against the partition's pair
+    rows and the only order check lives behind the OPTIONAL event_index_image*
+    attrs, so a differently-ordered metadata file silently gives every pair
+    another pair's |dt| -- wrong y* = |dt|/T0 and wrong coincidence factor --
+    with only a length check to catch it."""
+    import h5py
+
+    from darksirens.lensing import preflight
+
+    path = str(tmp_path / "pairs.h5")
+    with h5py.File(path, "w") as f:
+        f.attrs["npairs"] = 1
+        g = f.create_group("pair_0")
+        g.attrs["delta_t_obs"] = 1.0e5
+        g.attrs["sigma_delta_t"] = 3600.0
+
+    opts = _lensing_opts("--pair_marks", "time", "--partition_mode", "fixed")
+    errors, warnings_, summary = [], [], {}
+    preflight._check_pair_pe(path, 2, [(0, 1)], opts, errors, warnings_,
+                             summary, unified_observed_mode=True)
+    assert any("event_index_image0/event_index_image1" in e for e in errors), errors
+
+    # with the attrs present (what every in-repo writer emits) it passes
+    with h5py.File(path, "a") as f:
+        f["pair_0"].attrs["event_index_image0"] = 0
+        f["pair_0"].attrs["event_index_image1"] = 1
+    errors, warnings_, summary = [], [], {}
+    preflight._check_pair_pe(path, 2, [(0, 1)], opts, errors, warnings_,
+                             summary, unified_observed_mode=True)
+    assert not errors, errors
+
+
+def test_preflight_allows_index_free_marks_without_a_fixed_partition(tmp_path):
+    """Under marginalize_exact the marks come from candidate_pairs.json and are
+    re-oriented to each partition's stored order, so the attrs are not needed."""
+    import h5py
+
+    from darksirens.lensing import preflight
+
+    path = str(tmp_path / "pairs.h5")
+    with h5py.File(path, "w") as f:
+        f.attrs["npairs"] = 1
+        g = f.create_group("pair_0")
+        g.attrs["delta_t_obs"] = 1.0e5
+        g.attrs["sigma_delta_t"] = 3600.0
+
+    opts = _lensing_opts(
+        "--pair_marks", "time", "--partition_mode", "marginalize_exact",
+        "--cluster_mode", "j2", "--candidate_pairs_path", "cand.json",
+    )
+    errors, warnings_, summary = [], [], {}
+    preflight._check_pair_pe(path, 2, [], opts, errors, warnings_,
+                             summary, unified_observed_mode=True)
+    assert not any("event_index_image0/event_index_image1" in e for e in errors), errors
+
+
+def test_loader_refuses_index_free_pair_time_marks_in_fixed_mode():
+    """load_inputs is the second net behind preflight (a direct library caller
+    gets the same refusal)."""
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    src = inspect.getsource(cli.load_inputs)
+    assert "carries a time mark but no " in src
+    assert 'and partition_mode == "fixed"' in src

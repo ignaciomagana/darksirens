@@ -749,6 +749,13 @@ candidate-edge metadata:
 If both ``--pair_metadata_path`` and ``--pair_pe_path`` are provided, they must
 refer to the same path.
 
+Per-pair time marks taken from either file are consumed in the partition's pair
+order, so a ``pair_k`` group that carries ``delta_t_obs`` must also carry
+``event_index_image0``/``event_index_image1`` whenever ``--pair_marks time`` runs
+with ``--partition_mode fixed`` and a ``--partition_path``: those attrs are what
+verifies that file row *k* describes partition pair *k*.  Preflight and the
+loader both refuse the index-free combination rather than align by position.
+
 Mock lensing generation also writes a unified observed-event catalog by default:
 ``mock_observed_gw_pe.h5`` plus ``observed_catalog.json``.  This file uses the
 same ``gwcat-1.0`` event-major schema as the existing GW PE files, but contains
