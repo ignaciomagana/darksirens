@@ -416,7 +416,8 @@ def test_lensing_decoder_net_fires_on_injected_label_drift(tmp_path, monkeypatch
 # ---------------------------------------------------------------------------
 
 def _run_save_phase(tmp_path, extra_args=(), lens_fixed=None, logZerr=0.21,
-                    dead_points=None):
+                    dead_points=None, diagnostics=None, diagnostics_point=None,
+                    diagnostics_point_label="prior_midpoint"):
     """Drive _save_lensing_outputs on a minimal fixed-partition bundle and read
     back (results.hdf5 attrs, settings.json)."""
     import json
@@ -444,8 +445,10 @@ def _run_save_phase(tmp_path, extra_args=(), lens_fixed=None, logZerr=0.21,
     }
     settings = {}
     cli._save_lensing_outputs(
-        opts, str(tmp_path), settings, inp, results, {}, labels, mid,
+        opts, str(tmp_path), settings, inp, results, diagnostics or {}, labels, mid,
         {}, {}, lens_fixed, {},
+        diagnostics_point=diagnostics_point,
+        diagnostics_point_label=diagnostics_point_label,
     )
     with h5py.File(tmp_path / "results.hdf5", "r") as f:
         attrs = dict(f.attrs)
@@ -1420,3 +1423,71 @@ def test_hard_guard_still_refuses_a_non_count_only_selection(monkeypatch):
         cli.build_cluster_diagnostics(opts, inp, _FactorizedDecoder(), [], {})(
             jnp.zeros(1)
         )
+
+
+def test_saved_outputs_label_the_fallback_diagnostics_point(tmp_path):
+    """results.hdf5 and settings.json must name the point the diagnostics were
+    evaluated at. The guard-clear fallback (registry fiducial / seeded prior
+    draw) is the documented common case on paper-scale joint runs, and both
+    archives used to hard-code prior_midpoint (review F-006)."""
+    diagnostics = {
+        "n_partitions": 3,
+        "expected_n_singletons": 2.5,
+        "expected_n_pairs": 0.75,
+        "map_partition_index": 2,
+        "map_partition": {"n_singletons": 2, "n_pairs": 1},
+        "logL_marginalized": -12.5,
+        "log_z_partition_prior": 0.4,
+    }
+    marginal_args = (
+        "--cluster_mode", "j2",
+        "--partition_mode", "marginalize_exact",
+        "--candidate_pairs_path", "cand.json",
+    )
+    attrs, settings, _lo, _hi = _run_save_phase(
+        tmp_path, extra_args=marginal_args, diagnostics=diagnostics,
+        diagnostics_point=[70.0, 0.3], diagnostics_point_label="registry_fiducial",
+    )
+    assert attrs["partition_diagnostics_eval_point"] == "registry_fiducial"
+    assert attrs["diagnostics_point_logL_marginalized"] == pytest.approx(-12.5)
+    assert "prior_midpoint_logL_marginalized" not in attrs
+    assert settings["partition_diagnostics_eval_point"] == "registry_fiducial"
+    assert settings["diagnostics_point_expected_n_pairs"] == pytest.approx(0.75)
+    assert "prior_midpoint_expected_n_pairs" not in settings
+    assert settings["partition_diagnostics_eval_point_values"] == [70.0, 0.3]
+    # structural, eval-point-independent counts stay bare
+    assert settings["n_partitions"] == 3
+
+
+def test_saved_outputs_keep_the_prior_midpoint_names_when_that_is_the_point(tmp_path):
+    diagnostics = {
+        "n_partitions": 3,
+        "expected_n_singletons": 2.5,
+        "expected_n_pairs": 0.75,
+        "map_partition_index": 2,
+        "map_partition": {"n_singletons": 2, "n_pairs": 1},
+        "logL_marginalized": -12.5,
+        "log_z_partition_prior": 0.4,
+    }
+    attrs, settings, _lo, _hi = _run_save_phase(
+        tmp_path,
+        extra_args=("--cluster_mode", "j2", "--partition_mode", "marginalize_exact",
+                    "--candidate_pairs_path", "cand.json"),
+        diagnostics=diagnostics, diagnostics_point=[70.0, 0.3],
+    )
+    assert attrs["partition_diagnostics_eval_point"] == "prior_midpoint"
+    assert attrs["prior_midpoint_logL_marginalized"] == pytest.approx(-12.5)
+    assert settings["prior_midpoint_expected_n_pairs"] == pytest.approx(0.75)
+
+
+def test_smoke_test_threads_the_diagnostics_point_label_out():
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    assert "return mid, diagnostics, diag_point, diag_label" in inspect.getsource(
+        cli._smoke_test_likelihood
+    )
+    main_src = inspect.getsource(cli.main)
+    assert "diagnostics_point_label=diag_label" in main_src
+    assert "diagnostics_point=diag_point" in main_src

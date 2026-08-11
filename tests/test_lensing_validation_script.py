@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +59,46 @@ def test_marginalized_result_metadata_is_unambiguous():
     assert attrs["prior_midpoint_map_partition_n_pairs"] == 1
     assert "expected_n_pairs" not in attrs
     assert attrs["n_partitions"] == 3
+
+
+def test_fallback_diagnostics_point_is_not_filed_as_the_prior_midpoint():
+    """The reliability guard often fires at the midpoint on paper-scale joint
+    runs, and the fallback evaluates at the registry fiducial (or a seeded prior
+    draw) instead. Those numbers must not be archived as prior_midpoint_*
+    (review F-006)."""
+    from types import SimpleNamespace
+
+    from darksirens.cli.inference_lensing import _write_result_partition_metadata
+
+    attrs = {}
+    opts = SimpleNamespace(
+        partition_mode="marginalize_exact",
+        cluster_mode="j2",
+        wl_backend="lognormal",
+        wl_selection="standard",
+    )
+    inp = {"nEvents": 4, "n_singletons": 4, "n_pairs": 0}
+    diagnostics = {
+        "n_partitions": 3,
+        "expected_n_singletons": 2.5,
+        "expected_n_pairs": 0.75,
+        "map_partition_index": 2,
+        "map_partition": {"n_singletons": 2, "n_pairs": 1},
+        "logL_marginalized": -12.5,
+        "log_z_partition_prior": 0.4,
+    }
+
+    _write_result_partition_metadata(
+        attrs, opts=opts, inp=inp, diagnostics=diagnostics,
+        eval_point_label="registry_fiducial", eval_point=[70.0, 0.3],
+    )
+
+    assert attrs["partition_diagnostics_eval_point"] == "registry_fiducial"
+    assert attrs["diagnostics_point_expected_n_pairs"] == 0.75
+    assert attrs["diagnostics_point_logL_marginalized"] == -12.5
+    assert "prior_midpoint_expected_n_pairs" not in attrs
+    # the numeric point is archived too, not only in midpoint_diagnostics.json
+    assert json.loads(attrs["partition_diagnostics_eval_point_values"]) == [70.0, 0.3]
 
 
 def test_fixed_result_metadata_preserves_legacy_n_pairs():

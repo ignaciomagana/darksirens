@@ -1915,7 +1915,25 @@ def _write_failure(run_dir, stage, exc, *, labels=None, settings=None):
     _write_json(os.path.join(run_dir, "failure.json"), payload, allow_nan=True)
 
 
-def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
+def _partition_diagnostics_key_prefix(eval_point_label):
+    """Attr/settings prefix for the partition diagnostics' eval point.
+
+    ``prior_midpoint_*`` is reserved for numbers actually evaluated at the
+    midpoint; anything the guard-clear fallback picked instead gets the generic
+    ``diagnostics_point_*`` prefix already used for the lens block
+    (``_lens_settings_dict(..., eval_point="diagnostics_point")``).
+    """
+    return (
+        "prior_midpoint"
+        if str(eval_point_label or "prior_midpoint") == "prior_midpoint"
+        else "diagnostics_point"
+    )
+
+
+def _write_result_partition_metadata(
+    attrs, *, opts, inp, diagnostics,
+    eval_point_label="prior_midpoint", eval_point=None,
+):
     """Write unambiguous partition-count metadata to ``results.hdf5`` attrs."""
     partition_mode = str(getattr(opts, "partition_mode", "fixed"))
     attrs["partition_mode"] = partition_mode
@@ -1944,18 +1962,29 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
         attrs["global_partitions_enumerated"] = bool(diagnostics.get("global_partitions_enumerated", True))
         if diagnostics.get("approximate_total_partitions") is not None:
             attrs["approximate_total_partitions"] = int(diagnostics["approximate_total_partitions"])
-        # These are evaluated at the PRIOR MIDPOINT (the stdout print says so;
-        # the file attrs previously did not — library review, lensing CLI
-        # finding 6): label them explicitly so nobody traces pre-posterior
-        # numbers into a paper as run results.
-        attrs["partition_diagnostics_eval_point"] = "prior_midpoint"
-        attrs["prior_midpoint_expected_n_singletons"] = float(diagnostics["expected_n_singletons"])
-        attrs["prior_midpoint_expected_n_pairs"] = float(diagnostics["expected_n_pairs"])
-        attrs["prior_midpoint_map_partition_index"] = int(diagnostics["map_partition_index"])
+        # These are evaluated at ONE parameter point, not at the posterior (the
+        # stdout print says so; the file attrs previously did not — library
+        # review, lensing CLI finding 6): label them explicitly so nobody traces
+        # pre-posterior numbers into a paper as run results.  The point is the
+        # prior midpoint only when the reliability guard cleared there; the
+        # guard-clear fallback (registry fiducial, then seeded prior draws) is
+        # the documented common case on paper-scale joint runs, and the attrs
+        # used to claim prior_midpoint regardless (review F-006).
+        prefix = _partition_diagnostics_key_prefix(eval_point_label)
+        attrs["partition_diagnostics_eval_point"] = str(
+            eval_point_label or "prior_midpoint"
+        )
+        if eval_point is not None:
+            attrs["partition_diagnostics_eval_point_values"] = json.dumps(
+                np.asarray(eval_point, dtype=float).tolist()
+            )
+        attrs[f"{prefix}_expected_n_singletons"] = float(diagnostics["expected_n_singletons"])
+        attrs[f"{prefix}_expected_n_pairs"] = float(diagnostics["expected_n_pairs"])
+        attrs[f"{prefix}_map_partition_index"] = int(diagnostics["map_partition_index"])
         map_partition = diagnostics["map_partition"]
-        attrs["prior_midpoint_map_partition_n_singletons"] = int(map_partition["n_singletons"])
-        attrs["prior_midpoint_map_partition_n_pairs"] = int(map_partition["n_pairs"])
-        attrs["prior_midpoint_logL_marginalized"] = float(diagnostics["logL_marginalized"])
+        attrs[f"{prefix}_map_partition_n_singletons"] = int(map_partition["n_singletons"])
+        attrs[f"{prefix}_map_partition_n_pairs"] = int(map_partition["n_pairs"])
+        attrs[f"{prefix}_logL_marginalized"] = float(diagnostics["logL_marginalized"])
         attrs["log_z_partition_prior"] = float(diagnostics["log_z_partition_prior"])
         attrs["edge_mark_prior_keys"] = json.dumps(inp.get("edge_mark_prior_keys", []))
         attrs["edge_prior_semantics"] = "effective_log_prior_odds = raw_log_prior_odds + sum(requested log_* marks)"
@@ -2017,7 +2046,9 @@ def _diagnostics_at_guard_clear_point(
     sampler itself is fine (it concentrates where the guard is clear). Fall
     back to seeded prior draws; if none of them clears the guard the sampler
     would not find live points either, so re-raise the last error.
-    Returns (diagnostics, evaluation_point)."""
+    Returns (diagnostics, evaluation_point, evaluation_point_label) -- the label
+    is what the archived attrs/settings are keyed on, so numbers computed at the
+    fallback point cannot be filed as prior_midpoint_* (review F-006)."""
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
     rng = np.random.default_rng(seed)
@@ -2037,7 +2068,7 @@ def _diagnostics_at_guard_clear_point(
                     f"diagnostics point: {name} "
                     "(reliability guard fired at the prior midpoint)"
                 )
-            return diagnostics, point
+            return diagnostics, point, name.replace(" ", "_")
         except RuntimeError as exc:
             if "NON-FINITE" not in str(exc):
                 raise
@@ -3601,7 +3632,9 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
                            loglike, diagnostics_fn, pop_params_fid):
     """Smoke-eval at the prior midpoint so JIT compile errors surface early,
     then evaluate and persist the factorization diagnostics.  Returns
-    (mid, diagnostics)."""
+    (mid, diagnostics, diagnostics_point, diagnostics_point_label) -- the point
+    and its label travel with the numbers so the archives cannot mislabel
+    them."""
     _section("Building likelihood")
     print("  │  JIT compiling at the prior midpoint...", flush=True)
     mid = 0.5 * (lower + upper)
@@ -3618,12 +3651,16 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
         fid_point = _fiducial_candidate_point(
             labels, mid, lower, upper, opts, pop_params_fid
         )
-        diagnostics, diag_point = _diagnostics_at_guard_clear_point(
+        diagnostics, diag_point, diag_label = _diagnostics_at_guard_clear_point(
             diagnostics_fn, mid, lower, upper, int(opts.seed), fiducial=fid_point
         )
         _write_json(
             os.path.join(run_dir, "midpoint_diagnostics.json"),
-            {**diagnostics, "evaluation_point": np.asarray(diag_point, dtype=float).tolist()},
+            {
+                **diagnostics,
+                "evaluation_point": np.asarray(diag_point, dtype=float).tolist(),
+                "evaluation_point_label": diag_label,
+            },
         )
     except Exception as exc:
         _write_failure(run_dir, "midpoint_diagnostics", exc, labels=labels, settings=settings)
@@ -3639,7 +3676,7 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
         )
         raise
     _print_diagnostics_summary(diagnostics)
-    return mid, diagnostics
+    return mid, diagnostics, diag_point, diag_label
 
 
 def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
@@ -3695,7 +3732,8 @@ def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
 
 def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
                           labels, mid, fixed, base_fixed, lens_fixed,
-                          lens_overrides):
+                          lens_overrides, *, diagnostics_point=None,
+                          diagnostics_point_label="prior_midpoint"):
     """Persist samples/results/settings/diagnostics and the best-effort corner
     plot inside a framed section."""
     _section("Saving outputs")
@@ -3722,7 +3760,9 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             f.attrs["pair_tag_constant"] = float(opts.pair_tag_constant)
             f.attrs["pair_tag_perturb_logit"] = float(opts.pair_tag_perturb_logit)
             _write_result_partition_metadata(
-                f.attrs, opts=opts, inp=inp, diagnostics=diagnostics
+                f.attrs, opts=opts, inp=inp, diagnostics=diagnostics,
+                eval_point_label=diagnostics_point_label,
+                eval_point=diagnostics_point,
             )
             f.attrs["wl_a"] = float(opts.lensing_wl_a)
             f.attrs["wl_b"] = float(opts.lensing_wl_b)
@@ -3780,18 +3820,30 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
                 "format_version"
             ) or inp["observed_catalog"].get("pe_format_version")
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
-            # The partition diagnostics are evaluated ONCE at the prior midpoint,
-            # so the parameter-dependent quantities (expected/MAP pair counts,
-            # marginalized logL) are NOT posterior expectations. Prefix them
-            # prior_midpoint_* and stamp the eval point, mirroring results.hdf5
-            # -- bare names let a downstream tool read a pre-posterior number as
-            # the run's E[n_pairs]. Structural counts (n_partitions, ...) are
-            # eval-point-independent and stay bare.
+            # The partition diagnostics are evaluated ONCE, at a single
+            # parameter point, so the parameter-dependent quantities
+            # (expected/MAP pair counts, marginalized logL) are NOT posterior
+            # expectations. Prefix them with that point and stamp its name,
+            # mirroring results.hdf5 -- bare names let a downstream tool read a
+            # pre-posterior number as the run's E[n_pairs], and a hard-coded
+            # prior_midpoint_ prefix mislabels everything the guard-clear
+            # fallback evaluated elsewhere (review F-006). Structural counts
+            # (n_partitions, ...) are eval-point-independent and stay bare.
+            _diag_prefix = _partition_diagnostics_key_prefix(diagnostics_point_label)
+            settings.update({
+                "partition_diagnostics_eval_point": str(
+                    diagnostics_point_label or "prior_midpoint"
+                ),
+                "partition_diagnostics_eval_point_values": (
+                    np.asarray(diagnostics_point, dtype=float).tolist()
+                    if diagnostics_point is not None
+                    else None
+                ),
+                f"{_diag_prefix}_expected_n_pairs": float(diagnostics["expected_n_pairs"]),
+                f"{_diag_prefix}_map_n_pairs": int(diagnostics["map_partition"]["n_pairs"]),
+                f"{_diag_prefix}_logL_marginalized": float(diagnostics["logL_marginalized"]),
+            })
             settings.update(
-                partition_diagnostics_eval_point="prior_midpoint",
-                prior_midpoint_expected_n_pairs=float(diagnostics["expected_n_pairs"]),
-                prior_midpoint_map_n_pairs=int(diagnostics["map_partition"]["n_pairs"]),
-                prior_midpoint_logL_marginalized=float(diagnostics["logL_marginalized"]),
                 n_partitions=int(diagnostics["n_partitions"]),
                 approximate_total_partitions=int(diagnostics.get("approximate_total_partitions", diagnostics["n_partitions"])),
                 partition_component_mode=diagnostics.get("partition_component_mode"),
@@ -3858,7 +3910,7 @@ def main(argv=None):
     _gate_or_stamp_resume_fingerprint(
         opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed
     )
-    mid, diagnostics = _smoke_test_likelihood(
+    mid, diagnostics, diag_point, diag_label = _smoke_test_likelihood(
         opts, run_dir, settings, labels, lower, upper, loglike,
         diagnostics_fn, pop_params_fid)
     results = _run_lensing_sampling(
@@ -3866,7 +3918,8 @@ def main(argv=None):
         prior_kinds=prior_kinds)
     _save_lensing_outputs(
         opts, run_dir, settings, inp, results, diagnostics, labels, mid,
-        fixed, base_fixed, lens_fixed, lens_overrides)
+        fixed, base_fixed, lens_fixed, lens_overrides,
+        diagnostics_point=diag_point, diagnostics_point_label=diag_label)
 
     print()
     _banner(f"DONE  │  total wall time {datetime.datetime.now() - t_start}")
