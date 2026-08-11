@@ -70,6 +70,15 @@ def test_operational_knobs_do_not_change_the_digest():
         save_path="/a/completely/different/save",
         show_progress=True,
         dynesty_diagnostics=True,
+        # memory-probed block sizes: resolved from live free VRAM before the
+        # fingerprint is built, so they differ between two nodes / two requeues
+        sel_batch_size=4096,
+        block_size_static_state_bytes=1 << 33,
+        # legacy tinyns checkpoint flags (they also name the evolving checkpoint)
+        tinyns_checkpoint_path="/some/run/checkpoint.tinyns.npz",
+        tinyns_checkpoint_path_out="/some/run/checkpoint.tinyns.npz",
+        tinyns_resume_from="/some/run/checkpoint.tinyns.npz",
+        tinyns_progress_interval=50,
     )
     for key, value in operational.items():
         changed = _fingerprint(_opts(**{key: value}))
@@ -77,6 +86,20 @@ def test_operational_knobs_do_not_change_the_digest():
             f"operational knob {key!r} changed the fingerprint digest; this "
             "would break every SLURM requeue that toggles it"
         )
+
+
+def test_legacy_tinyns_checkpoint_is_never_hashed_as_an_input(tmp_path):
+    """--tinyns_resume_from names the run's OWN checkpoint, whose bytes are
+    rewritten every --tinyns_checkpoint_interval iterations: hashing it as an
+    input file made the digest unstable between two consecutive resume attempts,
+    so the gate was guaranteed to reject."""
+    ckpt = tmp_path / "checkpoint.tinyns.npz"
+    ckpt.write_bytes(b"\x00" * 64)
+    reference = _fingerprint(_opts(tinyns_resume_from=str(ckpt)))
+    ckpt.write_bytes(b"\x01" * 128)          # sampler wrote a new checkpoint
+    assert _fingerprint(_opts(tinyns_resume_from=str(ckpt)))["digest"] == (
+        reference["digest"]
+    )
 
 
 def test_underscore_attributes_are_ignored():

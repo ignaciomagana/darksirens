@@ -78,6 +78,16 @@ _NON_SEMANTIC_KEYS = frozenset({
     "resume_from_resolved",
     "run_dir",
     "save_path",
+    # legacy tinyns-specific checkpoint flags (sampling.py still honours them
+    # over the shared plan).  They differ between a submission and its resume
+    # exactly like resume_from_resolved -- and worse, once sampling has started
+    # they name an EXISTING file, so the data_files scan below would hash the
+    # checkpoint itself, whose bytes are rewritten every
+    # --tinyns_checkpoint_interval iterations.
+    "tinyns_checkpoint_path",
+    "tinyns_checkpoint_path_out",
+    "tinyns_resume_from",
+    "tinyns_progress_interval",
     # presentation / diagnostics
     "show_progress",
     "dynesty_diagnostics",
@@ -97,6 +107,12 @@ _NON_SEMANTIC_KEYS = frozenset({
     "pe_block",
     "pe_event_block",
     "selection_block",
+    # ... including the two other values _resolve_and_report_block_sizes writes
+    # back onto opts from a LIVE device-memory probe: a requeue landing on a GPU
+    # with a different resident footprint resolves a different sel_batch_size (or
+    # None), which would refuse the resume instead of continuing it.
+    "sel_batch_size",
+    "block_size_static_state_bytes",
     "max_component_partitions",
     "max_total_partitions",
     "tinyns_checkpoint_interval",
