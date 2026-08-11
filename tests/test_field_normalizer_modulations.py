@@ -924,3 +924,64 @@ def test_marked_field_requires_flat_mark_inputs():
             mark_model="loglinear", mark_params=jnp.asarray([0.5]),
             mark_names=("logmstar",), catalog_sky_weighting="field",
         )
+
+
+# ---------------------------------------------------------------------------
+# Bundles already carry their budget rows: prepare_catalog_views must not
+# rebuild them (the mixture factory reads the BUNDLE's rows, so the rebuild is
+# a dead float64 pass over the whole (M, n_pix, N_grid) ensemble).
+# ---------------------------------------------------------------------------
+
+def _views_opts():
+    return SimpleNamespace(catalog_sky_weighting="field", survey_z_depth=None,
+                           mark_model="none", mark_names=())
+
+
+def _count_field_q_builds(monkeypatch):
+    import darksirens.likelihood.catalog_views as cv
+
+    calls = {"det": 0, "members": 0}
+    det, mem = cv.build_field_lss_q_inputs, cv.build_field_lss_q_member_inputs
+
+    def _det(*a, **k):
+        calls["det"] += 1
+        return det(*a, **k)
+
+    def _mem(*a, **k):
+        calls["members"] += 1
+        return mem(*a, **k)
+
+    monkeypatch.setattr(cv, "build_field_lss_q_inputs", _det)
+    monkeypatch.setattr(cv, "build_field_lss_q_member_inputs", _mem)
+    return cv, calls
+
+
+def test_bundle_budget_rows_are_reused_not_rebuilt(monkeypatch):
+    cv, calls = _count_field_q_builds(monkeypatch)
+    bundle = _ensemble_bundle(_logq_members_table())
+    views = cv.prepare_catalog_views(
+        _views_opts(), bundle, "dark_sirens_complete", None
+    )
+    assert calls == {"det": 0, "members": 0}
+    np.testing.assert_array_equal(np.asarray(views.field_lss_q),
+                                  np.asarray(bundle["field_lss_q"]))
+    np.testing.assert_array_equal(np.asarray(views.field_lss_q_members),
+                                  np.asarray(bundle["field_lss_q_members"]))
+    np.testing.assert_array_equal(
+        np.asarray(views.field_lss_q_empty_sum_members),
+        np.asarray(bundle["field_lss_q_empty_sum_members"]))
+
+
+def test_missing_budget_rows_are_still_built_from_the_global_table(monkeypatch):
+    """The control: without caller-supplied rows the global table is consumed."""
+    cv, calls = _count_field_q_builds(monkeypatch)
+    bundle = _ensemble_bundle(_logq_members_table())
+    for key in ("field_lss_q", "field_lss_q_empty_sum",
+                "field_lss_q_members", "field_lss_q_empty_sum_members"):
+        bundle.pop(key, None)
+    views = cv.prepare_catalog_views(
+        _views_opts(), bundle, "dark_sirens_complete", None
+    )
+    assert calls == {"det": 1, "members": 1}
+    assert views.field_lss_q is not None
+    assert views.field_lss_q_members is not None

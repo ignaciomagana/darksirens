@@ -1812,6 +1812,45 @@ def _field_missing_curve(
     return V_total, dN_exp
 
 
+def _member_empty_strata_rows(survey: SurveyParams, em_catalog: EMCatalog):
+    """Per-member per-stratum empty-pixel Q budget, or ``None`` when unused.
+
+    ``None`` whenever the run is not stratified (the strata budget never reaches
+    :func:`_field_missing_curve`, so the member vmap broadcasts it) or the
+    stratified normalizer takes its ``empty_stratum_counts`` branch.  A
+    stratified Q-ensemble run that supplies the DETERMINISTIC strata budget but
+    NOT its per-member twin is rejected: the stratified branch reads only the
+    strata array, so member m's normalizer would carry the deterministic
+    empty-pixel budget while member m's numerator carries member m's Q --
+    marginalizing over inconsistent estimands.
+    """
+    if survey.selection_strata is None:
+        return None
+    rows = em_catalog.field_lss_q_empty_sum_strata_members
+    if rows is None:
+        if em_catalog.field_lss_q_empty_sum_strata is None:
+            return None
+        raise ValueError(
+            "stratified selection with a Q ENSEMBLE needs "
+            "EMCatalog.field_lss_q_empty_sum_strata_members (the per-member "
+            "twin of field_lss_q_empty_sum_strata); build it alongside "
+            "field_lss_q_empty_sum_members from the stratum map, or the "
+            "per-member normalizers would reuse the deterministic "
+            "empty-pixel budget."
+        )
+    return jnp.asarray(rows)
+
+
+def _replace_member_q(em_catalog, q_m, q_empty_m, q_strata_m):
+    """Install ensemble member m's Q rows / empty-pixel budgets on the catalog."""
+    cat_m = em_catalog._replace(
+        field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
+    )
+    if q_strata_m is None:
+        return cat_m
+    return cat_m._replace(field_lss_q_empty_sum_strata=q_strata_m)
+
+
 def field_global_log_Z_members(
     cosmo: CosmoParams,
     survey: SurveyParams,
@@ -1827,6 +1866,11 @@ def field_global_log_Z_members(
 
     The observed term (``field_observed_global_total``, including the depth
     reduction) is member-INDEPENDENT and is hoisted OUT of the member vmap.
+
+    Under STRATIFIED selection the per-stratum empty-pixel budget
+    (``field_lss_q_empty_sum_strata``) is what ``_field_missing_curve`` reads, so
+    its per-member twin must be swapped in too (see
+    :func:`_member_empty_strata_rows`).
     """
     q_members = em_catalog.field_lss_q_members
     q_empty_members = em_catalog.field_lss_q_empty_sum_members
@@ -1836,17 +1880,18 @@ def field_global_log_Z_members(
             "field_lss_q_empty_sum_members; build them via "
             "build_field_lss_q_member_inputs."
         )
+    strata_members = _member_empty_strata_rows(survey, em_catalog)
     N_obs_total = field_observed_global_total(cosmo, survey, em_catalog)
 
-    def _one(q_m, q_empty_m):
-        cat_m = em_catalog._replace(
-            field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
-        )
+    def _one(q_m, q_empty_m, q_strata_m):
+        cat_m = _replace_member_q(em_catalog, q_m, q_empty_m, q_strata_m)
         return field_global_log_Z(
             cosmo, survey, cat_m, N_obs_total=N_obs_total
         )
 
-    return vmap(_one)(jnp.asarray(q_members), jnp.asarray(q_empty_members))
+    return vmap(_one, in_axes=(0, 0, None if strata_members is None else 0))(
+        jnp.asarray(q_members), jnp.asarray(q_empty_members), strata_members
+    )
 
 
 def field_global_log_Z_marked(
@@ -1908,7 +1953,8 @@ def field_global_log_Z_marked_members(
     The marked analogue of :func:`field_global_log_Z_members`: one
     :func:`field_global_log_Z_marked` evaluation per Q-ensemble member, swapping
     only the member's Q rows / empty-pixel budget (``field_lss_q_members`` /
-    ``field_lss_q_empty_sum_members``) into the missing curve.  The observed
+    ``field_lss_q_empty_sum_members``, plus the per-stratum twin under
+    stratified selection) into the missing curve.  The observed
     marked mass (with its depth scaling) and the ``mu_miss(z | eta)`` factor are
     member-INDEPENDENT (full-sky flat marks), so they are computed ONCE here and
     shared verbatim across members -- reusing ``field_global_log_Z_marked``
@@ -1925,19 +1971,20 @@ def field_global_log_Z_marked_members(
             "field_lss_q_empty_sum_members; build them via "
             "build_field_lss_q_member_inputs."
         )
+    strata_members = _member_empty_strata_rows(survey, em_catalog)
     S_obs = field_marked_observed_global_total(
         cosmo, survey, em_catalog, log_h_flat
     )
 
-    def _one(q_m, q_empty_m):
-        cat_m = em_catalog._replace(
-            field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
-        )
+    def _one(q_m, q_empty_m, q_strata_m):
+        cat_m = _replace_member_q(em_catalog, q_m, q_empty_m, q_strata_m)
         return field_global_log_Z_marked(
             cosmo, survey, cat_m, mu_miss, log_h_flat, S_obs=S_obs
         )
 
-    return vmap(_one)(jnp.asarray(q_members), jnp.asarray(q_empty_members))
+    return vmap(_one, in_axes=(0, 0, None if strata_members is None else 0))(
+        jnp.asarray(q_members), jnp.asarray(q_empty_members), strata_members
+    )
 
 
 def build_field_mark_inputs(

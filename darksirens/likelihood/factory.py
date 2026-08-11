@@ -189,6 +189,39 @@ def _make_mixture_likelihood(
             f"{None if bundles is None else len(bundles)}."
         )
 
+    universe_model = opts.universe_model
+    # Operands this path does NOT carry: the bundle EMCatalogs are built without
+    # the counterpart plumbing and the stratified-selection inputs, and the body
+    # forwards no weak-lensing operands.  For K >= 2 each of those combinations is
+    # rejected elsewhere (core.darksiren_log_likelihood's mixture universe-model
+    # gate, parameters.build_parameter_decoder's single-catalog strata rule), but
+    # the K = 1-WITH-bundles route has no gate at all -- and a dropped counterpart
+    # is SILENT (redshift/prior.py falls back to an arbitrary catalogued pixel as
+    # "the counterpart"), while a dropped WL backend just evaluates with
+    # magnification off.  Fail at BUILD time so the unsupported combinations are
+    # unreachable by construction.
+    dropped = [
+        key
+        for key in (
+            "counterpart_pixel", "counterpart_pixels", "counterpart_zs",
+            "counterpart_dzs", "wl_params", "pixel_stratum_map",
+        )
+        if data.get(key) is not None
+    ]
+    if dropped:
+        raise NotImplementedError(
+            "The bundle-source likelihood does not carry these operands: "
+            f"{', '.join(dropped)}. Counterparts, weak lensing and stratified "
+            "selection are single-catalog FLAT-data features (no "
+            "data['catalogs'])."
+        )
+    if universe_model in ("bright_sirens", "spectral_sirens_wl"):
+        raise NotImplementedError(
+            f"universe_model={universe_model!r} is not supported by the "
+            "bundle-source likelihood (its counterpart / weak-lensing operands "
+            "are not carried); run it on the flat single-catalog path."
+        )
+
     nEvents = data["nEvents"]
     nsamp = data["nsamp"]
     Ndraw = data["Ndraw"]
@@ -196,7 +229,6 @@ def _make_mixture_likelihood(
     shared_beta = bool(getattr(opts, "shared_beta", True))
     shared_spin = bool(getattr(opts, "shared_spin", True))
     shared_gamma = bool(getattr(opts, "shared_gamma", True))
-    universe_model = opts.universe_model
     sel_batch_size = require_resolved_block_size(
         "sel_batch_size", getattr(opts, "sel_batch_size", None))
     pe_event_block = require_resolved_block_size(
@@ -753,8 +785,24 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             )
         return barrier(full_j[up]), 1
 
+    # Flat union path: prepare_catalog_views aliases the PE and selection views
+    # onto ONE union galaxy table / unique-pixel array, so every per-view slice
+    # below is a pure function of the SAME arguments.  Slice ONCE and alias, as
+    # _make_mixture_likelihood's ``bundle_union`` does: the redshift-prior-state
+    # sharing verdict tests ``is`` identity on exactly these leaves, so
+    # re-slicing collapsed sharing to False -- and doubled the (M, N_rows,
+    # N_grid) prior-state precomputation -- on every run carrying a Q table, a Q
+    # ensemble or marks.  Detected by identity, never by value.
+    union_views = (
+        catalogs.unique_pixels_pe is catalogs.unique_pixels_sel
+        and catalogs.zgals_pe_catalog is catalogs.zgals_sel_catalog
+    )
+
     lss_q_pe, lss_idx_pe = _compact_lss_q(catalogs.unique_pixels_pe)
-    lss_q_sel, lss_idx_sel = _compact_lss_q(catalogs.unique_pixels_sel)
+    lss_q_sel, lss_idx_sel = (
+        (lss_q_pe, lss_idx_pe) if union_views
+        else _compact_lss_q(catalogs.unique_pixels_sel)
+    )
 
     # Slice the (optional) Q_LSS ENSEMBLE (M, n_pix, n_grid) to each view's union
     # pixels the same way, for the fully-Bayesian marginalisation (--lss_marginalize).
@@ -789,7 +837,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         return barrier(full_j[:, up])
 
     lss_qm_pe = _compact_lss_members(catalogs.unique_pixels_pe)
-    lss_qm_sel = _compact_lss_members(catalogs.unique_pixels_sel)
+    lss_qm_sel = (
+        lss_qm_pe if union_views
+        else _compact_lss_members(catalogs.unique_pixels_sel)
+    )
     lss_marginalize = bool(getattr(opts, "lss_marginalize", False))
 
     # Per-galaxy marks: gathered to the compact catalog rows using the SAME
@@ -810,7 +861,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         return out
 
     marks_pe = _compact_marks(catalogs.unique_pixels_pe)
-    marks_sel = _compact_marks(catalogs.unique_pixels_sel)
+    marks_sel = (
+        marks_pe if union_views
+        else _compact_marks(catalogs.unique_pixels_sel)
+    )
 
     m1det_pe = barrier(_to_jax(data, "m1det"))
     m2det_pe = barrier(_to_jax(data, "m2det"))
@@ -898,6 +952,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         empty_stratum_counts=getattr(catalogs, "empty_stratum_counts", None),
         field_lss_q_empty_sum_strata=getattr(
             catalogs, "field_lss_q_empty_sum_strata", None),
+        field_lss_q_empty_sum_strata_members=getattr(
+            catalogs, "field_lss_q_empty_sum_strata_members", None),
     )
     em_catalog_sel = EMCatalog(
         apix=apix,
@@ -950,6 +1006,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         empty_stratum_counts=getattr(catalogs, "empty_stratum_counts", None),
         field_lss_q_empty_sum_strata=getattr(
             catalogs, "field_lss_q_empty_sum_strata", None),
+        field_lss_q_empty_sum_strata_members=getattr(
+            catalogs, "field_lss_q_empty_sum_strata_members", None),
     )
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, (em_catalog_pe,), (em_catalog_sel,)
