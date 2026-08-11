@@ -798,8 +798,21 @@ def run_sampler(method, likelihood, prior_transform, labels,
         _stop_diag = threading.Event()
 
         def _write_dynesty_diagnostics(sampler_ref):
-            res = sampler_ref.results
-            if len(res.samples) < 2:
+            # ``sampler_ref.results`` assembles several parallel arrays from the
+            # LIVE run while the main thread is appending to saved_run, so a
+            # concurrent read can see mismatched lengths and raise (dynesty 2.1
+            # checks that itself).  Unguarded, one such read killed this daemon
+            # thread permanently and silently -- no diagnostics for the rest of a
+            # multi-day run, which is exactly what --dynesty_diagnostics exists
+            # to avoid.  Skip the sample and try again next interval.
+            try:
+                res = sampler_ref.results
+                n_samples = len(res.samples)
+            except Exception as e:
+                print(f"[dynesty diag] skipped an inconsistent concurrent read "
+                      f"of sampler.results: {e}", flush=True)
+                return
+            if n_samples < 2:
                 return
             _diag_index[0] += 1
             idx = _diag_index[0]
@@ -898,7 +911,14 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 # Wait one full interval before the first plot so dynesty has real samples.
                 _stop_diag.wait(timeout=diag_interval)
                 while not _stop_diag.is_set():
-                    _write_dynesty_diagnostics(sampler)
+                    # Belt and braces around the guarded writer: nothing raised
+                    # from a diagnostics plot may terminate this thread (or the
+                    # remaining days of a run lose their diagnostics silently).
+                    try:
+                        _write_dynesty_diagnostics(sampler)
+                    except Exception as e:
+                        print(f"[dynesty diag] diagnostics pass failed: {e}",
+                              flush=True)
                     _stop_diag.wait(timeout=diag_interval)
 
             diag_thread = threading.Thread(target=_diag_thread_fn, daemon=True)
