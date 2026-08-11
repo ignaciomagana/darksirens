@@ -312,12 +312,18 @@ def batched_map(fn, samples, batch_size):
         samples = jnp.concatenate([samples, jnp.repeat(samples[-1:], pad, axis=0)], axis=0)
 
     vfn = jax.jit(jax.vmap(fn))
+    # Each batch is pulled to the host as it completes and the stack is built with
+    # numpy: keeping the per-batch outputs on device and concatenating there held
+    # three simultaneous device copies of the FULL per-sample stack at the seam
+    # (p_m1m2 alone is nsamples*nm*nm*8 bytes -- ~6.5 GB for a 50k-sample chain at
+    # --nm 128, ~20 GB tripled), none of which plan_ppd_sizing's per-step slab
+    # budget accounts for.
     outs = [
-        vfn(samples[i:i + batch_size])
+        jax.tree_util.tree_map(np.asarray, vfn(samples[i:i + batch_size]))
         for i in tqdm(range(0, samples.shape[0], batch_size),
                       desc="Posterior-predictive batches")
     ]
-    stacked = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *outs)
+    stacked = jax.tree_util.tree_map(lambda *xs: np.concatenate(xs, axis=0), *outs)
     return jax.tree_util.tree_map(lambda a: a[:ns], stacked)
 
 
@@ -482,11 +488,16 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
     )
     slab_pts = (grid_chunk if grid_chunk is not None else n_outer) * nz * nchi
     est_peak_gb = batch_size * slab_pts * 8 * (n_nodes + 16) / 1e9
+    # The accumulated per-sample outputs are a second, independent cost: they live
+    # on the HOST (batched_map moves each batch off device), but they are what the
+    # run actually has to fit in RAM, so report them rather than leaving the
+    # printed peak an order of magnitude below the real footprint.
+    out_gb = samples.shape[0] * (2 * nm + nq + nz + nchi + nm * nm) * 8 / 1e9
     print(
         f"  │  [ppd] grid={grid_points:,} pts  GP_nodes={n_nodes}  "
         f"mem={max_mem_bytes / 1e9:.1f}GB ({mem_src})  batch={batch_size}  "
         f"slab_rows={grid_chunk if grid_chunk is not None else 'full'}  "
-        f"~peak={est_peak_gb:.1f}GB"
+        f"~peak={est_peak_gb:.1f}GB device + {out_gb:.1f}GB host (outputs)"
     )
 
     single_theta = make_single_theta_predictive(
@@ -567,7 +578,14 @@ def plot_1d_spectrum(xgrid, summaries, labels, xlabel, ylabel,
 
 
 def plot_2d_mass(mgrid, p_m1m2_per_model, labels, figsize=None):
-    """Median joint p(m1, m2) as filled contours, one panel per model."""
+    """Median joint p(m1, m2) as filled contours, one panel per model.
+
+    ``p_m1m2_per_model`` holds one ALREADY-MEDIANED ``(nm, nm)`` array per model:
+    the median is all this plot uses, and keeping the full
+    ``(nsamples, nm, nm)`` stack per model resident instead costs
+    ``nsamples * nm**2 * 8`` bytes per model (~6.5 GB for a 50k-sample chain at
+    --nm 128) for nothing.
+    """
     mgrid = np.asarray(mgrid)
     n = len(labels)
     ncol = min(n, 3)
@@ -575,10 +593,9 @@ def plot_2d_mass(mgrid, p_m1m2_per_model, labels, figsize=None):
     figsize = figsize or (6.0 * ncol, 5.5 * nrow)
     fig, axes = plt.subplots(nrow, ncol, figsize=figsize, squeeze=False)
     M1, M2 = np.meshgrid(mgrid, mgrid, indexing="ij")
-    for k, (label, p2d) in enumerate(zip(labels, p_m1m2_per_model)):
+    for k, (label, med) in enumerate(zip(labels, p_m1m2_per_model)):
         ax = axes[k // ncol][k % ncol]
-        med = np.median(np.asarray(p2d), axis=0)
-        masked = np.where(M2 <= M1, med, np.nan)
+        masked = np.where(M2 <= M1, np.asarray(med), np.nan)
         levels = np.linspace(np.nanmax(masked) * 1e-3, np.nanmax(masked), 12) \
             if np.nanmax(masked) > 0 else None
         cf = ax.contourf(M1, M2, masked, levels=levels, cmap="viridis")
@@ -737,19 +754,36 @@ def plot_bayes_factor_matrix(labels, log10Zs, log10Zerrs, figsize=(10, 10),
     return fig
 
 
-def overlay_observed_events(ax, settings):
-    """Best-effort faint rug of observed detector-frame m1 medians on p(m1)."""
+def overlay_observed_events(ax, settings, cosmo=None):
+    """Best-effort faint rug of observed SOURCE-frame m1 medians on p(m1).
+
+    The plotted ``p_m1`` is a SOURCE-frame density (the likelihood forms
+    ``m1src = m1det/(1+z)`` before calling ``log_p_pop``), so rugging the raw
+    detector-frame medians put every tick a factor ``(1+z)`` -- 20-70% over this
+    pipeline's redshift range -- to the right of where its event belongs, which
+    reads as a high-mass misfit that is purely a frame error.  Each sample is
+    converted with ``z_of_dL`` under ``cosmo`` (the fiducial cosmology by default;
+    pass the run's posterior medians to use those instead) BEFORE the median, and
+    the legend names the frame and that conversion.
+    """
     try:
         from darksirens.gw.samples import load_gw_samples
+        from darksirens.utils.cosmology import z_of_dL
         gw_path = settings.get("gw_path")
         if not gw_path or not os.path.exists(gw_path):
             return
         out = load_gw_samples(gw_path)
-        m1det, nEvents, nsamp = np.asarray(out[0]), int(out[-2]), int(out[-1])
-        med = np.median(m1det.reshape(nEvents, nsamp), axis=1)
+        m1det = np.asarray(out[0])
+        dL = np.asarray(out[2])
+        nEvents, nsamp = int(out[-2]), int(out[-1])
+        c = {**COSMO_FID, **(cosmo or {})}
+        z = np.asarray(z_of_dL(dL, c["H0"], c["Om0"], c["w0"], c["wa"]))
+        m1src = m1det / (1.0 + z)
+        med = np.median(m1src.reshape(nEvents, nsamp), axis=1)
         for k, v in enumerate(med):
             ax.axvline(v, color="0.3", alpha=0.18, lw=0.8,
-                       label="observed (det-frame $m_1$)" if k == 0 else None)
+                       label="observed (source-frame $m_1$, fiducial cosmology)"
+                             if k == 0 else None)
         ax.legend(fontsize=16, frameon=False)
     except Exception as exc:  # noqa: BLE001 — overlay is best-effort
         _warn(f"event overlay skipped: {exc}")
@@ -849,7 +883,9 @@ def main():
         spec["q"].append(summarize_ppd(p_q, limits))
         spec["z"].append(summarize_ppd(p_z, limits))
         spec["chi"].append(summarize_ppd(p_chi, limits))
-        p_m1m2_per_model.append(np.asarray(p_m1m2))
+        # Only the median enters the 2-D figure; keep that, not every sample's
+        # (nm, nm) plane for every model.
+        p_m1m2_per_model.append(np.median(np.asarray(p_m1m2), axis=0))
 
         # Cosmology posteriors (only the sampled ones).
         cosmo_per_model.append({
