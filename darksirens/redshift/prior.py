@@ -495,11 +495,18 @@ def prepare_redshift_prior_state(
             # DEPTH-TRUNCATED CATALOG: the marked kernels were renormalised to
             # unit mass on [0, z_depth], so the amplitude paired with them is
             # the marked mass actually below the depth — the exact marked twin
-            # of the unmarked `Nobs * exp(log_depth_mass)` scaling below.
-            N_host_obs = jnp.where(
+            # of the unmarked `Nobs * exp(log_depth_mass)` scaling below.  The
+            # SAME depth-scaled amplitude is stored on the state as `log_Nobs`
+            # (the numerator's observed amplitude), not just used for Z: keeping
+            # the raw `log_N_host` there over-weighted the catalog branch by
+            # 1/m_pix and broke the per-pixel unit normalisation.
+            log_N_host_depth = jnp.where(
                 jnp.isfinite(log_N_host),
-                jnp.exp(log_N_host + kernels.log_depth_mass),
-                0.0,
+                log_N_host + kernels.log_depth_mass,
+                -jnp.inf,
+            )
+            N_host_obs = jnp.where(
+                jnp.isfinite(log_N_host_depth), jnp.exp(log_N_host_depth), 0.0
             )
             Z = N_host_obs + N_host_miss
             log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
@@ -532,7 +539,7 @@ def prepare_redshift_prior_state(
                 )
                 if is_field:
                     state = DarkSirenEnsemblePriorState(
-                        kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                        kernels=kernels, log_Nobs=log_N_host_depth, dN_miss=dN_miss,
                         log_Z=log_Z,
                         base_miss=base_miss_marked,
                         log_Z_members=log_Z_members,
@@ -543,7 +550,7 @@ def prepare_redshift_prior_state(
                     )
                     return _maybe_materialize(state, materialize_state)
                 state = DarkSirenEnsemblePriorState(
-                    kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                    kernels=kernels, log_Nobs=log_N_host_depth, dN_miss=dN_miss,
                     log_Z=log_Z,
                     base_miss=base_miss_marked,
                     log_Z_members=log_Z_members,
@@ -551,12 +558,12 @@ def prepare_redshift_prior_state(
                 return _maybe_materialize(state, materialize_state)
             if is_field:
                 state = DarkSirenPriorState(
-                    kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss,
+                    kernels=kernels, log_Nobs=log_N_host_depth, dN_miss=dN_miss,
                     log_Z=log_Z, log_Z_global=log_Z_global,
                 )
                 return _maybe_materialize(state, materialize_state)
             state = DarkSirenPriorState(
-                kernels=kernels, log_Nobs=log_N_host, dN_miss=dN_miss, log_Z=log_Z
+                kernels=kernels, log_Nobs=log_N_host_depth, dN_miss=dN_miss, log_Z=log_Z
             )
             return _maybe_materialize(state, materialize_state)
 

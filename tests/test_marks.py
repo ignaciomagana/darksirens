@@ -118,3 +118,60 @@ def test_marked_reweights_toward_high_mark_galaxy():
 def test_missing_mark_field_errors():
     with pytest.raises(ValueError, match="mark_logmstar is None|requested"):
         _prior(_cat(), mark_model="loglinear", eta=[1.0], mark_names=("logmstar",))
+
+
+# ------------------------------------------------------------
+# Depth truncation: the marked amplitude must carry log_depth_mass
+# ------------------------------------------------------------
+# The kernels are renormalised to unit mass on [0, z_depth], so the marked
+# observed amplitude paired with them is exp(log_N_host + log_depth_mass) --
+# exactly the unmarked `Nobs * exp(log_depth_mass)` scaling.  Storing the raw
+# log_N_host in the state over-weighted the catalog branch by 1/m_pix and broke
+# the per-pixel unit normalisation.  Row 0 of ``_cat`` has one galaxy below and
+# one above z_depth=0.25, so m = 1/2 there.
+# A small pixel area / low n0 keeps N_miss ~ O(1): with the production-sized
+# missing budget (N_miss ~ 1e9) a 2x error in an O(1) observed amplitude is
+# numerically invisible.
+_SURVEY_DEPTH = SurveyParams(
+    n0=1e-9, z50=0.3, w=0.1, delta=0.0, b_miss=0.0, alpha_miss=1.0, z_depth=0.25,
+)
+
+
+def _cat_small_apix(logmstar):
+    return _cat(logmstar=logmstar)._replace(apix=1e-4)
+
+
+def _prior_depth(cat, mark_model="none", eta=None, mark_names=(), row=0):
+    state = prepare_redshift_prior_state(
+        "dark_sirens", COSMO, _SURVEY_DEPTH, cat,
+        mark_model=mark_model,
+        mark_params=(None if eta is None else jnp.asarray(eta)),
+        mark_names=mark_names,
+    )
+    pix = jnp.full(NG, row, jnp.int32)
+    lp = eval_redshift_prior_with_state(
+        "dark_sirens", state, zgrid, pix, COSMO, _SURVEY_DEPTH, cat
+    )
+    return np.asarray(lp)
+
+
+def test_marked_amplitude_carries_depth_mass():
+    """eta=0 + unit weights reduces to the unmarked model WITH a survey depth."""
+    cat = _cat_small_apix(np.array([[0.5, -0.5, 0.0], [0.2, 0.0, 0.0]]))
+    for row in (0, 1):
+        base = _prior_depth(cat, mark_model="none", row=row)
+        marked0 = _prior_depth(
+            cat, mark_model="loglinear", eta=[0.0], mark_names=("logmstar",), row=row
+        )
+        assert np.max(np.abs(np.exp(base) - np.exp(marked0))) < 1e-9
+
+
+def test_marked_prior_normalizes_per_pixel_under_depth():
+    """The depth-truncated marked prior still integrates to 1 per pixel."""
+    cat = _cat_small_apix(np.array([[0.6, -0.4, 0.0], [0.1, 0.0, 0.0]]))
+    for row in (0, 1):
+        lp = _prior_depth(
+            cat, mark_model="loglinear", eta=[1.5], mark_names=("logmstar",), row=row
+        )
+        integ = _trapezoid(np.exp(lp), np.asarray(zgrid))
+        assert abs(integ - 1.0) < 5e-3
