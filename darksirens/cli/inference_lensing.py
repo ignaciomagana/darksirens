@@ -719,6 +719,53 @@ def _count_probe_partition_state(n_events: int, n_pairs: int) -> PartitionState:
     )
 
 
+def _count_correction_closed_form(baseline_raw, opts):
+    """Closed-form count-only selection correction, as a function of the
+    partition's ``(n_singletons, n_pairs)``.
+
+    The selection integrals (mu, sigma^2 per channel) do not depend on the
+    partition — only the marked-Poisson correction's counts do — so the whole
+    componentwise factorization needs just this scalar function of the counts.
+    Evaluating full-likelihood probes per count instead cost ~n_pairs extra
+    likelihood evaluations PER SAMPLER CALL and one multi-GB XLA specialization
+    per distinct ``(n_singletons, n_pairs)`` — the host-RAM OOM that killed
+    paper-scale j2 on 58 GB nodes.
+
+    ``pe_variance_sum`` matters here even though it does not depend on the
+    counts: ``selection0`` CANCELS EXACTLY out of
+    ``baseline + LSE_k(dp_k + count_delta_k)``, so this closed form IS the
+    sampler-facing selection correction and the master likelihood's value never
+    reaches the sampler on the factorized path.  Without it the guard reverted
+    to the selection-only bound ``N_obs^2/max_likelihood_variance`` and the band
+    ``N^2/max_var < Neff < N^2/(max_var - pe_var)`` went unguarded — the exact
+    defect P1-09 / ``tests/test_cluster_pe_variance_guard.py`` threaded it for
+    (review F-001).  The BASELINE's ``pe_variance_sum`` is the right scalar: it
+    keeps the invariant ``count_delta[0] == 0`` the factorization assumes, and
+    the residual partition dependence (``pair_variance_sum`` depends on WHICH
+    pairs are formed) is what ``build_cluster_diagnostics``' count-only
+    cross-check verifies is negligible at the evaluation point.
+
+    Shared by the sampler path and the diagnostics path so the two cannot drift
+    onto different variance budgets (review F-005).
+    """
+    def _count_correction(n_sing, n_prs):
+        return combined_selection_log_correction(
+            baseline_raw["log_mu_singleton"],
+            baseline_raw["log_sigma2_singleton"],
+            baseline_raw["log_mu_cluster"],
+            baseline_raw["log_sigma2_cluster"],
+            n_singletons_observed=n_sing,
+            n_clusters_observed=n_prs,
+            soft_guard=bool(getattr(opts, "selection_neff_soft_guard", False)),
+            max_likelihood_variance=float(
+                getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
+            ),
+            pe_variance_sum=baseline_raw["pe_variance_sum"],
+        )
+
+    return _count_correction
+
+
 def _factorized_logsumexp_jax(component_terms, count_loglike_delta):
     max_pairs = int(count_loglike_delta.shape[0]) - 1
     dp = jnp.full((max_pairs + 1,), -jnp.inf, dtype=jnp.float64)
@@ -1583,6 +1630,13 @@ def load_inputs(opts):
                 max(int(state.n_pairs) for state in states)
                 for states in component_partition_states
             )
+            # Count carriers for the closed-form selection deltas: ONLY
+            # ``(n_singletons, n_pairs)`` is read off these, by both the sampler
+            # and the diagnostics path (_count_correction_closed_form). The
+            # fabricated (2k, 2k+1) pairing and its placeholder time marks are
+            # never evaluated by any likelihood -- they were, before review
+            # F-005, and their fictitious pairs' pair_variance_sum leaked into
+            # the guard threshold.
             selection_probe_partitions = []
             for n_pairs_probe in range(max_factorized_pairs + 1):
                 probe_state = _count_probe_partition_state(candidate_n_events, n_pairs_probe)
@@ -2278,50 +2332,10 @@ def build_cluster_likelihood(
                 baseline = baseline_raw["logL_total"]
                 baseline_content = _content_loglike(baseline_raw)
                 selection0 = baseline_raw["selection_correction_total"]
-                # Count-only selection deltas, CLOSED FORM. The selection
-                # integrals (mu, sigma^2 per channel) do not depend on the
-                # partition — only the marked-Poisson correction's counts do
-                # (the invariant build_cluster_diagnostics asserts against
-                # probe evaluations at every diagnostics call). Evaluating
-                # full likelihood probes per count (the previous approach)
-                # cost ~n_pairs extra likelihood evaluations PER SAMPLER CALL
-                # and one multi-GB XLA specialization per distinct
-                # (n_singletons, n_pairs) — the host-RAM OOM that killed
-                # paper-scale j2 on 58 GB nodes.
-                # ``selection0`` CANCELS EXACTLY out of ``baseline +
-                # LSE_k(dp_k + count_delta_k)`` (it is the same scalar in the
-                # baseline and in every delta), so the closed form below IS the
-                # sampler-facing selection correction — the master
-                # likelihood's value never reaches the sampler on this path.
-                # It therefore has to carry the same total-variance budget:
-                # without ``pe_variance_sum`` the guard reverted to the
-                # selection-only bound N_obs^2/max_likelihood_variance and the
-                # band N^2/max_var < Neff < N^2/(max_var - pe_var) went
-                # unguarded (review F-001; the exact defect P1-09 /
-                # tests/test_cluster_pe_variance_guard.py added the threading
-                # for). The baseline's pe_variance_sum is the right scalar: it
-                # keeps the invariant count_delta[0] == 0 that the
-                # factorization assumes, and the partition dependence of
-                # pair_variance_sum is what build_cluster_diagnostics'
-                # count-only cross-check verifies is negligible at the
-                # evaluation point.
-                def _count_correction(n_sing, n_prs):
-                    return combined_selection_log_correction(
-                        baseline_raw["log_mu_singleton"],
-                        baseline_raw["log_sigma2_singleton"],
-                        baseline_raw["log_mu_cluster"],
-                        baseline_raw["log_sigma2_cluster"],
-                        n_singletons_observed=n_sing,
-                        n_clusters_observed=n_prs,
-                        soft_guard=bool(
-                            getattr(opts, "selection_neff_soft_guard", False)
-                        ),
-                        max_likelihood_variance=float(
-                            getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
-                        ),
-                        pe_variance_sum=baseline_raw["pe_variance_sum"],
-                    )
-
+                # Count-only selection deltas, CLOSED FORM (see
+                # _count_correction_closed_form for why the baseline's
+                # pe_variance_sum has to be in there).
+                _count_correction = _count_correction_closed_form(baseline_raw, opts)
                 count_delta = jnp.stack(
                     [
                         _count_correction(
@@ -2512,20 +2526,38 @@ def build_cluster_diagnostics(
                         baseline_raw["singleton_logL_sum"] + baseline_raw["pair_logL_sum"]
                     )
                 )
-                selection0 = None
-                count_delta = []
-                for probe_part in inp["selection_probe_partitions"]:
-                    probe_raw = _raw_for(
-                        probe_part["singleton_indices"],
-                        probe_part["pair_indices"],
-                        probe_part["n_singletons"],
-                        probe_part["n_pairs"],
-                        probe_part,
+                # Count-only selection deltas from the SAME closed form the
+                # sampler uses, so the two paths cannot drift apart. Each count
+                # used to be read off a FULL master-likelihood evaluation of a
+                # fabricated partition pairing events (0,1),(2,3),... with
+                # delta_t_obs = 0 and sigma = 1 s: those fictitious pairs carry
+                # their own pair_variance_sum into the guard threshold (so under
+                # the soft guard the count-only check below compared two
+                # different variance budgets), and the probes run out to
+                # n_pairs = sum of per-component maxima — far beyond any real
+                # component partition — re-incurring the per-(n_singletons,
+                # n_pairs) XLA specialization the sampler path was refactored
+                # away from (review F-005). The check below now compares the
+                # closed form against REAL component partitions, which the
+                # diagnostics evaluate anyway: a stronger invariant at no cost.
+                _count_correction = _count_correction_closed_form(baseline_raw, opts)
+                selection0 = float(
+                    np.asarray(baseline_raw["selection_correction_total"])
+                )
+                count_delta = [
+                    float(
+                        np.asarray(
+                            _count_correction(
+                                int(probe_part["n_singletons"]),
+                                int(probe_part["n_pairs"]),
+                            )
+                        )
                     )
-                    selection = float(np.asarray(probe_raw["selection_correction_total"]))
-                    if selection0 is None:
-                        selection0 = selection
-                    count_delta.append(selection - selection0)
+                    - selection0
+                    for probe_part in inp["selection_probe_partitions"]
+                ]
+                soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
+                count_only_warned = False
                 component_deltas = []
                 for states, parts in zip(
                     inp["component_partition_states"], inp["component_full_partitions"]
@@ -2573,15 +2605,40 @@ def build_cluster_diagnostics(
                             rtol=0.0,
                             atol=1e-8,
                         ):
-                            raise RuntimeError(
-                                "componentwise exact factorization failed: selection "
-                                "correction is not count-only "
+                            detail = (
                                 f"(n_pairs={n_pairs}: component delta "
-                                f"{local_selection_delta!r} vs probe delta "
+                                f"{local_selection_delta!r} vs closed-form delta "
                                 f"{count_delta[n_pairs] if n_pairs < len(count_delta) else 'MISSING'!r}, "
-                                f"n_probe_partitions={len(count_delta)}; component part "
+                                f"n_count_values={len(count_delta)}; component part "
                                 f"n_singletons={part['n_singletons']}, n_pairs={part['n_pairs']})"
                             )
+                            if soft_guard:
+                                # Under the soft guard the correction is count-only
+                                # ONLY where the smooth wall is inactive: inside it
+                                # the wall tracks the threshold, which the
+                                # partition's own pair_variance_sum moves. The
+                                # sampler's factorization deliberately uses the
+                                # baseline budget there, so this is an accuracy
+                                # notice about a region the guard is repelling the
+                                # sampler out of -- not a reason to kill the run at
+                                # build time after the full PE/injection load
+                                # (review F-005).
+                                if not count_only_warned:
+                                    count_only_warned = True
+                                    _warn(
+                                        "componentwise factorization is inexact at "
+                                        "the diagnostics point: the soft guard's "
+                                        "wall is active, so the selection "
+                                        f"correction is not count-only {detail}. "
+                                        "The sampler uses the baseline variance "
+                                        "budget; check that no posterior mass "
+                                        "sits in the walled region."
+                                    )
+                            else:
+                                raise RuntimeError(
+                                    "componentwise exact factorization failed: "
+                                    f"selection correction is not count-only {detail}"
+                                )
                         deltas.append(local_content - baseline_content)
                     component_deltas.append(deltas)
                 out = compute_componentwise_factorized_partition_diagnostics(
