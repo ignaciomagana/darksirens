@@ -206,6 +206,35 @@ def test_flow_ensemble_directory_content_is_fingerprinted(tmp_path):
     (flows / "EV3" / "EV3_flow.npz").write_bytes(b"\x00" * 32)
     assert _fingerprint(_opts(**opts))["digest"] != reference["digest"]
 
+def test_tinyns_resolved_config_does_not_smuggle_non_semantic_keys():
+    """``build_tinyns_config`` mirrors the resolved config onto opts, and the
+    fingerprint filters only TOP-LEVEL keys -- so the mirror used to re-admit
+    ``show_progress`` and ``tinyns_checkpoint_interval`` (both declared
+    non-semantic) through the nested dict, turning a requeue that changed the
+    tinyns checkpoint cadence into a fatal resume mismatch."""
+    from darksirens.inference.tinyns_config import (
+        BASE_DEFAULTS, build_tinyns_config,
+    )
+
+    def _tinyns_opts(**over):
+        kw = {f"tinyns_{name}": None for name in BASE_DEFAULTS}
+        kw.update(over)
+        opts = _opts(sampler="tinyns", tinyns_preset="recommended",
+                     max_samples=1000, **kw)
+        build_tinyns_config(opts)
+        return opts
+
+    reference = _fingerprint(_tinyns_opts())
+    for key, value in (("tinyns_checkpoint_interval", 500),
+                       ("show_progress", True)):
+        changed = _fingerprint(_tinyns_opts(**{key: value}))
+        assert changed["digest"] == reference["digest"], (
+            f"{key!r} reached the digest through tinyns_resolved_config"
+        )
+    # Genuinely semantic tinyns knobs must still be caught.
+    assert _fingerprint(_tinyns_opts(tinyns_walks=80))["digest"] != \
+        reference["digest"]
+
 
 def test_list_valued_path_options_are_fingerprinted(tmp_path):
     a = tmp_path / "a.h5"

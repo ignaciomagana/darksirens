@@ -339,6 +339,31 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         allow_unverified = bool(
             getattr(opts, "allow_unverified_shared_lss_members", False)
         )
+        # A catalog with NO ensemble at all is not a provenance failure: the
+        # estimator needs one on EVERY catalog (likelihood/core.py refuses a
+        # missing base_miss on either seam, since Z_m cancels only against
+        # mu(Q_m)), so diagnose that here instead of reporting the Q-less
+        # catalog as "LEGACY (no provenance)" and telling the operator to
+        # rebuild the ensembles jointly -- impossible for a catalog that has no
+        # LSS field.  Not bypassable by --allow_unverified_shared_lss_members:
+        # that flag accepts an unmatched realization set, not a missing one.
+        no_ensemble = [
+            path for path, bundle in zip(survey_paths, bundles)
+            if bundle.get("lss_completion_logq_members") is None
+            and bundle.get("lss_completion_q_members") is None
+        ]
+        if no_ensemble:
+            raise ValueError(
+                "--lss_marginalize with a K>=2 mixture marginalizes over ONE "
+                "SHARED member index, so EVERY catalog needs its own Q_LSS "
+                "ENSEMBLE; these carry none:\n"
+                + "\n".join(f"  - {p}" for p in no_ensemble) + "\n"
+                "Build each catalog's completion with members "
+                "(darksirens_build_joint_lognormal_completion, or "
+                "darksirens_build_lognormal_completion --n-members M > 0) and "
+                "pass them positionally via --lss_completion, or drop "
+                "--lss_marginalize for the deterministic posterior-mean Q."
+            )
         prov_by_catalog = []
         for path, bundle in zip(survey_paths, bundles):
             prov = bundle.get("lss_completion_provenance") or {}

@@ -164,3 +164,35 @@ def test_models_without_constraints_are_untouched():
     ref = make_prior_transform(res[1], res[2], res[11])
     np.testing.assert_allclose(
         np.asarray(transform(u)), np.asarray(ref(u)), rtol=0, atol=0)
+
+
+def test_numpyro_reports_that_it_leaves_joint_constraints_to_rejection(capsys):
+    """The numpyro model builds INDEPENDENT per-parameter sites, so the joint
+    constraints the nested transform reparameterizes away are left to
+    likelihood-side rejection there: same truncated measure, but NUTS integrates
+    against a gradient-free -inf wall.  run_sampler must say so (the `_site`
+    docstring used to claim measure parity with make_prior_transform)."""
+    pytest.importorskip("numpyro")
+    from types import SimpleNamespace
+
+    from darksirens.inference.sampling import run_sampler
+
+    labels = ["dx", "dy", "dz"]
+    lower = np.full(3, -1.0)
+    upper = np.full(3, 1.0)
+
+    def loglike(theta):
+        # Unit-ball indicator x a smooth core: the rejection wall NUTS sees.
+        r2 = jnp.sum(jnp.asarray(theta) ** 2)
+        return jnp.where(r2 <= 1.0, -0.5 * r2, -jnp.inf)
+
+    opts = SimpleNamespace(
+        seed=5, show_progress=False, nuts_warmup=2, nuts_samples=2,
+        nuts_chains=1, nuts_target_accept=0.8, nuts_max_tree_depth=3,
+        nuts_chain_method="sequential",
+    )
+    run_sampler("numpyro", loglike, make_prior_transform(lower, upper), labels,
+                lower, upper, opts, joint_constraints=[("ball3", (0, 1, 2))])
+    out = capsys.readouterr().out
+    assert "joint prior constraints ball3(0, 1, 2)" in out
+    assert "REJECTION" in out

@@ -108,6 +108,59 @@ def test_preflight_off_skips(capsys):
 
 
 # ---------------------------------------------------------------------------
+# Resumed runs: the probe guards a FRESH initial-live-point search only
+# ---------------------------------------------------------------------------
+
+def test_preflight_skipped_on_a_resume(capsys):
+    """A checkpoint already carries nlive finite-logL live points, and a tight
+    posterior makes k == 0 out of 32 PRIOR draws the expected outcome: the
+    fail-fast must not kill a requeued job (whose only escapes would all
+    invalidate the resume fingerprint)."""
+    opts = SimpleNamespace(
+        seed=3, nlive=50,
+        checkpoint_interval_seconds=0.0, checkpoint_file_resolved=None,
+        resume_from_resolved="/nonexistent/checkpoint.save",
+    )
+    with pytest.raises(Exception) as excinfo:
+        run_sampler(
+            "dynesty",
+            _neg_inf_likelihood,
+            _IDENTITY_PTFORM,
+            labels=["x", "y"],
+            lower_bound=np.zeros(2),
+            upper_bound=np.ones(2),
+            opts=opts,
+        )
+    # It died restoring the (nonexistent) checkpoint, NOT in the preflight.
+    assert "preflight" not in str(excinfo.value).lower()
+    out = capsys.readouterr().out
+    assert "preflight skipped: resuming" in out
+    assert "prior draws have finite logL" not in out
+
+
+def test_preflight_still_runs_for_a_fresh_checkpointed_run(capsys):
+    """Checkpointing ON but nothing to resume from is a FRESH run: the probe
+    must still fire (it is the only thing standing between an all--inf
+    likelihood and dynesty spinning forever)."""
+    opts = SimpleNamespace(
+        seed=3, nlive=50,
+        checkpoint_interval_seconds=1800.0,
+        checkpoint_file_resolved="/tmp/nonexistent/checkpoint.save",
+        resume_from_resolved=None,
+    )
+    with pytest.raises(RuntimeError, match="preflight"):
+        run_sampler(
+            "dynesty",
+            _neg_inf_likelihood,
+            _IDENTITY_PTFORM,
+            labels=["x", "y"],
+            lower_bound=np.zeros(2),
+            upper_bound=np.ones(2),
+            opts=opts,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Low finite fraction -> loud, non-fatal warning
 # ---------------------------------------------------------------------------
 

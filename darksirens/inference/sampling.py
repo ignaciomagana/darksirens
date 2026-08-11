@@ -288,7 +288,8 @@ def _nested_sampler_preflight(likelihood, prior_transform, ndims, opts, n_probe=
 
 
 def run_sampler(method, likelihood, prior_transform, labels,
-                lower_bound, upper_bound, opts, prior_kinds=None):
+                lower_bound, upper_bound, opts, prior_kinds=None,
+                joint_constraints=None):
     """
     method: "tinyns", "dynesty", or "numpyro"
     likelihood: function(coord) -> logL (expects 1D array)
@@ -296,6 +297,9 @@ def run_sampler(method, likelihood, prior_transform, labels,
     labels: list of parameter names
     lower_bound, upper_bound: arrays
     opts: argparse namespace
+    joint_constraints: index-resolved joint prior constraints ALREADY applied by
+        ``prior_transform``'s cube maps (nested samplers); the numpyro model
+        builds independent per-parameter sites, so they are only reported there
 
     Returns a dict:
         {
@@ -339,8 +343,31 @@ def run_sampler(method, likelihood, prior_transform, labels,
     # --------------------------------------------------------
     # numpyro runs its own gradient preflight below; skip it here.  The zero-
     # free-params path above already returned, so ndims >= 1 by construction.
+    #
+    # Never on a RESUME: the probe exists because a FRESH nested run must
+    # reject-sample the PRIOR until it collects nlive finite-logL points, and a
+    # checkpoint already carries nlive live points with finite logL.  A
+    # well-advanced posterior occupies a vanishing fraction of the prior, so
+    # k == 0 out of n_probe prior draws is the EXPECTED outcome there and the
+    # fail-fast would kill a requeued job the checkpoint would have finished --
+    # while every remedy the message prints (--selection_neff_guard,
+    # --max_likelihood_variance) is semantic and would then make
+    # check_resume_fingerprint refuse the checkpoint.  It also saves n_probe
+    # full likelihood evaluations on every requeue.
     if method in ("dynesty", "tinyns"):
-        _nested_sampler_preflight(likelihood, prior_transform, ndims, opts)
+        _resuming = bool(plan_from_opts(opts, method).resuming) or (
+            method == "tinyns" and bool(getattr(opts, "tinyns_resume_from", None))
+        )
+        if _resuming:
+            if getattr(opts, "sampler_preflight", "on") != "off":
+                print(
+                    "[*] preflight skipped: resuming from a checkpoint, whose "
+                    "live points are already finite (the probe only guards a "
+                    "fresh run's initial-live-point search).",
+                    flush=True,
+                )
+        else:
+            _nested_sampler_preflight(likelihood, prior_transform, ndims, opts)
 
     # --------------------------------------------------------
     # tinyns  (lightweight JAX nested sampler, dynesty-compatible)
@@ -357,13 +384,6 @@ def run_sampler(method, likelihood, prior_transform, labels,
 
         def tinyns_ptform(u):
             return jnp.asarray(prior_transform(jnp.asarray(u)))
-
-        # dynesty's call cap (--max_samples) doubles as tinyns' iteration
-        # cap; one nested-sampling iteration retires ~one live point, so the
-        # budget is comparable.  0/None means "run to the dlogz criterion".
-        maxiter = getattr(opts, "max_samples", None)
-        if maxiter is not None and maxiter <= 0:
-            maxiter = None
 
         config = build_tinyns_config(opts)
         sampler = NestedSampler(
@@ -387,6 +407,28 @@ def run_sampler(method, likelihood, prior_transform, labels,
         # cannot silently swap the lineage either.
         run_key, resample_key = jax.random.split(jax.random.PRNGKey(config.seed))
         run_kwargs = tinyns_run_kwargs(config)
+
+        # --max_samples reaches tinyns as ``maxiter`` (ITERATIONS) and dynesty as
+        # ``maxcall`` (likelihood CALLS): tinyns exposes no call cap, and one
+        # rwalk iteration costs walks x max_active_chains evaluations (5 for the
+        # 'recommended' preset, 1280 for heavy_darksirens).  The two budgets are
+        # therefore NOT comparable, so print the resolved cap and its call
+        # equivalent rather than leaving the reader to infer it from the flag.
+        _maxiter = run_kwargs.get("maxiter")
+        if _maxiter is None:
+            print("[*] tinyns iteration cap: none (runs to the dlogz "
+                  "criterion)", flush=True)
+        else:
+            _max_active = (max(config.replacement_chain_schedule)
+                           if config.replacement_chain_schedule
+                           else int(config.replacement_chains))
+            print(
+                f"[*] tinyns iteration cap: maxiter={int(_maxiter):,} "
+                f"(--max_samples), i.e. up to ~{int(_maxiter) * int(config.walks) * _max_active:,} "
+                f"likelihood calls at walks={config.walks} x "
+                f"{_max_active} chain(s)",
+                flush=True,
+            )
 
         # Checkpoint/resume policy: the shared --checkpoint_interval / --resume
         # flags place a checkpoint in the run directory, while the legacy
@@ -507,11 +549,39 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 "lower bound."
             )
 
+        # JOINT prior constraints (dipole unit ball, mixture simplex,
+        # ordered_le) are reparameterized away by make_prior_transform's cube
+        # maps, so the nested samplers propose only inside the constrained
+        # region.  The sites below are INDEPENDENT per parameter, so here the
+        # same region is carved out by likelihood-side rejection instead: the
+        # posterior is the same measure (uniform on the constrained set either
+        # way), but NUTS must integrate against a hard -inf wall whose gradient
+        # is NaN, so divergences become structural rather than diagnostic.  Say
+        # so instead of leaving the operator to read it out of the divergence
+        # fraction.
+        if joint_constraints:
+            print(
+                "  [!] joint prior constraints "
+                + ", ".join(f"{kind}{tuple(idx)}"
+                            for kind, idx in joint_constraints)
+                + " are enforced for NUTS by likelihood-side REJECTION (the "
+                "nested samplers reparameterize them into the unit cube "
+                "instead). The posterior is the same truncated measure, but "
+                "the -inf boundary has no gradient: expect a structurally "
+                "elevated divergence fraction and reduced ESS. Prefer "
+                "--sampler dynesty/tinyns for "
+                + ", ".join(sorted({kind for kind, _ in joint_constraints}))
+                + " models.",
+                flush=True,
+            )
+
         def _site(i, name):
-            # Per-parameter prior, matching make_prior_transform's measure so
-            # nested and NUTS infer the same posterior.  "normal" gives whitened
-            # GP latents the unit-scale geometry NUTS needs (Option A); low/high
-            # act as truncation bounds for every kind.
+            # Per-parameter prior, matching make_prior_transform's PER-DIMENSION
+            # measure so nested and NUTS infer the same posterior.  Any JOINT
+            # constraint is NOT reproduced here (see the note above): it is left
+            # to likelihood-side rejection.  "normal" gives whitened GP latents
+            # the unit-scale geometry NUTS needs (Option A); low/high act as
+            # truncation bounds for every kind.
             kind, kloc, kscale = ("uniform", None, None)
             if prior_kinds is not None:
                 kind, kloc, kscale = prior_kinds[i]
@@ -760,8 +830,21 @@ def run_sampler(method, likelihood, prior_transform, labels,
         _stop_diag = threading.Event()
 
         def _write_dynesty_diagnostics(sampler_ref):
-            res = sampler_ref.results
-            if len(res.samples) < 2:
+            # ``sampler_ref.results`` assembles several parallel arrays from the
+            # LIVE run while the main thread is appending to saved_run, so a
+            # concurrent read can see mismatched lengths and raise (dynesty 2.1
+            # checks that itself).  Unguarded, one such read killed this daemon
+            # thread permanently and silently -- no diagnostics for the rest of a
+            # multi-day run, which is exactly what --dynesty_diagnostics exists
+            # to avoid.  Skip the sample and try again next interval.
+            try:
+                res = sampler_ref.results
+                n_samples = len(res.samples)
+            except Exception as e:
+                print(f"[dynesty diag] skipped an inconsistent concurrent read "
+                      f"of sampler.results: {e}", flush=True)
+                return
+            if n_samples < 2:
                 return
             _diag_index[0] += 1
             idx = _diag_index[0]
@@ -860,7 +943,14 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 # Wait one full interval before the first plot so dynesty has real samples.
                 _stop_diag.wait(timeout=diag_interval)
                 while not _stop_diag.is_set():
-                    _write_dynesty_diagnostics(sampler)
+                    # Belt and braces around the guarded writer: nothing raised
+                    # from a diagnostics plot may terminate this thread (or the
+                    # remaining days of a run lose their diagnostics silently).
+                    try:
+                        _write_dynesty_diagnostics(sampler)
+                    except Exception as e:
+                        print(f"[dynesty diag] diagnostics pass failed: {e}",
+                              flush=True)
                     _stop_diag.wait(timeout=diag_interval)
 
             diag_thread = threading.Thread(target=_diag_thread_fn, daemon=True)

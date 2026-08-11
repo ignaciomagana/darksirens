@@ -362,6 +362,21 @@ def test_tinyns_config_rejects_nonpositive_interval_with_a_checkpoint():
         ))
 
 
+@pytest.mark.parametrize("interval", [0, -5])
+def test_tinyns_config_rejects_nonpositive_interval_without_a_config_path(
+        interval):
+    """The guard used to require a CONFIG-level checkpoint path, but
+    run_sampler also enables tinyns checkpointing from the shared
+    --checkpoint_interval plan (invisible to the validator): with only
+    --tinyns_checkpoint_interval 0 the value reached tinyns and raised after the
+    catalog load, KDE-cache build and likelihood trace."""
+    with pytest.raises(ValueError, match="checkpoint_interval must be a positive"):
+        build_tinyns_config(SimpleNamespace(
+            tinyns_checkpoint_interval=interval,
+            nlive=10, dlogz=0.1, max_samples=10, seed=0, show_progress=False,
+        ))
+
+
 def test_tinyns_checkpoints_without_an_explicit_interval_and_resumes(tmp_path):
     """End-to-end: this whole test used to die with the C-1 TypeError before
     the first nested-sampling iteration."""
@@ -389,6 +404,24 @@ def test_tinyns_checkpoints_without_an_explicit_interval_and_resumes(tmp_path):
     # It carried on from the checkpoint's 25 iterations rather than restarting.
     niter = resumed.get("tinyns_runtime_diagnostics", {}).get("niter")
     assert niter is None or niter > 25
+
+
+def test_tinyns_prints_the_resolved_iteration_cap_and_call_equivalent(
+        tmp_path, capsys):
+    """--max_samples is dynesty's CALL cap but tinyns' ITERATION cap, and one
+    rwalk iteration costs walks x max_active_chains evaluations, so the same
+    number buys a different budget per sampler.  The resolved cap and its call
+    equivalent must be in the log (the old code left a dead `maxiter` local and
+    a comment claiming the two budgets were comparable)."""
+    pytest.importorskip("tinyns")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    opts = _tinyns_opts(tmp_path, run_dir, max_samples=20)
+    run_sampler("tinyns", _loglike, _ptform, LABELS, LOWER, UPPER, opts)
+    out = capsys.readouterr().out
+    assert "tinyns iteration cap: maxiter=20 (--max_samples)" in out
+    # recommended preset: walks=5, replacement_chains=1 -> 100 calls.
+    assert "up to ~100 likelihood calls" in out
 
 
 def test_tinyns_run_and_resample_keys_are_independent_streams(tmp_path):

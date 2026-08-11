@@ -331,3 +331,80 @@ def test_validation_selection_theta_comes_from_the_fit(tmp_path, monkeypatch):
     assert float(sv.sigma_M) == 0.85
     assert sv.k_corr_coeffs == (0.7,)
     assert fixed["m_lim"] == 20.25           # the same pin the run gets
+
+
+# ---------------------------------------------------------------------------
+# Provenance of the attached Q leaves, and the representative cosmology
+# ---------------------------------------------------------------------------
+
+def test_mixed_q_leaf_provenance_is_reported_per_key(tmp_path):
+    """The single provenance scalar was last-write-wins over the four Q leaves,
+    so a run whose GLOBAL deterministic table WAS attached while a
+    wrongly-shaped members block was skipped reported 'compact_table_skipped'
+    (members come last in _LSS_TABLE_ROW_AXIS order) -- the reader could not
+    tell which leaf the clip fraction came from."""
+    opts = SimpleNamespace(
+        save_path=str(tmp_path / "out"), completion_validation_pixels=8
+    )
+    data = dict(
+        _k1_validation_data(tmp_path),
+        lss_completion_logq=_saturating_logq(),          # global: attached
+        # 3 pixel rows for a 12-pixel sky: no global pixel key -> skipped.
+        lss_completion_logq_members=np.stack([_saturating_logq(3)] * 2),
+        lss_completion_indexing=2,
+    )
+    with open(run_completion_validation(opts, data, {}, {})) as f:
+        diag = json.load(f)
+    assert diag["lss_completion_attached"] == "partial"
+    by_key = diag["lss_completion_attached_by_key"]
+    assert by_key["lss_completion_logq"] == "global_table_sliced"
+    assert by_key["lss_completion_logq_members"] == "compact_table_skipped"
+    # The attached deterministic table still drove the diagnostic.
+    assert diag["lss_source"] == "Q_LSS"
+
+
+def test_uniform_q_leaf_provenance_keeps_the_scalar_and_maps_every_leaf(tmp_path):
+    opts = SimpleNamespace(
+        save_path=str(tmp_path / "out"), completion_validation_pixels=8
+    )
+    data = dict(_k1_validation_data(tmp_path),
+                lss_completion_logq=_saturating_logq(),
+                lss_completion_indexing=2)
+    with open(run_completion_validation(opts, data, {}, {})) as f:
+        diag = json.load(f)
+    assert diag["lss_completion_attached"] == "global_table_sliced"
+    assert diag["lss_completion_attached_by_key"] == {
+        "lss_completion_logq": "global_table_sliced"}
+
+
+def test_dry_run_cosmology_follows_prior_overrides(tmp_path):
+    """The clip fractions are cosmology-dependent (dN_exp carries the comoving
+    volume element), so the representative cosmology must follow
+    --prior_overrides exactly as the survey block does -- pinning Planck15 under
+    an H0 override certified a budget the run never forms."""
+    opts = SimpleNamespace(
+        save_path=str(tmp_path / "out"), completion_validation_pixels=8
+    )
+    with open(run_completion_validation(
+            opts, _k1_data(tmp_path, 501),
+            {"H0": [40.0, 55.0], "log10n0": [-3.0, -1.0]}, {})) as f:
+        overridden = json.load(f)
+    assert overridden["cosmology_values"]["H0"] == 47.5
+    assert overridden["survey_values"]["log10n0"] == -2.0
+
+    # An explicit fixed value still wins over the override midpoint.
+    with open(run_completion_validation(
+            opts, _k1_data(tmp_path, 502),
+            {"H0": [40.0, 55.0]}, {"H0": 70.0})) as f:
+        fixed = json.load(f)
+    assert fixed["cosmology_values"]["H0"] == 70.0
+
+    # No override, no fixed value: the Planck15 fiducial, unchanged.
+    from darksirens.core.constants import H0_FID, W0_FID, WA_FID
+
+    with open(run_completion_validation(
+            opts, _k1_data(tmp_path, 503), {}, {})) as f:
+        default = json.load(f)
+    assert default["cosmology_values"]["H0"] == float(H0_FID)
+    assert default["cosmology_values"]["w0"] == float(W0_FID)
+    assert default["cosmology_values"]["wa"] == float(WA_FID)
