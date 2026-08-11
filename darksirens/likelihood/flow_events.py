@@ -754,9 +754,19 @@ def build_flow_loglike(
         event_lls, event_vars = jax.vmap(
             lambda row: log_evidence_and_mc_variance(row, J)
         )(ldw)
-        w = jnp.exp(ldw - jnp.max(ldw, axis=1, keepdims=True))
-        ess = jnp.sum(w, axis=1) ** 2 / jnp.maximum(
-            jnp.sum(w**2, axis=1), jnp.finfo(w.dtype).tiny
+        # An event the current hyperparameters exclude has an all -inf row (and
+        # ln Z_i = -inf, as log_evidence_and_mc_variance reports).  Shifting by
+        # its own max would then be -inf - (-inf) = nan, so the diagnostic that
+        # should say WHICH event died reported nan instead of ESS = 0 — and one
+        # nan poisons any host-side mean/percentile over events.
+        any_finite = jnp.any(jnp.isfinite(ldw), axis=1)
+        mx = jnp.where(any_finite, jnp.max(ldw, axis=1), 0.0)[:, None]
+        w = jnp.exp(ldw - mx)
+        ess = jnp.where(
+            any_finite,
+            jnp.sum(w, axis=1) ** 2
+            / jnp.maximum(jnp.sum(w**2, axis=1), jnp.finfo(w.dtype).tiny),
+            0.0,
         )
         return event_lls, event_vars, ess
 

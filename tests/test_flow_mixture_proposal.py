@@ -607,6 +607,13 @@ def test_draws_beyond_the_table_grid_carry_no_weight(setup):
     and inflated their weight by 10-28 nats.  A proposal confined to
     |chi_eff| > amax must therefore integrate to exactly zero.
     """
+    # w_full = 0: every draw comes from the beyond-amax window.
+    lz = np.asarray(_beyond_amax_diagnostics(setup)[0])
+    assert np.isneginf(lz).all(), lz
+
+
+def _beyond_amax_diagnostics(setup):
+    """Event diagnostics with EVERY draw confined to |chi_eff| > amax."""
     boxes = flows_mod.compute_support_boxes(setup["ens"], key=jax.random.key(1))
     n = int(np.asarray(boxes["chieff"]).shape[0])
     beyond = dict(boxes)
@@ -617,11 +624,24 @@ def test_draws_beyond_the_table_grid_carry_no_weight(setup):
     theta = np.asarray(setup["theta_fid"], dtype=np.float64).copy()
     theta[10] = 1.0   # sigma_chi at its prior ceiling: the window is reachable
     theta = jnp.asarray(theta)
+    return _build(setup, beyond, 4096, 0.0).event_diagnostics(
+        _cosmo(), _survey(), theta
+    )
 
-    # w_full = 0: every draw comes from the beyond-amax window.
-    lz = np.asarray(_build(setup, beyond, 4096, 0.0)
-                    .event_diagnostics(_cosmo(), _survey(), theta)[0])
-    assert np.isneginf(lz).all(), lz
+
+def test_dead_event_reports_zero_ess_not_nan(setup):
+    """An excluded event's ESS is 0, not nan.
+
+    ``_event_ldw`` legitimately returns an all -inf row (here: every draw
+    outside the PE prior's chi_eff support), and ``ln Z_i = -inf`` is reported
+    for it.  Shifting the row by its own max was then ``-inf - (-inf) = nan``,
+    so the diagnostic meant to identify the dead event reported nan — which also
+    poisons any host-side mean/percentile over events.
+    """
+    lz, var, ess = (np.asarray(a) for a in _beyond_amax_diagnostics(setup))
+    assert np.isneginf(lz).all()
+    np.testing.assert_array_equal(ess, np.zeros_like(ess))
+    assert np.isfinite(var).all()
 
 
 def test_pe_bounds_from_checkpoint_config_are_honoured(tmp_path):
