@@ -128,6 +128,51 @@ def _prior_sigma2(power_spectrum: np.ndarray) -> float:
     return float(np.mean(np.asarray(power_spectrum, dtype=float)))
 
 
+def _laplace_diag_variance(lam, pk, bias, prior_strength):
+    """Per-BIN Laplace posterior variance of ``s`` under the FFT-diagonal Hessian.
+
+    The Hessian is ``H = prior_strength C^{-1} + bias^2 diag(lambda)``.  Freezing
+    the data curvature at each bin's OWN ``lambda_v`` keeps the operator
+    circulant locally, so the diagonal of ``H^{-1}`` reads
+
+        var_v = mean_k 1 / (prior_strength / P_k + bias^2 lambda_v),
+
+    which is exact in both limits that matter: a data-free bin
+    (``lambda_v = 0``) gets the effective PRIOR variance ``sigma_s^2 /
+    prior_strength`` -- so ``E[Q] = exp(b s + b^2 var/2 - shift)`` reads
+    ``Q -> 1`` there -- and a data-rich bin gets ``~1/(b^2 lambda_v) -> 0``, so
+    ``E[Q] -> Q(s_map)``.
+
+    Using ONE row scalar instead (``median(lambda_row)``) was wrong wherever a
+    row's completeness support covers less than half its bins -- the norm for a
+    z < 1 survey on the z <= 5 package grid: the median is then exactly 0, the
+    row's var is pinned at the prior variance, the ``+0.5 b^2 var`` term cancels
+    ``shift`` in EVERY bin, and the data-rich bins are inflated by
+    ``exp(0.5 b^2 sigma_s^2 / prior_strength)`` (measured 1.65x at
+    ``b = sigma = ps = 1``).  Worse, the inflation switched on and off with the
+    fraction of covered bins, so pixels at fixed z got discontinuously
+    different Jensen boosts driven by grid coverage rather than by data.
+
+    Cost is ``O(n_rows * n_grid^2)`` (chunked over rows to bound the
+    intermediate), i.e. milliseconds per row against the seconds of that row's
+    MAP solve.
+    """
+    lam = np.atleast_2d(np.asarray(lam, dtype=float))
+    pk = np.asarray(pk, dtype=float)
+    n_rows, n_grid = lam.shape
+    A = float(prior_strength) / pk                       # (n_grid,)
+    b2 = float(bias) * float(bias)
+    out = np.empty((n_rows, n_grid), dtype=float)
+    # ~64 MB of (chunk, n_grid, n_grid) float64 intermediate at a time.
+    chunk = max(1, int(8_000_000 // max(n_grid * n_grid, 1)))
+    for start in range(0, n_rows, chunk):
+        blk = lam[start:start + chunk]                   # (c, n_grid)
+        H = A[None, None, :] + b2 * blk[:, :, None]      # (c, n_grid, n_grid)
+        out[start:start + chunk] = np.mean(
+            1.0 / np.maximum(H, 1e-30), axis=-1)
+    return out
+
+
 # ------------------------------------------------------------
 # MAP
 # ------------------------------------------------------------
@@ -379,17 +424,16 @@ def poisson_lognormal_map(
     # FFT-diagonal Hessian approximation as `laplace_lognormal_members`, so the
     # deterministic table agrees with the mean of its own ensemble and with the
     # gp3d output convention: a data-free bin reads logQ -> 0 (Q = 1,
-    # homogeneous; var_post -> sigma_s^2 cancels the mean-one shift) instead of
-    # the raw per-draw MAP's -0.5 b^2 sigma_s^2 (library review, radial
+    # homogeneous; var_post -> sigma_s^2/ps cancels the mean-one shift) instead
+    # of the raw per-draw MAP's -0.5 b^2 sigma_s^2 (library review, radial
     # finding 2). Data-rich bins are unchanged to O(var_post): the posterior
-    # variance collapses and E[Q] -> Q(s_map).
-    var_post = np.empty(n_rows, dtype=float)
-    for r in range(n_rows):
-        lam_scale = float(np.median(lam_map[r]))
-        H = ps / pk + (b * b) * lam_scale
-        var_post[r] = float(np.mean(1.0 / np.maximum(H, 1e-30)))
+    # variance collapses and E[Q] -> Q(s_map). The curvature is PER BIN (each
+    # bin's own lambda); a row scalar cancelled the shift everywhere on any row
+    # whose completeness support covered under half its bins -- see
+    # `_laplace_diag_variance`.
+    var_post = _laplace_diag_variance(lam_map, pk, b, ps)   # (n_rows, n_grid)
     logq_map = np.clip(
-        b * s_map - shift + 0.5 * (b * b) * var_post[:, None],
+        b * s_map - shift + 0.5 * (b * b) * var_post,
         -logq_clip, logq_clip,
     )
     q_map = np.exp(logq_map)
