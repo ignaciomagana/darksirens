@@ -258,6 +258,33 @@ def test_data_dim_must_match_column_count(tmp_path):
         flows_mod.load_flow_ensemble(tmp_path)
 
 
+def test_grouping_separates_flows_differing_only_in_a_static_leaf(tmp_path):
+    """Flows that constrain DIFFERENT dimensions must not share a group.
+
+    ``bij.Indexed.idxs`` is a plain Python int, so it is a pytree LEAF that
+    ``eqx.partition(flow, eqx.is_array)`` puts in the static half -- and a group
+    keeps only its first member's static half.  With the index absent from the
+    signature these two flows grouped together and the second was evaluated with
+    the first's index, i.e. the exp constraint applied to the wrong physical
+    column (log densities off by ~10^6 nats here).
+    """
+    for name, key, pos_dim in [("GW_POS2", 0, 2), ("GW_POS0", 1, 0)]:
+        cfg = _config(key)
+        cfg["constraints"] = {str(pos_dim): {"type": "positive"}}
+        d = tmp_path / name
+        d.mkdir()
+        _save_flow(d / f"{name}_flow.npz", flows_mod.create_flow_from_config(cfg), cfg)
+
+    ens = flows_mod.load_flow_ensemble(tmp_path)
+    assert len(ens.groups) == 2, "constraint dimension must split the groups"
+
+    X = jnp.asarray([[40.0, 20.0, 1000.0, 0.1], [30.0, 10.0, 500.0, -0.2]])
+    got = np.asarray(flows_mod.make_ensemble_log_prob(ens)(ens.group_params(), X))
+    for i, p in enumerate(ens.paths):
+        flow, _ = flows_mod.load_flow(p)
+        np.testing.assert_allclose(got[i], np.asarray(flow.log_prob(X)), rtol=1e-12)
+
+
 def test_ordered_positive_inverse_rejects_reversed_and_equal():
     """Outside the open cone x[0] > ... > x[n-1] > 0 the point has no preimage.
 
