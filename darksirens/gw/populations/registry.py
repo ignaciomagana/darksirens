@@ -114,6 +114,16 @@ class Curated:
 _PL1_BOUNDS = {"alpha": _B(0, 6), "m_min": _B(2, 10), "m_max": _B(15, 50)}
 _PL2_BOUNDS = {"alpha": _B(0, 6), "m_min": _B(20, 40), "m_max": _B(50, 100)}
 
+# Weight convention, stated once: ``weights`` are the leading FINAL fractions and
+# the LAST component takes the remainder, so ``weights=(0.10,)`` puts w_G = 0.90 in
+# the Gaussian peak -- 90% of the fiducial population inside one 35 Msun peak,
+# against a measured peak fraction of ~0.03-0.1 with the power-law continuum
+# dominating.  These are round tuning values inherited from the pre-grammar
+# factories, NOT release medians (only ``gwtc5_fiducial_bpl2peaks`` carries those),
+# and they set the truth of every ``--fix_population`` run and mock built from
+# ``get_fixed_population_params``.  Left verbatim so existing fixed-population runs
+# stay comparable; flip them (and the mock generator's ``peak_fraction``) together
+# if the fiducial population is meant to look like the measured one.
 CURATED: dict[str, Curated] = {
     "powerlaw+peak": Curated(
         latex="PL+G",

@@ -247,15 +247,26 @@ def test_population_proposal_is_population_coupled(gen):
     assert np.percentile(np.asarray(b_truth["m1det"]), 99) < 120.0
 
 
-# --- Per-component pairing pdraw + defensive population+uniform proposal --------
-# The following tests pin the PR-1 fix: the mock's mass-ratio-spin density
-# (source of the stored selection ``pdraw``) must pair EACH mass component
-# separately, exactly like the inference ``powerlaw+peak`` mixture
-# (MixtureModel.component_densities): the power law with its (m_min, dm_min)
-# secondary-mass taper, the Gaussian peak with the fallback (M_LO=1, dm=0.01).
-# The old single-tapered pairing mis-tapered the peak's secondaries at m_min=5,
-# driving the in-likelihood weight p_inference/pdraw to e^31 for injections with
-# m2src just above 5 (selection Neff -> 1, logL -> -inf at Ndraw >~ 1e6).
+# --- Mixture pairing pdraw + defensive population+uniform proposal --------------
+# The following tests pin the mock's mass-ratio-spin density (source of the stored
+# selection ``pdraw``) against the inference ``powerlaw+peak`` mixture.  The
+# inference resolves ONE low-mass edge for the whole mixture
+# (``MixtureModel._low_mass_edge``): the Gaussian peak declares no taper
+# parameters and inherits the power law's sampled (m_min, dm_min) rather than the
+# normalisation-grid floor M_LO = 1, so the mock applies the SAME single pairing
+# to both lanes.  Any mismatch between the two tapers drives the in-likelihood
+# weight p_inference/pdraw to e^31 for injections with m2src just above m_min
+# (selection Neff -> 1, logL -> -inf at Ndraw >~ 1e6).
+
+
+def test_mock_population_defaults_track_the_inference_fiducial(gen):
+    """PopulationConfig documents that its defaults mirror
+    ``get_fixed_population_params("powerlaw+peak")``; the rate slope is the one
+    that used to drift (0.0 in both, a non-evolving comoving rate)."""
+    from darksirens.gw.populations.grammar import GAMMA_FIDUCIAL
+
+    pop = gen.PopulationConfig()
+    assert pop.gamma == GAMMA_FIDUCIAL
 
 
 def _inference_model():
@@ -269,13 +280,16 @@ def _inference_model():
 def test_pairing_matches_inference_component_densities(gen):
     """The generator's ``_mass_spin_pdf`` equals the inference mixture density.
 
-    At z=0 (and gamma=0 fiducial, so the ``(1+z)**(gamma-1)`` factor is 1)
+    At z=0 the ``(1+z)**(gamma-1)`` factor is 1, so
     ``exp(model.log_p_pop(m1, q, 0, chi, theta)) == mixture(m1, q, chi)``, which
-    is precisely the per-component pairing the generator must reproduce.  The
-    mock normalises its mass and pairing densities on the SAME linspaces and
-    trapezoid the inference uses (_MASS_NORM_GRID == get_mass_grid(),
-    _Q_NORM_GRID == get_q_grid()), so agreement is at machine precision -- far
-    tighter than the 2% the fix requires away from the hard zeros."""
+    is precisely the mixture pairing the generator must reproduce.  The
+    mock normalises its pairing density on the SAME support-relative nodes the
+    inference uses (_Q_NORM_GRID == get_q_grid() mapped onto [q_cut, 1]) and its
+    mass/spin densities on the same trapezoid grids (_MASS_NORM_GRID ==
+    get_mass_grid()).  The inference normalises the tapered power law and the
+    Gaussian peak in CLOSED FORM, so the residual is that grid's O((h/sigma)^2)
+    quadrature error (measured worst 4.9e-6) rather than float64 round-off -- still
+    far tighter than the 2% the fix requires away from the hard zeros."""
     import jax.numpy as jnp
 
     model, theta = _inference_model()
@@ -292,9 +306,9 @@ def test_pairing_matches_inference_component_densities(gen):
                 continue
             rel = abs(g - inf) / abs(inf)
             worst = max(worst, rel)
-    # Grids match the inference exactly, so the residual is pure float64 round-off
-    # (measured worst ~2e-15); assert a tight bound well inside the 1e-6 target.
-    assert worst < 1e-9, f"per-component pairing disagreement {worst:.3e} exceeds 1e-9"
+    # Residual = the mock's grid mass/spin normalisers against the inference's
+    # closed forms (measured worst 4.9e-6, at m1 = 5.2 in the taper toe).
+    assert worst < 1e-5, f"mixture pairing disagreement {worst:.3e} exceeds 1e-5"
 
 
 def test_importance_weight_bounded_population_proposal(gen):
@@ -378,31 +392,27 @@ def test_defensive_mixture_pdraw_and_neff(gen):
     )
 
 
-def test_sample_q_component_split(gen):
-    """``_sample_q`` draws from the per-lane pairing selected by ``use_peak``.
+def test_sample_q_uses_the_mixture_low_mass_edge(gen):
+    """``_sample_q`` draws from the mixture's single tapered pairing.
 
-    A forced all-peak mask must sample ``_pair_pdf(.; 1.0, 0.01)`` (secondaries
-    down to m2=1); a forced all-power-law mask must sample the tapered
-    ``_pair_pdf(.; m_min, dm_min)`` (secondaries floored at m2=m_min)."""
+    Whatever mass component the primary came from, the secondary is floored at the
+    mixture's sampled ``m_min`` -- the peak lane no longer samples down to the
+    normalisation-grid floor m2 = M_LO = 1."""
     pop = gen.PopulationConfig()
     m1v = 35.0
     m1 = np.full(300_000, m1v)
     rng = np.random.default_rng(5)
 
-    q_peak = gen._sample_q(rng, m1, pop, use_peak=np.ones(len(m1), dtype=bool))
-    q_pl = gen._sample_q(rng, m1, pop, use_peak=np.zeros(len(m1), dtype=bool))
+    qs = gen._sample_q(rng, m1, pop)
 
-    # Peak lanes reach below the power-law floor 5/m1 (secondaries m2 in [1, 5]);
-    # power-law lanes stay at/above it.
-    assert q_peak.min() < pop.mmin / m1v
-    assert q_pl.min() > 0.9 * (pop.mmin / m1v)
+    # No secondary below the mixture edge (the taper starts exactly at m_min).
+    assert qs.min() > 0.9 * (pop.mmin / m1v)
+    assert (qs * m1v).min() >= pop.mmin
 
-    for qs, m_min, dm in ((q_peak, gen._PAIR_M_LO, gen._PAIR_DM),
-                          (q_pl, pop.mmin, pop.dm_min)):
-        edges = np.linspace(m_min / m1v - 0.01, 1.0, 60)
-        centers = 0.5 * (edges[:-1] + edges[1:])
-        dens, _ = np.histogram(qs, bins=edges, density=True)
-        pdf = gen._pair_pdf(centers, np.full_like(centers, m1v), m_min, dm, pop.beta)
-        mask = pdf > 0.05 * pdf.max()
-        rel = np.abs(dens[mask] - pdf[mask]) / pdf[mask]
-        assert np.median(rel) < 0.1, f"sampled q (m_min={m_min}) off its pair pdf: median rel {np.median(rel):.3f}"
+    edges = np.linspace(pop.mmin / m1v - 0.01, 1.0, 60)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    dens, _ = np.histogram(qs, bins=edges, density=True)
+    pdf = gen._pair_pdf(centers, np.full_like(centers, m1v), pop.mmin, pop.dm_min, pop.beta)
+    mask = pdf > 0.05 * pdf.max()
+    rel = np.abs(dens[mask] - pdf[mask]) / pdf[mask]
+    assert np.median(rel) < 0.1, f"sampled q off its pair pdf: median rel {np.median(rel):.3f}"

@@ -581,6 +581,16 @@ def resolve_mass_grid_bounds(model) -> tuple[float, float]:
     ``mu + 5 sigma``.  Overshooting is harmless (floored log-spaced cells in
     zero-density regions carry negligible proposal mass), so the box takes
     the max of those and a 200 M_sun default.  Lower edge: min(2, m_min).
+
+    The name-derived bounds are a REFINEMENT of the authoritative quantity, the
+    model's declared support ``population_m1_support_max``, which is also folded
+    in: the specs of the bespoke models carry no machine-readable ``name``, so
+    every lookup below returns its default and the box would silently collapse to
+    (1, 200) for e.g. ``gwtc5_fiducial_bpl2peaks``, whose primary-mass support runs
+    to a fixed 300 Msun (with an ``alpha_2`` prior reaching -4, i.e. a RISING
+    spectrum in [200, 300]) -- the same silent-clamp failure mode
+    ``assert_pairing_grid_covers_support`` exists to prevent, and today only latent
+    because ``flow_events`` rejects non-mixture models a few lines earlier.
     """
     by_name: dict[str, list[tuple[float, float]]] = {}
     lows, highs, _ = model.prior_bounds()
@@ -605,9 +615,12 @@ def resolve_mass_grid_bounds(model) -> tuple[float, float]:
     # harmless (see above), so the floor is unconditional.
     from darksirens.gw.populations.utils import M_LO
 
+    from darksirens.gw.populations.registry import population_m1_support_max
+
     m1_lo = min(float(M_LO), _min_lo("m_min", default=float(M_LO)))
     m1_hi = max(
         200.0,
+        float(population_m1_support_max(model)),
         _max_hi("m_max") + _max_hi("dm_max"),
         _max_hi("mu") + 5.0 * _max_hi("sigma"),
     )

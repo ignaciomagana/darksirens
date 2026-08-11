@@ -226,6 +226,13 @@ class AxisCfg:
         if self.name == "m1":
             return jnp.exp(jnp.linspace(jnp.log(self.node_lo),
                                         jnp.log(self.node_hi), self.n_inducing))
+        if self.name == "z":
+            # Uniform in the GP COORDINATE log1p(z), not in z: linear-in-z nodes
+            # would leave coordinate gaps of 0.54 at low z (where every event is)
+            # against a length-scale prior of [0.05, 0.8].
+            return jnp.expm1(jnp.linspace(math.log1p(self.node_lo),
+                                          math.log1p(self.node_hi),
+                                          self.n_inducing))
         return jnp.linspace(self.node_lo, self.node_hi, self.n_inducing)
 
     def nodes_coord(self) -> jnp.ndarray:
@@ -238,7 +245,18 @@ _DEFAULT_AXES = {
     "m1":  AxisCfg("m1",  "matern32", 10, 3.0,   100.0, math.log(0.15), math.log(2.0)),
     "q":   AxisCfg("q",   "rbf",       8, 0.10,    1.0, math.log(0.05), math.log(0.8)),
     "chi": AxisCfg("chi", "rbf",      10, -0.95,   0.95, math.log(0.05), math.log(1.0)),
-    "z":   AxisCfg("z",   "rbf",       8, 0.0,     1.5, math.log(0.05), math.log(0.8)),
+    # The z inducing nodes must SPAN the shared analysis grid, exactly like
+    # ``_ZNORM_HI`` above: the field is the RKHS conditional mean
+    # ``mu + k(x*, Z) alpha``, so a query beyond the outermost node is suppressed
+    # by exp(-d^2/2ls^2) and reverts to the prior mean (which is identically zero
+    # on the z axis).  With nodes stopping at z = 1.5 (coordinate 0.916) against
+    # zMax = 5 (1.792) the modulation decayed back to its zero-field value above
+    # z ~ 2 -- 6.4e-5 of it survived at the geometric-median length scale --
+    # silently reverting R(z) to the parametric (1+z)^(gamma-1) over most of the
+    # analysis range.  The node COUNT is deliberately unchanged: M is the product
+    # over axes, so gp4d would go from 6400 to 11200 inducing points.
+    "z":   AxisCfg("z",   "rbf",       8, 0.0, max(1.5, float(zMax)),
+                   math.log(0.05), math.log(0.8)),
 }
 
 # Shared prior bounds.
@@ -289,6 +307,24 @@ def _eval_field(coords, kern, nodes, alpha, mean):
     """f(coords) = mean(coords) + k(coords, Z) @ alpha."""
     kqz = kern(coords, nodes)                      # (Nq, M)
     return mean + kqz @ alpha
+
+
+def _eval_field_clipped(coords, kern, nodes, alpha, mean):
+    """``mean + clip(GP deviation, -_FIELD_CLIP, _FIELD_CLIP)``.
+
+    Only the DEVIATION is bounded.  Clipping the SUM would truncate the
+    parametric mean, whose dynamic range is exactly what ``alpha_gp``/``beta_gp``
+    are meant to control: at the shipped fiducial (alpha_gp = 4) the mean
+    ``-alpha_gp log m1`` reaches -_FIELD_CLIP at m1 = exp(10/4) = 12.2 Msun, so
+    every ``mean_mode="shape"`` model was FLAT in m1 above ~12 Msun instead of
+    ~m^-4 (measured d log p / d log m1 = -0.07 between 20 and 40 Msun), with the
+    same clip in the normaliser hiding it.  The mean is analytic and finite over
+    the whole prior box (|mu| <= 12 log(200) + 12 log(1/0.01) ~ 119 nats), so it
+    needs no guard; the deviation, which the whitened latent can drive anywhere,
+    keeps one.
+    """
+    dev = kern(coords, nodes) @ alpha
+    return mean + jnp.clip(dev, -_FIELD_CLIP, _FIELD_CLIP)
 
 
 def _grid_integrate(values, grids):
@@ -458,9 +494,9 @@ class JointGPPopulation:
         alpha = _alpha_from_xi(L, xi)
 
         coords_q = jnp.stack([_to_coord(a, m1, q, chi, z) for a in self.gp_axes], axis=-1)
-        f_q = _eval_field(coords_q, kern, self._Z, alpha,
-                          self._mean_on_coords(coords_q, alpha_gp, beta_gp))
-        p_gp_un = jnp.exp(jnp.clip(f_q, -_FIELD_CLIP, _FIELD_CLIP))
+        f_q = _eval_field_clipped(coords_q, kern, self._Z, alpha,
+                                  self._mean_on_coords(coords_q, alpha_gp, beta_gp))
+        p_gp_un = jnp.exp(f_q)
         p_gp_un = p_gp_un * self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
 
         norm = self._normalise(kern, alpha, alpha_gp, beta_gp,
@@ -554,9 +590,9 @@ class JointGPPopulation:
                     else:
                         cols.append(_to_coord(a, phys["m1"], phys["q"], phys["chi"], None))
                 coords = jnp.stack(cols, axis=-1)
-                fg = _eval_field(coords, kern, self._Z, alpha,
-                                 self._mean_on_coords(coords, alpha_gp, beta_gp))
-                exp_field = jnp.exp(jnp.clip(fg, -_FIELD_CLIP, _FIELD_CLIP))   # (G,)
+                fg = _eval_field_clipped(coords, kern, self._Z, alpha,
+                                         self._mean_on_coords(coords, alpha_gp, beta_gp))
+                exp_field = jnp.exp(fg)                                        # (G,)
                 # m1 not in gp_axes -> _taper_cut skips its m1 branch and the q
                 # branch computes m2 = q*m1 on the (Nm1, G) lattice.
                 cut = self._taper_cut(m1g[:, None], phys["q"][None, :],
@@ -587,9 +623,9 @@ class JointGPPopulation:
                 else:
                     cols.append(_to_coord(a, phys["m1"], phys["q"], phys["chi"], None))
             coords = jnp.stack(cols, axis=-1)
-            fg = _eval_field(coords, kern, self._Z, alpha,
-                             self._mean_on_coords(coords, alpha_gp, beta_gp))
-            val = jnp.exp(jnp.clip(fg, -_FIELD_CLIP, _FIELD_CLIP))
+            fg = _eval_field_clipped(coords, kern, self._Z, alpha,
+                                     self._mean_on_coords(coords, alpha_gp, beta_gp))
+            val = jnp.exp(fg)
             val = val * self._taper_cut(phys["m1"], phys["q"],
                                         m_min, dm_min, m_max, dm_max)
             return _grid_integrate(val.reshape([g.shape[0] for g in grids]), grids)
@@ -642,17 +678,29 @@ class JointGPPopulation:
 
 @dataclass
 class AdditiveGPPopulation:
-    """Functional-ANOVA decomposition: ``f = sum_terms f_term`` (each centred).
+    """Additive decomposition: ``f = sum_terms f_term``.
 
     Probability axes are ``{m1, q, chi}``; ``z`` enters only through interaction
     terms that include it (conditioning).  Each term is an independent whitened
-    rank-M GP with its own amplitude, length scales, and ``xi``, constrained to
-    integrate to zero over its own axes (sum-to-zero -- required for ANOVA
-    identifiability, else per-term contributions are not separable).
+    rank-M GP with its own amplitude, length scales, and ``xi``, and is ZERO-MEAN
+    (unlike :class:`JointGPPopulation`, this family has no parametric
+    ``alpha_gp``/``beta_gp`` shape mean, so its prior is centred on a density that
+    is flat in every probability axis -- the same convention the binned
+    :class:`BinnedGPPopulation` uses).
+
+    Identifiability: each term's grand mean over the coarse probability grid is
+    subtracted before exponentiating, which keeps ``exp(F)`` at O(1) scale.  It is
+    NOT the functional-ANOVA sum-to-zero projection and is not claimed to be: a
+    per-term CONSTANT cancels identically against the normaliser ``Z(z)`` computed
+    from the same centred field, so it has no effect on the likelihood.  The real
+    degeneracy -- an interaction term such as ``f_{m1,q}`` spanning functions that
+    are nearly constant in ``q`` and so duplicating ``f_{m1}`` -- is left to the
+    N(0, 1) latent priors, which keep the posterior proper (long ridges in the
+    latent space, not an improper posterior).  Projecting each interaction onto the
+    orthogonal complement of the main effects' spans would remove it.
     """
 
     terms: tuple = (("m1",), ("q",), ("chi",), ("m1", "q"), ("m1", "z"), ("chi", "z"))
-    mean_mode: str = "shape"
     axes_cfg: dict = field(default_factory=lambda: dict(_DEFAULT_AXES))
     latex: str = "GP add"
 
@@ -740,8 +788,8 @@ class AdditiveGPPopulation:
         G = flatg["m1"].shape[0]
         taper_grid = self._taper_cut(flatg["m1"], flatg["q"], m_min, dm_min, m_max, dm_max)
 
-        # Per z-grid node: per-term sum-to-zero constant c_term(z) and the
-        # prob-axis normalisation Z(z).  Smooth in z -> interpolate to queries.
+        # Per z-grid node: per-term centring constant c_term(z) and the prob-axis
+        # normalisation Z(z).  Smooth in z -> interpolate to queries.
         def _grid_quant(zval):
             cs = []
             F = jnp.zeros(G)
@@ -754,19 +802,32 @@ class AdditiveGPPopulation:
             Z = _grid_integrate(pg.reshape([g.shape[0] for g in grids]), grids)
             return Z, jnp.stack(cs)
 
-        zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
-        Zg, Cg_terms = jax.lax.map(_grid_quant, zg)        # (nz,), (nz, n_terms)
+        if self._z_in_gp:
+            zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
+            # jax.checkpoint is REQUIRED, not cosmetic (see _znorm_interp): a scan
+            # keeps its per-iteration residuals for the transpose, so reverse mode
+            # would otherwise tape every z node's (G, M) cross-kernel for all six
+            # terms.
+            Zg, Cg_terms = jax.lax.map(jax.checkpoint(_grid_quant), zg)
+            c_at = [jnp.interp(z, zg, Cg_terms[:, j]) for j in range(len(term_built))]
+            norm = jnp.exp(jnp.interp(z, zg,
+                                      jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
+        else:
+            # No term carries z (e.g. gp_separable), so _grid_quant is constant in
+            # z: evaluate it ONCE instead of mapping _ZNORM_N identical nodes and
+            # interpolating a constant.
+            Z0, C0 = _grid_quant(0.0)
+            c_at = [C0[j] for j in range(len(term_built))]
+            norm = jnp.where(Z0 > 0, Z0, 1.0)
 
         # Query points (direct evaluation; centring constants interpolated in z).
         qphys = {"m1": m1, "q": q, "chi": chi}
         F_q = jnp.zeros(N)
         for j, (meta, kern, alpha) in enumerate(term_built):
             fpt = self._term_eval(meta, kern, alpha, qphys, z, N)
-            c_at = jnp.interp(z, zg, Cg_terms[:, j])
-            F_q = F_q + (fpt - c_at)
+            F_q = F_q + (fpt - c_at[j])
         pun = jnp.exp(jnp.clip(F_q, -_FIELD_CLIP, _FIELD_CLIP)) * \
             self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
-        norm = jnp.exp(jnp.interp(z, zg, jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
         # The _LOGSAFE operand exists only to keep the dead branch of the
         # where free of log(0) (both branches are differentiated); the
         # RETURNED value outside the taper support must be -inf, exactly as
@@ -831,8 +892,10 @@ class BinnedGPPopulation:
     shape is normalised over the (m1, q) grid.  With ``z_edges`` set (model
     ``gppop_mz``) the (m1, m2, z) binning carries a *free-form* rate evolution
     (no gamma, no z-normalisation); the unnormalised z-dependence is the physical
-    R(z).  A baseline truncated-Gaussian spin (mu_chi, sigma_chi) is always
-    included.
+    R(z), and the TOP z bin is open-ended (constant comoving rate above
+    ``z_edges[-1]``, see :meth:`_binned_density`) so the model stays usable over
+    the whole analysis redshift range.  A baseline truncated-Gaussian spin
+    (mu_chi, sigma_chi) is always included.
 
     Parameter order (sliced by ``log_p_pop`` exactly as listed by ``param_specs``)
     ------------------------------------------------------------------------------
@@ -936,8 +999,22 @@ class BinnedGPPopulation:
                               jnp.clip(j, 0, self._n_m - 1)]
         valid = valid & (tril >= 0)
         if self._has_z:
+            # The TOP z bin is open-ended: a query above ``z_edges[-1]`` keeps the
+            # last bin's rate (constant comoving-frame extrapolation) instead of
+            # being declared invalid.  Truncating there asserted ZERO merger rate
+            # above z = 1.2 (the default top edge) while the rest of the pipeline
+            # runs to zMax = 5, so every PE sample and injection above it was
+            # silently dropped -- and any event whose PE support sat entirely above
+            # it made its log-likelihood -inf for EVERY proposal, which the
+            # likelihood's isfinite guard turns into a rejection of the whole
+            # parameter space (nested sampling cannot even initialise live points),
+            # with nothing pointing at the z edges.  Unlike the mass edges -- where
+            # zero density outside the binned range IS the model statement, as it is
+            # for every tapered parametric mass model -- a hard zero in z is not a
+            # statement anyone chose.  Override ``DARKSIRENS_GPPOP_Z_EDGES`` to
+            # resolve the high-z rate instead of extrapolating it.
             k = jnp.searchsorted(self._z_edges, z, side="right") - 1
-            valid = valid & (k >= 0) & (k < self._n_z)
+            valid = valid & (k >= 0)
             flat = jnp.clip(tril, 0, self._n_tril - 1) * self._n_z \
                 + jnp.clip(k, 0, self._n_z - 1)
         else:
@@ -1052,13 +1129,15 @@ _reg("gp3d_q_chi_z",  _joint(("q", "chi", "z"),  "GP q,chi,z"),  "GP q,chi,z")
 # 4-D joint
 _reg("gp4d", _joint(("m1", "q", "chi", "z"), "GP 4D"), "GP 4D")
 # Separable null: independent 1-D GP per probability axis, no interactions
+# ``mode`` is accepted and ignored: the additive family is zero-mean, so
+# ``@shape``/``@zero`` decorations name the same model.
 _reg("gp_separable",
      lambda mode="shape": AdditiveGPPopulation(
-         terms=(("m1",), ("q",), ("chi",)), mean_mode=mode, latex="GP sep"),
+         terms=(("m1",), ("q",), ("chi",)), latex="GP sep"),
      "GP sep")
 # Additive (functional ANOVA): mains + m1q + m1z + chiz interactions
 _reg("gp4d_additive",
-     lambda mode="shape": AdditiveGPPopulation(mean_mode=mode, latex="GP add"),
+     lambda mode="shape": AdditiveGPPopulation(latex="GP add"),
      "GP add")
 # Binned GP (gppop): mass-only and full (m1, m2, z)
 _reg("gppop",

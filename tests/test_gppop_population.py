@@ -142,10 +142,22 @@ def test_gppop_mz_redshift_binning():
                             jnp.array([0.5]), jnp.array([0.0]), theta)
     assert np.isfinite(np.asarray(lp_in)).all()
 
-    # z beyond the default z-edges (..., 1.2) -> out of bin -> zero density.
+    # z beyond the default z-edges (..., 1.2) -> the TOP bin is open-ended, so the
+    # rate is the last bin's, carried down only by the 1/(1+z) time dilation.  A
+    # hard zero there asserted no mergers above z = 1.2 while the pipeline runs to
+    # zMax = 5, making the likelihood -inf for every proposal.
+    lp_top = model.log_p_pop(jnp.array([40.0]), jnp.array([0.5]),
+                             jnp.array([1.0]), jnp.array([0.0]), theta)
     lp_out = model.log_p_pop(jnp.array([40.0]), jnp.array([0.5]),
                              jnp.array([5.0]), jnp.array([0.0]), theta)
-    assert np.isneginf(np.asarray(lp_out)).all()
+    assert np.isfinite(np.asarray(lp_out)).all()
+    np.testing.assert_allclose(float(lp_out[0]) - float(lp_top[0]),
+                               -np.log(6.0 / 2.0), atol=1e-10)
+
+    # Below the first edge (z < 0) is still outside the model's support.
+    lp_neg = model.log_p_pop(jnp.array([40.0]), jnp.array([0.5]),
+                             jnp.array([-0.1]), jnp.array([0.0]), theta)
+    assert np.isneginf(np.asarray(lp_neg)).all()
 
 
 def test_gppop_mz_carries_source_time_dilation():

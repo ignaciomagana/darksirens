@@ -117,6 +117,67 @@ def test_mass_grid_lower_bound_reaches_global_normalization_floor():
     assert m1_hi >= 200.0
 
 
+def test_mass_grid_upper_bound_covers_a_declared_support_without_named_specs():
+    """The proposal box must cover the model's DECLARED support.
+
+    The bounds are derived by string-matching ``ParamSpec.name`` suffixes, and the
+    bespoke models build their specs without ``name=``: every lookup then returns
+    its default and the box collapsed to the hardcoded (1, 200) even for
+    ``gwtc5_fiducial_bpl2peaks``, whose support runs to a fixed 300 Msun.
+    """
+    from darksirens.gw.populations.registry import (
+        get_model,
+        population_m1_support_max,
+    )
+    from darksirens.gw.populations.sampling import resolve_mass_grid_bounds
+
+    model = get_model("gwtc5_fiducial_bpl2peaks")
+    support = population_m1_support_max(model)
+    assert support == 300.0
+    _, m1_hi = resolve_mass_grid_bounds(model)
+    assert m1_hi >= support, (m1_hi, support)
+
+
+# ---------------------------------------------------------------------------
+# The mixture's low-mass edge is a MODEL parameter, not the quadrature floor
+# ---------------------------------------------------------------------------
+
+def test_peak_component_secondary_floor_is_the_sampled_m_min():
+    """A mass component with no low-mass edge (the Gaussian ``peak``) must
+    inherit the MIXTURE's sampled ``m_min`` for its ``m2 = q*m1`` cut.
+
+    It used to fall back to the normalisation-grid floor ``M_LO`` = 1, so 90% of
+    the fiducial ``powerlaw+peak`` population (w_G = 0.90) admitted 1 Msun
+    secondaries: measured log p = -4.31 at (m1, q) = (30, 0.05), i.e. m2 = 1.5,
+    and P(m2 < m_min = 5) = 0.019 at beta = 1 rising to 0.41 at beta = -1.
+    """
+    from darksirens.gw.populations.registry import (
+        get_fixed_population_params,
+        get_model,
+    )
+
+    model = get_model("powerlaw+peak")
+    theta = jnp.asarray(get_fixed_population_params("powerlaw+peak"))
+    m_min = float(theta[2])                                   # PL.m_min
+    m1 = jnp.asarray([30.0, 35.0, 30.0])
+    q = jnp.asarray([0.05, 0.04, 0.9 * m_min / 30.0])
+    out = np.asarray(model.log_p_pop(m1, q, jnp.full(3, 0.3), jnp.zeros(3), theta))
+    assert np.all(np.isneginf(out)), (
+        f"secondaries below m_min = {m_min} kept finite density {out}"
+    )
+
+    # No probability leaks below the edge, and (m1, q) stays normalised.
+    mt = model.mixture_theta(theta)
+    mg = jnp.linspace(1.0, 200.0, 1201)
+    qg = jnp.linspace(1.0e-4, 1.0, 601)
+    dens = model.mixture.mass_q_density(mg[:, None], qg[None, :], mt)
+    total = float(jnp.trapezoid(jnp.trapezoid(dens, qg, axis=1), mg))
+    below = float(jnp.trapezoid(jnp.trapezoid(
+        jnp.where(mg[:, None] * qg[None, :] < m_min, dens, 0.0), qg, axis=1), mg))
+    assert abs(total - 1.0) < 5.0e-3, total
+    assert below == 0.0, below
+
+
 # ---------------------------------------------------------------------------
 # P1-14: every registered population model returns -inf outside hard support
 # ---------------------------------------------------------------------------
