@@ -736,3 +736,28 @@ def test_registry_construction_inside_a_trace_is_safe(name):
     finally:
         if cached is not None:
             sky_registry._SKY_REGISTRY[name] = cached
+
+
+def test_multipole_prior_volume_fraction_quantifies_the_logz_offset():
+    """The global positivity gate rejects most of the l=3 box, so the reported
+    logZ carries an undocumented log(valid fraction) offset that is an artifact
+    of the arbitrary a_bound, not of the data: measure it so an isotropy Bayes
+    factor can subtract it (and so the l=3 prior-draw efficiency is visible).
+    """
+    from darksirens.sky.models import MultipoleSky
+
+    # l=1 is a pure dipole with |a| <= 1 in orthonormal units: always positive.
+    assert MultipoleSky(lmax=1).prior_volume_fraction(n_draws=4096) == 1.0
+
+    f2 = get_sky_model("multipole").prior_volume_fraction()
+    f3 = get_sky_model("multipole_l3").prior_volume_fraction()
+    assert f2 == pytest.approx(0.604, abs=0.02)
+    assert f3 == pytest.approx(0.035, abs=0.01)
+    # ~2.8 nats of the l=3-vs-l=2 evidence difference is pure prior volume.
+    assert np.log(f2) - np.log(f3) == pytest.approx(2.84, abs=0.3)
+    # Cached, and a tighter box needs no correction at all.
+    model = get_sky_model("multipole_l3")
+    assert model.prior_volume_fraction() == f3
+    assert model._prior_volume_cache[0] == (20000, 0)
+    assert MultipoleSky(lmax=3, a_bound=0.05).prior_volume_fraction(
+        n_draws=4096) == 1.0

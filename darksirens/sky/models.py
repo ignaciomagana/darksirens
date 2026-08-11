@@ -511,6 +511,20 @@ class MultipoleSky:
     the box produced negative regions.  With the orthonormal harmonics the
     angular power spectrum is ``C_ℓ = Σ_m a_lm² / (2ℓ+1)``.  Purely angular — the
     ``z`` argument is ignored.
+
+    Prior-volume caveat for the isotropy Bayes factor
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    The sampler is handed a UNIFORM BOX prior on the coefficients and the
+    positivity gate returns ``-inf`` outside the valid region, so the effective
+    prior is uniform on (box ∩ positivity) while its normalisation is that of the
+    box.  The reported ``logZ`` therefore carries an offset ``log(valid
+    fraction)`` — measured ``-0.51`` nats for ``lmax=2`` and ``-3.35`` for
+    ``lmax=3`` at the default ``a_bound=1.0`` — which is an artifact of the
+    arbitrary bound, not of the data: it penalises ``multipole_l3`` by ~3 nats
+    against isotropy and makes the two multipole models mutually incomparable.
+    :meth:`prior_volume_fraction` measures it so the comparison can subtract it
+    (it is also the prior-draw efficiency: ~97% of ``lmax=3`` draws are
+    rejected).
     """
 
     # Directions of the global-positivity quadrature. ~2e3 quasi-uniform
@@ -549,6 +563,34 @@ class MultipoleSky:
             ParamSpec(rf"$a_{{{l},{m}}}$", -b, b, name=f"sky_a_l{l}_m{m}")
             for (l, m) in self._lm
         ]
+
+    def prior_volume_fraction(self, n_draws: int = 20000, seed: int = 0) -> float:
+        """Fraction of the ``a_lm`` box that survives the global positivity gate.
+
+        This is the offset the reported ``logZ`` carries relative to a properly
+        normalised constrained prior (see the class docstring): subtract
+        ``log(prior_volume_fraction())`` from ``logZ`` before forming the
+        isotropy Bayes factor, or before comparing ``multipole`` with
+        ``multipole_l3``.  Estimated by Monte Carlo on the model's OWN positivity
+        grid, so it measures exactly the region ``log_g_sky`` accepts;
+        deterministic in ``seed`` and cached for the default arguments.
+        """
+        cache = getattr(self, "_prior_volume_cache", None)
+        if cache is not None and cache[0] == (int(n_draws), int(seed)):
+            return cache[1]
+        Y = np.asarray(self._Y_positivity)                    # (Ngrid, n_coeff)
+        rng = np.random.default_rng(seed)
+        n_valid = 0
+        remaining = int(n_draws)
+        while remaining > 0:                                  # chunked: the
+            chunk = min(2048, remaining)                      # (draws, Ngrid)
+            a = rng.uniform(-self._a_bound, self._a_bound,     # product would be
+                            size=(chunk, self._n_coeff))       # hundreds of MB
+            n_valid += int(np.count_nonzero(1.0 + (a @ Y.T).min(axis=1) >= 0.0))
+            remaining -= chunk
+        fraction = n_valid / float(n_draws)
+        self._prior_volume_cache = ((int(n_draws), int(seed)), fraction)
+        return fraction
 
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
