@@ -34,6 +34,13 @@ ensemble; each survey's per-member and posterior-mean ``logQ_k`` are evaluated
 with ``bias=b_k`` at that survey's own directions (arbitrary nside/mask/depth),
 so members are matched across the K files by construction.
 
+Budget convention: each survey's output table is per-z mean-one renormalized
+under ITS OWN missing-budget weights ``(1 - C_k) dN_exp_k`` over its fitted
+footprint (default ON, ``--no-budget-renorm`` to skip), exactly as in a
+single-survey build -- ``Q_k`` only PLACES survey k's missing budget, never
+rescales it.  A per-(survey, z) scalar shift does not touch the shared field, so
+the matched-member property is preserved.
+
 **Radial mode is rejected** with an explanatory error: the radial completion
 fits each pixel's 1-D field INDEPENDENTLY (no shared latent field even within
 one survey), so "matched members" across surveys would be RNG-position
@@ -55,6 +62,7 @@ from darksirens.redshift.lognormal_completion import (
     poisson_lognormal_gp3d_map,
     laplace_lognormal_gp3d_members,
     eval_logq_gp3d,
+    renormalize_q_mean_one,
     save_lss_completion_hdf5,
 )
 from darksirens.cli.build_lognormal_completion import (
@@ -64,6 +72,7 @@ from darksirens.cli.build_lognormal_completion import (
     _count_weighted_zref_lsz,
     _gp3d_base_diagnostics,
     _gp3d_resolution_guard,
+    _stamp_post_renorm_railing,
 )
 
 # The joint builder's inducing grid is FIXED (no per-run node knobs): the
@@ -121,6 +130,7 @@ def build_joint_completion(
     lss_sigma=None,
     realization_set_id=None,
     allow_unconverged: bool = False,
+    budget_renorm: bool = True,
 ):
     """Jointly infer ONE LSS field from K catalogs and write K matched Q files.
 
@@ -128,6 +138,16 @@ def build_joint_completion(
     output, aborts BEFORE any file is written (all K tables are computed
     first, then saved) unless ``allow_unconverged`` explicitly accepts and
     stamps the degraded artifact.
+
+    ``budget_renorm`` (default ON, as in the single-survey builder) applies the
+    per-z mean-one budget renormalization (:func:`renormalize_q_mean_one`) to
+    EACH survey's fitted rows under THAT survey's own missing-budget weights
+    ``(1 - C_k) dN_exp_k``.  The weighting is per survey because each catalog's
+    likelihood forms its own ``dN_miss = (1 - C_k) dN_exp_k Q_k``: the budget is
+    that survey's C and n0's job, and a monopole shared across footprints with
+    different completeness would move budget between surveys.  The shared field
+    (and therefore the matched members) is untouched -- only a per-(survey, z)
+    scalar is removed, exactly as in a K=1 build.
 
     Returns a list of per-file dicts (ordered as ``catalog_paths``) carrying the
     written ``out_path``, the shared ``realization_set_id``, the per-file
@@ -203,10 +223,16 @@ def build_joint_completion(
             diag["z_ref"] = 1.0
             if make_members:
                 diag["n_members"] = int(n_members)
+            # The homogeneous table is trivially mean-one, so the budget stamp
+            # is honest as-is (mirrors the single-survey empty shortcut).
+            diag["budget_renormalized"] = bool(budget_renorm)
             save_lss_completion_hdf5(
                 out_paths[k], logq_map=logq_map, logq_members=logq_members,
                 zgrid=zgrid_np, indexing="global", metadata=diag,
-                realization_set_id=rid)
+                realization_set_id=rid,
+                budget_renormalized=bool(budget_renorm),
+                budget_monopole_logq=(np.zeros(n_grid, dtype=float)
+                                     if budget_renorm else None))
             results.append(dict(
                 out_path=out_paths[k], realization_set_id=rid, diagnostics=diag,
                 logq_map=logq_map, logq_members=logq_members, n_occupied=a.n_occ))
@@ -326,6 +352,21 @@ def build_joint_completion(
                 logq_members = np.where(
                     np.isfinite(logq_members), logq_members, 0.0)
 
+        # Per-z mean-one budget renormalization over THIS survey's fitted
+        # footprint, under its own (1 - C_k) dN_exp_k weights -- the same call
+        # (and the same skip-on-non-finite rule) the single-survey gp3d builder
+        # makes.  Without it the shipped table is the Laplace posterior mean
+        # E[Q], whose per-z monopole RESCALES the missing budget the likelihood
+        # forms as (1 - C) dN_exp Q instead of only redistributing it.
+        log_mono = None
+        do_renorm = bool(budget_renorm) and n_bad == 0
+        if do_renorm:
+            logq_map[a.occ], log_mono = renormalize_q_mean_one(
+                logq_map[a.occ], a.w_budget)
+            if logq_members is not None:
+                logq_members[:, a.occ], _ = renormalize_q_mean_one(
+                    logq_members[:, a.occ], a.w_budget)
+
         diag = _gp3d_base_diagnostics(
             cosmo, survey_k, nside=a.nside, n_pix=a.n_pix, n_occ=a.n_occ,
             amp=amp, ls_sph=ls_sph, bias=b_k, mode="gp3d_joint")
@@ -349,10 +390,16 @@ def build_joint_completion(
             # sha256 of the SHARED stacked xi_m draws — identical in all K files;
             # the cross-file field-level member-order provenance hash.
             diag["joint_member_xi_sha256"] = member_sha
+        diag["budget_renormalized"] = bool(do_renorm)
+        if do_renorm:
+            _stamp_post_renorm_railing(
+                diag, logq_map[a.occ],
+                logq_members[:, a.occ] if logq_members is not None else None)
 
         pending.append(dict(
             out_path=out_paths[k], diagnostics=diag, logq_map=logq_map,
-            logq_members=logq_members, n_occupied=a.n_occ))
+            logq_members=logq_members, n_occupied=a.n_occ,
+            budget_monopole_logq=log_mono))
 
     results = []
     for entry in pending:
@@ -360,7 +407,9 @@ def build_joint_completion(
             entry["out_path"], logq_map=entry["logq_map"],
             logq_members=entry["logq_members"],
             zgrid=zgrid_np, indexing="global", metadata=entry["diagnostics"],
-            realization_set_id=rid)
+            realization_set_id=rid,
+            budget_renormalized=entry["diagnostics"]["budget_renormalized"],
+            budget_monopole_logq=entry["budget_monopole_logq"])
         results.append(dict(entry, realization_set_id=rid))
     return results
 
@@ -416,6 +465,14 @@ def main(argv=None):
                         "with Q=1). The override is stamped in the files' "
                         "diagnostics and warned about at load time; research "
                         "ablations only, never production.")
+    p.add_argument("--no-budget-renorm", action="store_true", default=False,
+                   help="Skip the per-survey per-z mean-one budget "
+                        "renormalization of Q under that survey's "
+                        "(1-C)*dN_exp weights (default ON). Without it Q's "
+                        "per-z monopole RESCALES the missing budget (measured "
+                        "+55%% Jensen inflation) instead of only "
+                        "redistributing it. The choice is stamped in every "
+                        "file; research ablations only.")
     p.add_argument("--realization-set-id", type=str, default=None,
                    help="Shared realization_set_id stamped on all K files "
                         "(default: a fresh uuid4 shared across the K outputs).")
@@ -457,6 +514,7 @@ def main(argv=None):
             lss_sigma=opts.lss_sigma,
             realization_set_id=opts.realization_set_id,
             allow_unconverged=opts.allow_unconverged,
+            budget_renorm=not opts.no_budget_renorm,
         )
     except ValueError as exc:
         raise SystemExit(f"FATAL: {exc}") from None
