@@ -74,6 +74,35 @@ def test_share_false_when_lss_completion_logq_differs():
     assert not can_share_redshift_prior_state("dark_sirens", "dark_sirens", pe, sel)
 
 
+def test_share_false_when_stratum_map_differs():
+    """``pixel_stratum_map`` IS read by the prepare tree (completion._row_C's
+    stratified aggregate branch and _field_missing_curve), so a pair differing
+    only in it must not share -- it fell out of the hand-maintained consumed
+    list, which made the selection integral silently reuse the PE catalog's
+    stratification."""
+    smap_pe = jnp.zeros((4,), dtype=jnp.int32)
+    smap_sel = jnp.zeros((4,), dtype=jnp.int32)   # equal values, distinct object
+    pe = _make_cat(pixel_stratum_map=smap_pe)
+    sel = pe._replace(pixel_stratum_map=smap_sel)
+    assert not can_share_redshift_prior_state("dark_sirens", "dark_sirens", pe, sel)
+
+
+def test_compared_fields_cover_every_consumed_leaf_and_nothing_is_unclassified():
+    """Every EMCatalog leaf is either compared or explicitly excluded, and the
+    documented consumed enumeration matches the compared set exactly.  A field
+    added to EMCatalog therefore trips HERE (and defaults to NOT sharing) instead
+    of silently falling out of the sharing proof."""
+    compared = set(core._PREPARE_STATE_COMPARED_EMCATALOG_FIELDS)
+    excluded = set(core._PREPARE_STATE_EXCLUDED_EMCATALOG_FIELDS)
+    consumed = set(core._PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS)
+    assert compared | excluded == set(EMCatalog._fields)
+    assert not (compared & excluded)
+    assert consumed == compared, (
+        "consumed enumeration out of sync: "
+        f"missing={sorted(compared - consumed)}, extra={sorted(consumed - compared)}"
+    )
+
+
 def test_share_false_for_bright_and_wl_and_mismatched_models():
     pe = _make_cat()
     sel = pe._replace(sample_to_unique_idx=jnp.arange(3, dtype=jnp.int32))

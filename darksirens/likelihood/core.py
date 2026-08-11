@@ -94,23 +94,21 @@ def selection_prior_model(universe_model: str) -> str:
 #   completion_curves -> _precompute_grids (apix),
 #       _resolve_lss_completion_row_tables (lss_completion_logq/q/_members),
 #       _row_C (unique_pixels, dN_obs_kde -- indexed directly by row, no longer
-#           via pixel_to_cache_idx; zgals/wgals/ngals on the uncached fallback),
+#           via pixel_to_cache_idx; zgals/wgals/ngals on the uncached fallback;
+#           pixel_stratum_map under a STRATIFIED aggregate curve stack),
 #       _assemble/_completion_curves_row (delta_g_pix_z);
 #   catalog_kernel_state / marked_catalog_kernel_state (zgals, dzgals, wgals, ngals);
 #   _row_counts (ngals, wgals);
 #   the mark parser _gather_marks (mark_logmstar/logssfr/metallicity/color; zgals);
-#   field_global_log_Z / _members / _marked (field_dN_obs_s, field_n_empty,
-#       field_N_obs_total, field_lss_q(+_empty_sum)(+_members), field_delta_g,
-#       field_mark_z/w/values, field_depth_z/dz/c under a survey depth).
+#   field_global_log_Z / _members / _marked -> _field_missing_curve
+#       (field_dN_obs_s, field_n_empty, field_N_obs_total,
+#       field_lss_q(+_empty_sum)(+_members), field_delta_g, field_mark_z/w/values,
+#       field_depth_z/dz/c under a survey depth; pixel_stratum_map,
+#       field_occupied_pixels, field_lss_q_empty_sum_strata and
+#       empty_stratum_counts under a STRATIFIED selection).
 # The state is a PURE function of (model, cosmo, survey, mark params,
 # sky-weighting) plus these leaves, so two EMCatalogs sharing the SAME object for
-# every one of them yield the identical state.  Leaves prepare NEVER reads --
-# sample_to_unique_idx, the counterpart_* plumbing, active_counterpart_index,
-# bright_siren_sky_marginalized, pixel_to_cache_idx (dN_obs_kde is indexed
-# directly by row now -- see completion._row_C), and lss_completion_indexing
-# (consumed EAGERLY in the factory, before this call) -- are deliberately
-# EXCLUDED so a PE/selection pair that differs ONLY in those (the post-union
-# multitracer bundle, and the flat K=1 union path) can still share.
+# every one of them yield the identical state.
 _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "apix",
     "zgals", "dzgals", "wgals", "ngals",
@@ -124,6 +122,34 @@ _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "field_delta_g",
     "field_mark_z", "field_mark_w", "field_mark_values",
     "field_depth_z", "field_depth_dz", "field_depth_c",
+    "pixel_stratum_map", "field_occupied_pixels",
+    "empty_stratum_counts", "field_lss_q_empty_sum_strata",
+)
+
+# Leaves prepare NEVER reads -- sample_to_unique_idx, the counterpart_* plumbing,
+# active_counterpart_index, bright_siren_sky_marginalized, pixel_to_cache_idx
+# (dN_obs_kde is indexed directly by row now -- see completion._row_C), and
+# lss_completion_indexing (consumed EAGERLY in the factory, before this call) --
+# are deliberately EXCLUDED so a PE/selection pair that differs ONLY in those
+# (the post-union multitracer bundle, and the flat K=1 union path) can still share.
+_PREPARE_STATE_EXCLUDED_EMCATALOG_FIELDS = (
+    "sample_to_unique_idx",
+    "counterpart_pixel", "counterpart_pixels", "counterpart_zs", "counterpart_dzs",
+    "active_counterpart_index", "bright_siren_sky_marginalized",
+    "pixel_to_cache_idx", "lss_completion_indexing",
+)
+
+# What ``can_share_redshift_prior_state`` actually compares: EVERY EMCatalog leaf
+# except the deliberately-excluded ones.  Derived (not hand-listed) so a leaf
+# added to EMCatalog and read by a new completion path defaults to NOT sharing
+# instead of silently sharing -- the earlier hand-maintained consumed list had
+# fallen four leaves behind the stratified-completion tree.  Superset of
+# :data:`_PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS`, and equal to it whenever that
+# enumeration is complete (pinned by
+# tests/test_redshift_prior_state_sharing.py).
+_PREPARE_STATE_COMPARED_EMCATALOG_FIELDS = tuple(
+    name for name in EMCatalog._fields
+    if name not in _PREPARE_STATE_EXCLUDED_EMCATALOG_FIELDS
 )
 
 # Prior models whose STATE is EMCatalog-derived and thus dedup-eligible across
@@ -138,20 +164,20 @@ def can_share_redshift_prior_state(pe_model, sel_model, cat_pe, cat_sel) -> bool
     """Whether the PE and selection redshift-prior states are provably identical.
 
     True iff both seams resolve to the SAME dedup-eligible prior model AND every
-    EMCatalog field ``prepare_redshift_prior_state`` reads
-    (:data:`_PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS`) is the identical object
-    (``is``) in both catalogs.  In that case ``prepare_redshift_prior_state`` --
-    a pure function of the model, the (seam-shared) cosmo/survey/mark params and
-    those leaves -- returns the identical state, so it may be built ONCE and
-    reused for both seams.  Object identity (never value equality) keeps this
-    trace-safe and cheap and defaults to NOT sharing whenever any consumed field
-    differs.
+    EMCatalog field that could feed ``prepare_redshift_prior_state``
+    (:data:`_PREPARE_STATE_COMPARED_EMCATALOG_FIELDS`, i.e. all of them bar the
+    leaves prepare provably never reads) is the identical object (``is``) in both
+    catalogs.  In that case ``prepare_redshift_prior_state`` -- a pure function of
+    the model, the (seam-shared) cosmo/survey/mark params and those leaves --
+    returns the identical state, so it may be built ONCE and reused for both
+    seams.  Object identity (never value equality) keeps this trace-safe and
+    cheap and defaults to NOT sharing whenever any compared field differs.
     """
     if pe_model != sel_model or pe_model not in _SHAREABLE_PRIOR_MODELS:
         return False
     return all(
         getattr(cat_pe, name) is getattr(cat_sel, name)
-        for name in _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS
+        for name in _PREPARE_STATE_COMPARED_EMCATALOG_FIELDS
     )
 
 
