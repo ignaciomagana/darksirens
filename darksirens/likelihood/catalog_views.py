@@ -445,6 +445,21 @@ def prepare_catalog_views(
                     np.asarray(full_z).shape[0] if full_z is not None else 0,
                 )
             )
+            # Caller-supplied budget rows are used AS-IS: the multitracer
+            # loader already built them from this catalog's FULL-sky rows
+            # (loaders.load_multitracer_catalog_bundles), so rebuilding them
+            # here repeats a float64 ``np.exp`` over the whole
+            # (M, n_pix, N_grid) ensemble per bundle -- and the memory model
+            # (block_sizing.estimate_pending_static_bytes) counts the members
+            # build only for non-bundle sources.
+            have_q_rows = (
+                data.get("field_lss_q") is not None
+                and data.get("field_lss_q_empty_sum") is not None
+            )
+            have_qm_rows = (
+                data.get("field_lss_q_members") is not None
+                and data.get("field_lss_q_empty_sum_members") is not None
+            )
             logq_full = data.get("lss_completion_logq")
             q_full = data.get("lss_completion_q")
             if logq_full is not None or q_full is not None:
@@ -453,18 +468,32 @@ def prepare_catalog_views(
                     if logq_full is not None
                     else np.log(np.maximum(np.asarray(q_full), 1e-300))
                 )
-                q_occ, q_empty_sum = build_field_lss_q_inputs(
-                    logq_np, occupied_np, n_pix_total
-                )
-                field_lss_q = barrier(q_occ)
-                field_lss_q_empty_sum = barrier(q_empty_sum)
+                if have_q_rows:
+                    field_lss_q = barrier(jnp.asarray(data["field_lss_q"]))
+                    field_lss_q_empty_sum = barrier(
+                        jnp.asarray(data["field_lss_q_empty_sum"])
+                    )
+                else:
+                    q_occ, q_empty_sum = build_field_lss_q_inputs(
+                        logq_np, occupied_np, n_pix_total
+                    )
+                    field_lss_q = barrier(q_occ)
+                    field_lss_q_empty_sum = barrier(q_empty_sum)
             logq_members_full = data.get("lss_completion_logq_members")
             if logq_members_full is not None:
-                qm_occ, qm_empty = build_field_lss_q_member_inputs(
-                    np.asarray(logq_members_full), occupied_np, n_pix_total
-                )
-                field_lss_q_members = barrier(qm_occ)
-                field_lss_q_empty_sum_members = barrier(qm_empty)
+                if have_qm_rows:
+                    field_lss_q_members = barrier(
+                        jnp.asarray(data["field_lss_q_members"])
+                    )
+                    field_lss_q_empty_sum_members = barrier(
+                        jnp.asarray(data["field_lss_q_empty_sum_members"])
+                    )
+                else:
+                    qm_occ, qm_empty = build_field_lss_q_member_inputs(
+                        np.asarray(logq_members_full), occupied_np, n_pix_total
+                    )
+                    field_lss_q_members = barrier(qm_occ)
+                    field_lss_q_empty_sum_members = barrier(qm_empty)
             dg_full = data.get("delta_g_pix_z")
             if dg_full is not None and np.asarray(dg_full).ndim == 2 \
                     and np.asarray(dg_full).shape[0] > 1:
