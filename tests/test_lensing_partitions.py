@@ -200,6 +200,42 @@ def test_map_partition_uses_highest_posterior_log_weight():
     assert diag["map_partition"]["pair_indices"] == [[0, 1], [2, 3]]
 
 
+def test_fully_annihilated_partition_set_raises_instead_of_nan_posteriors():
+    """-inf - (-inf) used to hand back all-NaN partition posteriors, NaN
+    expected_n_pairs and map_partition_index = 0 as though state 0 had been
+    selected, and those NaNs were persisted to diagnostics/results files."""
+    candidates = [CandidatePair(0, 1, 0.0)]
+    states = enumerate_compatible_partitions(2, candidates)
+    for loglike in (lambda _s: -np.inf, lambda _s: np.nan):
+        with pytest.raises(RuntimeError, match="NON-FINITE") as excinfo:
+            compute_marginalized_partition_diagnostics(states, candidates, loglike)
+
+    # The tag is the contract the CLI's guard-clear-point retry keys on, so
+    # global-mode diagnostics now retry another evaluation point (the
+    # factorized branch already did) instead of writing NaNs.
+    from darksirens.cli.inference_lensing import _diagnostics_at_guard_clear_point
+
+    calls = []
+
+    def _fn(point):
+        calls.append(np.asarray(point))
+        if len(calls) == 1:
+            raise excinfo.value
+        return {"logL_total": 1.0}
+
+    diag, _ = _diagnostics_at_guard_clear_point(
+        _fn, np.full(2, 0.5), np.zeros(2), np.ones(2), seed=5
+    )
+    assert diag == {"logL_total": 1.0} and len(calls) == 2
+
+    # A single annihilated partition among finite ones is still fine.
+    ok = compute_marginalized_partition_diagnostics(
+        states, candidates, lambda s: -np.inf if s.n_pairs else 0.0
+    )
+    assert ok["partition_posterior_probability"][0] == pytest.approx(1.0)
+    assert ok["expected_n_pairs"] == pytest.approx(0.0)
+
+
 def test_expected_n_pairs_equals_sum_of_candidate_pair_probabilities():
     candidates = [CandidatePair(0, 1, 0.2), CandidatePair(1, 2, -0.1)]
     states = enumerate_compatible_partitions(3, candidates)

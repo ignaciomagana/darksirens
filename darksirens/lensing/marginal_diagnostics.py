@@ -599,6 +599,24 @@ def compute_marginalized_partition_diagnostics(
     if log_z_partition_prior is None:
         log_z_partition_prior = float(logsumexp(log_prior))
     log_norm = float(logsumexp(log_prior + logL))
+    if not np.isfinite(log_norm):
+        # Every partition (including the all-singleton baseline) is annihilated
+        # at this parameter point -- typically the selection reliability guard
+        # clipping the correction to -inf. -inf - (-inf) would hand back NaN
+        # posteriors, NaN expected_n_pairs and map_partition_index = 0 as though
+        # state 0 had been selected, and those NaNs get persisted verbatim to
+        # diagnostics.json/hdf5 and results.hdf5. Raise instead, tagged
+        # NON-FINITE so _diagnostics_at_guard_clear_point retries at another
+        # evaluation point exactly as it does for the factorized branch.
+        raise RuntimeError(
+            "exact partition marginalization: every partition log-likelihood is "
+            f"NON-FINITE at the evaluation point (log_norm={log_norm!r}, "
+            f"n_partitions={len(states)}) — typically the selection reliability "
+            "guard firing at the prior midpoint (the Neff <= 5 N_obs floor or "
+            "the variance criterion Neff <= N_obs^2/max_likelihood_variance). "
+            "The partition posterior is undefined there; increase the injection "
+            "campaign or relax --max_likelihood_variance for exploratory runs."
+        )
     log_post = log_prior + logL - log_norm
     post = np.exp(log_post)
     map_idx = int(np.argmax(log_post))
