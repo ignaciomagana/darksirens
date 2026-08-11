@@ -25,6 +25,7 @@ from darksirens.lensing.lensed_injections import (
 )
 from darksirens.lensing.slmarks import DEFAULT_T0_SECONDS
 from darksirens.lensing.partitions import (
+    TIME_DERIVED_EDGE_MARK_KEYS,
     apply_edge_mark_prior_keys,
     connected_components_from_candidate_pairs,
     enumerate_compatible_partitions,
@@ -404,6 +405,30 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
         like_keys = set(parse_edge_mark_keys(_get(opts, "edge_mark_likelihood_keys")))
         if _get(opts, "pair_marks", "none") == "time":
             like_keys.add("time")
+        if like_keys & {"time", "delta_t_obs"}:
+            # The double-count guard above only compares folded keys against the
+            # requested PRIOR keys, so it cannot see the time term the builder
+            # bakes into log_prior_odds -- yet the time edge-mark LIKELIHOOD
+            # evaluates p(Delta t | y) on the very same delay. A pairing prior
+            # tilted by |Delta t| plus that likelihood counts the arrival-time
+            # separation twice, biasing the pairing posterior (and hence the
+            # lensed fraction / A_tau) toward short separations.
+            time_double_counted = sorted(
+                k
+                for k in (folded_keys | set(prior_keys))
+                if k in TIME_DERIVED_EDGE_MARK_KEYS
+            )
+            if time_double_counted:
+                errors.append(
+                    f"time-derived edge marks {time_double_counted} enter the "
+                    "pairing prior (folded_mark_keys="
+                    f"{sorted(folded_keys)}, edge_mark_prior_keys="
+                    f"{sorted(prior_keys)}) while the time edge-mark likelihood "
+                    "scores the same delta_t_obs; that double-counts the "
+                    "arrival-time separation. Rebuild candidate_pairs.json with "
+                    "time marks exported (the builder then leaves the time score "
+                    "out of log_prior_odds), or drop --pair_marks time"
+                )
         unsupported_like = sorted(
             k for k in like_keys if k not in ("time", "delta_t_obs")
         )

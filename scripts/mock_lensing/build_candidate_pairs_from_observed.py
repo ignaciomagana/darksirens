@@ -180,6 +180,15 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
     samples = _read_event_samples(gw_path, n_events)
     summaries = [_event_summary(samples, i) for i in range(n_events)]
 
+    # The time-coincidence tilt toward small |Delta t| is folded into
+    # log_prior_odds ONLY when this file exports no delta_t_obs mark. With
+    # --include_time_marks the SIS time-mark likelihood evaluates the SAME
+    # |Delta t| through its coincidence odds 1/p(Delta t | unlensed), so
+    # tilting the pairing prior by a monotone function of it double-counts the
+    # arrival-time separation (up to ~1 nat per edge at |Delta t| ~ T0).  The
+    # score is emitted as the log_time_coincidence mark either way, so the
+    # time content of log_prior_odds is machine-readable via folded_mark_keys.
+    fold_time_score = not include_time_marks
     candidates: list[dict[str, Any]] = []
     for i in range(n_events):
         for j in range(i + 1, n_events):
@@ -201,13 +210,16 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
                 log_sky_overlap = _log_sky_overlap(
                     events[i], events[j], sigma_floor_rad=sky_sigma_floor_rad
                 )
-            score = float(-3.0 + log_mass_distance_score + 0.25 * time_score
+            score = float(-3.0 + log_mass_distance_score
+                          + (0.25 * time_score if fold_time_score else 0.0)
                           + float(sky_overlap_weight) * (log_sky_overlap or 0.0)
                           + rng.uniform(0.0, 1e-12))
             edge = {"i": i, "j": j, "log_prior_odds": score}
             if include_truth_labels:
                 edge["label"] = _truth_label(events[i], events[j])
             marks = {"log_mass_distance_score": log_mass_distance_score}
+            if delta_t is not None:
+                marks["log_time_coincidence"] = float(time_score)
             if include_time_marks:
                 if uniform_times and delta_t is not None:
                     marks["delta_t_obs"] = float(delta_t)
@@ -260,8 +272,14 @@ def build_candidate_pairs(*, gw_path: str | Path, observed_catalog_path: str | P
                 edge.get("marks", {}).pop("sigma_delta_t", None)
 
     # Mark keys whose values are baked into log_prior_odds above; inference
-    # refuses to re-apply these via --edge_mark_prior_keys (double count).
+    # refuses to re-apply these via --edge_mark_prior_keys (double count), and
+    # preflight refuses a folded time term together with the time-mark
+    # likelihood (which would score the same |Delta t| twice).
     folded_mark_keys = ["log_mass_distance_score"]
+    if fold_time_score and any(
+        "log_time_coincidence" in edge.get("marks", {}) for edge in kept
+    ):
+        folded_mark_keys.append("log_time_coincidence")
     if include_sky_marks and float(sky_overlap_weight) != 0.0:
         folded_mark_keys.append("log_sky_overlap")
 
