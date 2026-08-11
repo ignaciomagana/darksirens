@@ -157,6 +157,38 @@ def test_znorm_hi_tracks_zmax():
     assert _ZNORM_HI >= zMax
 
 
+def test_z_inducing_nodes_span_the_analysis_grid():
+    """The z nodes must span ``zMax`` and be uniform in the log1p COORDINATE.
+
+    A rank-M GP reverts to its prior mean beyond its outermost inducing node, so
+    nodes stopping at z = 1.5 (coordinate 0.916) against zMax = 5 (1.792) pinned
+    the redshift field to zero over most of the analysis range."""
+    from darksirens.gw.populations.gp import _DEFAULT_AXES
+
+    coords = np.asarray(_DEFAULT_AXES["z"].nodes_coord())
+    assert coords[-1] >= math.log1p(zMax) - 1e-9
+    np.testing.assert_allclose(np.diff(coords), np.diff(coords)[0], rtol=1e-9)
+
+
+@_NEED_TINYGP
+def test_z_field_still_modulates_at_the_top_of_the_analysis_range():
+    """The free-form ``gp1d_z`` rate modulation must respond to the latents at
+    z = 3, 4, 5.  Measured pre-fix: exp(f) decayed monotonically back toward its
+    zero-field value above z ~ 2 (1.4e-2, 2.7e-2 of an e^7 swing)."""
+    model = build_gp_model("gp1d_z")
+    seeded = _seed_theta(model, seed=0, scale=1.5)
+    flat = jnp.asarray(model.fiducial(), dtype=float)
+
+    z = jnp.asarray([0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0])
+    args = (jnp.full(z.size, 30.0), jnp.full(z.size, 0.8), z, jnp.zeros(z.size))
+    # Only the latents differ, and gp1d_z has no probability axis to normalise
+    # over, so the difference IS the GP field's deviation from its (zero) mean.
+    dev = np.abs(np.asarray(model.log_p_pop(*args, seeded))
+                 - np.asarray(model.log_p_pop(*args, flat)))
+    low = dev[z <= 1.5].max()
+    assert dev[-3:].max() > 0.25 * low, (dev, low)
+
+
 @_NEED_TINYGP
 def test_m1_norm_correct_at_high_z():
     """PHY-6 isolated: int p(m1 | z=4.5) dm1 = 1 for ``gp2d_m1_z``.  With a

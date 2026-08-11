@@ -226,6 +226,13 @@ class AxisCfg:
         if self.name == "m1":
             return jnp.exp(jnp.linspace(jnp.log(self.node_lo),
                                         jnp.log(self.node_hi), self.n_inducing))
+        if self.name == "z":
+            # Uniform in the GP COORDINATE log1p(z), not in z: linear-in-z nodes
+            # would leave coordinate gaps of 0.54 at low z (where every event is)
+            # against a length-scale prior of [0.05, 0.8].
+            return jnp.expm1(jnp.linspace(math.log1p(self.node_lo),
+                                          math.log1p(self.node_hi),
+                                          self.n_inducing))
         return jnp.linspace(self.node_lo, self.node_hi, self.n_inducing)
 
     def nodes_coord(self) -> jnp.ndarray:
@@ -238,7 +245,18 @@ _DEFAULT_AXES = {
     "m1":  AxisCfg("m1",  "matern32", 10, 3.0,   100.0, math.log(0.15), math.log(2.0)),
     "q":   AxisCfg("q",   "rbf",       8, 0.10,    1.0, math.log(0.05), math.log(0.8)),
     "chi": AxisCfg("chi", "rbf",      10, -0.95,   0.95, math.log(0.05), math.log(1.0)),
-    "z":   AxisCfg("z",   "rbf",       8, 0.0,     1.5, math.log(0.05), math.log(0.8)),
+    # The z inducing nodes must SPAN the shared analysis grid, exactly like
+    # ``_ZNORM_HI`` above: the field is the RKHS conditional mean
+    # ``mu + k(x*, Z) alpha``, so a query beyond the outermost node is suppressed
+    # by exp(-d^2/2ls^2) and reverts to the prior mean (which is identically zero
+    # on the z axis).  With nodes stopping at z = 1.5 (coordinate 0.916) against
+    # zMax = 5 (1.792) the modulation decayed back to its zero-field value above
+    # z ~ 2 -- 6.4e-5 of it survived at the geometric-median length scale --
+    # silently reverting R(z) to the parametric (1+z)^(gamma-1) over most of the
+    # analysis range.  The node COUNT is deliberately unchanged: M is the product
+    # over axes, so gp4d would go from 6400 to 11200 inducing points.
+    "z":   AxisCfg("z",   "rbf",       8, 0.0, max(1.5, float(zMax)),
+                   math.log(0.05), math.log(0.8)),
 }
 
 # Shared prior bounds.
