@@ -249,7 +249,16 @@ _SORTED_ROWS_CACHE: dict = {}
 # with ANY unsorted view disarms it.  The concrete-array check still runs first
 # and never consults this flag, so eager/closure callers and the bitwise
 # unsorted-fallback contract are unaffected.
+#
+# The arming is additionally keyed to the attested views' ROW SHAPES — the only
+# property of a catalog the evaluator can read off a tracer — so one build's
+# attestation cannot spill onto an unrelated view (a diagnostic call through
+# PRIOR_REGISTRY with an ad-hoc or re-sliced catalog, which would be windowed
+# without ever having been verified).  Two tracers of the SAME shape remain
+# indistinguishable inside a trace, so the contract is still "attest every view
+# you bind".
 _ROWS_SORTED_ATTESTED: bool = False
+_ATTESTED_ROW_SHAPES: frozenset = frozenset()
 
 
 def attest_rows_sorted_for_windowing(*em_catalogs) -> bool:
@@ -259,10 +268,12 @@ def attest_rows_sorted_for_windowing(*em_catalogs) -> bool:
     Call with every catalog view the likelihood will bind (PE, selection, and
     all mixture views).  Returns the armed verdict: True only if every catalog
     with per-galaxy rows verifiably satisfies the invariant.  Catalog views
-    without rows (``zgals is None``) are ignored rather than disarming.
+    without rows (``zgals is None``) are ignored rather than disarming.  Only the
+    row shapes attested here can be windowed through a jit boundary.
     """
-    global _ROWS_SORTED_ATTESTED
+    global _ROWS_SORTED_ATTESTED, _ATTESTED_ROW_SHAPES
     verdict = True
+    shapes = set()
     for cat in em_catalogs:
         zgals = getattr(cat, "zgals", None)
         ngals = getattr(cat, "ngals", None)
@@ -271,8 +282,25 @@ def attest_rows_sorted_for_windowing(*em_catalogs) -> bool:
         if not _rows_sorted_for_windowing(zgals, ngals):
             verdict = False
             break
+        shapes.add(tuple(np.asarray(zgals).shape))
     _ROWS_SORTED_ATTESTED = verdict
+    _ATTESTED_ROW_SHAPES = frozenset(shapes) if verdict else frozenset()
     return verdict
+
+
+def _traced_rows_attested(zgals) -> bool:
+    """True iff ``zgals`` is a TRACER whose row shape was attested at build time.
+
+    Traced catalogs (jit arguments — the production likelihood path) cannot be
+    verified in the evaluator; the factory attests them while the arrays are
+    concrete (:func:`attest_rows_sorted_for_windowing`).  Requiring the attested
+    ``(N_rows, N_max)`` keeps that arming from covering a view nobody checked.
+    """
+    return (
+        _ROWS_SORTED_ATTESTED
+        and isinstance(zgals, jax.core.Tracer)
+        and tuple(zgals.shape) in _ATTESTED_ROW_SHAPES
+    )
 
 
 def _rows_sorted_for_windowing(zgals, ngals) -> bool:
@@ -746,11 +774,9 @@ def eval_log_catalog_prior_state(
             _rows_sorted_for_windowing(em_catalog.zgals, em_catalog.ngals)
             # Traced catalogs (jit arguments — the production likelihood path)
             # cannot be verified here; the factory attests them at build time
-            # with the concrete arrays (attest_rows_sorted_for_windowing).
-            or (
-                _ROWS_SORTED_ATTESTED
-                and isinstance(em_catalog.zgals, jax.core.Tracer)
-            )
+            # with the concrete arrays (attest_rows_sorted_for_windowing), and
+            # only the row shapes it attested are armed.
+            or _traced_rows_attested(em_catalog.zgals)
         )
     )
     if use_window:
