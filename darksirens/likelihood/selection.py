@@ -433,7 +433,12 @@ def compute_selection_term(
     Ndraw : float
         Total number of generated injections (detected + missed).
     nEvents : int
-        Number of observed GW events (for the N_eff reliability check).
+        Number of observed GW events.  ACCEPTED BUT UNUSED here (kept for the
+        call-signature compatibility of every existing caller): the N_eff
+        reliability check lives in :func:`selection_log_correction`, which the
+        caller invokes with these outputs.  Estimating ``log_mu`` does not apply
+        any guard -- passing ``nEvents`` here does NOT protect a caller that
+        skips :func:`selection_log_correction`.
     sel_batch_size : int or None
         If not None, process injections in chunks via ``lax.scan`` to
         limit peak GPU memory.  Non-divisible inputs are padded internally;
@@ -450,6 +455,8 @@ def compute_selection_term(
     -------
     log_mu : scalar — log of the selection integral estimate
     Neff   : scalar — effective sample size
+    log_sigma2 : scalar — log Monte-Carlo variance of μ (used by the
+        strong-lensing cluster path; ignored by the standard likelihood)
     """
     def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b, nx_b, ny_b, nz_b):
         ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b, em_catalog_sel)
