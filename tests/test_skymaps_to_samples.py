@@ -632,3 +632,32 @@ def test_narrowed_mass_window_is_flagged_against_the_reached_redshift(tmp_path):
     # The stamped zmax reports what the narrowed window really guarantees.
     assert float(attrs["zmax"]) < float(attrs["zmax_reached"])
     assert abs(float(attrs["zmax"]) - 1.5) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# (7) The sky support is the pixel's AREA, not its centre
+# ---------------------------------------------------------------------------
+
+
+def test_samples_spread_inside_their_skymap_pixel(converted):
+    """Every sample used to sit exactly on a pixel centre, so an analysis at a
+    finer nside than the skymap saw only the fine pixels containing those
+    centres.  The samples must be spread over the pixel's solid angle, while
+    still belonging to the pixel they were drawn from."""
+    nside = converted["nside"]
+    for ev, hot in (("A", converted["hotA"]), ("B", converted["hotB"])):
+        e = converted[ev]
+        pix = _pix_of(e, nside)
+        assert set(np.unique(pix)).issubset(set(hot.tolist()))   # containment
+        centres = np.asarray(hp.pix2ang(nside, pix, nest=False))
+        theta = 0.5 * np.pi - e["dec"]
+        # Not on the centre: the offsets are a real fraction of the pixel scale.
+        offset = np.abs(theta - centres[0])
+        assert np.median(offset) > 0.05 * hp.nside2resol(nside)
+        # ... and finer-nside pixels are populated many-to-one per coarse pixel.
+        fine = hp.ang2pix(4 * nside, theta, e["ra"], nest=False)
+        assert np.unique(fine).size > np.unique(pix).size
+
+
+def test_output_records_the_skymap_resolution(converted):
+    assert int(converted["file_attrs"]["skymap_nside"]) == NSIDE

@@ -217,6 +217,32 @@ def _read_skymap(path: Path):
     return prob, distmu, distsigma, nside
 
 
+_JITTER_LEVELS = 6      # 4**6 = 4096 equal-area sub-pixels per skymap pixel
+
+
+def _sample_angles_in_pixels(nside, pix_ring, rng, levels=_JITTER_LEVELS):
+    """Directions drawn UNIFORMLY INSIDE each sampled skymap pixel.
+
+    Placing every sample at its pixel's CENTRE makes the event's angular support a
+    set of measure-zero points rather than the pixel's solid angle.  The
+    likelihood re-derives ``pix = ang2pix(catalog_nside, ra, dec)`` from these
+    angles, so as soon as the analysis resolution is FINER than the skymap's --
+    a low-resolution or heavily rasterised skymap, a high-nside catalog or
+    completion map -- every sample of one coarse pixel collapses into the single
+    fine pixel containing its centre, ``p_z(z|pix)`` sees only ~(nside ratio)^-2
+    of the galaxies actually inside the localisation region, and the sky-anisotropy
+    models are evaluated on a comb of directions.
+
+    Each sample is placed at the centre of a uniformly chosen equal-area sub-pixel
+    at ``nside * 2**levels``, which is uniform in solid angle inside the parent
+    pixel to that resolution (1/2**levels of a pixel's linear size).
+    """
+    nest = np.asarray(hp.ring2nest(nside, pix_ring), dtype=np.int64)
+    nchild = 4 ** int(levels)
+    child = nest * nchild + rng.integers(0, nchild, size=nest.size)
+    return hp.pix2ang(nside * 2 ** int(levels), child, nest=True)
+
+
 def _ansatz_grid_bounds(
     mu: np.ndarray, sig: np.ndarray, n_widths: float = 10.0
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -459,6 +485,8 @@ def main() -> None:
     pe_Om0 = Om0Planck if args.pe_Om0 is None else args.pe_Om0
     dL_lo, dL_hi = (float(x) for x in dL_grid_bounds(pe_H0, pe_Om0))
 
+    nside_min = None        # coarsest skymap resolution, stamped for the run to check
+
     # PASS 1 — sky + distance samples.  Done before the surrogate masses so the
     # mass window can be sized from the redshifts the data actually reach rather
     # than from the user's --zmax declaration.
@@ -466,9 +494,12 @@ def main() -> None:
         prob, distmu, distsigma, nside = _read_skymap(path)
 
         pix = rng.choice(prob.size, size=nsamp, p=prob)
-        theta, phi = hp.pix2ang(nside, pix, nest=False)  # RING (see _read_skymap)
+        # RING indices (see _read_skymap), jittered inside the pixel so the
+        # angular support is the pixel's AREA, not its centre.
+        theta, phi = _sample_angles_in_pixels(nside, pix, rng)
         ra[i] = phi
         dec[i] = 0.5 * np.pi - theta
+        nside_min = nside if nside_min is None else min(nside_min, nside)
         dL[i] = _sample_distance_ansatz(
             distmu[pix], distsigma[pix], rng, n_grid=args.n_dist_grid
         )
@@ -569,6 +600,11 @@ def main() -> None:
         f.attrs["zmax_reached"] = float(z_reached)
         f.attrs["h0_max"] = float(args.h0_max)
         f.attrs["pe_distance_prior"] = "euclidean_dL2"
+        # The coarsest skymap resolution behind these samples: the sky support is
+        # a pixel of THIS nside (samples are drawn uniformly inside it), so an
+        # analysis at a much finer catalog / sky-model nside is resolving
+        # structure the skymaps never carried.
+        f.attrs["skymap_nside"] = int(nside_min)
         # Fiducial cosmology used ONLY for the m1src/m2src bookkeeping above;
         # required by the loader but inert given mock_data=True.
         f.attrs["pe_cosmology_H0"] = float(pe_H0)
