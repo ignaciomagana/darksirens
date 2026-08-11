@@ -18,7 +18,9 @@ through ``darksirens.cli.inference.main()`` with two monkeypatches:
 
   * ``run_sampler`` is intercepted to CAPTURE the built likelihood, prior
     transform and bounds and then stop (no sampling happens);
-  * ``selection_log_correction`` is wrapped to report ``Neff``,
+  * ``selection_log_correction`` is wrapped -- in its source module and in every
+    likelihood module that has already bound it, so the standard, flow-surrogate
+    and cluster stacks are all covered -- to report ``Neff``,
     ``pe_variance_sum`` and ``log_mu`` (via ``jax.debug.print`` and a
     ``jax.debug.callback`` that stashes the concrete values) each time the
     guard is evaluated.
@@ -56,6 +58,37 @@ def _split_argv(argv):
     # No separator: treat everything as passthrough so a forgotten ``--`` still
     # does something sensible.
     return [], argv
+
+
+def _patch_selection_guard(wrapper, original):
+    """Install ``wrapper`` everywhere ``selection_log_correction`` is reachable.
+
+    Every likelihood stack binds the symbol in its OWN module namespace via
+    ``from ..selection import selection_log_correction`` -- ``core``,
+    ``flow_events`` (the ``--gw_flows_path`` path), ``cluster_selection`` (the
+    lensing stack) -- so patching a single module measures one code path and
+    silently misses the others, which is how a flow-surrogate run used to collect
+    zero records and be told the guard was never evaluated.  Patching the SOURCE
+    module also fixes the stacks the CLI imports LAZILY, since their ``from ...
+    import`` then picks up the wrapper.
+
+    Returns the list of patched modules (pass to :func:`_restore_selection_guard`).
+    """
+    import darksirens.likelihood.selection as selection_mod
+
+    patched = [selection_mod] + [
+        mod for name, mod in list(sys.modules.items())
+        if name.startswith("darksirens.") and mod is not selection_mod
+        and getattr(mod, "selection_log_correction", None) is original
+    ]
+    for mod in patched:
+        mod.selection_log_correction = wrapper
+    return patched
+
+
+def _restore_selection_guard(patched, original):
+    for mod in patched:
+        mod.selection_log_correction = original
 
 
 def _fiducial_point(labels, lower, upper, opts):
@@ -132,7 +165,7 @@ def main(argv=None):
               "(not actually run).", flush=True)
 
     import darksirens.cli.inference as inference_cli
-    import darksirens.likelihood.core as core
+    import darksirens.likelihood.selection as selection_mod
     from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 
     # ---- monkeypatch 1: capture the likelihood/prior and stop ---------------
@@ -154,7 +187,7 @@ def main(argv=None):
 
     # ---- monkeypatch 2: report the guard inputs -----------------------------
     guard_records = []
-    _orig_selection = core.selection_log_correction
+    _orig_selection = selection_mod.selection_log_correction
 
     def _record(n, p, m, ne, mv):
         # Runs under jax.debug.callback with CONCRETE values, so it is safe to
@@ -178,7 +211,7 @@ def main(argv=None):
         jax.debug.callback(_record, Neff, pe_var, log_mu, nEvents, max_var)
         return _orig_selection(*args, **kwargs)
 
-    core.selection_log_correction = _wrapped_selection
+    _patched = _patch_selection_guard(_wrapped_selection, _orig_selection)
 
     # ---- replay the user's CLI up to (but not into) the sampler -------------
     print("[diagnose] replaying darksirens_inference "
@@ -203,7 +236,7 @@ def main(argv=None):
         # time); _diagnose does the analysis and returns an exit code.
         return _diagnose(captured, guard_records, ns)
     finally:
-        core.selection_log_correction = _orig_selection
+        _restore_selection_guard(_patched, _orig_selection)
 
 
 def _diagnose(captured, guard_records, ns):
@@ -243,8 +276,9 @@ def _diagnose(captured, guard_records, ns):
 
     if not guard_records:
         print("  [!] the selection guard was not evaluated at the fiducial "
-              "(the likelihood may short-circuit to -inf earlier, or this "
-              "universe model does not use it). Inspect the CLI output above.")
+              "(the likelihood may short-circuit to -inf earlier, this universe "
+              "model may not use it, or a likelihood module resolved the symbol "
+              "before the wrapper was installed). Inspect the CLI output above.")
     else:
         rec = guard_records[-1]
         Neff = rec["Neff"]
