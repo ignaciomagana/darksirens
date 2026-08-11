@@ -103,3 +103,35 @@ def test_nlive_defaults_to_the_request_without_sampler_state(tmp_path):
     with h5py.File(tmp_path / "results.hdf5") as f:
         assert int(f.attrs["nlive"]) == 64
         assert int(f.attrs["nlive_requested"]) == 64
+
+
+def test_save_results_hdf5_records_resume_provenance(tmp_path):
+    """--resume_force can resume across a fingerprint MISMATCH, whose output
+    mixes two statistical targets; the artifact itself must say so instead of
+    leaving only argv (which no analyzer reads) as the hint."""
+    opts = _opts(
+        run_fingerprint_digest="a" * 64,
+        resume_from_resolved="/run/checkpoint.tinyns.npz",
+        resume_force=True,
+        resume_forced_mismatch=True,
+    )
+    path = save_results_hdf5(
+        _results(), str(tmp_path), ["H0"], [10.0], [100.0], {}, {}, opts, _meta()
+    )
+    with h5py.File(path, "r") as f:
+        assert f.attrs["run_fingerprint_digest"] == "a" * 64
+        assert bool(f.attrs["resumed"]) is True
+        assert f.attrs["resume_from"] == "/run/checkpoint.tinyns.npz"
+        assert bool(f.attrs["resume_forced"]) is True
+        assert bool(f.attrs["resume_forced_mismatch"]) is True
+
+
+def test_save_results_hdf5_resume_provenance_defaults_to_a_fresh_run(tmp_path):
+    path = save_results_hdf5(
+        _results(), str(tmp_path), ["H0"], [10.0], [100.0], {}, {}, _opts(), _meta()
+    )
+    with h5py.File(path, "r") as f:
+        assert f.attrs["run_fingerprint_digest"] == ""
+        assert bool(f.attrs["resumed"]) is False
+        assert bool(f.attrs["resume_forced"]) is False
+        assert bool(f.attrs["resume_forced_mismatch"]) is False

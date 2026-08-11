@@ -305,11 +305,17 @@ def build_run_fingerprint(
     }
 
 
-def save_run_fingerprint(run_dir: str, fingerprint: dict) -> str:
-    """Atomically write ``run_fingerprint.json`` into ``run_dir``."""
-    path = os.path.join(run_dir, FINGERPRINT_BASENAME)
+def save_run_fingerprint(run_dir: str, fingerprint: dict, *, basename=None) -> str:
+    """Atomically write ``run_fingerprint.json`` into ``run_dir``.
+
+    ``basename`` overrides the filename, which a ``--resume_force`` run across a
+    MISMATCH uses to record its own configuration beside (not over) the stored
+    fingerprint of the run that created the checkpoint.
+    """
+    basename = basename or FINGERPRINT_BASENAME
+    path = os.path.join(run_dir, basename)
     fd, tmp = tempfile.mkstemp(
-        prefix=FINGERPRINT_BASENAME + ".", suffix=".tmp", dir=run_dir
+        prefix=basename + ".", suffix=".tmp", dir=run_dir
     )
     try:
         with os.fdopen(fd, "w") as f:

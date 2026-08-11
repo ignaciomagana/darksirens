@@ -3140,6 +3140,11 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
         prior_overrides=prior_overrides,
         fixed_parameter_values=fixed_parameter_values,
     )
+    # Recorded on opts (hence in settings.json and results.hdf5) so an archived
+    # artifact carries the identity of the configuration that produced it.  Set
+    # AFTER the build above, so it never feeds back into the digest.
+    opts.run_fingerprint_digest = fingerprint["digest"]
+    opts.resume_forced_mismatch = False
     run_timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     if resume_dir:
         try:
@@ -3156,6 +3161,17 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
             # --resume_force accepted a fingerprint-less legacy run dir;
             # stamp it now so later requeues are validated, not forced.
             save_run_fingerprint(run_dir, fingerprint)
+        elif stored.get("digest") != fingerprint["digest"]:
+            # --resume_force accepted a MISMATCH: the stored fingerprint is the
+            # record of the configuration that created the checkpoint, so keep
+            # it, but stamp this run's configuration beside it -- otherwise the
+            # directory advertises a configuration that did not produce its
+            # results.hdf5, and every later requeue must be forced too.
+            opts.resume_forced_mismatch = True
+            save_run_fingerprint(
+                run_dir, fingerprint,
+                basename=f"run_fingerprint.forced-{run_timestamp}.json",
+            )
     else:
         run_dir = _make_run_dir(opts, run_timestamp)
     opts.run_dir = run_dir

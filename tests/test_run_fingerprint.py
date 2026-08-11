@@ -303,3 +303,22 @@ def test_resolve_checkpoint_plan_honours_the_callers_resume_target(tmp_path):
     # And the caller's explicit target wins over a fresh glob.
     plan = resolve_checkpoint_plan(opts, str(run_dir), resume_from=str(ckpt))
     assert plan.resume_from == str(ckpt)
+
+
+def test_forced_mismatch_fingerprint_can_be_stamped_beside_the_stored_one(tmp_path):
+    """A --resume_force run across a MISMATCH keeps the checkpoint's fingerprint
+    (its true record) and records its own configuration beside it, so the
+    directory never advertises only a configuration that did not produce its
+    results.hdf5."""
+    stored = _fingerprint()
+    save_run_fingerprint(str(tmp_path), stored)
+    current = _fingerprint(_opts(seed=18))
+    path = save_run_fingerprint(
+        str(tmp_path), current, basename="run_fingerprint.forced-TS.json"
+    )
+    assert os.path.basename(path) == "run_fingerprint.forced-TS.json"
+    with open(os.path.join(tmp_path, FINGERPRINT_BASENAME)) as f:
+        assert json.load(f)["digest"] == stored["digest"]
+    with open(path) as f:
+        assert json.load(f)["digest"] == current["digest"]
+    assert not any(p.endswith(".tmp") for p in os.listdir(tmp_path))
