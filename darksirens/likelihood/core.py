@@ -204,16 +204,17 @@ def redshift_prior_state_sharing(universe_model, catalogs_pe, catalogs_sel) -> t
     )
 
 
-def _require_field_mode_scope(
-    universe_model, wl_enabled, lss_marginalize, mark_model, catalogs
-):
+def _require_field_mode_scope(universe_model, wl_enabled, mark_model, catalogs):
     """Reject FIELD-convention sky weighting outside its supported scope.
 
     All checks are static (universe/model strings, static bools, and pytree
     STRUCTURE via ``is not None``), so they resolve once per trace -- mirroring
-    the K>=2 mixture ``NotImplementedError`` guards.  The estimand only holds
-    when the missing-galaxy budget carries no LSS modulation (dummy overdensity,
-    no Q_LSS), so those are rejected here.  Both ``dark_sirens`` and
+    the K>=2 mixture ``NotImplementedError`` guards.  LSS modulation of the
+    missing-galaxy budget (a deterministic Q_LSS table, a Q ensemble, or a real
+    per-pixel delta_g) IS supported -- including under ``lss_marginalize`` --
+    but only when the survey-global ``field_*`` rows mirror it, so the per-pixel
+    numerator and the global normalizer carry the SAME budget; that mirroring is
+    what the per-catalog checks below require.  Both ``dark_sirens`` and
     ``dark_sirens_complete`` are supported under the field convention (the
     complete-model field normalizer Z = Sum_pix N_obs is theta-independent).
     """
@@ -503,7 +504,7 @@ def darksiren_log_likelihood(
     # FIELD-convention sky weighting scope gate (static; covers K = 1 and K >= 2).
     if catalog_sky_weighting == "field":
         _require_field_mode_scope(
-            universe_model, wl_enabled, lss_marginalize, mark_model,
+            universe_model, wl_enabled, mark_model,
             (em_catalog_pe, em_catalog_sel)
             + tuple(mixture_em_catalogs_pe) + tuple(mixture_em_catalogs_sel),
         )
