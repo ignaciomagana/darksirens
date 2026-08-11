@@ -1215,8 +1215,7 @@ def _factorized_inp_and_opts(soft_guard):
         "--candidate_pairs_path", "cand.json",
         "--selection_neff_guard", "soft" if soft_guard else "hard",
     )
-    import darksirens.cli.inference_lensing as _cli
-    _cli._resolve_lensing_run_config(opts)
+    cli._resolve_lensing_run_config(opts)
     opts.sel_batch_size = None
     assert bool(opts.selection_neff_soft_guard) is soft_guard
 
