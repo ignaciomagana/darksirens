@@ -28,8 +28,14 @@ For five-component models the sampler spent 96 % of proposals in a region
 that is silently mapped to −∞, collapsing effective sample sizes and
 biasing evidence estimates.
 
-Prior bounds on the weight parameters stay [0, 1] — no change to prior
-transforms, CLI flags, or existing sampler configuration.
+Prior bounds on the weight parameters stay [0, 1], as do the CLI flags and
+sampler configuration.  The PRIOR FAMILY on them is Beta(1, k-i) for v_i, which
+is what makes the induced weight prior the uniform Dirichlet(1, ..., 1) the old
+"last weight = 1 - Σ" parameterisation had (uniform on the box conditioned on the
+simplex IS uniform on the simplex).  Sampling every v_i from U[0, 1] instead —
+as this file did until the stick prior was declared — gives
+E[w] = (1/2, 1/4, 1/8, ...): informative, and dependent on the ORDER the
+components appear in the model name.  k = 2 is unaffected (Beta(1, 1) = U[0, 1]).
 
 Labels: weight parameters are now named $v_i$ (stick-breaking inputs),
 not $f_i$ (direct fractions).  If you use ``fixed_parameter_values`` in
@@ -468,9 +474,18 @@ class MixtureModel:
     @property
     def param_specs(self):
         """Return weight, mass, pairing, and spin parameter specs in order."""
-        # v_i are stick-breaking inputs, bounded [0, 1].
+        # v_i are stick-breaking inputs, bounded [0, 1], with the Beta(1, k-i)
+        # prior that induces the UNIFORM Dirichlet(1, ..., 1) on the weights
+        # (mirrors the multitracer sticks, darksirens/inference/prior.py).  Under
+        # the plain U[0, 1] they carried before, the induced weight prior was
+        # E[w] = (1/2, 1/4, 1/8, ...) -- strongly informative and dependent on the
+        # ORDER the components appear in the model name, so a headline mixture
+        # fraction (e.g. the peak fraction) was prior-dominated.  k = 2 is
+        # unaffected: Beta(1, 1) IS U[0, 1].
         specs = [
-            ParamSpec(rf"$v_{i+1}$", 0.0, 1.0, name=f"v{i+1}")
+            ParamSpec(rf"$v_{i+1}$", 0.0, 1.0, name=f"v{i+1}",
+                      prior_kind="beta", prior_loc=1.0,
+                      prior_scale=float(self.k - 1 - i))
             for i in range(self.n_weight_params)
         ]
         for c in self.mass_components:    specs.extend(c.param_specs)
