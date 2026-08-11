@@ -87,9 +87,9 @@ _NON_SEMANTIC_KEYS = frozenset({
     "tinyns_checkpoint_path",
     "tinyns_checkpoint_path_out",
     "tinyns_resume_from",
-    "tinyns_progress_interval",
     # presentation / diagnostics
     "show_progress",
+    "tinyns_progress_interval",
     "dynesty_diagnostics",
     "preflight_only",
     "sampler_preflight",
