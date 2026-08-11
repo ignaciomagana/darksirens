@@ -55,7 +55,7 @@ from typing import NamedTuple, Any
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
-from darksirens.redshift.grid import zgrid
+from darksirens.redshift.grid import log_interp_zgrid, zgrid
 from .completion import log_galaxy_measure_grid
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
@@ -449,7 +449,7 @@ def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
     u = jnp.clip(u, 1e-12, 1.0 - 1e-12)
     z_node = jnp.clip(zs[..., None] + sig_eff[..., None] * ndtri(u), 0.0, z_hi)
     g = jnp.exp(
-        jnp.interp(z_node.reshape(-1), zgrid, log_g_grid)
+        log_interp_zgrid(z_node.reshape(-1), log_g_grid)
     ).reshape(z_node.shape)
     Zg = (g * _GL_W).sum(axis=-1)                           # (N_max,)
     Z = span * Zg
@@ -548,7 +548,7 @@ def _row_kernel_state(
     log_depth_mass = jnp.zeros((), dtype=sig_eff.dtype)
 
     if volume_weighted:
-        log_w = log_w + jnp.where(real, jnp.interp(zs, zgrid, log_g_grid), 0.0)
+        log_w = log_w + jnp.where(real, log_interp_zgrid(zs, log_g_grid), 0.0)
 
     lse = logsumexp(log_w)
     has_galaxies = jnp.isfinite(lse)
@@ -806,7 +806,8 @@ def eval_log_catalog_prior_state(
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
-    log_g_front = jnp.where(state.volume_weighted, 0.0, jnp.interp(z, zgrid, state.log_g_grid))
+    log_g_front = jnp.where(state.volume_weighted, 0.0,
+                            log_interp_zgrid(z, state.log_g_grid))
     log_p_cat = log_g_front + log_mix
     # Depth truncation: a magnitude-limited survey catalogs nothing past
     # ``z_depth``, so p_cat asserts nothing there -- zero it (the missing branch
@@ -852,7 +853,7 @@ def log_catalog_prior(
     log_kw, sig_eff, _log_depth_mass = _row_kernel_state(
         zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, False
     )
-    log_g_z = jnp.interp(z, zgrid, log_g_grid)
+    log_g_z = log_interp_zgrid(z, log_g_grid)
     return log_g_z + _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig_eff))
 
 
