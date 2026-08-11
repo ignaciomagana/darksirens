@@ -75,6 +75,19 @@ class WLParams(NamedTuple):
     log_p_table: Any       # (Nz, Nmu)  — log p_WL on (z, ln μ) grid
 
 
+def _sqrt_grad_safe(s2: jnp.ndarray) -> jnp.ndarray:
+    """``sqrt(s2)`` with a finite REVERSE pass at ``s2 == 0``.
+
+    ``d sqrt(s2) / d s2 = inf`` at the origin, so the unguarded chain through
+    ``s2 = a·z^b`` returns ``inf * 0 = NaN`` for every gradient w.r.t. z (hence
+    w.r.t. the cosmology) whenever ``a = 0`` — the advertised "reduces to the
+    unlensed model" ablation.  The standard double-``where`` keeps the value
+    unchanged and zeroes the cotangent instead.
+    """
+    pos = s2 > 0.0
+    return jnp.where(pos, jnp.sqrt(jnp.where(pos, s2, 1.0)), 0.0)
+
+
 def make_lognormal_wl_params(a: float = 4.0e-3, b: float = 1.5) -> WLParams:
     """Lognormal WL parameters with default Takahashi+11-calibrated constants.
 
@@ -222,7 +235,7 @@ def _log_p_wl_lognormal(mu: jnp.ndarray, z: jnp.ndarray, p: WLParams) -> jnp.nda
     """
     z_safe = jnp.maximum(z, 1.0e-3)
     s2 = p.a * jnp.power(z_safe, p.b)
-    s = jnp.sqrt(s2)
+    s = _sqrt_grad_safe(s2)
     m = -0.5 * s2
 
     log_mu = jnp.log(mu)
@@ -397,7 +410,7 @@ def make_lognormal_log_p_wl(a: jnp.ndarray, b: jnp.ndarray):
     def log_p_wl_fn(mu: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
         z_safe = jnp.maximum(z, 1.0e-3)
         s2 = a_jx * jnp.power(z_safe, b_jx)
-        s = jnp.sqrt(s2)
+        s = _sqrt_grad_safe(s2)
         m = -0.5 * s2
         log_mu = jnp.log(mu)
         return norm.logpdf(log_mu, loc=m, scale=s) - log_mu
