@@ -1656,6 +1656,24 @@ def _resolve_catalog_sky_weighting(opts):
     # relative angular host weighting the conditional per-pixel normalizer
     # discards.  dark_sirens_complete keeps its own pre-existing rules (K>=2
     # requires field, checked below; K=1 allows both).
+    # --drop_full_catalog is INERT for a K>=2 mixture: inference/data.py stubs the
+    # top-level catalog and returns before maybe_drop_full_catalog, while
+    # load_multitracer_catalog_bundles already loads every catalog HOST-side
+    # (to_device=False) and keeps only the compact per-bundle views.  Left to the
+    # resolution below, the flag would buy the legacy 'conditional' estimand --
+    # not a host-fraction estimand at K>=2 (fcat_k rails; see the refusal below)
+    # -- in exchange for no memory saving at all, and on the AUTO path that
+    # refusal never fired.  Refuse the combination instead.
+    if opts.n_catalogs >= 2 and getattr(opts, "drop_full_catalog", False):
+        _fatal(
+            "--drop_full_catalog has no effect on a K>=2 mixture: every catalog "
+            "is already loaded host-side and kept as compact per-bundle views "
+            "(inference/loaders.py: load_multitracer_catalog_bundles), so the "
+            "flag would only resolve an unset --catalog_sky_weighting to the "
+            "legacy 'conditional' estimand, whose fcat_k carries no "
+            "number-density / sky-clustering information and rails to 1 on "
+            "clustered sparse-contrast catalogs. Drop the flag."
+        )
     opts.catalog_sky_weighting_source = (
         "explicit" if opts.catalog_sky_weighting is not None else "auto"
     )
@@ -1690,8 +1708,10 @@ def _resolve_catalog_sky_weighting(opts):
             "discards. Pass --catalog_sky_weighting conditional for the "
             "radial-only legacy estimand."
         )
-    if (opts.universe_model == "dark_sirens"
-            and opts.catalog_sky_weighting_source == "explicit"):
+    # Provenance-INDEPENDENT: the estimand is wrong at K>=2 however it was
+    # chosen, so gating this on source == "explicit" only hid the auto paths
+    # (--drop_full_catalog above, and any future one) behind no diagnostic.
+    if opts.universe_model == "dark_sirens":
         if opts.n_catalogs >= 2 and opts.catalog_sky_weighting == "conditional":
             _fatal(
                 "--catalog_sky_weighting conditional is not a host-fraction "

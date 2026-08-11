@@ -208,6 +208,25 @@ def test_unset_weighting_with_drop_full_catalog_resolves_conditional():
     assert "incompatible with --drop_full_catalog" not in result.stdout
 
 
+def test_drop_full_catalog_at_k2_is_fatal_and_never_picks_conditional():
+    """K>=2 + --drop_full_catalog used to resolve the unset weighting to the
+    'conditional' estimand on the AUTO path, walking straight past the K>=2
+    refusal (gated on source == 'explicit') -- a biased/railed fcat_k for zero
+    memory saving, since the mixture loader already loads host-side and keeps
+    only compact per-bundle views (--drop_full_catalog is inert at K>=2)."""
+    result = _run([
+        "--gw_path", "/nonexistent/gw.h5",
+        "--gwselection_path", "/nonexistent/sel.h5",
+        "--survey_path", "/nonexistent/catA.h5", "/nonexistent/catB.h5",
+        "--universe_model", "dark_sirens",
+        "--drop_full_catalog", "true",
+        "--sampler", "tinyns",
+    ])
+    assert result.returncode != 0
+    assert "has no effect on a K>=2 mixture" in result.stdout
+    assert "conditional (auto)" not in result.stdout
+
+
 def test_explicit_weighting_choices_remain_valid_in_coherent_regimes():
     """Explicit conditional@K=1 and explicit field@K=2 stay accepted (they are
     the coherent estimands) -- runs proceed to data loading and fail there."""
