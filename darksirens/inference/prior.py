@@ -105,19 +105,41 @@ def _catalog_free(universe_model):
 
 _COMPLETE_CATALOG = _Inert(
     "universe_model 'dark_sirens_complete' assumes a 100%-complete catalog, so "
-    "the completion / missing-galaxy parameters never enter its likelihood "
-    "(only sigma_kde does)",
+    "the missing-galaxy amplitude parameters never enter its likelihood "
+    "(sigma_kde and delta do -- delta through the catalog kernels' galaxy "
+    "measure g(z))",
     remedy="or run universe_model 'dark_sirens', which models the missing galaxies",
 )
 
 
 def _completion_param_rule(universe_model, use_lss, q_active, catalog,
                            c_mode="per_pixel", selection_family="gaussian"):
-    """Activity of the completion parameters (``log10n0``, ``delta``)."""
+    """Activity of the missing-galaxy amplitude parameters (``log10n0``, ``b_miss``)."""
     if universe_model in _CATALOG_FREE_MODELS:
         return _catalog_free(universe_model)
     if universe_model == "dark_sirens_complete":
         return _COMPLETE_CATALOG
+    return None
+
+
+def _delta_rule(universe_model, use_lss, q_active, catalog,
+                c_mode="per_pixel", selection_family="gaussian"):
+    """Activity of ``delta``: the completion rule EXCEPT for the complete model.
+
+    ``delta`` is not only a missing-galaxy parameter: it tilts the galaxy measure
+    g(z) = dV_c/dz (1+z)^delta, which the complete-catalog prior uses as the
+    interim prior on each galaxy's true redshift (``catalog_kernel_state`` with
+    ``volume_weighted=False`` divides each kernel by ∫N(z; z_i, sig_eff) g(z) dz
+    and the per-sample evaluator reapplies g(z) as a front factor).  Those two
+    cancel only as sig_eff -> 0, so with PHOTOMETRIC redshifts p_cat -- and hence
+    the whole complete-catalog likelihood -- depends on delta: measured a 7%
+    differential tilt between delta = 0 and 3 across z = 0.1 -> 0.3 at
+    dzgals = 0.05 (0.08% at dzgals = 1e-3, i.e. effectively inert only for
+    spectroscopic catalogs).  Declaring it inert pinned it silently at its
+    fiducial instead of marginalising it.
+    """
+    if universe_model in _CATALOG_FREE_MODELS:
+        return _catalog_free(universe_model)
     return None
 
 
@@ -250,7 +272,7 @@ def _kde_rule(universe_model, use_lss, q_active, catalog,
 #: heavy clipping throughout the completion grid.
 _SURVEY_BLOCK = (
     _SurveyParam("log10n0", -4.0, -1.0, _completion_param_rule),
-    _SurveyParam("delta", -3.0, 3.0, _completion_param_rule),
+    _SurveyParam("delta", -3.0, 3.0, _delta_rule),
     _SurveyParam("b_miss", 0.0, 3.0, _b_miss_rule),
     _SurveyParam("sigma_kde", 0.0, 0.05, _kde_rule),
     # Parametric-selection block, appended LAST so pre-existing coordinate
@@ -1136,6 +1158,12 @@ def build_parameter_space(
                 labels += c_sampled_labels
                 lower += c_sampled_lower
                 upper += c_sampled_upper
+                # The suffixed blocks ARE sampled survey dimensions, so they
+                # belong in the reported count (settings.json provenance) just
+                # like the mark block accumulates into n_mark_eff below.  The
+                # fcat_* sticks deliberately do NOT: they are mixture weights,
+                # sampled regardless of fix_survey.
+                n_survey_eff += len(c_sampled_labels)
 
         # Mixture-weight sticks fcat_2..fcat_K ([0,1] bounds; the Beta(1,b)
         # prior family is carried in prior_kinds below).  Sampled regardless of

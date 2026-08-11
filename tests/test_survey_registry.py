@@ -116,25 +116,37 @@ EXPECTED = {
     ('bright_sirens', True, 2, 'mixed', True): ['fcat_2'],
     ('bright_sirens', True, 2, 'none', False): ['fcat_2'],
     ('bright_sirens', True, 2, 'none', True): ['fcat_2'],
-    ('dark_sirens_complete', False, 1, 'all', False): ['sigma_kde'],
+    ('dark_sirens_complete', False, 1, 'all', False): ['delta', 'sigma_kde'],
     ('dark_sirens_complete', False, 1, 'all', True): [],
-    ('dark_sirens_complete', False, 1, 'none', False): ['sigma_kde'],
+    ('dark_sirens_complete', False, 1, 'none', False): ['delta', 'sigma_kde'],
     ('dark_sirens_complete', False, 1, 'none', True): [],
-    ('dark_sirens_complete', False, 2, 'all', False): ['sigma_kde', 'sigma_kde_c2', 'fcat_2'],
+    ('dark_sirens_complete', False, 2, 'all', False): [
+        'delta', 'sigma_kde', 'delta_c2', 'sigma_kde_c2', 'fcat_2',
+    ],
     ('dark_sirens_complete', False, 2, 'all', True): ['fcat_2'],
-    ('dark_sirens_complete', False, 2, 'mixed', False): ['sigma_kde', 'sigma_kde_c2', 'fcat_2'],
+    ('dark_sirens_complete', False, 2, 'mixed', False): [
+        'delta', 'sigma_kde', 'delta_c2', 'sigma_kde_c2', 'fcat_2',
+    ],
     ('dark_sirens_complete', False, 2, 'mixed', True): ['fcat_2'],
-    ('dark_sirens_complete', False, 2, 'none', False): ['sigma_kde', 'sigma_kde_c2', 'fcat_2'],
+    ('dark_sirens_complete', False, 2, 'none', False): [
+        'delta', 'sigma_kde', 'delta_c2', 'sigma_kde_c2', 'fcat_2',
+    ],
     ('dark_sirens_complete', False, 2, 'none', True): ['fcat_2'],
-    ('dark_sirens_complete', True, 1, 'all', False): ['sigma_kde'],
+    ('dark_sirens_complete', True, 1, 'all', False): ['delta', 'sigma_kde'],
     ('dark_sirens_complete', True, 1, 'all', True): [],
-    ('dark_sirens_complete', True, 1, 'none', False): ['sigma_kde'],
+    ('dark_sirens_complete', True, 1, 'none', False): ['delta', 'sigma_kde'],
     ('dark_sirens_complete', True, 1, 'none', True): [],
-    ('dark_sirens_complete', True, 2, 'all', False): ['sigma_kde', 'sigma_kde_c2', 'fcat_2'],
+    ('dark_sirens_complete', True, 2, 'all', False): [
+        'delta', 'sigma_kde', 'delta_c2', 'sigma_kde_c2', 'fcat_2',
+    ],
     ('dark_sirens_complete', True, 2, 'all', True): ['fcat_2'],
-    ('dark_sirens_complete', True, 2, 'mixed', False): ['sigma_kde', 'sigma_kde_c2', 'fcat_2'],
+    ('dark_sirens_complete', True, 2, 'mixed', False): [
+        'delta', 'sigma_kde', 'delta_c2', 'sigma_kde_c2', 'fcat_2',
+    ],
     ('dark_sirens_complete', True, 2, 'mixed', True): ['fcat_2'],
-    ('dark_sirens_complete', True, 2, 'none', False): ['sigma_kde', 'sigma_kde_c2', 'fcat_2'],
+    ('dark_sirens_complete', True, 2, 'none', False): [
+        'delta', 'sigma_kde', 'delta_c2', 'sigma_kde_c2', 'fcat_2',
+    ],
     ('dark_sirens_complete', True, 2, 'none', True): ['fcat_2'],
     ('dark_sirens', False, 1, 'all', False): ['log10n0', 'delta', 'sigma_kde'],
     ('dark_sirens', False, 1, 'all', True): [],
@@ -514,21 +526,27 @@ def test_catalog_free_models_reject_any_survey_override(universe_model, label):
     assert "samples no survey parameters at all" in message
 
 
-@pytest.mark.parametrize("label", ["log10n0", "delta", "b_miss"])
+@pytest.mark.parametrize("label", ["log10n0", "b_miss"])
 def test_complete_catalog_model_rejects_completion_overrides(label):
     with pytest.raises(ValueError, match="100%-complete catalog"):
         _space("dark_sirens_complete", True, 1, "none", False,
                prior_overrides={label: [0.0, 1.0]})
 
 
-def test_complete_catalog_model_still_takes_a_sigma_kde_override():
+def test_complete_catalog_model_samples_delta_and_sigma_kde():
+    """``delta`` is NOT inert for the complete model: it tilts the galaxy measure
+    g(z) = dV_c/dz (1+z)^delta that the complete-catalog kernels use as the
+    interim prior on each galaxy's true redshift, and that cancels only as
+    sig_eff -> 0 (7% differential tilt across z at dzgals = 0.05).  It used to be
+    lumped with the missing-galaxy amplitudes and silently pinned."""
     labels, lower, upper, *_ = _space(
         "dark_sirens_complete", True, 1, "none", False,
-        prior_overrides={"sigma_kde": [0.0, 0.02]},
+        prior_overrides={"sigma_kde": [0.0, 0.02], "delta": [-1.0, 1.0]},
     )
 
-    assert labels == ["sigma_kde"]
-    assert float(upper[0]) == 0.02
+    assert labels == ["delta", "sigma_kde"]
+    assert (float(lower[0]), float(upper[0])) == (-1.0, 1.0)
+    assert float(upper[1]) == 0.02
 
 
 @pytest.mark.parametrize("label", ["log10n0", "sigma_kde"])
