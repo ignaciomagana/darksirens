@@ -339,8 +339,31 @@ def run_sampler(method, likelihood, prior_transform, labels,
     # --------------------------------------------------------
     # numpyro runs its own gradient preflight below; skip it here.  The zero-
     # free-params path above already returned, so ndims >= 1 by construction.
+    #
+    # Never on a RESUME: the probe exists because a FRESH nested run must
+    # reject-sample the PRIOR until it collects nlive finite-logL points, and a
+    # checkpoint already carries nlive live points with finite logL.  A
+    # well-advanced posterior occupies a vanishing fraction of the prior, so
+    # k == 0 out of n_probe prior draws is the EXPECTED outcome there and the
+    # fail-fast would kill a requeued job the checkpoint would have finished --
+    # while every remedy the message prints (--selection_neff_guard,
+    # --max_likelihood_variance) is semantic and would then make
+    # check_resume_fingerprint refuse the checkpoint.  It also saves n_probe
+    # full likelihood evaluations on every requeue.
     if method in ("dynesty", "tinyns"):
-        _nested_sampler_preflight(likelihood, prior_transform, ndims, opts)
+        _resuming = bool(plan_from_opts(opts, method).resuming) or (
+            method == "tinyns" and bool(getattr(opts, "tinyns_resume_from", None))
+        )
+        if _resuming:
+            if getattr(opts, "sampler_preflight", "on") != "off":
+                print(
+                    "[*] preflight skipped: resuming from a checkpoint, whose "
+                    "live points are already finite (the probe only guards a "
+                    "fresh run's initial-live-point search).",
+                    flush=True,
+                )
+        else:
+            _nested_sampler_preflight(likelihood, prior_transform, ndims, opts)
 
     # --------------------------------------------------------
     # tinyns  (lightweight JAX nested sampler, dynesty-compatible)
