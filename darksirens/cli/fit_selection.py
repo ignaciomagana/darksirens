@@ -144,7 +144,11 @@ def main(argv=None):
     _row("Input", survey)
     if not survey.is_file():
         _fatal(f"survey file not found: {survey}")
-    nside, ngals, zgals, dzgals, wgals, z_depth = load_survey(survey)
+    # to_device=False: this CLI is pure numpy/scipy and only reads zgals/ngals,
+    # so there is no reason to push the dense (npix, maxgals) tables (several GB
+    # each at catalog nside) onto a device we never compute on.
+    _nside, ngals, zgals, _dzgals, _wgals, _z_depth = load_survey(
+        survey, to_device=False)
     props = load_survey_galprops(survey)
     if "gal_app_mag" not in props:
         _fatal("survey carries no gal_app_mag dataset; re-pixelate from a "
