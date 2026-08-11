@@ -266,13 +266,45 @@ def test_k1_ensemble_skips_provenance_check(tmp_path):
 
 def test_k2_marginalize_missing_members_on_one_catalog_raises(tmp_path):
     """A catalog with a map-only (no-members) Q file cannot supply a matched
-    member set: distinct-or-missing provenance still aborts."""
+    member set: the per-catalog loader already refuses it by name."""
     s1 = _write_survey(tmp_path / "s1.h5", 11)
     s2 = _write_survey(tmp_path / "s2.h5", 22)
     qa = _save_q(tmp_path / "qa.h5", seed=100)
     qb = _save_q(tmp_path / "qb.h5", seed=200, with_members=False)
     opts = _opts([s1, s2], [qa, qb])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="requires an LSS-completion ENSEMBLE"):
+        load_multitracer_catalog_bundles(opts, _gw_inputs())
+
+
+def test_k2_marginalize_catalog_without_any_q_names_the_missing_ensemble(tmp_path):
+    """A catalog with NO completion at all (the "" placeholder) used to be
+    reported as 'LEGACY (no provenance)' with an instruction to rebuild the
+    ensembles jointly -- impossible for a catalog that has no LSS field.  The
+    abort must name the MISSING ENSEMBLE instead (the estimator needs one on
+    every catalog: likelihood/core.py refuses a missing base_miss on either
+    seam)."""
+    s1 = _write_survey(tmp_path / "s1.h5", 11)
+    s2 = _write_survey(tmp_path / "s2.h5", 22)
+    qa = _save_q(tmp_path / "qa.h5", seed=100)
+    opts = _opts([s1, s2], [qa, ""])
+    with pytest.raises(ValueError) as exc:
+        load_multitracer_catalog_bundles(opts, _gw_inputs())
+    msg = str(exc.value)
+    assert "EVERY catalog needs its own Q_LSS ENSEMBLE" in msg
+    assert s2 in msg and s1 not in msg
+    assert "LEGACY (no provenance)" not in msg
+
+
+def test_k2_marginalize_no_ensemble_is_not_bypassed_by_allow_flag(tmp_path):
+    """--allow_unverified_shared_lss_members accepts an UNMATCHED realization
+    set, not a MISSING one: a Q-less catalog must still abort (the likelihood
+    would otherwise raise mid-trace, after the whole data load)."""
+    s1 = _write_survey(tmp_path / "s1.h5", 11)
+    s2 = _write_survey(tmp_path / "s2.h5", 22)
+    qa = _save_q(tmp_path / "qa.h5", seed=100)
+    opts = _opts([s1, s2], [qa, ""],
+                 allow_unverified_shared_lss_members=True)
+    with pytest.raises(ValueError, match="EVERY catalog needs its own"):
         load_multitracer_catalog_bundles(opts, _gw_inputs())
 
 
