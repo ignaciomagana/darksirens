@@ -867,8 +867,10 @@ class BinnedGPPopulation:
     shape is normalised over the (m1, q) grid.  With ``z_edges`` set (model
     ``gppop_mz``) the (m1, m2, z) binning carries a *free-form* rate evolution
     (no gamma, no z-normalisation); the unnormalised z-dependence is the physical
-    R(z).  A baseline truncated-Gaussian spin (mu_chi, sigma_chi) is always
-    included.
+    R(z), and the TOP z bin is open-ended (constant comoving rate above
+    ``z_edges[-1]``, see :meth:`_binned_density`) so the model stays usable over
+    the whole analysis redshift range.  A baseline truncated-Gaussian spin
+    (mu_chi, sigma_chi) is always included.
 
     Parameter order (sliced by ``log_p_pop`` exactly as listed by ``param_specs``)
     ------------------------------------------------------------------------------
@@ -972,8 +974,22 @@ class BinnedGPPopulation:
                               jnp.clip(j, 0, self._n_m - 1)]
         valid = valid & (tril >= 0)
         if self._has_z:
+            # The TOP z bin is open-ended: a query above ``z_edges[-1]`` keeps the
+            # last bin's rate (constant comoving-frame extrapolation) instead of
+            # being declared invalid.  Truncating there asserted ZERO merger rate
+            # above z = 1.2 (the default top edge) while the rest of the pipeline
+            # runs to zMax = 5, so every PE sample and injection above it was
+            # silently dropped -- and any event whose PE support sat entirely above
+            # it made its log-likelihood -inf for EVERY proposal, which the
+            # likelihood's isfinite guard turns into a rejection of the whole
+            # parameter space (nested sampling cannot even initialise live points),
+            # with nothing pointing at the z edges.  Unlike the mass edges -- where
+            # zero density outside the binned range IS the model statement, as it is
+            # for every tapered parametric mass model -- a hard zero in z is not a
+            # statement anyone chose.  Override ``DARKSIRENS_GPPOP_Z_EDGES`` to
+            # resolve the high-z rate instead of extrapolating it.
             k = jnp.searchsorted(self._z_edges, z, side="right") - 1
-            valid = valid & (k >= 0) & (k < self._n_z)
+            valid = valid & (k >= 0)
             flat = jnp.clip(tril, 0, self._n_tril - 1) * self._n_z \
                 + jnp.clip(k, 0, self._n_z - 1)
         else:
