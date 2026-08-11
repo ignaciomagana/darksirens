@@ -433,8 +433,12 @@ darksirens_inference_lensing \
   exponent (defaults `5e-4`, `3.0`) and the time-delay scale `T0` in seconds
   (default `5.36e6`, ~62 d — the SIS scale at `z_L=0.5`, `z_s=1`,
   `sigma_v=200 km/s` under this repo's cosmology). Candidate pairs with
-  `|dt| >= T0` fall outside the SIS support `y in (0,1)` and get an exactly
-  `-inf` time-marked pair likelihood.
+  `|dt| >= T0` fall outside the SIS support `y in (0,1)`; with the
+  delta-collapse mark they get an exactly `-inf` time-marked pair likelihood
+  once `|dt|/T0 - 4.14 sigma_dt/T0 >= 1` (the mark's own Gaussian width still
+  reaches into the support just past the edge), while the quadrature mark stays
+  finite and merely suppressed. Only the fully annihilated case is a hard
+  error; the rest is a warning.
 - `--fix_lens_rate BOOL`: `true` (default) pins the SIS optical depth to
   `--sl_tau_A`/`--sl_tau_n`; `false` samples the lensing hyperparameters, with
   `--lens_prior_overrides` supplying their bounds, e.g.

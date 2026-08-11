@@ -15,6 +15,7 @@ from darksirens.lensing.observed_catalog import (
 )
 from darksirens.lensing.marginal_diagnostics import (
     candidate_time_mark_suspicion,
+    resolve_sis_time_mark_impl,
     sis_time_mark_support,
     sis_time_mark_support_message,
 )
@@ -201,6 +202,25 @@ def _check_partition(path, n_events, errors, summary, *, observed_n_events=None)
     )
 
 
+def _sis_support(opts, delta_t_values, sigma_values):
+    """SIS-support verdict for a set of time marks, resolved like the runtime.
+
+    The fatal case is ``all_annihilated`` (every pair's whole mark measure
+    outside y in (0, 1)), not the bare ``y* >= 1``: the delta-collapse mark
+    integrates over its own Gaussian width and the quadrature mark never masks,
+    so the run this used to abort could have a perfectly finite likelihood.
+    """
+    T0 = _get(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS
+    return sis_time_mark_support(
+        delta_t_values,
+        T0,
+        sigma_delta_t_seconds=sigma_values,
+        mark_impl=resolve_sis_time_mark_impl(
+            _get(opts, "pair_time_mark_impl", "auto"), sigma_values, T0
+        ),
+    )
+
+
 def _check_pair_pe(
     path,
     n_events,
@@ -231,6 +251,7 @@ def _check_pair_pe(
                 npairs = int(f.attrs["npairs"])
             summary["n_pairs_pair_pe"] = npairs
             pair_dt_values = []
+            pair_sigma_values = []
             for k in range(npairs):
                 pname = f"pair_{k}"
                 if pname not in f:
@@ -269,6 +290,7 @@ def _check_pair_pe(
                             f"{pname} event-index metadata {pair} does not match partition pair {partition_pairs[k]}"
                         )
                 has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
+                dt_recorded = False
                 if has_dt:
                     try:
                         dt_value = float(
@@ -280,6 +302,10 @@ def _check_pair_pe(
                         errors.append(f"{pname} delta_t_obs not readable: {exc}")
                     else:
                         pair_dt_values.append(dt_value)
+                        # Kept aligned with pair_dt_values so the support
+                        # diagnostic below can credit each mark's own width.
+                        pair_sigma_values.append(None)
+                        dt_recorded = True
                         # A non-finite delay is a broken mark, not a wide one:
                         # it propagates NaN/-inf through the marked pair
                         # likelihood, and the SIS support diagnostic below
@@ -322,6 +348,8 @@ def _check_pair_pe(
                                 f"{pname} sigma_delta_t must be finite and "
                                 f"positive, got {sig}"
                             )
+                        elif dt_recorded:
+                            pair_sigma_values[-1] = sig
                     except Exception as exc:
                         errors.append(f"{pname} sigma_delta_t not readable: {exc}")
                 if unified_observed_mode:
@@ -351,14 +379,15 @@ def _check_pair_pe(
                         except Exception as exc:
                             errors.append(str(exc))
             if _get(opts, "pair_marks", "none") == "time" and pair_dt_values:
-                # SIS support guard: y* = |dt|/T0 must be < 1 or the pair is
-                # annihilated (-inf) at every parameter value.
-                support = sis_time_mark_support(
-                    pair_dt_values,
-                    _get(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS,
+                # SIS support guard: a delay past y* = |dt|/T0 = 1 annihilates
+                # the pair (-inf at every parameter value) only once the mark's
+                # own width no longer reaches into the support -- and the
+                # quadrature mark never annihilates at all.
+                support = _sis_support(
+                    opts, pair_dt_values, pair_sigma_values
                 )
                 summary["sis_time_mark_support_pair_pe"] = support
-                if support["all_out_of_support"]:
+                if support["all_annihilated"]:
                     errors.append(sis_time_mark_support_message(support))
                 elif support["n_out_of_support"]:
                     warnings.append(sis_time_mark_support_message(support))
@@ -463,14 +492,16 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
             summary.update(suspicion)
             if suspicion.get("candidate_time_marks_suspicious"):
                 warnings.append(str(suspicion.get("candidate_time_marks_warning")))
-            # SIS support guard: y* = |dt|/T0 must be < 1 or the pair is
-            # annihilated (-inf) at every parameter value.
-            support = sis_time_mark_support(
+            # SIS support guard: a delay past y* = |dt|/T0 = 1 annihilates the
+            # pair (-inf at every parameter value) only once the mark's own
+            # width no longer reaches into the support.
+            support = _sis_support(
+                opts,
                 [p.delta_t_obs for p in pairs],
-                _get(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS,
+                [p.sigma_delta_t for p in pairs],
             )
             summary["sis_time_mark_support"] = support
-            if support["all_out_of_support"] and support["n_marked"] > 0:
+            if support["all_annihilated"] and support["n_marked"] > 0:
                 errors.append(sis_time_mark_support_message(support))
             elif support["n_out_of_support"]:
                 warnings.append(sis_time_mark_support_message(support))
