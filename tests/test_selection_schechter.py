@@ -398,6 +398,45 @@ def test_selection_fit_json_roundtrip_schechter(tmp_path):
         load_selection_fit_strata(p)
 
 
+def test_cov_and_sigma_M_legality_is_enforced_at_load_and_construction(tmp_path):
+    """The Laplace covariance IS the sampled prior and is read positionally off
+    its diagonal, and sigma_M divides c_sel_gaussian -- so both need the same
+    numeric wall at the loader and the constructor, not just a key-presence
+    check."""
+    from darksirens.redshift.selection import _validate_stratum
+
+    good = {"family": "gaussian", "m_lim": 21.0, "M0hat": -20.9,
+            "sigma_M": 0.9, "cov": (np.eye(2) * 1e-4).tolist()}
+    assert _validate_stratum(tmp_path / "f.json", good)["sigma_M"] == 0.9
+
+    # Wrong shape: a 3x3 would silently mis-map the (M0hat, sigma_M) sds; a 1x1
+    # raised an opaque IndexError inside the inference CLI instead.
+    for bad_cov in ((np.eye(3) * 1e-4).tolist(), [[1e-4]]):
+        with pytest.raises(ValueError, match="cov"):
+            _validate_stratum(tmp_path / "f.json", dict(good, cov=bad_cov))
+    # Non-positive / non-finite / asymmetric: no Gaussian prior to be had.
+    for bad_cov in ([[1e-4, 0.0], [0.0, -1e-4]],
+                    [[1e-4, 0.0], [0.0, 0.0]],
+                    [[1e-4, 1e-2], [0.0, 1e-4]],
+                    [[1e-4, 0.0], [0.0, float("nan")]]):
+        with pytest.raises(ValueError, match="cov"):
+            _validate_stratum(tmp_path / "f.json", dict(good, cov=bad_cov))
+        with pytest.raises(ValueError, match="cov"):
+            SelectionFit(family="gaussian", m_lim=21.0, M0hat=-20.9,
+                         sigma_M=0.9, cov=np.asarray(bad_cov, dtype=float))
+
+    for bad_sig in (0.0, -0.9):
+        with pytest.raises(ValueError, match="sigma_M"):
+            _validate_stratum(tmp_path / "f.json", dict(good, sigma_M=bad_sig))
+        with pytest.raises(ValueError, match="sigma_M"):
+            SelectionFit(family="gaussian", m_lim=21.0, M0hat=-20.9,
+                         sigma_M=bad_sig, cov=np.eye(2) * 1e-4)
+
+    # A correlated, positive-definite covariance is legal.
+    ok = [[1e-4, 5e-5], [5e-5, 1e-4]]
+    assert _validate_stratum(tmp_path / "f.json", dict(good, cov=ok))
+
+
 def test_loader_refuses_a_foreign_background_cosmology(tmp_path):
     """The h-scaled zero point absorbs H0 exactly, NOT Om0/w0/wa: those change
     the SHAPE of DM(z), so a fit measured at another background is not the fit

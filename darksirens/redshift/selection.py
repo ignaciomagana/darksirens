@@ -424,6 +424,41 @@ def _validate_fit_background(where, meta):
                 "Refit the magnitudes at the fiducial background.")
 
 
+def _validate_sampled_prior_numerics(where, family, cov, sigma_M):
+    """Numeric legality of the quantities that BECOME the sampled theta prior.
+
+    ``cov`` is consumed POSITIONALLY -- the inference CLI reads the marginal
+    Laplace sds off its diagonal in ``SELECTION_SAMPLED_FIELDS[family]`` order --
+    so a wrong-shape matrix silently mis-maps the priors, a negative diagonal
+    entry yields a NaN prior sd, and a 1x1 matrix raises an opaque IndexError far
+    from the file that caused it.  ``sigma_M`` divides the gaussian selection
+    curve: 0 turns it into a step function and a negative value INVERTS it (a
+    survey MORE complete at high z), with no error anywhere downstream.  The fit
+    path is safe by construction (it optimises log sigma and rejects a non-PD
+    Hessian); this wall is for hand-edited, merged or externally generated JSON.
+    """
+    n = len(SELECTION_SAMPLED_FIELDS[family])
+    fields = list(SELECTION_SAMPLED_FIELDS[family])
+    C = np.asarray(cov, dtype=float)
+    if C.shape != (n, n) or not np.all(np.isfinite(C)):
+        raise ValueError(
+            f"{where}: cov must be a finite ({n}, {n}) matrix in {fields} "
+            f"order (the sampled theta of the {family!r} family); got shape "
+            f"{C.shape}.")
+    scale = max(1.0, float(np.max(np.abs(C))))
+    if (not np.allclose(C, C.T, rtol=0.0, atol=1e-10 * scale)
+            or float(np.min(np.linalg.eigvalsh(C))) <= 0.0):
+        raise ValueError(
+            f"{where}: cov is not symmetric positive definite; it becomes the "
+            f"Gaussian prior on {fields}, whose sds are the square roots of its "
+            "diagonal.")
+    if family == "gaussian" and not float(sigma_M) > 0.0:
+        raise ValueError(
+            f"{where}: sigma_M={sigma_M} must be positive -- c_sel_gaussian "
+            "divides by it, so 0 makes the selection curve a step function and "
+            "a negative width inverts it (completeness RISING with redshift).")
+
+
 def _validate_stratum(path, s):
     s = dict(s)
     if "family" not in s:
@@ -437,6 +472,8 @@ def _validate_stratum(path, s):
         if key not in s:
             raise ValueError(f"{path}: stratum missing required key {key!r}.")
     _validate_fit_background(str(path), s.get("meta") or {})
+    _validate_sampled_prior_numerics(str(path), family, s["cov"],
+                                    s.get("sigma_M"))
     # Optional K(z) template; absent in pre-K fit files -> K = 0.
     s["k_corr_coeffs"] = tuple(float(c) for c in s.get("k_corr_coeffs") or ())
     if family == "schechter":
@@ -564,6 +601,9 @@ class SelectionFit:
                     f"SelectionFit(family={self.family!r}) is missing {name!r}"
                     f" (the family carries "
                     f"{list(SELECTION_THETA_FIELDS[self.family])}).")
+        _validate_sampled_prior_numerics(
+            f"SelectionFit(family={self.family!r})", self.family, self.cov,
+            self.sigma_M)
         if self.family == "schechter":
             if float(self.alpha) <= _ALPHA_MIN:
                 raise ValueError(
