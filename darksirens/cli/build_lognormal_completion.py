@@ -579,10 +579,13 @@ def _build_completion_radial(
             # bin-integrated expected OBSERVED counts, same footing as N_obs.
             Cbar_u = np.clip(
                 _bin_integral(Cbar_fine * dN_exp_density) / exp_safe, 0.0, 1.0)
-            C_u = np.tile(Cbar_u, (n_fit, 1))
+            # ONE shared row, broadcast (a read-only view, not a ~1.5 GB tile at
+            # nside=128): the solver and the renormalization only read them.
+            C_u = np.broadcast_to(Cbar_u, (n_fit, n_grid))
             # One shared budget-weight row (1 - Cbar) dN_exp for EVERY pixel:
             # the renormalization footprint is the whole fitted sky.
-            w_budget = np.tile((1.0 - Cbar_fine) * dN_exp_density, (n_fit, 1))
+            w_budget = np.broadcast_to(
+                (1.0 - Cbar_fine) * dN_exp_density, (n_fit, n_grid))
         N_obs_u = np.zeros((n_fit, n_grid), dtype=float)
         for i, r in enumerate(fit):
             if ngals_np[r] > 0:
@@ -613,8 +616,32 @@ def _build_completion_radial(
             N_obs_u[i] = _counts_in_uniform_chi(zs, chi, edges_chi)
 
     bias = float(survey.b_miss)
+    # Solve the UNIQUE rows only.  In aggregate/selection mode every EMPTY pixel
+    # enters with bit-identical inputs -- N_obs = 0 against the one shared base
+    # row of its stratum -- so its n_grid-dimensional L-BFGS-B solve is provably
+    # the same answer as every other empty pixel's in that stratum (~2.2 s per
+    # row at DESI scale x ~127k duplicated empty pixels at nside=128).  Solve one
+    # representative per (empty, stratum) group and broadcast it; the occupied
+    # rows are all solved.  The expansion below restores the full fitted-row
+    # ordering, so the member RNG stream (row-major) is unchanged.
+    empty_fit = (ngals_np[fit] == 0)
+    if empty_fit.any():
+        group = np.zeros(n_fit, dtype=np.int64)                   # 0 = solve me
+        if c_mode == "selection" and selection_strata is not None:
+            group[empty_fit] = 1 + stratum_map[fit][empty_fit]
+        else:
+            group[empty_fit] = 1
+        group[~empty_fit] = -1 - np.arange(int((~empty_fit).sum()))
+        _uniq, first, expand = np.unique(
+            group, return_index=True, return_inverse=True)
+        solve_rows = np.asarray(first, dtype=np.int64)
+        expand = np.asarray(expand, dtype=np.int64).reshape(-1)
+    else:
+        solve_rows = np.arange(n_fit, dtype=np.int64)
+        expand = solve_rows
+    n_solve = int(solve_rows.size)
     mp = poisson_lognormal_map(
-        N_obs_u, C_u, dN_exp_count_u, pk,
+        N_obs_u[solve_rows], np.asarray(C_u)[solve_rows], dN_exp_count_u, pk,
         bias=bias, prior_strength=prior_strength, maxiter=maxiter,
         workers=workers,
     )
@@ -623,9 +650,21 @@ def _build_completion_radial(
     # aggregate mode every row is fitted).
     logq_map = np.zeros((n_pix, n_grid), dtype=float)
     for i, r in enumerate(fit):
-        logq_map[r] = np.interp(chi, chi_u, mp["logq_map"][i])
+        logq_map[r] = np.interp(chi, chi_u, mp["logq_map"][expand[i]])
 
     diagnostics = dict(mp["diagnostics"])
+    # Convergence is judged against the FITTED rows (n_occupied), so re-express
+    # the solved-row counters over them: every unconverged representative counts
+    # as (at least) one unconverged fitted row, so the fail-closed gate in main()
+    # still trips.  The duplicate-row accounting is stamped for provenance.
+    n_unconv = n_solve - int(mp["diagnostics"]["n_converged"])
+    diagnostics.update({
+        "n_rows": n_fit,
+        "n_converged": n_fit - n_unconv,
+        "converged": bool(n_unconv == 0),
+        "n_solved_rows": n_solve,
+        "n_broadcast_duplicate_rows": n_fit - n_solve,
+    })
     diagnostics.update({
         # "n_occupied" is the FITTED-row count (what n_converged is judged
         # against): the occupied pixels in per_pixel mode, every pixel in
@@ -660,7 +699,7 @@ def _build_completion_radial(
     logq_members = None
     if n_members and n_members > 0:
         members = laplace_lognormal_members(
-            mp["s_map"], mp["lambda_map"], pk,
+            mp["s_map"][expand], mp["lambda_map"][expand], pk,
             n_members=int(n_members), bias=bias, prior_strength=prior_strength, seed=int(seed),
         )
         lm_u = members["logq_members"]                       # (M, n_fit, n_grid) on χ_u
