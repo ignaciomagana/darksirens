@@ -202,20 +202,51 @@ def _is_selection_c_mode(c_mode) -> bool:
     return _decode_c_mode(c_mode) == C_MODE_SELECTION
 
 
+def _validated_c_mode(code: int) -> int:
+    """An int ``c_mode`` must name one of the three legal estimators.
+
+    Anything else (a stray 3, a -1, a ``True`` that decodes to 1) used to fall
+    through: ``_is_selection_c_mode`` and ``_is_aggregate_c_mode`` both read
+    False, ``C_bar_raw`` stayed ``None`` and the run silently used the legacy
+    per-pixel estimator -- exactly the silent estimator swap the surrounding
+    hard errors exist to prevent.
+    """
+    legal = (C_MODE_PER_PIXEL, C_MODE_AGGREGATE, C_MODE_SELECTION)
+    if code not in legal:
+        from darksirens.core.constants import C_MODES
+
+        raise ValueError(
+            f"SurveyParams.c_mode={code} is not a completeness estimator code; "
+            f"the legal set is {dict(C_MODES)}. An unrecognised code would "
+            "silently fall through to the legacy per-pixel estimator, swapping "
+            "the entire clustering budget for a plumbing mistake. Carry the "
+            "mode structurally across jit boundaries (None / "
+            "C_MODE_AGGREGATE_STRUCT / C_MODE_SELECTION_STRUCT)."
+        )
+    return code
+
+
 def _decode_c_mode(c_mode) -> int:
     """Decode any legal ``c_mode`` spelling to its int code; hard-error on
     a traced int (guessing would silently swap the completeness estimator
-    -- and with it the entire clustering budget)."""
+    -- and with it the entire clustering budget) or an out-of-range code."""
     if c_mode is None:
         return C_MODE_PER_PIXEL
     if isinstance(c_mode, AggregateCMode):
         return C_MODE_AGGREGATE
     if isinstance(c_mode, SelectionCMode):
         return C_MODE_SELECTION
+    if isinstance(c_mode, (bool, np.bool_)):
+        # bool is an int subclass, so True would decode to aggregate.
+        raise ValueError(
+            f"SurveyParams.c_mode={c_mode!r} is a bool, not a completeness "
+            "estimator code (True would decode to aggregate). Use None / "
+            "C_MODE_AGGREGATE_STRUCT / C_MODE_SELECTION_STRUCT."
+        )
     if isinstance(c_mode, (int, np.integer)):
-        return int(c_mode)
+        return _validated_c_mode(int(c_mode))
     try:
-        return int(c_mode)                       # concrete 0-d array
+        return _validated_c_mode(int(c_mode))    # concrete 0-d array
     except jax.errors.ConcretizationTypeError as exc:
         raise ValueError(
             "SurveyParams.c_mode reached a jit boundary as a traced int "

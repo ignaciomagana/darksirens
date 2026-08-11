@@ -308,6 +308,21 @@ def test_c_mode_traced_int_leaf_hard_errors_not_silent_aggregate():
             total_miss(_survey(c_mode=bad))
 
 
+@pytest.mark.parametrize("bad", [3, -1, True])
+def test_out_of_range_c_mode_code_is_refused(bad):
+    """An int c_mode outside the three legal codes used to fall through to the
+    LEGACY per-pixel estimator with no error (review F-120): both mode probes
+    read False, C_bar_raw stayed None, and the run silently swapped the entire
+    clustering budget.  ``True`` decoded to aggregate (bool is an int)."""
+    from darksirens.redshift.completion import _decode_c_mode
+
+    with pytest.raises(ValueError, match="c_mode"):
+        _decode_c_mode(bad)
+    with pytest.raises(ValueError, match="c_mode"):
+        completion_curves(_cosmo(), _survey(c_mode=bad),
+                          _clustered_catalog(delta_g="dummy")[0])
+
+
 def test_c_mode_structural_conventions_survive_jit_boundary():
     """The decoder's conventions cross the survey-as-argument jit boundary as
     pytree STRUCTURE: the leaf-less sentinel selects aggregate (matching the
