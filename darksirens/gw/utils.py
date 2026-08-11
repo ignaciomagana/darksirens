@@ -220,7 +220,15 @@ def load_gw_samples(gw_path):
     # ------------------------------------------------------------
     if is_mock:
         print("This is using mock data.")
-    elif not _chi_in_ppe:
+    # ``chi_eff_in_p_pe`` is a required attr precisely so this decision is the
+    # file's, not the loader's: mock_data used to short-circuit it, so a mock
+    # declaring chi_eff_in_p_pe=False got p_pe WITHOUT the chi_eff factor while
+    # the selection loader below folded the chi_eff draw density into pdraw --
+    # numerator and denominator on different spin measures, which biases the
+    # spin population and, through the shared normalisation, H0.  Every in-repo
+    # generator writes chi_eff_in_p_pe=True, so honouring the attr is inert for
+    # them and fail-closed for anything else.
+    if not _chi_in_ppe:
         # chi_eff not yet in p_pe — apply it now
         logp_chi = chi_eff_prior_logprob(chieff, m1source, m2source, amax=_chi_amax)
         p_pe = p_pe * np.exp(np.clip(logp_chi, -50.0, None))
@@ -313,7 +321,13 @@ def load_selection_samples(file):
         "m1src",
         "m2src",
     )
-    required_attrs = ("ndraw",)
+    # ``chi_eff_swap_applied`` states whether pdraw already carries the 1-D
+    # chi_eff draw density.  It is REQUIRED (not defaulted to True) for the same
+    # reason ``chi_eff_in_p_pe`` is required of a PE file: the numerator and the
+    # denominator of the hierarchical likelihood must be on the same spin
+    # measure, and a file that does not say cannot be paired with one that does.
+    # Every gwcat chieff export and every in-repo mock generator stamps it.
+    required_attrs = ("ndraw", "chi_eff_swap_applied")
 
     if not jax.config.jax_enable_x64:
         raise RuntimeError(
@@ -349,8 +363,15 @@ def load_selection_samples(file):
         ndraw = int(f.attrs["ndraw"])
 
         # Apply 1-D chi_eff spin-prior swap if not already done.
-        if not f.attrs.get("chi_eff_swap_applied", True):
-            _amax = float(f.attrs.get("chi_eff_amax", 0.99))
+        if not bool(f.attrs["chi_eff_swap_applied"]):
+            if "chi_eff_amax" not in f.attrs:
+                raise RuntimeError(
+                    f"Selection file {file!r} declares chi_eff_swap_applied=False "
+                    "but carries no chi_eff_amax, so the chi_eff draw density "
+                    "this loader has to fold into pdraw is undefined. "
+                    f"{conversion_hint}"
+                )
+            _amax = float(f.attrs["chi_eff_amax"])
             log_p_chi = chi_eff_prior_logprob(chieffsels, m1src_sel, m2src_sel, amax=_amax)
             safe_log_p_chi = np.clip(log_p_chi, a_min=-50.0, a_max=None)
             pdraw_sel = pdraw_sel * np.exp(safe_log_p_chi)
