@@ -183,6 +183,14 @@ _A_NEAR_ZERO = 1e-6
 #: the completion's does.
 _DEEP_WARN = 0.02
 
+#: Separation |m_faint_cut - (Mstar_hat + M_faint_offset)| above which the
+#: analysis cut and the completeness denominator's protocol constant are worth a
+#: warning.  They are independent numbers that agree only if the caller makes
+#: them agree, and the offset between them mis-prices the whole out-of-catalog
+#: budget: ``missing_budget_vs_offset`` moves by ~0.05 per magnitude, so a few
+#: tenths is where the mismatch stops being fit-vs-protocol slack of the edge.
+_CUT_VS_PROTOCOL_WARN = 0.3
+
 
 def m0_absolute(M0hat, H0):
     """Absolute magnitude from its h-scaled form: ``M0 = M0hat + 5 log10 h``."""
@@ -756,13 +764,21 @@ def fit_selection_from_mags(m, z, m_lim, *, family="gaussian",
                     f"{int(keep.sum())} of {Mhat.size} galaxies (need at least "
                     "10): the cut is brighter than essentially the whole "
                     "sample.")
+            # Keep the PRE-cut arrays: the faint-end diagnostics answer a
+            # question about the CATALOG ("how many galaxies does it hold that
+            # the modelled population does not contain?"), which the cut sample
+            # cannot answer -- after the cut that count is identically 0 by
+            # construction whenever the cut sits faint-ward of M_faint.
+            Mhat_all, T_all = Mhat, T
             Mhat, T, z = Mhat[keep], T[keep], z[keep]
         else:
             n_cut = 0
+            Mhat_all = T_all = None
         return _fit_schechter_truncated(
             Mhat, T, z, m_lim, float(M_faint_offset),
             None if m_faint_cut is None else float(m_faint_cut),
-            n_cut=n_cut, stratum=stratum, Om0=Om0, w0=w0, wa=wa)
+            n_cut=n_cut, stratum=stratum, Om0=Om0, w0=w0, wa=wa,
+            Mhat_all=Mhat_all, T_all=T_all)
     return _fit_gaussian_truncated(
         Mhat, T, m_lim, stratum=stratum, k_corr_coeffs=k_corr_coeffs,
         Om0=Om0, w0=w0, wa=wa)
@@ -827,7 +843,8 @@ def _fit_gaussian_truncated(Mhat, T, m_lim, *, stratum, k_corr_coeffs,
 
 
 def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
-                             *, n_cut, stratum, Om0, w0, wa):
+                             *, n_cut, stratum, Om0, w0, wa,
+                             Mhat_all=None, T_all=None):
     """Detection-truncated Schechter MLE + Laplace covariance in (Mstar_hat, alpha).
 
     Work in reference absolute magnitudes ``Mhat_i = m_i - DM(z_i; H0=100)``
@@ -1017,7 +1034,29 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
         raise RuntimeError("selection-fit Hessian is not positive definite")
 
     diag = _faint_end_diagnostics(Mstar_hat, alpha_hat, M_faint_offset, m_lim,
-                                 Mhat, T, z, Om0, w0, wa)
+                                 Mhat, T, z, Om0, w0, wa,
+                                 Mhat_all=Mhat_all, T_all=T_all,
+                                 m_faint_cut=m_faint_cut)
+    if (m_faint_cut is not None
+            and abs(diag["m_faint_cut_vs_m_faint"]) > _CUT_VS_PROTOCOL_WARN):
+        import warnings
+
+        # The analysis cut and the completeness denominator's protocol constant
+        # are independent numbers that only agree if the caller makes them
+        # agree.  Where they disagree the fit describes one population and
+        # ``1 - C_sel`` prices another, so the out-of-catalog budget is
+        # mis-priced by whatever the offset between them buys (see
+        # ``missing_budget_vs_offset``, ~0.05 of budget per magnitude).
+        warnings.warn(
+            f"schechter fit: the declared m_faint_cut = {float(m_faint_cut):.3f} "
+            f"sits {diag['m_faint_cut_vs_m_faint']:+.3f} mag from the implied "
+            f"M_faint = {diag['m_faint_implied']:.3f} (Mstar_hat + "
+            f"M_faint_offset). The cut bounds the FIT sample while M_faint sets "
+            "the completeness denominator: at this separation the two describe "
+            "different populations and the out-of-catalog budget (1 - C_sel) is "
+            "priced for the wrong one. Move --m_faint_cut onto the implied "
+            "M_faint, or --m_faint_offset onto the cut (and REBUILD the Q "
+            "table).", RuntimeWarning)
     if m_faint_cut is None and diag["frac_complete_at_m_faint"] > _DEEP_WARN:
         import warnings
 
@@ -1050,7 +1089,8 @@ def _fit_schechter_truncated(Mhat, T, z, m_lim, M_faint_offset, m_faint_cut,
 
 def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
                           Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
-                          d_offset=1.0):
+                          d_offset=1.0, Mhat_all=None, T_all=None,
+                          m_faint_cut=None):
     """What the magnitudes say -- and cannot say -- about the faint cutoff.
 
     ``M_faint_offset`` never enters :func:`_fit_schechter_truncated`'s
@@ -1069,6 +1109,17 @@ def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
       and at +/- ``d_offset`` mag, evaluated through the consumed
       :func:`c_sel_schechter` itself, so the protocol's leverage on the budget
       is visible next to the fitted theta.
+
+    ``Mhat``/``T`` are the FIT sample, so with an ``m_faint_cut`` declared the
+    two count-based fields above describe the cut sample -- the faint-ward count
+    is then the slack between the parameter-free cut and the FITTED ``M_faint``,
+    and is identically 0 whenever the cut sits faint-ward of it, while the
+    complete fraction is biased low (the cut preferentially removes intrinsically
+    faint galaxies, which live at low z where ``T`` is faintest).  The
+    ``*_precut`` twins carry the catalog-level answers (``Mhat_all``/``T_all``,
+    the arrays before the cut), and ``m_faint_cut_vs_m_faint`` states the
+    separation between the analysis cut and the protocol constant, which is what
+    silently mis-prices the out-of-catalog budget when the two disagree.
     """
     m_faint = Mstar_hat + M_faint_offset
     z_med = float(np.median(np.asarray(z, dtype=float)))
@@ -1080,7 +1131,7 @@ def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
         c = float(c_sel_schechter(z_med, m_lim, Mstar_hat, alpha, off, H0_REF,
                                   Om0, w0, wa))
         budget[f"{off:.2f}"] = 1.0 - c
-    return {
+    out = {
         "m_faint_offset_constrained": False,
         "m_faint_implied": float(m_faint),
         "n_gal_faintward_of_m_faint": int(np.sum(np.asarray(Mhat) > m_faint)),
@@ -1088,3 +1139,15 @@ def _faint_end_diagnostics(Mstar_hat, alpha, M_faint_offset, m_lim, Mhat, T, z,
         "z_budget_ref": z_med,
         "missing_budget_vs_offset": budget,
     }
+    # With no cut the fit sample IS the catalog, so the twins are the same
+    # numbers; they are still stamped so a consumer never has to know which
+    # branch produced the file.
+    _Mhat_all = Mhat if Mhat_all is None else Mhat_all
+    _T_all = T if T_all is None else T_all
+    out["n_gal_faintward_of_m_faint_precut"] = int(
+        np.sum(np.asarray(_Mhat_all) > m_faint))
+    out["frac_complete_at_m_faint_precut"] = float(
+        np.mean(np.asarray(_T_all) > m_faint))
+    out["m_faint_cut_vs_m_faint"] = (
+        None if m_faint_cut is None else float(m_faint_cut) - float(m_faint))
+    return out

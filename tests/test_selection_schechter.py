@@ -15,6 +15,7 @@ code, including the emitted label ordering.
 """
 
 import json
+import warnings
 
 import numpy as np
 import pytest
@@ -223,6 +224,56 @@ def test_schechter_fit_survives_a_survey_that_reaches_the_faint_cutoff():
                                         M_faint_offset=1.5)
     assert tight.meta["n_gal_faintward_of_m_faint"] > 0
     assert tight.meta["m_faint_cut"] is None
+
+
+def test_faint_end_diagnostics_describe_the_catalog_not_just_the_cut_sample():
+    """With a cut declared, the count-based diagnostics used to describe ONLY
+    the cut sample -- so the faint-ward count was identically 0 in exactly the
+    configuration the warning text recommends, while advertising itself as
+    "galaxies the catalog holds that the modelled population does not contain".
+    The pre-cut twins answer that question, and the cut-vs-protocol separation
+    is stated instead of implied."""
+    rng = np.random.default_rng(7)
+    m, z = _schechter_truncated_sample(rng, 4000, 70.0, alpha_true=-1.25,
+                                       zlo=0.004)
+    mstar_true = MSTAR_TRUE - 5.0 * np.log10(70.0 / H0_REF)
+    # A tight cutoff the CATALOG reaches well past, with the cut declared ON it:
+    # the clean configuration the un-cut warning recommends.
+    offset = 1.5
+    cut = mstar_true + offset
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fit = fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                                      M_faint_offset=offset, m_faint_cut=cut)
+    assert not [w for w in caught if "sits" in str(w.message)]
+    meta = fit.meta
+    # The cut sample holds only the fit-vs-protocol slack of the edge (24
+    # galaxies between the cut and the FITTED M_faint); the catalog holds 2060.
+    assert meta["n_gal_faintward_of_m_faint_precut"] > 20 * max(
+        meta["n_gal_faintward_of_m_faint"], 1)
+    # The cut removes intrinsically faint galaxies, which sit at low z where the
+    # detection limit is faintest, so the cut sample's complete fraction is
+    # biased low relative to the catalog's.
+    assert (meta["frac_complete_at_m_faint_precut"]
+            > meta["frac_complete_at_m_faint"])
+    assert meta["m_faint_cut_vs_m_faint"] == pytest.approx(
+        cut - meta["m_faint_implied"])
+    assert abs(meta["m_faint_cut_vs_m_faint"]) < 0.3      # fit-vs-protocol slack
+
+    # A cut far from the implied M_faint prices the budget for a different
+    # population than the one fitted, and now says so.
+    with pytest.warns(RuntimeWarning, match="sits"):
+        fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                               M_faint_offset=offset,
+                               m_faint_cut=cut + 1.5)
+
+    # No cut: the twins are the same numbers, and the separation is undefined.
+    with pytest.warns(RuntimeWarning, match="m_faint_cut"):
+        uncut = fit_selection_from_mags(m, z, M_LIM, family="schechter",
+                                        M_faint_offset=offset)
+    assert (uncut.meta["n_gal_faintward_of_m_faint_precut"]
+            == uncut.meta["n_gal_faintward_of_m_faint"])
+    assert uncut.meta["m_faint_cut_vs_m_faint"] is None
 
 
 def test_m_faint_offset_leaves_the_fit_alone_and_says_so():
