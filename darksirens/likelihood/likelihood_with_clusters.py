@@ -346,8 +346,12 @@ def darksiren_log_likelihood_with_clusters(
             log_p_wl_fn = None
         elif wl_backend == WL_BACKEND_TABULATED:
             mu_nodes, log_w_nodes = make_log_mu_grid(_WL_NMU_NODES, _WL_LOG_MU_RANGE)
+            # validate=False: this factory runs inside the jitted likelihood
+            # body, where the grids are tracers and the value checks would raise
+            # TracerBoolConversionError.  The table is validated eagerly at load
+            # time (cli/inference_lensing._load_wl_table_arrays).
             log_p_wl_fn = make_tabulated_log_p_wl(
-                wl_z_grid, wl_log_mu_grid, wl_log_p_table,
+                wl_z_grid, wl_log_mu_grid, wl_log_p_table, validate=False,
             )
             u_nodes = jnp.zeros(1, dtype=jnp.float64)
             log_wH_nodes = jnp.zeros(1, dtype=jnp.float64)

@@ -739,6 +739,44 @@ class TestTabulatedClampAndValidation:
         make_tabulated_wl_params(jnp.asarray([0.0, 1.0]), jnp.asarray([0.0, 1.0]),
                                  table)
 
+    def test_closure_builds_inside_jit_with_traced_grids(self):
+        """``validate=False`` builds the closure from TRACERS.
+
+        Regression: both production likelihoods build this closure inside their
+        own ``jax.jit`` body, with the grids as tracers (they cannot be
+        static_argnames), so the unconditional ``bool(jnp.all(...))`` value
+        checks raised ``TracerBoolConversionError`` at the first likelihood
+        evaluation and ``--wl_backend tabulated`` could not run at all.
+        """
+        z_grid, log_mu_grid, table = _lognormal_table()
+        mu = jnp.asarray([0.9, 1.0, 1.1])
+        z = jnp.asarray([0.4, 0.8, 1.6])
+
+        @jax.jit
+        def f(zg, lmg, tab, mu, z):
+            fn = make_tabulated_log_p_wl(zg, lmg, tab, validate=False)
+            return fn(mu, z)
+
+        out = f(z_grid, log_mu_grid, table, mu, z)
+        assert np.all(np.isfinite(np.asarray(out)))
+        ref = make_tabulated_log_p_wl(z_grid, log_mu_grid, table)(mu, z)
+        np.testing.assert_allclose(np.asarray(out), np.asarray(ref),
+                                   rtol=1e-14, atol=0)
+
+    def test_shape_checks_still_run_without_value_validation(self):
+        """``validate=False`` drops only the checks that need concrete values;
+        the shape/ndim contract is static and stays enforced."""
+        with pytest.raises(ValueError, match="must equal"):
+            make_tabulated_log_p_wl(
+                jnp.asarray([0.0, 1.0]), jnp.asarray([0.0, 1.0]),
+                jnp.zeros((2, 3)), validate=False,
+            )
+        with pytest.raises(ValueError, match="at least 2 points"):
+            make_tabulated_log_p_wl(
+                jnp.asarray([0.5]), jnp.asarray([0.0, 1.0]),
+                jnp.zeros((1, 2)), validate=False,
+            )
+
 
 # ============================================================================
 # Generic bilinear helper: same clamp defect (P3-01)

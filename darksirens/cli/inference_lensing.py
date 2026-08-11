@@ -912,6 +912,12 @@ def _load_wl_table_arrays(opts):
     the quadrature's node spacing makes int p_WL(mu|z) dmu collapse to ~0 and
     silently DELETES those events from the likelihood. That is a hard startup
     error, never a silent rescale.
+
+    The grids themselves (finite, >= 2 points, strictly increasing, matching
+    table shape) are validated here too, via ``make_tabulated_wl_params``:
+    this loader is the ONLY eager chokepoint for the arrays the likelihood
+    interpolates on, because the likelihood builds its closure from tracers
+    (``make_tabulated_log_p_wl(..., validate=False)``).
     """
     if getattr(opts, "wl_backend", None) != "tabulated":
         return {}
@@ -926,6 +932,12 @@ def _load_wl_table_arrays(opts):
         wl_z_grid = jnp.asarray(f["z_grid"][()], dtype=jnp.float64)
         wl_log_mu_grid = jnp.asarray(f["log_mu_grid"][()], dtype=jnp.float64)
         wl_log_p_table = jnp.asarray(f["log_p_table"][()], dtype=jnp.float64)
+    try:
+        make_tabulated_wl_params(wl_z_grid, wl_log_mu_grid, wl_log_p_table)
+    except ValueError as exc:
+        raise SystemExit(
+            f"--lensing_wl_table_path {path}: malformed WL table. {exc}"
+        ) from exc
     mu_nodes, log_w_nodes = make_wl_mu_quadrature()
     try:
         validate_wl_mu_quadrature(
