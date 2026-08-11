@@ -139,21 +139,111 @@ def write_summary(rows: list[dict[str, Any]], bench_dir: Path) -> None:
     (bench_dir / "summary.json").write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _score(row: dict[str, Any]) -> tuple[int, float, float]:
+# Correctness gates.  The knobs this sweep varies (walks, step_scale,
+# min_accepts) control whether the live-point replacement is a valid Markov move;
+# under-mixing does not fail loudly, it biases logZ and the posterior while making
+# the run FASTER.  Ranking on speed behind two replacement-health flags therefore
+# recommends the fastest BIASED configuration, which is worse than no harness.
+INSERTION_Z_MAX = 3.0                    # |z| of the insertion-rank statistic
+INSERTION_STD_RATIO_RANGE = (0.8, 1.25)  # its spread relative to uniform
+LOGZ_SIGMA_MAX = 3.0                     # cross-config logZ agreement
+LOGZ_REFERENCE = "recommended"
+
+
+def _num(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _insertion_rank_ok(row: dict[str, Any]) -> tuple[bool, str]:
+    """Is the sampler's insertion-rank distribution consistent with uniform?
+
+    The standard nested-sampling correctness statistic: the insertion rank of each
+    new live point is uniform iff the replacement really draws from the
+    constrained prior.  ``|mean_z| >~ 3`` (or a spread well away from 1) means the
+    chain is under-mixed and the evidence is not trustworthy, however fast it ran.
+    Missing diagnostics are not treated as a failure — they are reported as such.
+    """
+    z = _num(row.get("insertion_rank_mean_z"))
+    ratio = _num(row.get("insertion_rank_std_ratio"))
+    if z is not None and abs(z) >= INSERTION_Z_MAX:
+        return False, f"insertion_rank_mean_z={z:+.2f} (|z| >= {INSERTION_Z_MAX})"
+    lo, hi = INSERTION_STD_RATIO_RANGE
+    if ratio is not None and not (lo <= ratio <= hi):
+        return False, f"insertion_rank_std_ratio={ratio:.2f} (outside [{lo}, {hi}])"
+    return True, ""
+
+
+def logz_outliers(rows: list[dict[str, Any]],
+                  reference: str = LOGZ_REFERENCE) -> dict[str, str]:
+    """Configs whose logZ disagrees with the reference preset by > 3 sigma.
+
+    Every config samples the SAME posterior, so their evidences must agree within
+    their own quoted errors; a disagreement is a tuning artefact, not a result.
+    """
+    ref = next((r for r in rows if r.get("config_name") == reference
+                and _num(r.get("logZ")) is not None), None)
+    if ref is None:
+        return {}
+    z_ref, e_ref = _num(ref["logZ"]), _num(ref.get("logZerr")) or 0.0
+    out: dict[str, str] = {}
+    for r in rows:
+        if r.get("config_name") == reference:
+            continue
+        z, e = _num(r.get("logZ")), _num(r.get("logZerr")) or 0.0
+        if z is None:
+            continue
+        sigma = (e * e + e_ref * e_ref) ** 0.5
+        nsig = abs(z - z_ref) / sigma if sigma > 0 else float("inf")
+        if nsig > LOGZ_SIGMA_MAX:
+            out[str(r.get("config_name"))] = (
+                f"logZ={z:.3f} disagrees with {reference} ({z_ref:.3f}) by "
+                f"{nsig:.1f} sigma")
+    return out
+
+
+def _score(row: dict[str, Any], outliers: dict[str, str] | None = None
+           ) -> tuple[int, int, float, float]:
+    outliers = outliers or {}
     has_diag = 1 if row.get("niter_per_sec") not in (None, "") else 0
+    correct = 1 if (_insertion_rank_ok(row)[0]
+                    and str(row.get("config_name")) not in outliers) else 0
     failures = float(row.get("replacement_failures") or 0)
     rescue = 1.0 if str(row.get("replacement_rescue_used")).lower() == "true" else 0.0
-    return (has_diag, -failures - rescue, float(row.get("niter_per_sec") or 0))
+    # Correctness outranks speed: an under-mixed config is FASTER, so any ranking
+    # that puts niter/sec ahead of the mixing diagnostics selects for the bias.
+    return (has_diag, correct, -failures - rescue, float(row.get("niter_per_sec") or 0))
 
 
 def print_ranking(rows: list[dict[str, Any]]) -> None:
     print("\nTinyNS short-budget benchmark summary\n")
     print(f"{'name':<16} {'status':<10} {'niter/sec':>10} {'ncall/sec':>10} {'calls/iter':>11} {'repl_mean_batches':>18} {'failures':>9} {'rescue':>7} {'final_dlogz':>11}")
-    for r in sorted(rows, key=_score, reverse=True):
+    outliers = logz_outliers(rows)
+    for r in sorted(rows, key=lambda r: _score(r, outliers), reverse=True):
         print(f"{r.get('config_name',''):<16} {r.get('status',''):<10} {str(r.get('niter_per_sec','')):>10} {str(r.get('ncall_per_sec','')):>10} {str(r.get('calls_per_iter','')):>11} {str(r.get('replacement_mean_batches','')):>18} {str(r.get('replacement_failures','')):>9} {str(r.get('replacement_rescue_used','')):>7} {str(r.get('final_delta_logz','')):>11}")
-    healthy = [r for r in rows if r.get("niter_per_sec") not in (None, "") and not r.get("replacement_failures") and str(r.get("replacement_rescue_used")).lower() != "true"]
+    for r in rows:
+        ok, reason = _insertion_rank_ok(r)
+        if not ok:
+            print(f"WARNING: {r.get('config_name')} FAILS the sampler-correctness "
+                  f"gate: {reason}; its evidence and posterior are not usable.")
+    for name, reason in outliers.items():
+        print(f"WARNING: {name} {reason}; the configs sample the same posterior, "
+              "so this is a tuning artefact, not a result.")
+    healthy = [r for r in rows
+               if r.get("niter_per_sec") not in (None, "")
+               and not r.get("replacement_failures")
+               and str(r.get("replacement_rescue_used")).lower() != "true"
+               and _insertion_rank_ok(r)[0]
+               and str(r.get("config_name")) not in outliers]
     if healthy:
         print(f"\nBest healthy candidate by niter/sec: {max(healthy, key=lambda r: float(r.get('niter_per_sec') or 0))['config_name']}")
+    else:
+        print("\nNo config passed both the replacement-health and "
+              "sampler-correctness gates; do NOT pick one on speed alone.")
     if not any(r.get("niter_per_sec") not in (None, "") for r in rows): print("WARNING: no config produced diagnostics")
     if all(r.get("status") == "failed" for r in rows): print("WARNING: all configs failed")
     if rows and all(str(r.get("replacement_rescue_used")).lower() == "true" for r in rows if r.get("replacement_rescue_used") not in (None, "")): print("WARNING: all configs with rescue diagnostics used rescue")
