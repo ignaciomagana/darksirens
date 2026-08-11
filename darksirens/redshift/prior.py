@@ -214,7 +214,21 @@ def _mu_miss_from_flat(zs: jnp.ndarray, h: jnp.ndarray, real: jnp.ndarray) -> jn
     b = jnp.clip(jnp.searchsorted(edges, zs, side="right") - 1, 0, _MU_MISS_NBINS - 1)
     sum_h = jnp.zeros(_MU_MISS_NBINS).at[b].add(h * real)
     cnt = jnp.zeros(_MU_MISS_NBINS).at[b].add(real)
-    mu_bin = jnp.where(cnt > 0.0, sum_h / jnp.where(cnt > 0.0, cnt, 1.0), 1.0)
+    # Bins with no observed galaxy fall back to the catalog-WIDE mean efficiency,
+    # NOT to 1.  With centred marks Jensen gives <h> >= 1 (7.4 at eta*sd(m) = 2,
+    # and the +-_LOG_H_CLIP clip admits e^7), so a homogeneous default made the
+    # missing density drop by that factor across ONE 0.125-wide bin at the
+    # catalog's coverage edge -- exactly where (1 - C) dN_exp is largest.  Worse,
+    # it made eta shift the catalog:missing ODDS even for marks with no redshift
+    # structure at all: the observed amplitude carries <h>_w while the
+    # beyond-coverage missing budget carried 1.  With the mean as the default a
+    # z-INDEPENDENT mark gives mu_miss == <h> everywhere, which cancels between
+    # the two branches, so eta stays a pure SHAPE parameter (the correct null)
+    # and the curve is continuous across the coverage edge and across z_depth.
+    mu_global = jnp.where(
+        jnp.sum(cnt) > 0.0, jnp.sum(sum_h) / jnp.maximum(jnp.sum(cnt), 1.0), 1.0
+    )
+    mu_bin = jnp.where(cnt > 0.0, sum_h / jnp.where(cnt > 0.0, cnt, 1.0), mu_global)
     return jnp.maximum(jnp.interp(zgrid, centers, mu_bin), 0.0)
 
 
@@ -224,8 +238,10 @@ def _mu_miss_grid(em_catalog: EMCatalog, log_h: jnp.ndarray) -> jnp.ndarray:
     The deterministic estimator of the *expected* host efficiency of the
     unobserved galaxies along the line of sight: the z-binned mean of
     ``h = exp(log_h)`` over the catalog's **observed** galaxies, interpolated to
-    ``zgrid``.  Empty/out-of-range z-bins default to 1 (homogeneous), so the
-    missing branch is only modulated where the catalog carries mark information.
+    ``zgrid``.  Empty/out-of-range z-bins default to the catalog-WIDE mean
+    efficiency (see :func:`_mu_miss_from_flat`), so the missing branch is
+    modulated in SHAPE only where the catalog carries local mark information and
+    a z-independent mark cancels between the observed and missing branches.
     No galaxies are invented — this reuses the observed marks (consistent with
     the deterministic-likelihood principle of the LSS completion).
     """

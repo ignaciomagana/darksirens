@@ -1935,8 +1935,9 @@ def field_global_log_Z_marked(
     S_obs = jnp.asarray(S_obs, dtype=dN_exp.dtype)
 
     # ``V_total`` already carries the beyond-depth relaxation (C == 0, lss == 1),
-    # where ``mu_miss`` defaults to the homogeneous 1 (no observed galaxies to
-    # inform the host efficiency), so the integrand is taken over the FULL grid.
+    # where ``mu_miss`` defaults to the catalog-wide mean host efficiency (no
+    # observed galaxies to inform it locally), so the integrand is taken over the
+    # FULL grid.
     integrand = jnp.asarray(mu_miss, dtype=dN_exp.dtype) * dN_exp * V_total
     N_miss_total = jnp.trapezoid(integrand, zgrid)
 

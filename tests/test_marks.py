@@ -211,3 +211,45 @@ def test_eta_zero_reduces_to_unmarked_with_non_unit_weights():
     marked0 = _prior(cat, mark_model="loglinear", eta=[0.0],
                      mark_names=("logmstar",))
     assert np.max(np.abs(np.exp(base) - np.exp(marked0))) < 1e-9
+
+
+# ------------------------------------------------------------
+# mu_miss outside the catalog's redshift coverage
+# ------------------------------------------------------------
+
+def test_mu_miss_is_continuous_and_reduces_to_the_mean_outside_coverage():
+    """Uninformed z-bins take the catalog-wide mean efficiency, not 1.
+
+    With centred marks Jensen gives <h> >= 1, so the old homogeneous default made
+    the missing density drop by that factor across ONE 0.125-wide bin at the
+    catalog's coverage edge -- and made eta shift the catalog:missing odds even
+    for marks with no redshift structure.
+    """
+    from darksirens.redshift.prior import _mu_miss_from_flat
+
+    rng = np.random.default_rng(0)
+    zs = rng.uniform(0.01, 0.30, 20000)          # coverage stops at z = 0.3
+    h = np.exp(np.clip(2.0 * rng.normal(0.0, 1.0, zs.size), -7.0, 7.0))
+    mu = np.asarray(_mu_miss_from_flat(
+        jnp.asarray(zs), jnp.asarray(h), jnp.ones(zs.size)
+    ))
+    z = np.asarray(zgrid)
+    mean_h = float(h.mean())
+    assert mean_h > 3.0                          # the Jensen factor is large here
+    # No cliff across the coverage edge, and far outside it mu_miss is the mean.
+    assert abs(mu[np.searchsorted(z, 0.25)] / mu[np.searchsorted(z, 0.40)] - 1.0) < 0.1
+    assert abs(mu[np.searchsorted(z, 3.0)] / mean_h - 1.0) < 1e-6
+
+
+def test_z_independent_marks_leave_the_prior_unchanged():
+    """A mark with no redshift structure must not move the prior at all.
+
+    h is then a constant that multiplies BOTH branches (amplitude N_obs*<h>_w and
+    dN_miss*mu_miss), so it cancels in p(z|pix) -- eta is a pure SHAPE parameter.
+    """
+    cat = _cat(logmstar=np.full((2, 3), 0.7))
+    base = _prior(cat, mark_model="none")
+    for eta in (0.5, 2.0, -1.0):
+        marked = _prior(cat, mark_model="loglinear", eta=[eta],
+                        mark_names=("logmstar",))
+        assert np.max(np.abs(np.exp(base) - np.exp(marked))) < 1e-9, eta
