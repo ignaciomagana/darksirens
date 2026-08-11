@@ -15,7 +15,9 @@ Pipeline
    counts ``dN_exp`` with the existing completion machinery
    (:func:`darksirens.redshift.completion._precompute_grids`,
    :func:`darksirens.redshift.completion._kde_dndz_obs`) under a *fiducial*
-   cosmology/survey (the same fiducials the inference dry-run uses).
+   cosmology/survey (the same fiducials the inference dry-run uses) and the
+   catalog's own ``z_depth`` (``--z-depth`` overrides it), so the completeness
+   denominator is truncated exactly as the likelihood truncates it.
    ``--c-mode aggregate`` swaps the per-pixel ``C`` for the ONE sky-aggregate
    ``Cbar`` (the inference ``SurveyParams.c_mode=1`` estimator) and extends
    the fit to EMPTY pixels as N_obs = 0 rows — the void information; the
@@ -74,7 +76,7 @@ from darksirens.redshift.lognormal_completion import (
 )
 
 
-def _fiducial_cosmo_survey(log10n0=None, delta=None):
+def _fiducial_cosmo_survey(log10n0=None, delta=None, z_depth=None):
     """Fiducial cosmology + survey (matching the inference dry-run defaults).
 
     ``log10n0``/``delta`` override the expected-density normalisation
@@ -83,6 +85,15 @@ def _fiducial_cosmo_survey(log10n0=None, delta=None):
     comoving density: a mis-set n0 cannot be separated from completeness and
     is absorbed into Q with spurious redshift structure (which then biases
     any downstream H0 inference — see working/GATES.md V2/V3).
+
+    ``z_depth`` is the survey's completeness depth (``None`` = no depth prior).
+    It MUST be the depth the likelihood will run with, because it changes the
+    completeness DENOMINATOR: ``_precompute_grids`` forms
+    ``S @ (dN_exp 1[z <= z_depth])`` when it is set, and the untruncated
+    denominator keeps mass above the depth the numerator can never match, so C
+    dips within ~2 sigma_smooth below the edge and ``(1 - C) dN_exp`` spikes
+    there.  The builders resolve it from the catalog's ``f.attrs['z_depth']``
+    (the same attr the inference reads) and stamp it as ``fiducial_z_depth``.
     """
     cosmo = CosmoParams(H0=H0Planck, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial)
     survey = SurveyParams(
@@ -90,8 +101,32 @@ def _fiducial_cosmo_survey(log10n0=None, delta=None):
         z50=1.0, w=0.5,
         delta=float(delta) if delta is not None else 0.0,
         b_miss=1.0, alpha_miss=1.0, sigma_kde=0.0,
+        z_depth=None if z_depth is None else float(z_depth),
     )  # lss_corr_length_mpc / lss_sigma take their container defaults
     return cosmo, survey
+
+
+def _resolve_build_z_depth(cli_override, file_attr):
+    """Resolve the build depth: CLI override > catalog attr > None.
+
+    Same precedence and validation as the inference resolver
+    (``cli/inference.resolve_survey_z_depth``, whose ``--survey_z_depth``
+    likewise wins over the per-catalog attr), so a table built here and the run
+    that consumes it agree on the truncation by construction.
+    """
+    z = cli_override if cli_override is not None else file_attr
+    if z is None:
+        return None
+    z = float(z)
+    if not np.isfinite(z) or z <= 0.0:
+        raise ValueError(
+            f"survey z_depth must be a finite positive redshift; got {z!r}.")
+    zmax = float(np.asarray(zgrid)[-1])
+    if z > zmax:
+        _warn(f"z_depth={z:g} exceeds the redshift grid zMax={zmax:g}; "
+              "clamping to zMax (the full-grid completeness base).")
+        z = zmax
+    return z
 
 
 def _apply_lss_overrides(survey, *, lss_corr_length_mpc=None, lss_sigma=None):
@@ -319,22 +354,27 @@ def _gp3d_resolution_guard(*, z_node_hi, n_z_nodes, ls_z, n_sph_nodes, ls_sph):
     return spacing
 
 
-def _zgrid_bin_edges() -> np.ndarray:
-    """Bin edges around the (non-uniform) ``zgrid`` points (midpoints)."""
-    z = np.asarray(zgrid, dtype=float)
-    mids = 0.5 * (z[:-1] + z[1:])
-    return np.concatenate([[z[0]], mids, [z[-1]]])
+def _counts_in_uniform_chi(zs, chi, edges_chi):
+    """Observed counts per uniform-chi bin: histogram the GALAXY redshifts.
 
+    Each galaxy is mapped to its comoving distance (linear interpolation of the
+    monotone ``chi(zgrid)`` table) and histogrammed into the same ``edges_chi``
+    the expected base is INTEGRATED over, so N_obs and rate_base = C * dN_exp
+    describe the same bins exactly.
 
-def _rebin_counts_to_uniform(counts_z, chi, chi_u):
-    """Reassign per-zgrid-bin counts to the uniform-chi bin each point falls in
-    (conserves the total, unlike interpolation)."""
-    n = chi_u.size
-    dchi_u = (chi_u[1] - chi_u[0]) if n > 1 else 1.0
-    idx = np.clip(np.round((chi - chi_u[0]) / dchi_u).astype(int), 0, n - 1)
-    out = np.zeros(n, dtype=float)
-    np.add.at(out, idx, counts_z)
-    return out
+    The previous route -- bin in z on ``zgrid``, then round each zgrid node's
+    counts into the nearest chi bin -- conserved the total but was not
+    one-to-one: the package zgrid is uniform in log(1+z), so its dchi exceeds
+    the uniform dchi_u by up to 14% around z ~ 0.65 and 54/1000 chi bins
+    received NO zgrid node (spread over z = 0.07 to 1.73) while their
+    neighbours received two.  Those bins entered the Poisson MAP as N_obs = 0
+    against a non-zero rate_base -- a spurious void every ~18 bins, with a 2x
+    overdensity next to it -- inflating the fitted field variance right where
+    the dark-siren likelihood is sensitive.
+    """
+    counts, _ = np.histogram(np.interp(zs, np.asarray(zgrid, dtype=float), chi),
+                             bins=edges_chi)
+    return counts.astype(float)
 
 
 def _build_completion_radial(
@@ -355,6 +395,7 @@ def _build_completion_radial(
     selection_strata=None,
     stratum_map=None,
     stratum_map_sha=None,
+    z_depth=None,
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
@@ -369,6 +410,10 @@ def _build_completion_radial(
     ``lss_corr_length_mpc`` / ``lss_sigma`` override the fixed SurveyParams GP
     hyperparameters at build time (``None`` keeps the fiducials).
 
+    ``z_depth`` overrides the catalog's own ``f.attrs['z_depth']``, which is
+    otherwise used: the completeness base MUST be truncated exactly as the
+    likelihood truncates it (see :func:`_fiducial_cosmo_survey`).
+
     ``c_mode`` selects the completeness base the fit is residual to:
     ``"per_pixel"`` (legacy default, bit-identical -- per-pixel matched-kernel
     C, occupied rows only) or ``"aggregate"`` (ONE sky-aggregate ``Cbar``
@@ -379,12 +424,14 @@ def _build_completion_radial(
     """
     import healpy as hp
 
-    nside, ngals, zgals, dzgals, wgals, _z_depth = load_survey(catalog_path)
+    nside, ngals, zgals, dzgals, wgals, cat_z_depth = load_survey(catalog_path)
     n_pix = int(np.asarray(zgals).shape[0])
     n_grid = int(zgrid.size)
     apix = float(hp.nside2pixarea(int(nside)))
 
-    cosmo, survey = _fiducial_cosmo_survey(log10n0=log10n0, delta=delta)
+    z_depth_eff = _resolve_build_z_depth(z_depth, cat_z_depth)
+    cosmo, survey = _fiducial_cosmo_survey(
+        log10n0=log10n0, delta=delta, z_depth=z_depth_eff)
     survey = _apply_lss_overrides(
         survey, lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma)
     em = EMCatalog(
@@ -396,7 +443,6 @@ def _build_completion_radial(
     dN_exp_density = np.asarray(grids.dN_exp, dtype=float)
     dN_exp_smooth = np.asarray(grids.dN_exp_smooth, dtype=float)
     safe_smooth = np.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
-    edges = _zgrid_bin_edges()
     ngals_np = np.asarray(ngals).astype(int)
     zgals_np = np.asarray(zgals, dtype=float)
 
@@ -416,8 +462,8 @@ def _build_completion_radial(
     # dz/dchi Jacobian (~ c/H(z) ~ 4e3) and inflating the homogeneous
     # expectation ~1e3x, which crushed the field and railed every radial table
     # at the -7 clip (library review P0.1). Bin edges are the chi-node
-    # midpoints, matching the round-to-nearest convention of
-    # `_rebin_counts_to_uniform` used for N_obs.
+    # midpoints, and `_counts_in_uniform_chi` histograms the galaxies into the
+    # SAME edges, so N_obs and the integrated base describe identical bins.
     zg = np.asarray(zgrid, dtype=float)
     dz_fine = np.diff(zg)
     edges_chi = np.concatenate([[chi_u[0]], 0.5 * (chi_u[:-1] + chi_u[1:]), [chi_u[-1]]])
@@ -485,8 +531,7 @@ def _build_completion_radial(
         for i, r in enumerate(fit):
             if ngals_np[r] > 0:
                 zs = zgals_np[r, : ngals_np[r]]
-                counts_z, _ = np.histogram(zs, bins=edges)
-                N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
+                N_obs_u[i] = _counts_in_uniform_chi(zs, chi, edges_chi)
     else:
         # Build only OCCUPIED pixels (DESI footprints are mostly empty ⇒ huge
         # speedup); empty pixels get logQ = 0 (Q = 1, homogeneous) by the
@@ -509,8 +554,7 @@ def _build_completion_radial(
             # (1 - C) dN_exp the likelihood multiplies Q into (dN_miss).
             w_budget[i] = (1.0 - C_fine) * dN_exp_density
             zs = zgals_np[r, : ngals_np[r]]
-            counts_z, _ = np.histogram(zs, bins=edges)
-            N_obs_u[i] = _rebin_counts_to_uniform(counts_z, chi, chi_u)
+            N_obs_u[i] = _counts_in_uniform_chi(zs, chi, edges_chi)
 
     bias = float(survey.b_miss)
     mp = poisson_lognormal_map(
@@ -542,6 +586,8 @@ def _build_completion_radial(
         "fiducial_n0": float(survey.n0), "fiducial_delta": float(survey.delta),
         "bias_b_miss": float(survey.b_miss),
     })
+    if z_depth_eff is not None:
+        diagnostics["fiducial_z_depth"] = float(z_depth_eff)
     if c_mode in ("aggregate", "selection"):
         diagnostics.update({"n_pix_total": n_pix_total, "n_occupied_data": n_occ})
     if c_mode == "selection":
@@ -621,6 +667,7 @@ class _GP3DSurveyAssembly(NamedTuple):
     base_vox: np.ndarray     # (n_occ, G_s) bin-integrated expected observed counts
     counts_z: np.ndarray     # (G_s,) coarse-z count profile (for z_ref weighting)
     w_budget: np.ndarray     # (n_occ, n_grid) fine-zgrid (1 - C) dN_exp weights
+    z_depth: float = None    # resolved completeness depth (None = no depth prior)
 
 
 def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
@@ -646,7 +693,8 @@ def _gp3d_base_diagnostics(cosmo, survey, *, nside, n_pix, n_occ, amp, ls_sph,
 
 def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
                           c_mode: str = "per_pixel", selection_fit=None,
-                          selection_strata=None, stratum_map=None):
+                          selection_strata=None, stratum_map=None,
+                          z_depth=None):
     """Load a survey and assemble its gp3d voxel inputs on the shared ``z_s`` grid.
 
     Extracted verbatim from the single-survey ``_build_completion_gp3d`` body so
@@ -665,10 +713,19 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
     ``occ``/``n_occ``/``n_hat_occ`` then describe the FITTED rows (the whole
     sky).  The default keeps the legacy occupied-only assembly bit-identical
     (the joint multi-survey builder never passes it).
+
+    The completeness depth is resolved HERE, per survey (``z_depth`` overrides
+    this catalog's ``f.attrs['z_depth']``), because it belongs to the catalog
+    rather than to the shared field: the incoming ``survey``'s depth is
+    replaced before ``_precompute_grids`` forms the truncated denominator, and
+    the resolved value is returned for the provenance stamp.  A joint fit over
+    catalogs with different depths therefore gets each catalog's own.
     """
     import healpy as hp
 
-    nside, ngals, zgals, dzgals, wgals, _z_depth = load_survey(catalog_path)
+    nside, ngals, zgals, dzgals, wgals, cat_z_depth = load_survey(catalog_path)
+    survey = survey._replace(
+        z_depth=_resolve_build_z_depth(z_depth, cat_z_depth))
     n_pix = int(np.asarray(zgals).shape[0])
     n_grid = int(zgrid.size)
     apix = float(hp.nside2pixarea(int(nside)))
@@ -775,7 +832,7 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
         nside=int(nside), n_pix=n_pix, apix=apix, occ=fit, n_occ=n_fit,
         n_hat_all=n_hat_all, n_hat_occ=n_hat_fit,
         N_obs_vox=N_obs_vox, base_vox=base_vox, counts_z=counts_z,
-        w_budget=w_budget,
+        w_budget=w_budget, z_depth=survey.z_depth,
     )
 
 
@@ -828,6 +885,7 @@ def _build_completion_gp3d(
     selection_strata=None,
     stratum_map=None,
     stratum_map_sha=None,
+    z_depth=None,
 ):
     """3-D angular-coupling MAP + optional ensemble log Q tables.
 
@@ -885,7 +943,8 @@ def _build_completion_gp3d(
     survey_data = _assemble_gp3d_survey(
         catalog_path, cosmo=cosmo, survey=survey, z_s=z_s, edges_s=edges_s,
         c_mode=c_mode, selection_fit=selection_fit,
-        selection_strata=selection_strata, stratum_map=stratum_map)
+        selection_strata=selection_strata, stratum_map=stratum_map,
+        z_depth=z_depth)
     nside, n_pix, n_occ = survey_data.nside, survey_data.n_pix, survey_data.n_occ
 
     def _base_diag(extra):
@@ -893,6 +952,8 @@ def _build_completion_gp3d(
             cosmo, survey, nside=nside, n_pix=n_pix, n_occ=n_occ,
             amp=amp, ls_sph=ls_sph, bias=bias)
         d["c_mode"] = c_mode
+        if survey_data.z_depth is not None:
+            d["fiducial_z_depth"] = float(survey_data.z_depth)
         if c_mode == "selection":
             d.update({
                 **_selection_theta_stamp(selection_fit),
@@ -1026,6 +1087,7 @@ def build_completion(
     selection_strata=None,
     stratum_map=None,
     stratum_map_sha=None,
+    z_depth=None,
 ):
     """Build the log Q completion tables from a survey catalog.
 
@@ -1040,6 +1102,10 @@ def build_completion(
     hyperparameters in BOTH modes; the ``gp3d_*_nodes`` / ``gp3d_z_node_hi``
     inducing-grid knobs apply to ``mode="gp3d"`` only, which hard-errors when
     the grid cannot resolve ``ls_z`` (:func:`_gp3d_resolution_guard`).
+
+    ``z_depth`` overrides each catalog's own ``f.attrs['z_depth']`` in BOTH
+    modes; the resolved depth truncates the completeness denominator exactly as
+    the likelihood does and is stamped as ``fiducial_z_depth``.
 
     ``c_mode`` selects the completeness base of the fit in BOTH modes:
     ``"per_pixel"`` (legacy default, bit-identical) or ``"aggregate"`` (the
@@ -1061,7 +1127,7 @@ def build_completion(
             lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
             c_mode=c_mode, selection_fit=selection_fit,
             selection_strata=selection_strata, stratum_map=stratum_map,
-            stratum_map_sha=stratum_map_sha,
+            stratum_map_sha=stratum_map_sha, z_depth=z_depth,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
@@ -1074,7 +1140,7 @@ def build_completion(
             gp3d_z_node_hi=gp3d_z_node_hi,
             c_mode=c_mode, selection_fit=selection_fit,
             selection_strata=selection_strata, stratum_map=stratum_map,
-            stratum_map_sha=stratum_map_sha,
+            stratum_map_sha=stratum_map_sha, z_depth=z_depth,
         )
     raise ValueError(f"Unknown build mode {mode!r}; expected 'radial' or 'gp3d'.")
 
@@ -1172,6 +1238,17 @@ def main(argv=None):
     p.add_argument("--delta", type=float, default=None,
                    help="Override the expected-density evolution exponent "
                         "(1+z)^delta (default 0.0).")
+    p.add_argument("--z-depth", type=float, default=None,
+                   help="Override the catalog's f.attrs['z_depth'] (written by "
+                        "darksirens_pixelate --z_depth), which is used by "
+                        "default. The depth TRUNCATES the completeness "
+                        "denominator (S @ dN_exp 1[z<=z_depth]); building "
+                        "against an untruncated base while the likelihood "
+                        "truncates biases C low (and the missing budget high) "
+                        "over the last ~0.1 in z below the edge. Must match "
+                        "the run's resolved depth (--survey_z_depth > the same "
+                        "file attr); stamped as fiducial_z_depth and checked "
+                        "at inference.")
     p.add_argument("--stratum-map", default=None,
                    help="HDF5 file with a full-sky 'stratum_map' dataset "
                         "(RING, at the catalog's nside). Required by, and "
@@ -1280,7 +1357,7 @@ def main(argv=None):
         gp3d_z_node_hi=opts.gp3d_z_node_hi,
         c_mode=opts.c_mode, selection_fit=selection_fit,
         selection_strata=selection_strata, stratum_map=stratum_map,
-        stratum_map_sha=stratum_map_sha,
+        stratum_map_sha=stratum_map_sha, z_depth=opts.z_depth,
     )
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")

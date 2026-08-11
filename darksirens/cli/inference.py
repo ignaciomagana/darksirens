@@ -683,6 +683,59 @@ def _resolve_selection_fit_pins(sel, family, fixed_parameter_values):
             for name in SELECTION_THETA_FIELDS[family]}
 
 
+def _check_q_table_z_depth(q_fiducials, opts):
+    """Fail-closed depth provenance of Q tables, PER CATALOG.
+
+    ``z_depth`` sets the completeness DENOMINATOR: with a depth,
+    ``_precompute_grids`` forms ``S @ (dN_exp 1[z <= z_depth])``, and without it
+    the denominator keeps mass above the depth the numerator can never match, so
+    C is biased low (and ``(1 - C) dN_exp`` high) over roughly the last ~0.1 in
+    z below the edge.  Q is the fit RESIDUAL to that base, so a table built at a
+    different depth than the run resolves places the missing galaxies against
+    the wrong completeness near the survey edge.  The builder stamps
+    ``fiducial_z_depth`` (absent = no depth prior at build time, or a table
+    predating the stamp), and this run's per-catalog depth is
+    ``opts.resolved_survey_z_depths``.
+    """
+    depths = list(getattr(opts, "resolved_survey_z_depths", None) or [])
+    for _k, _fid in enumerate(q_fiducials, start=1):
+        if not _fid:
+            continue
+        run_depth = depths[_k - 1] if len(depths) >= _k else None
+        tab_depth = _fid.get("fiducial_z_depth")
+        if tab_depth is not None and run_depth is not None:
+            if abs(float(tab_depth) - float(run_depth)) > 1e-9:
+                _fatal(
+                    f"catalog {_k}: Q table {_fid.get('path')} was built with "
+                    f"z_depth={float(tab_depth):g} but this run resolves "
+                    f"z_depth={float(run_depth):g}. The depth truncates the "
+                    "completeness denominator the field was fit residual to, "
+                    "so the table's Q would be consumed against a different "
+                    "C near the survey edge. Rebuild with "
+                    "darksirens_build_lognormal_completion --z-depth "
+                    f"{float(run_depth):g}, or run with --survey_z_depth "
+                    f"{float(tab_depth):g}."
+                )
+        elif tab_depth is None and run_depth is not None:
+            _warn(
+                f"catalog {_k}: Q table {_fid.get('path')} carries no "
+                f"fiducial_z_depth stamp but this run truncates completeness "
+                f"at z_depth={float(run_depth):g}. The table was almost "
+                "certainly fit against an UNTRUNCATED denominator, which "
+                "biases C low (and the missing budget high) just below the "
+                "depth. Rebuild it with the current builder, which reads the "
+                "catalog's z_depth attr."
+            )
+        elif tab_depth is not None and run_depth is None:
+            _fatal(
+                f"catalog {_k}: Q table {_fid.get('path')} was built with "
+                f"z_depth={float(tab_depth):g} but this run applies NO depth "
+                "prior: the table's completeness base is truncated and the "
+                "run's is not. Pass --survey_z_depth "
+                f"{float(tab_depth):g} (or rebuild the table without a depth)."
+            )
+
+
 def _check_selection_qtable_theta(q_fiducials, opts):
     """Fail-closed theta provenance of c_mode=selection Q tables, PER CATALOG.
 
@@ -2730,6 +2783,10 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # been built from the SAME offline fit that centers this run's theta
     # prior -- a stale table silently carries the wrong completeness base.
     _check_selection_qtable_theta(_q_fiducials, opts)
+    # The completeness depth is Q-conditioning too (it truncates the base the
+    # field is residual to), but it is not a sampled parameter, so it cannot
+    # ride q_provenance's label machinery.
+    _check_q_table_z_depth(_q_fiducials, opts)
     # Prior wider than the base is first-order-consistent only near theta_hat:
     # warn when the sampled bounds reach beyond +-5 prior sds of the center.
     if getattr(opts, "selection_prior", None):

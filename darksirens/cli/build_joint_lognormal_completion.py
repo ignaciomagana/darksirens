@@ -221,6 +221,8 @@ def build_joint_completion(
                 amp=amp, ls_sph=ls_sph, bias=b_k, mode="gp3d_joint")
             diag.update(_joint_diag_keys(k, K, catalog_paths, biases, seed))
             diag["z_ref"] = 1.0
+            if a.z_depth is not None:
+                diag["fiducial_z_depth"] = float(a.z_depth)
             if make_members:
                 diag["n_members"] = int(n_members)
             # The homogeneous table is trivially mean-one, so the budget stamp
@@ -385,6 +387,10 @@ def build_joint_completion(
             "n_nonfinite_substituted": int(n_bad),
         })
         diag.update(_joint_diag_keys(k, K, catalog_paths, biases, seed))
+        if a.z_depth is not None:
+            # Per-catalog completeness depth the base was truncated at (each
+            # survey carries its own; resolved in _assemble_gp3d_survey).
+            diag["fiducial_z_depth"] = float(a.z_depth)
         if make_members:
             diag["n_members"] = int(n_members)
             # sha256 of the SHARED stacked xi_m draws — identical in all K files;

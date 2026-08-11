@@ -132,6 +132,43 @@ def test_radial_deterministic_matches_member_mean(fiducial_catalog):
     assert float(np.median(err)) < 0.3, float(np.median(err))
 
 
+def _uniform_chi_bins():
+    """The builder's uniform-chi solve grid: (chi(zgrid), chi_u, edges_chi)."""
+    import jax.numpy as jnp
+    from darksirens.utils.cosmology import (
+        r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial)
+
+    n_grid = int(zgrid.size)
+    chi = np.asarray(r_of_z(jnp.asarray(zgrid), H0Planck, Om0Planck,
+                            w0Fiducial, waFiducial), dtype=float)
+    chi_u = np.linspace(float(chi[0]), float(chi[-1]), n_grid)
+    edges_chi = np.concatenate(
+        [[chi_u[0]], 0.5 * (chi_u[:-1] + chi_u[1:]), [chi_u[-1]]])
+    return chi, chi_u, edges_chi
+
+
+def test_counts_land_in_their_own_uniform_chi_bin():
+    """N_obs must be histogrammed in the SAME chi bins the expected base is
+    integrated over.
+
+    The old route binned in z on the log-spaced ``zgrid`` and then rounded each
+    node's counts into the nearest chi bin: 54 of the 1000 chi bins received no
+    zgrid node at all (z = 0.07 to 1.73) and read N_obs = 0 against a non-zero
+    rate_base, with a 2x pile-up next door.  One galaxy per chi-bin centre must
+    give exactly one count per bin.
+    """
+    chi, chi_u, edges_chi = _uniform_chi_bins()
+    z = np.asarray(zgrid, dtype=float)
+    # One galaxy at the centre of every uniform-chi bin (interior bins only:
+    # the two half-width end bins are the grid boundary).
+    centres = 0.5 * (edges_chi[:-1] + edges_chi[1:])
+    zs = np.interp(centres, chi, z)
+    counts = B._counts_in_uniform_chi(zs, chi, edges_chi)
+    assert counts.sum() == len(zs)                    # total conserved
+    assert int((counts == 0).sum()) == 0, "empty chi bin against non-zero base"
+    assert int(counts.max()) == 1, "a chi bin got two galaxies"
+
+
 def test_parallel_row_solves_are_bitwise_identical_to_serial():
     """``workers > 1`` must be an exact wall-clock optimisation, not an
     approximation.
