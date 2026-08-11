@@ -60,6 +60,13 @@ def _split_argv(argv):
     return [], argv
 
 
+def _sigma2_of(rec):
+    """sigma^2_lnL = pe_variance_sum + N_obs^2/Neff for one guard record."""
+    neff = rec["Neff"]
+    sel = (rec["nEvents"] * rec["nEvents"]) / neff if neff > 0 else np.inf
+    return rec["pe_variance_sum"] + sel
+
+
 def _patch_selection_guard(wrapper, original):
     """Install ``wrapper`` everywhere ``selection_log_correction`` is reachable.
 
@@ -280,7 +287,12 @@ def _diagnose(captured, guard_records, ns):
               "model may not use it, or a likelihood module resolved the symbol "
               "before the wrapper was installed). Inspect the CLI output above.")
     else:
-        rec = guard_records[-1]
+        # The guard is evaluated MORE THAN ONCE per likelihood call in two
+        # shipped configurations -- once per LSS member under core's member vmap
+        # (--lss_marginalize), and once per catalog reduction in a K-catalog
+        # mixture -- and the run is decided by the WORST of them, not by
+        # whichever happened to be recorded last.
+        rec = max(guard_records, key=_sigma2_of)
         Neff = rec["Neff"]
         pe_var = rec["pe_variance_sum"]
         n_obs = rec["nEvents"]
@@ -290,9 +302,19 @@ def _diagnose(captured, guard_records, ns):
         vitale_ok = Neff > vitale_floor
         variance_ok = sigma2 < cap
         admitted = vitale_ok and variance_ok
+        soft = bool(getattr(opts, "selection_neff_soft_guard", False))
 
         print()
         print("  measured at the fiducial population point:")
+        if len(guard_records) > 1:
+            neffs = [r["Neff"] for r in guard_records]
+            s2s = [_sigma2_of(r) for r in guard_records]
+            print(f"    guard evaluations     = {len(guard_records)} "
+                  "(LSS members / catalog reductions); reporting the WORST")
+            print(f"    Neff range            = [{min(neffs):.6g}, "
+                  f"{max(neffs):.6g}]")
+            print(f"    sigma^2_lnL range     = [{min(s2s):.6g}, "
+                  f"{max(s2s):.6g}]")
         print(f"    N_obs                 = {n_obs:.0f}")
         print(f"    Neff_sel              = {Neff:.6g}")
         print(f"    pe_variance_sum       = {pe_var:.6g}")
@@ -312,7 +334,16 @@ def _diagnose(captured, guard_records, ns):
                   "the prior box (run with the built-in preflight ON to see the "
                   "finite fraction).")
         else:
-            print("  VERDICT: the fiducial is GUARDED (-inf).")
+            if soft:
+                # This run already resolved to the soft guard (explicitly, or
+                # via --sampler numpyro through resolve_selection_neff_guard),
+                # so the likelihood here is finite-but-penalized, not -inf.
+                print("  VERDICT: the fiducial is in the PENALIZED (soft) "
+                      "region — the guard's criteria fail, but this run uses the "
+                      "soft guard, so the likelihood is finite and steeply "
+                      "penalized rather than -inf.")
+            else:
+                print("  VERDICT: the fiducial is GUARDED (-inf).")
             if not vitale_ok:
                 print(f"    The Vitale floor is VIOLATED (Neff={Neff:.4g} <= "
                       f"5*N_obs={vitale_floor:.4g}); NO value of "
@@ -326,10 +357,11 @@ def _diagnose(captured, guard_records, ns):
                       f"{smallest_cap * 1.1:.4g}).")
             print()
             print("  Recommended flags:")
-            print("    --selection_neff_guard soft      (finite penalized wall; "
-                  "the sampler initializes and is pushed toward the valid "
-                  "region — numpyro-style smoothing, valid for nested "
-                  "diagnosis)")
+            if not soft:
+                print("    --selection_neff_guard soft      (finite penalized "
+                      "wall; the sampler initializes and is pushed toward the "
+                      "valid region — numpyro-style smoothing, valid for nested "
+                      "diagnosis)")
             if vitale_ok:
                 print(f"    --max_likelihood_variance {sigma2 * 1.1:.4g}   "
                       "(accept a larger MC variance; verify your science can "

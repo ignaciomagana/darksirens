@@ -56,3 +56,62 @@ def test_wrapper_reaches_core_flows_and_cluster_bindings(diag):
     assert selection_mod.selection_log_correction is original
     assert sys.modules["darksirens.likelihood.core"].selection_log_correction \
         is original
+
+
+def _fake_likelihood(live, records):
+    """A likelihood stand-in that "evaluates the guard" once per call."""
+    import numpy as np
+
+    def _ll(theta):
+        live.extend(records)
+        return np.float64(-1.0)
+
+    return _ll
+
+
+def _rec(neff, n_obs=20.0, pe_var=0.0):
+    return dict(Neff=neff, pe_variance_sum=pe_var, log_mu=-1.0,
+                nEvents=n_obs, max_likelihood_variance=1.0)
+
+
+def test_worst_record_decides_not_the_last(diag, capsys):
+    """Under the member vmap / a K-catalog mixture the guard is evaluated many
+    times per likelihood call; the run is decided by the WORST evaluation."""
+    import numpy as np
+    from types import SimpleNamespace
+
+    records = [_rec(1e6), _rec(50.0), _rec(1e6)]   # the sparse one is NOT last
+    live = []          # _diagnose clears it, then the likelihood call refills it
+    captured = dict(
+        likelihood=_fake_likelihood(live, records),
+        prior_transform=lambda u: u,
+        labels=["H0"], lower=np.array([20.0]), upper=np.array([120.0]),
+        opts=SimpleNamespace(pop_model="powerlaw", max_likelihood_variance=1.0,
+                             selection_neff_soft_guard=False),
+    )
+    ns = SimpleNamespace(diagnose_draws=1, diagnose_seed=0)
+    assert diag._diagnose(captured, live, ns) == 0
+    out = capsys.readouterr().out
+    assert "guard evaluations     = 3" in out
+    assert "Neff_sel              = 50" in out          # worst, not last
+    assert "GUARDED (-inf)" in out
+
+
+def test_soft_guard_run_is_not_told_to_enable_the_soft_guard(diag, capsys):
+    import numpy as np
+    from types import SimpleNamespace
+
+    live = []
+    captured = dict(
+        likelihood=_fake_likelihood(live, [_rec(50.0)]),
+        prior_transform=lambda u: u,
+        labels=["H0"], lower=np.array([20.0]), upper=np.array([120.0]),
+        opts=SimpleNamespace(pop_model="powerlaw", max_likelihood_variance=1.0,
+                             selection_neff_soft_guard=True),
+    )
+    ns = SimpleNamespace(diagnose_draws=1, diagnose_seed=0)
+    diag._diagnose(captured, live, ns)
+    out = capsys.readouterr().out
+    assert "PENALIZED (soft) region" in out
+    assert "GUARDED (-inf)" not in out
+    assert "--selection_neff_guard soft" not in out
