@@ -259,6 +259,16 @@ def test_population_proposal_is_population_coupled(gen):
 # (selection Neff -> 1, logL -> -inf at Ndraw >~ 1e6).
 
 
+def test_mock_population_defaults_track_the_inference_fiducial(gen):
+    """PopulationConfig documents that its defaults mirror
+    ``get_fixed_population_params("powerlaw+peak")``; the rate slope is the one
+    that used to drift (0.0 in both, a non-evolving comoving rate)."""
+    from darksirens.gw.populations.grammar import GAMMA_FIDUCIAL
+
+    pop = gen.PopulationConfig()
+    assert pop.gamma == GAMMA_FIDUCIAL
+
+
 def _inference_model():
     """Build the inference ``powerlaw+peak`` model + fiducial theta, or skip."""
     reg = pytest.importorskip("darksirens.gw.populations.registry")
@@ -273,10 +283,13 @@ def test_pairing_matches_inference_component_densities(gen):
     At z=0 the ``(1+z)**(gamma-1)`` factor is 1, so
     ``exp(model.log_p_pop(m1, q, 0, chi, theta)) == mixture(m1, q, chi)``, which
     is precisely the mixture pairing the generator must reproduce.  The
-    mock normalises its mass and pairing densities on the SAME linspaces and
-    trapezoid the inference uses (_MASS_NORM_GRID == get_mass_grid(),
-    _Q_NORM_GRID == get_q_grid()), so agreement is at machine precision -- far
-    tighter than the 2% the fix requires away from the hard zeros."""
+    mock normalises its pairing density on the SAME support-relative nodes the
+    inference uses (_Q_NORM_GRID == get_q_grid() mapped onto [q_cut, 1]) and its
+    mass/spin densities on the same trapezoid grids (_MASS_NORM_GRID ==
+    get_mass_grid()).  The inference normalises the tapered power law and the
+    Gaussian peak in CLOSED FORM, so the residual is that grid's O((h/sigma)^2)
+    quadrature error (measured worst 4.9e-6) rather than float64 round-off -- still
+    far tighter than the 2% the fix requires away from the hard zeros."""
     import jax.numpy as jnp
 
     model, theta = _inference_model()
@@ -293,9 +306,9 @@ def test_pairing_matches_inference_component_densities(gen):
                 continue
             rel = abs(g - inf) / abs(inf)
             worst = max(worst, rel)
-    # Grids match the inference exactly, so the residual is pure float64 round-off
-    # (measured worst ~2e-15); assert a tight bound well inside the 1e-6 target.
-    assert worst < 1e-9, f"per-component pairing disagreement {worst:.3e} exceeds 1e-9"
+    # Residual = the mock's grid mass/spin normalisers against the inference's
+    # closed forms (measured worst 4.9e-6, at m1 = 5.2 in the taper toe).
+    assert worst < 1e-5, f"mixture pairing disagreement {worst:.3e} exceeds 1e-5"
 
 
 def test_importance_weight_bounded_population_proposal(gen):

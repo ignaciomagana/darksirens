@@ -81,7 +81,9 @@ class PopulationConfig:
     beta: float = 1.0
     chi_mu: float = 0.0
     chi_sigma: float = 0.10
-    gamma: float = 0.0
+    # Measured rate slope (kappa_z = 2.5 +/- 0.7, GWTC-5), matching
+    # grammar.GAMMA_FIDUCIAL so the injected truth is the inference fiducial.
+    gamma: float = 2.5
 
 
 @dataclass(frozen=True)
@@ -351,7 +353,8 @@ def _pair_pdf(q: np.ndarray, m1: np.ndarray, m_min: float, dm: float, beta: floa
 
     * unnormalised ``q**beta * S_low(q*m1; m_min, dm)`` with a HARD zero for
       ``m2 = q*m1 < m_min`` and the ``q>0`` safe-power guard;
-    * per-``m1`` normalisation by trapezoid over ``_Q_NORM_GRID`` (== get_q_grid())
+    * per-``m1`` normalisation by trapezoid over the SUPPORT-RELATIVE nodes the
+      inference uses (``_Q_NORM_GRID`` == get_q_grid() mapped onto [q_cut, 1])
       with the row-maximum factored out of the quadrature.  Factoring the row max
       is a backward-pass conditioning trick in the inference; here it only changes
       the association order, so the forward density equals ``unnorm / trapz(unnorm)``
@@ -361,15 +364,23 @@ def _pair_pdf(q: np.ndarray, m1: np.ndarray, m_min: float, dm: float, beta: floa
     """
     q = np.atleast_1d(np.asarray(q, dtype=float))
     m1 = np.atleast_1d(np.asarray(m1, dtype=float))
-    qg = _Q_NORM_GRID
-    m2g = qg[None, :] * m1[:, None]                       # (N, Nq)
+    # SUPPORT-RELATIVE nodes, q = q_cut + t (1 - q_cut) with t = _Q_NORM_GRID on
+    # [0, 1] and q_cut = m_min/m1: the inference places them the same way
+    # (PairingModel._support_nodes) because the support edge is a sampled quantity,
+    # so a fixed q grid makes the normaliser a staircase in m1 and m_min.
+    t = _Q_NORM_GRID
+    q_cut = np.clip(m_min / m1, 0.0, 1.0)
+    width = 1.0 - q_cut
+    qg = q_cut[:, None] + t[None, :] * width[:, None]     # (N, Nq)
+    m2g = qg * m1[:, None]                                # (N, Nq)
     # Row grid of the unnormalised pairing (safe q>0 power + hard m2<m_min zero).
     safe_qg = np.where(qg > 0.0, qg, 1.0)
-    pg = np.where(qg > 0.0, safe_qg ** beta, 0.0)[None, :] * _sfilter_low(m2g, m_min, dm)
+    pg = np.where(qg > 0.0, safe_qg ** beta, 0.0) * _sfilter_low(m2g, m_min, dm)
     pg = np.where(m2g < m_min, 0.0, pg)
     scale = np.max(pg, axis=-1, keepdims=True)            # row max (base.py:221)
     scale_s = np.where(scale > 0.0, scale, 1.0)
-    n_sc = _trapz(pg / scale_s, qg, axis=-1)              # (N,) scaled norm
+    n_sc = (_trapz(pg / scale_s, dx=1.0 / (t.size - 1), axis=-1)
+            * width)                                     # (N,) scaled norm
     scale_m = scale_s[:, 0]
     # Same unnormalised form at the requested q.
     safe_q = np.where(q > 0.0, q, 1.0)
