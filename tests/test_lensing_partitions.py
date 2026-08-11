@@ -458,6 +458,87 @@ def test_candidate_pairs_marks_suffice_for_marginalized_preflight(tmp_path):
 
 
 
+def test_fixed_time_marks_may_live_in_candidate_pairs(tmp_path):
+    """unified + partition_mode=fixed + pair_marks=time with the marks in
+    candidate_pairs.json is a supported runtime path (the mark_by_edge fallback),
+    but preflight hard-failed it with "missing pair_pe_path" and never validated
+    the marks the run actually consumes."""
+    from types import SimpleNamespace
+    import json
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    gw = tmp_path / "gw.h5"
+    sel = tmp_path / "sel.h5"
+    linj = tmp_path / "linj.h5"
+    part = tmp_path / "partition.json"
+    cand = tmp_path / "candidate_pairs.json"
+    obs = tmp_path / "observed_catalog.json"
+    _minimal_gw(gw)
+    _minimal_selection(sel)
+    _minimal_lensed(linj)
+    _partition(part)
+    obs.write_text(
+        '{"format_version":"observed-lensing-catalog-1.0","event_indexing":"global",'
+        '"n_events":2,"events":[{"event_index":0,"event_id":"e0"},'
+        '{"event_index":1,"event_id":"e1"}]}'
+    )
+
+    def _write_cand(marks):
+        cand.write_text(
+            json.dumps(
+                {
+                    "n_events": 2,
+                    "candidate_pairs": [
+                        {"i": 0, "j": 1, "log_prior_odds": 0.0, "marks": marks}
+                    ],
+                }
+            )
+        )
+
+    _write_cand({"delta_t_obs": 12345.6, "sigma_delta_t": 3600.0})
+    opts = SimpleNamespace(
+        gw_path=str(gw),
+        gwselection_path=str(sel),
+        lensed_injections_path=str(linj),
+        partition_path=str(part),
+        candidate_pairs_path=str(cand),
+        observed_catalog_path=str(obs),
+        pair_pe_path=None,
+        pair_metadata_path=None,
+        cluster_mode="j2",
+        partition_mode="fixed",
+        pair_marks="time",
+        pair_time_sigma_sec=None,
+        max_exact_partitions=10000,
+        wl_selection="standard",
+        wl_backend="lognormal",
+        fix_lens_rate=True,
+        sl_tau_A=5e-4,
+        sl_tau_n=3.0,
+        lens_prior_overrides=None,
+    )
+    report = run_lensing_preflight(opts)
+    assert report["ok"], report
+    assert report["summary"]["fixed_pair_marks_from_candidate_pairs"] is True
+    assert report["summary"]["sis_time_mark_support"]["n_marked"] == 1
+
+    # The marks the fixed-mode run consumes are now checked in preflight too:
+    # a partition edge outside the candidate graph is a precise error, not
+    # "missing pair_pe_path".
+    _write_cand({})
+    report = run_lensing_preflight(opts)
+    assert not report["ok"]
+    assert any(
+        "carry no candidate_pairs.json marks" in e for e in report["errors"]
+    ), report["errors"]
+
+    # Placeholder-looking marks warn here rather than only at runtime.
+    _write_cand({"delta_t_obs": 1.0, "sigma_delta_t": 1.0})
+    report = run_lensing_preflight(opts)
+    assert report["ok"], report
+    assert any("placeholder" in w for w in report["warnings"])
+
+
 def test_componentwise_preflight_warns_on_total_cap_but_global_fails(tmp_path):
     from types import SimpleNamespace
     import json

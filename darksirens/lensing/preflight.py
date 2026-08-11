@@ -566,6 +566,72 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
         errors.append(f"candidate_pairs invalid: {exc}")
 
 
+def _check_fixed_candidate_marks(
+    path, partition_pairs, opts, errors, warnings, summary
+):
+    """Validate fixed-partition time marks that live in candidate_pairs.json.
+
+    With a unified observed catalog, ``partition_mode=fixed`` and
+    ``--pair_marks time``, the runtime builds the per-pair marks from the
+    candidate graph when no pair file supplies them (the ``mark_by_edge``
+    fallback in cli/inference_lensing, and a documented input mode).  Preflight
+    demanded a pair PE/metadata file anyway, making that path unreachable, so
+    waive the pair-file requirement when the candidate graph covers every
+    partition edge -- and check those marks HERE, rather than leaving the run to
+    exit on them later.  Returns True when the waiver applies.
+    """
+    if not _exists(path, errors, "candidate_pairs_path"):
+        return False
+    try:
+        _, pairs = validate_candidate_pairs(_read_json(path))
+    except Exception as exc:
+        errors.append(f"candidate_pairs invalid: {exc}")
+        return False
+    mark_by_edge = {(p.i, p.j): p for p in pairs}
+    marked = []
+    missing = []
+    for pair in partition_pairs:
+        edge = tuple(sorted(int(x) for x in pair))
+        cand = mark_by_edge.get(edge)
+        if cand is None or cand.delta_t_obs is None or cand.sigma_delta_t is None:
+            missing.append(edge)
+            continue
+        dt = float(cand.delta_t_obs)
+        sig = float(cand.sigma_delta_t)
+        if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0.0:
+            errors.append(
+                f"fixed partition pair {edge} has invalid candidate_pairs.json "
+                f"time marks: delta_t_obs={dt}, sigma_delta_t={sig}"
+            )
+            continue
+        marked.append(cand)
+    if missing:
+        errors.append(
+            "pair_marks=time requires delta_t_obs/sigma_delta_t for every fixed "
+            f"partition pair, but {missing} carry no candidate_pairs.json marks "
+            "and no pair metadata file was provided"
+        )
+        return False
+    if not marked:
+        return False
+    suspicion = candidate_time_mark_suspicion(marked)
+    summary.update(suspicion)
+    if suspicion.get("candidate_time_marks_suspicious"):
+        warnings.append(str(suspicion.get("candidate_time_marks_warning")))
+    support = _sis_support(
+        opts,
+        [p.delta_t_obs for p in marked],
+        [p.sigma_delta_t for p in marked],
+    )
+    summary["sis_time_mark_support"] = support
+    if support["all_annihilated"] and support["n_marked"] > 0:
+        errors.append(sis_time_mark_support_message(support))
+    elif support["n_out_of_support"]:
+        warnings.append(sis_time_mark_support_message(support))
+    summary["fixed_pair_marks_from_candidate_pairs"] = True
+    return True
+
+
 def _check_lensed(path, errors, summary, opts=None):
     if not _exists(path, errors, "lensed_injections_path"):
         return
@@ -810,10 +876,30 @@ def run_lensing_preflight(opts) -> dict:
             )
         pair_path = pair_meta_path or pair_pe_path
         pair_label = "pair_metadata_path" if pair_meta_path else "pair_pe_path"
+        fixed_marks_from_candidates = False
+        if (
+            unified_observed_mode
+            and not pair_path
+            and _get(opts, "partition_mode", "fixed") == "fixed"
+            and _get(opts, "pair_marks", "none") == "time"
+            and _get(opts, "candidate_pairs_path")
+            and partition_pairs
+        ):
+            fixed_marks_from_candidates = _check_fixed_candidate_marks(
+                _get(opts, "candidate_pairs_path"),
+                partition_pairs,
+                opts,
+                errors,
+                warnings,
+                summary,
+            )
         if not (
             unified_observed_mode
-            and _get(opts, "partition_mode", "fixed") == "marginalize_exact"
             and _get(opts, "candidate_pairs_path")
+            and (
+                _get(opts, "partition_mode", "fixed") == "marginalize_exact"
+                or fixed_marks_from_candidates
+            )
         ):
             _check_pair_pe(
                 pair_path,
