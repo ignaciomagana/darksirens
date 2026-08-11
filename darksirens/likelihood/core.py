@@ -64,8 +64,12 @@ WL_BACKEND_TABULATED = 1
 # Selection-integral WL treatment (static dispatch), mirroring
 # likelihood_with_clusters: STANDARD keeps the legacy un-marginalized
 # selection weight; LOGNORMAL applies the same Hermite mu-marginalization to
-# injection samples as the PE term (lognormal backend only — disabled or
-# tabulated backends fall through to STANDARD for backward compatibility).
+# injection samples as the PE term.  LOGNORMAL needs the lognormal event-side
+# backend: with WL DISABLED there is no magnification scatter to marginalize, so
+# STANDARD *is* the marginalized weight and the request falls through; with the
+# TABULATED backend there is no matched selection integral in this stack, so the
+# fallthrough would silently normalize the hierarchy under a different
+# observation model than the numerator and is refused below.
 WL_SELECTION_STANDARD = 0
 WL_SELECTION_LOGNORMAL = 1
 
@@ -466,13 +470,25 @@ def darksiren_log_likelihood(
     # Weak-lensing dispatch (static): wl_enabled gates ALL WL machinery off for
     # every non-WL model, so they remain numerically identical to the non-WL code.
     wl_enabled = wl_backend != WL_BACKEND_DISABLED
-    # Selection-side WL marginalization: opt-in, lognormal backend only
-    # (same fallthrough semantics as likelihood_with_clusters — a disabled or
-    # tabulated backend keeps the exact legacy selection path).
+    # Selection-side WL marginalization: opt-in, lognormal backend only.  A
+    # DISABLED backend keeps the exact legacy selection path (no WL anywhere, so
+    # STANDARD is exact); the TABULATED backend has no matched selection integral
+    # here, so silently downgrading it to STANDARD would leave mu(Lambda)
+    # marginalized under a different observation model than the per-event weights
+    # — a static configuration error, not a fallthrough.
     wl_selection_enabled = (
         wl_selection == WL_SELECTION_LOGNORMAL
         and wl_backend == WL_BACKEND_LOGNORMAL
     )
+    if wl_selection == WL_SELECTION_LOGNORMAL and wl_backend == WL_BACKEND_TABULATED:
+        raise ValueError(
+            "wl_selection=WL_SELECTION_LOGNORMAL requires "
+            "wl_backend=WL_BACKEND_LOGNORMAL; the tabulated backend has no "
+            "matched selection integral, so the Hermite mu-marginalization the "
+            "PE term applies cannot be applied to the injections. Use the "
+            "lognormal backend, or pass wl_selection=WL_SELECTION_STANDARD for a "
+            "deliberately mismatched ablation."
+        )
     if wl_enabled and universe_model != "spectral_sirens_wl":
         raise ValueError(
             f"wl_backend={wl_backend} requires universe_model='spectral_sirens_wl', "

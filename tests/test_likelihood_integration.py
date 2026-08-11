@@ -37,6 +37,7 @@ from darksirens.likelihood.core import (
     darksiren_log_likelihood,
     WL_BACKEND_DISABLED,
     WL_BACKEND_LOGNORMAL,
+    WL_BACKEND_TABULATED,
     WL_SELECTION_STANDARD,
     WL_SELECTION_LOGNORMAL,
 )
@@ -339,6 +340,17 @@ class TestLikelihoodIntegration:
             wl_selection=WL_SELECTION_LOGNORMAL,
         )
         assert float(abs(ll_fall - ll_base)) < 1e-12
+
+    def test_wl_selection_lognormal_under_tabulated_backend_raises(self, fixture):
+        """The tabulated backend has NO matched selection integral: silently
+        downgrading to STANDARD would normalize mu(Lambda) under a different
+        observation model than the per-event weights, so it must be fatal."""
+        with pytest.raises(ValueError, match="tabulated backend"):
+            self._call(
+                fixture, "spectral_sirens_wl",
+                wl_backend=WL_BACKEND_TABULATED,
+                wl_selection=WL_SELECTION_LOGNORMAL,
+            )
 
 
 def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
