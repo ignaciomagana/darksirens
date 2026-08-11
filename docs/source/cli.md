@@ -456,7 +456,10 @@ darksirens_inference_lensing \
   pair is tagged as a candidate.
 - `--edge_mark_prior_keys`, `--edge_mark_likelihood_keys`: comma-separated
   candidate-edge marks folded into the edge log prior odds, and into the edge
-  likelihood, under exact marginalization.
+  likelihood, under exact marginalization.  The only implemented likelihood
+  mark is the arrival-time one, and it is switched on by `--pair_marks time`;
+  requesting `time`/`delta_t_obs` as a likelihood key without `--pair_marks
+  time` is refused rather than run without the time term.
 - `--singleton_lensing {off,sl_mixture}`: `off` (default) keeps the legacy
   single-image protocol. `sl_mixture` models observed singletons as a mixture of
   unlensed sources and strongly lensed sources with exactly one detected image
@@ -468,6 +471,11 @@ darksirens_inference_lensing \
 - `--fix_cosmology` / `--fix_survey` (both default `true`) and
   `--fix_population` (default `false`), plus `--fixed_parameter_values` and
   `--prior_overrides` as JSON — same conventions as the main CLI.
+  `--fix_cosmology false` is refused whenever a lensed-injection channel is on
+  (`--cluster_mode j2` or `--singleton_lensing sl_mixture`): those selection
+  terms reweight source-frame campaign columns whose detection flags were
+  rendered at the campaign's fiducial cosmology, so they are valid only there,
+  and the campaign file records no fiducial cosmology for a runtime check.
 
 ### Sampler, checkpoint, and performance options
 

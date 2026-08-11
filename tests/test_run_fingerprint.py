@@ -102,6 +102,35 @@ def test_legacy_tinyns_checkpoint_is_never_hashed_as_an_input(tmp_path):
     )
 
 
+def test_memory_probed_block_sizes_do_not_change_the_digest():
+    """The block-size resolvers overwrite ``opts.sel_batch_size`` (and stamp
+    ``opts.block_size_static_state_bytes``) from PROBED FREE DEVICE MEMORY
+    before the fingerprint is built, so a requeue onto a node with different
+    free memory used to resolve a different integer and lock itself out of its
+    own checkpoint (review F-002)."""
+    submitted = dict(
+        sel_batch_size=267520,
+        block_size_static_state_bytes=1 << 30,
+        block_size_resolution="blocked:auto",
+    )
+    requeued = dict(                    # same command line, emptier GPU
+        sel_batch_size=356864,
+        block_size_static_state_bytes=(1 << 30) + 4096,
+        block_size_resolution="single-pass:auto",
+    )
+    reference = _fingerprint(_opts(**submitted))
+    changed = _fingerprint(_opts(**requeued))
+    assert changed["digest"] == reference["digest"], (
+        "a memory-probed block size changed the fingerprint digest; --resume "
+        "auto then refuses to continue its own checkpoint on a node with "
+        "different free GPU memory"
+    )
+    # single pass (None) vs blocked must not split the digest either
+    assert _fingerprint(_opts(**{**submitted, "sel_batch_size": None}))[
+        "digest"
+    ] == reference["digest"]
+
+
 def test_underscore_attributes_are_ignored():
     reference = _fingerprint()
     changed = _fingerprint(_opts(_private_scratch="anything"))

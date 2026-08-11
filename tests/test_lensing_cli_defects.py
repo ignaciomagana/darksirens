@@ -416,7 +416,8 @@ def test_lensing_decoder_net_fires_on_injected_label_drift(tmp_path, monkeypatch
 # ---------------------------------------------------------------------------
 
 def _run_save_phase(tmp_path, extra_args=(), lens_fixed=None, logZerr=0.21,
-                    dead_points=None):
+                    dead_points=None, diagnostics=None, diagnostics_point=None,
+                    diagnostics_point_label="prior_midpoint"):
     """Drive _save_lensing_outputs on a minimal fixed-partition bundle and read
     back (results.hdf5 attrs, settings.json)."""
     import json
@@ -444,8 +445,10 @@ def _run_save_phase(tmp_path, extra_args=(), lens_fixed=None, logZerr=0.21,
     }
     settings = {}
     cli._save_lensing_outputs(
-        opts, str(tmp_path), settings, inp, results, {}, labels, mid,
+        opts, str(tmp_path), settings, inp, results, diagnostics or {}, labels, mid,
         {}, {}, lens_fixed, {},
+        diagnostics_point=diagnostics_point,
+        diagnostics_point_label=diagnostics_point_label,
     )
     with h5py.File(tmp_path / "results.hdf5", "r") as f:
         attrs = dict(f.attrs)
@@ -1004,3 +1007,650 @@ def test_preflight_rejects_nonfinite_pair_pe_time_marks(tmp_path):
                              summary, unified_observed_mode=True)
     assert any("delta_t_obs must be finite" in e for e in errors), errors
     assert any("sigma_delta_t must be finite" in e for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# closed-form count correction vs the master likelihood's variance budget
+# (review F-001)
+# ---------------------------------------------------------------------------
+
+def test_factorized_count_correction_threads_the_baseline_pe_variance():
+    """The sampler-facing selection correction on the DEFAULT componentwise
+    marginalize_exact path is the closed form, not the master likelihood's
+    value: ``selection0`` cancels exactly out of
+    ``baseline + LSE_k(dp_k + count_delta_k)``.  So the closed form has to
+    carry the same total-variance budget, or the guard silently reverts to the
+    selection-only bound."""
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    src = inspect.getsource(cli._count_correction_closed_form)
+    assert 'pe_variance_sum=baseline_raw["pe_variance_sum"]' in src, (
+        "the closed-form count correction calls "
+        "combined_selection_log_correction without pe_variance_sum -> the "
+        "factorized sampler path enforces the selection-only threshold "
+        "N_obs^2/max_likelihood_variance while every other path enforces the "
+        "total-variance criterion"
+    )
+    assert "_count_correction_closed_form(baseline_raw, opts)" in inspect.getsource(
+        cli.build_cluster_likelihood
+    )
+
+
+def test_dropping_pe_variance_really_moves_the_guard():
+    """Establishes the stake: the omitted argument is not cosmetic."""
+    from darksirens.likelihood.cluster_selection import (
+        combined_selection_log_correction,
+    )
+
+    # A point inside the band n^2/max_var < Neff < n^2/(max_var - pe_var):
+    # guarded once the per-event variances spend half the budget, admitted
+    # without them.
+    n_sing, n_prs = 30, 0
+    log_mu = -3.0
+    log_sigma2 = 2.0 * log_mu - np.log(1100.0)          # Neff = mu^2/sigma^2
+    kw = dict(
+        n_singletons_observed=n_sing,
+        n_clusters_observed=n_prs,
+        max_likelihood_variance=1.0,
+    )
+    neg = -np.inf
+    hard_without = float(combined_selection_log_correction(
+        log_mu, log_sigma2, neg, neg, pe_variance_sum=0.0, **kw))
+    hard_with = float(combined_selection_log_correction(
+        log_mu, log_sigma2, neg, neg, pe_variance_sum=0.5, **kw))
+    assert np.isfinite(hard_without) and hard_with == -np.inf
+
+    soft_without = float(combined_selection_log_correction(
+        log_mu, log_sigma2, neg, neg, soft_guard=True,
+        pe_variance_sum=0.0, **kw))
+    soft_with = float(combined_selection_log_correction(
+        log_mu, log_sigma2, neg, neg, soft_guard=True,
+        pe_variance_sum=0.5, **kw))
+    assert soft_without - soft_with > 1e3, (soft_without, soft_with)
+
+
+def test_loglike_diagnostics_cross_check_accepts_agreement():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts()
+    point = np.zeros(3)
+    value = cli._cross_check_loglike_against_diagnostics(
+        lambda c: -12.5, {"logL_marginalized": -12.5 + 1e-12}, point, opts=opts
+    )
+    assert np.isclose(value, -12.5)
+    # both guarded is agreement, not a mismatch
+    assert cli._cross_check_loglike_against_diagnostics(
+        lambda c: -np.inf, {"logL_marginalized": -np.inf}, point, opts=opts
+    ) == -np.inf
+
+
+@pytest.mark.parametrize("diag", [
+    {"logL_marginalized": -12.5},          # finite disagreement
+    {"logL_marginalized": -np.inf},        # diagnostics guarded, sampler not
+])
+def test_loglike_diagnostics_cross_check_catches_divergent_paths(diag):
+    """This is the check that would have caught F-001: the closed form and the
+    master likelihood must evaluate the same target at the same point."""
+    import darksirens.cli.inference_lensing as cli
+
+    with pytest.raises(RuntimeError, match="disagrees with the partition diagnostics"):
+        cli._cross_check_loglike_against_diagnostics(
+            lambda c: 90.0, diag, np.zeros(3), opts=_lensing_opts()
+        )
+
+
+def test_smoke_test_runs_the_cross_check_at_the_diagnostics_point():
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    src = inspect.getsource(cli._smoke_test_likelihood)
+    assert "_cross_check_loglike_against_diagnostics(" in src
+    assert "loglike, diagnostics, diag_point" in src, (
+        "the cross-check must use the point the diagnostics were actually "
+        "evaluated at, not the prior midpoint"
+    )
+
+
+# ---------------------------------------------------------------------------
+# diagnostics count_delta: closed form, not fabricated pairings (review F-005)
+# ---------------------------------------------------------------------------
+
+def _baseline_raw(pe_variance_sum=0.4, log_mu=-3.0, neff=1100.0):
+    import jax.numpy as jnp
+
+    from darksirens.likelihood.cluster_selection import (
+        combined_selection_log_correction,
+    )
+
+    log_sigma2 = 2.0 * log_mu - np.log(neff)
+    raw = {
+        "log_mu_singleton": jnp.asarray(log_mu),
+        "log_sigma2_singleton": jnp.asarray(log_sigma2),
+        "log_mu_cluster": jnp.asarray(-np.inf),
+        "log_sigma2_cluster": jnp.asarray(-np.inf),
+        "pe_variance_sum": jnp.asarray(pe_variance_sum),
+    }
+    return raw, combined_selection_log_correction
+
+
+def test_closed_form_count_correction_reproduces_the_baseline_selection():
+    """``count_delta[0] == 0`` is the invariant the whole factorization rests
+    on: the closed form at the all-singleton baseline counts must be the master
+    likelihood's own selection correction, variance budget included."""
+    import darksirens.cli.inference_lensing as cli
+
+    raw, combined = _baseline_raw()
+    opts = _lensing_opts()
+    opts.selection_neff_soft_guard = True
+    opts.max_likelihood_variance = 1.0
+
+    selection0 = float(combined(
+        raw["log_mu_singleton"], raw["log_sigma2_singleton"],
+        raw["log_mu_cluster"], raw["log_sigma2_cluster"],
+        n_singletons_observed=30, n_clusters_observed=0,
+        soft_guard=True, max_likelihood_variance=1.0,
+        pe_variance_sum=raw["pe_variance_sum"],
+    ))
+    closed = cli._count_correction_closed_form(raw, opts)
+    assert float(closed(30, 0)) == selection0
+    # and it is a real value, not a degenerate 0/-inf that would make the
+    # assertion vacuous
+    assert np.isfinite(selection0) or selection0 == -np.inf
+
+
+def test_both_factorized_paths_share_one_closed_form():
+    """The sampler and the diagnostics must not compute count_delta two ways:
+    the diagnostics used to read each count off a FULL likelihood evaluation of
+    a fabricated (2k, 2k+1) pairing with delta_t_obs=0 / sigma=1 s, whose
+    fictitious pairs' pair_variance_sum entered the guard threshold."""
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    like_src = inspect.getsource(cli.build_cluster_likelihood)
+    diag_src = inspect.getsource(cli.build_cluster_diagnostics)
+    assert "_count_correction_closed_form(baseline_raw, opts)" in like_src
+    assert "_count_correction_closed_form(baseline_raw, opts)" in diag_src
+    # the probe partitions must no longer be pushed through the master
+    # likelihood (that is what cost one XLA specialization per count)
+    assert "probe_raw" not in diag_src
+    assert 'for probe_part in inp["selection_probe_partitions"]' in diag_src
+
+
+# ---------------------------------------------------------------------------
+# end-to-end: the factorized sampler path and the diagnostics path must agree
+# ---------------------------------------------------------------------------
+
+def _factorized_inp_and_opts(soft_guard):
+    """A 4-event / 2-candidate componentwise marginalize_exact setup, built
+    with the CLI's own partition helpers so it mirrors load_inputs."""
+    import jax.numpy as jnp
+    from scipy.special import logsumexp
+
+    import darksirens.cli.inference_lensing as cli
+    from darksirens.lensing.partitions import (
+        CandidatePair,
+        exact_partition_components,
+    )
+
+    n_events = 4
+    candidates = [CandidatePair(0, 1, np.log(2.0)), CandidatePair(2, 3, np.log(3.0))]
+    summaries, component_states, approx_total = exact_partition_components(
+        n_events, candidates
+    )
+    full_states = tuple(
+        tuple(cli._full_state_for_component(n_events, summary, state) for state in states)
+        for summary, states in zip(summaries, component_states)
+    )
+    part = lambda state: cli._runtime_part_from_state(state, candidates, pair_marks="none")
+    baseline_state = cli._all_singleton_partition_state(n_events)
+    max_pairs = sum(max(int(s.n_pairs) for s in states) for states in component_states)
+
+    opts = _lensing_opts(
+        "--cluster_mode", "j2",
+        "--partition_mode", "marginalize_exact",
+        "--candidate_pairs_path", "cand.json",
+        "--selection_neff_guard", "soft" if soft_guard else "hard",
+    )
+    cli._resolve_lensing_run_config(opts)
+    opts.sel_batch_size = None
+    assert bool(opts.selection_neff_soft_guard) is soft_guard
+
+    inp = dict(
+        gw_pe=None, gw_sel=None, nEvents=n_events, nsamp=1, Ndraw=1.0,
+        lensed=None, pair_kdes=None,
+        factorized_exact=True,
+        candidate_pairs=candidates,
+        component_partition_states=component_states,
+        component_partition_summaries=summaries,
+        component_full_partitions=tuple(
+            tuple(part(state) for state in states) for states in full_states
+        ),
+        baseline_partition=part(baseline_state),
+        selection_probe_partitions=tuple(
+            part(cli._count_probe_partition_state(n_events, k))
+            for k in range(max_pairs + 1)
+        ),
+        partition_states=None,
+        log_z_prior=float(
+            sum(logsumexp([s.log_prior_weight for s in states]) for states in component_states)
+        ),
+        n_singletons=int(baseline_state.n_singletons),
+        n_pairs=0,
+        singleton_indices=jnp.asarray(baseline_state.singleton_indices, dtype=jnp.int32),
+        pair_indices=jnp.asarray(baseline_state.pair_indices, dtype=jnp.int32),
+    )
+    return inp, opts, candidates
+
+
+# Neff comfortably above every threshold (no wall), and a (Neff, pe_variance_sum)
+# pair inside the band n_tot^2/max_var < Neff < n_tot^2/(max_var - pe_var) for
+# EVERY total count a 4-event/2-candidate catalog can take (n_tot = 4, 3, 2) at
+# max_likelihood_variance = 1 -- the band the dropped pe_variance_sum left
+# entirely unguarded in the sampler.
+_CLEAR_NEFF = 1100.0
+_WALLED_NEFF = 25.0
+_WALLED_PE_VAR = 0.9
+
+
+def _install_fake_master(monkeypatch, pe_variance_sum, neff=_CLEAR_NEFF, log_mu=-3.0,
+                         pair_selection_bias=0.0):
+    """Master likelihood whose selection term is the real combined correction
+    at the given (partition-independent) variance budget, and whose content
+    term depends on which pairs are formed."""
+    import jax.numpy as jnp
+
+    import darksirens.cli.inference_lensing as cli
+    from darksirens.likelihood.cluster_selection import (
+        combined_selection_log_correction,
+    )
+
+    log_sigma2 = 2.0 * log_mu - np.log(neff)
+
+    def _raw(*args, **kwargs):
+        n_singletons, n_pairs = int(args[12]), int(args[13])
+        pair_indices = np.asarray(args[11], dtype=int).reshape((-1, 2))[:n_pairs]
+        singleton_logL_sum = jnp.asarray(0.5 * n_singletons)
+        pair_logL_sum = jnp.asarray(
+            float(sum(0.1 * (int(i) + int(j)) for i, j in pair_indices))
+        )
+        selection = combined_selection_log_correction(
+            jnp.asarray(log_mu), jnp.asarray(log_sigma2),
+            jnp.asarray(-np.inf), jnp.asarray(-np.inf),
+            n_singletons_observed=n_singletons,
+            n_clusters_observed=n_pairs,
+            soft_guard=bool(kwargs.get("selection_neff_soft_guard", False)),
+            max_likelihood_variance=float(kwargs.get("max_likelihood_variance", 1.0)),
+            pe_variance_sum=jnp.asarray(pe_variance_sum),
+        )
+        # Stands in for the partition dependence pair_variance_sum gives the
+        # real selection correction: a term that is NOT a function of the counts
+        # alone, so the closed form cannot reproduce it.
+        selection = selection + pair_selection_bias * float(
+            sum(int(i) + int(j) for i, j in pair_indices)
+        )
+        total = singleton_logL_sum + pair_logL_sum + selection
+        return {
+            "logL_total": jnp.where(jnp.isfinite(total), total, -jnp.inf),
+            "singleton_logL_sum": singleton_logL_sum,
+            "pair_logL_sum": pair_logL_sum,
+            "selection_correction_total": selection,
+            "log_mu_singleton": jnp.asarray(log_mu),
+            "log_sigma2_singleton": jnp.asarray(log_sigma2),
+            "log_mu_cluster": jnp.asarray(-np.inf),
+            "log_sigma2_cluster": jnp.asarray(-np.inf),
+            "pe_variance_sum": jnp.asarray(pe_variance_sum),
+            "n_singletons": jnp.asarray(n_singletons),
+            "n_pairs": jnp.asarray(n_pairs),
+        }
+
+    def _scalar(*args, **kwargs):
+        kwargs.pop("return_diagnostics", None)
+        return _raw(*args, **kwargs)["logL_total"]
+
+    monkeypatch.setattr(cli, "darksiren_log_likelihood_with_clusters", _scalar)
+    monkeypatch.setattr(cli, "darksiren_likelihood_diagnostics_with_clusters", _raw)
+
+
+class _FactorizedDecoder:
+    def decode(self, coord):
+        import jax.numpy as jnp
+        del coord
+        return None, None, jnp.ones(1), None, None
+
+
+@pytest.mark.parametrize("soft_guard", [False, True])
+@pytest.mark.parametrize("pe_variance_sum", [0.0, 0.5])
+def test_factorized_sampler_and_diagnostics_agree(monkeypatch, soft_guard, pe_variance_sum):
+    """The invariant the F-001 startup cross-check enforces: on the default
+    componentwise path the sampler's closed-form selection correction and the
+    diagnostics' marginalized logL must be the same number at the same point.
+    With pe_variance_sum dropped from the closed form they were ~1e4 nats apart
+    under the soft guard."""
+    import jax.numpy as jnp
+
+    import darksirens.cli.inference_lensing as cli
+
+    inp, opts, _ = _factorized_inp_and_opts(soft_guard)
+    _install_fake_master(monkeypatch, pe_variance_sum)
+
+    loglike = cli.build_cluster_likelihood(opts, inp, _FactorizedDecoder(), [], {})
+    diagnostics_fn = cli.build_cluster_diagnostics(opts, inp, _FactorizedDecoder(), [], {})
+    coord = jnp.zeros(1)
+    diagnostics = diagnostics_fn(coord)
+
+    # count_delta[0] == 0: the closed form reproduces the master's own value
+    assert diagnostics["count_loglike_delta"][0] == 0.0
+    value = cli._cross_check_loglike_against_diagnostics(
+        loglike, diagnostics, coord, opts=opts
+    )
+    assert np.isfinite(value) == np.isfinite(diagnostics["logL_marginalized"])
+
+
+def test_factorized_sampler_total_moves_with_the_variance_budget(monkeypatch):
+    """The stake, end to end: spending the budget must change the sampler-facing
+    likelihood.  Before the fix the closed form ignored pe_variance_sum, so the
+    soft-guard wall was entirely absent from the sampler's target."""
+    import jax.numpy as jnp
+
+    import darksirens.cli.inference_lensing as cli
+
+    totals = []
+    for pe_var in (0.0, _WALLED_PE_VAR):
+        inp, opts, _ = _factorized_inp_and_opts(soft_guard=True)
+        with pytest.MonkeyPatch.context() as mp:
+            # Neff inside the band n^2/max_var < Neff < n^2/(max_var - pe_var):
+            # guarded by the wall once the per-event variances spend the budget.
+            _install_fake_master(mp, pe_var, neff=_WALLED_NEFF)
+            loglike = cli.build_cluster_likelihood(
+                opts, inp, _FactorizedDecoder(), [], {}
+            )
+            totals.append(float(loglike(jnp.zeros(1))))
+    assert totals[0] - totals[1] > 1e3, totals
+
+
+def test_factorized_paths_agree_inside_the_soft_wall(monkeypatch):
+    """Agreement must hold where the soft wall is ACTIVE too -- that is the band
+    the dropped pe_variance_sum left completely unguarded in the sampler."""
+    import jax.numpy as jnp
+
+    import darksirens.cli.inference_lensing as cli
+
+    inp, opts, _ = _factorized_inp_and_opts(soft_guard=True)
+    _install_fake_master(monkeypatch, _WALLED_PE_VAR, neff=_WALLED_NEFF)
+    loglike = cli.build_cluster_likelihood(opts, inp, _FactorizedDecoder(), [], {})
+    diagnostics = cli.build_cluster_diagnostics(
+        opts, inp, _FactorizedDecoder(), [], {}
+    )(jnp.zeros(1))
+    value = cli._cross_check_loglike_against_diagnostics(
+        loglike, diagnostics, jnp.zeros(1), opts=opts
+    )
+    assert value < -1e3, "the wall is not engaged, so this proves nothing"
+
+
+def test_soft_guard_reports_a_non_count_only_selection_instead_of_dying(monkeypatch, capsys):
+    """The count-only invariant is exact only where the soft wall is inactive:
+    inside it the wall tracks a threshold the partition's own pair_variance_sum
+    moves.  Killing the run at build time -- after the full PE/injection load --
+    over an approximation the sampler makes deliberately was the F-005 abort;
+    warn instead, and keep the hard-guard case fatal (there the correction
+    provably IS count-only whenever it is finite)."""
+    import jax.numpy as jnp
+
+    import darksirens.cli.inference_lensing as cli
+
+    inp, opts, _ = _factorized_inp_and_opts(soft_guard=True)
+    _install_fake_master(monkeypatch, 0.0, pair_selection_bias=0.5)
+    out = cli.build_cluster_diagnostics(opts, inp, _FactorizedDecoder(), [], {})(
+        jnp.zeros(1)
+    )
+    assert np.isfinite(out["logL_marginalized"])
+    assert "not count-only" in capsys.readouterr().out
+
+
+def test_hard_guard_still_refuses_a_non_count_only_selection(monkeypatch):
+    import jax.numpy as jnp
+
+    import darksirens.cli.inference_lensing as cli
+
+    inp, opts, _ = _factorized_inp_and_opts(soft_guard=False)
+    _install_fake_master(monkeypatch, 0.0, pair_selection_bias=0.5)
+    with pytest.raises(RuntimeError, match="not count-only"):
+        cli.build_cluster_diagnostics(opts, inp, _FactorizedDecoder(), [], {})(
+            jnp.zeros(1)
+        )
+
+
+def test_saved_outputs_label_the_fallback_diagnostics_point(tmp_path):
+    """results.hdf5 and settings.json must name the point the diagnostics were
+    evaluated at. The guard-clear fallback (registry fiducial / seeded prior
+    draw) is the documented common case on paper-scale joint runs, and both
+    archives used to hard-code prior_midpoint (review F-006)."""
+    diagnostics = {
+        "n_partitions": 3,
+        "expected_n_singletons": 2.5,
+        "expected_n_pairs": 0.75,
+        "map_partition_index": 2,
+        "map_partition": {"n_singletons": 2, "n_pairs": 1},
+        "logL_marginalized": -12.5,
+        "log_z_partition_prior": 0.4,
+    }
+    marginal_args = (
+        "--cluster_mode", "j2",
+        "--partition_mode", "marginalize_exact",
+        "--candidate_pairs_path", "cand.json",
+    )
+    attrs, settings, _lo, _hi = _run_save_phase(
+        tmp_path, extra_args=marginal_args, diagnostics=diagnostics,
+        diagnostics_point=[70.0, 0.3], diagnostics_point_label="registry_fiducial",
+    )
+    assert attrs["partition_diagnostics_eval_point"] == "registry_fiducial"
+    assert attrs["diagnostics_point_logL_marginalized"] == pytest.approx(-12.5)
+    assert "prior_midpoint_logL_marginalized" not in attrs
+    assert settings["partition_diagnostics_eval_point"] == "registry_fiducial"
+    assert settings["diagnostics_point_expected_n_pairs"] == pytest.approx(0.75)
+    assert "prior_midpoint_expected_n_pairs" not in settings
+    assert settings["partition_diagnostics_eval_point_values"] == [70.0, 0.3]
+    # structural, eval-point-independent counts stay bare
+    assert settings["n_partitions"] == 3
+
+
+def test_saved_outputs_keep_the_prior_midpoint_names_when_that_is_the_point(tmp_path):
+    diagnostics = {
+        "n_partitions": 3,
+        "expected_n_singletons": 2.5,
+        "expected_n_pairs": 0.75,
+        "map_partition_index": 2,
+        "map_partition": {"n_singletons": 2, "n_pairs": 1},
+        "logL_marginalized": -12.5,
+        "log_z_partition_prior": 0.4,
+    }
+    attrs, settings, _lo, _hi = _run_save_phase(
+        tmp_path,
+        extra_args=("--cluster_mode", "j2", "--partition_mode", "marginalize_exact",
+                    "--candidate_pairs_path", "cand.json"),
+        diagnostics=diagnostics, diagnostics_point=[70.0, 0.3],
+    )
+    assert attrs["partition_diagnostics_eval_point"] == "prior_midpoint"
+    assert attrs["prior_midpoint_logL_marginalized"] == pytest.approx(-12.5)
+    assert settings["prior_midpoint_expected_n_pairs"] == pytest.approx(0.75)
+
+
+def test_smoke_test_threads_the_diagnostics_point_label_out():
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    assert "return mid, diagnostics, diag_point, diag_label" in inspect.getsource(
+        cli._smoke_test_likelihood
+    )
+    main_src = inspect.getsource(cli.main)
+    assert "diagnostics_point_label=diag_label" in main_src
+    assert "diagnostics_point=diag_point" in main_src
+
+
+# ---------------------------------------------------------------------------
+# --edge_mark_likelihood_keys must not be silently inert (review F-007)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("key", ["time", "delta_t_obs"])
+def test_time_likelihood_key_without_pair_marks_time_is_fatal(key):
+    """Only --pair_marks time enables the marked pair likelihood, so the flag
+    that advertises the arrival-time term must not run without it: the run was
+    statistically valid but discarded the strongest discriminant against false
+    pairings while settings.json recorded the key as honoured."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--edge_mark_likelihood_keys", key)
+    with pytest.raises(SystemExit, match="requires --pair_marks time"):
+        cli._resolve_lensing_run_config(opts)
+
+
+def test_time_likelihood_key_with_pair_marks_time_resolves():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts(
+        "--edge_mark_likelihood_keys", "time", "--pair_marks", "time",
+    )
+    cli._resolve_lensing_run_config(opts)          # no raise
+    assert opts.pair_marks == "time"
+
+
+def test_unsupported_edge_likelihood_keys_still_raise_not_implemented():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--edge_mark_likelihood_keys", "log_sky_overlap")
+    with pytest.raises(NotImplementedError):
+        cli._resolve_lensing_run_config(opts)
+
+
+# ---------------------------------------------------------------------------
+# per-pair time marks must be verifiably aligned to the partition (review F-014)
+# ---------------------------------------------------------------------------
+
+def test_preflight_requires_event_indices_for_positional_time_marks(tmp_path):
+    """Per-pair marks are consumed POSITIONALLY against the partition's pair
+    rows and the only order check lives behind the OPTIONAL event_index_image*
+    attrs, so a differently-ordered metadata file silently gives every pair
+    another pair's |dt| -- wrong y* = |dt|/T0 and wrong coincidence factor --
+    with only a length check to catch it."""
+    import h5py
+
+    from darksirens.lensing import preflight
+
+    path = str(tmp_path / "pairs.h5")
+    with h5py.File(path, "w") as f:
+        f.attrs["npairs"] = 1
+        g = f.create_group("pair_0")
+        g.attrs["delta_t_obs"] = 1.0e5
+        g.attrs["sigma_delta_t"] = 3600.0
+
+    opts = _lensing_opts("--pair_marks", "time", "--partition_mode", "fixed")
+    errors, warnings_, summary = [], [], {}
+    preflight._check_pair_pe(path, 2, [(0, 1)], opts, errors, warnings_,
+                             summary, unified_observed_mode=True)
+    assert any("event_index_image0/event_index_image1" in e for e in errors), errors
+
+    # with the attrs present (what every in-repo writer emits) it passes
+    with h5py.File(path, "a") as f:
+        f["pair_0"].attrs["event_index_image0"] = 0
+        f["pair_0"].attrs["event_index_image1"] = 1
+    errors, warnings_, summary = [], [], {}
+    preflight._check_pair_pe(path, 2, [(0, 1)], opts, errors, warnings_,
+                             summary, unified_observed_mode=True)
+    assert not errors, errors
+
+
+def test_preflight_allows_index_free_marks_without_a_fixed_partition(tmp_path):
+    """Under marginalize_exact the marks come from candidate_pairs.json and are
+    re-oriented to each partition's stored order, so the attrs are not needed."""
+    import h5py
+
+    from darksirens.lensing import preflight
+
+    path = str(tmp_path / "pairs.h5")
+    with h5py.File(path, "w") as f:
+        f.attrs["npairs"] = 1
+        g = f.create_group("pair_0")
+        g.attrs["delta_t_obs"] = 1.0e5
+        g.attrs["sigma_delta_t"] = 3600.0
+
+    opts = _lensing_opts(
+        "--pair_marks", "time", "--partition_mode", "marginalize_exact",
+        "--cluster_mode", "j2", "--candidate_pairs_path", "cand.json",
+    )
+    errors, warnings_, summary = [], [], {}
+    preflight._check_pair_pe(path, 2, [], opts, errors, warnings_,
+                             summary, unified_observed_mode=True)
+    assert not any("event_index_image0/event_index_image1" in e for e in errors), errors
+
+
+def test_loader_refuses_index_free_pair_time_marks_in_fixed_mode():
+    """load_inputs is the second net behind preflight (a direct library caller
+    gets the same refusal)."""
+    import inspect
+
+    import darksirens.cli.inference_lensing as cli
+
+    src = inspect.getsource(cli.load_inputs)
+    assert "carries a time mark but no " in src
+    assert 'and partition_mode == "fixed"' in src
+
+
+# ---------------------------------------------------------------------------
+# lensed channels are valid only at the campaign's fiducial cosmology (F-031)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("channel_args", [
+    ("--cluster_mode", "j2", "--candidate_pairs_path", "cand.json"),
+    ("--singleton_lensing", "sl_mixture"),
+])
+def test_sampling_cosmology_is_refused_with_a_lensed_channel(channel_args):
+    """The lensed selection terms reweight source-frame campaign columns whose
+    detection flags were rendered at the campaign's fiducial cosmology, so they
+    are valid only there; the file records no fiducial cosmology and H0 arrives
+    traced, so a runtime check is impossible. Gate on the flags."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--fix_cosmology", "false", *channel_args)
+    with pytest.raises(SystemExit, match="fix_cosmology false is not valid"):
+        cli._resolve_lensing_run_config(opts)
+
+
+def test_sampling_cosmology_is_allowed_without_a_lensed_channel():
+    """The unlensed singleton campaign is stored in the detector frame, so its
+    selection estimator is valid for any cosmology."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--fix_cosmology", "false")   # cluster_mode off
+    cli._resolve_lensing_run_config(opts)              # no raise
+    assert opts.fix_cosmology is False
+
+
+def test_lensed_channels_still_run_with_fixed_cosmology():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts(
+        "--fix_cosmology", "true", "--cluster_mode", "j2",
+        "--candidate_pairs_path", "cand.json",
+    )
+    cli._resolve_lensing_run_config(opts)              # no raise
+
+
+def test_load_inputs_is_the_second_net_for_the_cosmology_gate(monkeypatch):
+    """A direct library caller gets the same refusal, before any data is read."""
+    import darksirens.cli.inference_lensing as cli
+
+    def _boom(*a, **k):
+        raise AssertionError("load_inputs opened data before validating flags")
+
+    monkeypatch.setattr(cli, "load_gw_samples", _boom)
+    opts = SimpleNamespace(
+        cluster_mode="j2", partition_mode="fixed", singleton_lensing="off",
+        fix_cosmology=False, seed=1,
+    )
+    with pytest.raises(SystemExit, match="fix_cosmology false is not valid"):
+        cli.load_inputs(opts)

@@ -719,6 +719,53 @@ def _count_probe_partition_state(n_events: int, n_pairs: int) -> PartitionState:
     )
 
 
+def _count_correction_closed_form(baseline_raw, opts):
+    """Closed-form count-only selection correction, as a function of the
+    partition's ``(n_singletons, n_pairs)``.
+
+    The selection integrals (mu, sigma^2 per channel) do not depend on the
+    partition — only the marked-Poisson correction's counts do — so the whole
+    componentwise factorization needs just this scalar function of the counts.
+    Evaluating full-likelihood probes per count instead cost ~n_pairs extra
+    likelihood evaluations PER SAMPLER CALL and one multi-GB XLA specialization
+    per distinct ``(n_singletons, n_pairs)`` — the host-RAM OOM that killed
+    paper-scale j2 on 58 GB nodes.
+
+    ``pe_variance_sum`` matters here even though it does not depend on the
+    counts: ``selection0`` CANCELS EXACTLY out of
+    ``baseline + LSE_k(dp_k + count_delta_k)``, so this closed form IS the
+    sampler-facing selection correction and the master likelihood's value never
+    reaches the sampler on the factorized path.  Without it the guard reverted
+    to the selection-only bound ``N_obs^2/max_likelihood_variance`` and the band
+    ``N^2/max_var < Neff < N^2/(max_var - pe_var)`` went unguarded — the exact
+    defect P1-09 / ``tests/test_cluster_pe_variance_guard.py`` threaded it for
+    (review F-001).  The BASELINE's ``pe_variance_sum`` is the right scalar: it
+    keeps the invariant ``count_delta[0] == 0`` the factorization assumes, and
+    the residual partition dependence (``pair_variance_sum`` depends on WHICH
+    pairs are formed) is what ``build_cluster_diagnostics``' count-only
+    cross-check verifies is negligible at the evaluation point.
+
+    Shared by the sampler path and the diagnostics path so the two cannot drift
+    onto different variance budgets (review F-005).
+    """
+    def _count_correction(n_sing, n_prs):
+        return combined_selection_log_correction(
+            baseline_raw["log_mu_singleton"],
+            baseline_raw["log_sigma2_singleton"],
+            baseline_raw["log_mu_cluster"],
+            baseline_raw["log_sigma2_cluster"],
+            n_singletons_observed=n_sing,
+            n_clusters_observed=n_prs,
+            soft_guard=bool(getattr(opts, "selection_neff_soft_guard", False)),
+            max_likelihood_variance=float(
+                getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
+            ),
+            pe_variance_sum=baseline_raw["pe_variance_sum"],
+        )
+
+    return _count_correction
+
+
 def _factorized_logsumexp_jax(component_terms, count_loglike_delta):
     max_pairs = int(count_loglike_delta.shape[0]) - 1
     dp = jnp.full((max_pairs + 1,), -jnp.inf, dtype=jnp.float64)
@@ -876,6 +923,50 @@ def _validate_partition_mode_against_cluster_mode(opts):
             "to marginalise over). Drop --partition_mode (or set it to fixed) "
             "for the off control run."
         )
+
+
+def _validate_fixed_cosmology_for_lensed_channels(opts):
+    """Reject ``--fix_cosmology false`` while a lensed-injection channel is on.
+
+    Both lensed selection channels (``compute_lensed_pair_selection_term`` for
+    ``--cluster_mode j2`` and ``compute_lensed_single_selection_term`` for
+    ``--singleton_lensing sl_mixture``) reweight SOURCE-FRAME campaign columns,
+    and the detection efficiency enters ONLY through subset membership — the
+    per-image flags rendered at generation time.  Detection is a function of the
+    observables (m1_det, dL_app = dL(z)/sqrt(mu)) and hence of cosmology, so at
+    fixed (m1_src, q, z, y) a change in H0/w0/wa changes P_det while the stored
+    flags cannot follow: the estimators are valid only AT THE CAMPAIGN'S
+    FIDUCIAL COSMOLOGY (cluster_selection module docstring, "Frozen detection
+    realization").  The unlensed singleton campaign is stored in the detector
+    frame and IS valid for any cosmology, so sampling cosmology puts the two
+    channels of mu_tot on different selection conventions and gives the ratio
+    that sets A_tau a spurious cosmology dependence.
+
+    This cannot be caught at runtime: the campaign file keeps only the selected
+    subsets and records no fiducial cosmology, and H0 arrives traced.  Gate it
+    on the flags instead (review F-031; every in-repo lensing invocation already
+    passes ``--fix_cosmology true``, the default).
+    """
+    if getattr(opts, "fix_cosmology", True):
+        return
+    channels = []
+    if getattr(opts, "cluster_mode", "off") == "j2":
+        channels.append("--cluster_mode j2")
+    if getattr(opts, "singleton_lensing", "off") == "sl_mixture":
+        channels.append("--singleton_lensing sl_mixture")
+    if not channels:
+        return
+    raise SystemExit(
+        f"--fix_cosmology false is not valid with {' and '.join(channels)}: the "
+        "lensed-injection selection terms reweight source-frame campaign columns "
+        "whose detection flags were rendered at the campaign's fiducial "
+        "cosmology, so they are only valid there (the file records no fiducial "
+        "cosmology and H0 arrives traced, so this cannot be checked at "
+        "runtime). Sampling cosmology would give mu_sel^(2)/mu_sel^(1) — the "
+        "ratio that sets A_tau — a spurious cosmology dependence. Run with "
+        "--fix_cosmology true (the default), or use --cluster_mode off "
+        "--singleton_lensing off for a cosmology-sampling control."
+    )
 
 
 def _derive_universe_model(wl_backend):
@@ -1071,6 +1162,7 @@ def load_inputs(opts):
     # likelihood closure.  main() already rejects this via
     # _resolve_lensing_run_config; this is the second net.
     _validate_partition_mode_against_cluster_mode(opts)
+    _validate_fixed_cosmology_for_lensed_channels(opts)
     _gate_pair_orientation_mismatch(opts)
     rng = np.random.default_rng(opts.seed)
 
@@ -1285,6 +1377,28 @@ def load_inputs(opts):
                     if not has_dt:
                         raise SystemExit(
                             f"pair_marks=time requires delta_t_obs metadata for pair_{k}"
+                        )
+                    # The marks below are appended in pair-FILE order and the
+                    # master likelihood reads them POSITIONALLY against the
+                    # partition's pair rows, so without the event indices
+                    # nothing checks that pair_k describes partition pair k:
+                    # a differently-ordered metadata file hands every pair
+                    # another pair's |dt| (wrong y* = |dt|/T0, wrong
+                    # coincidence-odds denominator) and only the length is
+                    # verified (review F-014). Every in-repo writer emits the
+                    # attrs; require them.
+                    if (
+                        meta_pair is None
+                        and getattr(opts, "pair_marks", "none") == "time"
+                        and partition_mode == "fixed"
+                        and partition_pair_indices
+                    ):
+                        raise SystemExit(
+                            f"pair_{k} carries a time mark but no "
+                            "event_index_image0/event_index_image1: with "
+                            "--pair_marks time --partition_mode fixed the marks "
+                            "are consumed in partition pair order, so they "
+                            "cannot be aligned to the partition's pairs"
                         )
                     _dt_raw = float(
                         g.attrs["delta_t_obs"]
@@ -1583,6 +1697,13 @@ def load_inputs(opts):
                 max(int(state.n_pairs) for state in states)
                 for states in component_partition_states
             )
+            # Count carriers for the closed-form selection deltas: ONLY
+            # ``(n_singletons, n_pairs)`` is read off these, by both the sampler
+            # and the diagnostics path (_count_correction_closed_form). The
+            # fabricated (2k, 2k+1) pairing and its placeholder time marks are
+            # never evaluated by any likelihood -- they were, before review
+            # F-005, and their fictitious pairs' pair_variance_sum leaked into
+            # the guard threshold.
             selection_probe_partitions = []
             for n_pairs_probe in range(max_factorized_pairs + 1):
                 probe_state = _count_probe_partition_state(candidate_n_events, n_pairs_probe)
@@ -1861,7 +1982,25 @@ def _write_failure(run_dir, stage, exc, *, labels=None, settings=None):
     _write_json(os.path.join(run_dir, "failure.json"), payload, allow_nan=True)
 
 
-def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
+def _partition_diagnostics_key_prefix(eval_point_label):
+    """Attr/settings prefix for the partition diagnostics' eval point.
+
+    ``prior_midpoint_*`` is reserved for numbers actually evaluated at the
+    midpoint; anything the guard-clear fallback picked instead gets the generic
+    ``diagnostics_point_*`` prefix already used for the lens block
+    (``_lens_settings_dict(..., eval_point="diagnostics_point")``).
+    """
+    return (
+        "prior_midpoint"
+        if str(eval_point_label or "prior_midpoint") == "prior_midpoint"
+        else "diagnostics_point"
+    )
+
+
+def _write_result_partition_metadata(
+    attrs, *, opts, inp, diagnostics,
+    eval_point_label="prior_midpoint", eval_point=None,
+):
     """Write unambiguous partition-count metadata to ``results.hdf5`` attrs."""
     partition_mode = str(getattr(opts, "partition_mode", "fixed"))
     attrs["partition_mode"] = partition_mode
@@ -1890,18 +2029,29 @@ def _write_result_partition_metadata(attrs, *, opts, inp, diagnostics):
         attrs["global_partitions_enumerated"] = bool(diagnostics.get("global_partitions_enumerated", True))
         if diagnostics.get("approximate_total_partitions") is not None:
             attrs["approximate_total_partitions"] = int(diagnostics["approximate_total_partitions"])
-        # These are evaluated at the PRIOR MIDPOINT (the stdout print says so;
-        # the file attrs previously did not — library review, lensing CLI
-        # finding 6): label them explicitly so nobody traces pre-posterior
-        # numbers into a paper as run results.
-        attrs["partition_diagnostics_eval_point"] = "prior_midpoint"
-        attrs["prior_midpoint_expected_n_singletons"] = float(diagnostics["expected_n_singletons"])
-        attrs["prior_midpoint_expected_n_pairs"] = float(diagnostics["expected_n_pairs"])
-        attrs["prior_midpoint_map_partition_index"] = int(diagnostics["map_partition_index"])
+        # These are evaluated at ONE parameter point, not at the posterior (the
+        # stdout print says so; the file attrs previously did not — library
+        # review, lensing CLI finding 6): label them explicitly so nobody traces
+        # pre-posterior numbers into a paper as run results.  The point is the
+        # prior midpoint only when the reliability guard cleared there; the
+        # guard-clear fallback (registry fiducial, then seeded prior draws) is
+        # the documented common case on paper-scale joint runs, and the attrs
+        # used to claim prior_midpoint regardless (review F-006).
+        prefix = _partition_diagnostics_key_prefix(eval_point_label)
+        attrs["partition_diagnostics_eval_point"] = str(
+            eval_point_label or "prior_midpoint"
+        )
+        if eval_point is not None:
+            attrs["partition_diagnostics_eval_point_values"] = json.dumps(
+                np.asarray(eval_point, dtype=float).tolist()
+            )
+        attrs[f"{prefix}_expected_n_singletons"] = float(diagnostics["expected_n_singletons"])
+        attrs[f"{prefix}_expected_n_pairs"] = float(diagnostics["expected_n_pairs"])
+        attrs[f"{prefix}_map_partition_index"] = int(diagnostics["map_partition_index"])
         map_partition = diagnostics["map_partition"]
-        attrs["prior_midpoint_map_partition_n_singletons"] = int(map_partition["n_singletons"])
-        attrs["prior_midpoint_map_partition_n_pairs"] = int(map_partition["n_pairs"])
-        attrs["prior_midpoint_logL_marginalized"] = float(diagnostics["logL_marginalized"])
+        attrs[f"{prefix}_map_partition_n_singletons"] = int(map_partition["n_singletons"])
+        attrs[f"{prefix}_map_partition_n_pairs"] = int(map_partition["n_pairs"])
+        attrs[f"{prefix}_logL_marginalized"] = float(diagnostics["logL_marginalized"])
         attrs["log_z_partition_prior"] = float(diagnostics["log_z_partition_prior"])
         attrs["edge_mark_prior_keys"] = json.dumps(inp.get("edge_mark_prior_keys", []))
         attrs["edge_prior_semantics"] = "effective_log_prior_odds = raw_log_prior_odds + sum(requested log_* marks)"
@@ -1963,7 +2113,9 @@ def _diagnostics_at_guard_clear_point(
     sampler itself is fine (it concentrates where the guard is clear). Fall
     back to seeded prior draws; if none of them clears the guard the sampler
     would not find live points either, so re-raise the last error.
-    Returns (diagnostics, evaluation_point)."""
+    Returns (diagnostics, evaluation_point, evaluation_point_label) -- the label
+    is what the archived attrs/settings are keyed on, so numbers computed at the
+    fallback point cannot be filed as prior_midpoint_* (review F-006)."""
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
     rng = np.random.default_rng(seed)
@@ -1983,7 +2135,7 @@ def _diagnostics_at_guard_clear_point(
                     f"diagnostics point: {name} "
                     "(reliability guard fired at the prior midpoint)"
                 )
-            return diagnostics, point
+            return diagnostics, point, name.replace(" ", "_")
         except RuntimeError as exc:
             if "NON-FINITE" not in str(exc):
                 raise
@@ -2278,32 +2430,10 @@ def build_cluster_likelihood(
                 baseline = baseline_raw["logL_total"]
                 baseline_content = _content_loglike(baseline_raw)
                 selection0 = baseline_raw["selection_correction_total"]
-                # Count-only selection deltas, CLOSED FORM. The selection
-                # integrals (mu, sigma^2 per channel) do not depend on the
-                # partition — only the marked-Poisson correction's counts do
-                # (the invariant build_cluster_diagnostics asserts against
-                # probe evaluations at every diagnostics call). Evaluating
-                # full likelihood probes per count (the previous approach)
-                # cost ~n_pairs extra likelihood evaluations PER SAMPLER CALL
-                # and one multi-GB XLA specialization per distinct
-                # (n_singletons, n_pairs) — the host-RAM OOM that killed
-                # paper-scale j2 on 58 GB nodes.
-                def _count_correction(n_sing, n_prs):
-                    return combined_selection_log_correction(
-                        baseline_raw["log_mu_singleton"],
-                        baseline_raw["log_sigma2_singleton"],
-                        baseline_raw["log_mu_cluster"],
-                        baseline_raw["log_sigma2_cluster"],
-                        n_singletons_observed=n_sing,
-                        n_clusters_observed=n_prs,
-                        soft_guard=bool(
-                            getattr(opts, "selection_neff_soft_guard", False)
-                        ),
-                        max_likelihood_variance=float(
-                            getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
-                        ),
-                    )
-
+                # Count-only selection deltas, CLOSED FORM (see
+                # _count_correction_closed_form for why the baseline's
+                # pe_variance_sum has to be in there).
+                _count_correction = _count_correction_closed_form(baseline_raw, opts)
                 count_delta = jnp.stack(
                     [
                         _count_correction(
@@ -2494,20 +2624,38 @@ def build_cluster_diagnostics(
                         baseline_raw["singleton_logL_sum"] + baseline_raw["pair_logL_sum"]
                     )
                 )
-                selection0 = None
-                count_delta = []
-                for probe_part in inp["selection_probe_partitions"]:
-                    probe_raw = _raw_for(
-                        probe_part["singleton_indices"],
-                        probe_part["pair_indices"],
-                        probe_part["n_singletons"],
-                        probe_part["n_pairs"],
-                        probe_part,
+                # Count-only selection deltas from the SAME closed form the
+                # sampler uses, so the two paths cannot drift apart. Each count
+                # used to be read off a FULL master-likelihood evaluation of a
+                # fabricated partition pairing events (0,1),(2,3),... with
+                # delta_t_obs = 0 and sigma = 1 s: those fictitious pairs carry
+                # their own pair_variance_sum into the guard threshold (so under
+                # the soft guard the count-only check below compared two
+                # different variance budgets), and the probes run out to
+                # n_pairs = sum of per-component maxima — far beyond any real
+                # component partition — re-incurring the per-(n_singletons,
+                # n_pairs) XLA specialization the sampler path was refactored
+                # away from (review F-005). The check below now compares the
+                # closed form against REAL component partitions, which the
+                # diagnostics evaluate anyway: a stronger invariant at no cost.
+                _count_correction = _count_correction_closed_form(baseline_raw, opts)
+                selection0 = float(
+                    np.asarray(baseline_raw["selection_correction_total"])
+                )
+                count_delta = [
+                    float(
+                        np.asarray(
+                            _count_correction(
+                                int(probe_part["n_singletons"]),
+                                int(probe_part["n_pairs"]),
+                            )
+                        )
                     )
-                    selection = float(np.asarray(probe_raw["selection_correction_total"]))
-                    if selection0 is None:
-                        selection0 = selection
-                    count_delta.append(selection - selection0)
+                    - selection0
+                    for probe_part in inp["selection_probe_partitions"]
+                ]
+                soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
+                count_only_warned = False
                 component_deltas = []
                 for states, parts in zip(
                     inp["component_partition_states"], inp["component_full_partitions"]
@@ -2555,15 +2703,40 @@ def build_cluster_diagnostics(
                             rtol=0.0,
                             atol=1e-8,
                         ):
-                            raise RuntimeError(
-                                "componentwise exact factorization failed: selection "
-                                "correction is not count-only "
+                            detail = (
                                 f"(n_pairs={n_pairs}: component delta "
-                                f"{local_selection_delta!r} vs probe delta "
+                                f"{local_selection_delta!r} vs closed-form delta "
                                 f"{count_delta[n_pairs] if n_pairs < len(count_delta) else 'MISSING'!r}, "
-                                f"n_probe_partitions={len(count_delta)}; component part "
+                                f"n_count_values={len(count_delta)}; component part "
                                 f"n_singletons={part['n_singletons']}, n_pairs={part['n_pairs']})"
                             )
+                            if soft_guard:
+                                # Under the soft guard the correction is count-only
+                                # ONLY where the smooth wall is inactive: inside it
+                                # the wall tracks the threshold, which the
+                                # partition's own pair_variance_sum moves. The
+                                # sampler's factorization deliberately uses the
+                                # baseline budget there, so this is an accuracy
+                                # notice about a region the guard is repelling the
+                                # sampler out of -- not a reason to kill the run at
+                                # build time after the full PE/injection load
+                                # (review F-005).
+                                if not count_only_warned:
+                                    count_only_warned = True
+                                    _warn(
+                                        "componentwise factorization is inexact at "
+                                        "the diagnostics point: the soft guard's "
+                                        "wall is active, so the selection "
+                                        f"correction is not count-only {detail}. "
+                                        "The sampler uses the baseline variance "
+                                        "budget; check that no posterior mass "
+                                        "sits in the walled region."
+                                    )
+                            else:
+                                raise RuntimeError(
+                                    "componentwise exact factorization failed: "
+                                    f"selection correction is not count-only {detail}"
+                                )
                         deltas.append(local_content - baseline_content)
                     component_deltas.append(deltas)
                 out = compute_componentwise_factorized_partition_diagnostics(
@@ -2819,7 +2992,11 @@ def build_parser():
     model.add_argument(
         "--edge_mark_likelihood_keys",
         default="",
-        help="Comma-separated edge mark likelihood keys. Only time/delta_t_obs is implemented in this PR.",
+        help="Comma-separated edge mark likelihood keys. Only time/delta_t_obs "
+             "is implemented in this PR, and it is not a route of its own: the "
+             "marked pair likelihood is switched on by --pair_marks time, so "
+             "requesting a time-like key without it is a fatal error rather "
+             "than a silently inert flag.",
     )
     model.add_argument(
         "--allow_suspicious_time_marks",
@@ -2883,7 +3060,12 @@ def build_parser():
              "likelihood; use for deliberate convention ablations only.",
     )
     fixing = p.add_argument_group("Fixing")
-    fixing.add_argument("--fix_cosmology", type=str_to_bool, default=True, metavar="BOOL")
+    fixing.add_argument(
+        "--fix_cosmology", type=str_to_bool, default=True, metavar="BOOL",
+        help="false samples H0/Om0/w0/wa. REFUSED with --cluster_mode j2 or "
+             "--singleton_lensing sl_mixture: the lensed-injection selection "
+             "terms are valid only at the campaign's fiducial cosmology.",
+    )
     fixing.add_argument("--fix_survey", type=str_to_bool, default=True, metavar="BOOL")
     fixing.add_argument("--fix_population", type=str_to_bool, default=False, metavar="BOOL")
     fixing.add_argument(
@@ -2920,14 +3102,15 @@ def build_parser():
         "--max_likelihood_variance", type=float, default=DEFAULT_MAX_LIKELIHOOD_VARIANCE,
         help=("Cap on the Monte-Carlo variance of the log-likelihood estimator "
               "(Essick & Farr 2022; Talbot & Golomb 2023, arXiv:2304.06138; the "
-              "GWTC-4.0/5.0 criterion is sigma^2_lnL <= 1, the default). NOTE: "
-              "on this cluster/lensing stack the cap currently bounds the "
-              "SELECTION component only (N_obs^2/Neff_sel); the per-event/"
-              "per-pair variance term of the full sigma^2_lnL criterion is not "
-              "yet threaded here (follow-up; the main darksirens_inference CLI "
-              "enforces the full total). Proposals exceeding it are guarded "
-              "(hard -inf or the soft wall per --selection_neff_guard). The "
-              "Vitale 5 N_obs mean floor always applies."))
+              "GWTC-4.0/5.0 criterion is sigma^2_lnL <= 1, the default). The cap "
+              "bounds the TOTAL sigma^2_lnL = pe_variance_sum + "
+              "N_obs^2/Neff_sel: the summed per-event, lensed-singleton and "
+              "per-pair importance variances spend the budget before the "
+              "selection term, on every evaluation path (fixed partition, both "
+              "--partition_component_mode settings, and the diagnostics). "
+              "Proposals exceeding it are guarded (hard -inf or the soft wall "
+              "per --selection_neff_guard). The Vitale 5 N_obs mean floor "
+              "always applies."))
     sampler = p.add_argument_group("Sampler")
     sampler.add_argument("--sampler", required=True, choices=["tinyns", "dynesty", "numpyro"])
     sampler.add_argument("--nlive", type=int, default=2000)
@@ -3075,21 +3258,39 @@ def _resolve_lensing_run_config(opts):
         )
     if max_likelihood_variance != DEFAULT_MAX_LIKELIHOOD_VARIANCE:
         print(
-            "  [i] Selection-variance cap (this stack guards the selection "
-            f"component only): max_likelihood_variance={max_likelihood_variance} "
+            "  [i] Total-log-likelihood variance cap (per-event and per-pair "
+            "importance variances included): "
+            f"max_likelihood_variance={max_likelihood_variance} "
             "(default 1.0 mirrors the GWTC-4.0/5.0 total criterion).",
             flush=True,
         )
 
+    edge_like_keys = parse_edge_mark_keys(opts.edge_mark_likelihood_keys)
     unsupported_edge_like = [
-        k
-        for k in parse_edge_mark_keys(opts.edge_mark_likelihood_keys)
-        if k not in ("time", "delta_t_obs")
+        k for k in edge_like_keys if k not in ("time", "delta_t_obs")
     ]
     if unsupported_edge_like:
         raise NotImplementedError(
             "edge_mark_likelihood_keys only supports time/delta_t_obs in this PR; "
             f"unsupported keys: {unsupported_edge_like}"
+        )
+    # The ONLY switch that puts arrival-time information into the pair
+    # likelihood is --pair_marks time (_resolve_pair_marks branches on it
+    # alone); the likelihood keys reach only the placeholder-mark gate and the
+    # preflight summary. So `--edge_mark_likelihood_keys time --pair_marks none`
+    # used to run with no time term at all while settings.json and the preflight
+    # summary recorded the key as honoured -- and could even abort on
+    # "suspicious candidate time marks" for marks nothing would have read
+    # (review F-007). Resolve the two through one predicate instead.
+    if set(edge_like_keys) & {"time", "delta_t_obs"} and (
+        getattr(opts, "pair_marks", "none") != "time"
+    ):
+        raise SystemExit(
+            "--edge_mark_likelihood_keys "
+            f"{','.join(edge_like_keys)} requires --pair_marks time: the marked "
+            "pair likelihood is enabled by --pair_marks alone, so this "
+            "combination would discard the arrival-time term while recording it "
+            "as used. Add --pair_marks time (or drop the likelihood key)."
         )
     if any(
         not k.startswith("log_")
@@ -3104,6 +3305,7 @@ def _resolve_lensing_run_config(opts):
 
     _resolve_wl_selection(opts)
     _validate_partition_mode_against_cluster_mode(opts)
+    _validate_fixed_cosmology_for_lensed_channels(opts)
 
     opts.universe_model = _derive_universe_model(opts.wl_backend)
 
@@ -3471,11 +3673,65 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
             pop_params_fid, lens_overrides, prior_kinds)
 
 
+def _cross_check_loglike_against_diagnostics(loglike, diagnostics, point, *, opts):
+    """Pin the sampler-facing log-likelihood to the diagnostics total AT THE
+    SAME POINT, and return the checked value.
+
+    Under ``--partition_mode marginalize_exact --partition_component_mode
+    componentwise`` (the default) the sampler path does NOT read the master
+    likelihood's selection correction: it rebuilds the count-only term in
+    closed form (``_count_correction_closed_form``) and the master's value
+    cancels out of the factorized total.  Nothing tied the two
+    together, so a closed form missing the total-variance budget produced a
+    sampler likelihood ~1e4 nats away from every other evaluation path with no
+    symptom at all (review F-001).  One extra likelihood call at startup —
+    already-compiled shapes, so it is essentially free — makes that class of
+    divergence loud.
+    """
+    reference = diagnostics.get("logL_marginalized", diagnostics.get("logL_total"))
+    if reference is None:
+        return None
+    reference = float(reference)
+    value = float(loglike(jnp.asarray(point)))
+    # Both guarded to -inf is agreement; ``==`` (not isclose) so that case,
+    # and an exact match, short-circuit before the finite comparison.
+    if value == reference:
+        _ok(f"logL(diagnostics point) = {value:.6g}  ==  diagnostics total")
+        return value
+    tol = 1e-6 + 1e-9 * abs(reference)
+    if (
+        not np.isfinite(value)
+        or not np.isfinite(reference)
+        or abs(value - reference) > tol
+    ):
+        raise RuntimeError(
+            "sampler log-likelihood disagrees with the partition diagnostics at "
+            f"the SAME evaluation point: loglike={value!r} vs diagnostics "
+            f"{'logL_marginalized' if 'logL_marginalized' in diagnostics else 'logL_total'}"
+            f"={reference!r} (tol {tol:.3g}; --partition_mode "
+            f"{getattr(opts, 'partition_mode', 'fixed')} "
+            "--partition_component_mode "
+            f"{getattr(opts, 'partition_component_mode', 'componentwise')}). "
+            "Under componentwise factorization the sampler rebuilds the "
+            "count-only selection correction in closed form while the "
+            "diagnostics take it from the master likelihood; a mismatch means "
+            "the two are no longer the same statistical target, so posterior "
+            "and logZ would not correspond to the reported diagnostics."
+        )
+    _ok(
+        f"logL(diagnostics point) = {value:.6g}  ==  diagnostics total "
+        f"(|Δ| = {abs(value - reference):.3g})"
+    )
+    return value
+
+
 def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
                            loglike, diagnostics_fn, pop_params_fid):
     """Smoke-eval at the prior midpoint so JIT compile errors surface early,
     then evaluate and persist the factorization diagnostics.  Returns
-    (mid, diagnostics)."""
+    (mid, diagnostics, diagnostics_point, diagnostics_point_label) -- the point
+    and its label travel with the numbers so the archives cannot mislabel
+    them."""
     _section("Building likelihood")
     print("  │  JIT compiling at the prior midpoint...", flush=True)
     mid = 0.5 * (lower + upper)
@@ -3492,18 +3748,32 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
         fid_point = _fiducial_candidate_point(
             labels, mid, lower, upper, opts, pop_params_fid
         )
-        diagnostics, diag_point = _diagnostics_at_guard_clear_point(
+        diagnostics, diag_point, diag_label = _diagnostics_at_guard_clear_point(
             diagnostics_fn, mid, lower, upper, int(opts.seed), fiducial=fid_point
         )
         _write_json(
             os.path.join(run_dir, "midpoint_diagnostics.json"),
-            {**diagnostics, "evaluation_point": np.asarray(diag_point, dtype=float).tolist()},
+            {
+                **diagnostics,
+                "evaluation_point": np.asarray(diag_point, dtype=float).tolist(),
+                "evaluation_point_label": diag_label,
+            },
         )
     except Exception as exc:
         _write_failure(run_dir, "midpoint_diagnostics", exc, labels=labels, settings=settings)
         raise
+    try:
+        _cross_check_loglike_against_diagnostics(
+            loglike, diagnostics, diag_point, opts=opts
+        )
+    except Exception as exc:
+        _write_failure(
+            run_dir, "loglike_diagnostics_cross_check", exc,
+            labels=labels, settings=settings,
+        )
+        raise
     _print_diagnostics_summary(diagnostics)
-    return mid, diagnostics
+    return mid, diagnostics, diag_point, diag_label
 
 
 def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
@@ -3559,7 +3829,8 @@ def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
 
 def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
                           labels, mid, fixed, base_fixed, lens_fixed,
-                          lens_overrides):
+                          lens_overrides, *, diagnostics_point=None,
+                          diagnostics_point_label="prior_midpoint"):
     """Persist samples/results/settings/diagnostics and the best-effort corner
     plot inside a framed section."""
     _section("Saving outputs")
@@ -3586,7 +3857,9 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             f.attrs["pair_tag_constant"] = float(opts.pair_tag_constant)
             f.attrs["pair_tag_perturb_logit"] = float(opts.pair_tag_perturb_logit)
             _write_result_partition_metadata(
-                f.attrs, opts=opts, inp=inp, diagnostics=diagnostics
+                f.attrs, opts=opts, inp=inp, diagnostics=diagnostics,
+                eval_point_label=diagnostics_point_label,
+                eval_point=diagnostics_point,
             )
             f.attrs["wl_a"] = float(opts.lensing_wl_a)
             f.attrs["wl_b"] = float(opts.lensing_wl_b)
@@ -3644,18 +3917,30 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
                 "format_version"
             ) or inp["observed_catalog"].get("pe_format_version")
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
-            # The partition diagnostics are evaluated ONCE at the prior midpoint,
-            # so the parameter-dependent quantities (expected/MAP pair counts,
-            # marginalized logL) are NOT posterior expectations. Prefix them
-            # prior_midpoint_* and stamp the eval point, mirroring results.hdf5
-            # -- bare names let a downstream tool read a pre-posterior number as
-            # the run's E[n_pairs]. Structural counts (n_partitions, ...) are
-            # eval-point-independent and stay bare.
+            # The partition diagnostics are evaluated ONCE, at a single
+            # parameter point, so the parameter-dependent quantities
+            # (expected/MAP pair counts, marginalized logL) are NOT posterior
+            # expectations. Prefix them with that point and stamp its name,
+            # mirroring results.hdf5 -- bare names let a downstream tool read a
+            # pre-posterior number as the run's E[n_pairs], and a hard-coded
+            # prior_midpoint_ prefix mislabels everything the guard-clear
+            # fallback evaluated elsewhere (review F-006). Structural counts
+            # (n_partitions, ...) are eval-point-independent and stay bare.
+            _diag_prefix = _partition_diagnostics_key_prefix(diagnostics_point_label)
+            settings.update({
+                "partition_diagnostics_eval_point": str(
+                    diagnostics_point_label or "prior_midpoint"
+                ),
+                "partition_diagnostics_eval_point_values": (
+                    np.asarray(diagnostics_point, dtype=float).tolist()
+                    if diagnostics_point is not None
+                    else None
+                ),
+                f"{_diag_prefix}_expected_n_pairs": float(diagnostics["expected_n_pairs"]),
+                f"{_diag_prefix}_map_n_pairs": int(diagnostics["map_partition"]["n_pairs"]),
+                f"{_diag_prefix}_logL_marginalized": float(diagnostics["logL_marginalized"]),
+            })
             settings.update(
-                partition_diagnostics_eval_point="prior_midpoint",
-                prior_midpoint_expected_n_pairs=float(diagnostics["expected_n_pairs"]),
-                prior_midpoint_map_n_pairs=int(diagnostics["map_partition"]["n_pairs"]),
-                prior_midpoint_logL_marginalized=float(diagnostics["logL_marginalized"]),
                 n_partitions=int(diagnostics["n_partitions"]),
                 approximate_total_partitions=int(diagnostics.get("approximate_total_partitions", diagnostics["n_partitions"])),
                 partition_component_mode=diagnostics.get("partition_component_mode"),
@@ -3722,7 +4007,7 @@ def main(argv=None):
     _gate_or_stamp_resume_fingerprint(
         opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed
     )
-    mid, diagnostics = _smoke_test_likelihood(
+    mid, diagnostics, diag_point, diag_label = _smoke_test_likelihood(
         opts, run_dir, settings, labels, lower, upper, loglike,
         diagnostics_fn, pop_params_fid)
     results = _run_lensing_sampling(
@@ -3730,7 +4015,8 @@ def main(argv=None):
         prior_kinds=prior_kinds)
     _save_lensing_outputs(
         opts, run_dir, settings, inp, results, diagnostics, labels, mid,
-        fixed, base_fixed, lens_fixed, lens_overrides)
+        fixed, base_fixed, lens_fixed, lens_overrides,
+        diagnostics_point=diag_point, diagnostics_point_label=diag_label)
 
     print()
     _banner(f"DONE  │  total wall time {datetime.datetime.now() - t_start}")

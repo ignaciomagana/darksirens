@@ -749,6 +749,13 @@ candidate-edge metadata:
 If both ``--pair_metadata_path`` and ``--pair_pe_path`` are provided, they must
 refer to the same path.
 
+Per-pair time marks taken from either file are consumed in the partition's pair
+order, so a ``pair_k`` group that carries ``delta_t_obs`` must also carry
+``event_index_image0``/``event_index_image1`` whenever ``--pair_marks time`` runs
+with ``--partition_mode fixed`` and a ``--partition_path``: those attrs are what
+verifies that file row *k* describes partition pair *k*.  Preflight and the
+loader both refuse the index-free combination rather than align by position.
+
 Mock lensing generation also writes a unified observed-event catalog by default:
 ``mock_observed_gw_pe.h5`` plus ``observed_catalog.json``.  This file uses the
 same ``gwcat-1.0`` event-major schema as the existing GW PE files, but contains
@@ -993,10 +1000,12 @@ Edge marks have two roles:
   simulation use sky-overlap and mass-distance compatibility as interpretable
   edge-prior contributions while preserving the base `log_prior_odds` field.
 * **Likelihood marks** are requested with `--edge_mark_likelihood_keys`.  In
-  this PR, only the existing time-delay likelihood is implemented, via
-  `pair_marks=time` or the `time`/`delta_t_obs` likelihood key.  Other
-  likelihood marks are parsed and rejected with a clear not-implemented error
-  until corresponding likelihood terms are added.
+  this PR, only the existing time-delay likelihood is implemented, and it is
+  enabled by `--pair_marks time` — the likelihood key is a declaration, not an
+  alternative route, so `--edge_mark_likelihood_keys time` without
+  `--pair_marks time` is a fatal error rather than a run with no arrival-time
+  term.  Other likelihood marks are parsed and rejected with a clear
+  not-implemented error until corresponding likelihood terms are added.
 
 By default, no extra edge marks are used: existing `log_prior_odds` behavior is
 unchanged, and time marks affect the likelihood only when the run requests the

@@ -290,6 +290,28 @@ def _check_pair_pe(
                             f"{pname} event-index metadata {pair} does not match partition pair {partition_pairs[k]}"
                         )
                 has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
+                # The runtime consumes per-pair marks POSITIONALLY against the
+                # partition's pair rows, and the only order check is the
+                # event-index one above -- which the optional attrs can switch
+                # off entirely. Then a metadata file whose rows are ordered
+                # differently from partition.json silently hands every pair
+                # another pair's |dt| (wrong y* = |dt|/T0 and wrong 1/p_U(dt)
+                # coincidence factor), with only a length check to catch it
+                # (review F-014).
+                if (
+                    has_dt
+                    and "event_index_image0" not in g.attrs
+                    and _get(opts, "pair_marks", "none") == "time"
+                    and _get(opts, "partition_mode", "fixed") == "fixed"
+                    and partition_pairs
+                ):
+                    errors.append(
+                        f"{pname} carries a time mark but no "
+                        "event_index_image0/event_index_image1: with "
+                        "--pair_marks time --partition_mode fixed the marks are "
+                        "consumed in partition pair order and nothing would "
+                        "verify the alignment"
+                    )
                 dt_recorded = False
                 if has_dt:
                     try:

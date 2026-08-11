@@ -223,10 +223,12 @@ def test_fully_annihilated_partition_set_raises_instead_of_nan_posteriors():
             raise excinfo.value
         return {"logL_total": 1.0}
 
-    diag, _ = _diagnostics_at_guard_clear_point(
+    diag, _point, label = _diagnostics_at_guard_clear_point(
         _fn, np.full(2, 0.5), np.zeros(2), np.ones(2), seed=5
     )
     assert diag == {"logL_total": 1.0} and len(calls) == 2
+    # the retried point is labelled as such, not as the prior midpoint
+    assert label == "prior_draw_1"
 
     # A single annihilated partition among finite ones is still fine.
     ok = compute_marginalized_partition_diagnostics(

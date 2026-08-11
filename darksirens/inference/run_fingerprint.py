@@ -107,10 +107,16 @@ _NON_SEMANTIC_KEYS = frozenset({
     "pe_block",
     "pe_event_block",
     "selection_block",
-    # ... including the two other values _resolve_and_report_block_sizes writes
-    # back onto opts from a LIVE device-memory probe: a requeue landing on a GPU
-    # with a different resident footprint resolves a different sel_batch_size (or
-    # None), which would refuse the resume instead of continuing it.
+    # ... including the ones the block-size resolver STAMPS BACK onto opts
+    # before the fingerprint is built (cli/inference._resolve_and_report_block_
+    # sizes, cli/inference_lensing._resolve_lensing_block_sizes).  Both are
+    # derived from PROBED FREE DEVICE MEMORY, so a SLURM requeue landing on a
+    # node with different free memory resolved a different integer, changed the
+    # digest, and made `--resume auto` refuse to continue its own checkpoint --
+    # pushing users toward blanket --resume_force, which disarms the whole gate
+    # (review F-002).  Chunking a sum over injections cannot change the
+    # statistical target: the padded rows carry null weight and the same Ndraw
+    # normalization, exactly the argument that already excludes pe_event_block.
     "sel_batch_size",
     "block_size_static_state_bytes",
     "max_component_partitions",
