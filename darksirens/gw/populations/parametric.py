@@ -619,6 +619,240 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
         return log_p + (gamma - 1.0) * jnp.log1p(z)
 
 
+# ---------------------------------------------------------------------------
+# GWTC-3 fiducial POWER LAW + PEAK (arXiv:2111.03634, Table VI / Eqs. B4-B7)
+# ---------------------------------------------------------------------------
+# The published model, verbatim, as a counterpart to the curated
+# ``powerlaw+peak`` composition in registry.py -- which is a TUNED mixture
+# (w_G = 0.90 in the 35 Msun peak, an untapered Gaussian, per-component
+# high-mass smoothing) and reproduces nothing published.  The two differ in
+# structure, not only in numbers, which is why this is a bespoke class rather
+# than another ``Curated`` entry: Eq. B4 multiplies the WHOLE mixture by the
+# low-mass taper, and the grammar's mixture applies each component's own
+# smoothing instead.
+
+@dataclass
+class GWTC3PowerLawPeakMass(MassComponent):
+    r"""GWTC-3 fiducial Power Law + Peak primary-mass model.
+
+    Equation B4 of arXiv:2111.03634 exactly::
+
+        pi(m1) = [(1 - lambda_peak) P(m1 | -alpha, m_max)
+                  + lambda_peak G(m1 | mu_m, sigma_m)] S(m1 | m_min, delta_m)
+
+    with ``P`` the normalized power law of spectral index ``-alpha`` cut off at
+    ``m_max``, ``G`` the normalized Gaussian, and ``S`` the Eq. B5/B6 taper
+    rising from 0 to 1 across ``(m_min, m_min + delta_m)`` --
+    :func:`~darksirens.gw.populations.utils.sfilter_low` term for term.
+
+    Parameter order follows Table VI with the mass-ratio slope removed (it
+    lives on the pairing component): ``alpha``, ``m_min``, ``m_max``,
+    ``lambda_peak``, ``mu_m``, ``sigma_m``, ``delta_m``.
+
+    Two structural points worth stating, because they are where an
+    "obvious" reimplementation drifts from the paper:
+
+    * The taper multiplies the SUM.  The Gaussian is tapered too, so lowering
+      ``m_min`` does not just uncover more power law -- it uncovers peak as
+      well.  The curated ``powerlaw+peak`` mixture leaves its Gaussian
+      untapered, which is a different density however the weights are set.
+    * ``G`` is "a normalized Gaussian distribution" (Eq. B4), i.e. normalized
+      over the real line and NOT truncated at ``m_max``, so the model keeps a
+      Gaussian tail above the power law's cut-off.  That is the paper's
+      statement and it is what is implemented here; with the Table VI priors
+      (``mu_m <= 50``, ``sigma_m <= 10``) the tail beyond the ``M_HI = 200``
+      normalisation ceiling is below 1e-45 of the mixture, so the analytic
+      normaliser below and any grid integral over ``[M_LO, M_HI]`` agree to
+      far better than machine precision on the sampled region.
+    """
+
+    alpha_spec: ParamSpec
+    m_min_spec: ParamSpec
+    m_max_spec: ParamSpec
+    lambda_peak_spec: ParamSpec
+    mu_m_spec: ParamSpec
+    sigma_m_spec: ParamSpec
+    delta_m_spec: ParamSpec
+
+    @property
+    def param_specs(self):
+        return [
+            self.alpha_spec,
+            self.m_min_spec,
+            self.m_max_spec,
+            self.lambda_peak_spec,
+            self.mu_m_spec,
+            self.sigma_m_spec,
+            self.delta_m_spec,
+        ]
+
+    def _powerlaw_pdf(self, m, alpha, m_min, m_max):
+        """``P(m | -alpha, m_max)``: normalized over ``[m_min, m_max]``.
+
+        Table VI's priors are disjoint (``m_min`` in [2, 10], ``m_max`` in
+        [30, 100]), so ``m_max > m_min`` always and the segment normaliser is
+        never degenerate -- no ordering constraint group is needed for this
+        pair, unlike the GWTC-5 model's two low-mass edges.
+        """
+        norm = _powerlaw_segment_norm(m_min, m_max, 1.0, alpha)
+        raw = jnp.where((m >= m_min) & (m <= m_max), m ** (-alpha), 0.0)
+        return raw / _pos(norm)
+
+    def _gaussian_pdf(self, m, mu, sigma):
+        """``G(m | mu_m, sigma_m)``: the normalized Gaussian of Eq. B4."""
+        s = jnp.maximum(sigma, _NORM_SIGMA_FLOOR)
+        # sigma sqrt(2 pi) == 2 sigma sqrt(pi/2), reusing the module constant.
+        return jnp.exp(-0.5 * ((m - mu) / s) ** 2) / (2.0 * s * _SQRT_PI_2)
+
+    def _mixture_pretaper(self, m, t):
+        """``(1 - lambda) P + lambda G``, each member exactly normalized."""
+        alpha, m_min, m_max, lam, mu, sigma = t[0], t[1], t[2], t[3], t[4], t[5]
+        return ((1.0 - lam) * self._powerlaw_pdf(m, alpha, m_min, m_max)
+                + lam * self._gaussian_pdf(m, mu, sigma))
+
+    def _taper_window_grid(self, m_min, delta_m):
+        """Quadrature nodes across the taper window, placed RELATIVE to it
+        (``m = m_min + t delta_m``, ``t`` uniform on [0, 1]) so the deficit in
+        :meth:`_norm` follows the sampled window instead of being crossed by
+        it, and a ``delta_m = 0`` window (the prior floor) integrates to
+        exactly 0 rather than to one stray cell.  Same construction as
+        :meth:`GWTC5FiducialBPL2PeaksMass._taper_window_grid`."""
+        t = jnp.linspace(0.0, 1.0, get_mass_grid().size)
+        width = jnp.maximum(delta_m, 0.0)
+        return m_min + t * width
+
+    def _norm(self, theta) -> jnp.ndarray:
+        r"""Normalisation of the tapered mixture -- exact up to the taper window.
+
+        Both components are normalized in closed form, so the only quadrature
+        left is the probability the taper removes,
+
+            D_i = \int p_i(m) [1 - S(m | m_min, delta_m)] dm,
+
+        which for the power law is confined to the window ``[m_min, m_min +
+        delta_m]`` (it is zero below ``m_min`` anyway) but for the Gaussian
+        also includes ALL of its mass below ``m_min`` -- the taper is zero
+        there and the Gaussian is not truncated.  Dropping that piece would
+        over-normalise every draw whose peak sits near the low-mass edge.  It
+        is available exactly as ``Phi((m_min - mu)/sigma)``, so only the window
+        integral is numerical.  Each ``1 - D_i`` is clipped to [0, 1] so
+        rounding in the window quadrature can never drive the mixture
+        normalisation negative.
+        """
+        alpha, m_min, m_max, lam, mu, sigma, delta_m = theta
+        m_w = self._taper_window_grid(m_min, delta_m)
+        cut = 1.0 - sfilter_low(m_w, m_min, delta_m)
+
+        def kept(pdf, below=0.0):
+            deficit = below + jnp.trapezoid(pdf * cut, m_w)
+            return jnp.clip(1.0 - deficit, 0.0, 1.0)
+
+        s = jnp.maximum(sigma, _NORM_SIGMA_FLOOR)
+        # Phi((m_min - mu)/sigma), written through erfc so a peak far above
+        # m_min underflows to 0 instead of cancelling two values near 1.
+        gauss_below_edge = 0.5 * erfc((mu - m_min) / (s * _SQRT2))
+
+        kept_pl = kept(self._powerlaw_pdf(m_w, alpha, m_min, m_max))
+        kept_g = kept(self._gaussian_pdf(m_w, mu, s), below=gauss_below_edge)
+        return (1.0 - lam) * kept_pl + lam * kept_g
+
+    def _eval_unnorm(self, m, t):
+        m_min, delta_m = t[1], t[6]
+        return self._mixture_pretaper(m, t) * sfilter_low(m, m_min, delta_m)
+
+
+class GWTC3PowerLawPeakPopulationModel:
+    """GWTC-3 fiducial Power Law + Peak model (arXiv:2111.03634, Table VI)."""
+
+    def __init__(self):
+        # Prior bounds are Table VI verbatim; see the registry entry for the
+        # provenance of the fiducial vector.
+        self.mass_component = GWTC3PowerLawPeakMass(
+            ParamSpec(r"$\alpha$", -4.0, 12.0),
+            ParamSpec(r"$m_{\min}$", 2.0, 10.0),
+            ParamSpec(r"$m_{\max}$", 30.0, 100.0),
+            ParamSpec(r"$\lambda_{\rm peak}$", 0.0, 1.0),
+            ParamSpec(r"$\mu_m$", 20.0, 50.0),
+            ParamSpec(r"$\sigma_m$", 1.0, 10.0),
+            ParamSpec(r"$\delta_m$", 0.0, 10.0),
+        )
+        # Eq. B7: pi(q | beta_q, m1, m_min, delta_m) ~ q**beta_q S(q m1 |
+        # m_min, delta_m) -- exactly PowerLawPairing, evaluated at the mass
+        # model's OWN (m_min, delta_m).
+        self.pairing_component = PowerLawPairing(ParamSpec(r"$\beta_q$", -2.0, 7.0))
+        # NOT from Table VI, and deliberately the repo's DEFAULT spin block
+        # (same bounds as registry._default_spin) rather than an invented one.
+        # The GWTC-3 Default spin model (Table XII) is a Beta distribution in
+        # component spin magnitude plus a cos-tilt mixture; this likelihood
+        # works in chi_eff, so the two parameterisations cannot be identified
+        # and dressing one up as the other would be a fabrication.  The rate
+        # law is likewise the repo's (1+z)^(gamma-1); only the fiducial gamma
+        # is taken from the paper (its kappa), which the registry entry notes.
+        self.spin_component = TruncatedGaussianSpin(
+            ParamSpec(r"$\mu_\chi$", CHI_MU.lo, CHI_MU.hi, name="mu_chi"),
+            ParamSpec(r"$\sigma_\chi$", CHI_SIGMA.lo, CHI_SIGMA.hi, name="sigma_chi"),
+        )
+        self.gamma_spec = ParamSpec(r"$\gamma$", -10.0, 10.0)
+
+    @property
+    def param_specs(self):
+        return [
+            *self.mass_component.param_specs,
+            *self.pairing_component.param_specs,
+            *self.spin_component.param_specs,
+            self.gamma_spec,
+        ]
+
+    @property
+    def constraint_groups(self):
+        """No joint prior constraints -- deliberately, and this is the place to
+        say why rather than leave the absence to be read as an oversight.
+
+        The GWTC-5 fiducial model carries two low-mass edges (``m_1,low`` and
+        ``m_2,low``) whose Table 5 prior is CONDITIONAL, which is what the
+        ``conditional_upper`` cube map in
+        :func:`~darksirens.inference.prior.make_prior_transform` exists for.
+        Table VI has ONE minimum mass: the same ``m_min`` sets the primary-mass
+        taper (Eq. B4) and the mass-ratio taper (Eq. B7), and the paper says so
+        explicitly -- "a single minimum mass is imposed upon all BH".  There is
+        therefore no ordered pair to constrain here.  Adding a second low-mass
+        parameter so that a cube map would have something to act on would
+        invent a parameter the model does not have; leaving ``ordered_le`` on a
+        pair that does not exist would be worse.  ``m_min`` and ``m_max`` are
+        not an ordered pair either: their Table VI priors, U(2, 10) and
+        U(30, 100), are disjoint, so ``m_max > m_min`` holds identically and no
+        prior volume is wasted.
+        """
+        return ()
+
+    def prior_bounds(self):
+        return pack_specs(*self.param_specs)
+
+    def log_p_pop(self, m1, q, z, chieff, theta):
+        idx = 0
+        tm = theta[idx : idx + self.mass_component.n_params]
+        idx += self.mass_component.n_params
+        tp = theta[idx : idx + self.pairing_component.n_params]
+        idx += self.pairing_component.n_params
+        ts = theta[idx : idx + self.spin_component.n_params]
+        gamma = theta[idx + self.spin_component.n_params]
+
+        # Eq. B7 shares the mass model's taper parameters; passing anything
+        # else here (a separate secondary-mass edge, say) would be a different
+        # model from the published one.
+        m_min, delta_m = tm[1], tm[6]
+
+        mass_norm = self.mass_component._norm(tm)
+        spin_norm = self.spin_component._norm(ts)
+        p = (
+            self.mass_component(m1, tm, norm=mass_norm)
+            * self.pairing_component(m1, q, m_min, delta_m, tp)
+            * self.spin_component(chieff, ts, norm=spin_norm)
+        )
+        log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
+        return log_p + (gamma - 1.0) * jnp.log1p(z)
+
+
 _LOG_SQRT_2PI = 0.9189385332046727
 _EPS = 1.0e-30
 

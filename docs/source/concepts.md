@@ -73,7 +73,7 @@ priors, fiducials, and display names:
 
 | Curated name | Display label | Notes |
 | --- | --- | --- |
-| `powerlaw+peak` | `PL+G` | Standard LVK-style power law plus peak. |
+| `powerlaw+peak` | `PL+G` | Curated test composition, **not** a GWTC-like population: its fiducial puts `w_G = 0.90` in the Gaussian peak (GWTC-3 measures `lambda_peak = 0.038`) and its peak is untapered on primary mass. Kept verbatim so archived fixed-population runs stay comparable. For the published model use `gwtc3_fiducial_plpeak`. |
 | `brokenpowerlaw+2peaks` | `BPL+2G` | Broken power law plus two Gaussian peaks. |
 | `brokenpowerlaw+3peaks` | `BPL+3G` | Broken power law plus three Gaussian peaks. |
 | `brokenpowerlaw+2peaks+powerlaw` | `BPL+2G+PL` | Adds a high-mass power-law tail. |
@@ -81,12 +81,13 @@ priors, fiducials, and display names:
 
 Examples:
 
-- `powerlaw+peak` — LVK POWER LAW + PEAK
+- `powerlaw+peak` — curated power law plus peak (see the note in the table above; it is not the published GWTC-3 model)
+- `gwtc3_fiducial_plpeak` — the GWTC-3 POWER LAW + PEAK model, exactly as published in arXiv:2111.03634 Table VI and Eqs. B4–B7: the low-mass taper multiplies the whole mixture (peak included), the mass-ratio taper shares the same `m_min` and `delta_m`, and the prior box is Table VI verbatim
 - `brokenpowerlaw+2peaks+powerlaw` — BPL + two peaks + high-mass tail
 - `2powerlaws+3peaks` — five mass components; add `--shared_beta false`, `--shared_spin false`, or `--shared_gamma false` for per-component beta, spin, or redshift evolution
 - `gp_mass`, `gp_mass_pairing`, `gp_mass_pairing_joint` — Gaussian-process models
-- `golomb_1g`, `golomb_1g+tail`, `gwtc5_fiducial_bpl2peaks` — bespoke
-  (non-mixture) models registered explicitly
+- `golomb_1g`, `golomb_1g+tail`, `gwtc5_fiducial_bpl2peaks`,
+  `gwtc3_fiducial_plpeak` — bespoke (non-mixture) models registered explicitly
 
 ### Parameter order, weights, and labels
 
