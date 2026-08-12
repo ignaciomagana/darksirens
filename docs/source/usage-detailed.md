@@ -61,7 +61,7 @@ The GW posterior sample file is a gwcat HDF5 export passed with:
 --gw_path PATH_TO_GW_POSTERIORS.h5
 ```
 
-Create it with `gwcat.GWCatalog._to_darksirens_format(...)`. The loader requires `format_version="gwcat-1.0"` plus the gwcat-exported posterior datasets and metadata documented in [Data formats](data-formats.md). It rejects raw PE files and files that rely on darksirens to fill in missing `chieff`, `p_pe`, or source-mass arrays.
+Create it with `gwcat.GWCatalog.to_darksirens(...)`, or with the versioned export pinned to the chi_eff basis: `GWCatalog.export(path, spin_basis="chieff")`. Note that `export()` with no `spin_basis` resolves to gwcat's registry default, which is the `component` basis and is **not** loadable here. The loader requires `format_version="gwcat-1.0"` plus the gwcat-exported posterior datasets and metadata documented in [Data formats](data-formats.md). It rejects raw PE files and files that rely on darksirens to fill in missing `chieff`, `p_pe`, or source-mass arrays.
 
 The likelihood convention uses the canonical sample basis:
 
