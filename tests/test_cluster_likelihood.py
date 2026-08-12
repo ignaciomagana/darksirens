@@ -136,6 +136,36 @@ def _synth_lensed_pair(z_true=0.7, m1src_true=30.0, q_true=0.7,
 # A. PairKDE unit tests
 # ============================================================================
 
+def _whitened_kde_oracle(kde, queries, samples, log_w, n_norm):
+    """Independent numpy oracle for the full-covariance pair KDE.
+
+    Rebuilds the estimator from scratch in whitened coordinates -- including
+    log_norm from the bandwidth and the whitening Jacobian, rather than reading
+    ``kde.log_norm`` -- so the normalization is checked, not assumed. The q = 1
+    reflection is applied to the QUERY, which is the form that stays exact once
+    the kernel has cross-covariance (see log_eval_pair_kde's docstring).
+    """
+    from scipy.special import logsumexp as sp_lse
+
+    mean = np.asarray(kde.mean)
+    l_inv = np.asarray(kde.l_inv)
+    h = np.asarray(np.exp(kde.log_h))
+    log_det_l = -float(np.log(abs(np.linalg.det(l_inv))))
+    log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum() - log_det_l
+    samples_w = (samples - mean) @ l_inv.T
+
+    out = np.empty(len(queries))
+    for k, q_pt in enumerate(queries):
+        q_ref = np.array(q_pt, dtype=float).copy()
+        q_ref[1] = 2.0 - q_ref[1]
+        u = (q_pt - mean) @ l_inv.T
+        u_ref = (q_ref - mean) @ l_inv.T
+        direct = -0.5 * np.sum(((u - samples_w) / h) ** 2, axis=-1)
+        mirror = -0.5 * np.sum(((u_ref - samples_w) / h) ** 2, axis=-1)
+        out[k] = log_norm + sp_lse(np.logaddexp(direct, mirror) + log_w) - np.log(n_norm)
+    return out
+
+
 class TestPairKDE:
     def test_silverman_bandwidth_scales_with_N(self):
         """h ~ N^{-1/(d+4)} for d=4."""
@@ -176,8 +206,6 @@ class TestPairKDE:
         # Hand-written reference: π_PE(θ) = (1/N) Σ_t K_h(θ - θ_t).
         # The darksirens estimator returns π_PE / p_prop = π_PE / 0.5.
         samples = np.stack([m1det, q, dL, chieff], axis=-1)
-        h = np.asarray(np.exp(kde.log_h))
-        log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum()
 
         queries = np.array([
             [35.0, 0.7, 1000.0, 0.0],
@@ -185,14 +213,10 @@ class TestPairKDE:
             [30.0, 0.8, 800.0, -0.05],
         ])
 
-        log_p_ref = np.empty(queries.shape[0])
-        for i, q_pt in enumerate(queries):
-            diffs_sq = np.sum(((q_pt - samples) / h) ** 2, axis=-1)
-            log_kernel = -0.5 * diffs_sq
-            from scipy.special import logsumexp as sp_lse
-            # π_PE estimate; then multiply by 1/p_prop = 1/0.5 = 2
-            log_pi_PE = log_norm + sp_lse(log_kernel) - np.log(N)
-            log_p_ref[i] = log_pi_PE - np.log(p_prop_const)
+        # π_PE estimate carrying 1/p_prop = 1/0.5 = 2 per sample.
+        log_p_ref = _whitened_kde_oracle(
+            kde, queries, samples, np.full(N, -np.log(p_prop_const)), N
+        )
 
         log_p_ours = log_eval_pair_kde(kde, jnp.asarray(queries))
         np.testing.assert_allclose(
@@ -216,14 +240,11 @@ class TestPairKDE:
 
         kde = make_pair_kde(m1det, q, dL, chieff, prior_wt)
         samples = np.stack([m1det, q, dL, chieff], axis=-1)
-        h = np.asarray(np.exp(kde.log_h))
-        log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum()
         query = np.array([[35.0, 0.7, 1000.0, 0.0]])
 
-        from scipy.special import logsumexp as sp_lse
-        diffs_sq = np.sum(((query[0] - samples) / h) ** 2, axis=-1)
-        log_pi_PE = log_norm + sp_lse(-0.5 * diffs_sq) - np.log(N)
-        log_ref = log_pi_PE - np.log(1.0 / N)
+        log_ref = _whitened_kde_oracle(
+            kde, query, samples, np.full(N, -np.log(1.0 / N)), N
+        )[0]
 
         log_ours = np.asarray(log_eval_pair_kde(kde, jnp.asarray(query)))[0]
         np.testing.assert_allclose(log_ours, log_ref, rtol=1e-10, atol=1e-12)
@@ -968,9 +989,18 @@ def test_pair_kde_boundary_reflection_doubles_at_q_one():
 
     query = np.array([[35.0, 1.0, 1000.0, 0.0]])
     samples = np.stack([m1det, q, dL, chieff], axis=-1)
+    # Unreflected oracle in the whitened coordinates the kernel now lives in.
+    # At q = 1 the query is its own mirror, so the direct and mirror terms
+    # coincide and the estimator must exceed this by exactly log 2 -- a
+    # statement about the reflection alone, independent of the covariance.
+    mean = np.asarray(kde.mean)
+    l_inv = np.asarray(kde.l_inv)
     h = np.asarray(np.exp(kde.log_h))
-    log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum()
-    diffs_sq = np.sum(((query[0] - samples) / h) ** 2, axis=-1)
+    log_det_l = -float(np.log(abs(np.linalg.det(l_inv))))
+    log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum() - log_det_l
+    samples_w = (samples - mean) @ l_inv.T
+    u = (query[0] - mean) @ l_inv.T
+    diffs_sq = np.sum(((u - samples_w) / h) ** 2, axis=-1)
     log_unreflected = log_norm + sp_lse(-0.5 * diffs_sq) - np.log(N)
 
     log_ours = np.asarray(log_eval_pair_kde(kde, jnp.asarray(query)))[0]
@@ -979,9 +1009,8 @@ def test_pair_kde_boundary_reflection_doubles_at_q_one():
 
 def test_pair_kde_reflection_matches_mirrored_oracle_near_boundary():
     """Full oracle check: the estimator must equal a numpy KDE evaluated with
-    the sample set augmented by its q-mirror about 1 (same weights, same
-    bandwidth, kernel mass restricted to the direct+mirror pair)."""
-    from scipy.special import logsumexp as sp_lse
+    the query augmented by its q-mirror about 1 (same weights, same bandwidth,
+    kernel mass restricted to the direct+mirror pair)."""
 
     rng = np.random.default_rng(11)
     N = 250
@@ -998,18 +1027,7 @@ def test_pair_kde_reflection_matches_mirrored_oracle_near_boundary():
         [36.0, 0.90, 1100.0, -0.05],
     ])
     samples = np.stack([m1det, q, dL, chieff], axis=-1)
-    mirrored = samples.copy()
-    mirrored[:, 1] = 2.0 - mirrored[:, 1]
-    h = np.asarray(np.exp(kde.log_h))
-    log_norm = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h).sum()
-    log_w = -np.log(p_prop)
-
-    log_ref = np.empty(queries.shape[0])
-    for k, q_pt in enumerate(queries):
-        direct = -0.5 * np.sum(((q_pt - samples) / h) ** 2, axis=-1)
-        mirror = -0.5 * np.sum(((q_pt - mirrored) / h) ** 2, axis=-1)
-        log_kernel = np.logaddexp(direct, mirror)
-        log_ref[k] = log_norm + sp_lse(log_kernel + log_w) - np.log(N)
+    log_ref = _whitened_kde_oracle(kde, queries, samples, -np.log(p_prop), N)
 
     log_ours = np.asarray(log_eval_pair_kde(kde, jnp.asarray(queries)))
     np.testing.assert_allclose(log_ours, log_ref, rtol=1e-12, atol=1e-12)
@@ -1353,3 +1371,159 @@ def test_time_mark_requires_observing_window():
             sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
             pair_marks=1, delta_t_obs=jnp.asarray(1e5), sigma_delta_t=jnp.asarray(3600.0),
         )
+
+
+# --- F-034: the kernel is scaled to the covariance, not the marginals -------
+
+
+def _correlated_pe(n=800, seed=5):
+    """PE-like samples on a thin ridge: dL_app tracks m1det at r = 0.995.
+
+    This is the geometry the marginal-diagonal bandwidth got wrong -- the
+    posterior's width ACROSS the ridge is ~10x smaller than either marginal.
+    """
+    rng = np.random.default_rng(seed)
+    t = rng.normal(0.0, 1.0, n)
+    perp = rng.normal(0.0, 1.0, n)
+    m1det = 35.0 + 3.0 * t + 0.3 * perp
+    dL = 1000.0 + 100.0 * t - 10.0 * perp
+    q = np.clip(rng.normal(0.7, 0.05, n), 0.1, 1.0)
+    chieff = rng.normal(0.0, 0.1, n)
+    return m1det, q, dL, chieff
+
+
+def test_whitened_kernel_does_not_smear_across_the_ridge():
+    """Displacing ACROSS a thin correlated ridge must cost real density.
+
+    The old rule set h_k from the MARGINAL sigma_k, so the kernel was ~10x
+    wider than the posterior in the tight direction and reported a large
+    density at points the posterior does not support -- the tail inflation of
+    F-034, read pointwise by the pair branch. Scaling to the covariance makes
+    the same displacement land in the kernel's tail, where it belongs.
+    """
+    m1det, q, dL, chieff = _correlated_pe()
+    n = m1det.size
+    kde = make_pair_kde(m1det, q, dL, chieff, np.ones(n))
+
+    samples = np.stack([m1det, q, dL, chieff], axis=-1)
+    centre = samples.mean(axis=0)
+    # Step across the ridge: +m1det with dL held down, which the correlation
+    # says should not happen. Sized to the PERPENDICULAR spread, not the
+    # marginal, so it is a genuine 3-sigma-ish excursion of the posterior.
+    off_ridge = centre + np.array([2.0, 0.0, -66.0, 0.0])
+
+    log_whitened = float(np.asarray(
+        log_eval_pair_kde(kde, jnp.asarray(off_ridge[None, :])))[0])
+
+    # What the marginal-diagonal rule would have said at the same point.
+    from scipy.special import logsumexp as sp_lse
+    sigma = samples.std(axis=0, ddof=1)
+    h_marginal = (4.0 / (6 * n)) ** 0.125 * sigma
+    log_norm_m = -0.5 * 4 * np.log(2.0 * np.pi) - np.log(h_marginal).sum()
+    d_sq = np.sum(((off_ridge - samples) / h_marginal) ** 2, axis=-1)
+    log_marginal = log_norm_m + sp_lse(-0.5 * d_sq) - np.log(n)
+
+    # Measured ~42 nats apart on this fixture: the marginal rule barely
+    # notices an excursion the posterior does not support, the whitened one
+    # puts it deep in the kernel tail where it belongs.
+    assert log_whitened < log_marginal - 10.0, (
+        f"whitened={log_whitened:.3f} vs marginal={log_marginal:.3f}: the "
+        "covariance-scaled kernel must assign far less density off the ridge"
+    )
+
+
+def test_whitened_kernel_still_tracks_the_density_on_the_ridge():
+    """Whitening must not simply deflate everything: on the ridge, where the
+    posterior really has support, the estimate stays comparable."""
+    m1det, q, dL, chieff = _correlated_pe()
+    n = m1det.size
+    kde = make_pair_kde(m1det, q, dL, chieff, np.ones(n))
+    samples = np.stack([m1det, q, dL, chieff], axis=-1)
+    centre = samples.mean(axis=0)
+    on_ridge = centre + np.array([3.0, 0.0, 100.0, 0.0])   # along the ridge
+
+    log_on = float(np.asarray(
+        log_eval_pair_kde(kde, jnp.asarray(on_ridge[None, :])))[0])
+    log_centre = float(np.asarray(
+        log_eval_pair_kde(kde, jnp.asarray(centre[None, :])))[0])
+    # One sigma along the ridge: down, but nothing like the off-ridge cliff.
+    assert log_centre - 3.0 < log_on < log_centre
+
+
+def test_query_reflection_differs_from_sample_reflection_under_correlation():
+    """Documents why the q = 1 reflection moved to the QUERY.
+
+    With a diagonal kernel the two are algebraically identical. With
+    cross-covariance they are not, and only reflecting the query preserves
+    unit kernel mass on q <= 1. This test pins the distinction so a future
+    edit cannot quietly revert to the sample reflection.
+    """
+    rng = np.random.default_rng(23)
+    n = 600
+    t = rng.normal(0.0, 1.0, n)
+    q = np.clip(1.0 - np.abs(0.04 * t + 0.01 * rng.normal(0.0, 1.0, n)), 0.1, 1.0)
+    m1det = 35.0 + 3.0 * t          # strongly correlated with q
+    dL = rng.normal(1000.0, 100.0, n)
+    chieff = rng.normal(0.0, 0.1, n)
+    kde = make_pair_kde(m1det, q, dL, chieff, np.ones(n))
+
+    query = np.array([[35.0, 0.995, 1000.0, 0.0]])
+    ours = float(np.asarray(log_eval_pair_kde(kde, jnp.asarray(query)))[0])
+
+    # Sample-reflection variant, evaluated with the same whitened kernel.
+    from scipy.special import logsumexp as sp_lse
+    mean = np.asarray(kde.mean)
+    l_inv = np.asarray(kde.l_inv)
+    h = np.asarray(np.exp(kde.log_h))
+    log_norm = np.asarray(kde.log_norm)
+    samples = np.stack([m1det, q, dL, chieff], axis=-1)
+    mirrored = samples.copy()
+    mirrored[:, 1] = 2.0 - mirrored[:, 1]
+    u = (query[0] - mean) @ l_inv.T
+    sw = (samples - mean) @ l_inv.T
+    mw = (mirrored - mean) @ l_inv.T
+    direct = -0.5 * np.sum(((u - sw) / h) ** 2, axis=-1)
+    mirror = -0.5 * np.sum(((u - mw) / h) ** 2, axis=-1)
+    sample_reflected = float(
+        log_norm + sp_lse(np.logaddexp(direct, mirror)) - np.log(n))
+
+    assert abs(ours - sample_reflected) > 1e-6, (
+        "query and sample reflection agreed; the kernel has lost its "
+        "cross-covariance in q, or the reflection reverted to the sample form"
+    )
+
+
+def test_rank_deficient_covariance_falls_back_to_the_marginal_rule():
+    """Exactly collinear coordinates cannot support a 4x4 covariance.
+
+    A synthetic PE product whose chi_eff is a deterministic function of m1det
+    (no zero-variance coordinate to flag, but a singular covariance) degrades
+    to the marginal diagonal rather than failing the run -- and warns, because
+    that fallback carries exactly the inflation whitening exists to remove.
+    """
+    rng = np.random.default_rng(31)
+    n = 300
+    m1det = rng.normal(35.0, 3.0, n)
+    with pytest.warns(UserWarning, match="not positive definite"):
+        kde = make_pair_kde(
+            m1det, np.clip(rng.normal(0.7, 0.05, n), 0.1, 1.0),
+            rng.normal(1000.0, 100.0, n),
+            0.01 * (m1det - 35.0),           # collinear with m1det by construction
+            np.ones(n),
+        )
+    assert np.all(np.isfinite(np.asarray(kde.samples_w)))
+    assert np.isfinite(float(np.asarray(kde.log_norm)))
+
+
+def test_bandwidth_scale_still_multiplies_the_whitened_bandwidth():
+    """The sensitivity knob survives whitening as an exact multiplier."""
+    m1det, q, dL, chieff = _correlated_pe(n=200)
+    prior_wt = np.ones(m1det.size)
+    full = make_pair_kde(m1det, q, dL, chieff, prior_wt)
+    half = make_pair_kde(m1det, q, dL, chieff, prior_wt, bandwidth_scale=0.5)
+    np.testing.assert_allclose(
+        np.asarray(np.exp(half.log_h)), 0.5 * np.asarray(np.exp(full.log_h)),
+        rtol=1e-12,
+    )
+    # Whitening is a property of the samples, not of the bandwidth.
+    np.testing.assert_allclose(np.asarray(half.l_inv), np.asarray(full.l_inv))
