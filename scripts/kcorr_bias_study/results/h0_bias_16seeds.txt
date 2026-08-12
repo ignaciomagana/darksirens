@@ -1,0 +1,53 @@
+# 16 realizations from /tmp/claude-88592/-hildafs-projects-phy230014p-magana-src-darksirens-review/dc0432e4-a078-46a5-a9d0-bc580299b8eb/scratchpad/prod2/h0_s*.json
+# mock: ngal=300000 nevents=400 dl_frac_err=0.05 m_lim=19.0 z in [0.02,0.5] kcorr=[2.0, -1.0] H0_true=70.0
+# grid: Om0x5 w0x5 wax3 M0hatx9 H0x81 (H0 in [40.0,110.0])
+
+## offline fit: n_obs = 35725, Laplace sd(M0hat) = 0.00965 mag
+## delta(Theta) over the sampled prior box: -0.1494 .. +0.1248 mag = -15.5 .. +12.9 Laplace sd
+## dsigma_M(Theta) over the prior box: -0.0314 .. +0.0364 mag = -6.9 .. +8.0 Laplace sd (sd(sigma_M) = 0.00458)
+
+## worst-case anchor residual left by each treatment [mag]
+treatment             max|resid|  / Laplace sd
+stamped                   0.1494          16.2
+firstorder_meandm         0.1002          10.5
+firstorder_mle            0.0252           2.7
+   MLE slopes dM0hat/dTheta: Om0 +0.1763, w0 +0.1097, wa +0.0038
+
+## recovered posteriors (mean over 16 realizations)
+model                   H0 mean    H0 sd
+reanchored               70.080    3.249   (realization scatter of the mean: 3.147)
+stamped                  69.798    3.145   (realization scatter of the mean: 3.420)
+firstorder_meandm        70.130    3.191   (realization scatter of the mean: 2.975)
+firstorder_mle           70.077    3.252   (realization scatter of the mean: 3.152)
+
+## PAIRED bias vs 'reanchored' (the exact per-proposal re-anchor)
+
+### H0   (sigma_stat = 3.2490)
+model                      bias       sem  bias/sigma  sem(b/s)
+stamped                 -0.2822    0.2637     -0.0938    0.0787
+firstorder_meandm       +0.0498    0.0925     +0.0191    0.0291
+firstorder_mle          -0.0030    0.0061     -0.0008    0.0020
+
+### Om0   (sigma_stat = 0.0700)
+model                      bias       sem  bias/sigma  sem(b/s)
+stamped                 +0.0002    0.0007     +0.0033    0.0096
+firstorder_meandm       +0.0004    0.0005     +0.0064    0.0070
+firstorder_mle          -0.0004    0.0005     -0.0055    0.0071
+
+### w0   (sigma_stat = 0.5652)
+model                      bias       sem  bias/sigma  sem(b/s)
+stamped                 +0.0520    0.0497     +0.0935    0.0836
+firstorder_meandm       -0.0135    0.0170     -0.0223    0.0297
+firstorder_mle          -0.0005    0.0022     -0.0002    0.0041
+
+### wa   (sigma_stat = 1.6231)
+model                      bias       sem  bias/sigma  sem(b/s)
+stamped                 +0.0014    0.0130     +0.0009    0.0080
+firstorder_meandm       -0.0065    0.0086     -0.0039    0.0053
+firstorder_mle          -0.0002    0.0020     -0.0001    0.0012
+
+## posterior WIDTH ratio vs the exact re-anchor (>1 = broader, <1 = over-confident)
+model                        H0        Om0         w0         wa
+stamped                  0.9642     1.0014     0.9559     1.0011
+firstorder_meandm        0.9835     0.9996     0.9941     0.9999
+firstorder_mle           1.0007     1.0010     1.0024     1.0001

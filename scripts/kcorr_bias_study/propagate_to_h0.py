@@ -191,32 +191,42 @@ def anchor_table(mock, a, thetas):
     zfit = mock["z_obs"][mock["z_obs"] >= 0.01]
     base_dm = dm100(zfit, **FID)
 
-    # Central-difference MLE slopes at the fiducial.
+    # Central-difference MLE slopes at the fiducial, for BOTH sampled
+    # selection parameters: sigma_M's prior centre is stale for exactly the
+    # same reason M0hat's is.
     steps = dict(Om0=0.05, w0=0.5, wa=1.0)
-    slope = {}
+    slope, slope_s = {}, {}
     for key, h in steps.items():
         hi, lo = dict(FID), dict(FID)
         hi[key] += h
         lo[key] -= h
-        slope[key] = (_fit(**hi).M0hat - _fit(**lo).M0hat) / (2.0 * h)
+        fh, fl = _fit(**hi), _fit(**lo)
+        slope[key] = (fh.M0hat - fl.M0hat) / (2.0 * h)
+        slope_s[key] = (fh.sigma_M - fl.sigma_M) / (2.0 * h)
 
     delta = np.zeros(len(thetas))
+    dsig = np.zeros(len(thetas))
     meandd = np.zeros(len(thetas))
     lin = np.zeros(len(thetas))
+    lin_s = np.zeros(len(thetas))
     for i, (Om0, w0, wa) in enumerate(thetas):
         f = _fit(Om0, w0, wa)
+        d = (Om0 - FID["Om0"], w0 - FID["w0"], wa - FID["wa"])
         delta[i] = float(f.M0hat - base.M0hat)
+        dsig[i] = float(f.sigma_M - base.sigma_M)
         meandd[i] = float((dm100(zfit, Om0, w0, wa) - base_dm).mean())
-        lin[i] = (slope["Om0"] * (Om0 - FID["Om0"])
-                  + slope["w0"] * (w0 - FID["w0"])
-                  + slope["wa"] * (wa - FID["wa"]))
+        lin[i] = sum(slope[k] * v for k, v in zip(("Om0", "w0", "wa"), d))
+        lin_s[i] = sum(slope_s[k] * v for k, v in zip(("Om0", "w0", "wa"), d))
     cov = np.asarray(base.cov, float)
-    return (base, float(np.sqrt(cov[0, 0])), delta, meandd, lin,
-            {k: float(v) for k, v in slope.items()})
+    return (base, float(np.sqrt(cov[0, 0])), float(np.sqrt(cov[1, 1])),
+            delta, dsig, meandd, lin, lin_s,
+            {k: float(v) for k, v in slope.items()},
+            {k: float(v) for k, v in slope_s.items()})
 
 
 # ---------------------------------------------------------------- likelihood
-def run_grid(mock, a, base, sd_M0hat, thetas, delta, meandd, lin, mode):
+def run_grid(mock, a, base, sd_M0hat, thetas, delta, dsig, meandd, lin,
+             lin_s, mode):
     """log-posterior on (H0, Om0, w0, wa, M0hat) for one anchoring mode."""
     zg = np.linspace(a.zlo, a.zhi, a.nz)
     # Observed-catalog redshift histogram on the same grid (data; fixed).
@@ -225,7 +235,11 @@ def run_grid(mock, a, base, sd_M0hat, thetas, delta, meandd, lin, mode):
     zc = 0.5 * (edges[1:] + edges[:-1])
 
     H0 = np.linspace(a.h0_lo, a.h0_hi, a.nh0)
-    M0 = base.M0hat + sd_M0hat * np.linspace(-4, 4, a.nm0)
+    # nm0 = 1 PINS M0hat at the fit value: the large-catalog limit in
+    # which the Laplace sd -> 0 and the sampler has no freedom to
+    # absorb any part of the stale anchor.
+    M0 = (np.array([base.M0hat]) if a.nm0 == 1 else
+          base.M0hat + sd_M0hat * np.linspace(-4, 4, a.nm0))
     logprior_M0 = -0.5 * ((M0 - base.M0hat) / sd_M0hat) ** 2
 
     dl_obs = mock["dl_obs"][:, None]                 # (E, 1)
@@ -255,17 +269,20 @@ def run_grid(mock, a, base, sd_M0hat, thetas, delta, meandd, lin, mode):
         p_host = np.empty((a.nm0, zc.size))
         ok = np.ones(a.nm0, dtype=bool)
         for im, m0 in enumerate(M0):
+            sig_eff = base.sigma_M
             if mode == "stamped":
                 m0_eff = m0
             elif mode == "reanchored":
                 m0_eff = m0 + delta[it]
+                sig_eff = base.sigma_M + dsig[it]
             elif mode == "firstorder_meandm":
                 m0_eff = m0 - meandd[it]
             elif mode == "firstorder_mle":
                 m0_eff = m0 + lin[it]
+                sig_eff = base.sigma_M + lin_s[it]
             else:
                 raise ValueError(mode)
-            C = np.asarray(c_sel_gaussian(zc, a.m_lim, m0_eff, base.sigma_M,
+            C = np.asarray(c_sel_gaussian(zc, a.m_lim, m0_eff, sig_eff,
                                           70.0, Om0, w0, wa,
                                           k_corr_coeffs=tuple(a.kcorr) or None),
                            float)
@@ -368,7 +385,8 @@ def main(argv=None):
     wa = np.linspace(waPriorLower, waPriorUpper, a.nwa)
     thetas = [(float(o), float(x), float(y)) for o in om for x in w0 for y in wa]
 
-    base, sd_M0hat, delta, meandd, lin, slope = anchor_table(mock, a, thetas)
+    (base, sd_M0hat, sd_sigma, delta, dsig, meandd, lin, lin_s,
+     slope, slope_s) = anchor_table(mock, a, thetas)
     print(f"[mock] n_all={mock['n_all']} n_obs={mock['n_obs']} "
           f"n_events={a.nevents}", file=sys.stderr)
     print(f"[fit ] M0hat={base.M0hat:.5f} sigma_M={base.sigma_M:.5f} "
@@ -383,6 +401,11 @@ def main(argv=None):
                        laplace_sd_M0hat=sd_M0hat),
            "delta_range": [float(delta.min()), float(delta.max())],
            "mle_slopes": slope,
+           "mle_slopes_sigma": slope_s,
+           "laplace_sd_sigma_M": sd_sigma,
+           "dsigma_range": [float(dsig.min()), float(dsig.max())],
+           "dsigma_over_laplace_sd": [float(dsig.min() / sd_sigma),
+                                      float(dsig.max() / sd_sigma)],
            "approx_residual_mag": {
                "firstorder_meandm": {
                    "max_abs": float(np.abs(delta + meandd).max()),
@@ -400,8 +423,8 @@ def main(argv=None):
     ref = None
     for mode in ("reanchored", "stamped", "firstorder_meandm",
                  "firstorder_mle"):
-        H0, M0, lp = run_grid(mock, a, base, sd_M0hat, thetas, delta, meandd,
-                              lin, mode)
+        H0, M0, lp = run_grid(mock, a, base, sd_M0hat, thetas, delta, dsig,
+                              meandd, lin, lin_s, mode)
         m = marginals(H0, lp)
         entry = dict(H0=m, Om0=theta_marginal(thetas, om, lp, 0),
                      w0=theta_marginal(thetas, w0, lp, 1),

@@ -44,6 +44,14 @@ def main(pattern):
           f"{dmin.mean():+.4f} .. {dmax.mean():+.4f} mag "
           f"= {dmin.mean()/sd.mean():+.1f} .. {dmax.mean()/sd.mean():+.1f} "
           f"Laplace sd")
+    if "dsigma_range" in runs[0]:
+        sds = np.array([r["laplace_sd_sigma_M"] for r in runs])
+        lo = np.array([r["dsigma_range"][0] for r in runs])
+        hi = np.array([r["dsigma_range"][1] for r in runs])
+        print(f"## dsigma_M(Theta) over the prior box: {lo.mean():+.4f} .. "
+              f"{hi.mean():+.4f} mag = {lo.mean()/sds.mean():+.1f} .. "
+              f"{hi.mean()/sds.mean():+.1f} Laplace sd "
+              f"(sd(sigma_M) = {sds.mean():.5f})")
     if "approx_residual_mag" in runs[0]:
         print("\n## worst-case anchor residual left by each treatment [mag]")
         print(f"{'treatment':<20} {'max|resid|':>11} {'/ Laplace sd':>13}")
