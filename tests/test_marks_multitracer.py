@@ -257,3 +257,29 @@ def test_unmarked_catalog_runs_h1_inside_marked_mixture():
     v1 = float(ll(jnp.asarray([mid, 0.5, 1.2])))
     assert np.isfinite(v0) and np.isfinite(v1)
     assert v0 != v1
+
+
+def test_factory_rejects_saturating_marks():
+    """An uncentred mark table must be refused where the likelihood is built.
+
+    Marks this large put every real galaxy past the +-7 log-h rail everywhere
+    in the eta prior, so the clipped log h is constant in eta and the eta
+    posterior collapses to the h == 1 null.  Nothing downstream errors on that
+    -- the run just reports a flat posterior -- so the factory has to catch it.
+    """
+    pop_fid, overrides, fixed, _ = _pop_bits()
+    with pytest.raises(ValueError, match="clip"):
+        _marked_likelihood(
+            [_marked_bundle(mark_scale=20.0)], (("logmstar",),),
+            fixed, pop_fid, overrides,
+        )
+
+
+def test_factory_accepts_centred_marks():
+    """The same fixture at its normal scale builds cleanly (guard is not a
+    blanket ban on marked runs)."""
+    pop_fid, overrides, fixed, _ = _pop_bits()
+    _marked_likelihood(
+        [_marked_bundle(mark_scale=1.0)], (("logmstar",),),
+        fixed, pop_fid, overrides,
+    )

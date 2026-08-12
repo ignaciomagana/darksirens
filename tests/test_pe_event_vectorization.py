@@ -154,7 +154,19 @@ def _shared_physics_multi(nEvents, nsamp=NSAMP, n_sel=NSEL):
 
 
 def _mark_table():
-    vals = 10.0 + 0.2 * np.arange(NPIX, dtype=float).reshape(NPIX, 1)
+    """Per-pixel marks, z-CENTRED as the loader delivers them.
+
+    The raw ~10 dex zero point this fixture used to carry pushed every galaxy
+    past the +-7 log-h clip for any |eta| >= 0.7, which made the marked cell
+    test a dead eta direction: log h was pinned to the rail, so the two
+    vectorization paths agreed trivially rather than because they compute the
+    same marked prior.  Centring keeps the per-pixel variation and puts eta
+    back in the live range (max|m| * eta_bound < clip).
+    """
+    idx = np.arange(NPIX, dtype=float)
+    centred = idx - idx.mean()
+    # Span +-1 dex: with eta_bound = 5 that is max|log h| = 5, inside the rail.
+    vals = (centred / np.abs(centred).max()).reshape(NPIX, 1)
     return jnp.asarray(vals)
 
 

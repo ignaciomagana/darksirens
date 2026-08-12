@@ -253,3 +253,126 @@ def test_z_independent_marks_leave_the_prior_unchanged():
         marked = _prior(cat, mark_model="loglinear", eta=[eta],
                         mark_names=("logmstar",))
         assert np.max(np.abs(np.exp(base) - np.exp(marked))) < 1e-9, eta
+
+
+# --- eta-liveness guard: uncentred marks saturate the log-h clip -------------
+
+
+def _mark_table(mean, spread, seed=0):
+    """(4, 5) mark table with 3 real galaxies per row, drawn about ``mean``."""
+    rng = np.random.default_rng(seed)
+    arr = np.zeros((4, 5))
+    arr[:, :3] = mean + spread * rng.normal(size=(4, 3))
+    return jnp.asarray(arr)
+
+
+_NGALS = jnp.asarray(np.full(4, 3, dtype=np.int32))
+
+
+def test_centred_marks_pass_the_liveness_guard():
+    """A z-centred table saturates only its outlier tail, so eta stays live."""
+    from darksirens.marks import check_marks_centred, get_mark_model
+
+    model = get_mark_model("loglinear", ("logmstar",))
+    check_marks_centred(
+        model, {"logmstar": _mark_table(0.0, 0.5)}, _NGALS, where="unit test"
+    )
+
+
+def test_uncentred_marks_are_rejected():
+    """Raw logM* (~10.5 dex) pins every galaxy to the +-7 rail at |eta| <= 5.
+
+    The clip then makes log h locally constant in eta over the whole catalog:
+    the posterior would come back flat and the run would look converged while
+    measuring nothing, which is exactly what this guard exists to stop.
+    """
+    from darksirens.marks import check_marks_centred, get_mark_model
+
+    model = get_mark_model("loglinear", ("logmstar",))
+    with pytest.raises(ValueError, match="marked-host model would be dead"):
+        check_marks_centred(
+            model, {"logmstar": _mark_table(10.5, 0.5)}, _NGALS, where="unit test"
+        )
+
+
+def test_liveness_guard_uses_the_joint_worst_case_over_marks():
+    """Two marks each safe alone can still saturate together.
+
+    log h = sum_k eta_k m_k, and the eta_k are independent, so the reachable
+    |log h| is eta_bound * sum_k |m_k| -- not the per-mark maximum.
+    """
+    from darksirens.marks import check_marks_centred, get_mark_model
+
+    one = _mark_table(1.0, 0.02, seed=1)         # 5 * 1.0 = 5 < 7 on its own
+    model1 = get_mark_model("loglinear", ("logmstar",))
+    check_marks_centred(model1, {"logmstar": one}, _NGALS, where="unit test")
+
+    model2 = get_mark_model("loglinear", ("logmstar", "logssfr"))
+    with pytest.raises(ValueError, match="marked-host model would be dead"):
+        check_marks_centred(
+            model2,
+            {"logmstar": one, "logssfr": _mark_table(1.0, 0.02, seed=2)},
+            _NGALS,
+            where="unit test",
+        )
+
+
+def test_liveness_guard_ignores_padded_slots():
+    """Padding sits at 0 in the mark tables but must not dilute the fraction.
+
+    A table whose REAL galaxies are all saturated must be rejected even when
+    most columns are padding -- counting the zero-filled slots as live galaxies
+    would push the saturated fraction under the threshold and let it through.
+    """
+    from darksirens.marks import check_marks_centred, get_mark_model
+
+    arr = np.zeros((4, 20))
+    arr[:, :2] = 10.5                            # 2 real galaxies, 18 padded
+    model = get_mark_model("loglinear", ("logmstar",))
+    with pytest.raises(ValueError, match="marked-host model would be dead"):
+        check_marks_centred(
+            model,
+            {"logmstar": jnp.asarray(arr)},
+            jnp.asarray(np.full(4, 2, dtype=np.int32)),
+            where="unit test",
+        )
+
+
+def test_liveness_guard_is_a_no_op_for_the_none_model():
+    from darksirens.marks import check_marks_centred, get_mark_model
+
+    check_marks_centred(get_mark_model("none"), {}, _NGALS, where="unit test")
+
+
+def test_flat_field_marks_are_guarded_too():
+    """mu_miss reads the flat full-sky table through the same clip."""
+    from darksirens.marks import check_flat_marks_centred, get_mark_model
+
+    model = get_mark_model("loglinear", ("logmstar",))
+    check_flat_marks_centred(
+        model, jnp.asarray(np.random.default_rng(3).normal(0.0, 0.5, (100, 1))),
+        where="unit test",
+    )
+    with pytest.raises(ValueError, match="would kill mu_miss"):
+        check_flat_marks_centred(
+            model, jnp.asarray(np.full((100, 1), 10.5)), where="unit test"
+        )
+    check_flat_marks_centred(model, None, where="unit test")
+
+
+def test_liveness_guard_defers_to_the_missing_mark_error():
+    """A selected mark with no array is a data error, reported downstream.
+
+    The guard must stay quiet there: complaining about the saturation of a
+    table that does not exist would bury the actual (clear) missing-mark
+    message under an unrelated one.
+    """
+    from darksirens.marks import check_marks_centred, get_mark_model
+
+    model = get_mark_model("loglinear", ("logmstar", "logssfr"))
+    check_marks_centred(
+        model,
+        {"logmstar": _mark_table(10.5, 0.5), "logssfr": None},
+        _NGALS,
+        where="unit test",
+    )
