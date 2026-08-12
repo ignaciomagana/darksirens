@@ -45,11 +45,26 @@ Gaussian marginal the smoothed/true density ratio at separation Δ is
 LENSED branch uses a KDE (cluster_likelihood.py's pair integrand); the
 singleton/unlensed weight is an unsmoothed PE sum, so the smoothing bias does
 NOT cancel in the pair Bayes factor and it favours widely separated (false)
-pairs.  ``make_pair_kde(..., bandwidth_scale=...)`` exists to measure and
-control that: rebuild a candidate pair at 1.0 and 0.5 and compare the pair
-log Bayes factor — a shift of order nats means the kernel, not the physics, is
-setting the answer.  The default is left at the published rule; changing it is
-a validation exercise, not a code fix.
+pairs.  Note WHY it cannot be made to cancel: the pair branch evaluates a
+density POINTWISE, where the kernel inflates the tails, while the singleton
+branch integrates the population model against the event's own samples, which
+a narrow kernel leaves almost unchanged.  The two are not two evaluations of
+one estimator, so smoothing both sides does not remove the bandwidth
+dependence — it has to be attacked in the kernel itself.
+
+What we do about it: the kernel is scaled to the sample COVARIANCE, not to the
+marginal widths (``_whitening_transform``).  σ_k above is a marginal width, and
+PE posteriors are thin correlated ridges in (m1det, q, dL_app, χ_eff), so the
+old diagonal kernel smoothed across the ridge by many times the posterior's
+real extent there — the dominant source of the tail inflation.  Silverman's
+rule is unchanged; it is simply applied in coordinates where its unit-variance
+premise holds.
+
+``make_pair_kde(..., bandwidth_scale=...)`` remains the sensitivity handle:
+rebuild a candidate pair at 1.0 and 0.5 and compare the pair log Bayes factor —
+a shift of order nats means the kernel, not the physics, is setting the answer.
+The default is left at the published rule; changing it is a validation
+exercise, not a code fix.
 """
 
 from __future__ import annotations
@@ -114,18 +129,32 @@ class PairKDE(NamedTuple):
     samples : (N_pe, 4) float64
         Apparent-frame PE samples in the canonical coordinates
         ``(m1det, q, dL_app, chieff)``. Order matches the parent GWEvent's
-        sample ordering.
+        sample ordering. Kept for provenance and diagnostics; the kernel sum
+        runs on ``samples_w``.
+    samples_w : (N_pe, 4) float64
+        The same samples in WHITENED coordinates, ``u_t = L^-1 (θ_t - μ)``.
+        The kernel is isotropic here, so the evaluation loop stays a
+        coordinate-by-coordinate diagonal reduction (no (..., N, 4) temporary).
+    mean : (4,) float64
+        Sample mean μ used by the whitening transform.
+    l_inv : (4, 4) float64
+        Inverse Cholesky factor ``L^-1`` of the sample covariance, applied to
+        QUERY points at evaluation time.
     log_weights : (N_pe,) float64
         Per-sample log weights ``log(1 / p_prop)`` for importance correction.
         These are passed through to the kernel sum so the resulting density
         is the posterior-equivalent KDE, not the proposal-density KDE.
     log_h : (4,) float64
-        Log of the Silverman bandwidths in each coordinate. We store the log
-        to avoid repeated division at evaluation time.
+        Log of the Silverman bandwidths in WHITENED coordinates. Whitening
+        makes the sample covariance the identity, so all four entries are the
+        same Silverman factor unless a coordinate was degenerate. Stored as
+        a log, and per-coordinate, so the degenerate-dimension policy below
+        and the stacking helpers keep working unchanged.
     log_norm : scalar float64
         Log of the Gaussian-kernel normalization constant
-        ``-0.5 * d * log(2π) - sum(log_h)``, ready to add into the
-        log-evaluated density.
+        ``-0.5 * d * log(2π) - sum(log_h) - log|det L|``, ready to add into
+        the log-evaluated density. The ``log|det L|`` term is the Jacobian of
+        the whitening transform.
     valid : (N_pe,) bool
         Validity mask carried alongside samples (matches GWEvent.valid).
         Padded entries are excluded from BOTH the kernel sum and the 1/N
@@ -134,17 +163,19 @@ class PairKDE(NamedTuple):
 
     Notes
     -----
-    - The bandwidth is *diagonal*. A full-covariance KDE would need a
-      4×4 inverse per pair, which is wasteful for N~2000 and a smooth
-      population posterior. If you need full covariance (e.g. for
-      strongly correlated PE products), this container can be extended
-      to carry the precomputed inverse covariance + log-determinant.
+    - The bandwidth is full-covariance, implemented as a diagonal rule in
+      whitened coordinates: ``H = h_w² C`` for the sample covariance ``C``.
+      See :func:`_whitening_transform` for why the marginal-width diagonal
+      rule this replaced inflated the tails.
     - All arrays are float64 to match darksirens' jax_enable_x64 setting.
     - Building a PairKDE is **not** JIT-compatible — it uses sample
       statistics. Call ``make_pair_kde`` once per event at data-load
       time, not inside the likelihood.
     """
     samples: Any
+    samples_w: Any
+    mean: Any
+    l_inv: Any
     log_weights: Any
     log_h: Any
     log_norm: Any
@@ -216,6 +247,82 @@ def _silverman_bandwidth_diag(
     return h
 
 
+def _silverman_factor(n_valid: int, d: int = _D) -> float:
+    """Silverman's N-dependent factor ``(4 / ((d + 2) N))^(1/(d+4))``.
+
+    In whitened coordinates every marginal has unit variance, so this factor
+    IS the bandwidth: ``h_w = scale · factor``.
+    """
+    return float((4.0 / ((d + 2) * n_valid)) ** (1.0 / (d + 4)))
+
+
+def _whitening_transform(samples: np.ndarray, valid: np.ndarray):
+    """Cholesky whitening of the valid PE samples.
+
+    Returns ``(mean, l_inv, log_det_l, degenerate)``: the sample mean, the
+    inverse Cholesky factor of the sample covariance, ``log|det L|``, and the
+    per-coordinate degenerate mask.
+
+    Why whiten
+    ~~~~~~~~~~
+    The diagonal rule this replaced set ``h_k = factor · σ_k`` with ``σ_k`` the
+    MARGINAL standard deviation.  PE posteriors in ``(m1det, q, dL_app, χ_eff)``
+    are strongly correlated — chirp mass is measured far better than either
+    component mass, and dL_app tracks m1det through the redshift — so the
+    posterior is a thin ridge whose width ACROSS the ridge is a small fraction
+    of any marginal width.  A kernel scaled to the marginals therefore smears
+    the density by many times the posterior's actual extent in the tight
+    directions, and since the pair branch reads this density POINTWISE (at the
+    point event i predicts for event j, cluster_likelihood.py) that shows up
+    directly as inflated tail density: the finding measured 1.9x per coordinate
+    at 3σ, i.e. ~14x and +2.7 nats of spurious lensed-pair evidence for a false
+    pair separated by 3σ in all four coordinates.  Scaling the kernel to the
+    sample COVARIANCE instead makes the smoothing anisotropic in the same way
+    the posterior is, so it no longer spills across the ridge.  Silverman's rule
+    is untouched — it is applied in the coordinates where its unit-variance
+    assumption actually holds.
+
+    Degenerate coordinates
+    ~~~~~~~~~~~~~~~~~~~~~~
+    A coordinate with zero spread makes the covariance singular. It keeps the
+    documented :data:`DEGENERATE_H` policy: its variance is floored to
+    ``DEGENERATE_H²`` and its cross-covariances zeroed, so it stays independent
+    and delta-like exactly as under the diagonal rule, and the remaining
+    coordinates whiten normally.
+    """
+    s = samples[valid]
+    n_valid, d = s.shape
+    mean = s.mean(axis=0)
+    cov = np.cov(s, rowvar=False, ddof=1).reshape(d, d)
+    sigma = s.std(axis=0, ddof=1)
+    degenerate = ~(sigma > 0.0)
+    if degenerate.any():
+        cov[degenerate, :] = 0.0
+        cov[:, degenerate] = 0.0
+        cov[degenerate, degenerate] = DEGENERATE_H ** 2
+    try:
+        L = np.linalg.cholesky(cov)
+    except np.linalg.LinAlgError as exc:
+        # Exactly collinear coordinates (e.g. q reconstructed from m1det and a
+        # fixed m2det in a synthetic PE product) leave the covariance singular
+        # with no zero-variance coordinate to flag.  Fall back to the marginal
+        # diagonal rather than failing the run, and say so: the fallback is the
+        # tail-inflating behaviour this transform exists to remove.
+        import warnings
+
+        warnings.warn(
+            "PairKDE: sample covariance is not positive definite "
+            f"({exc}); falling back to the MARGINAL diagonal bandwidth for "
+            "this event. Its pair density will carry the tail inflation that "
+            "whitening removes (review F-034) -- check the PE product for "
+            "collinear coordinates."
+        )
+        L = np.diag(np.where(degenerate, DEGENERATE_H, sigma))
+    l_inv = np.linalg.inv(L)
+    log_det_l = float(np.sum(np.log(np.diag(L))))
+    return mean, l_inv, log_det_l, degenerate
+
+
 def make_pair_kde(
     m1det: np.ndarray,
     q: np.ndarray,
@@ -271,10 +378,40 @@ def make_pair_kde(
         valid = np.asarray(valid, dtype=bool)
     prior_wt = validate_pair_prior_wt(prior_wt, valid, context="make_pair_kde prior_wt")
 
-    # Bandwidth from UNWEIGHTED posterior samples
-    h = _silverman_bandwidth_diag(
-        samples, valid=valid, bandwidth_scale=bandwidth_scale
-    )
+    if not (bandwidth_scale > 0.0):
+        raise ValueError(
+            f"PairKDE: bandwidth_scale must be positive; got {bandwidth_scale}."
+        )
+    n_valid = int(valid.sum())
+    if n_valid < 2:
+        raise ValueError(f"PairKDE: need at least 2 valid samples, got {n_valid}.")
+
+    # Bandwidth from UNWEIGHTED posterior samples, in whitened coordinates.
+    mean, l_inv, log_det_l, degenerate = _whitening_transform(samples, valid)
+    if degenerate.any():
+        import warnings
+
+        names = [
+            PAIR_KDE_COORDS[k] if k < len(PAIR_KDE_COORDS) else str(k)
+            for k in np.flatnonzero(degenerate)
+        ]
+        warnings.warn(
+            f"PairKDE: zero sample spread in coordinate(s) {names} over "
+            f"{n_valid} valid PE samples; falling back to a delta-like "
+            f"bandwidth h={DEGENERATE_H:g} there. The kernel then rejects any "
+            "query displaced from the constant value, and log_norm carries "
+            f"{-np.log(DEGENERATE_H):.1f} nats per degenerate coordinate that do "
+            "NOT cancel in the pair Bayes factor. Drop the dimension or supply "
+            "real samples."
+        )
+    # Whitened coordinates have unit variance in every direction, so Silverman's
+    # sigma_k is 1 and the rule collapses to its N-dependent factor alone.
+    h = np.full(_D, float(bandwidth_scale) * _silverman_factor(n_valid))
+    # Padded rows commonly carry NaN coordinates; zero them BEFORE the matmul
+    # so the whitened table has no NaN to mask later (the evaluator masks too,
+    # but a NaN that never exists cannot leak into a gradient).
+    samples_w = (np.where(valid[:, None], samples, 0.0) - mean) @ l_inv.T
+    samples_w = np.where(valid[:, None], samples_w, 0.0)
 
     # KDE evaluation weights: 1/p_prop for the importance correction.
     # Padding slots commonly carry 0/NaN p_prop, so substitute a dummy before
@@ -282,10 +419,15 @@ def make_pair_kde(
     usable = valid & np.isfinite(prior_wt) & (prior_wt > 0.0)
     log_w = np.where(usable, -np.log(np.where(usable, prior_wt, 1.0)), -np.inf)
     log_h = np.log(h)
-    log_norm = -0.5 * _D * np.log(2.0 * np.pi) - log_h.sum()
+    # H = h_w^2 C, so |det H|^(1/2) = h_w^d |det L| and the Jacobian of the
+    # whitening transform enters the normalization as log|det L|.
+    log_norm = -0.5 * _D * np.log(2.0 * np.pi) - log_h.sum() - log_det_l
 
     return PairKDE(
         samples=jnp.asarray(samples),
+        samples_w=jnp.asarray(samples_w),
+        mean=jnp.asarray(mean),
+        l_inv=jnp.asarray(l_inv),
         log_weights=jnp.asarray(log_w),
         log_h=jnp.asarray(log_h),
         log_norm=jnp.asarray(log_norm),
@@ -321,6 +463,9 @@ def stack_pair_kdes(kdes: list) -> PairKDE:
             )
     return PairKDE(
         samples=jnp.stack([k.samples for k in kdes], axis=0),
+        samples_w=jnp.stack([k.samples_w for k in kdes], axis=0),
+        mean=jnp.stack([k.mean for k in kdes], axis=0),
+        l_inv=jnp.stack([k.l_inv for k in kdes], axis=0),
         log_weights=jnp.stack([k.log_weights for k in kdes], axis=0),
         log_h=jnp.stack([k.log_h for k in kdes], axis=0),
         log_norm=jnp.stack([k.log_norm for k in kdes], axis=0),
@@ -337,6 +482,9 @@ def _slice_event_kde_inside_jit(stacked: PairKDE, event_idx) -> PairKDE:
     from jax import lax
     return PairKDE(
         samples=lax.dynamic_index_in_dim(stacked.samples, event_idx, axis=0, keepdims=False),
+        samples_w=lax.dynamic_index_in_dim(stacked.samples_w, event_idx, axis=0, keepdims=False),
+        mean=lax.dynamic_index_in_dim(stacked.mean, event_idx, axis=0, keepdims=False),
+        l_inv=lax.dynamic_index_in_dim(stacked.l_inv, event_idx, axis=0, keepdims=False),
         log_weights=lax.dynamic_index_in_dim(stacked.log_weights, event_idx, axis=0, keepdims=False),
         log_h=lax.dynamic_index_in_dim(stacked.log_h, event_idx, axis=0, keepdims=False),
         log_norm=lax.dynamic_index_in_dim(stacked.log_norm, event_idx, axis=0, keepdims=False),
@@ -401,10 +549,21 @@ def log_eval_pair_kde(
     q has a hard physical boundary at 1 where equal-mass posteriors pile
     up. A plain Gaussian kernel leaks half its mass past the boundary
     there, underestimating the density by up to 2× as q → 1. We use the
-    standard reflection estimator: each sample also contributes a mirror
-    kernel about q = 1 (at 2 - q_t), which restores unit kernel mass on
-    q ≤ 1 and is exponentially negligible away from the boundary. No
-    change to log_norm is needed.
+    standard reflection estimator, which restores unit kernel mass on q ≤ 1
+    and is exponentially negligible away from the boundary. No change to
+    log_norm is needed.
+
+    The reflection is applied to the QUERY, not to the sample. Under the old
+    diagonal kernel the two were interchangeable — only the squared q
+    difference entered, and |q - (2 - q_t)| = |(2 - q) - q_t| — but the kernel
+    is now full-covariance, and only the query reflection stays exact:
+
+        ∫_{q ≤ 1} K_C(Rθ - θ_t) dθ = ∫_{q ≥ 1} K_C(θ - θ_t) dθ,
+
+    so the two terms sum to the kernel's total mass for ANY covariance C.
+    Reflecting the sample instead would require also flipping the sign of q's
+    cross-covariances to preserve that identity, and silently loses unit mass
+    if you do not.
     """
     from jax.scipy.special import logsumexp
 
@@ -413,8 +572,15 @@ def log_eval_pair_kde(
     # Sanitize BEFORE any arithmetic (see "Padding" above): invalid rows carry
     # no NaN/inf onto the differentiable path, so neither the forward
     # logsumexp nor its transpose can be poisoned by padding.
-    samples = jnp.where(valid[:, None], kde.samples, 0.0)         # (N, 4)
+    samples = jnp.where(valid[:, None], kde.samples_w, 0.0)       # (N, 4) whitened
     log_w = jnp.where(valid, kde.log_weights, 0.0)                # (N,)
+
+    # Whiten the query, and its mirror image about the q = 1 boundary.  The
+    # kernel is isotropic in these coordinates, so the reduction below stays
+    # diagonal and never materializes a (..., N, 4) temporary.
+    theta_ref = theta_app.at[..., q_axis].set(2.0 - theta_app[..., q_axis])
+    u = (theta_app - kde.mean) @ kde.l_inv.T                      # (..., 4)
+    u_ref = (theta_ref - kde.mean) @ kde.l_inv.T                  # (..., 4)
 
     # Accumulate the squared distance coordinate BY coordinate.  A (..., N, 4)
     # difference array is 4x the (..., N) reduction it feeds -- at the caller's
@@ -423,21 +589,14 @@ def log_eval_pair_kde(
     # cancelled the other three coordinates away whenever the q term dominated
     # the sum by many orders of magnitude.
     h = jnp.exp(kde.log_h)                                        # (4,)
-    sq_rest = jnp.zeros(())
+    sq = jnp.zeros(())
+    sq_ref = jnp.zeros(())
     for k in range(_D):
-        if k == q_axis:
-            continue
-        d_k = (theta_app[..., k][..., None] - samples[:, k]) / h[k]
-        sq_rest = sq_rest + d_k * d_k                             # (..., N)
-    diff_q = (theta_app[..., q_axis][..., None] - samples[:, q_axis]) / h[q_axis]
-    # Mirror image of each sample's q about the boundary: 2 - q_t.
-    diff_q_ref = (
-        theta_app[..., q_axis][..., None] + samples[:, q_axis] - 2.0
-    ) / h[q_axis]
-    log_kernel_q = jnp.logaddexp(
-        -0.5 * diff_q * diff_q, -0.5 * diff_q_ref * diff_q_ref
-    )
-    log_kernel = -0.5 * sq_rest + log_kernel_q                    # (..., N)
+        d_k = (u[..., k][..., None] - samples[:, k]) / h[k]
+        sq = sq + d_k * d_k                                       # (..., N)
+        d_k_ref = (u_ref[..., k][..., None] - samples[:, k]) / h[k]
+        sq_ref = sq_ref + d_k_ref * d_k_ref                       # (..., N)
+    log_kernel = jnp.logaddexp(-0.5 * sq, -0.5 * sq_ref)          # (..., N)
 
     terms = jnp.where(valid, log_kernel + log_w, -jnp.inf)        # (..., N)
     # All--inf-safe reduction (cf. ``_logsumexp_neginf_safe``): the -1e30

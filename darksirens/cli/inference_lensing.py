@@ -849,7 +849,8 @@ def extract_event_samples_from_gw_pe(
 
 
 def make_pair_kdes_from_gw_pe(
-    gw_pe_arrays, event_indices, nsamp, pe_max_per_pair=0, rng=None
+    gw_pe_arrays, event_indices, nsamp, pe_max_per_pair=0, rng=None,
+    bandwidth_scale=1.0,
 ):
     """Build per-observed-event KDEs directly from unified GW PE samples."""
     kdes = []
@@ -858,7 +859,10 @@ def make_pair_kdes_from_gw_pe(
             gw_pe_arrays, int(event_index), nsamp, pe_max_per_pair, rng
         )
         kdes.append(
-            make_pair_kde(d["m1det"], d["q"], d["dL_app"], d["chieff"], d["prior_wt"])
+            make_pair_kde(
+                d["m1det"], d["q"], d["dL_app"], d["chieff"], d["prior_wt"],
+                bandwidth_scale=bandwidth_scale,
+            )
         )
     return kdes
 
@@ -1165,6 +1169,18 @@ def load_inputs(opts):
     _validate_fixed_cosmology_for_lensed_channels(opts)
     _gate_pair_orientation_mismatch(opts)
     rng = np.random.default_rng(opts.seed)
+    # Sensitivity handle on the pair KDE's smoothing (review F-034). 1.0 is
+    # Silverman's rule as published; rerunning a pairing at 0.5 and comparing
+    # the pair log Bayes factor says whether the kernel or the physics is
+    # setting the answer.
+    pair_kde_bandwidth_scale = float(
+        getattr(opts, "pair_kde_bandwidth_scale", 1.0) or 1.0
+    )
+    if not (pair_kde_bandwidth_scale > 0.0):
+        raise SystemExit(
+            "--pair_kde_bandwidth_scale must be positive; got "
+            f"{pair_kde_bandwidth_scale}."
+        )
 
     # --- singleton PE (event-major flatten) ---
     out = load_gw_samples(opts.gw_path)
@@ -1221,7 +1237,8 @@ def load_inputs(opts):
             sl = slice(i * nsamp, (i + 1) * nsamp)
             kdes.append(
                 make_pair_kde(
-                    m1det[sl], m2det[sl] / m1det[sl], dL[sl], chieff[sl], p_pe[sl]
+                    m1det[sl], m2det[sl] / m1det[sl], dL[sl], chieff[sl], p_pe[sl],
+                    bandwidth_scale=pair_kde_bandwidth_scale,
                 )
             )
         pair_kdes = stack_pair_kdes(kdes) if kdes else None
@@ -1572,6 +1589,7 @@ def load_inputs(opts):
             nsamp,
             opts.pe_max_per_pair,
             rng,
+            bandwidth_scale=pair_kde_bandwidth_scale,
         )
     else:
         m1_all = [m1det]
@@ -1598,7 +1616,8 @@ def load_inputs(opts):
             sl = slice(i * nsamp, (i + 1) * nsamp)
             kdes.append(
                 make_pair_kde(
-                    m1det[sl], m2det[sl] / m1det[sl], dL[sl], chieff[sl], p_pe[sl]
+                    m1det[sl], m2det[sl] / m1det[sl], dL[sl], chieff[sl], p_pe[sl],
+                    bandwidth_scale=pair_kde_bandwidth_scale,
                 )
             )
         for imgs in pairs:
@@ -1610,6 +1629,7 @@ def load_inputs(opts):
                         img["dL_app"],
                         img["chieff"],
                         img["prior_wt"],
+                        bandwidth_scale=pair_kde_bandwidth_scale,
                     )
                 )
         n_events_total = n_sing + 2 * P
@@ -3135,6 +3155,19 @@ def build_parser():
         default=400,
         help="down-sample PE per pair image (0=keep all). Controls "
         "the O(N_pe^2 N_y) pair-KDE memory.",
+    )
+    performance.add_argument(
+        "--pair_kde_bandwidth_scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Multiplier on the pair KDE's Silverman bandwidth (default 1.0, the "
+            "rule as published). The kernel is scaled to the sample COVARIANCE, "
+            "so it no longer smooths across the PE degeneracy ridge, but the "
+            "overall scale is still a choice: rerun a pairing at 0.5 and compare "
+            "the pair log Bayes factor. A shift of order nats means the kernel, "
+            "not the physics, is setting the answer (review F-034)."
+        ),
     )
     performance.add_argument(
         "--pair_batch_size",
