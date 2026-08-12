@@ -247,6 +247,33 @@ def _make_mixture_likelihood(
     max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
     catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
 
+    def _check_bundle_marks(names_k, marks_k, ngals_k, field_k, *, where):
+        """Reject mark tables that would saturate the ``log h`` clip.
+
+        ``marks_k`` is keyed by EMCatalog field name (``mark_logmstar``, ...);
+        the guard wants canonical mark names, so remap here.  Skipped entirely
+        for the ``none`` model, which has no ``eta`` to keep alive.
+        """
+        if mark_model in (None, "none") or not names_k:
+            return
+        from darksirens.marks import (
+            MARK_FIELDS as _MF,
+            check_flat_marks_centred,
+            check_marks_centred,
+            get_mark_model,
+        )
+
+        model_k = get_mark_model(mark_model, names_k)
+        check_marks_centred(
+            model_k,
+            {name: marks_k[_MF[name]] for name in names_k},
+            ngals_k,
+            where=where,
+        )
+        check_flat_marks_centred(
+            model_k, field_k.get("field_mark_values"), where=where
+        )
+
     def _bundle_field_inputs(bundle):
         """Per-bundle FIELD-convention normalization inputs (survey-global),
         precomputed by the loader (loaders.py) or supplied directly in tests.
@@ -383,7 +410,7 @@ def _make_mixture_likelihood(
     em_catalogs_sel = []
     pe_pixel_cols = []
     sel_pixel_cols = []
-    for bundle in bundles:
+    for bundle_idx, bundle in enumerate(bundles):
         views = prepare_catalog_views(
             opts,
             bundle,
@@ -430,6 +457,16 @@ def _make_mixture_likelihood(
             return out
 
         marks_pe_k = _bundle_marks(views.unique_pixels_pe)
+        # Eager saturation guard: an uncentred mark table pins log h to the
+        # clip rail across the whole eta prior, so the eta posterior would come
+        # back flat with nothing anywhere reporting a problem.  Checked on the
+        # COMPACT rows the model actually reads, per catalog (each carries its
+        # own selected marks), before anything is traced.
+        _check_bundle_marks(
+            mark_names_all[bundle_idx] if bundle_idx < len(mark_names_all) else (),
+            marks_pe_k, views.ngals_pe_catalog, field_k,
+            where=f"catalog {bundle_idx + 1} PE view",
+        )
         if bundle_union:
             lss_q_sel_k, lss_idx_sel_k = lss_q_pe_k, lss_idx_pe_k
             lss_qm_sel_k = lss_qm_pe_k
@@ -440,6 +477,11 @@ def _make_mixture_likelihood(
             )
             lss_qm_sel_k = _compact_lss_members_for(views, views.unique_pixels_sel)
             marks_sel_k = _bundle_marks(views.unique_pixels_sel)
+            _check_bundle_marks(
+                mark_names_all[bundle_idx] if bundle_idx < len(mark_names_all) else (),
+                marks_sel_k, views.ngals_sel_catalog, field_k,
+                where=f"catalog {bundle_idx + 1} selection view",
+            )
 
         em_catalogs_pe.append(EMCatalog(
             apix=apix_k,
@@ -867,11 +909,39 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 out[field] = barrier(arr)
         return out
 
+    def _check_marks(marks, ngals_k, *, where):
+        """Eager saturation guard — see the K>=2 twin (_check_bundle_marks).
+
+        An uncentred mark table pins log h to the clip rail across the whole
+        eta prior; the eta posterior then comes back flat with nothing
+        downstream reporting a fault, so it has to be caught here at build time.
+        """
+        if mark_model in (None, "none") or not mark_names:
+            return
+        from darksirens.marks import (
+            check_flat_marks_centred, check_marks_centred, get_mark_model,
+        )
+
+        model = get_mark_model(mark_model, mark_names)
+        check_marks_centred(
+            model,
+            {name: marks[_MARK_FIELDS[name]] for name in mark_names},
+            ngals_k,
+            where=where,
+        )
+        check_flat_marks_centred(
+            model, getattr(catalogs, "field_mark_values", None), where=where
+        )
+
     marks_pe = _compact_marks(catalogs.unique_pixels_pe)
-    marks_sel = (
-        marks_pe if union_views
-        else _compact_marks(catalogs.unique_pixels_sel)
-    )
+    _check_marks(marks_pe, catalogs.ngals_pe_catalog, where="PE catalog view")
+    if union_views:
+        marks_sel = marks_pe
+    else:
+        marks_sel = _compact_marks(catalogs.unique_pixels_sel)
+        _check_marks(
+            marks_sel, catalogs.ngals_sel_catalog, where="selection catalog view"
+        )
 
     m1det_pe = barrier(_to_jax(data, "m1det"))
     m2det_pe = barrier(_to_jax(data, "m2det"))
