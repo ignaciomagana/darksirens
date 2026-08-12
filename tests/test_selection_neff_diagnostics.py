@@ -140,3 +140,36 @@ def test_raw_read_surfaces_the_spin_basis(tmp_path):
     assert meta["spin_basis"] == "component"
     assert meta["format_version"] == "gwcat-selection-2.0"
     assert meta["n_detected"] == 4
+
+
+def test_log_mu_is_flagged_as_non_portable(capsys, tmp_path):
+    """`log_mu` must be labelled, because it is the one reported number that
+    cannot be compared against anything from another process.
+
+    It carries the population's normalisation constant, which is process-state
+    dependent (measured: a factor 1.9 between two import orders). Within a
+    likelihood evaluation that constant cancels exactly -- c^N_obs from the
+    per-event numerators against c^N_obs from mu^N_obs -- so posteriors, logZ
+    and N_eff are all unaffected. Only this isolated log_mu is not portable, and
+    a reader comparing it to a stored reference would draw a false conclusion.
+    """
+    import h5py
+
+    p = tmp_path / "sel.h5"
+    rng = np.random.default_rng(3)
+    n = 500
+    with h5py.File(p, "w") as f:
+        f.attrs["ndraw"] = 1.0e6
+        f.create_dataset("m1det", data=rng.uniform(10.0, 60.0, n))
+        f.create_dataset("m2det", data=rng.uniform(5.0, 30.0, n))
+        f.create_dataset("dL", data=rng.uniform(200.0, 3000.0, n))
+        f.create_dataset("chieff", data=rng.uniform(-0.3, 0.3, n))
+        f.create_dataset("pdraw", data=rng.uniform(1e-9, 1e-7, n))
+    out = tmp_path / "r.json"
+    assert snd.main(["--selection_path", str(p), "--n_obs", "10",
+                     "--json", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "NOT comparable across processes" in printed
+    assert "cancels exactly" in printed
+    import json
+    assert json.loads(out.read_text())["log_mu_comparable_across_processes"] is False
