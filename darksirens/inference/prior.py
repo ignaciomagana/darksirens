@@ -1373,11 +1373,15 @@ def resolve_joint_prior_constraints(
 
     A group is skipped (falling back to the rejection backstop, with a
     warning) when any member label is not sampled, or when the members'
-    bounds/prior kinds break the map's measure-preservation requirements:
-    ``ordered_le`` needs identical uniform bounds on both members (sorting
-    then commutes with the shared monotone map), ``simplex`` needs exact
-    uniform [0, 1] bounds (the cube fold IS the parameter-space fold only
-    there).
+    bounds/prior kinds break the requirements that make the cube map the
+    intended density: ``ordered_le`` needs identical uniform bounds on both
+    members (sorting then commutes with the shared monotone map),
+    ``simplex`` needs exact uniform [0, 1] bounds (the cube fold IS the
+    parameter-space fold only there), and ``conditional_upper`` needs
+    identical uniform bounds too -- the SHARED LOWER EDGE is the conditional
+    distribution's floor (``x_i | x_j ~ U(lo, x_j)``), so a member whose
+    ``lower`` was overridden away from its partner's would silently sample a
+    different conditional than the one the model declares.
     """
     from darksirens.gw.populations import get_model
 
@@ -1415,7 +1419,7 @@ def resolve_joint_prior_constraints(
         uniform = prior_kinds is None or all(
             prior_kinds[i][0] == "uniform" for i in idx
         )
-        if kind == "ordered_le" and len(idx) == 2:
+        if kind in ("ordered_le", "conditional_upper") and len(idx) == 2:
             ok = uniform and (
                 lower[idx[0]] == lower[idx[1]] and upper[idx[0]] == upper[idx[1]]
             )
@@ -1459,9 +1463,12 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
     corresponding numpyro distribution.
 
     ``joint_constraints`` (from :func:`resolve_joint_prior_constraints`) are
-    measure-preserving cube maps applied BEFORE the per-dimension transforms,
-    mapping the cube onto a model's jointly-constrained prior region instead
-    of leaving it to likelihood-side rejection:
+    cube maps applied BEFORE the per-dimension transforms, mapping the cube
+    onto a model's jointly-constrained prior region instead of leaving it to
+    likelihood-side rejection.  The first three are measure-preserving folds
+    (uniform cube -> uniform density on the region); the fourth is a
+    triangular map that reproduces a declared CONDITIONAL prior, which is
+    deliberately not the uniform one:
 
     * ``("ordered_le", (i, j))`` — sort, so parameter i <= parameter j.  Each
       ordered pair has exactly two preimages, so a uniform cube maps to the
@@ -1472,6 +1479,16 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
     * ``("ball3", (i, j, k))`` — polar map onto the uniform unit ball
       (``r = u^(1/3)``), for parameters whose joint support is
       ``|v| <= 1`` in a ``[-1, 1]^3`` box (the dipole vector).
+    * ``("conditional_upper", (i, j))`` — the inverse-CDF (Rosenblatt) map
+      for ``x_j ~ U(lo, hi)``, ``x_i | x_j ~ U(lo, x_j)``: the joint density
+      ``1 / ((hi - lo)(x_j - lo))`` on the SAME ordered triangle
+      ``lo <= x_i <= x_j <= hi`` that ``ordered_le`` fills uniformly.  The two
+      differ by the factor ``(hi - lo) / (2 (x_j - lo))``, i.e. by
+      ``1 / (x_j - lo)`` up to normalization, so swapping one for the other
+      re-weights the conditioning parameter and is NOT a harmless
+      renormalization: the ``ordered_le`` marginal ``p(x_j) ~ (x_j - lo)``
+      pushes ``x_j`` toward ``hi`` (review F-115, GWTC-5 Table 5's
+      ``m_2,low | m_1,low ~ U(3, m_1,low)``).
 
     Implementation note: dynesty wraps this with ``np.asarray(transform(
     jnp.asarray(u)))``, i.e. the transform always receives a JAX array, so
@@ -1506,6 +1523,22 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
                 ui, uj = u[..., i], u[..., j]
                 if kind == "ordered_le":
                     new_i, new_j = _jnp.minimum(ui, uj), _jnp.maximum(ui, uj)
+                elif kind == "conditional_upper":
+                    # x_i | x_j ~ U(lo, x_j) is the PRODUCT u_i * u_j in cube
+                    # coordinates: with the shared affine map
+                    # x = lo + u (hi - lo) and x_j = lo + u_j (hi - lo),
+                    #   lo + (u_i u_j)(hi - lo) = lo + u_i (x_j - lo),
+                    # which is exactly the inverse CDF of U(lo, x_j).  Written
+                    # multiplicatively on purpose: the conditional density
+                    # carries 1/(x_j - lo), which diverges as x_j -> lo, but no
+                    # (x_j - lo) ever appears in a DENOMINATOR here, so the
+                    # degenerate edge u_j = 0 returns x_i = x_j = lo exactly
+                    # instead of 0/0 -> NaN.  A NaN there would not be caught by
+                    # the likelihood's support mask (NaN fails every comparison,
+                    # so `valid` is False but the arithmetic has already
+                    # poisoned the gradient) -- it would propagate into logL and
+                    # kill the whole nested iteration.
+                    new_i, new_j = ui * uj, uj
                 else:  # simplex
                     over = (ui + uj) > 1.0
                     new_i = _jnp.where(over, 1.0 - ui, ui)

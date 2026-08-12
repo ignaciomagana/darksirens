@@ -550,16 +550,27 @@ def run_sampler(method, likelihood, prior_transform, labels,
             )
 
         # JOINT prior constraints (dipole unit ball, mixture simplex,
-        # ordered_le) are reparameterized away by make_prior_transform's cube
-        # maps, so the nested samplers propose only inside the constrained
-        # region.  The sites below are INDEPENDENT per parameter, so here the
-        # same region is carved out by likelihood-side rejection instead: the
-        # posterior is the same measure (uniform on the constrained set either
-        # way), but NUTS must integrate against a hard -inf wall whose gradient
-        # is NaN, so divergences become structural rather than diagnostic.  Say
-        # so instead of leaving the operator to read it out of the divergence
-        # fraction.
+        # ordered_le, conditional_upper) are reparameterized away by
+        # make_prior_transform's cube maps, so the nested samplers propose only
+        # inside the constrained region.  The sites below are INDEPENDENT per
+        # parameter, so here the same region is carved out by likelihood-side
+        # rejection instead.  For the measure-preserving folds (ball3, simplex,
+        # ordered_le) that costs only geometry: the posterior is the same
+        # truncated measure, but NUTS must integrate against a hard -inf wall
+        # whose gradient is NaN, so divergences become structural rather than
+        # diagnostic.
+        #
+        # conditional_upper is DIFFERENT and worse.  Its cube map is a
+        # triangular inverse-CDF, not a fold: it puts the declared conditional
+        # density x_i | x_j ~ U(lo, x_j) on the ordered triangle.  Independent
+        # uniform sites plus rejection can only reproduce the region, never
+        # that 1/(x_j - lo) tilt, so NUTS samples the UNIFORM triangle -- a
+        # genuinely different prior (2x the density at the top of the x_j
+        # range, 0.14x near the bottom for the GWTC-5 m_low pair), hence a
+        # different posterior and a different logZ.  Name that separately
+        # instead of leaving the operator to read it out of a corner plot.
         if joint_constraints:
+            _kinds_present = sorted({kind for kind, _ in joint_constraints})
             print(
                 "  [!] joint prior constraints "
                 + ", ".join(f"{kind}{tuple(idx)}"
@@ -570,10 +581,21 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 "the -inf boundary has no gradient: expect a structurally "
                 "elevated divergence fraction and reduced ESS. Prefer "
                 "--sampler dynesty/tinyns for "
-                + ", ".join(sorted({kind for kind, _ in joint_constraints}))
+                + ", ".join(_kinds_present)
                 + " models.",
                 flush=True,
             )
+            if "conditional_upper" in _kinds_present:
+                print(
+                    "  [!] conditional_upper is a CONDITIONAL prior, not just "
+                    "a support restriction: rejection reproduces its region "
+                    "but not its density, so this NUTS run samples the "
+                    "UNIFORM ordered triangle instead of the declared "
+                    "x_i | x_j ~ U(lo, x_j). That is a different prior, hence "
+                    "a different posterior and logZ -- use --sampler "
+                    "dynesty/tinyns to sample the model as declared.",
+                    flush=True,
+                )
 
         def _site(i, name):
             # Per-parameter prior, matching make_prior_transform's PER-DIMENSION

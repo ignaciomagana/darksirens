@@ -154,12 +154,64 @@ def test_underscore_attributes_are_ignored():
     dict(prior_kinds=[("gaussian", 70.0, 5.0)]),
     dict(prior_overrides={"H0": [30.0, 120.0]}),
     dict(fixed_parameter_values={"Om0": 0.3075}),
+    dict(joint_constraints=[("ordered_le", (0, 1))]),
 ])
 def test_semantic_changes_change_the_digest(mutation):
     reference = _fingerprint()
     opts = mutation.pop("opts", None)
     changed = _fingerprint(opts, **mutation)
     assert changed["digest"] != reference["digest"]
+
+
+def test_joint_constraint_kind_is_fingerprinted(tmp_path):
+    """The cube maps are a semantic input the labels/bounds cannot express.
+
+    ``ordered_le`` and ``conditional_upper`` occupy the SAME ordered triangle
+    with the same labels, the same bounds and the same per-parameter uniform
+    families -- they differ only in the density they put on it (F-115: the
+    conditional carries the 1/(x_j - lo) factor the sort does not).  Without
+    this key the two configurations produced identical digests, so a
+    checkpoint taken under one would resume under the other and mix two
+    priors into one posterior and logZ.
+    """
+    labels = ["m2low", "m1low"]
+    common = dict(
+        labels=labels, lower_bound=[3.0, 3.0], upper_bound=[10.0, 10.0],
+        prior_kinds=[("uniform", None, None)] * 2,
+    )
+    sorted_fp = _fingerprint(
+        **common, joint_constraints=[("ordered_le", (0, 1))])
+    conditional_fp = _fingerprint(
+        **common, joint_constraints=[("conditional_upper", (0, 1))])
+
+    assert sorted_fp["digest"] != conditional_fp["digest"]
+    # The resume diff must NAME the map, not just report an opaque digest gap.
+    save_run_fingerprint(str(tmp_path), sorted_fp)
+    with pytest.raises(ResumeFingerprintError) as exc:
+        check_resume_fingerprint(str(tmp_path), conditional_fp)
+    assert "joint_constraints" in str(exc.value)
+    assert "conditional_upper" in str(exc.value)
+
+
+def test_schema_version_bump_refuses_pre_bump_fingerprints(tmp_path):
+    """A fingerprint written before joint_constraints entered the semantic
+    block cannot be compared against one written after: its digest was
+    computed over a block that could not distinguish the GWTC-5 m_low prior
+    from its replacement.  The gate must say so in the schema_version terms an
+    operator can act on (re-run, or --resume_force after checking the model has
+    no constraint groups), not silently accept."""
+    current = _fingerprint()
+    stale = json.loads(json.dumps(current))
+    stale["schema_version"] = 1
+    save_run_fingerprint(str(tmp_path), stale)
+
+    with pytest.raises(ResumeFingerprintError) as exc:
+        check_resume_fingerprint(str(tmp_path), current)
+    assert "schema_version" in str(exc.value)
+
+    with pytest.warns(RuntimeWarning, match="resume_force"):
+        assert check_resume_fingerprint(
+            str(tmp_path), current, force=True) is not None
 
 
 def test_input_file_content_is_fingerprinted(tmp_path):

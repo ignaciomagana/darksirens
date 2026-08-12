@@ -117,10 +117,12 @@ def test_gwtc5_fiducial_bpl2peaks_log_population_is_finite_and_enforces_constrai
     )
     assert np.all(np.isfinite(np.asarray(logp)))
 
-    # Table 5 has m2_low ~ U(3, m1_low) and lambda_0, lambda_1 on a simplex.  The
-    # implemented m2_low/m1_low prior is the uniform ORDERED TRIANGLE, not that
-    # conditional (see GWTC5FiducialBPL2PeaksPopulationModel.constraint_groups);
-    # only the support statement asserted here is shared by both.
+    # Table 5 has m2_low ~ U(3, m1_low) and lambda_0, lambda_1 on a simplex,
+    # and the model now implements exactly that: the low-mass pair maps through
+    # ``conditional_upper``, not the uniform ordered triangle (F-115; the
+    # density itself is pinned in tests/test_joint_prior_constraints.py).  What
+    # is asserted HERE is only the support statement m2_low <= m1_low, which
+    # ``log_p_pop`` keeps as a backstop for samplers that build their own prior.
     bad_m2_low = theta.at[12].set(theta[7] + 0.5)
     assert np.all(np.isneginf(np.asarray(model.log_p_pop(20.0, 0.8, 0.1, 0.0, bad_m2_low))))
 

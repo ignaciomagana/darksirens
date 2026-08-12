@@ -1,5 +1,5 @@
 """Constraint-preserving prior transforms for jointly-constrained models
-(review finding P1-15).
+(review findings P1-15 and F-115).
 
 The GWTC-5 fiducial BPL+2-peaks model enforces ``lambda0 + lambda1 <= 1``
 and ``m2_low <= m1_low`` by likelihood-side rejection.  Each condition kills
@@ -7,9 +7,18 @@ half its square, so 75% of the nominal unit cube had zero likelihood: nested
 proposals wasted 3 of 4 draws and the evidence carried a constant
 ``log(1/4) = -1.386`` offset relative to the intended normalized constrained
 prior.  The model now declares its ``constraint_groups`` and
-``make_prior_transform`` maps the cube ONTO the constrained region with
-measure-preserving fold/sort maps; the likelihood-side ``valid`` mask remains
-as a backstop (numpyro, overridden bounds).
+``make_prior_transform`` maps the cube ONTO the constrained region; the
+likelihood-side ``valid`` mask remains as a backstop (numpyro, overridden
+bounds).
+
+The low-mass pair uses ``conditional_upper``, not ``ordered_le`` (F-115).
+Both live on the ordered triangle ``{3 <= m2_low <= m1_low <= 10}``, so the
+support tests below cannot tell them apart -- but a sort gives the UNIFORM
+density there, while GWTC-5 Table 5 quotes the conditional
+``m1_low ~ U(3, 10)``, ``m2_low ~ U(3, m1_low)``.  They differ by the factor
+``1/(m1_low - 3)``: 2x the intended density at m1_low = 10 and 0.14x at 3.5,
+a tilt that pushes the minimum BH mass up and with it the low-mass end of the
+selection function.  So the density tests here are the ones with teeth.
 """
 import numpy as np
 import pytest
@@ -54,11 +63,14 @@ def test_resolver_finds_both_groups(gwtc5_space):
     jc = resolve_joint_prior_constraints(POP, labels, lower, upper, kinds)
     assert len(jc) == 2
     kinds_found = {k for k, _ in jc}
-    assert kinds_found == {"simplex", "ordered_le"}
+    assert kinds_found == {"simplex", "conditional_upper"}
     by_kind = dict(jc)
     i, j = by_kind["simplex"]
     assert labels[i] == L0 and labels[j] == L1
-    i, j = by_kind["ordered_le"]
+    # Order matters for conditional_upper: i is the CONDITIONED parameter
+    # (m2_low ~ U(3, m1_low)), j the one it is conditioned on.  Swapping them
+    # would silently sample m1_low ~ U(3, m2_low) instead.
+    i, j = by_kind["conditional_upper"]
     assert labels[i] == M2LOW and labels[j] == M1LOW
 
 
@@ -81,11 +93,15 @@ def test_transform_maps_the_whole_cube_into_the_constrained_region(gwtc5_space):
     assert np.all((theta >= lower - 1e-9) & (theta <= upper + 1e-9))
 
 
-def test_transform_is_measure_preserving(gwtc5_space):
-    """The fold/sort maps must give the NORMALIZED uniform density on the
-    constrained region — checked against the analytic moments of the uniform
-    triangle: E[lam] = 1/3, and for the ordered pair on [a, b],
-    E[min] = a + (b-a)/3, E[max] = a + 2(b-a)/3."""
+def test_transform_reproduces_the_declared_prior_moments(gwtc5_space):
+    """Each map must give the NORMALIZED density the model declares.
+
+    Simplex: uniform on the triangle, E[lam] = 1/3 each.  Low-mass pair:
+    Table 5's conditional, so m1_low keeps its FLAT U(a, b) marginal,
+    E[m1_low] = a + (b-a)/2, and E[m2_low] = a + E[m1_low - a]/2 =
+    a + (b-a)/4.  The uniform-triangle (``ordered_le``) answers would be
+    a + 2(b-a)/3 and a + (b-a)/3 -- the numbers this test used to pin, and
+    the reason it is worth pinning at all."""
     labels, lower, upper, kinds = gwtc5_space
     jc = resolve_joint_prior_constraints(POP, labels, lower, upper, kinds)
     transform = make_prior_transform(lower, upper, kinds, joint_constraints=jc)
@@ -102,9 +118,138 @@ def test_transform_is_measure_preserving(gwtc5_space):
     i1, i2 = labels.index(M1LOW), labels.index(M2LOW)
     a, b = lower[i1], upper[i1]
     np.testing.assert_allclose(
-        np.mean(theta[:, i2]), a + (b - a) / 3.0, atol=0.02 * (b - a))
+        np.mean(theta[:, i1]), a + (b - a) / 2.0, atol=0.02 * (b - a))
     np.testing.assert_allclose(
-        np.mean(theta[:, i1]), a + 2.0 * (b - a) / 3.0, atol=0.02 * (b - a))
+        np.mean(theta[:, i2]), a + (b - a) / 4.0, atol=0.02 * (b - a))
+
+
+def test_conditional_upper_is_exactly_the_1_over_m1_minus_3_reweighting(
+    gwtc5_space
+):
+    """The whole content of F-115: conditional / ordered-triangle =
+    (b - a) / (2 (m1_low - a)).
+
+    Both maps push the SAME cube through the SAME affine bounds, so the ratio
+    of their densities is the ratio of their Jacobians at matched points.
+    Checked here on the marginal of the conditioning parameter, where the
+    factor is visible in closed form: the sort gives p(m1) ~ (m1 - a) and the
+    conditional gives p(m1) = const, so binning both and dividing must return
+    (b - a) / (2 (m1 - a)) bin by bin.
+    """
+    labels, lower, upper, kinds = gwtc5_space
+    i1 = labels.index(M1LOW)
+    a, b = float(lower[i1]), float(upper[i1])
+
+    cond = make_prior_transform(
+        lower, upper, kinds,
+        joint_constraints=[("conditional_upper", (labels.index(M2LOW), i1))],
+    )
+    sort = make_prior_transform(
+        lower, upper, kinds,
+        joint_constraints=[("ordered_le", (labels.index(M2LOW), i1))],
+    )
+
+    n = 200000
+    u = _rng_cube(n, len(labels), seed=3)
+    m1_cond = np.asarray(jnp.stack([cond(u[k]) for k in range(n)]))[:, i1]
+    m1_sort = np.asarray(jnp.stack([sort(u[k]) for k in range(n)]))[:, i1]
+
+    edges = np.linspace(a, b, 8)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    p_cond, _ = np.histogram(m1_cond, bins=edges, density=True)
+    p_sort, _ = np.histogram(m1_sort, bins=edges, density=True)
+
+    expected = (b - a) / (2.0 * (centres - a))
+    np.testing.assert_allclose(p_cond / p_sort, expected, rtol=0.06)
+
+    # The two numbers F-115 quotes, read off the same closed form the other
+    # way round (sort density / Table 5 density = 2 (m1 - a) / (b - a)):
+    # 2x at the top of the range, 0.14x at m1_low = 3.5.
+    assert 2.0 * (b - a) / (b - a) == pytest.approx(2.0)
+    assert 2.0 * (3.5 - a) / (b - a) == pytest.approx(0.1429, abs=1e-4)
+
+
+def test_conditional_upper_marginal_is_the_flat_table5_prior(gwtc5_space):
+    """m1_low ~ U(3, 10) exactly: the sort's ``p(m1_low) ~ (m1_low - 3)``
+    tilt (which pushes the minimum BH mass up) must be gone."""
+    labels, lower, upper, kinds = gwtc5_space
+    jc = resolve_joint_prior_constraints(POP, labels, lower, upper, kinds)
+    transform = make_prior_transform(lower, upper, kinds, joint_constraints=jc)
+
+    i1, i2 = labels.index(M1LOW), labels.index(M2LOW)
+    a, b = float(lower[i1]), float(upper[i1])
+
+    n = 100000
+    u = _rng_cube(n, len(labels), seed=4)
+    theta = np.asarray(jnp.stack([transform(u[k]) for k in range(n)]))
+    m1 = theta[:, i1]
+    m2 = theta[:, i2]
+
+    # Flat marginal: equal-width bins hold equal mass.
+    counts, _ = np.histogram(m1, bins=np.linspace(a, b, 8))
+    np.testing.assert_allclose(counts / counts.mean(), 1.0, atol=0.03)
+
+    # Conditional: (m2 - 3) / (m1 - 3) ~ U(0, 1) independent of m1, so its
+    # mean is 1/2 in every m1 slice.  The uniform triangle would instead give
+    # a 1/2 that is only correct on AVERAGE, with the ratio's distribution
+    # unchanged -- so also check the slice-wise flatness that separates them
+    # from the m1 marginal above.
+    ratio = (m2 - a) / (m1 - a)
+    np.testing.assert_allclose(np.mean(ratio), 0.5, atol=0.01)
+    np.testing.assert_allclose(np.std(ratio), 1.0 / np.sqrt(12.0), atol=0.01)
+
+
+def test_conditional_upper_is_finite_at_the_degenerate_edge(gwtc5_space):
+    """m1_low -> 3 is where the conditional density 1/(m1_low - 3) diverges.
+
+    The map is written multiplicatively (u_i * u_j) precisely so that edge
+    costs nothing: at u_j = 0 both parameters land on the shared lower bound
+    instead of evaluating 0/0.  A NaN here would not be stopped by the
+    likelihood's ``valid`` mask -- NaN fails every comparison, so the point is
+    rejected but the poisoned value has already entered the arithmetic -- and
+    would take out the whole nested iteration.
+    """
+    labels, lower, upper, kinds = gwtc5_space
+    jc = resolve_joint_prior_constraints(POP, labels, lower, upper, kinds)
+    transform = make_prior_transform(lower, upper, kinds, joint_constraints=jc)
+    i1, i2 = labels.index(M1LOW), labels.index(M2LOW)
+    a = float(lower[i1])
+
+    for u_j in (0.0, 1e-300, 1e-12):
+        for u_i in (0.0, 0.5, 1.0):
+            u = np.full(len(labels), 0.5)
+            u[i1] = u_j
+            u[i2] = u_i
+            theta = np.asarray(transform(jnp.asarray(u)))
+            assert np.all(np.isfinite(theta)), (u_i, u_j)
+            assert theta[i2] <= theta[i1] + 1e-12
+            assert theta[i1] >= a and theta[i2] >= a
+        # u_j = 0 is the exact corner: both collapse onto the lower bound.
+        if u_j == 0.0:
+            u = np.full(len(labels), 0.5)
+            u[i1] = 0.0
+            u[i2] = 1.0
+            theta = np.asarray(transform(jnp.asarray(u)))
+            assert theta[i1] == pytest.approx(a)
+            assert theta[i2] == pytest.approx(a)
+
+
+def test_conditional_upper_transform_is_differentiable_at_the_edge(gwtc5_space):
+    """The nested transform is called inside jitted/differentiated code paths;
+    a NaN gradient at the u_j -> 0 corner is as fatal as a NaN value."""
+    import jax
+
+    labels, lower, upper, kinds = gwtc5_space
+    jc = resolve_joint_prior_constraints(POP, labels, lower, upper, kinds)
+    transform = make_prior_transform(lower, upper, kinds, joint_constraints=jc)
+    i1, i2 = labels.index(M1LOW), labels.index(M2LOW)
+
+    def scalar(u):
+        return jnp.sum(transform(u))
+
+    u = jnp.asarray(np.full(len(labels), 0.5)).at[i1].set(0.0).at[i2].set(1.0)
+    g = np.asarray(jax.grad(scalar)(u))
+    assert np.all(np.isfinite(g))
 
 
 def test_constant_likelihood_evidence_is_unbiased(gwtc5_space):
@@ -137,14 +282,17 @@ def test_fixed_member_falls_back_to_rejection(gwtc5_space):
         POP, [labels[k] for k in keep], lower[keep], upper[keep],
         [kinds[k] for k in keep],
     )
-    assert {k for k, _ in jc} == {"ordered_le"}
+    assert {k for k, _ in jc} == {"conditional_upper"}
 
 
 def test_overridden_bounds_fall_back_with_a_warning(gwtc5_space):
     labels, lower, upper, kinds = gwtc5_space
     lower2, upper2 = lower.copy(), upper.copy()
     upper2[labels.index(L1)] = 0.5           # simplex needs exact [0, 1]
-    lower2[labels.index(M2LOW)] = 4.0        # ordering needs identical bounds
+    # conditional_upper needs identical bounds too: the SHARED lower edge is
+    # the conditional's floor, so a raised m2_low floor would sample a
+    # different conditional than U(3, m1_low).
+    lower2[labels.index(M2LOW)] = 4.0
     with pytest.warns(RuntimeWarning, match="falling back to rejection"):
         jc = resolve_joint_prior_constraints(POP, labels, lower2, upper2, kinds)
     assert jc == []
