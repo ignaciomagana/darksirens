@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from scripts.mock_lensing.run_lensing_evidence_validation import (
+    _finite_diag,
     _format_status_object,
+    _gated_keys,
     _posterior_pair_probability_check,
     _write_markdown,
 )
@@ -151,3 +153,55 @@ def test_markdown_summary_generation(tmp_path):
     text = out.read_text()
     assert "| case | status | logZ | logZerr | logL_total |" in text
     assert "| case_a | passed | -1.0 | 0.2 | -2.0 | 0.5 | 1 | 0.2 | /tmp/case_a |" in text
+
+
+# --- finiteness gate: -inf is an answer for the deliberately-wrong control ---
+
+
+def _run_with(**diag):
+    return {"status": "passed", "diagnostics": diag}
+
+
+def test_finite_diag_accepts_all_finite_diagnostics():
+    run = _run_with(logL_total=-57.6, singleton_logL_sum=-19.6,
+                    pair_logL_sum=-32.8, selection_correction_total=-5.2)
+    assert _finite_diag("j2_fixed_true", run)
+    assert _gated_keys(run) == []
+
+
+def test_finite_diag_allows_the_gated_wrong_control():
+    """j2_fixed_wrong is MEANT to be rejected.
+
+    Mispairing inflates the pair importance-estimator variance past the
+    max_likelihood_variance budget, so the selection correction gates to -inf.
+    That is the reliability guard refusing to report an evidence it cannot
+    estimate -- the correct answer for this control, not a numerical failure.
+    """
+    run = _run_with(logL_total=float("-inf"), singleton_logL_sum=-19.6,
+                    pair_logL_sum=-158.9,
+                    selection_correction_total=float("-inf"))
+    assert _finite_diag("j2_fixed_wrong", run)
+    assert _gated_keys(run) == ["logL_total", "selection_correction_total"]
+
+
+def test_finite_diag_rejects_minus_inf_from_any_other_case():
+    """Only the wrong-pairing control has a licence to be gated."""
+    run = _run_with(logL_total=float("-inf"), pair_logL_sum=-32.8)
+    assert not _finite_diag("j2_fixed_true", run)
+
+
+def test_finite_diag_rejects_nan_even_for_the_gated_control():
+    """NaN is never an answer, and the exemption must not launder it.
+
+    A -inf says "this hypothesis has no support"; a NaN says the arithmetic
+    broke. Letting the control's exemption cover NaN would hide exactly the
+    class of bug this check exists to catch.
+    """
+    assert not _finite_diag(
+        "j2_fixed_wrong", _run_with(logL_total=float("nan")))
+    assert not _finite_diag(
+        "j2_fixed_wrong", _run_with(selection_correction_total=float("inf")))
+
+
+def test_finite_diag_ignores_absent_keys():
+    assert _finite_diag("off_true_catalog", _run_with(logL_total=-53.0))

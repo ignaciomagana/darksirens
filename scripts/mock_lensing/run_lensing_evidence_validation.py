@@ -248,9 +248,47 @@ def _run_case(name: str, cmd: list[str], save_root: Path, *, skip_preflight: boo
     return record
 
 
-def _finite_diag(run: dict[str, Any]) -> bool:
+_FINITE_DIAG_KEYS = ["logL_total", "singleton_logL_sum", "pair_logL_sum", "selection_correction_total"]
+
+#: Cases whose log-likelihood may legitimately come back -inf.
+#:
+#: ``j2_fixed_wrong`` pairs the events the WRONG way on purpose -- it is the
+#: control that shows the pairing carries information.  Mispairing makes the
+#: pair importance estimators noisy (measured pe_variance_sum 1.50 vs 0.076 for
+#: the true partition on tiny_evidence), so the total-log-likelihood variance
+#: guard in likelihood/selection.py gates the selection correction to -inf once
+#: sigma^2(lnL) passes max_likelihood_variance = 1.  That is the guard doing its
+#: job on a deliberately unreliable estimate, not a numerical failure: refusing
+#: to report an evidence it cannot estimate to 1 nat is the correct answer, and
+#: on a mock this small the wrong pairing is meant to be rejected outright.
+#: Demanding finiteness here made this check fail on every tiny_evidence run.
+_MAY_BE_GATED = frozenset({"j2_fixed_wrong"})
+
+
+def _finite_diag(name: str, run: dict[str, Any]) -> bool:
+    """True when ``run``'s diagnostics are as finite as that case can be.
+
+    NaN and +inf are failures everywhere -- neither is ever a meaningful answer
+    and both indicate the arithmetic broke.  -inf is a real value (a hypothesis
+    the likelihood refuses to support) and is accepted only for the cases in
+    :data:`_MAY_BE_GATED`, where it is the designed outcome.
+    """
     diag = run["diagnostics"]
-    return all(math.isfinite(float(diag[k])) for k in ["logL_total", "singleton_logL_sum", "pair_logL_sum", "selection_correction_total"] if k in diag)
+    for key in _FINITE_DIAG_KEYS:
+        if key not in diag:
+            continue
+        value = float(diag[key])
+        if math.isnan(value) or value == math.inf:
+            return False
+        if value == -math.inf and name not in _MAY_BE_GATED:
+            return False
+    return True
+
+
+def _gated_keys(run: dict[str, Any]) -> list[str]:
+    """Diagnostic keys of ``run`` that came back -inf (for the report)."""
+    diag = run.get("diagnostics", {})
+    return [k for k in _FINITE_DIAG_KEYS if k in diag and float(diag[k]) == -math.inf]
 
 
 def _safe_float(value: Any) -> float | None:
@@ -404,12 +442,24 @@ def main(argv: list[str] | None = None) -> int:
     delta_batched = None if logl_unbatched is None or logl_batched is None or not (math.isfinite(logl_unbatched) and math.isfinite(logl_batched)) else logl_batched - logl_unbatched
     true_pair_sum = _safe_float(runs.get("j2_fixed_true", {}).get("diagnostics", {}).get("pair_logL_sum"))
     wrong_pair_sum = _safe_float(runs.get("j2_fixed_wrong", {}).get("diagnostics", {}).get("pair_logL_sum"))
-    checks = {"all_requested_runs_completed": set(cases) <= set(runs), "all_cases_passed": all(r.get("status") == "passed" for r in runs.values()), "all_diagnostics_finite_where_expected": all((r.get("status") != "passed") or _finite_diag(r) for r in runs.values()), "true_pair_logL_sum_exceeds_wrong": true_pair_sum is not None and wrong_pair_sum is not None and true_pair_sum > wrong_pair_sum, "null_mock_reports_n_pairs_zero": int(runs.get("j2_null", {}).get("diagnostics", {}).get("n_pairs", -1)) == 0, "off_mode_reports_n_pairs_zero": int(runs.get("off_true_catalog", {}).get("diagnostics", {}).get("n_pairs", -1)) == 0, "batched_unbatched_logL_total_agree": delta_batched is not None and abs(delta_batched) < 1e-6}
+    checks = {"all_requested_runs_completed": set(cases) <= set(runs), "all_cases_passed": all(r.get("status") == "passed" for r in runs.values()), "all_diagnostics_finite_where_expected": all((r.get("status") != "passed") or _finite_diag(n, r) for n, r in runs.items()), "true_pair_logL_sum_exceeds_wrong": true_pair_sum is not None and wrong_pair_sum is not None and true_pair_sum > wrong_pair_sum, "null_mock_reports_n_pairs_zero": int(runs.get("j2_null", {}).get("diagnostics", {}).get("n_pairs", -1)) == 0, "off_mode_reports_n_pairs_zero": int(runs.get("off_true_catalog", {}).get("diagnostics", {}).get("n_pairs", -1)) == 0, "batched_unbatched_logL_total_agree": delta_batched is not None and abs(delta_batched) < 1e-6}
+    warnings: list[str] = []
+    # Report every gated case explicitly.  A -inf that the checks tolerate must
+    # still be visible in the summary -- silently accepting it is how a real
+    # numerical failure would hide behind an expected one.
+    for _name in sorted(_MAY_BE_GATED & set(runs)):
+        _gated = _gated_keys(runs[_name])
+        if _gated:
+            _pev = _safe_float(runs[_name].get("diagnostics", {}).get("pe_variance_sum"))
+            warnings.append(f"{_name}: {', '.join(_gated)} = -inf (expected for this control; pe_variance_sum={_pev!r} against the max_likelihood_variance budget)")
     true_logz = _safe_float(runs.get("j2_fixed_true", {}).get("logZ"))
     wrong_logz = _safe_float(runs.get("j2_fixed_wrong", {}).get("logZ"))
-    if true_logz is not None and wrong_logz is not None and math.isfinite(true_logz) and math.isfinite(wrong_logz):
+    # The discrimination check must survive a GATED wrong control.  Requiring
+    # both evidences finite skipped it on exactly the mocks where the wrong
+    # pairing is most decisively rejected (logZ = -inf), so the headline claim
+    # -- the true pairing beats the wrong one -- went unchecked there.
+    if true_logz is not None and wrong_logz is not None and math.isfinite(true_logz) and not math.isnan(wrong_logz) and wrong_logz != math.inf:
         checks["logZ_true_exceeds_wrong"] = true_logz > wrong_logz
-    warnings: list[str] = []
     null_logz_diff = None
     null_logl_diff = None
     j2_null_logz = _safe_float(runs.get("j2_null", {}).get("logZ"))
