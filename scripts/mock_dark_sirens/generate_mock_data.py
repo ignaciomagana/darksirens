@@ -1553,6 +1553,15 @@ def write_mock_data(args: argparse.Namespace) -> None:
         z50=args.survey_z50,
         width=args.survey_width,
         delta=args.galaxy_density_delta,
+        # Previously frozen at the dataclass defaults with no way to reach them,
+        # which left every mock magnitude-COMPLETE and the inference's
+        # magnitude-limited selection function structurally inert.  Defaults are
+        # the same dataclass values, so an existing command line reproduces its
+        # mock bit-identically.
+        magnitude_limit=args.survey_magnitude_limit,
+        z_hard_max=args.survey_z_hard_max,
+        absolute_mag_mean=args.survey_absolute_mag_mean,
+        absolute_mag_sigma=args.survey_absolute_mag_sigma,
     )
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -2024,6 +2033,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--survey-z50", type=float, default=SurveyConfig.z50)
     parser.add_argument("--survey-width", type=_positive_float, default=SurveyConfig.width)
     parser.add_argument("--galaxy-density-delta", type=float, default=SurveyConfig.delta)
+    parser.add_argument(
+        "--survey-magnitude-limit", type=float, default=SurveyConfig.magnitude_limit,
+        help=(
+            "Apparent-magnitude limit of the mock survey. THE DEFAULT MAKES THE "
+            "MAGNITUDE CUT INERT: with abs_mag ~ N(-21, 1) the apparent magnitude "
+            "at z = 0.3 is ~20, four sigma inside the 24.0 default, so no galaxy "
+            "is ever magnitude-selected and the catalog is magnitude-COMPLETE "
+            "(C_sel == 1). The inference's magnitude-limited selection function "
+            "(darksirens.redshift.selection.c_sel_gaussian) is then structurally "
+            "inert too, which is why that whole path had never been exercised "
+            "end-to-end on a mock. Lower this (~20 at zmax = 0.3) to generate a "
+            "genuinely magnitude-limited catalog: the mock's Gaussian luminosity "
+            "function (--survey-absolute-mag-mean/-sigma) is exactly the LF "
+            "c_sel_gaussian assumes, and the mock applies NO K-correction, so a "
+            "K = 0 selection fit is the matched model."
+        ),
+    )
+    parser.add_argument(
+        "--survey-z-hard-max", type=_positive_float, default=SurveyConfig.z_hard_max,
+        help=("Hard redshift ceiling of the survey (default 1.2, i.e. inert for "
+              "the usual --zmax <= 0.3). Independent of the sigmoid completeness."))
+    parser.add_argument(
+        "--survey-absolute-mag-mean", type=float,
+        default=SurveyConfig.absolute_mag_mean,
+        help="Mean of the mock's Gaussian absolute-magnitude LF (M0).")
+    parser.add_argument(
+        "--survey-absolute-mag-sigma", type=_positive_float,
+        default=SurveyConfig.absolute_mag_sigma,
+        help="Width of the mock's Gaussian absolute-magnitude LF (sigma_M).")
     parser.add_argument("--selection-batch-size", type=_positive_int, default=None,
                         help="Explicit chunk size (legacy). If set, it takes precedence over "
                              "--nbatches; otherwise the chunk size is --nselection / --nbatches.")
