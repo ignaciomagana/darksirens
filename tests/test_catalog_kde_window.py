@@ -483,6 +483,33 @@ def test_jit_argument_path_windows_only_after_attestation(_window8):
     assert val == pytest.approx(ref, rel=1e-10)
 
 
+def test_attestation_does_not_arm_an_unattested_view(_window8):
+    """Arming is keyed to the attested ROW SHAPES, not to the process: a view
+    nobody verified must not be windowed just because some other build attested
+    its own views.  The evaluator's soundness rests on the z-sort invariant, and
+    on an unsorted row the window can miss the sample's nearest galaxies with no
+    symptom other than a wrong log p_cat."""
+    C = _window8
+    good = _tiny_sorted_catalog(n=20)
+    assert C.attest_rows_sorted_for_windowing(good) is True
+
+    # A DIFFERENT (unattested, and here unsorted) view reaching the evaluator
+    # through a jit boundary — e.g. a diagnostic call through PRIOR_REGISTRY.
+    zs = np.random.default_rng(1).uniform(0.05, 1.0, 24)     # not sorted
+    other = _tiny_sorted_catalog(n=24)._replace(zgals=jnp.asarray(zs[None, :]))
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+    state = C.catalog_kernel_state(cosmo, survey, other)
+    calls, _ = _traced_window_calls(C, other, state)
+    assert calls == 0
+
+    # The attested view itself still windows.
+    state_good = C.catalog_kernel_state(cosmo, survey, good)
+    calls, _ = _traced_window_calls(C, good, state_good)
+    assert calls == 1
+
+
 def test_attestation_disarms_on_unsorted_catalog(_window8):
     C = _window8
     good = _tiny_sorted_catalog()

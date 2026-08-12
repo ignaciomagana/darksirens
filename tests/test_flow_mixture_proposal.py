@@ -597,6 +597,53 @@ def test_zero_chi_eff_prior_draws_are_dropped_not_floored(setup):
     assert (lz_floored - lz_masked > 20.0).all(), (lz_floored, lz_masked)
 
 
+def _beyond_amax_diagnostics(setup):
+    """Event diagnostics with EVERY draw confined to |chi_eff| > amax."""
+    boxes = flows_mod.compute_support_boxes(setup["ens"], key=jax.random.key(1))
+    n = int(np.asarray(boxes["chieff"]).shape[0])
+    beyond = dict(boxes)
+    beyond["chieff"] = jnp.tile(jnp.asarray([0.995, 1.0]), (n, 1))
+    beyond["chi_ab"] = jnp.zeros((n, 2))
+    beyond["chi_resid"] = jnp.tile(jnp.asarray([-2.0, 2.0]), (n, 1))
+
+    theta = np.asarray(setup["theta_fid"], dtype=np.float64).copy()
+    theta[10] = 1.0   # sigma_chi at its prior ceiling: the window is reachable
+    theta = jnp.asarray(theta)
+    # w_full = 0: every draw comes from the beyond-amax window.
+    return _build(setup, beyond, 4096, 0.0).event_diagnostics(
+        _cosmo(), _survey(), theta
+    )
+
+
+def test_draws_beyond_the_table_grid_carry_no_weight(setup):
+    """|chi_eff| > amax is outside the PE prior's support, clamping or not.
+
+    ``jnp.interp`` CLAMPS out-of-range inputs to the end of the chi_eff grid
+    (gwcat's own behaviour, kept for the port), and the shipped amax=0.99
+    table's boundary column is only zero to numerical accuracy -- 57/200 q rows
+    are positive there, down to 1e-12 -- so ``p_chi > 0`` alone kept such draws
+    and inflated their weight by 10-28 nats.  A proposal confined to
+    |chi_eff| > amax must therefore integrate to exactly zero.
+    """
+    lz = np.asarray(_beyond_amax_diagnostics(setup)[0])
+    assert np.isneginf(lz).all(), lz
+
+
+def test_dead_event_reports_zero_ess_not_nan(setup):
+    """An excluded event's ESS is 0, not nan.
+
+    ``_event_ldw`` legitimately returns an all -inf row (here: every draw
+    outside the PE prior's chi_eff support), and ``ln Z_i = -inf`` is reported
+    for it.  Shifting the row by its own max was then ``-inf - (-inf) = nan``,
+    so the diagnostic meant to identify the dead event reported nan — which also
+    poisons any host-side mean/percentile over events.
+    """
+    lz, var, ess = (np.asarray(a) for a in _beyond_amax_diagnostics(setup))
+    assert np.isneginf(lz).all()
+    np.testing.assert_array_equal(ess, np.zeros_like(ess))
+    assert np.isfinite(var).all()
+
+
 def test_pe_bounds_from_checkpoint_config_are_honoured(tmp_path):
     """A checkpoint declaring its PE window masks draws outside it."""
     root = tmp_path / "pe_bounded"

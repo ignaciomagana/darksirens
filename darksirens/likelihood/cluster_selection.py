@@ -52,6 +52,39 @@ from the LVK pair-id pipeline, multiply each kept-source weight by it
 before summing — the API exposes this via the ``log_p_tag_per_source``
 argument (default zero).
 
+Frozen detection realization: FIX THE COSMOLOGY
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Both lensed channels (this one and ``compute_lensed_single_selection_term``)
+reweight SOURCE-FRAME campaign columns (m1_src, q_src, z_src, chieff, y_source)
+against a source-frame proposal, and the detection efficiency enters ONLY
+through the subset membership — the per-image flags rendered at generation time
+(``lensed_injections.py``). Detection is a function of the OBSERVABLES
+(m1_det, dL_app = dL(z)/sqrt(mu)) and therefore of cosmology, so at fixed
+(m1_src, q, z, y) a change in H0 (or w0/wa) changes P_det while the stored flags
+cannot follow. These estimators are consequently valid only AT THE CAMPAIGN'S
+FIDUCIAL COSMOLOGY: they target
+
+    ∫ dθ_src dy τ_2 p_pop p_z(z|Θ) P_det(θ_app(θ_src, Θ_campaign))
+
+with the efficiency pinned to Θ_campaign. The unlensed singleton campaign is
+stored in the (m1det, q, dL, chieff) basis with p_draw in that same basis
+precisely so that ITS flags are cosmology-independent and
+``compute_selection_term`` is a valid estimator for any Θ; the two channels
+summed into μ_tot therefore obey different selection conventions once cosmology
+is sampled, and the ratio μ_sel^(2)/μ_sel^(1) that sets A_tau picks up a
+spurious cosmology dependence. (Note that ``cosmo``/``survey`` reach
+``_per_source_log_weight`` unused: only p_z sees cosmology, through the
+closure — the tell-tale that no efficiency is recomputed.)
+
+Run lensed channels with the cosmology FIXED (``--fix_cosmology true``, the
+CLI default). Removing the restriction needs the campaign's full draw set plus
+an analytic efficiency recomputed at the proposed cosmology (weight each source
+by P_det(x_+) P_det(x_-), resp. the exactly-one-detected combination, from
+``darksirens.lensing.fcpdet`` and the stored fc_rho_thr/fc_r0/fc_mc_bar attrs);
+the file keeps only the already-selected subsets and records no fiducial
+cosmology, so it cannot be done from the current format — and nothing here can
+detect the violation, since H0 arrives traced.
+
 Pair-orientation caveat (mode-dependent)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The ``p_det^(1)(θ_app,+) · p_det^(1)(θ_app,-)`` product above describes the
@@ -200,6 +233,10 @@ def compute_cluster_selection_term(
 ) -> tuple:
     """Importance-sampled cluster (J=2) selection integral.
 
+    Valid only at the campaign's fiducial cosmology — the rendered detection
+    flags freeze the efficiency (see the module docstring's "Frozen detection
+    realization" section).
+
     Parameters
     ----------
     injections
@@ -270,7 +307,9 @@ def compute_lensed_single_selection_term(
     exactly-one-detected subset (see LensedSingleImageSet). No pair-tag
     factor: single images are never pair-tagged. Detection realization is
     already encoded in the subset membership, exactly like the both-detected
-    estimator; no P_det factors appear here.
+    estimator; no P_det factors appear here — so this estimator, too, is valid
+    only at the campaign's fiducial cosmology (module docstring, "Frozen
+    detection realization").
 
     Returns (log_mu, Neff, log_sigma2) with the same conventions as
     compute_cluster_selection_term.
@@ -355,7 +394,11 @@ def combined_selection_log_correction(
         Total-log-likelihood variance budget per GWTC-4/5, forwarded to
         ``selection_log_correction``. The cluster stack threads the summed
         per-event and per-pair delta-method variances here, so the guard
-        bounds the TOTAL log-likelihood variance, not selection alone.
+        bounds the TOTAL log-likelihood variance, not selection alone. Caveat:
+        the per-pair term covers only each branch's DRIVING sample set — the
+        partner event's KDE sampling noise is invisible to it (see
+        ``cluster_likelihood.cluster_log_likelihood_pair``), so for the pair
+        channel the budget is spent against a lower bound on the true variance.
 
     Returns
     -------

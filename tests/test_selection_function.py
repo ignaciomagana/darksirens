@@ -113,6 +113,34 @@ def test_fit_and_suffstats_apply_the_z_floor():
         magnitude_suffstats(m2, z2, 22.5)
 
 
+def test_gaussian_fit_tolerance_scales_with_the_sample_size():
+    """The NLL scales with N, so an ABSOLUTE fatol stops meaning anything at
+    catalog size: at N ~ 1e6 the objective's own float64 resolution
+    (eps * |NLL| ~ 3e-10) is coarser than the old 1e-10 tolerance.  The
+    schechter twin already scales it; the DEFAULT family must too."""
+    import scipy.optimize as sopt
+
+    rng = np.random.default_rng(23)
+    m, z = _synthetic_truncated_sample(rng, 600, 70.0)
+
+    seen = {}
+    real_minimize = sopt.minimize
+
+    def spy(*args, **kwargs):
+        seen.setdefault("options", dict(kwargs.get("options") or {}))
+        return real_minimize(*args, **kwargs)
+
+    sopt.minimize = spy
+    try:
+        fit = fit_selection_from_mags(m, z, 22.5)
+    finally:
+        sopt.minimize = real_minimize
+
+    assert seen["options"]["fatol"] == pytest.approx(1e-9 * fit.n_gal)
+    assert seen["options"]["fatol"] > np.finfo(float).eps * abs(
+        fit.meta["nll"])
+
+
 def test_fit_rejects_sample_fainter_than_the_declared_limit():
     rng = np.random.default_rng(22)
     m, z = _synthetic_truncated_sample(rng, 500, 70.0)

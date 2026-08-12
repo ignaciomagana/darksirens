@@ -159,6 +159,26 @@ class TinyNSConfig:
         d = asdict(self); d["replacement_chain_schedule"] = list(self.replacement_chain_schedule) if self.replacement_chain_schedule else None; d["explicit"] = list(self.explicit); return d
 
 
+#: Resolved-config fields that do NOT change the statistical target: the
+#: checkpoint/resume machinery and the progress printing.  ``build_run_fingerprint``
+#: filters ``vars(opts)`` against ``run_fingerprint._NON_SEMANTIC_KEYS`` at the TOP
+#: level only, so mirroring these onto ``opts.tinyns_resolved_config`` re-admitted
+#: values the fingerprint had deliberately excluded (``show_progress``,
+#: ``tinyns_checkpoint_interval``) through the nested dict -- a SLURM requeue that
+#: changed the tinyns checkpoint cadence or toggled the progress bar then hit the
+#: fatal resume-fingerprint mismatch instead of resuming.  Kept out of the mirror
+#: (the dataclass still carries them; the flags themselves are recorded top-level
+#: in settings.json).
+_NON_SEMANTIC_RESOLVED_KEYS = (
+    "checkpoint_path",
+    "checkpoint_interval",
+    "resume_from",
+    "checkpoint_path_out",
+    "show_progress",
+    "progress_interval",
+)
+
+
 def parse_chain_schedule(raw):
     if raw in (None, ""):
         return None
@@ -201,9 +221,20 @@ def build_tinyns_config(opts):
     validate_tinyns_config(cfg)
     # Keep individual CLI override attributes unchanged so repeated resolution
     # remains idempotent and omitted flags stay distinguishable from explicit
-    # overrides. Store the complete resolved config separately for printing and
-    # result metadata.
-    setattr(opts, "tinyns_resolved_config", cfg.to_json_dict())
+    # overrides. Store the resolved config separately for printing and result
+    # metadata, MINUS the non-semantic checkpoint/progress fields: this dict is
+    # fingerprinted wholesale by build_run_fingerprint (see
+    # _NON_SEMANTIC_RESOLVED_KEYS).
+    mirror = cfg.to_json_dict()
+    for key in _NON_SEMANTIC_RESOLVED_KEYS:
+        mirror.pop(key, None)
+    # ``explicit`` records WHICH flags were passed, so a non-semantic flag's
+    # mere presence there would change the digest just as its value did.
+    mirror["explicit"] = [
+        name for name in mirror["explicit"]
+        if name not in _NON_SEMANTIC_RESOLVED_KEYS
+    ]
+    setattr(opts, "tinyns_resolved_config", mirror)
     return cfg
 
 
@@ -235,11 +266,15 @@ def validate_tinyns_config(c):
     if c.bound != "multi" and _explicit(c, "multi_bound_max_ellipsoids", "multi_bound_min_points", "multi_bound_split_threshold", "multi_bound_enlargement", "multi_bound_overlap_correction"): raise ValueError("multi_bound_* options require --tinyns_bound multi.")
     if c.bound_update_interval <= 0 or c.bound_enlargement <= 0 or c.bound_jitter < 0: raise ValueError("bound_update_interval and bound_enlargement must be positive; bound_jitter must be >= 0.")
     if c.bound_failure_rebuild_threshold <= 0: raise ValueError("bound_failure_rebuild_threshold must be positive.")
-    # Any checkpoint path at all means tinyns will evaluate
-    # ``checkpoint_interval <= 0``, so demand a positive int here rather than
-    # letting None/0 reach tinyns (None used to raise a bare TypeError).
-    if (c.checkpoint_path or c.resume_from or c.checkpoint_path_out) and (
-            c.checkpoint_interval is None or c.checkpoint_interval <= 0):
+    # UNCONDITIONAL: run_sampler also enables tinyns checkpointing from the
+    # shared --checkpoint_interval plan (sampling.py: config.checkpoint_path or
+    # plan.path), which is invisible here -- so gating on the CONFIG-level paths
+    # let --tinyns_checkpoint_interval 0 through to tinyns' own
+    # ``checkpoint_interval <= 0`` guard, i.e. a crash after the catalog load,
+    # KDE-cache build and likelihood trace.  The field always has a concrete
+    # default (BASE_DEFAULTS: 100), so demanding a positive int costs nothing
+    # and fails at _resolve_sampler_config time instead.
+    if c.checkpoint_interval is None or c.checkpoint_interval <= 0:
         raise ValueError("checkpoint_interval must be a positive number of iterations when checkpointing is enabled.")
     if c.checkpoint_path and c.resume_from and not c.checkpoint_path_out: raise ValueError("When both resume_from and checkpoint_path are set, also set checkpoint_path_out to clarify resumed checkpoint output.")
 

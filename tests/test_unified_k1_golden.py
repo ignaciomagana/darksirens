@@ -45,6 +45,7 @@ from darksirens.gw.populations.registry import get_fixed_population_params
 from darksirens.inference.prior import build_parameter_space
 from darksirens.lensing.wlmagnification import WLParams
 from darksirens.likelihood.factory import make_likelihood
+from darksirens.redshift.prior import _LOG_H_CLIP
 
 GOLDEN_PATH = os.path.join(os.path.dirname(__file__), "golden", "unified_k1_golden.json")
 NG = len(zgrid)
@@ -173,10 +174,49 @@ def _logq_members(m=3):
     return jnp.asarray(members)
 
 
+#: Peak |mark| in the marked fixture.  Marks reach the prior only through
+#: ``h = exp(eta * m)`` with ``log h`` clipped to +-``_LOG_H_CLIP``, so the
+#: fixture must satisfy ``max|m| * eta_bound < _LOG_H_CLIP``: past that every
+#: galaxy's ``h`` saturates to the SAME constant, and a globally constant ``h``
+#: is the model's exact null (it normalises away per pixel and cancels between
+#: the observed amplitude ``N_obs<h>_w`` and ``mu_miss``), so eta goes inert.
+MARK_ABS_MAX = 0.9
+
+
 def _mark_table(scale=1.0):
-    """(NPIX, maxg=1) log-Mstar-like mark values, deterministic per pixel."""
-    vals = 10.0 + 0.2 * np.arange(NPIX, dtype=float).reshape(NPIX, 1) * scale
-    return jnp.asarray(vals)
+    """(NPIX, 2) z-centred log-Mstar-like marks, deterministic per pixel.
+
+    Mirrors what the production loader hands the likelihood: marks are
+    z-centred at load (``m_tilde = m - E[m|z]``, see
+    ``darksirens.catalogs.marks.load_and_center_survey_marks``), i.e. each
+    redshift column has zero mean over the sky and O(1) spread -- NOT the raw
+    ~10-12 dex log-Mstar values, which saturate the ``_LOG_H_CLIP`` rail for
+    any |eta| >= 0.7 and make eta an exact no-op.
+
+    The two galaxies in a pixel sit at DIFFERENT redshifts and carry OPPOSITE
+    marks, so eta tilts the within-pixel host redshift distribution (the marked
+    model's primary channel) on top of the catalog:missing branch odds.
+    """
+    col = MARK_ABS_MAX * np.linspace(-1.0, 1.0, NPIX) * scale     # zero-mean
+    return jnp.asarray(np.stack([col, -col], axis=1))             # (NPIX, 2)
+
+
+def _marks_sky_data():
+    """Full-sky data with TWO galaxies per pixel at distinct redshifts.
+
+    One galaxy per pixel leaves the marked model no shape channel at all: the
+    single galaxy's ``w h`` is normalised away inside its own pixel, so eta can
+    only move the catalog:missing odds.  Two galaxies at different z (rows kept
+    z-ascending for the KDE window) let ``h(m|eta)`` genuinely reweight the
+    host redshift distribution.
+    """
+    data = _full_sky_data()
+    zg = np.tile(np.array([0.06, 0.16]), (NPIX, 1))
+    data["zgals"] = data["zgals_catalog"] = zg
+    data["dzgals"] = data["dzgals_catalog"] = np.full((NPIX, 2), 0.02)
+    data["wgals"] = data["wgals_catalog"] = np.ones((NPIX, 2))
+    data["ngals_catalog"] = np.full(NPIX, 2, dtype=np.int32)
+    return data
 
 
 def _delta_g_table():
@@ -212,7 +252,7 @@ def _cell_ensemble_marg():
 
 
 def _cell_marks():
-    data = _full_sky_data()
+    data = _marks_sky_data()
     data["mark_logmstar"] = _mark_table()
     return _base_opts(mark_model="loglinear", mark_names=("logmstar",)), data
 
@@ -434,6 +474,33 @@ def test_ensemble_marginalization_is_live():
     assert v_q != v_m
 
 
+def test_marks_fixture_stays_off_the_log_h_clip():
+    """The marked fixture must never saturate the host-efficiency rail.
+
+    ``log h = eta * m`` is clipped to +-``_LOG_H_CLIP`` before it reaches the
+    kernels.  Once EVERY galaxy clips, ``h`` is a global constant, which the
+    marked model deliberately treats as a null: the constant normalises away
+    inside each pixel, the observed amplitude ``N_obs <h>_w`` and the missing
+    branch's ``mu_miss = E_obs[h|z]`` both carry it, and it cancels exactly
+    between them.  An uncentred mark table (raw log-Mstar ~ 10-12 dex) hits
+    that rail at |eta| >= 0.7 and silently turns eta into a no-op, so pin the
+    fixture's headroom over the WHOLE sampled eta range.
+    """
+    opts, data = _cell_marks()
+    labels, lower, upper = _space_for(opts)
+    i = labels.index("eta_logmstar")
+    eta_bound = float(np.max(np.abs([lower[i], upper[i]])))
+    m_max = float(np.max(np.abs(np.asarray(data["mark_logmstar"]))))
+    assert m_max == pytest.approx(MARK_ABS_MAX)
+    assert m_max * eta_bound < _LOG_H_CLIP, (
+        f"marks saturate the log-h clip: max|m|={m_max} x eta_bound="
+        f"{eta_bound} >= {_LOG_H_CLIP}"
+    )
+    # z-centred, as the production loader delivers them: a nonzero column mean
+    # is a pure per-z-bin offset in log h, i.e. exactly the inert direction.
+    assert np.allclose(np.asarray(data["mark_logmstar"]).mean(axis=0), 0.0)
+
+
 def test_marks_eta_is_live():
     opts, data = _cell_marks()
     labels, coords = _coords_for(opts)
@@ -442,7 +509,14 @@ def test_marks_eta_is_live():
     base = np.array(coords[0])
     perturbed = base.copy()
     perturbed[idx] = base[idx] + 0.8
-    assert _value(opts, data, base) != _value(opts, data, perturbed)
+    v_base = _value(opts, data, base)
+    v_pert = _value(opts, data, perturbed)
+    assert v_base != v_pert
+    # ...and by physics, not by rounding dust: an eta shift that reweights the
+    # two hosts in a pixel by exp(0.8 * 2 * 0.245) ~ 1.5 must move the
+    # likelihood far above the ~1e-13 float residue a cancelling (inert) mark
+    # model leaves behind.
+    assert abs(v_pert - v_base) / abs(v_base) > 1e-4
 
 
 def test_delta_g_is_live():

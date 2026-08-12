@@ -49,13 +49,13 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit, lax, vmap
-from jax.scipy.special import logsumexp, ndtr, ndtri
+from jax.scipy.special import log_ndtr, logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
 from typing import NamedTuple, Any
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
-from darksirens.redshift.grid import zgrid
+from darksirens.redshift.grid import log_interp_zgrid, zgrid
 from .completion import log_galaxy_measure_grid
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
@@ -249,7 +249,16 @@ _SORTED_ROWS_CACHE: dict = {}
 # with ANY unsorted view disarms it.  The concrete-array check still runs first
 # and never consults this flag, so eager/closure callers and the bitwise
 # unsorted-fallback contract are unaffected.
+#
+# The arming is additionally keyed to the attested views' ROW SHAPES — the only
+# property of a catalog the evaluator can read off a tracer — so one build's
+# attestation cannot spill onto an unrelated view (a diagnostic call through
+# PRIOR_REGISTRY with an ad-hoc or re-sliced catalog, which would be windowed
+# without ever having been verified).  Two tracers of the SAME shape remain
+# indistinguishable inside a trace, so the contract is still "attest every view
+# you bind".
 _ROWS_SORTED_ATTESTED: bool = False
+_ATTESTED_ROW_SHAPES: frozenset = frozenset()
 
 
 def attest_rows_sorted_for_windowing(*em_catalogs) -> bool:
@@ -259,10 +268,12 @@ def attest_rows_sorted_for_windowing(*em_catalogs) -> bool:
     Call with every catalog view the likelihood will bind (PE, selection, and
     all mixture views).  Returns the armed verdict: True only if every catalog
     with per-galaxy rows verifiably satisfies the invariant.  Catalog views
-    without rows (``zgals is None``) are ignored rather than disarming.
+    without rows (``zgals is None``) are ignored rather than disarming.  Only the
+    row shapes attested here can be windowed through a jit boundary.
     """
-    global _ROWS_SORTED_ATTESTED
+    global _ROWS_SORTED_ATTESTED, _ATTESTED_ROW_SHAPES
     verdict = True
+    shapes = set()
     for cat in em_catalogs:
         zgals = getattr(cat, "zgals", None)
         ngals = getattr(cat, "ngals", None)
@@ -271,8 +282,25 @@ def attest_rows_sorted_for_windowing(*em_catalogs) -> bool:
         if not _rows_sorted_for_windowing(zgals, ngals):
             verdict = False
             break
+        shapes.add(tuple(zgals.shape))
     _ROWS_SORTED_ATTESTED = verdict
+    _ATTESTED_ROW_SHAPES = frozenset(shapes) if verdict else frozenset()
     return verdict
+
+
+def _traced_rows_attested(zgals) -> bool:
+    """True iff ``zgals`` is a TRACER whose row shape was attested at build time.
+
+    Traced catalogs (jit arguments — the production likelihood path) cannot be
+    verified in the evaluator; the factory attests them while the arrays are
+    concrete (:func:`attest_rows_sorted_for_windowing`).  Requiring the attested
+    ``(N_rows, N_max)`` keeps that arming from covering a view nobody checked.
+    """
+    return (
+        _ROWS_SORTED_ATTESTED
+        and isinstance(zgals, jax.core.Tracer)
+        and tuple(zgals.shape) in _ATTESTED_ROW_SHAPES
+    )
 
 
 def _rows_sorted_for_windowing(zgals, ngals) -> bool:
@@ -388,6 +416,18 @@ def _map_rows(row_fn, args: tuple):
     return _post(out)
 
 
+def _log_ndtr_span(lo, hi):
+    """``log(Phi(hi) - Phi(lo))`` without the f64 underflow of the difference.
+
+    ``ndtr`` returns exactly 0 past ~39 sigma, so the plain difference
+    underflows for any truncation that deep into a tail; ``log_ndtr`` stays
+    finite for arbitrarily deep ones.  The ``-1e-16`` clamp keeps the result
+    finite (and its gradient defined) when the two limits coincide.
+    """
+    log_lo, log_hi = log_ndtr(lo), log_ndtr(hi)
+    return log_hi + jnp.log(-jnp.expm1(jnp.minimum(log_lo - log_hi, -1e-16)))
+
+
 def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
     """
     log Z_i for one row: Z_i = ∫_0^{z_hi} N(z; z_i, sig_i) g(z) dz.
@@ -409,10 +449,27 @@ def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
     u = jnp.clip(u, 1e-12, 1.0 - 1e-12)
     z_node = jnp.clip(zs[..., None] + sig_eff[..., None] * ndtri(u), 0.0, z_hi)
     g = jnp.exp(
-        jnp.interp(z_node.reshape(-1), zgrid, log_g_grid)
+        log_interp_zgrid(z_node.reshape(-1), log_g_grid)
     ).reshape(z_node.shape)
-    Z = span * (g * _GL_W).sum(axis=-1)                     # (N_max,)
-    return jnp.where(real & (Z > 0.0), jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+    Zg = (g * _GL_W).sum(axis=-1)                           # (N_max,)
+    Z = span * Zg
+    # ``span`` underflows to exactly 0 in f64 once BOTH ndtr tails do (the
+    # truncation limit >~39 sigma_eff from the galaxy), which is routine on the
+    # depth path (``z_hi = z_depth``) for a REAL galaxy above the depth -- with
+    # spectroscopic sig_eff at the floor it is the rule, not the exception.
+    # Those rows are recovered in log space, where the truncated mass is exact:
+    # returning the padding fallback (0.0) instead would declare UNIT kernel
+    # mass below the truncation for a galaxy that has essentially none, and the
+    # depth-mass consumer would pick up that galaxy's whole weight.  Rows with a
+    # resolvable ``span`` keep the direct (bit-identical) spelling.
+    ok = Z > 0.0
+    log_Z = jnp.where(
+        ok,
+        jnp.log(jnp.where(ok, Z, 1.0)),
+        _log_ndtr_span(-zs / sig_eff, (z_hi - zs) / sig_eff)
+        + jnp.log(jnp.maximum(Zg, 1e-300)),
+    )
+    return jnp.where(real, log_Z, 0.0)
 
 
 def _renorm_log_kw_below_depth(
@@ -491,7 +548,7 @@ def _row_kernel_state(
     log_depth_mass = jnp.zeros((), dtype=sig_eff.dtype)
 
     if volume_weighted:
-        log_w = log_w + jnp.where(real, jnp.interp(zs, zgrid, log_g_grid), 0.0)
+        log_w = log_w + jnp.where(real, log_interp_zgrid(zs, log_g_grid), 0.0)
 
     lse = logsumexp(log_w)
     has_galaxies = jnp.isfinite(lse)
@@ -625,7 +682,24 @@ def _row_marked_kernel_state(
         log_kw, log_depth_mass = _renorm_log_kw_below_depth(
             log_kw, zs, sig_eff, real, log_g_grid, z_depth, has_galaxies
         )
-    log_N_host = jnp.where(has_galaxies, lse, -jnp.inf)
+    # AMPLITUDE CONVENTION (redshift/prior.py's module docstring): the
+    # catalog:missing odds are COUNT odds, so the marked amplitude is the
+    # observed COUNT times the weighted-mean host efficiency,
+    #
+    #     N_host = N_obs * <h>_w = N_obs * Σ_i w_i h_i / Σ_i w_i,
+    #
+    # not the raw Σ_i w_i h_i.  The raw mass carries the arbitrary scale of the
+    # WEIGHT column (a luminosity-weighted catalog with L/L_sun ~ 1e10 made the
+    # observed branch dominate the missing one by ~1e10 and silently switched the
+    # completeness correction off), and the missing branch it is paired against
+    # -- (1 - C) dN_exp * mu_miss with mu_miss = E_obs[h|z] -- carries no weight
+    # factor at all.  This form is invariant under w -> c*w and is EXACTLY the
+    # unmarked count at h == 1, so eta = 0 reduces to the galaxy-count model for
+    # any weights.  ``field_marked_observed_global_total`` uses the same
+    # convention through ``build_field_mark_inputs``' count-renormalised weights.
+    log_N_obs = jnp.log(jnp.maximum(jnp.sum(real.astype(sig_eff.dtype)), 1e-300))
+    log_w_tot = logsumexp(log_w)
+    log_N_host = jnp.where(has_galaxies, log_N_obs + lse - log_w_tot, -jnp.inf)
     return log_kw, sig_eff, log_N_host, log_depth_mass
 
 
@@ -717,11 +791,9 @@ def eval_log_catalog_prior_state(
             _rows_sorted_for_windowing(em_catalog.zgals, em_catalog.ngals)
             # Traced catalogs (jit arguments — the production likelihood path)
             # cannot be verified here; the factory attests them at build time
-            # with the concrete arrays (attest_rows_sorted_for_windowing).
-            or (
-                _ROWS_SORTED_ATTESTED
-                and isinstance(em_catalog.zgals, jax.core.Tracer)
-            )
+            # with the concrete arrays (attest_rows_sorted_for_windowing), and
+            # only the row shapes it attested are armed.
+            or _traced_rows_attested(em_catalog.zgals)
         )
     )
     if use_window:
@@ -751,7 +823,8 @@ def eval_log_catalog_prior_state(
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
-    log_g_front = jnp.where(state.volume_weighted, 0.0, jnp.interp(z, zgrid, state.log_g_grid))
+    log_g_front = jnp.where(state.volume_weighted, 0.0,
+                            log_interp_zgrid(z, state.log_g_grid))
     log_p_cat = log_g_front + log_mix
     # Depth truncation: a magnitude-limited survey catalogs nothing past
     # ``z_depth``, so p_cat asserts nothing there -- zero it (the missing branch
@@ -797,7 +870,7 @@ def log_catalog_prior(
     log_kw, sig_eff, _log_depth_mass = _row_kernel_state(
         zs, dzs, ws, ngal, survey.sigma_kde, log_g_grid, False
     )
-    log_g_z = jnp.interp(z, zgrid, log_g_grid)
+    log_g_z = log_interp_zgrid(z, log_g_grid)
     return log_g_z + _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig_eff))
 
 

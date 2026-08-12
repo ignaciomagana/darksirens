@@ -158,3 +158,90 @@ def test_fixed_and_override_out_of_range_raises_value_error(
             prior_overrides={label: list(override_bounds)},
             fixed_parameter_values={label: fixed_out_of_range},
         )
+
+
+# ------------------------------------------------------------
+# Override bound ORDERING (the guard the cosmology grid check relies on)
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "label,default_bounds,override_bounds,fixed_in_range,fixed_out_of_range",
+    LABEL_FAMILIES,
+)
+def test_reversed_override_bounds_raise(
+    label, default_bounds, override_bounds, fixed_in_range, fixed_out_of_range
+):
+    """A swapped [upper, lower] override must be refused, for every block.
+
+    make_prior_transform's affine map traverses the box backwards without
+    complaint (only the numpyro backend checks upper > lower), and
+    _validate_cosmology_within_interpolation_grid's `lo < g_lo or hi > g_hi`
+    test PASSES for a swapped pair -- so an unordered box silently samples the
+    out-of-grid region while settings.json reports the inverted bounds.
+    """
+    lo, hi = override_bounds
+    with pytest.raises(ValueError, match="lower < upper"):
+        _space(prior_overrides={label: [hi, lo]})
+
+
+def test_zero_width_override_raises():
+    with pytest.raises(ValueError, match="lower < upper"):
+        _space(prior_overrides={"log10n0": [-2.0, -2.0]})
+
+
+def test_reversed_cosmology_override_still_hits_the_grid_guard():
+    """The swapped pair that used to slip past the interpolation-grid guard."""
+    with pytest.raises(ValueError, match="lower < upper"):
+        _space(prior_overrides={"Om0": [0.9, 0.05]})
+
+
+def test_non_finite_override_raises():
+    with pytest.raises(ValueError, match="must be finite"):
+        _space(prior_overrides={"H0": [20.0, float("inf")]})
+
+
+# ------------------------------------------------------------
+# Fixed values are range-checked WITHOUT an override present
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "label,default_bounds,override_bounds,fixed_in_range,fixed_out_of_range",
+    LABEL_FAMILIES,
+)
+def test_fixed_only_out_of_default_bounds_warns(
+    label, default_bounds, override_bounds, fixed_in_range, fixed_out_of_range
+):
+    """A pinned-only label is range-checked against its registry bounds.
+
+    Previously only the fixed AND overridden intersection was inspected, so
+    e.g. sigma_M = -1 (which inverts C_sel(z)) passed silently.  Severity is
+    intent-keyed: a pinned-only value beyond the DEFAULT bounds is a legitimate
+    ablation device (the field-recovery campaign fixes log10n0 = -11 to null
+    the AGN missing-galaxy budget), so it WARNS rather than raises; the fatal
+    path is reserved for a fixed value contradicting an explicit override
+    (covered above).
+    """
+    lo, hi = default_bounds
+    if label.startswith("fcat_"):
+        # ``fcat_*`` has its own dedicated [0, 1] wall, which still raises.
+        with pytest.raises(ValueError, match="must lie in \\[0, 1\\]"):
+            _space(fixed_parameter_values={label: hi + 1.0})
+        return
+    with pytest.warns(UserWarning, match="outside the default prior bounds"):
+        _space(fixed_parameter_values={label: hi + 1.0})
+
+
+def test_fixed_sigma_M_below_floor_warns():
+    with pytest.warns(
+        UserWarning, match=r"'sigma_M' \(-1.0\) is outside the default prior bounds"
+    ):
+        build_parameter_space(
+            pop_model="powerlaw+peak",
+            fix_population=False,
+            fix_cosmology=False,
+            fix_survey=False,
+            universe_model="dark_sirens",
+            c_mode="selection",
+            prior_overrides={},
+            fixed_parameter_values={"sigma_M": -1.0},
+        )

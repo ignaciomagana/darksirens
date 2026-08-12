@@ -210,8 +210,18 @@ def main(argv: list[str] | None = None) -> int:
             "marginalized_pair_probabilities_in_unit_interval": all(0.0 <= p <= 1.0 for p in probs),
             "marginalized_results_partition_mode_attr": marginalized_attrs.get("partition_mode") == "marginalize_exact",
             "marginalized_results_n_partitions_attr": "n_partitions" in marginalized_attrs,
-            "marginalized_results_expected_n_pairs_attr": "prior_midpoint_expected_n_pairs" in marginalized_attrs,
-            "marginalized_results_map_partition_n_pairs_attr": "prior_midpoint_map_partition_n_pairs" in marginalized_attrs,
+            # The prefix names the point the diagnostics were evaluated at: the
+            # prior midpoint, or the generic diagnostics_point when the
+            # reliability guard sent the run to the fallback point.
+            "marginalized_results_expected_n_pairs_attr": any(
+                f"{p}_expected_n_pairs" in marginalized_attrs
+                for p in ("prior_midpoint", "diagnostics_point")
+            ),
+            "marginalized_results_map_partition_n_pairs_attr": any(
+                f"{p}_map_partition_n_pairs" in marginalized_attrs
+                for p in ("prior_midpoint", "diagnostics_point")
+            ),
+            "marginalized_results_eval_point_attr": "partition_diagnostics_eval_point" in marginalized_attrs,
             "marginalized_results_reference_partition_n_pairs_attr": "reference_partition_n_pairs" in marginalized_attrs,
         })
     print("\n[validation] diagnostics summary")

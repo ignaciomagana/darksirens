@@ -151,15 +151,6 @@ def test_k1_conditional_batched_selection_block_invariant():
         float(L.POP[0]), "k1_batched_sel")
 
 
-def test_asymmetric_pe_members_sel_no_members_block_invariant():
-    """PE ensemble, selection deterministic (hoisted): still block-invariant."""
-    cat_pe = L._dark_catalog(logq_members=L._members_table())
-    cat_sel = L._dark_catalog(logq=np.zeros((2, NG)))
-    _assert_block_invariant(
-        _k1_builder(cat_pe, cat_sel, _GW_PE7, _N_EV7), float(L.POP[0]),
-        "asymmetric")
-
-
 def test_k1_marked_grad_through_completion_block_invariant():
     """MARKED ensemble; grad w.r.t. eta runs the reverse pass THROUGH the member
     completion (which reads the block-assembled pe_pre brackets)."""

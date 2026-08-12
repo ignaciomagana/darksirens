@@ -749,6 +749,13 @@ candidate-edge metadata:
 If both ``--pair_metadata_path`` and ``--pair_pe_path`` are provided, they must
 refer to the same path.
 
+Per-pair time marks taken from either file are consumed in the partition's pair
+order, so a ``pair_k`` group that carries ``delta_t_obs`` must also carry
+``event_index_image0``/``event_index_image1`` whenever ``--pair_marks time`` runs
+with ``--partition_mode fixed`` and a ``--partition_path``: those attrs are what
+verifies that file row *k* describes partition pair *k*.  Preflight and the
+loader both refuse the index-free combination rather than align by position.
+
 Mock lensing generation also writes a unified observed-event catalog by default:
 ``mock_observed_gw_pe.h5`` plus ``observed_catalog.json``.  This file uses the
 same ``gwcat-1.0`` event-major schema as the existing GW PE files, but contains
@@ -898,6 +905,15 @@ an apparent-distance/magnification compatibility proxy, and optional effective
 spin consistency.  These observable scores determine `log_prior_odds`; truth is
 not consulted for inclusion or ranking.
 
+The GPS-time separation enters `log_prior_odds` as a coincidence tilt
+(`log_time_coincidence`) **only** when `--include_time_marks false`, i.e. when the
+file exports no `delta_t_obs` mark.  With time marks exported, the SIS time-mark
+likelihood scores the same `|Delta t|` through its coincidence odds, so folding
+the tilt into the prior as well would count the arrival-time separation twice;
+preflight rejects that combination.  Whatever the builder does fold is declared
+in the top-level `folded_mark_keys` list, and `--edge_mark_prior_keys` refuses to
+re-apply those marks.
+
 When `--include_truth_labels true` is used and truth fields exist in the
 simulated `observed_catalog.json`, each edge receives a validation-only `label`:
 `"true"` for two lensed images with the same `truth_source_id`, and `"wrong"`
@@ -984,10 +1000,12 @@ Edge marks have two roles:
   simulation use sky-overlap and mass-distance compatibility as interpretable
   edge-prior contributions while preserving the base `log_prior_odds` field.
 * **Likelihood marks** are requested with `--edge_mark_likelihood_keys`.  In
-  this PR, only the existing time-delay likelihood is implemented, via
-  `pair_marks=time` or the `time`/`delta_t_obs` likelihood key.  Other
-  likelihood marks are parsed and rejected with a clear not-implemented error
-  until corresponding likelihood terms are added.
+  this PR, only the existing time-delay likelihood is implemented, and it is
+  enabled by `--pair_marks time` — the likelihood key is a declaration, not an
+  alternative route, so `--edge_mark_likelihood_keys time` without
+  `--pair_marks time` is a fatal error rather than a run with no arrival-time
+  term.  Other likelihood marks are parsed and rejected with a clear
+  not-implemented error until corresponding likelihood terms are added.
 
 By default, no extra edge marks are used: existing `log_prior_odds` behavior is
 unchanged, and time marks affect the likelihood only when the run requests the

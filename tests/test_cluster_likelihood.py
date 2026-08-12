@@ -272,6 +272,101 @@ class TestPairKDE:
             f"expected < 0.3 statistical noise"
         )
 
+    def test_bandwidth_scale_is_a_plain_multiplier_on_silverman(self):
+        """The knob for the smoothing bias documented in the module docstring.
+
+        At d = 4 Silverman gives h ~ 0.35 sigma almost independently of N, so
+        the estimand is pi_PE/p_prop convolved with a 0.35-sigma Gaussian --
+        which inflates the tails, and only the LENSED branch is smoothed.
+        ``bandwidth_scale`` must be an exact multiplier so that rerunning a
+        candidate pair at 1.0 and 0.5 measures that bias.
+        """
+        rng = np.random.default_rng(23)
+        N = 8000
+        mu = np.array([35.0, 0.7, 1000.0, 0.0])
+        sig = np.array([3.0, 0.05, 100.0, 0.1])
+        samples = mu + sig * rng.normal(size=(N, 4))
+        h_full = _silverman_bandwidth_diag(samples)
+        h_half = _silverman_bandwidth_diag(samples, bandwidth_scale=0.5)
+        np.testing.assert_allclose(h_half, 0.5 * h_full, rtol=1e-14)
+        with pytest.raises(ValueError, match="bandwidth_scale must be positive"):
+            _silverman_bandwidth_diag(samples, bandwidth_scale=0.0)
+
+        kde_full = make_pair_kde(*samples.T, prior_wt=np.ones(N))
+        kde_half = make_pair_kde(*samples.T, prior_wt=np.ones(N),
+                                 bandwidth_scale=0.5)
+        np.testing.assert_allclose(np.asarray(kde_half.log_h),
+                                   np.asarray(kde_full.log_h) - np.log(2.0),
+                                   rtol=1e-14)
+        np.testing.assert_allclose(float(kde_half.log_norm),
+                                   float(kde_full.log_norm) + 4.0 * np.log(2.0),
+                                   rtol=1e-14)
+
+        # And the inflation is real: 3 sigma out in one coordinate, the
+        # Silverman KDE sits ABOVE the true Gaussian density it estimates
+        # (analytically +0.21 nats here, the rest is estimator noise).
+        delta = np.array([3.0, 0.0, 0.0, 0.0]) * sig
+        lp = float(log_eval_pair_kde(kde_full, jnp.asarray(mu + delta)))
+        log_truth = float(np.sum(-0.5 * (delta / sig) ** 2
+                                - 0.5 * np.log(2.0 * np.pi * sig**2)))
+        assert lp - log_truth > 0.1, (lp, log_truth)
+
+    def test_degenerate_coordinate_warns_and_names_it(self):
+        """A constant coordinate is a documented policy, not a silent epsilon.
+
+        ``sigma_k = 0`` (zero-spin PE, a fixed mock parameter) floors the
+        bandwidth to a delta, which both rejects any displaced query and adds
+        +18.4 nats to ``log_norm`` -- an offset that does NOT cancel in the pair
+        Bayes factor.  It must at least say so, and name the coordinate.
+        """
+        from darksirens.likelihood.pair_kde import DEGENERATE_H
+
+        rng = np.random.default_rng(17)
+        N = 200
+        samples = np.stack([
+            rng.normal(35.0, 3.0, N),
+            rng.normal(0.7, 0.05, N),
+            rng.normal(1000.0, 100.0, N),
+            np.zeros(N),                       # chi_eff pinned by the PE run
+        ], axis=-1)
+        with pytest.warns(UserWarning, match="chieff"):
+            h = _silverman_bandwidth_diag(samples)
+        assert h[3] == DEGENERATE_H
+        assert (h[:3] > 0.0).all()
+
+        # Non-degenerate samples must stay silent.
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _silverman_bandwidth_diag(samples[:, [0, 1, 2, 0]])
+
+    def test_log_eval_broadcasts_without_a_trailing_coordinate_axis(self):
+        """Query shape (..., 4) -> (...), with no (..., N, 4) intermediate.
+
+        The kernel accumulates the squared distance coordinate by coordinate:
+        the old (..., N, 4) difference array was 4x the size of the (..., N)
+        reduction it feeds (327 MB per temporary at the production N_pe = 400,
+        N_y = 64), and its ``sum(sq) - sq[q_axis]`` also cancelled the other
+        three coordinates away when the q term dominated the sum.
+        """
+        rng = np.random.default_rng(5)
+        N = 64
+        kde = make_pair_kde(
+            m1det=rng.normal(35, 3, N), q=rng.normal(0.7, 0.05, N),
+            dL_app=rng.normal(1000, 100, N), chieff=rng.normal(0, 0.1, N),
+            prior_wt=np.ones(N),
+        )
+        pt = np.array([35.0, 0.7, 1000.0, 0.0])
+        assert np.asarray(log_eval_pair_kde(kde, jnp.asarray(pt))).shape == ()
+        for shape in [(3,), (2, 5)]:
+            q = jnp.asarray(np.broadcast_to(pt, shape + (4,)))
+            got = np.asarray(log_eval_pair_kde(kde, q))
+            assert got.shape == shape
+            np.testing.assert_allclose(
+                got, float(log_eval_pair_kde(kde, jnp.asarray(pt))), rtol=1e-12
+            )
+
     def test_jit_compiles(self):
         rng = np.random.default_rng(3)
         N = 200
@@ -677,6 +772,62 @@ class TestNumpyReference:
         np.testing.assert_allclose(log_branch_jax, log_branch_np, rtol=1e-9, atol=1e-12)
 
 
+def test_pair_likelihood_sums_the_two_image_assignments():
+    """log L_2 is the SUM over the two image-to-event assignments, not their
+    average.
+
+    The observed datum is the UNORDERED pair {d_i, d_j} and the two assignments
+    (i→μ_+ vs j→μ_+) are distinct microstates of it, so the J=2 intensity at the
+    observed pair is g_a + g_b. That is also the only convention consistent with
+    the normalization it is charged against: each branch integrates to
+    mu_sel^(2) over the ordered data space, so the sum integrates to exactly
+    mu_sel^(2) over the unordered one, matching the -N_tot log(mu_tot) penalty
+    built from compute_cluster_selection_term. Averaging cost every pair
+    log 2 = 0.693 nat, which is NOT a constant when partitions with different
+    pair counts are compared (--partition_mode marginalize_exact) or when the
+    j2 and off evidences are differenced.
+    """
+    from darksirens.likelihood.cluster_likelihood import _pair_branch_log_integrand
+    from jax.scipy.special import logsumexp
+
+    ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=60, seed=52)
+    kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"],
+                          ev_i["prior_wt"])
+    kde_j = make_pair_kde(ev_j["m1det"], ev_j["q"], ev_j["dL"], ev_j["chieff"],
+                          ev_j["prior_wt"])
+    y_nodes, log_wy = make_y_grid(16)
+    sis = make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0)
+    mu_p, mu_m = mu_plus_minus_from_y(y_nodes)
+    log_py = log_p_y_SIS(y_nodes)
+    common = dict(
+        mu_i=mu_p, mu_j=mu_m, log_py=log_py, log_wy=log_wy,
+        cosmo=_cosmo(), survey=_survey(), pop_params=jnp.zeros(1),
+        catalog=_toy_catalog(), sis_params=sis,
+        log_p_pop_fn=_toy_log_p_pop, log_prior_z_fn=_toy_volume_prior,
+    )
+    branches = []
+    for drv, kde_other in ((ev_i, kde_j), (ev_j, kde_i)):
+        log_int = _pair_branch_log_integrand(
+            m1det_i=drv["m1det"], q_i=drv["q"], dL_app_i=drv["dL"],
+            chieff_i=drv["chieff"], prior_wt_i=drv["prior_wt"],
+            valid_i=drv["valid"], pix_i=drv["pixels"],
+            kde_j=kde_other, **common,
+        )
+        branches.append(
+            float(logsumexp(log_int) - jnp.log(drv["m1det"].shape[0]))
+        )
+    expected = float(np.logaddexp(*branches))
+
+    got = float(cluster_log_likelihood_pair(
+        ev_i, ev_j, kde_i, kde_j, _cosmo(), _survey(), jnp.zeros(1),
+        _toy_catalog(), sis, _toy_log_p_pop, _toy_volume_prior, y_nodes, log_wy,
+    ))
+    np.testing.assert_allclose(got, expected, rtol=1e-12)
+    # ...and therefore never BELOW either single assignment, as the average
+    # convention was for any pair with one dominant assignment.
+    assert got >= max(branches)
+
+
 def test_pair_marks_none_matches_legacy_likelihood():
     ev_i, ev_j = _synth_lensed_pair(y_true=0.4, n_pe=120, seed=30)
     kde_i = make_pair_kde(ev_i["m1det"], ev_i["q"], ev_i["dL"], ev_i["chieff"], ev_i["prior_wt"])
@@ -1064,17 +1215,20 @@ def _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt, *, signed,
     ))
 
 
-def test_signed_time_mark_removes_the_pair_double_count():
-    """Both branches at |dt| counts a time-marked pair TWICE.
+def test_signed_and_unsigned_time_marks_agree_when_the_sign_is_uninformative():
+    """The coincidence denominator must live in the same space as the mark.
 
-    For SIS the type-I minimum always arrives before the type-II saddle, so the
-    two image-assignment branches predict opposite signs of the observed delay
-    and at most one is compatible with the data. Evaluating both at |dt| made
-    L_2 exactly 2x too large whenever the branches were comparable — a spurious
-    +log 2 = 0.693 nat per time-marked pair toward pairing, and
-    int L_2 = 2 mu_sel^(2), which breaks the Poisson normalization the master
-    likelihood assumes. Two IDENTICAL events make the branches exactly equal,
-    so the double-count is measurable to machine precision.
+    With a SIGNED mark only the ordering-consistent branch survives and the
+    numerator is a density in dt = t_j - t_i over R, whose unlensed reference is
+    the triangular (T - |dt|)/T^2. With the folded |dt| convention BOTH branches
+    contribute at the same |dt| (the two arrival orders are distinct
+    configurations of the same folded observable) and the reference is the
+    doubled 2 (T - |dt|)/T^2. The two factors of 2 cancel, so for two IDENTICAL
+    events — where the branches are exactly equal and the sign therefore carries
+    no information — the two conventions must give the SAME coincidence odds.
+    Charging the folded reference against a signed numerator (the previous
+    behaviour) instead taxed every signed pair by log 2 = 0.693 nat, i.e. it
+    PENALIZED observing an arrival order consistent with SIS.
     """
     sis = make_sis_lens_params()
     y_true = 0.55
@@ -1087,7 +1241,7 @@ def test_signed_time_mark_removes_the_pair_double_count():
     signed = _time_marked_pair_ll(ev, ev, kde, kde, sis, dt,
                                   signed=True, mode="delta")
     assert np.isfinite(unsigned) and np.isfinite(signed)
-    np.testing.assert_allclose(unsigned - signed, np.log(2.0), atol=1e-9)
+    np.testing.assert_allclose(unsigned - signed, 0.0, atol=1e-9)
 
 
 def test_signed_time_mark_enforces_the_sis_arrival_order():
@@ -1111,13 +1265,16 @@ def test_signed_time_mark_enforces_the_sis_arrival_order():
 
     for mode, sigma in (("delta", 3600.0), ("quadrature", 3.0e5)):
         kw = dict(mode=mode, sigma=sigma)
-        # Ordering CONSISTENT (brighter image first): unchanged — branch b was
-        # already negligible, so there is no penalty for a determined pairing.
+        # Ordering CONSISTENT (brighter image first): the magnification data
+        # already made branch b negligible, so knowing the order confirms the
+        # only viable assignment and the pair GAINS the log 2 that the unlensed
+        # reference loses when the sign is resolved (P(consistent order |
+        # unlensed) = 1/2).
         ok_signed = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt,
                                          signed=True, **kw)
         ok_unsigned = _time_marked_pair_ll(ev_i, ev_j, kde_i, kde_j, sis, dt,
                                            signed=False, **kw)
-        np.testing.assert_allclose(ok_signed, ok_unsigned, atol=1e-8)
+        np.testing.assert_allclose(ok_signed - ok_unsigned, np.log(2.0), atol=1e-6)
 
         # Ordering INCONSISTENT (brighter image second): the |dt| code returns
         # the SAME value as the consistent case — it never saw the order.

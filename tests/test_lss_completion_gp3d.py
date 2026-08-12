@@ -536,3 +536,61 @@ def test_lss_corr_length_ang_not_sampled():
     assert not any(("lss_corr" in l) or ("lss_sigma" in l) for l in labels)
     for fixed in ("lss_corr_length_ang", "lss_corr_length_mpc", "lss_sigma"):
         assert fixed not in survey_labels
+
+
+def test_gp3d_empty_catalog_writes_unity_table(tmp_path):
+    """An empty (or fully masked) catalog must write the honest Q = 1 table the
+    n_occ == 0 shortcut builds.
+
+    The shortcut returned diagnostics with no 'converged'/'grad_inf', so main()
+    raised TypeError formatting None, and with the format fixed the fail-closed
+    gate would then have declared the trivial solve unconverged (review F-112).
+    """
+    pytest.importorskip("healpy")
+    import h5py
+    import healpy as hp
+    from darksirens.cli.build_lognormal_completion import main as build_main
+    from darksirens.redshift.lognormal_completion import load_lss_completion_hdf5
+
+    nside = 1
+    npix = hp.nside2npix(nside)
+    cat = str(tmp_path / "empty.h5")
+    with h5py.File(cat, "w") as f:
+        f.attrs["nside"] = nside
+        f.create_dataset("zgals", data=np.full((npix, 1), 100.0))
+        f.create_dataset("ngals", data=np.zeros(npix, dtype=np.int32))
+        f.create_dataset("dzgals", data=np.full((npix, 1), 0.01))
+        f.create_dataset("wgals", data=np.zeros((npix, 1)))
+    out = str(tmp_path / "q_empty.h5")
+    build_main(["--catalog", cat, "--out", out, "--mode", "gp3d",
+                "--n-members", "2", "--gp3d-nz-solve", "8",
+                "--lss-corr-length-mpc", str(RESOLVED_L_MPC)])
+    d = load_lss_completion_hdf5(out)
+    assert float(np.max(np.abs(np.asarray(d["logq_map"])))) == 0.0
+    assert float(np.max(np.abs(np.asarray(d["logq_members"])))) == 0.0
+    assert d["diagnostics"]["converged"] is True
+    assert d["diagnostics"]["n_occupied"] == 0
+    assert d["budget_renormalized"] is True
+
+
+def test_gp3d_stamps_the_allsky_budget_residual(tmp_path):
+    """The per-z mean-one renormalization covers the FITTED rows only, while the
+    borrowing halo keeps Q != 1 against the FULL homogeneous budget weight
+    (an unfitted pixel is empty, so C = 0). That residual must be auditable from
+    the file rather than left unmeasured (review F-113)."""
+    pytest.importorskip("healpy")
+    from darksirens.cli.build_lognormal_completion import build_completion
+
+    cat = str(tmp_path / "survey.h5")
+    npix = _write_tiny_survey(cat, nside=2)
+    logq_map, _members, diag = build_completion(
+        cat, mode="gp3d", n_members=0, seed=1, gp3d_nz_solve=16,
+        gp3d_pix_chunk=8, lss_corr_length_mpc=RESOLVED_L_MPC)
+
+    assert diag["budget_renormalized"] is True
+    assert diag["budget_residual_allsky_n_unfitted"] == npix - diag["n_occupied"]
+    resid = diag["budget_residual_allsky_at_max"]
+    dev = diag["budget_residual_allsky_max_abs_dev"]
+    assert dev == pytest.approx(abs(resid - 1.0), rel=1e-12)
+    assert 0.0 <= dev < 5.0
+    assert 0.0 <= diag["budget_residual_allsky_z_at_max"] <= float(np.asarray(zgrid)[-1])

@@ -33,10 +33,12 @@ INFERENCE_DLOGZ="${INFERENCE_DLOGZ:-0.1}"
 INFERENCE_MAX_SAMPLES="${INFERENCE_MAX_SAMPLES:-0}"
 INFERENCE_SEL_BATCH_SIZE="${INFERENCE_SEL_BATCH_SIZE:-256}"
 
-DL_FRAC_UNCERTAINTY="${DL_FRAC_UNCERTAINTY:-0.10}"
-M1DET_FRAC_UNCERTAINTY="${M1DET_FRAC_UNCERTAINTY:-0.08}"
-M2DET_FRAC_UNCERTAINTY="${M2DET_FRAC_UNCERTAINTY:-0.10}"
-CHIEFF_UNCERTAINTY="${CHIEFF_UNCERTAINTY:-0.08}"
+# Measurement family (all-observable): every width is set at the SNR threshold
+# and scales as 1/rho_obs.  The old truth-scaled dL/m1det/m2det knobs are gone.
+SNR_UNCERTAINTY="${SNR_UNCERTAINTY:-1.0}"
+LNMC_UNCERTAINTY="${LNMC_UNCERTAINTY:-0.08}"
+LNQ_UNCERTAINTY="${LNQ_UNCERTAINTY:-0.60}"
+CHIEFF_UNCERTAINTY="${CHIEFF_UNCERTAINTY:-0.20}"
 
 cd "${ROOT_DIR}"
 mkdir -p "${OUTDIR}"
@@ -79,9 +81,9 @@ python scripts/mock_bright_sirens/generate_mock_bright_sirens.py \
   --ndraw "${NDRAW}" \
   --selection-batch-size "${SELECTION_BATCH_SIZE}" \
   ${selection_target_args} \
-  --dL-fractional-uncertainty "${DL_FRAC_UNCERTAINTY}" \
-  --m1det-fractional-uncertainty "${M1DET_FRAC_UNCERTAINTY}" \
-  --m2det-fractional-uncertainty "${M2DET_FRAC_UNCERTAINTY}" \
+  --snr-uncertainty "${SNR_UNCERTAINTY}" \
+  --lnmc-uncertainty "${LNMC_UNCERTAINTY}" \
+  --lnq-uncertainty "${LNQ_UNCERTAINTY}" \
   --chieff-uncertainty "${CHIEFF_UNCERTAINTY}" \
   --counterpart-dz "${COUNTERPART_DZ}" \
   --verbose

@@ -607,6 +607,64 @@ class TestExactZeroSelectionVariance:
         expected = -N_tot * np.log(mu_tot) + N_tot * (3 + N_tot) / (2 * neff)
         np.testing.assert_allclose(float(got), expected, rtol=1e-12)
 
+    def test_reported_neff_combined_matches_the_shared_helper(self):
+        """The DIAGNOSTIC N_eff must use the same zero-variance semantics as the
+        gate.
+
+        ``Neff_combined`` was recomputed inline with the
+        ``isfinite(log_sigma2)`` gate this helper exists to replace, so an
+        exactly-known selection integral (log_sigma2 = -inf, infinite ESS) was
+        reported as N_eff = 0 next to a finite logL_total -- a contradiction for
+        anyone triaging a run, since ``Neff_combined`` is an exported run-health
+        key.  Identical injections with Ndraw = N_sel make the estimator exactly
+        deterministic.
+        """
+        from darksirens.likelihood.likelihood_with_clusters import (
+            darksiren_likelihood_diagnostics_with_clusters,
+            CLUSTER_MODE_OFF, WL_BACKEND_DISABLED,
+        )
+
+        rng = np.random.default_rng(0)
+        n_events, n_samp, n_sel = 4, 200, 8
+        total = n_events * n_samp
+        gw_pe = GWEvent(
+            m1det=jnp.asarray(rng.uniform(20.0, 60.0, total)),
+            m2det=jnp.asarray(rng.uniform(10.0, 30.0, total)),
+            dL=jnp.asarray(rng.uniform(400.0, 3000.0, total)),
+            chieff=jnp.asarray(rng.uniform(-0.3, 0.3, total)),
+            prior_wt=jnp.asarray(rng.uniform(0.5, 1.5, total)),
+            pixels=jnp.zeros(total, dtype=jnp.int32),
+            q=jnp.asarray(rng.uniform(0.3, 1.0, total)),
+            valid=jnp.ones(total, dtype=jnp.bool_),
+        )
+        const = lambda v: jnp.full(n_sel, v)
+        gw_sel = GWEvent(
+            m1det=const(35.0), m2det=const(25.0), dL=const(1500.0),
+            chieff=const(0.0), prior_wt=const(1.0),
+            pixels=jnp.zeros(n_sel, dtype=jnp.int32), q=const(0.7),
+            valid=jnp.ones(n_sel, dtype=jnp.bool_),
+        )
+        diag = darksiren_likelihood_diagnostics_with_clusters(
+            _cosmo(), _survey(), get_fixed_population_params("powerlaw+peak"),
+            gw_pe, _toy_catalog(), gw_sel, _toy_catalog(),
+            n_events, n_samp, float(n_sel),
+            singleton_indices=jnp.arange(n_events, dtype=jnp.int32),
+            pair_indices=jnp.zeros((0, 2), dtype=jnp.int32),
+            n_singletons=n_events, n_pairs=0,
+            lensed_injections=None, pair_kdes=None,
+            sis_params=make_sis_lens_params(A_tau=5e-4, n_tau=3.0, T0_seconds=1.0),
+            log_p_tag_per_source=jnp.zeros(0),
+            pop_model="powerlaw+peak", universe_model="spectral_sirens",
+            sel_batch_size=None, cluster_mode=CLUSTER_MODE_OFF,
+            wl_backend=WL_BACKEND_DISABLED,
+        )
+        assert float(diag["log_sigma2_singleton"]) == -np.inf
+        assert np.isfinite(float(diag["logL_total"]))
+        assert np.isinf(float(diag["Neff_singleton"]))
+        assert np.isinf(float(diag["Neff_combined"])), (
+            "zero-variance selection integral reported as a dead N_eff"
+        )
+
     def test_deterministic_gradient_is_finite(self):
         """The zero-variance branch must not NaN-poison reverse mode."""
         def f(lm):
@@ -1865,6 +1923,54 @@ def test_preflight_catches_missing_snr_time_sky_fields(tmp_path):
     report = run_lensing_preflight(opts)
     assert any("snr_image0" in e for e in report["errors"])
     assert any("log_sky_overlap" in e for e in report["errors"])
+
+
+def test_preflight_accepts_a_true_delta_t_only_campaign(tmp_path):
+    """The loader resolves the delay as "delta_t_obs if present else
+    true_delta_t", so a campaign storing only true_delta_t scores fine;
+    preflight used to hard-fail it. The finiteness check must follow the
+    loader's preference order, not pick whichever dataset looks better."""
+    from argparse import Namespace
+    from darksirens.lensing.preflight import run_lensing_preflight
+
+    camp = _synth_lensed_injection_campaign(n_sources=4, seed=225)
+    n = camp["n_draw_sources"]
+    base = {k: v for k, v in camp.items() if k not in ("n_both_detected",)}
+    snr = dict(
+        snr_image0=np.linspace(8, 12, n),
+        snr_image1=np.linspace(7, 11, n),
+        log_sky_overlap=np.linspace(-2, 0, n),
+    )
+    inj_path = tmp_path / "inj_true_dt.h5"
+    save_lensed_injections(
+        path=str(inj_path), **base, **snr, true_delta_t=np.linspace(10, 20, n)
+    )
+
+    def _report(path):
+        return run_lensing_preflight(Namespace(
+            cluster_mode="j2", partition_mode="marginalize_exact", pair_marks="none",
+            edge_mark_prior_keys="", edge_mark_likelihood_keys="", gw_path=None,
+            gwselection_path=str(path), lensed_injections_path=str(path),
+            candidate_pairs_path=None, observed_catalog_path=None,
+            pair_tag_model="snr_time", pair_tag_constant=1.0,
+            pair_tag_perturb_logit=0.0,
+        ))
+
+    assert not any("delta_t_obs" in e for e in _report(inj_path)["errors"])
+    # ... and the run really does score it, so the acceptance is not vacuous.
+    inj = load_lensed_injections(str(inj_path))
+    assert np.all(np.isfinite(np.asarray(inj.delta_t_obs)))
+
+    # An all-NaN delta_t_obs still fails even next to a finite true_delta_t:
+    # the loader prefers delta_t_obs and the run exits on it.
+    nan_path = tmp_path / "inj_nan_dt.h5"
+    save_lensed_injections(
+        path=str(nan_path), **base, **snr,
+        delta_t_obs=np.full(n, np.nan), true_delta_t=np.linspace(10, 20, n),
+    )
+    assert any(
+        "requires finite values in delta_t_obs" in e for e in _report(nan_path)["errors"]
+    )
 
 
 def test_selection_correction_changes_with_pair_tag_model():

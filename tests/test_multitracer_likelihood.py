@@ -382,3 +382,35 @@ def test_lss_marginalize_without_members_raises_at_k2():
     ll = make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
     with pytest.raises(ValueError, match="ENSEMBLE on EVERY"):
         ll(jnp.asarray([_mid_pop(), 0.3]))
+
+
+@pytest.mark.parametrize(
+    "key", ["counterpart_pixel", "counterpart_pixels", "wl_params",
+            "pixel_stratum_map"])
+def test_guard_bundle_path_rejects_operands_it_cannot_carry(key):
+    """The bundle EMCatalogs carry no counterpart / stratum inputs and the body
+    forwards no WL operands, and at K=1 nothing downstream rejects them (a
+    dropped counterpart is SILENT -- prior.py substitutes an arbitrary
+    catalogued pixel), so the factory must refuse them at build time."""
+    _pl, _pu, _plabels, pop_fid, _sampled, fixed = _pop_bits()
+    data = dict(_shared_physics())
+    data["apix"] = APIX1
+    data["catalogs"] = [_bundle(APIX1, Z_A)]
+    data[key] = 7 if key == "counterpart_pixel" else jnp.asarray([7])
+    opts = _base_opts(n_catalogs=1)
+    with pytest.raises(NotImplementedError, match=key):
+        make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)
+
+
+def test_guard_bundle_path_rejects_bright_sirens_by_name():
+    """A bright-siren bundle run carrying no counterpart arrays is refused by
+    MODEL name -- without it the run would silently host every event on an
+    arbitrary catalogued pixel.  (``spectral_sirens_wl`` is covered by the
+    wl_params case above: that model cannot be built without wl_params.)"""
+    _pl, _pu, _plabels, pop_fid, _sampled, fixed = _pop_bits()
+    data = dict(_shared_physics())
+    data["apix"] = APIX1
+    data["catalogs"] = [_bundle(APIX1, Z_A)]
+    opts = _base_opts(universe_model="bright_sirens", n_catalogs=1)
+    with pytest.raises(NotImplementedError, match="bright_sirens"):
+        make_likelihood(opts, data, pop_fid, fixed_parameter_values=fixed)

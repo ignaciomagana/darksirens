@@ -58,11 +58,16 @@ The full per-sample log-weight is then
 Reduction to the standard hot path
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When the lognormal variance parameter ``wl_a == 0``, the marginalization
-is degenerate (a delta at μ=1) and the formula above is unstable
-(s = 0 in ``norm.logpdf``).  This module short-circuits that case by
-falling through to the unmarginalized ``log_sample_weight``.  This makes
-the reduction test exact: ``wl_a == 0`` ⇒ identical numerical output to
-``universe_model == "spectral_sirens"``.
+is degenerate (a delta at μ=1).  The generic ln-μ quadrature above is
+unstable there (s = 0 in ``norm.logpdf``), so the lognormal backend runs
+the Hermite kernel below instead: in the standardized variable u the
+s → 0 limit is exact by construction — every node collapses to μ = 1 and
+the Hermite weights sum to 1 — so ``wl_a == 0`` reproduces the
+unmarginalized ``log_sample_weight`` to round-off, which is what the
+reduction tests pin.  The ``jnp.sqrt(s2)`` there carries a double-``where``
+so the REVERSE pass is finite at s2 = 0 as well (see the kernel).
+The dispatcher itself branches only on ``wl_enabled``; there is no
+``wl_a == 0`` short-circuit.
 
 Out-of-grid handling
 ~~~~~~~~~~~~~~~~~~~~
@@ -338,7 +343,14 @@ def log_sample_weight_wl_lognormal_hermite(
     z_app = z_of_dL(dL, H0, Om0, w0, wa)                                # (...,)
     z_app_safe = jnp.maximum(z_app, 1.0e-3)                     # avoid s=0 at z=0
     s2 = wl_a * jnp.power(z_app_safe, wl_b)                     # (...,)
-    s  = jnp.sqrt(s2)
+    # Double-where so the reverse pass is finite at wl_a == 0 (the advertised
+    # "reduces to standard" ablation).  The VALUE at s2 = 0 is already right
+    # (every node collapses to mu = 1 and the Hermite weights sum to 1), but
+    # d sqrt(s2) / d s2 = inf there, and ds2/dz_app = 0 at wl_a = 0, so the
+    # unguarded chain returns inf * 0 = NaN for every cosmology gradient
+    # through z_app.
+    s2_pos = s2 > 0.0
+    s  = jnp.where(s2_pos, jnp.sqrt(jnp.where(s2_pos, s2, 1.0)), 0.0)
     m  = -0.5 * s2
 
     # u → ln μ → μ

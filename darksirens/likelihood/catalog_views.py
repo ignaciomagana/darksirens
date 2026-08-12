@@ -10,6 +10,7 @@ from jax import lax
 import numpy as np
 
 from darksirens.redshift.completion import (
+    _LOGQ_CLIP,
     build_field_delta_g_inputs,
     build_field_depth_inputs,
     build_field_lss_q_inputs,
@@ -133,6 +134,7 @@ class CatalogViews:
     pixel_stratum_map: jnp.ndarray | None = None        # (n_pix_total,) int32
     empty_stratum_counts: jnp.ndarray | None = None     # (S,) f64
     field_lss_q_empty_sum_strata: jnp.ndarray | None = None  # (S, n_grid) f64
+    field_lss_q_empty_sum_strata_members: jnp.ndarray | None = None  # (M, S, n_grid) f64
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -221,6 +223,24 @@ def prepare_catalog_views(
     cache_builder=build_pixel_kde_cache,
 ) -> CatalogViews:
     """Compact catalogs, build sample-to-unique maps, and prebuild KDE caches."""
+    # The LINEAR Q tables are not plumbed to the NUMERATOR: ``CatalogViews``
+    # carries only the log forms and both factories compact only those, so a
+    # linear-only data dict would give a Q-modulated field normalizer (the
+    # budget rows below accept either form) with an UNMODULATED numerator --
+    # precisely the numerator/denominator budget mismatch field_global_log_Z's
+    # mutual-exclusion guard exists to prevent, and invisible to it.  Reject at
+    # this single seam rather than letting the two disagree.
+    for _linear_key in ("lss_completion_q", "lss_completion_q_members"):
+        if data.get(_linear_key) is not None:
+            raise ValueError(
+                f"data['{_linear_key}'] is not supported by the likelihood "
+                "factory: supply the LOG table instead "
+                "('lss_completion_logq' / 'lss_completion_logq_members', which "
+                "is what every builder emits). The linear table reaches only "
+                "the field normalizer's missing-galaxy budget, never the "
+                "per-pixel numerator, so the two seams would carry different "
+                "budgets."
+            )
     pe_view = _ensure_compact(data, "pe", "pixels_pe")
     sel_view = _ensure_compact(data, "sel", "pixels_sel")
 
@@ -385,7 +405,7 @@ def prepare_catalog_views(
     field_mark_z = field_mark_w = field_mark_values = None
     field_depth_z = field_depth_dz = field_depth_c = None
     pixel_stratum_map = empty_stratum_counts = None
-    field_lss_q_empty_sum_strata = None
+    field_lss_q_empty_sum_strata = field_lss_q_empty_sum_strata_members = None
     if getattr(opts, "catalog_sky_weighting", "conditional") == "field":
         occupied_np = None
         if data.get("field_dN_obs_s") is not None:
@@ -444,26 +464,52 @@ def prepare_catalog_views(
                     np.asarray(full_z).shape[0] if full_z is not None else 0,
                 )
             )
+            # Caller-supplied budget rows are used AS-IS: the multitracer
+            # loader already built them from this catalog's FULL-sky rows
+            # (loaders.load_multitracer_catalog_bundles), so rebuilding them
+            # here repeats a float64 ``np.exp`` over the whole
+            # (M, n_pix, N_grid) ensemble per bundle -- and the memory model
+            # (block_sizing.estimate_pending_static_bytes) counts the members
+            # build only for non-bundle sources.
+            have_q_rows = (
+                data.get("field_lss_q") is not None
+                and data.get("field_lss_q_empty_sum") is not None
+            )
+            have_qm_rows = (
+                data.get("field_lss_q_members") is not None
+                and data.get("field_lss_q_empty_sum_members") is not None
+            )
+            # Only the LOG form reaches here (the linear keys are rejected at the
+            # top of this function, since they never reach the numerator).
             logq_full = data.get("lss_completion_logq")
-            q_full = data.get("lss_completion_q")
-            if logq_full is not None or q_full is not None:
-                logq_np = (
-                    np.asarray(logq_full)
-                    if logq_full is not None
-                    else np.log(np.maximum(np.asarray(q_full), 1e-300))
-                )
-                q_occ, q_empty_sum = build_field_lss_q_inputs(
-                    logq_np, occupied_np, n_pix_total
-                )
-                field_lss_q = barrier(q_occ)
-                field_lss_q_empty_sum = barrier(q_empty_sum)
+            if logq_full is not None:
+                logq_np = np.asarray(logq_full)
+                if have_q_rows:
+                    field_lss_q = barrier(jnp.asarray(data["field_lss_q"]))
+                    field_lss_q_empty_sum = barrier(
+                        jnp.asarray(data["field_lss_q_empty_sum"])
+                    )
+                else:
+                    q_occ, q_empty_sum = build_field_lss_q_inputs(
+                        logq_np, occupied_np, n_pix_total
+                    )
+                    field_lss_q = barrier(q_occ)
+                    field_lss_q_empty_sum = barrier(q_empty_sum)
             logq_members_full = data.get("lss_completion_logq_members")
             if logq_members_full is not None:
-                qm_occ, qm_empty = build_field_lss_q_member_inputs(
-                    np.asarray(logq_members_full), occupied_np, n_pix_total
-                )
-                field_lss_q_members = barrier(qm_occ)
-                field_lss_q_empty_sum_members = barrier(qm_empty)
+                if have_qm_rows:
+                    field_lss_q_members = barrier(
+                        jnp.asarray(data["field_lss_q_members"])
+                    )
+                    field_lss_q_empty_sum_members = barrier(
+                        jnp.asarray(data["field_lss_q_empty_sum_members"])
+                    )
+                else:
+                    qm_occ, qm_empty = build_field_lss_q_member_inputs(
+                        np.asarray(logq_members_full), occupied_np, n_pix_total
+                    )
+                    field_lss_q_members = barrier(qm_occ)
+                    field_lss_q_empty_sum_members = barrier(qm_empty)
             dg_full = data.get("delta_g_pix_z")
             if dg_full is not None and np.asarray(dg_full).ndim == 2 \
                     and np.asarray(dg_full).shape[0] > 1:
@@ -504,12 +550,39 @@ def prepare_catalog_views(
                 if field_lss_q_empty_sum is not None:
                     # Per-stratum twin of the empty-pixel Q budget, from the
                     # same global (log)Q table.
-                    q_lin = np.exp(np.clip(logq_np, -700.0, 700.0))
+                    # SAME clip as the numerator (_to_q) and the whole-sky Q
+                    # rows: the per-stratum empty budget must carry the same
+                    # missing-galaxy total, not the raw table's tail.
+                    q_lin = np.exp(np.clip(logq_np, -_LOGQ_CLIP, _LOGQ_CLIP))
                     sums = np.zeros((n_strata, q_lin.shape[1]))
                     for s in range(n_strata):
                         rows = empty_mask & (strat_np == s)
                         sums[s] = q_lin[rows].sum(axis=0)
                     field_lss_q_empty_sum_strata = barrier(jnp.asarray(sums))
+                if field_lss_q_empty_sum_members is not None:
+                    # PER-MEMBER twin: the stratified branch of
+                    # completion._field_missing_curve reads ONLY the strata
+                    # budget, so without this every ensemble member's global
+                    # normalizer would carry the DETERMINISTIC empty-pixel
+                    # budget while its numerator carries member m's Q --
+                    # marginalizing over inconsistent estimands.  Streamed
+                    # member by member over the EMPTY rows only, so the full
+                    # (M, n_pix, n_grid) linear ensemble is never materialized.
+                    logqm_np = np.asarray(logq_members_full)
+                    strat_empty = strat_np[empty_mask]
+                    rows_by_s = [strat_empty == s for s in range(n_strata)]
+                    sums_m = np.zeros(
+                        (logqm_np.shape[0], n_strata, logqm_np.shape[2])
+                    )
+                    for m in range(logqm_np.shape[0]):
+                        q_lin_m = np.exp(
+                            np.clip(logqm_np[m][empty_mask], -700.0, 700.0)
+                        )
+                        for s in range(n_strata):
+                            sums_m[m, s] = q_lin_m[rows_by_s[s]].sum(axis=0)
+                    field_lss_q_empty_sum_strata_members = barrier(
+                        jnp.asarray(sums_m)
+                    )
 
         # Marked-host field normalizer: flatten the FULL-SKY z-centred marks so
         # mu_miss and the observed marked mass are view-independent (PE and
@@ -696,4 +769,5 @@ def prepare_catalog_views(
         pixel_stratum_map=pixel_stratum_map,
         empty_stratum_counts=empty_stratum_counts,
         field_lss_q_empty_sum_strata=field_lss_q_empty_sum_strata,
+        field_lss_q_empty_sum_strata_members=field_lss_q_empty_sum_strata_members,
     )

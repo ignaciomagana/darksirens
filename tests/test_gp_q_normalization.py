@@ -120,10 +120,73 @@ def test_conditional_q_integral_is_unity(name):
             assert abs(float(integ) - 1.0) < rtol, (name, m1v, zv, float(integ))
 
 
+@_NEED_TINYGP
+def test_shape_mean_slope_is_alpha_gp_over_the_whole_mass_range():
+    """The parametric mean must never be clipped.
+
+    At xi = 0 the field IS its mean ``-alpha_gp log m1``, so the GP factor is a
+    pure power law and ``d log p_gp / d log m1 == -alpha_gp`` everywhere inside
+    the taper plateau.  Clipping ``mean + deviation`` (instead of the deviation
+    alone) truncated the mean at ``_FIELD_CLIP`` = 10 nats, i.e. above
+    ``m1 = exp(10/alpha_gp)`` = 12.2 Msun at the fiducial alpha_gp = 4: measured
+    slopes were -0.53 (12 -> 20 Msun) and -0.07 (20 -> 40 Msun) instead of -4.
+    """
+    model = build_gp_model("gp1d_m1")
+    theta = jnp.asarray(model.fiducial(), dtype=float)
+    P = _params(model, theta)
+    alpha_gp = float(P("alpha_gp"))
+
+    m1 = jnp.asarray([15.0, 20.0, 30.0, 45.0])
+    q, chi, z = 0.9, 0.05, 0.3
+    lp = np.asarray(model.log_p_pop(m1, jnp.full(m1.size, q), jnp.full(m1.size, z),
+                                   jnp.full(m1.size, chi), theta))
+    # Divide out the parametric baselines and the rate term (file-wide idiom) so
+    # only the GP factor's m1 dependence is left.
+    pair = np.asarray(model._baseline_pairing(m1, jnp.full(m1.size, q), P("beta_q"),
+                                              P("m_min"), P("dm_min")))
+    spin = float(model._baseline_spin(chi, P("mu_chi"), P("sigma_chi")))
+    rate = (1.0 + z) ** (float(P("gamma")) - 1.0)
+    log_gp = lp - np.log(pair * spin * rate)
+    slopes = np.diff(log_gp) / np.diff(np.log(np.asarray(m1)))
+    np.testing.assert_allclose(slopes, -alpha_gp, rtol=2e-2)
+
+
 def test_znorm_hi_tracks_zmax():
     """PHY-6: the z-normalisation ceiling must never sit below the shared
     analysis redshift grid (no tinygp needed -- pure module constants)."""
     assert _ZNORM_HI >= zMax
+
+
+def test_z_inducing_nodes_span_the_analysis_grid():
+    """The z nodes must span ``zMax`` and be uniform in the log1p COORDINATE.
+
+    A rank-M GP reverts to its prior mean beyond its outermost inducing node, so
+    nodes stopping at z = 1.5 (coordinate 0.916) against zMax = 5 (1.792) pinned
+    the redshift field to zero over most of the analysis range."""
+    from darksirens.gw.populations.gp import _DEFAULT_AXES
+
+    coords = np.asarray(_DEFAULT_AXES["z"].nodes_coord())
+    assert coords[-1] >= math.log1p(zMax) - 1e-9
+    np.testing.assert_allclose(np.diff(coords), np.diff(coords)[0], rtol=1e-9)
+
+
+@_NEED_TINYGP
+def test_z_field_still_modulates_at_the_top_of_the_analysis_range():
+    """The free-form ``gp1d_z`` rate modulation must respond to the latents at
+    z = 3, 4, 5.  Measured pre-fix: exp(f) decayed monotonically back toward its
+    zero-field value above z ~ 2 (1.4e-2, 2.7e-2 of an e^7 swing)."""
+    model = build_gp_model("gp1d_z")
+    seeded = _seed_theta(model, seed=0, scale=1.5)
+    flat = jnp.asarray(model.fiducial(), dtype=float)
+
+    z = jnp.asarray([0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0])
+    args = (jnp.full(z.size, 30.0), jnp.full(z.size, 0.8), z, jnp.zeros(z.size))
+    # Only the latents differ, and gp1d_z has no probability axis to normalise
+    # over, so the difference IS the GP field's deviation from its (zero) mean.
+    dev = np.abs(np.asarray(model.log_p_pop(*args, seeded))
+                 - np.asarray(model.log_p_pop(*args, flat)))
+    low = dev[z <= 1.5].max()
+    assert dev[-3:].max() > 0.25 * low, (dev, low)
 
 
 @_NEED_TINYGP

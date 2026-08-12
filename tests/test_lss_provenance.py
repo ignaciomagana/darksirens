@@ -266,13 +266,45 @@ def test_k1_ensemble_skips_provenance_check(tmp_path):
 
 def test_k2_marginalize_missing_members_on_one_catalog_raises(tmp_path):
     """A catalog with a map-only (no-members) Q file cannot supply a matched
-    member set: distinct-or-missing provenance still aborts."""
+    member set: the per-catalog loader already refuses it by name."""
     s1 = _write_survey(tmp_path / "s1.h5", 11)
     s2 = _write_survey(tmp_path / "s2.h5", 22)
     qa = _save_q(tmp_path / "qa.h5", seed=100)
     qb = _save_q(tmp_path / "qb.h5", seed=200, with_members=False)
     opts = _opts([s1, s2], [qa, qb])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="requires an LSS-completion ENSEMBLE"):
+        load_multitracer_catalog_bundles(opts, _gw_inputs())
+
+
+def test_k2_marginalize_catalog_without_any_q_names_the_missing_ensemble(tmp_path):
+    """A catalog with NO completion at all (the "" placeholder) used to be
+    reported as 'LEGACY (no provenance)' with an instruction to rebuild the
+    ensembles jointly -- impossible for a catalog that has no LSS field.  The
+    abort must name the MISSING ENSEMBLE instead (the estimator needs one on
+    every catalog: likelihood/core.py refuses a missing base_miss on either
+    seam)."""
+    s1 = _write_survey(tmp_path / "s1.h5", 11)
+    s2 = _write_survey(tmp_path / "s2.h5", 22)
+    qa = _save_q(tmp_path / "qa.h5", seed=100)
+    opts = _opts([s1, s2], [qa, ""])
+    with pytest.raises(ValueError) as exc:
+        load_multitracer_catalog_bundles(opts, _gw_inputs())
+    msg = str(exc.value)
+    assert "EVERY catalog needs its own Q_LSS ENSEMBLE" in msg
+    assert s2 in msg and s1 not in msg
+    assert "LEGACY (no provenance)" not in msg
+
+
+def test_k2_marginalize_no_ensemble_is_not_bypassed_by_allow_flag(tmp_path):
+    """--allow_unverified_shared_lss_members accepts an UNMATCHED realization
+    set, not a MISSING one: a Q-less catalog must still abort (the likelihood
+    would otherwise raise mid-trace, after the whole data load)."""
+    s1 = _write_survey(tmp_path / "s1.h5", 11)
+    s2 = _write_survey(tmp_path / "s2.h5", 22)
+    qa = _save_q(tmp_path / "qa.h5", seed=100)
+    opts = _opts([s1, s2], [qa, ""],
+                 allow_unverified_shared_lss_members=True)
+    with pytest.raises(ValueError, match="EVERY catalog needs its own"):
         load_multitracer_catalog_bundles(opts, _gw_inputs())
 
 
@@ -338,3 +370,75 @@ def test_validate_survey_free_empty_z_depths_passes():
     skips the length check (n_catalogs defaults to 1)."""
     opts = SimpleNamespace(n_catalogs=1, resolved_survey_z_depths=[])
     validate_multitracer_run(opts, {})
+
+
+# ---------------------------------------------------------------------------
+# Q auto-discovery must fail loud, never degrade to a silent non-LSS run
+# (review finding F-040)
+# ---------------------------------------------------------------------------
+
+def _single_opts(survey_path, lss_completion, universe_model="dark_sirens"):
+    return SimpleNamespace(
+        survey_path=survey_path, lss_completion=lss_completion,
+        universe_model=universe_model, lss_marginalize=False,
+    )
+
+
+def test_unreadable_survey_probe_raises_instead_of_dropping_q(tmp_path):
+    """An unreadable survey must not be reported as "no embedded Q table".
+
+    Q REPLACES the (1 + alpha_miss*b_miss*delta_g) factor and supplies the
+    missing-galaxy budget, so swallowing an HDF5 read failure (Lustre lock
+    contention, a stale handle, a concurrent writer) silently changes the
+    completeness model: lss_completion_fiducials stays None, so the whole
+    Q_LSS provenance guard early-returns, and the run directory carries no
+    diagnostic at all.
+    """
+    from darksirens.catalogs.lss import maybe_load_lss_completion
+
+    broken = tmp_path / "not_hdf5.h5"
+    broken.write_bytes(b"this is not an HDF5 file")
+    with pytest.raises(OSError):
+        maybe_load_lss_completion(_single_opts(str(broken), None), zgrid=zgrid)
+
+
+def test_survey_without_the_group_is_still_a_clean_non_lss_run(tmp_path):
+    """The one benign case: a readable survey that genuinely carries no
+    /lss_completion group loads with no Q and no error."""
+    from darksirens.catalogs.lss import maybe_load_lss_completion
+
+    survey = _write_survey(tmp_path / "survey.h5", seed=3)
+    out = maybe_load_lss_completion(_single_opts(survey, None), zgrid=zgrid)
+    assert out["lss_completion_logq"] is None
+    assert out["lss_completion_fiducials"] is None
+
+
+def test_explicit_q_with_a_non_galaxy_aware_model_raises(tmp_path):
+    """--lss_completion with a model that has no galaxy catalog silently did
+    nothing, so the run did not target the completeness model it was given."""
+    from darksirens.catalogs.lss import maybe_load_lss_completion
+
+    q = _save_q(tmp_path / "q.h5", seed=1, with_members=False)
+    with pytest.raises(ValueError, match="no galaxy catalog"):
+        maybe_load_lss_completion(
+            _single_opts(None, q, universe_model="spectral_sirens"), zgrid=zgrid
+        )
+
+def test_validate_depth_inputs_without_a_resolved_depth_raises():
+    """The loader builds a bundle's field DEPTH inputs from the file attr / CLI
+    override, while the decoder applies a depth only from
+    opts.resolved_survey_z_depths (silent `or ()` fallback).  A bundle carrying
+    field_depth_z with no resolved depth makes the global normalizer use the RAW
+    field_N_obs_total -- every above-depth galaxy counted twice."""
+    opts = SimpleNamespace(n_catalogs=2, resolved_survey_z_depths=[])
+    data = {"catalogs": [{"nside": 64, "field_depth_z": np.zeros(3)},
+                         {"nside": 64}]}
+    with pytest.raises(ValueError, match="field_depth_z"):
+        validate_multitracer_run(opts, data)
+
+
+def test_validate_depth_inputs_with_a_resolved_depth_passes():
+    opts = SimpleNamespace(n_catalogs=2, resolved_survey_z_depths=[0.5, None])
+    data = {"catalogs": [{"nside": 64, "field_depth_z": np.zeros(3)},
+                         {"nside": 64}]}
+    validate_multitracer_run(opts, data)

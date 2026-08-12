@@ -239,9 +239,12 @@ def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
     simultaneously-live grid-sized reduction buffers are what OOMs.
 
     Returns ``slab_rows=None`` for small grids (``grid_points <=
-    full_grid_max``) so the caller takes the cheaper full-grid path; otherwise a
-    concrete slab size.  ``batch_size`` / ``grid_chunk`` overrides are honoured
-    (``grid_chunk`` sets ``slab_rows`` directly).
+    full_grid_max``) *whose full plane also fits the budget* so the caller takes
+    the cheaper full-grid path; otherwise a concrete slab size.  The size test
+    matters for the GP models: at ``n_nodes = 6400`` even a 65k-point grid needs
+    215 GB at ``batch = 64``, so a grid-size-only shortcut would OOM on exactly
+    the model class this planner exists for.  ``batch_size`` / ``grid_chunk``
+    overrides are honoured (``grid_chunk`` sets ``slab_rows`` directly).
     """
     budget = max(1.0, float(safe_frac) * float(max_mem_bytes))
     n_outer = max(1, int(n_outer))
@@ -255,10 +258,15 @@ def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
         b = max(1, min(batch_cap, int(nsamples)))
 
     if grid_chunk is not None:
+        if int(grid_chunk) >= n_outer:
+            # Clamping silently to n_outer IS the full-grid path, i.e. chunking
+            # off -- the opposite of what a user passing this flag wants.  It is
+            # the usual symptom of reading the value as flattened 4-D grid points
+            # (nm*nq*nz*nchi) rather than outer-plane rows (nm*nq).
+            _warn(f"--grid_chunk={int(grid_chunk)} >= nm*nq={n_outer}: one slab "
+                  "covers the whole (m1, q) plane, so chunking is disabled. The "
+                  "flag counts ROWS of that plane, not flattened 4-D grid points.")
         return b, max(1, min(int(grid_chunk), n_outer))
-
-    if grid_points <= full_grid_max:
-        return b, None                       # small grid: full path is cheap
 
     def _slab_for(bb):
         return int(budget // max(bb * plane * dtype_bytes * (nn + n_live), 1))
@@ -267,8 +275,28 @@ def plan_ppd_sizing(nsamples, n_outer, nz, nchi, n_nodes, max_mem_bytes,
     while c < slab_floor and b > 1:          # GP eval term too costly at this batch
         b = max(1, b // 2)
         c = _slab_for(b)
+    if grid_points <= full_grid_max and c >= n_outer:
+        return b, None                       # small grid AND full plane in budget
     c = max(1, min(c, n_outer))
     return b, c
+
+
+def gp_node_count(pop_model):
+    """Total inducing-node count behind a bound ``log_p_pop`` (0 for parametric).
+
+    ``JointGPPopulation`` / ``BinnedGPPopulation`` expose one flat node block as
+    ``M``; the additive family (``gp_separable``, ``gp4d_additive``) carries one
+    block per ANOVA term in ``_term_meta`` and has no top-level ``M``, so sum
+    those — reading ``M`` alone silently sizes the PPD slab as if the per-query
+    kernel tensor did not exist (~18x too large for ``gp4d_additive``).
+    """
+    model = getattr(pop_model, "__self__", None)
+    if model is None:
+        return 0
+    M = int(getattr(model, "M", 0) or 0)
+    if M:
+        return M
+    return int(sum(int(t["M"]) for t in getattr(model, "_term_meta", ()) or ()))
 
 
 def batched_map(fn, samples, batch_size):
@@ -284,12 +312,18 @@ def batched_map(fn, samples, batch_size):
         samples = jnp.concatenate([samples, jnp.repeat(samples[-1:], pad, axis=0)], axis=0)
 
     vfn = jax.jit(jax.vmap(fn))
+    # Each batch is pulled to the host as it completes and the stack is built with
+    # numpy: keeping the per-batch outputs on device and concatenating there held
+    # three simultaneous device copies of the FULL per-sample stack at the seam
+    # (p_m1m2 alone is nsamples*nm*nm*8 bytes -- ~6.5 GB for a 50k-sample chain at
+    # --nm 128, ~20 GB tripled), none of which plan_ppd_sizing's per-step slab
+    # budget accounts for.
     outs = [
-        vfn(samples[i:i + batch_size])
+        jax.tree_util.tree_map(np.asarray, vfn(samples[i:i + batch_size]))
         for i in tqdm(range(0, samples.shape[0], batch_size),
                       desc="Posterior-predictive batches")
     ]
-    stacked = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *outs)
+    stacked = jax.tree_util.tree_map(lambda *xs: np.concatenate(xs, axis=0), *outs)
     return jax.tree_util.tree_map(lambda a: a[:ns], stacked)
 
 
@@ -388,15 +422,24 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
         I_z = I_z.reshape(nm, nq, nchi)
 
         # 1-D marginals: outer (m1, q) integrals of the inner (z, chi) integrals.
+        # Every normalisation is guarded like the 2-D joint below: a sample whose
+        # density integrates to exactly 0 on this grid (a constraint-violating
+        # parametric draw, an underflowed GP field, or a --mmin/--mmax/--zmax
+        # window that misses the model support) would otherwise give 0/0 = NaN,
+        # and jnp.median/jnp.percentile in summarize_ppd propagate NaN — one bad
+        # draw out of thousands would blank the whole credible band, silently.
+        def _normed(p, grid):
+            """Normalise a 1-D marginal, leaving an all-zero curve alone."""
+            z = jnp.trapezoid(p, grid)
+            return p / jnp.where(z > 0, z, 1.0)
+
         p_m1q = I_zc                                          # ∫∫ p dz dchi
-        p_m1 = jnp.trapezoid(p_m1q, qgrid, axis=1)
-        p_m1 /= jnp.trapezoid(p_m1, mgrid)
-        p_q = jnp.trapezoid(p_m1q, mgrid, axis=0)
-        p_q /= jnp.trapezoid(p_q, qgrid)
-        p_z = jnp.trapezoid(jnp.trapezoid(I_c, qgrid, axis=1), mgrid, axis=0)
-        p_z /= jnp.trapezoid(p_z, zgrid)
-        p_chi = jnp.trapezoid(jnp.trapezoid(I_z, qgrid, axis=1), mgrid, axis=0)
-        p_chi /= jnp.trapezoid(p_chi, chigrid)
+        p_m1 = _normed(jnp.trapezoid(p_m1q, qgrid, axis=1), mgrid)
+        p_q = _normed(jnp.trapezoid(p_m1q, mgrid, axis=0), qgrid)
+        p_z = _normed(jnp.trapezoid(jnp.trapezoid(I_c, qgrid, axis=1), mgrid, axis=0),
+                      zgrid)
+        p_chi = _normed(jnp.trapezoid(jnp.trapezoid(I_z, qgrid, axis=1), mgrid, axis=0),
+                        chigrid)
 
         # 2-D joint p(m1, m2): map q→m2 on p(m1, q).
         p_interp = jax.vmap(
@@ -405,8 +448,7 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
         p_m1m2 = p_interp * jac * valid
         norm_2d = jnp.trapezoid(jnp.trapezoid(p_m1m2, mgrid, axis=0), mgrid, axis=0)
         p_m1m2 = jnp.where(norm_2d > 0, p_m1m2 / norm_2d, p_m1m2)
-        p_m2 = jnp.trapezoid(p_m1m2, mgrid, axis=0)
-        p_m2 /= jnp.trapezoid(p_m2, mgrid)
+        p_m2 = _normed(jnp.trapezoid(p_m1m2, mgrid, axis=0), mgrid)
 
         return p_m1, p_m2, p_q, p_z, p_chi, p_m1m2
 
@@ -430,7 +472,7 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
     n_outer = int(nm * nq)
     grid_points = int(nm * nq * nz * nchi)
     # GP inducing-node count (drives the (pts x M) eval cost); 0 for parametric.
-    n_nodes = int(getattr(getattr(pop_model, "__self__", None), "M", 0) or 0)
+    n_nodes = gp_node_count(pop_model)
 
     if max_mem_gb is not None:
         max_mem_bytes, mem_src = float(max_mem_gb) * 1e9, "cli:--max_mem_gb"
@@ -446,11 +488,16 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
     )
     slab_pts = (grid_chunk if grid_chunk is not None else n_outer) * nz * nchi
     est_peak_gb = batch_size * slab_pts * 8 * (n_nodes + 16) / 1e9
+    # The accumulated per-sample outputs are a second, independent cost: they live
+    # on the HOST (batched_map moves each batch off device), but they are what the
+    # run actually has to fit in RAM, so report them rather than leaving the
+    # printed peak an order of magnitude below the real footprint.
+    out_gb = samples.shape[0] * (2 * nm + nq + nz + nchi + nm * nm) * 8 / 1e9
     print(
         f"  │  [ppd] grid={grid_points:,} pts  GP_nodes={n_nodes}  "
         f"mem={max_mem_bytes / 1e9:.1f}GB ({mem_src})  batch={batch_size}  "
         f"slab_rows={grid_chunk if grid_chunk is not None else 'full'}  "
-        f"~peak={est_peak_gb:.1f}GB"
+        f"~peak={est_peak_gb:.1f}GB device + {out_gb:.1f}GB host (outputs)"
     )
 
     single_theta = make_single_theta_predictive(
@@ -531,7 +578,14 @@ def plot_1d_spectrum(xgrid, summaries, labels, xlabel, ylabel,
 
 
 def plot_2d_mass(mgrid, p_m1m2_per_model, labels, figsize=None):
-    """Median joint p(m1, m2) as filled contours, one panel per model."""
+    """Median joint p(m1, m2) as filled contours, one panel per model.
+
+    ``p_m1m2_per_model`` holds one ALREADY-MEDIANED ``(nm, nm)`` array per model:
+    the median is all this plot uses, and keeping the full
+    ``(nsamples, nm, nm)`` stack per model resident instead costs
+    ``nsamples * nm**2 * 8`` bytes per model (~6.5 GB for a 50k-sample chain at
+    --nm 128) for nothing.
+    """
     mgrid = np.asarray(mgrid)
     n = len(labels)
     ncol = min(n, 3)
@@ -539,10 +593,9 @@ def plot_2d_mass(mgrid, p_m1m2_per_model, labels, figsize=None):
     figsize = figsize or (6.0 * ncol, 5.5 * nrow)
     fig, axes = plt.subplots(nrow, ncol, figsize=figsize, squeeze=False)
     M1, M2 = np.meshgrid(mgrid, mgrid, indexing="ij")
-    for k, (label, p2d) in enumerate(zip(labels, p_m1m2_per_model)):
+    for k, (label, med) in enumerate(zip(labels, p_m1m2_per_model)):
         ax = axes[k // ncol][k % ncol]
-        med = np.median(np.asarray(p2d), axis=0)
-        masked = np.where(M2 <= M1, med, np.nan)
+        masked = np.where(M2 <= M1, np.asarray(med), np.nan)
         levels = np.linspace(np.nanmax(masked) * 1e-3, np.nanmax(masked), 12) \
             if np.nanmax(masked) > 0 else None
         cf = ax.contourf(M1, M2, masked, levels=levels, cmap="viridis")
@@ -619,12 +672,19 @@ def plot_catalog_weight_posteriors(weights, is_field=True, figsize=None):
 def plot_model_evidences(labels, log10Zs, log10Zerrs, figsize=(10, 6)):
     log10Zs = np.asarray(log10Zs, dtype=float)
     errs = np.asarray([0.0 if e is None else e for e in log10Zerrs], dtype=float)
-    delta = log10Zs - np.max(log10Zs)
+    # The bars are log Bayes factors AGAINST THE BEST MODEL, so the uncertainty is
+    # the one on the difference — hypot(err_i, err_best), the same combination
+    # plot_bayes_factor_matrix uses — not the single-model error on log10 Z.  The
+    # reference model's own bar is exactly 0 and carries no error.
+    best = int(np.argmax(log10Zs))
+    delta = log10Zs - log10Zs[best]
+    delta_err = np.hypot(errs, errs[best])
+    delta_err[best] = 0.0
 
     fig, ax = plt.subplots(figsize=figsize)
     xs = np.arange(len(labels))
     colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(labels))]
-    ax.bar(xs, delta, yerr=errs, color=colors, alpha=0.85, capsize=5)
+    ax.bar(xs, delta, yerr=delta_err, color=colors, alpha=0.85, capsize=5)
     ax.axhline(0.0, color="black", lw=1.5, ls="--")
     ax.set_xticks(xs)
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=16)
@@ -694,19 +754,36 @@ def plot_bayes_factor_matrix(labels, log10Zs, log10Zerrs, figsize=(10, 10),
     return fig
 
 
-def overlay_observed_events(ax, settings):
-    """Best-effort faint rug of observed detector-frame m1 medians on p(m1)."""
+def overlay_observed_events(ax, settings, cosmo=None):
+    """Best-effort faint rug of observed SOURCE-frame m1 medians on p(m1).
+
+    The plotted ``p_m1`` is a SOURCE-frame density (the likelihood forms
+    ``m1src = m1det/(1+z)`` before calling ``log_p_pop``), so rugging the raw
+    detector-frame medians put every tick a factor ``(1+z)`` -- 20-70% over this
+    pipeline's redshift range -- to the right of where its event belongs, which
+    reads as a high-mass misfit that is purely a frame error.  Each sample is
+    converted with ``z_of_dL`` under ``cosmo`` (the fiducial cosmology by default;
+    pass the run's posterior medians to use those instead) BEFORE the median, and
+    the legend names the frame and that conversion.
+    """
     try:
         from darksirens.gw.samples import load_gw_samples
+        from darksirens.utils.cosmology import z_of_dL
         gw_path = settings.get("gw_path")
         if not gw_path or not os.path.exists(gw_path):
             return
         out = load_gw_samples(gw_path)
-        m1det, nEvents, nsamp = np.asarray(out[0]), int(out[-2]), int(out[-1])
-        med = np.median(m1det.reshape(nEvents, nsamp), axis=1)
+        m1det = np.asarray(out[0])
+        dL = np.asarray(out[2])
+        nEvents, nsamp = int(out[-2]), int(out[-1])
+        c = {**COSMO_FID, **(cosmo or {})}
+        z = np.asarray(z_of_dL(dL, c["H0"], c["Om0"], c["w0"], c["wa"]))
+        m1src = m1det / (1.0 + z)
+        med = np.median(m1src.reshape(nEvents, nsamp), axis=1)
         for k, v in enumerate(med):
             ax.axvline(v, color="0.3", alpha=0.18, lw=0.8,
-                       label="observed (det-frame $m_1$)" if k == 0 else None)
+                       label="observed (source-frame $m_1$, fiducial cosmology)"
+                             if k == 0 else None)
         ax.legend(fontsize=16, frameon=False)
     except Exception as exc:  # noqa: BLE001 — overlay is best-effort
         _warn(f"event overlay skipped: {exc}")
@@ -731,8 +808,10 @@ def _build_parser():
     p.add_argument("--batch_size", type=int, default=None,
                    help="Per-sample batch size; auto-chosen from device memory if unset.")
     p.add_argument("--grid_chunk", type=int, default=None,
-                   help="Flattened-grid points per density-evaluation chunk; auto-chosen "
-                        "from device memory if unset (bounds the GP kernel tensor).")
+                   help="Rows of the flattened (m1, q) outer plane per density-evaluation "
+                        "slab (nm*nq rows in total, NOT flattened 4-D grid points); "
+                        "auto-chosen from device memory if unset (bounds the GP kernel "
+                        "tensor). A value >= nm*nq disables chunking.")
     p.add_argument("--max_mem_gb", type=float, default=None,
                    help="Memory budget in GB for posterior-predictive sizing; probes the "
                         "JAX device if unset (env DARKSIRENS_ANALYZE_MAX_MEM_GB also works).")
@@ -804,7 +883,9 @@ def main():
         spec["q"].append(summarize_ppd(p_q, limits))
         spec["z"].append(summarize_ppd(p_z, limits))
         spec["chi"].append(summarize_ppd(p_chi, limits))
-        p_m1m2_per_model.append(np.asarray(p_m1m2))
+        # Only the median enters the 2-D figure; keep that, not every sample's
+        # (nm, nm) plane for every model.
+        p_m1m2_per_model.append(np.median(np.asarray(p_m1m2), axis=0))
 
         # Cosmology posteriors (only the sampled ones).
         cosmo_per_model.append({

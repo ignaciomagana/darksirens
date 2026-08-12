@@ -105,19 +105,41 @@ def _catalog_free(universe_model):
 
 _COMPLETE_CATALOG = _Inert(
     "universe_model 'dark_sirens_complete' assumes a 100%-complete catalog, so "
-    "the completion / missing-galaxy parameters never enter its likelihood "
-    "(only sigma_kde does)",
+    "the missing-galaxy amplitude parameters never enter its likelihood "
+    "(sigma_kde and delta do -- delta through the catalog kernels' galaxy "
+    "measure g(z))",
     remedy="or run universe_model 'dark_sirens', which models the missing galaxies",
 )
 
 
 def _completion_param_rule(universe_model, use_lss, q_active, catalog,
                            c_mode="per_pixel", selection_family="gaussian"):
-    """Activity of the completion parameters (``log10n0``, ``delta``)."""
+    """Activity of the missing-galaxy amplitude parameters (``log10n0``, ``b_miss``)."""
     if universe_model in _CATALOG_FREE_MODELS:
         return _catalog_free(universe_model)
     if universe_model == "dark_sirens_complete":
         return _COMPLETE_CATALOG
+    return None
+
+
+def _delta_rule(universe_model, use_lss, q_active, catalog,
+                c_mode="per_pixel", selection_family="gaussian"):
+    """Activity of ``delta``: the completion rule EXCEPT for the complete model.
+
+    ``delta`` is not only a missing-galaxy parameter: it tilts the galaxy measure
+    g(z) = dV_c/dz (1+z)^delta, which the complete-catalog prior uses as the
+    interim prior on each galaxy's true redshift (``catalog_kernel_state`` with
+    ``volume_weighted=False`` divides each kernel by ∫N(z; z_i, sig_eff) g(z) dz
+    and the per-sample evaluator reapplies g(z) as a front factor).  Those two
+    cancel only as sig_eff -> 0, so with PHOTOMETRIC redshifts p_cat -- and hence
+    the whole complete-catalog likelihood -- depends on delta: measured a 7%
+    differential tilt between delta = 0 and 3 across z = 0.1 -> 0.3 at
+    dzgals = 0.05 (0.08% at dzgals = 1e-3, i.e. effectively inert only for
+    spectroscopic catalogs).  Declaring it inert pinned it silently at its
+    fiducial instead of marginalising it.
+    """
+    if universe_model in _CATALOG_FREE_MODELS:
+        return _catalog_free(universe_model)
     return None
 
 
@@ -250,7 +272,7 @@ def _kde_rule(universe_model, use_lss, q_active, catalog,
 #: heavy clipping throughout the completion grid.
 _SURVEY_BLOCK = (
     _SurveyParam("log10n0", -4.0, -1.0, _completion_param_rule),
-    _SurveyParam("delta", -3.0, 3.0, _completion_param_rule),
+    _SurveyParam("delta", -3.0, 3.0, _delta_rule),
     _SurveyParam("b_miss", 0.0, 3.0, _b_miss_rule),
     _SurveyParam("sigma_kde", 0.0, 0.05, _kde_rule),
     # Parametric-selection block, appended LAST so pre-existing coordinate
@@ -478,9 +500,41 @@ def apply_block_prior_overrides(block_name, labels, lower, upper, overrides):
             raise ValueError(
                 f"Override for '{label}' in block '{block_name}' must be [lower, upper]."
             )
+        lo, hi = bounds
+        # An unordered (or non-finite) box is never what the user meant, and it
+        # is not caught downstream: make_prior_transform's affine map traverses
+        # [lower, upper] backwards without complaint, and the cosmology grid
+        # guard's `lo < g_lo or hi > g_hi` test PASSES for a swapped pair even
+        # when the sampled interval lies entirely outside the tabulated grid --
+        # exactly the silent prior truncation that guard exists to prevent.
+        # (Only the numpyro backend checks upper > lower, so the nested samplers
+        # would run and every reported bound would be inverted.)
+        try:
+            lo_f, hi_f = float(lo), float(hi)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Override for '{label}' in block '{block_name}' must be two "
+                f"finite numbers, got [{lo!r}, {hi!r}]."
+            ) from None
+        if not (np.isfinite(lo_f) and np.isfinite(hi_f)):
+            raise ValueError(
+                f"Override for '{label}' in block '{block_name}' must be finite, "
+                f"got [{lo_f}, {hi_f}]."
+            )
+        if lo_f >= hi_f:
+            raise ValueError(
+                f"Override for '{label}' in block '{block_name}' must satisfy "
+                f"lower < upper, got [{lo_f}, {hi_f}]."
+                + (
+                    " A zero-width prior pins the parameter; use "
+                    "--fixed_parameter_values for that."
+                    if lo_f == hi_f
+                    else ""
+                )
+            )
         idx = label_to_index[label]
-        lower_out[idx] = bounds[0]
-        upper_out[idx] = bounds[1]
+        lower_out[idx] = lo
+        upper_out[idx] = hi
 
     return lower_out, upper_out
 
@@ -521,17 +575,52 @@ def _validate_schechter_alpha_domain(labels, lower, upper,
 
 
 def validate_fixed_parameter_overrides(all_bounds, prior_overrides, fixed_parameter_values):
-    """Validate and annotate labels that are both fixed and prior-overridden."""
+    """Range-check EVERY fixed label, and annotate the ones also overridden.
+
+    The bounds a fixed value bypasses are not cosmetic -- ``sigma_M``'s 0.05
+    floor keeps Phi from degenerating to a step, and a NEGATIVE ``sigma_M``
+    silently inverts the parametric completeness C_sel(z) so completeness rises
+    with distance -- so a ``--fixed_parameter_values`` entry is checked against
+    its resolved bounds whether or not the label was also prior-overridden
+    (previously only the fixed AND overridden intersection was inspected, which
+    left every pinned-only label unguarded).  Labels absent from ``all_bounds``
+    are the never-sampled pinned ones (``m_lim``, ``M_faint_offset``, ``z50``,
+    ``w``, ``alpha_miss``); they carry no bounds and keep their dedicated
+    validators.
+
+    Severity is intent-keyed.  A fixed value outside bounds the caller ALSO
+    overrode is a self-contradiction (the override names the range they want,
+    the fixed value ignores it) and raises.  Outside the DEFAULT bounds it only
+    warns: fixing removes the label from sampling entirely, and pinning a
+    parameter beyond its sampling range is a legitimate ablation device (e.g.
+    the field-recovery campaign pins ``log10n0 = -11`` to null the AGN
+    missing-galaxy budget); the warning still surfaces the sign/typo hazards
+    above.
+    """
     statuses = {}
-    for label in fixed_parameter_values.keys() & prior_overrides.keys():
+    for label, value in fixed_parameter_values.items():
+        if label not in all_bounds:
+            continue
         lower, upper = all_bounds[label]
-        fixed_value = float(fixed_parameter_values[label])
+        fixed_value = float(value)
+        overridden = label in prior_overrides
         if fixed_value < lower or fixed_value > upper:
-            raise ValueError(
+            if overridden:
+                raise ValueError(
+                    f"Fixed value for '{label}' ({fixed_value}) is outside the "
+                    f"overridden prior bounds [{lower}, {upper}]."
+                )
+            warnings.warn(
                 f"Fixed value for '{label}' ({fixed_value}) is outside the "
-                f"overridden prior bounds [{lower}, {upper}]."
+                f"default prior bounds [{lower}, {upper}]. The label is pinned, "
+                "not sampled, so this is accepted -- but check it is a "
+                "deliberate ablation, not a sign or unit slip.",
+                stacklevel=2,
             )
-        statuses[label] = "fixed; override ignored"
+            statuses[label] = "fixed; outside default prior bounds"
+            continue
+        if overridden:
+            statuses[label] = "fixed; override ignored"
     return statuses
 
 
@@ -1087,6 +1176,12 @@ def build_parameter_space(
                 labels += c_sampled_labels
                 lower += c_sampled_lower
                 upper += c_sampled_upper
+                # The suffixed blocks ARE sampled survey dimensions, so they
+                # belong in the reported count (settings.json provenance) just
+                # like the mark block accumulates into n_mark_eff below.  The
+                # fcat_* sticks deliberately do NOT: they are mixture weights,
+                # sampled regardless of fix_survey.
+                n_survey_eff += len(c_sampled_labels)
 
         # Mixture-weight sticks fcat_2..fcat_K ([0,1] bounds; the Beta(1,b)
         # prior family is carried in prior_kinds below).  Sampled regardless of

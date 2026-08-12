@@ -295,28 +295,48 @@ def _report_survey_z_depth(label: str, resolved) -> None:
     )
 
 
+def _completion_validation_point(
+    fiducials: dict,
+    prior_overrides: dict,
+    fixed_parameter_values: dict,
+) -> dict[str, float]:
+    """Representative dry-run point: fixed > prior-override midpoint > fiducial.
+
+    Shared by the survey and the cosmology blocks so the diagnostic cannot sit at
+    a fiducial the sampler never visits: the clip fractions are ratios of
+    ``dN_obs`` to ``dN_exp = n0 apix exp(log_galaxy_measure_grid(cosmo, survey))``,
+    i.e. cosmology-dependent through the comoving volume element, so a run with
+    e.g. ``--prior_overrides '{"H0": [40, 55]}'`` carries ~2x the volume per unit
+    z of Planck15 and can rail C where the fiducial point reports 0 clipping.
+    """
+    values = dict(fiducials)
+    for label in values:
+        if label in (prior_overrides or {}):
+            lo, hi = prior_overrides[label]
+            values[label] = 0.5 * (float(lo) + float(hi))
+        if label in (fixed_parameter_values or {}):
+            values[label] = float(fixed_parameter_values[label])
+    return values
+
+
 def _completion_validation_survey_values(
     prior_overrides: dict,
     fixed_parameter_values: dict,
 ) -> dict[str, float]:
     """Choose representative survey values for dry-run clipping diagnostics."""
-    fid = {
-        "log10n0": -2.0,
-        "z50": 1.0,
-        "w": 0.5,
-        "delta": 0.0,
-        "b_miss": 1.0,
-        "alpha_miss": 1.0,
-        "sigma_kde": 0.0,
-    }
-    values = dict(fid)
-    for label in values:
-        if label in prior_overrides:
-            lo, hi = prior_overrides[label]
-            values[label] = 0.5 * (float(lo) + float(hi))
-        if label in fixed_parameter_values:
-            values[label] = float(fixed_parameter_values[label])
-    return values
+    return _completion_validation_point(
+        {
+            "log10n0": -2.0,
+            "z50": 1.0,
+            "w": 0.5,
+            "delta": 0.0,
+            "b_miss": 1.0,
+            "alpha_miss": 1.0,
+            "sigma_kde": 0.0,
+        },
+        prior_overrides,
+        fixed_parameter_values,
+    )
 
 
 #: Row axis of each Q_LSS table leaf carried on ``EMCatalog``.
@@ -340,35 +360,47 @@ def _completion_validation_lss_tables(data: dict, unique_pixels, n_pix_catalog: 
 
     The tables are sliced HOST-side to the validation rows (mirroring the factory's
     eager global->compact gather) so a full ``(M, n_pix, N_grid)`` ensemble never
-    reaches the device.  Returns ``(kwargs, provenance)``; ``provenance`` records
-    why nothing was attached so the JSON never implies a clean Q when the Q was
-    simply not readable:
+    reaches the device.  Returns ``(kwargs, provenance, provenance_by_key)``;
+    the provenance records why nothing was attached so the JSON never implies a
+    clean Q when the Q was simply not readable.  Per leaf:
 
-    * ``"none"`` -- the run carries no Q table (the legacy delta_g diagnostic is
-      the right one);
     * ``"global_table_sliced"`` -- attached, rows gathered by global pixel;
     * ``"compact_table_skipped"`` -- the table is a COMPACT per-view block
       (``lss_completion_indexing == 1``, or its row count is not the full nside),
       which carries no global pixel key, so the validation pixels cannot be
       aligned to it.
+
+    The back-compatible scalar summarises those: ``"none"`` when the run carries
+    no Q table at all (the legacy delta_g diagnostic is the right one), the
+    common per-leaf value when every present leaf agrees, and ``"partial"`` for a
+    MIXED outcome -- which a single last-write-wins scalar reported as whichever
+    leaf happened to come last in ``_LSS_TABLE_ROW_AXIS`` order, so a reader
+    could not tell which leaf the clip fraction came from.
     """
     pix = np.asarray(unique_pixels, dtype=np.int64).reshape(-1)
     indexing = int(data.get("lss_completion_indexing", 0) or 0)
     kwargs: dict[str, object] = {}
-    provenance = "none"
+    by_key: dict[str, str] = {}
     for key, axis in _LSS_TABLE_ROW_AXIS.items():
         tab = data.get(key)
         if tab is None:
             continue
         arr = np.asarray(tab)
         if indexing == 1 or arr.shape[axis] != n_pix_catalog:
-            provenance = "compact_table_skipped"
+            by_key[key] = "compact_table_skipped"
             continue
         if n_pix_catalog != pix.size:
             arr = np.take(arr, pix, axis=axis)
         kwargs[key] = jnp.asarray(arr)
-        provenance = "global_table_sliced"
-    return kwargs, provenance
+        by_key[key] = "global_table_sliced"
+    outcomes = set(by_key.values())
+    if not outcomes:
+        provenance = "none"
+    elif len(outcomes) == 1:
+        provenance = outcomes.pop()
+    else:
+        provenance = "partial"
+    return kwargs, provenance, by_key
 
 
 def run_completion_validation(
@@ -425,13 +457,21 @@ def run_completion_validation(
     survey_values = _completion_validation_survey_values(
         prior_overrides, fixed_parameter_values
     )
-    # Completion validation is a dry run, so unsampled cosmological values must
-    # be represented by the fixed/fiducial values used by the likelihood decoder.
+    # Completion validation is a dry run, so the cosmology is a REPRESENTATIVE
+    # point on the same fixed > prior-override midpoint > fiducial precedence as
+    # the survey block above (the clip fractions are cosmology-dependent through
+    # the comoving volume element, so pinning Planck15 under an H0 override
+    # certified a completeness budget the run never forms).  W0_FID/WA_FID rather
+    # than literals so the dry run cannot drift from the decoder.
+    cosmology_values = _completion_validation_point(
+        {"H0": H0_FID, "Om0": OM0_FID, "w0": W0_FID, "wa": WA_FID},
+        prior_overrides, fixed_parameter_values,
+    )
     cosmo = CosmoParams(
-        H0=float(fixed_parameter_values.get("H0", H0_FID)),
-        Om0=float(fixed_parameter_values.get("Om0", OM0_FID)),
-        w0=float(fixed_parameter_values.get("w0", -1.0)),
-        wa=float(fixed_parameter_values.get("wa", 0.0)),
+        H0=float(cosmology_values["H0"]),
+        Om0=float(cosmology_values["Om0"]),
+        w0=float(cosmology_values["w0"]),
+        wa=float(cosmology_values["wa"]),
     )
     # NOTE: this dry-run deliberately leaves z_depth at its default (None):
     # completion_clip_diagnostics reports clip fractions of the completeness
@@ -506,7 +546,7 @@ def run_completion_validation(
         sigma_kde=survey_values["sigma_kde"],
         **_mode_kwargs,
     )
-    lss_kwargs, lss_attached = _completion_validation_lss_tables(
+    lss_kwargs, lss_attached, lss_attached_by_key = _completion_validation_lss_tables(
         data, unique_pixels, int(data.get("n_pix_catalog", np.asarray(full_z).shape[0]))
     )
     if _c_mode == "aggregate":
@@ -527,6 +567,15 @@ def run_completion_validation(
             field_N_obs_total=jnp.asarray(float(_field.N_obs_total)),
             field_occupied_pixels=jnp.asarray(
                 np.asarray(_field.occupied_pixels), dtype=jnp.int32),
+        )
+    if data.get("pixel_stratum_map") is not None:
+        # Stratified selection routes each pixel to its own C_sel curve by
+        # GLOBAL pixel, so the map stays full-sky (unsliced) like the run's.
+        # Without it the dry run cannot form the stratified estimator at all.
+        lss_kwargs = dict(
+            lss_kwargs,
+            pixel_stratum_map=jnp.asarray(
+                np.asarray(data["pixel_stratum_map"], dtype=np.int32)),
         )
     em_catalog = EMCatalog(
         apix=data["apix"],
@@ -549,6 +598,9 @@ def run_completion_validation(
         max_pixels=max_pixels,
     )
     diagnostics["lss_completion_attached"] = lss_attached
+    # Per-leaf provenance: the scalar above cannot express a MIXED outcome, so a
+    # reader could not tell which Q leaf the reported clip fraction came from.
+    diagnostics["lss_completion_attached_by_key"] = lss_attached_by_key or None
     diagnostics["c_mode"] = _c_mode
     if _c_mode == "selection":
         diagnostics["selection_theta_used"] = {
@@ -557,6 +609,34 @@ def run_completion_validation(
                       "Mstar_hat", "alpha", "M_faint_offset")}
         diagnostics["selection_family"] = str(
             getattr(opts, "selection_family", None) or "gaussian")
+        # The selection completeness never sees a galaxy count, so the missing
+        # budget amplitude (proportional to n0/H0^3) is identified only by its
+        # prior. Record the model-vs-observed counts so a prior-driven budget is
+        # auditable, and say so loudly when they disagree grossly.
+        from darksirens.redshift.completion import selection_budget_audit
+
+        _n_full = np.asarray(full_n).reshape(-1)
+        _audit = selection_budget_audit(
+            cosmo, survey, em_catalog,
+            N_obs_total=float(_n_full.sum()),
+            n_occupied=int((_n_full > 0).sum()),
+            n_pix_total=int(data.get("n_pix_catalog", _n_full.size)),
+        )
+        diagnostics["selection_budget_audit"] = _audit
+        _ratio = float(_audit["selection_model_over_observed_footprint"])
+        if not (1.0 / 3.0 < _ratio < 3.0):
+            _warn(
+                f"c_mode=selection budget audit: the model predicts "
+                f"{_audit['selection_model_N_obs_footprint']:.3g} catalogued "
+                f"galaxies over the footprint but the catalog holds "
+                f"{_audit['N_obs_total']:.3g} (ratio {_ratio:.3g}). The "
+                "selection completeness carries no counts, so the missing "
+                "budget is proportional to n0/H0^3 with nothing in the "
+                "likelihood calibrating it: at this (log10n0, delta, theta) the "
+                "in-vs-out-of-catalog odds -- and therefore the H0 information "
+                "-- are set by the log10n0 prior, not by the data. Recalibrate "
+                "log10n0 to N/(f_sky V_c) or narrow its prior."
+            )
     diagnostics["survey_values"] = survey_values
     diagnostics["cosmology_values"] = {
         "H0": float(cosmo.H0),
@@ -681,6 +761,93 @@ def _resolve_selection_fit_pins(sel, family, fixed_parameter_values):
         fixed_parameter_values["M_faint_offset"] = offset_fit
     return {name: float(fixed_parameter_values.get(name, sel[name]))
             for name in SELECTION_THETA_FIELDS[family]}
+
+
+def _check_aggregate_requires_q(opts, lss_active_by_catalog):
+    """``--c_mode aggregate`` is only meaningful with a full-sky Q table.
+
+    Aggregate mode replaces the per-pixel completeness with ONE sky curve
+    ``Cbar(z) = Sum_p dN_obs_s / (N_pix_total dN_exp_s)`` -- normalised over the
+    WHOLE SPHERE, so for a footprint survey ``Cbar ~ f_sky C_footprint`` --
+    broadcast to every pixel.  The design intends the mean-one ``Q`` field to
+    put that budget back where the galaxies are ("C says HOW MUCH is missing, Q
+    says WHERE it goes"), and the aggregate Q builder fits the full sky for
+    exactly that reason.  With no Q table the missing density falls back to the
+    legacy ``delta_g`` factor (or 1), both of which are mean-one over the sky
+    and therefore CANNOT encode a footprint: inside the footprint the prior then
+    claims ``1 - f_sky C_foot`` of hosts are uncatalogued (75% at f_sky = 0.25
+    with a locally complete catalog), diluting the very pixels that carry the
+    localization information.
+    """
+    if str(getattr(opts, "c_mode", None) or "per_pixel") != "aggregate":
+        return
+    missing = [k for k, active in enumerate(lss_active_by_catalog, start=1)
+               if not active]
+    if missing:
+        _fatal(
+            "--c_mode aggregate requires an --lss_completion table for every "
+            f"catalog (catalog(s) {missing} have none). Aggregate mode "
+            "normalises the completeness over the WHOLE SKY and delegates all "
+            "angular structure to the mean-one Q field, so without a full-sky Q "
+            "a footprint survey's missing budget is diluted by f_sky inside its "
+            "own footprint -- the legacy delta_g factor is mean-one over the sky "
+            "and cannot encode a footprint. Build Q with "
+            "darksirens_build_lognormal_completion --c-mode aggregate, or run "
+            "--c_mode per_pixel."
+        )
+
+
+def _check_q_table_z_depth(q_fiducials, opts):
+    """Fail-closed depth provenance of Q tables, PER CATALOG.
+
+    ``z_depth`` sets the completeness DENOMINATOR: with a depth,
+    ``_precompute_grids`` forms ``S @ (dN_exp 1[z <= z_depth])``, and without it
+    the denominator keeps mass above the depth the numerator can never match, so
+    C is biased low (and ``(1 - C) dN_exp`` high) over roughly the last ~0.1 in
+    z below the edge.  Q is the fit RESIDUAL to that base, so a table built at a
+    different depth than the run resolves places the missing galaxies against
+    the wrong completeness near the survey edge.  The builder stamps
+    ``fiducial_z_depth`` (absent = no depth prior at build time, or a table
+    predating the stamp), and this run's per-catalog depth is
+    ``opts.resolved_survey_z_depths``.
+    """
+    depths = list(getattr(opts, "resolved_survey_z_depths", None) or [])
+    for _k, _fid in enumerate(q_fiducials, start=1):
+        if not _fid:
+            continue
+        run_depth = depths[_k - 1] if len(depths) >= _k else None
+        tab_depth = _fid.get("fiducial_z_depth")
+        if tab_depth is not None and run_depth is not None:
+            if abs(float(tab_depth) - float(run_depth)) > 1e-9:
+                _fatal(
+                    f"catalog {_k}: Q table {_fid.get('path')} was built with "
+                    f"z_depth={float(tab_depth):g} but this run resolves "
+                    f"z_depth={float(run_depth):g}. The depth truncates the "
+                    "completeness denominator the field was fit residual to, "
+                    "so the table's Q would be consumed against a different "
+                    "C near the survey edge. Rebuild with "
+                    "darksirens_build_lognormal_completion --z-depth "
+                    f"{float(run_depth):g}, or run with --survey_z_depth "
+                    f"{float(tab_depth):g}."
+                )
+        elif tab_depth is None and run_depth is not None:
+            _warn(
+                f"catalog {_k}: Q table {_fid.get('path')} carries no "
+                f"fiducial_z_depth stamp but this run truncates completeness "
+                f"at z_depth={float(run_depth):g}. The table was almost "
+                "certainly fit against an UNTRUNCATED denominator, which "
+                "biases C low (and the missing budget high) just below the "
+                "depth. Rebuild it with the current builder, which reads the "
+                "catalog's z_depth attr."
+            )
+        elif tab_depth is not None and run_depth is None:
+            _fatal(
+                f"catalog {_k}: Q table {_fid.get('path')} was built with "
+                f"z_depth={float(tab_depth):g} but this run applies NO depth "
+                "prior: the table's completeness base is truncated and the "
+                "run's is not. Pass --survey_z_depth "
+                f"{float(tab_depth):g} (or rebuild the table without a depth)."
+            )
 
 
 def _check_selection_qtable_theta(q_fiducials, opts):
@@ -920,6 +1087,11 @@ class _ParameterSpace:
     n_cosmo_eff: object
     n_survey_eff: object
     model_name: object
+    # Index-resolved joint prior constraints applied by make_prior_transform's
+    # cube maps (empty when the model declares none); carried so the samplers
+    # can see which constraints the transform -- and only the transform --
+    # enforces.
+    joint_constraints: object = ()
 
 
 def build_parser():
@@ -1327,7 +1499,13 @@ def build_parser():
     g.add_argument("--dlogz",        type=float, default=0.1)
     g.add_argument("--max_samples",  type=int,   default=1_000_000,
                    help="Max call/iteration budget for nested samplers "
-                        "(dynesty call cap, tinyns iteration cap); 0 = unlimited.")
+                        "(dynesty call cap, tinyns iteration cap); 0 = unlimited. "
+                        "The UNITS differ: tinyns has no call cap and one rwalk "
+                        "iteration costs walks x max_active_chains likelihood "
+                        "evaluations (5 for --tinyns_preset recommended, 1280 for "
+                        "heavy_darksirens), so the same number buys far more "
+                        "compute there -- the resolved cap and its call "
+                        "equivalent are printed at sampler start.")
     add_tinyns_arguments(g, bool_type=str_to_bool)
     g.add_argument("--nuts_warmup",  type=int,   default=500)
     g.add_argument("--nuts_samples", type=int,   default=1000)
@@ -1532,6 +1710,24 @@ def _resolve_catalog_sky_weighting(opts):
     # relative angular host weighting the conditional per-pixel normalizer
     # discards.  dark_sirens_complete keeps its own pre-existing rules (K>=2
     # requires field, checked below; K=1 allows both).
+    # --drop_full_catalog is INERT for a K>=2 mixture: inference/data.py stubs the
+    # top-level catalog and returns before maybe_drop_full_catalog, while
+    # load_multitracer_catalog_bundles already loads every catalog HOST-side
+    # (to_device=False) and keeps only the compact per-bundle views.  Left to the
+    # resolution below, the flag would buy the legacy 'conditional' estimand --
+    # not a host-fraction estimand at K>=2 (fcat_k rails; see the refusal below)
+    # -- in exchange for no memory saving at all, and on the AUTO path that
+    # refusal never fired.  Refuse the combination instead.
+    if opts.n_catalogs >= 2 and getattr(opts, "drop_full_catalog", False):
+        _fatal(
+            "--drop_full_catalog has no effect on a K>=2 mixture: every catalog "
+            "is already loaded host-side and kept as compact per-bundle views "
+            "(inference/loaders.py: load_multitracer_catalog_bundles), so the "
+            "flag would only resolve an unset --catalog_sky_weighting to the "
+            "legacy 'conditional' estimand, whose fcat_k carries no "
+            "number-density / sky-clustering information and rails to 1 on "
+            "clustered sparse-contrast catalogs. Drop the flag."
+        )
     opts.catalog_sky_weighting_source = (
         "explicit" if opts.catalog_sky_weighting is not None else "auto"
     )
@@ -1566,8 +1762,10 @@ def _resolve_catalog_sky_weighting(opts):
             "discards. Pass --catalog_sky_weighting conditional for the "
             "radial-only legacy estimand."
         )
-    if (opts.universe_model == "dark_sirens"
-            and opts.catalog_sky_weighting_source == "explicit"):
+    # Provenance-INDEPENDENT: the estimand is wrong at K>=2 however it was
+    # chosen, so gating this on source == "explicit" only hid the auto paths
+    # (--drop_full_catalog above, and any future one) behind no diagnostic.
+    if opts.universe_model == "dark_sirens":
         if opts.n_catalogs >= 2 and opts.catalog_sky_weighting == "conditional":
             _fatal(
                 "--catalog_sky_weighting conditional is not a host-fraction "
@@ -1943,6 +2141,28 @@ def _validate_run_config(opts):
                 "event's empirical support box by a hyperparameter-dependent "
                 "amount (issue #260). Evidence differences below that "
                 "systematic are unresolved."
+            )
+        if not (0.0 < opts.flows_chieff_amax <= 1.0):
+            _fatal("--flows_chieff_amax must be in (0, 1].")
+        if opts.pdet_flow_path and abs(
+                float(opts.flows_chieff_amax)
+                - float(opts.pdet_chieff_amax)) > 1e-12:
+            # The chi_eff PE prior is DIVIDED OUT of every flow density
+            # (numerator) with --flows_chieff_amax and BAKED INTO the
+            # pseudo-injection p_draw (denominator) with --pdet_chieff_amax.
+            # Both sides marginalize the 4-D spin nuisance under the SAME
+            # amax-truncated reference conditional, so two different amax
+            # values leave a chi_eff- and q-dependent residual that does not
+            # cancel between the events and the injections.
+            _fatal(
+                f"--flows_chieff_amax {opts.flows_chieff_amax} != "
+                f"--pdet_chieff_amax {opts.pdet_chieff_amax}: the chi_eff PE "
+                "prior divided out of each event flow (numerator) and the one "
+                "baked into the emulator pseudo-injections' p_draw "
+                "(denominator) must be the SAME reference convention, or the "
+                "hierarchical ratio carries a chi_eff/mass-ratio-dependent "
+                "reweighting of the selection function. Set both to the "
+                "injection-file convention."
             )
         if opts.sampler == "numpyro":
             _warn(
@@ -2675,6 +2895,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # legacy back-compat fallback.
     opts.lss_completion_active_by_catalog = lss_completion_active_by_catalog
     opts.lss_completion_active = bool(lss_completion_active)
+    _check_aggregate_requires_q(opts, lss_completion_active_by_catalog)
 
     _resolve_selection_fits(opts, data, fixed_parameter_values)
 
@@ -2730,6 +2951,10 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # been built from the SAME offline fit that centers this run's theta
     # prior -- a stale table silently carries the wrong completeness base.
     _check_selection_qtable_theta(_q_fiducials, opts)
+    # The completeness depth is Q-conditioning too (it truncates the base the
+    # field is residual to), but it is not a sampled parameter, so it cannot
+    # ride q_provenance's label machinery.
+    _check_q_table_z_depth(_q_fiducials, opts)
     # Prior wider than the base is first-order-consistent only near theta_hat:
     # warn when the sampled bounds reach beyond +-5 prior sds of the center.
     if getattr(opts, "selection_prior", None):
@@ -2793,6 +3018,7 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         n_cosmo_eff=n_cosmo_eff,
         n_survey_eff=n_survey_eff,
         model_name=model_name,
+        joint_constraints=tuple(joint_constraints or ()),
     )
 
 
@@ -2844,6 +3070,7 @@ def _run_sampling(opts, likelihood, pspace):
         prior_transform=prior_transform, labels=labels,
         lower_bound=lower_bound, upper_bound=upper_bound, opts=opts,
         prior_kinds=prior_kinds,
+        joint_constraints=getattr(pspace, "joint_constraints", ()),
     )
     t_sample_end  = datetime.datetime.now()
     wall_sampling = t_sample_end - t_sample_start
@@ -3011,6 +3238,11 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
         prior_overrides=prior_overrides,
         fixed_parameter_values=fixed_parameter_values,
     )
+    # Recorded on opts (hence in settings.json and results.hdf5) so an archived
+    # artifact carries the identity of the configuration that produced it.  Set
+    # AFTER the build above, so it never feeds back into the digest.
+    opts.run_fingerprint_digest = fingerprint["digest"]
+    opts.resume_forced_mismatch = False
     run_timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     if resume_dir:
         try:
@@ -3027,6 +3259,17 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
             # --resume_force accepted a fingerprint-less legacy run dir;
             # stamp it now so later requeues are validated, not forced.
             save_run_fingerprint(run_dir, fingerprint)
+        elif stored.get("digest") != fingerprint["digest"]:
+            # --resume_force accepted a MISMATCH: the stored fingerprint is the
+            # record of the configuration that created the checkpoint, so keep
+            # it, but stamp this run's configuration beside it -- otherwise the
+            # directory advertises a configuration that did not produce its
+            # results.hdf5, and every later requeue must be forced too.
+            opts.resume_forced_mismatch = True
+            save_run_fingerprint(
+                run_dir, fingerprint,
+                basename=f"run_fingerprint.forced-{run_timestamp}.json",
+            )
     else:
         run_dir = _make_run_dir(opts, run_timestamp)
     opts.run_dir = run_dir

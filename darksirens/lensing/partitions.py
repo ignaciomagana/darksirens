@@ -25,6 +25,12 @@ KNOWN_EDGE_MARKS = {
     "log_spin_score",
 }
 
+# Marks that are functions of the observed arrival-time separation. Using any of
+# them as a pairing PRIOR (directly, or folded into log_prior_odds by the
+# builder) while the time edge-mark LIKELIHOOD evaluates p(Delta t | y) scores
+# the same |Delta t| twice.
+TIME_DERIVED_EDGE_MARK_KEYS = frozenset({"delta_t_obs", "log_time_coincidence"})
+
 
 @dataclass(frozen=True)
 class EdgeMarks:
@@ -238,9 +244,10 @@ def parse_folded_mark_keys(data: dict) -> tuple[str, ...]:
     """Return mark keys the builder already folded into log_prior_odds.
 
     Producers that bake mark values into the edge scores (e.g.
-    build_candidate_pairs_from_observed folds log_mass_distance_score, and
-    log_sky_overlap when sky_overlap_weight != 0) record them under the
-    optional top-level 'folded_mark_keys' field. Absent field = unknown
+    build_candidate_pairs_from_observed folds log_mass_distance_score,
+    log_sky_overlap when sky_overlap_weight != 0, and log_time_coincidence when
+    the file exports no time mark for the likelihood to reuse) record them under
+    the optional top-level 'folded_mark_keys' field. Absent field = unknown
     provenance, no guard (backward compatible with candidate-pairs-1.0
     files written before this field existed).
     """

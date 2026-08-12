@@ -67,8 +67,13 @@ except Exception:  # pragma: no cover - optional dependency
 #
 #     m1det_min ≤ pop_m_min        and        m1det_max ≥ pop_m_max·(1 + z_max).
 #
-# This converter sets the default m1det_max from (pop_m_max, z_max) to guarantee
-# that. If you narrow it, F(z;H0) becomes z-dependent and biases H0.
+# z_max here is NOT the user's declaration but the largest redshift the sampled
+# distances actually reach at the top of the H0 prior (--h0_max), floored by
+# --zmax: F(z;H0)=1 has to hold at every z the run can visit. This converter
+# sets the default m1det_max from (pop_m_max, that z_max) to guarantee it, warns
+# when the data reach beyond --zmax, and stamps the z it really guarantees as
+# ``zmax`` (with ``zmax_declared`` / ``zmax_reached`` / ``h0_max`` alongside).
+# If you narrow m1det_max, F(z;H0) becomes z-dependent and biases H0.
 #
 # Two caveats that the math does NOT let this patch remove (use Architecture B
 # — a native skymap likelihood term — if they bite):
@@ -212,6 +217,32 @@ def _read_skymap(path: Path):
     return prob, distmu, distsigma, nside
 
 
+_JITTER_LEVELS = 6      # 4**6 = 4096 equal-area sub-pixels per skymap pixel
+
+
+def _sample_angles_in_pixels(nside, pix_ring, rng, levels=_JITTER_LEVELS):
+    """Directions drawn UNIFORMLY INSIDE each sampled skymap pixel.
+
+    Placing every sample at its pixel's CENTRE makes the event's angular support a
+    set of measure-zero points rather than the pixel's solid angle.  The
+    likelihood re-derives ``pix = ang2pix(catalog_nside, ra, dec)`` from these
+    angles, so as soon as the analysis resolution is FINER than the skymap's --
+    a low-resolution or heavily rasterised skymap, a high-nside catalog or
+    completion map -- every sample of one coarse pixel collapses into the single
+    fine pixel containing its centre, ``p_z(z|pix)`` sees only ~(nside ratio)^-2
+    of the galaxies actually inside the localisation region, and the sky-anisotropy
+    models are evaluated on a comb of directions.
+
+    Each sample is placed at the centre of a uniformly chosen equal-area sub-pixel
+    at ``nside * 2**levels``, which is uniform in solid angle inside the parent
+    pixel to that resolution (1/2**levels of a pixel's linear size).
+    """
+    nest = np.asarray(hp.ring2nest(nside, pix_ring), dtype=np.int64)
+    nchild = 4 ** int(levels)
+    child = nest * nchild + rng.integers(0, nchild, size=nest.size)
+    return hp.pix2ang(nside * 2 ** int(levels), child, nest=True)
+
+
 def _ansatz_grid_bounds(
     mu: np.ndarray, sig: np.ndarray, n_widths: float = 10.0
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -335,8 +366,22 @@ def main() -> None:
         type=float,
         default=1.5,
         help=(
-            "Max redshift of the analysis; sets the default m1det_max so the mass "
-            "marginalisation is unbiased across the H0 prior (default 1.5)."
+            "Declared max redshift of the analysis; a FLOOR for the default "
+            "m1det_max (default 1.5). The bound actually used is the larger of "
+            "this and the redshift the sampled distances themselves reach at "
+            "--h0_max, so a distant event cannot silently bias H0."
+        ),
+    )
+    p.add_argument(
+        "--h0_max",
+        type=float,
+        default=120.0,
+        help=(
+            "Upper edge of the H0 prior the file will be analysed under "
+            "(default 120, darksirens' own H0 prior upper bound). The most "
+            "aggressive cosmology in the prior is the one that maps the sampled "
+            "dL to the LARGEST redshift, so it sets the redshifted population "
+            "support the surrogate mass window has to cover."
         ),
     )
     p.add_argument(
@@ -361,7 +406,8 @@ def main() -> None:
         "--m1det_max",
         type=float,
         default=None,
-        help="Surrogate m1det upper bound. Default = pop_m_max*(1+zmax).",
+        help=("Surrogate m1det upper bound. Default = "
+              "pop_m_max*(1+max(zmax, z reached at --h0_max))."),
     )
     p.add_argument("--q_min", type=float, default=0.05)
     p.add_argument("--chi_abs_max", type=float, default=0.99)
@@ -392,25 +438,20 @@ def main() -> None:
     args = p.parse_args()
 
     # Resolve mass-range defaults that guarantee an unbiased mass marginalisation.
+    # ``m1det_max`` needs the redshift the SAMPLES reach (below), so only the
+    # lower edge and the shape checks can be settled here.
     m1det_min = args.pop_m_min if args.m1det_min is None else args.m1det_min
-    m1det_max = (
-        args.pop_m_max * (1.0 + args.zmax) if args.m1det_max is None else args.m1det_max
-    )
-
-    if not (m1det_min > 0 and m1det_max > m1det_min):
+    if not (m1det_min > 0):
+        raise ValueError("Require m1det_min > 0")
+    if args.m1det_max is not None and not (args.m1det_max > m1det_min):
         raise ValueError("Require 0 < m1det_min < m1det_max")
     if not (0 < args.q_min <= 1.0):
         raise ValueError("Require 0 < q_min <= 1")
     if not (0 < args.chi_abs_max <= 1.0):
         raise ValueError("Require 0 < chi_abs_max <= 1")
+    if not (args.h0_max > 0):
+        raise ValueError("Require h0_max > 0")
 
-    needed_max = args.pop_m_max * (1.0 + args.zmax)
-    if m1det_max < needed_max - 1e-9:
-        warnings.warn(
-            f"m1det_max={m1det_max:.1f} < pop_m_max*(1+zmax)={needed_max:.1f}. The mass "
-            f"marginalisation factor F(z;H0) will be z-dependent and BIAS H0. "
-            f"Raise --m1det_max (or lower --zmax) to cover the redshifted population support."
-        )
     if m1det_min > args.pop_m_min + 1e-9:
         warnings.warn(
             f"m1det_min={m1det_min:.2f} > pop_m_min={args.pop_m_min:.2f}; low-mass population "
@@ -435,7 +476,6 @@ def main() -> None:
     chieff = np.empty((nobs, nsamp))
     p_pe = np.empty((nobs, nsamp))
 
-    log_m1_width = np.log(m1det_max / m1det_min)
     q_width = 1.0 - args.q_min
     chi_width = 2.0 * args.chi_abs_max
 
@@ -445,33 +485,81 @@ def main() -> None:
     pe_Om0 = Om0Planck if args.pe_Om0 is None else args.pe_Om0
     dL_lo, dL_hi = (float(x) for x in dL_grid_bounds(pe_H0, pe_Om0))
 
+    nside_min = None        # coarsest skymap resolution, stamped for the run to check
+
+    # PASS 1 — sky + distance samples.  Done before the surrogate masses so the
+    # mass window can be sized from the redshifts the data actually reach rather
+    # than from the user's --zmax declaration.
     for i, path in enumerate(files):
         prob, distmu, distsigma, nside = _read_skymap(path)
 
-        # (1) posterior samples in (pixel, dL)
         pix = rng.choice(prob.size, size=nsamp, p=prob)
-        theta, phi = hp.pix2ang(nside, pix, nest=False)  # RING (see _read_skymap)
-        ra_i = phi
-        dec_i = 0.5 * np.pi - theta
-        dL_i = _sample_distance_ansatz(
+        # RING indices (see _read_skymap), jittered inside the pixel so the
+        # angular support is the pixel's AREA, not its centre.
+        theta, phi = _sample_angles_in_pixels(nside, pix, rng)
+        ra[i] = phi
+        dec[i] = 0.5 * np.pi - theta
+        nside_min = nside if nside_min is None else min(nside_min, nside)
+        dL[i] = _sample_distance_ansatz(
             distmu[pix], distsigma[pix], rng, n_grid=args.n_dist_grid
         )
-        # z(dL) under the fiducial PE cosmology, reusing the likelihood's own
-        # grid inversion (darksirens.utils.cosmology.z_of_dL); clip to the
-        # grid support so an out-of-range dL sample yields a clamped z rather
-        # than the NaN-outside-grid sentinel.
-        z_i = np.asarray(z_of_dL(np.clip(dL_i, dL_lo, dL_hi), pe_H0, pe_Om0))
 
-        # surrogate (uninformative) mass/spin draws
+    # z(dL) under the fiducial PE cosmology, reusing the likelihood's own grid
+    # inversion (darksirens.utils.cosmology.z_of_dL); clip to the grid support so
+    # an out-of-range dL sample yields a clamped z rather than the
+    # NaN-outside-grid sentinel.
+    dL_clipped = np.clip(dL, dL_lo, dL_hi)
+    z_fid = np.asarray(z_of_dL(dL_clipped, pe_H0, pe_Om0))
+
+    # The redshift the analysis can actually reach: the most aggressive cosmology
+    # in the H0 prior maps a given dL to the LARGEST z, so that -- not --zmax --
+    # is what the surrogate mass window has to cover for F(z;H0) = 1.  (Om0 is
+    # held at the fiducial: H0 is the direction the prior is broad in.)
+    dL_lo_hi, dL_hi_hi = (float(x) for x in dL_grid_bounds(args.h0_max, pe_Om0))
+    z_reached = float(
+        np.max(np.asarray(z_of_dL(np.clip(dL, dL_lo_hi, dL_hi_hi),
+                                  args.h0_max, pe_Om0)))
+    )
+    zmax_needed = max(float(args.zmax), z_reached)
+    if z_reached > args.zmax + 1e-9:
+        warnings.warn(
+            f"--zmax={args.zmax:.2f} but the sampled distances reach z={z_reached:.2f} "
+            f"at H0={args.h0_max:.1f} (the top of the H0 prior). The surrogate mass "
+            f"window is sized from z={zmax_needed:.2f} instead, since F(z;H0)=1 -- the "
+            f"converter's whole unbiasedness argument -- must hold at every z the run "
+            f"can reach, not only at the declared one."
+        )
+
+    m1det_max = (
+        args.pop_m_max * (1.0 + zmax_needed)
+        if args.m1det_max is None
+        else args.m1det_max
+    )
+    needed_max = args.pop_m_max * (1.0 + zmax_needed)
+    if m1det_max < needed_max - 1e-9:
+        warnings.warn(
+            f"m1det_max={m1det_max:.1f} < pop_m_max*(1+zmax)={needed_max:.1f} at "
+            f"zmax={zmax_needed:.2f}. The mass marginalisation factor F(z;H0) will be "
+            f"z-dependent and BIAS H0. Raise --m1det_max (or restrict the analysis "
+            f"to nearer events / a narrower H0 prior) to cover the redshifted "
+            f"population support."
+        )
+    # The z up to which the resolved window really does cover the population
+    # support -- stamped into the file instead of the user's declaration.
+    zmax_guaranteed = min(zmax_needed, m1det_max / args.pop_m_max - 1.0)
+    log_m1_width = np.log(m1det_max / m1det_min)
+
+    # PASS 2 — surrogate (uninformative) mass/spin draws, per event.
+    for i in range(nobs):
         u = rng.uniform(size=nsamp)
         m1_i = m1det_min * np.exp(u * log_m1_width)  # log-uniform in m1det
         q_i = rng.uniform(args.q_min, 1.0, size=nsamp)
         m2_i = q_i * m1_i
         chi_i = rng.uniform(-args.chi_abs_max, args.chi_abs_max, size=nsamp)
-        m1src_i = m1_i / (1.0 + z_i)
-        m2src_i = m2_i / (1.0 + z_i)
+        m1src[i] = m1_i / (1.0 + z_fid[i])
+        m2src[i] = m2_i / (1.0 + z_fid[i])
 
-        # (2) p_pe = PE PRIOR in the (m1det, q, dL) basis.
+        # p_pe = PE PRIOR in the (m1det, q, dL) basis.
         #     distance prior  π(dL) ∝ dL²   (cancels the ansatz dL²)
         #     sky prior       isotropic ⇒ constant ⇒ dropped (per-event norm absorbs it);
         #                      localisation enters via pix ~ PROB, not via p_pe.
@@ -479,12 +567,9 @@ def main() -> None:
         g_m1 = 1.0 / (m1_i * log_m1_width)
         g_q = 1.0 / q_width
         g_chi = 1.0 / chi_width
-        p_pe_i = (dL_i * dL_i) * g_m1 * g_q * g_chi
 
-        ra[i], dec[i], dL[i] = ra_i, dec_i, dL_i
         m1det[i], m2det[i], chieff[i] = m1_i, m2_i, chi_i
-        m1src[i], m2src[i] = m1src_i, m2src_i
-        p_pe[i] = p_pe_i
+        p_pe[i] = (dL[i] * dL[i]) * g_m1 * g_q * g_chi
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -506,8 +591,20 @@ def main() -> None:
         f.attrs["requires_fixed_population"] = True
         f.attrs["m1det_min"] = float(m1det_min)
         f.attrs["m1det_max"] = float(m1det_max)
-        f.attrs["zmax"] = float(args.zmax)
+        # zmax is the z up to which the resolved surrogate mass window really
+        # does cover the redshifted population support (F(z;H0) = 1), NOT the
+        # --zmax declaration: the two differ whenever the data reach further
+        # than declared, or the user narrowed --m1det_max.
+        f.attrs["zmax"] = float(zmax_guaranteed)
+        f.attrs["zmax_declared"] = float(args.zmax)
+        f.attrs["zmax_reached"] = float(z_reached)
+        f.attrs["h0_max"] = float(args.h0_max)
         f.attrs["pe_distance_prior"] = "euclidean_dL2"
+        # The coarsest skymap resolution behind these samples: the sky support is
+        # a pixel of THIS nside (samples are drawn uniformly inside it), so an
+        # analysis at a much finer catalog / sky-model nside is resolving
+        # structure the skymaps never carried.
+        f.attrs["skymap_nside"] = int(nside_min)
         # Fiducial cosmology used ONLY for the m1src/m2src bookkeeping above;
         # required by the loader but inert given mock_data=True.
         f.attrs["pe_cosmology_H0"] = float(pe_H0)

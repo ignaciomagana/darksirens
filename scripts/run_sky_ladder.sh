@@ -18,10 +18,17 @@
 #
 # Notes
 # -----
-# * The Bayes factor needs a nested sampler (dynesty/tinyns) for the evidence.
-#   The GP sky models are high-dimensional (sphere_gp ~50, sphere_gp_z /
-#   overdensity_gp ~195 whitened latents), so nested sampling is SLOW there —
-#   raise NLIVE and expect long runtimes, or trim SKY_MODELS for a quick check.
+# * The Bayes factor needs a nested sampler (dynesty/tinyns) for the evidence,
+#   and a nested-sampling evidence is only USABLE when nlive is comfortably above
+#   the model's dimension: at nlive < ndim dynesty cannot form a non-degenerate
+#   bounding ellipsoid at all, and at nlive ~ ndim the evidence is biased --
+#   typically low for the higher-dimensional model, i.e. in exactly the direction
+#   that would manufacture the "expected" ordering below.  The GP sky models are
+#   high-dimensional (sphere_gp ~50, sphere_gp_z / overdensity_gp ~195 whitened
+#   latents), so this script sizes nlive PER MODEL from the sky block's own
+#   free-parameter count (NLIVE_PER_DIM * ndim, floored at NLIVE) and refuses to
+#   produce an evidence it would not trust.  Expect long runtimes there, or trim
+#   SKY_MODELS for a quick check.
 # * overdensity_gp (radial clustering) is partly degenerate with the population
 #   redshift slope gamma; set FIX_POP=true for an identifiable measurement
 #   (this drops 'isotropic', which would then have zero free parameters).
@@ -31,7 +38,13 @@ OUTDIR="${OUTDIR:-results/sky_ladder}"
 NOBS="${NOBS:-50}"
 NDRAW="${NDRAW:-80000}"
 SAMPLER="${SAMPLER:-dynesty}"
-NLIVE="${NLIVE:-150}"
+NLIVE="${NLIVE:-150}"          # floor; the per-model value scales with ndim
+NLIVE_PER_DIM="${NLIVE_PER_DIM:-25}"
+# Non-sky free parameters of this ladder's runs (powerlaw+peak population +
+# survey block, cosmology fixed).  Only used to size nlive, so an approximate
+# count is fine -- the sky block, which is what varies across the ladder, is read
+# from the package itself below.
+NLIVE_BASE_DIM="${NLIVE_BASE_DIM:-20}"
 SEED="${SEED:-22}"
 SKY_MODELS="${SKY_MODELS:-isotropic dipole sphere_gp sphere_gp_z overdensity_gp}"
 FIX_POP="${FIX_POP:-false}"
@@ -60,14 +73,31 @@ python scripts/mock_dark_sirens/generate_mock_data.py \
     --sky-blob-amp "$BLOB_AMP" --sky-blob-ra-deg "$BLOB_RA" --sky-blob-dec-deg "$BLOB_DEC" \
     --sky-blob-z0 "$BLOB_Z0"
 
+# ndim of a sky model's own parameter block, straight from the registry, so a
+# model that gains latents cannot silently keep the old live-point count.
+sky_ndim() {
+    python -c 'import sys; from darksirens.sky import sky_model_prior_parser; print(len(sky_model_prior_parser(sys.argv[1])[2]))' "$1"
+}
+
 RUN_DIRS=()
 for model in $SKY_MODELS; do
-    echo "==> [2/3] Inference: sky_model=$model  (sampler=$SAMPLER, nlive=$NLIVE)"
+    ndim=$(( $(sky_ndim "$model") + NLIVE_BASE_DIM ))
+    nlive=$(( NLIVE_PER_DIM * ndim ))
+    [ "$nlive" -lt "$NLIVE" ] && nlive="$NLIVE"
+    if [ "$nlive" -lt $(( 2 * ndim )) ]; then
+        echo "[ladder] REFUSING sky_model=$model: nlive=$nlive < 2*ndim=$(( 2 * ndim ))." >&2
+        echo "         A nested-sampling evidence at nlive below ~2x the dimension is" >&2
+        echo "         NOT A VALID EVIDENCE (degenerate bounding ellipsoid, biased logZ)," >&2
+        echo "         and the bias direction favours the low-dimensional model. Raise" >&2
+        echo "         NLIVE / NLIVE_PER_DIM or drop this model from SKY_MODELS." >&2
+        exit 2
+    fi
+    echo "==> [2/3] Inference: sky_model=$model  (sampler=$SAMPLER, ndim~$ndim, nlive=$nlive)"
     SAVE="$OUTDIR/runs/$model"
     mkdir -p "$SAVE"
     darksirens_inference \
         --gw_path "$GW" --gwselection_path "$SEL" \
-        --sampler "$SAMPLER" --nlive "$NLIVE" --seed "$SEED" \
+        --sampler "$SAMPLER" --nlive "$nlive" --seed "$SEED" \
         --universe_model spectral_sirens --pop_model powerlaw+peak \
         --fix_cosmology true $extra_fix \
         --sky_model "$model" \

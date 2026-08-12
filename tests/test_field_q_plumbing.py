@@ -222,3 +222,65 @@ def test_single_catalog_is_unaffected():
     from darksirens.inference.validation import validate_multitracer_run
 
     validate_multitracer_run(_opts("field", n_catalogs=1), _bundles(64))
+
+
+# ---------------------------------------------------------------------------
+# The LINEAR Q table is not plumbed to the numerator
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "key", ["lss_completion_q", "lss_completion_q_members"])
+def test_linear_q_table_is_rejected_by_the_view_builder(key):
+    """prepare_catalog_views fed the linear table would build a Q-modulated
+    FIELD normalizer while the numerator (which reads only the log forms) fell
+    back to the legacy overdensity branch -- a silent budget mismatch.  It must
+    be refused with the log-table hint instead."""
+    from darksirens.likelihood.catalog_views import prepare_catalog_views
+
+    data = {key: np.ones((NPIX, NZ))}
+    opts = SimpleNamespace(catalog_sky_weighting="field")
+    with pytest.raises(ValueError, match=key):
+        prepare_catalog_views(opts, data, "dark_sirens", None)
+
+# ===========================================================================
+# Numerator vs global normalizer: ONE Q clip (review F-067 / F-080)
+# ===========================================================================
+
+def test_field_q_rows_carry_the_numerators_logq_clip():
+    """The field normalizer's Q rows must be clipped exactly like the numerator's.
+
+    ``_to_q`` / ``_member_q_eff_from_logq`` clip |logQ| <= _LOGQ_CLIP before
+    exponentiating; the normalizer rows used a bare exp, and the shipped tables
+    are NOT bounded by the builder's clip (it is applied BEFORE the per-z
+    mean-one renorm, which then shifts each bin by its log-monopole).  On a
+    railed cell the normalizer therefore integrated up to e^7 ~ 1.1e3 times the
+    numerator's missing budget for that pixel.
+    """
+    from darksirens.redshift.completion import (
+        _LOGQ_CLIP,
+        _to_q,
+        build_field_lss_q_inputs,
+        build_field_lss_q_member_inputs,
+    )
+
+    rng = np.random.default_rng(3)
+    logq = rng.uniform(-14.0, 14.0, size=(NPIX, NZ))     # rails both ways
+    occ = np.arange(0, NPIX, 2)
+    q_occ, q_empty = build_field_lss_q_inputs(jnp.asarray(logq), occ, NPIX)
+    q_num = np.asarray(_to_q(jnp.asarray(logq), None))
+
+    assert float(np.max(np.abs(logq))) > _LOGQ_CLIP      # the fixture rails
+    np.testing.assert_allclose(np.asarray(q_occ, dtype=float),
+                               q_num[occ].astype(np.float32), rtol=1e-6)
+    empty = np.setdiff1d(np.arange(NPIX), occ)
+    np.testing.assert_allclose(np.asarray(q_empty),
+                               q_num[empty].sum(axis=0), rtol=1e-12)
+
+    logq_m = rng.uniform(-14.0, 14.0, size=(NMEM, NPIX, NZ))
+    qm_occ, qm_empty = build_field_lss_q_member_inputs(
+        jnp.asarray(logq_m), occ, NPIX)
+    q_num_m = np.exp(np.clip(logq_m, -_LOGQ_CLIP, _LOGQ_CLIP))
+    np.testing.assert_allclose(np.asarray(qm_occ, dtype=float),
+                               q_num_m[:, occ, :].astype(np.float32), rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(qm_empty),
+                               q_num_m[:, empty, :].sum(axis=1), rtol=1e-12)

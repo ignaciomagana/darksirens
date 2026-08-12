@@ -247,6 +247,32 @@ class TestWLTabulated:
             make_tabulated_wl_params(z_grid, log_mu_grid, bad_table)
 
 
+def test_sqrt_of_the_lognormal_variance_has_a_finite_gradient_at_zero():
+    """``s = sqrt(a·z^b)`` must survive reverse-mode at ``a = 0``.
+
+    ``d sqrt(x)/dx = inf`` at x = 0, so the unguarded chain through
+    ``s2 = a·z^b`` returns ``inf * 0 = NaN`` for every gradient w.r.t. z (and
+    hence w.r.t. the cosmology) in the ``a = 0`` ablation. Same defect, same
+    fix as the Hermite WL kernel in ``likelihood/wl_weight.py``.
+    """
+    from darksirens.lensing.wlmagnification import _sqrt_grad_safe
+
+    x = jnp.asarray([0.0, 1e-12, 0.25, 4.0])
+    np.testing.assert_allclose(np.asarray(_sqrt_grad_safe(x)),
+                               np.sqrt(np.asarray(x)), rtol=0, atol=0)
+    # Gradient through the a -> 0 chain: s2 = a * z^b with a = 0.
+    def s_of_z(z, a):
+        return _sqrt_grad_safe(a * jnp.power(z, 1.5))
+
+    g = jax.grad(s_of_z)(jnp.asarray(0.7), jnp.asarray(0.0))
+    assert np.isfinite(float(g)) and float(g) == 0.0
+    # And it is still the true derivative wherever s2 > 0.
+    g_pos = jax.grad(s_of_z)(jnp.asarray(0.7), jnp.asarray(4e-3))
+    assert float(g_pos) == pytest.approx(
+        float(jax.grad(lambda z: jnp.sqrt(4e-3 * z ** 1.5))(jnp.asarray(0.7)))
+    )
+
+
 # ============================================================================
 # Strong-lensing marks (SIS)
 # ============================================================================

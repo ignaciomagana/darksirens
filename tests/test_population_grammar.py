@@ -20,6 +20,7 @@ from darksirens.gw.populations import (
 )
 from darksirens.gw.populations.base import PopulationModel
 from darksirens.gw.populations.grammar import (
+    GAMMA_FIDUCIAL,
     ModelNameError,
     parse_model_name,
 )
@@ -195,7 +196,7 @@ def test_shared_gamma_cli_flag_builds_expected_parameters():
         )
     )
     assert fid.shape == (len(labels),)
-    assert fid[-1] == 0.0
+    assert fid[-1] == GAMMA_FIDUCIAL
 
 
 def test_per_component_cli_flags_build_expected_labels():
@@ -308,6 +309,48 @@ def test_novel_composition_builds_and_evaluates(name):
     chi = jnp.array([0.0, 0.1, -0.1])
     vals = np.asarray(log_p_pop(m1, q, z, chi, jnp.array(fid)))
     assert np.all(np.isfinite(vals)), f"non-finite log_p_pop for {name}: {vals}"
+
+
+@pytest.mark.parametrize(
+    "name", ["powerlaw", "powerlaw+peak", "brokenpowerlaw+2peaks", "2powerlaws+peak"]
+)
+def test_grammar_fiducial_rate_slope_is_the_measured_value(name):
+    """No grammar model may ship a NON-EVOLVING comoving rate.
+
+    ``build_fiducial_vector`` defaulted to gamma = 0.0 and no registry path
+    overrode it, so every ``--fix_population`` run, mock, and p_draw built from
+    ``get_fixed_population_params`` carried a source redshift distribution 3.6
+    sigma from the measured kappa_z = 2.5 +/- 0.7 -- the same defect registry.py
+    documents (and fixed) for the bespoke GWTC-5 entry."""
+    from darksirens.gw.populations.grammar import GAMMA_FIDUCIAL
+
+    assert 1.8 <= GAMMA_FIDUCIAL <= 3.2, GAMMA_FIDUCIAL
+    _, _, labels, _, _ = pop_model_prior_parser(name)
+    fid = np.asarray(get_fixed_population_params(name), dtype=np.float64)
+    assert float(fid[labels.index(r"$\gamma$")]) == GAMMA_FIDUCIAL
+
+
+@pytest.mark.parametrize("k", [2, 3, 4, 5])
+def test_mixture_weight_prior_is_uniform_on_the_simplex(k):
+    """The stick inputs must carry Beta(1, k-i), i.e. a uniform Dirichlet on the
+    weights.  Sampling every v_i from U[0, 1] gave E[w] = (1/2, 1/4, 1/8, ...) --
+    measured (0.500, 0.250, 0.250) for k = 3 against 1/3 each -- so the first-named
+    component got half the population a priori."""
+    from darksirens.gw.populations.base import _stick_breaking_weights
+    from darksirens.inference.prior import make_prior_transform
+
+    name = "+".join(["powerlaw"] * (k - 1) + ["peak"])
+    lows, highs, labels, kinds, _ = pop_model_prior_parser(name)
+    assert labels[:k - 1] == [rf"$v_{i + 1}$" for i in range(k - 1)]
+    for i in range(k - 1):
+        assert kinds[i] == ("beta", 1.0, float(k - 1 - i)), (i, kinds[i])
+
+    transform = make_prior_transform(lows, highs, kinds)
+    rng = np.random.default_rng(0)
+    u = jnp.asarray(rng.uniform(size=(40_000, len(lows))))
+    v = transform(u)[:, :k - 1]
+    w = np.asarray(jax.vmap(_stick_breaking_weights)(v))
+    np.testing.assert_allclose(w.mean(axis=0), 1.0 / k, atol=0.01)
 
 
 def test_novel_latex_derived():

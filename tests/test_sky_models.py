@@ -506,6 +506,56 @@ def test_sphere_gp_z_mean_one_between_z_nodes_and_off_quadrature():
     assert worst < 0.02, f"sphere mean of g deviates from 1 by {worst:.4f}"
 
 
+def test_sphere_gp_z_mean_one_at_the_z_length_scale_prior_floor():
+    """<g> = 1 between nodes must hold at the SHORTEST z length scale the prior
+    allows, not only at mid-prior hyperparameters.
+
+    Regression for the coarse-normaliser bug: the normaliser was tabulated on 40
+    nodes uniform in physical z (dz = 0.128) while the field's coordinate is
+    zeta = log1p(z) and log_ls_z reaches down to log(0.05) -- i.e. genuine
+    structure ~2.5x finer than the node spacing.  Measured mean-one violation
+    BETWEEN nodes was 4.8% at mid hyperparameters and 116% at the prior corner
+    (shell mean ranging over [0.71, 2.16]); the on-node tests above are blind to
+    it because linear interpolation is exact there.
+    """
+    model = get_sky_model("sphere_gp_z")
+    specs = model.param_specs
+    S = jnp.asarray(_independent_sphere())
+    zeta_g = np.asarray(model._zeta_g)
+    # Strictly BETWEEN nodes, in the coordinate the nodes are uniform in.
+    z_probe = np.expm1(0.5 * (zeta_g[:-1] + zeta_g[1:]))[::7]
+
+    for seed in (0, 1, 2):
+        rng = np.random.default_rng(seed)
+        th = rng.normal(size=len(specs))
+        th[0] = specs[0].high      # max amplitude
+        th[1] = specs[1].low       # min sphere length scale
+        th[2] = specs[2].low       # min z length scale  <- the unpinned corner
+        theta = jnp.asarray(th)
+        worst = 0.0
+        for z0 in z_probe:
+            zz = jnp.full(S.shape[0], float(z0))
+            g = jnp.exp(model.log_g_sky(S[:, 0], S[:, 1], S[:, 2], zz, theta))
+            worst = max(worst, abs(float(jnp.mean(g)) - 1.0))
+        assert worst < 0.10, (
+            f"per-shell mean-one violated by {worst:.4f} at the prior corner "
+            f"(seed {seed}); the z-normalisation grid under-resolves ls_z"
+        )
+
+
+def test_sky_z_normalisation_grid_resolves_the_z_kernel():
+    """The normalisation nodes are uniform in zeta = log1p(z) (the coordinate the
+    z-kernel acts on) and spaced at most a third of the shortest prior length
+    scale, so the interpolated normaliser can follow the field."""
+    model = get_sky_model("sphere_gp_z")
+    zeta_g = np.asarray(model._zeta_g)
+    d_zeta = np.diff(zeta_g)
+    np.testing.assert_allclose(d_zeta, d_zeta[0], rtol=1e-9)
+    ls_z_min = float(np.exp(model.param_specs[2].low))
+    assert d_zeta[0] <= ls_z_min / 3.0
+    np.testing.assert_allclose(np.asarray(model._zg), np.expm1(zeta_g), rtol=1e-12)
+
+
 def test_sky_z_normalisation_grid_covers_the_analysis_grid():
     """The normaliser must not freeze below the redshifts the pipeline samples.
 
@@ -643,3 +693,71 @@ def test_dipole_ball_cube_map_covers_the_ball_uniformly():
     np.testing.assert_allclose(np.mean(r), 0.75, atol=0.01)
     # Isotropy of the direction: component means vanish.
     np.testing.assert_allclose(np.mean(d, axis=0), 0.0, atol=0.02)
+
+
+# ============================================================================
+# Registry construction is trace-safe (review finding F-079)
+# ============================================================================
+
+@pytest.mark.parametrize("name", [n for n in SKY_MODEL_NAMES if n != "isotropic"])
+def test_registry_construction_inside_a_trace_is_safe(name):
+    """The likelihood resolves the sky model INSIDE its jit body, so the first
+    use of a model can build its geometry while a trace is active.
+
+    Before the fix, ``sphere_gp`` cached TRACERS in the process-global registry
+    (the first call returned a correct number, the next re-trace died with an
+    UnexpectedTracerError) and ``sphere_gp_z`` / ``overdensity_gp`` /
+    ``multipole*`` failed on a concretization inside their constructors.
+    Production was protected only by the prior decoder happening to warm the
+    registry first.
+    """
+    import jax
+
+    from darksirens.sky import registry as sky_registry
+
+    cached = sky_registry._SKY_REGISTRY.pop(name, None)
+    try:
+        @jax.jit
+        def total(x):
+            model = sky_registry.get_sky_model(name)
+            log_g = sky_registry.sky_model_parser(name)(
+                x, jnp.zeros_like(x), jnp.zeros_like(x), jnp.zeros_like(x),
+                get_fixed_sky_params(name),
+            )
+            return jnp.sum(log_g) + jnp.sum(x) + float(len(model.param_specs))
+
+        first = float(total(jnp.ones(3)))
+        # Nothing cached may be a tracer, or it escapes into every later trace.
+        for value in vars(sky_registry._SKY_REGISTRY[name]).values():
+            assert not isinstance(value, jax.core.Tracer)
+        # A re-trace (new batch shape) is where an escaped tracer would surface.
+        second = float(total(jnp.ones(4)))
+        assert np.isfinite(first) and np.isfinite(second)
+    finally:
+        if cached is not None:
+            sky_registry._SKY_REGISTRY[name] = cached
+
+
+def test_multipole_prior_volume_fraction_quantifies_the_logz_offset():
+    """The global positivity gate rejects most of the l=3 box, so the reported
+    logZ carries an undocumented log(valid fraction) offset that is an artifact
+    of the arbitrary a_bound, not of the data: measure it so an isotropy Bayes
+    factor can subtract it (and so the l=3 prior-draw efficiency is visible).
+    """
+    from darksirens.sky.models import MultipoleSky
+
+    # l=1 is a pure dipole with |a| <= 1 in orthonormal units: always positive.
+    assert MultipoleSky(lmax=1).prior_volume_fraction(n_draws=4096) == 1.0
+
+    f2 = get_sky_model("multipole").prior_volume_fraction()
+    f3 = get_sky_model("multipole_l3").prior_volume_fraction()
+    assert f2 == pytest.approx(0.604, abs=0.02)
+    assert f3 == pytest.approx(0.035, abs=0.01)
+    # ~2.8 nats of the l=3-vs-l=2 evidence difference is pure prior volume.
+    assert np.log(f2) - np.log(f3) == pytest.approx(2.84, abs=0.3)
+    # Cached, and a tighter box needs no correction at all.
+    model = get_sky_model("multipole_l3")
+    assert model.prior_volume_fraction() == f3
+    assert model._prior_volume_cache[0] == (20000, 0)
+    assert MultipoleSky(lmax=3, a_bound=0.05).prior_volume_fraction(
+        n_draws=4096) == 1.0

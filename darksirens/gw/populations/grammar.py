@@ -58,6 +58,16 @@ _LOG = logging.getLogger(__name__)
 DEFAULT_PAIRING = "pl_pairing"
 DEFAULT_SPIN = "spin"
 GAMMA_SPEC = ("gamma", r"\gamma", -10.0, 10.0)
+# Fiducial rate slope of every grammar model, i.e. what ``--fix_population true``
+# and every mock built from ``get_fixed_population_params`` inject.  With the
+# pipeline's p(z) ~ dV_c/dz (1+z)^(gamma-1) convention this is the measured
+# kappa_z = 2.5 +/- 0.7 (GWTC-5; the release-median PowerLawRedshift arm gives
+# 2.5439, which the bespoke gwtc5_fiducial_bpl2peaks entry carries verbatim).  The
+# old default of 0.0 asserted a NON-EVOLVING comoving rate -- 3.6 sigma from the
+# measurement -- which biases any fixed-population dark-siren H0 through the
+# source redshift distribution, exactly the defect registry.py documents for the
+# GWTC-5 entry.
+GAMMA_FIDUCIAL = 2.5
 
 
 class ModelNameError(ValueError):
@@ -356,7 +366,7 @@ def build_fiducial_vector(
     weights: Optional[Sequence[float]] = None,
     fids: Optional[Mapping[int, Mapping[str, float]]] = None,
     bounds: Optional[Mapping[int, Mapping[str, _B]]] = None,
-    gamma: float = 0.0,
+    gamma: float = GAMMA_FIDUCIAL,
     on_violation: str = "ignore",
 ) -> jnp.ndarray:
     """Fiducial parameter vector in exactly the model's parameter order.

@@ -132,6 +132,43 @@ def test_radial_deterministic_matches_member_mean(fiducial_catalog):
     assert float(np.median(err)) < 0.3, float(np.median(err))
 
 
+def _uniform_chi_bins():
+    """The builder's uniform-chi solve grid: (chi(zgrid), chi_u, edges_chi)."""
+    import jax.numpy as jnp
+    from darksirens.utils.cosmology import (
+        r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial)
+
+    n_grid = int(zgrid.size)
+    chi = np.asarray(r_of_z(jnp.asarray(zgrid), H0Planck, Om0Planck,
+                            w0Fiducial, waFiducial), dtype=float)
+    chi_u = np.linspace(float(chi[0]), float(chi[-1]), n_grid)
+    edges_chi = np.concatenate(
+        [[chi_u[0]], 0.5 * (chi_u[:-1] + chi_u[1:]), [chi_u[-1]]])
+    return chi, chi_u, edges_chi
+
+
+def test_counts_land_in_their_own_uniform_chi_bin():
+    """N_obs must be histogrammed in the SAME chi bins the expected base is
+    integrated over.
+
+    The old route binned in z on the log-spaced ``zgrid`` and then rounded each
+    node's counts into the nearest chi bin: 54 of the 1000 chi bins received no
+    zgrid node at all (z = 0.07 to 1.73) and read N_obs = 0 against a non-zero
+    rate_base, with a 2x pile-up next door.  One galaxy per chi-bin centre must
+    give exactly one count per bin.
+    """
+    chi, chi_u, edges_chi = _uniform_chi_bins()
+    z = np.asarray(zgrid, dtype=float)
+    # One galaxy at the centre of every uniform-chi bin (interior bins only:
+    # the two half-width end bins are the grid boundary).
+    centres = 0.5 * (edges_chi[:-1] + edges_chi[1:])
+    zs = np.interp(centres, chi, z)
+    counts = B._counts_in_uniform_chi(zs, chi, edges_chi)
+    assert counts.sum() == len(zs)                    # total conserved
+    assert int((counts == 0).sum()) == 0, "empty chi bin against non-zero base"
+    assert int(counts.max()) == 1, "a chi bin got two galaxies"
+
+
 def test_parallel_row_solves_are_bitwise_identical_to_serial():
     """``workers > 1`` must be an exact wall-clock optimisation, not an
     approximation.
@@ -181,3 +218,92 @@ def test_parallel_row_solves_handle_more_workers_than_rows():
     serial = poisson_lognormal_map(N_obs, C, dN_exp, pk, maxiter=200, workers=1)
     parallel = poisson_lognormal_map(N_obs, C, dN_exp, pk, maxiter=200, workers=8)
     assert np.array_equal(serial["logq_map"], parallel["logq_map"])
+
+
+def test_aggregate_mode_solves_unique_rows_only(tmp_path, monkeypatch):
+    """In aggregate/selection mode every EMPTY pixel enters the solver with
+    bit-identical inputs (N_obs = 0 against the one shared base row), so its
+    1000-dimensional solve is provably the same answer as every other empty
+    pixel's.  Solve one representative and broadcast: the table must be
+    unchanged, and the solver must see far fewer rows (review F-111).
+    """
+    import darksirens.cli.build_lognormal_completion as BB
+
+    path, log10n0 = _small_catalog(tmp_path)
+    seen = {}
+    orig = BB.poisson_lognormal_map
+
+    def spy(N_obs, C, dN_exp, pk, **kw):
+        seen["n_rows"] = int(np.asarray(N_obs).shape[0])
+        return orig(N_obs, C, dN_exp, pk, **kw)
+
+    monkeypatch.setattr(BB, "poisson_lognormal_map", spy)
+    logq, members, diag = BB.build_completion(
+        path, mode="radial", n_members=2, seed=4,
+        log10n0=log10n0, c_mode="aggregate")
+
+    n_pix = logq.shape[0]
+    n_occ = diag["n_occupied_data"]
+    assert diag["n_occupied"] == n_pix                 # every pixel is fitted
+    assert seen["n_rows"] == n_occ + 1                 # occupied rows + ONE empty
+    assert diag["n_solved_rows"] == n_occ + 1
+    assert diag["n_broadcast_duplicate_rows"] == n_pix - (n_occ + 1)
+    # Convergence is still reported over the FITTED rows, so the CLI gate is
+    # unchanged by the dedup.
+    assert diag["n_converged"] == diag["n_occupied"]
+    # Every empty pixel really did get the same (broadcast) solution, and the
+    # members are finite (the row-major RNG stream is unchanged by the dedup).
+    ngals = _catalog_ngals(path)
+    empties = [p for p in range(n_pix) if ngals[p] == 0]
+    assert len(empties) == n_pix - n_occ
+    for p in empties[1:]:
+        np.testing.assert_array_equal(logq[p], logq[empties[0]])
+    assert members.shape == (2, n_pix, int(zgrid.size))
+    assert np.all(np.isfinite(members))
+
+
+def _catalog_ngals(path):
+    with h5py.File(path, "r") as f:
+        return np.asarray(f["ngals"])
+
+
+def _small_catalog(tmp_path):
+    """nside=1 catalog (12 pixels, 3 occupied) drawn from the fiducial dN_exp."""
+    import jax.numpy as jnp
+    from darksirens.core.types import EMCatalog
+
+    nside = 1
+    npix = hp.nside2npix(nside)
+    apix = hp.nside2pixarea(nside)
+    zg = np.asarray(zgrid, dtype=float)
+    cosmo, survey = B._fiducial_cosmo_survey(log10n0=-2.0)
+    em0 = EMCatalog(
+        apix=apix, zgals=jnp.full((npix, 1), 100.0), dzgals=jnp.full((npix, 1), 0.01),
+        wgals=jnp.zeros((npix, 1)), ngals=jnp.zeros(npix, dtype=jnp.int32),
+        delta_g_pix_z=jnp.zeros((1, zg.size)), dN_obs_kde=None, pixel_to_cache_idx=None,
+    )
+    dN_exp = np.asarray(B._precompute_grids(cosmo, survey, em0).dN_exp, dtype=float)
+    T = float(_trapezoid(dN_exp, zg))
+    log10n0 = -2.0 + np.log10(10.0 / T)
+
+    rng = np.random.default_rng(11)
+    cdf = np.concatenate([[0.0], np.cumsum(0.5 * (dN_exp[1:] + dN_exp[:-1]) * np.diff(zg))])
+    cdf /= cdf[-1]
+    maxg = 10
+    zgals = np.full((npix, maxg), 100.0)
+    dzgals = np.full((npix, maxg), 0.005)
+    wgals = np.zeros((npix, maxg))
+    ngals = np.zeros(npix, dtype=np.int32)
+    for p in (0, 4, 9):
+        n = 6
+        zgals[p, :n] = np.interp(rng.uniform(size=n), cdf, zg)
+        wgals[p, :n] = 1.0
+        ngals[p] = n
+    path = str(tmp_path / "survey_small.h5")
+    with h5py.File(path, "w") as f:
+        f.attrs["nside"] = nside
+        f.create_dataset("zgals", data=zgals)
+        f.create_dataset("ngals", data=ngals)
+        f.create_dataset("dzgals", data=dzgals)
+        f.create_dataset("wgals", data=wgals)
+    return path, float(log10n0)

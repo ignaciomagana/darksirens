@@ -117,7 +117,17 @@ def code_identity() -> dict:
 
 
 def environment_block() -> dict:
-    """Code identity + numerics stack + invocation, for a run's artifacts."""
+    """Code identity + numerics stack + invocation, for a run's artifacts.
+
+    ``darksirens_env`` is the run's ``DARKSIRENS_*`` environment: several of
+    those knobs are read once at import and change the statistical target, not
+    just performance — ``DARKSIRENS_ZMAX`` sets the shared ``zgrid`` (the
+    integration domain of the redshift prior, the missing-galaxy budget and the
+    selection integral), and ``DARKSIRENS_GP_ZNORM_HI`` /
+    ``DARKSIRENS_SKY_ZNORM_HI`` set where the GP z-normalisers freeze.  Without
+    them recorded, an archived results.hdf5 cannot say which domain produced its
+    logZ (the issue-#288 class of problem this block exists for).
+    """
     block = dict(code_identity())
     block.update({
         "jax_version":    jax.__version__,
@@ -127,6 +137,10 @@ def environment_block() -> dict:
         "jax_devices":    [str(dv) for dv in jax.devices()],
         "python_version": sys.version,
         "argv":           list(sys.argv),
+        "darksirens_env": {
+            key: value for key, value in sorted(os.environ.items())
+            if key.startswith("DARKSIRENS_")
+        },
     })
     return block
 

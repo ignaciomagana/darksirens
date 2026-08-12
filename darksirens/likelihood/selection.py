@@ -310,8 +310,6 @@ def selection_log_correction(
     # whenever pe_variance_sum is.
     budget = jnp.maximum(max_likelihood_variance - pe_variance_sum, _MIN_VARIANCE_BUDGET)
     threshold = jnp.maximum(5.0 * n, (n * n) / budget)
-    # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.
-    too_sparse = ~(Neff > threshold)
     if soft_guard:
         # Gradient-based samplers (NumPyro NUTS) cannot cross a hard -inf wall:
         # every trajectory that brushes it is flagged divergent (the H1-profile
@@ -344,9 +342,14 @@ def selection_log_correction(
             + n * (3.0 + n) / (2.0 * Neff_taylor)
         )
         total = correction + wall
-        # mu == 0 exactly (all-invalid injections): correction and wall are
-        # +/-inf and their sum is NaN — collapse to the hard verdict.
+        # This collapse -- not the hard branch's ``too_sparse`` -- is the soft
+        # path's NaN guarantee: mu == 0 exactly (all-invalid injections) makes
+        # correction and wall +/-inf and their sum NaN, and a NaN Neff or
+        # threshold propagates through x -> gate -> wall to a NaN total.  Either
+        # way, collapse to the hard verdict.
         return jnp.where(jnp.isfinite(total), total, -jnp.inf)
+    # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.
+    too_sparse = ~(Neff > threshold)
     correction = (
         -n * log_mu
         + n * (3.0 + n) / (2.0 * Neff)
@@ -433,7 +436,12 @@ def compute_selection_term(
     Ndraw : float
         Total number of generated injections (detected + missed).
     nEvents : int
-        Number of observed GW events (for the N_eff reliability check).
+        Number of observed GW events.  ACCEPTED BUT UNUSED here (kept for the
+        call-signature compatibility of every existing caller): the N_eff
+        reliability check lives in :func:`selection_log_correction`, which the
+        caller invokes with these outputs.  Estimating ``log_mu`` does not apply
+        any guard -- passing ``nEvents`` here does NOT protect a caller that
+        skips :func:`selection_log_correction`.
     sel_batch_size : int or None
         If not None, process injections in chunks via ``lax.scan`` to
         limit peak GPU memory.  Non-divisible inputs are padded internally;
@@ -450,6 +458,8 @@ def compute_selection_term(
     -------
     log_mu : scalar — log of the selection integral estimate
     Neff   : scalar — effective sample size
+    log_sigma2 : scalar — log Monte-Carlo variance of μ (used by the
+        strong-lensing cluster path; ignored by the standard likelihood)
     """
     def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b, nx_b, ny_b, nz_b):
         ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b, em_catalog_sel)

@@ -23,9 +23,10 @@ def test_midpoint_clear_uses_midpoint():
         calls.append(np.asarray(point))
         return {"logL_total": 1.0}
 
-    diag, point = _diagnostics_at_guard_clear_point(fn, MID, LOWER, UPPER, seed=7)
+    diag, point, label = _diagnostics_at_guard_clear_point(fn, MID, LOWER, UPPER, seed=7)
     assert diag == {"logL_total": 1.0}
     assert np.allclose(point, MID)
+    assert label == "prior_midpoint"
     assert len(calls) == 1
 
 
@@ -38,8 +39,11 @@ def test_guarded_midpoint_falls_back_to_prior_draw():
             raise _guard_error()
         return {"logL_total": 2.0}
 
-    diag, point = _diagnostics_at_guard_clear_point(fn, MID, LOWER, UPPER, seed=7)
+    diag, point, label = _diagnostics_at_guard_clear_point(fn, MID, LOWER, UPPER, seed=7)
     assert diag == {"logL_total": 2.0}
+    # the label must NOT claim the midpoint: it is what the archived
+    # prior_midpoint_*/diagnostics_point_* keys are chosen from (review F-006)
+    assert label == "prior_draw_1"
     assert not np.allclose(point, MID)
     assert np.all((point >= LOWER) & (point <= UPPER))
     assert len(calls) == 2
@@ -51,8 +55,8 @@ def test_fallback_draws_are_seeded_deterministic():
             raise _guard_error()
         return {"point": np.asarray(point).tolist()}
 
-    d1, p1 = _diagnostics_at_guard_clear_point(fn_fail_first, MID, LOWER, UPPER, seed=11)
-    d2, p2 = _diagnostics_at_guard_clear_point(fn_fail_first, MID, LOWER, UPPER, seed=11)
+    d1, p1, _ = _diagnostics_at_guard_clear_point(fn_fail_first, MID, LOWER, UPPER, seed=11)
+    d2, p2, _ = _diagnostics_at_guard_clear_point(fn_fail_first, MID, LOWER, UPPER, seed=11)
     assert np.allclose(p1, p2)
 
 
@@ -86,10 +90,11 @@ def test_fiducial_candidate_tried_before_prior_draws():
         return {"logL_total": 3.0}
 
     fid = np.array([0.25, 0.5, 0.75])
-    diag, point = _diagnostics_at_guard_clear_point(
+    diag, point, label = _diagnostics_at_guard_clear_point(
         fn, MID, LOWER, UPPER, seed=7, fiducial=fid
     )
     assert np.allclose(point, fid)
+    assert label == "registry_fiducial"
     assert len(calls) == 2
 
 

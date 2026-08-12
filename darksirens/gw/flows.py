@@ -348,6 +348,28 @@ def load_flow(
 # ── ensemble: grouping + stacked batched evaluation ─────────────────────────
 
 
+def _static_leaf_key(leaf: Any) -> str:
+    """Hashable descriptor of one NON-array pytree leaf.
+
+    Non-array leaves land in the static half of ``eqx.partition``, and
+    ``load_flow_ensemble`` keeps only the FIRST member's static half for a whole
+    group -- so their VALUES have to enter the grouping signature.  The concrete
+    exposure is ``bij.Indexed.idxs``, a plain Python int: two flows whose only
+    difference is which dimension gets the Exp/Sigmoid constraint are otherwise
+    structurally identical (ints are leaves, not part of the treedef), so the
+    second would be evaluated with the first's index -- the constraint applied
+    to the wrong physical column.
+
+    Functions and closures are rebuilt per flow, so their reprs carry the
+    instance address; they are keyed by qualified name instead, or every flow
+    would land in a group of its own and the batched kernel would be lost.
+    """
+    r = repr(leaf)
+    if " at 0x" in r:
+        return f"<{getattr(leaf, '__qualname__', None) or type(leaf).__name__}>"
+    return r
+
+
 def _structure_signature(flow: Any) -> tuple:
     """Hashable signature identifying flows that can be stacked & vmapped."""
     leaves, treedef = jtu.tree_flatten(flow)
@@ -356,7 +378,10 @@ def _structure_signature(flow: Any) -> tuple:
         for leaf in leaves
         if eqx.is_array(leaf)
     )
-    return (treedef, leaf_spec)
+    static_spec = tuple(
+        _static_leaf_key(leaf) for leaf in leaves if not eqx.is_array(leaf)
+    )
+    return (treedef, leaf_spec, static_spec)
 
 
 @dataclass(frozen=True)

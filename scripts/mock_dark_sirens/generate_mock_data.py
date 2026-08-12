@@ -81,7 +81,9 @@ class PopulationConfig:
     beta: float = 1.0
     chi_mu: float = 0.0
     chi_sigma: float = 0.10
-    gamma: float = 0.0
+    # Measured rate slope (kappa_z = 2.5 +/- 0.7, GWTC-5), matching
+    # grammar.GAMMA_FIDUCIAL so the injected truth is the inference fiducial.
+    gamma: float = 2.5
 
 
 @dataclass(frozen=True)
@@ -152,15 +154,12 @@ _trapz = _trapezoid
 _MASS_NORM_GRID = np.linspace(1.0, 200.0, 500)
 _Q_NORM_GRID = np.linspace(0.0, 1.0, 200)
 
-# Fallback pairing secondary-mass taper for the Gaussian-peak component.  The
-# inference pairs every mass component SEPARATELY: a component without an
-# ``m_min_spec`` (the Gaussian peak) falls back to (M_LO=1.0, dm=0.01) in
-# MixtureModel.component_densities (darksirens/gw/populations/base.py:366,
-# darksirens/gw/populations/utils.py:14), i.e. an essentially un-tapered m2
-# floor at 1 Msun -- NOT the power law's (m_min=5, dm_min=3).  The mock must use
-# the same per-component pairing so p_inference/p_draw stays O(1).
-_PAIR_M_LO = 1.0
-_PAIR_DM = 0.01
+# Pairing secondary-mass taper.  The inference resolves ONE low-mass edge for the
+# whole mixture (``MixtureModel._low_mass_edge``, darksirens/gw/populations/base.py):
+# a mass component that declares no edge (the Gaussian peak) inherits the power
+# law's SAMPLED (m_min, dm_min) instead of the normalisation-grid floor M_LO = 1,
+# so every component's secondary is cut at the same physical mass.  The mock uses
+# that single pairing for both lanes so p_inference/p_draw stays O(1).
 
 
 def _sfilter_low(m: np.ndarray, m_min, dm) -> np.ndarray:
@@ -284,10 +283,9 @@ def _sample_powerlaw_peak_m1(
     the inference ``powerlaw+peak`` density (``peak_fraction`` weight in the peak).
 
     With ``return_component=True`` also returns the boolean ``use_peak`` lane mask
-    (True where the primary was drawn from the Gaussian peak).  The mask selects
-    the per-component pairing taper in :func:`_sample_q` so the joint (m1, q) draw
-    matches the inference's per-component pairing (peak lanes pair against the
-    (m_min=1, dm=0.01) fallback, power-law lanes against (m_min, dm_min))."""
+    (True where the primary was drawn from the Gaussian peak).  The mask is purely
+    diagnostic: both components pair against the mixture's single low-mass edge
+    (``pop.mmin``, ``pop.dm_min``), matching ``MixtureModel._low_mass_edge``."""
     use_peak = rng.uniform(size=n) < pop.peak_fraction
     m1 = np.empty(int(n), dtype=float)
     n_peak = int(use_peak.sum())
@@ -305,10 +303,9 @@ def _sample_powerlaw_peak_m1(
 def _sample_q_hard(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig, m_min=None) -> np.ndarray:
     """Inverse-CDF draw from the hard power law ``q**beta`` on ``[m_min/m1, 1]``.
 
-    ``m_min`` defaults to ``pop.mmin`` (the power-law pairing floor); pass a
-    per-lane array (e.g. ``_PAIR_M_LO`` for peak lanes) to widen the proposal
-    support down to ``m2 = m_min`` so the rejection sampler covers the whole
-    per-component pairing support."""
+    ``m_min`` defaults to ``pop.mmin`` (the mixture's pairing floor); pass a value
+    (or per-lane array) to widen the proposal support down to ``m2 = m_min`` so the
+    rejection sampler covers the whole pairing support."""
     if m_min is None:
         m_min = pop.mmin
     qmin = np.clip(m_min / m1, 1.0e-3, 1.0)
@@ -320,25 +317,17 @@ def _sample_q_hard(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConf
     return (u * (1.0 - qmin**bp1) + qmin**bp1) ** (1.0 / bp1)
 
 
-def _sample_q(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig, use_peak=None) -> np.ndarray:
+def _sample_q(rng: np.random.Generator, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
     """Mass ratio from ``p(q|m1) propto S_low(m2) q**beta`` (m2 = q*m1), matching
     the inference pairing model: rejection against the hard ``q**beta`` proposal.
 
-    ``use_peak`` (optional per-lane boolean mask, from
-    :func:`_sample_powerlaw_peak_m1`) selects the per-component pairing taper:
-    peak lanes use (``_PAIR_M_LO``, ``_PAIR_DM``) = (1, 0.01) and power-law lanes
-    use (``pop.mmin``, ``pop.dm_min``), exactly as the inference pairs each mass
-    component separately.  ``use_peak=None`` reproduces the historical all-power-
-    law behaviour (every lane tapered at ``pop.mmin``)."""
+    The taper is the mixture's single low-mass edge (``pop.mmin``, ``pop.dm_min``)
+    for every lane, whatever mass component the primary came from -- exactly how
+    the inference resolves it (``MixtureModel._low_mass_edge``)."""
     m1 = np.asarray(m1, dtype=float)
     out = np.empty_like(m1)
-    if use_peak is None:
-        m_min_lane = np.full(m1.shape, pop.mmin)
-        dm_lane = np.full(m1.shape, pop.dm_min)
-    else:
-        use_peak = np.asarray(use_peak, dtype=bool)
-        m_min_lane = np.where(use_peak, _PAIR_M_LO, pop.mmin)
-        dm_lane = np.where(use_peak, _PAIR_DM, pop.dm_min)
+    m_min_lane = np.full(m1.shape, pop.mmin)
+    dm_lane = np.full(m1.shape, pop.dm_min)
     todo = np.ones(len(m1), dtype=bool)
     for _ in range(10000):
         if not todo.any():
@@ -364,26 +353,34 @@ def _pair_pdf(q: np.ndarray, m1: np.ndarray, m_min: float, dm: float, beta: floa
 
     * unnormalised ``q**beta * S_low(q*m1; m_min, dm)`` with a HARD zero for
       ``m2 = q*m1 < m_min`` and the ``q>0`` safe-power guard;
-    * per-``m1`` normalisation by trapezoid over ``_Q_NORM_GRID`` (== get_q_grid())
+    * per-``m1`` normalisation by trapezoid over the SUPPORT-RELATIVE nodes the
+      inference uses (``_Q_NORM_GRID`` == get_q_grid() mapped onto [q_cut, 1])
       with the row-maximum factored out of the quadrature.  Factoring the row max
       is a backward-pass conditioning trick in the inference; here it only changes
       the association order, so the forward density equals ``unnorm / trapz(unnorm)``
       up to ULP while staying bit-comparable to the inference quadrature.
 
-    ``m_min``/``dm`` are the pairing floor for the component: (``pop.mmin``,
-    ``pop.dm_min``) for the power law, (``_PAIR_M_LO``, ``_PAIR_DM``) for the peak.
+    ``m_min``/``dm`` are the mixture's pairing floor (``pop.mmin``, ``pop.dm_min``).
     """
     q = np.atleast_1d(np.asarray(q, dtype=float))
     m1 = np.atleast_1d(np.asarray(m1, dtype=float))
-    qg = _Q_NORM_GRID
-    m2g = qg[None, :] * m1[:, None]                       # (N, Nq)
+    # SUPPORT-RELATIVE nodes, q = q_cut + t (1 - q_cut) with t = _Q_NORM_GRID on
+    # [0, 1] and q_cut = m_min/m1: the inference places them the same way
+    # (PairingModel._support_nodes) because the support edge is a sampled quantity,
+    # so a fixed q grid makes the normaliser a staircase in m1 and m_min.
+    t = _Q_NORM_GRID
+    q_cut = np.clip(m_min / m1, 0.0, 1.0)
+    width = 1.0 - q_cut
+    qg = q_cut[:, None] + t[None, :] * width[:, None]     # (N, Nq)
+    m2g = qg * m1[:, None]                                # (N, Nq)
     # Row grid of the unnormalised pairing (safe q>0 power + hard m2<m_min zero).
     safe_qg = np.where(qg > 0.0, qg, 1.0)
-    pg = np.where(qg > 0.0, safe_qg ** beta, 0.0)[None, :] * _sfilter_low(m2g, m_min, dm)
+    pg = np.where(qg > 0.0, safe_qg ** beta, 0.0) * _sfilter_low(m2g, m_min, dm)
     pg = np.where(m2g < m_min, 0.0, pg)
     scale = np.max(pg, axis=-1, keepdims=True)            # row max (base.py:221)
     scale_s = np.where(scale > 0.0, scale, 1.0)
-    n_sc = _trapz(pg / scale_s, qg, axis=-1)              # (N,) scaled norm
+    n_sc = (_trapz(pg / scale_s, dx=1.0 / (t.size - 1), axis=-1)
+            * width)                                     # (N,) scaled norm
     scale_m = scale_s[:, 0]
     # Same unnormalised form at the requested q.
     safe_q = np.where(q > 0.0, q, 1.0)
@@ -394,7 +391,7 @@ def _pair_pdf(q: np.ndarray, m1: np.ndarray, m_min: float, dm: float, beta: floa
 
 
 def _q_pdf(q: np.ndarray, m1: np.ndarray, pop: PopulationConfig) -> np.ndarray:
-    """``p(q | m1) propto S_low(m2) q**beta`` for the POWER-LAW pairing floor
+    """``p(q | m1) propto S_low(m2) q**beta`` for the mixture's pairing floor
     (``pop.mmin``, ``pop.dm_min``); thin wrapper over :func:`_pair_pdf` kept for
     backward compatibility with the pinned sampler/normalisation tests."""
     return _pair_pdf(q, m1, pop.mmin, pop.dm_min, pop.beta)
@@ -410,26 +407,22 @@ def _sample_chieff(rng: np.random.Generator, n: int, pop: PopulationConfig) -> n
 
 def _mass_spin_pdf(m1: np.ndarray, q: np.ndarray, chi: np.ndarray, pop: PopulationConfig) -> np.ndarray:
     """Joint source-frame mass-ratio-spin density ``p(m1, q, chi)``, matching the
-    inference ``powerlaw+peak`` mixture's per-component pairing EXACTLY.
+    inference ``powerlaw+peak`` mixture EXACTLY.
 
-    The inference (MixtureModel.component_densities, base.py:324-378) pairs each
-    mass component with its OWN secondary-mass floor: the power law with
-    (``m_min``, ``dm_min``) and the Gaussian peak with the fallback
-    (``M_LO``=1, dm=0.01).  The mixture is therefore
+    The inference resolves ONE low-mass edge for the whole mixture
+    (``MixtureModel._low_mass_edge``): the Gaussian peak declares no taper
+    parameters and inherits the power law's sampled (``m_min``, ``dm_min``), so
 
-        p(m1,q) = w_PL p_PL(m1) pair(q|m1; m_min, dm_min)
-                + w_G  p_G (m1) pair(q|m1; 1.0,  0.01),
+        p(m1,q) = [w_PL p_PL(m1) + w_G p_G(m1)] pair(q|m1; m_min, dm_min).
 
-    NOT a single tapered pairing applied to the whole primary mixture (the old
-    ``p_m1 * _q_pdf`` form, which mis-tapered the peak's secondaries at m_min=5
-    and drove p_inference/p_draw -> e^31 for injections with m2 just above 5).
+    The pairing normaliser still depends on m1, so it cannot be factored out of
+    the per-component sum in general; it is written per component for clarity.
     """
     p_pl = _powerlaw_pdf(m1, pop.alpha, pop.mmin, pop.mmax, pop.dm_min, pop.dm_max)
     p_pk = _peak_pdf(m1, pop.peak_mu, pop.peak_sigma)
-    pair_pl = _pair_pdf(q, m1, pop.mmin, pop.dm_min, pop.beta)
-    pair_pk = _pair_pdf(q, m1, _PAIR_M_LO, _PAIR_DM, pop.beta)
+    pair = _pair_pdf(q, m1, pop.mmin, pop.dm_min, pop.beta)
     p_chi = _truncnorm_pdf(chi, pop.chi_mu, pop.chi_sigma, -1.0, 1.0)
-    p_mass_pair = (1.0 - pop.peak_fraction) * p_pl * pair_pl + pop.peak_fraction * p_pk * pair_pk
+    p_mass_pair = ((1.0 - pop.peak_fraction) * p_pl + pop.peak_fraction * p_pk) * pair
     return p_mass_pair * p_chi
 
 
@@ -473,8 +466,11 @@ def _mass_spin_pdf(m1: np.ndarray, q: np.ndarray, chi: np.ndarray, pop: Populati
 # source's LATENT redshift, which is the defect above.  GWMockCat drops it too.
 MEASUREMENT_FAMILY = "all-observable-v3"
 P_PE_BASIS = ("rho/(dL m1det q): the PE prior, flat in "
-              "(ln Mc_det, ln q, rho, chi_eff), expressed in darksirens' "
-              "canonical (m1det, q, dL, chi_eff) integration basis; "
+              "(ln Mc_det, ln q, rho, chi_eff) and ISOTROPIC on the sky (flat "
+              "per steradian, i.e. in (ra, sin dec) -- the measure the "
+              "likelihood integrates the sky in, so the sky contributes no "
+              "factor), expressed in darksirens' canonical "
+              "(m1det, q, dL, chi_eff) integration basis; "
               "normalised to mean 1 per event")
 SNR_REF_DEFAULT = 11.5
 # The sky-width amplitude scale.  ``sigma_ang = clip(SKY_A_DEG / rho_sigma, ...)``
@@ -606,6 +602,54 @@ def _trunc_norm(rng, loc, scale, lo, hi, size=None):
     return loc + scale * ndtri(np.clip(a + u * (b - a), 1e-300, 1.0 - 1e-16))
 
 
+def _iso_dec_posterior(rng, dec_obs, sigma, nsamp):
+    """Exact posterior draws of ``dec`` under an ISOTROPIC sky prior.
+
+    The sky prior is flat PER STERADIAN -- flat in ``(ra, sin dec)`` -- which is
+    the measure the consuming likelihood integrates in (``darksirens.sky.models``
+    normalises ``g`` as ``int g dOmega/4pi = 1`` and the per-pixel redshift prior
+    is a per-equal-area-pixel object).  With a Gaussian ``dec`` likelihood the
+    exact posterior is therefore
+
+        p(dec | dec_obs) ~ cos(dec) N(dec; dec_obs, sigma),   |dec| <= pi/2
+
+    NOT the plain truncated normal, which is the posterior of a prior flat in
+    ``dec``.  A prior flat in ``dec`` has per-steradian density ``const/cos(dec)``,
+    so the sky measures would not cancel in ``p_target/p_pe`` and every event's
+    effective sky posterior would tilt pole-ward by ``~ sigma^2 tan|dec|`` -- with
+    the 12 deg width cap that is ~4 deg at |dec| = 60 deg, i.e. ~0.36 sigma of the
+    localisation, mis-weighting which pixel's galaxies dominate the event and
+    injecting a spurious l=2-like signal into exactly the channels
+    ``--sky-dipole-amp`` / ``--sky-quadrupole-amp`` / ``--sky-blob-amp`` exist to
+    validate.  Keeping the prior isotropic instead leaves ``p_pe`` sky-free (see
+    :func:`_p_pe`) and matches what real PE does.
+
+    Drawn by rejection against the truncated normal with acceptance ``cos(dec)``
+    (<= 1), which is EXACT -- no reweighting, no clipping, no duplicated draws.
+    """
+    half_pi = 0.5 * np.pi
+    out = np.empty(int(nsamp), dtype=float)
+    filled = 0
+    # Oversample by the inverse acceptance at the observation so the pole-adjacent
+    # events (about 2 % of an isotropic sky sits within the 12 deg cap of a pole)
+    # do not need many passes.
+    over = 1.0 / max(np.cos(float(dec_obs)), 0.02)
+    for _ in range(10_000):
+        need = int(nsamp) - filled
+        if need <= 0:
+            break
+        cand = _trunc_norm(rng, float(dec_obs), float(sigma), -half_pi, half_pi,
+                           int(np.ceil(need * over)) + 8)
+        acc = cand[rng.random(cand.shape) < np.cos(cand)][:need]
+        out[filled:filled + acc.size] = acc
+        filled += acc.size
+    if filled < int(nsamp):
+        raise RuntimeError(
+            "the isotropic-prior declination posterior did not fill: "
+            f"dec_obs={dec_obs}, sigma={sigma} (both are within a hair of a pole?)")
+    return out
+
+
 def _measure(rng, m1det, m2det, chi, dl, ra, dec, meas: MeasurementConfig, *,
              need_sky: bool = True):
     """ONE measurement of a source.  The draw order IS the model; do not reorder.
@@ -722,8 +766,13 @@ def _p_pe(m1det, q, dL, meas: MeasurementConfig):
 
         p_pe  ~  rho / (dL m1det q)  ~  Mc_det^(5/6) / (dL^2 m1det q).
 
-    ``chi_eff`` maps identically and the sky prior is flat in (ra, dec), so
-    neither contributes a factor.  darksirens renormalises ``p_pe`` per event,
+    ``chi_eff`` maps identically, and the sky prior is ISOTROPIC -- flat per
+    steradian, which is exactly the measure the likelihood integrates the sky in
+    (``int g dOmega/4pi = 1``; per-equal-area-pixel redshift priors) -- so its
+    density is constant there and neither contributes a factor.  A prior flat in
+    ``dec`` would NOT be constant per steradian (``const/cos dec``) and would owe
+    this column a ``1/cos(dec)`` factor; :func:`_iso_dec_posterior` keeps the
+    prior isotropic instead.  darksirens renormalises ``p_pe`` per event,
     so only the shape matters; the stored column is normalised to mean 1 per
     event.
     """
@@ -886,8 +935,8 @@ def _draw_events_until_detected(
         ra = catalog["ra"][host_idx]
         dec = catalog["dec"][host_idx]
         dl = _interp_dl(z, grids)
-        m1, use_peak = _sample_powerlaw_peak_m1(rng, ntry, pop, return_component=True)
-        q = _sample_q(rng, m1, pop, use_peak=use_peak)
+        m1 = _sample_powerlaw_peak_m1(rng, ntry, pop)
+        q = _sample_q(rng, m1, pop)
         m2 = q * m1
         chi = _sample_chieff(rng, ntry, pop)
         det, obs = _detect_on_observation(rng, m1, m2, z, dl, ra, dec, chi, meas)
@@ -953,17 +1002,19 @@ def _posterior_samples(
     recorded are read back, which is what makes the selection a function of the
     data this posterior conditions on.
 
-    The PE prior is flat in ``(ln Mc_det, ln q, rho, chi_eff, ra, dec)`` on the
-    physical support ``q <= 1, rho > 0, |chi_eff| <= 1, |dec| <= pi/2``.  Every
-    channel's likelihood is an UNBOUNDED Gaussian in exactly the variable the
-    prior is flat in, so every posterior is a (possibly prior-truncated) normal
-    about the OBSERVED value with the STORED width -- no shift, no skew:
+    The PE prior is flat in ``(ln Mc_det, ln q, rho, chi_eff)`` and ISOTROPIC on
+    the sky (flat in ``(ra, sin dec)`` -- the per-steradian measure the likelihood
+    integrates in, see :func:`_iso_dec_posterior`), on the physical support
+    ``q <= 1, rho > 0, |chi_eff| <= 1, |dec| <= pi/2``.  Every non-sky channel's
+    likelihood is an UNBOUNDED Gaussian in exactly the variable the prior is flat
+    in, so those posteriors are (possibly prior-truncated) normals about the
+    OBSERVED value with the STORED width -- no shift, no skew:
 
         ln Mc  ~ N(ln Mc_obs, sig_lnmc)
         ln q   ~ N(ln q_obs,  sig_lnq )   truncated to ln q <= 0
         rho    ~ N(rho_obs,   sigma_rho)  truncated to rho > 0 (inert at 8 sigma)
         chi_eff~ N(chi_obs,   sig_chieff) truncated to [-1, 1]
-        dec    ~ N(dec_obs,   sigma_ang)  truncated to [-pi/2, pi/2]
+        dec    ~ cos(dec) N(dec_obs, sigma_ang) on [-pi/2, pi/2]   (isotropic prior)
         ra     ~ wrapped N(ra_obs, sig_ra)
 
     Every truncation is a PRIOR truncation drawn by exact inverse CDF
@@ -1017,7 +1068,7 @@ def _posterior_samples(
         rho = _trunc_norm(rng, float(truth["obs_rho"][i]), s_rho, 0.0, np.inf, nsamp)
         chi = _trunc_norm(rng, float(truth["obs_chieff"][i]), s_ch,
                           CHIEFF_RANGE[0], CHIEFF_RANGE[1], nsamp)
-        dec = _trunc_norm(rng, float(truth["obs_dec"][i]), s_an, -half_pi, half_pi, nsamp)
+        dec = _iso_dec_posterior(rng, float(truth["obs_dec"][i]), s_an, nsamp)
         ra = (float(truth["obs_ra"][i]) + s_ra * rng.normal(size=nsamp)) % (2.0 * np.pi)
 
         mc = np.exp(lnmc)
@@ -1077,8 +1128,19 @@ def _selection_pdraw(
 
     def _p_uniform():
         # m1det drawn directly (no source->detector Jacobian); p(dL)=p_z(z)|dz/ddL|.
+        # The support indicator only matters for the MIXTURE: a population-branch
+        # draw whose detector-frame mass lands outside [m1lo, m1hi] (or whose q /
+        # chi lands outside the uniform branch's box) has p_uniform = 0 EXACTLY,
+        # so dropping it overstates pdraw there by up to a factor 10, understates
+        # the importance weight and biases mu low.  Unreachable with the shipped
+        # config (m1src <= 80 and (1+z) <= 1.08 at the default --zmax), and a live
+        # bias the moment m1det_range narrows, --zmax rises or pop.mmax grows.
+        m1det = np.asarray(m1src, dtype=float) * (1.0 + np.asarray(z, dtype=float))
+        inside = ((m1det >= m1lo * (1.0 - 1.0e-12))
+                  & (m1det <= m1hi * (1.0 + 1.0e-12))
+                  & (q >= 0.0) & (q <= 1.0) & (np.abs(chi) <= 1.0))
         p_dL = pz / np.maximum(ddldz, 1.0e-300)
-        return (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
+        return inside * (1.0 / (m1hi - m1lo)) * 1.0 * 0.5 * p_dL / (4.0 * np.pi)
 
     def _p_population():
         # m1det = (1+z) m1src, dL = dL(z): Jacobian (m1src,q,z)->(m1det,q,dL) is (1+z) dL'(z).
@@ -1094,6 +1156,47 @@ def _selection_pdraw(
     else:
         raise ValueError(f"Unknown proposal {proposal!r}; expected one of {SELECTION_PROPOSALS}")
     return np.maximum(p_draw, 1.0e-300)
+
+
+def _selection_neff_at_fiducial(
+    sel: dict,
+    grids: dict[str, np.ndarray],
+    pop: PopulationConfig,
+) -> float:
+    """Effective sample size of the SELECTION INTEGRAL the pipeline runs.
+
+    ``Neff`` of ``w = 1/pdraw`` is the effective size of an integral with a
+    CONSTANT numerator; the quantity the variance guard is keyed to
+    (``darksirens.likelihood.selection``: ``threshold = max(5 N_obs, N_obs^2 /
+    budget)``) is ``Neff`` of ``w = p_pop(theta|Lambda)/pdraw`` at the population
+    point.  Under the ``population`` proposal the two differ qualitatively --
+    ``1/pdraw`` is largest exactly where the population density is largest -- so
+    the flat number can look healthy while the real selection Neff at the fiducial
+    collapses, and a campaign sized off it will hit the -inf guard at run time.
+
+    Evaluated at the FIDUCIAL population: the mass/spin density times the
+    population redshift distribution ``dV_c/dz (1+z)^(gamma-1)``, in the same
+    ``(m1det, q, dL, chi_eff, sky)`` coordinates ``_selection_pdraw`` uses.
+    """
+    pdraw = np.asarray(sel["pdraw"], dtype=float)
+    if pdraw.size == 0:
+        return 0.0
+    m1src = np.asarray(sel["m1src"], dtype=float)
+    m1det = np.asarray(sel["m1det"], dtype=float)
+    z = m1det / np.maximum(m1src, 1.0e-300) - 1.0
+    q = np.asarray(sel["m2src"], dtype=float) / np.maximum(m1src, 1.0e-300)
+    chi = np.asarray(sel["chieff"], dtype=float)
+
+    rate = (1.0 + grids["z"]) ** (pop.gamma - 1.0)
+    pz = (np.interp(z, grids["z"], grids["dvc_dz"]) * (1.0 + z) ** (pop.gamma - 1.0)
+          / _trapz(grids["dvc_dz"] * rate, grids["z"]))
+    ddldz = np.interp(z, grids["z"], np.gradient(grids["dl"], grids["z"]))
+    jac = ddldz * (1.0 + z)
+    p_fid = (_mass_spin_pdf(m1src, q, chi, pop) * pz
+             / np.maximum(jac, 1.0e-300) / (4.0 * np.pi))
+    w = p_fid / pdraw
+    denom = float(np.square(w).sum())
+    return float(w.sum() ** 2 / denom) if denom > 0 else 0.0
 
 
 def _draw_selection_batch(
@@ -1129,8 +1232,8 @@ def _draw_selection_batch(
         chi = rng.uniform(-1.0, 1.0, ndraw)
         m1src = m1det / (1.0 + z)
     elif proposal == "population":
-        m1src, use_peak = _sample_powerlaw_peak_m1(rng, ndraw, pop, return_component=True)
-        q = _sample_q(rng, m1src, pop, use_peak=use_peak)
+        m1src = _sample_powerlaw_peak_m1(rng, ndraw, pop)
+        q = _sample_q(rng, m1src, pop)
         chi = _sample_chieff(rng, ndraw, pop)
     elif proposal == "population+uniform":
         # DEFENSIVE mixture: per draw, Bernoulli(0.9) -> population branch else
@@ -1138,8 +1241,8 @@ def _draw_selection_batch(
         # the mixture density 0.9 p_pop + 0.1 p_unif for ALL rows (_selection_pdraw).
         m1lo, m1hi = m1det_range
         use_pop = rng.uniform(size=ndraw) < 0.9
-        m1_pop, use_peak = _sample_powerlaw_peak_m1(rng, ndraw, pop, return_component=True)
-        q_pop = _sample_q(rng, m1_pop, pop, use_peak=use_peak)
+        m1_pop = _sample_powerlaw_peak_m1(rng, ndraw, pop)
+        q_pop = _sample_q(rng, m1_pop, pop)
         chi_pop = _sample_chieff(rng, ndraw, pop)
         m1det_u = rng.uniform(m1lo, m1hi, ndraw)
         q_u = rng.uniform(0.0, 1.0, ndraw)
@@ -1219,7 +1322,6 @@ def _make_population_mass_spin_sampler(pop: PopulationConfig):
     beta = float(pop.beta)
     chi_mu, chi_sigma = float(pop.chi_mu), float(pop.chi_sigma)
     lo_m, hi_m = float(_MASS_NORM_GRID[0]), float(_MASS_NORM_GRID[-1])
-    pair_m_lo, pair_dm = float(_PAIR_M_LO), float(_PAIR_DM)
     a = 1.0 - alpha
     alpha_is_one = bool(np.isclose(alpha, 1.0))
     bp1 = beta + 1.0
@@ -1255,16 +1357,16 @@ def _make_population_mass_spin_sampler(pop: PopulationConfig):
         _, m_pl, _, _ = lax.while_loop(cond, body, init)
         tn = jax.random.truncated_normal(kpk, (lo_m - mu) / sigma, (hi_m - mu) / sigma)
         m_pk = mu + sigma * tn
-        # Return the peak/power-law lane flag so sample_q can pick the matching
-        # per-component pairing floor (mirrors _sample_powerlaw_peak_m1's mask).
+        # Return the peak/power-law lane flag for diagnostics only: both lanes
+        # pair against the mixture's single low-mass edge (mirrors
+        # _sample_powerlaw_peak_m1's mask).
         return jnp.where(use_peak, m_pk, m_pl), use_peak
 
-    def sample_q(key, m1, use_peak):
-        # Per-component pairing floor: peak lanes -> (1.0, 0.01), power-law lanes
-        # -> (m_min, dm_min).  qmin uses the component m_min so the proposal
-        # support reaches m2 = m_min (peak lanes must cover m2 in [1, m_min]).
-        m_min_lane = jnp.where(use_peak, pair_m_lo, mmin)
-        dm_lane = jnp.where(use_peak, pair_dm, dm_min)
+    def sample_q(key, m1):
+        # One pairing floor for the whole mixture (MixtureModel._low_mass_edge);
+        # qmin uses it so the proposal support reaches m2 = m_min.
+        m_min_lane = jnp.asarray(mmin)
+        dm_lane = jnp.asarray(dm_min)
         qmin = jnp.clip(m_min_lane / m1, 1.0e-3, 1.0)
         kinit, kloop = jax.random.split(key, 2)
         q0 = _hard_q(jax.random.uniform(kinit), qmin)   # fallback for the (measure-0) no-accept case
@@ -1330,8 +1432,8 @@ def _make_selection_kernel(grids: dict[str, np.ndarray], pop: PopulationConfig,
             m1src = m1det / (1.0 + z)
         else:
             sample_m1, sample_q, sample_chi = samplers
-            m1src, use_peak = sample_m1(ks[3])
-            q = sample_q(ks[4], m1src, use_peak)
+            m1src, _ = sample_m1(ks[3])
+            q = sample_q(ks[4], m1src)
             chi = sample_chi(ks[5])
             if proposal == "population+uniform":
                 # DEFENSIVE mixture: Bernoulli(0.9) picks the population draw else
@@ -1650,6 +1752,10 @@ def write_mock_data(args: argparse.Namespace) -> None:
 
     inv_pdraw = 1.0 / np.asarray(sel["pdraw"])
     selection_neff = float(inv_pdraw.sum() ** 2 / np.square(inv_pdraw).sum()) if len(inv_pdraw) else 0.0
+    # The number the variance guard is actually keyed to (see
+    # _selection_neff_at_fiducial); the flat one above can look healthy while this
+    # one collapses under the ``population`` proposal.
+    selection_neff_fiducial = _selection_neff_at_fiducial(sel, grids, pop)
 
     metadata = {
         "seed": args.seed,
@@ -1796,7 +1902,11 @@ def write_mock_data(args: argparse.Namespace) -> None:
         f.attrs["format_version"] = "gwcat-selection-1.0"
         f.attrs["mock_data"] = True
         f.attrs["ndraw"] = int(sel["Ndraw"])
+        # ``Neff`` is kept as the historical FLAT-numerator number so old readers
+        # stay valid; ``Neff_fiducial`` is the one that governs the guard.
         f.attrs["Neff"] = selection_neff
+        f.attrs["Neff_flat"] = selection_neff
+        f.attrs["Neff_fiducial"] = selection_neff_fiducial
         f.attrs["selection_proposal"] = args.proposal
         f.attrs["measurement_family"] = MEASUREMENT_FAMILY
         f.attrs["snr_ref"] = float(args.snr_ref)
@@ -1820,7 +1930,9 @@ def write_mock_data(args: argparse.Namespace) -> None:
           f"photo-z realised, {n_negative_z_obs} with z_obs < 0 left unclipped)")
     print(f"  pixelated survey : {pixel_path} (nside={args.nside})")
     print(f"  GW posteriors    : {gw_path} ({args.nobs} events x {args.nsamp} samples)")
-    print(f"  GW selection     : {sel_path} ({sel['n_detected']:,}/{sel['Ndraw']:,} detected injections, Neff={selection_neff:.1f})")
+    print(f"  GW selection     : {sel_path} ({sel['n_detected']:,}/{sel['Ndraw']:,} detected "
+          f"injections, Neff_fiducial={selection_neff_fiducial:.1f} [governs the variance "
+          f"guard], Neff_flat={selection_neff:.1f})")
 
 
 def _positive_int(value: str) -> int:

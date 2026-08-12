@@ -924,3 +924,189 @@ def test_marked_field_requires_flat_mark_inputs():
             mark_model="loglinear", mark_params=jnp.asarray([0.5]),
             mark_names=("logmstar",), catalog_sky_weighting="field",
         )
+
+
+# ---------------------------------------------------------------------------
+# Bundles already carry their budget rows: prepare_catalog_views must not
+# rebuild them (the mixture factory reads the BUNDLE's rows, so the rebuild is
+# a dead float64 pass over the whole (M, n_pix, N_grid) ensemble).
+# ---------------------------------------------------------------------------
+
+def _views_opts():
+    return SimpleNamespace(catalog_sky_weighting="field", survey_z_depth=None,
+                           mark_model="none", mark_names=())
+
+
+def _count_field_q_builds(monkeypatch):
+    import darksirens.likelihood.catalog_views as cv
+
+    calls = {"det": 0, "members": 0}
+    det, mem = cv.build_field_lss_q_inputs, cv.build_field_lss_q_member_inputs
+
+    def _det(*a, **k):
+        calls["det"] += 1
+        return det(*a, **k)
+
+    def _mem(*a, **k):
+        calls["members"] += 1
+        return mem(*a, **k)
+
+    monkeypatch.setattr(cv, "build_field_lss_q_inputs", _det)
+    monkeypatch.setattr(cv, "build_field_lss_q_member_inputs", _mem)
+    return cv, calls
+
+
+def test_bundle_budget_rows_are_reused_not_rebuilt(monkeypatch):
+    cv, calls = _count_field_q_builds(monkeypatch)
+    bundle = _ensemble_bundle(_logq_members_table())
+    views = cv.prepare_catalog_views(
+        _views_opts(), bundle, "dark_sirens_complete", None
+    )
+    assert calls == {"det": 0, "members": 0}
+    np.testing.assert_array_equal(np.asarray(views.field_lss_q),
+                                  np.asarray(bundle["field_lss_q"]))
+    np.testing.assert_array_equal(np.asarray(views.field_lss_q_members),
+                                  np.asarray(bundle["field_lss_q_members"]))
+    np.testing.assert_array_equal(
+        np.asarray(views.field_lss_q_empty_sum_members),
+        np.asarray(bundle["field_lss_q_empty_sum_members"]))
+
+
+def test_missing_budget_rows_are_still_built_from_the_global_table(monkeypatch):
+    """The control: without caller-supplied rows the global table is consumed."""
+    cv, calls = _count_field_q_builds(monkeypatch)
+    bundle = _ensemble_bundle(_logq_members_table())
+    for key in ("field_lss_q", "field_lss_q_empty_sum",
+                "field_lss_q_members", "field_lss_q_empty_sum_members"):
+        bundle.pop(key, None)
+    views = cv.prepare_catalog_views(
+        _views_opts(), bundle, "dark_sirens_complete", None
+    )
+    assert calls == {"det": 1, "members": 1}
+    assert views.field_lss_q is not None
+    assert views.field_lss_q_members is not None
+
+def test_marked_field_observed_mass_is_weight_scale_invariant():
+    """The global marked observed term must follow the numerator's COUNT x <h>_w
+    amplitude convention for NON-unit weights too.
+
+    ``build_field_mark_inputs`` therefore emits count-renormalised weights
+    ``w_hat = N_obs,pix * w / Sum_pix w``: with the raw WEIGHT column the global
+    observed budget scaled with the arbitrary weight normalisation (a
+    luminosity-weighted catalog by ~1e10) while the missing budget stayed a
+    count.
+    """
+    from darksirens.redshift.catalog import marked_catalog_kernel_state
+    from darksirens.redshift.completion import (
+        build_field_depth_inputs,
+        field_marked_observed_global_total,
+    )
+
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    # Per-galaxy varying, wildly scaled weights (a luminosity column).
+    rng = np.random.default_rng(11)
+    wgals = np.where(wgals > 0.0, rng.uniform(0.5, 5.0, wgals.shape) * 1e9, 0.0)
+    marks = _mark_table()
+    cat = _catalog(zgals, dzgals, wgals, ngals)
+    fz, fw, fvals = build_field_mark_inputs(
+        zgals, wgals, ngals, {"logmstar": marks}, ("logmstar",)
+    )
+    depth = build_field_depth_inputs(
+        jnp.asarray(zgals), jnp.asarray(dzgals), jnp.asarray(wgals),
+        jnp.asarray(ngals),
+    )
+    cat = cat._replace(
+        mark_logmstar=jnp.asarray(marks),
+        field_mark_z=fz, field_mark_w=fw, field_mark_values=fvals,
+        field_depth_z=depth.z, field_depth_dz=depth.dz, field_depth_c=depth.c,
+    )
+    eta = jnp.asarray([1.3])
+    log_h_flat = jnp.clip(jnp.asarray(fvals) @ eta, -7.0, 7.0)
+    log_h_rows = jnp.clip(jnp.asarray(marks) * eta[0], -7.0, 7.0)
+
+    cosmo = _cosmo()
+    for z_depth in (None, 0.22):
+        survey = _survey(z_depth=z_depth)
+        S_obs = float(field_marked_observed_global_total(
+            cosmo, survey, cat, log_h_flat
+        ))
+        kernels, log_N_host = marked_catalog_kernel_state(
+            cosmo, survey, cat, log_h_rows, z_depth=z_depth,
+        )
+        amp = np.where(
+            np.isfinite(np.asarray(log_N_host)),
+            np.exp(np.asarray(log_N_host + kernels.log_depth_mass)),
+            0.0,
+        )
+        # rtol 1e-6: the flat marks are stored f32 (see the test above).
+        np.testing.assert_allclose(S_obs, float(amp.sum()), rtol=1e-6)
+        # The budget is a COUNT budget: 7 observed galaxies, not ~1e9.
+        assert S_obs < 100.0
+
+def test_member_diagnostic_follows_the_weighting_convention():
+    """``eval_redshift_prior_members_with_state`` must normalize the way the
+    likelihood does.
+
+    The likelihood's member path selects ``log_Z_global_members`` under field
+    (``_factored_member_marginalization``); the diagnostic used to divide by the
+    per-pixel ``log_Z_members`` unconditionally, so a field-mode run's Bayesian
+    prior diagnostic reported a per-pixel-normalized prior the run never
+    evaluated -- with the relative angular host weighting divided away.
+    """
+    from darksirens.redshift.prior import (
+        eval_redshift_prior_members_with_state,
+        eval_redshift_prior_with_state,
+        prepare_redshift_prior_state,
+    )
+
+    zgals, dzgals, wgals, ngals = _synthetic_full_sky()
+    cosmo, survey = _cosmo(), _survey()
+    logq_m = _logq_members_table(m=1)
+    cat = _catalog(zgals, dzgals, wgals, ngals, logq=logq_m[0])
+    occupied = np.asarray([1, 3, 4, 7])
+    qm_occ, qm_empty = build_field_lss_q_member_inputs(logq_m, occupied, 12)
+    cat = cat._replace(
+        field_lss_q_members=qm_occ, field_lss_q_empty_sum_members=qm_empty,
+        lss_completion_logq_members=jnp.asarray(logq_m),
+    )
+    pix = jnp.full(NG, 3, jnp.int32)
+
+    for mode in ("conditional", "field"):
+        state = prepare_redshift_prior_state(
+            "dark_sirens", cosmo, survey, cat, catalog_sky_weighting=mode
+        )
+        # M = 1: the single member IS the deterministic table, so the member
+        # diagnostic must reproduce the scalar evaluator in BOTH conventions.
+        lpm = np.asarray(eval_redshift_prior_members_with_state(
+            "dark_sirens", state, zgrid, pix, cosmo, survey, cat,
+            catalog_sky_weighting=mode,
+        ))
+        lp = np.asarray(eval_redshift_prior_with_state(
+            "dark_sirens", state, zgrid, pix, cosmo, survey, cat,
+            catalog_sky_weighting=mode,
+        ))
+        assert lpm.shape == (1, NG)
+        np.testing.assert_allclose(lpm[0], lp, rtol=1e-10)
+
+    # The two conventions are genuinely different curves (the field normalizer
+    # keeps the pixel's relative angular host weight).
+    state_f = prepare_redshift_prior_state(
+        "dark_sirens", cosmo, survey, cat, catalog_sky_weighting="field"
+    )
+    lpm_f = np.asarray(eval_redshift_prior_members_with_state(
+        "dark_sirens", state_f, zgrid, pix, cosmo, survey, cat,
+        catalog_sky_weighting="field",
+    ))
+    lpm_c = np.asarray(eval_redshift_prior_members_with_state(
+        "dark_sirens", state_f, zgrid, pix, cosmo, survey, cat,
+        catalog_sky_weighting="conditional",
+    ))
+    assert not np.allclose(lpm_f, lpm_c)
+
+    # A field request on a conditional state has no per-member global normalizer.
+    state_c = prepare_redshift_prior_state("dark_sirens", cosmo, survey, cat)
+    with pytest.raises(ValueError, match="log_Z_global_members"):
+        eval_redshift_prior_members_with_state(
+            "dark_sirens", state_c, zgrid, pix, cosmo, survey, cat,
+            catalog_sky_weighting="field",
+        )

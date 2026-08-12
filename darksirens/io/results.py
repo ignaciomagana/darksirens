@@ -340,6 +340,21 @@ def save_results_hdf5(
         if prior_overrides:
             f.attrs["prior_overrides"] = json.dumps(prior_overrides)
 
+        # Resume provenance.  --resume_force deliberately allows a resume across
+        # a fingerprint MISMATCH, whose output "mixes two targets and must not be
+        # used as a science result" -- but nothing durable said so: only argv
+        # hinted at it, and no analyzer reads argv.  Record the digest of the
+        # configuration that actually produced these samples (so it can be
+        # compared against the run directory's run_fingerprint.json), whether
+        # this run restored state, and whether the gate was forced.
+        f.attrs["run_fingerprint_digest"] = str(
+            getattr(opts, "run_fingerprint_digest", None) or "")
+        f.attrs["resumed"] = bool(getattr(opts, "resume_from_resolved", None))
+        f.attrs["resume_from"] = str(getattr(opts, "resume_from_resolved", None) or "")
+        f.attrs["resume_forced"] = bool(getattr(opts, "resume_force", False))
+        f.attrs["resume_forced_mismatch"] = bool(
+            getattr(opts, "resume_forced_mismatch", False))
+
         # Same block as settings.json (code identity + numerics stack + argv),
         # built centrally in io/settings.py so the two artifacts cannot drift.
         f.attrs["environment"] = json.dumps(environment_block())

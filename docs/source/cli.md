@@ -433,8 +433,12 @@ darksirens_inference_lensing \
   exponent (defaults `5e-4`, `3.0`) and the time-delay scale `T0` in seconds
   (default `5.36e6`, ~62 d — the SIS scale at `z_L=0.5`, `z_s=1`,
   `sigma_v=200 km/s` under this repo's cosmology). Candidate pairs with
-  `|dt| >= T0` fall outside the SIS support `y in (0,1)` and get an exactly
-  `-inf` time-marked pair likelihood.
+  `|dt| >= T0` fall outside the SIS support `y in (0,1)`; with the
+  delta-collapse mark they get an exactly `-inf` time-marked pair likelihood
+  once `|dt|/T0 - 4.14 sigma_dt/T0 >= 1` (the mark's own Gaussian width still
+  reaches into the support just past the edge), while the quadrature mark stays
+  finite and merely suppressed. Only the fully annihilated case is a hard
+  error; the rest is a warning.
 - `--fix_lens_rate BOOL`: `true` (default) pins the SIS optical depth to
   `--sl_tau_A`/`--sl_tau_n`; `false` samples the lensing hyperparameters, with
   `--lens_prior_overrides` supplying their bounds, e.g.
@@ -452,7 +456,10 @@ darksirens_inference_lensing \
   pair is tagged as a candidate.
 - `--edge_mark_prior_keys`, `--edge_mark_likelihood_keys`: comma-separated
   candidate-edge marks folded into the edge log prior odds, and into the edge
-  likelihood, under exact marginalization.
+  likelihood, under exact marginalization.  The only implemented likelihood
+  mark is the arrival-time one, and it is switched on by `--pair_marks time`;
+  requesting `time`/`delta_t_obs` as a likelihood key without `--pair_marks
+  time` is refused rather than run without the time term.
 - `--singleton_lensing {off,sl_mixture}`: `off` (default) keeps the legacy
   single-image protocol. `sl_mixture` models observed singletons as a mixture of
   unlensed sources and strongly lensed sources with exactly one detected image
@@ -464,6 +471,11 @@ darksirens_inference_lensing \
 - `--fix_cosmology` / `--fix_survey` (both default `true`) and
   `--fix_population` (default `false`), plus `--fixed_parameter_values` and
   `--prior_overrides` as JSON — same conventions as the main CLI.
+  `--fix_cosmology false` is refused whenever a lensed-injection channel is on
+  (`--cluster_mode j2` or `--singleton_lensing sl_mixture`): those selection
+  terms reweight source-frame campaign columns whose detection flags were
+  rendered at the campaign's fiducial cosmology, so they are valid only there,
+  and the campaign file records no fiducial cosmology for a runtime check.
 
 ### Sampler, checkpoint, and performance options
 

@@ -15,6 +15,7 @@ from darksirens.lensing.observed_catalog import (
 )
 from darksirens.lensing.marginal_diagnostics import (
     candidate_time_mark_suspicion,
+    resolve_sis_time_mark_impl,
     sis_time_mark_support,
     sis_time_mark_support_message,
 )
@@ -25,6 +26,7 @@ from darksirens.lensing.lensed_injections import (
 )
 from darksirens.lensing.slmarks import DEFAULT_T0_SECONDS
 from darksirens.lensing.partitions import (
+    TIME_DERIVED_EDGE_MARK_KEYS,
     apply_edge_mark_prior_keys,
     connected_components_from_candidate_pairs,
     enumerate_compatible_partitions,
@@ -200,6 +202,25 @@ def _check_partition(path, n_events, errors, summary, *, observed_n_events=None)
     )
 
 
+def _sis_support(opts, delta_t_values, sigma_values):
+    """SIS-support verdict for a set of time marks, resolved like the runtime.
+
+    The fatal case is ``all_annihilated`` (every pair's whole mark measure
+    outside y in (0, 1)), not the bare ``y* >= 1``: the delta-collapse mark
+    integrates over its own Gaussian width and the quadrature mark never masks,
+    so the run this used to abort could have a perfectly finite likelihood.
+    """
+    T0 = _get(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS
+    return sis_time_mark_support(
+        delta_t_values,
+        T0,
+        sigma_delta_t_seconds=sigma_values,
+        mark_impl=resolve_sis_time_mark_impl(
+            _get(opts, "pair_time_mark_impl", "auto"), sigma_values, T0
+        ),
+    )
+
+
 def _check_pair_pe(
     path,
     n_events,
@@ -230,6 +251,7 @@ def _check_pair_pe(
                 npairs = int(f.attrs["npairs"])
             summary["n_pairs_pair_pe"] = npairs
             pair_dt_values = []
+            pair_sigma_values = []
             for k in range(npairs):
                 pname = f"pair_{k}"
                 if pname not in f:
@@ -268,6 +290,29 @@ def _check_pair_pe(
                             f"{pname} event-index metadata {pair} does not match partition pair {partition_pairs[k]}"
                         )
                 has_dt = "delta_t_obs" in g.attrs or "delta_t_obs" in g
+                # The runtime consumes per-pair marks POSITIONALLY against the
+                # partition's pair rows, and the only order check is the
+                # event-index one above -- which the optional attrs can switch
+                # off entirely. Then a metadata file whose rows are ordered
+                # differently from partition.json silently hands every pair
+                # another pair's |dt| (wrong y* = |dt|/T0 and wrong 1/p_U(dt)
+                # coincidence factor), with only a length check to catch it
+                # (review F-014).
+                if (
+                    has_dt
+                    and "event_index_image0" not in g.attrs
+                    and _get(opts, "pair_marks", "none") == "time"
+                    and _get(opts, "partition_mode", "fixed") == "fixed"
+                    and partition_pairs
+                ):
+                    errors.append(
+                        f"{pname} carries a time mark but no "
+                        "event_index_image0/event_index_image1: with "
+                        "--pair_marks time --partition_mode fixed the marks are "
+                        "consumed in partition pair order and nothing would "
+                        "verify the alignment"
+                    )
+                dt_recorded = False
                 if has_dt:
                     try:
                         dt_value = float(
@@ -279,6 +324,10 @@ def _check_pair_pe(
                         errors.append(f"{pname} delta_t_obs not readable: {exc}")
                     else:
                         pair_dt_values.append(dt_value)
+                        # Kept aligned with pair_dt_values so the support
+                        # diagnostic below can credit each mark's own width.
+                        pair_sigma_values.append(None)
+                        dt_recorded = True
                         # A non-finite delay is a broken mark, not a wide one:
                         # it propagates NaN/-inf through the marked pair
                         # likelihood, and the SIS support diagnostic below
@@ -321,6 +370,8 @@ def _check_pair_pe(
                                 f"{pname} sigma_delta_t must be finite and "
                                 f"positive, got {sig}"
                             )
+                        elif dt_recorded:
+                            pair_sigma_values[-1] = sig
                     except Exception as exc:
                         errors.append(f"{pname} sigma_delta_t not readable: {exc}")
                 if unified_observed_mode:
@@ -350,14 +401,13 @@ def _check_pair_pe(
                         except Exception as exc:
                             errors.append(str(exc))
             if _get(opts, "pair_marks", "none") == "time" and pair_dt_values:
-                # SIS support guard: y* = |dt|/T0 must be < 1 or the pair is
-                # annihilated (-inf) at every parameter value.
-                support = sis_time_mark_support(
-                    pair_dt_values,
-                    _get(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS,
-                )
+                # SIS support guard: a delay past y* = |dt|/T0 = 1 annihilates
+                # the pair (-inf at every parameter value) only once the mark's
+                # own width no longer reaches into the support -- and the
+                # quadrature mark never annihilates at all.
+                support = _sis_support(opts, pair_dt_values, pair_sigma_values)
                 summary["sis_time_mark_support_pair_pe"] = support
-                if support["all_out_of_support"]:
+                if support["all_annihilated"]:
                     errors.append(sis_time_mark_support_message(support))
                 elif support["n_out_of_support"]:
                     warnings.append(sis_time_mark_support_message(support))
@@ -404,6 +454,30 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
         like_keys = set(parse_edge_mark_keys(_get(opts, "edge_mark_likelihood_keys")))
         if _get(opts, "pair_marks", "none") == "time":
             like_keys.add("time")
+        if like_keys & {"time", "delta_t_obs"}:
+            # The double-count guard above only compares folded keys against the
+            # requested PRIOR keys, so it cannot see the time term the builder
+            # bakes into log_prior_odds -- yet the time edge-mark LIKELIHOOD
+            # evaluates p(Delta t | y) on the very same delay. A pairing prior
+            # tilted by |Delta t| plus that likelihood counts the arrival-time
+            # separation twice, biasing the pairing posterior (and hence the
+            # lensed fraction / A_tau) toward short separations.
+            time_double_counted = sorted(
+                k
+                for k in (folded_keys | set(prior_keys))
+                if k in TIME_DERIVED_EDGE_MARK_KEYS
+            )
+            if time_double_counted:
+                errors.append(
+                    f"time-derived edge marks {time_double_counted} enter the "
+                    "pairing prior (folded_mark_keys="
+                    f"{sorted(folded_keys)}, edge_mark_prior_keys="
+                    f"{sorted(prior_keys)}) while the time edge-mark likelihood "
+                    "scores the same delta_t_obs; that double-counts the "
+                    "arrival-time separation. Rebuild candidate_pairs.json with "
+                    "time marks exported (the builder then leaves the time score "
+                    "out of log_prior_odds), or drop --pair_marks time"
+                )
         unsupported_like = sorted(
             k for k in like_keys if k not in ("time", "delta_t_obs")
         )
@@ -438,14 +512,16 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
             summary.update(suspicion)
             if suspicion.get("candidate_time_marks_suspicious"):
                 warnings.append(str(suspicion.get("candidate_time_marks_warning")))
-            # SIS support guard: y* = |dt|/T0 must be < 1 or the pair is
-            # annihilated (-inf) at every parameter value.
-            support = sis_time_mark_support(
+            # SIS support guard: a delay past y* = |dt|/T0 = 1 annihilates the
+            # pair (-inf at every parameter value) only once the mark's own
+            # width no longer reaches into the support.
+            support = _sis_support(
+                opts,
                 [p.delta_t_obs for p in pairs],
-                _get(opts, "sl_T0_sec", None) or DEFAULT_T0_SECONDS,
+                [p.sigma_delta_t for p in pairs],
             )
             summary["sis_time_mark_support"] = support
-            if support["all_out_of_support"] and support["n_marked"] > 0:
+            if support["all_annihilated"] and support["n_marked"] > 0:
                 errors.append(sis_time_mark_support_message(support))
             elif support["n_out_of_support"]:
                 warnings.append(sis_time_mark_support_message(support))
@@ -510,6 +586,72 @@ def _check_candidates(path, n_events, opts, errors, warnings, summary, *, observ
         errors.append(f"candidate_pairs invalid: {exc}")
 
 
+def _check_fixed_candidate_marks(
+    path, partition_pairs, opts, errors, warnings, summary
+):
+    """Validate fixed-partition time marks that live in candidate_pairs.json.
+
+    With a unified observed catalog, ``partition_mode=fixed`` and
+    ``--pair_marks time``, the runtime builds the per-pair marks from the
+    candidate graph when no pair file supplies them (the ``mark_by_edge``
+    fallback in cli/inference_lensing, and a documented input mode).  Preflight
+    demanded a pair PE/metadata file anyway, making that path unreachable, so
+    waive the pair-file requirement when the candidate graph covers every
+    partition edge -- and check those marks HERE, rather than leaving the run to
+    exit on them later.  Returns True when the waiver applies.
+    """
+    if not _exists(path, errors, "candidate_pairs_path"):
+        return False
+    try:
+        _, pairs = validate_candidate_pairs(_read_json(path))
+    except Exception as exc:
+        errors.append(f"candidate_pairs invalid: {exc}")
+        return False
+    mark_by_edge = {(p.i, p.j): p for p in pairs}
+    marked = []
+    missing = []
+    for pair in partition_pairs:
+        edge = tuple(sorted(int(x) for x in pair))
+        cand = mark_by_edge.get(edge)
+        if cand is None or cand.delta_t_obs is None or cand.sigma_delta_t is None:
+            missing.append(edge)
+            continue
+        dt = float(cand.delta_t_obs)
+        sig = float(cand.sigma_delta_t)
+        if not np.isfinite(dt) or not np.isfinite(sig) or sig <= 0.0:
+            errors.append(
+                f"fixed partition pair {edge} has invalid candidate_pairs.json "
+                f"time marks: delta_t_obs={dt}, sigma_delta_t={sig}"
+            )
+            continue
+        marked.append(cand)
+    if missing:
+        errors.append(
+            "pair_marks=time requires delta_t_obs/sigma_delta_t for every fixed "
+            f"partition pair, but {missing} carry no candidate_pairs.json marks "
+            "and no pair metadata file was provided"
+        )
+        return False
+    if not marked:
+        return False
+    suspicion = candidate_time_mark_suspicion(marked)
+    summary.update(suspicion)
+    if suspicion.get("candidate_time_marks_suspicious"):
+        warnings.append(str(suspicion.get("candidate_time_marks_warning")))
+    support = _sis_support(
+        opts,
+        [p.delta_t_obs for p in marked],
+        [p.sigma_delta_t for p in marked],
+    )
+    summary["sis_time_mark_support"] = support
+    if support["all_annihilated"] and support["n_marked"] > 0:
+        errors.append(sis_time_mark_support_message(support))
+    elif support["n_out_of_support"]:
+        warnings.append(sis_time_mark_support_message(support))
+    summary["fixed_pair_marks_from_candidate_pairs"] = True
+    return True
+
+
 def _check_lensed(path, errors, summary, opts=None):
     if not _exists(path, errors, "lensed_injections_path"):
         return
@@ -553,9 +695,22 @@ def _check_lensed(path, errors, summary, opts=None):
             elif kind != "constant":
                 model = make_pair_tag_selection_model(kind, constant=float(_get(opts, "pair_tag_constant", 1.0)), perturb_logit=float(_get(opts, "pair_tag_perturb_logit", 0.0) or 0.0))
                 for req in model.required_fields:
-                    dname = "delta_t_obs" if req in ("delta_t_obs", "true_delta_t") else req
-                    if dname not in f:
-                        errors.append(f"pair_tag_model={kind} requires lensed injection dataset {dname}")
+                    # load_lensed_injections resolves the delay as
+                    # "delta_t_obs if present else true_delta_t", so a campaign
+                    # that stores only true_delta_t scores fine and must not be
+                    # refused here. Validate the dataset the LOADER would pick,
+                    # in the loader's preference order -- checking the finite
+                    # true_delta_t of a file whose delta_t_obs is all-NaN would
+                    # pass a configuration the run then exits on.
+                    candidates = (
+                        ("delta_t_obs", "true_delta_t") if req == "delta_t_obs" else (req,)
+                    )
+                    dname = next((c for c in candidates if c in f), None)
+                    if dname is None:
+                        errors.append(
+                            f"pair_tag_model={kind} requires lensed injection dataset "
+                            + " or ".join(candidates)
+                        )
                     else:
                         arr = np.asarray(f[dname], dtype=float)
                         if arr.size == 0 or np.all(~np.isfinite(arr)):
@@ -754,10 +909,30 @@ def run_lensing_preflight(opts) -> dict:
             )
         pair_path = pair_meta_path or pair_pe_path
         pair_label = "pair_metadata_path" if pair_meta_path else "pair_pe_path"
+        fixed_marks_from_candidates = False
+        if (
+            unified_observed_mode
+            and not pair_path
+            and _get(opts, "partition_mode", "fixed") == "fixed"
+            and _get(opts, "pair_marks", "none") == "time"
+            and _get(opts, "candidate_pairs_path")
+            and partition_pairs
+        ):
+            fixed_marks_from_candidates = _check_fixed_candidate_marks(
+                _get(opts, "candidate_pairs_path"),
+                partition_pairs,
+                opts,
+                errors,
+                warnings,
+                summary,
+            )
         if not (
             unified_observed_mode
-            and _get(opts, "partition_mode", "fixed") == "marginalize_exact"
             and _get(opts, "candidate_pairs_path")
+            and (
+                _get(opts, "partition_mode", "fixed") == "marginalize_exact"
+                or fixed_marks_from_candidates
+            )
         ):
             _check_pair_pe(
                 pair_path,

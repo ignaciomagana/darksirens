@@ -67,7 +67,7 @@ _EXTRA_SPIN = ("a1", "a2", "cost1", "cost2", "chip")
 
 
 def _write_pe(path, *, format_version, spin_basis=None, include_chi_eff_in_p_pe=True,
-              extra_spin_datasets=False):
+              extra_spin_datasets=False, chi_eff_in_p_pe=True, mock_data=False):
     with h5py.File(path, "w") as f:
         f.attrs["format_version"] = format_version
         if spin_basis is not None:
@@ -77,9 +77,9 @@ def _write_pe(path, *, format_version, spin_basis=None, include_chi_eff_in_p_pe=
         f.attrs["pe_cosmology_H0"] = 67.7
         f.attrs["pe_cosmology_Om0"] = 0.31
         if include_chi_eff_in_p_pe:
-            f.attrs["chi_eff_in_p_pe"] = True
+            f.attrs["chi_eff_in_p_pe"] = bool(chi_eff_in_p_pe)
         f.attrs["chi_eff_amax"] = 0.99
-        f.attrs["mock_data"] = False
+        f.attrs["mock_data"] = bool(mock_data)
         for name, arr in _PE_DATA.items():
             f.create_dataset(name, data=arr)
         if extra_spin_datasets:
@@ -87,13 +87,15 @@ def _write_pe(path, *, format_version, spin_basis=None, include_chi_eff_in_p_pe=
                 f.create_dataset(name, data=np.linspace(0.0, 0.9, _N))
 
 
-def _write_selection(path, *, format_version, spin_basis=None, extra_spin_datasets=False):
+def _write_selection(path, *, format_version, spin_basis=None, extra_spin_datasets=False,
+                     chi_eff_swap_applied=True):
     with h5py.File(path, "w") as f:
         f.attrs["format_version"] = format_version
         if spin_basis is not None:
             f.attrs["spin_basis"] = spin_basis
         f.attrs["ndraw"] = 1000
-        f.attrs["chi_eff_swap_applied"] = True
+        if chi_eff_swap_applied is not None:
+            f.attrs["chi_eff_swap_applied"] = bool(chi_eff_swap_applied)
         f.attrs["chi_eff_amax"] = 0.99
         f.attrs["cosmology_H0"] = 67.7
         f.attrs["cosmology_Om0"] = 0.31
@@ -208,3 +210,62 @@ def test_file_contract_rejects_v2_component_selection(tmp_path):
     joined = " ".join(report["errors"])
     assert "component" in joined
     assert "spin_basis" in joined
+
+
+# ----------------------------------------------------------------------------
+# Spin-measure consistency between the two loaders (review finding F-077)
+# ----------------------------------------------------------------------------
+def test_mock_data_does_not_override_chi_eff_in_p_pe(tmp_path, monkeypatch):
+    """``chi_eff_in_p_pe`` is a required attr so the FILE decides whether p_pe
+    already carries the chi_eff prior.  mock_data used to short-circuit it, so a
+    mock declaring chi_eff_in_p_pe=False got p_pe without the chi_eff factor
+    while the selection loader folded the chi_eff draw density into pdraw --
+    numerator and denominator on different spin measures.
+    """
+    from darksirens.gw import utils as gw_utils
+
+    calls = []
+
+    def fake_chi_eff_prior_logprob(chieff, m1src, m2src, amax=0.99):
+        calls.append(float(amax))
+        return np.full(np.shape(chieff), np.log(2.0))
+
+    monkeypatch.setattr(gw_utils, "chi_eff_prior_logprob", fake_chi_eff_prior_logprob)
+
+    declared = tmp_path / "pe_mock_needs_chi.h5"
+    _write_pe(declared, format_version="gwcat-1.0", chi_eff_in_p_pe=False,
+              mock_data=True)
+    p_pe = np.asarray(load_gw_samples(declared)[6])
+    assert calls == [0.99], "the declared chi_eff prior was not applied"
+
+    # p_pe is renormalised per event, so the constant factor cancels there; the
+    # observable effect is that the factor was applied at all (calls above) and
+    # the weights match the with-factor reference.
+    reference = tmp_path / "pe_mock_has_chi.h5"
+    _write_pe(reference, format_version="gwcat-1.0", chi_eff_in_p_pe=True,
+              mock_data=True)
+    np.testing.assert_allclose(p_pe, np.asarray(load_gw_samples(reference)[6]))
+
+
+def test_selection_without_the_chi_eff_swap_attr_is_rejected(tmp_path):
+    """The selection loader used to default chi_eff_swap_applied to True, i.e.
+    fail OPEN on the one attr that says which spin measure pdraw is on."""
+    path = tmp_path / "sel_no_swap_attr.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0",
+                     chi_eff_swap_applied=None)
+    with pytest.raises(RuntimeError, match="chi_eff_swap_applied"):
+        load_selection_samples(path)
+
+
+def test_selection_declaring_no_swap_gets_the_chi_eff_draw_density(tmp_path, monkeypatch):
+    from darksirens.gw import utils as gw_utils
+
+    monkeypatch.setattr(
+        gw_utils, "chi_eff_prior_logprob",
+        lambda chieff, m1src, m2src, amax=0.99: np.full(np.shape(chieff), np.log(2.0)),
+    )
+    path = tmp_path / "sel_needs_swap.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0",
+                     chi_eff_swap_applied=False)
+    pdraw = np.asarray(load_selection_samples(path)[6])
+    np.testing.assert_allclose(pdraw, 2.0 * _SEL_DATA["pdraw"])

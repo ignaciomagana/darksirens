@@ -308,6 +308,21 @@ def test_c_mode_traced_int_leaf_hard_errors_not_silent_aggregate():
             total_miss(_survey(c_mode=bad))
 
 
+@pytest.mark.parametrize("bad", [3, -1, True])
+def test_out_of_range_c_mode_code_is_refused(bad):
+    """An int c_mode outside the three legal codes used to fall through to the
+    LEGACY per-pixel estimator with no error (review F-120): both mode probes
+    read False, C_bar_raw stayed None, and the run silently swapped the entire
+    clustering budget.  ``True`` decoded to aggregate (bool is an int)."""
+    from darksirens.redshift.completion import _decode_c_mode
+
+    with pytest.raises(ValueError, match="c_mode"):
+        _decode_c_mode(bad)
+    with pytest.raises(ValueError, match="c_mode"):
+        completion_curves(_cosmo(), _survey(c_mode=bad),
+                          _clustered_catalog(delta_g="dummy")[0])
+
+
 def test_c_mode_structural_conventions_survive_jit_boundary():
     """The decoder's conventions cross the survey-as-argument jit boundary as
     pytree STRUCTURE: the leaf-less sentinel selects aggregate (matching the
@@ -521,3 +536,26 @@ def test_c_mode_provenance_mismatch_hard_errors_both_directions(tmp_path):
     assert out["lss_completion_logq"] is not None
     out = maybe_load_lss_completion(_load_opts(legacy, None), zgrid=zgrid)
     assert out["lss_completion_logq"] is not None
+
+
+# ---------------------------------------------------------------------------
+# (d) aggregate mode is meaningless without a full-sky Q table (F-121)
+# ---------------------------------------------------------------------------
+
+def test_aggregate_mode_requires_a_q_table_per_catalog():
+    """Cbar is normalised over the WHOLE SKY, so a footprint survey's budget is
+    diluted by f_sky unless the mean-one Q field puts it back; the legacy
+    delta_g factor is mean-one over the sky and cannot encode a footprint."""
+    from types import SimpleNamespace
+
+    from darksirens.cli.inference import _check_aggregate_requires_q
+
+    opts = SimpleNamespace(c_mode="aggregate")
+    with pytest.raises(SystemExit):
+        _check_aggregate_requires_q(opts, (True, False))
+    with pytest.raises(SystemExit):
+        _check_aggregate_requires_q(opts, (False,))
+    # Q on every catalog is fine, and the other modes are untouched.
+    _check_aggregate_requires_q(opts, (True, True))
+    _check_aggregate_requires_q(SimpleNamespace(c_mode="per_pixel"), (False,))
+    _check_aggregate_requires_q(SimpleNamespace(c_mode="selection"), (False,))

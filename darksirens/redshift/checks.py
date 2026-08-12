@@ -21,7 +21,7 @@ and cannot be absorbed by the selection-correction term.
 
 Typical usage
 ~~~~~~~~~~~~~
-    from redshift_prior.checks import run_all_checks
+    from darksirens.redshift.checks import run_all_checks
 
     run_all_checks(
         cosmo, survey, em_catalog,
@@ -47,9 +47,20 @@ from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import catalog_completion_vmap
-from .catalog import log_catalog_prior_vmap
+from .catalog import catalog_kernel_state, eval_log_catalog_prior_state
 from .volume import log_volume_prior
 from darksirens.redshift.prior import PRIOR_REGISTRY
+
+
+#: Registry models whose prior is normalised at EVERY pixel, i.e. the ones a
+#: per-pixel normalisation check answers for.  ``bright_sirens`` is deliberately
+#: absent: it is ``-inf`` off the counterpart pixel BY CONSTRUCTION (a
+#: counterpart localises the host to one row), so it integrates to 0 -- and
+#: fails -- at every other test pixel; check it with ``test_pixels`` restricted
+#: to the counterpart pixel.  ``spectral_sirens_wl`` is absent because it is the
+#: same function as ``spectral_sirens`` (the WL marginalisation lives in the
+#: likelihood), so checking it twice only doubles the runtime.
+DEFAULT_CHECK_MODELS = ("spectral_sirens", "dark_sirens_complete", "dark_sirens")
 
 
 # ------------------------------------------------------------
@@ -57,9 +68,38 @@ from darksirens.redshift.prior import PRIOR_REGISTRY
 # ------------------------------------------------------------
 
 def _integrate(log_p: np.ndarray, z: np.ndarray) -> float:
-    """Trapezoidal integral of exp(log_p) over z."""
-    p = np.exp(np.where(np.isfinite(log_p), log_p, -np.inf))
+    """Trapezoidal integral of exp(log_p) over z; NaN in, NaN out.
+
+    ``-inf`` is a legitimately zero density and exponentiates to 0.  NaN is
+    NOT: it is the failure mode these checks exist to catch, so it must not be
+    laundered into a density of 0 -- that made a NaN-poisoned prior integrate to
+    slightly LESS than 1 and PASS the tolerance.  Returning NaN makes
+    ``_check_result``'s ``abs(value - 1) <= atol`` False, i.e. a loud FAIL.
+    """
+    log_p = np.asarray(log_p, dtype=float)
+    if np.isnan(log_p).any():
+        return float("nan")
+    p = np.exp(np.where(np.isneginf(log_p), -np.inf, log_p))
     return float(_trapezoid(p, z))
+
+
+def _log_p_cat_grid(cosmo, survey, em_catalog, pix) -> np.ndarray:
+    """``log p_cat(z | pix)`` on ``zgrid``, honouring ``survey.z_depth``.
+
+    Goes through the STATE API the production likelihood uses: the one-shot
+    ``log_catalog_prior`` ignores ``z_depth`` entirely, so under a survey depth
+    it would integrate a different density than the run does (the truncated,
+    below-depth-renormalised mixture).  With ``z_depth=None`` the two agree.
+    """
+    from jax import vmap
+
+    state = catalog_kernel_state(cosmo, survey, em_catalog,
+                                z_depth=survey.z_depth)
+    pix_arr = jnp.full_like(zgrid, int(pix), dtype=jnp.int32)
+    log_p = vmap(eval_log_catalog_prior_state, in_axes=(0, 0, None, None))(
+        zgrid, pix_arr, state, em_catalog
+    )
+    return np.array(log_p)
 
 
 def _check_result(label: str, value: float, atol: float, verbose: bool) -> bool:
@@ -216,7 +256,8 @@ def check_catalog_prior_normalization(
     (-∞, +∞).  The integral over zgrid will be slightly less than 1 if
     galaxies sit near the edge of the grid; a value well below 1 signals
     that either the galaxy redshifts are outside zgrid or the kernel
-    widths are too narrow.
+    widths are too narrow.  A ``survey.z_depth`` is honoured (the mixture is
+    then normalised on ``[0, z_depth]``, so the target is still 1).
 
     Parameters
     ----------
@@ -232,10 +273,7 @@ def check_catalog_prior_normalization(
     """
     results = {}
     for pix in np.array(test_pixels):
-        pix_arr = jnp.full_like(zgrid, int(pix), dtype=jnp.int32)
-        log_p   = np.array(
-            log_catalog_prior_vmap(zgrid, pix_arr, cosmo, survey, em_catalog)
-        )
+        log_p = _log_p_cat_grid(cosmo, survey, em_catalog, int(pix))
         integral = _integrate(log_p, np.array(zgrid))
         passed = _check_result(
             f"p_cat   pix={int(pix):6d}", integral, atol, verbose
@@ -267,6 +305,12 @@ def check_prior_normalization(
     tolerance is tight (2 %); any larger deviation indicates an
     implementation bug.
 
+    ``"bright_sirens"`` is normalised only at the counterpart pixel -- it is
+    ``-inf`` everywhere else by construction -- so pass ``test_pixels`` holding
+    that pixel alone (``em_catalog.counterpart_pixel``, or the row index of the
+    first non-empty pixel when it is ``None``).  It is excluded from
+    :data:`DEFAULT_CHECK_MODELS` for that reason.
+
     Parameters
     ----------
     model : str
@@ -274,7 +318,7 @@ def check_prior_normalization(
     cosmo, survey, em_catalog : as above.
     test_pixels : jnp.ndarray, shape (K,)
     atol : float
-        Absolute tolerance around 1.0.  Default 0.10 (10 %).
+        Absolute tolerance around 1.0.  Default 0.02 (2 %).
     verbose : bool
 
     Returns
@@ -324,7 +368,7 @@ def run_all_checks(
 
     Intended to be called once at the start of an inference run:
 
-        from redshift_prior.checks import run_all_checks
+        from darksirens.redshift.checks import run_all_checks
         run_all_checks(cosmo, survey, em_catalog,
                        test_pixels=jnp.array([0, 100, 500]),
                        raise_on_failure=True)
@@ -335,7 +379,11 @@ def run_all_checks(
     test_pixels : jnp.ndarray
         Pixel indices to use for per-pixel checks.
     models : list[str] or None
-        Which prior models to check.  Defaults to all registered models.
+        Which prior models to check.  Defaults to
+        :data:`DEFAULT_CHECK_MODELS` -- the registry entries that ARE normalised
+        at every pixel.  ``bright_sirens`` must be requested explicitly, with
+        ``test_pixels`` restricted to the counterpart pixel (see
+        :func:`check_prior_normalization`).
     atol_volume, atol_p_miss, atol_p_cat, atol_prior : float
         Per-check tolerances (see individual check functions).
     verbose : bool
@@ -351,7 +399,7 @@ def run_all_checks(
         Top-level key ``"all_passed"`` is True iff every check passed.
     """
     if models is None:
-        models = list(PRIOR_REGISTRY)
+        models = list(DEFAULT_CHECK_MODELS)
 
     summary: dict = {}
     all_passed = True

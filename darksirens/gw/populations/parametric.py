@@ -11,6 +11,15 @@ The ``ParamSpec`` fields stored on every dataclass describe the ordering,
 labels, and prior bounds of the component parameters.  Registry constructors
 combine these specs into a single inference vector; the methods here therefore
 expect ``t`` to be ordered exactly as returned by ``param_specs``.
+
+Frame convention
+----------------
+Every mass argument in this module is a SOURCE-frame mass in solar masses -- the
+normalisation grids are source-frame, and the callers pass source-frame masses
+(e.g. ``model.log_p_massspin(m1src, q, chieff, ...)`` in
+:mod:`darksirens.likelihood.flow_events`).  The detector-frame conversion and its
+``(1 + z)`` mass Jacobian are the likelihood's responsibility, never a
+component's.
 """
 
 import math
@@ -82,8 +91,18 @@ class PowerLaw(MassComponent):
         upper bound."""
         return float(self.m_max_spec.high)
 
+    def _norm(self, theta):
+        """Exact-in-the-edges normalisation (see :func:`_tapered_edge_norm`)."""
+        a, mmin, mmax, dmmin, dmmax = (theta[0], theta[1], theta[2],
+                                       theta[3], theta[4])
+        return _tapered_edge_norm(
+            lambda m: self._eval_unnorm(m, theta),
+            lambda lo, hi: _powerlaw_segment_norm(lo, hi, 1.0, a),
+            mmin, dmmin, mmax, dmmax,
+        )
+
     def _eval_unnorm(self, m, t):
-        """Evaluate the tapered unnormalised density at detector-frame mass ``m``."""
+        """Evaluate the tapered unnormalised density at source-frame mass ``m``."""
         a, mmin, mmax, dmmin, dmmax = t[0], t[1], t[2], t[3], t[4]
         S = sfilter_low(m, mmin, dmmin) * sfilter_high(m, mmax, dmmax)
         return S * m ** (-a)
@@ -135,6 +154,20 @@ class BrokenPowerLaw(MassComponent):
         is the ``m_max`` prior upper bound."""
         return float(self.m_max_spec.high)
 
+    def _norm(self, theta):
+        """Exact-in-the-edges normalisation (see :func:`_tapered_edge_norm`)."""
+        a1, a2, mb, mmin, mmax, dmmin, dmmax = (theta[0], theta[1], theta[2],
+                                                theta[3], theta[4], theta[5],
+                                                theta[6])
+        # This component's plateau is ``m**-a1`` / ``mb**(a2-a1) m**-a2``, i.e.
+        # ``mb**-a1`` times broken_powerlaw_norm's ``(m/mb)**-a`` integrand.
+        return _tapered_edge_norm(
+            lambda m: self._eval_unnorm(m, theta),
+            lambda lo, hi: (mb ** (-a1)
+                            * broken_powerlaw_norm(a1, a2, mb, lo, hi)),
+            mmin, dmmin, mmax, dmmax,
+        )
+
     def _eval_unnorm(self, m, t):
         """Evaluate the smoothed, continuous broken power law at ``m``."""
         a1, a2, mb, mmin, mmax, dmmin, dmmax = (
@@ -173,6 +206,19 @@ class Gaussian(MassComponent):
     def param_specs(self):
         """Return ``mu`` and ``sigma`` parameter specs."""
         return [self.mu_spec, self.sigma_spec]
+
+    def _norm(self, theta):
+        """Exact ``int_{m_lo}^{m_hi} exp(-(m-mu)^2/2sigma^2) dm``.
+
+        Same normalisation domain as the base class's grid trapezoid (the
+        component has no truncation of its own), but exact: the trapezoid carries
+        an O((h/sigma)^2) error -- 1.3% at the ``sigma`` prior floor of 1 Msun
+        against h = 0.4 -- which enters the mixture as a spurious rescaling of
+        this component's weight relative to the (now exactly normalised) power
+        laws.
+        """
+        grid = get_mass_grid()
+        return truncated_gaussian_norm(theta[0], theta[1], grid[0], grid[-1])
 
     def _eval_unnorm(self, m, t):
         """Evaluate the Gaussian peak at primary mass ``m``."""
@@ -248,6 +294,45 @@ def _powerlaw_segment_norm(lo, hi, m_break, alpha):
                       d * jnp.expm1(ud_s) / ud_s)
     seg = m_break * jnp.exp(u * jnp.log(lo_s / m_break)) * ratio
     return jnp.where(hi > lo, seg, 0.0)
+
+
+def _tapered_edge_norm(eval_unnorm, plateau_norm, m_min, dm_min, m_max, dm_max):
+    r"""Normaliser of a component tapered between SAMPLED edges, edge-exact.
+
+    Splits the support ``[m_min, m_max]`` into the two taper windows and the
+    plateau between them::
+
+        N = int_{m_min}^{w_1} S p dm + int_{w_1}^{w_2} p dm + int_{w_2}^{m_max} S p dm
+
+    with ``w_1 = m_min + dm_min``, ``w_2 = m_max - dm_max`` and ``S = 1``
+    identically on the plateau.  ``plateau_norm(lo, hi)`` supplies the plateau in
+    closed form; the two windows are integrated on WINDOW-RELATIVE nodes
+    (``m = a + t (b - a)``, ``t`` uniform on [0, 1] -- the same trick
+    :meth:`GWTC5FiducialBPL2PeaksMass._taper_window_grid` uses), so the nodes
+    follow the sampled window instead of being crossed by it.  ``w_1`` is clipped
+    into the support and ``w_2`` floored at ``w_1``, so overlapping windows
+    (allowed by the curated ``m_max`` overrides) neither double-count nor leave a
+    gap: the whole support is then covered by the two window integrals of the
+    FULL tapered integrand.
+
+    Why not the base class's fixed grid: with ``dm_min`` below the mass-grid
+    spacing (h = 0.4 Msun at n_mass = 500, against a DM_MIN prior floor of 0.01)
+    the quadrature sees a hard edge at a SAMPLED location, so the normaliser is a
+    staircase in ``m_min`` -- measured on ``powerlaw+peak``: exactly flat over
+    each 0.4-Msun cell with 10.2% drops at every node crossing, 0.112-nat
+    discontinuities in ``log_p_pop``, and ``d log p/d m_min`` = 0 inside a cell
+    (1.37 at a node) against a dense-quadrature reference of 0.27.
+    """
+    t = jnp.linspace(0.0, 1.0, get_mass_grid().size)
+    hi = jnp.maximum(m_max, m_min)
+    w1 = jnp.clip(m_min + dm_min, m_min, hi)
+    w2 = jnp.clip(m_max - dm_max, w1, hi)
+
+    def _window(a, b):
+        m = a + t * (b - a)
+        return jnp.trapezoid(eval_unnorm(m), m)
+
+    return _window(m_min, w1) + plateau_norm(w1, w2) + _window(w2, hi)
 
 
 def broken_powerlaw_norm(alpha1, alpha2, m_break, lo, hi):
@@ -482,6 +567,18 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
         the sampled prior is the normalized uniform density on it; the
         ``valid`` mask in ``log_p_pop`` remains as a backstop for samplers
         that build their own prior (numpyro) and for overridden bounds.
+
+        Deliberate deviation from Table 5: ``ordered_le`` is a SORT, so the
+        implemented joint prior is the uniform density on the ordered triangle
+        ``{3 <= m2_low <= m1_low <= 10}``, whose m1_low marginal is
+        ``p(m1_low) ~ (m1_low - 3)``.  Table 5 quotes the CONDITIONAL
+        ``m1_low ~ U(3, 10)``, ``m2_low ~ U(3, m1_low)``, i.e. the joint density
+        ``1/(7 (m1_low - 3))`` -- so this prior is 2x Table 5's density at
+        m1_low = 10 and 0.14x at 3.5, pushing the minimum BH mass up (and with it
+        the low-mass end of the selection function).  Reproducing Table 5 exactly
+        needs a conditional cube map (``m2_low = 3 + u (m1_low - 3)``) in
+        :func:`~darksirens.inference.prior.make_prior_transform`; until then the
+        fiducial vector, not the prior shape, is what this model pins.
         """
         return (
             ("simplex", (r"$\lambda_0$", r"$\lambda_1$")),

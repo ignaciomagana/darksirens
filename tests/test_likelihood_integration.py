@@ -37,9 +37,11 @@ from darksirens.likelihood.core import (
     darksiren_log_likelihood,
     WL_BACKEND_DISABLED,
     WL_BACKEND_LOGNORMAL,
+    WL_BACKEND_TABULATED,
     WL_SELECTION_STANDARD,
     WL_SELECTION_LOGNORMAL,
 )
+from darksirens.lensing.wlmagnification import make_lognormal_log_p_wl
 from darksirens.likelihood import factory as likelihood_module
 from darksirens.gw.populations import get_fixed_population_params
 
@@ -132,11 +134,13 @@ class TestLikelihoodIntegration:
         }
 
     def _call(self, fixture, universe_model, wl_backend=WL_BACKEND_DISABLED,
-              wl_a=0.0, wl_b=0.0, wl_selection=WL_SELECTION_STANDARD):
+              wl_a=0.0, wl_b=0.0, wl_selection=WL_SELECTION_STANDARD,
+              wl_grids=None):
         pop_params = fixture["pop_params"]
         expected_len = len(get_fixed_population_params("powerlaw+peak"))
         assert pop_params.shape[0] > 0
         assert pop_params.shape[0] == expected_len
+        grids = wl_grids or {}
         return darksiren_log_likelihood(
             fixture["cosmo"], fixture["survey"], fixture["pop_params"],
             fixture["gw_pe"], fixture["catalog"],
@@ -148,6 +152,7 @@ class TestLikelihoodIntegration:
             wl_backend=wl_backend,
             wl_a=wl_a, wl_b=wl_b,
             wl_selection=wl_selection,
+            **grids,
         )
 
     def test_baseline_spectral_sirens_finite(self, fixture):
@@ -222,6 +227,38 @@ class TestLikelihoodIntegration:
         assert 1e-4 < diff < 5.0, (
             f"|ll_on - ll_off| = {diff} at a=1e-2 — WL is either inert "
             f"or blowing up"
+        )
+
+    def test_tabulated_backend_runs_through_the_jitted_likelihood(self, fixture):
+        """``--wl_backend tabulated`` must survive the JIT boundary.
+
+        Regression: the likelihood builds its tabulated closure INSIDE its own
+        ``jax.jit`` body, and the closure factory validated its grids with
+        ``bool(jnp.all(...))``, so the first likelihood evaluation raised
+        ``TracerBoolConversionError`` and the backend could not run at all.
+        The table is a dense tabulation of the same lognormal, so the result
+        must also track the lognormal backend to interpolation accuracy.
+        """
+        a, b = 0.05, 0.5            # coverage ~ 1 on the 16-node mu-quadrature
+        z_grid = jnp.linspace(0.02, 3.0, 400)
+        log_mu_grid = jnp.linspace(-2.0, 2.0, 1537)
+        ZZ, MM = jnp.meshgrid(z_grid, log_mu_grid, indexing="ij")
+        table = make_lognormal_log_p_wl(a, b)(jnp.exp(MM), ZZ)
+
+        ll_tab = self._call(
+            fixture, "spectral_sirens_wl",
+            wl_backend=WL_BACKEND_TABULATED,
+            wl_grids=dict(wl_z_grid=z_grid, wl_log_mu_grid=log_mu_grid,
+                          wl_log_p_table=table),
+        )
+        assert jnp.isfinite(ll_tab), f"tabulated ll not finite: {ll_tab}"
+        ll_ln = self._call(
+            fixture, "spectral_sirens_wl",
+            wl_backend=WL_BACKEND_LOGNORMAL, wl_a=a, wl_b=b,
+        )
+        assert float(abs(ll_tab - ll_ln)) < 0.5, (
+            f"tabulated ll {ll_tab} vs lognormal ll {ll_ln} — the table is a "
+            f"dense tabulation of that very lognormal"
         )
 
     def test_spectral_sirens_wl_without_backend_raises(self, fixture):
@@ -339,6 +376,17 @@ class TestLikelihoodIntegration:
             wl_selection=WL_SELECTION_LOGNORMAL,
         )
         assert float(abs(ll_fall - ll_base)) < 1e-12
+
+    def test_wl_selection_lognormal_under_tabulated_backend_raises(self, fixture):
+        """The tabulated backend has NO matched selection integral: silently
+        downgrading to STANDARD would normalize mu(Lambda) under a different
+        observation model than the per-event weights, so it must be fatal."""
+        with pytest.raises(ValueError, match="tabulated backend"):
+            self._call(
+                fixture, "spectral_sirens_wl",
+                wl_backend=WL_BACKEND_TABULATED,
+                wl_selection=WL_SELECTION_LOGNORMAL,
+            )
 
 
 def test_make_likelihood_spectral_sirens_wl_passes_wl_args(monkeypatch):
@@ -595,7 +643,8 @@ def test_make_likelihood_operands_are_jit_arguments_not_captures():
     like = likelihood_module.make_likelihood(
         opts, data, get_fixed_population_params(opts.pop_model))
     closed_jaxpr = jax.make_jaxpr(like.jitted_body)(
-        jnp.array([]), like.operands, like.distance_table)
+        jnp.array([]), like.operands, like.distance_table,
+        like.smoothing_operator)
     invar_shapes = [tuple(v.aval.shape) for v in closed_jaxpr.jaxpr.invars]
     # the 5 selection physics fields + q + valid + the 3 sky components
     assert invar_shapes.count((n_sel,)) >= 5, invar_shapes
@@ -637,7 +686,8 @@ def test_spectral_likelihood_lowers_without_the_distance_table_as_a_literal():
     like = likelihood_module.make_likelihood(
         opts, data, get_fixed_population_params(opts.pop_model))
     text = like.jitted_body.lower(
-        jnp.array([]), like.operands, like.distance_table).as_text()
+        jnp.array([]), like.operands, like.distance_table,
+        like.smoothing_operator).as_text()
 
     # A literal costs >= 8 bytes of text per f64 element (measured ~16 on jax
     # 0.4.34), so anything at or above that bound is a table-sized constant.

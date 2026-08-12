@@ -28,8 +28,14 @@ For five-component models the sampler spent 96 % of proposals in a region
 that is silently mapped to −∞, collapsing effective sample sizes and
 biasing evidence estimates.
 
-Prior bounds on the weight parameters stay [0, 1] — no change to prior
-transforms, CLI flags, or existing sampler configuration.
+Prior bounds on the weight parameters stay [0, 1], as do the CLI flags and
+sampler configuration.  The PRIOR FAMILY on them is Beta(1, k-i) for v_i, which
+is what makes the induced weight prior the uniform Dirichlet(1, ..., 1) the old
+"last weight = 1 - Σ" parameterisation had (uniform on the box conditioned on the
+simplex IS uniform on the simplex).  Sampling every v_i from U[0, 1] instead —
+as this file did until the stick prior was declared — gives
+E[w] = (1/2, 1/4, 1/8, ...): informative, and dependent on the ORDER the
+components appear in the model name.  k = 2 is unaffected (Beta(1, 1) = U[0, 1]).
 
 Labels: weight parameters are now named $v_i$ (stick-breaking inputs),
 not $f_i$ (direct fractions).  If you use ``fixed_parameter_values`` in
@@ -224,19 +230,46 @@ class PairingModel(ABC):
         """Evaluate the unnormalised conditional mass-ratio density."""
         ...
 
+    @staticmethod
+    def _support_nodes(m1, m_min):
+        r"""Support-relative q nodes and their spacing.
+
+        The q-support is ``(q_cut, 1]`` with ``q_cut = m_min/m1``: it depends on a
+        SAMPLED parameter and on the query m1.  Nodes are therefore placed
+        RELATIVE to the support, ``q = q_cut + t (1 - q_cut)`` with ``t`` the
+        unit-interval node set ``get_q_grid()`` (``[q_lo, q_hi] = [0, 1]``), so
+        they follow the edge instead of being crossed by it -- the same trick
+        ``GWTC5FiducialBPL2PeaksMass._taper_window_grid`` uses for the mass taper.
+
+        With the historical FIXED grid the normaliser
+        ``N(m1) = int p(q|m1) dq`` was a staircase in both ``m1`` and ``m_min``
+        (it only changed when ``q_cut`` crossed a node): measured on
+        ``PowerLawPairing`` at m_min = 5, dm_min = 0.01, q = 0.9,
+        ``p(q|m1)`` was bit-identical over m1 in [60, 62] while the true N grows
+        3%, and ``d log p/d m_min`` was 0 almost everywhere with spurious +1.37
+        spikes wherever a node happened to land inside the taper window (against a
+        true value of ~0.03).  Support-relative nodes also spend every node inside
+        the support, so the edge itself is resolved for any m1.
+        """
+        t     = get_q_grid()                        # uniform nodes on [0, 1]
+        q_cut = jnp.clip(m_min / m1, 0.0, 1.0)
+        width = 1.0 - q_cut
+        return q_cut[..., None] + t * width[..., None], width, 1.0 / (t.size - 1)
+
     def __call__(self, m1, q, m_min, dm_min, theta):
         p = self._eval_unnorm(m1, q, m_min, dm_min, theta)
         # OPT-IN accuracy knob (STATIC branch on the module-global setting, read
         # at trace time): default None keeps the EXACT per-sample q-integration
-        # below (bit-identical to the historical code path); an int precomputes
-        # the normaliser once on a static m1 grid and interpolates it per sample.
+        # below; an int precomputes the normaliser once on a static m1 grid and
+        # interpolates it per sample.
         n_grid = normalization_grid_settings().pairing_m1_grid
         if n_grid is None:
             # PairingModel norm integrates over q for each m1 — sample-dependent,
             # cannot be lifted out of the per-sample loop.
-            m1_exp  = jnp.expand_dims(jnp.atleast_1d(m1), axis=-1)
-            q_grid  = get_q_grid()
-            p_grid  = self._eval_unnorm(m1_exp, q_grid, m_min, dm_min, theta)
+            m1_a    = jnp.atleast_1d(m1)
+            q_nodes, width, dt = self._support_nodes(m1_a, m_min)
+            p_grid  = self._eval_unnorm(m1_a[..., None], q_nodes,
+                                       m_min, dm_min, theta)
             # Scale-invariant normalisation: for an m1 in the low-mass taper toe
             # both p and its q-integral are ~exp(-500)-tiny; the RATIO is well
             # conditioned, but a direct p / n has divide's VJP square n, which
@@ -248,7 +281,9 @@ class PairingModel(ABC):
             # ratio up to association order (ULP-level).
             scale   = jnp.max(p_grid, axis=-1, keepdims=True)
             scale_s = jnp.where(scale > 0, scale, 1.0)
-            n_sc    = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
+            # Uniform in t, so the trapezoid is dt-spaced and the support width
+            # (which carries the m1 / m_min dependence) factors out.
+            n_sc    = jnp.trapezoid(p_grid / scale_s, dx=dt, axis=-1) * width
             n_sc    = n_sc.reshape(jnp.shape(m1))
             scale_m = scale_s[..., 0].reshape(jnp.shape(m1))
             return jnp.where(
@@ -261,13 +296,15 @@ class PairingModel(ABC):
         m1_grid = get_pairing_m1_grid()                     # (N_grid,) static nodes
         log_m1_grid = jnp.log(m1_grid)
         q_grid  = get_q_grid()
-        # Same scale-factored quadrature as the exact branch, per grid node, so
-        # the grid normaliser never underflows while forming I = scale * n_sc.
-        p_grid  = self._eval_unnorm(m1_grid[:, None], q_grid[None, :],
+        # Same scale-factored, SUPPORT-RELATIVE quadrature as the exact branch,
+        # per grid node, so the grid normaliser never underflows while forming
+        # I = scale * n_sc and agrees with the exact branch node-for-node.
+        q_nodes_g, width_g, dt = self._support_nodes(m1_grid, m_min)
+        p_grid  = self._eval_unnorm(m1_grid[:, None], q_nodes_g,
                                     m_min, dm_min, theta)    # (N_grid, N_Q)
         scale   = jnp.max(p_grid, axis=-1, keepdims=True)
         scale_s = jnp.where(scale > 0, scale, 1.0)
-        n_sc_g  = jnp.trapezoid(p_grid / scale_s, q_grid, axis=-1)
+        n_sc_g  = jnp.trapezoid(p_grid / scale_s, dx=dt, axis=-1) * width_g
         I_grid  = scale_s[..., 0] * n_sc_g                   # (N_grid,) normaliser
         # SUPPORT-EDGE HANDLING.  Nodes with no support have I == 0 exactly (for
         # every q, p_unnorm == 0 -- e.g. m1 <= m_min, so m2 = q*m1 <= m_min).  The
@@ -323,22 +360,24 @@ class PairingModel(ABC):
         resolved = jnp.interp(log_m1_q, log_m1_grid,
                               has_sup.astype(log_I_grid.dtype)
                               ).reshape(jnp.shape(m1)) >= 1.0
-        # RIGOROUS PER-SAMPLE LOWER BOUND on the exact normaliser.  The exact
-        # branch's I(m1) is a trapezoid sum of NON-NEGATIVE terms over q, so any
-        # single term bounds it from below: with the sample's own q bracketed by
-        # q-grid nodes k, k+1,
-        #     I(m1) >= (q_{k+1} - q_k)/2 * (p_unnorm(m1, q_k) + p_unnorm(m1, q_{k+1})).
-        # In an UNRESOLVED cell that bound is not merely safe but TIGHT: one grid
-        # cell spans dlog m1 = log(m_hi/m_lo)/(N_grid-1) = 2.6e-3 at N_grid=2048,
-        # so the q-support (m_min/m1, 1] inside the edge cell is narrower than one
-        # q-interval dq = 5.0e-3 (N_Q=200) and the exact trapezoid IS this single
-        # term -- the bound reproduces the exact branch to floating point.  In a
-        # RESOLVED cell it is inert (the support spans many q-nodes, so the
-        # interpolated normaliser is larger and the maximum keeps it bit-for-bit),
-        # while still capping any interpolation error that would INFLATE the
-        # density -- raising log_I toward a rigorous lower bound on the exact
-        # normaliser can never overshoot it.  Cost: two extra p_unnorm evaluations
-        # per sample, versus N_Q = 200 for the exact branch.
+        # PER-SAMPLE EDGE GUARD on the normaliser, evaluated on the FIXED q grid
+        # (its nodes are static, so this costs two p_unnorm evaluations per sample
+        # against N_Q = 200 for the exact branch).  With the sample's own q
+        # bracketed by q-grid nodes k, k+1,
+        #     I_lb = (q_{k+1} - q_k)/2 * (p_unnorm(m1, q_k) + p_unnorm(m1, q_{k+1})).
+        # In an UNRESOLVED cell this is within a factor of two of the true
+        # normaliser FROM BELOW: one m1 cell spans dlog m1 = log(m_hi/m_lo)/(N_grid-1)
+        # = 2.6e-3 at N_grid = 2048, so the q-support (m_min/m1, 1] inside the edge
+        # cell is narrower than one q-interval dq = 5.0e-3 (N_Q = 200) -- a coupling
+        # NormalizationGridSettings now enforces -- hence q_k <= m_min/m1 (so
+        # p_unnorm(m1, q_k) = 0, q_{k+1} = 1) and
+        #     I = int_{q_cut}^{1} p dq <= (1 - q_cut) p(1) <= dq p(1) = 2 I_lb.
+        # The density can therefore overshoot by at most 0.7 nats there, while the
+        # unbounded direction (log_I hundreds of nats below the truth, +547 nats of
+        # density) is impossible.  In a RESOLVED cell the guard is inert (the
+        # support spans many q-nodes, so the interpolated normaliser is larger and
+        # the maximum keeps it bit-for-bit) while still capping any interpolation
+        # error that would INFLATE the density.
         qi      = jnp.clip(jnp.searchsorted(q_grid, jnp.asarray(q)) - 1,
                            0, q_grid.size - 2)
         q_lo_n  = q_grid[qi]
@@ -435,9 +474,18 @@ class MixtureModel:
     @property
     def param_specs(self):
         """Return weight, mass, pairing, and spin parameter specs in order."""
-        # v_i are stick-breaking inputs, bounded [0, 1].
+        # v_i are stick-breaking inputs, bounded [0, 1], with the Beta(1, k-i)
+        # prior that induces the UNIFORM Dirichlet(1, ..., 1) on the weights
+        # (mirrors the multitracer sticks, darksirens/inference/prior.py).  Under
+        # the plain U[0, 1] they carried before, the induced weight prior was
+        # E[w] = (1/2, 1/4, 1/8, ...) -- strongly informative and dependent on the
+        # ORDER the components appear in the model name, so a headline mixture
+        # fraction (e.g. the peak fraction) was prior-dominated.  k = 2 is
+        # unaffected: Beta(1, 1) IS U[0, 1].
         specs = [
-            ParamSpec(rf"$v_{i+1}$", 0.0, 1.0, name=f"v{i+1}")
+            ParamSpec(rf"$v_{i+1}$", 0.0, 1.0, name=f"v{i+1}",
+                      prior_kind="beta", prior_loc=1.0,
+                      prior_scale=float(self.k - 1 - i))
             for i in range(self.n_weight_params)
         ]
         for c in self.mass_components:    specs.extend(c.param_specs)
@@ -490,6 +538,30 @@ class MixtureModel:
         _, _, _, ts_list = self._split_theta(theta)
         return ts_list[0]
 
+    def _low_mass_edge(self, tm_list):
+        """Mixture-level secondary-mass cut ``(m_min, dm_min)``.
+
+        The first mass component that declares a low-mass edge sets it.  A
+        component that declares none (the Gaussian ``peak``, which has no taper
+        parameters) inherits THIS edge rather than the quadrature floor
+        ``M_LO``: the secondary of a peak-component binary is drawn from the
+        same black-hole population as every other component, so its floor is a
+        sampled model parameter, not the normalisation grid's lower bound.
+        Falling back to ``M_LO`` there made the low-mass edge of most of the
+        fiducial population a quadrature knob and admitted 1 Msun secondaries
+        (measured on ``powerlaw+peak`` at the registered fiducial:
+        P(m2 < m_min = 5) = 0.019 at beta = 1 and 0.41 at beta = -1).
+        ``(M_LO, 0.01)`` survives only for a mixture in which NO component
+        declares an edge.
+        """
+        for j, c in enumerate(self.mass_components):
+            if hasattr(c, "m_min_spec"):
+                tm = tm_list[j]
+                dmmin = (tm[c.param_specs.index(c.dm_min_spec)]
+                         if hasattr(c, "dm_min_spec") else 0.01)
+                return tm[c.param_specs.index(c.m_min_spec)], dmmin
+        return M_LO, 0.01
+
     def component_densities(self, m1, q, chieff, theta):
         """Return weighted source-density contributions for each component.
 
@@ -509,6 +581,8 @@ class MixtureModel:
             for i, c in enumerate(self.spin_components)
         ]
 
+        edge = self._low_mass_edge(tm_list)
+
         contributions = []
         for i in range(self.k):
             c_m  = self.mass_components[i];    tm = tm_list[i]
@@ -518,7 +592,7 @@ class MixtureModel:
             ts   = ts_list[0 if self.shared_spin else i]
             s_idx = 0 if self.shared_spin else i
 
-            mmin, dmmin = M_LO, 0.01
+            mmin, dmmin = edge
             if hasattr(c_m, "m_min_spec"):
                 mmin  = tm[c_m.param_specs.index(c_m.m_min_spec)]
             if hasattr(c_m, "dm_min_spec"):
@@ -548,6 +622,7 @@ class MixtureModel:
         w, tm_list, tp_list, _ = self._split_theta(theta)
 
         mass_norms = [c._norm(tm_list[i]) for i, c in enumerate(self.mass_components)]
+        edge = self._low_mass_edge(tm_list)
 
         total = 0.0
         for i in range(self.k):
@@ -555,7 +630,7 @@ class MixtureModel:
             c_p = self.pairing_components[0 if self.shared_pairing else i]
             tp  = tp_list[0 if self.shared_pairing else i]
 
-            mmin, dmmin = M_LO, 0.01
+            mmin, dmmin = edge
             if hasattr(c_m, "m_min_spec"):
                 mmin  = tm[c_m.param_specs.index(c_m.m_min_spec)]
             if hasattr(c_m, "dm_min_spec"):

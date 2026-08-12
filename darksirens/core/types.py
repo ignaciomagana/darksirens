@@ -362,10 +362,16 @@ class EMCatalog(NamedTuple):
     # (data constant, replaces the scalar ``field_n_empty`` inside the
     # stratified V_empty); ``field_lss_q_empty_sum_strata[s]`` is
     # ``Sum_{empty pixels in s} Q_p(z)`` (the stratified twin of
-    # ``field_lss_q_empty_sum``).
+    # ``field_lss_q_empty_sum``).  ``field_lss_q_empty_sum_strata_members[m, s]``
+    # is the PER-MEMBER twin, required whenever a Q ENSEMBLE meets stratified
+    # selection: the stratified branch of ``_field_missing_curve`` reads ONLY the
+    # strata budget, so ``field_global_log_Z_members`` must swap member m's
+    # per-stratum rows in alongside ``field_lss_q_empty_sum_members`` or member
+    # m's normalizer would carry the DETERMINISTIC empty-pixel budget.
     pixel_stratum_map: Any = None       # (n_pix_total,) int32 stratum per pixel
     empty_stratum_counts: Any = None    # (S,) float64 empty-pixel count per stratum
     field_lss_q_empty_sum_strata: Any = None  # (S, N_grid) float64
+    field_lss_q_empty_sum_strata_members: Any = None  # (M, S, N_grid) float64
 
 
 class GWEvent(NamedTuple):
