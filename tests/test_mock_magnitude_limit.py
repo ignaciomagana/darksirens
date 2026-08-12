@@ -162,3 +162,62 @@ def test_defaults_reproduce_the_pre_change_config():
         absolute_mag_sigma=S.absolute_mag_sigma,
     )
     assert before == after
+
+
+def test_mock_selection_matches_the_inference_analytic_model(grids):
+    """The strongest claim: the mock's C_sel(z) IS what c_sel_gaussian models.
+
+    A path that RUNS and a path that is CORRECT are different claims. The tests
+    above establish the first (the limit is reachable and bites). This one
+    establishes the second: the incompleteness the generator produces is the
+    same function the inference assumes, so a selection-mode mock can actually
+    validate the selection machinery rather than merely exercise it.
+
+    The mock draws abs_mag ~ N(M0, sigma_M) and sets app_mag = M + DM(z) with NO
+    K-correction, so the matched model is c_sel_gaussian at K = 0 with the
+    mock's own LF. Note the h-scaling convention: c_sel_gaussian takes M0hat
+    with ``M0hat = M0 - 5 log10 h`` (utils/cosmology.py:417-419) -- the opposite
+    sign will appear to show a ~46% mismatch.
+
+    The footprint cut is z-independent and multiplies the curve, so it is
+    divided out by construction here rather than fitted.
+    """
+    jnp = pytest.importorskip("jax.numpy")
+    from darksirens.redshift.selection import c_sel_gaussian
+
+    m_lim, H0, om0 = 20.0, 67.74, 0.3089
+    survey = gmd.SurveyConfig(magnitude_limit=m_lim, **_SIGMOID_OFF)
+    catalog = gmd._generate_complete_catalog(
+        np.random.default_rng(7), _NGAL, grids, survey)
+    keep = gmd._apply_survey_selection(np.random.default_rng(11), catalog, survey)
+
+    # Footprint fraction: measured where the magnitude cut cannot reach, so it
+    # is the pure z-independent factor rather than a free parameter.
+    low_z = catalog["z"] < 0.06
+    footprint = float(keep[low_z].mean())
+    assert 0.7 < footprint < 0.9, f"unexpected footprint fraction {footprint:.3f}"
+
+    edges = np.linspace(0.09, 0.27, 7)
+    centres = 0.5 * (edges[1:] + edges[:-1])
+    idx = np.digitize(catalog["z"], edges) - 1
+    measured = np.array([
+        keep[idx == b].mean() for b in range(len(centres))
+    ])
+
+    m0hat = survey.absolute_mag_mean - 5.0 * np.log10(H0 / 100.0)
+    model = np.asarray(c_sel_gaussian(
+        jnp.asarray(centres), m_lim, m0hat, survey.absolute_mag_sigma,
+        H0, Om0=om0))
+    predicted = footprint * model
+
+    ratio = measured / predicted
+    assert np.all(np.abs(ratio - 1.0) < 0.05), (
+        "mock selection does not match c_sel_gaussian: "
+        f"ratios {np.round(ratio, 4).tolist()} at z={np.round(centres, 3).tolist()}"
+    )
+    # And the comparison must be non-trivial: the curve has to actually vary,
+    # or this would pass against a flat (inert) selection too.
+    assert predicted[0] - predicted[-1] > 0.15, (
+        "the analytic curve barely varies over the tested range; this test "
+        "would pass against an inert magnitude limit"
+    )
