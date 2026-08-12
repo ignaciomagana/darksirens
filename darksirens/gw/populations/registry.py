@@ -77,6 +77,7 @@ from .parametric import (
     GolombRemnantMass1G,
     GolombRemnantMass1GPlusTail,
     GolombSymmetricMassPopulationModel,
+    GWTC3PowerLawPeakPopulationModel,
     GWTC5FiducialBPL2PeaksPopulationModel,
     TruncatedGaussianSpin,
 )
@@ -119,13 +120,41 @@ _PL2_BOUNDS = {"alpha": _B(0, 6), "m_min": _B(20, 40), "m_max": _B(50, 100)}
 # the Gaussian peak -- 90% of the fiducial population inside one 35 Msun peak,
 # against a measured peak fraction of ~0.03-0.1 with the power-law continuum
 # dominating.  These are round tuning values inherited from the pre-grammar
-# factories, NOT release medians (only ``gwtc5_fiducial_bpl2peaks`` carries those),
-# and they set the truth of every ``--fix_population`` run and mock built from
+# factories, NOT release medians (only ``gwtc5_fiducial_bpl2peaks`` and
+# ``gwtc3_fiducial_plpeak`` carry published values), and they set the truth of
+# every ``--fix_population`` run and mock built from
 # ``get_fixed_population_params``.  Left verbatim so existing fixed-population runs
 # stay comparable; flip them (and the mock generator's ``peak_fraction``) together
 # if the fiducial population is meant to look like the measured one.
 CURATED: dict[str, Curated] = {
+    # NOT a GWTC-like population, and not an approximation of one.  This entry
+    # is a CURATED TEST COMPOSITION whose numbers were tuned before the grammar
+    # existed; it is kept exactly as-is because it defines the truth of every
+    # archived fixed-population run and every mock built from it, so changing
+    # it would silently invalidate those comparisons.  Two specific ways it
+    # departs from the published GWTC-3 Power Law + Peak model, both
+    # deliberate and both load-bearing for anyone reading a plot made with it:
+    #
+    #   * w_G = 0.90.  Ninety per cent of this population sits inside the
+    #     Gaussian peak.  GWTC-3 measures lambda_peak = 0.038 (+0.058, -0.026)
+    #     (arXiv:2111.03634 Sec. V B) -- the real BBH mass function is a
+    #     power-law continuum with a ~4% excess at ~34 Msun, i.e. very nearly
+    #     the mirror image of this one.
+    #   * The Gaussian peak is UNTAPERED on primary mass.  The grammar's
+    #     mixture applies each component's own smoothing, so the peak here has
+    #     no low-mass taper at all, where GWTC-3 Eq. B4 multiplies the WHOLE
+    #     mixture (peak included) by S(m1 | m_min, delta_m).  That is a
+    #     structural difference, not a parameter choice: no setting of the
+    #     weights turns this composition into that model.
+    #
+    # Use ``gwtc3_fiducial_plpeak`` (registered below) when the population is
+    # meant to be the published GWTC-3 one; use this when you want the legacy
+    # curated composition and its archived comparability.
     "powerlaw+peak": Curated(
+        # The display name stays "PL+G" verbatim: it is compared by the
+        # grammar tests and stored in the registry golden, and the honest
+        # description belongs in the comment above and in the docs table, not
+        # in a label that would silently reflow every archived corner plot.
         latex="PL+G",
         weights=(0.10,),                       # w_PL=0.10, w_G=0.90
         bounds={1: {"mu": _B(20, 50)}},
@@ -212,6 +241,13 @@ LEGACY_BASE_ALIASES = {
 LEGACY_NAME_ALIASES = {
     "gwtc5_fiducial_brokenpowerlaw+2peaks": "gwtc5_fiducial_bpl2peaks",
     "gwtc5_brokenpowerlaw+2peaks": "gwtc5_fiducial_bpl2peaks",
+    # Same two spellings for the GWTC-3 preset: the grammar-shaped name a user
+    # naturally writes, and the release-prefixed short form.  Both resolve (with
+    # a DeprecationWarning) so nobody lands on the CURATED ``powerlaw+peak``
+    # composition by typing what looks like the published model's name -- the
+    # two are structurally different densities, not two tunings of one.
+    "gwtc3_fiducial_powerlaw+peak": "gwtc3_fiducial_plpeak",
+    "gwtc3_powerlaw+peak": "gwtc3_fiducial_plpeak",
 }
 
 
@@ -372,6 +408,53 @@ register_model(
         4.8128, 0.0633, 0.3654, 2.5439,
     ),
 )(GWTC5FiducialBPL2PeaksPopulationModel)
+
+
+register_model(
+    "gwtc3_fiducial_plpeak",
+    latex=r"\text{GWTC-3 Fiducial PL+G}",
+    # Ordering follows GWTC3PowerLawPeakPopulationModel.param_specs:
+    # alpha, m_min, m_max, lambda_peak, mu_m, sigma_m, delta_m,
+    # beta_q, mu_chi, sigma_chi, gamma.
+    #
+    # The MODEL and the PRIOR BOUNDS are arXiv:2111.03634 (GWTC-3 population
+    # properties) Table VI and Eqs. B4-B7 verbatim: alpha U(-4, 12),
+    # beta_q U(-2, 7), m_min U(2, 10), m_max U(30, 100), lambda_peak U(0, 1),
+    # mu_m U(20, 50), sigma_m U(1, 10), delta_m U(0, 10).  Table VI is a table
+    # of PRIORS, so it fixes the model and its box, not a parameter point.
+    #
+    # The fiducial vector below is the paper's own reported posterior MEDIANS
+    # wherever the paper reports one, each traceable to a sentence:
+    #   alpha      = 3.5   ("alpha = 3.5 +0.6 -0.56",     Sec. V B)
+    #   m_min      = 5.0   ("mmin = 5.0 +0.86 -1.7 Msun", Sec. V B)
+    #   lambda_pk  = 0.038 ("lambda = 0.038 +0.058 -0.026", Sec. V B)
+    #   mu_m       = 34.0  ("a Gaussian peak at 34 +2.6 -4.0 Msun", Sec. V B)
+    #   delta_m    = 4.9   ("delta_m = 4.9 +3.4 -3.2 Msun", Sec. V B)
+    #   beta_q     = 1.1   ("beta_q = 1.1 +1.7 -1.3",     Sec. V B)
+    #   gamma      = 2.9   (the rate index kappa = 2.9 +1.7 -1.8, Fig. 13;
+    #                       this model's rate law is (1+z)^(gamma-1), i.e.
+    #                       R(z) ~ (1+z)^gamma, so gamma maps to kappa with no
+    #                       offset -- same convention as the GWTC-5 entry.)
+    #
+    # TWO ENTRIES ARE NOT MEASUREMENTS, and are marked here rather than left
+    # to look like the rest: the paper quotes NO posterior for the power law's
+    # cut-off m_max (it reports the derived m_99% = 44 +9.2 -5.1 Msun instead)
+    # and none for sigma_m ("both the mean and the standard deviation of the
+    # Gaussian component are consistent with previous inferences").  Both are
+    # set to the MIDPOINT of their own Table VI prior -- m_max = 65.0,
+    # sigma_m = 5.5 -- as a neutral placeholder.  Do not quote either as a
+    # GWTC-3 value; source them from the LVK data release if a fully measured
+    # fiducial is needed.
+    #
+    # mu_chi/sigma_chi are the repo's default chi_eff spin fiducials.  GWTC-3's
+    # Default spin model (Table XII) is a Beta magnitude distribution plus a
+    # cos-tilt mixture, which this chi_eff likelihood cannot represent, so no
+    # GWTC-3 spin number is claimed here (see the model's __init__).
+    fiducial=(
+        3.5, 5.0, 65.0, 0.038, 34.0, 5.5, 4.9,
+        1.1, 0.0, 0.1, 2.9,
+    ),
+)(GWTC3PowerLawPeakPopulationModel)
 
 
 # ============================================================

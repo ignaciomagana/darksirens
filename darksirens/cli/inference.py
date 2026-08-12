@@ -3237,6 +3237,7 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
         prior_kinds=pspace.prior_kinds,
         prior_overrides=prior_overrides,
         fixed_parameter_values=fixed_parameter_values,
+        joint_constraints=getattr(pspace, "joint_constraints", ()),
     )
     # Recorded on opts (hence in settings.json and results.hdf5) so an archived
     # artifact carries the identity of the configuration that produced it.  Set

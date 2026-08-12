@@ -3539,7 +3539,8 @@ def _prepare_run_dir(opts):
 
 
 def _gate_or_stamp_resume_fingerprint(
-    opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed
+    opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed,
+    joint_constraints=(),
 ):
     """Fingerprint gate: sampler state must never be restored under a
     different statistical target (the P0-01 failure mode).
@@ -3557,6 +3558,7 @@ def _gate_or_stamp_resume_fingerprint(
         prior_kinds=prior_kinds,
         prior_overrides=getattr(opts, "prior_overrides", None),
         fixed_parameter_values=fixed,
+        joint_constraints=joint_constraints,
     )
     if resume_dir:
         try:
@@ -3703,7 +3705,8 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
         _write_failure(run_dir, "build_parameter_space", exc, labels=labels, settings=settings)
         raise
     return (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
-            pop_params_fid, lens_overrides, prior_kinds)
+            pop_params_fid, lens_overrides, prior_kinds,
+            tuple(joint_constraints or ()))
 
 
 def _cross_check_loglike_against_diagnostics(loglike, diagnostics, point, *, opts):
@@ -3810,7 +3813,8 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
 
 
 def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
-                          prior_transform, loglike, prior_kinds=None):
+                          prior_transform, loglike, prior_kinds=None,
+                          joint_constraints=()):
     """Run the sampler inside a framed section and return its results."""
     _section(f"Sampling  [{opts.sampler.upper()}]")
     _row("ndim", len(labels))
@@ -3843,6 +3847,12 @@ def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
             # prior_transform, so they must be threaded here too or the NUTS
             # path keeps sampling GP latents uniform.
             prior_kinds=prior_kinds,
+            # Same reason, one level up: the joint cube maps are baked into
+            # prior_transform, which numpyro does not use.  Threading them
+            # here is what makes run_sampler say that NUTS falls back to
+            # rejection -- and, for conditional_upper, that the fallback is a
+            # DIFFERENT prior rather than the same one sampled awkwardly.
+            joint_constraints=joint_constraints,
         )
     except Exception as exc:
         _write_failure(run_dir, "sampler", exc, labels=labels, settings=settings)
@@ -4035,17 +4045,19 @@ def main(argv=None):
     )
     inp = _load_and_report_inputs(opts, run_dir, settings)
     (labels, lower, upper, prior_transform, loglike, diagnostics_fn,
-     pop_params_fid, lens_overrides, prior_kinds) = _build_space_and_closures(
+     pop_params_fid, lens_overrides, prior_kinds,
+     joint_constraints) = _build_space_and_closures(
         opts, inp, run_dir, settings, base_fixed, lens_fixed)
     _gate_or_stamp_resume_fingerprint(
-        opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed
+        opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed,
+        joint_constraints=joint_constraints,
     )
     mid, diagnostics, diag_point, diag_label = _smoke_test_likelihood(
         opts, run_dir, settings, labels, lower, upper, loglike,
         diagnostics_fn, pop_params_fid)
     results = _run_lensing_sampling(
         opts, run_dir, settings, labels, lower, upper, prior_transform, loglike,
-        prior_kinds=prior_kinds)
+        prior_kinds=prior_kinds, joint_constraints=joint_constraints)
     _save_lensing_outputs(
         opts, run_dir, settings, inp, results, diagnostics, labels, mid,
         fixed, base_fixed, lens_fixed, lens_overrides,

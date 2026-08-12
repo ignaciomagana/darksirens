@@ -71,6 +71,12 @@ _CUSTOM = [
     "gwtc5_fiducial_brokenpowerlaw+2peaks",
     "gwtc5_brokenpowerlaw+2peaks",
     "gwtc5_fiducial_bpl2peaks",
+    # Added after the golden was first recorded: the GWTC-3 Table VI preset is
+    # a PUBLISHED model, so its bounds, fiducial and log_p_pop are exactly the
+    # things a golden should stop from drifting.  Its entry was appended by a
+    # re-record that left every pre-existing entry byte-identical -- the golden
+    # still pins the pre-refactor physics for every name it already covered.
+    "gwtc3_fiducial_plpeak",
 ]
 
 LEGACY_NAMES = [b + s for b in _BASE_MIXTURES for s in _SUFFIXES] + _CUSTOM

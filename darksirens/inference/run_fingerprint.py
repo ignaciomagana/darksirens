@@ -24,7 +24,10 @@ continuing pre-fingerprint checkpoints) and is stamped loudly.
 What counts as semantic
 -----------------------
 Everything that changes the posterior or the evidence: the sampled labels,
-their bounds and prior families, fixed/overridden parameter values, every
+their bounds and prior families, the resolved JOINT prior constraints (the
+cube maps that turn a box prior into a constrained one -- a model can keep
+identical labels, bounds and per-parameter families while its joint prior
+changes shape underneath them), fixed/overridden parameter values, every
 model flag, the sampler and its stopping/live-point settings, the seed, the
 normalization grid, and the CONTENT of every input file -- a path string
 alone cannot detect a regenerated file.  Operational knobs (where the run
@@ -53,7 +56,20 @@ import tempfile
 import warnings
 
 FINGERPRINT_BASENAME = "run_fingerprint.json"
-FINGERPRINT_SCHEMA_VERSION = 1
+
+#: Bumped to 2 when the resolved joint prior constraints joined the semantic
+#: block.  A bump makes every PRE-BUMP fingerprint mismatch with an explicit
+#: "schema_version" diff rather than an unexplained digest difference, and that
+#: is the behaviour we want here rather than a silent pass: the change that
+#: motivated the new key (review F-115, GWTC-5's m_low pair moving from the
+#: ordered-triangle ``ordered_le`` map to Table 5's ``conditional_upper``) alters
+#: the sampled prior while leaving the labels, bounds and per-parameter prior
+#: families byte-identical -- so a pre-bump checkpoint of that model would have
+#: matched the post-change configuration exactly and resumed into a different
+#: target.  Runs of models with NO constraint groups are unaffected physically
+#: and can be continued with --resume_force after checking the diff says only
+#: schema_version.
+FINGERPRINT_SCHEMA_VERSION = 2
 
 # Full-file SHA-256 up to this size; sampled digest above it.
 _FULL_HASH_MAX_BYTES = 1 << 30
@@ -250,6 +266,7 @@ def build_run_fingerprint(
     prior_kinds=None,
     prior_overrides=None,
     fixed_parameter_values=None,
+    joint_constraints=None,
 ) -> dict:
     """Canonical fingerprint of everything that defines this run's target."""
     sem_opts = {}
@@ -284,6 +301,17 @@ def build_run_fingerprint(
         "lower_bound": [float(x) for x in lower_bound],
         "upper_bound": [float(x) for x in upper_bound],
         "prior_kinds": _jsonable(list(prior_kinds)) if prior_kinds is not None else None,
+        # The cube maps from resolve_joint_prior_constraints, as
+        # [[kind, [indices...]], ...].  ``prior_kinds`` covers only the
+        # PER-DIMENSION families; the joint constraints are what turns the box
+        # into the model's actual prior region and density, and two of them
+        # (ordered_le vs conditional_upper) share a region while carrying
+        # different densities.  Recorded verbatim rather than as a count so the
+        # resume diff names the map that changed.
+        "joint_constraints": (
+            _jsonable([[str(kind), list(idx)] for kind, idx in joint_constraints])
+            if joint_constraints else None
+        ),
         "prior_overrides": _jsonable(prior_overrides) if prior_overrides else None,
         "fixed_parameter_values": (
             _jsonable(fixed_parameter_values) if fixed_parameter_values else None
