@@ -103,6 +103,75 @@ def _require_chieff_spin_basis(f, path, reexport_hint):
         )
 
 
+#: Fraction of ``max_likelihood_variance`` the PE reweighting may consume before
+#: the loader calls it out.  Not a guard -- the guard lives in
+#: ``likelihood/selection.py`` and is enforced there.  This is visibility: a
+#: PE product that spends most of the budget makes the run's selection-N_eff
+#: requirement much harder to clear, and there was previously no way to see that
+#: short of the run failing.
+PE_VARIANCE_NOTICE_FRACTION = 0.20
+
+
+def _report_pe_weight_health(p_pe_2d, fmt, nEvents, nsamp, f_attrs=None):
+    """Print the PE reweighting's ESS and its share of the variance budget.
+
+    The reliability guard bounds the variance of the TOTAL log-likelihood
+    estimator, so every nat the PE weights spend RAISES the selection N_eff the
+    run must clear::
+
+        budget    = max_likelihood_variance - pe_variance_sum
+        threshold = max(5 N_obs, N_obs^2 / budget)
+
+    ``pe_variance_sum`` was threaded into that guard and reported only by the
+    LENSING CLI, so a standard dark-siren run could sit at three quarters of its
+    budget -- or fail the guard -- with no indication of why.  This is the
+    load-time half of ``scripts/pe_weight_diagnostics.py``.
+
+    What is reported is the PE-PRIOR share: the ESS of ``1/p_pe`` within each
+    event.  The run's true ``pe_variance_sum`` uses the full per-sample weight
+    (population, redshift prior, Jacobian) and is therefore LARGER.  The
+    reported number is cosmology-independent -- it is a property of the file --
+    which is exactly why it is worth printing before any sampling starts.
+
+    Scale-invariant in ``p_pe``: the estimator is a ratio of weight moments, so
+    it does not matter that this runs before the per-event normalisation.
+    Non-positive samples are zero-weighted, matching the likelihood's own
+    ``prior_wt > 0`` masking, and still count in ``n``.
+    """
+    good = p_pe_2d > 0.0
+    w = np.where(good, 1.0 / np.where(good, p_pe_2d, 1.0), 0.0)
+    sw = w.sum(axis=1)
+    sw2 = (w ** 2).sum(axis=1)
+    ess = np.where(sw2 > 0.0, sw ** 2 / np.where(sw2 > 0.0, sw2, 1.0), 0.0)
+    frac = ess / nsamp
+    var = np.maximum(
+        np.where(sw > 0.0, sw2 / np.where(sw > 0.0, sw ** 2, 1.0), 0.0)
+        - 1.0 / nsamp,
+        0.0,
+    )
+    total = float(var.sum())
+    attrs = f_attrs or {}
+    n_masked = int((~good).sum())
+    print(f"    [gwcat PE] format={fmt}  {nEvents:,} events x {nsamp:,} samples  "
+          f"H0={attrs.get('H0', '?')}  Om0={attrs.get('Om0', '?')}"
+          + (f"  ({n_masked} non-positive p_pe zero-weighted)" if n_masked else ""))
+    print(f"    PE reweighting ESS/nsamp: min={frac.min():.4f}  "
+          f"median={np.median(frac):.4f}  max={frac.max():.4f}  "
+          f"({int((frac < 0.1).sum())} events < 0.1)")
+    print(f"    pe_variance_sum = {total:.4f}  "
+          f"(PE-prior share of the total-variance budget; the run's value is "
+          "larger)")
+    if total > PE_VARIANCE_NOTICE_FRACTION:
+        worst = int(np.argmax(var))
+        print(f"    [!] that is {100.0 * total:.0f}% of a "
+              f"max_likelihood_variance of 1.0, so the selection N_eff this run "
+              f"must clear is inflated by ~{1.0 / max(1.0 - total, 1e-12):.2f}x. "
+              f"Event index {worst} alone contributes {var[worst]:.4f}. "
+              "See scripts/pe_weight_diagnostics.py; re-analysing or dropping "
+              "the worst events is usually cheaper than raising the budget.")
+    return total
+
+
 def _require_hdf5_members(f, datasets=(), attrs=(), conversion_hint=""):
     missing_datasets = [name for name in datasets if name not in f]
     missing_attrs = [name for name in attrs if name not in f.attrs]
@@ -218,6 +287,10 @@ def load_gw_samples(gw_path):
         _chi_in_ppe = bool(f.attrs["chi_eff_in_p_pe"])
         _chi_amax = float(f.attrs["chi_eff_amax"])
         is_mock = bool(f.attrs.get("mock_data", False))
+        _pe_attrs = {
+            "H0": f.attrs.get("pe_cosmology_H0", "?"),
+            "Om0": f.attrs.get("pe_cosmology_Om0", "?"),
+        }
 
     # ------------------------------------------------------------
     # p_pe handling
@@ -246,6 +319,7 @@ def load_gw_samples(gw_path):
     # introduce a factor of nEvents into every per-event sum, biasing
     # log μ and therefore the posterior on H0.
     p_pe = p_pe.reshape(nEvents, nsamp)
+    _report_pe_weight_health(p_pe, fmt, nEvents, nsamp, f_attrs=_pe_attrs)
     p_pe = p_pe / p_pe.sum(axis=1, keepdims=True)
     p_pe = p_pe.flatten()
 
