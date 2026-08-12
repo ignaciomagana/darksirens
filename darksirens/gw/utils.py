@@ -194,8 +194,7 @@ def load_gw_samples(gw_path):
 
     ``gw_path`` must point to a file with ``format_version`` in
     {"gwcat-1.0", "gwcat-pe-2.0"} produced by
-    ``gwcat.GWCatalog._to_darksirens_format(...)`` / the versioned export
-    layer.  A ``gwcat-pe-2.0`` file is only accepted when its ``spin_basis``
+    ``gwcat.GWCatalog.to_darksirens(...)`` / the versioned export layer.  A ``gwcat-pe-2.0`` file is only accepted when its ``spin_basis``
     attr is ``"chieff"`` (the sole basis array-compatible with darksirens'
     chi_eff-based likelihood); the ``"component"`` and ``"chieff_chip"`` bases
     are rejected with an actionable error.  The loader intentionally rejects
@@ -217,9 +216,20 @@ def load_gw_samples(gw_path):
         Number of posterior samples per event.
     """
 
+    # Name the FROZEN v1 entry point, not the versioned export.  gwcat's
+    # ``export()`` resolves its parameter space from a registry at call time,
+    # and that registry's default is now ``component`` -- which this loader
+    # rejects -- so ``export(path)`` with no basis produces a file that cannot
+    # be loaded here.  ``to_darksirens`` takes no spin-basis argument at all and
+    # is therefore immune to that default moving again.  (The old
+    # ``_to_darksirens_format`` spelling still works but is a deprecated alias
+    # scheduled for removal, so pointing users at it in an error message would
+    # hand them a DeprecationWarning today and a broken instruction later.)
     conversion_hint = (
-        "Create the PE file with "
-        "gwcat.GWCatalog._to_darksirens_format(...)."
+        "Create the PE file with gwcat.GWCatalog.to_darksirens(...), or with "
+        "the versioned export pinned to the chi_eff basis: "
+        "GWCatalog.export(path, spin_basis=\"chieff\") -- export() defaults to "
+        "the component basis, which this loader rejects."
     )
     required_datasets = (
         "ra",
