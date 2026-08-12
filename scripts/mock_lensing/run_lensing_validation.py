@@ -21,7 +21,17 @@ ROOT = Path(__file__).resolve().parents[2]
 GEN = ROOT / "scripts" / "mock_lensing" / "generate_mock_lensing.py"
 
 PROFILES = {
-    "tiny": dict(n_universe=2500, n_sing=1, n_pair=2, nsamp=48, n_unlensed_inj=800, n_lensed_inj=1000, pe_max=48),
+    # Injection counts sized so the selection reliability guard clears across the
+    # prior in EVERY case this script runs, --run_marginalized included.  At the
+    # old 800/1000 the fixed-partition cases passed but marginalize_exact aborted
+    # outright: the exact partition sum spends its variance budget over many more
+    # pair estimators, so sigma^2(lnL) breached max_likelihood_variance at the
+    # prior midpoint and at all 32 fallback draws ("no guard-clear evaluation
+    # point found"). That is the guard working -- the mock was too small to
+    # support the marginalized likelihood -- so the profile, not the guard, is
+    # what had to move.  Same fix and same counts as tiny_evidence in
+    # run_lensing_evidence_validation.py.
+    "tiny": dict(n_universe=4000, n_sing=1, n_pair=2, nsamp=48, n_unlensed_inj=4800, n_lensed_inj=4800, pe_max=48),
     "small": dict(n_universe=8000, n_sing=3, n_pair=3, nsamp=96, n_unlensed_inj=2500, n_lensed_inj=3000, pe_max=96),
 }
 
