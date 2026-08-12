@@ -157,3 +157,62 @@ def test_cli_writes_json(tmp_path):
     payload = json.loads(out_json.read_text())
     assert payload["n_events"] == 2
     assert "pe_variance_sum" in payload and "threshold" in payload
+
+
+# --- the loader's own report (the same estimator, surfaced automatically) ----
+
+
+def test_loader_report_matches_the_standalone_estimator():
+    """`load_gw_samples`'s load-time report must agree with the script exactly.
+
+    Two implementations of the same quantity is how they drift, so this pins
+    them together: whatever the diagnostic script computes for a file, the
+    loader must print the same pe_variance_sum for it.
+    """
+    from darksirens.gw.utils import _report_pe_weight_health
+
+    rng = np.random.default_rng(4)
+    p = np.exp(rng.normal(0.0, 1.2, size=(11, 128)))    # genuinely degenerate
+    expected = pwd.per_event_weight_stats(p)["variance"].sum()
+    got = _report_pe_weight_health(p, "gwcat-1.0", 11, 128)
+    assert got == pytest.approx(float(expected), rel=1e-12)
+
+
+def test_loader_report_is_invariant_to_per_event_rescaling():
+    """It runs BEFORE the per-event normalisation, so it must not depend on it.
+
+    The estimator is a ratio of weight moments, so scaling each event's p_pe by
+    its own constant cannot change the answer -- which is what makes it safe to
+    report at either point in the loader.
+    """
+    from darksirens.gw.utils import _report_pe_weight_health
+
+    rng = np.random.default_rng(9)
+    p = np.exp(rng.normal(0.0, 1.0, size=(6, 64)))
+    scaled = p / p.sum(axis=1, keepdims=True)
+    a = _report_pe_weight_health(p, "f", 6, 64)
+    b = _report_pe_weight_health(scaled, "f", 6, 64)
+    assert a == pytest.approx(b, rel=1e-12)
+
+
+def test_loader_report_flags_a_budget_hog(capsys):
+    """Above the notice fraction the operator must be told, with a number."""
+    from darksirens.gw.utils import _report_pe_weight_health
+
+    n = 64
+    p = np.full((40, n), 1e6)
+    p[:, 0] = 1.0                       # one dominant sample per event
+    total = _report_pe_weight_health(p, "gwcat-1.0", 40, n)
+    out = capsys.readouterr().out
+    assert total > 0.2
+    assert "[!]" in out and "inflated by" in out
+    assert "pe_weight_diagnostics" in out
+
+
+def test_loader_report_stays_quiet_on_a_healthy_file(capsys):
+    from darksirens.gw.utils import _report_pe_weight_health
+
+    _report_pe_weight_health(np.full((5, 32), 0.5), "gwcat-1.0", 5, 32)
+    out = capsys.readouterr().out
+    assert "[!]" not in out
+    assert "pe_variance_sum = 0.0000" in out
