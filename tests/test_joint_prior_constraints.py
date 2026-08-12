@@ -344,3 +344,123 @@ def test_numpyro_reports_that_it_leaves_joint_constraints_to_rejection(capsys):
     out = capsys.readouterr().out
     assert "joint prior constraints ball3(0, 1, 2)" in out
     assert "REJECTION" in out
+
+
+# --- numpyro samples conditional_upper exactly, not by rejection ------------
+
+
+def _numpyro_opts(**kw):
+    from types import SimpleNamespace
+
+    base = dict(
+        seed=1, show_progress=False, nuts_warmup=600, nuts_samples=4000,
+        nuts_chains=1, nuts_target_accept=0.9, nuts_max_tree_depth=10,
+        nuts_chain_method="sequential", nuts_init_tries=32,
+        nuts_init_seed_offset=100_000,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _flat_prior_run(joint_constraints, lo=3.0, hi=10.0):
+    """NUTS against a FLAT likelihood, so the samples ARE the prior."""
+    from darksirens.inference.sampling import run_sampler
+
+    labels = ["m2_low", "m1_low"]
+    lower, upper = jnp.array([lo, lo]), jnp.array([hi, hi])
+    res = run_sampler(
+        "numpyro", lambda th: jnp.asarray(0.0), None, labels, lower, upper,
+        _numpyro_opts(), prior_kinds=[("uniform", None, None)] * 2,
+        joint_constraints=joint_constraints,
+    )
+    s = np.asarray(res["samples"])
+    return s[:, 0], s[:, 1]
+
+
+def test_numpyro_reproduces_the_declared_conditional_prior():
+    """NUTS must sample Table 5's conditional, not the uniform triangle.
+
+    Rejection can restrict a REGION but cannot impose a DENSITY, so the
+    independent-sites fallback would give the uniform triangle -- whose
+    m1_low marginal is p ~ (m1_low - 3), i.e. CDF (x-3)^2/49 rather than
+    (x-3)/7.  Sampling m2_low against a dependent upper bound reproduces the
+    declared prior exactly; this test is what separates the two.
+    """
+    pytest.importorskip("numpyro")
+    lo, hi = 3.0, 10.0
+    m2, m1 = _flat_prior_run([("conditional_upper", (0, 1))], lo, hi)
+
+    assert bool((m2 <= m1 + 1e-9).all()), "support m2_low <= m1_low violated"
+    for v in (5.0, 6.5, 8.0):
+        got = float((m1 <= v).mean())
+        declared = (v - lo) / (hi - lo)
+        uniform_triangle = declared ** 2
+        assert abs(got - declared) < 0.03, (
+            f"m1_low CDF at {v}: {got:.4f}, declared {declared:.4f} "
+            f"(the uniform triangle would give {uniform_triangle:.4f})"
+        )
+        # And it must be nowhere near what rejection would have produced.
+        assert abs(got - uniform_triangle) > 0.05
+
+    near = np.abs(m1 - 8.0) < 0.3
+    frac = (m2[near] - lo) / (m1[near] - lo)
+    assert abs(float(frac.mean()) - 0.5) < 0.05, (
+        "m2_low | m1_low is not uniform on (lo, m1_low)"
+    )
+
+
+def test_conditional_upper_costs_numpyro_no_rejection_wall():
+    """The dependent bound is reparameterized, so the pair adds no -inf wall.
+
+    This is why conditional_upper is handled rather than merely warned about:
+    the rejection fallback would put a gradient-free boundary in NUTS's path
+    AND get the density wrong, where the dependent site gets both right.
+    """
+    pytest.importorskip("numpyro")
+    m2, m1 = _flat_prior_run([("conditional_upper", (0, 1))])
+    # A flat target inside a reparameterized box should be essentially
+    # divergence-free; a hard wall shows up as a fat divergence fraction.
+    assert bool(np.isfinite(m1).all()) and bool(np.isfinite(m2).all())
+    assert m1.std() > 1.0, "m1_low barely moved; the sampler was stuck"
+
+
+def test_numpyro_notice_excludes_conditional_upper_from_the_rejection_list(capsys):
+    """The rejection warning must not claim a constraint it no longer leaves
+    to rejection -- and must still fire for the ones it does."""
+    pytest.importorskip("numpyro")
+    from darksirens.inference.sampling import run_sampler
+
+    labels = ["a", "b", "c", "d"]
+    lower = np.array([3.0, 3.0, 0.0, 0.0])
+    upper = np.array([10.0, 10.0, 1.0, 1.0])
+    run_sampler(
+        "numpyro", lambda th: jnp.asarray(0.0), None, labels,
+        jnp.asarray(lower), jnp.asarray(upper),
+        _numpyro_opts(nuts_warmup=2, nuts_samples=2, nuts_max_tree_depth=3),
+        prior_kinds=[("uniform", None, None)] * 4,
+        joint_constraints=[("conditional_upper", (0, 1)), ("simplex", (2, 3))],
+    )
+    out = capsys.readouterr().out
+    assert "simplex(2, 3)" in out and "REJECTION" in out
+    # The conditional pair is handled exactly, so it must not be listed as
+    # rejection-enforced nor trigger the "prefer dynesty" advice.
+    assert "conditional_upper(0, 1)" not in out
+    assert "DEPENDENT numpyro site" in out
+
+
+def test_chained_conditional_upper_is_refused_rather_than_mis_sampled():
+    """`model` resolves the dependency in one pass, so a chain (i<-j, j<-k)
+    could reference an unbound partner. Refuse instead."""
+    pytest.importorskip("numpyro")
+    from darksirens.inference.sampling import run_sampler
+
+    with pytest.raises(ValueError, match="chained conditional_upper"):
+        run_sampler(
+            "numpyro", lambda th: jnp.asarray(0.0), None, ["a", "b", "c"],
+            jnp.array([3.0, 3.0, 3.0]), jnp.array([10.0, 10.0, 10.0]),
+            _numpyro_opts(nuts_warmup=2, nuts_samples=2),
+            prior_kinds=[("uniform", None, None)] * 3,
+            joint_constraints=[
+                ("conditional_upper", (0, 1)), ("conditional_upper", (1, 2)),
+            ],
+        )

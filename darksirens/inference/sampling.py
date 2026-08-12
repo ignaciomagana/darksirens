@@ -560,21 +560,44 @@ def run_sampler(method, likelihood, prior_transform, labels,
         # whose gradient is NaN, so divergences become structural rather than
         # diagnostic.
         #
-        # conditional_upper is DIFFERENT and worse.  Its cube map is a
-        # triangular inverse-CDF, not a fold: it puts the declared conditional
-        # density x_i | x_j ~ U(lo, x_j) on the ordered triangle.  Independent
-        # uniform sites plus rejection can only reproduce the region, never
-        # that 1/(x_j - lo) tilt, so NUTS samples the UNIFORM triangle -- a
-        # genuinely different prior (2x the density at the top of the x_j
-        # range, 0.14x near the bottom for the GWTC-5 m_low pair), hence a
-        # different posterior and a different logZ.  Name that separately
-        # instead of leaving the operator to read it out of a corner plot.
-        if joint_constraints:
-            _kinds_present = sorted({kind for kind, _ in joint_constraints})
+        # conditional_upper is the exception: rejection could not have handled
+        # it at all (its cube map is a triangular inverse-CDF, not a fold, so
+        # restricting the region would still leave the UNIFORM triangle rather
+        # than the declared 1/(x_j - lo) tilt), so it is NOT left to rejection
+        # -- `model` samples it as a dependent site instead and reproduces the
+        # conditional exactly.  It is excluded from the warning below, and from
+        # the "prefer dynesty" advice, because for this kind NUTS is not the
+        # degraded path: the dependent bound is reparameterized away, so the
+        # pair contributes no -inf wall at all.
+        # Which sites need the dependent treatment.  The conditioning
+        # parameter must be sampled before the conditioned one, which need not
+        # be their order in `labels`.
+        _cond_pairs = tuple(
+            (int(idx[0]), int(idx[1]))
+            for kind, idx in (joint_constraints or ())
+            if kind == "conditional_upper" and len(idx) == 2
+        )
+        _conditioned = {i for i, _ in _cond_pairs}
+        _chained = [(i, j) for i, j in _cond_pairs if j in _conditioned]
+        if _chained:
+            # Would need a topological sort of the dependency graph; the loop
+            # in `model` below is single-pass. No model declares a chain, so
+            # refuse rather than silently sample against an unbound partner.
+            raise ValueError(
+                "NumPyro sampler: chained conditional_upper constraints "
+                f"{_chained} are not supported (a conditioning parameter is "
+                "itself conditioned). Use --sampler dynesty/tinyns, whose "
+                "cube map composes them, or declare the chain differently."
+            )
+        _rejected = tuple(
+            (kind, idx) for kind, idx in (joint_constraints or ())
+            if kind != "conditional_upper"
+        )
+        if _rejected:
+            _kinds_present = sorted({kind for kind, _ in _rejected})
             print(
                 "  [!] joint prior constraints "
-                + ", ".join(f"{kind}{tuple(idx)}"
-                            for kind, idx in joint_constraints)
+                + ", ".join(f"{kind}{tuple(idx)}" for kind, idx in _rejected)
                 + " are enforced for NUTS by likelihood-side REJECTION (the "
                 "nested samplers reparameterize them into the unit cube "
                 "instead). The posterior is the same truncated measure, but "
@@ -585,17 +608,17 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 + " models.",
                 flush=True,
             )
-            if "conditional_upper" in _kinds_present:
-                print(
-                    "  [!] conditional_upper is a CONDITIONAL prior, not just "
-                    "a support restriction: rejection reproduces its region "
-                    "but not its density, so this NUTS run samples the "
-                    "UNIFORM ordered triangle instead of the declared "
-                    "x_i | x_j ~ U(lo, x_j). That is a different prior, hence "
-                    "a different posterior and logZ -- use --sampler "
-                    "dynesty/tinyns to sample the model as declared.",
-                    flush=True,
-                )
+        if _cond_pairs:
+            print(
+                "  [i] conditional_upper "
+                + ", ".join(f"({labels[i]} | {labels[j]})" for i, j in _cond_pairs)
+                + " is sampled as a DEPENDENT numpyro site, x_i ~ U(lo, x_j), "
+                "so NUTS reproduces the declared conditional exactly and the "
+                "pair adds no -inf wall. Rejection could not have done this: "
+                "it restricts the region but leaves the uniform triangle, "
+                "which is a different prior.",
+                flush=True,
+            )
 
         def _site(i, name):
             # Per-parameter prior, matching make_prior_transform's PER-DIMENSION
@@ -630,11 +653,38 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 return numpyro.sample(name, dist.Beta(1.0, float(kscale or 1.0)))
             return numpyro.sample(name, dist.Uniform(low=lower[i], high=upper[i]))
 
+        def _conditional_site(i, j, sites):
+            """``x_i | x_j ~ U(lo_i, x_j)`` as a DEPENDENT numpyro site.
+
+            ``dist.Uniform`` accepts a traced upper bound, and ``biject_to``
+            on the resulting interval carries the ``x_j``-dependent Jacobian
+            into the log-density, so NUTS reproduces the declared conditional
+            exactly -- and does it in unconstrained space, with no -inf wall
+            for this pair at all.  That is strictly better than the rejection
+            fallback the other constraint kinds get: rejection can restrict a
+            REGION but cannot impose a DENSITY, so it would sample the uniform
+            triangle instead of the ``1/(x_j - lo)`` tilt Table 5 declares.
+            """
+            return numpyro.sample(
+                labels[i], dist.Uniform(low=lower[i], high=sites[j])
+            )
+
         def model():
             # Independent priors per parameter (uniform unless a parameter
             # declares otherwise via prior_kinds).  NumPyro maps to an
             # unconstrained space internally so NUTS samples there.
-            theta_parts = [_site(i, name) for i, name in enumerate(labels)]
+            # conditional_upper members are the exception: they are sampled
+            # AFTER their conditioning partner, against a dependent bound.
+            sites = {
+                i: _site(i, name)
+                for i, name in enumerate(labels)
+                if i not in _conditioned
+            }
+            for i, j in _cond_pairs:
+                sites[i] = _conditional_site(i, j, sites)
+            # Stack in LABEL order regardless of sampling order, so theta,
+            # init_values and theta0 stay aligned with `labels`.
+            theta_parts = [sites[i] for i in range(len(labels))]
             theta = jnp.stack(theta_parts) if theta_parts else jnp.array([])
             log_l = likelihood(theta)
             numpyro.deterministic("log_likelihood", log_l)
@@ -681,6 +731,23 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 )
             init_values = {name: best_theta[i] for i, name in enumerate(labels)}
 
+        if _cond_pairs:
+            # A conditional_upper member's support is the OPEN interval
+            # (lo_i, x_j), and numpyro initializes by mapping the start point
+            # through biject_to's inverse -- which is +-inf on either edge.
+            # Both members share bounds, so the plain midpoint start puts
+            # x_i EXACTLY on x_j and NUTS would begin at an infinite
+            # unconstrained coordinate; the random-restart search above can
+            # also land on x_i > x_j, which is outside the support entirely
+            # (a hard error now, where the rejection fallback only returned
+            # -inf).  Pull the conditioned member strictly inside.
+            for _i, _j in _cond_pairs:
+                _li, _ui = labels[_i], labels[_j]
+                _lo_i = float(lower[_i])
+                _hi_i = float(init_values[_ui])
+                _mid = _lo_i + 0.5 * (_hi_i - _lo_i)
+                if not (_lo_i < float(init_values[_li]) < _hi_i):
+                    init_values[_li] = _mid
         theta0 = jnp.asarray([init_values[name] for name in labels], dtype=lower.dtype)
         log_l0 = likelihood(theta0)
 
