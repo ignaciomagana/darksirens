@@ -174,7 +174,13 @@ def selection_neff(selection_path: Path, pop_model: str, H0: float, Om0: float,
     safe = jnp.where(finite, ldw, -1e30)
     log_mu, Neff, _ = _lse_to_log_mu_neff(
         logsumexp(safe), logsumexp(2.0 * safe), meta["ndraw"])
+    # log_mu is reported for diagnosis but is NOT portable: it carries the
+    # population normalisation, which is process-state dependent.  The constant
+    # cancels within a likelihood evaluation (c^N_obs in the numerator against
+    # c^N_obs from mu^N_obs), so posteriors, logZ and N_eff are all unaffected --
+    # but two log_mu values from different processes are not comparable.
     meta.update(n_finite_weights=int(finite.sum()), log_mu=float(log_mu),
+                log_mu_comparable_across_processes=False,
                 Neff=float(Neff), pop_model=pop_model, H0=H0, Om0=Om0,
                 w0=w0, wa=wa, canary_log_p=canary,
                 n_pop_out_of_support=n_out_of_support)
@@ -250,7 +256,8 @@ def main(argv=None) -> int:
           f"{m['canary_log_p']:.2f}  [float64 OK]")
     print(f"  pop out-of-support       {m['n_pop_out_of_support']:,}"
           "   (underflow edge, NOT m_max: this preset's peak is untapered)")
-    print(f"  log_mu                   {m['log_mu']:+.4f}")
+    print(f"  log_mu                   {m['log_mu']:+.4f}"
+          "   [NOT comparable across processes -- see below]")
     print(f"  selection N_eff          {m['Neff']:,.0f}")
     print()
     print(f"  sigma^2 = pe + selection = total   (cap {v['max_likelihood_variance']:g})")
@@ -267,6 +274,16 @@ def main(argv=None) -> int:
     print("  N_eff depends on the population model, the redshift prior and the")
     print("  parameter point -- it is not a property of the file. This is the")
     print("  comoving-volume (spectral-siren) prior at one fiducial point.")
+    print()
+    print("  log_mu carries the population's normalisation constant, which is")
+    print("  process-state dependent (measured: a factor 1.9 between two import")
+    print("  orders). Do NOT compare this log_mu against one from inside a run,")
+    print("  from another process, or against a stored reference. Within a single")
+    print("  likelihood evaluation the constant cancels exactly -- it multiplies")
+    print("  each per-event numerator by c and mu by c, giving c^N_obs on both")
+    print("  sides -- so posteriors and logZ are unaffected. N_eff is likewise")
+    print("  scale-invariant. It is only this reported log_mu, taken in")
+    print("  isolation, that is not a portable number.")
     if m["spin_basis"] != "chieff":
         print()
         print(f"  [!] spin_basis={m['spin_basis']!r}: the loader REJECTS this basis, so")
