@@ -22,6 +22,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+#: numpy renamed ``trapz`` to ``trapezoid`` in 2.0 and removed the old
+#: spelling; this file is checked on both majors (tests/fast_subset.txt
+#: rejects files that pin one of them).
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 from darksirens.gw.populations.registry import (
     get_fixed_population_params,
     get_model,
@@ -233,7 +238,7 @@ def test_analytic_normaliser_matches_dense_quadrature():
     ]
     for theta in cases:
         analytic = float(mass._norm(theta))
-        quad = np.trapz(np.asarray(mass._eval_unnorm(jnp.asarray(grid), theta)),
+        quad = _trapezoid(np.asarray(mass._eval_unnorm(jnp.asarray(grid), theta)),
                         grid)
         assert analytic == pytest.approx(quad, rel=2.0e-4), np.asarray(theta)
 
@@ -243,7 +248,7 @@ def test_the_model_density_integrates_to_one():
     grid = np.linspace(0.5, 400.0, 2_000_001)
     theta = _mass_theta()
     dens = np.asarray(mass(jnp.asarray(grid), theta))
-    assert np.trapz(dens, grid) == pytest.approx(1.0, rel=2.0e-4)
+    assert _trapezoid(dens, grid) == pytest.approx(1.0, rel=2.0e-4)
 
 
 # ---------------------------------------------------------------------------
