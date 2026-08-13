@@ -58,7 +58,23 @@ else:
         return iterable
 
 try:
+    from gwcat.spin import ChiEffPrior as _ChiEffPrior
     from gwcat.spin import chi_eff_prior_logprob
+
+    # Convention guard (GW-03/DS-06): this module treats an out-of-support
+    # chi_eff as ZERO density (-inf log), matching gwcat's refusals-not-floors
+    # convention.  A pre-GW-03 gwcat instead floors at -50, i.e. density
+    # ~2e-22 -- in a DENOMINATOR, a weight ~1e21 above the median -- so the
+    # two conventions must never be silently mixed.  ``support`` was added by
+    # the same gwcat change that removed the floor.
+    if not hasattr(_ChiEffPrior, "support"):
+        raise ImportError(
+            "the installed gwcat predates the -inf out-of-support convention "
+            "(gwcat GW-03: ChiEffPrior.support + logprob returning -inf); "
+            "darksirens no longer floors log-densities at -50, so mixing the "
+            "two conventions would disagree about what an out-of-support "
+            "sample means. Upgrade gwcat."
+        )
 except ModuleNotFoundError:
     def chi_eff_prior_logprob(*_args, **_kwargs):
         raise ModuleNotFoundError(
@@ -471,9 +487,14 @@ def load_gw_store(gw_path) -> GWStore:
         "m2src": m2source,
     }
     if not _chi_in_ppe:
-        # chi_eff not yet in p_pe — apply it now
+        # chi_eff not yet in p_pe — apply it now.  gwcat's convention (GW-03)
+        # is -inf outside the prior support: such a sample gets p_pe = 0,
+        # which the likelihood masks (prior_wt > 0) while it still counts in
+        # n.  The old -50 floor instead handed it density 2e-22 in a
+        # denominator -- a weight ~1e21 above the median.  The masked count
+        # is reported by _report_pe_weight_health below.
         logp_chi = chi_eff_prior_logprob(chieff, m1source, m2source, amax=_chi_amax)
-        p_pe = p_pe * np.exp(np.clip(logp_chi, -50.0, None))
+        p_pe = p_pe * np.exp(logp_chi)
 
     # Normalise per event so that each event's importance weights are
     # independent.  The per-event marginal likelihood is
@@ -654,8 +675,24 @@ def load_selection_store(file, allow_invalid_spin_swap=False) -> SelectionStore:
                 )
             _amax = float(f.attrs["chi_eff_amax"])
             log_p_chi = chi_eff_prior_logprob(chieffsels, m1src_sel, m2src_sel, amax=_amax)
-            safe_log_p_chi = np.clip(log_p_chi, a_min=-50.0, a_max=None)
-            pdraw_sel = pdraw_sel * np.exp(safe_log_p_chi)
+            # GW-03 convention: -inf means zero density, and a DETECTED
+            # injection with zero draw density must not be floored or
+            # silently dropped -- Ndraw is the campaign's fixed total, so
+            # excluding one biases mu low while flooring hands it a weight
+            # ~1e21 above the median.  Refuse instead: the injection lies
+            # outside the analytic chi_eff prior this swap assumes, so the
+            # swap itself is invalid for this file.
+            n_out = int((~np.isfinite(log_p_chi)).sum())
+            if n_out:
+                raise RuntimeError(
+                    f"Selection file {file!r}: {n_out} detected injection(s) "
+                    f"fall outside the chi_eff prior support (amax={_amax}) "
+                    "that chi_eff_swap_applied=False asks this loader to fold "
+                    "into pdraw. The swap is invalid for this file; re-export "
+                    "with the swap applied by gwcat, or with a basis that "
+                    "does not assume it."
+                )
+            pdraw_sel = pdraw_sel * np.exp(log_p_chi)
 
         n_det = len(pdraw_sel)
         _basis = _decode_hdf5_attr(f.attrs.get("spin_basis", "chieff"))

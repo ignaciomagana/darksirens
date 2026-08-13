@@ -224,14 +224,20 @@ def chi_eff_prior_logpdf(
 ) -> jnp.ndarray:
     """gwcat's ``chi_eff_prior_logprob``: log of :func:`chi_eff_prior_prob`.
 
-    Zero density is reported as gwcat reports it, clipped at -50, so this
-    stays a bit-for-bit port of the reference implementation.  The likelihood
-    does NOT use that clip as a density: see ``_event_ldw``, which masks
-    zero-prior draws out of the integral entirely (a -50 floor would hand
-    e^50 of importance weight to flow density outside the PE support).
+    Zero density is reported as gwcat reports it since GW-03: ``-inf`` where
+    the interpolated probability is zero (refusals, not floors; previously
+    the sentinel -50).  Like the reference, NO support mask is applied here:
+    ``jnp.interp`` clamps ``|chi_eff| > amax`` to the boundary column, whose
+    value is only zero to the accuracy of gwcat's convolution -- identical
+    behaviour to ``ChiEffPrior.logprob``, pinned bit-for-bit by
+    ``test_chi_prior_port_matches_gwcat``.  Support masking stays the
+    caller's job (:func:`chi_eff_prior_in_support`); see ``_event_ldw``,
+    which masks zero-prior draws out of the integral entirely.
     """
     p = chi_eff_prior_prob(q_frac, chieff, q_grid, chi_grid, table)
-    return jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -50.0)
+    return jnp.where(
+        p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf
+    )
 
 
 def _parse_pe_cosmology(opts) -> tuple[float, float]:

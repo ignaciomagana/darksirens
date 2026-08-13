@@ -627,3 +627,54 @@ def test_file_contract_rejects_non_uniform_campaign(tmp_path):
     report = file_contract.validate_selection_inputs(path)
     assert not report["ok"]
     assert any("injected_spin_uniform_isotropic" in e for e in report["errors"])
+
+
+# ----------------------------------------------------------------------------
+# -50 -> -inf convention (DS-06, mirroring gwcat GW-03): zero density is
+# zero, not 2e-22; refusals, not floors.
+# ----------------------------------------------------------------------------
+def test_out_of_support_pe_sample_gets_zero_weight(tmp_path, monkeypatch):
+    """A PE sample outside the chi_eff prior support gets p_pe = 0 (masked by
+    the likelihood, still counted in n) -- not the old floor exp(-50)."""
+    from darksirens.gw import utils as gw_utils
+
+    def fake_logprob(chieff, m1src, m2src, amax=0.99):
+        logp = np.full(np.shape(chieff), np.log(2.0))
+        logp[0] = -np.inf
+        return logp
+
+    monkeypatch.setattr(gw_utils, "chi_eff_prior_logprob", fake_logprob)
+    path = tmp_path / "pe_out_of_support.h5"
+    _write_pe(path, format_version="gwcat-1.0", chi_eff_in_p_pe=False)
+    p_pe = np.asarray(load_gw_samples(path)[6])
+    assert p_pe[0] == 0.0
+    assert np.all(p_pe[1:] > 0.0)
+
+
+def test_out_of_support_injection_refused_on_swap(tmp_path, monkeypatch):
+    """A DETECTED injection at zero draw density cannot be floored (weight
+    ~1e21 above median) or dropped (Ndraw fixed -> mu biased low): refuse."""
+    from darksirens.gw import utils as gw_utils
+
+    def fake_logprob(chieff, m1src, m2src, amax=0.99):
+        logp = np.full(np.shape(chieff), np.log(2.0))
+        logp[-1] = -np.inf
+        return logp
+
+    monkeypatch.setattr(gw_utils, "chi_eff_prior_logprob", fake_logprob)
+    path = tmp_path / "sel_out_of_support.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0",
+                     chi_eff_swap_applied=False)
+    with pytest.raises(RuntimeError, match="outside the chi_eff prior support"):
+        load_selection_samples(path)
+
+
+def test_gwcat_new_convention_api_present():
+    """The import-time guard's premise: the linked gwcat exposes the GW-03
+    API (support predicate + -inf logprob), so the two packages agree on
+    what an out-of-support sample means."""
+    gwcat_spin = pytest.importorskip("gwcat.spin")
+    assert hasattr(gwcat_spin.ChiEffPrior, "support")
+    logp = np.asarray(gwcat_spin.chi_eff_prior_logprob(
+        np.array([0.0]), np.array([30.0]), np.array([25.0]), amax=0.99))
+    assert np.isfinite(logp).all()
