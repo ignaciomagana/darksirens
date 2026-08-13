@@ -101,10 +101,10 @@ def test_build_cli_then_load_into_inference(survey_path, tmp_path, monkeypatch):
 
     pe_ra, pe_dec = _angles(pe_pix)
     sel_ra, sel_dec = _angles(sel_pix)
-    monkeypatch.setattr(data_module.loaders, "load_gw_samples", lambda _p: (
+    monkeypatch.setattr(data_module.loaders, "load_gw_samples", lambda _p, **_kw: (
         np.array([36.0, 38.0]), np.array([28.8, 30.4]), np.array([460.0, 500.0]),
         np.array([0.0, 0.02]), pe_ra, pe_dec, np.ones(2), 1, 2))
-    monkeypatch.setattr(data_module.loaders, "load_selection_samples", lambda _p: (
+    monkeypatch.setattr(data_module.loaders, "load_selection_samples", lambda _p, **_kw: (
         np.array([34.0, 40.0]), np.array([27.2, 32.0]), np.array([430.0, 530.0]),
         np.zeros(2), sel_ra, sel_dec, np.ones(2), 2))
 
@@ -281,10 +281,10 @@ def test_pixelate_writes_marks_and_load_all_data_centers_them(tmp_path, monkeypa
 
     pe_ra, pe_dec = _ang(pe_pix)
     sel_ra, sel_dec = _ang(sel_pix)
-    monkeypatch.setattr(data_module.loaders, "load_gw_samples", lambda _p: (
+    monkeypatch.setattr(data_module.loaders, "load_gw_samples", lambda _p, **_kw: (
         np.array([36.0]), np.array([28.8]), np.array([460.0]), np.array([0.0]),
         pe_ra, pe_dec, np.ones(1), 1, 1))
-    monkeypatch.setattr(data_module.loaders, "load_selection_samples", lambda _p: (
+    monkeypatch.setattr(data_module.loaders, "load_selection_samples", lambda _p, **_kw: (
         np.array([34.0, 40.0]), np.array([27.2, 32.0]), np.array([430.0, 530.0]),
         np.zeros(2), sel_ra, sel_dec, np.ones(2), 2))
 
