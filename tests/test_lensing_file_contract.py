@@ -8,14 +8,25 @@ from darksirens.lensing import file_contract
 
 
 def _write_pe(path: Path, n_events=2, nsamp=3):
+    # Loader-complete on purpose: the preflight now enforces the same
+    # requirement table as load_gw_samples (review DS-02), so a fixture
+    # carrying only the old five-dataset subset would (correctly) fail it.
     with h5py.File(path, "w") as f:
         f.attrs["format_version"] = "observed-lensing-pe-1.0"
         f.attrs["event_indexing"] = "global"
         f.attrs["n_events"] = n_events
         f.attrs["nobs"] = n_events
         f.attrs["nsamp"] = nsamp
-        for name in ("m1det", "m2det", "dL", "chieff", "p_pe"):
-            f.create_dataset(name, data=np.ones(n_events * nsamp))
+        f.attrs["pe_cosmology_H0"] = 67.7
+        f.attrs["pe_cosmology_Om0"] = 0.31
+        f.attrs["chi_eff_in_p_pe"] = True
+        f.attrs["chi_eff_amax"] = 0.99
+        n = n_events * nsamp
+        for name in ("m1det", "m2det", "dL", "p_pe", "m1src", "m2src"):
+            f.create_dataset(name, data=np.ones(n))
+        f.create_dataset("chieff", data=np.zeros(n))
+        f.create_dataset("ra", data=np.linspace(0.1, 1.0, n))
+        f.create_dataset("dec", data=np.linspace(-0.5, 0.5, n))
 
 
 def _write_catalog(path: Path, include_truth=True):
@@ -92,3 +103,101 @@ def test_canonical_lensed_injection_selection_file_is_accepted(tmp_path):
     assert report["ok"]
     assert report["summary"]["selection_kind"] == "lensed"
     assert report["summary"]["canonical_lensed_injections"] is True
+
+
+def test_preflight_and_loader_agree_on_requirements(tmp_path):
+    """Property test over the shared table: dropping ANY required dataset or
+    attr from a selection file must fail the preflight (review DS-02 -- the
+    old preflight passed files that then failed at load on m1src/m2src)."""
+    from darksirens.gw import store_contract
+
+    contract = store_contract.contract_for("gwcat-selection-1.0")
+
+    def _write_full(path):
+        with h5py.File(path, "w") as f:
+            f.attrs["format_version"] = "gwcat-selection-1.0"
+            f.attrs["ndraw"] = 100
+            f.attrs["chi_eff_swap_applied"] = True
+            n = 4
+            for name in contract.datasets:
+                if name == "chieff":
+                    f.create_dataset(name, data=np.zeros(n))
+                elif name in ("ra", "dec"):
+                    f.create_dataset(name, data=np.linspace(0.1, 0.9, n))
+                else:
+                    f.create_dataset(name, data=np.ones(n))
+
+    full = tmp_path / "sel_full.h5"
+    _write_full(full)
+    assert file_contract.validate_selection_inputs(full)["ok"]
+
+    for missing in contract.datasets:
+        path = tmp_path / f"sel_missing_{missing}.h5"
+        _write_full(path)
+        with h5py.File(path, "a") as f:
+            del f[missing]
+        report = file_contract.validate_selection_inputs(path)
+        assert not report["ok"], f"preflight passed without dataset {missing!r}"
+        assert any(missing in err for err in report["errors"])
+
+    for missing in contract.attrs:
+        path = tmp_path / f"sel_missing_attr_{missing}.h5"
+        _write_full(path)
+        with h5py.File(path, "a") as f:
+            del f.attrs[missing]
+        report = file_contract.validate_selection_inputs(path)
+        assert not report["ok"], f"preflight passed without attr {missing!r}"
+        assert any(missing in err for err in report["errors"])
+
+
+def test_zero_pdraw_rejected(tmp_path):
+    """A detected injection with zero draw density is a mis-specified prior:
+    the likelihood would silently exclude it with the same mask that drops
+    padding rows while Ndraw keeps counting it, biasing mu low."""
+    from darksirens.gw import store_contract
+
+    contract = store_contract.contract_for("gwcat-selection-1.0")
+    path = tmp_path / "sel_zero_pdraw.h5"
+    with h5py.File(path, "w") as f:
+        f.attrs["format_version"] = "gwcat-selection-1.0"
+        f.attrs["ndraw"] = 100
+        f.attrs["chi_eff_swap_applied"] = True
+        n = 4
+        for name in contract.datasets:
+            if name == "chieff":
+                f.create_dataset(name, data=np.zeros(n))
+            elif name in ("ra", "dec"):
+                f.create_dataset(name, data=np.linspace(0.1, 0.9, n))
+            elif name == "pdraw":
+                data = np.ones(n)
+                data[1] = 0.0
+                f.create_dataset(name, data=data)
+            else:
+                f.create_dataset(name, data=np.ones(n))
+    report = file_contract.validate_selection_inputs(path)
+    assert not report["ok"]
+    assert any("pdraw" in err and "non-positive" in err for err in report["errors"])
+
+
+def test_zero_p_pe_accepted_negative_rejected(tmp_path):
+    """Zero p_pe is legal (the likelihood masks prior_wt > 0, and the shipped
+    whitelist product carries exactly one zero); NEGATIVE density is not."""
+    pe_ok = tmp_path / "pe_zero_ppe.h5"
+    _write_pe(pe_ok)
+    with h5py.File(pe_ok, "a") as f:
+        data = np.asarray(f["p_pe"])
+        data[0] = 0.0
+        del f["p_pe"]
+        f.create_dataset("p_pe", data=data)
+    assert file_contract.validate_observed_gw_pe(pe_ok)["ok"]
+
+    pe_bad = tmp_path / "pe_negative_ppe.h5"
+    _write_pe(pe_bad)
+    with h5py.File(pe_bad, "a") as f:
+        data = np.asarray(f["p_pe"])
+        data[0] = -1.0
+        del f["p_pe"]
+        f.create_dataset("p_pe", data=data)
+    report = file_contract.validate_observed_gw_pe(pe_bad)
+    assert not report["ok"]
+    assert any("p_pe" in err and "negative" in err for err in report["errors"])
