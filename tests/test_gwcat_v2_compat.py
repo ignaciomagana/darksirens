@@ -729,3 +729,78 @@ def test_per_event_cosmology_flag_surfaced(tmp_path, capsys):
         f.attrs["cosmology_mode"] = "per-event"
     loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
     assert "cosmology_per_event_varies=True" in capsys.readouterr().out
+
+
+# ----------------------------------------------------------------------------
+# Provenance (DS-10): store attrs into the run record, event identity
+# logged, writer-commit drift surfaced.
+# ----------------------------------------------------------------------------
+def test_provenance_block_is_json_clean(tmp_path):
+    import json
+
+    from darksirens.inference.data import _attr_event_names, _provenance_block
+
+    attrs = {
+        "format_version": "gwcat-selection-2.1",
+        "far_threshold": np.float64(1.0),
+        "campaign_ndraws": np.array([73957576, 870454872]),
+        "n_campaigns": np.int64(2),
+        "event_names": np.array([b"GW150914", b"GW151226"]),
+        "irrelevant_attr": object(),
+    }
+    block = _provenance_block(attrs)
+    json.dumps(block)
+    assert block["campaign_ndraws"] == [73957576, 870454872]
+    assert block["event_names"] == ["GW150914", "GW151226"]
+    assert "irrelevant_attr" not in block
+    assert _provenance_block(None) is None
+    assert _attr_event_names({"event_names": np.array([b"a", b"b"])}) == ["a", "b"]
+    assert _attr_event_names({}) is None
+
+
+def test_settings_records_store_provenance(tmp_path):
+    """opts attributes are serialised into settings.json; the provenance
+    blocks attached by load_all_data must survive that round trip."""
+    import json
+    from types import SimpleNamespace
+
+    from darksirens.io.settings import save_settings_json
+
+    opts = SimpleNamespace(
+        universe_model="dark_sirens",
+        gw_store_provenance={"format_version": "gwcat-1.0",
+                             "event_names": ["GW150914"]},
+        selection_store_provenance={"format_version": "gwcat-selection-2.1",
+                                    "ndraw": 1000},
+        gw_event_names=["GW150914"],
+    )
+    path = save_settings_json(
+        opts, str(tmp_path), labels=["H0"], lower_bound=[20.0],
+        upper_bound=[140.0], fixed_parameter_values={}, prior_overrides={},
+        meta={},
+    )
+    with open(path) as f:
+        recorded = json.load(f)
+    assert recorded["gw_store_provenance"]["event_names"] == ["GW150914"]
+    assert recorded["selection_store_provenance"]["ndraw"] == 1000
+    assert recorded["gw_event_names"] == ["GW150914"]
+
+
+def test_writer_commit_mismatch_warns(capsys):
+    from darksirens.inference.loaders import _warn_writer_commit
+
+    _warn_writer_commit({}, "x.h5")  # no attr: silent
+    _warn_writer_commit({"writer_commit": "deadbeef"}, "x.h5")
+    out = capsys.readouterr().out
+    # The installed gwcat commit is whatever the environment has; the warning
+    # fires iff it is known and differs. Either way this must not raise, and
+    # a matching prefix must stay silent.
+    from darksirens.io.settings import code_identity
+
+    installed = str(code_identity().get("gwcat_commit") or "")
+    if installed and installed != "unknown":
+        assert ("was written by gwcat commit" in out) == (
+            not installed.split("-")[0].startswith("deadbeef")
+        )
+        _warn_writer_commit({"writer_commit": installed}, "x.h5")
+        assert "was written by gwcat" not in capsys.readouterr().out

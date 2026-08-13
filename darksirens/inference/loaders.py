@@ -652,6 +652,34 @@ def _warn_per_event_cosmology(gw_attrs, gw_path) -> None:
               "will be inconsistent across events.")
 
 
+def _warn_writer_commit(attrs, path) -> None:
+    """Warn when the gwcat that WROTE a file is not the gwcat imported now.
+
+    ``code_identity()`` records the installed gwcat commit, but nothing
+    compared it to the commit that produced the input file -- and gwcat is an
+    editable install here, so the functions this loader imports change
+    whenever that worktree switches branches.  gwcat files that carry a
+    ``writer_commit`` (or legacy ``gwcat_commit``) attr get the comparison;
+    files that predate the attr are silently exempt.
+    """
+    file_commit = attrs.get("writer_commit") or attrs.get("gwcat_commit")
+    if not file_commit:
+        return
+    from darksirens.io.settings import code_identity
+
+    installed = str(code_identity().get("gwcat_commit") or "")
+    file_commit = str(file_commit)
+    if not installed or installed == "unknown":
+        return
+    # Tolerate short-vs-full SHAs and "-dirty" suffixes.
+    a, b = installed.split("-")[0], file_commit.split("-")[0]
+    if a and b and not (a.startswith(b) or b.startswith(a)):
+        print(f"    [!] {path!r} was written by gwcat commit {file_commit} "
+              f"but the imported gwcat is {installed}; prior/draw-density "
+              "conventions may not match the file. Pin gwcat for any run "
+              "whose numbers will be quoted.")
+
+
 def load_gw_and_selection_inputs(opts) -> dict:
     """Load GW posterior and selection samples."""
     # Load GW posterior samples (Always required)
@@ -666,6 +694,7 @@ def load_gw_and_selection_inputs(opts) -> dict:
     # checks the PE file's basis against the emulator's fixed chieff basis.
     selection_attrs = None
     _warn_per_event_cosmology(gw_attrs, opts.gw_path)
+    _warn_writer_commit(gw_attrs, opts.gw_path)
     if getattr(opts, "pdet_flow_path", None):
         _require_chieff_pe_for_emulator(gw_attrs, opts.gw_path)
         _require_matching_pdet_cosmology(gw_attrs, opts.gw_path, opts)
@@ -681,6 +710,7 @@ def load_gw_and_selection_inputs(opts) -> dict:
         _warn_pair_cosmology(
             gw_attrs, selection_attrs, opts.gw_path, opts.gwselection_path
         )
+        _warn_writer_commit(selection_attrs, opts.gwselection_path)
 
     return dict(
         gw_attrs=gw_attrs,

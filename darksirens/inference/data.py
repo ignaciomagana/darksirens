@@ -2,10 +2,65 @@
 
 import healpy as hp
 import jax.numpy as jnp
+import numpy as np
 
 from darksirens.catalogs.compact import validate_loaded_survey_shapes
 from darksirens.inference import loaders
 from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS
+
+#: Store attrs worth carrying into the run record: they exist in the input
+#: files and previously vanished from every artifact, so an archived run
+#: could not say what detection cut, observing time, or campaign structure
+#: produced its numbers.
+_PROVENANCE_ATTRS = (
+    "format_version",
+    "spin_basis",
+    "parameter_space",
+    "contract_hash",
+    "far_threshold",
+    "far_max",
+    "T_obs_yr",
+    "campaign_ndraws",
+    "n_campaigns",
+    "ndraw",
+    "nobs",
+    "source_class_filter",
+    "detection_statistic",
+    "detection_threshold",
+    "allow_missing_far",
+    "chi_eff_amax",
+    "pe_cosmology_H0",
+    "pe_cosmology_Om0",
+    "cosmology_H0",
+    "cosmology_Om0",
+    "writer_commit",
+    "gwcat_commit",
+    "event_names",
+)
+
+
+def _jsonable(value):
+    if isinstance(value, bytes):
+        return value.decode()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return [_jsonable(v) for v in value.tolist()]
+    return value
+
+
+def _provenance_block(attrs):
+    if not attrs:
+        return None
+    return {k: _jsonable(attrs[k]) for k in _PROVENANCE_ATTRS if k in attrs}
+
+
+def _attr_event_names(attrs):
+    names = (attrs or {}).get("event_names")
+    if names is None:
+        return None
+    return [v.decode() if isinstance(v, bytes) else str(v)
+            for v in np.atleast_1d(names)]
 
 
 def load_all_data(opts):
@@ -44,6 +99,19 @@ def load_all_data(opts):
     else:
         gw_inputs = loaders.load_gw_and_selection_inputs(opts)
 
+    gw_event_names = _attr_event_names(gw_inputs.get("gw_attrs"))
+
+    # Persist store provenance in settings.json (opts attributes are
+    # serialised there), mirroring how the flow path records
+    # flow_event_names: the run record can then say which detection cut,
+    # observing time, campaign structure, and event identity produced it.
+    opts.gw_store_provenance = _provenance_block(gw_inputs.get("gw_attrs"))
+    opts.selection_store_provenance = _provenance_block(
+        gw_inputs.get("selection_attrs")
+    )
+    if gw_event_names is not None:
+        opts.gw_event_names = gw_event_names
+
     if opts.universe_model in BRIGHT_SIREN_MODELS and catalog_inputs["counterpart_zs"] is not None:
         if len(catalog_inputs["counterpart_zs"]) != int(gw_inputs["nEvents"]):
             raise ValueError(
@@ -51,6 +119,15 @@ def load_all_data(opts):
                 f"got {len(catalog_inputs['counterpart_zs'])} counterpart(s) "
                 f"for {int(gw_inputs['nEvents'])} event(s)."
             )
+        # Counterpart triplets are aligned to events BY POSITION -- nothing
+        # else identifies them -- so a store rebuilt with a different
+        # whitelist silently re-pairs every counterpart.  Print the identity
+        # this run assumed, so the pairing is at least verifiable.
+        if gw_event_names is not None:
+            print("    Bright-siren counterpart <-> event pairing (by position):")
+            for k, name in enumerate(gw_event_names):
+                z_k = float(np.asarray(catalog_inputs["counterpart_zs"])[k])
+                print(f"      counterpart[{k}] (z={z_k:.4f}) -> {name}")
 
     sky_inputs = loaders.compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs)
 
@@ -67,6 +144,9 @@ def load_all_data(opts):
         p_pe=gw_inputs["p_pe"],
         flow_ensemble=gw_inputs.get("flow_ensemble"),
         flow_event_names=gw_inputs.get("flow_event_names"),
+        gw_attrs=gw_inputs.get("gw_attrs"),
+        selection_attrs=gw_inputs.get("selection_attrs"),
+        gw_event_names=gw_event_names,
         pixels_pe=_maybe_jnp(sky_inputs["pixels_pe"]),
         nx_pe=_maybe_jnp(sky_inputs["nx_pe"]),
         ny_pe=_maybe_jnp(sky_inputs["ny_pe"]),
