@@ -112,6 +112,7 @@ def log_target_density_m1det_q_dL(
     catalog: EMCatalog,
     log_p_pop_fn,
     log_prior_z_fn,
+    spin: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Target density evaluated in the canonical sample basis.
@@ -119,13 +120,23 @@ def log_target_density_m1det_q_dL(
     Returns ``log p(m1det, q, dL, chieff, pix | λ, Θ)`` when the
     source-frame population model supplies ``log p_pop(m1src, q, z,
     chieff | λ)`` and the EM term supplies ``log p_z(z | pix, Θ)``.
+
+    ``spin`` is the optional (N, d) extra-spin block (GWEvent.spin).  It is
+    forwarded to ``log_p_pop_fn`` as a keyword ONLY when present, so every
+    existing chi_eff population model (signature ``(m1src, q, z, chieff,
+    pop_params)``) is called exactly as before -- the d = 0 path is
+    byte-identical by construction.
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
 
+    if spin is None:
+        log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params)
+    else:
+        log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params, spin=spin)
     return (
-        log_p_pop_fn(m1src, q, z, chieff, pop_params)
+        log_p_pop
         + log_prior_z_fn(z, pix, catalog)
         - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa)
     )
@@ -143,6 +154,7 @@ def log_target_density_base_and_z(
     pop_params: jnp.ndarray,
     catalog: EMCatalog,
     log_p_pop_fn,
+    spin: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Member-INDEPENDENT split of :func:`log_sample_weight`.
 
@@ -175,8 +187,12 @@ def log_target_density_base_and_z(
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
+    if spin is None:
+        log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params)
+    else:
+        log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params, spin=spin)
     base = (
-        log_p_pop_fn(m1src, q, z, chieff, pop_params)
+        log_p_pop
         - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa)
         - jnp.log(prior_wt)
     )
@@ -196,6 +212,7 @@ def log_sample_weight(
     catalog: EMCatalog,
     log_p_pop_fn,
     log_prior_z_fn,
+    spin: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Per-sample log importance weight, shared by the PE and selection terms.
@@ -248,6 +265,7 @@ def log_sample_weight(
             catalog,
             log_p_pop_fn,
             log_prior_z_fn,
+            spin=spin,
         )
         - jnp.log(prior_wt)
     )

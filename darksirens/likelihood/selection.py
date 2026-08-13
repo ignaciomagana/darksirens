@@ -430,6 +430,9 @@ def compute_selection_term(
     em_catalog_sel : EMCatalog
         EM catalog sliced to the injection sky positions.
     log_weight_fn : callable(m1det, q, dL, chieff, pix, prior_wt, catalog) → array
+        When ``gw_sel.spin`` is not None the callable is instead invoked with a
+        trailing ``spin=(batch, d)`` keyword; chi_eff-basis weight functions
+        (and test doubles) never see it.
         Per-sample log importance weight.  Must broadcast over the batch
         dimension.  Typically a closure from ``likelihood.py`` that captures
         cosmo, survey, pop_params, and the finite-guard for log_prior_z.
@@ -461,8 +464,17 @@ def compute_selection_term(
     log_sigma2 : scalar — log Monte-Carlo variance of μ (used by the
         strong-lensing cluster path; ignored by the standard likelihood)
     """
-    def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b, nx_b, ny_b, nz_b):
-        ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b, em_catalog_sel)
+    def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b, nx_b, ny_b,
+                   nz_b, spin_b=None):
+        # ``spin_b`` is passed to ``log_weight_fn`` ONLY when the event carries
+        # a spin block, so every existing weight function (and test double)
+        # with the 7-argument signature keeps working and the d = 0 path is
+        # call-for-call identical.
+        if spin_b is None:
+            ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b, em_catalog_sel)
+        else:
+            ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b,
+                                em_catalog_sel, spin=spin_b)
         if sky_log_weight_fn is not None:
             ldw = ldw + sky_log_weight_fn(nx_b, ny_b, nz_b, dL_b)
         valid = valid_b & (pwt_b > 0.0)
@@ -482,6 +494,7 @@ def compute_selection_term(
             gw_sel.nx,
             gw_sel.ny,
             gw_sel.nz,
+            gw_sel.spin,
         )
     else:
         # --- Batched via lax.scan ---
@@ -508,6 +521,7 @@ def compute_selection_term(
                 nx_b,
                 ny_b,
                 nz_b,
+                sl(gw_sel.spin) if gw_sel.spin is not None else None,
             )
             return None, (lse_b, lse2_b)
 

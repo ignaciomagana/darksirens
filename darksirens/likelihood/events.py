@@ -59,6 +59,7 @@ def make_gw_event(
     nx=None,
     ny=None,
     nz=None,
+    spin=None,
 ) -> GWEvent:
     """
     Construct a ``GWEvent`` with barrier-wrapped arrays and pre-computed ``q``.
@@ -84,6 +85,14 @@ def make_gw_event(
         ``dL``).  Default to zeros when unspecified — harmless, because they are
         only read by an anisotropic sky model; an isotropic run never touches
         them.
+    spin : array-like of shape (N, d), optional
+        Extra spin coordinates beyond ``chieff`` (e.g. the component basis's
+        ``(a1, a2, cost1, cost2)``).  ``None`` — the chi_eff default — keeps
+        the pytree structure identical to a build without the field, so every
+        existing run is byte-identical.  Unlike the sky vector there is no
+        zeros placeholder: a spin block either exists with real columns or
+        does not exist at all, and consumers branch on its presence at trace
+        time.
 
     Returns
     -------
@@ -110,6 +119,16 @@ def make_gw_event(
             return _barrier(jnp.zeros_like(dL_b))
         return _barrier(jnp.asarray(v, dtype=jnp.float64))
 
+    spin_b = None
+    if spin is not None:
+        spin_b = jnp.asarray(spin, dtype=jnp.float64)
+        if spin_b.ndim != 2 or spin_b.shape[0] != dL_b.shape[0]:
+            raise ValueError(
+                f"spin must have shape (N, d) with N = {dL_b.shape[0]}; got "
+                f"{spin_b.shape}"
+            )
+        spin_b = _barrier(spin_b)
+
     return GWEvent(
         m1det    = m1det_b,
         m2det    = m2det_b,
@@ -122,6 +141,7 @@ def make_gw_event(
         nx       = _sky(nx),
         ny       = _sky(ny),
         nz       = _sky(nz),
+        spin     = spin_b,
     )
 
 
@@ -189,5 +209,14 @@ def pad_gw_event_to_multiple(
         nx       = _pad1d(event.nx, fill=0.0) if event.nx is not None else None,
         ny       = _pad1d(event.ny, fill=0.0) if event.ny is not None else None,
         nz       = _pad1d(event.nz, fill=0.0) if event.nz is not None else None,
+        # Spin block: (N, d) — pad axis 0 with a zero block (masked by valid).
+        spin     = (
+            jnp.concatenate(
+                [event.spin,
+                 jnp.zeros((pad, event.spin.shape[1]), dtype=event.spin.dtype)],
+                axis=0,
+            )
+            if event.spin is not None else None
+        ),
     )
     return padded, pad

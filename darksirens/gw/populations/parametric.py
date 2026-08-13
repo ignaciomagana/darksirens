@@ -762,9 +762,15 @@ class GWTC3PowerLawPeakMass(MassComponent):
 
 
 class GWTC3PowerLawPeakPopulationModel:
-    """GWTC-3 fiducial Power Law + Peak model (arXiv:2111.03634, Table VI)."""
+    """GWTC-3 fiducial Power Law + Peak model (arXiv:2111.03634, Table VI).
 
-    def __init__(self):
+    ``spin_component`` may be overridden with any :class:`SpinModel`; a model
+    with ``consumes_spin_block`` (the 4-D :class:`ComponentSpinModel`) makes
+    this the Table VI mass model x the Table XII Default spin model, which
+    the chi_eff parameterisation could not represent (see __init__ note).
+    """
+
+    def __init__(self, spin_component=None):
         # Prior bounds are Table VI verbatim; see the registry entry for the
         # provenance of the fiducial vector.
         self.mass_component = GWTC3PowerLawPeakMass(
@@ -788,7 +794,10 @@ class GWTC3PowerLawPeakPopulationModel:
         # and dressing one up as the other would be a fabrication.  The rate
         # law is likewise the repo's (1+z)^(gamma-1); only the fiducial gamma
         # is taken from the paper (its kappa), which the registry entry notes.
-        self.spin_component = TruncatedGaussianSpin(
+        # (With DS-08's ComponentSpinModel passed in instead, the Table XII
+        # Default spin model IS representable; the chi_eff default below is
+        # unchanged.)
+        self.spin_component = spin_component if spin_component is not None else TruncatedGaussianSpin(
             ParamSpec(r"$\mu_\chi$", CHI_MU.lo, CHI_MU.hi, name="mu_chi"),
             ParamSpec(r"$\sigma_\chi$", CHI_SIGMA.lo, CHI_SIGMA.hi, name="sigma_chi"),
         )
@@ -828,7 +837,7 @@ class GWTC3PowerLawPeakPopulationModel:
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def log_p_pop(self, m1, q, z, chieff, theta, spin=None):
         idx = 0
         tm = theta[idx : idx + self.mass_component.n_params]
         idx += self.mass_component.n_params
@@ -844,10 +853,14 @@ class GWTC3PowerLawPeakPopulationModel:
 
         mass_norm = self.mass_component._norm(tm)
         spin_norm = self.spin_component._norm(ts)
+        if getattr(self.spin_component, "consumes_spin_block", False):
+            p_spin = self.spin_component(chieff, ts, norm=spin_norm, spin=spin)
+        else:
+            p_spin = self.spin_component(chieff, ts, norm=spin_norm)
         p = (
             self.mass_component(m1, tm, norm=mass_norm)
             * self.pairing_component(m1, q, m_min, delta_m, tp)
-            * self.spin_component(chieff, ts, norm=spin_norm)
+            * p_spin
         )
         log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
         return log_p + (gamma - 1.0) * jnp.log1p(z)

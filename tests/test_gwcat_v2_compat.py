@@ -201,15 +201,22 @@ def test_file_contract_accepts_v2_chieff_selection(tmp_path):
     assert report["summary"]["selection_kind"] == "unlensed"
 
 
-def test_file_contract_rejects_v2_component_selection(tmp_path):
+def test_file_contract_accepts_v2_component_selection(tmp_path):
+    """DS-09: a component-basis selection file is a VALID product at
+    preflight (which is model-agnostic); which model may consume it is the
+    loaders' basis negotiation.  A basis with no consumer stays rejected."""
     path = tmp_path / "sel_contract_component.h5"
     _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="component",
                      extra_spin_datasets=True)
     report = file_contract.validate_selection_inputs(path)
+    assert report["ok"], report["errors"]
+
+    other = tmp_path / "sel_contract_chip.h5"
+    _write_selection(other, format_version="gwcat-selection-2.0",
+                     spin_basis="chieff_chip", extra_spin_datasets=True)
+    report = file_contract.validate_selection_inputs(other)
     assert not report["ok"]
-    joined = " ".join(report["errors"])
-    assert "component" in joined
-    assert "spin_basis" in joined
+    assert any("chieff_chip" in e for e in report["errors"])
 
 
 # ----------------------------------------------------------------------------
@@ -373,3 +380,548 @@ def test_file_contract_rejects_skyless_campaign(tmp_path):
     report = file_contract.validate_selection_inputs(path)
     assert not report["ok"]
     assert any("sky_position_available" in err for err in report["errors"])
+
+
+# ----------------------------------------------------------------------------
+# Store record API (DS-04): the tuple loaders are thin wrappers over
+# GWStore/SelectionStore and must stay bit-identical.
+# ----------------------------------------------------------------------------
+def test_tuple_loaders_bit_identical_to_store_api(tmp_path):
+    from darksirens.gw.utils import load_gw_store, load_selection_store
+
+    pe = tmp_path / "pe_store.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.0", spin_basis="chieff")
+    tup = load_gw_samples(pe)
+    store = load_gw_store(pe)
+    for i, name in enumerate(("m1det", "m2det", "dL", "chieff", "ra", "dec")):
+        np.testing.assert_array_equal(np.asarray(tup[i]), store.columns[name])
+    np.testing.assert_array_equal(np.asarray(tup[6]), store.prior_wt)
+    assert (tup[7], tup[8]) == (store.n_events, store.nsamp)
+    assert store.format_version == "gwcat-pe-2.0"
+    assert store.fit_columns == ("m1det", "q", "dL", "chieff")
+    # Raw column, not the processed weight: prior_wt is normalised per event.
+    np.testing.assert_array_equal(store.columns["p_pe"], _PE_DATA["p_pe"])
+
+    sel = tmp_path / "sel_store.h5"
+    _write_selection(sel, format_version="gwcat-selection-1.0")
+    tup = load_selection_samples(sel)
+    store = load_selection_store(sel)
+    for i, name in enumerate(("m1det", "m2det", "dL", "chieff", "ra", "dec", "pdraw")):
+        np.testing.assert_array_equal(np.asarray(tup[i]), store.columns[name])
+    np.testing.assert_array_equal(np.asarray(tup[6]), store.prior_wt)
+    assert tup[7] == store.ndraw == 1000
+    assert store.n_injections == _SEL_N
+
+
+def test_store_processed_prior_wt_when_swap_pending(tmp_path, monkeypatch):
+    """prior_wt carries the folded-in chi_eff density; columns['pdraw'] stays raw."""
+    from darksirens.gw import utils as gw_utils
+
+    monkeypatch.setattr(
+        gw_utils, "chi_eff_prior_logprob",
+        lambda chieff, m1src, m2src, amax=0.99: np.full(np.shape(chieff), np.log(3.0)),
+    )
+    sel = tmp_path / "sel_store_swap.h5"
+    _write_selection(sel, format_version="gwcat-selection-1.0",
+                     chi_eff_swap_applied=False)
+    store = gw_utils.load_selection_store(sel)
+    np.testing.assert_allclose(store.prior_wt, 3.0 * _SEL_DATA["pdraw"])
+    np.testing.assert_array_equal(store.columns["pdraw"], _SEL_DATA["pdraw"])
+
+
+def test_store_surfaces_event_names_and_attrs(tmp_path):
+    from darksirens.gw.utils import load_gw_store
+
+    pe = tmp_path / "pe_names.h5"
+    _write_pe(pe, format_version="gwcat-1.0")
+    with h5py.File(pe, "a") as f:
+        f.attrs["event_names"] = np.array(["GW150914", "GW151226"], dtype=h5py.string_dtype())
+    store = load_gw_store(pe)
+    assert store.event_names == ("GW150914", "GW151226")
+    assert store.attrs["pe_cosmology_H0"] == 67.7
+    assert store.attrs["nobs"] == NOBS
+
+    pe2 = tmp_path / "pe_no_names.h5"
+    _write_pe(pe2, format_version="gwcat-1.0")
+    assert load_gw_store(pe2).event_names is None
+
+
+# ----------------------------------------------------------------------------
+# Format 2.1 (DS-05): accepted in the chieff basis, contract_hash compared
+# across the PE/selection pair, emulator path checks the PE basis.
+# ----------------------------------------------------------------------------
+def _add_21_contract(path, *, parameter_space="chieff", source_class=None):
+    """Stamp the gwcat-2.1 contract attrs the way writers_gwcat21 does."""
+    import hashlib
+    import json
+
+    pairing = {
+        "parameter_space": parameter_space,
+        "fit_columns": ["m1det", "q", "dL", "chieff"],
+        "advisory_columns": [],
+        "spin_basis_kind": "projection" if parameter_space != "component" else "bijection",
+        "spin_density_exact": parameter_space == "component",
+        "sky_prior_in_density": True,
+        "source_class": source_class,
+    }
+    payload = json.dumps(pairing, sort_keys=True, separators=(",", ":"))
+    with h5py.File(path, "a") as f:
+        f.attrs["parameter_space"] = parameter_space
+        f.attrs["fit_columns"] = np.array(pairing["fit_columns"], dtype=h5py.string_dtype())
+        f.attrs["advisory_columns"] = np.array([], dtype=h5py.string_dtype())
+        f.attrs["contract"] = json.dumps(pairing)
+        f.attrs["contract_hash"] = hashlib.blake2b(payload.encode(), digest_size=8).hexdigest()
+
+
+def test_pe_v21_chieff_matches_v2_arrays(tmp_path):
+    v2 = tmp_path / "pe_v2c.h5"
+    v21 = tmp_path / "pe_v21.h5"
+    _write_pe(v2, format_version="gwcat-pe-2.0", spin_basis="chieff")
+    _write_pe(v21, format_version="gwcat-pe-2.1", spin_basis="chieff")
+    _add_21_contract(v21)
+    out2 = load_gw_samples(v2)
+    out21 = load_gw_samples(v21)
+    for a, b in zip(out2[:7], out21[:7]):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    from darksirens.gw.utils import load_gw_store
+    store = load_gw_store(v21)
+    assert store.fit_columns == ("m1det", "q", "dL", "chieff")
+    assert store.attrs["contract_hash"]
+
+
+def test_pe_v21_component_rejected_for_chieff_model(tmp_path):
+    path = tmp_path / "pe_v21_comp.h5"
+    _write_pe(path, format_version="gwcat-pe-2.1", spin_basis="component",
+              extra_spin_datasets=True)
+    with pytest.raises(RuntimeError, match="ADVISORY|cannot be paired"):
+        load_gw_samples(path)
+
+
+def test_selection_v21_chieff_accepted_component_rejected(tmp_path):
+    ok = tmp_path / "sel_v21.h5"
+    _write_selection(ok, format_version="gwcat-selection-2.1", spin_basis="chieff")
+    _add_21_contract(ok)
+    out = load_selection_samples(ok)
+    np.testing.assert_array_equal(np.asarray(out[6]), _SEL_DATA["pdraw"])
+
+    bad = tmp_path / "sel_v21_comp.h5"
+    _write_selection(bad, format_version="gwcat-selection-2.1",
+                     spin_basis="component", extra_spin_datasets=True)
+    with pytest.raises(RuntimeError, match="ADVISORY|cannot be paired"):
+        load_selection_samples(bad)
+
+
+def test_file_contract_accepts_v21_chieff_selection(tmp_path):
+    path = tmp_path / "sel_v21_fc.h5"
+    _write_selection(path, format_version="gwcat-selection-2.1", spin_basis="chieff")
+    _add_21_contract(path)
+    report = file_contract.validate_selection_inputs(path)
+    assert report["ok"], report["errors"]
+
+
+def _pair_opts(gw_path, sel_path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(gw_path=str(gw_path), gwselection_path=str(sel_path),
+                           pdet_flow_path=None)
+
+
+def test_mismatched_contract_hash_raises(tmp_path):
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_pair.h5"
+    sel = tmp_path / "sel_pair.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.1", spin_basis="chieff")
+    _write_selection(sel, format_version="gwcat-selection-2.1", spin_basis="chieff")
+    _add_21_contract(pe, source_class="BBH")
+    _add_21_contract(sel, source_class=None)
+    with pytest.raises(RuntimeError, match="contract_hash") as err:
+        loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert "source_class" in str(err.value)
+
+
+def test_matching_contract_hash_accepted(tmp_path):
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_pair_ok.h5"
+    sel = tmp_path / "sel_pair_ok.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.1", spin_basis="chieff")
+    _write_selection(sel, format_version="gwcat-selection-2.1", spin_basis="chieff")
+    _add_21_contract(pe)
+    _add_21_contract(sel)
+    out = loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert out["nEvents"] == NOBS
+    assert out["Ndraw"] == 1000
+    assert out["gw_attrs"]["contract_hash"] == out["selection_attrs"]["contract_hash"]
+
+
+def test_legacy_pair_without_contract_accepted(tmp_path):
+    """1.0/2.0 files predate the contract; pairing them stays legal."""
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_legacy.h5"
+    sel = tmp_path / "sel_legacy.h5"
+    _write_pe(pe, format_version="gwcat-1.0")
+    _write_selection(sel, format_version="gwcat-selection-1.0")
+    out = loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert out["selection_attrs"] is not None
+    assert out["gw_attrs"].get("contract_hash") is None
+
+
+def test_emulator_rejects_non_chieff_pe():
+    from darksirens.inference.loaders import _require_chieff_pe_for_emulator
+
+    attrs = {"spin_basis": "component", "parameter_space": "component"}
+    with pytest.raises(RuntimeError, match="pdet_flow_path"):
+        _require_chieff_pe_for_emulator(attrs, "x.h5")
+    # chieff-basis PE passes.
+    _require_chieff_pe_for_emulator({"spin_basis": "chieff"}, "x.h5")
+
+
+# ----------------------------------------------------------------------------
+# Spin-swap validity (DS-03): a chi_eff product whose campaigns did not draw
+# spins uniform-in-magnitude/isotropic carries a wrong pdraw.
+# ----------------------------------------------------------------------------
+def test_non_uniform_campaign_rejected_under_chieff(tmp_path):
+    path = tmp_path / "sel_nonuniform.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, False])
+    with pytest.raises(RuntimeError, match="injected_spin_uniform_isotropic"):
+        load_selection_samples(path)
+
+
+def test_all_uniform_campaigns_accepted(tmp_path):
+    path = tmp_path / "sel_uniform.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, True])
+    load_selection_samples(path)
+
+
+def test_recorded_swap_violations_rejected(tmp_path):
+    path = tmp_path / "sel_violations.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["spin_basis_assumption_violations"] = '["o4ab: isotropy_dev=0.642"]'
+    with pytest.raises(RuntimeError, match="spin_basis_assumption_violations"):
+        load_selection_samples(path)
+
+
+def test_flag_downgrades_to_warning(tmp_path, capsys):
+    path = tmp_path / "sel_nonuniform_ok.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, False])
+    out = load_selection_samples(path, allow_invalid_spin_swap=True)
+    assert out[7] == 1000
+    assert "allow_invalid_spin_swap" in capsys.readouterr().out
+
+
+def test_legacy_file_without_the_attr_loads(tmp_path):
+    """The shipped gwcat-selection-1.0 product predates the attr; the gate
+    cannot read what is not there (retiring it needs the GW-24 re-export)."""
+    path = tmp_path / "sel_legacy_noattr.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0")
+    load_selection_samples(path)
+
+
+def test_file_contract_rejects_non_uniform_campaign(tmp_path):
+    path = tmp_path / "sel_nonuniform_fc.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([False])
+    report = file_contract.validate_selection_inputs(path)
+    assert not report["ok"]
+    assert any("injected_spin_uniform_isotropic" in e for e in report["errors"])
+
+
+# ----------------------------------------------------------------------------
+# -50 -> -inf convention (DS-06, mirroring gwcat GW-03): zero density is
+# zero, not 2e-22; refusals, not floors.
+# ----------------------------------------------------------------------------
+def test_out_of_support_pe_sample_gets_zero_weight(tmp_path, monkeypatch):
+    """A PE sample outside the chi_eff prior support gets p_pe = 0 (masked by
+    the likelihood, still counted in n) -- not the old floor exp(-50)."""
+    from darksirens.gw import utils as gw_utils
+
+    def fake_logprob(chieff, m1src, m2src, amax=0.99):
+        logp = np.full(np.shape(chieff), np.log(2.0))
+        logp[0] = -np.inf
+        return logp
+
+    monkeypatch.setattr(gw_utils, "chi_eff_prior_logprob", fake_logprob)
+    path = tmp_path / "pe_out_of_support.h5"
+    _write_pe(path, format_version="gwcat-1.0", chi_eff_in_p_pe=False)
+    p_pe = np.asarray(load_gw_samples(path)[6])
+    assert p_pe[0] == 0.0
+    assert np.all(p_pe[1:] > 0.0)
+
+
+def test_out_of_support_injection_refused_on_swap(tmp_path, monkeypatch):
+    """A DETECTED injection at zero draw density cannot be floored (weight
+    ~1e21 above median) or dropped (Ndraw fixed -> mu biased low): refuse."""
+    from darksirens.gw import utils as gw_utils
+
+    def fake_logprob(chieff, m1src, m2src, amax=0.99):
+        logp = np.full(np.shape(chieff), np.log(2.0))
+        logp[-1] = -np.inf
+        return logp
+
+    monkeypatch.setattr(gw_utils, "chi_eff_prior_logprob", fake_logprob)
+    path = tmp_path / "sel_out_of_support.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0",
+                     chi_eff_swap_applied=False)
+    with pytest.raises(RuntimeError, match="outside the chi_eff prior support"):
+        load_selection_samples(path)
+
+
+def test_gwcat_new_convention_api_present():
+    """The import-time guard's premise: the linked gwcat exposes the GW-03
+    API (support predicate + -inf logprob), so the two packages agree on
+    what an out-of-support sample means."""
+    gwcat_spin = pytest.importorskip("gwcat.spin")
+    assert hasattr(gwcat_spin.ChiEffPrior, "support")
+    logp = np.asarray(gwcat_spin.chi_eff_prior_logprob(
+        np.array([0.0]), np.array([30.0]), np.array([25.0]), amax=0.99))
+    assert np.isfinite(logp).all()
+
+
+# ----------------------------------------------------------------------------
+# PE cosmology consumption (DS-12): pe_cosmology_H0/Om0 were required attrs
+# read by no consumer; the emulator cosmology was never checked against them.
+# ----------------------------------------------------------------------------
+def test_emulator_cosmology_must_match_pe():
+    from types import SimpleNamespace
+
+    from darksirens.inference.loaders import _require_matching_pdet_cosmology
+
+    attrs = {"pe_cosmology_H0": 67.7, "pe_cosmology_Om0": 0.31}
+    opts_ok = SimpleNamespace(pdet_cosmology="67.7,0.31")
+    _require_matching_pdet_cosmology(attrs, "pe.h5", opts_ok)
+    # Sub-tolerance differences are the same cosmology.
+    _require_matching_pdet_cosmology(
+        attrs, "pe.h5", SimpleNamespace(pdet_cosmology="67.9,0.3065"))
+    with pytest.raises(RuntimeError, match="pdet_cosmology"):
+        _require_matching_pdet_cosmology(
+            attrs, "pe.h5", SimpleNamespace(pdet_cosmology="70.0,0.31"))
+    with pytest.raises(RuntimeError, match="pdet_cosmology"):
+        _require_matching_pdet_cosmology(
+            attrs, "pe.h5", SimpleNamespace(pdet_cosmology="67.7,0.25"))
+
+
+def test_pair_cosmology_mismatch_warns_not_raises(tmp_path, capsys):
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_cosmo.h5"
+    sel = tmp_path / "sel_cosmo.h5"
+    _write_pe(pe, format_version="gwcat-1.0")
+    _write_selection(sel, format_version="gwcat-selection-1.0")
+    with h5py.File(sel, "a") as f:
+        f.attrs["cosmology_H0"] = 73.0
+    out = loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert out["Ndraw"] == 1000
+    assert "declares cosmology" in capsys.readouterr().out
+
+
+def test_per_event_cosmology_flag_surfaced(tmp_path, capsys):
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_varies.h5"
+    sel = tmp_path / "sel_varies.h5"
+    _write_pe(pe, format_version="gwcat-1.0")
+    _write_selection(sel, format_version="gwcat-selection-1.0")
+    with h5py.File(pe, "a") as f:
+        f.attrs["cosmology_per_event_varies"] = True
+        f.attrs["cosmology_mode"] = "per-event"
+    loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert "cosmology_per_event_varies=True" in capsys.readouterr().out
+
+
+# ----------------------------------------------------------------------------
+# Provenance (DS-10): store attrs into the run record, event identity
+# logged, writer-commit drift surfaced.
+# ----------------------------------------------------------------------------
+def test_provenance_block_is_json_clean(tmp_path):
+    import json
+
+    from darksirens.inference.data import _attr_event_names, _provenance_block
+
+    attrs = {
+        "format_version": "gwcat-selection-2.1",
+        "far_threshold": np.float64(1.0),
+        "campaign_ndraws": np.array([73957576, 870454872]),
+        "n_campaigns": np.int64(2),
+        "event_names": np.array([b"GW150914", b"GW151226"]),
+        "irrelevant_attr": object(),
+    }
+    block = _provenance_block(attrs)
+    json.dumps(block)
+    assert block["campaign_ndraws"] == [73957576, 870454872]
+    assert block["event_names"] == ["GW150914", "GW151226"]
+    assert "irrelevant_attr" not in block
+    assert _provenance_block(None) is None
+    assert _attr_event_names({"event_names": np.array([b"a", b"b"])}) == ["a", "b"]
+    assert _attr_event_names({}) is None
+
+
+def test_settings_records_store_provenance(tmp_path):
+    """opts attributes are serialised into settings.json; the provenance
+    blocks attached by load_all_data must survive that round trip."""
+    import json
+    from types import SimpleNamespace
+
+    from darksirens.io.settings import save_settings_json
+
+    opts = SimpleNamespace(
+        universe_model="dark_sirens",
+        gw_store_provenance={"format_version": "gwcat-1.0",
+                             "event_names": ["GW150914"]},
+        selection_store_provenance={"format_version": "gwcat-selection-2.1",
+                                    "ndraw": 1000},
+        gw_event_names=["GW150914"],
+    )
+    path = save_settings_json(
+        opts, str(tmp_path), labels=["H0"], lower_bound=[20.0],
+        upper_bound=[140.0], fixed_parameter_values={}, prior_overrides={},
+        meta={},
+    )
+    with open(path) as f:
+        recorded = json.load(f)
+    assert recorded["gw_store_provenance"]["event_names"] == ["GW150914"]
+    assert recorded["selection_store_provenance"]["ndraw"] == 1000
+    assert recorded["gw_event_names"] == ["GW150914"]
+
+
+def test_writer_commit_mismatch_warns(capsys):
+    from darksirens.inference.loaders import _warn_writer_commit
+
+    _warn_writer_commit({}, "x.h5")  # no attr: silent
+    _warn_writer_commit({"writer_commit": "deadbeef"}, "x.h5")
+    out = capsys.readouterr().out
+    # The installed gwcat commit is whatever the environment has; the warning
+    # fires iff it is known and differs. Either way this must not raise, and
+    # a matching prefix must stay silent.
+    from darksirens.io.settings import code_identity
+
+    installed = str(code_identity().get("gwcat_commit") or "")
+    if installed and installed != "unknown":
+        assert ("was written by gwcat commit" in out) == (
+            not installed.split("-")[0].startswith("deadbeef")
+        )
+        _warn_writer_commit({"writer_commit": installed}, "x.h5")
+        assert "was written by gwcat" not in capsys.readouterr().out
+
+
+# ----------------------------------------------------------------------------
+# Basis negotiation (DS-09): the model's fit columns must equal the file's.
+# ----------------------------------------------------------------------------
+_COMPONENT_COLUMNS = ("m1det", "q", "dL", "a1", "a2", "cost1", "cost2")
+
+
+def test_component_pe_accepted_with_component_model(tmp_path):
+    path = tmp_path / "pe_comp_ok.h5"
+    _write_pe(path, format_version="gwcat-pe-2.0", spin_basis="component",
+              include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
+    out = load_gw_samples(path, fit_columns=_COMPONENT_COLUMNS)
+    assert out[7] == NOBS
+    from darksirens.gw.utils import load_gw_store
+
+    store = load_gw_store(path, fit_columns=_COMPONENT_COLUMNS)
+    assert store.fit_columns == _COMPONENT_COLUMNS
+    for name in ("a1", "a2", "cost1", "cost2"):
+        assert name in store.columns
+
+
+def test_chieff_pe_rejected_with_component_model(tmp_path):
+    path = tmp_path / "pe_chieff_for_comp.h5"
+    _write_pe(path, format_version="gwcat-pe-2.0", spin_basis="chieff")
+    with pytest.raises(RuntimeError, match="does not cover"):
+        load_gw_samples(path, fit_columns=_COMPONENT_COLUMNS)
+
+
+def test_legacy_10_file_rejected_with_component_model(tmp_path):
+    path = tmp_path / "pe_legacy_for_comp.h5"
+    _write_pe(path, format_version="gwcat-1.0")
+    with pytest.raises(RuntimeError, match="does not cover"):
+        load_gw_samples(path, fit_columns=_COMPONENT_COLUMNS)
+
+
+def test_advisory_column_cannot_be_fit(tmp_path):
+    """chip in a component file is advisory: the dataset exists, its density
+    is not in p_pe -- fitting it must refuse by name."""
+    path = tmp_path / "pe_comp_chip.h5"
+    _write_pe(path, format_version="gwcat-pe-2.0", spin_basis="component",
+              include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
+    with pytest.raises(RuntimeError, match="ADVISORY"):
+        load_gw_samples(path, fit_columns=_COMPONENT_COLUMNS + ("chip",))
+
+
+def test_chieff_chip_file_rejected_for_chieff_model(tmp_path):
+    """A chieff_chip file's density covers chip, which a chieff model does
+    not fit: dividing chip's prior out with no population term replacing it
+    is silently wrong, so the pairing is refused (not merely inefficient)."""
+    path = tmp_path / "pe_chip.h5"
+    _write_pe(path, format_version="gwcat-pe-2.0", spin_basis="chieff_chip",
+              extra_spin_datasets=True)
+    with pytest.raises(RuntimeError, match="does not fit"):
+        load_gw_samples(path)
+
+
+def test_component_selection_accepted_and_swap_gate_skipped(tmp_path):
+    path = tmp_path / "sel_comp_ok.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0",
+                     spin_basis="component", extra_spin_datasets=True)
+    with h5py.File(path, "a") as f:
+        # A non-uniform campaign is FINE in the component basis (no swap).
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, False])
+    out = load_selection_samples(path, fit_columns=_COMPONENT_COLUMNS)
+    np.testing.assert_array_equal(np.asarray(out[6]), _SEL_DATA["pdraw"])
+
+
+def test_component_pair_produces_spin_blocks(tmp_path):
+    """End-to-end: a component-model run against a component pair loads and
+    surfaces (N, 4) spin blocks for the factory."""
+    from types import SimpleNamespace
+
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_comp_pair.h5"
+    sel = tmp_path / "sel_comp_pair.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.0", spin_basis="component",
+              include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
+    _write_selection(sel, format_version="gwcat-selection-2.0",
+                     spin_basis="component", extra_spin_datasets=True)
+    opts = SimpleNamespace(gw_path=str(pe), gwselection_path=str(sel),
+                           pdet_flow_path=None,
+                           pop_model="gwtc3_plpeak_component_spin")
+    out = loaders.load_gw_and_selection_inputs(opts)
+    assert out["spin_pe"].shape == (_N, 4)
+    assert out["spin_sel"].shape == (_SEL_N, 4)
+
+    # The chieff-model default against the same pair refuses at load.
+    opts_chieff = SimpleNamespace(gw_path=str(pe), gwselection_path=str(sel),
+                                  pdet_flow_path=None,
+                                  pop_model="gwtc3_fiducial_plpeak")
+    with pytest.raises(RuntimeError, match="ADVISORY|cannot be paired"):
+        loaders.load_gw_and_selection_inputs(opts_chieff)
+
+
+def test_component_model_refuses_emulator_and_flows(tmp_path):
+    from types import SimpleNamespace
+
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_comp_em.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.0", spin_basis="component",
+              include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
+    opts = SimpleNamespace(gw_path=str(pe), gwselection_path=None,
+                           pdet_flow_path="/nonexistent/pdet.npz",
+                           pop_model="gwtc3_plpeak_component_spin")
+    with pytest.raises(RuntimeError, match="unsupported in the component"):
+        loaders.load_gw_and_selection_inputs(opts)
+
+    opts_flows = SimpleNamespace(gw_flows_path="/nonexistent/flows",
+                                 pop_model="gwtc3_plpeak_component_spin")
+    with pytest.raises(RuntimeError, match="unsupported in the component"):
+        loaders.load_flow_and_selection_inputs(opts_flows)

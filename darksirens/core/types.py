@@ -401,6 +401,14 @@ class GWEvent(NamedTuple):
     nx: Any = None
     ny: Any = None
     nz: Any = None
+    # Extra spin coordinates as ONE (N, d) block, not one field per
+    # coordinate: the chi_eff basis is d = 0 (spin = None, byte-identical
+    # pytree structure to before the field existed), the component basis is
+    # d = 4 with columns (a1, a2, cost1, cost2).  Column NAMES are config,
+    # not data — they travel with the population model / basis negotiation
+    # (DS-09), never inside the pytree.  ``chieff`` stays its own field: it
+    # is consumed unconditionally by the current likelihood.
+    spin: Any = None
 
     @property
     def chirp_mass(self):

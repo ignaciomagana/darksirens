@@ -456,14 +456,75 @@ def _parse_pdet_cosmology(opts) -> tuple[float, float]:
     return float(h0), float(om0)
 
 
-def resolve_selection_inputs(opts):
+#: The two fit-column sets darksirens' population models can request.
+_CHIEFF_FIT_COLUMNS = ("m1det", "q", "dL", "chieff")
+_COMPONENT_FIT_COLUMNS = ("m1det", "q", "dL", "a1", "a2", "cost1", "cost2")
+
+
+def _model_requests_component_spin(opts) -> bool:
+    """Whether the configured population model consumes the spin block.
+
+    Basis negotiation (DS-09) starts from the MODEL: a model whose spin
+    component declares ``consumes_spin_block`` fits the component columns and
+    needs a component-basis store; every other model fits chi_eff.  Errors in
+    the model name are deliberately not raised here -- the real model build
+    reports them with full context.
+    """
+    pop_model = getattr(opts, "pop_model", None)
+    if not pop_model:
+        return False
+    try:
+        from darksirens.gw.populations.registry import get_model
+
+        model = get_model(
+            pop_model,
+            shared_beta=bool(getattr(opts, "shared_beta", True)),
+            shared_spin=bool(getattr(opts, "shared_spin", True)),
+            shared_gamma=bool(getattr(opts, "shared_gamma", True)),
+        )
+    except Exception:
+        return False
+    components = []
+    if hasattr(model, "spin_component"):
+        components.append(model.spin_component)
+    mixture = getattr(model, "mixture", None)
+    if mixture is not None:
+        components.extend(getattr(mixture, "spin_components", ()))
+    return any(
+        getattr(c, "consumes_spin_block", False) for c in components
+    )
+
+
+def required_fit_columns_for(opts):
+    """The fit columns the configured run consumes (see DS-09)."""
+    return (_COMPONENT_FIT_COLUMNS if _model_requests_component_spin(opts)
+            else _CHIEFF_FIT_COLUMNS)
+
+
+def _read_spin_block(path):
+    """(N, 4) component-spin block (a1, a2, cost1, cost2) from a gwcat file.
+
+    Called only after the loader has validated the file against the
+    component contract, so the datasets exist.
+    """
+    import h5py
+
+    with h5py.File(path, "r") as f:
+        return np.column_stack([
+            np.asarray(f[name]) for name in ("a1", "a2", "cost1", "cost2")
+        ])
+
+
+def resolve_selection_inputs(opts, fit_columns=None):
     """Selection inputs from exactly one source: injection HDF5 or P_det emulator.
 
     Returns the 8-tuple ``(m1detsels, m2detsels, dLsels, chieffsels, rasels,
     decsels, p_draw, Ndraw)`` shared by both sources.  ``--pdet_flow_path``
     generates pseudo-injections from the emulator flow once at load time;
     everything downstream (GWEvent packing, compute_selection_term, Neff
-    guards, batching) is source-agnostic.
+    guards, batching) is source-agnostic.  ``fit_columns`` (DS-09) is passed
+    through to the file loader only when it departs from the chi_eff
+    default, so test doubles with the legacy signature keep working.
     """
     if getattr(opts, "pdet_flow_path", None):
         from darksirens.gw.selection import pseudo_injections_from_pdet_flow
@@ -477,24 +538,271 @@ def resolve_selection_inputs(opts):
             Om0=om0,
             chieff_amax=float(getattr(opts, "pdet_chieff_amax", 0.99)),
         )
-    return load_selection_samples(opts.gwselection_path)
+    kwargs = {}
+    if fit_columns is not None and tuple(fit_columns) != _CHIEFF_FIT_COLUMNS:
+        kwargs["fit_columns"] = tuple(fit_columns)
+    return load_selection_samples(
+        opts.gwselection_path,
+        allow_invalid_spin_swap=bool(
+            getattr(opts, "allow_invalid_spin_swap", False)
+        ),
+        **kwargs,
+    )
+
+
+def _read_store_attrs(path) -> dict:
+    """Decoded attrs of a gwcat HDF5 file, or ``{}`` when unreadable.
+
+    Attrs-only open: cheap even for a GB-scale product.  Tolerating an
+    unreadable path is deliberate -- the tuple loaders are the validation
+    (and, in tests, the monkeypatch) seam, so by the time this runs a real
+    file has already been opened and gated; only a test double's placeholder
+    path lands in the except arm.
+    """
+    import h5py
+
+    def _decode(value):
+        return value.decode() if isinstance(value, bytes) else value
+
+    try:
+        with h5py.File(path, "r") as f:
+            return {key: _decode(f.attrs[key]) for key in f.attrs}
+    except OSError:
+        return {}
+
+
+def _require_matching_contract(gw_attrs, sel_attrs, gw_path, sel_path) -> None:
+    """Compare the gwcat-2.1 pairing contract across a PE/selection pair.
+
+    2.1 files carry a ``contract_hash`` (a digest over the pairing-critical
+    declarations: parameter space, fit/advisory columns, spin basis kind,
+    sky-measure convention, source-class filter) plus the full ``contract``
+    JSON.  A mismatched pair -- e.g. a component-basis PE file against a
+    chieff selection file, or a class-filtered PE store against an unfiltered
+    injection set -- is silently wrong, so it is refused here with the
+    field-by-field difference rather than a bare hash.  Files that predate
+    the contract (1.0 / 2.0) are exempt; the per-attr gates still apply.
+    """
+    pe_hash = gw_attrs.get("contract_hash")
+    sel_hash = sel_attrs.get("contract_hash")
+    if pe_hash is None or sel_hash is None:
+        return
+    if pe_hash == sel_hash:
+        return
+    import json
+
+    diff = ""
+    try:
+        pe_contract = json.loads(gw_attrs.get("contract", "{}"))
+        sel_contract = json.loads(sel_attrs.get("contract", "{}"))
+        fields = sorted(set(pe_contract) | set(sel_contract))
+        parts = [
+            f"{k}: PE={pe_contract.get(k)!r} vs selection={sel_contract.get(k)!r}"
+            for k in fields
+            if pe_contract.get(k) != sel_contract.get(k)
+        ]
+        diff = " Differing fields: " + "; ".join(parts) if parts else ""
+    except Exception:
+        pass
+    raise RuntimeError(
+        f"PE file {gw_path!r} and selection file {sel_path!r} "
+        f"declare different pairing contracts (contract_hash {pe_hash} != "
+        f"{sel_hash}): the pair does not describe the same fit and cannot be "
+        f"combined in one likelihood.{diff}"
+    )
+
+
+def _require_chieff_pe_for_emulator(gw_attrs, gw_path) -> None:
+    """The P_det emulator path is chi_eff-basis by construction.
+
+    ``pseudo_injections_from_pdet_flow`` bakes the 1-D chi_eff draw density
+    into its pseudo-injections' ``p_draw``, so pairing it with a PE store in
+    any other spin basis puts numerator and denominator on different spin
+    measures -- a wrong mu that looks entirely healthy.  Today the PE loader
+    also refuses non-chieff bases outright; this check is the emulator-path
+    half of that gate, and stays load-bearing once basis negotiation (DS-09)
+    widens the loader.
+    """
+    basis = gw_attrs.get("spin_basis", "chieff")
+    space = gw_attrs.get("parameter_space", basis)
+    if basis != "chieff" or space != "chieff":
+        raise RuntimeError(
+            f"--pdet_flow_path generates chi_eff-basis pseudo-injections, but "
+            f"the PE file {gw_path!r} declares "
+            f"spin_basis={basis!r} / parameter_space={space!r}. Pair the "
+            "emulator with a chieff-basis PE store, or use a gwcat selection "
+            "file exported in the PE file's basis."
+        )
+
+
+#: Physical tolerances for "these two declared cosmologies are the same one",
+#: matching gwcat's pair validator: differences below these move nothing at
+#: the precision of the products.
+_COSMO_H0_TOL = 1.0
+_COSMO_OM0_TOL = 0.05
+
+
+def _require_matching_pdet_cosmology(gw_attrs, gw_path, opts) -> None:
+    """--pdet_cosmology must be the PE store's declared cosmology.
+
+    ``pe_cosmology_H0``/``pe_cosmology_Om0`` are REQUIRED attrs of every PE
+    file and were previously read by no consumer anywhere in the package,
+    while ``--pdet_cosmology`` was validated for format and range only -- so
+    an emulator campaign generated under one cosmology could be paired with a
+    PE store built under another and nothing noticed.  Both fiducials enter
+    the fixed densities (p_pe's source-frame construction, the emulator's
+    injection z-prior and detector-frame conversion), so a mismatched pair
+    mixes two cosmologies in one likelihood.
+    """
+    pe_h0 = gw_attrs.get("pe_cosmology_H0")
+    pe_om0 = gw_attrs.get("pe_cosmology_Om0")
+    if pe_h0 is None or pe_om0 is None:
+        return
+    h0, om0 = _parse_pdet_cosmology(opts)
+    if (abs(float(pe_h0) - h0) >= _COSMO_H0_TOL
+            or abs(float(pe_om0) - om0) >= _COSMO_OM0_TOL):
+        raise RuntimeError(
+            f"--pdet_cosmology ({h0:g}, {om0:g}) does not match the PE "
+            f"store's declared cosmology ({float(pe_h0):g}, {float(pe_om0):g}) "
+            f"from {gw_path!r}: the emulator's pseudo-injections and the PE "
+            "densities would be built under two different fiducials in one "
+            "likelihood. Set --pdet_cosmology to the PE store's values (or "
+            "rebuild the PE store)."
+        )
+
+
+def _warn_pair_cosmology(gw_attrs, sel_attrs, gw_path, sel_path) -> None:
+    """Surface a PE/selection fiducial-cosmology disagreement.
+
+    A warning, not a refusal: campaigns legitimately carry their own
+    generation cosmology (gwcat GW-09 records ``cosmology_source`` per
+    campaign, with 'file' meaning no cosmology entered pdraw at all), so
+    difference alone is not an error -- but it is exactly the kind of quiet
+    configuration drift an operator should see once, at load.
+    """
+    pe_h0 = gw_attrs.get("pe_cosmology_H0")
+    pe_om0 = gw_attrs.get("pe_cosmology_Om0")
+    sel_h0 = sel_attrs.get("cosmology_H0")
+    sel_om0 = sel_attrs.get("cosmology_Om0")
+    if None in (pe_h0, pe_om0, sel_h0, sel_om0):
+        return
+    try:
+        mismatch = (abs(float(pe_h0) - float(sel_h0)) >= _COSMO_H0_TOL
+                    or abs(float(pe_om0) - float(sel_om0)) >= _COSMO_OM0_TOL)
+    except (TypeError, ValueError):
+        return
+    if mismatch:
+        print(f"    [!] PE store {gw_path!r} declares cosmology "
+              f"({pe_h0}, {pe_om0}) but selection file {sel_path!r} declares "
+              f"({sel_h0}, {sel_om0}); campaigns may legitimately differ "
+              "(per-campaign cosmology_source), but verify this pair was "
+              "built together.")
+
+
+def _warn_per_event_cosmology(gw_attrs, gw_path) -> None:
+    """darksirens consumes ONE scalar PE cosmology; say so if the file varies.
+
+    gwcat writes per-event ``cosmology_H0_per_event``/``Om0_per_event``
+    arrays plus ``cosmology_per_event_varies``; darksirens requires the
+    scalar attrs and never reads the arrays, so if the flag ever flips True
+    the scalar is a fiction.  All shipped products are False today -- this is
+    the signal for when that stops being true.
+    """
+    if gw_attrs.get("cosmology_per_event_varies"):
+        print(f"    [!] PE store {gw_path!r} declares cosmology_per_event_"
+              "varies=True (mode="
+              f"{gw_attrs.get('cosmology_mode', '?')!r}): darksirens uses the "
+              "single scalar pe_cosmology_H0/Om0 for every event, which does "
+              "not describe this file. Downstream cosmology-sensitive terms "
+              "will be inconsistent across events.")
+
+
+def _warn_writer_commit(attrs, path) -> None:
+    """Warn when the gwcat that WROTE a file is not the gwcat imported now.
+
+    ``code_identity()`` records the installed gwcat commit, but nothing
+    compared it to the commit that produced the input file -- and gwcat is an
+    editable install here, so the functions this loader imports change
+    whenever that worktree switches branches.  gwcat files that carry a
+    ``writer_commit`` (or legacy ``gwcat_commit``) attr get the comparison;
+    files that predate the attr are silently exempt.
+    """
+    file_commit = attrs.get("writer_commit") or attrs.get("gwcat_commit")
+    if not file_commit:
+        return
+    from darksirens.io.settings import code_identity
+
+    installed = str(code_identity().get("gwcat_commit") or "")
+    file_commit = str(file_commit)
+    if not installed or installed == "unknown":
+        return
+    # Tolerate short-vs-full SHAs and "-dirty" suffixes.
+    a, b = installed.split("-")[0], file_commit.split("-")[0]
+    if a and b and not (a.startswith(b) or b.startswith(a)):
+        print(f"    [!] {path!r} was written by gwcat commit {file_commit} "
+              f"but the imported gwcat is {installed}; prior/draw-density "
+              "conventions may not match the file. Pin gwcat for any run "
+              "whose numbers will be quoted.")
 
 
 def load_gw_and_selection_inputs(opts) -> dict:
     """Load GW posterior and selection samples."""
+    # Basis negotiation (DS-09): the configured population model decides
+    # which fit columns the pair must cover; the file loaders enforce it.
+    required_columns = required_fit_columns_for(opts)
+    component_basis = "a1" in required_columns
+
     # Load GW posterior samples (Always required)
     # Following the new convention: m1det, m2det, dL, chieff, ra, ...
-    m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = load_gw_samples(
-        opts.gw_path
-    )
+    if component_basis:
+        m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = load_gw_samples(
+            opts.gw_path, fit_columns=required_columns
+        )
+    else:
+        m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = load_gw_samples(
+            opts.gw_path
+        )
+    gw_attrs = _read_store_attrs(opts.gw_path)
+    spin_pe = _read_spin_block(opts.gw_path) if component_basis else None
 
-    # Load Selection samples (Always required)
+    # Load Selection samples (Always required).  When both sides are gwcat
+    # files, cross-check the 2.1 pairing contract; the emulator path instead
+    # checks the PE file's basis against the emulator's fixed chieff basis.
+    selection_attrs = None
+    _warn_per_event_cosmology(gw_attrs, opts.gw_path)
+    _warn_writer_commit(gw_attrs, opts.gw_path)
+    if getattr(opts, "pdet_flow_path", None):
+        if component_basis:
+            raise RuntimeError(
+                "--pdet_flow_path is unsupported in the component spin "
+                "basis: the P_det emulator generates chi_eff-basis "
+                "pseudo-injections. Use a component-basis gwcat selection "
+                "file (--gwselection_path)."
+            )
+        _require_chieff_pe_for_emulator(gw_attrs, opts.gw_path)
+        _require_matching_pdet_cosmology(gw_attrs, opts.gw_path, opts)
     (
         m1detsels, m2detsels, dLsels, chieffsels,
         rasels, decsels, p_draw, Ndraw,
-    ) = resolve_selection_inputs(opts)
+    ) = resolve_selection_inputs(opts, fit_columns=required_columns)
+    spin_sel = (
+        _read_spin_block(opts.gwselection_path) if component_basis else None
+    )
+    if not getattr(opts, "pdet_flow_path", None):
+        selection_attrs = _read_store_attrs(opts.gwselection_path)
+        _require_matching_contract(
+            gw_attrs, selection_attrs, opts.gw_path, opts.gwselection_path
+        )
+        _warn_pair_cosmology(
+            gw_attrs, selection_attrs, opts.gw_path, opts.gwselection_path
+        )
+        _warn_writer_commit(selection_attrs, opts.gwselection_path)
 
     return dict(
+        gw_attrs=gw_attrs,
+        selection_attrs=selection_attrs,
+        spin_pe=spin_pe,
+        spin_sel=spin_sel,
         m1det=m1det,
         m2det=m2det,
         dL=dL,
@@ -527,6 +835,13 @@ def load_flow_and_selection_inputs(opts) -> dict:
     surfaced as ``flow_event_names``.
     """
     from darksirens.gw.flows import load_flow_ensemble
+
+    if _model_requests_component_spin(opts):
+        raise RuntimeError(
+            "--gw_flows_path is unsupported in the component spin basis: "
+            "the flow surrogates are trained in (m1det, q, dL, chieff). "
+            "Use stored PE samples from a component-basis gwcat store."
+        )
 
     ensemble = load_flow_ensemble(
         opts.gw_flows_path,

@@ -77,7 +77,8 @@ def _finite_dataset(
     return int(arr.size)
 
 
-def _check_store_contract(f: h5py.File, fmt: str, *, size: int | None = None) -> None:
+def _check_store_contract(f: h5py.File, fmt: str, *, size: int | None = None,
+                          basis: str = "chieff") -> None:
     """Enforce the shared gwcat store contract (``darksirens.gw.store_contract``).
 
     The preflight must be at least as strict as the loader it gates; both now
@@ -85,7 +86,7 @@ def _check_store_contract(f: h5py.File, fmt: str, *, size: int | None = None) ->
     reach the other automatically.  ``size`` additionally pins every required
     dataset to a common length (n_events * nsamp for PE files).
     """
-    contract = store_contract.contract_for(fmt)
+    contract = store_contract.contract_for(fmt, basis)
     missing_datasets, missing_attrs = store_contract.missing_members(f, contract)
     if missing_datasets or missing_attrs:
         details = []
@@ -176,9 +177,9 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
 
     Consolidated files use root ``format_version='lensing-selection-inputs-1.0'``.
     Legacy simulation component files (``gwcat-selection-1.0`` /
-    ``gwcat-selection-2.0`` in the chi_eff spin basis, and lensed injection
-    files) are accepted so existing split-pair simulations remain
-    preflightable while the new contract is adopted.
+    ``gwcat-selection-2.0`` / ``gwcat-selection-2.1`` in the chi_eff spin
+    basis, and lensed injection files) are accepted so existing split-pair
+    simulations remain preflightable while the new contract is adopted.
     """
 
     def _impl() -> dict[str, Any]:
@@ -201,19 +202,35 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
                             "its injection datasets"
                         )
                 return {"format_version": fmt, "groups": groups, "warnings": warnings}
-            if fmt in ("gwcat-selection-1.0", "gwcat-selection-2.0"):
-                # gwcat-2.0 selection files are only chi_eff-compatible in the
-                # "chieff" spin basis; the component / chieff_chip bases fold a
-                # different draw prior into pdraw and must be re-exported.
-                if fmt == "gwcat-selection-2.0":
-                    basis = _decode(f.attrs.get("spin_basis", ""))
-                    if basis != "chieff":
+            if fmt in ("gwcat-selection-1.0", "gwcat-selection-2.0",
+                       "gwcat-selection-2.1"):
+                # Preflight is model-agnostic: both the chieff and the
+                # component bases are valid products (which MODEL may consume
+                # which is the loaders' basis negotiation, DS-09); anything
+                # else -- e.g. chieff_chip -- has no darksirens consumer.
+                basis = _decode(f.attrs.get("spin_basis", "chieff")) or "chieff"
+                if basis not in ("chieff", "component"):
+                    raise ValueError(
+                        f"gwcat selection file uses spin_basis={basis!r}; "
+                        "darksirens consumes only the 'chieff' and "
+                        "'component' bases"
+                    )
+                _check_store_contract(f, fmt, basis=basis)
+                # DS-03: a chi_eff product whose campaigns did not draw spins
+                # uniform-in-magnitude/isotropic carries a wrong pdraw; the
+                # loader refuses it (with a CLI escape flag), so the preflight
+                # must too.  The component basis needs no swap and is exempt.
+                if basis == "chieff" and "injected_spin_uniform_isotropic" in f.attrs:
+                    uniform = np.atleast_1d(
+                        np.asarray(f.attrs["injected_spin_uniform_isotropic"])
+                    ).astype(bool)
+                    if not uniform.all():
                         raise ValueError(
-                            f"gwcat-2.0 selection file uses spin_basis={basis!r}; "
-                            "darksirens' likelihood is chi_eff-based, re-export with "
-                            "spin_basis='chieff'"
+                            "selection file declares injected_spin_uniform_"
+                            f"isotropic={uniform.tolist()}; the analytic "
+                            "chi_eff spin swap is invalid for the non-uniform "
+                            "campaign(s) and pdraw is the wrong draw density"
                         )
-                _check_store_contract(f, fmt)
                 warnings.append("legacy unlensed selection file accepted; prefer consolidated selection_inputs.h5")
                 return {"format_version": fmt, "selection_kind": "unlensed", "n_injections": int(len(f["dL"])), "ndraw": int(f.attrs.get("ndraw", len(f["dL"]))), "warnings": warnings}
             # Lensed injection writer has varied format strings; accept both legacy

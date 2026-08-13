@@ -103,3 +103,37 @@ def test_console_scripts_for_long_running_clis_keep_the_teardown_guard():
 
     assert callable(inference_console_main)
     assert callable(lensing_console_main)
+
+
+def test_chi_eff_prior_tables_agree_across_packages():
+    """Standing cross-package guard (DS-11): the JAX chi_eff prior port and
+    the linked gwcat.spin reference must agree to 1e-10, so a gwcat version
+    bump cannot silently split the convention again.  (The detailed port
+    test lives in test_flow_pe_prior.py; this one is the packaging-level
+    tripwire that fires even when the flow suites are skipped.)"""
+    import numpy as np
+
+    gwcat_spin = pytest.importorskip("gwcat.spin")
+    pytest.importorskip("darksirens.likelihood.flow_events")
+    import jax.numpy as jnp
+
+    from darksirens.likelihood.flow_events import (
+        build_chi_eff_prior_table,
+        chi_eff_prior_logpdf,
+    )
+
+    amax = 0.99
+    qg, cg, tab = build_chi_eff_prior_table(amax)
+    ref_prior = gwcat_spin.ChiEffPrior(amax=amax)
+    np.testing.assert_array_equal(np.asarray(tab), np.asarray(ref_prior.table))
+
+    rng = np.random.default_rng(5)
+    m1 = rng.uniform(5.0, 90.0, 500)
+    m2 = rng.uniform(0.1, 1.0, 500) * m1
+    chi = rng.uniform(-1.05, 1.05, 500)
+    ref = np.asarray(ref_prior.logprob(chi, m1, m2))
+    got = np.asarray(chi_eff_prior_logpdf(
+        jnp.asarray(m1 / (m1 + m2)), jnp.asarray(chi),
+        jnp.asarray(qg), jnp.asarray(cg), jnp.asarray(tab),
+    ))
+    np.testing.assert_allclose(got, ref, atol=1e-10)

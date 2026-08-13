@@ -522,10 +522,20 @@ def pseudo_injections_from_pdet_flow(
     # Uniform angle factors cancel against the isotropic population exactly
     # and are excluded (constant offsets cannot move posteriors).
     log_p_chi = chi_eff_prior_logprob(chieff, m1src, m2src, amax=chieff_amax)
-    # Mirror the gwcat-export convention (gw/utils.py): floor the table
-    # interpolation at -50 so pdraw stays strictly positive at the
-    # |chieff| -> amax table edges.
-    log_p_chi = np.clip(log_p_chi, a_min=-50.0, a_max=None)
+    # gwcat convention (GW-03): -inf means zero reference density, which here
+    # can only be a |chieff| -> amax table-edge zero (the a_i <= chieff_amax
+    # mask above bounds |chieff| <= chieff_amax).  Excluding such a draw is
+    # EXACT, not an approximation: the swapped-spin population uses the same
+    # amax-truncated reference conditional, so p_pop is zero wherever pi_ref
+    # is and the draw's true contribution to mu is zero.  It reaches the
+    # selection sum with pdraw = 0 and is masked there (prior_wt > 0);
+    # Ndraw = M/xi is unaffected.  The old -50 floor instead handed the draw
+    # e^50 of spurious importance weight.
+    n_edge = int((~np.isfinite(log_p_chi)).sum())
+    if n_edge:
+        print(f"    [pdet emulator] {n_edge} draw(s) at zero reference "
+              "chi_eff density (table edge) carry pdraw = 0 and are excluded "
+              "from the selection sum (exact; Ndraw unchanged).")
     log_pdraw = (
         _gwtc4_log_p_m1(m1src)
         + _gwtc4_log_p_m2_given_m1(m2src, m1src)

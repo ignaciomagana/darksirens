@@ -94,7 +94,7 @@ def test_load_all_data_returns_named_pe_counts_for_survey_fixture(
             2,
         )
 
-    def fake_load_selection_samples(_path):
+    def fake_load_selection_samples(_path, **_kwargs):
         return (
             np.array([34.0, 40.0]),
             np.array([27.2, 32.0]),
@@ -162,7 +162,7 @@ def test_load_all_data_stores_bright_siren_counterpart_pixel_and_keeps_it_compac
             2,
         )
 
-    def fake_load_selection_samples(_path):
+    def fake_load_selection_samples(_path, **_kwargs):
         return (
             np.array([34.0]),
             np.array([27.2]),
@@ -221,7 +221,7 @@ def test_load_all_data_accepts_multiple_bright_siren_counterparts(monkeypatch):
             2,
         )
 
-    def fake_load_selection_samples(_path):
+    def fake_load_selection_samples(_path, **_kwargs):
         return (
             np.array([34.0]),
             np.array([27.2]),
@@ -315,7 +315,7 @@ def test_load_all_data_multitracer_drops_top_level_catalog_and_loads_each_path_o
             2,
         )
 
-    def fake_load_selection_samples(_path):
+    def fake_load_selection_samples(_path, **_kwargs):
         return (
             np.array([34.0, 40.0]),
             np.array([27.2, 32.0]),

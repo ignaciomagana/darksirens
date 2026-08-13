@@ -124,6 +124,7 @@ def log_sample_weight_wl_marginalized(
     log_p_wl_fn: Callable,
     mu_nodes: jnp.ndarray,
     log_w_nodes: jnp.ndarray,
+    spin: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """WL-marginalized per-sample log importance weight.
 
@@ -193,7 +194,13 @@ def log_sample_weight_wl_marginalized(
     m1src = m1det_b / (1.0 + z_s_safe)                         # (..., Nmu)
 
     # Physics pieces evaluated on the μ-grid
-    log_pp  = log_p_pop_fn(m1src, q_b, z_s_safe, chieff_b, pop_params)  # (..., Nmu)
+    if spin is None:
+        log_pp = log_p_pop_fn(m1src, q_b, z_s_safe, chieff_b, pop_params)  # (..., Nmu)
+    else:
+        # (N, d) spin block broadcast against the mu-node axis: the extra
+        # spin coordinates are z-independent, so each node sees the same row.
+        log_pp = log_p_pop_fn(m1src, q_b, z_s_safe, chieff_b, pop_params,
+                              spin=spin[:, None, :])
     log_pz  = log_prior_z_fn(z_s_safe.reshape(-1),
                              pix_b.reshape(-1),
                              catalog).reshape(z_s_safe.shape)            # (..., Nmu)
@@ -243,6 +250,7 @@ def log_sample_weight_wl_or_standard(
     mu_nodes: jnp.ndarray | None,
     log_w_nodes: jnp.ndarray | None,
     wl_enabled: bool,
+    spin: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Dispatcher: WL-marginalize when ``wl_enabled`` is True, otherwise
     fall through to the standard ``log_sample_weight``.
@@ -259,12 +267,14 @@ def log_sample_weight_wl_or_standard(
             m1det, q, dL, chieff, pix, prior_wt,
             cosmo, survey, pop_params, catalog,
             log_p_pop_fn, log_prior_z_fn,
+            spin=spin,
         )
     return log_sample_weight_wl_marginalized(
         m1det, q, dL, chieff, pix, prior_wt,
         cosmo, survey, pop_params, catalog,
         log_p_pop_fn, log_prior_z_fn,
         log_p_wl_fn, mu_nodes, log_w_nodes,
+        spin=spin,
     )
 
 
@@ -289,6 +299,7 @@ def log_sample_weight_wl_lognormal_hermite(
     wl_b: jnp.ndarray,
     u_nodes: jnp.ndarray,
     log_wH_nodes: jnp.ndarray,
+    spin: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Lognormal-specialized WL marginalization using Gauss-Hermite quadrature.
 
@@ -371,7 +382,11 @@ def log_sample_weight_wl_lognormal_hermite(
     z_s_safe = jnp.where(in_grid, z_s, 0.5)
     m1src = m1det_b / (1.0 + z_s_safe)
 
-    log_pp = log_p_pop_fn(m1src, q_b, z_s_safe, chieff_b, pop_params)
+    if spin is None:
+        log_pp = log_p_pop_fn(m1src, q_b, z_s_safe, chieff_b, pop_params)
+    else:
+        log_pp = log_p_pop_fn(m1src, q_b, z_s_safe, chieff_b, pop_params,
+                              spin=spin[:, None, :])
     log_pz = log_prior_z_fn(z_s_safe.reshape(-1),
                             pix_b.reshape(-1), catalog).reshape(z_s_safe.shape)
     log_J  = log_jacobian_m1src_q_z_to_m1det_q_dL(z_s_safe, dL_true, H0, Om0, w0, wa)
