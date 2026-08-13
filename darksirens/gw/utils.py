@@ -32,6 +32,8 @@ except ModuleNotFoundError:
 
 import h5py
 
+from darksirens.gw import store_contract
+
 _TQDM_MODULE = sys.modules.get("tqdm")
 if _TQDM_MODULE is not None and hasattr(_TQDM_MODULE, "tqdm"):
     tqdm = _TQDM_MODULE.tqdm
@@ -172,69 +174,26 @@ def _report_pe_weight_health(p_pe_2d, fmt, nEvents, nsamp, f_attrs=None):
     return total
 
 
-def _require_valid_sky(ra, dec, path, conversion_hint=""):
-    """Reject non-finite or out-of-range sky positions before they reach healpy.
+def _require_store_quality(f, contract, path, conversion_hint=""):
+    """Raise on finiteness / positivity / range violations against the contract.
 
-    Both loaders feed ``ra``/``dec`` straight into
-    ``hp.ang2pix(nside, pi/2 - dec, ra)``, whose failure mode on bad input is
-    either an exception deep inside healpy or -- worse -- a silently wrong
-    pixel index.  gwcat legitimately writes NaN sky for the semianalytic O1/O2
-    rows of cumulative-mixture selection files, and a degrees-vs-radians
-    ingestion mistake produces values that healpy happily wraps.  Ranges follow
-    the gwcat export contract: ``ra`` in [0, 2*pi) and ``dec`` in
-    [-pi/2, pi/2], both radians.
+    The checks themselves (and the requirement tables) live in
+    ``darksirens.gw.store_contract`` -- one declarative source shared with the
+    lensing preflight validator, so the loader and the preflight cannot drift
+    apart again.  Notable consequences: NaN or degrees-valued ``ra``/``dec``
+    is rejected before it reaches ``hp.ang2pix`` (gwcat legitimately writes
+    NaN sky for semianalytic O1/O2 campaigns), a partially-skyless
+    ``sky_position_available`` is refused by name, and a zero ``pdraw`` --
+    which the likelihood would silently exclude from the selection sum with
+    the same mask that drops padding rows -- fails loudly here instead.
     """
-    ra = np.asarray(ra)
-    dec = np.asarray(dec)
-    problems = []
-    n_bad_ra = int((~np.isfinite(ra)).sum())
-    n_bad_dec = int((~np.isfinite(dec)).sum())
-    if n_bad_ra or n_bad_dec:
-        problems.append(
-            f"{n_bad_ra} non-finite ra and {n_bad_dec} non-finite dec values"
-        )
-    finite_ra = ra[np.isfinite(ra)]
-    finite_dec = dec[np.isfinite(dec)]
-    n_range_ra = int(((finite_ra < 0.0) | (finite_ra >= 2.0 * np.pi)).sum())
-    n_range_dec = int((np.abs(finite_dec) > np.pi / 2.0).sum())
-    if n_range_ra or n_range_dec:
-        problems.append(
-            f"{n_range_ra} ra values outside [0, 2*pi) and {n_range_dec} dec "
-            "values outside [-pi/2, pi/2] (radians; a degrees-valued file "
-            "fails this check by construction)"
-        )
+    problems = store_contract.quality_problems(f, contract)
     if problems:
         raise RuntimeError(
-            f"Invalid sky positions in {path!r}: "
+            f"Invalid data in {path!r}: "
             + "; ".join(problems)
-            + ". Sky angles must be finite radians with ra in [0, 2*pi) and "
-            "dec in [-pi/2, pi/2]."
+            + "."
             + (f" {conversion_hint}" if conversion_hint else "")
-        )
-
-
-def _require_sky_available(f, path):
-    """Refuse a selection file that declares sky-less campaigns.
-
-    gwcat stamps a per-campaign ``sky_position_available`` bool array; a False
-    entry means that campaign's ``ra``/``dec`` rows are NaN placeholders (the
-    semianalytic O1/O2 half of a cumulative-mixture file).  darksirens
-    pixelates every selection sample against the galaxy catalog, so a
-    partially-skyless product cannot be consumed correctly -- the NaN rows
-    would also fail the finiteness check below, but this failure names the
-    campaign structure instead of a row count.
-    """
-    if "sky_position_available" not in f.attrs:
-        return
-    available = np.atleast_1d(np.asarray(f.attrs["sky_position_available"])).astype(bool)
-    if not available.all():
-        raise RuntimeError(
-            f"Selection file {path!r} declares sky_position_available="
-            f"{available.tolist()}: at least one campaign carries no sky "
-            "positions (NaN ra/dec placeholders). darksirens assigns every "
-            "selection sample to a HEALPix pixel, so it cannot consume a "
-            "partially-skyless product; re-export without the skyless "
-            "campaigns or use a fully sky-resolved injection set."
         )
 
 
@@ -297,26 +256,6 @@ def load_gw_samples(gw_path):
         "GWCatalog.export(path, spin_basis=\"chieff\") -- export() defaults to "
         "the component basis, which this loader rejects."
     )
-    required_datasets = (
-        "ra",
-        "dec",
-        "m1det",
-        "m2det",
-        "dL",
-        "chieff",
-        "p_pe",
-        "m1src",
-        "m2src",
-    )
-    required_attrs = (
-        "nsamp",
-        "nobs",
-        "pe_cosmology_H0",
-        "pe_cosmology_Om0",
-        "chi_eff_in_p_pe",
-        "chi_eff_amax",
-    )
-
     reexport_hint = (
         "Re-export in the chi_eff basis, e.g. "
         "gwcat ... --spin-basis chieff or GWCatalog.export(spin_basis=\"chieff\")."
@@ -338,12 +277,14 @@ def load_gw_samples(gw_path):
         # (legitimately absent) chi_eff-compat attrs.
         if fmt == "gwcat-pe-2.0":
             _require_chieff_spin_basis(f, gw_path, reexport_hint)
+        contract = store_contract.contract_for(fmt)
         _require_hdf5_members(
             f,
-            datasets=required_datasets,
-            attrs=required_attrs,
+            datasets=contract.datasets,
+            attrs=contract.attrs,
             conversion_hint=conversion_hint,
         )
+        _require_store_quality(f, contract, gw_path, conversion_hint=conversion_hint)
 
         nsamp = int(f.attrs["nsamp"])
         nEvents = int(f.attrs["nobs"])
@@ -359,8 +300,6 @@ def load_gw_samples(gw_path):
         p_pe = np.array(f["p_pe"])
         m1source = np.array(f["m1src"])
         m2source = np.array(f["m2src"])
-
-        _require_valid_sky(ra, dec, gw_path, conversion_hint=conversion_hint)
 
         _chi_in_ppe = bool(f.attrs["chi_eff_in_p_pe"])
         _chi_amax = float(f.attrs["chi_eff_amax"])
@@ -466,25 +405,13 @@ def load_selection_samples(file):
         "Re-export in the chi_eff basis, e.g. "
         "gwcat ... --spin-basis chieff or SelectionSet.export(spin_basis=\"chieff\")."
     )
-    required_datasets = (
-        "m1det",
-        "m2det",
-        "dL",
-        "chieff",
-        "ra",
-        "dec",
-        "pdraw",
-        "m1src",
-        "m2src",
-    )
-    # ``chi_eff_swap_applied`` states whether pdraw already carries the 1-D
-    # chi_eff draw density.  It is REQUIRED (not defaulted to True) for the same
-    # reason ``chi_eff_in_p_pe`` is required of a PE file: the numerator and the
-    # denominator of the hierarchical likelihood must be on the same spin
-    # measure, and a file that does not say cannot be paired with one that does.
-    # Every gwcat chieff export and every in-repo mock generator stamps it.
-    required_attrs = ("ndraw", "chi_eff_swap_applied")
-
+    # ``chi_eff_swap_applied`` (required by the selection contract, not
+    # defaulted to True) states whether pdraw already carries the 1-D chi_eff
+    # draw density, for the same reason ``chi_eff_in_p_pe`` is required of a
+    # PE file: the numerator and the denominator of the hierarchical
+    # likelihood must be on the same spin measure, and a file that does not
+    # say cannot be paired with one that does.  Every gwcat chieff export and
+    # every in-repo mock generator stamps it.
     if not jax.config.jax_enable_x64:
         raise RuntimeError(
             "load_selection_samples requires x64; call configure_jax_runtime() "
@@ -500,14 +427,14 @@ def load_selection_samples(file):
         # checks (extra spin datasets a1/a2/cost1/cost2/chip are ignored).
         if fmt == "gwcat-selection-2.0":
             _require_chieff_spin_basis(f, file, reexport_hint)
+        contract = store_contract.contract_for(fmt)
         _require_hdf5_members(
             f,
-            datasets=required_datasets,
-            attrs=required_attrs,
+            datasets=contract.datasets,
+            attrs=contract.attrs,
             conversion_hint=conversion_hint,
         )
-
-        _require_sky_available(f, file)
+        _require_store_quality(f, contract, file, conversion_hint=conversion_hint)
 
         m1detsels = np.array(f["m1det"])
         m2detsels = np.array(f["m2det"])
@@ -519,8 +446,6 @@ def load_selection_samples(file):
         m1src_sel = np.array(f["m1src"])
         m2src_sel = np.array(f["m2src"])
         ndraw = int(f.attrs["ndraw"])
-
-        _require_valid_sky(rasels, decsels, file, conversion_hint=conversion_hint)
 
         # Apply 1-D chi_eff spin-prior swap if not already done.
         if not bool(f.attrs["chi_eff_swap_applied"]):

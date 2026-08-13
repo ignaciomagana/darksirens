@@ -13,6 +13,7 @@ from typing import Any, Callable
 import h5py
 import numpy as np
 
+from darksirens.gw import store_contract
 from darksirens.lensing.observed_catalog import (
     EVENT_INDEXING,
     PE_FORMAT_VERSION,
@@ -76,13 +77,34 @@ def _finite_dataset(
     return int(arr.size)
 
 
-#: Sky-angle ranges shared with the loaders (``gw/utils._require_valid_sky``):
-#: radians, ``ra`` in [0, 2*pi) and ``dec`` in [-pi/2, pi/2].  A degrees-valued
-#: file fails these by construction.
-_SKY_RANGES: dict[str, dict[str, Any]] = {
-    "ra": {"lo": 0.0, "hi": 2.0 * np.pi, "hi_open": True},
-    "dec": {"lo": -np.pi / 2.0, "hi": np.pi / 2.0},
-}
+def _check_store_contract(f: h5py.File, fmt: str, *, size: int | None = None) -> None:
+    """Enforce the shared gwcat store contract (``darksirens.gw.store_contract``).
+
+    The preflight must be at least as strict as the loader it gates; both now
+    consume the same declarative table, so requirements added on one side
+    reach the other automatically.  ``size`` additionally pins every required
+    dataset to a common length (n_events * nsamp for PE files).
+    """
+    contract = store_contract.contract_for(fmt)
+    missing_datasets, missing_attrs = store_contract.missing_members(f, contract)
+    if missing_datasets or missing_attrs:
+        details = []
+        if missing_datasets:
+            details.append("datasets: " + ", ".join(missing_datasets))
+        if missing_attrs:
+            details.append("attributes: " + ", ".join(missing_attrs))
+        raise ValueError("missing required " + "; ".join(details))
+    for name in contract.datasets:
+        arr = np.asarray(f[name])
+        if arr.ndim != 1:
+            raise ValueError(f"dataset {name!r} must be one-dimensional")
+        if size is not None and arr.size != size:
+            raise ValueError(
+                f"dataset {name!r} length {arr.size} != expected {size}"
+            )
+    problems = store_contract.quality_problems(f, contract)
+    if problems:
+        raise ValueError("; ".join(problems))
 
 
 def validate_observed_gw_pe(path: str | Path) -> dict[str, Any]:
@@ -108,8 +130,11 @@ def validate_observed_gw_pe(path: str | Path) -> dict[str, Any]:
                     "and positive nsamp attrs"
                 )
             expected = n_events * nsamp
-            for name in ("m1det", "m2det", "dL", "chieff", "p_pe"):
-                _finite_dataset(f, name, size=expected)
+            # The full loader table, not a subset: this preflight used to
+            # check only (m1det, m2det, dL, chieff, p_pe), so a file could
+            # pass preflight and then fail load_gw_samples on ra/dec/m1src/
+            # m2src or the chi_eff/cosmology attrs (review DS-02).
+            _check_store_contract(f, fmt, size=expected)
             warnings = []
             if "nobs" in f.attrs and int(f.attrs["nobs"]) != n_events:
                 raise ValueError("nobs attr must match n_events")
@@ -188,23 +213,7 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
                             "darksirens' likelihood is chi_eff-based, re-export with "
                             "spin_basis='chieff'"
                         )
-                for name in ("m1det", "m2det", "dL", "chieff", "pdraw"):
-                    _finite_dataset(f, name)
-                # Sky angles were the one loader requirement this preflight
-                # never covered: gwcat writes NaN ra/dec for semianalytic
-                # O1/O2 campaigns, and the loader feeds them to hp.ang2pix.
-                for name, ranges in _SKY_RANGES.items():
-                    if name in f:
-                        _finite_dataset(f, name, **ranges)
-                sky_avail = np.atleast_1d(
-                    np.asarray(f.attrs.get("sky_position_available", True))
-                ).astype(bool)
-                if not sky_avail.all():
-                    raise ValueError(
-                        "selection file declares sky_position_available="
-                        f"{sky_avail.tolist()}; at least one campaign carries "
-                        "no sky positions and cannot be pixelated"
-                    )
+                _check_store_contract(f, fmt)
                 warnings.append("legacy unlensed selection file accepted; prefer consolidated selection_inputs.h5")
                 return {"format_version": fmt, "selection_kind": "unlensed", "n_injections": int(len(f["dL"])), "ndraw": int(f.attrs.get("ndraw", len(f["dL"]))), "warnings": warnings}
             # Lensed injection writer has varied format strings; accept both legacy
