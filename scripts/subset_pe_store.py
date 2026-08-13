@@ -1,7 +1,15 @@
 #!/usr/bin/env python
-"""Subset a gwcat-1.0 PE store to the events of a flow-checkpoint directory.
+"""Subset a gwcat PE store to the events of a flow-checkpoint directory.
 
-Produces a gwcat-1.0 file whose events are exactly the flow ensemble's, in
+Accepts gwcat-1.0 / gwcat-pe-2.0 / gwcat-pe-2.1 stores (any other
+format_version is refused rather than silently copied with stale metadata).
+Every attr whose leading axis is (nobs,) -- spin_amax_*_per_event,
+cosmology_*_per_event, the sample-set provenance arrays -- is reindexed to
+the subset; scalar and space-level attrs (contract, contract_hash,
+fit_columns, block_provenance) are invariant under an event subset and are
+copied verbatim.
+
+Produces a file whose events are exactly the flow ensemble's, in
 the ensemble's (lexicographically sorted) order — the same order the
 flow-surrogate likelihood uses — so a stored-PE baseline run and a flow run
 index events identically.
@@ -41,7 +49,17 @@ def main():
     if not flow_names:
         raise SystemExit(f"No flow checkpoints under {args.flows}")
 
+    _ACCEPTED_FORMATS = ("gwcat-1.0", "gwcat-pe-2.0", "gwcat-pe-2.1")
+
     with h5py.File(args.store, "r") as f:
+        fmt = _decode(f.attrs.get("format_version", ""))
+        if fmt not in _ACCEPTED_FORMATS:
+            raise SystemExit(
+                f"Refusing to subset format_version {fmt!r}: this tool knows "
+                f"how to reindex {_ACCEPTED_FORMATS} only. Copying an unknown "
+                "format would silently carry event-indexed metadata it "
+                "cannot recognise."
+            )
         names = [_decode(n) for n in f.attrs["event_names"]]
         nsamp = int(f.attrs["nsamp"])
         nobs = int(f.attrs["nobs"])
@@ -66,6 +84,8 @@ def main():
 
     # Update event-indexed attributes.
     attrs["nobs"] = len(rows)
+    attrs["subset_of"] = str(args.store)
+    attrs["subset_n_original_events"] = nobs
     attrs["event_names"] = np.asarray(flow_names, dtype=object)
     for key, val in list(attrs.items()):
         if key in ("nobs", "event_names"):
