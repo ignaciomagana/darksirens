@@ -1,0 +1,1187 @@
+% ============================================================================
+%  MODEL.tex -- Mathematical specification for the field-level dark-siren
+%  hierarchy.  Written to seed the proposal document.
+%
+%  This is a SELF-CONTAINED LaTeX body fragment.  It uses only amsmath,
+%  amssymb, amsthm, booktabs and verbatim -- no algorithmic/algorithm2e, no
+%  siunitx, no custom classes.  Drop it into a document whose preamble has
+%
+%      \usepackage{amsmath,amssymb,amsthm,booktabs}
+%      \newtheorem{proposition}{Proposition}
+%      \newtheorem{lemma}{Lemma}
+%      \newtheorem{theorem}{Theorem}
+%      \theoremstyle{definition}\newtheorem{definition}{Definition}
+%      \theoremstyle{remark}\newtheorem{remark}{Remark}
+%
+%  EVERY equation labelled "[code]" is transcribed from a verified source
+%  line in darksirens @ master 0c5b3db.  Equations labelled "[new]" are the
+%  proposed model and exist nowhere in the repository.
+% ============================================================================
+
+\section{Notation and the objects that already exist}
+\label{sec:notation}
+
+Sky pixels are indexed $p\in\{1,\dots,N_{\rm pix}\}$ in HEALPix RING ordering at
+$N_{\rm side}=64$ ($N_{\rm pix}=49\,152$, $\Omega_{\rm pix}=4\pi/N_{\rm pix}$).
+Redshift is carried on the package grid $\{z_n\}_{n=1}^{N_{\rm grid}}$
+($N_{\rm grid}=1086$).  A \emph{voxel} is $v=(p,z)$.  Coarse radial shells used
+by the field fit are indexed $g\in\{1,\dots,G_s\}$ with edges $\{z_g^-,z_g^+\}$.
+Catalogs (tracers) are indexed $k\in\{1,\dots,K\}$.
+
+Cosmological and population parameters are $\Lambda$ (containing $H_0$);
+survey parameters are
+$\theta=(\log_{10}n_0,\,\delta,\,\theta_{\rm sel},\,b_{\rm miss},\dots)$, per
+catalog where suffixed.  Throughout, the \emph{expected all-galaxy comoving
+density} is
+\begin{equation}
+  \bar n(z;\Lambda,\theta)\;\equiv\;\frac{dN_{\rm exp}}{dz\,d\Omega}
+  \;=\;n_0\,(1+z)^{\delta}\,\frac{dV_c}{dz\,d\Omega}(z;\Lambda),
+  \label{eq:dNexp}
+\end{equation}
+which is the code object \verb|grids.dN_exp|.  $C(z;\theta)\in[0,1]$ is the
+completeness curve; under \verb|c_mode="per_pixel"| it is $C_p(z)$ (a per-pixel
+KDE ratio), under \verb|"aggregate"| it is the sky-aggregate $\bar C(z)$, and
+under \verb|"selection"| it is the parametric $C_{\rm sel}(z;\theta_{\rm sel})$
+formed from a truncated luminosity function (optionally stratified, giving a
+per-pixel \emph{depth} routing $C_{s(p)}(z;\theta_{\rm sel})$ through a stamped
+stratum map --- single-catalog only).  The production 259-event run uses
+\verb|c_mode=selection|, no stratification, and \emph{no LSS at all}: it runs
+\verb|--use_lss false| with \verb|lss_completion none|
+(\texttt{logs/ns\_joint\_sel\_1119811.out:68,\,73,\,232}), so the field-level
+path would be the first LSS ever used in production.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{ll}
+\toprule
+object & source of truth (\texttt{master} @ \texttt{0c5b3db})\\
+\midrule
+$dN_{\rm miss}=(1-C)\,dN_{\rm exp}\,Q$ & \texttt{redshift/completion.py:1280}\\
+low-rank operator $\Phi=K_{XZ}L^{-\!\top}$ & \texttt{redshift/lognormal\_completion.py:635--655}\\
+MAP objective $J(\xi)$ & \texttt{redshift/lognormal\_completion.py:660--700}\\
+Laplace ensemble $\xi_m$ & \texttt{redshift/lognormal\_completion.py:868--887}\\
+$\log Q$ evaluation (both modes) & \texttt{redshift/lognormal\_completion.py:889--978}\\
+per-$z$ mean-one renormalisation & \texttt{redshift/lognormal\_completion.py:502--560}\\
+$\log\mathcal L=\mathrm{LSE}_m\log\mathcal L_m-\log M$ & \texttt{likelihood/core.py:1274}\\
+two-node member gather (the seam) & \texttt{redshift/prior.py:711--758}\\
+$K\!\ge\!2$ shared-latent stacked solve & \texttt{cli/build\_joint\_lognormal\_completion.py:239--290}\\
+\bottomrule
+\end{tabular}
+\caption{Anchors for the current-state equations of \S\ref{sec:current}.}
+\end{table}
+
+% ============================================================================
+\section{The current state as one generative model}
+\label{sec:current}
+
+The pieces are usually described as three separate machines (a builder, a
+table, a likelihood).  They are one generative model, and writing it as one is
+what exposes where it is exact and where it is a plug-in.
+
+\subsection{The galaxy point process and its thinning}
+
+Conditional on a latent log-density contrast field $s(p,z)$, galaxies are an
+inhomogeneous Poisson process on $(p,z)$ with intensity
+\begin{equation}
+  \Lambda_{\rm gal}(p,z)\;=\;\bar n(z;\Lambda,\theta)\,
+  \exp\!\Big[b_{\rm gal}\,s(p,z)-\tfrac12 b_{\rm gal}^2\sigma^2(p,z)\Big],
+  \qquad \sigma^2(p,z)\equiv\mathrm{Var}\,[s(p,z)],
+  \label{eq:galintensity}
+\end{equation}
+the lognormal density model.  The shift $-\tfrac12b^2\sigma^2$ enforces
+$\mathbb E_{\rm prior}\big[e^{b s-\frac12 b^2\sigma^2}\big]=1$, so
+\eqref{eq:galintensity} has prior-mean intensity exactly $\bar n$: the field
+\emph{redistributes} galaxies and does not create them.  This mean-one
+convention is the single most load-bearing convention in the whole stack and
+reappears three times below.
+
+The survey observes each galaxy independently with probability
+$f_p\,C(z;\theta)$, where $f_p\in[0,1]$ is the per-pixel areal completeness
+($f_p=1-\texttt{masked\_frac}_p$; $f_p\equiv1$ in today's code) and $C$ is the
+magnitude/flux completeness.  By the Poisson thinning theorem the observed
+(\emph{catalogued}) and unobserved (\emph{missing}) galaxies are two
+\textbf{independent} Poisson processes,
+\begin{align}
+  \Lambda_{\rm cat}(p,z) &= f_p\,C(z;\theta)\;\Lambda_{\rm gal}(p,z), \label{eq:thin-cat}\\
+  \Lambda_{\rm miss}(p,z) &= \big[1-f_p\,C(z;\theta)\big]\;\Lambda_{\rm gal}(p,z),
+  \label{eq:thin-miss}
+\end{align}
+and, crucially,
+\begin{equation}
+  p\big(\text{missing galaxies}\,\big|\,\text{catalogued galaxies},\,s\big)
+  \;=\;p\big(\text{missing galaxies}\,\big|\,s\big).
+  \label{eq:thinning-independence}
+\end{equation}
+Equation~\eqref{eq:thinning-independence} is exact, and it is the entire
+resolution of the double-conditioning question of \S\ref{sec:double}.  It says:
+\emph{once the field is fixed, the catalog carries no further information about
+what is missing}.  Everything the catalog knows about the missing galaxies, it
+knows through $s$.
+
+\subsection{The dark-siren redshift--sky prior as it is coded}
+
+The likelihood does not integrate \eqref{eq:thin-cat} --- it uses the catalog
+itself.  For a dark siren with parameters $(z,\hat n_p)$,
+\begin{equation}
+  p\big(z,p\,\big|\,\Lambda,\theta,Q\big)
+  \;=\;\frac{N_{{\rm obs},p}\,\mathcal K_p(z)\;+\;\big[1-C(z;\theta)\big]\,
+  \bar n(z;\Lambda,\theta)\;Q_p(z)}{\mathcal Z(\Lambda,\theta,Q)},
+  \label{eq:zprior}
+\end{equation}
+\hfill[code: \texttt{prior.py:668--673}, \texttt{:755--758}]
+
+\noindent where $N_{{\rm obs},p}$ is the integer galaxy count in pixel $p$ and
+$\mathcal K_p(z)$ the pixel's photo-$z$ kernel density
+(\verb|eval_log_catalog_prior_state|).  The normaliser $\mathcal Z$ is either
+per-pixel ($\mathcal Z_p$, ``conditional'' convention) or survey-global
+(``field'' convention, \texttt{completion.py:1780--1810}).  The consumed
+missing density is
+\begin{equation}
+  \frac{dN_{\rm miss}}{dz\,d\Omega}(p,z)=\big[1-C(z;\theta)\big]\,
+  \bar n(z;\Lambda,\theta)\;Q_p(z),\qquad
+  Q_p(z)\equiv e^{\mathrm{clip}(\log Q_p(z),\,\pm7)},
+  \label{eq:dNmiss}
+\end{equation}
+relaxed to $dN_{\rm miss}=dN_{\rm exp}$ (i.e. $C:=0$, $Q:=1$) above the survey
+depth $z_{\rm depth}$.\hfill[code: \texttt{completion.py:1280,\,1295}]
+
+Comparing \eqref{eq:dNmiss} with \eqref{eq:thin-miss} identifies
+\begin{equation}
+  Q_p(z)\;\equiv\;\exp\!\Big[b_{\rm miss}\,s(p,z)-\tfrac12 b_{\rm miss}^2\sigma^2(p,z)\Big]
+  \quad\text{with } f_p\equiv 1 .
+  \label{eq:Qdef}
+\end{equation}
+So $Q$ \emph{is} the exponentiated latent field, mean-one normalised, and
+nothing else.  Its only defect as written is that in the current code it is a
+\textbf{fixed table read from disk} rather than a function of the sampled
+parameters.
+
+\subsection{The offline field model: Poisson-lognormal on a low-rank basis}
+
+Let $\{Z_j\}_{j=1}^{M}$ be inducing nodes on $\mathbb S^2\times\zeta$ with
+$\zeta=\log(1+z)$ (a Fibonacci sphere of $M_{\rm sph}$ points crossed with
+$M_z$ nodes uniform in $\zeta$, $M=M_{\rm sph}M_z$), and $k(\cdot,\cdot)$ the
+separable kernel $k=k_{\rm sph}\otimes k_{\zeta}$ with amplitude $a$ and
+lengthscales $(\ell_{\rm ang},\ell_\zeta)$.  With
+$L L^{\!\top}=K_{ZZ}+j\mathbb 1$ define the Nystr\"om design
+\begin{equation}
+  \Phi \;=\; K_{XZ}\,L^{-\!\top}\ \in\ \mathbb R^{V\times M},
+  \qquad
+  s \;=\; \Phi\,\xi,\qquad \xi\sim\mathcal N(0,\mathbb 1_M),
+  \label{eq:lowrank}
+\end{equation}
+so that $\mathrm{Cov}(s)=\Phi\Phi^{\!\top}=K_{XZ}(K_{ZZ}+j\mathbb 1)^{-1}K_{ZX}$
+and the per-voxel prior variance is
+$\sigma^2_{\rm prior}(v)=\sum_i\Phi_{vi}^2$.  $\Phi$ is never materialised: it
+factorises exactly as $\Phi=\Phi_{\rm sph}\otimes\Phi_\zeta$ (a dense $\Phi$ at
+$M=3780$ would be $47.6$\,GB).
+
+The fit is over solve voxels $v=(p,g)$ carrying integer counts $N_v$ and a base
+\begin{equation}
+  \bar\lambda_v\;=\;\int_{z_g^-}^{z_g^+}\! C(z;\theta_{\rm ref})\,
+  \bar n(z;\Lambda_{\rm ref},\theta_{\rm ref})\,dz ,
+  \label{eq:base}
+\end{equation}
+which is $p$-independent under \verb|c_mode| $\in$
+\{\texttt{aggregate},\texttt{selection}\} and $p$-dependent under
+\verb|per_pixel|.  The MAP problem is
+\begin{equation}
+  J(\xi)=\tfrac12\|\xi\|^2+\sum_v\big[\lambda_v-N_v\log\lambda_v\big],
+  \qquad
+  \lambda_v=\bar\lambda_v\exp\!\Big[b\,(\Phi\xi)_v-\tfrac12 b^2\sigma^2_{\rm prior}(v)\Big],
+  \label{eq:Jpoisson}
+\end{equation}
+\hfill[code: \texttt{lognormal\_completion.py:660--700}]
+\begin{equation}
+  \nabla J=\xi+b\,\Phi^{\!\top}(\lambda-N),
+  \qquad
+  H=\nabla^2 J=\mathbb 1+b^2\,\Phi^{\!\top}\mathrm{diag}(\lambda)\,\Phi .
+  \label{eq:poissonHess}
+\end{equation}
+$J$ is convex; $H\succeq\mathbb 1$ always, so the problem is well posed even
+when $V<M$.  The field is clipped at $|s|\le10$ with a KKT projection so that
+objective, gradient and Hessian describe the same clipped function.
+
+The Laplace posterior is $p(\xi\,|\,\{N\})\approx\mathcal N(\hat\xi,H^{-1})$,
+sampled as
+\begin{equation}
+  \xi_m=\hat\xi+L_H^{-\!\top}g_m,\qquad g_m\sim\mathcal N(0,\mathbb 1_M),
+  \qquad L_HL_H^{\!\top}=H .
+  \label{eq:laplacedraws}
+\end{equation}
+
+\subsection{The two $Q$ evaluations, and the variance shift}
+
+Let $\phi_u\in\mathbb R^M$ be the Nystr\"om row at an \emph{output} voxel
+$u=(p,z)$ on the fine grid, and
+\begin{equation}
+  \sigma^2_{\rm prior}(u)=\|\phi_u\|^2,
+  \qquad
+  \sigma^2_{\rm post}(u)=\phi_u^{\!\top}H^{-1}\phi_u=\big\|L_H^{-1}\phi_u\big\|^2 .
+\end{equation}
+
+\begin{lemma}[posterior-mean $Q$ and its variance shift]
+\label{lem:varshift}
+Under the Laplace posterior \eqref{eq:laplacedraws},
+\begin{equation}
+  \log\mathbb E\big[Q_u\big]
+  \;=\;b\,\phi_u^{\!\top}\hat\xi
+  \;-\;\tfrac12 b^2\Big[\sigma^2_{\rm prior}(u)-\sigma^2_{\rm post}(u)\Big].
+  \label{eq:postmeanQ}
+\end{equation}
+\end{lemma}
+\begin{proof}
+$Q_u=\exp\!\big[b\,\phi_u^{\!\top}\xi-\tfrac12b^2\sigma^2_{\rm prior}(u)\big]$
+by \eqref{eq:Qdef}--\eqref{eq:lowrank}.  For $\xi\sim\mathcal N(\hat\xi,H^{-1})$
+and any $a$, $\mathbb E[e^{a^{\!\top}\xi}]=\exp(a^{\!\top}\hat\xi+\tfrac12
+a^{\!\top}H^{-1}a)$.  Put $a=b\,\phi_u$.
+\end{proof}
+
+\noindent Equation~\eqref{eq:postmeanQ} \emph{is} the table the GW likelihood
+consumes today [code: \texttt{lognormal\_completion.py:967}], and the per-draw
+member tables are
+\begin{equation}
+  \log Q^{(m)}_u=b\,\phi_u^{\!\top}\xi_m-\tfrac12 b^2\sigma^2_{\rm prior}(u)
+  \label{eq:memberQ}
+\end{equation}
+\hfill[code: \texttt{lognormal\_completion.py:973}]
+
+\noindent so that $\tfrac1M\sum_m Q^{(m)}_u\to\mathbb E[Q_u]$ exactly, by
+Lemma~\ref{lem:varshift}.  Data-free voxels have
+$\sigma^2_{\rm post}=\sigma^2_{\rm prior}$ and $\phi_u^{\!\top}\hat\xi\to0$, so
+$Q\to1$: ``no information, no modulation.''
+
+\begin{remark}[the plug-in gap, stated exactly]
+\label{rem:plugin}
+The GW likelihood is a nonlinear functional of $Q$ --- $Q$ appears inside
+$\log$ in \eqref{eq:zprior} and inside $\log\mu$ in the selection term --- so
+\begin{equation}
+  \log\mathbb E_\xi\big[\mathcal L\big(Q(\xi)\big)\big]\;\neq\;
+  \log\mathcal L\big(\mathbb E_\xi[Q]\big).
+\end{equation}
+Running the deterministic table is a \emph{plug-in}, exact only to first order
+in the posterior spread of $s$.  The member ensemble is the correction; its own
+error budget is Proposition~\ref{prop:jensen}.
+\end{remark}
+
+\subsection{The per-$z$ mean-one budget constraint as a gauge condition}
+
+\begin{proposition}[$Q$ has no monopole freedom]
+\label{prop:gauge}
+For any positive function $\alpha(z)$, the map
+\begin{equation}
+  \mathcal G_\alpha:\quad
+  Q_p(z)\;\longmapsto\;\alpha(z)\,Q_p(z),
+  \qquad
+  \big[1-C(z;\theta)\big]\,\bar n(z;\Lambda,\theta)
+  \;\longmapsto\;
+  \frac{\big[1-C(z;\theta)\big]\,\bar n(z;\Lambda,\theta)}{\alpha(z)}
+\end{equation}
+leaves $dN_{\rm miss}$ in \eqref{eq:dNmiss}, and therefore the entire GW
+likelihood, exactly invariant.  Hence the per-$z$ monopole of $Q$ is not
+identified by the GW data; it is identified only by whatever fixes
+$(n_0,\delta,\theta_{\rm sel})$.
+\end{proposition}
+
+The code fixes this gauge, at build time, by the condition
+\begin{equation}
+  \log Q_p(z)\;\longleftarrow\;\log Q_p(z)
+  -\log\!\left[\frac{\sum_{p\in\mathcal F}w_p(z)\,Q_p(z)}{\sum_{p\in\mathcal F}w_p(z)}\right],
+  \qquad
+  w_p(z)=\big[1-C_p(z)\big]\,\bar n(z),
+  \label{eq:renorm}
+\end{equation}
+applied over the \emph{fitted footprint} $\mathcal F$, to the MAP table and to
+\textbf{each member independently}.\hfill[code:
+\texttt{lognormal\_completion.py:502--560};
+\texttt{build\_lognormal\_completion.py:582,\,990}]
+
+\begin{proposition}[when the gauge fixing is exactly what the likelihood consumes]
+\label{prop:budgetexact}
+Let $\mathcal B(z)=\sum_{p=1}^{N_{\rm pix}}\big[1-C_p(z;\theta)\big]\bar n(z;\theta)Q_p(z)$
+be the budget the likelihood actually integrates, and
+$\mathcal B_0(z)$ the same sum with $Q\equiv1$.  Then:
+\begin{enumerate}
+\item Under \verb|c_mode| $\in\{\texttt{aggregate},\texttt{selection}\}$ in the
+\texttt{gp3d} builder, $\mathcal F$ is the \emph{whole sky}
+(\verb|fit = np.arange(n_pix)|) and $w_p(z)=w(z)$ is $p$-independent
+(\verb|np.tile|).  Then \eqref{eq:renorm} reduces to
+$\langle Q\rangle_{\rm sky}=1$, and
+\begin{equation}
+  \mathcal B(z)=\big[1-C(z;\theta)\big]\bar n(z;\theta)\sum_p Q_p(z)
+  =\big[1-C(z;\theta)\big]\bar n(z;\theta)\,N_{\rm pix}=\mathcal B_0(z)
+\end{equation}
+\textbf{exactly, for every $z$, every member, and every $\theta$} --- the
+gauge condition is $\theta$-free because the weights are.
+\item Under \verb|c_mode="per_pixel"|, $\mathcal F$ is the occupied subset and
+$w_p$ depends on $p$ and on $\theta$.  Then $\mathcal B(z)\neq\mathcal B_0(z)$
+in general, by two separate mechanisms: (i) the off-footprint pixels
+($Q\equiv1$) are outside the constraint but inside the consumed sum, and (ii)
+the weights used at build time are evaluated at $\theta_{\rm ref}$.
+\end{enumerate}
+\end{proposition}
+
+\begin{remark}
+Proposition~\ref{prop:budgetexact}(1) is a stronger statement than the plan's
+\S4.2 assumes.  In the \emph{production} configuration
+(\verb|c_mode=selection|) the mean-one identity is already exactly the consumed
+identity; the discrepancy the reviews flag is real, but confined to
+\verb|per_pixel|.  This matters for the proposed model because it says the
+budget/placement split survives a change of $\theta$ \emph{without any frozen
+weight operator} whenever the completeness base is sky-uniform.
+\end{remark}
+
+\begin{remark}[the renormalisation does not commute with the ensemble mean]
+\label{rem:noncommute}
+Write $\Pi$ for the map \eqref{eq:renorm}.  $\Pi$ is nonlinear in $Q$, so
+\begin{equation}
+  \frac1M\sum_m \Pi\big[Q^{(m)}\big]\;\neq\;\Pi\big[\mathbb E[Q]\big] .
+\end{equation}
+The deterministic table (renormalise the posterior mean) and the member
+ensemble (renormalise each draw) therefore target slightly different objects.
+The bias is $O\!\big(\mathrm{Var}_{\rm sky}(Q)/N_{\rm pix}\big)$ per shell and
+is second order, but it is not zero, and it is the reason the members carry
+``placement uncertainty only, zero budget uncertainty'' --- a statement that is
+a modelling choice, not a theorem.
+\end{remark}
+
+\subsection{Member-ensemble marginalisation}
+
+With members $\{Q^{(m)}\}_{m=1}^{M_{\rm draw}}$ the likelihood is
+\begin{equation}
+  \log\mathcal L(\Lambda,\theta)
+  \;=\;\log\frac1{M_{\rm draw}}\sum_{m}\mathcal L_m(\Lambda,\theta)
+  \;=\;\mathop{\mathrm{LSE}}_m\;\log\mathcal L_m\;-\;\log M_{\rm draw},
+  \label{eq:membermarg}
+\end{equation}
+\hfill[code: \texttt{likelihood/core.py:1274}]
+\begin{equation}
+  \log\mathcal L_m=\sum_{i=1}^{N_{\rm ev}}
+  \log\!\int\! d\vartheta\;
+  \frac{p(d_i|\vartheta)\,\pi_{\rm pop}(\vartheta|\Lambda)\,
+        p_z\big(z,p\,|\,\Lambda,\theta,Q^{(m)}\big)}{\pi_{\rm PE}(\vartheta)}
+  \;-\;N_{\rm ev}\log\mu\big(\Lambda,\theta,Q^{(m)}\big).
+  \label{eq:Lm}
+\end{equation}
+\hfill[code: \texttt{likelihood/core.py:1249--1262}]
+
+\noindent The member index enters \textbf{both} the per-event (PE) term and the
+selection term $\mu$; \verb|core.py:1372--1380| enforces this as an all-or-none
+guard, and the per-member $N_{\rm eff}$/variance guard already runs inside the
+member \verb|vmap|.  This is the correct structure: a member is one realisation
+of the universe, and the same universe must be used to place hosts and to
+compute the detected fraction.
+
+\begin{proposition}[Jensen bias of \eqref{eq:membermarg}]
+\label{prop:jensen}
+\eqref{eq:membermarg} is an unbiased estimator of $\mathcal L$ but a biased
+estimator of $\log\mathcal L$.  If $\log\mathcal L_m$ has spread $\sigma$ nats
+and is approximately Gaussian across members, then to leading order
+\begin{equation}
+  \mathbb E\big[\log\widehat{\mathcal L}_{M}\big]-\log\mathcal L
+  \;\simeq\;-\,\frac12\frac{\mathrm{Var}\big(\widehat{\mathcal L}_M\big)}{\mathcal L^2}
+  \;=\;-\,\frac{e^{\sigma^2}-1}{2M},
+  \qquad
+  \frac{\mathrm{ESS}}{M}\;\simeq\;e^{-\sigma^2}.
+  \label{eq:jensenbias}
+\end{equation}
+Requiring $|{\rm bias}|<\epsilon$ nats therefore requires
+\begin{equation}
+  \boxed{\;M\;>\;\frac{e^{\sigma^2}-1}{2\epsilon}\;}
+  \label{eq:Mrequired}
+\end{equation}
+\end{proposition}
+\begin{proof}
+$\mathcal L_m$ lognormal with $\mathbb E[\mathcal L_m]=\mathcal L$ gives
+$\mathrm{Var}(\mathcal L_m)/\mathcal L^2=e^{\sigma^2}-1$ and hence
+$\mathrm{Var}(\widehat{\mathcal L}_M)/\mathcal L^2=(e^{\sigma^2}-1)/M$.
+Expand $\log$ about $\mathcal L$ to second order.
+\end{proof}
+
+\noindent \eqref{eq:Mrequired} is sharper than the usual ``$M\sim e^{\sigma^2}$''
+folklore and it is brutal: at the plan's upper estimate $\sigma\simeq2.6$ nats,
+$e^{\sigma^2}=863$, so $\epsilon=0.1$ nat needs $M>4.3\times10^3$, and $M=8$
+carries a $54$-nat bias.
+
+\begin{remark}[what actually has to be gated: the frozen-noise surrogate]
+\label{rem:crn}
+The whitened draws $g_m$ in \eqref{eq:laplacedraws} are generated \emph{once}
+and reused at every $\theta$ (common random numbers).  Therefore
+$\widehat{\mathcal L}_M(\theta)$ is a \textbf{deterministic, smooth function of
+$\theta$}, not a noisy one: the sampler explores an exactly reproducible
+surrogate surface.  The bias of Proposition~\ref{prop:jensen} is a fixed
+perturbation, and only its \emph{$\theta$-variation}
+\begin{equation}
+  \Delta(\theta)\;=\;\log\widehat{\mathcal L}_M(\theta)-\log\mathcal L(\theta),
+  \qquad
+  \mathop{\mathrm{osc}}_\theta\,\Delta\;\equiv\;
+  \max_\theta\Delta-\min_\theta\Delta
+  \label{eq:osc}
+\end{equation}
+distorts the posterior; a constant offset is absorbed into the evidence.  The
+consequence for validation is unforgiving: every determinism diagnostic
+(repeat-to-repeat identity, adjacent-$\theta$ smoothness) passes
+\emph{by construction} under CRN, and passes just as well on a badly distorted
+surrogate.  Only \eqref{eq:osc}, measured against a large-$M$ reference,
+discriminates.
+\end{remark}
+
+\subsection{The $K\ge2$ shared-latent joint solve}
+
+For $K$ catalogs sharing one field, the stacked design is
+$\Phi'_k=b_k\Phi_k$ with $b=1$ passed to the solver, so that the solver's
+default $\sigma^2_{\rm vox}=\sum_i(\Phi'_k)^2_{vi}=b_k^2\sum_i(\Phi_k)^2_{vi}$
+is the per-survey-correct mean-one shift automatically.  Then
+\begin{align}
+  J(\xi)&=\tfrac12\|\xi\|^2+\sum_{k=1}^K\sum_{v\in\mathcal V_k}
+  \big[\lambda_{kv}-N_{kv}\log\lambda_{kv}\big],
+  \qquad
+  \lambda_{kv}=\bar\lambda_{kv}\,
+  e^{\,b_k(\Phi_k\xi)_v-\frac12 b_k^2\sigma^2_{kv}},
+  \label{eq:jointJ}\\
+  H&=\mathbb 1+\sum_{k=1}^K b_k^2\,\Phi_k^{\!\top}\mathrm{diag}(\lambda_k)\,\Phi_k ,
+  \label{eq:jointH}
+\end{align}
+one Laplace ensemble $\{\xi_m\}$, and per-survey tables
+$\log Q_k^{(m)}=b_k\phi^{\!\top}\xi_m-\tfrac12 b_k^2\sigma^2_{\rm prior}$.
+Member $m$ of every catalog is then the same physical realisation --- a theorem,
+not a check --- and it is stamped as a shared \verb|realization_set_id| which
+the inference verifies.
+
+\begin{remark}[three verified limitations of this path, as of \texttt{0c5b3db}]
+\label{rem:jointgaps}
+\begin{enumerate}
+\item \textbf{It is \texttt{per\_pixel}-only.}  The joint builder calls the
+shared assembly without a \verb|c_mode| argument,
+\begin{verbatim}
+_assemble_gp3d_survey(path, cosmo=cosmo, survey=survey_k, z_s=z_s, edges_s=edges_s)
+                                       [build_joint_lognormal_completion.py:180-181]
+\end{verbatim}
+so it silently takes the default \verb|c_mode="per_pixel"| and the
+occupied-only base.  Neither \texttt{aggregate} nor \texttt{selection} is
+reachable at $K\ge2$.
+\item \textbf{It never fixes the budget gauge.}  \verb|renormalize_q_mean_one|
+is called by the radial builder (\texttt{:582}) and the $K=1$ \texttt{gp3d}
+builder (\texttt{:990}) and by \emph{nothing} in
+\verb|build_joint_lognormal_completion.py|.  The $K\ge2$ tables therefore carry
+the full Jensen monopole of Lemma~\ref{lem:varshift} --- the effect measured at
+$+55\%$ budget inflation --- which the $K=1$ tables have removed.
+\item \textbf{Its rank cannot resolve any physical scale.}  The joint inducing
+grid is hard-coded at $M_{\rm sph}=32$, $M_z=6$, $z_{\rm node,hi}=3$
+($M=192$), giving a $\zeta$ node spacing $\log(1+3)/5=0.277$.  The \emph{hard}
+radial resolution guard demands $\ell_\zeta\ge0.277$, i.e.
+$L_{\rm smooth}\ge0.277\,(1+z_{\rm ref})\,d\chi/dz\simeq1.34\,$Gpc at
+$z_{\rm ref}\simeq0.24$.  Any correlation length a DESI-like survey can
+actually support ($50$--$190$\,Mpc, $\ell_\zeta=0.010$--$0.039$) hard-fails the
+guard.
+\end{enumerate}
+Together these say the shared-latent $K\ge2$ path is not merely un-plumbed for
+selection completeness: \emph{it cannot today produce a resolved, gauge-fixed,
+selection-based shared field at all}.
+\end{remark}
+
+\subsection{Which half of the \texttt{selection}\,$\times\,K\!\ge\!2$ seam is open}
+\label{sec:seam}
+
+This is worth stating precisely, because the two halves have moved apart.
+
+\paragraph{The inference half is OPEN.}  At \texttt{master} \texttt{0c5b3db},
+$K\ge2$ mixtures under \verb|c_mode="selection"| assemble and evaluate
+end-to-end: per-catalog magnitude fits with per-catalog $\theta$ routing,
+homogeneous Schechter mixtures with one shared \verb|M_faint_offset|, a
+per-catalog $Q$-table $\theta$ firewall (cosmology checked globally, survey
+parameters checked against \emph{catalog $k$'s own} table), and a two-catalog
+likelihood fixture pinning the identical-catalogs-collapse-to-$K{=}1$ identity
+and the no-cross-routing swap invariance
+(\texttt{tests/test\_multitracer\_selection.py}).  There is exactly one refusal
+left on this side: \emph{stratified} selection is single-catalog only, because
+the full-sky stratum map is attached to the shared data bundle while a $K\ge2$
+mixture builds each catalog's views from its own bundle, so the map never
+reaches catalog $k$'s \verb|EMCatalog| and its per-stratum empty-pixel budget
+would be silently missing (\texttt{inference/parameters.py:460--470}).  That is
+a data-plumbing limitation, not a modelling one.
+
+\paragraph{The builder half is CLOSED.}  Remark~\ref{rem:jointgaps} is the
+statement.  Operationally: the joint builder is the \emph{only} producer of a
+shared \verb|realization_set_id|
+(\verb|save_lss_completion_hdf5| mints a fresh \verb|uuid4| whenever one is not
+supplied, so $K$ independently built single-catalog tables carry $K$ different
+ids), and $K\ge2$ \verb|--lss_marginalize| requires equal, non-null ids unless
+\verb|--allow_unverified_shared_lss_members| is passed --- which downgrades the
+matched shared-field prior to an independent-fields product prior, i.e. throws
+away exactly the cross-tracer coupling the multitracer analysis exists to
+exploit.  So a $K\ge2$ shared-latent LSS marginalisation under a
+\texttt{selection} (or even \texttt{aggregate}) completeness is not refused; it
+is \textbf{not constructible}.
+
+\paragraph{Consequence for the proposal.}  The seam does not need to be closed
+by extending the joint builder --- passing \verb|c_mode| through
+\texttt{build\_joint\_lognormal\_completion.py:180}, calling
+\verb|renormalize_q_mean_one|, and unfreezing $(M_{\rm sph},M_z,z_{\rm node,hi})$
+would close it, and that is a genuine short-term option.  But the field-level
+hierarchy of \S\ref{sec:proposed} closes it \emph{by construction}: one $\xi$
+shared across $K$ tracers makes ``member $m$ of every catalog is the same
+realisation'' a theorem, retires \verb|realization_set_id| and the whole
+provenance firewall, and removes the builder's frozen rank, frozen $\theta$ and
+frozen completeness mode simultaneously.  That is the strongest available
+argument that the field belongs inside the HBI rather than in an exported
+table.
+
+% ============================================================================
+\section{The proposed model}
+\label{sec:proposed}
+
+\subsection{The hierarchy}
+
+Promote $\xi$ from a table to a latent variable of the inference:
+\begin{multline}
+  p\big(H_0,\Lambda,\xi,\{\theta_k\},\{b_k\},b_{\rm GW},\{f_k\}\;\big|\;
+     d_{\rm GW},\{d_{{\rm gal},k}\}\big)
+  \;\propto\;
+  \pi(H_0,\Lambda)\,\pi(\{\theta_k\})\,\pi(\{b_k\})\,\pi(b_{\rm GW})\,\pi(\{f_k\})\\
+  \times\;\underbrace{\mathcal N\big(\xi;0,\mathbb 1_M\big)}_{\rm (F1)}\;
+  \times\;\prod_{k=1}^{K}\underbrace{p\big(\{m_i\}_k\,\big|\,\{z_i\}_k,\theta_k\big)}_{\rm (F2)\ magnitudes}\;
+  \times\;\prod_{k=1}^{K}\underbrace{p\big(\{N_{kv}\}\,\big|\,\xi,\theta_k,b_k,f_k,\Lambda\big)}_{\rm (F3)\ counts}\\
+  \times\;\underbrace{p\big(d_{\rm GW}\,\big|\,\{d_{{\rm gal},k}\},\xi,b_{\rm GW},\Lambda,\{\theta_k\}\big)}_{\rm (F4)\ GW}
+  \label{eq:hierarchy}
+\end{multline}
+\hfill[new]
+
+\noindent with $f_k=\{f_{k,p}\}_{p}$ the per-pixel areal completeness field of
+catalog $k$ (data with a mask-model uncertainty, not a free function).  The
+single structural change from \S\ref{sec:current} is that
+$\xi$ now appears in (F1), (F3) \emph{and} (F4), so every cosmological proposal
+changes the galaxy-field likelihood consistently.  Factor (F2) is the existing
+magnitude channel; the chain rule
+$p(\{z\},\{p\},\{m\})=p(\{z\})\,p(\{p\}|\{z\})\,p(\{m\}|\{z\},\{p\})$ is what
+licenses writing (F2) and (F3) side by side.
+
+\subsection{(F3): the count likelihood}
+
+On solve voxels $v=(p,g)$:
+\begin{equation}
+  N_{kv}\;\sim\;\mathrm{Poisson}\Big[
+  \underbrace{f_{k,p}\,C_k(v;\theta_k)\,\bar N_k(v;\Lambda,\theta_k)}_{\textstyle \bar\lambda_{kv}(\theta_k,\Lambda)}
+  \;\exp\!\Big(b_k s_v-\tfrac12 b_k^2\sigma_v^2\Big)\Big],
+  \label{eq:countlike}
+\end{equation}
+\hfill[new]
+\begin{equation}
+  \bar N_k(v)=\Omega_{\rm pix}\!\!\int_{z_g^-}^{z_g^+}\!\!\bar n(z;\Lambda,\theta_k)\,dz .
+\end{equation}
+Two consequences must be stated explicitly because they are $C$-side changes:
+\begin{itemize}
+\item $f_{k,p}$ appears in \eqref{eq:countlike} \emph{and} in the consumed
+missing budget, $dN_{\rm miss}=\big[1-f_pC(z;\theta)\big]\bar n\,Q$.  Putting it
+on one side only inverts the sign of the inferred incompleteness: a pixel with
+$63\%$ areal masking is currently told $63\%$ of its galaxies are a
+\emph{density deficit} rather than a \emph{selection deficit}, and that deficit
+then re-enters the GW likelihood as a claim about where hosts are not.
+\item Under \verb|c_mode="per_pixel"| the base $\bar\lambda_{kv}$ is itself a
+plug-in estimate of the same counts $N_{kv}$; \eqref{eq:countlike} is then
+circular and must be refused.  \verb|aggregate| and \verb|selection| bases are
+functions of $\theta$, not of the counts, and are admissible.
+\end{itemize}
+
+\subsection{(F4): the GW-host intensity on the same field}
+
+The GW host intensity is built from the \emph{same} $s$ with its own bias:
+\begin{equation}
+  \Lambda_{\rm host}(p,z;\Lambda,\theta,\xi)
+  \;=\;\psi(z;\Lambda)\;\bar n(z;\Lambda,\theta)\;
+  \exp\!\Big[b_{\rm GW}\,s(p,z)-\tfrac12 b_{\rm GW}^2\sigma^2(p,z)\Big],
+  \label{eq:hostintensity}
+\end{equation}
+\hfill[new]
+with $\psi$ the merger-rate weighting.  Thinning \eqref{eq:hostintensity} by
+the same $f_pC$ gives the catalogued/missing split, and the dark-siren
+redshift--sky prior becomes
+\begin{equation}
+  p\big(z,p\,\big|\,\mathcal C,\xi,\Lambda,\theta\big)
+  =\frac{\displaystyle\sum_{j\in\mathcal C}\delta_{p,p_j}\,\mathcal K_j(z)\,w_j(\Lambda)
+        \;+\;\big[1-f_pC(z;\theta)\big]\,\psi\,\bar n\;
+        e^{\,b_{\rm GW}s(p,z)-\frac12 b_{\rm GW}^2\sigma^2(p,z)}}
+       {\mathcal Z(\Lambda,\theta,\xi)} .
+  \label{eq:zprior-new}
+\end{equation}
+\hfill[new]
+Structurally this is \eqref{eq:zprior} with $Q_p(z)$ replaced by an explicit
+function of $\xi$ and $b_{\rm GW}$ --- which is why the seam in the code is one
+gather: $\log Q\to b_{\rm GW}\,\big(\mathrm{row\_fac}[p]\cdot\phi_\zeta[n]\big)-\rho$.
+
+\subsection{Double conditioning: the exact factorisation}
+\label{sec:double}
+
+The catalog enters twice --- as the empirical spike train in
+\eqref{eq:zprior-new} and as the data of \eqref{eq:countlike}.  This is the
+central correctness question of the whole proposal.
+
+\begin{theorem}[no double use]
+\label{thm:double}
+Let $\mathcal C$ denote the catalogued galaxies and $\mathcal U$ the missing
+ones.  Then, exactly,
+\begin{equation}
+  p\big(\mathcal C,\,d_{\rm GW}\;\big|\;\xi,\Lambda,\theta\big)
+  \;=\;
+  \underbrace{p\big(\mathcal C\,\big|\,\xi,\theta,\Lambda\big)}_{\rm (F3)}
+  \;\times\;
+  \underbrace{p\big(d_{\rm GW}\,\big|\,\mathcal C,\xi,\Lambda,\theta\big)}_{\rm (F4)} ,
+  \label{eq:chainrule}
+\end{equation}
+and the second factor may be evaluated with the host prior
+\eqref{eq:zprior-new} \textbf{without any double use of the catalog}, provided
+the missing-galaxy intensity is written as a function of $\xi$ alone and never
+of $\mathcal C$.
+\end{theorem}
+\begin{proof}
+\eqref{eq:chainrule} is the chain rule and is exact.  For the second claim, the
+GW factor requires (i) the catalogued hosts, which are $\mathcal C$ --- a
+conditioning event, used as known positions, not re-modelled --- and (ii) the
+intensity of $\mathcal U$.  By the thinning independence
+\eqref{eq:thinning-independence},
+$p(\mathcal U\,|\,\mathcal C,\xi)=p(\mathcal U\,|\,\xi)$, so the intensity of
+$\mathcal U$ is $[1-f_pC]\Lambda_{\rm gal}(\xi)$ and involves $\mathcal C$
+nowhere.  The catalog's information about $\mathcal U$ has been fully routed
+through (F3) into the posterior for $\xi$.
+\end{proof}
+
+\begin{remark}[what breaks it]
+\label{rem:doublebreak}
+Theorem~\ref{thm:double} fails in exactly two ways, and both are live:
+\begin{enumerate}
+\item \textbf{Empirical-Bayes plug-in.}  If the missing intensity is evaluated
+at a point estimate $\hat\xi(\mathcal C)$ --- which is precisely what the
+current $Q$ table is --- then $\mathcal C$ appears inside the GW factor.
+Multiplying that by (F3) uses the same counts twice.  Today the code is
+\emph{safe} only because it never multiplies by (F3): it is a conditional model
+with an empirical-Bayes prior, not a joint one.  Adding the count likelihood
+without promoting $\xi$ to a latent is the single most dangerous half-measure
+available.
+\item \textbf{The monopole, twice.}  Factor the counts exactly by shell totals
+$T_{kg}=\sum_pN_{kpg}$:
+\begin{equation}
+  p\big(\{N_{kpg}\}\,\big|\,\xi,\theta\big)
+  \;=\;
+  \underbrace{p\big(\{T_{kg}\}\,\big|\,\xi,\theta\big)}_{\text{budget / monopole}}
+  \;\times\;
+  \underbrace{p\big(\{N_{kpg}\}\,\big|\,\{T_{kg}\},\xi,\theta\big)}_{\text{placement}} .
+  \label{eq:shellfactor}
+\end{equation}
+The calibration that currently pins $(\log_{10}n_0,\delta)$ is a fit to the
+\emph{same} counts over $z\in[0.05,0.3]$, delivered to the run as
+\verb|--fixed_parameter_values|.  That prior is a surrogate for the first
+factor of \eqref{eq:shellfactor}.  Keeping both the calibration prior
+\emph{and} the unconditional Poisson count likelihood squares the monopole
+information.  The admissible combinations are exactly two:
+\emph{(a)} conditional (multinomial) count likelihood $+$ external calibration
+prior, or \emph{(b)} unconditional Poisson count likelihood $+$ a genuinely
+independent prior on $(n_0,\delta)$.  Combination (a) is recommended, and it is
+what \S\ref{sec:cancel} makes exact.
+\end{enumerate}
+\end{remark}
+
+\subsection{The exact $\theta$-cancellation criterion for the conditional channel}
+\label{sec:cancel}
+
+Write the shell-integrated intensity
+\begin{equation}
+  \Lambda_{pg}(\theta,\xi)=\int_{z_g^-}^{z_g^+}\!
+  f_p\,C(z;\theta)\,\bar n(z;\Lambda,\theta)\;
+  e^{\,b\,s_p(z)-\frac12 b^2\sigma_p^2(z)}\,dz ,
+  \qquad
+  \pi_{pg}=\frac{\Lambda_{pg}}{\sum_{p'}\Lambda_{p'g}} .
+  \label{eq:pipg}
+\end{equation}
+Define the within-shell normalised profile
+\begin{equation}
+  \omega_g(z;\theta)=\frac{C(z;\theta)\,\bar n(z;\Lambda,\theta)}
+  {\int_{g} C\,\bar n\,dz},\qquad \int_g\omega_g\,dz=1,
+\end{equation}
+so that $\Lambda_{pg}=a_g(\theta,\Lambda)\,f_p\!\int_g\omega_g(z;\theta)\,
+e^{b s_p(z)-\frac12 b^2\sigma_p^2(z)}dz$ with $a_g$ $p$-independent.
+
+\begin{proposition}[exact cancellation]
+\label{prop:cancel}
+$\pi_{pg}$ is exactly independent of $\theta$ (and of $\Lambda$, and of $n_0$,
+$\delta$, $\theta_{\rm sel}$, $H_0$, $\Omega_{m}$, $w_0$, $w_a$) if and only if
+the base is $p$-separable within the shell --- $\bar\lambda_{p}(z)=u_p\,a(z)$,
+true whenever $C$ is sky-uniform --- \textbf{and} the field is shell-constant,
+$s_p(z)=s_{pg}$ for $z\in g$.  Under those two conditions
+\begin{equation}
+  \pi_{pg}=\frac{f_p\,e^{\,b s_{pg}-\frac12 b^2\sigma_{pg}^2}}
+                {\sum_{p'}f_{p'}\,e^{\,b s_{p'g}-\frac12 b^2\sigma_{p'g}^2}} .
+  \label{eq:pi-exact}
+\end{equation}
+Otherwise the residual $\theta$-dependence is exactly a within-shell covariance,
+\begin{equation}
+  \frac{\partial\log\pi_{pg}}{\partial\theta}
+  =\frac{\displaystyle\int_g \partial_\theta\omega_g\,e^{b s_p}dz}
+        {\displaystyle\int_g \omega_g\,e^{b s_p}dz}
+  \;-\;\sum_{p'}\pi_{p'g}\,
+  \frac{\displaystyle\int_g \partial_\theta\omega_g\,e^{b s_{p'}}dz}
+       {\displaystyle\int_g \omega_g\,e^{b s_{p'}}dz},
+  \label{eq:cancelresidual}
+\end{equation}
+which vanishes identically when $e^{bs_p(z)}$ is constant across the shell.
+\end{proposition}
+\begin{proof}
+Immediate from \eqref{eq:pipg}: any $p$-independent factor divides out of the
+ratio, and shell-constancy of $s_p$ pulls the exponential out of the
+$z$-integral so that the remaining $\int_g\omega_g\,dz=1$ removes all
+$\theta$-dependence.  \eqref{eq:cancelresidual} is
+$\partial_\theta\log\Lambda_{pg}-\sum_{p'}\pi_{p'g}\partial_\theta\log\Lambda_{p'g}$
+with $a_g$ cancelled.
+\end{proof}
+
+\begin{remark}
+Proposition~\ref{prop:cancel} converts the plan's ``freeze the shell-response
+operator $W$'' from a modelling choice into a measurable residual: freezing $W$
+at $\theta_{\rm ref}$ is exactly the approximation
+$\partial_\theta\omega_g\to0$, and \eqref{eq:cancelresidual} is the quantity to
+bound.  It also identifies the correct shell width: shells narrow enough that
+$s$ is constant across them make the cancellation exact, but the radial
+resolution is bounded below by the photo-$z$ scatter
+($\sigma_z\simeq0.023$, $\sigma_\chi\simeq89$\,Mpc), so the honest statement is
+that the cancellation is exact only up to the photo-$z$-smoothed radial
+structure --- which is precisely the structure the forward convolution puts
+into $W$.
+\end{remark}
+
+\subsection{The per-proposal conditional solve and its warm start}
+\label{sec:solve}
+
+For each proposal $(\Lambda,\theta,\{b_k\},b_{\rm GW})$ define
+\begin{equation}
+  J_\theta(\xi)=\tfrac12\|\xi\|^2-\log p\big(\{N\}\,\big|\,\xi,\theta\big),
+\end{equation}
+with, in the Poisson form, $\nabla J_\theta$ and $H(\theta)$ as in
+\eqref{eq:poissonHess}, and in the conditional multinomial form
+\begin{align}
+  \nabla J_\theta &= \xi-b\sum_g\Phi_g^{\!\top}\big(N_g-T_g\,\pi_g\big),
+  \label{eq:multgrad}\\
+  H(\theta) &= \mathbb 1+b^2\sum_g T_g\Big[\Phi_g^{\!\top}\mathrm{diag}(\pi_g)\Phi_g
+              -u_gu_g^{\!\top}\Big],\qquad u_g=\Phi_g^{\!\top}\pi_g .
+  \label{eq:multhess}
+\end{align}
+\hfill[new]
+
+\begin{proof}[Derivation of \eqref{eq:multhess}]
+With $\eta_p=b\,s_p$ and $\pi_p=e^{\eta_p}/\sum_{p'}e^{\eta_{p'}}$, the
+multinomial log-likelihood $\ell=\sum_pN_p\log\pi_p$ has
+$\partial\ell/\partial\eta_p=N_p-T\pi_p$ and
+$\partial^2\ell/\partial\eta_p\partial\eta_q=-T(\delta_{pq}\pi_p-\pi_p\pi_q)$.
+Chain through $\eta=b\Phi\xi$ and negate.
+\end{proof}
+
+The rank-one subtraction $-T_gu_gu_g^{\!\top}$ is not optional: it is a
+positive-semidefinite term, so omitting it makes $H$ too large, $H^{-1}$ too
+small, and the Laplace draws \emph{under}-dispersed --- exactly the direction
+that hides the error of Proposition~\ref{prop:jensen}.  It is separable and
+therefore free: with $\Phi_g=\Phi_{\rm sph}\otimes\phi_\zeta[g]$,
+\begin{equation}
+  u_g=v_g\otimes\phi_\zeta[g],\quad v_g=\Phi_{\rm sph}^{\!\top}\pi_g,
+  \qquad
+  T_g\,u_gu_g^{\!\top}=T_g\,\big(v_gv_g^{\!\top}\big)\otimes
+  \big(\phi_\zeta[g]\phi_\zeta[g]^{\!\top}\big).
+\end{equation}
+
+\begin{proposition}[warm starts are admissible under a gradient stopping rule]
+\label{prop:warmstart}
+Let $\xi_\star$ be the iterate at which the solve stops, with
+$\varepsilon=\|\nabla J_\theta(\xi_\star)\|_2$.  Since $H\succeq\mathbb 1$
+(the whitened prior),
+\begin{equation}
+  0\;\le\;J_\theta(\xi_\star)-J_\theta(\hat\xi_\theta)
+  \;\simeq\;\tfrac12\,\nabla J^{\!\top}H^{-1}\nabla J
+  \;\le\;\frac{\varepsilon^2}{2\,\lambda_{\min}(H)}
+  \;\le\;\frac{\varepsilon^2}{2}.
+  \label{eq:warmbound}
+\end{equation}
+Hence \emph{any} start --- including a warm start from a neighbouring proposal
+--- yields a likelihood that is history-independent to within
+$\varepsilon^2/2$ nats.
+\end{proposition}
+
+\begin{remark}
+The blanket prohibition on warm starts is too strong and the blanket permission
+is too weak.  \eqref{eq:warmbound} gives the operational rule: stop on
+$\|\nabla J\|_2<\varepsilon$ with $\varepsilon^2/2$ at least an order of
+magnitude below the $\theta$-oscillation budget of \eqref{eq:osc}.  For a
+$0.01$-nat budget, $\varepsilon<0.14$.  What is genuinely inadmissible is a
+\emph{fixed iteration count} started from a history-dependent point, because
+then the residual is unbounded and $\log\mathcal L$ becomes a functional of the
+sampler's traversal order --- at which point nested sampling's
+$\mathbb E[\log X_i]=-i/n$ shrinkage argument no longer refers to any
+well-defined likelihood.  A deterministic anchored start
+$\xi^{(0)}=\hat\xi(\theta_{\rm ref})$ satisfies both requirements trivially and
+costs one or two extra Newton steps.
+\end{remark}
+
+\subsection{Laplace marginalisation of the field}
+
+\begin{proposition}[the galaxy-side evidence]
+\label{prop:laplace}
+With the whitened prior $\mathcal N(\xi;0,\mathbb 1_M)$,
+\begin{equation}
+  \log\mathcal L_{\rm gal}(\theta)
+  \;=\;\log\!\int\!d\xi\;\mathcal N(\xi;0,\mathbb 1_M)\;p\big(\{N\}|\xi,\theta\big)
+  \;\simeq\;-\,J_\theta(\hat\xi_\theta)\;-\;\tfrac12\log\det H(\theta),
+  \label{eq:laplace}
+\end{equation}
+with \textbf{no} residual $(2\pi)^{\pm M/2}$: the prior normalisation and the
+Gaussian integral cancel exactly.  Numerically
+$\log\det H=2\sum_i\log (L_H)_{ii}$.
+\end{proposition}
+\begin{proof}
+$\int(2\pi)^{-M/2}e^{-J(\xi)}d\xi\simeq(2\pi)^{-M/2}e^{-J(\hat\xi)}(2\pi)^{M/2}|H|^{-1/2}$.
+\end{proof}
+
+The $\theta$-gradient, for gradient-based samplers, is
+\begin{equation}
+  \frac{\partial}{\partial\theta}\log\mathcal L_{\rm gal}
+  =-\left.\frac{\partial J_\theta}{\partial\theta}\right|_{\hat\xi_\theta}
+  \;-\;\tfrac12\mathrm{tr}\!\left(H^{-1}\frac{dH}{d\theta}\right),
+  \qquad
+  \frac{dH}{d\theta}=\frac{\partial H}{\partial\theta}
+  +\sum_i\frac{\partial H}{\partial\xi_i}\frac{\partial\hat\xi_i}{\partial\theta},
+  \label{eq:laplacegrad}
+\end{equation}
+where the envelope theorem removes $\partial\hat\xi/\partial\theta$ from the
+first term (because $\nabla_\xi J=0$ at $\hat\xi$) but \emph{not} from the
+second, and the implicit function theorem gives
+$\partial\hat\xi/\partial\theta=-H^{-1}\,\partial_\theta\nabla_\xi J$.
+
+\paragraph{Exactness.}  \eqref{eq:laplace} is exact iff $J$ is quadratic in
+$\xi$.  The controlling small parameter is the posterior standard deviation of
+the linear predictor $s_v$, measured at $\simeq5.6\times10^{-3}$; the leading
+Edgeworth correction to the log-evidence is $O(10^{-3})$ nats.  This is
+\emph{not} the estimator error of Proposition~\ref{prop:jensen}, which is
+larger by orders of magnitude and is a separate budget.
+
+\subsection{The fixed-whitened-draw alternative and its ESS law}
+\label{sec:ess}
+
+The cheap alternative to a per-proposal solve is to draw $\{g_m\}$ once and
+reuse the resulting $\{\xi_m\}$ at every $\theta$ --- exactly what the member
+ensemble does today.  Formally this is importance sampling with proposal
+$q=\mathcal N(\hat\xi_0,H_0^{-1})$ and target
+$p(\xi|\{N\},\theta)\simeq\mathcal N(\hat\xi_\theta,H_\theta^{-1})$:
+\begin{equation}
+  \widehat{\mathcal L}(\theta)=\frac{\sum_m w_m(\theta)\,
+  \mathcal L_{\rm GW}(\theta;\xi_m)}{\sum_m w_m(\theta)},
+  \qquad
+  w_m(\theta)=\frac{\mathcal N(\xi_m;0,\mathbb 1)\,p(\{N\}|\xi_m,\theta)}{q(\xi_m)} .
+  \label{eq:isest}
+\end{equation}
+
+\begin{proposition}[the ESS law for a fixed draw set]
+\label{prop:esslaw}
+If $H_\theta\simeq H_0\equiv H$ and only the mode moves, then under $\xi\sim q$
+\begin{equation}
+  \log w(\theta)=\big(\hat\xi_\theta-\hat\xi_0\big)^{\!\top}H\big(\xi-\hat\xi_0\big)+\mathrm{const},
+  \qquad
+  \mathrm{Var}\big[\log w\big]
+  =\big\|\hat\xi_\theta-\hat\xi_0\big\|_{H}^{2},
+\end{equation}
+and hence
+\begin{equation}
+  \boxed{\;\frac{\mathrm{ESS}(\theta)}{M_{\rm draw}}\;\simeq\;
+  \exp\!\Big(-\big\|\hat\xi_\theta-\hat\xi_0\big\|_{H}^{2}\Big)\;}
+  \label{eq:esslaw}
+\end{equation}
+where $\|x\|_H^2=x^{\!\top}Hx$ is measured in units of the posterior standard
+deviation, summed over all $M$ modes.
+\end{proposition}
+\begin{proof}
+For two Gaussians with common precision $H$, the log ratio is affine in $\xi$
+with coefficient $H(\hat\xi_\theta-\hat\xi_0)$; the variance of an affine form
+under $q$ is $(\hat\xi_\theta-\hat\xi_0)^{\!\top}H H^{-1}H(\hat\xi_\theta-\hat\xi_0)$.
+Then $\mathrm{ESS}/M=1/(1+\mathrm{Var}[w]/\mathbb E[w]^2)=e^{-\mathrm{Var}[\log w]}$
+for lognormal $w$.
+\end{proof}
+
+\begin{remark}[the criterion is on the total, not the per-mode, displacement]
+\label{rem:P7}
+\eqref{eq:esslaw} is the exact criterion for when the compressed ensemble is
+valid, and it is \textbf{much} stricter than a per-mode statement.  A tolerance
+written as $\|\Delta\hat\xi\|_H/\sqrt M<\tau$ implies
+$\|\Delta\hat\xi\|_H^2<\tau^2M$ and therefore
+$\mathrm{ESS}/M\simeq e^{-\tau^2M}$.  At the plan's rank $M=3780$ and its
+proposed $\tau=0.1$, this is $e^{-37.8}\approx4\times10^{-17}$ --- a complete
+collapse, from a pin that reads as comfortably tight.  To keep
+$\mathrm{ESS}/M>0.1$ one needs
+\begin{equation}
+  \big\|\hat\xi_\theta-\hat\xi_0\big\|_H^2<\log 10\simeq2.3
+  \quad\Longleftrightarrow\quad
+  \tau<\sqrt{2.3/M}\;=\;0.025\ \text{at }M=3780 .
+  \label{eq:P7corrected}
+\end{equation}
+The same measured number $\|\hat\xi_\theta-\hat\xi_0\|_H$ therefore plays two
+distinct roles and needs two distinct tolerances:
+\begin{itemize}
+\item[(a)] as a \emph{model-misspecification} diagnostic --- how far the frozen
+model's field sits from the exact $\theta$-coupled one --- a per-mode
+tolerance $\|\Delta\hat\xi\|_H/\sqrt M<0.1$ is a defensible scale, because what
+matters there is whether the fitted field looks different;
+\item[(b)] as the \emph{estimator-validity} criterion for reusing one draw set
+across $\theta$, only the total \eqref{eq:P7corrected} is admissible, because
+importance weights compound over all $M$ modes.
+\end{itemize}
+Any validation of the fixed-draw path must be stated at
+\eqref{eq:P7corrected}, not at a per-mode fraction.  This is the quantitative
+reason the $\theta$-freezing of the conditional channel
+(Proposition~\ref{prop:cancel}) is worth its cost: when the cancellation is
+exact there is no importance sampling at all --- it sets
+$\hat\xi_\theta\equiv\hat\xi_0$ identically and makes the ESS perfect by
+construction rather than by measurement, and only role (a) remains.
+\end{remark}
+
+\begin{proposition}[when the compressed ensemble is \emph{exact}]
+\label{prop:compressexact}
+If $p(\xi\,|\,d_{\rm gal},\theta)=p(\xi\,|\,d_{\rm gal})$ for all $\theta$,
+then a single draw set $\{\xi_m\}\sim p(\xi|d_{\rm gal})$ gives, at every
+$\theta$, an unbiased estimator of $\mathcal L(\theta)$ with unit importance
+weights.  The only error is the Monte-Carlo error of
+Proposition~\ref{prop:jensen}; there is no importance-sampling degeneracy at
+all.  Conversely, the full $\theta$-coupled solve is \textbf{required} whenever
+\begin{equation}
+  \big\|\hat\xi_\theta-\hat\xi_0\big\|_H^2
+  \;\gtrsim\;\log\!\Big(\frac{M_{\rm draw}}{\mathrm{ESS}_{\min}}\Big).
+  \label{eq:requirefullsolve}
+\end{equation}
+\end{proposition}
+
+% ============================================================================
+\section{The three limits: one hierarchy, three known analyses}
+\label{sec:limits}
+
+Write the single-event likelihood as
+\begin{equation}
+  \mathcal L_i(\Lambda,\theta,\xi)
+  =\int\! dz\,d\hat n\;\;p_i\big(d_i\,\big|\,d_L(z;\Lambda),\hat n\big)\;
+  \frac{\Lambda_{\rm cat}(\hat n,z)+\Lambda_{\rm miss}(\hat n,z;\xi)}
+       {\int\!\big[\Lambda_{\rm cat}+\Lambda_{\rm miss}\big]} .
+  \label{eq:master}
+\end{equation}
+All three established analyses are limits of \eqref{eq:master}, and the field
+marginalisation is exactly the operation that interpolates between them.
+
+\subsection{Limit I --- complete catalog, good localisation: the discrete host sum}
+
+$f_pC\to1$ implies $\Lambda_{\rm miss}\to0$ and $\Lambda_{\rm cat}$ is the
+empirical point process.  Then
+\begin{equation}
+  \mathcal L_i(\Lambda)\;\longrightarrow\;
+  \sum_{j\in\Omega_{90}^{(i)}} w_j(\Lambda)\;
+  p_i\big(d_i\,\big|\,d_L(z_j;\Lambda),\hat n_j\big),
+  \label{eq:limit1}
+\end{equation}
+the classical statistical standard siren.  $\xi$ drops out of
+\eqref{eq:master} identically, so
+$p(\xi\,|\,d_{\rm gal},d_{\rm GW})=p(\xi\,|\,d_{\rm gal})$ \emph{exactly} and
+the marginalisation is trivial.  \textbf{Exact.}
+
+\subsection{Limit II --- incomplete, good localisation: spikes plus a clustered missing field}
+
+$\Lambda_{\rm tot}$ is a sum of catalog spikes and a smooth clustered
+component.  Because a well-localised event's support spans only $O(1$--$10)$
+correlation cells at the smoothing scale $L_{\rm smooth}$, the likelihood
+depends on $\xi$ essentially through the \emph{point value}
+$s(\hat n_i,z)$ in the localisation volume.  Expanding to second order in the
+field,
+\begin{equation}
+  \log\mathbb E_\xi\big[\mathcal L_i\big]
+  \;\simeq\;\log\bar{\mathcal L}_i
+  \;+\;b_{\rm GW}\big\langle s\big\rangle_{i}
+  \;+\;\tfrac12 b_{\rm GW}^2\Big[
+   \mathrm{Var}_\xi\big\langle s\big\rangle_{i}
+   -\big\langle\sigma^2\big\rangle_{i}\Big]+O(b^3),
+  \label{eq:limit2}
+\end{equation}
+where $\langle\cdot\rangle_i$ is the average against the event's normalised
+localisation kernel restricted to the missing component.  The first-order term
+is the placement information; the second-order term is the placement
+\emph{uncertainty}, and it is exactly what the member ensemble estimates.
+\textbf{Exact given the model; the expansion \eqref{eq:limit2} is $O(b^3)$.}
+
+\subsection{Limit III --- very incomplete, diffuse localisation: a correlation-function statement}
+
+Now $\Lambda_{\rm cat}\to0$ and the localisation spans many correlation cells.
+Write $p_i(x)$ for the event's normalised localisation density on
+$x=(\hat n,z)$.  Expanding \eqref{eq:master} in $b_{\rm GW}s$ and taking the
+field expectation over $\xi\sim\mathcal N(\hat\xi,\Sigma_\xi)$,
+\begin{equation}
+  \log\mathbb E_\xi\Big[\prod_i\mathcal L_i\Big]
+  \;\ni\;
+  b_{\rm GW}^2\sum_{i<j}
+  \iint p_i(x)\,p_j(y)\;\xi_{\rm mm}\big(|x-y|\big)\,d^3x\,d^3y
+  \;+\;b_{\rm GW}b_{\rm gal}\sum_i\!\iint p_i(x)\,\delta_g(y)\,\xi_{\rm mm}\,,
+  \label{eq:limit3}
+\end{equation}
+i.e. \textbf{the field-marginalised dark-siren likelihood depends on the field
+only through the two-point function smeared by the events' localisation
+kernels}.  Decomposing the localisation kernels in spherical harmonics per
+tomographic shell, $p_i(\hat n,z)=\sum_{\ell m}p^i_{\ell m}(z)Y_{\ell m}(\hat n)$,
+\eqref{eq:limit3} becomes
+\begin{equation}
+  b_{\rm GW}^2\sum_{\ell}\frac{2\ell+1}{4\pi}\,
+  \mathcal W^{i}_{\ell}\,\mathcal W^{j}_{\ell}\,C_\ell^{gg}(z_i,z_j)
+  \;+\;
+  b_{\rm GW}b_{\rm gal}\sum_\ell\frac{2\ell+1}{4\pi}\,
+  \mathcal W^i_\ell\,\mathcal W^{g}_\ell\,C_\ell^{\rm GW\times g},
+  \label{eq:limit3harmonic}
+\end{equation}
+which is the harmonic cross-correlation estimator, with the GW localisation
+windows $\mathcal W^i_\ell$ playing the role of tomographic bin windows.  The
+bias combination that appears, $b_{\rm GW}b_{\rm gal}$, is exactly the
+combination a $C_\ell^{\rm GW\times g}$ measurement constrains.
+\textbf{Approximate: \eqref{eq:limit3}--\eqref{eq:limit3harmonic} are the
+$O(b^2)$ truncation of \eqref{eq:master}, and are exact only in the Gaussian,
+weakly-clustered regime.}
+
+\subsection{The unification statement}
+
+Limits I--III are not three methods; they are one likelihood evaluated at three
+completeness/localisation regimes.  Catalog dark sirens are the
+$\Lambda_{\rm miss}\to0$ corner; cross-correlation is the
+$\Lambda_{\rm cat}\to0$, many-cell corner; the field-level hierarchy of
+\S\ref{sec:proposed} is the interpolant that is valid at both ends and, unlike
+either, in the middle --- which is where every real catalog/detector pairing
+actually sits.  The operational content of the unification is
+Proposition~\ref{prop:compressexact}: whether a given analysis \emph{needs} the
+in-likelihood field is decided by \eqref{eq:requirefullsolve}, a number one can
+measure, not by which corner one prefers.
+
+% ============================================================================
+\section{The per-proposal algorithm}
+\label{sec:algo}
+
+\subsection{Offline (once per catalog set)}
+
+\begin{verbatim}
+ANCHOR BUILD  -- inputs: catalogs {k}, masks {f_k}, anchor (theta_ref, Lambda_ref)
+ A1  basis:   Zn, Zz <- inducing nodes (M_sph x M_z);  L <- chol(K_ZZ + j*I)
+              Phi_sph (N_pix x M_sph),  Phi_zeta (N_z x M_z)     [never dense Phi]
+ A2  counts:  N_kpg <- histogram(z_gal, bins=z_count_edges)      [integer, exact]
+ A3  shell response W (G_s x N_fine):
+              W[g,n] = (int_g K(z|z_n) dz) * omega_g(z_n; theta_ref) * Delta_n
+              rows normalized to 1        [photo-z convolved FORWARD, not on data]
+ A4  solve:   xi_hat, H  <- Newton on J_{theta_ref}   [Poisson or multinomial
+                                                       grad/Hessian, Sec. 3.6]
+ A5  draws:   xi_m = xi_hat + L_H^{-T} g_m,  g_m antithetic pairs, seed stamped
+ A6  moments: A_m(z;b) = sum_p e^{b f_m(p,z)},   B_m(z;b) = sum_p f_p e^{b f_m(p,z)}
+              on a Chebyshev grid in b;  P = sum_p 1,  F = sum_p f_p
+ A7  stamp:   sha256 over (M_sph,M_z,ls_ang,ls_zeta,amp,jitter_mode,j,nside,
+              hash(f_p), hash(W), z_count_edges, hash(counts), theta_ref, {b_k})
+\end{verbatim}
+
+\noindent Step A6 is what removes the full-sky reduction from the online path.
+The budget normaliser with the consumption weights is
+\begin{equation}
+  \rho_m(z;\theta,b)=\log\frac{\sum_p\big[1-f_pC(z;\theta)\big]e^{b f_m(p,z)}}
+                              {\sum_p\big[1-f_pC(z;\theta)\big]}
+  =\log\frac{A_m(z;b)-c\,B_m(z;b)}{P-c\,F},
+  \qquad c\equiv C(z;\theta),
+  \label{eq:rho}
+\end{equation}
+so the only online $\theta$-dependence is through the \emph{scalar} $c\in[0,1]$
+at each $z$.  $A_m,B_m$ are $\theta$-free by construction.  Equation
+\eqref{eq:rho} is exact, not an interpolation, given $A_m,B_m$ on the $b$-grid.
+
+\subsection{Online (once per proposal)}
+
+\begin{verbatim}
+LIKELIHOOD(H0, Lambda, {theta_k}, {b_k}, b_GW):
+
+ -- decide the path --------------------------------------------------------
+ P0  if base is p-separable within every shell        (c_mode in {aggregate,
+        AND the frozen-W residual is below budget            selection})
+        [the exact-cancellation criterion, Prop. "exact cancellation"]
+     then  FAST PATH        (theta-cancellation holds; xi posterior is theta-free)
+     else  FULL PATH
+
+ -- FAST PATH: compressed ensemble, exact by Prop. "compressed exactness" --
+ F1  c(z)  <- C(z; theta)                                     [scalar per z node]
+ F2  rho_m <- (A_m - c B_m) / (P - c F)      closed form, budget normalizer
+ F3  for each member m:
+       logQ_m(p,z) = b_GW * (row_fac_m[p] . phi_zeta[z]) - log rho_m(z)
+       ll_m = PE_terms(logQ_m) - N_ev * log mu(logQ_m)
+ F4  logL = LSE_m(ll_m) - log M_draw
+ F5  diagnostics: member ESS = exp(-sum_m p_m log p_m),  p_m = softmax(ll_m)
+
+ -- FULL PATH: theta-coupled conditional solve ------------------------------
+ G1  xi <- xi_hat(theta_ref)             [DETERMINISTIC anchor, not the previous
+                                          proposal's solution unless G3 holds]
+ G2  Newton/Fisher-scoring on J_theta:
+        grad = xi - b sum_g Phi_g^T (N_g - T_g pi_g)
+        H    = I + b^2 sum_g T_g [ Phi_g^T diag(pi_g) Phi_g - u_g u_g^T ]
+        (separable two-stage contraction; never form S[p,(i,j)])
+ G3  stop when ||grad||_2 < eps  with  eps^2/2  <<  osc-budget
+        [Prop. "warm starts are admissible": J(xi*) - J(xi_hat) <= eps^2/2]
+ G4  logL_gal = -J_theta(xi_hat) - 0.5*logdet H,  logdet H = 2 sum log diag(L_H)
+ G5  draws:  xi_m = xi_hat + L_H^{-T} g_m       [g_m FIXED across theta: CRN]
+ G6  logL = logL_gal + LSE_m(ll_m(xi_m)) - log M_draw
+
+ -- the exactness switch ---------------------------------------------------
+ S1  monitor  d2 = || xi_hat(theta) - xi_hat(theta_ref) ||_H^2
+ S2  if d2 > log(M_draw / ESS_min)   -> FAST PATH is invalid, use FULL PATH
+     [the ESS law; note d2 is a SUM over all M modes, NOT a per-mode average,
+      so a "0.1 posterior sd per mode" pin means d2 = 0.01*M and fails]
+\end{verbatim}
+
+\subsection{Cost structure of the two paths}
+
+The fast path adds work only to the member-vmapped slice: the seam replaces a
+gather \verb|member_logq[pix,idx]| by a contraction
+\verb|row_fac[pix] @ phi_zeta[idx]|.  The row factors are
+$M_{\rm draw}\times n_{\rm rows}\times M_z$ instead of
+$M_{\rm draw}\times n_{\rm rows}\times N_{\rm grid}$ --- a compression factor
+$N_{\rm grid}/M_z\simeq90$, which is what makes a defensible $M_{\rm draw}$
+affordable at all under \eqref{eq:Mrequired}.  The full path adds, per
+proposal, one $M\times M$ Cholesky ($M^3/3$) plus the separable contraction
+$2G_sN_{\rm pix}M_{\rm sph}^2+2M_{\rm sph}^2G_sM_z^2$; at
+$(M_{\rm sph},M_z,G_s)=(315,12,32)$ this is $O(1)$\,s of dense linear algebra
+per proposal, i.e. four orders of magnitude above the measured $27.5$--$49.3$\,ms
+likelihood baseline.  \textbf{The full path is not affordable inside a
+$10^6$-call nested-sampling run at production rank}; it is affordable at
+reduced rank, on a grid, or as a validation reference.  This asymmetry --- not
+elegance --- is why Proposition~\ref{prop:cancel} is the load-bearing result.
+
+% ============================================================================
+\section{Exact / approximate ledger}
+\label{sec:ledger}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{p{0.46\linewidth}p{0.17\linewidth}p{0.31\linewidth}}
+\toprule
+statement & status & controlling parameter\\
+\midrule
+Thinning independence \eqref{eq:thinning-independence} & \textbf{exact} & --- \\
+Chain-rule factorisation \eqref{eq:chainrule} & \textbf{exact} & --- \\
+$\mathbb E[Q]$ variance shift, Lemma~\ref{lem:varshift} & \textbf{exact} & given the Laplace posterior \\
+Monopole gauge, Prop.~\ref{prop:gauge} & \textbf{exact} & --- \\
+Budget identity in \texttt{aggregate}/\texttt{selection}, Prop.~\ref{prop:budgetexact}(1) & \textbf{exact} & sky-uniform $C$ \\
+Shell-total factorisation \eqref{eq:shellfactor} & \textbf{exact} & --- \\
+$\theta$-cancellation \eqref{eq:pi-exact} & \textbf{exact} iff & $p$-separable base \emph{and} shell-constant $s$ \\
+ESS law \eqref{eq:esslaw} & \textbf{exact} for & Gaussian mode shift at fixed $H$ \\
+Limit I \eqref{eq:limit1} & \textbf{exact} & $f_pC\to1$ \\
+\midrule
+Low-rank Nystr\"om $\Phi\Phi^{\!\top}\!\approx\!K$ & approx. & rank $M$ vs. $\ell_{\rm ang},\ell_\zeta$; hard guard \\
+Laplace evidence \eqref{eq:laplace} & approx. & posterior sd of $s$ ($5.6\times10^{-3}$) $\Rightarrow O(10^{-3})$ nats \\
+Member estimator \eqref{eq:membermarg} & approx. & $(e^{\sigma^2}\!-\!1)/2M$, eq.~\eqref{eq:Mrequired} \\
+Deterministic-$Q$ plug-in, Rem.~\ref{rem:plugin} & approx. & first order in posterior spread \\
+Renormalise-then-average, Rem.~\ref{rem:noncommute} & approx. & $\mathrm{Var}_{\rm sky}(Q)/N_{\rm pix}$ \\
+Budget identity in \texttt{per\_pixel}, Prop.~\ref{prop:budgetexact}(2) & approx. & footprint fraction; $\theta-\theta_{\rm ref}$ \\
+Frozen $W$ & approx. & residual \eqref{eq:cancelresidual} \\
+Population-average photo-$z$ kernel in $W$ & approx. & spread of $\sigma_z$ across the sample \\
+Warm start & approx. & $\varepsilon^2/2$, eq.~\eqref{eq:warmbound} \\
+Limit II \eqref{eq:limit2} & approx. & $O(b_{\rm GW}^3)$ \\
+Limit III \eqref{eq:limit3harmonic} & approx. & $O(b^2)$ truncation; Gaussianity \\
+$Q\equiv1$ above $z_{\rm depth}$ and off-footprint & \emph{choice} & zero assumed variance where there is no data \\
+\bottomrule
+\end{tabular}
+\caption{What is exact and what is not.  The three ``choice'' rows are
+modelling conventions and must be quoted as systematics, never as
+marginalisations.}
+\end{table}
