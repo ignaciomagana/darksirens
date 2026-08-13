@@ -119,6 +119,9 @@ def _load_selection_arrays(path: Path):
         if "ndraw" not in f.attrs:
             raise SystemExit(f"{path}: missing required attr 'ndraw'")
         cols = {k: np.asarray(f[k], dtype=float) for k in need}
+        for k in ("a1", "a2", "cost1", "cost2"):
+            if k in f:
+                cols[k] = np.asarray(f[k], dtype=float)
         basis = f.attrs.get("spin_basis", b"chieff")
         if isinstance(basis, bytes):
             basis = basis.decode()
@@ -146,9 +149,40 @@ def selection_neff(selection_path: Path, pop_model: str, H0: float, Om0: float,
 
     log_p_pop = pop_model_parser(pop_model=pop_model)
     pop_params = jnp.asarray(get_fixed_population_params(pop_model))
-    canary = assert_float64_population_path(log_p_pop, pop_params)
+    # The canary detects PROCESS state (a float32 constant cached before x64
+    # was enabled), not a property of the measured model, and its -265 band
+    # is specific to the curated preset's untapered Gaussian tail -- a
+    # hard-truncated mass model is legitimately -inf at the probe mass.  So
+    # it always runs on the curated powerlaw+peak regardless of --pop_model.
+    canary = assert_float64_population_path(
+        pop_model_parser(pop_model="powerlaw+peak"),
+        jnp.asarray(get_fixed_population_params("powerlaw+peak")))
+
+    # A component-spin population (DS-08) consumes the (N, 4) spin block
+    # (a1, a2, cost1, cost2) and ignores chieff -- the decisive measurement
+    # the chieff-marginal read below cannot make.
+    from darksirens.gw.populations.registry import get_model
+
+    _model = get_model(pop_model)
+    _spin_comps = ([_model.spin_component]
+                   if hasattr(_model, "spin_component") else [])
+    _mixture = getattr(_model, "mixture", None)
+    if _mixture is not None:
+        _spin_comps.extend(getattr(_mixture, "spin_components", ()))
+    consumes_spin_block = any(
+        getattr(c, "consumes_spin_block", False) for c in _spin_comps)
 
     cols, meta = _load_selection_arrays(selection_path)
+    spin = None
+    if consumes_spin_block:
+        missing = [k for k in ("a1", "a2", "cost1", "cost2") if k not in cols]
+        if missing:
+            raise SystemExit(
+                f"--pop_model {pop_model} consumes the component-spin block, "
+                f"but {selection_path} carries no {missing} datasets; use a "
+                "component-basis export.")
+        spin = jnp.asarray(np.column_stack(
+            [cols[k] for k in ("a1", "a2", "cost1", "cost2")]))
     m1 = jnp.asarray(cols["m1det"])
     q = jnp.asarray(cols["m2det"] / np.maximum(cols["m1det"], 1e-300))
     dL = jnp.asarray(cols["dL"])
@@ -163,11 +197,14 @@ def selection_neff(selection_path: Path, pop_model: str, H0: float, Om0: float,
     base, z = log_target_density_base_and_z(
         m1, q, dL, chieff, jnp.zeros(n, dtype=jnp.int32), pdraw,
         cosmo, survey, pop_params, None, log_p_pop,
+        spin=spin,
     )
     # Reported because it is the float64/float32 discriminator on this preset.
-    n_out_of_support = int(
-        (~np.isfinite(np.asarray(log_p_pop(m1 / (1.0 + z), q, z, chieff,
-                                           pop_params)))).sum())
+    if spin is None:
+        _lp = log_p_pop(m1 / (1.0 + z), q, z, chieff, pop_params)
+    else:
+        _lp = log_p_pop(m1 / (1.0 + z), q, z, chieff, pop_params, spin=spin)
+    n_out_of_support = int((~np.isfinite(np.asarray(_lp))).sum())
     ldw = base + log_volume_prior_vmap(z, cosmo, survey)
     ldw = jnp.where(jnp.isfinite(ldw) & (pdraw > 0.0), ldw, -jnp.inf)
     finite = jnp.isfinite(ldw)
@@ -183,7 +220,8 @@ def selection_neff(selection_path: Path, pop_model: str, H0: float, Om0: float,
                 log_mu_comparable_across_processes=False,
                 Neff=float(Neff), pop_model=pop_model, H0=H0, Om0=Om0,
                 w0=w0, wa=wa, canary_log_p=canary,
-                n_pop_out_of_support=n_out_of_support)
+                n_pop_out_of_support=n_out_of_support,
+                consumes_spin_block=bool(consumes_spin_block))
     return meta
 
 
@@ -254,8 +292,9 @@ def main(argv=None) -> int:
     print(f"  population               {m['pop_model']} at registry fiducial")
     print(f"  precision canary         log_p_pop({CANARY_M1SRC:g}) = "
           f"{m['canary_log_p']:.2f}  [float64 OK]")
-    print(f"  pop out-of-support       {m['n_pop_out_of_support']:,}"
-          "   (underflow edge, NOT m_max: this preset's peak is untapered)")
+    suffix = ("   (underflow edge, NOT m_max: this preset's peak is untapered)"
+              if m["pop_model"] == "powerlaw+peak" else "")
+    print(f"  pop out-of-support       {m['n_pop_out_of_support']:,}{suffix}")
     print(f"  log_mu                   {m['log_mu']:+.4f}"
           "   [NOT comparable across processes -- see below]")
     print(f"  selection N_eff          {m['Neff']:,.0f}")
@@ -284,13 +323,18 @@ def main(argv=None) -> int:
     print("  sides -- so posteriors and logZ are unaffected. N_eff is likewise")
     print("  scale-invariant. It is only this reported log_mu, taken in")
     print("  isolation, that is not a portable number.")
-    if m["spin_basis"] != "chieff":
+    if m.get("consumes_spin_block"):
         print()
-        print(f"  [!] spin_basis={m['spin_basis']!r}: the loader REJECTS this basis, so")
-        print("      this was a raw read. Our population model is 1-D in chi_eff, so")
+        print("  spin: the population model consumed the file's component-spin block")
+        print("  (a1, a2, cost1, cost2) directly -- this IS the 4-D spin measurement,")
+        print("  with no flat-orthogonal assumption.")
+    elif m["spin_basis"] != "chieff":
+        print()
+        print(f"  [!] spin_basis={m['spin_basis']!r} under a 1-D chi_eff population model:")
         print("      applying it to a non-chieff draw density assumes the population is")
         print("      flat in the orthogonal spin directions. N_eff is scale-invariant so")
-        print("      that does not affect the number, but a 4-D spin model would differ.")
+        print("      that does not affect the number, but a 4-D spin model would differ")
+        print("      (measure it with --pop_model gwtc3_plpeak_component_spin).")
 
     out = {**m, **v}
     if args.json:
