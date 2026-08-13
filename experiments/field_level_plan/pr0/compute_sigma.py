@@ -275,6 +275,9 @@ def main():
                git_sha=C.git_sha())
     with open(PR0_DIR / "sigma_results.json", "w") as f:
         json.dump(out, f, indent=1)
+    np.savez(PR0_DIR / "a_vector.npz", a_mat=a_mat, phi=phi,
+             S_sph=S_sph, S_z=S_z,
+             kernel=np.array([LS_SPH, LS_Z, M_SPH, M_Z, JITTER]))
     print(f"[pr0-sigma] sum_i phi_i = {phi.sum():.6e}  (K0 threshold 1e-3)")
     print(f"[pr0-sigma] ||a||_2 = {a_norm:.6e}   sigma_H = {sigma:.6e} nats")
     print(f"[pr0-sigma] wrote {PR0_DIR / 'sigma_results.json'}")
