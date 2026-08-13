@@ -341,6 +341,15 @@ def _make_mixture_likelihood(
     ny_sel = barrier(_to_jax(data, "ny_sel"))
     nz_sel = barrier(_to_jax(data, "nz_sel"))
 
+    # Optional extra-spin block (DS-07): (N, d) columns beyond chieff, present
+    # only for a non-chieff parameter space (basis negotiation, DS-09).  None
+    # keeps the GWEvent pytree structure -- and every compiled likelihood --
+    # identical to a build without the field.
+    spin_pe = (barrier(jnp.asarray(data["spin_pe"], dtype=jnp.float64))
+               if data.get("spin_pe") is not None else None)
+    spin_sel = (barrier(jnp.asarray(data["spin_sel"], dtype=jnp.float64))
+                if data.get("spin_sel") is not None else None)
+
     def _compact_lss_q_for(views, unique_pixels):
         # Per-catalog analogue of make_likelihood._compact_lss_q: slice each
         # catalog's own Q_LSS table to its union pixels so only the compact block
@@ -553,6 +562,7 @@ def _make_mixture_likelihood(
         nx=nx_pe,
         ny=ny_pe,
         nz=nz_pe,
+        spin=spin_pe,
     )
     gw_sel = GWEvent(
         m1det=m1det_sel,
@@ -566,6 +576,7 @@ def _make_mixture_likelihood(
         nx=nx_sel,
         ny=ny_sel,
         nz=nz_sel,
+        spin=spin_sel,
     )
     if sel_batch_size is not None:
         gw_sel, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
@@ -965,6 +976,15 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     ny_sel = barrier(_to_jax(data, "ny_sel"))
     nz_sel = barrier(_to_jax(data, "nz_sel"))
 
+    # Optional extra-spin block (DS-07): (N, d) columns beyond chieff, present
+    # only for a non-chieff parameter space (basis negotiation, DS-09).  None
+    # keeps the GWEvent pytree structure -- and every compiled likelihood --
+    # identical to a build without the field.
+    spin_pe = (barrier(jnp.asarray(data["spin_pe"], dtype=jnp.float64))
+               if data.get("spin_pe") is not None else None)
+    spin_sel = (barrier(jnp.asarray(data["spin_sel"], dtype=jnp.float64))
+                if data.get("spin_sel") is not None else None)
+
     parameter_decoder = build_parameter_decoder(
         opts,
         pop_params_fid,
@@ -1116,6 +1136,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         nx=nx_pe,
         ny=ny_pe,
         nz=nz_pe,
+        spin=spin_pe,
     )
     gw_sel = GWEvent(
         m1det=m1det_sel,
@@ -1129,6 +1150,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         nx=nx_sel,
         ny=ny_sel,
         nz=nz_sel,
+        spin=spin_sel,
     )
     if sel_batch_size is not None:
         gw_sel, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
