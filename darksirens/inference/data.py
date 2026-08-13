@@ -147,6 +147,11 @@ def load_all_data(opts):
         gw_attrs=gw_inputs.get("gw_attrs"),
         selection_attrs=gw_inputs.get("selection_attrs"),
         gw_event_names=gw_event_names,
+        # Component-spin blocks (DS-09): (N, 4) columns (a1, a2, cost1,
+        # cost2), None on the chi_eff basis; the factory barriers them into
+        # GWEvent.spin.
+        spin_pe=gw_inputs.get("spin_pe"),
+        spin_sel=gw_inputs.get("spin_sel"),
         pixels_pe=_maybe_jnp(sky_inputs["pixels_pe"]),
         nx_pe=_maybe_jnp(sky_inputs["nx_pe"]),
         ny_pe=_maybe_jnp(sky_inputs["ny_pe"]),

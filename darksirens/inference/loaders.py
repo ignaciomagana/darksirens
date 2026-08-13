@@ -456,14 +456,75 @@ def _parse_pdet_cosmology(opts) -> tuple[float, float]:
     return float(h0), float(om0)
 
 
-def resolve_selection_inputs(opts):
+#: The two fit-column sets darksirens' population models can request.
+_CHIEFF_FIT_COLUMNS = ("m1det", "q", "dL", "chieff")
+_COMPONENT_FIT_COLUMNS = ("m1det", "q", "dL", "a1", "a2", "cost1", "cost2")
+
+
+def _model_requests_component_spin(opts) -> bool:
+    """Whether the configured population model consumes the spin block.
+
+    Basis negotiation (DS-09) starts from the MODEL: a model whose spin
+    component declares ``consumes_spin_block`` fits the component columns and
+    needs a component-basis store; every other model fits chi_eff.  Errors in
+    the model name are deliberately not raised here -- the real model build
+    reports them with full context.
+    """
+    pop_model = getattr(opts, "pop_model", None)
+    if not pop_model:
+        return False
+    try:
+        from darksirens.gw.populations.registry import get_model
+
+        model = get_model(
+            pop_model,
+            shared_beta=bool(getattr(opts, "shared_beta", True)),
+            shared_spin=bool(getattr(opts, "shared_spin", True)),
+            shared_gamma=bool(getattr(opts, "shared_gamma", True)),
+        )
+    except Exception:
+        return False
+    components = []
+    if hasattr(model, "spin_component"):
+        components.append(model.spin_component)
+    mixture = getattr(model, "mixture", None)
+    if mixture is not None:
+        components.extend(getattr(mixture, "spin_components", ()))
+    return any(
+        getattr(c, "consumes_spin_block", False) for c in components
+    )
+
+
+def required_fit_columns_for(opts):
+    """The fit columns the configured run consumes (see DS-09)."""
+    return (_COMPONENT_FIT_COLUMNS if _model_requests_component_spin(opts)
+            else _CHIEFF_FIT_COLUMNS)
+
+
+def _read_spin_block(path):
+    """(N, 4) component-spin block (a1, a2, cost1, cost2) from a gwcat file.
+
+    Called only after the loader has validated the file against the
+    component contract, so the datasets exist.
+    """
+    import h5py
+
+    with h5py.File(path, "r") as f:
+        return np.column_stack([
+            np.asarray(f[name]) for name in ("a1", "a2", "cost1", "cost2")
+        ])
+
+
+def resolve_selection_inputs(opts, fit_columns=None):
     """Selection inputs from exactly one source: injection HDF5 or P_det emulator.
 
     Returns the 8-tuple ``(m1detsels, m2detsels, dLsels, chieffsels, rasels,
     decsels, p_draw, Ndraw)`` shared by both sources.  ``--pdet_flow_path``
     generates pseudo-injections from the emulator flow once at load time;
     everything downstream (GWEvent packing, compute_selection_term, Neff
-    guards, batching) is source-agnostic.
+    guards, batching) is source-agnostic.  ``fit_columns`` (DS-09) is passed
+    through to the file loader only when it departs from the chi_eff
+    default, so test doubles with the legacy signature keep working.
     """
     if getattr(opts, "pdet_flow_path", None):
         from darksirens.gw.selection import pseudo_injections_from_pdet_flow
@@ -477,11 +538,15 @@ def resolve_selection_inputs(opts):
             Om0=om0,
             chieff_amax=float(getattr(opts, "pdet_chieff_amax", 0.99)),
         )
+    kwargs = {}
+    if fit_columns is not None and tuple(fit_columns) != _CHIEFF_FIT_COLUMNS:
+        kwargs["fit_columns"] = tuple(fit_columns)
     return load_selection_samples(
         opts.gwselection_path,
         allow_invalid_spin_swap=bool(
             getattr(opts, "allow_invalid_spin_swap", False)
         ),
+        **kwargs,
     )
 
 
@@ -682,12 +747,23 @@ def _warn_writer_commit(attrs, path) -> None:
 
 def load_gw_and_selection_inputs(opts) -> dict:
     """Load GW posterior and selection samples."""
+    # Basis negotiation (DS-09): the configured population model decides
+    # which fit columns the pair must cover; the file loaders enforce it.
+    required_columns = required_fit_columns_for(opts)
+    component_basis = "a1" in required_columns
+
     # Load GW posterior samples (Always required)
     # Following the new convention: m1det, m2det, dL, chieff, ra, ...
-    m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = load_gw_samples(
-        opts.gw_path
-    )
+    if component_basis:
+        m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = load_gw_samples(
+            opts.gw_path, fit_columns=required_columns
+        )
+    else:
+        m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = load_gw_samples(
+            opts.gw_path
+        )
     gw_attrs = _read_store_attrs(opts.gw_path)
+    spin_pe = _read_spin_block(opts.gw_path) if component_basis else None
 
     # Load Selection samples (Always required).  When both sides are gwcat
     # files, cross-check the 2.1 pairing contract; the emulator path instead
@@ -696,12 +772,22 @@ def load_gw_and_selection_inputs(opts) -> dict:
     _warn_per_event_cosmology(gw_attrs, opts.gw_path)
     _warn_writer_commit(gw_attrs, opts.gw_path)
     if getattr(opts, "pdet_flow_path", None):
+        if component_basis:
+            raise RuntimeError(
+                "--pdet_flow_path is unsupported in the component spin "
+                "basis: the P_det emulator generates chi_eff-basis "
+                "pseudo-injections. Use a component-basis gwcat selection "
+                "file (--gwselection_path)."
+            )
         _require_chieff_pe_for_emulator(gw_attrs, opts.gw_path)
         _require_matching_pdet_cosmology(gw_attrs, opts.gw_path, opts)
     (
         m1detsels, m2detsels, dLsels, chieffsels,
         rasels, decsels, p_draw, Ndraw,
-    ) = resolve_selection_inputs(opts)
+    ) = resolve_selection_inputs(opts, fit_columns=required_columns)
+    spin_sel = (
+        _read_spin_block(opts.gwselection_path) if component_basis else None
+    )
     if not getattr(opts, "pdet_flow_path", None):
         selection_attrs = _read_store_attrs(opts.gwselection_path)
         _require_matching_contract(
@@ -715,6 +801,8 @@ def load_gw_and_selection_inputs(opts) -> dict:
     return dict(
         gw_attrs=gw_attrs,
         selection_attrs=selection_attrs,
+        spin_pe=spin_pe,
+        spin_sel=spin_sel,
         m1det=m1det,
         m2det=m2det,
         dL=dL,
@@ -747,6 +835,13 @@ def load_flow_and_selection_inputs(opts) -> dict:
     surfaced as ``flow_event_names``.
     """
     from darksirens.gw.flows import load_flow_ensemble
+
+    if _model_requests_component_spin(opts):
+        raise RuntimeError(
+            "--gw_flows_path is unsupported in the component spin basis: "
+            "the flow surrogates are trained in (m1det, q, dL, chieff). "
+            "Use stored PE samples from a component-basis gwcat store."
+        )
 
     ensemble = load_flow_ensemble(
         opts.gw_flows_path,

@@ -164,14 +164,68 @@ SELECTION_FORMATS: tuple[str, ...] = tuple(
 )
 
 
-def contract_for(fmt: str) -> StoreContract:
+#: Component-spin datasets (the GWEvent.spin block, in column order).
+COMPONENT_SPIN_DATASETS: tuple[str, ...] = ("a1", "a2", "cost1", "cost2")
+
+#: fit_columns implied by each gwcat spin_basis for files that predate the
+#: explicit 2.1 attr.
+IMPLIED_FIT_COLUMNS: dict[str, tuple[str, ...]] = {
+    "chieff": ("m1det", "q", "dL", "chieff"),
+    "component": ("m1det", "q", "dL") + COMPONENT_SPIN_DATASETS,
+    "chieff_chip": ("m1det", "q", "dL", "chieff", "chip"),
+}
+
+#: Advisory columns implied per basis for pre-2.1 files: datasets gwcat ships
+#: for convenience whose draw/prior density is NOT in p_pe/pdraw, so fitting
+#: on them is invalid (e.g. the component export's chieff and chip columns).
+IMPLIED_ADVISORY_COLUMNS: dict[str, tuple[str, ...]] = {
+    "chieff": (),
+    "component": ("chieff", "chip"),
+    "chieff_chip": (),
+}
+
+_COMPONENT_RANGES = {
+    "a1": RangeSpec(0.0, 1.0),
+    "a2": RangeSpec(0.0, 1.0),
+    "cost1": RangeSpec(-1.0, 1.0),
+    "cost2": RangeSpec(-1.0, 1.0),
+}
+
+
+def _component_variant(base: StoreContract) -> StoreContract:
+    """The component-basis variant of a PE/selection contract.
+
+    Adds the four component-spin datasets (finite + range-checked) and, on
+    the PE side, DROPS the chi_eff-compat attrs: a component export's p_pe is
+    exact in its own basis and legitimately omits chi_eff_in_p_pe /
+    chi_eff_amax.  The selection side keeps chi_eff_swap_applied -- it states
+    which spin measure pdraw is on, which a component file must still declare.
+    """
+    attrs = tuple(
+        a for a in base.attrs if a not in ("chi_eff_in_p_pe", "chi_eff_amax")
+    )
+    return StoreContract(
+        kind=base.kind,
+        datasets=base.datasets + COMPONENT_SPIN_DATASETS,
+        attrs=attrs,
+        finite=base.finite + COMPONENT_SPIN_DATASETS,
+        positive=base.positive,
+        nonnegative=base.nonnegative,
+        ranges={**base.ranges, **_COMPONENT_RANGES},
+    )
+
+
+def contract_for(fmt: str, basis: str = "chieff") -> StoreContract:
     try:
-        return STORE_CONTRACTS[fmt]
+        base = STORE_CONTRACTS[fmt]
     except KeyError:
         raise KeyError(
             f"no store contract for format_version {fmt!r}; accepted: "
             f"{sorted(STORE_CONTRACTS)}"
         ) from None
+    if basis == "component":
+        return _component_variant(base)
+    return base
 
 
 def missing_members(f: Any, contract: StoreContract) -> tuple[list[str], list[str]]:

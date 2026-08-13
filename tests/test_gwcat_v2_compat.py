@@ -201,15 +201,22 @@ def test_file_contract_accepts_v2_chieff_selection(tmp_path):
     assert report["summary"]["selection_kind"] == "unlensed"
 
 
-def test_file_contract_rejects_v2_component_selection(tmp_path):
+def test_file_contract_accepts_v2_component_selection(tmp_path):
+    """DS-09: a component-basis selection file is a VALID product at
+    preflight (which is model-agnostic); which model may consume it is the
+    loaders' basis negotiation.  A basis with no consumer stays rejected."""
     path = tmp_path / "sel_contract_component.h5"
     _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="component",
                      extra_spin_datasets=True)
     report = file_contract.validate_selection_inputs(path)
+    assert report["ok"], report["errors"]
+
+    other = tmp_path / "sel_contract_chip.h5"
+    _write_selection(other, format_version="gwcat-selection-2.0",
+                     spin_basis="chieff_chip", extra_spin_datasets=True)
+    report = file_contract.validate_selection_inputs(other)
     assert not report["ok"]
-    joined = " ".join(report["errors"])
-    assert "component" in joined
-    assert "spin_basis" in joined
+    assert any("chieff_chip" in e for e in report["errors"])
 
 
 # ----------------------------------------------------------------------------
@@ -482,11 +489,11 @@ def test_pe_v21_chieff_matches_v2_arrays(tmp_path):
     assert store.attrs["contract_hash"]
 
 
-def test_pe_v21_component_rejected(tmp_path):
+def test_pe_v21_component_rejected_for_chieff_model(tmp_path):
     path = tmp_path / "pe_v21_comp.h5"
     _write_pe(path, format_version="gwcat-pe-2.1", spin_basis="component",
               extra_spin_datasets=True)
-    with pytest.raises(RuntimeError, match="spin_basis='component'"):
+    with pytest.raises(RuntimeError, match="ADVISORY|cannot be paired"):
         load_gw_samples(path)
 
 
@@ -500,7 +507,7 @@ def test_selection_v21_chieff_accepted_component_rejected(tmp_path):
     bad = tmp_path / "sel_v21_comp.h5"
     _write_selection(bad, format_version="gwcat-selection-2.1",
                      spin_basis="component", extra_spin_datasets=True)
-    with pytest.raises(RuntimeError, match="spin_basis='component'"):
+    with pytest.raises(RuntimeError, match="ADVISORY|cannot be paired"):
         load_selection_samples(bad)
 
 
@@ -804,3 +811,117 @@ def test_writer_commit_mismatch_warns(capsys):
         )
         _warn_writer_commit({"writer_commit": installed}, "x.h5")
         assert "was written by gwcat" not in capsys.readouterr().out
+
+
+# ----------------------------------------------------------------------------
+# Basis negotiation (DS-09): the model's fit columns must equal the file's.
+# ----------------------------------------------------------------------------
+_COMPONENT_COLUMNS = ("m1det", "q", "dL", "a1", "a2", "cost1", "cost2")
+
+
+def test_component_pe_accepted_with_component_model(tmp_path):
+    path = tmp_path / "pe_comp_ok.h5"
+    _write_pe(path, format_version="gwcat-pe-2.0", spin_basis="component",
+              include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
+    out = load_gw_samples(path, fit_columns=_COMPONENT_COLUMNS)
+    assert out[7] == NOBS
+    from darksirens.gw.utils import load_gw_store
+
+    store = load_gw_store(path, fit_columns=_COMPONENT_COLUMNS)
+    assert store.fit_columns == _COMPONENT_COLUMNS
+    for name in ("a1", "a2", "cost1", "cost2"):
+        assert name in store.columns
+
+
+def test_chieff_pe_rejected_with_component_model(tmp_path):
+    path = tmp_path / "pe_chieff_for_comp.h5"
+    _write_pe(path, format_version="gwcat-pe-2.0", spin_basis="chieff")
+    with pytest.raises(RuntimeError, match="does not cover"):
+        load_gw_samples(path, fit_columns=_COMPONENT_COLUMNS)
+
+
+def test_legacy_10_file_rejected_with_component_model(tmp_path):
+    path = tmp_path / "pe_legacy_for_comp.h5"
+    _write_pe(path, format_version="gwcat-1.0")
+    with pytest.raises(RuntimeError, match="does not cover"):
+        load_gw_samples(path, fit_columns=_COMPONENT_COLUMNS)
+
+
+def test_advisory_column_cannot_be_fit(tmp_path):
+    """chip in a component file is advisory: the dataset exists, its density
+    is not in p_pe -- fitting it must refuse by name."""
+    path = tmp_path / "pe_comp_chip.h5"
+    _write_pe(path, format_version="gwcat-pe-2.0", spin_basis="component",
+              include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
+    with pytest.raises(RuntimeError, match="ADVISORY"):
+        load_gw_samples(path, fit_columns=_COMPONENT_COLUMNS + ("chip",))
+
+
+def test_chieff_chip_file_rejected_for_chieff_model(tmp_path):
+    """A chieff_chip file's density covers chip, which a chieff model does
+    not fit: dividing chip's prior out with no population term replacing it
+    is silently wrong, so the pairing is refused (not merely inefficient)."""
+    path = tmp_path / "pe_chip.h5"
+    _write_pe(path, format_version="gwcat-pe-2.0", spin_basis="chieff_chip",
+              extra_spin_datasets=True)
+    with pytest.raises(RuntimeError, match="does not fit"):
+        load_gw_samples(path)
+
+
+def test_component_selection_accepted_and_swap_gate_skipped(tmp_path):
+    path = tmp_path / "sel_comp_ok.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0",
+                     spin_basis="component", extra_spin_datasets=True)
+    with h5py.File(path, "a") as f:
+        # A non-uniform campaign is FINE in the component basis (no swap).
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, False])
+    out = load_selection_samples(path, fit_columns=_COMPONENT_COLUMNS)
+    np.testing.assert_array_equal(np.asarray(out[6]), _SEL_DATA["pdraw"])
+
+
+def test_component_pair_produces_spin_blocks(tmp_path):
+    """End-to-end: a component-model run against a component pair loads and
+    surfaces (N, 4) spin blocks for the factory."""
+    from types import SimpleNamespace
+
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_comp_pair.h5"
+    sel = tmp_path / "sel_comp_pair.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.0", spin_basis="component",
+              include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
+    _write_selection(sel, format_version="gwcat-selection-2.0",
+                     spin_basis="component", extra_spin_datasets=True)
+    opts = SimpleNamespace(gw_path=str(pe), gwselection_path=str(sel),
+                           pdet_flow_path=None,
+                           pop_model="gwtc3_plpeak_component_spin")
+    out = loaders.load_gw_and_selection_inputs(opts)
+    assert out["spin_pe"].shape == (_N, 4)
+    assert out["spin_sel"].shape == (_SEL_N, 4)
+
+    # The chieff-model default against the same pair refuses at load.
+    opts_chieff = SimpleNamespace(gw_path=str(pe), gwselection_path=str(sel),
+                                  pdet_flow_path=None,
+                                  pop_model="gwtc3_fiducial_plpeak")
+    with pytest.raises(RuntimeError, match="ADVISORY|cannot be paired"):
+        loaders.load_gw_and_selection_inputs(opts_chieff)
+
+
+def test_component_model_refuses_emulator_and_flows(tmp_path):
+    from types import SimpleNamespace
+
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_comp_em.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.0", spin_basis="component",
+              include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
+    opts = SimpleNamespace(gw_path=str(pe), gwselection_path=None,
+                           pdet_flow_path="/nonexistent/pdet.npz",
+                           pop_model="gwtc3_plpeak_component_spin")
+    with pytest.raises(RuntimeError, match="unsupported in the component"):
+        loaders.load_gw_and_selection_inputs(opts)
+
+    opts_flows = SimpleNamespace(gw_flows_path="/nonexistent/flows",
+                                 pop_model="gwtc3_plpeak_component_spin")
+    with pytest.raises(RuntimeError, match="unsupported in the component"):
+        loaders.load_flow_and_selection_inputs(opts_flows)

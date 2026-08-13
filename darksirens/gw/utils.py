@@ -103,24 +103,82 @@ def _require_hdf5_format(f, expected, conversion_hint):
     return observed
 
 
-def _require_chieff_spin_basis(f, path, reexport_hint):
-    """Reject a gwcat-2.x export that is not written in the chi_eff spin basis.
+def _file_spin_basis(f):
+    """The file's declared spin basis; 1.0-era files are implicitly chieff."""
+    return _decode_hdf5_attr(f.attrs.get("spin_basis", "chieff")) or "chieff"
 
-    gwcat-2.x files carry a ``spin_basis`` attr in {"chieff", "component",
-    "chieff_chip"}.  Only the "chieff" basis is array-compatible with the
-    legacy 1.0 contract: the "component" and "chieff_chip" bases fold a
-    different spin-prior/draw factor into ``p_pe``/``pdraw`` and omit the
-    chi_eff-compat attrs.  darksirens' likelihood is chi_eff-based (its
-    population model uses a 1-D ``SpinModel``), so consuming those bases would
-    be silently wrong; reject them with an actionable error.
+
+def _negotiate_spin_basis(f, path, required_fit_columns, reexport_hint):
+    """Capability negotiation replacing the old hard chieff gate (DS-09).
+
+    A pairing is valid only when the model FITS exactly the columns the
+    file's density COVERS:
+
+    * a required column the file's density does not cover (a component-spin
+      model against a chieff export) cannot be fitted at all;
+    * a covered column the model does not fit (a chieff model against a
+      chieff_chip export) leaves that column's prior divided out of
+      ``p_pe``/``pdraw`` with no population term replacing it -- silently
+      wrong weights, not merely inefficiency;
+    * an ADVISORY column (shipped for convenience, its density NOT in
+      ``p_pe``/``pdraw`` -- the component export's ``chieff``/``chip``) may
+      never be fitted.
+
+    2.1 files declare ``fit_columns``/``advisory_columns`` explicitly; for
+    older files both are implied by ``spin_basis``.  Returns the file's
+    basis so callers can pick the matching store contract.
     """
-    basis = _decode_hdf5_attr(f.attrs.get("spin_basis", ""))
-    if basis != "chieff":
-        raise RuntimeError(
-            f"gwcat-2.x file {path!r} was exported with spin_basis={basis!r}, but "
-            "darksirens' likelihood is chi_eff-based and can only consume the "
-            f"'chieff' basis. {reexport_hint}"
+    basis = _file_spin_basis(f)
+    if "fit_columns" in f.attrs:
+        file_fit = tuple(
+            _decode_hdf5_attr(v) for v in np.atleast_1d(f.attrs["fit_columns"])
         )
+    else:
+        file_fit = store_contract.IMPLIED_FIT_COLUMNS.get(basis)
+        if file_fit is None:
+            raise RuntimeError(
+                f"gwcat file {path!r} declares spin_basis={basis!r}, which "
+                "this darksirens does not know how to consume. "
+                f"{reexport_hint}"
+            )
+    if "advisory_columns" in f.attrs:
+        advisory = tuple(
+            _decode_hdf5_attr(v)
+            for v in np.atleast_1d(f.attrs["advisory_columns"])
+        )
+    else:
+        advisory = store_contract.IMPLIED_ADVISORY_COLUMNS.get(basis, ())
+
+    required = tuple(required_fit_columns)
+    fitted_advisory = sorted(set(required) & set(advisory))
+    if fitted_advisory:
+        raise RuntimeError(
+            f"gwcat file {path!r} carries {fitted_advisory} only as ADVISORY "
+            "columns: the datasets exist but their density is not in "
+            "p_pe/pdraw, so they cannot be fitted. Use a model that does not "
+            f"fit them, or a store whose basis covers them. {reexport_hint}"
+        )
+    missing = sorted(set(required) - set(file_fit))
+    unmodelled = sorted(set(file_fit) - set(required))
+    if missing or unmodelled:
+        parts = []
+        if missing:
+            parts.append(
+                f"the model fits {missing}, which the file's density does "
+                "not cover"
+            )
+        if unmodelled:
+            parts.append(
+                f"the file's density covers {unmodelled}, which the model "
+                "does not fit (their prior would be divided out with no "
+                "population term replacing it)"
+            )
+        raise RuntimeError(
+            f"gwcat file {path!r} (spin_basis={basis!r}, fit columns "
+            f"{list(file_fit)}) cannot be paired with a model fitting "
+            f"{list(required)}: " + "; ".join(parts) + f". {reexport_hint}"
+        )
+    return basis
 
 
 #: Fraction of ``max_likelihood_variance`` the PE reweighting may consume before
@@ -363,7 +421,7 @@ class SelectionStore:
     prior_wt: np.ndarray
 
 
-def load_gw_store(gw_path) -> GWStore:
+def load_gw_store(gw_path, fit_columns=None) -> GWStore:
     """
     Load a gwcat PE export as a :class:`GWStore` record.
 
@@ -420,12 +478,13 @@ def load_gw_store(gw_path) -> GWStore:
              "gwcat-pe-2.1"),
             conversion_hint,
         )
-        # gwcat-2.x gate: reject non-chi_eff spin bases BEFORE the member
-        # checks so the failure names the incompatible basis rather than the
-        # (legitimately absent) chi_eff-compat attrs.
-        if fmt in store_contract.SPIN_BASIS_FORMATS:
-            _require_chieff_spin_basis(f, gw_path, reexport_hint)
-        contract = store_contract.contract_for(fmt)
+        # Basis negotiation (DS-09) BEFORE the member checks, so a basis
+        # mismatch names the incompatible fit columns rather than the
+        # (legitimately absent) chi_eff-compat attrs.  1.0-era files carry no
+        # spin_basis attr and are implicitly chieff.
+        required = tuple(fit_columns) if fit_columns is not None else _CHIEFF_FIT_COLUMNS
+        file_basis = _negotiate_spin_basis(f, gw_path, required, reexport_hint)
+        contract = store_contract.contract_for(fmt, file_basis)
         _require_hdf5_members(
             f,
             datasets=contract.datasets,
@@ -448,9 +507,21 @@ def load_gw_store(gw_path) -> GWStore:
         p_pe = np.array(f["p_pe"])
         m1source = np.array(f["m1src"])
         m2source = np.array(f["m2src"])
+        spin_cols = {
+            name: np.array(f[name])
+            for name in store_contract.COMPONENT_SPIN_DATASETS
+            if name in f
+        }
 
-        _chi_in_ppe = bool(f.attrs["chi_eff_in_p_pe"])
-        _chi_amax = float(f.attrs["chi_eff_amax"])
+        # chi_eff-compat attrs exist only on chieff-basis files; a component
+        # export's p_pe is exact in its own basis with no chi_eff factor to
+        # fold in or remove.
+        if file_basis == "chieff":
+            _chi_in_ppe = bool(f.attrs["chi_eff_in_p_pe"])
+            _chi_amax = float(f.attrs["chi_eff_amax"])
+        else:
+            _chi_in_ppe = True
+            _chi_amax = float("nan")
         is_mock = bool(f.attrs.get("mock_data", False))
         _pe_attrs = {
             "H0": f.attrs.get("pe_cosmology_H0", "?"),
@@ -458,9 +529,9 @@ def load_gw_store(gw_path) -> GWStore:
         }
         attrs = _decoded_attrs(f)
         event_names = _decoded_event_names(f)
-        fit_columns = tuple(
+        record_fit_columns = tuple(
             _decode_hdf5_attr(v) for v in np.atleast_1d(f.attrs["fit_columns"])
-        ) if "fit_columns" in f.attrs else _CHIEFF_FIT_COLUMNS
+        ) if "fit_columns" in f.attrs else store_contract.IMPLIED_FIT_COLUMNS[file_basis]
 
     # ------------------------------------------------------------
     # p_pe handling
@@ -485,6 +556,7 @@ def load_gw_store(gw_path) -> GWStore:
         "p_pe": np.array(p_pe),
         "m1src": m1source,
         "m2src": m2source,
+        **spin_cols,
     }
     if not _chi_in_ppe:
         # chi_eff not yet in p_pe — apply it now.  gwcat's convention (GW-03)
@@ -512,7 +584,7 @@ def load_gw_store(gw_path) -> GWStore:
     return GWStore(
         format_version=fmt,
         path=str(gw_path),
-        fit_columns=fit_columns,
+        fit_columns=record_fit_columns,
         columns=raw_columns,
         attrs=attrs,
         n_events=nEvents,
@@ -522,7 +594,7 @@ def load_gw_store(gw_path) -> GWStore:
     )
 
 
-def load_gw_samples(gw_path):
+def load_gw_samples(gw_path, fit_columns=None):
     """
     Load GW posterior samples from a gwcat HDF5 export (positional tuple).
 
@@ -544,7 +616,7 @@ def load_gw_samples(gw_path):
     nsamp : int
         Number of posterior samples per event.
     """
-    store = load_gw_store(gw_path)
+    store = load_gw_store(gw_path, fit_columns=fit_columns)
     # Convert to jnp in requested order.  m2det is retained so
     # make_gw_event can form q, but prior_wt is already in the (m1det, q, dL)
     # proposal-density basis used by the likelihood.
@@ -561,7 +633,8 @@ def load_gw_samples(gw_path):
     )
 
 
-def load_selection_store(file, allow_invalid_spin_swap=False) -> SelectionStore:
+def load_selection_store(file, allow_invalid_spin_swap=False,
+                         fit_columns=None) -> SelectionStore:
     """
     Load a gwcat selection export as a :class:`SelectionStore` record.
 
@@ -624,12 +697,16 @@ def load_selection_store(file, allow_invalid_spin_swap=False) -> SelectionStore:
              "gwcat-selection-2.1"),
             conversion_hint,
         )
-        # gwcat-2.x gate: reject non-chi_eff spin bases before the member
-        # checks (extra spin datasets a1/a2/cost1/cost2/chip are ignored).
-        if fmt in store_contract.SPIN_BASIS_FORMATS:
-            _require_chieff_spin_basis(f, file, reexport_hint)
-        _require_valid_spin_swap(f, file, allow_invalid=allow_invalid_spin_swap)
-        contract = store_contract.contract_for(fmt)
+        # Basis negotiation (DS-09) before the member checks.
+        required = tuple(fit_columns) if fit_columns is not None else _CHIEFF_FIT_COLUMNS
+        file_basis = _negotiate_spin_basis(f, file, required, reexport_hint)
+        # The spin-swap validity gate applies to PROJECTION bases only: the
+        # component basis needs no swap (its flat draw factor is exact for
+        # any campaign), which is precisely why it is the remedy the gate
+        # names.
+        if file_basis == "chieff":
+            _require_valid_spin_swap(f, file, allow_invalid=allow_invalid_spin_swap)
+        contract = store_contract.contract_for(fmt, file_basis)
         _require_hdf5_members(
             f,
             datasets=contract.datasets,
@@ -648,10 +725,15 @@ def load_selection_store(file, allow_invalid_spin_swap=False) -> SelectionStore:
         m1src_sel = np.array(f["m1src"])
         m2src_sel = np.array(f["m2src"])
         ndraw = int(f.attrs["ndraw"])
+        spin_cols = {
+            name: np.array(f[name])
+            for name in store_contract.COMPONENT_SPIN_DATASETS
+            if name in f
+        }
         attrs = _decoded_attrs(f)
-        fit_columns = tuple(
+        record_fit_columns = tuple(
             _decode_hdf5_attr(v) for v in np.atleast_1d(f.attrs["fit_columns"])
-        ) if "fit_columns" in f.attrs else _CHIEFF_FIT_COLUMNS
+        ) if "fit_columns" in f.attrs else store_contract.IMPLIED_FIT_COLUMNS[file_basis]
         raw_columns = {
             "m1det": m1detsels,
             "m2det": m2detsels,
@@ -662,9 +744,16 @@ def load_selection_store(file, allow_invalid_spin_swap=False) -> SelectionStore:
             "pdraw": np.array(pdraw_sel),
             "m1src": m1src_sel,
             "m2src": m2src_sel,
+            **spin_cols,
         }
 
         # Apply 1-D chi_eff spin-prior swap if not already done.
+        if file_basis != "chieff" and not bool(f.attrs["chi_eff_swap_applied"]):
+            raise RuntimeError(
+                f"Selection file {file!r} declares chi_eff_swap_applied=False "
+                f"in the {file_basis!r} basis, where the 1-D chi_eff swap is "
+                "undefined; the export is malformed."
+            )
         if not bool(f.attrs["chi_eff_swap_applied"]):
             if "chi_eff_amax" not in f.attrs:
                 raise RuntimeError(
@@ -714,7 +803,7 @@ def load_selection_store(file, allow_invalid_spin_swap=False) -> SelectionStore:
     return SelectionStore(
         format_version=fmt,
         path=str(file),
-        fit_columns=fit_columns,
+        fit_columns=record_fit_columns,
         columns=raw_columns,
         attrs=attrs,
         n_injections=n_det,
@@ -723,7 +812,8 @@ def load_selection_store(file, allow_invalid_spin_swap=False) -> SelectionStore:
     )
 
 
-def load_selection_samples(file, allow_invalid_spin_swap=False):
+def load_selection_samples(file, allow_invalid_spin_swap=False,
+                           fit_columns=None):
     """
     Return detected GW selection samples from a gwcat HDF5 export (tuple).
 
@@ -744,7 +834,8 @@ def load_selection_samples(file, allow_invalid_spin_swap=False):
     ndraw     : int
     """
     store = load_selection_store(
-        file, allow_invalid_spin_swap=allow_invalid_spin_swap
+        file, allow_invalid_spin_swap=allow_invalid_spin_swap,
+        fit_columns=fit_columns,
     )
     # Convert to jnp in requested order.  m2det is retained for q
     # construction, but prior_wt is already in the (m1det, q, dL) basis.
