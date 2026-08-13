@@ -480,6 +480,91 @@ def resolve_selection_inputs(opts):
     return load_selection_samples(opts.gwselection_path)
 
 
+def _read_store_attrs(path) -> dict:
+    """Decoded attrs of a gwcat HDF5 file, or ``{}`` when unreadable.
+
+    Attrs-only open: cheap even for a GB-scale product.  Tolerating an
+    unreadable path is deliberate -- the tuple loaders are the validation
+    (and, in tests, the monkeypatch) seam, so by the time this runs a real
+    file has already been opened and gated; only a test double's placeholder
+    path lands in the except arm.
+    """
+    import h5py
+
+    def _decode(value):
+        return value.decode() if isinstance(value, bytes) else value
+
+    try:
+        with h5py.File(path, "r") as f:
+            return {key: _decode(f.attrs[key]) for key in f.attrs}
+    except OSError:
+        return {}
+
+
+def _require_matching_contract(gw_attrs, sel_attrs, gw_path, sel_path) -> None:
+    """Compare the gwcat-2.1 pairing contract across a PE/selection pair.
+
+    2.1 files carry a ``contract_hash`` (a digest over the pairing-critical
+    declarations: parameter space, fit/advisory columns, spin basis kind,
+    sky-measure convention, source-class filter) plus the full ``contract``
+    JSON.  A mismatched pair -- e.g. a component-basis PE file against a
+    chieff selection file, or a class-filtered PE store against an unfiltered
+    injection set -- is silently wrong, so it is refused here with the
+    field-by-field difference rather than a bare hash.  Files that predate
+    the contract (1.0 / 2.0) are exempt; the per-attr gates still apply.
+    """
+    pe_hash = gw_attrs.get("contract_hash")
+    sel_hash = sel_attrs.get("contract_hash")
+    if pe_hash is None or sel_hash is None:
+        return
+    if pe_hash == sel_hash:
+        return
+    import json
+
+    diff = ""
+    try:
+        pe_contract = json.loads(gw_attrs.get("contract", "{}"))
+        sel_contract = json.loads(sel_attrs.get("contract", "{}"))
+        fields = sorted(set(pe_contract) | set(sel_contract))
+        parts = [
+            f"{k}: PE={pe_contract.get(k)!r} vs selection={sel_contract.get(k)!r}"
+            for k in fields
+            if pe_contract.get(k) != sel_contract.get(k)
+        ]
+        diff = " Differing fields: " + "; ".join(parts) if parts else ""
+    except Exception:
+        pass
+    raise RuntimeError(
+        f"PE file {gw_path!r} and selection file {sel_path!r} "
+        f"declare different pairing contracts (contract_hash {pe_hash} != "
+        f"{sel_hash}): the pair does not describe the same fit and cannot be "
+        f"combined in one likelihood.{diff}"
+    )
+
+
+def _require_chieff_pe_for_emulator(gw_attrs, gw_path) -> None:
+    """The P_det emulator path is chi_eff-basis by construction.
+
+    ``pseudo_injections_from_pdet_flow`` bakes the 1-D chi_eff draw density
+    into its pseudo-injections' ``p_draw``, so pairing it with a PE store in
+    any other spin basis puts numerator and denominator on different spin
+    measures -- a wrong mu that looks entirely healthy.  Today the PE loader
+    also refuses non-chieff bases outright; this check is the emulator-path
+    half of that gate, and stays load-bearing once basis negotiation (DS-09)
+    widens the loader.
+    """
+    basis = gw_attrs.get("spin_basis", "chieff")
+    space = gw_attrs.get("parameter_space", basis)
+    if basis != "chieff" or space != "chieff":
+        raise RuntimeError(
+            f"--pdet_flow_path generates chi_eff-basis pseudo-injections, but "
+            f"the PE file {gw_path!r} declares "
+            f"spin_basis={basis!r} / parameter_space={space!r}. Pair the "
+            "emulator with a chieff-basis PE store, or use a gwcat selection "
+            "file exported in the PE file's basis."
+        )
+
+
 def load_gw_and_selection_inputs(opts) -> dict:
     """Load GW posterior and selection samples."""
     # Load GW posterior samples (Always required)
@@ -487,14 +572,27 @@ def load_gw_and_selection_inputs(opts) -> dict:
     m1det, m2det, dL, chieff, ra, dec, p_pe, nEvents, nsamp = load_gw_samples(
         opts.gw_path
     )
+    gw_attrs = _read_store_attrs(opts.gw_path)
 
-    # Load Selection samples (Always required)
+    # Load Selection samples (Always required).  When both sides are gwcat
+    # files, cross-check the 2.1 pairing contract; the emulator path instead
+    # checks the PE file's basis against the emulator's fixed chieff basis.
+    selection_attrs = None
+    if getattr(opts, "pdet_flow_path", None):
+        _require_chieff_pe_for_emulator(gw_attrs, opts.gw_path)
     (
         m1detsels, m2detsels, dLsels, chieffsels,
         rasels, decsels, p_draw, Ndraw,
     ) = resolve_selection_inputs(opts)
+    if not getattr(opts, "pdet_flow_path", None):
+        selection_attrs = _read_store_attrs(opts.gwselection_path)
+        _require_matching_contract(
+            gw_attrs, selection_attrs, opts.gw_path, opts.gwselection_path
+        )
 
     return dict(
+        gw_attrs=gw_attrs,
+        selection_attrs=selection_attrs,
         m1det=m1det,
         m2det=m2det,
         dL=dL,

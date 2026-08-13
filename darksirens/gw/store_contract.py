@@ -139,9 +139,22 @@ STORE_CONTRACTS: dict[str, StoreContract] = {
     "gwcat-1.0": _PE_CONTRACT,
     "observed-lensing-pe-1.0": _PE_CONTRACT,
     "gwcat-pe-2.0": _PE_CONTRACT,
+    "gwcat-pe-2.1": _PE_CONTRACT,
     "gwcat-selection-1.0": _SELECTION_CONTRACT,
     "gwcat-selection-2.0": _SELECTION_CONTRACT,
+    "gwcat-selection-2.1": _SELECTION_CONTRACT,
 }
+
+#: Formats that carry the gwcat-2.x ``spin_basis`` attr (and, at 2.1, the
+#: declarative pairing contract: ``fit_columns``, ``contract``,
+#: ``contract_hash``).  The loaders gate these on the chi_eff basis until the
+#: capability negotiation of DS-09 lands.
+SPIN_BASIS_FORMATS: tuple[str, ...] = (
+    "gwcat-pe-2.0",
+    "gwcat-pe-2.1",
+    "gwcat-selection-2.0",
+    "gwcat-selection-2.1",
+)
 
 PE_FORMATS: tuple[str, ...] = tuple(
     fmt for fmt, c in STORE_CONTRACTS.items() if c.kind == "pe"

@@ -437,3 +437,135 @@ def test_store_surfaces_event_names_and_attrs(tmp_path):
     pe2 = tmp_path / "pe_no_names.h5"
     _write_pe(pe2, format_version="gwcat-1.0")
     assert load_gw_store(pe2).event_names is None
+
+
+# ----------------------------------------------------------------------------
+# Format 2.1 (DS-05): accepted in the chieff basis, contract_hash compared
+# across the PE/selection pair, emulator path checks the PE basis.
+# ----------------------------------------------------------------------------
+def _add_21_contract(path, *, parameter_space="chieff", source_class=None):
+    """Stamp the gwcat-2.1 contract attrs the way writers_gwcat21 does."""
+    import hashlib
+    import json
+
+    pairing = {
+        "parameter_space": parameter_space,
+        "fit_columns": ["m1det", "q", "dL", "chieff"],
+        "advisory_columns": [],
+        "spin_basis_kind": "projection" if parameter_space != "component" else "bijection",
+        "spin_density_exact": parameter_space == "component",
+        "sky_prior_in_density": True,
+        "source_class": source_class,
+    }
+    payload = json.dumps(pairing, sort_keys=True, separators=(",", ":"))
+    with h5py.File(path, "a") as f:
+        f.attrs["parameter_space"] = parameter_space
+        f.attrs["fit_columns"] = np.array(pairing["fit_columns"], dtype=h5py.string_dtype())
+        f.attrs["advisory_columns"] = np.array([], dtype=h5py.string_dtype())
+        f.attrs["contract"] = json.dumps(pairing)
+        f.attrs["contract_hash"] = hashlib.blake2b(payload.encode(), digest_size=8).hexdigest()
+
+
+def test_pe_v21_chieff_matches_v2_arrays(tmp_path):
+    v2 = tmp_path / "pe_v2c.h5"
+    v21 = tmp_path / "pe_v21.h5"
+    _write_pe(v2, format_version="gwcat-pe-2.0", spin_basis="chieff")
+    _write_pe(v21, format_version="gwcat-pe-2.1", spin_basis="chieff")
+    _add_21_contract(v21)
+    out2 = load_gw_samples(v2)
+    out21 = load_gw_samples(v21)
+    for a, b in zip(out2[:7], out21[:7]):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    from darksirens.gw.utils import load_gw_store
+    store = load_gw_store(v21)
+    assert store.fit_columns == ("m1det", "q", "dL", "chieff")
+    assert store.attrs["contract_hash"]
+
+
+def test_pe_v21_component_rejected(tmp_path):
+    path = tmp_path / "pe_v21_comp.h5"
+    _write_pe(path, format_version="gwcat-pe-2.1", spin_basis="component",
+              extra_spin_datasets=True)
+    with pytest.raises(RuntimeError, match="spin_basis='component'"):
+        load_gw_samples(path)
+
+
+def test_selection_v21_chieff_accepted_component_rejected(tmp_path):
+    ok = tmp_path / "sel_v21.h5"
+    _write_selection(ok, format_version="gwcat-selection-2.1", spin_basis="chieff")
+    _add_21_contract(ok)
+    out = load_selection_samples(ok)
+    np.testing.assert_array_equal(np.asarray(out[6]), _SEL_DATA["pdraw"])
+
+    bad = tmp_path / "sel_v21_comp.h5"
+    _write_selection(bad, format_version="gwcat-selection-2.1",
+                     spin_basis="component", extra_spin_datasets=True)
+    with pytest.raises(RuntimeError, match="spin_basis='component'"):
+        load_selection_samples(bad)
+
+
+def test_file_contract_accepts_v21_chieff_selection(tmp_path):
+    path = tmp_path / "sel_v21_fc.h5"
+    _write_selection(path, format_version="gwcat-selection-2.1", spin_basis="chieff")
+    _add_21_contract(path)
+    report = file_contract.validate_selection_inputs(path)
+    assert report["ok"], report["errors"]
+
+
+def _pair_opts(gw_path, sel_path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(gw_path=str(gw_path), gwselection_path=str(sel_path),
+                           pdet_flow_path=None)
+
+
+def test_mismatched_contract_hash_raises(tmp_path):
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_pair.h5"
+    sel = tmp_path / "sel_pair.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.1", spin_basis="chieff")
+    _write_selection(sel, format_version="gwcat-selection-2.1", spin_basis="chieff")
+    _add_21_contract(pe, source_class="BBH")
+    _add_21_contract(sel, source_class=None)
+    with pytest.raises(RuntimeError, match="contract_hash") as err:
+        loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert "source_class" in str(err.value)
+
+
+def test_matching_contract_hash_accepted(tmp_path):
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_pair_ok.h5"
+    sel = tmp_path / "sel_pair_ok.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.1", spin_basis="chieff")
+    _write_selection(sel, format_version="gwcat-selection-2.1", spin_basis="chieff")
+    _add_21_contract(pe)
+    _add_21_contract(sel)
+    out = loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert out["nEvents"] == NOBS
+    assert out["Ndraw"] == 1000
+    assert out["gw_attrs"]["contract_hash"] == out["selection_attrs"]["contract_hash"]
+
+
+def test_legacy_pair_without_contract_accepted(tmp_path):
+    """1.0/2.0 files predate the contract; pairing them stays legal."""
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_legacy.h5"
+    sel = tmp_path / "sel_legacy.h5"
+    _write_pe(pe, format_version="gwcat-1.0")
+    _write_selection(sel, format_version="gwcat-selection-1.0")
+    out = loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert out["selection_attrs"] is not None
+    assert out["gw_attrs"].get("contract_hash") is None
+
+
+def test_emulator_rejects_non_chieff_pe():
+    from darksirens.inference.loaders import _require_chieff_pe_for_emulator
+
+    attrs = {"spin_basis": "component", "parameter_space": "component"}
+    with pytest.raises(RuntimeError, match="pdet_flow_path"):
+        _require_chieff_pe_for_emulator(attrs, "x.h5")
+    # chieff-basis PE passes.
+    _require_chieff_pe_for_emulator({"spin_basis": "chieff"}, "x.h5")
