@@ -1119,6 +1119,13 @@ def build_parser():
                          "gwcat-selection-1.0, -2.0 or -2.1; a 2.x "
                          "file must use spin_basis=chieff). Exactly one of "
                          "--gwselection_path / --pdet_flow_path is required."))
+    g.add_argument("--allow_invalid_spin_swap", action="store_true",
+                   help=("Load a chi_eff selection file whose per-campaign "
+                         "injected_spin_uniform_isotropic evidence says the "
+                         "analytic chi_eff spin swap was invalid (warn instead "
+                         "of refuse). Deliberate legacy comparisons only: the "
+                         "resulting pdraw is the wrong draw density for the "
+                         "non-uniform campaign(s)."))
     g.add_argument("--survey_path",      default=None, nargs="+", metavar="PATH",
                    help=("Galaxy survey catalog(s). One path = current "
                          "single-catalog behaviour. Multiple paths define a "

@@ -215,6 +215,21 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
                             "spin_basis='chieff'"
                         )
                 _check_store_contract(f, fmt)
+                # DS-03: a chi_eff product whose campaigns did not draw spins
+                # uniform-in-magnitude/isotropic carries a wrong pdraw; the
+                # loader refuses it (with a CLI escape flag), so the preflight
+                # must too.
+                if "injected_spin_uniform_isotropic" in f.attrs:
+                    uniform = np.atleast_1d(
+                        np.asarray(f.attrs["injected_spin_uniform_isotropic"])
+                    ).astype(bool)
+                    if not uniform.all():
+                        raise ValueError(
+                            "selection file declares injected_spin_uniform_"
+                            f"isotropic={uniform.tolist()}; the analytic "
+                            "chi_eff spin swap is invalid for the non-uniform "
+                            "campaign(s) and pdraw is the wrong draw density"
+                        )
                 warnings.append("legacy unlensed selection file accepted; prefer consolidated selection_inputs.h5")
                 return {"format_version": fmt, "selection_kind": "unlensed", "n_injections": int(len(f["dL"])), "ndraw": int(f.attrs.get("ndraw", len(f["dL"]))), "warnings": warnings}
             # Lensed injection writer has varied format strings; accept both legacy

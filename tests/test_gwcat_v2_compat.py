@@ -569,3 +569,61 @@ def test_emulator_rejects_non_chieff_pe():
         _require_chieff_pe_for_emulator(attrs, "x.h5")
     # chieff-basis PE passes.
     _require_chieff_pe_for_emulator({"spin_basis": "chieff"}, "x.h5")
+
+
+# ----------------------------------------------------------------------------
+# Spin-swap validity (DS-03): a chi_eff product whose campaigns did not draw
+# spins uniform-in-magnitude/isotropic carries a wrong pdraw.
+# ----------------------------------------------------------------------------
+def test_non_uniform_campaign_rejected_under_chieff(tmp_path):
+    path = tmp_path / "sel_nonuniform.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, False])
+    with pytest.raises(RuntimeError, match="injected_spin_uniform_isotropic"):
+        load_selection_samples(path)
+
+
+def test_all_uniform_campaigns_accepted(tmp_path):
+    path = tmp_path / "sel_uniform.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, True])
+    load_selection_samples(path)
+
+
+def test_recorded_swap_violations_rejected(tmp_path):
+    path = tmp_path / "sel_violations.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["spin_basis_assumption_violations"] = '["o4ab: isotropy_dev=0.642"]'
+    with pytest.raises(RuntimeError, match="spin_basis_assumption_violations"):
+        load_selection_samples(path)
+
+
+def test_flag_downgrades_to_warning(tmp_path, capsys):
+    path = tmp_path / "sel_nonuniform_ok.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([True, False])
+    out = load_selection_samples(path, allow_invalid_spin_swap=True)
+    assert out[7] == 1000
+    assert "allow_invalid_spin_swap" in capsys.readouterr().out
+
+
+def test_legacy_file_without_the_attr_loads(tmp_path):
+    """The shipped gwcat-selection-1.0 product predates the attr; the gate
+    cannot read what is not there (retiring it needs the GW-24 re-export)."""
+    path = tmp_path / "sel_legacy_noattr.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0")
+    load_selection_samples(path)
+
+
+def test_file_contract_rejects_non_uniform_campaign(tmp_path):
+    path = tmp_path / "sel_nonuniform_fc.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["injected_spin_uniform_isotropic"] = np.array([False])
+    report = file_contract.validate_selection_inputs(path)
+    assert not report["ok"]
+    assert any("injected_spin_uniform_isotropic" in e for e in report["errors"])

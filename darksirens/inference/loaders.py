@@ -477,7 +477,12 @@ def resolve_selection_inputs(opts):
             Om0=om0,
             chieff_amax=float(getattr(opts, "pdet_chieff_amax", 0.99)),
         )
-    return load_selection_samples(opts.gwselection_path)
+    return load_selection_samples(
+        opts.gwselection_path,
+        allow_invalid_spin_swap=bool(
+            getattr(opts, "allow_invalid_spin_swap", False)
+        ),
+    )
 
 
 def _read_store_attrs(path) -> dict:

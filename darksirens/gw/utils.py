@@ -176,6 +176,66 @@ def _report_pe_weight_health(p_pe_2d, fmt, nEvents, nsamp, f_attrs=None):
     return total
 
 
+def _require_valid_spin_swap(f, path, allow_invalid=False):
+    """Refuse a chi_eff selection product whose spin swap is invalid.
+
+    The chi_eff basis replaces each campaign's real spin-draw density with
+    the ANALYTIC uniform-magnitude/isotropic chi_eff marginal (the "swap",
+    stamped as ``chi_eff_swap_applied``).  That replacement is only exact when
+    the campaign actually drew spins uniform-in-magnitude and isotropic; for a
+    campaign that did not (O4ab measures isotropy_dev = 0.64), the exported
+    ``pdraw`` is the wrong density by an O(1), chi_eff-dependent factor -- the
+    textbook Essick & Fishbach p_draw mismatch, biasing the spin population
+    and leaking into masses, rate, and H0.
+
+    gwcat stamps the evidence per campaign as ``injected_spin_uniform_isotropic``
+    (GW-24 re-exports) and, when a non-strict export applied the swap anyway,
+    records ``spin_basis_assumption_violations``.  Any False campaign, or any
+    recorded violation, refuses the file; ``allow_invalid=True``
+    (``--allow_invalid_spin_swap``) downgrades to one loud warning for
+    deliberate legacy comparisons.  Files predating the attr (the shipped
+    gwcat-selection-1.0 product carries neither attr) load unchanged -- this
+    gate cannot read what is not there, which is why the re-export is the
+    other half of retiring the stale product.
+    """
+    problems = []
+    if "injected_spin_uniform_isotropic" in f.attrs:
+        uniform = np.atleast_1d(
+            np.asarray(f.attrs["injected_spin_uniform_isotropic"])
+        ).astype(bool)
+        if not uniform.all():
+            problems.append(
+                f"injected_spin_uniform_isotropic={uniform.tolist()}: at least "
+                "one campaign did not draw spins uniform-in-magnitude/"
+                "isotropic, so the analytic chi_eff spin swap baked into "
+                "pdraw is the wrong draw density for that campaign"
+            )
+    violations = _decode_hdf5_attr(
+        f.attrs.get("spin_basis_assumption_violations", "")
+    )
+    if violations and violations not in ("[]", "{}"):
+        problems.append(
+            "the exporter recorded spin_basis_assumption_violations="
+            f"{violations}"
+        )
+    if not problems:
+        return
+    message = (
+        f"Selection file {path!r} is not a valid chi_eff-basis product: "
+        + "; ".join(problems)
+        + ". Re-export the campaign in the component spin basis (exact for "
+        "any campaign) once basis negotiation supports it, or drop the "
+        "non-uniform campaign."
+    )
+    if allow_invalid:
+        print(f"    [!] --allow_invalid_spin_swap: {message}")
+        return
+    raise RuntimeError(
+        message + " Pass --allow_invalid_spin_swap to load it anyway "
+        "(deliberate legacy comparisons only)."
+    )
+
+
 def _require_store_quality(f, contract, path, conversion_hint=""):
     """Raise on finiteness / positivity / range violations against the contract.
 
@@ -480,7 +540,7 @@ def load_gw_samples(gw_path):
     )
 
 
-def load_selection_store(file) -> SelectionStore:
+def load_selection_store(file, allow_invalid_spin_swap=False) -> SelectionStore:
     """
     Load a gwcat selection export as a :class:`SelectionStore` record.
 
@@ -547,6 +607,7 @@ def load_selection_store(file) -> SelectionStore:
         # checks (extra spin datasets a1/a2/cost1/cost2/chip are ignored).
         if fmt in store_contract.SPIN_BASIS_FORMATS:
             _require_chieff_spin_basis(f, file, reexport_hint)
+        _require_valid_spin_swap(f, file, allow_invalid=allow_invalid_spin_swap)
         contract = store_contract.contract_for(fmt)
         _require_hdf5_members(
             f,
@@ -625,7 +686,7 @@ def load_selection_store(file) -> SelectionStore:
     )
 
 
-def load_selection_samples(file):
+def load_selection_samples(file, allow_invalid_spin_swap=False):
     """
     Return detected GW selection samples from a gwcat HDF5 export (tuple).
 
@@ -645,7 +706,9 @@ def load_selection_samples(file):
     pdraw_sel : jnp.ndarray
     ndraw     : int
     """
-    store = load_selection_store(file)
+    store = load_selection_store(
+        file, allow_invalid_spin_swap=allow_invalid_spin_swap
+    )
     # Convert to jnp in requested order.  m2det is retained for q
     # construction, but prior_wt is already in the (m1det, q, dL) basis.
     return (
