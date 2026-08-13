@@ -333,9 +333,14 @@ def sky_moments(basis: LatentBasis, xi_members, b_nodes,
     def _one(xi):
         Xi = jnp.reshape(xi, (basis.m_sph, basis.m_z))
         f = (basis.proj_sph @ Xi) @ basis.phi_z_out.T       # (n_fit, N_z)
-        e = jnp.exp(b_nodes[:, None, None] * f[None, :, :]) # (n_b, n_fit, N_z)
-        A = jnp.sum(e, axis=1)                              # (n_b, N_z)
-        B = jnp.einsum("p,bpz->bz", f_p, e)                 # (n_b, N_z)
+
+        # One b node at a time: the (n_b, n_fit, N_z) exponential cube is
+        # ~4 GB at production scale, so it is never materialized.
+        def _at_b(b):
+            e = jnp.exp(b * f)                              # (n_fit, N_z)
+            return jnp.sum(e, axis=0), f_p @ e              # (N_z,), (N_z,)
+
+        A, B = jax.lax.map(_at_b, b_nodes)
         return A, B
 
     A, B = jax.vmap(_one)(xi_members)
@@ -348,3 +353,29 @@ def rho_from_moments(A, B, c, b_index) -> jnp.ndarray:
     caller via ``A, B`` normalization or passed explicitly at the seam
     (PR-5); here the bare ``log(A - c B)`` building block."""
     return jnp.log(A[..., b_index, :] - c * B[..., b_index, :])
+
+
+def chebyshev_lobatto_nodes(n_b: int, b_max: float) -> np.ndarray:
+    """The ``n_b`` Chebyshev–Lobatto nodes on ``[0, b_max]`` (the ``b_GW``
+    interpolation grid of PLAN §2.2; endpoints included)."""
+    k = np.arange(n_b)
+    return 0.5 * b_max * (1.0 - np.cos(np.pi * k / (n_b - 1)))
+
+
+def interp_moments_b(table, b_nodes, b) -> jnp.ndarray:
+    """Barycentric Chebyshev–Lobatto interpolation of a moment table along
+    its ``b``-node axis (axis -2, per :func:`sky_moments`'s layout), at one
+    scalar ``b`` — the P9-pinned online path (1e-6).  Exact at the nodes by
+    the barycentric formula's pole handling."""
+    table = jnp.asarray(table)
+    b_nodes = jnp.asarray(b_nodes, dtype=jnp.float64)
+    n = b_nodes.shape[0]
+    w = jnp.asarray((-1.0) ** np.arange(n))
+    w = w.at[0].mul(0.5).at[-1].mul(0.5)
+    d = b - b_nodes                                          # (n_b,)
+    exact = jnp.any(d == 0.0)
+    idx = jnp.argmin(jnp.abs(d))
+    coef = w / jnp.where(d == 0.0, 1.0, d)
+    coef = jnp.where(exact, jnp.zeros_like(coef).at[idx].set(1.0), coef)
+    coef = coef / jnp.sum(coef)
+    return jnp.tensordot(table, coef, axes=([-2], [0]))
