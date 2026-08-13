@@ -562,7 +562,7 @@ class MixtureModel:
                 return tm[c.param_specs.index(c.m_min_spec)], dmmin
         return M_LO, 0.01
 
-    def component_densities(self, m1, q, chieff, theta):
+    def component_densities(self, m1, q, chieff, theta, spin=None):
         """Return weighted source-density contributions for each component.
 
         The leading axis indexes mass-mixture components; summing over that
@@ -598,10 +598,19 @@ class MixtureModel:
             if hasattr(c_m, "dm_min_spec"):
                 dmmin = tm[c_m.param_specs.index(c_m.dm_min_spec)]
 
+            if getattr(c_s, "consumes_spin_block", False):
+                # 4-D component-spin model: consumes the event spin block
+                # (a1, a2, cost1, cost2) and ignores chieff.  Raises inside
+                # the component if spin is None, i.e. if it was paired with a
+                # chieff-basis store (basis negotiation, DS-09, prevents
+                # reaching that state from the CLI).
+                spin_term = c_s(chieff, ts, norm=spin_norms[s_idx], spin=spin)
+            else:
+                spin_term = c_s(chieff, ts, norm=spin_norms[s_idx])
             contributions.append(w[i] * (
                 c_m(m1, tm, norm=mass_norms[i])
                 * c_p(m1, q, mmin, dmmin, tp)
-                * c_s(chieff, ts, norm=spin_norms[s_idx])
+                * spin_term
             ))
 
         return jnp.stack(contributions, axis=0)
@@ -642,9 +651,11 @@ class MixtureModel:
             )
         return total
 
-    def __call__(self, m1, q, chieff, theta):
+    def __call__(self, m1, q, chieff, theta, spin=None):
         """Evaluate the normalised mixture density for source parameters."""
-        return jnp.sum(self.component_densities(m1, q, chieff, theta), axis=0)
+        return jnp.sum(
+            self.component_densities(m1, q, chieff, theta, spin=spin), axis=0
+        )
 
 
 # ── Population model ─────────────────────────────────────────────────────────
@@ -786,7 +797,7 @@ class PopulationModel:
             "the z factor does not separate from the mixture sum."
         )
 
-    def log_p_massspin(self, m1, q, chieff, theta):
+    def log_p_massspin(self, m1, q, chieff, theta, spin=None):
         """Log source-parameter (mass, mass-ratio, spin) mixture density.
 
         Sentinel: p = 0  →  log p = −jnp.inf, matching :meth:`log_p_pop`.
@@ -796,27 +807,31 @@ class PopulationModel:
                 "log_p_massspin is undefined for per-component redshift "
                 "evolution: use log_p_pop."
             )
-        p = self.mixture(m1, q, chieff, self.mixture_theta(theta))
+        p = self.mixture(m1, q, chieff, self.mixture_theta(theta), spin=spin)
         return jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def log_p_pop(self, m1, q, z, chieff, theta, spin=None):
         """
         Log population probability at (m1, q, z, chieff) under parameters theta.
 
         Sentinel: p = 0  →  log p = −jnp.inf  (not −1e10).
         −∞ propagates correctly through logsumexp / jnp.sum; the final
         jnp.isfinite guard in the likelihood rejects the proposal cleanly.
+
+        ``spin`` is the optional (N, d) component-spin block; forwarded to the
+        mixture, where only a spin component with ``consumes_spin_block`` ever
+        reads it.
         """
         if self.has_additive_rate_split:
             return (
-                self.log_p_massspin(m1, q, chieff, theta)
+                self.log_p_massspin(m1, q, chieff, theta, spin=spin)
                 + self.log_rate_z(z, theta)
             )
 
         n_mix  = self.mixture.n_params
         tm     = theta[:n_mix]
         gamma  = theta[n_mix : n_mix + self.mixture.k]
-        p_comp = self.mixture.component_densities(m1, q, chieff, tm)
+        p_comp = self.mixture.component_densities(m1, q, chieff, tm, spin=spin)
 
         gamma_shape = (self.mixture.k,) + (1,) * (jnp.ndim(p_comp) - 1)
         z_factor = jnp.power(1.0 + z, gamma.reshape(gamma_shape) - 1.0)

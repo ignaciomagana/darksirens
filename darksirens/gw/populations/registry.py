@@ -457,6 +457,40 @@ register_model(
 )(GWTC3PowerLawPeakPopulationModel)
 
 
+def _component_spin_default():
+    from .component_spin import default_component_spin
+
+    return default_component_spin()
+
+
+register_model(
+    "gwtc3_plpeak_component_spin",
+    latex=r"\text{GWTC-3 PL+G, component spin}",
+    # Ordering: the 7 GWTC-3 mass parameters and beta_q as in
+    # gwtc3_fiducial_plpeak above, then the 4-D component-spin block
+    # (alpha_chi, beta_chi, zeta_spin, sigma_t), then gamma.
+    #
+    # Mass/pairing/gamma fiducials are gwtc3_fiducial_plpeak's, with the same
+    # caveats (m_max = 65.0 and sigma_m = 5.5 are prior midpoints, NOT
+    # measurements).  The spin entries are GWTC-3 Default-model-LIKE
+    # placeholders (a Beta near mean 0.26 and a mostly-aligned tilt mixture),
+    # NOT quoted release values: the paper reports the magnitude posterior in
+    # (mu_chi, sigma_chi^2) space and this preset parameterises the Beta
+    # directly, so source exact numbers from the LVK data release before
+    # building mocks on this preset.
+    #
+    # This preset requires a COMPONENT-basis gwcat pair: its spin model
+    # consumes GWEvent.spin = (a1, a2, cost1, cost2) and raises against a
+    # chieff-basis store (basis negotiation, DS-09, refuses the pairing
+    # before the likelihood is ever built).
+    fiducial=(
+        3.5, 5.0, 65.0, 0.038, 34.0, 5.5, 4.9,
+        1.1, 1.6, 4.5, 0.75, 0.9, 2.9,
+    ),
+)(lambda: GWTC3PowerLawPeakPopulationModel(
+    spin_component=_component_spin_default()))
+
+
 # ============================================================
 # 3b. Gaussian-process model family (true-GP prior, mixture-decoupled)
 # ============================================================
