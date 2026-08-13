@@ -678,3 +678,54 @@ def test_gwcat_new_convention_api_present():
     logp = np.asarray(gwcat_spin.chi_eff_prior_logprob(
         np.array([0.0]), np.array([30.0]), np.array([25.0]), amax=0.99))
     assert np.isfinite(logp).all()
+
+
+# ----------------------------------------------------------------------------
+# PE cosmology consumption (DS-12): pe_cosmology_H0/Om0 were required attrs
+# read by no consumer; the emulator cosmology was never checked against them.
+# ----------------------------------------------------------------------------
+def test_emulator_cosmology_must_match_pe():
+    from types import SimpleNamespace
+
+    from darksirens.inference.loaders import _require_matching_pdet_cosmology
+
+    attrs = {"pe_cosmology_H0": 67.7, "pe_cosmology_Om0": 0.31}
+    opts_ok = SimpleNamespace(pdet_cosmology="67.7,0.31")
+    _require_matching_pdet_cosmology(attrs, "pe.h5", opts_ok)
+    # Sub-tolerance differences are the same cosmology.
+    _require_matching_pdet_cosmology(
+        attrs, "pe.h5", SimpleNamespace(pdet_cosmology="67.9,0.3065"))
+    with pytest.raises(RuntimeError, match="pdet_cosmology"):
+        _require_matching_pdet_cosmology(
+            attrs, "pe.h5", SimpleNamespace(pdet_cosmology="70.0,0.31"))
+    with pytest.raises(RuntimeError, match="pdet_cosmology"):
+        _require_matching_pdet_cosmology(
+            attrs, "pe.h5", SimpleNamespace(pdet_cosmology="67.7,0.25"))
+
+
+def test_pair_cosmology_mismatch_warns_not_raises(tmp_path, capsys):
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_cosmo.h5"
+    sel = tmp_path / "sel_cosmo.h5"
+    _write_pe(pe, format_version="gwcat-1.0")
+    _write_selection(sel, format_version="gwcat-selection-1.0")
+    with h5py.File(sel, "a") as f:
+        f.attrs["cosmology_H0"] = 73.0
+    out = loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert out["Ndraw"] == 1000
+    assert "declares cosmology" in capsys.readouterr().out
+
+
+def test_per_event_cosmology_flag_surfaced(tmp_path, capsys):
+    from darksirens.inference import loaders
+
+    pe = tmp_path / "pe_varies.h5"
+    sel = tmp_path / "sel_varies.h5"
+    _write_pe(pe, format_version="gwcat-1.0")
+    _write_selection(sel, format_version="gwcat-selection-1.0")
+    with h5py.File(pe, "a") as f:
+        f.attrs["cosmology_per_event_varies"] = True
+        f.attrs["cosmology_mode"] = "per-event"
+    loaders.load_gw_and_selection_inputs(_pair_opts(pe, sel))
+    assert "cosmology_per_event_varies=True" in capsys.readouterr().out

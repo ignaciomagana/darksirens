@@ -570,6 +570,88 @@ def _require_chieff_pe_for_emulator(gw_attrs, gw_path) -> None:
         )
 
 
+#: Physical tolerances for "these two declared cosmologies are the same one",
+#: matching gwcat's pair validator: differences below these move nothing at
+#: the precision of the products.
+_COSMO_H0_TOL = 1.0
+_COSMO_OM0_TOL = 0.05
+
+
+def _require_matching_pdet_cosmology(gw_attrs, gw_path, opts) -> None:
+    """--pdet_cosmology must be the PE store's declared cosmology.
+
+    ``pe_cosmology_H0``/``pe_cosmology_Om0`` are REQUIRED attrs of every PE
+    file and were previously read by no consumer anywhere in the package,
+    while ``--pdet_cosmology`` was validated for format and range only -- so
+    an emulator campaign generated under one cosmology could be paired with a
+    PE store built under another and nothing noticed.  Both fiducials enter
+    the fixed densities (p_pe's source-frame construction, the emulator's
+    injection z-prior and detector-frame conversion), so a mismatched pair
+    mixes two cosmologies in one likelihood.
+    """
+    pe_h0 = gw_attrs.get("pe_cosmology_H0")
+    pe_om0 = gw_attrs.get("pe_cosmology_Om0")
+    if pe_h0 is None or pe_om0 is None:
+        return
+    h0, om0 = _parse_pdet_cosmology(opts)
+    if (abs(float(pe_h0) - h0) >= _COSMO_H0_TOL
+            or abs(float(pe_om0) - om0) >= _COSMO_OM0_TOL):
+        raise RuntimeError(
+            f"--pdet_cosmology ({h0:g}, {om0:g}) does not match the PE "
+            f"store's declared cosmology ({float(pe_h0):g}, {float(pe_om0):g}) "
+            f"from {gw_path!r}: the emulator's pseudo-injections and the PE "
+            "densities would be built under two different fiducials in one "
+            "likelihood. Set --pdet_cosmology to the PE store's values (or "
+            "rebuild the PE store)."
+        )
+
+
+def _warn_pair_cosmology(gw_attrs, sel_attrs, gw_path, sel_path) -> None:
+    """Surface a PE/selection fiducial-cosmology disagreement.
+
+    A warning, not a refusal: campaigns legitimately carry their own
+    generation cosmology (gwcat GW-09 records ``cosmology_source`` per
+    campaign, with 'file' meaning no cosmology entered pdraw at all), so
+    difference alone is not an error -- but it is exactly the kind of quiet
+    configuration drift an operator should see once, at load.
+    """
+    pe_h0 = gw_attrs.get("pe_cosmology_H0")
+    pe_om0 = gw_attrs.get("pe_cosmology_Om0")
+    sel_h0 = sel_attrs.get("cosmology_H0")
+    sel_om0 = sel_attrs.get("cosmology_Om0")
+    if None in (pe_h0, pe_om0, sel_h0, sel_om0):
+        return
+    try:
+        mismatch = (abs(float(pe_h0) - float(sel_h0)) >= _COSMO_H0_TOL
+                    or abs(float(pe_om0) - float(sel_om0)) >= _COSMO_OM0_TOL)
+    except (TypeError, ValueError):
+        return
+    if mismatch:
+        print(f"    [!] PE store {gw_path!r} declares cosmology "
+              f"({pe_h0}, {pe_om0}) but selection file {sel_path!r} declares "
+              f"({sel_h0}, {sel_om0}); campaigns may legitimately differ "
+              "(per-campaign cosmology_source), but verify this pair was "
+              "built together.")
+
+
+def _warn_per_event_cosmology(gw_attrs, gw_path) -> None:
+    """darksirens consumes ONE scalar PE cosmology; say so if the file varies.
+
+    gwcat writes per-event ``cosmology_H0_per_event``/``Om0_per_event``
+    arrays plus ``cosmology_per_event_varies``; darksirens requires the
+    scalar attrs and never reads the arrays, so if the flag ever flips True
+    the scalar is a fiction.  All shipped products are False today -- this is
+    the signal for when that stops being true.
+    """
+    if gw_attrs.get("cosmology_per_event_varies"):
+        print(f"    [!] PE store {gw_path!r} declares cosmology_per_event_"
+              "varies=True (mode="
+              f"{gw_attrs.get('cosmology_mode', '?')!r}): darksirens uses the "
+              "single scalar pe_cosmology_H0/Om0 for every event, which does "
+              "not describe this file. Downstream cosmology-sensitive terms "
+              "will be inconsistent across events.")
+
+
 def load_gw_and_selection_inputs(opts) -> dict:
     """Load GW posterior and selection samples."""
     # Load GW posterior samples (Always required)
@@ -583,8 +665,10 @@ def load_gw_and_selection_inputs(opts) -> dict:
     # files, cross-check the 2.1 pairing contract; the emulator path instead
     # checks the PE file's basis against the emulator's fixed chieff basis.
     selection_attrs = None
+    _warn_per_event_cosmology(gw_attrs, opts.gw_path)
     if getattr(opts, "pdet_flow_path", None):
         _require_chieff_pe_for_emulator(gw_attrs, opts.gw_path)
+        _require_matching_pdet_cosmology(gw_attrs, opts.gw_path, opts)
     (
         m1detsels, m2detsels, dLsels, chieffsels,
         rasels, decsels, p_draw, Ndraw,
@@ -592,6 +676,9 @@ def load_gw_and_selection_inputs(opts) -> dict:
     if not getattr(opts, "pdet_flow_path", None):
         selection_attrs = _read_store_attrs(opts.gwselection_path)
         _require_matching_contract(
+            gw_attrs, selection_attrs, opts.gw_path, opts.gwselection_path
+        )
+        _warn_pair_cosmology(
             gw_attrs, selection_attrs, opts.gw_path, opts.gwselection_path
         )
 
