@@ -48,7 +48,15 @@ def _decode(value: Any) -> Any:
     return value.decode() if isinstance(value, bytes) else value
 
 
-def _finite_dataset(f: h5py.File, name: str, *, size: int | None = None) -> int:
+def _finite_dataset(
+    f: h5py.File,
+    name: str,
+    *,
+    size: int | None = None,
+    lo: float | None = None,
+    hi: float | None = None,
+    hi_open: bool = False,
+) -> int:
     if name not in f:
         raise ValueError(f"missing required dataset {name!r}")
     arr = np.asarray(f[name])
@@ -58,7 +66,23 @@ def _finite_dataset(f: h5py.File, name: str, *, size: int | None = None) -> int:
         raise ValueError(f"dataset {name!r} length {arr.size} != expected {size}")
     if arr.size and not np.all(np.isfinite(arr)):
         raise ValueError(f"dataset {name!r} contains non-finite values")
+    if arr.size and lo is not None and np.any(arr < lo):
+        raise ValueError(f"dataset {name!r} contains values below {lo}")
+    if arr.size and hi is not None:
+        out = (arr >= hi) if hi_open else (arr > hi)
+        if np.any(out):
+            bound = f"{hi} (exclusive)" if hi_open else f"{hi}"
+            raise ValueError(f"dataset {name!r} contains values above {bound}")
     return int(arr.size)
+
+
+#: Sky-angle ranges shared with the loaders (``gw/utils._require_valid_sky``):
+#: radians, ``ra`` in [0, 2*pi) and ``dec`` in [-pi/2, pi/2].  A degrees-valued
+#: file fails these by construction.
+_SKY_RANGES: dict[str, dict[str, Any]] = {
+    "ra": {"lo": 0.0, "hi": 2.0 * np.pi, "hi_open": True},
+    "dec": {"lo": -np.pi / 2.0, "hi": np.pi / 2.0},
+}
 
 
 def validate_observed_gw_pe(path: str | Path) -> dict[str, Any]:
@@ -166,6 +190,21 @@ def validate_selection_inputs(path: str | Path) -> dict[str, Any]:
                         )
                 for name in ("m1det", "m2det", "dL", "chieff", "pdraw"):
                     _finite_dataset(f, name)
+                # Sky angles were the one loader requirement this preflight
+                # never covered: gwcat writes NaN ra/dec for semianalytic
+                # O1/O2 campaigns, and the loader feeds them to hp.ang2pix.
+                for name, ranges in _SKY_RANGES.items():
+                    if name in f:
+                        _finite_dataset(f, name, **ranges)
+                sky_avail = np.atleast_1d(
+                    np.asarray(f.attrs.get("sky_position_available", True))
+                ).astype(bool)
+                if not sky_avail.all():
+                    raise ValueError(
+                        "selection file declares sky_position_available="
+                        f"{sky_avail.tolist()}; at least one campaign carries "
+                        "no sky positions and cannot be pixelated"
+                    )
                 warnings.append("legacy unlensed selection file accepted; prefer consolidated selection_inputs.h5")
                 return {"format_version": fmt, "selection_kind": "unlensed", "n_injections": int(len(f["dL"])), "ndraw": int(f.attrs.get("ndraw", len(f["dL"]))), "warnings": warnings}
             # Lensed injection writer has varied format strings; accept both legacy

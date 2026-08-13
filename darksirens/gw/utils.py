@@ -172,6 +172,72 @@ def _report_pe_weight_health(p_pe_2d, fmt, nEvents, nsamp, f_attrs=None):
     return total
 
 
+def _require_valid_sky(ra, dec, path, conversion_hint=""):
+    """Reject non-finite or out-of-range sky positions before they reach healpy.
+
+    Both loaders feed ``ra``/``dec`` straight into
+    ``hp.ang2pix(nside, pi/2 - dec, ra)``, whose failure mode on bad input is
+    either an exception deep inside healpy or -- worse -- a silently wrong
+    pixel index.  gwcat legitimately writes NaN sky for the semianalytic O1/O2
+    rows of cumulative-mixture selection files, and a degrees-vs-radians
+    ingestion mistake produces values that healpy happily wraps.  Ranges follow
+    the gwcat export contract: ``ra`` in [0, 2*pi) and ``dec`` in
+    [-pi/2, pi/2], both radians.
+    """
+    ra = np.asarray(ra)
+    dec = np.asarray(dec)
+    problems = []
+    n_bad_ra = int((~np.isfinite(ra)).sum())
+    n_bad_dec = int((~np.isfinite(dec)).sum())
+    if n_bad_ra or n_bad_dec:
+        problems.append(
+            f"{n_bad_ra} non-finite ra and {n_bad_dec} non-finite dec values"
+        )
+    finite_ra = ra[np.isfinite(ra)]
+    finite_dec = dec[np.isfinite(dec)]
+    n_range_ra = int(((finite_ra < 0.0) | (finite_ra >= 2.0 * np.pi)).sum())
+    n_range_dec = int((np.abs(finite_dec) > np.pi / 2.0).sum())
+    if n_range_ra or n_range_dec:
+        problems.append(
+            f"{n_range_ra} ra values outside [0, 2*pi) and {n_range_dec} dec "
+            "values outside [-pi/2, pi/2] (radians; a degrees-valued file "
+            "fails this check by construction)"
+        )
+    if problems:
+        raise RuntimeError(
+            f"Invalid sky positions in {path!r}: "
+            + "; ".join(problems)
+            + ". Sky angles must be finite radians with ra in [0, 2*pi) and "
+            "dec in [-pi/2, pi/2]."
+            + (f" {conversion_hint}" if conversion_hint else "")
+        )
+
+
+def _require_sky_available(f, path):
+    """Refuse a selection file that declares sky-less campaigns.
+
+    gwcat stamps a per-campaign ``sky_position_available`` bool array; a False
+    entry means that campaign's ``ra``/``dec`` rows are NaN placeholders (the
+    semianalytic O1/O2 half of a cumulative-mixture file).  darksirens
+    pixelates every selection sample against the galaxy catalog, so a
+    partially-skyless product cannot be consumed correctly -- the NaN rows
+    would also fail the finiteness check below, but this failure names the
+    campaign structure instead of a row count.
+    """
+    if "sky_position_available" not in f.attrs:
+        return
+    available = np.atleast_1d(np.asarray(f.attrs["sky_position_available"])).astype(bool)
+    if not available.all():
+        raise RuntimeError(
+            f"Selection file {path!r} declares sky_position_available="
+            f"{available.tolist()}: at least one campaign carries no sky "
+            "positions (NaN ra/dec placeholders). darksirens assigns every "
+            "selection sample to a HEALPix pixel, so it cannot consume a "
+            "partially-skyless product; re-export without the skyless "
+            "campaigns or use a fully sky-resolved injection set."
+        )
+
+
 def _require_hdf5_members(f, datasets=(), attrs=(), conversion_hint=""):
     missing_datasets = [name for name in datasets if name not in f]
     missing_attrs = [name for name in attrs if name not in f.attrs]
@@ -293,6 +359,8 @@ def load_gw_samples(gw_path):
         p_pe = np.array(f["p_pe"])
         m1source = np.array(f["m1src"])
         m2source = np.array(f["m2src"])
+
+        _require_valid_sky(ra, dec, gw_path, conversion_hint=conversion_hint)
 
         _chi_in_ppe = bool(f.attrs["chi_eff_in_p_pe"])
         _chi_amax = float(f.attrs["chi_eff_amax"])
@@ -439,6 +507,8 @@ def load_selection_samples(file):
             conversion_hint=conversion_hint,
         )
 
+        _require_sky_available(f, file)
+
         m1detsels = np.array(f["m1det"])
         m2detsels = np.array(f["m2det"])
         dLsels = np.array(f["dL"])
@@ -449,6 +519,8 @@ def load_selection_samples(file):
         m1src_sel = np.array(f["m1src"])
         m2src_sel = np.array(f["m2src"])
         ndraw = int(f.attrs["ndraw"])
+
+        _require_valid_sky(rasels, decsels, file, conversion_hint=conversion_hint)
 
         # Apply 1-D chi_eff spin-prior swap if not already done.
         if not bool(f.attrs["chi_eff_swap_applied"]):
