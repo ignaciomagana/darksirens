@@ -871,7 +871,8 @@ def test_chieff_chip_file_rejected_for_chieff_model(tmp_path):
 def test_component_selection_accepted_and_swap_gate_skipped(tmp_path):
     path = tmp_path / "sel_comp_ok.h5"
     _write_selection(path, format_version="gwcat-selection-2.0",
-                     spin_basis="component", extra_spin_datasets=True)
+                     spin_basis="component", extra_spin_datasets=True,
+                     chi_eff_swap_applied=False)
     with h5py.File(path, "a") as f:
         # A non-uniform campaign is FINE in the component basis (no swap).
         f.attrs["injected_spin_uniform_isotropic"] = np.array([True, False])
@@ -891,7 +892,8 @@ def test_component_pair_produces_spin_blocks(tmp_path):
     _write_pe(pe, format_version="gwcat-pe-2.0", spin_basis="component",
               include_chi_eff_in_p_pe=False, extra_spin_datasets=True)
     _write_selection(sel, format_version="gwcat-selection-2.0",
-                     spin_basis="component", extra_spin_datasets=True)
+                     spin_basis="component", extra_spin_datasets=True,
+                     chi_eff_swap_applied=False)
     opts = SimpleNamespace(gw_path=str(pe), gwselection_path=str(sel),
                            pdet_flow_path=None,
                            pop_model="gwtc3_plpeak_component_spin")
@@ -925,3 +927,15 @@ def test_component_model_refuses_emulator_and_flows(tmp_path):
                                  pop_model="gwtc3_plpeak_component_spin")
     with pytest.raises(RuntimeError, match="unsupported in the component"):
         loaders.load_flow_and_selection_inputs(opts_flows)
+
+
+def test_component_selection_claiming_the_swap_is_malformed(tmp_path):
+    """chi_eff_swap_applied states pdraw's spin measure TRUTHFULLY (gwcat
+    GW-27): component exports stamp False; True would claim a 1-D marginal
+    folded into a 4-D-basis density."""
+    path = tmp_path / "sel_comp_swap_true.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0",
+                     spin_basis="component", extra_spin_datasets=True,
+                     chi_eff_swap_applied=True)
+    with pytest.raises(RuntimeError, match="malformed"):
+        load_selection_samples(path, fit_columns=_COMPONENT_COLUMNS)

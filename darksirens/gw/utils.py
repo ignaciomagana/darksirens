@@ -149,7 +149,16 @@ def _negotiate_spin_basis(f, path, required_fit_columns, reexport_hint):
     else:
         advisory = store_contract.IMPLIED_ADVISORY_COLUMNS.get(basis, ())
 
-    required = tuple(required_fit_columns)
+    # Compare the SPIN portion only.  The mass/distance/sky block is spelled
+    # differently by the two packages for the same parameterisation (gwcat
+    # exports m1det/m2det/ra/dec; darksirens consumes m1det/q=m2det/m1det and
+    # the sky block via its own convention) and is fixed on both sides -- the
+    # store contract's presence checks already guarantee it.  The negotiated
+    # degree of freedom is which SPIN columns the density covers.
+    spin_universe = {"chieff", "chip"} | set(store_contract.COMPONENT_SPIN_DATASETS)
+    required = tuple(c for c in required_fit_columns if c in spin_universe)
+    file_fit = tuple(c for c in file_fit if c in spin_universe)
+    advisory = tuple(c for c in advisory if c in spin_universe)
     fitted_advisory = sorted(set(required) & set(advisory))
     if fitted_advisory:
         raise RuntimeError(
@@ -174,9 +183,10 @@ def _negotiate_spin_basis(f, path, required_fit_columns, reexport_hint):
                 "population term replacing it)"
             )
         raise RuntimeError(
-            f"gwcat file {path!r} (spin_basis={basis!r}, fit columns "
-            f"{list(file_fit)}) cannot be paired with a model fitting "
-            f"{list(required)}: " + "; ".join(parts) + f". {reexport_hint}"
+            f"gwcat file {path!r} (spin_basis={basis!r}, spin fit columns "
+            f"{list(file_fit)}) cannot be paired with a model fitting spin "
+            f"columns {list(required)}: " + "; ".join(parts)
+            + f". {reexport_hint}"
         )
     return basis
 
@@ -747,14 +757,21 @@ def load_selection_store(file, allow_invalid_spin_swap=False,
             **spin_cols,
         }
 
-        # Apply 1-D chi_eff spin-prior swap if not already done.
-        if file_basis != "chieff" and not bool(f.attrs["chi_eff_swap_applied"]):
-            raise RuntimeError(
-                f"Selection file {file!r} declares chi_eff_swap_applied=False "
-                f"in the {file_basis!r} basis, where the 1-D chi_eff swap is "
-                "undefined; the export is malformed."
-            )
-        if not bool(f.attrs["chi_eff_swap_applied"]):
+        # Apply 1-D chi_eff spin-prior swap if not already done.  The attr
+        # states TRUTHFULLY whether pdraw carries the 1-D chi_eff marginal
+        # (gwcat GW-27): a chieff export stamps True, a component export
+        # stamps False -- its pdraw carries the campaign's own 4-D spin
+        # density, no swap exists to apply, and nothing must be folded in
+        # here.  A component file claiming True is contradictory (a 1-D
+        # marginal folded into a 4-D-basis density) and refused.
+        if file_basis != "chieff":
+            if bool(f.attrs["chi_eff_swap_applied"]):
+                raise RuntimeError(
+                    f"Selection file {file!r} declares chi_eff_swap_applied="
+                    f"True in the {file_basis!r} basis, where the 1-D chi_eff "
+                    "swap is undefined; the export is malformed."
+                )
+        elif not bool(f.attrs["chi_eff_swap_applied"]):
             if "chi_eff_amax" not in f.attrs:
                 raise RuntimeError(
                     f"Selection file {file!r} declares chi_eff_swap_applied=False "
