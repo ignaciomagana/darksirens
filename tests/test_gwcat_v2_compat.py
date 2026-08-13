@@ -269,3 +269,107 @@ def test_selection_declaring_no_swap_gets_the_chi_eff_draw_density(tmp_path, mon
                      chi_eff_swap_applied=False)
     pdraw = np.asarray(load_selection_samples(path)[6])
     np.testing.assert_allclose(pdraw, 2.0 * _SEL_DATA["pdraw"])
+
+
+# ----------------------------------------------------------------------------
+# Sky validation (DS-01): both loaders feed ra/dec straight to hp.ang2pix,
+# and gwcat legitimately writes NaN sky for semianalytic O1/O2 campaigns.
+# ----------------------------------------------------------------------------
+def _overwrite_dataset(path, name, values):
+    with h5py.File(path, "a") as f:
+        del f[name]
+        f.create_dataset(name, data=values)
+
+
+def test_nan_sky_rejected_pe(tmp_path):
+    path = tmp_path / "pe_nan_sky.h5"
+    _write_pe(path, format_version="gwcat-1.0")
+    bad = _PE_DATA["dec"].copy()
+    bad[2] = np.nan
+    _overwrite_dataset(path, "dec", bad)
+    with pytest.raises(RuntimeError, match="non-finite"):
+        load_gw_samples(path)
+
+
+def test_degree_sky_rejected_pe(tmp_path):
+    path = tmp_path / "pe_degree_sky.h5"
+    _write_pe(path, format_version="gwcat-1.0")
+    _overwrite_dataset(path, "ra", np.linspace(10.0, 350.0, _N))
+    with pytest.raises(RuntimeError, match=r"\[0, 2\*pi\)"):
+        load_gw_samples(path)
+
+
+def test_nan_sky_rejected_selection(tmp_path):
+    path = tmp_path / "sel_nan_sky.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0")
+    bad = _SEL_DATA["ra"].copy()
+    bad[0] = np.nan
+    _overwrite_dataset(path, "ra", bad)
+    with pytest.raises(RuntimeError, match="non-finite"):
+        load_selection_samples(path)
+
+
+def test_degree_sky_rejected_selection(tmp_path):
+    path = tmp_path / "sel_degree_sky.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0")
+    _overwrite_dataset(path, "dec", np.linspace(-45.0, 45.0, _SEL_N))
+    with pytest.raises(RuntimeError, match="pi/2"):
+        load_selection_samples(path)
+
+
+def test_polar_dec_accepted(tmp_path):
+    """dec exactly at the poles is legal, and ra=0 is legal."""
+    path = tmp_path / "sel_poles.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0")
+    _overwrite_dataset(path, "dec", np.linspace(-np.pi / 2, np.pi / 2, _SEL_N))
+    _overwrite_dataset(path, "ra", np.linspace(0.0, 2 * np.pi - 1e-9, _SEL_N))
+    load_selection_samples(path)
+
+
+def test_partially_skyless_campaign_rejected(tmp_path):
+    """A per-campaign sky_position_available with any False entry is refused
+    by name, before the (equally fatal) NaN scan."""
+    path = tmp_path / "sel_skyless.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["sky_position_available"] = np.array([False, True])
+    with pytest.raises(RuntimeError, match="sky_position_available"):
+        load_selection_samples(path)
+
+
+def test_all_sky_available_attr_accepted(tmp_path):
+    path = tmp_path / "sel_sky_ok.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["sky_position_available"] = np.array([True, True])
+    load_selection_samples(path)
+
+
+def test_file_contract_rejects_nan_sky_selection(tmp_path):
+    path = tmp_path / "sel_nan_sky_fc.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0")
+    bad = _SEL_DATA["dec"].copy()
+    bad[1] = np.nan
+    _overwrite_dataset(path, "dec", bad)
+    report = file_contract.validate_selection_inputs(path)
+    assert not report["ok"]
+    assert any("dec" in err for err in report["errors"])
+
+
+def test_file_contract_rejects_degree_sky_selection(tmp_path):
+    path = tmp_path / "sel_degree_sky_fc.h5"
+    _write_selection(path, format_version="gwcat-selection-1.0")
+    _overwrite_dataset(path, "ra", np.linspace(10.0, 350.0, _SEL_N))
+    report = file_contract.validate_selection_inputs(path)
+    assert not report["ok"]
+    assert any("ra" in err for err in report["errors"])
+
+
+def test_file_contract_rejects_skyless_campaign(tmp_path):
+    path = tmp_path / "sel_skyless_fc.h5"
+    _write_selection(path, format_version="gwcat-selection-2.0", spin_basis="chieff")
+    with h5py.File(path, "a") as f:
+        f.attrs["sky_position_available"] = np.array([True, False])
+    report = file_contract.validate_selection_inputs(path)
+    assert not report["ok"]
+    assert any("sky_position_available" in err for err in report["errors"])
