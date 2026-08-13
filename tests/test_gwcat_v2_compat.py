@@ -373,3 +373,67 @@ def test_file_contract_rejects_skyless_campaign(tmp_path):
     report = file_contract.validate_selection_inputs(path)
     assert not report["ok"]
     assert any("sky_position_available" in err for err in report["errors"])
+
+
+# ----------------------------------------------------------------------------
+# Store record API (DS-04): the tuple loaders are thin wrappers over
+# GWStore/SelectionStore and must stay bit-identical.
+# ----------------------------------------------------------------------------
+def test_tuple_loaders_bit_identical_to_store_api(tmp_path):
+    from darksirens.gw.utils import load_gw_store, load_selection_store
+
+    pe = tmp_path / "pe_store.h5"
+    _write_pe(pe, format_version="gwcat-pe-2.0", spin_basis="chieff")
+    tup = load_gw_samples(pe)
+    store = load_gw_store(pe)
+    for i, name in enumerate(("m1det", "m2det", "dL", "chieff", "ra", "dec")):
+        np.testing.assert_array_equal(np.asarray(tup[i]), store.columns[name])
+    np.testing.assert_array_equal(np.asarray(tup[6]), store.prior_wt)
+    assert (tup[7], tup[8]) == (store.n_events, store.nsamp)
+    assert store.format_version == "gwcat-pe-2.0"
+    assert store.fit_columns == ("m1det", "q", "dL", "chieff")
+    # Raw column, not the processed weight: prior_wt is normalised per event.
+    np.testing.assert_array_equal(store.columns["p_pe"], _PE_DATA["p_pe"])
+
+    sel = tmp_path / "sel_store.h5"
+    _write_selection(sel, format_version="gwcat-selection-1.0")
+    tup = load_selection_samples(sel)
+    store = load_selection_store(sel)
+    for i, name in enumerate(("m1det", "m2det", "dL", "chieff", "ra", "dec", "pdraw")):
+        np.testing.assert_array_equal(np.asarray(tup[i]), store.columns[name])
+    np.testing.assert_array_equal(np.asarray(tup[6]), store.prior_wt)
+    assert tup[7] == store.ndraw == 1000
+    assert store.n_injections == _SEL_N
+
+
+def test_store_processed_prior_wt_when_swap_pending(tmp_path, monkeypatch):
+    """prior_wt carries the folded-in chi_eff density; columns['pdraw'] stays raw."""
+    from darksirens.gw import utils as gw_utils
+
+    monkeypatch.setattr(
+        gw_utils, "chi_eff_prior_logprob",
+        lambda chieff, m1src, m2src, amax=0.99: np.full(np.shape(chieff), np.log(3.0)),
+    )
+    sel = tmp_path / "sel_store_swap.h5"
+    _write_selection(sel, format_version="gwcat-selection-1.0",
+                     chi_eff_swap_applied=False)
+    store = gw_utils.load_selection_store(sel)
+    np.testing.assert_allclose(store.prior_wt, 3.0 * _SEL_DATA["pdraw"])
+    np.testing.assert_array_equal(store.columns["pdraw"], _SEL_DATA["pdraw"])
+
+
+def test_store_surfaces_event_names_and_attrs(tmp_path):
+    from darksirens.gw.utils import load_gw_store
+
+    pe = tmp_path / "pe_names.h5"
+    _write_pe(pe, format_version="gwcat-1.0")
+    with h5py.File(pe, "a") as f:
+        f.attrs["event_names"] = np.array(["GW150914", "GW151226"], dtype=h5py.string_dtype())
+    store = load_gw_store(pe)
+    assert store.event_names == ("GW150914", "GW151226")
+    assert store.attrs["pe_cosmology_H0"] == 67.7
+    assert store.attrs["nobs"] == NOBS
+
+    pe2 = tmp_path / "pe_no_names.h5"
+    _write_pe(pe2, format_version="gwcat-1.0")
+    assert load_gw_store(pe2).event_names is None

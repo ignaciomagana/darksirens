@@ -3,6 +3,8 @@ import importlib.util
 import multiprocessing as mp
 import os
 import sys
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 # Same two knobs, same values, as core.jax_config.configure_jax_runtime (which
 # also enables x64; this module must not, so it only sets the env).  setdefault
@@ -213,32 +215,98 @@ def _require_hdf5_members(f, datasets=(), attrs=(), conversion_hint=""):
         )
 
 
-def load_gw_samples(gw_path):
+#: Columns a chi_eff-basis gwcat file's density covers.  1.0 / 2.0 files do
+#: not declare ``fit_columns``; this is their implied value.  gwcat 2.1 files
+#: will carry the attr explicitly (review DS-05/DS-09).
+_CHIEFF_FIT_COLUMNS = ("m1det", "q", "dL", "chieff")
+
+
+def _decoded_attrs(f):
+    """All file attrs as a plain dict with bytes decoded (arrays passed through)."""
+    return {key: _decode_hdf5_attr(f.attrs[key]) for key in f.attrs}
+
+
+def _decoded_event_names(f):
+    """gwcat's ``event_names`` attr (array of strings) as a tuple, or None."""
+    if "event_names" not in f.attrs:
+        return None
+    return tuple(
+        v.decode() if isinstance(v, bytes) else str(v)
+        for v in np.atleast_1d(f.attrs["event_names"])
+    )
+
+
+@dataclass(frozen=True)
+class GWStore:
+    """A loaded gwcat PE store: named columns, provenance, and the prior weight.
+
+    The positional 9-tuple returned by :func:`load_gw_samples` is unpacked
+    through ``loaders.py`` -> ``data.py`` -> ``factory.py`` by position, which
+    is why adding one coordinate means a cascade across every unpack site.
+    This record is the extensible surface: consumers pick columns by NAME, new
+    columns / attrs are additive, and the tuple loader is a thin wrapper kept
+    byte-identical for existing call sites.
+
+    ``columns`` holds the raw file datasets (numpy, flattened, length
+    ``n_events * nsamp``).  ``prior_wt`` is the PROCESSED PE proposal density:
+    chi_eff prior folded in when the file declares it absent, then normalised
+    per event -- i.e. exactly the ``p_pe`` the tuple loader returns, not the
+    raw dataset.  ``event_names`` surfaces gwcat's per-event identity attr
+    (previously read by nothing, so bright-siren counterpart triplets aligned
+    by position only); None when the file predates it.
     """
-    Load GW posterior samples from a gwcat HDF5 export.
+
+    format_version: str
+    path: str
+    fit_columns: tuple[str, ...]
+    columns: Mapping[str, np.ndarray]
+    attrs: Mapping[str, Any]
+    n_events: int
+    nsamp: int
+    prior_wt: np.ndarray
+    event_names: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class SelectionStore:
+    """A loaded gwcat selection store (detected injections + draw density).
+
+    ``prior_wt`` is the PROCESSED physical draw density ``pdraw``: the 1-D
+    chi_eff swap is folded in when the file declares it absent.  Its absolute
+    scale is load-bearing (it enters the expected-detection integral), so it
+    is never normalised.  ``ndraw`` is the campaign's total generated count.
+    """
+
+    format_version: str
+    path: str
+    fit_columns: tuple[str, ...]
+    columns: Mapping[str, np.ndarray]
+    attrs: Mapping[str, Any]
+    n_injections: int
+    ndraw: int
+    prior_wt: np.ndarray
+
+
+def load_gw_store(gw_path) -> GWStore:
+    """
+    Load a gwcat PE export as a :class:`GWStore` record.
 
     ``gw_path`` must point to a file with ``format_version`` in
-    {"gwcat-1.0", "gwcat-pe-2.0"} produced by
-    ``gwcat.GWCatalog.to_darksirens(...)`` / the versioned export layer.  A ``gwcat-pe-2.0`` file is only accepted when its ``spin_basis``
-    attr is ``"chieff"`` (the sole basis array-compatible with darksirens'
+    {"gwcat-1.0", "observed-lensing-pe-1.0", "gwcat-pe-2.0"} produced by
+    ``gwcat.GWCatalog.to_darksirens(...)`` / the versioned export layer.  A
+    ``gwcat-pe-2.0`` file is only accepted when its ``spin_basis`` attr is
+    ``"chieff"`` (the sole basis array-compatible with darksirens'
     chi_eff-based likelihood); the ``"component"`` and ``"chieff_chip"`` bases
     are rejected with an actionable error.  The loader intentionally rejects
     raw PE files and partially-populated HDF5 files so that all catalog
     ingestion and coordinate conversions remain owned by gwcat.
 
-    Returns
-    -------
-    m1det, m2det, dL, chieff, ra, dec, p_pe : jnp.ndarray
-        Flattened arrays of length ``nEvents * nsamp``. ``m1det`` and
-        ``m2det`` are detector-frame masses in solar masses, ``dL`` is in
-        Mpc, sky angles are radians, and ``chieff`` is dimensionless.
-        ``p_pe`` is the per-event-normalised PE proposal density in the
-        likelihood's canonical sample basis ``(m1det, q, dL)`` with
-        ``q = m2det / m1det``.
-    nEvents : int
-        Number of GW events.
-    nsamp : int
-        Number of posterior samples per event.
+    ``GWStore.columns`` holds the raw file datasets (numpy, flattened,
+    length ``n_events * nsamp``); ``GWStore.prior_wt`` is the processed
+    per-event-normalised PE proposal density in the likelihood's canonical
+    sample basis ``(m1det, q, dL)`` with ``q = m2det / m1det``, chi_eff
+    prior included.  :func:`load_gw_samples` is the positional-tuple
+    wrapper over this record.
     """
 
     # Name the FROZEN v1 entry point, not the versioned export.  gwcat's
@@ -308,6 +376,11 @@ def load_gw_samples(gw_path):
             "H0": f.attrs.get("pe_cosmology_H0", "?"),
             "Om0": f.attrs.get("pe_cosmology_Om0", "?"),
         }
+        attrs = _decoded_attrs(f)
+        event_names = _decoded_event_names(f)
+        fit_columns = tuple(
+            _decode_hdf5_attr(v) for v in np.atleast_1d(f.attrs["fit_columns"])
+        ) if "fit_columns" in f.attrs else _CHIEFF_FIT_COLUMNS
 
     # ------------------------------------------------------------
     # p_pe handling
@@ -322,6 +395,17 @@ def load_gw_samples(gw_path):
     # spin population and, through the shared normalisation, H0.  Every in-repo
     # generator writes chi_eff_in_p_pe=True, so honouring the attr is inert for
     # them and fail-closed for anything else.
+    raw_columns = {
+        "ra": ra,
+        "dec": dec,
+        "m1det": m1det,
+        "m2det": m2det,
+        "dL": dL,
+        "chieff": chieff,
+        "p_pe": np.array(p_pe),
+        "m1src": m1source,
+        "m2src": m2source,
+    }
     if not _chi_in_ppe:
         # chi_eff not yet in p_pe — apply it now
         logp_chi = chi_eff_prior_logprob(chieff, m1source, m2source, amax=_chi_amax)
@@ -340,25 +424,61 @@ def load_gw_samples(gw_path):
     p_pe = p_pe / p_pe.sum(axis=1, keepdims=True)
     p_pe = p_pe.flatten()
 
-    # Convert to jnp in requested order.  m2det is retained so
-    # make_gw_event can form q, but p_pe is already in the (m1det, q, dL)
-    # proposal-density basis used by the likelihood.
-    return (
-        jnp.array(m1det),
-        jnp.array(m2det),
-        jnp.array(dL),
-        jnp.array(chieff),
-        jnp.array(ra),
-        jnp.array(dec),
-        jnp.array(p_pe),
-        nEvents,
-        nsamp
+    return GWStore(
+        format_version=fmt,
+        path=str(gw_path),
+        fit_columns=fit_columns,
+        columns=raw_columns,
+        attrs=attrs,
+        n_events=nEvents,
+        nsamp=nsamp,
+        prior_wt=p_pe,
+        event_names=event_names,
     )
 
 
-def load_selection_samples(file):
+def load_gw_samples(gw_path):
     """
-    Return detected GW selection samples from a gwcat HDF5 export.
+    Load GW posterior samples from a gwcat HDF5 export (positional tuple).
+
+    Thin wrapper over :func:`load_gw_store`; see there for the accepted
+    formats and gates.  Kept byte-identical for the existing positional
+    unpack sites; new consumers should prefer the record API.
+
+    Returns
+    -------
+    m1det, m2det, dL, chieff, ra, dec, p_pe : jnp.ndarray
+        Flattened arrays of length ``nEvents * nsamp``. ``m1det`` and
+        ``m2det`` are detector-frame masses in solar masses, ``dL`` is in
+        Mpc, sky angles are radians, and ``chieff`` is dimensionless.
+        ``p_pe`` is the per-event-normalised PE proposal density in the
+        likelihood's canonical sample basis ``(m1det, q, dL)`` with
+        ``q = m2det / m1det``.
+    nEvents : int
+        Number of GW events.
+    nsamp : int
+        Number of posterior samples per event.
+    """
+    store = load_gw_store(gw_path)
+    # Convert to jnp in requested order.  m2det is retained so
+    # make_gw_event can form q, but prior_wt is already in the (m1det, q, dL)
+    # proposal-density basis used by the likelihood.
+    return (
+        jnp.array(store.columns["m1det"]),
+        jnp.array(store.columns["m2det"]),
+        jnp.array(store.columns["dL"]),
+        jnp.array(store.columns["chieff"]),
+        jnp.array(store.columns["ra"]),
+        jnp.array(store.columns["dec"]),
+        jnp.array(store.prior_wt),
+        store.n_events,
+        store.nsamp,
+    )
+
+
+def load_selection_store(file) -> SelectionStore:
+    """
+    Load a gwcat selection export as a :class:`SelectionStore` record.
 
     ``file`` must point to a file with ``format_version`` in
     {"gwcat-selection-1.0", "gwcat-selection-2.0"} produced by
@@ -378,23 +498,15 @@ def load_selection_samples(file):
     - ``m1det`` and ``m2det`` are detector-frame masses in solar masses.
     - ``dL`` is luminosity distance in Mpc.
     - ``ra`` and ``dec`` are radians, and ``chieff`` is dimensionless.
-    - ``pdraw``/``p_draw`` is the physical injection proposal density in the
-      likelihood's canonical basis ``(m1det, q, dL)`` with
-      ``q = m2det / m1det``. Its absolute scale is retained because it enters
-      the expected-detection integral.
+    - ``SelectionStore.prior_wt`` is the physical injection proposal density
+      in the likelihood's canonical basis ``(m1det, q, dL)`` with
+      ``q = m2det / m1det``, chi_eff draw density included. Its absolute
+      scale is retained because it enters the expected-detection integral.
     - ``ndraw`` is the total number of generated injections represented by
       the gwcat export.
 
-    Returns
-    -------
-    m1detsels : jnp.ndarray
-    m2detsels : jnp.ndarray
-    dLsels    : jnp.ndarray
-    chieffsels: jnp.ndarray
-    rasels    : jnp.ndarray
-    decsels   : jnp.ndarray
-    pdraw_sel : jnp.ndarray
-    ndraw     : int
+    :func:`load_selection_samples` is the positional-tuple wrapper over this
+    record.
     """
     conversion_hint = (
         "Use gwcat.SelectionSet.to_darksirens(...) or "
@@ -446,6 +558,21 @@ def load_selection_samples(file):
         m1src_sel = np.array(f["m1src"])
         m2src_sel = np.array(f["m2src"])
         ndraw = int(f.attrs["ndraw"])
+        attrs = _decoded_attrs(f)
+        fit_columns = tuple(
+            _decode_hdf5_attr(v) for v in np.atleast_1d(f.attrs["fit_columns"])
+        ) if "fit_columns" in f.attrs else _CHIEFF_FIT_COLUMNS
+        raw_columns = {
+            "m1det": m1detsels,
+            "m2det": m2detsels,
+            "dL": dLsels,
+            "chieff": chieffsels,
+            "ra": rasels,
+            "dec": decsels,
+            "pdraw": np.array(pdraw_sel),
+            "m1src": m1src_sel,
+            "m2src": m2src_sel,
+        }
 
         # Apply 1-D chi_eff spin-prior swap if not already done.
         if not bool(f.attrs["chi_eff_swap_applied"]):
@@ -478,17 +605,48 @@ def load_selection_samples(file):
     #
     # so p_draw must retain its physical scale (per unit volume per unit
     # mass per unit time).
-    pdraw_wt = pdraw_sel
+    return SelectionStore(
+        format_version=fmt,
+        path=str(file),
+        fit_columns=fit_columns,
+        columns=raw_columns,
+        attrs=attrs,
+        n_injections=n_det,
+        ndraw=ndraw,
+        prior_wt=pdraw_sel,
+    )
 
+
+def load_selection_samples(file):
+    """
+    Return detected GW selection samples from a gwcat HDF5 export (tuple).
+
+    Thin wrapper over :func:`load_selection_store`; see there for the
+    accepted formats, gates, and conventions.  Kept byte-identical for the
+    existing positional unpack sites; new consumers should prefer the record
+    API.
+
+    Returns
+    -------
+    m1detsels : jnp.ndarray
+    m2detsels : jnp.ndarray
+    dLsels    : jnp.ndarray
+    chieffsels: jnp.ndarray
+    rasels    : jnp.ndarray
+    decsels   : jnp.ndarray
+    pdraw_sel : jnp.ndarray
+    ndraw     : int
+    """
+    store = load_selection_store(file)
     # Convert to jnp in requested order.  m2det is retained for q
-    # construction, but p_draw is already in the (m1det, q, dL) basis.
+    # construction, but prior_wt is already in the (m1det, q, dL) basis.
     return (
-        jnp.array(m1detsels),
-        jnp.array(m2detsels),
-        jnp.array(dLsels),
-        jnp.array(chieffsels),
-        jnp.array(rasels),
-        jnp.array(decsels),
-        jnp.array(pdraw_wt),
-        ndraw
+        jnp.array(store.columns["m1det"]),
+        jnp.array(store.columns["m2det"]),
+        jnp.array(store.columns["dL"]),
+        jnp.array(store.columns["chieff"]),
+        jnp.array(store.columns["ra"]),
+        jnp.array(store.columns["dec"]),
+        jnp.array(store.prior_wt),
+        store.ndraw,
     )
