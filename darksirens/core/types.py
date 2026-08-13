@@ -372,6 +372,18 @@ class EMCatalog(NamedTuple):
     empty_stratum_counts: Any = None    # (S,) float64 empty-pixel count per stratum
     field_lss_q_empty_sum_strata: Any = None  # (S, N_grid) float64
     field_lss_q_empty_sum_strata_members: Any = None  # (M, S, N_grid) float64
+    # Per-pixel selection fraction ``f_p`` (field-level PR-2, OWNER DECISION
+    # 4a): ``C_p(z) = f_p * C(z; theta_sel)`` on BOTH sides of the missing
+    # budget.  ``None`` (default) is bit-identical to the pre-existing
+    # behaviour.  ``f_p_rows`` is aligned with the catalog rows (compact:
+    # one row per unique inference pixel); ``field_f_p_occ`` with the
+    # ``field_dN_obs_s`` occupied rows; ``field_f_p_empty_sum`` is
+    # ``Sum_{p empty} f_p`` so the empty-pixel budget becomes
+    # ``n_empty - C(z) * f_p_empty_sum`` without a per-empty-pixel loop.
+    # Built from :func:`darksirens.catalogs.depth_map.load_selection_fraction`.
+    f_p_rows: Any = None                # (N_catalog_rows,) float32
+    field_f_p_occ: Any = None           # (n_occupied,) float32
+    field_f_p_empty_sum: Any = None     # scalar float64
 
 
 class GWEvent(NamedTuple):

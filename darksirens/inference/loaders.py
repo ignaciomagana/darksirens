@@ -989,6 +989,80 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
     )
 
 
+def attach_selection_fraction_inputs(opts, data) -> dict:
+    """Attach the per-pixel selection fraction ``f_p`` (field-level PR-2).
+
+    ``--per_pixel_completeness <mth_map.h5>`` puts ``C_p(z) = f_p C(z)`` into
+    both sides of the missing budget (``f_p = 1 - masked_frac``, degraded to
+    the catalog nside by area weighting).  Admissible only where the
+    combination is derived:
+
+    * ``c_mode`` in {aggregate, selection} — a per-pixel count-derived ``C``
+      already contains the mask loss (multiplying would double-count it);
+    * gaussian selection family — the truncated-Schechter disjointness
+      argument (F2) has not been re-derived under ``f_p`` (PLAN §7 PR-2);
+    * no Q table, no stratified selection — their empty-pixel budgets would
+      need ``f_p``-weighted twins (NotImplemented until a rung needs them);
+    * K = 1 — the multitracer bundle loader does not thread ``f_p`` yet.
+    """
+    path = getattr(opts, "per_pixel_completeness", None)
+    if not path:
+        return data
+    c_mode = getattr(opts, "c_mode", None) or "per_pixel"
+    if c_mode not in ("aggregate", "selection"):
+        raise ValueError(
+            f"--per_pixel_completeness requires c_mode aggregate|selection "
+            f"(got {c_mode!r}): a per-pixel count-derived C already contains "
+            f"the mask loss.")
+    if int(getattr(opts, "n_catalogs", 1) or 1) > 1:
+        raise NotImplementedError(
+            "--per_pixel_completeness is K=1 only for now (the multitracer "
+            "bundle loader does not thread f_p).")
+    if getattr(opts, "lss_completion", None):
+        raise NotImplementedError(
+            "--per_pixel_completeness with a Q table needs an f_p-weighted "
+            "empty-pixel Q budget that is not implemented; drop one of them.")
+    if getattr(opts, "selection_strata_by_catalog", None):
+        raise NotImplementedError(
+            "--per_pixel_completeness with stratified selection needs "
+            "per-stratum f_p empty sums that are not implemented.")
+    fit_path = getattr(opts, "selection_fit", None)
+    if fit_path:
+        from darksirens.redshift.selection import load_selection_fit_json
+        family = str(load_selection_fit_json(fit_path).get(
+            "family", "gaussian"))
+        if family != "gaussian":
+            raise NotImplementedError(
+                f"--per_pixel_completeness admits only the gaussian selection "
+                f"family until the truncated-{family} disjointness argument "
+                f"is re-derived under f_p (PLAN §7 PR-2).")
+
+    from darksirens.catalogs.depth_map import load_selection_fraction
+
+    nside = int(data["nside"])
+    sfm = load_selection_fraction(path, nside)
+    ngals_full = np.asarray(data["ngals"])
+    if ngals_full.shape[0] != sfm.f_p.shape[0]:
+        raise ValueError(
+            f"--per_pixel_completeness: catalog has {ngals_full.shape[0]} "
+            f"full-sky rows but the degraded f_p map has {sfm.f_p.shape[0]} "
+            f"pixels (nside mismatch?).")
+    report = sfm.coverage_report(ngals_full)
+    print(f"    [f_p] per-pixel selection fraction from {path}")
+    print(f"    [f_p] covered area sum_p f_p Omega_pix = "
+          f"{report['area_deg2']:.1f} deg^2; occupied mean f_p = "
+          f"{report['f_p_occupied_mean']:.4f} (min "
+          f"{report['f_p_occupied_min']:.4f})")
+    print(f"    [f_p] coverage: occupied {report['n_occupied']}, "
+          f"occupied-partial {report['n_occupied_partial']}, empty-covered "
+          f"{report['n_empty_covered']}, off-footprint "
+          f"{report['n_off_footprint']}, occupied-but-uncovered "
+          f"{report['n_occupied_uncovered']}")
+    data["f_p_map"] = sfm.f_p.astype(np.float32)
+    data["f_p_coverage_report"] = report
+    return data
+
+
 def attach_lss_inputs(opts, data) -> dict:
     """Attach LSS overdensity and optional LSS-conditioned completion inputs."""
     nside_check = data.get("nside", "N/A")

@@ -229,6 +229,7 @@ def load_all_data(opts):
         return data
 
     data = loaders.attach_lss_inputs(opts, data)
+    data = loaders.attach_selection_fraction_inputs(opts, data)
     data = loaders.attach_mark_inputs(opts, data)
     data = loaders.attach_wl_inputs(opts, data)
     data = loaders.maybe_drop_full_catalog(opts, data)

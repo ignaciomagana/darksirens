@@ -1375,6 +1375,14 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
     branch): the one sky-aggregate curve replaces the per-pixel ratio for
     EVERY row -- the row's own observed KDE is not consulted, so the observed
     angular clustering cannot enter the missing budget (it belongs to Q).
+
+    Per-pixel selection fraction (field-level PR-2): with
+    ``em_catalog.f_p_rows`` populated (a static pytree-structure branch;
+    ``None`` is bit-identical), the row's completeness is
+    ``C_p(z) = f_p * C(z)`` — survey mask-loss thinning multiplying the
+    survey curve.  The loader admits ``f_p`` only for the aggregate/selection
+    ``c_mode``s (a per-pixel count-derived ``C`` already contains the mask
+    loss, so multiplying would double-count it).
     """
     global_pix = row if em_catalog.unique_pixels is None else em_catalog.unique_pixels[row]
 
@@ -1382,8 +1390,12 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
         if grids.C_bar_raw.ndim == 2:
             # Stratified selection: this pixel's stratum picks its curve.
             stratum = em_catalog.pixel_stratum_map[global_pix]
-            return jnp.clip(grids.C_bar_raw[stratum], 0.0, 1.0), global_pix
-        return jnp.clip(grids.C_bar_raw, 0.0, 1.0), global_pix
+            C = jnp.clip(grids.C_bar_raw[stratum], 0.0, 1.0)
+        else:
+            C = jnp.clip(grids.C_bar_raw, 0.0, 1.0)
+        if em_catalog.f_p_rows is not None:
+            C = em_catalog.f_p_rows[row] * C
+        return C, global_pix
 
     # --- observed density: O(1) cache lookup, or on-the-fly fallback ---
     if em_catalog.dN_obs_kde is not None:
@@ -1869,7 +1881,29 @@ def _field_missing_curve(
         mod_rows = jnp.zeros((n_occ, 1), dtype=jnp.float32)  # inert placeholder
     b_eff = survey.alpha_miss * survey.b_miss                # traced (delta_g mode)
 
-    def _row_V(obs_row, mod_row, strat_row):
+    # Per-pixel selection fraction (field-level PR-2): C -> f_p * C on the
+    # occupied rows, and the empty-pixel budget below becomes
+    # n_empty - C * Sum_empty f_p.  Static pytree-structure branch; None is
+    # bit-identical.  The loader restricts f_p to aggregate/selection c_modes
+    # without a Q table or strata (their empty budgets would need
+    # f_p-weighted twins), so the admissible combinations are closed here.
+    has_fp = em_catalog.field_f_p_occ is not None
+    if has_fp and (has_q or has_dg or stratified or not aggregate):
+        raise NotImplementedError(
+            "_field_missing_curve: field_f_p_occ (per-pixel selection "
+            "fraction) is only supported under aggregate/selection c_modes "
+            "without a Q table, delta_g rows, or stratified selection."
+        )
+    if has_fp and em_catalog.field_f_p_empty_sum is None:
+        raise ValueError(
+            "_field_missing_curve: field_f_p_occ requires "
+            "field_f_p_empty_sum (Sum_{p empty} f_p) for the empty-pixel "
+            "budget."
+        )
+    f_occ_rows = (jnp.asarray(em_catalog.field_f_p_occ)
+                  if has_fp else jnp.zeros((n_occ,), dtype=jnp.float32))
+
+    def _row_V(obs_row, mod_row, strat_row, f_row):
         obs_row = obs_row.astype(dN_exp.dtype)
         if stratified:
             C = C_bar[strat_row]     # this row's stratum curve
@@ -1877,6 +1911,8 @@ def _field_missing_curve(
             C = C_bar        # one survey curve; the row's own KDE is unused
         else:
             C = jnp.clip(obs_row / dN_exp_safe, 0.0, 1.0)
+        if has_fp:
+            C = f_row.astype(dN_exp.dtype) * C
         if has_q:
             lss = mod_row.astype(dN_exp.dtype)
         elif has_dg:
@@ -1902,16 +1938,19 @@ def _field_missing_curve(
     strat_chunks = strat_pad.reshape(n_chunks, chunk_size)
     valid_chunks = valid.reshape(n_chunks, chunk_size)
 
+    f_pad_rows = jnp.pad(f_occ_rows, (0, pad))
+    f_chunks = f_pad_rows.reshape(n_chunks, chunk_size)
+
     def _body(acc, xs):
-        obs_c, mod_c, strat_c, val_c = xs
-        Vc = vmap(_row_V)(obs_c, mod_c, strat_c)             # (chunk, N_grid)
+        obs_c, mod_c, strat_c, val_c, f_c = xs
+        Vc = vmap(_row_V)(obs_c, mod_c, strat_c, f_c)        # (chunk, N_grid)
         Vc = jnp.where(val_c[:, None], Vc, 0.0)
         return acc + jnp.sum(Vc, axis=0), None
 
     V_occ, _ = lax.scan(
         _body,
         jnp.zeros(zgrid.size, dtype=dN_exp.dtype),
-        (obs_chunks, mod_chunks, strat_chunks, valid_chunks),
+        (obs_chunks, mod_chunks, strat_chunks, valid_chunks, f_chunks),
     )
 
     # Empty pixels: per-pixel C == 0, so their budget curve is lss_p itself --
@@ -1956,7 +1995,12 @@ def _field_missing_curve(
                                   dtype=dN_exp.dtype)
         else:
             V_empty = n_empty
-        if aggregate:
+        if has_fp:
+            # Sum_{p empty} (1 - f_p C(z)) = n_empty - C(z) Sum_empty f_p.
+            # (has_fp forbids has_q/strata above, and requires aggregate.)
+            V_empty = n_empty - C_bar * jnp.asarray(
+                em_catalog.field_f_p_empty_sum, dtype=dN_exp.dtype)
+        elif aggregate:
             V_empty = (1.0 - C_bar) * V_empty
 
     V_total = V_occ + V_empty

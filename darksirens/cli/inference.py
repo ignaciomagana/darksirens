@@ -1457,6 +1457,17 @@ def build_parser():
                          "carry the map builder's documented policy label. "
                          "Single-catalog only (a K>=2 mixture cannot route "
                          "per-catalog stratum maps)."))
+    g.add_argument("--per_pixel_completeness", default=None, metavar="H5",
+                   help=("Depth-map HDF5 (build_mth_map output: masked_frac "
+                         "+ counts, RING) supplying the per-pixel selection "
+                         "fraction f_p = 1 - masked_frac, degraded to the "
+                         "catalog nside by area weighting. Puts "
+                         "C_p(z) = f_p C(z) into BOTH sides of the missing "
+                         "budget (field-level PR-2, OWNER DECISION 4a). "
+                         "Requires c_mode aggregate|selection with the "
+                         "gaussian family; refuses Q tables, stratified "
+                         "selection, and K>=2 (their empty-pixel budgets "
+                         "need f_p-weighted twins not yet derived)."))
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
                          "--save_path, and exit before building the likelihood."))

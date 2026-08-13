@@ -135,6 +135,13 @@ class CatalogViews:
     empty_stratum_counts: jnp.ndarray | None = None     # (S,) f64
     field_lss_q_empty_sum_strata: jnp.ndarray | None = None  # (S, n_grid) f64
     field_lss_q_empty_sum_strata_members: jnp.ndarray | None = None  # (M, S, n_grid) f64
+    # Per-pixel selection fraction f_p (field-level PR-2): per-view row
+    # gathers of the full-sky map plus the footprint splits the field
+    # normalizer consumes.  None when --per_pixel_completeness is off.
+    f_p_rows_pe: jnp.ndarray | None = None       # (n_pe_rows,) f32
+    f_p_rows_sel: jnp.ndarray | None = None      # (n_sel_rows,) f32
+    field_f_p_occ: jnp.ndarray | None = None     # (n_occupied,) f32
+    field_f_p_empty_sum: jnp.ndarray | None = None  # scalar f64
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -730,7 +737,39 @@ def prepare_catalog_views(
     # pixel_to_cache_idx is no longer built (see completion._row_C): the fields
     # stay None so the EMCatalog treedef is unchanged.
 
+    # Per-pixel selection fraction f_p (field-level PR-2): row-align the
+    # full-sky map with each view (compact views gather by unique_pixels;
+    # legacy full catalogs use the map itself), and split the footprint sums
+    # for the field normalizer.  ``None`` everywhere when the flag is off.
+    f_p_rows_pe = f_p_rows_sel = None
+    field_f_p_occ = field_f_p_empty_sum = None
+    f_p_full = data.get("f_p_map")
+    if f_p_full is not None:
+        fp_np = np.asarray(f_p_full, dtype=np.float32)
+
+        def _fp_rows(up_raw):
+            if up_raw is None:
+                return barrier(jnp.asarray(fp_np))
+            return barrier(jnp.asarray(
+                fp_np[np.asarray(up_raw, dtype=np.int64)]))
+
+        f_p_rows_pe = _fp_rows(unique_pixels_pe_raw)
+        f_p_rows_sel = (
+            f_p_rows_pe
+            if unique_pixels_sel_raw is unique_pixels_pe_raw
+            else _fp_rows(unique_pixels_sel_raw))
+        if field_occupied_pixels is not None:
+            occ_idx = np.asarray(field_occupied_pixels, dtype=np.int64)
+            field_f_p_occ = barrier(jnp.asarray(fp_np[occ_idx]))
+            field_f_p_empty_sum = jnp.asarray(
+                float(fp_np.sum()) - float(fp_np[occ_idx].sum()),
+                dtype=jnp.float64)
+
     return CatalogViews(
+        f_p_rows_pe=f_p_rows_pe,
+        f_p_rows_sel=f_p_rows_sel,
+        field_f_p_occ=field_f_p_occ,
+        field_f_p_empty_sum=field_f_p_empty_sum,
         zgals_pe_catalog=zgals_pe_catalog,
         dzgals_pe_catalog=dzgals_pe_catalog,
         wgals_pe_catalog=wgals_pe_catalog,
