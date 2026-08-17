@@ -185,7 +185,13 @@ def main(argv=None):
     labels = names + ["b_gal"]
 
     # --------------------------------------------------------- members
-    draws = laplace_draws(xi_hat, L, args.m_draw, jax.random.PRNGKey(args.seed))
+    # ``g_members`` and ``Xi_members`` are DIFFERENT objects; the builder used
+    # to write the members under both names, so anything trusting the header's
+    # "antithetic standard-normal draws" and skipping the ``- xi_hat`` step
+    # silently picked up ``a.xi_hat`` (found by the PR-5b prediction: eight
+    # spurious same-sign offsets with a spread 7x too small).
+    draws, g_members = laplace_draws(
+        xi_hat, L, args.m_draw, jax.random.PRNGKey(args.seed), return_g=True)
     Xi_members = np.asarray(draws).reshape(args.m_draw, args.m_sph, args.m_z)
     row_fac = np.stack([
         np.asarray(row_factor(basis, d)).astype(np.float32) for d in draws])
@@ -244,7 +250,7 @@ def main(argv=None):
         g.create_dataset("H_chol", data=np.asarray(L))
         g.create_dataset("sensitivity_S", data=S)
         g.attrs["sensitivity_labels"] = json.dumps(labels)
-        g.create_dataset("g_members", data=np.asarray(draws))
+        g.create_dataset("g_members", data=np.asarray(g_members))
         g.create_dataset("Xi_members", data=Xi_members)
         g.create_dataset("row_fac", data=row_fac)
         g.create_dataset("A_moments", data=A)

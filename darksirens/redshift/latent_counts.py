@@ -233,10 +233,19 @@ def dgrad_db(xi, op: CountOperator) -> jnp.ndarray:
                               op.log_fp, b)))(op.bias)
 
 
-def laplace_draws(xi_hat, H_chol, n_draw: int, key) -> jnp.ndarray:
+def laplace_draws(xi_hat, H_chol, n_draw: int, key, *, return_g: bool = False):
     """``xi_m = xi_hat + L_H^{-T} g_m`` with ANTITHETIC standard-normal pairs
-    (``n_draw`` even; g_{2k+1} = -g_{2k}) — PLAN §6.5 item 3: free, cancels
-    the odd part of the response exactly."""
+    (``n_draw`` even; the partner of member ``k`` is ``k + n_draw//2``) —
+    PLAN §6.5 item 3: free, cancels the odd part of the response exactly.
+
+    ``return_g`` additionally returns the WHITENED draws ``g`` themselves.  The
+    two are different objects and conflating them is not harmless: ``g`` is
+    standard normal (unit sd, mean zero) while ``xi_m`` is centred on
+    ``xi_hat``, whose own per-mode amplitude is 2.46 on the production anchor.
+    Anything that reads ``g`` but is handed ``xi_m`` silently picks up
+    ``a·xi_hat`` — a set of same-sign offsets with a spread several times too
+    small, which is exactly how it presents.
+    """
     if n_draw % 2:
         raise ValueError("laplace_draws: n_draw must be even (antithetic).")
     M = xi_hat.shape[0]
@@ -244,7 +253,8 @@ def laplace_draws(xi_hat, H_chol, n_draw: int, key) -> jnp.ndarray:
     g = jnp.concatenate([g_half, -g_half], axis=0)
     steps = jax.scipy.linalg.solve_triangular(
         H_chol.T, g.T, lower=False).T                       # (n_draw, M)
-    return jnp.asarray(xi_hat)[None, :] + steps
+    draws = jnp.asarray(xi_hat)[None, :] + steps
+    return (draws, g) if return_g else draws
 
 
 def counts_from_catalog(zgals, ngals, pix_ids, z_count_edges) -> np.ndarray:
