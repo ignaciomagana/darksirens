@@ -1549,6 +1549,41 @@ def build_parser():
                          "The run fingerprint's schema_version is bumped so a "
                          "latent run can never resume a table run's "
                          "checkpoint."))
+    g.add_argument("--lss_field_sha256", default=None, metavar="HEX",
+                   help=("Pin the identity of --lss_field_artifact (PLAN 4.4 "
+                         "guard 1). Latent mode retires the five Q-table "
+                         "provenance checks -- they describe a table's "
+                         "build-time stamps and latent mode has no table -- so "
+                         "the artifact fingerprint is the ENTIRE provenance "
+                         "surface. Give either digest: the sha256 the builder "
+                         "printed (stamped in /latent_field.attrs) or the "
+                         "recomputed guard-1 CONTENT digest over (basis "
+                         "geometry, nside, completeness map, shell response, "
+                         "z_count_edges, counts, theta_ref, b_gal), which the "
+                         "run prints and writes to settings.json and which "
+                         "survives a copy that dropped the attrs. A mismatch "
+                         "is fatal: the run would otherwise consume a "
+                         "different field than the one whose budget, footprint "
+                         "and anchor theta were verified. Latent mode only."))
+    g.add_argument("--allow_unanchored_budget", action="store_true",
+                   help=("Escape hatch for PLAN 4.4 guard 5 (the budget-anchor "
+                         "guard) in --lss_field_mode latent. At rung 0 -- what "
+                         "PR-6a ships -- the count channel is conditioned on "
+                         "the observed shell totals and therefore carries ZERO "
+                         "information about (log10n0, delta, theta_sel) BY "
+                         "CONSTRUCTION, so a FLAT prior on log10n0 or delta is "
+                         "not marginalisation over an uncertain budget: the "
+                         "posterior on those directions is the prior, and the "
+                         "missing-galaxy budget -- hence H0 -- is set by "
+                         "whatever prior volume was declared. Latent mode "
+                         "therefore requires them either pinned by "
+                         "--fixed_parameter_values to the calibration fit "
+                         "(experiments/desi_ingest/calibrate_n0.py; OWNER "
+                         "DECISION 6) or carrying a normal calibration prior. "
+                         "This flag runs anyway and is for deliberate "
+                         "prior-sensitivity ablations ONLY: with it, any H0 "
+                         "shift is an artifact of the declared prior volume, "
+                         "the same class of defect as K10."))
     g.add_argument("--lss_marginalize", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Fully-Bayesian marginalisation of the GW likelihood over the "
                          "Q_LSS ENSEMBLE: logL = logsumexp_m logL(Q_m) - log M, instead of "
@@ -1831,6 +1866,30 @@ def _check_latent_field_mode(opts):
                 "artifact is never read, so this run would silently be a plain "
                 "table run. Pass --lss_field_mode latent, or drop the artifact."
             )
+        # Same treatment for the two latent-only flags this PR adds: an option
+        # that is parsed and then ignored is the failure mode where an operator
+        # believes a guard is armed and it is not.  --lss_field_sha256 pins an
+        # artifact table mode never reads; --allow_unanchored_budget waives a
+        # guard that only exists in latent mode (table mode's Q table carries
+        # its own n0/delta firewall, check_lss_completion_provenance, which
+        # this flag does NOT and must not touch).
+        if getattr(opts, "lss_field_sha256", None):
+            _fatal(
+                "--lss_field_sha256 given without --lss_field_mode latent: it "
+                "pins the identity of --lss_field_artifact, which table mode "
+                "never reads, so the pin would be checked against nothing. "
+                "Pass --lss_field_mode latent, or drop the pin."
+            )
+        if getattr(opts, "allow_unanchored_budget", False):
+            _fatal(
+                "--allow_unanchored_budget given without --lss_field_mode "
+                "latent: it waives PLAN 4.4 guard 5, which exists only in "
+                "latent mode (the shell-total conditioning that makes the "
+                "count channel carry zero information about log10n0/delta is a "
+                "latent-mode construction). In table mode the corresponding "
+                "firewall is check_lss_completion_provenance, which this flag "
+                "does not and must not bypass. Drop the flag."
+            )
         return
 
     artifact = getattr(opts, "lss_field_artifact", None)
@@ -1844,6 +1903,22 @@ def _check_latent_field_mode(opts):
         )
     if not os.path.isfile(artifact):
         _fatal(f"--lss_field_artifact is not a file: {artifact}")
+
+    # FORMAT of the guard-1 pin only; the COMPARISON needs the artifact open
+    # and lives in _stamp_latent_artifact_fingerprint (and again at
+    # likelihood-build time in likelihood/factory._latent_guard_fingerprint).
+    # A typo'd pin should cost a second, not a load.
+    _pin = getattr(opts, "lss_field_sha256", None)
+    if _pin is not None:
+        _p = str(_pin).strip().lower()
+        if len(_p) != 64 or any(c not in "0123456789abcdef" for c in _p):
+            _fatal(
+                f"--lss_field_sha256 {_pin!r} is not a 64-character hex "
+                "sha256 digest. Pass either the digest "
+                "darksirens_build_latent_field printed ('[artifact] sha256 = "
+                "...') or the guard-1 content digest this run prints under "
+                "'LSS field artifact' (PLAN 4.4 guard 1)."
+            )
 
     if opts.universe_model not in ("dark_sirens", "dark_sirens_complete"):
         _fatal(
@@ -1932,6 +2007,209 @@ def _check_latent_selection_strata(opts):
                 "does not carry. Use the single-stratum fit, or stay in table "
                 "mode (PLAN 4.4 guard 6)."
             )
+
+
+def _check_latent_selection_family(opts):
+    """PR-6a gate list: latent mode refuses ``selection_family='schechter'``.
+
+    Not a capability gap -- the seam is family-agnostic, it consumes whatever
+    ``C_sel(z)`` the completion side forms -- but a DERIVATION gap, and the plan
+    is explicit about which (PLAN §3, "(F2) caveat", and §7's PR-6a entry:
+    "refuses ... schechter (until PR-2 clears it)").
+
+    The latent likelihood multiplies a count factor whose base is
+    ``f_p C(z; theta_sel) Nbar`` by a GW factor that also reads ``C``, and the
+    two may be used together only because the chain-rule factorization
+    ``p({z},{pix},{m}) = p({z}) p({pix}|{z}) p({m}|{z},{pix})`` makes them
+    disjoint.  That argument was re-derived for ``_fit_gaussian_truncated``
+    (``redshift/selection.py:675``), a clean conditional density
+    ``p(Mhat_i | z_i, T_i)`` with ``sigma(M0hat) = 1.6e-4`` mag.  It has NOT
+    been re-derived for ``_fit_schechter_truncated`` (``:725``), which master
+    added along with per-catalog fits, K>=2 homogeneous-Schechter mixtures and
+    ``M_faint_offset`` -- and ``M_faint_offset`` is the awkward one, because it
+    never enters the fit likelihood while ``m_faint_cut`` is the fit-side
+    truncation, so the schechter base and the run's completeness truncation are
+    not the same object by construction.  Until PR-2 does that work, a schechter
+    latent run would be a number nobody can defend, so it is refused rather than
+    warned about.
+
+    Post-load, because the family is a property of the ``--selection_fit``
+    JSON: ``_resolve_selection_fits`` stamps ``opts.selection_family`` from the
+    fits (scalar; a mixture must be homogeneous), and it is ``"gaussian"``
+    whenever no fit is given -- which is why the wide-open ablation and every
+    ``c_mode=aggregate`` run pass this guard untouched.
+    """
+    if not latent_field_mode(opts):
+        return
+    fam = str(getattr(opts, "selection_family", None) or "gaussian")
+    if fam != "gaussian":
+        _fatal(
+            f"--lss_field_mode latent is incompatible with the '{fam}' "
+            "luminosity-function family: the disjointness argument that lets "
+            "the latent count channel coexist with an anchored theta_sel prior "
+            "was re-derived for the truncated-Gaussian fit only "
+            "(redshift/selection.py:675). The Schechter branch (:725) adds "
+            "M_faint_offset, which never enters the fit likelihood while "
+            "m_faint_cut is the fit-side truncation, so the fixed base and the "
+            "run's completeness truncation are not the same object by "
+            "construction -- and PLAN PR-2 owes that derivation before latent "
+            "mode may admit it. Refit the catalog under the gaussian family, "
+            "or stay in table mode (PLAN §3 '(F2) caveat', §7 PR-6a)."
+        )
+
+
+#: The two budget parameters PLAN §4.4 guard 5 names, plus their per-catalog
+#: suffixed forms (``log10n0_c2`` ...).  ``theta_sel`` is the third name in the
+#: guard, and it is already anchored by construction: ``inference/prior.py``
+#: flips M0hat/sigma_M to ``("normal", loc, scale)`` from the offline fit's
+#: covariance whenever ``--selection_fit`` is given, and a latent
+#: ``c_mode=selection`` run without a fit is the deliberate wide-open ablation
+#: the codebase already warns about.  So the guard below is written for the two
+#: that have NO anchoring machinery of their own.
+_LATENT_BUDGET_PARAMS = ("log10n0", "delta")
+
+
+def _check_latent_budget_anchor(opts, labels, prior_kinds,
+                                fixed_parameter_values):
+    """PLAN §4.4 guard 5, the budget-anchor guard, restated per rung (v4).
+
+    **The statement.**  At RUNG 0 -- which is exactly what PR-6a ships -- the
+    count channel is conditioned on the OBSERVED shell totals, so by
+    construction (``prop:cancel``) it carries ZERO information about
+    ``(n0, delta, theta_sel)``: the shell multinomial's normalizer cancels the
+    monopole.  A FLAT prior on ``log10n0`` or ``delta`` in latent mode is
+    therefore not "marginalising over an uncertain budget"; the posterior in
+    those directions IS the prior, and the missing-galaxy budget -- which is
+    the whole coupling between the field and H0 -- is set by whatever prior
+    volume happened to be declared.  Any H0 shift read off such a run is an
+    artifact of the declared volume, the same class of defect as K10.  The plan
+    says it in one line: "A **flat** prior on ``log10n0``/``delta`` in latent
+    mode is refused at every rung; the calibration prior (OWNER DECISION 6) or
+    ``--allow_unanchored_budget`` is required."
+
+    **Per rung, so the guard survives the ladder.**  Rung 1 (PR-6b) makes the
+    count channel carry the within-shell RESIDUAL information about
+    ``(delta, theta_sel)`` -- the same object P7e measures -- so the refusal
+    stays but its justification becomes an overlap bound rather than an
+    identity; rung 2 restores the shell totals and K10 applies outright.  The
+    refusal is unchanged at all three, which is why it is written once here.
+
+    **What counts as anchored.**  Three admissible configurations:
+
+    * the label is PINNED (absent from ``labels`` because
+      ``--fixed_parameter_values`` fixed it) -- how the production line runs it,
+      at the ``experiments/desi_ingest/calibrate_n0.py`` fit;
+    * the label is SAMPLED under a NORMAL prior -- the calibration prior of
+      OWNER DECISION 6 proper, the same machinery ``--selection_fit`` uses for
+      ``theta_sel`` (``inference/prior.py``: ``kind_map[lbl] = ("normal", ...)``);
+    * the label is INERT for this universe model and never sampled at all.
+
+    Everything else -- sampled with ``("uniform", ...)`` -- is refused, unless
+    ``--allow_unanchored_budget`` is passed, and then the run says out loud what
+    the resulting posterior means.
+
+    A pin at the DECODER DEFAULT rather than at the calibration fit is
+    permitted but WARNED: it is still a plug-in, and an arbitrary one.  Table
+    mode never reaches any of this; its Q table has its own n0/delta firewall
+    (``inference/q_provenance.py``), which latent mode retires for want of a
+    referent (§4.4).
+    """
+    if not latent_field_mode(opts):
+        return
+    import re as _re
+
+    kinds = {lbl: knd for lbl, knd in zip(labels, prior_kinds or ())}
+    fixed = dict(fixed_parameter_values or {})
+    # ``log10n0`` and ``log10n0_c2`` alike; the suffix is the per-catalog form
+    # (inference/prior.py appends ``_c{k}`` for catalogs 2..K).
+    _budget = _re.compile(r"^(%s)(_c\d+)?$" % "|".join(_LATENT_BUDGET_PARAMS))
+    unanchored, plugged_at_default = [], []
+    for lbl in labels:
+        if not _budget.match(lbl):
+            continue
+        if str(kinds.get(lbl, ("uniform",))[0]) == "uniform":
+            unanchored.append(lbl)
+    for name in _LATENT_BUDGET_PARAMS:
+        for lbl in [name] + [f"{name}_c{k}" for k in
+                             range(2, int(getattr(opts, "n_catalogs", 1)) + 1)]:
+            if lbl not in labels and lbl not in fixed:
+                plugged_at_default.append(lbl)
+
+    if unanchored:
+        msg = (
+            f"--lss_field_mode latent samples {', '.join(unanchored)} under a "
+            "FLAT prior. PLAN 4.4 guard 5 refuses that at every rung. At rung "
+            "0 -- what PR-6a ships -- the count channel is conditioned on the "
+            "observed shell totals, so it carries ZERO information about "
+            "(log10n0, delta, theta_sel) BY CONSTRUCTION: the posterior in "
+            "these directions is exactly the prior you declared, and the "
+            "missing-galaxy budget they set -- the only channel through which "
+            "the latent field reaches H0 -- is then a statement about the "
+            "prior volume rather than about the data. An H0 shift measured "
+            "this way is an artifact of the fiducial calibration, the same "
+            "class of defect as kill criterion K10. Fix them with "
+            "--fixed_parameter_values at the calibration fit "
+            "(experiments/desi_ingest/calibrate_n0.py; OWNER DECISION 6), give "
+            "them a normal calibration prior, or pass "
+            "--allow_unanchored_budget for a deliberate prior-sensitivity "
+            "ablation."
+        )
+        if not getattr(opts, "allow_unanchored_budget", False):
+            _fatal(msg)
+        _warn(
+            "--allow_unanchored_budget: " + msg + " RUNNING ANYWAY -- treat "
+            "every H0 number from this run as a prior-volume ablation, not a "
+            "measurement."
+        )
+    for lbl in plugged_at_default:
+        _warn(
+            f"latent mode: {lbl} is neither sampled nor pinned by "
+            "--fixed_parameter_values, so the likelihood decoder plugs it at "
+            "its package fiducial. That is a legal budget anchor for PLAN 4.4 "
+            "guard 5 (it is not a flat prior), but it is an ARBITRARY one: the "
+            "shell-total conditioning gives the data no say in it, so the "
+            "missing-galaxy budget is whatever the fiducial says. The "
+            "production line pins both to "
+            "experiments/desi_ingest/calibrate_n0.py's fit instead."
+        )
+
+
+def _stamp_latent_artifact_fingerprint(opts):
+    """PLAN §4.4 successor 1 at the CLI, so the digests reach settings.json.
+
+    The authoritative check is at likelihood-build time
+    (``likelihood/factory._latent_guard_fingerprint``, where §4.4 places every
+    successor).  This call runs the SAME guard pre-load for two reasons that
+    are not redundancy: a bad artifact should cost the operator a second rather
+    than a catalog load, and ``settings.json`` is written BEFORE the likelihood
+    is built, so the only way the run's provenance record can carry the
+    fingerprint is to compute it here.
+
+    In latent mode that record is the whole provenance surface.  Table mode
+    writes a ``Q_LSS build fiducials`` block into the loaded-data report and
+    enforces it through ``check_lss_completion_provenance``; latent mode has no
+    table, so what stands in its place is exactly these two digests plus the
+    anchor ``theta_ref`` and ``b_gal`` they cover.
+    """
+    if not latent_field_mode(opts):
+        return
+    from darksirens.likelihood.factory import _latent_guard_fingerprint
+
+    try:
+        fp = _latent_guard_fingerprint(opts.lss_field_artifact, opts)
+    except (ValueError, OSError, KeyError) as exc:
+        _fatal(str(exc))
+        return
+    # Onto opts so save_settings_json picks them up with every other option:
+    # a latent run's settings.json then names the exact field it consumed.
+    opts.lss_field_stored_sha256 = fp["stored"]
+    opts.lss_field_content_sha256 = fp["content"]
+    opts.lss_field_theta_ref = fp["theta_ref"]
+    opts.lss_field_b_gal = fp["b_gal"]
+    _ok(f"latent artifact sha256   →  {fp['stored']}")
+    _ok(f"latent guard-1 content   →  {fp['content']}")
+    _ok(f"latent anchor theta_ref  →  {json.dumps(fp['theta_ref'], sort_keys=True)}"
+        f"  b_gal={fp['b_gal']}")
 
 
 def _resolve_catalog_sky_weighting(opts):
@@ -2483,6 +2761,21 @@ def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
         # a different parameter space, not a different Q backend.
         _row("LSS field mode", "latent (Q generated from the anchor artifact)")
         _row("  anchor artifact", opts.lss_field_artifact)
+        # The provenance record.  In table mode this slot is the "Q_LSS build
+        # fiducials" block of the loaded-data report, enforced by
+        # check_lss_completion_provenance; latent mode retires that (no table,
+        # no referent -- PLAN 4.4) and these two digests are what replaces it,
+        # so they are printed with the same prominence.
+        _row("  sha256 (stamped)",
+             getattr(opts, "lss_field_stored_sha256", None) or "unknown")
+        _row("  sha256 (guard-1 content)",
+             getattr(opts, "lss_field_content_sha256", None) or "unknown")
+        _row("  pinned by --lss_field_sha256",
+             getattr(opts, "lss_field_sha256", None) or "no (identity unpinned)")
+        _row("  anchor theta_ref",
+             json.dumps(getattr(opts, "lss_field_theta_ref", None),
+                        sort_keys=True))
+        _row("  anchor b_gal", getattr(opts, "lss_field_b_gal", None))
         _row("  b_miss", "= b_GW, SAMPLED (PLAN 4.3 rule inversion)")
     print("  │")
     _row("Fix cosmology",    "yes" if opts.fix_cosmology  else "no")
@@ -3175,8 +3468,11 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     _check_aggregate_requires_q(opts, lss_completion_active_by_catalog)
 
     _resolve_selection_fits(opts, data, fixed_parameter_values)
-    # The half of guard 6's stratified refusal that needs the fits opened.
+    # The two post-load halves of the latent gate list: guard 6's stratified
+    # refusal, and the schechter refusal (both are properties of the
+    # --selection_fit JSON, so neither is knowable pre-load).
     _check_latent_selection_strata(opts)
+    _check_latent_selection_family(opts)
 
     # ── b_miss -> b_GW: the PLAN 4.3 rule INVERSION ────────────────────────
     # TABLE MODE (unchanged).  b_miss reaches the likelihood ONLY through the
@@ -3257,6 +3553,13 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     fixed_parameter_statuses = res[10]
     prior_kinds = res[11]
 
+    # PLAN 4.4 guard 5, the budget-anchor guard.  Here and not earlier: it is a
+    # statement about which budget labels are SAMPLED and under WHICH prior
+    # family, and this is the first line at which both are known.  No-op in
+    # table mode, where the corresponding firewall is the Q-table one below.
+    _check_latent_budget_anchor(
+        opts, labels, prior_kinds, fixed_parameter_values)
+
     # A prebuilt Q_LSS table is conditioned on build-time n0/delta/bias/cosmology;
     # sampling or re-fixing those does not propagate into Q, it is absorbed as
     # spurious redshift structure and biases H0. This is the first point where
@@ -3272,17 +3575,59 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         ]
     else:
         _q_fiducials = [data.get("lss_completion_fiducials")]
-    check_lss_completion_provenance(_q_fiducials, labels, fixed_parameter_values)
+    # ── PLAN 4.4: the provenance rewiring, mode-routed BOTH WAYS ───────────
+    # Table mode falls through to the three checks below exactly as it always
+    # has.  Latent mode retires all three -- plus the catalogs/lss.py float
+    # whitelist, the c_mode table-vs-run check and realization_set_id /
+    # member_content_sha256 matching -- and the reason is uniform: every one of
+    # them is a statement about a Q TABLE's build-time stamps, and latent mode
+    # has no table to stamp.  They are retired for want of a REFERENT, not
+    # because they are inconvenient; their successor is the artifact
+    # fingerprint (guard 1), checked twice: pre-load in
+    # _stamp_latent_artifact_fingerprint (which is also what puts the two
+    # digests in settings.json) and again at likelihood-build time in
+    # likelihood/factory._latent_guard_fingerprint.
+    #
+    # The bypass is written as an ASSERTION and not as an early return, because
+    # a bypass that could hide a live table would be exactly the defect it is
+    # meant to avoid.  Guard 6 refuses --lss_completion pre-load and the
+    # in-catalog /lss_completion group above, so in latent mode _q_fiducials is
+    # necessarily all-None and the three checks below are already no-ops on
+    # their own terms; this makes that a checked invariant rather than a
+    # reading of the control flow.  The other three retirements are structural
+    # in the same way: the lss.py whitelist and the c_mode table-vs-run check
+    # run only inside maybe_load_lss_completion (never entered), and
+    # realization_set_id / member_content_sha256 matching runs only for a K>=2
+    # --lss_marginalize mixture, which likelihood/factory refuses outright in
+    # latent mode ("not wired on the K >= 2 mixture path").
+    if latent_field_mode(opts):
+        _live = [k for k, _f in enumerate(_q_fiducials, start=1) if _f]
+        if _live:
+            _fatal(
+                f"--lss_field_mode latent, but catalog(s) {_live} produced "
+                "Q-table build fiducials. The latent path RETIRES the Q-table "
+                "provenance checks (check_lss_completion_provenance, the "
+                "c_mode table-vs-run check, _check_selection_qtable_theta, the "
+                "z_depth check, the catalogs/lss.py float whitelist and "
+                "realization_set_id matching) on the grounds that there is no "
+                "table to stamp -- so a table that reached this line would be "
+                "consumed with NO provenance enforcement at all. This is a "
+                "bug: guard 6 should have refused the table before the load "
+                "(PLAN 4.4)."
+            )
+    else:
+        check_lss_completion_provenance(
+            _q_fiducials, labels, fixed_parameter_values)
 
-    # Selection-base Q tables: theta is SAMPLED by design (exempt from the
-    # pinned-to-build rule, like H0), but the table's FIXED base must have
-    # been built from the SAME offline fit that centers this run's theta
-    # prior -- a stale table silently carries the wrong completeness base.
-    _check_selection_qtable_theta(_q_fiducials, opts)
-    # The completeness depth is Q-conditioning too (it truncates the base the
-    # field is residual to), but it is not a sampled parameter, so it cannot
-    # ride q_provenance's label machinery.
-    _check_q_table_z_depth(_q_fiducials, opts)
+        # Selection-base Q tables: theta is SAMPLED by design (exempt from the
+        # pinned-to-build rule, like H0), but the table's FIXED base must have
+        # been built from the SAME offline fit that centers this run's theta
+        # prior -- a stale table silently carries the wrong completeness base.
+        _check_selection_qtable_theta(_q_fiducials, opts)
+        # The completeness depth is Q-conditioning too (it truncates the base
+        # the field is residual to), but it is not a sampled parameter, so it
+        # cannot ride q_provenance's label machinery.
+        _check_q_table_z_depth(_q_fiducials, opts)
     # Prior wider than the base is first-order-consistent only near theta_hat:
     # warn when the sampled bounds reach beyond +-5 prior sds of the center.
     if getattr(opts, "selection_prior", None):
@@ -3735,6 +4080,11 @@ def main(argv=None):
     # exclusions on the loaded pytree.  An over-specified completion model
     # should cost the operator a second, not a load.
     _check_latent_field_mode(opts)
+    # Guard 1 (PLAN 4.4 successor 1) immediately after: the artifact is now
+    # known to exist, the fingerprint reads only its small datasets, and
+    # settings.json -- written further down, BEFORE the likelihood build -- is
+    # the run's provenance record, which in latent mode is these two digests.
+    _stamp_latent_artifact_fingerprint(opts)
     _resolve_catalog_sky_weighting(opts)
     _validate_multitracer_config(opts)
     _canonicalize_fixed_flags(opts)

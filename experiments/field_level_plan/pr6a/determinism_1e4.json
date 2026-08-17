@@ -1,0 +1,80 @@
+{
+ "what": "PLAN 6.4 determinism sweep at 1e4 points on the tests/test_latent_seam_e2e end-to-end fixture (the whole latent stack, fixture-scale data)",
+ "limits": "under CRN the estimator is a deterministic smooth function of theta; both halves of this gate pass BY CONSTRUCTION and pass equally on a distorted surrogate. Regression guard, NEVER evidence of correctness. Only P14 (PR-5b) discriminates.",
+ "gate": "100 repeats bit-identical; max|dlogL| between adjacent points < 10x the median",
+ "DARKSIRENS_ZMAX": "1.0",
+ "platform": "cpu",
+ "fixture": {
+  "n_events": 3,
+  "n_samples": 48,
+  "n_selection": 240,
+  "M_draw": 3,
+  "n_rows": 6,
+  "n_footprint": 4,
+  "b_GW": 1.4,
+  "z_depth": 0.35,
+  "n_zgrid": 1000
+ },
+ "arms": {
+  "latent": {
+   "arm": "latent",
+   "n_points": 10000,
+   "h0_range": [
+    20.0,
+    140.0
+   ],
+   "spacing": 0.012001200120010935,
+   "wall_s": 31.306144515052438,
+   "ms_per_eval": 3.130614451505244,
+   "n_finite": 10000,
+   "logl_first": 0.10281992689638719,
+   "logl_last": 0.683329738733041,
+   "logl_min": 0.10281992689638719,
+   "logl_max": 0.683329738733041,
+   "adj_abs_delta_median": 8.826473972312066e-05,
+   "adj_abs_delta_max": 0.006843528201964766,
+   "adj_ratio_max_over_median": 77.53411184842736,
+   "adj_abs_delta_max_at_H0": 98.82388238823881,
+   "n_zero_adjacent_deltas": 0,
+   "monotone_deltas_sign_changes": 68,
+   "repeats": {
+    "n": 100,
+    "H0": 80.0,
+    "value": 0.5799060285937161,
+    "n_distinct": 1,
+    "max_abs_dev": 0.0,
+    "bit_identical": true
+   }
+  },
+  "table": {
+   "arm": "table",
+   "n_points": 10000,
+   "h0_range": [
+    20.0,
+    140.0
+   ],
+   "spacing": 0.012001200120010935,
+   "wall_s": 25.16943909879774,
+   "ms_per_eval": 2.5169439098797737,
+   "n_finite": 10000,
+   "logl_first": 0.10281992694246278,
+   "logl_last": 0.6833297387014892,
+   "logl_min": 0.10281992694246278,
+   "logl_max": 0.6833297387014892,
+   "adj_abs_delta_median": 8.826473974044013e-05,
+   "adj_abs_delta_max": 0.006843528202122862,
+   "adj_ratio_max_over_median": 77.53411183500461,
+   "adj_abs_delta_max_at_H0": 98.82388238823881,
+   "n_zero_adjacent_deltas": 0,
+   "monotone_deltas_sign_changes": 68,
+   "repeats": {
+    "n": 100,
+    "H0": 80.0,
+    "value": 0.5799060285808559,
+    "n_distinct": 1,
+    "max_abs_dev": 0.0,
+    "bit_identical": true
+   }
+  }
+ }
+}

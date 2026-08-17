@@ -123,9 +123,21 @@ def main(argv=None):
             f"occupancy guard 7: shells "
             f"{np.where(~(gal_ok & pix_ok))[0].tolist()} under-occupied; "
             f"reduce --n-shells.")
+    # float32 ROUND-TRIP, deliberately.  ``likelihood/catalog_views.py`` stores
+    # the run's ``f_p_rows`` / ``field_f_p_occ`` as float32, and those are what
+    # both integrators consume; forming ``(A, B, F_F)`` from the float64 map
+    # would normalize eq. (4) against a completeness the likelihood never sees.
+    # Measured on the shipped anchor: the mismatch leaves the budget identity
+    # closing at 1.6e-9 (b_GW = 0.37) to 3.25e-8 (b_GW = 3.77), growing with
+    # b_GW as e^{b f} predicts, against 8.9e-16 when the two agree.  Exactly the
+    # defect PR-5 fixed on the OTHER eq. (2) input (moments from the f64 draws
+    # rather than the stored f32 row factors) -- same class, one input over, and
+    # small enough to sit inside factory's own 1e-6 f_p guard, so nothing
+    # refuses such a run.  PLAN 4.2 claims eq. (4) is exact; this is what makes
+    # that true rather than true-to-1e-8.
     f_p = np.maximum(
         load_selection_fraction(args.per_pixel_completeness, nside).f_p[occ],
-        1e-3)
+        1e-3).astype(np.float32).astype(np.float64)
     print(f"[data] {occ.size} pixels, {int(counts.sum())} galaxies, "
           f"{args.n_shells} shells", flush=True)
 

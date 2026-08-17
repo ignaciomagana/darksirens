@@ -1,0 +1,39 @@
+This is using mock data.
+    [gwcat PE] format=gwcat-1.0  60 events x 512 samples  H0=67.74  Om0=0.3075
+    PE reweighting ESS/nsamp: min=0.8626  median=0.9111  max=0.9893  (0 events < 0.1)
+    pe_variance_sum = 0.0110  (PE-prior share of the total-variance budget; the run's value is larger)
+    [gwcat selection] format=gwcat-selection-1.0 spin_basis=chieff  65,791 detected injections  Ndraw=3,000,000  H0=67.74  Om0=0.3075
+    p_draw: min=4.254e-12  max=5.074e-06  mean=3.765e-07
+    - Compact catalog rows: PE 191, selection 3,072
+    - Duplicated catalog bytes avoided: 0.2574 GB
+    - Max galaxies per unique inference pixel: 115
+    - Data loaded. Found 60 GW events.
+    - HEALPix nside detected: 16
+[*] Preparing LSS/Overdensity Field...
+    - Non-LSS run. Creating memory-efficient dummy (1, 1000) grid.
+    - Overdensity array shape: (1, 1000) (0.0000 GB)
+    [f_p] per-pixel selection fraction from data/curve/mth_map_nside16.h5
+    [f_p] covered area sum_p f_p Omega_pix = 21714.0 deg^2; occupied mean f_p = 0.8722 (min 0.6136)
+    [f_p] coverage: occupied 1854, occupied-partial 1854, empty-covered 0, off-footprint 1218, occupied-but-uncovered 0
+/hildafs/projects/phy230014p/magana/src/darksirens-dev/darksirens/inference/prior.py:1096: UserWarning: Fixed value for 'log10n0' (-4.301029995663981) is outside the default prior bounds [-4.0, -1.0]. The label is pinned, not sampled, so this is accepted -- but check it is a deliberate ablation, not a sign or unit slip.
+  fixed_parameter_statuses = validate_fixed_parameter_overrides(
+ARM latent_off
+20:-0.4 25:0.0 30:-0.1 35:-0.7 40:-1.8 45:-3.5 50:-5.6 55:-8.2 60:-11.1 65:-14.2 70:-17.6 75:-21.1 80:-24.5 85:-27.9 90:-31.3 95:-34.6 100:-37.9 105:-41.2 110:-44.3 115:-47.4 120:-50.3 125:-53.3 130:-56.0 135:-58.8 140:-61.4
+This is using mock data.
+    [gwcat PE] format=gwcat-1.0  60 events x 512 samples  H0=67.74  Om0=0.3075
+    PE reweighting ESS/nsamp: min=0.8626  median=0.9111  max=0.9893  (0 events < 0.1)
+    pe_variance_sum = 0.0110  (PE-prior share of the total-variance budget; the run's value is larger)
+    [gwcat selection] format=gwcat-selection-1.0 spin_basis=chieff  65,791 detected injections  Ndraw=3,000,000  H0=67.74  Om0=0.3075
+    p_draw: min=4.254e-12  max=5.074e-06  mean=3.765e-07
+    - Compact catalog rows: PE 191, selection 3,072
+    - Duplicated catalog bytes avoided: 0.2574 GB
+    - Max galaxies per unique inference pixel: 115
+    - Data loaded. Found 60 GW events.
+    - HEALPix nside detected: 16
+[*] Preparing LSS/Overdensity Field...
+    - Non-LSS run. Creating memory-efficient dummy (1, 1000) grid.
+    - Overdensity array shape: (1, 1000) (0.0000 GB)
+/hildafs/projects/phy230014p/magana/src/darksirens-dev/darksirens/inference/prior.py:1096: UserWarning: Fixed value for 'log10n0' (-4.301029995663981) is outside the default prior bounds [-4.0, -1.0]. The label is pinned, not sampled, so this is accepted -- but check it is a deliberate ablation, not a sign or unit slip.
+  fixed_parameter_statuses = validate_fixed_parameter_overrides(
+ARM latent_off_nofp
+20:-225.7 25:-175.2 30:-138.9 35:-111.8 40:-91.0 45:-74.8 50:-61.8 55:-51.3 60:-42.6 65:-35.5 70:-29.6 75:-24.6 80:-20.4 85:-16.8 90:-13.6 95:-11.0 100:-8.6 105:-6.9 110:-5.3 115:-4.2 120:-3.0 125:-2.1 130:-1.3 135:-0.6 140:0.0

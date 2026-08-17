@@ -139,6 +139,27 @@ _LATENT_F_P_FLOOR = 1e-3
 #: >= 3.3e-6 -- above the tolerance whatever the depth map looks like.
 _LATENT_F_F_RTOL = 1e-6
 
+#: The ``format_version`` string ``cli/build_latent_field.py`` stamps.  An
+#: artifact carrying anything else was not written by the guard-compliant
+#: builder, and in latent mode there is no second provenance channel to fall
+#: back on (PLAN §4.4 retires all five table-side checks), so the mismatch is
+#: fatal rather than a warning.
+_LATENT_FORMAT_VERSION = "darksirens-latent-field-1.0"
+
+#: PLAN §4.4 successor 1, the ingredient list VERBATIM: sha256 over
+#: ``(M_sph, M_z, ls_ang, ls_z, amp, z_node_hi, jitter_mode, j_sph, j_z, nside,
+#: completeness-map hash, shell-response W hash, z_edges, counts hash, anchor
+#: theta_ref, b_gal)``.  ``ls_ang`` is ``basis_meta['ls_sph']``; the four
+#: hashed arrays are the datasets named below.  Everything here is READABLE
+#: BACK OFF THE ARTIFACT, which is the property the builder's own
+#: ``attrs['sha256']`` does not have (it also hashes ``vars(args)``, which is
+#: not stored), and therefore the property that makes this digest a CHECK
+#: rather than a stamp.
+_LATENT_FP_SCALARS = ("M_sph", "M_z", "ls_sph", "ls_z", "amp", "z_node_hi",
+                      "jitter_mode", "j_sph", "j_z")
+_LATENT_FP_ARRAYS = ("completeness", "shell_response", "z_count_edges",
+                     "counts")
+
 #: Isotropy guard threshold (PLAN §4.4 successor 4): the anchor's angular and
 #: radial correlation lengths must agree to within a factor of 1.5 in PHYSICAL
 #: units at ``z_ref``.  Beyond that the field the artifact fits is a pancake --
@@ -237,6 +258,178 @@ def _latent_guard_ls_z_units(opts) -> None:
             "length would act as a standard ruler against 22.79M galaxies. "
             "Drop lss_corr_length_mpc and set the anchor's --ls-z in zeta."
         )
+
+
+def latent_artifact_fingerprint(path):
+    """PLAN §4.4 successor 1: recompute the artifact fingerprint from the file.
+
+    Returns ``{'stored', 'content', 'format_version', 'theta_ref', 'b_gal'}``.
+    ``stored`` is the digest ``cli/build_latent_field.py`` printed at build time
+    (``attrs['sha256']``); ``content`` is the guard-1 digest RECOMPUTED here
+    from the artifact's own bytes.
+
+    Why two digests rather than one.  The builder hashes the arrays AND
+    ``json.dumps(vars(args))`` -- the command line, which is not stored -- so
+    ``attrs['sha256']`` is an identity STAMP that nobody can recompute; it can
+    only be compared against a value the operator carries (``--lss_field_sha256``).
+    ``content`` covers exactly the ingredient list PLAN §4.4 successor 1 names,
+    every item of which is readable back off the artifact, so it is a CHECK: it
+    changes if any of the geometry, the completeness map, the shell response,
+    the shell edges, the counts, the anchor ``theta_ref`` or ``b_gal`` is edited
+    after the build, and it survives a copy that dropped the HDF5 attrs.
+
+    This is the whole provenance surface in latent mode.  §4.4 retires
+    ``check_lss_completion_provenance``, the ``catalogs/lss.py`` float
+    whitelist, ``_check_selection_qtable_theta``, the ``c_mode`` table-vs-run
+    check and ``realization_set_id`` / ``member_content_sha256`` matching --
+    all five are statements about a Q TABLE's build-time stamps, and latent
+    mode has no table to stamp (guard 6 refuses every way of loading one).
+    They are retired for want of a referent, not for convenience, and this
+    function is what stands in their place.  It also CLOSES a gap the retired
+    firewall had: a Q table carries no catalog-content hash, so a table built
+    from a different catalog at the same nside is undetectable today, while
+    ``counts`` and ``completeness`` are inside this digest.
+
+    **What the content digest does NOT cover, MEASURED.**  ``A_moments`` /
+    ``B_moments`` are absent from guard 1's ingredient list, so the digest
+    identifies the FIELD (basis, footprint, completeness map, counts, anchor
+    theta) and not the moment build.  Measured on the two production anchors:
+    ``pr4/latent_anchor_a.h5`` and ``pr5/latent_anchor_v2a.h5`` -- which PR-5b
+    verified are bit-identical everywhere EXCEPT the moments, differing there by
+    2.66e-7 relative (the eq. (4) fix: v2a's moments are built from the stored
+    f32 row factors, a's from the f64 draws) -- share the content digest
+    ``4e45daa6830a341eb0a4532f75dd6e6427740ce0d6dfd8f06aeebdf5e72012e4`` and
+    differ in the STAMPED one (``adb28418...`` vs ``0cdfa78a...``).  An operator
+    who needs to tell the two apart must pin the stamped digest; the content
+    digest is the one that catches an edited file.
+
+    HOST-SIDE, once, at likelihood build.  Reads only the small datasets (the
+    ~64 MB ``row_fac`` / moment blocks are NOT touched here).
+    """
+    import hashlib
+    import json
+
+    import h5py
+
+    from darksirens.likelihood.latent_q import _json_attr
+
+    with h5py.File(path, "r") as f:
+        if "latent_field" not in f:
+            raise ValueError(
+                f"latent artifact {path!r} has no /latent_field group: this is "
+                "not an anchor artifact. Build one with "
+                "darksirens_build_latent_field.")
+        g = f["latent_field"]
+        stored = str(g.attrs.get("sha256", "") or "")
+        fmt = str(g.attrs.get("format_version", "") or "")
+        basis_meta = _json_attr(g, "basis_meta") or {}
+        theta_ref = _json_attr(g, "theta_ref")
+        b_gal = g.attrs.get("b_gal", None)
+        nside = g.attrs.get("nside", None)
+
+        missing = [k for k in _LATENT_FP_SCALARS if k not in basis_meta]
+        missing += [k for k in _LATENT_FP_ARRAYS if k not in g]
+        if theta_ref is None:
+            missing.append("theta_ref")
+        if b_gal is None:
+            missing.append("b_gal")
+        if nside is None:
+            missing.append("nside")
+        if missing:
+            raise ValueError(
+                f"latent artifact {path!r} is missing the guard-1 fingerprint "
+                f"ingredient(s) {sorted(set(missing))}. PLAN §4.4 successor 1 "
+                "fingerprints (M_sph, M_z, ls_ang, ls_z, amp, z_node_hi, "
+                "jitter_mode, j_sph, j_z, nside, completeness-map hash, "
+                "shell-response W hash, z_edges, counts hash, theta_ref, "
+                "b_gal); in latent mode that digest is the ONLY provenance "
+                "there is, because the five table-side checks §4.4 retires "
+                "have no referent without a Q table. An artifact that cannot "
+                "be fingerprinted cannot be run. Rebuild it with "
+                "darksirens_build_latent_field.")
+
+        h = hashlib.sha256()
+        for name in _LATENT_FP_ARRAYS:
+            # The dataset NAME goes in too, so two arrays swapping places is
+            # not a collision.
+            h.update(name.encode())
+            h.update(np.ascontiguousarray(np.asarray(g[name][...])).tobytes())
+        cfg = {k: basis_meta[k] for k in _LATENT_FP_SCALARS}
+        cfg["nside"] = int(nside)
+        cfg["b_gal"] = float(b_gal)
+        cfg["theta_ref"] = theta_ref
+        h.update(json.dumps(cfg, sort_keys=True, default=str).encode())
+        content = h.hexdigest()
+        declared = str(g.attrs.get("content_sha256", "") or "")
+
+    if declared and declared != content:
+        raise ValueError(
+            f"latent artifact {path!r} FAILED its own content fingerprint: the "
+            f"file declares content_sha256={declared} but its basis geometry, "
+            f"completeness map, shell response, shell edges, counts, theta_ref "
+            f"and b_gal hash to {content}. The artifact was edited after it "
+            "was built. Rebuild it with darksirens_build_latent_field (PLAN "
+            "§4.4 successor 1).")
+    return {"stored": stored, "content": content, "format_version": fmt,
+            "theta_ref": theta_ref, "b_gal": None if b_gal is None
+            else float(b_gal)}
+
+
+def _latent_guard_fingerprint(path, opts):
+    """PLAN §4.4 successor 1, enforced: format, presence, and the operator pin.
+
+    Three statements, in order of how much they cost the operator:
+
+    1. ``format_version`` must be the one the guard-compliant builder stamps.
+       A latent run has no second provenance channel, so an artifact from some
+       other producer is refused rather than warned about.
+    2. ``attrs['sha256']`` must be present and well formed (64 hex).  Its
+       absence means the file was not written by ``build_latent_field`` (or was
+       stripped), and the identity half of guard 1 would silently be a no-op.
+    3. ``--lss_field_sha256``, when given, must match EITHER digest -- the one
+       the builder printed, or the recomputed content digest this guard prints.
+       Both identify the artifact; the content digest additionally survives a
+       copy that dropped the attrs, which is why the pin accepts it.
+
+    Returns the fingerprint dict so the caller can stamp it (the CLI puts both
+    digests in ``settings.json``: in latent mode they are the run's provenance
+    record, standing where the retired Q-table fiducial block used to stand).
+    """
+    fp = latent_artifact_fingerprint(path)
+    if fp["format_version"] != _LATENT_FORMAT_VERSION:
+        raise ValueError(
+            f"latent artifact {path!r} declares "
+            f"format_version={fp['format_version']!r}, not "
+            f"{_LATENT_FORMAT_VERSION!r}. The artifact fingerprint is the ONLY "
+            "provenance latent mode has (PLAN §4.4 retires the five Q-table "
+            "checks because they have no referent without a table), so an "
+            "artifact from an unknown producer is refused rather than trusted. "
+            "Rebuild with darksirens_build_latent_field.")
+    # Case- and whitespace-normalised before the format test, so an artifact
+    # whose stamp was pasted back in upper case reads as a valid digest rather
+    # than as a missing one.
+    stored = fp["stored"].strip().lower()
+    if len(stored) != 64 or any(c not in "0123456789abcdef" for c in stored):
+        raise ValueError(
+            f"latent artifact {path!r} carries no usable sha256 stamp "
+            f"(attrs['sha256']={stored!r}); the builder writes a 64-character "
+            "hex digest and prints it. Without it the identity half of guard 1 "
+            "is a no-op and there is nothing for --lss_field_sha256 to pin "
+            "against. Rebuild with darksirens_build_latent_field.")
+    pin = getattr(opts, "lss_field_sha256", None)
+    if pin:
+        pin = str(pin).strip().lower()
+        if pin not in (stored, fp["content"]):
+            raise ValueError(
+                f"latent artifact fingerprint MISMATCH: --lss_field_sha256 "
+                f"pins {pin}, but {path!r} stamps sha256={stored} and its "
+                f"guard-1 content digest is {fp['content']}. This is the check "
+                "that stands in for every retired Q-table provenance stamp "
+                "(PLAN §4.4), so a mismatch means the run would consume a "
+                "DIFFERENT field than the one whose budget, footprint and "
+                "anchor theta_ref the operator verified. Pass the artifact the "
+                "pin names, or update the pin deliberately.")
+    return fp
 
 
 def _latent_guard_resolution(plan) -> None:
@@ -478,6 +671,15 @@ def _resolve_latent_leaves(opts, catalogs, survey_z_depth, nside,
     # and the artifact is a 64 MB read at production rank.
     _latent_guard_exclusivity(opts)
     _latent_guard_ls_z_units(opts)
+
+    # Guard 1 BEFORE the 64 MB read: the fingerprint touches only the small
+    # datasets, and an artifact that is not guard-compliant should not cost the
+    # operator a load.  This is the check that replaces the five retired
+    # table-side provenance checks (PLAN §4.4); the CLI runs the same guard
+    # pre-load so the digests reach settings.json, and runs it again HERE
+    # because likelihood-build time is where §4.4 places every successor and
+    # the only place the artifact that is actually consumed is in hand.
+    _latent_guard_fingerprint(path, opts)
 
     plan = load_latent_plan(path, z_depth=survey_z_depth, expect_nside=nside)
 

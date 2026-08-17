@@ -1,0 +1,6 @@
+*.h5
+*.out
+*.err
+*.npz
+__pycache__/
+data/
