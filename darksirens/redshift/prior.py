@@ -94,6 +94,9 @@ from darksirens.redshift.completion import (
 )
 
 from darksirens.redshift.grid import log_interp_zgrid, zgrid
+# The seam kernel lives in likelihood/latent_q.py (PLAN §3.5, "the single
+# seam"); ``darksirens.likelihood.__init__`` is empty, so this is not a cycle.
+from darksirens.likelihood.latent_q import latent_logq_at
 
 
 COMPLETE_EMPTY_PIXEL_POLICY_ZERO = 0
@@ -183,6 +186,12 @@ class DarkSirenEnsemblePriorState(NamedTuple):
     # the scalar-compat (posterior-mean-Q) global Z and the per-member ones.
     log_Z_global: Any = None          # scalar log Z(theta) with the mean Q
     log_Z_global_members: Any = None  # (M,) per-member log Z_m(theta)
+    # LATENT mode (field-level PR-5): the per-member budget normalizer
+    # ``rho_m(z)`` of PLAN eq. (2), (M, N_grid).  Carried on the state so the
+    # seam consumes the SAME curve ``base_miss`` was built against -- one
+    # formation site, per PLAN §4.2 -- instead of rebuilding the completeness
+    # grids at the point of use.  ``None`` in table mode.
+    latent_rho: Any = None            # (M, N_grid) | None
 
 
 def _row_counts(em_catalog: EMCatalog) -> jnp.ndarray:
@@ -653,11 +662,13 @@ def prepare_redshift_prior_state(
                 log_Z_global_members=field_global_log_Z_members(
                     cosmo, survey, em_catalog
                 ),
+                latent_rho=curves.latent_rho,
             )
             return _maybe_materialize(state, materialize_state)
         state = DarkSirenEnsemblePriorState(
             kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss, log_Z=log_Z,
             base_miss=curves.base_miss, log_Z_members=log_Z_members,
+            latent_rho=curves.latent_rho,
         )
         return _maybe_materialize(state, materialize_state)
 
@@ -784,6 +795,68 @@ def eval_dark_member_completion(
         depth_hi = zgrid[idx + 1] <= z_depth
     q_lo = _member_q_eff_from_logq(lq_lo, depth_lo, member_is_log)
     q_hi = _member_q_eff_from_logq(lq_hi, depth_hi, member_is_log)
+    miss = _interp_row(b_lo * q_lo, b_hi * q_hi, t)
+    log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
+    numerator = jnp.logaddexp(A_obs, log_miss)
+    if is_field:
+        return numerator - log_Z_row_m_or_global
+    return numerator - log_Z_row_m_or_global[pix]
+
+
+def eval_dark_member_completion_latent(
+    A_obs, idx, t, pix, pix_fit, on_fp, base_miss, row_fac_m, phi_z, rho, b_gw,
+    log_Z_row_m_or_global, z_depth, is_field: bool,
+):
+    """LATENT-mode twin of :func:`eval_dark_member_completion` (PLAN §3.6).
+
+    Structurally identical -- same two-node ``base_miss`` gather, same
+    ``_member_q_eff_from_logq`` clip + depth relaxation, same ``logaddexp`` and
+    normalizer selection -- with the ONE substitution that defines the seam:
+    the resident log-Q table lookup ``member_logq[pix, idx]`` is replaced by
+    the GENERATED
+
+        logQ = 1[p in F] * ( b_GW * (row_fac[pix] . phi_z[idx]) - rho[idx] ).
+
+    ``row_fac_m`` ``(n_fit + 1, M_z)`` is this member's COMPACT footprint row
+    factor -- catalog rows are not expanded into it (that would duplicate the
+    ~38% off-footprint rows M times for nothing).  Instead ``pix_fit`` and
+    ``on_fp`` arrive PER SAMPLE, already gathered: they are the footprint row
+    index and the footprint mask at this sample's pixel, and both are
+    member-INDEPENDENT, so the caller computes them once in the same precompute
+    that produces ``A_obs``/``idx``/``t`` rather than M times inside the member
+    vmap.  Off-footprint samples index the trailing ZERO pad row at ``n_fit``.
+
+    ``phi_z`` ``(N_grid, M_z)`` is the redshift factor ZEROED above the depth
+    and ``rho`` ``(N_grid,)`` the per-proposal budget normalizer (also zeroed
+    above the depth); ``b_gw`` is the sampled bias.  The footprint mask covers
+    the WHOLE bracket including ``-rho``, so off-footprint rows return bit-zero
+    ``logQ`` -- pin P13b, and the reason PLAN eq. (4)'s off-footprint block is
+    conserved trivially.
+
+    The member-DEPENDENT leaves are ``row_fac_m`` / ``rho`` /
+    ``log_Z_row_m_or_global``; ``phi_z``, ``pix_fit``, ``on_fp``, ``b_gw`` and
+    ``base_miss`` are member-INDEPENDENT and passed unbatched, exactly as
+    ``base_miss`` is on the table path.  Nothing here is ``(M, N_rows,
+    N_grid)``-shaped: the gather is ``(n_fit + 1, M_z)`` per member against
+    ``(N_grid, M_z)`` shared -- 11.7 MB and 0.1 MB at production rank, against
+    the 1.06 GB table it replaces.
+    """
+    b_lo = base_miss[pix, idx]
+    b_hi = base_miss[pix, idx + 1]
+    rf = row_fac_m[pix_fit]                     # (..., M_z)
+    lq_lo = latent_logq_at(rf, phi_z[idx], rho[idx], b_gw, on_fp)
+    lq_hi = latent_logq_at(rf, phi_z[idx + 1], rho[idx + 1], b_gw, on_fp)
+    if z_depth is None:
+        depth_lo = depth_hi = None
+    else:
+        depth_lo = zgrid[idx] <= z_depth
+        depth_hi = zgrid[idx + 1] <= z_depth
+    # ``member_is_log=True``: the seam produces log-Q by construction.  The
+    # depth relaxation is retained even though ``phi_z``/``rho`` already vanish
+    # above the depth -- it is then an exact no-op, and keeping it means the
+    # latent and table evaluators differ in EXACTLY one expression.
+    q_lo = _member_q_eff_from_logq(lq_lo, depth_lo, True)
+    q_hi = _member_q_eff_from_logq(lq_hi, depth_hi, True)
     miss = _interp_row(b_lo * q_lo, b_hi * q_hi, t)
     log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
     numerator = jnp.logaddexp(A_obs, log_miss)

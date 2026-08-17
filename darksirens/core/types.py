@@ -384,6 +384,34 @@ class EMCatalog(NamedTuple):
     f_p_rows: Any = None                # (N_catalog_rows,) float32
     field_f_p_occ: Any = None           # (n_occupied,) float32
     field_f_p_empty_sum: Any = None     # scalar float64
+    # ---------------------------------------------------------------- LATENT
+    # Latent-field completion (field-level PR-5, ``--lss_field_mode latent``).
+    # In table mode ``Q`` is a resident ``(M, N_rows, N_grid)`` data constant;
+    # in latent mode it is GENERATED from these compact leaves as
+    #   logQ_m(p, z) = 1[p in F] (b_GW row_fac_m[p].phi_z[z] - rho_m(z; C, b_GW))
+    # (see ``darksirens.likelihood.latent_q``).  Carrying them on the catalog
+    # -- rather than threading a new argument through every state builder --
+    # is what keeps the change additive: the consumers branch on
+    # ``latent_row_fac is not None``, a static pytree-STRUCTURE branch, so
+    # ``None`` is bit-identical to the pre-existing code everywhere.
+    #
+    # Two row maps, because the numerator and the field-global normalizer
+    # index different row sets: ``latent_row_map`` sends CATALOG rows and
+    # ``latent_field_row_map`` sends ``field_dN_obs_s`` OCCUPIED rows into
+    # ``[0, n_fit]``, where ``n_fit`` is ``row_fac``'s trailing ZERO pad row.
+    # The companion masks force bit-zero ``logQ`` off-footprint (pin P13b) --
+    # the pad row alone would zero the field term but leave ``-rho``.
+    latent_row_fac: Any = None          # (M_draw, n_fit + 1, M_z) float32
+    latent_phi_z: Any = None            # (N_grid, M_z) float64, 0 above z_depth
+    latent_row_map: Any = None          # (N_catalog_rows,) int32
+    latent_on_fp: Any = None            # (N_catalog_rows,) bool
+    latent_field_row_map: Any = None    # (n_occupied,) int32
+    latent_field_on_fp: Any = None      # (n_occupied,) bool
+    latent_A: Any = None                # (M_draw, n_b, N_grid) float64
+    latent_B: Any = None                # (M_draw, n_b, N_grid) float64
+    latent_b_nodes: Any = None          # (n_b,) float64
+    latent_P_F: Any = None              # scalar: |F|
+    latent_F_F: Any = None              # scalar: Sum_{p in F} f_p
 
 
 class GWEvent(NamedTuple):

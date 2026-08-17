@@ -104,6 +104,7 @@ from darksirens.inference.checkpointing import (
     resolve_checkpoint_plan,
 )
 from darksirens.inference.run_fingerprint import (
+    FINGERPRINT_SCHEMA_VERSION,
     ResumeFingerprintError,
     build_run_fingerprint,
     check_resume_fingerprint,
@@ -781,6 +782,14 @@ def _check_aggregate_requires_q(opts, lss_active_by_catalog):
     """
     if str(getattr(opts, "c_mode", None) or "per_pixel") != "aggregate":
         return
+    if latent_field_mode(opts):
+        # Latent mode HAS a Q -- it is generated per member from the anchor
+        # artifact instead of loaded -- so the premise of this refusal (no Q,
+        # therefore a mean-one factor that cannot encode a footprint) does not
+        # hold.  The latent Q is explicitly footprint-shaped: bit-zero logQ
+        # off-footprint (pin P13b), and the f_p that guard 6 forces alongside
+        # it carries the footprint into both sides of the budget.
+        return
     missing = [k for k, active in enumerate(lss_active_by_catalog, start=1)
                if not active]
     if missing:
@@ -881,6 +890,21 @@ def _check_selection_qtable_theta(q_fiducials, opts):
     compared against the stamp the likelihood will actually contradict.
     """
     from darksirens.redshift.selection import SELECTION_THETA_FIELDS
+
+    if latent_field_mode(opts):
+        # BYPASS, latent mode only (PLAN 4.4: this check is named in the list
+        # of firewall pieces retired for the latent path).  Every statement
+        # below is about a Q TABLE's build-time theta stamps -- the fixed C_sel
+        # base frozen into a resident logq_map.  Latent mode has no Q table
+        # (guard 6 refuses both --lss_completion and the in-catalog group), so
+        # there is nothing to compare theta against: the check has no referent
+        # rather than a weaker one.  Note this is NOT a loss of provenance --
+        # the seam's C_sel is formed in-likelihood at the SAMPLED theta, so the
+        # stale-base failure mode this firewall exists to catch cannot occur,
+        # and the artifact's own sha256 over (basis, footprint, completeness
+        # map, anchor theta_ref, b_gal) is the successor stamp.  Table mode
+        # reaches this line and falls through, unchanged.
+        return
 
     fits = getattr(opts, "selection_fits", None)
     if fits is None:
@@ -1482,6 +1506,49 @@ def build_parser():
                          "For a multi-catalog mixture pass 0, 1, or n_catalogs paths, "
                          "positionally aligned with --survey_path (use \"\" as a placeholder "
                          "for a catalog with no external completion)."))
+    g.add_argument("--lss_field_mode", default="table",
+                   choices=["table", "latent"],
+                   help=("Where the missing-galaxy modulation Q comes from "
+                         "(dark_sirens). 'table' (DEFAULT): the resident "
+                         "(M_draw, N_rows, N_grid) log-Q table read from "
+                         "--lss_completion or an in-catalog /lss_completion "
+                         "group -- bit-identical to pre-existing behaviour. "
+                         "'latent': Q is GENERATED in-likelihood from the "
+                         "compact anchor artifact (--lss_field_artifact, built "
+                         "by darksirens_build_latent_field) through the "
+                         "factored (sphere x z) basis, "
+                         "logQ_m(p,z) = 1[p in F] (b_GW row_fac_m[p].phi_z[z] "
+                         "- rho_m(z)), with rho the closed-form budget "
+                         "normalizer that conserves "
+                         "Sum_p (1 - f_p C(z)) Q_p(z) exactly at every z, "
+                         "member and theta (PLAN eq. 4). Off-footprint pixels "
+                         "return bit-zero logQ. Latent mode is a DIFFERENT "
+                         "PARAMETER SPACE, not a storage optimization: b_miss "
+                         "becomes b_GW (see --lss_field_artifact), the Q-table "
+                         "provenance firewall has no referent, and the run "
+                         "requires --per_pixel_completeness with an "
+                         "aggregate|selection --c_mode."))
+    g.add_argument("--lss_field_artifact", default=None, metavar="H5",
+                   help=("Latent-field anchor artifact (HDF5 /latent_field "
+                         "group from darksirens_build_latent_field): the "
+                         "solved field draws (row_fac), the z factor basis, "
+                         "the theta-free sky moments (A, B) over the fitted "
+                         "footprint and the (P_F, F_F) footprint constants. "
+                         "Required by, and only legal with, "
+                         "--lss_field_mode latent. The artifact carries the "
+                         "footprint, the completeness map f_p and the anchor "
+                         "(theta_ref, b_gal) it was solved at; its sha256 is "
+                         "the provenance successor to the retired Q-table "
+                         "stamps (PLAN 4.4). NOTE the parameter-space change "
+                         "it brings: in table mode b_miss reaches the "
+                         "likelihood only through max(1 + alpha_miss b_miss "
+                         "delta_g, 0) and is inert without --use_lss, but in "
+                         "latent mode b_miss IS b_GW -- the bias with which GW "
+                         "hosts trace this artifact's field -- and is sampled "
+                         "(weakly identified by the events, prior-dominated). "
+                         "The run fingerprint's schema_version is bumped so a "
+                         "latent run can never resume a table run's "
+                         "checkpoint."))
     g.add_argument("--lss_marginalize", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Fully-Bayesian marginalisation of the GW likelihood over the "
                          "Q_LSS ENSEMBLE: logL = logsumexp_m logL(Q_m) - log M, instead of "
@@ -1696,6 +1763,175 @@ def _check_stratum_map_pairing(opts):
                "stratum map never reaches catalog k and its per-stratum "
                "empty-pixel budget would be missing. Use single-stratum fits "
                "for a mixture, or run the stratified fit single-catalog.")
+
+
+# ── Latent-field mode (field-level PR-5, the seam) ─────────────────────────────
+
+def latent_field_mode(opts) -> bool:
+    """True when this run generates Q from the anchor artifact.
+
+    ONE reader for the mode string, so every latent branch in this module is a
+    static Python-level test on the same predicate and table mode stays
+    textually untouched.  ``getattr`` default "table" keeps every caller that
+    builds an opts namespace without the flag (tests, the lensing CLI's
+    borrowed helpers) on the shipped path.
+    """
+    return str(getattr(opts, "lss_field_mode", "table") or "table") == "latent"
+
+
+def _check_latent_field_mode(opts):
+    """Guard 6 (PLAN 4.4): the c_mode / exclusivity gate for latent mode.
+
+    Pure opts arithmetic, so it runs pre-load in ``main`` alongside
+    ``_check_stratum_map_pairing``: a run whose completion model is
+    over-specified must be refused before any catalog, artifact or depth map is
+    opened.  Every branch below is inside ``if latent``, so a table run reaches
+    exactly one ``getattr`` and returns.
+
+    The five refusals, and why each is a refusal rather than a preference:
+
+    * ``latent + --c_mode per_pixel`` -- CIRCULAR.  The per-pixel matched-kernel
+      ratio absorbs the observed angular clustering INTO C, so (1 - C) already
+      contains the missing-galaxy structure the latent field exists to model;
+      running both makes the run's estimand unreadable, and no choice of b_GW
+      recovers the intended one.  (``redshift/completion.py`` refuses the same
+      pairing at likelihood-build time; this is the same gate said early enough
+      that the operator sees it before a 20-minute load.)
+    * ``latent + aggregate|selection`` WITHOUT ``--per_pixel_completeness`` --
+      the sky moments the artifact ships, B(z; b) = Sum_p f_p e^{b f_p-weighted
+      field}, CARRY f_p, so rho conserves an f_p-weighted budget.  A run whose
+      completion side has no f_p would consume a DIFFERENT budget than the one
+      rho normalizes, and the exact conservation of PLAN eq. (4) -- the single
+      property that makes the seam safe -- would silently stop holding.
+    * ``latent + --lss_completion`` -- two completion models.  A resident log-Q
+      table and a generated one are different objects built from different
+      conditioning; silently preferring either makes the estimand unreadable.
+    * ``latent + --use_lss`` -- inherits the existing ``field_lss_q`` vs
+      ``field_delta_g`` exclusion (``redshift/completion.py:1698``): Q and the
+      local-overdensity factor are two spellings of the same modulation, and
+      latent mode supplies Q.  This one also protects the b_miss inversion
+      below: with --use_lss off, b_miss reaching the likelihood can only mean
+      b_GW.
+    * ``latent + stratified selection`` -- each stratum has its own C_sel(z),
+      hence its own (A, B) moment pair and its own rho; the artifact carries
+      ONE pair.  ``--stratum_map`` is the pre-load proxy (a fit's stratum count
+      is only knowable once its JSON is opened), and
+      ``_check_latent_selection_strata`` closes the multi-stratum-fit-without-
+      a-map direction after the fits are read.
+    """
+    if not latent_field_mode(opts):
+        # Table mode: --lss_field_artifact would be silently ignored, which is
+        # the failure mode where an operator believes they ran the seam and did
+        # not.  Refuse the orphan flag; that is the only latent-aware statement
+        # a table run ever executes.
+        if getattr(opts, "lss_field_artifact", None):
+            _fatal(
+                "--lss_field_artifact given without --lss_field_mode latent: "
+                "in table mode Q comes from the resident log-Q table and the "
+                "artifact is never read, so this run would silently be a plain "
+                "table run. Pass --lss_field_mode latent, or drop the artifact."
+            )
+        return
+
+    artifact = getattr(opts, "lss_field_artifact", None)
+    if not artifact:
+        _fatal(
+            "--lss_field_mode latent requires --lss_field_artifact: latent "
+            "mode GENERATES Q from the anchor artifact's factored basis "
+            "(row_fac, phi_z) and its theta-free sky moments (A, B); there is "
+            "no default and no in-catalog fallback. Build one with "
+            "darksirens_build_latent_field."
+        )
+    if not os.path.isfile(artifact):
+        _fatal(f"--lss_field_artifact is not a file: {artifact}")
+
+    if opts.universe_model not in ("dark_sirens", "dark_sirens_complete"):
+        _fatal(
+            f"--lss_field_mode latent needs a galaxy-aware universe model "
+            f"(dark_sirens / dark_sirens_complete); got "
+            f"'{opts.universe_model}', which never evaluates the catalog "
+            "missing-galaxy budget the latent Q modulates."
+        )
+
+    c_mode = str(getattr(opts, "c_mode", None) or "per_pixel")
+    if c_mode == "per_pixel":
+        _fatal(
+            "--lss_field_mode latent is incompatible with --c_mode per_pixel: "
+            "the per-pixel matched-kernel ratio absorbs the observed angular "
+            "clustering INTO C, so (1 - C) already carries the missing-galaxy "
+            "structure the latent field is there to model -- the two "
+            "completion models would double-count each other and the run's "
+            "estimand would be unreadable. Use --c_mode aggregate or "
+            "--c_mode selection with --per_pixel_completeness (PLAN 4.4 "
+            "guard 6)."
+        )
+    if not getattr(opts, "per_pixel_completeness", None):
+        _fatal(
+            f"--lss_field_mode latent with --c_mode {c_mode} requires "
+            "--per_pixel_completeness: the artifact's sky moments "
+            "B(z; b) = Sum_p f_p e^{b f} carry the per-pixel selection "
+            "fraction f_p, so the budget normalizer rho conserves an "
+            "f_p-weighted missing budget. Without f_p on the completion side "
+            "the two sides would conserve different budgets and PLAN eq. (4) "
+            "-- Sum_p (1 - f_p C(z)) Q_p(z) == Sum_p (1 - f_p C(z)) at every "
+            "z, member and theta -- would silently stop holding. Pass the "
+            "SAME depth map the artifact was built with (PLAN 4.4 guard 6)."
+        )
+
+    _lss = [p for p in (getattr(opts, "lss_completions", None) or []) if p]
+    if _lss:
+        _fatal(
+            f"--lss_field_mode latent is incompatible with --lss_completion "
+            f"({len(_lss)} table(s) given): a resident log-Q table and a "
+            "latent-generated Q are two different completion models built "
+            "from different conditioning, and silently preferring one would "
+            "make the run's estimand unreadable. Drop --lss_completion "
+            "(PLAN 4.4 guard 6)."
+        )
+    if bool(getattr(opts, "use_LSS", False)):
+        _fatal(
+            "--lss_field_mode latent is incompatible with --use_lss: the "
+            "local-overdensity factor max(1 + alpha_miss b_miss delta_g, 0) "
+            "and Q are two spellings of the SAME missing-galaxy modulation "
+            "(the field_lss_q vs field_delta_g exclusion at "
+            "redshift/completion.py:1698), and latent mode supplies Q. It is "
+            "also what keeps the b_miss -> b_GW inversion unambiguous: with "
+            "--use_lss off, a sampled b_miss in latent mode can only mean "
+            "b_GW (PLAN 4.3, 4.4 guard 6)."
+        )
+    if getattr(opts, "stratum_map", None):
+        _fatal(
+            "--lss_field_mode latent is incompatible with --stratum_map "
+            "(stratified selection): each stratum carries its own C_sel(z), "
+            "hence its own theta-free moment pair (A_s, B_s) and its own "
+            "budget normalizer rho_s, while the anchor artifact ships ONE "
+            "(A, B) pair over the fitted footprint. Run the single-stratum "
+            "fit, or stay in table mode (PLAN 4.4 guard 6)."
+        )
+
+
+def _check_latent_selection_strata(opts):
+    """The post-load half of guard 6's stratified refusal.
+
+    ``--stratum_map`` is refused pre-load, but a ``--selection_fit`` may carry
+    several strata without a map ever being passed (the map only ROUTES them);
+    that is only knowable once ``_resolve_selection_fits`` has opened the JSON.
+    Same reason the single-stratum-fit-with-a-map direction lives there.
+    """
+    if not latent_field_mode(opts):
+        return
+    for _k, _strata in enumerate(
+            getattr(opts, "selection_strata_by_catalog", None) or (), start=1):
+        if _strata and len(_strata) > 1:
+            _fatal(
+                f"catalog {_k}: --selection_fit declares {len(_strata)} "
+                "selection strata, but --lss_field_mode latent ships ONE "
+                "theta-free moment pair (A, B) over the fitted footprint and "
+                "therefore ONE budget normalizer rho. A stratified run needs "
+                "one (A_s, B_s) pair per stratum, which the anchor artifact "
+                "does not carry. Use the single-stratum fit, or stay in table "
+                "mode (PLAN 4.4 guard 6)."
+            )
 
 
 def _resolve_catalog_sky_weighting(opts):
@@ -2241,6 +2477,13 @@ def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
             opts.survey_z_depth if opts.survey_z_depth is not None
             else "none (per-catalog file attr, else legacy full-grid)",
         )
+    if latent_field_mode(opts):
+        # Printed only in latent mode: the table-mode configuration block is
+        # byte-for-byte what it was.  Both rows are loud on purpose -- this is
+        # a different parameter space, not a different Q backend.
+        _row("LSS field mode", "latent (Q generated from the anchor artifact)")
+        _row("  anchor artifact", opts.lss_field_artifact)
+        _row("  b_miss", "= b_GW, SAMPLED (PLAN 4.3 rule inversion)")
     print("  │")
     _row("Fix cosmology",    "yes" if opts.fix_cosmology  else "no")
     _row(
@@ -2913,9 +3156,73 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
     # legacy back-compat fallback.
     opts.lss_completion_active_by_catalog = lss_completion_active_by_catalog
     opts.lss_completion_active = bool(lss_completion_active)
+    # Guard 6's --lss_completion refusal is pre-load and can only see the FLAG.
+    # An in-catalog /lss_completion group is discovered here, after the load, so
+    # close the same exclusion on the loaded data: latent mode generates Q, and
+    # a catalog that also ships a resident table is two completion models.
+    if latent_field_mode(opts) and lss_completion_active:
+        _bad = [k for k, a in enumerate(lss_completion_active_by_catalog, start=1)
+                if a]
+        _fatal(
+            f"--lss_field_mode latent, but catalog(s) {_bad} carry an "
+            "in-catalog /lss_completion Q table (loaded automatically when no "
+            "--lss_completion path is given). Latent mode GENERATES Q from the "
+            "anchor artifact; a resident table alongside it is a second, "
+            "differently-conditioned completion model, and silently preferring "
+            "one would make the run's estimand unreadable. Re-pixelate without "
+            "the group, or stay in table mode (PLAN 4.4 guard 6)."
+        )
     _check_aggregate_requires_q(opts, lss_completion_active_by_catalog)
 
     _resolve_selection_fits(opts, data, fixed_parameter_values)
+    # The half of guard 6's stratified refusal that needs the fits opened.
+    _check_latent_selection_strata(opts)
+
+    # ── b_miss -> b_GW: the PLAN 4.3 rule INVERSION ────────────────────────
+    # TABLE MODE (unchanged).  b_miss reaches the likelihood ONLY through the
+    # local-overdensity factor max(1 + alpha_miss*b_miss*delta_g, 0), so
+    # inference/prior.py:_b_miss_rule declares it INERT whenever that factor
+    # cannot depend on it, and the second of its two gates reads, verbatim:
+    #
+    #     "b_miss is inert with --use_lss off: delta_g is the all-zero
+    #      (1, N_grid) dummy built by inference/loaders.py, so the
+    #      (1 + alpha_miss*b_miss*delta_g) factor is identically 1 for any
+    #      b_miss"                       (remedy: "or pass --use_lss true ...")
+    #
+    # which this call site arms by passing use_lss = bool(opts.use_LSS): with
+    # --use_lss off, b_miss is dropped from the sampled dark_sirens block so it
+    # is not a phantom flat nuisance dimension.  It is not identified because
+    # it multiplies a zero.
+    #
+    # LATENT MODE (the inversion).  The rule flips because the parameter does.
+    # PLAN 4.3: (b, xi) and (amp, xi) enter only through b*xi and b*amp, so amp
+    # is fixed at 1 and the bias is the sampled degree of freedom; b_gal is
+    # pinned at the anchor inside the artifact, and what remains free is b_GW,
+    # the bias with which GW HOSTS trace the latent field.  It enters the
+    # likelihood as the b_GW multiplying (row_fac_m[p] . phi_z[z]) in the seam's
+    # logQ, and again inside rho(z; C, b_GW) through the moments (A, B) --
+    # completion.latent_b_gw(survey) reads survey.b_miss for exactly this
+    # reason.  So in latent mode b_miss is NOT inert with --use_lss off: it is
+    # the field's GW bias and it IS genuinely (if weakly -- 259 events, expected
+    # prior-dominated) identified.  The guard becomes, in latent mode:
+    #
+    #     b_miss IS b_GW and is SAMPLED with --use_lss off; --use_lss on is
+    #     refused outright (guard 6 above), because delta_g and Q are the same
+    #     modulation twice.
+    #
+    # Mechanically the inversion is this one argument: prior.py's ``use_lss``
+    # parameter means "the missing-galaxy modulation is a function of b_miss",
+    # and in latent mode it is -- through b_GW, not through delta_g.  Passing
+    # True is therefore the honest answer to the question that rule asks, and
+    # guard 6 has already guaranteed opts.use_LSS is False here, so the two
+    # never disagree about which field b_miss multiplies.  q_active is likewise
+    # all-False by the refusals above, so the Q-table gate cannot fire either.
+    # Old and new runs do not share a parameter space: the run fingerprint's
+    # schema_version is bumped (inference/run_fingerprint.py) so a latent run
+    # can never silently resume a table run's checkpoint, and lss_field_mode
+    # itself is fingerprinted, so the two digests differ even at equal labels.
+    _latent = latent_field_mode(opts)
+    _b_miss_identified = bool(getattr(opts, "use_LSS", False)) or _latent
 
     res = build_parameter_space(
         opts.pop_model,
@@ -2934,9 +3241,12 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         mark_names             = opts.mark_names,
         n_catalogs             = opts.n_catalogs,
         lss_completion_active  = lss_completion_active_by_catalog,
-        # b_miss is inert when delta_g is the all-zero dummy (--use_lss off),
-        # so it must not be sampled as a phantom flat dimension.
-        use_lss                = bool(getattr(opts, "use_LSS", False)),
+        # "Is the missing-galaxy modulation a function of b_miss?"  In table
+        # mode that is --use_lss (b_miss is inert when delta_g is the all-zero
+        # dummy, so it must not be sampled as a phantom flat dimension); in
+        # latent mode it is unconditionally yes, because b_miss IS b_GW.  See
+        # the inversion note above.
+        use_lss                = _b_miss_identified,
         mark_names_by_catalog  = getattr(opts, "mark_names_by_catalog", None),
         c_mode                 = opts.c_mode,
         selection_prior        = opts.selection_prior,
@@ -3206,6 +3516,13 @@ def _base_meta(opts, data, pspace, timestamp, wall_sampling=None, t_start=None,
         "total_runtime":    None if t_end is None else str(t_end - t_start),
         "sampling_runtime": None if wall_sampling is None else str(wall_sampling),
         "timestamp":        timestamp,
+        # The run's parameter-space CONVENTION, not just its digest.  Bumped to
+        # 3 by --lss_field_mode latent, whose b_miss -> b_GW inversion changes
+        # what the label means while leaving the label, its bounds and its
+        # prior family byte-identical (PLAN 4.3).  settings.json is the file a
+        # human reads when deciding whether two archived runs are comparable,
+        # so the version belongs here and not only inside run_fingerprint.json.
+        "settings_schema_version": FINGERPRINT_SCHEMA_VERSION,
     }
     if data.get("flow_event_names"):
         # Flow runs have no event names in a PE file: the ensemble's sorted
@@ -3412,6 +3729,12 @@ def main(argv=None):
     opts = optp.parse_args(argv)
 
     _normalize_multitracer_paths(opts)
+    # Guard 6 (PLAN 4.4) is pure opts arithmetic, so it fires here -- before any
+    # catalog, artifact or depth map is opened -- rather than at
+    # likelihood-build time where redshift/completion.py re-asserts the same
+    # exclusions on the loaded pytree.  An over-specified completion model
+    # should cost the operator a second, not a load.
+    _check_latent_field_mode(opts)
     _resolve_catalog_sky_weighting(opts)
     _validate_multitracer_config(opts)
     _canonicalize_fixed_flags(opts)
