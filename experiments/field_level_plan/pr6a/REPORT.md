@@ -301,27 +301,70 @@ its own theta-varying MC floor near `1e-2` nat, so "clears by 14×" over-reads
 the data. If the owner wants the claim to be about the method rather than about
 this file, `M_draw = 64` costs roughly `+0.2 s` on a 1.4 s baseline and buys it.
 
-*Second, the mock closure fails, and it fails in the arm with no field.* Tier B
-puts `H0_true` outside the 90% CI in **all four** arms — including `latent_off`,
-which has no LSS treatment at all — and Tier C's 24 realizations are
-overconfident by **×2.59** in the latent arm and **×2.26** in `latent_off`, with
-9 of 24 outside the 99% band. The bisection in `CLOSURE.md` §B.4 shows every
-`f_p`-aware rung recovering the truth, so the failure is dispersion in the mock
-construction, not the field: the latent field moves the mock's `H0` by
-**0.136 σ** and the `f_p` channel moves it by **1.674 σ**. PR-6a is not the
-cause and cannot be the fix, but the ladder's Tier-B/C gate is **not met**, and
-the production run should not be read as validated by a closure that failed.
+*Second, the mock closure fails, it fails in the arm with no field, and the fix
+aimed at it has now been implemented and measured not to help.* Tier B puts
+`H0_true` outside the 90% CI in **all five** arms — including `latent_off`,
+which has no LSS treatment at all. The first pass attributed the failure to
+under-dispersed member draws and named the missing implementation (closure S-2:
+PLAN §3.4's `Cov(xi) = H^-1 + s_b^2 (dxi_hat/db)(dxi_hat/db)^T` existed nowhere
+in `darksirens/`). **It was then implemented (commit `16e8195`, `s_b` measured
+as the profile curvature and floored at 5% of `b_gal`) and the tiers re-run.
+`CLOSURE_v2.md` reports the result: the coverage gap did not close.** Tier C at
+**n = 50** — the number PLAN §6.2 asks for, with the first pass's 24 seeds
+reproduced bit-for-bit inside it — gives an overconfidence ratio of **2.5515**
+with the inflation off and **2.5526** with it on, a change of **+0.04%, upward**;
+on the first pass's own 24 realizations it moved 2.5930 → 2.5938. Paired over
+50 realizations the 90% width ratio is **1.00065** and the inflated arm is wider
+in **24 of 50**, a coin flip. The whole `b_gal` propagation moves Tier B's `H0`
+by **1.6e-05 σ**. Sweeping `s_b` over three decades **refutes the diagnosis
+outright**: raising it from 0 to 5 inflates the member spread ×4.54 and makes the
+90% `H0` interval 0.6% *narrower*, so no value of `s_b` — defensible or not —
+would have closed Tier C.
 
-*Third, the comparison PLAN wants at PR-6a cannot currently be made.*
-`loaders.py:1021` refuses `f_p` alongside a `Q` table, so **no configuration
-exists in which the table and latent arms differ only by the field** — the
-`1.571 σ` Tier-B gap is 91% the `f_p` channel. Closure finding S-3 goes further:
-in `c_mode=selection` without `--per_pixel_completeness`, off-footprint pixels
-are modelled as `C_bar`-complete, and **16 of 16 footprint-limited runs railed
-`H0` to 125–138 at CDF 0.0000**. Every `Q`-table configuration on a
-footprint-limited survey is exposed, **including the shipped production
-`selq_radial` arm**. That is a defect in the table path, surfaced by PR-6a and
-owed to whoever owns `loaders.py`.
+*Second (continued): where the variance actually is.* Splitting each mock's
+random stream immediately before the event draw gives a law-of-total-variance
+decomposition over 25 catalog × event-set cells, and it is unambiguous:
+**92% (`latent_off`) / 82% (`latent`) of the excess variance is present with the
+catalog, the field, `f_p`, the mask, the depth map and the anchor all held
+byte-identical.** The design reproduces Tier C's own ratio independently (2.348
+vs 2.351, 2.603 vs 2.552). The mock's synthetic PE is width-calibrated to **6%**
+(residual sd 1.0593), so it cannot supply a factor 2.4 either. **The blocking
+defect is in the GW-event channel of this mock, upstream of the latent seam.**
+Which defect is not resolved: the `N_obs` lever arm gives
+`spread ∝ N^-0.3141 ± 0.1574` where per-event over-sharpness predicts 0.5 and a
+per-realization common mode predicts 0, and `CLOSURE_v2.md` §V.2 states the
+~4-GPU-hour design that would separate them. **PR-6a is not the cause and,
+measurably, cannot be the fix; the ladder's Tier-B/C gate is still not met, and
+the production run must not be read as validated by a closure that failed.**
+
+*Third, the comparison PLAN wants at PR-6a still cannot be made — but one of its
+three criteria is now real.* PLAN §6.2's third Tier-B gate ("latent-on CI width
+≥ table CI width") was marked VACUOUS by the first pass because §3.4's
+propagation did not exist. **S-2 makes it a real gate, and it fails**: 22.30
+(latent) vs 32.64 (table). It fails through the `f_p` channel, not the field —
+`loaders.py:1021` refuses `f_p` alongside a `Q` table while `factory.py`'s guard
+6 requires it in latent mode, so **no configuration exists in which the table
+and latent arms differ only by the field**, and the `1.571 σ` Tier-B gap remains
+91% the `f_p` channel and 9% the field. Closure finding S-3 goes further: in
+`c_mode=selection` without `--per_pixel_completeness`, off-footprint pixels are
+modelled as `C_bar`-complete, and **16 of 16 footprint-limited runs railed `H0`
+to 125–138 at CDF 0.0000**. Every `Q`-table configuration on a footprint-limited
+survey is exposed, **including the shipped production `selq_radial` arm**. That
+is a defect in the table path, surfaced by PR-6a and owed to whoever owns
+`loaders.py`.
+
+*Fourth, this branch no longer only reports its source findings — it fixes two of
+them, and that changes what the PR contains.* `f45be7c` and `16e8195` carry S-1
+(Armijo-damped `count_map_solve`: P6 pass rate 0.375 → 1.000 over 8 nside-16
+realizations, bit-identical on the three that already converged) and S-2 into
+`darksirens/redshift/latent_counts.py` and `darksirens/cli/build_latent_field.py`.
+S-1 is load-bearing rather than cosmetic: the Tier-B realization's own count
+operator **diverges** under the pre-fix solve (`grad_inf = 5.68e4`, `‖xi‖ = 1.3e5`
+against a true 14.2), so the shipped builder would have raised its own P6 gate on
+this mock. Both fixes are additive and table-mode-inert — 228 latent tests pass
+and the P12 goldens are 23/23 bit-exact. **One bookkeeping defect blocks the PR:
+`tests/test_latent_solve_damping.py` (22 pins, all passing) is untracked and is
+in no commit.**
 
 **What is held.** The production 259-event `H0` run awaits the owner's gate. It
 was not launched, no posterior was produced, and no `H0` number for the
@@ -354,13 +397,17 @@ pre-existing, not this workstream's).
 
 ```
 DARKSIRENS_ZMAX=1.0 JAX_PLATFORMS=cpu pytest tests/test_latent_*.py -q
-    -> 199 passed, 1 skipped in 126.42s
-       (12 files: anchor, block_sizing, cli, counts, factory, field, guards,
-        p11, p13, p17, seam, seam_e2e; the skip is
-        test_latent_block_sizing.py:459 "device peak not measurable here: no GPU")
+    -> 228 passed, 1 skipped in 161.16s      [re-run after S-1 and S-2]
+       (14 files: the 12 above -- anchor, block_sizing, cli, counts, factory,
+        field, guards, p11, p13, p17, seam, seam_e2e -- plus
+        b_gal_dispersion (7 pins, S-2) and solve_damping (22 pins, S-1);
+        was 199 passed / 1 skipped in 126.42s before those two landed.  The
+        skip is still test_latent_block_sizing.py:459 "device peak not
+        measurable here: no GPU")
 
 DARKSIRENS_GOLDEN_EXACT=1 JAX_PLATFORMS=cpu pytest tests/test_unified_k1_golden.py -q
-    -> 23 passed in 59.20s                                    [P12]
+    -> 23 passed in 59.83s                                    [P12, after S-1+S-2]
+       (59.20s before them; still bit-exact, both fixes are table-mode-inert)
 
 JAX_PLATFORMS=cpu pytest tests/test_lss_marginalization.py \
                         tests/test_marks_lss_marginalize.py -q
@@ -382,7 +429,13 @@ All under `experiments/field_level_plan/pr6a/`:
 | file | what |
 |---|---|
 | `REPORT.md` | this |
-| `CLOSURE.md` | Tiers A–D, the bisection, source findings S-1…S-5 |
+| `CLOSURE.md` | Tiers A–D, the bisection, source findings S-1…S-5 (**first pass**) |
+| `CLOSURE_v2.md` | Tiers B and C re-run after S-1 and S-2 landed; the `s_b` sweep, the catalog/event variance split, the PE PP test, the `N_obs` lever arm |
+| `tier_b_rb_v2.json`, `tier_c_v2.json` + `.log` | Tier B at 5 arms; Tier C at **n = 50**, 3 arms |
+| `variance_split*.py` / `.json` / `.log` | the 5 × 5 catalog × event-set decomposition — where the dispersion actually is |
+| `s_b_sensitivity.py` / `.json` / `.log` | the `s_b` sweep that refutes the under-dispersion diagnosis |
+| `pe_calibration.py` / `.json` | the mock's own PE PP test (width mis-scaling 1.0593) |
+| `nobs_scaling.py`, `nobs_scaling{,_b,_c}.json` / `.log` | the `N_obs` lever arm, 22 / 6 / 22 event sets |
 | `overhead_determinism.py` / `.json` / `.log` | the 4 production arms, 200 repeats, 2 × 241-point sweeps |
 | `overhead_pr0_control.json` | PR-0's exact baseline arm re-measured on this machine |
 | `determinism_1e4.py` / `.json` / `.log` | the literal 1e4-point sweep, both modes |

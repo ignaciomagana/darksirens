@@ -107,9 +107,16 @@ def make_opts(paths, arm, *, soft_guard=False, max_var=1e6, marginalize=True,
         o.per_pixel_completeness = None
     if arm == "table":
         o.lss_completion = str(paths["q_table"])
-    elif arm == "latent":
+    elif arm in ("latent", "latent_bgal"):
+        # ``latent_bgal`` is ``latent`` pointed at an anchor whose member
+        # ensemble was drawn from ``H^-1 + s_b^2 v v^T`` instead of ``H^-1``
+        # (PLAN §3.4, S-2).  The arms are IDENTICAL on the inference side --
+        # same opts, same guards, same data -- and differ only in which
+        # artifact file is loaded, which is the only way the b_gal
+        # propagation can be isolated: it lives entirely in the draws.
         o.lss_field_mode = "latent"
-        o.lss_field_artifact = str(paths["anchor"])
+        o.lss_field_artifact = str(paths["anchor_bgal" if arm == "latent_bgal"
+                                          else "anchor"])
         o.lss_marginalize = bool(marginalize)
     elif arm not in ("latent_off", "latent_off_nofp"):
         raise ValueError(f"unknown arm {arm!r}")
@@ -135,6 +142,11 @@ def build(paths, arm, *, data_cache=None, **kw):
     # ``load_all_data``, so keying on the file triple alone silently serves the
     # previous arm's data (found the hard way -- the table arm reproduced the
     # latent_off arm to the last bit because its Q table was never loaded).
+    # ``lss_field_artifact`` is deliberately NOT in the key: the anchor is read
+    # by ``likelihood/factory.py:187`` inside ``make_likelihood``, never by
+    # ``load_all_data`` (grepped), so ``latent`` and ``latent_bgal`` share one
+    # data object by construction -- which is what makes them a paired
+    # comparison rather than two runs that happen to agree.
     key = (opts.survey_path, opts.gw_path, opts.gwselection_path,
            opts.per_pixel_completeness, opts.lss_completion,
            bool(opts.lss_marginalize), opts.selection_fit)

@@ -182,7 +182,7 @@ def build(seed, outdir, *, world=None, nobs=NOBS, nsamp=NSAMP, ndraw=NDRAW,
           n0=N0_TRUE, f_p_survey=None, extra_selection=None,
           lognormal_tail=0.0, field_scale=1.0, z_universe=Z_UNIVERSE,
           target_det=TARGET_DET, verbose=True,
-          reuse_injections=None):
+          reuse_injections=None, event_seed=None):
     """Write one realization's data products under ``outdir``.
 
     ``f_p_survey`` is the map the SURVEY applies (Tier D-i perturbs it while
@@ -266,6 +266,18 @@ def build(seed, outdir, *, world=None, nobs=NOBS, nsamp=NSAMP, ndraw=NDRAW,
               f"universe)", flush=True)
 
     # ---------------------------------------------------------------- the GW
+    # ``event_seed`` splits the realization in two.  Everything above this line
+    # -- the field, the complete catalog, the mask, the survey -- is a function
+    # of ``seed`` alone; everything below it (which 60 hosts are detected, and
+    # their PE noise) becomes a function of ``event_seed`` when one is given.
+    # That is what turns Tier C's variance into a DECOMPOSITION: holding
+    # ``seed`` fixed and varying ``event_seed`` gives the event-and-PE half of
+    # the realization-to-realization spread, and comparing it against the full
+    # spread says whether the overconfidence is per-event likelihood
+    # sharpness or a catalog-level common mode.  With ``event_seed=None`` the
+    # stream is untouched and every existing seed reproduces bit-for-bit.
+    if event_seed is not None:
+        rng = np.random.default_rng(int(event_seed))
     truth, _ = dark._draw_events_until_detected(
         rng, nobs, complete, grids, pop, SNR_THRESHOLD, meas=meas)
     post, pe_obs = dark._posterior_samples(rng, truth, nsamp, meas)

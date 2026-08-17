@@ -47,7 +47,22 @@ import world16 as W16
 
 def build(*, survey, mth_map, out, world=None, z_depth=None, n_shells=12,
           b_gal=None, m_draw=8, n_b_nodes=33, b_max=4.0, seed=22,
-          theta_ref=None, verbose=True, ls_sph_fit=None):
+          theta_ref=None, verbose=True, ls_sph_fit=None,
+          b_gal_dispersion=False, s_b_floor_frac=None):
+    """``b_gal_dispersion`` switches on PLAN §3.4's rank-1 draw-covariance
+    inflation ``Cov(xi) = H^-1 + s_b^2 v v^T`` (S-2, landed in ``16e8195``).
+
+    It is a KEYWORD with default ``False`` here and not in the shipped builder
+    (where S-2 made it default ON) for one reason: this file's job in
+    ``CLOSURE_v2.md`` is a BEFORE/AFTER comparison, and the "before" arm has to
+    be reproducible from the same script.  ``False`` reproduces the ensemble the
+    first closure pass measured; ``True`` is the shipped default.  ``s_b`` is
+    never a free number on either path -- it is
+    :func:`latent_counts.b_gal_profile_sigma`'s profile curvature at the anchor,
+    maximised against the module's 5% systematics floor, and every component
+    (statistical, floor, which one won, both curvatures) is stamped into the
+    artifact so the two arms differ by a quantity that is on the record.
+    """
     import h5py
     import healpy as hp
     import jax
@@ -58,7 +73,8 @@ def build(*, survey, mth_map, out, world=None, z_depth=None, n_shells=12,
     from darksirens.catalogs.depth_map import load_selection_fraction
     from darksirens.redshift.grid import zgrid
     from darksirens.redshift.latent_counts import (
-        TracerCounts, counts_from_catalog, dgrad_db, gradient, laplace_draws,
+        B_GAL_SYSTEMATIC_FLOOR_FRAC, TracerCounts, b_gal_profile_sigma,
+        counts_from_catalog, dgrad_db, gradient, laplace_draws,
         make_count_operator, sensitivity)
     from darksirens.redshift.latent_field import (
         shell_response, sky_constant_coeffs, sky_moments)
@@ -156,9 +172,32 @@ def build(*, survey, mth_map, out, world=None, z_depth=None, n_shells=12,
     S = np.asarray(sensitivity(xi_hat, L, jnp.asarray(dgrad)))
     labels = names + ["b_gal"]
 
+    # ---- PLAN §3.4's rank-1 b_gal inflation (S-2) -------------------------
+    # ``v`` is read straight out of the ``sensitivity_S`` block that has just
+    # been built against this same ``L`` -- the builder must not have two
+    # constructions of ``d xi_hat/d b`` (``b_gal_profile_sigma`` accepts the
+    # column for exactly that reason), and the artifact's ``sensitivity_S``
+    # column and the draws' inflation direction are then the same array by
+    # construction rather than by coincidence.
+    v_b = S[:, labels.index("b_gal")]
+    prof = b_gal_profile_sigma(
+        xi_hat, op, dgrad_b=dgrad[:, -1], v_b=jnp.asarray(v_b),
+        systematic_floor_frac=(B_GAL_SYSTEMATIC_FLOOR_FRAC
+                               if s_b_floor_frac is None
+                               else float(s_b_floor_frac)))
+    s_b = float(prof["s_b"]) if b_gal_dispersion else 0.0
+    if verbose:
+        print(f"[anchor] s_b={s_b:.6e} (profile {prof['s_b_stat']:.6e}, "
+              f"floor {prof['s_b_floor']:.6e}, "
+              f"floor_active={prof['floor_active']}); "
+              f"dispersion={'ON' if b_gal_dispersion else 'OFF'}", flush=True)
+
     m_sph, m_z = world.meta["m_sph"], world.meta["m_z"]
-    draws, g_members = laplace_draws(xi_hat, L, m_draw,
-                                     jax.random.PRNGKey(seed), return_g=True)
+    draws, g_members, eps_members = laplace_draws(
+        xi_hat, L, m_draw, jax.random.PRNGKey(seed), return_g=True,
+        return_eps=True,
+        s_b=(s_b if b_gal_dispersion else None),
+        v_b=(jnp.asarray(v_b) if b_gal_dispersion else None))
     Xi_members = np.asarray(draws).reshape(m_draw, m_sph, m_z)
     proj_np = np.asarray(basis.proj_sph)
     row_fac = np.stack([
@@ -190,7 +229,15 @@ def build(*, survey, mth_map, out, world=None, z_depth=None, n_shells=12,
                n_b_nodes=n_b_nodes, b_max=b_max, seed=seed,
                theta_ref=theta_ref, labels=labels, jitter=dict(basis.meta),
                world=world.meta, shells="equal_comoving_volume",
-               guard7=guard7)
+               guard7=guard7,
+               b_gal_dispersion=bool(b_gal_dispersion), s_b=s_b,
+               s_b_profile=float(prof["s_b_stat"]),
+               s_b_floor=float(prof["s_b_floor"]),
+               s_b_floor_active=bool(prof["floor_active"]),
+               b_gal_curvature_profile=float(prof["curvature_profile"]),
+               b_gal_curvature_conditional=float(prof["curvature_conditional"]),
+               draw_covariance=("H^-1 + s_b^2 v v^T" if b_gal_dispersion
+                                else "H^-1"))
     sha = hashlib.sha256()
     for arr in (np.asarray(xi_hat), np.asarray(L), S, counts, f_p,
                 np.asarray(W_ref), A, B, b_nodes, z_sub, edges):
@@ -206,6 +253,7 @@ def build(*, survey, mth_map, out, world=None, z_depth=None, n_shells=12,
         g.create_dataset("sensitivity_S", data=S)
         g.attrs["sensitivity_labels"] = json.dumps(labels)
         g.create_dataset("g_members", data=np.asarray(g_members))
+        g.create_dataset("eps_members", data=np.asarray(eps_members))
         g.create_dataset("Xi_members", data=Xi_members)
         g.create_dataset("row_fac", data=row_fac)
         g.create_dataset("A_moments", data=A)
@@ -227,6 +275,9 @@ def build(*, survey, mth_map, out, world=None, z_depth=None, n_shells=12,
         g.attrs["b_gal"] = b_gal
         g.attrs["seed"] = seed
         g.attrs["grad_inf"] = float(sol["grad_inf"])
+        g.attrs["b_gal_dispersion"] = bool(b_gal_dispersion)
+        g.attrs["s_b"] = s_b
+        g.attrs["draw_covariance"] = cfg["draw_covariance"]
         g.attrs["sha256"] = digest
         g.attrs["format_version"] = "darksirens-latent-field-1.0"
         g.attrs["pr6a_config"] = json.dumps(cfg, default=str)
@@ -234,6 +285,14 @@ def build(*, survey, mth_map, out, world=None, z_depth=None, n_shells=12,
         print(f"[anchor] wrote {out} sha256={digest[:16]}...", flush=True)
     return dict(path=str(out), sha256=digest, guard7=guard7,
                 grad_inf=float(sol["grad_inf"]),
+                b_gal_dispersion=bool(b_gal_dispersion), s_b=s_b,
+                s_b_profile=float(prof["s_b_stat"]),
+                s_b_floor=float(prof["s_b_floor"]),
+                s_b_floor_active=bool(prof["floor_active"]),
+                b_gal_curvature_profile=float(prof["curvature_profile"]),
+                b_gal_curvature_conditional=float(prof["curvature_conditional"]),
+                row_fac_sd=float(np.std(row_fac)),
+                member_sd=float(np.mean(np.std(row_fac, axis=0))),
                 xi_hat=np.asarray(xi_hat), H_chol=np.asarray(L))
 
 
@@ -245,9 +304,14 @@ def main(argv=None):
     p.add_argument("--n-shells", type=int, default=12)
     p.add_argument("--m-draw", type=int, default=8)
     p.add_argument("--seed", type=int, default=22)
+    p.add_argument("--b-gal-dispersion", action="store_true",
+                   help="PLAN §3.4 rank-1 inflation Cov = H^-1 + s_b^2 v v^T")
+    p.add_argument("--s-b-floor-frac", type=float, default=None)
     a = p.parse_args(argv)
     build(survey=a.survey, mth_map=a.mth_map, out=a.out,
-          n_shells=a.n_shells, m_draw=a.m_draw, seed=a.seed)
+          n_shells=a.n_shells, m_draw=a.m_draw, seed=a.seed,
+          b_gal_dispersion=a.b_gal_dispersion,
+          s_b_floor_frac=a.s_b_floor_frac)
 
 
 if __name__ == "__main__":

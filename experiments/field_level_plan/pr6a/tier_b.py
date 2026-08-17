@@ -38,11 +38,14 @@ def paths_for(d):
                 mth=d / "mth_map_nside16.h5",
                 selection_fit=d / "selection_fit.json",
                 n0_calibration=d / "n0_calibration.json",
-                anchor=d / "latent_anchor.h5", q_table=d / "q_radial.h5")
+                anchor=d / "latent_anchor.h5",
+                anchor_bgal=d / "latent_anchor_bgal.h5",
+                q_table=d / "q_radial.h5")
 
 
 def run(dirname, *, grid=None, soft_guard=False, max_var=1e6,
-        arm_names=("latent_off", "latent_off_nofp", "table", "latent"), quiet=False):
+        arm_names=("latent_off", "latent_off_nofp", "table", "latent",
+                   "latent_bgal"), quiet=False):
     import time
 
     p = paths_for(dirname)
@@ -72,16 +75,26 @@ def run(dirname, *, grid=None, soft_guard=False, max_var=1e6,
     return out
 
 
-def verdict(res):
+ARMS = ("latent_off", "latent_off_nofp", "table", "latent", "latent_bgal")
+
+
+def verdict(res, *, s_b=None):
     h0t = W16.H0_TRUE
     v = {}
-    for arm in ("latent_off", "latent_off_nofp", "table", "latent"):
+    for arm in ARMS:
         if arm not in res:
             continue
         s = res[arm]
         v[f"{arm}_in_ci90"] = bool(s["ci90"][0] <= h0t <= s["ci90"][1])
-    if "table" in res and "latent" in res:
-        st, sl = res["table"], res["latent"]
+    # The gate-2 / gate-3 comparison object is the arm that carries the SHIPPED
+    # draw covariance.  Since S-2 (commit 16e8195) that is ``latent_bgal``:
+    # ``build_latent_field.py`` defaults the inflation ON, so ``latent`` is now
+    # the historical control (``Cov = H^-1``, what the first closure pass ran)
+    # and ``latent_bgal`` is the deliverable (``Cov = H^-1 + s_b^2 v v^T``).
+    ref = "latent_bgal" if "latent_bgal" in res else "latent"
+    v["gate_reference_arm"] = ref
+    if "table" in res and ref in res:
+        st, sl = res["table"], res[ref]
         d = abs(sl["median"] - st["median"])
         sig = 0.5 * (st["sigma"] + sl["sigma"])
         v["latent_vs_table_shift_sigma"] = float(d / sig)
@@ -89,10 +102,24 @@ def verdict(res):
         v["ci90_width_latent"] = float(sl["width90"])
         v["ci90_width_table"] = float(st["width90"])
         v["latent_width_ge_table"] = bool(sl["width90"] >= st["width90"])
+        # The criterion is only meaningful once the draws actually carry
+        # ``b_gal``.  Report WHY it is or is not, with the measured ``s_b``,
+        # instead of a bare boolean -- PLAN §6.2 predicates the gate on §3.4's
+        # propagation existing, and for the first closure pass it did not.
         v["width_criterion_status"] = (
-            "VACUOUS -- b_gal is not propagated into the member draws; "
-            "laplace_draws takes H_chol only and s_b is not implemented "
-            "anywhere in darksirens/ (see the module docstring)")
+            "REAL -- the reference arm's members are drawn from "
+            f"H^-1 + s_b^2 v v^T with the measured s_b = {s_b!r} "
+            "(latent_counts.b_gal_profile_sigma, PLAN §3.4 v4)"
+            if ref == "latent_bgal" else
+            "VACUOUS -- b_gal is not propagated into the member draws")
+    if "latent" in res and "latent_bgal" in res:
+        # The whole point of the re-run: what the inflation did, in isolation.
+        # Same data object, same guards, same solve, same ``g`` stream -- the
+        # ONLY difference is ``+ s_b eps_m v`` in the members.
+        s0, s1 = res["latent"], res["latent_bgal"]
+        v["bgal_median_shift_kms"] = float(s1["median"] - s0["median"])
+        v["bgal_width90_ratio"] = float(s1["width90"] / s0["width90"])
+        v["bgal_sigma_ratio"] = float(s1["sigma"] / s0["sigma"])
     # The decomposition: latent-vs-table is NOT a pure field comparison,
     # because the table arm cannot carry ``--per_pixel_completeness``
     # (loaders.py:1021 refuses the pair).  Split it.
@@ -109,8 +136,10 @@ def verdict(res):
         "table", "latent_off_nofp")
     v["shift_sigma_fp_channel__latent_off_vs_nofp"] = _shift(
         "latent_off", "latent_off_nofp")
+    v["shift_sigma_bgal_only__latent_bgal_vs_latent"] = _shift("latent_bgal",
+                                                               "latent")
     v["TIER_B"] = bool(all(v.get(f"{a}_in_ci90", False)
-                           for a in ("latent_off", "table", "latent"))
+                           for a in ("latent_off", "table", ref))
                        and v.get("latent_vs_table_within_0p3sigma", False))
     return v
 
@@ -121,15 +150,24 @@ def main(argv=None):
     p.add_argument("--out", default="tier_b.json")
     p.add_argument("--h0-step", type=float, default=1.0)
     p.add_argument("--soft-guard", action="store_true")
+    p.add_argument("--arms", nargs="*", default=list(ARMS))
     a = p.parse_args(argv)
     grid = np.arange(20.0, 140.0 + 0.5 * a.h0_step, a.h0_step)
     truth = json.load(open(Path(a.dir) / "truth.json"))
     print(f"[tier B] {a.dir}: {truth['nobs']} events, "
           f"{truth['n_survey']} catalog galaxies, H0_true={truth['H0_true']}",
           flush=True)
-    res = run(a.dir, grid=grid, soft_guard=a.soft_guard)
+    res = run(a.dir, grid=grid, soft_guard=a.soft_guard,
+              arm_names=tuple(a.arms))
     res["truth"] = truth
-    res["verdict"] = verdict(res)
+    s_b = None
+    anchor_bgal = paths_for(a.dir)["anchor_bgal"]
+    if anchor_bgal.exists():
+        import h5py
+        with h5py.File(anchor_bgal) as f:
+            s_b = float(f["latent_field"].attrs["s_b"])
+    res["s_b"] = s_b
+    res["verdict"] = verdict(res, s_b=s_b)
     res["guard"] = dict(soft_guard=bool(a.soft_guard),
                         max_likelihood_variance=1e6,
                         convention="PR-0 clean arm" if not a.soft_guard
