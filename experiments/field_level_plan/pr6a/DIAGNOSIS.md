@@ -347,3 +347,84 @@ mismatch", not "the builder forgot to cut".
 
 Recorded because the wrong version was already written into a commit message
 and into pass 3 above.
+
+
+---
+
+# Pass 4: three more suspects eliminated, and where the width actually comes from
+
+## The depth-boundary test: NULL
+
+Tier C with the catalog truncated at `z_depth` (max z exactly 0.3000, matching
+production), same seeds, nothing else changed:
+
+| arm | untruncated | truncated |
+|---|---|---|
+| latent | 2.593 | **2.659** |
+| latent_off | 2.259 | **2.399** |
+
+No improvement.  The 4.87% of galaxies scattered above the depth by photo-z
+error are not the cause.  (They remain a model/catalog convention mismatch
+worth tidying -- see the correction above -- but they cost nothing here.)
+
+## Rule 6's OTHER half: injection coverage is clean
+
+The 18x injection test addressed "noisy".  Rule 6 also names "MIS-SLOPED", and
+more draws from the same proposal would not fix that -- a distinction I had
+conflated.  Tested directly: at every trial `H0` in the scan, no injection
+falls outside the redshift grid.
+
+| `H0` | grid `dL_hi` | injections beyond it | max injection z |
+|---|---|---|---|
+| 20 | 37,970 | **0** | 0.210 |
+| 67.74 | 11,211 | **0** | 0.596 |
+| 120 | 6,328 | **0** | 0.951 |
+| 140 | 5,424 | **0** | 1.078 |
+
+against a grid `zmax` of 1.500.  No coverage failure at any trial value.
+
+(An earlier version of this check reported NaNs at `H0` = 140 and looked like a
+coverage failure.  That was my own artifact: I ran the check at
+`DARKSIRENS_ZMAX=1.0` while the mock pins **1.5**.  Corrected above.)
+
+## The catalog KDE kernel is not too narrow
+
+`sigma_eff = sqrt(sigma_cat^2 + sigma_kde^2)` with the mock's stored
+`dzgals = 0.0230` and the run's `sigma_kde = 0.003` gives 0.0232 -- the stored
+per-galaxy error dominates, so the kernel is the catalog's own, not the tiny
+sampled floor.
+
+## Where the width actually comes from: a 65% cancellation
+
+Decomposing the `H0` curvature at the peak (`latent_off`, from the live
+`log_mu` capture), `logL = sum_i(events) - N_obs log mu`:
+
+    total      d2 logL/dH0^2 = -0.022314   -> sigma = 6.69 km/s
+    events                   = -0.064303   (288% of the total)
+    selection  -N log mu     = +0.041988   (-188% of the total)
+
+**The posterior width is set by a near-cancellation**: the event sum supplies
+-0.0643 of curvature and the selection term gives back +0.0420, leaving
+-0.0223.  To match the measured event-only scatter of 15.57 km/s the net would
+have to be -0.0041 -- i.e. the net is **5.4x too curved**, which corresponds to
+a **~30-40% error in ONE of two large, mostly-cancelling terms** (the selection
+term would need to be +0.060 instead of +0.042, or the event term -0.046
+instead of -0.064).
+
+That is the sharpest statement available about where to look, and it explains
+why six downstream interventions all did nothing: none of them moves either
+term by 30%.
+
+## Eliminated so far, each with a number
+
+1. the latent field (no-field control equally affected)
+2. `b_gal` draw covariance (+0.04%, and the `s_b` response has the wrong SIGN)
+3. PE over-sharpness (residual sd 1.059 vs the 2.6 required)
+4. DAG rules 1-2 in the generator (verified by reading the source)
+5. selection-integral MC **noise** (18x injections, Neff 1,953 -> 12,618)
+6. selection-integral **coverage/mis-slope** (0 injections off-grid at any H0)
+7. multimodality / outlier widths (posteriors near-Gaussian, widths stable)
+8. the depth boundary (truncation test, null)
+9. the catalog KDE width (dominated by the stored `dzgals`)
+
+plus gate 8(a), which localises what remains to the estimator's own terms.
