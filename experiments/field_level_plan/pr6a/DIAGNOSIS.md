@@ -86,3 +86,75 @@ the field, not the PE width, and not the b_gal draw covariance.
   `H0` is common to all of them, and the tier would be measuring catalog
   variance with an event-variance error bar.  That would make Tier C's design,
   not the estimator, the thing to fix.
+
+
+---
+
+# Pass 3 (2026-08-18): the selection-noise hypothesis, REFUTED
+
+The hypothesis from pass 2's measurements was that the SHARED injection set's
+Monte-Carlo noise adds a common, structured distortion to every realization's
+`log mu(H0)` -- which would narrow every posterior while leaving the ensemble
+centred, i.e. every symptom Tier C has.  The measured noise supported it: the
+MC sd of the `-N_obs log mu` term runs 0.37-0.63 nats against a 0.279-nat
+curvature over +-5 km/s.
+
+**It is wrong.**  Rebuilt the injection set 18x larger with NOTHING else
+changed -- same world (`make_mock.build` does `world = world or
+W16.build_world()`, so both sets are matched to the same one), same seeds, same
+catalog, same events -- and verified the two sets are statistically the same
+population before using it:
+
+| | original | 18x |
+|---|---|---|
+| Ndraw | 3,000,000 | 55,000,000 |
+| detected | 65,791 | 1,201,469 |
+| detected fraction | 0.021930 | 0.021845 |
+| `log mu` proxy | +15.458649 | +15.454407 |
+| **stamped Neff** | **1,953** | **12,618** |
+
+Tier C at n = 24, the same seeds:
+
+| arm | original | 18x injections |
+|---|---|---|
+| latent | 2.593 | **2.662** |
+| latent_off | 2.259 | **2.413** |
+
+A 6.5x improvement in `Neff` -- which should cut the MC noise by 2.5x -- moved
+the overconfidence **up**, within noise.  The selection integral's Monte-Carlo
+noise is not the cause.  Second hypothesis refuted with a controlled
+experiment, after the `b_gal` draw covariance.
+
+## What pass 3 did find: a rule-7 signature
+
+Checklist rule 7 -- "a depth/selection knob must truncate the rows the
+likelihood actually reads ... verify on the built artifact, never the builder's
+intent" -- fires on this mock:
+
+    catalog rows the prior reads: max z = 0.3847,  z_depth = 0.30
+    9,384 of 192,757 galaxies (4.868% of count AND of weight) sit above it
+    1,594 of 1,854 occupied rows contain at least one
+
+and `z_depth = 0.3` is carried as an HDF5 **attribute**, which is precisely the
+metadata-only pattern the rule names.  The precedent's cost was large
+(+34...+57 terms and a fake non-monotone depth curve).
+
+**This is NOT yet a diagnosis.**  The shipped code has a correction for exactly
+this configuration (`redshift/prior.py`: `Nobs = Nobs * exp(kernels.log_depth_mass)`,
+whose comment records that using the full row count with a depth-renormalised
+kernel is "a double count that measured 2.6x on a 10-galaxy row with
+z_depth=0.3").  So the 4.87% may be absorbed.  Whether it is, on this mock, is
+the next controlled test -- and 4.87% of the catalog is a priori too small to
+produce a 2.5x width error on its own, so the honest prior is that this is a
+real DAG blemish worth fixing but probably not the cause either.
+
+## Ruled out so far, each with a number
+
+1. the latent field itself (the no-field control is equally affected)
+2. the `b_gal` draw covariance (moved it +0.04%, and the `s_b` response has the
+   wrong SIGN over three decades)
+3. synthetic PE over-sharpness (residual sd 1.059 against the 2.6 required)
+4. DAG violations in the event generator (rules 1 and 2 verified by reading:
+   threshold on `rho_obs`, that measurement carried into the PE, rejections
+   stored)
+5. **selection-integral Monte-Carlo noise (this pass, 6.5x `Neff`, no change)**
