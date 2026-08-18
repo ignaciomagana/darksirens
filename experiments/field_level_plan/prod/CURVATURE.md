@@ -193,3 +193,47 @@ the only construction that carries the catalog-induced correlations.
 
 The interval caveat is therefore unchanged: medians and arm-to-arm differences
 may be quoted; the 90% intervals may not yet be quoted as credible intervals.
+
+
+## The identity holds on production WITHOUT `f_p`, and not with it
+
+The first arm comparison evaluated every arm at `H0 = 72`, which is `fp`'s peak
+but 2.6 sigma from `nofp`'s (90.25).  The information identity is a statement at
+the peak, so that was not like-for-like.  Re-run with each arm at its own:
+
+| arm | evaluated at | `H` | `J` (OPG) | `J/H` | width factor |
+|---|---|---|---|---|---|
+| `nofp` (no `f_p`, no field) | 90.0 | 0.071762 | 0.070276 | **0.979** | x0.990 |
+| `fp` (`f_p`, no field) | 72.0 | 0.088532 | 0.044733 | **0.505** | x0.711 |
+| `latent` | -- | -- | -- | refused | -- |
+
+Both ordering checks pass at 0.00%.  The `latent` arm was REFUSED by the same
+check: under marginalisation the event reduction runs once per member, so the
+capture returned `2072 = 259 x 8` values instead of 259.  Handling the member
+axis is a straightforward extension and is not done here; the check doing its
+job is why no latent number is quoted.
+
+**Without the per-pixel completeness the identity holds** -- `J/H = 0.979`
+against the 1.000 a correctly specified model requires.  **With it, `J/H` halves.**
+The same estimator is applied to both, so the contrast is meaningful even though
+each value is a lower bound; and `nofp` landing on 1.0 is evidence that the OPG
+bound is TIGHT in this configuration rather than loose, which is what makes
+`fp`'s 0.505 worth taking seriously.
+
+## What this does and does not say
+
+It says the `f_p` channel -- already responsible for the entire `-4.31 sigma`
+shift and for 97.2% of the runtime -- is also where production's information
+identity departs from unity.  That is a third independent way in which the
+per-pixel completeness, not the latent field, is the consequential part of this
+programme.
+
+It does NOT say production reproduces the mock's defect.  The directions are
+opposite: the mock's `J/H = 6.03` makes intervals too NARROW, production's
+`f_p` arm at `0.505` would make them too WIDE.  Whatever breaks the identity in
+the `f_p` arm at production scale is therefore not the mechanism that breaks
+Tier C, and the two must not be conflated.  The mock's factor still has no
+production counterpart, and the ensemble measurement that would supply one --
+synthetic 259-event datasets on the production catalog -- remains unbuilt.
+
+The interval caveat stands unchanged.
