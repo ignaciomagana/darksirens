@@ -458,3 +458,50 @@ even though it is the right size.
 more information than its own curvature implies -- with none of these
 assumptions, by measuring `J` and `H` from the same stored `logL(H0)` curves.
 That is what the conclusion should rest on.
+
+
+---
+
+# The `N_obs` scaling at n=40: the deficit is a CONSTANT factor
+
+Pass 2 flagged an unresolved question: at n=6 realisations per cell the median
+scatter looked FLAT in `N_obs` (18.07 / 22.51 / 15.96), which would be a
+common-mode term that never averages down -- but the 32% error on a standard
+deviation at n=6 made that indistinguishable from correct `1/sqrt(N)` scaling,
+and the difference between those two readings was the whole diagnosis.  Re-run
+at **n = 40 per cell** (error ~11%):
+
+| `N_obs` | n | scatter | mean `sigma` | overconfidence |
+|---|---|---|---|---|
+| 30 | 40 | 22.11 | 11.483 | 1.925 |
+| 60 | 40 | 19.77 | 8.577 | 2.304 |
+| 120 | 40 | 10.86 | 5.902 | 1.840 |
+
+(`latent_off`; the `latent` arm gives 1.987 / 2.384 / 1.922.)
+
+    d log(scatter)/d log N = -0.513   (latent_off),  -0.463 (latent)
+    d log(sigma)  /d log N = -0.480   (latent_off),  -0.439 (latent)
+
+**The scatter averages down as `1/sqrt(N)`.**  The flat reading was a
+small-sample artifact, as pass 2 suspected; it is now excluded at 6.7x better
+statistics.  There is no common-mode term that survives more events.
+
+**And the quoted `sigma` scales the same way**, so the overconfidence ratio is
+essentially CONSTANT in `N_obs` -- 1.93, 2.30, 1.84, no trend, scattered about
+~2.0.
+
+## Why that matters
+
+A constant multiplicative deficit, independent of the number of events, is
+exactly what a **fractional error in one of the two curvature terms** produces:
+both the event sum and the selection term scale linearly with `N_obs`, so a
+fixed fractional error in either leaves their ratio -- and therefore the ratio
+of the naive width to the true scatter -- unchanged.  The `N_obs` lever arm
+therefore CONFIRMS the cancellation framing and excludes mechanisms that would
+scale differently: anything common-mode (`N^0`), and anything whose relative
+size grows or shrinks with the event count.
+
+Combined with gate 8(a) (the deficit is in the estimator, not the PE) and with
+the selection term being a clean power law, the surviving description is: **a
+fixed ~30% fractional error in the event/catalog term's `H0` curvature**, i.e.
+a redshift prior more informative than the catalog warrants.
