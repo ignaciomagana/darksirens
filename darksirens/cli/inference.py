@@ -1489,9 +1489,28 @@ def build_parser():
                          "C_p(z) = f_p C(z) into BOTH sides of the missing "
                          "budget (field-level PR-2, OWNER DECISION 4a). "
                          "Requires c_mode aggregate|selection with the "
-                         "gaussian family; refuses Q tables, stratified "
-                         "selection, and K>=2 (their empty-pixel budgets "
-                         "need f_p-weighted twins not yet derived)."))
+                         "gaussian family; admits a deterministic Q table "
+                         "(the f_p-weighted empty-pixel Q budget is built "
+                         "alongside the plain one); refuses Q ENSEMBLES, "
+                         "stratified selection, and K>=2 (their empty-pixel "
+                         "budgets need per-member/per-stratum f_p-weighted "
+                         "twins not yet derived)."))
+    g.add_argument("--allow_unmasked_footprint", action="store_true",
+                   help=("Run c_mode aggregate|selection on a "
+                         "footprint-limited catalog WITHOUT a per-pixel "
+                         "selection fraction. Refused by default (S-3): the "
+                         "survey completeness curve Cbar(z) is applied to "
+                         "empty pixels too, so sky the survey never observed "
+                         "is modelled as Cbar-COMPLETE and its hosts leave "
+                         "the missing budget while the numerator keeps them. "
+                         "16 of 16 footprint runs of the PR-6a mock railed to "
+                         "H0 = 125-138 without a mask, and on the production "
+                         "line the mask moves the median by 4.3 sigma. Sparse "
+                         "all-sky catalogs are not affected: the guard fires "
+                         "only when the empty fraction exceeds what the mean "
+                         "count predicts under Poisson. Pass this flag for "
+                         "the no-mask CONTROL arms, which want the exposed "
+                         "configuration on purpose."))
     g.add_argument("--validate_completion", type=str_to_bool, default=False, metavar="BOOL",
                    help=("Run a dry-run completion clipping diagnostic, save JSON under "
                          "--save_path, and exit before building the likelihood."))

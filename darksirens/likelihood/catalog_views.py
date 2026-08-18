@@ -13,6 +13,7 @@ from darksirens.redshift.completion import (
     _LOGQ_CLIP,
     build_field_delta_g_inputs,
     build_field_depth_inputs,
+    build_field_lss_q_fp_empty_sum,
     build_field_lss_q_inputs,
     build_field_lss_q_member_inputs,
     build_field_mark_inputs,
@@ -142,6 +143,11 @@ class CatalogViews:
     f_p_rows_sel: jnp.ndarray | None = None      # (n_sel_rows,) f32
     field_f_p_occ: jnp.ndarray | None = None     # (n_occupied,) f32
     field_f_p_empty_sum: jnp.ndarray | None = None  # scalar f64
+    # f_p x Q pairing (S-3): the f_p-weighted empty-pixel Q budget
+    # ``Sum_{p empty} f_p Q_p(z)``.  Built only when a GLOBAL Q table and an
+    # f_p map are both present; without it the field normalizer would model
+    # unobserved sky as Cbar-complete (completion.build_field_lss_q_fp_empty_sum).
+    field_lss_q_fp_empty_sum: jnp.ndarray | None = None  # (n_grid,) f64
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -743,6 +749,7 @@ def prepare_catalog_views(
     # for the field normalizer.  ``None`` everywhere when the flag is off.
     f_p_rows_pe = f_p_rows_sel = None
     field_f_p_occ = field_f_p_empty_sum = None
+    field_lss_q_fp_empty_sum = None
     f_p_full = data.get("f_p_map")
     if f_p_full is not None:
         fp_np = np.asarray(f_p_full, dtype=np.float32)
@@ -764,12 +771,21 @@ def prepare_catalog_views(
             field_f_p_empty_sum = jnp.asarray(
                 float(fp_np.sum()) - float(fp_np[occ_idx].sum()),
                 dtype=jnp.float64)
+            # f_p x Q (S-3): the empty-pixel budget the Q path needs before it
+            # may carry f_p at all.  A Q ENSEMBLE is refused rather than paired
+            # with the deterministic budget -- see _field_missing_curve.
+            logq_for_fp = data.get("lss_completion_logq")
+            if logq_for_fp is not None:
+                field_lss_q_fp_empty_sum = barrier(
+                    build_field_lss_q_fp_empty_sum(
+                        np.asarray(logq_for_fp), occ_idx, n_pix_total, fp_np))
 
     return CatalogViews(
         f_p_rows_pe=f_p_rows_pe,
         f_p_rows_sel=f_p_rows_sel,
         field_f_p_occ=field_f_p_occ,
         field_f_p_empty_sum=field_f_p_empty_sum,
+        field_lss_q_fp_empty_sum=field_lss_q_fp_empty_sum,
         zgals_pe_catalog=zgals_pe_catalog,
         dzgals_pe_catalog=dzgals_pe_catalog,
         wgals_pe_catalog=wgals_pe_catalog,
