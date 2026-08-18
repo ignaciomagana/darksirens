@@ -425,3 +425,41 @@ def test_footprint_row_map_handles_unsorted_and_missing_pixels():
     assert m.tolist() == [2, 4, 1, 4, 0, 3, 4]
     mask = np.asarray(on_footprint_mask(m, fit.size))
     assert mask.tolist() == [True, False, True, False, True, True, False]
+
+
+# ------------------------------------------ moment interpolation dynamic range
+
+def test_moment_interpolation_survives_the_production_dynamic_range():
+    """``rho`` stays finite and ``A - cB`` stays POSITIVE at small ``b_GW``.
+
+    ``A(z; b) = sum_{p in F} e^{b f}`` spans **14.9 orders of magnitude** across
+    the shipped b-node range on the real anchor, and a polynomial interpolant of
+    a function with that dynamic range oscillates at the LOW end.  Measured on
+    ``latent_anchor_v2a.h5`` before the fix: linear-space barycentric
+    interpolation returned ``A = -9.69e7`` at ``b_GW = 0.37`` where the true
+    value is ``+3.07e4`` (bracketed by +2.97e4 at b = 0.1 and +3.20e4 at 0.5),
+    so ``A - cB`` went negative, the ``1e-300`` floor caught it, and ``rho`` was
+    silently garbage.  ``b_GW`` is SAMPLED, so the sampler visits that region.
+
+    This fixture reproduces the mechanism at small scale by giving the moments a
+    production-like dynamic range: the pin is that ``num > 0`` STRUCTURALLY
+    (``B <= A`` and ``c <= 1``), never that the floor rescued it.
+    """
+    n_b, n_z = N_B, 64
+    b_nodes = 0.5 * B_MAX * (1.0 - np.cos(np.pi * np.arange(n_b) / (n_b - 1)))
+    # A = |F| e^{b fmax}, B = (sum f_p) e^{b fmax}: the real functional form,
+    # with fmax = 6.8 giving the anchor's ~15 orders over b in [0, 4].
+    P_F, F_F, fmax = 30470.0, 26251.7, 6.8
+    z = np.linspace(0.0, 1.0, n_z)
+    A = P_F * np.exp(b_nodes[:, None] * fmax * (0.5 + 0.5 * z)[None, :])
+    B = F_F * np.exp(b_nodes[:, None] * fmax * (0.5 + 0.5 * z)[None, :])
+    assert np.log10(A.max() / A.min()) > 10.0, "fixture lost its dynamic range"
+    c = jnp.asarray(0.5 * np.ones(n_z))
+    for b in (0.0, 0.1, 0.37, 0.5, 1.11, 2.5, 3.77, 4.0):
+        rho = rho_from_moments(jnp.asarray(A), jnp.asarray(B), c, b,
+                               jnp.asarray(b_nodes), P_F, F_F, None)
+        assert np.all(np.isfinite(np.asarray(rho))), f"rho non-finite at b={b}"
+        # The floor must NOT be doing the work: recover num and assert it is
+        # positive on its own.
+        num = np.exp(np.asarray(rho)) * (P_F - 0.5 * F_F)
+        assert np.all(num > 0.0), f"A - cB went non-positive at b={b}"
