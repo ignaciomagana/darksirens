@@ -91,3 +91,50 @@ cancellation.
 
 The second is now the more likely of the two and is where the next test should
 go.
+
+
+## An attempt to measure `J/H` on production, and why its answer is not quoted
+
+The mock's `sqrt(J/H) = 2.456` must not be assumed to carry to production, so it
+was measured here.  Production has one dataset, so `J` cannot come from an
+ensemble; instead the score's additivity over events was used, splitting the
+259 events into 10 disjoint subsets and reading `J` off the spread of the
+subset scores.
+
+The method carries its own consistency check -- since `sum_k n_k = N`, the
+subset scores must SUM to the full-data score.  **They do not:**
+
+    sum of the 10 subset scores = -0.018050
+    full-data score             = -0.019870
+    discrepancy                  9.2%
+
+so the decomposition the estimator rests on is not exact here, and the number it
+produced (`J/H = 0.385`, i.e. intervals too WIDE by 1.6x) is **not reported as
+a result**.
+
+Two reasons it fails, both identified rather than guessed:
+
+1. **The selection correction is not linear in the event count.**  It is not
+   simply `-N log mu`: it carries the Vitale `5 N_obs` floor and the
+   total-variance criterion, and those do not decompose across subsets.  This
+   is structural -- more subsets will not fix it.
+2. **Ten subsets give a 47% error on a variance**, so even a valid `J` would
+   read `0.385 +- 0.18` here.  That alone would not support a conclusion.
+
+There is also a physical objection to the design: 26-event subsets are not
+exchangeable with the 259-event configuration whose interval is in question --
+the guards sit at different points and the likelihood is far flatter -- so even
+a self-consistent subset estimator would be measuring a different regime.
+
+**What a correct production measurement needs.**  Either per-event score
+contributions from a single evaluation (an outer-product-of-gradients estimator,
+`J = sum_i u_i u_i^T`, which requires exposing the per-event likelihood terms
+the reduction currently sums internally), or an ensemble of synthetic 259-event
+datasets built on the production catalog -- the mock route at production scale.
+The first is cheap and is the better target.
+
+**So the production `sqrt(J/H)` remains unmeasured**, and the interval caveat
+stands exactly as written above: the medians and arm-to-arm differences may be
+quoted, the 90% intervals may not yet be quoted as credible intervals, and the
+factor-2 figure is a conditional carried over from the mock rather than a
+production measurement.
