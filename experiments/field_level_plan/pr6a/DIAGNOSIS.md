@@ -158,3 +158,53 @@ real DAG blemish worth fixing but probably not the cause either.
    threshold on `rho_obs`, that measurement carried into the PE, rejections
    stored)
 5. **selection-integral Monte-Carlo noise (this pass, 6.5x `Neff`, no change)**
+
+
+---
+
+# Two mundane explanations checked and eliminated (2026-08-18)
+
+Before chasing further physics, the two ways a "2.5x overconfidence" can be an
+artifact of how it is MEASURED rather than a real defect:
+
+**Is the quoted `sigma` even comparable to the median scatter?**  It is.  The
+posteriors are unimodal and near-Gaussian, so a 68%-interval half-width is a
+fair standard deviation:
+
+| | peaks | `sigma_moment / sigma_68` | skew |
+|---|---|---|---|
+| production `fp` | 1 | 1.017 | +0.16 |
+| production `latent` | 1 | 1.017 | +0.15 |
+| mock `latent_off` | 1 | 1.010 | +0.29 |
+| mock `latent` | 1 | 1.012 | +0.28 |
+| mock `table` | **6** | 1.065 | +0.49 |
+
+(The `table` arm is multimodal, which is worth knowing on its own -- but it is
+not the arm that fails.)
+
+**Is the deficit driven by a few realizations with anomalously small widths?**
+No.  The widths are stable across realizations (spread 18-19%), and the deficit
+survives when each realization is scored against its OWN width:
+
+| arm | `sd[(median - mean)/own sigma]` | coverage at nominal 90% |
+|---|---|---|
+| `latent_off` | **2.303** | **0.38** |
+| `latent` | **2.858** | **0.38** |
+
+Calibrated would be 1.000 and 0.90.  So the deficit is real, robust, and a
+WIDTH problem: each posterior is individually about 2.3-2.9x too narrow for the
+scatter its own estimator produces.
+
+## The gate that has not been run, and would separate the two possibilities
+
+Checklist gate 8(a): **machinery closure with delta-function PE at truth**.
+Every test so far has varied something downstream of the likelihood's core.  A
+delta-PE run removes the PE as a noise source entirely, so:
+
+* correct coverage under delta-PE -> the likelihood is calibrated and the
+  dispersion enters through the synthetic PE or the event construction;
+* wrong coverage under delta-PE -> the width deficit is in the estimator's
+  catalog/selection terms and is independent of the mock's PE.
+
+That is the next test worth building, and it is the checklist's own FIRST gate
+-- everything else is downstream of it.
