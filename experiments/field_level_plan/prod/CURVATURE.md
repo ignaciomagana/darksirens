@@ -237,3 +237,57 @@ production counterpart, and the ensemble measurement that would supply one --
 synthetic 259-event datasets on the production catalog -- remains unbuilt.
 
 The interval caveat stands unchanged.
+
+
+---
+
+# CORRECTION: the production `J/H` values above are WRONG, and the claim built on them is withdrawn
+
+A stability check -- re-evaluating each arm at neighbouring centres -- shows the
+production numbers are not robust:
+
+| arm | `H0` | `H` | `J` | `J/H` |
+|---|---|---|---|---|
+| `fp` | 70 | 0.044608 | 0.045648 | 1.023 |
+| `fp` | 72 | 0.088532 | 0.044733 | 0.505 |
+| `fp` | 74 | 0.089742 | 0.043603 | 0.486 |
+| `nofp` | 88 | **-0.071459** | 0.073224 | **-1.025** |
+| `nofp` | 90 | 0.071762 | 0.070276 | 0.979 |
+| `nofp` | 92 | 0.086862 | 0.068374 | 0.787 |
+
+`J` is stable to 4%.  **`H` is not** -- it swings by a factor 2 over 2 km/s and
+goes NEGATIVE at one node.  A three-point second difference at +-2 km/s is
+measuring small-scale structure in the likelihood curve, not the width.
+
+**The check that should have been run from the start** is whether `1/sqrt(H)`
+reproduces the posterior's actual width:
+
+    MOCK        H = 0.018418  ->  sigma 7.37   against a quoted 7.5    AGREES
+    PRODUCTION  H = 0.088532  ->  sigma 3.36   against a posterior 4.20  DOES NOT
+
+The mock's `H` passes this and its `J/H = 6.03` stands (it was also verified
+stable across nodes, median 6.07 over the width-setting window).  The
+production `H` fails it.  Fitting a quadratic over +-8 km/s instead gives
+`H_fit` that does reproduce the width -- `fp` 0.05232 -> sigma 4.37 against 4.20,
+`nofp` 0.05668 -> 4.20 against 4.14 -- and the corrected ratios are:
+
+| arm | previously quoted | **corrected** |
+|---|---|---|
+| `fp` | 0.505 | **0.855** |
+| `nofp` | 0.979 | **1.240** |
+
+**So the claim "the identity holds without `f_p` and halves with it" does not
+survive and is withdrawn.**  Both arms are consistent with `J/H ~ 1` at this
+precision; there is no measured departure from the identity in the production
+configuration in either arm, and no evidence from this that the `f_p` channel
+breaks it.
+
+What survives unchanged: the mock's `J/H = 6.03`, its agreement with the
+directly measured overconfidence, the cancellation structure (`|S/E|` 0.638 vs
+0.653, computed from `log mu` and `logL` and not from second differences), and
+the interval caveat -- which never rested on these production ratios.
+
+The corrected reading is the more conservative one: production shows **no**
+evidence of the mock's defect, and also no evidence against it, because
+`J_OPG` remains a lower bound that ignores catalog-induced correlation between
+events.
