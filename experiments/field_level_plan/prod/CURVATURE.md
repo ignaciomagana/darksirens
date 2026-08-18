@@ -52,3 +52,42 @@ negligible.  That is the reason to finish the diagnosis before the production
 The MEDIANS and the arm-to-arm SHIFTS are unaffected by any of this -- the
 field's 0.06 sigma and `f_p`'s 4.31 sigma are differences between arms that
 share the same estimator and the same selection term.
+
+
+## The selection term has no structural pathology
+
+If the excess curvature were the selection term's, the most likely mechanism
+would be a distorted `log mu(H0)`.  Measured on production over
+`H0` in [60, 86]:
+
+    d log_mu / d log H0 = +3.814        (a smooth power law)
+    measured d2 log_mu/dH0^2 = -5.862e-04
+    the same power law predicts         -6.964e-04   (agrees to 16%)
+
+`log mu(H0)` is a clean power law with a **positive** index, which is the right
+sign: raising `H0` shrinks `dL` at fixed `z`, so sources are closer, louder and
+more detectable, and `mu` rises.  Its curvature is consistent with that power
+law to 16% over the interval that sets the width.  There is no kink, no
+flattening at the edges, and no sign of the coverage failure rule 6 warns about
+(independently confirmed: zero injections fall off the grid at any trial `H0`).
+
+So the selection term is smooth and behaves as it should.  That does not
+exclude an error in its INDEX or NORMALISATION -- matching the mock's scatter
+would need its curvature ~43% larger, i.e. an effective index near 5.5 rather
+than 3.81 -- but it does exclude the structural pathologies that would be
+visible in the curve, and it shifts weight toward the other side of the
+cancellation.
+
+## Where that leaves the two candidates
+
+* **selection term ~43% under-curved** -- no structural evidence for it; would
+  require the index to be wrong by 1.7, in a quantity fixed by the injection
+  set, whose coverage and noise have both been tested and cleared.
+* **event/catalog term ~28% over-curved** -- untested.  With delta-PE the event
+  term is the catalog redshift prior evaluated at exactly-known redshifts, so
+  "the prior is more informative than the catalog warrants" is the remaining
+  shape of the hypothesis, and it is consistent with gate 8(a) having localised
+  the deficit to the estimator.
+
+The second is now the more likely of the two and is where the next test should
+go.
