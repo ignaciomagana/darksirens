@@ -573,3 +573,32 @@ misspecification, and both ingredients are computable from a single run's
 likelihood curve plus a modest ensemble.  That is a defensible way to quote an
 interval before the root cause is found, and it should be measured on the
 production configuration rather than assumed to carry the mock's factor.
+
+
+## `J/H` is not a single-node artifact
+
+The identity was first reported at one node (`H0 = 68`).  Recomputed at every
+node of the same stored curves:
+
+| `H0` | `J` | `H` | `J/H` | `sqrt(J/H)` |
+|---|---|---|---|---|
+| 54 | 0.17621 | 0.02738 | 6.436 | 2.537 |
+| 60 | 0.14300 | 0.02383 | 6.000 | 2.450 |
+| 66 | 0.11813 | 0.01945 | 6.074 | 2.464 |
+| 72 | 0.09792 | 0.01732 | 5.654 | 2.378 |
+| 78 | 0.08180 | 0.01509 | 5.420 | 2.328 |
+| 84 | 0.06953 | 0.01085 | 6.406 | 2.531 |
+
+Over `H0` in [55, 85] -- the region that sets the width -- the median is
+**6.074** (range 5.42-8.19), against the **6.034** reported at the single node.
+`sqrt(J/H)` has median **2.464**, against 2.456.  The number is representative,
+not a node chosen well.
+
+Outside that window the ratio climbs (10.3 at `H0 = 42`, 19.2 at 102) because
+`H` itself is collapsing there -- the likelihood is flat in the tails, so the
+ratio is unstable and carries no information about the width.  That is expected
+and is why the window is quoted.
+
+At `n = 24` realisations the error on a variance is 29%, so `J/H = 6.03 +- 1.8`
+-- far from the 1.0 a correctly specified model requires, and the conclusion
+does not depend on the precision.
