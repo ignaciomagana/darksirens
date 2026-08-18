@@ -138,3 +138,58 @@ stands exactly as written above: the medians and arm-to-arm differences may be
 quoted, the 90% intervals may not yet be quoted as credible intervals, and the
 factor-2 figure is a conditional carried over from the mock rather than a
 production measurement.
+
+
+## `J/H` on production by outer product of gradients
+
+The subset route failed structurally, so `J` was taken instead from the
+per-event score gradients on the single production dataset,
+`J = sum_i (u_i - ubar)^2 N/(N-1)`, with the per-event log-evidences captured
+from the reduction the likelihood vmaps over events.
+
+**The first attempt failed its ordering check by 10.3%, and the failure was
+diagnostic.**  The shipped selection correction is not exactly `-N log mu`: it
+carries the Vitale `5 N_obs` floor and the total-variance criterion, which add a
+nearly constant `+0.92` nats whose DERIVATIVE is `-0.00205` -- 10% of the total
+score.  Attributing the actual correction (`logL - sum_i ll_i`) rather than the
+idealised `-N log mu`, spread as `1/N` per event because the correction is
+proportional to the event count, makes the decomposition exact:
+
+    ORDERING CHECK: sum(u_i) = -0.019870   vs full score -0.019870   (0.00%)
+
+Both estimators had failed in the same direction by the same ~10%, which is why
+this was a real omission and not either method's artifact.
+
+With the decomposition exact:
+
+    H (observed)                       = 0.088532
+    J (expected, OPG over 259 events)  = 0.044733
+    J/H = 0.505      ->  width factor x0.711
+
+## Why this is a LOWER BOUND, not "production is conservative"
+
+Read naively this says production's intervals are ~1.4x too WIDE -- the opposite
+of the mock.  That reading is not available, because the two `J`s do not measure
+the same thing:
+
+* on the mock, `J` came from an ENSEMBLE of realisations, which redraws the
+  events and their host assignments and therefore captures every correlation
+  between events, including those induced by the shared catalog;
+* on production, the OPG estimator sums per-event variances and thereby assumes
+  the events are INDEPENDENT.
+
+Events sharing a catalog are not independent -- neighbouring events read the same
+galaxies -- and positive correlation makes `Var(sum_i u_i) > sum_i Var(u_i)`.
+So the OPG value can only under-state `J`:
+
+    J_true >= J_OPG   =>   (J/H)_true >= 0.505
+
+**0.505 is a floor.**  It does not establish that production is conservative,
+and it does not exclude the mock's 6.03.  What it does do is bound the problem
+from below on the real configuration and identify precisely what an unbiased
+production measurement still needs: an ensemble of synthetic 259-event datasets
+built on the production catalog, which is the mock route at production scale and
+the only construction that carries the catalog-induced correlations.
+
+The interval caveat is therefore unchanged: medians and arm-to-arm differences
+may be quoted; the 90% intervals may not yet be quoted as credible intervals.
