@@ -221,13 +221,29 @@ def _selection_schechter_rule(universe_model, use_lss, q_active, catalog,
 
 
 def _b_miss_rule(universe_model, use_lss, q_active, catalog,
-                 c_mode="per_pixel", selection_family="gaussian"):
+                 c_mode="per_pixel", selection_family="gaussian",
+                 lss_field_mode="table"):
     """Activity of ``b_miss``: the completion rule plus the two LSS gates.
 
-    ``b_miss`` enters the likelihood ONLY through the local-overdensity factor
-    ``max(1 + alpha_miss*b_miss*delta_g, 0)`` (redshift/completion.py), so it is
-    additionally inert whenever that factor is not a function of it.
+    In TABLE mode ``b_miss`` enters the likelihood ONLY through the
+    local-overdensity factor ``max(1 + alpha_miss*b_miss*delta_g, 0)``
+    (redshift/completion.py), so it is inert whenever that factor is not a
+    function of it -- which is what the two gates below detect.
+
+    In LATENT mode the same symbol is a DIFFERENT parameter: it is ``b_GW``,
+    the bias with which GW hosts trace the latent field, and it enters through
+    ``logQ = b_GW (row_fac . phi_z) - rho(...)`` at every evaluation.  It is
+    then genuinely (if weakly) identified by the events, and none of the
+    table-mode inertness arguments apply -- ``delta_g`` is not consulted at all
+    and there is no Q table to replace anything.  PLAN 4.3 calls this the
+    inversion of the guard, and it is inverted HERE, in the rule, rather than
+    at one call site: ``make_likelihood`` reaches this function directly, so a
+    fix applied only in ``cli/inference.py`` leaves every non-CLI caller (the
+    production scan harnesses among them) refusing a parameter the
+    configuration genuinely has.
     """
+    if str(lss_field_mode) == "latent":
+        return None
     model_rule = _completion_param_rule(
         universe_model, use_lss, q_active, catalog, c_mode=c_mode)
     if model_rule is not None:
@@ -369,7 +385,8 @@ if set(_SURVEY_PARAM_LABELS) != set(SURVEY_PARAMS_FID_BY_NAME):
 
 def _survey_param_inactive_reason(spec, universe_model, use_lss, q_active,
                                   catalog, c_mode="per_pixel",
-                                  selection_family="gaussian"):
+                                  selection_family="gaussian",
+                                  lss_field_mode="table"):
     """``spec``'s :class:`_Inert` for this configuration, or ``None`` if sampled.
 
     A universe model the registry does not know about samples the whole
@@ -388,6 +405,12 @@ def _survey_param_inactive_reason(spec, universe_model, use_lss, q_active,
                                         c_mode=c_mode,
                                         selection_family=selection_family)
         return None
+    if spec.inactive_reason is _b_miss_rule:
+        # Only b_miss's rule is mode-aware (PLAN 4.3's inversion); passing the
+        # kwarg to every rule would be a signature change across the registry.
+        return _b_miss_rule(universe_model, use_lss, q_active, catalog,
+                            c_mode=c_mode, selection_family=selection_family,
+                            lss_field_mode=lss_field_mode)
     return spec.inactive_reason(universe_model, use_lss, q_active, catalog,
                                 c_mode=c_mode,
                                 selection_family=selection_family)
@@ -683,6 +706,7 @@ def build_parameter_space(
     c_mode: "str | Sequence[str]" = "per_pixel",
     selection_prior=None,
     selection_family: str = "gaussian",
+    lss_field_mode: str = "table",
 ):
     """Construct labels and prior bounds for cosmological, population, survey, and sky parameters.
 
@@ -835,6 +859,7 @@ def build_parameter_space(
                     catalog,
                     c_mode=c_mode_by_cat[catalog - 1],
                     selection_family=selection_family,
+                    lss_field_mode=lss_field_mode,
                 )
         return None
 
