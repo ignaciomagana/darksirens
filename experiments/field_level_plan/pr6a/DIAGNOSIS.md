@@ -602,3 +602,119 @@ and is why the window is quoted.
 At `n = 24` realisations the error on a variance is 29%, so `J/H = 6.03 +- 1.8`
 -- far from the 1.0 a correctly specified model requires, and the conclusion
 does not depend on the precision.
+
+
+## Tier C at `n = 100`, on a disjoint seed block
+
+The overconfidence ratio is the statistic the whole diagnosis turns on, and at
+`n = 24` its error is 15%.  A third pass ran 100 realizations from a seed block
+(7001 + 37k) that shares nothing with the earlier passes -- so this is an
+independent replication, not an extension of the same sample.
+
+| pass | `n` | seeds | `latent` | `latent_off` |
+|---|---|---|---|---|
+| second (`tier_c_v2`) | 50 | 90000 + 37k | 2.552 | 2.351 |
+| big injections | 24 | as second | 2.662 | 2.413 |
+| **third (`tier_c_n100`)** | **100** | **7001 + 37k** | **2.645** | **2.482** |
+
+All three agree inside the ~7-15% precision of a variance ratio at these `n`
+(the first pass predates the ratio being recorded; it reported the same coverage
+failure, `frac_in_90` = 0.58 and 0.46).
+The factor is settled: **`2.645` latent, `2.482` latent_off**, now to ~7%.
+
+The `n = 100` pass in full (`tier_c_n100.json`; arms `latent` and `latent_off`,
+`n0 = 5e-5`, 49 grid nodes over `H0` in [20, 140]):
+
+| | `latent` | `latent_off` |
+|---|---|---|
+| spread of medians | 20.43 | 20.03 |
+| mean quoted `sigma` | 7.73 | 8.07 |
+| overconfidence | 2.645 | 2.482 |
+| `frac_in_90` (nominal 0.90) | 0.45 | 0.49 |
+| `frac_in_68` (nominal 0.68) | 0.29 | 0.31 |
+| outside 99% | 35/100 | 33/100 |
+| KS `p` | 5.1e-8 | 3.5e-5 |
+| median bias | -0.223 `sigma` | -0.087 `sigma` |
+| mean of medians | 64.07 | 66.57 |
+
+Three details worth having on the record:
+
+* **It is a width failure, not a bias.**  The median bias is 0.22 `sigma` and
+  0.09 `sigma` while coverage is half its nominal value.  The mean of medians
+  sits 3.7 (latent) and 1.2 (latent_off) km/s below `H0_true = 67.74`, which is
+  the same -2.5 km/s paired field shift seen at every `n`.
+* **No rail effects.**  Not one of the 200 medians lands within 1 km/s of either
+  grid edge (range 24.0 to 107.4), so the spread is not a grid artifact.
+* **It survives per-realization scoring.**  Scoring each realization by its OWN
+  `sigma` rather than the ensemble mean gives `z` with sd 3.08 (latent) and 2.71
+  (latent_off) -- larger, not smaller, than the ratio-of-means, because the
+  quoted widths themselves scatter by 32% and do so in the wrong direction to
+  help.
+
+Nothing here changes the diagnosis; it removes the precision caveat from it.
+
+
+## The PE offset across eight independent mocks
+
+`pe_calibration.py` on the Tier-B mock had eliminated PE over-sharpness
+(residual sd 1.059 against the 2.6 required) but left a residual MEAN of +0.486
+with a KS `p` of 0.0055 unexplained.  Eight fresh mocks (seeds 8101-8108, same
+injection set) were run through the same PP test; `pecal_multiseed.py`
+aggregates them into `pecal_multiseed.json`.
+
+| seed | `resid_mean` | `resid_sd` | KS `p` | `frac_in_90` | outside 99% |
+|---|---|---|---|---|---|
+| 8101 | +0.507 | 1.433 | 0.0004 | 0.783 | 4 |
+| 8102 | +0.657 | 1.148 | 0.0001 | 0.800 | 2 |
+| 8103 | +0.416 | 1.393 | 0.0789 | 0.800 | 2 |
+| 8104 | +0.305 | 1.065 | 0.0034 | 0.900 | 2 |
+| 8105 | +0.232 | 1.017 | 0.0737 | 0.900 | 0 |
+| 8106 | +0.167 | 1.118 | 0.2163 | 0.917 | 2 |
+| 8107 | +0.489 | 1.117 | 0.0007 | 0.833 | 1 |
+| 8108 | +0.417 | 0.960 | 0.0028 | 0.883 | 0 |
+
+**The width elimination now rests on eight realizations, not one.**  Mean
+`resid_sd` = **1.156** with a between-seed spread of 0.170 and a range of
+0.960-1.433, against the **2.6** Tier C requires.  The single realization's
+1.059 was, if anything, on the low side of a distribution that never comes
+within a factor 1.8 of what would be needed.
+
+**The mean offset is one number, not noise.**  Positive in all eight, mean
+**+0.399**, pooled standard error 0.053 -- 7.5 `sigma` from zero.  Its
+between-seed scatter (0.159) is what the within-seed error alone predicts
+(`1.156/sqrt(60) = 0.149`), so it is a constant feature of the construction
+rather than something that varies from mock to mock.
+
+**And the offset is the ENTIRE non-uniformity.**  Pooled over 480 events the raw
+KS is decisive against uniformity (`p = 9.8e-17`, statistic 0.197).  Mapping
+each quantile back through the Gaussian, removing the per-seed mean, and
+re-testing gives statistic 0.043, **`p = 0.32`** -- uniform.  The shape is
+right; only the centre is displaced.  (That re-test assumes near-Gaussian `dL`
+posteriors, which the raw KS does not; it answers only the one question.)
+
+**What this does NOT establish.**  The queue that generated these runs was set
+up on the premise that an offset stable across realizations would be "a DAG
+inconsistency, not noise".  That dichotomy is wrong and the conclusion does not
+follow.  A positive offset is what detection PREDICTS -- selection keeps upward
+SNR fluctuations, which under-estimate `dL`, so the truth sits above the PE mean
+-- and it is exactly what the hierarchical likelihood's selection term exists to
+absorb.  A working selection effect and a generator bug are BOTH stable across
+seeds; only noise is not.  So stability establishes that the offset is real and
+leaves its cause open.
+
+Two things would separate the two, neither done here:
+
+* the offset's dependence on SNR -- a selection offset is largest at threshold
+  and vanishes for loud events, a construction bug need not be;
+* whether the estimator's own bias stays small once the selection term is
+  included, which is a statement about `H0`, not about `dL`.
+
+On the second there is already indirect evidence: at `n = 100` the median bias
+is 0.22 `sigma` and 0.09 `sigma`, i.e. the estimator is very nearly centred
+while this +0.4 `sigma` offset sits in its input.  That is what absorption looks
+like.  It is consistent with the offset being benign and it is not proof.
+
+Either way this is a BIAS channel and Tier C's failure is a WIDTH failure, so
+neither reading of the offset explains the 2.5x -- and gate 8(a) had already
+closed that door from the other side, by collapsing the PE onto truth and
+watching the scatter not move.
