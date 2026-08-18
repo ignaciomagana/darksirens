@@ -1,0 +1,7 @@
+*.h5
+*.out
+*.err
+*.log
+__pycache__/
+anchors/
+data/

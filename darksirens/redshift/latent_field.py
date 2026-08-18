@@ -38,6 +38,7 @@ photo-z attenuation lives in the forward model.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
@@ -61,6 +62,97 @@ from darksirens.redshift.lognormal_completion import (
 JITTER_FACTORED_V1: float = 1e-6
 
 _VALID_JITTER_MODES = ("factored-v1", "legacy")
+
+#: PR-8 amplitude profiles.  ``"step"`` is what the sensitivity table quotes
+#: (one assumed number for the whole unconstrained region); ``"growth"`` is the
+#: same number carried by linear growth ``D(z)/D(z_depth)``, which DECAYS with
+#: z and is therefore the conservative shape at fixed ``amp_hi``.
+_VALID_AMP_KINDS = ("step", "growth")
+
+
+def growth_factor(z, Om0: float) -> np.ndarray:
+    """Linear growth factor ``D(z)``, flat LCDM, normalized to ``D(0) = 1``.
+
+    ``D(a) ∝ H(a) int_0^a da' / (a' H(a'))^3`` — the exact quadrature rather
+    than a fitting formula, because it costs nothing offline and the profile it
+    feeds is the whole content of PR-8's table.  numpy only: this is builder-
+    and loader-side, never traced (PLAN §3.7).
+    """
+    z = np.asarray(z, dtype=float)
+    a = 1.0 / (1.0 + z)
+    E = lambda x: np.sqrt(Om0 * x ** -3 + (1.0 - Om0))      # noqa: E731
+    # Integrate on a fixed fine grid in a and interpolate, so the profile is a
+    # single deterministic function of (z, Om0) and not of the caller's grid.
+    ag = np.linspace(1e-6, 1.0, 200001)
+    integ = np.concatenate([[0.0], np.cumsum(
+        0.5 * (1.0 / (ag[1:] * E(ag[1:])) ** 3
+               + 1.0 / (ag[:-1] * E(ag[:-1])) ** 3) * np.diff(ag))])
+    D_un = E(ag) * integ
+    D = np.interp(a, ag, D_un) / float(np.interp(1.0, ag, D_un))
+    return D
+
+
+def amp_profile(z, *, z_depth, amp_hi, kind: str = "step",
+                Om0: float = 0.3075) -> np.ndarray:
+    """The PR-8 amplitude profile ``amp(z)`` — ONE below the depth, assumed above.
+
+    PLAN §4.3 is the constraint this function is written around: ``(b, xi)`` and
+    ``(amp, xi)`` enter the model only through ``b*xi`` and ``b*amp``, so where
+    the counts constrain the field there is exactly one clustering amplitude and
+    it is ``b_gal``.  ``amp`` is therefore **pinned at 1 for every ``z <=
+    z_depth``, bit-exactly** — the profile returns literal ``1.0`` there, and a
+    literal ``1.0`` multiplying the basis rows is the identity in IEEE754, so
+    the fitted region is untouched rather than merely unchanged to rounding.
+    Anything else would re-open the degeneracy §4.3 closes.
+
+    ABOVE the depth there are no counts at all (R1: 99.994% of the missing
+    budget lies above ``z = 0.30`` and the measured in-support fraction is
+    6e-5), so ``amp(z > z_depth)`` is an ASSUMPTION, not a fitted quantity.
+    That is why PR-8 ships a sensitivity scan and never a marginalized
+    posterior (OWNER DECISION 7): the width above the depth is a pure function
+    of the number chosen here, and quoting it as a measurement would be quoting
+    a prior.
+
+    Parameters
+    ----------
+    z : array
+        Redshifts of the consumption rows.
+    z_depth : float
+        The FITTED depth — the edge of the count channel's support, not the
+        node range.  ``amp == 1`` at or below it.
+    amp_hi : float
+        The assumed amplitude above the depth, relative to the fitted region.
+        ``0.0`` reproduces the shipped "``Q == 1`` above ``z_depth``" convention
+        (PLAN §4.2's stated under-dispersion) EXACTLY: the basis rows are
+        multiplied by a literal zero, so the field, and with it ``logQ``, is
+        bit-zero there.  ``1.0`` would be the full prior variance — a factor of
+        ``e`` over the 38% of sky §4.2 names.
+    kind : {"step", "growth"}
+        ``"step"``: ``amp_hi`` everywhere above the depth (what the PR-8 table
+        quotes).  ``"growth"``: ``amp_hi * D(z)/D(z_depth)``, the same assumed
+        amplitude carried by linear growth.
+    Om0 : float
+        Matter density for the ``"growth"`` quadrature; ignored by ``"step"``.
+    """
+    z = np.asarray(z, dtype=float)
+    if kind not in _VALID_AMP_KINDS:
+        raise ValueError(
+            f"amp_profile kind must be one of {_VALID_AMP_KINDS}, got {kind!r}.")
+    amp_hi = float(amp_hi)
+    if amp_hi < 0.0:
+        raise ValueError(
+            f"amp_hi must be >= 0 (it is an amplitude, and it enters the field "
+            f"as amp*xi with xi ~ N(0, I)); got {amp_hi}.")
+    above = z > float(z_depth)
+    if kind == "step":
+        hi = np.full(z.shape, amp_hi)
+    else:
+        D = growth_factor(z, Om0)
+        D_depth = float(growth_factor(np.asarray([float(z_depth)]), Om0)[0])
+        hi = amp_hi * D / D_depth
+    # ``np.where`` and not an in-place write: the below-depth branch must be
+    # the literal 1.0 the docstring promises, on every element.
+    return np.where(above, hi, 1.0)
 
 
 def _chol_factor(K: jnp.ndarray, jitter: float) -> jnp.ndarray:
@@ -135,6 +227,10 @@ def build_latent_basis(
     sigma_z_fn: Callable | None = None,
     base_fn: Callable | None = None,
     footprint_rows=None,
+    amp_hi: float | None = None,
+    amp_kind: str = "step",
+    amp_z_depth: float | None = None,
+    amp_Om0: float = 0.3075,
 ) -> LatentBasis:
     """Build the factored basis (and optionally ``W``) at the given rows.
 
@@ -155,6 +251,28 @@ def build_latent_basis(
     footprint_rows : optional integer index array selecting the fitted
         footprint ``F`` inside ``X_n``; ``proj_sph`` is that row subset
         (defaults to all rows).
+    amp_hi, amp_kind, amp_z_depth, amp_Om0 :
+        PR-8's ``amp(z)`` profile (:func:`amp_profile`), applied to the
+        REDSHIFT FACTOR ROWS: ``phi_z -> amp(z) phi_z``, which scales the field
+        ``f(p, z) = row_fac[p] . phi_z[z]`` by ``amp(z)`` exactly, at every
+        ``p``, with no change whatsoever to the node geometry, the kernels or
+        their Cholesky factors.  That placement is deliberate — it is the only
+        one under which ``amp`` is a pure per-``z`` amplitude and the
+        ``amp == 1`` case is the IDENTITY (``x * 1.0 == x`` in IEEE754), so
+        ``amp_hi=None`` and an all-ones profile produce BIT-IDENTICAL bases
+        (pin P19a).  Scaling ``K_sph`` instead — the scalar ``amp`` argument
+        above — does not have that property, because the per-factor jitter is
+        absolute and does not scale with it.
+
+        ``amp_hi is None`` (the default) is the legacy path: no profile is
+        evaluated and no multiplication is performed.  Otherwise ``amp_z_depth``
+        must be given (the FITTED depth, below which PLAN §4.3 pins
+        ``amp == 1``) and the profile is applied to BOTH ``phi_z_out`` and
+        ``phi_z_fine``.  ``phi_z_fine`` is the count operator's grid and lives
+        entirely below the depth in every shipped configuration, where the
+        profile is exactly ``1.0``; applying it there anyway is what keeps the
+        fitted and consumed fields the same object by construction instead of
+        by an argument about grid ranges.
     """
     if jitter_mode != "factored-v1":
         raise ValueError(
@@ -188,6 +306,26 @@ def build_latent_basis(
     phi_z_fine = _phi_z(jnp.asarray(zeta_fine, dtype=jnp.float64)) \
         if zeta_fine is not None else None
 
+    # ---- PR-8: the amp(z) profile, applied to the redshift factor rows ----
+    if amp_hi is not None:
+        if amp_z_depth is None:
+            raise ValueError(
+                "build_latent_basis: amp_hi requires amp_z_depth (the FITTED "
+                "depth). PLAN §4.3 pins amp = 1 wherever the counts constrain "
+                "the field, so the profile is meaningless without the edge of "
+                "that region; passing amp_hi alone would scale the fitted "
+                "region too and re-open the (b_gal, amp) degeneracy.")
+        amp_out = amp_profile(np.expm1(np.asarray(zeta_out, dtype=float)),
+                              z_depth=amp_z_depth, amp_hi=amp_hi,
+                              kind=amp_kind, Om0=amp_Om0)
+        phi_z_out = phi_z_out * jnp.asarray(amp_out)[:, None]
+        if phi_z_fine is not None:
+            amp_fine = amp_profile(
+                np.expm1(np.asarray(zeta_fine, dtype=float)),
+                z_depth=amp_z_depth, amp_hi=amp_hi, kind=amp_kind,
+                Om0=amp_Om0)
+            phi_z_fine = phi_z_fine * jnp.asarray(amp_fine)[:, None]
+
     W = None
     if (shell_edges_z is not None and zeta_fine is not None
             and sigma_z_fn is not None and base_fn is not None):
@@ -201,6 +339,16 @@ def build_latent_basis(
                 j_sph=JITTER_FACTORED_V1, j_z=JITTER_FACTORED_V1,
                 amp=float(amp), ls_sph=float(ls_sph), ls_z=float(ls_z),
                 M_sph=M_sph, M_z=M_z, z_node_hi=float(z_node_hi))
+    if amp_hi is not None:
+        # Written into ``basis_meta`` ONLY when a profile was applied, so an
+        # artifact built before PR-8 and one built after with no profile carry
+        # byte-identical metadata and the loader's ``.get("amp_hi")`` is the
+        # single test for "does this artifact model the field above the
+        # depth?".  These four numbers are all the loader needs to REBUILD the
+        # profile (it already rebuilds ``phi_z`` from ``basis_meta``), so no
+        # new dataset is stored and the two sides cannot drift.
+        meta.update(amp_hi=float(amp_hi), amp_kind=str(amp_kind),
+                    amp_z_depth=float(amp_z_depth), amp_Om0=float(amp_Om0))
     return LatentBasis(phi_sph=phi_sph, phi_z_out=phi_z_out,
                        phi_z_fine=phi_z_fine, shell_response=W,
                        proj_sph=proj, L_sph=L_sph, L_z=L_z,
@@ -364,6 +512,75 @@ def sky_moments(basis: LatentBasis, xi_members, b_nodes,
     else:
         A, B = jax.vmap(lambda rf: _one(None, rf))(row_fac)
     return A, B
+
+
+def sky_moments_by_tracer(basis: LatentBasis, xi_members, b_nodes,
+                          f_p_by_tracer, *, proj_by_tracer=None,
+                          row_fac_by_tracer=None):
+    """Per-tracer moment tables ``(A_k, B_k)`` and constants ``(P_k, F_k)``.
+
+    **Why the tables are PER TRACER and cannot be shared (PLAN §2.2 + §4.4's
+    ``Z_k`` non-cancellation).**  Eq. (2)'s two reductions
+
+        A(z; b) = sum_{p in F} e^{b f(p,z)},   B(z; b) = sum_{p in F} f_p e^{b f(p,z)}
+
+    depend on the tracer through TWO things: the fitted footprint ``F_k`` the
+    sums run over, and the per-pixel selection fraction ``f_p^(k)`` that weights
+    ``B``.  Both are properties of catalog ``k``'s depth and mask, not of the
+    field, so K tracers need K tables even though they share one ``xi`` and one
+    ``b_GW`` grid.  Sharing one table across catalogs would normalize catalog
+    2's budget against catalog 1's footprint — the exact error the K >= 2
+    refusal in ``likelihood/factory.py`` exists to prevent.
+
+    **This is where the closed form ``redshift/completion.py`` needs actually
+    lives.**  ``completion.field_global_log_Z``'s own docstring records that at
+    K = 1 the survey-global ``log Z`` cancels — it enters the ``N`` per-event PE
+    terms and the ``-N log mu`` selection term the same number of times — while
+    "at K >= 2 each catalog's ``log_Z_global`` sits inside its own mixture
+    branch and does NOT cancel".  §2.2's decomposition is what makes that
+    surviving object cheap: split the sum at ``f_p = 0``, and the occupied rows
+    go through the existing row-wise path while the empty/off-footprint block is
+    eq. (2) over the empty subset, closed-form in the scalar ``c = C(z; theta)``
+    as ``(A_k - c B_k)/(P_k - c F_k)``.  In latent mode the off-footprint block
+    is even simpler, because the footprint is fitted TO the counts: every empty
+    pixel is outside ``F_k``, ``Q == 1`` there by the seam's convention, and the
+    budget is the plain ``f_p`` formula (``completion.py``'s LATENT branch).  So
+    the per-tracer ``Z_k`` needs the per-tracer ``(A_k, B_k, P_k, F_k)`` and
+    nothing else — no per-member empty budget, no second reduction, and no
+    derivation of our own.
+
+    ``f_p_by_tracer`` is a length-K sequence of footprint completeness rows.
+    ``proj_by_tracer`` is the matching sequence of basis row blocks (defaults to
+    ``basis.proj_sph`` for every tracer, i.e. a shared footprint with
+    per-tracer depth); ``row_fac_by_tracer`` is the matching sequence of stored
+    f32 row factors, passed for the eq. (4) exactness reason
+    :func:`sky_moments` documents at length.
+
+    Returns ``(A, B, P, F)`` with ``A``/``B`` shaped ``(K, M_draw, n_b, N_z)``
+    and ``P``/``F`` shaped ``(K,)``.
+    """
+    f_by_k = list(f_p_by_tracer)
+    K = len(f_by_k)
+    projs = ([basis.proj_sph] * K if proj_by_tracer is None
+             else list(proj_by_tracer))
+    rfs = ([None] * K if row_fac_by_tracer is None
+           else list(row_fac_by_tracer))
+    if len(projs) != K or len(rfs) != K:
+        raise ValueError(
+            f"sky_moments_by_tracer: {K} completeness blocks against "
+            f"{len(projs)} row blocks and {len(rfs)} row-factor blocks.")
+    As, Bs, Ps, Fs = [], [], [], []
+    for f_p, proj, rf in zip(f_by_k, projs, rfs):
+        # ``replace`` and not a re-construction: LatentBasis grows fields as the
+        # ladder proceeds (PR-8 added the amplitude profile), and a positional
+        # or exhaustive-keyword rebuild here would silently drop whichever field
+        # arrives next while still type-checking.
+        sub = dataclasses.replace(basis, proj_sph=proj)
+        A, B = sky_moments(sub, xi_members, b_nodes, f_p, row_fac=rf)
+        P, F = sky_constant_coeffs(f_p)
+        As.append(A); Bs.append(B); Ps.append(P); Fs.append(F)
+    return (jnp.stack(As), jnp.stack(Bs),
+            np.asarray(Ps, dtype=float), np.asarray(Fs, dtype=float))
 
 
 def rho_from_moments(A, B, c, b_index) -> jnp.ndarray:

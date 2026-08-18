@@ -160,6 +160,12 @@ _LATENT_FP_SCALARS = ("M_sph", "M_z", "ls_sph", "ls_z", "amp", "z_node_hi",
 _LATENT_FP_ARRAYS = ("completeness", "shell_response", "z_count_edges",
                      "counts")
 
+#: PR-8: the ``amp(z)`` profile's four numbers, hashed into the guard-1 content
+#: digest WHEN PRESENT (see :func:`latent_artifact_fingerprint`).  Optional by
+#: construction -- a pre-PR-8 anchor carries none of them and hashes exactly as
+#: it did before.
+_LATENT_FP_SCALARS_AMP = ("amp_hi", "amp_kind", "amp_z_depth", "amp_Om0")
+
 #: Isotropy guard threshold (PLAN §4.4 successor 4): the anchor's angular and
 #: radial correlation lengths must agree to within a factor of 1.5 in PHYSICAL
 #: units at ``z_ref``.  Beyond that the field the artifact fits is a pancake --
@@ -355,6 +361,17 @@ def latent_artifact_fingerprint(path):
             h.update(name.encode())
             h.update(np.ascontiguousarray(np.asarray(g[name][...])).tobytes())
         cfg = {k: basis_meta[k] for k in _LATENT_FP_SCALARS}
+        # PR-8's amp(z) profile joins the digest ONLY when the artifact carries
+        # one.  Two anchors that differ solely in the assumed amp(z) above the
+        # depth are different fields -- they generate different Q over 99.99% of
+        # the missing budget -- so they must not share a content digest.  They
+        # are optional rather than required because every anchor built before
+        # PR-8 has no profile at all, and a required key would refuse those
+        # artifacts instead of reproducing their digest unchanged (which the
+        # absent-key branch does, byte for byte).
+        for k in _LATENT_FP_SCALARS_AMP:
+            if k in basis_meta:
+                cfg[k] = basis_meta[k]
         cfg["nside"] = int(nside)
         cfg["b_gal"] = float(b_gal)
         cfg["theta_ref"] = theta_ref
@@ -496,8 +513,23 @@ def _latent_guard_isotropy(plan) -> None:
     pancake fits radial modes to angular structure and generates a modulation
     that is not the clustering it claims to be.
 
-    ``z_ref`` is the MIDPOINT of the artifact's depth, ``0.5 * z_node_hi`` --
-    the fitted volume's own scale, and the only z the artifact itself names.
+    ``z_ref`` is the MIDPOINT of the artifact's FITTED depth -- the fitted
+    volume's own scale, which is where the isotropy claim has to hold because
+    that is where the counts see the field.  Through PR-7 the node range and
+    the fitted depth were the same number (``z_node_hi = z_depth``) and this
+    read ``0.5 * z_node_hi``.  PR-8 separates them: an ``amp(z)`` anchor puts
+    nodes far above the depth to give the assumed field somewhere to live, and
+    taking the midpoint of the NODE range would then measure the aspect ratio
+    at a redshift the counts never constrained -- failing anchors whose fitted
+    geometry is fine, for a reason that has nothing to do with the fit.  So the
+    fitted depth is taken from the artifact, in the order in which its sources
+    are authoritative: the profile's step ``amp_z_depth`` (which the loader
+    refuses unless it equals the run's ``z_depth``), else the last SHELL EDGE
+    ``z_fit_depth`` -- the counts' own upper limit, and already a guard-1
+    fingerprint array -- and only then the node range.  On every pre-PR-8
+    artifact all three are the same number, so this IS the pre-PR-8 expression
+    there.
+
     The ratio is H0-FREE by construction: ``chi = (c/H0) int dz/E`` and
     ``dchi/dz = (c/H0)/E`` carry the same ``c/H0``, so it cancels and only
     ``Om0`` survives (taken from the artifact's ``theta_ref`` when it has one,
@@ -505,7 +537,9 @@ def _latent_guard_isotropy(plan) -> None:
     input is refused above: nothing here may depend on the sampled H0.
     """
     z_node_hi = float(plan.meta["z_node_hi"])
-    z_ref = 0.5 * z_node_hi
+    z_fit = float(plan.meta.get("amp_z_depth")
+                  or plan.meta.get("z_fit_depth") or z_node_hi)
+    z_ref = 0.5 * z_fit
     ls_sph = float(plan.meta["ls_sph"])
     ls_z = float(plan.meta["ls_z"])
     theta_ref = dict(plan.theta_ref or {})
@@ -521,7 +555,8 @@ def _latent_guard_isotropy(plan) -> None:
     if abs(np.log(aspect)) >= _LATENT_ISOTROPY_LOG_TOL:
         raise ValueError(
             f"latent artifact's correlation lengths are anisotropic at "
-            f"z_ref = {z_ref:.4g} (the depth midpoint, Om0 = {om0:.4g}): "
+            f"z_ref = {z_ref:.4g} (the FITTED depth's midpoint, "
+            f"Om0 = {om0:.4g}): "
             f"transverse ls_sph*chi = {transverse:.4g} Mpc vs radial "
             f"ls_z*(1+z)*dchi/dz = {radial:.4g} Mpc, an aspect ratio of "
             f"{aspect:.3g} (limit 1.5). A pancake field fits radial modes to "
@@ -751,6 +786,16 @@ def _resolve_latent_leaves(opts, catalogs, survey_z_depth, nside,
         latent_F_F=float(plan.F_F),
         latent_field_row_map=field_row_map,
         latent_field_on_fp=field_on_fp,
+        # PR-8: the support leaf is installed ONLY when the anchor models the
+        # field above the fitted depth.  On every pre-PR-8 anchor (and every
+        # ``--amp-hi 0`` one, whose support IS ``zgrid <= z_depth``) it stays
+        # ``None`` and the consumers keep computing the mask from
+        # ``survey.z_depth`` exactly as they did -- a static pytree-STRUCTURE
+        # branch, so the legacy path is not merely equivalent, it is the same
+        # code with the same arrays.
+        latent_support=(barrier(jnp.asarray(plan.below_depth))
+                        if float(plan.meta.get("amp_hi") or 0.0) > 0.0
+                        else None),
     )
     leaves_pe = dict(shared, latent_row_map=row_map_pe, latent_on_fp=on_fp_pe)
     leaves_sel = dict(shared, latent_row_map=row_map_sel,
@@ -1460,19 +1505,33 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     # bundles and is bit-identical to the pre-unification behaviour.
     n_catalogs = int(getattr(opts, "n_catalogs", 1))
     if data.get("catalogs") is not None or n_catalogs >= 2:
-        # The latent seam is wired on the FLAT (single-catalog) path only: each
-        # catalog of a K >= 2 mixture has its own footprint, depth map and
-        # anchor, so one artifact cannot serve them and silently reusing it
-        # would apply catalog 1's field to catalog 2's rows.  Refuse rather
-        # than ignore the flag (PR-5 scope; the mixture wiring is its own PR).
+        # The latent seam is wired on the FLAT (single-catalog) path only.
+        #
+        # [PR-7 restated this message; the refusal itself is unchanged.]  The
+        # pre-PR-7 reason was "each catalog has its own footprint and depth map,
+        # so one artifact cannot serve them".  That half is now FALSE: PR-7's
+        # anchor carries a /latent_field/tracers/<k> block per tracer, with that
+        # tracer's own footprint completeness, its own counts, its own eq. (2)
+        # moment tables and its own b_k, all against ONE xi -- which is exactly
+        # the object a shared-field K >= 2 marginalization needs, and building
+        # it is what makes such a configuration constructible at all (PLAN §0.4:
+        # on the table path it is not, at any K).  What is still missing is
+        # likelihood-side and specific: the seam's per-catalog ROW MAP.
+        # _resolve_latent_leaves builds one (latent_row_map, latent_on_fp) pair
+        # against one catalog view's gathered pixels, and a K >= 2 mixture needs
+        # K of them plus the per-branch selection of the matching tracer's
+        # (A_k, B_k, P_k, F_k).  Until that exists, a latent K >= 2 run would
+        # evaluate tracer 0's moments on every branch, so the flag is refused
+        # rather than ignored.
         if _resolve_lss_field_mode(opts)[0] == "latent":
             raise NotImplementedError(
                 "lss_field_mode='latent' is not wired on the K >= 2 mixture "
-                "path: each catalog has its own footprint and depth map, so it "
-                "needs its own anchor artifact, and reusing one across "
-                "catalogs would evaluate one catalog's field on another's "
-                "rows. Run the latent seam with a single catalog, or use "
-                "--lss_field_mode table."
+                "path: the ANCHOR is K-tracer as of field-level PR-7 (one xi, "
+                "per-tracer footprint completeness, counts and eq. (2) moment "
+                "tables under /latent_field/tracers), but the seam still "
+                "resolves a single per-catalog row map, so every mixture "
+                "branch would consume tracer 0's moments. Run the latent seam "
+                "with a single catalog, or use --lss_field_mode table."
             )
         return _make_mixture_likelihood(
             opts, data, pop_params_fid, fixed_parameter_values, n_catalogs
