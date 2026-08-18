@@ -41,6 +41,10 @@ import numpy as np  # noqa: E402
 
 from darksirens.redshift.selection import load_selection_fit_json  # noqa: E402
 
+# numpy 1.26 (the pinned stack on both machines) has no ``trapezoid``; 2.x
+# renamed ``trapz`` to it.  Bind once rather than per call.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
 
 def _opts(*, q_path, per_pixel_completeness=None, allow_unmasked=False):
     o = SimpleNamespace(
@@ -79,7 +83,7 @@ def _summarize(h0, vals):
     v = np.where(finite, vals, -np.inf)
     pdf = np.exp(v - v.max())
     pdf = np.where(finite, pdf, 0.0)
-    pdf /= np.trapezoid(pdf, h0)
+    pdf /= _trapz(pdf, h0)
     cdf = np.concatenate([[0], np.cumsum(0.5 * (pdf[1:] + pdf[:-1])
                                          * np.diff(h0))])
     cdf /= cdf[-1]
