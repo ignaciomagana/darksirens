@@ -428,3 +428,33 @@ term by 30%.
 9. the catalog KDE width (dominated by the stored `dzgals`)
 
 plus gate 8(a), which localises what remains to the estimator's own terms.
+
+
+---
+
+# An attempted shortcut that does NOT settle anything (recorded so it is not repeated)
+
+The leading hypothesis after pass 4 is "the redshift prior is more informative
+than the catalog warrants".  One tempting cheap version of that is: does the
+selection MODEL's completeness match the mock's ACTUAL completeness?  If the
+model thinks the survey is more complete than it is, the missing branch is too
+small, the catalog spikes dominate, and the prior over-informs.
+
+Attempted, and it does not survive its own assumptions.
+
+    model  Cbar * <f_p>                = 0.6348
+    actual, if n_complete is ALL-SKY   = 0.4566   -> model 1.39x too complete
+    actual, if restricted to the 1,854
+      occupied of 3,072 pixels         = 0.7565   -> model 0.84x, the OTHER WAY
+
+The sign of the answer flips on whether `truth.json`'s `n_complete` counts the
+full sky or the footprint, and the estimate additionally ignores the clustering
+of the true field and the `(1+z)^delta` evolution in the number density.  A
+quantity whose sign depends on an unresolved bookkeeping question is not
+evidence, and the 1.39x version is NOT reported as support for the hypothesis
+even though it is the right size.
+
+`score_information.py` answers the same question -- does the event term carry
+more information than its own curvature implies -- with none of these
+assumptions, by measuring `J` and `H` from the same stored `logL(H0)` curves.
+That is what the conclusion should rest on.
