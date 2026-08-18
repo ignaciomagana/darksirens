@@ -505,3 +505,71 @@ Combined with gate 8(a) (the deficit is in the estimator, not the PE) and with
 the selection term being a clean power law, the surviving description is: **a
 fixed ~30% fractional error in the event/catalog term's `H0` curvature**, i.e.
 a redshift prior more informative than the catalog warrants.
+
+
+---
+
+# The information identity, measured: `J/H = 6.03`
+
+`H = -d^2 logL/dH0^2` (observed information) and `J = Var(dlogL/dH0)`
+(expected information) must agree for a correctly specified model, and the MLE
+variance is then `H^-1`.  When they disagree the correct variance is the
+sandwich `H^-1 J H^-1`, and the naive interval is too narrow by `sqrt(J/H)`.
+Both computed at `H0 = 68` from the SAME stored `logL(H0)` curves over 24
+realisations (`latent_off`):
+
+    J (expected, = Var of the score)  = 0.111133
+    H (observed, = mean curvature)    = 0.018418
+    J/H = 6.034     ->  intervals too narrow by  x2.456
+
+**Tier C measured 2.1-2.9 directly from the realisation scatter.  These agree**
+-- and they are independent routes to the same number, one from the spread of
+medians, the other from the score and the curvature of individual likelihood
+curves.
+
+## What it localises, and one artifact ruled out
+
+Because the injection set is shared across realisations, the selection term's
+score is identical in every one and contributes **zero** variance.  `J` is
+therefore a pure EVENT-term quantity, while `H` is the cancelled net.  So:
+
+    J / |event curvature|  = 1.728      (1.0 if the event term were consistent)
+    J / net curvature      = 6.034
+
+The event term's score varies **1.73x more than its own curvature allows**, and
+the 65% cancellation against the selection term amplifies that to 6.03 in the
+net.  Both factors are real and they compound.
+
+**Is `J` artificially small because the injections are held fixed?**  No.  If
+they were redrawn per realisation the selection score would acquire a Monte
+Carlo variance; from the measured variation of the `N log mu` MC error across
+the scan (0.26 nats over ~100 km/s) that contributes `~7e-6`, against the
+`0.093` needed to close the gap -- short by four orders of magnitude.  The
+mismatch is not an artifact of the tier's design.
+
+## The diagnosis, as far as the evidence carries it
+
+Three independent measurements agree:
+
+* **gate 8(a)** -- delta-PE at truth leaves the scatter unmoved: the deficit is
+  in the estimator, not the parameter estimation or the event construction;
+* **`N_obs` scaling at n=40** -- scatter and `sigma` both fall as `1/sqrt(N)`
+  and the ratio is constant, which is what a fixed FRACTIONAL error in one
+  curvature term produces and no common-mode term can;
+* **the information identity** -- `J/H = 6.03`, matching the observed width
+  deficit, with `J` a pure event-term quantity.
+
+and the selection term is a clean power law with no structural defect.  The
+surviving description is a **fixed fractional error in the event/catalog term**:
+its curvature under-states the actual variability of its own score by 1.73x,
+which the cancellation turns into a 2.5x interval deficit.  In physical terms,
+the redshift prior is more informative than the catalog warrants.
+
+## What is actionable now, without the root cause
+
+`sqrt(J/H)` IS the correction.  A sandwich interval -- `H^-1 J H^-1` rather
+than `H^-1` -- has the right coverage by construction whatever the underlying
+misspecification, and both ingredients are computable from a single run's
+likelihood curve plus a modest ensemble.  That is a defensible way to quote an
+interval before the root cause is found, and it should be measured on the
+production configuration rather than assumed to carry the mock's factor.
