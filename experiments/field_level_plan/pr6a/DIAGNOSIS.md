@@ -301,3 +301,49 @@ here answers that -- the scale difference is two orders of magnitude in
 galaxies and a factor 4 in events -- and it must not be assumed in either
 direction.  It is the reason the closure tiers matter, and it should be
 resolved before the production interval is quoted as a credible interval.
+
+
+---
+
+# CORRECTION: the rule-7 call was wrong in mechanism
+
+Pass 3 reported the mock's `z_depth` as "metadata-only", on the evidence that
+the catalog rows run to z = 0.3847 against a stamped 0.30.  **That
+characterisation is wrong and is withdrawn.**
+
+`make_mock.py` DOES apply the cut to the rows:
+
+    observed = ((complete["z"] <= Z_DEPTH)
+                & (complete["app_mag"] <= survey_cfg.magnitude_limit)
+                & (rng.uniform(size=total) < p_keep))
+
+The cut is on the TRUE redshift; what the catalog STORES is `z_obs = z + zerr`.
+So galaxies with true z just below the depth land above it once photo-z error
+is applied.  Measured, and it is exactly that:
+
+    above-depth galaxies      9,384
+    median excess over 0.30   0.50 sigma      max excess  3.68 sigma
+    stored dzgals (1 sigma)   0.0230          (the mock's photo-z width)
+    n(z > 0.30 / .32 / .34 / .36 / .38) = 9,384 / 2,485 / 382 / 31 / 1
+
+a Gaussian tail, not an untruncated parent.  Rule 7's actual signature -- "the
+catalog's total row count/weight equals the uncut parent" -- does NOT hold
+here; the count is the cut population, scattered.
+
+**What IS different from production**, and it is the reverse of what I wrote:
+production's catalog is hard-truncated at OBSERVED z = 0.3000 (zero galaxies
+above), while the mock carries the physical photo-z tail.  The mock is the more
+physical of the two on this point.
+
+**What may still matter.**  The likelihood's `z_depth` convention is that
+completeness is exactly zero beyond the depth -- every host there is missing.
+A catalog that contains OBSERVED galaxies above the depth is inconsistent with
+that convention regardless of how they got there, because the same galaxies are
+then in the observed branch and inside the "everything is missing" region.  The
+shipped code's `Nobs * exp(kernels.log_depth_mass)` rescaling exists for this.
+So the truncation test remains worth running -- it measures sensitivity to the
+boundary treatment -- but its motivation is "model/catalog convention
+mismatch", not "the builder forgot to cut".
+
+Recorded because the wrong version was already written into a commit message
+and into pass 3 above.
