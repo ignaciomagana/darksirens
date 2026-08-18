@@ -1041,7 +1041,16 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
 
     nside = int(data["nside"])
     sfm = load_selection_fraction(path, nside)
-    ngals_full = np.asarray(data["ngals"])
+    # ``ngals_catalog`` is the key the loader actually stores (see the
+    # ``ngals_catalog`` reads at :1102, :1135, :1189 and :1194); ``data["ngals"]``
+    # was never populated on this path, so --per_pixel_completeness raised
+    # KeyError before its first likelihood evaluation on ANY run that reached
+    # here.  Found by the PR-6a campaign, which worked around it with a shim in
+    # its own harness; fixed at the source here because the production H0 scan
+    # goes through this line.  ``get`` with the legacy alias so a caller that
+    # does supply the old key still works.
+    ngals_full = np.asarray(
+        data.get("ngals_catalog", data.get("ngals")))
     if ngals_full.shape[0] != sfm.f_p.shape[0]:
         raise ValueError(
             f"--per_pixel_completeness: catalog has {ngals_full.shape[0]} "
