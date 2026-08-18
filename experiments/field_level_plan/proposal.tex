@@ -100,14 +100,18 @@ describes. Which corner a given pairing occupies is set by two numbers one can
 measure, not by which method one prefers.
 
 \paragraph{What is affordable, and what is not.} A full per-proposal Newton
-re-solve of the field is not affordable: at the smallest rank the resolution
-guards permit ($M=\Msph\Mz=315\times12=3780$) it is $\sim1$\,s of dense linear
-algebra against a measured $27.5$--$49.3$\,ms likelihood, a factor of $\sim36$,
-inside a run that makes $\sim10^6$ calls. The affordable form is
-\emph{linear response}: the mode of the field posterior moves affinely with the
-proposal through $S=\partial\hat\xi/\partial\theta$, obtained from the implicit
-function theorem against the Cholesky factor the anchor solve already computes,
-at a storage cost of $121$\,kB and an online cost of one member-independent
+re-solve of the field is not affordable --- though not for the reason first
+written down. The production baseline is now measured on the line this work
+targets: $1417$\,ms per likelihood call with no structure at all, on one H100
+(\S\ref{sec:measured}), not the $27.5$--$49.3$\,ms that belongs to a different
+configuration. A $\sim1$\,s re-solve at the guard-permitted rank is therefore of
+order the likelihood itself, not $36$ times it, and the refusal has to rest ---
+and does rest --- on memory and on smoothness rather than on wall clock. The
+affordable form is \emph{linear response}: the mode of the field posterior moves
+affinely with the proposal through $S=\partial\hat\xi/\partial\theta$, obtained
+from the implicit function theorem against the Cholesky factor the anchor solve
+already computes, at a measured storage cost of $101$\,kB in the shipped
+artefact (five columns at $M=2520$) and an online cost of one member-independent
 row-factor contraction. The correction is member-independent, which is the single
 fact that keeps the memory budget flat under a $256$-fold evaluation concurrency.
 
@@ -128,21 +132,48 @@ footprint. The $K$-correction is why it sits below the other three: it drives
 $\Csel$ down faster with redshift ($\Csel=0.92$ at $\zdep$, $<10^{-3}$ by
 $z=1$), moving yet more of the missing budget above the survey depth, where
 $Q\equiv1$. The field is being asked to redistribute two thousandths of one
-percent of the missing budget. (iii) The mean-one budget
+percent of the missing budget --- but that is the \emph{budget} share, and it is
+the wrong statistic for whether the field can move the answer, because the
+events sit exactly where the catalog is. Measured, $24.6\%$ of all posterior
+samples fall in support and the event-weighted missing-branch mass is
+$\sum_i\varphi_i=0.993$, two to three orders above the budget share
+(\S\ref{sec:measured}). (iii) The mean-one budget
 constraint that makes ``$C$ and $n_0$ own the budget, $Q$ owns placement'' true is
 a \emph{gauge fixing}, not a measurement.
 
-\paragraph{The first thing to do is the cheapest thing to do.} Point (ii) is not
-a caveat, it is a falsifiable prediction that the whole direction may be a
-null operation, and it is testable in three days against artefacts that exist
-today: the event-weighted fraction of prior mass in the in-support missing branch,
-and the oscillation of the log-likelihood across the $H_0$ prior when the
-\emph{existing} table is switched on at the anchor. That second number is an upper
-bound on everything the entire programme can buy. If both are small, the honest
-deliverable is a bounded systematic --- ``large-scale-structure placement
-uncertainty contributes less than $X$ to the $H_0$ posterior'' --- and it is a
-publishable result reachable in days rather than weeks. Every other measurement in
-this document is downstream of that one.
+\paragraph{The cheapest thing to do was done first, and it did not stop the
+programme.} Point (ii) was written not as a caveat but as a falsifiable
+prediction that the whole direction might be a null operation, testable in three
+days against artefacts that existed already: the event-weighted fraction of prior
+mass in the in-support missing branch, and the oscillation of the log-likelihood
+across the $H_0$ prior when the \emph{existing} table is switched on at the
+anchor. Both were measured and the prediction is refuted. The event-weighted mass
+is $\sum_i\varphi_i=0.993$ against a kill threshold of $10^{-3}$, and the
+oscillation is $10.85$ nats against a threshold of $0.1$: both legs miss by two
+orders of magnitude. So the upper bound on everything the entire programme can
+buy is $10.85$ nats rather than zero --- $0.3$ nat and
+$0.3$\,km\,s$^{-1}$\,Mpc$^{-1}$ of median shift within the posterior bulk. Every
+other measurement in this document is downstream of that one, and
+\S\ref{sec:measured} reports them.
+
+\paragraph{What came back, successes and failures in the same breath.} Rungs
+$0$ through $8$ have run (\S\ref{sec:measured}). The field's $\theta$-dependence
+on the gravitational-wave channel is $5.4\times10^{-4}$ nat, $300$ times under
+its own gate, so the $\theta$-coupled rung is demoted to an inertness flag and
+the frozen-anchor ensemble is the deliverable; the galaxy-side evidence
+oscillates by $59.9$ nats over the same draws and stays a diagnostic. The member
+marginalisation ships: the spread is $1.5\times10^{-2}$ nat at the anchor and at
+most $1.15$ nats anywhere in the $H_0$ prior, and the $\theta$-varying bias at
+the shipped $\Mdraw=8$ is $7.1\times10^{-3}$ nat against a $0.1$-nat budget. The
+seam costs $+2.7\%$ of the measured baseline. Two things did not pass. The mock
+closure's coverage tiers fail --- but they fail identically in the arm with
+\emph{no} field, $82$--$92\%$ of the scatter is the event draw at fixed catalog,
+and the fix aimed at them was implemented and measured not to help, so what those
+tiers measure is the mock's own event-channel calibration and not the latent
+design. And a $5\%$ shared membership between two tracers breaks the bias-ratio
+recovery at $10\sigma$ while the quoted uncertainty \emph{shrinks}. The honest
+one-line status is that the code is validated and the mock's parameter-estimation
+calibration is not.
 
 \paragraph{What is genuinely new, stated at the level the literature permits.}
 Three-dimensional Bayesian reconstruction of the galaxy field for dark sirens is
@@ -153,8 +184,15 @@ field carrying per-tracer bias and per-tracer parametric selection, marginalised
 inside a finite-event gravitational-wave hierarchy with the same realisation in
 the event terms and in the detection normalisation, at fixed missing-budget
 monopole --- and the demonstration that catalog sirens and cross-correlation
-sirens are its two limits. The claim to \emph{first} is not made here; the
-paper-by-paper search that would license it is the first item of work.
+sirens are its two limits. No unqualified claim to priority is made here, and
+none is made on assertion: the paper-by-paper search that licenses what \emph{is}
+claimed was run as the opening item of work rather than the closing one, and is
+recorded in \texttt{pr0/NOVELTY\_SEARCH.md} --- $\sim22$ papers individually
+assessed, search date 2026-08-13, each against the three tests
+(per-realisation budget constraint; realisations through the \emph{selection}
+normalisation; matched multi-tracer realisations of one shared latent). Every
+statement below that could be read as priority carries that search behind it
+(\S\ref{sec:measured}, D11).
 
 % =====================================================================
 \section{What the machinery does today}
@@ -190,9 +228,9 @@ completeness, which is $f_p\equiv1$ in today's code.
 The production run this work targets carries $259$ events at $4096$ posterior
 samples, $1\,067\,946$ detected injections, $20$ free dimensions, and
 \emph{no large-scale structure at all}: it runs with the field switched off and no
-completion table. The field-level path would be the first structure ever used in
-production, which is why the standard is ``provably inert when off, provably
-correct when on.''
+completion table. No production run on this line has ever carried structure of any
+kind; the field-level path would be the one that does, which is why the standard is
+``provably inert when off, provably correct when on.''
 
 \subsection{Thinning: why the catalog and the missing galaxies separate}
 
@@ -290,9 +328,12 @@ over $2.24$M galaxies), i.e.\ $\sigma_\chi=89$\,Mpc at $z_{\rm ref}=0.237$, so a
 $50$\,Mpc radial kernel retains $\exp[-(89/50)^2/2]=0.20$ of its own radial signal
 while a $190$\,Mpc kernel retains $0.90$. The self-consistent configuration is
 isotropic at $\sim190$\,Mpc: $\ell_{\rm ang}=0.2$, $\ell_\zeta=0.039$, $\Msph=315$,
-$\Mz=8$--$12$, $M=2520$--$3780$. At that rank roughly $40\%$ of the coefficients
-are data-constrained and the remainder are prior --- which is correct, and is what
-the Laplace covariance encodes.
+$\Mz=8$--$12$, $M=2520$--$3780$; the shipped anchor is built at the lower end,
+$M=315\times8=2520$. At that rank the measured spectrum of $H$ on the real
+catalog puts $1497$ of $2520$ modes above eigenvalue $10$ and only $199$ below
+$1.01$, at a per-mode amplitude $\|\hat\xi\|/\sqrt M=2.46$: the count channel is
+strongly data-constrained, a few hundred modes are pure prior, and that split is
+what the Laplace covariance encodes.
 
 The fit is over solve voxels $v=(p,g)$ with integer counts $N_v$ and a base
 $\bar\lambda_v=\int_g C\,\nbar\,dz$, giving
@@ -412,8 +453,16 @@ for an $\epsilon$-nat bias.
 \noindent This is sharper than the usual $M\sim e^{\sigma^2}$ folklore and it is
 brutal. At $\sigma=1.0$ nats, $\epsilon=0.1$ needs $M=9$; at $\sigma=1.5$, $M=43$;
 at $\sigma=2.6$, $M=4.3\times10^{3}$, and $M=8$ carries a $54$-nat bias. The member
-spread is therefore the largest open number in the design, and \S\ref{sec:est}
-predicts it in closed form rather than discovering it.
+spread was therefore the largest open number in the design, and \S\ref{sec:est}
+predicts it in closed form and then measures it. The measurement excludes the
+$\sigma=2.6$ branch outright: the worst node anywhere in the $H_0$ prior is
+$1.15$ nats and the anchor is $1.5\times10^{-2}$. It also shows where
+\eqref{eq:Mrequired}'s lognormal premise fails, and that it fails safely: at the
+low-$H_0$ rail the member log-weights are strongly \emph{left}-skewed and
+heavy-tailed (skew $-7.43$, excess kurtosis $74.1$), $\sigma$ there is set by a
+handful of catastrophic members while the bulk of the ensemble is tight, and the
+measured $\ESS/M=0.835$ against a predicted $e^{-\sigma^2}=0.265$. On this line
+\eqref{eq:Mrequired} is an upper bound, not an estimate.
 
 \begin{remark}[what actually has to be gated]
 \label{rem:crn}
@@ -428,7 +477,12 @@ a constant offset is absorbed into the evidence. The consequence is unforgiving:
 every determinism diagnostic --- repeat-to-repeat identity, adjacent-$\theta$
 smoothness --- passes \emph{by construction}, and passes just as well on a badly
 distorted surrogate. Only $\osc_\theta\Delta$ against a large-$M$ reference
-discriminates.
+discriminates. This is not a hypothetical either: measured, $100$ of $100$
+repeats are bit-identical in both the latent and the table arm, while the
+adjacent-$\theta$ smoothness statistic on a $10^4$-point fixture sweep fails in
+\emph{both} arms at the same point by the same factor, with the two curves
+agreeing to $5\times10^{-11}$ --- a statistic that cannot tell the two apart is
+not evidence about either.
 \end{remark}
 
 \subsection{The shared-latent multitracer solve, and which half of the seam is open}
@@ -480,7 +534,11 @@ field-level hierarchy closes that seam \emph{by deleting the producer}. One $\xi
 shared across $K$ tracers makes matched realisations a theorem, retires the
 realisation identifier and the provenance firewall together, and removes the
 builder's frozen rank, frozen cosmology and frozen completeness mode
-simultaneously.
+simultaneously. That is now measured rather than argued: two disjoint tracers
+over one shared $\xi$ recover an imposed bias ratio $b_2/b_1=2$ in $20$ of $20$
+realisations at $\sigma_r=0.0084$, against a deliberately decoupled two-field
+variant that returns $1.456$ at $\sigma_r=1.08$ --- biased and uninformative at
+once (\S\ref{sec:measured}).
 
 \subsection{Novelty, scored honestly}
 
@@ -505,20 +563,29 @@ per-$z$ mean-one budget constraint & interesting methodological contribution & \
 empty pixels as Poisson information & important, not fundamentally new & --- \\
 parametric selection $C$ separated from $Q$ & quite interesting combination & correct, and it is what makes the count likelihood non-circular \\
 marginalising members through a complete GW hierarchy & \textbf{potentially novel} & the same-realisation requirement is a \emph{correctness} condition, already enforced; the contribution is doing it at fixed budget monopole \\
-joint multitracer shared latent & \textbf{potentially very novel} & \textbf{not constructible today} (\S\ref{sec:seam}) \\
-\textbf{joint multitracer $+$ selection $C$ $+$ GW marginalisation} & \textbf{not implemented; strongest direction} & unchanged --- and the field-level hierarchy is the shortest route to it \\
+joint multitracer shared latent & \textbf{potentially very novel} & \textbf{not constructible on the table path} (\S\ref{sec:seam}); constructible, and measured, on the latent path (\S\ref{sec:measured}) \\
+\textbf{joint multitracer $+$ selection $C$ $+$ GW marginalisation} & \textbf{strongest direction} & \textbf{implemented at mock scale} (\S\ref{sec:measured}); the field-level hierarchy was the shortest route to it, and a paper-by-paper search found no prior implementation \\
 \bottomrule
 \end{tabular}
 \caption{Novelty scoring, with the corrections the code-level verification forces.
-The sentence \emph{``we introduce Bayesian large-scale-structure reconstruction for
-incomplete dark-siren catalogs''} must not be written.}
+Nothing in this document may be written as if three-dimensional Bayesian
+density reconstruction for dark sirens were new; that ground is taken, and the
+row in bold is where it is taken.}
 \end{table}
 
-\noindent Two scope sentences must ride with any claim to marginalise over the
-clustered missing field: the marginalisation is over \emph{the volume the survey
-sees}, not over the budget ($Q\equiv1$ off-footprint and above $\zdep$, covering
-$38\%$ of the sky and $\sim99.99\%$ of the missing budget); and the compression
-that makes a defensible $\Mdraw$ affordable is engineering, not a methods claim.
+\noindent The claim this scoring is sharpest about is the budget-preserving one:
+posterior realisations $Q^{(m)}$ of the clustered missing field, each constrained
+to carry zero missing-budget monopole, marginalised through \emph{both} the event
+terms and the detection normalisation. Two scope sentences must ride with that
+sentence wherever it is written --- abstract included, not only here and not only
+in a risk table. First, the marginalisation is over \emph{the volume the survey
+sees}, not over the budget: $Q\equiv1$ with \emph{zero} assumed variance off the
+footprint ($38\%$ of the sky) and above $\zdep=0.3$, and those two regions
+together carry $\sim99.99\%$ of the missing-galaxy budget, so the statement ``we
+marginalise over the clustered missing-galaxy field'' is true over the volume the
+survey sees and false over the volume that carries the budget. Second, the
+compression that makes a defensible $\Mdraw$ affordable is engineering, not a
+methods claim.
 
 % =====================================================================
 \section{Proposed work}
@@ -786,7 +853,8 @@ standard-density $H_0$ constraint out of the fiducial cosmology, acting against
 $22.79$M galaxies. The honest sentence, which belongs verbatim in any paper:
 
 \begin{quote}\itshape
-The galaxy field constrains the shape parameters and the tracer biases. It
+The galaxy field constrains the shape parameters $(\Omega_m,w_0,w_a,\delta)$ and
+the tracer biases. It
 constrains $H_0$ only through the volume--density amplitude, which is degenerate
 with the mean comoving number density; that degeneracy is why $n_0$ is a nuisance
 and why its prior must be $H_0$-aware rather than a fiducial plug-in.
@@ -819,10 +887,11 @@ $\ell(\xi,\theta)=\sum_g\sum_pN_{pg}\log\pi_{pg}$,
 \emph{not} removable by the envelope theorem: stationarity gives
 $\partial_\xi\ell(\hat\xi)=\hat\xi$, not $0$, so the envelope theorem removes
 $\partial\hat\xi/\partial\theta$ from $J$ and not from $\ell$. Its size is not
-academic: with $\sim10^3$ data-constrained modes, $\|\hat\xi\|\sim32$, and a
-displacement of the mode of order $\|\Delta\hat\xi\|_H\sim6$ across the prior gives
-$\hat\xi^{\!\top}S\,\Delta\theta$ of order a few nats at random alignment and up to
-$O(10^2)$ nats worst case, against a target accuracy of $0.1$ nat. Under linear
+academic, and it is the worst case rather than the typical one that happened.
+Measured on the anchor, $\|\hat\xi\|=123.5$ at $M=2520$ ($2.46$ per mode), and
+the galaxy-side evidence \eqref{eq:evidence} oscillates by $59.9$ nats across
+$\theta$ drawn around the anchor, against a target accuracy of $0.1$ nat
+(\S\ref{sec:measured}). Under linear
 response it is also free:
 \begin{equation}
   \tfrac12\|\hat\xi_\theta\|^2
@@ -831,9 +900,13 @@ response it is also free:
   +\tfrac12\Delta\theta^{\!\top}\big(S^{\!\top}S\big)\Delta\theta ,
 \end{equation}
 one precomputed vector and one small matrix. Likewise $\log\det H$ is not
-\emph{assumed} constant: its motion enters multiplied by $M/2\simeq1.9\times10^3$,
-so a $0.1\%$ per-mode drift is $1.9$ nats, and it is measured directly at the same
-solves that produce $S$ --- the Cholesky factor is already formed.
+\emph{assumed} constant: its motion enters multiplied by $M/2=1260$ at the
+shipped rank, so a $0.1\%$ per-mode drift is $1.3$ nats, and it is measured
+directly at the same solves that produce $S$ --- the Cholesky factor is already
+formed. It was measured, and it drifts: $1.47$ nats across the prior-drawn
+$\theta$ (\S\ref{sec:measured}), so any rung that admits the galaxy-side evidence
+into a posterior must carry the $\tr(H^{-1}\partial_\theta H)$ term rather than
+freeze it.
 
 \subsection{Linear response: the \texorpdfstring{$\theta$}{theta}-coupled ensemble}
 \label{sec:linresp}
@@ -846,8 +919,9 @@ Cholesky factor,
    \;\in\;\mathbb R^{M\times n_\theta},
   \label{eq:S}
 \end{equation}
-i.e.\ $n_\theta$ extra triangular solves and $121$\,kB of storage at $M=3780$,
-$n_\theta=4$. At $K\ge2$ each catalog's own selection parameters and its own bias
+i.e.\ $n_\theta$ extra triangular solves and, in the shipped artefact,
+$101$\,kB of storage at $M=2520$ over five columns
+($\hat M_0,\sigma_M,\delta,\Omega_m,\bgal$). At $K\ge2$ each catalog's own selection parameters and its own bias
 contribute their own \emph{columns} of $S$: the multitracer generalisation adds
 terms, it does not restructure anything.
 
@@ -883,21 +957,28 @@ fixed draw set across proposals is inadmissible; the mean-shifted construction
 \emph{member-independent}, and that single fact carries the whole cost model. The
 member row factors stay static under a $256$-fold evaluation concurrency; the only
 per-proposal additions are one member-independent row-factor contraction
-($\sim1$\,ms against a $27.5$--$49.3$\,ms baseline, and a $1.46$\,MB transient that
-must be reserved rather than assumed) and a rank-$n_\theta$ update of two sky
-moments. It is also \emph{analytically smooth} in $\theta$: no solver, no
+($\sim1$\,ms against the measured $1417$\,ms baseline, i.e.\ $+0.07\%$, and a
+$1.46$\,MB transient that must be reserved rather than assumed) and a
+rank-$n_\theta$ update of two sky moments. On this catalog/event pairing the
+correction is also measurably inert on the gravitational-wave channel
+($5.4\times10^{-4}$ nat, \S\ref{sec:measured}), so it ships as insurance against
+a deeper catalog rather than as a source of signal. It is also \emph{analytically smooth} in $\theta$: no solver, no
 tolerance, no iteration count, no history --- so the discontinuity failure mode of a
 per-proposal re-solve cannot occur by construction.
 
-\paragraph{Why not simply re-solve.} Because of arithmetic, not taste. The separable
-two-stage contraction costs $2G_s\Npix\Msph^2$ for the diagonal part plus
-$2\Msph^2G_s\Mz^2$ for the radial contraction, and the Cholesky costs $M^3/3$; at
-$(\Msph,\Mz,G_s)=(315,12,32)$ that is tens of milliseconds per Newton step and
-$\sim13$ steps, i.e.\ $\sim1$\,s per proposal against a $27.5$\,ms baseline. A
-re-solve would also drag the member row factors into the per-evaluation transient,
-$3.0$\,GB at $\Mdraw=8$ and $24$\,GB at $\Mdraw=64$ at production concurrency. The
-asymmetry, not elegance, is why Proposition~\ref{prop:cancel} is the load-bearing
-result.
+\paragraph{Why not simply re-solve.} The separable two-stage contraction costs
+$2G_s\Npix\Msph^2$ for the diagonal part plus $2\Msph^2G_s\Mz^2$ for the radial
+contraction, and the Cholesky costs $M^3/3$; at $(\Msph,\Mz,G_s)=(315,8,12)$ the
+whole anchor build --- thirteen Fisher steps plus the moment tables, which
+dominate --- is a measured $41$\,s on one H100. The solve alone is of order a
+second, which against the measured $1417$\,ms baseline is order unity, not the
+$36\times$ this document first asserted against a baseline $52\times$ too small.
+The refusal survives the correction, but it has to be argued from the other two
+costs: a re-solve drags the member row factors into the per-evaluation
+transient, $3.0$\,GB at $\Mdraw=8$ and $24$\,GB at $\Mdraw=64$ at production
+concurrency, and it replaces an analytically smooth surrogate by one carrying a
+solver's tolerance and iteration count. That asymmetry, not wall clock and not
+elegance, is why Proposition~\ref{prop:cancel} is the load-bearing result.
 
 \subsection{The budget normaliser in closed form}
 
@@ -918,8 +999,11 @@ is unity and $Q\equiv1$, so that block satisfies the budget identity trivially a
 must not absorb the footprint's monopole. $A_m$ and $B_m$ are $\theta$-free and are
 computed once on a grid in $b$; the only online $\theta$-dependence is the scalar
 $c$ at each node, so \eqref{eq:rho} is exact rather than interpolated. This is what
-removes a full-sky reduction --- measured at $25.6$\,ms in double precision, i.e.\
-$+50$--$90\%$ of the entire likelihood --- from the per-proposal path. Under linear
+removes a full-sky reduction --- $25.6$\,ms in double precision --- from the
+per-proposal path. That reduction was quoted as $+50$--$90\%$ of the entire
+likelihood; against the measured $1417$\,ms baseline it is $+1.8\%$, so removing
+it is worth having and is no longer decisive, and \eqref{eq:rho} is retained
+because it is exact rather than because it is fast. Under linear
 response the moments acquire $\theta$-dependence only through the same projection,
 $\partial A_m/\partial\theta_j=\sum_pe^{bf_m^{\rm ref}}(\Phi_p\!\cdot\!S_j)$, at
 $1.1$\,MB of extra storage.
@@ -932,10 +1016,10 @@ The identity the design must preserve, exactly, per realisation, is
   \label{eq:budget}
 \end{equation}
 
-\subsection{The member estimator, predicted before it is measured}
+\subsection{The member estimator, predicted and then measured}
 \label{sec:est}
 
-The largest open number in the design is the member spread $\sigma$ of
+The largest open number in the design was the member spread $\sigma$ of
 Proposition~\ref{prop:jensen}, because $\Mdraw$ depends on it exponentially. It can
 be predicted in closed form from objects that already exist. To first order in the
 field, the gradient of the total event log-likelihood with respect to the latent is
@@ -962,11 +1046,98 @@ small-bias limit of the estimator: expanding \eqref{eq:membermarg} to second ord
   \label{eq:P17}
 \end{equation}
 so prediction and validation become one measurement, checked against truth rather
-than against a larger draw count. (With the counts switched off, $\hat\xi=0$ and
-$H=\mathbb 1$, and \eqref{eq:P17} reduces to the pure prior form
-$\tfrac12\bgw^2\sum_{ij}K(x_i,x_j)$ --- the two-arm structure is what makes this a
-genuine closed-form test rather than a certificate of prior collapse.) And it
-supplies the criterion of the next subsection.
+than against a larger draw count. And it supplies the criterion of the next
+subsection.
+
+\paragraph{The normaliser is not a detail: it corrects both forms at the same
+order.} \eqref{eq:sigma} and \eqref{eq:P17} are written with the raw basis row
+$\Phi_i$ at the event's voxel. The seam applies the budget normaliser
+\eqref{eq:rho} at every evaluation --- it is what makes \eqref{eq:budget} hold ---
+and $\rho$ enters at the same order $b^2$. Carrying it through the expansion gives,
+per event at $x_i=(p_i,z_i)$ and with $u_m=\Phi\xi_m$,
+\begin{equation}
+  \log Q_m(x_i)=\bgw\big[u_m(x_i)-\langle u_m(\cdot,z_i)\rangle_{\mathcal F}\big]
+  -\tfrac12\bgw^2\Var_{p\in\mathcal F}\big(u_m(p,z_i)\big)+O(\bgw^3),
+  \label{eq:logQexpansion}
+\end{equation}
+so \emph{both} orders change: the first contracts the \emph{monopole-projected}
+row $\psi_i=\Phi(x_i)-\langle\Phi(\cdot,z_i)\rangle_{\mathcal F}$, and the second
+is a deterministic self-energy. Marginalising,
+\begin{equation}
+  \LSE_m\ell_m-\log\Mdraw-\ell(\xi\!=\!0)\;\longrightarrow\;\bgw^2c_\infty+O(\bgw^4),
+  \qquad
+  c_\infty=\tfrac12\sum_{ij}\tilde K(x_i,x_j)-\tfrac12\sum_iV(z_i),
+  \label{eq:cinf}
+\end{equation}
+with $\tilde K(x_i,x_j)=\langle\psi_i,\psi_j\rangle$ and $V(z)$ the footprint
+variance of the kernel at $z$. Three things follow. The correction is large: on
+the pinned fixture $c_\infty=+3.042196$ against the unprojected $+26.931816$, a
+factor $8.9$ and $64$ Monte-Carlo standard errors, and the estimator's measured
+$b^2$ coefficient lands $1.14$ standard errors from $c_\infty$ with the predicted
+$b^4$ convergence \emph{rate} verified. Every object in \eqref{eq:cinf} is
+nevertheless still a pure contraction of the kernel $K=\Phi\Phi^{\!\top}$, so
+\emph{marginalising the Gaussian latent still replaces the field by its kernel} ---
+what dies is the naive pairing, not the structure, and \S\ref{sec:limits} is
+written accordingly. And the reading is physical: the monopole projection removes
+the field mode the gauge fixing of Proposition~\ref{prop:gauge} conserves, while
+$-V/2$ cancels the events' self terms $K(x_i,x_i)$, because a common
+multiplicative normaliser cannot inform an event about its own pixel; at large
+$|\mathcal F|$, \eqref{eq:cinf} collapses to the strictly off-diagonal
+$\tfrac12\sum_{i\neq j}K(x_i,x_j)$.
+
+One further caution about \eqref{eq:P17} in the form that subtracts
+$\ell(\hat\xi)$ rather than $\ell(0)$: it is guaranteed positive only if $\ell$
+is linear in $\xi$, and the shipped seam is not linear at that precision.
+Measured on the production line it is \emph{negative} at every node below
+$H_0=83.75$ --- $-5.6\times10^{-4}$ nat at the anchor, where the second-order
+curvature beats the Jensen term about six to one --- and its sign is
+member-set dependent at $\Mdraw=8$, which is the statement that eight members do
+not resolve it. The $b\to0$ form \eqref{eq:cinf}, whose convergence \emph{rate}
+is verified independently of its level, is the one to test against.
+
+\paragraph{Prediction against measurement.} The spread was then measured
+directly, at $\Mdraw=256$ under common random numbers, at $34$ nodes across the
+$H_0$ prior on the production line.
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+form & $\sigma$ at the anchor & what it gets wrong \\
+\midrule
+unconditioned Poisson Fisher & $6.0\times10^{-4}$ & $H$; $171\times$ low, and the caveat's sign \\
+Euclidean $\|a\|_2$ & $1.56\times10^{-1}$ & the norm \\
+\eqref{eq:sigma} with $H^{-1}$ and the real $H$ & $1.03\times10^{-1}$ & the monopole projection \\
+\textbf{measured}, $\Mdraw=256$ & $\mathbf{1.49\times10^{-2}}$ & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The $a$ vector reproduces between the two implementations to $13$
+digits, so the entire first-row discrepancy is $H$: an unconditioned Poisson
+Fisher was substituted for the shell-conditioned multinomial one, and the caveat
+attached to it has its sign backwards --- a \emph{smaller} $H$ is a larger
+$H^{-1}$ and therefore a \emph{larger} $\sigma$, so the approximation was unsafe
+in exactly the direction it was claimed to be safe. The two Fishers agree at the
+top of the spectrum and differ at the bottom, which is where $H^{-1}$ lives:
+$199$ modes below eigenvalue $1.01$ against $47$. The Euclidean-to-$H^{-1}$ ratio
+is $1.52$, not the $259$ that $6.0\times10^{-4}$ implied. The corrected closed
+form has the sign, the mechanism and the monotone shape right and the level wrong
+by a median factor $5.5$, over-predicting for precisely the reason
+\eqref{eq:cinf} gives.
+
+Measured, $\sigma$ is monotone decreasing in $H_0$: $1.1525$ nats at $H_0=20$,
+$1.4882\times10^{-2}$ at the anchor, $1.3814\times10^{-3}$ at $140$, with
+$\ESS/M$ from $0.835$ to $0.999998$. The $\theta$-varying bias of
+\eqref{eq:membermarg} against the $256$-member reference is $7.07\times10^{-3}$
+nat at the shipped $\Mdraw=8$ and is met at $0.1$ nat by every $\Mdraw$ from $4$
+to $128$ under the antithetic construction, so the marginalisation ships rather
+than falling back to a fixed realisation. One caveat rides with that and belongs
+in the same sentence: over $400$ random antithetically balanced $8$-member
+subsets of the $256$, $22\%$ \emph{fail} the same gate over the full prior, and
+$\Mdraw=64$ is the first draw count at which none does. The shipped ensemble
+passes and under common random numbers it is the only ensemble that exists, but
+the margin is a property of that artefact rather than of $\Mdraw=8$;
+$\Mdraw=32$ costs $+2.25\%$ and buys the difference.
 
 \subsection{Two numbers decide the whole design}
 \label{sec:criterion}
@@ -975,7 +1146,8 @@ What decides whether the field must be coupled to the proposal is not whether th
 fitted field \emph{looks} different --- it is whether the \emph{likelihood} is
 different, in nats. To first order $\Delta\log\mathcal L=a\cdot\Delta\hat\xi$, and
 Cauchy--Schwarz gives $|\Delta\log\mathcal L|\le\sigma\,\|\Delta\hat\xi\|_H$. A
-per-mode tolerance is therefore indeterminate by $\sqrt M\simeq61.5$ depending on an
+per-mode tolerance is therefore indeterminate by $\sqrt M=50.2$ at the shipped
+rank depending on an
 alignment between the field displacement (a radial re-weighting of shells) and the
 event gradient (the localisation volumes) that nothing bounds and that has every
 reason to be non-negligible, since both live in the same radial direction. Do not
@@ -1007,6 +1179,24 @@ covariance, and a shell-collapsed basis cannot represent within-shell structure,
 expected case, not an excluded one. \eqref{eq:critGW} and \eqref{eq:critgal} must
 both be measured and reported.
 \end{remark}
+
+\paragraph{Both were measured, and they are five orders apart.} Over $20$ values
+of $\theta$ drawn around the anchor and re-solved with the $\theta$-dependent base
+inside $W$, $\osc_\theta\Delta\log\mathcal L_{\rm GW}=5.4\times10^{-4}$ nat ---
+$300$ times under the $0.1$-nat gate --- while
+$\osc_\theta\Delta\log\mathcal L_{\rm gal}=59.9$ nats. Remark~\ref{rem:notsame} is
+therefore not a hypothetical but a description of this catalog: the field
+displacement is invisible to the events and the galaxy-side evidence is enormous.
+Three consequences, all structural. The $\theta$-coupled rung is a no-op on the
+gravitational-wave channel here, so it is demoted to an inertness flag and the
+frozen-anchor ensemble is the deliverable. The linear-response residual is
+$6.3\times10^{-3}$ nat, so the coupling is available and accurate if a deeper
+catalog or a larger event set ever moves the first number above the gate --- which
+is why $S$ is still built and stamped. And the log-det drift is $1.47$ nats, so a
+rung that admitted the galaxy-side evidence would have to carry
+$\tr(H^{-1}\partial_\theta H)$ rather than freeze it. Both oscillations inherit
+the over-prediction of \eqref{eq:sigma}, whose $a$ carries the unprojected
+$\Phi_i$: $5.4\times10^{-4}$ nat is an upper bound, in the benign direction.
 
 \begin{remark}[and the galaxy-side channel must not be quoted as cosmology]
 \label{rem:effectA}
@@ -1092,6 +1282,24 @@ itself. \textbf{Approximate:} \eqref{eq:limit3}--\eqref{eq:limit3harmonic} are t
 $O(b^2)$ truncation of \eqref{eq:master}, valid in the Gaussian, weakly clustered
 regime, and the expansion parameter $\bgw s$ over the events' support is a measured
 quantity, not an assumed one.
+
+\paragraph{What the budget normaliser does to Limit III, and what survives it.}
+\eqref{eq:limit3} is written with the raw rows $\Phi_i$, and the normaliser
+\eqref{eq:rho} corrects it at the same order $b^2$ (\S\ref{sec:est}): every
+$\Phi_i$ is replaced by its monopole-projected $\psi_i$, and the events' self
+terms cancel against $-\tfrac12\sum_iV(z_i)$, giving \eqref{eq:cinf}. Measured on
+a pinned fixture the difference is a factor $8.9$ and $64$ standard errors, so it
+is a correction and not a refinement. \emph{The unification survives it.} Every
+term of the corrected form is still a contraction of the same kernel
+$K=\Phi\Phi^{\!\top}$; the event$\,\times\,$galaxy-voxel term is still $\bgw\bgal$
+times a kernel sum and still harmonic-transforms to $C_\ell^{\rm GW\times g}$; and
+at large footprint the event$\,\times\,$event term is the strictly off-diagonal
+$\tfrac12\sum_{i\neq j}K(x_i,x_j)$, which is the same physics stated correctly ---
+a mode that a survey-wide multiplicative normalisation conserves carries no
+information, and an event cannot inform itself about its own pixel. What does not
+survive is the naive pairing of a raw kernel against a raw auto-correlation. Any
+version of this limit written without projecting out the gauge mode over-counts,
+and by a factor that is measured rather than assumed.
 
 \paragraph{The unification statement, and its honest scope.} Limits I--III are not
 three methods; they are one likelihood at three completeness/localisation regimes,
@@ -1187,11 +1395,11 @@ Limit I \eqref{eq:limit1} & \textbf{exact} & $f_pC\to1$ \emph{and} $\bgw=\bgal$ 
 Low-rank $\Phi\Phi^{\!\top}\!\approx\!K$ & approx. & rank vs.\ $\ell_{\rm ang},\ell_\zeta$; hard guard \\
 Within-shell linearisation \eqref{eq:pipg} & approx. & $\tfrac12b^2[\Var_g(s_p)-\langle\sigma^2_p\rangle_g]$ \\
 Laplace evidence \eqref{eq:laplace} & approx. & non-Gaussianity of the \emph{count} term on data-rich voxels \\
-Member estimator \eqref{eq:membermarg} & approx. & $(e^{\sigma^2}\!-\!1)/2M$, eq.~\eqref{eq:Mrequired} \\
+Member estimator \eqref{eq:membermarg} & approx. & $(e^{\sigma^2}\!-\!1)/2M$, eq.~\eqref{eq:Mrequired}; \emph{measured} $7.1\times10^{-3}$ nat at $\Mdraw=8$ \\
 Deterministic-$Q$ plug-in, Rem.~\ref{rem:plugin} & approx. & first order in posterior spread \\
 Renormalise-then-average, Rem.~\ref{rem:noncommute} & approx. & $\Var_{\rm sky}(Q)/\Npix$ \\
-Frozen $H$ in the draw covariance & approx. & $\tfrac12\sigma^2\epsilon_H$; $0.1$--$0.3$ nat at $10\%$ drift \\
-Frozen $\log\det H$ & approx. & $\times M/2\simeq1.9\times10^3$ per unit relative drift \\
+Frozen $H$ in the draw covariance & approx. & $\tfrac12\sigma^2\epsilon_H$; $<10^{-5}$ nat at the measured $\sigma$ \\
+Frozen $\log\det H$ & approx. & $\times M/2=1260$ per unit relative drift; \emph{measured} $1.47$ nat \\
 Linear response $\hat\xi_\theta\approx\hat\xi_{\rm ref}+S\Delta\theta$ & approx. & second order in $\Delta\theta$ \\
 Population-average photo-$z$ kernel in $W$ & approx. & spread of $\sigma_z$ across the sample \\
 Limit II \eqref{eq:limit2} & approx. & $O(\bgw^3)$ \\
@@ -1203,6 +1411,174 @@ Empirical-Bayes $\theta_{\rm sel}$ prior instead of (F2) & \emph{choice} & ancho
 \caption{The ledger. The ``choice'' rows are modelling conventions and are quoted as
 systematics, never as marginalisations.}
 \end{table}
+
+% =====================================================================
+\section{What the ladder measured}
+\label{sec:measured}
+% =====================================================================
+
+The ladder of \S\ref{sec:impl} has been run from rung $0$ through rung $8$.
+Rungs $0$, $3$, $4$, $5$, $5$b and the timing half of $6$a ran on the production
+line --- $259$ events at $4096$ posterior samples, $1\,067\,946$ detected
+injections, the DESI union catalog at $N_{\rm side}=64$ ($30\,470$ occupied
+pixels, $22\,787\,566$ galaxies). The closure campaign, rung $7$ and rung $8$ ran
+at mock scale, $N_{\rm side}=16$, and are labelled as such. \textbf{No production
+$H_0$ posterior exists}: that run is held, and every number below is a
+likelihood-level or mock-level measurement. A reader who takes any of them as
+``the $H_0$ result'' has read the wrong document.
+
+\paragraph{Can the field move the answer at all?} Yes, by two orders of
+magnitude more than the budget argument allowed. The event-weighted in-support
+missing-branch mass is $\sum_i\varphi_i=0.993$ measured through the production
+likelihood itself --- a killer $Q$ table deletes the in-support missing branch
+from both the event terms and the selection integral, and the event-term delta
+gives $\sum_i-\log(1-\varphi_i)$ --- against a kill threshold of $10^{-3}$, with
+$24.6\%$ of all posterior samples in support. Switching the \emph{existing} table
+on at the anchor moves $\log\mathcal L$ by $10.85$ nats across
+$H_0\in[20,140]$ against a threshold of $0.1$. Neither leg of the kill criterion
+fires. The reconciliation is the useful part: the in-support share of the
+\emph{missing budget} is indeed tiny ($1.3\times10^{-5}$ occupied and
+$3.8\times10^{-4}$ including empty sky), but the in-support share of the
+\emph{selection integral} is $2.6\times10^{-3}$ and of the event posterior mass
+$5.7\times10^{-3}$ per event, because both the events and the injections are
+population-weighted onto exactly the volume the survey covers. The budget share
+was the wrong statistic, and this is the sentence that replaces it.
+
+\paragraph{A finding about the shipped scans, not about the field.} The same
+measurement establishes that under the production variance guard in its hard
+form the likelihood is $-\infty$ at \emph{every} $H_0$ node in $[25,140]$, in
+both the structure-on and structure-off arms: the fixed-population $259$-event
+convention delivers a selection $N_{\rm eff}$ of $31$--$36$k against the
+$\sim92$k the GWTC-4/5 criterion demands. The soft-guard wall then contributes
+$\sim-10^6$ nats and dwarfs the likelihood, so the shipped scans' $H_0=139$ rail
+is guard-shaped rather than likelihood-shaped; on the clean arm the
+fixed-population posterior peaks at $H_0=90\pm5$. Every posterior-level
+comparison in this programme must state which guard convention it ran under, or
+it is vacuous. The $10.85$ nats above is the clean arm.
+
+\paragraph{The count channel, and the gate that changed the deliverable.} At the
+anchor the solve converges to $\mathrm{grad}_\infty=1.1\times10^{-10}$ with
+$\|\hat\xi\|/\sqrt M=2.46$: the clustering is unambiguous. Over $20$ values of
+$\theta$ drawn around the anchor and re-solved, the four numbers of
+\S\ref{sec:criterion} are the linear-response residual $6.3\times10^{-3}$ nat,
+the gravitational-wave oscillation \eqref{eq:critGW} $5.4\times10^{-4}$ nat, the
+log-det drift $1.47$ nats and the galaxy-side oscillation \eqref{eq:critgal}
+$59.9$ nats. The first two are the design decision: the $\theta$-coupled rung is
+inert on the gravitational-wave channel of this pairing, so it is demoted from
+deliverable to an inertness flag and the frozen-anchor ensemble is what ships,
+with the quotable systematic ``the anchor-frozen field differs from the
+$\theta$-consistent field by less than $10^{-3}$ nat of gravitational-wave
+likelihood content across the selection and budget prior''. The last is the
+$dN/dz$-shape information the conditioned channel retains against $22.79$M
+galaxies; per D13(a) it stays a diagnostic, and the guard that keeps it there was
+independently verified to refuse the configuration that would let it in.
+
+\paragraph{The anchor and the seam.} The anchor artefact builds in $41$\,s on one
+H100 at $M=2520$ --- the plan's gate said ``minutes'' --- into $64$\,MB carrying
+$\hat\xi$, $L_H$, the five columns of $S$, the members, the row factors, the
+$(A,B)$ moment tables and a content hash; two same-seed builds are bit-identical
+in every array. On the seam, the budget identity \eqref{eq:budget} closes to
+$3.8\times10^{-15}$ at the integral actually consumed, for every $z$, member and
+$\theta$, and the survey-global normaliser is member-independent
+\emph{bit-exactly} at its formation site, which is the gauge fixing of
+Proposition~\ref{prop:gauge} made literal. The complete-catalog limit
+\eqref{eq:limit1} is bit-identical per member at $\bgw=\bgal$, off-footprint rows
+return exactly zero, the legacy goldens are $23/23$ bit-exact, $100$ repeated
+evaluations are bit-identical in both arms, and $11$ of $11$ guard cells refuse
+or permit exactly what they are supposed to, parsed from the production
+command line rather than from a fixture.
+
+\paragraph{The member spread.} Measured at $\Mdraw=256$: $1.4882\times10^{-2}$
+nat at the anchor, monotone to $1.1525$ at $H_0=20$ and $1.3814\times10^{-3}$ at
+$140$; $\ESS/M=0.9998$ at the anchor, $7.998$ of $8$ members effective. The
+$\theta$-varying bias at the shipped $\Mdraw=8$ is $7.07\times10^{-3}$ nat
+against a $0.1$-nat budget. \S\ref{sec:est} gives the reconciliation against the
+two closed forms, both of which were wrong and neither of which is papered over.
+
+\paragraph{Cost.} $+2.68\%$ of the production baseline for the seam and its eight
+members; $+95.4\%$ for the rung as a whole, of which $97.2\%$ is the per-pixel
+areal completeness the latent path requires and not the field. \S\ref{sec:cost}
+gives the table.
+
+\paragraph{Two tracers on one field.} At mock scale, over $20$ realisations with
+two \emph{disjoint} tracers, one shared $\xi$ and an imposed $b_2/b_1=2$: the
+ratio is recovered in $20$ of $20$ within $2\sigma$ at median $2.00156$ and
+$\sigma_r=0.00836$, against a deliberately decoupled two-field variant that
+returns median $1.456$ at $\sigma_r=1.07984$ --- $129$ times looser and biased at
+the same time, with a cross-tracer correlation of $0.999944$ shared against
+exactly $0$ decoupled. So the shared field is what makes the bias ratio
+measurable at all, and the seam that could not be built on the table path
+(\S\ref{sec:seam}) is closed by deleting the producer. The overlap arm is the
+warning that rides with it: $5\%$ shared membership already breaks the recovery
+at $10\sigma$, and the quoted $\sigma_r$ \emph{shrinks} rather than growing,
+because the estimator reads duplicated galaxies as extra independent information.
+An overlapping pair is not merely less accurate, it is confidently wrong ---
+which is why D9's disjointness is a modelling requirement and not a convenience.
+
+\paragraph{Above the survey depth.} Delivered as a sensitivity scan and never as
+a posterior, at mock scale: over assumed amplitudes $amp(z>\zdep)\in\{0, 0.05,
+0.1, 0.2, 0.4\}$ the $H_0$ median moves by less than $0.01$\,km\,s$^{-1}$Mpc$^{-1}$
+and the $90\%$ width by less than $0.06$, monotonically and linearly in the
+assumed amplitude, with the growth-shaped profile indistinguishable from the step
+at fixed amplitude. For scale, turning the \emph{fitted} field on at all moves the
+same median by $0.94$ and the width by $0.71$ on the same realisation. The
+assumption about $99.4\%$ of the missing budget is worth about $1\%$ of what the
+fitted part is worth, which is the bounded systematic D7 asks for.
+
+\paragraph{The closure that failed, and what it actually measures.} This is the
+part a proposal is tempted to leave out. Of the mock closure's four tiers, two
+pass and two fail. Tier A --- fitted against true field, gauge-fixed --- gives
+slope $0.99908\pm0.00433$ at Pearson $r=0.99945$, with
+$\|\hat\xi-\xi_{\rm true}\|/\sqrt M$ matching $\sqrt{\tr H^{-1}/M}$ to $2.4\%$:
+the estimator recovers the field it is given. Tier D --- perturb $f_p$ by its own
+dispersion, add a $5\%$ fibre-collision proxy, double the angular lengthscale,
+give the field a non-Gaussian tail --- moves $H_0$ by at most $+0.390\sigma$
+against a $0.5\sigma$ tolerance. But Tier B puts $H_0^{\rm true}$ outside the
+$90\%$ interval in \emph{every} arm, and Tier C rejects uniformity of the
+posterior quantiles at $p=0.0111$ with $9$ of $24$ realisations outside the $99\%$
+band, an overconfidence ratio of $2.55$.
+
+The failure does not localise where it would have to for the field to be the
+cause, and three independent measurements say so. First, the control arm with
+\emph{no} field and no completion at all is overconfident by $2.35$: whatever is
+wrong is wrong before the latent path is reached. Second, splitting each mock's
+random stream immediately before the event draw gives a law-of-total-variance
+decomposition in which $92\%$ (no field) and $82\%$ (field) of the excess
+variance is already present with the catalog, the field, $f_p$, the mask, the
+depth map and the anchor all held byte-identical --- the excess is the
+\emph{event draw at fixed catalog}, and the decomposition reproduces Tier C's own
+ratios from an independent design. Third, the diagnosis that the member draws
+were under-dispersed was implemented rather than argued: the $\bgal$
+dispersion of the plan's $\mathrm{Cov}(\xi)=H^{-1}+s_b^2vv^{\!\top}$ was added,
+Tier C re-run at $n=50$, and the overconfidence moved from $2.5515$ to
+$2.5526$ --- $+0.04\%$, in the wrong direction --- with the $90\%$ width ratio at
+$1.00065$ and the inflated arm wider in $24$ of $50$. Sweeping $s_b$ over three
+decades refutes the diagnosis outright: inflating the member spread by $4.54$
+makes the interval $0.6\%$ \emph{narrower}, so the response has the wrong sign
+and no value of $s_b$ closes the tier. The mock's own synthetic
+parameter-estimation widths are calibrated to $6\%$, which cannot supply a factor
+$2.4$ either, and the $N_{\rm obs}$ lever arm gives
+$\mathrm{spread}\propto N^{-0.31\pm0.16}$ where per-event over-sharpness would
+predict $0.5$ and a per-realisation common mode $0$ --- so the mechanism inside
+the event channel is not yet separated.
+
+The honest statement, and the one this document makes, is therefore: \emph{the
+code is validated and the mock's parameter-estimation calibration is not}. The
+identities close, the estimator recovers the field, the guards refuse what they
+should, the systematics are bounded --- and the coverage gate that would license
+a cosmology claim is not met, for a reason measurably upstream of everything
+proposed here. Nothing in this programme should be quoted as validated by a
+closure that failed, and the production run must not be read as blessed by one.
+
+\paragraph{What is still unmeasured.} The production $H_0$ posterior, and with it
+the two posterior-level criteria K2 and K8. The mock's event-channel defect,
+which needs the $\sim4$ GPU-hour design that separates per-event over-sharpness
+from a per-realisation common mode. A second member seed --- the resampling that
+puts $22\%$ of $8$-member ensembles outside the marginalisation gate draws from
+within one artefact's $256$ members and is not an independent check of that
+artefact. And a derivative kink at $H_0=98.83$ in a fixture-scale sweep, present
+identically in the table path and in the latent path and absent when the
+completion channel is switched off, whose mechanism was not identified.
 
 % =====================================================================
 \section{Implementation}
@@ -1289,78 +1665,162 @@ $\zdep$; the run & 3\\
 \bottomrule
 \end{longtable}
 
-\noindent Critical path: \textbf{31 days} to the compressed ensemble, \textbf{36} to
-the $\theta$-coupled likelihood, with exits at day 3 and day 14.
-
-\subsection{Cost}
-
-The baseline is measured, not modelled: $27.5$\,ms per likelihood call in a single
-pass and $49.3$\,ms under a poorly chosen block plan, at production dimensions, with
-$256$ concurrent evaluations and $10.4$\,GiB of $72.7$\,GiB already static. The
-production configuration carries \emph{no} structure at all, so the honest added cost
-of the deliverable is the whole member-marginalised slice, not the difference against
-a table-marginalised run:
+\noindent Critical path as planned: $31$ days to the compressed ensemble, $36$
+to the $\theta$-coupled likelihood, with exits at day $3$ and day $14$. What
+happened is that the day-$14$ exit fired on its benign branch, which changed the
+deliverable rather than stopping the work: rungs $0$ through $8$ have run, rung
+$6$b is an inertness flag, and rungs $10$ and $11$ are open. Rung by rung:
 
 \begin{center}\small
-\begin{tabular}{cccc}
+\begin{tabular}{@{}lp{0.84\linewidth}@{}}
 \toprule
-$\Mdraw$ & member-dependent slice, table & member-dependent slice, latent & added vs.\ the $27.5$\,ms baseline\\
+rung & what it returned \\
 \midrule
-8  & $5.3$\,ms  & $8.6$\,ms  & $+31\%$\\
-32 & $21$\,ms   & $34.4$\,ms & $+125\%$\\
-64 & $42$\,ms (a $13.7$\,GB member cube) & $68.8$\,ms (a $94$\,MB row factor) & $+250\%$\\
+0 & $\sum_i\varphi_i=0.993$ and $\osc_{H_0}=10.85$ nats: \textbf{K0 does not fire}.
+Cost baseline measured, and the shipped scans shown to be guard-shaped. Novelty
+search over $\sim22$ papers: the shared-multitracer differentiator not found, the
+budget-preserving one anticipated only in disjoint pieces. Its own
+$\sigma=6.0\times10^{-4}$ was later shown wrong by $171\times$ (rung 5b) and its
+$3027$\,ms baseline to be an A100-80 number, not H100 (rung 6a). \\
+1--2 & basis module and $f_p$ as data. $f_p$ alone costs $+92.8\%$ of the
+baseline --- the single largest cost in the programme, and no field is involved. \\
+3 & the count channel, $\theta$-shaped: residual $6.3\times10^{-3}$,
+\eqref{eq:critGW} $5.4\times10^{-4}$ nat, log-det drift $1.47$ nat,
+\eqref{eq:critgal} $59.9$ nat. \textbf{K9 fires on its benign branch}: 6b becomes
+an inertness flag and \textbf{6a is the deliverable}. \\
+4 & the anchor artefact at $M=2520$: $41$\,s per build on one H100, $64$\,MB,
+bit-identical across same-seed rebuilds, $\mathrm{grad}_\infty=1.1\times10^{-10}$. \\
+5 & the seam, inert by default: goldens $23/23$ bit-exact, \eqref{eq:limit1}
+bit-identical per member at $\bgw=\bgal$, off-footprint rows exactly zero. \\
+5b & $\sigma=1.4882\times10^{-2}$ nat at the anchor and $\le1.1525$ anywhere;
+bias $7.07\times10^{-3}$ nat at $\Mdraw=8$. \textbf{K5 unfired}; the
+marginalisation ships and the fixed-realisation fallback is not triggered. \\
+6a & budget identity to $3.8\times10^{-15}$ and member-independent bit-exactly;
+seam $+2.68\%$; determinism $100/100$ bit-identical; guards $11/11$; Tier A and
+Tier D \textbf{pass}, Tiers B and C \textbf{fail} for a reason upstream of the
+field (\S\ref{sec:measured}). \\
+6b & demoted by rung 3 to the $\Delta\theta=0$ inertness flag. \\
+7 & $K=2$ on one shared $\xi$: $b_2/b_1$ recovered $20/20$ within $2\sigma$ at
+median $2.00156$, $129\times$ tighter than two independent fits; $5\%$ tracer
+overlap breaks it at $10\sigma$. \\
+8 & the $amp(z>\zdep)$ sensitivity scan: $H_0$ median moves $<0.01$ and the
+$90\%$ width $<0.06$ across assumed amplitudes $0$--$0.4$. \\
+10--11 & not run; the production $259$-event posterior is held. \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\noindent Three structural facts hold this together. The compression from a member
-\emph{table} cube to member \emph{row factors} is a factor $N_{\rm grid}/\Mz\simeq90$
-($1.71$\,GB $\to$ $11.7$\,MB at $\Mdraw=8$), which is what makes a defensible
-$\Mdraw$ affordable at all under \eqref{eq:Mrequired}. The full-sky budget reduction
-leaves the per-proposal path entirely, in closed form, by \eqref{eq:rho}. And the
-$\theta$-correction is member-independent, so the resident latent arrays stay static
-($+140$ to $+225$\,MB) and the only per-evaluation transient is the $1.46$\,MB row
-expansion of $S\Delta\theta$, i.e.\ $\sim375$\,MB at $256$-fold concurrency ---
-reserved explicitly, not assumed. Under any per-proposal re-solve variant every one
-of those three facts fails simultaneously: the moments regain $\theta$-dependence
-($+50$--$90\%$), the row factors become transient ($3$--$24$\,GB), and the evaluation
-goes memory-bound before it goes compute-bound.
+\subsection{Cost}
+\label{sec:cost}
+
+The baseline is measured, and the first thing to say about it is that the number
+this document was written against was wrong twice over. The $27.5$--$49.3$\,ms
+figure belongs to a different configuration; the production $259$-event line
+costs $1417$\,ms per likelihood call with no structure at all, on one H100,
+value-only path, $256$ concurrent evaluations, $10.4$\,GiB of $72.7$\,GiB already
+static. An intermediate figure of $3027$\,ms was carried for several rungs and is
+an A100-80 number rather than an H100 one; percentages built on $27.5$\,ms
+deflate by $52\times$, not $110\times$. Everything below is measured on that
+line, at $\Mdraw=8$, under the shipped guards:
+
+\begin{center}\small
+\begin{tabular}{lccrr}
+\toprule
+arm & structure & $f_p$ & ms/eval & vs.\ baseline\\
+\midrule
+production today & none & no & $1417.5$ & ---\\
+areal completeness only & none & yes & $2732.2$ & $+92.8\%$\\
+table mode, $8$ members marginalised & $Q$ table & no & $1428.7$ & $+0.8\%$\\
+\textbf{latent, $8$ members marginalised} & latent & yes & $2770.2$ & $+95.4\%$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Two numbers come out of that table and they say opposite-sounding
+things, so both are stated. \emph{The seam is nearly free.} At equal $f_p$
+treatment the latent field plus its eight-member ensemble is $+37.95$\,ms:
+$+1.39\%$ of the $f_p$ baseline and $+2.68\%$ of the no-structure baseline, and
+members cost $4.92$\,ms each thereafter --- $+2.25\%$ at $\Mdraw=32$, $+4.5\%$ at
+$64$, against the latent likelihood one actually runs. \emph{The configuration is
+not free, and the cost is not the field.} Turning the rung on against the shipped
+baseline roughly doubles the likelihood, and $1314.8$ of the $1352.7$\,ms ---
+$97.2\%$ --- is $C_p=f_pC(z)$, which the latent path requires and which any run
+adopting it would pay with no field at all. That row appears in no cost table
+written before the ladder ran, and it is the number an operator budgeting the
+production run needs.
+
+\noindent Three structural facts hold the rest together. The compression from a
+member \emph{table} cube to member \emph{row factors} is a factor
+$N_{\rm grid}/\Mz=136$ at the shipped $\Mz=8$ --- measured on the anchor
+artefact, $1.06$\,GB against $7.8$\,MB at $\Mdraw=8$ over the $30\,470$ fitted
+pixels --- which is what makes a defensible $\Mdraw$ affordable at all under
+\eqref{eq:Mrequired}. The full-sky budget reduction leaves the per-proposal path
+entirely, in closed form, by \eqref{eq:rho}. And the $\theta$-correction is
+member-independent, so the resident latent arrays stay static ($+140$ to
+$+225$\,MB) and the only per-evaluation transient is the $1.46$\,MB row expansion
+of $S\Delta\theta$, i.e.\ $\sim375$\,MB at $256$-fold concurrency --- reserved
+explicitly, not assumed. Under any per-proposal re-solve variant the second and
+third fail simultaneously: the moments regain $\theta$-dependence, the row factors
+become transient ($3$--$24$\,GB), and the evaluation goes memory-bound before it
+goes compute-bound. That, and not wall clock, is the argument against a re-solve.
 
 \subsection{When to stop}
+
+These are the criteria as they were written before the ladder ran; the outcomes
+in bold are what \S\ref{sec:measured} measured against them. Two of them --- K2
+and K8 --- are posterior-level and remain unscored, because the production run is
+held and because the mock that would score them fails its own coverage tiers for
+a reason upstream of the field.
 
 \begin{description}[leftmargin=2.1em,style=nextline,itemsep=1pt]
 \item[K0 (day 3).] If the event-weighted in-support prior mass is below $10^{-3}$
 \emph{and} switching the existing table on at the anchor moves the log-likelihood by
 less than $0.1$ nat across the $H_0$ prior, the field cannot move the posterior. Stop.
 The deliverable is the bounded systematic, and it is three days away rather than
-thirty-six. (Context: the in-support missing budget is $\sim2\times10^{-5}$ of the total by
-three independent integrals; the production $H_0$ posterior is already identical with
-and without a table; and most event posterior samples lie above $\zdep$.)
+thirty-six. \textbf{Did not fire.} The budget-side context was right and
+irrelevant: the in-support missing budget is $1.3\times10^{-5}$ of the total and
+only $24.6\%$ of event posterior samples fall in support at all --- but the
+event-weighted mass is $\sum_i\varphi_i=0.993$ and the oscillation is $10.85$
+nats, each two orders past its threshold, because the events sit where the
+catalog is. Replacing the budget share by the event-weighted share is the single
+most useful thing this rung returned.
 \item[K2.] If neither latent-on versus latent-off nor $\theta$-coupled versus frozen
 moves the $H_0$ median by $0.1\sigma$ or the $90\%$ interval width by $5\%$, on
 closure \emph{and} on a non-railing production configuration, stop at that rung and
-publish the bound as a systematic.
+publish the bound as a systematic. \textbf{Unscored}: the production run is held,
+and the closure's coverage tiers fail in the no-field arm as well, so no $H_0$
+comparison on that mock is currently readable.
 \item[K3.] Fitted-versus-truth slope below $0.8$ at the guard-compliant rank: the
-basis is collapsing (the pathological value is $0.04$).
-\item[K4.] Added wall beyond the accepted budget with the accuracy target unmet:
+basis is collapsing (the pathological value is $0.04$). \textbf{Did not fire}:
+measured $0.99908\pm0.00433$ at Pearson $r=0.99945$.
+\item[K4.] \textbf{Cannot fire on cost} --- the seam is $+2.68\%$ of the measured
+baseline, an order of magnitude under any budget written against it. Had it
+fired: added wall beyond the accepted budget with the accuracy target unmet,
 descend one rung at a time --- $\theta$-coupled $\to$ frozen ensemble $\to$
 fixed-realisation systematic --- rather than jumping to the weakest fallback.
 \item[K5.] Member effective sample size below $2$ of $\Mdraw$ with the
 $\theta$-varying bias unmeetable at $\Mdraw\le128$: do not ship it as a
-marginalisation.
+marginalisation. \textbf{Did not fire}: $7.998$ of $8$ effective members at the
+anchor and $7.07\times10^{-3}$ nat of bias, met at every $\Mdraw$ from $4$ to
+$128$. It ships as a marginalisation.
 \item[K8.] The areal-completeness change is \emph{expected} to be large --- the
 $18\,682$ empty pixels alone move the all-sky missing budget by $\sim+45\%$ --- so if
 it moves the $H_0$ posterior by more than $1\sigma$ with the field off, that change
 is a result in its own right and ships as its own arm; the field programme continues
-behind it.
+behind it. \textbf{Unscored at the posterior level}, but its cost is now known and
+is the largest in the programme: $+92.8\%$ of the baseline, $34.7$ times the
+entire latent seam.
 \item[K9 (day 14).] If \eqref{eq:critGW} exceeds $0.1$ nat and the linear-response
 residual cannot be brought below $0.1$ nat with a second-order term and multiple
 anchors, then a re-solve is required and a re-solve is not affordable: ship the
 frozen ensemble and quote the measured $\theta$-dependence as a systematic.
 Symmetrically, if \eqref{eq:critGW} is below $0.1$ nat the coupling adds nothing on
 the gravitational-wave side --- but by Remark~\ref{rem:notsame} that says nothing
-about \eqref{eq:critgal}, which is gated separately.
-\item[K10.] If the unconditional rung is taken and $n_0$ is not sampled under an
+about \eqref{eq:critgal}, which is gated separately. \textbf{The benign branch
+fired}: $5.4\times10^{-4}$ nat against $59.9$ nats on the galaxy side, exactly the
+asymmetry the remark predicted, and it is what demotes rung 6b.
+\item[K10.] \emph{Does not arise}: the unconditional rung was not taken. If it is
+taken and $n_0$ is not sampled under an
 $H_0$-aware prior (or reparameterised $H_0$-invariantly), and likewise for
 $\theta_{\rm sel}$ against its anchored magnitude prior, any $H_0$ shift is an
 artefact of the fiducial calibration. Refuse the arm rather than publish it.
@@ -1368,8 +1828,10 @@ artefact of the fiducial calibration. Refuse the arm rather than publish it.
 
 \subsection{What not to attempt}
 
-A full per-proposal Newton re-solve ($\sim36\times$ the entire likelihood, and it
-makes the member arrays transient). Reusing one draw set across proposals with
+A full per-proposal Newton re-solve --- of order the entire likelihood on the
+measured baseline rather than $36$ times it, so the refusal rests on the memory
+(it makes the member arrays transient at $3$--$24$\,GB) and on the loss of an
+analytically smooth surrogate, not on wall clock. Reusing one draw set across proposals with
 importance weights ($\ESS/M=4\times10^{-17}$ at a per-mode displacement that reads as
 comfortably tight). Adding the count likelihood while leaving the field a plug-in
 $\hat\xi(\mathcal C)$ --- Remark~\ref{rem:doublebreak}(i). Materialising $\Phi$
@@ -1393,8 +1855,11 @@ rank $n_\theta$, not from a small $M$.
 \emph{(a)} conditional counts, frozen response: no $\theta$ coupling; the control arm
 and the fallback.
 \emph{(b)} conditional counts, linear response: coupling for
-$\Omega_m,w_0,w_a,\delta,\theta_{\rm sel}$, no $H_0$ --- \textbf{recommended},
-conditional on the day-14 criterion.
+$\Omega_m,w_0,w_a,\delta,\theta_{\rm sel}$, no $H_0$ --- was recommended
+conditional on the day-14 criterion. \textbf{The criterion returned benign}
+($5.4\times10^{-4}$ nat, \S\ref{sec:measured}), so on this catalog/event pairing
+(a) \emph{is} (b) to within $10^{-3}$ nat and the recommendation becomes (a) with
+(b)'s machinery built, stamped and carried as insurance against a deeper catalog.
 \emph{(c)} unconditional counts: adds $H_0$ only through $n_0(c/H_0)^3$, admissible
 only with D6 resolved and \S\ref{sec:n0h0} stated in the paper.
 \emph{(d)} unconditional counts with a per-proposal re-solve: infeasible.
@@ -1423,10 +1888,16 @@ incompleteness.
 \item[\bf D5.] \textbf{Marginalisation-accuracy budget, hence $\Mdraw$.}
 \emph{Recommend} $0.1$ nat of $\theta$-varying bias across the $H_0$ prior, with
 $\Mdraw$ set against \eqref{eq:Mrequired} and $\sigma$ measured in the $H^{-1}$ norm
-of \eqref{eq:sigma}. \emph{Cost, against the true baseline:} $+31\%$ at $\Mdraw=8$,
-$+125\%$ at $32$, $+250\%$ at $64$. \emph{Alternative:} the fixed-realisation
-systematic --- zero cost, reduced claim. Note this arithmetic holds only under linear
-response.
+of \eqref{eq:sigma}. \emph{Measured:} $\sigma=1.49\times10^{-2}$ nat at the anchor and $\le1.15$
+anywhere, bias $7.07\times10^{-3}$ nat at $\Mdraw=8$, so the budget is met and the
+fixed-realisation alternative is not triggered. \emph{Cost, measured:} the seam
+plus eight members is $+2.68\%$ of the baseline and members are $4.92$\,ms each
+thereafter --- $+2.25\%$ at $\Mdraw=32$, $+4.5\%$ at $64$, not the $+31/125/250\%$
+projected against a baseline $52\times$ too small. \emph{Recommend $\Mdraw=32$}
+rather than the shipped $8$ for one reason: $8$ passes on the ensemble that will
+actually run, but $22\%$ of alternative balanced $8$-member ensembles do not, so
+the margin is a property of one artefact. Thirty-two costs two percent and buys
+the difference.
 
 \item[\bf D6.] \textbf{Budget uncertainty.} \emph{Recommend} sampling
 $(\log_{10}n_0,\delta)$ under the calibration covariance, systematics-inflated,
@@ -1438,19 +1909,27 @@ or $n_0$ reparameterised to an $H_0$-invariant combination such as $n_0h^{-3}$.
 variance in the headline analysis, with the amplitude profile delivered as a
 sensitivity scan quoted as ``$H_0$ shift under an assumed amplitude'', never as a
 marginalised posterior --- because no measurement in this programme constrains the
-field there.
+field there. \emph{Measured} (\S\ref{sec:measured}): across assumed amplitudes
+$0$--$0.4$ the $H_0$ median moves by $<0.01$ and the $90\%$ width by $<0.06$,
+about $1\%$ of what turning the fitted field on at all is worth on the same
+realisation. The systematic is bounded and small.
 
 \item[\bf D8.] \textbf{Is the gravitational-wave bias free, and what does that imply
 for the catalogued branch?} \emph{Recommend} $\bgw\equiv\bgal$ in the headline run:
 it makes Limit I exact and the complete-catalog test a genuine physics identity, at
-zero cost. Wherever $\bgw$ is free --- the mock campaign, the multitracer tier --- the
+zero cost --- and that test now runs, bit-identical per member (\S\ref{sec:measured}). Wherever $\bgw$ is free --- the mock campaign, the multitracer tier --- the
 excess-bias factor $e^{(\bgw-\bgal)s(x_j)}$ \textbf{must} be written on the catalogued
 spike weights. Writing that branch field-free is a modelling error, and it is the
 first thing a cross-correlation-literate referee checks.
 
 \item[\bf D9.] \textbf{Tracer overlap at $K\ge2$.} \emph{Recommend} a disjoint
 partition. The event-side mixture is safe under overlap; the count-side product is
-not.
+not --- and the size of the failure is now measured (\S\ref{sec:measured}): $5\%$
+shared membership breaks the bias-ratio recovery at $10\sigma$ while the quoted
+$\sigma_r$ \emph{shrinks}, because duplicated galaxies read as extra independent
+information. Disjointness must be established as a property of the catalogs, not
+assumed, and any future rung admitting overlap has to model the shared
+membership rather than tolerate it.
 
 \item[\bf D10.] \textbf{Field family for the headline run, and whether to keep the
 table path.} The production table is radial, and the radial builder is a per-pixel
@@ -1462,20 +1941,37 @@ path indefinitely as the golden-pinned reference. Note that the $K\ge2$
 parametric-selection \emph{table} arm cannot be built today at any $K$
 (\S\ref{sec:seam}).
 
-\item[\bf D11.] \textbf{The novelty search.} Resolved by scheduling: it is the first
-item of work, not the last. No ``first'' appears anywhere until it is written down.
+\item[\bf D11.] \textbf{The novelty search.} Resolved by scheduling: it was the
+opening item of work, not the closing one, and it is done ---
+$\sim22$ papers individually assessed on 2026-08-13,
+recorded in \texttt{pr0/NOVELTY\_SEARCH.md}, which is the artefact any priority
+sentence in this document must be read against.
+The shared multi-tracer completion realisation is not found in the literature;
+the budget-preserving marginalisation is anticipated only in disjoint pieces
+(deterministic mean-one renormalisation; realisation marginalisation through the
+event terms of a complete catalog; analytic free-monopole marginalisation), and
+the conjunction --- budget-constrained stochastic realisations through
+\emph{both} the event terms and the selection normalisation --- is not. The
+headline claim therefore survives only with its qualifying clauses; an
+unqualified ``first field-level dark sirens'' would not.
 
 \item[\bf D12.] \textbf{What is the headline?} Strip what is already scored as not
 novel and the budget-preserving marginalisation reduces to a gauge fixing
 (Prop.~\ref{prop:gauge}) plus a correctness requirement (same realisation in the event
-terms and the normalisation, already enforced); with the mandatory scope caveats what
+terms and the normalisation, already enforced); with the mandatory scope caveats ---
+$Q\equiv1$ with zero assumed variance off the footprint and above $\zdep$, so the
+marginalisation is over the volume the survey sees and not over the budget --- what
 remains is \emph{``we marginalise over the angular placement of missing hosts inside
 the surveyed volume at fixed budget.''} \emph{Recommend (a):} headline the
-\textbf{unification} --- Limits I--III as one likelihood, with the $\theta$-coupled
-field as the object that makes the interpolation real --- and demote the
-budget-preserving marginalisation to the enabling clause it is. \emph{(b)} headline
+\textbf{unification} --- Limits I--III as one likelihood, with the field as the
+object that makes the interpolation real --- and demote the budget-preserving
+marginalisation to the enabling clause it is. \emph{(b)} headline
 the marginalisation and accept that it may read as a methods note. \emph{(c)} defer
-until the day-3 search returns.
+until the day-3 search returns. The search has returned (D11) and it supports (a),
+with two amendments the measurements force: the interpolant is made real by the
+field itself rather than by its $\theta$-coupling, which is measurably inert here;
+and Limit III must be stated in its monopole-projected form (\S\ref{sec:limits}),
+which is a factor $8.9$ from the naive one.
 
 \item[\bf D13.] \textbf{Does the galaxy-side evidence enter the headline posterior?}
 It acts against $22.79$M galaxies while the events number $259$, and it is a
@@ -1498,9 +1994,13 @@ of real work.
 \end{enumerate}
 
 \vspace{0.6em}
-\noindent\textbf{The two decisions that gate everything else are D1 and D12}, and
-both are answerable within three days of starting: D1 by the day-3 measurement of
-whether the field can move the posterior at all, and D12 by the paper-by-paper search
-that the same three days contain.
+\noindent\textbf{The two decisions that gate everything else were D1 and D12},
+and both have been answered. D1: the day-14 criterion is benign, so the deliverable
+is the frozen-anchor ensemble with the $\theta$-coupled machinery built and inert.
+D12: the search supports headlining the unification, in the corrected form. What
+now gates the programme is neither of them --- it is the coverage failure of
+\S\ref{sec:measured}, which is a defect in the mock's event channel rather than in
+anything proposed here, and which must be closed before any $H_0$ number from this
+line is quoted as validated.
 
 \end{document}

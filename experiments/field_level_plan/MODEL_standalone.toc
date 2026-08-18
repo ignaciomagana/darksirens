@@ -1,0 +1,33 @@
+\contentsline {section}{\numberline {1}Notation and the objects that already exist}{2}{section.1}
+\contentsline {section}{\numberline {2}The current state as one generative model}{2}{section.2}
+\contentsline {subsection}{\numberline {2.1}The galaxy point process and its thinning}{2}{subsection.2.1}
+\contentsline {subsection}{\numberline {2.2}The dark-siren redshift--sky prior as it is coded}{3}{subsection.2.2}
+\contentsline {subsection}{\numberline {2.3}The offline field model: Poisson-lognormal on a low-rank basis}{3}{subsection.2.3}
+\contentsline {subsection}{\numberline {2.4}The two $Q$ evaluations, and the variance shift}{4}{subsection.2.4}
+\contentsline {subsection}{\numberline {2.5}The per-$z$ mean-one budget constraint as a gauge condition}{5}{subsection.2.5}
+\contentsline {subsection}{\numberline {2.6}Member-ensemble marginalisation}{6}{subsection.2.6}
+\contentsline {subsection}{\numberline {2.7}The $K\ge 2$ shared-latent joint solve}{7}{subsection.2.7}
+\contentsline {subsection}{\numberline {2.8}Which half of the \texttt {selection}\tmspace +\thinmuskip {.1667em}$\times \tmspace +\thinmuskip {.1667em}K\tmspace -\thinmuskip {.1667em}\ge \tmspace -\thinmuskip {.1667em}2$ seam is open}{7}{subsection.2.8}
+\contentsline {paragraph}{The inference half is OPEN.}{7}{section*.2}
+\contentsline {paragraph}{The builder half is CLOSED.}{8}{section*.3}
+\contentsline {paragraph}{Consequence for the proposal.}{8}{section*.4}
+\contentsline {section}{\numberline {3}The proposed model}{8}{section.3}
+\contentsline {subsection}{\numberline {3.1}The hierarchy}{8}{subsection.3.1}
+\contentsline {subsection}{\numberline {3.2}(F3): the count likelihood}{8}{subsection.3.2}
+\contentsline {subsection}{\numberline {3.3}(F4): the GW-host intensity on the same field}{9}{subsection.3.3}
+\contentsline {subsection}{\numberline {3.4}Double conditioning: the exact factorisation}{9}{subsection.3.4}
+\contentsline {subsection}{\numberline {3.5}The exact $\theta $-cancellation criterion for the conditional channel}{10}{subsection.3.5}
+\contentsline {subsection}{\numberline {3.6}The per-proposal conditional solve and its warm start}{11}{subsection.3.6}
+\contentsline {subsection}{\numberline {3.7}Laplace marginalisation of the field}{12}{subsection.3.7}
+\contentsline {paragraph}{Exactness.}{12}{section*.5}
+\contentsline {subsection}{\numberline {3.8}The fixed-whitened-draw alternative and its ESS law}{12}{subsection.3.8}
+\contentsline {section}{\numberline {4}The three limits: one hierarchy, three known analyses}{13}{section.4}
+\contentsline {subsection}{\numberline {4.1}Limit I --- complete catalog, good localisation: the discrete host sum}{13}{subsection.4.1}
+\contentsline {subsection}{\numberline {4.2}Limit II --- incomplete, good localisation: spikes plus a clustered missing field}{14}{subsection.4.2}
+\contentsline {subsection}{\numberline {4.3}Limit III --- very incomplete, diffuse localisation: a correlation-function statement}{14}{subsection.4.3}
+\contentsline {subsection}{\numberline {4.4}The unification statement}{14}{subsection.4.4}
+\contentsline {section}{\numberline {5}The per-proposal algorithm}{15}{section.5}
+\contentsline {subsection}{\numberline {5.1}Offline (once per catalog set)}{15}{subsection.5.1}
+\contentsline {subsection}{\numberline {5.2}Online (once per proposal)}{15}{subsection.5.2}
+\contentsline {subsection}{\numberline {5.3}Cost structure of the two paths}{16}{subsection.5.3}
+\contentsline {section}{\numberline {6}Exact / approximate ledger}{16}{section.6}

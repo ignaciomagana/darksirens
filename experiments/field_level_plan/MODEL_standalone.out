@@ -1,0 +1,29 @@
+\BOOKMARK [1][-]{section.1}{Notation and the objects that already exist}{}% 1
+\BOOKMARK [1][-]{section.2}{The current state as one generative model}{}% 2
+\BOOKMARK [2][-]{subsection.2.1}{The galaxy point process and its thinning}{section.2}% 3
+\BOOKMARK [2][-]{subsection.2.2}{The dark-siren redshift\205sky prior as it is coded}{section.2}% 4
+\BOOKMARK [2][-]{subsection.2.3}{The offline field model: Poisson-lognormal on a low-rank basis}{section.2}% 5
+\BOOKMARK [2][-]{subsection.2.4}{The two Q evaluations, and the variance shift}{section.2}% 6
+\BOOKMARK [2][-]{subsection.2.5}{The per-z mean-one budget constraint as a gauge condition}{section.2}% 7
+\BOOKMARK [2][-]{subsection.2.6}{Member-ensemble marginalisation}{section.2}% 8
+\BOOKMARK [2][-]{subsection.2.7}{The K2 shared-latent joint solve}{section.2}% 9
+\BOOKMARK [2][-]{subsection.2.8}{Which half of the selectionK2 seam is open}{section.2}% 10
+\BOOKMARK [1][-]{section.3}{The proposed model}{}% 11
+\BOOKMARK [2][-]{subsection.3.1}{The hierarchy}{section.3}% 12
+\BOOKMARK [2][-]{subsection.3.2}{\(F3\): the count likelihood}{section.3}% 13
+\BOOKMARK [2][-]{subsection.3.3}{\(F4\): the GW-host intensity on the same field}{section.3}% 14
+\BOOKMARK [2][-]{subsection.3.4}{Double conditioning: the exact factorisation}{section.3}% 15
+\BOOKMARK [2][-]{subsection.3.5}{The exact -cancellation criterion for the conditional channel}{section.3}% 16
+\BOOKMARK [2][-]{subsection.3.6}{The per-proposal conditional solve and its warm start}{section.3}% 17
+\BOOKMARK [2][-]{subsection.3.7}{Laplace marginalisation of the field}{section.3}% 18
+\BOOKMARK [2][-]{subsection.3.8}{The fixed-whitened-draw alternative and its ESS law}{section.3}% 19
+\BOOKMARK [1][-]{section.4}{The three limits: one hierarchy, three known analyses}{}% 20
+\BOOKMARK [2][-]{subsection.4.1}{Limit I \204 complete catalog, good localisation: the discrete host sum}{section.4}% 21
+\BOOKMARK [2][-]{subsection.4.2}{Limit II \204 incomplete, good localisation: spikes plus a clustered missing field}{section.4}% 22
+\BOOKMARK [2][-]{subsection.4.3}{Limit III \204 very incomplete, diffuse localisation: a correlation-function statement}{section.4}% 23
+\BOOKMARK [2][-]{subsection.4.4}{The unification statement}{section.4}% 24
+\BOOKMARK [1][-]{section.5}{The per-proposal algorithm}{}% 25
+\BOOKMARK [2][-]{subsection.5.1}{Offline \(once per catalog set\)}{section.5}% 26
+\BOOKMARK [2][-]{subsection.5.2}{Online \(once per proposal\)}{section.5}% 27
+\BOOKMARK [2][-]{subsection.5.3}{Cost structure of the two paths}{section.5}% 28
+\BOOKMARK [1][-]{section.6}{Exact / approximate ledger}{}% 29
