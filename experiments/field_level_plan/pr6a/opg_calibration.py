@@ -52,6 +52,9 @@ def main(argv=None):
     ap.add_argument("--h0", type=float, default=68.0)
     ap.add_argument("--dh", type=float, default=2.0)
     ap.add_argument("--injections", default="data/injections.h5")
+    ap.add_argument("--tag", default="iso_opg",
+                    help="private realization tree (two concurrent runs must "
+                         "not share one)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
 
@@ -64,7 +67,7 @@ def main(argv=None):
     import darksirens.likelihood.core as _core
     from darksirens.likelihood import selection as _sel
 
-    W16.PR6A_DIR = W16.PR6A_DIR / "iso_opg"
+    W16.PR6A_DIR = W16.PR6A_DIR / a.tag
     (W16.PR6A_DIR / "data").mkdir(parents=True, exist_ok=True)
     world = W16.build_world()
     hs = [a.h0 - a.dh, a.h0, a.h0 + a.dh]
@@ -116,11 +119,20 @@ def main(argv=None):
                     u = (EV[2] - EV[0]) / (2 * a.dh) + dcorr / N
                     score = (LL[2] - LL[0]) / (2 * a.dh)
                     rel = abs(float(u.sum()) - score) / max(abs(score), 1e-12)
+                    dll = (EV[2] - EV[0]) / (2 * a.dh)
                     row.update(
                         score=float(score),
                         H=float(-(LL[2] - 2 * LL[1] + LL[0]) / a.dh ** 2),
                         J_opg=float(np.sum((u - u.mean()) ** 2) * N / (N - 1)),
-                        ordering_rel=float(rel))
+                        ordering_rel=float(rel),
+                        # the decomposition that says WHY J_OPG can be biased:
+                        # the event-term score, the correction's derivative
+                        # (a common mode across events, removed by the OPG
+                        # centring), and the within-dataset event dispersion.
+                        event_score=float(dll.sum()),
+                        dcorr=float(dcorr),
+                        var_within_events=float(dll.var(ddof=1)),
+                        n_events_used=int(dll.size))
                     if rel > 0.02:
                         row["checks_failed"] = [
                             f"ordering check failed at {100 * rel:.1f}%"]
@@ -145,17 +157,36 @@ def main(argv=None):
         H = float(np.mean([r["H"] for r in g]))
         J_ens = float(sc.var(ddof=1))
         R = J_ens / float(jo.mean())
+        ev = np.array([r["event_score"] for r in g])
+        dc = np.array([r["dcorr"] for r in g])
+        vw = np.array([r["var_within_events"] for r in g])
+        Nev = int(g[0]["n_events_used"])
+        iid_pred = Nev * float(vw.mean())      # what i.i.d. events would give
         per_cat.append(dict(catalog=c, n=len(g), J_ensemble=J_ens,
                             J_opg_mean=float(jo.mean()),
                             J_opg_sd=float(jo.std(ddof=1)),
                             ratio_R=R, H_mean=H,
                             J_ens_over_H=J_ens / H if H else None,
-                            J_opg_over_H=float(jo.mean()) / H if H else None))
+                            J_opg_over_H=float(jo.mean()) / H if H else None,
+                            var_event_score=float(ev.var(ddof=1)),
+                            var_dcorr=float(dc.var(ddof=1)),
+                            cov_event_dcorr=float(
+                                np.cov(ev, dc, ddof=1)[0, 1]),
+                            iid_prediction=iid_pred,
+                            event_score_over_iid=(
+                                float(ev.var(ddof=1)) / iid_pred
+                                if iid_pred else None),
+                            n_events=Nev))
         pooled_R.append(R)
         print(f"\n  CATALOG {c} (n={len(g)}): J_ensemble={J_ens:.6f}  "
               f"mean J_OPG={jo.mean():.6f}  R={R:.3f}   "
               f"J_ens/H={J_ens / H:.3f} vs J_OPG/H={jo.mean() / H:.3f}",
               flush=True)
+        print(f"      decomposition: Var(event score)={ev.var(ddof=1):.6f} "
+              f"vs i.i.d. prediction N*E[var_within]={iid_pred:.6f} "
+              f"(ratio {ev.var(ddof=1) / iid_pred:.2f});  "
+              f"Var(dcorr)={dc.var(ddof=1):.6f};  "
+              f"Cov={np.cov(ev, dc, ddof=1)[0, 1]:+.6f}", flush=True)
     out = dict(arm=a.arm, h0=a.h0, dh=a.dh, n_catalogs=a.catalogs,
                n_events_per_catalog=a.events, rows=rows, per_catalog=per_cat,
                R_median=float(np.median(pooled_R)) if pooled_R else None,

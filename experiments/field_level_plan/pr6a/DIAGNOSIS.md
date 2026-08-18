@@ -781,3 +781,65 @@ marginalisation both enter at this order.  It is not the width deficit -- a
 0.18-sigma centring error is a bias channel and Tier C fails on WIDTH by 2.5x --
 but it is the one part of the PP test that the selection account does not
 already explain.
+
+
+## The OPG estimator of `J` is blind to the defect, and the mock proves it
+
+Production has no ensemble, so its `J` was estimated from ONE dataset by the
+outer product of per-event gradients (`desi_full259/production_opg.py`), which
+assumes the per-event scores are independent: it forms `sum_i (u_i - ubar)^2`
+and drops every `Cov(u_i, u_j)`.  That has always been quoted as a LOWER bound.
+It was never measured how loose the bound is.  The mock can measure it, because
+there the ensemble exists.
+
+`opg_calibration.py` holds the catalog FIXED and varies only the event draw
+(`make_mock.build(seed, event_seed=e)` re-seeds immediately before the events --
+`variance_split.py`'s split), so both sides are the event-conditional variance
+the quoted `sigma` claims to be:
+
+| catalogs x event sets | `J` ensemble | mean `J_OPG` | `R` | `J_ens/H` | `J_OPG/H` |
+|---|---|---|---|---|---|
+| 3 x 16 (`opg_calibration.json`) | 0.0879 / 0.0945 / 0.1360 | 0.0183 / 0.0182 / 0.0136 | 4.80 / 5.20 / 9.96 | 5.80 / 3.92 / 8.23 | 1.21 / 0.75 / 0.83 |
+| 2 x 12 (`opg_decomposition.json`) | 0.1559 / 0.0809 | 0.0213 / 0.0142 | 7.31 / 5.69 | 7.14 / 5.33 | 0.98 / 0.94 |
+
+**`J_OPG` understates `J` by a factor 4.8-10 (median 5.2 and 6.5), and returns
+`J/H ~ 1` on a configuration whose true `J/H` is 3.9-8.2.**  All 80 datasets
+passed the ordering check exactly (0.0000%), so this is not a capture artifact.
+
+**Where the missing variance is, measured rather than assumed.**  The second
+run decomposes the score into the event term and the selection correction:
+
+* the correction's derivative takes exactly TWO values across 24 datasets, one
+  per catalog, with within-catalog variance `1.5e-27` -- it is bit-identical
+  across event sets, as it must be, since `log mu` depends on `theta` and the
+  SHARED injections and not on the events.  It contributes nothing.
+* the event-term score carries all of it, and its ensemble variance is
+  **7.31** and **5.69** times `N * E[Var_within(u_i)]` -- the i.i.d. prediction,
+  which is what `J_OPG` computes.
+
+So at fixed catalog the per-event scores are POSITIVELY CORRELATED, with an
+implied mean pairwise correlation of `rho = 0.107` and `0.079` from
+`R = 1 + (N-1) rho` at `N = 60`.  A ~9% average correlation is all it takes;
+`J_OPG` assumes zero.
+
+**What this does to the production numbers.**  Production's OPG gave
+`J/H = 0.855` (fp) and `1.240` (nofp) after the curvature correction.  The mock
+-- which has the defect, `J/H = 5-8` -- returns `0.75-1.21` through the SAME
+estimator.  The production values are statistically indistinguishable from what
+a defective configuration reports, so **the OPG route has no discriminating
+power and production's `J/H ~ 1` is not evidence that production is clean.**
+The withdrawal of the earlier `f_p` claim already followed from the curvature
+check; this says the whole estimator, not just the curvature, cannot answer the
+question.
+
+**And the naive scaling is the wrong way to transfer it.**  What plausibly
+carries over is `rho`, not `R`: at `N = 259` with `rho ~ 0.09` the inflation
+would be `1 + 258 rho ~ 24`, not 5-6.  Whether `rho` itself survives the jump
+from 1,854 pixels and 192,757 galaxies to 30,470 and 22.8M is exactly what is
+not known -- a bigger, denser catalog could correlate events more (more shared
+structure per event) or less (each event's hosts more locally determined).  No
+number is quoted for production here.
+
+**What it makes necessary.**  An ENSEMBLE of synthetic 259-event datasets on the
+production catalog, which was already the stated requirement and is now the only
+route: the shortcut has been measured and it does not work.
