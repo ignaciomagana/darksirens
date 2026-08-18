@@ -1,0 +1,100 @@
+{
+ "n_mocks": 9,
+ "n_events": 540,
+ "snr_threshold": 8.0,
+ "z_mean_all": 0.40822302482726885,
+ "z_sem_all": 0.04975191421342159,
+ "predicted_mean_all": 0.5117095506185372,
+ "bins": [
+  {
+   "rho_lo": 0.0,
+   "rho_hi": 8.0,
+   "n": 134,
+   "rho_true_mean": 7.2172694271624,
+   "z_mean": 1.281801884378109,
+   "z_sem": 0.09225992275935294,
+   "z_sd": 1.0679858185262936,
+   "predicted_mean": 1.5905187601765198
+  },
+  {
+   "rho_lo": 8.0,
+   "rho_hi": 9.0,
+   "n": 100,
+   "rho_true_mean": 8.494606458256461,
+   "z_mean": 0.4371675960022833,
+   "z_sem": 0.09917920398683328,
+   "z_sd": 0.9917920398683328,
+   "predicted_mean": 0.4952904892157817
+  },
+  {
+   "rho_lo": 9.0,
+   "rho_hi": 10.0,
+   "n": 97,
+   "rho_true_mean": 9.490021568565242,
+   "z_mean": 0.17681182350540833,
+   "z_sem": 0.10232326974325451,
+   "z_sd": 1.0077673335161395,
+   "predicted_mean": 0.1288244314405758
+  },
+  {
+   "rho_lo": 10.0,
+   "rho_hi": 11.0,
+   "n": 60,
+   "rho_true_mean": 10.436533144966289,
+   "z_mean": 0.037775098271432196,
+   "z_sem": 0.1166065613797485,
+   "z_sd": 0.9032305405645578,
+   "predicted_mean": 0.018974618820990434
+  },
+  {
+   "rho_lo": 11.0,
+   "rho_hi": 12.0,
+   "n": 35,
+   "rho_true_mean": 11.542203094160632,
+   "z_mean": 0.171577983021298,
+   "z_sem": 0.2075563958142273,
+   "z_sd": 1.227920197129572,
+   "predicted_mean": 0.0008412710954454111
+  },
+  {
+   "rho_lo": 12.0,
+   "rho_hi": 15.0,
+   "n": 60,
+   "rho_true_mean": 13.267341421242406,
+   "z_mean": -0.18326267198021212,
+   "z_sem": 0.13201668159072624,
+   "z_sd": 1.0225968184449001,
+   "predicted_mean": 1.1718023894246786e-05
+  },
+  {
+   "rho_lo": 15.0,
+   "rho_hi": 1000000000.0,
+   "n": 54,
+   "rho_true_mean": 22.770920447119185,
+   "z_mean": -0.17526852895209194,
+   "z_sem": 0.13946248900753003,
+   "z_sd": 1.0248358089808696,
+   "predicted_mean": 1.6109331371718813e-13
+  }
+ ],
+ "slope_z_vs_rho_true": -0.0587197987890691,
+ "slope_se": 0.00837736110443212,
+ "slope_p": 7.200652964861555e-12,
+ "z_mean_below_10": 0.7028065226190923,
+ "n_below_10": 331,
+ "z_mean_above_12": -0.1794759726511026,
+ "z_sem_above_12": 0.09544983111673583,
+ "n_above_12": 114,
+ "corr_z_rho_obs": -0.1295104074378686,
+ "paths": [
+  "/media/volume/darksirens-data/darksirens-dev-data/runs/q/mock_8101/gw_events.h5",
+  "/media/volume/darksirens-data/darksirens-dev-data/runs/q/mock_8102/gw_events.h5",
+  "/media/volume/darksirens-data/darksirens-dev-data/runs/q/mock_8103/gw_events.h5",
+  "/media/volume/darksirens-data/darksirens-dev-data/runs/q/mock_8104/gw_events.h5",
+  "/media/volume/darksirens-data/darksirens-dev-data/runs/q/mock_8105/gw_events.h5",
+  "/media/volume/darksirens-data/darksirens-dev-data/runs/q/mock_8106/gw_events.h5",
+  "/media/volume/darksirens-data/darksirens-dev-data/runs/q/mock_8107/gw_events.h5",
+  "/media/volume/darksirens-data/darksirens-dev-data/runs/q/mock_8108/gw_events.h5",
+  "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/rb/gw_events.h5"
+ ]
+}

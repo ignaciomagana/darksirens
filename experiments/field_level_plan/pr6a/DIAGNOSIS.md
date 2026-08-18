@@ -729,3 +729,55 @@ Either way this is a BIAS channel and Tier C's failure is a WIDTH failure, so
 neither reading of the offset explains the 2.5x -- and gate 8(a) had already
 closed that door from the other side, by collapsing the PE onto truth and
 watching the scatter not move.
+
+
+## The PE offset IS the selection effect, measured against its own prediction
+
+The eight-mock aggregate left the ``+0.399 sigma`` residual mean open: stable
+across realizations, therefore real, but stability does not separate "selection
+working as designed" from a construction defect.  The named discriminator was
+the offset's SNR dependence, and it is now run (`pe_offset_vs_snr.py`, 540
+events over nine mocks -- the eight plus the Tier-B one).
+
+Detection keeps upward SNR fluctuations, which under-estimate ``dL``, so the
+truth sits above the PE mean -- but only near threshold; a loud event is
+detected whatever its noise draw and must be centred.  From the mock's own
+measurement model (``sigma_rho = 1``, ``rho_thr = 8``, ``dL = k/rho``), with
+``n = rho_obs - rho_true`` and ``a = rho_thr - rho_true``,
+
+    z ~ n + (n^2 - 1)/rho_true      =>     E[z | detected] ~ lambda(a) + a lambda(a)/rho_true
+
+with ``lambda(a) = phi(a)/(1 - Phi(a))``.  That is parameter-free.  Against it:
+
+| `rho_true` | events | measured `<z>` | predicted `<z>` |
+|---|---|---|---|
+| < 8 | 134 | +1.282 ± 0.092 | +1.591 |
+| 8-9 | 100 | +0.437 ± 0.099 | +0.495 |
+| 9-10 | 97 | +0.177 ± 0.102 | +0.129 |
+| 10-11 | 60 | +0.038 ± 0.117 | +0.019 |
+| 11-12 | 35 | +0.172 ± 0.208 | +0.001 |
+| 12-15 | 60 | -0.183 ± 0.132 | +0.000 |
+| > 15 | 54 | -0.175 ± 0.139 | +0.000 |
+
+The offset falls from +1.28 below threshold to consistent with zero above
+``rho_true ~ 10``, exactly where the prediction says it must, with a regression
+slope of ``-0.0587 ± 0.0084`` (``p = 7e-12``).  Pooled, measured ``+0.408``
+against a predicted ``+0.512``: the approximation overshoots by 20%, which is
+the direction its own caveat gives -- it takes the ``dL`` posterior straight
+from the ``rho`` posterior and ignores the mass and sky marginalisation that
+widen it, and a wider ``sd_PE`` divides ``z`` down.
+
+**So the offset is the Malmquist selection the hierarchical likelihood's
+selection term exists to absorb, not a DAG defect.**  The events below
+threshold in TRUE SNR are the same population whose presence already showed the
+generator applies its threshold to the noisy statistic rather than the noiseless
+one (checklist rules 1-2), and here they carry the largest offset, +1.28.
+
+One residual worth recording rather than explaining away: above ``rho_true =
+12`` the mean is ``-0.179 ± 0.095``, i.e. 1.9 sigma BELOW zero where the
+prediction is 0.000.  Small, marginal, and in the opposite direction to
+selection; the PE prior (flat in ``rho``, so ``p(dL) ~ dL^-2``) and the mass
+marginalisation both enter at this order.  It is not the width deficit -- a
+0.18-sigma centring error is a bias channel and Tier C fails on WIDTH by 2.5x --
+but it is the one part of the PP test that the selection account does not
+already explain.
