@@ -52,6 +52,10 @@ def main(argv=None):
     ap.add_argument("--h0", type=float, default=68.0)
     ap.add_argument("--dh", type=float, default=2.0)
     ap.add_argument("--injections", default="data/injections.h5")
+    ap.add_argument("--store-events", action="store_true",
+                    help="store per-event scores and sky/distance coordinates "
+                         "so the correlation STRUCTURE can be measured (is the "
+                         "missing covariance local in the sky, or global?)")
     ap.add_argument("--tag", default="iso_opg",
                     help="private realization tree (two concurrent runs must "
                          "not share one)")
@@ -130,12 +134,21 @@ def main(argv=None):
                         # (a common mode across events, removed by the OPG
                         # centring), and the within-dataset event dispersion.
                         event_score=float(dll.sum()),
+                        u=([float(x) for x in u] if a.store_events else None),
                         dcorr=float(dcorr),
                         var_within_events=float(dll.var(ddof=1)),
                         n_events_used=int(dll.size))
                     if rel > 0.02:
                         row["checks_failed"] = [
                             f"ordering check failed at {100 * rel:.1f}%"]
+                if a.store_events:
+                    import h5py
+                    with h5py.File(d / "gw_events.h5") as f:
+                        row["ev_ra"] = [float(x) for x in f["truth"]["ra"][...]]
+                        row["ev_dec"] = [float(x)
+                                         for x in f["truth"]["dec"][...]]
+                        row["ev_dl"] = [float(x) for x in f["truth"]["dl"][...]]
+                        row["ev_z"] = [float(x) for x in f["truth"]["z"][...]]
                 rows.append(row)
                 print(f"[opg] cat {c} evt {e:3d}  score="
                       f"{row.get('score', float('nan')):+.5f}  J_opg="

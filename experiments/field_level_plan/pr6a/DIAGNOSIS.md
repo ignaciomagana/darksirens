@@ -843,3 +843,95 @@ number is quoted for production here.
 **What it makes necessary.**  An ENSEMBLE of synthetic 259-event datasets on the
 production catalog, which was already the stated requirement and is now the only
 route: the shortcut has been measured and it does not work.
+
+
+### The `J_OPG` gap is a dataset-level common mode, and it is not heavy tails
+
+Two readings could give `R ~ 5-7` and they have different consequences, so both
+were tested rather than argued.
+
+**Not an outlier artifact.**  The dataset scores are light-tailed (kurtosis
+-0.8 to -1.7), leave-one-out variance moves the ratio only from 4.80 to 4.39 and
+from 7.30 to 6.27, and robust scales (IQR, MAD) bracket the plain estimate.  A
+third pair of catalogs, run with per-event scores stored, gives `R = 6.70` and
+`6.03` with `J_ens/H = 6.62` and `6.09` against `J_OPG/H = 0.99` and `1.01`.
+
+**Not heavy per-event tails either, and the mechanism is a common mode.**  With
+the per-event scores in hand (32 datasets x 60 events):
+
+| | catalog 0 | catalog 1 |
+|---|---|---|
+| per-event `u`: kurtosis | +0.51 | -0.64 |
+| max abs deviation / sd | 3.6 | 4.0 |
+| dataset-mean `u`: sd | 0.00539 | 0.00490 |
+| i.i.d. prediction for that sd | 0.00208 | 0.00200 |
+| ratio (sd / variance) | 2.59 / 6.7 | 2.46 / 6.0 |
+| pooled var / mean within-dataset var | 1.089 | 1.079 |
+
+The per-event scores are near-Gaussian, so the sample variance inside one
+dataset is a fair estimate of their spread.  What exceeds the i.i.d. prediction
+is the DATASET MEAN: every event's score in a realization shifts together by
+about `+-0.0054` against a within-dataset event-to-event spread of `0.0168`.
+That 8-9% variance share is exactly the `rho` implied by `R = 1 + (N-1) rho`,
+and it is what `J_OPG` removes when it centres on the dataset's own mean.
+
+**It is not the events' redshifts.**  An event's own `z` explains only 2.1% of
+the per-event score variance, and removing a smooth `g(z)` fitted on all pooled
+events leaves the common mode untouched (variance ratio 6.56 and 5.78, against
+6.70 and 6.03 before).  The correlation between the dataset mean and the
+dataset's mean redshift is `-0.13` in one catalog and `+0.51` in the other --
+inconsistent in sign, so not a redshift driver.
+
+**What the common mode IS remains open.**  The catalog, the injections, the
+pinned `theta` (`n0_calibration.json` and `selection_fit.json` are written at
+the injected truth and are byte-identical across event seeds) and the selection
+correction (variance `1.5e-27`) are all held fixed, and the events are drawn
+i.i.d. from the same complete catalog.  Something shared by all 60 events of a
+realization still moves them together.  That is a question about the estimator's
+structure, not about this measurement, and it does not change what the
+measurement licenses: **no single-dataset estimator that centres on its own mean
+can see this term**, so the production `J` needs an ensemble.
+
+
+## Catalog-side interventions: the deficit tracks the catalog branch's WEIGHT
+
+Gate 8(a) put the deficit in the estimator; the information identity put it in
+the event/catalog term.  Three catalog-side interventions, each Tier C's own
+loop with one term perturbed, at `n = 24` from seed 7001 -- the first 24
+realizations of the `n = 100` pass, so the baseline is matched seed for seed
+(`tier_c_catalog_side.py`, `catalog_side_summary.py`):
+
+| intervention | overconfidence | mean `sigma` | spread of medians | median bias |
+|---|---|---|---|---|
+| baseline (`latent_off`) | 2.397 | 8.125 | 19.48 | +0.436 |
+| `kde_wide` (`sigma_kde` 0.003 -> 0.01) | 2.412 | 8.147 | 19.65 | +0.447 |
+| `fp_scaled` (`f_p` x 0.8) | 1.893 | 7.794 | 14.75 | -0.002 |
+| `per_pixel` (count-derived `C`) | 1.529 | 7.249 | 11.08 | +1.710 |
+
+**The catalog kernel width is not the knob.**  Broadening the per-galaxy
+redshift kernels by 3.3x moves the overconfidence by +0.015 and the quoted
+`sigma` by 0.3%.  The redshift prior's informativeness does not come from how
+sharply each galaxy is placed.
+
+**Reducing the catalog branch's weight does move it, through the SCATTER.**
+Scaling `f_p` down by 20% takes the overconfidence from 2.40 to 1.89 -- and it
+does so by shrinking the realization-to-realization spread (19.5 to 14.8), not
+by widening the interval (8.13 to 7.79).  **This is a lever, not a
+mis-specification correction, and the mock says so unambiguously**: its
+completeness model is EXACTLY right by construction (`world16.M0_HAT`,
+`SIGMA_M`, `M_LIM` are the values `make_mock` draws magnitudes with, and
+`c_sel_gaussian` reproduces the mock's own `Phi` to 1e-4), so there is no
+completeness error to correct.  What the scan shows is that the excess scatter
+is generated in proportion to how much the catalog branch carries.
+
+**Swapping the completeness ESTIMATOR trades width for centring.**  The
+per-pixel matched-kernel ratio cuts the overconfidence to 1.53 and the spread by
+43%, but the median bias goes from +0.44 to **+1.71 sigma**.  It is not a fix;
+it absorbs the observed angular clustering into `C`, which is exactly why the
+production line does not use it.
+
+So within the catalog side: not the kernels, not a wrong completeness curve, and
+no intervention that keeps the estimator centred closes the gap.  The deficit
+scales with the catalog branch's weight while the branch's own inputs are
+correct -- which is the same statement the information identity makes, arrived
+at from the other end.
