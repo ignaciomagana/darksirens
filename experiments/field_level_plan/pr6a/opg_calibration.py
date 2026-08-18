@@ -52,6 +52,13 @@ def main(argv=None):
     ap.add_argument("--h0", type=float, default=68.0)
     ap.add_argument("--dh", type=float, default=2.0)
     ap.add_argument("--injections", default="data/injections.h5")
+    ap.add_argument("--delta-pe", action="store_true",
+                    help="collapse every event's PE onto its truth (gate 8(a)'s "
+                         "intervention). Under delta-PE each per-event score is "
+                         "a pure function of that event's own parameters, so "
+                         "i.i.d. events MUST give R = 1: the common mode either "
+                         "survives (the events are not i.i.d.) or it does not "
+                         "(it lives in the PE realization).")
     ap.add_argument("--store-events", action="store_true",
                     help="store per-event scores and sky/distance coordinates "
                          "so the correlation STRUCTURE can be measured (is the "
@@ -102,6 +109,9 @@ def main(argv=None):
                 d = W16.PR6A_DIR / "data" / f"c{c:02d}_e{e:03d}"
                 make_mock.build(seed, d, world=world, verbose=False,
                                 reuse_injections=a.injections, event_seed=e)
+                if a.delta_pe:
+                    from delta_pe import make_delta
+                    make_delta(d / "gw_events.h5", d / "gw_events.h5")
                 p = tier_b.paths_for(d)
                 logl, opts, data = A.build(p, a.arm)
                 LL, EV = [], []
@@ -200,7 +210,8 @@ def main(argv=None):
               f"(ratio {ev.var(ddof=1) / iid_pred:.2f});  "
               f"Var(dcorr)={dc.var(ddof=1):.6f};  "
               f"Cov={np.cov(ev, dc, ddof=1)[0, 1]:+.6f}", flush=True)
-    out = dict(arm=a.arm, h0=a.h0, dh=a.dh, n_catalogs=a.catalogs,
+    out = dict(arm=a.arm, h0=a.h0, dh=a.dh, delta_pe=bool(a.delta_pe),
+               n_catalogs=a.catalogs,
                n_events_per_catalog=a.events, rows=rows, per_catalog=per_cat,
                R_median=float(np.median(pooled_R)) if pooled_R else None,
                R_min=float(np.min(pooled_R)) if pooled_R else None,

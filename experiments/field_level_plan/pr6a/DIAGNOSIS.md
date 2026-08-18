@@ -935,3 +935,68 @@ no intervention that keeps the estimator centred closes the gap.  The deficit
 scales with the catalog branch's weight while the branch's own inputs are
 correct -- which is the same statement the information identity makes, arrived
 at from the other end.
+
+
+### The common mode survives delta-PE, and that is an anomaly, not a mechanism
+
+The obvious mechanism for a per-dataset common mode is the PE realization, so
+gate 8(a)'s intervention was applied to the calibration itself
+(`opg_calibration.py --delta-pe`, verified on the built artifact: max
+within-event `dL` spread `0.000e+00` in the delta-PE trees, `8.7e+02` in the
+ordinary one).  It does not go away:
+
+| | ordinary PE | delta-PE at truth |
+|---|---|---|
+| `R` (catalog A / B) | 6.70 / 6.03 | 5.35 / 6.48 |
+| `J_ens/H` | 6.62 / 6.09 | 4.64 / 6.14 |
+| `J_OPG/H` | 0.99 / 1.01 | 0.87 / 0.95 |
+| dataset-mean variance / i.i.d. | 6.7 / 6.0 | 5.4 / 6.5 |
+
+**And a bootstrap makes the statement assumption-free.**  Pool a catalog's
+`16 x 60` per-event scores, resample 16 synthetic datasets of 60, and take the
+variance of their means: that is the i.i.d. null with no distributional
+assumption at all.  Observed / null = **6.37, 5.81 (ordinary) and 5.31, 6.41
+(delta-PE), each with `p < 5e-4`** over 2000 resamples.  Shuffling events across
+datasets destroys the effect, so the per-event scores carry dataset identity.
+
+**Here is why that is an anomaly.**  The events of one realization are drawn
+independently from a FIXED catalog, with byte-identical injections, depth map
+and pinned `theta` -- verified by hash, and the only file that differs between
+event seeds beyond the events is `selection_fit.json`'s recorded `survey_path`
+string.  If the per-event scores were i.i.d. -- which they must be if `u_i` is a
+function of event `i`'s own parameters -- then `Var(sum_i u_i) = N Var(u_i)`
+exactly.  It is 6x that.  The argument does not even need delta-PE: an
+independent noise draw per event is still per-event.
+
+**The capture is not the explanation.**  `capture_check.py` re-runs one dataset
+at `pe_event_block` 4, 8 and 16, twice each: `logL` is identical to the last bit,
+the captured multiset is identical (`max |sort(x) - sort(ref)| = 0`), and within
+a fixed block size the ORDER is reproducible too.  Changing the block size
+permutes the order, as vmap chunking should -- and the calibration holds the
+block fixed across its three `H0` nodes, so its pairing is consistent.  (A
+permuted capture would in any case INFLATE `J_OPG` by adding pairing noise, and
+the discrepancy runs the other way.)
+
+**It is not the events' redshifts.**  Their distributions are homogeneous across
+datasets (Kruskal-Wallis `p = 0.82` and `0.037`) while the SCORE distributions
+are not (`p < 1e-10` both), and a smooth `g(z)` fitted on all pooled events
+reproduces only **8%** of the dataset-mean scatter.  Same redshifts, shifted
+scores.
+
+So one of two things is true and this campaign does not settle which:
+
+* the mock's event draw does not produce independent events, despite drawing
+  hosts i.i.d. from the catalog; or
+* the per-event score carries a dataset-level dependence that is not in the
+  event's own parameters -- a coupling in the estimator we have not found.
+
+The second would be the more interesting, because it would be a property of the
+LIKELIHOOD rather than of the mock, and Tier C's width deficit is exactly a
+statement about the likelihood.  Worth noting alongside: `J_ens/H` = 4.6-8.2
+here, and `sqrt` of that is 2.2-2.9, which is Tier C's measured overconfidence
+range.  This may be the same object seen from a third direction.
+
+**What does not depend on resolving it:** the operational conclusion.  A
+per-dataset common mode is invisible to any single-dataset estimator that
+centres on its own mean, whatever creates it, so production's `J` needs an
+ensemble either way.
