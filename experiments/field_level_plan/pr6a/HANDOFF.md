@@ -1,44 +1,51 @@
-# Where to pick up (checkpoint 2026-08-18, second)
+# Where to pick up (checkpoint 2026-08-18, third)
 
-## js2h100 is idle
+Everything queued on 2026-08-18 has run.  `js2h100` is idle; nothing is pending
+on PSC (the S-3 job was cancelled there and run on the H100 instead).
 
-The work queue (`queue_h100.sh`, copied here for provenance) ran to
-`===== QUEUE DONE =====` at 08:57 UTC and the box has since rebooted.  Nothing
-is running; the GPU is at 0%.
+## What was measured, and what is now the owner's call
 
-Everything it produced is now harvested into this directory:
+**1. S-3 is fixed and measured on production** (`845858d`, `3d52b86`).  The
+Q-table line can carry a mask for the first time.  Four arms now exist:
+`nofp` 90.25, `fp` 71.70, `q_nofp` 89.90, `q_fp` **80.61**.  The mask is worth
+`-2.49 sigma` on the Q line, and Q and the mask INTERACT (Q alone: 0.35 km/s;
+Q with the mask: +8.91).
+**OWNER DECISION:** the ladder's headline arms (`fp`/`latent`, 71.7/72.0) carry
+the mask and no Q table because that was the only runnable pairing; the shipped
+scan's `selq_radial` is `q_nofp` and should now be `q_fp`.  They differ by 8.9
+km/s.  See `desi_full259/data/s3_footprint/RESULT.md`.
 
-| run | artifact | written up in |
-|---|---|---|
-| `tier_c_n100` | `tier_c_n100.json` | `DIAGNOSIS.md`, "Tier C at `n = 100`" |
-| `mock_81xx` + `pecal_81xx` | `pecal_multiseed/`, `pecal_multiseed.json` | `DIAGNOSIS.md`, "The PE offset across eight independent mocks" |
-| `variance_8x8` | `variance_8x8.json` | `DIAGNOSIS.md`, "The variance split at 8x8" (table corrected against it) |
+**2. The OPG shortcut is dead** (`9b1c4b8`, `f16518a`).  `J_OPG` understates `J`
+by 4.8-10x on the mock and returns `J/H ~ 1` where the truth is 3.9-8.2, so
+production's `J/H = 0.855/1.240` is not evidence production is clean.  The
+production `J` needs an ensemble: `desi_full259/ENSEMBLE_DESIGN.md`, whose §4 is
+an owner decision (the injection set has no SNR column, so DAG rule 2 cannot be
+honoured exactly).
 
-The `variance_8x8` "discrepancy" flagged at harvest was a misreading: 64.10 and
-60.54 are the `latent_off` and `latent` grand means of the SAME run, not two
-values of one number.  Harvesting it did turn up something real though -- three
-cells of the 8x8 table in `DIAGNOSIS.md` had been transcribed from an
-intermediate and disagreed with the run's own json, and are now corrected.
+**3. Tier C's catalog-side scan is complete** and closes nothing: the kernel
+width has no leverage, the completeness WEIGHT is a monotone lever but the
+mock's completeness model is exactly right by construction, and the `per_pixel`
+estimator trades width for a `+1.71 sigma` bias.
 
-## What the harvest settled
+**4. The mock's PE offset is the selection effect** (`200fe6f`), measured
+against its own parameter-free prediction over 540 events.
 
-* the overconfidence factor is `2.645` / `2.482`, replicated on 100 realizations
-  from a seed block disjoint from every earlier pass, so the 15% precision
-  caveat is gone;
-* PE over-sharpness is eliminated across EIGHT mocks, not one (mean `resid_sd`
-  1.156, never above 1.433, against the 2.6 required);
-* the mock's PE carries a stable `+0.399 sigma` offset which is the entire
-  non-uniformity of its PP test -- a bias channel, not the width failure, and
-  its cause (selection working as designed vs a construction defect) is open.
+## The one live thread
 
-## What is still open
+The per-dataset common mode in the score (`DIAGNOSIS.md`, last section) survives
+delta-PE, a bootstrap null, and a verified capture, and contradicts what i.i.d.
+events must give by a factor 6.  Either the mock's event draw is not i.i.d. or
+the per-event score has a dataset-level dependence — and the second would be a
+property of the LIKELIHOOD, with `sqrt(J_ens/H) = 2.2-2.9` sitting exactly on
+Tier C's measured overconfidence.  That is the cheapest remaining route to the
+root cause and it does not need the production ensemble.
 
-Unchanged by this harvest: gate 8(a) localises the width deficit to the
-ESTIMATOR (catalog term / completion / selection integral), so **the next test
-is catalog-side**.  The production counterpart of `J/H` still needs an ensemble
-of synthetic 259-event datasets on the production catalog; the OPG lower bound
-is all there is, and the first attempt at a production `J/H` was withdrawn
-(commit 122a2ba) because `H` from a +-2 km/s second difference does not
-reproduce the posterior width.
+Suggested next test: evaluate the per-event scores on datasets assembled by hand
+from i.i.d. draws, bypassing `_draw_events_until_detected` entirely.  If `R = 1`
+there, the generator's event draw is the culprit; if `R = 6`, the coupling is in
+the estimator.
 
-See memory `tier-c-dispersion` and the tail of `DIAGNOSIS.md`.
+## Still true from before
+
+The production 259-event run remains held for the owner's gate.  `variance_8x8`,
+the `n = 100` Tier C pass and the eight PE-calibration mocks are all harvested.
