@@ -221,23 +221,34 @@ every number below by ~1.6x in error.
 |---|---|---|
 | total spread | 17.41 | 19.18 |
 | **overconfidence, total** | **2.360** | **2.753** |
-| event spread at FIXED catalog | 15.57 | 16.49 |
-| **overconfidence, events only** | **2.110** | **2.367** |
-| catalog spread (debiased) | 7.93 | — |
+| event spread at FIXED catalog | 15.72 | 16.63 |
+| **overconfidence, events only** | **2.131** | **2.388** |
+| catalog spread (debiased) | 7.93 | 10.13 |
 | mean quoted `sigma` | 7.38 | 6.97 |
-| fraction of variance from events | 0.72-0.82 | 0.67 |
+| fraction of variance from events | 0.816 | 0.752 |
+
+*(Corrected 2026-08-18 against the harvested `variance_8x8.json` and an
+independent recomputation from its 64 raw cells: the first four rows above were
+transcribed from an intermediate and three of them were wrong -- event spread
+15.57/16.49, events-only 2.110/2.367, and a fraction quoted as a range.  The
+`latent` catalog spread was left blank and is 10.13.  Nothing in the reading
+below changes.  The fraction is `var_within / var_total`; debiasing the
+between-catalog variance for the finite 8 event sets per catalog instead gives
+0.797 and 0.730.)*
 
 Two things this settles.
 
 **The deficit survives conditioning on the catalog.**  Holding the catalog
-fixed and varying only the event draw still gives 2.11-2.37.  The analysis
+fixed and varying only the event draw still gives 2.13-2.39.  The analysis
 treats the catalog as observed data, so its coverage ought to hold conditional
 on that catalog -- and it does not.  Whatever is wrong is not "the tier varies
 the catalog while the posterior conditions on it".
 
-**There is a modest bias as well as a width deficit.**  Grand mean 64.10
-against `H0_true` = 67.74, i.e. -3.6 km/s, about -0.5 of the quoted `sigma`.
-The medians span 44.5 to 100.5 -- +-4 sigma excursions against a quoted 7.4.
+**There is a modest bias as well as a width deficit.**  Grand mean **64.10**
+(`latent_off`) and **60.54** (`latent`) against `H0_true` = 67.74 -- i.e. -3.6
+and -7.2 km/s, -0.5 and -1.0 of the quoted `sigma`.  The cell medians span 28.1
+to 100.5 (`latent_off`) and 24.3 to 98.2 (`latent`); the worst single cell sits
+6.7 and 11.2 of its OWN `sigma` from the truth.
 
 This is what motivates running the checklist's first gate rather than a sixth
 downstream variation.

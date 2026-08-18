@@ -12,12 +12,13 @@ Everything it produced is now harvested into this directory:
 |---|---|---|
 | `tier_c_n100` | `tier_c_n100.json` | `DIAGNOSIS.md`, "Tier C at `n = 100`" |
 | `mock_81xx` + `pecal_81xx` | `pecal_multiseed/`, `pecal_multiseed.json` | `DIAGNOSIS.md`, "The PE offset across eight independent mocks" |
-| `variance_8x8` | still on the box at `runs/q/variance_8x8.json` | NOT harvested |
+| `variance_8x8` | `variance_8x8.json` | `DIAGNOSIS.md`, "The variance split at 8x8" (table corrected against it) |
 
-The `variance_8x8` rerun (8x8 cells, up from 5x5) reports a grand mean of 60.54
-against the 64.10 recorded from the earlier split -- worth a look before it is
-quoted anywhere.  Its log and json are at
-`/media/volume/darksirens-data/darksirens-dev-data/{logs/q,runs/q}/variance_8x8.*`.
+The `variance_8x8` "discrepancy" flagged at harvest was a misreading: 64.10 and
+60.54 are the `latent_off` and `latent` grand means of the SAME run, not two
+values of one number.  Harvesting it did turn up something real though -- three
+cells of the 8x8 table in `DIAGNOSIS.md` had been transcribed from an
+intermediate and disagreed with the run's own json, and are now corrected.
 
 ## What the harvest settled
 
