@@ -22,6 +22,7 @@ import argparse
 
 import make_mock
 import tier_c
+import world16 as W16
 from truncate_catalog import truncate
 
 
@@ -47,6 +48,13 @@ def main(argv=None):
                           kept=int(tot), max_z=float(mx)))
         return r
 
+    # tier_c writes into W16.PR6A_DIR/"data"/c{k:03d}, a HARDCODED path, so two
+    # variants running at once clobber each other's realizations (found the
+    # hard way: a FileNotFoundError on truth.json when the other run had
+    # already moved on). Redirect this driver to a private tree.
+    _real_dir = W16.PR6A_DIR
+    W16.PR6A_DIR = _real_dir / "iso_trunc"
+    (W16.PR6A_DIR / "data").mkdir(parents=True, exist_ok=True)
     make_mock.build = _build_then_truncate
     try:
         tier_c.main(["--n-real", str(a.n_real), "--seed0", str(a.seed0),
@@ -54,6 +62,7 @@ def main(argv=None):
                      "--out", a.out])
     finally:
         make_mock.build = real_build
+        W16.PR6A_DIR = _real_dir
 
     if stats:
         import numpy as np
