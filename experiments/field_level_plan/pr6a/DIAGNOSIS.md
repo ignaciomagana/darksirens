@@ -208,3 +208,96 @@ delta-PE run removes the PE as a noise source entirely, so:
 
 That is the next test worth building, and it is the checklist's own FIRST gate
 -- everything else is downstream of it.
+
+
+---
+
+# The variance split at 8x8 (2026-08-18)
+
+The first split ran a 5x5 grid (25 cells).  This is 8x8 (64), which tightens
+every number below by ~1.6x in error.
+
+| | `latent_off` | `latent` |
+|---|---|---|
+| total spread | 17.41 | 19.18 |
+| **overconfidence, total** | **2.360** | **2.753** |
+| event spread at FIXED catalog | 15.57 | 16.49 |
+| **overconfidence, events only** | **2.110** | **2.367** |
+| catalog spread (debiased) | 7.93 | — |
+| mean quoted `sigma` | 7.38 | 6.97 |
+| fraction of variance from events | 0.72-0.82 | 0.67 |
+
+Two things this settles.
+
+**The deficit survives conditioning on the catalog.**  Holding the catalog
+fixed and varying only the event draw still gives 2.11-2.37.  The analysis
+treats the catalog as observed data, so its coverage ought to hold conditional
+on that catalog -- and it does not.  Whatever is wrong is not "the tier varies
+the catalog while the posterior conditions on it".
+
+**There is a modest bias as well as a width deficit.**  Grand mean 64.10
+against `H0_true` = 67.74, i.e. -3.6 km/s, about -0.5 of the quoted `sigma`.
+The medians span 44.5 to 100.5 -- +-4 sigma excursions against a quoted 7.4.
+
+This is what motivates running the checklist's first gate rather than a sixth
+downstream variation.
+
+
+---
+
+# GATE 8(a) FAILS: the width deficit is in the ESTIMATOR, not the mock's PE
+
+Ran Tier C with each event's PE samples collapsed onto that event's TRUE
+parameters -- no parameter-estimation uncertainty at all.  Same seeds, same
+arms, same catalog, `latent_off` (the no-field control, the simplest arm that
+exhibits the deficit).  Construction verified on the artifact: max within-event
+`dL` spread = 0.000e+00 exactly.
+
+| | real PE | **delta-PE at truth** |
+|---|---|---|
+| median scatter | 17.49 | **17.61** |
+| mean quoted `sigma` | 7.74 | **6.71** |
+| **overconfidence** | **2.259** | **2.624** |
+| coverage at nominal 90% | 0.38 | **0.42** |
+| `cdf` mean | 0.493 | 0.524 |
+
+**Removing the PE uncertainty entirely narrows each posterior (7.74 -> 6.71,
+the expected direction, which confirms the intervention took effect) and leaves
+the scatter untouched (17.49 -> 17.61).**  So the overconfidence gets slightly
+WORSE, and the scatter is demonstrably not coming from the parameter
+estimation.
+
+By the gate's own reading, that settles the fork:
+
+* the synthetic PE is **not** the source of the dispersion;
+* the event construction is **not** the source (the events carry their exact
+  true parameters here);
+* **the width deficit lives in the estimator's own terms** -- the catalog term,
+  the completion, or the selection integral -- and is independent of the mock's
+  parameter estimation.
+
+This redirects the investigation.  Five previous tests varied things downstream
+of the likelihood core and found nothing; this one says why.
+
+## What it does and does not license
+
+It does NOT yet say "the shipped likelihood is miscalibrated", because the test
+separates (estimator + catalog) from (PE + events), not estimator from catalog.
+The mock's catalog is still the mock's -- nside 16, 1,854 occupied pixels,
+192,757 galaxies, 60 events -- against production's nside 64, 30,470 pixels,
+22.8M galaxies and 259 events.  A deficit that is a property of the small
+configuration would not transfer.
+
+It DOES mean the next test is a catalog-side one, not another data-side one,
+and it means Tier C cannot be repaired by fixing the mock's PE or its event
+draw.
+
+## Open question this raises for the production result
+
+If the estimator's intervals are systematically ~2.5x too narrow **on this
+configuration**, the obvious question is whether the production 90% CI
+([65.18, 79.38] for the latent arm) is too narrow as well.  Nothing measured
+here answers that -- the scale difference is two orders of magnitude in
+galaxies and a factor 4 in events -- and it must not be assumed in either
+direction.  It is the reason the closure tiers matter, and it should be
+resolved before the production interval is quoted as a credible interval.
