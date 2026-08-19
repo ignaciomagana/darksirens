@@ -1181,3 +1181,63 @@ Three things follow and they should not be run together:
 3. **The production number is unchanged and the caveat is unchanged.**  Nothing
    here moves a median. It says the interval on any `f_p`-bearing arm --
    `fp`, `latent`, and now `q_fp` -- is the one that needs the correction.
+
+
+## The coupling, localized to `f_p` -- and one probe that disagrees
+
+`R` needs no capture: it is `Var_D(total score) / J_OPG`, and the numerator comes
+from total log-likelihoods.  But the INTERPRETATION -- that the excess is a
+per-dataset common mode in the per-event scores -- rests on the capture, so it
+was re-tested a capture-free way (`loo_coupling.py`).  For a dataset `D` and an
+event `e`,
+
+    u_e(D) = d/dH0 [ logL(D) - logL(D \ e) ]
+
+is a difference of TOTALS, immune to whatever order the event reduction runs in.
+Evaluate the SAME 12 events inside two datasets that share only those 12:
+
+| arm | delta of centred `u_e` | within-dataset spread | ratio | corr(X, Y) |
+|---|---|---|---|---|
+| `f_p` ON | 0.0279 | 0.1558 | **0.179** | +0.997 |
+| `f_p` OFF | **0.000000** | 0.0164 | **0.000** | **+1.000** |
+
+**Without `f_p` an event's score is EXACTLY independent of its company** -- zero
+to machine precision, correlation exactly 1.  With `f_p` it is not.  That is the
+localisation stated at the level of a mechanism rather than a ratio: `f_p` is
+what makes the per-event terms of this likelihood non-separable.
+
+### The probe that disagrees, and what it does and does not overturn
+
+Pushed further -- 8 datasets sharing 12 events, so the across-dataset variance of
+those events' mean LOO score estimates `Var(c)` directly -- the answer comes back
+NULL on the `f_p` arm:
+
+    dataset means of u: sd 0.0237   within-dataset sd 0.1025
+    Var(c) debiased = -3.2e-4  (i.e. consistent with ZERO)
+    => R predicted at N = 60: 1.00,  against the measured 5.57
+
+So the LOO route finds no common mode where the capture route finds a large one.
+Both cannot be describing the same quantity, and they are not: the per-event
+spread is **0.1025** by LOO against **0.0156** by capture, a factor 6.6.  LOO
+carries the selection correction's non-linearity in `N` -- removing an event
+changes the `60 -> 59` correction, which is precisely the term that broke the
+subset estimator at 9.2% and is recorded in this file as structural.  So the LOO
+`u` is a different decomposition of the same total, and its `Var(c)` does not
+bound the capture's covariance.
+
+**What survives regardless.**  `Sum_i u_i` equals the full score to 0.00% (the
+ordering check), and `Sum_i (u_i - ubar)^2` is invariant to any permutation of
+the capture -- so `J_OPG = 0.0146` is robust to the ordering defect that
+invalidated the invariance check.  With `Var_D(total score) = 0.081` measured
+from totals alone, `Var(S) > N Var(u)` is then arithmetic, and positive
+covariance among the within-dataset scores is inescapable.
+
+**What is now less settled than the previous section implied.**  The SIZE of the
+common mode, and therefore the claim that ~9% pairwise correlation is the whole
+story, rests on the capture-based decomposition alone; the independent probe of
+that decomposition returns a null it cannot explain.  The identity violation
+(`J_ens/H` = 5.50 with `f_p`, 0.75 without, `sqrt` matching Tier C's 2.40) is
+untouched by this -- it needs no per-event decomposition at all -- but the
+mechanism should be read as "`f_p` makes the per-event terms non-separable",
+which the exact-zero LOO result establishes, and NOT as a measured correlation
+coefficient.
