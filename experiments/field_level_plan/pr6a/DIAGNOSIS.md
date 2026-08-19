@@ -1588,3 +1588,64 @@ threshold as the event draw.  `make_mock` draws events by thresholding
 implied detection models agree to better than a few tenths of a sigma in `H0`
 has not been measured.  That is the next test, and it is cheap: regenerate the
 injection set from the SAME code path that draws the events and re-run.
+
+
+## The bias is the SELECTION INTEGRAL's support, and it is measured
+
+DAG rule 3 holds on the STATISTIC, and that part is settled by reading rather
+than running: events threshold `obs_rho` from `_measure`, injections threshold
+`rho_opt + N(0, sigma_rho)` in `_make_selection_kernel`, and both call the
+identical `snr_ref (mc_det/30)^(5/6) (1000/dl)` with the same `sigma_rho` and the
+same threshold.  Both also carry the `(1+z)^(gamma-1)` rate factor -- events by
+rejection at line 964, injections inside `pdraw` at line 1191.
+
+What rule 3 does NOT cover is the SOURCE distribution, and that is where the
+mismatch is.  Events are drawn from CATALOG HOSTS; injections from a smooth
+`dV_c/dz`.  Comparing the DETECTED redshift distributions, injections weighted by
+`1/pdraw` -- which is exactly how `mu` weights them -- over 1,440 events from the
+IDEAL-COMPLETE tree and 65,791 injections:
+
+| quantile | events | injections |
+|---|---|---|
+| 0.10 | 0.0635 | 0.0282 |
+| 0.25 | 0.0851 | 0.0630 |
+| 0.50 | 0.1113 | 0.1289 |
+| 0.75 | 0.1337 | **0.2149** |
+| 0.90 | 0.1587 | **0.2959** |
+| mean | 0.1107 | **0.1474 (+33.1%)** |
+
+KS distance **0.310**.  `mu` expects detections 33% more distant in the mean than
+the mock produced, and the direction is exactly right for the observed bias: a
+host placed at higher `z` for the same `dL` implies a larger `H0`, so the fit
+compensates upward.  The bias is `+0.32` in median `u`; this is a 33% error in
+the selection integral's first moment.
+
+**Two separable pieces, and only one is a defect.**
+
+* **9.5% of `mu`'s weight sits ABOVE the catalog's depth** (`z > 0.30`, where the
+  injections reach `z = 0.596` and the events cannot exist -- their max is 0.3003
+  and 0.07% lie above).  That part is NOT an error: the analysis models
+  above-depth hosts as uncatalogued, so `mu` is supposed to include them.
+* **Restricted to `z <= 0.30`, where catalog hosts exist, the mismatch is still
+  +13.5% in the mean** and the 90th percentile is 0.244 against the events' 0.159.
+  That part is a genuine disagreement between the two source distributions inside
+  the volume they share.
+
+The residual `+13.5%` is what a smooth `dV_c/dz` proposal gives against a
+CLUSTERED, depth-limited host catalog: at fixed `dL` the catalog's hosts are not
+uniformly distributed in comoving volume, and the injections know nothing about
+that.  This is the mock-data checklist's rule 6 in a form it does not state --
+not "injections must cover every trial hyperparameter" but "injections must be
+drawn from the same source population the events are", which for a dark-siren
+mock means the CATALOG, not the volume.
+
+**What this licenses, and what it does not.**  It identifies a specific,
+quantified inconsistency of the right sign and plausible size, and it is the only
+surviving candidate after the `f_p` gather, the PE, the event draw and the
+completeness model were each eliminated by measurement.  It does NOT yet prove
+causation: the step that would is rebuilding the injection set by drawing hosts
+from the catalog (with the same detection rule) and re-running Tier C.  That is a
+generator change, not an analysis change, so it belongs to the mock rather than
+to the pipeline -- and it is worth stating plainly that **this is a defect in the
+VALIDATION MOCK, not in the production analysis**, whose injections are the real
+LVK campaign and whose events are real detections.
