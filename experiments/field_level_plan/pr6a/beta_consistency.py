@@ -19,8 +19,17 @@ The test is a direct comparison of the DETECTED redshift distributions, weighted
 as the likelihood weights them:
 
 * events: the detected hosts' true `z`, pooled over realizations;
-* injections: detected injections, weighted by `1/pdraw` -- the same weight
-  `mu` uses, so this IS the selection integral's own view of `p(z | detected)`.
+* injections: detected injections, weighted by `p_fid / pdraw` -- the weight the
+  SELECTION INTEGRAL actually uses, where `p_fid` is the population density
+  `_mass_spin_pdf(m1src, q, chi) * p(z) / jac / 4pi` exactly as
+  `_selection_neff_at_fiducial` builds it.
+
+  **`1/pdraw` alone is the wrong weight and gives a badly wrong answer.**  The
+  proposal is `population+uniform`, a mixture containing a uniform-in-`m1det`
+  component, so `1/pdraw` over-weights heavy systems -- which are detectable
+  further away -- and manufactures an apparent excess of distant detections.
+  Measured: `1/pdraw` says the injections are 33% more distant in the mean than
+  the events; the correct weight is what this script now reports.
 
 A KS/mean comparison of those two is a direct check on `mu`'s support.  If they
 disagree, the sign of the disagreement predicts the sign of the `H0` bias: `mu`
@@ -73,10 +82,41 @@ def main(argv=None):
     zg = np.linspace(0.0, 3.0, 4001)
     dlg = np.asarray([float(dL_of_z(z, W16.H0_TRUE, W16.OM0)) for z in zg])
     z_in = np.interp(dl_in, dlg, zg)
-    w = 1.0 / pdraw
+
+    # p_fid: the population density in the injection basis, built exactly as
+    # generate_mock_data._selection_neff_at_fiducial does it.
+    import sys
+    sys.path.insert(0, str(Path(W16.__file__).resolve().parents[3]
+                          / "scripts" / "mock_dark_sirens"))
+    import generate_mock_data as G
+    with h5py.File(a.injections) as f:
+        m1src = np.asarray(f["m1src"][...])
+        m1det = np.asarray(f["m1det"][...])
+        m2src = np.asarray(f["m2src"][...])
+        chi = np.asarray(f["chieff"][...])
+    pop = G.PopulationConfig()
+    grids = G._cosmology_grids(
+        G._build_cosmology(W16.H0_TRUE, W16.OM0, -1.0, 0.0), 0.60)
+    q_in = m2src / np.maximum(m1src, 1e-300)
+    rate = (1.0 + grids["z"]) ** (pop.gamma - 1.0)
+    trapz = getattr(np, "trapezoid", None) or np.trapz
+    pz = (np.interp(z_in, grids["z"], grids["dvc_dz"])
+          * (1.0 + z_in) ** (pop.gamma - 1.0)
+          / trapz(grids["dvc_dz"] * rate, grids["z"]))
+    ddldz = np.interp(z_in, grids["z"],
+                      np.gradient(grids["dl"], grids["z"]))
+    jac = ddldz * (1.0 + z_in)
+    p_fid = (G._mass_spin_pdf(m1src, q_in, chi, pop) * pz
+             / np.maximum(jac, 1e-300) / (4.0 * np.pi))
+    w = p_fid / pdraw
     w = w / w.sum()
     print(f"[inj] {z_in.size} detected injections, Neff = "
           f"{1.0 / np.square(w).sum():.1f}")
+    w_bad = 1.0 / pdraw
+    w_bad = w_bad / w_bad.sum()
+    print(f"[inj] (the WRONG 1/pdraw weight would give mean z = "
+          f"{float((w_bad * z_in).sum()):.4f} vs the correct "
+          f"{float((w * z_in).sum()):.4f})")
 
     def wq(x, ww, t):
         o = np.argsort(x)

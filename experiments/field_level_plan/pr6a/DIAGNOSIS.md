@@ -1649,3 +1649,52 @@ generator change, not an analysis change, so it belongs to the mock rather than
 to the pipeline -- and it is worth stating plainly that **this is a defect in the
 VALIDATION MOCK, not in the production analysis**, whose injections are the real
 LVK campaign and whose events are real detections.
+
+
+## RETRACTION: the selection integral's support is FINE, and my 33% was my own error
+
+The previous section reported that `mu` expects detections 33% more distant than
+the mock produced, and read that as the cause of the residual bias.  **That is
+wrong and is withdrawn.**  It weighted the injections by `1/pdraw`, but the
+selection integral weights them by `p_fid / pdraw`, where `p_fid` is the
+population density `_mass_spin_pdf(m1src, q, chi) * p(z) / jac / 4pi` --
+exactly as `generate_mock_data._selection_neff_at_fiducial` builds it.
+
+The proposal is `population+uniform`, a MIXTURE containing a uniform-in-`m1det`
+component.  Dropping `p_fid` therefore over-weights heavy systems, which are
+detectable further away, and manufactures an excess of distant detections out of
+nothing.  With the correct weight:
+
+| quantile | events | injections (correct weight) | injections (`1/pdraw`, WRONG) |
+|---|---|---|---|
+| 0.10 | 0.0635 | 0.0593 | 0.0282 |
+| 0.50 | 0.1113 | 0.1077 | 0.1289 |
+| 0.90 | 0.1587 | 0.1571 | 0.2959 |
+| mean | 0.1107 | **0.1086 (-1.9%)** | 0.1474 (+33.1%) |
+
+`Neff` also rises from 1,953 to 37,111 under the correct weight, which is the
+same statement seen from the variance side.
+
+**So the selection integral's support matches the events to about 2%**, and the
+residual `KS = 0.042` (`p = 0.012` at 1,440 events) is a small effect of the
+**WRONG SIGN**: the injections are slightly CLOSER than the events, where an
+upward `H0` bias needs `mu` to expect detections FURTHER away.  DAG rule 3 is
+satisfied both on the statistic (by reading: identical `rho_opt` formula, `sigma_rho`,
+threshold, and `(1+z)^(gamma-1)` factor on both sides) and now on the support.
+
+**The residual bias is therefore still unexplained**, with the selection integral
+eliminated alongside the `f_p` gather, the PE, the event draw and the completeness
+model.  What remains untested is narrower than before: the catalog KERNEL (each
+galaxy's photo-z is represented by a Gaussian of width `dz`, and a
+mis-specified kernel SHAPE shifts the host redshift the analysis infers) and the
+`z_depth` relaxation boundary (the mock's universe extends to `Z_UNIVERSE = 0.60`
+while its catalog stops at 0.30, so 9.5% of `mu`'s weight is legitimately
+above-depth -- correct by design, but the branch that handles it is the one place
+the analysis must model hosts it cannot see).
+
+The lesson is the same one this file has now recorded twice: **a weight is part of
+a measurement's definition, and using the wrong one produces a confident number.**
+The check that would have caught it immediately is the one that did catch it --
+`Neff`, which the generator already computes with `p_fid/pdraw` and which was
+sitting in `truth.json` all along at 1,953 for the wrong weight against 37,111
+for the right one.
