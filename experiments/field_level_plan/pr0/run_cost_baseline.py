@@ -50,6 +50,9 @@ def _opts(q=None, marginalize=False):
         lss_completion=(str(q) if q else None),
         lss_marginalize=marginalize,
         c_mode="selection", catalog_sky_weighting="field",
+        # S-3: no mask on a footprint-limited catalog -- the exposed
+        # configuration, run here deliberately (loaders' guard).
+        allow_unmasked_footprint=True,
         complete_empty_pixel_policy="zero", mark_model="none", mark_names=(),
         sky_model="isotropic", drop_full_catalog=False, survey_z_depth=None,
         fix_cosmology=False, fix_de=True, fix_population=True,

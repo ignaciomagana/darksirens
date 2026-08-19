@@ -1016,6 +1016,12 @@ def _guard_unmasked_footprint(opts, data) -> dict:
     Sparsity is not a footprint, and the guard separates them: a catalog whose
     empty pixels are what its mean count predicts under Poisson is sparse, and
     passes at any empty fraction.
+
+    KNOWN GAP: ``inference/data.py`` returns before this attach step for
+    ``n_catalogs >= 2``, so a multitracer mixture is not guarded.  ``f_p`` is
+    refused there anyway (the bundle loader does not thread it), so the guard
+    would have nothing to recommend; the exposure is the same and is stated
+    here rather than left to be discovered.
     """
     c_mode = getattr(opts, "c_mode", None) or "per_pixel"
     if c_mode not in ("aggregate", "selection"):

@@ -110,6 +110,10 @@ def make_opts(paths, arm, *, soft_guard=False, max_var=1e6, marginalize=True,
         # ``table_fp`` below is the arm that pairing makes possible, and it is
         # the one to use for a latent-vs-table comparison from now on.
         o.per_pixel_completeness = None
+        # S-3: these two arms are the unmasked controls, and the mock's sky is
+        # footprint-limited (1,854 occupied pixels of 3,072), so the loader's
+        # guard would otherwise refuse them.
+        o.allow_unmasked_footprint = True
     if arm in ("table", "table_fp"):
         o.lss_completion = str(paths["q_table"])
     elif arm in ("latent", "latent_bgal"):

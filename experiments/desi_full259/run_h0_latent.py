@@ -68,6 +68,10 @@ def _opts(*, per_pixel_completeness=None, latent_artifact=None):
         max_likelihood_variance=1e6,
         # Latent plumbing; None/"table" is the shipped path exactly.
         per_pixel_completeness=per_pixel_completeness,
+        # S-3: the ``nofp`` arm runs the exposed configuration on purpose --
+        # 38% of this line's sky is off-footprint and without f_p the missing
+        # budget models it as Cbar-complete.  That IS the control.
+        allow_unmasked_footprint=per_pixel_completeness is None,
         lss_field_mode="latent" if latent_artifact else "table",
         lss_field_artifact=latent_artifact,
         lss_marginalize=bool(latent_artifact),
