@@ -1069,3 +1069,49 @@ verified.
 The lesson is the control's, not the result's: an identity round trip validates
 the round trip and nothing about the index mapping, and the two look the same
 until something is permuted on purpose.
+
+
+### CORRECTION: the `f_p` bisect was not like-for-like, and one number is withdrawn
+
+The bisect above measured every arm's `R` at `H0 = 68`.  That is within half a
+`sigma` of the `f_p`-on arm's peak (its median-of-medians is 70.9) and it is
+**59 km/s from the `f_p`-off arm's**, whose median-of-medians is **126.9**.  The
+information identity is a statement AT the peak; in the tail `H` collapses and
+the ratio is unstable, which this file has already recorded once and which the
+production arm comparison had to be corrected for (the arms were compared at
+`H0 = 72` when `nofp` peaked at 90).  The same mistake, one experiment over.
+
+**So `R = 0.885` without `f_p` is withdrawn as evidence about the `f_p`
+channel.**  A like-for-like re-run at that arm's own peak is what the claim needs
+and it is running; until it lands, the localisation is not established.
+
+**What the same run DID establish, and it is not small.**  Tier C in the
+`f_p`-off arm, 24 realizations on the seeds `tier_c_n100` uses:
+
+| | `latent_off` (`f_p` on) | `latent_off_nofp` (`f_p` off) |
+|---|---|---|
+| overconfidence | 2.397 | **1.809** |
+| spread of medians | 19.47 | 15.89 |
+| mean quoted `sigma` | 8.13 | 8.78 |
+| median bias | **+0.44 sigma** | **+5.11 sigma** |
+| `frac_in_90` | 0.50 | **0.00** |
+| median-of-medians | 70.9 | 126.9 |
+
+Removing `f_p` does lower the overconfidence -- 2.40 to 1.81, continuing the
+monotone trend the `f_p x 0.8/0.6/0.4` ladder traced -- and it destroys the
+answer: every one of the 24 realizations rails, `H0` lands at 92-138 against a
+truth of 67.74, and the truth is outside the 90% interval in 24 of 24.
+
+That is the S-3 exposure measured on the mock, and it is the same trade the
+`per_pixel` intervention showed: **every catalog-side lever that narrows the
+dispersion buys it with bias.** `f_p` scaled down, `f_p` removed, and the
+completeness estimator swapped all move along one line -- less weight on the
+catalog branch, less scatter, more bias -- and none of them lands anywhere with
+both.
+
+And a tension worth recording rather than resolving prematurely: at `H0 = 68` the
+`f_p`-off arm reported `J/H ~ 1` while its Tier C overconfidence is 1.81.  If
+that `J/H` survives at the arm's true peak, then the identity and the coverage
+disagree there, and `sqrt(J/H)` would not be the correction it is on the `f_p`-on
+arm.  The off-peak evaluation is the more likely explanation and the re-run will
+say.
