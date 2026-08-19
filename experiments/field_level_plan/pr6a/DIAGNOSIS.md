@@ -1241,3 +1241,45 @@ untouched by this -- it needs no per-event decomposition at all -- but the
 mechanism should be read as "`f_p` makes the per-event terms non-separable",
 which the exact-zero LOO result establishes, and NOT as a measured correlation
 coefficient.
+
+
+### Four more mechanisms eliminated, and the coupling is still unexplained
+
+The `f_p` arm's non-separability is not in doubt -- the control is that the SAME
+test on the `f_p`-free arm returns **exactly zero**, and now over 8 datasets, not
+two: the dataset-mean LOO score has sd **0.000000** there against 0.0237 with
+`f_p`.  What carries it is another matter, and four candidates are now closed:
+
+| candidate | test | result |
+|---|---|---|
+| the selection correction | its derivative across datasets | variance `1.5e-27` -- bit-identical |
+| the survey-global normalizer | conditional sky weighting, which removes it | `R = 6.70`, unchanged |
+| the reliability guard | `max_likelihood_variance` 1e6 -> 1e12 | `logL` **bit-identical** (`delta = 0.000e+00`), so the guard is already inert |
+| the compact catalog's `f_p` gather | `f_p_rows[row]` vs the map at that row's pixel, across event sets with 177 / 177 / 174 rows | `max abs diff = 0.000e+00` on every set |
+
+The guard test is the one worth dwelling on, because the guard was the only term
+in this likelihood whose value is a function of the whole event SET, and it was
+therefore the leading hypothesis.  Raising the budget a millionfold changes the
+log-likelihood in no bit, so on this configuration the guard contributes nothing
+at all -- neither a level nor a coupling.
+
+The `f_p` gather test was checking for a defect rather than a subtlety: had the
+per-row gather been misaligned when the compaction changed, every `f_p` run would
+have been indexing the wrong completeness for some rows.  It is exact, including
+on a set with a different row count, so there is no such bug.
+
+**So the state is: `f_p` demonstrably makes the per-event terms non-separable,
+and no shared term, no indexing path and no guard accounts for it.**  That is
+less satisfying than a mechanism and more useful than a guess.  What it does not
+touch, again, is the identity violation itself -- `J_ens/H` = 5.50 with `f_p` and
+0.75 without, both at their own peaks, with `sqrt` = 2.35 against Tier C's
+measured 2.40 -- which is computed from total log-likelihoods and needs none of
+this decomposition.
+
+Next probe, if this is picked up: the per-event term with `f_p` reads
+`C_p = f_p(pix) C(z)`, and the only remaining route by which one event's row can
+influence another's is through a reduction whose ORDER changes with the compact
+row set -- i.e. float non-associativity in a sum that `f_p` makes
+non-uniform. That predicts a coupling that shrinks with float64 accumulation and
+vanishes at `f_p == 1`, both of which are cheap to test and neither of which has
+been run.

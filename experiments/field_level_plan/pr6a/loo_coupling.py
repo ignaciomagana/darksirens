@@ -149,8 +149,9 @@ def main(argv=None):
               f"within-dataset sd {np.sqrt(var_a):.6f}")
         print(f"  Var(c) debiased = {var_c:.3e}   sd(c)/sd(a) = "
               f"{out['sd_ratio_c_over_a']:.3f}")
-        print(f"  => R predicted at N={a.nobs}: {out['R_predicted']:.2f}   "
-              f"(measured on this arm: 5.57)")
+        print(f"  => R predicted at N={a.nobs}: {out['R_predicted']:.2f}")
+        print(f"     (R measured by event_reshuffle.py: 5.57 with f_p at its "
+              f"peak, 0.98 without at its own -- compare to the ARM being run)")
     uX, uY = U[0], U[1]
     cX, cY = uX - uX.mean(), uY - uY.mean()
     out.update(
