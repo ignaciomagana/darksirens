@@ -1438,3 +1438,49 @@ a whole against the sum of its parts.
 The gather site now carries a fail-loud shape guard, and the regression pin
 asserts the invariant (one `f_p` entry per catalog row, each equal to the map at
 that row's own pixel) rather than the symptom.
+
+
+## Post-fix re-measurement of everything the bug touched
+
+Every tier that compares across event sets was exposed, so all were re-run.  The
+picture is coherent in one place and contradictory in another, and both halves
+matter.
+
+**At FIXED catalog the estimator is now calibrated.**
+
+| measurement | pre-fix | post-fix |
+|---|---|---|
+| variance split, events at fixed catalog | 2.110 | **1.018** |
+| `N_obs` scaling at `N` = 30 / 60 / 120 (one catalog) | 1.93 / 2.30 / 1.84 | **0.46 / 0.50 / 0.99** |
+| information identity `J_ens/H` (fixed catalog) | 5.50 | **1.266** |
+
+The `N_obs` values are 6 event sets each, so they carry ~30% error and the
+sub-unity reads as "1, or conservative" rather than a measured under-confidence.
+What they are not any more is 2.
+
+**The variance split's TOTAL is nearly calibrated too**, and its bias is gone:
+overconfidence 1.141 (from 2.360), grand mean **67.48** against `H0_true` = 67.74
+(from 64.10), with the catalog carrying 20% of the variance.
+
+**But Tier C, on a different seed family, still reads 1.579.**  Same estimator,
+same fix, same nominal quantity:
+
+    variance_split (seeds 90000+, 6 x 6 = 36 cells)   overconfidence 1.141
+    tier_c         (seeds 7001+,  24 realizations)    overconfidence 1.579
+
+Those disagree at roughly 2.5 sigma and one of them is wrong about the total.
+The discriminator -- `variance_split` re-run on TIER C's own seeds -- is running;
+until it lands, **the honest statement is that post-fix total coverage is
+somewhere between 1.14 and 1.58 and this campaign cannot yet say where.**
+
+**Gate 8(a) survives the fix.**  Delta-PE at truth, post-fix, same seeds:
+overconfidence **1.533** against the ordinary arm's 1.579 (both narrower: sigma
+5.74 vs 6.50, scatter 8.80 vs 10.26).  So whatever the residual is, it is still
+not the parameter estimation -- the one pre-fix conclusion in this file that never
+depended on the corrupted `f_p` path.
+
+**Tier B post-fix:** the field-only shift is **0.088 sigma** (was 0.136) and the
+`f_p` channel's shift is **2.239 sigma** (was 1.674).  The `f_p` effect GREW when
+the bug was fixed, which is the expected direction -- the defect was corrupting
+the very channel it lived in -- and the ladder's headline is unchanged in kind:
+the field does nothing measurable, `f_p` does everything.
