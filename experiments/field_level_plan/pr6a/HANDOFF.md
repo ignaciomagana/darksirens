@@ -1,51 +1,55 @@
-# Where to pick up (checkpoint 2026-08-18, third)
+# Where to pick up (checkpoint 2026-08-19)
 
-Everything queued on 2026-08-18 has run.  `js2h100` is idle; nothing is pending
-on PSC (the S-3 job was cancelled there and run on the H100 instead).
+`js2h100` is idle; nothing is queued on PSC.  Three PRs are open and stacked.
 
-## What was measured, and what is now the owner's call
+## The result
 
-**1. S-3 is fixed and measured on production** (`845858d`, `3d52b86`).  The
-Q-table line can carry a mask for the first time.  Four arms now exist:
-`nofp` 90.25, `fp` 71.70, `q_nofp` 89.90, `q_fp` **80.61**.  The mask is worth
-`-2.49 sigma` on the Q line, and Q and the mask INTERACT (Q alone: 0.35 km/s;
-Q with the mask: +8.91).
-**OWNER DECISION:** the ladder's headline arms (`fp`/`latent`, 71.7/72.0) carry
-the mask and no Q table because that was the only runnable pairing; the shipped
-scan's `selq_radial` is `q_nofp` and should now be `q_fp`.  They differ by 8.9
-km/s.  See `desi_full259/data/s3_footprint/RESULT.md`.
+**Tier C's ~2.5x overconfidence is the `f_p` channel breaking the information
+identity.**  Two routes that share no arithmetic agree to 2% on the
+deliverable's own configuration:
 
-**2. The OPG shortcut is dead** (`9b1c4b8`, `f16518a`).  `J_OPG` understates `J`
-by 4.8-10x on the mock and returns `J/H ~ 1` where the truth is 3.9-8.2, so
-production's `J/H = 0.855/1.240` is not evidence production is clean.  The
-production `J` needs an ensemble: `desi_full259/ENSEMBLE_DESIGN.md`, whose §4 is
-an owner decision (the injection set has no SNR column, so DAG rule 2 cannot be
-honoured exactly).
+| arm | `sqrt(J_ens/H)` predicted | Tier C overconfidence measured |
+|---|---|---|
+| `f_p` ON | **2.35** | **2.40** |
+| `f_p` OFF | 0.87 | 1.81 (biased +5.11 sigma; see below) |
 
-**3. Tier C's catalog-side scan is complete** and closes nothing: the kernel
-width has no leverage, the completeness WEIGHT is a monotone lever but the
-mock's completeness model is exactly right by construction, and the `per_pixel`
-estimator trades width for a `+1.71 sigma` bias.
+Measured by regrouping the same events into new datasets (`event_reshuffle.py`),
+each arm at its OWN peak, 16 regrouped datasets, identity round-trip control
+60/60 exact.  `J_ens/H` = 5.50 with `f_p` and 0.75 without; `J_OPG/H` = 0.99 in
+BOTH, which is why the single-dataset shortcut could never have found this.
 
-**4. The mock's PE offset is the selection effect** (`200fe6f`), measured
-against its own parameter-free prediction over 540 events.
+Eliminated on the way, each with a number: the event draw (regrouping leaves
+`R = 5.57`), the field normalizer (conditional weighting leaves `R = 6.70`), the
+PE (survives delta-PE), the capture (block-invariant multiset), and the events'
+redshifts (`g(z)` explains 8%).
 
-## The one live thread
+## What is open, in the order I would take it
 
-The per-dataset common mode in the score (`DIAGNOSIS.md`, last section) survives
-delta-PE, a bootstrap null, and a verified capture, and contradicts what i.i.d.
-events must give by a factor 6.  Either the mock's event draw is not i.i.d. or
-the per-event score has a dataset-level dependence — and the second would be a
-property of the LIKELIHOOD, with `sqrt(J_ens/H) = 2.2-2.9` sitting exactly on
-Tier C's measured overconfidence.  That is the cheapest remaining route to the
-root cause and it does not need the production ensemble.
+1. **The mechanism.**  `f_p` is localised, not explained: why `C_p = f_p C` on
+   both sides of the budget makes per-event scores share a per-dataset mode is
+   unknown, and the obvious suspicion -- coupling through the survey-global
+   budget -- is already refuted by the conditional-weighting run.  This is the
+   last unknown between here and a defensible interval.
+2. **Then the production `J`.**  `desi_full259/ENSEMBLE_DESIGN.md` §4 is an
+   owner decision (the injection set has no SNR column).  Note that #2 may not
+   be needed if #1 yields something computable directly from the likelihood.
+3. **Owner decisions unchanged**: which arm is production (`q_fp` 80.61 vs `fp`
+   71.70, 8.9 km/s apart); whether PR-6a is acceptable; and the 259-event
+   production run, still held.
 
-Suggested next test: evaluate the per-event scores on datasets assembled by hand
-from i.i.d. draws, bypassing `_draw_events_until_detected` entirely.  If `R = 1`
-there, the generator's event draw is the culprit; if `R = 6`, the coupling is in
-the estimator.
+## Two retractions on the record, both caught by their own controls
 
-## Still true from before
+* the per-event **invariance check** -- the capture's order is data-dependent, so
+  its `(source, event) -> slot` mapping was wrong.  The identity round-trip
+  control passed and could not have caught it; the REVERSED-events control did.
+* the first **`f_p` bisect** (`R = 0.885`) -- measured 59 km/s off that arm's
+  peak.  Right answer, invalid measurement; the like-for-like re-run replaced it.
 
-The production 259-event run remains held for the owner's gate.  `variance_8x8`,
-the `n = 100` Tier C pass and the eight PE-calibration mocks are all harvested.
+## PRs
+
+* **#406** `feat/s3-footprint-mask` -- the S-3 library fix, stacked on #404.
+* **#407** `feat/s3-followups` -- the Q ensemble x `f_p` pairing and the K>=2
+  guard gap, stacked on #406.
+* **#405** `feat/field-level-h100-production` -- the results branch.
+
+The ladder #395-#404 is still unreviewed, and #406/#407 sit on top of it.
