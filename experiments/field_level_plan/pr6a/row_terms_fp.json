@@ -1,0 +1,23 @@
+{
+ "arm": "latent_off",
+ "h0": 68.0,
+ "log_Z_global": {
+  "A": 18.123588182747532,
+  "B": 18.123588182747532,
+  "AB": 18.123588182747532
+ },
+ "A_vs_AB": {
+  "n_shared": 3072,
+  "max_d_log_Nobs": NaN,
+  "max_d_N_miss": 299921.7936166469,
+  "max_rel_d_N_miss": 0.02265720855874025,
+  "d_log_Z": 0.0
+ },
+ "B_vs_AB": {
+  "n_shared": 3072,
+  "max_d_log_Nobs": NaN,
+  "max_d_N_miss": 304497.66835277714,
+  "max_rel_d_N_miss": 0.023010841522778228,
+  "d_log_Z": 0.0
+ }
+}

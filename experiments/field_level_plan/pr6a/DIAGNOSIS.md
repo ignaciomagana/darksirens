@@ -1357,3 +1357,84 @@ normalizer assembled over the wrong row set.
    measurements, and the `N_obs` scaling, and not `fp`/`latent`/`q_fp`.
 3. **S-3 stands.**  The mask's -2.49 sigma on the production Q line is a
    single-event-set comparison of two models on the same 259 events.
+
+
+# THE BUG, FOUND AND FIXED -- and most of Tier C was it
+
+`completion._row_C` indexes `f_p_rows` by CATALOG ROW.  On the flat
+single-catalog UNION path those rows carry `union_unique_pixels`, but
+`catalog_views` gathered `f_p_rows` with the per-view `unique_pixels_pe`.  When
+the two differ the array is SHORTER than the row count -- **and JAX clamps an
+out-of-bounds gather instead of raising**, so every row past the short array
+silently took the LAST entry's completeness.  The per-view length depends on
+which events are in the run, so an event's own `C_p` depended on its company.
+
+On the mock the mismatch is brutal: 37 or 73 `f_p` entries against a 3,072-row
+catalog, i.e. ~99% of rows clamped.
+
+## What the fix moves
+
+| quantity | before | after |
+|---|---|---|
+| per-row `N_miss` between event sets | 2.3% shift | fixed |
+| event-sum additivity, real map | -18.32 nat | **-2.8e-14** |
+| event-sum additivity, `f_p == 1` | -55.27 nat | **-2.8e-14** |
+| **information identity `R = J_ens/J_OPG`** | **5.567** | **1.261** |
+| **Tier C overconfidence** (latent / latent_off, n=24) | 2.65 / 2.40 | **1.570 / 1.579** |
+| Tier C spread of medians | 19.5 | **10.2** |
+| Tier C coverage at 90% | 0.45-0.50 | **0.62** |
+
+`R = 1.261` is consistent with 1 at the ~35% error of a variance ratio at
+`n = 16`.  **So the identity violation was the bug**, and the previously reported
+agreement between `sqrt(J_ens/H) = 2.35` and Tier C's measured 2.40 was two
+manifestations of ONE defect, not independent confirmation by two routes.  That
+agreement was the strongest evidence in this file, and it is withdrawn AS
+EVIDENCE even though both numbers were correctly measured.
+
+## What did NOT go away
+
+Tier C still fails: overconfidence **1.57**, coverage **0.62** against 0.90.  The
+bug accounts for roughly `(2.4^2 - 1.57^2)/2.4^2 = 57%` of the variance excess; a
+factor ~1.6 remains.  It is now essentially IDENTICAL in the two arms (1.570 vs
+1.579, spreads 10.18 vs 10.26) where before they differed, and the residual bias
+grew against the narrower intervals (+0.56 and +0.79 sigma).  So there is a
+second, smaller effect: not the field, not the `f_p` gather, not yet identified.
+
+## What this does to the production numbers
+
+**Almost nothing, for a quantitative reason rather than a reassuring one.**  The
+production PE view holds 49,143 rows against a 49,152-row catalog, so only ~9
+rows were clamped -- 0.02%, against the mock's ~99%.  Re-run:
+
+    fp arm, 259 events:   71.70 [65.0, 79.1]  ->  71.54 [64.6, 79.1]
+
+a 0.16 km/s shift, 0.04 sigma.  **The production medians stand.**  An earlier
+claim in this campaign that they were safe was right in conclusion and WRONG in
+reasoning -- it argued that an event-set-dependent offset is constant across an
+`H0` scan and cancels; the real reason is that production's compact view is
+nearly complete, so the defect barely fires there.  Anything measured across
+DIFFERENT event sets -- Tiers B and C, every `J` number, the `N_obs` scaling --
+was fully exposed.
+
+## The methodological lesson, which is the transferable part
+
+Four passes of this file hunted a statistical explanation for a coding defect,
+and every diagnostic that "cleared" a component did so honestly:
+
+* the survey-global normalizer IS built from full-sky inputs and stayed
+  bit-identical (`log Z` = 18.123588182747532 in all three views);
+* `f_p_rows` DID match the map -- when checked against the per-view pixels, which
+  is the wrong reference;
+* the selection view was genuinely unaffected, because its pixel set already
+  spanned the sky.
+
+What broke it open was testing a property with no free parameters -- that the
+event sum must be ADDITIVE across disjoint event sets -- and then the control that
+`f_p == 1`, where the arithmetic is the no-`f_p` arm's by IEEE identity, still
+broke additivity by 55 nat.  A silent out-of-bounds clamp is invisible to every
+check that compares a quantity against itself; it is visible to one that compares
+a whole against the sum of its parts.
+
+The gather site now carries a fail-loud shape guard, and the regression pin
+asserts the invariant (one `f_p` entry per catalog row, each equal to the map at
+that row's own pixel) rather than the symptom.
