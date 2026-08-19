@@ -1115,3 +1115,69 @@ that `J/H` survives at the arm's true peak, then the identity and the coverage
 disagree there, and `sqrt(J/H)` would not be the correction it is on the `f_p`-on
 arm.  The off-peak evaluation is the more likely explanation and the re-run will
 say.
+
+
+### The like-for-like re-run: it IS the `f_p` channel, and it reproduces Tier C
+
+Each arm re-measured at its OWN peak, 16 regrouped datasets, identity round-trip
+control passing 60/60 exactly in each:
+
+| arm | node | `H` | `J_ens/H` | `J_OPG/H` | `R` |
+|---|---|---|---|---|---|
+| `f_p` ON (peak 70.9) | 68 | 0.01476 | **5.50** | 0.99 | **5.57** |
+| `f_p` OFF (peak 126.9) | 120 | 0.01963 | **0.75** | 0.76 | **0.98** |
+| `f_p` OFF | 127 | 0.00083 | 18.77 | 16.33 | 1.15 |
+
+The `H0 = 127` row is quoted and then set aside: the `f_p`-off arm rails, its
+curvature there is `8e-4` -- twenty times smaller than at 120 -- and a ratio
+against a curvature that is collapsing carries no information about a width.
+It agrees on `R` and that is all it is used for.  The `H0 = 120` row is the
+statement.
+
+**With `f_p` the information identity is violated 5.5x and the single-dataset
+estimator misses all of it** (`J_OPG/H = 0.99` against a truth of 5.50).
+**Without `f_p` the identity holds and the estimator is tight** (0.75 and 0.76,
+consistent with 1 at the ~35% error of a variance ratio at `n = 16`).  So the
+withdrawn `0.885` was right for the wrong reason -- measured 59 km/s off-peak --
+and the corrected measurement says the same thing where the identity is
+meaningful.
+
+**And it closes the loop on Tier C.**  `sqrt(J_ens/H)` is the interval inflation
+the identity predicts:
+
+| arm | `sqrt(J_ens/H)` predicted | Tier C overconfidence measured |
+|---|---|---|
+| `f_p` ON | **2.35** | **2.40** |
+| `f_p` OFF | 0.87 | 1.81 |
+
+On the `f_p`-on arm -- the deliverable's configuration -- the prediction and the
+measurement agree to 2%, by two routes that share no arithmetic: one is the
+variance of a score across an ensemble against a curvature, the other is the
+scatter of 24 posterior medians against their own quoted widths.  **That is the
+root-cause statement this campaign has been missing: Tier C's ~2.5x
+overconfidence is the `f_p` channel breaking the information identity.**
+
+The `f_p`-off row does NOT agree (0.87 predicted, 1.81 measured), and that is
+expected rather than awkward: that arm is biased by `+5.11 sigma` with 24 of 24
+realizations railing to 92-138, so its "scatter of medians" measures how far each
+realization rails and not a sampling distribution around a peak.  A
+Bernstein-von Mises quantity has nothing to predict there.
+
+### Where that leaves the deliverable
+
+Three things follow and they should not be run together:
+
+1. **The mechanism is localised but not explained.**  `f_p` enters `C_p = f_p C`
+   on both sides of the missing budget; why that should make the per-event
+   scores share a per-dataset mode is not established here.  The natural
+   suspicion is that `f_p` couples events through the survey-global budget --
+   but conditional sky weighting, which removes the global normalizer, left
+   `R = 6.70`, so that suspicion is already once refuted.
+2. **`sqrt(J/H)` is a correction that now has a measured provenance.**  A
+   sandwich interval on the `f_p`-on arm is right by construction, and its factor
+   agrees with the directly measured coverage. What is still missing for
+   production is `J` itself -- and this result says why the OPG shortcut cannot
+   supply it: `J_OPG/H = 0.99` is exactly what the defective arm reports.
+3. **The production number is unchanged and the caveat is unchanged.**  Nothing
+   here moves a median. It says the interval on any `f_p`-bearing arm --
+   `fp`, `latent`, and now `q_fp` -- is the one that needs the correction.
