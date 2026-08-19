@@ -1162,3 +1162,47 @@ def test_views_skip_the_fp_q_budget_when_there_is_no_q_table():
         _views_opts(), bundle, "dark_sirens_complete", None)
     assert views.field_lss_q_fp_empty_sum is None
     assert views.field_f_p_occ is not None
+
+
+def test_f_p_rows_are_gathered_with_the_catalog_row_pixel_map():
+    """`f_p_rows` must be indexed by CATALOG ROW, not by the per-view pixels.
+
+    Regression for a silent production defect.  `completion._row_C` does
+    `f_p_rows[row]` where `row` runs over the catalog's rows; on the flat
+    single-catalog UNION path those rows carry `union_unique_pixels`, while
+    `f_p_rows` was gathered with the per-view `unique_pixels_pe`.  When the two
+    differ the array is SHORTER than the row count, and JAX clamps an
+    out-of-bounds gather instead of raising -- so every row past the short array
+    silently took the last entry's completeness, and because the per-view length
+    depends on which events are in the run, an event's own `C_p` depended on its
+    company.
+
+    Measured before the fix (experiments/field_level_plan/pr6a): per-row `N_miss`
+    shifted 2.3% between event sets, the event sum lost additivity by 18 nat with
+    a real map and 55 nat with `f_p == 1`, and the information-identity ratio read
+    `R = 5.57` where it should read 1 (it reads 1.26 after).
+
+    The assertion is the invariant, not the symptom: one `f_p` entry per catalog
+    row, and each equal to the map at that row's own pixel.
+    """
+    import darksirens.likelihood.catalog_views as cv
+
+    bundle = _field_bundle()
+    n_pix = 12
+    f_p = np.linspace(0.1, 1.0, n_pix).astype(np.float32)
+    bundle["f_p_map"] = f_p
+    views = cv.prepare_catalog_views(
+        _views_opts(), bundle, "dark_sirens_complete", None)
+
+    for name in ("pe", "sel"):
+        rows = getattr(views, f"f_p_rows_{name}")
+        cat = getattr(views, f"ngals_{name}_catalog")
+        assert rows is not None and cat is not None
+        n_cat = int(np.asarray(cat).shape[0])
+        assert int(np.asarray(rows).shape[0]) == n_cat, (
+            f"f_p_rows_{name} has {np.asarray(rows).shape[0]} entries for "
+            f"{n_cat} catalog rows -- _row_C would clamp")
+        up = getattr(views, f"unique_pixels_{name}")
+        pix = (np.arange(n_cat) if up is None
+               else np.asarray(up).reshape(-1))
+        np.testing.assert_array_equal(np.asarray(rows), f_p[pix])

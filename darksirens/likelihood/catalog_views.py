@@ -762,11 +762,41 @@ def prepare_catalog_views(
             return barrier(jnp.asarray(
                 fp_np[np.asarray(up_raw, dtype=np.int64)]))
 
-        f_p_rows_pe = _fp_rows(unique_pixels_pe_raw)
+        # ``f_p_rows`` is indexed by CATALOG ROW (``completion._row_C`` does
+        # ``f_p_rows[row]``), so it must be gathered with the pixel map those
+        # rows actually carry -- which on the UNION path is
+        # ``union_unique_pixels``, NOT the per-view ``_raw`` pixels.  Gathering
+        # with the pre-union map produced an array of the per-view length (e.g.
+        # 37 rows) while the catalog held the union's (3,072), and JAX CLAMPS an
+        # out-of-bounds gather instead of raising: every row past the short
+        # array silently took the LAST compact entry's completeness.  Because
+        # the per-view length depends on which events are in the run, an event's
+        # own C_p then depended on its company -- measured as a 2.3% shift in
+        # per-row N_miss and 18-55 nat of non-additivity in the event sum
+        # (experiments/field_level_plan/pr6a/additivity.py).  The selection view
+        # was unaffected only because its pixel set already spanned the sky.
+        _fp_pixel_map = (union_unique_pixels if union_unique_pixels is not None
+                         else unique_pixels_pe_raw)
+        f_p_rows_pe = _fp_rows(_fp_pixel_map)
         f_p_rows_sel = (
             f_p_rows_pe
-            if unique_pixels_sel_raw is unique_pixels_pe_raw
+            if union_unique_pixels is not None
+            or unique_pixels_sel_raw is unique_pixels_pe_raw
             else _fp_rows(unique_pixels_sel_raw))
+        # Fail loudly rather than clamp if this ever drifts again: the row count
+        # is knowable here, and a silent gather is what made the defect a
+        # four-pass mystery instead of a stack trace.
+        for _name, _rows, _cat in (("pe", f_p_rows_pe, ngals_pe_catalog),
+                                   ("sel", f_p_rows_sel, ngals_sel_catalog)):
+            if _rows is not None and _cat is not None:
+                _n_cat = int(np.asarray(_cat).shape[0])
+                if int(np.asarray(_rows).shape[0]) != _n_cat:
+                    raise ValueError(
+                        f"f_p_rows_{_name} has "
+                        f"{int(np.asarray(_rows).shape[0])} entries but the "
+                        f"{_name} catalog has {_n_cat} rows; _row_C indexes "
+                        f"f_p_rows by CATALOG ROW and an out-of-bounds gather "
+                        f"is silently clamped by JAX.")
         if field_occupied_pixels is not None:
             occ_idx = np.asarray(field_occupied_pixels, dtype=np.int64)
             field_f_p_occ = barrier(jnp.asarray(fp_np[occ_idx]))

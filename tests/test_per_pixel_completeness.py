@@ -566,3 +566,4 @@ def test_the_footprint_guard_reaches_the_multitracer_path():
     # sparse and per-pixel still pass, by the same core the K=1 path uses
     guard_unmasked_footprint_counts(opts, rng.poisson(0.7, size=3072))
     guard_unmasked_footprint_counts(SimpleNamespace(c_mode="per_pixel"), ngals)
+
