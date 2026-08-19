@@ -1484,3 +1484,54 @@ depended on the corrupted `f_p` path.
 the bug was fixed, which is the expected direction -- the defect was corrupting
 the very channel it lived in -- and the ladder's headline is unchanged in kind:
 the field does nothing measurable, `f_p` does everything.
+
+
+## The residual, resolved into what it is and what it is not
+
+The 1.14-vs-1.58 disagreement was the SEED FAMILY, and running the same
+decomposition on Tier C's own seeds settles it:
+
+| | seeds 90000+ | seeds 7001+ |
+|---|---|---|
+| variance_split, TOTAL | 1.141 | **1.323** |
+| variance_split, events at FIXED catalog | 1.018 | **0.848** |
+| tier_c, TOTAL (n = 47) | -- | **1.508** |
+| grand mean vs `H0_true` = 67.74 | 67.48 | 70.73 / **72.58 +- 1.41** |
+
+Two statements survive across both families and both estimators, and they are the
+useful ones:
+
+**1. Events at fixed catalog are calibrated.**  0.848 and 1.018 by the variance
+split, 0.46-0.99 by the `N_obs` scaling, and `J_ens/H` = 1.266 by the information
+identity -- three independent routes, all consistent with 1, where every one of
+them read 2-5.5 before the fix.  **The per-event likelihood and the selection
+term are no longer implicated at all.**
+
+**2. What is left is the CATALOG term, plus a bias.**  The excess appears only
+when the catalog is redrawn, and the 7001 family carries a grand mean of
+**72.58 +- 1.41** against a truth of 67.74 -- **+3.4 sigma of the mean**, over 47
+independent catalogs, so not a fluctuation.  The 90000 family shows none
+(67.48).  Coverage is 0.64 at the 90% level and 0.43 at 68%.
+
+That is a coherent and unsurprising place to land: **the analysis conditions on
+its galaxy catalog as if the catalog were exact.**  Catalog-to-catalog variation
+-- finite galaxy counts, photo-z scatter, which hosts happen to be catalogued --
+is not propagated into the quoted interval, so redrawing the catalog produces
+scatter the posterior never claimed to cover.  It is a modelling choice, not a
+defect, and it is shared by every dark-siren analysis that treats the catalog as
+data.
+
+**What it does NOT explain** is the bias.  Unmodelled catalog noise inflates
+scatter symmetrically; it does not move 47 independent realizations up by 4.8
+km/s.  A seed-family-dependent bias of that size is the open item, and it is
+plainly separate from the interval question.
+
+### Status of the tiers
+
+* **Tier C: still fails**, at 1.51 rather than 2.65, with the failure now
+  attributable to the catalog term rather than to the estimator.
+* **The interval caveat is much weaker than it was.**  `sqrt(J/H)` was proposed
+  as a sandwich correction of 2.35-2.46; the honest post-fix number at fixed
+  catalog is **1.13**, and production's own arm never showed a departure once its
+  curvature was measured properly.
+* **The production medians are unchanged** (`fp` 71.70 -> 71.54).
