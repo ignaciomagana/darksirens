@@ -1283,3 +1283,77 @@ row set -- i.e. float non-associativity in a sum that `f_p` makes
 non-uniform. That predicts a coupling that shrinks with float64 accumulation and
 vanishes at `f_p == 1`, both of which are cheap to test and neither of which has
 been run.
+
+
+## THE COUPLING IS A DEFECT IN THE `f_p` PATH, not a property of `f_p`
+
+The additivity test settles it (`additivity.py`).  For DISJOINT event sets `A`
+and `B`, the sum of per-event log-evidences must satisfy
+`E(A u B) = E(A) + E(B)` if each term depends on its own event alone.  `E` is the
+captured per-event values SUMMED, so it needs no ordering assumption -- a sum does
+not care -- and it excludes the selection correction, the one term already known
+not to decompose.
+
+| arm | `E(A u B) - E(A) - E(B)` | relative to `|E|` |
+|---|---|---|
+| no `f_p` | **+0.000000e+00** (score residual 7.1e-15) | 0 |
+| real `f_p` map | **-18.32 nat** | -4.1% |
+| **`f_p == 1` everywhere** | **-55.27 nat** | **-10.5%** |
+
+**The `f_p == 1` row is the finding.**  Multiplying the completeness by exactly
+1.0 is the IEEE identity, so that arm's arithmetic is mathematically the no-`f_p`
+arm's -- which is additive to the last bit.  It returns 55 nat of non-additivity.
+That rules out every value-dependent explanation, including the float
+non-associativity this file predicted as the next probe: 55 nat is not rounding,
+and the residual gets LARGER, not smaller, as `f_p` becomes uniform.
+
+**So the `f_p` code path breaks the additivity of the event sum.**  Not the
+modelling of `C_p = f_p C`; the path.
+
+### Where it is, and where it is not
+
+* **Not the survey-global normalizer.**  Its two ingredients are bit-identical
+  across event sets: `N_obs_total = 222107.85349099262` and the total missing
+  curve `sum V = 2664415.0787219717` for `A`, `B` and `A u B` alike.
+* **The per-event values themselves move.**  A multiset comparison
+  (`ll_multiset.py`) -- order-free, so immune to the capture defect -- finds
+  `sorted(ll(A) u ll(B))` differs from `sorted(ll(A u B))` in **all 24 of 24**
+  values, by **+0.236 to +1.381 nat, mean +0.764**, every one the same sign.
+* A uniform per-event offset of that size accounts for the whole residual
+  (`24 x -0.764 = -18.3`), which is the signature of a NORMALIZER -- and yet the
+  global normalizer is identical.  The compact row set is what differs
+  (37 / 36 / 73 rows, disjoint: 37 + 36 = 73).
+
+The remaining suspect is therefore a per-event normalizer that is assembled from
+the COMPACT rows where it should be full-sky, on the `f_p` branch only.  Finding
+it is a code-reading task, not a compute one, and it is the next thing to do.
+
+### What this does to everything upstream
+
+**The 5.5x information-identity violation on the `f_p` arm may BE this defect.**
+The chain is: `J` is the variance of the total score across datasets; if each
+event's term carries an offset that depends on which other events are present,
+then the total score acquires exactly the kind of dataset-level common mode that
+`J_ens` measures and `J_OPG` cannot see.  That is the same object this file spent
+four passes describing as a mystery, and it now has a candidate cause that is a
+bug rather than a property of the model.
+
+**Nothing is retracted yet, and the numbers stand as measurements.**  Tier C's
+2.4-2.6 overconfidence, `J_ens/H` = 5.50 with `f_p` against 0.75 without, and
+`sqrt(J/H)` = 2.35 matching the measured 2.40 are all correctly measured
+properties OF THE SHIPPED CODE.  What is now in question is their
+INTERPRETATION: whether they describe the estimator's statistical behaviour or a
+normalizer assembled over the wrong row set.
+
+**Consequences to act on:**
+
+1. **Do not build the production `J` ensemble yet.**  It would measure this
+   defect at production scale and at production cost.  The ensemble was gated on
+   finding the mechanism precisely so this could not happen.
+2. **The production medians are NOT implicated by this test.**  A single H0 scan
+   uses one fixed event set, so an event-set-dependent offset is a constant
+   across the scan and cancels from the shape.  What it can move is anything
+   compared ACROSS different event sets -- which is Tiers B and C, the `J`
+   measurements, and the `N_obs` scaling, and not `fp`/`latent`/`q_fp`.
+3. **S-3 stands.**  The mask's -2.49 sigma on the production Q line is a
+   single-event-set comparison of two models on the same 259 events.
