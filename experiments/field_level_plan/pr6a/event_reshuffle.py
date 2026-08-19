@@ -108,6 +108,11 @@ def main(argv=None):
     ap.add_argument("--n-regrouped", type=int, default=16)
     ap.add_argument("--nobs", type=int, default=60)
     ap.add_argument("--arm", default="latent_off")
+    ap.add_argument("--sky-weighting", default=None,
+                    choices=["field", "conditional"],
+                    help="bisect: 'conditional' drops the survey-global field "
+                         "normalizer, so a coupling that lives in the field "
+                         "convention disappears while a per-pixel one does not")
     ap.add_argument("--h0", type=float, default=68.0)
     ap.add_argument("--dh", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=20260818)
@@ -131,6 +136,20 @@ def main(argv=None):
     work.mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(a.seed)
+    # THE NULL CONTROL, and it must run before anything is concluded from the
+    # invariance check: rebuild source 0 from its own events, in its own order.
+    # Every per-event log-evidence must then come back IDENTICAL. If it does
+    # not, the round trip (file write, event indexing, capture order) is at
+    # fault and no statement about regrouping is licensed.
+    control = [(0, e) for e in range(a.nobs)]
+    # THE SECOND CONTROL, and the first one does not substitute for it: the
+    # identity rebuild passes even if the loader REORDERS events, because the
+    # same 60 events reorder the same way.  So also rebuild source 0 with its
+    # events REVERSED.  If the capture follows file order the values come back
+    # reversed; if they come back in the original order the loader sorts, and
+    # the (source, event) -> capture-slot mapping the invariance check assumes
+    # is wrong.
+    permuted = [(0, e) for e in reversed(range(a.nobs))]
     # Draw 60 (source, event) pairs per regrouped dataset from the whole pool,
     # without replacement WITHIN a dataset.  Spanning sources is the point: a
     # regrouped dataset holds events from ~every source realization, so the
@@ -157,6 +176,16 @@ def main(argv=None):
 
     hs = [a.h0 - a.dh, a.h0, a.h0 + a.dh]
 
+    real_make_opts = A.make_opts
+
+    def _opts_weighted(paths, arm, **kw):
+        o, sel = real_make_opts(paths, arm, **kw)
+        if a.sky_weighting:
+            o.catalog_sky_weighting = a.sky_weighting
+        return o, sel
+
+    A.make_opts = _opts_weighted
+
     def run_one(d):
         p = tier_b.paths_for(d)
         logl, opts, data = A.build(p, a.arm)
@@ -181,6 +210,40 @@ def main(argv=None):
                 src_ll[si] = EV[1].copy()
             print(f"[source] {si+1}/{a.n_sources} logL={LL[1]:.6f}", flush=True)
 
+        dc = build_regrouped(sources, control, work / "control")
+        LLc, EVc, Nc = run_one(dc)
+        want_c = src_ll[0]
+        got_c = EVc[1]
+        dev_c = np.abs(got_c - want_c) if got_c.size == want_c.size else None
+        control_check = dict(
+            n=int(want_c.size), logL_source=None, logL_control=float(LLc[1]),
+            max_abs=(float(dev_c.max()) if dev_c is not None else None),
+            n_exact=(int((dev_c == 0).sum()) if dev_c is not None else None),
+            matched_as_multiset=(bool(np.allclose(
+                np.sort(got_c), np.sort(want_c), rtol=0, atol=1e-9))
+                if dev_c is not None else None))
+        print(f"\n[CONTROL] rebuild of source 0 from its own events: "
+              f"max |delta| = {control_check['max_abs']:.3e} "
+              f"({control_check['n_exact']} exact of {control_check['n']}), "
+              f"multiset {control_check['matched_as_multiset']}", flush=True)
+
+        dp = build_regrouped(sources, permuted, work / "permuted")
+        LLp, EVp, Np = run_one(dp)
+        got_p = EVp[1]
+        want_p = want_c[::-1]
+        permute_check = dict(
+            n=int(got_p.size),
+            follows_file_order=bool(np.array_equal(got_p, want_p)),
+            follows_source_order=bool(np.array_equal(got_p, want_c)),
+            max_abs_vs_file_order=float(np.abs(got_p - want_p).max()),
+            max_abs_vs_source_order=float(np.abs(got_p - want_c).max()),
+            logL_same=bool(abs(LLp[1] - LLc[1]) < 1e-9),
+            logL_delta=float(LLp[1] - LLc[1]))
+        print(f"[CONTROL 2] source 0 with events REVERSED: capture follows "
+              f"file order = {permute_check['follows_file_order']}, "
+              f"source order = {permute_check['follows_source_order']}; "
+              f"logL identical = {permute_check['logL_same']}", flush=True)
+
         d0 = build_regrouped(sources, groups[0], work / "r000")
         LL0, EV0, N0 = run_one(d0)
         # The capture's ORDER within a dataset is the event order in the file,
@@ -191,7 +254,16 @@ def main(argv=None):
         if got.size == want.size:
             dev = np.abs(got - want)
             invariance = dict(
-                n=int(want.size), max_abs=float(dev.max()),
+                n=int(want.size), original=[float(x) for x in want],
+                regrouped=[float(x) for x in got],
+                delta=[float(x) for x in (got - want)],
+                # A CONSTANT delta means a shared normalizer moved; a
+                # structured one means the coupling is per-event.
+                delta_mean=float((got - want).mean()),
+                delta_sd=float((got - want).std(ddof=1)),
+                delta_min=float((got - want).min()),
+                delta_max=float((got - want).max()),
+                max_abs=float(dev.max()),
                 max_rel=float((dev / np.maximum(np.abs(want), 1e-300)).max()),
                 n_exact=int((dev == 0).sum()),
                 matched_as_multiset=bool(np.allclose(
@@ -234,6 +306,7 @@ def main(argv=None):
     good = [r for r in rows if not r["checks_failed"]]
     out = dict(tree=str(tree), arm=a.arm, h0=a.h0, dh=a.dh,
                n_sources=a.n_sources, n_regrouped=a.n_regrouped,
+               control=control_check, permute_control=permute_check,
                invariance=invariance, rows=rows)
     if len(good) >= 3:
         sc = np.array([r["score"] for r in good])

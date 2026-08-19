@@ -1000,3 +1000,72 @@ range.  This may be the same object seen from a third direction.
 per-dataset common mode is invisible to any single-dataset estimator that
 centres on its own mean, whatever creates it, so production's `J` needs an
 ensemble either way.
+
+
+## Regrouping the SAME events: the common mode is the `f_p` channel
+
+The anomaly's two explanations -- a non-i.i.d. event draw, or a coupling in the
+estimator -- are separated by REGROUPING (`event_reshuffle.py`).  Pool the events
+of 16 datasets that share one catalog and build new datasets of 60 drawn from
+that pool, each spanning 15-16 of the source realizations.  The event population
+is identical by construction; only the grouping changes.
+
+| configuration | `R = J_ensemble / J_OPG` | `J_ens/H` | `J_OPG/H` |
+|---|---|---|---|
+| original grouping, `f_p` on | 6.70 / 6.03 | 6.62 / 6.09 | 0.99 / 1.01 |
+| **regrouped**, `f_p` on (n=16) | **5.57** | 5.50 | 0.99 |
+| **regrouped**, conditional sky weighting (n=8) | **6.70** | -- | -- |
+| **regrouped**, `f_p` OFF (n=8) | **0.885** | -- | -- |
+
+**The common mode is not the event draw.**  Regrouping the same events into new
+datasets leaves `R = 5.57` -- if the generator's grouping had carried the
+correlation, destroying it would have returned `R = 1`.
+
+**It is not the field normalizer either.**  Under `catalog_sky_weighting =
+conditional`, which drops the survey-global normalizer entirely, `R = 6.70`.
+
+**It IS the per-pixel selection fraction.**  Drop `f_p` and `R = 0.885` -- the
+identity holds, from `5.57` with it.  At `n = 8` a variance ratio carries ~50%
+error, so `0.885` is `~1` and not a measurement of anything smaller, but the
+separation from `5.57` is a factor 6 and far outside that.
+
+That is the same channel the rest of this campaign keeps landing on: `f_p` moves
+the production median by `4.31 sigma`, carries 97.2% of the ensemble's runtime,
+and accounts for 91% of Tier B's failure -- and the catalog-side scan above found
+the overconfidence falls monotonically as the `f_p` channel's weight is scaled
+down (2.40 -> 1.89 -> 1.58 -> 1.40 at `f_p x 0.8/0.6/0.4`).  Removing it
+entirely is the endpoint of that ladder, and it is where the information
+identity comes back.
+
+**One thing this does NOT say.**  The `f_p`-free arm is the S-3-EXPOSED
+configuration -- it models unobserved sky as `Cbar`-complete, which is the defect
+PR #406 fixes.  So "`R = 1` without `f_p`" is not "the correct model has `R = 1`";
+it is "the channel that carries the common mode is the one `f_p` introduces".
+Which of the two configurations is right is a separate question, already answered
+in `f_p`'s favour on the modelling merits.
+
+### A retracted check, and why the retraction matters
+
+The regrouping was to be read alongside a per-event invariance check: does an
+event's captured log-evidence change when it is moved into different company?
+It appeared to fail decisively (max `|delta|` = 5.98 nats, none exact).
+
+**That check is invalid and its result is withdrawn.**  A first control -- rebuild
+source 0 from its own events, in its own order -- passed exactly (60/60,
+`max |delta| = 0.000e+00`), which is why the failure looked real.  But that
+control cannot see a reordering: the same 60 events reorder the same way.  A
+second control rebuilds source 0 with its events REVERSED, and the capture then
+matches NEITHER file order NOR the source's order, while `logL` is identical to
+the last bit (`delta = 0.0`, as it must be for the same events).
+
+So the capture's order is data-dependent, the `(source, event) -> capture slot`
+mapping the invariance check assumed is wrong, and its 5.98 nats are
+misattribution rather than coupling.  Nothing else here rests on it: `R` is
+computed from the total `logL` and from the within-dataset spread about its own
+mean, neither of which needs an event's identity -- only that the capture order
+is stable across the three `H0` nodes of one dataset, which `capture_check.py`
+verified.
+
+The lesson is the control's, not the result's: an identity round trip validates
+the round trip and nothing about the index mapping, and the two look the same
+until something is permuted on purpose.
