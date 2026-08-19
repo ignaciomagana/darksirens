@@ -530,3 +530,39 @@ def test_fp_without_a_q_ensemble_leaves_the_member_rows_none():
                     field_lss_q_fp_empty_sum=build_field_lss_q_fp_empty_sum(
                         logq, occ, n_pix, np.ones(n_pix)))
     assert _member_fp_empty_rows(em_fp_det) is None
+
+
+def test_the_footprint_guard_reaches_the_multitracer_path():
+    """K >= 2 returns before the attach step, so the guard rides the bundle loader.
+
+    Regression for the gap the S-3 PR documented and did not close: a
+    multitracer mixture skipped `attach_selection_fraction_inputs` entirely, so
+    a footprint-limited tracer under `c_mode=selection` was modelled as
+    Cbar-complete off its own footprint with nothing said.  The guard is now
+    called per BUNDLE, on that tracer's own full-sky counts before compaction --
+    the compact view holds only the pixels this run's events touch, which is not
+    a footprint.
+    """
+    from types import SimpleNamespace
+
+    from darksirens.inference.loaders import guard_unmasked_footprint_counts
+
+    rng = np.random.default_rng(4)
+    ngals = rng.poisson(60, size=3072)
+    ngals[:1200] = 0
+    opts = SimpleNamespace(c_mode="selection")
+
+    with pytest.raises(ValueError, match="FOOTPRINT"):
+        guard_unmasked_footprint_counts(opts, ngals, label="tracer_B.h5")
+    # the message names WHICH tracer, which is the point of the label for K >= 2
+    try:
+        guard_unmasked_footprint_counts(opts, ngals, label="tracer_B.h5")
+    except ValueError as exc:
+        assert "tracer_B.h5" in str(exc)
+
+    guard_unmasked_footprint_counts(
+        SimpleNamespace(c_mode="selection", allow_unmasked_footprint=True),
+        ngals, label="tracer_B.h5")
+    # sparse and per-pixel still pass, by the same core the K=1 path uses
+    guard_unmasked_footprint_counts(opts, rng.poisson(0.7, size=3072))
+    guard_unmasked_footprint_counts(SimpleNamespace(c_mode="per_pixel"), ngals)
