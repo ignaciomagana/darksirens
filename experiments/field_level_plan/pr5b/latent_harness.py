@@ -118,6 +118,7 @@ def clean_arm_opts(artifact, *, soft_guard=False, max_var=1e6,
         per_pixel_completeness=str(C.INGEST_DATA / "mth_map_nside128.h5"),
         # ----------------------------------------------
         c_mode="selection", catalog_sky_weighting="field",
+        allow_unmasked_footprint=True,  # S-3: unmasked arms are controls here
         complete_empty_pixel_policy="zero",
         mark_model="none", mark_names=(), sky_model="isotropic",
         drop_full_catalog=False, survey_z_depth=None,

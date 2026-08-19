@@ -1110,3 +1110,55 @@ def test_member_diagnostic_follows_the_weighting_convention():
             "dark_sirens", state_c, zgrid, pix, cosmo, survey, cat,
             catalog_sky_weighting="field",
         )
+
+
+def test_views_build_the_fp_weighted_empty_q_budget(monkeypatch):
+    """S-3 plumbing: f_p + a Q table must produce Sum_{p empty} f_p Q_p(z).
+
+    The unit tests cover the formula; this covers the wiring, which is the part
+    production actually walks: `prepare_catalog_views` sees an `f_p_map` beside
+    a global log-Q table and has to build the budget the normalizer then
+    demands.  Without it a Q-table run with a mask raises rather than modelling
+    unobserved sky as Cbar-complete -- so this is also the test that says the
+    masked Q-table configuration EXISTS.
+    """
+    import darksirens.likelihood.catalog_views as cv
+    from darksirens.redshift.completion import build_field_lss_q_fp_empty_sum
+
+    rng = np.random.default_rng(3)
+    logq = rng.normal(0.0, 0.3, size=(12, NG))
+    bundle = _field_bundle(logq=logq)
+    for key in ("field_lss_q", "field_lss_q_empty_sum"):
+        bundle.pop(key, None)          # force the build from the global table
+    f_p = np.linspace(0.0, 1.0, 12).astype(np.float32)
+    bundle["f_p_map"] = f_p
+
+    views = cv.prepare_catalog_views(
+        _views_opts(), bundle, "dark_sirens_complete", None)
+
+    occ = np.asarray(bundle["field_occupied_pixels"], dtype=np.int64)
+    empty = np.setdiff1d(np.arange(12), occ)
+    ref = (f_p.astype(np.float64)[empty][:, None]
+           * np.exp(logq[empty])).sum(axis=0)
+    assert views.field_lss_q_fp_empty_sum is not None
+    np.testing.assert_allclose(
+        np.asarray(views.field_lss_q_fp_empty_sum), ref, rtol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(views.field_lss_q_fp_empty_sum),
+        np.asarray(build_field_lss_q_fp_empty_sum(logq, occ, 12, f_p)),
+        rtol=0, atol=0)
+    # and the occupied f_p rows still line up with the occupied Q rows
+    np.testing.assert_allclose(np.asarray(views.field_f_p_occ), f_p[occ],
+                               rtol=0, atol=0)
+
+
+def test_views_skip_the_fp_q_budget_when_there_is_no_q_table():
+    """No Q table, no twin: the field stays None so the treedef is unchanged."""
+    import darksirens.likelihood.catalog_views as cv
+
+    bundle = _field_bundle()
+    bundle["f_p_map"] = np.linspace(0.2, 1.0, 12).astype(np.float32)
+    views = cv.prepare_catalog_views(
+        _views_opts(), bundle, "dark_sirens_complete", None)
+    assert views.field_lss_q_fp_empty_sum is None
+    assert views.field_f_p_occ is not None

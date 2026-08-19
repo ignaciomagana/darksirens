@@ -35,6 +35,9 @@ from darksirens.core.types import (  # noqa: E402
 )
 from darksirens.redshift.completion import (  # noqa: E402
     _field_missing_curve,
+    build_field_lss_q_fp_empty_sum,
+    build_field_lss_q_fp_empty_sum_members,
+    build_field_lss_q_inputs,
     build_field_normalization_inputs,
     completion_curves,
 )
@@ -269,13 +272,187 @@ def test_loader_refusals(tmp_path):
         attach_selection_fraction_inputs(
             SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
                             n_catalogs=2), dict(data))
-    with pytest.raises(NotImplementedError, match="Q table"):
+    # S-3: a DETERMINISTIC Q table is now admitted (the f_p-weighted
+    # empty-pixel budget is built alongside the plain one), an ENSEMBLE is not.
+    det = dict(data, lss_completion_logq=np.zeros((48, int(zgrid.size))))
+    out_q = attach_selection_fraction_inputs(
+        SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
+                        n_catalogs=1, lss_completion="q.h5",
+                        selection_strata_by_catalog=None, selection_fit=None),
+        dict(det))
+    assert out_q["f_p_map"].shape == (48,)
+    ens = dict(data,
+               lss_completion_logq=np.zeros((48, int(zgrid.size))),
+               lss_completion_logq_members=np.zeros((3, 48, int(zgrid.size))))
+    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
         attach_selection_fraction_inputs(
             SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
-                            n_catalogs=1, lss_completion="q.h5"), dict(data))
+                            n_catalogs=1, lss_completion="q.h5",
+                            selection_strata_by_catalog=None,
+                            selection_fit=None), dict(ens))
     with pytest.raises(NotImplementedError, match="strat"):
         attach_selection_fraction_inputs(
             SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
                             n_catalogs=1, lss_completion=None,
                             selection_strata_by_catalog=[[(24.0, 0.0, 1.0)]]),
             dict(data))
+
+
+# ------------------------------------------------- S-3: f_p alongside a Q table
+
+
+def _q_field_kw(n_pix=12, seed=11, f_full=None):
+    """Field-normalizer inputs with a deterministic Q table, +/- f_p."""
+    em0 = _em(n_pix=n_pix)
+    field = build_field_normalization_inputs(em0.zgals, em0.wgals, em0.ngals)
+    occ = np.asarray(field.occupied_pixels)
+    rng = np.random.default_rng(seed)
+    logq = rng.normal(0.0, 0.4, size=(n_pix, int(zgrid.size)))
+    q_occ, q_empty_sum = build_field_lss_q_inputs(logq, occ, n_pix)
+    kw = dict(field_dN_obs_s=field.dN_obs_s,
+              field_n_empty=jnp.asarray(float(field.n_empty)),
+              field_N_obs_total=jnp.asarray(float(field.N_obs_total)),
+              field_occupied_pixels=jnp.asarray(occ),
+              field_lss_q=q_occ, field_lss_q_empty_sum=q_empty_sum)
+    return em0, field, occ, logq, kw
+
+
+def test_fp_q_empty_budget_matches_brute_force():
+    """``Sum_{p empty} f_p Q_p`` against an explicit loop, and the member twin."""
+    n_pix = 12
+    _, field, occ, logq, _ = _q_field_kw(n_pix)
+    f_full = np.linspace(0.0, 1.0, n_pix)
+    got = np.asarray(build_field_lss_q_fp_empty_sum(logq, occ, n_pix, f_full))
+    empty = np.setdiff1d(np.arange(n_pix), occ)
+    ref = (f_full[empty][:, None] * np.exp(logq[empty])).sum(axis=0)
+    np.testing.assert_allclose(got, ref, rtol=0, atol=1e-12)
+
+    logq_m = np.stack([logq, logq + 0.1, logq - 0.2])
+    got_m = np.asarray(
+        build_field_lss_q_fp_empty_sum_members(logq_m, occ, n_pix, f_full))
+    ref_m = np.stack([
+        (f_full[empty][:, None] * np.exp(logq_m[m][empty])).sum(axis=0)
+        for m in range(3)])
+    assert got_m.shape == (3, int(zgrid.size))
+    np.testing.assert_allclose(got_m, ref_m, rtol=0, atol=1e-12)
+
+
+def test_fp_ones_with_a_q_table_recovers_the_no_fp_path():
+    """f_p == 1 everywhere must reproduce the no-f_p Q path.
+
+    To ROUNDING, not bit-exactly, and the distinction is the point: the f_p
+    branch evaluates ``Sum_empty Q_p - C Sum_empty f_p Q_p`` where the shipped
+    branch evaluates ``(1 - C) Sum_empty Q_p``, and ``a - Ca`` is not the same
+    float as ``(1 - C)a``.  The shipped branch itself is untouched code, so it
+    stays bit-exact -- that is what the golden suite pins; here the claim is
+    only that the generalisation is the same function of the same inputs.
+    """
+    n_pix = 12
+    _, field, occ, logq, kw = _q_field_kw(n_pix)
+    fp_empty = build_field_lss_q_fp_empty_sum(
+        logq, occ, n_pix, np.ones(n_pix))
+    em_nofp = _em(n_pix=n_pix, **kw)
+    em_fp = _em(n_pix=n_pix, **kw,
+                field_f_p_occ=jnp.ones(occ.size, dtype=jnp.float32),
+                field_f_p_empty_sum=jnp.asarray(float(n_pix - occ.size)),
+                field_lss_q_fp_empty_sum=fp_empty)
+    V0, _ = _field_missing_curve(_cosmo(), _survey(), em_nofp)
+    Vf, _ = _field_missing_curve(_cosmo(), _survey(), em_fp)
+    V0, Vf = np.asarray(V0), np.asarray(Vf)
+    np.testing.assert_allclose(Vf, V0, rtol=1e-12, atol=1e-12)
+    assert np.max(np.abs(Vf - V0)) < 1e-14 * max(np.max(np.abs(V0)), 1.0)
+
+
+def test_fp_q_budget_is_the_q_weighted_formula():
+    """The empty budget must weight f_p INSIDE the Q sum, not outside it."""
+    n_pix = 12
+    _, field, occ, logq, kw = _q_field_kw(n_pix)
+    f_full = np.linspace(0.2, 1.0, n_pix)
+    f_occ = f_full[occ]
+    empty = np.setdiff1d(np.arange(n_pix), occ)
+    fp_empty = build_field_lss_q_fp_empty_sum(logq, occ, n_pix, f_full)
+    em_fp = _em(n_pix=n_pix, **kw,
+                field_f_p_occ=jnp.asarray(f_occ.astype(np.float32)),
+                field_f_p_empty_sum=jnp.asarray(float(f_full[empty].sum())),
+                field_lss_q_fp_empty_sum=fp_empty)
+    V, _ = _field_missing_curve(_cosmo(), _survey(), em_fp)
+    V = np.asarray(V)
+
+    C = np.asarray(c_sel_gaussian(zgrid, THETA["m_lim"], THETA["M0hat"],
+                                  THETA["sigma_M"], 67.74, 0.3075, -1.0, 0.0))
+    q = np.exp(logq)
+    below = np.asarray(zgrid) <= Z_DEPTH
+    ref = ((1.0 - f_occ[:, None] * C[None, :]) * q[occ]).sum(axis=0) \
+        + q[empty].sum(axis=0) - C * (f_full[empty][:, None] * q[empty]).sum(axis=0)
+    np.testing.assert_allclose(V[below], ref[below], rtol=1e-6)
+    # and the WRONG pairing (f_p outside the Q sum) is measurably different
+    wrong = ((1.0 - f_occ[:, None] * C[None, :]) * q[occ]).sum(axis=0) \
+        + (n_pix - occ.size) - C * f_full[empty].sum()
+    assert not np.allclose(V[below], wrong[below], rtol=1e-3)
+
+
+def test_fp_q_refusals():
+    n_pix = 12
+    _, field, occ, logq, kw = _q_field_kw(n_pix)
+    f_occ = np.linspace(0.2, 1.0, n_pix)[occ]
+    # a Q table with f_p but no f_p-weighted empty budget
+    em_bad = _em(n_pix=n_pix, **kw,
+                 field_f_p_occ=jnp.asarray(f_occ.astype(np.float32)),
+                 field_f_p_empty_sum=jnp.asarray(1.0))
+    with pytest.raises(ValueError, match="field_lss_q_fp_empty_sum"):
+        _field_missing_curve(_cosmo(), _survey(), em_bad)
+    # a Q ENSEMBLE with f_p: the member normalizers would reuse the
+    # deterministic f_p-weighted budget
+    em_ens = _em(n_pix=n_pix, **kw,
+                 field_f_p_occ=jnp.asarray(f_occ.astype(np.float32)),
+                 field_f_p_empty_sum=jnp.asarray(1.0),
+                 field_lss_q_fp_empty_sum=build_field_lss_q_fp_empty_sum(
+                     logq, occ, n_pix, np.ones(n_pix)),
+                 field_lss_q_members=jnp.asarray(
+                     np.stack([np.asarray(kw["field_lss_q"])] * 2)))
+    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
+        _field_missing_curve(_cosmo(), _survey(), em_ens)
+
+
+# ------------------------------------------------- S-3: the unmasked-footprint guard
+
+
+def _guard_opts(**kw):
+    from types import SimpleNamespace
+    base = dict(per_pixel_completeness=None, c_mode="selection")
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_unmasked_footprint_is_refused_and_the_flag_allows_it():
+    from darksirens.inference.loaders import attach_selection_fraction_inputs
+
+    # 3072 pixels, 40% empty, 60 galaxies per occupied pixel: Poisson would
+    # predict essentially no empty pixels, so the emptiness is a footprint.
+    rng = np.random.default_rng(0)
+    ngals = rng.poisson(60, size=3072)
+    ngals[:1200] = 0
+    data = dict(nside=16, ngals_catalog=ngals)
+
+    with pytest.raises(ValueError, match="FOOTPRINT"):
+        attach_selection_fraction_inputs(_guard_opts(), dict(data))
+    out = attach_selection_fraction_inputs(
+        _guard_opts(allow_unmasked_footprint=True), dict(data))
+    assert "f_p_map" not in out
+
+
+def test_sparse_all_sky_catalog_passes_the_guard():
+    """Sparsity is not a footprint: empties the mean count predicts are fine."""
+    from darksirens.inference.loaders import attach_selection_fraction_inputs
+
+    rng = np.random.default_rng(1)
+    ngals = rng.poisson(0.7, size=3072)          # ~50% empty BY SPARSITY
+    assert (ngals == 0).mean() > 0.4
+    data = dict(nside=16, ngals_catalog=ngals)
+    attach_selection_fraction_inputs(_guard_opts(), dict(data))
+
+    # and a per-pixel c_mode is out of scope for the guard entirely
+    ngals_fp = rng.poisson(60, size=3072)
+    ngals_fp[:1200] = 0
+    attach_selection_fraction_inputs(
+        _guard_opts(c_mode="per_pixel"), dict(nside=16, ngals_catalog=ngals_fp))

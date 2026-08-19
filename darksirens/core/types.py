@@ -381,9 +381,16 @@ class EMCatalog(NamedTuple):
     # ``Sum_{p empty} f_p`` so the empty-pixel budget becomes
     # ``n_empty - C(z) * f_p_empty_sum`` without a per-empty-pixel loop.
     # Built from :func:`darksirens.catalogs.depth_map.load_selection_fraction`.
+    # ``field_lss_q_fp_empty_sum`` is the Q-weighted twin, ``Sum_{p empty}
+    # f_p Q_p(z)``: with a Q table the empty-pixel budget is
+    # ``Sum_empty Q_p - C(z) * Sum_empty f_p Q_p``, since f_p multiplies
+    # INSIDE the sum.  Required whenever f_p and a Q table are both present
+    # (S-3); without it the normalizer would model unobserved sky as
+    # ``Cbar``-complete.
     f_p_rows: Any = None                # (N_catalog_rows,) float32
     field_f_p_occ: Any = None           # (n_occupied,) float32
     field_f_p_empty_sum: Any = None     # scalar float64
+    field_lss_q_fp_empty_sum: Any = None  # (N_grid,) float64
     # ---------------------------------------------------------------- LATENT
     # Latent-field completion (field-level PR-5, ``--lss_field_mode latent``).
     # In table mode ``Q`` is a resident ``(M, N_rows, N_grid)`` data constant;

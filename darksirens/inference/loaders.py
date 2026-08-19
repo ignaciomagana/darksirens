@@ -989,6 +989,77 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
     )
 
 
+#: Empty-sky fraction above which a count-derived completeness with no mask is
+#: treated as a footprint rather than as sparsity (S-3).  Not a tuned number:
+#: below it the modelling error is under a twentieth of the missing budget, and
+#: above it the run is making a claim about sky it never observed.
+_UNMASKED_FOOTPRINT_EMPTY_FRAC = 0.05
+
+
+def _guard_unmasked_footprint(opts, data) -> dict:
+    """S-3: refuse an aggregate/selection ``C`` on unobserved sky, unmasked.
+
+    Under ``c_mode`` aggregate or selection the completeness is a SURVEY curve
+    ``Cbar(z)`` applied to every pixel, empty ones included.  For a pixel that
+    is empty because the survey never looked there, that says the survey
+    catalogued a fraction ``Cbar`` of its galaxies -- so only ``1 - Cbar`` of
+    them enter the missing-host budget, while the numerator still places hosts
+    there.  On a footprint-limited survey the two sides then carry different
+    budgets and ``H0`` rails: 16 of 16 footprint runs of the PR-6a mock railed
+    to 125-138 without a mask, and on the production line switching the mask on
+    moves the median by 4.3 sigma.
+
+    ``--per_pixel_completeness`` is the fix: ``C_p = f_p Cbar`` with ``f_p = 0``
+    off-footprint.  ``--allow_unmasked_footprint`` runs the exposed
+    configuration deliberately, which is what the no-mask CONTROL arms want.
+
+    Sparsity is not a footprint, and the guard separates them: a catalog whose
+    empty pixels are what its mean count predicts under Poisson is sparse, and
+    passes at any empty fraction.
+
+    KNOWN GAP: ``inference/data.py`` returns before this attach step for
+    ``n_catalogs >= 2``, so a multitracer mixture is not guarded.  ``f_p`` is
+    refused there anyway (the bundle loader does not thread it), so the guard
+    would have nothing to recommend; the exposure is the same and is stated
+    here rather than left to be discovered.
+    """
+    c_mode = getattr(opts, "c_mode", None) or "per_pixel"
+    if c_mode not in ("aggregate", "selection"):
+        return data
+    ngals = data.get("ngals_catalog", data.get("ngals"))
+    if ngals is None:
+        return data
+    ngals = np.asarray(ngals).reshape(-1)
+    n_pix = int(ngals.size)
+    if n_pix == 0:
+        return data
+    empty_frac = float((ngals == 0).mean())
+    lam = float(ngals.sum()) / n_pix
+    poisson_empty = float(np.exp(-lam))
+    structural = empty_frac > max(_UNMASKED_FOOTPRINT_EMPTY_FRAC,
+                                  10.0 * poisson_empty)
+    if not structural:
+        return data
+    area = 4.0 * np.pi * (180.0 / np.pi) ** 2
+    msg = (
+        f"c_mode={c_mode!r} with no --per_pixel_completeness on a catalog "
+        f"whose empty sky looks like a FOOTPRINT, not sparsity: "
+        f"{empty_frac:.1%} of {n_pix} pixels are empty "
+        f"({empty_frac * area:,.0f} deg^2) against {poisson_empty:.2e} "
+        f"predicted by the mean count {lam:.1f} gal/pixel. The survey "
+        f"completeness curve Cbar(z) is applied there too, so that sky is "
+        f"modelled as Cbar-COMPLETE and its hosts leave the missing budget "
+        f"while the numerator keeps them. Pass --per_pixel_completeness "
+        f"<mth_map.h5> (C_p = f_p Cbar, f_p = 0 off-footprint), or "
+        f"--allow_unmasked_footprint to run the exposed configuration "
+        f"deliberately (the no-mask control arms do)."
+    )
+    if getattr(opts, "allow_unmasked_footprint", False):
+        print(f"    [footprint] ALLOWED BY FLAG -- {msg}")
+        return data
+    raise ValueError(msg)
+
+
 def attach_selection_fraction_inputs(opts, data) -> dict:
     """Attach the per-pixel selection fraction ``f_p`` (field-level PR-2).
 
@@ -1001,12 +1072,15 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
       already contains the mask loss (multiplying would double-count it);
     * gaussian selection family — the truncated-Schechter disjointness
       argument (F2) has not been re-derived under ``f_p`` (PLAN §7 PR-2);
-    * no Q table, no stratified selection — their empty-pixel budgets would
-      need ``f_p``-weighted twins (NotImplemented until a rung needs them);
+    * a deterministic Q table is ADMITTED (S-3): the field normalizer builds
+      ``Sum_{p empty} f_p Q_p(z)`` alongside the plain empty-pixel budget.  A
+      Q ENSEMBLE and stratified selection are still refused — their budgets
+      would need per-member / per-stratum ``f_p``-weighted twins;
     * K = 1 — the multitracer bundle loader does not thread ``f_p`` yet.
     """
     path = getattr(opts, "per_pixel_completeness", None)
     if not path:
+        _guard_unmasked_footprint(opts, data)
         return data
     c_mode = getattr(opts, "c_mode", None) or "per_pixel"
     if c_mode not in ("aggregate", "selection"):
@@ -1018,10 +1092,13 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
         raise NotImplementedError(
             "--per_pixel_completeness is K=1 only for now (the multitracer "
             "bundle loader does not thread f_p).")
-    if getattr(opts, "lss_completion", None):
+    if data.get("lss_completion_logq_members") is not None or bool(
+            getattr(opts, "lss_marginalize", False)):
         raise NotImplementedError(
-            "--per_pixel_completeness with a Q table needs an f_p-weighted "
-            "empty-pixel Q budget that is not implemented; drop one of them.")
+            "--per_pixel_completeness with a Q ENSEMBLE needs a per-member "
+            "f_p-weighted empty-pixel budget "
+            "(completion.build_field_lss_q_fp_empty_sum_members, not wired "
+            "into the member substitution); drop one of them.")
     if getattr(opts, "selection_strata_by_catalog", None):
         raise NotImplementedError(
             "--per_pixel_completeness with stratified selection needs "
@@ -1041,7 +1118,16 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
 
     nside = int(data["nside"])
     sfm = load_selection_fraction(path, nside)
-    ngals_full = np.asarray(data["ngals"])
+    # ``ngals_catalog`` is the key the loader actually stores (see the
+    # ``ngals_catalog`` reads at :1102, :1135, :1189 and :1194); ``data["ngals"]``
+    # was never populated on this path, so --per_pixel_completeness raised
+    # KeyError before its first likelihood evaluation on ANY run that reached
+    # here.  Found by the PR-6a campaign, which worked around it with a shim in
+    # its own harness; fixed at the source here because the production H0 scan
+    # goes through this line.  ``get`` with the legacy alias so a caller that
+    # does supply the old key still works.
+    ngals_full = np.asarray(
+        data.get("ngals_catalog", data.get("ngals")))
     if ngals_full.shape[0] != sfm.f_p.shape[0]:
         raise ValueError(
             f"--per_pixel_completeness: catalog has {ngals_full.shape[0]} "
