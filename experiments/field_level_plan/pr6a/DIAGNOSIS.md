@@ -1535,3 +1535,56 @@ plainly separate from the interval question.
   catalog is **1.13**, and production's own arm never showed a departure once its
   curvature was measured properly.
 * **The production medians are unchanged** (`fp` 71.70 -> 71.54).
+
+
+## Gate 8(c): the bias survives an IDEAL COMPLETE catalog
+
+The residual bias had one modelling explanation left -- the completeness model.
+Below the survey limit the analysis represents uncatalogued hosts by
+`(1 - C(z)) dN_exp`, and that branch sits at HIGHER redshift than the catalogued
+one, so misplacing it moves `H0` upward.  The checklist's gate for exactly this
+is an end-to-end run on ideal inputs, and it had never been run here.
+
+Ideal = the world's `f_p` set to 1 (which feeds BOTH the survey draw and the
+depth map `make_mock` writes, so the survey is complete AND the analysis is told
+so) and `m_lim = 99`, which makes the parametric `C(z)` ~1 everywhere.  The arm
+is otherwise untouched, so the only difference from an ordinary Tier C run is
+that there is nothing for the completeness model to correct.
+
+    ordinary mock (n=49)   median u = 0.323   median-of-medians +2.25 km/s   oc 1.508
+    IDEAL COMPLETE (n=24)  median u = 0.277   median-of-medians +3.00 km/s   oc 1.714
+
+**Both survive.**  The completeness model is not the carrier of either the bias
+or the residual dispersion.
+
+(Setting `f_p_survey` alone would NOT have been the ideal test: `make_mock`
+always writes the UNPERTURBED `world.f_p` into its depth map, so that route
+makes the survey complete while telling the analysis it is masked -- Tier D-i's
+deliberate mismatch, the opposite of what is wanted.  And switching to
+`dark_sirens_complete` is not available here: the mock's footprint is 1,854 of
+3,072 pixels, so off-footprint events have no catalog support and the first
+attempt returned n = 0 surviving realizations.)
+
+### Where that leaves the bias
+
+Eliminated, each by measurement: the `f_p` gather (fixed, and the ideal run has
+`f_p == 1` anyway), the parameter estimation (delta-PE at truth leaves it), the
+event draw (events at fixed catalog are calibrated on three independent routes),
+and now the completeness model.
+
+The candidate that fits a BIAS specifically -- as opposed to the dispersion --
+is the **selection integral**.  It is computed from ONE injection set shared by
+every realization, so an error in it contributes no realization-to-realization
+scatter and shifts every posterior the same way.  That is exactly the observed
+shape: a bias of +0.3 sigma present in every configuration tried, alongside a
+dispersion that the fixed-catalog tests say is fine.  It is also consistent with
+the one thing the earlier injection work did NOT test: injections were rebuilt
+18x and the SCATTER did not move, which measures noise, not bias.
+
+The check is DAG rule 3 -- that `beta` uses the same detection statistic and
+threshold as the event draw.  `make_mock` draws events by thresholding
+`obs_rho` from `_detect_on_observation`, and builds injections with
+`proposal="population+uniform"` through `_selection_injections`; whether the two
+implied detection models agree to better than a few tenths of a sigma in `H0`
+has not been measured.  That is the next test, and it is cheap: regenerate the
+injection set from the SAME code path that draws the events and re-run.
