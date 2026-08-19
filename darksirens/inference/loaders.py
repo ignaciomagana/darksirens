@@ -1072,10 +1072,11 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
       already contains the mask loss (multiplying would double-count it);
     * gaussian selection family — the truncated-Schechter disjointness
       argument (F2) has not been re-derived under ``f_p`` (PLAN §7 PR-2);
-    * a deterministic Q table is ADMITTED (S-3): the field normalizer builds
-      ``Sum_{p empty} f_p Q_p(z)`` alongside the plain empty-pixel budget.  A
-      Q ENSEMBLE and stratified selection are still refused — their budgets
-      would need per-member / per-stratum ``f_p``-weighted twins;
+    * a Q table is ADMITTED (S-3), deterministic or an ENSEMBLE: the field
+      normalizer builds ``Sum_{p empty} f_p Q_p(z)`` alongside the plain
+      empty-pixel budget, and its per-member twin alongside the per-member one.
+      Stratified selection is still refused — its budget would need per-stratum
+      ``f_p``-weighted twins;
     * K = 1 — the multitracer bundle loader does not thread ``f_p`` yet.
     """
     path = getattr(opts, "per_pixel_completeness", None)
@@ -1092,13 +1093,6 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
         raise NotImplementedError(
             "--per_pixel_completeness is K=1 only for now (the multitracer "
             "bundle loader does not thread f_p).")
-    if data.get("lss_completion_logq_members") is not None or bool(
-            getattr(opts, "lss_marginalize", False)):
-        raise NotImplementedError(
-            "--per_pixel_completeness with a Q ENSEMBLE needs a per-member "
-            "f_p-weighted empty-pixel budget "
-            "(completion.build_field_lss_q_fp_empty_sum_members, not wired "
-            "into the member substitution); drop one of them.")
     if getattr(opts, "selection_strata_by_catalog", None):
         raise NotImplementedError(
             "--per_pixel_completeness with stratified selection needs "

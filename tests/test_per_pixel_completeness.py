@@ -284,12 +284,12 @@ def test_loader_refusals(tmp_path):
     ens = dict(data,
                lss_completion_logq=np.zeros((48, int(zgrid.size))),
                lss_completion_logq_members=np.zeros((3, 48, int(zgrid.size))))
-    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
-        attach_selection_fraction_inputs(
-            SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
-                            n_catalogs=1, lss_completion="q.h5",
-                            selection_strata_by_catalog=None,
-                            selection_fit=None), dict(ens))
+    out_e = attach_selection_fraction_inputs(
+        SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
+                        n_catalogs=1, lss_completion="q.h5",
+                        selection_strata_by_catalog=None,
+                        selection_fit=None), dict(ens))
+    assert out_e["f_p_map"].shape == (48,)
     with pytest.raises(NotImplementedError, match="strat"):
         attach_selection_fraction_inputs(
             SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
@@ -401,8 +401,8 @@ def test_fp_q_refusals():
                  field_f_p_empty_sum=jnp.asarray(1.0))
     with pytest.raises(ValueError, match="field_lss_q_fp_empty_sum"):
         _field_missing_curve(_cosmo(), _survey(), em_bad)
-    # a Q ENSEMBLE with f_p: the member normalizers would reuse the
-    # deterministic f_p-weighted budget
+    # a Q ENSEMBLE with f_p but WITHOUT the per-member twin: member m's
+    # normalizer would reuse the deterministic f_p-weighted budget
     em_ens = _em(n_pix=n_pix, **kw,
                  field_f_p_occ=jnp.asarray(f_occ.astype(np.float32)),
                  field_f_p_empty_sum=jnp.asarray(1.0),
@@ -410,7 +410,7 @@ def test_fp_q_refusals():
                      logq, occ, n_pix, np.ones(n_pix)),
                  field_lss_q_members=jnp.asarray(
                      np.stack([np.asarray(kw["field_lss_q"])] * 2)))
-    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
+    with pytest.raises(ValueError, match="fp_empty_sum_members"):
         _field_missing_curve(_cosmo(), _survey(), em_ens)
 
 
@@ -456,3 +456,77 @@ def test_sparse_all_sky_catalog_passes_the_guard():
     ngals_fp[:1200] = 0
     attach_selection_fraction_inputs(
         _guard_opts(c_mode="per_pixel"), dict(nside=16, ngals_catalog=ngals_fp))
+
+
+def test_fp_q_ensemble_members_get_their_own_empty_budget():
+    """Each member's normalizer must consume ITS OWN Sum_empty f_p Q_p.
+
+    The deterministic budget paired with member m's Q rows is the hazard the
+    stratified path already guards one axis over: the numerator would carry
+    member m's Q while the normalizer carried the ensemble mean's.  The test
+    is that the per-member normalizers DIFFER, and differ in the way the
+    per-member budgets do -- a run that reused the deterministic budget would
+    still vary (the occupied rows differ) but by a different amount.
+    """
+    from darksirens.redshift.completion import (
+        _replace_member_q, _member_fp_empty_rows)
+
+    n_pix = 12
+    _, field, occ, logq, kw = _q_field_kw(n_pix)
+    rng = np.random.default_rng(7)
+    logq_m = np.stack([logq + 0.5, logq - 0.5, logq * 0.0])
+    f_full = np.linspace(0.2, 1.0, n_pix)
+    empty = np.setdiff1d(np.arange(n_pix), occ)
+    qm_occ, qm_empty = build_field_lss_q_inputs(logq_m[0], occ, n_pix), None
+    fp_m = build_field_lss_q_fp_empty_sum_members(logq_m, occ, n_pix, f_full)
+    assert np.asarray(fp_m).shape == (3, int(zgrid.size))
+    # the three members' budgets are genuinely different
+    assert not np.allclose(np.asarray(fp_m)[0], np.asarray(fp_m)[1])
+
+    em = _em(n_pix=n_pix, **kw,
+             field_f_p_occ=jnp.asarray(f_full[occ].astype(np.float32)),
+             field_f_p_empty_sum=jnp.asarray(float(f_full[empty].sum())),
+             field_lss_q_fp_empty_sum=build_field_lss_q_fp_empty_sum(
+                 logq, occ, n_pix, f_full),
+             field_lss_q_members=jnp.asarray(
+                 np.stack([np.asarray(kw["field_lss_q"])] * 3)),
+             field_lss_q_fp_empty_sum_members=fp_m)
+    rows = _member_fp_empty_rows(em)
+    assert rows is not None and np.asarray(rows).shape == (3, int(zgrid.size))
+
+    # the substitution installs member m's budget, not the deterministic one
+    for m in range(3):
+        cat_m = _replace_member_q(em, em.field_lss_q_members[m],
+                                  em.field_lss_q_empty_sum, None,
+                                  np.asarray(rows)[m])
+        np.testing.assert_allclose(
+            np.asarray(cat_m.field_lss_q_fp_empty_sum),
+            np.asarray(fp_m)[m], rtol=0, atol=0)
+        V, _ = _field_missing_curve(_cosmo(), _survey(), cat_m)
+        assert np.all(np.isfinite(np.asarray(V)))
+
+    # and the per-member curves DIFFER, which the deterministic reuse would hide
+    Vs = []
+    for m in range(3):
+        cat_m = _replace_member_q(em, em.field_lss_q_members[m],
+                                  em.field_lss_q_empty_sum, None,
+                                  np.asarray(rows)[m])
+        Vs.append(np.asarray(_field_missing_curve(_cosmo(), _survey(), cat_m)[0]))
+    assert not np.allclose(Vs[0], Vs[1])
+
+
+def test_fp_without_a_q_ensemble_leaves_the_member_rows_none():
+    """No f_p, or no ensemble: the accessor returns None so the vmap broadcasts."""
+    from darksirens.redshift.completion import _member_fp_empty_rows
+
+    n_pix = 12
+    _, field, occ, logq, kw = _q_field_kw(n_pix)
+    em_nofp = _em(n_pix=n_pix, **kw)
+    assert _member_fp_empty_rows(em_nofp) is None
+    # f_p and a DETERMINISTIC Q table, no ensemble: nothing to substitute
+    em_fp_det = _em(n_pix=n_pix, **kw,
+                    field_f_p_occ=jnp.ones(occ.size, dtype=jnp.float32),
+                    field_f_p_empty_sum=jnp.asarray(0.0),
+                    field_lss_q_fp_empty_sum=build_field_lss_q_fp_empty_sum(
+                        logq, occ, n_pix, np.ones(n_pix)))
+    assert _member_fp_empty_rows(em_fp_det) is None

@@ -14,6 +14,7 @@ from darksirens.redshift.completion import (
     build_field_delta_g_inputs,
     build_field_depth_inputs,
     build_field_lss_q_fp_empty_sum,
+    build_field_lss_q_fp_empty_sum_members,
     build_field_lss_q_inputs,
     build_field_lss_q_member_inputs,
     build_field_mark_inputs,
@@ -148,6 +149,7 @@ class CatalogViews:
     # f_p map are both present; without it the field normalizer would model
     # unobserved sky as Cbar-complete (completion.build_field_lss_q_fp_empty_sum).
     field_lss_q_fp_empty_sum: jnp.ndarray | None = None  # (n_grid,) f64
+    field_lss_q_fp_empty_sum_members: jnp.ndarray | None = None  # (M, n_grid) f64
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -749,7 +751,7 @@ def prepare_catalog_views(
     # for the field normalizer.  ``None`` everywhere when the flag is off.
     f_p_rows_pe = f_p_rows_sel = None
     field_f_p_occ = field_f_p_empty_sum = None
-    field_lss_q_fp_empty_sum = None
+    field_lss_q_fp_empty_sum = field_lss_q_fp_empty_sum_members = None
     f_p_full = data.get("f_p_map")
     if f_p_full is not None:
         fp_np = np.asarray(f_p_full, dtype=np.float32)
@@ -779,6 +781,11 @@ def prepare_catalog_views(
                 field_lss_q_fp_empty_sum = barrier(
                     build_field_lss_q_fp_empty_sum(
                         np.asarray(logq_for_fp), occ_idx, n_pix_total, fp_np))
+            logq_m_for_fp = data.get("lss_completion_logq_members")
+            if logq_m_for_fp is not None:
+                field_lss_q_fp_empty_sum_members = barrier(
+                    build_field_lss_q_fp_empty_sum_members(
+                        np.asarray(logq_m_for_fp), occ_idx, n_pix_total, fp_np))
 
     return CatalogViews(
         f_p_rows_pe=f_p_rows_pe,
@@ -786,6 +793,7 @@ def prepare_catalog_views(
         field_f_p_occ=field_f_p_occ,
         field_f_p_empty_sum=field_f_p_empty_sum,
         field_lss_q_fp_empty_sum=field_lss_q_fp_empty_sum,
+        field_lss_q_fp_empty_sum_members=field_lss_q_fp_empty_sum_members,
         zgals_pe_catalog=zgals_pe_catalog,
         dzgals_pe_catalog=dzgals_pe_catalog,
         wgals_pe_catalog=wgals_pe_catalog,

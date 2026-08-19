@@ -391,6 +391,7 @@ class EMCatalog(NamedTuple):
     field_f_p_occ: Any = None           # (n_occupied,) float32
     field_f_p_empty_sum: Any = None     # scalar float64
     field_lss_q_fp_empty_sum: Any = None  # (N_grid,) float64
+    field_lss_q_fp_empty_sum_members: Any = None  # (M, N_grid) float64
     # ---------------------------------------------------------------- LATENT
     # Latent-field completion (field-level PR-5, ``--lss_field_mode latent``).
     # In table mode ``Q`` is a resident ``(M, N_rows, N_grid)`` data constant;
