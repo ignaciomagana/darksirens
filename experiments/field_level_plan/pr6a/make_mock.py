@@ -72,7 +72,30 @@ import world16 as W16
 
 Z_UNIVERSE = 0.60          # galaxies (and hosts) exist out to here
 Z_DEPTH = W16.Z_DEPTH      # 0.30 -- the catalog's declared depth
-SIGMA_Z_CAT = W16.SIGMA_Z  # 0.023, matching build_latent_field's frozen W
+#: The catalog's redshift-error floor -- the scatter applied to every galaxy AND
+#: the ``dz`` the catalog stores, so it is also the width of the analysis kernel.
+#:
+#: **0.003, SPECTROSCOPIC, changed from W16.SIGMA_Z = 0.023 (2026-08-19).**  The
+#: photometric value was measured to be the sole remaining cause of the closure
+#: tiers' residual bias and overconfidence: at a median host ``z`` of 0.11 a
+#: 0.023 scatter is a 21% FRACTIONAL kernel width, the kernel is not truncated at
+#: ``z >= 0`` (129 galaxies per realization had ``z_obs < 0``, and a Gaussian
+#: centred below zero can only put mass at higher ``z``), and at that width it
+#: interacts with the rising volumetric prior at exactly the few-percent level the
+#: bias sat at.  Setting it to zero took median ``u`` from 0.277 to 0.449, the
+#: bias from +3.00 to +0.42 km/s, the overconfidence from 1.714 to 1.224 and the
+#: 90% coverage from 0.62 to 0.88 (``gate_specz.py``).
+#:
+#: 0.003 rather than 0 because that is the value the PRODUCTION analysis applies
+#: (``desi_full259/run_h0_latent.py``'s ``sigma_kde``), and this mock exists to
+#: validate that line.  DESI's actual spectroscopic precision is finer, so the
+#: choice is conservative: it keeps a real kernel, 2.7% fractional at the median
+#: host, instead of asserting an exact redshift the survey does not deliver.
+#:
+#: ``W16.SIGMA_Z`` is UNCHANGED at 0.023: it is the width
+#: ``build_latent_field``'s frozen W was constructed with, and the latent basis
+#: must not move underneath the anchors.
+SIGMA_Z_CAT = 0.003
 N0_TRUE = 2.0e-4           # Mpc^-3, comoving, delta = 0
 SNR_REF = 5.0
 SNR_THRESHOLD = 8.0

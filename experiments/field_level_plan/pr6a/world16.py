@@ -107,7 +107,23 @@ M_Z = 5
 LS_SPH = 0.5
 LS_Z = 0.10
 N_FINE = 400
-SIGMA_Z = 0.023          # the production builder's population-average photo-z
+#: The catalog redshift uncertainty the WORLD assumes -- it becomes
+#: ``world.meta["sigma_z"]`` and therefore the shell response ``W`` that
+#: ``build_anchor16`` builds the count channel's forward model from.
+#:
+#: **0.003, changed from 0.023 (2026-08-19), and it must track
+#: ``make_mock.SIGMA_Z_CAT``.**  The photometric 0.023 was measured to be the
+#: sole remaining cause of the closure tiers' bias and overconfidence (a 21%
+#: fractional kernel at the median host `z`; see ``make_mock.SIGMA_Z_CAT`` and
+#: ``gate_specz.py``).  Leaving THIS at 0.023 while the catalog moved to 0.003
+#: would make the latent arm measure a photo-`z` MISMATCH between the shell
+#: response and the catalog rather than the field -- so the two are changed
+#: together, deliberately, and the anchors must be rebuilt.
+#:
+#: ``build_anchor16`` rebuilds ``W`` from ``world.meta`` on every call, so this
+#: is safe for the mock.  The PRODUCTION anchor is built by
+#: ``cli/build_latent_field.py`` from its own depth map and is untouched.
+SIGMA_Z = 0.003
 B_GAL = 1.0
 
 #: Mock survey magnitude limit.  With the mock LF ``M ~ N(-21, 1)`` the
