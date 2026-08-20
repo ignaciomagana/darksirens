@@ -1,5 +1,21 @@
 # S-3 on the production line, measured (2026-08-18)
 
+> **CAVEAT ADDED 2026-08-20 — `q_fp` = 80.61 IS WITHDRAWN.**  The `f_p` x Q-table
+> pairing this run exercises DOUBLE-COUNTS the survey mask: the Q table is fit to
+> the catalog's observed counts and therefore already carries the footprint
+> (measured on the closure mock: mean `Q` 1.624 on-footprint vs **0.050** off, a
+> 32x suppression, `corr(Q, f_p) = +0.41`), so applying `C_p = f_p C` on top
+> applies the mask twice.  On the mock the same pairing puts `H0` at **41.24
+> [36.1, 46.3]** against a truth of 67.74 — confidently wrong, and the tightest
+> arm in that run.  So the `-2.49 sigma` shift below is partly or wholly the
+> double-count rather than the mask, **80.61 must not be quoted**, and the
+> arm-selection question it raises is void until the pairing is gated on an
+> `f_p`-aware Q artifact.  Full record: `field_level_plan/pr6a/DIAGNOSIS.md`,
+> section "A FINDING AGAINST S-3 ITSELF".
+>
+> **Unaffected**: the `f_p`-without-Q arms (`nofp` 90.25, `fp` 71.70 → 71.54 after
+> the f_p-gather bugfix), which have no second mask channel.
+
 The shipped `selq_radial` configuration -- `c_mode=selection` plus the radial
 lognormal Q table -- had no legal masked form: the loader refused
 `--per_pixel_completeness` alongside a Q table, because the field normalizer had
