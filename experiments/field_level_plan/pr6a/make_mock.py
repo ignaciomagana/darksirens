@@ -231,7 +231,7 @@ def clustered_catalog(world, xi_true, rng, grids, *, n0=N0_TRUE,
 def build(seed, outdir, *, world=None, nobs=NOBS, nsamp=NSAMP, ndraw=NDRAW,
           n0=N0_TRUE, f_p_survey=None, extra_selection=None,
           lognormal_tail=0.0, field_scale=1.0, z_universe=Z_UNIVERSE,
-          dz_quantiles="default",
+          dz_quantiles="default", dz_scale=1.0,
           target_det=TARGET_DET, verbose=True,
           reuse_injections=None, event_seed=None):
     """Write one realization's data products under ``outdir``.
@@ -297,7 +297,7 @@ def build(seed, outdir, *, world=None, nobs=NOBS, nsamp=NSAMP, ndraw=NDRAW,
         # represented by another is a mock/analysis mismatch of exactly the kind
         # this campaign spent a day chasing.
         _q = np.asarray(dz_quantiles["q"], dtype=float)
-        _d = np.asarray(dz_quantiles["dz"], dtype=float)
+        _d = np.asarray(dz_quantiles["dz"], dtype=float) * float(dz_scale)
         zerr = np.interp(rng.uniform(size=total), _q, _d)
     else:
         zerr = dark._catalog_zerr(complete["z"], survey_cfg)
