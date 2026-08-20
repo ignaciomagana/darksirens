@@ -2142,3 +2142,33 @@ The reassuring result was the artifact.  That is worth stating plainly, because
 the sequence -- measure a defect, "fix" it, watch the numbers improve, conclude
 the defect was the mock's -- is exactly what a wrong premise looks like from the
 inside.
+
+
+## Tier D on the production-`dz` mock: PASSES, and the SE finally fits under the gate
+
+| variant (`latent`) | flat 0.023 | flat 1e-4 | **production `dz`** | SE |
+|---|---|---|---|---|
+| matched | +0.473 | +0.636 | **+0.146** | 0.360 |
+| `fp_perturbed` | +0.388 | +0.551 | +0.147 | 0.404 |
+| `fibre_5pc` | +0.498 | +0.645 | +0.176 | 0.363 |
+| `ls_ang_2x` | +0.500 | +0.644 | +0.149 | 0.352 |
+| `lognormal_tail` | +0.238 | +0.136 | +0.209 | 0.428 |
+| **TIER_D** | true | false | **TRUE** | |
+
+Every variant is now well inside the 0.5-sigma gate -- **and inside its own
+bootstrap SE**, which the previous two configurations were not.  On the flat-1e-4
+mock the biases (0.55-0.65) sat ABOVE the SE (0.32), i.e. detectably off; here
+they sit below it.  That is the first time this tier has been comfortably rather
+than marginally passed.
+
+**Note the apparent contradiction with Tier C, and that it is not one.**  Tier C
+on the same mock reports the LARGEST bias of the three configurations
+(`u` = 0.251, median +2.8 km/s) while Tier D reports the SMALLEST (+0.146
+sigma).  They measure different things: Tier D's `latent` arm is compared against
+its own quoted `sigma` on 20 realizations per variant, and this mock's intervals
+are WIDER (mean `sigma` 6.24 against the spec-`z` mock's 3.74) because the
+photometric kernel genuinely degrades each posterior.  So the same physical bias
+divided by a larger `sigma` is a smaller number.  The ladder's sigma-unit gates
+reward a less precise analysis, which is the structural point recorded above --
+it just now cuts in the reassuring direction, and should not be read as
+"production-`dz` is better".
