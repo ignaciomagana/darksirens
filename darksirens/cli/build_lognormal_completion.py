@@ -601,7 +601,21 @@ def _build_completion_radial(
                 # to (measured on the closure mock: mean Q 1.624 on-footprint
                 # against 0.050 off, corr(Q, f_p) = +0.41), and the paired arm
                 # put H0 at 41.24 [36.1, 46.3] against a truth of 67.74.
-                fp_fit = np.asarray(f_p_map, dtype=float)[fit][:, None]
+                # OFF-FOOTPRINT PIXELS MUST NOT BE FITTED. With f_p folded in,
+                # their model rate is f_p C dN_exp Q = 0 for ANY Q while N_obs is
+                # also 0, so the likelihood is FLAT in Q and the MAP is set by the
+                # prior plus the budget renormalization rather than by data.
+                # Measured when they were left in: off-footprint logQ came out
+                # with sd 0.57 where mask-freedom requires exactly 0, and
+                # corr(Q, f_p) was still +0.39 at low z and -0.995 at high z --
+                # i.e. the footprint was still imprinted, just differently.
+                # Restricting the fit to the covered sky is what the per-pixel
+                # branch already does for EMPTY pixels, for the same reason.
+                fp_all = np.asarray(f_p_map, dtype=float)
+                covered = fp_all > 0.0
+                fit = np.nonzero(covered)[0]
+                n_fit = int(fit.size)
+                fp_fit = fp_all[fit][:, None]
                 C_u = np.clip(fp_fit * Cbar_u[None, :], 0.0, 1.0)
                 w_budget = ((1.0 - np.clip(fp_fit * Cbar_fine[None, :], 0.0, 1.0))
                             * dN_exp_density[None, :])
@@ -1209,6 +1223,63 @@ def _build_completion_gp3d(
     return logq_map, logq_members, diagnostics
 
 
+#: Tolerances for the mask-free verification.  A truly mask-free Q has logQ == 0
+#: off-footprint (those pixels carry no data) and no residual correlation with
+#: f_p on it.  Both are properties of the ARTIFACT, checkable without a run.
+_MASK_FREE_OFF_LOGQ_TOL = 1.0e-6
+_MASK_FREE_CORR_TOL = 0.10
+
+
+def _verify_mask_free(logq_map, opts) -> bool:
+    """Did this build actually remove the survey footprint from Q?
+
+    Two checks on the finished table, both cheap and both independent of the
+    code that produced it:
+
+    * off-footprint pixels (``f_p == 0``) must carry ``logQ == 0`` exactly -- they
+      have no counts, so any structure there came from the prior or the budget
+      renormalization rather than from data;
+    * on the covered sky, ``corr(Q, f_p)`` must be small at every z slice --
+      a surviving correlation IS the footprint imprint.
+
+    Returns the value stamped as ``f_p_aware``.  False is reported loudly rather
+    than raised: the table is still a valid ordinary Q table, it simply may not be
+    paired with ``--per_pixel_completeness``, and the loader enforces that.
+    """
+    import numpy as _np
+
+    from darksirens.catalogs.depth_map import load_selection_fraction
+    from darksirens.catalogs.io import load_survey as _ls
+
+    nside = int(_ls(opts.catalog, to_device=False)[0])
+    fp = _np.asarray(load_selection_fraction(opts.depth_map, nside).f_p,
+                     dtype=float)
+    lq = _np.asarray(logq_map, dtype=float)
+    if lq.shape[0] != fp.size:
+        print(f"    [mask-free] SKIPPED: logq rows {lq.shape[0]} != {fp.size} "
+              f"pixels (compact indexing?); stamping f_p_aware=False")
+        return False
+    off = fp <= 0.0
+    on = ~off
+    off_max = float(_np.abs(lq[off]).max()) if off.any() else 0.0
+    zs = _np.linspace(0, lq.shape[1] - 1, 9).astype(int)
+    corrs = []
+    for zi in zs:
+        q = _np.exp(lq[:, zi])
+        if on.sum() > 2 and float(_np.std(q[on])) > 0 and float(_np.std(fp[on])) > 0:
+            corrs.append(abs(float(_np.corrcoef(q[on], fp[on])[0, 1])))
+    worst_corr = max(corrs) if corrs else 0.0
+    ok = (off_max <= _MASK_FREE_OFF_LOGQ_TOL
+          and worst_corr <= _MASK_FREE_CORR_TOL)
+    print(f"    [mask-free] off-footprint max|logQ| = {off_max:.3e} "
+          f"(need <= {_MASK_FREE_OFF_LOGQ_TOL:g}); worst |corr(Q, f_p)| on the "
+          f"covered sky = {worst_corr:.3f} (need <= {_MASK_FREE_CORR_TOL:g})")
+    print(f"    [mask-free] stamping f_p_aware={ok}"
+          + ("" if ok else "  -- this table MUST NOT be paired with "
+                           "--per_pixel_completeness; the loader will refuse it"))
+    return bool(ok)
+
+
 def build_completion(
     catalog_path: str,
     *,
@@ -1613,11 +1684,20 @@ def main(argv=None):
         budget_renormalized=diagnostics.get("budget_renormalized"),
         budget_monopole_logq=budget_monopole,
         c_mode=opts.c_mode,
-        # Only True when a depth map was actually folded into the fit-time
-        # completeness. This attr is what the inference loader trusts before
-        # admitting --per_pixel_completeness alongside the table, so it must
-        # track the ACTUAL build, never a default.
-        f_p_aware=bool(getattr(opts, "depth_map", None)),
+        # SELF-VERIFYING: the stamp is earned by MEASUREMENT, not by the
+        # presence of the flag.  The inference loader admits
+        # --per_pixel_completeness alongside the table on the strength of this
+        # attr, so an unearned True is worse than no flag at all -- it converts a
+        # refusal into a silent double-count.
+        #
+        # This exists because the first --depth-map implementation stamped True
+        # on intent and was WRONG: folding f_p into the fit-time completeness
+        # left the off-footprint pixels degenerate (model rate 0 for any Q), so
+        # their logQ came out with sd 0.57 where mask-freedom needs exactly 0,
+        # and corr(Q, f_p) was still +0.39 at low z and -0.995 at high z. The
+        # formula was right and the artifact was not.
+        f_p_aware=_verify_mask_free(logq_map, opts) if getattr(
+            opts, "depth_map", None) else None,
     )
     _ok(f"completion  →  {opts.out}")
     _end()
