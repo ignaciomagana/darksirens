@@ -2188,7 +2188,7 @@ Tier C, n = 50, `latent_off` arm, all on the same seeds:
 | kernel | fractional width | median `u` | median-of-medians | bias | oc |
 |---|---|---|---|---|---|
 | flat 1e-4 | ~0% | 0.401 | 68.63 | **+0.89** | 1.449 |
-| `s = 0.25` | ~5% | (pending) | | | |
+| `s = 0.25` | ~5% | 0.292 | 69.66 | **+1.92** | 1.224 |
 | **`s = 0.50`** | **~10% = PRODUCTION** | **0.251** | **70.38** | **+2.64** | 1.322 |
 | `s = 1.00` | ~21% (faithful mock) | 0.251 | 70.56 | **+2.82** | 1.283 |
 
@@ -2219,3 +2219,32 @@ monotonically with the kernel (1.449 -> 1.322 -> 1.283) purely because the quote
 `sigma` grows with it (3.74 -> 5.37 -> 6.24).  A wider kernel makes each posterior
 genuinely less informative, which flatters every ratio-to-`sigma` gate -- the same
 structural point recorded for Tier D, seen here as a clean monotone trend.
+
+
+### The completed curve, and where the saturation actually sets in
+
+| fractional width | median `u` | bias (km/s) | oc | quoted `sigma` |
+|---|---|---|---|---|
+| ~0% | 0.401 | +0.89 | 1.449 | 3.74 |
+| ~5% | 0.292 | +1.92 | 1.224 | 4.96 |
+| **~10% (production)** | **0.251** | **+2.64** | 1.322 | 5.37 |
+| ~21% (faithful mock) | 0.251 | +2.82 | 1.283 | 6.24 |
+
+The 5% point sharpens the reading and corrects it: the bias is **not** flat below
+production's width -- it climbs steeply from 0 to 10% (`+0.89 -> +1.92 -> +2.64`,
+i.e. roughly linear in the width over that range) and only then flattens
+(`+2.64 -> +2.82` for another doubling).  **The knee sits essentially AT
+production's own fractional width.**
+
+That is the least convenient place for it to be.  Production is at the point where
+the effect has just finished growing: it gets none of the relief a smaller kernel
+would buy, and no protection from the saturation either, since the saturation is
+what caps the mock's 21% at only 7% more than production's 10%.  A survey with a
+5% kernel would see roughly a third less bias; production does not.
+
+The dispersion is NOT monotone once the 5% point is in (1.449, 1.224, 1.322,
+1.283), so the earlier "falls monotonically with the kernel" reading was an
+artifact of having only three points -- at n = 50 these four values sit within
+about their own scatter and the honest statement is that the dispersion is
+insensitive to the kernel, while the quoted `sigma` grows steadily with it
+(3.74 -> 4.96 -> 5.37 -> 6.24) as it must.
