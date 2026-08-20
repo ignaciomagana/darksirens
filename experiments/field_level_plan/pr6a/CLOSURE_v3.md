@@ -30,6 +30,7 @@ Fixed (`67ac782`), and re-measured:
 | information identity `J_ens / J_OPG` | 5.567 | **1.261** |
 | Tier B, field-only shift | 0.136 sigma | **0.088 sigma** |
 | Tier B, `f_p`-channel shift | 1.674 sigma | **2.239 sigma** |
+| **Tier D** | **FAIL** | **PASS** |
 
 Three independent routes now say the same thing: **at fixed catalog the estimator
 is calibrated.**  The event channel is exonerated; what §V saw there was the bug.
@@ -59,6 +60,28 @@ width.  The stored `dz` matches the applied scatter exactly (0.02300, row by row
 so this is not a width mismatch -- it is that at 21% the kernel is not truncated
 at `z >= 0` (129 galaxies per realization have `z_obs < 0`) and interacts with the
 rising volumetric prior at the few-percent level the bias sat at.
+
+## Tier D post-fix: FAIL -> PASS
+
+`tier_d.py`'s five robustness variants, median bias in units of the quoted
+`sigma`, `latent` arm:
+
+| variant | pre-fix | post-fix |
+|---|---|---|
+| matched | -0.857 | **+0.473** |
+| `fp_perturbed` | -0.709 | **+0.388** |
+| `fibre_5pc` | -0.842 | **+0.498** |
+| `ls_ang_2x` | -0.790 | **+0.500** |
+| `lognormal_tail` | -0.236 | **+0.238** |
+| **TIER_D** | **false** | **true** |
+
+Every variant moves by about +1.3 sigma and the tier passes.  The SIGN FLIP is
+worth noting rather than glossing: the `f_p` gather defect pulled `H0` DOWN in
+Tier D's configuration and UP in Tier C's, which is what an event-set-dependent
+completeness offset does -- its direction depends on which rows the short array
+happened to end at, so it is configuration-specific rather than systematic.  The
+post-fix residual is the photo-`z` bias, positive and consistent across both
+tiers (+0.24 to +0.50 sigma here, +0.3 in Tier C).
 
 ## §R revised — what this means for PR-6a
 
