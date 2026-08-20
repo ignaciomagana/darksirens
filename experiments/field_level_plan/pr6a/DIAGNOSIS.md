@@ -1751,3 +1751,57 @@ finding in a row whose scope is the validation mock rather than the production
 analysis -- and taken together with the `f_p` gather bug (which barely fired on
 production's near-complete compact view) it means **Tier C was, in the end,
 measuring its own mock twice over**.
+
+
+# THE SPEC-z REBUILD: the bias closes, the dispersion does not
+
+The mock rebuilt with `SIGMA_Z_CAT = 1e-4` (DESI-like) and `world16.SIGMA_Z`
+tracking it, so the shell response and the catalog agree.  Tier A and Tier C at
+n = 50, against the photo-`z` post-fix run on the same seeds:
+
+| | photo-`z` (n=47) | **spec-`z`** `latent_off` | **spec-`z`** `latent` |
+|---|---|---|---|
+| median `u` (0.5 = unbiased) | 0.323 | **0.401** | **0.474** |
+| median-of-medians (truth 67.74) | 69.99 | **68.63** | **67.93** |
+| overconfidence | 1.508 | 1.449 | 1.396 |
+| coverage at 90% | 0.64 | **0.82** | **0.80** |
+| coverage at 68% | 0.43 | 0.54 | 0.52 |
+
+**Tier A passes** (slope 0.9984, representable 0.9997).
+
+**The bias is closed.**  `u` moves from 0.323 to 0.401/0.474 and the
+median-of-medians lands at 68.63 and **67.93** against a truth of 67.74 -- the
+latent arm is within 0.2 km/s.  That is the prediction `gate_specz` made, now
+confirmed on the full realistic survey rather than on an idealized one.
+
+**The dispersion is not.**  Overconfidence stays at 1.40-1.45 and 90% coverage at
+0.80-0.82 against a nominal 0.90, so `TIER_C` is still `false`.  Note what
+changed underneath: the quoted `sigma` fell from 6.40 to **3.74** -- spectroscopic
+redshifts make each posterior far tighter -- and the scatter fell with it, from
+9.66 to 5.42.  The RATIO barely moved.  A residual that survives a 1.7x change in
+the interval's own scale is not a mis-set width; it is the catalog-realization
+variance the analysis does not propagate, which is exactly where the post-fix
+variance split localized it.
+
+## Two errors of mine on the way, both caught by measurement
+
+**1. `SIGMA_Z_CAT = 0.003` was the wrong value, and I chose it for a bad reason.**
+I set it to "the value production applies", but production applies `sigma_kde =
+0.003` as the ANALYSIS's smoothing on top of a nearly exact catalog redshift.
+Since `sig_eff = sqrt(dz^2 + sigma_kde^2)`, setting the catalog's own scatter to
+0.003 makes the kernel `sqrt(2) x 0.003` -- **41% over-wide**, replacing one
+mismatch with another.  Measured before I caught it: overconfidence 1.603 and 90%
+coverage 0.53 at n = 17, no better than photo-`z`.  Kept as
+`sz003_tier_c_partial.json`.
+
+**2. I read stale results and reported them.**  `tier_c.py` writes its output
+INCREMENTALLY to the same path, and I relaunched without deleting the killed
+run's file.  A wait condition of "at least 20 rows" was satisfied instantly by
+the dead run's leftovers, and I reported "spec-`z` at 1e-4 gives overconfidence
+1.352, coverage 0.75" -- which was the 0.003 run's data.  The real 1e-4 numbers
+are the table above.
+
+**Both hazards are worth naming as procedure**: an incremental writer plus a
+row-count wait condition is a stale-read trap, and the fix is to delete the
+output before relaunching; and when a quantity enters in quadrature, matching the
+mock to the ANALYSIS's total is not the same as matching it to the TRUTH.
