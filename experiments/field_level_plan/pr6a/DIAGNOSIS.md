@@ -2090,3 +2090,55 @@ the catalog to see what the DATA carries.  The number was one `h5py` call away
 for the entire campaign, and the scope claim that rested on it -- the reassuring
 half of two days' work -- was false.  When a conclusion turns on "our survey is
 X", measure X on the artifact.
+
+
+# THE MOCK AT PRODUCTION'S `dz`: the bias is a PRODUCTION-scale effect
+
+The mock rebuilt so every galaxy draws its own `dz` from production's empirical
+distribution -- verified against the target at every quantile (median 0.02265 vs
+0.02265, q25 0.00009 vs 0.00009, q75 0.03986 vs 0.03990, q90 0.05632 vs 0.05643,
+spec-`z` fraction 0.271 vs 0.270).  This is the mock the line actually needs, and
+neither of the two earlier attempts was it.
+
+Tier C, n = 50, against the two wrong configurations on the same seeds:
+
+| kernel | `u` | median-of-medians | oc | cov90 |
+|---|---|---|---|---|
+| flat 0.023 (photometric) | 0.323 | 69.99 (+2.25) | 1.508 | 0.64 |
+| flat 1e-4 (the "spec-`z`" rebuild) | 0.401 / 0.474 | 68.63 / 67.93 | 1.449 / 1.396 | 0.82 / 0.80 |
+| **production's distribution** | **0.251 / 0.305** | **70.56 / 69.59 (+2.82 / +1.85)** | **1.283 / 1.268** | **0.74 / 0.80** |
+
+**The bias is not only still present on the faithful mock, it is the LARGEST of
+the three** -- `u` = 0.251 in the no-field arm, a median-of-medians 2.8 km/s above
+truth.  That is the opposite of where the spec-`z` detour pointed, and it follows
+directly from the retraction above: 73% of production's galaxies are photometric,
+so a faithful mock inherits most of the photometric bias, and the bimodal
+distribution's long tail (q90 = 0.056, more than twice the flat 0.023) adds to it.
+
+**So the photo-`z` bias is a production-scale effect, of measured size.**  On this
+mock it is `+2.8 km/s` in the arm with no field, `+1.9` with.  Production's hosts
+sit at a higher median `z` (0.237 vs the mock's 0.11), which makes its FRACTIONAL
+kernel smaller and should reduce the effect -- so this is an upper bound rather
+than a transfer, and it is the first quantified one.
+
+**The dispersion improves and still fails**: overconfidence 1.27-1.28 (from 1.51
+at flat 0.023), coverage 0.74-0.80 against 0.90.  Consistent with the
+decomposition already established -- an irreducible ~1.22 from catalog-realization
+variance the analysis does not propagate, plus a little from completeness.
+
+## What this settles about the campaign
+
+Three mock configurations have now been run, and the ONE that matches production
+is the one nobody had built:
+
+* flat 0.023 -- what the mock always had.  Close to production's median by
+  accident, but treats a bimodal distribution as a point.
+* flat 1e-4 -- built on my false "production is spectroscopic" premise.  Made the
+  mock two orders more precise than the survey, and produced the reassuring
+  answer.
+* **production's distribution** -- the faithful one, and the least reassuring.
+
+The reassuring result was the artifact.  That is worth stating plainly, because
+the sequence -- measure a defect, "fix" it, watch the numbers improve, conclude
+the defect was the mock's -- is exactly what a wrong premise looks like from the
+inside.
