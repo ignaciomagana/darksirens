@@ -1698,3 +1698,56 @@ The check that would have caught it immediately is the one that did catch it --
 `Neff`, which the generator already computes with `p_fid/pdraw` and which was
 sitting in `truth.json` all along at 1,953 for the wrong weight against 37,111
 for the right one.
+
+
+# THE BIAS IS THE PHOTO-z KERNEL, and both halves of Tier C now close
+
+One knob, one answer.  Set the catalog's redshift-error floor to zero -- a
+SPECTROSCOPIC catalog, `z_obs == z_true`, kernel at its 1e-4 numerical floor --
+and hold everything else at the ideal-complete configuration, so `SIGMA_Z` is the
+only difference:
+
+| | photo-`z` ON | **spec-`z`** |
+|---|---|---|
+| median `u` (0.5 = unbiased) | 0.277 | **0.449** |
+| median-of-medians | +3.00 km/s | **+0.42 km/s** |
+| overconfidence | 1.714 | **1.224** |
+| coverage at 90% | 0.62 | **0.88** |
+
+**The bias essentially vanishes and the coverage essentially closes.**  So the
+residual is the catalog's photo-`z` treatment -- and it explains BOTH halves at
+once, which no earlier candidate did.
+
+The mechanism is not a width mismatch: the stored `dz` is `0.02300`, exactly the
+scatter applied, verified row by row.  It is that `SIGMA_Z = 0.023` at a median
+host `z` of 0.11 is a **21% fractional** width, and at that width two things bite
+which a matched width does not fix -- the kernel is not truncated at `z >= 0`
+(129 galaxies per realization have `z_obs < 0`, and a Gaussian centred below zero
+can only put mass at higher `z`), and a 21% kernel convolved against the steeply
+rising volumetric prior is where the direction of the convolution matters at
+exactly the few-percent level the bias sat at.
+
+### A no-op run that had to be caught first
+
+The first spec-`z` attempt patched `W16.SIGMA_Z` and came back **identical to
+photo-`z` ON in all three statistics to three digits** -- median `u` 0.277,
++3.00 km/s, overconfidence 1.714.  That is not a null result, it is a run that
+did nothing: the knob is `make_mock.SIGMA_Z_CAT` (its own module constant, which
+becomes `SurveyConfig.redshift_error_floor`), and `W16.SIGMA_Z` only seeds it at
+import.  The catalog's `dz` was still `0.02300`, which is what caught it.
+
+**Three identical digits across three independent statistics is the signature of
+an intervention that did not fire**, and it is worth naming as a check: any
+"the knob does nothing" result should be confirmed by reading the artifact the
+knob was supposed to change, not by the summary statistics.
+
+### What this means for the scope of the whole diagnosis
+
+The photo-`z` scatter is a property of the MOCK's catalog, and the production
+catalog is DESI spectroscopy: the ingest line's own products carry
+`sigma_kde = 0.003` against the mock's 0.023, an order of magnitude smaller, and
+DESI redshifts are spectroscopic rather than photometric.  So this is the third
+finding in a row whose scope is the validation mock rather than the production
+analysis -- and taken together with the `f_p` gather bug (which barely fired on
+production's near-complete compact view) it means **Tier C was, in the end,
+measuring its own mock twice over**.
