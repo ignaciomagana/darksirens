@@ -1,0 +1,27 @@
+{
+ "sources": [
+  "/hildafs/projects/phy220048p/share/legacysurvey/ls_dr9north_m21_v2.h5",
+  "/hildafs/projects/phy220048p/share/legacysurvey/ls_dr10south_m21.h5"
+ ],
+ "n_occupied_pixels": 127258,
+ "mth_eff_quantiles_10_50_90": [
+  21.0,
+  21.0,
+  21.0
+ ],
+ "frac_pixels_shallower_than_retention": 0.0007178750897343862,
+ "stratum_edges": [
+  19.025,
+  21.0,
+  21.0,
+  21.0,
+  21.0
+ ],
+ "note": "m5sigma is a point-source depth proxy; detection at the r<=21 retention cut is ~complete wherever median m5 > 21, so mth_eff = min(21, median m5). q99_mag flags pixels whose faint tail stops short of the cut.",
+ "created_utc": "2026-08-09T03:12:25.308848+00:00",
+ "darksirens_git_sha": "676f4e635c35dd331dad9753ad2abef6debc04cc",
+ "DARKSIRENS_ZMAX": "0.75",
+ "argv": [
+  "build_mth_map.py"
+ ]
+}

@@ -1,0 +1,15 @@
+{
+ "source": "theta_hat (machinery check)",
+ "gate": {
+  "mode": "fractional",
+  "max_abs_resid_gate_range": 0.13999893756657955,
+  "max_abs_resid_z_lt_005": 0.381986457431688
+ },
+ "created_utc": "2026-08-10T00:32:36.765307+00:00",
+ "darksirens_git_sha": "76705ed0d71be4a9a0df5178bc82fd80c4023dac",
+ "DARKSIRENS_ZMAX": "0.75",
+ "argv": [
+  "ppd_dndz.py",
+  "--theta-hat"
+ ]
+}

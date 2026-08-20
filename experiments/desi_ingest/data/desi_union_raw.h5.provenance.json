@@ -1,0 +1,51 @@
+{
+ "source": "/hildafs/projects/phy230014p/magana/desi_darksirens_selection/final/experiments/experiment_loa_rebuild/inputs/rebuild_loa_faint_pixelate_input.h5",
+ "source_sha256": "42e91b594572cfba716d0128ea3dcb24924a6c63e573078e7c4184fe24c0eaaa",
+ "source_attrs": {
+  "experiment": "loa_rebuild",
+  "floor": "faint",
+  "rows": "22787835",
+  "variant": "loa_faint"
+ },
+ "cut": "isfinite(M_APP) & M_APP <= 21.0",
+ "n_source": 22787835,
+ "n_kept": 22787566,
+ "n_cut": 269,
+ "cut_rows_by_survey_code": {
+  "0": 266,
+  "2": 3
+ },
+ "side_split_rows": {
+  "south_end": 17907592,
+  "north_end": 22787567
+ },
+ "kept_by_stratum": {
+  "south": 17907591,
+  "north": 4879975
+ },
+ "kept_by_survey_code": {
+  "0": 4967832,
+  "1": 16630351,
+  "2": 1189383
+ },
+ "z_range": [
+  0.003533781,
+  0.3
+ ],
+ "zerr_range": [
+  2.5069986759864417e-07,
+  0.099999875
+ ],
+ "app_mag_quantiles_50_99_999_max": [
+  19.277489,
+  20.71568,
+  20.923307,
+  20.999998
+ ],
+ "created_utc": "2026-08-09T02:52:10.285599+00:00",
+ "darksirens_git_sha": "e8d5035c3562f86ce83497572844a213aa14801c",
+ "DARKSIRENS_ZMAX": "0.75",
+ "argv": [
+  "ingest_loa_rebuild.py"
+ ]
+}

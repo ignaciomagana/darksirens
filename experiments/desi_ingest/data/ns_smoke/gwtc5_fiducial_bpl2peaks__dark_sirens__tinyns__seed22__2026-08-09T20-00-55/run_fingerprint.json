@@ -1,0 +1,355 @@
+{
+  "schema_version": 1,
+  "digest": "7f7d9d6d8ef2c6f9148c3e55c8b3eff6e8b384e49cc8610b4b2c19487f54b2f5",
+  "semantic": {
+    "labels": [
+      "H0",
+      "M0hat",
+      "sigma_M"
+    ],
+    "lower_bound": [
+      20.0,
+      -23.0,
+      0.05
+    ],
+    "upper_bound": [
+      140.0,
+      -18.0,
+      3.0
+    ],
+    "prior_kinds": [
+      [
+        "uniform",
+        null,
+        null
+      ],
+      [
+        "normal",
+        -20.309781546689074,
+        0.00015954919540508018
+      ],
+      [
+        "normal",
+        0.7144467727667887,
+        0.00011993825846692052
+      ]
+    ],
+    "prior_overrides": {
+      "H0": [
+        20.0,
+        140.0
+      ]
+    },
+    "fixed_parameter_values": {
+      "Om0": 0.3075,
+      "sigma_kde": 0.003,
+      "log10n0": -2.318433420538896,
+      "delta": 0.9401786996818476,
+      "m_lim": 21.0
+    },
+    "options": {
+      "allow_unverified_shared_lss_members": false,
+      "block_size_static_state_bytes": 10178244704,
+      "bright_siren_sky_marginalized": false,
+      "c_mode": "selection",
+      "catalog_sky_weighting": "field",
+      "catalog_sky_weighting_source": "explicit",
+      "complete_empty_pixel_policy": "zero",
+      "completion_validation_pixels": 64,
+      "counterpart": null,
+      "counterpart_dz": 0.0001,
+      "counterpart_nside": 1,
+      "dlogz": 0.1,
+      "drop_full_catalog": false,
+      "expected_sampled_labels": [
+        "H0",
+        "M0hat",
+        "sigma_M"
+      ],
+      "fix_cosmology": false,
+      "fix_de": true,
+      "fix_population": true,
+      "fix_survey": false,
+      "fixed_cosmology": false,
+      "fixed_de": true,
+      "fixed_parameter_values": {
+        "Om0": 0.3075,
+        "sigma_kde": 0.003,
+        "log10n0": -2.318433420538896,
+        "delta": 0.9401786996818476,
+        "m_lim": 21.0
+      },
+      "flows_chieff_amax": 0.99,
+      "flows_grid_nm": 512,
+      "flows_grid_nq": 256,
+      "flows_nsamp": 16384,
+      "flows_on_mismatch": "error",
+      "flows_pattern": "*/*_flow.npz",
+      "flows_pe_cosmology": "67.74,0.3089",
+      "flows_seed": 42,
+      "flows_support_margin": 0.25,
+      "flows_support_nsamples": 4096,
+      "flows_wfull": 0.05,
+      "gw_flows_path": null,
+      "gw_path": "/hildafs/projects/phy230014p/magana/desi_darksirens_selection/final/experiments/experiment_loa_rebuild/inputs/gwsamples_44.h5",
+      "gwselection_path": "/hildafs/projects/phy230014p/magana/desi_darksirens_selection/final/experiments/experiment_loa_rebuild/inputs/selection_betaS_v2_loaFaint_marg_s0495_noom.h5",
+      "kde_window": null,
+      "kde_window_nsigma": null,
+      "kernel_gl_nodes": null,
+      "lss_completion": null,
+      "lss_completion_active": false,
+      "lss_completion_active_by_catalog": [
+        false
+      ],
+      "lss_completions": [],
+      "lss_marginalize": false,
+      "mark_model": "none",
+      "mark_names": [],
+      "mark_names_by_catalog": [
+        []
+      ],
+      "marks": null,
+      "materialize_redshift_prior_state": false,
+      "max_likelihood_variance": 1.0,
+      "max_samples": 400,
+      "n_catalogs": 1,
+      "nlive": 100,
+      "norm_nchi": null,
+      "norm_nmass": null,
+      "norm_nq": null,
+      "nuts_chain_method": "sequential",
+      "nuts_chains": 1,
+      "nuts_init_seed_offset": 100000,
+      "nuts_init_tries": 32,
+      "nuts_max_tree_depth": 10,
+      "nuts_samples": 1000,
+      "nuts_target_accept": 0.8,
+      "nuts_warmup": 500,
+      "pairing_norm_grid": null,
+      "pdet_chieff_amax": 0.99,
+      "pdet_cosmology": "67.9,0.3065",
+      "pdet_flow_path": null,
+      "pdet_nsamp": 1000000,
+      "pdet_seed": 42,
+      "pop_model": "gwtc5_fiducial_bpl2peaks",
+      "prior_overrides": {
+        "H0": [
+          20.0,
+          140.0
+        ]
+      },
+      "redshift_prior_barrier": "auto",
+      "redshift_prior_barrier_resolved": "auto -> off for TinyNS JAX rwalk",
+      "resolved_survey_z_depths": [
+        0.3
+      ],
+      "sampler": "tinyns",
+      "seed": 22,
+      "sel_batch_size": null,
+      "selection_family": "gaussian",
+      "selection_fit": "data/selection_fit_union.json",
+      "selection_fit_paths": [
+        "data/selection_fit_union.json"
+      ],
+      "selection_fits": [
+        {
+          "catalog": 1,
+          "path": "data/selection_fit_union.json",
+          "family": "gaussian",
+          "theta": {
+            "m_lim": 21.0,
+            "M0hat": -20.309781546689074,
+            "sigma_M": 0.7144467727667887
+          },
+          "k_corr_coeffs": [
+            1.13465,
+            -4.88963,
+            8.58828
+          ],
+          "strata_fit": null,
+          "strata_struct": null,
+          "stratum_map": null,
+          "stratum_map_sha256": null,
+          "prior": {
+            "M0hat": [
+              -20.309781546689074,
+              0.00015954919540508018
+            ],
+            "sigma_M": [
+              0.7144467727667887,
+              0.00011993825846692052
+            ]
+          }
+        }
+      ],
+      "selection_kcorr_by_catalog": [
+        [
+          1.13465,
+          -4.88963,
+          8.58828
+        ]
+      ],
+      "selection_neff_guard": "auto",
+      "selection_neff_soft_guard": false,
+      "selection_prior": {
+        "M0hat": [
+          -20.309781546689074,
+          0.00015954919540508018
+        ],
+        "sigma_M": [
+          0.7144467727667887,
+          0.00011993825846692052
+        ]
+      },
+      "selection_strata_by_catalog": [
+        null
+      ],
+      "shared_beta": true,
+      "shared_gamma": true,
+      "shared_spin": true,
+      "sky_model": "isotropic",
+      "stratum_map": null,
+      "survey_path": "data/pixelated_n64/catalog_pixelated_nside_64.h5",
+      "survey_paths": [
+        "data/pixelated_n64/catalog_pixelated_nside_64.h5"
+      ],
+      "survey_z_depth": null,
+      "tinyns_allow_unused_bound": null,
+      "tinyns_batch_size": null,
+      "tinyns_bound": null,
+      "tinyns_bound_enlargement": null,
+      "tinyns_bound_failure_rebuild_threshold": null,
+      "tinyns_bound_jitter": null,
+      "tinyns_bound_max_draws": null,
+      "tinyns_bound_rebuild_on_failure": null,
+      "tinyns_bound_seed_kernel": null,
+      "tinyns_bound_update_interval": null,
+      "tinyns_checkpoint_path": null,
+      "tinyns_checkpoint_path_out": null,
+      "tinyns_fused_bound_rwalk": null,
+      "tinyns_jax_block_size": null,
+      "tinyns_jax_vectorized": null,
+      "tinyns_kernel": "jax",
+      "tinyns_max_attempts": null,
+      "tinyns_min_accepts": null,
+      "tinyns_multi_bound_enlargement": null,
+      "tinyns_multi_bound_max_ellipsoids": null,
+      "tinyns_multi_bound_min_points": null,
+      "tinyns_multi_bound_overlap_correction": null,
+      "tinyns_multi_bound_split_threshold": null,
+      "tinyns_preset": "recommended",
+      "tinyns_progress_interval": null,
+      "tinyns_replacement_chain_schedule": null,
+      "tinyns_replacement_chains": null,
+      "tinyns_resolved_config": {
+        "preset": "recommended",
+        "nlive": 100,
+        "dlogz": 0.1,
+        "max_samples": 400,
+        "seed": 22,
+        "show_progress": true,
+        "sample": "rwalk",
+        "kernel": "jax",
+        "vectorized": false,
+        "max_attempts": 10000,
+        "walks": 5,
+        "step_scale": 0.1,
+        "batch_size": 128,
+        "min_accepts": 1,
+        "replacement_chains": 1,
+        "replacement_chain_schedule": null,
+        "rwalk_proposal": "isotropic",
+        "bound": "none",
+        "bound_enlargement": 1.25,
+        "bound_update_interval": 100,
+        "bound_jitter": 1e-12,
+        "bound_max_draws": null,
+        "multi_bound_max_ellipsoids": 64,
+        "multi_bound_min_points": null,
+        "multi_bound_split_threshold": 0.5,
+        "multi_bound_enlargement": null,
+        "multi_bound_overlap_correction": true,
+        "rwalk_seed": "live",
+        "rwalk_seed_fallback": true,
+        "bound_seed_kernel": "python",
+        "allow_unused_bound": false,
+        "fused_bound_rwalk": false,
+        "bound_rebuild_on_failure": true,
+        "bound_failure_rebuild_threshold": 10,
+        "jax_vectorized": false,
+        "jax_block_size": 32,
+        "checkpoint_path": null,
+        "checkpoint_interval": 100,
+        "resume_from": null,
+        "checkpoint_path_out": null,
+        "progress_interval": 100,
+        "explicit": [
+          "sample",
+          "kernel"
+        ]
+      },
+      "tinyns_resume_from": null,
+      "tinyns_rwalk_proposal": null,
+      "tinyns_rwalk_seed": null,
+      "tinyns_rwalk_seed_fallback": null,
+      "tinyns_sample": "rwalk",
+      "tinyns_step_scale": null,
+      "tinyns_vectorized": null,
+      "tinyns_walks": null,
+      "universe_model": "dark_sirens",
+      "use_LSS": false,
+      "validate_completion": false
+    },
+    "data_files": {
+      "gw_path": {
+        "bytes": 70425216,
+        "sha256": "8bc4d2e8be9127e83142649ee30aafe0326d78e266dadc293ef55b65af03acd8"
+      },
+      "gwselection_path": {
+        "bytes": 72651948,
+        "sha256": "1ad1a65934fffa405ac5544af29da5f52a784af4213152e1fb738831238679ab"
+      },
+      "selection_fit": {
+        "bytes": 891,
+        "sha256": "fb583546de06833ad91e82d8b9d23b5458e863f98d036a88c9656c72e9f83807"
+      },
+      "selection_fit_paths": {
+        "bytes": 891,
+        "sha256": "fb583546de06833ad91e82d8b9d23b5458e863f98d036a88c9656c72e9f83807"
+      },
+      "survey_path": {
+        "bytes": 479637386,
+        "sha256": "286bc0f9123f2e6ddbd009059b8cbe33aae21606ad6f18e862b11ed149cd8563"
+      },
+      "survey_paths": {
+        "bytes": 479637386,
+        "sha256": "286bc0f9123f2e6ddbd009059b8cbe33aae21606ad6f18e862b11ed149cd8563"
+      }
+    },
+    "normalization_grid": {
+      "n_mass": 500,
+      "n_q": 200,
+      "n_chi": 200,
+      "pairing_m1_grid": null,
+      "m_lo": 1.0,
+      "m_hi": 200.0,
+      "pairing_m_hi": 200.0,
+      "q_lo": 0.0,
+      "q_hi": 1.0,
+      "chi_lo": -1.0,
+      "chi_hi": 1.0
+    }
+  },
+  "advisory": {
+    "code": {
+      "darksirens_version": "0.0.1",
+      "git_sha": "76705ed0d71be4a9a0df5178bc82fd80c4023dac",
+      "git_dirty": false,
+      "git_branch": "master",
+      "gwcat_version": "0.1.0",
+      "gwcat_commit": "1c7cdbdc9721398628829dda8fdeb7a37ff40a04",
+      "tinyns_version": "0.1.0",
+      "tinyns_commit": "3f9e1b2537f32b59f17ee9ce68b2d725681a024c"
+    }
+  }
+}

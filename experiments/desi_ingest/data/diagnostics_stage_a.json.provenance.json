@@ -1,0 +1,14 @@
+{
+ "inputs": [
+  "desi_union_raw.h5",
+  "selection_fit_union.json",
+  "n0_calibration.json",
+  "/hildafs/projects/phy230014p/magana/desi_darksirens_selection/final/experiments/experiment_loa_rebuild/inputs/gwsamples_44.h5"
+ ],
+ "created_utc": "2026-08-09T03:45:00.664580+00:00",
+ "darksirens_git_sha": "676f4e635c35dd331dad9753ad2abef6debc04cc",
+ "DARKSIRENS_ZMAX": "0.75",
+ "argv": [
+  "diagnose_stage_a.py"
+ ]
+}
