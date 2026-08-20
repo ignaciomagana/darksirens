@@ -1891,3 +1891,76 @@ interpretable here: the table arm's 90% width is **53.6 km/s against latent's
 the Q ensemble's spread, not a cosmology measurement.  Comparing two arms whose
 widths differ 4x through a "shift in units of sigma" gate is measuring the
 denominator.
+
+
+# A FINDING AGAINST S-3 ITSELF: `f_p` x Q table DOUBLE-COUNTS the mask
+
+S-3 (PR #406) lifted the loader's refusal of `--per_pixel_completeness` alongside
+a Q table, on the grounds that the only thing missing was the `f_p`-weighted
+empty-pixel budget.  Tier B's `table_fp` arm -- the arm that refusal had made
+impossible, and which I added to exercise it -- says that reasoning was
+incomplete.
+
+On the spec-`z` mock, one realization (seed 7001), truth `H0 = 67.74`:
+
+| arm | median | 90% CI | width |
+|---|---|---|---|
+| `latent` | 69.65 | [62.5, 75.4] | 12.95 |
+| `table` (`f_p` OFF) | 116.22 | [83.6, 137.1] | 53.58 |
+| **`table_fp` (`f_p` ON)** | **41.24** | **[36.1, 46.3]** | **10.18** |
+
+`table_fp` is **confidently wrong**: its 90% interval EXCLUDES the truth by
+21 km/s, and it is the TIGHTEST arm in the run.  That is worse than `table`'s
+wide-and-wrong 116, because a narrow interval in the wrong place is what a
+consumer trusts.
+
+**The mechanism, measured.**  The Q table is fit to the catalog's OBSERVED counts,
+so it already carries the footprint.  On this catalog, at a low-`z` slice:
+
+    mean Q on-footprint   1.624   (1,854 pixels)
+    mean Q off-footprint  0.050   (1,218 pixels)      a 32x suppression
+    corr(Q, f_p)         +0.410
+
+So the missing-galaxy budget is multiplied by the mask TWICE -- once through
+`Q_p(z)`, which learned it from the counts, and once through `C_p = f_p C`.  The
+budget off-footprint is then suppressed by `~0.05 x 0` instead of `0`, and
+on-footprint by `f_p` on top of a Q that already absorbed it.
+
+**This is exactly the hazard the ORIGINAL refusal named, one term over.**  The
+loader's docstring said a per-pixel count-derived `C` already contains the mask
+loss, "multiplying would double-count it", and used that to require
+`c_mode` in {aggregate, selection} -- where `C` is parametric, so multiplying IS
+right.  What neither the docstring nor my change noticed is that `Q` is ALSO
+count-derived.  Moving the mask out of `C` did not move it out of `Q`.
+
+## What must change
+
+1. **#406/#407's capability should be gated, not shipped as-is.**  Admitting
+   `f_p` alongside a Q table is only safe for a Q table built to be `f_p`-aware --
+   i.e. one whose builder divided the mask out, or was fit on mask-corrected
+   counts.  Nothing stamps that property today, so the loader cannot check it.
+   The honest options: (a) re-refuse the pairing unless the Q artifact carries an
+   explicit `f_p_aware` stamp, (b) have `build_lognormal_completion` take the
+   depth map and divide the mask out, stamping that it did, or (c) keep the
+   pairing but require the operator to assert it via a flag.  (a) is the smallest
+   correct change and (b) is the right one.
+2. **The production `q_fp` number is affected.**  The S-3 production measurement
+   reported `q_fp` = 80.61 against `q_nofp` = 89.90 and read the -2.49 sigma shift
+   as "the mask matters on the Q line".  That shift is now partly or wholly the
+   DOUBLE-COUNT, not the mask, so **80.61 must not be quoted** and the
+   arm-selection question it was raising is void until (1) is settled.
+   `desi_full259/data/s3_footprint/RESULT.md` needs this caveat.
+3. **What is NOT affected**: the `f_p`-without-Q arms (`fp`, `latent`), because
+   there is no second mask channel.  The production headline 71.54 stands, and so
+   does the whole f_p-gather bug fix, which is independent.
+
+## The lesson, and it is uncomfortable
+
+I built the capability, wrote its tests, and pinned the arithmetic against a
+brute-force reference -- and all of that was correct.  What I did not do was ask
+whether the OTHER factor in the product already contained the thing I was
+multiplying in.  The unit tests could not catch it: they pin
+`Sum_empty Q_p (1 - f_p C)` against a hand-computed
+`Sum_empty Q_p (1 - f_p C)`.  Checking a formula against itself proves it is
+implemented, never that it is the right formula.  What caught it was running the
+arm end to end and looking at where `H0` landed.
