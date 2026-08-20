@@ -21,6 +21,19 @@ and ``counts`` are what ``darksirens.catalogs.depth_map.load_selection_fraction`
 consumes for the ``--per_pixel_completeness`` selection fraction
 ``f_p = 1 - masked_frac``.
 
+**What ``masked_frac`` actually is, and how it is biased.**  It is a
+SOURCE-COUNT fraction, ``(# sources with maskbits != 0) / (# sources)`` -- not an
+AREA fraction, which is what a completeness multiplying ``dN_exp ∝ apix`` wants.
+The two differ because masked regions yield systematically FEWER detected
+sources, so a source-weighted flag fraction UNDER-states the area lost and
+``f_p`` therefore OVER-states completeness, most where the masking is worst.
+The unbiased estimator is the standard one -- flag a RANDOM catalog over the same
+footprint and take the random-weighted fraction, which measures area by
+construction -- and it is not implemented here because this builder reads only
+the object catalogs.  Treat ``f_p`` as an upper bound on the surviving fraction,
+and note that the direction of the bias is the same as running with no mask at
+all, just smaller.
+
 Usage:
     python scripts/build_mth_map.py --sources north.h5 south.h5 \
         --out mth_map_nside128.h5 [--nside 128] [--m-retention 21.0]
@@ -33,6 +46,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import h5py
+import re
+
 import numpy as np
 
 CHUNK = 20_000_000
@@ -43,6 +58,19 @@ MAG_EDGES = np.linspace(18.0, 21.0, 61)
 def _accumulate(path: Path, npix: int, h_m5, h_mag, counts, masked) -> None:
     with h5py.File(path, "r") as f:
         pix_key = next(k for k in f.keys() if k.upper().startswith("HPX"))
+        # The column NAME carries its nside (e.g. HPX128_RING).  Reading an
+        # HPX128 column at --nside 64 used to pass silently: the `pix < npix`
+        # mask below simply DROPPED every pixel above 12*64^2, i.e. three
+        # quarters of the sky, and wrote a plausible-looking map with a wrong
+        # footprint.  The nside is right there in the key, so check it.
+        _m = re.search(r"HPX(\d+)", pix_key.upper())
+        if _m is not None and int(_m.group(1)) != int(nside):
+            raise ValueError(
+                f"column {pix_key!r} is indexed at nside {int(_m.group(1))} but "
+                f"this build is --nside {int(nside)}; the out-of-range pixels "
+                f"would be silently dropped (keeping only "
+                f"{(int(nside) / int(_m.group(1))) ** 2:.1%} of the sky). "
+                f"Re-run at the column's nside, or degrade the column first.")
         n = f[pix_key].shape[0]
         for lo in range(0, n, CHUNK):
             hi = min(lo + CHUNK, n)

@@ -166,8 +166,14 @@ def test_above_depth_logq_is_bit_zero():
 
 # ------------------------------------------------------- the eq. (4) identity
 
-def _budget_residual(plan, row_map, f_p, b):
-    """max_z |sum_p (1 - f_p C) Q_p / sum_p (1 - f_p C) - 1| over all members."""
+def _budget_residual(plan, row_map, f_p, b, clip=None):
+    """max_z |sum_p (1 - f_p C) Q_p / sum_p (1 - f_p C) - 1| over all members.
+
+    ``clip`` applies the ``+-_LOGQ_CLIP`` the LIKELIHOOD always applies
+    (``_member_q_eff_from_logq``).  ``None`` measures the unclipped object, which
+    is what the identity is proved for; the clipped one is what the normalizer
+    actually integrates, and the two are not the same number at large ``b``.
+    """
     c = _c_curve()
     on_fp = on_footprint_mask(row_map, N_FIT)
     w_fit = 1.0 - np.asarray(f_p)[:, None] * np.asarray(c)[None, :]
@@ -175,7 +181,10 @@ def _budget_residual(plan, row_map, f_p, b):
     for m in range(plan.n_draw):
         rho = _rho(plan, m, c, b)
         rows = plan.row_fac[m][jnp.asarray(row_map)]
-        Q = np.exp(np.asarray(latent_logq_rows(plan, rows, rho, b, on_fp)))
+        lq = np.asarray(latent_logq_rows(plan, rows, rho, b, on_fp))
+        if clip is not None:
+            lq = np.clip(lq, -clip, clip)
+        Q = np.exp(lq)
         got = (w_fit * Q[:N_FIT]).sum(axis=0)
         worst = max(worst, float(np.abs(got / w_fit.sum(axis=0) - 1.0).max()))
     return worst
@@ -191,7 +200,16 @@ def test_budget_identity_eq4(b):
     what ``rho`` is defined to enforce, and the +55% Jensen inflation the table
     path measured is removed by construction, not by a fitted correction.
 
-    Machine-exact, NOT a fitted tolerance.  Two things buy that, and this pin
+    Machine-exact on THIS FIXTURE, and the qualifier is load-bearing: the
+    ``1e-13`` below is bought partly by ``_tiny_plan``'s small amplitude
+    (``xi = rng.normal(...) * 0.4``).  On the real production anchor the same
+    unclipped residual is 1.7e-8 to 2.8e-8 -- five orders of magnitude above this
+    bound -- so this pin cannot detect a regression in the quantity at production
+    scale, and a companion measurement on the artifact is what would.  It is
+    still a true identity check of the two mechanisms below; it is not a
+    production-scale tolerance.
+
+    Two things buy the fixture-scale exactness, and this pin
     catches the loss of either: the builder computes the moments from the same
     f32 row factors the seam consumes (else a ``b|f|eps_f32`` residual,
     measured 2.7e-7 at the production corner), and the shipped 33-node
@@ -200,6 +218,14 @@ def test_budget_identity_eq4(b):
     """
     plan, row_map, f_p = _tiny_plan()
     assert _budget_residual(plan, row_map, f_p, b) < 1e-13
+    # The CONSUMED object: the likelihood clips logQ to +-_LOGQ_CLIP before
+    # exponentiating, and eq. (4) is not an identity on the clipped rows -- on
+    # the production anchor the clipped residual reaches 8.7e-4 at b = 4 against
+    # 4.9e-7 at b = 0.586.  Pinned two orders looser than the unclipped bound so
+    # the DIFFERENCE between the two is what a regression has to break, rather
+    # than the clip being silently absorbed into a single generous tolerance.
+    from darksirens.redshift.completion import _LOGQ_CLIP
+    assert _budget_residual(plan, row_map, f_p, b, clip=_LOGQ_CLIP) < 1e-11
 
 
 def test_budget_identity_off_node_is_bought_by_the_node_count():

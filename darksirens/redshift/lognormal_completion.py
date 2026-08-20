@@ -1206,7 +1206,13 @@ def load_lss_completion_hdf5(path: str) -> dict:
            "diagnostics": None, "realization_set_id": None,
            "member_content_sha256": None, "n_members": None,
            "budget_renormalized": None, "budget_monopole_logq": None,
-           "c_mode": None}
+           "c_mode": None,
+           # Whether the builder divided the survey mask OUT of Q.  A Q table is
+           # fit to OBSERVED counts, so by default it ABSORBS the footprint and
+           # must not then be multiplied by f_p (that applies the mask twice).
+           # No builder writes this attr yet, so it reads False for every
+           # existing artifact -- which is the correct, conservative answer.
+           "f_p_aware": False}
     with h5py.File(path, "r") as f:
         grp = f["lss_completion"] if "lss_completion" in f else f
         if "logq_map" in grp:
@@ -1222,6 +1228,8 @@ def load_lss_completion_hdf5(path: str) -> dict:
                 out[key] = val.decode() if isinstance(val, bytes) else str(val)
         if "n_members" in grp.attrs:
             out["n_members"] = int(grp.attrs["n_members"])
+        if "f_p_aware" in grp.attrs:
+            out["f_p_aware"] = bool(grp.attrs["f_p_aware"])
         if "budget_renormalized" in grp.attrs:
             out["budget_renormalized"] = bool(grp.attrs["budget_renormalized"])
         if "budget_monopole_logq" in grp.attrs:

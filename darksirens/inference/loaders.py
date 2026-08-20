@@ -1017,7 +1017,17 @@ def guard_unmasked_footprint_counts(opts, ngals, *, label="") -> None:
     if n_pix == 0:
         return
     empty_frac = float((ngals == 0).mean())
-    lam = float(ngals.sum()) / n_pix
+    # The Poisson reference must come from the OCCUPIED mean, not thefull-sky mean.
+    # Using ngals.sum()/n_pix puts the mask's own zeros into lambda, so the
+    # emptier the footprint the SMALLER lambda, the LARGER exp(-lambda), and the
+    # higher the bar the guard has to clear -- the hole raises its own detection
+    # threshold. It made the guard unfireable for any catalog with
+    # lambda <= ln(10) = 2.303, since then 10*exp(-lambda) >= 1 >= empty_frac at
+    # every empty fraction. Concretely: a pencil-beam survey with 20 gal/pixel
+    # over 12% of the sky gave lambda = 2.4 and passed silently at empty_frac
+    # 0.88 -- exactly the S-3 exposure this exists to catch.
+    occ = ngals[ngals > 0]
+    lam = float(occ.mean()) if occ.size else 0.0
     poisson_empty = float(np.exp(-lam))
     if not empty_frac > max(_UNMASKED_FOOTPRINT_EMPTY_FRAC,
                             10.0 * poisson_empty):
@@ -1091,11 +1101,15 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
       already contains the mask loss (multiplying would double-count it);
     * gaussian selection family — the truncated-Schechter disjointness
       argument (F2) has not been re-derived under ``f_p`` (PLAN §7 PR-2);
-    * a Q table is ADMITTED (S-3), deterministic or an ENSEMBLE: the field
-      normalizer builds ``Sum_{p empty} f_p Q_p(z)`` alongside the plain
-      empty-pixel budget, and its per-member twin alongside the per-member one.
-      Stratified selection is still refused — its budget would need per-stratum
-      ``f_p``-weighted twins;
+    * a Q table (deterministic OR ensemble) is REFUSED unless its artifact
+      stamps ``f_p_aware`` — the builder's assertion that it divided the survey
+      mask out.  Q is fit to OBSERVED counts, so it otherwise already contains
+      the footprint and ``C_p = f_p C`` applies the mask twice (measured: a
+      confidently wrong ``H0``, 26 km/s from truth).  The machinery for the
+      pairing exists — the field normalizer builds ``Sum_{p empty} f_p Q_p(z)``
+      and its per-member twin — and becomes usable the moment a mask-free Q
+      builder does.  Stratified selection is refused separately, for its
+      per-stratum twins;
     * K = 1 — the multitracer bundle loader does not thread ``f_p`` yet.
     """
     path = getattr(opts, "per_pixel_completeness", None)
@@ -1116,6 +1130,43 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
         raise NotImplementedError(
             "--per_pixel_completeness with stratified selection needs "
             "per-stratum f_p empty sums that are not implemented.")
+    # THE MASK MUST NOT BE APPLIED TWICE.  A Q table is fit to the catalog's
+    # OBSERVED counts, so unless its builder divided the survey mask out, Q
+    # already carries the footprint and C_p = f_p C applies the mask a SECOND
+    # time.  Measured on the closure mock's own Q table at a low-z slice: mean Q
+    # is 1.624 on-footprint against 0.050 off (a 32x suppression) with
+    # corr(Q, f_p) = +0.41, and the paired arm put H0 at 41.24 [36.1, 46.3]
+    # against a truth of 67.74 -- confidently wrong, and the TIGHTEST arm in the
+    # run.
+    #
+    # S-3 originally admitted this pairing because only the f_p-weighted
+    # empty-pixel budget seemed to be missing.  That was incomplete: the original
+    # refusal's own reasoning -- "a count-derived C already contains the mask
+    # loss" -- applies to Q as well, and moving the mask out of C did not move it
+    # out of Q.
+    #
+    # ``f_p_aware`` is the artifact's assertion that its builder removed the
+    # mask.  Nothing writes it yet (build_lognormal_completion never reads a
+    # depth map), so this refuses every Q table in existence -- the correct answer
+    # until a mask-free one is built.  The machinery for the pairing is already
+    # in place and becomes usable the moment that happens.
+    if data.get("lss_completion_logq") is not None:
+        prov = data.get("lss_completion_provenance") or {}
+        if not bool(prov.get("f_p_aware", False)):
+            dbl = (
+                "--per_pixel_completeness with a Q table DOUBLE-COUNTS the "
+                "survey mask: the table is fit to observed counts and so already "
+                "carries the footprint, and C_p = f_p C then applies it again "
+                "(measured: H0 = 41.24 [36.1, 46.3] against a truth of 67.74 on "
+                "the closure mock, the tightest arm in that run). Admissible "
+                "only for a Q artifact whose builder divided the mask out and "
+                "stamped /lss_completion.attrs['f_p_aware'] = True; no builder "
+                "does that yet. Drop one of the two, or pass "
+                "--allow_double_counted_mask to run the exposed configuration "
+                "deliberately.")
+            if not getattr(opts, "allow_double_counted_mask", False):
+                raise NotImplementedError(dbl)
+            print(f"    [f_p x Q] ALLOWED BY FLAG -- {dbl}")
     fit_path = getattr(opts, "selection_fit", None)
     if fit_path:
         from darksirens.redshift.selection import load_selection_fit_json

@@ -272,23 +272,32 @@ def test_loader_refusals(tmp_path):
         attach_selection_fraction_inputs(
             SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
                             n_catalogs=2), dict(data))
-    # S-3: a DETERMINISTIC Q table is now admitted (the f_p-weighted
-    # empty-pixel budget is built alongside the plain one), an ENSEMBLE is not.
+    # A Q table is REFUSED unless its artifact stamps f_p_aware: Q is fit to
+    # observed counts, so it already carries the footprint and C_p = f_p C would
+    # apply the survey mask TWICE (measured: H0 = 41.24 [36.1, 46.3] against a
+    # truth of 67.74 on the closure mock, the tightest arm in that run).
     det = dict(data, lss_completion_logq=np.zeros((48, int(zgrid.size))))
-    out_q = attach_selection_fraction_inputs(
-        SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
-                        n_catalogs=1, lss_completion="q.h5",
-                        selection_strata_by_catalog=None, selection_fit=None),
-        dict(det))
+    q_opts = lambda **kw: SimpleNamespace(  # noqa: E731
+        per_pixel_completeness=path, c_mode="selection", n_catalogs=1,
+        lss_completion="q.h5", selection_strata_by_catalog=None,
+        selection_fit=None, **kw)
+    with pytest.raises(NotImplementedError, match="DOUBLE-COUNTS"):
+        attach_selection_fraction_inputs(q_opts(), dict(det))
+    # ... admitted when the artifact asserts its builder removed the mask ...
+    aware = dict(det, lss_completion_provenance={"f_p_aware": True})
+    out_q = attach_selection_fraction_inputs(q_opts(), dict(aware))
     assert out_q["f_p_map"].shape == (48,)
+    # ... or when the operator takes the exposed configuration deliberately.
+    out_forced = attach_selection_fraction_inputs(
+        q_opts(allow_double_counted_mask=True), dict(det))
+    assert out_forced["f_p_map"].shape == (48,)
+    # An ENSEMBLE is count-derived too, so the same gate applies to it, and it
+    # passes once the artifact asserts the mask was removed.
     ens = dict(data,
                lss_completion_logq=np.zeros((48, int(zgrid.size))),
-               lss_completion_logq_members=np.zeros((3, 48, int(zgrid.size))))
-    out_e = attach_selection_fraction_inputs(
-        SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
-                        n_catalogs=1, lss_completion="q.h5",
-                        selection_strata_by_catalog=None,
-                        selection_fit=None), dict(ens))
+               lss_completion_logq_members=np.zeros((3, 48, int(zgrid.size))),
+               lss_completion_provenance={"f_p_aware": True})
+    out_e = attach_selection_fraction_inputs(q_opts(), dict(ens))
     assert out_e["f_p_map"].shape == (48,)
     with pytest.raises(NotImplementedError, match="strat"):
         attach_selection_fraction_inputs(
@@ -445,9 +454,14 @@ def test_sparse_all_sky_catalog_passes_the_guard():
     """Sparsity is not a footprint: empties the mean count predicts are fine."""
     from darksirens.inference.loaders import attach_selection_fraction_inputs
 
+    # lambda must be LARGE enough that the test discriminates: with the old
+    # full-sky lambda the threshold was 10*exp(-lambda), which exceeds 1 for any
+    # lambda <= ln(10) = 2.303, so a lambda = 0.7 catalog passed trivially and
+    # demonstrated nothing. At lambda = 3 the bar is 0.498, so a catalog that is
+    # ~5% empty by sparsity passes on its merits.
     rng = np.random.default_rng(1)
-    ngals = rng.poisson(0.7, size=3072)          # ~50% empty BY SPARSITY
-    assert (ngals == 0).mean() > 0.4
+    ngals = rng.poisson(3.0, size=3072)
+    assert 0.01 < (ngals == 0).mean() < 0.30
     data = dict(nside=16, ngals_catalog=ngals)
     attach_selection_fraction_inputs(_guard_opts(), dict(data))
 
@@ -530,6 +544,28 @@ def test_fp_without_a_q_ensemble_leaves_the_member_rows_none():
                     field_lss_q_fp_empty_sum=build_field_lss_q_fp_empty_sum(
                         logq, occ, n_pix, np.ones(n_pix)))
     assert _member_fp_empty_rows(em_fp_det) is None
+
+
+def test_the_guard_fires_on_a_pencil_beam_survey():
+    """A deep, narrow survey must trip the guard, and once did not.
+
+    The Poisson reference was built from `ngals.sum()/n_pix`, which counts the
+    mask's own zeros, so a bigger footprint hole gave a SMALLER lambda, a LARGER
+    `exp(-lambda)` and a HIGHER bar -- the hole raised its own detection
+    threshold. For any lambda <= ln(10) the bar exceeded 1 and the guard could
+    not fire at any empty fraction.
+    """
+    from darksirens.inference.loaders import guard_unmasked_footprint_counts
+    from types import SimpleNamespace
+
+    rng = np.random.default_rng(7)
+    ngals = np.zeros(3072, dtype=int)
+    beam = rng.choice(3072, size=int(0.12 * 3072), replace=False)
+    ngals[beam] = rng.poisson(20, size=beam.size) + 1   # deep, 12% of sky
+    assert (ngals == 0).mean() > 0.85
+    with pytest.raises(ValueError, match="FOOTPRINT"):
+        guard_unmasked_footprint_counts(
+            SimpleNamespace(c_mode="selection"), ngals)
 
 
 def test_the_footprint_guard_reaches_the_multitracer_path():

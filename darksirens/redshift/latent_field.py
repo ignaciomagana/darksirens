@@ -606,6 +606,19 @@ def interp_moments_b(table, b_nodes, b) -> jnp.ndarray:
     table = jnp.asarray(table)
     b_nodes = jnp.asarray(b_nodes, dtype=jnp.float64)
     n = b_nodes.shape[0]
+    # Axis -2 is the b axis ONLY for the (M_draw, n_b, N_z) layout sky_moments
+    # emits.  Hand it a 4-D dA/dB (M_draw, n_b, N_z, n_th) and axis -2 is N_z,
+    # so it would contract the wrong axis and return a silently wrong answer of
+    # a plausible shape.  No shipped caller does that -- the live path applies
+    # moments_at first, which contracts n_th -- so this is a trap rather than a
+    # bug, and the assertion is what keeps it that way.
+    if table.shape[-2] != n:
+        raise ValueError(
+            f"interp_moments_b contracts axis -2 as the b axis, but the table's "
+            f"axis -2 has length {table.shape[-2]} against {n} b nodes "
+            f"(table shape {tuple(table.shape)}). A 4-D dA/dB "
+            f"(M_draw, n_b, N_z, n_th) hits this: contract its theta axis first "
+            f"(moments_at), or move the b axis to -2.")
     w = jnp.asarray((-1.0) ** np.arange(n))
     w = w.at[0].mul(0.5).at[-1].mul(0.5)
     d = b - b_nodes                                          # (n_b,)

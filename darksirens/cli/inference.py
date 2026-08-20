@@ -1495,6 +1495,17 @@ def build_parser():
                          "stratified selection, and K>=2 (their empty-pixel "
                          "budgets need per-member/per-stratum f_p-weighted "
                          "twins not yet derived)."))
+    g.add_argument("--allow_double_counted_mask", action="store_true",
+                   help=("Permit --per_pixel_completeness together with a Q "
+                         "table whose artifact does not stamp f_p_aware. "
+                         "Refused by default because it applies the survey mask "
+                         "TWICE: a Q table is fit to observed counts and so "
+                         "already carries the footprint (measured on the closure "
+                         "mock: mean Q 1.624 on-footprint vs 0.050 off), and "
+                         "C_p = f_p C then applies it again. The paired arm put "
+                         "H0 at 41.24 [36.1, 46.3] against a truth of 67.74 -- "
+                         "confidently wrong, and the tightest arm in that run. "
+                         "Use only to reproduce that measurement."))
     g.add_argument("--allow_unmasked_footprint", action="store_true",
                    help=("Run c_mode aggregate|selection on a "
                          "footprint-limited catalog WITHOUT a per-pixel "

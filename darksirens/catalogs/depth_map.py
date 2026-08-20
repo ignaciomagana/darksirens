@@ -1,8 +1,9 @@
 """Per-pixel selection fraction ``f_p`` from a magnitude-threshold depth map.
 
 PR-2 of the field-level ladder (OWNER DECISION 4a): the per-pixel completeness
-is ``C_p(z) = f_p * C(z; theta_sel)`` with ``f_p = 1 - masked_frac`` — the
-fraction of the pixel's area not lost to survey mask bits — degraded from the
+is ``C_p(z) = f_p * C(z; theta_sel)`` with ``f_p = 1 - masked_frac`` — nominally
+the fraction of the pixel's area not lost to survey mask bits, though see the
+caveat below on what the shipped builder actually measures — degraded from the
 depth map's native nside to the catalog nside by equal-area (plain child)
 averaging.  ``f_p`` multiplies the SURVEY-CURVE completeness on both sides of
 the budget (the per-row missing density and the field normalizer), so the
@@ -10,6 +11,14 @@ missing-budget identity keeps holding row by row.
 
 The map artifact is ``build_mth_map.py``'s output
 (``mth_map_nside<N>.h5``: ``masked_frac``, ``counts``, ... RING ordering).
+
+CAVEAT ON ``masked_frac``: ``scripts/build_mth_map.py`` computes it as a
+SOURCE-COUNT fraction, ``masked / counts``, not an area fraction.  Since masked
+regions yield fewer detected sources, that UNDER-states the area lost, so ``f_p``
+OVER-states completeness -- an error in the same direction as running with no
+mask at all, only smaller.  An area-unbiased ``f_p`` needs a random catalog
+flagged over the same footprint; that is not implemented.  The consumer code here
+is agnostic to which estimator produced the number.
 """
 from __future__ import annotations
 
