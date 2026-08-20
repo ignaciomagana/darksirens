@@ -1805,3 +1805,37 @@ are the table above.
 row-count wait condition is a stale-read trap, and the fix is to delete the
 output before relaunching; and when a quantity enters in quadrature, matching the
 mock to the ANALYSIS's total is not the same as matching it to the TRUTH.
+
+
+## Tier D on the spec-`z` mock, and why its PASS/FAIL is not resolvable at n = 20
+
+| variant (`latent`) | pre-fix | photo-`z` post-fix | **spec-`z`** |
+|---|---|---|---|
+| matched | -0.857 | +0.473 | **+0.636** |
+| `fp_perturbed` | -0.709 | +0.388 | +0.551 |
+| `fibre_5pc` | -0.842 | +0.498 | +0.645 |
+| `ls_ang_2x` | -0.790 | +0.500 | +0.644 |
+| `lognormal_tail` | -0.236 | +0.238 | +0.136 |
+| **TIER_D** | false | **true** | **false** |
+
+Read at face value that is a regression, and it is not one.  The tier's own
+bootstrap standard error on the bias is **0.327 sigma** (photo-`z`) and **0.321
+sigma** (spec-`z`), against a gate at **0.5 sigma**.  So +0.473 and +0.636 differ
+by `0.16 +- 0.46` -- statistically indistinguishable, and both sit within one SE
+of the threshold they are being tested against.  **At n = 20 per variant this gate
+cannot resolve its own criterion**, and which side of 0.5 a run lands on is close
+to a coin flip.  The pre-fix `-0.8` values were outside that noise; these are not.
+
+A second reason the sigma-unit comparison misleads here: spec-`z` TIGHTENS every
+posterior (Tier C's mean quoted `sigma` falls from 6.40 to 3.74, a factor 1.7), so
+the same absolute bias in km/s becomes a larger fraction of `sigma`.  Tier C shows
+that directly -- its median-of-medians moves from 69.99 (photo-`z`, +2.25 km/s) to
+68.63 and **67.93** (spec-`z`, +0.89 and +0.19 km/s against a truth of 67.74).
+The absolute bias shrank by 2.5x to 12x while the sigma-unit bias barely moved,
+because the ruler shrank with it.
+
+**That is worth stating as a property of the tier ladder rather than of this run:
+gates expressed in units of the quoted `sigma` get HARDER as the analysis gets
+better.** A tier that passes at 6.4 km/s intervals and fails at 3.7 km/s
+intervals, with the same physical bias, is reporting the improvement as a
+failure.
