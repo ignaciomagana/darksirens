@@ -2172,3 +2172,50 @@ divided by a larger `sigma` is a smaller number.  The ladder's sigma-unit gates
 reward a less precise analysis, which is the structural point recorded above --
 it just now cuts in the reassuring direction, and should not be read as
 "production-`dz` is better".
+
+
+# ITEM 1: the bias vs the kernel's FRACTIONAL width -- it SATURATES
+
+Production's hosts sit at a median `z` of 0.237 against the mock's 0.11, so the
+same `dz` is a ~21% fractional kernel on the mock and ~10% on production.  Rather
+than move the mock's hosts (which would change the detection horizon and much
+else), scale the KERNEL: scaling production's empirical `dz` distribution by `s`
+gives fractional width `s x 21%` at the mock's own hosts, so **`s = 0.5` IS
+production's fractional width** -- a measurement, not an extrapolation.
+
+Tier C, n = 50, `latent_off` arm, all on the same seeds:
+
+| kernel | fractional width | median `u` | median-of-medians | bias | oc |
+|---|---|---|---|---|---|
+| flat 1e-4 | ~0% | 0.401 | 68.63 | **+0.89** | 1.449 |
+| `s = 0.25` | ~5% | (pending) | | | |
+| **`s = 0.50`** | **~10% = PRODUCTION** | **0.251** | **70.38** | **+2.64** | 1.322 |
+| `s = 1.00` | ~21% (faithful mock) | 0.251 | 70.56 | **+2.82** | 1.283 |
+
+**The effect saturates.**  Removing the kernel entirely is worth `+1.75 km/s`
+(2.64 -> 0.89), but halving the fractional width from 21% to 10% is worth only
+`+0.18` (2.82 -> 2.64) -- a tenth as much for the same factor-two change.  The
+`u` statistic says the same thing more starkly: 0.251 at BOTH 10% and 21%, moving
+only when the kernel is essentially removed.
+
+**So production gets no relief from its narrower fractional kernel.**  The
+reasoning I used when this was first found -- "production's fractional width is
+~10% against the mock's 21%, so smaller, not absent" -- implied a
+proportionate reduction.  It is not proportionate: at production's own fractional
+width the mock still shows **+2.6 km/s** in the arm with no field, 94% of the
+full-kernel effect.
+
+That makes the number quotable in a way the earlier bound was not:
+
+    the photo-z bias on this mock, AT PRODUCTION'S FRACTIONAL KERNEL WIDTH,
+    is +2.6 km/s (no field) / +1.8 km/s (with field)
+
+with the caveats that it is measured at the mock's `N_obs = 60` and nside 16, and
+that production's absolute `H0` scale differs, so it transfers as a scale rather
+than a subtraction.
+
+**The dispersion moves the other way**, and consistently: overconfidence falls
+monotonically with the kernel (1.449 -> 1.322 -> 1.283) purely because the quoted
+`sigma` grows with it (3.74 -> 5.37 -> 6.24).  A wider kernel makes each posterior
+genuinely less informative, which flatters every ratio-to-`sigma` gate -- the same
+structural point recorded for Tier D, seen here as a clean monotone trend.
