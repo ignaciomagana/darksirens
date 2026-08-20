@@ -1839,3 +1839,55 @@ gates expressed in units of the quoted `sigma` get HARDER as the analysis gets
 better.** A tier that passes at 6.4 km/s intervals and fails at 3.7 km/s
 intervals, with the same physical bias, is reporting the improvement as a
 failure.
+
+
+## The spec-`z` ladder, complete — and the residual decomposed
+
+`gate_complete` re-run on the spec-`z` mock isolates the last piece.  Three
+configurations, all at `SIGMA_Z_CAT = 1e-4`:
+
+| configuration | median `u` | overconfidence | coverage 90% |
+|---|---|---|---|
+| photo-`z`, realistic survey | 0.323 | 1.508 | 0.64 |
+| spec-`z`, realistic survey | 0.401 / 0.474 | 1.449 / 1.396 | 0.82 / 0.80 |
+| **spec-`z`, IDEAL COMPLETE survey** | **0.451** | **1.224** | **0.88** |
+
+(The ideal-complete row reproduces `gate_specz_v2`'s 0.449 / 1.224 / 0.88 to
+three digits at `dz = 1e-4` rather than 0, which is the check that 1e-4 is
+numerically "spectroscopic" as intended.)
+
+So the post-fix residual splits cleanly into two pieces, neither of which is a
+defect:
+
+* **~1.22 is irreducible on this mock even with an ideal complete catalog and
+  exact redshifts.**  What varies between those realizations is WHICH GALAXIES
+  EXIST -- the catalog realization -- and the analysis conditions on its catalog
+  as if exact.  That variance is not propagated into the quoted interval by
+  construction, so redrawing the catalog produces scatter the posterior never
+  claimed to cover.  It is the modelling choice every dark-siren analysis makes
+  when it treats the catalog as data.
+* **~0.2 more comes from survey incompleteness** (1.224 -> 1.40-1.45, coverage
+  0.88 -> 0.80-0.82), i.e. from the completeness model working on a real
+  magnitude limit and mask rather than on nothing.
+
+## Tier B on the spec-`z` mock
+
+    field only        (latent vs latent_off)        0.083 sigma
+    f_p channel       (latent_off vs nofp)          5.366 sigma
+    b_gal only        (latent_bgal vs latent)       0.0001 sigma
+    latent vs table                                 5.003 sigma   gate: < 0.3
+    ci90 width        latent 12.95   table 53.58
+    TIER_B: false
+
+The ladder's headline is unchanged and sharper than ever: **the field moves `H0`
+by 0.083 sigma and the `f_p` channel by 5.37.**  With spectroscopic redshifts the
+`f_p` channel's effect is larger still than the 2.24 sigma the photo-`z` mock
+gave, because the intervals are 1.7x tighter.
+
+`TIER_B` fails on its latent-vs-table gate, and that comparison is not
+interpretable here: the table arm's 90% width is **53.6 km/s against latent's
+13.0**, a factor 4.1.  The table arm carries a Q table built at
+`--n-members 8` on this catalog, and a 53 km/s interval on a 60-event mock is
+the Q ensemble's spread, not a cosmology measurement.  Comparing two arms whose
+widths differ 4x through a "shift in units of sigma" gate is measuring the
+denominator.
