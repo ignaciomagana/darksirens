@@ -2017,3 +2017,76 @@ change.
 geometry), then rebuild the production anchor and re-run the latent arm.  Until
 then the latent arm's 71.95 should be quoted as "the field, on an anchor built
 with a photometric kernel", not as the field's measured effect.
+
+
+# RETRACTION: THE PRODUCTION CATALOG IS PHOTOMETRIC, SO THE PHOTO-`z` FINDING IS NOT MOCK-ONLY
+
+Found by an independent review of PR #405, and it overturns the scope claim this
+file has been closing on.
+
+Everything above that says "the production line is DESI **spectroscopy**
+(`SIGMA_Z_CAT = 1e-4`, analysis `sigma_kde = 0.003`)" is **wrong**.  I mistook
+`sigma_kde` -- an analysis smoothing floor -- for the catalog's redshift
+uncertainty.  Measured directly on the catalog the 259-event line actually loads
+(`desi_ingest/data/pixelated_n64/catalog_pixelated_nside_64.h5`, 3.1M live
+galaxy entries):
+
+    median dz                    0.0238
+    p75 / p95 / p99      0.045 / 0.069 / 0.089
+    fraction dz < 1e-3 (true spec-z)   0.387
+    fraction dz > 0.02                 0.532
+    sigma_kde = 0.003 contributes      0.8% in quadrature
+
+**The production catalog carries essentially the same 0.023 the mock did**, and
+the ingest provenance says so itself (`zerr_range: [2.5e-7, 0.0999999]`).
+
+## What this retracts
+
+* **"Tier C was measuring its own mock, twice over"** -- withdrawn.  The `f_p`
+  gather bug was genuinely mock-scale (production's compact view is 49,143 of
+  49,152 rows), but the photo-`z` half is NOT: the production catalog has the same
+  kernel width that, on the mock, was the sole cause of the residual bias.
+* **The spec-`z` rebuild made the mock LESS faithful, not more.**  Setting
+  `SIGMA_Z_CAT = 1e-4` gave the validation mock redshifts two orders of magnitude
+  more precise than the survey it validates.  Its tiers now measure a
+  configuration production does not have.  The correct mock carries production's
+  `dz` DISTRIBUTION (median 0.024, p95 0.069), not a single spectroscopic value --
+  and not the old single 0.023 either, since a third of production's galaxies
+  really are spectroscopic.
+* **`build_latent_field.py`'s hard-coded 0.023 was approximately RIGHT**, and my
+  prescription to default `--sigma-z` to "the survey's actual value ~1e-4" would
+  have under-smoothed the count channel's forward model by ~100x -- replacing the
+  flagged defect with a worse one.  The flag is still right to exist (the value
+  was unstated and unstampable); its default stays 0.023.
+
+## What survives, and what it now means
+
+The mechanism is unchanged and still measured: a kernel that is a large FRACTION
+of the host redshift biases `H0` upward, and removing it took the mock's median
+`u` from 0.277 to 0.449 with coverage 0.62 -> 0.88.  What changes is who it
+applies to.  Production's fractional width is **~10%** (0.024 at a median host
+`z` of 0.237) against the mock's **21%** (0.023 at 0.11) -- smaller, not absent.
+So this is now a candidate systematic ON THE PRODUCTION LINE, of unknown size,
+where I had just finished arguing it was a mock artifact.
+
+The one part that genuinely does not transfer is the `z_obs < 0` truncation
+asymmetry: at production's median `z` the kernel mass below zero is ~0.03%,
+against the mock's 129 galaxies per realization.
+
+## What to do
+
+1. **Rebuild the mock at production's `dz` distribution** and re-run the tiers.
+   That is the mock the line actually needs, and neither 0.023-flat nor 1e-4 is
+   it.
+2. **Quantify the production-side bias directly** -- the cheapest handle is the
+   fractional-width scaling the mock now provides two points of (21% -> +0.32 in
+   `u`; ~0% -> +0.05), evaluated at production's 10%.
+3. **Do not quote "the photo-`z` effect is a mock property"** anywhere.
+
+## The lesson
+
+I checked what value the ANALYSIS applies (`sigma_kde = 0.003`) and never opened
+the catalog to see what the DATA carries.  The number was one `h5py` call away
+for the entire campaign, and the scope claim that rested on it -- the reassuring
+half of two days' work -- was false.  When a conclusion turns on "our survey is
+X", measure X on the artifact.
