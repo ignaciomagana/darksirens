@@ -1964,3 +1964,56 @@ multiplying in.  The unit tests could not catch it: they pin
 `Sum_empty Q_p (1 - f_p C)`.  Checking a formula against itself proves it is
 implemented, never that it is the right formula.  What caught it was running the
 arm end to end and looking at where `H0` landed.
+
+
+# THE PRODUCTION ANCHOR CARRIES THE PHOTO-`z` DEFECT TOO
+
+Found by an independent review of the PR stack, and it is the same defect this
+file spent a day chasing in the mock -- sitting in the SHIPPED production path.
+
+`darksirens/cli/build_latent_field.py:447`:
+
+    sigma_z = lambda z: 0.023 * np.ones_like(z)
+
+Hard-coded, with **no CLI flag anywhere in the stack**.  That `sigma_z` is the
+width of the photo-`z` convolution in `shell_response`, i.e. the radial kernel of
+the count channel's forward model `W`.  The production line is DESI
+**spectroscopy** (`SIGMA_Z_CAT = 1e-4`, analysis `sigma_kde = 0.003`).
+
+**The arithmetic is damning on its own.**  With the shipped defaults
+`--z-depth 0.30 --n-shells 12` the shell width is `0.30/12 = 0.025`, and
+`sigma_z = 0.023` is **92% of a shell width**.  Each shell's response is therefore
+smeared across roughly its two neighbours.  The reviewer computed the resulting
+`W` directly: shell 0 covers `z in [0, 0.025]` but the shipped `W` places its
+galaxies at a mean `z` of **0.0446** -- outside the shell entirely -- and every row
+is ~3.2x too wide (radial std 0.0175-0.0238 against 0.0049-0.0073 at the truth).
+
+**What it implicates.**  `experiments/field_level_plan/pr5/sbatch_anchor_v2.sh`
+builds the production anchor with this CLI, and that artifact
+(`latent_anchor_v2a.h5`) is what the 259-event latent arm consumes via
+`--anchor`.  So the count-channel MAP `xi_hat` was fit with basis rows registered
+to the wrong redshifts, and the field `Q(p,z)` the seam generates from it is
+radially misregistered at exactly the redshifts the GW hosts occupy.
+
+**And it changes how the ladder's headline should be read.**  Every arm comparison
+says the field does nothing measurable -- 0.06 sigma on production, 0.083 sigma on
+the spec-`z` mock.  That may be a statement about a MISREGISTERED field rather
+than about the field.  The finding does not overturn "the field is not the
+consequential part of this programme" -- `f_p` dominating by 50x is robust to it --
+but it does mean the field's own number has not been measured on a correctly
+registered basis.
+
+**My part in missing it.**  When I fixed the mock's `sigma_z` I wrote, in
+`world16.py`'s own comment, that "the PRODUCTION anchor is built by
+`cli/build_latent_field.py` from its own depth map and is untouched" -- and
+recorded that as reassurance.  It was the opposite: the production builder was
+untouched BY THE FIX, carrying the same 0.023 whose effect I had just measured
+to be the sole cause of the mock's bias.  I checked that changing the mock would
+not disturb production, and never asked whether production needed the same
+change.
+
+**What to do**: add a `--sigma-z` flag defaulting to the survey's actual value
+(and stamp it into the artifact's provenance, which already hashes the basis
+geometry), then rebuild the production anchor and re-run the latent arm.  Until
+then the latent arm's 71.95 should be quoted as "the field, on an anchor built
+with a photometric kernel", not as the field's measured effect.
