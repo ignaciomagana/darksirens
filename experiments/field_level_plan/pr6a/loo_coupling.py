@@ -129,13 +129,60 @@ def main(argv=None):
 
     U = np.array([out["datasets"][l]["u"] for l in labels])   # (M, n_shared)
     if a.n_datasets > 2:
-        # Var(c) DIRECTLY: the same events, so their mean moves only with the
-        # dataset.  Debiased for the finite n_shared, exactly as the catalog
-        # term is debiased in variance_split.py.
-        means = U.mean(axis=1)
-        within = U.var(axis=1, ddof=1)
-        var_c = float(means.var(ddof=1) - within.mean() / a.n_shared)
-        var_a = float(within.mean())
+        # Var(c) DIRECTLY, by a TWO-WAY decomposition.  The same events appear in
+        # every dataset, so
+        #
+        #     u[k, i] = mu + a_i + c_k + e[k, i]
+        #
+        # with a_i the event effect, c_k the dataset common mode we want, and e
+        # the noise.  A dataset's mean is mu + abar + c_k + ebar_k, so
+        #
+        #     Var(row means) = Var(c) + Var(e) / n_shared
+        #
+        # and the debias needs Var(e) ALONE.
+        #
+        # THE PREVIOUS VERSION SUBTRACTED within.mean()/n_shared, where
+        # ``within`` is the per-row variance ACROSS EVENTS and therefore
+        # estimates Var(a) + Var(e).  Var(a) is the event-to-event spread, which
+        # dominates here (0.1025 vs a row-mean sd of 0.0237), so the subtraction
+        # removed far more than the sampling error and drove Var(c) NEGATIVE
+        # (-3.2e-4), which then clamped to 0 and reported "no common mode,
+        # R_predicted = 1.00".  That null was an artifact of the estimator and it
+        # was used to retract a correct result.
+        #
+        # Var(e) is identified by the residual after removing BOTH effects --
+        # the standard two-way ANOVA residual, on (M-1)(n-1) degrees of freedom.
+        means = U.mean(axis=1)                       # (M,)  dataset means
+        col = U.mean(axis=0)                         # (n,)  event means
+        grand = float(U.mean())
+        resid = U - means[:, None] - col[None, :] + grand
+        M, n = U.shape
+        dof = max((M - 1) * (n - 1), 1)
+        var_e = float((resid ** 2).sum() / dof)
+        var_c = float(means.var(ddof=1) - var_e / n)
+        # Var(a): the event effect, debiased for its own sampling error.
+        var_a_event = float(max(col.var(ddof=1) - var_e / M, 0.0))
+        # The denominator R is built from is the WITHIN-DATASET event spread the
+        # OPG estimator sees, which is Var(a) + Var(e) -- unchanged.
+        var_a = float(within.mean() if False else U.var(axis=1, ddof=1).mean())
+        # AND ITS POWER, because the point estimate alone was read twice as a
+        # result and is not one: bootstrap over DATASETS (the replicated unit).
+        _rng = np.random.default_rng(0)
+
+        def _est(X):
+            m = X.mean(axis=1)
+            c = X.mean(axis=0)
+            r = X - m[:, None] - c[None, :] + float(X.mean())
+            ve = float((r ** 2).sum() / max((X.shape[0] - 1) * (n - 1), 1))
+            vc = float(m.var(ddof=1) - ve / n)
+            va = float(X.var(axis=1, ddof=1).mean())
+            return vc, 1.0 + a.nobs * max(vc, 0.0) / va
+
+        _R = np.array([_est(U[_rng.integers(0, M, M)])[1] for _ in range(4000)])
+        out.update(var_e_residual=var_e, var_a_event_only=var_a_event,
+                   R_bootstrap_ci90=[float(np.percentile(_R, 5)),
+                                     float(np.percentile(_R, 95))],
+                   R_bootstrap_median=float(np.median(_R)))
         out.update(
             n_datasets=a.n_datasets,
             dataset_mean_u=[float(x) for x in means],
@@ -149,7 +196,11 @@ def main(argv=None):
               f"within-dataset sd {np.sqrt(var_a):.6f}")
         print(f"  Var(c) debiased = {var_c:.3e}   sd(c)/sd(a) = "
               f"{out['sd_ratio_c_over_a']:.3f}")
-        print(f"  => R predicted at N={a.nobs}: {out['R_predicted']:.2f}")
+        print(f"  => R predicted at N={a.nobs}: {out['R_predicted']:.2f} "
+              f"(bootstrap 90% CI [{out['R_bootstrap_ci90'][0]:.2f}, "
+              f"{out['R_bootstrap_ci90'][1]:.2f}] over {M} datasets)")
+        print(f"     If that CI spans both 1 and the capture route's value, this "
+              f"probe is UNINFORMATIVE at this M -- not a disagreement.")
         print(f"     (R measured by event_reshuffle.py: 5.57 with f_p at its "
               f"peak, 0.98 without at its own -- compare to the ARM being run)")
     uX, uY = U[0], U[1]

@@ -26,11 +26,19 @@ wrong events across `H0` nodes.  Two checks run before any number is reported:
 
     (a) COMPLETENESS -- the captured per-event values must sum to
         `logL - selection_correction` at every node;
-    (b) ORDERING -- the resulting per-event scores must sum to the full-data
-        score computed from `logL` alone.
+    (b) ORDERING -- each event's log-evidence must vary SMOOTHLY across the
+        three `H0` nodes, i.e. its second difference must be small against the
+        event-to-event spread.
 
-Check (b) is the one the subset method failed.  If either fails the run reports
-the failure and quotes nothing, which is the point of having them.
+**Check (b) was wrong until 2026-08-20 and is worth recording.**  It used to
+compare `sum_i u_i` against the full-data score -- but that is an algebraic
+identity in which only SUMS of the captured values appear, so it passes for ANY
+permutation and was blind to exactly the failure this docstring claims it
+catches.  Meanwhile `J = sum_i (u_i - ubar)^2` is precisely the quantity a
+permutation destroys.  The smoothness form is permutation-sensitive: a shuffled
+capture makes the per-event second difference O(spread) instead of
+O(curvature x dh^2).  The old check is kept as (a)'s companion, correctly
+labelled a completeness check.
 """
 from __future__ import annotations
 
@@ -150,10 +158,35 @@ def main(argv=None):
         full_score = (LL[2] - LL[0]) / (2 * a.dh)
         s = float(u.sum())
         rel = abs(s - full_score) / max(abs(full_score), 1e-12)
-        print(f"\n  ORDERING CHECK: sum(u_i) = {s:+.6f} vs full score "
+        print(f"\n  COMPLETENESS CHECK: sum(u_i) = {s:+.6f} vs full score "
               f"{full_score:+.6f}  ({100*rel:.2f}%)")
         if rel > 0.02:
-            fail.append(f"ordering check failed at {100*rel:.1f}%")
+            fail.append(f"completeness check failed at {100*rel:.1f}%")
+
+        # THE ABOVE IS NOT AN ORDERING CHECK, AND USED TO BE LABELLED ONE.
+        # Only SUMS of EV enter it: sum_i u_i = (S2-S0)/2dh + [(LL2-S2)-(LL0-S0)]
+        # /2dh = (LL2-LL0)/2dh identically, for ANY permutation of EV[2] relative
+        # to EV[0]. So it passes at 0.00% by algebra and is blind to precisely the
+        # failure its docstring claimed it caught -- while J = sum (u_i - ubar)^2
+        # is exactly the quantity a permutation destroys.
+        #
+        # A real ordering check has to use the per-event values as a SEQUENCE.
+        # This one uses smoothness in H0: with a consistent capture order each
+        # event's log-evidence varies smoothly across the three nodes, so the
+        # second difference is O(curvature * dh^2) -- tiny against the
+        # event-to-event spread. Under a permutation it becomes O(spread).
+        d2 = EV[2] - 2.0 * EV[1] + EV[0]
+        spread = float(np.std(EV[1]))
+        curv_ratio = float(np.max(np.abs(d2)) / max(spread, 1e-300))
+        print(f"  ORDERING CHECK (per-event smoothness in H0): "
+              f"max|d2 ll| / sd(ll) = {curv_ratio:.4f}")
+        print(f"    (a permuted capture gives O(1) here; a consistent one gives "
+              f"the true curvature, ~(dh/H0)^2)")
+        if curv_ratio > 0.5:
+            fail.append(
+                f"ordering check failed: per-event second differences are "
+                f"{curv_ratio:.2f} of the event-to-event spread, which is what a "
+                f"PERMUTED capture looks like")
 
     out = dict(arm=a.arm, h0=a.h0, n_events=N, logL=LL, log_mu=MU,
                checks_failed=fail)
