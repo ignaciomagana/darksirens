@@ -452,6 +452,7 @@ def _build_completion_radial(
     stratum_map=None,
     stratum_map_sha=None,
     z_depth=None,
+    f_p_map=None,
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
@@ -579,13 +580,31 @@ def _build_completion_radial(
             # bin-integrated expected OBSERVED counts, same footing as N_obs.
             Cbar_u = np.clip(
                 _bin_integral(Cbar_fine * dN_exp_density) / exp_safe, 0.0, 1.0)
-            # ONE shared row, broadcast (a read-only view, not a ~1.5 GB tile at
-            # nside=128): the solver and the renormalization only read them.
-            C_u = np.broadcast_to(Cbar_u, (n_fit, n_grid))
-            # One shared budget-weight row (1 - Cbar) dN_exp for EVERY pixel:
-            # the renormalization footprint is the whole fitted sky.
-            w_budget = np.broadcast_to(
-                (1.0 - Cbar_fine) * dN_exp_density, (n_fit, n_grid))
+            if f_p_map is None:
+                # ONE shared row, broadcast (a read-only view, not a ~1.5 GB tile
+                # at nside=128): the solver and the renormalization only read
+                # them.
+                C_u = np.broadcast_to(Cbar_u, (n_fit, n_grid))
+                # One shared budget-weight row (1 - Cbar) dN_exp for EVERY pixel:
+                # the renormalization footprint is the whole fitted sky.
+                w_budget = np.broadcast_to(
+                    (1.0 - Cbar_fine) * dN_exp_density, (n_fit, n_grid))
+            else:
+                # MASK-FREE Q (--depth-map): fold the per-pixel selection
+                # fraction into the MODEL's completeness at fit time, exactly as
+                # the likelihood's C_p = f_p C does.  Then Q is the residual with
+                # the footprint already explained, so it carries clustering only
+                # -- and applying f_p again downstream is correct rather than a
+                # double count.
+                #
+                # Without this, Q absorbs the footprint from the counts it is fit
+                # to (measured on the closure mock: mean Q 1.624 on-footprint
+                # against 0.050 off, corr(Q, f_p) = +0.41), and the paired arm
+                # put H0 at 41.24 [36.1, 46.3] against a truth of 67.74.
+                fp_fit = np.asarray(f_p_map, dtype=float)[fit][:, None]
+                C_u = np.clip(fp_fit * Cbar_u[None, :], 0.0, 1.0)
+                w_budget = ((1.0 - np.clip(fp_fit * Cbar_fine[None, :], 0.0, 1.0))
+                            * dN_exp_density[None, :])
         N_obs_u = np.zeros((n_fit, n_grid), dtype=float)
         for i, r in enumerate(fit):
             if ngals_np[r] > 0:
@@ -606,6 +625,18 @@ def _build_completion_radial(
             # so the solver's rate_base = C_u * dN_exp_count_u is exactly the
             # bin-integrated expected OBSERVED counts — the same footing as N_obs.
             C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
+            if f_p_map is not None:
+                # A per-pixel count-derived C already contains the mask loss, so
+                # multiplying by f_p here would double-count it -- the same
+                # reasoning the loader uses to restrict --per_pixel_completeness
+                # to aggregate/selection modes. Refused rather than silently
+                # applied.
+                raise SystemExit(
+                    "--depth-map is only meaningful with --c-mode "
+                    "aggregate|selection: a per-pixel count-derived C already "
+                    "contains the mask loss, so dividing it out again would "
+                    "double-correct. Drop --depth-map, or use a parametric "
+                    "c_mode.")
             prod = C_fine * dN_exp_density
             C_u[i] = np.clip(_bin_integral(prod) / exp_safe, 0.0, 1.0)
             # This pixel's missing-budget weight on the OUTPUT zgrid at the build
@@ -1204,6 +1235,7 @@ def build_completion(
     stratum_map=None,
     stratum_map_sha=None,
     z_depth=None,
+    depth_map=None,
 ):
     """Build the log Q completion tables from a survey catalog.
 
@@ -1235,9 +1267,25 @@ def build_completion(
             f"c_mode must be 'per_pixel', 'aggregate' or 'selection', "
             f"got {c_mode!r}.")
     _require_selection_fit(c_mode, selection_fit)
+    f_p_map = None
+    if depth_map is not None:
+        if c_mode not in ("aggregate", "selection"):
+            raise ValueError(
+                f"--depth-map requires --c-mode aggregate|selection (got "
+                f"{c_mode!r}): a per-pixel count-derived C already contains the "
+                f"mask loss, so dividing it out again would double-correct.")
+        import healpy as hp
+        from darksirens.catalogs.io import load_survey as _ls
+        from darksirens.catalogs.depth_map import load_selection_fraction
+        _nside = int(_ls(catalog_path, to_device=False)[0])
+        f_p_map = np.asarray(
+            load_selection_fraction(depth_map, _nside).f_p, dtype=float)
+        print(f"    [depth-map] f_p at nside {_nside}: "
+              f"{int((f_p_map > 0).sum())} covered pixels, occupied mean "
+              f"{float(f_p_map[f_p_map > 0].mean()):.4f}", flush=True)
     if mode == "radial":
         return _build_completion_radial(
-            catalog_path, n_members=n_members, seed=seed,
+            catalog_path, f_p_map=f_p_map, n_members=n_members, seed=seed,
             prior_strength=prior_strength, maxiter=maxiter, workers=workers,
             log10n0=log10n0, delta=delta, budget_renorm=budget_renorm,
             lss_corr_length_mpc=lss_corr_length_mpc, lss_sigma=lss_sigma,
@@ -1339,6 +1387,22 @@ def main(argv=None):
                         "the budget; empty pixels included like aggregate). "
                         "Stamped in the HDF5 attrs; the inference hard-errors "
                         "when the table's c_mode does not match the survey's.")
+    p.add_argument("--depth-map", default=None, metavar="H5",
+                   help="Depth map (build_mth_map output) supplying the "
+                        "per-pixel selection fraction f_p. When given, f_p is "
+                        "folded into the MODEL's completeness at fit time, so "
+                        "the fitted Q carries CLUSTERING ONLY and the survey "
+                        "footprint is left to f_p -- which is what makes "
+                        "--per_pixel_completeness safe to use alongside the "
+                        "resulting table. WITHOUT this, Q is fit to raw observed "
+                        "counts and absorbs the footprint (measured on the "
+                        "closure mock: mean Q 1.624 on-footprint against 0.050 "
+                        "off, corr(Q, f_p) = +0.41), and pairing such a table "
+                        "with f_p applies the mask TWICE -- which put H0 at "
+                        "41.24 [36.1, 46.3] against a truth of 67.74. The output "
+                        "stamps f_p_aware, which the inference loader requires "
+                        "before it will admit the pairing. Requires --c-mode "
+                        "aggregate|selection.")
     p.add_argument("--selection-fit", default=None,
                    help="selection_fit.json from darksirens_fit_selection "
                         "(required by, and only legal with, --c-mode "
@@ -1471,7 +1535,8 @@ def main(argv=None):
         lss_corr_length_mpc=opts.lss_corr_length_mpc, lss_sigma=opts.lss_sigma,
         gp3d_nz_nodes=opts.gp3d_nz_nodes, gp3d_nsph_nodes=opts.gp3d_nsph_nodes,
         gp3d_z_node_hi=opts.gp3d_z_node_hi,
-        c_mode=opts.c_mode, selection_fit=selection_fit,
+        c_mode=opts.c_mode, depth_map=getattr(opts, "depth_map", None),
+        selection_fit=selection_fit,
         selection_strata=selection_strata, stratum_map=stratum_map,
         stratum_map_sha=stratum_map_sha, z_depth=opts.z_depth,
     )
@@ -1548,6 +1613,11 @@ def main(argv=None):
         budget_renormalized=diagnostics.get("budget_renormalized"),
         budget_monopole_logq=budget_monopole,
         c_mode=opts.c_mode,
+        # Only True when a depth map was actually folded into the fit-time
+        # completeness. This attr is what the inference loader trusts before
+        # admitting --per_pixel_completeness alongside the table, so it must
+        # track the ACTUAL build, never a default.
+        f_p_aware=bool(getattr(opts, "depth_map", None)),
     )
     _ok(f"completion  →  {opts.out}")
     _end()

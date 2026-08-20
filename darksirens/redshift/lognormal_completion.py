@@ -1053,6 +1053,7 @@ def save_lss_completion_hdf5(
     budget_renormalized: bool | None = None,
     budget_monopole_logq: np.ndarray | None = None,
     c_mode: str | None = None,
+    f_p_aware: bool | None = None,
 ) -> str:
     """Write a completion file with layout ``/lss_completion/{logq_map,logq_members,zgrid}``.
 
@@ -1156,6 +1157,13 @@ def save_lss_completion_hdf5(
                 grp.attrs["budget_monopole_logq"] = budget_monopole_logq
             if c_mode is not None:
                 grp.attrs["c_mode"] = c_mode
+            # The builder's assertion that it divided the survey mask OUT of Q,
+            # i.e. that f_p was folded into the model's completeness at fit time
+            # so the fitted Q carries clustering only.  The inference loader
+            # REQUIRES this before it will admit --per_pixel_completeness
+            # alongside the table, because otherwise the mask is applied twice.
+            if f_p_aware is not None:
+                grp.attrs["f_p_aware"] = bool(f_p_aware)
             if logq_members is not None:
                 grp.attrs["member_content_sha256"] = hashlib.sha256(
                     np.ascontiguousarray(members_arr).tobytes()
