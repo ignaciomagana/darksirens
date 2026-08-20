@@ -111,8 +111,10 @@ N_FINE = 400
 #: ``world.meta["sigma_z"]`` and therefore the shell response ``W`` that
 #: ``build_anchor16`` builds the count channel's forward model from.
 #:
-#: **0.003, changed from 0.023 (2026-08-19), and it must track
-#: ``make_mock.SIGMA_Z_CAT``.**  The photometric 0.023 was measured to be the
+#: **1e-4, changed from 0.023 (2026-08-19), and it must track
+#: ``make_mock.SIGMA_Z_CAT``** -- which is 1e-4 and not 0.003 because the
+#: analysis adds ``sigma_kde = 0.003`` in quadrature, so a 0.003 catalog scatter
+#: would make the kernel 41% over-wide (see that constant's note).  The photometric 0.023 was measured to be the
 #: sole remaining cause of the closure tiers' bias and overconfidence (a 21%
 #: fractional kernel at the median host `z`; see ``make_mock.SIGMA_Z_CAT`` and
 #: ``gate_specz.py``).  Leaving THIS at 0.023 while the catalog moved to 0.003
@@ -123,7 +125,7 @@ N_FINE = 400
 #: ``build_anchor16`` rebuilds ``W`` from ``world.meta`` on every call, so this
 #: is safe for the mock.  The PRODUCTION anchor is built by
 #: ``cli/build_latent_field.py`` from its own depth map and is untouched.
-SIGMA_Z = 0.003
+SIGMA_Z = 1.0e-4
 B_GAL = 1.0
 
 #: Mock survey magnitude limit.  With the mock LF ``M ~ N(-21, 1)`` the

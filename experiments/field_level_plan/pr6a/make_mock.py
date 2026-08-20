@@ -86,16 +86,25 @@ Z_DEPTH = W16.Z_DEPTH      # 0.30 -- the catalog's declared depth
 #: bias from +3.00 to +0.42 km/s, the overconfidence from 1.714 to 1.224 and the
 #: 90% coverage from 0.62 to 0.88 (``gate_specz.py``).
 #:
-#: 0.003 rather than 0 because that is the value the PRODUCTION analysis applies
-#: (``desi_full259/run_h0_latent.py``'s ``sigma_kde``), and this mock exists to
-#: validate that line.  DESI's actual spectroscopic precision is finer, so the
-#: choice is conservative: it keeps a real kernel, 2.7% fractional at the median
-#: host, instead of asserting an exact redshift the survey does not deliver.
+#: **1e-4, and NOT 0.003 -- a first attempt used 0.003 and it was wrong.**  The
+#: analysis kernel is ``sig_eff = sqrt(dz^2 + sigma_kde^2)``
+#: (``redshift/catalog.py:540``) with the production ``sigma_kde = 0.003``, so
+#: setting the catalog's own scatter to 0.003 makes the kernel
+#: ``sqrt(2) x 0.003``: **41% WIDER than the truth**, a brand-new mismatch where
+#: the photometric 0.023 had made ``sigma_kde`` negligible (0.9%).  Measured: at
+#: n = 17 that configuration left Tier C at overconfidence 1.603 and 90% coverage
+#: 0.53 -- no better than photo-`z`.
+#:
+#: What production actually looks like is a catalog redshift that is essentially
+#: EXACT (DESI spectroscopy, ~30 km/s) with ``sigma_kde = 0.003`` as the
+#: analysis's own deliberate smoothing.  1e-4 reproduces that: it sits at
+#: ``catalog.SIGMA_EFF_FLOOR``, so ``sig_eff -> 0.003002`` and the kernel is
+#: `sigma_kde` alone, exactly as on the production line.
 #:
 #: ``W16.SIGMA_Z`` is UNCHANGED at 0.023: it is the width
 #: ``build_latent_field``'s frozen W was constructed with, and the latent basis
 #: must not move underneath the anchors.
-SIGMA_Z_CAT = 0.003
+SIGMA_Z_CAT = 1.0e-4
 N0_TRUE = 2.0e-4           # Mpc^-3, comoving, delta = 0
 SNR_REF = 5.0
 SNR_THRESHOLD = 8.0
