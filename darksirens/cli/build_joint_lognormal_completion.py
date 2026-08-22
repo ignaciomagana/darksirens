@@ -58,7 +58,6 @@ from darksirens.cli.common import _banner, _section, _row, _end, _ok, _warn
 from darksirens.redshift import zgrid
 from darksirens.redshift.lognormal_completion import (
     lowrank_inducing_nodes,
-    build_lowrank_operator,
     poisson_lognormal_gp3d_map,
     laplace_lognormal_gp3d_members,
     eval_logq_gp3d,
