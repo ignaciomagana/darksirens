@@ -31,7 +31,6 @@ from pathlib import Path
 import numpy as np
 
 import world16 as W16
-import arms as A
 import build_anchor16
 import make_mock
 import tier_b
