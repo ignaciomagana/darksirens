@@ -10,12 +10,17 @@ P13b   off-footprint rows return **bit-zero** ``logQ`` -- the whole bracket,
        PLAN eq. (4) conserves the off-footprint budget block only because
        ``Q == 1`` there exactly.
 seam   the latent evaluator is **bit-identical** to the table evaluator fed the
-       table the seam would generate.  This is the pin that says the seam
-       changed the SOURCE of ``Q`` and nothing else: same clip, same depth
-       relaxation, same two-node interpolation, same normalizer selection.
+       table the seam would generate, on a fixture inside both clip bounds.
+       This is the pin that says the seam changed the SOURCE of ``Q`` and
+       nothing else: same depth relaxation, same two-node interpolation, same
+       normalizer selection.  The one deliberate difference is the clip BOUND
+       (``_LATENT_LOGQ_CLIP`` vs ``_LOGQ_CLIP``), which is why that pin's
+       fixture is the mild-amplitude one and the production-amplitude pins
+       below are separate.
 eq.(4) the generated ``Q`` conserves the CONSUMED missing budget
        ``sum_p (1 - f_p C(z)) Q_p(z)`` at every ``z``, member and ``b_GW`` --
-       the identity ``rho`` is defined to enforce.
+       the identity ``rho`` is defined to enforce -- BOTH as an expression and
+       through the clip the consumers apply to it at production amplitude.
 P16    the complete-catalog limit: at ``C == 1`` (``f_p == 1``) the missing
        branch vanishes and the prior collapses to the observed host spikes
        **for every member**, so latent-on equals latent-off bit-identically.
@@ -45,6 +50,11 @@ from darksirens.likelihood.latent_q import (
     rho_from_moments,
     theta_shift,
 )
+from darksirens.redshift.completion import (
+    _LATENT_LOGQ_CLIP,
+    _LOGQ_CLIP,
+    _member_q_eff_from_logq,
+)
 from darksirens.redshift.grid import zgrid
 from darksirens.redshift.latent_field import build_latent_basis, sky_moments
 from darksirens.redshift.prior import (
@@ -60,16 +70,30 @@ N_FIT, N_ROWS, M_DRAW = 40, 64, 3
 #: The node count is not cosmetic: see
 #: ``test_budget_identity_off_node_is_bought_by_the_node_count``.
 N_B, B_MAX = 33, 4.0
+#: The real anchor's per-mode field amplitude ``||xi_hat||/sqrt(M) = 2.46``
+#: (experiments/field_level_plan/pr3/REPORT.md).  The 0.4 default above is a
+#: sixth of it, and at 0.4 the consumer clip below never engages -- which is
+#: exactly why the unclipped eq. (4) pins could not see the clip defect.
+PROD_AMP = 2.46
+#: The top of the shipped ``b_miss`` prior, ``U(0, 3)``.
+PROD_B = 3.0
+#: The shipped anchor's footprint size and depth-map maximum
+#: (experiments/field_level_plan/pr5/latent_anchor_v2a.h5, ``completeness``:
+#: 30,470 pixels, f_p in [0.001, 0.9558]).
+DESI_P_F, DESI_F_P_MAX = 30470.0, 0.9558
 
 
 # --------------------------------------------------------------------- fixture
 
-def _tiny_plan(seed=7, f_p=None, n_b=N_B, b_max=B_MAX):
+def _tiny_plan(seed=7, f_p=None, n_b=N_B, b_max=B_MAX, amp=0.4):
     """A small but STRUCTURALLY complete plan: real basis, real moments.
 
     The footprint is the first ``N_FIT`` of ``N_ROWS`` catalog rows, so the
     remaining rows exercise the off-footprint branch the production run spends
     ~38% of its gathers in.
+
+    ``amp`` is the per-mode field amplitude ``||xi||/sqrt(M)``.  The default
+    0.4 is a mild field; ``PROD_AMP`` is the real anchor's.
     """
     rng = np.random.default_rng(seed)
     zg = np.asarray(zgrid)
@@ -87,7 +111,7 @@ def _tiny_plan(seed=7, f_p=None, n_b=N_B, b_max=B_MAX):
         f_p = rng.uniform(0.5, 1.0, size=N_FIT)
     f_p = np.asarray(f_p, dtype=float)
 
-    xi = rng.normal(size=(M_DRAW, M_SPH * M_Z)) * 0.4
+    xi = rng.normal(size=(M_DRAW, M_SPH * M_Z)) * float(amp)
     row_fac_fit = np.stack([
         np.asarray(basis.phi_sph @ x.reshape(M_SPH, M_Z)) for x in xi
     ]).astype(np.float32)
@@ -221,6 +245,158 @@ def test_budget_identity_off_node_is_bought_by_the_node_count():
     assert r_coarse > 100 * r_fine
 
 
+# ------------------------------- eq. (4) THROUGH the clipped consumer path
+
+def _prod_plan():
+    """The fixture at the real anchor's amplitude, on a ``b`` grid whose TOP
+    node is ``PROD_B``.
+
+    ``b_max = PROD_B`` puts the sampled ``b`` exactly on a node, so
+    :func:`interp_b` takes its exact branch and the residual measured below is
+    the CLIP's alone -- the off-node interpolation error is a separate axis,
+    already pinned by ``test_budget_identity_off_node_is_bought_by_the_node_count``.
+    """
+    return _tiny_plan(amp=PROD_AMP, b_max=PROD_B)
+
+
+def _consumed_budget_ratio(plan, row_map, f_p, b, clip):
+    """``sum_p (1 - f_p C) Q_eff_p / sum_p (1 - f_p C)`` per z, worst member.
+
+    ``Q_eff`` comes from :func:`_member_q_eff_from_logq`, the ONE function every
+    latent consumer routes through (``latent_member_N_miss_integrals``,
+    ``latent_posterior_mean_q``, ``field_global_log_Z_members`` and the
+    numerator's ``eval_dark_member_completion_latent``), so this measures the
+    budget the run actually consumes rather than the expression it would consume
+    with no clip at all.
+    """
+    c = _c_curve()
+    on_fp = on_footprint_mask(row_map, N_FIT)
+    below = np.asarray(plan.below_depth)
+    w_fit = 1.0 - np.asarray(f_p)[:, None] * np.asarray(c)[None, :]
+    den = w_fit.sum(axis=0)
+    worst = 0.0
+    for m in range(plan.n_draw):
+        rho = _rho(plan, m, c, b)
+        rows = plan.row_fac[m][jnp.asarray(row_map)]
+        lq = latent_logq_rows(plan, rows, rho, b, on_fp)
+        q = np.asarray(_member_q_eff_from_logq(
+            lq, plan.below_depth, True, clip))
+        got = (w_fit * q[:N_FIT]).sum(axis=0)
+        worst = max(worst, float(np.abs(got[below] / den[below] - 1.0).max()))
+    return worst
+
+
+def test_eq4_survives_the_consumer_clip_at_production_amplitude():
+    """eq. (4) must hold THROUGH the clip the consumers actually apply.
+
+    The other eq. (4) pins evaluate ``exp(logQ)`` directly on a 0.4-amplitude
+    fixture, where ``|logQ| < 7`` everywhere -- so they are blind to the bound
+    ``_member_q_eff_from_logq`` imposes.  At the real anchor's amplitude
+    (``PROD_AMP``) and the top of the ``b_miss`` prior (``PROD_B``) most rows
+    are outside ``+/-_LOGQ_CLIP``, and clipping there does not tame a tail: it
+    hands back missing hosts that ``rho`` had already spent, so the consumed
+    budget stops being the budget the normalizer conserves.
+
+    The second assertion is what keeps this pin from going quietly vacuous: the
+    TABLE bound must still fail the same tolerance on the same fixture.  If a
+    future fixture change makes it pass, this test has stopped measuring the
+    thing it was written for.
+    """
+    plan, row_map, f_p = _prod_plan()
+    lat = _consumed_budget_ratio(plan, row_map, f_p, PROD_B, _LATENT_LOGQ_CLIP)
+    tab = _consumed_budget_ratio(plan, row_map, f_p, PROD_B, _LOGQ_CLIP)
+    print(f"\n[eq.4 through the consumer, amp={PROD_AMP} b={PROD_B}] "
+          f"latent bound {_LATENT_LOGQ_CLIP}: {lat:.2e}   "
+          f"table bound {_LOGQ_CLIP}: {tab:.2e}")
+    assert lat < 1e-6
+    assert tab > 1e-6
+
+
+def test_latent_bound_clears_the_identity_bound_at_the_production_footprint():
+    """The latent bound is numerical safety; the upper rail must not engage.
+
+    eq. (4) bounds the POSITIVE tail on its own.  Every ``w_p = 1 - f_p C`` is
+    positive and every ``Q_p`` non-negative, so a single row's term cannot
+    exceed the whole sum:
+
+        w_p Q_p <= sum_q w_q Q_q == sum_q w_q   =>   logQ_p <= log(sum_q w_q / w_p),
+
+    which is what the first assertion measures on the fixture.  Evaluated at the
+    SHIPPED footprint (pr5/latent_anchor_v2a.h5: 30,470 pixels, ``f_p`` in
+    [0.001, 0.9558], so ``w >= 1 - 0.9558`` at ``C == 1``) that bound is ~13.4:
+    ABOVE ``_LOGQ_CLIP``, which is the structural statement of the defect --
+    the table rail sits inside the range the identity legitimately produces, so
+    it deletes budget instead of taming a tail.  ``_LATENT_LOGQ_CLIP`` must sit
+    above it, leaving only the inert lower rail reachable.
+    """
+    plan, row_map, f_p = _prod_plan()
+    c = _c_curve()
+    on_fp = on_footprint_mask(row_map, N_FIT)
+    below = np.asarray(plan.below_depth)
+    w_fit = 1.0 - np.asarray(f_p)[:, None] * np.asarray(c)[None, :]
+    hi = float(np.log(w_fit.sum(axis=0)[below] / w_fit[:, below].min()).max())
+    worst_pos, worst_abs = -np.inf, 0.0
+    for m in range(plan.n_draw):
+        rows = plan.row_fac[m][jnp.asarray(row_map)]
+        lq = np.asarray(latent_logq_rows(
+            plan, rows, _rho(plan, m, c, PROD_B), PROD_B, on_fp))[:N_FIT, below]
+        worst_pos = max(worst_pos, float(lq.max()))
+        worst_abs = max(worst_abs, float(np.abs(lq).max()))
+    assert worst_pos <= hi + 1e-9
+    # ... and the fixture is genuinely outside the TABLE bound.
+    assert worst_abs > _LOGQ_CLIP
+
+    desi = float(np.log(DESI_P_F / (1.0 - DESI_F_P_MAX)))
+    print(f"\n[bounds] fixture max logQ {worst_pos:.2f} <= identity bound "
+          f"{hi:.2f}; DESI-footprint identity bound {desi:.2f}; "
+          f"table {_LOGQ_CLIP}, latent {_LATENT_LOGQ_CLIP}")
+    assert desi > _LOGQ_CLIP
+    assert _LATENT_LOGQ_CLIP > desi
+
+
+def test_numerator_hot_path_returns_the_unclipped_Q():
+    """The per-event numerator carries the same ``Q``, not a railed one.
+
+    ``eval_dark_member_completion_latent`` is the two-node gather every PE and
+    injection sample goes through.  Driven with ``A_obs = -inf``,
+    ``base_miss == 1`` and ``log_Z == 0`` it returns exactly ``log Q_eff``, so
+    the clip it applies is measurable rather than inferred: at production
+    amplitude the railed evaluator overstates ``Q`` on the deeply underdense
+    rows by tens of nats, which is a per-event distortion of the missing-host
+    density even where the aggregate budget nearly closes.
+    """
+    plan, row_map, f_p = _prod_plan()
+    c = _c_curve()
+    below = np.asarray(plan.below_depth)
+    nodes = np.arange(N_GRID - 1)[below[:-1]]
+    rows_idx, node_idx = np.meshgrid(np.arange(N_FIT), nodes, indexing="ij")
+    pix = jnp.asarray(rows_idx.reshape(-1), dtype=jnp.int32)
+    idx = jnp.asarray(node_idx.reshape(-1), dtype=jnp.int32)
+    t = jnp.zeros(pix.shape, dtype=float)              # land ON the low node
+    A_obs = jnp.full(pix.shape, -jnp.inf)
+    base_miss = jnp.ones((N_ROWS, N_GRID))
+    logZ = jnp.zeros(N_ROWS)
+    on_fp = on_footprint_mask(row_map, N_FIT)
+    pix_fit = jnp.asarray(row_map)[pix]
+    on_fp_s = on_fp[pix]
+
+    m = 0
+    rho = _rho(plan, m, c, PROD_B)
+    got = np.asarray(eval_dark_member_completion_latent(
+        A_obs, idx, t, pix, pix_fit, on_fp_s, base_miss, plan.row_fac[m],
+        plan.phi_z, rho, PROD_B, logZ, Z_DEPTH, False))
+    want = np.asarray(latent_logq_rows(
+        plan, plan.row_fac[m][jnp.asarray(row_map)], rho, PROD_B, on_fp)
+    )[rows_idx.reshape(-1), node_idx.reshape(-1)]
+    np.testing.assert_allclose(got, want, rtol=0.0, atol=1e-12)
+    # The old bound would have railed a majority of these samples.
+    railed = float((np.abs(want) > _LOGQ_CLIP).mean())
+    print(f"\n[numerator] {railed:.1%} of (row, node) samples exceed "
+          f"+/-{_LOGQ_CLIP}; worst overstatement under it "
+          f"{float(np.max(np.clip(want, -_LOGQ_CLIP, _LOGQ_CLIP) - want)):.1f} nats")
+    assert railed > 0.25
+
+
 def test_rho_vanishes_on_a_zero_field():
     """A zero field gives ``rho == 0`` and ``Q == 1`` identically -- the
     property P16 turns into a physics gate (and the sanity check that ``rho``
@@ -305,8 +481,13 @@ def test_seam_is_bit_identical_to_the_table_evaluator():
     This is what licenses reusing every downstream pin (the goldens, the
     marginalization tests) rather than re-deriving them for latent mode: the
     latent evaluator differs from the table evaluator in the SOURCE of
-    ``logQ`` and in nothing else -- same clip, same depth relaxation, same
-    two-node interpolation, same ``logaddexp``, same normalizer selection.
+    ``logQ`` and in nothing else -- same depth relaxation, same two-node
+    interpolation, same ``logaddexp``, same normalizer selection.
+
+    The two evaluators DO carry different clip bounds, so this pin is stated on
+    the mild-amplitude fixture, where ``|logQ| < _LOGQ_CLIP`` everywhere and
+    neither bound engages; the assertion below records that.  What the seam is
+    licensed to reuse is the evaluator, not the table path's bound.
     """
     plan, row_map, _ = _tiny_plan()
     c, b = _c_curve(), 1.15
@@ -321,6 +502,7 @@ def test_seam_is_bit_identical_to_the_table_evaluator():
     logZ = jnp.asarray(rng.normal(size=(plan.n_draw, N_ROWS)) + 5.0)
 
     table = _table_from_plan(plan, row_map, c, b, kernel="gather")
+    assert float(np.max(np.abs(np.asarray(table)))) < _LOGQ_CLIP
     # The evaluator takes the footprint row index and mask PER SAMPLE: they are
     # member-independent, so production hoists them into the same precompute
     # that produces A_obs/idx/t rather than regathering them M times.
