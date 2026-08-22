@@ -1054,7 +1054,6 @@ def _posterior_samples(
     arrays: dict[str, list[np.ndarray]] = {k: [] for k in keys}
     obs_keys = ("obs_rho", "obs_lnmc", "obs_lnq", "obs_chieff", "obs_ra", "obs_dec")
     observations = {k: np.asarray(truth[k], dtype=float).copy() for k in obs_keys}
-    half_pi = 0.5 * np.pi
     for i in range(nobs):
         s_mc = float(truth["obs_sig_lnmc"][i])
         s_q = float(truth["obs_sig_lnq"][i])
