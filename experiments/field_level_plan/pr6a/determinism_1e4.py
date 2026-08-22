@@ -49,7 +49,6 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tests"))
 
 import numpy as np  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
 
 import test_latent_seam_e2e as E  # noqa: E402
 from darksirens.core.types import CosmoParams  # noqa: E402
@@ -98,7 +97,6 @@ def run(name, n_points, n_repeats, h0_lo, h0_hi):
                   f"({time.perf_counter() - t0:.0f} s)", flush=True)
     wall = time.perf_counter() - t0
     d = np.abs(np.diff(out))
-    fin = np.isfinite(d) & (d > 0)
     med = float(np.median(d[np.isfinite(d)]))
     res = {
         "arm": name, "n_points": int(n_points),

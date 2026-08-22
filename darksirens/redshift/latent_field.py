@@ -50,7 +50,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 
-from darksirens.sky.models import _sphere_z_kernel, _fibonacci_sphere
+from darksirens.sky.models import _fibonacci_sphere
 from darksirens.redshift.lognormal_completion import (
     lowrank_inducing_nodes,
     build_lowrank_operator,
@@ -395,7 +395,6 @@ def field_rows(basis: LatentBasis, xi, *, z_axis: str = "out") -> jnp.ndarray:
 def at_nodes(basis: LatentBasis, xi) -> jnp.ndarray:
     """The field at the flattened inducing nodes ``(Zn, Zz)`` — the
     diagnostic view; equals ``(L_sph (x) L_z)^T``-whitened kernel rows."""
-    zeta_nodes = jnp.unique(basis.Zz, size=basis.m_z)
     Xi = jnp.reshape(jnp.asarray(xi), (basis.m_sph, basis.m_z))
     # phi at the nodes: k(Z,Z) L^{-T} per factor
     K_sph = basis.L_sph @ basis.L_sph.T - JITTER_FACTORED_V1 * jnp.eye(basis.m_sph)

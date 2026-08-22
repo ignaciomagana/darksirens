@@ -28,7 +28,6 @@ import io
 import json
 import contextlib
 import sys
-import tempfile
 from pathlib import Path
 
 PR6A = Path(__file__).resolve().parent

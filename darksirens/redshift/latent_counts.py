@@ -62,7 +62,7 @@ refactorization, by adding one scalar-normal step along ``v``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 

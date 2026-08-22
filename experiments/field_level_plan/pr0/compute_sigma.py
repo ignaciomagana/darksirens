@@ -72,7 +72,7 @@ def _dc_of_z(zgrid, H0, Om0):
 def main():
     from darksirens.redshift.selection import load_selection_fit_json, \
         c_sel_gaussian
-    from darksirens.sky.models import _sphere_z_kernel, _fibonacci_sphere
+    from darksirens.sky.models import _fibonacci_sphere
 
     sel = load_selection_fit_json(C.FIT_JSON)
     cal = json.load(open(C.DATA_DIR / "n0_calibration.json"))
