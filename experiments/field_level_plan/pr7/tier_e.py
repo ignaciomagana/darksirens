@@ -129,8 +129,7 @@ def make_stack(world, counts_k, biases, names=("g", "a")):
 
 def one_realization(world, seed, args, prior_s):
     from darksirens.redshift.latent_counts import (
-        bias_profile, bias_ratio_from_profile, check_disjoint_tracers,
-        decoupled_bias_profile)
+        bias_profile, bias_ratio_from_profile, decoupled_bias_profile)
 
     b_true = [args.b1, args.b1 * args.ratio]
     xi_true, counts_k = draw_realization(world, seed, b_true)
