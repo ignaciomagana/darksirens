@@ -151,7 +151,8 @@ _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "empty_stratum_counts", "field_lss_q_empty_sum_strata",
     "field_lss_q_empty_sum_strata_members",
     # per-pixel selection fraction (field-level PR-2)
-    "f_p_rows", "field_f_p_occ", "field_f_p_empty_sum",
+    "f_p_rows", "field_f_p_occ", "field_f_p_empty_sum", "f_p_total_sum",
+    "field_lss_q_fp_empty_sum",
     # the latent Q seam (field-level PR-5); all None in table mode
     "latent_row_fac", "latent_phi_z",
     "latent_row_map", "latent_on_fp",

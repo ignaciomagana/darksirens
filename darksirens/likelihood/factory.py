@@ -1813,6 +1813,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_f_p_empty_sum=getattr(catalogs, "field_f_p_empty_sum", None),
         field_lss_q_fp_empty_sum=getattr(
             catalogs, "field_lss_q_fp_empty_sum", None),
+        f_p_total_sum=getattr(catalogs, "f_p_total_sum", None),
         # Latent seam (PR-5): empty in the default table mode, so this
         # construction is textually the shipped one there.
         **latent_leaves_pe,
@@ -1875,6 +1876,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_f_p_empty_sum=getattr(catalogs, "field_f_p_empty_sum", None),
         field_lss_q_fp_empty_sum=getattr(
             catalogs, "field_lss_q_fp_empty_sum", None),
+        f_p_total_sum=getattr(catalogs, "f_p_total_sum", None),
         # Latent seam (PR-5): the theta-free blocks are the SAME objects the PE
         # catalog carries (aliased, not re-barriered), so the prior-state
         # sharing verdict still sees identical leaves.
