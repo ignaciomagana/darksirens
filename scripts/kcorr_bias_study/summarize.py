@@ -44,7 +44,7 @@ def main(path):
                   f"{row['residual_vs_meanshift']:>+10.4f} "
                   f"{row['delta_over_laplace_sd']:>+9.1f}")
     if "csel" in r:
-        print(f"\n## C_sel error from the stale anchor (model - re-anchored)")
+        print("\n## C_sel error from the stale anchor (model - re-anchored)")
         print(f"{'corner':<22} {'dM0hat':>9} {'max|dC|':>9} {'z@max':>7} "
               f"{'C_mod':>7} {'C_cor':>7} {'miss_frac_err':>13}")
         for row in r["csel"]["rows"]:
