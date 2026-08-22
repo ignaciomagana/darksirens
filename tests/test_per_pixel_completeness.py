@@ -546,23 +546,40 @@ def test_fp_without_a_q_ensemble_leaves_the_member_rows_none():
     assert _member_fp_empty_rows(em_fp_det) is None
 
 
-def test_the_guard_fires_on_a_pencil_beam_survey():
-    """A deep, narrow survey must trip the guard, and once did not.
+def test_the_guard_fires_on_a_footprint_limited_survey():
+    """A footprint-limited survey must trip the guard, and once did not.
 
     The Poisson reference was built from `ngals.sum()/n_pix`, which counts the
     mask's own zeros, so a bigger footprint hole gave a SMALLER lambda, a LARGER
     `exp(-lambda)` and a HIGHER bar -- the hole raised its own detection
     threshold. For any lambda <= ln(10) the bar exceeded 1 and the guard could
     not fire at any empty fraction.
+
+    The fixture is chosen to DISCRIMINATE the two rules, which a deeper beam
+    does not: at 20 gal/pixel over 12% of the sky the full-sky lambda is 2.56,
+    bar 10 exp(-lambda) = 0.7734 < empty_frac 0.8802, so the BROKEN rule fires
+    too and the test proves nothing. Here, 30% of the sky at Poisson(3) gives
+
+      full-sky lambda 0.8818 -> bar 4.1402  (broken rule: never fires, the bar
+                                             is above 1 at any empty fraction)
+      occupied lambda 3.0889 -> bar 0.4555  (fixed rule: fires)
+
+    against a measured empty fraction of 0.7145.
     """
     from darksirens.inference.loaders import guard_unmasked_footprint_counts
     from types import SimpleNamespace
 
     rng = np.random.default_rng(7)
     ngals = np.zeros(3072, dtype=int)
-    beam = rng.choice(3072, size=int(0.12 * 3072), replace=False)
-    ngals[beam] = rng.poisson(20, size=beam.size) + 1   # deep, 12% of sky
-    assert (ngals == 0).mean() > 0.85
+    beam = rng.choice(3072, size=int(0.30 * 3072), replace=False)
+    ngals[beam] = rng.poisson(3, size=beam.size)       # shallow, 30% of sky
+    empty_frac = float((ngals == 0).mean())
+    lam_full = float(ngals.sum() / ngals.size)
+    lam_occ = float(ngals[ngals > 0].mean())
+    # the broken rule cannot fire on this sky; the fixed one must
+    assert empty_frac < max(0.05, 10.0 * np.exp(-lam_full))
+    assert empty_frac > max(0.05, 10.0 * np.exp(-lam_occ))
+
     with pytest.raises(ValueError, match="FOOTPRINT"):
         guard_unmasked_footprint_counts(
             SimpleNamespace(c_mode="selection"), ngals)
