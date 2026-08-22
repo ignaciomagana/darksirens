@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 
@@ -95,7 +94,7 @@ def main(argv=None):
     print(f"  J (expected, = Var of the score) = {J:.6f}")
     print(f"  H (observed, = mean curvature)   = {H:.6f}")
     print(f"  J/H = {J/H:.3f}   -> intervals too narrow by x{np.sqrt(J/H):.3f}")
-    print(f"  (Tier C measured x2.1-2.9 directly from the scatter)")
+    print("  (Tier C measured x2.1-2.9 directly from the scatter)")
     print(f"  score mean={score.mean():+.4f} sd={score.std(ddof=1):.4f}")
     json.dump(out, open(a.out, "w"), indent=1)
     print(f"[wrote] {a.out}")

@@ -114,7 +114,7 @@ def main(argv=None):
     print(f"\nlog Z: A={zA:.9f}  B={zB:.9f}  AB={zAB:.9f}")
     print(f"  AB - A = {zAB - zA:+.6e}   AB - B = {zAB - zB:+.6e}")
     print(f"  predicted additivity residual from logZ alone = {pred:+.6e} nat")
-    print(f"  (measured by additivity.py: -1.832e+01 with the real f_p map)")
+    print("  (measured by additivity.py: -1.832e+01 with the real f_p map)")
     print(f"N_obs_total: A={one('A','N_obs_total'):.6f} "
           f"B={one('B','N_obs_total'):.6f} AB={one('AB','N_obs_total'):.6f}")
     print(f"V_total sum: A={one('A','V_total_sum'):.6f} "

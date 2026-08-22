@@ -127,7 +127,7 @@ def main(argv=None):
         print(f"[proxy] erosion {rr:5.1f} deg -> {int(e.sum()):5d} of "
               f"{int(ok.sum())} cells survive "
               f"({100 * e.sum() / max(ok.sum(), 1):5.1f}%)")
-    ero = ero_ladder[float(radii[0])]  # placeholder for the artifact below
+    ero_ladder[float(radii[0])]  # placeholder for the artifact below
 
     # --- validation on the real events -------------------------------------
     with h5py.File(C.GW_259) as f:
@@ -209,7 +209,7 @@ def main(argv=None):
 
     p_ev = p_contained(med, pix_med)
     exp_n = float(p_ev.sum())
-    print(f"\n[validate] PROBABILISTIC proxy on the same 259 events:")
+    print("\n[validate] PROBABILISTIC proxy on the same 259 events:")
     print(f"    expected contained = {exp_n:.2f} events against an observed "
           f"{int(truth.sum())}")
     print(f"    rate ratio = "

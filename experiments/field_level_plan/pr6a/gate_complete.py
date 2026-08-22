@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 
@@ -79,7 +78,6 @@ def main(argv=None):
     # missing branch reduces to the off-footprint sky -- which f_p handles
     # exactly.  Switching to dark_sirens_complete instead would give -inf for
     # every event outside the 1,854-pixel footprint (measured: n = 0 survived).
-    real_opts = A.make_opts
     _real_fixed = A.fixed_values
 
     h0 = np.arange(20.0, 140.0 + 0.5 * a.h0_step, a.h0_step)

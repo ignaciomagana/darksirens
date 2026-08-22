@@ -25,7 +25,6 @@ kernel is held fixed.
 from __future__ import annotations
 
 import argparse
-import json
 
 import make_mock
 import tier_c

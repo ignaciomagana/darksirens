@@ -129,7 +129,7 @@ def main(argv=None):
     print(f"  H (observed) = {H:.6f}")
     print(f"  J (expected) = {J:.6f}   from {len(scores)} disjoint subsets")
     print(f"  J/H = {J/H:.3f}   -> width inflation x{np.sqrt(J/H):.3f}")
-    print(f"  (mock: J/H = 6.034, x2.456)")
+    print("  (mock: J/H = 6.034, x2.456)")
     json.dump(out, open(a.out, "w"), indent=1)
     print("PROD_SANDWICH_DONE", flush=True)
 

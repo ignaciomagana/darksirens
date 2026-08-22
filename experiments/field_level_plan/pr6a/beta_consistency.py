@@ -91,7 +91,6 @@ def main(argv=None):
     import generate_mock_data as G
     with h5py.File(a.injections) as f:
         m1src = np.asarray(f["m1src"][...])
-        m1det = np.asarray(f["m1det"][...])
         m2src = np.asarray(f["m2src"][...])
         chi = np.asarray(f["chieff"][...])
     pop = G.PopulationConfig()
@@ -137,7 +136,7 @@ def main(argv=None):
     # a KS p-value at the events' effective n (injections are far better sampled)
     p_ks = float(stats.kstwo.sf(ks, z_ev.size)) if ks > 0 else 1.0
 
-    print(f"\nDETECTED REDSHIFT DISTRIBUTIONS (the selection integral's support):")
+    print("\nDETECTED REDSHIFT DISTRIBUTIONS (the selection integral's support):")
     print(f"  {'quantile':>10} {'events':>10} {'injections':>12}")
     for t, e, i in zip((0.1, 0.25, 0.5, 0.75, 0.9), ev_q, in_q):
         print(f"  {t:>10.2f} {e:>10.4f} {i:>12.4f}")

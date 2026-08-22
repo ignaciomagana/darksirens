@@ -164,7 +164,7 @@ def main(argv=None):
         var_a_event = float(max(col.var(ddof=1) - var_e / M, 0.0))
         # The denominator R is built from is the WITHIN-DATASET event spread the
         # OPG estimator sees, which is Var(a) + Var(e) -- unchanged.
-        var_a = float(within.mean() if False else U.var(axis=1, ddof=1).mean())
+        var_a = float(U.var(axis=1, ddof=1).mean())
         # AND ITS POWER, because the point estimate alone was read twice as a
         # result and is not one: bootstrap over DATASETS (the replicated unit).
         _rng = np.random.default_rng(0)
@@ -199,10 +199,10 @@ def main(argv=None):
         print(f"  => R predicted at N={a.nobs}: {out['R_predicted']:.2f} "
               f"(bootstrap 90% CI [{out['R_bootstrap_ci90'][0]:.2f}, "
               f"{out['R_bootstrap_ci90'][1]:.2f}] over {M} datasets)")
-        print(f"     If that CI spans both 1 and the capture route's value, this "
-              f"probe is UNINFORMATIVE at this M -- not a disagreement.")
-        print(f"     (R measured by event_reshuffle.py: 5.57 with f_p at its "
-              f"peak, 0.98 without at its own -- compare to the ARM being run)")
+        print("     If that CI spans both 1 and the capture route's value, this "
+              "probe is UNINFORMATIVE at this M -- not a disagreement.")
+        print("     (R measured by event_reshuffle.py: 5.57 with f_p at its "
+              "peak, 0.98 without at its own -- compare to the ARM being run)")
     uX, uY = U[0], U[1]
     cX, cY = uX - uX.mean(), uY - uY.mean()
     out.update(

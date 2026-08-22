@@ -62,7 +62,7 @@ M_LIM_UNION = 21.0
 Z_DEPTH = 0.30
 
 # provenance helper shared verbatim
-import hashlib, json, subprocess  # noqa: E402
+import json, subprocess  # noqa: E402
 
 
 def git_sha() -> str:

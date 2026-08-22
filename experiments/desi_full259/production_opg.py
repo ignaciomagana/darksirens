@@ -180,8 +180,8 @@ def main(argv=None):
         curv_ratio = float(np.max(np.abs(d2)) / max(spread, 1e-300))
         print(f"  ORDERING CHECK (per-event smoothness in H0): "
               f"max|d2 ll| / sd(ll) = {curv_ratio:.4f}")
-        print(f"    (a permuted capture gives O(1) here; a consistent one gives "
-              f"the true curvature, ~(dh/H0)^2)")
+        print("    (a permuted capture gives O(1) here; a consistent one gives "
+              "the true curvature, ~(dh/H0)^2)")
         if curv_ratio > 0.5:
             fail.append(
                 f"ordering check failed: per-event second differences are "
@@ -203,7 +203,7 @@ def main(argv=None):
         print(f"  H (observed) = {H:.6f}")
         print(f"  J (expected, OPG over {N} events) = {J:.6f}")
         print(f"  J/H = {J/H:.3f}   -> width inflation x{np.sqrt(J/H):.3f}")
-        print(f"  (mock: J/H = 6.034, x2.456)")
+        print("  (mock: J/H = 6.034, x2.456)")
     json.dump(out, open(a.out, "w"), indent=1, default=float)
     print("PROD_OPG_DONE", flush=True)
 
