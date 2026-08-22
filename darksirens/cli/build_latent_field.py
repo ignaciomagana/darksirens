@@ -63,12 +63,16 @@ and the artifact gains
 
     /latent_field/tracers/<k>/counts, completeness, A_moments, B_moments,
                               shell_response
-                            attrs: name, b_gal, P_F, F_F,
+                            attrs: name, b_gal, b_gal_hat, P_F, F_F,
                                    selection_fit, m_lim, sigma_z, theta_ref
-    /latent_field attrs: n_tracer, tracer_names, tracer_bias,
+    /latent_field attrs: n_tracer, tracer_names, tracer_bias, tracer_bias_hat,
                          tracer_overlap_policy, tracer_theta_ref,
-                         bias_profile_cov, bias_prior_log_sd,
-                         bias_cov_convention
+                         bias_profile_cov, bias_profile_cov_log,
+                         bias_profile_curvature_log(_eigenvalues),
+                         bias_profile_sd_log, bias_profile_grad_log_inf
+                         (+ _at_anchor, _tol), bias_profile_outer,
+                         bias_prior_log_sd, bias_cov_convention,
+                         bias_spread_inflation_along_v_by_tracer
 
 on top of the shared block, which does not change shape: there is still one
 ``xi_hat``, one ``H_chol``, one member ensemble.  That layout IS PLAN §4.4's
@@ -91,6 +95,15 @@ shared ``--selection-fit`` and to ``SIGMA_Z_DEFAULT``), and ``M0hat`` and
 from catalog k's own operator, which is PLAN §3.4's sentence rather than a
 paraphrase of it.  ``delta`` and ``Om0`` stay one column apiece: they describe
 the field and the cosmology, which the K catalogs share.
+
+**The (K, K) bias covariance is read at the PROFILE MAXIMUM.**  The log-bias
+curvature is ``diag(b) H_b diag(b) + diag(b g_b)``, and the second term
+vanishes only where the profile gradient does.  The anchor's own ``b_k`` is not
+that point -- the count channel decreases monotonically in the bias amplitude
+and the prior, centred on the anchor, contributes no gradient there -- so the
+builder runs ``latent_counts.bias_profile``'s outer Newton to the maximum,
+reads the curvature there, gates the residual ``|b dP/db|_inf``, and stamps
+both the solved ``tracer_bias_hat`` and the residual it reached.
 
 **A K = 1 build is byte-identical through all of that, digest included.**  The
 tracer switches are dropped from the stamped configuration when ``K == 1`` and
@@ -217,6 +230,17 @@ def main(argv=None):
                          "ratio -- so this is what makes the (K, K) draw-"
                          "covariance inflation a proper posterior rather than "
                          "the inverse of an indefinite matrix.")
+    ap.add_argument("--bias-profile-outer", type=int, default=8,
+                    help="K >= 2 only: outer Newton trips used to profile the "
+                         "stacked count channel to its MAXIMUM in the biases "
+                         "before the (K, K) covariance is read off. The "
+                         "covariance is a Laplace width, and a Laplace width "
+                         "is only a width at a stationary point.")
+    ap.add_argument("--bias-profile-grad-tol", type=float, default=1e-6,
+                    help="K >= 2 only: the residual |b dP/db|_inf the profile "
+                         "solution must reach. Gated, not reported: a "
+                         "covariance quoted at a non-stationary point is not "
+                         "a width.")
     ap.add_argument("--tracer-names", default=None,
                     help="comma-separated tracer labels, in tracer-index "
                          "order (default t0,t1,...).")
@@ -248,8 +272,8 @@ def main(argv=None):
     from darksirens.redshift.grid import zgrid
     from darksirens.redshift.latent_counts import (
         B_GAL_SYSTEMATIC_FLOOR_FRAC, MultiTracerCountOperator, TracerCounts,
-        b_gal_profile_sigma, bias_profile_curvature_log, bias_profile_grad,
-        bias_profile_hessian, check_disjoint_tracers,
+        b_gal_profile_sigma, bias_profile, bias_profile_grad,
+        check_disjoint_tracers,
         count_map_solve, counts_from_catalog, counts_from_catalog_by_tracer,
         dgrad_db, dgrad_db_by_tracer, gradient, laplace_draws,
         laplace_draws_multitracer, make_count_operator,
@@ -678,9 +702,26 @@ def main(argv=None):
     # s_b; here the prior supplies a width where the counts supply none.  The
     # prior is centred on the anchor's own b_k, so it says "b_k is known to 5%
     # around the value this artifact was built at", never "b_k is 1".
+    #
+    # **A LAPLACE WIDTH IS ONLY A WIDTH AT A STATIONARY POINT.**  The curvature
+    # in log bias is
+    #     H_u = diag(b) H_b diag(b) + diag(b g_b)
+    # and the second term is the one the reparametrization generates.  It
+    # vanishes only where the profile gradient does.  PR-7 evaluated it at the
+    # ANCHOR's own b_k, which is not the maximum: the count channel decreases
+    # monotonically in the bias amplitude (:func:`log_bias_prior_potential`)
+    # and the prior, being centred on the anchor, contributes exactly zero
+    # gradient there -- so ``b g_b`` is systematically nonzero and
+    # ``inv(H_u)`` was a Laplace width about a non-stationary point.  The fix
+    # is the library's own outer Newton, which Tier E already uses
+    # (experiments/field_level_plan/pr7/tier_e.py): profile to the maximum
+    # FIRST, read the curvature THERE, and gate the residual gradient so the
+    # claim is checked rather than assumed.
     fl_frac = (B_GAL_SYSTEMATIC_FLOOR_FRAC if args.s_b_floor_frac is None
                else float(args.s_b_floor_frac))
     cov_b = None
+    cov_u = None
+    b_hat = None
     bias_prior_sd = None
     if n_tracer == 1:
         prof = b_gal_profile_sigma(xi_hat, op, dgrad_b=dgrad[:, -1],
@@ -690,38 +731,67 @@ def main(argv=None):
     else:
         bias_prior_sd = float(fl_frac if args.bias_prior_log_sd is None
                               else args.bias_prior_log_sd)
-        b_arr = jnp.asarray(b_k, dtype=jnp.float64)
-        prior = (np.log(np.asarray(b_k, dtype=float)), bias_prior_sd)
-        g_b = bias_profile_grad(xi_hat, op, log_b_prior=prior)
-        H_b = bias_profile_hessian(xi_hat, op, H_chol=L, log_b_prior=prior)
-        H_u = np.asarray(bias_profile_curvature_log(g_b, H_b, b_arr))
+        b_anchor = np.asarray(b_k, dtype=float)
+        prior = (np.log(b_anchor), bias_prior_sd)
+        # The residual the anchor carries, measured before it is removed: this
+        # is the number that made the pre-fix covariance a width about the
+        # wrong point, and printing it is what keeps the claim falsifiable.
+        gu_anchor = float(np.max(np.abs(
+            b_anchor * np.asarray(bias_profile_grad(
+                xi_hat, op, log_b_prior=prior)))))
+        print(f"[b_gal] K = {n_tracer}: profiling to the maximum in log bias "
+              f"({args.bias_profile_outer} outer Newton trips); "
+              f"|b dP/db|_inf at the anchor = {gu_anchor:.6e}", flush=True)
+        fit = bias_profile(op, n_outer=int(args.bias_profile_outer),
+                           log_b_prior=prior, xi0=xi_hat)
+        b_hat = np.asarray(fit["b_hat"], dtype=float)
+        gu_mode = float(np.max(np.abs(np.asarray(fit["profile_grad_log"]))))
+        H_u = np.asarray(fit["curvature_log_b"])
         evals = np.linalg.eigvalsh(H_u)
         if evals.min() <= 0.0:
             raise SystemExit(
                 f"K = {n_tracer} bias covariance is not positive definite: the "
-                f"log-bias curvature at the anchor has eigenvalues "
-                f"{evals.tolist()} even with a prior of width "
-                f"{bias_prior_sd:g} nat. The count channel does not identify "
-                f"the bias amplitude (only the ratio), so the prior is what "
-                f"makes the amplitude proper; tighten --bias-prior-log-sd, or "
-                f"pass --no-b-gal-dispersion to ship an anchor whose members "
-                f"carry no bias dispersion at all (and which stamps that).")
-        cov_u = np.linalg.inv(H_u)
-        cov_b = np.diag(np.asarray(b_k)) @ cov_u @ np.diag(np.asarray(b_k))
+                f"log-bias curvature at the profile maximum b_hat = "
+                f"{b_hat.tolist()} has eigenvalues {evals.tolist()} even with "
+                f"a prior of width {bias_prior_sd:g} nat. The count channel "
+                f"does not identify the bias amplitude (only the ratio), so "
+                f"the prior is what makes the amplitude proper; tighten "
+                f"--bias-prior-log-sd, or pass --no-b-gal-dispersion to ship "
+                f"an anchor whose members carry no bias dispersion at all "
+                f"(and which stamps that).")
+        if not np.isfinite(gu_mode) \
+                or gu_mode > float(args.bias_profile_grad_tol):
+            raise SystemExit(
+                f"K = {n_tracer} bias profile did not reach a stationary "
+                f"point: |b dP/db|_inf = {gu_mode:.6e} at b_hat = "
+                f"{b_hat.tolist()} after {args.bias_profile_outer} outer "
+                f"Newton trips, against the tolerance "
+                f"{args.bias_profile_grad_tol:g} (it was {gu_anchor:.6e} at "
+                f"the anchor). inv(H_u) is a Laplace width, and a Laplace "
+                f"width about a non-stationary point is not a width: the "
+                f"diag(b g_b) term of the log-bias curvature is exactly the "
+                f"residual gradient. Raise --bias-profile-outer, or relax "
+                f"--bias-profile-grad-tol only with a reason.")
+        # The width is quoted in u = log b at the maximum; the DRAW inflation
+        # is V C_b V^T with V = S[:, b-block] = d xi_hat/d b at the ANCHOR, so
+        # the push to b coordinates uses the anchor's b -- V diag(b_anchor) is
+        # d xi_hat/d u there, and the two halves of the product must be taken
+        # at the same point. ``bias_profile_cov_log`` and ``tracer_bias_hat``
+        # are stamped so a reader can redo the push at b_hat if they want it.
+        cov_u = np.asarray(fit["cov_log_b"])
+        cov_b = np.diag(b_anchor) @ cov_u @ np.diag(b_anchor)
         sd_u = np.sqrt(np.diag(cov_u))
-        corr = float(cov_u[0, 1] / (sd_u[0] * sd_u[1]))
-        prof = dict(s_b=float(np.max(np.sqrt(np.diag(cov_b)))),
-                    s_b_stat=float(np.max(np.sqrt(np.diag(cov_b)))),
-                    s_b_floor=float(bias_prior_sd),
-                    floor_active=False,
-                    curvature_profile=float(evals.min()),
-                    curvature_conditional=float(evals.max()))
-        s_b = float(prof["s_b"])
         print(f"[b_gal] K = {n_tracer}: log-bias prior sd {bias_prior_sd:g}; "
-              f"posterior sd in log b {sd_u.tolist()}, corr(0,1) {corr:.6f} "
-              f"(the off-diagonal IS the shared field); log-ratio sd "
-              f"{float(np.sqrt(cov_u[0, 0] + cov_u[1, 1] - 2 * cov_u[0, 1])):.6e}",
-              flush=True)
+              f"b_hat {b_hat.tolist()} (anchor {b_anchor.tolist()}), "
+              f"|b dP/db|_inf {gu_anchor:.6e} -> {gu_mode:.6e}, inner "
+              f"grad_inf {float(fit['grad_inf']):.2e}", flush=True)
+        msg = f"[b_gal] posterior sd in log b {sd_u.tolist()}"
+        if n_tracer == 2:
+            corr = float(cov_u[0, 1] / (sd_u[0] * sd_u[1]))
+            var_lr = float(cov_u[0, 0] + cov_u[1, 1] - 2 * cov_u[0, 1])
+            msg += (f", corr(0,1) {corr:.6f} (the off-diagonal IS the shared "
+                    f"field); log-ratio sd {np.sqrt(var_lr):.6e}")
+        print(msg, flush=True)
     inflate = not args.no_b_gal_dispersion
     # The spread the inflation adds, reported TWO ways because one number
     # alone misreads it.  (i) On the whole member norm: ||L^{-T} g|| has
@@ -731,27 +801,53 @@ def main(argv=None):
     # term actually lives: Var(v.xi) goes from v^T H^{-1} v to
     # v^T H^{-1} v + s_b^2 (v.v)^2.  That is the honest size of S-2, and it is
     # the direction the count channel's amplitude response lives in.
+    #
+    # At K >= 2 the SECOND number has no scalar to be built from.  The
+    # inflation is V C_b V^T, so the variance along a direction v is
+    #     v^T H^{-1} v + (V^T v)^T C_b (V^T v),
+    # which for K = 1 collapses to the expression above and for K >= 2 does
+    # NOT: the K bias directions are correlated (that correlation IS the
+    # shared field), so no single ``s_b`` reproduces it.  It is therefore
+    # reported per bias direction and stamped under a K >= 2 name, rather than
+    # under ``b_gal_spread_inflation_along_v``, which means the K = 1 rank-1
+    # quantity and would be a wrong number under a trusted name.
     Hinv = np.linalg.inv(np.asarray(L) @ np.asarray(L).T)
-    v_b = S[:, -1]
     tr_hinv = float(np.trace(Hinv))
+    infl_v = None
+    infl_v_k = None
     if n_tracer == 1:
+        v_b = S[:, -1]
         rank1_tr = float(s_b ** 2 * np.dot(v_b, v_b))
+        infl_factor = float(np.sqrt((tr_hinv + rank1_tr) / tr_hinv))
+        var_v = float(v_b @ Hinv @ v_b)
+        infl_v = float(np.sqrt(
+            (var_v + s_b ** 2 * float(v_b @ v_b) ** 2) / var_v))
+        print(f"[b_gal] s_b = {s_b:.6e} "
+              f"(profile {prof['s_b_stat']:.6e}, floor {prof['s_b_floor']:.6e}, "
+              f"{'FLOOR' if prof['floor_active'] else 'PROFILE'} binding); "
+              f"curvature profile {prof['curvature_profile']:.6e} vs conditional "
+              f"{prof['curvature_conditional']:.6e}", flush=True)
+        print(f"[b_gal] rank-1 inflation {'ON' if inflate else 'OFF'}: "
+              f"tr H^-1 = {tr_hinv:.6e}, s_b^2||v||^2 = {rank1_tr:.6e}, "
+              f"member-spread factor "
+              f"{'' if inflate else 'WOULD BE '}{infl_factor:.6f} overall, "
+              f"{infl_v:.4f} ALONG v", flush=True)
     else:
         V_blk = S[:, -n_tracer:]
         rank1_tr = float(np.trace(V_blk @ cov_b @ V_blk.T))
-    infl_factor = float(np.sqrt((tr_hinv + rank1_tr) / tr_hinv))
-    var_v = float(v_b @ Hinv @ v_b)
-    infl_v = float(np.sqrt((var_v + s_b ** 2 * float(v_b @ v_b) ** 2) / var_v))
-    print(f"[b_gal] s_b = {s_b:.6e} "
-          f"(profile {prof['s_b_stat']:.6e}, floor {prof['s_b_floor']:.6e}, "
-          f"{'FLOOR' if prof['floor_active'] else 'PROFILE'} binding); "
-          f"curvature profile {prof['curvature_profile']:.6e} vs conditional "
-          f"{prof['curvature_conditional']:.6e}", flush=True)
-    print(f"[b_gal] rank-1 inflation {'ON' if inflate else 'OFF'}: "
-          f"tr H^-1 = {tr_hinv:.6e}, s_b^2||v||^2 = {rank1_tr:.6e}, "
-          f"member-spread factor "
-          f"{'' if inflate else 'WOULD BE '}{infl_factor:.6f} overall, "
-          f"{infl_v:.4f} ALONG v", flush=True)
+        infl_factor = float(np.sqrt((tr_hinv + rank1_tr) / tr_hinv))
+        infl_v_k = []
+        for kk in range(n_tracer):
+            v = V_blk[:, kk]
+            var0 = float(v @ Hinv @ v)
+            pv = V_blk.T @ v
+            infl_v_k.append(float(np.sqrt(
+                (var0 + float(pv @ cov_b @ pv)) / var0)))
+        print(f"[b_gal] rank-{n_tracer} inflation "
+              f"{'ON' if inflate else 'OFF'}: tr H^-1 = {tr_hinv:.6e}, "
+              f"tr V C_b V^T = {rank1_tr:.6e}, member-spread factor "
+              f"{'' if inflate else 'WOULD BE '}{infl_factor:.6f} overall, "
+              f"{[round(x, 4) for x in infl_v_k]} along v_k", flush=True)
 
     # --------------------------------------------------------- members
     # ``g_members`` and ``Xi_members`` are DIFFERENT objects; the builder used
@@ -833,8 +929,9 @@ def main(argv=None):
     # factory.latent_artifact_fingerprint).
     cfg = dict(vars(args), theta_ref=theta_ref, labels=labels,
                jitter=dict(basis.meta),
-               s_b=(s_b if inflate else 0.0),
                b_gal_dispersion=bool(inflate))
+    if n_tracer == 1:
+        cfg["s_b"] = (s_b if inflate else 0.0)
     # The sha identifies the artifact CONTENT + configuration; the output
     # path is identity-irrelevant (the reproducibility gate compares two
     # same-seed builds written to different paths).
@@ -853,15 +950,17 @@ def main(argv=None):
     # PR-7's tracer switches, dropped on a K = 1 build for the reason the PR-8
     # block above gives: a K = 1 rebuild must reproduce the digest of the anchor
     # it rebuilds, byte for byte, and a key whose value is None changes the JSON
-    # while changing no array in the file. That is also why the per-tracer
-    # SELECTION switches are popped here rather than defaulted into the K = 1
-    # stamp. At K >= 2 they all stay in (and ``n_tracer`` joins them), because
-    # two anchors that partition the same catalog differently, or select
-    # against it differently, are different artifacts.
+    # while changing no array in the file. That is also why every K >= 2 switch
+    # added since -- the per-tracer selection inputs and the two bias-profile
+    # controls -- is popped here rather than defaulted into the K = 1 stamp. At
+    # K >= 2 they all stay in (and ``n_tracer`` joins them), because two anchors
+    # that partition the same catalog differently, or select against it
+    # differently, are different artifacts.
     if n_tracer == 1:
         for _k in ("tracer_labels", "tracer_completeness", "tracer_b_gal",
                    "tracer_names", "bias_prior_log_sd",
-                   "tracer_selection_fit", "tracer_sigma_z"):
+                   "tracer_selection_fit", "tracer_sigma_z",
+                   "bias_profile_outer", "bias_profile_grad_tol"):
             cfg.pop(_k, None)
     else:
         cfg["n_tracer"] = int(n_tracer)
@@ -870,6 +969,10 @@ def main(argv=None):
         cfg["tracer_theta_ref"] = theta_k
         cfg["tracer_sigma_z_used"] = [float(s) for s in sigz_k]
         cfg["tracer_m_lim"] = [float(s["m_lim"]) for s in sel_k]
+        # The covariance is now read at the profile MAXIMUM, so the point it
+        # was read at is part of the artifact's identity.
+        cfg["bias_b_hat"] = [float(x) for x in b_hat]
+        cfg["bias_cov_log"] = np.asarray(cov_u).tolist()
     sha = hashlib.sha256()
     for arr in (np.asarray(xi_hat), np.asarray(L), S, counts, f_p,
                 np.asarray(W_k_ref[0]), A, B, b_nodes, z_sub, edges):
@@ -929,18 +1032,36 @@ def main(argv=None):
             "H^{-1} + s_b^2 v v^T, v = sensitivity_S[:, 'b_gal']"
             if inflate else "H^{-1}")
         g.attrs["b_gal_dispersion"] = bool(inflate)
-        g.attrs["s_b"] = float(s_b if inflate else 0.0)
-        g.attrs["s_b_profile"] = float(prof["s_b_stat"])
-        g.attrs["s_b_floor"] = float(prof["s_b_floor"])
-        g.attrs["s_b_floor_frac"] = float(fl_frac)
-        g.attrs["s_b_floor_active"] = bool(prof["floor_active"])
-        g.attrs["b_gal_curvature_profile"] = float(prof["curvature_profile"])
-        g.attrs["b_gal_curvature_conditional"] = float(
-            prof["curvature_conditional"])
+        # The ``s_b*`` / ``b_gal_curvature_*`` / ``..._along_v`` names each
+        # denote a K = 1 object: a SCALAR profile curvature in b_gal, the
+        # systematics floor that may raise it, and the rank-1 variance ratio
+        # along v.  None of them exists at K >= 2 -- there the object is a
+        # (K, K) posterior covariance in log bias under a stated prior, with no
+        # floor and no scalar -- so they are written only at K = 1 and the
+        # K >= 2 block below stamps its own names.  Filling them with
+        # repurposed quantities (max over the diagonal, the prior sd, the
+        # curvature eigenvalues) would put wrong numbers under names a reader
+        # has learned to trust.
+        if n_tracer == 1:
+            g.attrs["s_b"] = float(s_b if inflate else 0.0)
+            g.attrs["s_b_profile"] = float(prof["s_b_stat"])
+            g.attrs["s_b_floor"] = float(prof["s_b_floor"])
+            g.attrs["s_b_floor_frac"] = float(fl_frac)
+            g.attrs["s_b_floor_active"] = bool(prof["floor_active"])
+            g.attrs["b_gal_curvature_profile"] = float(
+                prof["curvature_profile"])
+            g.attrs["b_gal_curvature_conditional"] = float(
+                prof["curvature_conditional"])
+        # tr(H^-1 + inflation)/tr(H^-1): the same object at every K (the
+        # inflation's trace is s_b^2||v||^2 at K = 1 and tr(V C_b V^T) beyond),
+        # so this one name is honest on both branches.  Written HERE, between
+        # the two K = 1-only groups, because HDF5 stores attributes in creation
+        # order and the K = 1 artifact is byte-identical only if that order is.
         g.attrs["b_gal_spread_inflation"] = float(infl_factor if inflate
                                                   else 1.0)
-        g.attrs["b_gal_spread_inflation_along_v"] = float(infl_v if inflate
-                                                          else 1.0)
+        if n_tracer == 1:
+            g.attrs["b_gal_spread_inflation_along_v"] = float(infl_v if inflate
+                                                              else 1.0)
         g.attrs["seed"] = args.seed
         g.attrs["grad_inf"] = float(sol["grad_inf"])
         # ---- K >= 2 (PR-7).  A SUBGROUP, deliberately: everything above is
@@ -958,15 +1079,47 @@ def main(argv=None):
                 "disjoint (OWNER DECISION 9); the K count arrays are a "
                 "partition of the parent catalog by per-galaxy label, so "
                 "disjointness is structural rather than checked")
+            # b_hat is the profile MAXIMUM in log bias, which is where the
+            # covariance below is read; ``tracer_bias`` is the anchor the field
+            # was solved at, and the two are different points.  Both are
+            # stamped because ``bias_profile_cov`` is the push of
+            # ``bias_profile_cov_log`` through diag(``tracer_bias``) -- the
+            # anchor, so that it pairs with V = d xi_hat/d b, which is also the
+            # anchor's -- and a reader who wants the push at b_hat needs b_hat.
+            g.attrs["tracer_bias_hat"] = np.asarray(b_hat, dtype=float)
             g.attrs["bias_profile_cov"] = json.dumps(
                 np.asarray(cov_b).tolist())
+            g.attrs["bias_profile_cov_log"] = json.dumps(
+                np.asarray(cov_u).tolist())
+            g.attrs["bias_profile_curvature_log"] = json.dumps(
+                np.asarray(H_u).tolist())
+            g.attrs["bias_profile_curvature_log_eigenvalues"] = np.asarray(
+                evals, dtype=float)
+            g.attrs["bias_profile_sd_log"] = np.asarray(sd_u, dtype=float)
+            # The gate, and the number it replaced.  |b dP/db| at the anchor is
+            # the size of the diag(b g_b) term the pre-fix covariance carried.
+            g.attrs["bias_profile_grad_log_inf"] = float(gu_mode)
+            g.attrs["bias_profile_grad_log_inf_at_anchor"] = float(gu_anchor)
+            g.attrs["bias_profile_grad_log_tol"] = float(
+                args.bias_profile_grad_tol)
+            g.attrs["bias_profile_outer"] = int(args.bias_profile_outer)
+            g.attrs["bias_profile_solve_grad_inf"] = float(fit["grad_inf"])
             g.attrs["bias_prior_log_sd"] = float(bias_prior_sd)
             g.attrs["bias_cov_convention"] = (
                 "posterior in log b under a log-normal prior of sd "
-                "bias_prior_log_sd centred on each tracer's own b_gal; the "
-                "count channel identifies the RATIO b_j/b_k, not the "
-                "amplitude (PLAN 4.3), so the prior is what makes the "
-                "amplitude direction proper")
+                "bias_prior_log_sd centred on each tracer's own b_gal, "
+                "evaluated at the PROFILE MAXIMUM tracer_bias_hat (a Laplace "
+                "width is a width only at a stationary point; the residual is "
+                "stamped as bias_profile_grad_log_inf); the count channel "
+                "identifies the RATIO b_j/b_k, not the amplitude (PLAN 4.3), "
+                "so the prior is what makes the amplitude direction proper")
+            # The K = 1 name ``b_gal_spread_inflation_along_v`` is
+            # sqrt(1 + s_b^2 (v.v)^2 / v^T H^-1 v), which has no K >= 2 reading:
+            # the rank-K variance along v_k is
+            # v^T H^-1 v + (V^T v)^T C_b (V^T v) and the K directions are
+            # correlated.  Different object, different name.
+            g.attrs["bias_spread_inflation_along_v_by_tracer"] = np.asarray(
+                infl_v_k if inflate else [1.0] * n_tracer, dtype=float)
             g.attrs["draw_covariance"] = (
                 "H^{-1} + V C_b V^T, V = sensitivity_S[:, b_gal block], "
                 "C_b = bias_profile_cov" if inflate else "H^{-1}")
@@ -976,6 +1129,7 @@ def main(argv=None):
                 t = tg.create_group(str(k))
                 t.attrs["name"] = nm
                 t.attrs["b_gal"] = float(b_k[k])
+                t.attrs["b_gal_hat"] = float(b_hat[k])
                 t.attrs["P_F"] = float(P_k[k])
                 t.attrs["F_F"] = float(F_k[k])
                 # This tracer's own selection: the fit it came from, the

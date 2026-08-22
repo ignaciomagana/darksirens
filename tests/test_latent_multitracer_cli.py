@@ -15,10 +15,11 @@ checked here two ways on a small synthetic world:
   DIFFERENT ``xi_hat`` (the stacked fit is a different fit), while the
   per-tracer counts still sum to the parent's exactly.
 
-A further pin covers what "K catalogs of selection against one field" has to
-mean beyond ``f_p`` and ``b_k``: the SHELL RESPONSE is per tracer, because a
-catalog's own magnitude selection and photo-z kernel are what weight its
-galaxies within a shell.
+Two further pins cover what "K catalogs of selection against one field" has to
+mean beyond ``f_p`` and ``b_k``: the SHELL RESPONSE is per tracer (a catalog's
+own magnitude selection and photo-z kernel are what weight its galaxies within
+a shell), and the ``(K, K)`` bias covariance is read at the PROFILE MAXIMUM
+rather than at the anchor, with the residual gradient gated.
 
 The world is deliberately tiny (nside 8, rank 48, two shells) but must still
 clear the builder's own occupancy guard 7 (``>= 1e4`` galaxies and ``>= 500``
@@ -282,6 +283,89 @@ def test_shell_response_is_per_tracer(tmp_path):
         # only one M0hat direction to give.
         assert (np.linalg.norm(c_agn - c_gal)
                 > 0.01 * np.linalg.norm(c_gal))
+
+
+@pytest.mark.slow
+def test_bias_covariance_is_read_at_the_profile_maximum(tmp_path):
+    """``inv(H_u)`` is a Laplace width, and a width needs a stationary point.
+
+    The log-bias curvature is ``diag(b) H_b diag(b) + diag(b g_b)``; the second
+    term is exactly the profile gradient and vanishes only at the maximum.  The
+    anchor's own ``b_k`` is not the maximum -- the count channel decreases
+    monotonically in the bias amplitude and the prior, centred on the anchor,
+    contributes no gradient there -- so the builder profiles to the maximum
+    first.  Both numbers are stamped, and the test pins that they are on
+    opposite sides of the tolerance: the anchor residual is O(10) nats per nat
+    on this world, the solved one is machine noise.
+    """
+    w = _write_world(tmp_path)
+    out = tmp_path / "mode.h5"
+    _build(w, out, ["--tracer-labels", "tracer",
+                    "--tracer-completeness", w["mth1"],
+                    "--tracer-completeness", w["mth2"],
+                    "--tracer-b-gal", "1.0", "--tracer-b-gal", "2.0",
+                    "--tracer-names", "gal,agn"])
+    with h5py.File(out) as f:
+        g = f["latent_field"]
+        tol = float(g.attrs["bias_profile_grad_log_tol"])
+        assert float(g.attrs["bias_profile_grad_log_inf"]) <= tol
+        # The defect, on the record: what the anchor carried.
+        assert float(g.attrs["bias_profile_grad_log_inf_at_anchor"]) > 1.0
+        b_hat = np.asarray(g.attrs["tracer_bias_hat"])
+        b_anchor = np.asarray(g.attrs["tracer_bias"])
+        assert b_hat.shape == (2,)
+        # The maximum is a DIFFERENT point from the anchor; if it were not,
+        # the residual above could not have been large.
+        assert np.max(np.abs(np.log(b_hat / b_anchor))) > 1e-3
+        # The covariance is the inverse of the curvature that was gated.
+        C_log = np.asarray(json.loads(g.attrs["bias_profile_cov_log"]))
+        H_log = np.asarray(json.loads(g.attrs["bias_profile_curvature_log"]))
+        assert np.allclose(C_log @ H_log, np.eye(2), atol=1e-10)
+        assert np.all(np.asarray(
+            g.attrs["bias_profile_curvature_log_eigenvalues"]) > 0.0)
+        assert "PROFILE MAXIMUM" in g.attrs["bias_cov_convention"]
+
+        # The K = 1 scalar names denote K = 1 objects and must not be filled
+        # with repurposed K >= 2 quantities: there is no scalar s_b here, no
+        # systematics floor, and the rank-1 along-v ratio has no K >= 2
+        # reading.
+        for gone in ("s_b", "s_b_profile", "s_b_floor", "s_b_floor_active",
+                     "s_b_floor_frac", "b_gal_curvature_profile",
+                     "b_gal_curvature_conditional",
+                     "b_gal_spread_inflation_along_v"):
+            assert gone not in g.attrs, gone
+        infl = np.asarray(g.attrs["bias_spread_inflation_along_v_by_tracer"])
+        assert infl.shape == (2,) and np.all(infl >= 1.0)
+
+
+@pytest.mark.slow
+def test_bias_profile_residual_gate_refuses_a_non_stationary_point(tmp_path):
+    """``--bias-profile-outer 0`` leaves the profile AT the anchor.
+
+    That is the pre-fix evaluation point exactly, so the gate must refuse it
+    rather than write a covariance -- otherwise "evaluated at the maximum" is a
+    claim the artifact makes without checking.
+    """
+    w = _write_world(tmp_path)
+    cmd = [sys.executable, "-m", "darksirens.cli.build_latent_field",
+           "--survey", w["survey"], "--selection-fit", w["sel"],
+           "--n0-calibration", w["cal"],
+           "--per-pixel-completeness", w["mth1"],
+           "--out", str(tmp_path / "nonstationary.h5"), "--om0", "0.3075",
+           "--z-depth", str(Z_DEPTH), "--n-shells", str(N_SHELL),
+           "--m-sph", "16", "--m-z", "3", "--ls-sph", "0.9", "--ls-z", "0.15",
+           "--m-draw", "4", "--n-b-nodes", "5", "--b-max", "2.0",
+           "--tracer-labels", "tracer",
+           "--tracer-b-gal", "1.0", "--tracer-b-gal", "2.0",
+           "--bias-profile-outer", "0"]
+    env = dict(os.environ, JAX_PLATFORMS="cpu")
+    env.pop("DARKSIRENS_ZMAX", None)
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                       cwd=os.path.dirname(os.path.dirname(
+                           os.path.abspath(__file__))))
+    assert r.returncode != 0
+    assert "did not reach a stationary point" in (r.stdout + r.stderr)
+    assert not (tmp_path / "nonstationary.h5").exists()
 
 
 @pytest.mark.slow
