@@ -65,7 +65,6 @@ def main(argv=None):
     with h5py.File(args.survey) as f:
         zg, ng = f["zgals"][...], f["ngals"][...]
         nside = int(f.attrs.get("nside", hp.npix2nside(zg.shape[0])))
-    npix = 12 * nside ** 2
     apix = hp.nside2pixarea(nside)
     occ = np.where(ng > 0)[0]
 
