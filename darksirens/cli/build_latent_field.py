@@ -61,11 +61,14 @@ single-valued, so the partition is structural, not checked), the solve becomes
 the stacked objective ``J = 0.5||xi||^2 - sum_k log p_count,k`` over ONE ``xi``,
 and the artifact gains
 
-    /latent_field/tracers/<k>/counts, completeness, A_moments, B_moments
-                            attrs: name, b_gal, P_F, F_F
+    /latent_field/tracers/<k>/counts, completeness, A_moments, B_moments,
+                              shell_response
+                            attrs: name, b_gal, P_F, F_F,
+                                   selection_fit, m_lim, sigma_z, theta_ref
     /latent_field attrs: n_tracer, tracer_names, tracer_bias,
-                         tracer_overlap_policy, bias_profile_cov,
-                         bias_prior_log_sd, bias_cov_convention
+                         tracer_overlap_policy, tracer_theta_ref,
+                         bias_profile_cov, bias_prior_log_sd,
+                         bias_cov_convention
 
 on top of the shared block, which does not change shape: there is still one
 ``xi_hat``, one ``H_chol``, one member ensemble.  That layout IS PLAN §4.4's
@@ -77,6 +80,17 @@ place of one (K >= 2 ADDS COLUMNS, PLAN §3.4), the moment tables are per tracer
 because eq. (2)'s two reductions run over that tracer's footprint and weight its
 own ``f_p``, and the rank-1 draw-covariance inflation becomes rank K with a
 CORRELATED ``C_b`` -- the off-diagonal being the shared field itself.
+
+**One field, K SELECTIONS -- including the shell response.**  A tracer's counts
+are a shell multinomial whose WITHIN-SHELL weighting is that catalog's own
+magnitude selection ``C(z; m_lim, M0hat, sigma_M, k_corr)`` convolved with its
+own photo-z kernel; that weighting is exactly what ``W`` is.  So ``W`` is per
+tracer (``--tracer-selection-fit``, ``--tracer-sigma-z``, defaulting to the
+shared ``--selection-fit`` and to ``SIGMA_Z_DEFAULT``), and ``M0hat`` and
+``sigma_M`` become K sensitivity columns each -- catalog k's own theta, built
+from catalog k's own operator, which is PLAN §3.4's sentence rather than a
+paraphrase of it.  ``delta`` and ``Om0`` stay one column apiece: they describe
+the field and the cosmology, which the K catalogs share.
 
 **A K = 1 build is byte-identical through all of that, digest included.**  The
 tracer switches are dropped from the stamped configuration when ``K == 1`` and
@@ -102,6 +116,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+#: Population-average photo-z kernel width used when no per-tracer value is
+#: given.  It is a CONSTANT and not a flag: turning it into one would put a
+#: non-``None`` key into the stamped configuration of every K = 1 anchor ever
+#: built and move its digest while moving not one array in it (the same reason
+#: the tracer switches below are additive).  ``--tracer-sigma-z`` defaults to
+#: this value per tracer, so a K >= 2 build that does not pass it evaluates the
+#: same kernel this constant always meant.
+SIGMA_Z_DEFAULT = 0.023
 
 
 def main(argv=None):
@@ -168,6 +191,23 @@ def main(argv=None):
                     default=None,
                     help="per-tracer b_k, repeated K times in tracer-index "
                          "order (omit to reuse --b-gal for every tracer).")
+    ap.add_argument("--tracer-selection-fit", action="append", default=None,
+                    help="per-tracer selection fit JSON, repeated K times in "
+                         "tracer-index order (omit to reuse --selection-fit "
+                         "for every tracer). Tracer k's magnitude selection "
+                         "C(z; m_lim, M0hat, sigma_M, k_corr) is what weights "
+                         "its galaxies WITHIN a shell, so it enters that "
+                         "tracer's shell response W_k and nothing else's; a "
+                         "shared W would give every tracer catalog 0's "
+                         "within-shell weighting while its f_p and b_k were "
+                         "its own.")
+    ap.add_argument("--tracer-sigma-z", action="append", type=float,
+                    default=None,
+                    help="per-tracer photo-z kernel width, repeated K times in "
+                         "tracer-index order (omit to reuse "
+                         f"{SIGMA_Z_DEFAULT} for every tracer). It convolves "
+                         "the MODEL inside W_k, so like the selection fit it "
+                         "is a property of the catalog, not of the field.")
     ap.add_argument("--bias-prior-log-sd", type=float, default=None,
                     help="K >= 2 only: sd of the log-normal prior on each "
                          "tracer's b_k, centred on the anchor's own b_k "
@@ -212,8 +252,8 @@ def main(argv=None):
         bias_profile_hessian, check_disjoint_tracers,
         count_map_solve, counts_from_catalog, counts_from_catalog_by_tracer,
         dgrad_db, dgrad_db_by_tracer, gradient, laplace_draws,
-        laplace_draws_multitracer, make_count_operator, multi_gradient,
-        sensitivity)
+        laplace_draws_multitracer, make_count_operator,
+        make_multi_count_operator, multi_gradient, sensitivity)
 
     def _grad_of(xi, o):
         """``gradient`` for a bare operator, ``multi_gradient`` for a stack.
@@ -238,8 +278,6 @@ def main(argv=None):
     theta_ref = dict(M0hat=float(sel["M0hat"]),
                      sigma_M=float(sel["sigma_M"]),
                      delta=float(cal["delta"]), Om0=args.om0)
-    m_lim = float(sel["m_lim"])
-    kcorr = tuple(sel["k_corr_coeffs"])
 
     # ------------------------------------------------------------- guards
     # PR-8 splits two numbers that were one through PR-7: ``z_depth`` is the
@@ -367,9 +405,22 @@ def main(argv=None):
     # no galaxies is still a legitimate row of tracer k's multinomial (it
     # predicts a small pi there), so restricting each tracer to its own occupied
     # subset would DISCARD information rather than avoid an error.
+    #
+    # ``sel_k`` / ``sigz_k`` / ``theta_k`` are the SELECTION half of the same
+    # statement, and they were the half PR-7 left shared.  Tracer k's counts
+    # are a multinomial over shells whose within-shell weighting is
+    # ``C(z; m_lim_k, M0hat_k, sigma_M_k)`` convolved with tracer k's own
+    # photo-z kernel -- that is what the shell response ``W_k`` is -- so a
+    # single ``W`` gives every tracer catalog 0's magnitude selection while its
+    # ``f_p`` and its ``b_k`` are its own.  Nothing about the field is per
+    # tracer here: there is still one ``xi``, one basis and one set of shell
+    # edges (PLAN §4.4).  ``W_k`` is per tracer because SELECTION is.
     fp_k = [f_p]
     b_k = [float(args.b_gal)]
     names_k = ["t0"]
+    sel_k = [sel]
+    sigz_k = [float(SIGMA_Z_DEFAULT)]
+    theta_k = [theta_ref]
     if n_tracer > 1:
         cpaths = list(args.tracer_completeness or [])
         if not cpaths:
@@ -392,13 +443,41 @@ def main(argv=None):
             raise SystemExit(
                 f"--tracer-names has {len(names_k)} entries for {n_tracer} "
                 f"tracers.")
+        spaths = list(args.tracer_selection_fit or [])
+        if not spaths:
+            spaths = [args.selection_fit] * n_tracer
+        if len(spaths) != n_tracer:
+            raise SystemExit(
+                f"--tracer-selection-fit given {len(spaths)} times for "
+                f"{n_tracer} tracers.")
+        sigs = list(args.tracer_sigma_z or [])
+        if not sigs:
+            sigs = [float(SIGMA_Z_DEFAULT)] * n_tracer
+        if len(sigs) != n_tracer:
+            raise SystemExit(
+                f"--tracer-sigma-z given {len(sigs)} times for {n_tracer} "
+                f"tracers.")
         fp_k = [_load_fp(p) for p in cpaths]
         b_k = [float(x) for x in bs]
+        sel_k = [load_selection_fit_json(p) for p in spaths]
+        sigz_k = [float(s) for s in sigs]
+        # delta and Om0 are SHARED: one evolution index and one cosmology
+        # describe the field the K catalogs select against.  M0hat and sigma_M
+        # are per catalog, because they came out of that catalog's own fit.
+        theta_k = [dict(M0hat=float(s["M0hat"]), sigma_M=float(s["sigma_M"]),
+                        delta=float(cal["delta"]), Om0=args.om0)
+                   for s in sel_k]
         print(f"[tracers] K = {n_tracer}: "
               + ", ".join(f"{nm}(N={int(c.sum())}, b={b:.3f}, "
                           f"<f_p>={float(fp.mean()):.3f})"
                           for nm, c, b, fp in zip(names_k, counts_k, b_k, fp_k)),
               flush=True)
+        print("[tracers] selection: "
+              + ", ".join(
+                  f"{nm}(m_lim={float(s['m_lim']):.3f}, "
+                  f"M0hat={float(s['M0hat']):.4f}, "
+                  f"sigma_M={float(s['sigma_M']):.4f}, sigma_z={sz:g})"
+                  for nm, s, sz in zip(names_k, sel_k, sigz_k)), flush=True)
 
     # ---------------------------------------------------------------- basis
     z_fine = np.linspace(1e-4, args.z_depth, 400)
@@ -435,16 +514,29 @@ def main(argv=None):
             0.5 * (1 / E[1:] + 1 / E[:-1]) * np.diff(z))])
         return dc ** 2 / E
 
-    def base_fn(theta):
-        def _f(z):
-            Cz = np.asarray(c_sel_gaussian(
-                jnp.asarray(z), m_lim, theta["M0hat"], theta["sigma_M"],
-                args.h0, theta["Om0"], k_corr_coeffs=kcorr))
-            return (Cz * (1 + z) ** theta["delta"]
-                    * _dvdz_shape(z, theta["Om0"]) + 1e-300)
-        return _f
+    def _base_fn_for(m_lim_k, kcorr_k):
+        """``base(z; theta)`` closed over ONE catalog's magnitude selection.
 
-    sigma_z = lambda z: 0.023 * np.ones_like(z)
+        At K = 1 the closure variables are ``--selection-fit``'s own ``m_lim``
+        and k-corrections, so the expression evaluated is the pre-PR-7 one,
+        operation for operation.
+        """
+        def base_fn(theta):
+            def _f(z):
+                Cz = np.asarray(c_sel_gaussian(
+                    jnp.asarray(z), m_lim_k, theta["M0hat"], theta["sigma_M"],
+                    args.h0, theta["Om0"], k_corr_coeffs=kcorr_k))
+                return (Cz * (1 + z) ** theta["delta"]
+                        * _dvdz_shape(z, theta["Om0"]) + 1e-300)
+            return _f
+        return base_fn
+
+    def _sigma_z_for(width):
+        return lambda z: float(width) * np.ones_like(z)
+
+    base_fn_k = [_base_fn_for(float(s["m_lim"]), tuple(s["k_corr_coeffs"]))
+                 for s in sel_k]
+    sigma_z_k = [_sigma_z_for(s) for s in sigz_k]
 
     # ``tracers`` is the K-element list even at K = 1, but ``op_at`` returns a
     # BARE CountOperator there and a MultiTracerCountOperator only at K >= 2.
@@ -461,17 +553,27 @@ def main(argv=None):
               f"max over-count {disj['max_excess']:.6g} galaxies in any "
               f"(pixel, shell) cell", flush=True)
 
-    def op_at(theta):
-        W = shell_response(edges, z_fine, sigma_z, base_fn(theta))
+    def op_at(thetas):
+        """``(operator, [W_0..W_{K-1}])`` at a LIST of K per-catalog thetas.
+
+        One shell response per tracer, because the within-shell weighting is
+        tracer k's own magnitude selection and its own photo-z kernel.
+        ``make_multi_count_operator`` has always taken "one response or a
+        length-K sequence"; PR-7 built the sequence-free case and handed the
+        same ``W`` to all K, which silently gave tracers 1..K-1 tracer 0's
+        selection.  At K = 1 the list has one entry and the bare
+        ``CountOperator`` branch below evaluates the pre-PR-7 expression tree.
+        """
+        Ws = [shell_response(edges, z_fine, sigma_z_k[j], base_fn_k[j](th))
+              for j, th in enumerate(thetas)]
         if n_tracer == 1:
-            return make_count_operator(basis.phi_sph, basis.phi_z_fine, W,
-                                       tracers[0]), W
-        return MultiTracerCountOperator(tuple(
-            make_count_operator(basis.phi_sph, basis.phi_z_fine, W, t)
-            for t in tracers)), W
+            return make_count_operator(basis.phi_sph, basis.phi_z_fine, Ws[0],
+                                       tracers[0]), Ws
+        return make_multi_count_operator(basis.phi_sph, basis.phi_z_fine, Ws,
+                                         tracers), Ws
 
     print("[solve] anchor ...", flush=True)
-    op, W_ref = op_at(theta_ref)
+    op, W_k_ref = op_at(theta_k)
     sol = count_map_solve(op)
     xi_hat, L = sol["xi_hat"], sol["H_chol"]
     print(f"[solve] grad_inf={float(sol['grad_inf']):.2e}", flush=True)
@@ -479,30 +581,59 @@ def main(argv=None):
         raise SystemExit("P6 gate: anchor solve did not converge to 1e-8.")
 
     # --------------------------------------------------------- sensitivity
-    names = ["M0hat", "sigma_M", "delta", "Om0"]
-    steps = dict(M0hat=1e-3, sigma_M=1e-3, delta=1e-2, Om0=1e-3)
     # K >= 2 ADDS COLUMNS and nothing else (PLAN §3.4).  ``sensitivity`` is
-    # linear in the stacked block and never inspects it, so the only PR-7
-    # change here is that the bias block is ``dgrad_db_by_tracer``'s K columns
-    # instead of ``dgrad_db``'s one -- solved against the SAME stacked
-    # ``H_chol``, which is where the tracers couple.  The theta columns are
-    # untouched: ``gradient`` dispatches on the operator type, so a
-    # central difference in ``M0hat`` is the stacked gradient's difference at
-    # K >= 2 and the single-tracer one at K = 1, with no branch here.
+    # linear in the stacked block and never inspects it, so no line of it
+    # changes; what changes is the BLOCK handed to it.
+    #
+    # PLAN §3.4, quoted in ``sensitivity``'s own docstring: "catalog k's own
+    # theta contributes its own column built from its own operator".  ``M0hat``
+    # and ``sigma_M`` came out of catalog k's OWN selection fit and enter only
+    # catalog k's ``W_k``, so at K >= 2 they are K columns each, and bumping
+    # ``M0hat[k]`` rebuilds tracer k's response alone.  ``delta`` and ``Om0``
+    # stay ONE column apiece: they describe the field's evolution and the
+    # cosmology, which the K catalogs share, so bumping them rebuilds all K
+    # responses at once and the stacked gradient's difference is their true
+    # total derivative.  At K = 1 the column list is exactly
+    # ``[M0hat, sigma_M, delta, Om0]`` in exactly that order, and the bump is
+    # the same arithmetic on the same single theta dict.
+    per_cat_theta = ("M0hat", "sigma_M")
+    shared_theta = ("delta", "Om0")
+    steps = dict(M0hat=1e-3, sigma_M=1e-3, delta=1e-2, Om0=1e-3)
+    if n_tracer == 1:
+        cols = ([(nme, 0) for nme in per_cat_theta]
+                + [(nme, None) for nme in shared_theta])
+        theta_labels = list(per_cat_theta) + list(shared_theta)
+    else:
+        cols = ([(nme, kk) for nme in per_cat_theta
+                 for kk in range(n_tracer)]
+                + [(nme, None) for nme in shared_theta])
+        theta_labels = ([f"{nme}[{names_k[kk]}]" for nme in per_cat_theta
+                         for kk in range(n_tracer)] + list(shared_theta))
+
+    def _bump(nme, which, h):
+        ts = [dict(t) for t in theta_k]
+        if which is None:
+            for t in ts:
+                t[nme] += h
+        else:
+            ts[which][nme] += h
+        return ts
+
     n_b_cols = 1 if n_tracer == 1 else n_tracer
-    dgrad = np.zeros((op.rank, len(names) + n_b_cols))
-    for j, nme in enumerate(names):
-        tp = dict(theta_ref); tp[nme] += steps[nme]
-        tm = dict(theta_ref); tm[nme] -= steps[nme]
-        dgrad[:, j] = (np.asarray(_grad_of(xi_hat, op_at(tp)[0]))
-                       - np.asarray(_grad_of(xi_hat, op_at(tm)[0]))) \
-            / (2 * steps[nme])
+    dgrad = np.zeros((op.rank, len(cols) + n_b_cols))
+    for j, (nme, which) in enumerate(cols):
+        h = steps[nme]
+        dgrad[:, j] = (np.asarray(_grad_of(xi_hat,
+                                           op_at(_bump(nme, which, +h))[0]))
+                       - np.asarray(_grad_of(xi_hat,
+                                             op_at(_bump(nme, which, -h))[0]))) \
+            / (2 * h)
     if n_tracer == 1:
         dgrad[:, -1] = np.asarray(dgrad_db(xi_hat, op))
-        labels = names + ["b_gal"]
+        labels = theta_labels + ["b_gal"]
     else:
         dgrad[:, -n_tracer:] = np.asarray(dgrad_db_by_tracer(xi_hat, op))
-        labels = names + [f"b_gal[{nm}]" for nm in names_k]
+        labels = theta_labels + [f"b_gal[{nm}]" for nm in names_k]
     S = np.asarray(sensitivity(xi_hat, L, jnp.asarray(dgrad)))
 
     # ------------------------------------------------ b_gal dispersion (S-2)
@@ -719,28 +850,38 @@ def main(argv=None):
     if args.amp_hi is None and args.z_node_hi is None:
         for _k in ("amp_hi", "amp_kind", "z_node_hi"):
             cfg.pop(_k, None)
-    # PR-7's four tracer switches, dropped on a K = 1 build for the reason the
-    # PR-8 block above gives: a K = 1 rebuild must reproduce the digest of the
-    # anchor it rebuilds, byte for byte, and a key whose value is None changes
-    # the JSON while changing no array in the file. At K >= 2 all four stay in
-    # (and ``n_tracer`` joins them), because two anchors that partition the same
-    # catalog differently are different artifacts.
+    # PR-7's tracer switches, dropped on a K = 1 build for the reason the PR-8
+    # block above gives: a K = 1 rebuild must reproduce the digest of the anchor
+    # it rebuilds, byte for byte, and a key whose value is None changes the JSON
+    # while changing no array in the file. That is also why the per-tracer
+    # SELECTION switches are popped here rather than defaulted into the K = 1
+    # stamp. At K >= 2 they all stay in (and ``n_tracer`` joins them), because
+    # two anchors that partition the same catalog differently, or select
+    # against it differently, are different artifacts.
     if n_tracer == 1:
         for _k in ("tracer_labels", "tracer_completeness", "tracer_b_gal",
-                   "tracer_names", "bias_prior_log_sd"):
+                   "tracer_names", "bias_prior_log_sd",
+                   "tracer_selection_fit", "tracer_sigma_z"):
             cfg.pop(_k, None)
     else:
         cfg["n_tracer"] = int(n_tracer)
         cfg["tracer_bias"] = [float(x) for x in b_k]
         cfg["bias_prior_log_sd"] = float(bias_prior_sd)
+        cfg["tracer_theta_ref"] = theta_k
+        cfg["tracer_sigma_z_used"] = [float(s) for s in sigz_k]
+        cfg["tracer_m_lim"] = [float(s["m_lim"]) for s in sel_k]
     sha = hashlib.sha256()
     for arr in (np.asarray(xi_hat), np.asarray(L), S, counts, f_p,
-                np.asarray(W_ref), A, B, b_nodes, z_sub, edges):
+                np.asarray(W_k_ref[0]), A, B, b_nodes, z_sub, edges):
         sha.update(np.ascontiguousarray(arr).tobytes())
     # The per-tracer arrays join the stamp only when they exist, so the K = 1
-    # digest is the pre-PR-7 one.
+    # digest is the pre-PR-7 one.  Tracer 0's response is already in the tuple
+    # above (it is the K = 1 ``W``); tracers 1.. join here, so two K >= 2
+    # anchors whose catalogs differ only in their magnitude selection cannot
+    # share a digest.
     if n_tracer > 1:
-        for arr in counts_k + fp_k + [A_k, B_k, P_k, F_k]:
+        for arr in (counts_k + fp_k + [A_k, B_k, P_k, F_k]
+                    + [np.asarray(w) for w in W_k_ref[1:]]):
             sha.update(np.ascontiguousarray(np.asarray(arr)).tobytes())
     sha.update(json.dumps(cfg, sort_keys=True, default=str).encode())
     digest = sha.hexdigest()
@@ -771,7 +912,10 @@ def main(argv=None):
         g.create_dataset("completeness", data=f_p)
         g.create_dataset("counts", data=counts)
         g.create_dataset("z_count_edges", data=edges)
-        g.create_dataset("shell_response", data=np.asarray(W_ref))
+        # Tracer 0's response.  At K = 1 that is THE response; at K >= 2 the
+        # other K-1 live in the tracer subgroups, because the within-shell
+        # weighting is each catalog's own magnitude selection.
+        g.create_dataset("shell_response", data=np.asarray(W_k_ref[0]))
         g.attrs["P_F"] = P_F
         g.attrs["F_F"] = F_F
         g.attrs["theta_ref"] = json.dumps(theta_ref)
@@ -826,6 +970,7 @@ def main(argv=None):
             g.attrs["draw_covariance"] = (
                 "H^{-1} + V C_b V^T, V = sensitivity_S[:, b_gal block], "
                 "C_b = bias_profile_cov" if inflate else "H^{-1}")
+            g.attrs["tracer_theta_ref"] = json.dumps(theta_k)
             tg = g.create_group("tracers")
             for k, nm in enumerate(names_k):
                 t = tg.create_group(str(k))
@@ -833,10 +978,22 @@ def main(argv=None):
                 t.attrs["b_gal"] = float(b_k[k])
                 t.attrs["P_F"] = float(P_k[k])
                 t.attrs["F_F"] = float(F_k[k])
+                # This tracer's own selection: the fit it came from, the
+                # magnitude limit and photo-z width that build its W_k, and the
+                # theta its W_k was frozen at.  Without these the artifact
+                # cannot say which catalog's selection weighted which counts.
+                t.attrs["selection_fit"] = str(
+                    (args.tracer_selection_fit or [args.selection_fit] *
+                     n_tracer)[k])
+                t.attrs["m_lim"] = float(sel_k[k]["m_lim"])
+                t.attrs["sigma_z"] = float(sigz_k[k])
+                t.attrs["theta_ref"] = json.dumps(theta_k[k])
                 t.create_dataset("counts", data=counts_k[k])
                 t.create_dataset("completeness", data=fp_k[k])
                 t.create_dataset("A_moments", data=A_k[k])
                 t.create_dataset("B_moments", data=B_k[k])
+                t.create_dataset("shell_response",
+                                 data=np.asarray(W_k_ref[k]))
         g.attrs["sha256"] = digest
         g.attrs["format_version"] = "darksirens-latent-field-1.0"
     print(f"[artifact] sha256 = {digest}")
