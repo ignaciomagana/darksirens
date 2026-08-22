@@ -536,6 +536,10 @@ def _build_completion_radial(
 
     occ = np.nonzero(ngals_np > 0)[0]
     n_occ = int(occ.size)
+    # Per-fitted-row f_p when --depth-map is in play, else None.  The empty-row
+    # dedup below keys on it: with f_p folded into C the empty rows are no
+    # longer interchangeable.
+    fp_fit_rows = None
     if c_mode in ("aggregate", "selection"):
         # SKY-UNIFORM base: ONE completeness curve for every pixel, and the
         # fit covers EVERY pixel: empty pixels enter as N_obs = 0 rows against
@@ -615,7 +619,8 @@ def _build_completion_radial(
                 covered = fp_all > 0.0
                 fit = np.nonzero(covered)[0]
                 n_fit = int(fit.size)
-                fp_fit = fp_all[fit][:, None]
+                fp_fit_rows = fp_all[fit]
+                fp_fit = fp_fit_rows[:, None]
                 C_u = np.clip(fp_fit * Cbar_u[None, :], 0.0, 1.0)
                 w_budget = ((1.0 - np.clip(fp_fit * Cbar_fine[None, :], 0.0, 1.0))
                             * dN_exp_density[None, :])
@@ -661,19 +666,30 @@ def _build_completion_radial(
             N_obs_u[i] = _counts_in_uniform_chi(zs, chi, edges_chi)
 
     bias = float(survey.b_miss)
-    # Solve the UNIQUE rows only.  In aggregate/selection mode every EMPTY pixel
-    # enters with bit-identical inputs -- N_obs = 0 against the one shared base
-    # row of its stratum -- so its n_grid-dimensional L-BFGS-B solve is provably
-    # the same answer as every other empty pixel's in that stratum (~2.2 s per
-    # row at DESI scale x ~127k duplicated empty pixels at nside=128).  Solve one
-    # representative per (empty, stratum) group and broadcast it; the occupied
-    # rows are all solved.  The expansion below restores the full fitted-row
-    # ordering, so the member RNG stream (row-major) is unchanged.
+    # Solve the UNIQUE rows only.  In aggregate/selection mode an EMPTY pixel's
+    # solve inputs are N_obs = 0 against its base row C_u -- nothing else -- so
+    # two empty pixels sharing a base row are provably the same n_grid-dimensional
+    # L-BFGS-B answer and only one need be solved (~2.2 s per row at DESI scale x
+    # ~127k duplicated empty pixels at nside=128).  What makes two base rows the
+    # same is the mode:
+    #   * stratified selection: the stratum, whose C_sel curve is the base;
+    #   * --depth-map: the pixel's f_p, since C_u = f_p Cbar differs row by row
+    #     and the N_obs = 0 MAP depends strongly on it (measured on the closure
+    #     mock: max|dlogQ| 0.93 between f_p 1.0 and 0.3, 2.03 between 1.0 and
+    #     0.05, i.e. Q wrong by 2.5-7.6x for the unobserved-sky budget rows that
+    #     feed field_lss_q_empty_sum).  Exact float equality is the point: only
+    #     bit-identical f_p may share a solve.
+    #   * otherwise: ONE shared Cbar row, so every empty pixel is interchangeable.
+    # The occupied rows are all solved.  The expansion below restores the full
+    # fitted-row ordering, so the member RNG stream (row-major) is unchanged.
     empty_fit = (ngals_np[fit] == 0)
     if empty_fit.any():
         group = np.zeros(n_fit, dtype=np.int64)                   # 0 = solve me
         if c_mode == "selection" and selection_strata is not None:
             group[empty_fit] = 1 + stratum_map[fit][empty_fit]
+        elif fp_fit_rows is not None:
+            group[empty_fit] = 1 + np.unique(
+                fp_fit_rows[empty_fit], return_inverse=True)[1].reshape(-1)
         else:
             group[empty_fit] = 1
         group[~empty_fit] = -1 - np.arange(int((~empty_fit).sum()))
