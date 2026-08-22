@@ -174,8 +174,13 @@ of `0.99997`.
 PLAN §6.2 predicated the gate on §3.4's propagation existing: "latent-on CI width ≥ table
 CI width — now a valid check because §3.4 propagates `b_gal` (rev 1's version compared
 against a point estimate and would have passed while under-dispersed)". The first pass
-marked it VACUOUS because `s_b` did not exist. **It exists now, it is measured (not
-dialled), and the reference arm's members carry it, so the gate is no longer vacuous.**
+marked it VACUOUS because `s_b` did not exist. **It exists now and the reference arm's
+members carry it, so the gate is no longer vacuous — but on this world the shipped
+`s_b` is the 5% systematics floor, not the measured curvature: §0.2's measured profile
+sd is 4.432e-2 against the 5.000e-2 floor, so `s_b_floor_active = True` and the width
+criterion is still set by a chosen constant.** The measurement takes over only when
+`s_stat` exceeds the floor; the production catalog has ~6x this world's galaxy count,
+which shrinks `s_stat` like 1/sqrt(N) and makes the floor bind HARDER there, not less.
 
 Measured: `latent_bgal` 90% width **22.3023** against `table` **32.6372**. The latent arm
 is still narrower, by 32%. **The gate FAILS.**
@@ -278,7 +283,9 @@ variance back, contributes 0.06% of a width against the field's −4.4%.
 
 ## §S Could ANY `s_b` have closed it? — `s_b_sensitivity.py` → `s_b_sensitivity.json`
 
-`s_b` is measured, not dialled, so this is not a proposal to turn a knob. It is a
+`s_b` carries a measured statistical term, but on every build in this record the 5%
+floor wins (`s_b_floor_active = True` throughout `s_b_sensitivity.json`), so the shipped
+value IS a chosen constant. This section is nonetheless not a proposal to turn a knob. It is a
 falsification test that does not depend on the value S-2 chose, on the 5% floor, or on
 the profile-versus-conditional argument. **If the closure's diagnosis were right — the
 ensemble is under-dispersed and `b_gal` is the missing dispersion — then SOME `s_b` would
