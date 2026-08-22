@@ -55,7 +55,8 @@ M5_EDGES = np.linspace(19.0, 24.0, 101)     # 0.05-mag bins
 MAG_EDGES = np.linspace(18.0, 21.0, 61)
 
 
-def _accumulate(path: Path, npix: int, h_m5, h_mag, counts, masked) -> None:
+def _accumulate(path: Path, nside: int, npix: int, h_m5, h_mag, counts,
+                masked) -> None:
     with h5py.File(path, "r") as f:
         pix_key = next(k for k in f.keys() if k.upper().startswith("HPX"))
         # The column NAME carries its nside (e.g. HPX128_RING).  Reading an
@@ -130,7 +131,7 @@ def main(argv=None) -> None:
 
     for p in args.sources:
         print(f"[mth] streaming {p}")
-        _accumulate(Path(p), npix, h_m5, h_mag, counts, masked)
+        _accumulate(Path(p), args.nside, npix, h_m5, h_mag, counts, masked)
 
     med_m5 = _hist_quantile(h_m5, M5_EDGES, 0.5)
     q99_mag = _hist_quantile(h_mag, MAG_EDGES, 0.99)
