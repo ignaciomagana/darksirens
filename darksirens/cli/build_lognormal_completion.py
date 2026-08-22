@@ -69,7 +69,6 @@ from darksirens.redshift.lognormal_completion import (
     renormalize_q_mean_one,
     save_lss_completion_hdf5,
     lowrank_inducing_nodes,
-    build_lowrank_operator,
     poisson_lognormal_gp3d_map,
     laplace_lognormal_gp3d_members,
     eval_logq_gp3d,
@@ -1099,7 +1098,10 @@ def _build_completion_gp3d(
     M = int(np.asarray(Zn).shape[0])
     X_n = np.repeat(survey_data.n_hat_occ, G_s, axis=0)                    # (n_occ*G_s, 3)
     X_z = np.tile(zeta_s, n_occ)                                           # (n_occ*G_s,)
-    Phi, L = build_lowrank_operator(Zn, Zz, X_n, X_z, amp=amp, ls_sph=ls_sph, ls_z=ls_z)
+    # Routed through latent_field's legacy path (byte-identical delegation;
+    # the factored-v1 basis is latent-mode only — PLAN §3.3 / PR-1).
+    from darksirens.redshift.latent_field import legacy_lowrank_operator
+    Phi, L = legacy_lowrank_operator(Zn, Zz, X_n, X_z, amp=amp, ls_sph=ls_sph, ls_z=ls_z)
 
     mp = poisson_lognormal_gp3d_map(
         survey_data.N_obs_vox.ravel(), survey_data.base_vox.ravel(), Phi, bias=bias)

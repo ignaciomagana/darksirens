@@ -58,7 +58,6 @@ from darksirens.cli.common import _banner, _section, _row, _end, _ok, _warn
 from darksirens.redshift import zgrid
 from darksirens.redshift.lognormal_completion import (
     lowrank_inducing_nodes,
-    build_lowrank_operator,
     poisson_lognormal_gp3d_map,
     laplace_lognormal_gp3d_members,
     eval_logq_gp3d,
@@ -280,7 +279,10 @@ def build_joint_completion(
             continue  # empty survey contributes no voxels (still gets a Q map below)
         X_n = np.repeat(a.n_hat_occ, G_s, axis=0)                     # (n_occ*G_s, 3)
         X_z = np.tile(zeta_s, a.n_occ)                                # (n_occ*G_s,)
-        Phi_k, L_k = build_lowrank_operator(
+        # Routed through latent_field's legacy path (byte-identical
+        # delegation — PLAN §3.3 / PR-1).
+        from darksirens.redshift.latent_field import legacy_lowrank_operator
+        Phi_k, L_k = legacy_lowrank_operator(
             Zn, Zz, X_n, X_z, amp=amp, ls_sph=ls_sph, ls_z=ls_z)
         if L_shared is None:
             L_shared = L_k

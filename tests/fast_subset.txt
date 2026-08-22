@@ -65,3 +65,7 @@ tests/test_pop_extractor_multitracer.py
 # ── analyze / post-processing ──────────────────────────────────────────────
 tests/test_analyze_fcat_weights.py
 tests/test_analyze_bayes_factors.py
+
+# ── field-level latent ladder (PR-1+; CI gap closed per PLAN §7) ───────────
+tests/test_latent_field.py
+tests/test_q_provenance_guard.py
