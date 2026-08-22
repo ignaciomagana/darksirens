@@ -1169,8 +1169,27 @@ class CompletionCurves(NamedTuple):
 # ------------------------------------------------------------
 
 #: log Q is clipped to this symmetric range before exponentiating, so that a
-#: heavy lognormal tail cannot blow up the missing-galaxy density.
+#: heavy lognormal tail cannot blow up the missing-galaxy density.  TABLE path
+#: only: the shipped Q_LSS tables are empirically fit and are NOT bounded by
+#: their builder's own clip (it is applied before the per-z mean-one renorm),
+#: so this bound is what keeps the numerator's and the normalizer's missing
+#: budgets equal on a railed cell.
 _LOGQ_CLIP: float = 7.0
+
+#: The LATENT seam's bound on ``logQ`` -- a numerical-safety rail, NOT a tail
+#: tamer, and it must never bind on a physical row.  The latent field is not an
+#: empirically fit table: ``rho`` is DEFINED so that the consumed missing budget
+#: ``sum_p (1 - f_p C(z)) Q_p(z)`` equals its ``Q == 1`` value exactly (PLAN
+#: eq. 4).  That identity BOUNDS the positive tail on its own --
+#: ``Q_p <= (sum_q w_q) / w_p <= P_F / min_p w_p``, i.e. ``logQ <= 13.4`` at the
+#: DESI footprint (``P_F = 30470``, ``min w = 1 - max f_p = 0.044``) -- so a
+#: ``+/-7`` rail does not bound a tail there, it DELETES budget, and the deficit
+#: grows with ``b_GW``.  ``60`` sits ~4x above that structural bound while
+#: ``exp(60) = 1.1e26`` stays ~280 orders under f64 overflow (and 12 under f32),
+#: so the product with the missing-density base cannot become ``inf``.  The
+#: negative rail is inert by the same identity: a floored ``Q = e^-60``
+#: contributes ``< 1e-26`` of the budget, against ``e^-7 = 9e-4`` today.
+_LATENT_LOGQ_CLIP: float = 60.0
 
 
 def _check_lss_grid(arr):
@@ -1232,8 +1251,9 @@ def _to_q(logq_arr, q_arr):
     return jnp.exp(lq)
 
 
-def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool):
-    """One member's completion factor ``Q_eff = exp(clip(logQ, ±_LOGQ_CLIP))``,
+def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool,
+                            clip: float = _LOGQ_CLIP):
+    """One member's completion factor ``Q_eff = exp(clip(logQ, ±clip))``,
     relaxed to ``1`` beyond ``survey.z_depth``.
 
     ``logq_arr`` is a RAW (un-clipped, un-exponentiated) log table when
@@ -1243,10 +1263,17 @@ def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool):
     2-node gather the caller passes (never the full cube).  ``depth_mask`` is a
     static ``(N_grid,)`` (or gathered ``(...,)``) boolean, or ``None`` when
     ``z_depth is None`` (Q_eff is then just ``exp(clip(logQ))`` everywhere).
+
+    ``clip`` is a STATIC Python float and defaults to the table path's
+    ``_LOGQ_CLIP``.  The latent seam passes ``_LATENT_LOGQ_CLIP`` instead: its
+    ``logQ`` is generated against a normalizer that already conserves the
+    consumed budget, so the table bound would truncate that budget rather than
+    tame a tail (see the two constants).  Keying this off ``member_is_log``
+    would be wrong -- a LOADED log-Q table is ``member_is_log=True`` too.
     """
     if not member_is_log:
         logq_arr = jnp.log(jnp.maximum(logq_arr, 1e-300))
-    q = jnp.exp(jnp.clip(logq_arr, -_LOGQ_CLIP, _LOGQ_CLIP))
+    q = jnp.exp(jnp.clip(logq_arr, -float(clip), float(clip)))
     if depth_mask is None:
         return q
     return jnp.where(depth_mask, q, 1.0)
@@ -1446,7 +1473,8 @@ def latent_member_N_miss_integrals(base_miss, C_curve, em_catalog: EMCatalog,
 
     def _body(carry, m):
         lq = latent_member_logq_rows(em_catalog, survey, C_curve, m)
-        q_eff = _member_q_eff_from_logq(lq, depth_mask, True)
+        q_eff = _member_q_eff_from_logq(lq, depth_mask, True,
+                                        _LATENT_LOGQ_CLIP)
         dN_m = base_miss * q_eff                        # transient, discarded
         return carry, jnp.trapezoid(dN_m, zgrid, axis=-1)
 
@@ -1476,7 +1504,8 @@ def latent_posterior_mean_q(em_catalog: EMCatalog, survey: SurveyParams,
     def _body(acc, m):
         lq = latent_member_logq_rows(em_catalog, survey, C_curve, m,
                                      field_rows=field_rows)
-        return acc + _member_q_eff_from_logq(lq, depth_mask, True), None
+        return acc + _member_q_eff_from_logq(
+            lq, depth_mask, True, _LATENT_LOGQ_CLIP), None
 
     total, _ = lax.scan(
         _body, jnp.zeros((n_rows, zgrid.size), dtype=float), jnp.arange(M))
@@ -2337,7 +2366,8 @@ def field_global_log_Z_members(
         def _one_latent(m):
             lq = latent_member_logq_rows(em_catalog, survey, C_curve, m,
                                          field_rows=True)
-            q_m = _member_q_eff_from_logq(lq, depth_mask, True)
+            q_m = _member_q_eff_from_logq(lq, depth_mask, True,
+                                          _LATENT_LOGQ_CLIP)
             return field_global_log_Z(
                 cosmo, survey, em_catalog, N_obs_total=N_obs_total_l,
                 latent_q_rows=q_m)
