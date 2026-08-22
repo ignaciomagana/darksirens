@@ -598,33 +598,11 @@ def chebyshev_lobatto_nodes(n_b: int, b_max: float) -> np.ndarray:
     return 0.5 * b_max * (1.0 - np.cos(np.pi * k / (n_b - 1)))
 
 
-def interp_moments_b(table, b_nodes, b) -> jnp.ndarray:
-    """Barycentric Chebyshev–Lobatto interpolation of a moment table along
-    its ``b``-node axis (axis -2, per :func:`sky_moments`'s layout), at one
-    scalar ``b`` — the P9-pinned online path (1e-6).  Exact at the nodes by
-    the barycentric formula's pole handling."""
-    table = jnp.asarray(table)
-    b_nodes = jnp.asarray(b_nodes, dtype=jnp.float64)
-    n = b_nodes.shape[0]
-    # Axis -2 is the b axis ONLY for the (M_draw, n_b, N_z) layout sky_moments
-    # emits.  Hand it a 4-D dA/dB (M_draw, n_b, N_z, n_th) and axis -2 is N_z,
-    # so it would contract the wrong axis and return a silently wrong answer of
-    # a plausible shape.  No shipped caller does that -- the live path applies
-    # moments_at first, which contracts n_th -- so this is a trap rather than a
-    # bug, and the assertion is what keeps it that way.
-    if table.shape[-2] != n:
-        raise ValueError(
-            f"interp_moments_b contracts axis -2 as the b axis, but the table's "
-            f"axis -2 has length {table.shape[-2]} against {n} b nodes "
-            f"(table shape {tuple(table.shape)}). A 4-D dA/dB "
-            f"(M_draw, n_b, N_z, n_th) hits this: contract its theta axis first "
-            f"(moments_at), or move the b axis to -2.")
-    w = jnp.asarray((-1.0) ** np.arange(n))
-    w = w.at[0].mul(0.5).at[-1].mul(0.5)
-    d = b - b_nodes                                          # (n_b,)
-    exact = jnp.any(d == 0.0)
-    idx = jnp.argmin(jnp.abs(d))
-    coef = w / jnp.where(d == 0.0, 1.0, d)
-    coef = jnp.where(exact, jnp.zeros_like(coef).at[idx].set(1.0), coef)
-    coef = coef / jnp.sum(coef)
-    return jnp.tensordot(table, coef, axes=([-2], [0]))
+# There is deliberately NO ``b``-interpolant here.  The moment tables are
+# consumed at one place -- ``likelihood.latent_q.rho_from_moments``, through
+# ``latent_q.interp_b`` -- and that interpolant works in LOG space because
+# ``A(z; b)`` spans 14.9 orders across this node grid on the real anchor.  A
+# second copy living beside the BUILDER is a copy that no production call
+# reaches, so a fix to the consumer silently leaves it behind; that is exactly
+# what happened to the one that used to be here, and the P9 pin that called it
+# went on passing against the pre-fix arithmetic.
