@@ -26,7 +26,6 @@ from pathlib import Path
 import numpy as np
 
 import world16 as W16
-import arms as A
 import build_anchor16
 import tier_b
 
@@ -43,7 +42,6 @@ def main(argv=None):
     d = Path(a.dir)
     grid = np.arange(20.0, 140.0 + 0.5 * a.h0_step, a.h0_step)
     world = W16.build_world()
-    cache = {}
     rows = []
     t0 = time.time()
     for s_b in a.s_b:

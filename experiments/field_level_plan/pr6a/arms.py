@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
