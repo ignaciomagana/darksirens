@@ -52,7 +52,6 @@ from darksirens.redshift.latent_counts import (  # noqa: E402
     laplace_evidence,
     make_count_operator,
     sensitivity,
-    shell_multinomial_logl,
 )
 from darksirens.redshift.latent_field import (  # noqa: E402
     build_latent_basis,
@@ -175,7 +174,6 @@ def main():
     # ---------------------------------------------------------------- 20 theta
     rng = np.random.default_rng(SEED)
     prior_sd = dict(M0hat=0.05, sigma_M=0.05, delta=0.10, Om0=0.01)
-    Hn = np.asarray(L_ref @ L_ref.T)
     Ln = np.asarray(L_ref)
     rows = []
     for t in range(N_THETA):

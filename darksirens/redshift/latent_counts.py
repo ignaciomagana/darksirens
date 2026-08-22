@@ -40,7 +40,7 @@ so its cross-derivatives stack), never a refactor.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
