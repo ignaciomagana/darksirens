@@ -380,10 +380,18 @@ class EMCatalog(NamedTuple):
     # ``field_dN_obs_s`` occupied rows; ``field_f_p_empty_sum`` is
     # ``Sum_{p empty} f_p`` so the empty-pixel budget becomes
     # ``n_empty - C(z) * f_p_empty_sum`` without a per-empty-pixel loop.
+    # ``f_p_total_sum`` is ``Sum_{all sky p} f_p`` -- the f_p-weighted covered
+    # sky in pixel units.  It is the AGGREGATE ``Cbar`` denominator: the
+    # aggregate numerator sums observed counts over the footprint only, so
+    # normalizing it by the full sphere would make ``Cbar`` the all-sky mean
+    # ``<f_p> * C_true`` and the ``f_p * Cbar`` product would carry the mask
+    # loss twice (see completion._precompute_grids).  REQUIRED whenever
+    # ``f_p_rows``/``field_f_p_occ`` is populated under c_mode=aggregate.
     # Built from :func:`darksirens.catalogs.depth_map.load_selection_fraction`.
     f_p_rows: Any = None                # (N_catalog_rows,) float32
     field_f_p_occ: Any = None           # (n_occupied,) float32
     field_f_p_empty_sum: Any = None     # scalar float64
+    f_p_total_sum: Any = None           # scalar float64  Sum_{all p} f_p
 
 
 class GWEvent(NamedTuple):

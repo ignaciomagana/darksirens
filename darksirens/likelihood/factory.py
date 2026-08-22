@@ -1054,6 +1054,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         f_p_rows=getattr(catalogs, "f_p_rows_pe", None),
         field_f_p_occ=getattr(catalogs, "field_f_p_occ", None),
         field_f_p_empty_sum=getattr(catalogs, "field_f_p_empty_sum", None),
+        f_p_total_sum=getattr(catalogs, "f_p_total_sum", None),
     )
     em_catalog_sel = EMCatalog(
         apix=apix,
@@ -1111,6 +1112,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         f_p_rows=getattr(catalogs, "f_p_rows_sel", None),
         field_f_p_occ=getattr(catalogs, "field_f_p_occ", None),
         field_f_p_empty_sum=getattr(catalogs, "field_f_p_empty_sum", None),
+        f_p_total_sum=getattr(catalogs, "f_p_total_sum", None),
     )
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, (em_catalog_pe,), (em_catalog_sel,)
