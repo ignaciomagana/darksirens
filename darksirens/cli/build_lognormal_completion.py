@@ -563,6 +563,8 @@ def _build_completion_radial(
             # by the stratum map -- mirrors the in-likelihood
             # SurveyParams.selection_strata consumption, so the table's fixed
             # base carries the same per-pixel budget the numerator does.
+            # This branch does NOT fold f_p in; build_completion refuses
+            # --depth-map alongside strata rather than dropping it silently.
             Cfine_s = _selection_cbar_fine_strata(selection_strata, cosmo)
             Cu_s = np.stack([
                 np.clip(_bin_integral(cf * dN_exp_density) / exp_safe, 0.0, 1.0)
@@ -1361,6 +1363,30 @@ def build_completion(
                 f"--depth-map requires --c-mode aggregate|selection (got "
                 f"{c_mode!r}): a per-pixel count-derived C already contains the "
                 f"mask loss, so dividing it out again would double-correct.")
+        # Only the radial, UNSTRATIFIED base folds f_p into the model
+        # completeness. Both refusals below exist because main() stamps
+        # f_p_aware whenever --depth-map was passed, and a table built by a
+        # path that never saw f_p would carry that stamp unearned -- which is
+        # exactly the licence the inference loader reads before it will pair a
+        # Q table with --per_pixel_completeness (the double-count that put H0
+        # at 41.24 against a truth of 67.74). Refused before anything is built.
+        if mode != "radial":
+            raise ValueError(
+                f"--depth-map is not honoured by --mode {mode!r}: the gp3d "
+                f"builder takes no f_p at all, so Q would be fit to raw counts "
+                f"with the footprint absorbed into it, and the table would "
+                f"still be stamped f_p_aware. Use --mode radial, or drop "
+                f"--depth-map.")
+        if selection_strata is not None:
+            raise ValueError(
+                "--depth-map is not honoured by a STRATIFIED --c-mode "
+                "selection build (a multi-stratum --selection-fit with "
+                "--stratum-map): the per-stratum C_sel base is built in its "
+                "own branch that bypasses the f_p fold, so f_p would never "
+                "reach the model completeness while the table was still "
+                "stamped f_p_aware. Build with a single-stratum "
+                "--selection-fit (or --c-mode aggregate), or drop "
+                "--depth-map.")
         import healpy as hp
         from darksirens.catalogs.io import load_survey as _ls
         from darksirens.catalogs.depth_map import load_selection_fraction
@@ -1489,7 +1515,10 @@ def main(argv=None):
                         "41.24 [36.1, 46.3] against a truth of 67.74. The output "
                         "stamps f_p_aware, which the inference loader requires "
                         "before it will admit the pairing. Requires --c-mode "
-                        "aggregate|selection.")
+                        "aggregate|selection and --mode radial with a "
+                        "single-stratum --selection-fit; the gp3d and "
+                        "stratified bases do not fold f_p in and the "
+                        "combinations are refused, not silently dropped.")
     p.add_argument("--selection-fit", default=None,
                    help="selection_fit.json from darksirens_fit_selection "
                         "(required by, and only legal with, --c-mode "

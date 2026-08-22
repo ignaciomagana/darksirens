@@ -1,13 +1,22 @@
 """``--depth-map`` in the lognormal-completion builder: the f_p-aware Q table.
 
-The EMPTY-row dedup.  Empty on-footprint pixels are deduplicated before the
-L-BFGS-B solve because their inputs are identical -- but with ``--depth-map``
-active each row's base is ``C_u = f_p Cbar``, and the ``N_obs = 0`` MAP moves
-strongly with ``f_p``.  Collapsing them all into one group hands every empty
-pixel one representative's ``logQ``, and those rows are precisely the
-missing-host budget for unobserved sky (``field_lss_q_empty_sum`` /
-``field_lss_q_fp_empty_sum``).
+Two failure modes are pinned here, both of which make the ``f_p_aware`` stamp a
+lie about what the table actually contains:
+
+* the EMPTY-row dedup.  Empty on-footprint pixels are deduplicated before the
+  L-BFGS-B solve because their inputs are identical -- but with ``--depth-map``
+  active each row's base is ``C_u = f_p Cbar``, and the ``N_obs = 0`` MAP moves
+  strongly with ``f_p``.  Collapsing them all into one group hands every empty
+  pixel one representative's ``logQ``, and those rows are precisely the
+  missing-host budget for unobserved sky (``field_lss_q_empty_sum`` /
+  ``field_lss_q_fp_empty_sum``);
+* the paths that ACCEPT ``--depth-map`` and never fold it in.  ``--mode gp3d``
+  passes no ``f_p`` to its builder at all, and the stratified selection base is
+  built in a branch that bypasses the ``f_p`` block; main() would still stamp
+  the table for pairing with ``--per_pixel_completeness``.
 """
+import json
+
 import numpy as np
 import pytest
 
@@ -59,6 +68,27 @@ def _write_depth_map(path, f_p):
         f.create_dataset("counts", data=counts)
         f.create_dataset("masked_frac",
                          data=np.where(counts > 0.0, 1.0 - f_p, np.nan))
+    return str(path)
+
+
+def _write_selection_fit(path, strata):
+    payload = {
+        "format_version": ("darksirens-selection-fit-1.0" if len(strata) == 1
+                           else "darksirens-selection-fit-1.1"),
+        "strata": [dict(family="gaussian", m_lim=ml, M0hat=m0, sigma_M=sg,
+                        cov=[[1e-6, 0.0], [0.0, 1e-6]], n_gal=1000,
+                        stratum=str(j), k_corr_coeffs=[])
+                   for j, (ml, m0, sg) in enumerate(strata)],
+    }
+    path.write_text(json.dumps(payload))
+    return str(path)
+
+
+def _write_stratum_map(path, labels):
+    import h5py
+
+    with h5py.File(path, "w") as f:
+        f.create_dataset("stratum_map", data=np.asarray(labels, dtype=np.int32))
     return str(path)
 
 
@@ -117,3 +147,71 @@ def test_without_a_depth_map_every_empty_pixel_still_shares_one_solve(tmp_path):
     assert diag["n_broadcast_duplicate_rows"] == 7
     for p in range(5, NPIX):
         np.testing.assert_array_equal(logq[p], logq[4])
+
+
+# ---------------------------------------------------------------------------
+# paths that cannot honour f_p must refuse it, not drop it
+# ---------------------------------------------------------------------------
+
+def test_depth_map_with_gp3d_is_refused_before_any_compute(tmp_path):
+    """gp3d never sees f_p; it used to build a full table and stamp it anyway.
+
+    Measured on this fixture with the old code: the build ran to completion,
+    printed the loaded f_p, and produced a table with the footprint still in it
+    (off-footprint max|logQ| 5.4e-02 against the 1e-06 mask-free tolerance,
+    worst |corr(Q, f_p)| 0.537 against 0.1).
+    """
+    from darksirens.cli.build_lognormal_completion import main
+
+    cat = _write_survey(tmp_path / "survey.h5")
+    dmap = _write_depth_map(tmp_path / "depth.h5",
+                            np.array([1.0] * 8 + [0.0] * 4))
+    out = tmp_path / "q.h5"
+    # An inducing grid that RESOLVES ls_z on this toy catalog, so the only
+    # thing that can stop the build is the depth-map refusal itself (with the
+    # default 6 nodes the resolution guard would fire first and the test would
+    # pass for the wrong reason).
+    argv = ["--catalog", cat, "--out", str(out), "--n-members", "0",
+            "--mode", "gp3d", "--c-mode", "aggregate", "--depth-map", dmap,
+            "--gp3d-nz-nodes", "200", "--gp3d-nsph-nodes", "8"]
+    with pytest.raises(ValueError, match="not honoured by --mode 'gp3d'"):
+        main(argv)
+    assert not out.exists()
+
+
+def test_depth_map_with_stratified_selection_is_refused(tmp_path):
+    """The per-stratum C_sel base bypasses the f_p fold, so the pair is refused."""
+    from darksirens.cli.build_lognormal_completion import main
+
+    cat = _write_survey(tmp_path / "survey.h5")
+    dmap = _write_depth_map(tmp_path / "depth.h5",
+                            np.array([1.0] * 8 + [0.0] * 4))
+    fit = _write_selection_fit(tmp_path / "fit2.json",
+                               [(21.0, -20.8, 0.8), (20.5, -20.5, 0.9)])
+    smap = _write_stratum_map(tmp_path / "strata.h5", np.arange(NPIX) % 2)
+    out = tmp_path / "q.h5"
+    with pytest.raises(ValueError, match="STRATIFIED"):
+        main(["--catalog", cat, "--out", str(out), "--n-members", "0",
+              "--mode", "radial", "--c-mode", "selection",
+              "--selection-fit", fit, "--stratum-map", smap,
+              "--depth-map", dmap])
+    assert not out.exists()
+
+
+def test_a_single_stratum_selection_fit_still_takes_a_depth_map(tmp_path):
+    """The refusal is aimed at the stratified branch only, not at selection mode."""
+    from darksirens.cli.build_lognormal_completion import build_completion
+    from darksirens.redshift.selection import load_selection_fit_strata
+
+    cat = _write_survey(tmp_path / "survey.h5")
+    dmap = _write_depth_map(tmp_path / "depth.h5",
+                            np.array([1.0] * 4 + [0.9, 0.9, 0.4, 0.4]
+                                     + [0.0] * 4))
+    fit = _write_selection_fit(tmp_path / "fit1.json", [(21.0, -20.8, 0.8)])
+    strata = load_selection_fit_strata(fit)
+    logq, _members, diag = build_completion(
+        cat, mode="radial", n_members=0, maxiter=200, workers=1,
+        c_mode="selection", selection_fit=strata[0], depth_map=dmap,
+        budget_renorm=False)
+    assert diag["n_solved_rows"] == 6
+    assert not np.array_equal(logq[4], logq[6])
