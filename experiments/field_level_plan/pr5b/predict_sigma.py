@@ -220,7 +220,6 @@ def main(argv=None):
         f_p = g["completeness"][...]
         counts = g["counts"][...]
         W_ref = g["shell_response"][...]
-        z_edges = g["z_count_edges"][...]
         basis_meta = json.loads(g.attrs["basis_meta"])
         theta_ref = json.loads(g.attrs["theta_ref"])
         anchor_sha = g.attrs["sha256"]
@@ -232,7 +231,6 @@ def main(argv=None):
     LS_SPH = float(basis_meta["ls_sph"])
     LS_Z = float(basis_meta["ls_z"])
     Z_NODE_HI = float(basis_meta["z_node_hi"])
-    JITTER = float(basis_meta["j_sph"])
     M_RANK = M_SPH * M_Z
     assert nside_a == NSIDE and L_H.shape == (M_RANK, M_RANK)
     print(f"[anchor] {anchor_path}")
@@ -594,8 +592,8 @@ def main(argv=None):
         p14_bulk = _p14(bulk)
         print(f"\n[P14] sigma(H0) range over {len(res)} nodes: "
               f"[{smin:.4e}, {smax:.4e}] nats")
-        print(f"[P14] predicted max |(bias_M - bias_256) - mean| over the FULL "
-              f"prior [20, 140]:")
+        print("[P14] predicted max |(bias_M - bias_256) - mean| over the FULL "
+              "prior [20, 140]:")
         print("      " + "  ".join(f"M={m}:{p14[str(m)]:.3e}" for m in M_LADDER))
         print(f"[P14] the same over the clean posterior bulk H0 in [75, 105] "
               f"({int(bulk.sum())} nodes):")
@@ -643,7 +641,7 @@ def main(argv=None):
     print(f"\n[P17b] predicted (LSE_m ll_m - log M) - ll(xi_hat) at the shipped "
           f"M_draw = 8 members: {anchor_res['p17b_realized_nats']:+.6e} nats "
           f"(asymptotic 0.5 sigma^2 = {0.5 * sig ** 2:.6e})")
-    print(f"[P17b] predicted per-member ll_m - ll(xi_hat), M_draw = 8: "
+    print("[P17b] predicted per-member ll_m - ll(xi_hat), M_draw = 8: "
           + ", ".join(f"{x:+.4f}" for x in anchor_res["dll_members"]))
     print(f"[P17b] realized sd over the 8 stored draws = "
           f"{anchor_res['dll_sd']:.6e} (population sigma {sig:.6e})")
