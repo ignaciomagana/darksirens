@@ -228,7 +228,6 @@ def anchor_table(mock, a, thetas):
 def run_grid(mock, a, base, sd_M0hat, thetas, delta, dsig, meandd, lin,
              lin_s, mode):
     """log-posterior on (H0, Om0, w0, wa, M0hat) for one anchoring mode."""
-    zg = np.linspace(a.zlo, a.zhi, a.nz)
     # Observed-catalog redshift histogram on the same grid (data; fixed).
     hist, edges = np.histogram(mock["z_obs"], bins=a.nz, range=(a.zlo, a.zhi))
     n_obs_z = hist / np.diff(edges)

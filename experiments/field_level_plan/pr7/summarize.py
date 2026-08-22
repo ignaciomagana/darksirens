@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 
 import numpy as np
 
@@ -85,7 +84,7 @@ def main():
             print(f"\nprior width spans x{max(ps) / min(ps):.0f}; shared "
                   f"sigma_log r spans x{max(sh) / min(sh):.3f}, decoupled "
                   f"spans x{max(dec) / min(dec):.3f}")
-            print(f"decoupled sigma_log r / (sqrt(2) s): "
+            print("decoupled sigma_log r / (sqrt(2) s): "
                   + ", ".join(f"{d / (np.sqrt(2) * p):.3f}"
                               for d, p in zip(dec, ps)))
             print()

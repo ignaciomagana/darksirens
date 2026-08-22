@@ -69,7 +69,6 @@ from darksirens.redshift.lognormal_completion import (
     renormalize_q_mean_one,
     save_lss_completion_hdf5,
     lowrank_inducing_nodes,
-    build_lowrank_operator,
     poisson_lognormal_gp3d_map,
     laplace_lognormal_gp3d_members,
     eval_logq_gp3d,

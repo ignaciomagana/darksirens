@@ -62,7 +62,7 @@ refactorization, by adding one scalar-normal step along ``v``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -919,7 +919,6 @@ def bias_profile(mop: MultiTracerCountOperator, *, n_outer: int = 8,
                                log_b_prior=log_b_prior)
     H_u = bias_profile_curvature_log(g_b, H_b, b)
     cov_u = jnp.linalg.inv(H_u)
-    inv_b = jnp.diag(1.0 / b)
     return dict(b_hat=b, xi_hat=xi, H_chol=sol["H_chol"],
                 cov_log_b=cov_u, curvature_log_b=H_u,
                 cov_b=jnp.diag(b) @ cov_u @ jnp.diag(b),

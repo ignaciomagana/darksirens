@@ -124,8 +124,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -322,7 +320,6 @@ def main(argv=None):
     from darksirens.redshift.selection import (
         c_sel_gaussian, load_selection_fit_json)
 
-    CLIGHT = 299792.458
     sel = load_selection_fit_json(args.selection_fit)
     cal = json.load(open(args.n0_calibration))
     theta_ref = dict(M0hat=float(sel["M0hat"]),
