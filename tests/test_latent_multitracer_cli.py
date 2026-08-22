@@ -15,6 +15,12 @@ checked here two ways on a small synthetic world:
   DIFFERENT ``xi_hat`` (the stacked fit is a different fit), while the
   per-tracer counts still sum to the parent's exactly.
 
+Two further pins cover what "K catalogs of selection against one field" has to
+mean beyond ``f_p`` and ``b_k``: the SHELL RESPONSE is per tracer (a catalog's
+own magnitude selection and photo-z kernel are what weight its galaxies within
+a shell), and the ``(K, K)`` bias covariance is read at the PROFILE MAXIMUM
+rather than at the anchor, with the residual gradient gated.
+
 The world is deliberately tiny (nside 8, rank 48, two shells) but must still
 clear the builder's own occupancy guard 7 (``>= 1e4`` galaxies and ``>= 500``
 occupied pixels per shell), so the counts are generated to satisfy it rather
@@ -84,18 +90,28 @@ def _write_world(tmp_path, seed=4242, n_tracer=2):
     _mth(mth1, rng.uniform(0.0, 0.3, NPIX))
     _mth(mth2, rng.uniform(0.2, 0.6, NPIX))
 
+    def _sel(path, m_lim, M0hat, sigma_M):
+        path.write_text(json.dumps(dict(
+            format_version="darksirens-selection-fit-1.0",
+            strata=[dict(family="gaussian", m_lim=m_lim, M0hat=M0hat,
+                         sigma_M=sigma_M,
+                         cov=[[1e-6, 0.0], [0.0, 1e-6]],
+                         n_gal=int(ngals.sum()),
+                         stratum="all", k_corr_coeffs=[],
+                         meta=dict(Om0=0.3075, w0=-1.0, wa=0.0, H0_ref=100.0,
+                                   nll=0.0))])))
+
     sel = tmp_path / "selection_fit.json"
-    sel.write_text(json.dumps(dict(
-        format_version="darksirens-selection-fit-1.0",
-        strata=[dict(family="gaussian", m_lim=20.0, M0hat=-20.2, sigma_M=1.0,
-                     cov=[[1e-6, 0.0], [0.0, 1e-6]], n_gal=int(ngals.sum()),
-                     stratum="all", k_corr_coeffs=[],
-                     meta=dict(Om0=0.3075, w0=-1.0, wa=0.0, H0_ref=100.0,
-                               nll=0.0))])))
+    _sel(sel, 20.0, -20.2, 1.0)
+    # A SECOND catalog's selection: a brighter limiting magnitude and a
+    # narrower magnitude scatter, i.e. a genuinely different C(z) and so a
+    # genuinely different within-shell weighting.
+    sel2 = tmp_path / "selection_fit_2.json"
+    _sel(sel2, 19.2, -21.0, 0.7)
     cal = tmp_path / "n0_calibration.json"
     cal.write_text(json.dumps(dict(log10n0=-4.3, delta=0.0)))
     return dict(survey=str(survey), mth1=str(mth1), mth2=str(mth2),
-                sel=str(sel), cal=str(cal))
+                sel=str(sel), sel2=str(sel2), cal=str(cal))
 
 
 def _build(w, out, extra=()):
@@ -165,8 +181,12 @@ def test_k2_artifact_carries_the_per_tracer_block(tmp_path):
         # ... on the same shared field: one xi, one H_chol, one member set.
         assert gb["xi_hat"].shape == ga["xi_hat"].shape
         assert gb["Xi_members"].shape == ga["Xi_members"].shape
-        # K >= 2 ADDS COLUMNS: 4 theta + K biases against 4 theta + 1.
-        assert gb["sensitivity_S"].shape[1] == ga["sensitivity_S"].shape[1] + 1
+        # K >= 2 ADDS COLUMNS (PLAN §3.4).  K = 1 carries
+        # [M0hat, sigma_M, delta, Om0, b_gal]; K = 2 carries the two SHARED
+        # columns (delta, Om0 -- one field, one cosmology) plus K columns for
+        # each of the two per-catalog selection parameters and K bias columns.
+        assert ga["sensitivity_S"].shape[1] == 5
+        assert gb["sensitivity_S"].shape[1] == 2 + 2 * 2 + 2
         # The per-tracer block, and the partition property.
         t0, t1 = gb["tracers"]["0"], gb["tracers"]["1"]
         assert t0.attrs["name"] == "gal" and t1.attrs["name"] == "agn"
@@ -192,6 +212,160 @@ def test_k2_artifact_carries_the_per_tracer_block(tmp_path):
         assert abs(C[0, 1] - C[1, 0]) <= 1e-12 * abs(C[0, 1])
         assert float(gb.attrs["bias_prior_log_sd"]) == 0.05
         assert "RATIO" in gb.attrs["bias_cov_convention"]
+
+
+@pytest.mark.slow
+def test_shell_response_is_per_tracer(tmp_path):
+    """Tracer k's WITHIN-SHELL weighting must be tracer k's own selection.
+
+    ``W`` collapses the fine redshift grid onto shells weighted by
+    ``C(z; m_lim, M0hat, sigma_M)`` convolved with the photo-z kernel, so it is
+    a property of the CATALOG, not of the field.  PR-7 built one ``W`` at
+    ``theta_ref`` and handed it to all K operators, which silently gave every
+    tracer catalog 0's magnitude selection while its ``f_p`` and its ``b_k``
+    were its own -- and the omission was invisible precisely because those two
+    per-tracer inputs already existed.
+
+    Two builds pin it: one where the K selections DIFFER (the responses must
+    differ) and one where they are the shared default (the responses must be
+    identical, so the per-tracer machinery cannot have perturbed the shared
+    case).
+    """
+    w = _write_world(tmp_path)
+    diff, same = tmp_path / "sel_diff.h5", tmp_path / "sel_same.h5"
+    _build(w, diff, ["--tracer-labels", "tracer",
+                     "--tracer-completeness", w["mth1"],
+                     "--tracer-completeness", w["mth2"],
+                     "--tracer-b-gal", "1.0", "--tracer-b-gal", "2.0",
+                     "--tracer-names", "gal,agn",
+                     "--tracer-selection-fit", w["sel"],
+                     "--tracer-selection-fit", w["sel2"],
+                     "--tracer-sigma-z", "0.023",
+                     "--tracer-sigma-z", "0.05"])
+    _build(w, same, ["--tracer-labels", "tracer",
+                     "--tracer-completeness", w["mth1"],
+                     "--tracer-completeness", w["mth2"],
+                     "--tracer-b-gal", "1.0", "--tracer-b-gal", "2.0",
+                     "--tracer-names", "gal,agn"])
+    with h5py.File(diff) as fd, h5py.File(same) as fs:
+        gd, gs = fd["latent_field"], fs["latent_field"]
+        W0 = gd["tracers"]["0"]["shell_response"][...]
+        W1 = gd["tracers"]["1"]["shell_response"][...]
+        # Not a rounding difference: a different m_lim and a different photo-z
+        # width move the within-shell weighting by tens of percent.
+        assert np.max(np.abs(W1 - W0)) / np.max(np.abs(W0)) > 0.05
+        # The top-level dataset stays tracer 0's, which is what it is at K = 1.
+        assert np.array_equal(gd["shell_response"][...], W0)
+        # The catalog's selection is recorded WITH its response, so the
+        # artifact can say which selection weighted which counts.
+        assert float(gd["tracers"]["0"].attrs["m_lim"]) == 20.0
+        assert float(gd["tracers"]["1"].attrs["m_lim"]) == 19.2
+        assert float(gd["tracers"]["0"].attrs["sigma_z"]) == 0.023
+        assert float(gd["tracers"]["1"].attrs["sigma_z"]) == 0.05
+        th1 = json.loads(gd["tracers"]["1"].attrs["theta_ref"])
+        assert th1["M0hat"] == -21.0 and th1["sigma_M"] == 0.7
+        # Shared inputs: one selection, so the K responses coincide exactly.
+        assert np.array_equal(gs["tracers"]["1"]["shell_response"][...],
+                              gs["tracers"]["0"]["shell_response"][...])
+
+        # PLAN §3.4: "catalog k's own theta contributes its own column built
+        # from its own operator".  The per-catalog selection parameters are K
+        # columns each; delta and Om0 stay one apiece because the field and the
+        # cosmology are shared.
+        labels = json.loads(gd.attrs["sensitivity_labels"])
+        assert labels == ["M0hat[gal]", "M0hat[agn]",
+                          "sigma_M[gal]", "sigma_M[agn]",
+                          "delta", "Om0", "b_gal[gal]", "b_gal[agn]"]
+        S = gd["sensitivity_S"][...]
+        c_gal, c_agn = S[:, 0], S[:, 1]
+        assert np.linalg.norm(c_gal) > 0.0 and np.linalg.norm(c_agn) > 0.0
+        # Two DIFFERENT columns, not one column stored twice: a shared W has
+        # only one M0hat direction to give.
+        assert (np.linalg.norm(c_agn - c_gal)
+                > 0.01 * np.linalg.norm(c_gal))
+
+
+@pytest.mark.slow
+def test_bias_covariance_is_read_at_the_profile_maximum(tmp_path):
+    """``inv(H_u)`` is a Laplace width, and a width needs a stationary point.
+
+    The log-bias curvature is ``diag(b) H_b diag(b) + diag(b g_b)``; the second
+    term is exactly the profile gradient and vanishes only at the maximum.  The
+    anchor's own ``b_k`` is not the maximum -- the count channel decreases
+    monotonically in the bias amplitude and the prior, centred on the anchor,
+    contributes no gradient there -- so the builder profiles to the maximum
+    first.  Both numbers are stamped, and the test pins that they are on
+    opposite sides of the tolerance: the anchor residual is O(10) nats per nat
+    on this world, the solved one is machine noise.
+    """
+    w = _write_world(tmp_path)
+    out = tmp_path / "mode.h5"
+    _build(w, out, ["--tracer-labels", "tracer",
+                    "--tracer-completeness", w["mth1"],
+                    "--tracer-completeness", w["mth2"],
+                    "--tracer-b-gal", "1.0", "--tracer-b-gal", "2.0",
+                    "--tracer-names", "gal,agn"])
+    with h5py.File(out) as f:
+        g = f["latent_field"]
+        tol = float(g.attrs["bias_profile_grad_log_tol"])
+        assert float(g.attrs["bias_profile_grad_log_inf"]) <= tol
+        # The defect, on the record: what the anchor carried.
+        assert float(g.attrs["bias_profile_grad_log_inf_at_anchor"]) > 1.0
+        b_hat = np.asarray(g.attrs["tracer_bias_hat"])
+        b_anchor = np.asarray(g.attrs["tracer_bias"])
+        assert b_hat.shape == (2,)
+        # The maximum is a DIFFERENT point from the anchor; if it were not,
+        # the residual above could not have been large.
+        assert np.max(np.abs(np.log(b_hat / b_anchor))) > 1e-3
+        # The covariance is the inverse of the curvature that was gated.
+        C_log = np.asarray(json.loads(g.attrs["bias_profile_cov_log"]))
+        H_log = np.asarray(json.loads(g.attrs["bias_profile_curvature_log"]))
+        assert np.allclose(C_log @ H_log, np.eye(2), atol=1e-10)
+        assert np.all(np.asarray(
+            g.attrs["bias_profile_curvature_log_eigenvalues"]) > 0.0)
+        assert "PROFILE MAXIMUM" in g.attrs["bias_cov_convention"]
+
+        # The K = 1 scalar names denote K = 1 objects and must not be filled
+        # with repurposed K >= 2 quantities: there is no scalar s_b here, no
+        # systematics floor, and the rank-1 along-v ratio has no K >= 2
+        # reading.
+        for gone in ("s_b", "s_b_profile", "s_b_floor", "s_b_floor_active",
+                     "s_b_floor_frac", "b_gal_curvature_profile",
+                     "b_gal_curvature_conditional",
+                     "b_gal_spread_inflation_along_v"):
+            assert gone not in g.attrs, gone
+        infl = np.asarray(g.attrs["bias_spread_inflation_along_v_by_tracer"])
+        assert infl.shape == (2,) and np.all(infl >= 1.0)
+
+
+@pytest.mark.slow
+def test_bias_profile_residual_gate_refuses_a_non_stationary_point(tmp_path):
+    """``--bias-profile-outer 0`` leaves the profile AT the anchor.
+
+    That is the pre-fix evaluation point exactly, so the gate must refuse it
+    rather than write a covariance -- otherwise "evaluated at the maximum" is a
+    claim the artifact makes without checking.
+    """
+    w = _write_world(tmp_path)
+    cmd = [sys.executable, "-m", "darksirens.cli.build_latent_field",
+           "--survey", w["survey"], "--selection-fit", w["sel"],
+           "--n0-calibration", w["cal"],
+           "--per-pixel-completeness", w["mth1"],
+           "--out", str(tmp_path / "nonstationary.h5"), "--om0", "0.3075",
+           "--z-depth", str(Z_DEPTH), "--n-shells", str(N_SHELL),
+           "--m-sph", "16", "--m-z", "3", "--ls-sph", "0.9", "--ls-z", "0.15",
+           "--m-draw", "4", "--n-b-nodes", "5", "--b-max", "2.0",
+           "--tracer-labels", "tracer",
+           "--tracer-b-gal", "1.0", "--tracer-b-gal", "2.0",
+           "--bias-profile-outer", "0"]
+    env = dict(os.environ, JAX_PLATFORMS="cpu")
+    env.pop("DARKSIRENS_ZMAX", None)
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                       cwd=os.path.dirname(os.path.dirname(
+                           os.path.abspath(__file__))))
+    assert r.returncode != 0
+    assert "did not reach a stationary point" in (r.stdout + r.stderr)
+    assert not (tmp_path / "nonstationary.h5").exists()
 
 
 @pytest.mark.slow

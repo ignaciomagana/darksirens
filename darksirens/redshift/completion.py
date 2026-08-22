@@ -922,6 +922,52 @@ def _aggregate_dN_obs_sum(em_catalog: EMCatalog) -> jnp.ndarray:
     return jnp.sum(kde, axis=0)
 
 
+def _aggregate_sky_norm(em_catalog: EMCatalog, n_pix_total):
+    """Sky normalization of the aggregate ``Cbar`` ratio (pixel units).
+
+    Returns ``n_pix_total`` on the legacy path (no ``f_p``), and the
+    f_p-weighted covered sky ``Sum_{all p} f_p`` when a per-pixel selection
+    fraction is active.  The choice is what makes the survey-total budget
+    close: consumers spend ``Sum_p C_p dN_exp`` of the expectation on the
+    observed side, with ``C_p = f_p Cbar`` under f_p and ``C_p = Cbar``
+    without it, so the denominator must be exactly ``Sum_p (C_p / Cbar)`` for
+    that to equal the observed sum ``dN_obs_sum``.
+
+    ``f_p_total_sum`` is a data constant covering the WHOLE sky (occupied and
+    empty pixels alike), not a per-view row sum: the compact PE/selection
+    views carry only the union pixels, and the field normalizer's occupied
+    rows only the occupied ones, so neither could supply it.  A run that
+    populates ``f_p`` without it is refused rather than silently normalized
+    by the full sphere -- that is the double-count this function exists to
+    prevent, and it is invisible in every diagnostic (Cbar simply reads low
+    by the covered fraction).
+
+    Structure-only dispatch (``None``-ness), so it resolves at trace time and
+    the no-``f_p`` path stays bit-identical.
+    """
+    has_fp = (em_catalog.f_p_rows is not None
+              or em_catalog.field_f_p_occ is not None)
+    if not has_fp:
+        return n_pix_total
+    if em_catalog.f_p_total_sum is None:
+        raise ValueError(
+            "c_mode='aggregate' with a per-pixel selection fraction requires "
+            "EMCatalog.f_p_total_sum (Sum_{all sky p} f_p): the aggregate "
+            "numerator sums observed counts over the footprint only, so "
+            "normalizing it by the full sphere would make Cbar the all-sky "
+            "mean <f_p> C_true and the consumers' C_p = f_p Cbar would apply "
+            "the mask loss TWICE -- a fraction (1 - <f_p>) of the catalogued "
+            "galaxies would stay in the missing budget on top of their own "
+            "observed counts. Build it from the full-sky f_p map "
+            "(darksirens.likelihood.catalog_views.prepare_catalog_views)."
+        )
+    f_tot = jnp.asarray(em_catalog.f_p_total_sum, dtype=zgrid.dtype)
+    # A completely uncovered map (Sum f_p == 0) has no observed counts either,
+    # so the ratio is 0/0; the inert 1 keeps Cbar at exactly 0 there instead
+    # of NaN, matching the guarded dN_exp_smooth denominator alongside it.
+    return jnp.where(f_tot > 0.0, f_tot, 1.0)
+
+
 def _check_stratum_labels(em_catalog: EMCatalog, n_strata: int) -> None:
     """Bound-check the stratum labels against the curve stack (host-side only).
 
@@ -1012,11 +1058,15 @@ def _precompute_grids(
     AGGREGATE mode this is the single formation site of the sky-aggregate
     ratio
 
-        Cbar(z) = Sum_p dN_obs_s(z|p) / (N_pix_total * dN_exp_smooth(z)),
-        N_pix_total = round(4 pi / apix)   (occupied AND empty pixels),
+        Cbar(z) = Sum_p dN_obs_s(z|p) / (A_sky * dN_exp_smooth(z)),
+        A_sky   = round(4 pi / apix)   (occupied AND empty pixels),
 
-    stored UNCLIPPED on the grids bundle (consumers clip to [0, 1]); every C
-    consumer (the per-row curves, the field normalizer, the clip diagnostics)
+    or, when a per-pixel selection fraction is active, ``A_sky = Sum_p f_p``
+    (the f_p-weighted covered sky) so that Cbar is the TRUE per-covered-sky
+    completeness and the consumers' ``C_p = f_p Cbar`` carries the mask loss
+    exactly once -- see :func:`_aggregate_sky_norm`.  Stored UNCLIPPED on the
+    grids bundle (consumers clip to [0, 1]); every C consumer (the per-row
+    curves, the field normalizer, the clip diagnostics)
     then broadcasts this one curve in place of the per-pixel ratio, so the
     numerator and the global normalizer carry the same budget by
     construction.  The numerator is a data constant; the theta dependence is
@@ -1116,7 +1166,18 @@ def _precompute_grids(
         # beyond a concrete z_depth the smooth is already pinned to 1 above,
         # and every consumer discards Cbar there anyway (C := 0 relax).
         dN_exp_safe = jnp.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
-        C_bar_raw = dN_obs_sum / (n_pix_total * dN_exp_safe)
+        # Sky normalization of the aggregate ratio.  The numerator sums the
+        # observed density over the FOOTPRINT only (empty/uncovered pixels
+        # contribute exactly zero), so the denominator must count the sky the
+        # survey could actually observe.  Without f_p that is the whole
+        # sphere, because C is then applied unweighted to every pixel.  With
+        # f_p it is the f_p-weighted covered sky Sum_p f_p: consumers form
+        # C_p = f_p * Cbar, so normalizing by n_pix_total instead would make
+        # Cbar = <f_p>_allsky * C_true and C_p = f_p <f_p> C_true -- the mask
+        # loss applied twice, leaving (1 - <f_p>) of the catalogued galaxies
+        # in the missing budget alongside their own observed counts.
+        sky_norm = _aggregate_sky_norm(em_catalog, n_pix_total)
+        C_bar_raw = dN_obs_sum / (sky_norm * dN_exp_safe)
     return _CompletionGrids(
         log_g=log_g, dN_exp=dN_exp, dN_exp_smooth=dN_exp_smooth,
         C_bar_raw=C_bar_raw,
@@ -1169,8 +1230,27 @@ class CompletionCurves(NamedTuple):
 # ------------------------------------------------------------
 
 #: log Q is clipped to this symmetric range before exponentiating, so that a
-#: heavy lognormal tail cannot blow up the missing-galaxy density.
+#: heavy lognormal tail cannot blow up the missing-galaxy density.  TABLE path
+#: only: the shipped Q_LSS tables are empirically fit and are NOT bounded by
+#: their builder's own clip (it is applied before the per-z mean-one renorm),
+#: so this bound is what keeps the numerator's and the normalizer's missing
+#: budgets equal on a railed cell.
 _LOGQ_CLIP: float = 7.0
+
+#: The LATENT seam's bound on ``logQ`` -- a numerical-safety rail, NOT a tail
+#: tamer, and it must never bind on a physical row.  The latent field is not an
+#: empirically fit table: ``rho`` is DEFINED so that the consumed missing budget
+#: ``sum_p (1 - f_p C(z)) Q_p(z)`` equals its ``Q == 1`` value exactly (PLAN
+#: eq. 4).  That identity BOUNDS the positive tail on its own --
+#: ``Q_p <= (sum_q w_q) / w_p <= P_F / min_p w_p``, i.e. ``logQ <= 13.4`` at the
+#: DESI footprint (``P_F = 30470``, ``min w = 1 - max f_p = 0.044``) -- so a
+#: ``+/-7`` rail does not bound a tail there, it DELETES budget, and the deficit
+#: grows with ``b_GW``.  ``60`` sits ~4x above that structural bound while
+#: ``exp(60) = 1.1e26`` stays ~280 orders under f64 overflow (and 12 under f32),
+#: so the product with the missing-density base cannot become ``inf``.  The
+#: negative rail is inert by the same identity: a floored ``Q = e^-60``
+#: contributes ``< 1e-26`` of the budget, against ``e^-7 = 9e-4`` today.
+_LATENT_LOGQ_CLIP: float = 60.0
 
 
 def _check_lss_grid(arr):
@@ -1232,8 +1312,9 @@ def _to_q(logq_arr, q_arr):
     return jnp.exp(lq)
 
 
-def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool):
-    """One member's completion factor ``Q_eff = exp(clip(logQ, ±_LOGQ_CLIP))``,
+def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool,
+                            clip: float = _LOGQ_CLIP):
+    """One member's completion factor ``Q_eff = exp(clip(logQ, ±clip))``,
     relaxed to ``1`` beyond ``survey.z_depth``.
 
     ``logq_arr`` is a RAW (un-clipped, un-exponentiated) log table when
@@ -1243,10 +1324,17 @@ def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool):
     2-node gather the caller passes (never the full cube).  ``depth_mask`` is a
     static ``(N_grid,)`` (or gathered ``(...,)``) boolean, or ``None`` when
     ``z_depth is None`` (Q_eff is then just ``exp(clip(logQ))`` everywhere).
+
+    ``clip`` is a STATIC Python float and defaults to the table path's
+    ``_LOGQ_CLIP``.  The latent seam passes ``_LATENT_LOGQ_CLIP`` instead: its
+    ``logQ`` is generated against a normalizer that already conserves the
+    consumed budget, so the table bound would truncate that budget rather than
+    tame a tail (see the two constants).  Keying this off ``member_is_log``
+    would be wrong -- a LOADED log-Q table is ``member_is_log=True`` too.
     """
     if not member_is_log:
         logq_arr = jnp.log(jnp.maximum(logq_arr, 1e-300))
-    q = jnp.exp(jnp.clip(logq_arr, -_LOGQ_CLIP, _LOGQ_CLIP))
+    q = jnp.exp(jnp.clip(logq_arr, -float(clip), float(clip)))
     if depth_mask is None:
         return q
     return jnp.where(depth_mask, q, 1.0)
@@ -1479,7 +1567,8 @@ def latent_member_N_miss_integrals(base_miss, C_curve, em_catalog: EMCatalog,
 
     def _body(carry, m):
         lq = latent_member_logq_rows(em_catalog, survey, C_curve, m)
-        q_eff = _member_q_eff_from_logq(lq, depth_mask, True)
+        q_eff = _member_q_eff_from_logq(lq, depth_mask, True,
+                                        _LATENT_LOGQ_CLIP)
         dN_m = base_miss * q_eff                        # transient, discarded
         return carry, jnp.trapezoid(dN_m, zgrid, axis=-1)
 
@@ -1509,7 +1598,8 @@ def latent_posterior_mean_q(em_catalog: EMCatalog, survey: SurveyParams,
     def _body(acc, m):
         lq = latent_member_logq_rows(em_catalog, survey, C_curve, m,
                                      field_rows=field_rows)
-        return acc + _member_q_eff_from_logq(lq, depth_mask, True), None
+        return acc + _member_q_eff_from_logq(
+            lq, depth_mask, True, _LATENT_LOGQ_CLIP), None
 
     total, _ = lax.scan(
         _body, jnp.zeros((n_rows, zgrid.size), dtype=float), jnp.arange(M))
@@ -2380,7 +2470,8 @@ def field_global_log_Z_members(
         def _one_latent(m):
             lq = latent_member_logq_rows(em_catalog, survey, C_curve, m,
                                          field_rows=True)
-            q_m = _member_q_eff_from_logq(lq, depth_mask, True)
+            q_m = _member_q_eff_from_logq(lq, depth_mask, True,
+                                          _LATENT_LOGQ_CLIP)
             return field_global_log_Z(
                 cosmo, survey, em_catalog, N_obs_total=N_obs_total_l,
                 latent_q_rows=q_m)

@@ -89,6 +89,7 @@ from darksirens.redshift.completion import (
     field_global_log_Z_members,
     log_galaxy_measure_grid,
     member_N_miss_integrals,
+    _LATENT_LOGQ_CLIP,
     _member_q_eff_from_logq,
     _resolve_member_logq_row,
 )
@@ -810,8 +811,9 @@ def eval_dark_member_completion_latent(
     """LATENT-mode twin of :func:`eval_dark_member_completion` (PLAN §3.6).
 
     Structurally identical -- same two-node ``base_miss`` gather, same
-    ``_member_q_eff_from_logq`` clip + depth relaxation, same ``logaddexp`` and
-    normalizer selection -- with the ONE substitution that defines the seam:
+    ``_member_q_eff_from_logq`` depth relaxation, same ``logaddexp`` and
+    normalizer selection (the clip BOUND differs; see below) -- with the ONE
+    substitution that defines the seam:
     the resident log-Q table lookup ``member_logq[pix, idx]`` is replaced by
     the GENERATED
 
@@ -862,8 +864,12 @@ def eval_dark_member_completion_latent(
     # It is still not a second convention: outside the seam's SUPPORT the two
     # arrays are exact zeros, ``logQ`` is bit-zero, and ``exp(clip(0)) == 1.0``
     # exactly -- the support IS the relaxation, and ``None`` says so.
-    q_lo = _member_q_eff_from_logq(lq_lo, depth_lo, True)
-    q_hi = _member_q_eff_from_logq(lq_hi, depth_hi, True)
+    #
+    # ``_LATENT_LOGQ_CLIP`` is the second (and last) difference: the generated
+    # ``logQ`` carries a budget ``rho`` already conserves, so the table bound
+    # would subtract missing hosts rather than tame a tail.
+    q_lo = _member_q_eff_from_logq(lq_lo, depth_lo, True, _LATENT_LOGQ_CLIP)
+    q_hi = _member_q_eff_from_logq(lq_hi, depth_hi, True, _LATENT_LOGQ_CLIP)
     miss = _interp_row(b_lo * q_lo, b_hi * q_hi, t)
     log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
     numerator = jnp.logaddexp(A_obs, log_miss)
