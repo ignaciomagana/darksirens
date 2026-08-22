@@ -60,6 +60,15 @@ N_FIT, N_ROWS, M_DRAW = 40, 64, 3
 #: The node count is not cosmetic: see
 #: ``test_budget_identity_off_node_is_bought_by_the_node_count``.
 N_B, B_MAX = 33, 4.0
+#: The production anchor's moment scale, measured on ``latent_anchor_v2a.h5``:
+#: 30,470 fitted-footprint pixels carrying a field COHERENT across that
+#: footprint, at a level that puts ``A(z; b) = sum_{p in F} e^{b f}`` at 2.97e4
+#: for ``b = 0`` and 2.37e19 for ``b = 4``.  ``N_FOOT_PROD_LEVEL`` is set from
+#: that pair -- ``4 * level ~ ln(2.37e19 / 2.97e4)`` less the spread's Jensen
+#: term -- and reproduces it to 3.047e4 / 2.366e19.  The SPREAD is small on
+#: purpose: it is the coherence that keeps ``log A`` free of a freezing
+#: crossover inside ``[0, B_MAX]``.
+N_FOOT_PROD, N_FOOT_PROD_LEVEL, N_FOOT_PROD_SPREAD = 30470, 7.82, 0.6
 
 
 # --------------------------------------------------------------------- fixture
@@ -441,25 +450,69 @@ def test_moment_interpolation_survives_the_production_dynamic_range():
     so ``A - cB`` went negative, the ``1e-300`` floor caught it, and ``rho`` was
     silently garbage.  ``b_GW`` is SAMPLED, so the sampler visits that region.
 
-    This fixture reproduces the mechanism at small scale by giving the moments a
-    production-like dynamic range: the pin is that ``num > 0`` STRUCTURALLY
-    (``B <= A`` and ``c <= 1``), never that the floor rescued it.
+    The fixture is the production moment scale, not a scaled-down cartoon: the
+    footprint is the anchor's own 30,470 pixels and the field sits at the
+    anchor's own level, which puts ``A(b = 0) = 3.047e4`` and
+    ``A(b = 4) = 2.366e19`` against the artifact's measured 2.97e4 and 2.37e19
+    -- 14.89 orders against 14.9.  Four orders less than that and linear
+    interpolation survives (the earlier fixture spanned 11.8 and could not go
+    red), so the range is a fixture INVARIANT, asserted below.
+
+    Two properties of the fixture carry the discrimination and neither is
+    cosmetic:
+
+    * ``f_p`` VARIES pixel to pixel, so ``B`` is not a multiple of ``A``.  With
+      a constant ``f_p`` the moments are exactly proportional, ``A - cB``
+      collapses to ``(P_F - c F_F)/P_F * A``, and "num > 0" degenerates into
+      "A_interp > 0" -- a strictly weaker statement than the one this pin
+      exists to make.
+    * the field is COHERENT across the footprint (one level, a small
+      pixel-to-pixel spread) rather than a wide zero-mean scatter.  That is what
+      the anchor looks like, and it is why ``log A`` has no freezing crossover
+      inside ``[0, b_max]`` and the same 33 nodes reproduce it to ~1e-14 while
+      they cannot reproduce ``A`` itself at all.
+
+    The pin is that ``num > 0`` STRUCTURALLY (``B <= A`` and ``c <= 1``) and
+    that ``rho`` matches the direct footprint reduction -- never that the
+    ``1e-300`` floor rescued it.  The floor cannot be detected by ``num > 0``
+    alone (a floored ``rho`` still exponentiates to a positive 1e-300), so the
+    floor is caught by a magnitude threshold and by the reduction itself.
     """
     n_b, n_z = N_B, 64
     b_nodes = 0.5 * B_MAX * (1.0 - np.cos(np.pi * np.arange(n_b) / (n_b - 1)))
-    # A = |F| e^{b fmax}, B = (sum f_p) e^{b fmax}: the real functional form,
-    # with fmax = 6.8 giving the anchor's ~15 orders over b in [0, 4].
-    P_F, F_F, fmax = 30470.0, 26251.7, 6.8
+    rng = np.random.default_rng(11)
     z = np.linspace(0.0, 1.0, n_z)
-    A = P_F * np.exp(b_nodes[:, None] * fmax * (0.5 + 0.5 * z)[None, :])
-    B = F_F * np.exp(b_nodes[:, None] * fmax * (0.5 + 0.5 * z)[None, :])
-    assert np.log10(A.max() / A.min()) > 10.0, "fixture lost its dynamic range"
-    c = jnp.asarray(0.5 * np.ones(n_z))
+    # f(p, z) = (level + spread) * mild z ramp, and f_p drawn per pixel.
+    f = ((N_FOOT_PROD_LEVEL + N_FOOT_PROD_SPREAD * rng.normal(size=N_FOOT_PROD))
+         [:, None] * (0.85 + 0.15 * z)[None, :])            # (n_pix, n_z)
+    f_p = rng.uniform(0.3, 1.0, size=N_FOOT_PROD)
+    P_F, F_F = float(N_FOOT_PROD), float(f_p.sum())
+    # eq. (2) itself, one b node at a time (the cube is never materialized).
+    A = np.empty((n_b, n_z))
+    B = np.empty((n_b, n_z))
+    for i, b_i in enumerate(b_nodes):
+        e = np.exp(b_i * f)
+        A[i] = e.sum(0)
+        B[i] = f_p @ e
+    assert np.log10(A.max() / A.min()) > 14.0, "fixture lost its dynamic range"
+    ratio = B / A
+    assert ratio.max() / ratio.min() > 1.05, "B is proportional to A"
+
+    # C(z) varies with z, as the sky-aggregate completeness curve does.
+    c = 0.4 + 0.5 * z
+    den = P_F - c * F_F
+    w = 1.0 - f_p[:, None] * c[None, :]                     # (n_pix, n_z)
     for b in (0.0, 0.1, 0.37, 0.5, 1.11, 2.5, 3.77, 4.0):
-        rho = rho_from_moments(jnp.asarray(A), jnp.asarray(B), c, b,
-                               jnp.asarray(b_nodes), P_F, F_F, None)
-        assert np.all(np.isfinite(np.asarray(rho))), f"rho non-finite at b={b}"
-        # The floor must NOT be doing the work: recover num and assert it is
-        # positive on its own.
-        num = np.exp(np.asarray(rho)) * (P_F - 0.5 * F_F)
+        rho = np.asarray(rho_from_moments(jnp.asarray(A), jnp.asarray(B),
+                                          jnp.asarray(c), b,
+                                          jnp.asarray(b_nodes), P_F, F_F, None))
+        assert np.all(np.isfinite(rho)), f"rho non-finite at b={b}"
+        num = np.exp(rho) * den
         assert np.all(num > 0.0), f"A - cB went non-positive at b={b}"
+        # The floor is 1e-300; the true minimum of A - cB over this fixture is
+        # 1.26e4 (the production anchor's own minimum is 1.70e4), so anything
+        # below 1e3 means the floor, not the arithmetic, produced the sign.
+        assert num.min() > 1e3, f"the 1e-300 floor is load-bearing at b={b}"
+        # ... and against eq. (2) evaluated directly: worst |drho| = 6.8e-14.
+        ref = np.log((w * np.exp(b * f)).sum(0) / w.sum(0))
+        np.testing.assert_allclose(rho, ref, rtol=0, atol=1e-9)
