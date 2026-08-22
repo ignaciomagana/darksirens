@@ -44,7 +44,7 @@ jobs:
   fast-tests:
     name: Tier-0 fast subset (CPU)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       # Default fetch-depth=1 is enough: tests/test_run_provenance.py and
       # tests/test_packaging_contract.py only need `git rev-parse HEAD`,
