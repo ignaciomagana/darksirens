@@ -24,7 +24,7 @@ def main():
     anchor_i = int(d["anchor_node_index"])
     pred = json.load(open(HERE / "sigma_prediction.json"))
 
-    print(f"# PR-5b measurement summary")
+    print("# PR-5b measurement summary")
     print(f"guard: {d['guard_convention']['name']}  b_GW={d['b_GW']}  "
           f"git {d['git_sha'][:12]}  {d['total_seconds'] / 60:.1f} min")
     print(f"devices: {d['devices']}")
@@ -34,7 +34,6 @@ def main():
             continue
         a = d["arms"][arm]
         der = a["derived"]
-        ll = np.asarray(a["ll"])
         sig = np.asarray(der["sigma"])
         ess = np.asarray(der["ess_over_M"])
         ok = np.asarray(der["node_finite"])
