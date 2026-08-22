@@ -402,6 +402,22 @@ def load_latent_plan(path, *, z_depth, expect_nside=None):
             "grid come from the artifact, never from ZMAX).")
 
     below = np.ones(n_grid, dtype=bool) if z_depth is None else (zg <= float(z_depth))
+    if z_depth is None:
+        # ``below`` is all-True here, so a DEPTH-BUILT artifact would be read as
+        # if its moments covered the whole grid.  Above ``z_sub`` the padded
+        # ``A``/``B`` are exact zeros, so ``rho`` takes its ``1e-300`` floor
+        # (``rho ~ -700``) instead of ``0`` and the seam returns ``logQ ~ +700``
+        # on every footprint row -- clipped, that is a ~1e3x inflation of the
+        # missing-host density above the build's depth.  Refuse instead.
+        if n_sub != n_grid:
+            raise ValueError(
+                f"latent artifact was built with a depth ({n_sub} of {n_grid} "
+                "zgrid nodes, z_sub ends at "
+                f"z={float(z_sub[-1]):.4f}) but this run resolved NO survey "
+                "z_depth, so the seam would treat the artifact's zero pad as "
+                "real field above that node and rail logQ. Pass the "
+                "--survey_z_depth the anchor was built at, or rebuild the "
+                "anchor on the full grid.")
 
     # PR-8: does this artifact model the field ABOVE the fitted depth?  One
     # test, on the one place the profile is recorded (``basis_meta``, written
