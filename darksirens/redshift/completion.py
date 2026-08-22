@@ -922,6 +922,52 @@ def _aggregate_dN_obs_sum(em_catalog: EMCatalog) -> jnp.ndarray:
     return jnp.sum(kde, axis=0)
 
 
+def _aggregate_sky_norm(em_catalog: EMCatalog, n_pix_total):
+    """Sky normalization of the aggregate ``Cbar`` ratio (pixel units).
+
+    Returns ``n_pix_total`` on the legacy path (no ``f_p``), and the
+    f_p-weighted covered sky ``Sum_{all p} f_p`` when a per-pixel selection
+    fraction is active.  The choice is what makes the survey-total budget
+    close: consumers spend ``Sum_p C_p dN_exp`` of the expectation on the
+    observed side, with ``C_p = f_p Cbar`` under f_p and ``C_p = Cbar``
+    without it, so the denominator must be exactly ``Sum_p (C_p / Cbar)`` for
+    that to equal the observed sum ``dN_obs_sum``.
+
+    ``f_p_total_sum`` is a data constant covering the WHOLE sky (occupied and
+    empty pixels alike), not a per-view row sum: the compact PE/selection
+    views carry only the union pixels, and the field normalizer's occupied
+    rows only the occupied ones, so neither could supply it.  A run that
+    populates ``f_p`` without it is refused rather than silently normalized
+    by the full sphere -- that is the double-count this function exists to
+    prevent, and it is invisible in every diagnostic (Cbar simply reads low
+    by the covered fraction).
+
+    Structure-only dispatch (``None``-ness), so it resolves at trace time and
+    the no-``f_p`` path stays bit-identical.
+    """
+    has_fp = (em_catalog.f_p_rows is not None
+              or em_catalog.field_f_p_occ is not None)
+    if not has_fp:
+        return n_pix_total
+    if em_catalog.f_p_total_sum is None:
+        raise ValueError(
+            "c_mode='aggregate' with a per-pixel selection fraction requires "
+            "EMCatalog.f_p_total_sum (Sum_{all sky p} f_p): the aggregate "
+            "numerator sums observed counts over the footprint only, so "
+            "normalizing it by the full sphere would make Cbar the all-sky "
+            "mean <f_p> C_true and the consumers' C_p = f_p Cbar would apply "
+            "the mask loss TWICE -- a fraction (1 - <f_p>) of the catalogued "
+            "galaxies would stay in the missing budget on top of their own "
+            "observed counts. Build it from the full-sky f_p map "
+            "(darksirens.likelihood.catalog_views.prepare_catalog_views)."
+        )
+    f_tot = jnp.asarray(em_catalog.f_p_total_sum, dtype=zgrid.dtype)
+    # A completely uncovered map (Sum f_p == 0) has no observed counts either,
+    # so the ratio is 0/0; the inert 1 keeps Cbar at exactly 0 there instead
+    # of NaN, matching the guarded dN_exp_smooth denominator alongside it.
+    return jnp.where(f_tot > 0.0, f_tot, 1.0)
+
+
 def _check_stratum_labels(em_catalog: EMCatalog, n_strata: int) -> None:
     """Bound-check the stratum labels against the curve stack (host-side only).
 
@@ -1012,11 +1058,15 @@ def _precompute_grids(
     AGGREGATE mode this is the single formation site of the sky-aggregate
     ratio
 
-        Cbar(z) = Sum_p dN_obs_s(z|p) / (N_pix_total * dN_exp_smooth(z)),
-        N_pix_total = round(4 pi / apix)   (occupied AND empty pixels),
+        Cbar(z) = Sum_p dN_obs_s(z|p) / (A_sky * dN_exp_smooth(z)),
+        A_sky   = round(4 pi / apix)   (occupied AND empty pixels),
 
-    stored UNCLIPPED on the grids bundle (consumers clip to [0, 1]); every C
-    consumer (the per-row curves, the field normalizer, the clip diagnostics)
+    or, when a per-pixel selection fraction is active, ``A_sky = Sum_p f_p``
+    (the f_p-weighted covered sky) so that Cbar is the TRUE per-covered-sky
+    completeness and the consumers' ``C_p = f_p Cbar`` carries the mask loss
+    exactly once -- see :func:`_aggregate_sky_norm`.  Stored UNCLIPPED on the
+    grids bundle (consumers clip to [0, 1]); every C consumer (the per-row
+    curves, the field normalizer, the clip diagnostics)
     then broadcasts this one curve in place of the per-pixel ratio, so the
     numerator and the global normalizer carry the same budget by
     construction.  The numerator is a data constant; the theta dependence is
@@ -1116,7 +1166,18 @@ def _precompute_grids(
         # beyond a concrete z_depth the smooth is already pinned to 1 above,
         # and every consumer discards Cbar there anyway (C := 0 relax).
         dN_exp_safe = jnp.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
-        C_bar_raw = dN_obs_sum / (n_pix_total * dN_exp_safe)
+        # Sky normalization of the aggregate ratio.  The numerator sums the
+        # observed density over the FOOTPRINT only (empty/uncovered pixels
+        # contribute exactly zero), so the denominator must count the sky the
+        # survey could actually observe.  Without f_p that is the whole
+        # sphere, because C is then applied unweighted to every pixel.  With
+        # f_p it is the f_p-weighted covered sky Sum_p f_p: consumers form
+        # C_p = f_p * Cbar, so normalizing by n_pix_total instead would make
+        # Cbar = <f_p>_allsky * C_true and C_p = f_p <f_p> C_true -- the mask
+        # loss applied twice, leaving (1 - <f_p>) of the catalogued galaxies
+        # in the missing budget alongside their own observed counts.
+        sky_norm = _aggregate_sky_norm(em_catalog, n_pix_total)
+        C_bar_raw = dN_obs_sum / (sky_norm * dN_exp_safe)
     return _CompletionGrids(
         log_g=log_g, dN_exp=dN_exp, dN_exp_smooth=dN_exp_smooth,
         C_bar_raw=C_bar_raw,
@@ -1375,6 +1436,14 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
     branch): the one sky-aggregate curve replaces the per-pixel ratio for
     EVERY row -- the row's own observed KDE is not consulted, so the observed
     angular clustering cannot enter the missing budget (it belongs to Q).
+
+    Per-pixel selection fraction (field-level PR-2): with
+    ``em_catalog.f_p_rows`` populated (a static pytree-structure branch;
+    ``None`` is bit-identical), the row's completeness is
+    ``C_p(z) = f_p * C(z)`` — survey mask-loss thinning multiplying the
+    survey curve.  The loader admits ``f_p`` only for the aggregate/selection
+    ``c_mode``s (a per-pixel count-derived ``C`` already contains the mask
+    loss, so multiplying would double-count it).
     """
     global_pix = row if em_catalog.unique_pixels is None else em_catalog.unique_pixels[row]
 
@@ -1382,8 +1451,12 @@ def _row_C(row, grids: _CompletionGrids, em_catalog: EMCatalog):
         if grids.C_bar_raw.ndim == 2:
             # Stratified selection: this pixel's stratum picks its curve.
             stratum = em_catalog.pixel_stratum_map[global_pix]
-            return jnp.clip(grids.C_bar_raw[stratum], 0.0, 1.0), global_pix
-        return jnp.clip(grids.C_bar_raw, 0.0, 1.0), global_pix
+            C = jnp.clip(grids.C_bar_raw[stratum], 0.0, 1.0)
+        else:
+            C = jnp.clip(grids.C_bar_raw, 0.0, 1.0)
+        if em_catalog.f_p_rows is not None:
+            C = em_catalog.f_p_rows[row] * C
+        return C, global_pix
 
     # --- observed density: O(1) cache lookup, or on-the-fly fallback ---
     if em_catalog.dN_obs_kde is not None:
@@ -1869,7 +1942,29 @@ def _field_missing_curve(
         mod_rows = jnp.zeros((n_occ, 1), dtype=jnp.float32)  # inert placeholder
     b_eff = survey.alpha_miss * survey.b_miss                # traced (delta_g mode)
 
-    def _row_V(obs_row, mod_row, strat_row):
+    # Per-pixel selection fraction (field-level PR-2): C -> f_p * C on the
+    # occupied rows, and the empty-pixel budget below becomes
+    # n_empty - C * Sum_empty f_p.  Static pytree-structure branch; None is
+    # bit-identical.  The loader restricts f_p to aggregate/selection c_modes
+    # without a Q table or strata (their empty budgets would need
+    # f_p-weighted twins), so the admissible combinations are closed here.
+    has_fp = em_catalog.field_f_p_occ is not None
+    if has_fp and (has_q or has_dg or stratified or not aggregate):
+        raise NotImplementedError(
+            "_field_missing_curve: field_f_p_occ (per-pixel selection "
+            "fraction) is only supported under aggregate/selection c_modes "
+            "without a Q table, delta_g rows, or stratified selection."
+        )
+    if has_fp and em_catalog.field_f_p_empty_sum is None:
+        raise ValueError(
+            "_field_missing_curve: field_f_p_occ requires "
+            "field_f_p_empty_sum (Sum_{p empty} f_p) for the empty-pixel "
+            "budget."
+        )
+    f_occ_rows = (jnp.asarray(em_catalog.field_f_p_occ)
+                  if has_fp else jnp.zeros((n_occ,), dtype=jnp.float32))
+
+    def _row_V(obs_row, mod_row, strat_row, f_row):
         obs_row = obs_row.astype(dN_exp.dtype)
         if stratified:
             C = C_bar[strat_row]     # this row's stratum curve
@@ -1877,6 +1972,8 @@ def _field_missing_curve(
             C = C_bar        # one survey curve; the row's own KDE is unused
         else:
             C = jnp.clip(obs_row / dN_exp_safe, 0.0, 1.0)
+        if has_fp:
+            C = f_row.astype(dN_exp.dtype) * C
         if has_q:
             lss = mod_row.astype(dN_exp.dtype)
         elif has_dg:
@@ -1902,16 +1999,19 @@ def _field_missing_curve(
     strat_chunks = strat_pad.reshape(n_chunks, chunk_size)
     valid_chunks = valid.reshape(n_chunks, chunk_size)
 
+    f_pad_rows = jnp.pad(f_occ_rows, (0, pad))
+    f_chunks = f_pad_rows.reshape(n_chunks, chunk_size)
+
     def _body(acc, xs):
-        obs_c, mod_c, strat_c, val_c = xs
-        Vc = vmap(_row_V)(obs_c, mod_c, strat_c)             # (chunk, N_grid)
+        obs_c, mod_c, strat_c, val_c, f_c = xs
+        Vc = vmap(_row_V)(obs_c, mod_c, strat_c, f_c)        # (chunk, N_grid)
         Vc = jnp.where(val_c[:, None], Vc, 0.0)
         return acc + jnp.sum(Vc, axis=0), None
 
     V_occ, _ = lax.scan(
         _body,
         jnp.zeros(zgrid.size, dtype=dN_exp.dtype),
-        (obs_chunks, mod_chunks, strat_chunks, valid_chunks),
+        (obs_chunks, mod_chunks, strat_chunks, valid_chunks, f_chunks),
     )
 
     # Empty pixels: per-pixel C == 0, so their budget curve is lss_p itself --
@@ -1956,7 +2056,12 @@ def _field_missing_curve(
                                   dtype=dN_exp.dtype)
         else:
             V_empty = n_empty
-        if aggregate:
+        if has_fp:
+            # Sum_{p empty} (1 - f_p C(z)) = n_empty - C(z) Sum_empty f_p.
+            # (has_fp forbids has_q/strata above, and requires aggregate.)
+            V_empty = n_empty - C_bar * jnp.asarray(
+                em_catalog.field_f_p_empty_sum, dtype=dN_exp.dtype)
+        elif aggregate:
             V_empty = (1.0 - C_bar) * V_empty
 
     V_total = V_occ + V_empty
