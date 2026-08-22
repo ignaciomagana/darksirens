@@ -272,15 +272,25 @@ def test_loader_refusals(tmp_path):
         attach_selection_fraction_inputs(
             SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
                             n_catalogs=2), dict(data))
-    # S-3: a DETERMINISTIC Q table is now admitted (the f_p-weighted
-    # empty-pixel budget is built alongside the plain one), an ENSEMBLE is not.
+    # A Q table is REFUSED unless its artifact stamps f_p_aware: Q is fit to
+    # observed counts, so it already carries the footprint and C_p = f_p C would
+    # apply the survey mask TWICE (measured: H0 = 41.24 [36.1, 46.3] against a
+    # truth of 67.74 on the closure mock, the tightest arm in that run).
     det = dict(data, lss_completion_logq=np.zeros((48, int(zgrid.size))))
-    out_q = attach_selection_fraction_inputs(
-        SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
-                        n_catalogs=1, lss_completion="q.h5",
-                        selection_strata_by_catalog=None, selection_fit=None),
-        dict(det))
+    q_opts = lambda **kw: SimpleNamespace(  # noqa: E731
+        per_pixel_completeness=path, c_mode="selection", n_catalogs=1,
+        lss_completion="q.h5", selection_strata_by_catalog=None,
+        selection_fit=None, **kw)
+    with pytest.raises(NotImplementedError, match="DOUBLE-COUNTS"):
+        attach_selection_fraction_inputs(q_opts(), dict(det))
+    # ... admitted when the artifact asserts its builder removed the mask ...
+    aware = dict(det, lss_completion_provenance={"f_p_aware": True})
+    out_q = attach_selection_fraction_inputs(q_opts(), dict(aware))
     assert out_q["f_p_map"].shape == (48,)
+    # ... or when the operator takes the exposed configuration deliberately.
+    out_forced = attach_selection_fraction_inputs(
+        q_opts(allow_double_counted_mask=True), dict(det))
+    assert out_forced["f_p_map"].shape == (48,)
     ens = dict(data,
                lss_completion_logq=np.zeros((48, int(zgrid.size))),
                lss_completion_logq_members=np.zeros((3, 48, int(zgrid.size))))
@@ -290,12 +300,65 @@ def test_loader_refusals(tmp_path):
                             n_catalogs=1, lss_completion="q.h5",
                             selection_strata_by_catalog=None,
                             selection_fit=None), dict(ens))
+    # an ENSEMBLE is refused for its MISSING per-member budget, which f_p_aware
+    # says nothing about, so neither the stamp nor the escape hatch admits one
+    ens_aware = dict(ens, lss_completion_provenance={"f_p_aware": True})
+    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
+        attach_selection_fraction_inputs(q_opts(), dict(ens_aware))
+    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
+        attach_selection_fraction_inputs(
+            q_opts(allow_double_counted_mask=True), dict(ens))
     with pytest.raises(NotImplementedError, match="strat"):
         attach_selection_fraction_inputs(
             SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
                             n_catalogs=1, lss_completion=None,
                             selection_strata_by_catalog=[[(24.0, 0.0, 1.0)]]),
             dict(data))
+
+
+@pytest.mark.parametrize("stamp", [None, False, True])
+def test_f_p_aware_travels_from_the_artifact_to_the_gate(tmp_path, stamp):
+    """The stamp is read off the FILE, not asserted by the caller.
+
+    Written as a round trip because the gate is only as good as the plumbing
+    under it: an artifact that never records ``f_p_aware`` (``stamp=None``, i.e.
+    every Q table built so far) must reach the loader as False, not as a missing
+    key that some later ``get`` defaults to True.
+    """
+    from types import SimpleNamespace
+
+    from darksirens.catalogs.lss import maybe_load_lss_completion
+    from darksirens.inference.loaders import attach_selection_fraction_inputs
+    from darksirens.redshift.lognormal_completion import (
+        load_lss_completion_hdf5, save_lss_completion_hdf5)
+
+    nside_in = 4
+    npix = 12 * nside_in ** 2
+    _write_mth_map(tmp_path / "m.h5", nside_in,
+                   np.zeros(npix), np.ones(npix, dtype=np.uint64))
+
+    q_path = str(tmp_path / "q.h5")
+    save_lss_completion_hdf5(
+        q_path, logq_map=np.zeros((48, int(zgrid.size))),
+        zgrid=np.asarray(zgrid), indexing="global", c_mode="selection",
+        f_p_aware=stamp)
+    assert load_lss_completion_hdf5(q_path)["f_p_aware"] is bool(stamp)
+
+    opts = SimpleNamespace(
+        lss_completion=q_path, survey_path=None, universe_model="dark_sirens",
+        c_mode="selection", lss_marginalize=False, n_catalogs=1,
+        per_pixel_completeness=str(tmp_path / "m.h5"),
+        selection_strata_by_catalog=None, selection_fit=None)
+    data = dict(nside=2, ngals=np.zeros(48, dtype=int))
+    data.update(maybe_load_lss_completion(opts, zgrid=zgrid))
+    assert data["lss_completion_provenance"]["f_p_aware"] is bool(stamp)
+
+    if stamp:
+        assert attach_selection_fraction_inputs(
+            opts, dict(data))["f_p_map"].shape == (48,)
+    else:
+        with pytest.raises(NotImplementedError, match="DOUBLE-COUNTS"):
+            attach_selection_fraction_inputs(opts, dict(data))
 
 
 # ------------------------------------------------- S-3: f_p alongside a Q table
