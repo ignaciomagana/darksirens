@@ -441,3 +441,37 @@ def test_z_depth_mismatch_is_refused(tmp_path):
         _resolve_latent_leaves(
             _opts(lss_field_artifact=art), _catalogs(), 0.5, NSIDE,
             int(ROW_PIXELS.size), int(ROW_PIXELS.size))
+
+
+def test_no_run_depth_against_a_depth_built_artifact_is_refused(tmp_path):
+    """A run with NO ``--survey_z_depth`` may not load a depth-built anchor.
+
+    This is the case ``z_depth is not None`` never reached.  ``below`` is
+    all-True, so the artifact's ZERO PAD above ``z_sub`` is consumed as real
+    field: ``A - C B`` is ``0`` there, ``rho`` takes its ``1e-300`` floor at
+    about ``-693``, and the seam returns ``logQ = +693`` on every footprint row
+    above the build's depth -- delivered as ``Q = e^7 = 1097`` by the clip, a
+    ~1100x inflation of the missing-host density with no NaN and no crash.
+    """
+    art = _write_artifact(tmp_path / "anchor.h5")
+    with pytest.raises(ValueError, match="built with a depth"):
+        _resolve_latent_leaves(
+            _opts(lss_field_artifact=art), _catalogs(), None, NSIDE,
+            int(ROW_PIXELS.size), int(ROW_PIXELS.size))
+
+
+def test_no_run_depth_against_a_full_grid_artifact_still_loads(tmp_path):
+    """...and the legacy full-grid convention is NOT collateral damage.
+
+    An anchor whose ``z_sub`` IS the whole zgrid has no pad to misread, so a
+    depthless run loads it exactly as before.  ``m_z``/``ls_z`` are retuned
+    here only to keep the resolution and isotropy guards satisfied out to
+    ``z = 5``; the depth check is what the test is about.
+    """
+    art = _write_artifact(tmp_path / "anchor.h5", z_depth=float(_Z[-1]),
+                          m_z=4, ls_z=1.0)
+    _, pe, _ = _resolve_latent_leaves(
+        _opts(lss_field_artifact=art), _catalogs(), None, NSIDE,
+        int(ROW_PIXELS.size), int(ROW_PIXELS.size))
+    # No zero pad anywhere: the last grid node carries real basis rows.
+    assert np.any(np.asarray(pe["latent_phi_z"])[-1] != 0.0)

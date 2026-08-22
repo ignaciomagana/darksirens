@@ -142,6 +142,7 @@ class CatalogViews:
     f_p_rows_sel: jnp.ndarray | None = None      # (n_sel_rows,) f32
     field_f_p_occ: jnp.ndarray | None = None     # (n_occupied,) f32
     field_f_p_empty_sum: jnp.ndarray | None = None  # scalar f64
+    f_p_total_sum: jnp.ndarray | None = None     # scalar f64 (whole sky)
 
 
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
@@ -742,10 +743,17 @@ def prepare_catalog_views(
     # legacy full catalogs use the map itself), and split the footprint sums
     # for the field normalizer.  ``None`` everywhere when the flag is off.
     f_p_rows_pe = f_p_rows_sel = None
-    field_f_p_occ = field_f_p_empty_sum = None
+    field_f_p_occ = field_f_p_empty_sum = f_p_total_sum = None
     f_p_full = data.get("f_p_map")
     if f_p_full is not None:
         fp_np = np.asarray(f_p_full, dtype=np.float32)
+        # Whole-sky f_p-weighted covered area, in pixel units: the aggregate
+        # Cbar denominator (completion._aggregate_sky_norm).  Summed in
+        # float64 from the FULL-sky map -- no view (compact union rows, field
+        # occupied rows) spans the whole sphere, so it cannot be recovered
+        # downstream.
+        f_p_total_sum = jnp.asarray(
+            float(fp_np.astype(np.float64).sum()), dtype=jnp.float64)
 
         def _fp_rows(up_raw):
             if up_raw is None:
@@ -770,6 +778,7 @@ def prepare_catalog_views(
         f_p_rows_sel=f_p_rows_sel,
         field_f_p_occ=field_f_p_occ,
         field_f_p_empty_sum=field_f_p_empty_sum,
+        f_p_total_sum=f_p_total_sum,
         zgals_pe_catalog=zgals_pe_catalog,
         dzgals_pe_catalog=dzgals_pe_catalog,
         wgals_pe_catalog=wgals_pe_catalog,
