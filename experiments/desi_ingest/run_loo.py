@@ -11,7 +11,6 @@ numerator term -- the 43-event file is scanned against the same beta.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import common as C

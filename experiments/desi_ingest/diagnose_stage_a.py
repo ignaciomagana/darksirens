@@ -82,7 +82,7 @@ def main() -> None:
     zc, dN_obs, dN_exp = _binned_completeness(z, w, n0, f_sky, z_depth)
     zf = np.asarray(zgrid)
     csel_c = np.asarray(c_sel_gaussian(
-        jnp_z := zf, sel["m_lim"], sel["M0hat"], sel["sigma_M"], H0Planck,
+        zf, sel["m_lim"], sel["M0hat"], sel["sigma_M"], H0Planck,
         k_corr_coeffs=coeffs))
     csel_at = np.interp(zc, zf, csel_c)
     counts_cbar = dN_obs / dN_exp

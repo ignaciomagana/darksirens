@@ -1386,7 +1386,6 @@ def build_completion(
                 "stamped f_p_aware. Build with a single-stratum "
                 "--selection-fit (or --c-mode aggregate), or drop "
                 "--depth-map.")
-        import healpy as hp
         from darksirens.catalogs.io import load_survey as _ls
         from darksirens.catalogs.depth_map import load_selection_fraction
         _nside = int(_ls(catalog_path, to_device=False)[0])

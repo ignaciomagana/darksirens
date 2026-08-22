@@ -25,7 +25,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-import common
+import common  # noqa: F401  (side effect: puts the repo ROOT on sys.path)
 from common import (
     ROOT,  # noqa: F401  (re-exported for provenance printing)
     eval_truth_field_logq,
@@ -198,7 +198,6 @@ def main(argv=None):
     print(f"[draw] n0={n0:.4e} Mpc^-3 (log10n0={log10n0:.4f})  "
           f"E[N]={mu_vox.sum():.0f}  N={total}")
 
-    pix_flat = np.repeat(np.arange(npix), N_vox.sum(axis=1))
     bin_flat = np.concatenate([np.repeat(np.arange(nbin), N_vox[p]) for p in range(npix)])
     # z within each bin: uniform in comoving volume (inverse CDF restricted to bin).
     cdf = Vcum / V_tot

@@ -210,7 +210,6 @@ def main(argv=None):
                             q=f"{args.fits_agg}/q_gp3d.h5"),
     }
     if args.sel_catalog:
-        import sys as _sys
         from darksirens.redshift.selection import load_selection_fit_json
         sel_fit = load_selection_fit_json(args.sel_fit_json)
         sel_fixed = {"m_lim": float(sel_fit["m_lim"]),

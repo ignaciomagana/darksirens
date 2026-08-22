@@ -32,7 +32,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-import common
+import common  # noqa: F401  (side effect: puts the repo ROOT on sys.path)
 from common import INDEXING, fiducial_cosmo, fiducial_survey, make_em_catalog
 
 import jax.numpy as jnp
