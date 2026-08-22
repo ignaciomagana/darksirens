@@ -922,6 +922,52 @@ def _aggregate_dN_obs_sum(em_catalog: EMCatalog) -> jnp.ndarray:
     return jnp.sum(kde, axis=0)
 
 
+def _aggregate_sky_norm(em_catalog: EMCatalog, n_pix_total):
+    """Sky normalization of the aggregate ``Cbar`` ratio (pixel units).
+
+    Returns ``n_pix_total`` on the legacy path (no ``f_p``), and the
+    f_p-weighted covered sky ``Sum_{all p} f_p`` when a per-pixel selection
+    fraction is active.  The choice is what makes the survey-total budget
+    close: consumers spend ``Sum_p C_p dN_exp`` of the expectation on the
+    observed side, with ``C_p = f_p Cbar`` under f_p and ``C_p = Cbar``
+    without it, so the denominator must be exactly ``Sum_p (C_p / Cbar)`` for
+    that to equal the observed sum ``dN_obs_sum``.
+
+    ``f_p_total_sum`` is a data constant covering the WHOLE sky (occupied and
+    empty pixels alike), not a per-view row sum: the compact PE/selection
+    views carry only the union pixels, and the field normalizer's occupied
+    rows only the occupied ones, so neither could supply it.  A run that
+    populates ``f_p`` without it is refused rather than silently normalized
+    by the full sphere -- that is the double-count this function exists to
+    prevent, and it is invisible in every diagnostic (Cbar simply reads low
+    by the covered fraction).
+
+    Structure-only dispatch (``None``-ness), so it resolves at trace time and
+    the no-``f_p`` path stays bit-identical.
+    """
+    has_fp = (em_catalog.f_p_rows is not None
+              or em_catalog.field_f_p_occ is not None)
+    if not has_fp:
+        return n_pix_total
+    if em_catalog.f_p_total_sum is None:
+        raise ValueError(
+            "c_mode='aggregate' with a per-pixel selection fraction requires "
+            "EMCatalog.f_p_total_sum (Sum_{all sky p} f_p): the aggregate "
+            "numerator sums observed counts over the footprint only, so "
+            "normalizing it by the full sphere would make Cbar the all-sky "
+            "mean <f_p> C_true and the consumers' C_p = f_p Cbar would apply "
+            "the mask loss TWICE -- a fraction (1 - <f_p>) of the catalogued "
+            "galaxies would stay in the missing budget on top of their own "
+            "observed counts. Build it from the full-sky f_p map "
+            "(darksirens.likelihood.catalog_views.prepare_catalog_views)."
+        )
+    f_tot = jnp.asarray(em_catalog.f_p_total_sum, dtype=zgrid.dtype)
+    # A completely uncovered map (Sum f_p == 0) has no observed counts either,
+    # so the ratio is 0/0; the inert 1 keeps Cbar at exactly 0 there instead
+    # of NaN, matching the guarded dN_exp_smooth denominator alongside it.
+    return jnp.where(f_tot > 0.0, f_tot, 1.0)
+
+
 def _check_stratum_labels(em_catalog: EMCatalog, n_strata: int) -> None:
     """Bound-check the stratum labels against the curve stack (host-side only).
 
@@ -1012,11 +1058,15 @@ def _precompute_grids(
     AGGREGATE mode this is the single formation site of the sky-aggregate
     ratio
 
-        Cbar(z) = Sum_p dN_obs_s(z|p) / (N_pix_total * dN_exp_smooth(z)),
-        N_pix_total = round(4 pi / apix)   (occupied AND empty pixels),
+        Cbar(z) = Sum_p dN_obs_s(z|p) / (A_sky * dN_exp_smooth(z)),
+        A_sky   = round(4 pi / apix)   (occupied AND empty pixels),
 
-    stored UNCLIPPED on the grids bundle (consumers clip to [0, 1]); every C
-    consumer (the per-row curves, the field normalizer, the clip diagnostics)
+    or, when a per-pixel selection fraction is active, ``A_sky = Sum_p f_p``
+    (the f_p-weighted covered sky) so that Cbar is the TRUE per-covered-sky
+    completeness and the consumers' ``C_p = f_p Cbar`` carries the mask loss
+    exactly once -- see :func:`_aggregate_sky_norm`.  Stored UNCLIPPED on the
+    grids bundle (consumers clip to [0, 1]); every C consumer (the per-row
+    curves, the field normalizer, the clip diagnostics)
     then broadcasts this one curve in place of the per-pixel ratio, so the
     numerator and the global normalizer carry the same budget by
     construction.  The numerator is a data constant; the theta dependence is
@@ -1116,7 +1166,18 @@ def _precompute_grids(
         # beyond a concrete z_depth the smooth is already pinned to 1 above,
         # and every consumer discards Cbar there anyway (C := 0 relax).
         dN_exp_safe = jnp.where(dN_exp_smooth > 0.0, dN_exp_smooth, 1.0)
-        C_bar_raw = dN_obs_sum / (n_pix_total * dN_exp_safe)
+        # Sky normalization of the aggregate ratio.  The numerator sums the
+        # observed density over the FOOTPRINT only (empty/uncovered pixels
+        # contribute exactly zero), so the denominator must count the sky the
+        # survey could actually observe.  Without f_p that is the whole
+        # sphere, because C is then applied unweighted to every pixel.  With
+        # f_p it is the f_p-weighted covered sky Sum_p f_p: consumers form
+        # C_p = f_p * Cbar, so normalizing by n_pix_total instead would make
+        # Cbar = <f_p>_allsky * C_true and C_p = f_p <f_p> C_true -- the mask
+        # loss applied twice, leaving (1 - <f_p>) of the catalogued galaxies
+        # in the missing budget alongside their own observed counts.
+        sky_norm = _aggregate_sky_norm(em_catalog, n_pix_total)
+        C_bar_raw = dN_obs_sum / (sky_norm * dN_exp_safe)
     return _CompletionGrids(
         log_g=log_g, dN_exp=dN_exp, dN_exp_smooth=dN_exp_smooth,
         C_bar_raw=C_bar_raw,
