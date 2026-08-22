@@ -1,0 +1,5 @@
+q_killer_insupport.h5
+*.err
+*.out
+phi_run.log
+sigma_run.log

@@ -1,0 +1,1506 @@
+% =====================================================================
+%  proposal.tex -- A field-level dark-siren likelihood: making the
+%  large-scale-structure field a latent variable of the hierarchy.
+%
+%  Self-contained.  Compile with pdflatex (twice, for references).
+%  Uses only amsmath, amssymb, amsthm, booktabs, geometry, algorithm,
+%  algorithmic, enumitem, hyperref, xcolor -- all in TeX Live base.
+% =====================================================================
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!55!black,citecolor=blue!55!black,
+            urlcolor=blue!55!black]{hyperref}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\newcommand{\bn}{\hat{n}}
+\newcommand{\bgw}{b_{\rm GW}}
+\newcommand{\bgal}{b_{\rm gal}}
+\newcommand{\dgal}{d_{\rm gal}}
+\newcommand{\dgw}{d_{\rm GW}}
+\newcommand{\nbar}{\bar n}
+\newcommand{\Lmiss}{\Lambda_{\rm miss}}
+\newcommand{\Lcat}{\Lambda_{\rm cat}}
+\newcommand{\Lgal}{\Lambda_{\rm gal}}
+\newcommand{\Lhost}{\Lambda_{\rm host}}
+\newcommand{\zmaxsix}{z_{\max}\!=\!6}
+\newcommand{\Csel}{C_{\rm sel}}
+\newcommand{\zdep}{z_{\rm depth}}
+\newcommand{\Mdraw}{M_{\rm draw}}
+\newcommand{\LSE}{\mathop{\mathrm{LSE}}}
+\newcommand{\osc}{\mathop{\mathrm{osc}}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\tr}{\mathrm{tr}}
+\newcommand{\Msph}{M_{\rm sph}}
+\newcommand{\Mz}{M_{z}}
+\newcommand{\Npix}{N_{\rm pix}}
+\newcommand{\ESS}{\mathrm{ESS}}
+\setlength{\parskip}{2pt}
+
+\title{\bf A field-level dark-siren likelihood\\[2pt]
+\large Making the large-scale-structure field a latent variable of the
+hierarchy, and recovering catalog sirens and cross-correlation sirens as its
+two limits}
+\author{}
+\date{2026 August 10}
+
+\begin{document}
+\maketitle
+\vspace{-2.2\baselineskip}
+
+% =====================================================================
+\section*{Executive summary}
+% =====================================================================
+
+The dark-siren likelihood in this repository already contains a three-dimensional
+Bayesian reconstruction of the galaxy density field. It is used in the wrong
+place. The field is fitted once, offline, at a fixed cosmology, a fixed mean
+density and a fixed completeness fit; it is exported to disk as a table
+$Q_p(z)$; and a provenance firewall then \emph{forbids} the inference from
+sampling any of the parameters the table was built at. The literal sentence
+``every cosmological proposal changes the galaxy-field likelihood consistently''
+is, today, unrepresentable by construction.
+
+\paragraph{The proposal.} Delete the table. Promote the whitened low-rank
+coefficients $\xi$ of the field to a latent variable of the hierarchy, so that
+one field appears in three places at once: in the galaxy \emph{counts}, which
+constrain it; in the \emph{placement} of missing hosts, which the gravitational-wave
+events probe; and in the \emph{selection normalisation}, which decides what
+fraction of universes like this one are detectable. Every cosmological proposal
+then re-weights the galaxy-field likelihood, and the missing-host field it
+delivers to the event terms and to the detected fraction is the same realisation.
+
+\paragraph{Why this is more than plumbing.} The same generative hierarchy
+contains the two established dark-siren analyses as limits of one likelihood.
+When the catalog is complete the missing branch vanishes and the field drops out
+\emph{identically}: one recovers the discrete weighted-host sum. When the
+catalogued fraction of an event's localisation volume tends to zero and the
+volume spans many correlation cells, marginalising the Gaussian latent
+analytically replaces the field by its kernel, and the surviving
+event$\,\times\,$galaxy-voxel term is the harmonic cross-correlation
+$C_\ell^{\rm GW\times g}$ carrying the bias combination $\bgw\bgal$. The interior
+--- an incomplete catalog with well-localised events --- is where every real
+catalog/detector pairing actually sits, and it is the regime neither limit
+describes. Which corner a given pairing occupies is set by two numbers one can
+measure, not by which method one prefers.
+
+\paragraph{What is affordable, and what is not.} A full per-proposal Newton
+re-solve of the field is not affordable: at the smallest rank the resolution
+guards permit ($M=\Msph\Mz=315\times12=3780$) it is $\sim1$\,s of dense linear
+algebra against a measured $27.5$--$49.3$\,ms likelihood, a factor of $\sim36$,
+inside a run that makes $\sim10^6$ calls. The affordable form is
+\emph{linear response}: the mode of the field posterior moves affinely with the
+proposal through $S=\partial\hat\xi/\partial\theta$, obtained from the implicit
+function theorem against the Cholesky factor the anchor solve already computes,
+at a storage cost of $121$\,kB and an online cost of one member-independent
+row-factor contraction. The correction is member-independent, which is the single
+fact that keeps the memory budget flat under a $256$-fold evaluation concurrency.
+
+\paragraph{What must be conceded in the same breath.} Three things, and they
+belong in the abstract, not the appendix. (i) The galaxy field constrains the
+\emph{shape} parameters $(\Omega_m,w_0,w_a,\delta)$ and the tracer biases; it
+constrains $H_0$ only through the volume--density amplitude $n_0(c/H_0)^3$, which
+is exactly degenerate with the mean comoving number density --- so an $H_0$
+constraint from the counts is manufactured unless $n_0$ carries an $H_0$-aware
+prior. (ii) The field is defined over the volume the survey sees: $Q\equiv1$ off
+the footprint ($38\%$ of the sky) and above the survey depth $\zdep=0.3$. Four
+independent integrals put the in-support fraction of the missing-galaxy budget at
+$2.2\times10^{-5}$ to $2.7\times10^{-4}$. The lowest and most defensible is the
+verification integral for this document, which uses the shipped fit
+\emph{including its cubic $K(z)$ template} on the production $\zmaxsix$ grid:
+$2.2\times10^{-5}$ all-sky, $1.4\times10^{-5}$ restricted to the occupied
+footprint. The $K$-correction is why it sits below the other three: it drives
+$\Csel$ down faster with redshift ($\Csel=0.92$ at $\zdep$, $<10^{-3}$ by
+$z=1$), moving yet more of the missing budget above the survey depth, where
+$Q\equiv1$. The field is being asked to redistribute two thousandths of one
+percent of the missing budget. (iii) The mean-one budget
+constraint that makes ``$C$ and $n_0$ own the budget, $Q$ owns placement'' true is
+a \emph{gauge fixing}, not a measurement.
+
+\paragraph{The first thing to do is the cheapest thing to do.} Point (ii) is not
+a caveat, it is a falsifiable prediction that the whole direction may be a
+null operation, and it is testable in three days against artefacts that exist
+today: the event-weighted fraction of prior mass in the in-support missing branch,
+and the oscillation of the log-likelihood across the $H_0$ prior when the
+\emph{existing} table is switched on at the anchor. That second number is an upper
+bound on everything the entire programme can buy. If both are small, the honest
+deliverable is a bounded systematic --- ``large-scale-structure placement
+uncertainty contributes less than $X$ to the $H_0$ posterior'' --- and it is a
+publishable result reachable in days rather than weeks. Every other measurement in
+this document is downstream of that one.
+
+\paragraph{What is genuinely new, stated at the level the literature permits.}
+Three-dimensional Bayesian reconstruction of the galaxy field for dark sirens is
+not new. Lognormal density reconstruction is not new. Multiplicative
+large-scale-structure corrections to catalog completion are not new. What is not
+found in the completion literature is the conjunction: a \emph{shared} latent
+field carrying per-tracer bias and per-tracer parametric selection, marginalised
+inside a finite-event gravitational-wave hierarchy with the same realisation in
+the event terms and in the detection normalisation, at fixed missing-budget
+monopole --- and the demonstration that catalog sirens and cross-correlation
+sirens are its two limits. The claim to \emph{first} is not made here; the
+paper-by-paper search that would license it is the first item of work.
+
+% =====================================================================
+\section{What the machinery does today}
+\label{sec:today}
+% =====================================================================
+
+The pieces are usually described as three machines --- a builder, a table, a
+likelihood. They are one generative model, and writing them as one is what
+exposes where the model is exact and where it is a plug-in. All equations marked
+\textsc{[code]} are transcribed from verified source lines at \texttt{master}
+\texttt{0c5b3db}.
+
+\subsection{Notation}
+
+Sky pixels are $p\in\{1,\dots,\Npix\}$ in HEALPix RING ordering at
+$N_{\rm side}=64$ ($\Npix=49\,152$, $\Omega_{\rm pix}=4\pi/\Npix$); redshift is
+carried on a grid of $N_{\rm grid}=1086$ nodes; a voxel is $v=(p,z)$; coarse
+radial shells used by the field fit are $g\in\{1,\dots,G_s\}$; catalogs (tracers)
+are $k\in\{1,\dots,K\}$. Cosmological and population parameters are $\Lambda$
+(containing $H_0$); survey parameters are
+$\theta=(\log_{10}n_0,\delta,\theta_{\rm sel},b_{\rm miss},\dots)$. The expected
+all-galaxy comoving density is
+\begin{equation}
+  \nbar(z;\Lambda,\theta)\;=\;\frac{dN_{\rm exp}}{dz\,d\Omega}
+  \;=\;n_0\,(1+z)^{\delta}\,\frac{dV_c}{dz\,d\Omega}(z;\Lambda),
+  \label{eq:dNexp}
+\end{equation}
+and $C(z;\theta)\in[0,1]$ is the completeness. The production configuration uses
+the parametric $C_{\rm sel}(z;\theta_{\rm sel})$ built from a truncated luminosity
+function; $f_p=1-\texttt{masked\_frac}_p\in[0,1]$ is the per-pixel areal
+completeness, which is $f_p\equiv1$ in today's code.
+
+The production run this work targets carries $259$ events at $4096$ posterior
+samples, $1\,067\,946$ detected injections, $20$ free dimensions, and
+\emph{no large-scale structure at all}: it runs with the field switched off and no
+completion table. The field-level path would be the first structure ever used in
+production, which is why the standard is ``provably inert when off, provably
+correct when on.''
+
+\subsection{Thinning: why the catalog and the missing galaxies separate}
+
+Conditional on a latent log-density contrast $s(p,z)$, galaxies are an
+inhomogeneous Poisson process with the lognormal intensity
+\begin{equation}
+  \Lgal(p,z)\;=\;\nbar(z;\Lambda,\theta)\,
+  \exp\!\Big[\bgal\,s(p,z)-\tfrac12\bgal^2\sigma^2(p,z)\Big],
+  \qquad \sigma^2(p,z)\equiv\Var[s(p,z)],
+  \label{eq:galintensity}
+\end{equation}
+where the shift $-\tfrac12 b^2\sigma^2$ enforces
+$\mathbb E_{\rm prior}[e^{bs-\frac12b^2\sigma^2}]=1$: the field \emph{redistributes}
+galaxies, it does not create them. This mean-one convention is the most
+load-bearing convention in the stack and it reappears three times below.
+
+The survey observes each galaxy independently with probability $f_pC(z;\theta)$.
+By the Poisson thinning theorem the catalogued and missing galaxies are two
+\emph{independent} Poisson processes,
+\begin{align}
+  \Lcat(p,z) &= f_p\,C(z;\theta)\,\Lgal(p,z), \label{eq:thincat}\\
+  \Lmiss(p,z) &= \big[1-f_p\,C(z;\theta)\big]\,\Lgal(p,z),
+  \label{eq:thinmiss}
+\end{align}
+and, exactly,
+\begin{equation}
+  p\big(\text{missing}\,\big|\,\text{catalogued},\,s\big)
+  \;=\;p\big(\text{missing}\,\big|\,s\big).
+  \label{eq:thinindep}
+\end{equation}
+Equation~\eqref{eq:thinindep} says: once the field is fixed, the catalog carries
+no further information about what is missing. Everything the catalog knows about
+the missing galaxies, it knows through $s$. It is the entire resolution of the
+double-conditioning question of \S\ref{sec:double}.
+
+\subsection{The redshift--sky prior as it is coded}
+
+The likelihood does not integrate \eqref{eq:thincat}; it uses the catalog itself.
+For a dark siren at $(z,p)$,
+\begin{equation}
+  p\big(z,p\,\big|\,\Lambda,\theta,Q\big)
+  \;=\;\frac{N_{{\rm obs},p}\,\mathcal K_p(z)\;+\;\big[1-C(z;\theta)\big]\,
+  \nbar(z;\Lambda,\theta)\;Q_p(z)}{\mathcal Z(\Lambda,\theta,Q)},
+  \label{eq:zprior}
+\end{equation}
+\textsc{[code]} with $N_{{\rm obs},p}$ the integer galaxy count in pixel $p$ and
+$\mathcal K_p$ the pixel's photometric-redshift kernel density. The consumed
+missing density is $dN_{\rm miss}=[1-C]\,\nbar\,Q$, relaxed to $dN_{\rm exp}$ above
+the survey depth $\zdep$ --- i.e.\ $C:=0$, $Q:=1$ there. Comparing with
+\eqref{eq:thinmiss} identifies
+\begin{equation}
+  Q_p(z)\;\equiv\;\exp\!\Big[b_{\rm miss}\,s(p,z)-\tfrac12 b_{\rm miss}^2\sigma^2(p,z)\Big]
+  \quad\text{with } f_p\equiv1 .
+  \label{eq:Qdef}
+\end{equation}
+So $Q$ \emph{is} the exponentiated latent field, mean-one normalised, and nothing
+else. Its only defect as written is that it is a fixed table read from disk rather
+than a function of the sampled parameters.
+
+Two structural consequences of $f_p\equiv1$ deserve naming, because both are
+first-order for the target survey. The measured areal masking has mean $0.137$,
+standard deviation $0.104$ and $99$th percentile $0.635$ over the occupied
+footprint, while the magnitude depth is uniform at the retention cut
+($m_{\rm th}$ percentiles $1$, $50$, $99$ all equal $21.000$; the imaging depth is
+nowhere the limit). So the entire per-pixel selection variation is \emph{areal},
+which is achromatic in redshift and magnitude and therefore exactly correctable.
+First, putting $f_p$ on the count side only would invert the sign of the inferred
+incompleteness: a pixel with $63\%$ areal masking would be told that $63\%$ of its
+galaxies are a \emph{density deficit} rather than a \emph{selection deficit}, and
+that deficit re-enters the event likelihood as a claim about where hosts are not.
+Second, the dominant term is not the partial pixels: it is the $18\,682$ of
+$49\,152$ pixels with $f_p=0$, whose missing-budget weight moves from $1-C$ to $1$,
+because a pixel with no catalog has \emph{all} of its galaxies missing.
+
+\subsection{The offline field: Poisson--lognormal on a low-rank basis}
+
+Let $\{Z_j\}_{j=1}^M$ be inducing nodes on $\mathbb S^2\times\zeta$,
+$\zeta=\log(1+z)$ --- a Fibonacci sphere of $\Msph$ points crossed with $\Mz$ nodes
+uniform in $\zeta$ --- and $k=k_{\rm sph}\otimes k_\zeta$ a separable kernel. With
+$LL^{\!\top}=K_{ZZ}+j\mathbb 1$, the Nystr\"om design and the whitened field are
+\begin{equation}
+  \Phi=K_{XZ}L^{-\!\top}\in\mathbb R^{V\times M},
+  \qquad s=\Phi\xi,\qquad \xi\sim\mathcal N(0,\mathbb 1_M),
+  \label{eq:lowrank}
+\end{equation}
+so $\mathrm{Cov}(s)=\Phi\Phi^{\!\top}$ and $\sigma^2_{\rm prior}(v)=\sum_i\Phi_{vi}^2$.
+$\Phi$ factorises exactly as $\Phi_{\rm sph}\otimes\Phi_\zeta$ and is never
+materialised: a dense $\Phi$ at $M=3780$ would be $47.6$\,GB, and a build at
+$M=1728$ has already exhausted memory at $21.7$\,GB.
+
+The rank is not free. The angular and radial lengthscales must be equal in
+comoving units or the kernel is a pancake, and the radial scale must survive the
+photometric-redshift scatter. The measured scatter is $\sigma_z=0.0227$ (median
+over $2.24$M galaxies), i.e.\ $\sigma_\chi=89$\,Mpc at $z_{\rm ref}=0.237$, so a
+$50$\,Mpc radial kernel retains $\exp[-(89/50)^2/2]=0.20$ of its own radial signal
+while a $190$\,Mpc kernel retains $0.90$. The self-consistent configuration is
+isotropic at $\sim190$\,Mpc: $\ell_{\rm ang}=0.2$, $\ell_\zeta=0.039$, $\Msph=315$,
+$\Mz=8$--$12$, $M=2520$--$3780$. At that rank roughly $40\%$ of the coefficients
+are data-constrained and the remainder are prior --- which is correct, and is what
+the Laplace covariance encodes.
+
+The fit is over solve voxels $v=(p,g)$ with integer counts $N_v$ and a base
+$\bar\lambda_v=\int_g C\,\nbar\,dz$, giving
+\begin{equation}
+  J(\xi)=\tfrac12\|\xi\|^2+\sum_v\big[\lambda_v-N_v\log\lambda_v\big],
+  \qquad
+  \lambda_v=\bar\lambda_v\exp\!\Big[b(\Phi\xi)_v-\tfrac12b^2\sigma^2_{\rm prior}(v)\Big],
+  \label{eq:Jpoisson}
+\end{equation}
+\textsc{[code]} with $\nabla J=\xi+b\Phi^{\!\top}(\lambda-N)$ and
+$H=\mathbb 1+b^2\Phi^{\!\top}\mathrm{diag}(\lambda)\Phi\succeq\mathbb 1$. The problem
+is convex and well posed even when $V<M$. The Laplace posterior
+$\mathcal N(\hat\xi,H^{-1})$ is sampled as
+\begin{equation}
+  \xi_m=\hat\xi+L_H^{-\!\top}g_m,\qquad g_m\sim\mathcal N(0,\mathbb 1_M),
+  \qquad L_HL_H^{\!\top}=H .
+  \label{eq:laplacedraws}
+\end{equation}
+
+\begin{lemma}[posterior-mean $Q$ and its variance shift]
+\label{lem:varshift}
+Under \eqref{eq:laplacedraws}, for the Nystr\"om row $\phi_u$ at an output voxel
+$u$,
+\begin{equation}
+  \log\mathbb E[Q_u]
+  =b\,\phi_u^{\!\top}\hat\xi-\tfrac12b^2\big[\sigma^2_{\rm prior}(u)-\sigma^2_{\rm post}(u)\big],
+  \qquad \sigma^2_{\rm post}(u)=\|L_H^{-1}\phi_u\|^2 .
+  \label{eq:postmeanQ}
+\end{equation}
+\end{lemma}
+\noindent Equation \eqref{eq:postmeanQ} \emph{is} the table the likelihood consumes
+today. It has a physically desirable property that a MAP table does not: a voxel
+with no data has $\sigma_{\rm post}\to\sigma_{\rm prior}$ and
+$\phi_u^{\!\top}\hat\xi\to0$, so $Q\to1$. \emph{No information, no modulation.}
+
+\begin{remark}[the plug-in gap, stated exactly]
+\label{rem:plugin}
+The event likelihood is a nonlinear functional of $Q$: $Q$ appears inside a
+logarithm in \eqref{eq:zprior} and inside $\log\mu$ in the detection
+normalisation. Hence $\log\mathbb E_\xi[\mathcal L(Q(\xi))]\neq
+\log\mathcal L(\mathbb E_\xi[Q])$, and running the deterministic table is a
+plug-in, exact only to first order in the posterior spread of $s$.
+\end{remark}
+
+\subsection{The mean-one budget constraint is a gauge fixing}
+
+\begin{proposition}[$Q$ has no monopole freedom]
+\label{prop:gauge}
+For any positive $\alpha(z)$, the map $Q_p(z)\mapsto\alpha(z)Q_p(z)$ together with
+$[1-C]\nbar\mapsto[1-C]\nbar/\alpha(z)$ leaves $dN_{\rm miss}$, and therefore the
+entire event likelihood, exactly invariant. The per-$z$ monopole of $Q$ is
+therefore not identified by the gravitational-wave data; it is identified only by
+whatever fixes $(n_0,\delta,\theta_{\rm sel})$.
+\end{proposition}
+
+The code fixes this gauge at build time by rescaling each realisation so that
+\begin{equation}
+  \frac{\sum_{p\in\mathcal F}w_p(z)\,Q_p(z)}{\sum_{p\in\mathcal F}w_p(z)}=1,
+  \qquad w_p(z)=\big[1-C_p(z)\big]\,\nbar(z),
+  \label{eq:renorm}
+\end{equation}
+over the \emph{fitted footprint} $\mathcal F$, applied
+to the deterministic table and to \emph{each member independently}. This is
+necessary and it is measured: the Jensen contribution of
+Lemma~\ref{lem:varshift} otherwise inflates the missing budget by $+55\%$, because
+the posterior variance is largest exactly where the data are sparse.
+
+Two precisions matter for what may be claimed. First, in the production
+completeness modes the constraint is \emph{already} exactly the identity the
+likelihood consumes: the builder fits the whole sky with $p$-independent weights,
+so mean-one reduces to $\langle Q\rangle_{\rm sky}=1$ and the consumed sum equals
+its $Q\equiv1$ value for every $z$, member and $\theta$. Under \emph{stratified}
+selection the weights are $p$-dependent and evaluated at the build-time fit, so
+that identity holds only at $\theta=\theta_{\rm ref}$ and leaks elsewhere at the
+order of the stratum-to-stratum spread in $C_{\rm sel}$. Second, and more
+importantly for the paper: by Proposition~\ref{prop:gauge} this is a
+\emph{convention that makes an estimand well posed}, i.e.\ a definition, not a
+measurement. ``$C$ and $n_0$ own the budget, $Q$ owns placement'' is the correct
+sentence, and ``gauge fixing'' is the correct word for it.
+
+\begin{remark}[renormalisation does not commute with the ensemble mean]
+\label{rem:noncommute}
+Writing $\Pi$ for the renormalisation, $\Pi$ is nonlinear in $Q$, so
+$\frac1M\sum_m\Pi[Q^{(m)}]\neq\Pi[\mathbb E[Q]]$ at order
+$\Var_{\rm sky}(Q)/\Npix$ per shell. ``Members carry placement uncertainty but zero
+budget uncertainty'' is therefore a modelling choice, not a theorem.
+\end{remark}
+
+\subsection{Member marginalisation, and the price of a logarithm}
+
+With $\Mdraw$ realisations the likelihood is
+\begin{equation}
+  \log\mathcal L(\Lambda,\theta)=\LSE_m\log\mathcal L_m-\log\Mdraw,
+  \label{eq:membermarg}
+\end{equation}
+\textsc{[code]} where the member index enters \emph{both} the per-event terms and
+the detection normalisation $\mu$ --- enforced as an all-or-none guard, and
+correct: a member is one realisation of the universe, and the same universe must
+place the hosts and set the detected fraction.
+
+\begin{proposition}[Jensen bias of \eqref{eq:membermarg}]
+\label{prop:jensen}
+\eqref{eq:membermarg} is unbiased for $\mathcal L$ and biased for
+$\log\mathcal L$. If $\log\mathcal L_m$ has spread $\sigma$ nats and is
+approximately Gaussian across members, then
+\begin{equation}
+  \mathbb E\big[\log\widehat{\mathcal L}_M\big]-\log\mathcal L
+  \simeq-\frac{e^{\sigma^2}-1}{2M},
+  \qquad \frac{\ESS}{M}\simeq e^{-\sigma^2},
+  \qquad\Longrightarrow\qquad
+  \boxed{\,M>\frac{e^{\sigma^2}-1}{2\epsilon}\,}
+  \label{eq:Mrequired}
+\end{equation}
+for an $\epsilon$-nat bias.
+\end{proposition}
+
+\noindent This is sharper than the usual $M\sim e^{\sigma^2}$ folklore and it is
+brutal. At $\sigma=1.0$ nats, $\epsilon=0.1$ needs $M=9$; at $\sigma=1.5$, $M=43$;
+at $\sigma=2.6$, $M=4.3\times10^{3}$, and $M=8$ carries a $54$-nat bias. The member
+spread is therefore the largest open number in the design, and \S\ref{sec:est}
+predicts it in closed form rather than discovering it.
+
+\begin{remark}[what actually has to be gated]
+\label{rem:crn}
+The whitened draws $g_m$ are generated once and reused at every $\theta$ (common
+random numbers), so $\widehat{\mathcal L}_M(\theta)$ is a \emph{deterministic,
+smooth} function of $\theta$, not a noisy one. The bias of
+Proposition~\ref{prop:jensen} is a fixed perturbation and only its
+$\theta$-variation,
+$\osc_\theta\Delta\equiv\max_\theta\Delta-\min_\theta\Delta$ with
+$\Delta(\theta)=\log\widehat{\mathcal L}_M-\log\mathcal L$, distorts the posterior;
+a constant offset is absorbed into the evidence. The consequence is unforgiving:
+every determinism diagnostic --- repeat-to-repeat identity, adjacent-$\theta$
+smoothness --- passes \emph{by construction}, and passes just as well on a badly
+distorted surrogate. Only $\osc_\theta\Delta$ against a large-$M$ reference
+discriminates.
+\end{remark}
+
+\subsection{The shared-latent multitracer solve, and which half of the seam is open}
+\label{sec:seam}
+
+For $K$ catalogs sharing one field the stacked objective and Hessian are
+\begin{equation}
+  J(\xi)=\tfrac12\|\xi\|^2+\sum_{k}\sum_{v\in\mathcal V_k}
+  \big[\lambda_{kv}-N_{kv}\log\lambda_{kv}\big],
+  \qquad
+  H=\mathbb 1+\sum_k b_k^2\,\Phi_k^{\!\top}\mathrm{diag}(\lambda_k)\Phi_k ,
+  \label{eq:jointJ}
+\end{equation}
+with $\lambda_{kv}=\bar\lambda_{kv}e^{\,b_k(\Phi_k\xi)_v-\frac12b_k^2\sigma^2_{kv}}$,
+one Laplace ensemble, and per-survey tables
+$\log Q_k^{(m)}=b_k\phi^{\!\top}\xi_m-\frac12b_k^2\sigma^2_{\rm prior}$. Member $m$
+of every catalog is then the same physical realisation --- a theorem, not a check.
+
+The interesting statement is where this stands operationally, and it is not where
+one would guess. \textbf{The consumer is ready; the producer cannot produce.} On
+the inference side, $K\ge2$ mixtures under parametric selection completeness
+assemble and evaluate end to end: per-catalog completeness modes, per-catalog
+selection fits with an all-or-nothing anchoring rule, a homogeneous
+luminosity-function family, per-catalog parameter routing, and a two-catalog
+end-to-end likelihood fixture pinning the identical-catalogs-collapse-to-$K{=}1$
+identity. Exactly one refusal survives on that side --- \emph{stratified} fits at
+$K\ge2$ --- and its stated reason is data plumbing, not modelling.
+
+On the builder side the shared-field path is closed in four independent ways. It
+takes the per-pixel completeness default and is hard-rejected at load by any
+parametric-selection run; it never fixes the budget gauge, so every joint file
+ships the full $+55\%$ Jensen monopole that the single-catalog tables remove; its
+inducing grid is hard-coded at $\Msph,\Mz=32,6$ up to $z=3$, giving a $\zeta$ node
+spacing of $0.277$ and hence a \emph{hard} floor of $L_{\rm smooth}\ge1.34$\,Gpc ---
+every physically supportable correlation length fails it; and it is the only
+producer of a shared realisation identifier, so $K$ independently built
+single-catalog tables carry $K$ different ones. The only way to run the
+configuration is a flag whose own documentation states that it marginalises over
+an \emph{independent-fields product prior} rather than the shared-field prior the
+estimator assumes.
+
+\begin{center}\itshape
+A shared-latent multitracer marginalisation under parametric selection
+completeness is not refused. It is not constructible.
+\end{center}
+
+\noindent This is the cleanest one-line motivation for the whole proposal: the
+field-level hierarchy closes that seam \emph{by deleting the producer}. One $\xi$
+shared across $K$ tracers makes matched realisations a theorem, retires the
+realisation identifier and the provenance firewall together, and removes the
+builder's frozen rank, frozen cosmology and frozen completeness mode
+simultaneously.
+
+\subsection{Novelty, scored honestly}
+
+The scoring below is the owner's, transcribed; the right-hand column is the
+correction this document's verification requires.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{p{0.40\linewidth}p{0.20\linewidth}p{0.34\linewidth}}
+\toprule
+claim & score & reality check \\
+\midrule
+homogeneous missing galaxies & none & --- \\
+$1+b\delta_g$ correction & low & --- \\
+a multiplicative structure field $Q$ & low & variance-completion work introduced it \\
+clustering to reconstruct missing galaxies & not novel & --- \\
+Poisson/lognormal density reconstruction & not novel broadly & --- \\
+\textbf{3-D Bayesian dark-siren catalog reconstruction} & \textbf{not novel broadly} & cartography-style reconstructions already propagate voxel-count uncertainty and marginalise cosmology and bias; on the $\theta$-coupling axis they are \emph{ahead} of an exported table \\
+low-rank sphere$\,\times\,z$ GP implementation & interesting implementation & --- \\
+posterior-mean rather than MAP $Q$ & strong technical choice & correct, and it is what makes $Q\to1$ where there is no data \\
+per-$z$ mean-one budget constraint & interesting methodological contribution & \textbf{it is a gauge fixing} (Prop.~\ref{prop:gauge}) --- a definition, not a measurement; demote to an enabling clause \\
+empty pixels as Poisson information & important, not fundamentally new & --- \\
+parametric selection $C$ separated from $Q$ & quite interesting combination & correct, and it is what makes the count likelihood non-circular \\
+marginalising members through a complete GW hierarchy & \textbf{potentially novel} & the same-realisation requirement is a \emph{correctness} condition, already enforced; the contribution is doing it at fixed budget monopole \\
+joint multitracer shared latent & \textbf{potentially very novel} & \textbf{not constructible today} (\S\ref{sec:seam}) \\
+\textbf{joint multitracer $+$ selection $C$ $+$ GW marginalisation} & \textbf{not implemented; strongest direction} & unchanged --- and the field-level hierarchy is the shortest route to it \\
+\bottomrule
+\end{tabular}
+\caption{Novelty scoring, with the corrections the code-level verification forces.
+The sentence \emph{``we introduce Bayesian large-scale-structure reconstruction for
+incomplete dark-siren catalogs''} must not be written.}
+\end{table}
+
+\noindent Two scope sentences must ride with any claim to marginalise over the
+clustered missing field: the marginalisation is over \emph{the volume the survey
+sees}, not over the budget ($Q\equiv1$ off-footprint and above $\zdep$, covering
+$38\%$ of the sky and $\sim99.99\%$ of the missing budget); and the compression
+that makes a defensible $\Mdraw$ affordable is engineering, not a methods claim.
+
+% =====================================================================
+\section{Proposed work}
+\label{sec:proposed}
+% =====================================================================
+
+\subsection{The hierarchy}
+
+Promote $\xi$ from a table to a latent variable:
+\begin{multline}
+  p\big(H_0,\Lambda,\xi,\{\theta_k\},\{b_k\},\bgw,\{f_k\}\;\big|\;\dgw,\{d_{{\rm gal},k}\}\big)
+  \;\propto\;
+  \pi(H_0,\Lambda)\,\pi(\{\theta_k\})\,\pi(\{b_k\})\,\pi(\bgw)\\
+  \times\;\underbrace{\mathcal N(\xi;0,\mathbb 1_M)}_{\rm (F1)}\;
+  \times\;\prod_{k}\underbrace{p\big(\{m_i\}_k\,\big|\,\{z_i\}_k,\theta_k\big)}_{\rm (F2)\ magnitudes}\;
+  \times\;\prod_{k}\underbrace{p\big(\{N_{kv}\}\,\big|\,\xi,\theta_k,b_k,f_k,\Lambda\big)}_{\rm (F3)\ counts}\\
+  \times\;\underbrace{p\big(\dgw\,\big|\,\{d_{{\rm gal},k}\},\xi,\bgw,\Lambda,\{\theta_k\}\big)}_{\rm (F4)\ GW}
+  \label{eq:hierarchy}
+\end{multline}
+The single structural change is that $\xi$ now appears in (F1), (F3) \emph{and}
+(F4).
+
+\paragraph{An honest statement about (F2).} In the shipped pipeline the magnitude
+channel is \emph{not} a likelihood factor: the magnitude log-likelihood is defined
+but referenced nowhere outside its own test, and $\theta_{\rm sel}$ enters as an
+anchored Gaussian prior whose width comes from the offline fit's covariance
+($\sigma(\hat M_0)=1.60\times10^{-4}$\,mag). The shipped hierarchy is therefore
+empirical Bayes on $\theta_{\rm sel}$, and \eqref{eq:hierarchy} is the target, not
+the current object. This matters exactly once: at the unconditional rung of
+\S\ref{sec:cancel} the restored shell totals draw $\theta_{\rm sel}$ information
+from the same magnitudes that produced the prior, and the combination is refused.
+
+\subsection{(F3): the count likelihood, and the one approximation that buys three things}
+\label{sec:counts}
+
+On solve voxels $v=(p,g)$,
+\begin{equation}
+  N_{kv}\;\sim\;\mathrm{Poisson}\Big[
+  \underbrace{f_{k,p}\,C_k(v;\theta_k)\,\bar N_k(v;\Lambda,\theta_k)}_{\bar\lambda_{kv}}
+  \;\exp\!\big(b_ks_v-\tfrac12b_k^2\sigma_v^2\big)\Big],
+  \label{eq:countlike}
+\end{equation}
+with $\bar N_k(v)=\Omega_{\rm pix}\int_g\nbar\,dz$. Two consequences must be stated
+because both change the completeness side. $f_{k,p}$ appears here \emph{and} in the
+consumed missing budget $dN_{\rm miss}=[1-f_pC]\,\nbar\,Q$ --- one side only inverts
+the sign of the inferred incompleteness. And under a per-pixel completeness the
+base $\bar\lambda_{kv}$ is itself a plug-in estimate of the same counts, so
+\eqref{eq:countlike} would be circular; only bases that are functions of $\theta$
+rather than of the counts are admissible.
+
+Conditioning on the per-shell totals $T_{kg}=\sum_pN_{kpg}$ factorises the counts
+exactly,
+\begin{equation}
+  p\big(\{N_{kpg}\}\,\big|\,\xi,\theta\big)
+  =\underbrace{p\big(\{T_{kg}\}\,\big|\,\xi,\theta\big)}_{\rm monopole}
+  \times\underbrace{p\big(\{N_{kpg}\}\,\big|\,\{T_{kg}\},\xi,\theta\big)}_{\rm placement},
+  \label{eq:shellfactor}
+\end{equation}
+and using only the second factor is a deliberate \emph{partial likelihood}: the
+factorisation is exact, the choice is not free. The discarded monopole is removed
+to linear order by an explicit projection of the sky-constant coefficients and
+retains $O(b^2\Var_{\rm sky}(s)/2)$ content.
+
+\paragraph{The within-shell linearisation.} Write the shell-integrated intensity
+and its normalised within-shell profile,
+\begin{equation}
+  \Lambda_{pg}=a_g(\theta)\,f_p\!\int_g\omega_g(z;\theta)\,
+  e^{\,bs_p(z)-\frac12b^2\sigma_p^2(z)}dz,
+  \qquad
+  \omega_g(z;\theta)=\frac{C\nbar}{\int_gC\nbar\,dz},
+  \label{eq:Lambdapg}
+\end{equation}
+with $a_g$ $p$-independent. Expanding the integral,
+$\log\int_g\omega_ge^{bs_p}dz=b\langle s_p\rangle_g+\tfrac12b^2\Var_g(s_p)+O(b^3)$,
+and \emph{keeping the first term} defines the shell-response operator $W$ to act on
+the radial \emph{basis rows} rather than around the exponential:
+\begin{equation}
+  \tilde\phi_\zeta[g,:]=\sum_nW_{gn}\,\phi_\zeta[n,:],
+  \qquad
+  W_{gn}=\Big(\int_g\mathcal K(z|z_n)\,dz\Big)\,\omega_g(z_n;\theta)\,\Delta_n,
+  \label{eq:Wdef}
+\end{equation}
+rows normalised to unity, so that
+\begin{equation}
+  \boxed{\;
+  \eta_{pg}=b\,\big(\Phi_{\rm sph}[p]\otimes\tilde\phi_\zeta[g]\big)\cdot\xi,
+  \qquad
+  \pi_{pg}=\frac{f_p\,e^{\eta_{pg}}}{\sum_{p'}f_{p'}e^{\eta_{p'g}}},
+  \qquad
+  \log p_{\rm count}=\sum_g\sum_pN_{pg}\log\pi_{pg}. \;}
+  \label{eq:pipg}
+\end{equation}
+
+This is the load-bearing modelling step, and it is worth being explicit about what
+it buys and what it costs. \emph{Buys:} $\eta$ is exactly linear in $\xi$, so the
+Kronecker factorisation $\Phi_g=\Phi_{\rm sph}\otimes\tilde\phi_\zeta[g]$ is exact,
+the Hessian below is exact, and the sky-constant subspace is an \emph{exact} gauge
+direction of \eqref{eq:pipg}. \emph{Costs:} the neglected term is precisely
+$\tfrac12b^2[\Var_g(s_p)-\langle\sigma_p^2\rangle_g]$, a within-shell variance,
+which is $p$-dependent (which is why it does not divide out) and which vanishes
+identically when $s$ is constant across a shell. \emph{And this is the same
+condition that makes the completeness parameters cancel} (Prop.~\ref{prop:cancel}
+below): one approximation controls the separability, the exactness of the Hessian,
+and the $\theta$-cancellation together, and its controlling scale is the shell
+width against the photometric-redshift-smoothed radial structure. Moving $W$ onto
+the basis is also what makes it a genuine forward model: the photometric-redshift
+kernel is convolved into the \emph{model}, not deconvolved from the data, so the
+counts remain integer, the multinomial remains exact, and the radial attenuation
+$\sim e^{-k^2\sigma_\chi^2/2}$ does not bias the tracer bias.
+
+\paragraph{Gradient and Hessian.} For \eqref{eq:pipg},
+\begin{align}
+  \nabla J_\theta &= \xi-b\sum_g\Phi_g^{\!\top}\big(N_g-T_g\pi_g\big),
+  \label{eq:multgrad}\\
+  H(\theta) &= \mathbb 1+b^2\sum_gT_g\Big[\Phi_g^{\!\top}\mathrm{diag}(\pi_g)\Phi_g
+              -u_gu_g^{\!\top}\Big],\qquad u_g=\Phi_g^{\!\top}\pi_g .
+  \label{eq:multhess}
+\end{align}
+The rank-one subtraction is not optional: it is positive semidefinite, so omitting
+it makes $H$ too large, $H^{-1}$ too small, and the Laplace draws
+\emph{under}-dispersed --- exactly the direction that hides the error of
+Proposition~\ref{prop:jensen}. It is separable and therefore free:
+$u_g=v_g\otimes\tilde\phi_\zeta[g]$ with $v_g=\Phi_{\rm sph}^{\!\top}\pi_g$.
+Equation \eqref{eq:multhess} is the \emph{Fisher} information of the multinomial,
+hence $H\succeq\mathbb 1$ for any link function; using the observed Hessian instead
+would forfeit that guarantee under a saturating link, so Fisher scoring is
+normative rather than convenient.
+
+\subsection{(F4): the gravitational-wave host intensity on the same field}
+
+Hosts are built from the \emph{same} $s$ with their own bias,
+\begin{equation}
+  \Lhost(p,z;\Lambda,\theta,\xi)=\psi(z;\Lambda)\,\nbar(z;\Lambda,\theta)\,
+  \exp\!\Big[\bgw s(p,z)-\tfrac12\bgw^2\sigma^2(p,z)\Big],
+  \label{eq:hostintensity}
+\end{equation}
+with $\psi$ the merger-rate weighting. Thinning \eqref{eq:hostintensity} by the same
+$f_pC$ gives the catalogued/missing split. The point that a
+cross-correlation-literate reader checks first is the \emph{catalogued} branch:
+since hosts trace $e^{\bgw s}$ while galaxies trace $e^{\bgal s}$, the probability
+that a specific catalogued galaxy $j$ hosts the event carries an excess-bias
+factor. The correct prior is
+\begin{multline}
+  p\big(z,p\,\big|\,\mathcal C,\xi,\Lambda,\theta\big)
+  \;=\;\frac{1}{\mathcal Z(\Lambda,\theta,\xi)}
+   \Bigg[\;\sum_{j\in\mathcal C}\delta_{p,p_j}\,\mathcal K_j(z)\,w_j(\Lambda)\,
+        e^{\,(\bgw-\bgal)s(x_j)-\frac12(\bgw^2-\bgal^2)\sigma^2(x_j)}\\[2pt]
+   +\;\big[1-f_p\,C(z;\theta)\big]\,\psi(z;\Lambda)\,\nbar(z;\Lambda,\theta)\;
+     e^{\,\bgw s(p,z)-\frac12\bgw^2\sigma^2(p,z)}\Bigg].
+  \label{eq:zpriornew}
+\end{multline}
+At $\bgw=\bgal$ the spike factor is identically unity and the catalogued branch is
+field-free; away from it, writing the branch field-free is a modelling error that
+also makes the complete-catalog limit below true by omission rather than by
+physics. Setting $\bgw\equiv\bgal$ in a headline analysis is therefore not only a
+statistics choice; it is the choice that makes Limit I exact.
+
+Structurally \eqref{eq:zpriornew} is \eqref{eq:zprior} with $Q_p(z)$ replaced by an
+explicit function of $\xi$, which is why the change in the evaluation is one
+contraction: $\log Q\to\bgw\,(\mathrm{row\_fac}[p]\cdot\tilde\phi_\zeta[n])-\rho$.
+
+\subsection{Double conditioning: the catalog is used once}
+\label{sec:double}
+
+\begin{theorem}[no double use]
+\label{thm:double}
+Let $\mathcal C$ be the catalogued galaxies and $\mathcal U$ the missing ones. Then
+exactly
+\begin{equation}
+  p\big(\mathcal C,\dgw\,\big|\,\xi,\Lambda,\theta\big)
+  =\underbrace{p\big(\mathcal C\,\big|\,\xi,\theta,\Lambda\big)}_{\rm (F3)}
+  \times\underbrace{p\big(\dgw\,\big|\,\mathcal C,\xi,\Lambda,\theta\big)}_{\rm (F4)},
+  \label{eq:chainrule}
+\end{equation}
+and the second factor may be evaluated with \eqref{eq:zpriornew} without any double
+use of the catalog, \emph{provided the missing intensity is written as a function of
+$\xi$ alone and never of $\mathcal C$.}
+\end{theorem}
+\begin{proof}
+\eqref{eq:chainrule} is the chain rule. The gravitational-wave factor requires the
+catalogued hosts --- a conditioning event, used as known positions, not re-modelled
+--- and the intensity of $\mathcal U$, which by \eqref{eq:thinindep} is
+$[1-f_pC]\Lgal(\xi)$ and involves $\mathcal C$ nowhere. The catalog's information
+about $\mathcal U$ has been routed entirely through (F3) into the posterior for
+$\xi$.
+\end{proof}
+
+\begin{remark}[the two ways it breaks, both live]
+\label{rem:doublebreak}
+(i) \emph{Empirical-Bayes plug-in.} If the missing intensity is evaluated at a
+point estimate $\hat\xi(\mathcal C)$ --- which is exactly what the current table is
+--- then $\mathcal C$ appears inside the gravitational-wave factor, and multiplying
+by (F3) uses the same counts twice. The present code is safe \emph{only} because it
+never multiplies by (F3). \textbf{Adding the count likelihood without promoting
+$\xi$ to a latent variable is the single most dangerous intermediate state
+available, and it must never exist.}
+(ii) \emph{The monopole, twice.} The calibration that pins $(\log_{10}n_0,\delta)$
+is a fit to the \emph{same} counts over $z\in[0.05,0.3]$, delivered to the run as
+fixed values; that prior is a surrogate for the first factor of
+\eqref{eq:shellfactor}. Keeping both it \emph{and} an unconditional Poisson count
+likelihood squares the monopole information. Exactly two combinations are
+admissible: conditional counts $+$ external calibration prior, or unconditional
+counts $+$ a genuinely independent prior on $(n_0,\delta)$. The first is
+recommended; the second carries \S\ref{sec:n0h0}'s degeneracy.
+\end{remark}
+
+\subsection{Which parameters the field is allowed to couple to}
+\label{sec:cancel}
+
+\begin{proposition}[exact cancellation]
+\label{prop:cancel}
+$\pi_{pg}$ is exactly independent of $\theta$ and $\Lambda$ if and only if the base
+is $p$-separable within the shell --- true whenever $C$ is sky-uniform --- and the
+field is shell-constant. Otherwise the residual is exactly a within-shell
+covariance,
+\begin{equation}
+  \frac{\partial\log\pi_{pg}}{\partial\theta}
+  =\frac{\int_g\partial_\theta\omega_g\,e^{bs_p}dz}{\int_g\omega_g\,e^{bs_p}dz}
+  -\sum_{p'}\pi_{p'g}\,
+  \frac{\int_g\partial_\theta\omega_g\,e^{bs_{p'}}dz}{\int_g\omega_g\,e^{bs_{p'}}dz},
+  \label{eq:cancelresidual}
+\end{equation}
+which vanishes identically when $e^{bs_p(z)}$ is constant across the shell.
+\end{proposition}
+
+\noindent This is the specification of the coupling set, and it is exact. Since
+$dV_c/dz=(c/H_0)^3\times\text{shape}(z;\Omega_m)$ and the completeness curve is
+built $h$-free, $H_0$ cancels from \eqref{eq:pipg} identically while
+$\Omega_m,w_0,w_a,\delta$ and $\theta_{\rm sel}$ do not. Three rungs follow, and they
+are the design space:
+
+\begin{center}\small
+\begin{tabular}{clll}
+\toprule
+rung & structure & parameters reaching the field & per-proposal cost \\
+\midrule
+0 & conditional counts, frozen $W$ & none & $\sim0$ \\
+1 & conditional counts, live $\pi_{pg}$ & $\Omega_m,w_0,w_a,\delta,\theta_{\rm sel}$ (\emph{not} $H_0$) & $\sim1$\,ms \\
+2 & unconditional counts & the above, plus $H_0$ through $n_0(c/H_0)^3$ & rung 1 $+$ $\log\det H$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Rung 1 is the target. It satisfies ``every cosmological proposal changes
+the galaxy-field likelihood consistently'' for every parameter the galaxy field can
+honestly constrain, and it is affordable. Rung 0 is its control arm and its
+fallback: it is exactly rung 1 evaluated at $\Delta\theta=0$.
+
+\subsection{The \texorpdfstring{$n_0$--$H_0$}{n0-H0} degeneracy: what rung 2 actually costs}
+\label{sec:n0h0}
+
+Un-conditioning restores the shell-total factor, and the restored channel is
+\begin{equation}
+  T_g(\theta)\;\propto\;n_0\,(c/H_0)^3\int_g C_{\rm sel}(z;\theta_{\rm sel})\,(1+z)^{\delta}\,
+  \text{shape}(z;\Omega_m,w_0,w_a)\,dz ,
+  \label{eq:Tg}
+\end{equation}
+so the \emph{entire} $H_0$ content of the count channel is the volume--density
+amplitude $n_0H_0^{-3}$, exactly degenerate with $n_0$. It is identified only if
+$n_0$ carries an $H_0$-independent prior --- and the shipped calibration does not:
+it computes $n_0$ by dividing the summed galaxy weights by a comoving volume
+integral evaluated at the \emph{fiducial} cosmology. Pinning $\log_{10}n_0$ and then
+sampling $H_0$ against an unconditional count likelihood therefore manufactures a
+standard-density $H_0$ constraint out of the fiducial cosmology, acting against
+$22.79$M galaxies. The honest sentence, which belongs verbatim in any paper:
+
+\begin{quote}\itshape
+The galaxy field constrains the shape parameters and the tracer biases. It
+constrains $H_0$ only through the volume--density amplitude, which is degenerate
+with the mean comoving number density; that degeneracy is why $n_0$ is a nuisance
+and why its prior must be $H_0$-aware rather than a fiducial plug-in.
+\end{quote}
+
+\subsection{Marginalising the field: the galaxy-side evidence}
+\label{sec:laplace}
+
+\begin{proposition}[the galaxy-side evidence]
+\label{prop:laplace}
+With the whitened prior,
+\begin{equation}
+  \log\mathcal L_{\rm gal}(\theta)
+  =\log\!\int\!d\xi\,\mathcal N(\xi;0,\mathbb 1_M)\,p(\{N\}|\xi,\theta)
+  \;\simeq\;-J_\theta(\hat\xi_\theta)-\tfrac12\log\det H(\theta),
+  \label{eq:laplace}
+\end{equation}
+with \emph{no} residual $(2\pi)^{\pm M/2}$: the prior normalisation and the Gaussian
+integral cancel exactly. Equivalently, with
+$\ell(\xi,\theta)=\sum_g\sum_pN_{pg}\log\pi_{pg}$,
+\begin{equation}
+  \log\mathcal L_{\rm gal}(\theta)
+  =\ell(\hat\xi_\theta,\theta)\;-\;\tfrac12\big\|\hat\xi_\theta\big\|^2
+  \;-\;\tfrac12\log\det H(\theta).
+  \label{eq:evidence}
+\end{equation}
+\end{proposition}
+
+\noindent The middle term of \eqref{eq:evidence} is an Occam factor and it is
+\emph{not} removable by the envelope theorem: stationarity gives
+$\partial_\xi\ell(\hat\xi)=\hat\xi$, not $0$, so the envelope theorem removes
+$\partial\hat\xi/\partial\theta$ from $J$ and not from $\ell$. Its size is not
+academic: with $\sim10^3$ data-constrained modes, $\|\hat\xi\|\sim32$, and a
+displacement of the mode of order $\|\Delta\hat\xi\|_H\sim6$ across the prior gives
+$\hat\xi^{\!\top}S\,\Delta\theta$ of order a few nats at random alignment and up to
+$O(10^2)$ nats worst case, against a target accuracy of $0.1$ nat. Under linear
+response it is also free:
+\begin{equation}
+  \tfrac12\|\hat\xi_\theta\|^2
+  =\tfrac12\|\hat\xi_{\rm ref}\|^2
+  +\big(S^{\!\top}\hat\xi_{\rm ref}\big)\!\cdot\!\Delta\theta
+  +\tfrac12\Delta\theta^{\!\top}\big(S^{\!\top}S\big)\Delta\theta ,
+\end{equation}
+one precomputed vector and one small matrix. Likewise $\log\det H$ is not
+\emph{assumed} constant: its motion enters multiplied by $M/2\simeq1.9\times10^3$,
+so a $0.1\%$ per-mode drift is $1.9$ nats, and it is measured directly at the same
+solves that produce $S$ --- the Cholesky factor is already formed.
+
+\subsection{Linear response: the \texorpdfstring{$\theta$}{theta}-coupled ensemble}
+\label{sec:linresp}
+
+\paragraph{Offline, once.} From the implicit function theorem, against the same
+Cholesky factor,
+\begin{equation}
+  S=\frac{\partial\hat\xi}{\partial\theta}
+   =-H^{-1}\frac{\partial\,\nabla_\xi J}{\partial\theta}\bigg|_{\hat\xi_{\rm ref},\theta_{\rm ref}}
+   \;\in\;\mathbb R^{M\times n_\theta},
+  \label{eq:S}
+\end{equation}
+i.e.\ $n_\theta$ extra triangular solves and $121$\,kB of storage at $M=3780$,
+$n_\theta=4$. At $K\ge2$ each catalog's own selection parameters and its own bias
+contribute their own \emph{columns} of $S$: the multitracer generalisation adds
+terms, it does not restructure anything.
+
+\paragraph{Per proposal.} At fixed $H$, a mean shift is exact:
+\begin{equation}
+  \xi_m(\theta)=\hat\xi_{\rm ref}+S\,\Delta\theta+L_H^{-\!\top}g_m
+  \label{eq:meanshift}
+\end{equation}
+is an \emph{exact} draw from $\mathcal N(\hat\xi_\theta,H^{-1})$ for every $\theta$,
+with $g_m$ fixed across proposals. There are no importance weights and no
+effective-sample-size penalty. This is worth stating sharply because the obvious
+alternative is a trap:
+
+\begin{proposition}[the effective-sample-size law for a reused draw set]
+\label{prop:esslaw}
+If instead one keeps the draws at $\hat\xi_{\rm ref}$ and re-weights, then for a
+Gaussian mode shift at fixed $H$,
+$\Var[\log w]=\|\hat\xi_\theta-\hat\xi_{\rm ref}\|_H^2$ exactly, so
+\begin{equation}
+  \frac{\ESS(\theta)}{\Mdraw}\simeq
+  \exp\!\Big(-\big\|\hat\xi_\theta-\hat\xi_{\rm ref}\big\|_H^2\Big).
+  \label{eq:esslaw}
+\end{equation}
+\end{proposition}
+
+\noindent The norm is a \emph{sum over all $M$ modes}. A tolerance written per mode
+as $\|\Delta\hat\xi\|_H/\sqrt M<\tau$ implies $\ESS/M\simeq e^{-\tau^2M}$: at
+$M=3780$ and a comfortable-looking $\tau=0.1$ this is $4\times10^{-17}$. Reusing a
+fixed draw set across proposals is inadmissible; the mean-shifted construction
+\eqref{eq:meanshift} is the one to build.
+
+\paragraph{What linear response costs.} The correction $S\Delta\theta$ is
+\emph{member-independent}, and that single fact carries the whole cost model. The
+member row factors stay static under a $256$-fold evaluation concurrency; the only
+per-proposal additions are one member-independent row-factor contraction
+($\sim1$\,ms against a $27.5$--$49.3$\,ms baseline, and a $1.46$\,MB transient that
+must be reserved rather than assumed) and a rank-$n_\theta$ update of two sky
+moments. It is also \emph{analytically smooth} in $\theta$: no solver, no
+tolerance, no iteration count, no history --- so the discontinuity failure mode of a
+per-proposal re-solve cannot occur by construction.
+
+\paragraph{Why not simply re-solve.} Because of arithmetic, not taste. The separable
+two-stage contraction costs $2G_s\Npix\Msph^2$ for the diagonal part plus
+$2\Msph^2G_s\Mz^2$ for the radial contraction, and the Cholesky costs $M^3/3$; at
+$(\Msph,\Mz,G_s)=(315,12,32)$ that is tens of milliseconds per Newton step and
+$\sim13$ steps, i.e.\ $\sim1$\,s per proposal against a $27.5$\,ms baseline. A
+re-solve would also drag the member row factors into the per-evaluation transient,
+$3.0$\,GB at $\Mdraw=8$ and $24$\,GB at $\Mdraw=64$ at production concurrency. The
+asymmetry, not elegance, is why Proposition~\ref{prop:cancel} is the load-bearing
+result.
+
+\subsection{The budget normaliser in closed form}
+
+The normaliser that enforces the gauge of Proposition~\ref{prop:gauge} against the
+\emph{consumption} weights is
+\begin{equation}
+  \rho_m(z;\theta,b)
+  =\log\frac{\sum_{p\in\mathcal F}\big[1-f_pC(z;\theta)\big]e^{\,bf_m(p,z)}}
+            {\sum_{p\in\mathcal F}\big[1-f_pC(z;\theta)\big]}
+  =\log\frac{A_m(z;b)-c\,B_m(z;b)}{P_{\mathcal F}-c\,F_{\mathcal F}},
+  \qquad c\equiv C(z;\theta),
+  \label{eq:rho}
+\end{equation}
+with $A_m=\sum_{p\in\mathcal F}e^{bf_m}$, $B_m=\sum_{p\in\mathcal F}f_pe^{bf_m}$,
+$P_{\mathcal F}=|\mathcal F|$, $F_{\mathcal F}=\sum_{p\in\mathcal F}f_p$. The sums run
+over the \emph{fitted footprint}: off the footprint $f_p=0$, the consumption weight
+is unity and $Q\equiv1$, so that block satisfies the budget identity trivially and
+must not absorb the footprint's monopole. $A_m$ and $B_m$ are $\theta$-free and are
+computed once on a grid in $b$; the only online $\theta$-dependence is the scalar
+$c$ at each node, so \eqref{eq:rho} is exact rather than interpolated. This is what
+removes a full-sky reduction --- measured at $25.6$\,ms in double precision, i.e.\
+$+50$--$90\%$ of the entire likelihood --- from the per-proposal path. Under linear
+response the moments acquire $\theta$-dependence only through the same projection,
+$\partial A_m/\partial\theta_j=\sum_pe^{bf_m^{\rm ref}}(\Phi_p\!\cdot\!S_j)$, at
+$1.1$\,MB of extra storage.
+
+The identity the design must preserve, exactly, per realisation, is
+\begin{equation}
+  \frac{\sum_{p=1}^{\Npix}\big[1-f_pC(z;\theta)\big]\,Q_p(z)}
+       {\sum_{p=1}^{\Npix}\big[1-f_pC(z;\theta)\big]}\;=\;1
+  \qquad\text{for every }z,\text{ member and }\theta .
+  \label{eq:budget}
+\end{equation}
+
+\subsection{The member estimator, predicted before it is measured}
+\label{sec:est}
+
+The largest open number in the design is the member spread $\sigma$ of
+Proposition~\ref{prop:jensen}, because $\Mdraw$ depends on it exponentially. It can
+be predicted in closed form from objects that already exist. To first order in the
+field, the gradient of the total event log-likelihood with respect to the latent is
+\begin{equation}
+  \boxed{\;a\;\equiv\;\nabla_\xi\Big(\sum_i\ell_i\Big)
+   \;=\;\bgw\Big(\sum_i\varphi_i\,\Phi_i-N_{\rm obs}\langle\Phi\rangle_{\rm sel}\Big),
+   \qquad
+   \sigma=\big\|L_H^{-1}a\big\|_2 \;}
+  \label{eq:sigma}
+\end{equation}
+where $\varphi_i$ is event $i$'s fraction of prior mass in the missing branch and
+$\langle\Phi\rangle_{\rm sel}$ is the selection-weighted basis average. The norm is
+the $H^{-1}$ norm, not the Euclidean one: for members drawn as in
+\eqref{eq:laplacedraws}, $\Var_m(\ell_m)=a^{\!\top}H^{-1}a$ exactly. The subtraction
+term is the detection normalisation, and it is what makes \eqref{eq:sigma} a
+correlation statistic rather than a raw pair count.
+
+The same object $a$ does three jobs, which is the reason to build it first. It
+predicts $\sigma$ and hence $\Mdraw$. It gives the closed-form target for the
+small-bias limit of the estimator: expanding \eqref{eq:membermarg} to second order,
+\begin{equation}
+  \LSE_m\ell_m-\log\Mdraw-\ell(\hat\xi)\;\longrightarrow\;\tfrac12\,a^{\!\top}H^{-1}a
+  \;=\;\tfrac12\sigma^2 ,
+  \label{eq:P17}
+\end{equation}
+so prediction and validation become one measurement, checked against truth rather
+than against a larger draw count. (With the counts switched off, $\hat\xi=0$ and
+$H=\mathbb 1$, and \eqref{eq:P17} reduces to the pure prior form
+$\tfrac12\bgw^2\sum_{ij}K(x_i,x_j)$ --- the two-arm structure is what makes this a
+genuine closed-form test rather than a certificate of prior collapse.) And it
+supplies the criterion of the next subsection.
+
+\subsection{Two numbers decide the whole design}
+\label{sec:criterion}
+
+What decides whether the field must be coupled to the proposal is not whether the
+fitted field \emph{looks} different --- it is whether the \emph{likelihood} is
+different, in nats. To first order $\Delta\log\mathcal L=a\cdot\Delta\hat\xi$, and
+Cauchy--Schwarz gives $|\Delta\log\mathcal L|\le\sigma\,\|\Delta\hat\xi\|_H$. A
+per-mode tolerance is therefore indeterminate by $\sqrt M\simeq61.5$ depending on an
+alignment between the field displacement (a radial re-weighting of shells) and the
+event gradient (the localisation volumes) that nothing bounds and that has every
+reason to be non-negligible, since both live in the same radial direction. Do not
+bound the alignment; measure it. The two criteria, both in nats, both computable
+from the same set of solves at prior-drawn $\theta$:
+\begin{align}
+  \osc_\theta\,\Delta\log\mathcal L_{\rm GW}
+  &=\osc_\theta\Big[\,a\cdot\big(\hat\xi_\theta-\hat\xi_{\rm ref}\big)\Big],
+  \label{eq:critGW}\\[2pt]
+  \osc_\theta\,\Delta\log\mathcal L_{\rm gal}
+  &=\osc_\theta\Big[\,\ell(\hat\xi_\theta,\theta)-\tfrac12\|\hat\xi_\theta\|^2
+      -\tfrac12\log\det H(\theta)\Big].
+  \label{eq:critgal}
+\end{align}
+
+\begin{remark}[they are not the same number]
+\label{rem:notsame}
+It is tempting to argue that if the field barely moves then the galaxy-side
+evidence cannot be informative either. That is false, and the direction of the
+error matters. The evidence responds to the \emph{full} count residual
+$r=N-T\pi$ contracted with $\partial_\theta\eta$; the field displacement is that
+residual \emph{projected onto} $\mathrm{span}(\Phi)$ and damped by $H^{-1}$. A
+$\theta$-direction lying inside $\mathrm{span}(\Phi)$ is absorbed by the field ---
+large displacement, flat evidence, no constraint. A direction orthogonal to it
+cannot be absorbed --- zero displacement, maximal evidence constraint. Since
+\eqref{eq:cancelresidual} makes the $\theta$-direction exactly a \emph{within-shell}
+covariance, and a shell-collapsed basis cannot represent within-shell structure,
+``small displacement with a live galaxy-side constraint'' is the structurally
+expected case, not an excluded one. \eqref{eq:critGW} and \eqref{eq:critgal} must
+both be measured and reported.
+\end{remark}
+
+\begin{remark}[and the galaxy-side channel must not be quoted as cosmology]
+\label{rem:effectA}
+$\Delta\log\mathcal L_{\rm gal}$ acts against $22.79$M galaxies while the
+gravitational-wave side carries $259$ events, so it can dominate the posterior. But
+it is a $dN/dz$-shape constraint, exactly degenerate with the radial evolution index
+$\delta$, with the population-average photometric-redshift kernel and with the shell
+binning --- all of which are frozen inside $W$ and none of which are sampled. It is
+therefore reported as a diagnostic and does not enter a headline posterior unless
+$W$'s own parameters are sampled or profiled. Otherwise the headline result is a
+galaxy-clustering measurement wearing a dark-siren hat.
+\end{remark}
+
+\subsection{Three limits, one hierarchy}
+\label{sec:limits}
+
+Write the single-event likelihood as
+\begin{equation}
+  \mathcal L_i(\Lambda,\theta,\xi)
+  =\int\!dz\,d\bn\;p_i\big(d_i\,\big|\,d_L(z;\Lambda),\bn\big)\,
+  \frac{\Lcat(\bn,z)+\Lmiss(\bn,z;\xi)}{\int[\Lcat+\Lmiss]} .
+  \label{eq:master}
+\end{equation}
+All three established analyses are limits of \eqref{eq:master}, and marginalising
+the field is exactly the operation that interpolates between them.
+
+\paragraph{Limit I --- complete catalog, good localisation.} $f_pC\to1$ gives
+$\Lmiss\to0$, and at $\bgw=\bgal$ the catalogued branch of \eqref{eq:zpriornew} is
+field-free, so
+\begin{equation}
+  \mathcal L_i(\Lambda)\;\longrightarrow\;
+  \sum_{j\in\Omega_{90}^{(i)}}w_j(\Lambda)\,p_i\big(d_i\,\big|\,d_L(z_j;\Lambda),\bn_j\big),
+  \label{eq:limit1}
+\end{equation}
+the classical weighted-host dark siren, with $\xi$ dropping out of
+\eqref{eq:master} \emph{identically}, member by member. \textbf{Exact.} This is a
+physics identity, not a routing property, and it is the strongest inertness
+statement the design admits --- but only at $\bgw=\bgal$; otherwise the excess-bias
+factor of \eqref{eq:zpriornew} survives and the limit is deliberately not an
+identity.
+
+\paragraph{Limit II --- incomplete, good localisation.} Both terms live. Because a
+well-localised event spans $O(1$--$10)$ correlation cells at the smoothing scale,
+the likelihood depends on the field essentially through its point value in the
+localisation volume, and
+\begin{equation}
+  \log\mathbb E_\xi[\mathcal L_i]\simeq\log\bar{\mathcal L}_i
+  +\bgw\langle s\rangle_i
+  +\tfrac12\bgw^2\Big[\Var_\xi\langle s\rangle_i-\langle\sigma^2\rangle_i\Big]+O(b^3).
+  \label{eq:limit2}
+\end{equation}
+The first-order term is the placement \emph{information}; the second-order term is
+the placement \emph{uncertainty}, and it is exactly what the member ensemble
+estimates. This is the regime every real catalog/detector pairing occupies.
+
+\paragraph{Limit III --- diffuse localisation: a correlation-function statement.}
+Let the catalogued fraction of each event's prior mass tend to zero while the
+localisation spans many correlation cells. The galaxy counts are \emph{retained} ---
+they are what carries $\bgal$. Linearising both the event factor and the count factor
+in the field and marginalising the Gaussian latent jointly,
+\begin{equation}
+  \log\!\int\!d\xi\,\mathcal N(\xi;0,\mathbb 1)\,e^{(a_{\rm GW}+a_{\rm gal})\cdot\xi}
+  =\tfrac12\|a_{\rm GW}\|^2+a_{\rm GW}\!\cdot\!a_{\rm gal}+\tfrac12\|a_{\rm gal}\|^2 ,
+  \label{eq:limit3}
+\end{equation}
+with $a_{\rm GW}=\bgw\sum_i\Phi_i$ and
+$a_{\rm gal}=\bgal\sum_{p,g}(N_{pg}-T_g\pi_{pg})\Phi_{pg}$. \emph{Marginalising the
+Gaussian latent replaces the field by its kernel}, and every pair of field-coupled
+objects contributes $b_ab_bK(x_a,x_b)$: event$\,\times\,$event is the
+gravitational-wave auto-correlation; event$\,\times\,$galaxy-voxel is
+\begin{equation}
+  \bgw\bgal\sum_i\sum_{p,g}(N_{pg}-T_g\pi_{pg})\,K(x_i,x_{pg})
+  \;\longrightarrow\;
+  \bgw\bgal\sum_\ell\frac{2\ell+1}{4\pi}\,\mathcal W^i_\ell\,\mathcal W^g_\ell\,
+  C_\ell^{\rm GW\times g},
+  \label{eq:limit3harmonic}
+\end{equation}
+the harmonic cross-correlation estimator, with the per-event localisation windows
+$\mathcal W^i_\ell$ playing the role of tomographic bin windows and the bias
+combination $\bgw\bgal$ being exactly what such a measurement constrains; and
+voxel$\,\times\,$voxel is the galaxy auto-correlation, i.e.\ the count likelihood
+itself. \textbf{Approximate:} \eqref{eq:limit3}--\eqref{eq:limit3harmonic} are the
+$O(b^2)$ truncation of \eqref{eq:master}, valid in the Gaussian, weakly clustered
+regime, and the expansion parameter $\bgw s$ over the events' support is a measured
+quantity, not an assumed one.
+
+\paragraph{The unification statement, and its honest scope.} Limits I--III are not
+three methods; they are one likelihood at three completeness/localisation regimes,
+and the field-level hierarchy is the interpolant that is valid at both ends and,
+unlike either, in the middle. Two scope statements ride with this. Limit III is a
+property of \emph{the hierarchy}; the practical estimator conditions on the galaxy
+data first, absorbing the counts into $\hat\xi$ and $H$, so the cross term is not a
+separate object of the estimator. And at rung 0 that conditioning happens at frozen
+$\theta$, which removes precisely the cosmology dependence of
+$C_\ell^{\rm GW\times g}$ that a cross-correlation measurement uses --- which is an
+argument \emph{for} the $\theta$-coupled rung, not against the unification.
+
+\subsection{The algorithm}
+
+\begin{algorithm}[t]
+\caption{Offline anchor construction (once per catalog set)}
+\label{alg:offline}
+\begin{algorithmic}[1]
+\REQUIRE catalogs $\{k\}$, areal-completeness maps $\{f_k\}$, anchor
+         $(\theta_{\rm ref},\Lambda_{\rm ref})$, bias grid $\{b\}$
+\STATE \textbf{basis:} inducing nodes $\Msph\times\Mz$; $L\leftarrow\mathrm{chol}(K_{ZZ}+j\mathbb 1)$;
+       form $\Phi_{\rm sph}$ and $\Phi_\zeta$ \COMMENT{never a dense $\Phi$: $47.6$\,GB at $M=3780$}
+\STATE \textbf{counts:} $N_{kpg}\leftarrow\mathrm{histogram}(z_{\rm gal};\text{shell edges})$
+       \COMMENT{integer, exact; edges stamped, never inherited from a global $z_{\max}$}
+\STATE \textbf{shell response:} $W_{gn}$ by \eqref{eq:Wdef}, rows normalised;
+       $\tilde\phi_\zeta\leftarrow W\phi_\zeta$
+       \COMMENT{photo-$z$ convolved \emph{forward}, into the basis}
+\STATE \textbf{solve:} $\hat\xi,H\leftarrow$ Fisher scoring on $J_{\theta_{\rm ref}}$ with
+       \eqref{eq:multgrad}--\eqref{eq:multhess} \COMMENT{separable two-stage contraction}
+\STATE \textbf{sensitivities:} $S\leftarrow-H^{-1}\partial_\theta\nabla_\xi J$ by
+       \eqref{eq:S}; also $\partial\hat\xi/\partial b$
+       \COMMENT{$n_\theta{+}1$ triangular solves against the same $L_H$; $121$\,kB}
+\STATE \textbf{Occam pre-contraction:} store $S^{\!\top}\hat\xi_{\rm ref}$ and $S^{\!\top}S$
+       \COMMENT{makes \eqref{eq:evidence} free online}
+\STATE \textbf{draws:} $\xi_m=\hat\xi+L_H^{-\!\top}g_m$, $g_m$ in antithetic pairs, seed stamped
+\STATE \textbf{moments:} $A_m,B_m$ on the $b$-grid over $\mathcal F$, and their
+       projections $\partial A_m/\partial\theta$, $\partial B_m/\partial\theta$
+\STATE \textbf{stamp:} content hash over basis, kernel, jitter, $N_{\rm side}$, $f_p$,
+       $W$, shell edges, counts, $\theta_{\rm ref}$, $\{b_k\}$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Per-proposal likelihood, rung 1 (linear response)}
+\label{alg:online}
+\begin{algorithmic}[1]
+\REQUIRE $(H_0,\Lambda,\{\theta_k\},\{b_k\},\bgw)$; anchor artefact of Alg.~\ref{alg:offline}
+\STATE $\Delta\theta\leftarrow\theta-\theta_{\rm ref}$
+       \COMMENT{$H_0$ is absent by Prop.~\ref{prop:cancel}}
+\STATE $\Delta\Xi\leftarrow\mathrm{reshape}(S\,\Delta\theta,(\Msph,\Mz))$
+       \COMMENT{member-independent: this is the whole cost model}
+\STATE $\log\mathcal L_{\rm gal}\leftarrow
+        \ell_{\rm ref}+\partial_\theta\ell\cdot\Delta\theta
+        -\tfrac12\|\hat\xi_{\rm ref}\|^2-(S^{\!\top}\hat\xi_{\rm ref})\!\cdot\!\Delta\theta
+        -\tfrac12\Delta\theta^{\!\top}(S^{\!\top}S)\Delta\theta
+        -\tfrac12\log\det H$
+\STATE $c(z)\leftarrow C(z;\theta)$ \COMMENT{a scalar per redshift node}
+\STATE $A\leftarrow A^{\rm ref}+(\partial A/\partial\theta)\Delta\theta$; likewise $B$;
+       $\rho_m\leftarrow\log[(A_m-cB_m)/(P_{\mathcal F}-cF_{\mathcal F})]$ by \eqref{eq:rho}
+\FOR{each member $m$}
+  \STATE $\log Q_m(p,z)\leftarrow
+         \bgw\big[(\mathrm{row\_fac}_m[p]+\Delta\Xi[p])\cdot\tilde\phi_\zeta[z]\big]-\rho_m(z)$
+         \COMMENT{$0$ exactly for $p\notin\mathcal F$ and for $z>\zdep$}
+  \STATE $\ell_m\leftarrow\textsc{EventTerms}(\log Q_m)-N_{\rm ev}\log\mu(\log Q_m)$
+         \COMMENT{same realisation in both, enforced}
+\ENDFOR
+\STATE $\log\mathcal L\leftarrow\log\mathcal L_{\rm gal}+\LSE_m\ell_m-\log\Mdraw$
+\STATE report member $\ESS=\exp(-\sum_mp_m\log p_m)$, $p_m=\mathrm{softmax}_m(\ell_m)$,
+       and the two channels of \eqref{eq:critGW}--\eqref{eq:critgal} separately
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{What is exact and what is not}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{p{0.46\linewidth}p{0.15\linewidth}p{0.33\linewidth}}
+\toprule
+statement & status & controlling parameter\\
+\midrule
+Thinning independence \eqref{eq:thinindep} & \textbf{exact} & --- \\
+Chain-rule factorisation \eqref{eq:chainrule} & \textbf{exact} & --- \\
+Posterior-mean $Q$, Lemma~\ref{lem:varshift} & \textbf{exact} & given the Laplace posterior \\
+Monopole gauge, Prop.~\ref{prop:gauge} & \textbf{exact} & --- \\
+Shell-total factorisation \eqref{eq:shellfactor} & \textbf{exact} & (using one factor is a \emph{choice}) \\
+Kronecker separability and \eqref{eq:multhess} for \eqref{eq:pipg} & \textbf{exact} & given the linearisation below \\
+Sky-constant gauge direction of \eqref{eq:pipg} & \textbf{exact} & given the linearisation below \\
+$\theta$-cancellation, Prop.~\ref{prop:cancel} & \textbf{exact iff} & $p$-separable base \emph{and} shell-constant $s$ \\
+Mean-shifted draws \eqref{eq:meanshift} & \textbf{exact} & at fixed $H$ \\
+Effective-sample-size law \eqref{eq:esslaw} & \textbf{exact} & Gaussian mode shift at fixed $H$ \\
+Limit I \eqref{eq:limit1} & \textbf{exact} & $f_pC\to1$ \emph{and} $\bgw=\bgal$ \\
+\midrule
+Low-rank $\Phi\Phi^{\!\top}\!\approx\!K$ & approx. & rank vs.\ $\ell_{\rm ang},\ell_\zeta$; hard guard \\
+Within-shell linearisation \eqref{eq:pipg} & approx. & $\tfrac12b^2[\Var_g(s_p)-\langle\sigma^2_p\rangle_g]$ \\
+Laplace evidence \eqref{eq:laplace} & approx. & non-Gaussianity of the \emph{count} term on data-rich voxels \\
+Member estimator \eqref{eq:membermarg} & approx. & $(e^{\sigma^2}\!-\!1)/2M$, eq.~\eqref{eq:Mrequired} \\
+Deterministic-$Q$ plug-in, Rem.~\ref{rem:plugin} & approx. & first order in posterior spread \\
+Renormalise-then-average, Rem.~\ref{rem:noncommute} & approx. & $\Var_{\rm sky}(Q)/\Npix$ \\
+Frozen $H$ in the draw covariance & approx. & $\tfrac12\sigma^2\epsilon_H$; $0.1$--$0.3$ nat at $10\%$ drift \\
+Frozen $\log\det H$ & approx. & $\times M/2\simeq1.9\times10^3$ per unit relative drift \\
+Linear response $\hat\xi_\theta\approx\hat\xi_{\rm ref}+S\Delta\theta$ & approx. & second order in $\Delta\theta$ \\
+Population-average photo-$z$ kernel in $W$ & approx. & spread of $\sigma_z$ across the sample \\
+Limit II \eqref{eq:limit2} & approx. & $O(\bgw^3)$ \\
+Limit III \eqref{eq:limit3harmonic} & approx. & $O(b^2)$ truncation; Gaussianity \\
+$Q\equiv1$ above $\zdep$ and off-footprint & \emph{choice} & zero assumed variance where there is no data \\
+Empirical-Bayes $\theta_{\rm sel}$ prior instead of (F2) & \emph{choice} & anchored at $1.6\times10^{-4}$\,mag \\
+\bottomrule
+\end{tabular}
+\caption{The ledger. The ``choice'' rows are modelling conventions and are quoted as
+systematics, never as marginalisations.}
+\end{table}
+
+% =====================================================================
+\section{Implementation}
+\label{sec:impl}
+% =====================================================================
+
+\subsection{The ladder}
+
+Legacy behaviour is bit-identical throughout, enforced by a golden test at
+$10^{-12}$ relative tolerance in exact mode; regenerating that golden is
+forbidden at every step. Two early exits are built in by design, at day 3 and at
+day 14.
+
+\begin{longtable}{@{}p{0.11\linewidth}p{0.44\linewidth}p{0.33\linewidth}r@{}}
+\toprule
+step & scope & gate & days\\
+\midrule
+\endhead
+\textbf{0} & \textbf{Can the field move the answer at all?} $\sum_i\varphi_i$ and
+$\sigma$ from \eqref{eq:sigma}; the oscillation of $\log\mathcal L$ across the $H_0$
+prior with the \emph{existing} table switched on at the anchor; a three-column cost
+baseline (no structure / table / latent); the paper-by-paper novelty search &
+\textbf{kill criterion K0}; all four artefacts committed. Nothing downstream is
+usable until this lands & 3\\
+1 & Basis module: Kronecker design, named jitter convention, shell response
+\eqref{eq:Wdef}, sky moments, prior variances; builders rewired to call it &
+Kronecker identity to $10^{-13}$ against a factored reference at production rank;
+builder outputs byte-identical & 3\\
+2 & Areal completeness as data: $f_p$ at $N_{\rm side}=64$; counts as an inference
+input; $C_p=f_pC(z)$ on \emph{both} sides behind its own flag and its own golden &
+counts round-trip exactly; sky area to $1\%$; flag off is bit-identical; flag on
+moves the missing budget in the predicted direction and by the predicted magnitude;
+\textbf{K8} on a non-railing configuration & 5\\
+\textbf{3} & \textbf{Count channel, $\theta$-shaped from the start}: \eqref{eq:pipg},
+\eqref{eq:multgrad}--\eqref{eq:multhess}, Fisher-scoring solve, sensitivities
+\eqref{eq:S} built from the stacked $K$-tracer objective, antithetic draws &
+separable Hessian vs.\ dense to $10^{-10}$; solver vs.\ dense Newton to $10^{-8}$;
+within-shell Jensen residual reported; \textbf{both criteria
+\eqref{eq:critGW}--\eqref{eq:critgal}}, the log-det drift, and the linear-response
+residual --- \textbf{kill criterion K9} & 5\\
+4 & Anchor artefact: $\hat\xi$, $L_H$, $S$, Occam pre-contractions, $(A,B)$ and
+their projections, members, row factors, stamp &
+build completes at $M=3780$ in minutes; moment tables to $10^{-6}$; projected
+moments to the same scale; draws reproduce the posterior mean; hash reproducible &
+4\\
+5 & The evaluation seam, inert by default: latent leaves built and barriered
+outside the traced body; closed-form $\rho$; memory accounting on both the static
+and the reserved-transient path &
+every golden cell bit-identical with the flag off; \textbf{complete-catalog limit
+\eqref{eq:limit1} bit-identical per member at $\bgw=\bgal$}; off-footprint rows
+return exactly zero; reservation within $10\%$ of measured peak & 4\\
+5b & Member spread: predict $\sigma$ by \eqref{eq:sigma}, then measure it at
+$\Mdraw=256$ across the $H_0$ prior &
+predicted vs.\ measured $\sigma$ reconciled; \textbf{closed-form limit
+\eqref{eq:P17}}; $\theta$-varying bias $<0.1$ nat at the chosen $\Mdraw$;
+\textbf{K5} & 2\\
+\textbf{6a} & \textbf{The compressed ensemble} (control arm, and the fallback):
+rung 0 live at the anchor; budget identity \eqref{eq:budget}; bias-parameter
+inversion; provenance replaced by the artefact stamp &
+budget identity to $10^{-12}$ for all $z$, members and $\theta$; closure tiers A--D;
+overhead inside the accuracy budget; \textbf{K2}, \textbf{K4} & 5\\
+\textbf{6b} & \textbf{The $\theta$-coupled likelihood} --- the deliverable: linear
+response \eqref{eq:meanshift}, projected moments, the evidence \eqref{eq:evidence},
+the two-channel report &
+at $\Delta\theta=0$, bit-identical to 6a; linear-response residual re-checked at
+production rank; no adjacent-$\theta$ discontinuity over $10^4$ points; measured
+overhead $\sim1$\,ms & 5\\
+6c & \emph{Optional}: unconditional counts, restoring $H_0$ through
+$n_0(c/H_0)^3$; Laplace log-det live; saturating link &
+agrees with 6b where conditioning is benign; \textbf{K10}; gradient-norm stopping
+rule with the residual inside the oscillation budget & 5\\
+7 & Multitracer $K\ge2$: per-tracer bias, completeness, counts and columns of $S$;
+the realisation identifier retires &
+$K=1$ bit-identical; bias ratio recovered within $2\sigma$ over 20 realisations;
+\textbf{shared-field coupling demonstrably tighter than two independent fits}, shown
+against a deliberately decoupled variant & 4\\
+8 & Support and amplitude profile above $\zdep$ &
+delivered as a \emph{sensitivity scan} --- $H_0$ shift versus assumed amplitude ---
+never as a marginalised posterior & 3\\
+10 & Performance and the production campaign & chunk plans; sample compaction below
+$\zdep$; the run & 3\\
+11 & The paper & the day-3 novelty search is cited; the scope sentences of
+\S\ref{sec:today} and the $H_0$ sentence of \S\ref{sec:n0h0} appear verbatim & 3\\
+\bottomrule
+\end{longtable}
+
+\noindent Critical path: \textbf{31 days} to the compressed ensemble, \textbf{36} to
+the $\theta$-coupled likelihood, with exits at day 3 and day 14.
+
+\subsection{Cost}
+
+The baseline is measured, not modelled: $27.5$\,ms per likelihood call in a single
+pass and $49.3$\,ms under a poorly chosen block plan, at production dimensions, with
+$256$ concurrent evaluations and $10.4$\,GiB of $72.7$\,GiB already static. The
+production configuration carries \emph{no} structure at all, so the honest added cost
+of the deliverable is the whole member-marginalised slice, not the difference against
+a table-marginalised run:
+
+\begin{center}\small
+\begin{tabular}{cccc}
+\toprule
+$\Mdraw$ & member-dependent slice, table & member-dependent slice, latent & added vs.\ the $27.5$\,ms baseline\\
+\midrule
+8  & $5.3$\,ms  & $8.6$\,ms  & $+31\%$\\
+32 & $21$\,ms   & $34.4$\,ms & $+125\%$\\
+64 & $42$\,ms (a $13.7$\,GB member cube) & $68.8$\,ms (a $94$\,MB row factor) & $+250\%$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Three structural facts hold this together. The compression from a member
+\emph{table} cube to member \emph{row factors} is a factor $N_{\rm grid}/\Mz\simeq90$
+($1.71$\,GB $\to$ $11.7$\,MB at $\Mdraw=8$), which is what makes a defensible
+$\Mdraw$ affordable at all under \eqref{eq:Mrequired}. The full-sky budget reduction
+leaves the per-proposal path entirely, in closed form, by \eqref{eq:rho}. And the
+$\theta$-correction is member-independent, so the resident latent arrays stay static
+($+140$ to $+225$\,MB) and the only per-evaluation transient is the $1.46$\,MB row
+expansion of $S\Delta\theta$, i.e.\ $\sim375$\,MB at $256$-fold concurrency ---
+reserved explicitly, not assumed. Under any per-proposal re-solve variant every one
+of those three facts fails simultaneously: the moments regain $\theta$-dependence
+($+50$--$90\%$), the row factors become transient ($3$--$24$\,GB), and the evaluation
+goes memory-bound before it goes compute-bound.
+
+\subsection{When to stop}
+
+\begin{description}[leftmargin=2.1em,style=nextline,itemsep=1pt]
+\item[K0 (day 3).] If the event-weighted in-support prior mass is below $10^{-3}$
+\emph{and} switching the existing table on at the anchor moves the log-likelihood by
+less than $0.1$ nat across the $H_0$ prior, the field cannot move the posterior. Stop.
+The deliverable is the bounded systematic, and it is three days away rather than
+thirty-six. (Context: the in-support missing budget is $\sim2\times10^{-5}$ of the total by
+three independent integrals; the production $H_0$ posterior is already identical with
+and without a table; and most event posterior samples lie above $\zdep$.)
+\item[K2.] If neither latent-on versus latent-off nor $\theta$-coupled versus frozen
+moves the $H_0$ median by $0.1\sigma$ or the $90\%$ interval width by $5\%$, on
+closure \emph{and} on a non-railing production configuration, stop at that rung and
+publish the bound as a systematic.
+\item[K3.] Fitted-versus-truth slope below $0.8$ at the guard-compliant rank: the
+basis is collapsing (the pathological value is $0.04$).
+\item[K4.] Added wall beyond the accepted budget with the accuracy target unmet:
+descend one rung at a time --- $\theta$-coupled $\to$ frozen ensemble $\to$
+fixed-realisation systematic --- rather than jumping to the weakest fallback.
+\item[K5.] Member effective sample size below $2$ of $\Mdraw$ with the
+$\theta$-varying bias unmeetable at $\Mdraw\le128$: do not ship it as a
+marginalisation.
+\item[K8.] The areal-completeness change is \emph{expected} to be large --- the
+$18\,682$ empty pixels alone move the all-sky missing budget by $\sim+45\%$ --- so if
+it moves the $H_0$ posterior by more than $1\sigma$ with the field off, that change
+is a result in its own right and ships as its own arm; the field programme continues
+behind it.
+\item[K9 (day 14).] If \eqref{eq:critGW} exceeds $0.1$ nat and the linear-response
+residual cannot be brought below $0.1$ nat with a second-order term and multiple
+anchors, then a re-solve is required and a re-solve is not affordable: ship the
+frozen ensemble and quote the measured $\theta$-dependence as a systematic.
+Symmetrically, if \eqref{eq:critGW} is below $0.1$ nat the coupling adds nothing on
+the gravitational-wave side --- but by Remark~\ref{rem:notsame} that says nothing
+about \eqref{eq:critgal}, which is gated separately.
+\item[K10.] If the unconditional rung is taken and $n_0$ is not sampled under an
+$H_0$-aware prior (or reparameterised $H_0$-invariantly), and likewise for
+$\theta_{\rm sel}$ against its anchored magnitude prior, any $H_0$ shift is an
+artefact of the fiducial calibration. Refuse the arm rather than publish it.
+\end{description}
+
+\subsection{What not to attempt}
+
+A full per-proposal Newton re-solve ($\sim36\times$ the entire likelihood, and it
+makes the member arrays transient). Reusing one draw set across proposals with
+importance weights ($\ESS/M=4\times10^{-17}$ at a per-mode displacement that reads as
+comfortably tight). Adding the count likelihood while leaving the field a plug-in
+$\hat\xi(\mathcal C)$ --- Remark~\ref{rem:doublebreak}(i). Materialising $\Phi$
+($47.6$\,GB at $M=3780$). Sampling $\xi$ in the outer chain (the production run has
+$20$ free dimensions; $M\ge2520$ is not a perturbation on that). Widening shells past
+the photometric-redshift scatter. And building the multitracer table producer: the
+field-level path makes it unnecessary, and it would inherit that producer's missing
+budget gauge and its $1.34$\,Gpc rank floor. One caution on rank: a feasibility
+argument made at $M\sim10^2$ is made at a rank the resolution and isotropy guards
+forbid --- feasibility here comes from the correction being member-independent and of
+rank $n_\theta$, not from a small $M$.
+
+% =====================================================================
+\section{Decisions required}
+\label{sec:decisions}
+% =====================================================================
+
+\begin{enumerate}[leftmargin=2.0em,itemsep=3pt]
+
+\item[\bf D1.] \textbf{Which rung?}
+\emph{(a)} conditional counts, frozen response: no $\theta$ coupling; the control arm
+and the fallback.
+\emph{(b)} conditional counts, linear response: coupling for
+$\Omega_m,w_0,w_a,\delta,\theta_{\rm sel}$, no $H_0$ --- \textbf{recommended},
+conditional on the day-14 criterion.
+\emph{(c)} unconditional counts: adds $H_0$ only through $n_0(c/H_0)^3$, admissible
+only with D6 resolved and \S\ref{sec:n0h0} stated in the paper.
+\emph{(d)} unconditional counts with a per-proposal re-solve: infeasible.
+\emph{Trade:} conditioning gives up the $dN/dz$ constraint on the budget, restored
+explicitly as a prior rather than as a by-product of the field.
+
+\item[\bf D2.] \textbf{Jitter convention} for the Kronecker basis. \emph{Recommend}
+an absolute, amplitude-independent $10^{-6}$ on both factors, stamped. \emph{Cost:}
+latent-mode $Q$ differs from any legacy table by $\sim2\times10^{-3}$ at the guard
+rank, so every migration comparison references a same-convention rebuild.
+
+\item[\bf D3.] \textbf{Smoothing scale.} \emph{Recommend} the isotropic
+$\sim190$\,Mpc kernel ($\ell_{\rm ang}=0.2$, $\ell_\zeta=0.039$, $\Msph=315$,
+$\Mz=8$--$12$). \emph{Cost:} the analysis is explicitly a $190$\,Mpc-smoothed density
+field. \emph{Alternative:} keep $50$\,Mpc radially and accept a $4{:}1$ anisotropic
+kernel measuring $20\%$ of its own radial signal --- which must then be stated as
+such.
+
+\item[\bf D4.] \textbf{Per-pixel areal completeness.} \emph{Recommend} $f_p$ on
+\emph{both} sides with $C_p=f_pC(z)$ in the missing budget --- exact for areal
+masking. \emph{Fallback:} restrict the count channel to a mask-homogeneous
+sub-footprint, exact without touching the completeness side, losing $\sim30\%$ of
+area. Not an option: ignoring it, which inverts the sign of the inferred
+incompleteness.
+
+\item[\bf D5.] \textbf{Marginalisation-accuracy budget, hence $\Mdraw$.}
+\emph{Recommend} $0.1$ nat of $\theta$-varying bias across the $H_0$ prior, with
+$\Mdraw$ set against \eqref{eq:Mrequired} and $\sigma$ measured in the $H^{-1}$ norm
+of \eqref{eq:sigma}. \emph{Cost, against the true baseline:} $+31\%$ at $\Mdraw=8$,
+$+125\%$ at $32$, $+250\%$ at $64$. \emph{Alternative:} the fixed-realisation
+systematic --- zero cost, reduced claim. Note this arithmetic holds only under linear
+response.
+
+\item[\bf D6.] \textbf{Budget uncertainty.} \emph{Recommend} sampling
+$(\log_{10}n_0,\delta)$ under the calibration covariance, systematics-inflated,
+rather than the current plug-in from the same counts. \textbf{Required, not
+recommended, under D1(c)}: the calibration must be re-derived as a function of $H_0$,
+or $n_0$ reparameterised to an $H_0$-invariant combination such as $n_0h^{-3}$.
+
+\item[\bf D7.] \textbf{Above the survey depth.} \emph{Recommend} $Q\equiv1$ with zero
+variance in the headline analysis, with the amplitude profile delivered as a
+sensitivity scan quoted as ``$H_0$ shift under an assumed amplitude'', never as a
+marginalised posterior --- because no measurement in this programme constrains the
+field there.
+
+\item[\bf D8.] \textbf{Is the gravitational-wave bias free, and what does that imply
+for the catalogued branch?} \emph{Recommend} $\bgw\equiv\bgal$ in the headline run:
+it makes Limit I exact and the complete-catalog test a genuine physics identity, at
+zero cost. Wherever $\bgw$ is free --- the mock campaign, the multitracer tier --- the
+excess-bias factor $e^{(\bgw-\bgal)s(x_j)}$ \textbf{must} be written on the catalogued
+spike weights. Writing that branch field-free is a modelling error, and it is the
+first thing a cross-correlation-literate referee checks.
+
+\item[\bf D9.] \textbf{Tracer overlap at $K\ge2$.} \emph{Recommend} a disjoint
+partition. The event-side mixture is safe under overlap; the count-side product is
+not.
+
+\item[\bf D10.] \textbf{Field family for the headline run, and whether to keep the
+table path.} The production table is radial, and the radial builder is a per-pixel
+quasi-Newton loop that cannot move inside the likelihood at any rung --- so adopting
+the latent path \emph{is} a change of family, by necessity rather than preference.
+\emph{Recommend} running four arms of one comparison before choosing --- radial table
+/ low-rank table / frozen latent / $\theta$-coupled latent --- and keeping the table
+path indefinitely as the golden-pinned reference. Note that the $K\ge2$
+parametric-selection \emph{table} arm cannot be built today at any $K$
+(\S\ref{sec:seam}).
+
+\item[\bf D11.] \textbf{The novelty search.} Resolved by scheduling: it is the first
+item of work, not the last. No ``first'' appears anywhere until it is written down.
+
+\item[\bf D12.] \textbf{What is the headline?} Strip what is already scored as not
+novel and the budget-preserving marginalisation reduces to a gauge fixing
+(Prop.~\ref{prop:gauge}) plus a correctness requirement (same realisation in the event
+terms and the normalisation, already enforced); with the mandatory scope caveats what
+remains is \emph{``we marginalise over the angular placement of missing hosts inside
+the surveyed volume at fixed budget.''} \emph{Recommend (a):} headline the
+\textbf{unification} --- Limits I--III as one likelihood, with the $\theta$-coupled
+field as the object that makes the interpolation real --- and demote the
+budget-preserving marginalisation to the enabling clause it is. \emph{(b)} headline
+the marginalisation and accept that it may read as a methods note. \emph{(c)} defer
+until the day-3 search returns.
+
+\item[\bf D13.] \textbf{Does the galaxy-side evidence enter the headline posterior?}
+It acts against $22.79$M galaxies while the events number $259$, and it is a
+$dN/dz$-shape constraint degenerate with $\delta$, with the photometric-redshift
+kernel and with the shell binning --- all frozen inside $W$. \emph{Recommend (a):}
+report it as a diagnostic; it does not enter the headline posterior unless $W$'s own
+parameters are sampled or profiled. \emph{(b)} admit it and sample/profile those
+parameters --- real work, and the only honest route to quoting cosmology from it.
+\emph{(c)} admit it with $W$ frozen: refused.
+
+\item[\bf D14.] \textbf{Is the magnitude channel a likelihood factor or an anchored
+prior?} Today it is an anchored Gaussian prior at $1.6\times10^{-4}$\,mag; the
+magnitude log-likelihood exists but is never evaluated. \emph{Recommend (a):} keep
+empirical Bayes, state it plainly, and let the rung-dependent guards carry the
+consequences --- zero work, honest. \emph{(b)} implement it as a likelihood factor and
+drop the anchored prior: this closes \eqref{eq:hierarchy} exactly and is what would
+permit the unconditional rung without double-counting $\theta_{\rm sel}$, at the cost
+of real work.
+
+\end{enumerate}
+
+\vspace{0.6em}
+\noindent\textbf{The two decisions that gate everything else are D1 and D12}, and
+both are answerable within three days of starting: D1 by the day-3 measurement of
+whether the field can move the posterior at all, and D12 by the paper-by-paper search
+that the same three days contain.
+
+\end{document}

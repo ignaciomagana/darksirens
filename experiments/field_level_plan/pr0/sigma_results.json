@@ -1,0 +1,20 @@
+{
+ "anchor_H0": 67.74,
+ "b_GW": 1.0,
+ "kernel": {
+  "ls_sph": 0.2,
+  "ls_z": 0.039,
+  "M_sph": 315,
+  "M_z": 8,
+  "jitter": 1e-06,
+  "z_node_hi": 0.3
+ },
+ "sum_phi": 1.4671212117641965,
+ "phi_max": 0.03927977311867687,
+ "n_events_phi_pos": 256,
+ "pe_insupport_sample_frac": 0.2460437907215251,
+ "f_missing_sel": 0.0025661155395590783,
+ "a_euclid_norm": 0.15577360748965957,
+ "sigma_Hnorm": 0.0006018525089540707,
+ "git_sha": "8592b021792b4f26bba7f59415438ad939b007f3"
+}
