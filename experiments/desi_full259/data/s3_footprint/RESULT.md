@@ -76,3 +76,37 @@ rather than a constraint.
   without the Tier C caveat: the mock says intervals on this estimator are ~2.5x
   too narrow, production has no ensemble to check it, and the OPG shortcut that
   looked like a check has been measured blind (`pr6a/DIAGNOSIS.md`).
+
+---
+
+## RESOLUTION (2026-08-23): the pairing is gated, the mask-free Q exists, and the number is replaced
+
+The caveat above said the arm-selection question was void "until the pairing is
+gated on an `f_p`-aware Q artifact".  Both halves now exist:
+
+* the loader admits `f_p` x Q only on an EARNED `f_p_aware` stamp
+  (`_verify_mask_free`: off-footprint `|logQ| <= 1e-6` exactly, and per-slice
+  `|corr(Q, f_p) - corr(N/f_p, f_p)| <= 0.10` against the catalog's OWN
+  density-depth coupling, which is +0.11..+0.24 on this catalog and so cannot
+  be zero-anchored);
+* `data/fits/q_v4_depthmap_prod.h5` earns it (worst delta 0.029; built with
+  `--depth-map` + `--q-support-depth 0.30`, the catalog's measured truncation,
+  and the wrap-padded truncated solve).
+
+Closure first (rb spec-z world, truth 67.74): the admitted pairing moves
+`table_fp` from 41.24 [36.1, 46.3] (truth excluded) to 76.77 [67.3, 87.4]
+(truth at the 5.7th percentile); record
+`field_level_plan/pr6a/sz_tier_b_tablefp_v4.json`.
+
+Then the production line (this run, `data/s3_footprint_v4/`):
+
+| arm | Q table | mask | `H0` median | 90% CI |
+|---|---|---|---|---|
+| `q_nofp` | v4 | -- | 90.22 | [82.6, 96.6] |
+| `q_fp` | v4 | yes | **71.47** | [64.5, 79.2] |
+
+**The Q-table line now AGREES with the Q-free line on the masked answer:
+71.47 vs `fp` 71.54.**  The withdrawn 80.61 was the double-count; the true
+mask shift on the Q line is -18.8 km/s (-4.40 sigma), the same story the
+Q-free arms told.  The arm-selection question is no longer void: masked arms
+agree at ~71.5 with or without Q.
