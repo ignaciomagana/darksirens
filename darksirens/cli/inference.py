@@ -105,10 +105,8 @@ from darksirens.inference.checkpointing import (
 )
 from darksirens.inference.run_fingerprint import (
     FINGERPRINT_SCHEMA_VERSION,
-    ResumeFingerprintError,
     build_run_fingerprint,
-    check_resume_fingerprint,
-    save_run_fingerprint,
+    gate_and_stamp_resume_fingerprint,
 )
 from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
@@ -3951,40 +3949,21 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
         fixed_parameter_values=fixed_parameter_values,
         joint_constraints=getattr(pspace, "joint_constraints", ()),
     )
-    # Recorded on opts (hence in settings.json and results.hdf5) so an archived
-    # artifact carries the identity of the configuration that produced it.  Set
-    # AFTER the build above, so it never feeds back into the digest.
-    opts.run_fingerprint_digest = fingerprint["digest"]
-    opts.resume_forced_mismatch = False
+    # The gate AND its provenance stamps (opts.run_fingerprint_digest,
+    # opts.resume_forced_mismatch, the run_fingerprint.json /
+    # run_fingerprint.forced-<ts>.json files) live in one shared helper, so the
+    # lensing CLI records exactly the same thing rather than a subset of it.
     run_timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     if resume_dir:
-        try:
-            stored = check_resume_fingerprint(
-                resume_dir, fingerprint,
-                force=bool(getattr(opts, "resume_force", False)),
-            )
-        except ResumeFingerprintError as exc:
-            _fatal(str(exc))
         run_dir = resume_dir
         _row("Resuming run", run_dir)
         _row("From checkpoint", resume_ckpt)
-        if stored is None:
-            # --resume_force accepted a fingerprint-less legacy run dir;
-            # stamp it now so later requeues are validated, not forced.
-            save_run_fingerprint(run_dir, fingerprint)
-        elif stored.get("digest") != fingerprint["digest"]:
-            # --resume_force accepted a MISMATCH: the stored fingerprint is the
-            # record of the configuration that created the checkpoint, so keep
-            # it, but stamp this run's configuration beside it -- otherwise the
-            # directory advertises a configuration that did not produce its
-            # results.hdf5, and every later requeue must be forced too.
-            opts.resume_forced_mismatch = True
-            save_run_fingerprint(
-                run_dir, fingerprint,
-                basename=f"run_fingerprint.forced-{run_timestamp}.json",
-            )
     else:
         run_dir = _make_run_dir(opts, run_timestamp)
+    gate_and_stamp_resume_fingerprint(
+        opts, run_dir, resume_dir, fingerprint, run_timestamp,
+        on_error=_fatal,
+    )
     opts.run_dir = run_dir
     plan = resolve_checkpoint_plan(
         opts, run_dir, name_prefix=prefix, resume_from=resume_ckpt
@@ -4005,8 +3984,7 @@ def _prepare_run_dir(opts, data, pspace, fixed_parameter_values, prior_overrides
         fixed_parameter_values, prior_overrides, meta,
         basename=settings_basename,
     )
-    if not resume_dir:
-        save_run_fingerprint(run_dir, fingerprint)
+    # (run_fingerprint.json was written by gate_and_stamp_resume_fingerprint.)
     _ok(f"{settings_basename}  →  {json_path}")
     _end()
     settings_snapshot = {

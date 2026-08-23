@@ -111,10 +111,9 @@ from darksirens.inference.checkpointing import (
     resolve_checkpoint_plan,
 )
 from darksirens.inference.run_fingerprint import (
-    ResumeFingerprintError,
     build_run_fingerprint,
-    check_resume_fingerprint,
-    save_run_fingerprint,
+    gate_and_stamp_resume_fingerprint,
+    resume_provenance_attrs,
 )
 from darksirens.inference.prior import (
     build_parameter_space,
@@ -123,6 +122,7 @@ from darksirens.inference.prior import (
 )
 from darksirens.inference.sampling import run_sampler
 from darksirens.io.results import (
+    atomic_result_hdf5,
     save_tinyns_diagnostics_json,
     write_dead_point_datasets,
     write_tinyns_metadata,
@@ -3538,6 +3538,12 @@ def _prepare_run_dir(opts):
     return run_dir, settings, fixed, base_fixed, lens_fixed, resume_dir
 
 
+def _raise_system_exit(msg):
+    """Fingerprint-gate refusal, kept as the lensing CLI's own SystemExit (the
+    message is the refusal, unchanged from before the gate was shared)."""
+    raise SystemExit(msg)
+
+
 def _gate_or_stamp_resume_fingerprint(
     opts, run_dir, resume_dir, labels, lower, upper, prior_kinds, fixed,
     joint_constraints=(),
@@ -3549,6 +3555,14 @@ def _gate_or_stamp_resume_fingerprint(
     and bounds only exist once ``_build_space_and_closures`` has returned.
     That ordering is safe: a checkpoint file cannot exist before sampling
     starts, so no restorable state ever predates the fresh run's stamp.
+
+    Delegates to the SHARED gate, so a forced lensing resume leaves the same
+    provenance the main CLI leaves: this run's digest on ``opts`` (hence in
+    settings.json and results.hdf5), a ``resume_forced_mismatch`` flag, and a
+    ``run_fingerprint.forced-<timestamp>.json`` beside the stored fingerprint.
+    Ignoring the stored fingerprint here used to make a forced lensing resume --
+    which mixes two statistical targets by construction -- indistinguishable
+    from a matched one in every archived artifact.
     """
     fingerprint = build_run_fingerprint(
         opts,
@@ -3560,20 +3574,14 @@ def _gate_or_stamp_resume_fingerprint(
         fixed_parameter_values=fixed,
         joint_constraints=joint_constraints,
     )
-    if resume_dir:
-        try:
-            stored = check_resume_fingerprint(
-                run_dir, fingerprint,
-                force=bool(getattr(opts, "resume_force", False)),
-            )
-        except ResumeFingerprintError as exc:
-            raise SystemExit(str(exc)) from None
-        if stored is None:
-            # --resume_force accepted a fingerprint-less legacy run dir;
-            # stamp it now so later requeues are validated, not forced.
-            save_run_fingerprint(run_dir, fingerprint)
-    else:
-        save_run_fingerprint(run_dir, fingerprint)
+    # The lensing CLI resumes INSIDE the original run directory, so run_dir and
+    # resume_dir are the same path here; pass both so the shared helper reads
+    # the same way in either CLI.
+    run_timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    gate_and_stamp_resume_fingerprint(
+        opts, run_dir, resume_dir, fingerprint, run_timestamp,
+        on_error=_raise_system_exit,
+    )
 
 
 def _load_and_report_inputs(opts, run_dir, settings):
@@ -3882,7 +3890,12 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
     try:
         samples = np.asarray(results["samples"])
         np.save(os.path.join(run_dir, "samples.npy"), samples)
-        with h5py.File(os.path.join(run_dir, "results.hdf5"), "w") as f:
+        # Temp-then-atomic-replace, shared with io.results.save_results_hdf5:
+        # this file used to be opened directly in "w" mode, so a fault anywhere
+        # below (write_dead_point_datasets, an unserializable attr, a SIGTERM)
+        # left a truncated results.hdf5 that auto-resume read as "this run
+        # finished" and analyze read as the run's posterior.
+        with atomic_result_hdf5(os.path.join(run_dir, "results.hdf5")) as f:
             f.create_dataset("samples", data=samples)
             # Nested-sampler dead-point record (logl_dead/logwt_dead + n_dead /
             # n_live attrs), additive and indexed by dead point rather than by
@@ -3930,10 +3943,18 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
                         results["numpyro_diagnostics"], default=str)
                 except (TypeError, ValueError):
                     pass
+            # Resume provenance, identical to io.results.save_results_hdf5: a
+            # forced resume across a fingerprint MISMATCH mixes two statistical
+            # targets, and results.hdf5 used to carry no record of it at all.
+            f.attrs.update(resume_provenance_attrs(opts))
             f.attrs["selection_neff_soft_guard"] = bool(
                 getattr(opts, "selection_neff_soft_guard", False))
             f.attrs["max_likelihood_variance"] = float(
                 getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
+        # settings.json is written BEFORE the gate runs (in _prepare_run_dir),
+        # so it holds resume_force but not the gate's verdict; add the verdict
+        # here, where the run is over and the digest is known.
+        settings.update(resume_provenance_attrs(opts))
         settings.update(
             wl_a=float(opts.lensing_wl_a),
             wl_b=float(opts.lensing_wl_b),

@@ -56,6 +56,9 @@ import tempfile
 import warnings
 
 FINGERPRINT_BASENAME = "run_fingerprint.json"
+# Stem of the above, so the forced-mismatch sibling
+# (run_fingerprint.forced-<timestamp>.json) cannot drift from it.
+FINGERPRINT_BASENAME_STEM = FINGERPRINT_BASENAME[: -len(".json")]
 
 #: Bumped to 2 when the resolved joint prior constraints joined the semantic
 #: block.  A bump makes every PRE-BUMP fingerprint mismatch with an explicit
@@ -395,6 +398,86 @@ def save_run_fingerprint(run_dir: str, fingerprint: dict, *, basename=None) -> s
             pass
         raise
     return path
+
+
+def gate_and_stamp_resume_fingerprint(
+    opts, run_dir, resume_dir, fingerprint, run_timestamp, *, on_error=None
+):
+    """The shared ``--resume`` fingerprint gate for BOTH inference CLIs.
+
+    Gating alone is not enough: a ``--resume_force`` run that crosses a
+    fingerprint MISMATCH produces output that mixes two statistical targets, and
+    unless that fact is written down, the archived run directory is
+    indistinguishable from a clean one.  ``settings.json`` records
+    ``resume_force=true`` and the argv, but neither can say whether the gate
+    actually found a match, no fingerprint at all, or a mismatch.
+
+    So this records, in one place:
+
+    * ``opts.run_fingerprint_digest`` — the identity of the configuration that
+      produced THIS run's samples (reaches settings.json and results.hdf5);
+    * ``opts.resume_forced_mismatch`` — whether the gate was forced across a
+      genuine mismatch, as opposed to a match or a fingerprint-less legacy dir;
+    * ``run_fingerprint.json`` for a fresh run (or a forced legacy dir that had
+      none), and ``run_fingerprint.forced-<timestamp>.json`` beside the stored
+      one on a forced mismatch -- keeping the stored fingerprint, which is the
+      record of the configuration that created the checkpoint.
+
+    ``on_error`` receives the message of a :class:`ResumeFingerprintError` (the
+    CLIs pass their own fatal-exit helper); the default re-raises.
+
+    Returns the stored fingerprint dict, or ``None`` (fresh run, or a forced
+    resume into a directory with no readable fingerprint).
+    """
+    # Set AFTER build_run_fingerprint, so it can never feed back into the digest.
+    opts.run_fingerprint_digest = fingerprint["digest"]
+    opts.resume_forced_mismatch = False
+    if not resume_dir:
+        save_run_fingerprint(run_dir, fingerprint)
+        return None
+    try:
+        stored = check_resume_fingerprint(
+            resume_dir, fingerprint,
+            force=bool(getattr(opts, "resume_force", False)),
+        )
+    except ResumeFingerprintError as exc:
+        if on_error is not None:
+            on_error(str(exc))
+            return None
+        raise
+    if stored is None:
+        # --resume_force accepted a fingerprint-less legacy run dir; stamp it
+        # now so later requeues are validated, not forced.
+        save_run_fingerprint(run_dir, fingerprint)
+    elif stored.get("digest") != fingerprint["digest"]:
+        # --resume_force accepted a MISMATCH: keep the stored fingerprint (the
+        # record of the configuration that created the checkpoint) and stamp
+        # this run's configuration beside it -- otherwise the directory
+        # advertises a configuration that did not produce its results.hdf5, and
+        # every later requeue must be forced too.
+        opts.resume_forced_mismatch = True
+        save_run_fingerprint(
+            run_dir, fingerprint,
+            basename=f"{FINGERPRINT_BASENAME_STEM}.forced-{run_timestamp}.json",
+        )
+    return stored
+
+
+def resume_provenance_attrs(opts) -> dict:
+    """The resume-provenance block both CLIs stamp into results.hdf5.
+
+    Kept here so the two archives cannot drift: a reader must be able to tell a
+    matched resume from a forced mismatch from the file alone.
+    """
+    return {
+        "run_fingerprint_digest": str(
+            getattr(opts, "run_fingerprint_digest", None) or ""),
+        "resumed": bool(getattr(opts, "resume_from_resolved", None)),
+        "resume_from": str(getattr(opts, "resume_from_resolved", None) or ""),
+        "resume_forced": bool(getattr(opts, "resume_force", False)),
+        "resume_forced_mismatch": bool(
+            getattr(opts, "resume_forced_mismatch", False)),
+    }
 
 
 def _semantic_diff(stored, current, prefix="", out=None, limit=20):

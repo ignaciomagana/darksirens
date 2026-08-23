@@ -78,3 +78,4 @@ tests/test_latent_counts.py
 tests/test_latent_anchor.py
 tests/test_latent_seam.py
 tests/test_latent_factory.py
+tests/test_result_atomicity_and_resume_provenance.py
