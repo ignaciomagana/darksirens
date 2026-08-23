@@ -1,0 +1,5213 @@
+{
+ "rows": [
+  {
+   "latent": {
+    "median": 80.02879017026733,
+    "ci68": [
+     73.47435144597063,
+     87.13062582395284
+    ],
+    "ci90": [
+     69.50479724036747,
+     92.2031106172508
+    ],
+    "sigma": 6.828137188991107,
+    "cdf_at_truth": 0.025638033617998796,
+    "map": 80.0,
+    "width90": 22.698313376883334
+   },
+   "latent_off": {
+    "median": 80.96869273395194,
+    "ci68": [
+     74.2288789649047,
+     88.33398947402208
+    ],
+    "ci90": [
+     70.20429888770153,
+     93.59081838063575
+    ],
+    "sigma": 7.0525552545586905,
+    "cdf_at_truth": 0.02015219633610158,
+    "map": 80.0,
+    "width90": 23.386519492934227
+   },
+   "seed": 7001,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c000/latent_anchor.h5",
+     "sha256": "4b5a775c0d1e0648e52d1fb0e62505b49d49ca0060468aa9b9b35875a32db18d",
+     "grad_inf": 5.790619095336069e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.044323625055434954,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 509.013680928736,
+     "b_gal_curvature_conditional": 172886.03763410228,
+     "row_fac_sd": 1.027141809463501,
+     "member_sd": 0.5100448727607727
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 66.92341360303017,
+    "ci68": [
+     61.312410512602426,
+     72.90623205931402
+    ],
+    "ci90": [
+     57.81877135449266,
+     77.20943257017356
+    ],
+    "sigma": 5.796910773355798,
+    "cdf_at_truth": 0.5569398166464429,
+    "map": 67.5,
+    "width90": 19.3906612156809
+   },
+   "latent_off": {
+    "median": 67.38905535420125,
+    "ci68": [
+     61.82935251911458,
+     73.44782738979703
+    ],
+    "ci90": [
+     58.278342226674845,
+     77.61685302731239
+    ],
+    "sigma": 5.809237435341224,
+    "cdf_at_truth": 0.5237766622675433,
+    "map": 67.5,
+    "width90": 19.338510800637543
+   },
+   "seed": 7038,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c001/latent_anchor.h5",
+     "sha256": "4b5f130618f721b90ad66e04a56a715317f08be544dca9c985ddf0eee54acc98",
+     "grad_inf": 1.699798080068149e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0541934709403202,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 340.4913359880593,
+     "b_gal_curvature_conditional": 68314.28153538145,
+     "row_fac_sd": 0.8917625546455383,
+     "member_sd": 0.5127342939376831
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 88.45969795665921,
+    "ci68": [
+     78.09041644730696,
+     100.39098909090991
+    ],
+    "ci90": [
+     72.11435105157783,
+     107.79620868471021
+    ],
+    "sigma": 11.150286321801474,
+    "cdf_at_truth": 0.015011850345725681,
+    "map": 87.5,
+    "width90": 35.68185763313238
+   },
+   "latent_off": {
+    "median": 89.62094885083523,
+    "ci68": [
+     79.30740817631698,
+     101.52600544711397
+    ],
+    "ci90": [
+     73.50672898962368,
+     109.3672770357369
+    ],
+    "sigma": 11.109298635398495,
+    "cdf_at_truth": 0.008173610600003146,
+    "map": 87.5,
+    "width90": 35.86054804611322
+   },
+   "seed": 7075,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c002/latent_anchor.h5",
+     "sha256": "8850bbbde77993a6bef68372c750a68b2ae541c7e0cf473d123b87effc84142e",
+     "grad_inf": 2.942234789138354e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.054270727866119944,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 339.522615224967,
+     "b_gal_curvature_conditional": 208378.28121640772,
+     "row_fac_sd": 0.9190277457237244,
+     "member_sd": 0.5136137008666992
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 72.01529455534953,
+    "ci68": [
+     66.7079694607653,
+     77.51674318983848
+    ],
+    "ci90": [
+     63.32481057748735,
+     81.58234300033114
+    ],
+    "sigma": 5.4043868645365905,
+    "cdf_at_truth": 0.20880981765365023,
+    "map": 72.5,
+    "width90": 18.257532422843788
+   },
+   "latent_off": {
+    "median": 72.92660472978369,
+    "ci68": [
+     67.6463087887526,
+     78.6471716386031
+    ],
+    "ci90": [
+     64.17172758869354,
+     82.46584907113954
+    ],
+    "sigma": 5.500431424925246,
+    "cdf_at_truth": 0.1652655656679337,
+    "map": 72.5,
+    "width90": 18.294121482446002
+   },
+   "seed": 7112,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c003/latent_anchor.h5",
+     "sha256": "fa7a07830b1776880e088429b5caf9cd7a6217ec462551b284eeee51177568fc",
+     "grad_inf": 1.040467711987958e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04980551110199803,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 403.1300734411925,
+     "b_gal_curvature_conditional": 152663.07156359532,
+     "row_fac_sd": 0.956659734249115,
+     "member_sd": 0.5129444599151611
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 94.4356452409389,
+    "ci68": [
+     84.50417931848376,
+     104.97719605217877
+    ],
+    "ci90": [
+     78.31490309189599,
+     112.13963627628002
+    ],
+    "sigma": 10.236508366847502,
+    "cdf_at_truth": 0.002099177129802503,
+    "map": 95.0,
+    "width90": 33.82473318438403
+   },
+   "latent_off": {
+    "median": 96.54864374856366,
+    "ci68": [
+     86.18374106529961,
+     107.53093224176834
+    ],
+    "ci90": [
+     79.90894750439021,
+     114.93191414387995
+    ],
+    "sigma": 10.673595588234363,
+    "cdf_at_truth": 0.001320695855674857,
+    "map": 95.0,
+    "width90": 35.02296663948974
+   },
+   "seed": 7149,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c004/latent_anchor.h5",
+     "sha256": "02ad381cc9d9c9f18269867e37478135f6d638c98b4720c8154ac2a89602d6ca",
+     "grad_inf": 2.0474733020137137e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04945670382154307,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 408.8365017314791,
+     "b_gal_curvature_conditional": 51288.307779094874,
+     "row_fac_sd": 0.947584867477417,
+     "member_sd": 0.5168113708496094
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 66.14971881796146,
+    "ci68": [
+     59.81317632602718,
+     73.21926055695837
+    ],
+    "ci90": [
+     55.835788431547776,
+     78.3425872185559
+    ],
+    "sigma": 6.703042115465596,
+    "cdf_at_truth": 0.5932301327004869,
+    "map": 65.0,
+    "width90": 22.50679878700813
+   },
+   "latent_off": {
+    "median": 64.94708064905326,
+    "ci68": [
+     58.67312909859247,
+     71.92589481600018
+    ],
+    "ci90": [
+     55.06750668508877,
+     76.9824993867774
+    ],
+    "sigma": 6.626382858703856,
+    "cdf_at_truth": 0.6605896819332897,
+    "map": 65.0,
+    "width90": 21.914992701688632
+   },
+   "seed": 7186,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c005/latent_anchor.h5",
+     "sha256": "ab15a1284e2840cc2440c261249953dbbecbc93d595faefe1c97681ff3bcbe0c",
+     "grad_inf": 5.177414053036955e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.043633848555357735,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 525.2341554951272,
+     "b_gal_curvature_conditional": 264517.2613651688,
+     "row_fac_sd": 1.0167973041534424,
+     "member_sd": 0.5013757944107056
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 101.61992790168206,
+    "ci68": [
+     90.33640232123636,
+     114.58510731734471
+    ],
+    "ci90": [
+     83.5645241861547,
+     124.59764733439843
+    ],
+    "sigma": 12.124352498054172,
+    "cdf_at_truth": 0.00044156104015924196,
+    "map": 100.0,
+    "width90": 41.03312314824373
+   },
+   "latent_off": {
+    "median": 104.80699969003943,
+    "ci68": [
+     93.21656975397366,
+     118.33772176060768
+    ],
+    "ci90": [
+     86.47892803264027,
+     128.29221234215697
+    ],
+    "sigma": 12.56057600331701,
+    "cdf_at_truth": 0.00010514069449408424,
+    "map": 105.0,
+    "width90": 41.8132843095167
+   },
+   "seed": 7223,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c006/latent_anchor.h5",
+     "sha256": "0b6fbeb887e6a473c76d41abaa93ccb3a72f7d0468d075536a80e5fd1771f7e7",
+     "grad_inf": 6.692424392440444e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05767576679976422,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 300.61679869884756,
+     "b_gal_curvature_conditional": 24479.976760673795,
+     "row_fac_sd": 0.9817100167274475,
+     "member_sd": 0.5396561622619629
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 89.71706684273077,
+    "ci68": [
+     83.29009579963191,
+     97.0638716208882
+    ],
+    "ci90": [
+     79.54485229540681,
+     102.15541250466593
+    ],
+    "sigma": 6.88688791062814,
+    "cdf_at_truth": 0.00011404182819109695,
+    "map": 90.0,
+    "width90": 22.61056020925912
+   },
+   "latent_off": {
+    "median": 90.91755576980623,
+    "ci68": [
+     84.35337395750261,
+     98.28277301484555
+    ],
+    "ci90": [
+     80.46494889957339,
+     103.37463558511013
+    ],
+    "sigma": 6.964699528671467,
+    "cdf_at_truth": 4.789132512134245e-05,
+    "map": 90.0,
+    "width90": 22.90968668553674
+   },
+   "seed": 7260,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c007/latent_anchor.h5",
+     "sha256": "c5fbda91a76858ace5ba8abee6c2cf27f9027e596b7c3ad4f17e501528ed01ca",
+     "grad_inf": 1.849884134763613e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05009191406058396,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 398.53342024752055,
+     "b_gal_curvature_conditional": 165678.83001430938,
+     "row_fac_sd": 0.9288244247436523,
+     "member_sd": 0.5131801962852478
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 85.85414735661914,
+    "ci68": [
+     76.65909025354178,
+     97.02769490197322
+    ],
+    "ci90": [
+     71.1212835644245,
+     105.9099222444465
+    ],
+    "sigma": 10.184302324215722,
+    "cdf_at_truth": 0.018180091947668706,
+    "map": 85.0,
+    "width90": 34.788638680022004
+   },
+   "latent_off": {
+    "median": 87.12110522367588,
+    "ci68": [
+     77.79782293641847,
+     98.58709644549087
+    ],
+    "ci90": [
+     72.24969886826484,
+     107.72139399717933
+    ],
+    "sigma": 10.3946367545362,
+    "cdf_at_truth": 0.012886838859814388,
+    "map": 85.0,
+    "width90": 35.47169512891449
+   },
+   "seed": 7297,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c008/latent_anchor.h5",
+     "sha256": "0227eaa80c9f049f7190fed040bb50bfd5bc920e7ef9af1711a7efef198d37be",
+     "grad_inf": 1.0322853682964706e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05347299474132605,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 349.72846791055053,
+     "b_gal_curvature_conditional": 90950.66682246205,
+     "row_fac_sd": 0.8651899695396423,
+     "member_sd": 0.5220471024513245
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 43.070877398130925,
+    "ci68": [
+     37.886645686395845,
+     48.436469715477614
+    ],
+    "ci90": [
+     34.52303228529363,
+     52.01283690750391
+    ],
+    "sigma": 5.2749120145408845,
+    "cdf_at_truth": 0.9999848343116702,
+    "map": 42.5,
+    "width90": 17.48980462221028
+   },
+   "latent_off": {
+    "median": 59.344678784464726,
+    "ci68": [
+     53.63643233588501,
+     65.1685306609623
+    ],
+    "ci90": [
+     50.09706720037069,
+     69.31460900139936
+    ],
+    "sigma": 5.766049162538646,
+    "cdf_at_truth": 0.9211114153375165,
+    "map": 60.0,
+    "width90": 19.217541801028673
+   },
+   "seed": 7334,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c009/latent_anchor.h5",
+     "sha256": "fe7fb69e2a5b611e4c21fd21e3045af7b5a918614f0b572f4610694eea43977c",
+     "grad_inf": 1.4992895813747964e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.048890220618499874,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 418.3656369454402,
+     "b_gal_curvature_conditional": 214399.61603043936,
+     "row_fac_sd": 0.9455040693283081,
+     "member_sd": 0.5177993178367615
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 41.46760672736229,
+    "ci68": [
+     34.745301169972585,
+     48.08760028514025
+    ],
+    "ci90": [
+     30.23975485575426,
+     52.260525419399606
+    ],
+    "sigma": 6.671149557583831,
+    "cdf_at_truth": 0.9999798854732818,
+    "map": 42.5,
+    "width90": 22.020770563645346
+   },
+   "latent_off": {
+    "median": 39.781781586894645,
+    "ci68": [
+     30.60786314669461,
+     48.47571341651233
+    ],
+    "ci90": [
+     25.138064129772165,
+     53.75908586158156
+    ],
+    "sigma": 8.93392513490886,
+    "cdf_at_truth": 0.9998141654706327,
+    "map": 40.0,
+    "width90": 28.621021731809396
+   },
+   "seed": 7371,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c010/latent_anchor.h5",
+     "sha256": "9fade636ff13c9f670400a8d9ed688d94cb65be37fd3bd5c99ce4fc5bb0bcf58",
+     "grad_inf": 9.256137523117047e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0506435404445339,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 389.89878476486774,
+     "b_gal_curvature_conditional": 136595.75511423615,
+     "row_fac_sd": 0.9653246402740479,
+     "member_sd": 0.5117039084434509
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 25.05334832883192,
+    "ci68": [
+     21.559160512067297,
+     30.23629781359549
+    ],
+    "ci90": [
+     20.48723766002103,
+     34.17109951166658
+    ],
+    "sigma": 4.3385686507640955,
+    "cdf_at_truth": 0.9999999999941098,
+    "map": 20.0,
+    "width90": 13.683861851645553
+   },
+   "latent_off": {
+    "median": 30.732875530989585,
+    "ci68": [
+     24.22396510432338,
+     37.915698431084074
+    ],
+    "ci90": [
+     21.461788512149393,
+     42.44822687190131
+    ],
+    "sigma": 6.845866663380347,
+    "cdf_at_truth": 0.9999999500350792,
+    "map": 30.0,
+    "width90": 20.98643835975192
+   },
+   "seed": 7408,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c011/latent_anchor.h5",
+     "sha256": "d892ba46271694fadda07a9fa613f18349afcf2791479c91c2d4c3cffe42252b",
+     "grad_inf": 5.5073723359555515e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05214350297159483,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 367.7897257902223,
+     "b_gal_curvature_conditional": 85077.0553036201,
+     "row_fac_sd": 0.9203285574913025,
+     "member_sd": 0.5151175260543823
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 46.572118397637865,
+    "ci68": [
+     39.82226035695648,
+     53.312785774291335
+    ],
+    "ci90": [
+     35.22353521384326,
+     57.64707360825338
+    ],
+    "sigma": 6.745262708667429,
+    "cdf_at_truth": 0.9988554287065708,
+    "map": 47.5,
+    "width90": 22.423538394410116
+   },
+   "latent_off": {
+    "median": 57.213192526817835,
+    "ci68": [
+     49.251122589803096,
+     64.97890717954216
+    ],
+    "ci90": [
+     43.73025056952578,
+     70.2334609037731
+    ],
+    "sigma": 7.863892294869533,
+    "cdf_at_truth": 0.909403448435942,
+    "map": 57.5,
+    "width90": 26.503210334247328
+   },
+   "seed": 7445,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c012/latent_anchor.h5",
+     "sha256": "403b4cde6134eb865fb7558a32193361f5016026a6850abc8096a6afe9c857fc",
+     "grad_inf": 2.453148795211746e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04664170527374085,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 459.6752906207257,
+     "b_gal_curvature_conditional": 96188.25646820723,
+     "row_fac_sd": 1.024356722831726,
+     "member_sd": 0.5260966420173645
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 68.34221997998625,
+    "ci68": [
+     60.6991636808824,
+     76.3495345835999
+    ],
+    "ci90": [
+     55.892581610301804,
+     81.7084398144655
+    ],
+    "sigma": 7.825185451358752,
+    "cdf_at_truth": 0.469432424819246,
+    "map": 67.5,
+    "width90": 25.815858204163703
+   },
+   "latent_off": {
+    "median": 71.36904236262235,
+    "ci68": [
+     63.55154998787047,
+     79.37856802858231
+    ],
+    "ci90": [
+     58.58044458442654,
+     84.67791074946095
+    ],
+    "sigma": 7.913509020355917,
+    "cdf_at_truth": 0.3222078570208018,
+    "map": 70.0,
+    "width90": 26.09746616503441
+   },
+   "seed": 7482,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c013/latent_anchor.h5",
+     "sha256": "2288b236cdbce15daf029a0e676190ac78d05fca15239ff7f3114f92e48c6619",
+     "grad_inf": 2.3234747459355276e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04772047228579977,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 439.1273971796327,
+     "b_gal_curvature_conditional": 78049.32836864052,
+     "row_fac_sd": 1.0610276460647583,
+     "member_sd": 0.5314134955406189
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 56.26907613885689,
+    "ci68": [
+     50.09403843880205,
+     63.190878356977464
+    ],
+    "ci90": [
+     46.18299949377064,
+     68.08527736023237
+    ],
+    "sigma": 6.548419959087706,
+    "cdf_at_truth": 0.9461057788938966,
+    "map": 55.0,
+    "width90": 21.90227786646173
+   },
+   "latent_off": {
+    "median": 57.329638529100095,
+    "ci68": [
+     51.25493040637873,
+     64.22981758847465
+    ],
+    "ci90": [
+     47.775337974666996,
+     69.1979613500971
+    ],
+    "sigma": 6.487443591047956,
+    "cdf_at_truth": 0.9293183164884259,
+    "map": 57.5,
+    "width90": 21.422623375430106
+   },
+   "seed": 7519,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c014/latent_anchor.h5",
+     "sha256": "e3a36ba231aee399188f975bba881b0d826c438e4095be3f62f0cbf7467e1f28",
+     "grad_inf": 4.848343948538059e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04847388153372123,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 425.5831313885574,
+     "b_gal_curvature_conditional": 242434.2824994424,
+     "row_fac_sd": 0.9919036626815796,
+     "member_sd": 0.5018420219421387
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 67.02390352546347,
+    "ci68": [
+     59.93119088893182,
+     74.8733457350857
+    ],
+    "ci90": [
+     55.46185995662575,
+     80.67841393121964
+    ],
+    "sigma": 7.471077423076942,
+    "cdf_at_truth": 0.5376854059702246,
+    "map": 67.5,
+    "width90": 25.216553974593886
+   },
+   "latent_off": {
+    "median": 67.99864485081174,
+    "ci68": [
+     61.16806963011252,
+     75.49285573675826
+    ],
+    "ci90": [
+     57.047809416446,
+     81.0499448814896
+    ],
+    "sigma": 7.1623930533228695,
+    "cdf_at_truth": 0.48569461519726237,
+    "map": 67.5,
+    "width90": 24.002135465043594
+   },
+   "seed": 7556,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c015/latent_anchor.h5",
+     "sha256": "cdcb4674981bbfb5cd82a15d27a19e219e601877bce0dc4b1d2bdd9398b93e85",
+     "grad_inf": 1.4515055823949297e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04789352904878094,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 435.95967617593124,
+     "b_gal_curvature_conditional": 106779.34940487935,
+     "row_fac_sd": 1.0107921361923218,
+     "member_sd": 0.5277479290962219
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 58.20109117661744,
+    "ci68": [
+     52.29849652854185,
+     64.5311834162364
+    ],
+    "ci90": [
+     48.45557160646682,
+     69.0358863608896
+    ],
+    "sigma": 6.116343443847278,
+    "cdf_at_truth": 0.9301321824056313,
+    "map": 57.5,
+    "width90": 20.580314754422787
+   },
+   "latent_off": {
+    "median": 57.85032431858379,
+    "ci68": [
+     51.53129782811733,
+     64.44137713868378
+    ],
+    "ci90": [
+     47.63892525804427,
+     69.06689637434961
+    ],
+    "sigma": 6.4550396552832225,
+    "cdf_at_truth": 0.9300718649842832,
+    "map": 57.5,
+    "width90": 21.427971116305343
+   },
+   "seed": 7593,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c016/latent_anchor.h5",
+     "sha256": "2c7d0f95d37e1ba28b93a4301d805971812b84a55c13432a4c6b1cf57f840fc7",
+     "grad_inf": 2.5118795932144167e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05085543525449058,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 386.6564406205289,
+     "b_gal_curvature_conditional": 90583.10145346272,
+     "row_fac_sd": 0.925798237323761,
+     "member_sd": 0.505617618560791
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 73.97009575154262,
+    "ci68": [
+     64.89882282973579,
+     84.52131055037482
+    ],
+    "ci90": [
+     59.806134286351906,
+     91.86023334886002
+    ],
+    "sigma": 9.811243860319514,
+    "cdf_at_truth": 0.2537934887374889,
+    "map": 72.5,
+    "width90": 32.054099062508115
+   },
+   "latent_off": {
+    "median": 75.8294209317626,
+    "ci68": [
+     67.82520514696277,
+     85.28355500263825
+    ],
+    "ci90": [
+     63.136224144804636,
+     92.20461075172098
+    ],
+    "sigma": 8.72917492783774,
+    "cdf_at_truth": 0.15692945132530617,
+    "map": 75.0,
+    "width90": 29.06838660691634
+   },
+   "seed": 7630,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c017/latent_anchor.h5",
+     "sha256": "615852393e8c7754dcca2ebd9f8bcf3e103303e0186e7e871e64031af705416f",
+     "grad_inf": 1.1795564525129976e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.044295633200304184,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 509.65720888620126,
+     "b_gal_curvature_conditional": 258216.43392128806,
+     "row_fac_sd": 1.0814671516418457,
+     "member_sd": 0.5065829157829285
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 89.19917807761415,
+    "ci68": [
+     81.44116485699085,
+     98.7270762139289
+    ],
+    "ci90": [
+     76.81947611865066,
+     106.80056281393772
+    ],
+    "sigma": 8.642955678469022,
+    "cdf_at_truth": 0.0014159162103447344,
+    "map": 87.5,
+    "width90": 29.98108669528706
+   },
+   "latent_off": {
+    "median": 93.31364818759681,
+    "ci68": [
+     84.79270889540513,
+     104.13117731220095
+    ],
+    "ci90": [
+     79.84859787194424,
+     112.60713614915866
+    ],
+    "sigma": 9.66923420839791,
+    "cdf_at_truth": 0.00041946193092630413,
+    "map": 90.0,
+    "width90": 32.75853827721443
+   },
+   "seed": 7667,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c018/latent_anchor.h5",
+     "sha256": "d1d8bfc7392bc1fc4d05838507fad37203f6ba0c04ebba7f1347624aa1fa8e57",
+     "grad_inf": 1.1171064073778325e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05878848609177978,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 289.344643606717,
+     "b_gal_curvature_conditional": 39271.15307200697,
+     "row_fac_sd": 1.0056908130645752,
+     "member_sd": 0.5357092022895813
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 78.88370761862382,
+    "ci68": [
+     71.53317409110599,
+     87.41341720962868
+    ],
+    "ci90": [
+     67.37491987586542,
+     93.99615582655652
+    ],
+    "sigma": 7.9401215592613426,
+    "cdf_at_truth": 0.05692874644195178,
+    "map": 77.5,
+    "width90": 26.6212359506911
+   },
+   "latent_off": {
+    "median": 80.9250893873793,
+    "ci68": [
+     73.22571859279653,
+     90.04990553464957
+    ],
+    "ci90": [
+     68.74481787022681,
+     97.01304131801527
+    ],
+    "sigma": 8.412093470926521,
+    "cdf_at_truth": 0.034440819881406654,
+    "map": 80.0,
+    "width90": 28.268223447788458
+   },
+   "seed": 7704,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c019/latent_anchor.h5",
+     "sha256": "a6fbbbf685406c8257bcdc11494826ea4c930090453962559427178cd6c1734f",
+     "grad_inf": 1.4985790386390363e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04636122888297822,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 465.25400647349306,
+     "b_gal_curvature_conditional": 153034.80897142077,
+     "row_fac_sd": 0.9344377517700195,
+     "member_sd": 0.5033904314041138
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 67.8342870059816,
+    "ci68": [
+     61.48902077938372,
+     74.56103732123908
+    ],
+    "ci90": [
+     57.7126354963609,
+     79.39539741958477
+    ],
+    "sigma": 6.536008270927681,
+    "cdf_at_truth": 0.4943288547690785,
+    "map": 67.5,
+    "width90": 21.682761923223865
+   },
+   "latent_off": {
+    "median": 70.43075176593,
+    "ci68": [
+     64.15288886930556,
+     77.19790514945323
+    ],
+    "ci90": [
+     60.36497453948443,
+     81.87384708893205
+    ],
+    "sigma": 6.522508140073839,
+    "cdf_at_truth": 0.3360972496547414,
+    "map": 70.0,
+    "width90": 21.508872549447624
+   },
+   "seed": 7741,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c020/latent_anchor.h5",
+     "sha256": "8dbac386e4f37cf77ff224634d54b456b0584ad38229d4100454bacbcc4e9b4d",
+     "grad_inf": 6.538465324723575e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04336266827290072,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 531.82408755488,
+     "b_gal_curvature_conditional": 80795.33998420578,
+     "row_fac_sd": 1.2953585386276245,
+     "member_sd": 0.5174041986465454
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 33.358051338049236,
+    "ci68": [
+     26.68237627736898,
+     40.31173657931937
+    ],
+    "ci90": [
+     23.029252130297152,
+     44.876044128569404
+    ],
+    "sigma": 6.814680150975196,
+    "cdf_at_truth": 0.999998761117523,
+    "map": 32.5,
+    "width90": 21.846791998272252
+   },
+   "latent_off": {
+    "median": 34.6470071003839,
+    "ci68": [
+     27.449123152277668,
+     42.2327434559583
+    ],
+    "ci90": [
+     23.335772201683742,
+     47.27072940261488
+    ],
+    "sigma": 7.391810151840316,
+    "cdf_at_truth": 0.9999826259374173,
+    "map": 35.0,
+    "width90": 23.93495720093114
+   },
+   "seed": 7778,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c021/latent_anchor.h5",
+     "sha256": "21a403b338884c9b13bfaac9740a2bd6b8c6490d8df0be86b1cd5747d3110c22",
+     "grad_inf": 2.0711210524382295e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.052689442075139196,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 360.2075406965232,
+     "b_gal_curvature_conditional": 57199.15697365738,
+     "row_fac_sd": 0.8633649945259094,
+     "member_sd": 0.524188756942749
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 44.336714488940245,
+    "ci68": [
+     34.64874763349569,
+     53.60390589054675
+    ],
+    "ci90": [
+     28.07628103355707,
+     59.46058430436111
+    ],
+    "sigma": 9.47757912852553,
+    "cdf_at_truth": 0.9949695456711874,
+    "map": 45.0,
+    "width90": 31.384303270804043
+   },
+   "latent_off": {
+    "median": 47.09381428688093,
+    "ci68": [
+     33.957768815692866,
+     59.18938891899392
+    ],
+    "ci90": [
+     26.636245736984723,
+     66.22245612933045
+    ],
+    "sigma": 12.615810051650527,
+    "cdf_at_truth": 0.9639328460280469,
+    "map": 50.0,
+    "width90": 39.586210392345734
+   },
+   "seed": 7815,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c022/latent_anchor.h5",
+     "sha256": "8fd461a89bf1e6e5819ec57bf896cca1bf9632511abce8cf1eff7454133cc2d1",
+     "grad_inf": 2.531464621258195e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.054489219822595636,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 336.8052252327907,
+     "b_gal_curvature_conditional": 45226.72453929027,
+     "row_fac_sd": 0.9160736203193665,
+     "member_sd": 0.518955647945404
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 70.08635014314503,
+    "ci68": [
+     63.08949521690874,
+     77.46509489393884
+    ],
+    "ci90": [
+     58.609497633383356,
+     82.73352429941424
+    ],
+    "sigma": 7.187799838515051,
+    "cdf_at_truth": 0.3705883730073753,
+    "map": 70.0,
+    "width90": 24.124026666030886
+   },
+   "latent_off": {
+    "median": 73.69634613866707,
+    "ci68": [
+     66.4187928781271,
+     81.5043444227103
+    ],
+    "ci90": [
+     61.87311726570611,
+     87.02989207796583
+    ],
+    "sigma": 7.5427757722915985,
+    "cdf_at_truth": 0.20676227888066595,
+    "map": 72.5,
+    "width90": 25.15677481225972
+   },
+   "seed": 7852,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c023/latent_anchor.h5",
+     "sha256": "efc79e8af1a80f118fa3709995389fe4a80806b5397154b95ff8d90e926b7037",
+     "grad_inf": 8.137934770502397e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05593590600359017,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 319.6087395381692,
+     "b_gal_curvature_conditional": 43553.69686363187,
+     "row_fac_sd": 0.867999792098999,
+     "member_sd": 0.5174347758293152
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 31.22520968115645,
+    "ci68": [
+     25.43251900458866,
+     37.386202695487135
+    ],
+    "ci90": [
+     22.43169001277663,
+     41.69480304753419
+    ],
+    "sigma": 5.976841845449238,
+    "cdf_at_truth": 0.9999999619819985,
+    "map": 30.0,
+    "width90": 19.263113034757556
+   },
+   "latent_off": {
+    "median": 30.381098241304205,
+    "ci68": [
+     24.314185637743428,
+     37.33450007493679
+    ],
+    "ci90": [
+     21.572286434875842,
+     42.183341634722616
+    ],
+    "sigma": 6.510157218596682,
+    "cdf_at_truth": 0.9999992520056877,
+    "map": 30.0,
+    "width90": 20.611055199846774
+   },
+   "seed": 7889,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c024/latent_anchor.h5",
+     "sha256": "8834f8ce4fc019d72ba756587ea0f43ecae0888e2ef7c137c7cdee5711383773",
+     "grad_inf": 2.5555113580821853e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.049292282757325646,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 411.5685093340726,
+     "b_gal_curvature_conditional": 104355.96153573987,
+     "row_fac_sd": 1.0539729595184326,
+     "member_sd": 0.51143878698349
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 85.04258195970183,
+    "ci68": [
+     77.50569679692248,
+     93.36002004289159
+    ],
+    "ci90": [
+     72.69153945247488,
+     99.59781839605705
+    ],
+    "sigma": 7.927161622984556,
+    "cdf_at_truth": 0.01031010750010998,
+    "map": 85.0,
+    "width90": 26.906278943582166
+   },
+   "latent_off": {
+    "median": 89.28332698817661,
+    "ci68": [
+     81.36230294429572,
+     98.82388880413754
+    ],
+    "ci90": [
+     76.55688730834817,
+     107.15185740775271
+    ],
+    "sigma": 8.73079292992091,
+    "cdf_at_truth": 0.0018885422551289523,
+    "map": 87.5,
+    "width90": 30.59497009940455
+   },
+   "seed": 7926,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c025/latent_anchor.h5",
+     "sha256": "1e2f76795563736aa0fdedbe87ebc836c8f43ddf483f14214e8ca0261eadeb32",
+     "grad_inf": 8.451017663446692e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.052704100578311756,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 360.0072007211893,
+     "b_gal_curvature_conditional": 32519.5826102746,
+     "row_fac_sd": 0.9769790768623352,
+     "member_sd": 0.5136260390281677
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 62.04852977523729,
+    "ci68": [
+     54.07425317201446,
+     69.72854626627482
+    ],
+    "ci90": [
+     48.445913958638414,
+     74.76914976278562
+    ],
+    "sigma": 7.82714654713018,
+    "cdf_at_truth": 0.7692034033490579,
+    "map": 62.5,
+    "width90": 26.323235804147203
+   },
+   "latent_off": {
+    "median": 65.77639434614117,
+    "ci68": [
+     58.14177491277351,
+     73.43351865538881
+    ],
+    "ci90": [
+     53.077350253075345,
+     78.58760037999713
+    ],
+    "sigma": 7.645871871307648,
+    "cdf_at_truth": 0.6019067868961371,
+    "map": 65.0,
+    "width90": 25.510250126921783
+   },
+   "seed": 7963,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c026/latent_anchor.h5",
+     "sha256": "ed14d8e45719ed6529e16b35dfbbe54fadbc11e523c08ca7d5e7503d27136759",
+     "grad_inf": 9.284684132637722e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04688394474600572,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 454.9374710734919,
+     "b_gal_curvature_conditional": 51177.17888707945,
+     "row_fac_sd": 1.0019944906234741,
+     "member_sd": 0.5090548992156982
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 59.79255177257796,
+    "ci68": [
+     54.045400179454546,
+     65.9064389428877
+    ],
+    "ci90": [
+     50.459382094355625,
+     70.01992968076823
+    ],
+    "sigma": 5.930519381716579,
+    "cdf_at_truth": 0.9019186507006933,
+    "map": 60.0,
+    "width90": 19.560547586412603
+   },
+   "latent_off": {
+    "median": 63.77245937383632,
+    "ci68": [
+     58.16844159730462,
+     69.79597835908746
+    ],
+    "ci90": [
+     54.82563796611544,
+     74.24589917398718
+    ],
+    "sigma": 5.813768380891418,
+    "cdf_at_truth": 0.7471956860904287,
+    "map": 62.5,
+    "width90": 19.420261207871746
+   },
+   "seed": 8000,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c027/latent_anchor.h5",
+     "sha256": "d76ae940696f9fa710f5c9b9c4165f4a2196e2de1dbb358b8af8db0965c1e6b7",
+     "grad_inf": 2.680744515259903e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.049350881435825174,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 410.5917060142092,
+     "b_gal_curvature_conditional": 162460.19667876326,
+     "row_fac_sd": 0.906383752822876,
+     "member_sd": 0.5018389225006104
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 65.45211950232135,
+    "ci68": [
+     59.13734570578088,
+     72.12764143634939
+    ],
+    "ci90": [
+     55.246459988699314,
+     76.91338896064917
+    ],
+    "sigma": 6.495147865284256,
+    "cdf_at_truth": 0.6373227295072693,
+    "map": 65.0,
+    "width90": 21.666928971949858
+   },
+   "latent_off": {
+    "median": 68.2101764816139,
+    "ci68": [
+     62.244186221036585,
+     74.7213457197535
+    ],
+    "ci90": [
+     58.42971311969393,
+     79.43369350018823
+    ],
+    "sigma": 6.238579749358458,
+    "cdf_at_truth": 0.4702222567268212,
+    "map": 67.5,
+    "width90": 21.003980380494298
+   },
+   "seed": 8037,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c028/latent_anchor.h5",
+     "sha256": "41fee78a1117e16aeb2504349cfa6f5c0b029996c4240b7f85703654cc0bd871",
+     "grad_inf": 1.2968626172948916e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.047338314339288666,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 446.2460877598496,
+     "b_gal_curvature_conditional": 222098.3767843094,
+     "row_fac_sd": 1.0105770826339722,
+     "member_sd": 0.5077992677688599
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 81.04820765989109,
+    "ci68": [
+     74.66982759928493,
+     87.79185981975783
+    ],
+    "ci90": [
+     70.42803681904353,
+     92.756049744088
+    ],
+    "sigma": 6.5610161102364515,
+    "cdf_at_truth": 0.020602423350556304,
+    "map": 82.5,
+    "width90": 22.328012925044476
+   },
+   "latent_off": {
+    "median": 85.94268262405969,
+    "ci68": [
+     78.86741257769387,
+     93.92485953905722
+    ],
+    "ci90": [
+     74.52799595464602,
+     99.83958966321127
+    ],
+    "sigma": 7.528723480681677,
+    "cdf_at_truth": 0.0034166229418795876,
+    "map": 85.0,
+    "width90": 25.311593708565255
+   },
+   "seed": 8074,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c029/latent_anchor.h5",
+     "sha256": "51a1a363652dcdc47b758365b7f7b8a85983107414666f79bd022fe148bd62df",
+     "grad_inf": 8.704507115098181e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05266427871159954,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 360.5518423350368,
+     "b_gal_curvature_conditional": 52648.783329069665,
+     "row_fac_sd": 1.0251035690307617,
+     "member_sd": 0.5412895083427429
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 41.46424377958409,
+    "ci68": [
+     33.41958993265098,
+     49.42377618622762
+    ],
+    "ci90": [
+     28.203279203155137,
+     54.62062952358492
+    ],
+    "sigma": 8.00209312678832,
+    "cdf_at_truth": 0.9994017439977237,
+    "map": 42.5,
+    "width90": 26.41735032042978
+   },
+   "latent_off": {
+    "median": 43.83035782079307,
+    "ci68": [
+     35.14309536492245,
+     52.567031553636724
+    ],
+    "ci90": [
+     29.413506239606534,
+     58.4506169452297
+    ],
+    "sigma": 8.711968094357136,
+    "cdf_at_truth": 0.9963246366025308,
+    "map": 45.0,
+    "width90": 29.037110705623164
+   },
+   "seed": 8111,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c030/latent_anchor.h5",
+     "sha256": "d35236611dc01b799ac0656430b1fb91b2de10fe33cc56f9f43714897efaa6fa",
+     "grad_inf": 1.3465062398410055e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.055647091738554005,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 322.9349549181061,
+     "b_gal_curvature_conditional": 26646.392561571498,
+     "row_fac_sd": 0.9678393602371216,
+     "member_sd": 0.5247186422348022
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 67.55123014742657,
+    "ci68": [
+     62.0860865536721,
+     73.22872852676473
+    ],
+    "ci90": [
+     58.48276029939729,
+     77.02898281998488
+    ],
+    "sigma": 5.571320986546315,
+    "cdf_at_truth": 0.5131538264496428,
+    "map": 67.5,
+    "width90": 18.546222520587584
+   },
+   "latent_off": {
+    "median": 69.33978313182571,
+    "ci68": [
+     63.890373655576795,
+     74.87736443900252
+    ],
+    "ci90": [
+     60.48124351305228,
+     78.97168305881534
+    ],
+    "sigma": 5.493495391712862,
+    "cdf_at_truth": 0.3838823675647219,
+    "map": 70.0,
+    "width90": 18.490439545763067
+   },
+   "seed": 8148,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c031/latent_anchor.h5",
+     "sha256": "732e3de1eb46f934f5a2a180f3be85380994a76a45362b84f4ae9a383ebaab26",
+     "grad_inf": 2.745970117956631e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0494531645534893,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 408.8950231127383,
+     "b_gal_curvature_conditional": 203802.5483859474,
+     "row_fac_sd": 0.9472862482070923,
+     "member_sd": 0.5075943470001221
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 102.85740106066876,
+    "ci68": [
+     90.08365547423692,
+     117.04628459791023
+    ],
+    "ci90": [
+     82.64711206804145,
+     126.97236413392596
+    ],
+    "sigma": 13.481314561836655,
+    "cdf_at_truth": 0.0005562414411084687,
+    "map": 102.5,
+    "width90": 44.32525206588451
+   },
+   "latent_off": {
+    "median": 103.25919142477647,
+    "ci68": [
+     90.21274234486938,
+     117.70127293092516
+    ],
+    "ci90": [
+     82.64231047737665,
+     127.7506289879135
+    ],
+    "sigma": 13.744265293027887,
+    "cdf_at_truth": 0.0006256344797439646,
+    "map": 102.5,
+    "width90": 45.10831851053685
+   },
+   "seed": 8185,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c032/latent_anchor.h5",
+     "sha256": "1f69108fe68ea2c1f1959c091760054c4bbbdc9e33bf24e8a6012176827fe405",
+     "grad_inf": 3.561900774329274e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05195346124428549,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 370.4853394822567,
+     "b_gal_curvature_conditional": 36215.769716875235,
+     "row_fac_sd": 0.8544148802757263,
+     "member_sd": 0.5128456950187683
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 54.25672221263112,
+    "ci68": [
+     48.519741866871705,
+     59.91223860085211
+    ],
+    "ci90": [
+     44.97018533921087,
+     63.838249363053784
+    ],
+    "sigma": 5.696248366990204,
+    "cdf_at_truth": 0.9903010217478402,
+    "map": 55.0,
+    "width90": 18.868064023842912
+   },
+   "latent_off": {
+    "median": 57.176026462953985,
+    "ci68": [
+     51.544848140663625,
+     62.82772320894579
+    ],
+    "ci90": [
+     47.97634757079503,
+     66.70042482650553
+    ],
+    "sigma": 5.641437534141083,
+    "cdf_at_truth": 0.9675609736190894,
+    "map": 57.5,
+    "width90": 18.724077255710498
+   },
+   "seed": 8222,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c033/latent_anchor.h5",
+     "sha256": "75a780c20c609495daf6d733bee5228a30b9dc62bf0ff4ac88fccb7358ad8352",
+     "grad_inf": 1.1823875212257917e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05146371534152277,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 377.5702153078528,
+     "b_gal_curvature_conditional": 61683.625829217846,
+     "row_fac_sd": 1.0486185550689697,
+     "member_sd": 0.517318844795227
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 93.72449384300208,
+    "ci68": [
+     83.31545115460878,
+     108.28224079761021
+    ],
+    "ci90": [
+     77.58044858358934,
+     124.69122206631987
+    ],
+    "sigma": 12.483394821500717,
+    "cdf_at_truth": 0.0020180137561929376,
+    "map": 90.0,
+    "width90": 47.11077348273052
+   },
+   "latent_off": {
+    "median": 98.07975275187196,
+    "ci68": [
+     87.15934747571742,
+     114.19876902128412
+    ],
+    "ci90": [
+     80.92568077374573,
+     129.04282022549174
+    ],
+    "sigma": 13.519710772783348,
+    "cdf_at_truth": 0.0005562485558097563,
+    "map": 95.0,
+    "width90": 48.11713945174601
+   },
+   "seed": 8259,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c034/latent_anchor.h5",
+     "sha256": "e08cdeef973ca0f56adfc0b52762f6eead0019aeec49bb7904d5570abbd18572",
+     "grad_inf": 6.039946320868239e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05474201296106243,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 333.7017419441763,
+     "b_gal_curvature_conditional": 41811.70637291484,
+     "row_fac_sd": 0.9474249482154846,
+     "member_sd": 0.5245496034622192
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 24.080666840917093,
+    "ci68": [
+     21.23712570615073,
+     28.40306980240993
+    ],
+    "ci90": [
+     20.386601783172104,
+     31.73578908329909
+    ],
+    "sigma": 3.5829720481295997,
+    "cdf_at_truth": 0.9999999998999829,
+    "map": 20.0,
+    "width90": 11.349187300126985
+   },
+   "latent_off": {
+    "median": 25.85474412768047,
+    "ci68": [
+     21.878627252400584,
+     31.469012801888503
+    ],
+    "ci90": [
+     20.587071016375184,
+     35.609808777178586
+    ],
+    "sigma": 4.79519277474396,
+    "cdf_at_truth": 0.9999999917916362,
+    "map": 22.5,
+    "width90": 15.022737760803402
+   },
+   "seed": 8296,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c035/latent_anchor.h5",
+     "sha256": "eb3050795a047401101a1de9286930b3e348568e7acc43f16495cf9a4dfda486",
+     "grad_inf": 8.08242361927114e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04780216125404736,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 437.62783262418816,
+     "b_gal_curvature_conditional": 126138.9095988955,
+     "row_fac_sd": 0.9397647380828857,
+     "member_sd": 0.5085888504981995
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 95.0244014065279,
+    "ci68": [
+     85.12101410890536,
+     107.97950131536481
+    ],
+    "ci90": [
+     79.46500334495329,
+     117.4747853919493
+    ],
+    "sigma": 11.429243603229729,
+    "cdf_at_truth": 0.0006924445421692029,
+    "map": 92.5,
+    "width90": 38.00978204699601
+   },
+   "latent_off": {
+    "median": 97.36367368528339,
+    "ci68": [
+     86.64186886655453,
+     110.91523817515468
+    ],
+    "ci90": [
+     80.72179464660097,
+     120.30618372681047
+    ],
+    "sigma": 12.136684654300076,
+    "cdf_at_truth": 0.00046428775786029993,
+    "map": 95.0,
+    "width90": 39.584389080209505
+   },
+   "seed": 8333,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c036/latent_anchor.h5",
+     "sha256": "f51d13a788390387e031824569fc84d94fd989ff8006ac3213fad79fddc965dd",
+     "grad_inf": 4.354294702579864e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.051774060045519626,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 373.05730961912195,
+     "b_gal_curvature_conditional": 39082.75611835967,
+     "row_fac_sd": 0.8707176446914673,
+     "member_sd": 0.5144903063774109
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 72.15423869041234,
+    "ci68": [
+     65.14610069548043,
+     79.95208692023297
+    ],
+    "ci90": [
+     60.55973753486954,
+     85.85472543596924
+    ],
+    "sigma": 7.402993112376272,
+    "cdf_at_truth": 0.26619550147615634,
+    "map": 72.5,
+    "width90": 25.294987901099702
+   },
+   "latent_off": {
+    "median": 74.62105221750014,
+    "ci68": [
+     67.72815067343105,
+     82.49239575983022
+    ],
+    "ci90": [
+     63.263097989925896,
+     88.46042386819224
+    ],
+    "sigma": 7.382122543199586,
+    "cdf_at_truth": 0.16049219618892346,
+    "map": 72.5,
+    "width90": 25.19732587826634
+   },
+   "seed": 8370,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c037/latent_anchor.h5",
+     "sha256": "6364affa95a47b2177215d3f9efe1789e7d685eb90bf001fba4948968e7b09de",
+     "grad_inf": 1.4450662888521038e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.049722436304782715,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 404.4782747204881,
+     "b_gal_curvature_conditional": 43595.60116261031,
+     "row_fac_sd": 0.9162279963493347,
+     "member_sd": 0.526382565498352
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 59.79380519007746,
+    "ci68": [
+     53.469071955213295,
+     66.55981205060877
+    ],
+    "ci90": [
+     49.573307255482284,
+     71.31081906176458
+    ],
+    "sigma": 6.5453700476977374,
+    "cdf_at_truth": 0.879438967682726,
+    "map": 60.0,
+    "width90": 21.737511806282292
+   },
+   "latent_off": {
+    "median": 64.69703567334626,
+    "ci68": [
+     58.45828515746184,
+     71.5069211768337
+    ],
+    "ci90": [
+     54.70572963944939,
+     76.35477058234166
+    ],
+    "sigma": 6.524318009685931,
+    "cdf_at_truth": 0.6774934341951659,
+    "map": 65.0,
+    "width90": 21.64904094289227
+   },
+   "seed": 8407,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c038/latent_anchor.h5",
+     "sha256": "1e08ef311768d1677d489c49b8b644dddff43b2cfb66239aa5a68aaf63468fc3",
+     "grad_inf": 3.1798175204045265e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04955648901820961,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 407.1917218443268,
+     "b_gal_curvature_conditional": 97447.71732339443,
+     "row_fac_sd": 1.087823510169983,
+     "member_sd": 0.5163065195083618
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 65.12292816239076,
+    "ci68": [
+     57.697713510443606,
+     72.35744417472985
+    ],
+    "ci90": [
+     52.626347314021416,
+     77.20491834796948
+    ],
+    "sigma": 7.329865332143122,
+    "cdf_at_truth": 0.6398453709683414,
+    "map": 65.0,
+    "width90": 24.578571033948066
+   },
+   "latent_off": {
+    "median": 68.76490751076578,
+    "ci68": [
+     61.762714598687815,
+     75.86558936248431
+    ],
+    "ci90": [
+     57.23080862623097,
+     80.71240693554624
+    ],
+    "sigma": 7.05143738189825,
+    "cdf_at_truth": 0.4414959495548698,
+    "map": 67.5,
+    "width90": 23.481598309315274
+   },
+   "seed": 8444,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c039/latent_anchor.h5",
+     "sha256": "deaf62f874f0625196492d57ae194d52081c8a0c61c32292ea37bba6e2ed2c93",
+     "grad_inf": 1.0347278589506459e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.051431087661792635,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 378.04942538330215,
+     "b_gal_curvature_conditional": 53791.37345460385,
+     "row_fac_sd": 0.8845863342285156,
+     "member_sd": 0.5112423300743103
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 59.07709602005998,
+    "ci68": [
+     52.995873950258826,
+     65.36718877358467
+    ],
+    "ci90": [
+     48.94604760766314,
+     69.73819222179316
+    ],
+    "sigma": 6.185657411662923,
+    "cdf_at_truth": 0.9124229954706721,
+    "map": 60.0,
+    "width90": 20.792144614130017
+   },
+   "latent_off": {
+    "median": 60.71766437964916,
+    "ci68": [
+     54.97886092092751,
+     66.88737860492735
+    ],
+    "ci90": [
+     51.099226345693424,
+     71.31987819663114
+    ],
+    "sigma": 5.95425884199992,
+    "cdf_at_truth": 0.8717386970988115,
+    "map": 60.0,
+    "width90": 20.220651850937713
+   },
+   "seed": 8481,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c040/latent_anchor.h5",
+     "sha256": "dd6a197b4aa15ea18611944b0de80abf41dbc31f87706df0b820a957ed031c87",
+     "grad_inf": 2.9625191189097677e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.053366382973828515,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 351.12719163623115,
+     "b_gal_curvature_conditional": 99281.01581306836,
+     "row_fac_sd": 0.8321484327316284,
+     "member_sd": 0.501876950263977
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 77.73264383811451,
+    "ci68": [
+     70.14317525966369,
+     86.01122243208545
+    ],
+    "ci90": [
+     65.31933038074555,
+     91.8241703583502
+    ],
+    "sigma": 7.934023586210877,
+    "cdf_at_truth": 0.09392751891455987,
+    "map": 77.5,
+    "width90": 26.504839977604647
+   },
+   "latent_off": {
+    "median": 80.52033291736224,
+    "ci68": [
+     72.71824650004585,
+     89.18438119331441
+    ],
+    "ci90": [
+     67.82491208129765,
+     94.91104444794875
+    ],
+    "sigma": 8.233067346634279,
+    "cdf_at_truth": 0.04856731797374494,
+    "map": 80.0,
+    "width90": 27.0861323666511
+   },
+   "seed": 8518,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c041/latent_anchor.h5",
+     "sha256": "32a44c1a46f42bd4210399ce5ad8041fd4b8ae1342b3db362329a46d381f73ca",
+     "grad_inf": 4.871214542845337e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.047765649852943945,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 438.2971216306614,
+     "b_gal_curvature_conditional": 101749.53464601665,
+     "row_fac_sd": 0.9605050086975098,
+     "member_sd": 0.5316360592842102
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 43.239487345835066,
+    "ci68": [
+     36.463239522183336,
+     49.94697348669738
+    ],
+    "ci90": [
+     32.05845614736181,
+     54.58881107860033
+    ],
+    "sigma": 6.741866982257022,
+    "cdf_at_truth": 0.9996431622692704,
+    "map": 42.5,
+    "width90": 22.53035493123852
+   },
+   "latent_off": {
+    "median": 59.1816890741137,
+    "ci68": [
+     51.23554715892832,
+     67.15432649360255
+    ],
+    "ci90": [
+     46.02006094927241,
+     72.41037060284727
+    ],
+    "sigma": 7.959389667337117,
+    "cdf_at_truth": 0.8573680928599681,
+    "map": 60.0,
+    "width90": 26.390309653574853
+   },
+   "seed": 8555,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c042/latent_anchor.h5",
+     "sha256": "ae0e72a073a9c1b8585df47e5d8fbf0b380ce48070836342147ac5d10943f219",
+     "grad_inf": 1.1213807660226394e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.053191173971712136,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 353.4441913633491,
+     "b_gal_curvature_conditional": 77111.69323026903,
+     "row_fac_sd": 0.9600471258163452,
+     "member_sd": 0.5134825706481934
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 77.36840659832767,
+    "ci68": [
+     69.24523759478335,
+     87.3157070297428
+    ],
+    "ci90": [
+     64.63455804356099,
+     95.22796653094504
+    ],
+    "sigma": 9.035234717479725,
+    "cdf_at_truth": 0.11399576018401986,
+    "map": 75.0,
+    "width90": 30.593408487384053
+   },
+   "latent_off": {
+    "median": 78.73547511906399,
+    "ci68": [
+     70.72397586306536,
+     88.05446433235275
+    ],
+    "ci90": [
+     66.08593820592512,
+     95.29476264444628
+    ],
+    "sigma": 8.665244234643694,
+    "cdf_at_truth": 0.07807674106321222,
+    "map": 77.5,
+    "width90": 29.208824438521162
+   },
+   "seed": 8592,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c043/latent_anchor.h5",
+     "sha256": "1b8965ebd7b64f4fdd1ffe031afa30c04e7206eeace55da7a54d1773a3f154bc",
+     "grad_inf": 1.9781398741258727e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04674282491276446,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 457.68859334127046,
+     "b_gal_curvature_conditional": 247005.98558890884,
+     "row_fac_sd": 0.8966255187988281,
+     "member_sd": 0.5027093291282654
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 67.49257659683877,
+    "ci68": [
+     61.422854674505984,
+     74.11370383378862
+    ],
+    "ci90": [
+     57.73963330601831,
+     78.93044861066501
+    ],
+    "sigma": 6.345424579641318,
+    "cdf_at_truth": 0.5152226465000549,
+    "map": 67.5,
+    "width90": 21.190815304646698
+   },
+   "latent_off": {
+    "median": 68.93806251856518,
+    "ci68": [
+     62.79624995578259,
+     75.74757766729152
+    ],
+    "ci90": [
+     58.85531655161206,
+     80.73683484937526
+    ],
+    "sigma": 6.4756638557544655,
+    "cdf_at_truth": 0.42538096216429006,
+    "map": 67.5,
+    "width90": 21.881518297763193
+   },
+   "seed": 8629,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c044/latent_anchor.h5",
+     "sha256": "8da0bc7560f1cbc0819722f698f07d4b889ee50aae5608a77e78e7c67ae4c385",
+     "grad_inf": 1.5764056726652598e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04973025003034917,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 404.3511796850362,
+     "b_gal_curvature_conditional": 75881.93127807783,
+     "row_fac_sd": 0.9781308770179749,
+     "member_sd": 0.5178661942481995
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 37.944156059016414,
+    "ci68": [
+     31.817449599332647,
+     44.07536201181134
+    ],
+    "ci90": [
+     27.8377953623937,
+     48.07475500713181
+    ],
+    "sigma": 6.128956206239348,
+    "cdf_at_truth": 0.9999977659909042,
+    "map": 37.5,
+    "width90": 20.236959644738114
+   },
+   "latent_off": {
+    "median": 48.81094163197695,
+    "ci68": [
+     41.58928125891738,
+     56.18621327803266
+    ],
+    "ci90": [
+     36.845815174951035,
+     61.13232496003139
+    ],
+    "sigma": 7.2984660095576395,
+    "cdf_at_truth": 0.994228366890326,
+    "map": 47.5,
+    "width90": 24.286509785080355
+   },
+   "seed": 8666,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c045/latent_anchor.h5",
+     "sha256": "49782d37570116a0ce9b5b57c8057263b0f78ae803d7c3ef6135ea32f396c978",
+     "grad_inf": 4.992450897134404e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.045964869657834875,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 473.31245637605025,
+     "b_gal_curvature_conditional": 119226.37125312352,
+     "row_fac_sd": 1.0075048208236694,
+     "member_sd": 0.5159436464309692
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 94.3944357123718,
+    "ci68": [
+     84.99379485342398,
+     104.68991905770154
+    ],
+    "ci90": [
+     79.66635040662969,
+     112.6377678749959
+    ],
+    "sigma": 9.848062102138783,
+    "cdf_at_truth": 0.0006437703934891095,
+    "map": 92.5,
+    "width90": 32.97141746836621
+   },
+   "latent_off": {
+    "median": 93.44744161738373,
+    "ci68": [
+     83.78461359918221,
+     104.25762316303852
+    ],
+    "ci90": [
+     78.25075677239064,
+     112.46979048283593
+    ],
+    "sigma": 10.236504781928154,
+    "cdf_at_truth": 0.001488181777456205,
+    "map": 92.5,
+    "width90": 34.21903371044529
+   },
+   "seed": 8703,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c046/latent_anchor.h5",
+     "sha256": "8f80fbe3cf28814adcc2a88e416dba48bd25f0516bacf3c6d80acfe221ebbcc1",
+     "grad_inf": 3.002065263046916e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.051046796659870455,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 383.76292181811004,
+     "b_gal_curvature_conditional": 29974.714562026653,
+     "row_fac_sd": 0.9347935914993286,
+     "member_sd": 0.5134511590003967
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 59.95395455749886,
+    "ci68": [
+     53.835873748260624,
+     66.25974835182734
+    ],
+    "ci90": [
+     50.06121967631406,
+     70.44657465809053
+    ],
+    "sigma": 6.211937301783358,
+    "cdf_at_truth": 0.8921729452854046,
+    "map": 60.0,
+    "width90": 20.385354981776466
+   },
+   "latent_off": {
+    "median": 64.36888912821384,
+    "ci68": [
+     58.491596175322144,
+     70.50467391429281
+    ],
+    "ci90": [
+     54.94156722627457,
+     74.70819878912899
+    ],
+    "sigma": 6.0065388694853326,
+    "cdf_at_truth": 0.7110076868525655,
+    "map": 65.0,
+    "width90": 19.766631562854414
+   },
+   "seed": 8740,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c047/latent_anchor.h5",
+     "sha256": "55c2f1523065f40422883f5996c60e0d7f8c9ecb7fcfd73bd087fa2d40946831",
+     "grad_inf": 2.995492742741135e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04917787224847699,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 413.4857348827354,
+     "b_gal_curvature_conditional": 183085.6942414678,
+     "row_fac_sd": 0.951884388923645,
+     "member_sd": 0.5084835886955261
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 86.65459609700234,
+    "ci68": [
+     77.98619308640133,
+     95.93036416369561
+    ],
+    "ci90": [
+     72.68511566873467,
+     104.61074255123172
+    ],
+    "sigma": 8.972085538647143,
+    "cdf_at_truth": 0.009150112767415716,
+    "map": 85.0,
+    "width90": 31.925626882497056
+   },
+   "latent_off": {
+    "median": 86.8704840086131,
+    "ci68": [
+     78.8519891877312,
+     96.29554573160028
+    ],
+    "ci90": [
+     74.11724960617633,
+     103.65480076557215
+    ],
+    "sigma": 8.72177827193454,
+    "cdf_at_truth": 0.004156036831127957,
+    "map": 85.0,
+    "width90": 29.537551159395818
+   },
+   "seed": 8777,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c048/latent_anchor.h5",
+     "sha256": "621980834ee7c42550b3ef224128cced754df4d3a5be7ff79b4dad392c59ffa5",
+     "grad_inf": 4.134914632913933e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.048942574463317956,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 417.47106468258426,
+     "b_gal_curvature_conditional": 159788.81226540278,
+     "row_fac_sd": 0.9466867446899414,
+     "member_sd": 0.5112160444259644
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 101.86680470373733,
+    "ci68": [
+     84.92352944486576,
+     124.19746579971162
+    ],
+    "ci90": [
+     75.25161194331213,
+     134.2976340534475
+    ],
+    "sigma": 19.63696817742293,
+    "cdf_at_truth": 0.011540279029341715,
+    "map": 95.0,
+    "width90": 59.04602211013537
+   },
+   "latent_off": {
+    "median": 104.36230258527135,
+    "ci68": [
+     86.4492296562775,
+     127.21694161951976
+    ],
+    "ci90": [
+     76.33653168422063,
+     135.58220878083512
+    ],
+    "sigma": 20.38385598162113,
+    "cdf_at_truth": 0.009557302591669255,
+    "map": 95.0,
+    "width90": 59.245677096614486
+   },
+   "seed": 8814,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c049/latent_anchor.h5",
+     "sha256": "40f034ae3b1ac083a53402c50852ad26bcd8d185f621dafe54e1bc9aee9eca06",
+     "grad_inf": 4.5151882233085416e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05193731993973011,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 370.7156573333923,
+     "b_gal_curvature_conditional": 50508.27287027471,
+     "row_fac_sd": 0.8950929641723633,
+     "member_sd": 0.5109382271766663
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 36.71571733434663,
+    "ci68": [
+     29.09770063685638,
+     44.34720636354502
+    ],
+    "ci90": [
+     24.635426914598064,
+     49.22757856202989
+    ],
+    "sigma": 7.62475286334432,
+    "cdf_at_truth": 0.9999894652535289,
+    "map": 37.5,
+    "width90": 24.592151647431827
+   },
+   "latent_off": {
+    "median": 34.41297900777905,
+    "ci68": [
+     26.947612689020414,
+     42.063513524614265
+    ],
+    "ci90": [
+     22.974021689632643,
+     46.9761057506819
+    ],
+    "sigma": 7.557950417796926,
+    "cdf_at_truth": 0.9999965554796383,
+    "map": 35.0,
+    "width90": 24.00208406104926
+   },
+   "seed": 8851,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c050/latent_anchor.h5",
+     "sha256": "315c0c57a4549bb0ce63afd2416f81d7977721438983b48db085fb41b3e503c7",
+     "grad_inf": 2.683742117426391e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04985570400631277,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 402.3187687351965,
+     "b_gal_curvature_conditional": 49212.34435401266,
+     "row_fac_sd": 0.8992202877998352,
+     "member_sd": 0.5136899948120117
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 62.25514803821613,
+    "ci68": [
+     56.31908856966278,
+     68.68759348616213
+    ],
+    "ci90": [
+     52.72588070892437,
+     73.244495978852
+    ],
+    "sigma": 6.184252458249674,
+    "cdf_at_truth": 0.8065140572229501,
+    "map": 62.5,
+    "width90": 20.51861526992763
+   },
+   "latent_off": {
+    "median": 63.35196290682221,
+    "ci68": [
+     57.5704356706799,
+     69.71244945458622
+    ],
+    "ci90": [
+     53.79721046970404,
+     74.40478379915432
+    ],
+    "sigma": 6.071006891953161,
+    "cdf_at_truth": 0.7577974264371455,
+    "map": 62.5,
+    "width90": 20.607573329450275
+   },
+   "seed": 8888,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c051/latent_anchor.h5",
+     "sha256": "07f7a2c7a15428b12f44428d862626e90b3aa75c2ba0258be0c4a6c6fd00369d",
+     "grad_inf": 6.168288102514907e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04677182222915221,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 457.12125915379147,
+     "b_gal_curvature_conditional": 121983.49699029457,
+     "row_fac_sd": 0.9488639831542969,
+     "member_sd": 0.5131737589836121
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 79.97118003984562,
+    "ci68": [
+     72.82553388168901,
+     87.73806185247875
+    ],
+    "ci90": [
+     68.32337175811679,
+     93.27048588259179
+    ],
+    "sigma": 7.45626398539487,
+    "cdf_at_truth": 0.04022569584523539,
+    "map": 80.0,
+    "width90": 24.947114124474993
+   },
+   "latent_off": {
+    "median": 80.95032439140965,
+    "ci68": [
+     73.35101278778731,
+     89.19700405722685
+    ],
+    "ci90": [
+     68.63201258340227,
+     94.92247397350752
+    ],
+    "sigma": 7.9229956347197685,
+    "cdf_at_truth": 0.036907752003007596,
+    "map": 80.0,
+    "width90": 26.29046139010525
+   },
+   "seed": 8925,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c052/latent_anchor.h5",
+     "sha256": "d8f4a3cfcc33e18a3943648013de9e50568db1671bbbadd4a0f86fb7570ed446",
+     "grad_inf": 2.814193322819847e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.047391383053220736,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 445.2472375427096,
+     "b_gal_curvature_conditional": 62786.07919123687,
+     "row_fac_sd": 0.9797655940055847,
+     "member_sd": 0.5135082006454468
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 32.17515209595458,
+    "ci68": [
+     25.219499187672,
+     39.79422316348652
+    ],
+    "ci90": [
+     21.964156680440663,
+     44.78790701426648
+    ],
+    "sigma": 7.287361987907261,
+    "cdf_at_truth": 0.999996887910224,
+    "map": 32.5,
+    "width90": 22.823750333825817
+   },
+   "latent_off": {
+    "median": 31.1657651318164,
+    "ci68": [
+     23.7830529922046,
+     40.52852072281717
+    ],
+    "ci90": [
+     21.217673152150486,
+     46.7486744800741
+    ],
+    "sigma": 8.372733865306285,
+    "cdf_at_truth": 0.9999670878401493,
+    "map": 27.5,
+    "width90": 25.531001327923615
+   },
+   "seed": 8962,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c053/latent_anchor.h5",
+     "sha256": "aca1145974c403d2b413cc89dd9e6476d4cc5a0eb2bcff79ee2f71e3a52b750c",
+     "grad_inf": 8.230804926512292e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.049740978076664104,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 404.1767789974838,
+     "b_gal_curvature_conditional": 100983.73643018553,
+     "row_fac_sd": 1.0198705196380615,
+     "member_sd": 0.5162758827209473
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 84.9043364914788,
+    "ci68": [
+     75.41880356039333,
+     96.29218843419113
+    ],
+    "ci90": [
+     70.04295754896944,
+     105.028326271145
+    ],
+    "sigma": 10.436692436898902,
+    "cdf_at_truth": 0.026567601488379364,
+    "map": 82.5,
+    "width90": 34.985368722175565
+   },
+   "latent_off": {
+    "median": 86.51617905458464,
+    "ci68": [
+     76.77118496877533,
+     98.26357527979944
+    ],
+    "ci90": [
+     71.19606892775224,
+     107.31754471841404
+    ],
+    "sigma": 10.746195155512055,
+    "cdf_at_truth": 0.017923480752475223,
+    "map": 85.0,
+    "width90": 36.121475790661805
+   },
+   "seed": 8999,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c054/latent_anchor.h5",
+     "sha256": "a603f5081cab5e99bc5e34efee65a4264f7f3089c64408c34ab1f5969a3b00d3",
+     "grad_inf": 9.796607969292381e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04402635425209329,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 515.9107204812317,
+     "b_gal_curvature_conditional": 111794.78941354973,
+     "row_fac_sd": 1.0586305856704712,
+     "member_sd": 0.5159551501274109
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 64.34105433506896,
+    "ci68": [
+     57.931894437078256,
+     71.53782814472866
+    ],
+    "ci90": [
+     53.83073690869375,
+     76.6504009184639
+    ],
+    "sigma": 6.802966853825204,
+    "cdf_at_truth": 0.6864454189451721,
+    "map": 62.5,
+    "width90": 22.81966400977015
+   },
+   "latent_off": {
+    "median": 64.71634881900847,
+    "ci68": [
+     57.97133584616788,
+     72.16998536667995
+    ],
+    "ci90": [
+     53.63702276101384,
+     77.42445579483355
+    ],
+    "sigma": 7.099324760256035,
+    "cdf_at_truth": 0.6601571553905003,
+    "map": 65.0,
+    "width90": 23.78743303381971
+   },
+   "seed": 9036,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c055/latent_anchor.h5",
+     "sha256": "e8f92aa97da5cac4bda5cabec0f078a1107797c6703014d17189e2c23b8775a8",
+     "grad_inf": 2.355502320972036e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04825100598957746,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 429.5238217419974,
+     "b_gal_curvature_conditional": 93801.57481319811,
+     "row_fac_sd": 0.9437053799629211,
+     "member_sd": 0.5152246952056885
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 80.30189881518686,
+    "ci68": [
+     73.09723586411093,
+     87.75756982307944
+    ],
+    "ci90": [
+     68.3501769399107,
+     92.96589229190646
+    ],
+    "sigma": 7.330166979484254,
+    "cdf_at_truth": 0.04058922553278781,
+    "map": 80.0,
+    "width90": 24.61571535199576
+   },
+   "latent_off": {
+    "median": 81.49103873127916,
+    "ci68": [
+     73.90613457674777,
+     89.45148061796617
+    ],
+    "ci90": [
+     68.98494482839473,
+     95.0102692036696
+    ],
+    "sigma": 7.772673020609197,
+    "cdf_at_truth": 0.03404473281310279,
+    "map": 80.0,
+    "width90": 26.025324375274863
+   },
+   "seed": 9073,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c056/latent_anchor.h5",
+     "sha256": "e4795279e39e66dec128912e5f1c27be3eac6871b09d5d257e4dc00843b28fab",
+     "grad_inf": 4.8503201455218914e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05222565573989411,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 366.63354386697756,
+     "b_gal_curvature_conditional": 67087.87504370642,
+     "row_fac_sd": 0.9611856341362,
+     "member_sd": 0.5284298658370972
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 50.49311148784705,
+    "ci68": [
+     42.7238296160876,
+     58.562981841890846
+    ],
+    "ci90": [
+     37.70365239895023,
+     64.03205721944585
+    ],
+    "sigma": 7.919576112901623,
+    "cdf_at_truth": 0.9814455753431955,
+    "map": 50.0,
+    "width90": 26.328404820495614
+   },
+   "latent_off": {
+    "median": 60.86114329769973,
+    "ci68": [
+     52.60733981859277,
+     69.31584258126605
+    ],
+    "ci90": [
+     46.97563113771271,
+     75.25295765388078
+    ],
+    "sigma": 8.354251381336642,
+    "cdf_at_truth": 0.7934734748318746,
+    "map": 60.0,
+    "width90": 28.277326516168074
+   },
+   "seed": 9110,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c057/latent_anchor.h5",
+     "sha256": "c6bd6bae884436407816d02833c609ac0437e13860cf213515bf89aca5ff1e9c",
+     "grad_inf": 5.8610893916011264e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.052953850767798995,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 356.6193512530008,
+     "b_gal_curvature_conditional": 54916.85026995384,
+     "row_fac_sd": 0.9430566430091858,
+     "member_sd": 0.5181083679199219
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 72.80482988403803,
+    "ci68": [
+     66.18472322600483,
+     80.51078532286824
+    ],
+    "ci90": [
+     62.44105201570918,
+     86.56901394358358
+    ],
+    "sigma": 7.163031048431705,
+    "cdf_at_truth": 0.22489953422425119,
+    "map": 72.5,
+    "width90": 24.127961927874402
+   },
+   "latent_off": {
+    "median": 75.77587626556661,
+    "ci68": [
+     68.80082563415937,
+     84.16437232530099
+    ],
+    "ci90": [
+     64.9882169357582,
+     91.01144549067173
+    ],
+    "sigma": 7.681773345570811,
+    "cdf_at_truth": 0.12033016429008149,
+    "map": 75.0,
+    "width90": 26.02322855491353
+   },
+   "seed": 9147,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c058/latent_anchor.h5",
+     "sha256": "be5a1736fda7abd6e7c17ae8ac3bffc18ae7d44c20de676c6e6d9abedff266a9",
+     "grad_inf": 1.0938139283211967e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05026274320986069,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 395.82901430584025,
+     "b_gal_curvature_conditional": 111009.26064003768,
+     "row_fac_sd": 1.0411200523376465,
+     "member_sd": 0.5258013010025024
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 67.4659044260073,
+    "ci68": [
+     58.79460323258713,
+     77.76583701147858
+    ],
+    "ci90": [
+     53.68113832230734,
+     85.50629069128105
+    ],
+    "sigma": 9.485616889445726,
+    "cdf_at_truth": 0.5113605755083039,
+    "map": 65.0,
+    "width90": 31.82515236897371
+   },
+   "latent_off": {
+    "median": 66.3232988508858,
+    "ci68": [
+     58.09112945129056,
+     75.85042345849972
+    ],
+    "ci90": [
+     53.06768278349235,
+     83.09850943014993
+    ],
+    "sigma": 8.879647003604578,
+    "cdf_at_truth": 0.5639047165890014,
+    "map": 65.0,
+    "width90": 30.03082664665758
+   },
+   "seed": 9184,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c059/latent_anchor.h5",
+     "sha256": "257401de6a7b71c8ea1e65e82a26b1c59d587235ff44034bc4e5fe721f1d845f",
+     "grad_inf": 1.2854162179110062e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0492330529852971,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 412.55937912298396,
+     "b_gal_curvature_conditional": 52589.851256028276,
+     "row_fac_sd": 1.076918125152588,
+     "member_sd": 0.5349944233894348
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 26.08414814575359,
+    "ci68": [
+     22.127780380694254,
+     31.130681471610746
+    ],
+    "ci90": [
+     20.664931368966954,
+     34.568397279569886
+    ],
+    "sigma": 4.501450545458246,
+    "cdf_at_truth": 0.9999999999969508,
+    "map": 25.0,
+    "width90": 13.903465910602932
+   },
+   "latent_off": {
+    "median": 38.92027768109257,
+    "ci68": [
+     32.56165668580619,
+     44.99156372459612
+    ],
+    "ci90": [
+     28.01246193262969,
+     49.13365988306063
+    ],
+    "sigma": 6.214953519394964,
+    "cdf_at_truth": 0.9999966178169455,
+    "map": 40.0,
+    "width90": 21.12119795043094
+   },
+   "seed": 9221,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c060/latent_anchor.h5",
+     "sha256": "f7d324c408a9d2cf34c698271f8908a9d3d76de5ed29172dfb5cba75f9873e73",
+     "grad_inf": 3.694822225952521e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04671216493129872,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 458.28960719137103,
+     "b_gal_curvature_conditional": 131181.4376280262,
+     "row_fac_sd": 1.0707767009735107,
+     "member_sd": 0.5135329961776733
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 62.36756068340872,
+    "ci68": [
+     56.12976776805198,
+     68.8049083060464
+    ],
+    "ci90": [
+     52.16995561073019,
+     73.01368563774402
+    ],
+    "sigma": 6.3375702689972115,
+    "cdf_at_truth": 0.8001430348826133,
+    "map": 62.5,
+    "width90": 20.843730027013827
+   },
+   "latent_off": {
+    "median": 66.79567241218538,
+    "ci68": [
+     60.902760195463166,
+     72.88230148073988
+    ],
+    "ci90": [
+     57.330886496634214,
+     77.04730338186387
+    ],
+    "sigma": 5.989770642638359,
+    "cdf_at_truth": 0.5619057856083495,
+    "map": 67.5,
+    "width90": 19.716416885229656
+   },
+   "seed": 9258,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c061/latent_anchor.h5",
+     "sha256": "89230d2ea3048a5726ff27bddef5b424674e800d421f407748abf65fd012f7ba",
+     "grad_inf": 4.259703700881801e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05011603815568747,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 398.1498326973815,
+     "b_gal_curvature_conditional": 159118.03418826498,
+     "row_fac_sd": 0.9726464152336121,
+     "member_sd": 0.5242981314659119
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 48.292646340767014,
+    "ci68": [
+     42.551003036094485,
+     54.31469236643028
+    ],
+    "ci90": [
+     38.644880006249835,
+     58.42171870804285
+    ],
+    "sigma": 5.881844665167897,
+    "cdf_at_truth": 0.9989784422494772,
+    "map": 47.5,
+    "width90": 19.776838701793018
+   },
+   "latent_off": {
+    "median": 57.45429841918248,
+    "ci68": [
+     51.100501558863066,
+     63.85404669695981
+    ],
+    "ci90": [
+     47.01595821262851,
+     68.02952496692355
+    ],
+    "sigma": 6.376772569048374,
+    "cdf_at_truth": 0.9462832846383885,
+    "map": 57.5,
+    "width90": 21.013566754295034
+   },
+   "seed": 9295,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c062/latent_anchor.h5",
+     "sha256": "2b15ff5383a1df3caa53f3f11e9a2e5ee3258e0250ab07daadf98435d1ec3d04",
+     "grad_inf": 4.194200542428916e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.046423351500136094,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 464.0096560732345,
+     "b_gal_curvature_conditional": 139168.17959071737,
+     "row_fac_sd": 1.0473262071609497,
+     "member_sd": 0.5188724994659424
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 71.23674111300353,
+    "ci68": [
+     65.03322055899993,
+     77.73709906324608
+    ],
+    "ci90": [
+     60.87158479141652,
+     82.30305214460734
+    ],
+    "sigma": 6.351939252123074,
+    "cdf_at_truth": 0.2897956088829096,
+    "map": 70.0,
+    "width90": 21.43146735319082
+   },
+   "latent_off": {
+    "median": 72.34361147737009,
+    "ci68": [
+     66.03154016235628,
+     78.88068803057014
+    ],
+    "ci90": [
+     62.03794235506011,
+     83.3281774206997
+    ],
+    "sigma": 6.424573934106931,
+    "cdf_at_truth": 0.23174146938768686,
+    "map": 72.5,
+    "width90": 21.290235065639592
+   },
+   "seed": 9332,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c063/latent_anchor.h5",
+     "sha256": "fe09694790003b02ce85e83367e8d82f330e024892d1ee8690868d57c6f6c457",
+     "grad_inf": 5.295319738252147e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05005978316410768,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 399.0451821762472,
+     "b_gal_curvature_conditional": 60977.66520577872,
+     "row_fac_sd": 0.9739201068878174,
+     "member_sd": 0.5187711715698242
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 76.0718437648739,
+    "ci68": [
+     67.81496709260576,
+     85.27854255356704
+    ],
+    "ci90": [
+     62.863890958040415,
+     92.13374582755264
+    ],
+    "sigma": 8.73178773048064,
+    "cdf_at_truth": 0.15743554465547804,
+    "map": 75.0,
+    "width90": 29.26985486951223
+   },
+   "latent_off": {
+    "median": 78.34462943693045,
+    "ci68": [
+     70.07677745888647,
+     87.72478261661112
+    ],
+    "ci90": [
+     65.14403131018511,
+     94.81931057418522
+    ],
+    "sigma": 8.824002578862327,
+    "cdf_at_truth": 0.0978354280218771,
+    "map": 77.5,
+    "width90": 29.67527926400011
+   },
+   "seed": 9369,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c064/latent_anchor.h5",
+     "sha256": "25f4fa32a3961e080f21d83c9354c8965452b10f231c3d141a83206522e115fa",
+     "grad_inf": 3.6224356847469608e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05551101583377222,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 324.5201367333939,
+     "b_gal_curvature_conditional": 54625.57438691666,
+     "row_fac_sd": 0.8681967258453369,
+     "member_sd": 0.5143720507621765
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 57.19744339732432,
+    "ci68": [
+     50.276475698714,
+     64.2274452349111
+    ],
+    "ci90": [
+     45.658484945828036,
+     68.94564009038382
+    ],
+    "sigma": 6.97548476809855,
+    "cdf_at_truth": 0.9325401942811847,
+    "map": 57.5,
+    "width90": 23.287155144555783
+   },
+   "latent_off": {
+    "median": 58.44169830770927,
+    "ci68": [
+     47.802202424464824,
+     68.24458349468212
+    ],
+    "ci90": [
+     40.27136652121598,
+     74.41850678115533
+    ],
+    "sigma": 10.221190535108647,
+    "cdf_at_truth": 0.8278500676275038,
+    "map": 60.0,
+    "width90": 34.14714025993935
+   },
+   "seed": 9406,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c065/latent_anchor.h5",
+     "sha256": "a60b065a5fb688a83a0e45473eba5d25fcabd531757fc32861bc9dcca444da48",
+     "grad_inf": 3.216871213851391e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.051896196855670804,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 371.30340796635573,
+     "b_gal_curvature_conditional": 43515.58406289107,
+     "row_fac_sd": 0.9838775396347046,
+     "member_sd": 0.5284269452095032
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 94.82865338135134,
+    "ci68": [
+     80.95031645766053,
+     127.89323423544155
+    ],
+    "ci90": [
+     75.04209818590378,
+     136.92039885887465
+    ],
+    "sigma": 23.47145888889051,
+    "cdf_at_truth": 0.005072082360693107,
+    "map": 90.0,
+    "width90": 61.878300672970866
+   },
+   "latent_off": {
+    "median": 94.2256854129878,
+    "ci68": [
+     83.17401815385699,
+     115.5145507273324
+    ],
+    "ci90": [
+     77.2736356435221,
+     133.21890582493043
+    ],
+    "sigma": 16.170266286737707,
+    "cdf_at_truth": 0.0024375587021296503,
+    "map": 90.0,
+    "width90": 55.94527018140833
+   },
+   "seed": 9443,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c066/latent_anchor.h5",
+     "sha256": "7b3dfe3bed997e3f096e5a92cb483d54baee4d6b7685b54d08a808e5f1c7edef",
+     "grad_inf": 1.0376144388146713e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04926998315270739,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 411.94114562840696,
+     "b_gal_curvature_conditional": 37190.71136099715,
+     "row_fac_sd": 0.9870327711105347,
+     "member_sd": 0.5391902327537537
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 51.59394212142269,
+    "ci68": [
+     45.21900111921811,
+     58.50451937004551
+    ],
+    "ci90": [
+     41.08498657831504,
+     63.34303748524003
+    ],
+    "sigma": 6.642759125413697,
+    "cdf_at_truth": 0.9865095094130961,
+    "map": 50.0,
+    "width90": 22.258050906924993
+   },
+   "latent_off": {
+    "median": 53.87887015730918,
+    "ci68": [
+     47.17589379054209,
+     61.14014358832978
+    ],
+    "ci90": [
+     42.958853901809974,
+     66.25546972240859
+    ],
+    "sigma": 6.982124898893844,
+    "cdf_at_truth": 0.9671761203473758,
+    "map": 52.5,
+    "width90": 23.296615820598618
+   },
+   "seed": 9480,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c067/latent_anchor.h5",
+     "sha256": "bfe2afbc4a00ecd51bb3047e399475121e65f925f5c172ab7685a4d65d253752",
+     "grad_inf": 3.3517633113433476e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04607924609787295,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 470.96569025935605,
+     "b_gal_curvature_conditional": 76804.32809787233,
+     "row_fac_sd": 0.9281108379364014,
+     "member_sd": 0.5180708169937134
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 70.7598541847193,
+    "ci68": [
+     64.6286220369053,
+     77.2642033723067
+    ],
+    "ci90": [
+     60.670819755913286,
+     81.98214951334792
+    ],
+    "sigma": 6.317790667700699,
+    "cdf_at_truth": 0.3128942307356912,
+    "map": 70.0,
+    "width90": 21.311329757434635
+   },
+   "latent_off": {
+    "median": 72.1286853052178,
+    "ci68": [
+     65.87925342112466,
+     78.8910844781272
+    ],
+    "ci90": [
+     62.06838746531501,
+     83.71707662127481
+    ],
+    "sigma": 6.505915528501269,
+    "cdf_at_truth": 0.2420446525369674,
+    "map": 72.5,
+    "width90": 21.6486891559598
+   },
+   "seed": 9517,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c068/latent_anchor.h5",
+     "sha256": "92e1f08c830b9c2c0ee96c9773ea19f5ccc1dbdbee04869ef2b257ea44d9b8bc",
+     "grad_inf": 3.5156322297780207e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04547238197606024,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 483.62037690056604,
+     "b_gal_curvature_conditional": 116669.36460926407,
+     "row_fac_sd": 0.9684925079345703,
+     "member_sd": 0.50923752784729
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 37.50748317820669,
+    "ci68": [
+     31.331367071103507,
+     43.70770477801917
+    ],
+    "ci90": [
+     27.512713968124544,
+     47.6535189385626
+    ],
+    "sigma": 6.188168853457832,
+    "cdf_at_truth": 0.9999978062825355,
+    "map": 37.5,
+    "width90": 20.140804970438055
+   },
+   "latent_off": {
+    "median": 39.7452004173415,
+    "ci68": [
+     33.329119138322476,
+     46.25783729895026
+    ],
+    "ci90": [
+     29.137024139393134,
+     50.53205893564712
+    ],
+    "sigma": 6.464359080313891,
+    "cdf_at_truth": 0.9999746267438739,
+    "map": 40.0,
+    "width90": 21.395034796253988
+   },
+   "seed": 9554,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c069/latent_anchor.h5",
+     "sha256": "7f27ad773b8ae07cd5c8343860681dee13cf63a39920780b17271e2a55d14be8",
+     "grad_inf": 2.8843594179761567e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04864048524412652,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 422.6727040578844,
+     "b_gal_curvature_conditional": 102344.65000764473,
+     "row_fac_sd": 0.9603433609008789,
+     "member_sd": 0.5118662118911743
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 78.64225560972929,
+    "ci68": [
+     71.35906152196027,
+     87.39027071817485
+    ],
+    "ci90": [
+     67.24866095533847,
+     95.07552065601972
+    ],
+    "sigma": 8.015604598107288,
+    "cdf_at_truth": 0.05877938144209401,
+    "map": 77.5,
+    "width90": 27.826859700681254
+   },
+   "latent_off": {
+    "median": 82.26161660264535,
+    "ci68": [
+     74.82566644135257,
+     91.6375061259361
+    ],
+    "ci90": [
+     70.44991363571893,
+     100.29382781498357
+    ],
+    "sigma": 8.405919842291766,
+    "cdf_at_truth": 0.01864939055891701,
+    "map": 80.0,
+    "width90": 29.843914179264644
+   },
+   "seed": 9591,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c070/latent_anchor.h5",
+     "sha256": "3198b2e731d5a75cdfea95e8a8af8433c5af4df522810a8fa65ca805b3d38ccf",
+     "grad_inf": 2.8101965199311962e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05317178810409942,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 353.7019623203669,
+     "b_gal_curvature_conditional": 83645.24278781426,
+     "row_fac_sd": 0.9620582461357117,
+     "member_sd": 0.5103714466094971
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 45.761246960752025,
+    "ci68": [
+     39.455651435242785,
+     52.03354041681924
+    ],
+    "ci90": [
+     35.30172391293684,
+     56.27491757291549
+    ],
+    "sigma": 6.288944490788229,
+    "cdf_at_truth": 0.9996501461629347,
+    "map": 45.0,
+    "width90": 20.973193659978648
+   },
+   "latent_off": {
+    "median": 52.766940258846326,
+    "ci68": [
+     44.89415870439006,
+     60.523719477383935
+    ],
+    "ci90": [
+     39.374322265836724,
+     65.65348325086583
+    ],
+    "sigma": 7.814780386496938,
+    "cdf_at_truth": 0.9723726418369015,
+    "map": 52.5,
+    "width90": 26.279160985029108
+   },
+   "seed": 9628,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c071/latent_anchor.h5",
+     "sha256": "844df9dac83180c9c9d65c3c4478f3ae25675a04ed9f923751923d6b9228b285",
+     "grad_inf": 1.2509993041476264e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04511359057729799,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 491.34349681616004,
+     "b_gal_curvature_conditional": 43312.177270217966,
+     "row_fac_sd": 0.9627584218978882,
+     "member_sd": 0.5191168785095215
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 78.14694137082476,
+    "ci68": [
+     70.23912152260576,
+     86.87315101972973
+    ],
+    "ci90": [
+     65.21357933481745,
+     92.84598278311087
+    ],
+    "sigma": 8.317014748561988,
+    "cdf_at_truth": 0.0943901994694308,
+    "map": 77.5,
+    "width90": 27.632403448293417
+   },
+   "latent_off": {
+    "median": 81.18510444842973,
+    "ci68": [
+     72.36496340912021,
+     90.55624818462202
+    ],
+    "ci90": [
+     66.74204708888651,
+     96.80396398814004
+    ],
+    "sigma": 9.095642387750907,
+    "cdf_at_truth": 0.06250091976789943,
+    "map": 82.5,
+    "width90": 30.061916899253532
+   },
+   "seed": 9665,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c072/latent_anchor.h5",
+     "sha256": "db088098f802fa7444a18df03cf2cd211ec498f4444498123c7c52663b112178",
+     "grad_inf": 5.826447102563748e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05052317244767418,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 391.75881210558146,
+     "b_gal_curvature_conditional": 57572.09736799001,
+     "row_fac_sd": 0.9451524615287781,
+     "member_sd": 0.5153526663780212
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 106.46294955059595,
+    "ci68": [
+     95.8223165998549,
+     118.06481166878993
+    ],
+    "ci90": [
+     89.09855782802117,
+     126.1451454461268
+    ],
+    "sigma": 11.121247534467514,
+    "cdf_at_truth": 6.0669634273896796e-05,
+    "map": 105.0,
+    "width90": 37.04658761810563
+   },
+   "latent_off": {
+    "median": 107.44425365326666,
+    "ci68": [
+     95.71886733225851,
+     119.99354304941244
+    ],
+    "ci90": [
+     88.29928115394776,
+     128.8060531020942
+    ],
+    "sigma": 12.137337858576963,
+    "cdf_at_truth": 0.0001293180077894793,
+    "map": 105.0,
+    "width90": 40.50677194814645
+   },
+   "seed": 9702,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c073/latent_anchor.h5",
+     "sha256": "a92a5b3d92686b2679b1647ff21deae56b1d957ed49c25f15ad221a237f6c22c",
+     "grad_inf": 9.130474154517287e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.056524906209716855,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 312.9826758169147,
+     "b_gal_curvature_conditional": 25636.558429953802,
+     "row_fac_sd": 0.8791103363037109,
+     "member_sd": 0.525568425655365
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 25.710579056824223,
+    "ci68": [
+     21.634536717527215,
+     32.2491686092435
+    ],
+    "ci90": [
+     20.510792724227255,
+     37.10544903706516
+    ],
+    "sigma": 5.307315945858141,
+    "cdf_at_truth": 0.9999999908049638,
+    "map": 20.0,
+    "width90": 16.59465631283791
+   },
+   "latent_off": {
+    "median": 24.03668516223817,
+    "ci68": [
+     21.17319340656481,
+     28.954909221679188
+    ],
+    "ci90": [
+     20.366622939551505,
+     32.801092278306804
+    ],
+    "sigma": 3.890857907557189,
+    "cdf_at_truth": 0.9999999997891442,
+    "map": 20.0,
+    "width90": 12.4344693387553
+   },
+   "seed": 9739,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c074/latent_anchor.h5",
+     "sha256": "3cdc6e47e120f5d510eadcc53674ebb5f3c9d576596ff8458ffa259b3017eef9",
+     "grad_inf": 1.8545591451424315e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.052929707213468145,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 356.9447648193309,
+     "b_gal_curvature_conditional": 82169.95689708892,
+     "row_fac_sd": 0.9276027679443359,
+     "member_sd": 0.5112994909286499
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 36.97540381532265,
+    "ci68": [
+     31.107724430021683,
+     42.81559679735546
+    ],
+    "ci90": [
+     27.500052471491735,
+     46.75772099112711
+    ],
+    "sigma": 5.853936183666889,
+    "cdf_at_truth": 0.9999997464065804,
+    "map": 37.5,
+    "width90": 19.257668519635374
+   },
+   "latent_off": {
+    "median": 32.572687441270375,
+    "ci68": [
+     26.37546055475478,
+     39.0682127259346
+    ],
+    "ci90": [
+     22.971495639999105,
+     43.37625172804428
+    ],
+    "sigma": 6.34637608558991,
+    "cdf_at_truth": 0.9999998871410645,
+    "map": 32.5,
+    "width90": 20.404756088045175
+   },
+   "seed": 9776,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c075/latent_anchor.h5",
+     "sha256": "036cec295ba142957ff9f734a91b1437e4f996735f0a3bdf5d84e047918e1f55",
+     "grad_inf": 3.218758592993254e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04808134197155805,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 432.56048047557124,
+     "b_gal_curvature_conditional": 61189.95379971035,
+     "row_fac_sd": 0.8340056538581848,
+     "member_sd": 0.5083436965942383
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 27.593067065572054,
+    "ci68": [
+     22.925910824731428,
+     32.967234520874904
+    ],
+    "ci90": [
+     20.954436206956213,
+     36.603465124337134
+    ],
+    "sigma": 5.020661848071738,
+    "cdf_at_truth": 0.9999999999986876,
+    "map": 27.5,
+    "width90": 15.649028917380921
+   },
+   "latent_off": {
+    "median": 28.359778999830535,
+    "ci68": [
+     23.12945377744351,
+     34.337822997280675
+    ],
+    "ci90": [
+     21.02405677558999,
+     38.22873552565159
+    ],
+    "sigma": 5.604184609918583,
+    "cdf_at_truth": 0.9999999999776243,
+    "map": 27.5,
+    "width90": 17.204678750061596
+   },
+   "seed": 9813,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c076/latent_anchor.h5",
+     "sha256": "8698cf8ad816faef186976926193f4149f72fd7260d56afa0d8bfe420d39e94f",
+     "grad_inf": 1.2116885272916988e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04453392444087316,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 504.21767341316445,
+     "b_gal_curvature_conditional": 192454.35540822742,
+     "row_fac_sd": 0.9162202477455139,
+     "member_sd": 0.5010325312614441
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 63.451407148919586,
+    "ci68": [
+     55.79905175491676,
+     71.60346106509746
+    ],
+    "ci90": [
+     50.88416553716142,
+     77.27600097507005
+    ],
+    "sigma": 7.902204655090351,
+    "cdf_at_truth": 0.7040898586369615,
+    "map": 62.5,
+    "width90": 26.391835437908625
+   },
+   "latent_off": {
+    "median": 65.29405149859984,
+    "ci68": [
+     57.1380822024862,
+     74.08857992177771
+    ],
+    "ci90": [
+     52.06114628531092,
+     80.29870197149226
+    ],
+    "sigma": 8.475248859645752,
+    "cdf_at_truth": 0.6126862686061881,
+    "map": 65.0,
+    "width90": 28.237555686181345
+   },
+   "seed": 9850,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c077/latent_anchor.h5",
+     "sha256": "025e3d89fb335223967851edeec915d859d628f81dc1d85d09053e6d2a710393",
+     "grad_inf": 1.6219248166748912e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.050904040542324225,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 385.9184019516979,
+     "b_gal_curvature_conditional": 34815.293912360954,
+     "row_fac_sd": 0.9905632138252258,
+     "member_sd": 0.5247361660003662
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 38.832949305058875,
+    "ci68": [
+     32.614052645469116,
+     44.71654987193153
+    ],
+    "ci90": [
+     28.209955885392947,
+     48.52220560704554
+    ],
+    "sigma": 6.0512486132312056,
+    "cdf_at_truth": 0.9999998573698269,
+    "map": 40.0,
+    "width90": 20.312249721652595
+   },
+   "latent_off": {
+    "median": 37.213018278447684,
+    "ci68": [
+     29.8597852469937,
+     44.26848518913431
+    ],
+    "ci90": [
+     25.236628231432725,
+     48.63696259321918
+    ],
+    "sigma": 7.204349971070306,
+    "cdf_at_truth": 0.9999991186769768,
+    "map": 37.5,
+    "width90": 23.400334361786456
+   },
+   "seed": 9887,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c078/latent_anchor.h5",
+     "sha256": "8f4bb5011d9823ac94d82406dab942887b25d8124b7c218037069c6f978405ef",
+     "grad_inf": 4.240355289120146e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05252929017263121,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 362.40729868110793,
+     "b_gal_curvature_conditional": 119867.14974091992,
+     "row_fac_sd": 0.91847163438797,
+     "member_sd": 0.5101950764656067
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 46.310800908796764,
+    "ci68": [
+     39.31793933090926,
+     53.122990224174536
+    ],
+    "ci90": [
+     34.577517278275735,
+     57.46771712393325
+    ],
+    "sigma": 6.902525446632637,
+    "cdf_at_truth": 0.9989574273033618,
+    "map": 47.5,
+    "width90": 22.890199845657513
+   },
+   "latent_off": {
+    "median": 44.938010734359345,
+    "ci68": [
+     36.646097406660225,
+     52.83806805979053
+    ],
+    "ci90": [
+     30.933666919595623,
+     57.97408672558749
+    ],
+    "sigma": 8.095985326565152,
+    "cdf_at_truth": 0.9979035898109277,
+    "map": 45.0,
+    "width90": 27.040419805991867
+   },
+   "seed": 9924,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c079/latent_anchor.h5",
+     "sha256": "7dacccbaa9125d54238eac3fa1c7f03fc1a89b08df8d37e5414b5500d4b0d1d5",
+     "grad_inf": 1.3771206397450442e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.054363713822122545,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 338.36214134600596,
+     "b_gal_curvature_conditional": 71671.37619999176,
+     "row_fac_sd": 0.9184655547142029,
+     "member_sd": 0.5182775259017944
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 53.20987591065413,
+    "ci68": [
+     46.878407678392826,
+     59.74781722675305
+    ],
+    "ci90": [
+     42.79867540539972,
+     64.41727648526201
+    ],
+    "sigma": 6.434704774180112,
+    "cdf_at_truth": 0.9820286372821966,
+    "map": 52.5,
+    "width90": 21.618601079862287
+   },
+   "latent_off": {
+    "median": 54.18441912440384,
+    "ci68": [
+     47.9796423353188,
+     60.81230405006184
+    ],
+    "ci90": [
+     43.923707052795564,
+     65.42793445708017
+    ],
+    "sigma": 6.41633085737152,
+    "cdf_at_truth": 0.9747046230396647,
+    "map": 55.0,
+    "width90": 21.504227404284606
+   },
+   "seed": 9961,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c080/latent_anchor.h5",
+     "sha256": "bc99d6decea760a56ce03711bdb9024615a9cbd70e4790d62799af81d1a9bf92",
+     "grad_inf": 8.855416400166405e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05293627902895126,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 356.8561439503901,
+     "b_gal_curvature_conditional": 57703.9425163842,
+     "row_fac_sd": 0.8809779286384583,
+     "member_sd": 0.5184901356697083
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 38.66254723577419,
+    "ci68": [
+     31.722920929687312,
+     45.734579128529575
+    ],
+    "ci90": [
+     27.449226036897734,
+     50.40943576040948
+    ],
+    "sigma": 7.005829099421131,
+    "cdf_at_truth": 0.9999569755782023,
+    "map": 37.5,
+    "width90": 22.960209723511745
+   },
+   "latent_off": {
+    "median": 47.852910570339105,
+    "ci68": [
+     40.2422491906629,
+     55.43896236895785
+    ],
+    "ci90": [
+     35.13353606883291,
+     60.43882865068597
+    ],
+    "sigma": 7.598356589147475,
+    "cdf_at_truth": 0.9952827072973496,
+    "map": 47.5,
+    "width90": 25.30529258185306
+   },
+   "seed": 9998,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c081/latent_anchor.h5",
+     "sha256": "3ca9b0008ab87ee7fdace4976987d18712f51a92a5a9ceb14459bcf8be4d5a8c",
+     "grad_inf": 7.38031857849819e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04509386847113682,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 491.7733755557565,
+     "b_gal_curvature_conditional": 330133.2532280836,
+     "row_fac_sd": 1.121245265007019,
+     "member_sd": 0.5192248821258545
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 56.975082311110626,
+    "ci68": [
+     50.782862219124404,
+     63.324698426783485
+    ],
+    "ci90": [
+     46.68809577246629,
+     67.47085565274871
+    ],
+    "sigma": 6.2709181038295405,
+    "cdf_at_truth": 0.9532747552864428,
+    "map": 57.5,
+    "width90": 20.78275988028242
+   },
+   "latent_off": {
+    "median": 57.4912942762361,
+    "ci68": [
+     51.184342469212716,
+     64.02915853324085
+    ],
+    "ci90": [
+     47.2402029295064,
+     68.48675247772398
+    ],
+    "sigma": 6.422408032014065,
+    "cdf_at_truth": 0.9399065381251844,
+    "map": 57.5,
+    "width90": 21.24654954821758
+   },
+   "seed": 10035,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c082/latent_anchor.h5",
+     "sha256": "17b5c20546795fb40d2f7b8b088a8d93b2b2c2a1965cd78422087f77ab1d7888",
+     "grad_inf": 2.374545005068285e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05259427045478427,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 361.51234260670026,
+     "b_gal_curvature_conditional": 56453.29529315948,
+     "row_fac_sd": 1.0208293199539185,
+     "member_sd": 0.5145002603530884
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 70.89626812999288,
+    "ci68": [
+     64.435449605116,
+     78.1893175949013
+    ],
+    "ci90": [
+     60.47966275209249,
+     83.84418250315804
+    ],
+    "sigma": 6.876933994892646,
+    "cdf_at_truth": 0.31659463566271284,
+    "map": 70.0,
+    "width90": 23.36451975106555
+   },
+   "latent_off": {
+    "median": 70.88714101357024,
+    "ci68": [
+     64.11636559083851,
+     78.4820280543435
+    ],
+    "ci90": [
+     60.069707588754056,
+     84.3340046495392
+    ],
+    "sigma": 7.182831231752495,
+    "cdf_at_truth": 0.32409152465456786,
+    "map": 70.0,
+    "width90": 24.26429706078514
+   },
+   "seed": 10072,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c083/latent_anchor.h5",
+     "sha256": "df7bcdbfb0dcd2dbde58ae6dc2a785ce247430ccc5cdb57f62cb9ab3eab38885",
+     "grad_inf": 5.335731856348502e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05375010393078635,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 346.1317063300521,
+     "b_gal_curvature_conditional": 31976.36794534082,
+     "row_fac_sd": 0.972633421421051,
+     "member_sd": 0.5203782320022583
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 73.56684848545599,
+    "ci68": [
+     65.5439429398017,
+     82.50350137915488
+    ],
+    "ci90": [
+     60.6869683756499,
+     89.2090518041114
+    ],
+    "sigma": 8.479779219676594,
+    "cdf_at_truth": 0.23744702198381507,
+    "map": 72.5,
+    "width90": 28.5220834284615
+   },
+   "latent_off": {
+    "median": 76.12469123152032,
+    "ci68": [
+     67.76882927544563,
+     85.48671815431729
+    ],
+    "ci90": [
+     62.725587461725375,
+     92.34971495937862
+    ],
+    "sigma": 8.858944439435831,
+    "cdf_at_truth": 0.15902784207718862,
+    "map": 75.0,
+    "width90": 29.62412749765324
+   },
+   "seed": 10109,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c084/latent_anchor.h5",
+     "sha256": "f6b997d83aba4bbb210bfdf8dc36c7d1ed86d8506ed8ac62875f56bba8a7d44d",
+     "grad_inf": 1.4372947276797277e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05346032550194155,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 349.8942476229422,
+     "b_gal_curvature_conditional": 60947.85593724696,
+     "row_fac_sd": 0.9668187499046326,
+     "member_sd": 0.5191085338592529
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 98.63476296634825,
+    "ci68": [
+     87.50787994442216,
+     110.90091144099672
+    ],
+    "ci90": [
+     80.79611082322722,
+     119.29994826545361
+    ],
+    "sigma": 11.696515748287283,
+    "cdf_at_truth": 0.000763744744597801,
+    "map": 95.0,
+    "width90": 38.503837442226384
+   },
+   "latent_off": {
+    "median": 100.28560298736322,
+    "ci68": [
+     88.48574888462763,
+     112.8149773994145
+    ],
+    "ci90": [
+     81.47306902837349,
+     121.48981439447759
+    ],
+    "sigma": 12.164614257393438,
+    "cdf_at_truth": 0.000915990212276796,
+    "map": 100.0,
+    "width90": 40.016745366104104
+   },
+   "seed": 10146,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c085/latent_anchor.h5",
+     "sha256": "0bed51e22db9900791864611559e631a2e87cce1fd575a3cb9e2a7165f078ac8",
+     "grad_inf": 1.4464707209782546e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.050298783625839234,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 395.26197349982976,
+     "b_gal_curvature_conditional": 57154.92675866748,
+     "row_fac_sd": 1.0817770957946777,
+     "member_sd": 0.5113516449928284
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 61.85148266202321,
+    "ci68": [
+     56.48336968786253,
+     67.37187593195354
+    ],
+    "ci90": [
+     53.08635551451397,
+     71.35949617387163
+    ],
+    "sigma": 5.444253122045506,
+    "cdf_at_truth": 0.854298254265193,
+    "map": 62.5,
+    "width90": 18.273140659357665
+   },
+   "latent_off": {
+    "median": 62.03854865770603,
+    "ci68": [
+     56.49765628888175,
+     67.70033251698572
+    ],
+    "ci90": [
+     52.97325817523505,
+     71.71412113400582
+    ],
+    "sigma": 5.601338114051988,
+    "cdf_at_truth": 0.8413482449009708,
+    "map": 62.5,
+    "width90": 18.74086295877077
+   },
+   "seed": 10183,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c086/latent_anchor.h5",
+     "sha256": "2f45c0be240f6ef4e4e1f4150305252f6d90c2a2c6d907d4d27ba6db8a63a7d8",
+     "grad_inf": 8.098188786220817e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05085659847317426,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 386.63875320667285,
+     "b_gal_curvature_conditional": 165715.42094308187,
+     "row_fac_sd": 1.0045318603515625,
+     "member_sd": 0.5042892098426819
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 70.1612346137252,
+    "ci68": [
+     60.47329552095228,
+     81.08568262083293
+    ],
+    "ci90": [
+     55.214908751582016,
+     89.37264407721902
+    ],
+    "sigma": 10.306193549940325,
+    "cdf_at_truth": 0.4050661586793479,
+    "map": 70.0,
+    "width90": 34.157735325637006
+   },
+   "latent_off": {
+    "median": 72.13001426225908,
+    "ci68": [
+     62.40005093511039,
+     83.53899370732603
+    ],
+    "ci90": [
+     56.809552002162604,
+     92.37816311823693
+    ],
+    "sigma": 10.569471386107818,
+    "cdf_at_truth": 0.32813134411240175,
+    "map": 70.0,
+    "width90": 35.56861111607432
+   },
+   "seed": 10220,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c087/latent_anchor.h5",
+     "sha256": "b52236b42ed0c851a4b757a238a87e0c20c1dc4f99749fed24c96d4754b3155e",
+     "grad_inf": 8.113509863960644e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05032500042830572,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 394.850257421509,
+     "b_gal_curvature_conditional": 51984.501209632086,
+     "row_fac_sd": 1.0059930086135864,
+     "member_sd": 0.5206355452537537
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 67.84703211228472,
+    "ci68": [
+     61.222617451523405,
+     74.80099797453927
+    ],
+    "ci90": [
+     57.17538110858858,
+     79.7058141035739
+    ],
+    "sigma": 6.789190261507933,
+    "cdf_at_truth": 0.49379573829682055,
+    "map": 67.5,
+    "width90": 22.53043299498532
+   },
+   "latent_off": {
+    "median": 71.95541380160331,
+    "ci68": [
+     65.48218313261631,
+     79.02534519625185
+    ],
+    "ci90": [
+     61.397583252758984,
+     84.05781433556592
+    ],
+    "sigma": 6.771581031817767,
+    "cdf_at_truth": 0.26002354040183584,
+    "map": 72.5,
+    "width90": 22.660231082806938
+   },
+   "seed": 10257,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c088/latent_anchor.h5",
+     "sha256": "b532f043d7cef28521c303e55b9d124f65d2f88916e559aa6c907e4d47204204",
+     "grad_inf": 4.469979941745805e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05135535313670094,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 379.1652781043813,
+     "b_gal_curvature_conditional": 119712.42822136606,
+     "row_fac_sd": 0.9848307967185974,
+     "member_sd": 0.5205713510513306
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 82.2306657492484,
+    "ci68": [
+     71.6582079928583,
+     93.32043485017898
+    ],
+    "ci90": [
+     65.16146985567264,
+     101.16503558279342
+    ],
+    "sigma": 10.831113428660345,
+    "cdf_at_truth": 0.08326437015324677,
+    "map": 80.0,
+    "width90": 36.00356572712079
+   },
+   "latent_off": {
+    "median": 82.25192473761433,
+    "ci68": [
+     72.47690916394009,
+     92.89349897417273
+    ],
+    "ci90": [
+     66.4638720340789,
+     100.35912597018888
+    ],
+    "sigma": 10.208294905116318,
+    "cdf_at_truth": 0.06549992896428083,
+    "map": 80.0,
+    "width90": 33.89525393610998
+   },
+   "seed": 10294,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c089/latent_anchor.h5",
+     "sha256": "19046f4a7d4d149eb823610be3ff9e720daecfb4170c804a47dcdff1fd647afb",
+     "grad_inf": 2.0232704400768853e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04873893939455716,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 420.9668051669141,
+     "b_gal_curvature_conditional": 104936.71424932891,
+     "row_fac_sd": 0.9577159881591797,
+     "member_sd": 0.5290185809135437
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 39.751332681007625,
+    "ci68": [
+     33.75618331538888,
+     45.89011712194876
+    ],
+    "ci90": [
+     30.017111453706754,
+     49.91195565031027
+    ],
+    "sigma": 6.0669669032799405,
+    "cdf_at_truth": 0.9999766509629736,
+    "map": 40.0,
+    "width90": 19.894844196603515
+   },
+   "latent_off": {
+    "median": 44.310453593239984,
+    "ci68": [
+     37.15176400299324,
+     51.56791381303823
+    ],
+    "ci90": [
+     32.354123367085606,
+     56.520659291157656
+    ],
+    "sigma": 7.208074905022496,
+    "cdf_at_truth": 0.9986487874988818,
+    "map": 45.0,
+    "width90": 24.16653592407205
+   },
+   "seed": 10331,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c090/latent_anchor.h5",
+     "sha256": "9eb9a61c2137b501000629e7b7af326f9b338c1942e56b3b67216ac32dfd87c6",
+     "grad_inf": 5.261568958303542e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.051748024918835324,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 373.43278433917294,
+     "b_gal_curvature_conditional": 65761.35664731263,
+     "row_fac_sd": 0.9625528454780579,
+     "member_sd": 0.5118701457977295
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 86.13063777210205,
+    "ci68": [
+     77.90490657016966,
+     95.4528905681905
+    ],
+    "ci90": [
+     73.05953578884713,
+     101.86547786097367
+    ],
+    "sigma": 8.77399199901042,
+    "cdf_at_truth": 0.007308206800543542,
+    "map": 85.0,
+    "width90": 28.80594207212654
+   },
+   "latent_off": {
+    "median": 88.33695762214042,
+    "ci68": [
+     80.01122870576101,
+     97.56363460529676
+    ],
+    "ci90": [
+     75.12548387284437,
+     104.16533750185184
+    ],
+    "sigma": 8.776202949767871,
+    "cdf_at_truth": 0.003132033186431237,
+    "map": 87.5,
+    "width90": 29.039853629007467
+   },
+   "seed": 10368,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c091/latent_anchor.h5",
+     "sha256": "e9d79fb506da84ec14a10f245be7d6c5d7128c71cf56a69a8cffd82f67eed4d0",
+     "grad_inf": 1.1963097179545912e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04784518083217918,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 436.84120790922316,
+     "b_gal_curvature_conditional": 246557.86465619953,
+     "row_fac_sd": 0.9551200270652771,
+     "member_sd": 0.510354220867157
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 80.1412461826277,
+    "ci68": [
+     73.11477257727017,
+     88.38682904137185
+    ],
+    "ci90": [
+     68.89363200557806,
+     94.4739479138396
+    ],
+    "sigma": 7.63602823205084,
+    "cdf_at_truth": 0.031848248231651236,
+    "map": 77.5,
+    "width90": 25.58031590826154
+   },
+   "latent_off": {
+    "median": 81.47908036696809,
+    "ci68": [
+     74.14579844148167,
+     89.68869174489708
+    ],
+    "ci90": [
+     70.041629284454,
+     96.17645809751862
+    ],
+    "sigma": 7.771446651707706,
+    "cdf_at_truth": 0.022130713415142656,
+    "map": 82.5,
+    "width90": 26.134828813064615
+   },
+   "seed": 10405,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c092/latent_anchor.h5",
+     "sha256": "f8de9036a846b9de41fbb0521d39f6b849468282fc7da95ee81e191f61eb7c96",
+     "grad_inf": 9.70301616831648e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05199820505342926,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 369.84801774454536,
+     "b_gal_curvature_conditional": 99698.86637597953,
+     "row_fac_sd": 0.9744311571121216,
+     "member_sd": 0.5197758078575134
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 70.73211439746198,
+    "ci68": [
+     63.9701913664376,
+     77.83444518445428
+    ],
+    "ci90": [
+     59.88145291641375,
+     82.78355917303921
+    ],
+    "sigma": 6.932126909008343,
+    "cdf_at_truth": 0.33056412017922704,
+    "map": 70.0,
+    "width90": 22.90210625662546
+   },
+   "latent_off": {
+    "median": 72.81056675130378,
+    "ci68": [
+     65.95180013283688,
+     79.98154202295856
+    ],
+    "ci90": [
+     61.62735774905484,
+     85.0022783370478
+    ],
+    "sigma": 7.014870945060842,
+    "cdf_at_truth": 0.23019218189738452,
+    "map": 72.5,
+    "width90": 23.37492058799296
+   },
+   "seed": 10442,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c093/latent_anchor.h5",
+     "sha256": "a4bb150f1fabdeb7996beee8f6f96da4071e89d2bfde3162dbab5234df7d8875",
+     "grad_inf": 9.945377854592152e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04842930620348058,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 426.3669228791914,
+     "b_gal_curvature_conditional": 51175.83784923599,
+     "row_fac_sd": 0.965682864189148,
+     "member_sd": 0.5102654099464417
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 58.876418233734896,
+    "ci68": [
+     52.90036561366503,
+     65.32963476767603
+    ],
+    "ci90": [
+     49.059469534824565,
+     69.92629103009924
+    ],
+    "sigma": 6.214634577005498,
+    "cdf_at_truth": 0.9101271172336317,
+    "map": 57.5,
+    "width90": 20.86682149527467
+   },
+   "latent_off": {
+    "median": 60.43637432674779,
+    "ci68": [
+     54.42756504718503,
+     67.02948626194862
+    ],
+    "ci90": [
+     50.68105670764192,
+     71.88236894651585
+    ],
+    "sigma": 6.300960607381796,
+    "cdf_at_truth": 0.8643709651240846,
+    "map": 60.0,
+    "width90": 21.201312238873932
+   },
+   "seed": 10479,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c094/latent_anchor.h5",
+     "sha256": "b17241ec4e326e69f48b866a50b719c95799bdfc02cbba80b12749f70c7e9c85",
+     "grad_inf": 1.341149413747189e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05450010248818333,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 336.6707310752827,
+     "b_gal_curvature_conditional": 67383.12420514114,
+     "row_fac_sd": 0.8700031638145447,
+     "member_sd": 0.5154716968536377
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 66.57202115287197,
+    "ci68": [
+     61.17130721850024,
+     72.32932505605483
+    ],
+    "ci90": [
+     57.88408651853412,
+     76.6643253685344
+    ],
+    "sigma": 5.579008918777294,
+    "cdf_at_truth": 0.5834460338461654,
+    "map": 65.0,
+    "width90": 18.780238850000288
+   },
+   "latent_off": {
+    "median": 67.09422196049616,
+    "ci68": [
+     61.61969371779817,
+     73.05672613782384
+    ],
+    "ci90": [
+     58.17816842648412,
+     77.30862775607471
+    ],
+    "sigma": 5.718516210012837,
+    "cdf_at_truth": 0.54493706147715,
+    "map": 67.5,
+    "width90": 19.130459329590593
+   },
+   "seed": 10516,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c095/latent_anchor.h5",
+     "sha256": "1dff439fab016c32752972f1ea8068f9fda3b0d4e8881f9caf5e7dcb4e889323",
+     "grad_inf": 1.4275247650630263e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.048952163681993004,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 417.3075242408959,
+     "b_gal_curvature_conditional": 166405.26104002842,
+     "row_fac_sd": 0.9992440938949585,
+     "member_sd": 0.50651615858078
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 30.561650621524375,
+    "ci68": [
+     25.03604155164942,
+     36.40659602763577
+    ],
+    "ci90": [
+     22.072768764580594,
+     39.994430645744295
+    ],
+    "sigma": 5.685277237993176,
+    "cdf_at_truth": 0.9999999996275701,
+    "map": 30.0,
+    "width90": 17.9216618811637
+   },
+   "latent_off": {
+    "median": 28.89256482477866,
+    "ci68": [
+     23.55929956388272,
+     34.839495891982516
+    ],
+    "ci90": [
+     21.2328053193117,
+     38.94137124859287
+    ],
+    "sigma": 5.640098164049897,
+    "cdf_at_truth": 0.9999999997475869,
+    "map": 27.5,
+    "width90": 17.70856592928117
+   },
+   "seed": 10553,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c096/latent_anchor.h5",
+     "sha256": "3e59a5fe6decceb05ac4f94013d6d2238363e5493c458b965cc0cecf3eee62e4",
+     "grad_inf": 3.22830651100503e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04793749887869949,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 435.16029022492876,
+     "b_gal_curvature_conditional": 83609.43090216156,
+     "row_fac_sd": 0.9433934688568115,
+     "member_sd": 0.5036106705665588
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 35.25951081921007,
+    "ci68": [
+     27.737974539997325,
+     43.16104579685499
+    ],
+    "ci90": [
+     23.483093424890537,
+     48.408343647904935
+    ],
+    "sigma": 7.711535628428834,
+    "cdf_at_truth": 0.9999687274052012,
+    "map": 35.0,
+    "width90": 24.925250223014398
+   },
+   "latent_off": {
+    "median": 44.71019827649836,
+    "ci68": [
+     34.98396473209974,
+     54.01258126981669
+    ],
+    "ci90": [
+     28.526004670421685,
+     59.8075019759948
+    ],
+    "sigma": 9.514308268858475,
+    "cdf_at_truth": 0.9942661405772852,
+    "map": 45.0,
+    "width90": 31.28149730557312
+   },
+   "seed": 10590,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c097/latent_anchor.h5",
+     "sha256": "0815f5595fe498f40f30fb3c00877362f418c0d6a81bb7fea46e6405de34796d",
+     "grad_inf": 4.2485881479592535e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05193782177001345,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 370.708493558006,
+     "b_gal_curvature_conditional": 58125.81362531438,
+     "row_fac_sd": 0.970237135887146,
+     "member_sd": 0.526806116104126
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 53.02957887325181,
+    "ci68": [
+     46.353262730473084,
+     59.77108291926717
+    ],
+    "ci90": [
+     41.99876368648427,
+     64.49315901335495
+    ],
+    "sigma": 6.708910094397044,
+    "cdf_at_truth": 0.9815098660529119,
+    "map": 52.5,
+    "width90": 22.494395326870688
+   },
+   "latent_off": {
+    "median": 55.29108032677136,
+    "ci68": [
+     47.56320865924032,
+     63.5221382122014
+    ],
+    "ci90": [
+     42.53831126926512,
+     69.3334342277584
+    ],
+    "sigma": 7.97946477648054,
+    "cdf_at_truth": 0.9304953121769026,
+    "map": 55.0,
+    "width90": 26.79512295849328
+   },
+   "seed": 10627,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c098/latent_anchor.h5",
+     "sha256": "4e3001376305dc7d19d1ab24d643732662724655a7fa5ee53e0b1beeff65abb4",
+     "grad_inf": 6.070699498650356e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.050201386211227536,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 396.79718367507303,
+     "b_gal_curvature_conditional": 48668.043344787584,
+     "row_fac_sd": 0.953183114528656,
+     "member_sd": 0.5221826434135437
+    }
+   }
+  },
+  {
+   "latent": {
+    "median": 61.257392175462044,
+    "ci68": [
+     52.712901112619434,
+     71.27174163107428
+    ],
+    "ci90": [
+     47.699839754183124,
+     78.87145342541254
+    ],
+    "sigma": 9.279420259227422,
+    "cdf_at_truth": 0.7472996933728703,
+    "map": 60.0,
+    "width90": 31.171613671229416
+   },
+   "latent_off": {
+    "median": 59.12106333457718,
+    "ci68": [
+     50.983984188449654,
+     68.98468298502306
+    ],
+    "ci90": [
+     46.348001107666406,
+     76.58188019654403
+    ],
+    "sigma": 9.000349398286701,
+    "cdf_at_truth": 0.8116452436865248,
+    "map": 57.5,
+    "width90": 30.23387908887763
+   },
+   "seed": 10664,
+   "anchor": {
+    "latent": {
+     "path": "/media/volume/darksirens-data/darksirens-dev-data/repo/experiments/field_level_plan/pr6a/data/c099/latent_anchor.h5",
+     "sha256": "d74224cf96ea8f5205bfb7e9f96165b133d3b8c7cb787ea5e040b2f4256e7216",
+     "grad_inf": 3.2070457400834584e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.047390882169775946,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 445.2566494016355,
+     "b_gal_curvature_conditional": 103256.30526244701,
+     "row_fac_sd": 0.9309903979301453,
+     "member_sd": 0.5223169326782227
+    }
+   }
+  }
+ ],
+ "grid": [
+  20.0,
+  22.5,
+  25.0,
+  27.5,
+  30.0,
+  32.5,
+  35.0,
+  37.5,
+  40.0,
+  42.5,
+  45.0,
+  47.5,
+  50.0,
+  52.5,
+  55.0,
+  57.5,
+  60.0,
+  62.5,
+  65.0,
+  67.5,
+  70.0,
+  72.5,
+  75.0,
+  77.5,
+  80.0,
+  82.5,
+  85.0,
+  87.5,
+  90.0,
+  92.5,
+  95.0,
+  97.5,
+  100.0,
+  102.5,
+  105.0,
+  107.5,
+  110.0,
+  112.5,
+  115.0,
+  117.5,
+  120.0,
+  122.5,
+  125.0,
+  127.5,
+  130.0,
+  132.5,
+  135.0,
+  137.5,
+  140.0
+ ],
+ "n0": 5e-05,
+ "arms": [
+  "latent",
+  "latent_off"
+ ],
+ "n_real": 100,
+ "verdict": {
+  "latent": {
+   "n_real": 100,
+   "ks_stat": 0.2914455753431956,
+   "ks_p": 5.103932380074935e-08,
+   "ks_pass": false,
+   "median_bias_sigma": -0.2233000339987512,
+   "bias_pass": false,
+   "n_outside_99": 35,
+   "outside_99_pass": false,
+   "frac_in_90": 0.45,
+   "frac_in_68": 0.29,
+   "spread_of_medians": 20.432951663605213,
+   "mean_quoted_sigma": 7.725939605511078,
+   "overconfidence": 2.6447206044724902,
+   "median_quoted_sigma": 6.8947066786303886,
+   "median_width90": 22.856975089741667,
+   "u": [
+    0.025638033617998796,
+    0.5569398166464429,
+    0.015011850345725681,
+    0.20880981765365023,
+    0.002099177129802503,
+    0.5932301327004869,
+    0.00044156104015924196,
+    0.00011404182819109695,
+    0.018180091947668706,
+    0.9999848343116702,
+    0.9999798854732818,
+    0.9999999999941098,
+    0.9988554287065708,
+    0.469432424819246,
+    0.9461057788938966,
+    0.5376854059702246,
+    0.9301321824056313,
+    0.2537934887374889,
+    0.0014159162103447344,
+    0.05692874644195178,
+    0.4943288547690785,
+    0.999998761117523,
+    0.9949695456711874,
+    0.3705883730073753,
+    0.9999999619819985,
+    0.01031010750010998,
+    0.7692034033490579,
+    0.9019186507006933,
+    0.6373227295072693,
+    0.020602423350556304,
+    0.9994017439977237,
+    0.5131538264496428,
+    0.0005562414411084687,
+    0.9903010217478402,
+    0.0020180137561929376,
+    0.9999999998999829,
+    0.0006924445421692029,
+    0.26619550147615634,
+    0.879438967682726,
+    0.6398453709683414,
+    0.9124229954706721,
+    0.09392751891455987,
+    0.9996431622692704,
+    0.11399576018401986,
+    0.5152226465000549,
+    0.9999977659909042,
+    0.0006437703934891095,
+    0.8921729452854046,
+    0.009150112767415716,
+    0.011540279029341715,
+    0.9999894652535289,
+    0.8065140572229501,
+    0.04022569584523539,
+    0.999996887910224,
+    0.026567601488379364,
+    0.6864454189451721,
+    0.04058922553278781,
+    0.9814455753431955,
+    0.22489953422425119,
+    0.5113605755083039,
+    0.9999999999969508,
+    0.8001430348826133,
+    0.9989784422494772,
+    0.2897956088829096,
+    0.15743554465547804,
+    0.9325401942811847,
+    0.005072082360693107,
+    0.9865095094130961,
+    0.3128942307356912,
+    0.9999978062825355,
+    0.05877938144209401,
+    0.9996501461629347,
+    0.0943901994694308,
+    6.0669634273896796e-05,
+    0.9999999908049638,
+    0.9999997464065804,
+    0.9999999999986876,
+    0.7040898586369615,
+    0.9999998573698269,
+    0.9989574273033618,
+    0.9820286372821966,
+    0.9999569755782023,
+    0.9532747552864428,
+    0.31659463566271284,
+    0.23744702198381507,
+    0.000763744744597801,
+    0.854298254265193,
+    0.4050661586793479,
+    0.49379573829682055,
+    0.08326437015324677,
+    0.9999766509629736,
+    0.007308206800543542,
+    0.031848248231651236,
+    0.33056412017922704,
+    0.9101271172336317,
+    0.5834460338461654,
+    0.9999999996275701,
+    0.9999687274052012,
+    0.9815098660529119,
+    0.7472996933728703
+   ],
+   "PASS": false
+  },
+  "latent_off": {
+   "n_real": 100,
+   "ks_stat": 0.23111141533751656,
+   "ks_p": 3.5290203433594226e-05,
+   "ks_pass": false,
+   "median_bias_sigma": -0.08666951750950305,
+   "bias_pass": true,
+   "n_outside_99": 33,
+   "outside_99_pass": false,
+   "frac_in_90": 0.49,
+   "frac_in_68": 0.31,
+   "spread_of_medians": 20.028747694278703,
+   "mean_quoted_sigma": 8.068278607304887,
+   "overconfidence": 2.482406554000875,
+   "median_quoted_sigma": 7.550363095044262,
+   "median_width90": 25.2513092300597,
+   "u": [
+    0.02015219633610158,
+    0.5237766622675433,
+    0.008173610600003146,
+    0.1652655656679337,
+    0.001320695855674857,
+    0.6605896819332897,
+    0.00010514069449408424,
+    4.789132512134245e-05,
+    0.012886838859814388,
+    0.9211114153375165,
+    0.9998141654706327,
+    0.9999999500350792,
+    0.909403448435942,
+    0.3222078570208018,
+    0.9293183164884259,
+    0.48569461519726237,
+    0.9300718649842832,
+    0.15692945132530617,
+    0.00041946193092630413,
+    0.034440819881406654,
+    0.3360972496547414,
+    0.9999826259374173,
+    0.9639328460280469,
+    0.20676227888066595,
+    0.9999992520056877,
+    0.0018885422551289523,
+    0.6019067868961371,
+    0.7471956860904287,
+    0.4702222567268212,
+    0.0034166229418795876,
+    0.9963246366025308,
+    0.3838823675647219,
+    0.0006256344797439646,
+    0.9675609736190894,
+    0.0005562485558097563,
+    0.9999999917916362,
+    0.00046428775786029993,
+    0.16049219618892346,
+    0.6774934341951659,
+    0.4414959495548698,
+    0.8717386970988115,
+    0.04856731797374494,
+    0.8573680928599681,
+    0.07807674106321222,
+    0.42538096216429006,
+    0.994228366890326,
+    0.001488181777456205,
+    0.7110076868525655,
+    0.004156036831127957,
+    0.009557302591669255,
+    0.9999965554796383,
+    0.7577974264371455,
+    0.036907752003007596,
+    0.9999670878401493,
+    0.017923480752475223,
+    0.6601571553905003,
+    0.03404473281310279,
+    0.7934734748318746,
+    0.12033016429008149,
+    0.5639047165890014,
+    0.9999966178169455,
+    0.5619057856083495,
+    0.9462832846383885,
+    0.23174146938768686,
+    0.0978354280218771,
+    0.8278500676275038,
+    0.0024375587021296503,
+    0.9671761203473758,
+    0.2420446525369674,
+    0.9999746267438739,
+    0.01864939055891701,
+    0.9723726418369015,
+    0.06250091976789943,
+    0.0001293180077894793,
+    0.9999999997891442,
+    0.9999998871410645,
+    0.9999999999776243,
+    0.6126862686061881,
+    0.9999991186769768,
+    0.9979035898109277,
+    0.9747046230396647,
+    0.9952827072973496,
+    0.9399065381251844,
+    0.32409152465456786,
+    0.15902784207718862,
+    0.000915990212276796,
+    0.8413482449009708,
+    0.32813134411240175,
+    0.26002354040183584,
+    0.06549992896428083,
+    0.9986487874988818,
+    0.003132033186431237,
+    0.022130713415142656,
+    0.23019218189738452,
+    0.8643709651240846,
+    0.54493706147715,
+    0.9999999997475869,
+    0.9942661405772852,
+    0.9304953121769026,
+    0.8116452436865248
+   ],
+   "PASS": false
+  },
+  "paired__latent_minus_latent_off": {
+   "median_shift_kms": -2.4986933259674937,
+   "median_shift_sd": 3.5276131753813442,
+   "width90_shift_kms": -1.2213123397505918,
+   "width90_ratio": 0.9550654139138942,
+   "n_wider": 28,
+   "n_real": 100
+  },
+  "gate_reference_arm": "latent",
+  "TIER_C": false
+ }
+}

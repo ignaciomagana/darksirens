@@ -528,6 +528,10 @@ def build_parameter_decoder(
         # CLI opts always carry use_LSS explicitly; the fallback mirrors the
         # build_parameter_space signature default for direct/legacy callers.
         use_lss=bool(getattr(opts, "use_LSS", True)),
+        # b_miss IS b_GW in latent mode and is genuinely identified there, so
+        # the decoder must re-derive the space under the SAME mode the
+        # likelihood runs in or the label sets diverge (PLAN 4.3).
+        lss_field_mode=str(getattr(opts, "lss_field_mode", "table") or "table"),
         mark_names_by_catalog=mark_names_by_catalog,
         # The selection parameters are gated on c_mode exactly as b_miss is on
         # use_lss: the decoder must re-derive the space under the same mode.

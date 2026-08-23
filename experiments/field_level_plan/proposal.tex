@@ -1422,10 +1422,10 @@ Rungs $0$, $3$, $4$, $5$, $5$b and the timing half of $6$a ran on the production
 line --- $259$ events at $4096$ posterior samples, $1\,067\,946$ detected
 injections, the DESI union catalog at $N_{\rm side}=64$ ($30\,470$ occupied
 pixels, $22\,787\,566$ galaxies). The closure campaign, rung $7$ and rung $8$ ran
-at mock scale, $N_{\rm side}=16$, and are labelled as such. \textbf{No production
-$H_0$ posterior exists}: that run is held, and every number below is a
-likelihood-level or mock-level measurement. A reader who takes any of them as
-``the $H_0$ result'' has read the wrong document.
+at mock scale, $N_{\rm side}=16$, and are labelled as such. The production
+$H_0$ scan has since been run at fixed $\theta$ on a dedicated H100
+(\S\ref{sec:prodresult}); it is a grid scan, not a sampled-$\theta$ posterior,
+and the distinction matters for what may be quoted from it.
 
 \paragraph{Can the field move the answer at all?} Yes, by two orders of
 magnitude more than the budget argument allowed. The event-weighted in-support
@@ -1562,16 +1562,33 @@ $\mathrm{spread}\propto N^{-0.31\pm0.16}$ where per-event over-sharpness would
 predict $0.5$ and a per-realisation common mode $0$ --- so the mechanism inside
 the event channel is not yet separated.
 
-The honest statement, and the one this document makes, is therefore: \emph{the
-code is validated and the mock's parameter-estimation calibration is not}. The
-identities close, the estimator recovers the field, the guards refuse what they
-should, the systematics are bounded --- and the coverage gate that would license
-a cosmology claim is not met, for a reason measurably upstream of everything
-proposed here. Nothing in this programme should be quoted as validated by a
-closure that failed, and the production run must not be read as blessed by one.
+That reading has since been tested directly and does not survive. Collapsing
+every event's posterior onto its true parameters --- no measurement uncertainty
+at all --- narrows each interval, from $\sigma=7.74$ to $6.71$, and leaves the
+realisation-to-realisation scatter unmoved at $17.5$; the overconfidence rises
+to $2.62$. The dispersion is therefore not the synthetic parameter estimation
+and not the event construction, both of which that test removes. It is a
+property of the likelihood's own terms.
 
-\paragraph{What is still unmeasured.} The production $H_0$ posterior, and with it
-the two posterior-level criteria K2 and K8. The mock's event-channel defect,
+Where those terms put it is a near-cancellation. At the peak the event sum
+supplies $-0.0643$ of curvature in $H_0$ and the selection term returns
+$+0.0420$, leaving $-0.0223$; matching the measured scatter would require
+$-0.0041$, so the net is $5.4$ times too curved --- a $\sim30\%$ error in one
+of two large terms that mostly cancel. The selection side shows no structural
+defect: $\log\mu$ runs as a clean power law of index $+3.81$, its curvature
+agreeing with that law to $16\%$, with no injection falling outside the
+redshift grid at any trial $H_0$. The remaining candidate is that the redshift
+prior is more informative than the catalog warrants.
+
+The honest statement is therefore: \emph{the code is validated and its
+interval is not}. The identities close, the estimator recovers the field, the
+guards refuse what they should, the systematics are bounded --- and the width
+the likelihood reports is, on the one configuration where truth is known,
+narrower than the estimator's own scatter by a factor $2.3$--$2.9$.
+
+\paragraph{What is still unmeasured.} The sampled-$\theta$ production
+posterior, and with it the two posterior-level criteria K2 and K8; the grid scan
+of \S\ref{sec:prodresult} does not supply them. The mock's event-channel defect,
 which needs the $\sim4$ GPU-hour design that separates per-event over-sharpness
 from a per-realisation common mode. A second member seed --- the resampling that
 puts $22\%$ of $8$-member ensembles outside the marginalisation gate draws from
@@ -1579,6 +1596,72 @@ within one artefact's $256$ members and is not an independent check of that
 artefact. And a derivative kink at $H_0=98.83$ in a fixture-scale sweep, present
 identically in the table path and in the latent path and absent when the
 completion channel is switched off, whose mechanism was not identified.
+
+% =====================================================================
+\section{The production scan}
+\label{sec:prodresult}
+% =====================================================================
+
+The $259$-event line was run at fixed $\theta$ over $121$ nodes in
+$H_0\in[20,140]$, in three arms differing only in where the missing-galaxy
+modulation comes from: no per-pixel completeness and no field; per-pixel
+completeness alone; and the field on top of it with an eight-member ensemble.
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+ & $H_0$ median & $90\%$ interval & finite nodes \\
+\midrule
+no $f_p$, no field & $90.25$ & $[82.95,\,96.47]$ & $116/121$ \\
+$f_p$, no field    & $71.70$ & $[64.97,\,79.12]$ & $121/121$ \\
+$f_p$ and field    & $71.95$ & $[65.18,\,79.38]$ & $121/121$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{The field moves $H_0$ by $0.06\sigma$; the per-pixel completeness moves
+it by $4.31\sigma$.} Of the total shift, $1.3\%$ is the field. The comparison
+that carries meaning is the second row against the third, not the first against
+the third: the first two rows differ by the completeness map, and reading the
+field against the no-$f_p$ baseline credits it with an effect that is not its.
+
+This is the outcome the earlier rungs predicted. The member spread is
+$1.5\times10^{-2}$ nats at the anchor, the field's response to cosmology is
+$5.4\times10^{-4}$ nats against a threshold of $0.1$, and the mock decomposition
+already put $91\%$ of the arm-to-arm shift in the completeness channel. What the
+field buys is not a shift but a correct one: the missing-galaxy budget is
+conserved to $10^{-15}$, the realisations are marginalised through both the
+event terms and the detection normalisation, and the modulation is generated
+from $7.8$ MB of coefficients rebuildable in $41$ s rather than read from a
+$1.06$ GB table --- together with the multitracer construction, which the table
+path cannot represent at all.
+
+Two smaller things fall out. The field \emph{widens} the interval, from $14.15$
+to $14.20$, which is the direction a marginalisation must move it. And the
+completeness map repairs the support: without it the likelihood returns
+$-\infty$ at five of the $121$ nodes.
+
+\paragraph{The completeness shift is a modelling artifact, not a measurement.}
+The $-18.55$ between the first two rows is what it costs to model pixels the
+survey never observed as though they were complete. Under a parametric
+selection function, off-footprint pixels inherit the sky-average completeness
+unless the per-pixel fraction supplies the zero; the mock campaign showed the
+same effect railing $H_0$ to $125$--$138$ in sixteen of sixteen
+footprint-limited runs. Because the per-pixel fraction cannot presently be
+combined with a tabulated $Q$, every tabulated configuration on a
+footprint-limited survey carries this exposure.
+
+\paragraph{What may be quoted.} The medians and the differences between arms.
+The $90\%$ intervals should not yet be quoted as credible intervals: the
+closure campaign finds the estimator's width narrower than its own scatter by
+$2.3$--$2.9$ on the one configuration where truth is known, and the production
+likelihood shares the structure that makes that possible --- the same $64\%$
+cancellation between the event sum and the selection term ($|S/E|=0.638$ against
+the mock's $0.653$). If the mock's deficit were present here at the same
+fractional size, the interval would widen by a factor $2$. Whether it is present
+is not established, and cannot be settled on a configuration two orders of
+magnitude smaller in galaxies; the arm-to-arm differences above are unaffected
+either way, since they are differences between arms sharing one estimator.
 
 % =====================================================================
 \section{Implementation}

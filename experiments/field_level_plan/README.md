@@ -6,7 +6,7 @@ Upload this zip to Overleaf via **New Project → Upload Project**.
 
 | file | role | compiles to |
 |---|---|---|
-| `proposal.tex` | **the main document** — set this as the Overleaf main file | 31 pp |
+| `proposal.tex` | **the main document** — set this as the Overleaf main file | 32 pp |
 | `MODEL.tex` | the mathematical body. A LaTeX **body fragment**: no `\documentclass`, by design, because it was written to be dropped into a document | — |
 | `MODEL_standalone.tex` | a thin wrapper that compiles `MODEL.tex` on its own, with exactly the preamble its header asks for | 17 pp |
 
@@ -48,3 +48,19 @@ Points a reader should not miss, because they are the ones that changed:
 Generated from `experiments/field_level_plan/` in the `darksirens` repository.
 The per-rung reports (`pr0/`, `pr3/`, `pr5b/`, `pr6a/`, `pr7/`, `pr8/`) hold the
 raw measurements every corrected number traces to.
+
+## The production scan is now in it
+
+Section "The production scan" carries the measured 259-event result: the field
+moves H0 by 0.06 sigma, the per-pixel completeness by 4.31 sigma, and 1.3% of
+the total shift is the field. Read the second table row against the third --
+comparing the field against the no-completeness baseline credits it with an
+effect that is not its.
+
+The medians and the arm-to-arm differences may be quoted. **The 90% intervals
+should not yet be quoted as credible intervals**: on the one configuration
+where truth is known the estimator's width is narrower than its own scatter by
+2.3-2.9x, and the production likelihood shares the 64% cancellation between the
+event sum and the selection term that makes that possible. If the same
+fractional error were present, the interval would widen by a factor 2. The
+arm-to-arm differences are unaffected either way.
