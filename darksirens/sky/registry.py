@@ -125,3 +125,29 @@ def sky_fiducial(sky_model: str) -> tuple[float, ...]:
 def get_fixed_sky_params(sky_model: str) -> jnp.ndarray:
     """Return the fiducial (isotropic) sky parameter vector as a JAX array."""
     return jnp.array(sky_fiducial(sky_model), dtype=float)
+
+
+def sky_log_prior_volume_correction(sky_model: str) -> float:
+    """``log(f_valid)`` for ``sky_model`` -- SUBTRACT it from a reported ``logZ``.
+
+    A sky model whose ``log_g_sky`` rejects part of the prior box (returning
+    ``-inf`` for a whole parameter point) makes the sampler integrate against
+    an UNNORMALISED constrained prior: the raw evidence is ``f_valid`` times
+    the evidence under the prior the model actually claims, so
+
+        logZ_corrected = logZ_raw - log(f_valid).
+
+    That offset depends only on the arbitrary prior box, not on the data, and
+    it is what makes ``multipole`` and ``multipole_l3`` mutually incomparable
+    (measured -0.50 vs -3.35 nats).  Models whose density is positive by
+    construction, or whose prior transform maps ONTO the valid region, return
+    exactly 0.0 and are therefore untouched.
+
+    Models are free not to declare the method; the absence of one is read as
+    "no rejection", i.e. 0.0.
+    """
+    model = get_sky_model(sky_model)
+    fn = getattr(model, "log_prior_volume_correction", None)
+    if fn is None:
+        return 0.0
+    return float(fn())

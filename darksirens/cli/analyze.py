@@ -134,8 +134,18 @@ def _load_run_hdf5(run_dir):
                 "(checked the root and the 'posterior' group)"
             )
         settings = _merge_hdf5_metadata(settings, f)
-        # Evidence: canonical attr names with documented aliases.
-        logZ = f.attrs.get("logZ", f.attrs.get("log_evidence", None))
+        # Evidence: canonical attr names with documented aliases.  Prefer the
+        # PRIOR-VOLUME-CORRECTED value when the writer recorded one: a sky
+        # model that rejects part of its prior box (multipole) makes the raw
+        # sampler logZ carry a log(f_valid) offset that depends only on the
+        # arbitrary coefficient bound, so raw values from two such models are
+        # not comparable and their Bayes factor is an artifact (measured -0.50
+        # vs -3.35 nats at lmax=2 vs 3).  Models with no rejection record a
+        # correction of exactly zero, so this is a no-op for them.
+        logZ = f.attrs.get(
+            "logZ_corrected",
+            f.attrs.get("logZ", f.attrs.get("log_evidence", None)),
+        )
         logZerr = f.attrs.get("logZerr", f.attrs.get("log_evidence_err", None))
 
     if logZ is not None:

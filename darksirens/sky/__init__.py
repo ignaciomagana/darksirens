@@ -13,6 +13,7 @@ from .registry import (
     get_sky_model,
     sky_model_parser,
     sky_model_prior_parser,
+    sky_log_prior_volume_correction,
     get_fixed_sky_params,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "get_sky_model",
     "sky_model_parser",
     "sky_model_prior_parser",
+    "sky_log_prior_volume_correction",
     "get_fixed_sky_params",
 ]

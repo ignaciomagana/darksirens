@@ -152,7 +152,10 @@ from darksirens.cli.common import (
     resolve_selection_neff_guard,
     run_cli,
 )
-from darksirens.io.results import save_results_hdf5
+from darksirens.io.results import (
+    _sky_log_prior_volume_correction,
+    save_results_hdf5,
+)
 from darksirens.io.settings import save_settings_json
 
 
@@ -3793,6 +3796,17 @@ def _run_sampling(opts, likelihood, pspace):
     if logZ is not None:
         zerr = float(logZerr) if logZerr is not None else float("nan")
         _ok(f"log Z = {float(logZ):.3f} ± {zerr:.3f}")
+        # A sky model that REJECTS part of its prior box leaves the raw
+        # evidence multiplied by the valid fraction, so two such models cannot
+        # be compared on the raw number.  Print the corrected value next to it
+        # whenever it differs; models with no rejection report exactly 0.0 and
+        # this stays silent (bit-identical output).
+        _log_fvalid = _sky_log_prior_volume_correction(opts)
+        if _log_fvalid != 0.0:
+            _ok(f"log Z (prior-volume corrected) = "
+                f"{float(logZ) - _log_fvalid:.3f} ± {zerr:.3f}   "
+                f"[log f_valid = {_log_fvalid:.3f}; use THIS for model "
+                f"comparison]")
     _end()
     return results, wall_sampling
 

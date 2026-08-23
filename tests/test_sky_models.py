@@ -761,3 +761,113 @@ def test_multipole_prior_volume_fraction_quantifies_the_logz_offset():
     assert model._prior_volume_cache[0] == (20000, 0)
     assert MultipoleSky(lmax=3, a_bound=0.05).prior_volume_fraction(
         n_draws=4096) == 1.0
+
+
+# --------------------------------------------------------------------------
+# Prior-volume correction of the reported evidence (PHY-07)
+# --------------------------------------------------------------------------
+#
+# A sky model whose ``log_g_sky`` returns -inf for a whole parameter point is
+# integrating against an UNNORMALISED constrained prior: the sampler's prior
+# mass is that of the box, but the model only lives on the valid subset, so
+# the raw evidence is ``f_valid`` times the evidence under the prior the model
+# claims.  That offset depends on the arbitrary coefficient bound, not on the
+# data, and it is what makes multipole lmax=2 and lmax=3 mutually incomparable.
+
+def _sky_prior_draws(name, n, seed=0):
+    """Draws from the SAMPLER's prior for ``name``'s block, via the real transform."""
+    from darksirens.inference.prior import make_prior_transform
+
+    lows, highs, labels, kinds, _ = sky_model_prior_parser(name)
+    if not labels:
+        return np.zeros((n, 0))
+    model = get_sky_model(name)
+    groups = getattr(model, "constraint_groups", ())
+    joint = [(kind, tuple(labels.index(str(g)) for g in members))
+             for kind, members in groups]
+    transform = make_prior_transform(lows, highs, kinds, joint_constraints=joint)
+    u = np.random.default_rng(seed).uniform(size=(n, len(labels)))
+    return np.asarray(transform(jnp.asarray(u)))
+
+
+def _constant_likelihood_log_evidence(name, n=20000, seed=0):
+    """``log Z`` for a likelihood that is 1 wherever the model is defined.
+
+    With a normalised prior this is exactly zero; whatever it returns instead
+    IS the prior-volume artifact.
+    """
+    theta = _sky_prior_draws(name, n, seed=seed)
+    if theta.shape[1] == 0:
+        return 0.0
+    nx, ny, nz = _random_unit_vectors(64, seed=7)
+    z = jnp.full_like(nx, 0.3)
+    log_g = sky_model_parser(name)
+    valid = np.array([
+        bool(np.all(np.isfinite(np.asarray(log_g(nx, ny, nz, z, jnp.asarray(t))))))
+        for t in theta
+    ])
+    return float(np.log(valid.mean()))
+
+
+@pytest.mark.parametrize("name", SKY_MODEL_NAMES)
+def test_constant_likelihood_evidence_is_zero_after_the_prior_correction(name):
+    """The evidence of a UNIT likelihood must be zero for every sky model.
+
+    Any nonzero value is prior volume the model rejected but never declared.
+    Subtracting the model's own ``log_prior_volume_correction()`` must bring it
+    back to zero -- for the models that reject nothing that is trivially true,
+    and for ``multipole``/``multipole_l3`` it is the whole point.
+    """
+    from darksirens.sky import sky_log_prior_volume_correction
+
+    raw = _constant_likelihood_log_evidence(name, n=6000, seed=11)
+    corrected = raw - sky_log_prior_volume_correction(name)
+    # 6000 Bernoulli draws at the worst valid fraction (~0.035, lmax=3) give a
+    # log-scale MC error near 0.07; 0.25 is a comfortable multiple of that.
+    assert corrected == pytest.approx(0.0, abs=0.25), (
+        f"{name}: constant-likelihood logZ = {raw:.3f}, corrected "
+        f"{corrected:.3f} (declared correction "
+        f"{sky_log_prior_volume_correction(name):.3f})"
+    )
+
+
+def test_multipole_declares_the_offset_the_raw_evidence_carries():
+    """The declared correction IS log(valid fraction), and it is what separates
+    the two multipole models by ~2.8 nats of pure prior volume."""
+    from darksirens.sky import sky_log_prior_volume_correction
+
+    c2 = sky_log_prior_volume_correction("multipole")
+    c3 = sky_log_prior_volume_correction("multipole_l3")
+    assert c2 == pytest.approx(np.log(0.604), abs=0.05)
+    assert c3 == pytest.approx(np.log(0.035), abs=0.3)
+    assert c2 - c3 == pytest.approx(2.84, abs=0.3)
+    # Every non-rejecting model declares EXACTLY zero, so the correction is a
+    # no-op for them and existing logZ numbers are untouched.
+    for name in ("isotropic", "dipole", "sphere_gp", "sphere_gp_z",
+                 "overdensity_gp"):
+        assert sky_log_prior_volume_correction(name) == 0.0
+
+
+def test_results_writer_records_the_corrected_evidence(tmp_path):
+    """``logZ`` stays the raw sampler number; ``logZ_corrected`` is written next
+    to it so a reader never has to know which convention a file used."""
+    import h5py
+    from darksirens.io.results import _sky_log_prior_volume_correction
+
+    opts = types.SimpleNamespace(sky_model="multipole_l3")
+    corr = _sky_log_prior_volume_correction(opts)
+    assert corr == pytest.approx(np.log(0.035), abs=0.3)
+    assert _sky_log_prior_volume_correction(
+        types.SimpleNamespace(sky_model="isotropic")) == 0.0
+    # An unresolvable/absent model must not lose a finished run.
+    assert _sky_log_prior_volume_correction(
+        types.SimpleNamespace(sky_model="not_a_model")) == 0.0
+    assert _sky_log_prior_volume_correction(types.SimpleNamespace()) == 0.0
+
+    path = tmp_path / "results.hdf5"
+    with h5py.File(path, "w") as f:
+        f.attrs["logZ"] = -12.5
+        f.attrs["log_prior_volume_fraction"] = corr
+        f.attrs["logZ_corrected"] = -12.5 - corr
+    with h5py.File(path, "r") as f:
+        assert float(f.attrs["logZ_corrected"]) > float(f.attrs["logZ"])
