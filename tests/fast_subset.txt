@@ -3,8 +3,33 @@
 # docs/source/testing.md and .github/workflows/ci.yml both read this file, so
 # the documented gate and the CI gate cannot drift apart.
 #
-# Measured 2026-07-26 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
-#   32 files, 214 passed, 1 skipped, ~3 min wall (2026-07-29).
+# SIZE OF THIS GATE (keep this block honest — it drifted badly once).
+#
+#   2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
+#     52 files, 552 tests collected.
+#     Last end-to-end timing: 17m47s in GitHub CI at a0ba24f, and 21m10s on a
+#     shared review node, both at the then-current 49 files / 519 tests.  The
+#     four files added since (import side effects, campaign-script contract,
+#     the sdist rebuild check, and this record's own guard) cost about a
+#     minute between them.
+#
+#   The stale record this replaces claimed "32 files, 214 passed, ~3 min"
+#   (measured 2026-07-29).  By 2026-08-23 that was 49 files and 519 tests
+#   taking ~18 min — a 6x understatement of the runtime a contributor was told
+#   to expect before every commit, and of the CI budget being consumed.
+#
+#   THE BUDGET: .github/workflows/ci.yml gives the fast-tests job
+#   timeout-minutes: 30.  At ~18 min there is roughly 12 min of headroom.  That
+#   is not an emergency, but the gate has grown ~2.5x in a month and headroom
+#   is finite: when a run comes in over ~25 min, split this manifest into
+#   fresh-process shards (which also releases JAX caches between groups) rather
+#   than raising the timeout.  Do NOT enable a monolithic CPU full-suite job to
+#   relieve it — that grows to ~258 GB RSS and gets OOM-killed (Tier 0b, below).
+#
+#   Re-measure with:
+#     grep -vc '^#\|^$' tests/fast_subset.txt          # file count
+#     PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu python -m pytest -q \
+#       --collect-only $(grep -v '^#' tests/fast_subset.txt) | tail -1
 #
 # Run it with:
 #   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu \
@@ -22,6 +47,8 @@ tests/test_refactor_imports.py
 tests/test_public_import_contract.py
 tests/test_packaging_contract.py
 tests/test_import_side_effects.py
+tests/test_campaign_script_contract.py
+tests/test_fast_subset_record.py
 
 # ── CLI plumbing, run dirs, artifacts ──────────────────────────────────────
 tests/test_cli_run_dir.py
