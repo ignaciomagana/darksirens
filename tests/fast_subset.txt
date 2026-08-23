@@ -6,12 +6,13 @@
 # SIZE OF THIS GATE (keep this block honest — it drifted badly once).
 #
 #   2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
-#     53 files, 557 tests collected.
+#     66 files, 751 tests collected.
 #     Last end-to-end timing: 17m47s in GitHub CI at a0ba24f, and 21m10s on a
 #     shared review node, both at the then-current 49 files / 519 tests.  The
-#     five files added since (import side effects, campaign-script contract,
-#     the sdist rebuild check, this record's own guard, and the dN/dz shell
-#     quadrature) cost about a minute between them.
+#     seventeen files added since come from the 2026-08-23 codex-review
+#     remediation (gradient NaN safety, store layout, atomic results, support
+#     masks, allocator/import-order/KDE-batch guards, physics gates, the
+#     sdist rebuild check, this record's own guard) and cost a few minutes.
 #
 #   The stale record this replaces claimed "32 files, 214 passed, ~3 min"
 #   (measured 2026-07-29).  By 2026-08-23 that was 49 files and 519 tests
