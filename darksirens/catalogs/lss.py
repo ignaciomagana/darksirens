@@ -96,6 +96,7 @@ def maybe_load_lss_completion(opts, *, zgrid) -> dict:
             "realization_set_id": loaded.get("realization_set_id"),
             "member_content_sha256": loaded.get("member_content_sha256"),
             "n_members": loaded.get("n_members"),
+            "f_p_aware": bool(loaded.get("f_p_aware", False)),
         }
         if getattr(opts, "lss_marginalize", False):
             logq_m = loaded.get("logq_members")

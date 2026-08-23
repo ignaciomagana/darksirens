@@ -1053,6 +1053,7 @@ def save_lss_completion_hdf5(
     budget_renormalized: bool | None = None,
     budget_monopole_logq: np.ndarray | None = None,
     c_mode: str | None = None,
+    f_p_aware: bool | None = None,
 ) -> str:
     """Write a completion file with layout ``/lss_completion/{logq_map,logq_members,zgrid}``.
 
@@ -1156,6 +1157,13 @@ def save_lss_completion_hdf5(
                 grp.attrs["budget_monopole_logq"] = budget_monopole_logq
             if c_mode is not None:
                 grp.attrs["c_mode"] = c_mode
+            # The builder's assertion that it divided the survey mask OUT of Q,
+            # i.e. that f_p was folded into the model's completeness at fit time
+            # so the fitted Q carries clustering only.  The inference loader
+            # REQUIRES this before it will admit --per_pixel_completeness
+            # alongside the table, because otherwise the mask is applied twice.
+            if f_p_aware is not None:
+                grp.attrs["f_p_aware"] = bool(f_p_aware)
             if logq_members is not None:
                 grp.attrs["member_content_sha256"] = hashlib.sha256(
                     np.ascontiguousarray(members_arr).tobytes()
@@ -1206,7 +1214,13 @@ def load_lss_completion_hdf5(path: str) -> dict:
            "diagnostics": None, "realization_set_id": None,
            "member_content_sha256": None, "n_members": None,
            "budget_renormalized": None, "budget_monopole_logq": None,
-           "c_mode": None}
+           "c_mode": None,
+           # Whether the builder divided the survey mask OUT of Q.  A Q table is
+           # fit to OBSERVED counts, so by default it ABSORBS the footprint and
+           # must not then be multiplied by f_p (that applies the mask twice).
+           # No builder writes this attr yet, so it reads False for every
+           # existing artifact -- which is the correct, conservative answer.
+           "f_p_aware": False}
     with h5py.File(path, "r") as f:
         grp = f["lss_completion"] if "lss_completion" in f else f
         if "logq_map" in grp:
@@ -1222,6 +1236,8 @@ def load_lss_completion_hdf5(path: str) -> dict:
                 out[key] = val.decode() if isinstance(val, bytes) else str(val)
         if "n_members" in grp.attrs:
             out["n_members"] = int(grp.attrs["n_members"])
+        if "f_p_aware" in grp.attrs:
+            out["f_p_aware"] = bool(grp.attrs["f_p_aware"])
         if "budget_renormalized" in grp.attrs:
             out["budget_renormalized"] = bool(grp.attrs["budget_renormalized"])
         if "budget_monopole_logq" in grp.attrs:
