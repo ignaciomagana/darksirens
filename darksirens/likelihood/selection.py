@@ -99,7 +99,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.scipy.special import logsumexp
 
-from darksirens.utils.utils import logdiffexp
+from darksirens.utils.utils import logsumexp_neginf_safe
 from darksirens.core.types import GWEvent, EMCatalog
 from darksirens.likelihood.events import pad_gw_event_to_multiple
 
@@ -141,29 +141,65 @@ def _lse_to_log_mu_neff(
     Returns
     -------
     log_mu : scalar
-    Neff   : scalar  (0.0 when log_mu = -inf; never NaN)
+    Neff   : scalar  (0.0 when log_mu = -inf; +inf for an exactly-zero
+        Monte-Carlo variance; never NaN for a finite input pair)
     log_sigma2 : scalar  (log Monte-Carlo variance of the selection integral μ;
-        consumed by the strong-lensing cluster-selection combiner. May be
-        -inf/NaN when log_mu = -inf, where Neff = 0 already forces the
-        too-sparse -inf selection correction downstream.)
+        consumed by the strong-lensing cluster-selection combiner. -inf when
+        log_mu = -inf, where Neff = 0 already forces the too-sparse -inf
+        selection correction downstream, and -inf for an exactly-zero
+        variance, where Neff = inf passes every reliability guard.)
+
+    Reverse-mode discipline
+    -----------------------
+    The variance is carried as the INVERSE effective sample size
+
+        1/N_eff = Var(μ̂)/μ̂² = exp(lse2 - 2·lse) - 1/Ndraw,
+
+    the stable direct form :func:`log_evidence_and_mc_variance` already uses,
+    NOT as ``logdiffexp(log_s2, 2·log_mu - log_Ndraw)``.  Uniform (or
+    numerically uniform) importance weights make those two logdiffexp operands
+    EQUAL: the forward value is correctly -inf, but the derivative runs through
+    ``log1p(-exp(0))``, whose slope is 1/0, and reverse-mode AD has already
+    evaluated that branch by the time a downstream ``jnp.where`` selects the
+    other one — a ``where`` cannot erase a NaN cotangent.  MEASURED on master:
+    four equal log weights gave the correct statistics (0, inf, -inf) with an
+    all-NaN Jacobian, and ``selection_log_correction`` returned 0.0 with
+    gradient [nan, nan, nan, nan].  A perfectly valid deterministic selection
+    campaign therefore produced a finite log likelihood and unusable gradients
+    for NUTS/HMC and every gradient optimizer.
+
+    Both operands of every ``jnp.where`` below are finite, so the dead branch
+    contributes a ZERO cotangent rather than a NaN one (the same discipline as
+    ``redshift/catalog.py:_logsumexp_neginf_safe``).
     """
     log_Ndraw  = jnp.log(Ndraw)
     log_mu     = lse  - log_Ndraw
-    log_s2     = lse2 - 2.0 * log_Ndraw
- 
-    # Var(μ) estimator in log-space
-    log_sigma2 = logdiffexp(log_s2, 2.0 * log_mu - log_Ndraw)
- 
-    # Guard: when log_mu = -inf (all weights −∞), both log_mu and
-    # log_sigma2 are -inf.  The subtraction 2*(-inf) - (-inf) = NaN.
-    # We instead set Neff = 0.0, which triggers too_sparse → return -inf.
+
     finite_mu = jnp.isfinite(log_mu)
+    lse_safe  = jnp.where(finite_mu, lse,  0.0)
+    lse2_safe = jnp.where(finite_mu, lse2, 0.0)
+    # >= 0 and finite by construction; the clamp also absorbs the round-off
+    # that can push a numerically-uniform campaign a few ulps negative.
+    inv_neff = jnp.maximum(jnp.exp(lse2_safe - 2.0 * lse_safe) - 1.0 / Ndraw, 0.0)
+
+    zero_var = inv_neff <= 0.0
+    inv_neff_safe = jnp.where(zero_var, 1.0, inv_neff)
+    log_mu_safe   = jnp.where(finite_mu, log_mu, 0.0)
+
+    # log_mu = -inf (all weights -inf): Neff = 0.0 triggers too_sparse -> -inf.
+    # Zero variance: Neff = inf, which passes every reliability guard, and
+    # log_sigma2 = -inf, so the channel drops out of the cluster combiner's sums.
     Neff = jnp.where(
         finite_mu,
-        jnp.exp(2.0 * log_mu - log_sigma2),
+        jnp.where(zero_var, jnp.inf, 1.0 / inv_neff_safe),
         0.0,
     )
- 
+    log_sigma2 = jnp.where(
+        finite_mu & ~zero_var,
+        2.0 * log_mu_safe + jnp.log(inv_neff_safe),
+        -jnp.inf,
+    )
+
     return log_mu, Neff, log_sigma2
 
 
@@ -208,7 +244,7 @@ def log_evidence_and_mc_variance(
     variance     : scalar — σ² of ln Ẑ, in [0, 1 − 1/n]; 0.0 when ln Ẑ = -inf
     """
     # Shared finite mask for both reductions (isfinite(2x) == isfinite(x)):
-    # bit-identical to _logsumexp_neginf_safe applied to ldw and 2*ldw
+    # bit-identical to logsumexp_neginf_safe applied to ldw and 2*ldw
     # separately (either sentinel underflows to exactly zero weight), one
     # nsamp-length isfinite/where/any pass cheaper inside the per-event scan.
     finite = jnp.isfinite(ldw)
@@ -374,8 +410,11 @@ def selection_reduce_from_ldw_provider(
     ``[start, start + size)`` (i.e. the array ``_batch_lse`` computes just
     before its ``logsumexp``).  This mirrors :func:`compute_selection_term`'s
     reduction bit-for-bit -- the same per-batch ``(logsumexp(ldw),
-    logsumexp(2·ldw))`` accumulation, the same all-batches ``logsumexp``
-    combine (``logsumexp`` is additive across disjoint index sets), and the same
+    logsumexp(2·ldw))`` accumulation (through
+    :func:`~darksirens.utils.utils.logsumexp_neginf_safe`, which is
+    bit-identical to the plain reduction whenever any weight is finite), the
+    same all-batches ``logsumexp`` combine (``logsumexp`` is additive across
+    disjoint index sets), and the same
     :func:`_lse_to_log_mu_neff` -- so a factored caller that recomputes the
     per-member ldw through this helper matches the monolithic path's reduction.
 
@@ -388,19 +427,22 @@ def selection_reduce_from_ldw_provider(
     """
     if sel_batch_size is None:
         ldw = ldw_provider(0, N_sel)
-        lse = logsumexp(ldw)
-        lse2 = logsumexp(2.0 * ldw)
+        lse = logsumexp_neginf_safe(ldw)
+        lse2 = logsumexp_neginf_safe(2.0 * ldw)
     else:
         N_batches = N_sel // sel_batch_size
 
         def _scan_fn(_, batch_idx):
             start = batch_idx * sel_batch_size
             ldw_b = ldw_provider(start, sel_batch_size)
-            return None, (logsumexp(ldw_b), logsumexp(2.0 * ldw_b))
+            return None, (
+                logsumexp_neginf_safe(ldw_b),
+                logsumexp_neginf_safe(2.0 * ldw_b),
+            )
 
         _, (lse_all, lse2_all) = lax.scan(_scan_fn, None, jnp.arange(N_batches))
-        lse = logsumexp(lse_all)
-        lse2 = logsumexp(lse2_all)
+        lse = logsumexp_neginf_safe(lse_all)
+        lse2 = logsumexp_neginf_safe(lse2_all)
 
     return _lse_to_log_mu_neff(lse, lse2, Ndraw)
 
@@ -479,7 +521,11 @@ def compute_selection_term(
             ldw = ldw + sky_log_weight_fn(nx_b, ny_b, nz_b, dL_b)
         valid = valid_b & (pwt_b > 0.0)
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
-        return logsumexp(ldw), logsumexp(2.0 * ldw)
+        # ``ldw`` is finite-or--inf by the line above, so the neginf-safe
+        # reduction is bit-identical to the plain one on any live batch and
+        # only changes the ALL-invalid batch: -inf forward either way, but with
+        # a zero instead of a NaN cotangent (softmax of all--inf is 0/0).
+        return logsumexp_neginf_safe(ldw), logsumexp_neginf_safe(2.0 * ldw)
 
     if sel_batch_size is None:
         # --- Unbatched: process all injections at once ---
@@ -529,8 +575,9 @@ def compute_selection_term(
             _scan_fn, None, jnp.arange(N_batches)
         )
         # Combine per-batch logsumexp values: logsumexp is additive
-        # across disjoint index sets.
-        lse  = logsumexp(lse_all)
-        lse2 = logsumexp(lse2_all)
+        # across disjoint index sets.  Neginf-safe for the same reason as the
+        # per-batch reduction -- every batch can be all-invalid at once.
+        lse  = logsumexp_neginf_safe(lse_all)
+        lse2 = logsumexp_neginf_safe(lse2_all)
 
     return _lse_to_log_mu_neff(lse, lse2, Ndraw)

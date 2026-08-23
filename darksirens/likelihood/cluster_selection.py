@@ -123,14 +123,14 @@ from __future__ import annotations
 from typing import Callable
 
 import jax.numpy as jnp
-from jax.scipy.special import logsumexp
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.lensing.lensed_injections import LensedInjectionSet
 from darksirens.lensing.slmarks import SISLensParams, tau_2_prob
-from darksirens.utils.utils import logdiffexp
+from darksirens.utils.utils import logsumexp_neginf_safe
 from darksirens.likelihood.selection import (
     DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    _lse_to_log_mu_neff,
     selection_log_correction,
 )
 
@@ -272,20 +272,16 @@ def compute_cluster_selection_term(
         log_p_pop_fn, log_prior_z_fn, log_p_tag_per_source,
     )
 
-    log_sum_w = logsumexp(log_w)
-    log_n_draw = jnp.log(injections.n_draw_sources)
-    log_mu = log_sum_w - log_n_draw
-
-    log_sum_w2 = logsumexp(2.0 * log_w)
-    log_var_term = logdiffexp(log_sum_w2, 2.0 * log_sum_w - log_n_draw)
-    # Empty channel: variance is exactly zero; logdiffexp(-inf, -inf) is
-    # NaN — pin to -inf (same guard as the lensed-single term).
-    log_sigma2 = jnp.where(
-        jnp.isfinite(log_sum_w), log_var_term - 2.0 * log_n_draw, -jnp.inf
-    )
-
-    Neff = _neff_from_log_mu_sigma2(log_mu, log_sigma2)
-    return log_mu, Neff, log_sigma2
+    # Same reduction as the singleton path, and for the same reverse-mode
+    # reason: ``logdiffexp(x, x)`` (uniform weights -> exactly-zero variance)
+    # is -inf forward but NaN backward, and an empty channel's all--inf
+    # ``logsumexp`` has a NaN softmax.  ``_lse_to_log_mu_neff`` carries
+    # 1/N_eff directly with safe operands on both where-branches; it returns
+    # the identical (log_mu, Neff = inf / 0, log_sigma2 = -inf) verdicts the
+    # hand-rolled version pinned here, minus the NaN cotangents.
+    log_sum_w = logsumexp_neginf_safe(log_w)
+    log_sum_w2 = logsumexp_neginf_safe(2.0 * log_w)
+    return _lse_to_log_mu_neff(log_sum_w, log_sum_w2, injections.n_draw_sources)
 
 
 def compute_lensed_single_selection_term(
@@ -330,21 +326,12 @@ def compute_lensed_single_selection_term(
     valid = singles.valid & (singles.p_prop_src > 0.0) & (singles.p_prop_y > 0.0)
     log_w = jnp.where(valid & jnp.isfinite(log_w_raw), log_w_raw, -jnp.inf)
 
-    log_sum_w = logsumexp(log_w)
-    log_n_draw = jnp.log(singles.n_draw_sources)
-    log_mu = log_sum_w - log_n_draw
-
-    log_sum_w2 = logsumexp(2.0 * log_w)
-    log_var_term = logdiffexp(log_sum_w2, 2.0 * log_sum_w - log_n_draw)
-    # Empty channel (all weights -inf, e.g. tau_A = 0): the variance is
-    # exactly zero, but logdiffexp(-inf, -inf) is NaN — pin it to -inf so
-    # the channel drops out of combined sums instead of NaN-poisoning them.
-    log_sigma2 = jnp.where(
-        jnp.isfinite(log_sum_w), log_var_term - 2.0 * log_n_draw, -jnp.inf
-    )
-
-    Neff = _neff_from_log_mu_sigma2(log_mu, log_sigma2)
-    return log_mu, Neff, log_sigma2
+    # Same NaN-free reduction as the cluster term above: an empty channel
+    # (all weights -inf, e.g. tau_A = 0) and an exactly-zero variance both
+    # come back as pinned -inf/0/inf verdicts with finite cotangents.
+    log_sum_w = logsumexp_neginf_safe(log_w)
+    log_sum_w2 = logsumexp_neginf_safe(2.0 * log_w)
+    return _lse_to_log_mu_neff(log_sum_w, log_sum_w2, singles.n_draw_sources)
 
 
 def combined_selection_log_correction(
