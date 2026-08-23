@@ -7,23 +7,27 @@
 # max observed z = 0.3000 exactly). Replaces q_radial.h5 for the S-3 arms; the
 # earned f_p_aware stamp is what admits the q_fp pairing.
 set -euo pipefail
-cd "$(dirname "$0")"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$HERE"
+while [ ! -f "$REPO_ROOT/setup.py" ] && [ "$REPO_ROOT" != / ]; do
+  REPO_ROOT="$(dirname "$REPO_ROOT")"; done
+. "$REPO_ROOT/experiments/py_env.sh"
+cd "$HERE"
 
 export DARKSIRENS_ZMAX=6.0
-export PYTHONPATH=/hildafs/projects/phy230014p/magana/src/darksirens-dev
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 
 CATALOG=../desi_ingest/data/pixelated_n64/catalog_pixelated_nside_64.h5
 FIT=../desi_ingest/data/selection_fit_union.json
 DEPTH=../desi_ingest/data/mth_map_nside128.h5
 OUT=data/fits/q_v4_depthmap_prod.h5
-LOG10N0=$(python -c "import json; print(json.load(open('data/n0_calibration.json'))['log10n0'])")
-DELTA=$(python -c "import json; print(json.load(open('data/n0_calibration.json'))['delta'])")
+LOG10N0=$("$PYTHON" -c "import json; print(json.load(open('data/n0_calibration.json'))['log10n0'])")
+DELTA=$("$PYTHON" -c "import json; print(json.load(open('data/n0_calibration.json'))['delta'])")
 mkdir -p data/fits logs
 
 echo "log10n0=$LOG10N0 delta=$DELTA q_support_depth=0.30 ZMAX=6.0"
 
-JAX_PLATFORMS=cpu python -m darksirens.cli.build_lognormal_completion \
+JAX_PLATFORMS=cpu "$PYTHON" -m darksirens.cli.build_lognormal_completion \
   --catalog "$CATALOG" --out "$OUT" \
   --c-mode selection --selection-fit "$FIT" \
   --log10n0 "$LOG10N0" --delta "$DELTA" \

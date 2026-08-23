@@ -44,7 +44,9 @@ coordinates.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import shutil
 import sys
 import types
 
@@ -661,3 +663,144 @@ def test_samples_spread_inside_their_skymap_pixel(converted):
 
 def test_output_records_the_skymap_resolution(converted):
     assert int(converted["file_attrs"]["skymap_nside"]) == NSIDE
+
+
+# ---------------------------------------------------------------------------
+# REP-01: the artifact must be reproducible from what the artifact records
+# ---------------------------------------------------------------------------
+
+
+def _run_converter_seed(skymap_dir, output, seed=None):
+    """Like ``_run_converter`` but with an explicit (or omitted) ``--seed``."""
+    mod = importlib.import_module(CONVERTER_MODULE)
+    argv = [
+        "darksirens_skymaps_to_samples",
+        "--skymap_dir", str(skymap_dir),
+        "--output", str(output),
+        "--nsamp", str(NSAMP),
+        "--m1det_min", str(M1DET_MIN),
+        "--m1det_max", str(M1DET_MAX),
+        "--q_min", str(Q_MIN),
+        "--chi_abs_max", str(CHI_ABS_MAX),
+        "--pe_H0", str(PE_H0),
+        "--pe_Om0", str(PE_OM0),
+    ]
+    if seed is not None:
+        argv += ["--seed", str(seed)]
+    saved = sys.argv
+    sys.argv = argv
+    try:
+        mod.main()
+    finally:
+        sys.argv = saved
+
+
+@pytest.fixture(scope="module")
+def _two_skymaps(tmp_path_factory):
+    smdir = tmp_path_factory.mktemp("skymaps_rep01")
+    npix = hp.nside2npix(NSIDE)
+    _write_toy_3d_skymap(smdir / "eventA.fits", NSIDE,
+                         np.arange(0, npix // 8), MU_A, SIGMA)
+    _write_toy_3d_skymap(smdir / "eventB.fits", NSIDE,
+                         np.arange(npix // 2, npix // 2 + npix // 8), MU_B, SIGMA)
+    return smdir
+
+
+_SAMPLED = ("ra", "dec", "dL", "m1det", "m2det", "chieff")
+
+
+def _read(path, keys=_SAMPLED):
+    with h5py.File(path, "r") as f:
+        return dict(f.attrs), {k: np.asarray(f[k]) for k in keys}
+
+
+def test_generated_seed_is_recorded_and_regenerates_the_artifact(_two_skymaps, tmp_path):
+    """Run with NO --seed, then replay from the stamped seed alone.
+
+    Before this, ``--seed`` defaulted to None, ``default_rng(None)`` took fresh
+    OS entropy, and the output recorded nothing about it: an identical command
+    produced a different PE artifact and there was no way to say which one you
+    had. The default is still "fresh entropy" — it is now a fresh seed that is
+    written down.
+    """
+    a = tmp_path / "a.h5"
+    _run_converter_seed(_two_skymaps, a, seed=None)
+    attrs_a, data_a = _read(a)
+
+    assert "seed" in attrs_a, "the output records no effective seed"
+    assert bool(attrs_a["seed_was_generated"]) is True
+    seed = int(attrs_a["seed"])
+
+    # A second unseeded run must NOT collide (i.e. the default really is fresh
+    # entropy, not a silently fixed constant).
+    b = tmp_path / "b.h5"
+    _run_converter_seed(_two_skymaps, b, seed=None)
+    attrs_b, data_b = _read(b)
+    assert int(attrs_b["seed"]) != seed
+    assert not np.array_equal(data_a["dL"], data_b["dL"])
+
+    # The replay: the stamped seed, nothing else, reproduces the arrays exactly.
+    c = tmp_path / "c.h5"
+    _run_converter_seed(_two_skymaps, c, seed=seed)
+    attrs_c, data_c = _read(c)
+    assert int(attrs_c["seed"]) == seed
+    assert bool(attrs_c["seed_was_generated"]) is False
+    for k in _SAMPLED:
+        np.testing.assert_array_equal(
+            data_a[k], data_c[k],
+            err_msg=f"replay from the stamped seed did not reproduce {k}")
+
+
+def test_output_stamps_ordered_source_names_and_content_hashes(_two_skymaps, tmp_path):
+    """The seed alone does not identify the artifact: the sampling order is the
+    sorted glob, so the ordered sources are part of the identity."""
+    out = tmp_path / "prov.h5"
+    _run_converter_seed(_two_skymaps, out, seed=SEED)
+    with h5py.File(out, "r") as f:
+        names = [n.decode() if isinstance(n, bytes) else n
+                 for n in np.asarray(f["provenance_source_names"])]
+        hashes = [h.decode() if isinstance(h, bytes) else h
+                  for h in np.asarray(f["provenance_source_sha256"])]
+        digest = f.attrs["sources_sha256"]
+        pattern = f.attrs["skymap_pattern"]
+
+    assert names == ["eventA.fits", "eventB.fits"], names
+    assert len(hashes) == 2 and all(len(h) == 64 for h in hashes)
+    assert str(pattern) == "*.fits*"
+
+    # The hashes are the real file contents, in the glob order the sampler used.
+    for name, got in zip(names, hashes):
+        ref = hashlib.sha256((_two_skymaps / name).read_bytes()).hexdigest()
+        assert got == ref, f"{name}: stamped hash is not the file content"
+
+    # The rollup digest is order-sensitive: reversing the pairs changes it.
+    def roll(pairs):
+        d = hashlib.sha256()
+        for n, h in pairs:
+            d.update(n.encode()); d.update(b"\0"); d.update(h.encode()); d.update(b"\n")
+        return d.hexdigest()
+
+    assert str(digest) == roll(list(zip(names, hashes)))
+    assert str(digest) != roll(list(zip(names, hashes))[::-1])
+
+
+def test_edited_source_file_changes_the_recorded_provenance(_two_skymaps, tmp_path):
+    """A hash that did not move when the input did would be decoration."""
+    smdir = tmp_path / "edited"
+    shutil.copytree(_two_skymaps, smdir)
+    out0 = tmp_path / "p0.h5"
+    _run_converter_seed(smdir, out0, seed=SEED)
+    d0, _ = _read(out0, keys=())
+
+    npix = hp.nside2npix(NSIDE)
+    # Same event names, different sky support => same seed, different artifact.
+    _write_toy_3d_skymap(smdir / "eventA.fits", NSIDE,
+                         np.arange(npix // 4, npix // 4 + npix // 8), MU_A, SIGMA)
+    out1 = tmp_path / "p1.h5"
+    _run_converter_seed(smdir, out1, seed=SEED)
+    d1, _ = _read(out1, keys=())
+
+    assert int(d0["seed"]) == int(d1["seed"]) == SEED
+    assert str(d0["sources_sha256"]) != str(d1["sources_sha256"]), (
+        "the source digest did not move when a source file was rewritten"
+    )

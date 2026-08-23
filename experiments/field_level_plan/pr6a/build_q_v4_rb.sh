@@ -9,17 +9,21 @@
 # f_p_aware = True from the catalog-anchored verifier before validate_fp_q_v4.py
 # is allowed to mean anything.
 set -euo pipefail
-cd "$(dirname "$0")"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$HERE"
+while [ ! -f "$REPO_ROOT/setup.py" ] && [ "$REPO_ROOT" != / ]; do
+  REPO_ROOT="$(dirname "$REPO_ROOT")"; done
+. "$REPO_ROOT/experiments/py_env.sh"
+cd "$HERE"
 
 export DARKSIRENS_ZMAX=1.5   # the pr6a world pin (world16.py)
-export PYTHONPATH=/hildafs/projects/phy230014p/magana/src/darksirens-dev
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 
-LOG10N0=$(python -c "import json; print(json.load(open('data/rb/n0_calibration.json'))['log10n0'])")
-DELTA=$(python -c "import json; print(json.load(open('data/rb/n0_calibration.json'))['delta'])")
+LOG10N0=$("$PYTHON" -c "import json; print(json.load(open('data/rb/n0_calibration.json'))['log10n0'])")
+DELTA=$("$PYTHON" -c "import json; print(json.load(open('data/rb/n0_calibration.json'))['delta'])")
 mkdir -p logs
 
-JAX_PLATFORMS=cpu python -m darksirens.cli.build_lognormal_completion \
+JAX_PLATFORMS=cpu "$PYTHON" -m darksirens.cli.build_lognormal_completion \
   --catalog data/rb/catalog_pixelated_nside_16.h5 \
   --out data/rb/q_v4_maskfree.h5 \
   --c-mode selection --selection-fit data/rb/selection_fit.json \

@@ -156,20 +156,65 @@ def test_sensitivity_b_column_linear_response():
 
 
 def test_laplace_draws_antithetic_and_covariance():
+    """Antithetic PAIRING and the draw covariance — both discriminating.
+
+    This test used to assert
+
+        q  = resid^T (L L^T) resid
+        g2 = L^T resid
+        assert q == (g2**2).sum(1)
+
+    which is the identity ``x^T L L^T x == |L^T x|^2``: true to 4e-16 for a
+    uniform-random ``resid`` that is not a draw from anything at all.  It could
+    not fail, so it pinned nothing.  Replaced with the two properties that
+    actually characterise ``laplace_draws``.
+    """
     op, _ = _fixture(seed=6)
     sol = count_map_solve(op)
     xi_hat, L = sol["xi_hat"], sol["H_chol"]
-    draws = np.asarray(laplace_draws(xi_hat, L, 64, jax.random.PRNGKey(0)))
-    # antithetic: the sample mean is EXACTLY xi_hat
-    np.testing.assert_allclose(draws.mean(0), np.asarray(xi_hat),
-                               rtol=0, atol=1e-12)
-    # per-draw identity: H (xi_m - xi_hat) has cov H (whitened residuals)
-    resid = draws - np.asarray(xi_hat)[None, :]
-    white = resid @ np.asarray(L)                   # = g_m (L^{-T} g)^T L ...
-    # each residual satisfies L^T resid = g -> resid^T H resid = |g|^2
-    q = np.einsum("mi,ij,mj->m", resid, np.asarray(L @ L.T), resid)
-    g2 = (np.asarray(L.T) @ resid.T).T
-    np.testing.assert_allclose(q, (g2 ** 2).sum(1), rtol=1e-10)
+    xh, Ln = np.asarray(xi_hat), np.asarray(L)
+    n_draw = 64
+    draws = np.asarray(laplace_draws(xi_hat, L, n_draw, jax.random.PRNGKey(0)))
+
+    # ``steps = g L^{-1}``, so ``resid @ L`` recovers the whitened draws g.
+    resid = draws - xh[None, :]
+    white = resid @ Ln
+
+    # (1) ANTITHETIC PAIRING, member by member: partner of k is k + n/2, and
+    # the pair is an exact sign flip. A shuffled or unpaired stream still has
+    # mean ~0 but fails here -- this is the property PR-5b's balanced member
+    # ordering depends on, and the one the old assertion could not see.
+    half = n_draw // 2
+    np.testing.assert_allclose(white[:half], -white[half:], rtol=0, atol=1e-12)
+
+    # ... and the pairing makes the mean EXACTLY xi_hat, not merely close.
+    np.testing.assert_allclose(draws.mean(0), xh, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(white.mean(0), 0.0, rtol=0, atol=1e-12)
+
+    # (2) The whitened draws must be standard normal, i.e. the member
+    # covariance approaches H^{-1} = (L L^T)^{-1}. Independent of (1): a stream
+    # with the right pairing but a wrong scale, or one that forgot the
+    # triangular solve, passes (1) and fails this.
+    n_big = 20_000
+    big = np.asarray(laplace_draws(xi_hat, L, n_big, jax.random.PRNGKey(1)))
+    w_big = (big - xh[None, :]) @ Ln
+    M = xh.size
+    cov_w = (w_big.T @ w_big) / n_big
+    # sd of an empirical variance from n samples is sqrt(2/n) ~ 0.010 here;
+    # 5 sigma with a seeded RNG.
+    assert np.abs(np.diag(cov_w) - 1.0).max() < 0.05, np.diag(cov_w)
+    off = cov_w - np.diag(np.diag(cov_w))
+    assert np.abs(off).max() < 0.05, np.abs(off).max()
+
+    # The same statement in the unwhitened basis: Cov(xi_m) ~ H^{-1}.
+    H_inv = np.linalg.inv(Ln @ Ln.T)
+    cov_x = np.cov(big.T, bias=True)
+    scale = np.sqrt(np.outer(np.diag(H_inv), np.diag(H_inv)))
+    assert np.abs((cov_x - H_inv) / scale).max() < 0.06
+
+    # ... and it is really M-dimensional, not a collapsed rank-deficient cloud.
+    assert np.linalg.matrix_rank(cov_x, tol=1e-8 * np.trace(cov_x) / M) == M
+
     with pytest.raises(ValueError):
         laplace_draws(xi_hat, L, 7, jax.random.PRNGKey(0))
 

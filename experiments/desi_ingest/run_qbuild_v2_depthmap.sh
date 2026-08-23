@@ -17,23 +17,27 @@
 # builder forks workers, hence CPU JAX.  Empty covered pixels are deduped PER
 # f_p VALUE (each f_p is its own N_obs = 0 fit problem).
 set -euo pipefail
-cd "$(dirname "$0")"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$HERE"
+while [ ! -f "$REPO_ROOT/setup.py" ] && [ "$REPO_ROOT" != / ]; do
+  REPO_ROOT="$(dirname "$REPO_ROOT")"; done
+. "$REPO_ROOT/experiments/py_env.sh"
+cd "$HERE"
 
 export DARKSIRENS_ZMAX=0.75
-export PYTHONPATH=/hildafs/projects/phy230014p/magana/src/darksirens-dev
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 
 CATALOG=data/pixelated_n64/catalog_pixelated_nside_64.h5
 FIT=data/selection_fit_union.json
 DEPTH=data/mth_map_nside128.h5
 OUT=data/fits/q_v2_depthmap.h5
-LOG10N0=$(python -c "import json; print(json.load(open('data/n0_calibration.json'))['log10n0'])")
-DELTA=$(python -c "import json; print(json.load(open('data/n0_calibration.json'))['delta'])")
+LOG10N0=$("$PYTHON" -c "import json; print(json.load(open('data/n0_calibration.json'))['log10n0'])")
+DELTA=$("$PYTHON" -c "import json; print(json.load(open('data/n0_calibration.json'))['delta'])")
 mkdir -p data/fits logs
 
 echo "log10n0=$LOG10N0 delta=$DELTA"
 
-JAX_PLATFORMS=cpu python -m darksirens.cli.build_lognormal_completion \
+JAX_PLATFORMS=cpu "$PYTHON" -m darksirens.cli.build_lognormal_completion \
   --catalog "$CATALOG" --out "$OUT" \
   --c-mode selection --selection-fit "$FIT" \
   --log10n0 "$LOG10N0" --delta "$DELTA" \
@@ -44,7 +48,7 @@ JAX_PLATFORMS=cpu python -m darksirens.cli.build_lognormal_completion \
 # Measure the artifact independently of the builder's own stamp, and leave a
 # machine-readable record beside it (v1 left none, which is why its numbers
 # are prose).  DO NOT trust the stamp without reading this report.
-JAX_PLATFORMS=cpu python measure_maskfree_v2.py "$OUT" "$DEPTH" "$CATALOG" \
+JAX_PLATFORMS=cpu "$PYTHON" measure_maskfree_v2.py "$OUT" "$DEPTH" "$CATALOG" \
   --json data/fits/q_v2_depthmap_maskfree.json \
   2>&1 | tee -a logs/qbuild_v2_depthmap.log
 

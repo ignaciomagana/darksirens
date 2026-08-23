@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import secrets
 import warnings
 from pathlib import Path
 
@@ -142,8 +144,59 @@ def _positive_int(value: str) -> int:
     return ivalue
 
 
+def _effective_seed(seed: int | None) -> int:
+    """The seed actually used, materialised so it can be written down (REP-01).
+
+    ``--seed`` defaulted to ``None``, ``default_rng(None)`` draws fresh OS
+    entropy, and nothing about that entropy reached the output file.  The
+    artifact was therefore unreproducible even from its own command line: two
+    identical invocations produced different PE samples and neither recorded
+    which one it had been.  Drawing the entropy HERE, printing it and stamping
+    it into the file makes the default convenient AND replayable — rerun with
+    ``--seed <effective_seed>`` and you get the same artifact back.
+    """
+    if seed is not None:
+        return int(seed)
+    # 63 bits of OS entropy: the same kind of source ``default_rng(None)`` uses,
+    # but named rather than thrown away.  63 and not 128 so the value is an
+    # ordinary int64 -- printable, retypable on a command line, and storable as
+    # an HDF5 attribute (a 128-bit SeedSequence.entropy is none of those).
+    return int(secrets.randbits(63))
+
+
 def _rng(seed: int | None) -> np.random.Generator:
-    return np.random.default_rng(seed)
+    return np.random.default_rng(_effective_seed(seed))
+
+
+def _sha256(path: Path, _chunk: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(_chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _source_provenance(files):
+    """Ordered basenames + content hashes of the skymaps that fed this file.
+
+    The seed alone does not identify the artifact: the sampling order follows
+    ``sorted(skymap_dir.glob(pattern))``, so the same seed over a different (or
+    reordered, or edited) skymap set gives different samples.  Recording the
+    ordered names AND their sha256 makes the input side of the reproduction
+    checkable rather than assumed.
+    """
+    names = [Path(f).name for f in files]
+    hashes = [_sha256(Path(f)) for f in files]
+    # One hash over the ordered (name, hash) pairs: a single value a downstream
+    # record can quote, and it changes if the ORDER changes even when the set
+    # does not.
+    digest = hashlib.sha256()
+    for n, h in zip(names, hashes):
+        digest.update(n.encode())
+        digest.update(b"\0")
+        digest.update(h.encode())
+        digest.update(b"\n")
+    return names, hashes, digest.hexdigest()
 
 
 def _read_skymap(path: Path):
@@ -358,7 +411,16 @@ def main() -> None:
         default=5000,
         help="Samples per event. Larger reduces surrogate-mass MC noise (default 5000).",
     )
-    p.add_argument("--seed", type=int, default=None)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "RNG seed. Omitted, a fresh 128-bit OS seed is drawn, PRINTED, and "
+            "stamped into the output as attrs['seed'] — rerun with that value "
+            "(and the same skymaps) to regenerate the artifact exactly."
+        ),
+    )
     p.add_argument("--pattern", default="*.fits*", help="Glob for skymap files.")
     # --- surrogate mass/spin proposal (uninformative; reweighted to p_pop downstream) ---
     p.add_argument(
@@ -463,7 +525,15 @@ def main() -> None:
     if not files:
         raise FileNotFoundError(f"No skymaps in {skymap_dir} matching {args.pattern}")
 
-    rng = _rng(args.seed)
+    seed_effective = _effective_seed(args.seed)
+    rng = np.random.default_rng(seed_effective)
+    src_names, src_hashes, src_digest = _source_provenance(files)
+    print(
+        f"[skymaps_to_samples] seed={seed_effective}"
+        f"{'' if args.seed is not None else '  (generated; pass --seed to replay)'}\n"
+        f"[skymaps_to_samples] {len(files)} skymaps from {skymap_dir} "
+        f"matching {args.pattern!r}, sources_sha256={src_digest}"
+    )
     nobs, nsamp = len(files), args.nsamp
 
     ra = np.empty((nobs, nsamp))
@@ -614,6 +684,27 @@ def main() -> None:
         # chi_eff prior on top of it.
         f.attrs["chi_eff_in_p_pe"] = True
         f.attrs["chi_eff_amax"] = float(args.chi_abs_max)
+        # --- replay provenance (REP-01) ----------------------------------
+        # Everything needed to regenerate this file byte-for-byte:
+        #   darksirens_skymaps_to_samples --skymap_dir <dir> --pattern <pattern>
+        #       --nsamp <nsamp> --seed <seed> ... (the sampling knobs below)
+        # The seed alone is not enough — the sampling order is the sorted glob,
+        # so the ordered source list and its hashes are part of the identity.
+        # As a STRING: a user-supplied --seed is an unbounded Python int and
+        # h5py cannot store one that exceeds int64 ("Object dtype has no native
+        # HDF5 equivalent"). int(f.attrs["seed"]) round-trips either way, and a
+        # provenance stamp that can fail on a legal input is not a stamp.
+        f.attrs["seed"] = str(int(seed_effective))
+        f.attrs["seed_was_generated"] = bool(args.seed is None)
+        f.attrs["skymap_pattern"] = str(args.pattern)
+        f.attrs["skymap_dir"] = str(skymap_dir)
+        f.attrs["sources_sha256"] = str(src_digest)
+        f.create_dataset(
+            "provenance_source_names",
+            data=np.array(src_names, dtype=h5py.string_dtype()))
+        f.create_dataset(
+            "provenance_source_sha256",
+            data=np.array(src_hashes, dtype=h5py.string_dtype()))
         for name, arr in (
             ("ra", ra),
             ("dec", dec),

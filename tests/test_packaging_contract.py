@@ -16,7 +16,10 @@ without its ``__init__.py``, and pin the console-script targets to callables
 that keep the GPU teardown guard.
 """
 
+import re
 import subprocess
+import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -103,6 +106,86 @@ def test_console_scripts_for_long_running_clis_keep_the_teardown_guard():
 
     assert callable(inference_console_main)
     assert callable(lensing_console_main)
+
+
+def _files_setup_py_opens():
+    """Paths that ``setup.py`` reads at build time (so the sdist must ship them)."""
+    text = (REPO_ROOT / "setup.py").read_text()
+    return sorted(set(re.findall(r'open\(os\.path\.join\(_HERE,\s*"([^"]+)"\)', text)))
+
+
+def test_setup_py_reads_its_build_inputs_relative_to_itself():
+    """A cwd-relative ``open()`` in setup.py breaks any build from elsewhere.
+
+    ``python setup.py --name`` from outside the tree (and, historically, the
+    unpacked-sdist rebuild) died on ``open("requirements.txt")``.  Every
+    build-time read must be anchored to the setup.py directory.
+    """
+    text = (REPO_ROOT / "setup.py").read_text()
+    bare = [m for m in re.findall(r'open\(\s*"([^"]+)"', text)]
+    assert not bare, (
+        "setup.py opens these build inputs relative to the CWD, not to "
+        f"itself: {bare}. Wrap them in os.path.join(_HERE, ...)."
+    )
+    assert _files_setup_py_opens(), "no build-time reads found — did setup.py change shape?"
+
+    out = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "setup.py"), "--name"],
+        cwd=REPO_ROOT.parent, capture_output=True, text=True,
+    )
+    assert out.returncode == 0, f"setup.py --name failed outside the tree:\n{out.stderr}"
+    assert out.stdout.strip().splitlines()[-1] == "darksirens", out.stdout
+
+
+def test_sdist_ships_every_file_setup_py_needs_to_rebuild_itself(tmp_path):
+    """The generated sdist must be able to build itself (OPS-01).
+
+    ``setup.py`` reads requirements.txt for ``install_requires``; setuptools
+    does not put non-package data files into an sdist on its own, so without
+    MANIFEST.in the tarball shipped to PyPI unpacked into a tree whose very
+    first build step raised ``FileNotFoundError: 'requirements.txt'``.  CI only
+    ever built from the checkout, where the file is present, so the wheel job
+    stayed green while the source artifact was dead on arrival.
+    """
+    needed = _files_setup_py_opens()
+    dist = tmp_path / "dist"
+    egg = tmp_path / "egg"
+    egg.mkdir()
+    # --egg-base into tmp: setuptools REUSES a stale SOURCES.txt if the
+    # checkout already carries a darksirens.egg-info from an earlier build,
+    # which would let a tarball built without MANIFEST.in still list the file
+    # and hide the very defect this pins.
+    build = subprocess.run(
+        [sys.executable, "setup.py", "-q",
+         "egg_info", "--egg-base", str(egg),
+         "sdist", "--formats=gztar", "--dist-dir", str(dist)],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    assert build.returncode == 0, f"sdist build failed:\n{build.stderr[-3000:]}"
+    tarballs = sorted(dist.glob("*.tar.gz"))
+    assert len(tarballs) == 1, tarballs
+
+    with tarfile.open(tarballs[0]) as tf:
+        names = tf.getnames()
+        root = names[0].split("/")[0]
+        missing = [f for f in needed if f"{root}/{f}" not in names]
+        assert not missing, (
+            "the sdist omits files setup.py opens at build time — the source "
+            f"distribution cannot rebuild itself: {missing}. Add them to "
+            "MANIFEST.in."
+        )
+        tf.extractall(tmp_path / "ext")
+
+    # The reproduction itself: build metadata from the UNPACKED sdist.
+    src = tmp_path / "ext" / root
+    out = subprocess.run(
+        [sys.executable, "setup.py", "--name"],
+        cwd=src, capture_output=True, text=True,
+    )
+    assert out.returncode == 0, (
+        f"the unpacked sdist cannot run its own setup.py:\n{out.stderr[-3000:]}"
+    )
+    assert out.stdout.strip().splitlines()[-1] == "darksirens", out.stdout
 
 
 def test_chi_eff_prior_tables_agree_across_packages():

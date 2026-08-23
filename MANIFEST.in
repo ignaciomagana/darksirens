@@ -1,0 +1,18 @@
+# Files setup.py READS at build time must travel inside the sdist, or the
+# source distribution cannot rebuild itself: `pip install darksirens-*.tar.gz`
+# unpacks into a scratch directory and re-runs setup.py there, where
+# `open("requirements.txt")` raised FileNotFoundError before this file existed
+# (the wheel built from the checkout was fine, which is why CI never saw it).
+include requirements.txt
+include README.md
+include LICENSE
+
+# Build/lint configuration a downstream rebuild or an unpacked-source test run
+# expects to find next to setup.py.
+include pyproject.toml
+include pytest.ini
+include ruff.toml
+
+# The Tier-0 manifest is read by tests/ (and by docs), so an sdist that ships
+# tests/ without it collects a broken gate.
+include tests/fast_subset.txt

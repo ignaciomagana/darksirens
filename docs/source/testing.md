@@ -81,10 +81,26 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu \
   $RUN python -m pytest -q $(grep -v '^#' tests/fast_subset.txt)
 ```
 
-Measured 2026-07-29 on a CPU-only box (CPython 3.11.10, jax 0.4.34, numpy
-1.26.4): **32 files, 214 passed, 1 skipped, ~3 min**. Every file in it is verified
-green both standalone and in the batch, and none of them depends on the numpy
-major version. Collection over the whole tree is still a useful cheap check:
+Measured 2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4): **53 files,
+557 tests collected**, with the last end-to-end timing **17m47s in GitHub CI**
+(and 21m10s on a shared review node) at the then-current 49 files / 519 tests.
+Every file in it is verified green both standalone and in the batch, and none of
+them depends on the numpy major version.
+
+> This block said "32 files, 214 passed, ~3 min" until 2026-08-23, having been
+> measured on 2026-07-29. The gate had meanwhile grown ~2.5x, so a contributor
+> was told to expect three minutes before every commit and got closer to twenty.
+> It is a *record*, not an aspiration: re-measure it when you add files, with
+> the commands in the `tests/fast_subset.txt` header.
+
+**Capacity.** `.github/workflows/ci.yml` gives this job `timeout-minutes: 30`,
+so ~18 min leaves roughly 12 min of headroom — not urgent, but the trend is one
+way. When a run comes in over ~25 min, split the manifest into fresh-process
+shards (which also releases the JAX caches between groups) rather than raising
+the timeout. Do **not** reach for a monolithic CPU full-suite job to relieve it,
+for the RSS reason below.
+
+Collection over the whole tree is still a useful cheap check:
 
 ```bash
 $RUN python -m pytest tests/ --collect-only -q     # should report 0 errors

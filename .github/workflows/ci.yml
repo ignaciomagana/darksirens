@@ -133,6 +133,7 @@ jobs:
       - name: Console scripts resolve
         run: |
           darksirens_inference --help > /dev/null
+
           darksirens_inference_lensing --help > /dev/null
           darksirens_analyze --help > /dev/null
           darksirens_pixelate --help > /dev/null
@@ -140,3 +141,75 @@ jobs:
           darksirens_build_lognormal_completion --help > /dev/null
           darksirens_build_joint_lognormal_completion --help > /dev/null
           darksirens_diagnose_lognormal_completion --help > /dev/null
+
+  distribution:
+    # The job above installs from the CHECKOUT, where every build input is on
+    # disk whether or not the sdist would ship it.  That is exactly why the
+    # sdist could not build itself for as long as it did (setup.py opened
+    # requirements.txt; MANIFEST.in did not ship it).  This job builds BOTH
+    # artifacts, inspects them, and installs each one from OUTSIDE the
+    # checkout, which is the only place the defect is visible.
+    name: sdist and wheel build and install
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --sdist --wheel --outdir dist .
+          ls -l dist
+
+      - name: Inspect both artifacts
+        # The sdist must carry every file setup.py reads at build time, and the
+        # wheel must carry the package tree (an empty-directory regression ships
+        # an importable-looking wheel with no modules).
+        run: |
+          python - <<'PY'
+          import pathlib, re, tarfile, zipfile
+          setup = pathlib.Path("setup.py").read_text()
+          needed = sorted(set(re.findall(
+              r'open\(os\.path\.join\(_HERE,\s*"([^"]+)"\)', setup)))
+          assert needed, "no build-time reads found in setup.py"
+          sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist) as tf:
+              names = tf.getnames()
+          root = names[0].split("/")[0]
+          missing = [f for f in needed if f"{root}/{f}" not in names]
+          assert not missing, f"sdist cannot rebuild itself, missing: {missing}"
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as zf:
+              mods = [n for n in zf.namelist()
+                      if n.startswith("darksirens/") and n.endswith(".py")]
+          assert len(mods) > 50, f"wheel ships only {len(mods)} modules"
+          print(f"sdist {sdist.name}: ok ({len(names)} entries)")
+          print(f"wheel {wheel.name}: ok ({len(mods)} modules)")
+          PY
+
+      - name: Install the sdist from outside the checkout
+        # --no-build-isolation would hide a missing pyproject build-require, and
+        # --no-deps keeps this about packaging rather than index availability.
+        # cd out of the repo: from the checkout root the source tree shadows
+        # site-packages and the import check passes even from a dead artifact.
+        run: |
+          python -m pip install ${{ env.PIP_DEPS }}
+          python -m pip install --no-deps "$(ls dist/*.tar.gz)"
+          cd /tmp && python -c "
+          import darksirens, darksirens.likelihood.core, darksirens.utils.cosmology
+          assert 'site-packages' in darksirens.__file__, darksirens.__file__
+          print('sdist install ok:', darksirens.__file__)"
+          python -m pip uninstall -y darksirens
+
+      - name: Install the wheel from outside the checkout
+        run: |
+          python -m pip install --no-deps "$(ls dist/*.whl)"
+          cd /tmp && python -c "
+          import darksirens, darksirens.likelihood.core, darksirens.utils.cosmology
+          assert 'site-packages' in darksirens.__file__, darksirens.__file__
+          print('wheel install ok:', darksirens.__file__)"

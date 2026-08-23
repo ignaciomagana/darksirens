@@ -33,6 +33,44 @@ import numpy as np
 
 CLIGHT = 299792.458
 
+# numpy 1 / numpy 2 both, per the repo-wide convention in docs/source/testing.md.
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+
+
+def shell_integral(zf, dens, lo, hi):
+    """Integrate ``dens(zf)`` over ``[lo, hi]``, honouring the shell EDGES.
+
+    The previous form was
+
+        np.trapz(np.where((zf >= lo) & (zf < hi), dens, 0.0), zf)
+
+    over the whole fine grid.  Zeroing outside the shell and then applying the
+    trapezoid rule across the boundary cells is algebraically a RECTANGLE sum
+    over the selected nodes: the two straddling half-cells contribute
+    ``0.5*dens[first]*dz`` and ``0.5*dens[last]*dz`` instead of the partial
+    cells the shell actually covers.  The shell width is therefore effectively
+    ``(#nodes inside) * dz`` rather than ``hi - lo``, and since the fine grid
+    is not aligned to the shell edges that node count varies -- 50, 50, ..., 49
+    on the default 600-node / 12-shell setup.  Measured against a converged
+    reference on a synthetic (1+z)^3 z^2 integrand: per-shell errors of -1.45%,
+    +0.33%, -1.89%, and -0.30% on the total.
+
+    A 2% shift on a shell holding ~4000 galaxies is ~80 counts against a
+    Poisson sigma of ~63, i.e. a z-score of order one manufactured by the
+    quadrature -- in a diagnostic whose entire output is per-shell z-scores.
+
+    Here the sub-grid is the nodes strictly inside the shell with the two
+    edges spliced on at their interpolated heights, so the integration domain
+    is exactly [lo, hi] and adjacent shells tile without gap or overlap.
+    """
+    zf = np.asarray(zf, dtype=float)
+    dens = np.asarray(dens, dtype=float)
+    inside = (zf > lo) & (zf < hi)
+    zs = np.concatenate([[lo], zf[inside], [hi]])
+    ds = np.concatenate([
+        [np.interp(lo, zf, dens)], dens[inside], [np.interp(hi, zf, dens)]])
+    return float(_trapezoid(ds, zs))
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
@@ -96,7 +134,7 @@ def main(argv=None):
 
     fsum = float(f_p.sum())
     T_pred = np.array([
-        fsum * np.trapz(np.where((zf >= lo) & (zf < hi), dens, 0.0), zf)
+        fsum * shell_integral(zf, dens, lo, hi)
         for lo, hi in zip(edges[:-1], edges[1:])])
 
     zsc = (T_obs - T_pred) / np.sqrt(np.maximum(T_pred, 1.0))
