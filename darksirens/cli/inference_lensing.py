@@ -233,8 +233,60 @@ from darksirens.lensing.lensed_injections import (
 from darksirens.lensing.fcpdet import make_fc_pdet_params
 
 
+BOTH_DETECTED_APPROX_REFUSAL = (
+    "Refusing to INFER lensing-rate parameters under the both-detected pair "
+    "approximation.\n\n"
+    "Every both-detected pair is being counted as identified (p_tag = 1), "
+    "which darksirens.likelihood.cluster_selection states is an UPPER BOUND "
+    "on the true pair-detection probability: it OVERestimates mu_sel^(2), so "
+    "the master likelihood's -mu_sel^(2) penalty for high rates is too strong "
+    "and the inferred optical-depth parameters (log10_tau_A, n_tau) come out "
+    "BIASED LOW. That bias lands directly on the quantities --fix_lens_rate "
+    "false is sampling.\n\n"
+    "Either supply a calibrated pair-identification efficiency "
+    "(--pair_tag_model file --pair_tag_selection_path ..., or a campaign "
+    "carrying p_tag_per_source), or fix the rate (--fix_lens_rate true), or "
+    "pass --allow_both_detected_approx true to acknowledge the bias -- the "
+    "acknowledgement is stamped into settings.json and results.hdf5 so the "
+    "archived run says which arm it is."
+)
+
+
+def _both_detected_approx_stamp(opts) -> dict:
+    """The pair-tag approximation block stamped into settings AND results.hdf5.
+
+    ``pair_tag_both_detected_approx`` is what the run RESOLVED to (p_tag == 1
+    for every kept source), not what was requested; ``lens_rate_inferred`` says
+    whether the biased quantities were being sampled at all.
+    """
+    return {
+        "pair_tag_both_detected_approx": bool(
+            getattr(opts, "pair_tag_both_detected_approx", False)),
+        "allow_both_detected_approx": bool(
+            getattr(opts, "allow_both_detected_approx", False)),
+        "lens_rate_inferred": not bool(getattr(opts, "fix_lens_rate", True)),
+    }
+
+
+def _gate_both_detected_approximation(opts, log_p_tag):
+    """Refuse an un-acknowledged rate inference under p_tag == 1.
+
+    Records ``opts.pair_tag_both_detected_approx`` either way, so the save
+    phase can stamp what the run actually did rather than what was requested.
+    """
+    arr = np.asarray(log_p_tag) if log_p_tag is not None else np.zeros(0)
+    approx = bool(arr.size > 0 and np.all(arr == 0.0))
+    opts.pair_tag_both_detected_approx = approx
+    rate_inferred = not bool(getattr(opts, "fix_lens_rate", True))
+    if approx and rate_inferred and not bool(
+        getattr(opts, "allow_both_detected_approx", False)
+    ):
+        raise SystemExit(BOTH_DETECTED_APPROX_REFUSAL)
+
+
 def _pair_tag_log_probs_from_options(opts, lensed):
     if lensed is None:
+        opts.pair_tag_both_detected_approx = False
         return jnp.zeros(0)
     kind = getattr(opts, "pair_tag_model", "constant")
     perturb = float(getattr(opts, "pair_tag_perturb_logit", 0.0) or 0.0)
@@ -243,7 +295,9 @@ def _pair_tag_log_probs_from_options(opts, lensed):
     elif kind == "constant" and perturb == 0.0 and float(getattr(opts, "pair_tag_constant", 1.0)) == 1.0:
         # Preserve legacy behavior: consume the p_tag dataset written by older mocks.
         fallback = jnp.zeros(int(np.asarray(lensed.m1_src).shape[0]))
-        return jnp.asarray(getattr(lensed, "log_p_tag_per_source", fallback))
+        log_p_tag = jnp.asarray(getattr(lensed, "log_p_tag_per_source", fallback))
+        _gate_both_detected_approximation(opts, log_p_tag)
+        return log_p_tag
     else:
         model = make_pair_tag_selection_model(
             kind,
@@ -261,7 +315,12 @@ def _pair_tag_log_probs_from_options(opts, lensed):
         fields[name] = arr
     if missing:
         raise SystemExit(f"pair_tag_model={model.kind} requires lensed injection fields: {missing}")
-    return jnp.asarray(model.log_probability(**fields))
+    log_p_tag = jnp.asarray(model.log_probability(**fields))
+    # A model can still evaluate to p_tag == 1 everywhere (constant=1.0 with a
+    # nonzero perturb that cancels, a file of ones): gate on the RESOLVED
+    # values, not on the flags that were typed.
+    _gate_both_detected_approximation(opts, log_p_tag)
+    return log_p_tag
 
 # =============================================================================
 # Local lensing-parameter space
@@ -3005,6 +3064,15 @@ def build_parser():
     model.add_argument("--pair_tag_perturb_logit", type=float, default=0.0)
     model.add_argument("--pair_tag_selection_path", default=None)
     model.add_argument(
+        "--allow_both_detected_approx",
+        type=str_to_bool, default=False, metavar="BOOL",
+        help="Acknowledge the both-detected pair approximation (p_tag = 1) "
+             "while INFERRING lensing rates (--fix_lens_rate false). That "
+             "approximation overestimates mu_sel^(2) and biases the inferred "
+             "optical-depth parameters LOW, so the run is refused without this "
+             "flag; passing it is stamped into settings.json and results.hdf5.",
+    )
+    model.add_argument(
         "--edge_mark_prior_keys",
         default="",
         help="Comma-separated log_* candidate edge marks to add to edge log_prior_odds in exact marginalization.",
@@ -3441,6 +3509,8 @@ def _print_run_configuration(opts):
     _row("Singleton lensing", opts.singleton_lensing)
     print("  │")
     _row("Fix lens rate",     "yes" if opts.fix_lens_rate else "no")
+    if getattr(opts, "allow_both_detected_approx", False):
+        _row("Both-detected approx", "ACKNOWLEDGED (p_tag=1 biases tau LOW)")
     _row("SIS tau A, n",      f"{opts.sl_tau_A}, {opts.sl_tau_n}")
     _row("SIS T0", f"{_sl_T0_seconds(opts):.4g} s ({_sl_T0_seconds(opts) / 86400.0:.3g} d)")
     _row("Sampler",           opts.sampler)
@@ -3912,6 +3982,11 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             f.attrs["pair_tag_model"] = opts.pair_tag_model
             f.attrs["pair_tag_constant"] = float(opts.pair_tag_constant)
             f.attrs["pair_tag_perturb_logit"] = float(opts.pair_tag_perturb_logit)
+            # Whether this run RESOLVED to p_tag == 1 (the both-detected upper
+            # bound), and whether that was explicitly acknowledged.  With the
+            # lensing rate sampled, the first biases the optical-depth
+            # parameters low, so a reader must be able to see it in the archive.
+            f.attrs.update(_both_detected_approx_stamp(opts))
             _write_result_partition_metadata(
                 f.attrs, opts=opts, inp=inp, diagnostics=diagnostics,
                 eval_point_label=diagnostics_point_label,
@@ -3955,6 +4030,7 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
         # so it holds resume_force but not the gate's verdict; add the verdict
         # here, where the run is over and the digest is known.
         settings.update(resume_provenance_attrs(opts))
+        settings.update(_both_detected_approx_stamp(opts))
         settings.update(
             wl_a=float(opts.lensing_wl_a),
             wl_b=float(opts.lensing_wl_b),

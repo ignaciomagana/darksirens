@@ -151,6 +151,13 @@ def _cli_cmd(mock_dir: Path, save_root: Path, *, cluster_mode: str, partition: P
         cmd += ["--observed_catalog_path", str(mock_dir / "observed_catalog.json")]
     if not fix_lens_rate:
         cmd += ["--fixed_parameter_values", '{"tau_n": 3.0}', "--lens_prior_overrides", '{"log10_tau_A": [-5.0, -2.5]}']
+        if pair_tag_model == "constant" and pair_tag_constant == 1.0 and pair_tag_perturb_logit == 0.0:
+            # Sampling the optical depth under p_tag == 1 (the both-detected
+            # upper bound) biases it LOW; the CLI refuses that unless it is
+            # acknowledged.  This is a self-consistency validation of the
+            # estimator, not a science measurement, so acknowledge it here --
+            # a recovery run against a CALIBRATED tag efficiency does not.
+            cmd += ["--allow_both_detected_approx", "true"]
     if cluster_mode == "j2":
         cmd += ["--lensed_injections_path", str(mock_dir / "mock_lensed_injections.h5"), "--partition_mode", partition_mode]
         if use_unified_observed_catalog:

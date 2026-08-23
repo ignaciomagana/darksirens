@@ -442,6 +442,12 @@ def inference_cmd(case_dir: Path, run_dir: Path, spec: dict[str, Any], cfg: dict
            *(["--selection_neff_guard", str(cfg["selection_neff_guard"])] if cfg.get("selection_neff_guard") else []),
            "--seed", str(cfg["seed"]), "--pair_marks", spec["pair_marks"], "--pair_tag_model", spec["pair_tag_model"],
            "--pair_tag_constant", str(spec["pair_tag_constant"]), "--pair_tag_perturb_logit", str(spec["pair_tag_perturb_logit"]),
+           # p_tag == 1 with the lens rate SAMPLED biases the optical depth low
+           # (the both-detected upper bound); the CLI refuses that combination
+           # unless it is acknowledged.  Opt in per study config rather than
+           # silently -- a study whose tag model is calibrated never needs it.
+           *(["--allow_both_detected_approx", "true"]
+             if cfg.get("allow_both_detected_approx", False) else []),
            "--edge_mark_prior_keys", spec["edge_mark_prior_keys_csv"], "--save_path", str(run_dir),
            "--resume", ("off" if diagnostics_only else str(getattr(args, "resume", "auto")))]
     if cfg.get("prior_overrides"):
