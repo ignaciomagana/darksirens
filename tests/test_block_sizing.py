@@ -30,6 +30,12 @@ from darksirens.likelihood.block_sizing import (
     STATIC_STATE_CAL_BYTES,
     SEL_BYTES_PER_INJECTION_VALUE,
     PE_BYTES_PER_SAMPLE_VALUE,
+    SEL_BYTES_PER_INJECTION_CAT,
+    PE_BYTES_PER_SAMPLE_CAT,
+    SEL_BYTES_PER_INJECTION_VALUE_CAT,
+    PE_BYTES_PER_SAMPLE_VALUE_CAT,
+    GRAD_RUNTIME_FIXED_BYTES,
+    GRAD_WORKSET_FLOOR_BYTES,
     SAFETY_FACTOR,
     block_size_arg,
     resolve_block_sizes,
@@ -638,6 +644,118 @@ def test_explicit_small_max_gals_is_trusted():
     assert sparse >= dense
 
 
+# ── JAX-03: the catalog estimate is spectral COMMON + catalog INCREMENT ─────────
+#
+# The old model multiplied the WHOLE per-unit cost — and the gradient
+# working-set floor — by ``gals_ratio * n_catalogs``.  At the calibration shapes
+# a one-galaxy-per-row catalog therefore predicted a 1.746 GB gradient peak
+# against the 80.283 GB the equivalent catalog-free path predicts: ~46x below a
+# working set the two paths SHARE (same population log density, same exact q
+# normalisation, same per-sample selection/PE weights).  ``auto`` would promise
+# a single pass on a 40-60 GB card for a graph needing ~80 GB.
+
+_CAL_SHAPES = dict(n_events=CAL_N_EVENTS, n_samp=CAL_N_SAMP, n_sel=CAL_N_SEL)
+
+#: Catalog-free predictions at the calibration shapes, pinned so a remodel of
+#: the catalog path cannot move the spectral path it is measured against.
+_SPECTRAL_GRAD_PEAK = 80_283_217_392.0
+_SPECTRAL_VALUE_PEAK = 6_413_471_824.0
+
+
+@pytest.mark.parametrize("needs_grad,expected",
+                         [(True, _SPECTRAL_GRAD_PEAK), (False, _SPECTRAL_VALUE_PEAK)])
+def test_spectral_path_prediction_is_unchanged(needs_grad, expected):
+    """The catalog remodel must not move the catalog-free path by one byte."""
+    assert predicted_peak_bytes(
+        **_CAL_SHAPES, has_catalog=False, needs_grad=needs_grad) == expected
+
+
+@pytest.mark.parametrize("needs_grad", [True, False])
+@pytest.mark.parametrize("max_gals", [1, 2, 10, 300, 1000, CAL_MAX_GALS_PER_ROW,
+                                      2 * CAL_MAX_GALS_PER_ROW])
+@pytest.mark.parametrize("n_catalogs", [1, 2, 3])
+def test_catalog_never_predicts_below_the_catalog_free_baseline(
+        needs_grad, max_gals, n_catalogs):
+    """Adding catalog work can only ADD memory.  No density empties the shared set."""
+    spectral = predicted_peak_bytes(
+        **_CAL_SHAPES, has_catalog=False, needs_grad=needs_grad)
+    catalog = predicted_peak_bytes(
+        **_CAL_SHAPES, has_catalog=True, needs_grad=needs_grad,
+        max_gals_per_row=max_gals, n_catalogs=n_catalogs)
+    assert catalog >= spectral
+
+
+def test_sparse_catalog_no_longer_underpredicts_by_46x():
+    """The exact reproduction: max row 1 predicted 1.746 GB against 80.283 GB."""
+    sparse = predicted_peak_bytes(
+        **_CAL_SHAPES, has_catalog=True, needs_grad=True, max_gals_per_row=1)
+    assert sparse >= _SPECTRAL_GRAD_PEAK
+    # ... and it is an INCREMENT on that baseline, not a rescaling of it.
+    assert sparse < 1.01 * _SPECTRAL_GRAD_PEAK
+
+
+@pytest.mark.parametrize("needs_grad", [True, False])
+def test_catalog_peak_is_monotonic_in_density_and_count(needs_grad):
+    """More galaxies per row, or more catalogs, never predicts LESS memory."""
+    widths = [1, 2, 10, 300, 1000, CAL_MAX_GALS_PER_ROW, 2 * CAL_MAX_GALS_PER_ROW]
+    peaks = [predicted_peak_bytes(**_CAL_SHAPES, has_catalog=True,
+                                  needs_grad=needs_grad, max_gals_per_row=m)
+             for m in widths]
+    assert peaks == sorted(peaks)
+    assert peaks[-1] > peaks[0]                      # the term is not inert
+    by_k = [predicted_peak_bytes(**_CAL_SHAPES, has_catalog=True,
+                                 needs_grad=needs_grad,
+                                 max_gals_per_row=CAL_MAX_GALS_PER_ROW,
+                                 n_catalogs=k)
+            for k in (1, 2, 3, 4)]
+    assert by_k == sorted(by_k)
+    assert by_k[-1] > by_k[0]
+
+
+def _legacy_catalog_peak(cat_scale, needs_grad):
+    """The shipped multiplicative model, recomputed from the same constants."""
+    if needs_grad:
+        fixed = GRAD_RUNTIME_FIXED_BYTES + cat_scale * GRAD_WORKSET_FLOOR_BYTES
+        sel_b, pe_b = SEL_BYTES_PER_INJECTION_CAT, PE_BYTES_PER_SAMPLE_CAT
+    else:
+        fixed = float(TRUE_FIXED_VALUE_BYTES)
+        sel_b, pe_b = SEL_BYTES_PER_INJECTION_VALUE_CAT, PE_BYTES_PER_SAMPLE_VALUE_CAT
+    sel = CAL_N_SEL * sel_b * cat_scale
+    pe = CAL_N_EVENTS * CAL_N_SAMP * pe_b * cat_scale
+    return fixed + (sel + pe if needs_grad else max(sel, pe))
+
+
+@pytest.mark.parametrize("needs_grad", [True, False])
+@pytest.mark.parametrize("max_gals,n_catalogs,cat_scale", [
+    (CAL_MAX_GALS_PER_ROW, 1, 1.0),
+    (2 * CAL_MAX_GALS_PER_ROW, 1, 2.0),
+    (CAL_MAX_GALS_PER_ROW, 3, 3.0),
+])
+def test_dense_catalog_predictions_are_bit_identical_to_the_shipped_model(
+        needs_grad, max_gals, n_catalogs, cat_scale):
+    """At and above the calibration density nothing moves: the remodel only lifts
+    the SPARSE end.  The _CAT constants are still unmeasured 2x estimates, so
+    lowering a dense-catalog prediction is the OOM-risky direction."""
+    assert predicted_peak_bytes(
+        **_CAL_SHAPES, has_catalog=True, needs_grad=needs_grad,
+        max_gals_per_row=max_gals, n_catalogs=n_catalogs
+    ) == _legacy_catalog_peak(cat_scale, needs_grad)
+
+
+def test_sparse_catalog_cannot_single_pass_a_card_the_spectral_path_blocks():
+    """The operational consequence: a 60 GB card.  The shared gradient graph needs
+    ~80 GB, so neither path may promise a single pass — the sparse catalog used to."""
+    base = dict(n_events=CAL_N_EVENTS, n_samp=CAL_N_SAMP, n_sel=CAL_N_SEL,
+                sel_requested=BLOCK_AUTO, pe_requested=BLOCK_AUTO,
+                flow_path=False, needs_grad=True, free_bytes=60 * GB,
+                backend="gpu")
+    spectral = resolve_block_sizes(has_catalog=False, **base)
+    sparse = resolve_block_sizes(has_catalog=True, max_gals_per_row=1, **base)
+    assert spectral.sel_batch_size is not None
+    assert sparse.sel_batch_size is not None
+    assert sparse.sel_batch_size <= spectral.sel_batch_size
+
+
 # ── P-6: the population q-quadrature grid enters the peak model ──────────────────
 
 def test_monotonic_in_n_q():
@@ -973,11 +1091,12 @@ def test_lensing_cli_threads_sampler_profile(monkeypatch):
 
 # ── free-memory probe: the platform-allocator fallback (issue #276) ──────────────
 #
-# ``core.jax_config`` sets XLA_PYTHON_CLIENT_ALLOCATOR=platform, under which
-# ``device.memory_stats()`` returns None. Before the nvidia-smi fallback every
-# production CLI run therefore fell through to the 4 GB default (measured: 4 GB
-# reported on an H100 NVL with 92.4 GB actually free), so memory-aware sizing —
-# and the calibrated single-pass constants — never engaged.
+# Under XLA_PYTHON_CLIENT_ALLOCATOR=platform ``device.memory_stats()`` returns
+# None. That was ``core.jax_config``'s default until 2026-08-23 and is still an
+# honored explicit override. Before the nvidia-smi fallback every such CLI run
+# fell through to the 4 GB default (measured: 4 GB reported on an H100 NVL with
+# 92.4 GB actually free), so memory-aware sizing — and the calibrated
+# single-pass constants — never engaged.
 
 class _FakeDevice:
     def __init__(self, stats, platform="gpu", dev_id=0):
@@ -1007,19 +1126,71 @@ def test_probe_env_override_ignored_when_unusable(monkeypatch, bad):
     from darksirens.likelihood.block_sizing import (
         DEVICE_MEM_ENV_VAR, probe_device_memory_bytes,
     )
+    import darksirens.likelihood.block_sizing as bs
     monkeypatch.setenv(DEVICE_MEM_ENV_VAR, bad)
     _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 40 * GB}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: None)
     nbytes, source = probe_device_memory_bytes()
     assert source == "device:gpu bytes_limit-in_use" and nbytes == 40 * GB
 
 
 def test_probe_prefers_memory_stats_over_nvidia_smi(monkeypatch):
+    """Allocator telemetry is the preferred signal when the device is not shared.
+
+    nvidia-smi reports MORE free than the allocator's own headroom here (nothing
+    else is on the card), so the telemetry value passes through untouched — it
+    is the view the peak constants were calibrated against.
+    """
     import darksirens.likelihood.block_sizing as bs
     monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
     _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 40 * GB, "bytes_in_use": 10 * GB}))
-    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes",
-                        lambda i: pytest.fail("nvidia-smi must not be reached"))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: 35 * GB)
     assert bs.probe_device_memory_bytes() == (30 * GB, "device:gpu bytes_limit-in_use")
+
+
+def test_probe_clips_allocator_headroom_to_physical_free(monkeypatch):
+    """SHARED GPU: BFC's bytes_limit is the whole card, blind to another process.
+
+    The physical free memory is the smaller, and therefore the only safe budget.
+    """
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 80 * GB, "bytes_in_use": 0}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: 12 * GB)
+    nbytes, source = bs.probe_device_memory_bytes()
+    assert nbytes == 12 * GB
+    assert source == "min(device:gpu bytes_limit-in_use, nvidia-smi memory.free)"
+
+
+def test_probe_clips_reservable_limit_to_physical_free(monkeypatch):
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_reservable_limit": 80 * GB}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: 9 * GB)
+    nbytes, source = bs.probe_device_memory_bytes()
+    assert nbytes == 9 * GB
+    assert source == "min(device:gpu bytes_reservable_limit, nvidia-smi memory.free)"
+
+
+def test_probe_keeps_telemetry_when_nvidia_smi_unavailable(monkeypatch):
+    """No nvidia-smi (or it fails): the allocator view is used as-is, not dropped."""
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 40 * GB, "bytes_in_use": 10 * GB}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: None)
+    assert bs.probe_device_memory_bytes() == (30 * GB, "device:gpu bytes_limit-in_use")
+
+
+def test_probe_does_not_shell_out_for_telemetry_on_cpu(monkeypatch):
+    """A CPU/TPU device never consults nvidia-smi, even with live telemetry."""
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch,
+                   _FakeDevice({"bytes_limit": 40 * GB, "bytes_in_use": 10 * GB},
+                               platform="tpu"))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes",
+                        lambda i: pytest.fail("must not shell out on a non-GPU device"))
+    assert bs.probe_device_memory_bytes() == (30 * GB, "device:tpu bytes_limit-in_use")
 
 
 def test_probe_falls_back_to_nvidia_smi_when_memory_stats_is_none(monkeypatch):

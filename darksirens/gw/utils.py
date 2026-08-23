@@ -6,11 +6,19 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 # Same two knobs, same values, as core.jax_config.configure_jax_runtime (which
-# also enables x64; this module must not, so it only sets the env).  setdefault
-# on both sides means the effective configuration is order-independent as long
-# as the two stay in sync.
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+# also enables x64; this module must not, so it only sets the env).  The values
+# are IMPORTED from there rather than repeated, so the two cannot drift; that
+# module is import-side-effect free and does not import JAX at module level, so
+# this stays safe to do before the JAX import below.  setdefault on both sides
+# means the effective configuration is order-independent, and an explicit
+# environment override still wins.
+from darksirens.core.jax_config import (  # noqa: E402
+    DEFAULT_XLA_ALLOCATOR,
+    DEFAULT_XLA_PREALLOCATE,
+)
+
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", DEFAULT_XLA_PREALLOCATE)
+os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", DEFAULT_XLA_ALLOCATOR)
 
 # NOTE (OPS-02): this module used to call multiprocessing.set_start_method(
 # "spawn") at import time.  That is a PROCESS-WIDE mutation performed by a

@@ -132,6 +132,16 @@ The 88 GB dynesty row is the defect this split fixes: the gradient model chose
   predicts ≥ the measured peak at every measured config and within 2× of it.
 * **`_CAT` (dark-siren) slopes** — still 2× the spectral ones, **unmeasured**;
   erring high over-blocks (slower, safe) rather than under-blocks (OOM).
+* **Catalog density scales the INCREMENT, not the whole peak** — the catalog and
+  spectral paths share the population log density, the exact `q` normalisation
+  and the per-sample selection/PE weights, so a catalog estimate is
+  `spectral_common + catalog_increment` and can never fall below the
+  catalog-free baseline. Multiplying the whole per-unit cost (and the gradient
+  working-set floor) by `gals_ratio × n_catalogs` made `max_gals_per_row = 1`
+  predict a **1.746 GB** gradient peak against the equivalent spectral path's
+  **80.283 GB** — ~46× below a working set the two share, enough for `auto` to
+  promise a single pass on a 40–60 GB card. At and above the calibration density
+  (`cat_scale ≥ 1`) predictions are bit-identical to what shipped.
 
 ### Calibrating precisely
 
@@ -140,6 +150,18 @@ subprocess per config (clean per-config `peak_bytes_in_use`, OOM isolation) unde
 the **BFC allocator** (the `platform` allocator does not track a peak), building
 the real spectral likelihood via the CLI phase functions and recording the peak
 plus compile/warm times.
+
+Since 2026-08-23 BFC (`XLA_PYTHON_CLIENT_ALLOCATOR=default`, preallocation still
+off) is also the **production** default in `darksirens.core.jax_config`, so the
+calibration and the runs it sizes share an allocator. The old `platform` default
+measured **23.0 ms/call against BFC's 13.7 ms** (1.68x) on the shipped real
+spectral likelihood — 1,067,946 injections, 259 events, Dynesty value-only,
+`off:off` blocking, 20 warm repetitions, clean process on an H100 NVL — and
+reported no memory statistics at all. An explicit
+`export XLA_PYTHON_CLIENT_ALLOCATOR=platform` is still honored; on that path
+`memory_stats()` is inert and the probe falls back to `nvidia-smi` free memory.
+On a shared GPU the probe now takes the *smaller* of the allocator headroom and
+the physical free memory.
 
 ```bash
 # smoke (validate the harness):

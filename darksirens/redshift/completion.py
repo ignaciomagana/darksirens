@@ -561,6 +561,52 @@ def _kde_dndz_obs(
     return kern.sum(axis=1)  # (N_grid,)
 
 
+#: ONE module-level batched KDE kernel, shared by every builder below.
+#:
+#: Each builder used to create its own ``jit(vmap(_kde_dndz_obs, ...))`` inside
+#: the call, which threw the compiled executable away when the function
+#: returned — and then compiled it TWICE, because the short final batch is a
+#: second shape (MEASURED at 513 rows / batch 512: cache size 1 after the
+#: 512-row call, 2 after the 1-row tail, on every freshly created wrapper).
+#: Hoisting it here keeps the cache across calls and across builders;
+#: :func:`_kde_rows` supplies the fixed shape.
+_batched_kde_dndz_obs = jit(vmap(_kde_dndz_obs, in_axes=(0, None, None, None)))
+
+
+def _kde_rows(pix_idx, zgals, wgals, ngals, batch_size) -> np.ndarray:
+    """``(n, N_grid)`` observed-density rows for ``pix_idx``, in ONE compiled shape.
+
+    Batches are an EVEN split (``k`` equal chunks, ``k = ceil(n / batch_size)``)
+    and the last one is padded to that same shape with a repeat of its final
+    index, then trimmed — the padded pattern ``cli/analyze.batched_map`` already
+    uses.  One shape means one compilation for the whole cache build instead of
+    one per distinct tail, and the even split keeps the padding to at most
+    ``k - 1`` wasted rows rather than the ``batch_size - 1`` a fixed block would
+    pad (513 rows at ``batch_size=512`` become 2x257, not 512 + 511 wasted).
+
+    Rows are independent — ``_kde_dndz_obs`` reduces only over the galaxy axis —
+    so the batching is numerically inert: the result is bit-identical to any
+    other split, padded or not.
+    """
+    pix_idx = np.asarray(pix_idx, dtype=np.int32).reshape(-1)
+    n = int(pix_idx.size)
+    out = np.empty((n, int(zgrid.size)), dtype=np.float64)
+    if n == 0:
+        return out
+    requested = max(1, min(int(batch_size), n))
+    n_chunks = -(-n // requested)          # ceil
+    block = -(-n // n_chunks)              # even split
+    for start in range(0, n, block):
+        chunk = pix_idx[start:start + block]
+        take = int(chunk.size)
+        if take < block:                   # pad the tail to the compiled shape
+            chunk = np.concatenate([chunk, np.repeat(chunk[-1:], block - take)])
+        rows = np.asarray(_batched_kde_dndz_obs(
+            jnp.asarray(chunk, dtype=jnp.int32), zgals, wgals, ngals))
+        out[start:start + take] = rows[:take]
+    return out
+
+
 # ------------------------------------------------------------
 # Pixel KDE cache — precomputed at startup
 # ------------------------------------------------------------
@@ -602,21 +648,9 @@ def build_pixel_kde_cache(
     ngals_jax = None if ngals is None else jnp.asarray(ngals)
 
     pix_idx = np.asarray(unique_pixels)
-    n_unique = int(pix_idx.size)
 
-    _batch_kde = jit(vmap(_kde_dndz_obs, in_axes=(0, None, None, None)))
-    dN_obs_kde = np.empty((n_unique, zgrid.size), dtype=np.float64)
-    for start in range(0, n_unique, batch_size):
-        stop = min(start + batch_size, n_unique)
-        dN_obs_kde[start:stop] = np.asarray(
-            _batch_kde(
-                jnp.asarray(pix_idx[start:stop], dtype=jnp.int32),
-                zgals_jax,
-                wgals_jax,
-                ngals_jax,
-            )
-        )
-    dN_obs_kde = jnp.asarray(dN_obs_kde)
+    dN_obs_kde = jnp.asarray(
+        _kde_rows(pix_idx, zgals_jax, wgals_jax, ngals_jax, batch_size))
 
     pixel_to_cache_idx = np.zeros(n_pix_catalog, dtype=np.int32)
     for i, p in enumerate(unique_pixels):
@@ -709,18 +743,8 @@ def build_field_normalization_inputs(
     wgals_jax = None if full_w is None else jnp.asarray(full_w)
     ngals_jax = None if full_n is None else jnp.asarray(full_n)
 
-    _batch_kde = jit(vmap(_kde_dndz_obs, in_axes=(0, None, None, None)))
-    dN_obs_s = np.empty((n_occ, zgrid.size), dtype=np.float64)
-    for start in range(0, n_occ, batch_size):
-        stop = min(start + batch_size, n_occ)
-        dN_obs_s[start:stop] = np.asarray(
-            _batch_kde(
-                jnp.asarray(occupied_pixels[start:stop], dtype=jnp.int32),
-                zgals_jax,
-                wgals_jax,
-                ngals_jax,
-            )
-        )
+    dN_obs_s = _kde_rows(occupied_pixels, zgals_jax, wgals_jax, ngals_jax,
+                         batch_size)
 
     # Store as float32: for a full-sky (n_occupied, N_grid) table this halves the
     # device footprint; it only feeds the GLOBAL normalizer (a survey-scale
@@ -3346,18 +3370,8 @@ def compute_lss_overdensity(
     wgals_jax = None if wgals is None else jnp.asarray(wgals)
     ngals_jax = None if ngals is None else jnp.asarray(ngals)
 
-    _batch = jit(vmap(_kde_dndz_obs, in_axes=(0, None, None, None)))
-    kde = np.empty((n_pix, zgrid.size), dtype=np.float64)
-    for start in range(0, n_pix, batch_size):
-        stop = min(start + batch_size, n_pix)
-        kde[start:stop] = np.asarray(
-            _batch(
-                jnp.arange(start, stop, dtype=jnp.int32),
-                zgals_jax,
-                wgals_jax,
-                ngals_jax,
-            )
-        )
+    kde = _kde_rows(np.arange(n_pix, dtype=np.int32), zgals_jax, wgals_jax,
+                    ngals_jax, batch_size)
 
     if ngals_jax is not None:
         occupied = np.asarray(ngals_jax) > 0

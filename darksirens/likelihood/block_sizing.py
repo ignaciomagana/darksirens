@@ -72,7 +72,10 @@ from dataclasses import dataclass
 # RELATIVE to the calibration config, so the calibrated point is preserved (every
 # scale factor is 1 there).  The ``_CAT`` variants apply when a galaxy catalog is
 # loaded (dark sirens), whose per-injection / per-sample redshift-prior state is
-# heavier than the catalog-free spectral path.
+# heavier than the catalog-free spectral path.  Catalog DENSITY scales only the
+# INCREMENT over the catalog-free slopes (:func:`_catalog_scaled_bytes`): the two
+# paths share the population log density, the exact q normalisation and the
+# per-sample selection/PE weights, so no catalog can predict less than spectral.
 #
 # ── Why the split (PERF-4) ──
 # The original model folded ALL static state into a single ``FIXED_OVERHEAD``
@@ -351,9 +354,12 @@ def _nvidia_smi_free_bytes(device_index):
     """Free bytes on GPU ``device_index`` via ``nvidia-smi``, or ``None``.
 
     ``memory_stats()`` returns ``None`` under ``XLA_PYTHON_CLIENT_ALLOCATOR=
-    platform`` (which ``core.jax_config`` sets), so on a production CUDA run it
-    is the only probe that reports anything at all.  Deliberately subprocess and
-    not NVML: pynvml is not a declared dependency.
+    platform``, which is no longer the production default but is still honored
+    as an explicit override, so this stays the only probe that reports anything
+    at all on such a run.  It is ALSO the physical-free cross-check the BFC
+    default needs on a SHARED GPU, where the allocator's own headroom does not
+    know about another process's growth.  Deliberately subprocess and not NVML:
+    pynvml is not a declared dependency.
 
     ``nvidia-smi`` indexes GPUs the same way CUDA does *after*
     ``CUDA_VISIBLE_DEVICES`` filtering is undone, so the visible-device list is
@@ -399,16 +405,24 @@ def probe_device_memory_bytes(default_gb=4.0):
 
     1. ``$DARKSIRENS_DEVICE_MEM_GB`` — explicit override, always wins.
     2. ``device.memory_stats()`` (GPU/TPU): ``bytes_limit - bytes_in_use`` if
-       both present, else ``bytes_limit`` / ``bytes_reservable_limit``.
-    3. ``nvidia-smi`` free memory, for CUDA devices.
+       both present, else ``bytes_limit`` / ``bytes_reservable_limit``.  On a
+       GPU this ALLOCATOR TELEMETRY is preferred — it is the view the
+       peak-memory constants were calibrated against — but it is then taken as
+       ``min(allocator headroom, nvidia-smi free)``: on a shared box the
+       allocator's own ceiling does not know about another process's growth,
+       and the smaller of the two is the only safe budget.
+    3. ``nvidia-smi`` free memory alone, for CUDA devices with no telemetry.
     4. ``default_gb``.
 
-    Step 3 exists because step 2 is INERT in production: ``core.jax_config``
-    sets ``XLA_PYTHON_CLIENT_ALLOCATOR=platform``, under which
-    ``memory_stats()`` returns ``None``.  Without it every CLI run fell through
-    to the 4 GB default on machines with far more — measured 4 GB reported
-    against 92.4 GB actually free on an H100 NVL — so memory-aware sizing never
-    engaged and the calibrated single-pass constants were never used.
+    Step 3 exists because step 2 is INERT under
+    ``XLA_PYTHON_CLIENT_ALLOCATOR=platform``, where ``memory_stats()`` returns
+    ``None``.  That was the production default until 2026-08-23 (see
+    ``core.jax_config``): without the ``nvidia-smi`` fallback every CLI run fell
+    through to the 4 GB default on machines with far more — measured 4 GB
+    reported against 92.4 GB actually free on an H100 NVL — so memory-aware
+    sizing never engaged and the calibrated single-pass constants were never
+    used.  ``platform`` is still honored as an explicit override, so the
+    fallback stays.
 
     Note: with ``memory_stats`` available and ``XLA_PYTHON_CLIENT_PREALLOCATE``
     unset, JAX preallocates a large fraction of the GPU and ``bytes_limit``
@@ -428,22 +442,46 @@ def probe_device_memory_bytes(default_gb=4.0):
     try:
         import jax  # lazy: this module is imported by the (JAX-free) argparse layer
         dev = jax.devices()[0]
+        is_gpu = str(dev.platform).lower() in _GPU_BACKENDS
         stats = dev.memory_stats() or {}
         limit = stats.get("bytes_limit")
         if limit:
             in_use = int(stats.get("bytes_in_use", 0) or 0)
             free = max(int(limit) - in_use, int(0.1 * int(limit)))
-            return int(free), f"device:{dev.platform} bytes_limit-in_use"
+            return _min_with_physical_free(
+                free, f"device:{dev.platform} bytes_limit-in_use", dev, is_gpu)
         res = stats.get("bytes_reservable_limit")
         if res:
-            return int(res), f"device:{dev.platform} bytes_reservable_limit"
-        if str(dev.platform).lower() in _GPU_BACKENDS:
+            return _min_with_physical_free(
+                int(res), f"device:{dev.platform} bytes_reservable_limit",
+                dev, is_gpu)
+        if is_gpu:
             free = _nvidia_smi_free_bytes(int(getattr(dev, "id", 0) or 0))
             if free:
                 return int(free), "nvidia-smi memory.free"
     except Exception:
         pass
     return int(default_gb * 1e9), "fallback-default"
+
+
+def _min_with_physical_free(allocator_bytes, source, dev, is_gpu):
+    """``(bytes, source)`` clipped to physical free memory on a shared GPU.
+
+    Allocator telemetry is the PREFERRED signal (it is what the peak constants
+    were calibrated against), but under a non-preallocating BFC allocator
+    ``bytes_limit`` is the whole device, blind to another process already
+    holding part of it.  Taking the smaller of the two is the safe quantity;
+    the source tag records which one bound so the run log stays diagnosable.
+    ``nvidia-smi`` unavailable (or a non-GPU device) leaves the telemetry
+    unchanged.
+    """
+    allocator_bytes = int(allocator_bytes)
+    if not is_gpu:
+        return allocator_bytes, source
+    physical = _nvidia_smi_free_bytes(int(getattr(dev, "id", 0) or 0))
+    if physical and int(physical) < allocator_bytes:
+        return int(physical), f"min({source}, nvidia-smi memory.free)"
+    return allocator_bytes, source
 
 
 def _even_split_block(n_total: int, budget_bytes: float, bytes_per_unit: float,
@@ -1139,6 +1177,48 @@ def measure_static_state_bytes(data, *, n_grid: int, has_catalog: bool,
     return int(total)
 
 
+def _catalog_scaled_bytes(base_spectral: float, base_catalog: float,
+                          cat_scale: float) -> float:
+    """Per-unit bytes on a catalog run: spectral COMMON + catalog INCREMENT.
+
+    The catalog and spectral paths share the same population log density, the
+    same exact ``q`` normalisation, and the same per-sample selection/PE
+    weights.  Catalog work is ADDITIONAL: a sparse catalog cannot make that
+    common working set disappear.  The old model scaled the WHOLE per-unit cost
+    (and the gradient working-set floor) by ``cat_scale = gals_ratio *
+    n_catalogs``, so a one-galaxy-per-row catalog predicted a 1.746 GB gradient
+    peak against the 80.283 GB the equivalent catalog-free path predicts — a
+    factor of ~46 below the shared baseline, enough for ``auto`` to promise a
+    single pass on a 40-60 GB card for a graph that needs ~80 GB.
+
+    So the density scaling is applied to the INCREMENT only::
+
+        additive = base_spectral + (base_catalog - base_spectral) * cat_scale
+
+    which is exactly ``base_catalog`` at the calibration density
+    (``cat_scale == 1``, preserving every historical plan bit-for-bit) and
+    decays to ``base_spectral`` — never below it — as the catalog empties.
+
+    Two guards ride along:
+
+    * ``base_spectral`` is a hard floor, so a hypothetical ``_CAT`` constant
+      below the spectral one could not price a catalog under the catalog-free
+      baseline either;
+    * the legacy ``base_catalog * cat_scale`` term is kept as a MAXIMUM, so for
+      a catalog DENSER than the calibration reference (or ``K >= 2``) the
+      prediction never drops below what shipped.  The ``_CAT`` constants are
+      still unmeasured 2x estimates; lowering a dense-catalog prediction on
+      unmeasured constants is the OOM-risky direction, and over-prediction only
+      costs throughput.  Drop the legacy term once they are measured.
+    """
+    base_spectral = float(base_spectral)
+    base_catalog = float(base_catalog)
+    cat_scale = max(0.0, float(cat_scale))
+    additive = base_spectral + (base_catalog - base_spectral) * cat_scale
+    legacy = base_catalog * cat_scale
+    return max(base_spectral, additive, legacy)
+
+
 def _slopes_and_fixed(*, has_catalog: bool, needs_grad: bool, n_grid: int,
                       n_q: int, max_gals_per_row, n_catalogs: int,
                       concurrent_evals: int, warn: bool = True,
@@ -1177,54 +1257,70 @@ def _slopes_and_fixed(*, has_catalog: bool, needs_grad: bool, n_grid: int,
     # A sampler that vmaps several proposals at once (tinyns replacement_chains)
     # holds that many copies of every intermediate live simultaneously.
     batch_scale = float(max(1, int(concurrent_evals)))
+    # Everything the catalog and spectral paths SHARE scales with these three and
+    # with nothing catalog-specific; see :func:`_catalog_scaled_bytes`.
+    common_scale = grid_scale * q_scale * batch_scale
     if has_catalog:
         if max_gals_per_row is None or int(max_gals_per_row) <= 0:
             # UNKNOWN row width on a catalog run: the caller could not determine
             # the dimension (the K >= 2 stubbed top-level ``catalog_memory`` was
             # the historical case, and it silently produced max_gals_per_row = 1).
-            # Scaling the heavier _CAT slopes BELOW the catalog-free ones would
-            # claim a dark-siren likelihood is ~1000x lighter per injection than
-            # the spectral config they were calibrated on, so fall back to the
-            # calibration reference (ratio 1.0) and say so.  An explicit small
-            # integer is TRUSTED — a genuinely sparse catalog really is lighter.
+            # An unknown dimension is not evidence of a light catalog, so fall
+            # back to the calibration reference (ratio 1.0) and say so.  An
+            # explicit small integer is TRUSTED — a genuinely sparse catalog
+            # really is lighter, though only in its INCREMENT (see
+            # :func:`_catalog_scaled_bytes`; it can never go below the shared
+            # catalog-free baseline).
             if warn:
                 _loud(
                     f"has_catalog=True but max_gals_per_row={max_gals_per_row!r}: "
                     "the caller could not supply the galaxies-per-unique-pixel "
                     "dimension. Falling back to the calibration reference "
-                    f"({CAL_MAX_GALS_PER_ROW:,} galaxies/row) rather than scaling "
-                    "the _CAT slopes below the catalog-free ones."
+                    f"({CAL_MAX_GALS_PER_ROW:,} galaxies/row) rather than "
+                    "pricing an unknown catalog as an empty one."
                 )
             gals_ratio = 1.0
         else:
             gals_ratio = max(
                 1e-9, float(max_gals_per_row) / float(CAL_MAX_GALS_PER_ROW))
         cat_scale = gals_ratio * max(1, int(n_catalogs))
-        base_sel = (SEL_BYTES_PER_INJECTION_CAT if needs_grad
-                    else SEL_BYTES_PER_INJECTION_VALUE_CAT)
-        base_pe = (PE_BYTES_PER_SAMPLE_CAT if needs_grad
-                   else PE_BYTES_PER_SAMPLE_VALUE_CAT)
-    else:
-        cat_scale = 1.0
-        base_sel = (SEL_BYTES_PER_INJECTION if needs_grad
+        # spectral COMMON base + the catalog TOTAL at the reference density; the
+        # increment between them is what ``cat_scale`` is allowed to scale.
+        spec_sel = (SEL_BYTES_PER_INJECTION if needs_grad
                     else SEL_BYTES_PER_INJECTION_VALUE)
-        base_pe = (PE_BYTES_PER_SAMPLE if needs_grad
+        spec_pe = (PE_BYTES_PER_SAMPLE if needs_grad
                    else PE_BYTES_PER_SAMPLE_VALUE)
-    unit_scale = grid_scale * q_scale * cat_scale * batch_scale
+        cat_sel = (SEL_BYTES_PER_INJECTION_CAT if needs_grad
+                   else SEL_BYTES_PER_INJECTION_VALUE_CAT)
+        cat_pe = (PE_BYTES_PER_SAMPLE_CAT if needs_grad
+                  else PE_BYTES_PER_SAMPLE_VALUE_CAT)
+        sel_unit = _catalog_scaled_bytes(spec_sel, cat_sel, cat_scale)
+        pe_unit = _catalog_scaled_bytes(spec_pe, cat_pe, cat_scale)
+        # The gradient working-set FLOOR has no _CAT variant: it is the shared
+        # graph's floor, so its "increment" is zero and the same helper clamps it
+        # to the catalog-free value while preserving the historical ``* cat_scale``
+        # for a denser-than-reference catalog.
+        floor_unit = _catalog_scaled_bytes(
+            GRAD_WORKSET_FLOOR_BYTES, GRAD_WORKSET_FLOOR_BYTES, cat_scale)
+    else:
+        sel_unit = float(SEL_BYTES_PER_INJECTION if needs_grad
+                         else SEL_BYTES_PER_INJECTION_VALUE)
+        pe_unit = float(PE_BYTES_PER_SAMPLE if needs_grad
+                        else PE_BYTES_PER_SAMPLE_VALUE)
+        floor_unit = float(GRAD_WORKSET_FLOOR_BYTES)
     # Fixed term of the peak model.  On the GRADIENT path only ~1.7 GB of the 57.9
     # GiB is genuinely fixed runtime; the rest is the IRREDUCIBLE working-set floor
     # and scales with the same dimensions as the slopes (MEASURED: the single-pass
     # peak is 26.89 GB at n_q=64 and 78.77 GB at n_q=200).  At the calibration
-    # dimensions unit_scale == 1.0, so this is TRUE_FIXED_BYTES exactly and every
+    # dimensions every scale is 1.0, so this is TRUE_FIXED_BYTES exactly and every
     # historical plan is preserved bit-for-bit.  The gradient-free fixed term is a
     # genuinely small, genuinely flat measured intercept and is NOT scaled.
     if needs_grad:
-        fixed_bytes = (GRAD_RUNTIME_FIXED_BYTES
-                       + unit_scale * GRAD_WORKSET_FLOOR_BYTES)
+        fixed_bytes = GRAD_RUNTIME_FIXED_BYTES + common_scale * floor_unit
     else:
         fixed_bytes = float(TRUE_FIXED_VALUE_BYTES)
-    sel_bpi = base_sel * unit_scale
-    pe_bps = base_pe * unit_scale
+    sel_bpi = sel_unit * common_scale
+    pe_bps = pe_unit * common_scale
     # ── The guarded LATENT transient branch (PLAN §2.4 / §3.6) ──
     # ``latent_dims is None`` in table mode, so everything above is returned
     # unchanged; nothing here can move a table-mode plan by one byte.
@@ -1332,11 +1428,13 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
       per SAMPLE by the default pairing model, so it multiplies both working sets
       (measured ~26 MB per q-node at N_sel = 1.07e6);
     * for catalog runs, ``(max_gals_per_row / CAL_MAX_GALS_PER_ROW) * n_catalogs``
-      on the heavier ``_CAT`` slopes (more galaxies per row and a K-catalog
-      mixture both multiply the redshift-prior work).  ``max_gals_per_row=None``
+      on the catalog INCREMENT — the difference between the ``_CAT`` slopes and
+      the catalog-free ones — never on the shared common set (more galaxies per
+      row and a K-catalog mixture both multiply the redshift-prior work, but
+      neither can make the population/``q``/PE working set the two paths SHARE
+      disappear; see :func:`_catalog_scaled_bytes`).  ``max_gals_per_row=None``
       means "the caller could not determine it": the ratio then falls back to 1.0
-      with a loud warning instead of silently scaling the ``_CAT`` slopes below the
-      catalog-free ones;
+      with a loud warning rather than pricing an unknown catalog as an empty one;
     * ``concurrent_evals`` on both slopes, for a sampler that ``vmap``s several
       likelihood evaluations at once (tinyns ``replacement_chains``).
 
