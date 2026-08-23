@@ -26,6 +26,20 @@ Quality semantics worth recording:
   drops padding rows -- biasing mu low with no signature anywhere.
 * Sky ranges are radians, ``ra`` in [0, 2*pi) and ``dec`` in [-pi/2, pi/2];
   a degrees-valued file fails by construction.
+
+Layout semantics (:func:`layout_problems`, :func:`count_problems`) are as
+load-bearing as the value checks.  The contract used to say nothing about
+shape, so a PE file whose ``ra`` had length ONE loaded cleanly and then
+BROADCAST that single right ascension across every posterior sample: measured
+on a nobs=2 x nsamp=3 fixture, the six samples were assigned HEALPix pixels
+[561, 497, 401, 337, 241, 177] from one shared ra=0.25 and six distinct decs,
+i.e. six wrong sky rows with no error anywhere (review DATA-01).  A length-5
+``ra`` against six samples merely loaded and failed later, deep in a
+broadcast; the singleton case never failed at all.  Every required dataset is
+therefore pinned 1-D at one common length -- ``nobs * nsamp`` for PE, one
+shared detected-injection length for selection -- and the campaign-size attrs
+(``nobs``, ``nsamp``, ``ndraw``) are required to be positive, with ``ndraw``
+at least the number of detected rows it is the denominator for.
 """
 from __future__ import annotations
 
@@ -256,6 +270,156 @@ def sky_availability_problem(attrs: Mapping[str, Any]) -> str | None:
         "without the skyless campaigns or use a fully sky-resolved "
         "injection set"
     )
+
+
+def _length_checked_names(f: Any, contract: StoreContract) -> list[str]:
+    """Contract datasets plus any OPTIONAL column the loaders still read.
+
+    A chi_eff-basis export may carry the four component-spin datasets even
+    though its contract does not require them; both loaders copy every one
+    that is present into the store's columns, so a short ``a1`` would ride
+    into the likelihood exactly like a short ``ra``.  ``chip`` is never read
+    and is deliberately not length-checked.
+    """
+    names = list(contract.datasets)
+    names += [
+        name
+        for name in COMPONENT_SPIN_DATASETS
+        if name not in contract.datasets and name in f
+    ]
+    return names
+
+
+def layout_problems(
+    f: Any,
+    contract: StoreContract,
+    *,
+    expected_size: int | None = None,
+) -> list[str]:
+    """One-dimensionality and common-length problems for the store's columns.
+
+    Presence is NOT checked here -- run :func:`missing_members` first.  With
+    ``expected_size`` every present column must have exactly that length (the
+    PE case, ``nobs * nsamp``); without it they must merely agree with one
+    another (the selection case, where the detected count is whatever the
+    campaign produced).  Shape problems short-circuit the length report: a
+    2-D column has no meaningful length to compare.
+    """
+    problems: list[str] = []
+    sizes: dict[str, int] = {}
+    for name in _length_checked_names(f, contract):
+        if name not in f:
+            continue
+        arr = np.asarray(f[name])
+        if arr.ndim != 1:
+            problems.append(
+                f"dataset {name!r} has shape {tuple(arr.shape)}; store "
+                "columns must be one-dimensional"
+            )
+            continue
+        sizes[name] = int(arr.size)
+    if problems:
+        return problems
+    if expected_size is not None:
+        wrong = {n: s for n, s in sizes.items() if s != expected_size}
+        if wrong:
+            problems.append(
+                "dataset length(s) "
+                + ", ".join(f"{n}={s}" for n, s in sorted(wrong.items()))
+                + f" != expected {expected_size} (nobs * nsamp); a shorter "
+                "column BROADCASTS silently over the samples and assigns the "
+                "wrong sky/mass rows"
+            )
+    elif len(set(sizes.values())) > 1:
+        problems.append(
+            "store columns have inconsistent lengths ("
+            + ", ".join(f"{n}={s}" for n, s in sorted(sizes.items()))
+            + "); every detected-injection column must share one length, or "
+            "a shorter column broadcasts silently over the rest"
+        )
+    return problems
+
+
+def common_length(f: Any, contract: StoreContract) -> int:
+    """The shared 1-D length of the store's columns.
+
+    Only meaningful once :func:`layout_problems` is clean; returns 0 for a
+    store with no length-checked column present.
+    """
+    sizes = {
+        int(np.asarray(f[name]).size)
+        for name in _length_checked_names(f, contract)
+        if name in f
+    }
+    return max(sizes) if sizes else 0
+
+
+def _positive_count(attrs: Mapping[str, Any], name: str) -> tuple[int | None, str | None]:
+    """(value, problem) for a scalar positive-integer attr."""
+    if name not in attrs:
+        return None, None
+    raw = np.atleast_1d(np.asarray(attrs[name]))
+    if raw.size != 1:
+        return None, f"attr {name!r} must be a scalar count, got {raw.size} values"
+    try:
+        value = int(raw.reshape(())[()])
+    except (TypeError, ValueError):
+        return None, f"attr {name!r} is not an integer count"
+    if value < 1:
+        return None, f"attr {name!r}={value} must be a positive count"
+    return value, None
+
+
+def count_problems(
+    attrs: Mapping[str, Any],
+    contract: StoreContract,
+    *,
+    n_rows: int | None = None,
+) -> list[str]:
+    """Problems with the campaign-size attrs (``nobs``/``nsamp``/``ndraw``).
+
+    A zero or negative count is not a harmless oddity: ``nobs * nsamp`` is the
+    PE reshape target (a zero divides by zero in the per-event normalisation),
+    and ``ndraw`` is the DENOMINATOR of the selection integral, so a
+    non-positive value silently produces an infinite or sign-flipped mu.
+    ``n_rows``, when given, additionally requires ``ndraw`` to be at least the
+    number of detected rows it normalises -- more detections than draws is
+    arithmetically impossible and means the two were paired from different
+    campaigns.
+    """
+    problems: list[str] = []
+    names = ("nobs", "nsamp") if contract.kind == "pe" else ("ndraw",)
+    values: dict[str, int] = {}
+    for name in names:
+        value, problem = _positive_count(attrs, name)
+        if problem is not None:
+            problems.append(problem)
+        elif value is not None:
+            values[name] = value
+    if (
+        contract.kind == "selection"
+        and n_rows is not None
+        and "ndraw" in values
+        and values["ndraw"] < n_rows
+    ):
+        problems.append(
+            f"attr 'ndraw'={values['ndraw']} is smaller than the "
+            f"{n_rows} detected injection(s) it normalises; the detected set "
+            "and the draw count come from different campaigns"
+        )
+    return problems
+
+
+def expected_pe_size(attrs: Mapping[str, Any]) -> int | None:
+    """``nobs * nsamp`` for a PE store, or None if either attr is unusable.
+
+    Only meaningful once :func:`count_problems` is clean.
+    """
+    nobs, nobs_problem = _positive_count(attrs, "nobs")
+    nsamp, nsamp_problem = _positive_count(attrs, "nsamp")
+    if nobs is None or nsamp is None or nobs_problem or nsamp_problem:
+        return None
+    return nobs * nsamp
 
 
 def quality_problems(f: Any, contract: StoreContract) -> list[str]:

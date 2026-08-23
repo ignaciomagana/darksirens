@@ -95,14 +95,25 @@ def _check_store_contract(f: h5py.File, fmt: str, *, size: int | None = None,
         if missing_attrs:
             details.append("attributes: " + ", ".join(missing_attrs))
         raise ValueError("missing required " + "; ".join(details))
-    for name in contract.datasets:
-        arr = np.asarray(f[name])
-        if arr.ndim != 1:
-            raise ValueError(f"dataset {name!r} must be one-dimensional")
-        if size is not None and arr.size != size:
-            raise ValueError(
-                f"dataset {name!r} length {arr.size} != expected {size}"
-            )
+    # Layout is the shared table's job too (review DATA-01): the loop this
+    # replaced covered only ``contract.datasets``, skipped the optional
+    # component-spin columns the loaders still read, and -- with ``size=None``
+    # on the selection path -- did not require the columns to agree with EACH
+    # OTHER at all, so a preflighted selection file could still carry a
+    # length-1 ``ra`` that broadcasts at load.
+    count_problems = store_contract.count_problems(f.attrs, contract)
+    if count_problems:
+        raise ValueError("; ".join(count_problems))
+    expected = size
+    if expected is None and contract.kind == "pe":
+        expected = store_contract.expected_pe_size(f.attrs)
+    problems = store_contract.layout_problems(f, contract, expected_size=expected)
+    if not problems and contract.kind == "selection":
+        problems = store_contract.count_problems(
+            f.attrs, contract, n_rows=store_contract.common_length(f, contract)
+        )
+    if problems:
+        raise ValueError("; ".join(problems))
     problems = store_contract.quality_problems(f, contract)
     if problems:
         raise ValueError("; ".join(problems))

@@ -343,6 +343,42 @@ def _require_store_quality(f, contract, path, conversion_hint=""):
         )
 
 
+def _require_store_layout(f, contract, path, conversion_hint=""):
+    """Raise unless every store column is 1-D at one common length.
+
+    The value gates above run per column, so a file could pass all of them
+    while its columns disagreed on LENGTH -- and numpy broadcasting turns a
+    length-1 column into a constant repeated over every sample rather than an
+    error (review DATA-01: a singleton ``ra`` gave six PE samples six
+    different HEALPix pixels off one shared right ascension, with nothing
+    raised anywhere).  The campaign counts are validated FIRST so
+    ``nobs * nsamp`` is a trustworthy expected length before it is used as
+    one, and, on the selection side, the detected row count is known before
+    ``ndraw`` is compared against it.
+    """
+    problems = store_contract.count_problems(f.attrs, contract)
+    if not problems:
+        expected = (
+            store_contract.expected_pe_size(f.attrs)
+            if contract.kind == "pe"
+            else None
+        )
+        problems = store_contract.layout_problems(
+            f, contract, expected_size=expected
+        )
+    if not problems and contract.kind == "selection":
+        problems = store_contract.count_problems(
+            f.attrs, contract, n_rows=store_contract.common_length(f, contract)
+        )
+    if problems:
+        raise RuntimeError(
+            f"Malformed store layout in {path!r}: "
+            + "; ".join(problems)
+            + "."
+            + (f" {conversion_hint}" if conversion_hint else "")
+        )
+
+
 def _require_hdf5_members(f, datasets=(), attrs=(), conversion_hint=""):
     missing_datasets = [name for name in datasets if name not in f]
     missing_attrs = [name for name in attrs if name not in f.attrs]
@@ -501,6 +537,7 @@ def load_gw_store(gw_path, fit_columns=None) -> GWStore:
             attrs=contract.attrs,
             conversion_hint=conversion_hint,
         )
+        _require_store_layout(f, contract, gw_path, conversion_hint=conversion_hint)
         _require_store_quality(f, contract, gw_path, conversion_hint=conversion_hint)
 
         nsamp = int(f.attrs["nsamp"])
@@ -723,6 +760,7 @@ def load_selection_store(file, allow_invalid_spin_swap=False,
             attrs=contract.attrs,
             conversion_hint=conversion_hint,
         )
+        _require_store_layout(f, contract, file, conversion_hint=conversion_hint)
         _require_store_quality(f, contract, file, conversion_hint=conversion_hint)
 
         m1detsels = np.array(f["m1det"])
