@@ -255,6 +255,74 @@ class TestLensedInjectionSetIO:
             assert not list(Path(tmp).glob("*.tmp-*"))
             assert load_lensed_injections(str(path)).n_kept == camp["n_both_detected"]
 
+    def test_writer_refuses_what_its_own_loader_refuses(self):
+        """The writer's promised validation was dtype-deep only (DATA-02).
+
+        Each payload below wrote a COMPLETE file that ``load_lensed_injections``
+        then rejected -- so the atomic replace had already destroyed the good
+        campaign at ``path`` before anyone could find out.  Semantic refusal
+        must happen before the temp file is opened, leaving the destination
+        byte-identical and no temp behind.
+        """
+        camp = _synth_lensed_injection_campaign(n_sources=20, seed=5)
+        kwargs = {k: v for k, v in camp.items() if k != "n_both_detected"}
+        n_src = int(camp["n_draw_sources"])
+        n_img = 2 * n_src
+        bad_payloads = {
+            # The review's example: a probability outside [0, 1].
+            "p_tag_per_source": dict(
+                kwargs, p_tag_per_source=np.full(n_src, 2.0)),
+            # Ragged columns surfaced at load as a bare IndexError.
+            "share one length": dict(
+                kwargs, p_prop_y=kwargs["p_prop_y"][:-1]),
+            # Pairing structure: every source_id must appear exactly twice,
+            # once as image 0 and once as image 1.
+            "image_id must be": dict(
+                kwargs, source_id=np.zeros(n_img, dtype=np.int32)),
+            # A source-level field that disagrees between the two images.
+            "z_src": dict(
+                kwargs,
+                z_src=np.concatenate([[99.0], kwargs["z_src"][1:]])),
+            # Optional-field layout.
+            "expected N_img": dict(
+                kwargs, snr_image0=np.ones(n_src + 1)),
+            # The importance weight's denominator.
+            "denominator": dict(
+                kwargs, p_prop_src=np.zeros(n_img)),
+            # The selection integral's normalisation.
+            "positive count": dict(kwargs, n_draw_sources=0),
+            "campaign TOTAL": dict(kwargs, n_draw_sources=n_src - 1),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "inj.h5"
+            save_lensed_injections(path=str(path), **kwargs)
+            before = path.read_bytes()
+            for pattern, payload in bad_payloads.items():
+                with pytest.raises(ValueError, match=pattern):
+                    save_lensed_injections(path=str(path), **payload)
+                assert path.read_bytes() == before, pattern
+                assert not list(Path(tmp).glob("*.tmp-*")), pattern
+            # The good campaign is still loadable after every refusal.
+            assert (load_lensed_injections(str(path)).n_kept
+                    == camp["n_both_detected"])
+
+    def test_writer_accepts_the_canonical_campaign_with_pair_tags(self):
+        """The new gate must not narrow what a legitimate campaign may write."""
+        camp = _synth_lensed_injection_campaign(n_sources=20, seed=6)
+        kwargs = {k: v for k, v in camp.items() if k != "n_both_detected"}
+        n_src = int(camp["n_draw_sources"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "inj.h5"
+            save_lensed_injections(
+                path=str(path), **kwargs,
+                p_tag_per_source=np.full(n_src, 0.5),
+                snr_image0=np.linspace(8.0, 12.0, n_src),
+                snr_image1=np.linspace(7.0, 11.0, n_src),
+                tagged_pair=np.zeros(n_src, dtype=bool),
+            )
+            assert (load_lensed_injections(str(path)).n_kept
+                    == camp["n_both_detected"])
+
     def test_validation_rejects_inconsistent_source_fields(self):
         """If two images of the same source disagree on a source-level field
         (z_src), the loader should reject."""

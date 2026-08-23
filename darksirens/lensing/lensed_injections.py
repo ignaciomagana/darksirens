@@ -424,6 +424,106 @@ def load_lensed_injections(path: str) -> LensedInjectionSet:
     return out
 
 
+#: Per-IMAGE datasets every campaign file must carry, in write order.
+_REQUIRED_IMAGE_DATASETS = (
+    "source_id", "image_id", "m1_src", "q_src", "z_src", "chieff",
+    "y_source", "mu", "detected", "p_prop_src", "p_prop_y",
+)
+
+#: Pair-tag / diagnostic datasets: optional, and legally either per-IMAGE
+#: (N_img) or per-SOURCE (N_img // 2) -- the same two layouts the loader's
+#: grouping accepts.
+_OPTIONAL_LENSED_DATASETS = (
+    "log_p_tag_per_source", "p_tag_per_source", "snr_image0", "snr_image1",
+    "delta_t_obs", "true_delta_t", "log_sky_overlap", "p_tag_true",
+    "tagged_pair",
+)
+
+#: The DENOMINATOR of the per-source importance weight
+#: (w = p_pop . p_z . tau_2 . p(y) / (p_prop_src . p_prop_y)).  A zero or
+#: negative proposal density does not make a bad estimate, it makes an
+#: infinite or sign-flipped one.
+_POSITIVE_LENSED_DATASETS = ("p_prop_src", "p_prop_y")
+
+
+def _validate_lensed_injection_payload(
+    by_name: dict[str, np.ndarray], n_draw_sources: int
+) -> None:
+    """The loader's own semantic checks, run on the payload before any I/O.
+
+    ``save_lensed_injections`` promised validation-before-disk but only ever
+    enforced mutual exclusion and dtype conversion, so it happily wrote files
+    its OWN loader rejects -- ``p_tag_per_source=[2.0]`` is the review's
+    example (DATA-02), and because the bad write completed, it also destroyed
+    whatever campaign was at ``path``.  Ragged columns were worse still: they
+    surfaced at load as a bare ``IndexError: index 3 is out of bounds``.
+
+    The layout/domain gates below are new (nothing checked shapes, lengths, or
+    the proposal-density denominators anywhere); the structural pass at the
+    end is literally the loader's grouping routine, so the writer cannot again
+    accept something the reader refuses.
+    """
+    for name, arr in by_name.items():
+        if arr.ndim != 1:
+            raise ValueError(
+                f"lensed-injection dataset {name!r} has shape "
+                f"{tuple(arr.shape)}; every column must be one-dimensional"
+            )
+    n_img = int(by_name["source_id"].size)
+    if n_img % 2 != 0:
+        raise ValueError(
+            f"lensed injection set has odd number of images ({n_img}); "
+            "each source must have exactly two."
+        )
+    wrong = {
+        name: int(by_name[name].size)
+        for name in _REQUIRED_IMAGE_DATASETS
+        if int(by_name[name].size) != n_img
+    }
+    if wrong:
+        raise ValueError(
+            "per-image lensed-injection columns must share one length; got "
+            + ", ".join(f"{n}={s}" for n, s in sorted(wrong.items()))
+            + f" against source_id={n_img}"
+        )
+    n_src = n_img // 2
+    for name in _OPTIONAL_LENSED_DATASETS:
+        if name in by_name and int(by_name[name].size) not in (n_img, n_src):
+            raise ValueError(
+                f"optional lensed-injection field {name!r} has length "
+                f"{int(by_name[name].size)}; expected N_img={n_img} or "
+                f"N_sources={n_src}"
+            )
+    for name in _POSITIVE_LENSED_DATASETS:
+        arr = np.asarray(by_name[name], dtype=float)
+        n_bad = int((~(np.isfinite(arr) & (arr > 0.0))).sum())
+        if n_bad:
+            raise ValueError(
+                f"lensed-injection dataset {name!r} has {n_bad} non-finite or "
+                "non-positive value(s); it is a denominator of the "
+                "importance weight"
+            )
+    if n_draw_sources < 1:
+        raise ValueError(
+            f"n_draw_sources={n_draw_sources} must be a positive count; it is "
+            "the normalisation denominator of the selection integral"
+        )
+    if n_draw_sources < n_src:
+        raise ValueError(
+            f"n_draw_sources={n_draw_sources} is smaller than the {n_src} "
+            "source(s) in the file; it is the campaign TOTAL, including the "
+            "sources where neither image was detected"
+        )
+    # The canonical structural pass: exact pairing, image_id orientation,
+    # source-level consistency between the two images, pair-tag bounds and
+    # layout.  Running the reader's own routine is what keeps the two sides
+    # from drifting.
+    _make_lensed_injection_arrays_per_source(
+        **{name: by_name[name] for name in _REQUIRED_IMAGE_DATASETS},
+        **{name: by_name.get(name) for name in _OPTIONAL_LENSED_DATASETS},
+    )
+
+
 def save_lensed_injections(
     path: str,
     source_id: np.ndarray,
@@ -463,6 +563,12 @@ def save_lensed_injections(
     writer used to open ``path`` with mode "w" first and check the mutually
     exclusive pair-tag arguments afterwards, so a bad call DESTROYED an
     existing campaign and left a half-written HDF5 in its place.
+
+    "Validated" now means SEMANTICALLY validated, by the reader's own checks
+    (:func:`_validate_lensed_injection_payload`), not merely converted: the
+    writer used to accept ``p_tag_per_source=[2.0]`` -- writing a complete,
+    atomically-replaced file that :func:`load_lensed_injections` immediately
+    refused, having already overwritten the good campaign it replaced.
     """
     if log_p_tag_per_source is not None and p_tag_per_source is not None:
         raise ValueError("Pass only one of log_p_tag_per_source or p_tag_per_source")
@@ -496,6 +602,11 @@ def save_lensed_injections(
     attrs["n_draw_sources"] = int(n_draw_sources)
     for key, value in (snr_model_attrs or {}).items():
         attrs[key] = float(value)
+
+    # SEMANTICS before disk, not just dtypes: the materialised payload is run
+    # through the reader's own checks, so a file this writer produces is one
+    # this package can load (review DATA-02).
+    _validate_lensed_injection_payload(dict(datasets), attrs["n_draw_sources"])
 
     tmp_path = f"{path}.tmp-{os.getpid()}"
     try:
