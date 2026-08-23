@@ -187,6 +187,54 @@ def _build_cpl_distance_grid():
 zgrid = jnp.array(zgrid)
 """Redshift coordinates of the distance interpolation grid."""
 
+#: First NONZERO node of :data:`zgrid` (~0.0036 at the default zMax=5).  Below
+#: it the table has exactly one cell, spanned by linear interpolation from
+#: ``r(0) = 0`` -- see :func:`_low_z_hermite_correction`.
+_Z_FIRST_NODE = float(np.asarray(zgrid)[1])
+
+#: ``dr/dz`` at ``z = 0`` in the table's OWN units (Mpc at ``H0Planck``).  For
+#: EVERY flat CPL cosmology ``E(0) = sqrt(Om0 + (1 - Om0)) = 1`` exactly, so
+#: this slope is a constant, independent of ``(Om0, w0, wa)``.
+_R_SLOPE_AT_ZERO = float(speed_of_light / H0Planck)
+
+
+def _low_z_hermite_correction(r_lin, z):
+    r"""Third-order-accurate ``r(z)`` inside the FIRST grid cell ``[0, z1]``.
+
+    The table's redshift axis is ``expm1``-spaced with ``z = 0`` as its first
+    node, so the whole interval below ``z1 ~ 0.0036`` is spanned by ONE linear
+    segment from ``r(0) = 0``.  Linear interpolation there returns the CHORD
+    slope ``r(z1)/z1`` at every ``z``, while the true slope at the origin is
+    ``c/H0`` -- so as ``z -> 0`` the interpolant is biased by exactly
+    ``r(z1)/(z1 c/H0) - 1 = -E'(0) z1 / 2``: MEASURED -0.083% at the fiducial,
+    -0.108% at ``Om0 = 0.40``, -0.207% at the ``(0.25, -0.3, -2.0)`` prior
+    corner and +0.052% at ``(0.40, -2.0, +2.0)``.  It is a pure
+    interpolation artifact -- the tabulated NODE ``r(z1)`` is itself accurate
+    to ``O(z1^3)``.
+
+    The fix is the quadratic Hermite interpolant on that one cell pinned by the
+    two things known exactly there: ``r(0) = 0`` and ``r'(0) = c/H0`` (``E(0)
+    = 1`` for every flat CPL cosmology, so the slope is a CONSTANT), plus the
+    tabulated endpoint ``r(z1)``.  With ``u = z/z1`` that interpolant is
+    ``u [c/H0 z1 (1 - u) + r1 u]``, and since linear interpolation already
+    returns ``r_lin = u r1`` the whole correction collapses to
+
+        r = r_lin + (1 - z/z1) (c/H0 z - r_lin),
+
+    needing NO second table lookup.  It is exactly zero at ``z = z1`` (so the
+    interpolant stays continuous with the untouched cells above) and exactly
+    zero at ``z = 0``, and it reproduces ``r'(0) = c/H0`` identically.
+    Residual error is ``O(z^3)``: 1.5e-8 relative at ``z = 1e-5``.
+
+    Applied ONLY on ``0 < z < z1``; every query at or above the second node --
+    which is every GW event, every catalog galaxy and every injection in
+    practice -- returns the pre-existing value bit-for-bit, and ``NaN`` fills
+    outside the grid are preserved because the mask is false there.
+    """
+    u = z / _Z_FIRST_NODE
+    corrected = r_lin + (1.0 - u) * (_R_SLOPE_AT_ZERO * z - r_lin)
+    return jnp.where((z > 0.0) & (z < _Z_FIRST_NODE), corrected, r_lin)
+
 rs = jnp.asarray(_build_cpl_distance_grid())
 """Comoving-distance table indexed by ``(Om0grid, w0grid, wagrid, zgrid)`` in Mpc."""
 
@@ -386,17 +434,23 @@ def r_of_z(z, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial, distance_table=No
     ``None`` picks up :func:`distance_table` (the module-level :data:`rs`, or
     whatever an enclosing :func:`bound_distance_table` installed).  It is a jit
     ARGUMENT, never a closure capture -- see the note above :data:`rs`.
+
+    Inside the FIRST grid cell (``0 < z < zgrid[1] ~ 0.0036``) the linear
+    interpolant is replaced by the exact-at-the-origin quadratic Hermite form
+    (:func:`_low_z_hermite_correction`); every other query is unchanged
+    bit-for-bit.
     """
     if jnp.ndim(Om0) == 0 and jnp.ndim(w0) == 0 and jnp.ndim(wa) == 0:
         interpolate = interpnd_scalar_head
     else:
         interpolate = interpnd
-    return interpolate(
+    r_lin = interpolate(
         (Om0, w0, wa, z),
         (Om0grid, w0grid, wagrid, zgrid),
         distance_table,
         fill_value=jnp.nan,
-    ) * (H0Planck / H0)
+    )
+    return _low_z_hermite_correction(r_lin, z) * (H0Planck / H0)
 
 
 @threads_distance_table()

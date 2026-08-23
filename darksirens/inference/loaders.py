@@ -1,5 +1,7 @@
 """Staged data loading helpers for inference."""
 
+import warnings
+
 import healpy as hp
 import jax.numpy as jnp
 import numpy as np
@@ -177,6 +179,7 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         # compact view holds only the pixels this run's events touch, which is
         # not the survey's footprint.
         guard_unmasked_footprint_counts(opts, ngals, label=str(path))
+        warn_per_pixel_clustering_cancellation(opts, ngals, label=str(path))
 
         union_pixels = unique_inference_pixels(pixels_pe, pixels_sel)
         z_u = zgals[union_pixels]
@@ -1001,6 +1004,101 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
 _UNMASKED_FOOTPRINT_EMPTY_FRAC = 0.05
 
 
+def _footprint_like(ngals):
+    """``(is_footprint, empty_frac, poisson_empty, lam, n_pix)`` for a count array.
+
+    Sparsity is not a footprint: a catalog whose empty pixels are what its own
+    mean count predicts under Poisson is sparse and passes at ANY empty
+    fraction.  The Poisson reference is taken over the OCCUPIED pixels, not the
+    full sky -- putting the mask's own zeros into lambda lets the hole raise
+    its own detection threshold (a pencil-beam survey with 20 gal/pixel over
+    12% of the sky gave lambda = 2.4 and passed silently at empty_frac 0.88).
+    """
+    ngals = np.asarray(ngals).reshape(-1)
+    n_pix = int(ngals.size)
+    if n_pix == 0:
+        return False, 0.0, 0.0, 0.0, 0
+    empty_frac = float((ngals == 0).mean())
+    occ = ngals[ngals > 0]
+    lam = float(occ.mean()) if occ.size else 0.0
+    poisson_empty = float(np.exp(-lam))
+    is_footprint = bool(
+        empty_frac > max(_UNMASKED_FOOTPRINT_EMPTY_FRAC, 10.0 * poisson_empty)
+    )
+    return is_footprint, empty_frac, poisson_empty, lam, n_pix
+
+
+def warn_per_pixel_clustering_cancellation(opts, ngals, *, label="") -> None:
+    r"""Name the clustering cancellation of the DEFAULT per-pixel completeness.
+
+    Under ``c_mode='per_pixel'`` the completeness numerator is the pixel's own
+    observed density while the denominator is isotropic, so the estimator is
+
+        C_est(z|p) = clip[ dN_obs_s(z|p) / dN_exp_s(z), 0, 1 ],
+
+    which in the matched-kernel idealization ``dN_obs = C_sel nbar (1 + delta)``
+    is ``clip[C_sel (1 + delta), 0, 1]``.  With no LSS modulation on the
+    missing branch (``--use_lss`` off, no ``--lss_completion`` table) the
+    completed density is
+
+        dN_obs + (1 - C_est) dN_exp = C_sel nbar (1+delta) + nbar - C_sel nbar (1+delta)
+                                    = nbar,
+
+    i.e. the clustering signal the dark-siren host weighting is supposed to use
+    CANCELS EXACTLY.  MEASURED on a constant-selection injection with known
+    delta (tests/test_per_pixel_clustering_cancellation.py): true pixel
+    contrasts of +-50% come back as ~1e-3 in the completed density, four orders
+    of magnitude of suppression.  Above the clip -- ``C_sel (1 + delta) > 1`` --
+    it is worse than cancellation: the excess is discarded outright
+    (``C_sel = 0.8, delta = 0.5`` gives 1.2 against a truth of 1.5).
+
+    This changes host angular weights and the catalog-versus-missing odds, so
+    it can bias ``H0``.  The fix is the aggregate radial budget plus a
+    validated mean-one field -- ``--c_mode aggregate`` with an
+    ``--lss_completion`` Q table -- which is why this is a WARNING and not a
+    refusal: flipping the default is an owner decision, and the per-pixel mode
+    remains the reproducible legacy/ablation path.
+
+    Fires only where the exposure is real: a footprint-limited catalog (the
+    same sparsity-vs-footprint test the S-3 guard uses) with no angular
+    modulation on the missing branch at all.
+    """
+    c_mode = getattr(opts, "c_mode", None) or "per_pixel"
+    if c_mode != "per_pixel":
+        return
+    if bool(getattr(opts, "use_LSS", False)):
+        return
+    if getattr(opts, "lss_completion", None) or str(
+            getattr(opts, "lss_field_mode", "table") or "table") != "table":
+        return
+    is_footprint, empty_frac, poisson_empty, lam, n_pix = _footprint_like(ngals)
+    if not is_footprint:
+        return
+    area = 4.0 * np.pi * (180.0 / np.pi) ** 2
+    where = f" [{label}]" if label else ""
+    warnings.warn(
+        f"c_mode='per_pixel' with NO angular modulation on the missing branch"
+        f"{where} (--use_lss off, no --lss_completion table) on a "
+        f"footprint-limited catalog: {empty_frac:.1%} of {n_pix} pixels are "
+        f"empty ({empty_frac * area:,.0f} deg^2) against {poisson_empty:.2e} "
+        f"predicted by the mean count {lam:.1f} gal/pixel. The per-pixel "
+        "completeness numerator is that pixel's own observed density against "
+        "an ISOTROPIC denominator, so C absorbs the observed clustering: "
+        "C = clip[C_sel (1 + delta), 0, 1], and the completed density "
+        "dN_obs + (1 - C) dN_exp collapses to the MEAN density -- the "
+        "clustering signal the dark-siren host weighting exists to use "
+        "CANCELS EXACTLY (measured: +-50% true pixel contrast comes back as "
+        "~1e-3). Where C clips at 1 the overdense excess is discarded outright "
+        "(C_sel = 0.8, delta = 0.5 gives 1.2 against a truth of 1.5). This "
+        "moves host angular weights and the catalog-versus-missing odds, so it "
+        "can bias H0. Use --c_mode aggregate with an --lss_completion Q table "
+        "(radial budget from C, angular structure from a mean-one Q), or run "
+        "per_pixel deliberately as the legacy/ablation arm.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
 def guard_unmasked_footprint_counts(opts, ngals, *, label="") -> None:
     """The S-3 footprint guard, on a bare full-sky count array.
 
@@ -1012,25 +1110,12 @@ def guard_unmasked_footprint_counts(opts, ngals, *, label="") -> None:
     c_mode = getattr(opts, "c_mode", None) or "per_pixel"
     if c_mode not in ("aggregate", "selection"):
         return
-    ngals = np.asarray(ngals).reshape(-1)
-    n_pix = int(ngals.size)
-    if n_pix == 0:
-        return
-    empty_frac = float((ngals == 0).mean())
-    # The Poisson reference must come from the OCCUPIED mean, not thefull-sky mean.
-    # Using ngals.sum()/n_pix puts the mask's own zeros into lambda, so the
-    # emptier the footprint the SMALLER lambda, the LARGER exp(-lambda), and the
-    # higher the bar the guard has to clear -- the hole raises its own detection
-    # threshold. It made the guard unfireable for any catalog with
-    # lambda <= ln(10) = 2.303, since then 10*exp(-lambda) >= 1 >= empty_frac at
-    # every empty fraction. Concretely: a pencil-beam survey with 20 gal/pixel
-    # over 12% of the sky gave lambda = 2.4 and passed silently at empty_frac
-    # 0.88 -- exactly the S-3 exposure this exists to catch.
-    occ = ngals[ngals > 0]
-    lam = float(occ.mean()) if occ.size else 0.0
-    poisson_empty = float(np.exp(-lam))
-    if not empty_frac > max(_UNMASKED_FOOTPRINT_EMPTY_FRAC,
-                            10.0 * poisson_empty):
+    # The Poisson reference comes from the OCCUPIED mean, not the full-sky one
+    # (see _footprint_like): putting the mask's own zeros into lambda lets the
+    # hole raise its own detection threshold, which made the guard unfireable
+    # for any catalog with lambda <= ln(10) = 2.303.
+    is_footprint, empty_frac, poisson_empty, lam, n_pix = _footprint_like(ngals)
+    if not is_footprint:
         return
     area = 4.0 * np.pi * (180.0 / np.pi) ** 2
     where = f" [{label}]" if label else ""
@@ -1086,6 +1171,11 @@ def _guard_unmasked_footprint(opts, data) -> dict:
     ngals = data.get("ngals_catalog", data.get("ngals"))
     if ngals is not None:
         guard_unmasked_footprint_counts(opts, ngals)
+        # PHY-01: the DEFAULT per-pixel estimator cancels the clustering signal
+        # when nothing modulates the missing branch.  A warning, not a refusal:
+        # flipping the default is an owner decision and per_pixel stays the
+        # reproducible legacy/ablation path.
+        warn_per_pixel_clustering_cancellation(opts, ngals)
     return data
 
 

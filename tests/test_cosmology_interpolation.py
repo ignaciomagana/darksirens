@@ -69,10 +69,14 @@ _GRIDS = (_cosmo.Om0grid, _cosmo.w0grid, _cosmo.wagrid, _cosmo.zgrid)
 
 
 def _r_of_z_interpnd(z, H0, Om0, w0, wa):
-    """The pre-optimisation general path, kept here as the reference."""
-    return interpnd(
-        (Om0, w0, wa, z), _GRIDS, _cosmo.rs, fill_value=jnp.nan
-    ) * (_cosmo.H0Planck / H0)
+    """The pre-optimisation general path, kept here as the reference.
+
+    This mirrors ``r_of_z``'s body, so it carries the same first-cell
+    quadratic-Hermite branch: these tests compare the SEPARABLE head against
+    the GENERAL interpnd path, and the low-z branch is downstream of both.
+    """
+    r_lin = interpnd((Om0, w0, wa, z), _GRIDS, _cosmo.rs, fill_value=jnp.nan)
+    return _cosmo._low_z_hermite_correction(r_lin, z) * (_cosmo.H0Planck / H0)
 
 
 def test_separable_matches_general_path_over_random_cosmologies():
@@ -340,3 +344,82 @@ def test_threads_distance_table_rejects_a_function_without_the_parameter():
     import time rather than silently fall back to the module global."""
     with pytest.raises(TypeError, match="distance_table"):
         _cosmo.threads_distance_table()(lambda z, H0: z * H0)
+
+
+# ── the FIRST grid cell: 0 < z < zgrid[1] ~ 0.0036 ────────────────────────────
+#
+# The redshift axis is expm1-spaced with z = 0 as its first node, so everything
+# below the second node is spanned by ONE linear segment out of the origin.
+# Linear interpolation there returns the chord slope r(z1)/z1 at every z while
+# the true slope at the origin is c/H0, biasing dL by -E'(0) z1 / 2 as z -> 0:
+# MEASURED -0.083% at the fiducial and -0.207% at the (0.25, -0.3, -2.0) prior
+# corner before the quadratic-Hermite branch. The probe above starts at z = 0.01
+# and never saw it.
+
+#: Prior corners plus the fiducial; the last two are the widest CPL cells.
+_LOW_Z_CORNERS = [
+    (_cosmo.Om0Planck, _cosmo.w0Fiducial, _cosmo.waFiducial),
+    (_cosmo.Om0PriorLower, -1.0, 0.0),
+    (_cosmo.Om0PriorUpper, -1.0, 0.0),
+    (_cosmo.Om0PriorLower, -0.3, -2.0),
+    (_cosmo.Om0PriorUpper, -2.0, 2.0),
+]
+
+#: Inside the first cell only (z1 ~ 0.0036); the ordinary cells above it are
+#: budgeted by ``_Z_PROBE`` / the midpoint tests, at their own coarser bar.
+_Z_LOW_PROBE = np.array([1e-5, 1e-4, 1e-3, 3e-3])
+
+
+@pytest.mark.parametrize("Om0,w0,wa", _LOW_Z_CORNERS)
+def test_low_z_distance_accuracy_down_to_1e5(Om0, w0, wa):
+    """dL must stay accurate into the first grid cell, at every prior corner.
+
+    The reference is scipy quadrature of the module's own CPL E(z) (astropy's
+    own low-z quadrature carries more roundoff at z = 1e-5 than the effect
+    being measured). The 2e-5 bar sits between the pre-fix worst (2.1e-3 at
+    z = 1e-5, (0.2075, -0.3, -2.0)) and the measured post-fix worst inside the
+    cell (5.7e-6, the O(z^3) Hermite residual at z = 3e-3), so it fails loudly
+    on a regression without pinning the exact interpolant.
+    """
+    from scipy.integrate import quad
+
+    ref = np.array([
+        (_cosmo.speed_of_light / _cosmo.H0Planck)
+        * quad(lambda x: 1.0 / _cosmo._cpl_E_numpy(np.asarray(x), Om0, w0, wa),
+               0.0, float(z), epsabs=1e-16, epsrel=1e-13)[0]
+        * (1.0 + float(z))
+        for z in _Z_LOW_PROBE
+    ])
+    got = np.asarray(dL_of_z(jnp.asarray(_Z_LOW_PROBE), _cosmo.H0Planck,
+                             Om0, w0, wa))
+    rel = np.abs(got / ref - 1.0)
+    assert rel.max() < 2e-5, (
+        f"low-z dL error {rel.max():.2e} at (Om0={Om0}, w0={w0}, wa={wa}); "
+        f"per-z {dict(zip(_Z_LOW_PROBE.tolist(), rel.tolist()))}"
+    )
+
+
+def test_low_z_branch_is_exactly_inert_at_and_above_the_second_node():
+    """Every query at or above zgrid[1] keeps the pre-existing value bit-for-bit.
+
+    That is what makes the branch safe to enable by default: no GW event,
+    catalog galaxy or injection in practice sits below z = 0.0036, so the
+    correction must be the identity everywhere else -- including on the NaN
+    fills that mark out-of-grid queries.
+    """
+    z1 = _cosmo._Z_FIRST_NODE
+    z = jnp.asarray([z1, np.nextafter(z1, 1.0), 0.01, 0.5, 4.0, -0.1, 1e6])
+    r_lin = jnp.asarray([1.0, 2.0, 3.0, 4.0, 5.0, jnp.nan, jnp.nan])
+    out = np.asarray(_cosmo._low_z_hermite_correction(r_lin, z))
+    np.testing.assert_array_equal(out[:5], np.asarray(r_lin)[:5])
+    assert np.isnan(out[5]) and np.isnan(out[6])
+
+
+def test_low_z_branch_reproduces_the_exact_slope_at_the_origin():
+    """r'(0) = c/H0 exactly, for EVERY flat CPL cosmology (E(0) = 1)."""
+    for Om0, w0, wa in _LOW_Z_CORNERS:
+        slope = float(jax.grad(
+            lambda z: _cosmo.r_of_z(z, _cosmo.H0Planck, Om0, w0, wa)
+        )(1e-12))
+        np.testing.assert_allclose(
+            slope, _cosmo.speed_of_light / _cosmo.H0Planck, rtol=1e-9)

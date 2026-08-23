@@ -132,6 +132,10 @@ class IsotropicSky:
     def prior_bounds(self):
         return [], [], []
 
+    def log_prior_volume_correction(self) -> float:
+        """No parameters, nothing to reject: the prior is already normalised."""
+        return 0.0
+
     def log_g_sky(self, nx, ny, nz, z, theta):
         return jnp.zeros_like(nx)
 
@@ -167,6 +171,18 @@ class DipoleSky:
 
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
+
+    def log_prior_volume_correction(self) -> float:
+        """Zero: ``constraint_groups`` normalises the prior, it does not reject.
+
+        The samplers map their unit cube ONTO the ball via the ``ball3``
+        transform, so every draw is valid and the prior integrates to one over
+        exactly the region the model supports.  ``log_g_sky``'s ``|d| > 1``
+        branch is an unreachable backstop, not a rejection gate, so there is no
+        prior-volume artifact in ``logZ`` here (contrast
+        :class:`MultipoleSky`).
+        """
+        return 0.0
 
     def log_g_sky(self, nx, ny, nz, z, theta):
         dx, dy, dz = theta[0], theta[1], theta[2]
@@ -230,6 +246,14 @@ class SphereGPSky:
 
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
+
+    def log_prior_volume_correction(self) -> float:
+        """Zero: ``g = exp(f)/<exp f>`` is positive by CONSTRUCTION.
+
+        Nothing is ever rejected, so the box/normal prior the sampler is handed
+        is the prior the evidence is computed under.
+        """
+        return 0.0
 
     def log_g_sky(self, nx, ny, nz, z, theta):
         amp = jnp.exp(theta[0])
@@ -354,6 +378,10 @@ class _SphereZGPBase:
 
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
+
+    def log_prior_volume_correction(self) -> float:
+        """Zero: ``g = exp(f)/Z`` is positive by construction; nothing rejects."""
+        return 0.0
 
     def _field(self, nx, ny, nz, z, theta):
         """Return ``(f, fq)``: the field at the query points ``(N,)`` and the
@@ -591,6 +619,25 @@ class MultipoleSky:
         fraction = n_valid / float(n_draws)
         self._prior_volume_cache = ((int(n_draws), int(seed)), fraction)
         return fraction
+
+    def log_prior_volume_correction(self) -> float:
+        """``log(f_valid)`` -- the offset to SUBTRACT from a reported ``logZ``.
+
+        The sampler integrates against the uniform BOX prior while the model's
+        positivity gate returns ``-inf`` outside the valid region, so the raw
+        evidence is ``f_valid`` times the evidence under the intended
+        (constrained, normalised) prior:
+
+            logZ_corrected = logZ_raw - log(f_valid).
+
+        Measured ``-0.50`` nats at ``lmax=2`` and ``-3.35`` at ``lmax=3``, i.e.
+        an artificial ~2.8-nat preference for the smaller model that comes from
+        the arbitrary ``a_bound``, not from the data.  This is what
+        :func:`darksirens.io.results.save_results` records as
+        ``log_prior_volume_fraction`` / ``logZ_corrected`` and what
+        ``darksirens_analyze`` compares models with.
+        """
+        return float(math.log(self.prior_volume_fraction()))
 
     def prior_bounds(self):
         return pack_specs(*self.param_specs)

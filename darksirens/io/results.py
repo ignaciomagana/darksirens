@@ -115,6 +115,24 @@ def result_is_complete(path) -> bool:
     except (OSError, KeyError, ValueError):
         return False
 
+def _sky_log_prior_volume_correction(opts) -> float:
+    """``log(f_valid)`` for this run's sky model, or 0.0 if it has none.
+
+    Imported lazily: ``darksirens.sky`` pulls in JAX and the population base,
+    and this module is imported by tooling that only wants to read/write HDF5.
+    Any failure to resolve the model (an unknown name from an old settings
+    file, say) degrades to 0.0 -- a missing correction must not lose a
+    finished run's results.
+    """
+    name = getattr(opts, "sky_model", None)
+    if not name:
+        return 0.0
+    try:
+        from darksirens.sky import sky_log_prior_volume_correction
+        return float(sky_log_prior_volume_correction(str(name)))
+    except Exception:
+        return 0.0
+
 
 def write_tinyns_metadata(attrs, results, opts) -> None:
     if getattr(opts, "tinyns_resolved_config", None) is not None:
@@ -418,6 +436,16 @@ def save_results_hdf5(
         if logZ is not None:
             f.attrs["logZ"]    = float(logZ)
             f.attrs["logZerr"] = float(logZerr) if logZerr is not None else float("nan")
+            # Prior-volume correction (sky models that REJECT part of their
+            # prior box).  ``logZ`` stays the raw sampler number -- that is what
+            # every existing reader expects -- and the corrected value is
+            # written ALONGSIDE it, because the raw one is not comparable
+            # between two models whose rejected fractions differ (measured
+            # -0.50 nats for multipole lmax=2 against -3.35 for lmax=3: a 2.8-nat
+            # artificial preference set by the coefficient bound, not the data).
+            _log_fvalid = _sky_log_prior_volume_correction(opts)
+            f.attrs["log_prior_volume_fraction"] = float(_log_fvalid)
+            f.attrs["logZ_corrected"] = float(logZ) - float(_log_fvalid)
 
         if prior_overrides:
             f.attrs["prior_overrides"] = json.dumps(prior_overrides)

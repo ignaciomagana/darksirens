@@ -311,19 +311,33 @@ def test_global_Q_too_few_rows_raises():
 def test_legacy_delta_g_floor_warns_about_budget_inflation():
     """The legacy factor max(1 + b_eff delta_g, 0) is mean-one over the sky ONLY
     while the floor is inert; every floored cell inflates the TOTAL missing
-    budget (not just its placement), and unlike the Q path there is no
-    renormalization to undo it -- so the diagnostic must say so (review F-119)."""
+    budget (not just its placement).  The DEFAULT now renormalizes the floored
+    factor back to full-sky mean one, so the diagnostic reports the conserved
+    source and stays silent; the warning belongs to the opt-in legacy floor,
+    which really does return the inflated budget (review F-119, PHY-02)."""
     import warnings
 
+    from darksirens.core.types import LSS_FLOOR_LEGACY_STRUCT
+
     # b_miss = 2 with delta_g = -0.8 -> 1 + b_eff delta_g = -0.6 -> floored.
-    survey = SurveyParams(n0=1e-2, z50=0.3, w=0.1, delta=0.0, b_miss=2.0,
-                          alpha_miss=1.0)
+    kw = dict(n0=1e-2, z50=0.3, w=0.1, delta=0.0, b_miss=2.0, alpha_miss=1.0)
     cat = _tiny_catalog(delta_g_pix_z=jnp.full((2, NG), -0.8))
+
+    legacy = SurveyParams(lss_floor=LSS_FLOOR_LEGACY_STRUCT, **kw)
     with pytest.warns(RuntimeWarning, match="INFLATES the total missing"):
-        diag = completion_clip_diagnostics(COSMO, survey, cat)
+        diag = completion_clip_diagnostics(COSMO, legacy, cat)
     assert diag["lss_source"] == "legacy_delta_g"
     assert diag["max_rho_miss_eff_clipped_fraction"] == 1.0
-    # An inert floor must stay silent.
+
+    # The conserving default: same clip FRACTION (a divisor cannot unfloor a
+    # cell) but no budget inflation, so no warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        diag = completion_clip_diagnostics(COSMO, SurveyParams(**kw), cat)
+    assert diag["lss_source"] == "legacy_delta_g_conserved"
+    assert diag["max_rho_miss_eff_clipped_fraction"] == 1.0
+
+    # An inert floor must stay silent either way.
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         completion_clip_diagnostics(COSMO, SURVEY_B0, _tiny_catalog())

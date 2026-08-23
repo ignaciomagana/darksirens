@@ -64,6 +64,35 @@ class SchechterSelectionFamily(NamedTuple):
 SELECTION_FAMILY_SCHECHTER_STRUCT = SchechterSelectionFamily()
 
 
+class LegacyLSSFloor(NamedTuple):
+    """Leaf-less structural flag for the UNCONSERVED legacy LSS floor.
+
+    Same design as :class:`AggregateCMode`: zero pytree leaves, so the mode is
+    part of the treedef and ``isinstance``-decodable inside any trace.  FALSY
+    as an empty tuple -- test with ``isinstance``, never truthiness.
+
+    ``SurveyParams.lss_floor`` is ``None`` by default, which RENORMALIZES the
+    floored local-overdensity factor ``max(1 + b_eff delta_g, 0)`` to full-sky
+    mean one at every redshift.  ``delta_g`` is built with an exactly zero
+    full-sky mean, so the unfloored factor sums to ``N_pix`` and is a pure
+    REDISTRIBUTION of the missing budget set by ``(1 - C)`` and ``n0``; the
+    floor breaks that identity wherever ``b_eff delta_g < -1`` (reachable for
+    ``b_miss > 1``, since ``delta_g >= -1``), inflating the total missing count
+    above what ``(1 - C)`` authorised.  Renormalizing is exactly inert wherever
+    the floor does not engage -- the normalizer is then 1.0 to the bit -- so
+    this default changes only the runs that were already violating
+    conservation and already warning about it.
+
+    This sentinel restores the unrenormalized legacy factor, for reproducing a
+    measurement made with it.
+    """
+
+
+#: Singleton structural legacy-floor flag; ``None`` spells the conserving
+#: default.  See :class:`LegacyLSSFloor`.
+LSS_FLOOR_LEGACY_STRUCT = LegacyLSSFloor()
+
+
 class SurveyParams(NamedTuple):
     """Parameters dictating galaxy survey completeness and selection.
 
@@ -189,6 +218,13 @@ class SurveyParams(NamedTuple):
     Mstar_hat: Any = -20.5
     alpha: Any = -0.7
     M_faint_offset: Any = 5.0
+    # Conservation policy of the LEGACY local-overdensity missing-galaxy factor
+    # max(1 + alpha_miss*b_miss*delta_g, 0).  STRUCTURAL like c_mode: None (the
+    # default) renormalizes the floored factor to full-sky mean one at every z,
+    # LSS_FLOOR_LEGACY_STRUCT restores the unrenormalized legacy factor.  Never
+    # sampled or traced; inert on the Q_LSS / latent paths (Q carries its own
+    # mean-one renormalization).  See :class:`LegacyLSSFloor`.
+    lss_floor: Any = None
 
 
 class EMCatalog(NamedTuple):
