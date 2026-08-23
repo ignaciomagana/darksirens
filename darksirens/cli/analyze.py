@@ -16,6 +16,21 @@ The population density is evaluated on a flattened, equal-shape coordinate grid
 so the recompute works for every model type, including the GP / binned-GP
 (gppop) models (which require equal-shape arguments to ``log_p_pop``).
 """
+# ── JAX runtime configuration (before ANY JAX-dependent import) ───────────────
+# x64 has to be on before the first JAX-dependent import, not after it: the
+# population registry builds MASS_GRID / Q_GRID / CHI_GRID / M1_MESH and their
+# lru_cached getters AT IMPORT TIME, and those arrays keep whatever precision
+# was configured when they were built.  Importing jax (and the population
+# modules) first and enabling x64 later left every one of them float32 for the
+# life of the process -- MEASURED in a clean subprocess: x64 False before the
+# import, True after it, and get_mass_grid() still float32 -- which violates the
+# package's x64 contract and cost ~1e-8 in recomputed log densities.  The
+# inference CLIs already configure first; this one now matches them.  The
+# pytest conftest enables x64 before collection, so no test could have caught it.
+from darksirens.core.jax_config import configure_jax_runtime  # noqa: E402
+
+configure_jax_runtime()
+
 import os
 import json
 import argparse

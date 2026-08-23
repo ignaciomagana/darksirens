@@ -79,3 +79,4 @@ tests/test_latent_anchor.py
 tests/test_latent_seam.py
 tests/test_latent_factory.py
 tests/test_jax_allocator_config.py
+tests/test_cold_import_precision.py
