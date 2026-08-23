@@ -130,13 +130,26 @@ def test_resume_auto_picks_newest_checkpoint_and_its_run_dir(tmp_path):
     assert ckpt == str(newer / CHECKPOINT_BASENAMES["dynesty"])
 
 
+def _write_complete_results_hdf5(path):
+    """A results.hdf5 the way a finished writer leaves it (completion marker)."""
+    import h5py
+
+    from darksirens.io.results import atomic_result_hdf5
+
+    with atomic_result_hdf5(str(path)) as f:
+        f.create_dataset("samples", data=np.zeros((2, 1)))
+        f.attrs["labels"] = '["H0"]'
+    with h5py.File(str(path), "r") as f:
+        assert f.attrs["result_complete"]
+
+
 def test_resume_auto_skips_finished_runs(tmp_path):
-    """A run directory holding results.hdf5 is a run that converged; its
-    end-of-run checkpoint must not hijack a fresh submission."""
+    """A run directory holding a COMPLETE results.hdf5 is a run that converged;
+    its end-of-run checkpoint must not hijack a fresh submission."""
     done = tmp_path / "run_done"
     done.mkdir()
     (done / CHECKPOINT_BASENAMES["dynesty"]).write_bytes(b"x")
-    (done / "results.hdf5").write_bytes(b"x")
+    _write_complete_results_hdf5(done / "results.hdf5")
     opts = SimpleNamespace(sampler="dynesty", resume="auto", save_path=str(tmp_path))
     assert find_resume_target(opts, "dynesty") == (None, None)
     # An explicit path still resumes it (re-saving a converged run is a valid

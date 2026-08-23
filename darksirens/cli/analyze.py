@@ -40,6 +40,7 @@ from darksirens.gw.populations import pop_model_parser
 from darksirens.inference.pop_extractor import make_pop_extractor
 from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
 from darksirens.utils.cosmology import dV_of_z
+from darksirens.io.results import result_is_complete
 from darksirens.utils.plotting import (
     set_publication_style,
     latent_indices,
@@ -192,10 +193,34 @@ def _load_run_npy(run_dir, allow_legacy_pickle=False):
 
 
 def load_run(run_dir, allow_legacy_pickle=False):
-    """Load a completed inference run (current HDF5, else samples.npy)."""
-    if os.path.exists(os.path.join(run_dir, "results.hdf5")):
-        return _load_run_hdf5(run_dir)
-    if os.path.exists(os.path.join(run_dir, "samples.npy")):
+    """Load a completed inference run (current HDF5, else samples.npy).
+
+    A results.hdf5 is accepted only when its writer FINISHED it (the completion
+    marker, or -- for files predating it -- the samples+labels pair a truncated
+    write never reaches).  A partial file is not silently analysed as if it were
+    the run's posterior: the samples.npy recovery chain is used instead when one
+    exists, and otherwise the caller is told the file is truncated rather than
+    handed whatever datasets happened to land before the fault.
+    """
+    hdf5_path = os.path.join(run_dir, "results.hdf5")
+    npy_path = os.path.join(run_dir, "samples.npy")
+    if os.path.exists(hdf5_path):
+        if result_is_complete(hdf5_path):
+            return _load_run_hdf5(run_dir)
+        if os.path.exists(npy_path):
+            _warn(
+                f"{hdf5_path} is a PARTIAL result (no completion marker): its "
+                "final write did not finish. Falling back to the samples.npy "
+                "recovery chain; there is no evidence to report."
+            )
+            return _load_run_npy(run_dir, allow_legacy_pickle=allow_legacy_pickle)
+        raise ValueError(
+            f"{hdf5_path} is a PARTIAL result (no completion marker): its final "
+            "write did not finish, and no samples.npy recovery chain sits beside "
+            "it. Re-run (--resume auto will restart from the checkpoint) rather "
+            "than analysing a truncated file."
+        )
+    if os.path.exists(npy_path):
         return _load_run_npy(run_dir, allow_legacy_pickle=allow_legacy_pickle)
     raise FileNotFoundError(
         f"No inference results found in {run_dir!r}; expected 'results.hdf5' "

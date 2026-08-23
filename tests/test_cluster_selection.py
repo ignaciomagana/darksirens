@@ -1351,6 +1351,10 @@ def test_lensing_cli_sampled_lens_params_affect_cluster_and_pair_terms(monkeypat
         n_singletons=0, n_pairs=1, pair_kdes=None, lensed=SimpleNamespace(m1_src=jnp.ones(2)),
     )
     opts = SimpleNamespace(
+        # Structural test of the lens-parameter plumbing, not a science run:
+        # acknowledge the both-detected p_tag = 1 approximation the PHY-11 gate
+        # otherwise refuses under --fix_lens_rate false.
+        allow_both_detected_approx=True,
         fix_lens_rate=False, sl_tau_A=5e-4, sl_tau_n=3.0,
         cluster_mode="j2", wl_backend="disabled", wl_selection="standard",
         universe_model="spectral_sirens", pop_model="powerlaw+peak", sel_batch_size=None,

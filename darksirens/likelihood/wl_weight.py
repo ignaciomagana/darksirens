@@ -336,12 +336,34 @@ def log_sample_weight_wl_lognormal_hermite(
     (compare the generic version's 3/2 coefficient). The Hermite
     substitution carries the entire WL PDF as the integration measure.
 
-    A subtle case: when ``z`` varies with ``μ`` through z(dL_app · √μ),
-    the lognormal's z-dependence ``s(z(μ))`` makes ``u(μ; z)`` itself
-    μ-dependent. We use a **fixed** z = z(dL_app) (the apparent
-    redshift) to set u, accepting an O(s²) error in the Jacobian — same
-    order as the WL effect itself. For commit-2 accuracy this is fine.
-    A future commit will iterate to self-consistency.
+    Proposal vs target: the density ratio
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    When ``z`` varies with ``μ`` through z(dL_app · √μ), the lognormal's
+    z-dependence ``s(z(μ))`` makes ``u(μ; z)`` itself μ-dependent.  The
+    nodes are therefore drawn from the PROPOSAL
+
+        q(μ) = p_WL(μ | z_app),      z_app = z(dL_app),
+
+    which is not the stated target's ``p_WL(μ | z_s(μ))``.  Evaluating the
+    rest of the integrand at z_s while the measure stays at z_app
+    integrates the wrong density: with a constant source weight the
+    quadrature returns exactly 1, whereas direct quadrature of the stated
+    target returns 0.999822, 0.999517, 0.998712 and 0.996507 at apparent
+    z = 0.5, 1, 2, 4 for the default a = 0.004, b = 1.5.  That is the whole
+    normalization error, and nonconstant population/volume factors move it
+    off the small numbers above.
+
+    So each node carries the importance weight
+
+        log p_WL(μ | z_s(μ)) − log p_WL(μ | z_app)
+            = log s_app − log s_s − (ln μ − m_s)² / (2 s_s²) + u²/2,
+
+    with s_s = s(z_s(μ)), m_s = −s_s²/2, and the −ln μ terms cancelling
+    between the two lognormals.  The identity ln μ = m_app + s_app·u is
+    what turns the proposal's exponent into u²/2.  At ``wl_a == 0`` both
+    widths vanish, every node collapses to μ = 1, and the ratio is
+    identically zero — the advertised reduction to the unmarginalized
+    weight is untouched.
     """
     # Full CPL: dropping w0/wa here ran the WL mu-marginalisation in LambdaCDM
     # while the surrounding likelihood (clamp bounds, volume prior, pop z
@@ -391,12 +413,35 @@ def log_sample_weight_wl_lognormal_hermite(
                             pix_b.reshape(-1), catalog).reshape(z_s_safe.shape)
     log_J  = log_jacobian_m1src_q_z_to_m1det_q_dL(z_s_safe, dL_true, H0, Om0, w0, wa)
 
+    # Proposal -> target density ratio (see the docstring).  Without it the
+    # Hermite backend integrates p_WL(mu | z_app), not the stated
+    # p_WL(mu | z_s(mu)) the generic backend uses, and the two backends of the
+    # same quantity disagree.  The lognormal at the NODE's source redshift,
+    # with the same z clamp make_lognormal_log_p_wl applies:
+    z_s_clamped = jnp.maximum(z_s_safe, 1.0e-3)
+    s2_s = wl_a * jnp.power(z_s_clamped, wl_b)
+    # Same double-where as s above: at wl_a == 0 both widths are exactly zero,
+    # every node sits at mu = 1, and the ratio must be 0 with a finite reverse
+    # pass rather than 0 * inf.
+    s2_s_pos = s2_s > 0.0
+    s2_s_safe = jnp.where(s2_s_pos, s2_s, 1.0)
+    m_s = -0.5 * s2_s
+    log_ratio = jnp.where(
+        s2_s_pos & s2_pos[..., None],
+        0.5 * jnp.log(jnp.where(s2_pos, s2, 1.0))[..., None]   # + log s_app
+        - 0.5 * jnp.log(s2_s_safe)                             # - log s_s
+        - jnp.square(log_mu - m_s) / (2.0 * s2_s_safe)
+        + 0.5 * jnp.square(u_b),                               # proposal exponent
+        0.0,
+    )
+
     # Per-node log-integrand: NO extra +log μ from substitution
     # (Hermite quadrature substitution carries the WL PDF as measure).
     log_integrand = (
         log_w_b
         + log_pp
         + log_pz
+        + log_ratio                   # proposal q(mu|z_app) -> target p(mu|z_s)
         - log_J
         + 0.5 * log_mu                # physics √μ Jacobian only
     )

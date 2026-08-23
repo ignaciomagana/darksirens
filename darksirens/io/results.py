@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 
@@ -6,6 +7,7 @@ import numpy as np
 
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.cli.common import _fixed_dark_energy_metadata
+from darksirens.inference.run_fingerprint import resume_provenance_attrs
 from darksirens.inference.sampling import _json_safe_tinyns_value
 from darksirens.io.settings import environment_block
 
@@ -31,6 +33,87 @@ _TINYNS_SCALAR_ATTRS = {
 
 def _json_attr(value):
     return json.dumps(_json_safe_tinyns_value(value), default=str)
+
+
+# ── Atomic result writing + completion marker ──────────────────────────────────
+#
+# A results.hdf5 is not just an output: auto-resume reads its EXISTENCE as "this
+# run finished" (inference/checkpointing.py) and analyze prefers it over the
+# samples.npy recovery chain.  A final write that dies half-way therefore does
+# double damage -- it poisons analysis with a truncated file AND disables the
+# automatic recovery that would have rebuilt it from the checkpoint.
+#
+# Two things close that hole, and both writers (main CLI and lensing CLI) must
+# use them:
+#
+#   1. write to a sibling temporary file and os.replace() it into place only
+#      after the file closes cleanly, deleting the temporary on ANY exception
+#      (BaseException: a SLURM SIGTERM/KeyboardInterrupt mid-write is exactly
+#      the scenario, and it is not an Exception);
+#   2. stamp a completion marker as the last attribute written, so a reader can
+#      tell a finished result from a file that merely exists.
+#
+# The marker is what `result_is_complete` checks.  Files written from now on are
+# exact: marker present iff the writer returned.  Files written BEFORE the marker
+# existed carry no such attr, and the point of the fallback is that every one of
+# those archives keeps loading -- so it accepts any HDF5 with samples plus SOME
+# metadata (a labels dataset, or any attribute at all).  That is deliberately
+# permissive: it is a heuristic for old files, not a guarantee, and it catches
+# the reproduced failure (samples written, then the fault, no attrs) without
+# refusing the grouped/alias layouts that real archives use.
+RESULT_COMPLETE_ATTR = "result_complete"
+RESULT_SCHEMA_ATTR = "result_schema_version"
+RESULT_SCHEMA_VERSION = 1
+
+
+@contextlib.contextmanager
+def atomic_result_hdf5(path):
+    """Yield an open :class:`h5py.File` that becomes ``path`` only if the whole
+    block succeeds.
+
+    On success the completion marker is stamped and the temporary file is
+    atomically renamed over ``path`` (``os.replace`` on a sibling path, so the
+    same filesystem).  On ANY exception -- including ``KeyboardInterrupt`` and
+    ``SystemExit`` -- the temporary is removed and ``path`` is left exactly as
+    it was: absent for a fresh run, the previous complete result for a rerun.
+    """
+    tmp_path = str(path) + ".tmp"
+    try:
+        with h5py.File(tmp_path, "w") as f:
+            yield f
+            # Last thing written, inside the open file: a marker present in the
+            # renamed file proves every preceding write returned.
+            f.attrs[RESULT_COMPLETE_ATTR] = True
+            f.attrs[RESULT_SCHEMA_ATTR] = RESULT_SCHEMA_VERSION
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp_path, path)
+
+
+def result_is_complete(path) -> bool:
+    """True when ``path`` is a results.hdf5 that a writer finished.
+
+    Unreadable/absent files are incomplete.  Files carrying
+    ``RESULT_COMPLETE_ATTR`` answer with it; older files (written before the
+    marker) fall back to the structural check described above.
+    """
+    if not os.path.isfile(path):
+        return False
+    try:
+        with h5py.File(path, "r") as f:
+            if RESULT_COMPLETE_ATTR in f.attrs:
+                return bool(f.attrs[RESULT_COMPLETE_ATTR])
+            has_samples = "samples" in f or (
+                "posterior" in f and "samples" in f["posterior"]
+            )
+            has_metadata = "labels" in f or len(f.attrs) > 0
+            return bool(has_samples and has_metadata)
+    except (OSError, KeyError, ValueError):
+        return False
 
 
 def write_tinyns_metadata(attrs, results, opts) -> None:
@@ -177,14 +260,13 @@ def save_results_hdf5(
     sample; see :data:`DEAD_POINT_SEMANTICS`.
     """
     path     = os.path.join(run_dir, "results.hdf5")
-    tmp_path = path + ".tmp"
     kw       = dict(compression="gzip", shuffle=True)
     dt       = h5py.string_dtype(encoding="utf-8")
 
     samples = np.asarray(results["samples"])
     N, ndim = samples.shape
 
-    with h5py.File(tmp_path, "w") as f:
+    with atomic_result_hdf5(path) as f:
 
         # Samples and bounds
         f.create_dataset("samples",     data=samples,                          **kw)
@@ -347,24 +429,16 @@ def save_results_hdf5(
         # configuration that actually produced these samples (so it can be
         # compared against the run directory's run_fingerprint.json), whether
         # this run restored state, and whether the gate was forced.
-        f.attrs["run_fingerprint_digest"] = str(
-            getattr(opts, "run_fingerprint_digest", None) or "")
-        f.attrs["resumed"] = bool(getattr(opts, "resume_from_resolved", None))
-        f.attrs["resume_from"] = str(getattr(opts, "resume_from_resolved", None) or "")
-        f.attrs["resume_forced"] = bool(getattr(opts, "resume_force", False))
-        f.attrs["resume_forced_mismatch"] = bool(
-            getattr(opts, "resume_forced_mismatch", False))
+        f.attrs.update(resume_provenance_attrs(opts))
 
         # Same block as settings.json (code identity + numerics stack + argv),
         # built centrally in io/settings.py so the two artifacts cannot drift.
         f.attrs["environment"] = json.dumps(environment_block())
 
-    # Rename only after the file closes cleanly, so a failure mid-write (e.g.
-    # an attr with no native HDF5 equivalent) leaves the old results.hdf5, if
-    # any, untouched instead of a truncated one. os.replace is atomic on the
-    # same filesystem, which run_dir always is (tmp_path is a sibling).
-    os.replace(tmp_path, path)
-
+    # atomic_result_hdf5 did the rename (and the completion stamp), so a failure
+    # mid-write -- e.g. an attr with no native HDF5 equivalent -- leaves the old
+    # results.hdf5, if any, untouched instead of a truncated one, and leaves no
+    # temporary behind.
     save_tinyns_diagnostics_json(results, run_dir, opts)
     return path
 

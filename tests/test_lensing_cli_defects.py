@@ -417,17 +417,22 @@ def test_lensing_decoder_net_fires_on_injected_label_drift(tmp_path, monkeypatch
 
 def _run_save_phase(tmp_path, extra_args=(), lens_fixed=None, logZerr=0.21,
                     dead_points=None, diagnostics=None, diagnostics_point=None,
-                    diagnostics_point_label="prior_midpoint"):
+                    diagnostics_point_label="prior_midpoint", opts=None):
     """Drive _save_lensing_outputs on a minimal fixed-partition bundle and read
-    back (results.hdf5 attrs, settings.json)."""
+    back (results.hdf5 attrs, settings.json).
+
+    ``opts`` lets a caller hand in an options namespace it already put through
+    another CLI stage (e.g. the resume-fingerprint gate) instead of a fresh one.
+    """
     import json
 
     import h5py
 
     import darksirens.cli.inference_lensing as cli
 
-    opts = _lensing_opts(*extra_args)
-    cli._resolve_lensing_run_config(opts)
+    if opts is None:
+        opts = _lensing_opts(*extra_args)
+        cli._resolve_lensing_run_config(opts)
     lens_fixed = dict(lens_fixed or {})
     lens_labels, lens_lower, lens_upper = cli._build_lens_parameter_space(
         opts, lens_fixed, {}

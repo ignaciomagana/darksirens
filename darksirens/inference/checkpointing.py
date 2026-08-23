@@ -38,7 +38,10 @@ The user-facing contract (identical in both CLIs)
     holds many runs: it only considers run directories whose name carries
     THIS run's configuration prefix (model/sampler/seed — the CLI passes
     ``name_prefix``), and it skips any directory that already holds a
-    ``results.hdf5``, i.e. a run that finished.  So a SLURM array that varies
+    COMPLETE ``results.hdf5``, i.e. a run that finished.  A results.hdf5 that
+    merely exists is not enough: a final write killed half-way leaves a
+    truncated file, and treating that as completion would disable the very
+    recovery the checkpoint is for.  So a SLURM array that varies
     only ``--seed`` resumes each member into its own directory, and a fresh
     submission after a successful run starts fresh instead of silently
     "resuming" a converged sampler.
@@ -199,6 +202,10 @@ def find_resume_target(opts, sampler, name_prefix=None):
     ``--save_path`` holding several models cannot hand a job someone else's
     half-finished sampler.
     """
+    # Local import: io.results pulls in inference.sampling, which imports this
+    # module -- at module scope the two would deadlock on partial init.
+    from darksirens.io.results import result_is_complete
+
     spec = _resume_spec(opts)
     if spec.lower() in _OFF_WORDS:
         return None, None
@@ -219,9 +226,12 @@ def find_resume_target(opts, sampler, name_prefix=None):
             run_dir = os.path.dirname(path)
             if name_prefix and not os.path.basename(run_dir).startswith(name_prefix):
                 continue
-            # A run directory holding results.hdf5 is a run that FINISHED; its
-            # end-of-run checkpoint must not silently hijack a fresh submission.
-            if os.path.exists(os.path.join(run_dir, "results.hdf5")):
+            # A run directory holding a COMPLETE results.hdf5 is a run that
+            # FINISHED; its end-of-run checkpoint must not silently hijack a
+            # fresh submission.  Bare existence is not completion: a final write
+            # that died half-way used to poison this test and lock the run out
+            # of the automatic recovery it needed most.
+            if result_is_complete(os.path.join(run_dir, "results.hdf5")):
                 continue
             candidates.append(path)
         if not candidates:

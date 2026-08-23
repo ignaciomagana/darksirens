@@ -20,6 +20,12 @@ Goldens are stored PER JAX BACKEND (cpu/gpu reductions differ at the ULP
 level), keyed by ``jax.default_backend()``; a backend with no recorded
 goldens fails with a regeneration hint.
 
+STALE CELL: the two ``gpu:*`` ``wl_lognormal`` entries predate the PHY-06 fix
+(the lognormal Hermite backend now carries the proposal-to-target density
+ratio, which moves that cell by ~6%).  The cpu entry was regenerated with the
+fix; the A100/H100 entries must be regenerated ON THAT HARDWARE and will fail
+until then.  No other cell is affected -- the fix touches only the WL path.
+
 Regenerate (ONLY on the legacy path, never after the refactor):
     DARKSIRENS_REGEN_GOLDEN=1 python -m pytest tests/test_unified_k1_golden.py -q
 

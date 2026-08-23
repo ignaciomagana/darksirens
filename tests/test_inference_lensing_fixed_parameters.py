@@ -110,6 +110,10 @@ def test_lensing_cli_base_decoder_ignores_appended_lens_coordinate(monkeypatch):
         lensed=SimpleNamespace(m1_src=jnp.ones(2)),
     )
     opts = SimpleNamespace(
+        # Structural decoder test, not a science run: acknowledge the
+        # both-detected p_tag = 1 approximation the PHY-11 gate otherwise
+        # refuses under --fix_lens_rate false.
+        allow_both_detected_approx=True,
         fix_lens_rate=False,
         sl_tau_A=5e-4,
         sl_tau_n=1.0,
