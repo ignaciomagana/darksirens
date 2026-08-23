@@ -181,6 +181,30 @@ class MassComponent(ABC):
         """
         return float(M_HI)
 
+    @property
+    def support(self) -> tuple[float | None, float | None]:
+        """Explicit support edges the common call path masks the density to.
+
+        A ``None`` edge means "this component owns that edge itself" -- either
+        because ``_eval_unnorm`` already returns zero there (the tapered power
+        laws), or because the model DELIBERATELY has no finite edge on that
+        side.  Both cases exist and neither may be blindly masked, which is
+        why the metadata is explicit rather than inferred.
+
+        The default is the NORMALISATION grid's own span: the base
+        :meth:`_norm` integrates exactly ``[m_lo, m_hi]``, so density outside
+        it is density the normaliser never counted.  Nothing masked it, and
+        the grammar Gaussian is positive for every finite mass: at the
+        fixed/custom corner ``mu = 100``, ``sigma = 20`` it returned
+        ``p_G(201) = 5.78e-8`` per solar mass with ``2.87e-7`` of nominal
+        normalisation leaked above 200 (and ``3.71e-7`` below M_LO = 1),
+        scored against a normaliser that integrated neither (review PHY-08).
+        PE weights carry no compensating mass mask, so the leak is a real
+        (if, under the shipped priors, tiny) density error.
+        """
+        settings = normalization_grid_settings()
+        return float(settings.m_lo), float(settings.m_hi)
+
     @abstractmethod
     def _eval_unnorm(self, m, theta):
         """Evaluate the component's unnormalised primary-mass density."""
@@ -194,6 +218,24 @@ class MassComponent(ABC):
         mass_grid = get_mass_grid()
         return jnp.trapezoid(self._eval_unnorm(mass_grid, theta), mass_grid)
 
+    def _mask_to_support(self, m, dens):
+        """Zero ``dens`` outside :attr:`support`.
+
+        ``support`` is Python floats/None, so both bounds are STATIC: the
+        branches below are taken at trace time and a component with no finite
+        edges costs nothing.
+        """
+        lo, hi = self.support
+        if lo is None and hi is None:
+            return dens
+        in_support = None
+        if lo is not None:
+            in_support = m >= lo
+        if hi is not None:
+            above = m <= hi
+            in_support = above if in_support is None else (in_support & above)
+        return jnp.where(in_support, dens, jnp.zeros_like(dens))
+
     def __call__(self, m, theta, norm=None):
         """Evaluate the normalised density at mass ``m``.
 
@@ -203,7 +245,7 @@ class MassComponent(ABC):
         """
         p = self._eval_unnorm(m, theta)
         n = norm if norm is not None else self._norm(theta)
-        return p / jnp.where(n > 0, n, 1.0)
+        return self._mask_to_support(m, p / jnp.where(n > 0, n, 1.0))
 
 
 class PairingModel(ABC):
@@ -258,6 +300,18 @@ class PairingModel(ABC):
 
     def __call__(self, m1, q, m_min, dm_min, theta):
         p = self._eval_unnorm(m1, q, m_min, dm_min, theta)
+        # SUPPORT MASK.  Every normaliser below integrates over (q_cut, 1] --
+        # the q-support implied by the m2 = q*m1 >= m_min cut and the m2 <= m1
+        # labelling convention -- but the concrete _eval_unnorm implementations
+        # only require q > 0 and m2 >= m_min.  A row with m2 > m1 therefore
+        # received a finite density from OUTSIDE the domain the division
+        # normalises over: measured on PowerLawPairing at beta = 1, m_min = 5,
+        # dm_min = 3, m1 = 30, the returned density integrated to 1.0000 over
+        # (q_cut, 1] yet still handed p = 2.52 at q = 1.2 and p = 4.20 at
+        # q = 2, i.e. total mass well above one (review PHY-09).  q = 1 is IN
+        # support (equal masses are physical); q > 1 and q <= 0 are not.  The
+        # densities are finite there, so a plain where is NaN-safe in the VJP.
+        in_support = (q > 0.0) & (q <= 1.0)
         # OPT-IN accuracy knob (STATIC branch on the module-global setting, read
         # at trace time): default None keeps the EXACT per-sample q-integration
         # below; an int precomputes the normaliser once on a static m1 grid and
@@ -287,7 +341,9 @@ class PairingModel(ABC):
             n_sc    = n_sc.reshape(jnp.shape(m1))
             scale_m = scale_s[..., 0].reshape(jnp.shape(m1))
             return jnp.where(
-                n_sc > 0, (p / scale_m) / jnp.where(n_sc > 0, n_sc, 1.0), 0.0
+                in_support & (n_sc > 0),
+                (p / scale_m) / jnp.where(n_sc > 0, n_sc, 1.0),
+                0.0,
             )
         # GRID path: the q-support depends on m1 only through the m2 = q*m1 cut,
         # so N(m1) = ∫ p_unnorm(m1, q) dq is a smooth 1-D function.  Precompute it
@@ -393,7 +449,7 @@ class PairingModel(ABC):
                             jnp.where(resolved, jnp.maximum(log_I, log_I_lb), log_I_lb),
                             log_I)
         dens    = p * jnp.exp(-log_I)
-        return jnp.where(any_sup, dens, jnp.zeros_like(dens))
+        return jnp.where(any_sup & in_support, dens, jnp.zeros_like(dens))
 
 
 class SpinModel(ABC):
