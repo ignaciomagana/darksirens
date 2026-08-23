@@ -18,6 +18,7 @@ from darksirens.core.constants import (
 from darksirens.core.types import (
     C_MODE_AGGREGATE_STRUCT,
     C_MODE_SELECTION_STRUCT,
+    LSS_FLOOR_LEGACY_STRUCT,
     SELECTION_FAMILY_SCHECHTER_STRUCT,
     CosmoParams,
     SurveyParams,
@@ -134,7 +135,8 @@ def _as_per_catalog_strata(raw, n_catalogs, where):
 
 def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
                    wl_params, c_mode=None, k_corr_coeffs=None,
-                   selection_strata=None, selection_family=None):
+                   selection_strata=None, selection_family=None,
+                   lss_floor=None):
     """Build one catalog's :class:`SurveyParams` from a resolved label dict.
 
     ``values`` maps sampled + fixed labels to values; every
@@ -208,6 +210,13 @@ def _survey_params(values, suffix, *, complete_empty_pixel_policy, z_depth,
         Mstar_hat=field["Mstar_hat"],
         alpha=field["alpha"],
         M_faint_offset=field["M_faint_offset"],
+        # Legacy-floor conservation policy, STRUCTURAL by the same argument as
+        # c_mode: the conserving default is None and the unrenormalized legacy
+        # floor the leaf-less sentinel, so it survives the likelihood's jit
+        # boundary as pytree structure (a bool leaf would arrive as a
+        # value-unreadable tracer, which the completion module hard-errors on).
+        lss_floor=(LSS_FLOOR_LEGACY_STRUCT
+                   if str(lss_floor or "conserve") == "legacy" else None),
     )
 
 
@@ -339,6 +348,7 @@ class ParameterDecoder:
             k_corr_coeffs=_kc1,
             selection_strata=_st1,
             selection_family=self.selection_family,
+            lss_floor=self.lss_floor,
         )
         return cosmo, survey, pop_params, sky_params, mark_params
 
@@ -383,6 +393,7 @@ class ParameterDecoder:
                 k_corr_coeffs=_kc,
                 selection_strata=_st,
                 selection_family=self.selection_family,
+                lss_floor=self.lss_floor,
             ))
 
         # Per-catalog eta blocks: catalog 1 is decode()'s vector verbatim;

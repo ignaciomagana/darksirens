@@ -1397,6 +1397,32 @@ def build_parser():
     g.add_argument("--use_lss", "--use_LSS", dest="use_LSS",
                    action=DeprecatedSpellingAction, deprecated=["--use_LSS"],
                    type=str_to_bool, default=False, metavar="BOOL")
+    g.add_argument("--lss_floor", default="conserve",
+                   choices=["conserve", "legacy"],
+                   help=("Number-conservation policy of the LEGACY "
+                         "local-overdensity missing-galaxy factor "
+                         "max(1 + alpha_miss*b_miss*delta_g, 0) (--use_lss "
+                         "without an --lss_completion table). 'conserve' "
+                         "(DEFAULT) renormalizes the FLOORED factor to "
+                         "full-sky mean one at every redshift, restoring "
+                         "Sum_p lss_p(z) == N_pix exactly for every parameter "
+                         "draw. delta_g is built mean-zero over the full sky, "
+                         "so the unfloored factor is a pure REDISTRIBUTION of "
+                         "the budget (1-C) and n0 set; the floor breaks that "
+                         "wherever b_eff*delta_g < -1 (reachable for "
+                         "b_miss > 1, since delta_g >= -1) and INFLATES the "
+                         "total missing count -- two equal pixels with "
+                         "delta_g = (-1,+1) at b_eff = 2 floor to (0,3), mean "
+                         "1.5, a 50%% budget inflation, 100%% at b_eff = 3. "
+                         "That changes the catalog-versus-missing odds that "
+                         "carry the dark-siren H0 information, not just where "
+                         "the missing galaxies sit. 'conserve' is BIT-"
+                         "IDENTICAL wherever the floor never engages (the "
+                         "normalizer is then exactly 1.0). 'legacy' restores "
+                         "the unrenormalized floor, for reproducing a "
+                         "measurement made with it. Inert with a Q_LSS table "
+                         "or --lss_field_mode latent (Q carries its own "
+                         "mean-one renormalization)."))
     g.add_argument("--catalog_sky_weighting", default=None,
                    choices=["conditional", "field"],
                    help=("Catalog redshift-prior normalization convention (dark_sirens). "
@@ -2930,6 +2956,11 @@ def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
             for _i, _p in enumerate(opts.survey_paths):
                 _row(f"  catalog {_i + 1}", _p)
         _row("Use LSS",      "yes" if opts.use_LSS else "no")
+        if opts.use_LSS:
+            _row("  legacy-floor budget",
+                 "conserved (renormalized to full-sky mean one)"
+                 if str(getattr(opts, "lss_floor", "conserve")) == "conserve"
+                 else "LEGACY unrenormalized floor (budget can inflate)")
         _row("Catalog sky weighting",
              f"{getattr(opts, 'catalog_sky_weighting', 'conditional')} "
              f"({getattr(opts, 'catalog_sky_weighting_source', 'explicit')})")

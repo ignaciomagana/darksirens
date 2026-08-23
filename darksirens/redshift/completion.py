@@ -167,6 +167,7 @@ from darksirens.core.types import (
     AggregateCMode,
     CosmoParams,
     EMCatalog,
+    LegacyLSSFloor,
     SchechterSelectionFamily,
     SelectionCMode,
     SurveyParams,
@@ -309,6 +310,92 @@ def _decode_selection_family(selection_family) -> str:
         "(darksirens.inference.parameters._survey_params) performs this "
         "normalisation for production runs."
     )
+
+
+def _is_legacy_lss_floor(lss_floor) -> bool:
+    """Trace-safe decode of ``SurveyParams.lss_floor`` -> unrenormalized legacy?
+
+    Structural like ``c_mode``: ``None`` (the conserving default) or the
+    leaf-less :data:`darksirens.core.types.LSS_FLOOR_LEGACY_STRUCT` sentinel;
+    the eager strings ``"conserve"`` / ``"legacy"`` are accepted host-side.
+    Anything else -- notably a bool or int leaf that crossed a jit boundary as
+    a value-unreadable tracer -- is a HARD ERROR, for the same reason
+    :func:`_is_aggregate_c_mode` refuses one: guessing would silently change
+    the TOTAL missing-galaxy budget, which is the quantity carrying the
+    dark-siren information.
+    """
+    if lss_floor is None or lss_floor == "conserve":
+        return False
+    if isinstance(lss_floor, LegacyLSSFloor) or lss_floor == "legacy":
+        return True
+    raise ValueError(
+        "SurveyParams.lss_floor could not be decoded at trace time (got "
+        f"{type(lss_floor).__name__}); guessing would silently change the "
+        "total missing-galaxy budget. Carry it STRUCTURALLY: None for the "
+        "conserving default, darksirens.core.types.LSS_FLOOR_LEGACY_STRUCT "
+        "for the unrenormalized legacy floor (the eager strings 'conserve'/"
+        "'legacy' are accepted host-side only)."
+    )
+
+
+def legacy_lss_floor_normalizer(survey: SurveyParams, em_catalog: EMCatalog):
+    r"""Full-sky mean of ``max(1 + b_eff delta_g, 0)`` at every z, or ``None``.
+
+    ``compute_lss_overdensity`` centres ``delta_g`` on the FULL sky (occupied
+    pixels carry the deviation from the occupied-pixel mean, empty pixels carry
+    exactly zero), so
+
+        Sum_p (1 + b_eff delta_g_p(z)) == N_pix   for every z, every b_eff,
+
+    i.e. the unfloored factor is a pure REDISTRIBUTION of the missing budget
+    that ``(1 - C)`` and ``n0`` set.  ``max(..., 0)`` breaks that identity
+    wherever ``b_eff delta_g < -1`` -- reachable for ``b_miss > 1``, since
+    ``delta_g >= -1`` by construction and ``b_miss`` samples over [0, 3].  Two
+    equal pixels with ``delta_g = (-1, +1)`` and ``b_eff = 2`` floor to
+    ``(0, 3)``, mean 1.5: a 50% INFLATION of the missing budget, 100% at
+    ``b_eff = 3``.  That is not a spatial reshuffle -- it changes the total
+    catalog-versus-missing odds, and with them the inferred completeness and
+    the strength of the catalog's H0 information.
+
+    Dividing the floored factor by this normalizer restores
+    ``Sum_p lss_p(z) == N_pix`` exactly, for every parameter draw and every
+    redshift slice, while leaving the ANGULAR pattern the floor produced
+    untouched.  (The Q path has carried the same renormalization since
+    ``lognormal_completion.renormalize_q_mean_one``, which measured +55% budget
+    inflation from an unrenormalized monopole; this is the ``delta_g`` path's
+    missing counterpart.)
+
+    Returns ``None`` -- meaning "no renormalization, the factor is already
+    mean one" -- when:
+
+    * the legacy floor was explicitly requested (``survey.lss_floor`` is the
+      legacy sentinel), or
+    * ``delta_g_pix_z`` is the ``(1, N_grid)`` broadcast dummy, which is the
+      canonical spelling of "no per-pixel LSS" everywhere in the package
+      (``prior.py`` and ``likelihood/core.py`` both gate ``use_lss`` on
+      ``shape[0] != 1``).  Its every pixel shares one row, so the sky mean IS
+      the factor and dividing would erase the field rather than conserve it.
+
+    Written as ``1 + <relu(-(1 + b_eff delta_g))>_p`` rather than as
+    ``<max(1 + b_eff delta_g, 0)>_p``.  The two are equal analytically
+    (``max(y, 0) = y + relu(-y)`` and ``<1 + b_eff delta_g>_p == 1`` exactly),
+    but the relu form is EXACTLY 1.0 whenever nothing floors -- the deficit is
+    then the mean of an all-zero array -- where the direct mean lands 1 ulp
+    away and would perturb the last bit of every existing run that never
+    engaged the floor.  It is also the cheaper of the two.
+
+    Cost is one fused elementwise-relu + mean over the resident
+    ``(N_pix, N_grid)`` table, once per proposal (not once per row).
+    """
+    if _is_legacy_lss_floor(survey.lss_floor):
+        return None
+    dg = em_catalog.delta_g_pix_z
+    if dg is None or dg.shape[0] == 1:
+        return None
+    b_eff = survey.alpha_miss * survey.b_miss
+    deficit = jnp.mean(
+        jnp.maximum(-(1.0 + b_eff * jnp.asarray(dg)), 0.0), axis=0)
+    return 1.0 + deficit
 
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
@@ -963,6 +1050,12 @@ class _CompletionGrids(NamedTuple):
     # stack (indexed by EMCatalog.pixel_stratum_map), OR None (per-pixel).
     # The ndim is static under jit, so consumers branch on it at trace time.
     C_bar_raw: jnp.ndarray = None
+    # (N_grid,) full-sky mean of the FLOORED legacy local-overdensity factor,
+    # or None (no per-pixel delta_g, or the legacy unrenormalized floor was
+    # asked for).  Pixel-independent by construction and depends on the draw
+    # only through b_eff, so it belongs here: computed ONCE per proposal, not
+    # once per catalog row.  See :func:`legacy_lss_floor_normalizer`.
+    lss_floor_norm: jnp.ndarray = None
 
 
 def _aggregate_dN_obs_sum(em_catalog: EMCatalog) -> jnp.ndarray:
@@ -1268,6 +1361,7 @@ def _precompute_grids(
     return _CompletionGrids(
         log_g=log_g, dN_exp=dN_exp, dN_exp_smooth=dN_exp_smooth,
         C_bar_raw=C_bar_raw,
+        lss_floor_norm=legacy_lss_floor_normalizer(survey, em_catalog),
     )
 
 
@@ -1867,6 +1961,12 @@ def _completion_curves_row(
     else:
         delta_g_z = delta_g_pix_z[global_pix]
     lss = jnp.maximum(1.0 + b_eff * delta_g_z, 0.0)
+    # Number conservation: the floor breaks delta_g's mean-one identity and
+    # INFLATES the missing budget (see legacy_lss_floor_normalizer).  The
+    # normalizer is a static-pytree branch and is exactly 1.0 wherever the
+    # floor never engaged, so the division is bit-inert there.
+    if grids.lss_floor_norm is not None:
+        lss = lss / grids.lss_floor_norm
     return _assemble_curves(C, lss, grids, survey)
 
 
@@ -2359,6 +2459,10 @@ def _field_missing_curve(
     f_occ_rows = (jnp.asarray(em_catalog.field_f_p_occ)
                   if has_fp else jnp.zeros((n_occ,), dtype=jnp.float32))
 
+    # Legacy-floor number conservation, delta_g mode only (Q carries its own
+    # mean-one renormalization, and the latent path generates a conserved Q).
+    dg_norm = grids.lss_floor_norm if has_dg else None
+
     def _row_V(obs_row, mod_row, strat_row, f_row):
         obs_row = obs_row.astype(dN_exp.dtype)
         if stratified:
@@ -2373,6 +2477,13 @@ def _field_missing_curve(
             lss = mod_row.astype(dN_exp.dtype)
         elif has_dg:
             lss = jnp.maximum(1.0 + b_eff * mod_row.astype(dN_exp.dtype), 0.0)
+            # Same number-conservation renormalization the per-pixel numerator
+            # applies (_completion_curves_row): the global normalizer has to
+            # carry the SAME missing budget as the numerator or the two sides
+            # divide different totals.  Static pytree-structure branch, and
+            # exactly 1.0 wherever the floor never engaged.
+            if dg_norm is not None:
+                lss = lss / dg_norm
         else:
             lss = 1.0
         return (1.0 - C) * lss                               # (N_grid,)
@@ -2474,6 +2585,14 @@ def _field_missing_curve(
             V_empty = V_empty - C_bar * fp_weight
         elif aggregate:
             V_empty = (1.0 - C_bar) * V_empty
+
+    if dg_norm is not None:
+        # Empty pixels carry delta_g == 0 by construction, so their UNFLOORED
+        # factor is exactly 1 -- and after the renormalization it is 1/norm(z),
+        # the same divisor every occupied row got.  Without this the empty
+        # block would keep the pre-renormalization weight and the two halves of
+        # the global budget would disagree.
+        V_empty = V_empty / dg_norm
 
     V_total = V_occ + V_empty
     # ``z_depth`` is concrete at trace time -> Python-level branch (mirrors
@@ -2872,7 +2991,15 @@ def _completion_clip_fractions_for_pixel(
             delta_g_z = em_catalog.delta_g_pix_z[global_pix]
         lss_raw = 1.0 + b_eff * delta_g_z
         lss = jnp.maximum(lss_raw, 0.0)
-        lss_source = "legacy_delta_g"
+        # Report the factor the LIKELIHOOD actually forms: the clip FRACTION is
+        # unchanged by the renormalization (a divisor cannot make a floored
+        # cell unfloored), but C_eff and the missing density are, and those are
+        # the numbers this diagnostic is read for.
+        if grids.lss_floor_norm is not None:
+            lss = lss / grids.lss_floor_norm
+            lss_source = "legacy_delta_g_conserved"
+        else:
+            lss_source = "legacy_delta_g"
         lss_clipped_mask = lss_raw < 0.0
 
     dN_miss = (1.0 - C) * grids.dN_exp * lss
@@ -2955,7 +3082,10 @@ def completion_clip_diagnostics(
         "z_min": float(zgrid[0]),
         "z_max": float(zgrid[-1]),
         "n_pixels_checked": int(len(per_pixel)),
-        "lss_source": "Q_LSS" if q_row is not None else "legacy_delta_g",
+        "lss_source": ("Q_LSS" if q_row is not None
+                       else ("legacy_delta_g_conserved"
+                             if grids.lss_floor_norm is not None
+                             else "legacy_delta_g")),
         "per_pixel": per_pixel,
     }
     for field in fields:
@@ -2963,7 +3093,10 @@ def completion_clip_diagnostics(
         summary[f"mean_{field}"] = float(vals.mean()) if vals.size else 0.0
         summary[f"max_{field}"] = float(vals.max()) if vals.size else 0.0
 
-    if q_row is None and summary["max_rho_miss_eff_clipped_fraction"] > 0.0:
+    _conserved = any(item.get("lss_source") == "legacy_delta_g_conserved"
+                     for item in per_pixel)
+    if (q_row is None and not _conserved
+            and summary["max_rho_miss_eff_clipped_fraction"] > 0.0):
         # The legacy factor's floor is not a numerical guard here: it changes
         # the BUDGET.  delta_g is mean-zero over the sky, so the unfloored
         # factor sums to N_pix exactly (pure redistribution); every floored
@@ -2975,8 +3108,12 @@ def completion_clip_diagnostics(
             "1 + alpha_miss*b_miss*delta_g < 0 there, which breaks the "
             "mean-one property of delta_g and INFLATES the total missing "
             "budget instead of only redistributing it (the Q path renormalizes "
-            "for exactly this reason; the delta_g path has no counterpart). "
-            "Lower b_miss's prior ceiling or use an LSS completion table.",
+            "for exactly this reason). This run asked for the LEGACY "
+            "unrenormalized floor (SurveyParams.lss_floor / "
+            "--lss_floor legacy); the default renormalizes the floored factor "
+            "to full-sky mean one at every z and reports "
+            "lss_source='legacy_delta_g_conserved'. Drop the legacy flag, "
+            "lower b_miss's prior ceiling, or use an LSS completion table.",
             RuntimeWarning,
             stacklevel=2,
         )
