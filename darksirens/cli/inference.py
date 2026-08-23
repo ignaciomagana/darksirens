@@ -1529,6 +1529,18 @@ def build_parser():
                          "H0 at 41.24 [36.1, 46.3] against a truth of 67.74 -- "
                          "confidently wrong, and the tightest arm in that run. "
                          "Use only to reproduce that measurement."))
+    g.add_argument("--allow_selection_fit_free_background", action="store_true",
+                   help=("Permit a magnitude-selection --selection_fit while "
+                         "the background cosmology beyond H0 (Om0/w0/wa) is "
+                         "SAMPLED. Refused by default: the h-scaled zero point "
+                         "absorbs H0 exactly but not Om0/w0/wa, which change "
+                         "the shape of DM(z); the fit's zero point is anchored "
+                         "at the package fiducial and is never re-fitted per "
+                         "proposal, leaving ~0.1 mag of non-absorbable shape "
+                         "across a z = 0.05-0.5 catalog against a ~0.02 mag "
+                         "Laplace sd, so the selection model can inject "
+                         "artificial information about the dark-energy "
+                         "parameters. Use only for methodological studies."))
     g.add_argument("--allow_unmasked_footprint", action="store_true",
                    help=("Run c_mode aggregate|selection on a "
                          "footprint-limited catalog WITHOUT a per-pixel "
@@ -3202,6 +3214,75 @@ def _selection_c_mode_by_catalog(opts):
     return tuple(str(m) for m in mode)
 
 
+#: Background parameters the h-scaled magnitude zero point does NOT absorb.
+_SELECTION_FIT_BACKGROUND_LABELS = ("Om0", "w0", "wa")
+
+
+def _check_selection_fit_background(opts, labels):
+    """Refuse a magnitude-selection FIT while the background beyond H0 is sampled.
+
+    ``C_sel(z; theta)`` is built from ``m_lim - M0hat - DM(z; H0=100)``.  The
+    h-scaled zero point absorbs ``H0`` EXACTLY -- the tabulated ``dL`` is exactly
+    proportional to ``1/H0``, so ``M0 + DM(z)`` is H0-free (the firewall in
+    ``darksirens/redshift/selection.py``).  It does NOT absorb ``Om0``/``w0``/
+    ``wa``: those change the SHAPE of ``DM(z)``, and only the z-INDEPENDENT part
+    of that change is absorbable by a fitted zero point.  The module measures
+    the residual at ~0.1 mag of non-absorbable shape across a z = 0.05-0.5
+    catalog (0.012 -> 0.110 mag from z = 0.05 to 0.5 between Om0 = 0.25 and
+    0.40), against a Laplace fit sd of ~0.02 mag: five times the fit's own
+    uncertainty.
+
+    ``_validate_fit_background`` already refuses a fit MEASURED at a background
+    other than the package fiducial.  What it cannot see is the run: with the
+    background SAMPLED, the completeness curve is evaluated at each proposal's
+    cosmology while its zero point stays pinned where it was measured, so the
+    missing-galaxy budget acquires a spurious dependence on Om0/w0/wa and the
+    selection model injects artificial information about them.  Fixing only
+    w0/wa is not enough while Om0 is free.
+
+    The escape hatch is deliberately explicit and stamped in settings.json;
+    the real fix (persist the fit sample's redshift distribution and re-apply
+    the mean DM offset inside the curves per proposal) is not implemented.
+    """
+    if getattr(opts, "allow_selection_fit_free_background", False):
+        _warn(
+            "--allow_selection_fit_free_background: running a magnitude-"
+            "selection FIT with a sampled background cosmology. The fitted "
+            "zero point is anchored at the package fiducial, so the "
+            "completeness budget carries ~0.1 mag of non-absorbable DM(z) "
+            "shape (~5x the fit's own Laplace sd) as Om0/w0/wa move. "
+            "Methodological studies only -- this arm can inject artificial "
+            "information about the dark-energy parameters."
+        )
+        return
+    modes = _selection_c_mode_by_catalog(opts)
+    fits = getattr(opts, "selection_fits", None) or []
+    anchored = [
+        k for k, mode in enumerate(modes, start=1)
+        if mode == "selection" and len(fits) >= k and fits[k - 1]
+    ]
+    if not anchored:
+        return
+    sampled = [lab for lab in _SELECTION_FIT_BACKGROUND_LABELS if lab in labels]
+    if not sampled:
+        return
+    _fatal(
+        f"catalog(s) {anchored} run c_mode='selection' anchored by a "
+        f"--selection_fit while {sampled} is SAMPLED. The h-scaled magnitude "
+        "zero point absorbs H0 exactly, but NOT Om0/w0/wa: they change the "
+        "shape of DM(z), the fit measured its zero point at the package "
+        "fiducial background, and nothing re-fits it per proposal -- so the "
+        "completeness curve carries ~0.1 mag of non-absorbable shape across a "
+        "z = 0.05-0.5 catalog against a Laplace sd of ~0.02 mag, and the "
+        "selection model can inject artificial information about the "
+        "background. Pass --fix_cosmology true (fixing only w0/wa via --fix_de "
+        "is NOT enough while Om0 is free), or pin Om0/w0/wa individually with "
+        "--fixed_parameters, or drop --selection_fit for the wide-open "
+        "ablation. --allow_selection_fit_free_background runs it anyway, "
+        "loudly and stamped in settings.json."
+    )
+
+
 def _resolve_selection_fits(opts, data, fixed_parameter_values):
     """Load each catalog's --selection_fit and stamp the per-catalog state.
 
@@ -3681,6 +3762,10 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         # the field is residual to), but it is not a sampled parameter, so it
         # cannot ride q_provenance's label machinery.
         _check_q_table_z_depth(_q_fiducials, opts)
+    # The magnitude-selection fit is anchored at ONE background cosmology.
+    # First point where both the fits and the final sampled label set are known.
+    _check_selection_fit_background(opts, labels)
+
     # Prior wider than the base is first-order-consistent only near theta_hat:
     # warn when the sampled bounds reach beyond +-5 prior sds of the center.
     if getattr(opts, "selection_prior", None):
