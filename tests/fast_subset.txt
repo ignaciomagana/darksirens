@@ -71,3 +71,4 @@ tests/test_latent_field.py
 tests/test_q_provenance_guard.py
 tests/test_per_pixel_completeness.py
 tests/test_latent_counts.py
+tests/test_latent_anchor.py
