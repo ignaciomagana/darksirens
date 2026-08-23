@@ -432,6 +432,18 @@ def _counts_in_uniform_chi(zs, chi, edges_chi):
     return counts.astype(float)
 
 
+#: Periodic-wrap pad for a support-truncated radial solve, in units of the
+#: prior's correlation length on the uniform-chi grid.  Four lengths leave the
+#: two ends of the fitted domain correlated at exp(-8) ~ 3e-4 of the marginal
+#: variance through the pad.  See the sizing note in
+#: :func:`_build_completion_radial`.
+_Q_PAD_ELL_MULTIPLE = 4.0
+#: Floor on the pad, in nodes: with a short correlation length four lengths can
+#: be a handful of nodes, which the FFT cannot meaningfully separate from the
+#: seam itself.
+_Q_PAD_MIN_NODES = 32
+
+
 def _build_completion_radial(
     catalog_path: str,
     *,
@@ -492,6 +504,12 @@ def _build_completion_radial(
     (measured on the v2 build), which is exactly the footprint imprint
     :func:`_verify_mask_free` refuses to stamp.  Precedent: the latent seam
     pins Q = 1 outside its support (:mod:`darksirens.likelihood.latent_q`).
+
+    When the cut actually truncates (``n_fit_z < n_grid``) the solve domain is
+    PADDED above the top fitted node with data-free prior nodes, because the
+    circulant prior's periodic seam would otherwise glue z = 0 to the catalog's
+    truncation edge -- see the sizing note at ``n_pad`` below.  With no cut, or
+    a cut at/above the grid top, ``n_pad = 0`` and the path is unchanged.
     """
     import healpy as hp
 
@@ -549,7 +567,48 @@ def _build_completion_radial(
     chi_u = np.linspace(float(chi[0]), float(chi[n_fit_z - 1]), n_fit_z)
     dchi_u = float(chi_u[1] - chi_u[0]) if n_fit_z > 1 else 1.0
     ell_grid = float(survey.lss_corr_length_mpc) / max(dchi_u, 1e-6)  # now constant in Mpc
-    pk = gaussian_correlation_spectrum(n_fit_z, ell_grid, float(survey.lss_sigma))
+    # PERIODIC-WRAP PAD (support cut only).  The prior is CIRCULANT -- an FFT
+    # covariance c[d] = sigma^2 exp(-d^2 / 2 ell^2) in PERIODIC index distance
+    # -- so the first and last nodes of the solve domain are nearest neighbours.
+    # On the full DARKSIRENS_ZMAX grid that seam sat in empty high-z sky and
+    # cost nothing; the cut moves it onto the catalog's truncation edge, gluing
+    # z = 0 to z = z_support.  Measured on the real DESI build (records
+    # experiments/desi_ingest/data/fits/q_v{2,3}_depthmap_maskfree.json):
+    # corr(Q, f_p) at node 0 went +0.006 (v2, uncut, wrap partner the empty
+    # z = 0.75 region) -> +0.191 (v3, cut at z = 0.30) == the edge node 468's
+    # +0.189, decaying back to the interior baseline by node ~50 of 469 -- i.e.
+    # ~2.6 ell at that build's ell_grid = 19.0 nodes.  Node 0 was reading the
+    # truncation edge's field, not its own.
+    #
+    # The fix is to solve on a LONGER domain than we output: n_pad extra nodes
+    # above the top fitted node, carrying NO data (see the zero-rate padding at
+    # the solve call), no budget weight (w_budget is never padded, so the
+    # per-z renormalization cannot see them), and no output (only the first
+    # n_fit_z solved columns are interpolated back to the zgrid; above the cut
+    # logQ stays bit-zero as before).  They are unconstrained PRIOR nodes whose
+    # only job is to hold the seam far enough from the data that the wrap is
+    # numerically dead.
+    #
+    # SIZE.  The prior correlation between the two ends of the FITTED domain,
+    # taken the short way round through the pad, is exp(-(n_pad + 1)^2 /
+    # 2 ell_grid^2).  Four correlation lengths puts that at exp(-8) ~ 3e-4 of
+    # the marginal variance -- against the ~0.999 (distance 1) the unpadded cut
+    # imposed -- and the floor keeps short-ell grids (where 4 ell is a handful
+    # of nodes) from padding by less than the FFT can meaningfully separate.
+    n_pad = 0
+    if n_fit_z < n_grid:
+        n_pad = int(max(_Q_PAD_MIN_NODES,
+                        int(np.ceil(_Q_PAD_ELL_MULTIPLE * ell_grid))))
+    n_solve_z = n_fit_z + n_pad
+    pk = gaussian_correlation_spectrum(n_solve_z, ell_grid, float(survey.lss_sigma))
+    if n_pad:
+        print(f"    [q-support] + {n_pad} data-free wrap-pad nodes above the "
+              f"top fitted node ({_Q_PAD_ELL_MULTIPLE:g} x ell_grid = "
+              f"{ell_grid:.2f} nodes, floor {_Q_PAD_MIN_NODES}): the circulant "
+              f"prior solves on {n_solve_z} nodes and outputs {n_fit_z}. "
+              f"Ends of the fitted domain now correlate at "
+              f"{np.exp(-0.5 * ((n_pad + 1) / max(ell_grid, 1e-6)) ** 2):.2e} "
+              f"through the pad.", flush=True)
 
     # Expected counts per uniform-chi bin: INTEGRATE the per-unit-z density in z
     # between the bin-edge redshifts (cumulative trapezoid on the fine grid,
@@ -748,8 +807,29 @@ def _build_completion_radial(
         solve_rows = np.arange(n_fit, dtype=np.int64)
         expand = solve_rows
     n_solve = int(solve_rows.size)
+    N_solve = N_obs_u[solve_rows]
+    C_solve = np.asarray(C_u)[solve_rows]
+    exp_solve = dN_exp_count_u
+    if n_pad:
+        # THE PAD EXERTS NO DATA PULL, BY CONSTRUCTION OF THE POISSON TERM.
+        # :func:`_map_solve_row` forms ``rate_base = C * dN_exp`` and masks on
+        # ``rate_base > 0``: where it is zero the row contributes ``lam = 0``,
+        # ``-N log lam`` is dropped, and the data gradient is ``0`` EXACTLY --
+        # not "small", masked out.  Padding both C and dN_exp with zeros
+        # therefore makes each pad node a pure prior node: the MAP puts it
+        # wherever the prior's smoothness wants, which is precisely the free
+        # boundary the wrap needs.
+        #
+        # Padding with N_obs = 0 against a NONZERO expectation would have been
+        # the opposite of this: those are the maximally informative "this
+        # volume is empty" bins that drove Q down above the truncation in the
+        # first place (the defect --q-support-depth exists to remove).
+        z_pad = np.zeros((N_solve.shape[0], n_pad), dtype=float)
+        N_solve = np.concatenate([N_solve, z_pad], axis=1)
+        C_solve = np.concatenate([C_solve, z_pad], axis=1)
+        exp_solve = np.concatenate([dN_exp_count_u, np.zeros(n_pad)])
     mp = poisson_lognormal_map(
-        N_obs_u[solve_rows], np.asarray(C_u)[solve_rows], dN_exp_count_u, pk,
+        N_solve, C_solve, exp_solve, pk,
         bias=bias, prior_strength=prior_strength, maxiter=maxiter,
         workers=workers,
     )
@@ -760,11 +840,13 @@ def _build_completion_radial(
     # i.e. Q == 1 exactly, for EVERY pixel (occupied, empty, on and off
     # footprint).  chi_u ends at chi[n_fit_z - 1], so the interpolation below is
     # strictly interior and never clamps a pinned node to the top solved value.
+    # The pad columns are dropped here and never reach the table.
+    logq_solved = mp["logq_map"][:, :n_fit_z]
     logq_map = np.zeros((n_pix, n_grid), dtype=float)
     chi_fit = chi[:n_fit_z]
     for i, r in enumerate(fit):
         logq_map[r, :n_fit_z] = np.interp(
-            chi_fit, chi_u, mp["logq_map"][expand[i]])
+            chi_fit, chi_u, logq_solved[expand[i]])
 
     diagnostics = dict(mp["diagnostics"])
     # Convergence is judged against the FITTED rows (n_occupied), so re-express
@@ -812,17 +894,30 @@ def _build_completion_radial(
 
     logq_members = None
     if n_members and n_members > 0:
+        lam_members = mp["lambda_map"]
+        if n_pad:
+            # ONE cross-bin scalar reads the whole row: the member ensemble's
+            # stationary Hessian uses ``median(lambda_row)``
+            # (:func:`laplace_lognormal_members`).  Leaving the pad's lambda at
+            # 0 would drag that median down and change the member SPREAD at the
+            # fitted nodes -- a pull the pad must not have.  Filling the pad
+            # with the row's own fitted median leaves the median exactly where
+            # it was (adding copies of the median cannot move it); the pad's
+            # per-bin variance is irrelevant because its columns are dropped.
+            lam_members = lam_members.copy()
+            lam_members[:, n_fit_z:] = np.median(
+                lam_members[:, :n_fit_z], axis=1, keepdims=True)
         members = laplace_lognormal_members(
-            mp["s_map"][expand], mp["lambda_map"][expand], pk,
+            mp["s_map"][expand], lam_members[expand], pk,
             n_members=int(n_members), bias=bias, prior_strength=prior_strength, seed=int(seed),
         )
-        lm_u = members["logq_members"]                       # (M, n_fit, n_grid) on χ_u
+        lm_u = members["logq_members"]                    # (M, n_fit, n_solve_z) on χ_u
         M = int(n_members)
         logq_members = np.zeros((M, n_pix, n_grid), dtype=float)
         for i, r in enumerate(fit):
             for m in range(M):
                 logq_members[m, r, :n_fit_z] = np.interp(
-                    chi_fit, chi_u, lm_u[m, i])
+                    chi_fit, chi_u, lm_u[m, i, :n_fit_z])
         diagnostics.update(members["diagnostics"])
 
     # Per-z mean-one budget renormalization over the FITTED FOOTPRINT (the
@@ -867,6 +962,11 @@ def _build_completion_radial(
             "q_support_depth": float(q_support_depth),
             "n_z_nodes_fitted": int(n_fit_z),
             "n_z_nodes_pinned": int(n_grid - n_fit_z),
+            # Data-free prior nodes carried above the top fitted node so the
+            # circulant prior's seam does not glue z = 0 to z = z_support.  0
+            # when the cut fitted the whole grid (no truncation, no seam moved).
+            "n_z_nodes_wrap_pad": int(n_pad),
+            "n_z_nodes_solved": int(n_solve_z),
         })
 
     return logq_map, logq_members, diagnostics
@@ -1643,8 +1743,15 @@ def main(argv=None):
                         "mask-free check refuses the f_p_aware stamp. --mode "
                         "radial only, and not with a stratified "
                         "--selection-fit; both combinations are refused, not "
-                        "silently dropped. Independent of --depth-map. Stamped "
-                        "as q_support_depth in the output attrs.")
+                        "silently dropped. Independent of --depth-map. When the "
+                        "cut really truncates, the solve grid is PADDED above "
+                        "the top fitted node with data-free prior nodes so the "
+                        "circulant prior's periodic seam does not glue z = 0 to "
+                        "z = Z (measured on the v3 build: corr(Q, f_p) at node 0 "
+                        "+0.006 uncut -> +0.191 cut, matching the truncation "
+                        "edge's own +0.189). Stamped as q_support_depth, "
+                        "n_z_nodes_wrap_pad and n_z_nodes_solved in the output "
+                        "attrs.")
     p.add_argument("--selection-fit", default=None,
                    help="selection_fit.json from darksirens_fit_selection "
                         "(required by, and only legal with, --c-mode "
