@@ -1054,6 +1054,7 @@ def save_lss_completion_hdf5(
     budget_monopole_logq: np.ndarray | None = None,
     c_mode: str | None = None,
     f_p_aware: bool | None = None,
+    q_support_depth: float | None = None,
 ) -> str:
     """Write a completion file with layout ``/lss_completion/{logq_map,logq_members,zgrid}``.
 
@@ -1073,6 +1074,11 @@ def save_lss_completion_hdf5(
     reads as legacy ``per_pixel``.  The two targets differ by the entire
     clustering signal, so the loader hard-errors when a table's ``c_mode``
     does not match the consuming survey's.
+
+    ``q_support_depth`` records the redshift the radial fit was truncated to
+    (``--q-support-depth``): above it the table is exactly ``logQ = 0`` for
+    every pixel.  ``None`` (the default) writes no attr, which reads as "the
+    fit covered the whole zgrid".
 
     A ``realization_set_id`` (a fresh ``uuid4().hex`` unless one is supplied)
     is stamped on the ``/lss_completion`` group so a K>=2 mixture can verify
@@ -1164,6 +1170,13 @@ def save_lss_completion_hdf5(
             # alongside the table, because otherwise the mask is applied twice.
             if f_p_aware is not None:
                 grp.attrs["f_p_aware"] = bool(f_p_aware)
+            # The redshift SUPPORT the fit was truncated to: above it every
+            # pixel's logQ is exactly 0 (Q = 1) by construction, because Q owns
+            # placement only inside the catalog's support and the missing-host
+            # budget above it belongs to C(z)/n0.  Absent when the build fit the
+            # whole grid.
+            if q_support_depth is not None:
+                grp.attrs["q_support_depth"] = float(q_support_depth)
             if logq_members is not None:
                 grp.attrs["member_content_sha256"] = hashlib.sha256(
                     np.ascontiguousarray(members_arr).tobytes()
@@ -1220,7 +1233,10 @@ def load_lss_completion_hdf5(path: str) -> dict:
            # must not then be multiplied by f_p (that applies the mask twice).
            # No builder writes this attr yet, so it reads False for every
            # existing artifact -- which is the correct, conservative answer.
-           "f_p_aware": False}
+           "f_p_aware": False,
+           # The redshift the fit was truncated to (--q-support-depth); None
+           # when the build fit the whole zgrid, which is every legacy table.
+           "q_support_depth": None}
     with h5py.File(path, "r") as f:
         grp = f["lss_completion"] if "lss_completion" in f else f
         if "logq_map" in grp:
@@ -1238,6 +1254,8 @@ def load_lss_completion_hdf5(path: str) -> dict:
             out["n_members"] = int(grp.attrs["n_members"])
         if "f_p_aware" in grp.attrs:
             out["f_p_aware"] = bool(grp.attrs["f_p_aware"])
+        if "q_support_depth" in grp.attrs:
+            out["q_support_depth"] = float(grp.attrs["q_support_depth"])
         if "budget_renormalized" in grp.attrs:
             out["budget_renormalized"] = bool(grp.attrs["budget_renormalized"])
         if "budget_monopole_logq" in grp.attrs:
