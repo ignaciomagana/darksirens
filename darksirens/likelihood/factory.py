@@ -16,6 +16,8 @@ arrays are already abstract tracers and the barrier has no effect.
 
 from __future__ import annotations
 
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 
@@ -29,6 +31,11 @@ from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.catalog_views import barrier, prepare_catalog_views
 from darksirens.likelihood.events import pad_gw_event_to_multiple
 from darksirens.likelihood.block_sizing import require_resolved_block_size
+from darksirens.likelihood.latent_q import (
+    footprint_row_map,
+    load_latent_plan,
+    on_footprint_mask,
+)
 from darksirens.likelihood.core import (
     darksiren_log_likelihood,
     redshift_prior_state_sharing,
@@ -92,6 +99,461 @@ def _redshift_prior_materialization_reason(opts, materialize: bool) -> str:
 def _to_jax(data: dict, key: str) -> jnp.ndarray:
     val = data.get(key)
     return jnp.asarray(val) if val is not None else jnp.array([0.0])
+
+
+# ----------------------------------------------------------- the latent seam
+#
+# ``lss_field_mode='latent'`` (field-level PR-5) replaces the resident
+# ``(M_draw, N_rows, N_grid)`` log-Q table with the compact anchor artifact of
+# PR-4: ``Q`` is GENERATED from ``row_fac`` / ``phi_z`` / the sky moments
+# ``(A, B)`` by :mod:`darksirens.likelihood.latent_q`.  Everything below is
+# HOST-SIDE and runs exactly once, at likelihood build: the leaves are resolved
+# and barriered here (never inside ``body()`` -- see this module's docstring:
+# under a trace the arrays are abstract and ``optimization_barrier`` is a
+# no-op), and the guards fire BEFORE the first likelihood evaluation, which is
+# the only place a mismatched artifact is still cheap to reject.
+#
+# Default is ``table``: with the flag off every function here returns empty
+# dicts and the two ``EMCatalog(...)`` constructions below are textually and
+# numerically the shipped ones.
+
+#: The anchor builder floors the per-pixel selection fraction at ``1e-3``
+#: before it forms ``F_F`` (``cli/build_latent_field.py``: ``np.maximum(f_p,
+#: 1e-3)``).  The run's ``f_p`` map is NOT floored (``catalog_views`` gathers it
+#: raw), so the consistency guard must apply the same floor or every footprint
+#: pixel below it would read as a depth-map mismatch.
+_LATENT_F_P_FLOOR = 1e-3
+
+#: Relative tolerance of the ``F_F`` consistency guard.  MEASURED: the only
+#: admissible difference between the two sums is that the run carries ``f_p``
+#: as float32 (``catalog_views._fp_rows``) while the builder summed float64;
+#: over 30,470 production footprint rows that round-trip moves the sum by
+#: <= 4.5e-10 relative (50 random draws, both sides accumulated in float64,
+#: which is why this guard casts before summing rather than trusting a float32
+#: reduction -- that costs 1.0e-8 on its own).  1e-6 sits between that floor
+#: (2200x above it, so representation alone can never fire the guard) and the
+#: 2.7e-7 at which eq. (4)'s own budget identity closes at the production
+#: corner (build_latent_field.py), i.e. the same order as the identity the
+#: guard protects.  It is not a coarse gate: ``f_p <= 1`` bounds ``F_F <= P_F``
+#: = 30,470, so ONE footprint pixel whose f_p moved by 0.1 shows up at
+#: >= 3.3e-6 -- above the tolerance whatever the depth map looks like.
+_LATENT_F_F_RTOL = 1e-6
+
+#: Isotropy guard threshold (PLAN §4.4 successor 4): the anchor's angular and
+#: radial correlation lengths must agree to within a factor of 1.5 in PHYSICAL
+#: units at ``z_ref``.  Beyond that the field the artifact fits is a pancake --
+#: a 4:1 anisotropy fits the radial modes to angular structure (and vice versa)
+#: and the modulation it generates is no longer the clustering it claims to be.
+_LATENT_ISOTROPY_LOG_TOL = float(np.log(1.5))
+
+
+def _resolve_lss_field_mode(opts):
+    """Validate ``--lss_field_mode`` and its pairing with the artifact path.
+
+    Returns ``(mode, artifact_path)``.  A supplied artifact under ``table``
+    mode is a HARD ERROR rather than a silent no-op: an input that is read,
+    parsed and then ignored is exactly the class of failure this codebase
+    refuses elsewhere (see the Q-table provenance checks), and the user who
+    passed it believes the run is latent.
+    """
+    mode = getattr(opts, "lss_field_mode", "table") or "table"
+    if mode not in ("table", "latent"):
+        raise ValueError(
+            f"lss_field_mode must be 'table' or 'latent', got {mode!r}. "
+            "'table' is the shipped resident-log-Q path; 'latent' generates Q "
+            "from the anchor artifact (--lss_field_artifact)."
+        )
+    path = getattr(opts, "lss_field_artifact", None)
+    if mode == "table" and path is not None:
+        raise ValueError(
+            f"lss_field_artifact={path!r} was given but lss_field_mode is "
+            "'table', which never reads it: the run would silently use the "
+            "shipped table path and the artifact would have no effect on a "
+            "single number. Pass --lss_field_mode latent to consume it, or "
+            "drop the artifact."
+        )
+    if mode == "latent" and path is None:
+        raise ValueError(
+            "lss_field_mode='latent' requires --lss_field_artifact: in latent "
+            "mode Q is GENERATED from the anchor artifact (row_fac, phi_z and "
+            "the (A, B) sky moments), so there is no Q at all without it. "
+            "Build one with darksirens_build_latent_field, or run with "
+            "--lss_field_mode table."
+        )
+    return mode, path
+
+
+def _latent_guard_exclusivity(opts) -> None:
+    """PLAN §4.4 successor 6, the half that is visible at likelihood build.
+
+    Latent mode is the ONE generator of ``Q``.  A loaded Q table
+    (``--lss_completion``) would be a SECOND missing-galaxy modulation on the
+    same rows, and ``--use_lss``'s per-pixel ``delta_g`` a third: the two
+    multiply, so the budget eq. (4) conserves is not the budget the run
+    consumes, and the doubled modulation lands directly on H0 through the
+    missing-galaxy weight.  The ``c_mode`` half of guard 6 (per-pixel /
+    stratified completeness does not factor through the sky moments) is
+    enforced at the point of use, in ``redshift/completion.py``.
+    """
+    if getattr(opts, "lss_completion", None) is not None:
+        raise ValueError(
+            "lss_field_mode='latent' generates Q from the anchor artifact, so "
+            f"a loaded Q_LSS table (--lss_completion "
+            f"{getattr(opts, 'lss_completion')!r}) would apply a SECOND "
+            "modulation to the same rows: the two multiply and the consumed "
+            "missing budget stops being the one rho conserves (PLAN eq. 4). "
+            "Drop --lss_completion, or run with --lss_field_mode table."
+        )
+    if bool(getattr(opts, "use_LSS", False)):
+        raise ValueError(
+            "lss_field_mode='latent' is incompatible with --use_lss: the "
+            "per-pixel delta_g overdensity is a second missing-galaxy "
+            "modulation on top of the generated Q, and b_miss is b_GW in "
+            "latent mode (PLAN §4.3), so the field would be applied twice. "
+            "Drop --use_lss, or run with --lss_field_mode table."
+        )
+
+
+def _latent_guard_ls_z_units(opts) -> None:
+    """PLAN §4.4 successor 2: ``ls_z`` must be in ``zeta = log1p(z)`` units.
+
+    The lognormal builders accept the radial correlation length in Mpc and map
+    it to zeta at a reference redshift, ``ls_z = L / ((1 + z_ref) dchi/dz)``.
+    That mapping scales like ``H0``: over the sampled prior ``H0 in [20, 140]``
+    it varies by 7x, so an ASSUMED Mpc length becomes a standard ruler --- the
+    field's own lengthscale would then inform H0, from 22.79M galaxies, without
+    ever appearing in the likelihood as a parameter.  The anchor artifact is
+    built in zeta directly (``--ls-z``), and there is no admissible Mpc-valued
+    input in latent mode.
+    """
+    mpc = getattr(opts, "lss_corr_length_mpc", None)
+    if mpc is not None:
+        raise ValueError(
+            f"lss_field_mode='latent' was given lss_corr_length_mpc={mpc!r}, "
+            "an Mpc-valued radial correlation length. In latent mode ls_z is "
+            "in zeta = log1p(z) units and is fixed by the artifact; converting "
+            "an Mpc length to zeta needs ls_z = L/((1+z_ref) dchi/dz), which "
+            "scales like H0 and varies 7x over H0 in [20, 140] -- an assumed "
+            "length would act as a standard ruler against 22.79M galaxies. "
+            "Drop lss_corr_length_mpc and set the anchor's --ls-z in zeta."
+        )
+
+
+def _latent_guard_resolution(plan) -> None:
+    """PLAN §4.4 successor 3: the inducing grid must RESOLVE both lengthscales.
+
+    A low-rank GP whose node spacing exceeds its kernel lengthscale collapses
+    to the prior while still reporting convergence (Burt et al. 2019,
+    arXiv:1903.03571); the shipped 50 Mpc fiducial was ~30x under-resolved and
+    measured a fitted-vs-truth logQ slope of 0.04 on the closure experiment.
+
+    ``cli/build_lognormal_completion._gp3d_resolution_guard`` encodes the same
+    two inequalities but its SPHERE half only WARNS, and PLAN promotes both to
+    HARD in latent mode; importing a CLI module from the likelihood factory to
+    then re-implement half of it buys nothing, so the two inequalities are
+    inlined here.  The anchor builder checks them too -- this is the consumer's
+    copy, because the run does not necessarily own the artifact it was handed.
+    """
+    m_sph = int(plan.m_sph)
+    m_z = int(plan.m_z)
+    ls_sph = float(plan.meta["ls_sph"])
+    ls_z = float(plan.meta["ls_z"])
+    z_node_hi = float(plan.meta["z_node_hi"])
+
+    d_sph = float(np.sqrt(4.0 * np.pi / max(m_sph, 1)))
+    if d_sph > ls_sph:
+        raise ValueError(
+            f"latent artifact is under-resolved on the SPHERE: Fibonacci node "
+            f"spacing sqrt(4pi/M_sph) = {d_sph:.4g} ({m_sph} nodes) exceeds "
+            f"the chordal angular lengthscale ls_sph = {ls_sph:.4g}. A "
+            "low-rank GP with spacing > lengthscale collapses to the prior "
+            "(Burt et al. 2019) while still reporting convergence, so the "
+            "generated Q would carry the prior's clustering, not the "
+            f"catalog's. Rebuild the anchor with --m-sph >= "
+            f"{int(np.ceil(4.0 * np.pi / ls_sph ** 2))}, or a larger --ls-sph."
+        )
+    if m_z < 2:
+        raise ValueError(
+            f"latent artifact has M_z = {m_z} radial inducing nodes; at least "
+            "2 are needed to resolve any redshift structure. Rebuild the "
+            "anchor with --m-z >= 2."
+        )
+    d_zeta = float(np.log1p(z_node_hi)) / (m_z - 1)
+    if d_zeta > ls_z:
+        raise ValueError(
+            f"latent artifact is under-resolved in REDSHIFT: node spacing in "
+            f"zeta = log1p(z) is {d_zeta:.4g} ({m_z} nodes up to z_node_hi = "
+            f"{z_node_hi:.4g}) but the lengthscale is ls_z = {ls_z:.4g}. Same "
+            "failure as the sphere side: the posterior collapses to the prior "
+            "silently. Rebuild the anchor with --m-z >= "
+            f"{int(np.ceil(np.log1p(z_node_hi) / ls_z)) + 1}, or a larger "
+            "--ls-z."
+        )
+
+
+def _latent_guard_isotropy(plan) -> None:
+    """PLAN §4.4 successor 4: refuse an anisotropic (pancake) anchor field.
+
+        |log( (ls_sph chi(z_ref)) / (ls_z (1 + z_ref) dchi/dz) )| < log(1.5)
+
+    ``ls_sph`` is chordal on the unit sphere, so ``ls_sph * chi`` is the
+    TRANSVERSE physical correlation length at ``z_ref``; ``ls_z`` is in
+    ``zeta = log1p(z)``, so ``dz = (1 + z) dzeta`` makes ``ls_z (1 + z_ref)
+    dchi/dz`` the RADIAL one.  Their ratio is the field's aspect ratio: a 4:1
+    pancake fits radial modes to angular structure and generates a modulation
+    that is not the clustering it claims to be.
+
+    ``z_ref`` is the MIDPOINT of the artifact's depth, ``0.5 * z_node_hi`` --
+    the fitted volume's own scale, and the only z the artifact itself names.
+    The ratio is H0-FREE by construction: ``chi = (c/H0) int dz/E`` and
+    ``dchi/dz = (c/H0)/E`` carry the same ``c/H0``, so it cancels and only
+    ``Om0`` survives (taken from the artifact's ``theta_ref`` when it has one,
+    the Planck fiducial otherwise).  That is the same reason the ls_z-in-Mpc
+    input is refused above: nothing here may depend on the sampled H0.
+    """
+    z_node_hi = float(plan.meta["z_node_hi"])
+    z_ref = 0.5 * z_node_hi
+    ls_sph = float(plan.meta["ls_sph"])
+    ls_z = float(plan.meta["ls_z"])
+    theta_ref = dict(plan.theta_ref or {})
+    om0 = float(theta_ref.get("Om0", cosmology.Om0Planck))
+    h0_cancels = 70.0  # any value: it cancels in the ratio below
+    chi = float(cosmology.r_of_z(z_ref, h0_cancels, om0))
+    dchi_dz = float(
+        cosmology.speed_of_light / (h0_cancels * float(cosmology.E(z_ref, om0)))
+    )
+    transverse = ls_sph * chi
+    radial = ls_z * (1.0 + z_ref) * dchi_dz
+    aspect = transverse / radial
+    if abs(np.log(aspect)) >= _LATENT_ISOTROPY_LOG_TOL:
+        raise ValueError(
+            f"latent artifact's correlation lengths are anisotropic at "
+            f"z_ref = {z_ref:.4g} (the depth midpoint, Om0 = {om0:.4g}): "
+            f"transverse ls_sph*chi = {transverse:.4g} Mpc vs radial "
+            f"ls_z*(1+z)*dchi/dz = {radial:.4g} Mpc, an aspect ratio of "
+            f"{aspect:.3g} (limit 1.5). A pancake field fits radial modes to "
+            "angular structure and back, so the Q it generates is not the "
+            "clustering it claims to be. Rebuild the anchor with --ls-sph and "
+            "--ls-z matched in physical units at z_ref."
+        )
+
+
+def _latent_run_f_p_by_pixel(catalogs, n_rows_pe):
+    """The run's per-pixel selection fraction, as ``(pixels, f_p, source)``.
+
+    Prefers the FIELD rows (``field_f_p_occ`` on ``field_occupied_pixels``),
+    which are the survey's occupied pixels -- exactly the set the anchor
+    builder fits its footprint on -- and falls back to the PE catalog rows.
+    ``(None, None, None)`` when the run carries no per-pixel completeness at
+    all.
+    """
+    occ = getattr(catalogs, "field_occupied_pixels", None)
+    fp_occ = getattr(catalogs, "field_f_p_occ", None)
+    if occ is not None and fp_occ is not None:
+        return (np.asarray(occ, dtype=np.int64),
+                np.asarray(fp_occ, dtype=np.float64), "field_f_p_occ")
+    fp_rows = getattr(catalogs, "f_p_rows_pe", None)
+    if fp_rows is not None:
+        up = getattr(catalogs, "unique_pixels_pe", None)
+        pix = (np.arange(int(n_rows_pe), dtype=np.int64) if up is None
+               else np.asarray(up, dtype=np.int64))
+        return pix, np.asarray(fp_rows, dtype=np.float64), "f_p_rows_pe"
+    return None, None, None
+
+
+def _latent_guard_f_p_consistency(plan, catalogs, n_rows_pe) -> None:
+    """PLAN §4.4 successor 1: the run's depth map must be the anchor's.
+
+    ``F_F = sum_{p in F} f_p`` is the denominator constant of the budget
+    normalizer ``rho = log[(A - C B)/(P_F - C F_F)]``, and ``B(z; b) =
+    sum_p f_p e^{bf}`` carries the same ``f_p`` inside the artifact.  If the
+    run's per-pixel completeness differs from the one the anchor was built
+    against, ``rho`` normalizes against a budget nobody consumes and eq. (4)'s
+    identity -- ``sum_p (1 - f_p C) Q_p == sum_p (1 - f_p C)`` at every z,
+    member and theta -- silently stops holding.  Nothing downstream notices:
+    the likelihood still evaluates, just against the wrong missing budget.
+
+    So compare the two sums here, over the footprint rows the run will actually
+    use.  Both sides accumulate in float64 and both apply the builder's
+    ``1e-3`` floor; the tolerance is :data:`_LATENT_F_F_RTOL` (see its note for
+    the measurement that fixes it).
+    """
+    fit_pixels = np.asarray(plan.meta["fit_pixels"], dtype=np.int64)
+    if int(fit_pixels.size) != int(plan.n_fit):
+        raise ValueError(
+            f"latent artifact is internally inconsistent: {fit_pixels.size} "
+            f"fit_pixels but row_fac carries {plan.n_fit} footprint rows "
+            "(+1 zero pad). Rebuild the anchor."
+        )
+    if abs(float(plan.P_F) - float(plan.n_fit)) > 0.5:
+        raise ValueError(
+            f"latent artifact's P_F = {float(plan.P_F)} is not its footprint "
+            f"size {plan.n_fit}; P_F is |F| by definition (PLAN eq. 2). "
+            "Rebuild the anchor."
+        )
+
+    pix, f_p, source = _latent_run_f_p_by_pixel(catalogs, n_rows_pe)
+    if pix is None:
+        raise ValueError(
+            "lss_field_mode='latent' requires the run's per-pixel selection "
+            "fraction f_p (neither field_f_p_occ nor f_p_rows is present): "
+            "the artifact's sky moment B(z; b) = sum_p f_p e^{bf} and its "
+            "F_F = sum_p f_p are built from it, so without it the budget "
+            "normalizer rho cannot be checked against the depth map the run "
+            "actually consumes (PLAN §4.4 guard 1). Pass "
+            "--per_pixel_completeness (the same map the anchor was built "
+            "with)."
+        )
+
+    # Same searchsorted membership test ``footprint_row_map`` uses, run the
+    # other way round: every footprint pixel must be present in the run's rows,
+    # because those are the rows whose f_p the artifact's moments already sum.
+    order = np.argsort(pix)
+    pix_sorted = pix[order]
+    pos = np.zeros(fit_pixels.shape, dtype=np.int64)
+    if pix_sorted.size == 0:
+        n_missing = int(fit_pixels.size)
+    else:
+        pos = np.clip(np.searchsorted(pix_sorted, fit_pixels),
+                      0, pix_sorted.size - 1)
+        hit = pix_sorted[pos] == fit_pixels
+        n_missing = int((~hit).sum())
+    if n_missing:
+        raise ValueError(
+            f"{n_missing} of the latent artifact's {fit_pixels.size} footprint "
+            f"pixels are absent from the run's {source} ({pix.size} pixels): "
+            "the run's sky is not the sky the anchor was fit on, so the "
+            "footprint row map would silently send those rows to the "
+            "off-footprint pad (Q == 1) while the artifact's moments still "
+            "count them. Rebuild the anchor against this run's catalog, or run "
+            "with --lss_field_mode table."
+        )
+    f_p_fit = np.maximum(f_p[order][pos], _LATENT_F_P_FLOOR)
+    f_f_run = float(f_p_fit.sum())
+    f_f_art = float(plan.F_F)
+    denom = max(abs(f_f_art), 1e-300)
+    rel = abs(f_f_run - f_f_art) / denom
+    if rel > _LATENT_F_F_RTOL:
+        raise ValueError(
+            f"latent artifact's F_F = {f_f_art:.10g} disagrees with the run's "
+            f"sum of f_p over the same {fit_pixels.size} footprint pixels "
+            f"({source}): {f_f_run:.10g}, a relative difference of {rel:.3g} "
+            f"(tolerance {_LATENT_F_F_RTOL:g}, ~2200x the float32 storage "
+            "round-trip and the same order as eq. 4's own closure floor). "
+            "The two depth maps differ, so rho = log[(A - C B)/(P_F - C F_F)] "
+            "would normalize against a budget this run never consumes and the "
+            "eq. (4) identity would stop holding silently. Pass the SAME "
+            "--per_pixel_completeness map the anchor was built with, or "
+            "rebuild the anchor."
+        )
+
+
+def _resolve_latent_leaves(opts, catalogs, survey_z_depth, nside,
+                           n_rows_pe, n_rows_sel):
+    """Resolve the latent-seam EMCatalog leaves (``(mode, pe, sel)``).
+
+    In ``table`` mode both dicts are EMPTY, so the ``EMCatalog(...)`` calls
+    below are the shipped ones with a ``**{}`` splat and no leaf changes -- the
+    flag-off path is bit-identical by construction, not by testing.
+
+    In ``latent`` mode the artifact is loaded once (HOST-SIDE), the build-time
+    guards fire, and every array is barriered HERE: PLAN §3.6 and this module's
+    docstring both say the barrier must precede the JIT closure, because inside
+    ``body()`` the leaves are already tracers and ``optimization_barrier`` has
+    no effect.
+
+    The theta-free blocks (``row_fac``, ``phi_z``, ``A``, ``B``, ``b_nodes``)
+    are barriered ONCE and ALIASED into both dicts, and the row maps are
+    aliased whenever the PE and selection views share their pixel array: the
+    redshift-prior-state sharing verdict (``can_share_redshift_prior_state``)
+    tests ``is`` identity over every EMCatalog field, so two separately
+    barriered copies of the same array would collapse sharing to False and
+    double the per-member prior-state precomputation.
+    """
+    mode, path = _resolve_lss_field_mode(opts)
+    if mode == "table":
+        return "table", {}, {}
+
+    # Guards that need only the run configuration come first: they are free,
+    # and the artifact is a 64 MB read at production rank.
+    _latent_guard_exclusivity(opts)
+    _latent_guard_ls_z_units(opts)
+
+    plan = load_latent_plan(path, z_depth=survey_z_depth, expect_nside=nside)
+
+    _latent_guard_resolution(plan)
+    _latent_guard_isotropy(plan)
+    _latent_guard_f_p_consistency(plan, catalogs, n_rows_pe)
+
+    fit_pixels = np.asarray(plan.meta["fit_pixels"], dtype=np.int64)
+    n_fit = int(plan.n_fit)
+
+    def _row_leaves(unique_pixels, n_rows, *, where):
+        """``(row_map, on_fp)`` for one row set, barriered.
+
+        ``unique_pixels`` is the row -> global-HEALPix map of a COMPACT view;
+        ``None`` is the legacy full-sky catalog, whose row index IS the pixel
+        index.  Rows outside the fitted footprint are sent to the zero pad row
+        ``n_fit`` and masked, which is what makes their logQ bit-zero (pin
+        P13b) rather than merely small.
+        """
+        if unique_pixels is None:
+            row_pixels = np.arange(int(n_rows), dtype=np.int64)
+        else:
+            row_pixels = np.asarray(unique_pixels, dtype=np.int64)
+            if int(row_pixels.size) != int(n_rows):
+                raise ValueError(
+                    f"{where}: {row_pixels.size} unique pixels for "
+                    f"{int(n_rows)} catalog rows; the latent row map indexes "
+                    "catalog rows, so the two must agree."
+                )
+        row_map = footprint_row_map(row_pixels, fit_pixels, n_fit)
+        on_fp = on_footprint_mask(row_map, n_fit)
+        return (barrier(jnp.asarray(row_map, dtype=jnp.int32)),
+                barrier(jnp.asarray(on_fp)))
+
+    row_map_pe, on_fp_pe = _row_leaves(
+        catalogs.unique_pixels_pe, n_rows_pe, where="latent PE row map")
+    if catalogs.unique_pixels_pe is catalogs.unique_pixels_sel \
+            and int(n_rows_pe) == int(n_rows_sel):
+        row_map_sel, on_fp_sel = row_map_pe, on_fp_pe
+    else:
+        row_map_sel, on_fp_sel = _row_leaves(
+            catalogs.unique_pixels_sel, n_rows_sel,
+            where="latent selection row map")
+
+    # FIELD rows: the survey-global normalizer's occupied rows
+    # (``field_dN_obs_s``).  ``None`` under the conditional sky-weighting
+    # convention, which never builds that normalizer -- and then the field
+    # latent leaves are correctly None too.
+    occ_pixels = getattr(catalogs, "field_occupied_pixels", None)
+    if occ_pixels is None:
+        field_row_map = field_on_fp = None
+    else:
+        occ_np = np.asarray(occ_pixels, dtype=np.int64)
+        field_rows = footprint_row_map(occ_np, fit_pixels, n_fit)
+        field_row_map = barrier(jnp.asarray(field_rows, dtype=jnp.int32))
+        field_on_fp = barrier(jnp.asarray(
+            on_footprint_mask(field_rows, n_fit)))
+
+    shared = dict(
+        latent_row_fac=barrier(jnp.asarray(plan.row_fac)),
+        latent_phi_z=barrier(jnp.asarray(plan.phi_z)),
+        latent_A=barrier(jnp.asarray(plan.A)),
+        latent_B=barrier(jnp.asarray(plan.B)),
+        latent_b_nodes=barrier(jnp.asarray(plan.b_nodes)),
+        # P_F / F_F are the two eq. (2) SCALARS; they ride as plain Python
+        # floats (as the seam's own fixtures do) so they land in the jit
+        # signature as scalars rather than as two more device buffers.
+        latent_P_F=float(plan.P_F),
+        latent_F_F=float(plan.F_F),
+        latent_field_row_map=field_row_map,
+        latent_field_on_fp=field_on_fp,
+    )
+    leaves_pe = dict(shared, latent_row_map=row_map_pe, latent_on_fp=on_fp_pe)
+    leaves_sel = dict(shared, latent_row_map=row_map_sel,
+                      latent_on_fp=on_fp_sel)
+    return "latent", leaves_pe, leaves_sel
 
 
 def _jit_likelihood_body(body, operands):
@@ -796,6 +1258,20 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     # bundles and is bit-identical to the pre-unification behaviour.
     n_catalogs = int(getattr(opts, "n_catalogs", 1))
     if data.get("catalogs") is not None or n_catalogs >= 2:
+        # The latent seam is wired on the FLAT (single-catalog) path only: each
+        # catalog of a K >= 2 mixture has its own footprint, depth map and
+        # anchor, so one artifact cannot serve them and silently reusing it
+        # would apply catalog 1's field to catalog 2's rows.  Refuse rather
+        # than ignore the flag (PR-5 scope; the mixture wiring is its own PR).
+        if _resolve_lss_field_mode(opts)[0] == "latent":
+            raise NotImplementedError(
+                "lss_field_mode='latent' is not wired on the K >= 2 mixture "
+                "path: each catalog has its own footprint and depth map, so it "
+                "needs its own anchor artifact, and reusing one across "
+                "catalogs would evaluate one catalog's field on another's "
+                "rows. Run the latent seam with a single catalog, or use "
+                "--lss_field_mode table."
+            )
         return _make_mixture_likelihood(
             opts, data, pop_params_fid, fixed_parameter_values, n_catalogs
         )
@@ -806,6 +1282,26 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         universe_model,
         counterpart_pixel,
         cache_builder=build_pixel_kde_cache,
+    )
+
+    # The latent seam (field-level PR-5).  Resolved here, right after the views
+    # exist and long before the first likelihood evaluation: the artifact is
+    # read, its guards fire, and its leaves are barriered on the host.  Both
+    # dicts are EMPTY under the default lss_field_mode='table', so the two
+    # EMCatalog(...) constructions below are unchanged there.
+    # The run's resolved per-catalog depth (cli.inference.resolve_survey_z_depth,
+    # whose result is what parameters.py hands the SurveyParams).  This is the
+    # flat K = 1 path, so element 0 is this catalog's; an unset list is the
+    # legacy full-grid convention (no depth), and the artifact must have been
+    # built the same way -- load_latent_plan checks exactly that.
+    _resolved_depths = list(getattr(opts, "resolved_survey_z_depths", None) or ())
+    lss_field_mode, latent_leaves_pe, latent_leaves_sel = _resolve_latent_leaves(
+        opts,
+        catalogs,
+        _resolved_depths[0] if _resolved_depths else None,
+        data.get("nside"),
+        int(jnp.asarray(catalogs.zgals_pe_catalog).shape[0]),
+        int(jnp.asarray(catalogs.zgals_sel_catalog).shape[0]),
     )
 
     # Slice the (global, host-side) Q_LSS table to each view's union pixels, so
@@ -1055,6 +1551,9 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_f_p_occ=getattr(catalogs, "field_f_p_occ", None),
         field_f_p_empty_sum=getattr(catalogs, "field_f_p_empty_sum", None),
         f_p_total_sum=getattr(catalogs, "f_p_total_sum", None),
+        # Latent seam (PR-5): empty in the default table mode, so this
+        # construction is textually the shipped one there.
+        **latent_leaves_pe,
     )
     em_catalog_sel = EMCatalog(
         apix=apix,
@@ -1113,6 +1612,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         field_f_p_occ=getattr(catalogs, "field_f_p_occ", None),
         field_f_p_empty_sum=getattr(catalogs, "field_f_p_empty_sum", None),
         f_p_total_sum=getattr(catalogs, "f_p_total_sum", None),
+        # Latent seam (PR-5): the theta-free blocks are the SAME objects the PE
+        # catalog carries (aliased, not re-barriered), so the prior-state
+        # sharing verdict still sees identical leaves.
+        **latent_leaves_sel,
     )
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, (em_catalog_pe,), (em_catalog_sel,)
@@ -1217,6 +1720,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 wl_log_p_table=wl_log_p_table_,
                 wl_selection=wl_selection,
                 lss_marginalize=lss_marginalize,
+                lss_field_mode=lss_field_mode,
                 materialize_redshift_prior_state=materialize_redshift_prior_state,
                 selection_neff_soft_guard=selection_neff_soft_guard,
                 max_likelihood_variance=max_likelihood_variance,
@@ -1254,6 +1758,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             wl_log_p_table=wl_log_p_table_,
             wl_selection=wl_selection,
             lss_marginalize=lss_marginalize,
+            lss_field_mode=lss_field_mode,
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,

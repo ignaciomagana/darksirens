@@ -191,7 +191,13 @@ def main(argv=None):
     # Chebyshev nodes on [0, b_max] for the b_GW interpolation grid (P9).
     k = np.arange(args.n_b_nodes)
     b_nodes = 0.5 * args.b_max * (1 - np.cos(np.pi * k / (args.n_b_nodes - 1)))
-    A, B = sky_moments(basis, np.asarray(draws), b_nodes, f_p)
+    # Build the moments from the STORED f32 row factors, not from the f64
+    # draws: eq. (4)'s budget identity is exact only if the moments and the
+    # seam evaluate the same field, and the seam consumes ``row_fac``.  With
+    # the f64 draws the identity closes to 2.7e-7 relative at the production
+    # corner instead of 2e-15 (measured, field-level PR-5).
+    A, B = sky_moments(basis, np.asarray(draws), b_nodes, f_p,
+                       row_fac=row_fac)
     A, B = np.asarray(A), np.asarray(B)
     P_F, F_F = sky_constant_coeffs(f_p)
 
@@ -207,7 +213,8 @@ def main(argv=None):
         (proj @ S[:, j].reshape(args.m_sph, args.m_z)) @ phi_z_out.T
         for j in range(n_th)]).astype(np.float32)           # (n_th, n_fit, Nz)
     for m in range(args.m_draw):
-        f_m = (proj @ Xi_members[m]) @ phi_z_out.T          # (n_fit, Nz)
+        # Same f32 row factors the moments and the seam use (see above).
+        f_m = row_fac[m].astype(np.float64) @ phi_z_out.T   # (n_fit, Nz)
         for i, b in enumerate(b_nodes):
             e = np.exp(b * f_m)
             dA[m, i] = b * np.einsum("pz,jpz->zj", e, fprime)

@@ -1214,6 +1214,15 @@ class CompletionCurves(NamedTuple):
     N_miss: jnp.ndarray   # (N_rows,) integral of dN_miss
     base_miss: jnp.ndarray = None        # (N_rows, N_grid) member-independent base | None
     N_miss_members: jnp.ndarray = None   # (M, N_rows) | None
+    # LATENT mode only (field-level PR-5): the per-member budget normalizer
+    # ``rho_m(z; C, b_GW)`` of PLAN eq. (2), ``(M, N_grid)``.  It is returned
+    # from HERE -- rather than recomputed by the likelihood -- so the
+    # completeness curve that enters ``rho`` is the SAME object, from the same
+    # ``_precompute_grids`` call, that ``base_miss`` was built from.  PLAN §4.2
+    # is explicit that the numerator and the normalizer must carry one budget
+    # from one formation site; rebuilding the grids at the seam would create a
+    # second one, and the two would diverge under any change that touched C.
+    latent_rho: jnp.ndarray = None       # (M, N_grid) | None
 
 
 # ------------------------------------------------------------
@@ -1221,8 +1230,27 @@ class CompletionCurves(NamedTuple):
 # ------------------------------------------------------------
 
 #: log Q is clipped to this symmetric range before exponentiating, so that a
-#: heavy lognormal tail cannot blow up the missing-galaxy density.
+#: heavy lognormal tail cannot blow up the missing-galaxy density.  TABLE path
+#: only: the shipped Q_LSS tables are empirically fit and are NOT bounded by
+#: their builder's own clip (it is applied before the per-z mean-one renorm),
+#: so this bound is what keeps the numerator's and the normalizer's missing
+#: budgets equal on a railed cell.
 _LOGQ_CLIP: float = 7.0
+
+#: The LATENT seam's bound on ``logQ`` -- a numerical-safety rail, NOT a tail
+#: tamer, and it must never bind on a physical row.  The latent field is not an
+#: empirically fit table: ``rho`` is DEFINED so that the consumed missing budget
+#: ``sum_p (1 - f_p C(z)) Q_p(z)`` equals its ``Q == 1`` value exactly (PLAN
+#: eq. 4).  That identity BOUNDS the positive tail on its own --
+#: ``Q_p <= (sum_q w_q) / w_p <= P_F / min_p w_p``, i.e. ``logQ <= 13.4`` at the
+#: DESI footprint (``P_F = 30470``, ``min w = 1 - max f_p = 0.044``) -- so a
+#: ``+/-7`` rail does not bound a tail there, it DELETES budget, and the deficit
+#: grows with ``b_GW``.  ``60`` sits ~4x above that structural bound while
+#: ``exp(60) = 1.1e26`` stays ~280 orders under f64 overflow (and 12 under f32),
+#: so the product with the missing-density base cannot become ``inf``.  The
+#: negative rail is inert by the same identity: a floored ``Q = e^-60``
+#: contributes ``< 1e-26`` of the budget, against ``e^-7 = 9e-4`` today.
+_LATENT_LOGQ_CLIP: float = 60.0
 
 
 def _check_lss_grid(arr):
@@ -1284,8 +1312,9 @@ def _to_q(logq_arr, q_arr):
     return jnp.exp(lq)
 
 
-def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool):
-    """One member's completion factor ``Q_eff = exp(clip(logQ, ±_LOGQ_CLIP))``,
+def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool,
+                            clip: float = _LOGQ_CLIP):
+    """One member's completion factor ``Q_eff = exp(clip(logQ, ±clip))``,
     relaxed to ``1`` beyond ``survey.z_depth``.
 
     ``logq_arr`` is a RAW (un-clipped, un-exponentiated) log table when
@@ -1295,10 +1324,17 @@ def _member_q_eff_from_logq(logq_arr, depth_mask, member_is_log: bool):
     2-node gather the caller passes (never the full cube).  ``depth_mask`` is a
     static ``(N_grid,)`` (or gathered ``(...,)``) boolean, or ``None`` when
     ``z_depth is None`` (Q_eff is then just ``exp(clip(logQ))`` everywhere).
+
+    ``clip`` is a STATIC Python float and defaults to the table path's
+    ``_LOGQ_CLIP``.  The latent seam passes ``_LATENT_LOGQ_CLIP`` instead: its
+    ``logQ`` is generated against a normalizer that already conserves the
+    consumed budget, so the table bound would truncate that budget rather than
+    tame a tail (see the two constants).  Keying this off ``member_is_log``
+    would be wrong -- a LOADED log-Q table is ``member_is_log=True`` too.
     """
     if not member_is_log:
         logq_arr = jnp.log(jnp.maximum(logq_arr, 1e-300))
-    q = jnp.exp(jnp.clip(logq_arr, -_LOGQ_CLIP, _LOGQ_CLIP))
+    q = jnp.exp(jnp.clip(logq_arr, -float(clip), float(clip)))
     if depth_mask is None:
         return q
     return jnp.where(depth_mask, q, 1.0)
@@ -1376,6 +1412,165 @@ def member_N_miss_integrals(base_miss, em_catalog: EMCatalog, survey: SurveyPara
 
     _, N = lax.scan(jax.checkpoint(_body), None, logq_members_row)  # (M, N_rows)
     return N
+
+
+# ------------------------------------------------------------
+# LATENT completion: Q is GENERATED, not loaded (field-level PR-5)
+# ------------------------------------------------------------
+#
+# Every consumer below already streams the ensemble ONE member at a time
+# (``member_N_miss_integrals``, ``_member_posterior_mean_q``,
+# ``field_global_log_Z_members``), precisely so the ``(M, N_rows, N_grid)``
+# cube is never materialised.  Latent mode changes only what the scan body
+# READS: instead of gathering member ``m``'s slice of a resident table it
+# generates that member's rows from the compact ``(M_draw, n_fit + 1, M_z)``
+# row-factor leaf.  The memory profile is therefore unchanged -- one
+# ``(N_rows, N_grid)`` transient, formed and discarded -- and at DESI scale the
+# table those scans would otherwise need does not exist (1.06 GB at
+# ``M_draw = 8``, and it is theta-dependent, so it could not be a data constant
+# even if it fit).
+
+
+def latent_enabled(em_catalog: EMCatalog) -> bool:
+    """Static (pytree-STRUCTURE) test for latent mode."""
+    return em_catalog.latent_row_fac is not None
+
+
+def latent_n_members(em_catalog: EMCatalog) -> int:
+    return int(em_catalog.latent_row_fac.shape[0])
+
+
+def latent_b_gw(survey: SurveyParams):
+    """``b_GW`` in latent mode.
+
+    PLAN §4.3 inverts the ``b_miss`` guard: in table mode ``b_miss`` scales the
+    local-overdensity factor through ``alpha_miss * b_miss`` and is not
+    identified; in latent mode it IS ``b_GW``, the bias with which GW hosts
+    trace the field, and it is genuinely (if weakly) identified by the events.
+    ``alpha_miss`` does not enter -- it is the delta_g path's calibration and
+    has no referent here.
+    """
+    return survey.b_miss
+
+
+def _latent_C_curve(grids: "_CompletionGrids"):
+    """The SCALAR sky-aggregate completeness ``C(z; theta)`` the moments assume.
+
+    PLAN eq. (2) factors the budget normalizer through two ``z``-curves,
+    ``A(z; b) = sum_p e^{bf}`` and ``B(z; b) = sum_p f_p e^{bf}``, which closes
+    the identity in closed form only if the completeness enters as ``f_p``
+    times ONE sky-independent curve.  A per-pixel ``C`` (``c_mode=per_pixel``)
+    or a stratified stack does not factor that way -- the sum would need its
+    own moment per distinct curve -- so both are refused here rather than
+    silently evaluated against the wrong normalizer.  This is PLAN §4.4
+    guard 6 stated at the point where the assumption is actually used.
+    """
+    if grids.C_bar_raw is None:
+        raise NotImplementedError(
+            "lss_field_mode='latent' requires an aggregate/selection c_mode: "
+            "the budget normalizer rho = log[(A - C B)/(P_F - C F_F)] assumes "
+            "ONE sky-aggregate completeness curve, and a per-pixel C does not "
+            "factor through the sky moments (PLAN §4.4 guard 6). "
+            "Use --c-mode aggregate or selection with --per_pixel_completeness."
+        )
+    if grids.C_bar_raw.ndim == 2:
+        raise NotImplementedError(
+            "lss_field_mode='latent' does not support stratified selection: "
+            "each stratum's C(z) would need its own (A, B) moment pair, and "
+            "the shipped anchor artifact carries one. Refused rather than "
+            "evaluated against the wrong stratum's normalizer."
+        )
+    return jnp.clip(grids.C_bar_raw, 0.0, 1.0)
+
+
+def latent_rho_member(em_catalog: EMCatalog, survey: SurveyParams, C_curve, m):
+    """``rho_m(z)`` on the FULL ``zgrid`` -- PLAN eq. (2), zeroed above depth.
+
+    ``C_curve`` is the SCALAR sky-aggregate completeness ``C(z; theta)`` (the
+    ``f_p`` structure is already inside ``B``).  ``O(n_b + N_grid)`` per member
+    per proposal -- the entire per-proposal cost of the latent normalizer.
+    """
+    from darksirens.likelihood.latent_q import rho_from_moments
+
+    below = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+    return rho_from_moments(
+        em_catalog.latent_A[m], em_catalog.latent_B[m], C_curve,
+        latent_b_gw(survey), em_catalog.latent_b_nodes,
+        em_catalog.latent_P_F, em_catalog.latent_F_F, below)
+
+
+def latent_member_logq_rows(em_catalog: EMCatalog, survey: SurveyParams,
+                            C_curve, m, *, field_rows: bool = False):
+    """One member's ``(N_rows, N_grid)`` log-Q block, generated.
+
+    ``field_rows`` selects the row set: catalog rows (the numerator) or the
+    ``field_dN_obs_s`` occupied rows (the survey-global normalizer).  Both
+    carry their own footprint map, because they are different row orders over
+    different pixel sets.
+    """
+    row_map = (em_catalog.latent_field_row_map if field_rows
+               else em_catalog.latent_row_map)
+    on_fp = (em_catalog.latent_field_on_fp if field_rows
+             else em_catalog.latent_on_fp)
+    rho = latent_rho_member(em_catalog, survey, C_curve, m)
+    phi_z = jnp.asarray(em_catalog.latent_phi_z)
+    rows = jnp.asarray(em_catalog.latent_row_fac)[m][jnp.asarray(row_map)]
+    field = rows.astype(phi_z.dtype) @ phi_z.T          # (N_rows, N_grid)
+    lq = jnp.asarray(latent_b_gw(survey), dtype=field.dtype) * field - rho[None, :]
+    return jnp.where(jnp.asarray(on_fp)[:, None], lq, 0.0)
+
+
+def latent_member_N_miss_integrals(base_miss, C_curve, em_catalog: EMCatalog,
+                                   survey: SurveyParams):
+    """Latent twin of :func:`member_N_miss_integrals` -- same scan, same peak.
+
+    ``jax.checkpoint`` on the body for the same reason: the reverse pass
+    rematerialises each member's block instead of stacking ``(M, N_rows,
+    N_grid)`` residuals.  Unlike the table path this integrand IS
+    theta-dependent (through ``C_curve`` and ``b_GW``), so the checkpoint is
+    load-bearing here rather than merely tidy.
+    """
+    depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+
+    def _body(carry, m):
+        lq = latent_member_logq_rows(em_catalog, survey, C_curve, m)
+        q_eff = _member_q_eff_from_logq(lq, depth_mask, True,
+                                        _LATENT_LOGQ_CLIP)
+        dN_m = base_miss * q_eff                        # transient, discarded
+        return carry, jnp.trapezoid(dN_m, zgrid, axis=-1)
+
+    _, N = lax.scan(jax.checkpoint(_body), None,
+                    jnp.arange(latent_n_members(em_catalog)))
+    return N                                            # (M, N_rows)
+
+
+def latent_posterior_mean_q(em_catalog: EMCatalog, survey: SurveyParams,
+                            C_curve, *, field_rows: bool = False):
+    """Posterior-MEAN ``Q`` ``(N_rows, N_grid)`` = ``mean_m exp(clip(logQ_m))``.
+
+    The latent twin of :func:`_member_posterior_mean_q`, feeding the SCALAR
+    (deterministic-Q) path so that a latent run without ``--lss_marginalize``
+    still evaluates a well-defined prior.  Streamed, no cube.
+
+    Note this is the mean of ``Q``, not ``Q`` of the mean field -- the two
+    differ, and PLAN §4.2 (``rem:noncommute``) is explicit that renormalising
+    each member does not commute with renormalising the mean.  The member
+    average is the estimand; this scalar path is the fallback.
+    """
+    M = latent_n_members(em_catalog)
+    depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+    n_rows = ((em_catalog.latent_field_row_map if field_rows
+               else em_catalog.latent_row_map)).shape[0]
+
+    def _body(acc, m):
+        lq = latent_member_logq_rows(em_catalog, survey, C_curve, m,
+                                     field_rows=field_rows)
+        return acc + _member_q_eff_from_logq(
+            lq, depth_mask, True, _LATENT_LOGQ_CLIP), None
+
+    total, _ = lax.scan(
+        _body, jnp.zeros((n_rows, zgrid.size), dtype=float), jnp.arange(M))
+    return total / M
 
 
 def _resolve_lss_completion_row_tables(em_catalog: EMCatalog):
@@ -1629,6 +1824,23 @@ def completion_curves(
 
     q_row, logq_members_row = _resolve_lss_completion_row_tables(em_catalog)
 
+    # LATENT mode: Q is generated from the anchor artifact rather than loaded.
+    # Static pytree-structure branch; ``latent_row_fac is None`` leaves every
+    # line below textually and numerically as it was.
+    latent = latent_enabled(em_catalog)
+    C_curve = None
+    if latent:
+        if q_row is not None or logq_members_row is not None:
+            raise NotImplementedError(
+                "lss_field_mode='latent' generates Q from the latent field, so "
+                "a loaded Q_LSS table (--lss_completion / lss_completion_q*) is "
+                "refused: the two are different completion models and silently "
+                "preferring one would make the run's estimand unreadable "
+                "(PLAN §4.4 guard 6)."
+            )
+        C_curve = _latent_C_curve(grids)
+        q_row = latent_posterior_mean_q(em_catalog, survey, C_curve)
+
     if q_row is None:
         f, dN_miss, C_eff, N_miss = _completion_curves_rows_vmap(rows, grids, survey, em_catalog)
     else:
@@ -1638,13 +1850,23 @@ def completion_curves(
 
     base_miss = None
     N_miss_members = None
-    if logq_members_row is not None:
+    latent_rho = None
+    if latent:
+        base_miss = _base_miss_rows_vmap(rows, grids, survey, em_catalog)
+        N_miss_members = latent_member_N_miss_integrals(
+            base_miss, C_curve, em_catalog, survey)                         # (M, N_rows)
+        latent_rho = jnp.stack([
+            latent_rho_member(em_catalog, survey, C_curve, m)
+            for m in range(latent_n_members(em_catalog))
+        ])                                                                  # (M, N_grid)
+    elif logq_members_row is not None:
         base_miss = _base_miss_rows_vmap(rows, grids, survey, em_catalog)   # (N_rows, N_grid)
         N_miss_members = member_N_miss_integrals(base_miss, em_catalog, survey)  # (M, N_rows)
 
     return CompletionCurves(
         f=f, dN_miss=dN_miss, C_eff=C_eff, N_miss=N_miss,
         base_miss=base_miss, N_miss_members=N_miss_members,
+        latent_rho=latent_rho,
     )
 
 
@@ -1814,6 +2036,7 @@ def field_global_log_Z(
     em_catalog: EMCatalog,
     chunk_size: int = 4096,
     N_obs_total=None,
+    latent_q_rows=None,
 ) -> jnp.ndarray:
     """log of the survey-GLOBAL FIELD normalizer for one parameter proposal.
 
@@ -1860,8 +2083,21 @@ def field_global_log_Z(
     :func:`field_global_log_Z_members` hoists the depth reduction out of its
     member vmap instead of repeating it M times.
     """
+    if latent_q_rows is None and latent_enabled(em_catalog):
+        # Scalar (deterministic-Q) latent path: the posterior-MEAN Q on the
+        # occupied rows, mirroring what ``_resolve_lss_completion_row_tables``
+        # hands the per-row numerator.  Explicit rather than implicit: without
+        # this the latent branch of ``_field_missing_curve`` would never fire
+        # here and the scalar normalizer would silently be the Q == 1 budget
+        # while the numerator carried the mean Q.
+        latent_q_rows = latent_posterior_mean_q(
+            em_catalog, survey,
+            _latent_C_curve(_precompute_grids(cosmo, survey, em_catalog)),
+            field_rows=True)
+
     V_total, dN_exp = _field_missing_curve(
-        cosmo, survey, em_catalog, chunk_size=chunk_size
+        cosmo, survey, em_catalog, chunk_size=chunk_size,
+        latent_q_rows=latent_q_rows,
     )
     if N_obs_total is None:
         N_obs_total = field_observed_global_total(cosmo, survey, em_catalog)
@@ -1878,6 +2114,7 @@ def _field_missing_curve(
     survey: SurveyParams,
     em_catalog: EMCatalog,
     chunk_size: int = 4096,
+    latent_q_rows=None,
 ):
     """The (N_grid,) field missing curve ``V(z; theta)`` plus its companions.
 
@@ -1920,7 +2157,15 @@ def _field_missing_curve(
 
     # Static (pytree-structure) modulation dispatch, mirroring the numerator's
     # rule: a Q table REPLACES the local-overdensity factor.
-    has_q = em_catalog.field_lss_q is not None
+    # LATENT: ``latent_q_rows`` (n_occ, N_grid) is member m's GENERATED Q on the
+    # occupied rows, supplied by the caller.  It enters exactly where a loaded
+    # Q table would, so the budget arithmetic below is shared rather than
+    # duplicated -- the only differences are that the empty-pixel budget comes
+    # from the ``f_p`` formula (empty pixels are off-footprint, so Q == 1 there
+    # by the seam's own convention) and that ``f_p`` and ``Q`` may coexist,
+    # which the table path forbids because it has no f_p-weighted empty budget.
+    latent = latent_q_rows is not None
+    has_q = latent or em_catalog.field_lss_q is not None
     has_dg = em_catalog.field_delta_g is not None
     if has_q and has_dg:
         raise NotImplementedError(
@@ -1928,13 +2173,15 @@ def _field_missing_curve(
             "exclusive (Q_LSS replaces the local-overdensity factor, matching "
             "the per-pixel numerator)."
         )
-    if has_q and em_catalog.field_lss_q_empty_sum is None:
+    if has_q and not latent and em_catalog.field_lss_q_empty_sum is None:
         raise ValueError(
             "field_global_log_Z: field_lss_q requires field_lss_q_empty_sum "
             "(the empty-pixel Q budget); build both via "
             "build_field_lss_q_inputs."
         )
-    if has_q:
+    if latent:
+        mod_rows = jnp.asarray(latent_q_rows)                # (n_occ, N_grid)
+    elif has_q:
         mod_rows = jnp.asarray(em_catalog.field_lss_q)       # (n_occ, N_grid) f32
     elif has_dg:
         mod_rows = jnp.asarray(em_catalog.field_delta_g)     # (n_occ, N_grid) f32
@@ -1949,11 +2196,22 @@ def _field_missing_curve(
     # without a Q table or strata (their empty budgets would need
     # f_p-weighted twins), so the admissible combinations are closed here.
     has_fp = em_catalog.field_f_p_occ is not None
-    if has_fp and (has_q or has_dg or stratified or not aggregate):
+    if has_fp and ((has_q and not latent) or has_dg or stratified or not aggregate):
         raise NotImplementedError(
             "_field_missing_curve: field_f_p_occ (per-pixel selection "
             "fraction) is only supported under aggregate/selection c_modes "
-            "without a Q table, delta_g rows, or stratified selection."
+            "without a Q table, delta_g rows, or stratified selection. "
+            "(lss_field_mode='latent' is the one admitted f_p x Q pairing: "
+            "its empty pixels are off-footprint, so Q == 1 there and the "
+            "empty-pixel budget is the f_p formula below.)"
+        )
+    if latent and not has_fp:
+        raise ValueError(
+            "lss_field_mode='latent' requires the per-pixel selection "
+            "fraction on the field side (field_f_p_occ / "
+            "field_f_p_empty_sum): the sky moments B(z; b) = sum_p f_p e^{bf} "
+            "carry f_p, so a normalizer built without it would consume a "
+            "different budget than the one rho conserves (PLAN §4.4 guard 6)."
         )
     if has_fp and em_catalog.field_f_p_empty_sum is None:
         raise ValueError(
@@ -2051,10 +2309,15 @@ def _field_missing_curve(
                 budget_s.shape, n_strata, "empty_stratum_counts")
         V_empty = jnp.sum((1.0 - C_bar) * budget_s, axis=0)
     else:
-        if has_q:
+        if has_q and not latent:
             V_empty = jnp.asarray(em_catalog.field_lss_q_empty_sum,
                                   dtype=dN_exp.dtype)
         else:
+            # LATENT: every empty pixel is outside the fitted footprint (the
+            # footprint is fitted TO the counts), so Q == 1 there and the
+            # budget is the plain f_p formula below -- no per-member empty
+            # budget exists or is needed, which is the structural reason
+            # PLAN eq. (4)'s off-footprint block is conserved trivially.
             V_empty = n_empty
         if has_fp:
             # Sum_{p empty} (1 - f_p C(z)) = n_empty - C(z) Sum_empty f_p.
@@ -2144,6 +2407,34 @@ def field_global_log_Z_members(
     its per-member twin must be swapped in too (see
     :func:`_member_empty_strata_rows`).
     """
+    if latent_enabled(em_catalog):
+        # LATENT: each member's occupied-row Q is generated, installed, and
+        # discarded one at a time (``lax.map``, not ``vmap``), so the peak stays
+        # at ONE (n_occ, N_grid) block instead of the (M, n_occ, N_grid) stack
+        # the table path can afford only because that stack is a data constant.
+        #
+        # A prediction worth knowing when reading these numbers: by PLAN eq.
+        # (4) the occupied-row budget sums to its Q == 1 value exactly, and
+        # every empty pixel is off-footprint, so the survey-GLOBAL normalizer
+        # is member-INDEPENDENT in latent mode.  That is the gauge fixing of
+        # §4.2 ("C and n0 own the budget, Q owns placement"), not a coincidence
+        # -- and it is pinned by tests/test_latent_seam.py.
+        grids = _precompute_grids(cosmo, survey, em_catalog)
+        C_curve = _latent_C_curve(grids)
+        depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+        N_obs_total_l = field_observed_global_total(cosmo, survey, em_catalog)
+
+        def _one_latent(m):
+            lq = latent_member_logq_rows(em_catalog, survey, C_curve, m,
+                                         field_rows=True)
+            q_m = _member_q_eff_from_logq(lq, depth_mask, True,
+                                          _LATENT_LOGQ_CLIP)
+            return field_global_log_Z(
+                cosmo, survey, em_catalog, N_obs_total=N_obs_total_l,
+                latent_q_rows=q_m)
+
+        return lax.map(_one_latent, jnp.arange(latent_n_members(em_catalog)))
+
     q_members = em_catalog.field_lss_q_members
     q_empty_members = em_catalog.field_lss_q_empty_sum_members
     if q_members is None or q_empty_members is None:

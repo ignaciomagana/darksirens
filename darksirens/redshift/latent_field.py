@@ -311,7 +311,7 @@ def sky_constant_coeffs(f_p_footprint) -> tuple[float, float]:
 
 
 def sky_moments(basis: LatentBasis, xi_members, b_nodes,
-                f_p_footprint) -> tuple[jnp.ndarray, jnp.ndarray]:
+                f_p_footprint, *, row_fac=None) -> tuple[jnp.ndarray, jnp.ndarray]:
     """The theta-free moment tables ``(A_m, B_m)`` of PLAN eq. (2).
 
     ``A_m(z; b) = sum_{p in F} e^{b f_m(p, z)}``,
@@ -324,14 +324,30 @@ def sky_moments(basis: LatentBasis, xi_members, b_nodes,
     Online, the budget normalizer is then closed-form in the scalar
     ``c = C(z; theta)``:
     ``rho_m(z; c, b) = log[(A_m - c B_m) / (P_F - c F_F)]``.
+
+    ``row_fac`` — **pass the artifact's own ``(M_draw, n_fit, M_z)`` row
+    factors whenever they will be STORED at reduced precision.**  The budget
+    identity that ``rho`` enforces is exact only if the moments and the seam
+    evaluate the SAME field: building ``A``/``B`` from the f64 ``xi`` while the
+    seam consumes an f32 ``row_fac`` leaves a residual ``~ b |f| eps_f32``,
+    measured at **2.7e-7** relative at the production corner (``b_GW = 4``,
+    per-mode amplitude 2.46) against **2e-15** when the two agree.  That is far
+    below the +55% Jensen inflation the identity removes, but eq. (4) is stated
+    as an identity, so the builder closes it rather than carrying a tolerance.
+    ``None`` recomputes the field from ``xi_members`` in f64 (the reference
+    path, used by the tests that pin this function against a dense rebuild).
     """
     xi_members = jnp.atleast_2d(jnp.asarray(xi_members))    # (M_draw, M)
     b_nodes = jnp.asarray(b_nodes, dtype=jnp.float64)       # (n_b,)
     f_p = jnp.asarray(f_p_footprint, dtype=jnp.float64)     # (n_fit,)
+    if row_fac is not None:
+        row_fac = jnp.asarray(row_fac, dtype=jnp.float64)   # (M_draw, n_fit, M_z)
 
-    def _one(xi):
-        Xi = jnp.reshape(xi, (basis.m_sph, basis.m_z))
-        f = (basis.proj_sph @ Xi) @ basis.phi_z_out.T       # (n_fit, N_z)
+    def _one(xi, rf):
+        if rf is None:
+            Xi = jnp.reshape(xi, (basis.m_sph, basis.m_z))
+            rf = basis.proj_sph @ Xi
+        f = rf @ basis.phi_z_out.T                          # (n_fit, N_z)
 
         # One b node at a time: the (n_b, n_fit, N_z) exponential cube is
         # ~4 GB at production scale, so it is never materialized.
@@ -342,7 +358,10 @@ def sky_moments(basis: LatentBasis, xi_members, b_nodes,
         A, B = jax.lax.map(_at_b, b_nodes)
         return A, B
 
-    A, B = jax.vmap(_one)(xi_members)
+    if row_fac is None:
+        A, B = jax.vmap(lambda xi: _one(xi, None))(xi_members)
+    else:
+        A, B = jax.vmap(lambda rf: _one(None, rf))(row_fac)
     return A, B
 
 

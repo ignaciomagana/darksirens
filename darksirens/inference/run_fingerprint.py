@@ -69,7 +69,28 @@ FINGERPRINT_BASENAME = "run_fingerprint.json"
 #: target.  Runs of models with NO constraint groups are unaffected physically
 #: and can be continued with --resume_force after checking the diff says only
 #: schema_version.
-FINGERPRINT_SCHEMA_VERSION = 2
+#:
+#: Bumped to 3 when ``--lss_field_mode latent`` (field-level PR-5, the seam)
+#: entered the CLI.  The motivating change is the same SHAPE of defect as the
+#: one that motivated 2: latent mode INVERTS the ``b_miss`` rule
+#: (``inference/prior.py:_b_miss_rule``).  In table mode ``b_miss`` reaches the
+#: likelihood only through ``max(1 + alpha_miss*b_miss*delta_g, 0)`` and is
+#: dropped from the sampled block whenever ``--use_lss`` is off; in latent mode
+#: ``b_miss`` IS ``b_GW``, the bias with which GW hosts trace the latent field,
+#: and it is sampled with ``--use_lss`` off (PLAN 4.3, 4.4 guard 6).  The label
+#: string, its bounds and its prior family are IDENTICAL in the two modes -- only
+#: the field it multiplies changes -- so the two parameter spaces are not
+#: distinguishable from the sampled block alone.  ``lss_field_mode`` is itself
+#: semantic and lands in the digest automatically (it is not in
+#: ``_NON_SEMANTIC_KEYS``), and ``--lss_field_artifact`` is content-hashed by the
+#: generic input-file scan, so post-bump runs already separate; the bump is what
+#: makes a PRE-bump table checkpoint refuse a latent resume with a
+#: ``schema_version`` diff an operator can read, rather than a bare digest
+#: mismatch.  Table-mode runs are unaffected PHYSICALLY -- the parameter space,
+#: the likelihood and logZ are bit-identical across the bump -- so an in-flight
+#: table run whose checkpoint predates it can be continued with ``--resume_force``
+#: once the diff is confirmed to say only ``schema_version``.
+FINGERPRINT_SCHEMA_VERSION = 3
 
 # Full-file SHA-256 up to this size; sampled digest above it.
 _FULL_HASH_MAX_BYTES = 1 << 30

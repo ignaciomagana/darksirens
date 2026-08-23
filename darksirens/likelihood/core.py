@@ -10,6 +10,7 @@ from jax.scipy.special import logsumexp
 from darksirens.redshift.prior import (
     DarkSirenPriorState,
     eval_dark_member_completion,
+    eval_dark_member_completion_latent,
     eval_dark_obs_bracket,
     eval_redshift_prior_with_state,
     prepare_redshift_prior_state,
@@ -17,6 +18,8 @@ from darksirens.redshift.prior import (
 from darksirens.redshift.completion import (
     _member_q_eff_from_logq,
     _resolve_member_logq_row,
+    latent_b_gw,
+    latent_enabled,
 )
 from darksirens.redshift.grid import zgrid
 from darksirens.gw.populations import pop_model_parser
@@ -110,6 +113,24 @@ def selection_prior_model(universe_model: str) -> str:
 #       field_depth_z/dz/c under a survey depth; pixel_stratum_map,
 #       field_occupied_pixels, field_lss_q_empty_sum_strata(+_members) and
 #       empty_stratum_counts under a STRATIFIED selection).
+# Two later ladder steps added leaves to this same tree and are enumerated here
+# for the same reason:
+#   the PER-PIXEL selection fraction C_p = f_p C(z) (field-level PR-2):
+#       _row_C (f_p_rows), _field_missing_curve (field_f_p_occ,
+#       field_f_p_empty_sum).  These three were read by the tree but never
+#       enumerated -- the omission dates from PR-2 and made the consumed-vs-
+#       compared pin below red before the seam landed.
+#   the LATENT Q seam (field-level PR-5, lss_field_mode='latent'):
+#       completion_curves -> latent_posterior_mean_q /
+#       latent_member_N_miss_integrals / latent_rho_member, and
+#       field_global_log_Z(+_members) -> latent_member_logq_rows, which between
+#       them read latent_row_fac, latent_phi_z, latent_A, latent_B,
+#       latent_b_nodes, latent_P_F, latent_F_F and both row-map/mask pairs
+#       (latent_row_map/latent_on_fp for catalog rows,
+#       latent_field_row_map/latent_field_on_fp for the field normalizer's
+#       occupied rows).  All are None in the shipped table mode, so listing them
+#       cannot change any table-mode sharing verdict: two table-mode EMCatalogs
+#       compare None-vs-None on each of them, which the ``is`` test passes.
 # The state is a PURE function of (model, cosmo, survey, mark params,
 # sky-weighting) plus these leaves, so two EMCatalogs sharing the SAME object for
 # every one of them yield the identical state.
@@ -129,6 +150,14 @@ _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "pixel_stratum_map", "field_occupied_pixels",
     "empty_stratum_counts", "field_lss_q_empty_sum_strata",
     "field_lss_q_empty_sum_strata_members",
+    # per-pixel selection fraction (field-level PR-2)
+    "f_p_rows", "field_f_p_occ", "field_f_p_empty_sum", "f_p_total_sum",
+    # the latent Q seam (field-level PR-5); all None in table mode
+    "latent_row_fac", "latent_phi_z",
+    "latent_row_map", "latent_on_fp",
+    "latent_field_row_map", "latent_field_on_fp",
+    "latent_A", "latent_B", "latent_b_nodes",
+    "latent_P_F", "latent_F_F",
 )
 
 # Leaves prepare NEVER reads -- sample_to_unique_idx, the counterpart_* plumbing,
@@ -388,6 +417,7 @@ def _require_field_mode_scope(universe_model, wl_enabled, mark_model, catalogs):
         "wl_selection",
         "lss_marginalize",
         "lss_member_impl",
+        "lss_field_mode",
         "materialize_redshift_prior_state",
         "selection_neff_soft_guard",
         "n_catalogs",
@@ -443,6 +473,15 @@ def darksiren_log_likelihood(
     # keeps the historical whole-likelihood vmap (each member redoes everything)
     # as a numerically-pinned fallback; the two agree to float re-association.
     lss_member_impl: str = "factored",
+    # Where the missing-galaxy modulation Q comes from (static; field-level
+    # PR-5).  "table" (default) is the shipped behaviour in every respect: Q is
+    # a resident (M, N_rows, N_grid) log-Q table gathered two nodes at a time.
+    # "latent" GENERATES Q from the anchor artifact's compact row-factor leaves
+    # through ``eval_dark_member_completion_latent`` -- the ONE substitution
+    # (PLAN §3.6).  The flag is a routing declaration; the arrays that make it
+    # work ride on the EMCatalog (``latent_*``), and the two are cross-checked
+    # below so a mode string cannot disagree with the data it names.
+    lss_field_mode: str = "table",
     materialize_redshift_prior_state: bool = True,
     selection_neff_soft_guard: bool = False,
     # Cap on the Monte-Carlo variance of the total log-likelihood estimator
@@ -1102,6 +1141,46 @@ def darksiren_log_likelihood(
                 "lss_member_impl='factored' is not compatible with weak lensing."
             )
 
+        # --- Q source (static).  The mode string and the data must agree: a
+        # run that says "latent" without the artifact leaves would silently
+        # fall back to the table path (and find no table), and one that carries
+        # the leaves but says "table" would ignore them.  Both are refused. ---
+        if lss_field_mode not in ("table", "latent"):
+            raise ValueError(
+                f"lss_field_mode must be 'table' or 'latent', got {lss_field_mode!r}."
+            )
+        latent_mode = lss_field_mode == "latent"
+        have_latent = [latent_enabled(c) for c in catalogs_pe_all + catalogs_sel_all]
+        if latent_mode and not all(have_latent):
+            raise ValueError(
+                "lss_field_mode='latent' requires the latent-field leaves on "
+                "EVERY PE and selection catalog (EMCatalog.latent_row_fac and "
+                "friends, installed from the anchor artifact by the likelihood "
+                "factory); some catalogs carry none. The seam cannot generate Q "
+                "for a catalog it has no row map for."
+            )
+        if not latent_mode and any(have_latent):
+            raise ValueError(
+                "a catalog carries latent-field leaves but lss_field_mode is "
+                "'table'; the leaves would be ignored and the run would consume "
+                "a Q table the latent artifact does not describe. Pass "
+                "--lss_field_mode latent or drop the artifact."
+            )
+
+        def _latent_row_gather(pixk, catalogs):
+            """Per-sample footprint row index + mask, MEMBER-INDEPENDENT.
+
+            Empty tuples in table mode, so the precompute pytree is
+            structurally identical to the shipped one there.
+            """
+            if not latent_mode:
+                return (), ()
+            fit = tuple(jnp.asarray(catalogs[k].latent_row_map)[pixk[k]]
+                        for k in range(n_catalogs))
+            fp = tuple(jnp.asarray(catalogs[k].latent_on_fp)[pixk[k]]
+                       for k in range(n_catalogs))
+            return fit, fp
+
         dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
 
         # Member-stacked leaves: per catalog (row-aligned RAW member log-Q table,
@@ -1114,12 +1193,28 @@ def darksiren_log_likelihood(
         # normalizer is the (M,) survey-global scalars.  ``base_miss`` /
         # ``member_is_log`` / ``z_depth`` are member-INDEPENDENT and captured as
         # per-side closures (below), never batched.
+        # LATENT (field-level PR-5): the member-stacked leaf is the compact
+        # (M, n_fit + 1, M_z) row factor and the (M, N_grid) budget normalizer
+        # -- 11.7 MB + 0.07 MB at production rank -- in place of the
+        # (M, N_rows, N_grid) log-Q table, which at DESI scale is 1.06 GB and,
+        # being theta-dependent through rho, could not be a data constant at
+        # any size.  ``rho`` is the ONLY per-proposal latent work: O(n_b +
+        # N_grid) per member (PLAN §2.3).
         def _member_leaf_bundle(states, catalogs):
             out = []
             for s, c in zip(states, catalogs):
-                logq_all, _ = _resolve_member_logq_row(c)  # (M, N_rows, N_grid) view
                 logZ = s.log_Z_global_members if is_field else s.log_Z_members
-                out.append((logq_all, logZ))
+                if latent_mode:
+                    # ``rho`` comes from the STATE, not from a fresh grid
+                    # build: it must be the normalizer of the same
+                    # completeness curve ``base_miss`` carries, and it is
+                    # already computed once per proposal in
+                    # ``completion_curves`` (PLAN §4.2, one formation site).
+                    out.append((jnp.asarray(c.latent_row_fac),
+                                s.latent_rho, logZ))
+                else:
+                    logq_all, _ = _resolve_member_logq_row(c)  # (M, N_rows, N_grid) view
+                    out.append((logq_all, logZ))
             return tuple(out)
 
         # ``base_miss`` is present only on ENSEMBLE states, which the guard in the
@@ -1127,12 +1222,23 @@ def darksiren_log_likelihood(
         base_miss_univ = tuple(s.base_miss for s in prior_states_univ)
         base_miss_sel = tuple(s.base_miss for s in prior_states_sel)
         member_is_log_univ = tuple(
-            _resolve_member_logq_row(c)[1] for c in catalogs_pe_all
+            True if latent_mode else _resolve_member_logq_row(c)[1]
+            for c in catalogs_pe_all
         )
         member_is_log_sel = tuple(
-            _resolve_member_logq_row(c)[1] for c in catalogs_sel_all
+            True if latent_mode else _resolve_member_logq_row(c)[1]
+            for c in catalogs_sel_all
         )
         z_depth_all = tuple(surveys_all[k].z_depth for k in range(n_catalogs))
+        # Member-INDEPENDENT latent constant, hoisted out of the member vmap.
+        # Per SIDE (like ``base_miss`` / ``member_is_log``) rather than shared,
+        # so the two seams cannot silently drift onto one catalog's grid.
+        latent_phi_z_univ = (tuple(jnp.asarray(c.latent_phi_z)
+                                   for c in catalogs_pe_all)
+                             if latent_mode else ())
+        latent_phi_z_sel = (tuple(jnp.asarray(c.latent_phi_z)
+                                  for c in catalogs_sel_all)
+                            if latent_mode else ())
 
         # Per-catalog member completion -> per-sample log p_mix(z), reusing the
         # SAME K=1 static shortcut / K>=2 _mixture_logsumexp seam as
@@ -1140,8 +1246,19 @@ def darksiren_log_likelihood(
         # / ``is_log_tup`` are the per-SIDE (PE vs selection) member-independent
         # closures; ``leaves[k] = (member_logq_m, logZ_m)`` is the per-catalog
         # member-axis leaf peeled by the outer vmap.
-        def _log_p_mix(A_obs, idx, t, pixk, leaves, base_tup, is_log_tup):
+        def _log_p_mix(A_obs, idx, t, pixk, fitk, fpk, leaves, base_tup,
+                       is_log_tup, phi_z_tup):
             def _one(k):
+                if latent_mode:
+                    # THE seam.  Identical to the table branch below in every
+                    # respect except where logQ comes from (PLAN §3.6).
+                    row_fac_m, rho_m, logZ_m = leaves[k]
+                    return eval_dark_member_completion_latent(
+                        A_obs[k], idx[k], t[k], pixk[k], fitk[k], fpk[k],
+                        base_tup[k], row_fac_m, phi_z_tup[k], rho_m,
+                        latent_b_gw(surveys_all[k]), logZ_m,
+                        z_depth_all[k], is_field,
+                    )
                 member_logq_m, logZ_m = leaves[k]
                 return eval_dark_member_completion(
                     A_obs[k], idx[k], t[k], pixk[k], base_tup[k],
@@ -1194,13 +1311,18 @@ def darksiren_log_likelihood(
             idx = tuple(o[1] for o in obs)
             t = tuple(o[2] for o in obs)
             pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
+            # LATENT: the pixel -> footprint-row map and the footprint mask are
+            # MEMBER-INDEPENDENT, so they belong here (once) rather than inside
+            # the member vmap (M times).  Empty tuples in table mode keep the
+            # precompute pytree structurally identical to the shipped one.
+            fitk, fpk = _latent_row_gather(pixk, catalogs_pe_all)
             # Sky factor uses the SAME clamped-dL redshift as base (z_c); it is
             # inserted AFTER the first mask in _pe_member_terms, exactly as before.
             sky = (
                 log_g_sky(sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_c, sky_params)
                 if apply_sky else jnp.zeros_like(base)
             )
-            return (base, supported, valid, sky, A_obs, idx, t, pixk)
+            return (base, supported, valid, sky, A_obs, idx, t, pixk, fitk, fpk)
 
         def _pe_precompute_chunk(s, m):
             # Evaluate m events (m*nsamp samples) in one flat pass, then split the
@@ -1245,9 +1367,10 @@ def darksiren_log_likelihood(
         )
 
         def _pe_member_terms(leaves):
-            base, supported, valid, sky, A_obs, idx, t, pixk = pe_pre
+            base, supported, valid, sky, A_obs, idx, t, pixk, fitk, fpk = pe_pre
             log_p_mix = _log_p_mix(
-                A_obs, idx, t, pixk, leaves, base_miss_univ, member_is_log_univ
+                A_obs, idx, t, pixk, fitk, fpk, leaves, base_miss_univ,
+                member_is_log_univ, latent_phi_z_univ,
             )   # (nEvents, nsamp)
             # Reproduce _pe_event_fn's mask ORDER with base playing ldw's role:
             #   ldw -> mask(supported & isfinite) -> +sky -> mask(valid & isfinite).
@@ -1293,6 +1416,7 @@ def darksiren_log_likelihood(
             idx = tuple(o[1] for o in obs)
             t = tuple(o[2] for o in obs)
             pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
+            fitk, fpk = _latent_row_gather(pixk, catalogs_sel_all)
             # _sky_weight clamps dL internally, matching _batch_lse (which
             # passes the UNCLAMPED dL_b to sky_log_weight_fn).
             sky = (
@@ -1301,7 +1425,7 @@ def darksiren_log_likelihood(
                 )
                 if apply_sky else jnp.zeros_like(base)
             )
-            return base, supported, valid, sky, A_obs, idx, t, pixk
+            return base, supported, valid, sky, A_obs, idx, t, pixk, fitk, fpk
 
         if sel_batch_size is None:
             sel_pre = _sel_precompute(0, N_sel_p)
@@ -1318,7 +1442,8 @@ def darksiren_log_likelihood(
             )
 
         def _sel_member_reduction(leaves):
-            base_a, sup_a, val_a, sky_a, A_obs_a, idx_a, t_a, pixk_a = sel_pre
+            (base_a, sup_a, val_a, sky_a, A_obs_a, idx_a, t_a, pixk_a,
+             fitk_a, fpk_a) = sel_pre
 
             def _provider(start, size):
                 sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
@@ -1327,7 +1452,10 @@ def darksiren_log_likelihood(
                     tuple(sl(a) for a in idx_a),
                     tuple(sl(a) for a in t_a),
                     tuple(sl(a) for a in pixk_a),
+                    tuple(sl(a) for a in fitk_a),
+                    tuple(sl(a) for a in fpk_a),
                     leaves, base_miss_sel, member_is_log_sel,
+                    latent_phi_z_sel,
                 )
                 # Reproduce log_weight's mask, then _batch_lse's +sky and mask.
                 ldw = sl(base_a) + log_p_mix
@@ -1473,6 +1601,20 @@ def darksiren_log_likelihood(
 
         if lss_member_impl == "factored":
             ll = _factored_member_marginalization(n_members, is_field)
+        elif lss_member_impl == "reference" and lss_field_mode == "latent":
+            # The reference path exists to be the memory-heavy numerical pin:
+            # it DELIBERATELY materialises the (M, N_rows, N_grid) member cube
+            # from the resident table.  In latent mode there is no table, and
+            # building the cube from the field would be 1.06 GB at DESI scale
+            # while contradicting the seam's entire premise.  Refuse rather
+            # than provide a "reference" that is not the reference.
+            raise ValueError(
+                "lss_member_impl='reference' is not available with "
+                "lss_field_mode='latent': the reference path pins the factored "
+                "one by materialising the member Q cube, which the latent seam "
+                "exists to avoid. Use lss_member_impl='factored' (the default); "
+                "the seam's own pin is tests/test_latent_seam.py."
+            )
         elif lss_member_impl == "reference":
             ll = _reference_member_marginalization(n_members, is_field)
         else:

@@ -33,6 +33,13 @@ Design notes
   data-constants (duck-typed ``.nbytes``, no JAX import) and adds an analytic
   estimate for the factory-built KDE caches / ``base_miss`` curves, so the peak
   model sees the allocations that dominate real dark-siren runs.
+* ``lss_field_mode='latent'`` (field-level PR-5) changes *what* the static state
+  is, not how it is resolved: the resident log-Q table is replaced by the compact
+  anchor-artifact leaves (:class:`LatentDims`, ~30.6 MB against 1.06–3.42 GB at
+  DESI scale), and the small genuinely per-evaluation pieces — ``rho`` now,
+  ``row_fac_shift`` at PLAN rung 1 — go through the **guarded transient branch**
+  in :func:`_slopes_and_fixed`, where ``concurrent_evals`` multiplies them.  Both
+  branches are static ``None``-vs-not Python branches, so table mode is untouched.
 * The selection axis is blocked **first** (it dominates: ~1.07e6 injections),
   the PE axis only if a floored selection block still overflows.  Blocks are an
   **even split** (``k`` equal chunks) rounded up to a multiple of 256 rather
@@ -537,9 +544,386 @@ def _rows_and_width(value):
     return rows, width
 
 
+# ── LATENT-field memory accounting (field-level PR-5; PLAN §2.4 / §2.5 / §3.6) ──
+#
+# With ``--lss_field_mode latent`` the missing-galaxy modulation ``Q`` is no
+# longer a resident table: it is GENERATED from the compact anchor artifact
+# (``darksirens.likelihood.latent_q``).  The accounting consequence is a
+# SUBSTITUTION, not an addition — the table the latent leaves replace is:
+#
+#     field member Q rows  (M_draw, n_occupied, N_grid) f32
+#         = 8 x 30,470 x 1,086 x 4  =  1.06 GB   (DESI footprint rows)
+#     catalog-row log-Q ensemble (M_draw, N_rows, N_grid) f64
+#         = 8 x 49,143 x 1,086 x 8  =  3.42 GB   (PE ∪ selection rows)
+#
+# against the latent leaves, which at the same production shapes
+# (``M_draw = 8``, ``n_fit = 30,470``, ``M_z = 12``, ``n_b = 33``,
+# ``N_grid = 1,086``, ``N_rows = 49,143``) are
+#
+#     row_fac  (M_draw, n_fit + 1, M_z) f32   11.70 MB   (PLAN §2.4's 11.7 MB)
+#     A, B     (M_draw, n_b, N_grid)    f64    4.59 MB   (2 tables)
+#     phi_z    (N_grid, M_z)            f64    0.10 MB
+#     row maps (N_rows,) i32 + bool             0.25 MB   (+ the field-row twins)
+#
+# i.e. 16.6 MB of seam leaves — 30.6 MB once the rung-1 sensitivity blocks the
+# loader reads unconditionally are counted — replacing 1.06–3.42 GB of table.
+#
+# ``A``/``B`` are BIGGER than PLAN §2.4's 0.3 MB because ``load_latent_plan`` zero-pads the
+# artifact's below-depth ``z_sub`` block (~65 nodes) to the FULL ``N_grid``
+# grid so the seam's gather is the same ``[idx]`` the table path uses; the pad
+# is inert but it is allocated, so it is reserved here.  The loader also reads
+# the rung-1 sensitivity blocks ``S``/``dA``/``dB`` UNCONDITIONALLY, so they are
+# resident even at rung 0 and are counted whenever ``n_theta > 0``.
+#
+# Two rules this section exists to enforce (PLAN §3.6, last paragraph):
+#
+#  1. ``row_fac`` is STATIC and must NEVER acquire a ``theta`` index.  An
+#     implementation in which it does has silently become the per-proposal
+#     re-solve design PLAN §10 refuses: at 256 concurrent evaluations the leaf
+#     costs 2.99 GB (``M_draw = 8``) to 23.96 GB (``M_draw = 64``) of PER-
+#     EVALUATION transient.  ``latent_transient_bytes_per_eval(..., recompute=
+#     True)`` is that reservation, and it warns loudly — the guard rail, not a
+#     supported mode.
+#  2. Everything that IS per-evaluation goes through the transient branch in
+#     :func:`_slopes_and_fixed`, where ``batch_scale = concurrent_evals``
+#     multiplies it, NOT through the static estimators.  PLAN §2.4's categorical
+#     "per-evaluation transient added: 0" is scoped to RUNG 0 (PLAN §0.5 finding
+#     9): rho is small but nonzero at rung 0, and at rung 1 the row expansion
+#     ``row_fac_shift[pix]`` is 1.46 MB per evaluation (~375 MB at 256
+#     concurrency).  The ~34 GB under-reservation precedent below (see
+#     :func:`estimate_pending_static_bytes`) is why none of this is assumed.
+
+
+#: Live device copies of the ``(M_draw, N_grid)`` ``rho`` array per evaluation.
+#:
+#: ``rho_from_moments`` is not one array: the barycentric ``b`` interpolation
+#: materialises ``A(b)`` and ``B(b)``, and the log-ratio chain adds its own
+#: buffers, so the device peak of the seam's normaliser is a multiple of the
+#: result.  MEASURED on an NVIDIA H100 NVL (2026-08-17, BFC allocator,
+#: PREALLOCATE=false, production shapes ``M_draw=8, n_fit=30,470, M_z=12,
+#: n_b=33, N_grid=1,086``, one measurement per process because
+#: ``peak_bytes_in_use`` is monotone), as ``(peak - bytes_in_use) / (conc *
+#: rho_bytes)`` for a jitted ``vmap`` of ``rho_from_moments`` over ``conc``
+#: proposals x 8 members:
+#:
+#:     conc =  16   7.93 MB   implied  7.13 copies
+#:     conc =  64  26.12 MB   implied  5.87
+#:     conc = 256  62.32 MB   implied  3.50
+#:
+#: The ratio is not constant — a fixed compile/workspace component dominates at
+#: small ``conc`` — so no single integer is within 10% everywhere.  8 is the
+#: smallest that never UNDER-reserves any measured configuration (this module's
+#: standing safety direction), and it costs 142 MB at 256 concurrency against a
+#: 72.7 GiB budget.  Each measurement was bit-repeatable across three runs.
+#:
+#: The rung-1 path was measured the same way and is the one that matters (the
+#: row expansion, not ``rho``, sets its scale).  At ``conc = 64`` two harnesses
+#: differing only in what else was resident and live measured 391.66 MB and
+#: 432.27 MB against a 424.71 MB reservation — +8.4% and -1.8%, both inside
+#: PLAN's 10% PR-5 gate.  ``tests/test_latent_block_sizing.py`` re-measures it.
+LATENT_RHO_LIVE_COPIES = 8
+
+
+@dataclass(frozen=True)
+class LatentDims:
+    """Latent-field leaf shapes for ONE catalog source (PLAN §2.4).
+
+    Pure shape bookkeeping — no arrays, no JAX — so the whole latent branch is
+    unit-testable on CPU with injected dimensions, exactly like the rest of this
+    module.  Field meanings follow ``core/types.py``'s ``EMCatalog`` latent
+    leaves and ``likelihood/latent_q.LatentQPlan``:
+
+    * ``m_draw``       — posterior draws of the latent field (``M_draw``);
+    * ``n_fit``        — fitted-footprint pixels (``row_fac`` carries ``n_fit +
+      1`` rows: the trailing ZERO pad row for off-footprint gathers);
+    * ``m_z``          — redshift-factor rank (``M_z``);
+    * ``n_b``          — ``b_GW`` interpolation nodes;
+    * ``n_grid``       — redshift-grid nodes (the loader pads ``phi_z``/``A``/
+      ``B`` to the FULL grid, so this — not ``N_z_sub`` — is what is allocated);
+    * ``n_rows``       — catalog rows the seam gathers (``latent_row_map``);
+    * ``n_field_rows`` — occupied rows of ``field_dN_obs_s`` (the field-weighting
+      global normalizer's row set), 0 when the run is not field-weighted;
+    * ``m_sph``        — sphere-factor rank, needed only at rung 1;
+    * ``n_theta``      — sensitivity columns in ``S``/``dA``/``dB``; 0 when the
+      artifact carries no rung-1 blocks.
+    """
+
+    m_draw: int
+    n_fit: int
+    m_z: int
+    n_b: int
+    n_grid: int
+    n_rows: int
+    n_field_rows: int = 0
+    m_sph: int = 0
+    n_theta: int = 0
+
+    # ---------------------------------------------------------------- statics
+    @property
+    def row_fac_bytes(self) -> int:
+        """``(M_draw, n_fit + 1, M_z)`` f32 — PLAN §2.4's 11.7 MB leaf."""
+        return int(self.m_draw) * (int(self.n_fit) + 1) * int(self.m_z) * 4
+
+    @property
+    def moment_bytes(self) -> int:
+        """``A`` + ``B``, each ``(M_draw, n_b, N_grid)`` f64, plus ``b_nodes``."""
+        return 2 * int(self.m_draw) * int(self.n_b) * int(self.n_grid) * 8 + int(self.n_b) * 8
+
+    @property
+    def phi_z_bytes(self) -> int:
+        """``phi_z`` ``(N_grid, M_z)`` f64 plus the ``(N_grid,)`` depth mask."""
+        return int(self.n_grid) * int(self.m_z) * 8 + int(self.n_grid)
+
+    @property
+    def row_map_bytes(self) -> int:
+        """``row_map`` i32 + ``on_fp`` bool, for catalog rows AND field rows."""
+        return (int(self.n_rows) + int(self.n_field_rows)) * (4 + 1)
+
+    @property
+    def sensitivity_bytes(self) -> int:
+        """``S`` ``(M_sph*M_z, n_theta)`` and ``dA``/``dB``, both f64.
+
+        ``load_latent_plan`` reads these whether or not rung 1 is enabled and
+        pads ``dA``/``dB`` to the full grid alongside ``A``/``B``, so they are
+        resident at rung 0 too — 0 only when the artifact has no sensitivity
+        block (``n_theta = 0``).
+        """
+        if int(self.n_theta) <= 0:
+            return 0
+        s = int(self.m_sph) * int(self.m_z) * int(self.n_theta) * 8
+        dab = 2 * int(self.m_draw) * int(self.n_b) * int(self.n_grid) * int(self.n_theta) * 8
+        return s + dab
+
+    def leaf_bytes(self, *, rung: int = 0) -> int:
+        """Device bytes of the latent leaves the factory builds.
+
+        At rung 1 the row expansion ``Phi_sph[F] @ reshape(S.dtheta, ...)``
+        needs the footprint block of the sphere basis, ``(n_fit, M_sph)`` f64 —
+        76.8 MB at production rank (PLAN §2.4 lists the FULL-sky ``phi_sph`` at
+        124 MB; only the fitted footprint is ever gathered).  That leaf does not
+        exist yet — PR-6b adds it — but it is reserved here so enabling rung 1
+        cannot surprise the sizer.
+        """
+        total = (self.row_fac_bytes + self.moment_bytes + self.phi_z_bytes
+                 + self.row_map_bytes + self.sensitivity_bytes)
+        if int(rung) >= 1:
+            total += int(self.n_fit) * int(self.m_sph) * 8
+        return int(total)
+
+    @property
+    def base_miss_bytes(self) -> int:
+        """``base_miss`` ``(N_rows, N_grid)`` f64 per view (PE + selection).
+
+        Mode-INDEPENDENT: latent mode replaces ``Q``, not the base missing-galaxy
+        curve the seam multiplies it into (``prior.eval_dark_member_completion_
+        latent`` takes the same ``base_miss`` the table evaluator does).  It is
+        counted here rather than in the table branch because the table branch
+        keys off the loaded member table, which a latent run does not have.
+        """
+        return 2 * int(self.n_rows) * int(self.n_grid) * 8
+
+    # -------------------------------------------------------------- transients
+    @property
+    def rho_bytes(self) -> int:
+        """``rho`` ``(M_draw, N_grid)`` f64 — the rung-0 per-evaluation term.
+
+        Small (69.5 kB at production) but NOT zero, which is why it belongs in
+        the guarded transient branch rather than being declared away: PLAN §2.4's
+        "0 transient" is a statement about the LEAVES, not about ``rho``.  This
+        is the ARRAY; the reservation carries :data:`LATENT_RHO_LIVE_COPIES` of
+        it, because the interpolation and log-ratio chain that produce it are
+        live at the same time (measured — see that constant).
+        """
+        return int(self.m_draw) * int(self.n_grid) * 8
+
+    @property
+    def shift_bytes(self) -> int:
+        """Rung-1 (PR-6b) per-evaluation objects — PLAN §3.6's "exactly two".
+
+        ``row_fac_shift = reshape(S.dtheta, (M_sph, M_z))`` is tiny, but it is
+        CONSUMED as ``row_fac_shift[pix]``, i.e. as the row expansion
+        ``(n_fit + 1, M_z)`` f32 — 1.46 MB at production, ~375 MB at 256
+        concurrency (PLAN §0.5 finding 9, correcting §2.4).  The moment
+        correction ``(dA/dtheta).dtheta`` produces fresh ``A``/``B`` tables of
+        the same shape as the static ones, 4.59 MB.  Both are member-INDEPENDENT,
+        which is the entire reason rung 1 stays affordable (PLAN §2.5).
+        """
+        expansion = (int(self.n_fit) + 1) * int(self.m_z) * 4
+        shift = int(self.m_sph) * int(self.m_z) * 8
+        moments = 2 * int(self.m_draw) * int(self.n_b) * int(self.n_grid) * 8
+        return expansion + shift + moments
+
+    def transient_bytes(self, *, rung: int = 0, recompute: bool = False) -> int:
+        """Per-EVALUATION latent bytes (``concurrent_evals`` multiplies this)."""
+        total = LATENT_RHO_LIVE_COPIES * self.rho_bytes
+        if int(rung) >= 1:
+            total += self.shift_bytes
+        if recompute:
+            # ``row_fac`` acquiring a theta index — PLAN §10's refused re-solve.
+            total += self.row_fac_bytes
+        return int(total)
+
+    @property
+    def slope_bytes_per_unit(self) -> int:
+        """Latent addend to the per-injection / per-PE-sample slopes.
+
+        The hot path gathers ``rf = row_fac_m[pix_fit]`` ONCE PER SAMPLE
+        (``prior.eval_dark_member_completion_latent``), i.e. an
+        ``(n_block, M_z)`` f32 intermediate per member — 384 B/unit at
+        ``M_draw = 8`` and 3,072 B/unit at ``M_draw = 64``.  It scales with the
+        BLOCK, not with the evaluation, so it belongs on the slopes where
+        blocking can control it; the table path's counterpart is the
+        ``member_logq[pix, idx]`` gather the calibration never measured either.
+        Shape arithmetic (dtype x rank), not a measured slope — it is ADDED to
+        the calibrated ``_CAT`` slopes, which is the over-reserving direction.
+        """
+        return int(self.m_draw) * int(self.m_z) * 4
+
+    # ------------------------------------------------------------ constructors
+    @classmethod
+    def from_plan(cls, plan, *, n_rows: int, n_field_rows: int = 0) -> "LatentDims":
+        """Dimensions of a :class:`~darksirens.likelihood.latent_q.LatentQPlan`.
+
+        Duck-typed on ``.shape`` only (no JAX import): ``row_fac`` is
+        ``(M_draw, n_fit + 1, M_z)``, ``A`` is ``(M_draw, n_b, N_grid)``.  The
+        row counts come from the CALLER because they are properties of the
+        catalog the plan is attached to, not of the artifact.
+        """
+        row_fac = getattr(plan, "row_fac")
+        m_draw, n_fit_plus_pad, m_z = (int(v) for v in row_fac.shape)
+        a_shape = getattr(plan, "A").shape
+        n_b, n_grid = int(a_shape[-2]), int(a_shape[-1])
+        s = getattr(plan, "S", None)
+        n_theta = int(s.shape[-1]) if s is not None else 0
+        return cls(
+            m_draw=m_draw, n_fit=n_fit_plus_pad - 1, m_z=m_z, n_b=n_b,
+            n_grid=n_grid, n_rows=int(n_rows), n_field_rows=int(n_field_rows),
+            m_sph=int(getattr(plan, "m_sph", 0) or 0), n_theta=n_theta,
+        )
+
+    @classmethod
+    def from_leaves(cls, leaves) -> "LatentDims":
+        """Dimensions off the ``EMCatalog`` latent leaves (object or dict).
+
+        ``m_sph`` / ``n_theta`` are 0: the sensitivity blocks live on the plan,
+        not on the catalog, so a caller that wants them reserved must use
+        :meth:`from_plan`.
+        """
+        def _get(name):
+            if isinstance(leaves, dict):
+                return leaves.get(name)
+            return getattr(leaves, name, None)
+
+        row_fac = _get("latent_row_fac")
+        if row_fac is None:
+            raise ValueError(
+                "LatentDims.from_leaves needs 'latent_row_fac'; the object "
+                "carries no latent-field leaves (lss_field_mode='table')."
+            )
+        m_draw, n_fit_plus_pad, m_z = (int(v) for v in row_fac.shape)
+        a_shape = _get("latent_A").shape
+        row_map = _get("latent_row_map")
+        field_row_map = _get("latent_field_row_map")
+        return cls(
+            m_draw=m_draw, n_fit=n_fit_plus_pad - 1, m_z=m_z,
+            n_b=int(a_shape[-2]), n_grid=int(a_shape[-1]),
+            n_rows=int(row_map.shape[0]) if row_map is not None else 0,
+            n_field_rows=(int(field_row_map.shape[0])
+                          if field_row_map is not None else 0),
+        )
+
+
+def latent_pending_bytes(dims: LatentDims, *, rung: int = 0) -> int:
+    """Static device bytes the factory allocates for ONE latent catalog source.
+
+    The leaves PLUS ``base_miss`` — and deliberately NO log-Q table: in latent
+    mode there is none to transfer, slice or expand.  Counting one anyway would
+    reserve gigabytes that are never allocated; NOT counting the leaves would
+    repeat the ~34 GB under-reservation of ``estimate_pending_static_bytes``'
+    docstring in the other direction.
+    """
+    return int(dims.leaf_bytes(rung=rung) + dims.base_miss_bytes)
+
+
+def latent_transient_bytes_per_eval(dims: LatentDims, *, rung: int = 0,
+                                    recompute: bool = False,
+                                    warn: bool = True) -> int:
+    """Per-EVALUATION latent bytes, i.e. the term ``concurrent_evals`` multiplies.
+
+    ``rung`` 0 is the shipped seam (``rho`` only); ``rung`` 1 is PR-6b's linear
+    response (``row_fac_shift`` + the moment correction).  ``recompute=True`` is
+    the guard rail: it prices the design in which ``row_fac`` itself becomes
+    per-proposal (PLAN §10 / §2.5), which is 2.99 GB at ``M_draw = 8`` and 23.96
+    GB at ``M_draw = 64`` once the 256x concurrency multiplier is applied — and
+    says so loudly.  Latent + recompute is REFUSED until that branch is measured;
+    what this function guarantees is that it can never be silently affordable.
+    """
+    rung = int(rung)
+    if rung not in (0, 1):
+        raise ValueError(
+            f"latent_rung must be 0 (the shipped seam) or 1 (PR-6b linear "
+            f"response); got {rung!r}."
+        )
+    if recompute and warn:
+        _loud(
+            f"latent per-proposal RECOMPUTE requested: row_fac "
+            f"({dims.row_fac_bytes / 1e6:,.1f} MB) becomes a PER-EVALUATION "
+            f"transient — {256 * dims.row_fac_bytes / 1e9:,.2f} GB at the "
+            "production 256-way concurrency. This is the re-solve design "
+            "PLAN §10 refuses; it is reserved, not endorsed, and it has "
+            "never been measured."
+        )
+    return int(dims.transient_bytes(rung=rung, recompute=recompute))
+
+
+def _resolve_latent_mode(lss_field_mode: str, latent_dims):
+    """Validate the (mode, dims) pair and return the dims to account for, or None.
+
+    A latent run whose dimensions were not supplied would be accounted as a
+    catalog run with NO Q state at all — silently under-reserving every latent
+    leaf — and a table run handed latent dims would reserve leaves that are never
+    built.  Both are the failure mode this module has a scar from, so both are
+    hard errors rather than best-effort guesses.
+    """
+    mode = str(lss_field_mode or "table").strip().lower()
+    if mode not in ("table", "latent"):
+        raise ValueError(
+            f"lss_field_mode must be 'table' or 'latent', got {lss_field_mode!r}."
+        )
+    if mode == "latent" and latent_dims is None:
+        raise ValueError(
+            "lss_field_mode='latent' needs latent_dims (LatentDims) to size the "
+            "latent leaves; without them the static estimate silently omits "
+            "every latent array."
+        )
+    if mode == "table" and latent_dims is not None:
+        raise ValueError(
+            "latent_dims were supplied but lss_field_mode='table'; the latent "
+            "leaves are not built in table mode and reserving them would "
+            "over-size the static state."
+        )
+    return latent_dims if mode == "latent" else None
+
+
+def _latent_dims_for(latent_dims, index: int, n_sources: int):
+    """One source's dims from a single ``LatentDims`` or a per-source sequence."""
+    if latent_dims is None or isinstance(latent_dims, LatentDims):
+        return latent_dims
+    dims = list(latent_dims)
+    if len(dims) != n_sources:
+        raise ValueError(
+            f"latent_dims sequence has {len(dims)} entries but the run has "
+            f"{n_sources} catalog source(s); pass one LatentDims per catalog or "
+            "a single LatentDims shared by all of them."
+        )
+    return dims[index]
+
+
 def _pending_for_catalog_source(src, *, n_grid: int, catalog_memory=None,
                                 catalog_sky_weighting: str = "conditional",
-                                is_bundle: bool = False) -> int:
+                                is_bundle: bool = False,
+                                latent_dims: LatentDims | None = None,
+                                latent_rung: int = 0) -> int:
     """Pending factory allocations for ONE catalog source (the flat top-level
     ``data`` dict, or one ``data['catalogs']`` bundle).  See
     :func:`estimate_pending_static_bytes` for the term-by-term rationale."""
@@ -564,6 +948,26 @@ def _pending_for_catalog_source(src, *, n_grid: int, catalog_memory=None,
     if not is_bundle and src.get("zgals") is not None and max_gals > 0:
         union_rows = n_unique                    # |PE ∪ sel| <= unique_pe + unique_sel
         pending += union_rows * max_gals * 3 * 8 + union_rows * 4
+
+    # ── LATENT mode: the leaves REPLACE the log-Q table (PLAN §2.4) ──
+    # A latent run carries no member table at all — ``completion.completion_
+    # curves`` refuses one (PLAN §4.4 guard 6) — so the table branch below would
+    # find nothing and reserve NOTHING, not even ``base_miss``.  The latent
+    # branch is therefore a full substitute for it, and it is a static Python
+    # branch on a None-vs-not argument, so table mode is textually untouched.
+    if latent_dims is not None:
+        if int(latent_dims.n_grid) != int(n_grid):
+            # ``load_latent_plan`` pads the artifact's ``z_sub`` block to the
+            # RUN's grid and refuses a mismatch outright; disagreeing here means
+            # the caller built the dims against a different DARKSIRENS_ZMAX, and
+            # every latent byte below would be sized against the wrong grid.
+            raise ValueError(
+                f"latent_dims.n_grid={int(latent_dims.n_grid)} but the run's "
+                f"n_grid={int(n_grid)}; the latent leaves are padded to the "
+                "run's redshift grid, so the two must agree."
+            )
+        pending += latent_pending_bytes(latent_dims, rung=latent_rung)
+        return int(pending)
 
     members = src.get("lss_completion_logq_members")
     shape = getattr(members, "shape", None)
@@ -598,7 +1002,10 @@ def _pending_for_catalog_source(src, *, n_grid: int, catalog_memory=None,
 
 def estimate_pending_static_bytes(data, *, n_grid: int, has_catalog: bool,
                                   catalog_memory=None,
-                                  catalog_sky_weighting: str = "conditional") -> int:
+                                  catalog_sky_weighting: str = "conditional",
+                                  lss_field_mode: str = "table",
+                                  latent_dims=None,
+                                  latent_rung: int = 0) -> int:
     """Analytic estimate of the static state the FACTORY will allocate *after* the
     block-size resolver runs — i.e. the piece the device probe is blind to.
 
@@ -627,29 +1034,47 @@ def estimate_pending_static_bytes(data, *, n_grid: int, has_catalog: bool,
     in ``data['catalogs']`` are walked instead (each carries its own compact rows and
     its own Q ensemble), so the estimate is no longer silently 0 for every K >= 2 run.
 
+    **Latent mode** (``lss_field_mode='latent'``, field-level PR-5).  The log-Q
+    table does not exist; ``Q`` is generated from the anchor artifact, whose leaves
+    ``load_latent_plan`` reads HOST-side at likelihood-build time — i.e. AFTER this
+    probe, so they are pending exactly as the KDE caches are.  ``latent_dims``
+    (a :class:`LatentDims`, or one per catalog source) then routes the source
+    through :func:`latent_pending_bytes`: the leaves plus ``base_miss``, and NO
+    table copies, because the substitution must be accounted as a substitution
+    (~30.6 MB of leaves for a 1.06–3.42 GB table at DESI scale).  Mode and dims
+    must agree; a latent run with no dims is a hard error, not a 0.
+
     This is the quantity to subtract from the memory budget / reserve in the floor
     guard; subtracting the already-resident loaded arrays too would double-count
     them against ``free_bytes``.  Pure Python (no JAX import).
     """
+    latent_dims = _resolve_latent_mode(lss_field_mode, latent_dims)
     if not has_catalog or not isinstance(data, dict):
         return 0
     bundles = data.get("catalogs")
     if bundles:
+        sources = [b for b in bundles if isinstance(b, dict)]
         return int(sum(
             _pending_for_catalog_source(
                 bundle, n_grid=n_grid, catalog_memory=None,
-                catalog_sky_weighting=catalog_sky_weighting, is_bundle=True)
-            for bundle in bundles if isinstance(bundle, dict)
+                catalog_sky_weighting=catalog_sky_weighting, is_bundle=True,
+                latent_dims=_latent_dims_for(latent_dims, i, len(sources)),
+                latent_rung=latent_rung)
+            for i, bundle in enumerate(sources)
         ))
     return _pending_for_catalog_source(
         data, n_grid=n_grid, catalog_memory=catalog_memory,
-        catalog_sky_weighting=catalog_sky_weighting, is_bundle=False)
+        catalog_sky_weighting=catalog_sky_weighting, is_bundle=False,
+        latent_dims=_latent_dims_for(latent_dims, 0, 1), latent_rung=latent_rung)
 
 
 def measure_static_state_bytes(data, *, n_grid: int, has_catalog: bool,
                                n_catalogs: int = 1, catalog_memory=None,
                                drop_full_catalog: bool = False,
-                               catalog_sky_weighting: str = "conditional") -> int:
+                               catalog_sky_weighting: str = "conditional",
+                               lss_field_mode: str = "table",
+                               latent_dims=None,
+                               latent_rung: int = 0) -> int:
     """Total static data-constant bytes for a loaded run (for the run-config report).
 
     Sums the exact ``nbytes`` of every loaded array — deduplicated by object
@@ -663,6 +1088,13 @@ def measure_static_state_bytes(data, *, n_grid: int, has_catalog: bool,
     device-only one; the pending term separately accounts for the device copies the
     factory makes of the host arrays.  Pure Python: duck-types ``.nbytes``, no JAX
     import.
+
+    In latent mode (``lss_field_mode='latent'``) the walk finds no log-Q table —
+    a latent run does not load one — and the latent leaves are contributed by the
+    pending term, since the anchor artifact is read at likelihood-build time, not
+    at data load.  ``latent_dims`` therefore has to be passed for the reported
+    figure to include them; the mode/dims agreement is enforced the same way as in
+    :func:`estimate_pending_static_bytes`.
     """
     seen: set[int] = set()
     total = 0
@@ -701,18 +1133,40 @@ def measure_static_state_bytes(data, *, n_grid: int, has_catalog: bool,
 
     total += estimate_pending_static_bytes(
         data, n_grid=n_grid, has_catalog=has_catalog, catalog_memory=catalog_memory,
-        catalog_sky_weighting=catalog_sky_weighting)
+        catalog_sky_weighting=catalog_sky_weighting,
+        lss_field_mode=lss_field_mode, latent_dims=latent_dims,
+        latent_rung=latent_rung)
     return int(total)
 
 
 def _slopes_and_fixed(*, has_catalog: bool, needs_grad: bool, n_grid: int,
                       n_q: int, max_gals_per_row, n_catalogs: int,
-                      concurrent_evals: int, warn: bool = True):
+                      concurrent_evals: int, warn: bool = True,
+                      latent_dims=None, latent_rung: int = 0,
+                      latent_recompute: bool = False):
     """``(sel_bpi, pe_bps, fixed_bytes)`` of the peak model for these dimensions.
 
     Factored out of :func:`resolve_block_sizes` so :func:`predicted_peak_bytes` and
     the resolver cannot drift apart.  See ``resolve_block_sizes``' docstring for the
     meaning of every scale factor.
+
+    ``latent_dims`` (field-level PR-5) opens the **guarded transient branch**.  It
+    is a static ``None``-vs-not Python branch: with it unset — i.e. in table mode,
+    always — not one arithmetic operation below changes, so the flag-off path stays
+    bit-identical.  With it set, two things are added, both multiplied by
+    ``batch_scale = concurrent_evals`` exactly like every other transient:
+
+    * a per-EVALUATION term (``rho`` at rung 0; ``+ row_fac_shift[pix]`` and the
+      moment correction at rung 1 — PLAN §0.5 finding 9, which corrects §2.4's
+      categorical "0 transient" to a rung-0-only statement);
+    * a per-UNIT slope addend for the hot-path ``row_fac_m[pix_fit]`` gather,
+      which scales with the block rather than the evaluation.
+
+    ``row_fac`` itself stays STATIC and must never acquire a theta index; an
+    implementation in which it does has become PLAN §10's per-proposal re-solve,
+    and ``latent_recompute=True`` is what prices it (2.99–23.96 GB at 256
+    concurrency) and warns.  That is the structural reason this branch exists:
+    the static estimators cannot see a theta index, but this one charges it.
     """
     grid_scale = max(1e-9, float(n_grid) / float(CAL_N_GRID))
     # The q-quadrature is evaluated PER SAMPLE by the default (exact) pairing
@@ -769,7 +1223,32 @@ def _slopes_and_fixed(*, has_catalog: bool, needs_grad: bool, n_grid: int,
                        + unit_scale * GRAD_WORKSET_FLOOR_BYTES)
     else:
         fixed_bytes = float(TRUE_FIXED_VALUE_BYTES)
-    return base_sel * unit_scale, base_pe * unit_scale, fixed_bytes
+    sel_bpi = base_sel * unit_scale
+    pe_bps = base_pe * unit_scale
+    # ── The guarded LATENT transient branch (PLAN §2.4 / §3.6) ──
+    # ``latent_dims is None`` in table mode, so everything above is returned
+    # unchanged; nothing here can move a table-mode plan by one byte.
+    if latent_dims is not None:
+        per_eval = latent_transient_bytes_per_eval(
+            latent_dims, rung=latent_rung, recompute=latent_recompute, warn=warn)
+        # ``concurrent_evals`` is the multiplier that matters (PLAN §3.6): tinyns
+        # vmaps 256 proposals, so every per-evaluation object is live 256 times.
+        fixed_bytes = float(fixed_bytes) + batch_scale * float(per_eval)
+        # The per-sample ``row_fac_m[pix_fit]`` gather rides the BLOCK, so it is a
+        # slope, and it carries the same batch/grid/q scaling the calibrated
+        # slopes do (``unit_scale`` already contains ``batch_scale``).  ``n_grid``
+        # and ``n_q`` do NOT multiply this gather — it is (block x M_z) per member
+        # regardless — so it is scaled by ``batch_scale`` alone.
+        latent_bpu = float(latent_dims.slope_bytes_per_unit) * batch_scale
+        sel_bpi += latent_bpu
+        pe_bps += latent_bpu
+    elif latent_rung or latent_recompute:
+        raise ValueError(
+            "latent_rung / latent_recompute were set without latent_dims; the "
+            "latent transient branch cannot size an evaluation whose shapes it "
+            "was not given."
+        )
+    return sel_bpi, pe_bps, fixed_bytes
 
 
 def predicted_peak_bytes(*, n_events: int, n_samp: int, n_sel: int,
@@ -779,7 +1258,9 @@ def predicted_peak_bytes(*, n_events: int, n_samp: int, n_sel: int,
                          max_gals_per_row=CAL_MAX_GALS_PER_ROW,
                          n_catalogs: int = 1, concurrent_evals: int = 1,
                          static_state_bytes: float = 0.0,
-                         flow_path: bool = False) -> float:
+                         flow_path: bool = False,
+                         latent_dims=None, latent_rung: int = 0,
+                         latent_recompute: bool = False) -> float:
     """Peak device bytes the model predicts for a given plan.
 
     ``sel_batch_size``/``pe_event_block`` of ``None`` mean a single pass over that
@@ -788,11 +1269,19 @@ def predicted_peak_bytes(*, n_events: int, n_samp: int, n_sel: int,
     axis alone does not move the value peak).  Used by the resolver's calibration
     tests; the resolver itself compares a budget rather than a peak, but both go
     through :func:`_slopes_and_fixed` so they cannot drift.
+
+    ``latent_dims`` / ``latent_rung`` / ``latent_recompute`` (field-level PR-5)
+    add the latent transient terms; ``static_state_bytes`` should then be the
+    LATENT static (:func:`estimate_pending_static_bytes` with
+    ``lss_field_mode='latent'``), not a table one.  All three default to the
+    table-mode no-op.
     """
     sel_bpi, pe_bps, fixed_bytes = _slopes_and_fixed(
         has_catalog=has_catalog, needs_grad=needs_grad, n_grid=n_grid, n_q=n_q,
         max_gals_per_row=max_gals_per_row, n_catalogs=n_catalogs,
-        concurrent_evals=concurrent_evals, warn=False)
+        concurrent_evals=concurrent_evals, warn=False,
+        latent_dims=latent_dims, latent_rung=latent_rung,
+        latent_recompute=latent_recompute)
     sel = float(n_sel if sel_batch_size is None else sel_batch_size) * sel_bpi
     pe = (0.0 if flow_path else
           float(n_events if pe_event_block is None else pe_event_block)
@@ -808,6 +1297,8 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
                         n_catalogs: int = 1, n_q: int = CAL_N_Q,
                         static_state_bytes: float = 0.0,
                         needs_grad: bool = True, concurrent_evals: int = 1,
+                        latent_dims=None, latent_rung: int = 0,
+                        latent_recompute: bool = False,
                         free_bytes: int | None = None,
                         free_bytes_reliable: bool = True,
                         backend: str | None = None,
@@ -848,6 +1339,13 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
       catalog-free ones;
     * ``concurrent_evals`` on both slopes, for a sampler that ``vmap``s several
       likelihood evaluations at once (tinyns ``replacement_chains``).
+
+    ``latent_dims`` (field-level PR-5) additionally opens the guarded latent
+    transient branch of :func:`_slopes_and_fixed`: ``concurrent_evals * (rho [+
+    the rung-1 corrections])`` on the fixed term and the per-sample ``row_fac``
+    gather on both slopes.  ``static_state_bytes`` must then come from
+    :func:`estimate_pending_static_bytes` with ``lss_field_mode='latent'``, which
+    reserves the latent leaves INSTEAD of a log-Q table rather than on top of one.
 
     Auto policy: on a non-GPU backend keep a single pass; else size each axis
     against ``safety_factor * free_bytes - true_fixed - static_state_bytes`` — the
@@ -900,7 +1398,8 @@ def resolve_block_sizes(*, n_events: int, n_samp: int, n_sel: int,
     sel_bpi, pe_bps, fixed_bytes = _slopes_and_fixed(
         has_catalog=has_catalog, needs_grad=needs_grad, n_grid=n_grid, n_q=n_q,
         max_gals_per_row=max_gals_per_row, n_catalogs=n_catalogs,
-        concurrent_evals=concurrent_evals)
+        concurrent_evals=concurrent_evals, latent_dims=latent_dims,
+        latent_rung=latent_rung, latent_recompute=latent_recompute)
 
     # Placement budget: safety-discounted, minus that fixed term and the pending
     # static.  Drives even-split block sizing; when it goes negative (a catalog run
