@@ -1,11 +1,23 @@
+import os
+
 from setuptools import setup, find_packages
 
 # The jax floor lives in requirements.txt (hence install_requires) — it used to
 # be declared only via setup_requires, which pip ignores for dependency
 # resolution while still triggering a legacy easy_install egg fetch at build
 # time (fatal for an offline/no-network `pip install --no-deps .`).
+#
+# Resolve it RELATIVE TO THIS FILE, not to the cwd: a build backend may invoke
+# setup.py from anywhere, and `python setup.py --name` run from outside the
+# tree used to die on a cwd-relative open.  requirements.txt (and the other
+# files read here) travel in the sdist via MANIFEST.in — without that entry the
+# unpacked sdist could not rebuild itself at all, and CI never noticed because
+# it only ever built from the checkout.  tests/test_packaging_contract.py pins
+# both halves.
 
-with open("requirements.txt", "r") as fh:
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+with open(os.path.join(_HERE, "requirements.txt"), "r") as fh:
     install_requires = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
 # pytest is a development dependency, not a runtime one (library review,
@@ -20,9 +32,9 @@ extras_require = {
     "flows": ["flowjax>=17.1,<18", "paramax", "equinox>=0.11,<0.13"],
 }
 
-with open("README.md", "r") as fh:
-    long_description = fh.read()    
-    
+with open(os.path.join(_HERE, "README.md"), "r") as fh:
+    long_description = fh.read()
+
 setup(
     name="darksirens",
     version='0.0.1',
