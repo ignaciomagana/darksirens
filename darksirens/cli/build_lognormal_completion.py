@@ -1418,60 +1418,218 @@ def _build_completion_gp3d(
 
 
 #: Tolerances for the mask-free verification.  A truly mask-free Q has logQ == 0
-#: off-footprint (those pixels carry no data) and no residual correlation with
-#: f_p on it.  Both are properties of the ARTIFACT, checkable without a run.
+#: off-footprint (those pixels carry no data), and on the covered sky its
+#: correlation with f_p matches THE CATALOG'S OWN -- not zero.  Both are
+#: properties of the ARTIFACT, checkable without a run.
 _MASK_FREE_OFF_LOGQ_TOL = 1.0e-6
+#: Tolerance on the per-slice DELTA ``corr(Q, f_p) - corr(N/f_p, f_p)``.
 _MASK_FREE_CORR_TOL = 0.10
+#: Number of z slices swept (kept at 9: the shipped v1/v2/v3 records use it).
+_MASK_FREE_N_SLICES = 9
 
 
-def _verify_mask_free(logq_map, opts) -> bool:
-    """Did this build actually remove the survey footprint from Q?
+def _mask_free_band_counts(zgals, ngals, z_lo, z_hi):
+    """Per-pixel galaxy counts in ``[z_lo, z_hi)``, from the pixelated catalog.
+
+    ``zgals`` is the ``(n_pix, maxgals)`` padded redshift table and ``ngals``
+    its per-pixel fill count; the pad entries sit at z = 100 but are excluded
+    explicitly rather than relying on that sentinel.
+    """
+    valid = (np.arange(zgals.shape[1])[None, :] < np.asarray(ngals)[:, None])
+    inband = valid & (zgals >= float(z_lo)) & (zgals < float(z_hi))
+    return inband.sum(axis=1).astype(float)
+
+
+def _corr(a, b):
+    """Pearson correlation, 0.0 where either side is constant (undefined)."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.size < 3 or float(np.std(a)) == 0.0 or float(np.std(b)) == 0.0:
+        return 0.0
+    c = float(np.corrcoef(a, b)[0, 1])
+    return c if np.isfinite(c) else 0.0
+
+
+def measure_mask_free(logq_map, catalog_path, depth_map_path, zgrid_nodes=None):
+    """Measure whether a Q table carries the survey footprint. Returns a dict.
+
+    THE ONE implementation behind both the builder's ``f_p_aware`` stamp and
+    ``experiments/desi_ingest/measure_maskfree_v2.py``, so a recomputed verdict
+    can never drift from the stamped one.
 
     Two checks on the finished table, both cheap and both independent of the
     code that produced it:
 
-    * off-footprint pixels (``f_p == 0``) must carry ``logQ == 0`` exactly -- they
-      have no counts, so any structure there came from the prior or the budget
-      renormalization rather than from data;
-    * on the covered sky, ``corr(Q, f_p)`` must be small at every z slice --
-      a surviving correlation IS the footprint imprint.
+    * OFF-FOOTPRINT (``f_p == 0``) pixels must carry ``logQ == 0`` exactly.
+      They have no counts, so any structure there came from the prior or the
+      budget renormalization rather than from data.  This is the guard against
+      the v1 failure: an f_p-shaped Q with on/off mean contrast 1.62 vs 0.05,
+      which put H0 at 41.24 against a truth of 67.74.  UNCHANGED.
+    * ON the covered sky, ``corr(Q, f_p)`` must match what the CATALOG ITSELF
+      says at that redshift.
 
-    Returns the value stamped as ``f_p_aware``.  False is reported loudly rather
-    than raised: the table is still a valid ordinary Q table, it simply may not be
-    paired with ``--per_pixel_completeness``, and the loader enforces that.
+    WHY THE SECOND CHECK IS ANCHORED TO THE DATA AND NOT TO ZERO.  A real
+    survey's covered sky is not depth-independent: on this DESI table the
+    depth-corrected density itself correlates with depth, measured
+    corr(N/f_p, f_p) = +0.112 / +0.174 / +0.237 in z bands [0.10, 0.15] /
+    [0.20, 0.25] / [0.27, 0.30] at 68-192 galaxies per pixel (so not shrinkage
+    noise).  A FAITHFUL Q must reproduce that -- it is structure on the covered
+    sky, which is exactly what Q is for -- yet a zero-anchored threshold fails
+    it.  The old test conflated "Q absorbed the mask SHAPE" (the real hazard)
+    with "Q records true covered-sky structure that happens to correlate with
+    depth".  The criterion is therefore the DELTA against the catalog's own
+    correlation, per z slice.
+
+    Both profiles are returned so the artifact can stamp them; the verdict is
+    ``ok``.
     """
-    import numpy as _np
-
     from darksirens.catalogs.depth_map import load_selection_fraction
     from darksirens.catalogs.io import load_survey as _ls
 
-    nside = int(_ls(opts.catalog, to_device=False)[0])
-    fp = _np.asarray(load_selection_fraction(opts.depth_map, nside).f_p,
-                     dtype=float)
-    lq = _np.asarray(logq_map, dtype=float)
-    if lq.shape[0] != fp.size:
-        print(f"    [mask-free] SKIPPED: logq rows {lq.shape[0]} != {fp.size} "
-              f"pixels (compact indexing?); stamping f_p_aware=False")
-        return False
+    nside, ngals, zgals, _dz, _w, _zd = _ls(catalog_path, to_device=False)
+    nside = int(nside)
+    ngals = np.asarray(ngals)
+    zgals = np.asarray(zgals, dtype=float)
+    fp = np.asarray(load_selection_fraction(depth_map_path, nside).f_p,
+                    dtype=float)
+    lq = np.asarray(logq_map, dtype=float)
+    n_grid = int(lq.shape[1])
+
+    out = {"nside": nside, "n_grid": n_grid,
+           "tolerances": {"off_logq": float(_MASK_FREE_OFF_LOGQ_TOL),
+                          "corr_delta": float(_MASK_FREE_CORR_TOL)}}
+    if lq.shape[0] != fp.size or lq.shape[0] != zgals.shape[0]:
+        out.update(ok=False, skipped=True,
+                   reason=(f"logq rows {lq.shape[0]} != {fp.size} f_p pixels / "
+                           f"{zgals.shape[0]} catalog rows (compact indexing?)"))
+        return out
+
+    if zgrid_nodes is None:
+        from darksirens.redshift import zgrid as _zg
+        zgrid_nodes = _zg
+    zg = np.asarray(zgrid_nodes, dtype=float)
+    if zg.size != n_grid:
+        out.update(ok=False, skipped=True,
+                   reason=f"zgrid has {zg.size} nodes, logq has {n_grid}")
+        return out
+
     off = fp <= 0.0
     on = ~off
-    off_max = float(_np.abs(lq[off]).max()) if off.any() else 0.0
-    zs = _np.linspace(0, lq.shape[1] - 1, 9).astype(int)
-    corrs = []
+    off_lq = lq[off]
+    out["off_footprint"] = {
+        "n_off": int(off.sum()), "n_on": int(on.sum()),
+        "mean": float(off_lq.mean()) if off.any() else 0.0,
+        "sd": float(off_lq.std()) if off.any() else 0.0,
+        "max_abs": float(np.abs(off_lq).max()) if off.any() else 0.0,
+    }
+    off_max = out["off_footprint"]["max_abs"]
+
+    # The FITTED column block, read off the artifact itself rather than off a
+    # stamp: above a --q-support-depth cut every row is bit-zero logQ, so the
+    # last column carrying any structure is the top fitted node.  The corr_data
+    # bands are laid out over that block, so a truncated build compares against
+    # the catalog inside its own support.
+    nz_cols = np.nonzero(np.any(lq != 0.0, axis=0))[0]
+    n_fit_cols = int(nz_cols[-1]) + 1 if nz_cols.size else n_grid
+    # BAND WIDTH: half-width n_fit/(2 * 9) nodes, so each band spans ~1/9 of the
+    # fitted node range -- the same partition the 9-slice sweep implies, which
+    # makes each slice's corr_data the density-depth correlation of the
+    # neighbourhood that slice represents.  On the DESI build that is +-26 of
+    # 469 nodes, dz ~ 0.03 at z ~ 0.25 and ~70-200 galaxies per covered pixel:
+    # wide enough that corr_data is a measurement rather than shot noise,
+    # narrow enough that the profile still resolves its z dependence (+0.11 at
+    # z ~ 0.12 to +0.24 at z ~ 0.29).
+    band_half = max(1, int(round(n_fit_cols / (2.0 * _MASK_FREE_N_SLICES))))
+    fp_on = fp[on]
+
+    zs = np.linspace(0, n_grid - 1, _MASK_FREE_N_SLICES).astype(int)
+    corr_q, corr_data, deltas = {}, {}, {}
     for zi in zs:
-        q = _np.exp(lq[:, zi])
-        if on.sum() > 2 and float(_np.std(q[on])) > 0 and float(_np.std(fp[on])) > 0:
-            corrs.append(abs(float(_np.corrcoef(q[on], fp[on])[0, 1])))
-    worst_corr = max(corrs) if corrs else 0.0
+        zi = int(zi)
+        q = np.exp(lq[:, zi])
+        if float(np.std(q[on])) == 0.0:
+            # A constant-Q slice carries no footprint by definition: above a
+            # support cut every pixel is Q = 1 exactly.  Skipped, as before.
+            continue
+        lo = int(max(0, min(zi - band_half, n_fit_cols - 1)))
+        hi = int(min(n_fit_cols - 1, max(zi + band_half, lo + 1)))
+        z_lo, z_hi = float(zg[lo]), float(zg[hi])
+        counts = _mask_free_band_counts(zgals, ngals, z_lo, z_hi)
+        # Depth-corrected density on the covered sky: N / f_p is what a
+        # depth-blind Q would have to reproduce, and its correlation with f_p is
+        # the survey's own density-depth coupling.
+        dens_on = counts[on] / fp_on
+        cq = _corr(q[on], fp_on)
+        cd = _corr(dens_on, fp_on)
+        corr_q[str(zi)] = cq
+        corr_data[str(zi)] = cd
+        deltas[str(zi)] = cq - cd
+    worst_delta = (max(deltas.values(), key=abs) if deltas else 0.0)
+    worst_slice = (max(deltas, key=lambda k: abs(deltas[k])) if deltas else None)
+
     ok = (off_max <= _MASK_FREE_OFF_LOGQ_TOL
-          and worst_corr <= _MASK_FREE_CORR_TOL)
-    print(f"    [mask-free] off-footprint max|logQ| = {off_max:.3e} "
-          f"(need <= {_MASK_FREE_OFF_LOGQ_TOL:g}); worst |corr(Q, f_p)| on the "
-          f"covered sky = {worst_corr:.3f} (need <= {_MASK_FREE_CORR_TOL:g})")
+          and abs(worst_delta) <= _MASK_FREE_CORR_TOL)
+    out.update(
+        skipped=False, ok=bool(ok),
+        n_fit_cols=int(n_fit_cols), band_half_nodes=int(band_half),
+        corr_q=corr_q, corr_data=corr_data, corr_delta=deltas,
+        worst_abs_corr_q=(max(abs(v) for v in corr_q.values())
+                          if corr_q else 0.0),
+        worst_signed_delta=float(worst_delta),
+        worst_abs_delta=float(abs(worst_delta)),
+        worst_delta_slice=worst_slice,
+    )
+    return out
+
+
+def format_mask_free_report(res, prefix="    [mask-free]"):
+    """Human-readable lines for a :func:`measure_mask_free` result."""
+    if res.get("skipped"):
+        return [f"{prefix} SKIPPED: {res.get('reason')}"]
+    off = res["off_footprint"]
+    lines = [
+        f"{prefix} off-footprint ({off['n_off']} px): max|logQ| = "
+        f"{off['max_abs']:.3e} (need <= {_MASK_FREE_OFF_LOGQ_TOL:g})",
+        f"{prefix} corr anchored to the catalog's own density-depth coupling; "
+        f"band = +-{res['band_half_nodes']} zgrid nodes of the "
+        f"{res['n_fit_cols']} fitted:",
+    ]
+    for zi in res["corr_q"]:
+        lines.append(
+            f"{prefix}   z-slice {zi:>4}: corr(Q, f_p) = {res['corr_q'][zi]:+.3f}"
+            f"   corr(N/f_p, f_p) = {res['corr_data'][zi]:+.3f}"
+            f"   delta = {res['corr_delta'][zi]:+.3f}")
+    lines.append(
+        f"{prefix} worst |delta| = {res['worst_abs_delta']:.3f} at slice "
+        f"{res['worst_delta_slice']} (need <= {_MASK_FREE_CORR_TOL:g})")
+    return lines
+
+
+def _verify_mask_free(logq_map, opts, diagnostics=None) -> bool:
+    """Stamp value for ``f_p_aware``: did this build remove the footprint?
+
+    Thin wrapper over :func:`measure_mask_free` that prints the report and, when
+    given the ``diagnostics`` dict, stamps both correlation profiles into it.
+    False is reported loudly rather than raised: the table is still a valid
+    ordinary Q table, it simply may not be paired with
+    ``--per_pixel_completeness``, and the loader enforces that.
+    """
+    res = measure_mask_free(logq_map, opts.catalog, opts.depth_map)
+    for line in format_mask_free_report(res):
+        print(line)
+    ok = bool(res.get("ok", False))
+    if diagnostics is not None and not res.get("skipped"):
+        diagnostics["mask_free"] = {
+            k: res[k] for k in (
+                "corr_q", "corr_data", "corr_delta", "worst_abs_delta",
+                "worst_signed_delta", "worst_delta_slice", "worst_abs_corr_q",
+                "band_half_nodes", "n_fit_cols", "off_footprint",
+                "tolerances", "ok")
+        }
     print(f"    [mask-free] stamping f_p_aware={ok}"
           + ("" if ok else "  -- this table MUST NOT be paired with "
                            "--per_pixel_completeness; the loader will refuse it"))
-    return bool(ok)
+    return ok
 
 
 def build_completion(
@@ -1957,17 +2115,21 @@ def main(argv=None):
     # boolean stamp), not the JSON diagnostics blob — the loader treats an
     # absent stamp as a legacy (non-renormalized) table and warns.
     budget_monopole = diagnostics.pop("budget_monopole_logq", None)
+    # SELF-VERIFYING: the stamp is earned by MEASUREMENT, not by the presence of
+    # the flag.  Measured BEFORE the save call (not inline in its argument list)
+    # so the correlation profiles it stamps into `diagnostics` are certainly in
+    # the dict the metadata blob is serialized from.
+    f_p_aware = (_verify_mask_free(logq_map, opts, diagnostics)
+                 if getattr(opts, "depth_map", None) else None)
     save_lss_completion_hdf5(
         opts.out, logq_map=logq_map, logq_members=logq_members,
         zgrid=np.asarray(zgrid), indexing=indexing, metadata=diagnostics,
         budget_renormalized=diagnostics.get("budget_renormalized"),
         budget_monopole_logq=budget_monopole,
         c_mode=opts.c_mode,
-        # SELF-VERIFYING: the stamp is earned by MEASUREMENT, not by the
-        # presence of the flag.  The inference loader admits
-        # --per_pixel_completeness alongside the table on the strength of this
-        # attr, so an unearned True is worse than no flag at all -- it converts a
-        # refusal into a silent double-count.
+        # The inference loader admits --per_pixel_completeness alongside the
+        # table on the strength of this attr, so an unearned True is worse than
+        # no flag at all -- it converts a refusal into a silent double-count.
         #
         # This exists because the first --depth-map implementation stamped True
         # on intent and was WRONG: folding f_p into the fit-time completeness
@@ -1975,8 +2137,7 @@ def main(argv=None):
         # their logQ came out with sd 0.57 where mask-freedom needs exactly 0,
         # and corr(Q, f_p) was still +0.39 at low z and -0.995 at high z. The
         # formula was right and the artifact was not.
-        f_p_aware=_verify_mask_free(logq_map, opts) if getattr(
-            opts, "depth_map", None) else None,
+        f_p_aware=f_p_aware,
         # Read back off the BUILD, not off the flag: only the radial path
         # actually truncates, and it is the only path that records the cut.
         q_support_depth=diagnostics.get("q_support_depth"),
