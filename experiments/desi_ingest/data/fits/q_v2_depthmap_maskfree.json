@@ -1,0 +1,46 @@
+{
+ "artifact": "data/fits/q_v2_depthmap.h5",
+ "depth_map": "data/mth_map_nside128.h5",
+ "nside": 64,
+ "n_grid": 1000,
+ "stamped_f_p_aware": false,
+ "recomputed_f_p_aware": false,
+ "tolerances": {
+  "off_logq": 1e-06,
+  "corr": 0.1
+ },
+ "off_footprint": {
+  "n_off": 17009,
+  "n_on": 32143,
+  "mean": 0.0,
+  "sd": 0.0,
+  "max_abs": 0.0
+ },
+ "corr_signed_v1_slices": {
+  "150": 0.03476686424908903,
+  "250": 0.10315232912918575,
+  "400": 0.15904290424499867
+ },
+ "corr_signed_nine_slice_sweep": {
+  "0": 0.005961544418646634,
+  "124": 0.032831891936264505,
+  "249": 0.10258362319192264,
+  "374": 0.12995546966440435,
+  "499": -0.5075310584391728,
+  "624": -0.4871679363446997,
+  "749": -0.6007019393214741,
+  "874": -0.8640311712762726,
+  "999": 0.0036470474096550734
+ },
+ "worst_abs_corr": 0.8640311712762726,
+ "v1_prose_baseline": {
+  "off_footprint_logq_mean": -0.073,
+  "off_footprint_logq_sd": 0.5694,
+  "corr_slices": {
+   "150": 0.392,
+   "250": 0.333,
+   "400": -0.995
+  },
+  "source": "experiments/CHECKPOINT.md (2026-08-20), no artifact survived"
+ }
+}
