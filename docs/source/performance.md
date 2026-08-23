@@ -132,6 +132,16 @@ The 88 GB dynesty row is the defect this split fixes: the gradient model chose
   predicts ≥ the measured peak at every measured config and within 2× of it.
 * **`_CAT` (dark-siren) slopes** — still 2× the spectral ones, **unmeasured**;
   erring high over-blocks (slower, safe) rather than under-blocks (OOM).
+* **Catalog density scales the INCREMENT, not the whole peak** — the catalog and
+  spectral paths share the population log density, the exact `q` normalisation
+  and the per-sample selection/PE weights, so a catalog estimate is
+  `spectral_common + catalog_increment` and can never fall below the
+  catalog-free baseline. Multiplying the whole per-unit cost (and the gradient
+  working-set floor) by `gals_ratio × n_catalogs` made `max_gals_per_row = 1`
+  predict a **1.746 GB** gradient peak against the equivalent spectral path's
+  **80.283 GB** — ~46× below a working set the two share, enough for `auto` to
+  promise a single pass on a 40–60 GB card. At and above the calibration density
+  (`cat_scale ≥ 1`) predictions are bit-identical to what shipped.
 
 ### Calibrating precisely
 
