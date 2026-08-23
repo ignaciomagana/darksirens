@@ -1,0 +1,24 @@
+{
+ "anchor": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr4/latent_anchor_a.h5",
+ "sha256": "adb2841813c15c74179540a5681c4c250830f41507656440379bde16c5b5f772",
+ "M_draw": 8,
+ "logL_unpatched": -766.7914443725264,
+ "ll_m": [
+  -766.7790033754263,
+  -766.7949551002439,
+  -766.8035037576301,
+  -766.778478560157,
+  -766.8041975311435,
+  -766.7877109371329,
+  -766.7796558874597,
+  -766.8045335447187
+ ],
+ "reduced_minus_unpatched": 6.821210263296962e-13,
+ "chunk_max_dev": 2.4556356947869062e-11,
+ "warm_ms": 7008.121967315674,
+ "compile_s": 29.631227254867554,
+ "member_sd": 0.01099711231104155,
+ "devices": [
+  "cuda:0"
+ ]
+}

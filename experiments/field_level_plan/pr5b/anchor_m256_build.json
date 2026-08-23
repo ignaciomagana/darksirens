@@ -1,0 +1,24 @@
+{
+ "m_draw": 256,
+ "sha256_m256": "480a7f23926d69d3794500810f89b55f91b046e25c6d3857095b4c3898caa9ae",
+ "sha256_map": "7d2bd21b878cf08b7a5e59c4d749217d7873eaa609c75d8404d00d9d4d4eb211",
+ "reference_anchor": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr4/latent_anchor_a.h5",
+ "reference_sha256": "adb2841813c15c74179540a5681c4c250830f41507656440379bde16c5b5f772",
+ "G1_max_dev": {
+  "xi_hat": 0.0,
+  "H_chol": 0.0,
+  "counts": 0.0,
+  "f_p": 0.0,
+  "W": 0.0
+ },
+ "G2_grad_inf": 1.0905210068301585e-10,
+ "G3_antithetic_g": 0.0,
+ "G3_antithetic_xi": 1.7763568394002505e-15,
+ "G4_nesting_dev": 4.379063265136924,
+ "n_fit": 30470,
+ "n_z_sub": 147,
+ "rank": 2520,
+ "P_F": 30470.0,
+ "F_F": 26251.725175964035,
+ "dA_dB": "skipped; measured 107 ms per (member, b) pass -> 28 s at M_draw=8, 15.1 min at M_draw=256"
+}
