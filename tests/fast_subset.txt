@@ -6,12 +6,12 @@
 # SIZE OF THIS GATE (keep this block honest — it drifted badly once).
 #
 #   2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
-#     52 files, 552 tests collected.
+#     53 files, 557 tests collected.
 #     Last end-to-end timing: 17m47s in GitHub CI at a0ba24f, and 21m10s on a
 #     shared review node, both at the then-current 49 files / 519 tests.  The
-#     four files added since (import side effects, campaign-script contract,
-#     the sdist rebuild check, and this record's own guard) cost about a
-#     minute between them.
+#     five files added since (import side effects, campaign-script contract,
+#     the sdist rebuild check, this record's own guard, and the dN/dz shell
+#     quadrature) cost about a minute between them.
 #
 #   The stale record this replaces claimed "32 files, 214 passed, ~3 min"
 #   (measured 2026-07-29).  By 2026-08-23 that was 49 files and 519 tests
@@ -97,6 +97,7 @@ tests/test_pop_extractor_multitracer.py
 # ── analyze / post-processing ──────────────────────────────────────────────
 tests/test_analyze_fcat_weights.py
 tests/test_analyze_bayes_factors.py
+tests/test_dndz_ppd_shell_integral.py
 
 # ── field-level latent ladder (PR-1+; CI gap closed per PLAN §7) ───────────
 tests/test_latent_field.py

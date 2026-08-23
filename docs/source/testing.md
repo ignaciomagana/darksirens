@@ -81,8 +81,8 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu \
   $RUN python -m pytest -q $(grep -v '^#' tests/fast_subset.txt)
 ```
 
-Measured 2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4): **52 files,
-552 tests collected**, with the last end-to-end timing **17m47s in GitHub CI**
+Measured 2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4): **53 files,
+557 tests collected**, with the last end-to-end timing **17m47s in GitHub CI**
 (and 21m10s on a shared review node) at the then-current 49 files / 519 tests.
 Every file in it is verified green both standalone and in the batch, and none of
 them depends on the numpy major version.
