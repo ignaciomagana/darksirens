@@ -20,7 +20,8 @@ expectation never contain a bin above the support.  Each row's MAP is an
 ``N_grid``-dimensional field under a CIRCULANT (FFT) prior
 (``gaussian_correlation_spectrum``), which couples every node to every other,
 so shortening the domain necessarily moves the solution at the fitted nodes
-too -- measured max|dlogQ| = 0.117 below a z <= 0.5 cut on this fixture.  Bit
+too -- measured max|dlogQ| = 0.0438 below a z <= 0.5 cut on this fixture (it
+was 0.117 before the wrap pad below joined the cut).  Bit
 identity below the cut would therefore be evidence of the WRONG
 implementation: the one that masks the output while the fit still sees the
 empty high-z bins.  What IS pinned here:
@@ -30,6 +31,24 @@ empty high-z bins.  What IS pinned here:
   is a pure restriction and adds nothing of its own);
 * the fit really moved -- below-support values differ from the uncut build;
 * the per-z budget renormalization runs per z-SLICE over the FITTED nodes only.
+
+THE WRAP PAD.  The circulant prior is periodic in grid index, so the first and
+last nodes of the solve domain are NEAREST NEIGHBOURS.  On the full grid that
+seam sat in empty high-z sky; the cut moved it onto the catalog's truncation
+edge, gluing z = 0 to z = z_support.  Measured on the real DESI build
+(experiments/desi_ingest/data/fits/q_v{2,3}_depthmap_maskfree.json):
+corr(Q, f_p) at node 0 went +0.006 uncut -> +0.191 cut, matching the truncation
+edge's own +0.189 and decaying back to the interior baseline by node ~50 of 469
+(~2.6 x that build's ell_grid = 19.0 nodes).  The builder therefore SOLVES on a
+padded domain -- max(32, ceil(4 ell_grid)) data-free prior nodes above the top
+fitted node -- and OUTPUTS only the fitted block.  Pinned below:
+
+* the pad exerts EXACTLY zero data pull (the Poisson term's rate mask, not a
+  small number);
+* it never reaches the output, the budget weights, or the member spread;
+* it is applied only when the cut truncates, so the no-cut path is untouched;
+* it really moves the fitted values (max|dlogQ| 0.0751 on this fixture) --
+  that is the seam being removed, and it is why the numbers below shifted.
 """
 import json
 
@@ -148,6 +167,11 @@ def test_a_cut_at_the_grid_top_is_bit_identical_to_no_flag(tmp_path):
     np.testing.assert_array_equal(diag_top["budget_monopole_logq"],
                                   diag_ref["budget_monopole_logq"])
     assert diag_top["n_z_nodes_pinned"] == 0
+    # ... which is only possible because the wrap pad is conditioned on the cut
+    # ACTUALLY truncating.  Padding here would move every node and break the
+    # identity, so a cut that cuts nothing must also pad nothing.
+    assert diag_top["n_z_nodes_wrap_pad"] == 0
+    assert diag_top["n_z_nodes_solved"] == len(np.asarray(zgrid))
 
 
 def test_the_cut_moves_the_solve_not_only_the_output(tmp_path):
@@ -155,7 +179,8 @@ def test_the_cut_moves_the_solve_not_only_the_output(tmp_path):
 
     Each row's MAP is a field under a circulant FFT prior coupling every radial
     node, so a genuinely shorter domain moves the fitted nodes too (measured
-    max|dlogQ| 0.117 here).  An implementation that masked the output while the
+    max|dlogQ| 0.0438 here, with the wrap pad in place; 0.117 without it).  An
+    implementation that masked the output while the
     solver still saw the empty high-z bins would leave this difference at
     exactly 0 -- and would leave the manufactured corr(Q, f_p) in the fit.
     """
@@ -186,6 +211,136 @@ def test_the_flag_is_independent_of_the_depth_map(tmp_path):
     n = _n_fitted()
     assert np.all(lq[:, n:] == 0.0)
     assert diag["q_support_depth"] == pytest.approx(Z_CUT)
+
+
+# ---------------------------------------------------------------------------
+# the wrap pad: a free boundary the data cannot reach
+# ---------------------------------------------------------------------------
+
+def test_the_pad_carries_no_data_pull_at_all():
+    """Not "small" -- EXACTLY zero, and provably so.
+
+    ``_map_solve_row`` forms ``rate_base = C * dN_exp`` and masks on
+    ``rate_base > 0``; where it is zero the Poisson term is dropped from both
+    the objective and the gradient.  The builder pads C and dN_exp with zeros,
+    so a pad node is a pure PRIOR node.  Here the pad is handed 1e4 counts --
+    an absurd amount of data -- and the fitted block must not move by one bit.
+
+    This is the difference between padding and NOT cutting: an N_obs = 0 bin
+    against a NONZERO expectation is the most informative bin there is ("this
+    volume is empty"), and driving Q down through those is exactly the defect
+    --q-support-depth exists to remove.
+    """
+    from darksirens.redshift.lognormal_completion import (
+        gaussian_correlation_spectrum,
+        poisson_lognormal_map,
+    )
+
+    n_fit, ell, n_pad = 60, 6.0, 24
+    base = np.ones(n_fit)
+    nobs = np.full(n_fit, 5.0)
+    pk = gaussian_correlation_spectrum(n_fit + n_pad, ell, 1.0)
+
+    def solve(pad_counts):
+        return poisson_lognormal_map(
+            np.concatenate([nobs, np.full(n_pad, pad_counts)])[None, :],
+            np.concatenate([base, np.zeros(n_pad)])[None, :],
+            np.concatenate([base, np.zeros(n_pad)]),
+            pk, bias=1.0, prior_strength=1.0, maxiter=20000,
+        )["logq_map"][0, :n_fit]
+
+    np.testing.assert_array_equal(solve(0.0), solve(1.0e4))
+
+
+def test_the_pad_decouples_the_two_ends_of_the_fitted_domain():
+    """The seam, measured: a wall of counts at the top must not lift node 0.
+
+    Counts are flat over the domain except for a bright wall in the last eight
+    nodes -- the shape a hard catalog truncation leaves at its edge.  Under the
+    periodic prior the wall is node 0's NEAREST NEIGHBOUR, so an unpadded solve
+    reports node 0 far above the flat interior.  Measured here: node 0 sits
+    1.686 above the interior unpadded, 0.244 padded (the residual being the
+    ordinary free-boundary relaxation, not the wall).
+    """
+    from darksirens.redshift.lognormal_completion import (
+        gaussian_correlation_spectrum,
+        poisson_lognormal_map,
+    )
+
+    n_fit, ell, n_pad = 120, 10.0, 40
+    base = np.ones(n_fit)
+    nobs = np.full(n_fit, 5.0)
+    nobs[-8:] = 60.0                       # the truncation edge's wall
+
+    def solve(pad):
+        pk = gaussian_correlation_spectrum(n_fit + pad, ell, 1.0)
+        return poisson_lognormal_map(
+            np.concatenate([nobs, np.zeros(pad)])[None, :],
+            np.concatenate([base, np.zeros(pad)])[None, :],
+            np.concatenate([base, np.zeros(pad)]),
+            pk, bias=1.0, prior_strength=1.0, maxiter=20000,
+        )["logq_map"][0, :n_fit]
+
+    unpadded, padded = solve(0), solve(n_pad)
+    seam_unpadded = abs(float(unpadded[0] - unpadded[n_fit // 2]))
+    seam_padded = abs(float(padded[0] - padded[n_fit // 2]))
+    assert seam_unpadded > 1.0
+    assert seam_padded < 0.25 * seam_unpadded
+    # the wall itself is still fitted -- the pad removed the wrap, not the data
+    assert float(padded[-1]) > 3.0
+
+
+def test_a_truncating_cut_pads_the_solve_grid_and_stamps_it(tmp_path):
+    """The pad is sized from the prior's correlation length, floored at 32."""
+    from darksirens.cli.build_lognormal_completion import (
+        _Q_PAD_ELL_MULTIPLE,
+        _Q_PAD_MIN_NODES,
+        build_completion,
+    )
+    from darksirens.redshift import zgrid
+
+    cat = _write_survey(tmp_path / "survey.h5")
+    dmap = _write_depth_map(tmp_path / "depth.h5", _covered_f_p())
+    lq, _m, diag = build_completion(
+        cat, mode="radial", n_members=0, maxiter=200, workers=1,
+        c_mode="aggregate", depth_map=dmap, q_support_depth=Z_CUT)
+
+    n = _n_fitted()
+    expect = max(_Q_PAD_MIN_NODES,
+                 int(np.ceil(_Q_PAD_ELL_MULTIPLE
+                             * float(diag["ell_grid_uniform_chi"]))))
+    assert diag["n_z_nodes_wrap_pad"] == expect
+    assert diag["n_z_nodes_solved"] == n + expect
+    # the pad is solved and DISCARDED: the table is still exactly the zgrid,
+    # bit-zero above the cut
+    assert lq.shape[1] == len(np.asarray(zgrid))
+    assert np.all(lq[:, n:] == 0.0)
+
+
+def test_the_pad_moves_the_fitted_values(tmp_path):
+    """Otherwise the seam was never there to remove.
+
+    Measured on this fixture: max|dlogQ| = 0.0751 below the cut between a
+    padded and an unpadded solve of the same problem (rms 0.0053), with the
+    largest per-node changes at the two ends of the domain -- the seam.
+    """
+    import darksirens.cli.build_lognormal_completion as mod
+
+    cat = _write_survey(tmp_path / "survey.h5")
+    dmap = _write_depth_map(tmp_path / "depth.h5", _covered_f_p())
+    kw = dict(mode="radial", n_members=0, maxiter=200, workers=1,
+              c_mode="aggregate", depth_map=dmap, q_support_depth=Z_CUT)
+    lq_pad, _m, diag = mod.build_completion(cat, **kw)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(mod, "_Q_PAD_MIN_NODES", 0)
+        mp.setattr(mod, "_Q_PAD_ELL_MULTIPLE", 0.0)
+        lq_nopad, _m, diag0 = mod.build_completion(cat, **kw)
+
+    assert diag["n_z_nodes_wrap_pad"] > 0 and diag0["n_z_nodes_wrap_pad"] == 0
+    n = _n_fitted()
+    d = np.abs(lq_pad[:, :n] - lq_nopad[:, :n])
+    assert 1e-3 < float(d.max()) < 1.0
+    assert np.all(lq_pad[:, n:] == 0.0)
 
 
 # ---------------------------------------------------------------------------
