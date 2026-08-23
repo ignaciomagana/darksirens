@@ -70,6 +70,8 @@ import h5py
 from argparse import ArgumentParser, ArgumentTypeError, RawDescriptionHelpFormatter
 
 from darksirens.gw.populations import (
+    FIDUCIAL_SETS,
+    FIDUCIAL_SET_LEGACY,
     get_fixed_population_params,
     pop_model_prior_parser,
 )
@@ -1302,6 +1304,22 @@ def build_parser():
         help="Use one shared redshift-evolution gamma; false gives one gamma per mass component.",
     )
     g.add_argument("--fix_population",  type=str_to_bool, default=False, metavar="BOOL")
+    g.add_argument("--population_fiducials", default=FIDUCIAL_SET_LEGACY,
+                   choices=list(FIDUCIAL_SETS), metavar="SET",
+                   help=("WHICH curated fiducial vector --fix_population fixes "
+                         "the population at. 'legacy' (DEFAULT) is the "
+                         "inherited curated set, bit-identical to every "
+                         "archived fixed-population run and to every mock built "
+                         "from it -- but for 2powerlaws+peak / +2peaks / "
+                         "+3peaks it sits OUTSIDE the model's own declared "
+                         "priors (PL1.m_max 80 vs [15,50], PL2.m_min 5 vs "
+                         "[20,40], G.mu 35 vs [50,100]), so the sampled model "
+                         "cannot represent it and a fixed-vs-sampled comparison "
+                         "against it is not a comparison of one model family. "
+                         "'in_prior_v2' is the corrected set (each violating "
+                         "parameter moved to the MIDPOINT of its own prior); "
+                         "use it whenever the fixed arm is read as nested in "
+                         "the sampled one."))
     g.add_argument("--allow_skymap_population",
                    type=str_to_bool, nargs="?", const=True, default=False,
                    metavar="BOOL",
@@ -3694,6 +3712,8 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
         shared_beta=opts.shared_beta,
         shared_spin=opts.shared_spin,
         shared_gamma=opts.shared_gamma,
+        fiducials=getattr(opts, "population_fiducials",
+                          FIDUCIAL_SET_LEGACY),
     )
     joint_constraints = resolve_joint_prior_constraints(
         opts.pop_model, labels, lower_bound, upper_bound, prior_kinds,

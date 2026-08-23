@@ -368,6 +368,7 @@ def build_fiducial_vector(
     bounds: Optional[Mapping[int, Mapping[str, _B]]] = None,
     gamma: float = GAMMA_FIDUCIAL,
     on_violation: str = "ignore",
+    violation_hint: str = "",
 ) -> jnp.ndarray:
     """Fiducial parameter vector in exactly the model's parameter order.
 
@@ -381,6 +382,8 @@ def build_fiducial_vector(
     ``on_violation`` is ``"ignore"``, ``"warn"`` (curated legacy models carry
     known out-of-bounds fiducials that are preserved verbatim), or ``"error"``
     (novel compositions, where a violation means a blueprint bug).
+    ``violation_hint`` is appended to the warning/error text so the caller can
+    name the escape hatch where the problem is actually reported.
     """
     slots = make_slots(mass_tokens)
     k = len(slots)
@@ -427,6 +430,8 @@ def build_fiducial_vector(
 
     if violations and on_violation != "ignore":
         message = "; ".join(violations)
+        if violation_hint:
+            message = f"{message}. {violation_hint}"
         if on_violation == "error":
             raise ValueError(f"Fiducial parameters outside prior bounds: {message}")
         _LOG.warning("Fiducial parameters outside prior bounds: %s", message)

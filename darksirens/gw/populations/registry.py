@@ -197,8 +197,10 @@ CURATED: dict[str, Curated] = {
             2: {"mu": _B(50, 100), "sigma": _B(1, 20)},
         },
         # NOTE: inherited verbatim from the old registry - the PL m_max and
-        # Gaussian mu fiducials sit OUTSIDE these priors.  Known wart;
-        # preserved so fixed-population runs stay bit-identical.
+        # Gaussian mu fiducials sit OUTSIDE these priors.  Preserved so
+        # fixed-population runs stay bit-identical; the corrected in-prior set
+        # lives in ``_IN_PRIOR_FIDUCIAL_PATCHES`` and is selected by
+        # ``fiducials=FIDUCIAL_SET_IN_PRIOR``.
     ),
     "2powerlaws+2peaks": Curated(
         latex="2PL+2G",
@@ -224,6 +226,80 @@ CURATED: dict[str, Curated] = {
         fids={2: {"mu": 10.0, "sigma": 3.0}, 4: {"mu": 70.0, "sigma": 10.0}},
     ),
 }
+
+
+# ── the curated fiducials that violate their own overridden priors ────────────
+#
+# Three curated entries inherit the component blueprints' DEFAULT fiducials
+# (powerlaw m_max = 80, m_min = 5; peak mu = 35) while overriding the priors to
+# split a low-mass and a high-mass power law and to push the peak above 50.
+# MEASURED violations (``get_fixed_population_params``, warn path):
+#
+#   2powerlaws+peak    PL1.m_max 80 vs [15, 50]; PL2.m_min 5 vs [20, 40];
+#                      G.mu 35 vs [50, 100]
+#   2powerlaws+2peaks  PL1.m_max 80 vs [15, 50]; PL2.m_min 5 vs [20, 40]
+#   2powerlaws+3peaks  PL1.m_max 80 vs [15, 50]; PL2.m_min 5 vs [20, 40]
+#
+# A ``--fix_population`` run does not apply the sampling prior, so an
+# out-of-prior fiducial is not by itself an invalid density.  It becomes a
+# defect the moment the fixed arm is read as NESTED IN, or directly comparable
+# to, the sampled model: the sampled model cannot represent its own fiducial,
+# so no amount of data moves the posterior onto it and every arm-to-arm shift
+# is contaminated by that gap.
+#
+# The corrected set below is chosen by ONE mechanical rule -- the MIDPOINT of
+# the overridden prior for each violating parameter -- so it is reproducible
+# and carries no new tuning.  It leaves the composition's intent intact: PL1
+# becomes the low-mass continuum [5, 32.5], PL2 the high-mass one [30, 80], and
+# the peak sits at 75 where its own prior puts it.
+#
+#: Version tag of the corrected set; stamped into settings by the CLI so a run
+#: records WHICH fiducial vector it fixed the population at.
+FIDUCIAL_SET_LEGACY = "legacy"
+FIDUCIAL_SET_IN_PRIOR = "in_prior_v2"
+FIDUCIAL_SETS = (FIDUCIAL_SET_LEGACY, FIDUCIAL_SET_IN_PRIOR)
+
+#: Per-slot fiducial patches applied on top of ``Curated.fids`` under
+#: ``fiducials=FIDUCIAL_SET_IN_PRIOR``.  Every value is the midpoint of that
+#: slot's overridden prior; the in-prior build additionally runs with
+#: ``on_violation="error"`` so this table can never drift back out of bounds.
+_IN_PRIOR_FIDUCIAL_PATCHES: dict[str, dict[int, dict[str, float]]] = {
+    "2powerlaws+peak":   {0: {"m_max": 32.5}, 1: {"m_min": 30.0},
+                          2: {"mu": 75.0}},
+    "2powerlaws+2peaks": {0: {"m_max": 32.5}, 1: {"m_min": 30.0}},
+    "2powerlaws+3peaks": {0: {"m_max": 32.5}, 1: {"m_min": 30.0}},
+}
+
+#: Appended to the out-of-prior warning so the escape hatch is named where the
+#: problem is reported.
+_FIDUCIAL_HINT = (
+    "This is the LEGACY curated set, kept reachable for reproducing archived "
+    "fixed-population runs. It is not nested in the sampled model: the sampler "
+    "can never reach this point, so a fixed-vs-sampled comparison against it is "
+    "not a comparison of the same model family. Pass "
+    "--population_fiducials in_prior_v2 (or fiducials=FIDUCIAL_SET_IN_PRIOR) "
+    "for the corrected, in-prior set."
+)
+
+
+def _merge_fiducial_patch(base_fids, canonical, fiducials):
+    """``Curated.fids`` with the in-prior patch layered on, if requested."""
+    merged = {k: dict(v) for k, v in (base_fids or {}).items()}
+    if fiducials == FIDUCIAL_SET_LEGACY:
+        return merged or None
+    patch = _IN_PRIOR_FIDUCIAL_PATCHES.get(canonical, {})
+    for slot, values in patch.items():
+        merged.setdefault(slot, {}).update(values)
+    return merged or None
+
+
+def _validate_fiducial_set(fiducials: str) -> str:
+    if fiducials not in FIDUCIAL_SETS:
+        raise ValueError(
+            f"unknown fiducial set {fiducials!r}; expected one of "
+            f"{list(FIDUCIAL_SETS)}"
+        )
+    return fiducials
 
 
 # ============================================================
@@ -737,9 +813,17 @@ def get_fixed_population_params(
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,
+    fiducials: str = FIDUCIAL_SET_LEGACY,
 ) -> jnp.ndarray:
     """
     Return the fiducial population parameter vector for --fix_population=True.
+
+    ``fiducials`` selects WHICH curated fiducial vector: ``"legacy"`` (the
+    default, bit-identical to every archived fixed-population run and to every
+    mock built from it) or ``"in_prior_v2"``, the corrected set that lies
+    inside each model's own declared priors -- required whenever the fixed arm
+    is to be read as nested in, or comparable to, the sampled model.  See
+    ``_IN_PRIOR_FIDUCIAL_PATCHES``.
 
     Ordering matches PopulationModel.param_specs exactly:
         v_weights -> mass params -> pairing params -> spin params -> rate params
@@ -751,6 +835,7 @@ def get_fixed_population_params(
     curated weights are stored as human-readable fractions and converted here
     via _w_to_v.
     """
+    _validate_fiducial_set(fiducials)
     base_name, rate = split_rate_decoration(pop_model)
     if rate == "md":
         if not shared_gamma:
@@ -767,6 +852,7 @@ def get_fixed_population_params(
             shared_beta=shared_beta,
             shared_spin=shared_spin,
             shared_gamma=shared_gamma,
+            fiducials=fiducials,
         )
         # Replace the trailing shared gamma with the MD triple.
         return jnp.concatenate(
@@ -777,6 +863,7 @@ def get_fixed_population_params(
         shared_beta=shared_beta,
         shared_spin=shared_spin,
         shared_gamma=shared_gamma,
+        fiducials=fiducials,
     )
 
 
@@ -786,11 +873,22 @@ def _fixed_population_params_base(
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,
+    fiducials: str = FIDUCIAL_SET_LEGACY,
 ) -> jnp.ndarray:
+    _validate_fiducial_set(fiducials)
     name = _resolve_legacy(pop_model)
 
     if name in _CUSTOM_FIDUCIALS:
+        # Bespoke registered models carry a published parameter vector, not a
+        # grammar composition with overridable per-slot priors, so there is
+        # nothing to patch and both fiducial sets are the same numbers.
         return jnp.array(_CUSTOM_FIDUCIALS[name], dtype=float)
+
+    # The in-prior set is validated as an ERROR, not a warning: it exists
+    # precisely to be inside the priors, so a violation there is a bug in the
+    # patch table rather than an inherited wart to be tolerated.
+    _violation = ("warn" if fiducials == FIDUCIAL_SET_LEGACY else "error")
+    _hint = _FIDUCIAL_HINT if fiducials == FIDUCIAL_SET_LEGACY else ""
 
     entry = CURATED.get(name)
     if entry is not None and entry.mass is not None:
@@ -802,9 +900,10 @@ def _fixed_population_params_base(
             pairing=entry.pairing,
             spin=entry.spin,
             weights=entry.weights,
-            fids=entry.fids,
+            fids=_merge_fiducial_patch(entry.fids, name, fiducials),
             bounds=entry.bounds,
-            on_violation="warn",
+            on_violation=_violation,
+            violation_hint=_hint,
         )
 
     try:
@@ -827,9 +926,10 @@ def _fixed_population_params_base(
         shared_spin=shared_spin,
         shared_gamma=shared_gamma,
         weights=entry.weights,
-        fids=entry.fids,
+        fids=_merge_fiducial_patch(entry.fids, ir.canonical, fiducials),
         bounds=entry.bounds,
-        on_violation="warn",
+        on_violation=_violation,
+        violation_hint=_hint,
     )
 
 
