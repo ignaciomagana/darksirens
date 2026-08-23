@@ -112,7 +112,10 @@ def make_pop_extractor(settings: dict):
     -------
     extractor : callable
         theta (1-D sampled coordinate vector) → pop_params (1-D array).
-        Safe inside jax.jit and jax.vmap.
+        Safe inside jax.jit and jax.vmap.  On the general (not
+        ``fix_population``) path it carries ``.sampled_labels``, the ordered
+        label list the extractor reconstructed -- which MUST equal the one the
+        sampler used, and is what pins every settings key threaded below.
     """
     pop_model_name         = settings["pop_model"]
     shared_beta            = bool(settings.get("shared_beta", True))
@@ -219,6 +222,17 @@ def make_pop_extractor(settings: dict):
         # misalign every label after the survey block for archived schechter
         # chains.
         selection_family       = settings.get("selection_family", "gaussian") or "gaussian",
+        # In LATENT field mode b_miss is a DIFFERENT parameter -- b_GW, the bias
+        # with which GW hosts trace the latent field -- and it IS sampled, even
+        # though every table-mode inertness argument (--use_lss off, an active
+        # Q_LSS table) would drop it (prior.py:_b_miss_rule).  Rebuilding the
+        # space without the mode therefore reconstructs a latent chain one
+        # column short: b_miss missing and every label after it off by one.  It
+        # also made a latent run that FIXES b_miss fail here with a table-mode
+        # explanation ("b_miss is inert with --use_lss off").
+        lss_field_mode         = str(
+            settings.get("lss_field_mode", "table") or "table"
+        ),
     )
 
     label_to_coord_idx = {label: idx for idx, label in enumerate(labels)}
@@ -249,4 +263,10 @@ def make_pop_extractor(settings: dict):
     def extractor(theta: jnp.ndarray) -> jnp.ndarray:
         return jnp.where(mask_jnp, fixed_jnp, theta[idx_jnp])
 
+    # The ordering oracle's own answer, exposed so a test can compare it against
+    # the space the sampler built rather than only against the pop indices it
+    # happens to produce (the pop block precedes the survey block, so a survey
+    # label the reconstruction drops shifts the LATER labels, not the pop ones,
+    # and would go unnoticed).
+    extractor.sampled_labels = tuple(labels)
     return extractor

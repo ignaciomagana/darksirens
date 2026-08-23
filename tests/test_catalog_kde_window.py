@@ -541,3 +541,105 @@ def test_factory_attests_bound_catalog_views():
         "windowed catalog KDE will silently fall back to the full row in "
         "production (catalogs cross the jit boundary as arguments)"
     )
+
+
+# ---------------------------------------------------------------------------
+# The compiled windowed branch must be self-verifying (external review JAX-05)
+# ---------------------------------------------------------------------------
+# The trace-time decision to window reads mutable process globals
+# (_KDE_WINDOW_SIZE, _ROWS_SORTED_ATTESTED, _ATTESTED_ROW_SHAPES), none of which
+# is part of a jit cache key.  A callable compiled while a sorted view was
+# attested is therefore replayed verbatim on an unsorted view of the SAME shape:
+# the tests above hide that by building a fresh jitted function per case.
+# MEASURED on master with ONE jitted callable, window 8, a (1, 20) row and its
+# own permutation: the cache returned 0.4571784999571946 where a fresh trace
+# gives 0.4597108139040813, a silent 2.5e-3 nat corruption of a later
+# programmatic likelihood in the same process.
+
+
+def _one_jitted_evaluator(C, cosmo, survey):
+    """A SINGLE jitted callable, as a factory builds once and reuses."""
+
+    @jax.jit
+    def evaluate(z, pix, ct):
+        st = C.catalog_kernel_state(cosmo, survey, ct)
+        return C.eval_log_catalog_prior_state(z, pix, st, ct)
+
+    return evaluate
+
+
+def test_cached_windowed_branch_refuses_unsorted_data_of_the_same_shape(_window8):
+    C = _window8
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+
+    zs = np.random.default_rng(0).uniform(0.05, 1.0, 20)
+    good = _tiny_sorted_catalog(n=20)._replace(zgals=jnp.asarray(np.sort(zs)[None, :]))
+    bad = good._replace(zgals=jnp.asarray(zs[None, :]))    # same shape, unsorted
+
+    evaluate = _one_jitted_evaluator(C, cosmo, survey)
+    z, pix = jnp.asarray(0.3), jnp.asarray(0, dtype=jnp.int32)
+
+    assert C.attest_rows_sorted_for_windowing(good) is True
+    windowed = float(evaluate(z, pix, good))
+    assert np.isfinite(windowed)
+
+    # Disarm and replay the SAME compiled callable on unsorted data.  It must
+    # not hand back a plausible number computed by a window that is invalid
+    # there; the in-graph verdict collapses it to NaN.
+    C.attest_rows_sorted_for_windowing(bad)
+    assert np.isnan(float(evaluate(z, pix, bad)))
+
+
+def test_the_windowed_verdict_rides_in_the_graph_not_in_a_global(_window8):
+    """Same callable, same shape, no re-attestation at all: correctness must
+    still track the DATA, because nothing else reaches the compiled branch."""
+    C = _window8
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+
+    zs = np.random.default_rng(3).uniform(0.05, 1.0, 20)
+    good = _tiny_sorted_catalog(n=20)._replace(zgals=jnp.asarray(np.sort(zs)[None, :]))
+    bad = good._replace(zgals=jnp.asarray(zs[None, :]))
+
+    assert C.attest_rows_sorted_for_windowing(good) is True
+    evaluate = _one_jitted_evaluator(C, cosmo, survey)
+    z, pix = jnp.asarray(0.3), jnp.asarray(0, dtype=jnp.int32)
+
+    assert np.isfinite(float(evaluate(z, pix, good)))
+    assert np.isnan(float(evaluate(z, pix, bad)))
+
+
+def test_the_guard_leaves_the_attested_sorted_path_bit_identical(_window8):
+    """The guard must cost nothing in correctness terms: on attested sorted
+    rows the windowed value is still bitwise the full-row value."""
+    C = _window8
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+    cat = _tiny_sorted_catalog(n=20)
+    state = C.catalog_kernel_state(cosmo, survey, cat)
+
+    C.configure_catalog_kde_window(size=None)
+    ref = float(C.eval_log_catalog_prior_state(
+        jnp.asarray(0.3), jnp.asarray(0, dtype=jnp.int32), state, cat
+    ))
+    C.configure_catalog_kde_window(size=8, n_sigma=8.0)
+
+    assert C.attest_rows_sorted_for_windowing(cat) is True
+    evaluate = _one_jitted_evaluator(C, cosmo, survey)
+    got = float(evaluate(jnp.asarray(0.3), jnp.asarray(0, dtype=jnp.int32), cat))
+    assert got == pytest.approx(ref, rel=1e-10)
+
+
+def test_concrete_catalogs_pay_no_runtime_guard(_window8):
+    """An eagerly-evaluated catalog is verified from its own arrays at trace
+    time, so no ``rows_sorted`` node is built for it at all."""
+    C = _window8
+    cosmo = CosmoParams(H0=67.74, Om0=0.3075)
+    survey = SurveyParams(n0=1e-2, z50=1.0, w=0.5, delta=0.0, b_miss=1.0,
+                          alpha_miss=0.0, sigma_kde=0.0)
+    state = C.catalog_kernel_state(cosmo, survey, _tiny_sorted_catalog(n=20))
+    assert state.rows_sorted is None

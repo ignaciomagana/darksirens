@@ -48,7 +48,7 @@ import weakref
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax import jit, lax, vmap
+from jax import lax, vmap
 from jax.scipy.special import log_ndtr, logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
 from typing import NamedTuple, Any
@@ -56,6 +56,7 @@ from typing import NamedTuple, Any
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 from darksirens.redshift.grid import log_interp_zgrid, zgrid
+from darksirens.utils.cosmology import threads_distance_table
 from .completion import log_galaxy_measure_grid
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
@@ -295,12 +296,67 @@ def _traced_rows_attested(zgals) -> bool:
     verified in the evaluator; the factory attests them while the arrays are
     concrete (:func:`attest_rows_sorted_for_windowing`).  Requiring the attested
     ``(N_rows, N_max)`` keeps that arming from covering a view nobody checked.
+
+    This is a PERFORMANCE gate only, and deliberately so: the flags it reads are
+    mutable process globals and therefore NOT part of any jit cache key, so a
+    function compiled while they were armed can be replayed after they are
+    disarmed.  Correctness on the windowed branch is enforced IN THE GRAPH by
+    ``CatalogKernelState.rows_sorted`` (see :func:`_rows_sorted_traced`), which
+    is computed from the arrays the compiled graph actually receives.
     """
     return (
         _ROWS_SORTED_ATTESTED
         and isinstance(zgals, jax.core.Tracer)
         and tuple(zgals.shape) in _ATTESTED_ROW_SHAPES
     )
+
+
+def _rows_sorted_traced(zgals, ngals):
+    """In-GRAPH counterpart of :func:`_rows_sorted_for_windowing`.
+
+    Returns a scalar boolean *array* (a tracer when the catalog is a jit
+    argument) asserting the same invariant on the same data: every row's real
+    prefix ``[0, ngals[row])`` is non-decreasing in z.  ``None`` when the shapes
+    cannot carry the invariant, which leaves the guard disabled.
+
+    Cost: one chunked pass over ``zgals`` per state build, alongside the
+    24-node Gauss-Legendre kernel normalisation the same build already runs over
+    every galaxy -- a few percent of a build that is itself once per proposal.
+    When the arrays are concrete and already verified the expression folds to a
+    literal ``True`` and the guard disappears from the graph entirely.
+    """
+    if zgals is None or ngals is None:
+        return None
+    if getattr(zgals, "ndim", 0) != 2 or getattr(ngals, "ndim", 0) != 1:
+        return None
+    if ngals.shape[0] != zgals.shape[0] or zgals.shape[1] < 2:
+        return None
+
+    def _row(zs, ng):
+        cols = jnp.arange(1, zs.shape[0])
+        return jnp.all((jnp.diff(zs) >= 0) | (cols >= ng))
+
+    return jnp.all(_map_rows(_row, (zgals, ngals)))
+
+
+def _resolve_rows_sorted_guard(zgals, ngals):
+    """The ``CatalogKernelState.rows_sorted`` guard for this catalog, or None.
+
+    Emitted ONLY for TRACED catalogs, and only while windowing is enabled at
+    all: that is exactly the path where the trace-time verdict comes from the
+    mutable attestation globals and can therefore be replayed on unattested
+    data.  A concrete catalog is verified from its own arrays at trace time
+    (:func:`_rows_sorted_for_windowing`), so it needs no runtime node, and with
+    ``configure_catalog_kde_window(size=None)`` there is no windowed branch to
+    guard.  The row length is deliberately NOT part of the gate: if the state
+    outlives a window reconfiguration, the guard must already be in it.  When
+    the evaluator ends up not windowing, the node is unused and XLA drops it.
+    """
+    if _KDE_WINDOW_SIZE is None or zgals is None or ngals is None:
+        return None
+    if not isinstance(zgals, jax.core.Tracer):
+        return None
+    return _rows_sorted_traced(zgals, ngals)
 
 
 def _rows_sorted_for_windowing(zgals, ngals) -> bool:
@@ -594,6 +650,16 @@ class CatalogKernelState(NamedTuple):
     #: evaluator's half-width ``n_sigma * sig_eff_row_max[pix]``.  ``None``
     #: (e.g. a state built by hand) disables windowing for that state.
     sig_eff_row_max: Any = None
+    #: Scalar boolean verdict on the z-sort invariant, computed FROM THE ARRAYS
+    #: THEMSELVES (traced when the catalog is a jit argument).  This is what
+    #: makes the windowed branch self-verifying: the trace-time decision to emit
+    #: it comes from process globals (``_KDE_WINDOW_SIZE``,
+    #: ``attest_rows_sorted_for_windowing``) that are NOT part of any jit cache
+    #: key, so a compiled windowed graph can be replayed on data nobody
+    #: attested.  Carrying the verdict in the GRAPH means such a replay yields
+    #: NaN instead of a plausible wrong number.  ``None`` (a hand-built state)
+    #: leaves the branch unguarded, exactly as before.
+    rows_sorted: Any = None
 
 
 def catalog_kernel_state(
@@ -640,6 +706,7 @@ def catalog_kernel_state(
         volume_weighted=volume_weighted, z_depth=z_depth,
         log_depth_mass=log_depth_mass,
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
+        rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
     )
 
 
@@ -747,6 +814,7 @@ def marked_catalog_kernel_state(
         log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
         log_depth_mass=log_depth_mass, z_depth=z_depth,
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
+        rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
     ), log_N_host
 
 
@@ -779,6 +847,20 @@ def eval_log_catalog_prior_state(
     windowed galaxy, one logsumexp.  Falls back to the historical O(N_max)
     full-row evaluation when windowing is disabled, the rows are not
     verifiably sorted, or the row is not longer than the window.
+
+    Self-verifying windowed branch.  Whether to EMIT the windowed code is a
+    trace-time Python decision that reads mutable process globals
+    (``_KDE_WINDOW_SIZE``, ``_ROWS_SORTED_ATTESTED``), none of which is part of
+    a jit cache key -- so a callable compiled while a sorted view was attested
+    can be replayed later on an unsorted view of the SAME SHAPE and silently
+    return the windowed answer for data the window is invalid on (MEASURED: a
+    (1, 20) row at window 8 shifted log p_cat by 2.5e-3 nats on a permutation of
+    the same galaxies, and worse on realistic rows).  The emitted branch
+    therefore carries ``state.rows_sorted`` -- the invariant evaluated on the
+    arrays the compiled graph actually receives -- and collapses to NaN when it
+    is violated, so such a replay is loud instead of plausible.  Attest every
+    view you bind (:func:`attest_rows_sorted_for_windowing`), or disable
+    windowing with ``configure_catalog_kde_window(size=None)``.
     """
     window = _KDE_WINDOW_SIZE
     use_window = (
@@ -835,27 +917,29 @@ def eval_log_catalog_prior_state(
     # stays a proper density.
     if state.z_depth is not None:
         log_p_cat = jnp.where(z <= state.z_depth, log_p_cat, -jnp.inf)
+    if use_window and state.rows_sorted is not None:
+        # The windowed answer is valid ONLY on z-sorted rows.  ``rows_sorted``
+        # is evaluated on the arrays this graph receives (a compile-time literal
+        # for concrete catalogs, so the select folds away), which is what a
+        # process global read at trace time can never be.
+        log_p_cat = jnp.where(state.rows_sorted, log_p_cat, jnp.nan)
     return log_p_cat
 
 
-@jit
-def log_catalog_prior(
+def _log_catalog_prior_impl(
     z: float,
     pix: int,
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
 ) -> float:
-    r"""
-    Log of the EM-catalog redshift prior at redshift z for catalog row pix.
+    """Un-jitted body shared by the scalar and vector boundaries below.
 
-    Historical scalar signature; builds the per-row kernel state on the
-    fly.  Under ``vmap`` over samples, the (cosmo, survey)-only pieces
-    (the log g grid) are hoisted automatically; the per-row pieces are
-    recomputed per sample, so hot paths should use
-    ``catalog_kernel_state`` + ``eval_log_catalog_prior_state`` instead.
-
-    Empty rows return -inf (no host candidates), never NaN.
+    Deliberately NOT decorated: it reaches the 106.8 MB comoving-distance
+    table through ``log_galaxy_measure_grid``, so its only jit boundaries must
+    be :func:`threads_distance_table` ones (see ``utils.cosmology``).  Keeping
+    the body plain lets ``log_catalog_prior_vmap`` vmap it directly instead of
+    nesting a scalar jit inside the vector one.
     """
     zs = em_catalog.zgals[pix]
     dzs = em_catalog.dzgals[pix]
@@ -874,8 +958,62 @@ def log_catalog_prior(
     return log_g_z + _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig_eff))
 
 
+# ``threads_distance_table`` rather than ``@jit``, on BOTH boundaries.  These
+# reach the 106.8 MB comoving-distance table through ``log_galaxy_measure_grid``
+# -> ``dV_of_z`` -> ``r_of_z``, and ``_log_prior_bright_sirens`` resolves the
+# vector one from INSIDE an enclosing traced boundary.  A plain ``@jit``
+# MEASURED (jax 0.4.34):
+#
+#   * lowering the scalar function serialised 229.7 MB of module text -- the
+#     table as a dense<> HLO CONSTANT rather than a parameter, rebuilt,
+#     re-serialised and re-parsed by XLA on every compilation;
+#   * the public legacy bright-siren path succeeded for z shape (1,) and then
+#     raised ``UnexpectedTracerError`` for z shape (2,) in the SAME process,
+#     because the plain jit closed over the enclosing trace's table tracer and
+#     JAX replayed the cached jaxpr from that now-dead trace.
+#
+# ``tests/test_catalog_prior_distance_table.py`` pins both properties.
+
+@threads_distance_table()
+def log_catalog_prior(
+    z: float,
+    pix: int,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    distance_table=None,
+) -> float:
+    r"""
+    Log of the EM-catalog redshift prior at redshift z for catalog row pix.
+
+    Historical scalar signature; builds the per-row kernel state on the
+    fly.  Under ``vmap`` over samples, the (cosmo, survey)-only pieces
+    (the log g grid) are hoisted automatically; the per-row pieces are
+    recomputed per sample, so hot paths should use
+    ``catalog_kernel_state`` + ``eval_log_catalog_prior_state`` instead.
+
+    Empty rows return -inf (no host candidates), never NaN.
+
+    ``distance_table`` is the comoving-distance grid; leaving it ``None``
+    resolves whatever table is active for the current trace.  It is a jit
+    ARGUMENT, never a closure capture -- see ``utils.cosmology``.
+    """
+    return _log_catalog_prior_impl(z, pix, cosmo, survey, em_catalog)
+
+
 # Vectorised over (z, pix) pairs — both vmapped simultaneously so the
-# call signature matches all prior assembly functions.
-log_catalog_prior_vmap = jit(
-    vmap(log_catalog_prior, in_axes=(0, 0, None, None, None), out_axes=0)
-)
+# call signature matches all prior assembly functions.  ONE distance-aware
+# boundary over the plain body, not a jit wrapped around a jit.
+@threads_distance_table()
+def log_catalog_prior_vmap(
+    z: jnp.ndarray,
+    pix: jnp.ndarray,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    distance_table=None,
+) -> jnp.ndarray:
+    """``log_catalog_prior`` over matched ``(z, pix)`` arrays."""
+    return vmap(_log_catalog_prior_impl, in_axes=(0, 0, None, None, None), out_axes=0)(
+        z, pix, cosmo, survey, em_catalog
+    )
