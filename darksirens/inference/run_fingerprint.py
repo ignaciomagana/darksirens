@@ -136,6 +136,18 @@ _NON_SEMANTIC_KEYS = frozenset({
     # it permits is carried by fix_population, which is semantic.  Keeping it
     # out preserves the digest of every run that predates the flag.
     "allow_skymap_population",
+    # ... and the two latent-mode gates of PLAN 4.4 (field-level PR-6a), for
+    # the same reason.  --lss_field_sha256 PINS the identity of the anchor
+    # artifact; the artifact's own bytes are already content-hashed by the
+    # input-file scan below, so the pin decides whether the run may START, not
+    # what it targets.  --allow_unanchored_budget waives guard 5's refusal of a
+    # FLAT prior on log10n0/delta in latent mode; the prior itself is what
+    # changes the target, and it is already fingerprinted through the labels,
+    # the bounds and the per-parameter prior families.  Keeping both out also
+    # keeps every TABLE-mode digest byte-identical across this PR, which the
+    # ladder's additive rule requires.
+    "lss_field_sha256",
+    "allow_unanchored_budget",
     # performance-only execution knobs
     "row_chunk",
     "gp3d_pix_chunk",

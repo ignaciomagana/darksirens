@@ -393,6 +393,48 @@ def _require_field_mode_scope(universe_model, wl_enabled, mark_model, catalogs):
             )
 
 
+def member_ess(ll_members: jnp.ndarray) -> jnp.ndarray:
+    """Member effective sample size ``exp(-sum_m p_m log p_m)``, PLAN §6.4.
+
+    ``p_m = softmax_m(ll_m)`` are exactly the weights the marginalization
+    ``logsumexp_m ll_m - log M`` puts on each ensemble member, so this is the
+    perplexity of that mixture: ``M`` when the members are indistinguishable,
+    ``1`` when one member owns the estimate.  PLAN §6.5 is the reason it
+    ships: ``log Zhat = logsumexp_m ll_m - log M`` is Jensen-biased by
+    ``-(e^{sigma^2} - 1)/(2M)`` in the member spread ``sigma``, and ESS is the
+    runtime read-out of that spread (``E[ESS]/M ~ exp(-sigma^2)`` for lognormal
+    weights).  It is also the tripwire for **K5** (PLAN §9): member ESS below
+    ``2`` at the production configuration, with P14 failing, is what would send
+    PR-6a to §6.5's fixed-realization fallback.  PR-5b measured the shipped
+    configuration and it does NOT: sigma runs 1.15 nats at ``H0 = 20`` through
+    1.49e-2 at the anchor to 1.38e-3 at ``H0 = 140``, and P14 came out at
+    7.07e-3 nat against the 0.1 nat gate, so PR-6a ships as a marginalization.
+    ESS is the quantity that would show that changing.
+
+    Costs nothing: ``ll_members`` is already materialized by both member
+    marginalizations, and this is an O(M) reduction over a vector of length
+    ``M_draw`` (8 in the shipped configuration).
+
+    NaN-safe by construction, because ``ll_members`` is genuinely allowed to be
+    ``-inf``: the per-member selection guard
+    (:func:`~darksirens.likelihood.selection.selection_log_correction`, called
+    INSIDE the member vmap) returns ``-inf`` for a member whose ``Neff_m``
+    fails the Vitale floor or the total-variance criterion.  Members at
+    ``-inf`` carry ``p_m = 0`` and contribute nothing (the ``0 log 0 = 0``
+    convention); if EVERY member is dead the mixture is ``-inf`` and the ESS is
+    reported as ``0.0`` rather than the ``nan`` that ``-inf - (-inf)`` would
+    produce.
+    """
+    lse = logsumexp(ll_members)
+    alive = jnp.isfinite(lse)
+    # ``jnp.where`` on the SHIFT, not on the result: subtracting a -inf
+    # normalizer would make every log-weight nan before the mask could act.
+    log_p = ll_members - jnp.where(alive, lse, 0.0)
+    p = jnp.where(jnp.isfinite(log_p), jnp.exp(log_p), 0.0)
+    entropy = -jnp.sum(jnp.where(p > 0.0, p * log_p, 0.0))
+    return jnp.where(alive, jnp.exp(entropy), 0.0)
+
+
 # ``threads_distance_table`` is ``jax.jit`` plus the contract that the 106.8 MB
 # comoving-distance table reaches this module as an ARGUMENT: without it, jax
 # lowers the closed-over table to a ``dense<>`` HLO constant and this one jit
@@ -418,6 +460,7 @@ def _require_field_mode_scope(universe_model, wl_enabled, mark_model, catalogs):
         "lss_marginalize",
         "lss_member_impl",
         "lss_field_mode",
+        "lss_member_diagnostics",
         "materialize_redshift_prior_state",
         "selection_neff_soft_guard",
         "n_catalogs",
@@ -482,6 +525,19 @@ def darksiren_log_likelihood(
     # work ride on the EMCatalog (``latent_*``), and the two are cross-checked
     # below so a mode string cannot disagree with the data it names.
     lss_field_mode: str = "table",
+    # Runtime member diagnostics (static; PLAN §6.4, shipping with PR-6a).
+    # False (default) returns the SCALAR log-likelihood and compiles exactly the
+    # module it compiled before this flag existed -- the ESS reduction is behind
+    # a Python-level branch, so it is not merely cheap, it is absent.  True
+    # returns the diagnostics DICT described in :func:`darksiren_log_likelihood`
+    # (``logL_total``, ``ll_members``, ``member_ess``, ``n_members``), following
+    # the ``return_diagnostics`` convention of
+    # ``likelihood_with_clusters.darksiren_log_likelihood_with_clusters``: a
+    # SEPARATE static jit specialization, so the sampler's calls keep returning
+    # a scalar and nothing about the production trace changes.  Only meaningful
+    # under ``lss_marginalize`` -- there is no member axis otherwise, and asking
+    # for one is an error rather than a dict of zeros.
+    lss_member_diagnostics: bool = False,
     materialize_redshift_prior_state: bool = True,
     selection_neff_soft_guard: bool = False,
     # Cap on the Monte-Carlo variance of the total log-likelihood estimator
@@ -533,6 +589,17 @@ def darksiren_log_likelihood(
     by the same ``g(n̂)`` and the detector's own anisotropy divides out.  When
     ``sky_model == "isotropic"`` the factor is skipped entirely (static branch),
     so the result is bit-for-bit identical to the sky-free likelihood.
+
+    With ``lss_member_diagnostics=True`` (static; requires ``lss_marginalize``)
+    the return value is instead the PLAN §6.4 diagnostics dict:
+
+    ``logL_total``   the same scalar this function otherwise returns,
+    ``ll_members``   the ``(M,)`` per-member log-likelihoods the marginalization
+                     reduces -- already materialized, never rebuilt,
+    ``member_ess``   ``exp(-sum_m p_m log p_m)`` with ``p_m = softmax_m(ll_m)``
+                     (:func:`member_ess`),
+    ``n_members``    ``M_draw``, so a caller can read ``ESS / M`` without
+                     tracking the ensemble size separately.
     """
     pop_params_shape = tuple(pop_params.shape)
     if pop_params.ndim == 0 or pop_params_shape[0] == 0:
@@ -540,6 +607,18 @@ def darksiren_log_likelihood(
             "darksiren_log_likelihood received empty pop_params: "
             f"pop_model={pop_model!r}, pop_params.shape={pop_params_shape}. "
             "Verify parameter-space construction for this population model."
+        )
+    if lss_member_diagnostics and not lss_marginalize:
+        # The member ESS is a property of the member MIXTURE; without
+        # ``lss_marginalize`` there is no ``ll_members`` vector to take the
+        # softmax of (the deterministic path evaluates the posterior-mean Q
+        # once).  Refuse rather than return an ESS of 1 that would read as
+        # "the ensemble collapsed" instead of "there was no ensemble".
+        raise ValueError(
+            "lss_member_diagnostics=True requires lss_marginalize=True: the "
+            "PLAN §6.4 member ESS is the perplexity of the member mixture "
+            "softmax_m(ll_m), and the deterministic (posterior-mean Q) path "
+            "never forms an ll_m vector."
         )
 
     log_p_pop = pop_model_parser(
@@ -1486,7 +1565,11 @@ def darksiren_log_likelihood(
         ll_members = jax.vmap(_member_ll, in_axes=(0, 0))(univ_stack, sel_stack)
 
         ll_members = jnp.where(jnp.isfinite(ll_members), ll_members, -jnp.inf)
-        return logsumexp(ll_members) - jnp.log(n_members)
+        # Both member impls return the (M,) vector alongside the reduction, so
+        # the PLAN §6.4 ESS diagnostic reads the ALREADY-MATERIALIZED weights
+        # rather than a second evaluation.  The scalar caller drops it and XLA
+        # never sees it; nothing about the shipped trace changes.
+        return logsumexp(ll_members) - jnp.log(n_members), ll_members
 
     def _reference_member_marginalization(n_members, is_field):
         """REFERENCE LSS-completion marginalisation: the historical
@@ -1542,7 +1625,7 @@ def darksiren_log_likelihood(
             univ_members, sel_members
         )
         ll_members = jnp.where(jnp.isfinite(ll_members), ll_members, -jnp.inf)
-        return logsumexp(ll_members) - jnp.log(n_members)
+        return logsumexp(ll_members) - jnp.log(n_members), ll_members
 
     # LSS-completion marginalisation: logL = logsumexp_m logL(Λ; Q_m) − log M,
     # treating the M lognormal-completion members as Monte-Carlo draws of the
@@ -1600,7 +1683,7 @@ def darksiren_log_likelihood(
             )
 
         if lss_member_impl == "factored":
-            ll = _factored_member_marginalization(n_members, is_field)
+            ll, ll_members = _factored_member_marginalization(n_members, is_field)
         elif lss_member_impl == "reference" and lss_field_mode == "latent":
             # The reference path exists to be the memory-heavy numerical pin:
             # it DELIBERATELY materialises the (M, N_rows, N_grid) member cube
@@ -1616,7 +1699,7 @@ def darksiren_log_likelihood(
                 "the seam's own pin is tests/test_latent_seam.py."
             )
         elif lss_member_impl == "reference":
-            ll = _reference_member_marginalization(n_members, is_field)
+            ll, ll_members = _reference_member_marginalization(n_members, is_field)
         else:
             raise ValueError(
                 "lss_member_impl must be 'factored' or 'reference', got "
@@ -1624,5 +1707,46 @@ def darksiren_log_likelihood(
             )
     else:
         ll = _ll_given_states(prior_states_univ, prior_states_sel)
+        ll_members = None
 
-    return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
+    logL_total = jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
+    if lss_member_diagnostics:
+        # PLAN §6.4's runtime member diagnostics.  Python-level (static)
+        # branch: with the flag off not one op below is traced, so the shipped
+        # likelihood module is unchanged, and with it on this is a separate jit
+        # specialization -- the same arrangement
+        # ``darksiren_likelihood_diagnostics_with_clusters`` uses.
+        #
+        # The companion diagnostic PLAN §6.4 lists -- the per-member
+        # Neff/variance guard -- is NOT built here, because it already exists:
+        # ``_member_ll`` above calls ``selection_log_correction(log_mu_m,
+        # Neff_m, nEvents, soft_guard=..., max_likelihood_variance=...,
+        # pe_variance_sum=jnp.sum(event_vars))`` INSIDE the member vmap, so
+        # every member is guarded on its OWN selection Neff and its OWN summed
+        # per-event reweighting variance, and a member that fails either
+        # criterion enters ``ll_members`` as -inf.  Rev 1 of the plan listed
+        # this as new work (R1-SEV3-11); it is not, and adding a second guard
+        # would double-count the wall.  ``tests/test_latent_p13.py`` asserts it
+        # is live in latent mode rather than asserting it was written.
+        return {
+            "logL_total": logL_total,
+            "ll_members": ll_members,
+            "member_ess": member_ess(ll_members),
+            "n_members": jnp.asarray(n_members),
+        }
+    return logL_total
+
+
+def darksiren_member_diagnostics(*args, **kwargs):
+    """Evaluate the likelihood once and return the PLAN §6.4 member diagnostics.
+
+    The member-marginalization twin of
+    ``darksiren_likelihood_diagnostics_with_clusters``: a separate static JIT
+    specialization, so the sampler's own calls keep returning only the scalar
+    log-likelihood and the production trace is untouched.  Requires
+    ``lss_marginalize=True``; ``lss_field_mode`` is free (the ESS is a property
+    of the member mixture, not of where ``Q`` came from), which is what lets the
+    same read-out compare the table and latent arms.
+    """
+    kwargs["lss_member_diagnostics"] = True
+    return darksiren_log_likelihood(*args, **kwargs)

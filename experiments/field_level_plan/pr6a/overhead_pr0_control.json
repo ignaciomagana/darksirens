@@ -1,0 +1,88 @@
+{
+ "what": "PLAN 6.4 determinism sweep + 2.3 overhead, production 259-event line, PR-0 clean guard arm",
+ "NOT_a_posterior": "no sampler was run; the production 259-event H0 posterior is HELD by the owner pending the PR-6a gate",
+ "determinism_caveat": "under common random numbers the member ensemble is frozen, so the estimator is a deterministic smooth function of theta: repeat-determinism and adjacent-theta smoothness pass BY CONSTRUCTION and pass equally on a distorted surrogate. Regression guard, never evidence of correctness. Only P14's theta-varying bias discriminates (PR-5b).",
+ "guard_convention": {
+  "selection_neff_soft_guard": false,
+  "max_likelihood_variance": 1000000.0,
+  "vitale_5Nobs_floor": "retained",
+  "why": "PR-0's clean arm; the hard GWTC-4/5 criterion fails at every H0 node on this line"
+ },
+ "anchor": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr5/latent_anchor_v2a.h5",
+ "M_draw": 8,
+ "q_table": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/desi_full259/data/fits/q_radial.h5",
+ "device": [
+  "cuda:0"
+ ],
+ "git_sha": "377092d80dbd911e5c3680ae1772774827f4eef8",
+ "arms": {
+  "baseline_pr0": {
+   "load_s": 12.69453725591302,
+   "build_s": 5.664630549028516,
+   "opts": {
+    "use_LSS": false,
+    "lss_completion": null,
+    "lss_marginalize": false,
+    "lss_field_mode": "table",
+    "lss_field_artifact": null,
+    "per_pixel_completeness": null,
+    "c_mode": "selection",
+    "catalog_sky_weighting": "field",
+    "selection_neff_soft_guard": true,
+    "max_likelihood_variance": 1.0
+   },
+   "timing": {
+    "compile_plus_first_eval_s": 13.454149080440402,
+    "n_timed": 20,
+    "ms_median": 1429.9265993759036,
+    "ms_mean": 1429.6430921182036,
+    "ms_min": 1427.110149525106,
+    "ms_max": 1432.1883609518409,
+    "ms_all": [
+     1427.473794668913,
+     1427.8305815532804,
+     1427.5960940867662,
+     1427.110149525106,
+     1428.0257895588875,
+     1429.8524325713515,
+     1429.6131916344166,
+     1429.6194650232792,
+     1428.4325698390603,
+     1428.8673009723425,
+     1430.1600866019726,
+     1430.8908032253385,
+     1432.1883609518409,
+     1430.4932300001383,
+     1430.0007661804557,
+     1430.3021281957626,
+     1430.6224919855595,
+     1431.0960350558162,
+     1431.4712192863226,
+     1431.215351447463
+    ],
+    "logl_probe": -1152882.2518005362
+   }
+  }
+ },
+ "overhead": {
+  "baseline_nofp_ms": null,
+  "baseline_fp_ms": null,
+  "table_m8_ms": null,
+  "latent_m8_ms": null,
+  "latent_minus_baseline_nofp_ms": null,
+  "latent_vs_baseline_nofp_pct": null,
+  "latent_vs_baseline_fp_pct": null,
+  "f_p_cost_pct": null,
+  "latent_minus_table_ms": null,
+  "latent_minus_table_pct_of_baseline": null,
+  "PLAN_2_3_prediction": {
+   "note": "PLAN's percentages are quoted against a 27.5 ms baseline that PR-0 superseded with 3027 ms measured value-only on an H100, so every percentage in section 2 deflates ~110x; the ABSOLUTE ms columns are the ones to compare",
+   "latent_minus_table_ms_at_M8": 3.3,
+   "latent_vs_no_lss_baseline_ms_at_M8": 8.6,
+   "pct_vs_27_5ms_baseline": {
+    "latent_minus_table": 12.0,
+    "latent_vs_baseline": 31.0
+   }
+  }
+ }
+}

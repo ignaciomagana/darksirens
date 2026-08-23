@@ -1,0 +1,147 @@
+{
+ "what": "independent re-verification of 6+2 PR-6a guard cells",
+ "base_argv": "experiments/desi_full259/sbatch_ns_joint_sel.sh",
+ "anchor": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr5/latent_anchor_v2a.h5",
+ "results": [
+  {
+   "case": "R1 latent + --c_mode per_pixel",
+   "cell": "guard 6 / pre-load",
+   "expected": "REFUSED",
+   "raised": "SystemExit",
+   "message_head": "\u2717 FATAL: --lss_field_mode latent is incompatible with --c_mode per_pixel: the per-pixel matched-kernel ratio absorbs the observed angular clustering INTO C, so (1 - C) already carries the missing-galaxy structure the latent field is there to model -- the two completion models would double-count each other and the run's estimand would be unreadable. Use --c_mode aggregate or --c_mode selection with",
+   "required_substrings": [
+    "per_pixel",
+    "latent"
+   ],
+   "missing_substrings": [],
+   "verdict": "PASS"
+  },
+  {
+   "case": "R2 latent without --lss_field_artifact",
+   "cell": "guard 6 / pre-load",
+   "expected": "REFUSED",
+   "raised": "SystemExit",
+   "message_head": "\u2717 FATAL: --lss_field_mode latent requires --lss_field_artifact: latent mode GENERATES Q from the anchor artifact's factored basis (row_fac, phi_z) and its theta-free sky moments (A, B); there is no default and no in-catalog fallback. Build one with darksirens_build_latent_field. 1",
+   "required_substrings": [
+    "lss_field_artifact"
+   ],
+   "missing_substrings": [],
+   "verdict": "PASS"
+  },
+  {
+   "case": "R3 --lss_field_sha256 mismatch",
+   "cell": "guard 1 / build",
+   "expected": "REFUSED",
+   "raised": "SystemExit",
+   "message_head": "\u2717 FATAL: latent artifact fingerprint MISMATCH: --lss_field_sha256 pins 0000000000000000000000000000000000000000000000000000000000000001, but '/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr5/latent_anchor_v2a.h5' stamps sha256=0cdfa78a4e355dc037b1c0f04f14a99a20e341931bedaa2e92ca89a82ae1cf93 and its guard-1 content digest is 4e45daa6830a341eb0a4532f75dd6e64277",
+   "required_substrings": [
+    "sha256"
+   ],
+   "missing_substrings": [],
+   "verdict": "PASS"
+  },
+  {
+   "case": "R4 flat sampled budget ['log10n0', 'delta']",
+   "cell": "guard 5 / post-pspace",
+   "expected": "REFUSED",
+   "raised": "SystemExit",
+   "message_head": "\u2717 FATAL: --lss_field_mode latent samples log10n0, delta under a FLAT prior. PLAN 4.4 guard 5 refuses that at every rung. At rung 0 -- what PR-6a ships -- the count channel is conditioned on the observed shell totals, so it carries ZERO information about (log10n0, delta, theta_sel) BY CONSTRUCTION: the posterior in these directions is exactly the prior you declared, and the missing-galaxy budget th",
+   "required_substrings": [
+    "ZERO information",
+    "shell totals",
+    "K10",
+    "calibrate_n0.py"
+   ],
+   "missing_substrings": [],
+   "verdict": "PASS"
+  },
+  {
+   "case": "R5 schechter selection family",
+   "cell": "post-fits",
+   "expected": "REFUSED",
+   "raised": "SystemExit",
+   "message_head": "\u2717 FATAL: --lss_field_mode latent is incompatible with the 'schechter' luminosity-function family: the disjointness argument that lets the latent count channel coexist with an anchored theta_sel prior was re-derived for the truncated-Gaussian fit only (redshift/selection.py:675). The Schechter branch (:725) adds M_faint_offset, which never enters the fit likelihood while m_faint_cut is the fit-side",
+   "required_substrings": [
+    "schechter",
+    "M_faint_offset",
+    "m_faint_cut"
+   ],
+   "missing_substrings": [],
+   "verdict": "PASS"
+  },
+  {
+   "case": "R6 table mode + orphan --lss_field_sha256",
+   "cell": "pre-load",
+   "expected": "REFUSED",
+   "raised": "SystemExit",
+   "message_head": "\u2717 FATAL: --lss_field_sha256 given without --lss_field_mode latent: it pins the identity of --lss_field_artifact, which table mode never reads, so the pin would be checked against nothing. Pass --lss_field_mode latent, or drop the pin. 1",
+   "required_substrings": [
+    "lss_field_sha256",
+    "latent"
+   ],
+   "missing_substrings": [],
+   "verdict": "PASS"
+  },
+  {
+   "case": "P1 latent + selection + f_p + matching sha256",
+   "cell": "guard 6 + guard 1 / pre-load",
+   "expected": "PERMITTED",
+   "raised": null,
+   "stdout_head": "\u2713 latent artifact sha256 \u2192 0cdfa78a4e355dc037b1c0f04f14a99a20e341931bedaa2e92ca89a82ae1cf93 \u2713 latent guard-1 content \u2192 4e45daa6830a341eb0a4532f75dd6e6427740ce0d6dfd8f06aeebdf5e72012e4 \u2713 latent anchor theta_ref \u2192 {\"M0hat\": -20.309781546689074, \"Om0\": 0.3089, \"delta\": 0.9404729599861055, \"sigma_M\": 0.7144467727667887} b_gal=1.0",
+   "verdict": "PASS",
+   "observed": [
+    "0cdfa78a4e355dc037b1c0f04f14a99a20e341931bedaa2e92ca89a82ae1cf93",
+    true,
+    1.0
+   ],
+   "expected_value": [
+    "0cdfa78a4e355dc037b1c0f04f14a99a20e341931bedaa2e92ca89a82ae1cf93",
+    true,
+    1.0
+   ]
+  },
+  {
+   "case": "P2 budget pinned via --fixed_parameter_values (production)",
+   "cell": "guard 5 / post-pspace",
+   "expected": "PERMITTED",
+   "raised": null,
+   "stdout_head": "",
+   "verdict": "PASS",
+   "observed": [],
+   "expected_value": []
+  },
+  {
+   "case": "P3 latent + --c_mode aggregate, no Q table",
+   "cell": "pre-load",
+   "expected": "PERMITTED",
+   "raised": null,
+   "stdout_head": "",
+   "verdict": "PASS",
+   "observed": "aggregate-latent-ok",
+   "expected_value": "aggregate-latent-ok"
+  },
+  {
+   "case": "R7 (control) TABLE + --c_mode aggregate, no Q table",
+   "cell": "pre-load",
+   "expected": "REFUSED",
+   "raised": "SystemExit",
+   "message_head": "\u2717 FATAL: --c_mode aggregate requires an --lss_completion table for every catalog (catalog(s) [1] have none). Aggregate mode normalises the completeness over the WHOLE SKY and delegates all angular structure to the mean-one Q field, so without a full-sky Q a footprint survey's missing budget is diluted by f_sky inside its own footprint -- the legacy delta_g factor is mean-one over the sky and canno",
+   "required_substrings": [
+    "aggregate",
+    "lss_completion"
+   ],
+   "missing_substrings": [],
+   "verdict": "PASS"
+  },
+  {
+   "case": "P4 --allow_unanchored_budget escape hatch",
+   "cell": "guard 5 / post-pspace",
+   "expected": "PERMITTED WITH WARNING",
+   "raised": null,
+   "stdout_head": "\u26a0 --allow_unanchored_budget: --lss_field_mode latent samples log10n0, delta under a FLAT prior. PLAN 4.4 guard 5 refuses that at every rung. At rung 0 -- what PR-6a ships -- the count channel is conditioned on the observed shell totals, so it carries ZERO information about (log10n0, delta, theta_sel) BY CONSTRUCTION: the posterior in these directions is exactly the prior you declared, and the miss",
+   "verdict": "PASS"
+  }
+ ],
+ "n_pass": 11,
+ "n_total": 11
+}

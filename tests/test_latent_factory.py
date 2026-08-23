@@ -118,6 +118,17 @@ def _write_artifact(path, *, f_p=F_P, fit_pixels=FIT_PIXELS, nside=NSIDE,
         g.attrs["nside"] = int(nside)
         g.attrs["sha256"] = "0" * 64
         g.attrs["format_version"] = "darksirens-latent-field-1.0"
+        # The remaining guard-1 fingerprint ingredients (PLAN 4.4 successor 1:
+        # completeness-map hash, shell-response W hash, z_edges, counts hash,
+        # theta_ref, b_gal).  ``load_latent_plan`` never reads them -- the seam
+        # is theta-free and count-free online -- but the fingerprint guard does,
+        # and an artifact that cannot be fingerprinted is refused, so writing
+        # them is what makes this fixture the "structurally complete (but tiny)
+        # PR-4 anchor artifact" its docstring claims.
+        g.create_dataset("counts", data=np.full((3, n_fit), 7.0))
+        g.create_dataset("z_count_edges", data=np.linspace(0.0, z_depth, 4))
+        g.create_dataset("shell_response", data=np.eye(3, n_sub))
+        g.attrs["b_gal"] = 1.4
     return str(path)
 
 

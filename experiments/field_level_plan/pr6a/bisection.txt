@@ -1,0 +1,31 @@
+V0 fullsky,zuniv=0.3   seed=420000  H0=71.4 sig=10.6 cdf=0.3547
+V0 fullsky,zuniv=0.3   seed=420037  H0=56.7 sig=9.0 cdf=0.8696
+V0 fullsky,zuniv=0.3   seed=420074  H0=59.7 sig=10.0 cdf=0.7684
+V1 fullsky,zuniv=0.6   seed=420000  H0=75.5 sig=8.7 cdf=0.1716
+V1 fullsky,zuniv=0.6   seed=420037  H0=84.1 sig=15.7 cdf=0.1434
+V1 fullsky,zuniv=0.6   seed=420074  H0=71.1 sig=13.0 cdf=0.4026
+V2 footprint,nomask    seed=420000  H0=127.2 sig=10.1 cdf=0.0000
+V2 footprint,nomask    seed=420037  H0=137.5 sig=2.8 cdf=0.0000
+V2 footprint,nomask    seed=420074  H0=125.9 sig=10.9 cdf=0.0000
+V3 footprint+mask      seed=420000  H0=130.1 sig=9.0 cdf=0.0000
+V3 footprint+mask      seed=420037  H0=137.6 sig=2.7 cdf=0.0000
+V3 footprint+mask      seed=420074  H0=125.4 sig=11.3 cdf=0.0000
+V1b fullsky+fp,zu0.6     seed=420000  H0=75.3 sig=8.9 cdf=0.1820
+V1b fullsky+fp,zu0.6     seed=420037  H0=85.1 sig=16.5 cdf=0.1455
+V1b fullsky+fp,zu0.6     seed=420074  H0=68.5 sig=12.9 cdf=0.4784
+V2b footprint+fp,nomask  seed=420000  H0=72.8 sig=7.4 cdf=0.2395
+V2b footprint+fp,nomask  seed=420037  H0=68.0 sig=8.4 cdf=0.4898
+V2b footprint+fp,nomask  seed=420074  H0=77.4 sig=10.0 cdf=0.1702
+V3b footprint+fp+mask    seed=420000  H0=73.4 sig=7.3 cdf=0.2102
+V3b footprint+fp+mask    seed=420037  H0=72.8 sig=9.1 cdf=0.2848
+V3b footprint+fp+mask    seed=420074  H0=82.1 sig=9.7 cdf=0.0686
+fs=0.0 seed=310000  fp: H0=28.2 sig=5.8 cdf=1.000   nofp: H0=135.2 sig=5.2 cdf=0.000
+fs=0.0 seed=310037  fp: H0=30.4 sig=6.6 cdf=1.000   nofp: H0=131.1 sig=9.3 cdf=0.000
+fs=0.0 seed=310074  fp: H0=28.5 sig=6.2 cdf=1.000   nofp: H0=135.8 sig=4.5 cdf=0.000
+fs=0.0 seed=310111  fp: H0=78.3 sig=10.1 cdf=0.119   nofp: H0=133.5 sig=6.6 cdf=0.000
+fs=0.0 seed=310148  fp: H0=33.6 sig=7.4 cdf=1.000   nofp: H0=137.0 sig=3.5 cdf=0.000
+fs=1.0 seed=310000  fp: H0=55.0 sig=4.9 cdf=0.991   nofp: H0=128.7 sig=10.0 cdf=0.000
+fs=1.0 seed=310037  fp: H0=71.2 sig=9.1 cdf=0.347   nofp: H0=135.8 sig=4.3 cdf=0.000
+fs=1.0 seed=310074  fp: H0=84.6 sig=9.0 cdf=0.017   nofp: H0=137.9 sig=2.2 cdf=0.000
+fs=1.0 seed=310111  fp: H0=58.2 sig=6.6 cdf=0.909   nofp: H0=133.0 sig=8.0 cdf=0.000
+fs=1.0 seed=310148  fp: H0=28.1 sig=6.4 cdf=1.000   nofp: H0=134.4 sig=5.8 cdf=0.000

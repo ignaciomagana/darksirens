@@ -1,0 +1,4192 @@
+{
+ "rows": [
+  {
+   "latent_off": {
+    "median": 46.27703589373803,
+    "ci68": [
+     37.79776765411983,
+     54.300587636669945
+    ],
+    "ci90": [
+     31.50622827163182,
+     59.52690847102457
+    ],
+    "sigma": 8.251409991275057,
+    "cdf_at_truth": 0.9959080850018115,
+    "map": 47.5,
+    "width90": 28.02068019939275
+   },
+   "latent": {
+    "median": 42.14627146674507,
+    "ci68": [
+     34.96984495487267,
+     49.22446287168732
+    ],
+    "ci90": [
+     30.018794037027927,
+     53.906092928248796
+    ],
+    "sigma": 7.127308958407326,
+    "cdf_at_truth": 0.9997806154293052,
+    "map": 42.5,
+    "width90": 23.88729889122087
+   },
+   "latent_bgal": {
+    "median": 42.24317082464309,
+    "ci68": [
+     35.11231660410291,
+     49.28342242564148
+    ],
+    "ci90": [
+     30.185009140229607,
+     53.955174764081264
+    ],
+    "sigma": 7.085552910769287,
+    "cdf_at_truth": 0.9997773903575763,
+    "map": 42.5,
+    "width90": 23.770165623851657
+   },
+   "seed": 90000,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c000/latent_anchor.h5",
+     "sha256": "10ad4bc1bac282952c6c93790c8a8c1e1ed1566007df45253e64e1769311d016",
+     "grad_inf": 8.36664071357518e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.048408263062213006,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 426.73768807151646,
+     "b_gal_curvature_conditional": 53385.88262159708,
+     "row_fac_sd": 0.9484743475914001,
+     "member_sd": 0.5173543095588684
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c000/latent_anchor_bgal.h5",
+     "sha256": "500fd4a56f13c750d3fe554fbb487128ae4294f0c5782535f56babffb09d1412",
+     "grad_inf": 8.36664071357518e-13,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.048408263062213006,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 426.73768807151646,
+     "b_gal_curvature_conditional": 53385.88262159708,
+     "row_fac_sd": 0.9487115144729614,
+     "member_sd": 0.517941415309906
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 76.00803521686356,
+    "ci68": [
+     68.80747512897834,
+     83.81568037151723
+    ],
+    "ci90": [
+     64.4017000940329,
+     89.43790744226517
+    ],
+    "sigma": 7.504102621269446,
+    "cdf_at_truth": 0.12323458825803524,
+    "map": 75.0,
+    "width90": 25.036207348232267
+   },
+   "latent": {
+    "median": 75.11889688764006,
+    "ci68": [
+     68.10552921182993,
+     82.47930176719363
+    ],
+    "ci90": [
+     63.64280056566475,
+     87.94048736412334
+    ],
+    "sigma": 7.18688627768185,
+    "cdf_at_truth": 0.1460048566365687,
+    "map": 75.0,
+    "width90": 24.297686798458592
+   },
+   "latent_bgal": {
+    "median": 75.12472918157025,
+    "ci68": [
+     68.11107825129037,
+     82.48377375789511
+    ],
+    "ci90": [
+     63.64849081243827,
+     87.9464530022251
+    ],
+    "sigma": 7.186347753302371,
+    "cdf_at_truth": 0.14580326000445426,
+    "map": 75.0,
+    "width90": 24.29796218978683
+   },
+   "seed": 90037,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c001/latent_anchor.h5",
+     "sha256": "e46fbe36f36c9c9f928eb70413221833126b52f54debff51249f5f7bd145d86d",
+     "grad_inf": 1.4444001550373287e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04840353476543093,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 426.82106384143117,
+     "b_gal_curvature_conditional": 109650.72088000669,
+     "row_fac_sd": 1.0695124864578247,
+     "member_sd": 0.504025399684906
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c001/latent_anchor_bgal.h5",
+     "sha256": "a8bae5df52bae5643920158ad12d565b1c0f4031eede140ba02caac40032447f",
+     "grad_inf": 1.4444001550373287e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04840353476543093,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 426.82106384143117,
+     "b_gal_curvature_conditional": 109650.72088000669,
+     "row_fac_sd": 1.0696301460266113,
+     "member_sd": 0.503993034362793
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 67.59794551831591,
+    "ci68": [
+     61.569419002345384,
+     74.02606644929969
+    ],
+    "ci90": [
+     57.85721018988213,
+     78.50211256129153
+    ],
+    "sigma": 6.228323723477153,
+    "cdf_at_truth": 0.5089289440746387,
+    "map": 67.5,
+    "width90": 20.644902371409394
+   },
+   "latent": {
+    "median": 66.68738630449624,
+    "ci68": [
+     60.73998424146046,
+     72.99822561363123
+    ],
+    "ci90": [
+     57.053698588305046,
+     77.32397611403697
+    ],
+    "sigma": 6.129120686085386,
+    "cdf_at_truth": 0.5678842563065138,
+    "map": 67.5,
+    "width90": 20.27027752573192
+   },
+   "latent_bgal": {
+    "median": 66.67771272445661,
+    "ci68": [
+     60.73001863056731,
+     72.98778347766289
+    ],
+    "ci90": [
+     57.0383888476471,
+     77.31720904587833
+    ],
+    "sigma": 6.12888242354779,
+    "cdf_at_truth": 0.5685018037229915,
+    "map": 67.5,
+    "width90": 20.27882019823123
+   },
+   "seed": 90074,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c002/latent_anchor.h5",
+     "sha256": "b79a9df7f6ab30360906b3a12698ab9861d69ffb9361f5e2750ced5084f26641",
+     "grad_inf": 1.5907275496829243e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04683051059695913,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 455.9762410916737,
+     "b_gal_curvature_conditional": 137992.15687693804,
+     "row_fac_sd": 0.9900398850440979,
+     "member_sd": 0.5180091857910156
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c002/latent_anchor_bgal.h5",
+     "sha256": "a1228fdc5ffbe20eedb1139a82a6e440781f84e88deb9e9afdfc49f7eb03fbe7",
+     "grad_inf": 1.5907275496829243e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04683051059695913,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 455.9762410916737,
+     "b_gal_curvature_conditional": 137992.15687693804,
+     "row_fac_sd": 0.9900997877120972,
+     "member_sd": 0.5178991556167603
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 78.83226184660514,
+    "ci68": [
+     69.44419527962947,
+     91.12680624654797
+    ],
+    "ci90": [
+     64.35383178569224,
+     100.88719109917844
+    ],
+    "sigma": 10.841305483459251,
+    "cdf_at_truth": 0.11357681363221023,
+    "map": 75.0,
+    "width90": 36.5333593134862
+   },
+   "latent": {
+    "median": 76.57955798262287,
+    "ci68": [
+     67.66917549640799,
+     87.99891515312184
+    ],
+    "ci90": [
+     62.746414307194314,
+     97.37930653648601
+    ],
+    "sigma": 10.164869828356927,
+    "cdf_at_truth": 0.16236704261192178,
+    "map": 75.0,
+    "width90": 34.6328922292917
+   },
+   "latent_bgal": {
+    "median": 76.58016781798729,
+    "ci68": [
+     67.66999273316998,
+     87.9990000494732
+    ],
+    "ci90": [
+     62.74724797531775,
+     97.37901319650854
+    ],
+    "sigma": 10.16450365815161,
+    "cdf_at_truth": 0.16233962716632494,
+    "map": 75.0,
+    "width90": 34.63176522119079
+   },
+   "seed": 90111,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c003/latent_anchor.h5",
+     "sha256": "6d45b810d7c22872b4c7de6c1c47ecdc180996da841eb5a75b7c11d48f2ef330",
+     "grad_inf": 1.5785150964120476e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05375732752403363,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 346.0386902973405,
+     "b_gal_curvature_conditional": 127190.81933748869,
+     "row_fac_sd": 0.9250587821006775,
+     "member_sd": 0.5051180124282837
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c003/latent_anchor_bgal.h5",
+     "sha256": "e907ddcc777b2dc9cd0c40f5e33c13a64b82962f468088f75ad959d8a1cc2bad",
+     "grad_inf": 1.5785150964120476e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05375732752403363,
+     "s_b_profile": 0.05375732752403363,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 346.0386902973405,
+     "b_gal_curvature_conditional": 127190.81933748869,
+     "row_fac_sd": 0.9252199530601501,
+     "member_sd": 0.504818320274353
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 78.81533965296106,
+    "ci68": [
+     71.04889507024751,
+     87.3921245505116
+    ],
+    "ci90": [
+     66.38754368468801,
+     93.97420059130717
+    ],
+    "sigma": 8.171614740132043,
+    "cdf_at_truth": 0.07142907308244144,
+    "map": 77.5,
+    "width90": 27.586656906619154
+   },
+   "latent": {
+    "median": 76.63895462585998,
+    "ci68": [
+     69.12604233649616,
+     84.73550556669173
+    ],
+    "ci90": [
+     64.6324430826548,
+     90.71122153431878
+    ],
+    "sigma": 7.804731615097786,
+    "cdf_at_truth": 0.11561133004358207,
+    "map": 75.0,
+    "width90": 26.07877845166398
+   },
+   "latent_bgal": {
+    "median": 76.64085501802099,
+    "ci68": [
+     69.12854409029109,
+     84.73701784893059
+    ],
+    "ci90": [
+     64.63593844982685,
+     90.71323577083477
+    ],
+    "sigma": 7.8042368793197525,
+    "cdf_at_truth": 0.11554181918550212,
+    "map": 75.0,
+    "width90": 26.07729732100792
+   },
+   "seed": 90148,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c004/latent_anchor.h5",
+     "sha256": "3681e593d2060373bb4c58b80f113f162c31359b31faa7aedb465c85e8a6ff45",
+     "grad_inf": 1.560751528018045e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04920394063633863,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 413.04771910492855,
+     "b_gal_curvature_conditional": 67657.441943299,
+     "row_fac_sd": 0.9242013692855835,
+     "member_sd": 0.522678554058075
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c004/latent_anchor_bgal.h5",
+     "sha256": "addd75568bf8935cfbb96bd0ea7181a396f4c6db6c61a84bd6875f422a593f3a",
+     "grad_inf": 1.560751528018045e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04920394063633863,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 413.04771910492855,
+     "b_gal_curvature_conditional": 67657.441943299,
+     "row_fac_sd": 0.9251305460929871,
+     "member_sd": 0.5239822268486023
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 43.12464986759761,
+    "ci68": [
+     35.73466109465127,
+     50.46511895447847
+    ],
+    "ci90": [
+     30.86768935476185,
+     55.23404469331504
+    ],
+    "sigma": 7.365228929913599,
+    "cdf_at_truth": 0.9995244677216031,
+    "map": 42.5,
+    "width90": 24.36635533855319
+   },
+   "latent": {
+    "median": 37.190053065905396,
+    "ci68": [
+     30.625117898227195,
+     43.88537167288755
+    ],
+    "ci90": [
+     26.433695496351724,
+     48.2551848742659
+    ],
+    "sigma": 6.630126887330178,
+    "cdf_at_truth": 0.9999955418884773,
+    "map": 37.5,
+    "width90": 21.821489377914176
+   },
+   "latent_bgal": {
+    "median": 37.18395431245144,
+    "ci68": [
+     30.61353092394945,
+     43.88221566571384
+    ],
+    "ci90": [
+     26.414520384137454,
+     48.253071391864935
+    ],
+    "sigma": 6.634342370882193,
+    "cdf_at_truth": 0.9999955324319184,
+    "map": 37.5,
+    "width90": 21.83855100772748
+   },
+   "seed": 90185,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c005/latent_anchor.h5",
+     "sha256": "4dbcf9bb49c627d89d288dd50e47d88d8574a6a6e0a923e4e338493c4755d801",
+     "grad_inf": 6.2159166702713264e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04760703399746386,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 441.2226005339471,
+     "b_gal_curvature_conditional": 73692.30964068943,
+     "row_fac_sd": 0.9788708090782166,
+     "member_sd": 0.5085954070091248
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c005/latent_anchor_bgal.h5",
+     "sha256": "708cda60d5ccea3eedbf4f83a4f256bd9abc2867d2d5a187d7a205ff03bc51e7",
+     "grad_inf": 6.2159166702713264e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04760703399746386,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 441.2226005339471,
+     "b_gal_curvature_conditional": 73692.30964068943,
+     "row_fac_sd": 0.9784578680992126,
+     "member_sd": 0.5085211396217346
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 75.78919323106024,
+    "ci68": [
+     69.48329031274795,
+     82.42435327311266
+    ],
+    "ci90": [
+     65.50288603618695,
+     87.10309042329123
+    ],
+    "sigma": 6.470531480182352,
+    "cdf_at_truth": 0.09922555381565198,
+    "map": 75.0,
+    "width90": 21.600204387104284
+   },
+   "latent": {
+    "median": 74.16011932021121,
+    "ci68": [
+     67.96498669270886,
+     80.78873815821498
+    ],
+    "ci90": [
+     63.97373298045783,
+     85.28603572013786
+    ],
+    "sigma": 6.41187573275306,
+    "cdf_at_truth": 0.1499058442654007,
+    "map": 72.5,
+    "width90": 21.312302739680028
+   },
+   "latent_bgal": {
+    "median": 74.16286766205789,
+    "ci68": [
+     67.96768422033155,
+     80.79159720487435
+    ],
+    "ci90": [
+     63.9773466113815,
+     85.28932839371679
+    ],
+    "sigma": 6.4119564922714005,
+    "cdf_at_truth": 0.14978844848349102,
+    "map": 72.5,
+    "width90": 21.311981782335288
+   },
+   "seed": 90222,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c006/latent_anchor.h5",
+     "sha256": "254a727ed97bc76729530b6b01130ba3109c97cacf573295ee3f2864e5897b3f",
+     "grad_inf": 5.147241521896717e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05579413479448991,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 321.2350353828515,
+     "b_gal_curvature_conditional": 70811.9895010019,
+     "row_fac_sd": 0.9197360873222351,
+     "member_sd": 0.5145227313041687
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c006/latent_anchor_bgal.h5",
+     "sha256": "5efe4da3ac55e56607f833c3325b4ccffa20e76199fa53d2706f4053cf0a08dc",
+     "grad_inf": 5.147241521896717e-10,
+     "b_gal_dispersion": true,
+     "s_b": 0.05579413479448991,
+     "s_b_profile": 0.05579413479448991,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 321.2350353828515,
+     "b_gal_curvature_conditional": 70811.9895010019,
+     "row_fac_sd": 0.9196543097496033,
+     "member_sd": 0.5145805478096008
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 46.478670678581295,
+    "ci68": [
+     39.573051022302344,
+     53.50375545083515
+    ],
+    "ci90": [
+     35.01285658403242,
+     58.202470869922024
+    ],
+    "sigma": 6.965352214266403,
+    "cdf_at_truth": 0.998237992843474,
+    "map": 47.5,
+    "width90": 23.189614285889604
+   },
+   "latent": {
+    "median": 34.118323748263656,
+    "ci68": [
+     28.135594439436744,
+     40.241817755380275
+    ],
+    "ci90": [
+     24.482411833782404,
+     44.47199834286262
+    ],
+    "sigma": 6.053111657971765,
+    "cdf_at_truth": 0.9999988955135002,
+    "map": 35.0,
+    "width90": 19.989586509080215
+   },
+   "latent_bgal": {
+    "median": 34.103329666629826,
+    "ci68": [
+     28.08966029666482,
+     40.25765574461865
+    ],
+    "ci90": [
+     24.401799581292913,
+     44.49444261899687
+    ],
+    "sigma": 6.083997723976916,
+    "cdf_at_truth": 0.9999988582951492,
+    "map": 35.0,
+    "width90": 20.092643037703958
+   },
+   "seed": 90259,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c007/latent_anchor.h5",
+     "sha256": "8121adb6a6c9cd93e5ac14198e747c9bcc25af73d01f27948e25cf37ebf33a60",
+     "grad_inf": 1.7011503317121424e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.050172055877182306,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 397.2612505966681,
+     "b_gal_curvature_conditional": 270206.6523236087,
+     "row_fac_sd": 0.8651304244995117,
+     "member_sd": 0.50982666015625
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c007/latent_anchor_bgal.h5",
+     "sha256": "3cc201fb45d0abdb9c5a03f40c3768b300b1433ba5f2b15a879d3f7d622f7051",
+     "grad_inf": 1.7011503317121424e-11,
+     "b_gal_dispersion": true,
+     "s_b": 0.050172055877182306,
+     "s_b_profile": 0.050172055877182306,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 397.2612505966681,
+     "b_gal_curvature_conditional": 270206.6523236087,
+     "row_fac_sd": 0.8657385110855103,
+     "member_sd": 0.5105186700820923
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 67.27001089319872,
+    "ci68": [
+     59.0310606497422,
+     75.97668877104074
+    ],
+    "ci90": [
+     53.82868922172371,
+     81.94933641283707
+    ],
+    "sigma": 8.47281406064927,
+    "cdf_at_truth": 0.5219212950799442,
+    "map": 67.5,
+    "width90": 28.120647191113363
+   },
+   "latent": {
+    "median": 66.74389162556243,
+    "ci68": [
+     58.32254766862,
+     75.56088644238875
+    ],
+    "ci90": [
+     52.919086804724444,
+     81.6931177609133
+    ],
+    "sigma": 8.619169386884376,
+    "cdf_at_truth": 0.5459770219225971,
+    "map": 67.5,
+    "width90": 28.774030956188852
+   },
+   "latent_bgal": {
+    "median": 66.75816512199019,
+    "ci68": [
+     58.34001060985124,
+     75.57438268067294
+    ],
+    "ci90": [
+     52.93766647153105,
+     81.70425790913521
+    ],
+    "sigma": 8.61718603541085,
+    "cdf_at_truth": 0.5453314823072234,
+    "map": 67.5,
+    "width90": 28.766591437604156
+   },
+   "seed": 90296,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c008/latent_anchor.h5",
+     "sha256": "8aa4f2afc14e95268f745adba23fdb43330393570e9428a6cc78e1d1b561fe3d",
+     "grad_inf": 6.641749372704453e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.048559974969381296,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 424.075410926911,
+     "b_gal_curvature_conditional": 51990.60284823383,
+     "row_fac_sd": 1.0103492736816406,
+     "member_sd": 0.5344278216362
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c008/latent_anchor_bgal.h5",
+     "sha256": "525e0f466965405809c6204bd97d4d1720c6013f585b153d7ae348fac85183db",
+     "grad_inf": 6.641749372704453e-10,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.048559974969381296,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 424.075410926911,
+     "b_gal_curvature_conditional": 51990.60284823383,
+     "row_fac_sd": 1.010217308998108,
+     "member_sd": 0.5340902209281921
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 87.00897908345769,
+    "ci68": [
+     79.57438502973828,
+     95.2107169873934
+    ],
+    "ci90": [
+     75.09012009343432,
+     101.59373375626592
+    ],
+    "sigma": 7.818165978827558,
+    "cdf_at_truth": 0.00338339483120138,
+    "map": 87.5,
+    "width90": 26.503613662831597
+   },
+   "latent": {
+    "median": 85.65504946043335,
+    "ci68": [
+     78.49379637020134,
+     93.34733452209043
+    ],
+    "ci90": [
+     74.06379348208301,
+     99.17181101679147
+    ],
+    "sigma": 7.426769075944549,
+    "cdf_at_truth": 0.0045300900992092585,
+    "map": 85.0,
+    "width90": 25.108017534708452
+   },
+   "latent_bgal": {
+    "median": 85.65350961541976,
+    "ci68": [
+     78.49048592659612,
+     93.34717651808639
+    ],
+    "ci90": [
+     74.05806268195732,
+     99.17243441593418
+    ],
+    "sigma": 7.428345295745132,
+    "cdf_at_truth": 0.004548290064443015,
+    "map": 85.0,
+    "width90": 25.114371733976853
+   },
+   "seed": 90333,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c009/latent_anchor.h5",
+     "sha256": "a6004e9dcdbaf59d359044bdeec060451ac845f120f99cbe80c5058035270590",
+     "grad_inf": 2.6081359294494177e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.050579823795581146,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 390.8817336890643,
+     "b_gal_curvature_conditional": 70998.27803171321,
+     "row_fac_sd": 1.0042730569839478,
+     "member_sd": 0.520504891872406
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c009/latent_anchor_bgal.h5",
+     "sha256": "e3df7722f0cc8e3866b962bc9745a98d7b73e401237c2d9dc5b1ba0098350cd8",
+     "grad_inf": 2.6081359294494177e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.050579823795581146,
+     "s_b_profile": 0.050579823795581146,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 390.8817336890643,
+     "b_gal_curvature_conditional": 70998.27803171321,
+     "row_fac_sd": 1.0040699243545532,
+     "member_sd": 0.5203632712364197
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 32.62053454853352,
+    "ci68": [
+     25.786672242372713,
+     39.6564238964182
+    ],
+    "ci90": [
+     22.39692687914757,
+     44.26544406389326
+    ],
+    "sigma": 6.934875827022742,
+    "cdf_at_truth": 0.9999996959760414,
+    "map": 32.5,
+    "width90": 21.86851718474569
+   },
+   "latent": {
+    "median": 33.97538248223774,
+    "ci68": [
+     28.02492081658423,
+     39.88181199754844
+    ],
+    "ci90": [
+     24.304138804478434,
+     43.93410787014443
+    ],
+    "sigma": 5.928445590482104,
+    "cdf_at_truth": 0.9999999614921792,
+    "map": 35.0,
+    "width90": 19.629969065665996
+   },
+   "latent_bgal": {
+    "median": 34.00540500385787,
+    "ci68": [
+     28.061080871778774,
+     39.899741647148545
+    ],
+    "ci90": [
+     24.35206132210338,
+     43.95087237091458
+    ],
+    "sigma": 5.9193303876848855,
+    "cdf_at_truth": 0.9999999612007207,
+    "map": 35.0,
+    "width90": 19.5988110488112
+   },
+   "seed": 90370,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c010/latent_anchor.h5",
+     "sha256": "cd648fc6db743518ce10da1a8081a055ca8695b35c972058039190cfcabffac6",
+     "grad_inf": 5.342393194496253e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05511176146708157,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 329.23910762704327,
+     "b_gal_curvature_conditional": 36549.34417125058,
+     "row_fac_sd": 0.9537288546562195,
+     "member_sd": 0.5137518048286438
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c010/latent_anchor_bgal.h5",
+     "sha256": "d2a7d4fa71b15a573fede19d2ad2c139031307b7a61fe346e7b1f50b17761549",
+     "grad_inf": 5.342393194496253e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05511176146708157,
+     "s_b_profile": 0.05511176146708157,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 329.23910762704327,
+     "b_gal_curvature_conditional": 36549.34417125058,
+     "row_fac_sd": 0.9536058902740479,
+     "member_sd": 0.5138027667999268
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 81.47346929830582,
+    "ci68": [
+     73.21913575142626,
+     90.31407809837803
+    ],
+    "ci90": [
+     68.0802087246803,
+     96.9818929241467
+    ],
+    "sigma": 8.547471173475884,
+    "cdf_at_truth": 0.044832845410014074,
+    "map": 82.5,
+    "width90": 28.901684199466402
+   },
+   "latent": {
+    "median": 79.31297551713986,
+    "ci68": [
+     70.62595414582572,
+     88.41325431425405
+    ],
+    "ci90": [
+     65.23170782492953,
+     94.93443472309829
+    ],
+    "sigma": 8.893650084214165,
+    "cdf_at_truth": 0.08976238839548079,
+    "map": 80.0,
+    "width90": 29.702726898168763
+   },
+   "latent_bgal": {
+    "median": 79.31305968240058,
+    "ci68": [
+     70.62624571732877,
+     88.41347875142434
+    ],
+    "ci90": [
+     65.23238559985388,
+     94.93481627595784
+    ],
+    "sigma": 8.893616517047782,
+    "cdf_at_truth": 0.0897520873222243,
+    "map": 80.0,
+    "width90": 29.70243067610396
+   },
+   "seed": 90407,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c011/latent_anchor.h5",
+     "sha256": "ab1aab686f049bbbc5ce7cfd4cacfec3dd36b0c40dc89a9a8623c8f66ffab5f2",
+     "grad_inf": 2.8093732895584367e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04815304512785575,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 431.2732157043574,
+     "b_gal_curvature_conditional": 58532.16422914131,
+     "row_fac_sd": 0.8984183073043823,
+     "member_sd": 0.5098471641540527
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c011/latent_anchor_bgal.h5",
+     "sha256": "bef36733a6082c5686e4e3b56b816e0a8f8c9b3dacd0bb3c4fa162c4cfbc3b4f",
+     "grad_inf": 2.8093732895584367e-10,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04815304512785575,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 431.2732157043574,
+     "b_gal_curvature_conditional": 58532.16422914131,
+     "row_fac_sd": 0.8981567621231079,
+     "member_sd": 0.5094371438026428
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 60.71800816134465,
+    "ci68": [
+     54.3562916456777,
+     67.5503653993388
+    ],
+    "ci90": [
+     50.45443079455108,
+     72.46454071776978
+    ],
+    "sigma": 6.5970368768305505,
+    "cdf_at_truth": 0.8452424777837336,
+    "map": 60.0,
+    "width90": 22.0101099232187
+   },
+   "latent": {
+    "median": 56.49460049687195,
+    "ci68": [
+     50.19901475529947,
+     63.37623983701437
+    ],
+    "ci90": [
+     46.1534740690487,
+     68.19061280750168
+    ],
+    "sigma": 6.588612540857447,
+    "cdf_at_truth": 0.9447692869771789,
+    "map": 55.0,
+    "width90": 22.03713873845298
+   },
+   "latent_bgal": {
+    "median": 56.49402245956561,
+    "ci68": [
+     50.1986785249199,
+     63.375146188051545
+    ],
+    "ci90": [
+     46.152886880761,
+     68.18911827227075
+    ],
+    "sigma": 6.588233831565823,
+    "cdf_at_truth": 0.9447880700237989,
+    "map": 55.0,
+    "width90": 22.036231391509745
+   },
+   "seed": 90444,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c012/latent_anchor.h5",
+     "sha256": "0ae0f3c7366f22c4f6148571b75ad5fc1dcc4a4bbf1a3582f04c884b093c601e",
+     "grad_inf": 4.7641335321202405e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04934793610502962,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 410.64071979597793,
+     "b_gal_curvature_conditional": 76396.86062850698,
+     "row_fac_sd": 1.0360310077667236,
+     "member_sd": 0.5184425711631775
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c012/latent_anchor_bgal.h5",
+     "sha256": "12e38be5bba9162e4b97e32308a0f6ec43482b2b6a585523d5026e6486a490c8",
+     "grad_inf": 4.7641335321202405e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04934793610502962,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 410.64071979597793,
+     "b_gal_curvature_conditional": 76396.86062850698,
+     "row_fac_sd": 1.0370357036590576,
+     "member_sd": 0.5205750465393066
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 67.93906394643126,
+    "ci68": [
+     60.71357168550107,
+     76.27674091558805
+    ],
+    "ci90": [
+     56.39342656132148,
+     82.45617444251863
+    ],
+    "sigma": 7.781584615043489,
+    "cdf_at_truth": 0.4899007309250902,
+    "map": 67.5,
+    "width90": 26.062747881197147
+   },
+   "latent": {
+    "median": 65.59783872179828,
+    "ci68": [
+     58.339114233739004,
+     73.80582330677532
+    ],
+    "ci90": [
+     53.929293769279674,
+     79.8146219561143
+    ],
+    "sigma": 7.73335453651816,
+    "cdf_at_truth": 0.6087142680987476,
+    "map": 65.0,
+    "width90": 25.88532818683462
+   },
+   "latent_bgal": {
+    "median": 65.59811009453465,
+    "ci68": [
+     58.33976891149433,
+     73.80576658422608
+    ],
+    "ci90": [
+     53.93030010587094,
+     79.81440614140442
+    ],
+    "sigma": 7.732998836365873,
+    "cdf_at_truth": 0.6087061510679205,
+    "map": 65.0,
+    "width90": 25.884106035533478
+   },
+   "seed": 90481,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c013/latent_anchor.h5",
+     "sha256": "4358c56aefd389a662336b3a80701d0d6e5091db2d0e29f8a99f2f8e5804f54d",
+     "grad_inf": 1.078426237199892e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05325380472018983,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 352.6133227622704,
+     "b_gal_curvature_conditional": 52554.067730522795,
+     "row_fac_sd": 0.9062409996986389,
+     "member_sd": 0.5111868381500244
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c013/latent_anchor_bgal.h5",
+     "sha256": "2bc2ef74b29cde940471138b4f82be0a9b0bd830f5539af0d8d7868ae7480069",
+     "grad_inf": 1.078426237199892e-11,
+     "b_gal_dispersion": true,
+     "s_b": 0.05325380472018983,
+     "s_b_profile": 0.05325380472018983,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 352.6133227622704,
+     "b_gal_curvature_conditional": 52554.067730522795,
+     "row_fac_sd": 0.9064757823944092,
+     "member_sd": 0.5115217566490173
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 94.11180450384134,
+    "ci68": [
+     84.1841953535385,
+     107.28385019833371
+    ],
+    "ci90": [
+     78.5804768584095,
+     117.96409332074018
+    ],
+    "sigma": 11.549827422397605,
+    "cdf_at_truth": 0.0009191607328704573,
+    "map": 92.5,
+    "width90": 39.38361646233068
+   },
+   "latent": {
+    "median": 90.99489678912482,
+    "ci68": [
+     81.79763254054305,
+     102.74460875655858
+    ],
+    "ci90": [
+     76.58018799337178,
+     112.51459663011813
+    ],
+    "sigma": 10.473488108007764,
+    "cdf_at_truth": 0.001812814260537575,
+    "map": 87.5,
+    "width90": 35.934408636746355
+   },
+   "latent_bgal": {
+    "median": 90.99137114529103,
+    "ci68": [
+     81.7938346214607,
+     102.74028405083746
+    ],
+    "ci90": [
+     76.57637992187247,
+     112.5099387415179
+    ],
+    "sigma": 10.473224714688378,
+    "cdf_at_truth": 0.0018155764395465029,
+    "map": 87.5,
+    "width90": 35.93355881964543
+   },
+   "seed": 90518,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c014/latent_anchor.h5",
+     "sha256": "c184ab4971d6391f589d613010241b2b6adc6ace5ff1a20f314c5b2602bc8e22",
+     "grad_inf": 9.489298236076138e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.051051473375367376,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 383.6926136495749,
+     "b_gal_curvature_conditional": 75120.61492706386,
+     "row_fac_sd": 0.981057345867157,
+     "member_sd": 0.513270378112793
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c014/latent_anchor_bgal.h5",
+     "sha256": "d6fcfdd6966d6331f02374ee7ed791bc757249daad238894c49ed7e448e6a21c",
+     "grad_inf": 9.489298236076138e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.051051473375367376,
+     "s_b_profile": 0.051051473375367376,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 383.6926136495749,
+     "b_gal_curvature_conditional": 75120.61492706386,
+     "row_fac_sd": 0.9812396764755249,
+     "member_sd": 0.5131872296333313
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 68.06485688585684,
+    "ci68": [
+     60.84063813700049,
+     75.49614797137184
+    ],
+    "ci90": [
+     56.258462042119596,
+     80.500882296154
+    ],
+    "sigma": 7.3277549171856755,
+    "cdf_at_truth": 0.4824573094770707,
+    "map": 67.5,
+    "width90": 24.242420254034407
+   },
+   "latent": {
+    "median": 66.95489539838847,
+    "ci68": [
+     60.03063932021535,
+     74.05548391468135
+    ],
+    "ci90": [
+     55.34643246135526,
+     78.83283958629032
+    ],
+    "sigma": 7.012422297232998,
+    "cdf_at_truth": 0.5440924305163007,
+    "map": 67.5,
+    "width90": 23.486407124935056
+   },
+   "latent_bgal": {
+    "median": 66.96069187180525,
+    "ci68": [
+     60.03975094733169,
+     74.05949463025408
+    ],
+    "ci90": [
+     55.36041151413518,
+     78.836863319472
+    ],
+    "sigma": 7.0098718414611945,
+    "cdf_at_truth": 0.543781964533887,
+    "map": 67.5,
+    "width90": 23.476451805336822
+   },
+   "seed": 90555,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c015/latent_anchor.h5",
+     "sha256": "832af911c0a30b4d0e9a095d6eee835739cbe0a7763db5c651585e80a5c0f87d",
+     "grad_inf": 5.044853423896711e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05215957224952641,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 367.5631439883582,
+     "b_gal_curvature_conditional": 59455.49788543515,
+     "row_fac_sd": 0.9621352553367615,
+     "member_sd": 0.5239303708076477
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c015/latent_anchor_bgal.h5",
+     "sha256": "d29efadb133476da9e834fefd0faa3885b0edd7548568e8c14ac22238cf8f9ef",
+     "grad_inf": 5.044853423896711e-13,
+     "b_gal_dispersion": true,
+     "s_b": 0.05215957224952641,
+     "s_b_profile": 0.05215957224952641,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 367.5631439883582,
+     "b_gal_curvature_conditional": 59455.49788543515,
+     "row_fac_sd": 0.9628905653953552,
+     "member_sd": 0.5253338813781738
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 81.6464806413455,
+    "ci68": [
+     74.6134547055201,
+     89.51103949353406
+    ],
+    "ci90": [
+     70.32523010215353,
+     95.20507180381209
+    ],
+    "sigma": 7.448792394006979,
+    "cdf_at_truth": 0.019984367540931344,
+    "map": 80.0,
+    "width90": 24.879841701658563
+   },
+   "latent": {
+    "median": 78.32125236852933,
+    "ci68": [
+     71.2944275346128,
+     85.98473760350393
+    ],
+    "ci90": [
+     67.02379792046499,
+     91.54009304067827
+    ],
+    "sigma": 7.345155034445568,
+    "cdf_at_truth": 0.06168853426945238,
+    "map": 77.5,
+    "width90": 24.516295120213286
+   },
+   "latent_bgal": {
+    "median": 78.32786907809566,
+    "ci68": [
+     71.30109344396034,
+     85.99132531660504
+    ],
+    "ci90": [
+     67.03175043588658,
+     91.54574121695634
+    ],
+    "sigma": 7.345115936322351,
+    "cdf_at_truth": 0.061567764621593614,
+    "map": 77.5,
+    "width90": 24.513990781069765
+   },
+   "seed": 90592,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c016/latent_anchor.h5",
+     "sha256": "e29b33ef12581e43f36b3f737d85b6d486bf8857f1dacb6a396b43c9221d3db7",
+     "grad_inf": 1.4187873098592263e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05000374633631264,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 399.940065355142,
+     "b_gal_curvature_conditional": 129297.688193802,
+     "row_fac_sd": 1.0274003744125366,
+     "member_sd": 0.5107764005661011
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c016/latent_anchor_bgal.h5",
+     "sha256": "b8280e27b7f467336680589ece2eb15d4a3eb2cd3a91a249d897bd810539c6cc",
+     "grad_inf": 1.4187873098592263e-11,
+     "b_gal_dispersion": true,
+     "s_b": 0.05000374633631264,
+     "s_b_profile": 0.05000374633631264,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 399.940065355142,
+     "b_gal_curvature_conditional": 129297.688193802,
+     "row_fac_sd": 1.0282529592514038,
+     "member_sd": 0.5121796131134033
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 68.83211722221873,
+    "ci68": [
+     63.02968489991814,
+     75.0560522783868
+    ],
+    "ci90": [
+     59.45803003057486,
+     79.58852191591792
+    ],
+    "sigma": 6.0131836892343316,
+    "cdf_at_truth": 0.42752217870391573,
+    "map": 67.5,
+    "width90": 20.130491885343062
+   },
+   "latent": {
+    "median": 65.21665982628632,
+    "ci68": [
+     59.47715477269876,
+     71.46949589255462
+    ],
+    "ci90": [
+     55.86862503724424,
+     75.85542355300451
+    ],
+    "sigma": 5.996170559927929,
+    "cdf_at_truth": 0.6617752499500918,
+    "map": 65.0,
+    "width90": 19.98679851576027
+   },
+   "latent_bgal": {
+    "median": 65.22085552824014,
+    "ci68": [
+     59.48208115213563,
+     71.47324541240977
+    ],
+    "ci90": [
+     55.87270215923088,
+     75.85969785457993
+    ],
+    "sigma": 5.99558213013707,
+    "cdf_at_truth": 0.6615386322379762,
+    "map": 65.0,
+    "width90": 19.98699569534905
+   },
+   "seed": 90629,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c017/latent_anchor.h5",
+     "sha256": "23b1cc7d064ac80fd780e4e78c1a1b62bd3f3f362bbe364c39c1f3082656e2f2",
+     "grad_inf": 9.71533964388982e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0457628644056418,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 477.5002460387477,
+     "b_gal_curvature_conditional": 148496.3989720953,
+     "row_fac_sd": 0.9959694743156433,
+     "member_sd": 0.49736934900283813
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c017/latent_anchor_bgal.h5",
+     "sha256": "f9b242139417f1eb4e8b9e7eb0ac03c831eea664068d89675b3db4682458b8a4",
+     "grad_inf": 9.71533964388982e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.0457628644056418,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 477.5002460387477,
+     "b_gal_curvature_conditional": 148496.3989720953,
+     "row_fac_sd": 0.9971758723258972,
+     "member_sd": 0.49905502796173096
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 76.85544010309003,
+    "ci68": [
+     69.60493644301505,
+     84.5161506237237
+    ],
+    "ci90": [
+     65.14267356081163,
+     89.74863227256553
+    ],
+    "sigma": 7.455607090354327,
+    "cdf_at_truth": 0.10293763410168387,
+    "map": 77.5,
+    "width90": 24.6059587117539
+   },
+   "latent": {
+    "median": 70.72962426456793,
+    "ci68": [
+     63.33870393271209,
+     78.57796993805374
+    ],
+    "ci90": [
+     58.478663992816465,
+     83.92504464273013
+    ],
+    "sigma": 7.619633002670824,
+    "cdf_at_truth": 0.3428988110086135,
+    "map": 70.0,
+    "width90": 25.446380649913664
+   },
+   "latent_bgal": {
+    "median": 70.66676742579378,
+    "ci68": [
+     63.28055718480083,
+     78.51432088257711
+    ],
+    "ci90": [
+     58.4246956830739,
+     83.86713071148363
+    ],
+    "sigma": 7.616881848888141,
+    "cdf_at_truth": 0.3460145865546343,
+    "map": 70.0,
+    "width90": 25.442435028409726
+   },
+   "seed": 90666,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c018/latent_anchor.h5",
+     "sha256": "c06a039cfa0f3b65a8ad0e068cd120942017618af86efd3083583e5357aa03e8",
+     "grad_inf": 4.688915922201886e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0540994479988587,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 341.6758884276278,
+     "b_gal_curvature_conditional": 27472.861372494335,
+     "row_fac_sd": 0.8535189628601074,
+     "member_sd": 0.5277726054191589
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c018/latent_anchor_bgal.h5",
+     "sha256": "3c0cdc479e28962da6572ff50a6ea12aa746fc3c2177262b5f7ff7fdee75f2fb",
+     "grad_inf": 4.688915922201886e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.0540994479988587,
+     "s_b_profile": 0.0540994479988587,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 341.6758884276278,
+     "b_gal_curvature_conditional": 27472.861372494335,
+     "row_fac_sd": 0.8535990118980408,
+     "member_sd": 0.5279335379600525
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 36.24238793400977,
+    "ci68": [
+     30.326381765118818,
+     41.86265644753379
+    ],
+    "ci90": [
+     26.11923566301993,
+     45.393772023519574
+    ],
+    "sigma": 5.768137341207485,
+    "cdf_at_truth": 0.9999999803622104,
+    "map": 37.5,
+    "width90": 19.274536360499646
+   },
+   "latent": {
+    "median": 28.225535529120073,
+    "ci68": [
+     23.563819287940163,
+     33.27839800517082
+    ],
+    "ci90": [
+     21.308747796585397,
+     36.669964944990156
+    ],
+    "sigma": 4.857289358615329,
+    "cdf_at_truth": 0.9999999999992123,
+    "map": 27.5,
+    "width90": 15.361217148404759
+   },
+   "latent_bgal": {
+    "median": 28.076616925195143,
+    "ci68": [
+     23.459008060919547,
+     33.098245292310374
+    ],
+    "ci90": [
+     21.249320198199143,
+     36.52097661427455
+    ],
+    "sigma": 4.819618615695413,
+    "cdf_at_truth": 0.999999999999322,
+    "map": 27.5,
+    "width90": 15.271656416075409
+   },
+   "seed": 90703,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c019/latent_anchor.h5",
+     "sha256": "db9ecbf059bf5954d46eb6123f8dff596ff5641d4a174753df757eda871f2abb",
+     "grad_inf": 8.711253940418828e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.049467112387049914,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 408.6644701085752,
+     "b_gal_curvature_conditional": 417717.3557270351,
+     "row_fac_sd": 0.9984988570213318,
+     "member_sd": 0.4979758858680725
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c019/latent_anchor_bgal.h5",
+     "sha256": "07513a9f057e8fd5219b9eb1bf9f44fb9777cfa3b0e3b98ee2b220131e280602",
+     "grad_inf": 8.711253940418828e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.049467112387049914,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 408.6644701085752,
+     "b_gal_curvature_conditional": 417717.3557270351,
+     "row_fac_sd": 0.9982455372810364,
+     "member_sd": 0.49749937653541565
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 47.32450568688374,
+    "ci68": [
+     37.521827791412775,
+     56.59229472961659
+    ],
+    "ci90": [
+     30.86029972492253,
+     62.29319572867162
+    ],
+    "sigma": 9.535233469101907,
+    "cdf_at_truth": 0.9886347968718461,
+    "map": 47.5,
+    "width90": 31.43289600374909
+   },
+   "latent": {
+    "median": 52.55280299572248,
+    "ci68": [
+     44.16896131911206,
+     60.149049903736994
+    ],
+    "ci90": [
+     37.954542433996444,
+     64.93929069580085
+    ],
+    "sigma": 7.990044292312469,
+    "cdf_at_truth": 0.9783682311468637,
+    "map": 52.5,
+    "width90": 26.984748261804405
+   },
+   "latent_bgal": {
+    "median": 52.05468438870565,
+    "ci68": [
+     43.39316145340119,
+     59.83316308037767
+    ],
+    "ci90": [
+     36.96343492710337,
+     64.7433290263252
+    ],
+    "sigma": 8.220000813488241,
+    "cdf_at_truth": 0.9798317588598283,
+    "map": 52.5,
+    "width90": 27.779894099221828
+   },
+   "seed": 90740,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c020/latent_anchor.h5",
+     "sha256": "f9464478becc2730700707c72148600ad89b2e21fc85dcc73be9a97617fb9529",
+     "grad_inf": 1.0641487691032125e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04739397993061684,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 445.1984456577047,
+     "b_gal_curvature_conditional": 54618.64296797226,
+     "row_fac_sd": 1.0276840925216675,
+     "member_sd": 0.5176265239715576
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c020/latent_anchor_bgal.h5",
+     "sha256": "cc80e5abd47be33e10fa1fbdc5fa46deb1c683c3b74ee910ec0c2518241ece20",
+     "grad_inf": 1.0641487691032125e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04739397993061684,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 445.1984456577047,
+     "b_gal_curvature_conditional": 54618.64296797226,
+     "row_fac_sd": 1.0280503034591675,
+     "member_sd": 0.5184729099273682
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 54.975425654765445,
+    "ci68": [
+     49.0827061250023,
+     61.30707649434237
+    ],
+    "ci90": [
+     45.429130745055915,
+     65.72788138181551
+    ],
+    "sigma": 6.112185184670036,
+    "cdf_at_truth": 0.9736902490388213,
+    "map": 55.0,
+    "width90": 20.298750636759593
+   },
+   "latent": {
+    "median": 38.97308508575292,
+    "ci68": [
+     33.15099943233641,
+     44.95208870107071
+    ],
+    "ci90": [
+     29.453000860941092,
+     49.21551363587388
+    ],
+    "sigma": 5.900544634367147,
+    "cdf_at_truth": 0.9999888756566899,
+    "map": 37.5,
+    "width90": 19.76251277493279
+   },
+   "latent_bgal": {
+    "median": 38.74415854306949,
+    "ci68": [
+     32.930981536666,
+     44.76725265840072
+    ],
+    "ci90": [
+     29.143327097528424,
+     49.018577507835715
+    ],
+    "sigma": 5.918135560867359,
+    "cdf_at_truth": 0.9999900074596273,
+    "map": 37.5,
+    "width90": 19.87525041030729
+   },
+   "seed": 90777,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c021/latent_anchor.h5",
+     "sha256": "d34b921e3467105203d421194d4d357fa09d33d5134c63bd7691307c2a63c5bb",
+     "grad_inf": 8.05200350839641e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.042942552782767034,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 542.280869490729,
+     "b_gal_curvature_conditional": 186821.32648983764,
+     "row_fac_sd": 0.9717968702316284,
+     "member_sd": 0.5034163594245911
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c021/latent_anchor_bgal.h5",
+     "sha256": "b3676e51d945e4f01c69b7e1e61698da9de5a20a449f24995d01284e8774d5c7",
+     "grad_inf": 8.05200350839641e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.042942552782767034,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 542.280869490729,
+     "b_gal_curvature_conditional": 186821.32648983764,
+     "row_fac_sd": 0.971904456615448,
+     "member_sd": 0.5037373304367065
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 82.24896649108672,
+    "ci68": [
+     74.90070866844938,
+     90.17302154740865
+    ],
+    "ci90": [
+     70.19945818909146,
+     95.63970040802448
+    ],
+    "sigma": 7.636156439479635,
+    "cdf_at_truth": 0.023437583805172975,
+    "map": 82.5,
+    "width90": 25.440242218933022
+   },
+   "latent": {
+    "median": 79.01342899084865,
+    "ci68": [
+     71.41207087241253,
+     86.80014657939817
+    ],
+    "ci90": [
+     66.52185868325266,
+     92.18391159435774
+    ],
+    "sigma": 7.694037853492823,
+    "cdf_at_truth": 0.06744557224300163,
+    "map": 80.0,
+    "width90": 25.66205291110508
+   },
+   "latent_bgal": {
+    "median": 79.01894310429155,
+    "ci68": [
+     71.41996065176893,
+     86.80391649127833
+    ],
+    "ci90": [
+     66.5323068924534,
+     92.18671910834834
+    ],
+    "sigma": 7.691977919754699,
+    "cdf_at_truth": 0.06728501819757,
+    "map": 80.0,
+    "width90": 25.654412215894936
+   },
+   "seed": 90814,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c022/latent_anchor.h5",
+     "sha256": "9d846ce8c0d2e47fe19279c78478abbdfe1a1660c7c3309c36fd19b9f62fc00a",
+     "grad_inf": 5.42699218897269e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0449797968042411,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 494.27087647836015,
+     "b_gal_curvature_conditional": 126374.92219818426,
+     "row_fac_sd": 1.084549069404602,
+     "member_sd": 0.5300439596176147
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c022/latent_anchor_bgal.h5",
+     "sha256": "3ca2fd483469c641a7db3820cf1f809adb254e95769ebcacc2a36f0f1c84c6ff",
+     "grad_inf": 5.42699218897269e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.0449797968042411,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 494.27087647836015,
+     "b_gal_curvature_conditional": 126374.92219818426,
+     "row_fac_sd": 1.0843887329101562,
+     "member_sd": 0.5299044251441956
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 40.973020540824635,
+    "ci68": [
+     31.58853480432696,
+     49.71750302313363
+    ],
+    "ci90": [
+     25.61853244716463,
+     55.27247449807864
+    ],
+    "sigma": 9.064484109403335,
+    "cdf_at_truth": 0.9990388561066902,
+    "map": 42.5,
+    "width90": 29.653942050914008
+   },
+   "latent": {
+    "median": 37.01567101720687,
+    "ci68": [
+     30.33702830292014,
+     43.72349647943557
+    ],
+    "ci90": [
+     25.93879969153482,
+     48.0736970860962
+    ],
+    "sigma": 6.693234088257714,
+    "cdf_at_truth": 0.9999933968298317,
+    "map": 37.5,
+    "width90": 22.134897394561385
+   },
+   "latent_bgal": {
+    "median": 37.05659937308309,
+    "ci68": [
+     30.37089182482039,
+     43.76912938134569
+    ],
+    "ci90": [
+     25.978654105081326,
+     48.1300155295586
+    ],
+    "sigma": 6.699118778262651,
+    "cdf_at_truth": 0.9999932266059404,
+    "map": 37.5,
+    "width90": 22.151361424477273
+   },
+   "seed": 90851,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c023/latent_anchor.h5",
+     "sha256": "51165491b99f5797cc3117b0e5c2f23884f43b76b932cb859941ae2cb8b94f3e",
+     "grad_inf": 3.5653702212812277e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05081682982460392,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 387.24414781039377,
+     "b_gal_curvature_conditional": 62258.775809357125,
+     "row_fac_sd": 1.0315455198287964,
+     "member_sd": 0.5201325416564941
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c023/latent_anchor_bgal.h5",
+     "sha256": "e6359823e7033a279bd34a89090a0e328d837c633fa23e99dea4bbd153f1491d",
+     "grad_inf": 3.5653702212812277e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05081682982460392,
+     "s_b_profile": 0.05081682982460392,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 387.24414781039377,
+     "b_gal_curvature_conditional": 62258.775809357125,
+     "row_fac_sd": 1.030809998512268,
+     "member_sd": 0.5196691751480103
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 97.53944912455111,
+    "ci68": [
+     88.73321244021805,
+     106.5846549084522
+    ],
+    "ci90": [
+     83.11600749798194,
+     112.72980794103967
+    ],
+    "sigma": 8.92572123411707,
+    "cdf_at_truth": 0.00010036349281912309,
+    "map": 97.5,
+    "width90": 29.613800443057727
+   },
+   "latent": {
+    "median": 95.82985372585453,
+    "ci68": [
+     86.39351375211189,
+     105.03474567781771
+    ],
+    "ci90": [
+     80.83671488213213,
+     111.43676887650189
+    ],
+    "sigma": 9.320615962852912,
+    "cdf_at_truth": 0.00037796700587808133,
+    "map": 95.0,
+    "width90": 30.60005399436976
+   },
+   "latent_bgal": {
+    "median": 95.83095782368008,
+    "ci68": [
+     86.39462802672004,
+     105.03623436056212
+    ],
+    "ci90": [
+     80.8379056082337,
+     111.43813947864146
+    ],
+    "sigma": 9.320803166921038,
+    "cdf_at_truth": 0.0003776087254950115,
+    "map": 95.0,
+    "width90": 30.600233870407763
+   },
+   "seed": 90888,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c024/latent_anchor.h5",
+     "sha256": "2ff267003980f552cdf8e9338e6279990fd021a9f627e455ead30fe08c850a5b",
+     "grad_inf": 4.835021272242557e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05185741188145603,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 371.8590229863039,
+     "b_gal_curvature_conditional": 85263.82579420945,
+     "row_fac_sd": 0.9127411246299744,
+     "member_sd": 0.5062876343727112
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c024/latent_anchor_bgal.h5",
+     "sha256": "5a103643e0eae554101cb00aa7ffe197d4e9ee07e8bf540b8884f9704c4b30a9",
+     "grad_inf": 4.835021272242557e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05185741188145603,
+     "s_b_profile": 0.05185741188145603,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 371.8590229863039,
+     "b_gal_curvature_conditional": 85263.82579420945,
+     "row_fac_sd": 0.9140651226043701,
+     "member_sd": 0.5084360837936401
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 28.75634620655493,
+    "ci68": [
+     23.352727807360047,
+     35.13408986468523
+    ],
+    "ci90": [
+     21.12530274142741,
+     39.66038036265725
+    ],
+    "sigma": 5.890681028662591,
+    "cdf_at_truth": 0.999999865450901,
+    "map": 27.5,
+    "width90": 18.53507762122984
+   },
+   "latent": {
+    "median": 26.5639683396149,
+    "ci68": [
+     22.25537816032186,
+     32.23322856452845
+    ],
+    "ci90": [
+     20.70480567510058,
+     36.51623182498737
+    ],
+    "sigma": 4.988925202103296,
+    "cdf_at_truth": 0.999999978847625,
+    "map": 25.0,
+    "width90": 15.811426149886792
+   },
+   "latent_bgal": {
+    "median": 26.475308499313062,
+    "ci68": [
+     22.204903100983024,
+     32.135610994186464
+    ],
+    "ci90": [
+     20.689032219057196,
+     36.394752065797285
+    ],
+    "sigma": 4.96535394660172,
+    "cdf_at_truth": 0.9999999805622253,
+    "map": 25.0,
+    "width90": 15.705719846740088
+   },
+   "seed": 90925,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c025/latent_anchor.h5",
+     "sha256": "bed2268f6ba8ca2105f81759eab72e53245793c2ce997f90d130f5145373a07e",
+     "grad_inf": 2.2269963650956015e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.048854742339160234,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 418.973491236422,
+     "b_gal_curvature_conditional": 99929.95823767877,
+     "row_fac_sd": 0.9859829545021057,
+     "member_sd": 0.5150415897369385
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c025/latent_anchor_bgal.h5",
+     "sha256": "b07f6050047d97d9399e4b1811948781fd66ffca522dbd160d5d3274ffe9d5eb",
+     "grad_inf": 2.2269963650956015e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.048854742339160234,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 418.973491236422,
+     "b_gal_curvature_conditional": 99929.95823767877,
+     "row_fac_sd": 0.9864135384559631,
+     "member_sd": 0.5162988305091858
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 82.73239971188409,
+    "ci68": [
+     74.4090961643086,
+     91.98458591150748
+    ],
+    "ci90": [
+     69.32209264266147,
+     99.00018249150057
+    ],
+    "sigma": 8.787744873599443,
+    "cdf_at_truth": 0.03117398776253128,
+    "map": 82.5,
+    "width90": 29.678089848839093
+   },
+   "latent": {
+    "median": 80.69201059405076,
+    "ci68": [
+     72.09194850168164,
+     90.43632188153025
+    ],
+    "ci90": [
+     66.85528808320935,
+     97.3930806483079
+    ],
+    "sigma": 9.172186689924303,
+    "cdf_at_truth": 0.06192439394915128,
+    "map": 80.0,
+    "width90": 30.537792565098556
+   },
+   "latent_bgal": {
+    "median": 80.70533146683772,
+    "ci68": [
+     72.11053079010446,
+     90.44432418610931
+    ],
+    "ci90": [
+     66.87634620070098,
+     97.3966538112419
+    ],
+    "sigma": 9.166896698002425,
+    "cdf_at_truth": 0.06164180961470797,
+    "map": 80.0,
+    "width90": 30.520307610540925
+   },
+   "seed": 90962,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c026/latent_anchor.h5",
+     "sha256": "cf273c77faf5b0cead28314bf6d93b04fbb77252a789e54f721b88fdeca2c78c",
+     "grad_inf": 3.972244755345855e-11,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05461656733353019,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 335.23642275670136,
+     "b_gal_curvature_conditional": 90750.63690917773,
+     "row_fac_sd": 0.9518024325370789,
+     "member_sd": 0.5209633708000183
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c026/latent_anchor_bgal.h5",
+     "sha256": "b693dc13d345f3a997f47932259e45983dd240a131679bfc55352b77edcc36e7",
+     "grad_inf": 3.972244755345855e-11,
+     "b_gal_dispersion": true,
+     "s_b": 0.05461656733353019,
+     "s_b_profile": 0.05461656733353019,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 335.23642275670136,
+     "b_gal_curvature_conditional": 90750.63690917773,
+     "row_fac_sd": 0.9519058465957642,
+     "member_sd": 0.5218730568885803
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 99.224210146933,
+    "ci68": [
+     88.8246306695166,
+     111.39628943008661
+    ],
+    "ci90": [
+     82.81202800752477,
+     119.45357269660771
+    ],
+    "sigma": 11.285829380285008,
+    "cdf_at_truth": 0.00019267668617326474,
+    "map": 97.5,
+    "width90": 36.641544689082934
+   },
+   "latent": {
+    "median": 98.68802868055313,
+    "ci68": [
+     88.84439967699603,
+     110.15059874814095
+    ],
+    "ci90": [
+     82.99796685263733,
+     117.60818780109821
+    ],
+    "sigma": 10.653099535572458,
+    "cdf_at_truth": 0.0001552886192102673,
+    "map": 97.5,
+    "width90": 34.61022094846088
+   },
+   "latent_bgal": {
+    "median": 98.68648145664073,
+    "ci68": [
+     88.84307641002086,
+     110.14897363132627
+    ],
+    "ci90": [
+     82.99696606616648,
+     117.60678570832215
+    ],
+    "sigma": 10.652948610652707,
+    "cdf_at_truth": 0.0001553307655657579,
+    "map": 97.5,
+    "width90": 34.60981964215567
+   },
+   "seed": 90999,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c027/latent_anchor.h5",
+     "sha256": "bd55a6aa3568bfb29ff3e0cd725a1cf4cc8c5a5101e151733a571f82959d2a9d",
+     "grad_inf": 1.6322498908039051e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.051567061958957564,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 376.05833923369937,
+     "b_gal_curvature_conditional": 76835.70108018686,
+     "row_fac_sd": 0.8945581912994385,
+     "member_sd": 0.5165919065475464
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c027/latent_anchor_bgal.h5",
+     "sha256": "696aba892accc4a4fe3a790736e5e3bd7f29eb23263a777574d652f32ee2449d",
+     "grad_inf": 1.6322498908039051e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.051567061958957564,
+     "s_b_profile": 0.051567061958957564,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 376.05833923369937,
+     "b_gal_curvature_conditional": 76835.70108018686,
+     "row_fac_sd": 0.8951807618141174,
+     "member_sd": 0.5175163149833679
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 72.4449769445382,
+    "ci68": [
+     66.40299491720945,
+     79.36997619683683
+    ],
+    "ci90": [
+     62.8378051661345,
+     84.66057211533708
+    ],
+    "sigma": 6.483490639813688,
+    "cdf_at_truth": 0.21858370416031633,
+    "map": 72.5,
+    "width90": 21.822766949202574
+   },
+   "latent": {
+    "median": 71.09872254484273,
+    "ci68": [
+     65.20417358327738,
+     77.79330522615936
+    ],
+    "ci90": [
+     61.45721983267443,
+     82.97361520760063
+    ],
+    "sigma": 6.29456582144099,
+    "cdf_at_truth": 0.2897476924280021,
+    "map": 70.0,
+    "width90": 21.516395374926198
+   },
+   "latent_bgal": {
+    "median": 71.0995165541731,
+    "ci68": [
+     65.20473048948357,
+     77.79460961737652
+    ],
+    "ci90": [
+     61.45787318118005,
+     82.97528827988326
+    ],
+    "sigma": 6.294939563946478,
+    "cdf_at_truth": 0.2897067636067458,
+    "map": 70.0,
+    "width90": 21.51741509870321
+   },
+   "seed": 91036,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c028/latent_anchor.h5",
+     "sha256": "5162b5c8750c462149770abcb2ecbcc3ce2d65dab5960652134fddb5cc31e77d",
+     "grad_inf": 7.165118498519973e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.052693043428992184,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 360.15830495685805,
+     "b_gal_curvature_conditional": 141102.3103015243,
+     "row_fac_sd": 0.9352542757987976,
+     "member_sd": 0.5164611339569092
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c028/latent_anchor_bgal.h5",
+     "sha256": "71d97913f5ce7aeef0d75b386f35fd02a145593578993c2d513a5117ed275c01",
+     "grad_inf": 7.165118498519973e-10,
+     "b_gal_dispersion": true,
+     "s_b": 0.052693043428992184,
+     "s_b_profile": 0.052693043428992184,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 360.15830495685805,
+     "b_gal_curvature_conditional": 141102.3103015243,
+     "row_fac_sd": 0.935368537902832,
+     "member_sd": 0.5166583061218262
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 89.6918644235787,
+    "ci68": [
+     76.90140891787367,
+     103.65019855602095
+    ],
+    "ci90": [
+     70.2387863505039,
+     113.24311265087074
+    ],
+    "sigma": 13.374394819073643,
+    "cdf_at_truth": 0.027268552100160652,
+    "map": 87.5,
+    "width90": 43.00432630036684
+   },
+   "latent": {
+    "median": 87.40359260724314,
+    "ci68": [
+     72.9296530333459,
+     101.69157103339398
+    ],
+    "ci90": [
+     65.88441047108562,
+     110.86514278613534
+    ],
+    "sigma": 14.380959000024042,
+    "cdf_at_truth": 0.0722017688542458,
+    "map": 87.5,
+    "width90": 44.98073231504972
+   },
+   "latent_bgal": {
+    "median": 87.40445716039277,
+    "ci68": [
+     72.93242265004169,
+     101.6908583739401
+    ],
+    "ci90": [
+     65.88690493482926,
+     110.86438947243181
+    ],
+    "sigma": 14.379217861949208,
+    "cdf_at_truth": 0.0721649512419797,
+    "map": 87.5,
+    "width90": 44.97748453760255
+   },
+   "seed": 91073,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c029/latent_anchor.h5",
+     "sha256": "8ec936f93435fd32ad8829a2cf734ef650e626d2c3b18c64489ddc406e3d9705",
+     "grad_inf": 2.262190434976219e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0521339729635077,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 367.92420084438345,
+     "b_gal_curvature_conditional": 65217.02952019568,
+     "row_fac_sd": 0.9809734225273132,
+     "member_sd": 0.5249407887458801
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c029/latent_anchor_bgal.h5",
+     "sha256": "64f236c6aa49eaea0c896690756a7a014fabecc4ccf82db04e1e0136c4c57bcb",
+     "grad_inf": 2.262190434976219e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.0521339729635077,
+     "s_b_profile": 0.0521339729635077,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 367.92420084438345,
+     "b_gal_curvature_conditional": 65217.02952019568,
+     "row_fac_sd": 0.9814165234565735,
+     "member_sd": 0.525719940662384
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 70.4287874974748,
+    "ci68": [
+     64.85409463769446,
+     77.03620324730355
+    ],
+    "ci90": [
+     60.95805529442043,
+     81.97595130276015
+    ],
+    "sigma": 6.091054304804544,
+    "cdf_at_truth": 0.31794801680824436,
+    "map": 70.0,
+    "width90": 21.01789600833972
+   },
+   "latent": {
+    "median": 70.44639217492985,
+    "ci68": [
+     64.57393418863396,
+     77.2658927520124
+    ],
+    "ci90": [
+     60.620291269570096,
+     82.34018728485425
+    ],
+    "sigma": 6.345979281689225,
+    "cdf_at_truth": 0.32347205311650123,
+    "map": 70.0,
+    "width90": 21.719896015284156
+   },
+   "latent_bgal": {
+    "median": 70.4495893745343,
+    "ci68": [
+     64.57796171112193,
+     77.26875622109216
+    ],
+    "ci90": [
+     60.62323678252126,
+     82.34277006152394
+    ],
+    "sigma": 6.345397254985116,
+    "cdf_at_truth": 0.32328483450737044,
+    "map": 70.0,
+    "width90": 21.719533279002675
+   },
+   "seed": 91110,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c030/latent_anchor.h5",
+     "sha256": "0306b435c9357c66b5bef58981a5d747fd0297ab026ed352ad8575bfb638e9f6",
+     "grad_inf": 4.687361609967411e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.047211087000425804,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 448.65447129067616,
+     "b_gal_curvature_conditional": 201222.62775484545,
+     "row_fac_sd": 1.0081757307052612,
+     "member_sd": 0.5123125910758972
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c030/latent_anchor_bgal.h5",
+     "sha256": "73fe04185f309bcb70baf2a66656a453c8b4bef702adda6f1a3ef6a508893a07",
+     "grad_inf": 4.687361609967411e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.047211087000425804,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 448.65447129067616,
+     "b_gal_curvature_conditional": 201222.62775484545,
+     "row_fac_sd": 1.0083951950073242,
+     "member_sd": 0.512423038482666
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 60.83837372393837,
+    "ci68": [
+     54.675453559708984,
+     67.18405492024618
+    ],
+    "ci90": [
+     50.65179413556413,
+     71.59139121715484
+    ],
+    "sigma": 6.254300680268599,
+    "cdf_at_truth": 0.8603449438963094,
+    "map": 60.0,
+    "width90": 20.939597081590705
+   },
+   "latent": {
+    "median": 59.325666968149505,
+    "ci68": [
+     52.883900560925795,
+     65.86417048892469
+    ],
+    "ci90": [
+     48.555235147527235,
+     70.05155283118948
+    ],
+    "sigma": 6.490134963999445,
+    "cdf_at_truth": 0.9014882178102089,
+    "map": 60.0,
+    "width90": 21.496317683662248
+   },
+   "latent_bgal": {
+    "median": 59.33278763997502,
+    "ci68": [
+     52.89070651832229,
+     65.87067249481919
+    ],
+    "ci90": [
+     48.562478882806566,
+     70.05893457342937
+    ],
+    "sigma": 6.48998298824845,
+    "cdf_at_truth": 0.9013362963687747,
+    "map": 60.0,
+    "width90": 21.496455690622803
+   },
+   "seed": 91147,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c031/latent_anchor.h5",
+     "sha256": "1e5f0b7d81b59ae96906747ef673d554d48e6e561929789bb921776c87408975",
+     "grad_inf": 2.3447910280083306e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05046452073750084,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 392.6699741066259,
+     "b_gal_curvature_conditional": 195113.7850745175,
+     "row_fac_sd": 0.9624675512313843,
+     "member_sd": 0.5100154280662537
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c031/latent_anchor_bgal.h5",
+     "sha256": "3d22e42ad86320d469554e1f709bb469076346a3286dd632a2007c028efb7090",
+     "grad_inf": 2.3447910280083306e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05046452073750084,
+     "s_b_profile": 0.05046452073750084,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 392.6699741066259,
+     "b_gal_curvature_conditional": 195113.7850745175,
+     "row_fac_sd": 0.9628530740737915,
+     "member_sd": 0.5105631351470947
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 34.985487630969224,
+    "ci68": [
+     25.657171534321787,
+     46.26429633855226
+    ],
+    "ci90": [
+     21.98605376790579,
+     53.363540788264295
+    ],
+    "sigma": 10.303562402115238,
+    "cdf_at_truth": 0.9990277727594793,
+    "map": 32.5,
+    "width90": 31.377487020358505
+   },
+   "latent": {
+    "median": 40.30452782790305,
+    "ci68": [
+     32.743508732975656,
+     47.794457312563985
+    ],
+    "ci90": [
+     27.838771416227686,
+     52.63860751405715
+    ],
+    "sigma": 7.525474289794165,
+    "cdf_at_truth": 0.9998430761626068,
+    "map": 40.0,
+    "width90": 24.799836097829463
+   },
+   "latent_bgal": {
+    "median": 40.35717122950025,
+    "ci68": [
+     32.79742885208365,
+     47.83908080919844
+    ],
+    "ci90": [
+     27.8848965047366,
+     52.678494076989
+    ],
+    "sigma": 7.520825978557397,
+    "cdf_at_truth": 0.9998420933647049,
+    "map": 40.0,
+    "width90": 24.7935975722524
+   },
+   "seed": 91184,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c032/latent_anchor.h5",
+     "sha256": "841424cf08292f8635e1f439b6e1849d9c6ae9f3256951a87de98354fb34f4b5",
+     "grad_inf": 2.7827878890107627e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04840415127531918,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 426.8101913140272,
+     "b_gal_curvature_conditional": 53435.26240850426,
+     "row_fac_sd": 0.9918617010116577,
+     "member_sd": 0.5114378929138184
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c032/latent_anchor_bgal.h5",
+     "sha256": "37faccbaed58cb76e25c81212e05eb7409b115f6a293b53583fa1b01f5166ca7",
+     "grad_inf": 2.7827878890107627e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04840415127531918,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 426.8101913140272,
+     "b_gal_curvature_conditional": 53435.26240850426,
+     "row_fac_sd": 0.9917235374450684,
+     "member_sd": 0.5114332437515259
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 47.207512345712736,
+    "ci68": [
+     40.29764875129258,
+     54.495213310791186
+    ],
+    "ci90": [
+     35.71850367257228,
+     59.52928438692756
+    ],
+    "sigma": 7.0987822797493045,
+    "cdf_at_truth": 0.9959724213549604,
+    "map": 47.5,
+    "width90": 23.810780714355275
+   },
+   "latent": {
+    "median": 37.981627391472976,
+    "ci68": [
+     31.92951468374249,
+     44.39836095108564
+    ],
+    "ci90": [
+     28.06663819612988,
+     48.99319554633438
+    ],
+    "sigma": 6.2344231336715765,
+    "cdf_at_truth": 0.9999659202685907,
+    "map": 37.5,
+    "width90": 20.926557350204497
+   },
+   "latent_bgal": {
+    "median": 37.91777995613945,
+    "ci68": [
+     31.858597761596265,
+     44.34163603492073
+    ],
+    "ci90": [
+     28.015576050557254,
+     48.93307172029597
+    ],
+    "sigma": 6.241519136662234,
+    "cdf_at_truth": 0.999966723717063,
+    "map": 37.5,
+    "width90": 20.917495669738717
+   },
+   "seed": 91221,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c033/latent_anchor.h5",
+     "sha256": "3cfca6f5e0fc652d498c21d1380ae61c0a0b5ccb3649df933a5162842437b8dc",
+     "grad_inf": 5.641154210422883e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.054582668605833294,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 335.65295120244264,
+     "b_gal_curvature_conditional": 180896.44050836784,
+     "row_fac_sd": 0.9316063523292542,
+     "member_sd": 0.5149611234664917
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c033/latent_anchor_bgal.h5",
+     "sha256": "31916002134eaa42a355a8fb42b99f462e58f1aa8a003788c2d738c1adaca903",
+     "grad_inf": 5.641154210422883e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.054582668605833294,
+     "s_b_profile": 0.054582668605833294,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 335.65295120244264,
+     "b_gal_curvature_conditional": 180896.44050836784,
+     "row_fac_sd": 0.9316357374191284,
+     "member_sd": 0.5151546001434326
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 60.173020560119255,
+    "ci68": [
+     51.394439369601834,
+     69.49558087014915
+    ],
+    "ci90": [
+     45.9749958396143,
+     75.80341100503348
+    ],
+    "sigma": 9.05057075027366,
+    "cdf_at_truth": 0.791827808928254,
+    "map": 60.0,
+    "width90": 29.82841516541918
+   },
+   "latent": {
+    "median": 54.83877542367914,
+    "ci68": [
+     46.006267137310175,
+     64.20598971749502
+    ],
+    "ci90": [
+     40.61190571200842,
+     70.36353721754526
+    ],
+    "sigma": 9.09986129009242,
+    "cdf_at_truth": 0.9148087664799408,
+    "map": 55.0,
+    "width90": 29.751631505536835
+   },
+   "latent_bgal": {
+    "median": 54.84458888506199,
+    "ci68": [
+     46.009931387211225,
+     64.21351701539366
+    ],
+    "ci90": [
+     40.61437193677893,
+     70.37454174192276
+    ],
+    "sigma": 9.101792814091219,
+    "cdf_at_truth": 0.9146651938288086,
+    "map": 55.0,
+    "width90": 29.760169805143825
+   },
+   "seed": 91258,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c034/latent_anchor.h5",
+     "sha256": "842905aa63552034382f5d1d9b8eb98cb686a1f1fc525f838551288dc478ba39",
+     "grad_inf": 1.439737218333903e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05431095156018677,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 339.01988801609696,
+     "b_gal_curvature_conditional": 64993.022782811866,
+     "row_fac_sd": 0.8783497214317322,
+     "member_sd": 0.5210490226745605
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c034/latent_anchor_bgal.h5",
+     "sha256": "e6951e2e594d19eb8351c1f0ff80fb1527e96108d9aedbbee7dbf6afc316fc87",
+     "grad_inf": 1.439737218333903e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05431095156018677,
+     "s_b_profile": 0.05431095156018677,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 339.01988801609696,
+     "b_gal_curvature_conditional": 64993.022782811866,
+     "row_fac_sd": 0.879303514957428,
+     "member_sd": 0.5226925611495972
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 71.81220937797356,
+    "ci68": [
+     64.99228287015993,
+     79.6278539357477
+    ],
+    "ci90": [
+     60.76629708782946,
+     85.31784555212123
+    ],
+    "sigma": 7.317785532793884,
+    "cdf_at_truth": 0.2820858679368465,
+    "map": 70.0,
+    "width90": 24.55154846429177
+   },
+   "latent": {
+    "median": 68.93439904571837,
+    "ci68": [
+     61.95894594073231,
+     76.86745823050401
+    ],
+    "ci90": [
+     57.81877669355085,
+     82.59438370567297
+    ],
+    "sigma": 7.45425614488585,
+    "cdf_at_truth": 0.4354615069555005,
+    "map": 67.5,
+    "width90": 24.775607012122116
+   },
+   "latent_bgal": {
+    "median": 68.93753268964834,
+    "ci68": [
+     61.96236057246502,
+     76.87057655689125
+    ],
+    "ci90": [
+     57.821305203867084,
+     82.59869916844178
+    ],
+    "sigma": 7.454107992213114,
+    "cdf_at_truth": 0.43529078103717656,
+    "map": 67.5,
+    "width90": 24.7773939645747
+   },
+   "seed": 91295,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c035/latent_anchor.h5",
+     "sha256": "9c08216cd8533b01b097453862d14f1fed21f59f3805f6b3a1d51eec62c01bad",
+     "grad_inf": 8.619216451677403e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04641162566944694,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 464.244148440368,
+     "b_gal_curvature_conditional": 196838.37098056433,
+     "row_fac_sd": 1.0971827507019043,
+     "member_sd": 0.5100233554840088
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c035/latent_anchor_bgal.h5",
+     "sha256": "cd42a1a359095194a91c2c157b9bbfc4c1113a18e753520d76cc2346aea4e866",
+     "grad_inf": 8.619216451677403e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04641162566944694,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 464.244148440368,
+     "b_gal_curvature_conditional": 196838.37098056433,
+     "row_fac_sd": 1.0982602834701538,
+     "member_sd": 0.5120959281921387
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 51.18624882179408,
+    "ci68": [
+     45.69791683945011,
+     56.991622183800615
+    ],
+    "ci90": [
+     42.343696403202564,
+     61.182674618641215
+    ],
+    "sigma": 5.646852672175253,
+    "cdf_at_truth": 0.9953040626780743,
+    "map": 50.0,
+    "width90": 18.83897821543865
+   },
+   "latent": {
+    "median": 48.666086249147625,
+    "ci68": [
+     43.016823603812995,
+     54.51669829420608
+    ],
+    "ci90": [
+     39.3178617379147,
+     58.66807321167035
+    ],
+    "sigma": 5.7499373451965425,
+    "cdf_at_truth": 0.998410294243338,
+    "map": 47.5,
+    "width90": 19.35021147375565
+   },
+   "latent_bgal": {
+    "median": 48.66412695841435,
+    "ci68": [
+     43.015159014235444,
+     54.51491920934069
+    ],
+    "ci90": [
+     39.31563285860932,
+     58.66593530378132
+    ],
+    "sigma": 5.749880097552623,
+    "cdf_at_truth": 0.998411624504777,
+    "map": 47.5,
+    "width90": 19.350302445171998
+   },
+   "seed": 91332,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c036/latent_anchor.h5",
+     "sha256": "ce616be6141403a59b1161114f2fa51dfe0f58894942876aa7b064c6322e2c45",
+     "grad_inf": 1.3714585023194559e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04913280565261225,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 414.24461442857864,
+     "b_gal_curvature_conditional": 118767.31374639383,
+     "row_fac_sd": 0.9215839505195618,
+     "member_sd": 0.511293351650238
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c036/latent_anchor_bgal.h5",
+     "sha256": "8ee2db6ab692cbeefcbcc657b5571fde8af5db446fa8036b64b23e890a5f46a2",
+     "grad_inf": 1.3714585023194559e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04913280565261225,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 414.24461442857864,
+     "b_gal_curvature_conditional": 118767.31374639383,
+     "row_fac_sd": 0.9217889904975891,
+     "member_sd": 0.511725127696991
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 68.9611606095875,
+    "ci68": [
+     62.35241839753999,
+     76.0642119926222
+    ],
+    "ci90": [
+     58.039590982754305,
+     81.05301378896687
+    ],
+    "sigma": 6.8558967975411065,
+    "cdf_at_truth": 0.42849110397307544,
+    "map": 67.5,
+    "width90": 23.01342280621256
+   },
+   "latent": {
+    "median": 68.13801271465083,
+    "ci68": [
+     60.93381701224362,
+     75.42979391066083
+    ],
+    "ci90": [
+     56.13106923072583,
+     80.42502626579531
+    ],
+    "sigma": 7.247988449208606,
+    "cdf_at_truth": 0.47803951125100336,
+    "map": 67.5,
+    "width90": 24.293957035069482
+   },
+   "latent_bgal": {
+    "median": 68.12245435821143,
+    "ci68": [
+     60.91268745458477,
+     75.4164227443443
+    ],
+    "ci90": [
+     56.103396516266855,
+     80.41228897688791
+    ],
+    "sigma": 7.251867644879766,
+    "cdf_at_truth": 0.4789169890161548,
+    "map": 67.5,
+    "width90": 24.308892460621053
+   },
+   "seed": 91369,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c037/latent_anchor.h5",
+     "sha256": "0b99703e1086f91295ed622167aa0de04be9e7154500a7685a6ab5197fd1b9fb",
+     "grad_inf": 6.489333514991813e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.050285506651271114,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 395.47072454256704,
+     "b_gal_curvature_conditional": 58434.35326871541,
+     "row_fac_sd": 0.9506237506866455,
+     "member_sd": 0.5273415446281433
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c037/latent_anchor_bgal.h5",
+     "sha256": "e864fdfe8892b3e6378fd2a3832bc936eac23a4b136afc9bda1823a9a1ae68e0",
+     "grad_inf": 6.489333514991813e-10,
+     "b_gal_dispersion": true,
+     "s_b": 0.050285506651271114,
+     "s_b_profile": 0.050285506651271114,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 395.47072454256704,
+     "b_gal_curvature_conditional": 58434.35326871541,
+     "row_fac_sd": 0.9513847231864929,
+     "member_sd": 0.5280621647834778
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 37.577777650648,
+    "ci68": [
+     29.25999964731245,
+     45.96659057845016
+    ],
+    "ci90": [
+     24.45216349218303,
+     51.41388601127154
+    ],
+    "sigma": 8.353295465568854,
+    "cdf_at_truth": 0.9998414178420466,
+    "map": 37.5,
+    "width90": 26.961722519088514
+   },
+   "latent": {
+    "median": 39.344738015728446,
+    "ci68": [
+     31.430397117108058,
+     47.25796631029785
+    ],
+    "ci90": [
+     26.392741808172094,
+     52.462242724441474
+    ],
+    "sigma": 7.913784596594898,
+    "cdf_at_truth": 0.9997456134726026,
+    "map": 40.0,
+    "width90": 26.06950091626938
+   },
+   "latent_bgal": {
+    "median": 39.13288934739952,
+    "ci68": [
+     31.169959029238925,
+     47.10653624308396
+    ],
+    "ci90": [
+     26.12756504079573,
+     52.35081435417575
+    ],
+    "sigma": 7.968288606922517,
+    "cdf_at_truth": 0.9997523872763507,
+    "map": 40.0,
+    "width90": 26.223249313380023
+   },
+   "seed": 91406,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c038/latent_anchor.h5",
+     "sha256": "ca2c9da42dd17b00f0a7bb6d24df1d0f1d5535a04efd5c11444aa065705eba26",
+     "grad_inf": 1.2996270726262082e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05467213111047759,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 334.5553614537639,
+     "b_gal_curvature_conditional": 54946.220289966135,
+     "row_fac_sd": 0.8579854369163513,
+     "member_sd": 0.5162013173103333
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c038/latent_anchor_bgal.h5",
+     "sha256": "c87a951dd38b2cdb854fa9f098563692b186d7a2e2105305f944188be22cb4e1",
+     "grad_inf": 1.2996270726262082e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05467213111047759,
+     "s_b_profile": 0.05467213111047759,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 334.5553614537639,
+     "b_gal_curvature_conditional": 54946.220289966135,
+     "row_fac_sd": 0.8576169013977051,
+     "member_sd": 0.5154932141304016
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 46.978274955350784,
+    "ci68": [
+     39.2256547224615,
+     54.43530613304286
+    ],
+    "ci90": [
+     33.65925500965211,
+     59.327921414854494
+    ],
+    "sigma": 7.604825705290679,
+    "cdf_at_truth": 0.9970329541127778,
+    "map": 47.5,
+    "width90": 25.668666405202387
+   },
+   "latent": {
+    "median": 36.66721314125144,
+    "ci68": [
+     30.388970310737047,
+     42.90446912845754
+    ],
+    "ci90": [
+     26.272670732692784,
+     47.02559970374334
+    ],
+    "sigma": 6.257749408860247,
+    "cdf_at_truth": 0.999998672009573,
+    "map": 37.5,
+    "width90": 20.752928971050554
+   },
+   "latent_bgal": {
+    "median": 36.73661267980287,
+    "ci68": [
+     30.39789352459309,
+     43.03344044012924
+    ],
+    "ci90": [
+     26.24266928725216,
+     47.135629853906146
+    ],
+    "sigma": 6.317773457768075,
+    "cdf_at_truth": 0.9999984941233246,
+    "map": 37.5,
+    "width90": 20.892960566653986
+   },
+   "seed": 91443,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c039/latent_anchor.h5",
+     "sha256": "55ad7afd98db5918ed6894b56d685694c83d356ef4e47e722c214235f7d53935",
+     "grad_inf": 2.1604940059205546e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05947783543623261,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 282.67649003875704,
+     "b_gal_curvature_conditional": 60126.309016365325,
+     "row_fac_sd": 0.8947792053222656,
+     "member_sd": 0.5205549597740173
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c039/latent_anchor_bgal.h5",
+     "sha256": "58bdd40848525bd2ad86693c49b71ee922a1b63ab59d4c20a50345ccc9997488",
+     "grad_inf": 2.1604940059205546e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05947783543623261,
+     "s_b_profile": 0.05947783543623261,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 282.67649003875704,
+     "b_gal_curvature_conditional": 60126.309016365325,
+     "row_fac_sd": 0.8953841924667358,
+     "member_sd": 0.5213728547096252
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 71.59891779535236,
+    "ci68": [
+     65.02749159169488,
+     78.47595399812732
+    ],
+    "ci90": [
+     60.63297443513026,
+     83.11452700490082
+    ],
+    "sigma": 6.72423120321622,
+    "cdf_at_truth": 0.28125326934375733,
+    "map": 72.5,
+    "width90": 22.481552569770564
+   },
+   "latent": {
+    "median": 69.24688801948068,
+    "ci68": [
+     62.89477557742283,
+     75.80974504184582
+    ],
+    "ci90": [
+     58.694260246840855,
+     80.08540993297545
+    ],
+    "sigma": 6.457484732211494,
+    "cdf_at_truth": 0.40667680577765114,
+    "map": 70.0,
+    "width90": 21.391149686134597
+   },
+   "latent_bgal": {
+    "median": 69.25286152058031,
+    "ci68": [
+     62.90065922864758,
+     75.81622263190678
+    ],
+    "ci90": [
+     58.701857207859966,
+     80.09382254422975
+    ],
+    "sigma": 6.457781701629603,
+    "cdf_at_truth": 0.40630654874764294,
+    "map": 70.0,
+    "width90": 21.391965336369786
+   },
+   "seed": 91480,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c040/latent_anchor.h5",
+     "sha256": "5ec008b5cacfef5d76d1c045e290e8d62fc45ff1633bef81c5f59e8ac72bec90",
+     "grad_inf": 2.830180534374449e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04851877273233029,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 424.7959680892527,
+     "b_gal_curvature_conditional": 71363.20556648742,
+     "row_fac_sd": 0.9777463674545288,
+     "member_sd": 0.5176196694374084
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c040/latent_anchor_bgal.h5",
+     "sha256": "7822123bf10d00afb3074b788fced306ebc3bc46dbc3a0f240cf9c8283b08533",
+     "grad_inf": 2.830180534374449e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04851877273233029,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 424.7959680892527,
+     "b_gal_curvature_conditional": 71363.20556648742,
+     "row_fac_sd": 0.9784632921218872,
+     "member_sd": 0.51906818151474
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 29.973437768154398,
+    "ci68": [
+     23.655703056960014,
+     37.54736976802912
+    ],
+    "ci90": [
+     21.21155168607559,
+     42.65062125643807
+    ],
+    "sigma": 6.945833355534553,
+    "cdf_at_truth": 0.9999994240061557,
+    "map": 27.5,
+    "width90": 21.43906957036248
+   },
+   "latent": {
+    "median": 29.819564440174087,
+    "ci68": [
+     24.12367416313116,
+     36.23726637135823
+    ],
+    "ci90": [
+     21.503411447958964,
+     40.4651091438976
+    ],
+    "sigma": 6.056796104113536,
+    "cdf_at_truth": 0.999999978863896,
+    "map": 30.0,
+    "width90": 18.961697695938636
+   },
+   "latent_bgal": {
+    "median": 29.747125324511902,
+    "ci68": [
+     24.061280027916702,
+     36.17398369242305
+    ],
+    "ci90": [
+     21.469959951961066,
+     40.39814582366478
+    ],
+    "sigma": 6.056351832253174,
+    "cdf_at_truth": 0.9999999791771592,
+    "map": 30.0,
+    "width90": 18.92818587170371
+   },
+   "seed": 91517,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c041/latent_anchor.h5",
+     "sha256": "7d0d668cc6bf64d3e8ae3ad1711cbe5e4979c7131e6c43470acddac4e938ff9d",
+     "grad_inf": 3.268718629101386e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04674215385460296,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 457.701735134935,
+     "b_gal_curvature_conditional": 62743.76518488836,
+     "row_fac_sd": 0.8617512583732605,
+     "member_sd": 0.5151216387748718
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c041/latent_anchor_bgal.h5",
+     "sha256": "ce11c443d62f76a4a4c9e23f6e4c44cba741336df1072f25f661cc30ad7819a8",
+     "grad_inf": 3.268718629101386e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04674215385460296,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 457.701735134935,
+     "b_gal_curvature_conditional": 62743.76518488836,
+     "row_fac_sd": 0.8626042604446411,
+     "member_sd": 0.5159659385681152
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 81.86719383247862,
+    "ci68": [
+     73.77990634753807,
+     91.13846144600717
+    ],
+    "ci90": [
+     68.88084278836577,
+     98.48739394964497
+    ],
+    "sigma": 8.679277549234548,
+    "cdf_at_truth": 0.03477539958553923,
+    "map": 80.0,
+    "width90": 29.6065511612792
+   },
+   "latent": {
+    "median": 79.8966650191643,
+    "ci68": [
+     72.03036042653075,
+     88.94515535335448
+    ],
+    "ci90": [
+     67.23159581949504,
+     96.1722763296006
+    ],
+    "sigma": 8.457397463411866,
+    "cdf_at_truth": 0.057634276673658724,
+    "map": 80.0,
+    "width90": 28.940680510105565
+   },
+   "latent_bgal": {
+    "median": 79.87706982069994,
+    "ci68": [
+     72.00730847240527,
+     88.92560050333935
+    ],
+    "ci90": [
+     67.2048385137989,
+     96.14853257339749
+    ],
+    "sigma": 8.459146015467041,
+    "cdf_at_truth": 0.057972307315850354,
+    "map": 77.5,
+    "width90": 28.943694059598585
+   },
+   "seed": 91554,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c042/latent_anchor.h5",
+     "sha256": "e5739b9da657d081ae59bc3e8f724ac3a83d6f983fd164f65b8e3ffc46f3d79e",
+     "grad_inf": 1.4439827111800696e-10,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04519379609937486,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 489.6010677245213,
+     "b_gal_curvature_conditional": 67314.09960555541,
+     "row_fac_sd": 1.1292864084243774,
+     "member_sd": 0.5197742581367493
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c042/latent_anchor_bgal.h5",
+     "sha256": "6940d94140c34212a1ef9e1c8cdc0362fea53e3a986a261fb0f219e5f6b1eaf5",
+     "grad_inf": 1.4439827111800696e-10,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04519379609937486,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 489.6010677245213,
+     "b_gal_curvature_conditional": 67314.09960555541,
+     "row_fac_sd": 1.1285959482192993,
+     "member_sd": 0.5189077854156494
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 70.99909286703601,
+    "ci68": [
+     63.95747852246601,
+     79.2918176882233
+    ],
+    "ci90": [
+     60.00759501118841,
+     85.58109909267432
+    ],
+    "sigma": 7.667169582878646,
+    "cdf_at_truth": 0.32788570159228475,
+    "map": 70.0,
+    "width90": 25.573504081485915
+   },
+   "latent": {
+    "median": 66.99019787551865,
+    "ci68": [
+     60.28756035134911,
+     74.87035650025855
+    ],
+    "ci90": [
+     56.1691073870458,
+     81.11440051764569
+    ],
+    "sigma": 7.291398074454722,
+    "cdf_at_truth": 0.5408605616897174,
+    "map": 65.0,
+    "width90": 24.945293130599893
+   },
+   "latent_bgal": {
+    "median": 66.99080571228258,
+    "ci68": [
+     60.28774305672586,
+     74.87103405212983
+    ],
+    "ci90": [
+     56.16885621759639,
+     81.11522782529374
+    ],
+    "sigma": 7.291645497701985,
+    "cdf_at_truth": 0.5408256232256181,
+    "map": 65.0,
+    "width90": 24.94637160769735
+   },
+   "seed": 91591,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c043/latent_anchor.h5",
+     "sha256": "bf9dd3f370f1b30a6ea8022f5de8159959b8a715bab461e0dbf7187d86346436",
+     "grad_inf": 6.085132397970483e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04834062710097716,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 427.93266659020446,
+     "b_gal_curvature_conditional": 119908.45547955771,
+     "row_fac_sd": 0.9948254227638245,
+     "member_sd": 0.525151252746582
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c043/latent_anchor_bgal.h5",
+     "sha256": "53d91a33740d0b146d41376a9f703d21a4405b8e4e9f89f842d908e9290a2e7a",
+     "grad_inf": 6.085132397970483e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04834062710097716,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 427.93266659020446,
+     "b_gal_curvature_conditional": 119908.45547955771,
+     "row_fac_sd": 0.9950792789459229,
+     "member_sd": 0.5257831811904907
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 72.72864632843867,
+    "ci68": [
+     66.7018993231112,
+     79.2041122096354
+    ],
+    "ci90": [
+     62.98217544533101,
+     83.91523902771823
+    ],
+    "sigma": 6.2511064432620955,
+    "cdf_at_truth": 0.20366774710233487,
+    "map": 72.5,
+    "width90": 20.93306358238722
+   },
+   "latent": {
+    "median": 71.63198536426822,
+    "ci68": [
+     65.42475664301577,
+     78.34611384155102
+    ],
+    "ci90": [
+     61.49388858395322,
+     83.4610447885108
+    ],
+    "sigma": 6.460678599267624,
+    "cdf_at_truth": 0.2685429662983546,
+    "map": 70.0,
+    "width90": 21.967156204557583
+   },
+   "latent_bgal": {
+    "median": 71.63483927170905,
+    "ci68": [
+     65.42817259755913,
+     78.3481056027288
+    ],
+    "ci90": [
+     61.49878057770316,
+     83.46210231879306
+    ],
+    "sigma": 6.459966502584834,
+    "cdf_at_truth": 0.2683541651280336,
+    "map": 70.0,
+    "width90": 21.9633217410899
+   },
+   "seed": 91628,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c044/latent_anchor.h5",
+     "sha256": "f384828cb43c893f382d35535cb401bafaa0a77b927f8f97864194c07e651b19",
+     "grad_inf": 2.4875657089751257e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.04975176123145224,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 404.0015961153258,
+     "b_gal_curvature_conditional": 129466.78184945488,
+     "row_fac_sd": 0.9969879984855652,
+     "member_sd": 0.5099819302558899
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c044/latent_anchor_bgal.h5",
+     "sha256": "dcb33b204128b6a6e3d6ffc289aebb2f5342f52667701c3e1797f877d6481634",
+     "grad_inf": 2.4875657089751257e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.04975176123145224,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 404.0015961153258,
+     "b_gal_curvature_conditional": 129466.78184945488,
+     "row_fac_sd": 0.9975602030754089,
+     "member_sd": 0.5106192231178284
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 70.9639387256716,
+    "ci68": [
+     64.44784547895357,
+     77.85219237646159
+    ],
+    "ci90": [
+     60.34410121989006,
+     82.66644326948378
+    ],
+    "sigma": 6.70217344875401,
+    "cdf_at_truth": 0.31213195964665097,
+    "map": 70.0,
+    "width90": 22.322342049593722
+   },
+   "latent": {
+    "median": 67.2437561951069,
+    "ci68": [
+     60.60467637290499,
+     74.11781146762576
+    ],
+    "ci90": [
+     56.22020513647782,
+     78.9033659225651
+    ],
+    "sigma": 6.756567547360383,
+    "cdf_at_truth": 0.5289916427038335,
+    "map": 67.5,
+    "width90": 22.683160786087278
+   },
+   "latent_bgal": {
+    "median": 67.27319815870145,
+    "ci68": [
+     60.635147878121735,
+     74.14142154092113
+    ],
+    "ci90": [
+     56.256286669397134,
+     78.92606381489408
+    ],
+    "sigma": 6.753136831399697,
+    "cdf_at_truth": 0.5272764864498588,
+    "map": 67.5,
+    "width90": 22.669777145496944
+   },
+   "seed": 91665,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c045/latent_anchor.h5",
+     "sha256": "5f4d99e9a60ef57e80ba660f9a77162156e82240bf3a76643a86ea858082d666",
+     "grad_inf": 9.533762668212376e-13,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.0508289541268276,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 387.0594300563971,
+     "b_gal_curvature_conditional": 44411.848611984926,
+     "row_fac_sd": 0.9161831140518188,
+     "member_sd": 0.5131315588951111
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c045/latent_anchor_bgal.h5",
+     "sha256": "d1b8fb5027599ed58d08d20c7dc79bd23aaff56765f34c43e73eda7e8c40757c",
+     "grad_inf": 9.533762668212376e-13,
+     "b_gal_dispersion": true,
+     "s_b": 0.0508289541268276,
+     "s_b_profile": 0.0508289541268276,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 387.0594300563971,
+     "b_gal_curvature_conditional": 44411.848611984926,
+     "row_fac_sd": 0.9161182641983032,
+     "member_sd": 0.5130607485771179
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 97.53348704730956,
+    "ci68": [
+     86.17840678120571,
+     112.13034466470742
+    ],
+    "ci90": [
+     80.06193282031523,
+     123.62427191353038
+    ],
+    "sigma": 12.975968941750857,
+    "cdf_at_truth": 0.0006604316974958078,
+    "map": 95.0,
+    "width90": 43.562339093215144
+   },
+   "latent": {
+    "median": 93.34937402487677,
+    "ci68": [
+     82.7875338541177,
+     106.39350809405313
+    ],
+    "ci90": [
+     77.02256205236947,
+     117.72480602137784
+    ],
+    "sigma": 11.802987119967717,
+    "cdf_at_truth": 0.002070756891573709,
+    "map": 95.0,
+    "width90": 40.70224396900838
+   },
+   "latent_bgal": {
+    "median": 93.34831970655982,
+    "ci68": [
+     82.78628855846799,
+     106.39365021354767
+    ],
+    "ci90": [
+     77.02082203037793,
+     117.7275637084866
+    ],
+    "sigma": 11.803680827539843,
+    "cdf_at_truth": 0.002072610546109973,
+    "map": 95.0,
+    "width90": 40.70674167810867
+   },
+   "seed": 91702,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c046/latent_anchor.h5",
+     "sha256": "39aca499166f0322a18e7e515f88134a969baf8c85bffac2e6696d43dbcb6830",
+     "grad_inf": 1.3531398224131408e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.05205264795699078,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 369.0747594900895,
+     "b_gal_curvature_conditional": 72480.13348617413,
+     "row_fac_sd": 0.9145981669425964,
+     "member_sd": 0.5227662920951843
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c046/latent_anchor_bgal.h5",
+     "sha256": "7da468b9e43ad5e6a454fed97f87ab4892a86bc5eeef0cbaf5e5c045a19e7885",
+     "grad_inf": 1.3531398224131408e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05205264795699078,
+     "s_b_profile": 0.05205264795699078,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 369.0747594900895,
+     "b_gal_curvature_conditional": 72480.13348617413,
+     "row_fac_sd": 0.9147509932518005,
+     "member_sd": 0.5230355858802795
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 69.24997907688488,
+    "ci68": [
+     60.43139858411563,
+     80.35400340450164
+    ],
+    "ci90": [
+     55.42357619073896,
+     89.76846103589443
+    ],
+    "sigma": 9.961302410193007,
+    "cdf_at_truth": 0.43801499587595516,
+    "map": 67.5,
+    "width90": 34.34488484515547
+   },
+   "latent": {
+    "median": 67.7530199059292,
+    "ci68": [
+     58.96213885032157,
+     78.69935564859136
+    ],
+    "ci90": [
+     53.91430559581201,
+     87.76931377493543
+    ],
+    "sigma": 9.868608399134896,
+    "cdf_at_truth": 0.49947917343291903,
+    "map": 65.0,
+    "width90": 33.855008179123416
+   },
+   "latent_bgal": {
+    "median": 67.75950558941986,
+    "ci68": [
+     58.96914769244015,
+     78.70551288117771
+    ],
+    "ci90": [
+     53.92213718410998,
+     87.77650532371631
+    ],
+    "sigma": 9.868182594368779,
+    "cdf_at_truth": 0.49921954212650044,
+    "map": 65.0,
+    "width90": 33.85436813960633
+   },
+   "seed": 91739,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c047/latent_anchor.h5",
+     "sha256": "25f1fa848e61573872586e8c3f9375c7289f558895a5c7a8991c5f5fb98f762d",
+     "grad_inf": 1.617150857669003e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.048306222730721486,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 428.5424429688719,
+     "b_gal_curvature_conditional": 118772.11892922319,
+     "row_fac_sd": 0.9345191717147827,
+     "member_sd": 0.5053402781486511
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c047/latent_anchor_bgal.h5",
+     "sha256": "71068d7537a3afb9d17e75ec7480540e093c5675d6fcbe98b61caeb024071b4b",
+     "grad_inf": 1.617150857669003e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.048306222730721486,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 428.5424429688719,
+     "b_gal_curvature_conditional": 118772.11892922319,
+     "row_fac_sd": 0.9347729086875916,
+     "member_sd": 0.5061421990394592
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 94.56327305738922,
+    "ci68": [
+     79.99128961400413,
+     114.24153498936992
+    ],
+    "ci90": [
+     72.27205655114399,
+     128.0161369613234
+    ],
+    "sigma": 17.125122687682897,
+    "cdf_at_truth": 0.018798157686194233,
+    "map": 90.0,
+    "width90": 55.74408041017942
+   },
+   "latent": {
+    "median": 91.76416308009638,
+    "ci68": [
+     78.21109190377457,
+     110.03896471243804
+    ],
+    "ci90": [
+     70.99633055052954,
+     124.50191705878763
+    ],
+    "sigma": 15.913936404331736,
+    "cdf_at_truth": 0.023794347039864393,
+    "map": 87.5,
+    "width90": 53.50558650825809
+   },
+   "latent_bgal": {
+    "median": 91.75880550790802,
+    "ci68": [
+     78.20607868202165,
+     110.03234296914098
+    ],
+    "ci90": [
+     70.99094998400118,
+     124.49815873856224
+    ],
+    "sigma": 15.913132143559665,
+    "cdf_at_truth": 0.023828177181323483,
+    "map": 87.5,
+    "width90": 53.50720875456106
+   },
+   "seed": 91776,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c048/latent_anchor.h5",
+     "sha256": "521177b17371427e079489636c69fd7b4262f63a078931907b2dd41a9e8f9bcf",
+     "grad_inf": 1.1071144001562061e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.051287854152510325,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 380.1639594860826,
+     "b_gal_curvature_conditional": 46506.63159243615,
+     "row_fac_sd": 0.9347599744796753,
+     "member_sd": 0.5129730701446533
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c048/latent_anchor_bgal.h5",
+     "sha256": "44d7cd3a196440e8afbe7fb5583e2eb2bcb8fdf5610e9bf93ece351f28c4d984",
+     "grad_inf": 1.1071144001562061e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.051287854152510325,
+     "s_b_profile": 0.051287854152510325,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": false,
+     "b_gal_curvature_profile": 380.1639594860826,
+     "b_gal_curvature_conditional": 46506.63159243615,
+     "row_fac_sd": 0.9351672530174255,
+     "member_sd": 0.5134037733078003
+    }
+   }
+  },
+  {
+   "latent_off": {
+    "median": 78.5081464369126,
+    "ci68": [
+     70.85413290489146,
+     87.44812662497499
+    ],
+    "ci90": [
+     66.35293867668665,
+     94.59079067044257
+    ],
+    "sigma": 8.296996860041766,
+    "cdf_at_truth": 0.07313898877992873,
+    "map": 77.5,
+    "width90": 28.237851993755925
+   },
+   "latent": {
+    "median": 74.18109704704537,
+    "ci68": [
+     66.63816138039257,
+     82.82922852522525
+    ],
+    "ci90": [
+     62.282150939691235,
+     89.47561330602565
+    ],
+    "sigma": 8.095533572416336,
+    "cdf_at_truth": 0.19825418678487858,
+    "map": 72.5,
+    "width90": 27.193462366334415
+   },
+   "latent_bgal": {
+    "median": 74.17391831917968,
+    "ci68": [
+     66.62874136384636,
+     82.82227461426432
+    ],
+    "ci90": [
+     62.268556373345675,
+     89.47034181574611
+    ],
+    "sigma": 8.096766625208978,
+    "cdf_at_truth": 0.19859117233065654,
+    "map": 72.5,
+    "width90": 27.201785442400435
+   },
+   "seed": 91813,
+   "anchor": {
+    "latent": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c049/latent_anchor.h5",
+     "sha256": "af88849e377c5d6b6b35ebe77287d6b3ee793a2d377b5c0bdf0f151faf21b56e",
+     "grad_inf": 7.484679542812955e-12,
+     "b_gal_dispersion": false,
+     "s_b": 0.0,
+     "s_b_profile": 0.047190136810584656,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 449.052922468225,
+     "b_gal_curvature_conditional": 101775.60299474237,
+     "row_fac_sd": 0.8699805736541748,
+     "member_sd": 0.49796828627586365
+    },
+    "latent_bgal": {
+     "path": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/field_level_plan/pr6a/data/c049/latent_anchor_bgal.h5",
+     "sha256": "843fd534044db86c76eddc854ac6a57ba524cc6386c69e5dfb780dff841e033f",
+     "grad_inf": 7.484679542812955e-12,
+     "b_gal_dispersion": true,
+     "s_b": 0.05,
+     "s_b_profile": 0.047190136810584656,
+     "s_b_floor": 0.05,
+     "s_b_floor_active": true,
+     "b_gal_curvature_profile": 449.052922468225,
+     "b_gal_curvature_conditional": 101775.60299474237,
+     "row_fac_sd": 0.869709312915802,
+     "member_sd": 0.4978761076927185
+    }
+   }
+  }
+ ],
+ "grid": [
+  20.0,
+  22.5,
+  25.0,
+  27.5,
+  30.0,
+  32.5,
+  35.0,
+  37.5,
+  40.0,
+  42.5,
+  45.0,
+  47.5,
+  50.0,
+  52.5,
+  55.0,
+  57.5,
+  60.0,
+  62.5,
+  65.0,
+  67.5,
+  70.0,
+  72.5,
+  75.0,
+  77.5,
+  80.0,
+  82.5,
+  85.0,
+  87.5,
+  90.0,
+  92.5,
+  95.0,
+  97.5,
+  100.0,
+  102.5,
+  105.0,
+  107.5,
+  110.0,
+  112.5,
+  115.0,
+  117.5,
+  120.0,
+  122.5,
+  125.0,
+  127.5,
+  130.0,
+  132.5,
+  135.0,
+  137.5,
+  140.0
+ ],
+ "n0": 5e-05,
+ "arms": [
+  "latent_off",
+  "latent",
+  "latent_bgal"
+ ],
+ "n_real": 50,
+ "verdict": {
+  "latent_off": {
+   "n_real": 50,
+   "ks_stat": 0.27369024903882133,
+   "ks_p": 0.000842598496841318,
+   "ks_pass": false,
+   "median_bias_sigma": 0.3033458258164234,
+   "bias_pass": false,
+   "n_outside_99": 18,
+   "outside_99_pass": false,
+   "frac_in_90": 0.46,
+   "frac_in_68": 0.3,
+   "spread_of_medians": 19.113656942534952,
+   "mean_quoted_sigma": 8.130303016430945,
+   "overconfidence": 2.350915692060577,
+   "median_quoted_sigma": 7.554464163280063,
+   "median_width90": 25.238224783582645,
+   "u": [
+    0.9959080850018115,
+    0.12323458825803524,
+    0.5089289440746387,
+    0.11357681363221023,
+    0.07142907308244144,
+    0.9995244677216031,
+    0.09922555381565198,
+    0.998237992843474,
+    0.5219212950799442,
+    0.00338339483120138,
+    0.9999996959760414,
+    0.044832845410014074,
+    0.8452424777837336,
+    0.4899007309250902,
+    0.0009191607328704573,
+    0.4824573094770707,
+    0.019984367540931344,
+    0.42752217870391573,
+    0.10293763410168387,
+    0.9999999803622104,
+    0.9886347968718461,
+    0.9736902490388213,
+    0.023437583805172975,
+    0.9990388561066902,
+    0.00010036349281912309,
+    0.999999865450901,
+    0.03117398776253128,
+    0.00019267668617326474,
+    0.21858370416031633,
+    0.027268552100160652,
+    0.31794801680824436,
+    0.8603449438963094,
+    0.9990277727594793,
+    0.9959724213549604,
+    0.791827808928254,
+    0.2820858679368465,
+    0.9953040626780743,
+    0.42849110397307544,
+    0.9998414178420466,
+    0.9970329541127778,
+    0.28125326934375733,
+    0.9999994240061557,
+    0.03477539958553923,
+    0.32788570159228475,
+    0.20366774710233487,
+    0.31213195964665097,
+    0.0006604316974958078,
+    0.43801499587595516,
+    0.018798157686194233,
+    0.07313898877992873
+   ],
+   "PASS": false
+  },
+  "latent": {
+   "n_real": 50,
+   "ks_stat": 0.2784102942433381,
+   "ks_p": 0.0006418725045643781,
+   "ks_pass": false,
+   "median_bias_sigma": -0.03606340720745811,
+   "bias_pass": true,
+   "n_outside_99": 19,
+   "outside_99_pass": false,
+   "frac_in_90": 0.58,
+   "frac_in_68": 0.34,
+   "spread_of_medians": 19.72701512555232,
+   "mean_quoted_sigma": 7.731427624409939,
+   "overconfidence": 2.551535897881199,
+   "median_quoted_sigma": 7.269693261831664,
+   "median_width90": 24.40699095933594,
+   "u": [
+    0.9997806154293052,
+    0.1460048566365687,
+    0.5678842563065138,
+    0.16236704261192178,
+    0.11561133004358207,
+    0.9999955418884773,
+    0.1499058442654007,
+    0.9999988955135002,
+    0.5459770219225971,
+    0.0045300900992092585,
+    0.9999999614921792,
+    0.08976238839548079,
+    0.9447692869771789,
+    0.6087142680987476,
+    0.001812814260537575,
+    0.5440924305163007,
+    0.06168853426945238,
+    0.6617752499500918,
+    0.3428988110086135,
+    0.9999999999992123,
+    0.9783682311468637,
+    0.9999888756566899,
+    0.06744557224300163,
+    0.9999933968298317,
+    0.00037796700587808133,
+    0.999999978847625,
+    0.06192439394915128,
+    0.0001552886192102673,
+    0.2897476924280021,
+    0.0722017688542458,
+    0.32347205311650123,
+    0.9014882178102089,
+    0.9998430761626068,
+    0.9999659202685907,
+    0.9148087664799408,
+    0.4354615069555005,
+    0.998410294243338,
+    0.47803951125100336,
+    0.9997456134726026,
+    0.999998672009573,
+    0.40667680577765114,
+    0.999999978863896,
+    0.057634276673658724,
+    0.5408605616897174,
+    0.2685429662983546,
+    0.5289916427038335,
+    0.002070756891573709,
+    0.49947917343291903,
+    0.023794347039864393,
+    0.19825418678487858
+   ],
+   "PASS": false
+  },
+  "latent_bgal": {
+   "n_real": 50,
+   "ks_stat": 0.27983175885982836,
+   "ks_p": 0.000590799066836234,
+   "ks_pass": false,
+   "median_bias_sigma": -0.03357354565400364,
+   "bias_pass": true,
+   "n_outside_99": 19,
+   "outside_99_pass": false,
+   "frac_in_90": 0.58,
+   "frac_in_68": 0.34,
+   "spread_of_medians": 19.749767502288773,
+   "mean_quoted_sigma": 7.737008913345497,
+   "overconfidence": 2.552636002295742,
+   "median_quoted_sigma": 7.271756571290876,
+   "median_width90": 24.41144162084541,
+   "u": [
+    0.9997773903575763,
+    0.14580326000445426,
+    0.5685018037229915,
+    0.16233962716632494,
+    0.11554181918550212,
+    0.9999955324319184,
+    0.14978844848349102,
+    0.9999988582951492,
+    0.5453314823072234,
+    0.004548290064443015,
+    0.9999999612007207,
+    0.0897520873222243,
+    0.9447880700237989,
+    0.6087061510679205,
+    0.0018155764395465029,
+    0.543781964533887,
+    0.061567764621593614,
+    0.6615386322379762,
+    0.3460145865546343,
+    0.999999999999322,
+    0.9798317588598283,
+    0.9999900074596273,
+    0.06728501819757,
+    0.9999932266059404,
+    0.0003776087254950115,
+    0.9999999805622253,
+    0.06164180961470797,
+    0.0001553307655657579,
+    0.2897067636067458,
+    0.0721649512419797,
+    0.32328483450737044,
+    0.9013362963687747,
+    0.9998420933647049,
+    0.999966723717063,
+    0.9146651938288086,
+    0.43529078103717656,
+    0.998411624504777,
+    0.4789169890161548,
+    0.9997523872763507,
+    0.9999984941233246,
+    0.40630654874764294,
+    0.9999999791771592,
+    0.057972307315850354,
+    0.5408256232256181,
+    0.2683541651280336,
+    0.5272764864498588,
+    0.002072610546109973,
+    0.49921954212650044,
+    0.023828177181323483,
+    0.19859117233065654
+   ],
+   "PASS": false
+  },
+  "paired__latent_bgal_minus_latent": {
+   "median_shift_kms": -0.020916576147050493,
+   "median_shift_sd": 0.08911089149276406,
+   "width90_shift_kms": 0.018608793298897978,
+   "width90_ratio": 1.000649863521218,
+   "n_wider": 24,
+   "n_real": 50
+  },
+  "paired__latent_minus_latent_off": {
+   "median_shift_kms": -2.890698715607332,
+   "median_shift_sd": 3.655219299416936,
+   "width90_shift_kms": -1.2099121840466944,
+   "width90_ratio": 0.9558749351292165,
+   "n_wider": 15,
+   "n_real": 50
+  },
+  "gate_reference_arm": "latent_bgal",
+  "TIER_C": false
+ }
+}
