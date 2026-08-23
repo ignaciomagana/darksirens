@@ -260,6 +260,12 @@ class ParameterDecoder:
     # build_parameter_decoder from opts and never sampled -- it gates which
     # theta labels the survey block carries.
     selection_family: str = "gaussian"
+    # Conservation policy of the LEGACY local-overdensity missing-galaxy
+    # factor: "conserve" (the default -- renormalize the floored factor to
+    # full-sky mean one at every z) or "legacy" (the unrenormalized floor).
+    # STRUCTURAL on SurveyParams (None vs the leaf-less sentinel); never
+    # sampled.  Inert on the Q_LSS / latent paths.
+    lss_floor: str = "conserve"
     sky_labels: tuple[str, ...] = ()
     sky_params_fid: tuple[float, ...] = ()
     mark_labels: tuple[str, ...] = ()
@@ -586,6 +592,9 @@ def build_parameter_decoder(
         # + --stratum_map, per catalog; None = single stratum (legacy).
         selection_strata=_strata_by_cat,
         selection_family=selection_family,
+        # Absent on bare/legacy opts -> "conserve", which is bit-identical
+        # wherever the floor never engages (the normalizer is then exactly 1).
+        lss_floor=str(getattr(opts, "lss_floor", None) or "conserve"),
         # Resolved per-catalog survey z_depth (CLI --survey_z_depth override >
         # per-catalog file attr > None), computed host-side in the CLI before
         # the likelihood is built. Absent on bare/legacy ``opts`` (e.g. tests
