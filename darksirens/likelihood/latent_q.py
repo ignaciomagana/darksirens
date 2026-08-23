@@ -224,13 +224,41 @@ def rho_from_moments(A_m, B_m, c, b, b_nodes, P_F: float, F_F: float,
     identically ``0`` when the field is ``0`` -- the property P16 turns into a
     physics gate.
     """
-    A = interp_b(A_m, b_nodes, b)                       # (N_grid,)
-    B = interp_b(B_m, b_nodes, b)                       # (N_grid,)
+    # INTERPOLATE IN LOG SPACE.  ``A(z; b) = sum_{p in F} e^{b f}`` spans
+    # **14.9 orders of magnitude** across the shipped b-node range on the real
+    # anchor (2.97e4 at b = 0 to 2.37e19 at b = 4, per-mode field amplitude
+    # 2.46), and a polynomial interpolant of a function with that dynamic range
+    # oscillates at the LOW end where the function is small: measured on
+    # latent_anchor_v2a.h5, linear-space barycentric interpolation returns
+    # ``A = -9.69e7`` at ``b_GW = 0.37`` where the true value is ``+3.07e4``,
+    # bracketed by +2.97e4 at b = 0.1 and +3.20e4 at b = 0.5.  ``A - c B`` then
+    # goes negative, ``jnp.maximum(num, 1e-300)`` floors it, and ``rho`` is
+    # garbage -- silently, because the floor makes it finite.  ``b_GW`` is a
+    # SAMPLED parameter, so the sampler visits that region.
+    #
+    # ``log A`` is nearly linear in ``b`` (it is ``~ b f_max + log |F|``), so the
+    # same 33 Chebyshev nodes reproduce it to 1.4e-15 relative and ``A - B``
+    # stays positive at every ``b`` tested.  Exactness at the nodes is preserved
+    # -- ``interp_b``'s barycentric pole handling is untouched, and ``exp(log x)``
+    # round-trips to the last ulp.
+    #
+    # The zero PAD above the depth would give ``log 0``; it is masked out by
+    # ``below_depth`` below, so it is mapped to ``A = 1`` (``log A = 0``) rather
+    # than ``-inf``, which keeps the arithmetic finite before the mask.
+    def _interp_pos(T):
+        T = jnp.asarray(T)
+        return jnp.exp(interp_b(jnp.where(T > 0.0, jnp.log(jnp.maximum(T, 1e-300)),
+                                          0.0), b_nodes, b))
+
+    A = _interp_pos(A_m)                                # (N_grid,)
+    B = _interp_pos(B_m)                                # (N_grid,)
     c = jnp.asarray(c, dtype=A.dtype)
     num = A - c * B
     den = jnp.asarray(P_F, dtype=A.dtype) - c * jnp.asarray(F_F, dtype=A.dtype)
-    # Both sides are sums of positive weights over the footprint; a non-positive
-    # value can only come from c > 1 (clipped upstream) or a corrupt artifact.
+    # Both sides are sums of positive weights over the footprint; with the
+    # log-space interpolation above, ``B <= A`` and ``c <= 1`` make ``num > 0``
+    # structurally, so the floor is a corrupt-artifact guard rather than a
+    # working part of the arithmetic.
     rho = jnp.log(jnp.maximum(num, 1e-300)) - jnp.log(jnp.maximum(den, 1e-300))
     if below_depth is not None:
         rho = jnp.where(below_depth, rho, 0.0)

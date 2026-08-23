@@ -1,0 +1,40 @@
+% ============================================================================
+%  MODEL_standalone.tex -- a thin wrapper so MODEL.tex can be compiled and
+%  read on its own.
+%
+%  MODEL.tex is a self-contained LaTeX BODY FRAGMENT (it says so in its own
+%  header): it carries no \documentclass and no preamble, because it was
+%  written to be dropped into the proposal.  The preamble below is exactly
+%  the one MODEL.tex's header asks for, and nothing else.
+%
+%  Compile with pdflatex, twice, for the cross-references.
+% ============================================================================
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{verbatim}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!55!black,citecolor=blue!55!black,
+            urlcolor=blue!55!black]{hyperref}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\title{A field-level dark-siren hierarchy:\\ mathematical specification}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\bigskip
+\input{MODEL.tex}
+\end{document}

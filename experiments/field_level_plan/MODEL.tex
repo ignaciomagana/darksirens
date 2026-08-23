@@ -48,7 +48,8 @@ stratum map --- single-catalog only).  The production 259-event run uses
 \verb|c_mode=selection|, no stratification, and \emph{no LSS at all}: it runs
 \verb|--use_lss false| with \verb|lss_completion none|
 (\texttt{logs/ns\_joint\_sel\_1119811.out:68,\,73,\,232}), so the field-level
-path would be the first LSS ever used in production.
+path would be the one that puts LSS into a production run of this pipeline; no
+production run on this line has ever carried it.
 
 \begin{table}[t]
 \centering\small
@@ -401,7 +402,15 @@ Expand $\log$ about $\mathcal L$ to second order.
 \noindent \eqref{eq:Mrequired} is sharper than the usual ``$M\sim e^{\sigma^2}$''
 folklore and it is brutal: at the plan's upper estimate $\sigma\simeq2.6$ nats,
 $e^{\sigma^2}=863$, so $\epsilon=0.1$ nat needs $M>4.3\times10^3$, and $M=8$
-carries a $54$-nat bias.
+carries a $54$-nat bias.  That branch is excluded by measurement on the
+production line: $\sigma$ is $1.49\times10^{-2}$ nats at the anchor and at most
+$1.15$ nats anywhere in the $H_0$ prior, and the measured $\theta$-varying bias at
+$M=8$ is $7.1\times10^{-3}$ nats.  The lognormal premise of
+\eqref{eq:jensenbias} also fails at the low-$H_0$ rail, in the safe direction ---
+the member log-weights there are left-skewed and heavy-tailed (skew $-7.43$,
+excess kurtosis $74.1$) and the measured $\mathrm{ESS}/M=0.835$ against a
+predicted $e^{-\sigma^2}=0.265$ --- so \eqref{eq:Mrequired} is an upper bound on
+this line rather than an estimate.
 
 \begin{remark}[what actually has to be gated: the frozen-noise surrogate]
 \label{rem:crn}
@@ -1141,9 +1150,14 @@ affordable at all under \eqref{eq:Mrequired}.  The full path adds, per
 proposal, one $M\times M$ Cholesky ($M^3/3$) plus the separable contraction
 $2G_sN_{\rm pix}M_{\rm sph}^2+2M_{\rm sph}^2G_sM_z^2$; at
 $(M_{\rm sph},M_z,G_s)=(315,12,32)$ this is $O(1)$\,s of dense linear algebra
-per proposal, i.e. four orders of magnitude above the measured $27.5$--$49.3$\,ms
-likelihood baseline.  \textbf{The full path is not affordable inside a
-$10^6$-call nested-sampling run at production rank}; it is affordable at
+per proposal.  The $27.5$--$49.3$\,ms likelihood baseline this was first compared
+against belongs to a different configuration: the production $259$-event line is
+\emph{measured} at $1417$\,ms per call with no structure (H100, value-only path),
+so the full path is of order the likelihood itself rather than four orders above
+it.  \textbf{The full path is still not affordable inside a $10^6$-call
+nested-sampling run at production rank}, but the binding costs are memory --- it
+makes the member row factors a $3$--$24$\,GB per-evaluation transient --- and the
+loss of an analytically smooth surrogate, not wall clock; it is affordable at
 reduced rank, on a grid, or as a validation reference.  This asymmetry --- not
 elegance --- is why Proposition~\ref{prop:cancel} is the load-bearing result.
 

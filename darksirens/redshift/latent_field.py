@@ -597,20 +597,11 @@ def chebyshev_lobatto_nodes(n_b: int, b_max: float) -> np.ndarray:
     return 0.5 * b_max * (1.0 - np.cos(np.pi * k / (n_b - 1)))
 
 
-def interp_moments_b(table, b_nodes, b) -> jnp.ndarray:
-    """Barycentric Chebyshev–Lobatto interpolation of a moment table along
-    its ``b``-node axis (axis -2, per :func:`sky_moments`'s layout), at one
-    scalar ``b`` — the P9-pinned online path (1e-6).  Exact at the nodes by
-    the barycentric formula's pole handling."""
-    table = jnp.asarray(table)
-    b_nodes = jnp.asarray(b_nodes, dtype=jnp.float64)
-    n = b_nodes.shape[0]
-    w = jnp.asarray((-1.0) ** np.arange(n))
-    w = w.at[0].mul(0.5).at[-1].mul(0.5)
-    d = b - b_nodes                                          # (n_b,)
-    exact = jnp.any(d == 0.0)
-    idx = jnp.argmin(jnp.abs(d))
-    coef = w / jnp.where(d == 0.0, 1.0, d)
-    coef = jnp.where(exact, jnp.zeros_like(coef).at[idx].set(1.0), coef)
-    coef = coef / jnp.sum(coef)
-    return jnp.tensordot(table, coef, axes=([-2], [0]))
+# There is deliberately NO ``b``-interpolant here.  The moment tables are
+# consumed at one place -- ``likelihood.latent_q.rho_from_moments``, through
+# ``latent_q.interp_b`` -- and that interpolant works in LOG space because
+# ``A(z; b)`` spans 14.9 orders across this node grid on the real anchor.  A
+# second copy living beside the BUILDER is a copy that no production call
+# reaches, so a fix to the consumer silently leaves it behind; that is exactly
+# what happened to the one that used to be here, and the P9 pin that called it
+# went on passing against the pre-fix arithmetic.
