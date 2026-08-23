@@ -79,6 +79,12 @@ class StoreContract:
     positive: tuple[str, ...] = ()
     nonnegative: tuple[str, ...] = ()
     ranges: Mapping[str, RangeSpec] = field(default_factory=dict)
+    #: (primary, secondary) dataset pairs that must satisfy secondary <=
+    #: primary.  ``q = m2/m1 <= 1`` is a labelling convention, not a physical
+    #: bound, but every consumer here relies on it: the pairing models
+    #: normalise p(q|m1) over (m_min/m1, 1], so a row with m2 > m1 is handed a
+    #: finite density from outside the domain the normaliser covers (PHY-09).
+    ordered_masses: tuple[tuple[str, str], ...] = ()
 
 
 _PE_CONTRACT = StoreContract(
@@ -116,6 +122,7 @@ _PE_CONTRACT = StoreContract(
     positive=("m1det", "m2det", "dL", "m1src", "m2src"),
     nonnegative=("p_pe",),
     ranges={**SKY_RANGES, "chieff": RangeSpec(-1.0, 1.0)},
+    ordered_masses=(("m1det", "m2det"), ("m1src", "m2src")),
 )
 
 _SELECTION_CONTRACT = StoreContract(
@@ -145,6 +152,7 @@ _SELECTION_CONTRACT = StoreContract(
     ),
     positive=("m1det", "m2det", "dL", "m1src", "m2src", "pdraw"),
     ranges={**SKY_RANGES, "chieff": RangeSpec(-1.0, 1.0)},
+    ordered_masses=(("m1det", "m2det"), ("m1src", "m2src")),
 )
 
 #: format_version -> contract.  Adding an accepted format is a deliberate,
@@ -226,6 +234,7 @@ def _component_variant(base: StoreContract) -> StoreContract:
         positive=base.positive,
         nonnegative=base.nonnegative,
         ranges={**base.ranges, **_COMPONENT_RANGES},
+        ordered_masses=base.ordered_masses,
     )
 
 
@@ -472,6 +481,23 @@ def quality_problems(f: Any, contract: StoreContract) -> list[str]:
             problems.append(
                 f"dataset {name!r} contains {below + above} values outside "
                 f"{spec.describe()}{hint}"
+            )
+    for primary, secondary in contract.ordered_masses:
+        if primary not in f or secondary not in f:
+            continue
+        m1 = np.asarray(f[primary])
+        m2 = np.asarray(f[secondary])
+        if m1.shape != m2.shape:
+            continue  # layout_problems owns that failure
+        ok = np.isfinite(m1) & np.isfinite(m2)
+        n_bad = int((m2[ok] > m1[ok]).sum())
+        if n_bad:
+            worst = float(np.max(m2[ok] / m1[ok]))
+            problems.append(
+                f"dataset {secondary!r} exceeds {primary!r} in {n_bad} row(s) "
+                f"(largest q = {worst:.6g} > 1); the pairing models normalise "
+                "p(q|m1) over q <= 1, so such a row is scored with a density "
+                "from outside the normalisation domain"
             )
     sky_problem = sky_availability_problem(f.attrs)
     if sky_problem is not None:

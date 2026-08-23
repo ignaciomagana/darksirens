@@ -197,6 +197,39 @@ def test_zero_nobs_is_refused(tmp_path):
 
 
 # ----------------------------------------------------------------------------
+# Mass ordering (review PHY-09).  The pairing models normalise p(q|m1) over
+# q <= 1, so a row with m2 > m1 is scored with a density from outside the
+# normalisation domain -- the store must not carry one.
+# ----------------------------------------------------------------------------
+def test_pe_store_with_m2det_above_m1det_is_refused(tmp_path):
+    path = _write_pe(tmp_path / "pe_q_gt_1.h5", overrides={
+        "m1det": np.full(_N, 30.0), "m2det": np.full(_N, 36.0),
+    })
+    with pytest.raises(RuntimeError) as excinfo:
+        load_gw_store(path)
+    msg = str(excinfo.value)
+    assert "'m2det' exceeds 'm1det'" in msg
+    assert "1.2" in msg
+
+
+def test_selection_store_with_m2src_above_m1src_is_refused(tmp_path):
+    path = _write_selection(tmp_path / "sel_q_gt_1.h5", overrides={
+        "m1src": np.full(_SEL_N, 20.0), "m2src": np.full(_SEL_N, 25.0),
+    })
+    with pytest.raises(RuntimeError, match="'m2src' exceeds 'm1src'"):
+        load_selection_store(path)
+
+
+def test_equal_masses_are_accepted(tmp_path):
+    """q = 1 is a physical boundary, not a violation."""
+    path = _write_pe(tmp_path / "pe_q_eq_1.h5", overrides={
+        "m1det": np.full(_N, 30.0), "m2det": np.full(_N, 30.0),
+        "m1src": np.full(_N, 20.0), "m2src": np.full(_N, 20.0),
+    })
+    assert np.asarray(load_gw_store(path).columns["m2det"]).size == _N
+
+
+# ----------------------------------------------------------------------------
 # The lensing preflight gates the same files and must be at least as strict.
 # ----------------------------------------------------------------------------
 def test_preflight_refuses_singleton_ra_in_a_selection_file(tmp_path):

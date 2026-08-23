@@ -91,6 +91,20 @@ class PowerLaw(MassComponent):
         upper bound."""
         return float(self.m_max_spec.high)
 
+    @property
+    def support(self):
+        """No grid mask: this component carries BOTH its own edges.
+
+        ``_eval_unnorm`` multiplies by ``sfilter_low * sfilter_high``, which is
+        exactly zero outside the SAMPLED ``[m_min, m_max]``, and ``_norm``
+        below is the analytic integral over that same interval -- not over the
+        normalisation grid.  Masking to the grid would therefore be a lie in
+        both directions: inert when ``m_max`` sits below the ceiling, and a
+        silent truncation of real, already-normalised support when it does not
+        (``m_max`` may be sampled up to :attr:`m1_support_max`).
+        """
+        return (None, None)
+
     def _norm(self, theta):
         """Exact-in-the-edges normalisation (see :func:`_tapered_edge_norm`)."""
         a, mmin, mmax, dmmin, dmmax = (theta[0], theta[1], theta[2],
@@ -153,6 +167,12 @@ class BrokenPowerLaw(MassComponent):
         """Support ends at the sampled high-mass edge; the largest possible value
         is the ``m_max`` prior upper bound."""
         return float(self.m_max_spec.high)
+
+    @property
+    def support(self):
+        """No grid mask -- same ``sfilter_low * sfilter_high`` edges and same
+        analytic ``[m_min, m_max]`` normaliser as :class:`PowerLaw`."""
+        return (None, None)
 
     def _norm(self, theta):
         """Exact-in-the-edges normalisation (see :func:`_tapered_edge_norm`)."""
@@ -399,6 +419,17 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
         ``m < m_high``.  This exceeds the default ``M_HI`` ceiling, so the
         opt-in pairing grid must be sized to it."""
         return float(self.m_high)
+
+    @property
+    def support(self):
+        """This model declares its OWN 300 Msun ceiling, above the M_HI = 200
+        normalisation grid, and normalises on a grid stretched to it
+        (:meth:`_support_grid`).  Masking to the shared grid would delete real,
+        correctly-normalised support between 200 and 300 Msun -- the documented
+        exception the common mask must not swallow (review PHY-08).  The
+        component's own ``m < m_high`` cut makes this bound inert; it is
+        declared so the metadata is truthful rather than absent."""
+        return (None, float(self.m_high))
 
     def _bpl_raw(self, m, alpha1, alpha2, m_break, m1_low):
         below = (m >= m1_low) & (m < m_break)
@@ -675,6 +706,16 @@ class GWTC3PowerLawPeakMass(MassComponent):
     delta_m_spec: ParamSpec
 
     @property
+    def support(self):
+        """No mask: Eq. B4's ``G`` is normalized over the REAL LINE and is
+        deliberately not truncated at ``m_max``, so this model's upper tail is
+        the paper's statement, not a leak (see the class docstring).  It is the
+        documented exception the common finite-support mask must not swallow
+        (review PHY-08); the analytic ``_norm`` below integrates that same real
+        line, so masking would break the normalisation it is paired with."""
+        return (None, None)
+
+    @property
     def param_specs(self):
         return [
             self.alpha_spec,
@@ -907,6 +948,14 @@ class GolombRemnantMass1G(MassComponent):
     m_tr_spec: ParamSpec
     delta_m_spec: ParamSpec
     sigma_spec: ParamSpec
+
+    @property
+    def support(self):
+        """No mask: :meth:`_eval_unnorm` interpolates a precomputed
+        ``phi_1G`` table with ``left=0.0, right=0.0``, so the model already
+        carries its own hard edges wherever that table ends.  The documented
+        exception the common finite-support mask must not swallow (PHY-08)."""
+        return (None, None)
 
     @property
     def param_specs(self):

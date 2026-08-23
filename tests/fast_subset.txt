@@ -79,3 +79,4 @@ tests/test_latent_anchor.py
 tests/test_latent_seam.py
 tests/test_latent_factory.py
 tests/test_store_layout_contract.py
+tests/test_mass_pairing_support.py
