@@ -1,0 +1,29 @@
+{
+ "survey": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/desi_ingest/data/pixelated_n64/catalog_pixelated_nside_64.h5",
+ "selection_fit": "/hildafs/projects/phy230014p/magana/src/darksirens-dev/experiments/desi_ingest/data/selection_fit_union.json",
+ "nside": 64,
+ "n_occupied": 30470,
+ "f_sky_occupied": 0.6199137369791666,
+ "z_depth": 0.3,
+ "sum_weights": 22787566.0,
+ "V_c_Mpc3": 7788892534.122502,
+ "C_eff_volume_weighted": 0.9789857352659154,
+ "n0_raw_observed_Mpc3": 0.004719445416284855,
+ "n0_true_Mpc3": 0.003999594587498415,
+ "log10n0": -2.397984028005907,
+ "n0_true_Mpc3_no_evo": 0.004820749931563552,
+ "log10n0_no_evo": -2.3168853962412843,
+ "delta": 0.9404729599861055,
+ "delta_fit_z_range": [
+  0.05,
+  0.3
+ ],
+ "note": "n0 normalizes the counts against the FULL likelihood budget integrand C_sel * (1+z)^delta * dVc/dz (convention fixed 2026-08-09; *_no_evo are the superseded pre-fix values -- do not quote); delta from the count-weighted dN/dz shape residual to C_sel * dVc/dz",
+ "created_utc": "2026-08-20T10:47:18.994663+00:00",
+ "darksirens_git_sha": "61591b6d1f4b53d54ba516701741ebfc7a0c659e",
+ "DARKSIRENS_ZMAX": "6.0",
+ "argv": [
+  "calibrate_n0.py",
+  "--help"
+ ]
+}

@@ -1,0 +1,18 @@
+# Regenerable bulk.  This directory is 8.0 GB on disk and all of it rebuilds
+# from run_all.sh / run_validation.sh plus the read-only catalog inputs; what is
+# NOT regenerable is the code, the notes, and the small JSON summaries that
+# carry the measured numbers, so those stay tracked.
+output*/
+
+# Q tables and fitted curves: 36 h5 (399 MB each) + 830 MB of npz outside
+# output*/ alone.
+*.h5
+*.npz
+*.npy
+
+# 35 MB of plots, and every one of them is a `plot_completeness.py` invocation
+# away.  The closure_summary.json next to them is the part worth keeping.
+*.png
+
+__pycache__/
+.ipynb_checkpoints/

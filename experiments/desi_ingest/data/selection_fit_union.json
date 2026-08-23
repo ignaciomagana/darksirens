@@ -1,0 +1,38 @@
+{
+  "format_version": "darksirens-selection-fit-1.0",
+  "strata": [
+    {
+      "family": "gaussian",
+      "m_lim": 21.0,
+      "M0hat": -20.309781546689074,
+      "sigma_M": 0.7144467727667887,
+      "cov": [
+        [
+          2.545594575440846e-08,
+          3.3863734777395015e-09
+        ],
+        [
+          3.386373477739502e-09,
+          1.4385185844077832e-08
+        ]
+      ],
+      "n_gal": 22786660,
+      "stratum": "all",
+      "k_corr_coeffs": [
+        1.13465,
+        -4.88963,
+        8.58828
+      ],
+      "meta": {
+        "Om0": 0.3075,
+        "w0": -1.0,
+        "wa": 0.0,
+        "H0_ref": 100.0,
+        "nll": 23165465.04522908
+      }
+    }
+  ],
+  "survey_path": "data/pixelated_n64/catalog_pixelated_nside_64.h5",
+  "survey_sha256": "ec6b6362b2872517a30ad09cd9f289939829cef6aa563ce991275dec4dec53b3",
+  "created_utc": "2026-08-09T03:11:58.783518+00:00"
+}

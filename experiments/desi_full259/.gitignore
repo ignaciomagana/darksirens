@@ -1,0 +1,15 @@
+# 7.2 GB of Q tables and nested-sampling checkpoints, all regenerable from
+# run_h0_scans.py / the sbatch wrappers.  The small JSONs under data/ are the
+# measured record (h0 scans, n0 calibration and its provenance) and stay
+# tracked -- data/ is deliberately NOT ignored wholesale for that reason.
+*.h5
+*.npz
+*.npy
+*.png
+
+# SLURM logs land in logs/ next to the sbatch scripts.
+logs/
+*.out
+*.err
+
+__pycache__/

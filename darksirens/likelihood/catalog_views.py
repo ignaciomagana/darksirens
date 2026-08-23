@@ -14,6 +14,7 @@ from darksirens.redshift.completion import (
     build_field_delta_g_inputs,
     build_field_depth_inputs,
     build_field_lss_q_fp_empty_sum,
+    build_field_lss_q_fp_empty_sum_members,
     build_field_lss_q_inputs,
     build_field_lss_q_member_inputs,
     build_field_mark_inputs,
@@ -148,6 +149,7 @@ class CatalogViews:
     # f_p map are both present; without it the field normalizer would model
     # unobserved sky as Cbar-complete (completion.build_field_lss_q_fp_empty_sum).
     field_lss_q_fp_empty_sum: jnp.ndarray | None = None  # (n_grid,) f64
+    field_lss_q_fp_empty_sum_members: jnp.ndarray | None = None  # (M, n_grid) f64
     f_p_total_sum: jnp.ndarray | None = None     # scalar f64 (whole sky)
 
 
@@ -750,7 +752,7 @@ def prepare_catalog_views(
     # for the field normalizer.  ``None`` everywhere when the flag is off.
     f_p_rows_pe = f_p_rows_sel = None
     field_f_p_occ = field_f_p_empty_sum = f_p_total_sum = None
-    field_lss_q_fp_empty_sum = None
+    field_lss_q_fp_empty_sum = field_lss_q_fp_empty_sum_members = None
     f_p_full = data.get("f_p_map")
     if f_p_full is not None:
         fp_np = np.asarray(f_p_full, dtype=np.float32)
@@ -768,11 +770,41 @@ def prepare_catalog_views(
             return barrier(jnp.asarray(
                 fp_np[np.asarray(up_raw, dtype=np.int64)]))
 
-        f_p_rows_pe = _fp_rows(unique_pixels_pe_raw)
+        # ``f_p_rows`` is indexed by CATALOG ROW (``completion._row_C`` does
+        # ``f_p_rows[row]``), so it must be gathered with the pixel map those
+        # rows actually carry -- which on the UNION path is
+        # ``union_unique_pixels``, NOT the per-view ``_raw`` pixels.  Gathering
+        # with the pre-union map produced an array of the per-view length (e.g.
+        # 37 rows) while the catalog held the union's (3,072), and JAX CLAMPS an
+        # out-of-bounds gather instead of raising: every row past the short
+        # array silently took the LAST compact entry's completeness.  Because
+        # the per-view length depends on which events are in the run, an event's
+        # own C_p then depended on its company -- measured as a 2.3% shift in
+        # per-row N_miss and 18-55 nat of non-additivity in the event sum
+        # (experiments/field_level_plan/pr6a/additivity.py).  The selection view
+        # was unaffected only because its pixel set already spanned the sky.
+        _fp_pixel_map = (union_unique_pixels if union_unique_pixels is not None
+                         else unique_pixels_pe_raw)
+        f_p_rows_pe = _fp_rows(_fp_pixel_map)
         f_p_rows_sel = (
             f_p_rows_pe
-            if unique_pixels_sel_raw is unique_pixels_pe_raw
+            if union_unique_pixels is not None
+            or unique_pixels_sel_raw is unique_pixels_pe_raw
             else _fp_rows(unique_pixels_sel_raw))
+        # Fail loudly rather than clamp if this ever drifts again: the row count
+        # is knowable here, and a silent gather is what made the defect a
+        # four-pass mystery instead of a stack trace.
+        for _name, _rows, _cat in (("pe", f_p_rows_pe, ngals_pe_catalog),
+                                   ("sel", f_p_rows_sel, ngals_sel_catalog)):
+            if _rows is not None and _cat is not None:
+                _n_cat = int(np.asarray(_cat).shape[0])
+                if int(np.asarray(_rows).shape[0]) != _n_cat:
+                    raise ValueError(
+                        f"f_p_rows_{_name} has "
+                        f"{int(np.asarray(_rows).shape[0])} entries but the "
+                        f"{_name} catalog has {_n_cat} rows; _row_C indexes "
+                        f"f_p_rows by CATALOG ROW and an out-of-bounds gather "
+                        f"is silently clamped by JAX.")
         if field_occupied_pixels is not None:
             occ_idx = np.asarray(field_occupied_pixels, dtype=np.int64)
             field_f_p_occ = barrier(jnp.asarray(fp_np[occ_idx]))
@@ -787,6 +819,11 @@ def prepare_catalog_views(
                 field_lss_q_fp_empty_sum = barrier(
                     build_field_lss_q_fp_empty_sum(
                         np.asarray(logq_for_fp), occ_idx, n_pix_total, fp_np))
+            logq_m_for_fp = data.get("lss_completion_logq_members")
+            if logq_m_for_fp is not None:
+                field_lss_q_fp_empty_sum_members = barrier(
+                    build_field_lss_q_fp_empty_sum_members(
+                        np.asarray(logq_m_for_fp), occ_idx, n_pix_total, fp_np))
 
     return CatalogViews(
         f_p_rows_pe=f_p_rows_pe,
@@ -794,6 +831,7 @@ def prepare_catalog_views(
         field_f_p_occ=field_f_p_occ,
         field_f_p_empty_sum=field_f_p_empty_sum,
         field_lss_q_fp_empty_sum=field_lss_q_fp_empty_sum,
+        field_lss_q_fp_empty_sum_members=field_lss_q_fp_empty_sum_members,
         f_p_total_sum=f_p_total_sum,
         zgals_pe_catalog=zgals_pe_catalog,
         dzgals_pe_catalog=dzgals_pe_catalog,

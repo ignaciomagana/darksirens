@@ -173,6 +173,11 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         # objects as their ``_sel`` counterparts, which ``prepare_catalog_views``
         # and ``factory`` detect (``is``) to alias the device arrays and build one
         # cache per bundle instead of duplicating both across the two views.
+        # S-3: each tracer's own full-sky counts, BEFORE compaction -- the
+        # compact view holds only the pixels this run's events touch, which is
+        # not the survey's footprint.
+        guard_unmasked_footprint_counts(opts, ngals, label=str(path))
+
         union_pixels = unique_inference_pixels(pixels_pe, pixels_sel)
         z_u = zgals[union_pixels]
         dz_u = dzgals[union_pixels]
@@ -996,6 +1001,58 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
 _UNMASKED_FOOTPRINT_EMPTY_FRAC = 0.05
 
 
+def guard_unmasked_footprint_counts(opts, ngals, *, label="") -> None:
+    """The S-3 footprint guard, on a bare full-sky count array.
+
+    The numeric core of :func:`_guard_unmasked_footprint`, callable from any
+    loading path.  ``label`` names the catalog in the message, which is what
+    makes the K >= 2 report actionable: with a mixture the operator needs to
+    know WHICH tracer's sky looks like a footprint.
+    """
+    c_mode = getattr(opts, "c_mode", None) or "per_pixel"
+    if c_mode not in ("aggregate", "selection"):
+        return
+    ngals = np.asarray(ngals).reshape(-1)
+    n_pix = int(ngals.size)
+    if n_pix == 0:
+        return
+    empty_frac = float((ngals == 0).mean())
+    # The Poisson reference must come from the OCCUPIED mean, not thefull-sky mean.
+    # Using ngals.sum()/n_pix puts the mask's own zeros into lambda, so the
+    # emptier the footprint the SMALLER lambda, the LARGER exp(-lambda), and the
+    # higher the bar the guard has to clear -- the hole raises its own detection
+    # threshold. It made the guard unfireable for any catalog with
+    # lambda <= ln(10) = 2.303, since then 10*exp(-lambda) >= 1 >= empty_frac at
+    # every empty fraction. Concretely: a pencil-beam survey with 20 gal/pixel
+    # over 12% of the sky gave lambda = 2.4 and passed silently at empty_frac
+    # 0.88 -- exactly the S-3 exposure this exists to catch.
+    occ = ngals[ngals > 0]
+    lam = float(occ.mean()) if occ.size else 0.0
+    poisson_empty = float(np.exp(-lam))
+    if not empty_frac > max(_UNMASKED_FOOTPRINT_EMPTY_FRAC,
+                            10.0 * poisson_empty):
+        return
+    area = 4.0 * np.pi * (180.0 / np.pi) ** 2
+    where = f" [{label}]" if label else ""
+    msg = (
+        f"c_mode={c_mode!r} with no per-pixel selection fraction{where} on a "
+        f"catalog whose empty sky looks like a FOOTPRINT, not sparsity: "
+        f"{empty_frac:.1%} of {n_pix} pixels are empty "
+        f"({empty_frac * area:,.0f} deg^2) against {poisson_empty:.2e} "
+        f"predicted by the mean count {lam:.1f} gal/pixel. The survey "
+        f"completeness curve Cbar(z) is applied there too, so that sky is "
+        f"modelled as Cbar-COMPLETE and its hosts leave the missing budget "
+        f"while the numerator keeps them. Pass --per_pixel_completeness "
+        f"<mth_map.h5> (C_p = f_p Cbar, f_p = 0 off-footprint) where it is "
+        f"supported, or --allow_unmasked_footprint to run the exposed "
+        f"configuration deliberately (the no-mask control arms do)."
+    )
+    if getattr(opts, "allow_unmasked_footprint", False):
+        print(f"    [footprint] ALLOWED BY FLAG -- {msg}")
+        return
+    raise ValueError(msg)
+
+
 def _guard_unmasked_footprint(opts, data) -> dict:
     """S-3: refuse an aggregate/selection ``C`` on unobserved sky, unmasked.
 
@@ -1017,47 +1074,19 @@ def _guard_unmasked_footprint(opts, data) -> dict:
     empty pixels are what its mean count predicts under Poisson is sparse, and
     passes at any empty fraction.
 
-    KNOWN GAP: ``inference/data.py`` returns before this attach step for
-    ``n_catalogs >= 2``, so a multitracer mixture is not guarded.  ``f_p`` is
-    refused there anyway (the bundle loader does not thread it), so the guard
-    would have nothing to recommend; the exposure is the same and is stated
-    here rather than left to be discovered.
+    K >= 2 takes the same guard by a different route: ``inference/data.py``
+    returns before this attach step for a multitracer mixture, so
+    :func:`load_multitracer_catalog_bundles` calls
+    :func:`guard_unmasked_footprint_counts` on each bundle's own full-sky
+    counts.  ``f_p`` is still refused there (the bundle loader does not thread
+    it), so the guard's advice for K >= 2 is ``--allow_unmasked_footprint`` or a
+    different ``c_mode`` -- but the exposure is the same one, and it is now
+    reported rather than silent.
     """
-    c_mode = getattr(opts, "c_mode", None) or "per_pixel"
-    if c_mode not in ("aggregate", "selection"):
-        return data
     ngals = data.get("ngals_catalog", data.get("ngals"))
-    if ngals is None:
-        return data
-    ngals = np.asarray(ngals).reshape(-1)
-    n_pix = int(ngals.size)
-    if n_pix == 0:
-        return data
-    empty_frac = float((ngals == 0).mean())
-    lam = float(ngals.sum()) / n_pix
-    poisson_empty = float(np.exp(-lam))
-    structural = empty_frac > max(_UNMASKED_FOOTPRINT_EMPTY_FRAC,
-                                  10.0 * poisson_empty)
-    if not structural:
-        return data
-    area = 4.0 * np.pi * (180.0 / np.pi) ** 2
-    msg = (
-        f"c_mode={c_mode!r} with no --per_pixel_completeness on a catalog "
-        f"whose empty sky looks like a FOOTPRINT, not sparsity: "
-        f"{empty_frac:.1%} of {n_pix} pixels are empty "
-        f"({empty_frac * area:,.0f} deg^2) against {poisson_empty:.2e} "
-        f"predicted by the mean count {lam:.1f} gal/pixel. The survey "
-        f"completeness curve Cbar(z) is applied there too, so that sky is "
-        f"modelled as Cbar-COMPLETE and its hosts leave the missing budget "
-        f"while the numerator keeps them. Pass --per_pixel_completeness "
-        f"<mth_map.h5> (C_p = f_p Cbar, f_p = 0 off-footprint), or "
-        f"--allow_unmasked_footprint to run the exposed configuration "
-        f"deliberately (the no-mask control arms do)."
-    )
-    if getattr(opts, "allow_unmasked_footprint", False):
-        print(f"    [footprint] ALLOWED BY FLAG -- {msg}")
-        return data
-    raise ValueError(msg)
+    if ngals is not None:
+        guard_unmasked_footprint_counts(opts, ngals)
+    return data
 
 
 def attach_selection_fraction_inputs(opts, data) -> dict:
@@ -1072,16 +1101,15 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
       already contains the mask loss (multiplying would double-count it);
     * gaussian selection family — the truncated-Schechter disjointness
       argument (F2) has not been re-derived under ``f_p`` (PLAN §7 PR-2);
-    * a deterministic Q table is REFUSED unless its artifact stamps
-      ``f_p_aware`` — the builder's assertion that it divided the survey mask
-      out.  Q is fit to OBSERVED counts, so it otherwise already contains the
-      footprint and ``C_p = f_p C`` applies the mask twice (measured: a
+    * a Q table (deterministic OR ensemble) is REFUSED unless its artifact
+      stamps ``f_p_aware`` — the builder's assertion that it divided the survey
+      mask out.  Q is fit to OBSERVED counts, so it otherwise already contains
+      the footprint and ``C_p = f_p C`` applies the mask twice (measured: a
       confidently wrong ``H0``, 26 km/s from truth).  The machinery for the
-      admitted pairing exists — the field normalizer builds
-      ``Sum_{p empty} f_p Q_p(z)`` alongside the plain empty-pixel budget — and
-      becomes usable the moment a mask-free Q builder does.  A Q ENSEMBLE and
-      stratified selection are refused outright, ahead of that gate: their
-      budgets would need per-member / per-stratum ``f_p``-weighted twins;
+      pairing exists — the field normalizer builds ``Sum_{p empty} f_p Q_p(z)``
+      and its per-member twin — and becomes usable the moment a mask-free Q
+      builder does.  Stratified selection is refused separately, for its
+      per-stratum twins;
     * K = 1 — the multitracer bundle loader does not thread ``f_p`` yet.
     """
     path = getattr(opts, "per_pixel_completeness", None)
@@ -1098,13 +1126,6 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
         raise NotImplementedError(
             "--per_pixel_completeness is K=1 only for now (the multitracer "
             "bundle loader does not thread f_p).")
-    if data.get("lss_completion_logq_members") is not None or bool(
-            getattr(opts, "lss_marginalize", False)):
-        raise NotImplementedError(
-            "--per_pixel_completeness with a Q ENSEMBLE needs a per-member "
-            "f_p-weighted empty-pixel budget "
-            "(completion.build_field_lss_q_fp_empty_sum_members, not wired "
-            "into the member substitution); drop one of them.")
     if getattr(opts, "selection_strata_by_catalog", None):
         raise NotImplementedError(
             "--per_pixel_completeness with stratified selection needs "

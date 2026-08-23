@@ -1,0 +1,17 @@
+# 8.8 GB of ingested catalog and Q tables, all rebuilt by run_qbuilds.sh /
+# ingest_loa_rebuild.py from the read-only sources named in README.md.
+#
+# NB: this used to read `data/`, which also swallowed the tiny JSON records --
+# h0_real_scans.json, diagnostics_stage_a.json, ppd_dndz.json, the NS
+# run_fingerprints -- i.e. exactly the measured numbers this campaign exists to
+# produce.  Ignore the bulk by extension instead, and let the JSON through.
+*.h5
+*.npz
+*.npy
+*.png
+
+logs/
+*.out
+*.err
+
+__pycache__/

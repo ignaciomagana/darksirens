@@ -1,0 +1,13 @@
+{
+ "n_occupied": 30470,
+ "n_north_pixels": 6160,
+ "n_south_pixels": 24310,
+ "n_boundary_mixed_pixels": 246,
+ "off_footprint_label": 0,
+ "created_utc": "2026-08-09T05:32:52.012668+00:00",
+ "darksirens_git_sha": "de953f6383a890913eab9fd5fa94cfed5552ccdc",
+ "DARKSIRENS_ZMAX": "0.75",
+ "argv": [
+  "make_stratum_map.py"
+ ]
+}

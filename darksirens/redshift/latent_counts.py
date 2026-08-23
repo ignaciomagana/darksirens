@@ -138,6 +138,30 @@ def make_count_operator(proj_sph, phi_z_fine, W, tracer: TracerCounts
     """Anchor operator: ``phi_shell = W @ phi_z_fine`` with frozen ``W``."""
     phi_shell = jnp.asarray(W) @ jnp.asarray(phi_z_fine)    # (G_s, M_z)
     fp = jnp.asarray(tracer.completeness, dtype=jnp.float64)
+    # A row with counts but f_p == 0 is a contradiction the objective cannot
+    # express: log_fp is floored at log(1e-300) = -690 rather than -inf, so the
+    # row contributes N_pg * (-690) and Fisher scoring drives eta hard upward to
+    # explain a residual that no field value can. ``depth_map.coverage_report``
+    # counts exactly this class as ``n_occupied_uncovered``.
+    #
+    # cli/build_latent_field.py floors f_p at 1e-3 before it gets here, which
+    # caps the pull at ~+6.9 -- but that floor lives in ONE caller, so the
+    # operator refused nothing. Checked on the real production anchor: 56 of
+    # 30,470 footprint pixels are floored, carrying 941 galaxies. The check is
+    # therefore live but not currently firing, which is where it belongs.
+    _n = np.asarray(tracer.counts)
+    _fp = np.asarray(tracer.completeness)
+    _bad = (_fp <= 0.0) & (_n.reshape(_fp.shape[0], -1).sum(axis=1) > 0
+                           if _n.ndim > 1 else _n > 0)
+    if bool(np.any(_bad)):
+        raise ValueError(
+            f"{int(np.sum(_bad))} row(s) of tracer {tracer.label!r} carry "
+            f"galaxies but f_p <= 0 (e.g. row {int(np.argmax(_bad))} with "
+            f"{float(np.asarray(_n).reshape(_fp.shape[0], -1)[int(np.argmax(_bad))].sum()):g} "
+            f"galaxies). log_fp would be floored at -690 instead of -inf and the "
+            f"count-channel solve would push eta up to explain a residual no "
+            f"field value can. Floor f_p (build_latent_field uses 1e-3) or drop "
+            f"the rows.")
     return CountOperator(
         proj_sph=jnp.asarray(proj_sph, dtype=jnp.float64),
         phi_shell=phi_shell,

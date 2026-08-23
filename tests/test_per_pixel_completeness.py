@@ -462,23 +462,14 @@ def test_loader_refusals(tmp_path):
     out_forced = attach_selection_fraction_inputs(
         q_opts(allow_double_counted_mask=True), dict(det))
     assert out_forced["f_p_map"].shape == (48,)
+    # An ENSEMBLE is count-derived too, so the same gate applies to it, and it
+    # passes once the artifact asserts the mask was removed.
     ens = dict(data,
                lss_completion_logq=np.zeros((48, int(zgrid.size))),
-               lss_completion_logq_members=np.zeros((3, 48, int(zgrid.size))))
-    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
-        attach_selection_fraction_inputs(
-            SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
-                            n_catalogs=1, lss_completion="q.h5",
-                            selection_strata_by_catalog=None,
-                            selection_fit=None), dict(ens))
-    # an ENSEMBLE is refused for its MISSING per-member budget, which f_p_aware
-    # says nothing about, so neither the stamp nor the escape hatch admits one
-    ens_aware = dict(ens, lss_completion_provenance={"f_p_aware": True})
-    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
-        attach_selection_fraction_inputs(q_opts(), dict(ens_aware))
-    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
-        attach_selection_fraction_inputs(
-            q_opts(allow_double_counted_mask=True), dict(ens))
+               lss_completion_logq_members=np.zeros((3, 48, int(zgrid.size))),
+               lss_completion_provenance={"f_p_aware": True})
+    out_e = attach_selection_fraction_inputs(q_opts(), dict(ens))
+    assert out_e["f_p_map"].shape == (48,)
     with pytest.raises(NotImplementedError, match="strat"):
         attach_selection_fraction_inputs(
             SimpleNamespace(per_pixel_completeness=path, c_mode="selection",
@@ -635,8 +626,8 @@ def test_fp_q_refusals():
                  field_f_p_empty_sum=jnp.asarray(1.0))
     with pytest.raises(ValueError, match="field_lss_q_fp_empty_sum"):
         _field_missing_curve(_cosmo(), _survey(), em_bad)
-    # a Q ENSEMBLE with f_p: the member normalizers would reuse the
-    # deterministic f_p-weighted budget
+    # a Q ENSEMBLE with f_p but WITHOUT the per-member twin: member m's
+    # normalizer would reuse the deterministic f_p-weighted budget
     em_ens = _em(n_pix=n_pix, **kw,
                  field_f_p_occ=jnp.asarray(f_occ.astype(np.float32)),
                  field_f_p_empty_sum=jnp.asarray(1.0),
@@ -644,7 +635,7 @@ def test_fp_q_refusals():
                      logq, occ, n_pix, np.ones(n_pix)),
                  field_lss_q_members=jnp.asarray(
                      np.stack([np.asarray(kw["field_lss_q"])] * 2)))
-    with pytest.raises(NotImplementedError, match="Q ENSEMBLE"):
+    with pytest.raises(ValueError, match="fp_empty_sum_members"):
         _field_missing_curve(_cosmo(), _survey(), em_ens)
 
 
@@ -679,9 +670,14 @@ def test_sparse_all_sky_catalog_passes_the_guard():
     """Sparsity is not a footprint: empties the mean count predicts are fine."""
     from darksirens.inference.loaders import attach_selection_fraction_inputs
 
+    # lambda must be LARGE enough that the test discriminates: with the old
+    # full-sky lambda the threshold was 10*exp(-lambda), which exceeds 1 for any
+    # lambda <= ln(10) = 2.303, so a lambda = 0.7 catalog passed trivially and
+    # demonstrated nothing. At lambda = 3 the bar is 0.498, so a catalog that is
+    # ~5% empty by sparsity passes on its merits.
     rng = np.random.default_rng(1)
-    ngals = rng.poisson(0.7, size=3072)          # ~50% empty BY SPARSITY
-    assert (ngals == 0).mean() > 0.4
+    ngals = rng.poisson(3.0, size=3072)
+    assert 0.01 < (ngals == 0).mean() < 0.30
     data = dict(nside=16, ngals_catalog=ngals)
     attach_selection_fraction_inputs(_guard_opts(), dict(data))
 
@@ -690,3 +686,153 @@ def test_sparse_all_sky_catalog_passes_the_guard():
     ngals_fp[:1200] = 0
     attach_selection_fraction_inputs(
         _guard_opts(c_mode="per_pixel"), dict(nside=16, ngals_catalog=ngals_fp))
+
+
+def test_fp_q_ensemble_members_get_their_own_empty_budget():
+    """Each member's normalizer must consume ITS OWN Sum_empty f_p Q_p.
+
+    The deterministic budget paired with member m's Q rows is the hazard the
+    stratified path already guards one axis over: the numerator would carry
+    member m's Q while the normalizer carried the ensemble mean's.  The test
+    is that the per-member normalizers DIFFER, and differ in the way the
+    per-member budgets do -- a run that reused the deterministic budget would
+    still vary (the occupied rows differ) but by a different amount.
+    """
+    from darksirens.redshift.completion import (
+        _replace_member_q, _member_fp_empty_rows)
+
+    n_pix = 12
+    _, field, occ, logq, kw = _q_field_kw(n_pix)
+    rng = np.random.default_rng(7)
+    logq_m = np.stack([logq + 0.5, logq - 0.5, logq * 0.0])
+    f_full = np.linspace(0.2, 1.0, n_pix)
+    empty = np.setdiff1d(np.arange(n_pix), occ)
+    qm_occ, qm_empty = build_field_lss_q_inputs(logq_m[0], occ, n_pix), None
+    fp_m = build_field_lss_q_fp_empty_sum_members(logq_m, occ, n_pix, f_full)
+    assert np.asarray(fp_m).shape == (3, int(zgrid.size))
+    # the three members' budgets are genuinely different
+    assert not np.allclose(np.asarray(fp_m)[0], np.asarray(fp_m)[1])
+
+    em = _em(n_pix=n_pix, **kw,
+             field_f_p_occ=jnp.asarray(f_full[occ].astype(np.float32)),
+             field_f_p_empty_sum=jnp.asarray(float(f_full[empty].sum())),
+             field_lss_q_fp_empty_sum=build_field_lss_q_fp_empty_sum(
+                 logq, occ, n_pix, f_full),
+             field_lss_q_members=jnp.asarray(
+                 np.stack([np.asarray(kw["field_lss_q"])] * 3)),
+             field_lss_q_fp_empty_sum_members=fp_m)
+    rows = _member_fp_empty_rows(em)
+    assert rows is not None and np.asarray(rows).shape == (3, int(zgrid.size))
+
+    # the substitution installs member m's budget, not the deterministic one
+    for m in range(3):
+        cat_m = _replace_member_q(em, em.field_lss_q_members[m],
+                                  em.field_lss_q_empty_sum, None,
+                                  np.asarray(rows)[m])
+        np.testing.assert_allclose(
+            np.asarray(cat_m.field_lss_q_fp_empty_sum),
+            np.asarray(fp_m)[m], rtol=0, atol=0)
+        V, _ = _field_missing_curve(_cosmo(), _survey(), cat_m)
+        assert np.all(np.isfinite(np.asarray(V)))
+
+    # and the per-member curves DIFFER, which the deterministic reuse would hide
+    Vs = []
+    for m in range(3):
+        cat_m = _replace_member_q(em, em.field_lss_q_members[m],
+                                  em.field_lss_q_empty_sum, None,
+                                  np.asarray(rows)[m])
+        Vs.append(np.asarray(_field_missing_curve(_cosmo(), _survey(), cat_m)[0]))
+    assert not np.allclose(Vs[0], Vs[1])
+
+
+def test_fp_without_a_q_ensemble_leaves_the_member_rows_none():
+    """No f_p, or no ensemble: the accessor returns None so the vmap broadcasts."""
+    from darksirens.redshift.completion import _member_fp_empty_rows
+
+    n_pix = 12
+    _, field, occ, logq, kw = _q_field_kw(n_pix)
+    em_nofp = _em(n_pix=n_pix, **kw)
+    assert _member_fp_empty_rows(em_nofp) is None
+    # f_p and a DETERMINISTIC Q table, no ensemble: nothing to substitute
+    em_fp_det = _em(n_pix=n_pix, **kw,
+                    field_f_p_occ=jnp.ones(occ.size, dtype=jnp.float32),
+                    field_f_p_empty_sum=jnp.asarray(0.0),
+                    field_lss_q_fp_empty_sum=build_field_lss_q_fp_empty_sum(
+                        logq, occ, n_pix, np.ones(n_pix)))
+    assert _member_fp_empty_rows(em_fp_det) is None
+
+
+def test_the_guard_fires_on_a_footprint_limited_survey():
+    """A footprint-limited survey must trip the guard, and once did not.
+
+    The Poisson reference was built from `ngals.sum()/n_pix`, which counts the
+    mask's own zeros, so a bigger footprint hole gave a SMALLER lambda, a LARGER
+    `exp(-lambda)` and a HIGHER bar -- the hole raised its own detection
+    threshold. For any lambda <= ln(10) the bar exceeded 1 and the guard could
+    not fire at any empty fraction.
+
+    The fixture is chosen to DISCRIMINATE the two rules, which a deeper beam
+    does not: at 20 gal/pixel over 12% of the sky the full-sky lambda is 2.56,
+    bar 10 exp(-lambda) = 0.7734 < empty_frac 0.8802, so the BROKEN rule fires
+    too and the test proves nothing. Here, 30% of the sky at Poisson(3) gives
+
+      full-sky lambda 0.8818 -> bar 4.1402  (broken rule: never fires, the bar
+                                             is above 1 at any empty fraction)
+      occupied lambda 3.0889 -> bar 0.4555  (fixed rule: fires)
+
+    against a measured empty fraction of 0.7145.
+    """
+    from darksirens.inference.loaders import guard_unmasked_footprint_counts
+    from types import SimpleNamespace
+
+    rng = np.random.default_rng(7)
+    ngals = np.zeros(3072, dtype=int)
+    beam = rng.choice(3072, size=int(0.30 * 3072), replace=False)
+    ngals[beam] = rng.poisson(3, size=beam.size)       # shallow, 30% of sky
+    empty_frac = float((ngals == 0).mean())
+    lam_full = float(ngals.sum() / ngals.size)
+    lam_occ = float(ngals[ngals > 0].mean())
+    # the broken rule cannot fire on this sky; the fixed one must
+    assert empty_frac < max(0.05, 10.0 * np.exp(-lam_full))
+    assert empty_frac > max(0.05, 10.0 * np.exp(-lam_occ))
+
+    with pytest.raises(ValueError, match="FOOTPRINT"):
+        guard_unmasked_footprint_counts(
+            SimpleNamespace(c_mode="selection"), ngals)
+
+
+def test_the_footprint_guard_reaches_the_multitracer_path():
+    """K >= 2 returns before the attach step, so the guard rides the bundle loader.
+
+    Regression for the gap the S-3 PR documented and did not close: a
+    multitracer mixture skipped `attach_selection_fraction_inputs` entirely, so
+    a footprint-limited tracer under `c_mode=selection` was modelled as
+    Cbar-complete off its own footprint with nothing said.  The guard is now
+    called per BUNDLE, on that tracer's own full-sky counts before compaction --
+    the compact view holds only the pixels this run's events touch, which is not
+    a footprint.
+    """
+    from types import SimpleNamespace
+
+    from darksirens.inference.loaders import guard_unmasked_footprint_counts
+
+    rng = np.random.default_rng(4)
+    ngals = rng.poisson(60, size=3072)
+    ngals[:1200] = 0
+    opts = SimpleNamespace(c_mode="selection")
+
+    with pytest.raises(ValueError, match="FOOTPRINT"):
+        guard_unmasked_footprint_counts(opts, ngals, label="tracer_B.h5")
+    # the message names WHICH tracer, which is the point of the label for K >= 2
+    try:
+        guard_unmasked_footprint_counts(opts, ngals, label="tracer_B.h5")
+    except ValueError as exc:
+        assert "tracer_B.h5" in str(exc)
+
+    guard_unmasked_footprint_counts(
+        SimpleNamespace(c_mode="selection", allow_unmasked_footprint=True),
+        ngals, label="tracer_B.h5")
+    # sparse and per-pixel still pass, by the same core the K=1 path uses
+    guard_unmasked_footprint_counts(opts, rng.poisson(0.7, size=3072))
+    guard_unmasked_footprint_counts(SimpleNamespace(c_mode="per_pixel"), ngals)
+

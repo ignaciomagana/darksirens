@@ -2324,14 +2324,15 @@ def _field_missing_curve(
             "without delta_g rows or stratified selection (their empty-pixel "
             "budgets would need f_p-weighted twins)."
         )
-    if has_fp and not latent and em_catalog.field_lss_q_members is not None:
-        raise NotImplementedError(
-            "_field_missing_curve: a Q ENSEMBLE with field_f_p_occ would "
-            "pair member m's Q rows with the DETERMINISTIC f_p-weighted "
-            "empty-pixel budget (field_lss_q_fp_empty_sum), marginalizing "
-            "inconsistent estimands. Build the per-member twin "
-            "(build_field_lss_q_fp_empty_sum_members) and substitute it in "
-            "_replace_member_q before admitting this pairing."
+    if (has_fp and not latent and em_catalog.field_lss_q_members is not None
+            and em_catalog.field_lss_q_fp_empty_sum_members is None):
+        raise ValueError(
+            "_field_missing_curve: a Q ENSEMBLE with field_f_p_occ requires "
+            "field_lss_q_fp_empty_sum_members (the per-member twin of "
+            "field_lss_q_fp_empty_sum); without it member m's normalizer "
+            "would carry the DETERMINISTIC f_p-weighted empty-pixel budget "
+            "while its numerator carries member m's Q. Build it via "
+            "build_field_lss_q_fp_empty_sum_members."
         )
     if has_fp and has_q and not latent and (
             em_catalog.field_lss_q_fp_empty_sum is None):
@@ -2497,6 +2498,33 @@ def _field_missing_curve(
     return V_total, dN_exp
 
 
+def _member_fp_empty_rows(em_catalog: EMCatalog):
+    """Per-member ``Sum_{p empty} f_p Q_p(z)``, or ``None`` when unused.
+
+    ``None`` whenever the run has no ``f_p`` on the field side, or no Q ENSEMBLE
+    to pair it with (the budget never reaches :func:`_field_missing_curve`, so
+    the member vmap broadcasts it).  A
+    run that HAS ``f_p`` and a Q ensemble but not its per-member twin is
+    rejected rather than silently reusing the deterministic budget -- the same
+    hazard :func:`_member_empty_strata_rows` guards one axis over.
+    """
+    if em_catalog.field_f_p_occ is None or em_catalog.field_lss_q_members is None:
+        return None
+    rows = em_catalog.field_lss_q_fp_empty_sum_members
+    if rows is None:
+        if em_catalog.field_lss_q_fp_empty_sum is None:
+            return None
+        raise ValueError(
+            "a Q ENSEMBLE with the per-pixel selection fraction needs "
+            "EMCatalog.field_lss_q_fp_empty_sum_members (the per-member twin "
+            "of field_lss_q_fp_empty_sum); build it via "
+            "build_field_lss_q_fp_empty_sum_members, or the per-member "
+            "normalizers would reuse the deterministic f_p-weighted "
+            "empty-pixel budget."
+        )
+    return jnp.asarray(rows)
+
+
 def _member_empty_strata_rows(survey: SurveyParams, em_catalog: EMCatalog):
     """Per-member per-stratum empty-pixel Q budget, or ``None`` when unused.
 
@@ -2533,11 +2561,22 @@ def _member_empty_strata_rows(survey: SurveyParams, em_catalog: EMCatalog):
     return rows
 
 
-def _replace_member_q(em_catalog, q_m, q_empty_m, q_strata_m):
-    """Install ensemble member m's Q rows / empty-pixel budgets on the catalog."""
+def _replace_member_q(em_catalog, q_m, q_empty_m, q_strata_m,
+                      q_fp_empty_m=None):
+    """Install ensemble member m's Q rows / empty-pixel budgets on the catalog.
+
+    ``q_fp_empty_m`` is member m's ``Sum_{p empty} f_p Q_p(z)``.  It must be
+    swapped in for the same reason the plain empty budget is: member m's
+    normalizer carrying the DETERMINISTIC f_p-weighted budget while its
+    numerator carries member m's Q marginalizes inconsistent estimands.  Left
+    ``None`` when the run has no ``f_p`` (then the field is already ``None`` on
+    the catalog and the substitution is a no-op).
+    """
     cat_m = em_catalog._replace(
         field_lss_q=q_m, field_lss_q_empty_sum=q_empty_m
     )
+    if q_fp_empty_m is not None:
+        cat_m = cat_m._replace(field_lss_q_fp_empty_sum=q_fp_empty_m)
     if q_strata_m is None:
         return cat_m
     return cat_m._replace(field_lss_q_empty_sum_strata=q_strata_m)
@@ -2601,16 +2640,21 @@ def field_global_log_Z_members(
             "build_field_lss_q_member_inputs."
         )
     strata_members = _member_empty_strata_rows(survey, em_catalog)
+    fp_empty_members = _member_fp_empty_rows(em_catalog)
     N_obs_total = field_observed_global_total(cosmo, survey, em_catalog)
 
-    def _one(q_m, q_empty_m, q_strata_m):
-        cat_m = _replace_member_q(em_catalog, q_m, q_empty_m, q_strata_m)
+    def _one(q_m, q_empty_m, q_strata_m, q_fp_empty_m):
+        cat_m = _replace_member_q(em_catalog, q_m, q_empty_m, q_strata_m,
+                                  q_fp_empty_m)
         return field_global_log_Z(
             cosmo, survey, cat_m, N_obs_total=N_obs_total
         )
 
-    return vmap(_one, in_axes=(0, 0, None if strata_members is None else 0))(
-        jnp.asarray(q_members), jnp.asarray(q_empty_members), strata_members
+    return vmap(_one, in_axes=(0, 0,
+                               None if strata_members is None else 0,
+                               None if fp_empty_members is None else 0))(
+        jnp.asarray(q_members), jnp.asarray(q_empty_members), strata_members,
+        fp_empty_members
     )
 
 
@@ -2856,6 +2900,29 @@ def completion_clip_diagnostics(
     # Q_LSS-aware: resolve the (optional) completion table once and report the
     # Q-clip instead of the (inapplicable) delta_g-negativity when it is present.
     q_row, _ = _resolve_lss_completion_row_tables(em_catalog)
+
+    # LATENT MODE IS NOT MEASURABLE HERE, and silence was the wrong answer.
+    # There is no Q TABLE in latent mode -- Q is generated in-likelihood -- so
+    # ``q_row`` is None and this function used to fall through to the delta_g
+    # branch, reporting ``lss_source = "legacy_delta_g"`` with a clipped
+    # fraction computed from the all-zero delta_g placeholder (``--use_lss`` is
+    # refused in latent mode).  That reads as a clean zero, which is the one
+    # answer it cannot support: the generated logQ IS clipped to +-_LOGQ_CLIP,
+    # and on the production anchor the clipped footprint-voxel fraction is
+    # 0.085% at b_GW = 1, 1.8% at 2, 4.6% at 3 and 44.5% at 4 -- the top of the
+    # artifact's own Chebyshev range.  So the one diagnostic built to catch this
+    # could not fire.  Refuse instead of reporting a number that means nothing;
+    # measuring it properly needs the seam's generated rows, which this
+    # table-oriented function does not have.
+    if latent_enabled(em_catalog):
+        raise NotImplementedError(
+            "completion_clip_diagnostics cannot measure latent mode: Q is "
+            "generated in-likelihood, so there is no table to inspect and the "
+            "delta_g fallback would report a meaningless zero from the inert "
+            "placeholder. The generated logQ IS clipped (measured on the "
+            "production anchor: 0.085% of footprint voxels at b_GW = 1 rising to "
+            "44.5% at b_GW = 4), so a zero here would be actively misleading. "
+            "Use the seam's own rows (latent_member_logq_rows) to measure it.")
 
     if pixels is None:
         if em_catalog.unique_pixels is not None:

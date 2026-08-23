@@ -170,6 +170,32 @@ def main(argv=None):
                     help="'step': amp_hi above the depth (what the PR-8 table "
                          "quotes). 'growth': amp_hi * D(z)/D(z_depth).")
     ap.add_argument("--n-shells", type=int, default=12)
+    ap.add_argument("--sigma-z", type=float, default=0.023,
+                    help="Catalog redshift uncertainty used to build the count "
+                         "channel's shell response W (shell_response convolves "
+                         "each shell indicator with N(z; z_n, sigma_z)). It must "
+                         "be the SURVEY's actual value. The default 0.023 is the "
+                         "value this was hard-coded at, and MEASURED ON THE "
+                         "PRODUCTION CATALOG IT IS APPROXIMATELY RIGHT: the "
+                         "DESI union catalog's live dzgals have median 0.0238 "
+                         "(p95 0.069), only 39% are true spec-z, and sigma_kde = "
+                         "0.003 adds 0.8% in quadrature. The flag exists because "
+                         "the value was previously unstated and unstampable, not "
+                         "because the value was wrong. See "
+                         "--allow-oversmeared-shells for the real hazard.")
+    ap.add_argument("--allow-oversmeared-shells", action="store_true",
+                    help="Permit sigma_z >= half the shell width. Refused by "
+                         "default: at that point each shell's response smears "
+                         "into its neighbours and the basis rows are registered "
+                         "to redshifts outside their own shell. THE FIX IS "
+                         "USUALLY FEWER SHELLS, NOT A SMALLER SIGMA_Z: with "
+                         "--z-depth 0.30 --n-shells 12 the shell width is 0.025 "
+                         "while the production catalog's median dz is 0.0238, so "
+                         "the shipped configuration asks for radial resolution "
+                         "the survey's redshifts cannot support. That is a "
+                         "basis-resolution problem, and shrinking sigma_z to "
+                         "silence it would under-smooth the forward model by "
+                         "~100x -- a worse defect than the one being silenced.")
     ap.add_argument("--ls-sph", type=float, default=0.2)
     ap.add_argument("--ls-z", type=float, default=0.039,
                     help="zeta units (guard 2: Mpc is unrepresentable here)")
@@ -440,7 +466,7 @@ def main(argv=None):
     b_k = [float(args.b_gal)]
     names_k = ["t0"]
     sel_k = [sel]
-    sigz_k = [float(SIGMA_Z_DEFAULT)]
+    sigz_k = [float(args.sigma_z)]
     theta_k = [theta_ref]
     if n_tracer > 1:
         cpaths = list(args.tracer_completeness or [])
@@ -473,7 +499,7 @@ def main(argv=None):
                 f"{n_tracer} tracers.")
         sigs = list(args.tracer_sigma_z or [])
         if not sigs:
-            sigs = [float(SIGMA_Z_DEFAULT)] * n_tracer
+            sigs = [float(args.sigma_z)] * n_tracer
         if len(sigs) != n_tracer:
             raise SystemExit(
                 f"--tracer-sigma-z given {len(sigs)} times for {n_tracer} "
@@ -558,6 +584,32 @@ def main(argv=None):
     base_fn_k = [_base_fn_for(float(s["m_lim"]), tuple(s["k_corr_coeffs"]))
                  for s in sel_k]
     sigma_z_k = [_sigma_z_for(s) for s in sigz_k]
+
+    # The shell response's radial kernel.  Was hard-coded at 0.023 (photometric)
+    # until 2026-08-20; the production line is DESI SPECTROSCOPY, so a
+    # photometric kernel had been smearing every shell into its neighbours.
+    # Checked PER TRACER now that each catalog carries its own kernel.
+    _shell_width = float(args.z_depth) / max(int(args.n_shells), 1)
+    for _nm, _sz in zip(names_k, sigz_k):
+        if float(_sz) >= 0.5 * _shell_width:
+            msg = (
+                f"sigma_z {_sz:g} (tracer {_nm!r}) is {_sz / _shell_width:.0%} of "
+                f"the shell width {_shell_width:g} (--z-depth {args.z_depth:g} / "
+                f"--n-shells {args.n_shells}). At that ratio shell_response smears "
+                f"each shell into its neighbours: the basis rows end up registered "
+                f"to redshifts outside their own shell (measured at sigma_z = 0.023 "
+                f"with 12 shells over z_depth 0.30: shell 0 covers [0, 0.025] but "
+                f"its row's mean z is 0.045, and every row is ~3.2x too wide). "
+                f"THE FIX IS ALMOST CERTAINLY FEWER SHELLS: the production "
+                f"catalog's median dz is 0.0238, so 12 shells over 0.30 ask for "
+                f"radial resolution the redshifts cannot support. Do NOT shrink "
+                f"sigma_z to silence this unless the survey really is that precise "
+                f"-- under-smoothing the forward model is the worse error. Use "
+                f"--n-shells {max(int(args.z_depth / max(2.0 * _sz, 1e-9)), 1)} "
+                f"or fewer, or pass --allow-oversmeared-shells.")
+            if not args.allow_oversmeared_shells:
+                raise SystemExit(f"[sigma_z] REFUSED: {msg}")
+            print(f"    [sigma_z] ALLOWED BY FLAG -- {msg}", flush=True)
 
     # ``tracers`` is the K-element list even at K = 1, but ``op_at`` returns a
     # BARE CountOperator there and a MultiTracerCountOperator only at K >= 2.
@@ -1020,6 +1072,12 @@ def main(argv=None):
         g.attrs["F_F"] = F_F
         g.attrs["theta_ref"] = json.dumps(theta_ref)
         g.attrs["basis_meta"] = json.dumps(dict(basis.meta))
+        # Stamped so an anchor can never again be silently ambiguous about the
+        # kernel its shell response was built with.  Anchors predating this flag
+        # carry no such attribute, which is itself the signal that they were
+        # built with the hard-coded 0.023.
+        g.attrs["sigma_z"] = float(sigz_k[0])
+        g.attrs["shell_width"] = float(_shell_width)
         g.attrs["nside"] = nside
         g.attrs["b_gal"] = args.b_gal
         # Which draw-covariance convention this anchor was built under (PLAN
