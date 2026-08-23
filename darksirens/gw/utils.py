@@ -1,6 +1,5 @@
 import importlib
 import importlib.util
-import multiprocessing as mp
 import os
 import sys
 from dataclasses import dataclass
@@ -13,11 +12,16 @@ from typing import Any, Mapping
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
 
-try:
-    mp.set_start_method("spawn")
-except RuntimeError:
-    # Respect the start method if the embedding application already selected one.
-    pass
+# NOTE (OPS-02): this module used to call multiprocessing.set_start_method(
+# "spawn") at import time.  That is a PROCESS-WIDE mutation performed by a
+# plain `import darksirens.gw.utils`, and it reached every executor in the host
+# program -- imposing picklability and __main__-guard requirements on pools
+# this package never created.  The one parallel path darksirens owns
+# (redshift.lognormal_completion) already asks for its own context explicitly
+# with multiprocessing.get_context("spawn"), which is the correct scope and
+# needs no global default.  Anything added later that forks workers must do the
+# same rather than reinstating the global.  tests/test_import_side_effects.py
+# pins this.
 
 import jax
 
@@ -81,10 +85,26 @@ except ModuleNotFoundError:
             "gwcat is required to load gwcat PE/selection files; install the gwcat package or use precomputed prior weights"
         )
 
-import warnings
-warnings.filterwarnings("ignore", message="invalid value encountered in log")
-warnings.filterwarnings("ignore", message="invalid value encountered in arctanh")
-warnings.filterwarnings("ignore", message="divide by zero encountered in log")
+def _chi_eff_errstate():
+    """numpy error scope for the gwcat chi_eff prior evaluation.
+
+    gwcat's ``chi_eff_prior_logprob`` evaluates ``log``/``arctanh`` over the
+    whole sample array including out-of-support points, where numpy reports
+    ``invalid value encountered in log`` / ``in arctanh`` / ``divide by zero``.
+    Those are EXPECTED here: GW-03's convention is that an out-of-support
+    sample has zero density (-inf log), which is what the NaN/-inf then
+    becomes, and ``_report_pe_weight_health`` counts them explicitly.
+
+    This used to be three process-wide ``warnings.filterwarnings("ignore", ...)``
+    calls executed at import time (OPS-02).  Message-matched global filters
+    silence the same numpy warnings everywhere in the host program, including
+    in code that has nothing to do with darksirens -- and a suppressed
+    ``invalid value in log`` elsewhere is exactly the kind of thing a user
+    needs to see.  ``np.errstate`` is thread-local and scoped to the block, so
+    it hides only these evaluations.
+    """
+    return np.errstate(invalid="ignore", divide="ignore")
+
 
 def _decode_hdf5_attr(value):
     if isinstance(value, bytes):
@@ -575,8 +595,9 @@ def load_gw_store(gw_path, fit_columns=None) -> GWStore:
         # n.  The old -50 floor instead handed it density 2e-22 in a
         # denominator -- a weight ~1e21 above the median.  The masked count
         # is reported by _report_pe_weight_health below.
-        logp_chi = chi_eff_prior_logprob(chieff, m1source, m2source, amax=_chi_amax)
-        p_pe = p_pe * np.exp(logp_chi)
+        with _chi_eff_errstate():
+            logp_chi = chi_eff_prior_logprob(chieff, m1source, m2source, amax=_chi_amax)
+            p_pe = p_pe * np.exp(logp_chi)
 
     # Normalise per event so that each event's importance weights are
     # independent.  The per-event marginal likelihood is
@@ -780,7 +801,9 @@ def load_selection_store(file, allow_invalid_spin_swap=False,
                     f"{conversion_hint}"
                 )
             _amax = float(f.attrs["chi_eff_amax"])
-            log_p_chi = chi_eff_prior_logprob(chieffsels, m1src_sel, m2src_sel, amax=_amax)
+            with _chi_eff_errstate():
+                log_p_chi = chi_eff_prior_logprob(
+                    chieffsels, m1src_sel, m2src_sel, amax=_amax)
             # GW-03 convention: -inf means zero density, and a DETECTED
             # injection with zero draw density must not be floored or
             # silently dropped -- Ndraw is the campaign's fixed total, so
