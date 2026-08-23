@@ -162,11 +162,15 @@ def test_pairing_grid_path_also_masks_q_above_one():
     m1 = jnp.full(3, 30.0)
     q = jnp.asarray([0.9, 1.0, 1.2])
     exact = np.asarray(pairing(m1, q, M_MIN, DM_MIN, theta))
+    # configure_normalization_grids' None means "leave untouched", so the
+    # module-global settings object is what has to be put back.
+    saved = pop_utils._NORMALIZATION_GRID_SETTINGS
     try:
         pop_utils.configure_normalization_grids(pairing_m1_grid=2048)
         grid = np.asarray(pairing(m1, q, M_MIN, DM_MIN, theta))
     finally:
-        pop_utils.configure_normalization_grids(pairing_m1_grid=None)
+        pop_utils._NORMALIZATION_GRID_SETTINGS = saved
+        pop_utils._clear_grid_caches()
     assert exact[2] == 0.0 and grid[2] == 0.0
     np.testing.assert_allclose(grid[:2], exact[:2], rtol=1e-6)
 
