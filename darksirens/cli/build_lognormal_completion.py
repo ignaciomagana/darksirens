@@ -452,6 +452,7 @@ def _build_completion_radial(
     stratum_map_sha=None,
     z_depth=None,
     f_p_map=None,
+    q_support_depth=None,
 ):
     """Radial (per-pixel, independent 1-D) MAP + optional ensemble log Q tables.
 
@@ -477,6 +478,20 @@ def _build_completion_radial(
     fit INCLUDES EMPTY PIXELS as N_obs = 0 rows against the nonzero base
     ``Cbar dN_exp`` -- the void information; Q then targets the FULL observed
     overdensity, not the sub-smoothing residual).
+
+    ``q_support_depth`` (``None`` = no cut) truncates the FIT to the catalog's
+    own redshift support: only zgrid nodes with ``z <= q_support_depth`` enter
+    the solve, and every pixel's ``logQ`` is EXACTLY 0.0 (Q = 1) above it.  Q
+    owns PLACEMENT within the support; the missing-host budget above it belongs
+    to ``C(z)``/``n0``.  Without the cut a hard-truncated catalog (the real DESI
+    table ends at z = 0.3000 exactly, 0 galaxies above) feeds the fit
+    ``N_obs = 0`` rows against a nonzero model expectation at every node above
+    the truncation, and the MAP pushes Q down there in proportion to each
+    pixel's model rate -- under ``--depth-map`` that is f_p, so the build
+    manufactures a coherent ``corr(Q, f_p)`` reaching -0.86 at z ~ 0.65
+    (measured on the v2 build), which is exactly the footprint imprint
+    :func:`_verify_mask_free` refuses to stamp.  Precedent: the latent seam
+    pins Q = 1 outside its support (:mod:`darksirens.likelihood.latent_q`).
     """
     import healpy as hp
 
@@ -505,10 +520,36 @@ def _build_completion_radial(
     # Grid-aware P(k): solve on a UNIFORM comoving-distance grid so the Gaussian
     # correlation length is constant in Mpc (zgrid is log-spaced ⇒ Δχ varies).
     chi = np.asarray(r_of_z(jnp.asarray(zgrid), cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa), dtype=float)
-    chi_u = np.linspace(float(chi[0]), float(chi[-1]), n_grid)
-    dchi_u = float(chi_u[1] - chi_u[0]) if n_grid > 1 else 1.0
+    # SUPPORT CUT (--q-support-depth): the fit lives on zgrid nodes z <= Z only.
+    # The cut is applied to the SOLVE GRID, not to its output: chi_u spans
+    # [chi(0), chi(z_top_fitted)] with one node per fitted zgrid node -- the same
+    # recipe as the uncut build, over a shorter domain -- so N_obs, C and the
+    # homogeneous expectation never see a bin above the catalog's support.  Only
+    # masking the output would leave the MAP still pulled by those empty bins.
+    # With Z >= zgrid[-1] (or None) this reduces IDENTICALLY to the full grid.
+    zg_all = np.asarray(zgrid, dtype=float)
+    n_fit_z = n_grid
+    if q_support_depth is not None:
+        z_sup = float(q_support_depth)
+        if not np.isfinite(z_sup) or z_sup <= 0.0:
+            raise ValueError(
+                f"--q-support-depth must be a finite redshift > 0, got "
+                f"{q_support_depth!r}.")
+        n_fit_z = int(np.count_nonzero(zg_all <= z_sup))
+        if n_fit_z < 2:
+            raise ValueError(
+                f"--q-support-depth {z_sup:g} leaves {n_fit_z} zgrid node(s) "
+                f"below it (zgrid[1] = {float(zg_all[1]):.6f}): there is no "
+                f"radial field to fit. Raise the cut, or drop the flag.")
+        print(f"    [q-support] fit truncated at z <= {z_sup:g}: "
+              f"{n_fit_z}/{n_grid} zgrid nodes fitted (top fitted node z = "
+              f"{float(zg_all[n_fit_z - 1]):.6f}), {n_grid - n_fit_z} pinned to "
+              f"logQ = 0 exactly. The missing-host budget above support is "
+              f"C(z)/n0's, not Q's.", flush=True)
+    chi_u = np.linspace(float(chi[0]), float(chi[n_fit_z - 1]), n_fit_z)
+    dchi_u = float(chi_u[1] - chi_u[0]) if n_fit_z > 1 else 1.0
     ell_grid = float(survey.lss_corr_length_mpc) / max(dchi_u, 1e-6)  # now constant in Mpc
-    pk = gaussian_correlation_spectrum(n_grid, ell_grid, float(survey.lss_sigma))
+    pk = gaussian_correlation_spectrum(n_fit_z, ell_grid, float(survey.lss_sigma))
 
     # Expected counts per uniform-chi bin: INTEGRATE the per-unit-z density in z
     # between the bin-edge redshifts (cumulative trapezoid on the fine grid,
@@ -530,8 +571,12 @@ def _build_completion_radial(
         ])
         return np.diff(np.interp(edges_chi, chi, cum))
 
-    dN_exp_count_u = _bin_integral(dN_exp_density)               # (n_grid,)
+    dN_exp_count_u = _bin_integral(dN_exp_density)               # (n_fit_z,)
     exp_safe = np.where(dN_exp_count_u > 0.0, dN_exp_count_u, 1.0)
+    # Budget weights ride the OUTPUT zgrid, so they are cut there: the per-z
+    # mean-one renormalization must run over the fitted nodes ONLY (the pinned
+    # nodes carry Q = 1 by construction and have no monopole to remove).
+    w_fine = dN_exp_density[:n_fit_z]
 
     occ = np.nonzero(ngals_np > 0)[0]
     n_occ = int(occ.size)
@@ -569,7 +614,7 @@ def _build_completion_radial(
                 np.clip(_bin_integral(cf * dN_exp_density) / exp_safe, 0.0, 1.0)
                 for cf in Cfine_s])
             C_u = Cu_s[stratum_map[fit]]
-            w_budget = ((1.0 - Cfine_s) * dN_exp_density)[stratum_map[fit]]
+            w_budget = ((1.0 - Cfine_s[:, :n_fit_z]) * w_fine)[stratum_map[fit]]
         elif c_mode == "selection":
             Cbar_fine = _selection_cbar_fine(selection_fit, cosmo)
         else:
@@ -589,11 +634,11 @@ def _build_completion_radial(
                 # ONE shared row, broadcast (a read-only view, not a ~1.5 GB tile
                 # at nside=128): the solver and the renormalization only read
                 # them.
-                C_u = np.broadcast_to(Cbar_u, (n_fit, n_grid))
+                C_u = np.broadcast_to(Cbar_u, (n_fit, n_fit_z))
                 # One shared budget-weight row (1 - Cbar) dN_exp for EVERY pixel:
                 # the renormalization footprint is the whole fitted sky.
                 w_budget = np.broadcast_to(
-                    (1.0 - Cbar_fine) * dN_exp_density, (n_fit, n_grid))
+                    (1.0 - Cbar_fine[:n_fit_z]) * w_fine, (n_fit, n_fit_z))
             else:
                 # MASK-FREE Q (--depth-map): fold the per-pixel selection
                 # fraction into the MODEL's completeness at fit time, exactly as
@@ -623,9 +668,10 @@ def _build_completion_radial(
                 fp_fit_rows = fp_all[fit]
                 fp_fit = fp_fit_rows[:, None]
                 C_u = np.clip(fp_fit * Cbar_u[None, :], 0.0, 1.0)
-                w_budget = ((1.0 - np.clip(fp_fit * Cbar_fine[None, :], 0.0, 1.0))
-                            * dN_exp_density[None, :])
-        N_obs_u = np.zeros((n_fit, n_grid), dtype=float)
+                w_budget = ((1.0 - np.clip(fp_fit * Cbar_fine[None, :n_fit_z],
+                                           0.0, 1.0))
+                            * w_fine[None, :])
+        N_obs_u = np.zeros((n_fit, n_fit_z), dtype=float)
         for i, r in enumerate(fit):
             if ngals_np[r] > 0:
                 zs = zgals_np[r, : ngals_np[r]]
@@ -636,9 +682,9 @@ def _build_completion_radial(
         # zero-init below.
         fit = occ
         n_fit = n_occ
-        C_u = np.empty((n_occ, n_grid), dtype=float)
-        N_obs_u = np.zeros((n_occ, n_grid), dtype=float)
-        w_budget = np.empty((n_occ, n_grid), dtype=float)
+        C_u = np.empty((n_occ, n_fit_z), dtype=float)
+        N_obs_u = np.zeros((n_occ, n_fit_z), dtype=float)
+        w_budget = np.empty((n_occ, n_fit_z), dtype=float)
         for i, r in enumerate(occ):
             dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
             # Expectation-weighted bin completeness: C_bin = int(C * dN_exp) / int(dN_exp),
@@ -662,7 +708,7 @@ def _build_completion_radial(
             # This pixel's missing-budget weight on the OUTPUT zgrid at the build
             # fiducial: w_p(z) = (1 - C_p(z)) * dN_exp(z) — the same
             # (1 - C) dN_exp the likelihood multiplies Q into (dN_miss).
-            w_budget[i] = (1.0 - C_fine) * dN_exp_density
+            w_budget[i] = (1.0 - C_fine[:n_fit_z]) * w_fine
             zs = zgals_np[r, : ngals_np[r]]
             N_obs_u[i] = _counts_in_uniform_chi(zs, chi, edges_chi)
 
@@ -710,9 +756,15 @@ def _build_completion_radial(
     # Map logQ back from uniform-χ to zgrid and scatter the fitted rows into
     # the full (n_pix, n_grid) table (unfitted rows stay logQ = 0; in
     # aggregate mode every row is fitted).
+    # Above the support cut the output stays at its zero init -- bit-zero logQ,
+    # i.e. Q == 1 exactly, for EVERY pixel (occupied, empty, on and off
+    # footprint).  chi_u ends at chi[n_fit_z - 1], so the interpolation below is
+    # strictly interior and never clamps a pinned node to the top solved value.
     logq_map = np.zeros((n_pix, n_grid), dtype=float)
+    chi_fit = chi[:n_fit_z]
     for i, r in enumerate(fit):
-        logq_map[r] = np.interp(chi, chi_u, mp["logq_map"][expand[i]])
+        logq_map[r, :n_fit_z] = np.interp(
+            chi_fit, chi_u, mp["logq_map"][expand[i]])
 
     diagnostics = dict(mp["diagnostics"])
     # Convergence is judged against the FITTED rows (n_occupied), so re-express
@@ -769,7 +821,8 @@ def _build_completion_radial(
         logq_members = np.zeros((M, n_pix, n_grid), dtype=float)
         for i, r in enumerate(fit):
             for m in range(M):
-                logq_members[m, r] = np.interp(chi, chi_u, lm_u[m, i])
+                logq_members[m, r, :n_fit_z] = np.interp(
+                    chi_fit, chi_u, lm_u[m, i])
         diagnostics.update(members["diagnostics"])
 
     # Per-z mean-one budget renormalization over the FITTED FOOTPRINT (the
@@ -781,16 +834,40 @@ def _build_completion_radial(
     # homogeneous budget identically at the build fiducial; each member is
     # renormalized independently (placement uncertainty only, zero budget
     # uncertainty).  Unfitted rows stay logQ = 0 (Q = 1) exactly.
+    #
+    # The monopole is computed and removed PER Z-BIN (see
+    # :func:`renormalize_q_mean_one`: mono[z] = sum_p w_p(z) Q_p(z) / sum_p
+    # w_p(z)), mixing no two z bins, so restricting it to the fitted column
+    # block [:n_fit_z] is exact rather than an approximation: each fitted node
+    # gets the same shift it would get from a renorm of that column alone, and
+    # the pinned nodes keep their bit-zero logQ instead of being handed one.
+    # (The fitted VALUES do move against an uncut build -- the row solve is a
+    # field under a circulant prior coupling every node, so a shorter domain is
+    # a different problem everywhere. That is the cut working, not a leak.)
     if budget_renorm:
-        logq_map[fit], log_mono = renormalize_q_mean_one(logq_map[fit], w_budget)
+        fit_block = logq_map[fit]
+        fit_block[:, :n_fit_z], log_mono_fit = renormalize_q_mean_one(
+            fit_block[:, :n_fit_z], w_budget)
+        logq_map[fit] = fit_block
+        log_mono = np.zeros(n_grid, dtype=float)
+        log_mono[:n_fit_z] = log_mono_fit
+        mem_block = None
         if logq_members is not None:
-            logq_members[:, fit], _ = renormalize_q_mean_one(
-                logq_members[:, fit], w_budget)
+            mem_block = logq_members[:, fit]
+            mem_block[:, :, :n_fit_z], _ = renormalize_q_mean_one(
+                mem_block[:, :, :n_fit_z], w_budget)
+            logq_members[:, fit] = mem_block
         diagnostics["budget_monopole_logq"] = log_mono
         _stamp_post_renorm_railing(
-            diagnostics, logq_map[fit],
-            logq_members[:, fit] if logq_members is not None else None)
+            diagnostics, fit_block[:, :n_fit_z],
+            mem_block[:, :, :n_fit_z] if mem_block is not None else None)
     diagnostics["budget_renormalized"] = bool(budget_renorm)
+    if q_support_depth is not None:
+        diagnostics.update({
+            "q_support_depth": float(q_support_depth),
+            "n_z_nodes_fitted": int(n_fit_z),
+            "n_z_nodes_pinned": int(n_grid - n_fit_z),
+        })
 
     return logq_map, logq_members, diagnostics
 
@@ -1324,6 +1401,7 @@ def build_completion(
     stratum_map_sha=None,
     z_depth=None,
     depth_map=None,
+    q_support_depth=None,
 ):
     """Build the log Q completion tables from a survey catalog.
 
@@ -1349,12 +1427,42 @@ def build_completion(
     table must be consumed under the SAME ``SurveyParams.c_mode`` -- the two
     targets differ by the entire clustering signal -- so the mode is stamped
     in the HDF5 attrs and hard-checked at load.
+
+    ``q_support_depth`` truncates the RADIAL fit to the catalog's redshift
+    support (logQ pinned to exactly 0 above it); it is refused with
+    ``mode="gp3d"`` and with stratified selection, and is independent of
+    ``depth_map`` (its motivating use is alongside it).
     """
     if c_mode not in ("per_pixel", "aggregate", "selection"):
         raise ValueError(
             f"c_mode must be 'per_pixel', 'aggregate' or 'selection', "
             f"got {c_mode!r}.")
     _require_selection_fit(c_mode, selection_fit)
+    # Refused BEFORE anything is loaded or solved: only the radial builder has a
+    # radial grid to truncate, and only its unstratified path carries the single
+    # per-z budget block the cut renormalizes over.  Silently ignoring the flag
+    # would ship a table stamped q_support_depth that was in fact fit over the
+    # full grid -- the same unearned-stamp failure --depth-map already refuses.
+    if q_support_depth is not None:
+        if mode != "radial":
+            raise ValueError(
+                f"--q-support-depth is not honoured by --mode {mode!r}: the "
+                f"gp3d builder fits ONE low-rank field on its own inducing grid "
+                f"in zeta = log1p(z), which has no per-zgrid-node radial cut to "
+                f"apply, so the fit would still see every node above the "
+                f"catalog's support while the table claimed a support cut. Use "
+                f"--mode radial, or drop --q-support-depth (and shrink "
+                f"--gp3d-z-node-hi instead).")
+        if selection_strata is not None:
+            raise ValueError(
+                "--q-support-depth is not honoured by a STRATIFIED --c-mode "
+                "selection build (a multi-stratum --selection-fit with "
+                "--stratum-map): the per-stratum C_sel base is assembled in "
+                "its own branch, where the cut is neither exercised nor "
+                "validated -- rather than ship a table whose q_support_depth "
+                "stamp rests on an untested path, the pair is refused. "
+                "Build with a single-stratum --selection-fit (or --c-mode "
+                "aggregate|per_pixel), or drop --q-support-depth.")
     f_p_map = None
     if depth_map is not None:
         if c_mode not in ("aggregate", "selection"):
@@ -1403,6 +1511,7 @@ def build_completion(
             c_mode=c_mode, selection_fit=selection_fit,
             selection_strata=selection_strata, stratum_map=stratum_map,
             stratum_map_sha=stratum_map_sha, z_depth=z_depth,
+            q_support_depth=q_support_depth,
         )
     if mode == "gp3d":
         return _build_completion_gp3d(
@@ -1517,6 +1626,25 @@ def main(argv=None):
                         "single-stratum --selection-fit; the gp3d and "
                         "stratified bases do not fold f_p in and the "
                         "combinations are refused, not silently dropped.")
+    p.add_argument("--q-support-depth", type=float, default=None, metavar="Z",
+                   help="Truncate the radial fit to the catalog's own redshift "
+                        "SUPPORT: only zgrid nodes with z <= Z enter the solve, "
+                        "and logQ is exactly 0 (Q = 1) above Z for every pixel. "
+                        "Q owns PLACEMENT inside the support; the missing-host "
+                        "budget above it is C(z)/n0's job. Set this to the "
+                        "catalog's hard truncation (the real DESI table ends at "
+                        "z = 0.3000 exactly, 0 galaxies above): without it every "
+                        "covered pixel contributes N_obs = 0 rows against a "
+                        "nonzero model expectation at every node above the "
+                        "truncation, and the MAP pushes Q down in proportion to "
+                        "each pixel's model rate -- under --depth-map that rate "
+                        "is f_p, so the build manufactures corr(Q, f_p) = -0.86 "
+                        "at z ~ 0.65 (measured on the v2 build) and the "
+                        "mask-free check refuses the f_p_aware stamp. --mode "
+                        "radial only, and not with a stratified "
+                        "--selection-fit; both combinations are refused, not "
+                        "silently dropped. Independent of --depth-map. Stamped "
+                        "as q_support_depth in the output attrs.")
     p.add_argument("--selection-fit", default=None,
                    help="selection_fit.json from darksirens_fit_selection "
                         "(required by, and only legal with, --c-mode "
@@ -1653,6 +1781,7 @@ def main(argv=None):
         selection_fit=selection_fit,
         selection_strata=selection_strata, stratum_map=stratum_map,
         stratum_map_sha=stratum_map_sha, z_depth=opts.z_depth,
+        q_support_depth=getattr(opts, "q_support_depth", None),
     )
     _ok(f"MAP logq_map shape {logq_map.shape}; "
         f"members {'none' if logq_members is None else logq_members.shape}")
@@ -1741,6 +1870,9 @@ def main(argv=None):
         # formula was right and the artifact was not.
         f_p_aware=_verify_mask_free(logq_map, opts) if getattr(
             opts, "depth_map", None) else None,
+        # Read back off the BUILD, not off the flag: only the radial path
+        # actually truncates, and it is the only path that records the cut.
+        q_support_depth=diagnostics.get("q_support_depth"),
     )
     _ok(f"completion  →  {opts.out}")
     _end()
