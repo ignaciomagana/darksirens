@@ -25,8 +25,8 @@ inert       with the flag off nothing above runs: table mode is a static
 ("block_sizing reserves within 10% of measured peak").  It MEASURES the device
 peak of the seam's per-evaluation work at production shapes and compares it with
 the reservation; it self-skips when there is no GPU, when the allocator reports
-no statistics (production sets ``XLA_PYTHON_CLIENT_ALLOCATOR=platform``, under
-which ``memory_stats`` is inert), when another process has already driven this
+no statistics (under an explicit ``XLA_PYTHON_CLIENT_ALLOCATOR=platform``
+override ``memory_stats`` is inert), when another process has already driven this
 process's monotone peak counter, or when the shared device has no room.  The
 numbers it checks were measured on an NVIDIA H100 NVL on 2026-08-17 and were
 bit-repeatable across three runs; the rest of the file is arithmetic and runs

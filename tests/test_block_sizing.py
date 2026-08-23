@@ -973,11 +973,12 @@ def test_lensing_cli_threads_sampler_profile(monkeypatch):
 
 # ── free-memory probe: the platform-allocator fallback (issue #276) ──────────────
 #
-# ``core.jax_config`` sets XLA_PYTHON_CLIENT_ALLOCATOR=platform, under which
-# ``device.memory_stats()`` returns None. Before the nvidia-smi fallback every
-# production CLI run therefore fell through to the 4 GB default (measured: 4 GB
-# reported on an H100 NVL with 92.4 GB actually free), so memory-aware sizing —
-# and the calibrated single-pass constants — never engaged.
+# Under XLA_PYTHON_CLIENT_ALLOCATOR=platform ``device.memory_stats()`` returns
+# None. That was ``core.jax_config``'s default until 2026-08-23 and is still an
+# honored explicit override. Before the nvidia-smi fallback every such CLI run
+# fell through to the 4 GB default (measured: 4 GB reported on an H100 NVL with
+# 92.4 GB actually free), so memory-aware sizing — and the calibrated
+# single-pass constants — never engaged.
 
 class _FakeDevice:
     def __init__(self, stats, platform="gpu", dev_id=0):
@@ -1007,19 +1008,71 @@ def test_probe_env_override_ignored_when_unusable(monkeypatch, bad):
     from darksirens.likelihood.block_sizing import (
         DEVICE_MEM_ENV_VAR, probe_device_memory_bytes,
     )
+    import darksirens.likelihood.block_sizing as bs
     monkeypatch.setenv(DEVICE_MEM_ENV_VAR, bad)
     _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 40 * GB}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: None)
     nbytes, source = probe_device_memory_bytes()
     assert source == "device:gpu bytes_limit-in_use" and nbytes == 40 * GB
 
 
 def test_probe_prefers_memory_stats_over_nvidia_smi(monkeypatch):
+    """Allocator telemetry is the preferred signal when the device is not shared.
+
+    nvidia-smi reports MORE free than the allocator's own headroom here (nothing
+    else is on the card), so the telemetry value passes through untouched — it
+    is the view the peak constants were calibrated against.
+    """
     import darksirens.likelihood.block_sizing as bs
     monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
     _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 40 * GB, "bytes_in_use": 10 * GB}))
-    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes",
-                        lambda i: pytest.fail("nvidia-smi must not be reached"))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: 35 * GB)
     assert bs.probe_device_memory_bytes() == (30 * GB, "device:gpu bytes_limit-in_use")
+
+
+def test_probe_clips_allocator_headroom_to_physical_free(monkeypatch):
+    """SHARED GPU: BFC's bytes_limit is the whole card, blind to another process.
+
+    The physical free memory is the smaller, and therefore the only safe budget.
+    """
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 80 * GB, "bytes_in_use": 0}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: 12 * GB)
+    nbytes, source = bs.probe_device_memory_bytes()
+    assert nbytes == 12 * GB
+    assert source == "min(device:gpu bytes_limit-in_use, nvidia-smi memory.free)"
+
+
+def test_probe_clips_reservable_limit_to_physical_free(monkeypatch):
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_reservable_limit": 80 * GB}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: 9 * GB)
+    nbytes, source = bs.probe_device_memory_bytes()
+    assert nbytes == 9 * GB
+    assert source == "min(device:gpu bytes_reservable_limit, nvidia-smi memory.free)"
+
+
+def test_probe_keeps_telemetry_when_nvidia_smi_unavailable(monkeypatch):
+    """No nvidia-smi (or it fails): the allocator view is used as-is, not dropped."""
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch, _FakeDevice({"bytes_limit": 40 * GB, "bytes_in_use": 10 * GB}))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes", lambda i: None)
+    assert bs.probe_device_memory_bytes() == (30 * GB, "device:gpu bytes_limit-in_use")
+
+
+def test_probe_does_not_shell_out_for_telemetry_on_cpu(monkeypatch):
+    """A CPU/TPU device never consults nvidia-smi, even with live telemetry."""
+    import darksirens.likelihood.block_sizing as bs
+    monkeypatch.delenv(bs.DEVICE_MEM_ENV_VAR, raising=False)
+    _patch_devices(monkeypatch,
+                   _FakeDevice({"bytes_limit": 40 * GB, "bytes_in_use": 10 * GB},
+                               platform="tpu"))
+    monkeypatch.setattr(bs, "_nvidia_smi_free_bytes",
+                        lambda i: pytest.fail("must not shell out on a non-GPU device"))
+    assert bs.probe_device_memory_bytes() == (30 * GB, "device:tpu bytes_limit-in_use")
 
 
 def test_probe_falls_back_to_nvidia_smi_when_memory_stats_is_none(monkeypatch):

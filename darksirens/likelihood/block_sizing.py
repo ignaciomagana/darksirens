@@ -351,9 +351,12 @@ def _nvidia_smi_free_bytes(device_index):
     """Free bytes on GPU ``device_index`` via ``nvidia-smi``, or ``None``.
 
     ``memory_stats()`` returns ``None`` under ``XLA_PYTHON_CLIENT_ALLOCATOR=
-    platform`` (which ``core.jax_config`` sets), so on a production CUDA run it
-    is the only probe that reports anything at all.  Deliberately subprocess and
-    not NVML: pynvml is not a declared dependency.
+    platform``, which is no longer the production default but is still honored
+    as an explicit override, so this stays the only probe that reports anything
+    at all on such a run.  It is ALSO the physical-free cross-check the BFC
+    default needs on a SHARED GPU, where the allocator's own headroom does not
+    know about another process's growth.  Deliberately subprocess and not NVML:
+    pynvml is not a declared dependency.
 
     ``nvidia-smi`` indexes GPUs the same way CUDA does *after*
     ``CUDA_VISIBLE_DEVICES`` filtering is undone, so the visible-device list is
@@ -399,16 +402,24 @@ def probe_device_memory_bytes(default_gb=4.0):
 
     1. ``$DARKSIRENS_DEVICE_MEM_GB`` — explicit override, always wins.
     2. ``device.memory_stats()`` (GPU/TPU): ``bytes_limit - bytes_in_use`` if
-       both present, else ``bytes_limit`` / ``bytes_reservable_limit``.
-    3. ``nvidia-smi`` free memory, for CUDA devices.
+       both present, else ``bytes_limit`` / ``bytes_reservable_limit``.  On a
+       GPU this ALLOCATOR TELEMETRY is preferred — it is the view the
+       peak-memory constants were calibrated against — but it is then taken as
+       ``min(allocator headroom, nvidia-smi free)``: on a shared box the
+       allocator's own ceiling does not know about another process's growth,
+       and the smaller of the two is the only safe budget.
+    3. ``nvidia-smi`` free memory alone, for CUDA devices with no telemetry.
     4. ``default_gb``.
 
-    Step 3 exists because step 2 is INERT in production: ``core.jax_config``
-    sets ``XLA_PYTHON_CLIENT_ALLOCATOR=platform``, under which
-    ``memory_stats()`` returns ``None``.  Without it every CLI run fell through
-    to the 4 GB default on machines with far more — measured 4 GB reported
-    against 92.4 GB actually free on an H100 NVL — so memory-aware sizing never
-    engaged and the calibrated single-pass constants were never used.
+    Step 3 exists because step 2 is INERT under
+    ``XLA_PYTHON_CLIENT_ALLOCATOR=platform``, where ``memory_stats()`` returns
+    ``None``.  That was the production default until 2026-08-23 (see
+    ``core.jax_config``): without the ``nvidia-smi`` fallback every CLI run fell
+    through to the 4 GB default on machines with far more — measured 4 GB
+    reported against 92.4 GB actually free on an H100 NVL — so memory-aware
+    sizing never engaged and the calibrated single-pass constants were never
+    used.  ``platform`` is still honored as an explicit override, so the
+    fallback stays.
 
     Note: with ``memory_stats`` available and ``XLA_PYTHON_CLIENT_PREALLOCATE``
     unset, JAX preallocates a large fraction of the GPU and ``bytes_limit``
@@ -428,22 +439,46 @@ def probe_device_memory_bytes(default_gb=4.0):
     try:
         import jax  # lazy: this module is imported by the (JAX-free) argparse layer
         dev = jax.devices()[0]
+        is_gpu = str(dev.platform).lower() in _GPU_BACKENDS
         stats = dev.memory_stats() or {}
         limit = stats.get("bytes_limit")
         if limit:
             in_use = int(stats.get("bytes_in_use", 0) or 0)
             free = max(int(limit) - in_use, int(0.1 * int(limit)))
-            return int(free), f"device:{dev.platform} bytes_limit-in_use"
+            return _min_with_physical_free(
+                free, f"device:{dev.platform} bytes_limit-in_use", dev, is_gpu)
         res = stats.get("bytes_reservable_limit")
         if res:
-            return int(res), f"device:{dev.platform} bytes_reservable_limit"
-        if str(dev.platform).lower() in _GPU_BACKENDS:
+            return _min_with_physical_free(
+                int(res), f"device:{dev.platform} bytes_reservable_limit",
+                dev, is_gpu)
+        if is_gpu:
             free = _nvidia_smi_free_bytes(int(getattr(dev, "id", 0) or 0))
             if free:
                 return int(free), "nvidia-smi memory.free"
     except Exception:
         pass
     return int(default_gb * 1e9), "fallback-default"
+
+
+def _min_with_physical_free(allocator_bytes, source, dev, is_gpu):
+    """``(bytes, source)`` clipped to physical free memory on a shared GPU.
+
+    Allocator telemetry is the PREFERRED signal (it is what the peak constants
+    were calibrated against), but under a non-preallocating BFC allocator
+    ``bytes_limit`` is the whole device, blind to another process already
+    holding part of it.  Taking the smaller of the two is the safe quantity;
+    the source tag records which one bound so the run log stays diagnosable.
+    ``nvidia-smi`` unavailable (or a non-GPU device) leaves the telemetry
+    unchanged.
+    """
+    allocator_bytes = int(allocator_bytes)
+    if not is_gpu:
+        return allocator_bytes, source
+    physical = _nvidia_smi_free_bytes(int(getattr(dev, "id", 0) or 0))
+    if physical and int(physical) < allocator_bytes:
+        return int(physical), f"min({source}, nvidia-smi memory.free)"
+    return allocator_bytes, source
 
 
 def _even_split_block(n_total: int, budget_bytes: float, bytes_per_unit: float,

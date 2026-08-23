@@ -61,9 +61,12 @@ def _requested(value):
 def _run_worker(args) -> int:
     # Measure peak with the BFC allocator: memory_stats() exposes
     # ``peak_bytes_in_use`` only under BFC, NOT under the 'platform' (cudaMalloc)
-    # allocator that ``configure_jax_runtime`` would otherwise set.  Preallocation
-    # stays off so bytes reflect real on-demand growth.  These must be set before
-    # any JAX import; ``configure_jax_runtime``'s setdefault() then leaves them.
+    # allocator.  Since 2026-08-23 BFC is also what ``configure_jax_runtime``
+    # defaults to, so calibration and production now share an allocator; these
+    # lines are kept so the harness stays correct under an explicit ``platform``
+    # override in the environment.  Preallocation stays off so bytes reflect real
+    # on-demand growth.  These must be set before any JAX import;
+    # ``configure_jax_runtime``'s setdefault() then leaves them.
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "default")
     from darksirens.core.jax_config import configure_jax_runtime

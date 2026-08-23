@@ -19,7 +19,7 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
-export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
+export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-default}"
 
 # Survey-generation defaults.  N0=1e-3 Mpc^-3 is intentionally inside the
 # default inference prior log10n0 ∈ [-4, -1].  The low zmax keeps the fixture
