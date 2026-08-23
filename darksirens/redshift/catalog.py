@@ -48,7 +48,7 @@ import weakref
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax import jit, lax, vmap
+from jax import lax, vmap
 from jax.scipy.special import log_ndtr, logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
 from typing import NamedTuple, Any
@@ -56,6 +56,7 @@ from typing import NamedTuple, Any
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 from darksirens.redshift.grid import log_interp_zgrid, zgrid
+from darksirens.utils.cosmology import threads_distance_table
 from .completion import log_galaxy_measure_grid
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
@@ -838,24 +839,20 @@ def eval_log_catalog_prior_state(
     return log_p_cat
 
 
-@jit
-def log_catalog_prior(
+def _log_catalog_prior_impl(
     z: float,
     pix: int,
     cosmo: CosmoParams,
     survey: SurveyParams,
     em_catalog: EMCatalog,
 ) -> float:
-    r"""
-    Log of the EM-catalog redshift prior at redshift z for catalog row pix.
+    """Un-jitted body shared by the scalar and vector boundaries below.
 
-    Historical scalar signature; builds the per-row kernel state on the
-    fly.  Under ``vmap`` over samples, the (cosmo, survey)-only pieces
-    (the log g grid) are hoisted automatically; the per-row pieces are
-    recomputed per sample, so hot paths should use
-    ``catalog_kernel_state`` + ``eval_log_catalog_prior_state`` instead.
-
-    Empty rows return -inf (no host candidates), never NaN.
+    Deliberately NOT decorated: it reaches the 106.8 MB comoving-distance
+    table through ``log_galaxy_measure_grid``, so its only jit boundaries must
+    be :func:`threads_distance_table` ones (see ``utils.cosmology``).  Keeping
+    the body plain lets ``log_catalog_prior_vmap`` vmap it directly instead of
+    nesting a scalar jit inside the vector one.
     """
     zs = em_catalog.zgals[pix]
     dzs = em_catalog.dzgals[pix]
@@ -874,8 +871,62 @@ def log_catalog_prior(
     return log_g_z + _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig_eff))
 
 
+# ``threads_distance_table`` rather than ``@jit``, on BOTH boundaries.  These
+# reach the 106.8 MB comoving-distance table through ``log_galaxy_measure_grid``
+# -> ``dV_of_z`` -> ``r_of_z``, and ``_log_prior_bright_sirens`` resolves the
+# vector one from INSIDE an enclosing traced boundary.  A plain ``@jit``
+# MEASURED (jax 0.4.34):
+#
+#   * lowering the scalar function serialised 229.7 MB of module text -- the
+#     table as a dense<> HLO CONSTANT rather than a parameter, rebuilt,
+#     re-serialised and re-parsed by XLA on every compilation;
+#   * the public legacy bright-siren path succeeded for z shape (1,) and then
+#     raised ``UnexpectedTracerError`` for z shape (2,) in the SAME process,
+#     because the plain jit closed over the enclosing trace's table tracer and
+#     JAX replayed the cached jaxpr from that now-dead trace.
+#
+# ``tests/test_catalog_prior_distance_table.py`` pins both properties.
+
+@threads_distance_table()
+def log_catalog_prior(
+    z: float,
+    pix: int,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    distance_table=None,
+) -> float:
+    r"""
+    Log of the EM-catalog redshift prior at redshift z for catalog row pix.
+
+    Historical scalar signature; builds the per-row kernel state on the
+    fly.  Under ``vmap`` over samples, the (cosmo, survey)-only pieces
+    (the log g grid) are hoisted automatically; the per-row pieces are
+    recomputed per sample, so hot paths should use
+    ``catalog_kernel_state`` + ``eval_log_catalog_prior_state`` instead.
+
+    Empty rows return -inf (no host candidates), never NaN.
+
+    ``distance_table`` is the comoving-distance grid; leaving it ``None``
+    resolves whatever table is active for the current trace.  It is a jit
+    ARGUMENT, never a closure capture -- see ``utils.cosmology``.
+    """
+    return _log_catalog_prior_impl(z, pix, cosmo, survey, em_catalog)
+
+
 # Vectorised over (z, pix) pairs — both vmapped simultaneously so the
-# call signature matches all prior assembly functions.
-log_catalog_prior_vmap = jit(
-    vmap(log_catalog_prior, in_axes=(0, 0, None, None, None), out_axes=0)
-)
+# call signature matches all prior assembly functions.  ONE distance-aware
+# boundary over the plain body, not a jit wrapped around a jit.
+@threads_distance_table()
+def log_catalog_prior_vmap(
+    z: jnp.ndarray,
+    pix: jnp.ndarray,
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    distance_table=None,
+) -> jnp.ndarray:
+    """``log_catalog_prior`` over matched ``(z, pix)`` arrays."""
+    return vmap(_log_catalog_prior_impl, in_axes=(0, 0, None, None, None), out_axes=0)(
+        z, pix, cosmo, survey, em_catalog
+    )

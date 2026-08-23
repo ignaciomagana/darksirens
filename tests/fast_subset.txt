@@ -55,6 +55,7 @@ tests/test_completion_stratified.py
 tests/test_prior_defaults.py
 tests/test_parameter_table.py
 tests/test_bright_siren_prior.py
+tests/test_catalog_prior_distance_table.py
 tests/test_gwtc5_fiducial_bpl2peaks.py
 tests/test_population_registry_golden.py
 
