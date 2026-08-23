@@ -857,6 +857,14 @@ def eval_dark_member_completion_latent(
     # depth relaxation is retained even though ``phi_z``/``rho`` already vanish
     # above the depth -- it is then an exact no-op, and keeping it means the
     # latent and table evaluators differ in EXACTLY one expression.
+    #
+    # PR-8: with an ``amp(z)`` anchor the caller passes ``z_depth=None`` here
+    # (``likelihood/core.py``), because ``phi_z``/``rho`` no longer vanish
+    # above the depth and the relaxation would discard the assumed modulation.
+    # It is still not a second convention: outside the seam's SUPPORT the two
+    # arrays are exact zeros, ``logQ`` is bit-zero, and ``exp(clip(0)) == 1.0``
+    # exactly -- the support IS the relaxation, and ``None`` says so.
+    #
     # ``_LATENT_LOGQ_CLIP`` is the second (and last) difference: the generated
     # ``logQ`` carries a budget ``rho`` already conserves, so the table bound
     # would subtract missing hosts rather than tame a tail.

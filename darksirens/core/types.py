@@ -410,7 +410,7 @@ class EMCatalog(NamedTuple):
     # The companion masks force bit-zero ``logQ`` off-footprint (pin P13b) --
     # the pad row alone would zero the field term but leave ``-rho``.
     latent_row_fac: Any = None          # (M_draw, n_fit + 1, M_z) float32
-    latent_phi_z: Any = None            # (N_grid, M_z) float64, 0 above z_depth
+    latent_phi_z: Any = None            # (N_grid, M_z) float64, 0 out of support
     latent_row_map: Any = None          # (N_catalog_rows,) int32
     latent_on_fp: Any = None            # (N_catalog_rows,) bool
     latent_field_row_map: Any = None    # (n_occupied,) int32
@@ -420,6 +420,19 @@ class EMCatalog(NamedTuple):
     latent_b_nodes: Any = None          # (n_b,) float64
     latent_P_F: Any = None              # scalar: |F|
     latent_F_F: Any = None              # scalar: Sum_{p in F} f_p
+    # PR-8 (the amp(z) support): the field's SUPPORT on ``zgrid``, present ONLY
+    # when the anchor carries an amp(z) profile that reaches above the fitted
+    # depth.  ``None`` -- every table-mode run and every latent run on a
+    # pre-PR-8 anchor -- means "the support IS ``zgrid <= z_depth``", which is
+    # what the consumers already computed from ``survey.z_depth``, so the
+    # ``None`` branch is the pre-existing code line for line.  When it is
+    # present it does two things that ``survey.z_depth`` cannot: it is the mask
+    # ``rho`` is zeroed on (the budget normalizer must be applied wherever the
+    # field is nonzero, or the seam injects an un-normalized monopole above the
+    # depth), and its presence tells the evaluators NOT to relax ``Q := 1``
+    # above the depth, because there the seam now has a modelled -- assumed --
+    # value to say.
+    latent_support: Any = None          # (N_grid,) bool | None
 
 
 class GWEvent(NamedTuple):

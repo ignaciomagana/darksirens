@@ -254,7 +254,12 @@ def test_latent_installs_leaves_on_both_catalogs(tmp_path):
     assert set(pe) == set(sel) == {
         "latent_row_fac", "latent_phi_z", "latent_row_map", "latent_on_fp",
         "latent_field_row_map", "latent_field_on_fp", "latent_A", "latent_B",
-        "latent_b_nodes", "latent_P_F", "latent_F_F"}
+        "latent_b_nodes", "latent_P_F", "latent_F_F", "latent_support"}
+    # PR-8's support leaf is INSTALLED only by an amp(z) anchor.  On this one
+    # -- and on every anchor built before PR-8 -- it is None, which is the
+    # static pytree-STRUCTURE branch that keeps the consumers on the
+    # pre-PR-8 code path (they recompute ``zgrid <= z_depth`` themselves).
+    assert pe["latent_support"] is None and sel["latent_support"] is None
 
 
 def test_phi_z_is_zero_above_the_depth(tmp_path):

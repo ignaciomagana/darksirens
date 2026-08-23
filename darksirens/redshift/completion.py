@@ -1483,16 +1483,45 @@ def _latent_C_curve(grids: "_CompletionGrids"):
     return jnp.clip(grids.C_bar_raw, 0.0, 1.0)
 
 
+def latent_support_mask(em_catalog: EMCatalog, survey: SurveyParams):
+    """The z nodes at which the seam MODELS the field -- PR-8's one accessor.
+
+    ``None`` (no ``latent_support`` leaf) is the pre-PR-8 contract: the field
+    lives at ``z <= survey.z_depth`` and nowhere else, so the mask is the depth
+    mask and callers that relax ``Q := 1`` above the depth are relaxing it
+    exactly where ``logQ`` is already bit-zero.  With an ``amp(z)`` anchor the
+    leaf is present, the support reaches above the depth, and BOTH facts have
+    to travel together: ``rho`` must be applied wherever the field is nonzero
+    (else the seam injects an un-normalized monopole above the depth, breaking
+    PLAN eq. (4) exactly where 99.99% of the budget lives), and the downstream
+    depth relaxation must NOT fire there (else the assumed modulation is
+    discarded and the scan measures nothing).
+    """
+    if em_catalog.latent_support is not None:
+        return jnp.asarray(em_catalog.latent_support)
+    return None if survey.z_depth is None else (zgrid <= survey.z_depth)
+
+
 def latent_rho_member(em_catalog: EMCatalog, survey: SurveyParams, C_curve, m):
-    """``rho_m(z)`` on the FULL ``zgrid`` -- PLAN eq. (2), zeroed above depth.
+    """``rho_m(z)`` on the FULL ``zgrid`` -- PLAN eq. (2), zeroed off support.
 
     ``C_curve`` is the SCALAR sky-aggregate completeness ``C(z; theta)`` (the
     ``f_p`` structure is already inside ``B``).  ``O(n_b + N_grid)`` per member
     per proposal -- the entire per-proposal cost of the latent normalizer.
+
+    PR-8: when the support reaches ABOVE the depth, the ``C`` that enters here
+    must be the one the consumption actually uses, and above the depth that is
+    ``C := 0`` -- ``base_miss`` relaxes to ``dN_exp`` and ``_field_missing_curve``
+    to the total pixel count there.  Normalizing against the raw ``c_sel``
+    curve instead would conserve a budget nothing consumes, and eq. (4) would
+    close on paper while the likelihood integrated something else.  Below the
+    depth the two are the same curve, so the pre-PR-8 branch is untouched.
     """
     from darksirens.likelihood.latent_q import rho_from_moments
 
-    below = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+    below = latent_support_mask(em_catalog, survey)
+    if em_catalog.latent_support is not None and survey.z_depth is not None:
+        C_curve = jnp.where(zgrid <= survey.z_depth, C_curve, 0.0)
     return rho_from_moments(
         em_catalog.latent_A[m], em_catalog.latent_B[m], C_curve,
         latent_b_gw(survey), em_catalog.latent_b_nodes,
@@ -1530,7 +1559,11 @@ def latent_member_N_miss_integrals(base_miss, C_curve, em_catalog: EMCatalog,
     theta-dependent (through ``C_curve`` and ``b_GW``), so the checkpoint is
     load-bearing here rather than merely tidy.
     """
-    depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+    # The relaxation mask is the SEAM'S SUPPORT (PR-8), which is the depth mask
+    # on every pre-PR-8 anchor -- same expression, same array -- and reaches
+    # above the depth on an amp(z) one, where relaxing ``Q := 1`` would throw
+    # away the assumed modulation this integral exists to carry.
+    depth_mask = latent_support_mask(em_catalog, survey)
 
     def _body(carry, m):
         lq = latent_member_logq_rows(em_catalog, survey, C_curve, m)
@@ -1558,7 +1591,7 @@ def latent_posterior_mean_q(em_catalog: EMCatalog, survey: SurveyParams,
     average is the estimand; this scalar path is the fallback.
     """
     M = latent_n_members(em_catalog)
-    depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+    depth_mask = latent_support_mask(em_catalog, survey)     # PR-8; see above
     n_rows = ((em_catalog.latent_field_row_map if field_rows
                else em_catalog.latent_row_map)).shape[0]
 
@@ -2333,6 +2366,16 @@ def _field_missing_curve(
     # every pixel (occupied and empty) has C == 0 and lss == 1, so the global
     # missing curve relaxes to the total pixel count: the full expected
     # population is uncatalogued there, not nonexistent.
+    #
+    # PR-8 does NOT change this line, and that is a statement about the model
+    # rather than an omission.  With an amp(z) anchor ``lss != 1`` above the
+    # depth, but PLAN eq. (4) makes ``sum_{p in F} Q_p = P_F`` at ``C = 0`` and
+    # every off-footprint pixel carries ``Q == 1``, so the sum this branch
+    # replaces is ALREADY the total pixel count -- the amp(z) field moves
+    # placement, never the survey-global budget (§4.2's gauge fixing).  Keeping
+    # the relaxation therefore also keeps the normalizer member-INDEPENDENT
+    # bit-exactly (pin P13), instead of letting each member's float error in a
+    # ~1e5-term sum enter ``-259 log mu``.
     if survey.z_depth is not None:
         depth_mask = zgrid <= survey.z_depth
         n_pix_total = n_occ + n_empty
@@ -2421,7 +2464,7 @@ def field_global_log_Z_members(
         # -- and it is pinned by tests/test_latent_seam.py.
         grids = _precompute_grids(cosmo, survey, em_catalog)
         C_curve = _latent_C_curve(grids)
-        depth_mask = None if survey.z_depth is None else (zgrid <= survey.z_depth)
+        depth_mask = latent_support_mask(em_catalog, survey)  # PR-8; see above
         N_obs_total_l = field_observed_global_total(cosmo, survey, em_catalog)
 
         def _one_latent(m):

@@ -158,6 +158,8 @@ _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "latent_field_row_map", "latent_field_on_fp",
     "latent_A", "latent_B", "latent_b_nodes",
     "latent_P_F", "latent_F_F",
+    # the amp(z) support (field-level PR-8); None on every pre-PR-8 anchor
+    "latent_support",
 )
 
 # Leaves prepare NEVER reads -- sample_to_unique_idx, the counterpart_* plumbing,
@@ -1309,6 +1311,21 @@ def darksiren_log_likelihood(
             for c in catalogs_sel_all
         )
         z_depth_all = tuple(surveys_all[k].z_depth for k in range(n_catalogs))
+        # PR-8 (the amp(z) support).  The Q-side depth relaxation is dropped on
+        # a catalog whose anchor models the field ABOVE the fitted depth: there
+        # the seam has an assumed value to say and ``Q := 1`` would delete it.
+        # Everywhere else this tuple IS ``z_depth_all`` -- ``latent_support`` is
+        # None on every table-mode and every pre-PR-8 latent catalog, and that
+        # is a static pytree-STRUCTURE test, so nothing is decided at trace
+        # time.  Only the LATENT branch reads it; the table evaluator keeps
+        # ``z_depth_all``, because a resident Q table has no support of its own
+        # to speak for and the depth relaxation is the only thing that stops it
+        # being extrapolated.
+        z_depth_q_all = tuple(
+            None if (latent_mode
+                     and catalogs_pe_all[k].latent_support is not None)
+            else z_depth_all[k]
+            for k in range(n_catalogs))
         # Member-INDEPENDENT latent constant, hoisted out of the member vmap.
         # Per SIDE (like ``base_miss`` / ``member_is_log``) rather than shared,
         # so the two seams cannot silently drift onto one catalog's grid.
@@ -1336,7 +1353,7 @@ def darksiren_log_likelihood(
                         A_obs[k], idx[k], t[k], pixk[k], fitk[k], fpk[k],
                         base_tup[k], row_fac_m, phi_z_tup[k], rho_m,
                         latent_b_gw(surveys_all[k]), logZ_m,
-                        z_depth_all[k], is_field,
+                        z_depth_q_all[k], is_field,
                     )
                 member_logq_m, logZ_m = leaves[k]
                 return eval_dark_member_completion(

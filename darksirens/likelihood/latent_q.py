@@ -8,8 +8,14 @@ that table does not exist.  ``Q`` is *generated* from the compact anchor
 artifact (``darksirens_build_latent_field``, PR-4) through the factored basis of
 PLAN §3.5:
 
-    logQ_m(p, z) = b_GW * (row_fac_m[p] . phi_z[z])  -  rho_m(z; c, b_GW)     (p in F, z <= z_depth)
+    logQ_m(p, z) = b_GW * (row_fac_m[p] . phi_z[z])  -  rho_m(z; c, b_GW)     (p in F, z in support)
     logQ_m(p, z) = 0                                                          (otherwise)
+
+The support is ``z <= z_depth`` unless the artifact carries a PR-8 ``amp(z)``
+profile, in which case ``phi_z`` carries the extra factor ``amp(z)`` -- exactly
+``1.0`` below the depth, where PLAN §4.3 pins it, and the ASSUMED value above,
+where there are no counts -- and the support is the artifact's node coverage
+wherever ``amp != 0``.  ``amp_hi = 0`` is the legacy convention exactly.
 
 with ``row_fac_m = Phi_s[F] @ Xi_m`` an ``(n_fit, M_z)`` STATIC leaf (11.7 MB at
 production rank, ``M_draw = 8``) and ``phi_z`` the ``(N_grid, M_z)`` redshift
@@ -78,14 +84,22 @@ class LatentQPlan:
     Attributes
     ----------
     phi_z : (N_grid, M_z) f64
-        The redshift factor rows on the FULL ``zgrid``, ZEROED above
-        ``z_depth``.  Zeroing (rather than truncating) keeps the seam's gather
-        an ordinary ``phi_z[idx]`` on the same index the table path uses, and
-        makes the above-depth branch bit-exact rather than merely masked: a
-        zero row gives ``logQ = 0`` gives ``Q_eff = 1``, which is precisely the
-        ``z_depth`` relaxation the table path applies downstream.
+        The redshift factor rows on the FULL ``zgrid``, ZEROED outside the
+        field's SUPPORT.  Zeroing (rather than truncating) keeps the seam's
+        gather an ordinary ``phi_z[idx]`` on the same index the table path
+        uses, and makes the out-of-support branch bit-exact rather than merely
+        masked: a zero row gives ``logQ = 0`` gives ``Q_eff = 1``, which is
+        precisely the ``z_depth`` relaxation the table path applies downstream.
+        With a PR-8 ``amp(z)`` profile the rows carry the extra factor
+        ``amp(z)`` — exactly ``1.0`` at and below the depth (PLAN §4.3), the
+        assumed value above it.
     below_depth : (N_grid,) bool
-        ``zgrid <= z_depth`` (all-True when ``z_depth is None``).
+        The field's SUPPORT on the grid.  Without a PR-8 profile this is
+        ``zgrid <= z_depth`` (all-True when ``z_depth is None``) and the name is
+        literal.  With one it is the artifact's node coverage restricted to
+        ``amp(z) != 0``, which is wider — that is the whole point of PR-8 — and
+        the name is kept because it is what every consumer calls the mask that
+        answers "does the seam model this ``z``?".
     row_fac : (M_draw, n_fit + 1, M_z) f32
         ``Phi_s[F] @ Xi_m`` per member, with a trailing ZERO pad row at index
         ``n_fit`` for off-footprint gathers.
@@ -319,7 +333,7 @@ def load_latent_plan(path, *, z_depth, expect_nside=None):
     import h5py
 
     from darksirens.redshift.grid import zgrid
-    from darksirens.redshift.latent_field import build_latent_basis
+    from darksirens.redshift.latent_field import amp_profile, build_latent_basis
 
     with h5py.File(path, "r") as f:
         g = f["latent_field"]
@@ -330,6 +344,14 @@ def load_latent_plan(path, *, z_depth, expect_nside=None):
         B_sub = np.asarray(g["B_moments"][...], dtype=np.float64)
         b_nodes = np.asarray(g["b_nodes"][...], dtype=np.float64)
         z_sub = np.asarray(g["z_sub"][...], dtype=np.float64)
+        # The FITTED depth, straight off the shell edges the counts were binned
+        # into.  Through PR-7 it was always ``z_node_hi`` and nobody had to name
+        # it; PR-8 lets the nodes reach above the counts, so the guards that
+        # mean "where the field is constrained" (isotropy, §4.4 successor 4)
+        # need the edges rather than the node range.  Optional so a fixture
+        # without them still loads; every guard-compliant artifact has them.
+        z_edges = (np.asarray(g["z_count_edges"][...], dtype=np.float64)
+                   if "z_count_edges" in g else None)
         fit_pixels = np.asarray(g["fit_pixels"][...], dtype=np.int64)
         P_F = float(g.attrs["P_F"])
         F_F = float(g.attrs["F_F"])
@@ -339,6 +361,28 @@ def load_latent_plan(path, *, z_depth, expect_nside=None):
         labels = tuple(_json_attr(g, "sensitivity_labels") or ())
         theta_ref = _json_attr(g, "theta_ref")
         nside = int(g.attrs["nside"])
+        n_tracer_art = int(g.attrs.get("n_tracer", 1))
+
+    # [field-level PR-7] A K >= 2 anchor must not be consumed by this loader.
+    # It would load: the top-level ``A``/``B`` are eq. (2) over TRACER 0's
+    # footprint completeness (the ``--per-pixel-completeness`` map), and
+    # ``row_fac`` / ``xi_hat`` are the STACKED fit -- so the seam would
+    # normalize a K-tracer field against one tracer's budget and nothing would
+    # complain. The per-tracer tables live under ``/latent_field/tracers/<k>``
+    # and the seam has no per-catalog row map to choose between them yet
+    # (``likelihood/factory`` refuses the K >= 2 mixture path for exactly that
+    # reason, and says so). Refusing here as well means the failure is a message
+    # rather than a wrong number, at the one place the artifact is opened.
+    if n_tracer_art > 1:
+        raise ValueError(
+            f"latent artifact {path!r} was built with n_tracer="
+            f"{n_tracer_art} (field-level PR-7): it carries K per-tracer "
+            f"footprints, completeness maps and eq. (2) moment tables under "
+            f"/latent_field/tracers, and the single-catalog seam has no "
+            f"per-catalog row map to select among them -- it would consume "
+            f"tracer 0's budget for the whole stacked field. Build a K = 1 "
+            f"anchor for a single-catalog run (omit --tracer-labels)."
+        )
 
     if expect_nside is not None and int(expect_nside) != nside:
         raise ValueError(
@@ -374,16 +418,47 @@ def load_latent_plan(path, *, z_depth, expect_nside=None):
                 "real field above that node and rail logQ. Pass the "
                 "--survey_z_depth the anchor was built at, or rebuild the "
                 "anchor on the full grid.")
-    elif int(below.sum()) != n_sub:
-        raise ValueError(
-            f"latent artifact covers {n_sub} below-depth nodes but the run's "
-            f"z_depth={z_depth} selects {int(below.sum())}; the seam would "
-            "silently truncate or extrapolate the field. Rebuild the anchor at "
-            "the run's z_depth.")
 
-    # phi_z on the FULL grid: the real factor rows below the depth, exact zeros
-    # above (the z_depth relaxation, expressed in the basis rather than as a
-    # downstream mask).
+    # PR-8: does this artifact model the field ABOVE the fitted depth?  One
+    # test, on the one place the profile is recorded (``basis_meta``, written
+    # by ``build_latent_basis`` only when a profile was applied).  ``None`` --
+    # every artifact built before PR-8, and every one built after without
+    # ``--amp-hi`` -- takes the legacy branch UNCHANGED, line for line.
+    amp_hi = basis_meta.get("amp_hi")
+    if amp_hi is None:
+        if z_depth is not None and int(below.sum()) != n_sub:
+            raise ValueError(
+                f"latent artifact covers {n_sub} below-depth nodes but the "
+                f"run's z_depth={z_depth} selects {int(below.sum())}; the seam "
+                "would silently truncate or extrapolate the field. Rebuild the "
+                "anchor at the run's z_depth.")
+    else:
+        # The profile's step must sit exactly at the run's depth: it is the
+        # edge of the region where the counts constrain the amplitude (PLAN
+        # §4.3), so a mismatch would either scale part of the FITTED region --
+        # re-opening the (b_gal, amp) degeneracy -- or leave a band below the
+        # depth unmodelled while the counts think they constrained it.
+        amp_z_depth = float(basis_meta.get("amp_z_depth", float("nan")))
+        if z_depth is None or not np.isclose(amp_z_depth, float(z_depth),
+                                             rtol=0.0, atol=1e-12):
+            raise ValueError(
+                f"latent artifact carries a PR-8 amp(z) profile stepping at "
+                f"z = {amp_z_depth!r}, but the run's survey z_depth is "
+                f"{z_depth!r}. amp is pinned at 1 where the counts constrain "
+                "it and assumed above; the two edges must be the same z. "
+                "Rebuild the anchor at the run's z_depth.")
+        if int(below.sum()) > n_sub:
+            raise ValueError(
+                f"latent artifact covers {n_sub} grid nodes but the run's "
+                f"z_depth={z_depth} already selects {int(below.sum())} below "
+                "the depth; an amp(z) anchor must at minimum cover the fitted "
+                "region. Rebuild the anchor at the run's z_depth and grid.")
+
+    # phi_z on the FULL grid: the real factor rows inside the artifact's
+    # support, exact zeros outside it (the relaxation, expressed in the basis
+    # rather than as a downstream mask).  The profile is REBUILT here from
+    # ``basis_meta`` rather than read from a stored array, so the builder and
+    # the seam cannot carry two different amp(z)'s.
     m_sph = int(basis_meta["M_sph"])
     m_z = int(basis_meta["M_z"])
     sub_basis = build_latent_basis(
@@ -391,9 +466,31 @@ def load_latent_plan(path, *, z_depth, expect_nside=None):
         n_inducing_sphere=m_sph, n_inducing_z=m_z,
         z_node_hi=float(basis_meta["z_node_hi"]),
         amp=float(basis_meta["amp"]),
-        ls_sph=float(basis_meta["ls_sph"]), ls_z=float(basis_meta["ls_z"]))
+        ls_sph=float(basis_meta["ls_sph"]), ls_z=float(basis_meta["ls_z"]),
+        **({} if amp_hi is None else dict(
+            amp_hi=float(amp_hi),
+            amp_kind=str(basis_meta.get("amp_kind", "step")),
+            amp_z_depth=float(basis_meta["amp_z_depth"]),
+            amp_Om0=float(basis_meta.get("amp_Om0", 0.3075)))))
     phi_z = np.zeros((n_grid, m_z), dtype=np.float64)
     phi_z[:n_sub] = np.asarray(sub_basis.phi_z_out)
+
+    if amp_hi is not None:
+        # The SUPPORT is where the seam actually models the field: inside the
+        # artifact's node coverage AND where amp(z) is nonzero.  ``amp_hi = 0``
+        # therefore collapses it back to the below-depth mask, and with it the
+        # whole seam back to "Q == 1 above z_depth" -- bit-for-bit, since the
+        # basis rows above the depth are multiplied by a literal 0.0 and every
+        # consumer masks on this array.  That is the amp = 0 row of the PR-8
+        # table, and it is why that row is the legacy analysis rather than a
+        # near-miss of it.
+        amp_z = amp_profile(np.asarray(z_sub),
+                            z_depth=float(basis_meta["amp_z_depth"]),
+                            amp_hi=float(amp_hi),
+                            kind=str(basis_meta.get("amp_kind", "step")),
+                            Om0=float(basis_meta.get("amp_Om0", 0.3075)))
+        below = np.zeros(n_grid, dtype=bool)
+        below[:n_sub] = amp_z != 0.0
 
     def _pad_moments(t):
         out = np.zeros(t.shape[:2] + (n_grid,) + t.shape[3:], dtype=t.dtype)
@@ -417,6 +514,8 @@ def load_latent_plan(path, *, z_depth, expect_nside=None):
         S=jnp.asarray(S), dA=jnp.asarray(dA), dB=jnp.asarray(dB),
         theta_ref=theta_ref, labels=labels,
         meta=dict(basis_meta, nside=nside, fit_pixels=fit_pixels,
+                  z_fit_depth=(None if z_edges is None
+                               else float(z_edges[-1])),
                   sha256=str(meta.get("sha256", "")),
                   format_version=str(meta.get("format_version", ""))),
     )
