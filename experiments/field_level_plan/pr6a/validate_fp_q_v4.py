@@ -8,6 +8,20 @@ ITSELF").  The loader now admits the pairing only on the artifact's EARNED
 ``f_p_aware`` stamp, so this run exercises the real gate, not an override.
 
 Same grid as the record it answers: H0 in [20, 140] at 2 km/s (61 points).
+
+WHAT THIS IS EVIDENCE OF.  ONE rb realization, one 90% interval.  That is
+WIRING evidence -- it shows the admitted f_p x Q pairing is the arm the
+likelihood actually forms and that its interval lands on truth rather than
+41.24 -- and it is NOT coverage calibration: a single Bernoulli containment
+outcome cannot establish a 90% frequency or bound the bias.  Calibrating the
+quoted production interval needs >= 100 independent worlds (or SBC ranks) with
+the catalog/depth and Q seeds varied and the production variance guard
+restored.  Do not cite this file as coverage.
+
+EXIT STATUS.  ``main`` asserts the verdict (truth inside the new table_fp 90%
+CI) and returns 1 when it fails, so this script can gate a pipeline:
+``python validate_fp_q_v4.py || exit 1``.  The JSON record is written BEFORE
+the check, so a failing run still leaves its numbers behind for diagnosis.
 """
 import json
 import sys
@@ -57,7 +71,18 @@ def main():
     print(f"[verdict] table_fp: {v['old_table_fp']:.2f} (mask double-counted) "
           f"-> {v['new_table_fp']:.2f} (mask-free Q, admitted by stamp); "
           f"truth {TRUTH} in 90% CI: {v['truth_in_new_90']}")
+    if not v["truth_in_new_90"]:
+        print(f"[FAIL] truth {TRUTH} is OUTSIDE the new table_fp 90% CI "
+              f"[{res['table_fp']['ci90'][0]:.2f}, "
+              f"{res['table_fp']['ci90'][1]:.2f}] "
+              f"(cdf at truth {res['table_fp']['cdf_at_truth']:.4f}). "
+              "The admitted f_p x Q pairing did NOT recover truth on this "
+              "world; sz_tier_b_tablefp_v4.json has the scan.")
+        return 1
+    print("[PASS] one-world wiring check: truth inside the new table_fp 90% "
+          "CI. This is NOT coverage calibration -- see the module docstring.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

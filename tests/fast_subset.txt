@@ -46,11 +46,13 @@ tests/test_selection_prior_model.py
 tests/test_selection_kcorr.py
 tests/test_selection_schechter.py
 tests/test_selection_strata.py
+tests/test_selection_fit_background_gate.py
 tests/test_percatalog_selection.py
 tests/test_multitracer_selection.py
 tests/test_completion_stratified.py
 
 # ── priors, populations, parameter table ───────────────────────────────────
+tests/test_population_fiducial_sets.py
 tests/test_prior_defaults.py
 tests/test_parameter_table.py
 tests/test_bright_siren_prior.py
@@ -62,6 +64,8 @@ tests/test_completion_prior_strength.py
 tests/test_completion_depth_map_build.py
 tests/test_completion_q_support_depth.py
 tests/test_mask_free_criterion.py
+tests/test_lss_floor_conservation.py
+tests/test_per_pixel_clustering_cancellation.py
 tests/test_build_mth_map.py
 tests/test_complete_catalog_empty_pixel_policy.py
 tests/test_pop_extractor_multitracer.py
