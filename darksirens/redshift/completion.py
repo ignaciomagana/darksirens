@@ -826,6 +826,93 @@ def build_field_lss_q_member_inputs(
     return q_occ, q_empty_sum
 
 
+def _q_fp_empty_sum(logq_np, occ_mask, f_p_np, chunk: int = 4096):
+    """``Sum_{p empty} f_p Q_p(z)`` from a global log-Q block, chunked.
+
+    Shared core of the deterministic and per-member builders below.  Chunked
+    over pixels because the full-sky ``exp`` the plain empty-pixel budget
+    already pays is a (n_pix, N_grid) float64 array -- ~0.4 GB at nside 64 on
+    the production grid -- and this must not double it.
+    """
+    empty = np.flatnonzero(~occ_mask)
+    acc = np.zeros(logq_np.shape[-1], dtype=np.float64)
+    for lo in range(0, empty.size, chunk):
+        idx = empty[lo:lo + chunk]
+        q = np.exp(np.clip(logq_np[..., idx, :], -_LOGQ_CLIP, _LOGQ_CLIP))
+        acc = acc + (f_p_np[idx][..., :, None] * q).sum(axis=-2)
+    return acc
+
+
+def build_field_lss_q_fp_empty_sum(
+    logq_map: jnp.ndarray,
+    occupied_pixels: np.ndarray,
+    n_pix_total: int,
+    f_p: np.ndarray,
+) -> jnp.ndarray:
+    """``Sum_{p empty} f_p Q_p(z)`` -- the f_p-weighted empty-pixel Q budget.
+
+    The twin of :func:`build_field_lss_q_inputs`'s ``field_lss_q_empty_sum``,
+    and the datum that makes the per-pixel selection fraction admissible
+    ALONGSIDE a Q table.  Without it the field normalizer charges every empty
+    pixel ``(1 - Cbar) Q_p(z)``, i.e. it models sky the survey never observed
+    as ``Cbar``-COMPLETE; with it the budget is
+    ``Sum_empty Q_p (1 - f_p Cbar)``, so an off-footprint pixel (``f_p = 0``)
+    is correctly counted as entirely missing.
+
+    On a footprint-limited survey the difference is not a correction term: at
+    DESI's 26,702 deg^2 of coverage roughly a third of the sky is empty, and
+    charging it ``Cbar`` completeness removes that fraction of the missing-host
+    budget from the normalizer while the numerator keeps it.
+
+    Same ``±_LOGQ_CLIP`` convention as every other consumer of a log-Q table.
+    """
+    logq_np = np.asarray(logq_map, dtype=np.float64)
+    if logq_np.ndim != 2 or logq_np.shape[0] != int(n_pix_total):
+        raise ValueError(
+            "build_field_lss_q_fp_empty_sum requires a GLOBAL "
+            f"(n_pix_total, N_grid) log-Q table; got shape {logq_np.shape} "
+            f"for n_pix_total={int(n_pix_total)}.")
+    f_p_np = np.asarray(f_p, dtype=np.float64).reshape(-1)
+    if f_p_np.shape[0] != int(n_pix_total):
+        raise ValueError(
+            f"build_field_lss_q_fp_empty_sum: f_p has {f_p_np.shape[0]} "
+            f"pixels but the Q table has {int(n_pix_total)}.")
+    occ_mask = np.zeros(int(n_pix_total), dtype=bool)
+    occ_mask[np.asarray(occupied_pixels, dtype=np.int64).reshape(-1)] = True
+    return jnp.asarray(_q_fp_empty_sum(logq_np, occ_mask, f_p_np),
+                       dtype=jnp.float64)
+
+
+def build_field_lss_q_fp_empty_sum_members(
+    logq_members: jnp.ndarray,
+    occupied_pixels: np.ndarray,
+    n_pix_total: int,
+    f_p: np.ndarray,
+) -> jnp.ndarray:
+    """(M, N_grid) per-member twin of :func:`build_field_lss_q_fp_empty_sum`.
+
+    A member ensemble whose normalizer reused the DETERMINISTIC f_p-weighted
+    budget would marginalize inconsistent estimands, exactly as the plain
+    per-member empty budget must not be reused across members.
+    """
+    logq_np = np.asarray(logq_members, dtype=np.float64)
+    if logq_np.ndim != 3 or logq_np.shape[1] != int(n_pix_total):
+        raise ValueError(
+            "build_field_lss_q_fp_empty_sum_members requires a GLOBAL "
+            f"(M, n_pix_total, N_grid) log-Q ensemble; got shape "
+            f"{logq_np.shape} for n_pix_total={int(n_pix_total)}.")
+    f_p_np = np.asarray(f_p, dtype=np.float64).reshape(-1)
+    if f_p_np.shape[0] != int(n_pix_total):
+        raise ValueError(
+            f"build_field_lss_q_fp_empty_sum_members: f_p has "
+            f"{f_p_np.shape[0]} pixels but the Q ensemble has "
+            f"{int(n_pix_total)}.")
+    occ_mask = np.zeros(int(n_pix_total), dtype=bool)
+    occ_mask[np.asarray(occupied_pixels, dtype=np.int64).reshape(-1)] = True
+    return jnp.asarray(_q_fp_empty_sum(logq_np, occ_mask, f_p_np),
+                       dtype=jnp.float64)
+
+
 def build_field_delta_g_inputs(
     delta_g_pix_z: jnp.ndarray,
     occupied_pixels: np.ndarray,
@@ -2195,8 +2282,8 @@ def _field_missing_curve(
     # Q table would, so the budget arithmetic below is shared rather than
     # duplicated -- the only differences are that the empty-pixel budget comes
     # from the ``f_p`` formula (empty pixels are off-footprint, so Q == 1 there
-    # by the seam's own convention) and that ``f_p`` and ``Q`` may coexist,
-    # which the table path forbids because it has no f_p-weighted empty budget.
+    # by the seam's own convention), where the table path reads the built
+    # ``field_lss_q_fp_empty_sum``.
     latent = latent_q_rows is not None
     has_q = latent or em_catalog.field_lss_q is not None
     has_dg = em_catalog.field_delta_g is not None
@@ -2224,19 +2311,35 @@ def _field_missing_curve(
 
     # Per-pixel selection fraction (field-level PR-2): C -> f_p * C on the
     # occupied rows, and the empty-pixel budget below becomes
-    # n_empty - C * Sum_empty f_p.  Static pytree-structure branch; None is
-    # bit-identical.  The loader restricts f_p to aggregate/selection c_modes
-    # without a Q table or strata (their empty budgets would need
-    # f_p-weighted twins), so the admissible combinations are closed here.
+    # V_empty - C * Sum_empty f_p (lss-weighted; see the branch).  Static
+    # pytree-structure branch; None is bit-identical.  The loader restricts
+    # f_p to aggregate/selection c_modes without strata or a Q ENSEMBLE (their
+    # empty budgets would need f_p-weighted twins); a deterministic Q table is
+    # admitted and carries ``field_lss_q_fp_empty_sum``.
     has_fp = em_catalog.field_f_p_occ is not None
-    if has_fp and ((has_q and not latent) or has_dg or stratified or not aggregate):
+    if has_fp and (has_dg or stratified or not aggregate):
         raise NotImplementedError(
             "_field_missing_curve: field_f_p_occ (per-pixel selection "
             "fraction) is only supported under aggregate/selection c_modes "
-            "without a Q table, delta_g rows, or stratified selection. "
-            "(lss_field_mode='latent' is the one admitted f_p x Q pairing: "
-            "its empty pixels are off-footprint, so Q == 1 there and the "
-            "empty-pixel budget is the f_p formula below.)"
+            "without delta_g rows or stratified selection (their empty-pixel "
+            "budgets would need f_p-weighted twins)."
+        )
+    if has_fp and not latent and em_catalog.field_lss_q_members is not None:
+        raise NotImplementedError(
+            "_field_missing_curve: a Q ENSEMBLE with field_f_p_occ would "
+            "pair member m's Q rows with the DETERMINISTIC f_p-weighted "
+            "empty-pixel budget (field_lss_q_fp_empty_sum), marginalizing "
+            "inconsistent estimands. Build the per-member twin "
+            "(build_field_lss_q_fp_empty_sum_members) and substitute it in "
+            "_replace_member_q before admitting this pairing."
+        )
+    if has_fp and has_q and not latent and (
+            em_catalog.field_lss_q_fp_empty_sum is None):
+        raise ValueError(
+            "_field_missing_curve: a Q table with field_f_p_occ requires "
+            "field_lss_q_fp_empty_sum (Sum_{p empty} f_p Q_p(z)); build it "
+            "via build_field_lss_q_fp_empty_sum. Without it the empty-pixel "
+            "budget would model unobserved sky as Cbar-complete."
         )
     if latent and not has_fp:
         raise ValueError(
@@ -2345,6 +2448,12 @@ def _field_missing_curve(
         if has_q and not latent:
             V_empty = jnp.asarray(em_catalog.field_lss_q_empty_sum,
                                   dtype=dN_exp.dtype)
+            # The weight f_p multiplies inside the empty sum, so the f_p-aware
+            # budget is Sum_empty Q_p (1 - f_p C) = Sum_empty Q_p
+            # - C Sum_empty f_p Q_p -- NOT n_empty - C Sum_empty f_p.
+            fp_weight = (jnp.asarray(em_catalog.field_lss_q_fp_empty_sum,
+                                     dtype=dN_exp.dtype)
+                         if has_fp else None)
         else:
             # LATENT: every empty pixel is outside the fitted footprint (the
             # footprint is fitted TO the counts), so Q == 1 there and the
@@ -2352,11 +2461,16 @@ def _field_missing_curve(
             # budget exists or is needed, which is the structural reason
             # PLAN eq. (4)'s off-footprint block is conserved trivially.
             V_empty = n_empty
+            fp_weight = (jnp.asarray(em_catalog.field_f_p_empty_sum,
+                                     dtype=dN_exp.dtype)
+                         if has_fp else None)
         if has_fp:
-            # Sum_{p empty} (1 - f_p C(z)) = n_empty - C(z) Sum_empty f_p.
-            # (has_fp forbids has_q/strata above, and requires aggregate.)
-            V_empty = n_empty - C_bar * jnp.asarray(
-                em_catalog.field_f_p_empty_sum, dtype=dN_exp.dtype)
+            # Sum_{p empty} lss_p (1 - f_p C(z)) = V_empty - C(z) * fp_weight,
+            # with (V_empty, fp_weight) = (n_empty, Sum_empty f_p) without a Q
+            # table and (Sum_empty Q_p, Sum_empty f_p Q_p) with one.  S-3: the
+            # ``elif aggregate`` branch below is what modelled unobserved sky
+            # as Cbar-complete, and f_p is what supplies the zero.
+            V_empty = V_empty - C_bar * fp_weight
         elif aggregate:
             V_empty = (1.0 - C_bar) * V_empty
 

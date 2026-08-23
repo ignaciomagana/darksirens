@@ -72,7 +72,57 @@ import world16 as W16
 
 Z_UNIVERSE = 0.60          # galaxies (and hosts) exist out to here
 Z_DEPTH = W16.Z_DEPTH      # 0.30 -- the catalog's declared depth
-SIGMA_Z_CAT = W16.SIGMA_Z  # 0.023, matching build_latent_field's frozen W
+#: The catalog's redshift-error floor -- the scatter applied to every galaxy AND
+#: the ``dz`` the catalog stores, so it is also the width of the analysis kernel.
+#:
+#: **0.003, SPECTROSCOPIC, changed from W16.SIGMA_Z = 0.023 (2026-08-19).**  The
+#: photometric value was measured to be the sole remaining cause of the closure
+#: tiers' residual bias and overconfidence: at a median host ``z`` of 0.11 a
+#: 0.023 scatter is a 21% FRACTIONAL kernel width, the kernel is not truncated at
+#: ``z >= 0`` (129 galaxies per realization had ``z_obs < 0``, and a Gaussian
+#: centred below zero can only put mass at higher ``z``), and at that width it
+#: interacts with the rising volumetric prior at exactly the few-percent level the
+#: bias sat at.  Setting it to zero took median ``u`` from 0.277 to 0.449, the
+#: bias from +3.00 to +0.42 km/s, the overconfidence from 1.714 to 1.224 and the
+#: 90% coverage from 0.62 to 0.88 (``gate_specz.py``).
+#:
+#: **1e-4, and NOT 0.003 -- a first attempt used 0.003 and it was wrong.**  The
+#: analysis kernel is ``sig_eff = sqrt(dz^2 + sigma_kde^2)``
+#: (``redshift/catalog.py:540``) with the production ``sigma_kde = 0.003``, so
+#: setting the catalog's own scatter to 0.003 makes the kernel
+#: ``sqrt(2) x 0.003``: **41% WIDER than the truth**, a brand-new mismatch where
+#: the photometric 0.023 had made ``sigma_kde`` negligible (0.9%).  Measured: at
+#: n = 17 that configuration left Tier C at overconfidence 1.603 and 90% coverage
+#: 0.53 -- no better than photo-`z`.
+#:
+#: What production actually looks like is a catalog redshift that is essentially
+#: EXACT (DESI spectroscopy, ~30 km/s) with ``sigma_kde = 0.003`` as the
+#: analysis's own deliberate smoothing.  1e-4 reproduces that: it sits at
+#: ``catalog.SIGMA_EFF_FLOOR``, so ``sig_eff -> 0.003002`` and the kernel is
+#: `sigma_kde` alone, exactly as on the production line.
+#:
+#: ``W16.SIGMA_Z`` is UNCHANGED at 0.023: it is the width
+#: ``build_latent_field``'s frozen W was constructed with, and the latent basis
+#: must not move underneath the anchors.
+SIGMA_Z_CAT = 1.0e-4
+
+#: Path to the PRODUCTION catalog's empirical per-galaxy ``dz`` quantiles.  When
+#: present (the default), every mock galaxy draws its OWN ``dz`` from this
+#: distribution instead of sharing one scalar.
+#:
+#: This exists because both previous choices were wrong, in opposite directions.
+#: 0.023-flat treated a bimodal distribution as a point; 1e-4 was adopted on the
+#: false premise that the production catalog is spectroscopic.  Measured on the
+#: catalog the 259-event line actually loads (14.9M live entries):
+#:
+#:     q0.10  2e-5      q0.50  0.0227      q0.90  0.0564
+#:     q0.25  9e-5      q0.75  0.0399      q0.99  0.0901
+#:     27% of galaxies have dz < 1e-3 (genuinely spectroscopic)
+#:
+#: i.e. STRONGLY BIMODAL -- a spectroscopic quarter plus a photometric bulk. No
+#: scalar represents it, and which scalar you pick determines whether the mock
+#: over- or under-states the kernel's effect.
+DZ_QUANTILES = Path(__file__).resolve().parent / "production_dz_quantiles.json"
 N0_TRUE = 2.0e-4           # Mpc^-3, comoving, delta = 0
 SNR_REF = 5.0
 SNR_THRESHOLD = 8.0
@@ -181,6 +231,7 @@ def clustered_catalog(world, xi_true, rng, grids, *, n0=N0_TRUE,
 def build(seed, outdir, *, world=None, nobs=NOBS, nsamp=NSAMP, ndraw=NDRAW,
           n0=N0_TRUE, f_p_survey=None, extra_selection=None,
           lognormal_tail=0.0, field_scale=1.0, z_universe=Z_UNIVERSE,
+          dz_quantiles="default", dz_scale=1.0,
           target_det=TARGET_DET, verbose=True,
           reuse_injections=None, event_seed=None):
     """Write one realization's data products under ``outdir``.
@@ -204,6 +255,9 @@ def build(seed, outdir, *, world=None, nobs=NOBS, nsamp=NSAMP, ndraw=NDRAW,
     out.mkdir(parents=True, exist_ok=True)
     world = world or W16.build_world()
     rng = np.random.default_rng(seed)
+    if dz_quantiles == "default":
+        dz_quantiles = (json.loads(DZ_QUANTILES.read_text())
+                        if DZ_QUANTILES.exists() else None)
 
     pop = dark.PopulationConfig()
     survey_cfg = dark.SurveyConfig(
@@ -236,7 +290,17 @@ def build(seed, outdir, *, world=None, nobs=NOBS, nsamp=NSAMP, ndraw=NDRAW,
                                      survey_cfg.absolute_mag_sigma, total)
     complete["app_mag"] = complete["abs_mag"] + 5.0 * np.log10(
         np.maximum(dl_pc, 10.0) / 10.0)
-    zerr = dark._catalog_zerr(complete["z"], survey_cfg)
+    if dz_quantiles is not None:
+        # One draw per galaxy, used BOTH to scatter it and (subsetted below) as
+        # the dz the catalog stores.  They must be the same number: the analysis
+        # kernel is the stored dz, so a galaxy scattered by one width and
+        # represented by another is a mock/analysis mismatch of exactly the kind
+        # this campaign spent a day chasing.
+        _q = np.asarray(dz_quantiles["q"], dtype=float)
+        _d = np.asarray(dz_quantiles["dz"], dtype=float) * float(dz_scale)
+        zerr = np.interp(rng.uniform(size=total), _q, _d)
+    else:
+        zerr = dark._catalog_zerr(complete["z"], survey_cfg)
     complete["z_obs"] = complete["z"] + zerr * rng.standard_normal(total)
     if verbose:
         print(f"[mock] complete catalog {total} galaxies "
@@ -256,7 +320,8 @@ def build(seed, outdir, *, world=None, nobs=NOBS, nsamp=NSAMP, ndraw=NDRAW,
                 & (rng.uniform(size=total) < p_keep))
     n_obs = int(observed.sum())
     z_obs_s = complete["z_obs"][observed]
-    zerr_s = dark._catalog_zerr(z_obs_s, survey_cfg)
+    zerr_s = (zerr[observed] if dz_quantiles is not None
+              else dark._catalog_zerr(z_obs_s, survey_cfg))
     pixelated = dark._pixelate_catalog(
         complete["ra"][observed], complete["dec"][observed], z_obs_s, zerr_s,
         np.ones(n_obs), world.nside,

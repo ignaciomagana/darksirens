@@ -1,0 +1,58 @@
+{
+ "fit_ratio": [
+  0.23738710238615274,
+  -0.9967658453863469,
+  0.2633617493420373
+ ],
+ "fit_area": [
+  0.7240754537114217,
+  1.6792418966424267,
+  1.011057586188193
+ ],
+ "radii_ladder": [
+  2.0,
+  4.0,
+  6.0,
+  9.0,
+  13.0,
+  18.0,
+  25.0
+ ],
+ "quantile": 0.9,
+ "dl_cut_mpc": 774.8598089371678,
+ "dl_inj_cut_mpc": 390.95477386934675,
+ "nside": 32,
+ "fp_min": 0.5,
+ "n_cells_footprint": 6798,
+ "n_cells_eroded": {
+  "2": 3045,
+  "4": 1111,
+  "6": 336,
+  "9": 31,
+  "13": 0,
+  "18": 0,
+  "25": 0
+ },
+ "validation": {
+  "TP": 0,
+  "FP": 0,
+  "FN": 1,
+  "TN": 258,
+  "rate_proxy": 0.0,
+  "rate_truth": 0.003861003861003861,
+  "rate_ratio": 0.0,
+  "n_events": 259,
+  "radial_proxy": 8,
+  "radial_truth": 12,
+  "sky_proxy": 0,
+  "sky_truth": 2
+ },
+ "probabilistic": {
+  "expected_contained": 0.22007722007722008,
+  "observed_contained": 1,
+  "rate_ratio": 0.22007722007722008,
+  "p_max": 0.06177606177606178,
+  "p_mean": 0.0008497189964371431,
+  "n_p_positive": 7
+ }
+}

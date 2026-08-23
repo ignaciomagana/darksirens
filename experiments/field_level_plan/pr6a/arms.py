@@ -7,7 +7,11 @@ out of scope):
                   ``sel`` configuration of ``experiments/desi_full259``.
   ``table``       the same, plus a shipped radial lognormal Q table
                   (``--mode radial --c-mode selection --n-members 8``,
-                  matching ``data/fits/q_radial.h5``'s own diagnostics).
+                  matching ``data/fits/q_radial.h5``'s own diagnostics), and
+                  WITHOUT ``f_p`` -- the pairing the loader used to refuse.
+  ``table_fp``    the Q table WITH ``f_p`` (S-3): the arm that differs from
+                  ``latent`` only by where Q comes from, which is what a
+                  latent-vs-table comparison actually wants.
   ``latent``      ``lss_field_mode='latent'`` + the nside-16 anchor +
                   ``lss_marginalize=True`` -- PR-6a.
 
@@ -94,17 +98,22 @@ def make_opts(paths, arm, *, soft_guard=False, max_var=1e6, marginalize=True,
     sel = load_selection_fit_json(fit)
     o.selection_kcorr_by_catalog = [tuple(sel["k_corr_coeffs"]) or None]
     if arm in ("table", "latent_off_nofp"):
-        # ``loaders.py:1021`` REFUSES ``--per_pixel_completeness`` together
-        # with a Q table ("needs an f_p-weighted empty-pixel Q budget that is
-        # not implemented; drop one of them"), while ``factory.py``'s guard 6
-        # REQUIRES it in latent mode.  So no configuration exists in which the
-        # table arm and the latent arm differ only by the field: the table arm
-        # necessarily also drops PR-2's per-pixel ``C_p = f_p C(z)``.  That is
-        # why ``latent_off_nofp`` exists -- it is the table arm's own control,
-        # so the latent-vs-table shift can be split into the field part and the
-        # f_p part instead of being quoted as one number.
+        # HISTORICAL, and kept so the shipped comparisons stay reproducible:
+        # the loader used to REFUSE ``--per_pixel_completeness`` together with
+        # a Q table (no f_p-weighted empty-pixel Q budget existed) while
+        # ``factory.py``'s guard 6 REQUIRED it in latent mode, so no
+        # configuration existed in which the table arm and the latent arm
+        # differed only by the field.  That is why ``latent_off_nofp`` exists
+        # -- the table arm's own control, so the latent-vs-table shift could be
+        # split into a field part and an f_p part.  S-3 lifted the refusal;
+        # ``table_fp`` below is the arm that pairing makes possible, and it is
+        # the one to use for a latent-vs-table comparison from now on.
         o.per_pixel_completeness = None
-    if arm == "table":
+        # S-3: these two arms are the unmasked controls, and the mock's sky is
+        # footprint-limited (1,854 occupied pixels of 3,072), so the loader's
+        # guard would otherwise refuse them.
+        o.allow_unmasked_footprint = True
+    if arm in ("table", "table_fp"):
         o.lss_completion = str(paths["q_table"])
     elif arm in ("latent", "latent_bgal"):
         # ``latent_bgal`` is ``latent`` pointed at an anchor whose member
@@ -117,7 +126,7 @@ def make_opts(paths, arm, *, soft_guard=False, max_var=1e6, marginalize=True,
         o.lss_field_artifact = str(paths["anchor_bgal" if arm == "latent_bgal"
                                           else "anchor"])
         o.lss_marginalize = bool(marginalize)
-    elif arm not in ("latent_off", "latent_off_nofp"):
+    elif arm not in ("latent_off", "latent_off_nofp", "table_fp"):
         raise ValueError(f"unknown arm {arm!r}")
     return o, sel
 
