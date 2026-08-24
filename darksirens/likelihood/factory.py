@@ -676,8 +676,74 @@ def _latent_guard_f_p_consistency(plan, catalogs, n_rows_pe) -> None:
         )
 
 
+def _latent_guard_b_range(plan, opts, fixed_parameter_values=None) -> None:
+    """The run's b_GW range must be CONTAINED in the anchor's ``b_nodes``.
+
+    ``rho_from_moments`` evaluates the eq. (2) sky moments at the sampled
+    ``b_GW`` (= ``b_miss``, PLAN 4.3's inversion) by global barycentric
+    interpolation on the artifact's Chebyshev-Lobatto ``b_nodes`` -- a
+    degree-(n_b - 1) polynomial that is 1e-15-exact ON the node interval and
+    EXTRAPOLATES off it with ~|T_{n_b-1}| amplification (~1e13 at 25% past the
+    end at the production n_b = 33).  ``A - c B`` then goes negative, the
+    kernel's 1e-300 floor makes the garbage finite, and eq. (4)'s budget
+    identity fails silently on exactly the proposals the sampler visits.  The
+    node interval is a BUILDER flag (``--b-max``) and the b_miss prior is
+    freely settable through ``--prior_overrides`` (a fixed b_miss bypasses the
+    bounds entirely), so containment is a run property, walled here next to
+    the other consumer-side guards: ``make_likelihood`` is reached directly by
+    non-CLI callers, so a CLI-only check would miss them (the ``_b_miss_rule``
+    docstring's own argument).  The kernel additionally NaN-poisons an
+    out-of-range ``b`` (defense in depth), but a refusal with the remedy in
+    hand beats a run that starts and rails every proposal to ``-inf``.
+    """
+    from darksirens.inference.prior import _SURVEY_BLOCK, _survey_base_name
+
+    b_nodes = np.asarray(plan.b_nodes, dtype=np.float64)
+    node_lo, node_hi = float(b_nodes[0]), float(b_nodes[-1])
+
+    spec = next(s for s in _SURVEY_BLOCK if s.label == "b_miss")
+    lo, hi = float(spec.lower), float(spec.upper)
+    source = "the default b_miss prior"
+
+    overrides = getattr(opts, "prior_overrides", None)
+    if isinstance(overrides, str):
+        import json
+
+        overrides = json.loads(overrides)
+    for label, bounds in (overrides or {}).items():
+        if _survey_base_name(str(label)) != "b_miss":
+            continue
+        # A malformed override is left for apply_block_prior_overrides, whose
+        # message owns that failure; this guard only reads well-formed bounds.
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            continue
+        lo, hi = float(bounds[0]), float(bounds[1])
+        source = f"--prior_overrides[{str(label)!r}]"
+
+    for label, value in (fixed_parameter_values or {}).items():
+        if _survey_base_name(str(label)) == "b_miss":
+            lo = hi = float(value)
+            source = f"--fixed_parameter_values[{str(label)!r}]"
+
+    if lo < node_lo or hi > node_hi:
+        raise ValueError(
+            f"latent artifact's b_nodes span [{node_lo:g}, {node_hi:g}] but "
+            f"the run's b_GW (b_miss) range from {source} is [{lo:g}, {hi:g}], "
+            "which is not contained in it. rho interpolates the eq. (2) sky "
+            "moments in b by a global Chebyshev-Lobatto polynomial that is "
+            "exact on the node interval and EXTRAPOLATES off it with "
+            "|T_{n-1}|-sized amplification, so A - c B goes negative, the "
+            "1e-300 floor silences it, and the eq. (4) budget identity fails "
+            "on exactly the proposals the sampler visits -- biasing the "
+            "missing-galaxy budget and H0 with no diagnostic. Rebuild the "
+            f"anchor with --b-max >= {hi:g}, or narrow the b_miss prior to "
+            "the node interval via --prior_overrides."
+        )
+
+
 def _resolve_latent_leaves(opts, catalogs, survey_z_depth, nside,
-                           n_rows_pe, n_rows_sel):
+                           n_rows_pe, n_rows_sel,
+                           fixed_parameter_values=None):
     """Resolve the latent-seam EMCatalog leaves (``(mode, pe, sel)``).
 
     In ``table`` mode both dicts are EMPTY, so the ``EMCatalog(...)`` calls
@@ -721,6 +787,10 @@ def _resolve_latent_leaves(opts, catalogs, survey_z_depth, nside,
     _latent_guard_resolution(plan)
     _latent_guard_isotropy(plan)
     _latent_guard_f_p_consistency(plan, catalogs, n_rows_pe)
+    # Non-CLI callers pass fixed values through opts rather than the keyword.
+    if fixed_parameter_values is None:
+        fixed_parameter_values = getattr(opts, "fixed_parameter_values", None)
+    _latent_guard_b_range(plan, opts, fixed_parameter_values)
 
     fit_pixels = np.asarray(plan.meta["fit_pixels"], dtype=np.int64)
     n_fit = int(plan.n_fit)
@@ -901,29 +971,32 @@ def _make_mixture_likelihood(
 
     universe_model = opts.universe_model
     # Operands this path does NOT carry: the bundle EMCatalogs are built without
-    # the counterpart plumbing and the stratified-selection inputs, and the body
-    # forwards no weak-lensing operands.  For K >= 2 each of those combinations is
+    # the counterpart plumbing, the stratified-selection inputs and the per-pixel
+    # selection-fraction (f_p) leaves, and the body forwards no weak-lensing
+    # operands.  For K >= 2 each of those combinations is
     # rejected elsewhere (core.darksiren_log_likelihood's mixture universe-model
     # gate, parameters.build_parameter_decoder's single-catalog strata rule), but
     # the K = 1-WITH-bundles route has no gate at all -- and a dropped counterpart
     # is SILENT (redshift/prior.py falls back to an arbitrary catalogued pixel as
     # "the counterpart"), while a dropped WL backend just evaluates with
-    # magnification off.  Fail at BUILD time so the unsupported combinations are
-    # unreachable by construction.
+    # magnification off.  A dropped f_p is the worst of the three: the run
+    # proceeds on the UNMASKED-footprint estimand (aggregate Cbar applied to
+    # unobserved sky, the S-3 bias).  Fail at BUILD time so the unsupported
+    # combinations are unreachable by construction.
     dropped = [
         key
         for key in (
             "counterpart_pixel", "counterpart_pixels", "counterpart_zs",
-            "counterpart_dzs", "wl_params", "pixel_stratum_map",
+            "counterpart_dzs", "wl_params", "pixel_stratum_map", "f_p_map",
         )
         if data.get(key) is not None
     ]
     if dropped:
         raise NotImplementedError(
             "The bundle-source likelihood does not carry these operands: "
-            f"{', '.join(dropped)}. Counterparts, weak lensing and stratified "
-            "selection are single-catalog FLAT-data features (no "
-            "data['catalogs'])."
+            f"{', '.join(dropped)}. Counterparts, weak lensing, stratified "
+            "selection and per-pixel selection fractions (f_p_map) are "
+            "single-catalog FLAT-data features (no data['catalogs'])."
         )
     if universe_model in ("bright_sirens", "spectral_sirens_wl"):
         raise NotImplementedError(
@@ -1136,6 +1209,17 @@ def _make_mixture_likelihood(
             counterpart_pixel=None,
             cache_builder=build_pixel_kde_cache,
         )
+        # prepare_catalog_views happily consumes a bundle-carried f_p_map into
+        # f_p views, but the EMCatalog constructions below thread none of the
+        # f_p leaves (contrast the flat path) -- the top-level guard above
+        # cannot see a bundle-carried operand, so check the views here.
+        # Dropping it silently would run the UNMASKED-footprint estimand.
+        if views.f_p_rows_pe is not None or views.f_p_total_sum is not None:
+            raise NotImplementedError(
+                f"catalog {bundle_idx + 1}: per-pixel selection fraction "
+                "(f_p_map) is a single-catalog FLAT-data feature; the "
+                "bundle-source likelihood does not carry it."
+            )
         # Each catalog uses ITS OWN pixel area (its own nside): sharing a single
         # apix across catalogs of different resolutions would silently bias the
         # per-pixel galaxy densities that enter the completion.
@@ -1563,6 +1647,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         data.get("nside"),
         int(jnp.asarray(catalogs.zgals_pe_catalog).shape[0]),
         int(jnp.asarray(catalogs.zgals_sel_catalog).shape[0]),
+        fixed_parameter_values=fixed_parameter_values,
     )
 
     # Slice the (global, host-side) Q_LSS table to each view's union pixels, so
