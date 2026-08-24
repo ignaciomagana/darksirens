@@ -169,6 +169,7 @@ from darksirens.lensing.wlmagnification import (
     validate_wl_mu_quadrature,
 )
 from darksirens.lensing.grids import make_wl_mu_quadrature
+from darksirens.likelihood.wl_weight import validate_wl_hermite_quadrature
 from darksirens.lensing.lensed_injections import load_lensed_injections
 from darksirens.lensing.pair_tag_selection import (
     PAIR_TAG_SELECTION_MODEL_KINDS,
@@ -1075,7 +1076,31 @@ def _load_wl_table_arrays(opts):
     this loader is the ONLY eager chokepoint for the arrays the likelihood
     interpolates on, because the likelihood builds its closure from tracers
     (``make_tabulated_log_p_wl(..., validate=False)``).
+
+    The ``lognormal`` backend is validated here too (same eager chokepoint,
+    same failure class): its Gauss-Hermite importance-ratio quadrature is
+    node-count convergent only near the calibrated variance amplitude
+    (a ~ 4e-3), and --lensing_wl_a is an otherwise-unbounded float, so an
+    amplified-variance ablation would get silently wrong per-event
+    log-weights.  ``validate_wl_hermite_quadrature`` compares the production
+    16-node rule against a dense reference at test redshifts spanning the
+    z grid and hard-fails on disagreement.
     """
+    if getattr(opts, "wl_backend", None) == "lognormal":
+        wl_a = getattr(opts, "lensing_wl_a", None)
+        if wl_a is not None:
+            try:
+                validate_wl_hermite_quadrature(
+                    float(wl_a),
+                    float(getattr(opts, "lensing_wl_b", 1.5)),
+                    context=(
+                        f"--wl_backend lognormal (--lensing_wl_a {wl_a}, "
+                        f"--lensing_wl_b {getattr(opts, 'lensing_wl_b', 1.5)})"
+                    ),
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+        return {}
     if getattr(opts, "wl_backend", None) != "tabulated":
         return {}
     path = getattr(opts, "lensing_wl_table_path", None)
@@ -3479,6 +3504,14 @@ def _resolve_wl_selection(opts):
             RuntimeWarning,
             stacklevel=2,
         )
+        if requested == "wl_lognormal":
+            # No non-lognormal backend has a matched WL selection integral,
+            # so the integral that actually runs is the standard one — and the
+            # likelihood entry points now refuse LOGNORMAL selection under
+            # the tabulated backend rather than silently downgrading.
+            # Resolve the accepted ablation to what executes;
+            # wl_selection_requested keeps the original ask in provenance.
+            opts.wl_selection = "standard"
         return
     raise SystemExit(
         "FATAL: " + mismatch + " Use --wl_selection auto (the default), or "
@@ -3974,6 +4007,15 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
             # it is what an evidence bootstrap or a runplot has to be rebuilt
             # from.  Mirrors io.results.save_results_hdf5.
             write_dead_point_datasets(f, results)
+            # Canonical string dataset, mirroring io.results.save_results_hdf5,
+            # so analyze.py's shared reader gets a list of labels.  The JSON
+            # attr stays alongside it for the scripts/mock_lensing readers
+            # that already json.loads the attr form.
+            f.create_dataset(
+                "labels",
+                data=np.array(labels, dtype=object),
+                dtype=h5py.string_dtype(encoding="utf-8"),
+            )
             f.attrs["labels"] = json.dumps(labels)
             f.attrs["fixed_parameter_values_raw"] = json.dumps(fixed, default=str)
             f.attrs["fixed_parameter_values_base"] = json.dumps(base_fixed, default=str)

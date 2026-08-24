@@ -153,9 +153,10 @@ def make_hermite_u_grid(n_nodes: int = 16) -> tuple:
     A lognormal in ``μ`` with parameters (m(z), s(z)) becomes a unit
     Gaussian in the standardized variable ``u = (ln μ - m(z)) / s(z)``.
     Using a fixed Gauss-Hermite grid in ``u`` makes the quadrature
-    **independent of s(z)** — the same nodes resolve narrow and wide
-    distributions equally well. This fixes the quadrature breakdown at
-    small WL variance documented in commit 2 testing.
+    independent of s(z) *for integrands sub-Gaussian in u* — the same
+    nodes resolve narrow and wide distributions equally well. This fixes
+    the quadrature breakdown at small WL variance documented in commit 2
+    testing.
 
     Returns
     -------
@@ -167,10 +168,15 @@ def make_hermite_u_grid(n_nodes: int = 16) -> tuple:
 
     Notes
     -----
-    For weak lensing this is exact (matches the lognormal moments
-    exactly through u_max = √(2 (n_nodes - 1)) ≈ √30 ≈ 5.5σ at
-    n_nodes=16). For tabulated PDFs this rule is *not* appropriate;
-    use ``make_log_mu_grid`` instead.
+    For weak lensing this is exact only while the WL kernel's importance
+    ratio to ``p_WL(μ | z_s(μ))`` stays sub-Gaussian, i.e. for variance
+    amplitudes near the calibrated ``a ≈ 4e-3``: the ratio's exponent
+    grows like ``+u²/2 (1 - s_app²/s_s²)``, so an amplified ``a`` makes
+    the effective integrand super-Gaussian and convergence is no longer
+    controlled by node count (see ``darksirens.likelihood.wl_weight.
+    validate_wl_hermite_quadrature``, which the lensing CLI runs at
+    startup). For tabulated PDFs this rule is *not* appropriate; use
+    ``make_log_mu_grid`` instead.
     """
     if n_nodes < 2:
         raise ValueError(f"n_nodes must be ≥ 2, got {n_nodes}.")

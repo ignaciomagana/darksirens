@@ -105,11 +105,22 @@ def _merge_hdf5_metadata(settings, h5_file):
     merged = dict(settings)
 
     for key, value in h5_file.attrs.items():
-        if key in {"environment", "prior_overrides"} and isinstance(value, str):
+        if key in {"environment", "prior_overrides", "labels"} and isinstance(
+            value, str
+        ):
             try:
-                value = json.loads(value)
+                decoded = json.loads(value)
             except json.JSONDecodeError:
                 pass
+            else:
+                # The lensing CLI archives labels as a JSON-string attr rather
+                # than the main CLI's string dataset; without decoding here,
+                # _labels_of iterates the raw string per character and every
+                # label-driven summary silently finds no parameters.  Accept
+                # only the canonical JSON-list form: any other decode falls
+                # through unchanged.
+                if key != "labels" or isinstance(decoded, list):
+                    value = decoded
         merged.setdefault(key, _json_safe_hdf5_attr(value))
 
     if "labels" not in merged and "labels" in h5_file:

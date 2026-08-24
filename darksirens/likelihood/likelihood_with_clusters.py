@@ -166,6 +166,32 @@ def _unlensed_tau_suppression_enabled(cluster_mode: int, singleton_lensing: int)
     )
 
 
+def _fold_shared_campaign_covariance(
+    log_sigma2_2: jnp.ndarray, log_cov2: jnp.ndarray
+) -> jnp.ndarray:
+    """``log(sigma2_2 - cov2)`` in place: the P2-07 shared-campaign covariance
+    fold for the channel-2 variance slot.
+
+    logdiffexp, NaN-safe for dead channels (either side ``-inf`` makes the
+    correction a no-op) AND for the SATURATED regime ``cov2 >= sigma2_2``,
+    where the corrected slot clamps to zero variance.  Double-where
+    discipline (same reverse-mode class as ``selection._lse_to_log_mu_neff``):
+    the clamp's forward value ``log1p(-exp(0)) = -inf`` is correct, but
+    ``log1p``'s slope there is infinite and the zero cotangent arriving
+    through the downstream ``logaddexp`` multiplies it into NaN, poisoning the
+    gradient of every hyperparameter feeding ``log_mu_1L``/``log_mu_2`` — so
+    the saturated branch must be a CONSTANT ``-inf`` with no gradient path,
+    and every dead branch's operand must keep a finite slope.
+    """
+    both_live = jnp.isfinite(log_sigma2_2) & jnp.isfinite(log_cov2)
+    sat = both_live & (log_cov2 >= log_sigma2_2)
+    safe_hi = jnp.where(both_live, log_sigma2_2, 0.0)
+    safe_lo = jnp.where(both_live, jnp.minimum(log_cov2, safe_hi), -1.0)
+    x = jnp.where(sat, -1.0, jnp.minimum(safe_lo - safe_hi, 0.0))
+    corrected = jnp.where(sat, -jnp.inf, safe_hi + jnp.log1p(-jnp.exp(x)))
+    return jnp.where(both_live, corrected, log_sigma2_2)
+
+
 # ``threads_distance_table`` is ``jax.jit`` plus the contract that the 106.8 MB
 # comoving-distance table arrives as an ARGUMENT rather than a closed-over global
 # (a ``dense<>`` HLO constant worth ~214 MB of module text per embedding).  The
@@ -293,10 +319,23 @@ def darksiren_log_likelihood_with_clusters(
         wl_selection == WL_SELECTION_LOGNORMAL
         and wl_backend == WL_BACKEND_LOGNORMAL
     )
-    if wl_selection == WL_SELECTION_LOGNORMAL and wl_backend != WL_BACKEND_LOGNORMAL:
-        # Disabled WL (or future non-lognormal backends) must keep the exact
-        # legacy singleton-selection path.  In particular wl_backend=disabled
-        # reduces to standard selection, as required for backward compatibility.
+    if wl_selection == WL_SELECTION_LOGNORMAL and wl_backend == WL_BACKEND_TABULATED:
+        # Mirror likelihood/core.py: silently downgrading to STANDARD here
+        # would leave mu(Lambda) marginalized under a different observation
+        # model than the per-event weights — a static configuration error,
+        # not a fallthrough.
+        raise ValueError(
+            "wl_selection=WL_SELECTION_LOGNORMAL requires "
+            "wl_backend=WL_BACKEND_LOGNORMAL; the tabulated backend has no "
+            "matched selection integral, so the Hermite mu-marginalization the "
+            "PE term applies cannot be applied to the injections. Use the "
+            "lognormal backend, or pass wl_selection=WL_SELECTION_STANDARD for "
+            "a deliberately mismatched ablation."
+        )
+    if wl_selection == WL_SELECTION_LOGNORMAL and wl_backend == WL_BACKEND_DISABLED:
+        # Disabled WL must keep the exact legacy singleton-selection path:
+        # with no WL anywhere, STANDARD selection is exact, so this downgrade
+        # is a no-op rather than a mismatch (backward compatibility).
         wl_selection_enabled = False
     unlensed_tau_suppression = _unlensed_tau_suppression_enabled(
         cluster_mode, singleton_lensing
@@ -473,15 +512,7 @@ def darksiren_log_likelihood_with_clusters(
             jnp.log(2.0) + log_mu_1L + log_mu_2
             - jnp.log(lensed_injections.n_draw_sources)
         )
-        both_live = jnp.isfinite(log_sigma2_2) & jnp.isfinite(log_cov2)
-        # logdiffexp in-place, NaN-safe for dead channels: with either side
-        # -inf the correction is a no-op.
-        safe_hi = jnp.where(both_live, log_sigma2_2, 0.0)
-        safe_lo = jnp.where(both_live, jnp.minimum(log_cov2, safe_hi), -1.0)
-        corrected = safe_hi + jnp.log1p(
-            -jnp.exp(jnp.minimum(safe_lo - safe_hi, 0.0))
-        )
-        log_sigma2_2 = jnp.where(both_live, corrected, log_sigma2_2)
+        log_sigma2_2 = _fold_shared_campaign_covariance(log_sigma2_2, log_cov2)
 
     # The combined selection correction is evaluated AFTER the singleton and
     # pair reductions below: the total-variance guard budgets the per-event
