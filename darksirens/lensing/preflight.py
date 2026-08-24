@@ -666,8 +666,6 @@ def _check_lensed(path, errors, summary, opts=None):
             for name, is_log in (
                 ("log_p_tag_per_source", True),
                 ("p_tag_per_source", False),
-                ("log_p_tag", True),
-                ("p_tag", False),
             ):
                 if name in f:
                     ptag_present = True
@@ -683,6 +681,17 @@ def _check_lensed(path, errors, summary, opts=None):
                         not np.all(np.isfinite(arr)) or np.any((arr < 0) | (arr > 1))
                     ):
                         errors.append(f"{name} must be finite and in [0, 1]")
+            # load_lensed_injections reads ONLY the *_per_source names; a bare
+            # p_tag/log_p_tag dataset is silently ignored by the loader, which
+            # then defaults every kept-source tag to 1.  Fail closed instead of
+            # reporting p_tag_present for a dataset the run will never read.
+            for name in ("log_p_tag", "p_tag"):
+                if name in f and not ptag_present:
+                    errors.append(
+                        f"dataset '{name}' is not read by load_lensed_injections; "
+                        f"rename it to {name}_per_source or the run will default "
+                        "every kept-source tag to 1"
+                    )
             summary["p_tag_present"] = ptag_present
             if not ptag_present:
                 summary["p_tag_default"] = 1
