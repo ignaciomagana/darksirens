@@ -97,15 +97,26 @@ from __future__ import annotations
 
 from typing import Callable
 
+import numpy as np
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
 
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
-from darksirens.utils.cosmology import z_of_dL, dL_in_z_grid
+from darksirens.utils.cosmology import (
+    z_of_dL,
+    dL_of_z,
+    dL_in_z_grid,
+    zgrid,
+    Om0Planck,
+    w0Fiducial,
+    waFiducial,
+)
 from darksirens.inference.utils import (
     log_sample_weight,
     log_jacobian_m1src_q_z_to_m1det_q_dL,
 )
+
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
 
 def log_sample_weight_wl_marginalized(
@@ -282,6 +293,70 @@ def log_sample_weight_wl_or_standard(
 # Lognormal-specialized Hermite-Gauss marginalization (robust at small s)
 # ============================================================================
 
+def _hermite_mu_geometry_and_log_ratio(
+    dL: jnp.ndarray,
+    wl_a: jnp.ndarray,
+    wl_b: jnp.ndarray,
+    u_nodes: jnp.ndarray,
+    H0, Om0, w0, wa,
+) -> tuple:
+    """Node geometry + proposal→target importance ratio of the Hermite kernel.
+
+    Shared by ``log_sample_weight_wl_lognormal_hermite`` and the startup
+    convergence self-check ``wl_hermite_quadrature_errors`` so the check
+    provably exercises the exact algebra the likelihood integrates on.
+
+    Returns ``(log_mu, mu, dL_true, in_grid, z_s_safe, log_ratio)``, each of
+    shape ``(..., Nu)`` (broadcast of ``dL`` against the node axis).
+    """
+    # Apparent z (μ=1) sets the lognormal scale
+    z_app = z_of_dL(dL, H0, Om0, w0, wa)                        # (...,)
+    z_app_safe = jnp.maximum(z_app, 1.0e-3)                     # avoid s=0 at z=0
+    s2 = wl_a * jnp.power(z_app_safe, wl_b)                     # (...,)
+    # Double-where so the reverse pass is finite at wl_a == 0 (the advertised
+    # "reduces to standard" ablation).  The VALUE at s2 = 0 is already right
+    # (every node collapses to mu = 1 and the Hermite weights sum to 1), but
+    # d sqrt(s2) / d s2 = inf there, and ds2/dz_app = 0 at wl_a = 0, so the
+    # unguarded chain returns inf * 0 = NaN for every cosmology gradient
+    # through z_app.
+    s2_pos = s2 > 0.0
+    s  = jnp.where(s2_pos, jnp.sqrt(jnp.where(s2_pos, s2, 1.0)), 0.0)
+    m  = -0.5 * s2
+
+    # u → ln μ → μ
+    u_b = u_nodes                                                # (Nu,)
+    log_mu = (m[..., None] + s[..., None] * u_b)                # (..., Nu)
+    mu = jnp.exp(log_mu)
+
+    dL_true = dL[..., None] * jnp.sqrt(mu)                       # (..., Nu)
+    in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)
+    z_s = z_of_dL(dL_true, H0, Om0, w0, wa)
+    z_s_safe = jnp.where(in_grid, z_s, 0.5)
+
+    # Proposal -> target density ratio (see the kernel docstring).  Without it
+    # the Hermite backend integrates p_WL(mu | z_app), not the stated
+    # p_WL(mu | z_s(mu)) the generic backend uses, and the two backends of the
+    # same quantity disagree.  The lognormal at the NODE's source redshift,
+    # with the same z clamp make_lognormal_log_p_wl applies:
+    z_s_clamped = jnp.maximum(z_s_safe, 1.0e-3)
+    s2_s = wl_a * jnp.power(z_s_clamped, wl_b)
+    # Same double-where as s above: at wl_a == 0 both widths are exactly zero,
+    # every node sits at mu = 1, and the ratio must be 0 with a finite reverse
+    # pass rather than 0 * inf.
+    s2_s_pos = s2_s > 0.0
+    s2_s_safe = jnp.where(s2_s_pos, s2_s, 1.0)
+    m_s = -0.5 * s2_s
+    log_ratio = jnp.where(
+        s2_s_pos & s2_pos[..., None],
+        0.5 * jnp.log(jnp.where(s2_pos, s2, 1.0))[..., None]   # + log s_app
+        - 0.5 * jnp.log(s2_s_safe)                             # - log s_s
+        - jnp.square(log_mu - m_s) / (2.0 * s2_s_safe)
+        + 0.5 * jnp.square(u_b),                               # proposal exponent
+        0.0,
+    )
+    return log_mu, mu, dL_true, in_grid, z_s_safe, log_ratio
+
+
 def log_sample_weight_wl_lognormal_hermite(
     m1det: jnp.ndarray,
     q: jnp.ndarray,
@@ -364,6 +439,18 @@ def log_sample_weight_wl_lognormal_hermite(
     widths vanish, every node collapses to μ = 1, and the ratio is
     identically zero — the advertised reduction to the unmarginalized
     weight is untouched.
+
+    Convergence domain
+    ~~~~~~~~~~~~~~~~~~
+    The importance ratio's exponent grows like ``(u²/2)(1 − s_app²/s_s²)``,
+    which is POSITIVE for u > 0 whenever ``wl_b > 0`` (s grows with z and
+    z_s(μ) grows along u), so the effective Gauss-Hermite integrand is
+    super-Gaussian and node-count convergence is NOT guaranteed for
+    variance amplitudes well above the calibrated ``a ≈ 4e-3`` — the error
+    can even grow with more nodes.  ``validate_wl_hermite_quadrature``
+    below checks the actual (a, b) against a dense reference quadrature at
+    startup; the lensing CLI runs it for the lognormal backend the way the
+    tabulated backend runs ``validate_wl_mu_quadrature``.
     """
     # Full CPL: dropping w0/wa here ran the WL mu-marginalisation in LambdaCDM
     # while the surrounding likelihood (clamp bounds, volume prior, pop z
@@ -372,36 +459,17 @@ def log_sample_weight_wl_lognormal_hermite(
     # WL run.
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
-    # Apparent z (μ=1) sets the lognormal scale
-    z_app = z_of_dL(dL, H0, Om0, w0, wa)                                # (...,)
-    z_app_safe = jnp.maximum(z_app, 1.0e-3)                     # avoid s=0 at z=0
-    s2 = wl_a * jnp.power(z_app_safe, wl_b)                     # (...,)
-    # Double-where so the reverse pass is finite at wl_a == 0 (the advertised
-    # "reduces to standard" ablation).  The VALUE at s2 = 0 is already right
-    # (every node collapses to mu = 1 and the Hermite weights sum to 1), but
-    # d sqrt(s2) / d s2 = inf there, and ds2/dz_app = 0 at wl_a = 0, so the
-    # unguarded chain returns inf * 0 = NaN for every cosmology gradient
-    # through z_app.
-    s2_pos = s2 > 0.0
-    s  = jnp.where(s2_pos, jnp.sqrt(jnp.where(s2_pos, s2, 1.0)), 0.0)
-    m  = -0.5 * s2
-
-    # u → ln μ → μ
     u_b = u_nodes                                                # (Nu,)
     log_w_b = log_wH_nodes                                       # (Nu,)
-    log_mu = (m[..., None] + s[..., None] * u_b)                # (..., Nu)
-    mu = jnp.exp(log_mu)
+    log_mu, mu, dL_true, in_grid, z_s_safe, log_ratio = (
+        _hermite_mu_geometry_and_log_ratio(dL, wl_a, wl_b, u_b, H0, Om0, w0, wa)
+    )
 
     dL_b = dL[..., None]
     m1det_b = m1det[..., None]
     q_b = q[..., None]
     chieff_b = chieff[..., None]
     pix_b = jnp.broadcast_to(pix[..., None], dL_b.shape[:-1] + (u_b.shape[0],)).astype(pix.dtype)
-
-    dL_true = dL_b * jnp.sqrt(mu)                                # (..., Nu)
-    in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)
-    z_s = z_of_dL(dL_true, H0, Om0, w0, wa)
-    z_s_safe = jnp.where(in_grid, z_s, 0.5)
     m1src = m1det_b / (1.0 + z_s_safe)
 
     if spin is None:
@@ -412,28 +480,6 @@ def log_sample_weight_wl_lognormal_hermite(
     log_pz = log_prior_z_fn(z_s_safe.reshape(-1),
                             pix_b.reshape(-1), catalog).reshape(z_s_safe.shape)
     log_J  = log_jacobian_m1src_q_z_to_m1det_q_dL(z_s_safe, dL_true, H0, Om0, w0, wa)
-
-    # Proposal -> target density ratio (see the docstring).  Without it the
-    # Hermite backend integrates p_WL(mu | z_app), not the stated
-    # p_WL(mu | z_s(mu)) the generic backend uses, and the two backends of the
-    # same quantity disagree.  The lognormal at the NODE's source redshift,
-    # with the same z clamp make_lognormal_log_p_wl applies:
-    z_s_clamped = jnp.maximum(z_s_safe, 1.0e-3)
-    s2_s = wl_a * jnp.power(z_s_clamped, wl_b)
-    # Same double-where as s above: at wl_a == 0 both widths are exactly zero,
-    # every node sits at mu = 1, and the ratio must be 0 with a finite reverse
-    # pass rather than 0 * inf.
-    s2_s_pos = s2_s > 0.0
-    s2_s_safe = jnp.where(s2_s_pos, s2_s, 1.0)
-    m_s = -0.5 * s2_s
-    log_ratio = jnp.where(
-        s2_s_pos & s2_pos[..., None],
-        0.5 * jnp.log(jnp.where(s2_pos, s2, 1.0))[..., None]   # + log s_app
-        - 0.5 * jnp.log(s2_s_safe)                             # - log s_s
-        - jnp.square(log_mu - m_s) / (2.0 * s2_s_safe)
-        + 0.5 * jnp.square(u_b),                               # proposal exponent
-        0.0,
-    )
 
     # Per-node log-integrand: NO extra +log μ from substitution
     # (Hermite quadrature substitution carries the WL PDF as measure).
@@ -452,3 +498,151 @@ def log_sample_weight_wl_lognormal_hermite(
     valid = prior_wt > 0.0
     log_pPE = jnp.where(valid, jnp.log(prior_wt), 0.0)
     return jnp.where(valid, log_target - log_pPE, -jnp.inf)
+
+
+# ============================================================================
+# Startup convergence self-check for the Hermite importance-ratio quadrature
+# ============================================================================
+
+def wl_hermite_quadrature_errors(
+    wl_a: float,
+    wl_b: float,
+    u_nodes: jnp.ndarray,
+    log_wH_nodes: jnp.ndarray,
+    z_app_test: np.ndarray | None = None,
+    H0: float = 70.0,
+    Om0: float = Om0Planck,
+    w0: float = w0Fiducial,
+    wa: float = waFiducial,
+) -> tuple:
+    """``|Δ log I|`` of the Hermite rule vs a dense reference, per test z.
+
+    ``I(dL_app) = ∫ p_WL(μ | z_s(μ)) √μ dμ`` over the in-grid μ range is the
+    kernel's pure-quadrature content (constant source weight: population,
+    volume and Jacobian factors stripped).  The Hermite estimate is
+    ``logsumexp(log_wH + log_ratio + ½ log μ)`` through the exact production
+    algebra (``_hermite_mu_geometry_and_log_ratio``); the reference is a
+    dense trapezoid in ``ln μ`` of the identical masked target.  Their
+    difference is the per-sample log-weight error the importance-ratio
+    quadrature commits at that apparent redshift.
+
+    Test redshifts default to fractions of ``min(3.5, 0.7·z_grid_max)``:
+    high enough to expose the super-Gaussian ratio growth and the z-grid
+    edge truncation that break node-count convergence at amplified
+    ``wl_a``, while the calibrated default (a = 4e-3) stays ≲ 1e-6 nats
+    everywhere on this range.  Expressed in ``z_app`` the check is exactly
+    H0-invariant (dL ∝ 1/H0 cancels between the node distances and the
+    grid edge) and only weakly Om0/w0/wa-dependent.
+
+    Returns ``(z_app_test, errors)`` as numpy arrays.
+    """
+    wl_a = float(wl_a)
+    wl_b = float(wl_b)
+    z_hi = float(zgrid[-1])
+    if z_app_test is None:
+        z_cap = min(3.5, 0.7 * z_hi)
+        z_app_test = np.array([0.15, 0.3, 0.5, 0.75, 1.0]) * z_cap
+    z_app_test = np.atleast_1d(np.asarray(z_app_test, dtype=np.float64))
+    if wl_a <= 0.0:
+        # Delta at mu = 1: every node collapses, the Hermite weights sum to 1
+        # and the rule is exact by construction.
+        return z_app_test, np.zeros_like(z_app_test)
+
+    dL_test = np.asarray(
+        dL_of_z(jnp.asarray(z_app_test), H0, Om0, w0, wa), dtype=np.float64
+    )
+
+    # Hermite estimate through the production kernel algebra.
+    log_mu, _mu, _dL_true, in_grid, _z_s_safe, log_ratio = (
+        _hermite_mu_geometry_and_log_ratio(
+            jnp.asarray(dL_test), jnp.asarray(wl_a), jnp.asarray(wl_b),
+            u_nodes, H0, Om0, w0, wa,
+        )
+    )
+    log_integrand = log_wH_nodes + log_ratio + 0.5 * log_mu
+    log_integrand = jnp.where(in_grid & jnp.isfinite(log_integrand),
+                              log_integrand, -jnp.inf)
+    log_I_hermite = np.asarray(logsumexp(log_integrand, axis=-1))
+
+    # Dense reference: trapezoid in x = ln mu of the identical masked target
+    #   N(x; m_s(x), s_s(x)) e^{x/2},  m_s = -s_s^2/2,  s_s^2 = a z_s(x)^b,
+    # with the upper limit placed EXACTLY at the z-grid edge so the in-grid
+    # mask is an endpoint, not an interior step the trapezoid would smear.
+    dL_max = float(np.asarray(dL_of_z(jnp.asarray(z_hi), H0, Om0, w0, wa)))
+    s_hi = np.sqrt(wl_a * max(z_hi, 1.0e-3) ** wl_b)
+    errors = np.empty_like(z_app_test)
+    for i in range(z_app_test.shape[0]):
+        z_a = float(z_app_test[i])
+        dL_a = float(dL_test[i])
+        s2_app = wl_a * max(z_a, 1.0e-3) ** wl_b
+        s_app = np.sqrt(s2_app)
+        m_app = -0.5 * s2_app
+        half = 15.0 * max(s_app, float(s_hi))
+        x_lo = m_app - half
+        x_hi = min(m_app + half, 2.0 * np.log(dL_max / dL_a))
+        # ~300 points per proposal sigma: trapezoid error ~1e-6 nats, far
+        # below the validation tolerance.  Capped for pathological a, b.
+        n = int(min(2_000_001, max(20_001, round((x_hi - x_lo) / (s_app / 300.0)))))
+        x = np.linspace(x_lo, x_hi, n)
+        z_s = np.asarray(z_of_dL(jnp.asarray(dL_a * np.exp(0.5 * x)),
+                                 H0, Om0, w0, wa))
+        ok = np.isfinite(z_s)
+        z_c = np.maximum(np.where(ok, z_s, 1.0), 1.0e-3)
+        s2_s = wl_a * np.power(z_c, wl_b)
+        log_f = (
+            -0.5 * np.log(2.0 * np.pi * s2_s)
+            - np.square(x + 0.5 * s2_s) / (2.0 * s2_s)
+            + 0.5 * x
+        )
+        f = np.where(ok, np.exp(log_f), 0.0)
+        errors[i] = abs(float(log_I_hermite[i]) - float(np.log(_trapezoid(f, x))))
+    return z_app_test, errors
+
+
+def validate_wl_hermite_quadrature(
+    wl_a: float,
+    wl_b: float,
+    u_nodes: jnp.ndarray | None = None,
+    log_wH_nodes: jnp.ndarray | None = None,
+    z_app_test: np.ndarray | None = None,
+    tol: float = 1.0e-4,
+    context: str = "lognormal WL backend",
+) -> np.ndarray:
+    """Raise ``ValueError`` unless the Hermite rule converges for (a, b).
+
+    The counterpart of ``darksirens.lensing.wlmagnification.
+    validate_wl_mu_quadrature`` for the lognormal backend: checks
+    ``|log I_hermite - log I_ref| <= tol`` (nats) at every test redshift,
+    where I is the kernel's pure-quadrature integral (see
+    ``wl_hermite_quadrature_errors``).  The importance ratio to
+    p_WL(μ | z_s(μ)) is super-Gaussian for wl_b > 0, so amplified variance
+    amplitudes (≳ 10× the calibrated a = 4e-3) silently break node-count
+    convergence — the error does not shrink with more nodes.  Returns the
+    per-redshift error array on success.
+    """
+    if u_nodes is None or log_wH_nodes is None:
+        from darksirens.lensing.grids import make_hermite_u_grid
+        u_nodes, log_wH_nodes = make_hermite_u_grid()
+    z_test, err = wl_hermite_quadrature_errors(
+        wl_a, wl_b, u_nodes, log_wH_nodes, z_app_test=z_app_test,
+    )
+    worst = int(np.argmax(np.where(np.isfinite(err), err, np.inf)))
+    if not bool(np.all(np.isfinite(err))) or float(err[worst]) > float(tol):
+        n_nodes = int(np.asarray(u_nodes).shape[0])
+        raise ValueError(
+            f"{context}: the {n_nodes}-node Gauss-Hermite importance-ratio "
+            f"quadrature does not converge for wl_a = {wl_a:g}, "
+            f"wl_b = {wl_b:g}. |log I_hermite - log I_ref| = "
+            f"{float(err[worst]):.3g} nats at apparent z = "
+            f"{float(z_test[worst]):.4g} (tolerance {float(tol):g}; "
+            f"{int(np.sum(~np.isfinite(err) | (err > tol)))}/{int(err.shape[0])} "
+            "test redshifts fail). The rule integrates p_WL(mu | z_s(mu)) "
+            "through a proposal at z_app, and the importance ratio stays "
+            "integrable only near the calibrated variance amplitude "
+            "(a ~ 4e-3): in this regime per-event log-weights are silently "
+            "wrong and do NOT improve with more nodes. Reduce "
+            "--lensing_wl_a/--lensing_wl_b toward the calibrated values, or "
+            "use --wl_backend tabulated with a table and mu-grid wide enough "
+            "for the amplified variance."
+        )
+    return err

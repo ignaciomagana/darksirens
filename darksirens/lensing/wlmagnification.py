@@ -582,6 +582,8 @@ def validate_wl_mu_quadrature(
             "Events at those redshifts would be silently deleted from the "
             "likelihood. Widen/refine the table's log_mu support so the "
             "quadrature interval brackets it, or use --wl_backend lognormal "
-            "(Gauss-Hermite in the standardized variable, resolution-independent)."
+            "(Gauss-Hermite in the standardized variable; node-count "
+            "independent near the calibrated variance amplitude a ~ 4e-3, "
+            "and itself validated at startup)."
         )
     return coverage
