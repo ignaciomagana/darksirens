@@ -60,7 +60,7 @@ from darksirens.redshift import zgrid
 from darksirens.catalogs.io import load_survey
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import r_of_z, H0Planck, Om0Planck, w0Fiducial, waFiducial
-from darksirens.redshift.completion import _precompute_grids, _kde_dndz_obs
+from darksirens.redshift.completion import _precompute_grids, _kde_rows
 from darksirens.redshift.selection import SELECTION_THETA_FIELDS
 from darksirens.redshift.lognormal_completion import (
     gaussian_correlation_spectrum,
@@ -677,10 +677,8 @@ def _build_completion_radial(
         elif c_mode == "selection":
             Cbar_fine = _selection_cbar_fine(selection_fit, cosmo)
         else:
-            dN_obs_sum = np.zeros(n_grid, dtype=float)
-            for r in occ:
-                dN_obs_sum += np.asarray(
-                    _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            dN_obs_sum = _kde_rows(
+                occ, em.zgals, None, em.ngals, batch_size=512).sum(axis=0)
             Cbar_fine = np.clip(dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
         if not (c_mode == "selection" and selection_strata is not None):
             # Same expectation-weighted bin average as the per-pixel branch
@@ -739,29 +737,30 @@ def _build_completion_radial(
         # Build only OCCUPIED pixels (DESI footprints are mostly empty ⇒ huge
         # speedup); empty pixels get logQ = 0 (Q = 1, homogeneous) by the
         # zero-init below.
+        if f_p_map is not None:
+            # A per-pixel count-derived C already contains the mask loss, so
+            # multiplying by f_p here would double-count it -- the same
+            # reasoning the loader uses to restrict --per_pixel_completeness
+            # to aggregate/selection modes. Refused rather than silently
+            # applied.
+            raise SystemExit(
+                "--depth-map is only meaningful with --c-mode "
+                "aggregate|selection: a per-pixel count-derived C already "
+                "contains the mask loss, so dividing it out again would "
+                "double-correct. Drop --depth-map, or use a parametric "
+                "c_mode.")
         fit = occ
         n_fit = n_occ
         C_u = np.empty((n_occ, n_fit_z), dtype=float)
         N_obs_u = np.zeros((n_occ, n_fit_z), dtype=float)
         w_budget = np.empty((n_occ, n_fit_z), dtype=float)
+        dN_obs_rows = _kde_rows(occ, em.zgals, None, em.ngals, batch_size=512)
         for i, r in enumerate(occ):
-            dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            dN_obs_s = dN_obs_rows[i]
             # Expectation-weighted bin completeness: C_bin = int(C * dN_exp) / int(dN_exp),
             # so the solver's rate_base = C_u * dN_exp_count_u is exactly the
             # bin-integrated expected OBSERVED counts — the same footing as N_obs.
             C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
-            if f_p_map is not None:
-                # A per-pixel count-derived C already contains the mask loss, so
-                # multiplying by f_p here would double-count it -- the same
-                # reasoning the loader uses to restrict --per_pixel_completeness
-                # to aggregate/selection modes. Refused rather than silently
-                # applied.
-                raise SystemExit(
-                    "--depth-map is only meaningful with --c-mode "
-                    "aggregate|selection: a per-pixel count-derived C already "
-                    "contains the mask loss, so dividing it out again would "
-                    "double-correct. Drop --depth-map, or use a parametric "
-                    "c_mode.")
             prod = C_fine * dN_exp_density
             C_u[i] = np.clip(_bin_integral(prod) / exp_safe, 0.0, 1.0)
             # This pixel's missing-budget weight on the OUTPUT zgrid at the build
@@ -1127,11 +1126,8 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
             if c_mode == "selection":
                 Cbar_fine = _selection_cbar_fine(selection_fit, cosmo)
             else:
-                dN_obs_sum = np.zeros(n_grid, dtype=float)
-                for r in occ:
-                    dN_obs_sum += np.asarray(
-                        _kde_dndz_obs(int(r), em.zgals, ngals=em.ngals),
-                        dtype=float)
+                dN_obs_sum = _kde_rows(
+                    occ, em.zgals, None, em.ngals, batch_size=512).sum(axis=0)
                 Cbar_fine = np.clip(
                     dN_obs_sum / (n_pix_total * safe_smooth), 0.0, 1.0)
             base_row = _coarse_bin_integral(Cbar_fine * dN_exp_density)
@@ -1152,8 +1148,9 @@ def _assemble_gp3d_survey(catalog_path, *, cosmo, survey, z_s, edges_s,
         N_obs_vox = np.zeros((n_occ, G_s), dtype=float)
         base_vox = np.empty((n_occ, G_s), dtype=float)
         w_budget = np.empty((n_occ, n_grid), dtype=float)
+        dN_obs_rows = _kde_rows(occ, em.zgals, None, em.ngals, batch_size=512)
         for i, r in enumerate(occ):
-            dN_obs_s = np.asarray(_kde_dndz_obs(int(r), em.zgals, ngals=em.ngals), dtype=float)
+            dN_obs_s = dN_obs_rows[i]
             C_fine = np.clip(dN_obs_s / safe_smooth, 0.0, 1.0)
             base_vox[i] = _coarse_bin_integral(C_fine * dN_exp_density)
             # Fine-zgrid missing-budget weight (1 - C) dN_exp of this row, for the
