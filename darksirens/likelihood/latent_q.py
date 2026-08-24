@@ -260,7 +260,22 @@ def rho_from_moments(A_m, B_m, c, b, b_nodes, P_F: float, F_F: float,
     # structurally, so the floor is a corrupt-artifact guard rather than a
     # working part of the arithmetic.
     rho = jnp.log(jnp.maximum(num, 1e-300)) - jnp.log(jnp.maximum(den, 1e-300))
+    # The barycentric interpolant is defined ON the node interval only: outside
+    # it the degree-(n_b - 1) polynomial EXTRAPOLATES with Chebyshev-sized
+    # amplification (~|T_32| ~ 1e13 at 25% past the end at production n_b = 33),
+    # ``A - c B`` can go negative, and the 1e-300 floor above would make the
+    # garbage finite and SILENT.  The factory refuses any b_GW prior outside
+    # ``[b_nodes[0], b_nodes[-1]]`` at build (``_latent_guard_b_range``); this
+    # is the in-kernel wall for callers that never went through the factory.
+    # NaN, not a clamp: a clamp would silently flatten the likelihood in ``b``
+    # beyond the edge, while NaN reaches the finite guards as ``logL = -inf``.
+    nodes = jnp.asarray(b_nodes, dtype=jnp.float64)
+    b_val = jnp.asarray(b, dtype=jnp.float64)
+    in_nodes = (b_val >= nodes[0]) & (b_val <= nodes[-1])
+    rho = jnp.where(in_nodes, rho, jnp.nan)
     if below_depth is not None:
+        # Applied AFTER the range wall so the above-depth block stays bit-zero
+        # (pin P13b) even at an out-of-range ``b``.
         rho = jnp.where(below_depth, rho, 0.0)
     return rho
 
