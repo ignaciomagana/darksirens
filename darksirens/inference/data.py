@@ -71,6 +71,14 @@ def load_all_data(opts):
     n_catalogs = int(getattr(opts, "n_catalogs", 1))
 
     if n_catalogs >= 2:
+        # A K >= 2 run returns from this branch BEFORE
+        # attach_selection_fraction_inputs, so the "K=1 only" refusal that
+        # lives there never fired for a mixture: --per_pixel_completeness was
+        # hashed into the run fingerprint and recorded in settings.json while
+        # the likelihood ran entirely without f_p.  Refuse here, before any
+        # file is opened (the CLI re-asserts the same refusal pre-load in
+        # _validate_multitracer_config; this one covers programmatic callers).
+        loaders.refuse_per_pixel_completeness_for_multitracer(opts)
         # Multitracer mixture (K >= 2): every catalog is loaded exactly ONCE,
         # per bundle, by load_multitracer_catalog_bundles further below.
         # opts.survey_path is set to survey_paths[0] for a K>=2 run (see

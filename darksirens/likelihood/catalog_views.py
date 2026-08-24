@@ -257,8 +257,29 @@ def prepare_catalog_views(
                 "per-pixel numerator, so the two seams would carry different "
                 "budgets."
             )
-    pe_view = _ensure_compact(data, "pe", "pixels_pe")
-    sel_view = _ensure_compact(data, "sel", "pixels_sel")
+    full_z, full_dz, full_w, full_n = _full_catalog_arrays(data)
+
+    # Flat union path: with the FULL-sky arrays and both pixel maps present, the
+    # branch further below gathers ONE PE-union-selection table from the full
+    # rows and rebinds every per-view leaf to it.  Decided here, FIRST, so the
+    # per-view compact tables it would supersede are never built or barriered
+    # (each barrier is an eager device copy): on the default retained-catalog
+    # path they were pure dead work — discarded transients here, plus the same
+    # tables pinned in ``data`` for the whole run when the loader built them.
+    union_path = all(
+        value is not None
+        for value in (
+            full_z,
+            full_dz,
+            full_w,
+            full_n,
+            data.get("pixels_pe"),
+            data.get("pixels_sel"),
+        )
+    )
+
+    pe_view = None if union_path else _ensure_compact(data, "pe", "pixels_pe")
+    sel_view = None if union_path else _ensure_compact(data, "sel", "pixels_sel")
 
     # Caller-provided union views: a multitracer bundle (loaders.py) compacts PE
     # and selection ONCE over their pixel union, so both views reference the SAME
@@ -273,99 +294,97 @@ def prepare_catalog_views(
         and pe_view.unique_pixels is sel_view.unique_pixels
     )
 
-    full_z, full_dz, full_w, full_n = _full_catalog_arrays(data)
-
     def _full_or_default(full_value):
         return jnp.asarray(full_value) if full_value is not None else jnp.array([0.0])
 
-    zgals_pe_catalog = barrier(
-        jnp.asarray(pe_view.zgals) if pe_view is not None else _full_or_default(full_z)
-    )
-    dzgals_pe_catalog = barrier(
-        _full_or_default(pe_view.dzgals if pe_view is not None else full_dz)
-    )
-    wgals_pe_catalog = barrier(
-        _full_or_default(pe_view.wgals if pe_view is not None else full_w)
-    )
-    ngals_pe_raw = pe_view.ngals if pe_view is not None else full_n
-    ngals_pe_catalog = (
-        barrier(jnp.asarray(ngals_pe_raw, dtype=jnp.int32))
-        if ngals_pe_raw is not None
-        else None
-    )
-
-    if caller_union_views:
-        # PE and selection share one galaxy table: alias the already-barriered
-        # PE device arrays so the two EMCatalogs carry IS-identical leaves (one
-        # device buffer per array, not two copies of the same values).
-        zgals_sel_catalog = zgals_pe_catalog
-        dzgals_sel_catalog = dzgals_pe_catalog
-        wgals_sel_catalog = wgals_pe_catalog
-        ngals_sel_catalog = ngals_pe_catalog
+    if union_path:
+        # Every per-view leaf is (re)bound by the union branch below.
+        zgals_pe_catalog = dzgals_pe_catalog = wgals_pe_catalog = None
+        ngals_pe_catalog = None
+        zgals_sel_catalog = dzgals_sel_catalog = wgals_sel_catalog = None
+        ngals_sel_catalog = None
+        unique_pixels_pe_raw = unique_pixels_sel_raw = None
+        unique_pixels_pe = unique_pixels_sel = None
+        sample_to_unique_pe = sample_to_unique_sel = None
     else:
-        zgals_sel_catalog = barrier(
-            jnp.asarray(sel_view.zgals)
-            if sel_view is not None
-            else _full_or_default(full_z)
+        zgals_pe_catalog = barrier(
+            jnp.asarray(pe_view.zgals) if pe_view is not None else _full_or_default(full_z)
         )
-        dzgals_sel_catalog = barrier(
-            _full_or_default(sel_view.dzgals if sel_view is not None else full_dz)
+        dzgals_pe_catalog = barrier(
+            _full_or_default(pe_view.dzgals if pe_view is not None else full_dz)
         )
-        wgals_sel_catalog = barrier(
-            _full_or_default(sel_view.wgals if sel_view is not None else full_w)
+        wgals_pe_catalog = barrier(
+            _full_or_default(pe_view.wgals if pe_view is not None else full_w)
         )
-        ngals_sel_raw = sel_view.ngals if sel_view is not None else full_n
-        ngals_sel_catalog = (
-            barrier(jnp.asarray(ngals_sel_raw, dtype=jnp.int32))
-            if ngals_sel_raw is not None
+        ngals_pe_raw = pe_view.ngals if pe_view is not None else full_n
+        ngals_pe_catalog = (
+            barrier(jnp.asarray(ngals_pe_raw, dtype=jnp.int32))
+            if ngals_pe_raw is not None
             else None
         )
 
-    unique_pixels_pe_raw = pe_view.unique_pixels if pe_view is not None else None
-    unique_pixels_sel_raw = sel_view.unique_pixels if sel_view is not None else None
-    unique_pixels_pe = (
-        barrier(jnp.asarray(unique_pixels_pe_raw, dtype=jnp.int32))
-        if unique_pixels_pe_raw is not None
-        else None
-    )
-    unique_pixels_sel = (
-        unique_pixels_pe
-        if caller_union_views
-        else (
-            barrier(jnp.asarray(unique_pixels_sel_raw, dtype=jnp.int32))
-            if unique_pixels_sel_raw is not None
+        if caller_union_views:
+            # PE and selection share one galaxy table: alias the already-barriered
+            # PE device arrays so the two EMCatalogs carry IS-identical leaves (one
+            # device buffer per array, not two copies of the same values).
+            zgals_sel_catalog = zgals_pe_catalog
+            dzgals_sel_catalog = dzgals_pe_catalog
+            wgals_sel_catalog = wgals_pe_catalog
+            ngals_sel_catalog = ngals_pe_catalog
+        else:
+            zgals_sel_catalog = barrier(
+                jnp.asarray(sel_view.zgals)
+                if sel_view is not None
+                else _full_or_default(full_z)
+            )
+            dzgals_sel_catalog = barrier(
+                _full_or_default(sel_view.dzgals if sel_view is not None else full_dz)
+            )
+            wgals_sel_catalog = barrier(
+                _full_or_default(sel_view.wgals if sel_view is not None else full_w)
+            )
+            ngals_sel_raw = sel_view.ngals if sel_view is not None else full_n
+            ngals_sel_catalog = (
+                barrier(jnp.asarray(ngals_sel_raw, dtype=jnp.int32))
+                if ngals_sel_raw is not None
+                else None
+            )
+
+        unique_pixels_pe_raw = pe_view.unique_pixels if pe_view is not None else None
+        unique_pixels_sel_raw = sel_view.unique_pixels if sel_view is not None else None
+        unique_pixels_pe = (
+            barrier(jnp.asarray(unique_pixels_pe_raw, dtype=jnp.int32))
+            if unique_pixels_pe_raw is not None
             else None
         )
-    )
-    sample_to_unique_pe_raw = (
-        pe_view.sample_to_unique if pe_view is not None else data.get("pixels_pe")
-    )
-    sample_to_unique_sel_raw = (
-        sel_view.sample_to_unique if sel_view is not None else data.get("pixels_sel")
-    )
-    # The PE side is absent entirely on the flow-surrogate path (no stored PE
-    # samples): keep it None rather than crashing on jnp.asarray(None).
-    sample_to_unique_pe = (
-        barrier(jnp.asarray(sample_to_unique_pe_raw, dtype=jnp.int32))
-        if sample_to_unique_pe_raw is not None
-        else None
-    )
-    sample_to_unique_sel = barrier(
-        jnp.asarray(sample_to_unique_sel_raw, dtype=jnp.int32)
-    )
+        unique_pixels_sel = (
+            unique_pixels_pe
+            if caller_union_views
+            else (
+                barrier(jnp.asarray(unique_pixels_sel_raw, dtype=jnp.int32))
+                if unique_pixels_sel_raw is not None
+                else None
+            )
+        )
+        sample_to_unique_pe_raw = (
+            pe_view.sample_to_unique if pe_view is not None else data.get("pixels_pe")
+        )
+        sample_to_unique_sel_raw = (
+            sel_view.sample_to_unique if sel_view is not None else data.get("pixels_sel")
+        )
+        # The PE side is absent entirely on the flow-surrogate path (no stored PE
+        # samples): keep it None rather than crashing on jnp.asarray(None).
+        sample_to_unique_pe = (
+            barrier(jnp.asarray(sample_to_unique_pe_raw, dtype=jnp.int32))
+            if sample_to_unique_pe_raw is not None
+            else None
+        )
+        sample_to_unique_sel = barrier(
+            jnp.asarray(sample_to_unique_sel_raw, dtype=jnp.int32)
+        )
 
     union_unique_pixels = None
-    if all(
-        value is not None
-        for value in (
-            full_z,
-            full_dz,
-            full_w,
-            full_n,
-            data.get("pixels_pe"),
-            data.get("pixels_sel"),
-        )
-    ):
+    if union_path:
         counterpart_pixels = data.get("counterpart_pixels")
         required_pixels = (
             counterpart_pixels

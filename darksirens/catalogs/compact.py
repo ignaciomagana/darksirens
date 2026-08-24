@@ -3,11 +3,14 @@
 import numpy as np
 
 
-def _compact_catalog_for_pixels(pixels, zgals, dzgals, wgals, ngals, required_pixels=None):
-    """Return compact catalog rows and sample→row lookup for pixels.
+def _compact_pixel_rows(pixels, ngals, required_pixels=None):
+    """Unique-pixel rows, sample→row lookup, and per-row counts — no galaxy tables.
 
-    ``required_pixels`` are included in the compact catalog even if no sample
-    falls in them.  The sample-to-row lookup still covers only ``pixels``.
+    ``required_pixels`` are included in the row set even if no sample falls in
+    them.  The sample-to-row lookup still covers only ``pixels``.  Used on the
+    retained-full-catalog path, where the likelihood factory gathers the union
+    galaxy tables itself and only this host-side bookkeeping (shape validation,
+    the CLI report, the memory diagnostics) is needed at load time.
     """
     pixels = np.asarray(pixels, dtype=np.int32)
     if required_pixels is None:
@@ -18,13 +21,25 @@ def _compact_catalog_for_pixels(pixels, zgals, dzgals, wgals, ngals, required_pi
         sample_to_unique_idx = np.searchsorted(unique_pixels, pixels)
     unique_pixels = unique_pixels.astype(np.int32, copy=False)
     sample_to_unique_idx = sample_to_unique_idx.astype(np.int32, copy=False)
+    return unique_pixels, sample_to_unique_idx, np.asarray(ngals)[unique_pixels]
+
+
+def _compact_catalog_for_pixels(pixels, zgals, dzgals, wgals, ngals, required_pixels=None):
+    """Return compact catalog rows and sample→row lookup for pixels.
+
+    ``required_pixels`` are included in the compact catalog even if no sample
+    falls in them.  The sample-to-row lookup still covers only ``pixels``.
+    """
+    unique_pixels, sample_to_unique_idx, ngals_rows = _compact_pixel_rows(
+        pixels, ngals, required_pixels=required_pixels
+    )
     return (
         unique_pixels,
         sample_to_unique_idx,
         zgals[unique_pixels],
         dzgals[unique_pixels],
         wgals[unique_pixels],
-        ngals[unique_pixels],
+        ngals_rows,
     )
 
 

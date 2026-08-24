@@ -81,6 +81,7 @@ from darksirens.inference.validation import validate_multitracer_run
 from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.factory import make_likelihood
 from darksirens.likelihood.block_sizing import (
+    LatentDims,
     block_size_arg,
     resolve_block_sizes,
     measure_static_state_bytes,
@@ -2474,6 +2475,21 @@ def _resolve_catalog_sky_weighting(opts):
 
 
 def _validate_multitracer_config(opts):
+    # --per_pixel_completeness is K=1 only (the multitracer bundle loader does
+    # not thread f_p), and inference/data.py returns from its K>=2 branch
+    # before the attach step that holds the loader-side refusal -- so without
+    # this pre-load check the flag was recorded in settings.json and the run
+    # fingerprint while the likelihood ran unmasked, the exact S-3 exposure
+    # (H0 railed to 125-138 in 16/16 footprint mocks).  load_all_data
+    # re-asserts the same refusal for non-CLI callers; failing here costs the
+    # operator a second, not a multi-catalog load.
+    if (int(getattr(opts, "n_catalogs", 1) or 1) >= 2
+            and getattr(opts, "per_pixel_completeness", None)):
+        _fatal("--per_pixel_completeness is K=1 only for now: the multitracer "
+               "bundle loader does not thread f_p, so the map would be "
+               "recorded in settings.json but never applied. Drop the flag, "
+               "or run each catalog separately.")
+
     # FIELD-convention sky weighting scope (host-fraction estimand).  The
     # missing-galaxy budget modulations (deterministic Q_LSS, use_LSS delta_g)
     # and the marked-host model ARE supported: the survey-global normalizer
@@ -2995,6 +3011,63 @@ def _bundle_max_gals_per_row(data):
     return widest
 
 
+def _latent_block_sizing_dims(opts, data, n_grid):
+    """``LatentDims`` for the block-size resolver, or ``None`` in table mode.
+
+    A latent run sized without its dims is accounted as a catalog run with NO Q
+    state at all (``block_sizing._resolve_latent_mode``'s documented failure
+    mode): the pending reserve degrades to the KDE cache alone, silently
+    dropping ``base_miss`` (~854 MB at DESI production rows), the latent leaves
+    and the rho transient.  So in latent mode the anchor artifact's SHAPES are
+    read here — ``h5py`` dataset ``.shape`` only, no data — mirroring
+    ``likelihood/latent_q.load_latent_plan``'s layout:
+
+    * ``row_fac`` is stored WITHOUT the zero pad row (the loader appends it, and
+      ``LatentDims.row_fac_bytes`` prices ``n_fit + 1``), so ``n_fit`` is its
+      row axis verbatim;
+    * ``A_moments`` is ``(M_draw, n_b, N_sub)`` — the loader pads the z axis to
+      the RUN's grid, hence ``n_grid`` comes from the caller, not the artifact;
+    * ``sensitivity_S`` is read by the loader unconditionally, so ``n_theta``
+      counts whenever the block exists (resident even at rung 0).
+
+    ``n_rows`` is per VIEW (``base_miss_bytes`` carries the PE + selection
+    factor 2 itself), so the widest view is taken: ``2 * max`` never
+    under-reserves the pair and is exact when the views alias one pixel set —
+    the production case (``factory._resolve_latent_leaves`` shares the row map).
+    Runs before ``_stamp_latent_artifact_fingerprint`` has validated the
+    artifact never reach here, so the read is not guarded again.
+    """
+    if not latent_field_mode(opts):
+        return None
+
+    def _rows(key):
+        shape = getattr(data.get(key), "shape", None)
+        return int(shape[0]) if shape else 0
+
+    # Compact per-view rows; the legacy full-sky catalog (no compact views) has
+    # row index == pixel index, so its row count is the fallback.
+    n_rows = max(_rows("zgals_pe"), _rows("zgals_sel")) or _rows("zgals")
+    # Field-weighting global normalizer rows (row-map bytes only; 0 when the
+    # run is not field-weighted or the occupied set is not in ``data``).
+    n_field_rows = 0
+    if str(getattr(opts, "catalog_sky_weighting", None)) == "field":
+        n_field_rows = _rows("field_occupied_pixels")
+
+    with h5py.File(opts.lss_field_artifact, "r") as f:
+        g = f["latent_field"]
+        m_draw, n_fit, m_z = (int(v) for v in g["row_fac"].shape)
+        n_b = int(g["A_moments"].shape[1])
+        n_theta = (int(g["sensitivity_S"].shape[-1])
+                   if "sensitivity_S" in g else 0)
+        basis_meta = g.attrs.get("basis_meta")
+        m_sph = int(json.loads(basis_meta).get("M_sph", 0)) if basis_meta else 0
+
+    return LatentDims(
+        m_draw=m_draw, n_fit=n_fit, m_z=m_z, n_b=n_b, n_grid=int(n_grid),
+        n_rows=n_rows, n_field_rows=n_field_rows, m_sph=m_sph, n_theta=n_theta,
+    )
+
+
 def _block_sizing_inputs(opts, data):
     """Derive the ``resolve_block_sizes`` inputs from loaded ``opts``/``data``.
 
@@ -3044,10 +3117,17 @@ def _block_sizing_inputs(opts, data):
     # the loaded arrays are already device-resident, hence already in the probed
     # free_bytes (see block_sizing.estimate_pending_static_bytes).  The FULL measured
     # static is carried alongside for the run-config report only.
+    # Latent-mode (--lss_field_mode latent) dims: without them the estimators
+    # account a latent run as a table run with NO Q state at all (the mode
+    # loads no log-Q table, so the members branch never fires) — the exact
+    # silent under-reservation _resolve_latent_mode hard-errors on.
+    latent_dims = _latent_block_sizing_dims(opts, data, n_grid)
+    lss_field_mode = "latent" if latent_dims is not None else "table"
     pending_static_bytes = estimate_pending_static_bytes(
         data, n_grid=n_grid, has_catalog=has_catalog,
         catalog_memory=catalog_memory or None,
         catalog_sky_weighting=getattr(opts, "catalog_sky_weighting", "conditional"),
+        lss_field_mode=lss_field_mode, latent_dims=latent_dims,
     )
     full_static_bytes = measure_static_state_bytes(
         data,
@@ -3057,6 +3137,7 @@ def _block_sizing_inputs(opts, data):
         catalog_memory=catalog_memory or None,
         drop_full_catalog=bool(getattr(opts, "drop_full_catalog", False)),
         catalog_sky_weighting=getattr(opts, "catalog_sky_weighting", "conditional"),
+        lss_field_mode=lss_field_mode, latent_dims=latent_dims,
     )
     needs_grad, concurrent_evals = sampler_block_sizing_profile(opts)
     return dict(
@@ -3074,6 +3155,10 @@ def _block_sizing_inputs(opts, data):
         static_state_bytes=pending_static_bytes,
         needs_grad=needs_grad,
         concurrent_evals=concurrent_evals,
+        # None in table mode; rung 0 is the shipped seam (thread a rung option
+        # through here if PR-6b grows one).
+        latent_dims=latent_dims,
+        latent_rung=0,
         # Report-only extras (stripped before resolve_block_sizes):
         static_state_full_bytes=full_static_bytes,
     )
