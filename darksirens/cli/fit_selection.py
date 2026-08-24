@@ -201,6 +201,14 @@ def main(argv=None):
         except ValueError:
             _fatal("--m_lim_per_stratum must look like '0:19.5,1:21.0' "
                    f"(got {opts.m_lim_per_stratum!r})")
+        # m_lim is a truncation DATUM of the fit: a typo'd label would fall
+        # back to --m_lim silently and shift the fitted M0hat one-for-one.
+        present = {int(u) for u in np.unique(labels)}
+        unknown = sorted(set(m_lim_by) - present)
+        if unknown:
+            _fatal("--m_lim_per_stratum lists strata not present in the "
+                   f"survey: {', '.join(str(u) for u in unknown)} "
+                   f"(present: {', '.join(str(u) for u in sorted(present))})")
 
     _section("Fitting truncated luminosity function")
     fits = []
