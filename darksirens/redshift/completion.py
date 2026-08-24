@@ -2274,6 +2274,55 @@ def field_marked_observed_global_total(
     return _field_depth_weighted_mass(cosmo, survey, em_catalog, w_flat * h_flat)
 
 
+def _ensemble_mean_field_q_catalog(em_catalog: EMCatalog) -> EMCatalog:
+    """Install the posterior-MEAN field Q rows on an ensemble-ONLY catalog.
+
+    When only a Q ENSEMBLE was supplied (no deterministic table), the per-row
+    numerator carries the posterior-mean Q
+    (:func:`_resolve_lss_completion_row_tables` ->
+    :func:`_member_posterior_mean_q`), but :func:`_field_missing_curve`
+    dispatches on ``field_lss_q`` alone -- without this injection the SCALAR
+    field normalizer would silently be the ``Q == 1`` budget while the
+    numerator carried the mean Q, breaking ``Sum_pix integral p_field dz == 1``
+    by a theta-dependent amount.  This is the loaded-table twin of the latent
+    scalar injection in :func:`field_global_log_Z`.  ``field_lss_q_members``
+    holds LINEAR (already exp-clipped) Q rows, so the member mean IS
+    ``mean_m exp(clip(logQ_m))``, matching the numerator node-for-node; the
+    empty-pixel / strata / f_p budgets get their member means the same way.
+    No-op whenever the deterministic rows already exist (then the two sides
+    already share one budget) or no field ensemble is present (legacy / latent
+    / per-member paths).
+    """
+    if (em_catalog.field_lss_q is not None
+            or em_catalog.field_lss_q_members is None
+            or latent_enabled(em_catalog)):
+        return em_catalog
+    if em_catalog.field_lss_q_empty_sum_members is None:
+        raise ValueError(
+            "an ensemble-only catalog under catalog_sky_weighting='field' "
+            "requires field_lss_q_empty_sum_members alongside "
+            "field_lss_q_members (build both via "
+            "build_field_lss_q_member_inputs); without the empty-pixel budget "
+            "the scalar global normalizer cannot carry the posterior-mean Q."
+        )
+    cat = em_catalog._replace(
+        field_lss_q=jnp.mean(
+            jnp.asarray(em_catalog.field_lss_q_members), axis=0),
+        field_lss_q_empty_sum=jnp.mean(
+            jnp.asarray(em_catalog.field_lss_q_empty_sum_members), axis=0),
+    )
+    if (em_catalog.field_lss_q_empty_sum_strata is None
+            and em_catalog.field_lss_q_empty_sum_strata_members is not None):
+        cat = cat._replace(field_lss_q_empty_sum_strata=jnp.mean(
+            jnp.asarray(em_catalog.field_lss_q_empty_sum_strata_members),
+            axis=0))
+    if (em_catalog.field_lss_q_fp_empty_sum is None
+            and em_catalog.field_lss_q_fp_empty_sum_members is not None):
+        cat = cat._replace(field_lss_q_fp_empty_sum=jnp.mean(
+            jnp.asarray(em_catalog.field_lss_q_fp_empty_sum_members), axis=0))
+    return cat
+
+
 def field_global_log_Z(
     cosmo: CosmoParams,
     survey: SurveyParams,
@@ -2338,6 +2387,10 @@ def field_global_log_Z(
             em_catalog, survey,
             _latent_C_curve(_precompute_grids(cosmo, survey, em_catalog)),
             field_rows=True)
+    # Ensemble-ONLY loaded tables need the same scalar injection as the latent
+    # branch above: the posterior-mean Q rows, so the normalizer carries the
+    # budget the numerator does (no-op when a deterministic table exists).
+    em_catalog = _ensemble_mean_field_q_catalog(em_catalog)
 
     V_total, dN_exp = _field_missing_curve(
         cosmo, survey, em_catalog, chunk_size=chunk_size,
@@ -2830,6 +2883,10 @@ def field_global_log_Z_marked(
     ``S_obs`` may be passed precomputed -- it is member-INDEPENDENT, so
     :func:`field_global_log_Z_marked_members` hoists it out of the member vmap.
     """
+    # Ensemble-ONLY loaded tables: the scalar marked normalizer must carry the
+    # posterior-mean Q budget the numerator's dN_miss composes with mu_miss
+    # (no-op when a deterministic table exists -- see field_global_log_Z).
+    em_catalog = _ensemble_mean_field_q_catalog(em_catalog)
     V_total, dN_exp = _field_missing_curve(cosmo, survey, em_catalog)
 
     if S_obs is None:

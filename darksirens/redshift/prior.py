@@ -87,6 +87,7 @@ from darksirens.redshift.completion import (
     field_global_log_Z_marked,
     field_global_log_Z_marked_members,
     field_global_log_Z_members,
+    latent_enabled,
     log_galaxy_measure_grid,
     member_N_miss_integrals,
     _LATENT_LOGQ_CLIP,
@@ -1021,6 +1022,20 @@ def eval_redshift_prior_members_with_state(
             f"{catalog_sky_weighting!r}."
         )
     if model == "dark_sirens" and isinstance(state, DarkSirenEnsemblePriorState):
+        if latent_enabled(em_catalog):
+            # Structural refusal, mirroring completion_clip_diagnostics: a
+            # latent catalog carries no loaded member table, so the resolver
+            # below would hand the evaluator None and the vmap would die with
+            # an unexplained TypeError at trace time.
+            raise NotImplementedError(
+                "eval_redshift_prior_members_with_state has no latent-mode "
+                "member path: latent runs GENERATE each member's log-Q inside "
+                "the likelihood (eval_dark_member_completion_latent) instead "
+                "of loading a member table, so _resolve_member_logq_row has "
+                "nothing to resolve here. Reconstruct member rows via "
+                "latent_member_logq_rows(em_catalog, survey, C_curve, m) if a "
+                "per-member latent diagnostic is needed."
+            )
         if catalog_sky_weighting == "field" and state.log_Z_global_members is None:
             raise ValueError(
                 "catalog_sky_weighting='field' needs the per-member survey-global "
