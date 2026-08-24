@@ -105,8 +105,10 @@ from darksirens.likelihood.events import pad_gw_event_to_multiple
 
 # Single source of truth for the guard's default budget (the GWTC-4.0/5.0
 # threshold): argparse defaults and getattr fallbacks all reference this, so
-# CLI and programmatic callers cannot silently diverge.
-DEFAULT_MAX_LIKELIHOOD_VARIANCE = 1.0
+# CLI and programmatic callers cannot silently diverge.  Defined in
+# core.constants (re-exported here under its historical home) so JAX-free
+# tooling like io.results can read it without importing this JAX module.
+from darksirens.core.constants import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 
 # Numerical floor for the remaining variance budget once the per-event
 # Monte-Carlo variances are subtracted: keeps the traced threshold finite
@@ -368,7 +370,18 @@ def selection_log_correction(
         # boundary, inflated beyond the pure selection boundary N^2/max_var
         # (up to N^2/1e-12 once the budget is exhausted) — the gate turn-on
         # location and the frozen Taylor value move with it by design.
-        x = Neff / threshold
+        # Neff = +inf (the zero-variance verdict _lse_to_log_mu_neff issues for
+        # a deterministic/uniform campaign) must never reach the division: the
+        # div VJP stores the inf numerator, and the underflowed gate's ZERO
+        # cotangent times that inf is NaN — a NaN that flows into ``threshold``
+        # -> ``pe_variance_sum``/``max_likelihood_variance`` while the returned
+        # value stays finite, so the isfinite collapse below never fires.
+        # Double-where (the ``_lse_to_log_mu_neff`` discipline): the dead
+        # branch divides finite operands, and the inf is a gradient-free
+        # constant that still drives the gate to exactly zero.
+        finite_neff = jnp.isfinite(Neff)
+        neff_safe = jnp.where(finite_neff, Neff, threshold)
+        x = jnp.where(finite_neff, neff_safe / threshold, jnp.inf)
         gate = jax.nn.softplus(200.0 * (1.0 - x) - 10.0)
         reward_mag = n * jax.nn.softplus(-log_mu)
         wall = -gate * (100.0 + 2.0 * reward_mag)
@@ -380,8 +393,9 @@ def selection_log_correction(
         total = correction + wall
         # This collapse -- not the hard branch's ``too_sparse`` -- is the soft
         # path's NaN guarantee: mu == 0 exactly (all-invalid injections) makes
-        # correction and wall +/-inf and their sum NaN, and a NaN Neff or
-        # threshold propagates through x -> gate -> wall to a NaN total.  Either
+        # correction and wall +/-inf and their sum NaN; a NaN Neff propagates
+        # through Neff_taylor -> correction (the double-where above shunts it
+        # out of x), and a NaN threshold through x -> gate -> wall.  Either
         # way, collapse to the hard verdict.
         return jnp.where(jnp.isfinite(total), total, -jnp.inf)
     # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.

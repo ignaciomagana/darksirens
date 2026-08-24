@@ -63,6 +63,12 @@ import glob
 import os
 from dataclasses import dataclass
 
+# Safe at module scope only because io.results defers its likelihood/sampler
+# imports to call time: at module scope it must never reach back into
+# inference.sampling (which imports this module), or the two deadlock on
+# partial init.
+from darksirens.io.results import result_is_complete
+
 
 # One checkpoint file per sampler, so a run directory can hold a dynesty and a
 # tinyns attempt without them fighting over the same name.
@@ -202,10 +208,6 @@ def find_resume_target(opts, sampler, name_prefix=None):
     ``--save_path`` holding several models cannot hand a job someone else's
     half-finished sampler.
     """
-    # Local import: io.results pulls in inference.sampling, which imports this
-    # module -- at module scope the two would deadlock on partial init.
-    from darksirens.io.results import result_is_complete
-
     spec = _resume_spec(opts)
     if spec.lower() in _OFF_WORDS:
         return None, None

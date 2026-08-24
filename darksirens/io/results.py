@@ -5,10 +5,13 @@ import os
 import h5py
 import numpy as np
 
-from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+# Module-scope imports here must stay JAX-free: this module is imported by
+# tooling that only wants to read/write HDF5 (checkpointing's completion probe,
+# external result readers).  The likelihood/sampler stack is imported at call
+# time instead -- see _json_attr and _sky_log_prior_volume_correction.
 from darksirens.cli.common import _fixed_dark_energy_metadata
+from darksirens.core.constants import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.inference.run_fingerprint import resume_provenance_attrs
-from darksirens.inference.sampling import _json_safe_tinyns_value
 from darksirens.io.settings import environment_block
 
 # ── Data saving ────────────────────────────────────────────────────────────────
@@ -32,6 +35,9 @@ _TINYNS_SCALAR_ATTRS = {
 
 
 def _json_attr(value):
+    # Local import: inference.sampling imports JAX at module scope, which this
+    # module must not pull in at import time (see the header note).
+    from darksirens.inference.sampling import _json_safe_tinyns_value
     return json.dumps(_json_safe_tinyns_value(value), default=str)
 
 
@@ -119,7 +125,8 @@ def _sky_log_prior_volume_correction(opts) -> float:
     """``log(f_valid)`` for this run's sky model, or 0.0 if it has none.
 
     Imported lazily: ``darksirens.sky`` pulls in JAX and the population base,
-    and this module is imported by tooling that only wants to read/write HDF5.
+    and this module must stay importable by tooling that only wants to
+    read/write HDF5 (no JAX at module scope; see the header note).
     Any failure to resolve the model (an unknown name from an old settings
     file, say) degrades to 0.0 -- a missing correction must not lose a
     finished run's results.
@@ -135,6 +142,7 @@ def _sky_log_prior_volume_correction(opts) -> float:
 
 
 def write_tinyns_metadata(attrs, results, opts) -> None:
+    from darksirens.inference.sampling import _json_safe_tinyns_value  # see _json_attr
     if getattr(opts, "tinyns_resolved_config", None) is not None:
         attrs["tinyns_resolved_config"] = _json_attr(opts.tinyns_resolved_config)
     if results.get("tinyns_runtime_diagnostics") is not None:
@@ -158,6 +166,7 @@ def write_tinyns_metadata(attrs, results, opts) -> None:
 
 
 def save_tinyns_diagnostics_json(results: dict, run_dir: str, opts) -> str | None:
+    from darksirens.inference.sampling import _json_safe_tinyns_value  # see _json_attr
     if getattr(opts, "sampler", None) != "tinyns" and not results.get("tinyns_runtime_diagnostics"):
         return None
     payload = {
