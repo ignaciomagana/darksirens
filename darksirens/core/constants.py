@@ -68,3 +68,11 @@ C_MODES = {"per_pixel": 0, "aggregate": 1, "selection": 2}
 #: per-family theta tables) for callers that must not import the JAX module;
 #: a test pins the two agree.
 SELECTION_FAMILIES = ("gaussian", "schechter")
+
+#: Single source of truth for the selection guard's default variance budget
+#: (the GWTC-4.0/5.0 threshold): argparse defaults and getattr fallbacks all
+#: reference this, so CLI and programmatic callers cannot silently diverge.
+#: Lives here rather than in ``darksirens.likelihood.selection`` (which
+#: re-exports it) so JAX-free tooling -- ``darksirens.io.results`` and anything
+#: that only reads/writes HDF5 -- can use it without importing JAX.
+DEFAULT_MAX_LIKELIHOOD_VARIANCE = 1.0

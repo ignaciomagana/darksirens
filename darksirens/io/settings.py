@@ -5,13 +5,14 @@ import os
 import subprocess
 import sys
 
-import healpy as hp
-import jax
 import numpy as np
 
 import darksirens
 from darksirens.cli.common import _fixed_dark_energy_metadata
-from darksirens.gw.populations.utils import normalization_grid_settings
+
+# JAX/healpy and the population grid are imported at CALL time only: io.results
+# imports this module at module scope, and io.results must stay importable by
+# tooling that only reads/writes HDF5.
 
 # ── Run provenance ─────────────────────────────────────────────────────────────
 #
@@ -128,6 +129,9 @@ def environment_block() -> dict:
     them recorded, an archived results.hdf5 cannot say which domain produced its
     logZ (the issue-#288 class of problem this block exists for).
     """
+    import healpy as hp
+    import jax
+
     block = dict(code_identity())
     block.update({
         "jax_version":    jax.__version__,
@@ -196,6 +200,7 @@ def save_settings_json(
     d["lower_bound"] = list(map(float, lower_bound))
     d["upper_bound"] = list(map(float, upper_bound))
     d.update(meta)
+    from darksirens.gw.populations.utils import normalization_grid_settings
     d["normalization_grid"] = normalization_grid_settings().to_dict()
 
     d["environment"] = environment_block()
