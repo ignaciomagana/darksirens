@@ -23,7 +23,7 @@ from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
 
 from darksirens.catalogs.compact import (
     _catalog_memory_diagnostics,
-    _compact_catalog_for_pixels,
+    _compact_pixel_rows,
 )
 from darksirens.likelihood.catalog_views import (
     field_depth_inputs_required,
@@ -942,18 +942,44 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
             if opts.universe_model in BRIGHT_SIREN_MODELS and counterpart_pixels is not None
             else None
         )
-        (
-            unique_pixels_pe, sample_to_unique_pe,
-            zgals_pe, dzgals_pe, wgals_pe, ngals_pe,
-        ) = _compact_catalog_for_pixels(
-            pixels_pe, zgals, dzgals, wgals, ngals, required_pixels=required_pixels
-        )
-        (
-            unique_pixels_sel, sample_to_unique_sel,
-            zgals_sel, dzgals_sel, wgals_sel, ngals_sel,
-        ) = _compact_catalog_for_pixels(
-            pixels_sel, zgals, dzgals, wgals, ngals, required_pixels=required_pixels
-        )
+        if getattr(opts, "drop_full_catalog", False):
+            # Host-side rows (load_survey(to_device=False)): compact ONCE over
+            # the PE-union-selection pixel set so both views SHARE one galaxy
+            # table, mirroring load_multitracer_catalog_bundles above.
+            # prepare_catalog_views detects the identity (``is``) to alias the
+            # barriered device arrays and build a single KDE cache.
+            pixels_pe_np = np.asarray(pixels_pe, dtype=np.int32)
+            pixels_sel_np = np.asarray(pixels_sel, dtype=np.int32)
+            union_pixels = unique_inference_pixels(
+                pixels_pe_np, pixels_sel_np, required_pixels=required_pixels
+            )
+            zgals_pe = zgals_sel = zgals[union_pixels]
+            dzgals_pe = dzgals_sel = dzgals[union_pixels]
+            wgals_pe = wgals_sel = wgals[union_pixels]
+            ngals_pe = ngals_sel = ngals[union_pixels]
+            unique_pixels_pe = unique_pixels_sel = union_pixels
+            sample_to_unique_pe = np.searchsorted(
+                union_pixels, pixels_pe_np
+            ).astype(np.int32, copy=False)
+            sample_to_unique_sel = np.searchsorted(
+                union_pixels, pixels_sel_np
+            ).astype(np.int32, copy=False)
+        else:
+            # Full-sky catalog retained (the default): the likelihood factory's
+            # union branch (catalog_views.prepare_catalog_views) gathers ONE
+            # PE-union-selection table from the full rows itself, superseding
+            # any per-view compact built here — which would only pin GBs of
+            # dead device tables in ``data`` for the whole run (zgals is
+            # device-resident on this path).  Keep just the small host-side row
+            # bookkeeping: unique pixels, sample->row maps, and per-row counts
+            # (shape validation, the CLI report, the diagnostics below).
+            ngals_host = np.asarray(ngals)
+            unique_pixels_pe, sample_to_unique_pe, ngals_pe = _compact_pixel_rows(
+                pixels_pe, ngals_host, required_pixels=required_pixels
+            )
+            unique_pixels_sel, sample_to_unique_sel, ngals_sel = _compact_pixel_rows(
+                pixels_sel, ngals_host, required_pixels=required_pixels
+            )
 
         catalog_memory = _catalog_memory_diagnostics(
             zgals, dzgals, wgals, pixels_pe, pixels_sel, ngals_pe, ngals_sel
@@ -1119,6 +1145,24 @@ def guard_unmasked_footprint_counts(opts, ngals, *, label="") -> None:
         return
     area = 4.0 * np.pi * (180.0 / np.pi) ** 2
     where = f" [{label}]" if label else ""
+    if int(getattr(opts, "n_catalogs", 1) or 1) > 1:
+        # Do not steer the operator toward a flag the mixture refuses
+        # (refuse_per_pixel_completeness_for_multitracer): at K >= 2 the only
+        # remedies are the explicit override or a different c_mode.
+        remedy = (
+            "--per_pixel_completeness is not supported for a K>=2 mixture "
+            "(the bundle loader does not thread f_p); pass "
+            "--allow_unmasked_footprint to run the exposed configuration "
+            "deliberately (the no-mask control arms do), or use a c_mode "
+            "outside {aggregate, selection}."
+        )
+    else:
+        remedy = (
+            "Pass --per_pixel_completeness <mth_map.h5> (C_p = f_p Cbar, "
+            "f_p = 0 off-footprint), or --allow_unmasked_footprint to run "
+            "the exposed configuration deliberately (the no-mask control "
+            "arms do)."
+        )
     msg = (
         f"c_mode={c_mode!r} with no per-pixel selection fraction{where} on a "
         f"catalog whose empty sky looks like a FOOTPRINT, not sparsity: "
@@ -1127,10 +1171,7 @@ def guard_unmasked_footprint_counts(opts, ngals, *, label="") -> None:
         f"predicted by the mean count {lam:.1f} gal/pixel. The survey "
         f"completeness curve Cbar(z) is applied there too, so that sky is "
         f"modelled as Cbar-COMPLETE and its hosts leave the missing budget "
-        f"while the numerator keeps them. Pass --per_pixel_completeness "
-        f"<mth_map.h5> (C_p = f_p Cbar, f_p = 0 off-footprint) where it is "
-        f"supported, or --allow_unmasked_footprint to run the exposed "
-        f"configuration deliberately (the no-mask control arms do)."
+        f"while the numerator keeps them. {remedy}"
     )
     if getattr(opts, "allow_unmasked_footprint", False):
         print(f"    [footprint] ALLOWED BY FLAG -- {msg}")
@@ -1163,10 +1204,12 @@ def _guard_unmasked_footprint(opts, data) -> dict:
     returns before this attach step for a multitracer mixture, so
     :func:`load_multitracer_catalog_bundles` calls
     :func:`guard_unmasked_footprint_counts` on each bundle's own full-sky
-    counts.  ``f_p`` is still refused there (the bundle loader does not thread
-    it), so the guard's advice for K >= 2 is ``--allow_unmasked_footprint`` or a
-    different ``c_mode`` -- but the exposure is the same one, and it is now
-    reported rather than silent.
+    counts.  ``f_p`` itself is refused up front for K >= 2 -- by
+    :func:`refuse_per_pixel_completeness_for_multitracer` at the top of
+    ``load_all_data``'s multitracer branch, and again at CLI validation before
+    any load -- so the guard's advice for K >= 2 is
+    ``--allow_unmasked_footprint`` or a different ``c_mode`` -- but the
+    exposure is the same one, and it is now reported rather than silent.
     """
     ngals = data.get("ngals_catalog", data.get("ngals"))
     if ngals is not None:
@@ -1177,6 +1220,26 @@ def _guard_unmasked_footprint(opts, data) -> dict:
         # reproducible legacy/ablation path.
         warn_per_pixel_clustering_cancellation(opts, ngals)
     return data
+
+
+def refuse_per_pixel_completeness_for_multitracer(opts) -> None:
+    """Refuse ``--per_pixel_completeness`` for a K >= 2 mixture, reachably.
+
+    The multitracer bundle loader does not thread ``f_p``, and
+    ``inference/data.py`` returns from its K >= 2 branch BEFORE
+    :func:`attach_selection_fraction_inputs` -- so the "K=1 only" refusal that
+    lives there never fired for a mixture: the flag was hashed into the run
+    fingerprint and recorded in settings.json while the likelihood ran
+    entirely without the mask (masked in provenance, unmasked in fact).  This
+    helper is the single wording for that refusal; ``load_all_data`` calls it
+    at the top of its multitracer branch and the CLI re-asserts it pre-load.
+    """
+    if not getattr(opts, "per_pixel_completeness", None):
+        return
+    if int(getattr(opts, "n_catalogs", 1) or 1) > 1:
+        raise NotImplementedError(
+            "--per_pixel_completeness is K=1 only for now (the multitracer "
+            "bundle loader does not thread f_p).")
 
 
 def attach_selection_fraction_inputs(opts, data) -> dict:
@@ -1212,10 +1275,7 @@ def attach_selection_fraction_inputs(opts, data) -> dict:
             f"--per_pixel_completeness requires c_mode aggregate|selection "
             f"(got {c_mode!r}): a per-pixel count-derived C already contains "
             f"the mask loss.")
-    if int(getattr(opts, "n_catalogs", 1) or 1) > 1:
-        raise NotImplementedError(
-            "--per_pixel_completeness is K=1 only for now (the multitracer "
-            "bundle loader does not thread f_p).")
+    refuse_per_pixel_completeness_for_multitracer(opts)
     if getattr(opts, "selection_strata_by_catalog", None):
         raise NotImplementedError(
             "--per_pixel_completeness with stratified selection needs "

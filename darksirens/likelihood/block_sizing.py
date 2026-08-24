@@ -312,14 +312,27 @@ def sampler_block_sizing_profile(opts) -> tuple[bool, int]:
       the transient working set is multiplied by it.  tinyns' JAX rwalk kernel
       ``jax.vmap``s the loglike over ``replacement_chains`` proposals (and over
       the largest entry of ``replacement_chain_schedule`` when a schedule is set),
-      which batches every intermediate.  ``jax_block_size`` does NOT count: that
-      path ``lax.scan``s whole nested-sampling iterations, which are sequential.
+      which batches every intermediate.  NumPyro with ``--nuts_chain_method
+      vectorized`` likewise ``vmap``s the NUTS kernel over ``--nuts_chains``
+      (numpyro ``infer/hmc.py`` batches ``sample_fn`` for a batched rng key), so
+      every value+grad transient is live once per chain; ``sequential``
+      (``laxmap``, one chain at a time) and ``parallel`` (``pmap``, one chain per
+      device) stay at 1.  ``jax_block_size`` does NOT count: that path
+      ``lax.scan``s whole nested-sampling iterations, which are sequential.
 
     Pure Python (reads plain attributes off ``opts``); no JAX, no device access.
     """
     sampler = str(getattr(opts, "sampler", "") or "").strip().lower()
     needs_grad = sampler in _GRADIENT_SAMPLERS
     concurrent = 1
+    if sampler == "numpyro":
+        method = str(getattr(opts, "nuts_chain_method", "sequential")
+                     or "sequential").strip().lower()
+        if method == "vectorized":
+            try:
+                concurrent = max(1, int(getattr(opts, "nuts_chains", 1) or 1))
+            except (TypeError, ValueError):
+                concurrent = 1
     if sampler == "tinyns":
         cfg = getattr(opts, "tinyns_resolved_config", None) or {}
         try:
