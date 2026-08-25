@@ -438,6 +438,54 @@ def member_ess(ll_members: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(alive, jnp.exp(entropy), 0.0)
 
 
+# Refuse the overlapping tail chunk (see :func:`_pe_chunk_plan`) once it would
+# recompute more than ``nEvents / _PE_TAIL_OVERLAP_DENOM`` events.
+_PE_TAIL_OVERLAP_DENOM = 8
+
+
+def _pe_chunk_plan(nEvents: int, pe_block: int) -> tuple[int, int, bool]:
+    """Static chunk plan ``(n_full, rem, overlap_tail)`` for the block-vectorized
+    per-event PE reduction.
+
+    ``n_full`` full chunks of ``pe_block`` events cover the first
+    ``n_full*pe_block`` events, leaving ``rem`` events over.  The historical plan
+    evaluated those leftovers in a chunk of a DIFFERENT static event count, and
+    because that count is baked into the slice lengths the whole per-sample
+    kernel (``log_weight_ev`` -> the per-sample catalog KDE + redshift-prior
+    gathers) is traced and lowered a SECOND time at the remainder shape.  It is
+    the normal case, not a corner: ``block_sizing._even_split_block`` returns
+    ``ceil(nEvents/k)``, so the shipped 259-event plans (blocks 87 and 8) both
+    leave a remainder.  MEASURED on CPU at 259 events, block 87: the two-shape
+    plan lowers 8611 HLO lines and costs 6.8-7.4 s to compile; the single-shape
+    plan below lowers 6797 (-21%) and compiles in 2.8-3.7 s.  It is a
+    once-per-process cost -- the shapes are static and steady state is unchanged
+    to within the +0.8% of PE work the overlap recomputes.
+
+    ``overlap_tail`` removes the second shape: take the tail chunk at the FULL
+    block shape, ending at ``nEvents`` (flat start ``(nEvents - pe_block)*nsamp``,
+    always in bounds because ``n_full >= 1``), and keep only its last ``rem``
+    rows.  Every chunk then has ONE shape, so they all ride the same
+    ``lax.scan`` and the kernel is lowered exactly once.  The retained rows are
+    computed from the same masked samples in the same per-row order as before,
+    so the per-event values -- and the concatenated ``(nEvents,)`` vector they
+    are assembled into -- are unchanged.
+
+    The overlap recomputes ``pe_block - rem`` events (2 of 259 at the shipped
+    ``(32768, 87)`` plan, 5 of 259 at the floored one).  That is cheap only
+    because the resolver picks a near-even split; a hand-set block close to
+    ``nEvents`` (15 of 16 would recompute 14 events, nearly doubling the PE
+    work) keeps the two-shape plan instead.
+    """
+    n_full = nEvents // pe_block
+    rem = nEvents - n_full * pe_block
+    overlap_tail = (
+        rem > 0
+        and n_full >= 1
+        and _PE_TAIL_OVERLAP_DENOM * (pe_block - rem) <= nEvents
+    )
+    return n_full, rem, overlap_tail
+
+
 # ``threads_distance_table`` is ``jax.jit`` plus the contract that the 106.8 MB
 # comoving-distance table reaches this module as an ARGUMENT: without it, jax
 # lowers the closed-over table to a ``dense<>`` HLO constant and this one jit
@@ -1151,11 +1199,13 @@ def darksiren_log_likelihood(
         else:
             # Block-vectorized: ceil(nEvents/pe_block) chunks.  A static chunk
             # plan -- ``n_full`` full chunks (via lax.scan when >1, or a direct
-            # call when exactly 1) plus one Python-level remainder chunk -- keeps
-            # every shape static with no dynamic padding mask.
+            # call when exactly 1) plus, when the block does not divide nEvents,
+            # a tail chunk -- keeps every shape static with no dynamic padding
+            # mask.  ``_pe_chunk_plan`` decides whether that tail is taken at the
+            # FULL block shape (overlapping the last full chunk, so ONE shape is
+            # lowered for the whole plan) or at the remainder shape.
             block_samps = pe_block * nsamp
-            n_full = nEvents // pe_block
-            rem = nEvents - n_full * pe_block
+            n_full, rem, overlap_tail = _pe_chunk_plan(nEvents, pe_block)
 
             def _reduce_events(s, m):
                 # s: flat sample start (traced or static); m: STATIC event count.
@@ -1164,23 +1214,51 @@ def darksiren_log_likelihood(
                     lambda row: log_evidence_and_mc_variance(row, nsamp)
                 )(ldw)
 
-            parts = []
-            if n_full == 1:
-                parts.append(_reduce_events(0, pe_block))
-            elif n_full > 1:
-                def _chunk_scan(_, chunk_idx):
-                    return None, _reduce_events(chunk_idx * block_samps, pe_block)
+            def _chunk_scan(_, s):
+                return None, _reduce_events(s, pe_block)
 
-                _, stacked = lax.scan(_chunk_scan, None, jnp.arange(n_full))
-                # (n_full, pe_block) -> (n_full*pe_block,) preserving event order.
+            parts = []
+            if overlap_tail:
+                # n_full full-chunk starts plus the overlapping tail start, ALL
+                # through one scan: the kernel is traced (and lowered) once.
+                starts = jnp.asarray(
+                    [i * block_samps for i in range(n_full)]
+                    + [(nEvents - pe_block) * nsamp]
+                )
+                _, stacked = lax.scan(_chunk_scan, None, starts)
+                # (n_full+1, pe_block) -> the n_full full chunks in event order,
+                # then only the tail rows the full chunks did not already cover.
                 parts.append(
                     jax.tree_util.tree_map(
-                        lambda a: a.reshape((n_full * pe_block,) + a.shape[2:]),
+                        lambda a: a[:n_full].reshape(
+                            (n_full * pe_block,) + a.shape[2:]
+                        ),
                         stacked,
                     )
                 )
-            if rem > 0:
-                parts.append(_reduce_events(n_full * block_samps, rem))
+                parts.append(
+                    jax.tree_util.tree_map(
+                        lambda a: a[n_full, pe_block - rem:], stacked
+                    )
+                )
+            else:
+                if n_full == 1:
+                    parts.append(_reduce_events(0, pe_block))
+                elif n_full > 1:
+                    _, stacked = lax.scan(
+                        _chunk_scan, None, jnp.arange(n_full) * block_samps
+                    )
+                    # (n_full, pe_block) -> (n_full*pe_block,) in event order.
+                    parts.append(
+                        jax.tree_util.tree_map(
+                            lambda a: a.reshape(
+                                (n_full * pe_block,) + a.shape[2:]
+                            ),
+                            stacked,
+                        )
+                    )
+                if rem > 0:
+                    parts.append(_reduce_events(n_full * block_samps, rem))
 
             event_lls = jnp.concatenate([p[0] for p in parts])
             event_vars = jnp.concatenate([p[1] for p in parts])
@@ -1431,26 +1509,48 @@ def darksiren_log_likelihood(
                 lambda a: a.reshape((m, nsamp) + a.shape[1:]), flat
             )
 
+        # Same chunk plan as the shipped path above, including the overlapping
+        # tail that keeps a single lowered shape (see :func:`_pe_chunk_plan`).
         block_samps = pe_block * nsamp
-        n_full = nEvents // pe_block
-        rem = nEvents - n_full * pe_block
-        parts = []
-        if n_full == 1:
-            parts.append(_pe_precompute_chunk(0, pe_block))
-        elif n_full > 1:
-            def _chunk_scan(_, chunk_idx):
-                return None, _pe_precompute_chunk(chunk_idx * block_samps, pe_block)
+        n_full, rem, overlap_tail = _pe_chunk_plan(nEvents, pe_block)
 
-            _, stacked = lax.scan(_chunk_scan, None, jnp.arange(n_full))
-            # (n_full, pe_block, nsamp, ...) -> (n_full*pe_block, nsamp, ...).
+        def _chunk_scan(_, s):
+            return None, _pe_precompute_chunk(s, pe_block)
+
+        parts = []
+        if overlap_tail:
+            starts = jnp.asarray(
+                [i * block_samps for i in range(n_full)]
+                + [(nEvents - pe_block) * nsamp]
+            )
+            _, stacked = lax.scan(_chunk_scan, None, starts)
+            # (n_full+1, pe_block, nsamp, ...): the full chunks in event order,
+            # then only the tail rows the full chunks did not already cover.
             parts.append(
                 jax.tree_util.tree_map(
-                    lambda a: a.reshape((n_full * pe_block,) + a.shape[2:]),
+                    lambda a: a[:n_full].reshape((n_full * pe_block,) + a.shape[2:]),
                     stacked,
                 )
             )
-        if rem > 0:
-            parts.append(_pe_precompute_chunk(n_full * block_samps, rem))
+            parts.append(
+                jax.tree_util.tree_map(lambda a: a[n_full, pe_block - rem:], stacked)
+            )
+        else:
+            if n_full == 1:
+                parts.append(_pe_precompute_chunk(0, pe_block))
+            elif n_full > 1:
+                _, stacked = lax.scan(
+                    _chunk_scan, None, jnp.arange(n_full) * block_samps
+                )
+                # (n_full, pe_block, nsamp, ...) -> (n_full*pe_block, nsamp, ...).
+                parts.append(
+                    jax.tree_util.tree_map(
+                        lambda a: a.reshape((n_full * pe_block,) + a.shape[2:]),
+                        stacked,
+                    )
+                )
+            if rem > 0:
+                parts.append(_pe_precompute_chunk(n_full * block_samps, rem))
         # Concatenate full-chunk + remainder pytrees along the events axis,
         # preserving global event order (== the historical arange(nEvents) scan
         # order).  A single part (the None default and any exact-division block)
