@@ -37,12 +37,17 @@ import argparse
 import warnings
 
 import numpy as np
-import h5py
-from tqdm import tqdm
 
-import jax
-import jax.numpy as jnp
-from jax import lax
+# ── Deferred heavy imports ────────────────────────────────────────────────────
+# h5py, tqdm, the JAX stack, the population registry, the population extractor
+# and the cosmology grid are all post-argparse: none is reachable from
+# ``_build_parser``.  Importing them at module scope cost ``--help`` ~6.4 s and
+# ~900 MB; they now load inside the functions that use them.
+# ``configure_jax_runtime()`` above MUST stay at module scope (see its comment:
+# x64 has to be on before the first JAX-dependent import).  The matplotlib /
+# seaborn / ``darksirens.utils.plotting`` block below stays eager because this
+# module applies the publication style as an import-time side effect that every
+# ``plot_*`` entry point -- including the ones tests call directly -- relies on.
 
 import matplotlib
 import matplotlib.cm
@@ -51,10 +56,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from darksirens.cli.common import _banner, _section, _row, _end, _ok, _warn
-from darksirens.gw.populations import pop_model_parser
-from darksirens.inference.pop_extractor import make_pop_extractor
 from darksirens.core.constants import H0_FID, OM0_FID, W0_FID, WA_FID
-from darksirens.utils.cosmology import dV_of_z
 from darksirens.io.results import result_is_complete
 from darksirens.utils.plotting import (
     set_publication_style,
@@ -145,6 +147,8 @@ def _merge_hdf5_metadata(settings, h5_file):
 
 
 def _load_run_hdf5(run_dir):
+    import h5py
+
     path = os.path.join(run_dir, "results.hdf5")
     settings = _load_settings(run_dir)
 
@@ -366,6 +370,10 @@ def batched_map(fn, samples, batch_size):
     Pads the final batch so every call shares one compiled shape, then trims.
     Returns a pytree (matching ``fn``'s output) stacked over all samples.
     """
+    import jax
+    import jax.numpy as jnp
+    from tqdm import tqdm
+
     samples = jnp.asarray(samples)
     ns = samples.shape[0]
     pad = (-ns) % batch_size
@@ -413,6 +421,12 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
     full 4-D grid is never held.  ``grid_chunk=None`` keeps the simple full-grid
     path (used for small grids, where it is cheap).
     """
+    import jax
+    import jax.numpy as jnp
+    from jax import lax
+
+    from darksirens.inference.pop_extractor import make_pop_extractor
+
     mgrid = jnp.asarray(mgrid)
     qgrid = jnp.asarray(qgrid)
     zgrid = jnp.asarray(zgrid)
@@ -528,6 +542,8 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
     nodes.  ``batch_size`` / ``grid_chunk`` / ``max_mem_gb`` override the
     automatic choices.
     """
+    import jax.numpy as jnp
+
     samples = jnp.asarray(samples)
     nm, nq, nz, nchi = mgrid.size, qgrid.size, zgrid.size, chigrid.size
     n_outer = int(nm * nq)
@@ -568,6 +584,8 @@ def posterior_predictive(pop_model, settings, samples, mgrid, qgrid, zgrid, chig
 
 
 def summarize_ppd(ppd_samples, limits=(5, 95)):
+    import jax.numpy as jnp
+
     lo, hi = limits
     median = jnp.median(ppd_samples, axis=0)
     lower = jnp.percentile(ppd_samples, lo, axis=0)
@@ -596,6 +614,11 @@ def redshift_rate_samples(pz_samples, zgrid, h0_samples,
     full ``dV_of_z`` so a sampled Om0/w0/wa actually reshapes the rate curve,
     not just its (normalization-cancelling) H0 rescaling.
     """
+    import jax
+    import jax.numpy as jnp
+
+    from darksirens.utils.cosmology import dV_of_z
+
     zg = jnp.asarray(zgrid)
     n = jnp.asarray(h0_samples).shape[0]
     om0_samples = jnp.broadcast_to(jnp.asarray(om0_samples), (n,))
@@ -894,6 +917,12 @@ def _build_parser():
 
 def main():
     args = _build_parser().parse_args()
+
+    # Past argparse: from here on the run is real, so pay for the heavy stack.
+    import jax
+
+    from darksirens.gw.populations import pop_model_parser
+
     os.makedirs(args.outdir, exist_ok=True)
     out = lambda name: os.path.join(args.outdir, name)
 

@@ -14,13 +14,11 @@ from typing import Mapping, Any
 import numpy as np
 
 
-PAIR_TAG_SELECTION_MODEL_KINDS = (
-    "constant",
-    "snr_only",
-    "snr_sky",
-    "snr_time",
-    "snr_time_sky",
-    "file",
+# The tuple itself lives in the dependency-free darksirens.core.constants so the
+# lensing CLI's argparse choices do not have to import this package; this stays
+# the canonical spelling.
+from darksirens.core.constants import (  # noqa: E402,F401
+    PAIR_TAG_SELECTION_MODEL_KINDS,
 )
 
 

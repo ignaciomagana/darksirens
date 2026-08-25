@@ -103,7 +103,10 @@ from jax import jit
 # This is a scalar stand-in for a distribution.  The physically complete model
 # marginalises T_0 over the lens redshift and the velocity-dispersion function
 # (or samples it as a hyperparameter); that is deliberately NOT done here.
-DEFAULT_T0_SECONDS = 5.36e6
+# The value itself lives in the dependency-free darksirens.core.constants so the
+# lensing CLI's argparse default does not have to import this package; this stays
+# the canonical spelling.
+from darksirens.core.constants import DEFAULT_T0_SECONDS  # noqa: E402,F401
 
 
 class SISLensParams(NamedTuple):

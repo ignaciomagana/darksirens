@@ -75,8 +75,10 @@ SIS_TIME_COLLAPSE_U_MAX = float(
     * np.polynomial.hermite.hermgauss(_TIME_COLLAPSE_HERMITE_NODES)[0][-1]
 )
 # max(sigma_delta_t)/T0 below this resolves to the delta-collapse mark; mirrors
-# cli/inference_lensing._TIME_DELTA_SHARPNESS.
-SIS_TIME_MARK_SHARPNESS = 0.02
+# cli/inference_lensing._TIME_DELTA_SHARPNESS.  The value lives in the
+# dependency-free darksirens.core.constants so that CLI's module-level mirror
+# does not have to import this package; this stays the canonical spelling.
+from darksirens.core.constants import SIS_TIME_MARK_SHARPNESS  # noqa: E402,F401
 
 
 def resolve_sis_time_mark_impl(
