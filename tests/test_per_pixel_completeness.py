@@ -638,7 +638,8 @@ def test_folded_occupied_budget_matches_the_scan(monkeypatch, with_fp):
     sums the rows once instead of scanning them per proposal.  A/B against the
     scan itself (``_fold_occupied_rows`` monkeypatched off) rather than against
     a re-derivation, so the claim is old-code-vs-new-code on the same inputs.
-    The two differ only in summation order.
+    The two differ only in how the rounding falls (a different factorization
+    of the same sum, not a different sum).
     """
     from darksirens.redshift import completion as completion_mod
 
@@ -737,6 +738,40 @@ def test_folded_ensemble_member_curves_use_that_member_s_own_rows():
         curves.append(V_m)
     # and the members are genuinely distinguishable, so the check has teeth
     assert not np.allclose(curves[0], curves[1])
+
+
+@pytest.mark.parametrize("n_keep,with_fp", [(1, True), (-3, False)])
+@pytest.mark.parametrize("c_mode", [C_MODE_SELECTION_STRUCT, None])
+def test_a_misaligned_q_table_is_refused_not_summed(n_keep, with_fp, c_mode):
+    """Row-count drift raises, on the folded branch exactly as on the scan.
+
+    The chunked scan caught this only by accident -- its reshape raises -- and
+    the fold has no such accident: ``jnp.sum(q_rows, axis=0)`` would total the
+    wrong number of rows, and a single Q row would BROADCAST over all of them,
+    both returning a silently corrupt (measurably negative, in the one-row
+    case) missing budget.  So the check is unconditional and both c_modes are
+    pinned here.
+    """
+    n_pix = 12
+    _, _, occ, logq, kw = _q_field_kw(n_pix)
+    if with_fp:
+        kw = _fp_kw(kw, occ, logq, n_pix)
+    q_bad = np.asarray(kw["field_lss_q"])[:n_keep]
+    assert q_bad.shape[0] != occ.size
+    em = _em(n_pix=n_pix, **dict(kw, field_lss_q=jnp.asarray(q_bad)))
+    with pytest.raises(ValueError, match="occupied rows"):
+        _field_missing_curve(_cosmo(), _survey(c_mode=c_mode), em)
+
+
+def test_a_misaligned_f_p_column_is_refused_not_broadcast():
+    """Same rule for ``field_f_p_occ``: one entry must not broadcast."""
+    n_pix = 12
+    _, _, occ, logq, kw = _q_field_kw(n_pix)
+    kw = _fp_kw(kw, occ, logq, n_pix)
+    f_bad = np.asarray(kw["field_f_p_occ"])[:1]
+    em = _em(n_pix=n_pix, **dict(kw, field_f_p_occ=jnp.asarray(f_bad)))
+    with pytest.raises(ValueError, match="field_f_p_occ"):
+        _field_missing_curve(_cosmo(), _survey(), em)
 
 
 def test_fp_q_refusals():

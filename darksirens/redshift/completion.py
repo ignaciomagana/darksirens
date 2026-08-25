@@ -2499,6 +2499,19 @@ def _field_missing_curve(
         mod_rows = jnp.asarray(em_catalog.field_delta_g)     # (n_occ, N_grid) f32
     else:
         mod_rows = jnp.zeros((n_occ, 1), dtype=jnp.float32)  # inert placeholder
+    # Fail loudly rather than broadcast: the modulation rows are indexed BY
+    # OCCUPIED ROW, so a table built against a different occupancy is a wrong
+    # answer, not a smaller one.  The chunked scan below used to catch this by
+    # accident (its reshape raises), but the folded branch would happily sum
+    # the wrong number of rows -- or broadcast a single row over all of them --
+    # and return a silently corrupt (even negative) missing budget.  Checked
+    # unconditionally so every branch fails the same way.
+    if int(mod_rows.shape[0]) != n_occ:
+        raise ValueError(
+            f"_field_missing_curve: the modulation rows have "
+            f"{int(mod_rows.shape[0])} entries but the field catalog has "
+            f"{n_occ} occupied rows; latent_q_rows / field_lss_q / "
+            f"field_delta_g are aligned with field_dN_obs_s ROW FOR ROW.")
     b_eff = survey.alpha_miss * survey.b_miss                # traced (delta_g mode)
 
     # Per-pixel selection fraction (field-level PR-2): C -> f_p * C on the
@@ -2550,6 +2563,14 @@ def _field_missing_curve(
         )
     f_occ_rows = (jnp.asarray(em_catalog.field_f_p_occ)
                   if has_fp else jnp.zeros((n_occ,), dtype=jnp.float32))
+    # Same fail-loudly rule as the modulation rows: f_p is per OCCUPIED ROW,
+    # and a length-1 (or short) column would broadcast silently in the fold.
+    if int(f_occ_rows.shape[0]) != n_occ:
+        raise ValueError(
+            f"_field_missing_curve: field_f_p_occ has "
+            f"{int(f_occ_rows.shape[0])} entries but the field catalog has "
+            f"{n_occ} occupied rows; f_p is aligned with field_dN_obs_s ROW "
+            f"FOR ROW.")
 
     # Legacy-floor number conservation, delta_g mode only (Q carries its own
     # mean-one renormalization, and the latent path generates a conserved Q).
@@ -2599,8 +2620,14 @@ def _field_missing_curve(
     # per-member twin of the occupied budget can go stale the way
     # ``field_lss_q_fp_empty_sum_members`` guards against for the empty side.
     # Accumulated in ``dN_exp.dtype`` (float64) exactly like the scan it
-    # replaces; the only difference is summation order (5e-16 relative at the
-    # shipped nside-64 shape).
+    # replaces -- no f32 accumulation anywhere -- but note this is a different
+    # FACTORIZATION, not merely a different summation order: ``Sum Q - Cbar
+    # Sum f_p Q`` subtracts two same-sign totals where the scan multiplied
+    # inside the row, so it is cancellation-prone as Cbar -> 1 with f_p -> 1.
+    # The absolute error stays at ~eps * Sum_p Q_p either way (5e-16 relative
+    # at the shipped nside-64 shape); only where the true V_occ is itself
+    # numerically zero does the RELATIVE error differ from the scan's, and
+    # there both forms are noise on a vanishing budget.
     if _fold_occupied_rows(aggregate, has_q, latent, stratified, has_dg):
         q_rows = mod_rows.astype(dN_exp.dtype)               # fused into reduces
         V_occ = jnp.sum(q_rows, axis=0)                      # Sum_p Q_p(z)
