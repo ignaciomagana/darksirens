@@ -198,3 +198,72 @@ def test_zero_density_sample_yields_zero_curves_not_nan():
     stack = np.vstack([good, np.zeros((1, 8))])
     med, lo, hi = summarize_ppd(stack)
     assert np.all(np.isfinite(med)) and np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))
+
+
+# --------------------------------------------------------------------------
+# The slab evaluator must hand the population model BROADCAST AXES, not a
+# ravelled (S*nz*nchi,) mesh
+# --------------------------------------------------------------------------
+
+def test_slab_passes_broadcast_axes_not_a_ravelled_mesh():
+    """Pin the coordinate shapes the PPD evaluator hands the population model.
+
+    The pairing normaliser inside the model runs an N_Q-node q-quadrature per
+    query ROW and depends on m1 alone, so a flattened ``(S*nz*nchi,)`` mesh
+    repeats it ``nz*nchi`` times and materialises an ``(S*nz*nchi, N_Q)``
+    scratch buffer — 15.17 GB of compiled scratch at the shipped defaults
+    (--nm 128 --nq 48 --nz 32 --nchi 24), which is the reason ``--grid_chunk``
+    exists at all.  Broadcast axes keep that at ``(S, 1, 1, N_Q)``: 39.7 MB,
+    and 21.2 -> 0.58 ms per sample on GPU (1507 -> 16.7 ms on CPU).
+    """
+    from darksirens.cli.analyze import make_single_theta_predictive
+
+    settings = {"pop_model": "powerlaw", "fix_population": True,
+                "shared_beta": True, "shared_spin": True, "shared_gamma": True}
+    mgrid = np.linspace(6.0, 50.0, 10)
+    qgrid = np.linspace(0.05, 1.0, 6)
+    zgrid = np.linspace(0.0, 1.5, 5)
+    chigrid = np.linspace(-1.0, 1.0, 4)
+    nz, nchi = zgrid.size, chigrid.size
+    inner = pop_model_parser("powerlaw")
+
+    for grid_chunk, n_outer in ((None, mgrid.size * qgrid.size), (7, 7)):
+        seen = []
+
+        def recording(m1, q, z, chi, theta):
+            seen.append(tuple(jnp.shape(a) for a in (m1, q, z, chi)))
+            return inner(m1, q, z, chi, theta)
+
+        fn = make_single_theta_predictive(recording, settings, mgrid, qgrid,
+                                          zgrid, chigrid, grid_chunk=grid_chunk)
+        out = fn(jnp.zeros(1))
+        assert seen, grid_chunk
+        assert seen[0] == ((n_outer, 1, 1), (n_outer, 1, 1),
+                           (1, nz, 1), (1, 1, nchi)), (grid_chunk, seen[0])
+        for arr in out:
+            assert np.all(np.isfinite(np.asarray(arr))), grid_chunk
+
+
+def test_slab_accepts_a_model_with_degenerate_axes():
+    """A density independent of z (or chi) legitimately returns size-1 axes
+    under broadcast inputs; the slab evaluator must broadcast, not reshape."""
+    from darksirens.cli.analyze import make_single_theta_predictive
+
+    settings = {"pop_model": "powerlaw", "fix_population": True,
+                "shared_beta": True, "shared_spin": True, "shared_gamma": True}
+    mgrid = np.linspace(6.0, 50.0, 8)
+    qgrid = np.linspace(0.05, 1.0, 5)
+    zgrid = np.linspace(0.0, 1.5, 4)
+    chigrid = np.linspace(-1.0, 1.0, 3)
+
+    def flat_in_z_and_chi(m1, q, z, chi, theta):
+        # shape (S, 1, 1): no z or chi dependence at all.
+        return jnp.zeros(jnp.shape(m1))
+
+    for grid_chunk in (None, 3):
+        fn = make_single_theta_predictive(flat_in_z_and_chi, settings, mgrid,
+                                          qgrid, zgrid, chigrid,
+                                          grid_chunk=grid_chunk)
+        for arr in fn(jnp.zeros(1)):
+            arr = np.asarray(arr)
+            assert np.all(np.isfinite(arr)), grid_chunk

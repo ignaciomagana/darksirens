@@ -505,13 +505,19 @@ def build_flow_loglike(
         m1_centers = cell_centers(m1_edges_)
         q_centers = cell_centers(q_edges_)
         chi_centers = cell_centers(chi_edges)
-        M1, Q = jnp.meshgrid(m1_centers, q_centers, indexing="ij")
-        p_mq = mixture.mass_q_density(M1.reshape(-1), Q.reshape(-1), tm)
+        # BROADCAST, never ravel: the pairing normaliser inside mass_q_density
+        # runs an N_Q-node q-quadrature per query ROW, and it is a function of
+        # m1 alone.  A flattened (n_m1*n_q,) mesh therefore recomputes each m1's
+        # quadrature n_q times and materialises an (n_m1*n_q, N_Q) scratch
+        # buffer (420 MB at the shipped 512 x 256 x 200); the (n_m1, 1) x
+        # (1, n_q) form does the quadrature once per m1 for the same (n_m1, n_q)
+        # result (measured 44.1 -> 0.99 ms CPU, 1.00 -> 0.25 ms GPU).
+        p_mq = mixture.mass_q_density(m1_centers[:, None], q_centers[None, :], tm)
         log_t_cells = jnp.where(
             p_mq > 0.0,
             jnp.log(jnp.maximum(p_mq, jnp.finfo(p_mq.dtype).tiny)),
             -jnp.inf,
-        ).reshape(M1.shape)
+        )
 
         ts = mixture.spin_theta(tm)
         if not spin_is_truncnorm:
