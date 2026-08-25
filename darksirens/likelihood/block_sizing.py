@@ -1029,15 +1029,22 @@ def _pending_for_catalog_source(src, *, n_grid: int, catalog_memory=None,
         pending += 2 * table_rows * int(n_grid) * 8
         # ── Q ENSEMBLE device copies ──
         # ``catalogs/lss.py`` loads ``logq_members`` as HOST numpy; the transfer
-        # happens in the factory (``jnp.asarray(full)`` then ``full_j[:, up]``),
-        # which holds the FULL table and the compact slice live at once.  Only
-        # count it while the table is still on the host — a caller that hands the
-        # factory a device array has already paid for it in ``free_bytes``.
+        # happens in the factory (``_gather_pixel_rows``).  Only count it while the
+        # table is still on the host — a caller that hands the factory a device
+        # array has already paid for it in ``free_bytes``.
+        # The factory now gathers a HOST table in NUMPY *before* the transfer, so
+        # only the compact ``(M, n_union, n_grid)`` block ever reaches the device:
+        # the full ``(M, n_pix, n_grid)`` copy is no longer pending.  A source with
+        # NO union-pixel map has nothing to gather to and is still transferred
+        # whole, so it keeps owing the full term.
         # (An already-compact table — ``lss_completion_indexing == 1`` — is
         # transferred whole with no slice; counting a slice anyway over-reserves,
         # which is the safe direction.)
         if not _is_device_resident(members):
-            pending += n_members * table_rows * int(n_grid) * 8      # full copy
+            compacted = (src.get("unique_pixels_pe") is not None
+                         or src.get("unique_pixels_sel") is not None)
+            if not compacted:
+                pending += n_members * table_rows * int(n_grid) * 8  # full copy
             n_slices = 1 if is_bundle else 2   # bundles alias one compact slice
             pending += n_slices * n_members * max(1, n_unique) * int(n_grid) * 8
         # ── field_lss_q_members (M, n_occupied, n_grid) float32 ──
@@ -1072,8 +1079,10 @@ def estimate_pending_static_bytes(data, *, n_grid: int, has_catalog: bool,
     * **compact union galaxy tables** — ``prepare_catalog_views`` gathers the
       full-sky rows to the PE-union-selection pixels at factory time.
     * **Q-ensemble device copies** — ``lss_completion_logq_members`` is loaded as
-      HOST numpy, so both the full ``(M, n_pix, n_grid)`` transfer and the compact
-      per-view slices are pending, not resident.
+      HOST numpy, so the per-view compact ``(M, n_union, n_grid)`` slices are
+      pending, not resident.  The factory gathers a host table in numpy *before*
+      the transfer, so the full ``(M, n_pix, n_grid)`` copy is pending only for a
+      source with no union-pixel map (nothing to gather to; transferred whole).
     * **field_lss_q_members** — the ``(M, n_occupied, n_grid)`` float32 rows the
       field-convention normaliser needs, also built at factory time on the flat path.
 

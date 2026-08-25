@@ -492,6 +492,28 @@ def test_pending_static_skips_device_resident_member_table():
     assert host > device
 
 
+def test_pending_static_drops_the_full_member_copy_when_pixels_are_compacted():
+    """The factory gathers a HOST ensemble in numpy BEFORE the transfer
+    (``factory._gather_pixel_rows``), so only the compact ``(M, n_union, n_grid)``
+    slices reach the device -- the full ``(M, n_pix, n_grid)`` copy is no longer
+    pending.  A source with no union-pixel map has nothing to gather to and is
+    still transferred whole, so it keeps owing the full term."""
+    cm = {"unique_pe_pixels": 2, "unique_sel_pixels": 2}
+    members = np.zeros((3, 5, 30), np.float64)
+    uncompacted = estimate_pending_static_bytes(
+        {"lss_completion_logq_members": members, "catalog_memory": cm},
+        n_grid=30, has_catalog=True, catalog_memory=cm)
+    compacted = estimate_pending_static_bytes(
+        {"lss_completion_logq_members": members, "catalog_memory": cm,
+         "unique_pixels_pe": np.arange(2, dtype=np.int32),
+         "unique_pixels_sel": np.arange(2, dtype=np.int32)},
+        n_grid=30, has_catalog=True, catalog_memory=cm)
+    full_copy = 3 * 5 * 30 * 8
+    assert uncompacted - compacted == full_copy
+    # What remains is the KDE caches, base_miss and the two compact slices.
+    assert compacted == (2 + 2) * 30 * 8 + 2 * 5 * 30 * 8 + 2 * 3 * 4 * 30 * 8
+
+
 def test_pending_static_counts_field_member_rows():
     """The field convention adds an (M, n_occupied, n_grid) float32 table, also
     built at factory time (K=1 flat path)."""
