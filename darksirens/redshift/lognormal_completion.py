@@ -155,24 +155,39 @@ def _laplace_diag_variance(lam, pk, bias, prior_strength):
     fraction of covered bins, so pixels at fixed z got discontinuously
     different Jensen boosts driven by grid coverage rather than by data.
 
-    Cost is ``O(n_rows * n_grid^2)`` (chunked over rows to bound the
-    intermediate), i.e. milliseconds per row against the seconds of that row's
-    MAP solve.
+    Cost is ``O(n_occupied * n_grid)`` with ``n_occupied`` the number of bins
+    whose ``lambda`` is nonzero, i.e. milliseconds per row against the seconds
+    of that row's MAP solve.  The result is a function of the SCALAR
+    ``lambda[r, v]`` alone, so the bins where it is exactly zero -- every grid
+    node above the survey depth, plus the wrap pad, typically a fifth of the
+    table -- all share one precomputed value, and the rest are evaluated as a
+    flat 2-D block rather than a (chunk, n_grid, n_grid) cube.  The arithmetic
+    and its reduction order are unchanged (numpy's pairwise sum runs over the
+    same contiguous last axis), so this is bit-identical to the cube form.
     """
     lam = np.atleast_2d(np.asarray(lam, dtype=float))
     pk = np.asarray(pk, dtype=float)
     n_rows, n_grid = lam.shape
     A = float(prior_strength) / pk                       # (n_grid,)
     b2 = float(bias) * float(bias)
-    out = np.empty((n_rows, n_grid), dtype=float)
-    # ~64 MB of (chunk, n_grid, n_grid) float64 intermediate at a time.
-    chunk = max(1, int(8_000_000 // max(n_grid * n_grid, 1)))
-    for start in range(0, n_rows, chunk):
-        blk = lam[start:start + chunk]                   # (c, n_grid)
-        H = A[None, None, :] + b2 * blk[:, :, None]      # (c, n_grid, n_grid)
-        out[start:start + chunk] = np.mean(
-            1.0 / np.maximum(H, 1e-30), axis=-1)
-    return out
+    flat = lam.reshape(-1)
+    occupied = flat != 0.0
+    vals = flat[occupied]                                # (n_occupied,)
+    # Every data-free bin shares the lambda = 0 answer -- the effective PRIOR
+    # variance -- so it is computed once and broadcast.
+    out = np.full(flat.size, float(np.mean(1.0 / np.maximum(A, 1e-30))),
+                  dtype=float)
+    res = np.empty(vals.size, dtype=float)
+    # ~64 MB of (chunk, n_grid) float64 intermediate at a time, floored and
+    # inverted IN PLACE so neither step allocates a second one.
+    chunk = max(1, int(8_000_000 // max(n_grid, 1)))
+    for start in range(0, vals.size, chunk):
+        H = A[None, :] + b2 * vals[start:start + chunk, None]    # (c, n_grid)
+        np.maximum(H, 1e-30, out=H)
+        np.reciprocal(H, out=H)
+        res[start:start + chunk] = np.mean(H, axis=-1)
+    out[occupied] = res
+    return out.reshape(n_rows, n_grid)
 
 
 # ------------------------------------------------------------
@@ -192,23 +207,24 @@ def _map_solve_row(nobs, c_row, dN_exp_row, pk, bias, prior_strength, shift, max
     mask = rate_base > 0.0
     log_rate = np.where(mask, np.log(np.where(mask, rate_base, 1.0)), 0.0)
 
-    def _neg_log_post(s):
+    # FUSED value+gradient (jac=True).  Given a separate `jac` callable scipy's
+    # ScalarFunction updates value and gradient independently, so it re-ran the
+    # `exp` AND a second length-n_grid `np.fft.fft(s)` at the SAME x on every
+    # one of the ~10k L-BFGS-B evaluations per row.  Fusing them keeps every
+    # operation and its order identical -- only the number of times each runs
+    # changes -- so the iterate path is bit-for-bit the old one.
+    def _fun_and_grad(s):
         log_lam = log_rate + (b * s - shift)
         lam = np.where(mask, np.exp(log_lam), 0.0)
         data = np.sum(lam - nobs * np.where(mask, log_lam, 0.0))
         sk = np.fft.fft(s)
         prior = 0.5 * ps * np.sum((np.abs(sk) ** 2) / pk) / n_grid
-        return float(data + prior)
-
-    def _grad(s):
-        log_lam = log_rate + (b * s - shift)
-        lam = np.where(mask, np.exp(log_lam), 0.0)
         g_data = np.where(mask, b * (lam - nobs), 0.0)
-        g_prior = ps * np.real(np.fft.ifft(np.fft.fft(s) / pk))
-        return g_data + g_prior
+        g_prior = ps * np.real(np.fft.ifft(sk / pk))
+        return float(data + prior), g_data + g_prior
 
     res = optimize.minimize(
-        _neg_log_post, np.zeros(n_grid), jac=_grad, method="L-BFGS-B",
+        _fun_and_grad, np.zeros(n_grid), jac=True, method="L-BFGS-B",
         # maxfun: scipy's DEFAULT (15000) silently capped every large
         # --maxiter run.  L-BFGS-B stops with status=1 ("TOTAL NO. of f
         # AND g EVALUATIONS EXCEEDS LIMIT") once function EVALUATIONS --
