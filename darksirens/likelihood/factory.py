@@ -101,6 +101,65 @@ def _to_jax(data: dict, key: str) -> jnp.ndarray:
     return jnp.asarray(val) if val is not None else jnp.array([0.0])
 
 
+def _as_array(full):
+    """``full`` with a ``.shape``, without moving a device array to the host."""
+    return full if hasattr(full, "devices") else np.asarray(full)
+
+
+def _gather_pixel_rows(full, unique_pixels, *, what: str, unit: str):
+    """Gather the PIXEL axis (``shape[-2]``) of a Q_LSS table/ensemble to
+    ``unique_pixels``, keeping the FULL table off the device when it is on the host.
+
+    ``catalog_views`` deliberately carries the global ``(n_pix, n_grid)`` table and
+    the ``(M, n_pix, n_grid)`` ensemble UNBARRIERED -- "likelihood.py slices it to
+    the per-view union pixels so only the compact block reaches the device".  Doing
+    ``jnp.asarray(full)`` first and indexing afterwards transfers the whole table
+    and then holds it live alongside the compact slice.
+
+    THIS IS A MEMORY FIX, NOT A SPEED FIX -- the trade goes the other way in wall
+    time, on both backends.  MEASURED at the DESI ensemble shape (M=8,
+    n_pix=49152, N_grid=1086 f64, half the pixels in the union; jax 0.4.34, jit
+    warm, host pages pre-touched, fresh process per arm, ``block_until_ready``):
+
+        H100 NVL   device-first (old) 0.31 s, peak 6.833 GB
+                   numpy-first (this) 0.58 s, peak 3.416 GB
+        CPU        device-first (old) 0.32 s
+                   numpy-first (this) 0.74 s
+
+    i.e. peak DEVICE memory halves -- the full 3.42 GB table never becomes a
+    device operand, only the 1.71 GB compact block does -- at roughly 2x the wall
+    time of a step that runs ONCE per likelihood build, not per evaluation.  The
+    mirror image is on the host: numpy now holds the full table and the compact
+    block at once, so host peak rises by the size of the compact block (~1.7 GB
+    here) as the device peak falls.  Take the trade because the device is the
+    scarce side at DESI scale (it is what ``block_sizing`` budgets), not because
+    the compaction got faster.
+
+    A caller that already handed us a DEVICE array
+    (``darksirens/cli/diagnose_lognormal_completion.py``,
+    ``scripts/profile_member_marginalization.py``) keeps the on-device gather:
+    pulling it back to the host to slice would be strictly worse.
+
+    The bounds check covers BOTH ends.  JAX silently CLAMPS an out-of-range gather
+    index while numpy WRAPS a negative one, so a corrupt pixel array would change
+    meaning with the gather backend; it is refused here instead.
+    """
+    n_rows = int(full.shape[-2])
+    if hasattr(full, "devices"):
+        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
+        hi, lo = int(jnp.max(up)), int(jnp.min(up))
+    else:
+        up = np.asarray(unique_pixels, dtype=np.int64)
+        hi, lo = (int(up.max()), int(up.min())) if up.size else (-1, 0)
+    if hi >= n_rows or lo < 0:
+        raise ValueError(
+            f"LSS completion {what} has {n_rows} {unit} but a catalog "
+            f"pixel index reaches {hi if hi >= n_rows else lo} "
+            "(rebuild Q over the full nside)."
+        )
+    return full[..., up, :]
+
+
 # ----------------------------------------------------------- the latent seam
 #
 # ``lss_field_mode='latent'`` (field-level PR-5) replaces the resident
@@ -1139,32 +1198,27 @@ def _make_mixture_likelihood(
         full = views.lss_completion_logq
         if full is None:
             return None, 0
-        full_j = jnp.asarray(full)
+        full = _as_array(full)
         idx = int(views.lss_completion_indexing or 0)
         if idx == 1:
             # Stamped compact: rows must already be union-pixel-aligned (same
             # pre-JIT validation as make_likelihood._compact_lss_q — a
             # mis-stamped global table would be consumed positionally).
-            if unique_pixels is not None and int(full_j.shape[0]) != int(
+            if unique_pixels is not None and int(full.shape[0]) != int(
                     jnp.asarray(unique_pixels).shape[0]):
                 raise ValueError(
                     f"LSS completion table is stamped 'compact' but has "
-                    f"{int(full_j.shape[0])} rows for "
+                    f"{int(full.shape[0])} rows for "
                     f"{int(jnp.asarray(unique_pixels).shape[0])} union pixels; "
                     "a compact table must be row-aligned with this run's "
                     "union pixel set. The builders always emit 'global' "
                     "tables — rebuild the completion or fix the stamp."
                 )
-            return barrier(full_j), 1
+            return barrier(full), 1
         if unique_pixels is None:
-            return barrier(full_j), idx
-        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
-        if int(jnp.max(up)) >= full_j.shape[0]:
-            raise ValueError(
-                f"LSS completion table has {full_j.shape[0]} rows but a catalog "
-                f"pixel index reaches {int(jnp.max(up))} (rebuild Q over the full nside)."
-            )
-        return barrier(full_j[up]), 1
+            return barrier(full), idx
+        return barrier(_gather_pixel_rows(
+            full, unique_pixels, what="table", unit="rows")), 1
 
     def _compact_lss_members_for(views, unique_pixels):
         # Per-catalog analogue of make_likelihood._compact_lss_members: slice
@@ -1172,30 +1226,24 @@ def _make_mixture_likelihood(
         full = views.lss_completion_logq_members
         if full is None:
             return None
-        full_j = jnp.asarray(full)
+        full = _as_array(full)
         idx = int(views.lss_completion_indexing or 0)
         if idx == 1:
-            if unique_pixels is not None and int(full_j.shape[1]) != int(
+            if unique_pixels is not None and int(full.shape[1]) != int(
                     jnp.asarray(unique_pixels).shape[0]):
                 raise ValueError(
                     f"LSS completion ensemble is stamped 'compact' but has "
-                    f"{int(full_j.shape[1])} pixel rows for "
+                    f"{int(full.shape[1])} pixel rows for "
                     f"{int(jnp.asarray(unique_pixels).shape[0])} union pixels; "
                     "a compact ensemble must be row-aligned with this run's "
                     "union pixel set. The builders always emit 'global' "
                     "tables — rebuild the completion or fix the stamp."
                 )
-            return barrier(full_j)
+            return barrier(full)
         if unique_pixels is None:
-            return barrier(full_j)
-        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
-        if int(jnp.max(up)) >= full_j.shape[1]:
-            raise ValueError(
-                f"LSS completion ensemble has {full_j.shape[1]} pixels but a "
-                f"catalog pixel index reaches {int(jnp.max(up))} (rebuild Q "
-                "over the full nside)."
-            )
-        return barrier(full_j[:, up])
+            return barrier(full)
+        return barrier(_gather_pixel_rows(
+            full, unique_pixels, what="ensemble", unit="pixels"))
 
     em_catalogs_pe = []
     em_catalogs_sel = []
@@ -1657,7 +1705,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         full = catalogs.lss_completion_logq
         if full is None:
             return None, 0
-        full_j = jnp.asarray(full)
+        full = _as_array(full)
         idx = int(catalogs.lss_completion_indexing or 0)
         if idx == 1:
             # Stamped compact: rows must already be union-pixel-aligned. A
@@ -1665,27 +1713,22 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             # its rows consumed positionally as union rows — wrong Q per
             # event when the shapes coincide, a traced-index crash when they
             # don't — so the row count is validated here, before JIT.
-            if unique_pixels is not None and int(full_j.shape[0]) != int(
+            if unique_pixels is not None and int(full.shape[0]) != int(
                     jnp.asarray(unique_pixels).shape[0]):
                 raise ValueError(
                     f"LSS completion table is stamped 'compact' but has "
-                    f"{int(full_j.shape[0])} rows for "
+                    f"{int(full.shape[0])} rows for "
                     f"{int(jnp.asarray(unique_pixels).shape[0])} union pixels; "
                     "a compact table must be row-aligned with this run's "
                     "union pixel set. The builders always emit 'global' "
                     "tables — rebuild the completion or fix the stamp."
                 )
-            return barrier(full_j), 1
+            return barrier(full), 1
         if unique_pixels is None:
             # legacy full catalog (rows are global pixels)
-            return barrier(full_j), idx
-        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
-        if int(jnp.max(up)) >= full_j.shape[0]:
-            raise ValueError(
-                f"LSS completion table has {full_j.shape[0]} rows but a catalog "
-                f"pixel index reaches {int(jnp.max(up))} (rebuild Q over the full nside)."
-            )
-        return barrier(full_j[up]), 1
+            return barrier(full), idx
+        return barrier(_gather_pixel_rows(
+            full, unique_pixels, what="table", unit="rows")), 1
 
     # Flat union path: prepare_catalog_views aliases the PE and selection views
     # onto ONE union galaxy table / unique-pixel array, so every per-view slice
@@ -1712,31 +1755,26 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         full = catalogs.lss_completion_logq_members
         if full is None:
             return None
-        full_j = jnp.asarray(full)
+        full = _as_array(full)
         idx = int(catalogs.lss_completion_indexing or 0)
         if idx == 1:
             # Same pre-JIT row-alignment validation as _compact_lss_q, on the
             # ensemble's pixel axis.
-            if unique_pixels is not None and int(full_j.shape[1]) != int(
+            if unique_pixels is not None and int(full.shape[1]) != int(
                     jnp.asarray(unique_pixels).shape[0]):
                 raise ValueError(
                     f"LSS completion ensemble is stamped 'compact' but has "
-                    f"{int(full_j.shape[1])} pixel rows for "
+                    f"{int(full.shape[1])} pixel rows for "
                     f"{int(jnp.asarray(unique_pixels).shape[0])} union pixels; "
                     "a compact ensemble must be row-aligned with this run's "
                     "union pixel set. The builders always emit 'global' "
                     "tables — rebuild the completion or fix the stamp."
                 )
-            return barrier(full_j)
+            return barrier(full)
         if unique_pixels is None:
-            return barrier(full_j)
-        up = jnp.asarray(unique_pixels, dtype=jnp.int32)
-        if int(jnp.max(up)) >= full_j.shape[1]:
-            raise ValueError(
-                f"LSS completion ensemble has {full_j.shape[1]} pixels but a catalog "
-                f"pixel index reaches {int(jnp.max(up))} (rebuild Q over the full nside)."
-            )
-        return barrier(full_j[:, up])
+            return barrier(full)
+        return barrier(_gather_pixel_rows(
+            full, unique_pixels, what="ensemble", unit="pixels"))
 
     lss_qm_pe = _compact_lss_members(catalogs.unique_pixels_pe)
     lss_qm_sel = (
