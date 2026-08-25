@@ -80,7 +80,7 @@ def test_transform_maps_the_whole_cube_into_the_constrained_region(gwtc5_space):
     transform = make_prior_transform(lower, upper, kinds, joint_constraints=jc)
 
     u = _rng_cube(4000, len(labels))
-    theta = np.asarray(jnp.stack([transform(u[k]) for k in range(u.shape[0])]))
+    theta = np.asarray(transform(u))
 
     lam0 = theta[:, labels.index(L0)]
     lam1 = theta[:, labels.index(L1)]
@@ -108,7 +108,7 @@ def test_transform_reproduces_the_declared_prior_moments(gwtc5_space):
 
     n = 20000
     u = _rng_cube(n, len(labels), seed=1)
-    theta = np.asarray(jnp.stack([transform(u[k]) for k in range(n)]))
+    theta = np.asarray(transform(u))
 
     lam0 = theta[:, labels.index(L0)]
     lam1 = theta[:, labels.index(L1)]
@@ -151,8 +151,8 @@ def test_conditional_upper_is_exactly_the_1_over_m1_minus_3_reweighting(
 
     n = 200000
     u = _rng_cube(n, len(labels), seed=3)
-    m1_cond = np.asarray(jnp.stack([cond(u[k]) for k in range(n)]))[:, i1]
-    m1_sort = np.asarray(jnp.stack([sort(u[k]) for k in range(n)]))[:, i1]
+    m1_cond = np.asarray(cond(u))[:, i1]
+    m1_sort = np.asarray(sort(u))[:, i1]
 
     edges = np.linspace(a, b, 8)
     centres = 0.5 * (edges[:-1] + edges[1:])
@@ -181,7 +181,7 @@ def test_conditional_upper_marginal_is_the_flat_table5_prior(gwtc5_space):
 
     n = 100000
     u = _rng_cube(n, len(labels), seed=4)
-    theta = np.asarray(jnp.stack([transform(u[k]) for k in range(n)]))
+    theta = np.asarray(transform(u))
     m1 = theta[:, i1]
     m2 = theta[:, i2]
 
@@ -261,15 +261,15 @@ def test_constant_likelihood_evidence_is_unbiased(gwtc5_space):
     transform = make_prior_transform(lower, upper, kinds, joint_constraints=jc)
 
     def toy_L(theta):
-        lam0 = theta[labels.index(L0)]
-        lam1 = theta[labels.index(L1)]
-        m1l = theta[labels.index(M1LOW)]
-        m2l = theta[labels.index(M2LOW)]
+        lam0 = theta[..., labels.index(L0)]
+        lam1 = theta[..., labels.index(L1)]
+        m1l = theta[..., labels.index(M1LOW)]
+        m2l = theta[..., labels.index(M2LOW)]
         valid = (lam0 + lam1 <= 1.0) & (m2l <= m1l)
         return np.where(valid, 1.0, 0.0)
 
     u = _rng_cube(4000, len(labels), seed=2)
-    L = np.array([float(toy_L(np.asarray(transform(u[k])))) for k in range(4000)])
+    L = toy_L(np.asarray(transform(u)))
     # All mass lands in the valid region: logZ = 0 exactly, not log(1/4).
     np.testing.assert_allclose(np.log(np.mean(L)), 0.0, atol=1e-12)
 

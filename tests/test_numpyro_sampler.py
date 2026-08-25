@@ -344,3 +344,145 @@ def test_numpyro_nuts_multitracer_k2_fcat2_samples_in_bounds():
     assert np.all(np.isfinite(samples))
     fcat_2 = samples[:, labels.index("fcat_2")]
     assert np.all(fcat_2 >= 0.0) and np.all(fcat_2 <= 1.0)
+
+
+# ---------------------------------------------------------------------------
+# log_likelihood is recovered AFTER the run, not from inside the collection
+# scan (perf review rank 7).
+#
+# numpyro replays this model once per collected draw NO MATTER WHAT: run_sampler
+# builds the sites from jnp arrays, so every ``dist.Uniform(low=lower[i], ...)``
+# has a traced ``_Interval`` bound and ``_get_model_transforms`` sets
+# replay_model=True for any bound that is not a python int/float
+# (infer/util.py:518-525).  What a ``numpyro.deterministic`` site adds is not
+# the replay but its cost: it is the only thing that keeps ``likelihood(theta)``
+# LIVE in the replayed trace, since ``constrain_fn`` returns deterministic sites
+# while ``numpyro.factor``'s value is discarded.  Drop the site and XLA
+# eliminates the likelihood from the postprocess graph; the array comes back
+# from one ``lax.map`` pass over the retained draws instead.
+#
+# Hence: the site is dropped UNCONDITIONALLY.  A conditional_upper pair is NOT
+# an exception -- it forces the replay, which was already forced, and leaving
+# the site in would keep exactly the cost this removes.
+# ---------------------------------------------------------------------------
+
+
+def _reduction_likelihood(theta):
+    """Reduction-order sensitive on purpose.
+
+    A 4096-term ``jnp.sum`` gives a different answer batched than per row, so
+    a ``vmap``-based recovery would NOT reproduce the per-draw replay and the
+    exact comparisons below would fail.  ``lax.map`` evaluates one draw at a
+    time, exactly as the replay did.
+    """
+    theta = jnp.asarray(theta)
+    x = jnp.arange(4096, dtype=jnp.result_type(float)) * 1e-3
+    return -jnp.sum(jnp.sin(x * theta[0]) * jnp.cos(x * theta[1] + 0.5))
+
+
+def _spy_on_deterministic(monkeypatch):
+    """Record the names passed to ``numpyro.deterministic`` during a run."""
+    import numpyro
+
+    recorded = []
+    real_deterministic = numpyro.deterministic
+
+    def _spy(name, value):
+        recorded.append(name)
+        return real_deterministic(name, value)
+
+    monkeypatch.setattr(numpyro, "deterministic", _spy)
+    return recorded
+
+
+def _reduction_nuts_run(monkeypatch, joint_constraints=None, samples=6):
+    """Tiny 2-D NUTS run; returns (results, deterministic site names)."""
+    recorded = _spy_on_deterministic(monkeypatch)
+
+    labels = ["a", "b"]
+    lower = np.array([0.0, 0.0])
+    upper = np.array([4.0, 4.0])
+
+    opts = SimpleNamespace(**{**_TINY_NUTS_OPTS, "nuts_warmup": 4,
+                              "nuts_samples": samples})
+    results = run_sampler(
+        "numpyro", _reduction_likelihood, make_prior_transform(lower, upper),
+        labels, lower, upper, opts, joint_constraints=joint_constraints,
+    )
+    return results, recorded
+
+
+def test_numpyro_model_replay_is_forced_by_the_jnp_prior_bounds():
+    """The premise behind the fix, pinned so it cannot be re-guarded wrongly.
+
+    ``run_sampler`` passes ``lower[i]``/``upper[i]`` from jnp arrays, and
+    numpyro sets replay_model=True for ANY interval bound that is not a python
+    int/float.  So the replay is forced for every darksirens NUTS run, with or
+    without a conditional_upper pair -- dropping the deterministic site never
+    removes the replay, only the likelihood inside it.
+    """
+    import numpyro
+    import numpyro.distributions as dist
+    from numpyro.infer.util import _get_model_transforms
+
+    lower = jnp.asarray([0.0])
+    upper = jnp.asarray([1.0])
+
+    def traced_bounds():           # how run_sampler builds its sites
+        x = numpyro.sample("x", dist.Uniform(low=lower[0], high=upper[0]))
+        numpyro.factor("likelihood", -x ** 2)
+
+    def python_bounds():           # what a benchmark proxy usually builds
+        x = numpyro.sample("x", dist.Uniform(low=0.0, high=1.0))
+        numpyro.factor("likelihood", -x ** 2)
+
+    key = jax.random.PRNGKey(0)
+    _, replay_traced, _, _ = _get_model_transforms(
+        numpyro.handlers.seed(traced_bounds, key))
+    _, replay_python, _, _ = _get_model_transforms(
+        numpyro.handlers.seed(python_bounds, key))
+    assert replay_traced is True, (
+        "jnp prior bounds no longer force the model replay -- re-measure "
+        "rank 7 before assuming a deterministic site is what triggers it"
+    )
+    assert replay_python is False
+
+
+def test_numpyro_log_likelihood_is_not_replayed_per_draw(monkeypatch):
+    results, recorded = _reduction_nuts_run(monkeypatch)
+
+    assert "log_likelihood" not in recorded, (
+        "the deterministic site is back: it keeps the full likelihood live in "
+        "the per-draw model replay, which is the cost rank 7 removes"
+    )
+    log_l = np.asarray(results["log_likelihood"])
+    samples = np.asarray(results["samples"])
+    assert log_l.shape == (samples.shape[0],)
+    # The recovered array must be the likelihood AT the retained draws, to the
+    # last bit -- it is what the replay used to store, one draw at a time.
+    direct = np.array(
+        [float(_reduction_likelihood(jnp.asarray(row))) for row in samples])
+    np.testing.assert_array_equal(log_l, direct)
+
+
+def test_numpyro_log_likelihood_is_not_replayed_with_conditional_upper(monkeypatch):
+    """A conditional_upper pair is not an exception.
+
+    Its traced upper bound forces replay_model=True -- but so do the ordinary
+    uniform bounds (see the test above), so the site would buy nothing and
+    cost a live likelihood per draw.  It is dropped here too, and the post-hoc
+    pass reproduces the same values.
+    """
+    results, recorded = _reduction_nuts_run(
+        monkeypatch, joint_constraints=[("conditional_upper", (0, 1))],
+    )
+
+    assert "log_likelihood" not in recorded
+    log_l = np.asarray(results["log_likelihood"])
+    samples = np.asarray(results["samples"])
+    assert log_l.shape == (samples.shape[0],)
+    direct = np.array(
+        [float(_reduction_likelihood(jnp.asarray(row))) for row in samples])
+    np.testing.assert_array_equal(log_l, direct)
+    # The conditional really is enforced: a <= b on every draw.
+    assert np.all(samples[:, 0] <= samples[:, 1] + 1e-12)

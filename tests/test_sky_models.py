@@ -687,7 +687,7 @@ def test_dipole_ball_cube_map_covers_the_ball_uniformly():
     transform = make_prior_transform(lower, upper, kinds, joint_constraints=jc)
 
     u = jnp.asarray(np.random.default_rng(26).uniform(size=(5000, 3)))
-    d = np.asarray(jnp.stack([transform(u[k]) for k in range(5000)]))
+    d = np.asarray(transform(u))
     r = np.linalg.norm(d, axis=1)
     assert np.all(r <= 1.0 + 1e-12)
     np.testing.assert_allclose(np.mean(r), 0.75, atol=0.01)
