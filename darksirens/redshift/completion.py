@@ -2406,6 +2406,21 @@ def field_global_log_Z(
     return jnp.log(jnp.maximum(Z, 1e-300))
 
 
+def _fold_occupied_rows(aggregate, has_q, latent, stratified, has_dg) -> bool:
+    """Is the occupied-row budget of :func:`_field_missing_curve` foldable?
+
+    True exactly on the configuration where every occupied row's curve is
+    ``(1 - f_p Cbar(z)) Q_p(z)`` with a per-row DATA constant ``Q_p`` -- an
+    aggregate selection curve, a loaded Q table, no strata, no ``delta_g``, no
+    latent seam -- so the per-pixel pass collapses to two Cbar-free row sums.
+    All five arguments are static (pytree structure), so this is a trace-time
+    Python branch and never a traced one.  Also the A/B hook the tests use to
+    force the scan back on for the same inputs.
+    """
+    return bool(aggregate and has_q and not latent
+                and not stratified and not has_dg)
+
+
 def _field_missing_curve(
     cosmo: CosmoParams,
     survey: SurveyParams,
@@ -2565,37 +2580,68 @@ def _field_missing_curve(
             lss = 1.0
         return (1.0 - C) * lss                               # (N_grid,)
 
-    # Chunked scan over occupied rows: pad to a whole number of ``chunk_size``
-    # blocks and mask the padding so padded (all-zero) rows -- which would
-    # otherwise read as empty pixels with C == 0 -- contribute nothing.
-    pad = (-n_occ) % chunk_size
-    n_pad = n_occ + pad
-    obs_pad = jnp.pad(field_obs, ((0, pad), (0, 0)))
-    mod_pad = jnp.pad(mod_rows, ((0, pad), (0, 0)))
-    strat_rows = (strat_occ.astype(jnp.int32) if stratified
-                  else jnp.zeros(n_occ, dtype=jnp.int32))
-    strat_pad = jnp.pad(strat_rows, (0, pad))
-    valid = jnp.arange(n_pad) < n_occ
-    n_chunks = n_pad // chunk_size if chunk_size > 0 else 0
-    obs_chunks = obs_pad.reshape(n_chunks, chunk_size, zgrid.size)
-    mod_chunks = mod_pad.reshape(n_chunks, chunk_size, mod_rows.shape[1])
-    strat_chunks = strat_pad.reshape(n_chunks, chunk_size)
-    valid_chunks = valid.reshape(n_chunks, chunk_size)
+    # FOLDED occupied-row budget.  Under an AGGREGATE selection curve with a Q
+    # table -- no strata, no delta_g, no latent seam -- ``_row_V`` above is
+    # exactly ``(1 - f_p Cbar(z)) Q_p(z)`` with ``Q_p`` a per-row DATA constant
+    # and ``obs_row`` dead, so the whole per-pixel pass collapses to two row
+    # sums that Cbar never enters:
+    #     V_occ(z) = Sum_p Q_p(z) - Cbar(z) * Sum_p f_p Q_p(z)
+    # (and ``(1 - Cbar) Sum_p Q_p`` without f_p).  This is the occupied-side
+    # twin of the empty-pixel algebra below (``field_lss_q_empty_sum`` /
+    # ``field_lss_q_fp_empty_sum``), and the predicate is STATIC
+    # (pytree-structure), so every configuration whose rows really do carry a
+    # per-row C or a per-row-varying Q -- per-pixel C, delta_g, stratified,
+    # latent -- keeps the scan below untouched.
+    #
+    # The sums are taken over ``mod_rows`` ITSELF rather than a precomputed
+    # catalog leaf, which is what makes this safe under a Q ENSEMBLE: member
+    # m's normalizer folds the rows :func:`_replace_member_q` swapped in, so no
+    # per-member twin of the occupied budget can go stale the way
+    # ``field_lss_q_fp_empty_sum_members`` guards against for the empty side.
+    # Accumulated in ``dN_exp.dtype`` (float64) exactly like the scan it
+    # replaces; the only difference is summation order (5e-16 relative at the
+    # shipped nside-64 shape).
+    if _fold_occupied_rows(aggregate, has_q, latent, stratified, has_dg):
+        q_rows = mod_rows.astype(dN_exp.dtype)               # fused into reduces
+        V_occ = jnp.sum(q_rows, axis=0)                      # Sum_p Q_p(z)
+        if has_fp:
+            V_occ = V_occ - C_bar * jnp.sum(
+                f_occ_rows.astype(dN_exp.dtype)[:, None] * q_rows, axis=0)
+        else:
+            V_occ = (1.0 - C_bar) * V_occ
+    else:
+        # Chunked scan over occupied rows: pad to a whole number of
+        # ``chunk_size`` blocks and mask the padding so padded (all-zero) rows
+        # -- which would otherwise read as empty pixels with C == 0 --
+        # contribute nothing.
+        pad = (-n_occ) % chunk_size
+        n_pad = n_occ + pad
+        obs_pad = jnp.pad(field_obs, ((0, pad), (0, 0)))
+        mod_pad = jnp.pad(mod_rows, ((0, pad), (0, 0)))
+        strat_rows = (strat_occ.astype(jnp.int32) if stratified
+                      else jnp.zeros(n_occ, dtype=jnp.int32))
+        strat_pad = jnp.pad(strat_rows, (0, pad))
+        valid = jnp.arange(n_pad) < n_occ
+        n_chunks = n_pad // chunk_size if chunk_size > 0 else 0
+        obs_chunks = obs_pad.reshape(n_chunks, chunk_size, zgrid.size)
+        mod_chunks = mod_pad.reshape(n_chunks, chunk_size, mod_rows.shape[1])
+        strat_chunks = strat_pad.reshape(n_chunks, chunk_size)
+        valid_chunks = valid.reshape(n_chunks, chunk_size)
 
-    f_pad_rows = jnp.pad(f_occ_rows, (0, pad))
-    f_chunks = f_pad_rows.reshape(n_chunks, chunk_size)
+        f_pad_rows = jnp.pad(f_occ_rows, (0, pad))
+        f_chunks = f_pad_rows.reshape(n_chunks, chunk_size)
 
-    def _body(acc, xs):
-        obs_c, mod_c, strat_c, val_c, f_c = xs
-        Vc = vmap(_row_V)(obs_c, mod_c, strat_c, f_c)        # (chunk, N_grid)
-        Vc = jnp.where(val_c[:, None], Vc, 0.0)
-        return acc + jnp.sum(Vc, axis=0), None
+        def _body(acc, xs):
+            obs_c, mod_c, strat_c, val_c, f_c = xs
+            Vc = vmap(_row_V)(obs_c, mod_c, strat_c, f_c)    # (chunk, N_grid)
+            Vc = jnp.where(val_c[:, None], Vc, 0.0)
+            return acc + jnp.sum(Vc, axis=0), None
 
-    V_occ, _ = lax.scan(
-        _body,
-        jnp.zeros(zgrid.size, dtype=dN_exp.dtype),
-        (obs_chunks, mod_chunks, strat_chunks, valid_chunks, f_chunks),
-    )
+        V_occ, _ = lax.scan(
+            _body,
+            jnp.zeros(zgrid.size, dtype=dN_exp.dtype),
+            (obs_chunks, mod_chunks, strat_chunks, valid_chunks, f_chunks),
+        )
 
     # Empty pixels: per-pixel C == 0, so their budget curve is lss_p itself --
     # n_empty for the legacy/delta_g modes (delta_g == 0 on empty pixels), the
