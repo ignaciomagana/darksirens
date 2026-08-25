@@ -2368,6 +2368,7 @@ def _print_diagnostics_summary(diagnostics):
         _row("n_singletons", diagnostics.get("n_singletons"))
         _row("n_pairs",      diagnostics.get("n_pairs"))
     _row("pair_batch_size", diagnostics.get("pair_batch_size"))
+    _row("pe_event_block",  diagnostics.get("pe_event_block"))
     _row("y_nodes_pair",    diagnostics.get("y_nodes_pair"))
     _row("pe_max_per_pair", diagnostics.get("pe_max_per_pair"))
     _row("pair_eval_shape", diagnostics.get("approximate_pair_evaluation_shape"))
@@ -2598,6 +2599,7 @@ def build_cluster_likelihood(
                 opts.pop_model,
                 universe_model,
                 sel_batch_size=opts.sel_batch_size,
+                pe_event_block=getattr(opts, "pe_event_block", None),
                 cluster_mode=cluster_mode,
                 wl_backend=wl_backend,
                 wl_a=opts.lensing_wl_a,
@@ -2778,6 +2780,7 @@ def build_cluster_diagnostics(
                 opts.pop_model,
                 universe_model,
                 sel_batch_size=opts.sel_batch_size,
+                pe_event_block=getattr(opts, "pe_event_block", None),
                 cluster_mode=cluster_mode,
                 wl_backend=wl_backend,
                 wl_a=opts.lensing_wl_a,
@@ -3412,6 +3415,14 @@ def build_parser():
         help="Injections per selection-integral chunk. 'auto' (default) sizes "
              "the block from probed free device memory after the data load; "
              "'off'/'none'/'0' forces a single pass; a positive integer pins it.")
+    performance.add_argument(
+        "--pe_event_block", type=block_size_arg, default="auto",
+        metavar="N|auto|off",
+        help="Singletons per vectorized PE-reduction chunk. 'auto' (default) "
+             "sizes the block from probed free device memory after the data "
+             "load; 'off'/'none'/'0' evaluates every singleton in one block "
+             "(fastest, largest peak); a positive integer pins it, and 1 "
+             "reproduces the historical per-event scan.")
     # The lensing likelihood evaluates the SAME PairingModel grid branch as the
     # main CLI, and the pairing grid is a process-global setting read from the
     # environment, so this stack inherited DARKSIRENS_GW_PAIRING_M1_GRID with no
@@ -3436,9 +3447,8 @@ def build_parser():
 
 
 def _resolve_lensing_block_sizes(opts, inp, settings):
-    """Resolve the lensing selection block size from a probed memory budget.
+    """Resolve the lensing block sizes from a probed memory budget.
 
-    The lensing CLI exposes only ``--sel_batch_size`` (no per-event PE knob).
     The per-injection memory constants are those calibrated on the main
     spectral/dark-siren selection integral (see docs/source/performance.md); the
     lensing selection is the same order of magnitude, so they serve as a
@@ -3466,7 +3476,7 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
         n_samp=int(inp.get("nsamp", 0) or 0),
         n_sel=n_sel,
         sel_requested=getattr(opts, "sel_batch_size", None),
-        pe_requested=None,          # lensing has no PE-event block knob
+        pe_requested=getattr(opts, "pe_event_block", None),
         has_catalog=False,          # lensing selection carries no galaxy catalog
         flow_path=False,
         n_q=n_q,
@@ -3475,11 +3485,14 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
         backend=_jax.default_backend(),
     )
     opts.sel_batch_size = plan.sel_batch_size
+    opts.pe_event_block = plan.pe_event_block
     opts.block_size_resolution = plan.source
     settings["sel_batch_size"] = plan.sel_batch_size
+    settings["pe_event_block"] = plan.pe_event_block
     settings["block_size_resolution"] = plan.source
     _sel = plan.sel_batch_size if plan.sel_batch_size is not None else "single pass"
-    _ok(f"Block size [{plan.source}]: sel_batch_size={_sel}")
+    _pe = plan.pe_event_block if plan.pe_event_block is not None else "single pass"
+    _ok(f"Block sizes [{plan.source}]: sel_batch_size={_sel}, pe_event_block={_pe}")
     _ok(
         "Peak model: "
         f"{'value+grad' if needs_grad else 'value-only'} "

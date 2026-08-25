@@ -36,6 +36,7 @@ What this commit does NOT do
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 
@@ -166,6 +167,22 @@ def _unlensed_tau_suppression_enabled(cluster_mode: int, singleton_lensing: int)
     )
 
 
+def _has_counterpart_arrays(catalog) -> bool:
+    """True when the PE catalog carries per-event bright-siren counterpart
+    arrays, i.e. when ``active_counterpart_index`` actually selects something.
+
+    The block-vectorized singleton reduction evaluates a chunk of events in one
+    flattened call and so cannot set a per-event index; presence of ANY
+    counterpart array forces the exact per-event scan, keeping the bright path
+    bit-identical to the historical body.  Same gate as
+    ``likelihood/core.py``'s ``has_counterpart``.
+    """
+    return any(
+        getattr(catalog, name, None) is not None
+        for name in ("counterpart_pixels", "counterpart_zs", "counterpart_dzs")
+    )
+
+
 def _fold_shared_campaign_covariance(
     log_sigma2_2: jnp.ndarray, log_cov2: jnp.ndarray
 ) -> jnp.ndarray:
@@ -218,6 +235,7 @@ def _fold_shared_campaign_covariance(
         "y_nodes_single",
         "selection_neff_soft_guard",
         "pair_orientation_mode",
+        "pe_event_block",
     ],
 )
 def darksiren_log_likelihood_with_clusters(
@@ -269,6 +287,11 @@ def darksiren_log_likelihood_with_clusters(
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     pair_orientation_mode: str = "independent",
+    # Events-axis block size for the singleton PE reduction (static Python).
+    # None => all singletons in one vectorized block (fastest); an integer
+    # chunks them, trading throughput for peak memory.  1 reproduces the
+    # historical per-event scan row by row.
+    pe_event_block: int | None = None,
     # Comoving-distance interpolation table, threaded as a jit ARGUMENT and bound
     # as the active table for this trace (see ``utils.cosmology``).  None resolves
     # to whatever is active in the CALLER's scope.  Must stay the TRAILING
@@ -310,6 +333,12 @@ def darksiren_log_likelihood_with_clusters(
             "darksiren_log_likelihood_with_clusters received empty pop_params: "
             f"pop_model={pop_model!r}, pop_params.shape={pop_params_shape}. "
             "Verify parameter-space construction for this population model."
+        )
+
+    if pe_event_block is not None and pe_event_block < 1:
+        raise ValueError(
+            f"pe_event_block must be a positive integer or None; got "
+            f"{pe_event_block}."
         )
 
     log_p_pop = pop_model_parser(pop_model=pop_model)
@@ -619,7 +648,106 @@ def darksiren_log_likelihood_with_clusters(
         )
         return None, (jnp.logaddexp(log_unlensed, log_lensed), var_mix)
 
-    if cluster_mode == CLUSTER_MODE_J2:
+    # ----- Singleton PE reduction -------------------------------------
+    # Same block-vectorized events axis likelihood/core.py uses: a chunk of
+    # ``pe_block`` singletons is evaluated in ONE flattened (pe_block*nsamp,)
+    # call and reduced per event by a row-wise log_evidence_and_mc_variance
+    # (vmap), removing the sequential per-event kernel-launch overhead of the
+    # scan (259 iterations on the singleton campaign).  Masked elements and
+    # their per-row order are identical to the scan.  ``pe_event_block == 1``
+    # reproduces the historical scan row by row (minus the counterpart
+    # _replace); ``None`` (the default) is a single vectorized pass.
+    #
+    # Two branches keep the exact scan: bright sirens, whose per-event
+    # ``active_counterpart_index`` the block path cannot express (same
+    # ``has_counterpart`` gate as core.py), and singleton_lensing=MIXTURE,
+    # whose lensed branch reduces over BOTH the sample and the y-quadrature
+    # axis inside ``lensed_single_log_likelihood_event`` and so is not a
+    # row-wise reduction of a flat per-sample vector.
+    # Row count from the ARRAY the scan iterated, not the static
+    # ``n_singletons`` count: the two are the same in every shipped caller, but
+    # a dynamic_slice over a shorter array clamps (and would silently duplicate
+    # the last row) where the scan would simply run fewer iterations.
+    n_pe_rows = (
+        int(jnp.shape(singleton_indices)[0]) if cluster_mode == CLUSTER_MODE_J2
+        else nEvents
+    )
+    use_pe_block = (
+        not _has_counterpart_arrays(em_catalog_pe)
+        and singleton_lensing != SINGLETON_LENSING_MIXTURE
+        and n_pe_rows >= 1
+    )
+    if use_pe_block:
+        pe_block = n_pe_rows if pe_event_block is None else min(
+            pe_event_block, n_pe_rows
+        )
+
+        def _pe_rows(start, m):
+            """(m,) log-evidences and variances for the ``m`` singletons whose
+            row index starts at ``start`` (traced or static, events units)."""
+            if cluster_mode == CLUSTER_MODE_J2:
+                # The singleton rows are an arbitrary subset of event indices,
+                # so the chunk is a GATHER, not a contiguous slice.  Per-row
+                # sample order is unchanged.
+                idx = lax.dynamic_slice_in_dim(singleton_indices, start, m)
+                flat = (
+                    idx[:, None] * nsamp + jnp.arange(nsamp, dtype=idx.dtype)
+                ).reshape(-1)
+                take = lambda arr: jnp.take(arr, flat, axis=0)
+            else:
+                take = lambda arr: lax.dynamic_slice_in_dim(
+                    arr, start * nsamp, m * nsamp
+                )
+            valid = take(gw_pe.valid) & (take(gw_pe.prior_wt) > 0.0)
+            dL_ev = take(gw_pe.dL)
+            ldw = _log_sample_weight_if_supported(
+                take(gw_pe.m1det),
+                take(gw_pe.q),
+                dL_ev,
+                take(gw_pe.chieff),
+                take(gw_pe.pixels),
+                take(gw_pe.prior_wt),
+                em_catalog_pe,
+            )
+            ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
+            if unlensed_tau_suppression:
+                # Same per-sample (1 - tau_2) factor as the scan above.
+                dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
+                z_app = z_of_dL(jnp.clip(dL_ev, dL_lo, dL_hi), H0, Om0, w0, wa)
+                tau_app = tau_2_prob(z_app, sis_params)
+                ldw = jnp.where(
+                    jnp.isfinite(ldw), ldw + jnp.log1p(-tau_app), -jnp.inf
+                )
+            rows = ldw.reshape(m, nsamp)
+            return jax.vmap(
+                lambda row: log_evidence_and_mc_variance(row, nsamp)
+            )(rows)
+
+        # Static chunk plan: ``n_full`` full chunks (lax.scan when >1, a direct
+        # call when exactly 1) plus one Python-level remainder chunk, so every
+        # shape stays static with no dynamic padding mask.
+        n_full = n_pe_rows // pe_block
+        rem = n_pe_rows - n_full * pe_block
+        parts = []
+        if n_full == 1:
+            parts.append(_pe_rows(0, pe_block))
+        elif n_full > 1:
+            def _chunk_scan(_, chunk_idx):
+                return None, _pe_rows(chunk_idx * pe_block, pe_block)
+
+            _, stacked = lax.scan(_chunk_scan, None, jnp.arange(n_full))
+            # (n_full, pe_block) -> (n_full*pe_block,) preserving event order.
+            parts.append(
+                jax.tree_util.tree_map(
+                    lambda a: a.reshape((n_full * pe_block,) + a.shape[2:]),
+                    stacked,
+                )
+            )
+        if rem > 0:
+            parts.append(_pe_rows(n_full * pe_block, rem))
+        event_lls = jnp.concatenate([p[0] for p in parts])
+        event_vars = jnp.concatenate([p[1] for p in parts])
+    elif cluster_mode == CLUSTER_MODE_J2:
         # Sum singletons only
         _, (event_lls, event_vars) = lax.scan(
             _pe_event_fn, None, singleton_indices
@@ -775,6 +903,9 @@ def darksiren_log_likelihood_with_clusters(
             "n_singletons": jnp.asarray(n_singletons if cluster_mode == CLUSTER_MODE_J2 else nEvents),
             "n_pairs": jnp.asarray(n_pairs if cluster_mode == CLUSTER_MODE_J2 else 0),
             "pair_batch_size": jnp.asarray(pair_batch_size),
+            # Singleton rows per vectorized PE chunk; 1 when the exact
+            # per-event scan is in force (bright sirens / MIXTURE).
+            "pe_event_block": jnp.asarray(pe_block if use_pe_block else 1),
             "y_nodes_pair": jnp.asarray(y_nodes_pair),
             "pair_eval_shape_n": jnp.asarray(nsamp),
             "pair_eval_shape_y": jnp.asarray(y_nodes_pair),
