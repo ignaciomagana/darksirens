@@ -106,6 +106,9 @@ def _pair(sigma):
 def test_resolve_pair_marks_falls_back_to_candidate_pairs():
     """marginalize_exact keeps the widths on candidate_pairs, not on inp."""
     import darksirens.cli.inference_lensing as cli
+    from darksirens.likelihood.likelihood_with_clusters import (
+        PAIR_MARKS_TIME, PAIR_MARKS_TIME_DELTA,
+    )
 
     opts = SimpleNamespace(pair_marks="time", pair_time_mark_impl="auto",
                            sl_tau_A=1.0, sl_tau_n=1.0)
@@ -116,31 +119,35 @@ def test_resolve_pair_marks_falls_back_to_candidate_pairs():
 
     # No top-level pair_time_sigma (the marginalize_exact case), sharp marks.
     inp = {"candidate_pairs": [_pair(sharp), _pair(sharp)]}
-    assert cli._resolve_pair_marks(opts, inp) == cli.PAIR_MARKS_TIME_DELTA
+    assert cli._resolve_pair_marks(opts, inp) == PAIR_MARKS_TIME_DELTA
 
     # Broad marks still select the quadrature implementation.
     broad = 5.0 * cli._TIME_DELTA_SHARPNESS * T0
     inp_broad = {"candidate_pairs": [_pair(broad)]}
-    assert cli._resolve_pair_marks(opts, inp_broad) == cli.PAIR_MARKS_TIME
+    assert cli._resolve_pair_marks(opts, inp_broad) == PAIR_MARKS_TIME
 
 
 def test_resolve_pair_marks_prefers_explicit_inp_sigmas():
     """The pre-existing path (sigmas on inp) is unchanged."""
     import darksirens.cli.inference_lensing as cli
     from darksirens.lensing.slmarks import make_sis_lens_params
+    from darksirens.likelihood.likelihood_with_clusters import PAIR_MARKS_TIME_DELTA
 
     opts = SimpleNamespace(pair_marks="time", pair_time_mark_impl="auto",
                            sl_tau_A=1.0, sl_tau_n=1.0)
     T0 = float(make_sis_lens_params(A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n).T0)
     inp = {"pair_time_sigma": np.array([0.5 * cli._TIME_DELTA_SHARPNESS * T0])}
-    assert cli._resolve_pair_marks(opts, inp) == cli.PAIR_MARKS_TIME_DELTA
+    assert cli._resolve_pair_marks(opts, inp) == PAIR_MARKS_TIME_DELTA
 
 
 def test_resolve_pair_marks_explicit_impl_still_wins():
     import darksirens.cli.inference_lensing as cli
+    from darksirens.likelihood.likelihood_with_clusters import (
+        PAIR_MARKS_TIME, PAIR_MARKS_TIME_DELTA,
+    )
 
-    for impl, expected in (("quadrature", cli.PAIR_MARKS_TIME),
-                           ("delta", cli.PAIR_MARKS_TIME_DELTA)):
+    for impl, expected in (("quadrature", PAIR_MARKS_TIME),
+                           ("delta", PAIR_MARKS_TIME_DELTA)):
         opts = SimpleNamespace(pair_marks="time", pair_time_mark_impl=impl,
                                sl_tau_A=1.0, sl_tau_n=1.0)
         assert cli._resolve_pair_marks(opts, {}) == expected

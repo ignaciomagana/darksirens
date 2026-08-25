@@ -61,25 +61,23 @@ import traceback
 import warnings
 from dataclasses import dataclass
 
-import jax
-import jax.numpy as jnp
 import numpy as np
-import healpy as hp
-import h5py
 
 from argparse import ArgumentParser, ArgumentTypeError, RawDescriptionHelpFormatter
 
-from darksirens.gw.populations import (
-    FIDUCIAL_SETS,
-    FIDUCIAL_SET_LEGACY,
-    get_fixed_population_params,
-    pop_model_prior_parser,
-)
-from darksirens.gw.populations.utils import normalization_grid_settings
-from darksirens.inference.data import load_all_data, validate_loaded_survey_shapes
-from darksirens.inference.validation import validate_multitracer_run
-from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
-from darksirens.likelihood.factory import make_likelihood
+# ── Deferred heavy imports ────────────────────────────────────────────────────
+# Everything below the parser needs stays at module scope; the runtime stack
+# (jax.numpy, healpy, h5py, the population registry, the data loaders, the
+# likelihood factory, the prior/sampler machinery, the redshift grid) is
+# imported inside the functions that use it.  None of it is reachable from
+# ``build_parser`` or from the post-parse validation guards, so ``--help`` and
+# every argparse-guard subprocess used to pay ~6 s and ~830 MB for imports it
+# never touched.  ``configure_jax_runtime()`` above MUST stay at module scope:
+# it enables x64 before any JAX array is built anywhere, and moving it would
+# silently freeze import-time grids at float32 (tests/test_cold_import_precision.py,
+# tests/test_grid_x64_import.py).  ``build_latent_field.py`` is the pattern.
+# ``tests/test_cli_light_import.py`` pins this discipline.
+
 from darksirens.likelihood.block_sizing import (
     LatentDims,
     block_size_arg,
@@ -90,8 +88,6 @@ from darksirens.likelihood.block_sizing import (
     format_block_size_request,
     sampler_block_sizing_profile,
 )
-from darksirens.redshift.completion import build_pixel_kde_cache, completion_clip_diagnostics
-from darksirens.redshift.grid import zMax as _REDSHIFT_GRID_ZMAX
 from darksirens.core.types import (
     C_MODE_AGGREGATE_STRUCT,
     C_MODE_SELECTION_STRUCT,
@@ -111,15 +107,12 @@ from darksirens.inference.run_fingerprint import (
     build_run_fingerprint,
     gate_and_stamp_resume_fingerprint,
 )
-from darksirens.inference.sampling import run_sampler
 from darksirens.inference.tinyns_config import add_tinyns_arguments, build_tinyns_config
-from darksirens.inference.prior import (
-    build_parameter_space,
-    make_prior_transform,
-    resolve_joint_prior_constraints,
-)
 from darksirens.inference.q_provenance import check_lss_completion_provenance
 from darksirens.core.constants import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    FIDUCIAL_SETS,
+    FIDUCIAL_SET_LEGACY,
     H0_FID,
     OM0_FID,
     SURVEY_PARAMS_FID_BY_NAME,
@@ -158,6 +151,31 @@ from darksirens.io.results import (
     save_results_hdf5,
 )
 from darksirens.io.settings import save_settings_json
+
+
+def _deferred(module, name):
+    """Module-scope stand-in for ``from module import name``, resolved on call.
+
+    Used for the few runtime symbols callers REBIND on this module -- pytest's
+    ``monkeypatch.setattr(cli, ...)`` and ``scripts/diagnose_selection_guard.py``
+    both do -- which a function-local import would silently ignore.  They stay
+    module attributes; only the import is deferred.
+    """
+    def _proxy(*args, **kwargs):
+        import importlib
+
+        return getattr(importlib.import_module(module), name)(*args, **kwargs)
+
+    _proxy.__name__ = name
+    _proxy.__qualname__ = name
+    _proxy.__doc__ = f"Deferred proxy for ``{module}.{name}``."
+    return _proxy
+
+
+run_sampler = _deferred("darksirens.inference.sampling", "run_sampler")
+completion_clip_diagnostics = _deferred(
+    "darksirens.redshift.completion", "completion_clip_diagnostics"
+)
 
 
 # ── Parameter table ────────────────────────────────────────────────────────────
@@ -264,6 +282,8 @@ def resolve_survey_z_depth(cli_override, file_attr, zmax=None):
     a warning rather than silently accepted or rejected.
     """
     if zmax is None:
+        from darksirens.redshift.grid import zMax as _REDSHIFT_GRID_ZMAX
+
         zmax = _REDSHIFT_GRID_ZMAX
     z = cli_override if cli_override is not None else file_attr
     if z is None:
@@ -382,6 +402,8 @@ def _completion_validation_lss_tables(data: dict, unique_pixels, n_pix_catalog: 
     leaf happened to come last in ``_LSS_TABLE_ROW_AXIS`` order, so a reader
     could not tell which leaf the clip fraction came from.
     """
+    import jax.numpy as jnp
+
     pix = np.asarray(unique_pixels, dtype=np.int64).reshape(-1)
     indexing = int(data.get("lss_completion_indexing", 0) or 0)
     kwargs: dict[str, object] = {}
@@ -420,6 +442,10 @@ def run_completion_validation(
     ``suffix`` distinguishes per-catalog outputs for a K>=2 mixture run
     (e.g. ``"_c2"`` -> ``completion_validation_c2__<ts>.json``).
     """
+    import jax.numpy as jnp
+
+    from darksirens.redshift.completion import build_pixel_kde_cache
+
     required = ["zgals_catalog", "dzgals_catalog", "wgals_catalog", "ngals_catalog"]
     if any(data.get(key) is None for key in required):
         # Backward-compatible tests/callers may use unsuffixed catalog keys.
@@ -2652,6 +2678,8 @@ def _gw_file_requires_fixed_population(gw_path):
     marker probe, not a format check — ``load_gw_samples`` reports a missing or
     malformed PE file with its own, better message.
     """
+    import h5py
+
     from darksirens.cli.skymaps_to_samples import SOURCE_TAG
 
     try:
@@ -2706,6 +2734,18 @@ def _validate_skymap_surrogate_population(opts):
         f"{message} Pass --allow_skymap_population to override for a "
         "deliberate methodological study."
     )
+
+
+def _isnsideok(nside):
+    """``healpy.isnsideok`` behind a deferred import.
+
+    The only healpy call on the CLI's configuration-validation path; importing
+    healpy at module scope costs ~0.5 s in every ``--help`` and every guard
+    subprocess that never gets this far.
+    """
+    import healpy as hp
+
+    return hp.isnsideok(nside)
 
 
 def _validate_run_config(opts):
@@ -2817,7 +2857,7 @@ def _validate_run_config(opts):
         # argparse's ``type=float`` happily parses 'nan'/'inf', and a bare
         # ``<= 0`` lets both through to norm.logpdf() in redshift/prior.py.
         _fatal("--counterpart_dz must be a finite positive number.")
-    if opts.counterpart_nside < 1 or not hp.isnsideok(opts.counterpart_nside):
+    if opts.counterpart_nside < 1 or not _isnsideok(opts.counterpart_nside):
         _fatal("--counterpart_nside must be a valid positive HEALPix NSIDE.")
 
     if opts.universe_model in GALAXY_AWARE and not opts.survey_path:
@@ -2837,6 +2877,10 @@ def _validate_run_config(opts):
 
 
 def _print_run_configuration(opts, prior_overrides, fixed_parameter_values):
+    import jax
+
+    from darksirens.gw.populations.utils import normalization_grid_settings
+
     # ── Run configuration printout ─────────────────────────────────
 
     _section("Run Configuration")
@@ -3040,6 +3084,8 @@ def _latent_block_sizing_dims(opts, data, n_grid):
     if not latent_field_mode(opts):
         return None
 
+    import h5py
+
     def _rows(key):
         shape = getattr(data.get(key), "shape", None)
         return int(shape[0]) if shape else 0
@@ -3095,6 +3141,7 @@ def _block_sizing_inputs(opts, data):
     # The default pairing normaliser integrates over q PER SAMPLE, so this is the
     # axis that multiplies the selection / PE working sets — the memory model was
     # blind to it before, which made --norm_nq defeat the OOM guard entirely.
+    from darksirens.gw.populations.utils import normalization_grid_settings
     n_q = int(normalization_grid_settings().n_q)
 
     # Max galaxies per unique pixel — the row width that multiplies the catalog
@@ -3172,6 +3219,8 @@ def _resolve_and_report_block_sizes(opts, data):
     ``opts.block_size_resolution`` (persisted via settings.json), so the factory,
     flow builder and settings dump downstream all see plain ints/None.
     """
+    import jax
+
     kwargs = _block_sizing_inputs(opts, data)
     full_static_bytes = kwargs.pop("static_state_full_bytes")
     pending_static_bytes = kwargs["static_state_bytes"]
@@ -3209,6 +3258,12 @@ def _resolve_and_report_block_sizes(opts, data):
 
 def _load_and_report_data(opts):
     # ── Load data ──────────────────────────────────────────────────
+
+    from darksirens.inference.data import (
+        load_all_data,
+        validate_loaded_survey_shapes,
+    )
+    from darksirens.inference.validation import validate_multitracer_run
 
     _section("Loading data")
     print("  │")
@@ -3655,6 +3710,16 @@ def _resolve_single_catalog_marks(opts, data):
 
 
 def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_parameter_values):
+    from darksirens.gw.populations import (
+        get_fixed_population_params,
+        pop_model_prior_parser,
+    )
+    from darksirens.inference.prior import (
+        build_parameter_space,
+        make_prior_transform,
+        resolve_joint_prior_constraints,
+    )
+
     _section("Building parameter space")
     # A Q_LSS completion table (explicit --lss_completion path or an in-catalog
     # /lss_completion group) REPLACES the b_miss local-overdensity factor, so
@@ -3950,6 +4015,8 @@ def _build_and_report_parameter_space(opts, data, prior_overrides, fixed_paramet
 
 
 def _build_likelihood(opts, data, pspace, fixed_parameter_values):
+    from darksirens.likelihood.factory import make_likelihood
+
     pop_params_fid = pspace.pop_params_fid
     # ── Build likelihood ───────────────────────────────────────────
 
@@ -4317,6 +4384,9 @@ def main(argv=None):
 
     optp = build_parser()
     opts = optp.parse_args(argv)
+
+    # Past argparse: from here on the run is real, so pay for the heavy stack.
+    from darksirens.gw.populations.utils import normalization_grid_settings
 
     _normalize_multitracer_paths(opts)
     # Guard 6 (PLAN 4.4) is pure opts arithmetic, so it fires here -- before any

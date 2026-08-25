@@ -75,35 +75,35 @@ import traceback
 import warnings
 
 import numpy as np
-import h5py
-try:
-    import healpy as hp
-except ModuleNotFoundError:
-    class _HealpyFallback:
-        __version__ = "unavailable"
-
-        @staticmethod
-        def nside2npix(nside):
-            return 12 * int(nside) * int(nside)
-
-        @staticmethod
-        def nside2pixarea(nside):
-            return 4.0 * np.pi / _HealpyFallback.nside2npix(nside)
-
-    hp = _HealpyFallback()
-import jax
-import jax.numpy as jnp
-from jax.scipy.special import logsumexp as jax_logsumexp
 from scipy.special import logsumexp
 
-# ── branch machinery we reuse ────────────────────────────────────────────────
-from darksirens.redshift import zgrid
+# ── Deferred heavy imports ────────────────────────────────────────────────────
+# Only what ``build_parser`` and the post-parse guards need stays at module
+# scope.  The runtime stack -- h5py, healpy, the JAX stack, the population
+# registry, the prior/decoder/sampler machinery, the GW sample loaders and the
+# whole lensing/cluster likelihood tree -- is imported inside the functions that
+# use it: none of it is reachable from argparse, yet it cost ``--help`` and
+# every argparse-guard subprocess ~6 s and ~830 MB.  ``configure_jax_runtime()``
+# above MUST stay at module scope: it enables x64 before any JAX array is built,
+# and deferring it would silently freeze import-time grids at float32
+# (tests/test_cold_import_precision.py, tests/test_grid_x64_import.py).
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotations only (PEP 563: never evaluated at runtime)
+    import jax.numpy as jnp
+    from darksirens.lensing.partitions import PartitionState
+
 from darksirens.core.types import (
     EMCatalog,
     GWEvent,
 )
-from darksirens.gw.populations.registry import get_fixed_population_params
-from darksirens.gw.populations.utils import normalization_grid_settings
+from darksirens.core.constants import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    DEFAULT_T0_SECONDS,
+    PAIR_TAG_SELECTION_MODEL_KINDS,
+    SIS_TIME_MARK_SHARPNESS,
+)
 
 from darksirens.inference.checkpointing import (
     add_checkpoint_arguments,
@@ -115,12 +115,6 @@ from darksirens.inference.run_fingerprint import (
     gate_and_stamp_resume_fingerprint,
     resume_provenance_attrs,
 )
-from darksirens.inference.prior import (
-    build_parameter_space,
-    make_prior_transform,
-    resolve_joint_prior_constraints,
-)
-from darksirens.inference.sampling import run_sampler
 from darksirens.io.results import (
     atomic_result_hdf5,
     save_tinyns_diagnostics_json,
@@ -133,7 +127,6 @@ from darksirens.inference.tinyns_config import (
     build_tinyns_config,
     TINYNS_RESOLVED_DISPLAY_KEYS,
 )
-from darksirens.likelihood.selection import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 from darksirens.likelihood.block_sizing import (
     block_size_arg,
     resolve_block_sizes,
@@ -156,82 +149,67 @@ from darksirens.cli.common import (
     resolve_selection_neff_guard,
     run_cli,
 )
-from darksirens.inference.parameters import (
-    build_parameter_decoder,
-)
-from darksirens.gw.samples import load_gw_samples, load_selection_samples
 
-# ── lensing / cluster pieces ─────────────────────────────────────────────────
-from darksirens.lensing.slmarks import make_sis_lens_params, DEFAULT_T0_SECONDS
-from darksirens.lensing.wlmagnification import (
-    make_lognormal_wl_params,
-    make_tabulated_wl_params,
-    validate_wl_mu_quadrature,
+
+def _healpy():
+    """The healpy module, or the pixel-arithmetic fallback when it is absent.
+
+    Deferred (healpy costs ~0.5 s to import) and only reached from
+    :func:`_empty_em_catalog`; the fallback branch is unchanged, it just builds
+    on first use instead of at import.
+    """
+    try:
+        import healpy as hp
+    except ModuleNotFoundError:
+        class _HealpyFallback:
+            __version__ = "unavailable"
+
+            @staticmethod
+            def nside2npix(nside):
+                return 12 * int(nside) * int(nside)
+
+            @staticmethod
+            def nside2pixarea(nside):
+                return 4.0 * np.pi / _HealpyFallback.nside2npix(nside)
+
+        hp = _HealpyFallback()
+    return hp
+
+
+def _deferred(module, name):
+    """Module-scope stand-in for ``from module import name``, resolved on call.
+
+    Used for the few runtime symbols callers REBIND on this module (pytest's
+    ``monkeypatch.setattr(cli, ...)``) or reach through it, which a
+    function-local import would silently ignore.  They stay module attributes;
+    only the import is deferred.
+    """
+    def _proxy(*args, **kwargs):
+        import importlib
+
+        return getattr(importlib.import_module(module), name)(*args, **kwargs)
+
+    _proxy.__name__ = name
+    _proxy.__qualname__ = name
+    _proxy.__doc__ = f"Deferred proxy for ``{module}.{name}``."
+    return _proxy
+
+
+load_gw_samples = _deferred("darksirens.gw.samples", "load_gw_samples")
+make_pair_tag_selection_model = _deferred(
+    "darksirens.lensing.pair_tag_selection", "make_pair_tag_selection_model"
 )
-from darksirens.lensing.grids import make_wl_mu_quadrature
-from darksirens.likelihood.wl_weight import validate_wl_hermite_quadrature
-from darksirens.lensing.lensed_injections import load_lensed_injections
-from darksirens.lensing.pair_tag_selection import (
-    PAIR_TAG_SELECTION_MODEL_KINDS,
-    make_pair_tag_selection_model,
-    load_pair_tag_selection_file,
+build_parameter_space = _deferred(
+    "darksirens.inference.prior", "build_parameter_space"
 )
-from darksirens.lensing.observed_catalog import (
-    observed_catalog_metadata_from_hdf5,
-    validate_observed_catalog_file,
+darksiren_log_likelihood_with_clusters = _deferred(
+    "darksirens.likelihood.likelihood_with_clusters",
+    "darksiren_log_likelihood_with_clusters",
 )
-from darksirens.lensing.partitions import (
-    CandidatePair,
-    PartitionState,
-    exact_partitions_from_pairs,
-    exact_partition_components,
-    combine_component_partitions,
-    prepare_candidate_pairs_for_partitioning,
-    parse_edge_mark_keys,
+darksiren_likelihood_diagnostics_with_clusters = _deferred(
+    "darksirens.likelihood.likelihood_with_clusters",
+    "darksiren_likelihood_diagnostics_with_clusters",
 )
-from darksirens.lensing.preflight import (
-    fixed_partition_coverage_error,
-    run_lensing_preflight,
-)
-from darksirens.lensing.marginal_diagnostics import (
-    compute_marginalized_partition_diagnostics,
-    compute_componentwise_factorized_partition_diagnostics,
-    candidate_time_mark_suspicion,
-    resolve_sis_time_mark_impl,
-    SIS_TIME_MARK_SHARPNESS,
-    sis_time_mark_support,
-    sis_time_mark_support_message,
-)
-from darksirens.likelihood.pair_kde import (
-    make_pair_kde,
-    stack_pair_kdes,
-    validate_pair_prior_wt,
-)
-from darksirens.likelihood.cluster_selection import combined_selection_log_correction
-from darksirens.likelihood.likelihood_with_clusters import (
-    darksiren_log_likelihood_with_clusters,
-    darksiren_likelihood_diagnostics_with_clusters,
-    CLUSTER_MODE_J2,
-    CLUSTER_MODE_OFF,
-    WL_BACKEND_LOGNORMAL,
-    WL_BACKEND_TABULATED,
-    WL_BACKEND_DISABLED,
-    WL_SELECTION_STANDARD,
-    WL_SELECTION_LOGNORMAL,
-    PAIR_MARKS_NONE,
-    PAIR_MARKS_TIME,
-    PAIR_MARKS_TIME_DELTA,
-    SINGLETON_LENSING_OFF,
-    SINGLETON_LENSING_MIXTURE,
-)
-from darksirens.lensing.lensed_injections import (
-    DEFAULT_PAIR_ORIENTATION_MODE,
-    load_lensed_single_image_set,
-    pair_orientation_mismatch_message,
-    read_fc_pdet_attrs,
-    read_pair_orientation_mode,
-)
-from darksirens.lensing.fcpdet import make_fc_pdet_params
 
 
 BOTH_DETECTED_APPROX_REFUSAL = (
@@ -286,6 +264,9 @@ def _gate_both_detected_approximation(opts, log_p_tag):
 
 
 def _pair_tag_log_probs_from_options(opts, lensed):
+    import jax.numpy as jnp
+    from darksirens.lensing.pair_tag_selection import load_pair_tag_selection_file
+
     if lensed is None:
         opts.pair_tag_both_detected_approx = False
         return jnp.zeros(0)
@@ -391,6 +372,10 @@ def _sl_T0_seconds(opts) -> float:
 
 def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     """Construct ``SISLensParams`` from fixed CLI values or sampled lens coords."""
+
+    import jax.numpy as jnp
+    from darksirens.lensing.slmarks import make_sis_lens_params
+
     T0 = _sl_T0_seconds(opts)
     if getattr(opts, "fix_lens_rate", True):
         return make_sis_lens_params(
@@ -478,6 +463,9 @@ def _write_lens_settings_attrs(attrs, lens_settings):
 
 def _decode_base_parameters(decoder, coord):
     """Decode only the base-parameter prefix from a combined sampler vector."""
+
+    import jax.numpy as jnp
+
     coord = jnp.asarray(coord)
     sampled_labels = getattr(decoder, "sampled_labels", None)
     if sampled_labels is None:
@@ -488,6 +476,10 @@ def _decode_base_parameters(decoder, coord):
 # Container builders (mirror darksirens.likelihood.factory)
 # =============================================================================
 def _empty_em_catalog(nside=1):
+    import jax.numpy as jnp
+    from darksirens.redshift import zgrid
+
+    hp = _healpy()
     npix = hp.nside2npix(nside)
     return EMCatalog(
         apix=hp.nside2pixarea(nside),
@@ -510,6 +502,8 @@ def _empty_em_catalog(nside=1):
 
 
 def _gw_event(m1det, m2det, dL, chieff, prior_wt):
+    import jax.numpy as jnp
+
     m1det = jnp.asarray(m1det)
     m2det = jnp.asarray(m2det)
     dL = jnp.asarray(dL)
@@ -582,6 +576,9 @@ def _orient_time_marks(candidate_pairs, gps_times, opts=None):
     could be oriented; otherwise the pairs are returned unchanged and the
     likelihood keeps the legacy |dt|-in-both-branches behaviour.
     """
+
+    from darksirens.lensing.partitions import CandidatePair
+
     if candidate_pairs is None:
         return candidate_pairs, False
     marked = [p for p in candidate_pairs if p.delta_t_obs is not None]
@@ -664,6 +661,9 @@ def _orient_time_marks(candidate_pairs, gps_times, opts=None):
 
 def _time_mark_arrays_for_partition_state(state, candidate_pairs):
     """Return edge-level time marks ordered like ``state.pair_indices``."""
+
+    import jax.numpy as jnp
+
     dt_obs = []
     dt_sigma = []
     for edge_idx in np.asarray(state.candidate_edge_indices, dtype=int):
@@ -699,6 +699,8 @@ def _time_mark_arrays_for_partition_state(state, candidate_pairs):
 # =============================================================================
 
 def _all_singleton_partition_state(n_events: int) -> PartitionState:
+    from darksirens.lensing.partitions import PartitionState
+
     return PartitionState(
         np.arange(int(n_events), dtype=np.int32),
         np.asarray([], dtype=np.int32).reshape((0, 2)),
@@ -712,6 +714,8 @@ def _all_singleton_partition_state(n_events: int) -> PartitionState:
 def _full_state_for_component(
     n_events: int, component: dict, local_state: PartitionState
 ) -> PartitionState:
+    from darksirens.lensing.partitions import PartitionState
+
     component_events = {int(x) for x in component["event_indices"]}
     outside_singletons = [idx for idx in range(int(n_events)) if idx not in component_events]
     singletons = np.asarray(
@@ -744,6 +748,8 @@ def _runtime_part_from_state(
     pair_marks: str = "none",
     pair_time_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> dict:
+    import jax.numpy as jnp
+
     part = dict(
         singleton_indices=jnp.asarray(state.singleton_indices, dtype=jnp.int32),
         pair_indices=jnp.asarray(state.pair_indices, dtype=jnp.int32),
@@ -766,6 +772,8 @@ def _runtime_part_from_state(
 
 
 def _count_probe_partition_state(n_events: int, n_pairs: int) -> PartitionState:
+    from darksirens.lensing.partitions import PartitionState
+
     pairs = np.asarray([[2 * k, 2 * k + 1] for k in range(int(n_pairs))], dtype=np.int32)
     used = {int(x) for x in pairs.reshape(-1)} if pairs.size else set()
     singletons = np.asarray([idx for idx in range(int(n_events)) if idx not in used], dtype=np.int32)
@@ -808,6 +816,11 @@ def _count_correction_closed_form(baseline_raw, opts):
     Shared by the sampler path and the diagnostics path so the two cannot drift
     onto different variance budgets (review F-005).
     """
+
+    from darksirens.likelihood.cluster_selection import (
+        combined_selection_log_correction,
+    )
+
     def _count_correction(n_sing, n_prs):
         return combined_selection_log_correction(
             baseline_raw["log_mu_singleton"],
@@ -827,6 +840,9 @@ def _count_correction_closed_form(baseline_raw, opts):
 
 
 def _factorized_logsumexp_jax(component_terms, count_loglike_delta):
+    import jax.numpy as jnp
+    from jax.scipy.special import logsumexp as jax_logsumexp
+
     max_pairs = int(count_loglike_delta.shape[0]) - 1
     dp = jnp.full((max_pairs + 1,), -jnp.inf, dtype=jnp.float64)
     dp = dp.at[0].set(0.0)
@@ -861,6 +877,9 @@ def _normalize_pair_image_prior_wt(prior_wt, *, context):
     proposal-density weights are divided by their own sum.  This keeps pair
     likelihood constants independent of arbitrary PE prior-density scale.
     """
+
+    from darksirens.likelihood.pair_kde import validate_pair_prior_wt
+
     prior_wt = validate_pair_prior_wt(prior_wt, context=context)
     norm = float(np.sum(prior_wt))
     if not np.isfinite(norm) or norm <= 0.0:
@@ -875,6 +894,9 @@ def extract_event_samples_from_gw_pe(
     gw_pe_arrays, event_index, nsamp, pe_max=0, rng=None
 ):
     """Extract one observed-event PE sample block from event-major GW PE arrays."""
+
+    from darksirens.likelihood.pair_kde import validate_pair_prior_wt
+
     m1det, m2det, dL, chieff, p_pe = gw_pe_arrays
     event_index = int(event_index)
     sl = slice(event_index * nsamp, (event_index + 1) * nsamp)
@@ -913,6 +935,9 @@ def make_pair_kdes_from_gw_pe(
     bandwidth_scale=1.0,
 ):
     """Build per-observed-event KDEs directly from unified GW PE samples."""
+
+    from darksirens.likelihood.pair_kde import make_pair_kde
+
     kdes = []
     for event_index in event_indices:
         d = extract_event_samples_from_gw_pe(
@@ -937,6 +962,10 @@ def _gate_suspicious_time_marks(opts, candidate_pairs_raw) -> None:
     and only when time marks are actually in use (pair_marks=time or a
     time/delta_t_obs edge-mark likelihood key).
     """
+
+    from darksirens.lensing.marginal_diagnostics import candidate_time_mark_suspicion
+    from darksirens.lensing.partitions import parse_edge_mark_keys
+
     time_like_keys = set(
         parse_edge_mark_keys(getattr(opts, "edge_mark_likelihood_keys", ""))
     )
@@ -1048,6 +1077,13 @@ def _derive_universe_model(wl_backend):
 
 def _wl_backend_code(opts):
     """Map the --wl_backend string to the library integer WL backend code."""
+
+    from darksirens.likelihood.likelihood_with_clusters import (
+        WL_BACKEND_DISABLED,
+        WL_BACKEND_LOGNORMAL,
+        WL_BACKEND_TABULATED,
+    )
+
     return {
         "lognormal": WL_BACKEND_LOGNORMAL,
         "tabulated": WL_BACKEND_TABULATED,
@@ -1086,6 +1122,16 @@ def _load_wl_table_arrays(opts):
     16-node rule against a dense reference at test redshifts spanning the
     z grid and hard-fails on disagreement.
     """
+
+    import h5py
+    import jax.numpy as jnp
+    from darksirens.lensing.grids import make_wl_mu_quadrature
+    from darksirens.lensing.wlmagnification import (
+        make_tabulated_wl_params,
+        validate_wl_mu_quadrature,
+    )
+    from darksirens.likelihood.wl_weight import validate_wl_hermite_quadrature
+
     if getattr(opts, "wl_backend", None) == "lognormal":
         wl_a = getattr(opts, "lensing_wl_a", None)
         if wl_a is not None:
@@ -1155,6 +1201,9 @@ def _gate_pair_orientation_mismatch(opts):
     ``--allow_pair_orientation_mismatch true`` downgrades the fatal case to a
     loud warning so deliberate convention ablations remain possible.
     """
+
+    from darksirens.lensing.lensed_injections import read_pair_orientation_mode
+
     path = getattr(opts, "lensed_injections_path", None)
     if not path:
         return
@@ -1172,6 +1221,12 @@ def _require_pair_orientation_match(opts, campaign_mode, path):
     attrs IT read, at the point where the censoring factor is actually built,
     instead of trusting a startup check on a path that may since have changed.
     """
+
+    from darksirens.lensing.lensed_injections import (
+        DEFAULT_PAIR_ORIENTATION_MODE,
+        pair_orientation_mismatch_message,
+    )
+
     run_mode = getattr(
         opts, "pair_orientation_mode", DEFAULT_PAIR_ORIENTATION_MODE
     )
@@ -1209,6 +1264,13 @@ def _load_singleton_lensing_inputs(opts):
     detection constants come from the injection file's fc_* attrs, overridable
     via --fc_rho_thr/--fc_r0/--fc_mc_bar.
     """
+
+    from darksirens.lensing.fcpdet import make_fc_pdet_params
+    from darksirens.lensing.lensed_injections import (
+        load_lensed_single_image_set,
+        read_fc_pdet_attrs,
+    )
+
     if getattr(opts, "singleton_lensing", "off") != "sl_mixture":
         return dict(lensed_singles=None, fc_pdet_params=None)
     if not opts.lensed_injections_path:
@@ -1244,6 +1306,29 @@ def _load_singleton_lensing_inputs(opts):
 def load_inputs(opts):
     """Load singleton PE + selection, and (for j2) the lensed injections + pair
     PE + partition. Returns the assembled inputs for the cluster likelihood."""
+
+    import h5py
+    import jax.numpy as jnp
+    from darksirens.gw.samples import load_selection_samples
+    from darksirens.lensing.lensed_injections import load_lensed_injections
+    from darksirens.lensing.observed_catalog import (
+        observed_catalog_metadata_from_hdf5,
+        validate_observed_catalog_file,
+    )
+    from darksirens.lensing.partitions import (
+        combine_component_partitions,
+        exact_partition_components,
+        exact_partitions_from_pairs,
+        parse_edge_mark_keys,
+        prepare_candidate_pairs_for_partitioning,
+    )
+    from darksirens.lensing.preflight import fixed_partition_coverage_error
+    from darksirens.likelihood.likelihood_with_clusters import (
+        CLUSTER_MODE_J2,
+        CLUSTER_MODE_OFF,
+    )
+    from darksirens.likelihood.pair_kde import make_pair_kde, stack_pair_kdes
+
     # BEFORE the off-mode early return below (whose bundle has no
     # marginal_partitions / log_z_prior keys), so a direct library caller gets
     # the same actionable error the CLI does instead of a KeyError from the
@@ -1975,6 +2060,8 @@ def _add_off_control_nonfinite_diagnostics(diagnostics, *, opts, inp):
 
 
 def _write_diagnostics(run_dir, diagnostics):
+    import h5py
+
     with open(os.path.join(run_dir, "diagnostics.json"), "w") as f:
         json.dump(diagnostics, f, indent=2, allow_nan=True)
     numeric_array_keys = {
@@ -2220,6 +2307,9 @@ def _diagnostics_at_guard_clear_point(
     Returns (diagnostics, evaluation_point, evaluation_point_label) -- the label
     is what the archived attrs/settings are keyed on, so numbers computed at the
     fallback point cannot be filed as prior_midpoint_* (review F-006)."""
+
+    import jax.numpy as jnp
+
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
     rng = np.random.default_rng(seed)
@@ -2299,6 +2389,14 @@ def _resolve_pair_marks(opts, inp):
     the G-pilot failure mode — so the y-integral is delta-collapsed
     analytically (PAIR_MARKS_TIME_DELTA). --pair_time_mark_impl overrides.
     """
+
+    from darksirens.lensing.marginal_diagnostics import resolve_sis_time_mark_impl
+    from darksirens.likelihood.likelihood_with_clusters import (
+        PAIR_MARKS_NONE,
+        PAIR_MARKS_TIME,
+        PAIR_MARKS_TIME_DELTA,
+    )
+
     if getattr(opts, "pair_marks", "none") != "time":
         return PAIR_MARKS_NONE
     impl = getattr(opts, "pair_time_mark_impl", "auto")
@@ -2359,6 +2457,13 @@ def _require_time_marks_in_sis_support(opts, inp):
     value); the rest is a warning. Preflight raises the same error; this guard
     also covers runs that skip preflight.
     """
+
+    from darksirens.lensing.marginal_diagnostics import (
+        resolve_sis_time_mark_impl,
+        sis_time_mark_support,
+        sis_time_mark_support_message,
+    )
+
     if getattr(opts, "pair_marks", "none") != "time":
         return
     dt_values = list(np.asarray(inp.get("pair_time_delta_t_obs", []), dtype=float).ravel())
@@ -2402,6 +2507,18 @@ def build_cluster_likelihood(
     built with our ``wl_params``, so ``survey`` already carries the lognormal WL
     parameters and the integer empty-pixel policy. We pass them straight through.
     """
+
+    import jax.numpy as jnp
+    from darksirens.likelihood.likelihood_with_clusters import (
+        CLUSTER_MODE_J2,
+        CLUSTER_MODE_OFF,
+        SINGLETON_LENSING_MIXTURE,
+        SINGLETON_LENSING_OFF,
+        WL_SELECTION_LOGNORMAL,
+        WL_SELECTION_STANDARD,
+    )
+    from jax.scipy.special import logsumexp as jax_logsumexp
+
     em = _empty_em_catalog()
     lens_sampled_labels = list(lens_sampled_labels or [])
     fixed_parameter_values = dict(fixed_parameter_values or {})
@@ -2591,6 +2708,21 @@ def build_cluster_likelihood(
 def build_cluster_diagnostics(
     opts, inp, decoder, lens_sampled_labels=None, fixed_parameter_values=None
 ):
+    import jax.numpy as jnp
+    from darksirens.lensing.marginal_diagnostics import (
+        compute_componentwise_factorized_partition_diagnostics,
+        compute_marginalized_partition_diagnostics,
+    )
+    from darksirens.lensing.partitions import combine_component_partitions
+    from darksirens.likelihood.likelihood_with_clusters import (
+        CLUSTER_MODE_J2,
+        CLUSTER_MODE_OFF,
+        SINGLETON_LENSING_MIXTURE,
+        SINGLETON_LENSING_OFF,
+        WL_SELECTION_LOGNORMAL,
+        WL_SELECTION_STANDARD,
+    )
+
     em = _empty_em_catalog()
     lens_sampled_labels = list(lens_sampled_labels or [])
     fixed_parameter_values = dict(fixed_parameter_values or {})
@@ -3314,6 +3446,7 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
     the already-built ``settings`` dict so the final settings.json persists the
     resolved value (the early settings write predates the data load).
     """
+
     import numpy as _np
     import jax as _jax
 
@@ -3367,6 +3500,9 @@ def _validate_json_options(opts):
 def _resolve_lensing_run_config(opts):
     """Resolve sampler/barrier/guard config, validate the edge-mark and WL
     flags, and derive the universe model from the WL backend."""
+
+    from darksirens.lensing.partitions import parse_edge_mark_keys
+
     if opts.sampler == "tinyns":
         build_tinyns_config(opts)
     resolve_redshift_prior_barrier(opts, flush=True)
@@ -3521,6 +3657,8 @@ def _resolve_wl_selection(opts):
 
 
 def _print_run_configuration(opts):
+    import jax
+
     _section("Run Configuration")
     _row("Cluster mode",      opts.cluster_mode)
     _row("Universe model",    opts.universe_model)
@@ -3556,6 +3694,9 @@ def _print_run_configuration(opts):
 def _run_and_report_preflight(opts):
     """Run preflight, report it in a frame, and exit on failure (or after
     writing the JSON when ``--preflight_only``)."""
+
+    from darksirens.lensing.preflight import run_lensing_preflight
+
     _section("Preflight")
     preflight = run_lensing_preflight(opts)
     # One machine-greppable JSON summary line, kept verbatim inside the frame.
@@ -3715,6 +3856,18 @@ def _build_space_and_closures(opts, inp, run_dir, settings, base_fixed, lens_fix
     """Build the base+lens parameter space, the decoder, and the likelihood /
     diagnostics closures.  Returns (labels, lower, upper, prior_transform,
     loglike, diagnostics_fn, pop_params_fid, lens_overrides)."""
+
+    from darksirens.gw.populations.registry import get_fixed_population_params
+    from darksirens.inference.parameters import build_parameter_decoder
+    from darksirens.inference.prior import (
+        make_prior_transform,
+        resolve_joint_prior_constraints,
+    )
+    from darksirens.lensing.wlmagnification import (
+        make_lognormal_wl_params,
+        make_tabulated_wl_params,
+    )
+
     labels = []
     try:
         overrides = json.loads(opts.prior_overrides) if opts.prior_overrides else {}
@@ -3835,6 +3988,9 @@ def _cross_check_loglike_against_diagnostics(loglike, diagnostics, point, *, opt
     already-compiled shapes, so it is essentially free — makes that class of
     divergence loud.
     """
+
+    import jax.numpy as jnp
+
     reference = diagnostics.get("logL_marginalized", diagnostics.get("logL_total"))
     if reference is None:
         return None
@@ -3879,6 +4035,9 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
     (mid, diagnostics, diagnostics_point, diagnostics_point_label) -- the point
     and its label travel with the numbers so the archives cannot mislabel
     them."""
+
+    import jax.numpy as jnp
+
     _section("Building likelihood")
     print("  │  JIT compiling at the prior midpoint...", flush=True)
     mid = 0.5 * (lower + upper)
@@ -3927,6 +4086,9 @@ def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,
                           prior_transform, loglike, prior_kinds=None,
                           joint_constraints=()):
     """Run the sampler inside a framed section and return its results."""
+
+    from darksirens.inference.sampling import run_sampler
+
     _section(f"Sampling  [{opts.sampler.upper()}]")
     _row("ndim", len(labels))
     if opts.sampler in ("tinyns", "dynesty"):
@@ -3987,6 +4149,9 @@ def _save_lensing_outputs(opts, run_dir, settings, inp, results, diagnostics,
                           diagnostics_point_label="prior_midpoint"):
     """Persist samples/results/settings/diagnostics and the best-effort corner
     plot inside a framed section."""
+
+    import h5py
+
     _section("Saving outputs")
     _row("Run directory", run_dir)
     print("  │")
@@ -4157,6 +4322,10 @@ def main(argv=None):
     t_start = datetime.datetime.now()
     parser = build_parser()
     opts = parser.parse_args(argv)
+
+    # Past argparse: from here on the run is real, so pay for the heavy stack.
+    from darksirens.gw.populations.utils import normalization_grid_settings
+
     _validate_json_options(opts)
     os.makedirs(opts.save_path, exist_ok=True)
 

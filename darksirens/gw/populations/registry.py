@@ -254,10 +254,16 @@ CURATED: dict[str, Curated] = {
 # the peak sits at 75 where its own prior puts it.
 #
 #: Version tag of the corrected set; stamped into settings by the CLI so a run
-#: records WHICH fiducial vector it fixed the population at.
-FIDUCIAL_SET_LEGACY = "legacy"
-FIDUCIAL_SET_IN_PRIOR = "in_prior_v2"
-FIDUCIAL_SETS = (FIDUCIAL_SET_LEGACY, FIDUCIAL_SET_IN_PRIOR)
+#: records WHICH fiducial vector it fixed the population at.  The names live in
+#: the dependency-free :mod:`darksirens.core.constants` so the CLIs can build
+#: their ``--population_fiducials`` option without importing this registry (and
+#: the seconds of model/JAX imports behind it); they are re-exported here and
+#: from ``darksirens.gw.populations``, which stay the canonical spellings.
+from darksirens.core.constants import (  # noqa: E402,F401
+    FIDUCIAL_SET_IN_PRIOR,
+    FIDUCIAL_SET_LEGACY,
+    FIDUCIAL_SETS,
+)
 
 #: Per-slot fiducial patches applied on top of ``Curated.fids`` under
 #: ``fiducials=FIDUCIAL_SET_IN_PRIOR``.  Every value is the midpoint of that

@@ -23,7 +23,6 @@ import os
 import astropy.constants as constants
 import jax
 import numpy as np
-from astropy.cosmology import Flatw0waCDM, Planck15
 from jax import jit
 from jax import numpy as jnp
 
@@ -42,11 +41,20 @@ node count scales with the log range so low-z interpolation accuracy is
 preserved; darksirens.redshift.grid reads the same variable, keeping the two
 grids consistent."""
 
-H0Planck = Planck15.H0.value
-"""Planck-2015 Hubble constant used to build the reference distance grid."""
+H0Planck = np.float64(67.74)
+"""Planck-2015 Hubble constant used to build the reference distance grid.
 
-Om0Planck = float(Planck15.Om0)
-"""Planck-2015 matter density used as the center of the interpolation grid."""
+Pinned to the literal instead of ``Planck15.H0.value`` (repr-exact: that
+expression *is* ``np.float64(67.74)``, dtype included, so the tabulated grid is
+bit-identical) because ``astropy.cosmology`` drags ``astropy.modeling`` ->
+``nddata`` -> ``dask`` behind it for ~1 s of import time in every process that
+touches this module.  ``tests/test_cli_light_import.py`` pins the value and
+dtype against Astropy itself."""
+
+Om0Planck = 0.3075
+"""Planck-2015 matter density used as the center of the interpolation grid.
+
+Pinned literal for ``float(Planck15.Om0)``; see :data:`H0Planck`."""
 
 w0Fiducial = -1.0
 """Fiducial CPL present-day dark-energy equation-of-state parameter."""
@@ -140,14 +148,13 @@ wagrid = jnp.linspace(
 )
 """CPL ``wa`` coordinates of the distance interpolation grid."""
 
-# Keep an Astropy cosmology object attached to the grid construction so that the
-# tabulated model is explicitly the same flat CPL family Astropy calls
-# ``Flatw0waCDM``.  The grid values themselves are produced by the equivalent
-# analytic CPL expansion law below; this avoids thousands of slow Astropy
-# distance integrations at import time while preserving JAX-free grid setup.
-_reference_cosmology = Flatw0waCDM(
-    H0=H0Planck, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial
-)
+# The tabulated model is the flat CPL family Astropy calls ``Flatw0waCDM``; the
+# grid values are produced by the equivalent analytic CPL expansion law below,
+# which avoids thousands of slow Astropy distance integrations at import time.
+# (An unused ``Flatw0waCDM`` instance used to be constructed here purely as
+# documentation; it was the only reason this module imported
+# ``astropy.cosmology``, and tests/test_cosmology_interpolation.py already
+# checks the grid against a freshly built Astropy reference.)
 
 
 def _cpl_E_numpy(z, Om0, w0, wa):

@@ -1,9 +1,16 @@
 """Central constants shared across darksirens modules."""
 
-from astropy.cosmology import Planck15
-
-H0_FID = float(Planck15.H0.value)
-OM0_FID = float(Planck15.Om0)
+#: Planck-2015 fiducials, pinned to the exact ``float`` values Astropy's
+#: ``Planck15`` carries (``float(Planck15.H0.value) == 67.74`` and
+#: ``float(Planck15.Om0) == 0.3075`` are repr-exact, so this is bit-identical).
+#: They are literals rather than an ``astropy.cosmology`` import because this
+#: module sits at the bottom of nearly every import chain in the package --
+#: including the argparse-only CLI path -- and ``astropy.cosmology`` drags
+#: ``astropy.modeling`` -> ``nddata`` -> ``dask`` behind it for ~1 s per
+#: process.  ``tests/test_cli_light_import.py`` pins the values against
+#: Astropy itself.
+H0_FID = 67.74
+OM0_FID = 0.3075
 W0_FID = -1.0
 WA_FID = 0.0
 #: Prior label -> fiducial value for every :class:`~darksirens.core.types.SurveyParams`
@@ -76,3 +83,40 @@ SELECTION_FAMILIES = ("gaussian", "schechter")
 #: re-exports it) so JAX-free tooling -- ``darksirens.io.results`` and anything
 #: that only reads/writes HDF5 -- can use it without importing JAX.
 DEFAULT_MAX_LIKELIHOOD_VARIANCE = 1.0
+
+#: Version tags of the population fiducial vector a fixed-population run pins,
+#: stamped into settings so a run records WHICH vector it fixed at.  Same reason
+#: as above: they are the ONLY thing the CLIs' ``--population_fiducials`` option
+#: needs, and ``darksirens.gw.populations.registry`` -- which owns the vectors
+#: themselves and re-exports these names (as does the ``populations`` package,
+#: the canonical spelling for every consumer) -- costs ~4 s of JAX/model imports
+#: to reach.
+FIDUCIAL_SET_LEGACY = "legacy"
+FIDUCIAL_SET_IN_PRIOR = "in_prior_v2"
+FIDUCIAL_SETS = (FIDUCIAL_SET_LEGACY, FIDUCIAL_SET_IN_PRIOR)
+
+#: SIS time-delay scaling constant in seconds -- the ``--sl_T0_sec`` default.
+#: ``darksirens.lensing.slmarks`` owns the physics (and re-exports this name,
+#: which stays the canonical spelling); the value lives here because the lensing
+#: CLI's argparse default is otherwise the ONLY reason it imports the
+#: ``darksirens.lensing`` package, whose eager ``__init__`` costs ~2.6 s.
+DEFAULT_T0_SECONDS = 5.36e6
+
+#: ``max(sigma_delta_t)/T0`` below which the SIS time mark resolves to the
+#: delta-collapse implementation.  Same reason as :data:`DEFAULT_T0_SECONDS`:
+#: the lensing CLI mirrors it into a module constant its tests read directly,
+#: and ``darksirens.lensing.marginal_diagnostics`` (which re-exports it and
+#: remains the canonical spelling) costs the whole lensing import tree.
+SIS_TIME_MARK_SHARPNESS = 0.02
+
+#: Mock pair-tag selection kinds -- the ``--pair_tag_model`` choices.  Same
+#: reason as :data:`DEFAULT_T0_SECONDS`; ``darksirens.lensing.pair_tag_selection``
+#: re-exports it and remains the canonical spelling.
+PAIR_TAG_SELECTION_MODEL_KINDS = (
+    "constant",
+    "snr_only",
+    "snr_sky",
+    "snr_time",
+    "snr_time_sky",
+    "file",
+)
