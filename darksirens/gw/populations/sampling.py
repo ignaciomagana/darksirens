@@ -360,6 +360,73 @@ def _sample_histogram_trunc_tab(u, edges, log_cell_dens, cdf_nodes, log_norm, lo
     return HistogramSample(x=x, cell=k, log_s=log_s, log_norm=log_norm)
 
 
+def _searchsorted_right_col(cdf_nodes_2d, col, v):
+    """``searchsorted(cdf_nodes_2d[col], v, side="right")`` without the slice.
+
+    Slicing a whole CDF column per draw and handing it to ``jnp.searchsorted``
+    makes XLA materialise a (draws, K+1) table — 17.6 GB of scratch at the
+    production flow shape (nEvents=259, J=16384, K=512).  The loop below
+    probes the 2-D table with (draw, node) index pairs instead, so each of its
+    ceil(log2(K+2)) steps gathers only one scalar per draw.
+
+    It reproduces ``jnp.searchsorted``'s own scan STEP FOR STEP — same bounds
+    update, same ``return high``, same level count — so the two agree bitwise
+    even when the column is not actually sorted, which a parallel
+    ``jnp.cumsum`` can produce at the 1-ulp level near CDF saturation.
+    """
+    n = cdf_nodes_2d.shape[1]
+    n_levels = int(np.ceil(np.log2(n + 1)))
+
+    def _level(_, bounds):
+        low, high = bounds
+        mid = (low + high) // 2
+        go_left = v < cdf_nodes_2d[col, mid]
+        return (jnp.where(go_left, low, mid), jnp.where(go_left, mid, high))
+
+    low = jnp.zeros(jnp.shape(v), dtype=jnp.int32)
+    return jax.lax.fori_loop(0, n_levels, _level, (low, jnp.full_like(low, n)))[1]
+
+
+def _hist_cdf_at_col(edges, cdf_nodes_2d, log_cell_dens_2d, log_norm, col, x):
+    """:func:`_hist_cdf_at` for column ``col`` of 2-D tables."""
+    k = jnp.clip(jnp.searchsorted(edges, x, side="right") - 1, 0, edges.shape[0] - 2)
+    return jnp.clip(
+        cdf_nodes_2d[col, k]
+        + jnp.exp(log_cell_dens_2d[k, col] - log_norm) * (x - edges[k]),
+        0.0,
+        1.0,
+    )
+
+
+def _sample_histogram_trunc_col(
+    u, edges, log_cell_dens_2d, cdf_nodes_2d, log_norm_1d, col, lo, hi
+):
+    """:func:`_sample_histogram_trunc_tab` reading column ``col`` per draw.
+
+    Same arithmetic in the same order as the ``_tab`` twin — bit-identical
+    outputs — but every table read is a (draw, node) gather, so nothing
+    per-draw-column-shaped is ever materialised.
+    """
+    log_norm = log_norm_1d[col]
+    lo = jnp.clip(lo, edges[0], edges[-1])
+    hi = jnp.clip(hi, edges[0], edges[-1])
+    hi = jnp.maximum(hi, lo)
+    F_lo = _hist_cdf_at_col(edges, cdf_nodes_2d, log_cell_dens_2d, log_norm, col, lo)
+    F_hi = _hist_cdf_at_col(edges, cdf_nodes_2d, log_cell_dens_2d, log_norm, col, hi)
+    span = jnp.maximum(F_hi - F_lo, jnp.finfo(cdf_nodes_2d.dtype).tiny)
+
+    up = F_lo + u * span
+    K = edges.shape[0] - 1
+    k = jnp.clip(_searchsorted_right_col(cdf_nodes_2d, col, up) - 1, 0, K - 1)
+    c_k = cdf_nodes_2d[col, k]
+    denom = jnp.maximum(cdf_nodes_2d[col, k + 1] - c_k, jnp.finfo(up.dtype).tiny)
+    frac = jnp.clip((up - c_k) / denom, 0.0, 1.0)
+    x = jnp.clip(edges[k] + frac * (edges[k + 1] - edges[k]), lo, hi)
+
+    log_s = log_cell_dens_2d[k, col] - log_norm - jnp.log(span)
+    return HistogramSample(x=x, cell=k, log_s=log_s, log_norm=log_norm)
+
+
 def _histogram_trunc_logpdf_tab(x, edges, log_cell_dens, cdf_nodes, log_norm, lo, hi):
     """:func:`histogram_trunc_logpdf` with the CDF nodes supplied by the caller."""
     lo, hi, _F_lo, span = _hist_trunc_span(
@@ -486,14 +553,10 @@ def sample_m1_given_q_trunc(
     """
     tab = build_column_cdf_tables(m1_edges, log_t_cells) if tables is None else tables
 
-    def _one(u_j, c_j, lo_j, hi_j):
-        out = _sample_histogram_trunc_tab(
-            u_j[None], m1_edges, log_t_cells[:, c_j],
-            tab.cdf_nodes[c_j], tab.log_norm[c_j], lo_j, hi_j,
-        )
-        return out.x[0], out.log_s[0]
-
-    return jax.vmap(_one)(u, q_cells, m1_lo, m1_hi)
+    out = _sample_histogram_trunc_col(
+        u, m1_edges, log_t_cells, tab.cdf_nodes, tab.log_norm, q_cells, m1_lo, m1_hi,
+    )
+    return out.x, out.log_s
 
 
 def m1_given_q_trunc_logpdf(
