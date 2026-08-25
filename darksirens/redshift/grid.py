@@ -36,6 +36,54 @@ import numpy as _np
 zgrid = zgrid.at[-1].set(
     jnp.minimum(zgrid[-1], float(_np.expm1(_np.log(zMax + 1.0)))))
 
+# ``zgrid`` is expm1 of a UNIFORM grid in log(1+z), so the bracketing node of
+# any z is available in closed form as floor(log1p(z)/_DLOG) -- no binary
+# search.  ``jnp.interp`` instead calls ``searchsorted``, whose default 'scan'
+# method is a serial ceil(log2(N))-level lax.scan with a dependent gather per
+# level; that chain is the most-executed primitive in the redshift stack (the
+# per-proposal O(N_rows x N_max x 24) Gauss-Legendre reduction in
+# ``catalog._row_log_kernel_norms`` alone). See :func:`_interp_zgrid`.
+_DLOG = math.log(zMax + 1.0) / (_ZGRID_NODES - 1)
+# ``jnp.interp``'s guard against a zero-width cell, reproduced verbatim.
+_INTERP_DX0_EPS = float(_np.spacing(_np.finfo(_np.dtype(zgrid.dtype)).eps))
+# Escape hatch: ``DARKSIRENS_INTERP_SEARCHSORTED=1`` restores the ``jnp.interp``
+# path.  The closed-form index reproduces ``searchsorted(side='right')`` exactly
+# and the interpolation is spelled identically, so the two paths are pointwise
+# bit-identical in isolation; fused into a larger graph, dropping the scan lets
+# XLA contract the surrounding arithmetic differently, which moves the last ulp
+# (~1e-12 relative) of downstream reductions.  The hatch is what makes that
+# A/B'able in one process (tests/test_grid_interp_closed_form.py).
+_USE_SEARCHSORTED = os.environ.get("DARKSIRENS_INTERP_SEARCHSORTED") == "1"
+
+
+def _interp_zgrid(z, log_grid):
+    """``jnp.interp(z, zgrid, log_grid)`` with the node index in closed form.
+
+    Bit-identical to ``jnp.interp`` pointwise: the index is the same one
+    ``searchsorted(zgrid, z, side='right')`` returns (the one-step correction
+    below absorbs both the last-ulp disagreement between libm's ``log1p`` and
+    the tabulated node, and the pinned last node above), and the
+    interpolation, the ``dx0`` guard and the out-of-range fills are the same
+    expressions jax 0.4.34's ``_interp`` uses.
+    """
+    x = jnp.asarray(z)
+    x = x.astype(jnp.result_type(x.dtype, zgrid.dtype))
+    fp = jnp.asarray(log_grid)
+    n = zgrid.shape[0]
+    i = jnp.clip(
+        jnp.floor(jnp.log1p(jnp.maximum(x, 0.0)) / _DLOG).astype(jnp.int32) + 1,
+        1, n - 1)
+    i = i - ((i > 1) & (x < zgrid[i - 1]))
+    i = i + ((i < n - 1) & (x >= zgrid[i]))
+    df = fp[i] - fp[i - 1]
+    dx = zgrid[i] - zgrid[i - 1]
+    delta = x - zgrid[i - 1]
+    dx0 = jnp.abs(dx) <= _INTERP_DX0_EPS
+    f = jnp.where(dx0, fp[i - 1],
+                  fp[i - 1] + (delta / jnp.where(dx0, 1, dx)) * df)
+    f = jnp.where(x < zgrid[0], fp[0], f)
+    return jnp.where(x > zgrid[-1], fp[-1], f)
+
 
 def log_interp_zgrid(z, log_grid):
     """Interpolate a LOG-valued grid on ``zgrid``, with the z -> 0 power law.
@@ -54,4 +102,6 @@ def log_interp_zgrid(z, log_grid):
     z1 = zgrid[1]
     below = log_grid[1] + 2.0 * jnp.log(
         jnp.maximum(z, jnp.finfo(zgrid.dtype).tiny) / z1)
-    return jnp.where(z < z1, below, jnp.interp(z, zgrid, log_grid))
+    above = (jnp.interp(z, zgrid, log_grid) if _USE_SEARCHSORTED
+             else _interp_zgrid(z, log_grid))
+    return jnp.where(z < z1, below, above)
