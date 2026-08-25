@@ -43,7 +43,10 @@ import jax.numpy as jnp
 sys.path.insert(0, os.path.dirname(__file__))
 import test_lss_marginalization as L  # noqa: E402
 import test_marks_lss_marginalize as MK  # noqa: E402
-from darksirens.likelihood.core import darksiren_log_likelihood  # noqa: E402
+from darksirens.likelihood.core import (  # noqa: E402
+    _pe_chunk_plan,
+    darksiren_log_likelihood,
+)
 from darksirens.redshift import zgrid  # noqa: E402
 
 NG = int(zgrid.size)
@@ -52,6 +55,12 @@ NG = int(zgrid.size)
 _N_EV7 = 7
 _GW_PE7 = L._gw(_N_EV7, L._N_SAMP, seed=0)
 _BLOCKS = [None, 1, 3]
+# 9 events -> block=5 gives chunks (5, tail of 4): the tail is taken at the FULL
+# block shape and trimmed (``core._pe_chunk_plan``), the plan the 259-event
+# production blocks land on.  7/3 above stays on the remainder-shape plan (its
+# tail would recompute 2 of 7 events), so both branches are exercised.
+_N_EV9 = 9
+_GW_PE9 = L._gw(_N_EV9, L._N_SAMP, seed=1)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +180,31 @@ def test_k1_marked_grad_through_completion_block_invariant():
             )
         return f
     _assert_block_invariant(build, 1.3, "k1_marked")
+
+
+def test_k1_overlapping_tail_block_invariant():
+    """OVERLAPPING TAIL: 9 events at block 5 give chunks (5, tail) where the tail
+    is evaluated at the FULL 5-event shape (starting at event 4) and only its
+    last 4 rows are kept -- one lowered shape for the whole plan instead of a
+    second lowering of the precompute kernel at the remainder shape.  The kept
+    rows come from the same flat sample slices, so the block invariant is
+    unchanged (MEASURED: block 5 is bit-identical to block 1 here, and to the
+    remainder-shape plan this replaces)."""
+    assert _pe_chunk_plan(_N_EV9, 5) == (1, 4, True), "must take the overlap path"
+    cat = L._dark_catalog(logq_members=L._members_table())
+    build = _k1_builder(cat, cat, _GW_PE9, _N_EV9)
+    theta0 = float(L.POP[0])
+    v_none = float(build(None)(theta0))
+    v_one = float(build(1)(theta0))
+    v_five = float(build(5)(theta0))
+    assert np.isfinite(v_none), v_none
+    # Same tolerance as the block=3 case: only the assembly of pe_pre
+    # reassociates (7.6e-15 relative here between the unblocked pass and the
+    # per-event scan).
+    np.testing.assert_allclose(v_one, v_none, rtol=1e-12, atol=0.0,
+                               err_msg="k1_overlap_tail: None vs 1")
+    np.testing.assert_allclose(v_five, v_none, rtol=1e-12, atol=0.0,
+                               err_msg="k1_overlap_tail: block=5 vs None")
 
 
 def test_k2_conditional_block_invariant():

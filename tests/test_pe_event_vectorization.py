@@ -12,6 +12,13 @@ pointwise), so:
     ``pe_event_block=1`` (the historical per-event scan) bit-for-bit, and
   * a partial block (remainder chunk) MUST equal both.
 
+A block that does not divide ``nEvents`` used to lower the per-sample kernel a
+SECOND time at the remainder shape; ``core._pe_chunk_plan`` now takes that tail
+at the FULL block shape (overlapping the last full chunk, keeping only its last
+``rem`` rows), so one shape covers the whole plan.  The parity above must hold
+for the overlapping tail, for the plans where the cost guard refuses it, and the
+lowered module must not carry the second shape.
+
 Bright-siren configs carry per-event counterpart arrays (``active_counterpart_
 index`` is event-dependent), so they KEEP the exact per-event scan; a bright
 config's value must be independent of ``pe_event_block``.
@@ -33,6 +40,7 @@ from darksirens.redshift import zgrid
 from darksirens.gw.populations import pop_model_prior_parser
 from darksirens.gw.populations.registry import get_fixed_population_params
 from darksirens.inference.prior import build_parameter_space
+from darksirens.likelihood.core import _pe_chunk_plan
 from darksirens.likelihood.factory import make_likelihood
 
 NG = len(zgrid)
@@ -111,7 +119,10 @@ def _full_sky_multi(nEvents, nsamp=NSAMP, n_sel=NSEL):
         "dLsels": jnp.linspace(430.0, 530.0, n_sel),
         "chieffsels": jnp.zeros(n_sel),
         "p_draw": jnp.ones(n_sel),
-        "pixels_sel": jnp.asarray([2, 7, 2, 7, 2, 7, 2, 7][:n_sel], dtype=jnp.int32),
+        # 2/7 alternation, tiled so n_sel > 8 works (the overlapping-tail cases
+        # below need enough selection draws to clear the Neff guard at 16 events).
+        "pixels_sel": jnp.asarray(np.resize(np.array([2, 7]), n_sel),
+                                  dtype=jnp.int32),
         "nx_sel": nx_sel, "ny_sel": ny_sel, "nz_sel": nz_sel,
     }
 
@@ -327,6 +338,87 @@ def test_remainder_chunk_matches(name):
     # tighter than the golden pin (1e-12).
     np.testing.assert_allclose(v_three, v_none, rtol=1e-12, atol=0.0,
                                err_msg=f"{name}: block=3 vs None")
+
+
+# ---------------------------------------------------------------------------
+# (b2) Overlapping tail chunk: ONE lowered shape when the block does not divide.
+# ---------------------------------------------------------------------------
+
+def test_pe_chunk_plan_shipped_plans_overlap():
+    """The plan resolver's own 259-event blocks take the overlapping tail."""
+    # (32768, 87) -- the plan quoted in block_sizing.py -- and the floored plan.
+    assert _pe_chunk_plan(259, 87) == (2, 85, True)    # recomputes 2 events
+    assert _pe_chunk_plan(259, 8) == (32, 3, True)     # recomputes 5 events
+    # Exact division needs no tail at all.
+    assert _pe_chunk_plan(259, 37) == (7, 0, False)
+    assert _pe_chunk_plan(16, 8) == (2, 0, False)
+
+
+def test_pe_chunk_plan_refuses_expensive_overlap():
+    """A hand-set block close to nEvents keeps the two-shape plan: the tail would
+    recompute more than nEvents/8 events (15 of 16 -> 14 recomputed, nearly
+    doubling the PE work to save one lowered shape)."""
+    assert _pe_chunk_plan(16, 15) == (1, 1, False)
+    assert _pe_chunk_plan(7, 3) == (2, 1, False)       # 2 of 7 recomputed
+    # pe_block > nEvents: no full chunk exists, so there is nothing to overlap
+    # (and only one shape is lowered anyway).
+    assert _pe_chunk_plan(4, 8) == (0, 4, False)
+
+
+@pytest.mark.parametrize("pe_block", [6, 9, 15])
+def test_overlapping_tail_matches(pe_block):
+    """16 events at blocks that leave a remainder: 6 -> (6, 6, tail 4), 9 ->
+    (9, tail 7) both take the overlapping tail (the tail chunk is evaluated at
+    the FULL block shape and only its last ``rem`` rows are kept); 15 -> (15,
+    rem 1) is refused by the cost guard and keeps the historical remainder
+    chunk.  All three must reproduce the per-event scan."""
+    # 64 selection draws: the Neff guard kills 16 events against the 8 the other
+    # cells use.
+    data = _full_sky_multi(16, n_sel=64)
+    opts_factory = lambda **kw: _base_opts(**kw)
+    coord = jnp.asarray(_mid_coord(opts_factory(pe_event_block=None)))
+    ll_none, _ = _build_ll(opts_factory, data, None)
+    ll_one, _ = _build_ll(opts_factory, data, 1)
+    ll_blk, _ = _build_ll(opts_factory, data, pe_block)
+    v_none = float(ll_none(coord))
+    v_one = float(ll_one(coord))
+    v_blk = float(ll_blk(coord))
+    assert np.isfinite(v_none), v_none
+    np.testing.assert_allclose(v_none, v_one, rtol=1e-12, atol=0.0,
+                               err_msg="None vs 1")
+    # Same rationale (and tolerance) as the block=3 case above: the retained
+    # rows are computed from the identical masked samples in the identical order
+    # -- the overlap only recomputes rows it then drops -- so only the final
+    # cross-event sum reassociates when the vector is assembled from unequal
+    # parts.  MEASURED: block 9 and 15 are bit-identical to None, block 6
+    # (parts 12 + 4) differs by 2.8e-14 relative.
+    np.testing.assert_allclose(v_blk, v_none, rtol=1e-12, atol=0.0,
+                               err_msg=f"block={pe_block} vs None")
+
+
+def test_overlapping_tail_lowers_one_shape():
+    """Regression guard for the duplicated remainder shape.
+
+    A remainder chunk of a different static event count lowers the whole
+    per-sample kernel a SECOND time.  With the overlapping tail, a block that
+    does NOT divide nEvents (9 of 16) must lower a module the size of one that
+    DOES (8 of 16); before the fix it was 8529 lines against 6785, i.e. 1.26x.
+    Lowering only -- no compile -- so this stays cheap."""
+    data = _full_sky_multi(16, n_sel=64)
+    opts_factory = lambda **kw: _base_opts(**kw)
+    coord = jnp.asarray(_mid_coord(opts_factory(pe_event_block=None)))
+
+    def _hlo_lines(pe_block):
+        ll, _ = _build_ll(opts_factory, data, pe_block)
+        text = ll.jitted_body.lower(
+            coord, ll.operands, ll.distance_table, ll.smoothing_operator
+        ).as_text()
+        return text.count("\n") + 1
+
+    n_divides = _hlo_lines(8)     # 2 full chunks, no tail
+    n_overlap = _hlo_lines(9)     # 1 full chunk + overlapping tail
+    assert _pe_chunk_plan(16, 9)[2], "block 9 of 16 must take the overlap path"
+    assert n_overlap < 1.1 * n_divides, (n_overlap, n_divides)
 
 
 # ---------------------------------------------------------------------------
