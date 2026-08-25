@@ -339,3 +339,54 @@ def test_gradient_wrt_H0_finite(setup):
 
     g = float(jax.grad(f)(jnp.asarray(70.0)))
     assert np.isfinite(g)
+
+
+def test_target_grid_uses_broadcast_axes_not_a_ravelled_mesh(setup, monkeypatch):
+    """The (m1, q) target grid must go in as broadcast AXES, never ravelled.
+
+    ``MixtureModel.mass_q_density`` runs the pairing model's N_Q-node
+    q-quadrature once per query ROW, and that normaliser is a function of m1
+    alone.  Handing it a flattened ``(n_m1*n_q,)`` mesh therefore recomputes
+    each m1's quadrature ``n_q`` times and materialises an
+    ``(n_m1*n_q, N_Q)`` scratch buffer — 420 MB at the shipped 512 x 256 grid,
+    measured 44.1 ms vs 0.99 ms (CPU) for the identical result.  Pin the
+    broadcast call shapes so the ravel cannot creep back.
+    """
+    from darksirens.gw.populations.base import MixtureModel
+
+    calls = []
+    orig = MixtureModel.mass_q_density
+
+    def _recording(self, m1, q, theta):
+        calls.append((jnp.shape(m1), jnp.shape(q)))
+        return orig(self, m1, q, theta)
+
+    monkeypatch.setattr(MixtureModel, "mass_q_density", _recording)
+
+    ens = setup["ens"]
+    n_m1, n_q = 16, 8
+    edges = make_mass_q_edges(
+        *resolve_mass_grid_bounds(get_model("powerlaw+peak")), n_m1=n_m1, n_q=n_q
+    )
+    ll = build_flow_loglike(
+        model=get_model("powerlaw+peak"),
+        eval_logflows=flows_mod.make_ensemble_log_prob_per_event(ens),
+        group_params=ens.group_params(),
+        u_base=jax.random.uniform(
+            jax.random.PRNGKey(0), (ens.n_flows, 64, 4), dtype=jnp.float64
+        ),
+        m1_edges=edges[0],
+        q_edges=edges[1],
+        pe_tables=setup["pe_tables"],
+        support_boxes=flows_mod.compute_support_boxes(ens, key=jax.random.key(1)),
+        gw_sel=setup["gw_sel"],
+        em_catalog_sel=setup["catalog"],
+        Ndraw=setup["Ndraw"],
+        nEvents=ens.n_flows,
+    )
+    ll(_cosmo(), _survey(), setup["theta_fid"])
+
+    assert calls, "mass_q_density was never called while tracing the flow term"
+    # Cell CENTRES, so the grid is (n_m1, n_q) cells from (n_m1+1, n_q+1) edges.
+    assert (jnp.shape(edges[0])[0] - 1, 1) == calls[0][0], calls[0]
+    assert (1, jnp.shape(edges[1])[0] - 1) == calls[0][1], calls[0]

@@ -463,14 +463,28 @@ def make_single_theta_predictive(pop_model, settings, mgrid, qgrid, zgrid, chigr
         ``(I_c (S,nz), I_zc (S,), I_z (S,nchi))``.  Built from the unbatched grid
         constants and broadcast against the sampled ``pop_theta`` — the outer
         vmap tracks the sample axis through the fixed-shape reshapes.
+
+        The coordinates go in as BROADCAST AXES, never as a ravelled
+        ``(S*nz*nchi,)`` mesh: the pairing normaliser inside the population
+        model runs an N_Q-node q-quadrature per query row and depends on m1
+        alone, so a flat mesh repeats it ``nz*nchi`` times and materialises an
+        ``(S*nz*nchi, N_Q)`` scratch buffer — the reason ``--grid_chunk``
+        exists.  Broadcast axes cost ``(S,1,1,N_Q)`` instead: measured on
+        ``powerlaw+peak`` at the shipped defaults (--nm 128 --nq 48 --nz 32
+        --nchi 24), the compiled ``single_theta`` goes from 15.17 GB of scratch
+        and 21.2 ms to 39.7 MB and 0.58 ms per sample (GPU; 1507 -> 16.7 ms on
+        CPU).  The result is broadcast (not reshaped) back to ``shp`` because a
+        model whose density is independent of z or chi legitimately returns
+        size-1 axes.
         """
         S = m1c.shape[0]
         shp = (S, nz, nchi)
-        m1f = jnp.broadcast_to(m1c[:, None, None], shp).reshape(S * nz * nchi)
-        qf = jnp.broadcast_to(qc[:, None, None], shp).reshape(S * nz * nchi)
-        zf = jnp.broadcast_to(zgrid[None, :, None], shp).reshape(S * nz * nchi)
-        chif = jnp.broadcast_to(chigrid[None, None, :], shp).reshape(S * nz * nchi)
-        p = jnp.exp(pop_model(m1f, qf, zf, chif, pop_theta)).reshape(shp)
+        p = jnp.broadcast_to(
+            jnp.exp(pop_model(m1c[:, None, None], qc[:, None, None],
+                              zgrid[None, :, None], chigrid[None, None, :],
+                              pop_theta)),
+            shp,
+        )
         I_c = jnp.trapezoid(p, chigrid, axis=2)      # (S, nz)
         I_zc = jnp.trapezoid(I_c, zgrid, axis=1)     # (S,)
         I_z = jnp.trapezoid(p, zgrid, axis=1)        # (S, nchi)
