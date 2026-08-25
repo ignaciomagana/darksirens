@@ -3238,6 +3238,13 @@ def build_parser():
     sampler.add_argument("--nuts_chain_method", default="sequential",
                    choices=["sequential", "parallel", "vectorized"])
     sampler.add_argument("--nuts_init_tries", type=int, default=32)
+    sampler.add_argument("--prior_transform_dispatch",
+                         choices=["auto", "eager"], default="auto",
+                         help="How dynesty calls the prior transform: 'auto' "
+                              "picks the cheapest convention it supports (host "
+                              "numpy, or a jit verified bit-identical on this "
+                              "backend), 'eager' forces the op-by-op device "
+                              "path. See the main CLI for details.")
     # Shared with the main CLI (darksirens/inference/checkpointing.py): sampler
     # checkpoints land in the run directory and --resume auto continues there.
     add_checkpoint_arguments(sampler)

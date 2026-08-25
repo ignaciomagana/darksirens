@@ -397,6 +397,12 @@ def save_results_hdf5(
         # it so a mismatch stays visible in provenance.
         f.attrs["nlive"] = int(results.get("nlive_actual") or opts.nlive)
         f.attrs["nlive_requested"] = int(opts.nlive)
+        # Which calling convention dynesty's prior transform ran through
+        # ("" for the other samplers).  The conventions are verified equal bit
+        # for bit before a fast one is taken, so this is provenance rather than
+        # a knob -- but with the repo's bit-identity pin it must be recorded.
+        f.attrs["prior_transform_dispatch"] = str(
+            results.get("prior_transform_dispatch") or "")
         f.attrs["dlogz"]           = float(opts.dlogz)
         f.attrs["tinyns_sample"]   = str(getattr(opts, "tinyns_sample", ""))
         f.attrs["tinyns_kernel"]   = str(getattr(opts, "tinyns_kernel", ""))

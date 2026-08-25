@@ -95,6 +95,31 @@ def test_nlive_actual_wins_over_the_request(tmp_path):
         assert int(f.attrs["nlive_requested"]) == 64
 
 
+def test_prior_transform_dispatch_is_recorded(tmp_path):
+    """dynesty picks the prior transform's calling convention at run time
+    (host numpy / verified jit / eager).  The conventions are checked to agree
+    bit for bit before a fast one is taken, but with the repo's bit-identity
+    pin the choice must be provenance in the artifact, not just a log line."""
+    results = _results()
+    results["prior_transform_dispatch"] = "jit"
+    save_results_hdf5(
+        results, str(tmp_path), ["x"], [0.0], [1.0], {}, {},
+        _opts(sampler="dynesty"), _meta(),
+    )
+    with h5py.File(tmp_path / "results.hdf5") as f:
+        assert f.attrs["prior_transform_dispatch"] == "jit"
+
+
+def test_prior_transform_dispatch_defaults_to_empty(tmp_path):
+    """tinyns/numpyro do not go through the dynesty wrapper at all."""
+    save_results_hdf5(
+        _results(), str(tmp_path), ["x"], [0.0], [1.0], {}, {},
+        _opts(), _meta(),
+    )
+    with h5py.File(tmp_path / "results.hdf5") as f:
+        assert f.attrs["prior_transform_dispatch"] == ""
+
+
 def test_nlive_defaults_to_the_request_without_sampler_state(tmp_path):
     save_results_hdf5(
         _results(), str(tmp_path), ["x"], [0.0], [1.0], {}, {},

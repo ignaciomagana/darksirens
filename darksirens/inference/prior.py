@@ -1575,6 +1575,22 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
             return u
 
     if prior_kinds is None or all(k[0] == "uniform" for k in prior_kinds):
+        if not joint_constraints:
+            # Nothing but a per-dimension affine map: keep it on the HOST so
+            # dynesty's once-per-proposal call costs no host->device->host
+            # round trip (measured 681 us/call as a JAX graph vs 1.0 us/call
+            # here, bit-identical -- numpy and jax both do a correctly-rounded
+            # mul then add).  Still trace-safe: with a JAX ``u`` the array's
+            # ``__mul__`` wins and the closure lowers exactly as before, which
+            # is what tinyns (which jits it) and the preflight probe rely on.
+            span = upper - lower
+            def prior_transform(u):
+                return u * span + lower
+            # Advertised to the dynesty call site (inference/sampling.py): a
+            # numpy ``u`` in gives a numpy theta out, no device involved.
+            prior_transform.host_native = True
+            return prior_transform
+
         def prior_transform(u):
             return _apply_joint(u) * (upper - lower) + lower
         return prior_transform
@@ -1626,5 +1642,14 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
         out = jnp.where(is_lognorm, lognormal, out)
         out = jnp.where(is_beta, beta, out)
         return out
+
+    # ~40 device ops (two truncated-normal PPFs, the Beta PPF, three selects).
+    # Dispatched op-by-op that is ~26 ms per call, so the dynesty call site
+    # jits it (40x) -- but only after checking that the compiled version
+    # reproduces this one bit for bit, since XLA may contract a PPF polynomial
+    # into FMAs.  The all-uniform branches above are deliberately NOT flagged:
+    # fusing their mul+add would move a sampled parameter by one ulp, which
+    # the bit-identity pin forbids.
+    prior_transform.prefer_jit = True
 
     return prior_transform

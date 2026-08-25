@@ -193,6 +193,150 @@ def dynesty_diagnostics_dir(opts):
     return os.path.join(root, "dynesty_diagnostics")
 
 
+def _make_dynesty_ptform(prior_transform, ndims, n_probe=512, mode="auto"):
+    """Wrap ``prior_transform`` in the cheapest convention it supports.
+
+    dynesty calls the prior transform ONCE PER PROPOSAL, exactly as often as
+    the likelihood, so its dispatch cost is not a rounding error:
+
+    * an all-uniform transform with no joint constraint is a per-dimension
+      affine map, but sending it through ``jnp.asarray`` cost a host->device
+      launch and a blocking copy back — 681 us/call on the H100, against
+      1.0 us/call for the identical numpy expression.  ``make_prior_transform``
+      marks that closure ``host_native``: hand it dynesty's own numpy ``u``
+      and the device is never involved.  (Keeping ``jnp.asarray`` here would
+      defeat it: a numpy ``span`` times a device array is a device array.)
+    * the non-uniform branch is a ~40-op graph (two truncated-normal PPFs, the
+      Beta(1, b) PPF, three selects) dispatched op by op — 26 ms/call, 0.64 ms
+      jitted.  It is marked ``prefer_jit``.
+
+    The jit is accepted only if it reproduces the eager transform EXACTLY on
+    ``n_probe`` cube draws.  XLA contracts the truncated-normal PPF's
+    polynomial into FMAs, which moves theta by ~30 ulps on the CPU backend and
+    on 3-6% of draws on the H100; the closed-form Beta(1, b) stick (the K>=2
+    catalog mixture, the branch a dark-siren dynesty run actually hits) is
+    exact on both.  This repo pins bit identity, so the fusing configurations
+    keep the eager path and say so rather than silently moving the sampled
+    parameters.  The reference is one BATCHED eager call where the transform
+    supports it (all of ``make_prior_transform``'s do; a per-row loop
+    otherwise) — the probe is a sample, so it errs toward rejecting a jit,
+    which costs speed, never values.  That batched reference is only a valid
+    stand-in for dynesty's per-row calls because batched == per-row is itself
+    pinned (``test_batched_cube_equals_the_per_row_loop*``).  The probe's RNG
+    is its own ``default_rng``: dynesty's ``rstate`` must not be perturbed
+    (``test_dynesty_seed``).
+
+    Anything without a flag (an all-uniform transform WITH joint constraints,
+    or a caller-supplied callable) keeps the original eager path: jitting a
+    plain ``u * span + lower`` could lower it to an FMA too.
+
+    ``mode="eager"`` (``--prior_transform_dispatch eager``) refuses both fast
+    conventions and restores the pre-review call path exactly, so a run made
+    before this dispatch existed can be reproduced from the CLI.  Whichever
+    convention is chosen is PRINTED and returned on the wrapper's ``dispatch``
+    attribute, which ``run_sampler`` records into ``results.hdf5``: in a repo
+    that pins bit identity, "which transform produced these samples" must not
+    be a silent decision.
+    """
+    def _announce(dispatch, detail):
+        print(f"  [i] dynesty prior transform: {dispatch} -- {detail}",
+              flush=True)
+        return dispatch
+
+    if mode not in ("auto", "eager"):
+        raise ValueError(
+            f"prior_transform_dispatch must be 'auto' or 'eager', got {mode!r}."
+        )
+    if mode == "eager":
+        def dynesty_ptform(u):
+            return np.asarray(prior_transform(jnp.asarray(u)))
+        dynesty_ptform.dispatch = _announce(
+            "eager-forced",
+            "op-by-op on the device, as before this dispatch existed "
+            "(--prior_transform_dispatch eager)",
+        )
+        return dynesty_ptform
+
+    if getattr(prior_transform, "host_native", False):
+        def dynesty_ptform(u):
+            return np.asarray(prior_transform(u))
+        dynesty_ptform.dispatch = _announce(
+            "host",
+            "all-uniform affine map evaluated in numpy, no device round trip "
+            "(bit-identical to the eager JAX expression)",
+        )
+        return dynesty_ptform
+
+    if getattr(prior_transform, "prefer_jit", False):
+        cube = np.random.default_rng(0xB17C0DE).random((n_probe, ndims))
+        jitted = None
+        exact = False
+        rejected = (
+            "eager-not-bit-identical",
+            "the compiled transform does not reproduce the eager one bit for "
+            "bit on this backend (fused polynomial evaluation) and the "
+            "sampled values are pinned; proposals keep the slower op-by-op "
+            "path",
+        )
+        try:
+            jitted = jax.jit(prior_transform)
+            reference = None
+            try:
+                batched = np.asarray(prior_transform(jnp.asarray(cube)))
+                if batched.shape == cube.shape:
+                    reference = batched
+            except Exception:  # pragma: no cover - a non-batching transform
+                reference = None
+            if reference is None:
+                # No batched call: probe fewer points rather than pay the eager
+                # per-call cost 512 times before the run even starts.
+                cube = cube[: min(32, n_probe)]
+                reference = np.stack(
+                    [np.asarray(prior_transform(jnp.asarray(row)))
+                     for row in cube]
+                )
+            exact = True
+            for k, row in enumerate(cube):
+                if not np.array_equal(
+                    np.asarray(jitted(jnp.asarray(row))), reference[k]
+                ):
+                    exact = False
+                    break
+        except Exception as exc:
+            # A flagged transform that will not compile is a speed problem,
+            # never a correctness one: fall back to the path it had before.
+            exact = False
+            rejected = (
+                "eager-jit-unavailable",
+                f"the transform could not be compiled or probed "
+                f"({type(exc).__name__}: {exc}); proposals keep the eager path",
+            )
+        if exact:
+            def dynesty_ptform(u):
+                return np.asarray(jitted(jnp.asarray(u)))
+            dynesty_ptform.dispatch = _announce(
+                "jit",
+                f"compiled transform matched the eager one on all "
+                f"{len(cube)} probe draws, bit for bit "
+                f"(--prior_transform_dispatch eager to refuse it)",
+            )
+            return dynesty_ptform
+
+        def dynesty_ptform(u):
+            return np.asarray(prior_transform(jnp.asarray(u)))
+        dynesty_ptform.dispatch = _announce(*rejected)
+        return dynesty_ptform
+
+    def dynesty_ptform(u):
+        return np.asarray(prior_transform(jnp.asarray(u)))
+    dynesty_ptform.dispatch = _announce(
+        "eager",
+        "no fast convention available for this transform (joint constraints "
+        "or a caller-supplied callable); op-by-op on the device",
+    )
+    return dynesty_ptform
+
+
 def _nested_sampler_preflight(likelihood, prior_transform, ndims, opts, n_probe=32):
     """Probe the likelihood on a handful of prior draws before a nested sampler.
 
@@ -687,7 +831,20 @@ def run_sampler(method, likelihood, prior_transform, labels,
             theta_parts = [sites[i] for i in range(len(labels))]
             theta = jnp.stack(theta_parts) if theta_parts else jnp.array([])
             log_l = likelihood(theta)
-            numpyro.deterministic("log_likelihood", log_l)
+            # NO ``numpyro.deterministic("log_likelihood", log_l)`` here.
+            #
+            # numpyro replays this model once per collected draw regardless of
+            # what we do: `lower`/`upper` are jnp arrays, so every
+            # `dist.Uniform(low=lower[i], high=upper[i])` carries a traced
+            # `_Interval` bound and `_get_model_transforms` sets
+            # replay_model=True for any bound that is not a python int/float
+            # (infer/util.py:518-525).  What a deterministic site adds is not
+            # the replay but its COST: it is the only thing that keeps
+            # `likelihood(theta)` live in the replayed trace, since
+            # `constrain_fn` returns deterministic sites and `numpyro.factor`'s
+            # value is discarded.  Without the site XLA eliminates the
+            # likelihood from the postprocess graph, and the array is recovered
+            # by one mapped pass after the run instead (see below).
             numpyro.factor("likelihood", log_l)
 
         init_values = {name: midpoint[i] for i, name in enumerate(labels)}
@@ -830,6 +987,23 @@ def run_sampler(method, likelihood, prior_transform, labels,
             else jnp.zeros((num_samples * num_chains, 0))
         )
         log_likelihood = posterior.get("log_likelihood")
+        if log_likelihood is None and labels:
+            # Not recorded in-model -- an in-model deterministic site is what
+            # keeps the likelihood alive inside the per-draw replay.  Evaluate
+            # it once over the retained samples instead.  ``lax.map`` and NOT
+            # ``vmap``: the sequential map reproduces the replayed values BIT
+            # for BIT, while batching rewrites the likelihood's reduction order
+            # (measured 2.4e-07 off) -- and it keeps one draw in flight at a
+            # time, which a large likelihood over ~1000 draws needs.  Cheaper
+            # per draw than the in-scan replay, which is not fused, but the net
+            # saving is a few percent of the sampling phase, not a factor:
+            # dropping the site removes the likelihood from the replay, never
+            # the replay itself.
+            log_likelihood = jax.jit(
+                lambda thetas: jax.lax.map(
+                    lambda theta: jnp.asarray(likelihood(theta)), thetas
+                )
+            )(samples)
 
         # Sampler-health diagnostics. Divergences mean the leapfrog integrator
         # hit numerically unstable curvature (or a -inf likelihood cliff inside
@@ -905,8 +1079,12 @@ def run_sampler(method, likelihood, prior_transform, labels,
 
             return val
 
-        def dynesty_ptform(u):
-            return np.asarray(prior_transform(jnp.asarray(u)))
+        # Once per proposal, as often as the likelihood: see the dispatch rules
+        # (and the measured costs) in _make_dynesty_ptform.
+        dynesty_ptform = _make_dynesty_ptform(
+            prior_transform, ndims,
+            mode=str(getattr(opts, "prior_transform_dispatch", "auto") or "auto"),
+        )
 
         maxcall = getattr(opts, "max_samples", None)
         if maxcall is not None and maxcall <= 0:
@@ -1100,6 +1278,13 @@ def run_sampler(method, likelihood, prior_transform, labels,
             # run keeps the checkpoint's nlive over --nlive (warned above), so
             # results.hdf5 must not record the request as if it were the state.
             "nlive_actual": int(getattr(sampler, "nlive", opts.nlive)),
+            # WHICH prior-transform convention produced these samples (host /
+            # jit / eager / eager-forced / eager-not-bit-identical).  The
+            # conventions are checked to agree bit for bit before a fast one is
+            # taken, but with a one-ulp bit-identity pin the provenance of that
+            # choice belongs in the results file, not only in the log.
+            "prior_transform_dispatch": getattr(
+                dynesty_ptform, "dispatch", ""),
         }
 
     else:

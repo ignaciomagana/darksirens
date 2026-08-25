@@ -1730,6 +1730,18 @@ def build_parser():
     g.add_argument("--dynesty_diagnostics", type=str_to_bool, default=False, metavar="BOOL",
                    help="Write dynesty runplot/traceplot PDFs every 10 minutes to "
                         "<run_dir>/dynesty_diagnostics/. Only used with --sampler dynesty.")
+    g.add_argument("--prior_transform_dispatch", choices=["auto", "eager"],
+                   default="auto",
+                   help="How dynesty calls the prior transform. 'auto' (default) "
+                        "picks the cheapest convention the transform supports -- "
+                        "numpy on the host for an unconstrained all-uniform box, "
+                        "a jitted graph for normal/lognormal/beta priors, but the "
+                        "jit only after it is verified to reproduce the eager "
+                        "transform bit for bit on this backend. 'eager' refuses "
+                        "both and restores the op-by-op device path, for "
+                        "reproducing a run made before the dispatch existed. The "
+                        "choice is printed and saved as the "
+                        "'prior_transform_dispatch' attr of results.hdf5.")
     g.add_argument("--sampler_preflight", choices=["on", "off"], default="on",
                    help="Probe 32 prior draws before nested sampling (dynesty/tinyns) and "
                         "fail fast if the likelihood is -inf on all of them (usually the "
