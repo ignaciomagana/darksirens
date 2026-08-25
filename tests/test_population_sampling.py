@@ -247,3 +247,127 @@ def test_chirp_band_two_stage_sampler_recovers_target_integral(plp):
     band = (M1 >= 8.0 * G) & (M1 <= 12.0 * G)
     ref = float(jnp.trapezoid(jnp.trapezoid(jnp.where(band, P, 0.0), qg, axis=1), m1g))
     assert est == pytest.approx(ref, rel=5e-2)
+
+
+# ── the m1|q draw reads the CDF tables by (draw, node) index ────────────────
+#
+# The draw used to slice a whole CDF column per draw and hand it to
+# jnp.searchsorted, which XLA cannot fuse: 17.6 GB of scratch at the
+# production flow shape (nEvents=259, J=16384, K=512).  It now probes the 2-D
+# tables directly.  The tests below pin BOTH halves of that claim: bitwise
+# equality with the column-slice reference, and scratch that no longer grows
+# with the grid resolution.
+
+
+def _m1_given_q_column_slice_reference(u, m1_edges, log_t_cells, q_cells, lo, hi, tab):
+    """The pre-restructure draw: slice the column, then ``jnp.searchsorted``."""
+    from darksirens.gw.populations.sampling import _sample_histogram_trunc_tab
+
+    def _one(u_j, c_j, lo_j, hi_j):
+        out = _sample_histogram_trunc_tab(
+            u_j[None], m1_edges, log_t_cells[:, c_j],
+            tab.cdf_nodes[c_j], tab.log_norm[c_j], lo_j, hi_j,
+        )
+        return out.x[0], out.log_s[0]
+
+    return jax.vmap(_one)(u, q_cells, lo, hi)
+
+
+def test_column_searchsorted_matches_jnp_searchsorted():
+    """Including duplicate nodes and a table that is not quite monotone.
+
+    A parallel ``jnp.cumsum`` can leave the CDF nodes non-monotone by an ulp
+    near saturation, so the column search must agree with ``jnp.searchsorted``
+    on unsorted input too — not just where the precondition holds.
+    """
+    from darksirens.gw.populations.sampling import _searchsorted_right_col
+
+    rng = np.random.default_rng(7)
+    for K, C in ((512, 16), (65, 4), (2, 3), (1, 1)):
+        nodes = jnp.asarray(np.sort(rng.uniform(size=(C, K + 1)), axis=1))
+        nodes = nodes.at[:, K // 2 : K // 2 + 3].set(nodes[:, K // 2 : K // 2 + 1])
+        nodes = nodes.at[0, -1].set(nodes[0, -1] * (1.0 - 2.0**-52))
+        col = jnp.asarray(rng.integers(0, C, 4096))
+        v = jnp.asarray(rng.uniform(size=4096))
+        # hit exact node values, not just generic points
+        v = v.at[::4].set(nodes[col[::4], (col[::4] * 7) % (K + 1)])
+        got = _searchsorted_right_col(nodes, col, v)
+        want = jax.vmap(lambda c, x: jnp.searchsorted(nodes[c], x, side="right"))(col, v)
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+
+def test_m1_given_q_draw_is_bit_identical_to_column_slice_reference():
+    from darksirens.gw.populations.sampling import (
+        build_column_cdf_tables,
+        sample_m1_given_q_trunc,
+    )
+
+    rng = np.random.default_rng(11)
+    for K, C, n in ((512, 256, 4096), (64, 16, 257), (7, 3, 33), (1, 2, 17)):
+        m1_edges = jnp.asarray(np.sort(rng.uniform(3.0, 100.0, K + 1)))
+        dense = jnp.asarray(rng.normal(size=(K, C)) - 5.0)
+        # 90% floored: duplicate CDF nodes, and a saturated (non-monotone) tail
+        floored = jnp.where(jnp.asarray(rng.uniform(size=(K, C))) < 0.9, -700.0, dense)
+        for tag, log_t in (("dense", dense), ("floored", floored)):
+            tab = build_column_cdf_tables(m1_edges, log_t)
+            u = jnp.asarray(rng.uniform(size=n)).at[0].set(0.0).at[-1].set(1.0)
+            cells = jnp.asarray(rng.integers(0, C, n))
+            lo = jnp.asarray(rng.uniform(0.0, 110.0, n))       # windows off-grid
+            hi = lo + jnp.asarray(rng.uniform(-5.0, 60.0, n))  # and some hi < lo
+            x, log_s = sample_m1_given_q_trunc(
+                u, m1_edges, log_t, cells, lo, hi, tables=tab
+            )
+            x_ref, log_s_ref = _m1_given_q_column_slice_reference(
+                u, m1_edges, log_t, cells, lo, hi, tab
+            )
+            assert bool(jnp.all(x == x_ref)), f"{tag} K={K}: m1 draws moved"
+            assert bool(jnp.all(log_s == log_s_ref)), f"{tag} K={K}: log_s moved"
+
+    # ... and under the vmap-over-events the flow likelihood wraps it in.
+    K, C, nE, n = 64, 16, 5, 128
+    m1_edges = jnp.asarray(np.sort(rng.uniform(3.0, 100.0, K + 1)))
+    log_t = jnp.asarray(rng.normal(size=(K, C)) - 5.0)
+    tab = build_column_cdf_tables(m1_edges, log_t)
+    u = jnp.asarray(rng.uniform(size=(nE, n)))
+    cells = jnp.asarray(rng.integers(0, C, (nE, n)))
+    lo = jnp.asarray(rng.uniform(3.0, 90.0, (nE, n)))
+    hi = lo + jnp.asarray(rng.uniform(0.0, 40.0, (nE, n)))
+
+    def _per_event(f):
+        return jax.vmap(lambda a, b, c, d: f(a, m1_edges, log_t, b, c, d, tab))
+
+    x, log_s = _per_event(
+        lambda u_, e, l, c, a, b, t: sample_m1_given_q_trunc(u_, e, l, c, a, b, tables=t)
+    )(u, cells, lo, hi)
+    x_ref, log_s_ref = _per_event(_m1_given_q_column_slice_reference)(u, cells, lo, hi)
+    assert bool(jnp.all(x == x_ref)) and bool(jnp.all(log_s == log_s_ref))
+
+
+def test_m1_given_q_draw_scratch_is_independent_of_grid_resolution():
+    """Regression guard: the (draws, K+1) CDF tensor must not come back."""
+    from darksirens.gw.populations.sampling import (
+        build_column_cdf_tables,
+        sample_m1_given_q_trunc,
+    )
+
+    def temp_bytes(K, C=8, n=1024):
+        rng = np.random.default_rng(3)
+        m1_edges = jnp.asarray(np.linspace(3.0, 100.0, K + 1))
+        log_t = jnp.asarray(rng.normal(size=(K, C)))
+        tab = build_column_cdf_tables(m1_edges, log_t)
+        u = jnp.asarray(rng.uniform(size=n))
+        cells = jnp.asarray(rng.integers(0, C, n))
+        lo = jnp.asarray(rng.uniform(3.0, 40.0, n))
+        f = jax.jit(
+            lambda u_, c, a, b: sample_m1_given_q_trunc(
+                u_, m1_edges, log_t, c, a, b, tables=tab
+            )
+        )
+        mem = f.lower(u, cells, lo, lo + 10.0).compile().memory_analysis()
+        if mem is None:
+            pytest.skip("backend reports no memory analysis")
+        return mem.temp_size_in_bytes
+
+    small, big = temp_bytes(128), temp_bytes(1024)
+    # The column slice cost n*(K+1)*8 B, i.e. an 8x jump across this pair.
+    assert big < 1.5 * small, f"scratch grows with K: {small} -> {big} B"
