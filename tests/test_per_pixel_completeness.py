@@ -41,6 +41,7 @@ from darksirens.redshift.completion import (  # noqa: E402
     build_field_lss_q_fp_empty_sum,
     build_field_lss_q_fp_empty_sum_members,
     build_field_lss_q_inputs,
+    build_field_lss_q_member_inputs,
     build_field_normalization_inputs,
     completion_curves,
 )
@@ -614,6 +615,163 @@ def test_fp_q_budget_is_the_q_weighted_formula():
     wrong = ((1.0 - f_occ[:, None] * C[None, :]) * q[occ]).sum(axis=0) \
         + (n_pix - occ.size) - C * f_full[empty].sum()
     assert not np.allclose(V[below], wrong[below], rtol=1e-3)
+
+
+def _fp_kw(kw, occ, logq, n_pix, lo=0.2):
+    """``kw`` from :func:`_q_field_kw` plus the three f_p leaves."""
+    f_full = np.linspace(lo, 1.0, n_pix)
+    empty = np.setdiff1d(np.arange(n_pix), occ)
+    return dict(
+        kw,
+        field_f_p_occ=jnp.asarray(f_full[occ].astype(np.float32)),
+        field_f_p_empty_sum=jnp.asarray(float(f_full[empty].sum())),
+        field_lss_q_fp_empty_sum=build_field_lss_q_fp_empty_sum(
+            logq, occ, n_pix, f_full))
+
+
+@pytest.mark.parametrize("with_fp", [False, True])
+def test_folded_occupied_budget_matches_the_scan(monkeypatch, with_fp):
+    """The folded occupied budget is the chunked scan, to rounding.
+
+    Under an aggregate selection curve with a Q table the occupied rows carry
+    ``(1 - f_p Cbar) Q_p`` with a constant ``Q_p``, so ``_field_missing_curve``
+    sums the rows once instead of scanning them per proposal.  A/B against the
+    scan itself (``_fold_occupied_rows`` monkeypatched off) rather than against
+    a re-derivation, so the claim is old-code-vs-new-code on the same inputs.
+    The two differ only in how the rounding falls (a different factorization
+    of the same sum, not a different sum).
+    """
+    from darksirens.redshift import completion as completion_mod
+
+    n_pix = 12
+    _, _, occ, logq, kw = _q_field_kw(n_pix)
+    if with_fp:
+        kw = _fp_kw(kw, occ, logq, n_pix)
+    em = _em(n_pix=n_pix, **kw)
+
+    # the fold must actually FIRE on this configuration, or the A/B is vacuous
+    taken = []
+    real = completion_mod._fold_occupied_rows
+    monkeypatch.setattr(
+        completion_mod, "_fold_occupied_rows",
+        lambda *a: (taken.append(real(*a)), taken[-1])[1])
+    V_fold = np.asarray(_field_missing_curve(_cosmo(), _survey(), em)[0])
+    assert taken and all(taken)
+
+    monkeypatch.setattr(completion_mod, "_fold_occupied_rows",
+                        lambda *a: False)
+    V_scan = np.asarray(_field_missing_curve(_cosmo(), _survey(), em)[0])
+    assert np.max(np.abs(V_scan)) > 0.0
+    np.testing.assert_allclose(V_fold, V_scan, rtol=1e-13, atol=0.0)
+
+
+def test_the_fold_is_only_taken_where_every_row_shares_one_C_and_a_fixed_Q():
+    """The predicate, argument by argument: anything per-row keeps the scan."""
+    from darksirens.redshift.completion import _fold_occupied_rows
+
+    assert _fold_occupied_rows(True, True, False, False, False)
+    assert not _fold_occupied_rows(False, True, False, False, False)  # per-pixel C
+    assert not _fold_occupied_rows(True, False, False, False, False)  # no Q table
+    assert not _fold_occupied_rows(True, True, True, False, False)    # latent Q
+    assert not _fold_occupied_rows(True, True, False, True, False)    # stratified
+    assert not _fold_occupied_rows(True, True, False, False, True)    # delta_g
+
+
+def test_per_pixel_c_mode_with_a_q_table_is_bit_identical(monkeypatch):
+    """The excluded configurations are untouched code, so they stay BIT-exact.
+
+    ``C_p`` there is the row's own observed ratio, which the fold's algebra
+    cannot factor out; the guard is that turning the hook off changes nothing
+    at all, not merely nothing to rounding.
+    """
+    from darksirens.redshift import completion as completion_mod
+
+    n_pix = 12
+    _, _, occ, logq, kw = _q_field_kw(n_pix)
+    em = _em(n_pix=n_pix, **kw)
+    sur = _survey(c_mode=None)                      # legacy per-pixel C
+    V0 = np.asarray(_field_missing_curve(_cosmo(), sur, em)[0])
+    monkeypatch.setattr(completion_mod, "_fold_occupied_rows",
+                        lambda *a: False)
+    V1 = np.asarray(_field_missing_curve(_cosmo(), sur, em)[0])
+    np.testing.assert_array_equal(V0, V1)
+
+
+def test_folded_ensemble_member_curves_use_that_member_s_own_rows():
+    """Member m's folded budget must equal a from-scratch member-m build.
+
+    The occupied budget is folded from ``field_lss_q`` ITSELF, so the rows
+    :func:`_replace_member_q` swaps in are the rows that get summed.  This pins
+    that against the hazard a precomputed occupied-sum leaf would carry: a
+    member normalizer silently reusing the deterministic (ensemble-mean)
+    occupied budget while its numerator carries member m's Q -- exactly what
+    ``field_lss_q_fp_empty_sum_members`` guards for the empty half.
+    """
+    from darksirens.redshift.completion import _replace_member_q
+
+    n_pix = 12
+    _, _, occ, logq, kw = _q_field_kw(n_pix)
+    logq_m = np.stack([logq + 0.5, logq - 0.5, logq * 0.0])
+    f_full = np.linspace(0.2, 1.0, n_pix)
+    fp_m = np.asarray(
+        build_field_lss_q_fp_empty_sum_members(logq_m, occ, n_pix, f_full))
+    q_m, q_empty_m = build_field_lss_q_member_inputs(logq_m, occ, n_pix)
+    em = _em(n_pix=n_pix, **_fp_kw(kw, occ, logq, n_pix),
+             field_lss_q_members=q_m,
+             field_lss_q_empty_sum_members=q_empty_m,
+             field_lss_q_fp_empty_sum_members=jnp.asarray(fp_m))
+
+    curves = []
+    for m in range(3):
+        cat_m = _replace_member_q(em, q_m[m], q_empty_m[m], None, fp_m[m])
+        V_m = np.asarray(_field_missing_curve(_cosmo(), _survey(), cat_m)[0])
+        # the same member built as a STANDALONE deterministic Q catalog
+        q_occ, q_empty = build_field_lss_q_inputs(logq_m[m], occ, n_pix)
+        kw_m = dict(field_dN_obs_s=kw["field_dN_obs_s"],
+                    field_n_empty=kw["field_n_empty"],
+                    field_N_obs_total=kw["field_N_obs_total"],
+                    field_occupied_pixels=kw["field_occupied_pixels"],
+                    field_lss_q=q_occ, field_lss_q_empty_sum=q_empty)
+        em_m = _em(n_pix=n_pix, **_fp_kw(kw_m, occ, logq_m[m], n_pix))
+        V_ref = np.asarray(_field_missing_curve(_cosmo(), _survey(), em_m)[0])
+        np.testing.assert_allclose(V_m, V_ref, rtol=1e-12, atol=0.0)
+        curves.append(V_m)
+    # and the members are genuinely distinguishable, so the check has teeth
+    assert not np.allclose(curves[0], curves[1])
+
+
+@pytest.mark.parametrize("n_keep,with_fp", [(1, True), (-3, False)])
+@pytest.mark.parametrize("c_mode", [C_MODE_SELECTION_STRUCT, None])
+def test_a_misaligned_q_table_is_refused_not_summed(n_keep, with_fp, c_mode):
+    """Row-count drift raises, on the folded branch exactly as on the scan.
+
+    The chunked scan caught this only by accident -- its reshape raises -- and
+    the fold has no such accident: ``jnp.sum(q_rows, axis=0)`` would total the
+    wrong number of rows, and a single Q row would BROADCAST over all of them,
+    both returning a silently corrupt (measurably negative, in the one-row
+    case) missing budget.  So the check is unconditional and both c_modes are
+    pinned here.
+    """
+    n_pix = 12
+    _, _, occ, logq, kw = _q_field_kw(n_pix)
+    if with_fp:
+        kw = _fp_kw(kw, occ, logq, n_pix)
+    q_bad = np.asarray(kw["field_lss_q"])[:n_keep]
+    assert q_bad.shape[0] != occ.size
+    em = _em(n_pix=n_pix, **dict(kw, field_lss_q=jnp.asarray(q_bad)))
+    with pytest.raises(ValueError, match="occupied rows"):
+        _field_missing_curve(_cosmo(), _survey(c_mode=c_mode), em)
+
+
+def test_a_misaligned_f_p_column_is_refused_not_broadcast():
+    """Same rule for ``field_f_p_occ``: one entry must not broadcast."""
+    n_pix = 12
+    _, _, occ, logq, kw = _q_field_kw(n_pix)
+    kw = _fp_kw(kw, occ, logq, n_pix)
+    f_bad = np.asarray(kw["field_f_p_occ"])[:1]
+    em = _em(n_pix=n_pix, **dict(kw, field_f_p_occ=jnp.asarray(f_bad)))
+    with pytest.raises(ValueError, match="field_f_p_occ"):
+        _field_missing_curve(_cosmo(), _survey(), em)
 
 
 def test_fp_q_refusals():
