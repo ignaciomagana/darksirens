@@ -46,9 +46,10 @@ from darksirens.lensing.wlmagnification import make_tabulated_log_p_wl
 from darksirens.sky import sky_model_parser
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import (
-    dL_grid_bounds,
+    dL_of_z,
     threads_distance_table,
-    z_of_dL,
+    z_of_dL_precomputed,
+    zgrid as _cosmo_zgrid,
 )
 
 
@@ -692,9 +693,7 @@ def darksiren_log_likelihood(
     # review, likelihood finding 4). The invalid samples carry exactly zero
     # weight through the select, so the clamped garbage z is inert.
     def _sky_weight(nx, ny, nz, dL):
-        dL_lo, dL_hi = dL_grid_bounds(cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
-        z_c = z_of_dL(jnp.clip(dL, dL_lo, dL_hi),
-                      cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+        z_c = z_of_dL_precomputed(jnp.clip(dL, _dL_lo, _dL_hi), _dL_grid)
         return log_g_sky(nx, ny, nz, z_c, sky_params)
 
     sky_log_weight_fn = _sky_weight if apply_sky else None
@@ -747,6 +746,10 @@ def darksiren_log_likelihood(
     )
     selection_model = selection_prior_model(universe_model)
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+
+    _dL_grid = dL_of_z(_cosmo_zgrid, H0, Om0, w0, wa)
+    _dL_lo = _dL_grid[0]
+    _dL_hi = _dL_grid[-1]
 
     # FIELD-convention sky weighting scope gate (static; covers K = 1 and K >= 2).
     if catalog_sky_weighting == "field":
@@ -1042,14 +1045,13 @@ def darksiren_log_likelihood(
             bit-identical for supported samples; the clamped garbage rows carry
             exactly zero cotangent through the select.
             """
-            dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
-            supported = (dL >= dL_lo) & (dL <= dL_hi)
-            dL_c = jnp.clip(dL, dL_lo, dL_hi)
+            supported = (dL >= _dL_lo) & (dL <= _dL_hi)
+            dL_c = jnp.clip(dL, _dL_lo, _dL_hi)
             if not wl_enabled:
                 ldw = log_sample_weight(
                     m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
                     catalogs, log_p_pop, log_prior_z,
-                    spin=spin,
+                    spin=spin, dL_grid=_dL_grid,
                 )
             elif wl_backend == WL_BACKEND_LOGNORMAL:
                 ldw = log_sample_weight_wl_lognormal_hermite(
@@ -1057,7 +1059,7 @@ def darksiren_log_likelihood(
                     cosmo, survey, pop_params, catalogs,
                     log_p_pop, log_prior_z,
                     wl_a, wl_b, u_nodes, log_wH_nodes,
-                    spin=spin,
+                    spin=spin, dL_grid=_dL_grid,
                 )
             else:
                 ldw = log_sample_weight_wl_or_standard(
@@ -1066,7 +1068,7 @@ def darksiren_log_likelihood(
                     log_p_pop, log_prior_z,
                     log_p_wl_fn, mu_nodes, log_w_nodes,
                     wl_enabled=wl_enabled,
-                    spin=spin,
+                    spin=spin, dL_grid=_dL_grid,
                 )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
@@ -1077,9 +1079,8 @@ def darksiren_log_likelihood(
 
             # Same clamped-distance treatment as the PE weights (see above):
             # z_of_dL's NaN sentinel must never enter the arithmetic.
-            dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
-            supported = (dL >= dL_lo) & (dL <= dL_hi)
-            dL_c = jnp.clip(dL, dL_lo, dL_hi)
+            supported = (dL >= _dL_lo) & (dL <= _dL_hi)
+            dL_c = jnp.clip(dL, _dL_lo, _dL_hi)
             if wl_selection_enabled:
                 # Injection distances are apparent distances too: magnification
                 # scatter changes detectability, so mu(Lambda) must be
@@ -1091,13 +1092,13 @@ def darksiren_log_likelihood(
                     cosmo, survey, pop_params, catalogs,
                     log_p_pop, _selection_prior,
                     wl_a, wl_b, u_nodes, log_wH_nodes,
-                    spin=spin,
+                    spin=spin, dL_grid=_dL_grid,
                 )
             else:
                 ldw = log_sample_weight(
                     m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
                     catalogs, log_p_pop, _selection_prior,
-                    spin=spin,
+                    spin=spin, dL_grid=_dL_grid,
                 )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
@@ -1153,8 +1154,8 @@ def darksiren_log_likelihood(
             # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
             # Clamped dL for the same reverse-NaN reason as the weight paths.
             if apply_sky:
-                dL_lo_s, dL_hi_s = dL_grid_bounds(H0, Om0, w0, wa)
-                z_ev = z_of_dL(jnp.clip(dL_ev, dL_lo_s, dL_hi_s), H0, Om0, w0, wa)
+                z_ev = z_of_dL_precomputed(
+                    jnp.clip(dL_ev, _dL_lo, _dL_hi), _dL_grid)
                 ldw = ldw + log_g_sky(
                     sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
                 )
@@ -1185,8 +1186,8 @@ def darksiren_log_likelihood(
                     spin=sl(gw_pe.spin) if gw_pe.spin is not None else None,
                 )
                 if apply_sky:
-                    dL_lo_s, dL_hi_s = dL_grid_bounds(H0, Om0, w0, wa)
-                    z_ev = z_of_dL(jnp.clip(dL_ev, dL_lo_s, dL_hi_s), H0, Om0, w0, wa)
+                    z_ev = z_of_dL_precomputed(
+                        jnp.clip(dL_ev, _dL_lo, _dL_hi), _dL_grid)
                     ldw = ldw + log_g_sky(
                         sl(gw_pe.nx), sl(gw_pe.ny), sl(gw_pe.nz), z_ev, sky_params
                     )
@@ -1341,7 +1342,7 @@ def darksiren_log_likelihood(
                        for k in range(n_catalogs))
             return fit, fp
 
-        dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
+        dL_lo, dL_hi = _dL_lo, _dL_hi
 
         # Member-stacked leaves: per catalog (row-aligned RAW member log-Q table,
         # log_Z leaf).  These are the ONLY leaves carried into the member vmap;
@@ -1474,6 +1475,7 @@ def darksiren_log_likelihood(
                 sl(gw_pe.pixels), sl(gw_pe.prior_wt),
                 cosmo, survey, pop_params, catalogs_pe_all[0], log_p_pop,
                 spin=sl(gw_pe.spin) if gw_pe.spin is not None else None,
+                dL_grid=_dL_grid,
             )
             pix_all = sl(gw_pe.pixels)
             obs = tuple(
@@ -1600,6 +1602,7 @@ def darksiren_log_likelihood(
                 sl(gw_sel_p.pixels), sl(gw_sel_p.prior_wt),
                 cosmo, survey, pop_params, catalogs_sel_all[0], log_p_pop,
                 spin=sl(gw_sel_p.spin) if gw_sel_p.spin is not None else None,
+                dL_grid=_dL_grid,
             )
             pix_all = sl(gw_sel_p.pixels)
             obs = tuple(

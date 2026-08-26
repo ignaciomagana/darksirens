@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from darksirens.utils.cosmology import z_of_dL, ddL_of_z
+from darksirens.utils.cosmology import z_of_dL, z_of_dL_precomputed, ddL_of_z
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 
@@ -113,6 +113,7 @@ def log_target_density_m1det_q_dL(
     log_p_pop_fn,
     log_prior_z_fn,
     spin: jnp.ndarray | None = None,
+    dL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Target density evaluated in the canonical sample basis.
@@ -126,9 +127,16 @@ def log_target_density_m1det_q_dL(
     existing chi_eff population model (signature ``(m1src, q, z, chieff,
     pop_params)``) is called exactly as before -- the d = 0 path is
     byte-identical by construction.
+
+    ``dL_grid`` is the optional precomputed ``dL_of_z(zgrid, H0, Om0, w0,
+    wa)`` array.  When provided, the ``z_of_dL`` inversion skips the
+    redundant 4-D table lookup.
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
-    z = z_of_dL(dL, H0, Om0, w0, wa)
+    if dL_grid is not None:
+        z = z_of_dL_precomputed(dL, dL_grid)
+    else:
+        z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
 
     if spin is None:
@@ -155,6 +163,7 @@ def log_target_density_base_and_z(
     catalog: EMCatalog,
     log_p_pop_fn,
     spin: jnp.ndarray | None = None,
+    dL_grid: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Member-INDEPENDENT split of :func:`log_sample_weight`.
 
@@ -183,9 +192,16 @@ def log_target_density_base_and_z(
     The arithmetic mirrors :func:`log_target_density_m1det_q_dL` /
     :func:`log_sample_weight` with the prior-z term removed; ``base + log p_z``
     reproduces the monolithic weight up to floating-point re-association only.
+
+    ``dL_grid`` is the optional precomputed ``dL_of_z(zgrid, H0, Om0, w0,
+    wa)`` array.  When provided, the ``z_of_dL`` inversion skips the
+    redundant 4-D table lookup.
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
-    z = z_of_dL(dL, H0, Om0, w0, wa)
+    if dL_grid is not None:
+        z = z_of_dL_precomputed(dL, dL_grid)
+    else:
+        z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
     if spin is None:
         log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params)
@@ -213,6 +229,7 @@ def log_sample_weight(
     log_p_pop_fn,
     log_prior_z_fn,
     spin: jnp.ndarray | None = None,
+    dL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Per-sample log importance weight, shared by the PE and selection terms.
@@ -266,6 +283,7 @@ def log_sample_weight(
             log_p_pop_fn,
             log_prior_z_fn,
             spin=spin,
+            dL_grid=dL_grid,
         )
         - jnp.log(prior_wt)
     )
