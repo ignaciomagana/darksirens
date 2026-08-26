@@ -30,10 +30,12 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_int_opt(name: str, default: int | None) -> int | None:
-    """Optional int env var: unset -> ``default`` (which may be None)."""
+    """Optional int env var: unset -> ``default``; ``"0"`` or ``"none"`` -> None."""
     value = os.environ.get(name)
     if value is None:
         return default
+    if value.strip().lower() in ("0", "none", "off", ""):
+        return None
     try:
         parsed = int(value)
     except ValueError as exc:
@@ -74,11 +76,11 @@ class NormalizationGridSettings:
     or the environment variables ``DARKSIRENS_GW_N_MASS``,
     ``DARKSIRENS_GW_N_Q``, and ``DARKSIRENS_GW_N_CHI``.
 
-    ``pairing_m1_grid`` is an OPT-IN accuracy knob (default None = exact, env
-    ``DARKSIRENS_GW_PAIRING_M1_GRID``): when set to an int N the pairing model's
-    per-sample q-normalisation is interpolated from an N-node static m1 grid
-    instead of integrated exactly per sample (see ``get_pairing_m1_grid`` and
-    ``PairingModel.__call__``).  Samples inside the grid cell that straddles the
+    ``pairing_m1_grid`` (default 200, auto-raised to ~1056 by the minimum-density
+    floor; env ``DARKSIRENS_GW_PAIRING_M1_GRID``, set to ``0`` or ``none`` to
+    disable): the pairing model's per-sample q-normalisation is interpolated from
+    an N-node static m1 grid instead of integrated exactly per sample (see
+    ``get_pairing_m1_grid`` and ``PairingModel.__call__``).  Samples inside the grid cell that straddles the
     normaliser's SUPPORT EDGE are not interpolated at all -- no interpolant can
     follow the taper's essential singularity there -- but evaluated from the
     exact single-q-interval trapezoid term, which is the exact normaliser in that
@@ -98,7 +100,7 @@ class NormalizationGridSettings:
     n_mass: int = _env_int("DARKSIRENS_GW_N_MASS", 500)
     n_q: int = _env_int("DARKSIRENS_GW_N_Q", 200)
     n_chi: int = _env_int("DARKSIRENS_GW_N_CHI", 200)
-    pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", None)
+    pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", 200)
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -151,38 +153,37 @@ def normalization_grid_settings() -> NormalizationGridSettings:
     return _NORMALIZATION_GRID_SETTINGS
 
 
+_SENTINEL = object()
+
+
 def configure_normalization_grids(
     *,
     n_mass: int | None = None,
     n_q: int | None = None,
     n_chi: int | None = None,
-    pairing_m1_grid: int | None = None,
+    pairing_m1_grid: int | None | object = _SENTINEL,
     pairing_m_hi: float | None = None,
 ) -> NormalizationGridSettings:
     """Update cached normalisation-grid sizes and clear derived grids.
 
-    Every argument follows the same convention: None leaves the current setting
-    (env var / dataclass default) untouched; a value overrides it.  To ENABLE the
-    opt-in pairing m1-grid pass an int for ``pairing_m1_grid``; leaving it None
-    keeps the exact per-sample q-normalisation (the default).  ``pairing_m_hi``
-    raises the opt-in pairing grid's upper bound (see
-    :func:`size_pairing_grid_to_support`); callers should normally use that
-    helper rather than setting the bound directly.
+    Every argument follows the same convention: omitting it (or the default
+    sentinel) leaves the current setting untouched; a value overrides it.
+    To ENABLE the pairing m1-grid pass an int for ``pairing_m1_grid``.  To
+    explicitly DISABLE it (revert to exact per-sample q-normalisation), pass
+    ``pairing_m1_grid=None``.  ``pairing_m_hi`` raises the opt-in pairing
+    grid's upper bound (see :func:`size_pairing_grid_to_support`); callers
+    should normally use that helper rather than setting the bound directly.
     """
 
     global _NORMALIZATION_GRID_SETTINGS, N_MASS, N_Q, N_CHI
 
-    updates = {
-        key: value
-        for key, value in {
-            "n_mass": n_mass,
-            "n_q": n_q,
-            "n_chi": n_chi,
-            "pairing_m1_grid": pairing_m1_grid,
-            "pairing_m_hi": pairing_m_hi,
-        }.items()
-        if value is not None
-    }
+    updates = {}
+    for key, value in {"n_mass": n_mass, "n_q": n_q, "n_chi": n_chi,
+                        "pairing_m_hi": pairing_m_hi}.items():
+        if value is not None:
+            updates[key] = value
+    if pairing_m1_grid is not _SENTINEL:
+        updates["pairing_m1_grid"] = pairing_m1_grid
     if updates:
         _NORMALIZATION_GRID_SETTINGS = replace(_NORMALIZATION_GRID_SETTINGS, **updates)
         _clear_grid_caches()

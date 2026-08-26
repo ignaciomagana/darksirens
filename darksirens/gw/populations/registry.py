@@ -81,7 +81,7 @@ from .parametric import (
     GWTC5FiducialBPL2PeaksPopulationModel,
     TruncatedGaussianSpin,
 )
-from .utils import M_HI
+from .utils import M_HI, normalization_grid_settings, size_pairing_grid_to_support
 
 _LOG = logging.getLogger(__name__)
 
@@ -780,6 +780,9 @@ def get_model(
         )
         if rate != "powerlaw":
             model = replace(model, rate_evolution=rate)
+
+    if normalization_grid_settings().pairing_m1_grid is not None:
+        size_pairing_grid_to_support(population_m1_support_max(model))
 
     _MODEL_REGISTRY[cache_key] = model
     _MODEL_REGISTRY[resolved_key] = model
