@@ -104,6 +104,7 @@ from jax.scipy.special import logsumexp
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 from darksirens.utils.cosmology import (
     z_of_dL,
+    z_of_dL_precomputed,
     dL_of_z,
     dL_in_z_grid,
     zgrid,
@@ -136,6 +137,7 @@ def log_sample_weight_wl_marginalized(
     mu_nodes: jnp.ndarray,
     log_w_nodes: jnp.ndarray,
     spin: jnp.ndarray | None = None,
+    dL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """WL-marginalized per-sample log importance weight.
 
@@ -195,10 +197,12 @@ def log_sample_weight_wl_marginalized(
 
     # True (cosmological) dL for each μ node
     dL_true = dL_b * jnp.sqrt(mu_b)                            # (..., Nmu)
-    in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)                   # (..., Nmu)
-
-    # z_s on each μ node (NaN outside grid; we mask to -inf below)
-    z_s = z_of_dL(dL_true, H0, Om0, w0, wa)                            # (..., Nmu)
+    if dL_grid is not None:
+        in_grid = (dL_true >= dL_grid[0]) & (dL_true <= dL_grid[-1])
+        z_s = z_of_dL_precomputed(dL_true, dL_grid)
+    else:
+        in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)               # (..., Nmu)
+        z_s = z_of_dL(dL_true, H0, Om0, w0, wa)                        # (..., Nmu)
     # Replace NaN with a finite dummy so downstream ops don't NaN-poison
     # the logsumexp; we'll mask with -inf at the end.
     z_s_safe = jnp.where(in_grid, z_s, 0.5)                    # arbitrary finite value
@@ -262,6 +266,7 @@ def log_sample_weight_wl_or_standard(
     log_w_nodes: jnp.ndarray | None,
     wl_enabled: bool,
     spin: jnp.ndarray | None = None,
+    dL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Dispatcher: WL-marginalize when ``wl_enabled`` is True, otherwise
     fall through to the standard ``log_sample_weight``.
@@ -278,14 +283,14 @@ def log_sample_weight_wl_or_standard(
             m1det, q, dL, chieff, pix, prior_wt,
             cosmo, survey, pop_params, catalog,
             log_p_pop_fn, log_prior_z_fn,
-            spin=spin,
+            spin=spin, dL_grid=dL_grid,
         )
     return log_sample_weight_wl_marginalized(
         m1det, q, dL, chieff, pix, prior_wt,
         cosmo, survey, pop_params, catalog,
         log_p_pop_fn, log_prior_z_fn,
         log_p_wl_fn, mu_nodes, log_w_nodes,
-        spin=spin,
+        spin=spin, dL_grid=dL_grid,
     )
 
 
@@ -299,6 +304,7 @@ def _hermite_mu_geometry_and_log_ratio(
     wl_b: jnp.ndarray,
     u_nodes: jnp.ndarray,
     H0, Om0, w0, wa,
+    dL_grid: jnp.ndarray | None = None,
 ) -> tuple:
     """Node geometry + proposal→target importance ratio of the Hermite kernel.
 
@@ -310,7 +316,10 @@ def _hermite_mu_geometry_and_log_ratio(
     shape ``(..., Nu)`` (broadcast of ``dL`` against the node axis).
     """
     # Apparent z (μ=1) sets the lognormal scale
-    z_app = z_of_dL(dL, H0, Om0, w0, wa)                        # (...,)
+    if dL_grid is not None:
+        z_app = z_of_dL_precomputed(dL, dL_grid)
+    else:
+        z_app = z_of_dL(dL, H0, Om0, w0, wa)                    # (...,)
     z_app_safe = jnp.maximum(z_app, 1.0e-3)                     # avoid s=0 at z=0
     s2 = wl_a * jnp.power(z_app_safe, wl_b)                     # (...,)
     # Double-where so the reverse pass is finite at wl_a == 0 (the advertised
@@ -329,8 +338,12 @@ def _hermite_mu_geometry_and_log_ratio(
     mu = jnp.exp(log_mu)
 
     dL_true = dL[..., None] * jnp.sqrt(mu)                       # (..., Nu)
-    in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)
-    z_s = z_of_dL(dL_true, H0, Om0, w0, wa)
+    if dL_grid is not None:
+        in_grid = (dL_true >= dL_grid[0]) & (dL_true <= dL_grid[-1])
+        z_s = z_of_dL_precomputed(dL_true, dL_grid)
+    else:
+        in_grid = dL_in_z_grid(dL_true, H0, Om0, w0, wa)
+        z_s = z_of_dL(dL_true, H0, Om0, w0, wa)
     z_s_safe = jnp.where(in_grid, z_s, 0.5)
 
     # Proposal -> target density ratio (see the kernel docstring).  Without it
@@ -375,6 +388,7 @@ def log_sample_weight_wl_lognormal_hermite(
     u_nodes: jnp.ndarray,
     log_wH_nodes: jnp.ndarray,
     spin: jnp.ndarray | None = None,
+    dL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Lognormal-specialized WL marginalization using Gauss-Hermite quadrature.
 
@@ -462,7 +476,8 @@ def log_sample_weight_wl_lognormal_hermite(
     u_b = u_nodes                                                # (Nu,)
     log_w_b = log_wH_nodes                                       # (Nu,)
     log_mu, mu, dL_true, in_grid, z_s_safe, log_ratio = (
-        _hermite_mu_geometry_and_log_ratio(dL, wl_a, wl_b, u_b, H0, Om0, w0, wa)
+        _hermite_mu_geometry_and_log_ratio(dL, wl_a, wl_b, u_b, H0, Om0, w0, wa,
+                                           dL_grid=dL_grid)
     )
 
     dL_b = dL[..., None]

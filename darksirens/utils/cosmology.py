@@ -516,6 +516,18 @@ def z_of_dL(dL, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial,
     looking artificially valid.
     """
     dL_grid = dL_of_z(zgrid, H0, Om0, w0, wa)
+    return z_of_dL_precomputed(dL, dL_grid)
+
+
+def z_of_dL_precomputed(dL, dL_grid):
+    """Invert luminosity distance using a precomputed ``dL_grid``.
+
+    Identical to :func:`z_of_dL` but skips the ``dL_of_z(zgrid, ...)``
+    recomputation.  When the same cosmology is used for many calls (the
+    typical likelihood hot path), precomputing the grid once with
+    ``dL_of_z(zgrid, H0, Om0, w0, wa)`` and passing it here avoids
+    redundant 4-D table lookups.
+    """
     in_grid = (dL >= dL_grid[0]) & (dL <= dL_grid[-1])
     z = jnp.interp(dL, dL_grid, zgrid)
     return jnp.where(in_grid, z, jnp.nan)

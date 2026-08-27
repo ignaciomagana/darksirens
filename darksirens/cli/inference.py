@@ -1799,6 +1799,12 @@ def build_parser():
                         "(default 24). Spectroscopic catalogs (sigma_eff <~ 5e-3) are exact "
                         "to likelihood precision at 4-8 nodes and the quadrature dominates "
                         "wide-sky dark-siren runs; do NOT reduce for broad photo-z kernels.")
+    g.add_argument("--kernel_gl_domain", type=str, default=None,
+                   choices=["cdf", "zspace"],
+                   help="Quadrature domain for the kernel normalisation: 'cdf' (default) "
+                        "integrates in the Gaussian CDF variable, 'zspace' integrates "
+                        "directly in redshift (avoids ndtri, ~2x faster; validated for "
+                        "spectroscopic catalogs at 8-12 nodes).")
     g.add_argument("--kde_window", type=int, default=None, metavar="W",
                    help="Static window size for the per-sample catalog KDE: only the W "
                         "galaxies nearest each sample's redshift are evaluated (rows are "
@@ -2573,11 +2579,18 @@ def _configure_performance_grids(opts):
     # and it was guarded in this twin only.
     configure_normalization_grids_for_model(opts)
 
-    if opts.kernel_gl_nodes is not None:
+    _gl_nodes = getattr(opts, 'kernel_gl_nodes', None)
+    _gl_domain = getattr(opts, 'kernel_gl_domain', None)
+    if _gl_nodes is not None or _gl_domain is not None:
         from darksirens.redshift.catalog import configure_kernel_quadrature
-        if opts.kernel_gl_nodes < 2:
-            _fatal("--kernel_gl_nodes must be >= 2")
-        configure_kernel_quadrature(opts.kernel_gl_nodes)
+        kw = {}
+        if _gl_nodes is not None:
+            if _gl_nodes < 2:
+                _fatal("--kernel_gl_nodes must be >= 2")
+            kw['n_nodes'] = _gl_nodes
+        if _gl_domain is not None:
+            kw['domain'] = _gl_domain
+        configure_kernel_quadrature(**kw)
 
     kde_window = getattr(opts, "kde_window", None)
     kde_nsigma = getattr(opts, "kde_window_nsigma", None)

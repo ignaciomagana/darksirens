@@ -102,6 +102,11 @@ def _is_gp(name: str) -> bool:
 
 
 def _snapshot(name: str) -> dict:
+    from darksirens.gw.populations.utils import (
+        configure_normalization_grids,
+        normalization_grid_settings,
+    )
+
     with warnings.catch_warnings():
         # Post-refactor, legacy spellings resolve through a deprecation alias.
         warnings.simplefilter("ignore", DeprecationWarning)
@@ -109,11 +114,19 @@ def _snapshot(name: str) -> dict:
         fid = np.asarray(get_fixed_population_params(name), dtype=np.float64)
         log_p_pop = pop_model_parser(name)
 
+    # Disable the pairing grid so the golden comparison uses exact
+    # per-sample normalization, matching the conditions the golden file
+    # was generated under.  The setting is read at JIT trace time (a
+    # Python if inside PairingModel.__call__), so it must be set before
+    # the first call to log_p_pop.
+    prev = normalization_grid_settings().pairing_m1_grid
+    configure_normalization_grids(pairing_m1_grid=None)
     m1 = jnp.array([p[0] for p in _PROBES], dtype=jnp.float64)
     q = jnp.array([p[1] for p in _PROBES], dtype=jnp.float64)
     z = jnp.array([p[2] for p in _PROBES], dtype=jnp.float64)
     chi = jnp.array([p[3] for p in _PROBES], dtype=jnp.float64)
     vals = np.asarray(log_p_pop(m1, q, z, chi, jnp.array(fid)), dtype=np.float64)
+    configure_normalization_grids(pairing_m1_grid=prev)
 
     return {
         "labels": list(labels),  # reference only, not compared
