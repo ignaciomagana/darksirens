@@ -47,6 +47,7 @@ from darksirens.sky import sky_model_parser
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import (
     dL_of_z,
+    ddL_of_z,
     threads_distance_table,
     z_of_dL_precomputed,
     zgrid as _cosmo_zgrid,
@@ -748,6 +749,7 @@ def darksiren_log_likelihood(
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
 
     _dL_grid = dL_of_z(_cosmo_zgrid, H0, Om0, w0, wa)
+    _ddL_grid = ddL_of_z(_cosmo_zgrid, _dL_grid, H0, Om0, w0, wa)
     _dL_lo = _dL_grid[0]
     _dL_hi = _dL_grid[-1]
 
@@ -1023,7 +1025,7 @@ def darksiren_log_likelihood(
         def log_prior_z_selection(z, pix, catalogs):
             return _eval_prior_mix(selection_model, states_sel, z, pix, catalogs)
 
-        def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None):
+        def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None, log_prior_wt=None):
             """PE per-sample weight; WL-marginalized when wl_enabled, else standard.
 
             ``catalogs`` is the length-K tuple of per-catalog EMCatalogs; the
@@ -1051,7 +1053,8 @@ def darksiren_log_likelihood(
                 ldw = log_sample_weight(
                     m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
                     catalogs, log_p_pop, log_prior_z,
-                    spin=spin, dL_grid=_dL_grid,
+                    spin=spin, dL_grid=_dL_grid, ddL_grid=_ddL_grid,
+                    log_prior_wt=log_prior_wt,
                 )
             elif wl_backend == WL_BACKEND_LOGNORMAL:
                 ldw = log_sample_weight_wl_lognormal_hermite(
@@ -1059,7 +1062,8 @@ def darksiren_log_likelihood(
                     cosmo, survey, pop_params, catalogs,
                     log_p_pop, log_prior_z,
                     wl_a, wl_b, u_nodes, log_wH_nodes,
-                    spin=spin, dL_grid=_dL_grid,
+                    spin=spin, dL_grid=_dL_grid, ddL_grid=_ddL_grid,
+                    log_prior_wt=log_prior_wt,
                 )
             else:
                 ldw = log_sample_weight_wl_or_standard(
@@ -1068,11 +1072,12 @@ def darksiren_log_likelihood(
                     log_p_pop, log_prior_z,
                     log_p_wl_fn, mu_nodes, log_w_nodes,
                     wl_enabled=wl_enabled,
-                    spin=spin, dL_grid=_dL_grid,
+                    spin=spin, dL_grid=_dL_grid, ddL_grid=_ddL_grid,
+                    log_prior_wt=log_prior_wt,
                 )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-        def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None):
+        def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None, log_prior_wt=None):
             """Selection weight in the canonical ``(m1det, q, dL, chieff)`` variables."""
             def _selection_prior(z, pix, catalogs):
                 return log_prior_z_selection(z, pix, catalogs)
@@ -1092,20 +1097,23 @@ def darksiren_log_likelihood(
                     cosmo, survey, pop_params, catalogs,
                     log_p_pop, _selection_prior,
                     wl_a, wl_b, u_nodes, log_wH_nodes,
-                    spin=spin, dL_grid=_dL_grid,
+                    spin=spin, dL_grid=_dL_grid, ddL_grid=_ddL_grid,
+                    log_prior_wt=log_prior_wt,
                 )
             else:
                 ldw = log_sample_weight(
                     m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
                     catalogs, log_p_pop, _selection_prior,
-                    spin=spin, dL_grid=_dL_grid,
+                    spin=spin, dL_grid=_dL_grid, ddL_grid=_ddL_grid,
+                    log_prior_wt=log_prior_wt,
                 )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-        def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None):
+        def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None, log_prior_wt=None):
             """PE weight in the same ``(m1det, q, dL)`` variables as selection."""
             return _log_sample_weight_if_supported(
-                m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=spin
+                m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=spin,
+                log_prior_wt=log_prior_wt,
             )
 
         log_mu, Neff, _log_sigma2 = compute_selection_term(
@@ -1150,6 +1158,7 @@ def darksiren_log_likelihood(
                 sl(gw_pe.prior_wt),
                 catalogs_pe_all,
                 spin=sl(gw_pe.spin) if gw_pe.spin is not None else None,
+                log_prior_wt=sl(gw_pe.log_prior_wt) if gw_pe.log_prior_wt is not None else None,
             )
             # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
             # Clamped dL for the same reverse-NaN reason as the weight paths.
@@ -1184,6 +1193,7 @@ def darksiren_log_likelihood(
                     sl(gw_pe.prior_wt),
                     catalogs_ev,
                     spin=sl(gw_pe.spin) if gw_pe.spin is not None else None,
+                    log_prior_wt=sl(gw_pe.log_prior_wt) if gw_pe.log_prior_wt is not None else None,
                 )
                 if apply_sky:
                     z_ev = z_of_dL_precomputed(
@@ -1475,7 +1485,8 @@ def darksiren_log_likelihood(
                 sl(gw_pe.pixels), sl(gw_pe.prior_wt),
                 cosmo, survey, pop_params, catalogs_pe_all[0], log_p_pop,
                 spin=sl(gw_pe.spin) if gw_pe.spin is not None else None,
-                dL_grid=_dL_grid,
+                dL_grid=_dL_grid, ddL_grid=_ddL_grid,
+                log_prior_wt=sl(gw_pe.log_prior_wt) if gw_pe.log_prior_wt is not None else None,
             )
             pix_all = sl(gw_pe.pixels)
             obs = tuple(
@@ -1602,7 +1613,8 @@ def darksiren_log_likelihood(
                 sl(gw_sel_p.pixels), sl(gw_sel_p.prior_wt),
                 cosmo, survey, pop_params, catalogs_sel_all[0], log_p_pop,
                 spin=sl(gw_sel_p.spin) if gw_sel_p.spin is not None else None,
-                dL_grid=_dL_grid,
+                dL_grid=_dL_grid, ddL_grid=_ddL_grid,
+                log_prior_wt=sl(gw_sel_p.log_prior_wt) if gw_sel_p.log_prior_wt is not None else None,
             )
             pix_all = sl(gw_sel_p.pixels)
             obs = tuple(

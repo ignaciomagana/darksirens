@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from darksirens.utils.cosmology import z_of_dL, z_of_dL_precomputed, ddL_of_z
+from darksirens.utils.cosmology import z_of_dL, z_of_dL_precomputed, ddL_of_z, ddL_of_z_precomputed
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 
@@ -68,6 +68,7 @@ def log_jacobian_m1src_q_z_to_m1det_q_dL(
     Om0: jnp.ndarray,
     w0: jnp.ndarray = -1.0,
     wa: jnp.ndarray = 0.0,
+    ddL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Log-Jacobian for ``(m1src, q, z) → (m1det, q, dL)``.
@@ -77,11 +78,16 @@ def log_jacobian_m1src_q_z_to_m1det_q_dL(
     z : redshift at the sample point
     dL : luminosity distance [Mpc] at the sample point
     H0, Om0, w0, wa : cosmological parameters
+    ddL_grid : optional precomputed ``ddL_of_z(zgrid, dL_grid, H0, Om0, w0, wa)``
+        array.  When provided, the per-sample ``E(z)`` evaluation inside
+        ``ddL_of_z`` is replaced by a cheap 1-D interpolation.
 
     Returns
     -------
     log |J| = log d(dL)/dz + log(1+z)
     """
+    if ddL_grid is not None:
+        return jnp.log(ddL_of_z_precomputed(z, ddL_grid)) + jnp.log1p(z)
     return jnp.log(ddL_of_z(z, dL, H0, Om0, w0, wa)) + jnp.log1p(z)
 
 
@@ -114,6 +120,7 @@ def log_target_density_m1det_q_dL(
     log_prior_z_fn,
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
+    ddL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Target density evaluated in the canonical sample basis.
@@ -131,6 +138,10 @@ def log_target_density_m1det_q_dL(
     ``dL_grid`` is the optional precomputed ``dL_of_z(zgrid, H0, Om0, w0,
     wa)`` array.  When provided, the ``z_of_dL`` inversion skips the
     redundant 4-D table lookup.
+
+    ``ddL_grid`` is the optional precomputed ``ddL_of_z(zgrid, dL_grid, H0,
+    Om0, w0, wa)`` array.  When provided, the per-sample ``E(z)`` evaluation
+    inside the Jacobian is replaced by a 1-D interpolation.
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
@@ -146,7 +157,7 @@ def log_target_density_m1det_q_dL(
     return (
         log_p_pop
         + log_prior_z_fn(z, pix, catalog)
-        - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa)
+        - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa, ddL_grid=ddL_grid)
     )
 
 
@@ -164,6 +175,8 @@ def log_target_density_base_and_z(
     log_p_pop_fn,
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
+    ddL_grid: jnp.ndarray | None = None,
+    log_prior_wt: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Member-INDEPENDENT split of :func:`log_sample_weight`.
 
@@ -196,6 +209,14 @@ def log_target_density_base_and_z(
     ``dL_grid`` is the optional precomputed ``dL_of_z(zgrid, H0, Om0, w0,
     wa)`` array.  When provided, the ``z_of_dL`` inversion skips the
     redundant 4-D table lookup.
+
+    ``ddL_grid`` is the optional precomputed ``ddL_of_z(zgrid, dL_grid, H0,
+    Om0, w0, wa)`` array.  When provided, the per-sample ``E(z)`` evaluation
+    inside the Jacobian is replaced by a 1-D interpolation.
+
+    ``log_prior_wt`` is the optional precomputed ``log(prior_wt)`` from
+    ``GWEvent.log_prior_wt``.  When provided, the per-sample ``jnp.log``
+    is skipped.
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
@@ -207,10 +228,11 @@ def log_target_density_base_and_z(
         log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params)
     else:
         log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params, spin=spin)
+    log_pw = log_prior_wt if log_prior_wt is not None else jnp.log(prior_wt)
     base = (
         log_p_pop
-        - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa)
-        - jnp.log(prior_wt)
+        - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa, ddL_grid=ddL_grid)
+        - log_pw
     )
     return base, z
 
@@ -230,6 +252,8 @@ def log_sample_weight(
     log_prior_z_fn,
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
+    ddL_grid: jnp.ndarray | None = None,
+    log_prior_wt: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Per-sample log importance weight, shared by the PE and selection terms.
@@ -264,11 +288,13 @@ def log_sample_weight(
     catalog : EMCatalog (PE catalog or selection catalog)
     log_p_pop_fn : callable(m1_src, q, z, chieff, pop_params) → log probability
     log_prior_z_fn : callable(z, pix, catalog) → log probability
+    log_prior_wt : optional precomputed log(prior_wt) from GWEvent.log_prior_wt
 
     Returns
     -------
     log w : scalar or array matching the shape of the inputs
     """
+    log_pw = log_prior_wt if log_prior_wt is not None else jnp.log(prior_wt)
     return (
         log_target_density_m1det_q_dL(
             m1det,
@@ -284,6 +310,7 @@ def log_sample_weight(
             log_prior_z_fn,
             spin=spin,
             dL_grid=dL_grid,
+            ddL_grid=ddL_grid,
         )
-        - jnp.log(prior_wt)
+        - log_pw
     )
