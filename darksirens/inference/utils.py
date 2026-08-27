@@ -176,6 +176,7 @@ def log_target_density_base_and_z(
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
     ddL_grid: jnp.ndarray | None = None,
+    log_prior_wt: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Member-INDEPENDENT split of :func:`log_sample_weight`.
 
@@ -212,6 +213,10 @@ def log_target_density_base_and_z(
     ``ddL_grid`` is the optional precomputed ``ddL_of_z(zgrid, dL_grid, H0,
     Om0, w0, wa)`` array.  When provided, the per-sample ``E(z)`` evaluation
     inside the Jacobian is replaced by a 1-D interpolation.
+
+    ``log_prior_wt`` is the optional precomputed ``log(prior_wt)`` from
+    ``GWEvent.log_prior_wt``.  When provided, the per-sample ``jnp.log``
+    is skipped.
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
@@ -223,10 +228,11 @@ def log_target_density_base_and_z(
         log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params)
     else:
         log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params, spin=spin)
+    log_pw = log_prior_wt if log_prior_wt is not None else jnp.log(prior_wt)
     base = (
         log_p_pop
         - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa, ddL_grid=ddL_grid)
-        - jnp.log(prior_wt)
+        - log_pw
     )
     return base, z
 
@@ -247,6 +253,7 @@ def log_sample_weight(
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
     ddL_grid: jnp.ndarray | None = None,
+    log_prior_wt: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Per-sample log importance weight, shared by the PE and selection terms.
@@ -281,11 +288,13 @@ def log_sample_weight(
     catalog : EMCatalog (PE catalog or selection catalog)
     log_p_pop_fn : callable(m1_src, q, z, chieff, pop_params) → log probability
     log_prior_z_fn : callable(z, pix, catalog) → log probability
+    log_prior_wt : optional precomputed log(prior_wt) from GWEvent.log_prior_wt
 
     Returns
     -------
     log w : scalar or array matching the shape of the inputs
     """
+    log_pw = log_prior_wt if log_prior_wt is not None else jnp.log(prior_wt)
     return (
         log_target_density_m1det_q_dL(
             m1det,
@@ -303,5 +312,5 @@ def log_sample_weight(
             dL_grid=dL_grid,
             ddL_grid=ddL_grid,
         )
-        - jnp.log(prior_wt)
+        - log_pw
     )

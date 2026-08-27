@@ -113,6 +113,8 @@ def make_gw_event(
         valid = jnp.ones_like(dL_b, dtype=bool)
     valid_b   = _barrier(jnp.asarray(valid, dtype=bool))
     q_b       = _barrier(m2det_b / m1det_b)
+    log_prior_wt_b = _barrier(jnp.log(jnp.maximum(
+        prior_wt_b, jnp.finfo(jnp.float64).tiny)))
 
     def _sky(v):
         if v is None:
@@ -142,6 +144,7 @@ def make_gw_event(
         ny       = _sky(ny),
         nz       = _sky(nz),
         spin     = spin_b,
+        log_prior_wt = log_prior_wt_b,
     )
 
 
