@@ -60,6 +60,7 @@ from darksirens.utils.cosmology import threads_distance_table
 from .completion import log_galaxy_measure_grid
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
+_HALF_LOG_2PI: float = float(0.5 * np.log(2.0 * np.pi))
 
 #: Numerical floor on sigma_eff [redshift units]; ~30 km/s, well below any
 #: physical photo-z or peculiar-velocity scale.  Protects against
@@ -718,6 +719,7 @@ class CatalogKernelState(NamedTuple):
     log_g_grid: jnp.ndarray  # (N_grid,)
     log_kw: jnp.ndarray      # (N_rows, N_max)
     sig_eff: jnp.ndarray     # (N_rows, N_max)
+    log_sig_eff: jnp.ndarray = None  # (N_rows, N_max) — precomputed log(sig_eff)
     volume_weighted: bool = False
     #: (N_rows,) log of the mixture mass that lay below ``z_depth`` BEFORE the
     #: shape was renormalised.  Callers scale the row's observed galaxy count by
@@ -787,6 +789,7 @@ def catalog_kernel_state(
 
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
+        log_sig_eff=jnp.log(sig_eff),
         volume_weighted=volume_weighted, z_depth=z_depth,
         log_depth_mass=log_depth_mass,
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
@@ -896,6 +899,7 @@ def marked_catalog_kernel_state(
 
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
+        log_sig_eff=jnp.log(sig_eff),
         log_depth_mass=log_depth_mass, z_depth=z_depth,
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
         rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
@@ -981,11 +985,15 @@ def eval_log_catalog_prior_state(
         zs = _win(em_catalog.zgals)
         log_kw = _win(state.log_kw)
         sig = _win(state.sig_eff)
+        log_sig = _win(state.log_sig_eff) if state.log_sig_eff is not None else jnp.log(sig)
     else:
         zs = em_catalog.zgals[pix]
         log_kw = state.log_kw[pix]
         sig = state.sig_eff[pix]
-    log_mix = _logsumexp_neginf_safe(log_kw + norm.logpdf(z, zs, sig))
+        log_sig = state.log_sig_eff[pix] if state.log_sig_eff is not None else jnp.log(sig)
+    d = (z - zs) / sig
+    log_gauss = -0.5 * d * d - log_sig - _HALF_LOG_2PI
+    log_mix = _logsumexp_neginf_safe(log_kw + log_gauss)
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
