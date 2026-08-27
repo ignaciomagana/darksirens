@@ -926,18 +926,30 @@ def eval_redshift_prior_with_state(
         return _log_prior_bright_sirens(z, pix, cosmo, survey, em_catalog)
 
     if model == "dark_sirens_complete":
-        return vmap(
-            lambda z_i, p_i: _eval_complete_scalar(
-                z_i, p_i, state, survey, em_catalog, catalog_sky_weighting
-            )
-        )(z, pix)
+        log_p_cat = eval_log_catalog_prior_state_batch(
+            z, pix, state.kernels, em_catalog)
+        log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+        if catalog_sky_weighting == "field":
+            field_val = log_p_cat + state.log_Nobs[pix] - state.log_N_obs_total
+            return jnp.where(state.row_has[pix], field_val, -jnp.inf)
+        log_p_vol = vmap(
+            lambda z_i: log_interp_zgrid(z_i, state.log_pvol))(z)
+        empty_value = jnp.where(
+            survey.complete_empty_pixel_policy == COMPLETE_EMPTY_PIXEL_POLICY_VOLUME,
+            log_p_vol, -jnp.inf,
+        )
+        return jnp.where(state.row_has[pix], log_p_cat, empty_value)
 
     if model == "dark_sirens":
-        return vmap(
-            lambda z_i, p_i: _eval_dark_scalar(
-                z_i, p_i, state, em_catalog, catalog_sky_weighting
-            )
-        )(z, pix)
+        A_obs, idx, t = eval_dark_obs_bracket(z, pix, state, em_catalog)
+        miss = _interp_row(
+            state.dN_miss[pix, idx], state.dN_miss[pix, idx + 1], t)
+        log_miss = jnp.where(
+            miss > 0.0, jnp.log(jnp.maximum(miss, 1e-300)), -jnp.inf)
+        numerator = jnp.logaddexp(A_obs, log_miss)
+        if catalog_sky_weighting == "field":
+            return numerator - state.log_Z_global
+        return numerator - state.log_Z[pix]
 
     raise ValueError(f"Unknown redshift prior model '{model}'.")
 

@@ -1090,14 +1090,15 @@ def eval_log_catalog_prior_state_batch(
     )
     fused = state.kde_fused is not None
 
-    if not (use_window and fused):
+    chunk = _BATCH_CHUNK_SIZE
+    n = zs.shape[0]
+
+    if not (use_window and fused) or n < chunk:
         return vmap(
             lambda z, p: eval_log_catalog_prior_state(z, p, state, em_catalog)
         )(zs, pixs)
 
-    # --- Chunked batched hot path: windowed + fused ---
-    chunk = _BATCH_CHUNK_SIZE
-    n = zs.shape[0]
+    # --- Chunked batched hot path: windowed + fused, N >= chunk ---
     n_chunks = -((-n) // chunk)  # ceil division
     pad = n_chunks * chunk - n
 
