@@ -748,7 +748,7 @@ class CatalogKernelState(NamedTuple):
     rows_sorted: Any = None
     neg_half_inv_sig2: Any = None
     log_kw_normed: Any = None
-    kde_fused: Any = None
+    kde_fused: Any = None  # (N_rows, 3, N_max): [zgals, neg_half_inv_sig2, log_kw_normed]
 
 
 def catalog_kernel_state(
@@ -796,7 +796,7 @@ def catalog_kernel_state(
     log_kw_normed = log_kw_safe - log_sig - _HALF_LOG_2PI
     kde_fused = jnp.stack(
         [zgals.astype(log_kw_safe.dtype), neg_half_inv_sig2, log_kw_normed],
-        axis=-1,
+        axis=1,
     )
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
@@ -917,7 +917,7 @@ def marked_catalog_kernel_state(
     log_kw_normed = log_kw_safe - log_sig - _HALF_LOG_2PI
     kde_fused = jnp.stack(
         [zgals.astype(log_kw_safe.dtype), neg_half_inv_sig2, log_kw_normed],
-        axis=-1,
+        axis=1,
     )
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
@@ -1002,10 +1002,10 @@ def eval_log_catalog_prior_state(
 
         if fused:
             _z = jnp.int32(0)
-            kf = lax.dynamic_slice(state.kde_fused, (pix_i, start, _z), (1, window, 3))[0]
-            zs = kf[:, 0]
-            nhis2 = kf[:, 1]
-            lkn = kf[:, 2]
+            kf = lax.dynamic_slice(state.kde_fused, (pix_i, _z, start), (1, 3, window))[0]
+            zs = kf[0]
+            nhis2 = kf[1]
+            lkn = kf[2]
         else:
             def _win(a):
                 return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
@@ -1016,9 +1016,9 @@ def eval_log_catalog_prior_state(
     else:
         if fused:
             kf = state.kde_fused[pix]
-            zs = kf[:, 0]
-            nhis2 = kf[:, 1]
-            lkn = kf[:, 2]
+            zs = kf[0]
+            nhis2 = kf[1]
+            lkn = kf[2]
         else:
             zs = em_catalog.zgals[pix]
             log_kw = state.log_kw[pix]
