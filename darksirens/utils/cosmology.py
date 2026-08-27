@@ -554,3 +554,14 @@ def ddL_of_z(z, dL, H0, Om0=Om0Planck, w0=w0Fiducial, wa=waFiducial):
     that already computed the luminosity distance can avoid recomputing it.
     """
     return dL / (1 + z) + speed_of_light * (1 + z) / (H0 * E(z, Om0, w0, wa))
+
+
+def ddL_of_z_precomputed(z, ddL_grid):
+    """Interpolate ``d dL / dz`` from a precomputed grid.
+
+    Identical to :func:`ddL_of_z` but avoids the per-sample :func:`E` evaluation
+    (power + exp + sqrt per element).  The grid is built once per proposal with
+    ``ddL_of_z(zgrid, dL_grid, H0, Om0, w0, wa)`` and reused for every sample in
+    the PE and selection integrals.
+    """
+    return jnp.interp(z, zgrid, ddL_grid)

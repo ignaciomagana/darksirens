@@ -138,6 +138,7 @@ def log_sample_weight_wl_marginalized(
     log_w_nodes: jnp.ndarray,
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
+    ddL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """WL-marginalized per-sample log importance weight.
 
@@ -221,7 +222,7 @@ def log_sample_weight_wl_marginalized(
                              catalog).reshape(z_s_safe.shape)            # (..., Nmu)
     log_pwl = log_p_wl_fn(mu_b, z_s_safe)                                # (..., Nmu)
     log_J   = log_jacobian_m1src_q_z_to_m1det_q_dL(
-        z_s_safe, dL_true, H0, Om0, w0, wa
+        z_s_safe, dL_true, H0, Om0, w0, wa, ddL_grid=ddL_grid,
     )                                                                    # (..., Nmu)
 
     # Per-node log-integrand (BEFORE PE proposal subtraction)
@@ -267,6 +268,7 @@ def log_sample_weight_wl_or_standard(
     wl_enabled: bool,
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
+    ddL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Dispatcher: WL-marginalize when ``wl_enabled`` is True, otherwise
     fall through to the standard ``log_sample_weight``.
@@ -283,14 +285,14 @@ def log_sample_weight_wl_or_standard(
             m1det, q, dL, chieff, pix, prior_wt,
             cosmo, survey, pop_params, catalog,
             log_p_pop_fn, log_prior_z_fn,
-            spin=spin, dL_grid=dL_grid,
+            spin=spin, dL_grid=dL_grid, ddL_grid=ddL_grid,
         )
     return log_sample_weight_wl_marginalized(
         m1det, q, dL, chieff, pix, prior_wt,
         cosmo, survey, pop_params, catalog,
         log_p_pop_fn, log_prior_z_fn,
         log_p_wl_fn, mu_nodes, log_w_nodes,
-        spin=spin, dL_grid=dL_grid,
+        spin=spin, dL_grid=dL_grid, ddL_grid=ddL_grid,
     )
 
 
@@ -389,6 +391,7 @@ def log_sample_weight_wl_lognormal_hermite(
     log_wH_nodes: jnp.ndarray,
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
+    ddL_grid: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Lognormal-specialized WL marginalization using Gauss-Hermite quadrature.
 
@@ -494,7 +497,7 @@ def log_sample_weight_wl_lognormal_hermite(
                               spin=spin[:, None, :])
     log_pz = log_prior_z_fn(z_s_safe.reshape(-1),
                             pix_b.reshape(-1), catalog).reshape(z_s_safe.shape)
-    log_J  = log_jacobian_m1src_q_z_to_m1det_q_dL(z_s_safe, dL_true, H0, Om0, w0, wa)
+    log_J  = log_jacobian_m1src_q_z_to_m1det_q_dL(z_s_safe, dL_true, H0, Om0, w0, wa, ddL_grid=ddL_grid)
 
     # Per-node log-integrand: NO extra +log μ from substitution
     # (Hermite quadrature substitution carries the WL PDF as measure).
