@@ -794,7 +794,10 @@ def catalog_kernel_state(
     log_sig = jnp.log(sig_eff)
     neg_half_inv_sig2 = -0.5 / (sig_eff * sig_eff)
     log_kw_normed = log_kw_safe - log_sig - _HALF_LOG_2PI
-    kde_fused = jnp.stack([neg_half_inv_sig2, log_kw_normed], axis=-1)
+    kde_fused = jnp.stack(
+        [zgals.astype(log_kw_safe.dtype), neg_half_inv_sig2, log_kw_normed],
+        axis=-1,
+    )
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
         log_sig_eff=log_sig,
@@ -912,7 +915,10 @@ def marked_catalog_kernel_state(
     log_sig = jnp.log(sig_eff)
     neg_half_inv_sig2 = -0.5 / (sig_eff * sig_eff)
     log_kw_normed = log_kw_safe - log_sig - _HALF_LOG_2PI
-    kde_fused = jnp.stack([neg_half_inv_sig2, log_kw_normed], axis=-1)
+    kde_fused = jnp.stack(
+        [zgals.astype(log_kw_safe.dtype), neg_half_inv_sig2, log_kw_normed],
+        axis=-1,
+    )
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
         log_sig_eff=log_sig,
@@ -994,25 +1000,27 @@ def eval_log_catalog_prior_state(
             em_catalog.zgals, pix_i, z, half, n_real, window
         )
 
-        zs = lax.dynamic_slice(em_catalog.zgals, (pix_i, start), (1, window))[0]
         if fused:
             _z = jnp.int32(0)
-            kf = lax.dynamic_slice(state.kde_fused, (pix_i, start, _z), (1, window, 2))[0]
-            nhis2 = kf[:, 0]
-            lkn = kf[:, 1]
+            kf = lax.dynamic_slice(state.kde_fused, (pix_i, start, _z), (1, window, 3))[0]
+            zs = kf[:, 0]
+            nhis2 = kf[:, 1]
+            lkn = kf[:, 2]
         else:
             def _win(a):
                 return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
+            zs = _win(em_catalog.zgals)
             log_kw = _win(state.log_kw)
             sig = _win(state.sig_eff)
             log_sig = _win(state.log_sig_eff) if state.log_sig_eff is not None else jnp.log(sig)
     else:
-        zs = em_catalog.zgals[pix]
         if fused:
             kf = state.kde_fused[pix]
-            nhis2 = kf[:, 0]
-            lkn = kf[:, 1]
+            zs = kf[:, 0]
+            nhis2 = kf[:, 1]
+            lkn = kf[:, 2]
         else:
+            zs = em_catalog.zgals[pix]
             log_kw = state.log_kw[pix]
             sig = state.sig_eff[pix]
             log_sig = state.log_sig_eff[pix] if state.log_sig_eff is not None else jnp.log(sig)
