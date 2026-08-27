@@ -196,8 +196,8 @@ def _resolve_row_chunk(n_rows: int, n_max: int) -> int | None:
 # when it overflows the truncation is symmetric, and when it is empty the
 # window straddles the insertion point (nearest galaxies on both sides keep
 # the far-tail evaluation finite).  Windows containing zero real galaxies go
-# through the same ``_logsumexp_neginf_safe`` path as empty full rows
-# (bit-identical -inf, finite gradients).
+# through the same logsumexp path as empty full rows (log_kw is sanitized
+# to -1e30 at state build time, so plain logsumexp has finite gradients).
 _KDE_WINDOW_SIZE = 1024                # static window size W; None = full row
 _KDE_WINDOW_NSIGMA: float = 8.0        # half-width = n_sigma * max(sig_eff)
 
@@ -787,8 +787,9 @@ def catalog_kernel_state(
             (zgals, dzgals, wgals),
         )
 
+    log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1e30)
     return CatalogKernelState(
-        log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
+        log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
         log_sig_eff=jnp.log(sig_eff),
         volume_weighted=volume_weighted, z_depth=z_depth,
         log_depth_mass=log_depth_mass,
@@ -897,8 +898,9 @@ def marked_catalog_kernel_state(
             (zgals, dzgals, wgals, log_h),
         )
 
+    log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1e30)
     return CatalogKernelState(
-        log_g_grid=log_g_grid, log_kw=log_kw, sig_eff=sig_eff,
+        log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
         log_sig_eff=jnp.log(sig_eff),
         log_depth_mass=log_depth_mass, z_depth=z_depth,
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
@@ -975,10 +977,9 @@ def eval_log_catalog_prior_state(
         )
 
         # Fused 2-D windowed gathers (contiguous dynamic slices; no index
-        # vector, never the full row).  Padded slots inside the window carry
-        # log_kw = -inf exactly as in the full row, so an all-padding window
-        # reduces through the SAME ``_logsumexp_neginf_safe`` -inf path
-        # (bit-identical, finite grads).
+        # vector, never the full row).  Padded slots carry log_kw = -1e30
+        # (sanitized at state build time), so plain logsumexp is gradient-safe
+        # even for all-padding windows.
         def _win(a):
             return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
 
@@ -993,7 +994,7 @@ def eval_log_catalog_prior_state(
         log_sig = state.log_sig_eff[pix] if state.log_sig_eff is not None else jnp.log(sig)
     d = (z - zs) / sig
     log_gauss = -0.5 * d * d - log_sig - _HALF_LOG_2PI
-    log_mix = _logsumexp_neginf_safe(log_kw + log_gauss)
+    log_mix = logsumexp(log_kw + log_gauss)
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
