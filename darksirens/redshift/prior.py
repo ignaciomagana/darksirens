@@ -80,6 +80,7 @@ from darksirens.redshift.catalog import (
     catalog_kernel_state,
     marked_catalog_kernel_state,
     eval_log_catalog_prior_state,
+    eval_log_catalog_prior_state_batch,
 )
 from darksirens.redshift.completion import (
     completion_curves,
@@ -745,14 +746,10 @@ def eval_dark_obs_bracket(z, pix, state: DarkSirenPriorState, em_catalog: EMCata
     ``A_obs = state.log_Nobs[pix] + log p_cat`` -- the piece that depends only
     on the (Q-independent) kernels and ``log_Nobs`` broadcast across members.
     """
-    def _one(z_i, pix_i):
-        log_p_cat = eval_log_catalog_prior_state(z_i, pix_i, state.kernels, em_catalog)
-        # NaN (out-of-grid z, degenerate kernels) must mean "impossible", never p=1.
-        log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
-        idx, t = _grid_bracket(z_i)
-        return state.log_Nobs[pix_i] + log_p_cat, idx, t
-
-    return vmap(_one)(z, pix)
+    log_p_cat = eval_log_catalog_prior_state_batch(z, pix, state.kernels, em_catalog)
+    log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+    idx, t = _grid_bracket(z)
+    return state.log_Nobs[pix] + log_p_cat, idx, t
 
 
 def eval_dark_member_completion(
