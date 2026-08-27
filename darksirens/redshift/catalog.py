@@ -746,6 +746,9 @@ class CatalogKernelState(NamedTuple):
     #: NaN instead of a plausible wrong number.  ``None`` (a hand-built state)
     #: leaves the branch unguarded, exactly as before.
     rows_sorted: Any = None
+    neg_half_inv_sig2: Any = None
+    log_kw_normed: Any = None
+    kde_fused: Any = None
 
 
 def catalog_kernel_state(
@@ -788,13 +791,20 @@ def catalog_kernel_state(
         )
 
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1e30)
+    log_sig = jnp.log(sig_eff)
+    neg_half_inv_sig2 = -0.5 / (sig_eff * sig_eff)
+    log_kw_normed = log_kw_safe - log_sig - _HALF_LOG_2PI
+    kde_fused = jnp.stack([neg_half_inv_sig2, log_kw_normed], axis=-1)
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
-        log_sig_eff=jnp.log(sig_eff),
+        log_sig_eff=log_sig,
         volume_weighted=volume_weighted, z_depth=z_depth,
         log_depth_mass=log_depth_mass,
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
         rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
+        neg_half_inv_sig2=neg_half_inv_sig2,
+        log_kw_normed=log_kw_normed,
+        kde_fused=kde_fused,
     )
 
 
@@ -899,12 +909,19 @@ def marked_catalog_kernel_state(
         )
 
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1e30)
+    log_sig = jnp.log(sig_eff)
+    neg_half_inv_sig2 = -0.5 / (sig_eff * sig_eff)
+    log_kw_normed = log_kw_safe - log_sig - _HALF_LOG_2PI
+    kde_fused = jnp.stack([neg_half_inv_sig2, log_kw_normed], axis=-1)
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
-        log_sig_eff=jnp.log(sig_eff),
+        log_sig_eff=log_sig,
         log_depth_mass=log_depth_mass, z_depth=z_depth,
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
         rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
+        neg_half_inv_sig2=neg_half_inv_sig2,
+        log_kw_normed=log_kw_normed,
+        kde_fused=kde_fused,
     ), log_N_host
 
 
@@ -968,6 +985,7 @@ def eval_log_catalog_prior_state(
             or _traced_rows_attested(em_catalog.zgals)
         )
     )
+    fused = state.kde_fused is not None
     if use_window:
         pix_i = jnp.asarray(pix, dtype=jnp.int32)
         n_real = em_catalog.ngals[pix_i]
@@ -976,25 +994,35 @@ def eval_log_catalog_prior_state(
             em_catalog.zgals, pix_i, z, half, n_real, window
         )
 
-        # Fused 2-D windowed gathers (contiguous dynamic slices; no index
-        # vector, never the full row).  Padded slots carry log_kw = -1e30
-        # (sanitized at state build time), so plain logsumexp is gradient-safe
-        # even for all-padding windows.
-        def _win(a):
-            return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
-
-        zs = _win(em_catalog.zgals)
-        log_kw = _win(state.log_kw)
-        sig = _win(state.sig_eff)
-        log_sig = _win(state.log_sig_eff) if state.log_sig_eff is not None else jnp.log(sig)
+        zs = lax.dynamic_slice(em_catalog.zgals, (pix_i, start), (1, window))[0]
+        if fused:
+            _z = jnp.int32(0)
+            kf = lax.dynamic_slice(state.kde_fused, (pix_i, start, _z), (1, window, 2))[0]
+            nhis2 = kf[:, 0]
+            lkn = kf[:, 1]
+        else:
+            def _win(a):
+                return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
+            log_kw = _win(state.log_kw)
+            sig = _win(state.sig_eff)
+            log_sig = _win(state.log_sig_eff) if state.log_sig_eff is not None else jnp.log(sig)
     else:
         zs = em_catalog.zgals[pix]
-        log_kw = state.log_kw[pix]
-        sig = state.sig_eff[pix]
-        log_sig = state.log_sig_eff[pix] if state.log_sig_eff is not None else jnp.log(sig)
-    d = (z - zs) / sig
-    log_gauss = -0.5 * d * d - log_sig - _HALF_LOG_2PI
-    log_mix = logsumexp(log_kw + log_gauss)
+        if fused:
+            kf = state.kde_fused[pix]
+            nhis2 = kf[:, 0]
+            lkn = kf[:, 1]
+        else:
+            log_kw = state.log_kw[pix]
+            sig = state.sig_eff[pix]
+            log_sig = state.log_sig_eff[pix] if state.log_sig_eff is not None else jnp.log(sig)
+    if fused:
+        dz = z - zs
+        log_mix = logsumexp(nhis2 * dz * dz + lkn)
+    else:
+        d = (z - zs) / sig
+        log_gauss = -0.5 * d * d - log_sig - _HALF_LOG_2PI
+        log_mix = logsumexp(log_kw + log_gauss)
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
