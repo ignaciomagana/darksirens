@@ -160,7 +160,7 @@ import jax
 import jax.numpy as jnp
 from jax import jit, lax, vmap
 from jax.scipy.special import ndtr
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from darksirens.utils.cosmology import dV_of_z
 from darksirens.core.types import (
@@ -2211,6 +2211,91 @@ def _field_depth_weighted_mass(
     return total
 
 
+class PinnedFieldObservedTotal(NamedTuple):
+    """:func:`field_observed_global_total` evaluated ONCE, plus its probe.
+
+    Same premise as :class:`darksirens.redshift.catalog.PinnedKernelQuadrature`,
+    one step further: this scalar is ``Sum_i c_i * Z_i^depth / Z_i^full`` and
+    BOTH quadratures scale as ``(H0_ref/H0)^3``, so the RATIO -- and therefore
+    the whole survey-global observed total -- is a RUN CONSTANT, not merely a
+    shift.  MEASURED on 400 real DESI rows (184,359 galaxies): 157859.74968063808
+    at H0 = 67.74 and at H0 = 91.3, relative difference exactly 0.0; live
+    negative controls Om0 0.3089 -> 0.35 gives 7.59e-4, delta 0.94 -> 2.0 gives
+    5.77e-3, sigma_kde 0.003 -> 0.03 gives 6.78e-2.
+
+    GUARDED IN THE GRAPH, on its own probe rather than by borrowing the kernel
+    pin's: this scalar cancels at K=1 but NOT at K>=2, where it becomes a
+    theta-dependent tilt on the sampled host fractions -- exactly the
+    configuration a silent wrong number would be worst in.  ``probe_idx``
+    galaxies are re-integrated from the LIVE proposal through the same
+    ``_row_log_kernel_norms`` the pin came from and must reproduce
+    ``probe_ratio``; a mismatch returns ``NaN``, which propagates (``Z =
+    N_obs_total + N_miss_total`` then ``log(maximum(Z, 1e-300))`` has no NaN
+    filter) into every sample's log prior.
+    """
+    total: Any                  # scalar, Sum_i c_i Z_i^depth / Z_i^full
+    probe_idx: jnp.ndarray      # (P,) int32 flat-galaxy indices
+    probe_ratio: jnp.ndarray    # (P,) Z_i^depth / Z_i^full at build time
+
+
+def _field_depth_probe_ratio(cosmo, survey, em_catalog, idx):
+    """``Z_i^depth / Z_i^full`` for the flat FULL-SKY galaxies ``idx``.
+
+    The P-galaxy slice of :func:`_field_depth_weighted_mass`'s scan body,
+    expression for expression, so the probe measures the pinned quantity and not
+    a paraphrase of it.
+    """
+    from darksirens.redshift.catalog import SIGMA_EFF_FLOOR, _row_log_kernel_norms
+
+    z_p = jnp.asarray(em_catalog.field_depth_z, dtype=zgrid.dtype)[idx]
+    dz_p = jnp.asarray(em_catalog.field_depth_dz, dtype=zgrid.dtype)[idx]
+    log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+    sig = jnp.maximum(jnp.sqrt(dz_p ** 2 + survey.sigma_kde ** 2), SIGMA_EFF_FLOOR)
+    real = jnp.ones_like(z_p, dtype=bool)
+    log_Z_full = _row_log_kernel_norms(z_p, sig, real, log_g_grid)
+    log_Z_depth = _row_log_kernel_norms(
+        z_p, sig, real, log_g_grid, z_hi=survey.z_depth
+    )
+    return jnp.exp(log_Z_depth - log_Z_full)
+
+
+def build_pinned_field_observed_total(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    n_probe: int = 8,
+) -> PinnedFieldObservedTotal:
+    """Evaluate :func:`field_observed_global_total` ONCE and box it with a probe.
+
+    Call from the likelihood factory with the CONCRETE (pre-jit) catalog and the
+    run's reference cosmology (``H0`` at
+    :data:`darksirens.redshift.catalog.KERNEL_PIN_H0_REF`; every other field the
+    run's FIXED value).  Probe galaxies are spread evenly over the flat full-sky
+    array so the guard samples the whole depth range, not one pixel's neighbours.
+    """
+    total = field_observed_global_total(cosmo, survey, em_catalog)
+    n_gal = int(np.asarray(em_catalog.field_depth_z).shape[0])
+    n_probe = max(1, min(int(n_probe), n_gal))
+    idx = jnp.asarray(
+        np.unique(np.linspace(0, n_gal - 1, n_probe).round().astype(np.int64))
+        .astype(np.int32)
+    )
+    return PinnedFieldObservedTotal(
+        total=jnp.asarray(total, dtype=zgrid.dtype),
+        probe_idx=idx,
+        probe_ratio=_field_depth_probe_ratio(cosmo, survey, em_catalog, idx),
+    )
+
+
+def _pinned_field_observed_total(cosmo, survey, em_catalog, pinned):
+    """The pinned survey-global observed total for this proposal, guarded."""
+    from darksirens.redshift.catalog import KERNEL_PIN_TOL
+
+    live = _field_depth_probe_ratio(cosmo, survey, em_catalog, pinned.probe_idx)
+    ok = jnp.all(jnp.abs(live - pinned.probe_ratio) <= KERNEL_PIN_TOL)
+    return jnp.where(ok, pinned.total, jnp.nan)
+
+
 def field_observed_global_total(
     cosmo: CosmoParams,
     survey: SurveyParams,
@@ -2240,6 +2325,13 @@ def field_observed_global_total(
     """
     if survey.z_depth is None:
         return jnp.asarray(em_catalog.field_N_obs_total, dtype=zgrid.dtype)
+    # PINNED: a build-time RUN CONSTANT, re-verified in the graph on its own
+    # probe galaxies (see :class:`PinnedFieldObservedTotal`).  Removes the
+    # SECOND Gauss-Legendre site of the production call -- two truncations over
+    # every full-sky galaxy, per proposal.
+    if em_catalog.field_depth_total_pinned is not None:
+        return _pinned_field_observed_total(
+            cosmo, survey, em_catalog, em_catalog.field_depth_total_pinned)
     if em_catalog.field_depth_c is None:
         raise ValueError(
             "catalog_sky_weighting='field' with survey.z_depth set requires "

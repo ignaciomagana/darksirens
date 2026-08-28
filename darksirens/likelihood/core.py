@@ -162,6 +162,11 @@ _PREPARE_STATE_CONSUMED_EMCATALOG_FIELDS = (
     "latent_P_F", "latent_F_F",
     # the amp(z) support (field-level PR-8); None on every pre-PR-8 anchor
     "latent_support",
+    # the build-time H0 pin: catalog_kernel_state reads pinned_kernels and
+    # field_observed_global_total reads field_depth_total_pinned, so two views
+    # may share a prepared state only when they share the SAME pin objects
+    # (the factory installs one pair on both views of a union bundle).
+    "pinned_kernels", "field_depth_total_pinned",
 )
 
 # Leaves prepare NEVER reads -- sample_to_unique_idx, the counterpart_* plumbing,

@@ -477,6 +477,21 @@ class EMCatalog(NamedTuple):
     # above the depth, because there the seam now has a modelled -- assumed --
     # value to say.
     latent_support: Any = None          # (N_grid,) bool | None
+    # ------------------------------------------------------------- H0 PIN
+    # Build-time quadratures the likelihood factory installs when the run's
+    # SAMPLED-label set makes the galaxy measure EXACTLY H0-separable (nothing
+    # in {Om0, w0, wa, delta, sigma_kde} sampled, plain galaxy-count host
+    # model): the per-galaxy kernel state at a reference H0
+    # (:class:`darksirens.redshift.catalog.PinnedKernelQuadrature`, consumed by
+    # ``catalog_kernel_state``) and the survey-global observed total
+    # (:class:`darksirens.redshift.completion.PinnedFieldObservedTotal`,
+    # consumed by ``field_observed_global_total``).  ``None`` -- every run whose
+    # premise does not hold -- is the pre-existing code path, op for op.  Their
+    # PRESENCE is pytree structure and therefore part of every jit cache key;
+    # the premise they were built under is not, so each carries its own
+    # in-graph probe and both poison the likelihood on a mismatch.
+    pinned_kernels: Any = None
+    field_depth_total_pinned: Any = None
 
 
 class GWEvent(NamedTuple):
