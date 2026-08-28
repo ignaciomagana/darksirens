@@ -1803,8 +1803,23 @@ def build_parser():
                    choices=["cdf", "zspace"],
                    help="Quadrature domain for the kernel normalisation: 'cdf' (default) "
                         "integrates in the Gaussian CDF variable, 'zspace' integrates "
-                        "directly in redshift (avoids ndtri, ~2x faster; validated for "
-                        "spectroscopic catalogs at 8-12 nodes).")
+                        "directly in redshift (avoids ndtri; measured 1.8-3.0x faster "
+                        "production likelihood calls on H100). MEASURED ON THE FULL "
+                        "PRODUCTION LIKELIHOOD (259 events, DESI nside-64, field "
+                        "weighting): the survey-global observed count (~1.6e5 galaxies) "
+                        "amplifies kernel-norm error, and the cdf default carries an "
+                        "H0-correlated +/-8 nat likelihood error at 24 nodes (errors "
+                        "follow ~4723/K^2; the cdf family converges TO the zspace "
+                        "values). Production setting: zspace, --kernel_gl_nodes 24, "
+                        "--kernel_gl_nsigma 6 (357 ms/call, 1.8x, most accurate "
+                        "measured); speed option: 16 nodes at n_sigma 5 (214 ms, 3.0x, "
+                        "residual <= 0.3 nats vs the 24/6 reference). Do NOT use 8 "
+                        "nodes at n_sigma 5: ~9e-3 per galaxy, 130x WORSE than cdf-24.")
+    g.add_argument("--kernel_gl_nsigma", type=float, default=None, metavar="X",
+                   help="Half-width of the z-space kernel-quadrature window in units of "
+                        "sigma_eff (zspace domain only; module default 5.0). The dominant "
+                        "accuracy knob: 4 pins a -8e-5 truncation bias no node count can "
+                        "remove; 6 needs >= 24 nodes. Use >= 5.")
     g.add_argument("--kde_window", type=int, default=None, metavar="W",
                    help="Static window size for the per-sample catalog KDE: only the W "
                         "galaxies nearest each sample's redshift are evaluated (rows are "
@@ -2581,7 +2596,8 @@ def _configure_performance_grids(opts):
 
     _gl_nodes = getattr(opts, 'kernel_gl_nodes', None)
     _gl_domain = getattr(opts, 'kernel_gl_domain', None)
-    if _gl_nodes is not None or _gl_domain is not None:
+    _gl_nsigma = getattr(opts, 'kernel_gl_nsigma', None)
+    if _gl_nodes is not None or _gl_domain is not None or _gl_nsigma is not None:
         from darksirens.redshift.catalog import configure_kernel_quadrature
         kw = {}
         if _gl_nodes is not None:
@@ -2590,6 +2606,10 @@ def _configure_performance_grids(opts):
             kw['n_nodes'] = _gl_nodes
         if _gl_domain is not None:
             kw['domain'] = _gl_domain
+        if _gl_nsigma is not None:
+            if _gl_nsigma <= 0:
+                _fatal("--kernel_gl_nsigma must be > 0")
+            kw['n_sigma'] = _gl_nsigma
         configure_kernel_quadrature(**kw)
 
     kde_window = getattr(opts, "kde_window", None)
