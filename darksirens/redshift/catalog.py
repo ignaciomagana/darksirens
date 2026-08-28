@@ -749,6 +749,12 @@ class CatalogKernelState(NamedTuple):
     neg_half_inv_sig2: Any = None
     log_kw_normed: Any = None
     kde_fused: Any = None  # (N_rows, 3, N_max): [zgals, neg_half_inv_sig2, log_kw_normed]
+    #: (N_rows,) bool: True where the row had NO finite kernel weight before
+    #: the -1e30 sanitize (an empty pixel / all-padding row).  The evaluators
+    #: use it to restore the exact -inf output the sanitize would otherwise
+    #: turn into a finite ~-1e30 value.  ``None`` (a hand-built state) keeps
+    #: plain logsumexp semantics.
+    row_empty: Any = None
 
 
 def catalog_kernel_state(
@@ -790,6 +796,7 @@ def catalog_kernel_state(
             (zgals, dzgals, wgals),
         )
 
+    row_empty = ~jnp.any(jnp.isfinite(log_kw), axis=-1)
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1e30)
     log_sig = jnp.log(sig_eff)
     neg_half_inv_sig2 = -0.5 / (sig_eff * sig_eff)
@@ -808,6 +815,7 @@ def catalog_kernel_state(
         neg_half_inv_sig2=neg_half_inv_sig2,
         log_kw_normed=log_kw_normed,
         kde_fused=kde_fused,
+        row_empty=row_empty,
     )
 
 
@@ -911,6 +919,7 @@ def marked_catalog_kernel_state(
             (zgals, dzgals, wgals, log_h),
         )
 
+    row_empty = ~jnp.any(jnp.isfinite(log_kw), axis=-1)
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1e30)
     log_sig = jnp.log(sig_eff)
     neg_half_inv_sig2 = -0.5 / (sig_eff * sig_eff)
@@ -928,6 +937,7 @@ def marked_catalog_kernel_state(
         neg_half_inv_sig2=neg_half_inv_sig2,
         log_kw_normed=log_kw_normed,
         kde_fused=kde_fused,
+        row_empty=row_empty,
     ), log_N_host
 
 
@@ -1031,6 +1041,14 @@ def eval_log_catalog_prior_state(
         d = (z - zs) / sig
         log_gauss = -0.5 * d * d - log_sig - _HALF_LOG_2PI
         log_mix = logsumexp(log_kw + log_gauss)
+    # The build-time -1e30 sanitize makes plain logsumexp gradient-safe but
+    # would return a finite ~-1e30 for an empty pixel; restore the exact -inf
+    # contract with one per-row scalar select (zero gradient on empty rows,
+    # bit-identical elsewhere -- the sanitized padding underflows to 0 weight).
+    if state.row_empty is not None:
+        log_mix = jnp.where(
+            state.row_empty[jnp.asarray(pix, dtype=jnp.int32)], -jnp.inf, log_mix
+        )
     # Volume-weighted (complete-catalog) kernels already carry g(z_i) in their
     # weights, so no front g(z); otherwise reapply the per-sample galaxy measure
     # g(z) that Z_i divided out per kernel.  ``volume_weighted`` is a static bool.
@@ -1127,6 +1145,8 @@ def eval_log_catalog_prior_state_batch(
         dz = zc[:, None] - windows[:, 0, :]
         terms = windows[:, 1, :] * dz * dz + windows[:, 2, :]
         log_mix = logsumexp(terms, axis=1)
+        if state.row_empty is not None:
+            log_mix = jnp.where(state.row_empty[pc], -jnp.inf, log_mix)
 
         log_g_front = jnp.where(
             state.volume_weighted,
