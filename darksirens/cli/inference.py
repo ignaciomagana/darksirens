@@ -1759,8 +1759,10 @@ def build_parser():
     g.add_argument("--seed",         type=int,   default=22)
     g.add_argument("--show_progress",type=str_to_bool, default=True, metavar="BOOL")
     g.add_argument("--dynesty_diagnostics", type=str_to_bool, default=False, metavar="BOOL",
-                   help="Write dynesty runplot/traceplot PDFs every 10 minutes to "
+                   help="Write dynesty runplot/traceplot PDFs to "
                         "<run_dir>/dynesty_diagnostics/. Only used with --sampler dynesty.")
+    g.add_argument("--dynesty_diagnostics_interval", type=float, default=600.0, metavar="SECONDS",
+                   help="Seconds between --dynesty_diagnostics plot refreshes (default 600).")
     g.add_argument("--prior_transform_dispatch", choices=["auto", "eager"],
                    default="auto",
                    help="How dynesty calls the prior transform. 'auto' (default) "

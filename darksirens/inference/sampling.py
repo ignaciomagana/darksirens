@@ -1092,7 +1092,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
 
         diag_dir = dynesty_diagnostics_dir(opts)
         enable_diag = bool(getattr(opts, "dynesty_diagnostics", False))
-        diag_interval = 600  # 10 minutes in seconds
+        diag_interval = float(getattr(opts, "dynesty_diagnostics_interval", 600.0) or 600.0)
         _diag_index = [0]
         _stop_diag = threading.Event()
 
@@ -1119,7 +1119,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
             out_dir = diag_dir
             try:
                 fig, _ = dyplot.runplot(res, label_kwargs={"fontsize": 10})
-                fig.savefig(os.path.join(out_dir, f"runplot_{idx:04d}.pdf"), bbox_inches="tight")
+                fig.savefig(os.path.join(out_dir, "runplot.pdf"), bbox_inches="tight")
                 plt.close(fig)
             except Exception as e:
                 print(f"[dynesty diag] runplot failed: {e}", flush=True)
@@ -1127,7 +1127,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
                 fig, _ = dyplot.traceplot(res, labels=labels,
                                           label_kwargs={"fontsize": 8},
                                           title_kwargs={"fontsize": 8})
-                fig.savefig(os.path.join(out_dir, f"traceplot_{idx:04d}.pdf"), bbox_inches="tight")
+                fig.savefig(os.path.join(out_dir, "traceplot.pdf"), bbox_inches="tight")
                 plt.close(fig)
             except Exception as e:
                 print(f"[dynesty diag] traceplot failed: {e}", flush=True)
@@ -1222,7 +1222,7 @@ def run_sampler(method, likelihood, prior_transform, labels,
 
             diag_thread = threading.Thread(target=_diag_thread_fn, daemon=True)
             diag_thread.start()
-            print(f"[*] Diagnostic plots enabled — writing to {diag_dir}/ every 10 min.", flush=True)
+            print(f"[*] Diagnostic plots enabled — writing to {diag_dir}/ every {diag_interval:g} s.", flush=True)
 
         if not plan.resuming:
             print("[*] Initial live points found! Starting main nested sampling loop...", flush=True)
