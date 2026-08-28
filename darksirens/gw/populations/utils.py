@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 
 import jax.numpy as jnp
+import numpy as np
 from jax import ensure_compile_time_eval, jit
 
 # ======================================================================
@@ -45,6 +46,19 @@ def _env_int_opt(name: str, default: int | None) -> int | None:
     return parsed
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a float, got {value!r}") from exc
+    if not parsed > 0.0:
+        raise ValueError(f"{name} must be > 0, got {parsed}")
+    return parsed
+
+
 def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
     """Smallest pairing m1-grid size whose cells are narrower than one q-interval.
 
@@ -54,6 +68,13 @@ def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
     ``1 - m_min/m1 < 1 - exp(-dlog m1)``, fits in one q-interval, i.e.
 
         log(pairing_m_hi / m_lo) / (N_grid - 1)  <=  1 / (n_q - 1).
+
+    HISTORICAL: this floor existed only to keep the old fixed-q-grid edge clamp
+    (removed 2026-08-28) inside its factor-of-two bound.  The per-sample
+    Gauss-Legendre edge rule that replaced it is accurate for ANY relative sizing
+    of the two grids, so the floor is now only a mild over-resolution of the m1
+    grid; it is kept so that an existing ``--pairing_norm_grid`` request keeps
+    resolving the same nodes.
 
     Nothing enforced that coupling, so a small ``--pairing_norm_grid`` (or a
     FINER ``--norm_nq``, which naively should be more accurate) silently
@@ -81,11 +102,28 @@ class NormalizationGridSettings:
     explicitly disable): when set to an int N the pairing model's
     per-sample q-normalisation is interpolated from an N-node static m1 grid
     instead of integrated exactly per sample (see ``get_pairing_m1_grid`` and
-    ``PairingModel.__call__``).  Samples inside the grid cell that straddles the
-    normaliser's SUPPORT EDGE are not interpolated at all -- no interpolant can
-    follow the taper's essential singularity there -- but evaluated from the
-    exact single-q-interval trapezoid term, which is the exact normaliser in that
-    cell for N >= ~1024 (see ``PairingModel.__call__``).
+    ``PairingModel.__call__``).  Samples the interpolant cannot resolve -- those
+    near the normaliser's SUPPORT EDGE, where I(m1) ~ eps exp(-dm/eps) has an
+    essential singularity -- are not interpolated at all but integrated on their
+    OWN support with the Gauss-Legendre rule below.
+
+    ``pairing_edge_nq`` (env ``DARKSIRENS_GW_PAIRING_EDGE_NQ``) is the node count
+    of that per-sample edge rule and ``pairing_edge_tol`` (env
+    ``DARKSIRENS_GW_PAIRING_EDGE_TOL``) the interpolation-error budget, in nats,
+    that decides which samples take it: a grid node is TRUSTED when the second
+    difference of log I over 8 -- the linear-interpolation error bound on a
+    uniform-in-log-m1 grid -- is within ``pairing_edge_tol`` and no zero-support
+    node lies within one cell.  Measured over 50 (m_min, dm_min, beta) prior
+    draws, worst |Delta log density| against a converged 200001-node reference in
+    the 24 grid cells above the support edge: 22.6 nats with the pre-2026-08-28
+    fixed-q-grid clamp, 3.4e-3 with ``pairing_edge_nq = 24`` -- against 3.1e-2 for
+    the EXACT branch itself, whose 200-node uniform q-trapezoid does not resolve
+    the taper boundary layer there.  Raising ``pairing_edge_nq`` costs that many
+    ``_eval_unnorm`` evaluations per sample (against ``n_q`` for the exact
+    branch); lowering ``pairing_edge_tol`` routes more samples onto the rule,
+    which is NOT uniformly better -- the m1 grid wins in the bulk of the support
+    (measured, beta = -2 with a narrow taper: 0.19 nats for the rule alone
+    against 2e-5 for the interpolant).
 
     ``pairing_m_hi`` is the UPPER bound of that opt-in pairing m1 grid.  It is a
     SEPARATE knob from the mass-grid ceiling ``m_hi`` precisely so that sizing
@@ -102,6 +140,8 @@ class NormalizationGridSettings:
     n_q: int = _env_int("DARKSIRENS_GW_N_Q", 200)
     n_chi: int = _env_int("DARKSIRENS_GW_N_CHI", 200)
     pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", None)
+    pairing_edge_nq: int = _env_int("DARKSIRENS_GW_PAIRING_EDGE_NQ", 24)
+    pairing_edge_tol: float = _env_float("DARKSIRENS_GW_PAIRING_EDGE_TOL", 1.0e-4)
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -122,6 +162,14 @@ class NormalizationGridSettings:
             if pg < 2:
                 raise ValueError(f"pairing_m1_grid must be >= 2 or None, got {pg}")
             object.__setattr__(self, "pairing_m1_grid", pg)
+        pe = int(self.pairing_edge_nq)
+        if pe < 2:
+            raise ValueError(f"pairing_edge_nq must be >= 2, got {pe}")
+        object.__setattr__(self, "pairing_edge_nq", pe)
+        pt = float(self.pairing_edge_tol)
+        if not pt > 0.0:
+            raise ValueError(f"pairing_edge_tol must be > 0, got {pt}")
+        object.__setattr__(self, "pairing_edge_tol", pt)
         for lo_name, hi_name in (("m_lo", "m_hi"), ("q_lo", "q_hi"), ("chi_lo", "chi_hi")):
             lo = float(getattr(self, lo_name))
             hi = float(getattr(self, hi_name))
@@ -164,6 +212,8 @@ def configure_normalization_grids(
     n_chi: int | None = None,
     pairing_m1_grid: int | None | object = _SENTINEL,
     pairing_m_hi: float | None = None,
+    pairing_edge_nq: int | None = None,
+    pairing_edge_tol: float | None = None,
 ) -> NormalizationGridSettings:
     """Update cached normalisation-grid sizes and clear derived grids.
 
@@ -180,7 +230,9 @@ def configure_normalization_grids(
 
     updates = {}
     for key, value in {"n_mass": n_mass, "n_q": n_q, "n_chi": n_chi,
-                        "pairing_m_hi": pairing_m_hi}.items():
+                        "pairing_m_hi": pairing_m_hi,
+                        "pairing_edge_nq": pairing_edge_nq,
+                        "pairing_edge_tol": pairing_edge_tol}.items():
         if value is not None:
             updates[key] = value
     if pairing_m1_grid is not _SENTINEL:
@@ -276,6 +328,7 @@ def _clear_grid_caches() -> None:
     get_chi_grid.cache_clear()
     get_m1_q_mesh.cache_clear()
     get_pairing_m1_grid.cache_clear()
+    get_pairing_edge_quadrature.cache_clear()
 
 
 @lru_cache(maxsize=1)
@@ -331,6 +384,36 @@ def get_pairing_m1_grid():
     # yields a concrete constant, not a leaking tracer (see _linspace note).
     with ensure_compile_time_eval():
         return jnp.exp(jnp.linspace(jnp.log(s.m_lo), jnp.log(s.pairing_m_hi), int(n)))
+
+
+@lru_cache(maxsize=4)
+def _gauss_legendre_01(n: int):
+    x, w = np.polynomial.legendre.leggauss(int(n))
+    # ensure_compile_time_eval for the same reason as _linspace: a cold-cache
+    # first evaluation inside a jit trace must yield CONCRETE constants, not
+    # tracers that leak into the next trace.
+    with ensure_compile_time_eval():
+        return jnp.asarray(0.5 * (x + 1.0)), jnp.asarray(0.5 * w)
+
+
+@lru_cache(maxsize=1)
+def get_pairing_edge_quadrature():
+    """Gauss-Legendre nodes/weights on (0, 1) for the per-sample edge rule.
+
+    ``PairingModel.__call__``'s grid branch integrates I(m1) on the SAMPLE'S OWN
+    support, ``q = q_cut + t (1 - q_cut)``, wherever the m1 interpolant is not
+    trustworthy.  The integrand there is the taper boundary layer
+    ``S(m_min + t (m1 - m_min))``, of width ``A^-1 = (m1 - m_min)/dm_min`` in
+    ``t``; Gauss-Legendre resolves a layer of width ``1/A`` with ~``sqrt(A)``
+    nodes where a uniform rule needs ~``A`` of them, which is what makes a
+    per-sample quadrature affordable at all (measured, worst |Delta log I| over
+    the near-edge region across corner hyperparameters: 1.3e-3 for 16 GL nodes
+    against 1.4 for 16 uniform-trapezoid nodes).  The nodes are open, so the
+    exact support edge -- where the Planck taper is identically zero and its
+    derivatives are singular -- is never evaluated.
+    """
+    s = normalization_grid_settings()
+    return _gauss_legendre_01(s.pairing_edge_nq)
 
 
 # Backward-compatible aliases.  They reflect import-time/default settings;
