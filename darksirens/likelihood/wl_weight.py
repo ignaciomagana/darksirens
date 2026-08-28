@@ -139,7 +139,6 @@ def log_sample_weight_wl_marginalized(
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
     ddL_grid: jnp.ndarray | None = None,
-    log_prior_wt: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """WL-marginalized per-sample log importance weight.
 
@@ -245,8 +244,7 @@ def log_sample_weight_wl_marginalized(
 
     # Subtract PE proposal density
     valid = prior_wt > 0.0
-    log_pw = log_prior_wt if log_prior_wt is not None else jnp.log(prior_wt)
-    log_pPE = jnp.where(valid, log_pw, 0.0)
+    log_pPE = jnp.where(valid, jnp.log(prior_wt), 0.0)
     out = jnp.where(valid, log_target - log_pPE, -jnp.inf)
     return out
 
@@ -271,7 +269,6 @@ def log_sample_weight_wl_or_standard(
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
     ddL_grid: jnp.ndarray | None = None,
-    log_prior_wt: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Dispatcher: WL-marginalize when ``wl_enabled`` is True, otherwise
     fall through to the standard ``log_sample_weight``.
@@ -289,7 +286,6 @@ def log_sample_weight_wl_or_standard(
             cosmo, survey, pop_params, catalog,
             log_p_pop_fn, log_prior_z_fn,
             spin=spin, dL_grid=dL_grid, ddL_grid=ddL_grid,
-            log_prior_wt=log_prior_wt,
         )
     return log_sample_weight_wl_marginalized(
         m1det, q, dL, chieff, pix, prior_wt,
@@ -297,7 +293,6 @@ def log_sample_weight_wl_or_standard(
         log_p_pop_fn, log_prior_z_fn,
         log_p_wl_fn, mu_nodes, log_w_nodes,
         spin=spin, dL_grid=dL_grid, ddL_grid=ddL_grid,
-        log_prior_wt=log_prior_wt,
     )
 
 
@@ -397,7 +392,6 @@ def log_sample_weight_wl_lognormal_hermite(
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
     ddL_grid: jnp.ndarray | None = None,
-    log_prior_wt: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Lognormal-specialized WL marginalization using Gauss-Hermite quadrature.
 
@@ -520,8 +514,7 @@ def log_sample_weight_wl_lognormal_hermite(
     log_target = logsumexp(log_integrand, axis=-1)
 
     valid = prior_wt > 0.0
-    log_pw = log_prior_wt if log_prior_wt is not None else jnp.log(prior_wt)
-    log_pPE = jnp.where(valid, log_pw, 0.0)
+    log_pPE = jnp.where(valid, jnp.log(prior_wt), 0.0)
     return jnp.where(valid, log_target - log_pPE, -jnp.inf)
 
 

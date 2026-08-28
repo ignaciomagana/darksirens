@@ -520,23 +520,17 @@ def compute_selection_term(
     log_sigma2 : scalar — log Monte-Carlo variance of μ (used by the
         strong-lensing cluster path; ignored by the standard likelihood)
     """
-    import inspect as _inspect
-    _lwf_params = _inspect.signature(log_weight_fn).parameters
-    _lwf_accepts_log_prior_wt = "log_prior_wt" in _lwf_params
-
     def _batch_lse(dL_b, m1det_b, q_b, chi_b, pix_b, pwt_b, valid_b, nx_b, ny_b,
-                   nz_b, spin_b=None, log_pwt_b=None):
+                   nz_b, spin_b=None):
         # ``spin_b`` is passed to ``log_weight_fn`` ONLY when the event carries
         # a spin block, so every existing weight function (and test double)
         # with the 7-argument signature keeps working and the d = 0 path is
         # call-for-call identical.
-        kw = {}
-        if spin_b is not None:
-            kw["spin"] = spin_b
-        if log_pwt_b is not None and _lwf_accepts_log_prior_wt:
-            kw["log_prior_wt"] = log_pwt_b
-        ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b,
-                            em_catalog_sel, **kw)
+        if spin_b is None:
+            ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b, em_catalog_sel)
+        else:
+            ldw = log_weight_fn(m1det_b, q_b, dL_b, chi_b, pix_b, pwt_b,
+                                em_catalog_sel, spin=spin_b)
         if sky_log_weight_fn is not None:
             ldw = ldw + sky_log_weight_fn(nx_b, ny_b, nz_b, dL_b)
         valid = valid_b & (pwt_b > 0.0)
@@ -561,7 +555,6 @@ def compute_selection_term(
             gw_sel.ny,
             gw_sel.nz,
             gw_sel.spin,
-            gw_sel.log_prior_wt,
         )
     else:
         # --- Batched via lax.scan ---
@@ -589,7 +582,6 @@ def compute_selection_term(
                 ny_b,
                 nz_b,
                 sl(gw_sel.spin) if gw_sel.spin is not None else None,
-                sl(gw_sel.log_prior_wt) if gw_sel.log_prior_wt is not None else None,
             )
             return None, (lse_b, lse2_b)
 
