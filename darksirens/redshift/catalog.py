@@ -84,9 +84,14 @@ SIGMA_EFF_FLOOR: float = 1e-4
 #   z_i + n_sigma*sig] clipped to [0, z_hi].  Avoids ``ndtri`` entirely:
 #   the integrand is ``N(z; z_i, sig) g(z)``, evaluated with cheap
 #   ``exp(-0.5 d^2)`` instead.  Benchmarked 2–3x faster per row than
-#   ``'cdf'`` at the same node count and MORE accurate per node (GL nodes
-#   concentrate in the Gaussian's support).  Validated for spectroscopic
-#   catalogs (sig_eff ~ 0.01) at 8–12 nodes with n_sigma >= 4.
+#   ``'cdf'`` at the same node count.  Node guidance (measured against an
+#   exact analytic reference on the DESI nside-64 production catalog, a
+#   MIXED spectro+photo catalog with sig_eff spanning 3e-3 to 0.1):
+#   16 nodes at n_sigma=5 gives per-galaxy |dlog Z| median 9e-7 / max 6e-5
+#   (75x tighter than cdf-24 coherently over 259 events) and is the first
+#   node count that beats cdf-24; 12 is a wash; 8 at n_sigma=5 is ~9e-3
+#   per galaxy -- 130x WORSE than cdf-24.  n_sigma=4 pins an -8e-5
+#   truncation bias no node count can remove; use n_sigma >= 5.
 _GL_NODES = 24
 _GL_DOMAIN = 'cdf'
 _GL_NSIGMA = 5.0
@@ -596,12 +601,19 @@ def _row_log_kernel_norms_zspace(zs, sig_eff, real, log_g_grid,
     ).reshape(z_node.shape)
     integrand = jnp.exp(log_gauss + log_g)
     Z = span_z * (integrand * _GL_W).sum(axis=-1)              # (N_max,)
+    # A galaxy more than n_sigma*sig ABOVE the truncation has span_z <= 0 (no
+    # window at all), and a window that barely clips the [0, z_hi] boundary can
+    # underflow Z to exactly 0.  Both previously returned -700 / -inf --
+    # declaring ZERO truncated mass where the CDF twin returns the exact tiny
+    # value.  Recover both in log space exactly as _row_log_kernel_norms does:
+    # the true Gaussian mass on [0, z_hi] via _log_ndtr_span, times g at the
+    # point where that mass concentrates (the nearer boundary).  Rows with a
+    # resolvable Z keep the direct (bit-identical) spelling.
+    z_star = jnp.clip(zs, 0.0, z_hi)
+    log_g_star = log_interp_zgrid(z_star, log_g_grid)
+    fallback = _log_ndtr_span(-zs / sig_eff, (z_hi - zs) / sig_eff) + log_g_star
     ok = Z > 0.0
-    log_Z = jnp.where(
-        ok,
-        jnp.log(jnp.where(ok, Z, 1.0)),
-        jnp.where(span_z > 0.0, -700.0, -jnp.inf),
-    )
+    log_Z = jnp.where(ok, jnp.log(jnp.where(ok, Z, 1.0)), fallback)
     return jnp.where(real, log_Z, 0.0)
 
 

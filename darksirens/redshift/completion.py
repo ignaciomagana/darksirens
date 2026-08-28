@@ -2134,7 +2134,7 @@ def _field_depth_weighted_mass(
 
     The survey-global companion of ``kernels.log_depth_mass``: the per-galaxy
     ratio of the below-depth to the full GL kernel norm, reusing
-    :func:`darksirens.redshift.catalog._row_log_kernel_norms` verbatim (SAME nodes,
+    :func:`darksirens.redshift.catalog._dispatch_log_kernel_norms` verbatim (SAME nodes, SAME domain,
     SAME truncation, SAME ``sigma_eff`` floor) so the global observed term is
     term-for-term the full-sky sum of the per-pixel numerator's depth-scaled count.
 
@@ -2147,7 +2147,7 @@ def _field_depth_weighted_mass(
     # Deferred import: catalog.py imports log_galaxy_measure_grid from this module.
     from darksirens.redshift.catalog import (
         SIGMA_EFF_FLOOR,
-        _row_log_kernel_norms,
+        _dispatch_log_kernel_norms,
     )
 
     z_flat = em_catalog.field_depth_z
@@ -2191,8 +2191,8 @@ def _field_depth_weighted_mass(
         sig = jnp.maximum(
             jnp.sqrt(dz_c ** 2 + survey.sigma_kde ** 2), SIGMA_EFF_FLOOR
         )
-        log_Z_full = _row_log_kernel_norms(z_c, sig, val_c, log_g_grid)
-        log_Z_depth = _row_log_kernel_norms(
+        log_Z_full = _dispatch_log_kernel_norms(z_c, sig, val_c, log_g_grid)
+        log_Z_depth = _dispatch_log_kernel_norms(
             z_c, sig, val_c, log_g_grid, z_hi=survey.z_depth
         )
         ratio = jnp.where(val_c, jnp.exp(log_Z_depth - log_Z_full), 0.0)
