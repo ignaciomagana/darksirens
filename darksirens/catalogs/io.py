@@ -61,6 +61,25 @@ def sort_survey_rows_by_z(zgals, dzgals, wgals, ngals, extras=()):
     return z_s, _take(dzgals), _take(wgals), ng, extras_s
 
 
+def read_survey_pixel_ids(survey_path):
+    """Global HEALPix id of each catalog row, or None for a full-sky catalog.
+
+    Pixel-subset catalogs store only the rows a run touches, so row index is 
+    no longer the global pixel id; this is the map back.
+    """
+    with h5py.File(survey_path, 'r') as f:
+        if 'pixel_ids' not in f:
+            return None
+        pixel_ids = np.asarray(f['pixel_ids'][()])
+        n_rows = f['zgals'].shape[0]
+    if pixel_ids.shape[0] != n_rows:
+        raise ValueError(
+            f"{survey_path}: {n_rows} catalog rows but {pixel_ids.shape[0]} "
+            "pixel_ids; they must match."
+        )
+    return pixel_ids
+
+
 def load_survey(survey_path, to_device=True, sort_rows_by_z=True):
     """Load the pixelated survey. ``to_device=False`` keeps the dense full-sky
     arrays on the host so callers can compact before transferring to device.

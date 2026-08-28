@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from darksirens.gw.samples import load_gw_samples, load_selection_samples
-from darksirens.catalogs.io import load_survey
+from darksirens.catalogs.io import load_survey, read_survey_pixel_ids
 
 from darksirens.redshift.grid import zgrid
 from darksirens.redshift.completion import (
@@ -24,6 +24,7 @@ from darksirens.core.model_kinds import BRIGHT_SIREN_MODELS, GALAXY_AWARE_MODELS
 from darksirens.catalogs.compact import (
     _catalog_memory_diagnostics,
     _compact_pixel_rows,
+    _rows_for_pixels,
 )
 from darksirens.likelihood.catalog_views import (
     field_depth_inputs_required,
@@ -43,6 +44,7 @@ def load_or_build_catalog_inputs(opts) -> dict:
     ngals = None
     apix = 0.0
     z_depth = None
+    catalog_pixel_ids = None
     counterpart_pixel = None
     counterpart_pixels = None
     counterpart_zs = None
@@ -95,6 +97,7 @@ def load_or_build_catalog_inputs(opts) -> dict:
         nside, ngals, zgals, dzgals, wgals, z_depth = load_survey(
             opts.survey_path, to_device=not drop_full_catalog
         )
+        catalog_pixel_ids = read_survey_pixel_ids(opts.survey_path)
         npix = hp.nside2npix(nside)
         apix = hp.nside2pixarea(nside)
     else:
@@ -112,6 +115,7 @@ def load_or_build_catalog_inputs(opts) -> dict:
         ngals=ngals,
         apix=apix,
         z_depth=z_depth,
+        catalog_pixel_ids=catalog_pixel_ids,
         counterpart_pixel=counterpart_pixel,
         counterpart_pixels=counterpart_pixels,
         counterpart_zs=counterpart_zs,
@@ -182,10 +186,12 @@ def load_multitracer_catalog_bundles(opts, gw_inputs) -> list:
         warn_per_pixel_clustering_cancellation(opts, ngals, label=str(path))
 
         union_pixels = unique_inference_pixels(pixels_pe, pixels_sel)
-        z_u = zgals[union_pixels]
-        dz_u = dzgals[union_pixels]
-        w_u = wgals[union_pixels]
-        n_u = ngals[union_pixels]
+        # Global ids -> row positions for a pixel-subset catalog
+        union_rows = _rows_for_pixels(union_pixels, read_survey_pixel_ids(path))
+        z_u = zgals[union_rows]
+        dz_u = dzgals[union_rows]
+        w_u = wgals[union_rows]
+        n_u = ngals[union_rows]
         s2u_pe = np.searchsorted(union_pixels, pixels_pe).astype(np.int32, copy=False)
         s2u_se = np.searchsorted(union_pixels, pixels_sel).astype(np.int32, copy=False)
 
@@ -953,10 +959,14 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
             union_pixels = unique_inference_pixels(
                 pixels_pe_np, pixels_sel_np, required_pixels=required_pixels
             )
-            zgals_pe = zgals_sel = zgals[union_pixels]
-            dzgals_pe = dzgals_sel = dzgals[union_pixels]
-            wgals_pe = wgals_sel = wgals[union_pixels]
-            ngals_pe = ngals_sel = ngals[union_pixels]
+            # A pixel-subset catalog renumbers its rows, so we need the new mapping
+            union_rows = _rows_for_pixels(
+                union_pixels, catalog_inputs.get("catalog_pixel_ids")
+            )
+            zgals_pe = zgals_sel = zgals[union_rows]
+            dzgals_pe = dzgals_sel = dzgals[union_rows]
+            wgals_pe = wgals_sel = wgals[union_rows]
+            ngals_pe = ngals_sel = ngals[union_rows]
             unique_pixels_pe = unique_pixels_sel = union_pixels
             sample_to_unique_pe = np.searchsorted(
                 union_pixels, pixels_pe_np
@@ -974,11 +984,14 @@ def compute_sky_pixels_and_vectors(opts, catalog_inputs, gw_inputs) -> dict:
             # bookkeeping: unique pixels, sample->row maps, and per-row counts
             # (shape validation, the CLI report, the diagnostics below).
             ngals_host = np.asarray(ngals)
+            _cat_pixel_ids = catalog_inputs.get("catalog_pixel_ids")
             unique_pixels_pe, sample_to_unique_pe, ngals_pe = _compact_pixel_rows(
-                pixels_pe, ngals_host, required_pixels=required_pixels
+                pixels_pe, ngals_host, required_pixels=required_pixels,
+                pixel_ids=_cat_pixel_ids,
             )
             unique_pixels_sel, sample_to_unique_sel, ngals_sel = _compact_pixel_rows(
-                pixels_sel, ngals_host, required_pixels=required_pixels
+                pixels_sel, ngals_host, required_pixels=required_pixels,
+                pixel_ids=_cat_pixel_ids,
             )
 
         catalog_memory = _catalog_memory_diagnostics(

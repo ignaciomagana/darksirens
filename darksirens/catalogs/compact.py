@@ -3,7 +3,32 @@
 import numpy as np
 
 
-def _compact_pixel_rows(pixels, ngals, required_pixels=None):
+def _rows_for_pixels(unique_pixels, pixel_ids):
+    """Map global HEALPix ids to catalog row positions.
+
+    Identity when ``pixel_ids`` is None (a full-sky catalog, where row index IS
+    the global pixel id).  Otherwise ``pixel_ids`` is sorted ascending, so a
+    searchsorted lookup suffices; a pixel absent from the subset throws a hard error
+    rather than a silently wrong row.
+    """
+    if pixel_ids is None:
+        return unique_pixels
+    pixel_ids = np.asarray(pixel_ids)
+    rows = np.searchsorted(pixel_ids, unique_pixels)
+    rows = np.clip(rows, 0, pixel_ids.shape[0] - 1)
+    missing = pixel_ids[rows] != unique_pixels
+    if missing.any():
+        raise ValueError(
+            f"{int(missing.sum())} required pixel(s) are absent from this "
+            "pixel-subset catalog (e.g. "
+            f"{unique_pixels[missing][:5].tolist()}); it was cut for a "
+            "different gw/selection pair — recut it with "
+            "py_scripts/precompact_survey.py."
+        )
+    return rows.astype(np.int32, copy=False)
+
+
+def _compact_pixel_rows(pixels, ngals, required_pixels=None, pixel_ids=None):
     """Unique-pixel rows, sample→row lookup, and per-row counts — no galaxy tables.
 
     ``required_pixels`` are included in the row set even if no sample falls in
@@ -11,6 +36,9 @@ def _compact_pixel_rows(pixels, ngals, required_pixels=None):
     retained-full-catalog path, where the likelihood factory gathers the union
     galaxy tables itself and only this host-side bookkeeping (shape validation,
     the CLI report, the memory diagnostics) is needed at load time.
+
+    ``pixel_ids`` maps row -> global HEALPix id for a pixel-subset catalog;
+    ``None`` (the default, and every full-sky caller) is the historical path.
     """
     pixels = np.asarray(pixels, dtype=np.int32)
     if required_pixels is None:
@@ -21,24 +49,31 @@ def _compact_pixel_rows(pixels, ngals, required_pixels=None):
         sample_to_unique_idx = np.searchsorted(unique_pixels, pixels)
     unique_pixels = unique_pixels.astype(np.int32, copy=False)
     sample_to_unique_idx = sample_to_unique_idx.astype(np.int32, copy=False)
-    return unique_pixels, sample_to_unique_idx, np.asarray(ngals)[unique_pixels]
+    rows = _rows_for_pixels(unique_pixels, pixel_ids)
+    return unique_pixels, sample_to_unique_idx, np.asarray(ngals)[rows]
 
 
-def _compact_catalog_for_pixels(pixels, zgals, dzgals, wgals, ngals, required_pixels=None):
+def _compact_catalog_for_pixels(pixels, zgals, dzgals, wgals, ngals,
+                                required_pixels=None, pixel_ids=None):
     """Return compact catalog rows and sample→row lookup for pixels.
 
     ``required_pixels`` are included in the compact catalog even if no sample
     falls in them.  The sample-to-row lookup still covers only ``pixels``.
+
+    ``pixel_ids`` names the global HEALPix id of each catalog row for a
+    pixel-subset catalog; rows are gathered through it instead of by global id.
+    ``None`` means row index == global id (a full-sky catalog).
     """
     unique_pixels, sample_to_unique_idx, ngals_rows = _compact_pixel_rows(
-        pixels, ngals, required_pixels=required_pixels
+        pixels, ngals, required_pixels=required_pixels, pixel_ids=pixel_ids
     )
+    rows = _rows_for_pixels(unique_pixels, pixel_ids)
     return (
         unique_pixels,
         sample_to_unique_idx,
-        zgals[unique_pixels],
-        dzgals[unique_pixels],
-        wgals[unique_pixels],
+        zgals[rows],
+        dzgals[rows],
+        wgals[rows],
         ngals_rows,
     )
 
