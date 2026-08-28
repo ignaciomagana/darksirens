@@ -601,6 +601,11 @@ def darksiren_log_likelihood(
     # (per-event reweighting variances + N_obs^2/Neff_sel); traced on purpose
     # (arithmetic only) so sensitivity scans do not recompile.
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    # GW detection horizon: P_det(z) = 0 for z > z_horizon, applied ONLY to the
+    # selection integral (never the per-event PE numerator).  Putting it on the
+    # numerator too makes the per-event support cosmology-dependent and drives
+    # the H0 posterior into a sliver at the catalog's hard z edge.
+    z_horizon: float = float("inf"),
     # --- K-catalog mixture (dark_sirens only) -------------------------------
     # ``n_catalogs`` is static (jit specializes on the pytree structure); the
     # mixture operands are TRACED.  All default to the single-catalog values, so
@@ -1105,7 +1110,11 @@ def darksiren_log_likelihood(
                     catalogs, log_p_pop, _selection_prior,
                     spin=spin, dL_grid=_dL_grid,
                 )
-            return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+            # Detection horizon P_det=0 for z>z_hor
+            within_horizon = z_of_dL_precomputed(dL_c, _dL_grid) <= z_horizon
+            return jnp.where(
+                supported & within_horizon & jnp.isfinite(ldw), ldw, -jnp.inf
+            )
 
         def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None):
             """PE weight in the same ``(m1det, q, dL)`` variables as selection."""
@@ -1620,6 +1629,7 @@ def darksiren_log_likelihood(
             A_obs = tuple(o[0] for o in obs)
             idx = tuple(o[1] for o in obs)
             t = tuple(o[2] for o in obs)
+            supported = supported & (z_c <= z_horizon)
             pixk = tuple(_pix_col(pix_all, k) for k in range(n_catalogs))
             fitk, fpk = _latent_row_gather(pixk, catalogs_sel_all)
             # _sky_weight clamps dL internally, matching _batch_lse (which

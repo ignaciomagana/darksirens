@@ -1212,6 +1212,8 @@ def _make_mixture_likelihood(
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
     max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
+    z_horizon_opt = getattr(opts, "z_horizon", None)
+    z_horizon = float("inf") if z_horizon_opt is None else float(z_horizon_opt)
     catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
 
     def _check_bundle_marks(names_k, marks_k, ngals_k, field_k, *, where):
@@ -1652,6 +1654,7 @@ def _make_mixture_likelihood(
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
+            z_horizon=z_horizon,
             lss_marginalize=bool(getattr(opts, "lss_marginalize", False)),
             n_catalogs=n_catalogs,
             mixture_surveys=mixture_surveys,
@@ -1701,6 +1704,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     materialize_redshift_prior_state = _resolve_redshift_prior_materialization(opts)
     selection_neff_soft_guard = bool(getattr(opts, "selection_neff_soft_guard", False))
     max_likelihood_variance = float(getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE))
+    z_horizon_opt = getattr(opts, "z_horizon", None)
+    z_horizon = float("inf") if z_horizon_opt is None else float(z_horizon_opt)
     catalog_sky_weighting = getattr(opts, "catalog_sky_weighting", "conditional")
 
     # Weak-lensing magnification backend (resolved up front, before the heavy
@@ -2259,6 +2264,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 materialize_redshift_prior_state=materialize_redshift_prior_state,
                 selection_neff_soft_guard=selection_neff_soft_guard,
                 max_likelihood_variance=max_likelihood_variance,
+                z_horizon=z_horizon,
                 catalog_sky_weighting=catalog_sky_weighting,
                 share_prior_state_by_catalog=share_prior_state_by_catalog,
             )
@@ -2297,6 +2303,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             materialize_redshift_prior_state=materialize_redshift_prior_state,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
+            z_horizon=z_horizon,
             catalog_sky_weighting=catalog_sky_weighting,
             share_prior_state_by_catalog=share_prior_state_by_catalog,
         )

@@ -1400,6 +1400,11 @@ def build_parser():
               "GWTC-4.0/5.0 population-analysis criterion, default 1.0). Proposals "
               "exceeding it are guarded (hard -inf or the soft wall per "
               "--selection_neff_guard). The Vitale 5 N_obs mean floor always applies."))
+    g.add_argument(
+        "--z_horizon", type=float, default=None, metavar="Z",
+        help=("GW detection horizon: P_det(z) = 0 for z > Z, applied ONLY to the "
+              "selection integral (never the per-event PE numerator). Must be > 0. "
+              "Default is infinity."))
     g.add_argument("--prior_overrides", default=None, metavar="JSON")
     g.add_argument("--fixed_parameter_values", default=None, metavar="JSON")
     g.add_argument("--counterpart", nargs="+", metavar="RA_DEC_Z",
@@ -2809,6 +2814,8 @@ def _validate_run_config(opts):
             "Exactly one of --gwselection_path (injection file) or "
             "--pdet_flow_path (P_det emulator) is required."
         )
+    if getattr(opts, "z_horizon", None) is not None and opts.z_horizon <= 0.0:
+        _fatal(f"--z_horizon must be > 0; got {opts.z_horizon}.")
     if opts.pdet_flow_path:
         # Orthogonal to the event source: valid with --gw_path or
         # --gw_flows_path alike.
