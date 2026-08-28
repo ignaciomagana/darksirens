@@ -1523,6 +1523,27 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
     upper = np.asarray(upper, dtype=float)
     joint_constraints = list(joint_constraints or [])
 
+    if prior_kinds is not None:
+        # Beta(1, 1) IS the uniform distribution, and its truncated PPF on
+        # [lo, hi] within [0, 1] is the same affine map the uniform kind uses
+        # (identical up to IEEE rounding of the algebraically-equal
+        # expressions).  Normalising the kind here matters far beyond
+        # cosmetics: the K = 1 catalog stick is ("beta", 1, 1)
+        # (kind_map["fcat_1"] above), and ONE non-uniform kind pushes the
+        # whole space onto the ~40-op mixed-kind device graph -- measured
+        # ~18 ms per dynesty proposal eager (the H100 rejects the jit on
+        # bit-identity, see _make_dynesty_ptform) against ~1 us for the
+        # host-native numpy affine map this rewrite re-enables.  That was
+        # ~85% of a 16-dim dynesty run's wall time, spent transforming a
+        # parameter that is uniform by definition.
+        prior_kinds = [
+            ("uniform", None, None)
+            if (k[0] == "beta" and (k[2] is None or float(k[2]) == 1.0)
+                and 0.0 <= lo and hi <= 1.0)
+            else k
+            for k, lo, hi in zip(prior_kinds, lower, upper)
+        ]
+
     if joint_constraints:
         import jax.numpy as _jnp
 
@@ -1619,28 +1640,40 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
         x = ndtri(jnp.clip(Phi_a + u * (Phi_b - Phi_a), 1e-12, 1.0 - 1e-12))
         return mu + sg * x
 
+    has_normal = any(k == "normal" for k in kinds)
+    has_lognorm = any(k == "lognormal" for k in kinds)
+    has_beta = any(k == "beta" for k in kinds)
+
     def prior_transform(u):
+        # ``kinds`` is static Python, so absent families are skipped at trace
+        # time: the selected values are identical (each where only replaces
+        # lanes of its own kind) but a space with, say, only beta sticks no
+        # longer evaluates two truncated-normal PPFs (ndtr + ndtri) per call.
         u = _apply_joint(jnp.asarray(u))
-        uniform = u * (hi_j - lo_j) + lo_j
-        # normal: truncated to [lo, hi]
-        normal = _trunc_normal_ppf(u, lo_j, hi_j, loc, scale)
-        # lognormal: exp of a normal in log-space truncated to [log lo, log hi]
-        log_lo = jnp.log(jnp.clip(lo_j, 1e-300, None))
-        log_hi = jnp.log(jnp.clip(hi_j, 1e-300, None))
-        lognormal = jnp.exp(_trunc_normal_ppf(u, log_lo, log_hi, loc, scale))
-        # Beta(1, b) closed-form PPF truncated to [lo, hi]; scale defaults to 1
-        # for non-beta params so this expression is finite everywhere.  The
-        # bounds are clipped into [0, 1) so masked-out (non-beta) lanes with
-        # arbitrary physical bounds cannot produce NaNs.
-        b_lo = jnp.clip(lo_j, 0.0, 1.0 - 1e-12)
-        b_hi = jnp.clip(hi_j, 0.0, 1.0)
-        F_lo = 1.0 - (1.0 - b_lo) ** scale
-        F_hi = 1.0 - (1.0 - b_hi) ** scale
-        u_beta = F_lo + u * (F_hi - F_lo)
-        beta = 1.0 - (1.0 - u_beta) ** (1.0 / scale)
-        out = jnp.where(is_normal, normal, uniform)
-        out = jnp.where(is_lognorm, lognormal, out)
-        out = jnp.where(is_beta, beta, out)
+        out = u * (hi_j - lo_j) + lo_j
+        if has_normal:
+            # normal: truncated to [lo, hi]
+            out = jnp.where(
+                is_normal, _trunc_normal_ppf(u, lo_j, hi_j, loc, scale), out)
+        if has_lognorm:
+            # lognormal: exp of a normal in log-space truncated to [log lo, log hi]
+            log_lo = jnp.log(jnp.clip(lo_j, 1e-300, None))
+            log_hi = jnp.log(jnp.clip(hi_j, 1e-300, None))
+            out = jnp.where(
+                is_lognorm,
+                jnp.exp(_trunc_normal_ppf(u, log_lo, log_hi, loc, scale)), out)
+        if has_beta:
+            # Beta(1, b) closed-form PPF truncated to [lo, hi]; scale defaults
+            # to 1 for non-beta params so this expression is finite everywhere.
+            # The bounds are clipped into [0, 1) so masked-out (non-beta) lanes
+            # with arbitrary physical bounds cannot produce NaNs.
+            b_lo = jnp.clip(lo_j, 0.0, 1.0 - 1e-12)
+            b_hi = jnp.clip(hi_j, 0.0, 1.0)
+            F_lo = 1.0 - (1.0 - b_lo) ** scale
+            F_hi = 1.0 - (1.0 - b_hi) ** scale
+            u_beta = F_lo + u * (F_hi - F_lo)
+            beta = 1.0 - (1.0 - u_beta) ** (1.0 / scale)
+            out = jnp.where(is_beta, beta, out)
         return out
 
     # ~40 device ops (two truncated-normal PPFs, the Beta PPF, three selects).
