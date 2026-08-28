@@ -21,7 +21,9 @@ jax.config.update("jax_enable_x64", True)
 # module reads the same variable so the two grids stay consistent); the node
 # count scales with the log range to preserve low-z density.
 zMax: float = float(os.environ.get("DARKSIRENS_ZMAX", 5.0))
-_ZGRID_NODES = max(1000, int(round(1000 * math.log(zMax + 1.0) / math.log(6.0))))
+_ZGRID_NODES = int(os.environ.get("DARKSIRENS_NZ", 0)) or max(1000, int(round(1000 * math.log(zMax + 1.0) / math.log(6.0))))
+if _ZGRID_NODES < 2:
+    raise ValueError(f"DARKSIRENS_NZ must be >= 2, got {_ZGRID_NODES}")
 zgrid = jnp.expm1(jnp.linspace(jnp.log(1.0), jnp.log(zMax + 1.0), _ZGRID_NODES))
 # The cosmology module tabulates ITS grid with numpy's expm1/log while the
 # grid above uses jnp's (XLA libm): at some DARKSIRENS_ZMAX values the two
