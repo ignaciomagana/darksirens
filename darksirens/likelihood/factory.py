@@ -21,9 +21,14 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from darksirens.redshift.catalog import attest_rows_sorted_for_windowing
+from darksirens.redshift.catalog import (
+    attest_rows_sorted_for_windowing,
+    build_pinned_kernel_quadrature,
+    KERNEL_PIN_H0_REF,
+)
 from darksirens.redshift.completion import (
     bound_smoothing_operator,
+    build_pinned_field_observed_total,
     build_pixel_kde_cache,
     smoothing_operator as completion_smoothing_operator,
 )
@@ -1003,6 +1008,127 @@ def _jit_likelihood_body(body, operands):
     return likelihood
 
 
+# ------------------------------------------------------------
+# Build-time H0 pin of the catalog quadratures
+# ------------------------------------------------------------
+#: Labels whose SAMPLING breaks the H0 pin's premise.  ``Om0``/``w0``/``wa``
+#: and ``delta`` because ``g(z) = dV_c/dz (1+z)^delta`` is then no longer
+#: ``(H0_ref/H0)^3 g(z; H0_ref)``; ``sigma_kde`` because the Gauss-Legendre
+#: nodes stop being run constants.  ``log10n0``, ``b_miss``, ``M0hat``,
+#: ``sigma_M`` and the population block are correctly absent: none of them
+#: enters ``g(z)`` or ``sigma_eff``.  ``z_depth`` is absent because the
+#: parameter machinery never samples it (it is a per-catalog structural
+#: constant resolved before the decoder) -- and the in-graph probe, which
+#: rebuilds under the LIVE ``z_depth``, would catch it if that ever changed.
+_KERNEL_PIN_BLOCKING_LABELS = ("Om0", "w0", "wa", "delta", "sigma_kde")
+
+
+def kernel_pin_admissible(sampled_labels, universe_model, mark_model) -> bool:
+    """Is the galaxy measure EXACTLY H0-separable for this run's SAMPLED set?
+
+    Reads the sampled LABELS, never their values: a parameter that is fixed is
+    absent from ``sampled_labels`` (``resolve_parameter_values`` puts it in
+    ``fixed_parameter_values`` instead), which is precisely the condition the
+    pin needs.  Per-catalog ``_c{k}`` variants block the same way.  Restricted
+    to the plain galaxy-count ``dark_sirens`` host model: the marked kernels go
+    through ``marked_catalog_kernel_state`` (a different weight normalisation,
+    so the pinned ``log_kw`` is not theirs), and ``dark_sirens_complete``'s
+    kernels are built with no depth and are cheap anyway.
+    """
+    labels = {str(x) for x in (sampled_labels or ())}
+    if universe_model != "dark_sirens":
+        return False
+    if mark_model not in (None, "none"):
+        return False
+    return not any(
+        base in labels or any(x.startswith(base + "_c") for x in labels)
+        for base in _KERNEL_PIN_BLOCKING_LABELS
+    )
+
+
+def _reference_params(parameter_decoder, n_catalogs: int):
+    """``(cosmo_ref, surveys)`` for the pinned build, at ``KERNEL_PIN_H0_REF``.
+
+    Decoded through the run's OWN decoder, so the pinned build sees exactly the
+    ``delta`` / ``sigma_kde`` / ``z_depth`` the live trace will.  The coordinate
+    is immaterial: the pin is admissible only when nothing the kernel state
+    reads is sampled, so every field consumed below comes from
+    ``fixed_parameter_values`` or the registry fiducial regardless of it -- and
+    the in-graph probe re-verifies that on every proposal anyway.
+    """
+    coord = jnp.full((len(parameter_decoder.sampled_labels),), 0.5)
+    if n_catalogs >= 2:
+        cosmo, surveys = parameter_decoder.decode_mixture(coord)[:2]
+    else:
+        cosmo, survey = parameter_decoder.decode(coord)[:2]
+        surveys = (survey,)
+    return cosmo._replace(H0=jnp.asarray(KERNEL_PIN_H0_REF)), tuple(surveys)
+
+
+def _same_pin_inputs(cat_a, cat_b) -> bool:
+    """Do two views share every array the pinned quadratures are built from?"""
+    return all(
+        getattr(cat_a, name) is getattr(cat_b, name)
+        for name in ("zgals", "dzgals", "wgals", "ngals",
+                     "field_depth_z", "field_depth_dz", "field_depth_c")
+    )
+
+
+def _build_pins(cosmo_ref, survey, catalog_sky_weighting, cat):
+    """``(pinned_kernels, field_depth_total_pinned)`` for one catalog view."""
+    kernels = None
+    if cat.zgals is not None and cat.ngals is not None:
+        kernels = build_pinned_kernel_quadrature(
+            cosmo_ref, survey, cat, z_depth=survey.z_depth)
+    field_total = None
+    # The survey-global observed total is theta-dependent ONLY under a depth
+    # (without one it is already the frozen ``field_N_obs_total``), and only the
+    # field convention ever forms it.
+    if (catalog_sky_weighting == "field" and survey.z_depth is not None
+            and cat.field_depth_z is not None
+            and cat.field_depth_dz is not None
+            and cat.field_depth_c is not None):
+        field_total = build_pinned_field_observed_total(cosmo_ref, survey, cat)
+    return kernels, field_total
+
+
+def _install_kernel_pin(parameter_decoder, universe_model, mark_model,
+                        catalog_sky_weighting, catalogs_pe, catalogs_sel):
+    """Attach the build-time H0 pin to every eligible catalog view.
+
+    Returns ``(catalogs_pe, catalogs_sel)``, unchanged when the run's sampled
+    set makes the pin inadmissible (:func:`kernel_pin_admissible`).  The
+    quadratures are evaluated HERE, once, on the concrete arrays; per proposal
+    the traced graph replaces them with the scalar shift ``3 ln(H0/H0_ref)`` (the
+    kernel state) and a constant (the survey-global observed total), each behind
+    its own in-graph probe.
+
+    A union bundle's PE and selection views share every row array, so they get
+    the SAME pin objects -- which is also what keeps
+    ``can_share_redshift_prior_state`` true (it compares leaves by identity, and
+    both pins are now compared leaves).  Views with different rows each get
+    their own.
+    """
+    if not kernel_pin_admissible(parameter_decoder.sampled_labels,
+                                 universe_model, mark_model):
+        return catalogs_pe, catalogs_sel
+
+    cosmo_ref, surveys = _reference_params(parameter_decoder, len(catalogs_pe))
+    out_pe, out_sel = [], []
+    for k, (cat_pe, cat_sel) in enumerate(zip(catalogs_pe, catalogs_sel)):
+        survey = surveys[k] if k < len(surveys) else surveys[-1]
+        pins_pe = _build_pins(cosmo_ref, survey, catalog_sky_weighting, cat_pe)
+        pins_sel = (
+            pins_pe if _same_pin_inputs(cat_pe, cat_sel)
+            else _build_pins(cosmo_ref, survey, catalog_sky_weighting, cat_sel)
+        )
+        out_pe.append(cat_pe._replace(
+            pinned_kernels=pins_pe[0], field_depth_total_pinned=pins_pe[1]))
+        out_sel.append(cat_sel._replace(
+            pinned_kernels=pins_sel[0], field_depth_total_pinned=pins_sel[1]))
+    return tuple(out_pe), tuple(out_sel)
+
+
 def _make_mixture_likelihood(
     opts,
     data: dict,
@@ -1421,6 +1547,15 @@ def _make_mixture_likelihood(
     )
     if sel_batch_size is not None:
         gw_sel, _ = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
+
+    # Build-time H0 pin of the catalog quadratures (no-op unless the run's
+    # sampled set makes the galaxy measure exactly H0-separable).  Installed
+    # BEFORE the sharing verdict: both pins are compared leaves, so the two
+    # views must carry the same objects for a union bundle to keep sharing.
+    em_catalogs_pe, em_catalogs_sel = _install_kernel_pin(
+        parameter_decoder, universe_model, mark_model, catalog_sky_weighting,
+        tuple(em_catalogs_pe), tuple(em_catalogs_sel),
+    )
 
     em_catalog_pe_0 = em_catalogs_pe[0]
     em_catalog_sel_0 = em_catalogs_sel[0]
@@ -2008,6 +2143,14 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         # catalog carries (aliased, not re-barriered), so the prior-state
         # sharing verdict still sees identical leaves.
         **latent_leaves_sel,
+    )
+    # Build-time H0 pin of the catalog quadratures (no-op unless the run's
+    # sampled set makes the galaxy measure exactly H0-separable).  Installed
+    # BEFORE the sharing verdict: both pins are compared leaves, so the two
+    # views must carry the same objects for the union path to keep sharing.
+    (em_catalog_pe,), (em_catalog_sel,) = _install_kernel_pin(
+        parameter_decoder, universe_model, mark_model, catalog_sky_weighting,
+        (em_catalog_pe,), (em_catalog_sel,),
     )
     share_prior_state_by_catalog = redshift_prior_state_sharing(
         universe_model, (em_catalog_pe,), (em_catalog_sel,)

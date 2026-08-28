@@ -39,6 +39,14 @@ proposal via ``catalog_kernel_state`` and evaluate per sample with
 ``eval_log_catalog_prior_state``; the scalar ``log_catalog_prior`` keeps
 the historical signature for the complete-catalog and bright-siren
 models and for tests.
+
+When Om0, w0, wa, delta and sigma_kde are all FIXED — the production
+configuration — the quadrature is not per-proposal work at all: g(z)
+is then exactly (H0_ref/H0)^3 g(z; H0_ref), so Z_i and log_kw are a
+build-time constant plus the scalar shift 3 ln(H0/H0_ref) and log p_cat
+carries no H0 information.  ``PinnedKernelQuadrature`` is that constant,
+built once by the likelihood factory and re-verified in the graph on
+every proposal.
 """
 
 from __future__ import annotations
@@ -56,7 +64,7 @@ from typing import NamedTuple, Any
 from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog
 
 from darksirens.redshift.grid import log_interp_zgrid, zgrid
-from darksirens.utils.cosmology import threads_distance_table
+from darksirens.utils.cosmology import H0Planck, threads_distance_table
 from .completion import log_galaxy_measure_grid
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
@@ -764,6 +772,187 @@ class CatalogKernelState(NamedTuple):
     #: turn into a finite ~-1e30 value.  ``None`` (a hand-built state) keeps
     #: plain logsumexp semantics.
     row_empty: Any = None
+    #: Scalar boolean verdict of the H0-pin probe (see
+    #: :class:`PinnedKernelQuadrature`), or ``None`` for an unpinned state.
+    #: Consumed by :func:`kernel_pin_poison` at the prior's NORMALIZER seam,
+    #: NOT here: ``log_kw``/``log_p_cat`` are downstream of
+    #: ``nan_to_num(nan=-inf)`` and of several ``where(x > 0, ..., -inf)``
+    #: amplitude filters, any of which turns a poisoned value into "this pixel
+    #: has no catalog hosts" -- a plausible number, which is exactly what the
+    #: probe exists to prevent.
+    pin_ok: Any = None
+
+
+# ------------------------------------------------------------
+# H0-pinned kernel quadrature
+# ------------------------------------------------------------
+#: Reference H0 [km/s/Mpc] the pinned quadrature is evaluated at.  The
+#: comoving-distance table's own scale, so the reference build is the one
+#: ``r_of_z`` is tabulated at (``r(z; H0) = r_tab(z) * H0Planck / H0``).
+KERNEL_PIN_H0_REF: float = float(H0Planck)
+
+#: Rows rebuilt from the LIVE proposal on every pinned state build.  8 rows of
+#: 49,152 is 0.016% of the build the pin removes.
+KERNEL_PIN_PROBE_ROWS: int = 8
+
+#: Absolute tolerance on ``|log_kw_live - (log_kw_ref + shift)|`` over the probe
+#: rows.  MEASURED residual on real DESI nside-64 rows over the full sampled
+#: prior H0 in [20, 140] is 1.07e-14 (f64 rounding of an O(10) quantity); the
+#: smallest premise violation measured is 3.9e-2 (Om0 0.3089 -> 0.35).  1e-9
+#: sits five orders above the noise and seven below the signal.
+KERNEL_PIN_TOL: float = 1e-9
+
+#: Values at or below this are the ``-1e30`` padding sentinel, not a kernel
+#: weight, and are excluded from the probe comparison.
+_KERNEL_PIN_SENTINEL_CUT: float = -1e29
+
+
+class PinnedKernelQuadrature(NamedTuple):
+    """``catalog_kernel_state`` evaluated ONCE at ``H0_ref``, plus its probe.
+
+    Valid iff the galaxy measure is EXACTLY H0-separable and the kernel widths
+    are run constants:
+
+        r(z; H0)  = r_tab(z; Om0, w0, wa) * (H0Planck / H0)  [cosmology.r_of_z]
+        dV_c/dz   = c r^2 / (H0 E)                           [cosmology.dV_of_z]
+        g(z)      = dV_c/dz * (1 + z)^delta
+                  = (H0_ref / H0)^3 * g(z; H0_ref)    iff Om0, w0, wa, delta FIXED
+        sig_eff_i = max(sqrt(dz_i^2 + sigma_kde^2), 1e-4)    iff sigma_kde FIXED
+
+    The Gauss-Legendre nodes ``z_ik = clip(z_i + sig_i Phi^-1(a_i + (b_i - a_i)
+    x_k), 0, z_hi)`` then carry NO theta at all, and the only theta-dependent
+    factor in ``Z_i = int N(z; z_i, sig_i) g(z) dz`` is the scalar
+    ``(H0_ref / H0)^3``.  Hence, EXACTLY:
+
+        log Z_i(H0)        = log Z_i(H0_ref) - 3 ln(H0 / H0_ref)
+        log_kw(H0)         = log_kw(H0_ref)  + 3 ln(H0 / H0_ref)
+        log_depth_mass(H0) = log_depth_mass(H0_ref)      (the shifts cancel in
+                                                          Sum_i kw_i Z_i^depth)
+
+    and ``log p_cat`` is H0-INDEPENDENT: the ``+3 ln h`` on ``log_kw`` cancels
+    the ``-3 ln h`` the evaluator's ``log_g_front`` carries.  MEASURED on real
+    DESI nside-64 rows over the full sampled prior H0 in [20, 140] at
+    ``H0_ref = 67.74``: ``max |log_kw(H0) - 3 ln(H0/H0_ref) - log_kw(H0_ref)| =
+    1.07e-14``, ``max |dlog_depth_mass| = 1.78e-15``, ``max |dlog p_cat| =
+    7.11e-15``.  NEGATIVE controls: Om0 0.3089 -> 0.35 makes the shift
+    row-dependent with spread 3.9e-2; sigma_kde 0.003 -> 0.03 moves ``log_kw``
+    by up to 1.85.
+
+    SELF-VERIFYING, for exactly the reason ``rows_sorted`` is.  The decision to
+    emit this branch is a build-time Python test on the run's SAMPLED-LABEL set
+    (:func:`darksirens.likelihood.factory.kernel_pin_admissible`), and while the
+    pin's PRESENCE is pytree structure -- part of every jit cache key -- the
+    premise it was built under is not, so a graph compiled for one build could
+    be replayed on a pin built under a violated premise.  ``probe_rows`` are
+    therefore rebuilt from THIS proposal's ``log_g_grid``, ``sigma_kde`` and
+    ``z_depth`` by the same ``_row_kernel_state`` the pin came from, and must
+    reproduce ``log_kw[probe_rows]`` to ``KERNEL_PIN_TOL`` -- the array actually
+    served, not a stored copy of it, so a corrupted pin fails the probe as
+    loudly as a violated premise.  The verdict rides on
+    ``CatalogKernelState.pin_ok``; see :func:`kernel_pin_poison` for where it
+    is spent.
+
+    ``log_kw`` is the SANITIZED array (padding at ``-1e30``): ``-1e30 + shift``
+    is still exactly ``-1e30`` in f64, so padding stays inert and the probe
+    excludes those slots (the raw ``_row_kernel_state`` output has ``-inf``
+    there).
+    """
+    H0_ref: Any                     # scalar, the reference the pin was built at
+    log_kw: jnp.ndarray             # (N_rows, N_max) at H0_ref, depth-renormalised
+    sig_eff: jnp.ndarray            # (N_rows, N_max)  theta-invariant
+    log_sig_eff: jnp.ndarray        # (N_rows, N_max)  theta-invariant
+    sig_eff_row_max: jnp.ndarray    # (N_rows,)        theta-invariant
+    log_depth_mass: Any             # (N_rows,)        H0-invariant
+    row_empty: jnp.ndarray          # (N_rows,)        theta-invariant
+    probe_rows: jnp.ndarray         # (P,) int32 rows rebuilt every proposal
+
+
+def _spread_probe_rows(zgals, ngals, n_probe: int) -> jnp.ndarray:
+    """``n_probe`` OCCUPIED catalog rows spread evenly over the view.
+
+    Host-side (the pin is built from concrete arrays).  Occupied rows are what
+    the probe can actually compare: an all-padding row's live ``log_kw`` is
+    ``-inf`` everywhere, which the sentinel mask drops, so probing empty rows
+    would leave the guard vacuously true.
+    """
+    n_rows = int(np.asarray(zgals).shape[0])
+    occ = (np.arange(n_rows) if ngals is None
+           else np.flatnonzero(np.asarray(ngals) > 0))
+    if occ.size == 0:
+        occ = np.arange(n_rows)
+    n_probe = max(1, min(int(n_probe), int(occ.size)))
+    sel = np.unique(np.linspace(0, occ.size - 1, n_probe).round().astype(np.int64))
+    return jnp.asarray(occ[sel].astype(np.int32))
+
+
+def _pinned_kernel_state(cosmo, survey, em_catalog, pinned, log_g_grid, z_depth):
+    """This proposal's kernel state from the pin: one scalar shift + the probe.
+
+    The whole per-galaxy Gauss-Legendre quadrature was done once at
+    ``pinned.H0_ref``; this proposal only adds ``3 ln(H0/H0_ref)`` to
+    ``log_kw``.  ``sig_eff`` / ``log_sig_eff`` / ``sig_eff_row_max`` /
+    ``row_empty`` carry no theta and ``log_depth_mass`` is H0-invariant, so all
+    five are returned unchanged.  ``log_g_grid`` is the LIVE proposal's grid --
+    the evaluator's front factor reads it, and the H0 dependence only cancels in
+    the product with ``log_kw`` -- and ``rows_sorted`` is likewise rebuilt from
+    the arrays THIS graph receives (the pin is built from concrete arrays, where
+    that guard is a Python verdict and no node is emitted).
+    """
+    shift = 3.0 * (jnp.log(cosmo.H0) - jnp.log(pinned.H0_ref))
+    pr = pinned.probe_rows
+    ngals = em_catalog.ngals
+    if ngals is not None:
+        probe_kw, _, _ = _map_rows(
+            lambda zs, dzs, ws, ng: _row_kernel_state(
+                zs, dzs, ws, ng, survey.sigma_kde, log_g_grid, False, z_depth),
+            (em_catalog.zgals[pr], em_catalog.dzgals[pr],
+             em_catalog.wgals[pr], ngals[pr]),
+        )
+    else:
+        probe_kw, _, _ = _map_rows(
+            lambda zs, dzs, ws: _row_kernel_state(
+                zs, dzs, ws, None, survey.sigma_kde, log_g_grid, False, z_depth),
+            (em_catalog.zgals[pr], em_catalog.dzgals[pr], em_catalog.wgals[pr]),
+        )
+    ref_kw = pinned.log_kw[pr]
+    want = ref_kw + shift
+    # Compare only slots that carry a kernel weight in BOTH: the pin is
+    # sanitized (padding -1e30) and the live rebuild is raw (padding -inf).
+    compared = jnp.isfinite(probe_kw) & (ref_kw > _KERNEL_PIN_SENTINEL_CUT)
+    ok = jnp.all(
+        jnp.where(compared, jnp.abs(probe_kw - want), 0.0) <= KERNEL_PIN_TOL
+    )
+    return CatalogKernelState(
+        log_g_grid=log_g_grid, log_kw=pinned.log_kw + shift,
+        sig_eff=pinned.sig_eff, log_sig_eff=pinned.log_sig_eff,
+        volume_weighted=False, z_depth=z_depth,
+        log_depth_mass=pinned.log_depth_mass,
+        sig_eff_row_max=pinned.sig_eff_row_max,
+        rows_sorted=_resolve_rows_sorted_guard(em_catalog.zgals, em_catalog.ngals),
+        row_empty=pinned.row_empty,
+        pin_ok=ok,
+    )
+
+
+def kernel_pin_poison(state):
+    """``NaN`` when ``state``'s H0 pin failed its probe, ``None`` when unpinned.
+
+    Add it to the prior's NORMALIZER (``log_Z`` / ``log_Z_global``), which is the
+    first expression downstream of the kernels with no NaN filter in front of it:
+    ``_eval_dark_scalar`` runs ``nan_to_num(log_p_cat, nan=-inf)`` and every
+    amplitude between the state and the likelihood passes a ``where(x > 0, ...,
+    -inf)``, so a NaN placed on ``log_kw``, ``log_depth_mass`` or ``N_obs`` is
+    silently rewritten as "this pixel has no catalog hosts" and the run returns a
+    plausible wrong number.  Through the normalizer the poison reaches every
+    sample's log prior as NaN, and the run's log-likelihood as ``-inf`` (the
+    likelihood core's final ``where(isfinite(ll), ll, -inf)``).  ``None``
+    (unpinned) means the caller emits no op at all, so the legacy path stays
+    bit-identical.
+    """
+    ok = getattr(state, "pin_ok", None)
+    if ok is None:
+        return None
+    return jnp.where(ok, 0.0, jnp.nan)
 
 
 def catalog_kernel_state(
@@ -773,6 +962,7 @@ def catalog_kernel_state(
     log_g_grid: jnp.ndarray | None = None,
     volume_weighted: bool = False,
     z_depth=None,
+    pinned: "PinnedKernelQuadrature | None" = None,
 ) -> CatalogKernelState:
     """Precompute per-galaxy kernel quantities once per parameter proposal.
 
@@ -782,9 +972,16 @@ def catalog_kernel_state(
     state so the evaluator zeroes ``p_cat`` there.  It is threaded ONLY from the
     incomplete ``dark_sirens`` prior; the complete-catalog and bright-siren paths
     pass ``None`` (they model the full universe, so there is no depth to bound).
+
+    ``pinned`` short-circuits the whole quadrature to the closed-form H0 shift
+    (:class:`PinnedKernelQuadrature`).  ``volume_weighted`` kernels never form
+    ``Z_i`` at all, so the pin is inert for them.
     """
     if log_g_grid is None:
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
+    if pinned is not None and not volume_weighted:
+        return _pinned_kernel_state(
+            cosmo, survey, em_catalog, pinned, log_g_grid, z_depth)
     zgals, dzgals, wgals = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals
     ngals = em_catalog.ngals
 
@@ -815,6 +1012,52 @@ def catalog_kernel_state(
         sig_eff_row_max=jnp.max(sig_eff, axis=1),
         rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
         row_empty=row_empty,
+    )
+
+
+def build_pinned_kernel_quadrature(
+    cosmo: CosmoParams,
+    survey: SurveyParams,
+    em_catalog: EMCatalog,
+    z_depth=None,
+    n_probe: int = KERNEL_PIN_PROBE_ROWS,
+) -> PinnedKernelQuadrature:
+    """Evaluate the kernel state ONCE at ``KERNEL_PIN_H0_REF`` and box it.
+
+    Call from the likelihood factory with the CONCRETE (pre-jit) catalog arrays
+    and the run's reference cosmology; ``cosmo.H0`` is overridden with the
+    reference, and every other field must be the run's FIXED value (that is what
+    :func:`darksirens.likelihood.factory.kernel_pin_admissible` establishes).
+
+    The build goes through :func:`catalog_kernel_state` under the PROCESS-GLOBAL
+    quadrature configuration, unchanged: the pin must be bit-for-bit what the
+    live config would compute at ``H0_ref``, or the in-graph probe -- which
+    rebuilds under the live config -- would compare two different quadratures
+    and fire on a scheme difference rather than on a premise violation.
+
+    That matters more than it looks, because the pin FREEZES whatever scheme the
+    run configured: the shipped ``cdf``-24 kernel norm carries a ~5e-5 relative
+    error that the survey-global observed count (~1.6e5 galaxies) amplifies into
+    an H0-CORRELATED +/-8 nats on the production likelihood (measured against a
+    ``zspace``-24/n_sigma-6 reference; the cdf error follows 4723/K^2).  A run
+    that wants the accurate quadrature sets it ON THE RUN
+    (``--kernel_gl_domain zspace --kernel_gl_nodes 24``, applied by
+    ``_configure_performance_grids`` before the likelihood is built) -- which
+    the pin then makes free, since it runs once per run instead of once per
+    proposal.  Hard-coding a different scheme here would break the probe.
+    """
+    ref = cosmo._replace(H0=jnp.asarray(KERNEL_PIN_H0_REF, dtype=zgrid.dtype))
+    state = catalog_kernel_state(ref, survey, em_catalog, z_depth=z_depth)
+    probe_rows = _spread_probe_rows(em_catalog.zgals, em_catalog.ngals, n_probe)
+    return PinnedKernelQuadrature(
+        H0_ref=ref.H0,
+        log_kw=state.log_kw,
+        sig_eff=state.sig_eff,
+        log_sig_eff=state.log_sig_eff,
+        sig_eff_row_max=state.sig_eff_row_max,
+        log_depth_mass=state.log_depth_mass,
+        row_empty=state.row_empty,
+        probe_rows=probe_rows,
     )
 
 

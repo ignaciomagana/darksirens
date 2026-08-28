@@ -78,6 +78,7 @@ from typing import NamedTuple, Any
 from darksirens.redshift.volume import log_volume_prior_vmap, _precompute_volume_grid
 from darksirens.redshift.catalog import (
     catalog_kernel_state,
+    kernel_pin_poison,
     marked_catalog_kernel_state,
     eval_log_catalog_prior_state,
 )
@@ -608,6 +609,7 @@ def prepare_redshift_prior_state(
         kernels = catalog_kernel_state(
             cosmo, survey, em_catalog, log_g_grid=log_g_grid,
             z_depth=survey.z_depth,
+            pinned=em_catalog.pinned_kernels,
         )
         Nobs = _row_counts(em_catalog)
         # DEPTH-TRUNCATED CATALOG: kernels.log_kw has been renormalised to unit
@@ -627,6 +629,17 @@ def prepare_redshift_prior_state(
         # ensemble was supplied), so this matches the legacy behaviour exactly.
         Z = Nobs + curves.N_miss
         log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1e-300)), 0.0)
+        # The H0 pin's in-graph verdict is spent HERE, on the normalizers, and
+        # nowhere upstream: ``_eval_dark_scalar`` runs
+        # ``nan_to_num(log_p_cat, nan=-inf)`` and every amplitude between the
+        # kernels and the likelihood passes a ``where(x > 0, ..., -inf)``, so a
+        # NaN on ``log_kw`` / ``log_depth_mass`` / ``Nobs`` is silently rewritten
+        # as "this pixel has no catalog hosts" -- a plausible wrong number, which
+        # is what the probe exists to prevent.  ``numerator - log_Z`` is the
+        # first expression with no such filter.  ``None`` (unpinned) emits no op.
+        pin_poison = kernel_pin_poison(kernels)
+        if pin_poison is not None:
+            log_Z = log_Z + pin_poison
         if curves.base_miss is None:
             if is_field:
                 # Survey-GLOBAL normalizer log Sum_all-pixels[N_obs + N_miss].
@@ -636,6 +649,8 @@ def prepare_redshift_prior_state(
                 # budget modulation (Q_LSS / delta_g) as curves.dN_miss via the
                 # field_* rows.
                 log_Z_global = field_global_log_Z(cosmo, survey, em_catalog)
+                if pin_poison is not None:
+                    log_Z_global = log_Z_global + pin_poison
                 state = DarkSirenPriorState(
                     kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss,
                     log_Z=log_Z, log_Z_global=log_Z_global,
@@ -652,18 +667,25 @@ def prepare_redshift_prior_state(
         log_Z_members = jnp.where(
             Z_members > 0.0, jnp.log(jnp.maximum(Z_members, 1e-300)), 0.0
         )
+        if pin_poison is not None:
+            log_Z_members = log_Z_members + pin_poison
         if is_field:
             # Per-member survey-global normalizers: member m's mixture weight
             # divides by its OWN Z_m(theta), the field analogue of log_Z_members.
+            log_Z_global = field_global_log_Z(cosmo, survey, em_catalog)
+            log_Z_global_members = field_global_log_Z_members(
+                cosmo, survey, em_catalog
+            )
+            if pin_poison is not None:
+                log_Z_global = log_Z_global + pin_poison
+                log_Z_global_members = log_Z_global_members + pin_poison
             state = DarkSirenEnsemblePriorState(
                 kernels=kernels, log_Nobs=log_Nobs, dN_miss=curves.dN_miss,
                 log_Z=log_Z,
                 base_miss=curves.base_miss,
                 log_Z_members=log_Z_members,
-                log_Z_global=field_global_log_Z(cosmo, survey, em_catalog),
-                log_Z_global_members=field_global_log_Z_members(
-                    cosmo, survey, em_catalog
-                ),
+                log_Z_global=log_Z_global,
+                log_Z_global_members=log_Z_global_members,
                 latent_rho=curves.latent_rho,
             )
             return _maybe_materialize(state, materialize_state)
