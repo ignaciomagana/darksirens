@@ -65,6 +65,7 @@ from .utils import (
     get_q_grid,
     get_chi_grid,
     get_pairing_m1_grid,
+    get_pairing_edge_quadrature,
     normalization_grid_settings,
     M_LO,
     M_HI,
@@ -316,7 +317,8 @@ class PairingModel(ABC):
         # at trace time): default None keeps the EXACT per-sample q-integration
         # below; an int precomputes the normaliser once on a static m1 grid and
         # interpolates it per sample.
-        n_grid = normalization_grid_settings().pairing_m1_grid
+        settings = normalization_grid_settings()
+        n_grid = settings.pairing_m1_grid
         if n_grid is None:
             # PairingModel norm integrates over q for each m1 — sample-dependent,
             # cannot be lifted out of the per-sample loop.
@@ -351,7 +353,6 @@ class PairingModel(ABC):
         # theta-traced) and interpolate log N in log m1 per sample.
         m1_grid = get_pairing_m1_grid()                     # (N_grid,) static nodes
         log_m1_grid = jnp.log(m1_grid)
-        q_grid  = get_q_grid()
         # Same scale-factored, SUPPORT-RELATIVE quadrature as the exact branch,
         # per grid node, so the grid normaliser never underflows while forming
         # I = scale * n_sc and agrees with the exact branch node-for-node.
@@ -407,47 +408,69 @@ class PairingModel(ABC):
         # so p * exp(-log_I) == 0, matching the exact branch's guarded 0.
         log_m1_q = jnp.log(jnp.atleast_1d(m1))
         log_I   = jnp.interp(log_m1_q, log_m1_grid, log_I_grid).reshape(jnp.shape(m1))
-        # A cell that TOUCHES a zero-support node is unresolved: no interpolant of
-        # log I can follow the essential singularity there (I ~ exp(-dm/(m1-m_min))
-        # for the Planck taper), and the filled value above is only an upper bound.
-        # Interpolating the support INDICATOR flags exactly those samples (it is
-        # 1.0 iff both bracketing nodes have support; jnp.interp's clamp makes
-        # out-of-grid m1 inherit the end node's flag).
+        # TRUST MAP for the interpolant.  Linear interpolation of log I on the
+        # cell [i, i+1] is in error by at most h^2 |(log I)''| / 8, and this grid
+        # is uniform in log m1, so that bound IS the node second difference over
+        # 8.  Near the support edge the bound explodes -- I(m1) ~ eps exp(-dm/eps)
+        # with eps = m1 - m_min carries an essential singularity no interpolant
+        # can follow -- and it does so over MANY cells, not only the one that
+        # straddles the edge: measured on PowerLawPairing at the powerlaw+peak
+        # prior midpoint, N_grid = 2048, the interpolated density was still
+        # 5.3 nats high THREE cells above m_min.  A node is TRUSTED when its own
+        # second difference is inside the ``pairing_edge_tol`` budget and no
+        # zero-support node lies within one cell of it; a SAMPLE is trusted when
+        # both bracketing nodes are, which interpolating the indicator gives
+        # exactly (jnp.interp's clamp makes out-of-grid m1 inherit the end node's
+        # flag).  The criterion is SCALE INVARIANT -- it flags the same m1 range
+        # at every N_grid, where a fixed cell window does not (measured: a
+        # 16-cell window leaves 0.031 nats at N_grid = 2048 but 0.072 at 8192).
+        d2      = jnp.abs(log_I_grid[2:] - 2.0 * log_I_grid[1:-1]
+                          + log_I_grid[:-2]) / 8.0
+        d2      = jnp.concatenate([d2[:1], d2, d2[-1:]])
+        true1   = jnp.ones((1,), dtype=bool)
+        near_sup = (has_sup
+                    & jnp.concatenate([true1, has_sup[:-1]])
+                    & jnp.concatenate([has_sup[1:], true1]))
+        trusted = near_sup & (d2 <= settings.pairing_edge_tol)
         resolved = jnp.interp(log_m1_q, log_m1_grid,
-                              has_sup.astype(log_I_grid.dtype)
+                              trusted.astype(log_I_grid.dtype)
                               ).reshape(jnp.shape(m1)) >= 1.0
-        # PER-SAMPLE EDGE GUARD on the normaliser, evaluated on the FIXED q grid
-        # (its nodes are static, so this costs two p_unnorm evaluations per sample
-        # against N_Q = 200 for the exact branch).  With the sample's own q
-        # bracketed by q-grid nodes k, k+1,
-        #     I_lb = (q_{k+1} - q_k)/2 * (p_unnorm(m1, q_k) + p_unnorm(m1, q_{k+1})).
-        # In an UNRESOLVED cell this is within a factor of two of the true
-        # normaliser FROM BELOW: one m1 cell spans dlog m1 = log(m_hi/m_lo)/(N_grid-1)
-        # = 2.6e-3 at N_grid = 2048, so the q-support (m_min/m1, 1] inside the edge
-        # cell is narrower than one q-interval dq = 5.0e-3 (N_Q = 200) -- a coupling
-        # NormalizationGridSettings now enforces -- hence q_k <= m_min/m1 (so
-        # p_unnorm(m1, q_k) = 0, q_{k+1} = 1) and
-        #     I = int_{q_cut}^{1} p dq <= (1 - q_cut) p(1) <= dq p(1) = 2 I_lb.
-        # The density can therefore overshoot by at most 0.7 nats there, while the
-        # unbounded direction (log_I hundreds of nats below the truth, +547 nats of
-        # density) is impossible.  In a RESOLVED cell the guard is inert (the
-        # support spans many q-nodes, so the interpolated normaliser is larger and
-        # the maximum keeps it bit-for-bit) while still capping any interpolation
-        # error that would INFLATE the density.
-        qi      = jnp.clip(jnp.searchsorted(q_grid, jnp.asarray(q)) - 1,
-                           0, q_grid.size - 2)
-        q_lo_n  = q_grid[qi]
-        q_hi_n  = q_grid[qi + 1]
-        p_lo_n  = self._eval_unnorm(m1, q_lo_n, m_min, dm_min, theta)
-        p_hi_n  = self._eval_unnorm(m1, q_hi_n, m_min, dm_min, theta)
-        I_lb    = 0.5 * (q_hi_n - q_lo_n) * (p_lo_n + p_hi_n)
-        lb_ok   = I_lb > 0
-        # Safe log: a zero bound (the sample's q is outside the support, where
-        # p == 0 too) must not create a -inf whose VJP turns into 0 * inf = NaN.
-        log_I_lb = jnp.log(jnp.where(lb_ok, I_lb, 1.0))
-        log_I   = jnp.where(lb_ok,
-                            jnp.where(resolved, jnp.maximum(log_I, log_I_lb), log_I_lb),
-                            log_I)
+        # UNTRUSTED samples get the normaliser the exact branch DEFINES -- the
+        # same support-relative integral -- but evaluated on the sample's OWN
+        # support with a Gauss-Legendre rule of ``pairing_edge_nq`` nodes instead
+        # of the exact branch's n_q-node uniform trapezoid.  GL is what makes a
+        # per-sample quadrature affordable here: the integrand is a taper
+        # boundary layer of width (m1 - m_min)/dm_min in the support-relative
+        # variable, which GL resolves with ~sqrt of the nodes a uniform rule
+        # needs.  Measured over 50 (m_min, dm_min, beta) prior draws, worst
+        # |Delta log density| against a converged 200001-node reference in the 24
+        # cells above the support edge, N_grid = 1056:
+        #     old fixed-q-grid clamp   22.6 nats
+        #     this rule, 24 GL nodes   3.4e-3 nats
+        #     the EXACT branch itself  3.1e-2 nats
+        # -- i.e. the grid path is now an ORDER OF MAGNITUDE closer to the truth
+        # at the edge than the default it approximates, and the old clamp's
+        # 251x-and-unbounded density deficit (it pinned the normaliser to
+        # dq p(m1,1)/2, killing the m1 / m_min / beta dependence: d log p / d
+        # m_min came out -7.7e3 against a true +1.67e7) is gone.
+        t_e, w_e = get_pairing_edge_quadrature()             # (K,) static nodes
+        m1_a     = jnp.atleast_1d(m1)
+        q_cut_s  = jnp.clip(m_min / m1_a, 0.0, 1.0)
+        width_s  = 1.0 - q_cut_s
+        q_e      = q_cut_s[..., None] + t_e * width_s[..., None]
+        p_e      = self._eval_unnorm(m1_a[..., None], q_e, m_min, dm_min, theta)
+        # Same scale factoring as the exact branch: p ~ exp(-130) in the taper
+        # toe, and a direct sum would underflow the backward divisions.
+        scale_e  = jnp.max(p_e, axis=-1, keepdims=True)
+        scale_es = jnp.where(scale_e > 0, scale_e, 1.0)
+        I_edge   = (jnp.sum((p_e / scale_es) * w_e, axis=-1) * width_s
+                    * scale_es[..., 0]).reshape(jnp.shape(m1))
+        edge_ok  = I_edge > 0
+        # Safe log: an empty support gives I_edge == 0, and there p == 0 too, so
+        # keep the interpolated value rather than build a -inf whose VJP is
+        # 0 * inf = NaN.
+        log_I_edge = jnp.log(jnp.where(edge_ok, I_edge, 1.0))
+        log_I   = jnp.where(resolved | (~edge_ok), log_I, log_I_edge)
         dens    = p * jnp.exp(-log_I)
         return jnp.where(any_sup & in_support, dens, jnp.zeros_like(dens))
 

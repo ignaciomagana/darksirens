@@ -455,9 +455,19 @@ def test_gwtc5_pairing_grid_sized_agrees_over_full_support():
 def test_gwtc5_pairing_grid_clamp_error_reproduces_phy5():
     """Reproduces PHY-5 with the instruction's exact adverse params (beta_q=-2,
     m2_low=5, delta_m2=0): at the pre-fix 200 ceiling a valid sample at m1=299 --
-    inside the 300-Msun support -- silently uses the m1=200 normaliser, an
-    order-0.1+ log-density error that grows toward the top of the support.  Sizing
-    the grid to the support removes the clamp."""
+    inside the 300-Msun support -- silently uses the m1=200 normaliser, a
+    log-density error that grows toward the top of the support.  Sizing the grid
+    to the support removes the clamp.
+
+    The 2026-08-28 support-edge fix SOFTENS this failure without removing it: an
+    out-of-grid sample inherits the end node's trust flag, and for this adverse
+    beta_q = -2 the node normalisers at the top of the grid are noisy enough
+    (their own second difference is 3e-2, far outside pairing_edge_tol) that the
+    sample falls onto the per-sample Gauss-Legendre rule at its OWN m1 instead.
+    Measured at m1 = 299: 0.554 nats before the fix, 0.023 after.  The bound
+    below is loosened accordingly -- the point of the test is that an undersized
+    ceiling is still WRONG and that sizing the grid fixes it, which is what
+    assert_pairing_grid_covers_support enforces."""
     theta = _gwtc5_adverse_theta(0.0)
     m1 = jnp.asarray([201.0, 250.0, 299.0])
     q = jnp.full(3, 0.9)
@@ -473,7 +483,7 @@ def test_gwtc5_pairing_grid_clamp_error_reproduces_phy5():
 
     _set_pairing_grid(2048, m_hi=200.0)
     clamp_err = np.abs(lp() - exact)
-    assert clamp_err[-1] > 0.1, clamp_err            # m1 = 299, deep in the gap
+    assert clamp_err[-1] > 0.01, clamp_err           # m1 = 299, deep in the gap
     assert clamp_err[-1] > clamp_err[0]              # worse further past 200
 
     _set_pairing_grid(2048, m_hi=200.0)
@@ -759,9 +769,17 @@ def test_support_edge_cell_is_bounded_and_one_sided(capsys):
               "(was +406.8 nats at 2048):")
         for ng, (hi_e, lo_e) in worst.items():
             print(f"    grid={ng:5d}:  {hi_e:+.3e} | {lo_e:+.3e}")
+    # Post-fix the edge cell is integrated on the sample's own support, so the
+    # ONLY residual is the exact branch's own endpoint deficit: its q-trapezoid
+    # scores p(t = 0) = 0 at the support edge, losing 1/(2 (n_q - 1)) = 2.513e-3
+    # of the normaliser in this fully-tapered corner.  The grid path is on the
+    # right side of that (it is CLOSER to the converged reference -- see
+    # tests/test_pairing_edge_fix.py), so the residual is a small NEGATIVE
+    # offset, identical at every grid size.
     for ng, (hi_e, lo_e) in worst.items():
-        assert hi_e < 0.7, (ng, worst)          # never inflated
-        assert lo_e > -3.0, (ng, worst)         # and bounded from below
+        assert hi_e < 0.0, (ng, worst)          # never inflated
+        assert lo_e > -3.0e-3, (ng, worst)      # and pinned to the trapezoid deficit
+        assert abs(lo_e) > 2.4e-3, (ng, worst)
 
 
 def test_support_edge_dense_sweep_bounded_and_one_sided(capsys):
@@ -809,16 +827,15 @@ def test_support_edge_dense_sweep_bounded_and_one_sided(capsys):
         for mmin, dmmin, beta, ng, over, mism in rows:
             print(f"    mmin={mmin:5} dm={dmmin:6} beta={beta:5} N={ng:5}: "
                   f"over={over:+.3e}  zero-pattern-mismatches={mism}")
-    # Bounded (was e^{+578}), and tighter as the grid refines.  A request of 1024
-    # is raised to the coupling floor 1056 (one m1 cell = one q-interval); its
-    # cells are still wide enough that log-log interpolation of the normaliser one
-    # cell ABOVE the support edge -- where I(m1) has an essential singularity --
-    # over-estimates the density by ~3 nats, which the single-term bound only
-    # partially caps.  From 2048 up the residual is < 0.25 nats.
-    tol = {1024: 3.5, 2048: 0.25, 8192: 1.0e-6}
+    # Post-fix the residual is GRID-SIZE INDEPENDENT and is the EXACT branch's
+    # own quadrature error, not the grid path's: near the support edge the exact
+    # branch's 200-node uniform q-trapezoid does not resolve the taper boundary
+    # layer and is itself up to 3.1e-2 off a converged 200001-node reference,
+    # which the per-sample Gauss-Legendre rule tracks to <= 5e-3
+    # (tests/test_pairing_edge_fix.py).  Pre-fix this column read up to +3.5.
     for mmin, dmmin, beta, ng, over, mism in rows:
         assert mism == 0, (mmin, dmmin, beta, ng, mism)
-        assert over < tol[ng], (mmin, dmmin, beta, ng, over)
+        assert over < 3.5e-2, (mmin, dmmin, beta, ng, over)
 
 
 def test_support_edge_sample_does_not_corrupt_logmu_or_neff(capsys):
