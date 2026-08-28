@@ -1803,13 +1803,18 @@ def build_parser():
                    choices=["cdf", "zspace"],
                    help="Quadrature domain for the kernel normalisation: 'cdf' (default) "
                         "integrates in the Gaussian CDF variable, 'zspace' integrates "
-                        "directly in redshift (avoids ndtri; measured 2.7-3.5x faster "
-                        "production likelihood calls on H100). Validated setting for the "
-                        "DESI nside-64 production catalog (mixed spectro+photo, sig_eff "
-                        "3e-3..0.1): zspace with --kernel_gl_nodes 16 and "
-                        "--kernel_gl_nsigma 5 (per-galaxy |dlog Z| median 9e-7, max 6e-5; "
-                        "75x tighter than cdf-24 coherently over 259 events). Do NOT use "
-                        "8 nodes at n_sigma 5: ~9e-3 per galaxy, 130x WORSE than cdf-24.")
+                        "directly in redshift (avoids ndtri; measured 1.8-3.0x faster "
+                        "production likelihood calls on H100). MEASURED ON THE FULL "
+                        "PRODUCTION LIKELIHOOD (259 events, DESI nside-64, field "
+                        "weighting): the survey-global observed count (~1.6e5 galaxies) "
+                        "amplifies kernel-norm error, and the cdf default carries an "
+                        "H0-correlated +/-8 nat likelihood error at 24 nodes (errors "
+                        "follow ~4723/K^2; the cdf family converges TO the zspace "
+                        "values). Production setting: zspace, --kernel_gl_nodes 24, "
+                        "--kernel_gl_nsigma 6 (357 ms/call, 1.8x, most accurate "
+                        "measured); speed option: 16 nodes at n_sigma 5 (214 ms, 3.0x, "
+                        "residual <= 0.3 nats vs the 24/6 reference). Do NOT use 8 "
+                        "nodes at n_sigma 5: ~9e-3 per galaxy, 130x WORSE than cdf-24.")
     g.add_argument("--kernel_gl_nsigma", type=float, default=None, metavar="X",
                    help="Half-width of the z-space kernel-quadrature window in units of "
                         "sigma_eff (zspace domain only; module default 5.0). The dominant "
