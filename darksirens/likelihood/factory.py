@@ -1036,7 +1036,7 @@ def kernel_pin_admissible(sampled_labels, universe_model, mark_model) -> bool:
     kernels are built with no depth and are cheap anyway.
     """
     labels = {str(x) for x in (sampled_labels or ())}
-    if universe_model != "dark_sirens":
+    if universe_model not in ("dark_sirens", "dark_sirens_complete"):
         return False
     if mark_model not in (None, "none"):
         return False

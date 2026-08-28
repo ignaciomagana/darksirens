@@ -162,10 +162,10 @@ def test_gate_refuses_every_premise_label(blocked):
 def test_gate_admits_the_production_sampled_set():
     labels = ("H0", "log10n0", "M0hat", "sigma_M", "alpha", "mu_g", "b_miss")
     assert kernel_pin_admissible(labels, "dark_sirens", "none")
-    # ... and only for the plain galaxy-count dark-siren host model.
+    # ... and only for the plain galaxy-count host models.
     assert not kernel_pin_admissible(labels, "dark_sirens", "logmstar")
-    assert not kernel_pin_admissible(labels, "dark_sirens_complete", "none")
     assert not kernel_pin_admissible(labels, "spectral_sirens", "none")
+    assert kernel_pin_admissible(labels, "dark_sirens_complete", "none")
 
 
 def _decoder(sampled_labels):
