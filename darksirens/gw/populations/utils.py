@@ -76,11 +76,12 @@ class NormalizationGridSettings:
     or the environment variables ``DARKSIRENS_GW_N_MASS``,
     ``DARKSIRENS_GW_N_Q``, and ``DARKSIRENS_GW_N_CHI``.
 
-    ``pairing_m1_grid`` (default 200, auto-raised to ~1056 by the minimum-density
-    floor; env ``DARKSIRENS_GW_PAIRING_M1_GRID``, set to ``0`` or ``none`` to
-    disable): the pairing model's per-sample q-normalisation is interpolated from
-    an N-node static m1 grid instead of integrated exactly per sample (see
-    ``get_pairing_m1_grid`` and ``PairingModel.__call__``).  Samples inside the grid cell that straddles the
+    ``pairing_m1_grid`` is an OPT-IN accuracy knob (default None = exact; env
+    ``DARKSIRENS_GW_PAIRING_M1_GRID``, an int to enable, ``0`` or ``none`` to
+    explicitly disable): when set to an int N the pairing model's
+    per-sample q-normalisation is interpolated from an N-node static m1 grid
+    instead of integrated exactly per sample (see ``get_pairing_m1_grid`` and
+    ``PairingModel.__call__``).  Samples inside the grid cell that straddles the
     normaliser's SUPPORT EDGE are not interpolated at all -- no interpolant can
     follow the taper's essential singularity there -- but evaluated from the
     exact single-q-interval trapezoid term, which is the exact normaliser in that
@@ -100,7 +101,7 @@ class NormalizationGridSettings:
     n_mass: int = _env_int("DARKSIRENS_GW_N_MASS", 500)
     n_q: int = _env_int("DARKSIRENS_GW_N_Q", 200)
     n_chi: int = _env_int("DARKSIRENS_GW_N_CHI", 200)
-    pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", 200)
+    pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", None)
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI

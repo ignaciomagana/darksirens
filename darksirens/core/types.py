@@ -514,10 +514,6 @@ class GWEvent(NamedTuple):
     # (DS-09), never inside the pytree.  ``chieff`` stays its own field: it
     # is consumed unconditionally by the current likelihood.
     spin: Any = None
-    # Precomputed log(prior_wt) — avoids per-sample jnp.log inside the
-    # likelihood hot path (~550k elements per call).  None for backward compat;
-    # make_gw_event always populates it.
-    log_prior_wt: Any = None
 
     @property
     def chirp_mass(self):

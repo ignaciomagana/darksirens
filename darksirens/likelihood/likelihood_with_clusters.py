@@ -442,8 +442,7 @@ def darksiren_log_likelihood_with_clusters(
     # case deliberately falls through to the standard path; wl_a=0 is handled
     # by the Hermite kernel itself and reduces numerically to the standard path.
     # ──────────────────────────────────────────────────────────────────
-    def log_weight_sel(m1det, q, dL, chieff, pix, prior_wt, catalog,
-                       spin=None, log_prior_wt=None):
+    def log_weight_sel(m1det, q, dL, chieff, pix, prior_wt, catalog):
         def _selection_prior(z, pix, catalog):
             return log_prior_z_selection(z, pix, catalog)
         # Clamp-then-mask, mirroring likelihood/core.py: an out-of-support dL
@@ -461,14 +460,12 @@ def darksiren_log_likelihood_with_clusters(
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, _selection_prior,
                 wl_a, wl_b, u_nodes, log_wH_nodes,
-                spin=spin, log_prior_wt=log_prior_wt,
             )
         else:
             ldw = log_sample_weight(
                 m1det, q, dL_c, chieff, pix, prior_wt,
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, _selection_prior,
-                spin=spin, log_prior_wt=log_prior_wt,
             )
         if unlensed_tau_suppression:
             # Poisson consistency: the singleton EVIDENCE suppresses the
@@ -565,8 +562,7 @@ def darksiren_log_likelihood_with_clusters(
     # When cluster_mode == OFF: iterate over all nEvents (legacy behaviour).
     # When cluster_mode == J2: iterate over singleton_indices only.
     # ──────────────────────────────────────────────────────────────────
-    def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt,
-                                         catalog, log_prior_wt=None):
+    def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
         # Clamp-then-mask + full CPL bounds (see log_weight_sel above).
         dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
         supported = (dL >= dL_lo) & (dL <= dL_hi)
@@ -577,7 +573,6 @@ def darksiren_log_likelihood_with_clusters(
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, log_prior_z,
                 wl_a, wl_b, u_nodes, log_wH_nodes,
-                log_prior_wt=log_prior_wt,
             )
         else:
             ldw = log_sample_weight_wl_or_standard(
@@ -586,7 +581,6 @@ def darksiren_log_likelihood_with_clusters(
                 log_p_pop, log_prior_z,
                 log_p_wl_fn, mu_nodes, log_w_nodes,
                 wl_enabled=wl_enabled,
-                log_prior_wt=log_prior_wt,
             )
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
@@ -606,7 +600,6 @@ def darksiren_log_likelihood_with_clusters(
             sl(gw_pe.pixels),
             sl(gw_pe.prior_wt),
             catalog_ev,
-            log_prior_wt=sl(gw_pe.log_prior_wt) if gw_pe.log_prior_wt is not None else None,
         )
         ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
         if singleton_lensing != SINGLETON_LENSING_MIXTURE and not unlensed_tau_suppression:
@@ -715,7 +708,6 @@ def darksiren_log_likelihood_with_clusters(
                 take(gw_pe.pixels),
                 take(gw_pe.prior_wt),
                 em_catalog_pe,
-                log_prior_wt=take(gw_pe.log_prior_wt) if gw_pe.log_prior_wt is not None else None,
             )
             ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
             if unlensed_tau_suppression:
