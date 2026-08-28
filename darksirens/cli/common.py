@@ -355,11 +355,20 @@ def configure_normalization_grids_for_model(opts):
     )
 
     try:
+        # An unset --pairing_norm_grid must NOT reach configure_normalization_grids
+        # as None: None is the explicit-disable value, and passing it here would
+        # silently clobber both the dataclass default and the
+        # DARKSIRENS_GW_PAIRING_M1_GRID env opt-in.  Omit the kwarg (sentinel)
+        # when the flag was not given; map an explicit 0 to the disable value.
+        _pairing_kwargs = {}
+        _png = getattr(opts, "pairing_norm_grid", None)
+        if _png is not None:
+            _pairing_kwargs["pairing_m1_grid"] = None if _png <= 0 else _png
         configure_normalization_grids(
             n_mass=getattr(opts, "norm_nmass", None),
             n_q=getattr(opts, "norm_nq", None),
             n_chi=getattr(opts, "norm_nchi", None),
-            pairing_m1_grid=getattr(opts, "pairing_norm_grid", None),
+            **_pairing_kwargs,
         )
         if normalization_grid_settings().pairing_m1_grid is not None:
             try:
