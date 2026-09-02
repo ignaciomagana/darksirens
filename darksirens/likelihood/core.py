@@ -523,6 +523,7 @@ def _pe_chunk_plan(nEvents: int, pe_block: int) -> tuple[int, int, bool]:
         "n_catalogs",
         "catalog_sky_weighting",
         "share_prior_state_by_catalog",
+        "kde_window",
     ],
 )
 def darksiren_log_likelihood(
@@ -632,6 +633,14 @@ def darksiren_log_likelihood(
     # each EMCatalog leaf is a jit tracer, so it must be decided pre-jit).  Empty
     # (default) shares nothing -- every legacy caller keeps its exact trace.
     share_prior_state_by_catalog: tuple = (),
+    # Static per-sample catalog-KDE window (Python int or None) for every
+    # catalog's kernel state.  None (default) defers to the process-global
+    # ``configure_catalog_kde_window`` size -- the legacy behaviour every direct
+    # caller keeps; the factories pass a window sized from the bound catalogs
+    # (``redshift.catalog.auto_kde_window``) so the evaluator never truncates a
+    # sample's in-range galaxy block and one process may hold likelihoods over
+    # differently dense catalogs.
+    kde_window: int | None = None,
     # Comoving-distance interpolation table (``utils.cosmology.rs``), threaded as
     # a jit ARGUMENT and bound as the active table for this trace.  None resolves
     # to whatever is active in the CALLER's scope, so no call site has to know
@@ -940,6 +949,7 @@ def darksiren_log_likelihood(
             mark_names=mark_names_all[k],
             materialize_state=materialize_redshift_prior_state,
             catalog_sky_weighting=catalog_sky_weighting,
+            kde_window=kde_window,
         )
         share_k = (
             k < len(share_prior_state_by_catalog)
@@ -954,6 +964,7 @@ def darksiren_log_likelihood(
                 mark_names=mark_names_all[k],
                 materialize_state=materialize_redshift_prior_state,
                 catalog_sky_weighting=catalog_sky_weighting,
+                kde_window=kde_window,
             )
         univ_states.append(state_univ)
         sel_states.append(state_sel)

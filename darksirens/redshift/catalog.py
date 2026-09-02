@@ -387,7 +387,100 @@ def _rows_sorted_traced(zgals, ngals):
     return jnp.all(_map_rows(_row, (zgals, ngals)))
 
 
-def _resolve_rows_sorted_guard(zgals, ngals):
+@jax.tree_util.register_pytree_node_class
+class StaticInt:
+    """A Python int carried through a pytree as AUXILIARY DATA, not as a leaf.
+
+    ``CatalogKernelState`` is a NamedTuple, so every field is a pytree leaf:
+    ``lax.optimization_barrier`` (the prior state's materialize barrier) and
+    ``jax.jit`` turn a plain Python int field into a traced scalar, which can
+    no longer size a slice or be compared with a shape.  Flattening to no
+    children keeps the value concrete on every path, and it is part of the
+    treedef -- hence of every jit cache key -- so two states built for
+    different windows never share a compiled graph.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = int(value)
+
+    def tree_flatten(self):
+        return (), self.value
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        return cls(aux)
+
+    def __int__(self):
+        return self.value
+
+    def __eq__(self, other):
+        return int(self) == int(other) if other is not None else False
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __repr__(self):
+        return f"StaticInt({self.value})"
+
+
+def _effective_kde_window(kde_window):
+    """The static window a state was built for: its own ``kde_window`` when the
+    caller pinned one (the likelihood factory sizes it from the data), else the
+    process-global :func:`configure_catalog_kde_window` setting."""
+    if kde_window is None:
+        return _KDE_WINDOW_SIZE
+    return int(kde_window)
+
+
+def _static_window(kde_window):
+    """Box a caller's window for the state (``None`` stays ``None``)."""
+    if kde_window is None or isinstance(kde_window, StaticInt):
+        return kde_window
+    return StaticInt(kde_window)
+
+
+def auto_kde_window(catalogs, sigma_kde_max, n_sigma=None, granule=64):
+    """Data-sized static window for a set of CONCRETE catalog views.
+
+    The largest number of galaxies any row of any view holds inside an interval
+    of length ``2 n_sigma max_row(sigma_eff)`` at the WIDEST kernel the run can
+    reach (:func:`recommended_kde_window` at ``sigma_kde_max``), plus one, rounded
+    up to a multiple of ``granule``.  Every sample's in-range block then fits the
+    window, so the evaluator never truncates: it evaluates exactly the galaxies
+    within ``n_sigma`` row-max widths of the sample (the contract
+    :func:`configure_catalog_kde_window` documents), and no others beyond a
+    ``granule`` of nearest neighbours whose contribution is below
+    ``exp(-n_sigma^2 / 2)`` relative.  A view whose rows are no longer than the
+    result takes the full-row path by the evaluator's own length test.
+
+    Returns ``None`` when no view carries per-galaxy rows.  ``n_sigma`` defaults
+    to the configured evaluator half-width multiplier.
+    """
+    if n_sigma is None:
+        n_sigma = _KDE_WINDOW_NSIGMA
+    worst = None
+    for cat in catalogs:
+        zgals = getattr(cat, "zgals", None)
+        ngals = getattr(cat, "ngals", None)
+        dzgals = getattr(cat, "dzgals", None)
+        if zgals is None or ngals is None or dzgals is None:
+            continue
+        if getattr(zgals, "ndim", 0) != 2:
+            continue
+        need = recommended_kde_window(
+            np.asarray(zgals), np.asarray(ngals), np.asarray(dzgals),
+            float(sigma_kde_max), n_sigma=float(n_sigma),
+        ) + 1
+        worst = need if worst is None else max(worst, need)
+    if worst is None:
+        return None
+    granule = max(int(granule), 1)
+    return int(-(-worst // granule) * granule)
+
+
+def _resolve_rows_sorted_guard(zgals, ngals, kde_window=None):
     """The ``CatalogKernelState.rows_sorted`` guard for this catalog, or None.
 
     Emitted ONLY for TRACED catalogs, and only while windowing is enabled at
@@ -400,7 +493,7 @@ def _resolve_rows_sorted_guard(zgals, ngals):
     outlives a window reconfiguration, the guard must already be in it.  When
     the evaluator ends up not windowing, the node is unused and XLA drops it.
     """
-    if _KDE_WINDOW_SIZE is None or zgals is None or ngals is None:
+    if _effective_kde_window(kde_window) is None or zgals is None or ngals is None:
         return None
     if not isinstance(zgals, jax.core.Tracer):
         return None
@@ -741,6 +834,23 @@ class CatalogKernelState(NamedTuple):
     sig_eff: jnp.ndarray     # (N_rows, N_max)
     log_sig_eff: jnp.ndarray = None  # (N_rows, N_max) — precomputed log(sig_eff)
     volume_weighted: bool = False
+    #: (N_rows, N_max) ``log_kw - log(sig_eff) - log sqrt(2 pi)``: everything of
+    #: a galaxy's log kernel term that does not depend on the sample redshift,
+    #: fused at state-build time so the per-sample evaluator gathers THREE
+    #: arrays (z_i, sigma_i, this) instead of four and adds one term instead of
+    #: three.  Padding slots carry the same ``-1e30`` sentinel as ``log_kw``.
+    #: ``None`` (a hand-built state) selects the historical four-gather
+    #: arithmetic.
+    log_kw_eff: Any = None
+    #: Static window length this state was built for (a :class:`StaticInt`,
+    #: carried as pytree aux data so it stays concrete under jit and the
+    #: materialize barrier; or None); the evaluator uses it in place of the
+    #: process-global ``configure_catalog_kde_window`` size when set.  The
+    #: likelihood factory sizes it from the bound catalogs
+    #: (:func:`auto_kde_window`) so one process may hold likelihoods over
+    #: differently dense catalogs without one build's window truncating
+    #: another's rows.
+    kde_window: Any = None
     #: (N_rows,) log of the mixture mass that lay below ``z_depth`` BEFORE the
     #: shape was renormalised.  Callers scale the row's observed galaxy count by
     #: it so the depth-truncated catalog branch integrates to the number of
@@ -865,6 +975,7 @@ class PinnedKernelQuadrature(NamedTuple):
     log_depth_mass: Any             # (N_rows,)        H0-invariant
     row_empty: jnp.ndarray          # (N_rows,)        theta-invariant
     probe_rows: jnp.ndarray         # (P,) int32 rows rebuilt every proposal
+    log_kw_eff: Any = None          # (N_rows, N_max) at H0_ref; shifts like log_kw
 
 
 def _spread_probe_rows(zgals, ngals, n_probe: int) -> jnp.ndarray:
@@ -885,7 +996,35 @@ def _spread_probe_rows(zgals, ngals, n_probe: int) -> jnp.ndarray:
     return jnp.asarray(occ[sel].astype(np.int32))
 
 
-def _pinned_kernel_state(cosmo, survey, em_catalog, pinned, log_g_grid, z_depth):
+def _real_row_max(sig_eff, log_kw_raw):
+    """Per-row max ``sigma_eff`` over the REAL galaxies (finite raw ``log_kw``).
+
+    The windowed evaluator's half-width is ``n_sigma`` times this.  Taken over
+    the whole padded row it was the PADDING width -- ``dzgals`` pads at 1.0, so
+    every row shorter than ``N_max`` reported ``sigma_eff_max = 1.0`` and a
+    half-width of 8 in redshift: the in-range block was then the entire row,
+    it never "fit" a window shorter than the row, and the evaluator silently
+    fell to its nearest-``W``-by-index truncation on every such row, whatever
+    the galaxies' actual widths.  With the real maximum the block is the
+    galaxies within ``n_sigma`` true widths, and a window sized from the data
+    (:func:`auto_kde_window`) always holds it.  Empty rows report 0.
+    """
+    real = jnp.isfinite(log_kw_raw)
+    return jnp.max(jnp.where(real, sig_eff, 0.0), axis=1)
+
+
+def _fused_log_kw_eff(log_kw_safe, sig_eff):
+    """``log_kw - log(sig_eff) - log sqrt(2 pi)`` with the ``-1e30`` padding
+    sentinel preserved EXACTLY (``-1e30 - O(10)`` already rounds to ``-1e30``
+    in f64, but the select makes the contract explicit rather than incidental)."""
+    live = log_kw_safe > _KERNEL_PIN_SENTINEL_CUT
+    return jnp.where(
+        live, log_kw_safe - jnp.log(sig_eff) - _HALF_LOG_2PI, -1e30
+    )
+
+
+def _pinned_kernel_state(cosmo, survey, em_catalog, pinned, log_g_grid, z_depth,
+                         kde_window=None):
     """This proposal's kernel state from the pin: one scalar shift + the probe.
 
     The whole per-galaxy Gauss-Legendre quadrature was done once at
@@ -922,15 +1061,23 @@ def _pinned_kernel_state(cosmo, survey, em_catalog, pinned, log_g_grid, z_depth)
     ok = jnp.all(
         jnp.where(compared, jnp.abs(probe_kw - want), 0.0) <= KERNEL_PIN_TOL
     )
+    log_kw_eff = getattr(pinned, "log_kw_eff", None)
+    if log_kw_eff is None:
+        log_kw_eff = _fused_log_kw_eff(pinned.log_kw, pinned.sig_eff)
+    # ``-1e30 + shift`` is exactly ``-1e30`` in f64 (|shift| < 10), so the
+    # padding sentinel survives the shift on both fused and unfused arrays.
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=pinned.log_kw + shift,
         sig_eff=pinned.sig_eff, log_sig_eff=pinned.log_sig_eff,
         volume_weighted=False, z_depth=z_depth,
         log_depth_mass=pinned.log_depth_mass,
         sig_eff_row_max=pinned.sig_eff_row_max,
-        rows_sorted=_resolve_rows_sorted_guard(em_catalog.zgals, em_catalog.ngals),
+        rows_sorted=_resolve_rows_sorted_guard(
+            em_catalog.zgals, em_catalog.ngals, kde_window),
         row_empty=pinned.row_empty,
         pin_ok=ok,
+        log_kw_eff=log_kw_eff + shift,
+        kde_window=_static_window(kde_window),
     )
 
 
@@ -963,6 +1110,7 @@ def catalog_kernel_state(
     volume_weighted: bool = False,
     z_depth=None,
     pinned: "PinnedKernelQuadrature | None" = None,
+    kde_window=None,
 ) -> CatalogKernelState:
     """Precompute per-galaxy kernel quantities once per parameter proposal.
 
@@ -976,12 +1124,16 @@ def catalog_kernel_state(
     ``pinned`` short-circuits the whole quadrature to the closed-form H0 shift
     (:class:`PinnedKernelQuadrature`).  ``volume_weighted`` kernels never form
     ``Z_i`` at all, so the pin is inert for them.
+
+    ``kde_window`` (a concrete Python int or ``None``, never traced) pins the
+    static per-sample window this state is evaluated with; ``None`` defers to
+    the process-global :func:`configure_catalog_kde_window` size.
     """
     if log_g_grid is None:
         log_g_grid = log_galaxy_measure_grid(cosmo, survey)
     if pinned is not None and not volume_weighted:
         return _pinned_kernel_state(
-            cosmo, survey, em_catalog, pinned, log_g_grid, z_depth)
+            cosmo, survey, em_catalog, pinned, log_g_grid, z_depth, kde_window)
     zgals, dzgals, wgals = em_catalog.zgals, em_catalog.dzgals, em_catalog.wgals
     ngals = em_catalog.ngals
 
@@ -1009,9 +1161,11 @@ def catalog_kernel_state(
         log_sig_eff=jnp.log(sig_eff),
         volume_weighted=volume_weighted, z_depth=z_depth,
         log_depth_mass=log_depth_mass,
-        sig_eff_row_max=jnp.max(sig_eff, axis=1),
-        rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
+        sig_eff_row_max=_real_row_max(sig_eff, log_kw),
+        rows_sorted=_resolve_rows_sorted_guard(zgals, ngals, kde_window),
         row_empty=row_empty,
+        log_kw_eff=_fused_log_kw_eff(log_kw_safe, sig_eff),
+        kde_window=_static_window(kde_window),
     )
 
 
@@ -1058,6 +1212,7 @@ def build_pinned_kernel_quadrature(
         log_depth_mass=state.log_depth_mass,
         row_empty=state.row_empty,
         probe_rows=probe_rows,
+        log_kw_eff=state.log_kw_eff,
     )
 
 
@@ -1128,6 +1283,7 @@ def marked_catalog_kernel_state(
     log_h: jnp.ndarray,
     log_g_grid: jnp.ndarray | None = None,
     z_depth=None,
+    kde_window=None,
 ):
     """Marked per-galaxy kernel state + per-row marked total ``log_N_host``.
 
@@ -1167,9 +1323,11 @@ def marked_catalog_kernel_state(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
         log_sig_eff=jnp.log(sig_eff),
         log_depth_mass=log_depth_mass, z_depth=z_depth,
-        sig_eff_row_max=jnp.max(sig_eff, axis=1),
-        rows_sorted=_resolve_rows_sorted_guard(zgals, ngals),
+        sig_eff_row_max=_real_row_max(sig_eff, log_kw),
+        rows_sorted=_resolve_rows_sorted_guard(zgals, ngals, kde_window),
         row_empty=row_empty,
+        log_kw_eff=_fused_log_kw_eff(log_kw_safe, sig_eff),
+        kde_window=_static_window(kde_window),
     ), log_N_host
 
 
@@ -1217,7 +1375,7 @@ def eval_log_catalog_prior_state(
     view you bind (:func:`attest_rows_sorted_for_windowing`), or disable
     windowing with ``configure_catalog_kde_window(size=None)``.
     """
-    window = _KDE_WINDOW_SIZE
+    window = _effective_kde_window(getattr(state, "kde_window", None))
     use_window = (
         window is not None
         and state.sig_eff_row_max is not None
@@ -1245,21 +1403,28 @@ def eval_log_catalog_prior_state(
         # vector, never the full row).  Padded slots carry log_kw = -1e30
         # (sanitized at state build time), so plain logsumexp is gradient-safe
         # even for all-padding windows.
-        def _win(a):
+        def _gather(a):
             return lax.dynamic_slice(a, (pix_i, start), (1, window))[0]
-
-        zs = _win(em_catalog.zgals)
-        log_kw = _win(state.log_kw)
-        sig = _win(state.sig_eff)
-        log_sig = _win(state.log_sig_eff) if state.log_sig_eff is not None else jnp.log(sig)
     else:
-        zs = em_catalog.zgals[pix]
-        log_kw = state.log_kw[pix]
-        sig = state.sig_eff[pix]
-        log_sig = state.log_sig_eff[pix] if state.log_sig_eff is not None else jnp.log(sig)
+        def _gather(a):
+            return a[pix]
+
+    log_kw_eff = getattr(state, "log_kw_eff", None)
+    zs = _gather(em_catalog.zgals)
+    sig = _gather(state.sig_eff)
     d = (z - zs) / sig
-    log_gauss = -0.5 * d * d - log_sig - _HALF_LOG_2PI
-    log_mix = logsumexp(log_kw + log_gauss)
+    if log_kw_eff is not None:
+        # Three gathers: the sample-independent part of every galaxy's log
+        # kernel term was fused at state-build time (``log_kw_eff``), so the
+        # per-galaxy work here is one subtraction, one division, one FMA.
+        log_mix = logsumexp(_gather(log_kw_eff) - 0.5 * d * d)
+    else:
+        # Hand-built state without the fused array: the historical arithmetic.
+        log_kw = _gather(state.log_kw)
+        log_sig = (_gather(state.log_sig_eff) if state.log_sig_eff is not None
+                   else jnp.log(sig))
+        log_gauss = -0.5 * d * d - log_sig - _HALF_LOG_2PI
+        log_mix = logsumexp(log_kw + log_gauss)
     # The build-time -1e30 sanitize makes plain logsumexp gradient-safe but
     # would return a finite ~-1e30 for an empty pixel; restore the exact -inf
     # contract with one per-row scalar select (zero gradient on empty rows,

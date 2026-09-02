@@ -223,6 +223,49 @@ gather-bound on a GPU and `exp`-bound on a CPU — and on a CPU box pass explici
 plan is a single pass on non-GPU backends and a dense catalog then exceeds host
 RAM.
 
+## The per-sample catalog KDE: window sized from the data, injections sorted by pixel
+
+The dark-siren redshift prior evaluates, for every PE sample and every
+injection, a Gaussian mixture over the galaxies of the sample's pixel row. On a
+CPU it is ~85% of a dark-siren likelihood call once the kernel quadrature is
+pinned; on a GPU it is gather-bound (each sample reads its window of the row
+arrays). Three exact changes:
+
+* **Window sized from the data, never truncating.** The static window `W` used
+  to be a fixed 1024. The factory now sizes it from the bound catalogs
+  (`redshift.catalog.auto_kde_window`): the largest number of galaxies any row
+  holds within `n_sigma` row-max kernel widths at the widest `sigma_kde` the run
+  can reach (its fixed value, or the prior's upper bound when it is sampled),
+  plus one, rounded up to a multiple of 64. Every sample's in-range block then
+  fits, so the evaluator evaluates exactly the galaxies within `n_sigma` widths
+  and never falls to its nearest-`W`-by-index truncation. MEASURED on a
+  DESI-like mixed spectro+photo catalog (73% of widths in [0.02, 0.10], 2158
+  galaxies per row) the old fixed window moved `log p_cat` by 0.17 nats on
+  average and 0.36 at worst against the full-row evaluator, coherently in one
+  direction; the data-sized window reproduces the full row. When the data-sized
+  window exceeds 1024 the factory warns, because a dense photo-z catalog then
+  pays for the exact answer; `--kde_window` pins it, `--kde_window 0` is the
+  full-row escape hatch. The row-max width itself was also wrong: it was taken
+  over the padded row (`dzgals` pads at 1.0), so every row shorter than `N_max`
+  reported a half-width of 8 in redshift and the block never fit a window
+  shorter than the row. It is now the maximum over the real galaxies.
+* **Three gathers instead of four.** `CatalogKernelState.log_kw_eff` fuses
+  `log_kw - log(sigma_eff) - log sqrt(2 pi)` at state-build time, so the
+  evaluator gathers `z_i`, `sigma_i` and that array, and the per-galaxy work is
+  one subtraction, one division and one FMA before the `logsumexp`. Same
+  arithmetic up to re-association.
+* **Injections sorted by pixel.** The factory permutes every per-injection
+  array by the compact pixel index (a stable sort) so consecutive samples
+  re-read the same row and the gathers hit cache. The selection integral is a
+  sum over injections, so the order changes only the floating-point
+  association of the batched `logsumexp`.
+
+MEASURED on a 4-core CPU with the nside-16 mock of the previous section (3072
+rows × 2158, 64 events × 4096 samples, 839k injections, H0 the only sampled
+label): 7.07 s/call → 5.01 s/call (1.41×), log-likelihoods bit-identical at
+five prior draws. The pixel sort alone was 1010 → 770 ms per 131k injections
+of KDE evaluation.
+
 ## The likelihood closure is jitted
 
 The callable returned by `make_likelihood` / `_make_mixture_likelihood` /
