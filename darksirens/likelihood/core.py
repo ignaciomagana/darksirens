@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, NamedTuple
+
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -201,6 +203,64 @@ _PREPARE_STATE_COMPARED_EMCATALOG_FIELDS = tuple(
 # cosmo-only vector and its trace must stay untouched; ``bright_sirens`` returns
 # ``None`` and its PE model already differs from the spectral selection model.
 _SHAREABLE_PRIOR_MODELS = frozenset({"dark_sirens", "dark_sirens_complete"})
+
+
+class FrozenRedshiftPrior(NamedTuple):
+    """Per-sample ``log p(z | pix)`` of every PE sample and every injection,
+    evaluated ONCE at build time for a run whose sampled set cannot move it.
+
+    The dark-siren redshift prior is a pure function of (cosmology, survey
+    block, catalog) and of the sample redshift ``z = z(dL; cosmology)``.  When
+    no cosmology or survey label is sampled -- a population-only run, e.g. the
+    ``run_tinyns_heavy_darksirens_likelihood.sh`` launcher's
+    ``--fix_cosmology true --fix_survey true`` -- every one of those inputs is a
+    run constant, so the per-sample prior is too, and the per-proposal work it
+    represents (the kernel state, the completion curves, the windowed catalog
+    KDE for ~10^6 samples: ~85% of a CPU call) is spent once instead of once
+    per proposal.  Built by ``darksirens.likelihood.factory`` with the SAME
+    functions the live graph would run (``prepare_redshift_prior_state`` +
+    ``eval_redshift_prior_with_state`` on the concrete arrays), so the values
+    are the ones the unfrozen trace computes up to floating-point association.
+
+    SELF-VERIFYING, for the reason the H0 pin is: the decision to freeze is a
+    Python test on the run's sampled LABELS, which is not part of any jit cache
+    key.  ``probe_ref`` holds the fixed cosmology/survey scalars the prior
+    reads (:func:`frozen_prior_probe_vector`); the live graph rebuilds the same
+    vector from the proposal it is handed and poisons the log-likelihood to
+    ``-inf`` unless the two agree exactly (fixed parameters decode to the
+    identical floats every call, so equality is the right test).
+
+    ``log_prior_pe`` / ``log_prior_sel`` are ``(N,)`` for a single catalog and
+    ``(N, K)`` for the K-catalog mixture (the mixture weights may still be
+    sampled: they are combined LIVE with the frozen per-catalog priors).
+    ``log_prior_sel`` is aligned with the injections as the factory hands them
+    to the likelihood (pixel-sorted, padded to the selection batch).
+    """
+    log_prior_pe: Any     # (N_pe,) | (N_pe, K)
+    log_prior_sel: Any    # (N_sel,) | (N_sel, K)
+    probe_ref: Any        # (P,) fixed cosmology + survey scalars at build time
+
+
+#: SurveyParams scalars the redshift prior reads; the probe compares them.
+#: Structural fields (``z_depth``, ``c_mode``, ``wl_params`` ...) are pytree
+#: STRUCTURE and hence part of the jit cache key already.
+_FROZEN_SURVEY_PROBE_FIELDS = (
+    "n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde",
+    "m_lim", "M0hat", "sigma_M",
+)
+
+
+def frozen_prior_probe_vector(cosmo, surveys):
+    """The cosmology + per-catalog survey scalars a :class:`FrozenRedshiftPrior`
+    depends on, as one ``(P,)`` float64 vector (``None`` fields skipped: they are
+    structure, identical between the build and every live call)."""
+    vals = [cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa]
+    for s in surveys:
+        for name in _FROZEN_SURVEY_PROBE_FIELDS:
+            v = getattr(s, name, None)
+            if v is not None:
+                vals.append(v)
+    return jnp.stack([jnp.asarray(v, dtype=jnp.float64) for v in vals])
 
 
 def can_share_redshift_prior_state(pe_model, sel_model, cat_pe, cat_sel) -> bool:
@@ -641,6 +701,12 @@ def darksiren_log_likelihood(
     # sample's in-range galaxy block and one process may hold likelihoods over
     # differently dense catalogs.
     kde_window: int | None = None,
+    # Build-time per-sample redshift prior (:class:`FrozenRedshiftPrior`) for a
+    # run that samples no cosmology / survey / mark label.  A TRACED pytree
+    # operand: its presence (None vs the tuple) is structure, hence part of the
+    # jit cache key, and its values ride in as arguments.  None (default) is the
+    # pre-existing per-proposal evaluation, op for op.
+    frozen_prior: "FrozenRedshiftPrior | None" = None,
     # Comoving-distance interpolation table (``utils.cosmology.rs``), threaded as
     # a jit ARGUMENT and bound as the active table for this trace.  None resolves
     # to whatever is active in the CALLER's scope, so no call site has to know
@@ -940,9 +1006,40 @@ def darksiren_log_likelihood(
     # trace time with it OFF.  Default (empty tuple) shares nothing, so every
     # caller that does not opt in (bright_sirens / WL, and any external caller)
     # keeps its exact legacy trace.
+    frozen = frozen_prior is not None
+    if frozen:
+        # The frozen prior replaces BOTH seams' states.  Its premise is the
+        # factory's (frozen_prior_admissible); what is checked here is what
+        # the graph can check: the paths it cannot serve are refused
+        # statically, the array shapes must match the samples, and the value
+        # premise is re-verified by the probe at the end of the body.
+        if pe_model not in ("dark_sirens", "dark_sirens_complete"):
+            raise ValueError(
+                "frozen_prior is only defined for the catalog models "
+                f"(dark_sirens / dark_sirens_complete); got {pe_model!r}.")
+        if wl_enabled or lss_marginalize or has_counterpart:
+            raise ValueError(
+                "frozen_prior cannot serve weak lensing, an LSS-completion "
+                "member marginalization, or per-event counterparts: each "
+                "changes the redshift prior per member / per event / per "
+                "magnification node.")
+        n_pe = int(gw_pe.dL.shape[0])
+        want_pe = (n_pe,) if n_catalogs == 1 else (n_pe, n_catalogs)
+        if tuple(frozen_prior.log_prior_pe.shape) != want_pe:
+            raise ValueError(
+                f"frozen_prior.log_prior_pe has shape "
+                f"{tuple(frozen_prior.log_prior_pe.shape)}, expected {want_pe} "
+                "(one value per PE sample [per catalog]).")
+        want_probe = frozen_prior_probe_vector(cosmo, surveys_all).shape
+        if tuple(frozen_prior.probe_ref.shape) != tuple(want_probe):
+            raise ValueError(
+                "frozen_prior.probe_ref does not match this run's cosmology / "
+                f"survey structure ({tuple(frozen_prior.probe_ref.shape)} vs "
+                f"{tuple(want_probe)}); it was built for a different run.")
+
     univ_states = []
     sel_states = []
-    for k in range(n_catalogs):
+    for k in range(0 if frozen else n_catalogs):
         state_univ = prepare_redshift_prior_state(
             pe_model, cosmo, surveys_all[k], catalogs_pe_all[k],
             mark_model=_mark_model_for(k), mark_params=mark_params_all[k],
@@ -968,8 +1065,19 @@ def darksiren_log_likelihood(
             )
         univ_states.append(state_univ)
         sel_states.append(state_sel)
-    prior_states_univ = tuple(univ_states)
-    prior_states_sel = tuple(sel_states)
+    prior_states_univ = tuple(univ_states) if not frozen else (None,) * n_catalogs
+    prior_states_sel = tuple(sel_states) if not frozen else (None,) * n_catalogs
+
+    def _frozen_mix(lp):
+        """Per-sample log p_mix(z) from the frozen per-catalog columns: the
+        K = 1 column as is; for K >= 2 the LIVE mixture weights combine the
+        frozen per-catalog priors through the same all--inf-safe logsumexp
+        as ``_eval_prior_mix``."""
+        if n_catalogs == 1:
+            return lp
+        return _mixture_logsumexp(
+            [mixture_log_weights[k] + lp[:, k] for k in range(n_catalogs)]
+        )
 
     def _eval_prior_mix(model, states, z, pix, catalogs):
         """log p(z | pix) for ``model`` across the K-catalog mixture.
@@ -1039,13 +1147,16 @@ def darksiren_log_likelihood(
         def log_prior_z_selection(z, pix, catalogs):
             return _eval_prior_mix(selection_model, states_sel, z, pix, catalogs)
 
-        def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None):
+        def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalogs,
+                                            spin=None, log_prior_vals=None):
             """PE per-sample weight; WL-marginalized when wl_enabled, else standard.
 
             ``catalogs`` is the length-K tuple of per-catalog EMCatalogs; the
             weight kernels pass it (and ``pix``) opaquely through to the
             ``log_prior_z`` closure, which resolves the per-catalog mixture.
-            WL is statically K = 1 (guarded above).
+            WL is statically K = 1 (guarded above).  ``log_prior_vals`` (the
+            frozen path) supplies the per-sample ``log p(z | pix)`` directly, in
+            place of the closure; the weight arithmetic is otherwise identical.
 
             Returns -inf for distances outside the tabulated z(dL) support.  The
             angular factor g(n̂, z) is applied separately in ``_pe_event_fn`` (so WL
@@ -1063,17 +1174,21 @@ def darksiren_log_likelihood(
             """
             supported = (dL >= _dL_lo) & (dL <= _dL_hi)
             dL_c = jnp.clip(dL, _dL_lo, _dL_hi)
+            prior_fn = (
+                log_prior_z if log_prior_vals is None
+                else (lambda z, pix_, catalogs_: log_prior_vals)
+            )
             if not wl_enabled:
                 ldw = log_sample_weight(
                     m1det, q, dL_c, chieff, pix, prior_wt, cosmo, survey, pop_params,
-                    catalogs, log_p_pop, log_prior_z,
+                    catalogs, log_p_pop, prior_fn,
                     spin=spin, dL_grid=_dL_grid,
                 )
             elif wl_backend == WL_BACKEND_LOGNORMAL:
                 ldw = log_sample_weight_wl_lognormal_hermite(
                     m1det, q, dL_c, chieff, pix, prior_wt,
                     cosmo, survey, pop_params, catalogs,
-                    log_p_pop, log_prior_z,
+                    log_p_pop, prior_fn,
                     wl_a, wl_b, u_nodes, log_wH_nodes,
                     spin=spin, dL_grid=_dL_grid,
                 )
@@ -1081,16 +1196,19 @@ def darksiren_log_likelihood(
                 ldw = log_sample_weight_wl_or_standard(
                     m1det, q, dL_c, chieff, pix, prior_wt,
                     cosmo, survey, pop_params, catalogs,
-                    log_p_pop, log_prior_z,
+                    log_p_pop, prior_fn,
                     log_p_wl_fn, mu_nodes, log_w_nodes,
                     wl_enabled=wl_enabled,
                     spin=spin, dL_grid=_dL_grid,
                 )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-        def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None):
+        def log_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None,
+                       log_prior_vals=None):
             """Selection weight in the canonical ``(m1det, q, dL, chieff)`` variables."""
             def _selection_prior(z, pix, catalogs):
+                if log_prior_vals is not None:
+                    return log_prior_vals
                 return log_prior_z_selection(z, pix, catalogs)
 
             # Same clamped-distance treatment as the PE weights (see above):
@@ -1118,21 +1236,70 @@ def darksiren_log_likelihood(
                 )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-        def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None):
+        def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None,
+                          log_prior_vals=None):
             """PE weight in the same ``(m1det, q, dL)`` variables as selection."""
             return _log_sample_weight_if_supported(
-                m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=spin
+                m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=spin,
+                log_prior_vals=log_prior_vals,
             )
 
-        log_mu, Neff, _log_sigma2 = compute_selection_term(
-            gw_sel,
-            catalogs_sel_all,
-            log_weight,
-            Ndraw,
-            nEvents,
-            sel_batch_size=sel_batch_size,
-            sky_log_weight_fn=sky_log_weight_fn,
-        )
+        if frozen:
+            # Frozen prior: the injections' log p(z | pix) is a per-sample
+            # operand, sliced alongside the injection arrays.  The reduction
+            # goes through ``selection_reduce_from_ldw_provider`` -- the SAME
+            # per-batch (logsumexp, logsumexp(2x)) accumulation, batch combine
+            # and _lse_to_log_mu_neff as ``compute_selection_term`` -- with a
+            # provider that reproduces ``_batch_lse`` mask for mask: the
+            # weight's own supported/finite mask, then the sky factor, then
+            # ``valid & prior_wt > 0``.  Padding (when the caller did not pad)
+            # is the same ``pad_gw_event_to_multiple``; the padded rows carry
+            # ``valid == False`` and never read their (zero) frozen value.
+            gw_sel_f = gw_sel
+            lp_sel = frozen_prior.log_prior_sel
+            if sel_batch_size is not None:
+                gw_sel_f, n_pad = pad_gw_event_to_multiple(gw_sel, sel_batch_size)
+                if n_pad:
+                    lp_sel = jnp.concatenate([
+                        lp_sel,
+                        jnp.zeros((n_pad,) + tuple(lp_sel.shape[1:]), lp_sel.dtype),
+                    ])
+            N_sel_f = int(gw_sel_f.dL.shape[0])
+            if int(lp_sel.shape[0]) != N_sel_f:
+                raise ValueError(
+                    f"frozen_prior.log_prior_sel has {int(lp_sel.shape[0])} rows "
+                    f"for {N_sel_f} (padded) injections; it must be aligned with "
+                    "the injections exactly as they are handed to the likelihood.")
+
+            def _frozen_sel_provider(start, size):
+                sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
+                dL_b = sl(gw_sel_f.dL)
+                pwt_b = sl(gw_sel_f.prior_wt)
+                ldw = log_weight(
+                    sl(gw_sel_f.m1det), sl(gw_sel_f.q), dL_b, sl(gw_sel_f.chieff),
+                    sl(gw_sel_f.pixels), pwt_b, catalogs_sel_all,
+                    spin=sl(gw_sel_f.spin) if gw_sel_f.spin is not None else None,
+                    log_prior_vals=_frozen_mix(sl(lp_sel)),
+                )
+                if sky_log_weight_fn is not None:
+                    ldw = ldw + sky_log_weight_fn(
+                        sl(gw_sel_f.nx), sl(gw_sel_f.ny), sl(gw_sel_f.nz), dL_b)
+                valid = sl(gw_sel_f.valid) & (pwt_b > 0.0)
+                return jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
+
+            log_mu, Neff, _log_sigma2 = selection_reduce_from_ldw_provider(
+                _frozen_sel_provider, N_sel_f, Ndraw, sel_batch_size
+            )
+        else:
+            log_mu, Neff, _log_sigma2 = compute_selection_term(
+                gw_sel,
+                catalogs_sel_all,
+                log_weight,
+                Ndraw,
+                nEvents,
+                sel_batch_size=sel_batch_size,
+                sky_log_weight_fn=sky_log_weight_fn,
+            )
 
         # ----- Per-event PE reduction -------------------------------------
         # Each event contributes log Ẑ_i (importance average over its nsamp PE
@@ -1166,6 +1333,9 @@ def darksiren_log_likelihood(
                 sl(gw_pe.prior_wt),
                 catalogs_pe_all,
                 spin=sl(gw_pe.spin) if gw_pe.spin is not None else None,
+                log_prior_vals=(
+                    _frozen_mix(sl(frozen_prior.log_prior_pe)) if frozen else None
+                ),
             )
             # Angular/3-D factor log g(n̂, z) per sample (skipped when isotropic).
             # Clamped dL for the same reverse-NaN reason as the weight paths.
@@ -1845,6 +2015,16 @@ def darksiren_log_likelihood(
     else:
         ll = _ll_given_states(prior_states_univ, prior_states_sel)
         ll_members = None
+
+    if frozen:
+        # The frozen prior's value premise, re-verified IN THE GRAPH on the
+        # proposal actually served: every cosmology / survey scalar the prior
+        # reads must be the fixed value it was built at.  A violated premise
+        # (a graph compiled for a frozen run replayed with a sampled H0, say)
+        # turns the log-likelihood into -inf instead of a plausible number.
+        live = frozen_prior_probe_vector(cosmo, surveys_all)
+        ok = jnp.all(live == frozen_prior.probe_ref)
+        ll = ll + jnp.where(ok, 0.0, jnp.nan)
 
     logL_total = jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
     if lss_member_diagnostics:

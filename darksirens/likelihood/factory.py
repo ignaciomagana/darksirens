@@ -42,6 +42,8 @@ from darksirens.likelihood.latent_q import (
     on_footprint_mask,
 )
 from darksirens.likelihood.core import (
+    FrozenRedshiftPrior,
+    frozen_prior_probe_vector,
     darksiren_log_likelihood,
     redshift_prior_state_sharing,
     require_view_independent_mu_miss,
@@ -1228,6 +1230,168 @@ def _resolve_kde_window(opts, parameter_decoder, catalogs, n_catalogs):
     return window
 
 
+# ------------------------------------------------------------
+# Build-time frozen redshift prior (population-only runs)
+# ------------------------------------------------------------
+#: Universe models whose redshift prior is a catalog quantity worth freezing.
+_FROZEN_PRIOR_MODELS = ("dark_sirens", "dark_sirens_complete")
+#: Samples per chunk of the build-time evaluation (bounds the windowed KDE's
+#: (chunk, W) transients; the result is chunk-independent).
+_FROZEN_PRIOR_CHUNK = 32768
+
+
+def frozen_prior_admissible(parameter_decoder, universe_model, mark_model,
+                            lss_marginalize) -> bool:
+    """Can this run's per-sample redshift prior be evaluated once at build time?
+
+    Reads the sampled LABELS, never their values (the H0-pin discipline): the
+    prior is a pure function of (cosmology, survey block, marks, catalog) and of
+    ``z(dL; cosmology)``, so it is a run constant iff every sampled label is a
+    population label, a sky-model label (the sky factor is applied outside the
+    prior) or a mixture stick ``fcat_k`` (the sticks combine the frozen
+    per-catalog priors LIVE).  Any cosmology or survey label -- ``H0`` included
+    -- blocks it, as do the marked-host model (``eta`` reweights the kernels),
+    an LSS-completion member marginalization (a prior per member) and every
+    universe model whose prior is not a catalog quantity.
+    """
+    if universe_model not in _FROZEN_PRIOR_MODELS:
+        return False
+    if mark_model not in (None, "none"):
+        return False
+    if lss_marginalize:
+        return False
+    allowed = set(getattr(parameter_decoder, "pop_labels", ()) or ())
+    allowed |= set(getattr(parameter_decoder, "sky_labels", ()) or ())
+    for lbl in getattr(parameter_decoder, "sampled_labels", ()) or ():
+        lbl = str(lbl)
+        if lbl in allowed or lbl.startswith("fcat_"):
+            continue
+        return False
+    return True
+
+
+def _build_frozen_prior(parameter_decoder, universe_model, catalog_sky_weighting,
+                        kde_window, gw_pe, catalogs_pe, gw_sel, catalogs_sel,
+                        n_catalogs, chunk=32768):
+    """Evaluate ``log p(z | pix)`` for every PE sample and injection ONCE.
+
+    Runs the SAME functions the live graph runs -- ``prepare_redshift_prior_state``
+    then ``eval_redshift_prior_with_state`` on the concrete arrays, under the same
+    static window and the same distance / smoothing tables bound the way
+    ``_jit_likelihood_body`` binds them -- at the run's fixed cosmology and survey
+    block (decoded through the run's own decoder), in sample chunks so the
+    windowed KDE's transients stay bounded.  Returns a
+    :class:`~darksirens.likelihood.core.FrozenRedshiftPrior` whose arrays are
+    barriered device constants aligned with ``gw_pe`` / ``gw_sel`` as given
+    (``gw_sel`` already pixel-sorted and padded by the caller).
+    """
+    from darksirens.redshift.completion import (
+        bound_smoothing_operator,
+        smoothing_operator as completion_smoothing_operator,
+    )
+    from darksirens.redshift.prior import eval_redshift_prior_with_state
+    from darksirens.utils.cosmology import (
+        dL_of_z, z_of_dL_precomputed, zgrid as _cosmo_zgrid,
+    )
+    # Resolved through the core module at CALL time (not imported by name) so
+    # the build-time prepare is the same attribute the live graph would call --
+    # and is counted by anything that instruments it.
+    from darksirens.likelihood import core as _core
+
+    chunk = int(_FROZEN_PRIOR_CHUNK if chunk is None else chunk)
+    coord = jnp.full((len(parameter_decoder.sampled_labels),), 0.5)
+    if n_catalogs >= 2:
+        cosmo, surveys = parameter_decoder.decode_mixture(coord)[:2]
+    else:
+        cosmo, survey = parameter_decoder.decode(coord)[:2]
+        surveys = (survey,)
+    surveys = tuple(surveys)
+    distance_table = cosmology.distance_table()
+    smoothing = completion_smoothing_operator()
+
+    def _with_tables(fn):
+        def body(*args):
+            with cosmology.bound_distance_table(args[-2]), \
+                    bound_smoothing_operator(args[-1]):
+                return fn(*args[:-2])
+        j = jax.jit(body)
+        return lambda *args: j(*args, distance_table, smoothing)
+
+    def _prepare(k, em):
+        return _core.prepare_redshift_prior_state(
+            universe_model, cosmo, surveys[k], em,
+            catalog_sky_weighting=catalog_sky_weighting, kde_window=kde_window,
+        )
+
+    def _evaluate(k, state, dL, pix, em):
+        dL_grid = dL_of_z(_cosmo_zgrid, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
+        z = z_of_dL_precomputed(jnp.clip(dL, dL_grid[0], dL_grid[-1]), dL_grid)
+        return eval_redshift_prior_with_state(
+            universe_model, state, z, pix, cosmo, surveys[k], em,
+            catalog_sky_weighting=catalog_sky_weighting,
+        )
+
+    prepare_j = {k: _with_tables(lambda em, k=k: _prepare(k, em)) for k in range(n_catalogs)}
+    evaluate_j = {k: _with_tables(lambda st, dL, pix, em, k=k: _evaluate(k, st, dL, pix, em))
+                  for k in range(n_catalogs)}
+
+    # One state per catalog per SEAM -- or per catalog, when the PE and
+    # selection views provably share it (the same ``is``-identity verdict
+    # ``darksiren_log_likelihood`` applies live, so a union bundle prepares
+    # once, not twice).
+    sel_model = _core.selection_prior_model(universe_model)
+    states_pe = [prepare_j[k](catalogs_pe[k]) for k in range(n_catalogs)]
+    states_sel = [
+        states_pe[k]
+        if _core.can_share_redshift_prior_state(
+            universe_model, sel_model, catalogs_pe[k], catalogs_sel[k])
+        else prepare_j[k](catalogs_sel[k])
+        for k in range(n_catalogs)
+    ]
+
+    def _columns(gw, cats, states):
+        n = int(gw.dL.shape[0])
+        cols = []
+        for k in range(n_catalogs):
+            pix_k = gw.pixels[:, k] if getattr(gw.pixels, "ndim", 1) == 2 else gw.pixels
+            parts = [
+                evaluate_j[k](states[k], gw.dL[i:i + chunk], pix_k[i:i + chunk], cats[k])
+                for i in range(0, n, chunk)
+            ]
+            cols.append(jnp.concatenate(parts) if len(parts) > 1 else parts[0])
+        out = cols[0] if n_catalogs == 1 else jnp.stack(cols, axis=1)
+        return barrier(jax.block_until_ready(out))
+
+    return FrozenRedshiftPrior(
+        log_prior_pe=_columns(gw_pe, catalogs_pe, states_pe),
+        log_prior_sel=_columns(gw_sel, catalogs_sel, states_sel),
+        probe_ref=barrier(frozen_prior_probe_vector(cosmo, surveys)),
+    )
+
+
+def _maybe_freeze_prior(opts, parameter_decoder, universe_model, mark_model,
+                        catalog_sky_weighting, kde_window, gw_pe, catalogs_pe,
+                        gw_sel, catalogs_sel, n_catalogs):
+    """The frozen prior operand for this build, or ``None``.
+
+    ``--freeze_redshift_prior false`` (``opts.freeze_redshift_prior``) is the
+    A/B switch; the default freezes whenever :func:`frozen_prior_admissible`
+    says the sampled set allows it.
+    """
+    if not bool(getattr(opts, "freeze_redshift_prior", True)):
+        return None
+    lss_marginalize = bool(getattr(opts, "lss_marginalize", False))
+    if not frozen_prior_admissible(parameter_decoder, universe_model, mark_model,
+                                   lss_marginalize):
+        return None
+    if any(getattr(c, "zgals", None) is None for c in catalogs_pe + catalogs_sel):
+        return None
+    return _build_frozen_prior(
+        parameter_decoder, universe_model, catalog_sky_weighting, kde_window,
+        gw_pe, tuple(catalogs_pe), gw_sel, tuple(catalogs_sel), n_catalogs,
+    )
+
+
 def _make_mixture_likelihood(
     opts,
     data: dict,
@@ -1711,11 +1875,21 @@ def _make_mixture_likelihood(
          *mixture_em_catalogs_pe, *mixture_em_catalogs_sel),
         n_catalogs,
     )
+    # Build-time frozen redshift prior (population-only runs); None keeps the
+    # per-proposal evaluation.  Built AFTER the window is sized so the frozen
+    # values are the ones the live graph would compute at this window.
+    frozen_prior = _maybe_freeze_prior(
+        opts, parameter_decoder, universe_model, mark_model, catalog_sky_weighting,
+        kde_window, gw_pe, tuple(em_catalogs_pe), gw_sel, tuple(em_catalogs_sel),
+        n_catalogs,
+    )
+    operands = (*operands, frozen_prior)
 
     def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
         (
             gw_pe_, em_catalog_pe_0_, gw_sel_, em_catalog_sel_0_,
             mixture_em_catalogs_pe_, mixture_em_catalogs_sel_,
+            frozen_prior_,
         ) = operands
         if n_catalogs >= 2:
             (
@@ -1781,10 +1955,12 @@ def _make_mixture_likelihood(
             catalog_sky_weighting=catalog_sky_weighting,
             share_prior_state_by_catalog=share_prior_state_by_catalog,
             kde_window=kde_window,
+            frozen_prior=frozen_prior_,
         )
 
     likelihood = _jit_likelihood_body(_body, operands)
     likelihood.kde_window = kde_window
+    likelihood.frozen_redshift_prior = frozen_prior is not None
     return likelihood
 
 
@@ -2347,11 +2523,20 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     attest_rows_sorted_for_windowing(em_catalog_pe, em_catalog_sel)
     kde_window = _resolve_kde_window(
         opts, parameter_decoder, (em_catalog_pe, em_catalog_sel), 1)
+    # Build-time frozen redshift prior (population-only runs); None keeps the
+    # per-proposal evaluation.  Built AFTER the window is sized so the frozen
+    # values are the ones the live graph would compute at this window.
+    frozen_prior = _maybe_freeze_prior(
+        opts, parameter_decoder, universe_model, mark_model, catalog_sky_weighting,
+        kde_window, gw_pe, (em_catalog_pe,), gw_sel, (em_catalog_sel,), 1,
+    )
+    operands = (*operands, frozen_prior)
 
     def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
         (
             gw_pe_, em_catalog_pe_, gw_sel_, em_catalog_sel_,
             wl_a_, wl_b_, wl_z_grid_, wl_log_mu_grid_, wl_log_p_table_,
+            frozen_prior_,
         ) = operands
         cosmo, survey, pop_params, sky_params, mark_params = parameter_decoder.decode(coord)
         if len(pop_params) != len(parameter_decoder.pop_labels):
@@ -2398,6 +2583,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 catalog_sky_weighting=catalog_sky_weighting,
                 share_prior_state_by_catalog=share_prior_state_by_catalog,
             kde_window=kde_window,
+            frozen_prior=frozen_prior_,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -2437,8 +2623,10 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             catalog_sky_weighting=catalog_sky_weighting,
             share_prior_state_by_catalog=share_prior_state_by_catalog,
             kde_window=kde_window,
+            frozen_prior=frozen_prior_,
         )
 
     likelihood = _jit_likelihood_body(_body, operands)
     likelihood.kde_window = kde_window
+    likelihood.frozen_redshift_prior = frozen_prior is not None
     return likelihood

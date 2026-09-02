@@ -1831,6 +1831,16 @@ def build_parser():
                         "auto_kde_window; the former fixed 1024 truncated silently on "
                         "denser rows). A value pins W; 0 disables windowing entirely "
                         "(full-row escape hatch for A/B validation).")
+    g.add_argument("--freeze_redshift_prior", type=str_to_bool, default=True, metavar="BOOL",
+                   help="Evaluate the per-sample catalog redshift prior ONCE at build time "
+                        "when no cosmology, survey or mark label is sampled (a "
+                        "population-only run): the prior is then a run constant, so the "
+                        "per-proposal kernel state, completion curves and windowed KDE "
+                        "over every PE sample and injection are spent once instead of "
+                        "once per proposal. Re-verified in the graph on every call "
+                        "(-inf if the fixed values ever differ). false keeps the "
+                        "per-proposal evaluation (A/B switch). Inert when any of those "
+                        "labels is sampled.")
     g.add_argument("--kde_window_nsigma", type=float, default=None, metavar="X",
                    help="Half-width multiplier for the KDE window: contributing galaxies "
                         "are located within +/- X * max_row(sigma_eff) of the sample "
@@ -4077,6 +4087,11 @@ def _build_likelihood(opts, data, pspace, fixed_parameter_values):
         fixed_parameter_values = fixed_parameter_values,
     )
     _ok("Likelihood closure ready.")
+    if getattr(likelihood, "kde_window", None) is not None:
+        _ok(f"Catalog KDE window: {likelihood.kde_window} galaxies (sized from the data).")
+    if getattr(likelihood, "frozen_redshift_prior", False):
+        _ok("Redshift prior: FROZEN at build time (no cosmology / survey / mark "
+            "label is sampled); per proposal only the population term is evaluated.")
     _end()
     return likelihood
 
