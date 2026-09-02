@@ -196,6 +196,33 @@ Peak memory is a **per-process** statistic, so the calibration stays valid even
 when the box is shared with another job (only the secondary *timing* numbers get
 noisy under contention).
 
+## Timing one likelihood call
+
+`scripts/benchmarks/bench_likelihood_call.py` builds the likelihood with the
+CLI's own phase functions (option resolution, data load, parameter space,
+factory) and times the compiled callable on a fixed set of prior draws,
+recording the log-likelihood values so a candidate build can be compared with a
+base build for speed and value drift in one command each:
+
+```bash
+python scripts/benchmarks/bench_likelihood_call.py --tag base --out base.json -- \
+    --gw_path GW.h5 --gwselection_path SEL.h5 --survey_path CAT.h5 \
+    --universe_model dark_sirens --pop_model powerlaw+peak --sampler dynesty \
+    --fix_population true --fix_survey true --fix_de true \
+    --fixed_parameter_values '{"Om0": 0.3075}' --save_path /tmp/bench_run
+python scripts/benchmarks/bench_likelihood_call.py --tag cand --compare base.json -- ...
+```
+
+`--components` additionally times the per-proposal state build, the
+population/Jacobian kernel, the redshift-prior evaluation and the catalog KDE
+on the PE and selection sets as isolated jits (the prepared state is passed as
+an argument, so a consumer is timed without its producer). Report the backend:
+CPU and GPU profiles differ qualitatively — the windowed catalog KDE is
+gather-bound on a GPU and `exp`-bound on a CPU — and on a CPU box pass explicit
+`--sel_batch_size` / `--pe_event_block` / `--row_chunk 256`, because the auto
+plan is a single pass on non-GPU backends and a dense catalog then exceeds host
+RAM.
+
 ## The likelihood closure is jitted
 
 The callable returned by `make_likelihood` / `_make_mixture_likelihood` /
