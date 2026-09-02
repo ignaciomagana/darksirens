@@ -259,6 +259,19 @@ arrays). Three exact changes:
   re-read the same row and the gathers hit cache. The selection integral is a
   sum over injections, so the order changes only the floating-point
   association of the batched `logsumexp`.
+* **One binary search per sample.** The window used to be located with three
+  dependent searches (the in-range block's two edges and the sample's
+  insertion index) followed by a fit test that shifted the window onto the
+  block. It is now the `W` index-nearest galaxies centred on the insertion
+  index — one search — and exactness moved into the SIZING:
+  `recommended_kde_window` returns twice the largest ONE-sided count of
+  galaxies within `n_sigma` row-max widths (capped at the row length), which is
+  the smallest `W` for which the centred window provably holds every galaxy
+  within `n_sigma` widths of any sample. For an evenly populated row that is
+  the same count as the two-sided block; only a sample beside a dense clump
+  pays for the clump on both sides. The three searches were ~19% of the
+  windowed evaluation on a CPU, and dependent scalar gathers are latency-bound
+  on a GPU.
 
 MEASURED on a 4-core CPU with the nside-16 mock of the previous section (3072
 rows × 2158, 64 events × 4096 samples, 839k injections, H0 the only sampled

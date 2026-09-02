@@ -1842,10 +1842,11 @@ def build_parser():
                         "per-proposal evaluation (A/B switch). Inert when any of those "
                         "labels is sampled.")
     g.add_argument("--kde_window_nsigma", type=float, default=None, metavar="X",
-                   help="Half-width multiplier for the KDE window: contributing galaxies "
-                        "are located within +/- X * max_row(sigma_eff) of the sample "
-                        "(default 8). The half-width is traced (sigma_kde is sampled); "
-                        "only the window SIZE W is static.")
+                   help="Sizing multiplier for the KDE window: the window must hold every "
+                        "galaxy within X * max_row(sigma_eff) of a sample (default 8; "
+                        "the kernel mass beyond it is < exp(-32) per galaxy). Enters "
+                        "only the build-time sizing of W; the evaluator performs one "
+                        "binary search per sample and no width arithmetic.")
     g.add_argument("--row_chunk", default=None, metavar="auto|off|N",
                    help="Row-chunking for catalog kernel-state builds "
                         "(lax.map over N-row chunks instead of one full vmap). "

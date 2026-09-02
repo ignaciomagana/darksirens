@@ -189,9 +189,9 @@ def test_state_window_overrides_the_process_global_one():
     calls = []
     orig = C._sorted_row_window_start
 
-    def spy(zgals, pix_i, z_i, half, n_real, window):
+    def spy(zgals, pix_i, z_i, n_real, window):
         calls.append(int(window))
-        return orig(zgals, pix_i, z_i, half, n_real, window)
+        return orig(zgals, pix_i, z_i, n_real, window)
 
     st = C.catalog_kernel_state(COSMO, _survey(0.0), cat, kde_window=128)
     C.configure_catalog_kde_window(512)
