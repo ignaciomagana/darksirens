@@ -296,6 +296,8 @@ def main():
         "n_rows": None if zg is None else int(np.asarray(zg).shape[0]),
         "n_max": None if zg is None else int(np.asarray(zg).shape[1]),
         "sel_batch_size": opts.sel_batch_size, "pe_event_block": opts.pe_event_block,
+        "kde_window": getattr(likelihood, "kde_window", None),
+        "frozen_redshift_prior": bool(getattr(likelihood, "frozen_redshift_prior", False)),
         "t_load_s": b.t_load, "t_build_s": b.t_build, "t_first_call_s": t_first,
         "t_call_median_s": float(np.median(times)), "t_call_min_s": float(np.min(times)),
         "t_call_mean_s": float(np.mean(times)), "t_call_std_s": float(np.std(times)),
@@ -306,7 +308,8 @@ def main():
     print(f"[{a.tag}] backend={summary['backend']} labels={summary['labels']}")
     print(f"  nEvents={summary['nEvents']} nsamp={summary['nsamp']} n_sel={summary['n_sel']:,} "
           f"rows={summary['n_rows']} n_max={summary['n_max']} "
-          f"sel_batch={summary['sel_batch_size']} pe_block={summary['pe_event_block']}")
+          f"sel_batch={summary['sel_batch_size']} pe_block={summary['pe_event_block']} "
+          f"kde_window={summary['kde_window']} frozen_prior={summary['frozen_redshift_prior']}")
     print(f"  load {b.t_load:.1f}s  build {b.t_build:.1f}s  first call (compile+run) {t_first:.1f}s")
     print(f"  call: median {np.median(times) * 1e3:.1f} ms  min {np.min(times) * 1e3:.1f} ms  "
           f"mean {np.mean(times) * 1e3:.1f} +- {np.std(times) * 1e3:.1f} ms  (n={a.n_calls})")

@@ -223,6 +223,22 @@ gather-bound on a GPU and `exp`-bound on a CPU — and on a CPU box pass explici
 plan is a single pass on non-GPU backends and a dense catalog then exceeds host
 RAM.
 
+When `Om0` (or `w0`/`wa`/`delta`/`sigma_kde`) is sampled the kernel H0 pin is
+off and the per-galaxy Gauss-Legendre kernel norms are rebuilt every proposal.
+MEASURED on the 4-core CPU mock (3072 rows × 2158, 839k injections, `H0`+`Om0`
+sampled): 22.4 s/call on master → 19.2 s/call with the window changes above,
+and **75 %** of what remains (13.9 s of 18.6 s, by ablation) is that quadrature:
+two norms per galaxy (the full one and the below-depth one), 24 nodes each, so
+~320 M evaluations of `log_interp_zgrid` on the `dV_c/dz` grid. On XLA:CPU that
+interpolation — four gathers from an 8 KB table per node — is ~90 % of the
+norm's cost and `ndtri` most of the rest; on a GPU both are cheap and the
+profile will differ. Nothing in that quadrature is exact to skip on the dense
+padded layout (the compact-real-slots variant is bit-identical and buys only
+the padding fraction, 24 % on this mock, 3 % on its fullest rows), and its node
+positions are cosmology-independent only at the price of holding
+`2 × 24 × N_gal` doubles. Re-measure with `--components` on the H100 before
+touching it.
+
 ## The per-sample catalog KDE: window sized from the data, injections sorted by pixel
 
 The dark-siren redshift prior evaluates, for every PE sample and every
@@ -259,6 +275,19 @@ arrays). Three exact changes:
   re-read the same row and the gathers hit cache. The selection integral is a
   sum over injections, so the order changes only the floating-point
   association of the batched `logsumexp`.
+* **One binary search per sample.** The window used to be located with three
+  dependent searches (the in-range block's two edges and the sample's
+  insertion index) followed by a fit test that shifted the window onto the
+  block. It is now the `W` index-nearest galaxies centred on the insertion
+  index — one search — and exactness moved into the SIZING:
+  `recommended_kde_window` returns twice the largest ONE-sided count of
+  galaxies within `n_sigma` row-max widths (capped at the row length), which is
+  the smallest `W` for which the centred window provably holds every galaxy
+  within `n_sigma` widths of any sample. For an evenly populated row that is
+  the same count as the two-sided block; only a sample beside a dense clump
+  pays for the clump on both sides. The three searches were ~19% of the
+  windowed evaluation on a CPU, and dependent scalar gathers are latency-bound
+  on a GPU.
 
 MEASURED on a 4-core CPU with the nside-16 mock of the previous section (3072
 rows × 2158, 64 events × 4096 samples, 839k injections, H0 the only sampled
@@ -293,6 +322,16 @@ injections, powerlaw+peak fully sampled, cosmology and survey fixed): 7.38 s/cal
 → 3.19 s/call (2.3×), log-likelihood bit-identical at the fiducial population.
 What remains is the population term itself — dominated by the exact per-sample
 `q`-quadrature of the pairing normaliser — and the reductions.
+
+That quadrature was profiled on its own (`N = 262144` samples, `beta` sampled so
+`q**beta` is a real power, 4-core CPU): 439 ms per call, of which evaluating the
+200-node integrand is 420 ms (`sfilter_low` at the nodes 190 ms, `q**beta` at the
+nodes 248 ms). Reformulations that keep the 200-node trapezoid rule — materialising
+the node grid once behind an optimization barrier, a reciprocal in place of the
+per-node division, `exp(beta log q)` spelled out — were all *slower* (464–549 ms)
+at ≤ 3e-14 relative: XLA already fuses the grid's max and sum into one pass, so
+the node evaluation is the floor of this rule. Changing the cost means changing
+the rule (`--pairing_norm_grid`, opt-in), which changes the numbers.
 
 ## The likelihood closure is jitted
 

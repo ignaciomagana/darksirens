@@ -1829,8 +1829,11 @@ def build_parser():
                         "value, or the prior's upper bound when sampled), so the "
                         "evaluator never truncates (darksirens.redshift.catalog."
                         "auto_kde_window; the former fixed 1024 truncated silently on "
-                        "denser rows). A value pins W; 0 disables windowing entirely "
-                        "(full-row escape hatch for A/B validation).")
+                        "denser rows). A value pins W: the window is centred on the "
+                        "sample by index and not repositioned, so a W below the "
+                        "data-sized one TRUNCATES the catalog prior (warned at build). "
+                        "0 disables windowing entirely (full-row escape hatch for A/B "
+                        "validation).")
     g.add_argument("--freeze_redshift_prior", type=str_to_bool, default=True, metavar="BOOL",
                    help="Evaluate the per-sample catalog redshift prior ONCE at build time "
                         "when no cosmology, survey or mark label is sampled (a "
@@ -1842,10 +1845,11 @@ def build_parser():
                         "per-proposal evaluation (A/B switch). Inert when any of those "
                         "labels is sampled.")
     g.add_argument("--kde_window_nsigma", type=float, default=None, metavar="X",
-                   help="Half-width multiplier for the KDE window: contributing galaxies "
-                        "are located within +/- X * max_row(sigma_eff) of the sample "
-                        "(default 8). The half-width is traced (sigma_kde is sampled); "
-                        "only the window SIZE W is static.")
+                   help="Sizing multiplier for the KDE window: the window must hold every "
+                        "galaxy within X * max_row(sigma_eff) of a sample (default 8; "
+                        "the kernel mass beyond it is < exp(-32) per galaxy). Enters "
+                        "only the build-time sizing of W; the evaluator performs one "
+                        "binary search per sample and no width arithmetic.")
     g.add_argument("--row_chunk", default=None, metavar="auto|off|N",
                    help="Row-chunking for catalog kernel-state builds "
                         "(lax.map over N-row chunks instead of one full vmap). "

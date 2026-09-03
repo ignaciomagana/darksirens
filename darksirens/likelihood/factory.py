@@ -1201,7 +1201,9 @@ def _sigma_kde_upper_bound(opts, parameter_decoder, surveys):
 def _resolve_kde_window(opts, parameter_decoder, catalogs, n_catalogs):
     """The static per-sample catalog-KDE window for this build.
 
-    An explicit ``--kde_window`` wins (``0`` = full row).  Otherwise the window
+    An explicit ``--kde_window`` wins (``0`` = full row; a value below the
+    data-sized window is honoured with a warning, since the centred window
+    then truncates).  Otherwise the window
     is SIZED FROM THE DATA: the largest galaxy count any bound row holds within
     ``n_sigma`` row-max kernel widths at the widest ``sigma_kde`` the run can
     reach (:func:`darksirens.redshift.catalog.auto_kde_window`), so every
@@ -1213,14 +1215,29 @@ def _resolve_kde_window(opts, parameter_decoder, catalogs, n_catalogs):
     the data-sized window exceeds that old default the cost goes up with it;
     say so, because a dense photo-z catalog then pays for the exact answer.
     """
-    explicit = getattr(opts, "kde_window", None)
-    if explicit is not None:
-        return None if int(explicit) == 0 else int(explicit)
+    import warnings
     from darksirens.redshift.catalog import auto_kde_window, _KDE_WINDOW_NSIGMA
 
+    explicit = getattr(opts, "kde_window", None)
+    if explicit is not None and int(explicit) == 0:
+        return None
     _, surveys = _reference_params(parameter_decoder, n_catalogs)
     sigma_kde_max = _sigma_kde_upper_bound(opts, parameter_decoder, surveys)
     window = auto_kde_window(catalogs, sigma_kde_max, n_sigma=_KDE_WINDOW_NSIGMA)
+    if explicit is not None:
+        # A pinned W is centred by index and never repositioned to fit a
+        # block: below the data-sized window it TRUNCATES.  Say so.
+        if window is not None and int(explicit) < window:
+            warnings.warn(
+                f"--kde_window {int(explicit)} is below the data-sized window "
+                f"{window} (widest sigma_kde {sigma_kde_max:g}, n_sigma "
+                f"{_KDE_WINDOW_NSIGMA:g}): the catalog prior will be evaluated "
+                "on the W index-nearest galaxies only, which truncates the "
+                "in-range block on the densest rows. Unset it to size from "
+                "the data.",
+                RuntimeWarning, stacklevel=3,
+            )
+        return int(explicit)
     if window is None:
         return None
     n_max = max(
@@ -1228,7 +1245,6 @@ def _resolve_kde_window(opts, parameter_decoder, catalogs, n_catalogs):
         if getattr(c, "zgals", None) is not None and getattr(c.zgals, "ndim", 0) == 2
     )
     if window > 1024:
-        import warnings
         warnings.warn(
             f"catalog KDE window sized from the data: {window} galaxies "
             f"(rows hold up to {n_max}; widest sigma_kde {sigma_kde_max:g}, "

@@ -198,21 +198,23 @@ def _resolve_row_chunk(n_rows: int, n_max: int) -> int | None:
 # samples that materialises (N_samp, N_max) transients per event even though at
 # sigma_eff ~ 0.02 the kernel support is a few percent of the row's redshift
 # range.  When the catalog rows are z-sorted (the load-time invariant
-# established by ``darksirens.catalogs.io.sort_survey_rows_by_z``), a binary
-# search locates the galaxies within +/- n_sigma * max(sigma_eff) of the sample
-# and only a STATIC-size window of W galaxies is gathered and evaluated.
+# established by ``darksirens.catalogs.io.sort_survey_rows_by_z``), ONE binary
+# search locates the sample's insertion index in the row and only a
+# STATIC-size window of the W index-nearest galaxies, centred there, is
+# gathered and evaluated (``_sorted_row_window_start``).
 #
-# W is static (jit-compatible); the half-width is a TRACED quantity derived
-# from the row's max sigma_eff (sigma_kde is a sampled parameter, so kernel
-# widths are not compile-time constants).  The window start is centred on the
-# in-range galaxy block, so when the block fits in W it is covered entirely,
-# when it overflows the truncation is symmetric, and when it is empty the
-# window straddles the insertion point (nearest galaxies on both sides keep
-# the far-tail evaluation finite).  Windows containing zero real galaxies go
-# through the same logsumexp path as empty full rows (log_kw is sanitized
-# to -1e30 at state build time, so plain logsumexp has finite gradients).
+# W is static (jit-compatible) and is what carries the accuracy contract: sized
+# by ``recommended_kde_window`` -- twice the largest one-sided count of galaxies
+# within n_sigma * max_row(sigma_eff) at the widest sigma_kde the run can reach,
+# which is what the likelihood factory does through ``auto_kde_window`` -- the
+# centred window provably holds every galaxy within n_sigma widths of any
+# sample, so the evaluator never truncates inside the contract.  A sample beyond
+# the row's support straddles the nearest galaxies (far-tail evaluations stay
+# finite); windows containing zero real galaxies go through the same logsumexp
+# path as empty full rows (log_kw is sanitized to -1e30 at state build time, so
+# plain logsumexp has finite gradients).
 _KDE_WINDOW_SIZE = 1024                # static window size W; None = full row
-_KDE_WINDOW_NSIGMA: float = 8.0        # half-width = n_sigma * max(sig_eff)
+_KDE_WINDOW_NSIGMA: float = 8.0        # sizing multiplier: n_sigma * max(sig_eff)
 
 
 def configure_catalog_kde_window(size=1024, n_sigma=8.0):
@@ -223,13 +225,20 @@ def configure_catalog_kde_window(size=1024, n_sigma=8.0):
 
     ``size`` is the static window length W (galaxies gathered per sample);
     ``None`` disables windowing entirely — the full-row escape hatch for A/B
-    validation.  ``n_sigma`` scales the traced half-width
-    ``n_sigma * max_row(sigma_eff)`` used to locate contributing galaxies.
-    The default (W=1024, n_sigma=8) holds max |delta log p_cat| < 1e-6 against
-    the full-row evaluator across the ENTIRE sampled sigma_kde prior
-    [0, 0.05] on a realistic 2113-galaxy row (see
-    tests/test_catalog_kde_window.py); W=384 matches the external review's
-    fiducial-only table but is NOT safe at the wide end of the prior.
+    validation.  ``n_sigma`` is the SIZING multiplier: the window must hold
+    every galaxy within ``n_sigma * max_row(sigma_eff)`` of a sample
+    (:func:`recommended_kde_window` / :func:`auto_kde_window` size it so).
+    The likelihood factory sizes the window from the bound catalogs and
+    threads it statically (``CatalogKernelState.kde_window``); this
+    process-global size is the fallback for direct callers.  A fixed W that is
+    smaller than the data-sized one truncates: the window is CENTRED on the
+    sample's insertion index (one binary search), so it holds the W
+    index-nearest galaxies and nothing repositions it to fit a block --
+    exactness is entirely the sizing's job.  Measured:
+    W=1024 held max |delta log p_cat| < 1e-6 against the full-row evaluator on
+    a 2113-galaxy spectroscopic row across the sampled sigma_kde prior
+    [0, 0.05] (tests/test_catalog_kde_window.py) but moved it by 0.17 nats on
+    average on a DESI-like mixed spectro+photo row of the same length.
 
     Windowing additionally requires rows verified z-sorted (see
     ``_rows_sorted_for_windowing``); catalogs loaded with
@@ -251,16 +260,30 @@ def configure_catalog_kde_window(size=1024, n_sigma=8.0):
 def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     """Data-driven window size for :func:`configure_catalog_kde_window`.
 
-    Returns the maximum number of galaxies any interval of length
-    ``2 * n_sigma * max_row(sigma_eff)`` contains, over every row and every
-    interval position, evaluated at the WIDEST kernel the sampled prior
-    admits (``sigma_kde_max``; the prior upper bound in
-    ``darksirens/inference/prior.py``, 0.05 by default).  A window at least
-    this large keeps the nearest-neighbour truncation beyond ``n_sigma`` on
-    both sides for every sample; at the default ``n_sigma=6`` the truncated
-    kernel mass is < 2e-9 per galaxy, comfortably inside the 1e-6
-    |delta log p_cat| validation bar.  Host-side numpy diagnostic — run once
-    per catalog when sizing W, not in the hot path.
+    The smallest static ``W`` such that a window of ``W`` consecutive galaxies
+    CENTRED on a sample's insertion index in a z-sorted row (the rule
+    :func:`_sorted_row_window_start` applies) holds every galaxy within
+    ``n_sigma * max_row(sigma_eff)`` of the sample, for every row and every
+    sample position, at the WIDEST kernel the sampled prior admits
+    (``sigma_kde_max``; the prior upper bound in
+    ``darksirens/inference/prior.py``, 0.05 by default): TWICE the largest
+    number of galaxies any interval of length ``n_sigma * sigma_max`` (one
+    side of the sample) contains.  NOT capped at the row's real count: on a
+    ragged catalog a window as long as a SHORT row is not that row -- centred
+    on a sample past the row's support it starts at ``n - W//2 > 0`` and
+    drops the row's front half (measured 0.53 nats on a 300-galaxy photo-z
+    row beside a 2000-galaxy one).  A result longer than every row simply
+    sends the evaluator down its exact full-row path.  At the default
+    ``n_sigma=6`` the kernel mass a covered sample can miss is < 2e-9 per
+    galaxy, comfortably inside the 1e-6 |delta log p_cat| validation bar.
+    Host-side numpy diagnostic -- run once per catalog when sizing W, not in
+    the hot path.
+
+    The one-sided rule is what lets the evaluator locate a window with ONE
+    binary search (the insertion index) instead of three (the block's two
+    edges and the centre): for an evenly populated row it is the same count
+    as the block itself; only a sample sitting right beside a dense clump pays
+    for the clump on both sides.
     """
     z = np.asarray(zgals)
     ng = np.asarray(ngals)
@@ -270,16 +293,18 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     worst = 0
     for r in range(z.shape[0]):
         n = int(ng[r])
-        if n < 2:
-            worst = max(worst, n)
+        if n < 1:
             continue
         zr = np.sort(z[r, :n])
         sig_max = float(
             np.max(np.sqrt(dz[r, :n] ** 2 + float(sigma_kde_max) ** 2))
         )
-        width = 2.0 * float(n_sigma) * max(sig_max, SIGMA_EFF_FLOOR)
-        hi = np.searchsorted(zr, zr + width, side="right")
-        worst = max(worst, int(np.max(hi - np.arange(n))))
+        width = float(n_sigma) * max(sig_max, SIGMA_EFF_FLOOR)      # one side
+        idx = np.arange(n)
+        right = np.searchsorted(zr, zr + width, side="right") - idx   # [z_j, z_j + w]
+        left = idx - np.searchsorted(zr, zr - width, side="left") + 1  # [z_j - w, z_j]
+        one_sided = int(max(np.max(right), np.max(left)))
+        worst = max(worst, 2 * one_sided)
     return worst
 
 
@@ -554,52 +579,47 @@ def _rows_sorted_for_windowing(zgals, ngals) -> bool:
     return verdict
 
 
-def _sorted_row_window_start(zgals, pix, z, half, n_real, window):
+def _sorted_row_window_start(zgals, pix, z, n_real, window):
     """Start index of the W-galaxy window in row ``pix`` of z-sorted ``zgals``.
 
-    Binary-searches ONLY the real prefix ``[0, n_real)`` of the row (scalar
+    ONE binary search, over the real prefix ``[0, n_real)`` only (scalar
     gathers per iteration; the padded tail is never consulted, so trailing
-    padding values need no sentinel).  With ``i_lo``/``i_hi``/``i_z`` the
-    insertion points of ``z - half`` / ``z + half`` / ``z``:
+    padding values need no sentinel), for the insertion index ``i_z`` of the
+    sample; the window is the ``W`` index-nearest galaxies centred there,
+    ``clip(i_z - W//2, 0, N_max - W)``.  Index order IS z order, so on each
+    side the excluded galaxies are z-farther than every included one, and a
+    sample beyond the row's support straddles the nearest galaxies so far-tail
+    evaluations stay finite.
 
-    - block fits (``i_hi - i_lo <= W``): the window covers [i_lo, i_hi)
-      entirely, positioned as close to z-centred as that constraint allows
-      (``clip(i_z - W//2, i_hi - W, i_lo)``); an EMPTY block degenerates to a
-      pure straddle of the insertion point, keeping the nearest galaxies on
-      both sides so far-tail evaluations stay finite.
-    - block overflows W: nearest-neighbour truncation, ``i_z - W//2`` — the
-      W/2 index-nearest galaxies on each side of z (index order IS z order),
-      so the excluded terms on each side are z-farther than every included
-      one on that side.  Centring on the BLOCK midpoint instead would skew
-      the window into a dense cluster on one side and could exclude the
-      sample's own neighbourhood entirely.
+    Exactness is the WINDOW SIZE's job, not this rule's: with ``W`` sized by
+    :func:`recommended_kde_window` (twice the largest one-sided count of
+    galaxies within ``n_sigma`` row-max widths, which is what
+    :func:`auto_kde_window` hands the likelihood factory) the centred window
+    provably covers every galaxy within ``n_sigma`` widths of ANY sample, so
+    nothing inside the truncation contract is ever excluded.  The earlier
+    three-search rule (block edges plus centre, then a fit test) bought
+    coverage for a marginally smaller ``W`` at three dependent search chains
+    per sample; MEASURED on CPU the searches were ~19% of the windowed
+    evaluation, and on a GPU dependent scalar gathers are latency-bound.
     """
     n_max = zgals.shape[1]
     # Fixed iteration count: each step halves [lo, hi); log2(n_max)+1 is
     # enough to reach lo == hi from any initial span <= n_max.
     n_iter = int(np.ceil(np.log2(max(int(n_max), 2)))) + 1
-    targets = jnp.stack([z - half, z, z + half])
-    lo0 = jnp.zeros((3,), dtype=jnp.int32)
-    hi0 = jnp.full((3,), jnp.asarray(n_real, dtype=jnp.int32))
+    lo0 = jnp.zeros((), dtype=jnp.int32)
+    hi0 = jnp.asarray(n_real, dtype=jnp.int32)
 
     def _body(_, lh):
         lo, hi = lh
         active = lo < hi
         mid = (lo + hi) // 2
-        v = zgals[pix, mid]                     # (3,) scalar gathers
-        go_right = active & (v < targets)
+        go_right = active & (zgals[pix, mid] < z)
         lo = jnp.where(go_right, mid + 1, lo)
         hi = jnp.where(active & ~go_right, mid, hi)
         return lo, hi
 
-    lo, _ = lax.fori_loop(0, n_iter, _body, (lo0, hi0))
-    i_lo, i_z, i_hi = lo[0], lo[1], lo[2]
-    centred = i_z - window // 2
-    fits = (i_hi - i_lo) <= window
-    start = jnp.where(
-        fits, jnp.clip(centred, i_hi - window, i_lo), centred
-    )
-    return jnp.clip(start, 0, n_max - window)
+    i_z, _ = lax.fori_loop(0, n_iter, _body, (lo0, hi0))
+    return jnp.clip(i_z - window // 2, 0, n_max - window)
 
 
 def _map_rows(row_fn, args: tuple):
@@ -1019,15 +1039,14 @@ def _spread_probe_rows(zgals, ngals, n_probe: int) -> jnp.ndarray:
 def _real_row_max(sig_eff, log_kw_raw):
     """Per-row max ``sigma_eff`` over the REAL galaxies (finite raw ``log_kw``).
 
-    The windowed evaluator's half-width is ``n_sigma`` times this.  Taken over
-    the whole padded row it was the PADDING width -- ``dzgals`` pads at 1.0, so
-    every row shorter than ``N_max`` reported ``sigma_eff_max = 1.0`` and a
-    half-width of 8 in redshift: the in-range block was then the entire row,
-    it never "fit" a window shorter than the row, and the evaluator silently
-    fell to its nearest-``W``-by-index truncation on every such row, whatever
-    the galaxies' actual widths.  With the real maximum the block is the
-    galaxies within ``n_sigma`` true widths, and a window sized from the data
-    (:func:`auto_kde_window`) always holds it.  Empty rows report 0.
+    ``n_sigma`` times this is the half-width the static window is sized to
+    cover (:func:`recommended_kde_window` computes the same row maximum on the
+    host).  The evaluator no longer reads the value -- its window is centred by
+    index and its exactness rests on the sizing -- but the state keeps it as the
+    per-row diagnostic of that contract and as the ``use_window`` marker.  Taken
+    over the whole padded row it would be the PADDING width (``dzgals`` pads at
+    1.0), which is how the traced half-width it once fed made every ragged row
+    "not fit" its window.  Empty rows report 0.
     """
     real = jnp.isfinite(log_kw_raw)
     return jnp.max(jnp.where(real, sig_eff, 0.0), axis=1)
@@ -1414,9 +1433,8 @@ def eval_log_catalog_prior_state(
     if use_window:
         pix_i = jnp.asarray(pix, dtype=jnp.int32)
         n_real = em_catalog.ngals[pix_i]
-        half = _KDE_WINDOW_NSIGMA * state.sig_eff_row_max[pix_i]
         start = _sorted_row_window_start(
-            em_catalog.zgals, pix_i, z, half, n_real, window
+            em_catalog.zgals, pix_i, z, n_real, window
         )
 
         # Fused 2-D windowed gathers (contiguous dynamic slices; no index

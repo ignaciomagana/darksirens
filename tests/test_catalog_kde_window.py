@@ -384,7 +384,7 @@ def test_recommended_kde_window_bounds_block_counts():
     zg, dz, wg, ng, _ = sort_survey_rows_by_z(zg, dz, wg, ng)
     w_narrow = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.005)
     w_wide = recommended_kde_window(zg, ng, dz, sigma_kde_max=0.05)
-    assert 0 < w_narrow <= w_wide <= int(np.max(ng))
+    assert 0 < w_narrow <= w_wide <= 2 * int(np.max(ng))   # 2 x one-sided, uncapped
     # brute force on the dense row: every +/- 6 sigma_max block must fit
     n = int(ng[0])
     zr = np.asarray(zg)[0, :n]
