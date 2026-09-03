@@ -62,7 +62,7 @@ def test_probe_vector_reads_the_fixed_scalars_only():
     s = SurveyParams(n0=1e-2, z50=0.5, w=0.1, delta=0.0, b_miss=1.0, alpha_miss=0.5,
                      sigma_kde=0.01)
     v = frozen_prior_probe_vector(cosmo, (s,))
-    assert v.shape == (4 + 10,)
+    assert v.shape == (4 + 13,)   # cosmology + _FROZEN_SURVEY_PROBE_FIELDS
     assert float(v[0]) == 67.74 and float(v[4]) == 1e-2
     v2 = frozen_prior_probe_vector(cosmo, (s._replace(sigma_kde=0.02),))
     assert not bool(jnp.all(v == v2))

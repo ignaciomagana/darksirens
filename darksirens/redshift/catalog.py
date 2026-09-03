@@ -434,7 +434,11 @@ class StaticInt:
         return self.value
 
     def __eq__(self, other):
-        return int(self) == int(other) if other is not None else False
+        if isinstance(other, StaticInt):
+            return self.value == other.value
+        if isinstance(other, (int, np.integer)):
+            return self.value == int(other)
+        return NotImplemented
 
     def __hash__(self):
         return hash(self.value)
@@ -453,10 +457,18 @@ def _effective_kde_window(kde_window):
 
 
 def _static_window(kde_window):
-    """Box a caller's window for the state (``None`` stays ``None``)."""
-    if kde_window is None or isinstance(kde_window, StaticInt):
-        return kde_window
-    return StaticInt(kde_window)
+    """Box a caller's window for the state (``None`` stays ``None``).
+
+    Same validity rule as :func:`configure_catalog_kde_window`: a window is at
+    least 2 galaxies (``_sorted_row_window_start`` centres it on the insertion
+    index, so W = 1 could exclude the single nearest galaxy).
+    """
+    if kde_window is None:
+        return None
+    boxed = kde_window if isinstance(kde_window, StaticInt) else StaticInt(kde_window)
+    if int(boxed) < 2:
+        raise ValueError(f"KDE window size must be >= 2, got {int(boxed)}")
+    return boxed
 
 
 def auto_kde_window(catalogs, sigma_kde_max, n_sigma=None, granule=64):
@@ -483,10 +495,16 @@ def auto_kde_window(catalogs, sigma_kde_max, n_sigma=None, granule=64):
         zgals = getattr(cat, "zgals", None)
         ngals = getattr(cat, "ngals", None)
         dzgals = getattr(cat, "dzgals", None)
-        if zgals is None or ngals is None or dzgals is None:
-            continue
-        if getattr(zgals, "ndim", 0) != 2:
-            continue
+        if zgals is None or getattr(zgals, "ndim", 0) != 2:
+            continue                       # no per-galaxy rows: nothing to size
+        if dzgals is None:
+            raise ValueError(
+                "auto_kde_window: a catalog view carries per-galaxy rows "
+                "(zgals) but no widths (dzgals); the window cannot be sized "
+                "for it and it would be evaluated under another view's window."
+            )
+        if ngals is None:                  # no counts: every slot is a galaxy
+            ngals = np.full(zgals.shape[0], zgals.shape[1], dtype=np.int64)
         need = recommended_kde_window(
             np.asarray(zgals), np.asarray(ngals), np.asarray(dzgals),
             float(sigma_kde_max), n_sigma=float(n_sigma),
@@ -852,8 +870,10 @@ class CatalogKernelState(NamedTuple):
     #: fused at state-build time so the per-sample evaluator gathers THREE
     #: arrays (z_i, sigma_i, this) instead of four and adds one term instead of
     #: three.  Padding slots carry the same ``-1e30`` sentinel as ``log_kw``.
-    #: ``None`` (a hand-built state) selects the historical four-gather
-    #: arithmetic.
+    #: Every state builder populates it; ``None`` (a hand-built state) selects
+    #: the historical four-gather arithmetic, which agrees with the fused form
+    #: to the last ulp (~1e-13 relative on the golden likelihoods, not
+    #: bit-identical: the constant is summed in a different order).
     log_kw_eff: Any = None
     #: Static window length this state was built for (a :class:`StaticInt`,
     #: carried as pytree aux data so it stays concrete under jit and the

@@ -1176,11 +1176,22 @@ def _sigma_kde_upper_bound(opts, parameter_decoder, surveys):
 
     default_hi = next(spec.upper for spec in _SURVEY_BLOCK if spec.label == "sigma_kde")
     overrides = getattr(opts, "prior_overrides", None) or {}
-    sampled = [
+    sampled = {
         lbl for lbl in parameter_decoder.sampled_labels
         if lbl == "sigma_kde" or lbl.startswith("sigma_kde_c")
-    ]
-    hi = max(float(s.sigma_kde) for s in surveys) if surveys else 0.0
+    }
+    # ``surveys`` is decoded at a COORDINATE PLACEHOLDER (``_reference_params``),
+    # so a catalog whose ``sigma_kde`` is sampled carries that placeholder, not
+    # a bound: only the catalogs whose label is fixed contribute their value.
+    # Catalog k (0-based) is labelled ``sigma_kde`` for k == 0 and
+    # ``sigma_kde_c{k+1}`` beyond (``inference.prior._survey_catalog_number``).
+    def _label(k):
+        return "sigma_kde" if k == 0 else f"sigma_kde_c{k + 1}"
+
+    hi = max(
+        (float(s.sigma_kde) for k, s in enumerate(surveys) if _label(k) not in sampled),
+        default=0.0,
+    )
     for lbl in sampled:
         bounds = overrides.get(lbl) if isinstance(overrides, dict) else None
         hi = max(hi, float(bounds[1]) if bounds is not None else float(default_hi))
@@ -1272,7 +1283,7 @@ def frozen_prior_admissible(parameter_decoder, universe_model, mark_model,
 
 def _build_frozen_prior(parameter_decoder, universe_model, catalog_sky_weighting,
                         kde_window, gw_pe, catalogs_pe, gw_sel, catalogs_sel,
-                        n_catalogs, chunk=32768):
+                        n_catalogs, chunk=None):
     """Evaluate ``log p(z | pix)`` for every PE sample and injection ONCE.
 
     Runs the SAME functions the live graph runs -- ``prepare_redshift_prior_state``
@@ -2582,8 +2593,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 max_likelihood_variance=max_likelihood_variance,
                 catalog_sky_weighting=catalog_sky_weighting,
                 share_prior_state_by_catalog=share_prior_state_by_catalog,
-            kde_window=kde_window,
-            frozen_prior=frozen_prior_,
+                kde_window=kde_window,
+                frozen_prior=frozen_prior_,
             )
         return darksiren_log_likelihood(
             cosmo,
