@@ -682,6 +682,15 @@ def darksiren_log_likelihood_with_clusters(
         int(jnp.shape(singleton_indices)[0]) if cluster_mode == CLUSTER_MODE_J2
         else nEvents
     )
+    if cluster_mode == CLUSTER_MODE_J2 and n_pe_rows != int(n_singletons):
+        # Both are static; a mismatch means the caller's partition and its
+        # counts disagree, and the evidence sum (over the array) and the
+        # selection correction (over the count) would describe different
+        # partitions -- silently, since neither reads the other.
+        raise ValueError(
+            f"singleton_indices has {n_pe_rows} rows but n_singletons="
+            f"{int(n_singletons)}; build both from one PartitionState"
+        )
     use_pe_block = (
         not _has_counterpart_arrays(em_catalog_pe)
         and singleton_lensing != SINGLETON_LENSING_MIXTURE

@@ -2459,17 +2459,48 @@ def _resolve_pair_marks(opts, inp):
     )
 
 
+def _max_abs_time_mark(inp) -> float:
+    """Largest |delta_t_obs| any time-marked pair this run can evaluate carries:
+    the fixed partition's marks and every candidate edge's mark."""
+    values = [
+        abs(float(x)) for x in np.asarray(inp.get("pair_time_delta_t_obs", []), dtype=float).ravel()
+    ]
+    for pair in inp.get("candidate_pairs") or ():
+        if getattr(pair, "delta_t_obs", None) is not None:
+            values.append(abs(float(pair.delta_t_obs)))
+    return max(values) if values else 0.0
+
+
 def _require_time_window(opts, inp):
-    """Time marks need the observing-run length for the coincidence odds."""
-    if (
-        getattr(opts, "pair_marks", "none") == "time"
-        and inp.get("pair_time_t_obs_window_sec") is None
-    ):
+    """Time marks need the observing-run length for the coincidence odds, and
+    every mark must lie INSIDE it.
+
+    The unlensed reference density ``p_U(|dt|) = 2 (T - |dt|) / T^2`` vanishes
+    at ``|dt| = T``; ``cluster_log_likelihood_pair`` clamps ``|dt|`` just below
+    ``T`` so the odds stay finite, which turns a mark at or beyond the window
+    (a mis-set ``t_obs_days`` or a cross-run time base) into a ~+20 nat
+    pro-lensing reward for EVERY such pair.  That clamp is a numerical
+    backstop; the data condition is enforced here.
+    """
+    if getattr(opts, "pair_marks", "none") != "time":
+        return
+    window = inp.get("pair_time_t_obs_window_sec")
+    if window is None:
         raise SystemExit(
             "--pair_marks time requires an observed catalog with "
             "observation_times='uniform' (t_obs_days): the time-mark "
             "coincidence odds need the observing-run length. Regenerate the "
             "mock with --observation-times uniform."
+        )
+    worst = _max_abs_time_mark(inp)
+    if worst >= float(window):
+        raise SystemExit(
+            f"--pair_marks time: a candidate/pair time mark |delta_t_obs| = "
+            f"{worst:g} s reaches the observing-run length t_obs = "
+            f"{float(window):g} s. Two arrivals from one run cannot be that far "
+            "apart, so the mark or the window is wrong (a mis-set t_obs_days, "
+            "or a cross-run time base); the unlensed coincidence density "
+            "vanishes there and the pair would be rewarded by ~+20 nats."
         )
 
 
@@ -4126,8 +4157,63 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
             labels=labels, settings=settings,
         )
         raise
+    _check_pair_y_quadrature(opts, diagnostics_fn, diagnostics, diag_point)
     _print_diagnostics_summary(diagnostics)
     return mid, diagnostics, diag_point, diag_label
+
+
+#: |delta logL| between ``--y_nodes_pair`` and four times as many nodes above
+#: which the pair y-quadrature is reported as unconverged (nats).
+_PAIR_Y_QUADRATURE_TOL = 1.0e-3
+
+
+def _check_pair_y_quadrature(opts, diagnostics_fn, diagnostics, point):
+    """Measure the pair channel's y-quadrature error at the diagnostics point.
+
+    The unmarked SIS pair likelihood integrates a peaked integrand over the
+    impact parameter with ``--y_nodes_pair`` Gauss-Legendre nodes (default 32)
+    and its convergence is pair-dependent and non-monotonic: on the mock, one
+    true pair carried 0.15 nats of pure quadrature error at 32 nodes and a
+    false pair 0.42 -- the order of the j2-vs-off evidence differences the CLI
+    exists to measure.  Nothing checked it.  Re-evaluate the diagnostics total
+    with 4x the nodes and record ``|delta|``; warn (do not refuse: the choice
+    of node count is the run's) when it exceeds ``_PAIR_Y_QUADRATURE_TOL``.
+    Delta-collapsed time-marked pairs do not read ``y_nodes_pair`` and
+    contribute 0 to the difference.  Skipped when the pair channel is off.
+    """
+    if getattr(opts, "cluster_mode", "off") != "j2":
+        return None
+    key = "logL_marginalized" if "logL_marginalized" in diagnostics else "logL_total"
+    ref = diagnostics.get(key)
+    if ref is None or not np.isfinite(float(ref)):
+        return None
+    n_nodes = int(getattr(opts, "y_nodes_pair", 32))
+    opts.y_nodes_pair = 4 * n_nodes
+    try:
+        fine = float(diagnostics_fn(point)[key])
+    finally:
+        opts.y_nodes_pair = n_nodes
+    delta = abs(float(ref) - fine)
+    diagnostics["pair_y_quadrature_check"] = {
+        "y_nodes_pair": n_nodes,
+        "y_nodes_reference": 4 * n_nodes,
+        "abs_delta_logL": float(delta),
+        "tolerance": _PAIR_Y_QUADRATURE_TOL,
+        "converged": bool(delta <= _PAIR_Y_QUADRATURE_TOL),
+    }
+    if not np.isfinite(delta) or delta > _PAIR_Y_QUADRATURE_TOL:
+        _warn(
+            f"pair y-quadrature: |logL({n_nodes} nodes) - logL({4 * n_nodes} "
+            f"nodes)| = {delta:.3g} nats at the diagnostics point (tolerance "
+            f"{_PAIR_Y_QUADRATURE_TOL:g}). The SIS pair integrand is peaked and "
+            "its Gauss-Legendre convergence is pair-dependent; raise "
+            "--y_nodes_pair (128 removed the error on the mock) if this is "
+            "comparable to the evidence difference being measured."
+        )
+    else:
+        _ok(f"pair y-quadrature converged: |delta logL| = {delta:.3g} nats "
+            f"({n_nodes} vs {4 * n_nodes} nodes)")
+    return delta
 
 
 def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,

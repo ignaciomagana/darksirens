@@ -400,8 +400,10 @@ def combined_selection_log_correction(
         log_sigma2_tot = log_sigma2_singleton
         N_eff = N_eff_singleton
         N_tot = N_singletons
-    which is bit-identical to the original ``selection_log_correction``.
-    A test enforces this.
+    which reproduces the original ``selection_log_correction`` to ~1e-15
+    relative (this path forms ``N_eff = exp(2 log mu - log sigma^2)`` while the
+    singleton path carries ``1 / inv_neff``; not bit-identical).  A test pins
+    it at 1e-12.
     """
     log_mu_tot = jnp.logaddexp(log_mu_singleton, log_mu_cluster)
     log_sigma2_tot = jnp.logaddexp(log_sigma2_singleton, log_sigma2_cluster)
