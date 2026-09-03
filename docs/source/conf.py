@@ -127,8 +127,18 @@ _OPTIONAL_RUNTIME_DEPS = [
     "tinyns",
     "tqdm",
 ]
+# ``DARKSIRENS_DOCS_FORCE_MOCK=gwcat,tinyns`` mocks packages that ARE installed,
+# to rehearse a hosted build (CI and Read the Docs do not carry the git-pinned
+# gwcat/tinyns) on a full development machine.
+_FORCED = {
+    name.strip()
+    for name in __import__("os").environ.get("DARKSIRENS_DOCS_FORCE_MOCK", "").split(",")
+    if name.strip()
+}
 autodoc_mock_imports = [
-    name for name in _OPTIONAL_RUNTIME_DEPS if importlib.util.find_spec(name) is None
+    name
+    for name in _OPTIONAL_RUNTIME_DEPS
+    if name in _FORCED or importlib.util.find_spec(name) is None
 ]
 
 
