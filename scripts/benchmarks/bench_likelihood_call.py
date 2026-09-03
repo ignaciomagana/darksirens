@@ -101,14 +101,47 @@ def build_from_cli(cli_args, quiet=True):
     return b
 
 
-def draw_coords(pspace, n, seed):
-    """``n`` prior draws through the run's own prior transform (deterministic)."""
+def draw_coords(pspace, n, seed, mode="prior", opts=None, jitter=0.02):
+    """``n`` coordinates in the run's sampled space (deterministic).
+
+    ``mode="prior"``: draws through the run's own prior transform -- the
+    sampler's own distribution of proposals, but with a wide population prior
+    most draws land in the selection guard's -inf, which makes value
+    comparisons vacuous.  ``mode="fiducial"``: the registered fiducial value of
+    every sampled label (cosmology, survey, population, sky, marks), each
+    multiplied by ``1 + jitter * N(0, 1)`` and clipped to the prior box, so
+    the log-likelihood is finite and the timing is that of a live region.
+    """
     rng = np.random.default_rng(seed)
-    ndim = len(pspace.labels)
-    return np.asarray([
-        np.asarray(pspace.prior_transform(jnp.asarray(rng.random(ndim))))
-        for _ in range(n)
-    ])
+    labels = list(pspace.labels)
+    ndim = len(labels)
+    if mode == "prior":
+        return np.asarray([
+            np.asarray(pspace.prior_transform(jnp.asarray(rng.random(ndim))))
+            for _ in range(n)
+        ])
+    from darksirens.core.constants import (
+        H0_FID, OM0_FID, SURVEY_PARAMS_FID_BY_NAME, W0_FID, WA_FID,
+    )
+    from darksirens.gw.populations import pop_model_prior_parser
+    from darksirens.gw.populations.registry import get_fixed_population_params
+
+    pop_labels = list(pop_model_prior_parser(opts.pop_model)[2])
+    pop_fid = np.asarray(get_fixed_population_params(opts.pop_model), dtype=float)
+    fid = {"H0": H0_FID, "Om0": OM0_FID, "w0": W0_FID, "wa": WA_FID}
+    fid.update({k: float(v) for k, v in SURVEY_PARAMS_FID_BY_NAME.items()})
+    fid.update(dict(zip(pop_labels, pop_fid)))
+    lo = np.asarray(pspace.lower_bound, dtype=float)
+    hi = np.asarray(pspace.upper_bound, dtype=float)
+    base = np.empty(ndim)
+    for i, lbl in enumerate(labels):
+        key = lbl.split("_c")[0] if "_c" in lbl and lbl not in fid else lbl
+        base[i] = fid.get(key, 0.5 * (lo[i] + hi[i]))
+    out = []
+    for _ in range(n):
+        c = base * (1.0 + jitter * rng.standard_normal(ndim))
+        out.append(np.clip(c, lo, hi))
+    return np.asarray(out)
 
 
 def timeit(fn, n_warm=2, n_iter=10):
@@ -225,6 +258,8 @@ def main():
     ap.add_argument("--n-calls", type=int, default=20)
     ap.add_argument("--n-coords", type=int, default=8)
     ap.add_argument("--seed", type=int, default=20260902)
+    ap.add_argument("--coords", choices=["prior", "fiducial"], default="prior",
+                    help="where to evaluate: prior draws, or the fiducial point jittered by 2%%")
     ap.add_argument("--out", default=None, help="write the summary json here")
     ap.add_argument("--compare", default=None, help="a previous --out json to compare values/speed against")
     ap.add_argument("--components", action="store_true", help="also time the components in isolation")
@@ -235,7 +270,7 @@ def main():
 
     b = build_from_cli(cli_args, quiet=not a.verbose)
     opts, data, pspace, likelihood = b.opts, b.data, b.pspace, b.likelihood
-    coords = draw_coords(pspace, a.n_coords, a.seed)
+    coords = draw_coords(pspace, a.n_coords, a.seed, mode=a.coords, opts=opts)
 
     t0 = time.perf_counter()
     jax.block_until_ready(likelihood(jnp.asarray(coords[0])))

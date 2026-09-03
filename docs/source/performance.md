@@ -266,6 +266,34 @@ label): 7.07 s/call → 5.01 s/call (1.41×), log-likelihoods bit-identical at
 five prior draws. The pixel sort alone was 1010 → 770 ms per 131k injections
 of KDE evaluation.
 
+## Population-only runs: the redshift prior is frozen at build time
+
+A run that samples no cosmology, survey or mark label — the
+`scripts/run_tinyns_heavy_darksirens_likelihood.sh` launcher's
+`--fix_cosmology true --fix_survey true` population inference — has a
+redshift prior that cannot move: `log p(z | pix)` is a pure function of the
+fixed cosmology and survey block, of the catalog, and of `z = z(dL)` at the
+fixed cosmology. The factory (`frozen_prior_admissible`, a test on the sampled
+LABELS like the kernel pin's) then evaluates it once for every PE sample and
+every injection with the same `prepare_redshift_prior_state` /
+`eval_redshift_prior_with_state` the live graph would run, and hands the two
+vectors to `darksiren_log_likelihood` as the `frozen_prior` operand. The body
+skips both seams' state builds and adds the per-sample values in place of the
+prior closure; the selection reduction goes through
+`selection_reduce_from_ldw_provider` with a provider that reproduces
+`compute_selection_term`'s masks. Sky-model labels (applied outside the prior)
+and mixture sticks (combined live with the frozen per-catalog columns) may still
+be sampled. The premise is re-verified IN THE GRAPH on every call: the fixed
+cosmology/survey scalars the prior reads are compared exactly against the
+values it was built at, and a mismatch poisons the log-likelihood to `-inf`.
+`--freeze_redshift_prior false` is the A/B switch.
+
+MEASURED on the 4-core CPU mock (3072 rows × 2158, 64 × 4096 PE samples, 839k
+injections, powerlaw+peak fully sampled, cosmology and survey fixed): 7.38 s/call
+→ 3.19 s/call (2.3×), log-likelihood bit-identical at the fiducial population.
+What remains is the population term itself — dominated by the exact per-sample
+`q`-quadrature of the pairing normaliser — and the reductions.
+
 ## The likelihood closure is jitted
 
 The callable returned by `make_likelihood` / `_make_mixture_likelihood` /

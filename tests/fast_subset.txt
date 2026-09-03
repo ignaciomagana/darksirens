@@ -6,7 +6,7 @@
 # SIZE OF THIS GATE (keep this block honest — it drifted badly once).
 #
 #   2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy 1.26.4):
-#     67 files, 767 tests collected.
+#     68 files, 803 tests collected.
 #     Last end-to-end timing: 17m47s in GitHub CI at a0ba24f, and 21m10s on a
 #     shared review node, both at the then-current 49 files / 519 tests.  The
 #     seventeen files added since come from the 2026-08-23 codex-review
@@ -122,3 +122,4 @@ tests/test_jax_allocator_config.py
 tests/test_cold_import_precision.py
 tests/test_kde_batch_kernel.py
 tests/test_kde_window_auto.py
+tests/test_frozen_redshift_prior.py
