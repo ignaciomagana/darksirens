@@ -109,3 +109,36 @@ def test_cli_lognormal_chokepoint_fires_the_guard():
         lensing_wl_table_path=None,
     )
     assert lens_cli._load_wl_table_arrays(good) == {}
+
+
+def test_hermite_guard_probes_low_redshift_where_a_non_positive_b_diverges():
+    """``wl_b <= 0`` makes s(z) grow toward z = 0; the old test grid started at
+    z_app = 0.525 and passed a = 4e-3, b = -1.5 with a 4e-7 worst error while
+    the kernel was off by up to 1.7e-2 nats at z = 0.1, where the events are."""
+    import pytest
+    from darksirens.likelihood.wl_weight import validate_wl_hermite_quadrature
+
+    with pytest.raises(ValueError, match="does not converge"):
+        validate_wl_hermite_quadrature(4e-3, -1.5)
+    # the calibrated default still clears the widened grid
+    err = validate_wl_hermite_quadrature(4e-3, 1.5)
+    assert float(err.max()) < 1e-4
+
+
+def test_negative_wl_a_is_refused_not_treated_as_no_lensing():
+    """For a < 0 the kernel's width guard zeroes s but the mean -s^2/2 stays
+    positive: every node sits at mu != 1 with a zero importance ratio, a
+    silently wrong weight.  Only a == 0 is the exact delta at mu = 1."""
+    import numpy as np
+    import pytest
+    from darksirens.likelihood.wl_weight import (
+        validate_wl_hermite_quadrature,
+        wl_hermite_quadrature_errors,
+    )
+    from darksirens.lensing.grids import make_hermite_u_grid
+
+    with pytest.raises(ValueError, match="wl_a must be >= 0"):
+        validate_wl_hermite_quadrature(-0.004, 1.5)
+    u, lw = make_hermite_u_grid()
+    z, err = wl_hermite_quadrature_errors(0.0, 1.5, u, lw)
+    assert np.all(err == 0.0) and z[0] == 0.01

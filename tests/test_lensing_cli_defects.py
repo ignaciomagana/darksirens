@@ -1666,3 +1666,43 @@ def test_load_inputs_is_the_second_net_for_the_cosmology_gate(monkeypatch):
     )
     with pytest.raises(SystemExit, match="fix_cosmology false is not valid"):
         cli.load_inputs(opts)
+
+
+# ---------------------------------------------------------------------------
+# lens block: pinned values are honoured, override keys are validated
+# ---------------------------------------------------------------------------
+
+def test_fixed_lens_values_are_honoured_when_the_lens_rate_is_fixed():
+    """``--fix_lens_rate true`` (the default) read opts.sl_tau_A / sl_tau_n only,
+    so a lens label pinned through --fixed_parameter_values was silently
+    ignored and the ignored value archived under the bare lens_A_tau name."""
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--sl_tau_A", "1e-4", "--sl_tau_n", "3.0")
+    assert bool(opts.fix_lens_rate) is True
+    sis = cli._decode_lens_params(
+        np.zeros(0), [], {"log10_tau_A": -6.0, "tau_n": 1.0}, opts
+    )
+    assert float(sis.A_tau) == pytest.approx(1e-6)
+    assert float(sis.n_tau) == 1.0
+    settings = cli._lens_settings_dict(
+        np.zeros(0), [], {"log10_tau_A": -6.0, "tau_n": 1.0}, opts
+    )
+    assert settings["lens_A_tau"] == pytest.approx(1e-6)
+    assert settings["lens_n_tau"] == 1.0
+    # nothing pinned: the CLI constants, as before
+    sis0 = cli._decode_lens_params(np.zeros(0), [], {}, opts)
+    assert float(sis0.A_tau) == pytest.approx(1e-4) and float(sis0.n_tau) == 3.0
+
+
+def test_unknown_lens_prior_override_keys_are_refused():
+    import darksirens.cli.inference_lensing as cli
+
+    opts = _lensing_opts("--fix_lens_rate", "false")
+    with pytest.raises(ValueError, match="unknown lens label"):
+        cli._build_lens_parameter_space(opts, {}, {"log10_tauA": [-5.0, -4.0]})
+    labels, lo, hi = cli._build_lens_parameter_space(
+        opts, {}, {"log10_tau_A": [-5.0, -4.0]}
+    )
+    assert "log10_tau_A" in labels
+    assert lo[labels.index("log10_tau_A")] == -5.0 and hi[labels.index("log10_tau_A")] == -4.0

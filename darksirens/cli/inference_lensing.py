@@ -346,6 +346,12 @@ def _build_lens_parameter_space(opts, fixed_parameter_values, lens_prior_overrid
     ``fixed_parameter_values`` is treated as fixed, which allows tiny recovery
     runs such as sampling ``log10_tau_A`` while fixing ``tau_n``.
     """
+    unknown = sorted(set(lens_prior_overrides) - set(LENS_PARAMETER_PRIORS))
+    if unknown:
+        raise ValueError(
+            f"--lens_prior_overrides names unknown lens label(s) {unknown}; "
+            f"the SIS optical-depth labels are {sorted(LENS_PARAMETER_PRIORS)}"
+        )
     if getattr(opts, "fix_lens_rate", True):
         return [], np.asarray([], dtype=float), np.asarray([], dtype=float)
 
@@ -377,15 +383,20 @@ def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     from darksirens.lensing.slmarks import make_sis_lens_params
 
     T0 = _sl_T0_seconds(opts)
+    fixed = {label: float(value) for label, value in fixed_parameter_values.items()}
     if getattr(opts, "fix_lens_rate", True):
+        # A lens label pinned through --fixed_parameter_values is honoured
+        # here too: this branch used to read opts.sl_tau_A / opts.sl_tau_n
+        # only, so ``{"log10_tau_A": -6}`` was silently ignored and the
+        # ignored value archived under the bare ``lens_A_tau`` name.
+        log10_tau_A = fixed.get("log10_tau_A", np.log10(float(opts.sl_tau_A)))
+        tau_n = fixed.get("tau_n", float(opts.sl_tau_n))
         return make_sis_lens_params(
-            A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n, T0_seconds=T0,
+            A_tau=10.0**log10_tau_A, n_tau=tau_n, T0_seconds=T0,
         )
 
     values = {label: jnp.asarray(coord)[i] for i, label in enumerate(sampled_labels)}
-    values.update(
-        {label: float(value) for label, value in fixed_parameter_values.items()}
-    )
+    values.update(fixed)
     log10_tau_A = values.get("log10_tau_A", np.log10(float(opts.sl_tau_A)))
     tau_n = values.get("tau_n", float(opts.sl_tau_n))
     return make_sis_lens_params(
@@ -1174,6 +1185,23 @@ def _load_wl_table_arrays(opts):
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    # The interpolator CLAMPS the redshift query to the table's z range, so a
+    # source redshift past ``z_grid[-1]`` silently reuses the last row's PDF
+    # (constant extrapolation) -- and the mu-quadrature coverage check above
+    # cannot see it, because a clamped PDF is still normalised.  The kernel
+    # evaluates p_WL at z_s up to the cosmology grid's zMax; say so.
+    import warnings
+    from darksirens.redshift import zgrid as _zgrid
+    z_lo, z_hi = float(wl_z_grid[0]), float(wl_z_grid[-1])
+    if z_hi < float(_zgrid[-1]) or z_lo > 1.0e-3:
+        warnings.warn(
+            f"--lensing_wl_table_path {path}: the WL table covers z in "
+            f"[{z_lo:g}, {z_hi:g}] but the likelihood evaluates p_WL(mu | z_s) for "
+            f"source redshifts up to zMax = {float(_zgrid[-1]):g} (and down to "
+            "1e-3); outside the table the PDF is held CONSTANT at the nearest "
+            "tabulated redshift. Extend the table if posterior mass lives there.",
+            RuntimeWarning, stacklevel=2,
+        )
     return dict(
         wl_z_grid=wl_z_grid,
         wl_log_mu_grid=wl_log_mu_grid,

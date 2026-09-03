@@ -544,11 +544,15 @@ def wl_hermite_quadrature_errors(
     difference is the per-sample log-weight error the importance-ratio
     quadrature commits at that apparent redshift.
 
-    Test redshifts default to fractions of ``min(3.5, 0.7·z_grid_max)``:
-    high enough to expose the super-Gaussian ratio growth and the z-grid
-    edge truncation that break node-count convergence at amplified
-    ``wl_a``, while the calibrated default (a = 4e-3) stays ≲ 1e-6 nats
-    everywhere on this range.  Expressed in ``z_app`` the check is exactly
+    Test redshifts default to three low points (0.01, 0.05, 0.15 -- where a
+    non-positive ``wl_b`` makes the kernel width GROW toward z = 0 and the
+    quadrature diverge, and where most detected events sit) plus fractions of
+    ``min(3.5, 0.7·z_grid_max)``: high enough to expose the super-Gaussian
+    ratio growth and the z-grid edge truncation that break node-count
+    convergence at amplified ``wl_a``.  The calibrated default (a = 4e-3,
+    b = 1.5) measures ≲ 4e-5 nats everywhere on this range with the 16-node
+    rule (the 3e-5 at z = 3.5 is grid-edge truncation, flat in the node
+    count).  Expressed in ``z_app`` the check is exactly
     H0-invariant (dL ∝ 1/H0 cancels between the node distances and the
     grid edge) and only weakly Om0/w0/wa-dependent.
 
@@ -556,12 +560,23 @@ def wl_hermite_quadrature_errors(
     """
     wl_a = float(wl_a)
     wl_b = float(wl_b)
+    if wl_a < 0.0:
+        # A negative variance amplitude is not "no lensing": the kernel's
+        # ``s2 > 0`` guard zeroes the width but the mean ``m = -s2/2`` stays
+        # POSITIVE, so every node sits at mu = exp(m) != 1 with a zero
+        # importance ratio -- a spuriously magnified, silently wrong weight.
+        raise ValueError(
+            f"wl_a must be >= 0 (a lognormal variance amplitude), got {wl_a:g}"
+        )
     z_hi = float(zgrid[-1])
     if z_app_test is None:
         z_cap = min(3.5, 0.7 * z_hi)
-        z_app_test = np.array([0.15, 0.3, 0.5, 0.75, 1.0]) * z_cap
+        z_app_test = np.concatenate([
+            np.array([0.01, 0.05, 0.15]),
+            np.array([0.15, 0.3, 0.5, 0.75, 1.0]) * z_cap,
+        ])
     z_app_test = np.atleast_1d(np.asarray(z_app_test, dtype=np.float64))
-    if wl_a <= 0.0:
+    if wl_a == 0.0:
         # Delta at mu = 1: every node collapses, the Hermite weights sum to 1
         # and the rule is exact by construction.
         return z_app_test, np.zeros_like(z_app_test)
