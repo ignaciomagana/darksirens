@@ -223,6 +223,22 @@ gather-bound on a GPU and `exp`-bound on a CPU — and on a CPU box pass explici
 plan is a single pass on non-GPU backends and a dense catalog then exceeds host
 RAM.
 
+When `Om0` (or `w0`/`wa`/`delta`/`sigma_kde`) is sampled the kernel H0 pin is
+off and the per-galaxy Gauss-Legendre kernel norms are rebuilt every proposal.
+MEASURED on the 4-core CPU mock (3072 rows × 2158, 839k injections, `H0`+`Om0`
+sampled): 22.4 s/call on master → 19.2 s/call with the window changes above,
+and **75 %** of what remains (13.9 s of 18.6 s, by ablation) is that quadrature:
+two norms per galaxy (the full one and the below-depth one), 24 nodes each, so
+~320 M evaluations of `log_interp_zgrid` on the `dV_c/dz` grid. On XLA:CPU that
+interpolation — four gathers from an 8 KB table per node — is ~90 % of the
+norm's cost and `ndtri` most of the rest; on a GPU both are cheap and the
+profile will differ. Nothing in that quadrature is exact to skip on the dense
+padded layout (the compact-real-slots variant is bit-identical and buys only
+the padding fraction, 24 % on this mock, 3 % on its fullest rows), and its node
+positions are cosmology-independent only at the price of holding
+`2 × 24 × N_gal` doubles. Re-measure with `--components` on the H100 before
+touching it.
+
 ## The per-sample catalog KDE: window sized from the data, injections sorted by pixel
 
 The dark-siren redshift prior evaluates, for every PE sample and every
