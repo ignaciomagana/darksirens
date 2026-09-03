@@ -18,7 +18,7 @@ information into it:
 Sampled blocks: the flat-CPL cosmology (`H0`, `Om0`, `w0`, `wa`), the survey
 completeness block, and the hyperparameters of a population model named by a
 grammar such as `powerlaw+peak` or `brokenpowerlaw+2peaks`. Samplers:
-`tinyns` (default), `dynesty`, `numpyro`.
+`tinyns`, `dynesty`, `numpyro` (`--sampler` is required).
 
 **Documentation:** <https://darksirens.readthedocs.io> (source in `docs/source`).
 

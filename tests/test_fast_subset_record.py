@@ -22,7 +22,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = REPO_ROOT / "tests" / "fast_subset.txt"
-DOCS = REPO_ROOT / "docs" / "source" / "testing.md"
+DOCS = REPO_ROOT / "docs" / "source" / "guide" / "testing.md"
 
 
 def _listed_files():

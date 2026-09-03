@@ -55,8 +55,8 @@ the labels, their order, their bounds and their per-configuration activity.
 | Label | Meaning | Default prior | Sampled when |
 | --- | --- | --- | --- |
 | `log10n0` | $\log_{10}$ of the comoving galaxy number density $n_0$ in Mpc$^{-3}$. | `[-4, -1]` | `dark_sirens` |
-| `delta` | Density evolution exponent, $n(z) = n_0 (1+z)^\delta$. | `[-3, 3]` | `dark_sirens` |
-| `b_miss` | Bias amplitude of the LSS-modulated missing-galaxy density (dimensionless). | `[0, 3]` | `dark_sirens` with `--use_lss true` and no `Q_LSS` table for that catalog |
+| `delta` | Density evolution exponent, $n(z) = n_0 (1+z)^\delta$. | `[-3, 3]` | `dark_sirens`, `dark_sirens_complete` |
+| `b_miss` | Bias amplitude of the LSS-modulated missing-galaxy density (dimensionless). | `[0, 3]` | `dark_sirens` with `--use_lss true` and no `Q_LSS` table for that catalog, or with `--lss_field_mode latent` |
 | `sigma_kde` | Extra redshift width added in quadrature to the catalog kernels. | `[0, 0.05]` | `dark_sirens`, `dark_sirens_complete` |
 | `M0hat` | $h$-scaled magnitude zero point of the Gaussian selection family. | `[-23, -18]` | `--c_mode selection`, gaussian family |
 | `sigma_M` | Width of the Gaussian selection family. | `[0.05, 3]` | `--c_mode selection`, gaussian family |

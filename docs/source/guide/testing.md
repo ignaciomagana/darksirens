@@ -22,9 +22,8 @@ imported lazily and the subset stubs `gwcat`. One file runs the same way, e.g.
 `... python -m pytest -q tests/test_unified_k1_golden.py`.
 
 Recorded size, measured 2026-08-23 (CPython 3.11.10, jax 0.4.34 CPU, numpy
-1.26.4): **68 files, 805 tests collected**. The last end-to-end timing is
-17m47s in GitHub CI and 21m10s on a shared review node, both at the
-then-current 49 files / 519 tests.
+1.26.4): **68 files, 805 tests collected**. The CI job that runs it has a
+30-minute timeout.
 
 That record is enforced: `tests/test_fast_subset_record.py` asserts that every
 listed file exists, that none is listed twice, that the manifest header's
@@ -60,7 +59,7 @@ A second bank of tests perturbs each cell's feature and asserts the value
 moves, so an inert fixture cannot pin a meaningless golden.
 
 Known pre-existing drift, reproduced on this checkout on the `cpu` backend
-(2026-09-03, 3 failed / 24 passed in 178 s): the three `Q_LSS` cells `qdet`,
+(2026-09-03, 3 failed / 20 passed): the three `Q_LSS` cells `qdet`,
 `use_lss` and `ensemble_marg` exceed `rtol 1e-12` by about a factor two (max
 relative difference 2.3e-12, max absolute 3.0e-13 on values near 0.127). The
 module docstring additionally records two stale `gpu:*` `wl_lognormal` entries

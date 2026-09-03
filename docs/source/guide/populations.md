@@ -101,7 +101,8 @@ startup table as described in [Running inference](inference.md).
 The GP family replaces a parametric mass, mass-ratio, spin or redshift shape with
 a log-density Gaussian process, sampling kernel hyperparameters (`$\log A$`,
 `$\log\ell_m$`, ...) plus one `$\xi_i$` latent per grid node, so these models are
-high dimensional (92 labels for `gp2d_m1_q`, 26 for `gppop`). The registered
+high dimensional (92 labels for `gp2d_m1_q`, 26 for `gppop`, counted with
+`pop_model_prior_parser`). The registered
 names are `gp1d_{m1,q,chi,z}`, the six `gp2d_*` pairs (`m1_q`, `m1_chi`, `m1_z`,
 `q_chi`, `q_z`, `chi_z`), the four `gp3d_*` triples (`m1_q_chi`, `m1_q_z`,
 `m1_chi_z`, `q_chi_z`), `gp4d`, `gp_separable` (independent 1-D GPs, no

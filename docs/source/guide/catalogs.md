@@ -129,6 +129,22 @@ the missing budget without rescaling it (`--no-budget-renorm` removes that
 renormalisation; research ablations only).
 ```
 
+## In-likelihood latent field
+
+`--lss_field_mode latent` replaces the resident `Q_LSS` table by a latent
+field solved inside the likelihood, anchored to a prebuilt artifact:
+
+| Option | Meaning |
+| --- | --- |
+| `--lss_field_mode {table,latent}` | source of the missing-galaxy modulation (default `table`) |
+| `--lss_field_artifact PATH` | the anchor artifact; required by, and only legal with, `latent` |
+| `--lss_field_sha256 HEX` | pins the artifact's identity; a mismatch is fatal |
+| `--allow_unanchored_budget` | ablation: latent mode with a flat, uncalibrated `log10n0` or `delta` prior |
+
+In latent mode the `b_miss` label is sampled whenever the mode is active,
+independently of `--use_lss` and of any table. See the
+[CLI reference](../reference/cli.md) for the full option set.
+
 ## The marked-host model
 
 `--mark_model loglinear` reweights each catalog galaxy by a sampled BBH-host
