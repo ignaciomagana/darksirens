@@ -1176,11 +1176,22 @@ def _sigma_kde_upper_bound(opts, parameter_decoder, surveys):
 
     default_hi = next(spec.upper for spec in _SURVEY_BLOCK if spec.label == "sigma_kde")
     overrides = getattr(opts, "prior_overrides", None) or {}
-    sampled = [
+    sampled = {
         lbl for lbl in parameter_decoder.sampled_labels
         if lbl == "sigma_kde" or lbl.startswith("sigma_kde_c")
-    ]
-    hi = max(float(s.sigma_kde) for s in surveys) if surveys else 0.0
+    }
+    # ``surveys`` is decoded at a COORDINATE PLACEHOLDER (``_reference_params``),
+    # so a catalog whose ``sigma_kde`` is sampled carries that placeholder, not
+    # a bound: only the catalogs whose label is fixed contribute their value.
+    # Catalog k (0-based) is labelled ``sigma_kde`` for k == 0 and
+    # ``sigma_kde_c{k+1}`` beyond (``inference.prior._survey_catalog_number``).
+    def _label(k):
+        return "sigma_kde" if k == 0 else f"sigma_kde_c{k + 1}"
+
+    hi = max(
+        (float(s.sigma_kde) for k, s in enumerate(surveys) if _label(k) not in sampled),
+        default=0.0,
+    )
     for lbl in sampled:
         bounds = overrides.get(lbl) if isinstance(overrides, dict) else None
         hi = max(hi, float(bounds[1]) if bounds is not None else float(default_hi))

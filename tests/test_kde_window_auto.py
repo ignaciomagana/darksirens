@@ -375,3 +375,62 @@ def test_sigma_kde_upper_bound_uses_the_prior_when_sampled():
     assert F._sigma_kde_upper_bound(SimpleNamespace(prior_overrides=None), sampled, surveys) == 0.05
     assert F._sigma_kde_upper_bound(
         SimpleNamespace(prior_overrides={"sigma_kde": [0.0, 0.02]}), sampled, surveys) == 0.02
+
+
+def test_sigma_kde_upper_bound_ignores_the_coordinate_placeholder_of_a_sampled_label():
+    """``_reference_params`` decodes the sampled block at a coordinate
+    PLACEHOLDER (0.5), which for a sampled ``sigma_kde`` is 10x the prior's
+    upper bound.  The bound must come from the prior, never from that value:
+    with it, the data-sized window overshot ``N_max`` and windowing switched
+    itself OFF for every run that samples the survey block."""
+    import darksirens.likelihood.factory as F
+    from darksirens.inference.parameters import ParameterDecoder
+    from types import SimpleNamespace
+
+    def _decoder(sampled):
+        return ParameterDecoder(
+            sampled_labels=tuple(sampled),
+            fixed_parameter_values={"Om0": 0.3075, "delta": 0.94},
+            pop_labels=(), pop_params_fid=(),
+            complete_empty_pixel_policy=0, z_depths=(0.3,),
+        )
+
+    dec = _decoder(("H0", "log10n0", "delta", "sigma_kde"))
+    _, surveys = F._reference_params(dec, 1)
+    assert float(surveys[0].sigma_kde) == 0.5      # the placeholder, as decoded
+    opts = SimpleNamespace(prior_overrides=None)
+    assert F._sigma_kde_upper_bound(opts, dec, surveys) == 0.05
+    # A fixed catalog beside a sampled one still contributes its fixed value.
+    dec2 = _decoder(("H0", "sigma_kde_c2"))
+    surveys2 = (_survey(0.08), _survey(0.5))
+    assert F._sigma_kde_upper_bound(opts, dec2, surveys2) == 0.08
+    surveys3 = (_survey(0.5), _survey(0.01))
+    dec3 = _decoder(("H0", "sigma_kde"))
+    assert F._sigma_kde_upper_bound(opts, dec3, surveys3) == 0.05
+
+
+def test_static_int_equality_and_window_validation():
+    assert C.StaticInt(64) == 64 and C.StaticInt(64) == C.StaticInt(64)
+    assert not (C.StaticInt(64) == "x")             # no ValueError
+    assert C.StaticInt(64) != None                   # noqa: E711
+    assert C._static_window(None) is None
+    assert int(C._static_window(2)) == 2
+    with pytest.raises(ValueError):
+        C._static_window(1)
+    with pytest.raises(ValueError):
+        C.catalog_kernel_state(
+            CosmoParams(H0=70.0, Om0=0.3, w0=-1.0, wa=0.0), _survey(),
+            _rows(), kde_window=0)
+
+
+def test_auto_kde_window_refuses_rows_without_widths_and_accepts_missing_counts():
+    from types import SimpleNamespace
+    cat = _rows()
+    zg, dz, ng = cat.zgals, cat.dzgals, cat.ngals
+    with pytest.raises(ValueError):
+        C.auto_kde_window([SimpleNamespace(zgals=zg, dzgals=None, ngals=ng)], 0.0)
+    # No counts: every slot is a galaxy; the padding at z=100 is far from
+    # everything, so the answer matches the counted view on the real rows.
+    full = C.auto_kde_window([SimpleNamespace(zgals=zg, dzgals=dz, ngals=None)], 0.0)
+    counted = C.auto_kde_window([SimpleNamespace(zgals=zg, dzgals=dz, ngals=ng)], 0.0)
+    assert full is not None and counted is not None and full >= counted
