@@ -279,8 +279,14 @@ def prepare_redshift_prior_state(
     *,
     materialize_state: bool = True,
     catalog_sky_weighting: str = "conditional",
+    kde_window=None,
 ):
     """Build the per-proposal state for ``model``.  O(N_rows × N_grid).
+
+    ``kde_window`` (concrete Python int or ``None``; static) is the per-sample
+    catalog-KDE window the kernel state is built for; ``None`` defers to the
+    process-global :func:`darksirens.redshift.catalog.configure_catalog_kde_window`
+    size.  The likelihood factory sizes it from the bound catalogs.
 
     ``mark_model`` (+ sampled ``mark_params`` ``eta`` and the resolved
     ``mark_names``) optionally activates the marked-host model for
@@ -349,7 +355,9 @@ def prepare_redshift_prior_state(
         # Measured on a uniform-in-V_c null catalog, p_cat/(dV/dz) has
         # log-log slope +0.94 with volume weighting and 0.00 without (see
         # tests/test_complete_catalog_volume_convention.py).
-        kernels = catalog_kernel_state(cosmo, survey, em_catalog, volume_weighted=False)
+        kernels = catalog_kernel_state(
+            cosmo, survey, em_catalog, volume_weighted=False, kde_window=kde_window
+        )
         Nobs = _row_counts(em_catalog)
         row_has = Nobs > 0.0
         vol = _precompute_volume_grid(cosmo)
@@ -497,7 +505,7 @@ def prepare_redshift_prior_state(
             )
             kernels, log_N_host = marked_catalog_kernel_state(
                 cosmo, survey, em_catalog, log_h, log_g_grid=log_g_grid,
-                z_depth=survey.z_depth,
+                z_depth=survey.z_depth, kde_window=kde_window,
             )
             has_flat_marks = (
                 em_catalog.field_mark_values is not None
@@ -610,6 +618,7 @@ def prepare_redshift_prior_state(
             cosmo, survey, em_catalog, log_g_grid=log_g_grid,
             z_depth=survey.z_depth,
             pinned=em_catalog.pinned_kernels,
+            kde_window=kde_window,
         )
         Nobs = _row_counts(em_catalog)
         # DEPTH-TRUNCATED CATALOG: kernels.log_kw has been renormalised to unit

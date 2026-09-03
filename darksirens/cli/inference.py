@@ -1823,13 +1823,14 @@ def build_parser():
     g.add_argument("--kde_window", type=int, default=None, metavar="W",
                    help="Static window size for the per-sample catalog KDE: only the W "
                         "galaxies nearest each sample's redshift are evaluated (rows are "
-                        "z-sorted at load). Default 1024 holds |delta log p_cat| < 1e-6 "
-                        "against the full row across the ENTIRE sampled sigma_kde prior "
-                        "[0, 0.05] on a review-scale 2113-galaxy row (~2x wall-clock, "
-                        "~2x peak transient on that shape); denser rows need a larger W — "
-                        "size it with darksirens.redshift.catalog.recommended_kde_window. "
-                        "0 disables windowing entirely (full-row escape hatch for A/B "
-                        "validation).")
+                        "z-sorted at load). Unset (default) SIZES IT FROM THE DATA at "
+                        "build time: the largest in-range galaxy block any bound row "
+                        "holds at the widest sigma_kde the run can reach (its fixed "
+                        "value, or the prior's upper bound when sampled), so the "
+                        "evaluator never truncates (darksirens.redshift.catalog."
+                        "auto_kde_window; the former fixed 1024 truncated silently on "
+                        "denser rows). A value pins W; 0 disables windowing entirely "
+                        "(full-row escape hatch for A/B validation).")
     g.add_argument("--kde_window_nsigma", type=float, default=None, metavar="X",
                    help="Half-width multiplier for the KDE window: contributing galaxies "
                         "are located within +/- X * max_row(sigma_eff) of the sample "
