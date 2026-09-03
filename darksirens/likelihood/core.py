@@ -247,6 +247,9 @@ class FrozenRedshiftPrior(NamedTuple):
 _FROZEN_SURVEY_PROBE_FIELDS = (
     "n0", "z50", "w", "delta", "b_miss", "alpha_miss", "sigma_kde",
     "m_lim", "M0hat", "sigma_M",
+    # Schechter selection family (``c_mode="selection"``): read by the
+    # completion curves; ``Mstar_hat`` and ``alpha`` are sampled labels there.
+    "Mstar_hat", "alpha", "M_faint_offset",
 )
 
 

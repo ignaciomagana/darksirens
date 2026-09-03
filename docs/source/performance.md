@@ -268,29 +268,6 @@ of KDE evaluation.
 
 ## Population-only runs: the redshift prior is frozen at build time
 
-The dark-siren redshift prior `p(z | pix)` is a pure function of the cosmology,
-the survey block, the marks and the catalog, evaluated at `z = z(dL; cosmology)`.
-When none of those labels is sampled — a population-only run such as the
-`scripts/run_tinyns_heavy_darksirens_likelihood.sh` launcher's
-`--fix_cosmology true --fix_survey true` — every input is a run constant and so
-is the per-sample prior. The factory therefore evaluates it ONCE
-(`likelihood.core.FrozenRedshiftPrior`: one value per PE sample and per
-injection, built with the same `prepare_redshift_prior_state` +
-`eval_redshift_prior_with_state` the live graph would run) and the likelihood
-body skips the per-proposal kernel state, completion curves and windowed
-catalog KDE altogether; per proposal only the population term, the Jacobian
-and the reductions remain. The K-catalog mixture keeps its sampled sticks: the
-frozen per-catalog priors are combined live.
-
-The gate (`factory.frozen_prior_admissible`) reads the sampled LABELS only —
-every sampled label must be a population label, a sky-model label or a mixture
-stick — and the premise is re-verified IN THE GRAPH: the fixed cosmology and
-survey scalars the prior reads travel with the operand, the live graph rebuilds
-the same vector from the proposal it is handed, and any difference poisons the
-log-likelihood to `-inf`. `--freeze_redshift_prior false` is the A/B switch.
-
-## Population-only runs: the redshift prior is frozen at build time
-
 A run that samples no cosmology, survey or mark label — the
 `scripts/run_tinyns_heavy_darksirens_likelihood.sh` launcher's
 `--fix_cosmology true --fix_survey true` population inference — has a

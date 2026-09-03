@@ -1283,7 +1283,7 @@ def frozen_prior_admissible(parameter_decoder, universe_model, mark_model,
 
 def _build_frozen_prior(parameter_decoder, universe_model, catalog_sky_weighting,
                         kde_window, gw_pe, catalogs_pe, gw_sel, catalogs_sel,
-                        n_catalogs, chunk=32768):
+                        n_catalogs, chunk=None):
     """Evaluate ``log p(z | pix)`` for every PE sample and injection ONCE.
 
     Runs the SAME functions the live graph runs -- ``prepare_redshift_prior_state``
@@ -2593,8 +2593,8 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 max_likelihood_variance=max_likelihood_variance,
                 catalog_sky_weighting=catalog_sky_weighting,
                 share_prior_state_by_catalog=share_prior_state_by_catalog,
-            kde_window=kde_window,
-            frozen_prior=frozen_prior_,
+                kde_window=kde_window,
+                frozen_prior=frozen_prior_,
             )
         return darksiren_log_likelihood(
             cosmo,
