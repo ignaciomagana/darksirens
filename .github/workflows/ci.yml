@@ -41,6 +41,26 @@ env:
   PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
 
 jobs:
+  docs:
+    name: docs (sphinx -W)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the pinned CPU stack and the docs toolchain
+        # The same stack as the Tier-0 job, so autodoc imports the real
+        # modules (gwcat/tinyns/flowjax are mocked by conf.py when absent).
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ${{ env.PIP_DEPS }}
+          python -m pip install -r docs/requirements.txt
+      - name: Build with warnings as errors
+        run: python -m sphinx -W --keep-going -b html docs/source docs/_build/html
+
   fast-tests:
     name: Tier-0 fast subset (CPU)
     runs-on: ubuntu-latest

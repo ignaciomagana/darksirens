@@ -1,15 +1,28 @@
+# Read the Docs configuration (https://docs.readthedocs.io/en/stable/config-file/v2.html)
 version: 2
 
 build:
   os: ubuntu-24.04
   tools:
     python: "3.11"
+  jobs:
+    # JAX's CPU wheel and the two git-pinned dependencies (gwcat, tinyns) make
+    # the package installable on the builder; autodoc then documents real
+    # signatures instead of mocks.
+    pre_install:
+      - python -m pip install --upgrade pip
 
 sphinx:
   configuration: docs/source/conf.py
+  # A warning is a broken link, a missing page or a MyST error: fail the build
+  # rather than publish it.
+  fail_on_warning: true
 
 python:
   install:
     - method: pip
       path: .
     - requirements: docs/requirements.txt
+
+formats:
+  - htmlzip
