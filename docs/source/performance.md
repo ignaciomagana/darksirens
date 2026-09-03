@@ -380,8 +380,23 @@ decorator too** — a plain `@jit` that merely reads the active table closes ove
 the caller's tracer, which JAX does not key its tracing cache on and will replay
 from a dead trace (`UnexpectedTracerError`, reproduced on jax 0.4.34).
 
-The lensing CLI's `loglike` is deliberately **not** jitted as a whole: under
-`--partition_mode marginalize_exact` it builds one likelihood call per partition in
-a Python loop, and fusing those into a single XLA program is exactly the
-host-memory blow-up that halted the lensing campaign. Its per-partition eager lens
-decode is hoisted to once per call instead.
+The lensing CLI's `loglike` is deliberately **not** jitted as a whole. Under
+`--partition_mode marginalize_exact` it makes ONE call to the cluster master
+likelihood per proposal — every event as a singleton row, every candidate edge
+as a pair row (the pair rows go through the master's `lax.scan`, so the graph
+does not grow with the candidate graph) — and assembles each partition of the
+marginalisation from the returned per-row terms as gathers and sums plus the
+marked-Poisson selection correction at that partition's own counts and
+variance budget (`_assemble_partition`). That is legitimate because every row
+depends on its own event(s) and the proposal only, and both selection integrals
+depend on the proposal only; the reviewers confirmed nothing in the master
+couples a partition's members. The previous spelling called the whole master —
+both selection integrals and all the singletons — once per component partition
+with pairs, and fusing those calls into one XLA program was the host-memory
+blow-up that halted the lensing campaign. MEASURED on the 20-event × 250-sample
+mock with a 6-edge candidate graph (5 × 3 × 2 = 30 partitions, 4-core CPU): 8
+master evaluations per proposal → 1, 38.7 s → 15.7 s per `loglike`, and the
+value is **bit-identical** (−174.60377127321635) on both the componentwise and
+the global path. The remaining cost is the one master call itself (the
+singleton WL Hermite weights, the two selection integrals and one pair
+likelihood per candidate edge).

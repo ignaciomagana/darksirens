@@ -407,7 +407,12 @@ darksirens_inference_lensing \
   what makes it tractable; `--max_exact_partitions` (default `10000`),
   `--max_component_events`, `--max_component_edges`,
   `--max_component_partitions` and `--max_total_partitions` bound the
-  enumeration.
+  enumeration. Cost per proposal is one master-likelihood evaluation (every
+  event as a singleton, every candidate edge as a pair) regardless of the
+  number of partitions; the partitions themselves are assembled from those
+  terms (see `docs/source/performance.md`). A candidate graph whose
+  enumeration exceeds `--max_exact_partitions` is refused with a request to
+  prune it rather than run.
 
 ### Model options
 

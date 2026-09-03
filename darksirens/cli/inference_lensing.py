@@ -798,6 +798,103 @@ def _count_probe_partition_state(n_events: int, n_pairs: int) -> PartitionState:
     )
 
 
+def _edge_time_mark_arrays(candidate_pairs):
+    """Edge-level time marks for EVERY candidate edge, in candidate-edge order
+    (the order ``inp["edge_pair_indices"]`` lists the edges in)."""
+    from darksirens.lensing.partitions import PartitionState
+
+    pairs = tuple(candidate_pairs)
+    state = PartitionState(
+        np.asarray([], dtype=np.int32),
+        np.asarray([[int(c.i), int(c.j)] for c in pairs], dtype=np.int32).reshape((-1, 2)),
+        0,
+        len(pairs),
+        0.0,
+        np.arange(len(pairs), dtype=np.int32),
+    )
+    return _time_mark_arrays_for_partition_state(state, pairs)
+
+
+def _assemble_partition(terms, singleton_indices, edge_indices, opts):
+    """One partition's master-likelihood diagnostics from the per-row TERMS.
+
+    ``terms`` is the master likelihood's diagnostics dict for the call that
+    evaluated every event as a singleton row and every candidate edge as a
+    pair row (see ``build_cluster_likelihood``); its ``per_event_logL`` /
+    ``per_event_var`` are indexed by global event index and its
+    ``per_pair_logL`` / ``per_pair_var`` by candidate-edge index.  A partition
+    is then gathers and sums of those rows plus the marked-Poisson selection
+    correction at ITS OWN counts and ITS OWN total-variance budget -- exactly
+    what ``darksiren_log_likelihood_with_clusters`` computes for that partition
+    (same rows, same reduction order), without re-evaluating the two selection
+    integrals and every singleton for each partition.
+    """
+    import jax.numpy as jnp
+    from darksirens.likelihood.cluster_selection import (
+        combined_selection_log_correction,
+    )
+
+    s_idx = jnp.asarray(singleton_indices, dtype=jnp.int32).reshape(-1)
+    e_idx = jnp.asarray(edge_indices, dtype=jnp.int32).reshape(-1)
+    n_singletons = int(s_idx.shape[0])
+    n_pairs = int(e_idx.shape[0])
+    zero = jnp.asarray(0.0, dtype=jnp.float64)
+    per_pair_logL = (
+        jnp.take(terms["per_pair_logL"], e_idx, axis=0) if n_pairs
+        else jnp.zeros((0,), dtype=jnp.float64)
+    )
+    singleton_logL_sum = (
+        jnp.sum(jnp.take(terms["per_event_logL"], s_idx, axis=0)) if n_singletons else zero
+    )
+    singleton_variance_sum = (
+        jnp.sum(jnp.take(terms["per_event_var"], s_idx, axis=0)) if n_singletons else zero
+    )
+    pair_logL_sum = jnp.sum(per_pair_logL) if n_pairs else zero
+    pair_variance_sum = (
+        jnp.sum(jnp.take(terms["per_pair_var"], e_idx, axis=0)) if n_pairs else zero
+    )
+    pe_variance_sum = singleton_variance_sum + pair_variance_sum
+    selection = combined_selection_log_correction(
+        terms["log_mu_singleton"], terms["log_sigma2_singleton"],
+        terms["log_mu_cluster"], terms["log_sigma2_cluster"],
+        n_singletons_observed=n_singletons,
+        n_clusters_observed=n_pairs,
+        soft_guard=bool(getattr(opts, "selection_neff_soft_guard", False)),
+        max_likelihood_variance=float(
+            getattr(opts, "max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
+        ),
+        pe_variance_sum=pe_variance_sum,
+    )
+    ll = singleton_logL_sum + pair_logL_sum + selection
+    out = dict(terms)
+    out.update({
+        "logL_total": jnp.where(jnp.isfinite(ll), ll, -jnp.inf),
+        "singleton_logL_sum": singleton_logL_sum,
+        "singleton_variance_sum": singleton_variance_sum,
+        "pair_logL_sum": pair_logL_sum,
+        "pair_variance_sum": pair_variance_sum,
+        "pe_variance_sum": pe_variance_sum,
+        "selection_correction_total": selection,
+        "per_pair_logL": per_pair_logL,
+        "n_singletons": jnp.asarray(n_singletons),
+        "n_pairs": jnp.asarray(n_pairs),
+    })
+    for key in ("per_event_logL", "per_event_var", "per_pair_var"):
+        out.pop(key, None)
+    return out
+
+
+def _nontrivial_components(component_partition_states):
+    """Indices of the components that have at least one partition with a pair.
+    An isolated event's component has the single state (n_pairs = 0,
+    log_prior_weight = 0): a no-op in the pair-count convolution and in the
+    prior normaliser, so the per-proposal loops skip it."""
+    return tuple(
+        idx for idx, states in enumerate(component_partition_states)
+        if any(int(state.n_pairs) > 0 for state in states)
+    )
+
+
 def _count_correction_closed_form(baseline_raw, opts):
     """Closed-form count-only selection correction, as a function of the
     partition's ``(n_singletons, n_pairs)``.
@@ -1848,12 +1945,22 @@ def load_inputs(opts):
         factorized_exact = partition_component_mode == "componentwise"
         component_partition_summaries = None
         component_partition_states = None
-        component_marginal_partitions = None
         component_full_partition_states = None
         component_full_partitions = None
         baseline_partition = None
         selection_probe_partitions = None
         approximate_total_partitions = None
+        # Every candidate edge as a pair row, in candidate-edge order, with its
+        # own time marks: the per-proposal TERMS call evaluates all of them
+        # once (build_cluster_likelihood).
+        edge_pair_indices = jnp.asarray(
+            [[int(c.i), int(c.j)] for c in candidate_pairs], dtype=jnp.int32
+        ).reshape((-1, 2))
+        if pair_marks_mode == "time":
+            edge_time_delta_t_obs, edge_time_sigma = _edge_time_mark_arrays(candidate_pairs)
+        else:
+            edge_time_delta_t_obs = jnp.zeros((0,), dtype=jnp.float64)
+            edge_time_sigma = jnp.zeros((0,), dtype=jnp.float64)
 
         if partition_component_mode == "global":
             _candidate_n_events2, partition_states, log_z_prior = exact_partitions_from_pairs(
@@ -1898,13 +2005,6 @@ def load_inputs(opts):
                     for state in states
                 )
                 for states in component_full_partition_states
-            )
-            component_marginal_partitions = tuple(
-                tuple(
-                    _runtime_part_from_state(state, candidate_pairs, pair_marks=pair_marks_mode)
-                    for state in states
-                )
-                for states in component_partition_states
             )
             baseline_state = _all_singleton_partition_state(candidate_n_events)
             baseline_partition = _runtime_part_from_state(
@@ -1957,7 +2057,6 @@ def load_inputs(opts):
         factorized_exact = False
         component_partition_summaries = None
         component_partition_states = None
-        component_marginal_partitions = None
         component_full_partition_states = None
         component_full_partitions = None
         baseline_partition = None
@@ -1966,6 +2065,9 @@ def load_inputs(opts):
         marginal_partitions = None
         partition_states = None
         log_z_prior = 0.0
+        edge_pair_indices = None
+        edge_time_delta_t_obs = None
+        edge_time_sigma = None
         # A fixed partition must partition the WHOLE observed catalog: the
         # likelihood only touches the listed indices, so an uncovered event is
         # silently dropped from the product while the run still reports the PE
@@ -2008,8 +2110,10 @@ def load_inputs(opts):
         approximate_total_partitions=approximate_total_partitions,
         component_partition_summaries=component_partition_summaries,
         component_partition_states=component_partition_states,
-        component_marginal_partitions=component_marginal_partitions,
         component_full_partition_states=component_full_partition_states,
+        edge_pair_indices=edge_pair_indices,
+        edge_time_delta_t_obs=edge_time_delta_t_obs,
+        edge_time_sigma=edge_time_sigma,
         component_full_partitions=component_full_partitions,
         baseline_partition=baseline_partition,
         selection_probe_partitions=selection_probe_partitions,
@@ -2558,6 +2662,40 @@ def _require_time_marks_in_sis_support(opts, inp):
         _warn(sis_time_mark_support_message(support))
 
 
+def _terms_call_layout(opts, inp):
+    """The one master call a marginalize_exact proposal makes, as a runtime
+    part: EVERY event as a singleton row, EVERY candidate edge as a pair row.
+
+    Returns ``(terms_part, all_events, empty_edges, nontrivial_components)``;
+    ``None`` for the first three under ``--partition_mode fixed``.  The pair
+    rows go through the master's ``lax.scan`` (``pair_batch_size >= 1``), so
+    the compiled graph does not grow with the number of candidate edges.
+    """
+    import jax.numpy as jnp
+
+    if getattr(opts, "partition_mode", "fixed") != "marginalize_exact":
+        return None, None, None, ()
+    n_events = int(inp["nEvents"])
+    edge_pairs = inp["edge_pair_indices"]
+    n_edges = int(edge_pairs.shape[0])
+    all_events = jnp.arange(n_events, dtype=jnp.int32)
+    terms_part = dict(
+        singleton_indices=all_events,
+        pair_indices=jnp.asarray(edge_pairs, dtype=jnp.int32).reshape((-1, 2)),
+        n_singletons=n_events,
+        n_pairs=n_edges,
+        pair_batch_size=max(1, int(getattr(opts, "pair_batch_size", 0) or 0)) if n_edges else 0,
+    )
+    if getattr(opts, "pair_marks", "none") == "time":
+        terms_part["pair_time_delta_t_obs"] = inp["edge_time_delta_t_obs"]
+        terms_part["pair_time_sigma"] = inp["edge_time_sigma"]
+    nontrivial = (
+        _nontrivial_components(inp["component_partition_states"])
+        if inp.get("component_partition_states") is not None else ()
+    )
+    return terms_part, all_events, jnp.zeros((0,), dtype=jnp.int32), nontrivial
+
+
 def build_cluster_likelihood(
     opts, inp, decoder, lens_sampled_labels=None, fixed_parameter_values=None
 ):
@@ -2615,17 +2753,16 @@ def build_cluster_likelihood(
             "runner: selection.pair_tag_model/selection.pair_tag_constant)."
         )
 
+    terms_part, all_events, empty_edges, nontrivial = _terms_call_layout(opts, inp)
+
     def loglike(coord):
         # decode() returns a 5-tuple (cosmo, survey, pop, sky, mark) on current
         # master; the cluster likelihood is WL-only (sky/mark unused here).
         cosmo, survey, pop_params, _sky_params, _mark_params = _decode_base_parameters(
             decoder, coord
         )
-        # Decode the lens block ONCE per likelihood call.  It depends only on
-        # ``coord``, so calling it inside ``_call_partition`` re-ran the eager decode
-        # for every partition in the Python loop below — up to
-        # ``--max_exact_partitions`` times per evaluation under
-        # ``--partition_mode marginalize_exact``.
+        # Decode the lens block ONCE per likelihood call (it depends only on
+        # ``coord``).
         lens_params = _decode_lens_params(
             coord, lens_sampled_labels, fixed_parameter_values, opts
         )
@@ -2680,7 +2817,9 @@ def build_cluster_likelihood(
                 ),
                 pair_time_t_obs_window_sec=inp.get("pair_time_t_obs_window_sec"),
                 pair_time_signed=bool(inp.get("pair_time_signed", False)),
-                pair_batch_size=getattr(opts, "pair_batch_size", 0),
+                pair_batch_size=int(
+                    part.get("pair_batch_size", getattr(opts, "pair_batch_size", 0))
+                ),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
                 singleton_lensing=singleton_lensing,
                 lensed_singles=inp.get("lensed_singles"),
@@ -2700,17 +2839,19 @@ def build_cluster_likelihood(
         def _eval_partition(part):
             return _call_partition(part, diagnostics=False)
 
-        def _selection_correction(part):
-            return _call_partition(part, diagnostics=True)["selection_correction_total"]
-
-        def _content_loglike(raw):
-            return raw["singleton_logL_sum"] + raw["pair_logL_sum"]
-
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            # ONE master evaluation per proposal: every event as a singleton
+            # row and every candidate edge as a pair row.  Each row depends on
+            # its own event(s) and the proposal only, and both selection
+            # integrals depend on the proposal only, so every partition of the
+            # marginalisation is gathers and sums of these terms
+            # (_assemble_partition).  The former one-master-call-per-partition
+            # spelling redid the selection integrals and all the singletons
+            # for each partition with pairs.
+            terms = _call_partition(terms_part, diagnostics=True)
             if inp.get("factorized_exact"):
-                baseline_raw = _call_partition(inp["baseline_partition"], diagnostics=True)
+                baseline_raw = _assemble_partition(terms, all_events, empty_edges, opts)
                 baseline = baseline_raw["logL_total"]
-                baseline_content = _content_loglike(baseline_raw)
                 selection0 = baseline_raw["selection_correction_total"]
                 # Count-only selection deltas, CLOSED FORM (see
                 # _count_correction_closed_form for why the baseline's
@@ -2725,26 +2866,35 @@ def build_cluster_likelihood(
                         for part in inp["selection_probe_partitions"]
                     ]
                 )
+                per_event = terms["per_event_logL"]
+                per_edge = terms["per_pair_logL"]
                 component_terms = []
-                for states, parts in zip(
-                    inp["component_partition_states"], inp["component_full_partitions"]
-                ):
-                    terms = []
-                    for state, part in zip(states, parts):
+                for comp_idx in nontrivial:
+                    states = inp["component_partition_states"][comp_idx]
+                    comp = []
+                    for state in states:
                         n_pairs = int(state.n_pairs)
                         if n_pairs == 0:
                             content_delta = jnp.asarray(0.0, dtype=jnp.float64)
                         else:
-                            raw = _call_partition(part, diagnostics=True)
-                            content_delta = _content_loglike(raw) - baseline_content
-                        terms.append(
+                            # Content relative to the all-singleton baseline:
+                            # the pairs formed, minus the singleton rows they
+                            # replace.  Formed directly rather than as a
+                            # difference of two full-catalog sums.
+                            e_idx = jnp.asarray(state.candidate_edge_indices, dtype=jnp.int32)
+                            paired = jnp.asarray(state.pair_indices, dtype=jnp.int32).reshape(-1)
+                            content_delta = (
+                                jnp.sum(jnp.take(per_edge, e_idx, axis=0))
+                                - jnp.sum(jnp.take(per_event, paired, axis=0))
+                            )
+                        comp.append(
                             (
                                 n_pairs,
                                 jnp.asarray(float(state.log_prior_weight), dtype=jnp.float64)
                                 + content_delta,
                             )
                         )
-                    component_terms.append(tuple(terms))
+                    component_terms.append(tuple(comp))
                 total = (
                     baseline
                     + _factorized_logsumexp_jax(component_terms, count_delta)
@@ -2755,11 +2905,14 @@ def build_cluster_likelihood(
                 # NaN (-inf minus -inf) and would abort dynesty at live-point
                 # init. -inf is the correct sampler-facing value there.
                 return jnp.where(jnp.isfinite(total), total, -jnp.inf)
-            terms = [
-                part["log_prior_weight"] + _eval_partition(part)
+            terms_list = [
+                part["log_prior_weight"]
+                + _assemble_partition(
+                    terms, part["singleton_indices"], part["candidate_edge_indices"], opts
+                )["logL_total"]
                 for part in inp["marginal_partitions"]
             ]
-            total = jax_logsumexp(jnp.stack(terms)) - inp["log_z_prior"]
+            total = jax_logsumexp(jnp.stack(terms_list)) - inp["log_z_prior"]
             return jnp.where(jnp.isfinite(total), total, -jnp.inf)
 
         return _eval_partition(inp)
@@ -2804,6 +2957,8 @@ def build_cluster_diagnostics(
         if getattr(opts, "singleton_lensing", "off") == "sl_mixture"
         else SINGLETON_LENSING_OFF
     )
+
+    terms_part, _all_events, _empty_edges, _nontrivial = _terms_call_layout(opts, inp)
 
     def diagnostics(coord):
         coord = jnp.asarray(coord)
@@ -2861,7 +3016,9 @@ def build_cluster_diagnostics(
                 ),
                 pair_time_t_obs_window_sec=inp.get("pair_time_t_obs_window_sec"),
                 pair_time_signed=bool(inp.get("pair_time_signed", False)),
-                pair_batch_size=getattr(opts, "pair_batch_size", 0),
+                pair_batch_size=int(
+                    (part or {}).get("pair_batch_size", getattr(opts, "pair_batch_size", 0))
+                ),
                 y_nodes_pair=getattr(opts, "y_nodes_pair", 32),
                 singleton_lensing=singleton_lensing,
                 lensed_singles=inp.get("lensed_singles"),
@@ -2879,6 +3036,22 @@ def build_cluster_diagnostics(
             )
 
         if getattr(opts, "partition_mode", "fixed") == "marginalize_exact":
+            # The same ONE terms evaluation the sampler path makes (see
+            # build_cluster_likelihood): every partition below is assembled from
+            # it, so the diagnostics and the sampler read identical rows.
+            terms = _raw_for(
+                terms_part["singleton_indices"],
+                terms_part["pair_indices"],
+                terms_part["n_singletons"],
+                terms_part["n_pairs"],
+                terms_part,
+            )
+
+            def _raw_part(part):
+                return _assemble_partition(
+                    terms, part["singleton_indices"], part["candidate_edge_indices"], opts
+                )
+
             def _global_diagnostics():
                 state_to_part = {
                     id(state): part
@@ -2888,15 +3061,7 @@ def build_cluster_diagnostics(
                 }
 
                 def _part_loglike(state):
-                    part = state_to_part[id(state)]
-                    raw = _raw_for(
-                        jnp.asarray(state.singleton_indices, dtype=jnp.int32),
-                        jnp.asarray(state.pair_indices, dtype=jnp.int32),
-                        state.n_singletons,
-                        state.n_pairs,
-                        part,
-                    )
-                    return float(np.asarray(raw["logL_total"]))
+                    return float(np.asarray(_raw_part(state_to_part[id(state)])["logL_total"]))
 
                 return compute_marginalized_partition_diagnostics(
                     inp["partition_states"],
@@ -2908,14 +3073,7 @@ def build_cluster_diagnostics(
                 )
 
             if inp.get("factorized_exact"):
-                baseline_part = inp["baseline_partition"]
-                baseline_raw = _raw_for(
-                    baseline_part["singleton_indices"],
-                    baseline_part["pair_indices"],
-                    baseline_part["n_singletons"],
-                    baseline_part["n_pairs"],
-                    baseline_part,
-                )
+                baseline_raw = _raw_part(inp["baseline_partition"])
                 baseline_loglike = float(np.asarray(baseline_raw["logL_total"]))
                 baseline_content = float(
                     np.asarray(
@@ -2964,13 +3122,7 @@ def build_cluster_diagnostics(
                         if n_pairs == 0:
                             deltas.append(0.0)
                             continue
-                        raw = _raw_for(
-                            part["singleton_indices"],
-                            part["pair_indices"],
-                            part["n_singletons"],
-                            part["n_pairs"],
-                            part,
-                        )
+                        raw = _raw_part(part)
                         local_content = float(
                             np.asarray(raw["singleton_logL_sum"] + raw["pair_logL_sum"])
                         )
@@ -3093,13 +3245,7 @@ def build_cluster_diagnostics(
                     inp["candidate_pairs"],
                     pair_marks=getattr(opts, "pair_marks", "none"),
                 )
-                raw = _raw_for(
-                    map_part["singleton_indices"],
-                    map_part["pair_indices"],
-                    map_part["n_singletons"],
-                    map_part["n_pairs"],
-                    map_part,
-                )
+                raw = _raw_part(map_part)
                 out.update({f"map_{k}": v for k, v in _diagnostics_to_python(raw).items()})
             else:
                 out = _global_diagnostics()
@@ -3107,13 +3253,7 @@ def build_cluster_diagnostics(
                 out["factorized_exact"] = False
                 out["global_partitions_enumerated"] = True
                 map_part = inp["marginal_partitions"][int(out["map_partition_index"])]
-                raw = _raw_for(
-                    jnp.asarray(out["map_partition"]["singleton_indices"], dtype=jnp.int32),
-                    jnp.asarray(out["map_partition"]["pair_indices"], dtype=jnp.int32),
-                    out["map_partition"]["n_singletons"],
-                    out["map_partition"]["n_pairs"],
-                    map_part,
-                )
+                raw = _raw_part(map_part)
                 out.update({f"map_{k}": v for k, v in _diagnostics_to_python(raw).items()})
         else:
             raw = _raw_for(

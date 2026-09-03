@@ -1254,6 +1254,10 @@ def _factorized_inp_and_opts(soft_guard):
         n_pairs=0,
         singleton_indices=jnp.asarray(baseline_state.singleton_indices, dtype=jnp.int32),
         pair_indices=jnp.asarray(baseline_state.pair_indices, dtype=jnp.int32),
+        # every candidate edge as a pair row for the once-per-proposal terms call
+        edge_pair_indices=jnp.asarray([[c.i, c.j] for c in candidates], dtype=jnp.int32),
+        edge_time_delta_t_obs=jnp.zeros((0,), dtype=jnp.float64),
+        edge_time_sigma=jnp.zeros((0,), dtype=jnp.float64),
     )
     return inp, opts, candidates
 
@@ -1270,58 +1274,48 @@ _WALLED_PE_VAR = 0.9
 
 def _install_fake_master(monkeypatch, pe_variance_sum, neff=_CLEAR_NEFF, log_mu=-3.0,
                          pair_selection_bias=0.0):
-    """Master likelihood whose selection term is the real combined correction
-    at the given (partition-independent) variance budget, and whose content
-    term depends on which pairs are formed."""
+    """Master likelihood in the TERMS layout the marginalize_exact paths call
+    it in (every event a singleton row, every candidate edge a pair row): the
+    selection scalars are the real combined correction's inputs at the given
+    N_eff, each event row carries 0.5 nats and ``pe_variance_sum / n_events``
+    of variance, each edge row ``0.1 (i + j)`` nats and TWICE an event's
+    variance -- so every partition's total-variance budget is exactly
+    ``pe_variance_sum`` -- plus ``pair_selection_bias`` of extra variance per
+    formed pair.  That last term is what makes a partition's selection
+    correction depend on WHICH pairs are formed (not count-only): through the
+    soft guard's wall, or the hard guard's verdict."""
     import jax.numpy as jnp
 
     import darksirens.cli.inference_lensing as cli
-    from darksirens.likelihood.cluster_selection import (
-        combined_selection_log_correction,
-    )
 
     log_sigma2 = 2.0 * log_mu - np.log(neff)
 
     def _raw(*args, **kwargs):
         n_singletons, n_pairs = int(args[12]), int(args[13])
+        singleton_indices = np.asarray(args[10], dtype=int).reshape(-1)[:n_singletons]
         pair_indices = np.asarray(args[11], dtype=int).reshape((-1, 2))[:n_pairs]
-        singleton_logL_sum = jnp.asarray(0.5 * n_singletons)
-        pair_logL_sum = jnp.asarray(
-            float(sum(0.1 * (int(i) + int(j)) for i, j in pair_indices))
-        )
-        selection = combined_selection_log_correction(
-            jnp.asarray(log_mu), jnp.asarray(log_sigma2),
-            jnp.asarray(-np.inf), jnp.asarray(-np.inf),
-            n_singletons_observed=n_singletons,
-            n_clusters_observed=n_pairs,
-            soft_guard=bool(kwargs.get("selection_neff_soft_guard", False)),
-            max_likelihood_variance=float(kwargs.get("max_likelihood_variance", 1.0)),
-            pe_variance_sum=jnp.asarray(pe_variance_sum),
-        )
-        # Stands in for the partition dependence pair_variance_sum gives the
-        # real selection correction: a term that is NOT a function of the counts
-        # alone, so the closed form cannot reproduce it.
-        selection = selection + pair_selection_bias * float(
-            sum(int(i) + int(j) for i, j in pair_indices)
-        )
-        total = singleton_logL_sum + pair_logL_sum + selection
+        n_events = int(args[7])
+        per_event_var = pe_variance_sum / n_events
         return {
-            "logL_total": jnp.where(jnp.isfinite(total), total, -jnp.inf),
-            "singleton_logL_sum": singleton_logL_sum,
-            "pair_logL_sum": pair_logL_sum,
-            "selection_correction_total": selection,
+            "per_event_logL": jnp.full((n_singletons,), 0.5, dtype=jnp.float64),
+            "per_event_var": jnp.full((n_singletons,), per_event_var, dtype=jnp.float64),
+            "per_pair_logL": jnp.asarray(
+                [0.1 * (int(i) + int(j)) for i, j in pair_indices], dtype=jnp.float64
+            ),
+            "per_pair_var": jnp.asarray(
+                [2.0 * per_event_var + pair_selection_bias for _ in pair_indices],
+                dtype=jnp.float64,
+            ),
             "log_mu_singleton": jnp.asarray(log_mu),
             "log_sigma2_singleton": jnp.asarray(log_sigma2),
             "log_mu_cluster": jnp.asarray(-np.inf),
             "log_sigma2_cluster": jnp.asarray(-np.inf),
-            "pe_variance_sum": jnp.asarray(pe_variance_sum),
             "n_singletons": jnp.asarray(n_singletons),
             "n_pairs": jnp.asarray(n_pairs),
         }
 
     def _scalar(*args, **kwargs):
-        kwargs.pop("return_diagnostics", None)
-        return _raw(*args, **kwargs)["logL_total"]
+        raise AssertionError("marginalize_exact must go through the terms call")
 
     monkeypatch.setattr(cli, "darksiren_log_likelihood_with_clusters", _scalar)
     monkeypatch.setattr(cli, "darksiren_likelihood_diagnostics_with_clusters", _raw)
@@ -1415,7 +1409,10 @@ def test_soft_guard_reports_a_non_count_only_selection_instead_of_dying(monkeypa
     import darksirens.cli.inference_lensing as cli
 
     inp, opts, _ = _factorized_inp_and_opts(soft_guard=True)
-    _install_fake_master(monkeypatch, 0.0, pair_selection_bias=0.5)
+    # N_eff inside the wall for a partition whose formed pair carries 0.95 of
+    # variance (threshold 9 / 0.05 = 180 > 25), outside it at the all-singleton
+    # baseline (threshold 20 < 25): the correction is not count-only.
+    _install_fake_master(monkeypatch, 0.0, neff=_WALLED_NEFF, pair_selection_bias=0.95)
     out = cli.build_cluster_diagnostics(opts, inp, _FactorizedDecoder(), [], {})(
         jnp.zeros(1)
     )
@@ -1429,8 +1426,12 @@ def test_hard_guard_still_refuses_a_non_count_only_selection(monkeypatch):
     import darksirens.cli.inference_lensing as cli
 
     inp, opts, _ = _factorized_inp_and_opts(soft_guard=False)
-    _install_fake_master(monkeypatch, 0.0, pair_selection_bias=0.5)
-    with pytest.raises(RuntimeError, match="not count-only"):
+    # Under the hard guard a non-count-only selection can only show up as a
+    # flipped VERDICT (the correction's value never reads the variance budget):
+    # the pair partition's own budget pushes it to -inf while the closed form,
+    # on the baseline budget, stays finite.
+    _install_fake_master(monkeypatch, 0.0, neff=_WALLED_NEFF, pair_selection_bias=0.95)
+    with pytest.raises(RuntimeError, match="NON-FINITE|not count-only"):
         cli.build_cluster_diagnostics(opts, inp, _FactorizedDecoder(), [], {})(
             jnp.zeros(1)
         )

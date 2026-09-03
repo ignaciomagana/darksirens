@@ -783,6 +783,7 @@ def darksiren_log_likelihood_with_clusters(
     # Per-pair log-likelihood loop.  Skipped when cluster_mode == OFF.
     # ──────────────────────────────────────────────────────────────────
     per_pair_logL_values = []
+    per_pair_var_values = []
     pair_logL_sum = jnp.asarray(0.0, dtype=jnp.float64)
     pair_variance_sum = jnp.asarray(0.0, dtype=jnp.float64)
     if cluster_mode == CLUSTER_MODE_J2 and n_pairs > 0:
@@ -852,10 +853,10 @@ def darksiren_log_likelihood_with_clusters(
                 carry_ll, carry_var = carry
                 return (
                     (carry_ll + ll_pair_safe, carry_var + var_pair_safe),
-                    jnp.where(active, ll_pair_safe, -jnp.inf),
+                    (jnp.where(active, ll_pair_safe, -jnp.inf), var_pair_safe),
                 )
 
-            (pair_logL_sum, pair_variance_sum), padded_pair_logL = lax.scan(
+            (pair_logL_sum, pair_variance_sum), (padded_pair_logL, padded_pair_var) = lax.scan(
                 _scan_pair,
                 (
                     jnp.asarray(0.0, dtype=jnp.float64),
@@ -866,12 +867,14 @@ def darksiren_log_likelihood_with_clusters(
             ll = ll + pair_logL_sum
             if return_diagnostics:
                 per_pair_logL_values = [padded_pair_logL[k] for k in range(n_pairs)]
+                per_pair_var_values = [padded_pair_var[k] for k in range(n_pairs)]
         else:
             # Legacy small-n path: iterate pairs at Python level (n_pairs is static).
             for k in range(n_pairs):
                 ll_pair_safe, var_pair_safe = _pair_loglike_at_index(k)
                 if return_diagnostics:
                     per_pair_logL_values.append(ll_pair_safe)
+                    per_pair_var_values.append(var_pair_safe)
                 pair_logL_sum = pair_logL_sum + ll_pair_safe
                 pair_variance_sum = pair_variance_sum + var_pair_safe
                 ll = ll + ll_pair_safe
@@ -902,8 +905,23 @@ def darksiren_log_likelihood_with_clusters(
             if per_pair_logL_values
             else jnp.zeros((0,), dtype=jnp.float64)
         )
+        per_pair_var = (
+            jnp.stack(per_pair_var_values)
+            if per_pair_var_values
+            else jnp.zeros((0,), dtype=jnp.float64)
+        )
         return {
             "logL_total": logL_total,
+            # The per-row terms the sums above are made of, in the order of
+            # ``singleton_indices`` / ``pair_indices``.  Every row is a function
+            # of its own event(s) and the proposal only -- never of which
+            # other rows are in the partition -- which is what lets the lensing
+            # CLI evaluate them ONCE per proposal for every event and every
+            # candidate edge and assemble each partition of the marginalisation
+            # as gathers and sums (cli.inference_lensing._assemble_partition).
+            "per_event_logL": event_lls,
+            "per_event_var": event_vars,
+            "per_pair_var": per_pair_var,
             "log_mu_singleton": log_mu_1,
             "Neff_singleton": Neff_1,
             "log_sigma2_singleton": log_sigma2_1,
