@@ -66,7 +66,14 @@ except ImportError:
     def _chi_eff_prior_logprob(*args, **kwargs):
         return 0.0
 
+    class _ChiEffPrior:
+        """Shape of gwcat's ``ChiEffPrior`` as far as ``darksirens.gw.utils``
+        checks it at import: the ``support`` attribute is the GW-03 convention
+        guard (a prior without it is refused as pre-``-inf``)."""
+        support = (-1.0, 1.0)
+
     spin_stub.chi_eff_prior_logprob = _chi_eff_prior_logprob
+    spin_stub.ChiEffPrior = _ChiEffPrior
     sys.modules["gwcat"] = gwcat_stub
     sys.modules["gwcat.spin"] = spin_stub
 
