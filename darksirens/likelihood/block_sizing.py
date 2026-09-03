@@ -12,7 +12,7 @@ Historically both defaulted to ``None`` (single pass) and had to be hand-tuned
 to avoid an out-of-memory abort on dense dark-siren catalogs or small GPUs.
 This module resolves them automatically from a probed free-memory budget and a
 small **linear peak-memory model** whose slopes are calibrated once per device
-class by ``scripts/benchmark_block_sizes.py`` (see ``docs/source/performance.md``).
+class by ``scripts/benchmark_block_sizes.py`` (see ``docs/source/guide/performance.md``).
 
 The resolution is deliberately conservative and *falls back to today's exact
 behavior* — a single pass (``None``) — whenever the budget suffices, so a run on
@@ -223,7 +223,7 @@ BLOCK_HARD_MIN = 1
 # Fraction of probed free memory the working set may occupy (headroom for
 # fragmentation, transient copies, and — on a shared box — another process's
 # growth).  Per-process peak is what we bound; see the contention note in
-# docs/source/performance.md.
+# docs/source/guide/performance.md.
 SAFETY_FACTOR = 0.7
 
 # Even-split blocks are rounded up to a multiple of this (keeps XLA tile shapes

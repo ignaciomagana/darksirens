@@ -3,7 +3,7 @@ name: ci
 # CPU-only, deliberately conservative: this is the first automated gate the repo
 # has had, so it runs exactly what is verified green on a CPU box rather than
 # trying to cover the full suite (which grows to ~258 GB RSS under CPU-only JAX
-# and gets OOM-killed — see docs/source/testing.md, Tier 0b).
+# and gets OOM-killed — see docs/source/guide/testing.md, Tier 0b).
 on:
   push:
     branches: [master]
@@ -90,7 +90,7 @@ jobs:
         run: python -m pip list
 
       - name: Tier-0 fast subset
-        # Same manifest docs/source/testing.md prescribes, so the documented
+        # Same manifest docs/source/guide/testing.md prescribes, so the documented
         # local gate and this gate cannot drift.
         run: |
           FILES=$(grep -v '^#' tests/fast_subset.txt)

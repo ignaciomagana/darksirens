@@ -3656,7 +3656,7 @@ def _resolve_lensing_block_sizes(opts, inp, settings):
     """Resolve the lensing block sizes from a probed memory budget.
 
     The per-injection memory constants are those calibrated on the main
-    spectral/dark-siren selection integral (see docs/source/performance.md); the
+    spectral/dark-siren selection integral (see docs/source/guide/performance.md); the
     lensing selection is the same order of magnitude, so they serve as a
     reasonable default here — pin an integer to override.  Mutates ``opts`` and
     the already-built ``settings`` dict so the final settings.json persists the

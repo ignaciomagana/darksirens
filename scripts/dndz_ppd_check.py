@@ -33,7 +33,7 @@ import numpy as np
 
 CLIGHT = 299792.458
 
-# numpy 1 / numpy 2 both, per the repo-wide convention in docs/source/testing.md.
+# numpy 1 / numpy 2 both, per the repo-wide convention in docs/source/guide/testing.md.
 _trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
 

@@ -28,7 +28,6 @@ extensions = [
     "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
-    "sphinx.ext.intersphinx",
     "sphinx_copybutton",
     "sphinx_design",
 ]
@@ -92,6 +91,9 @@ myst_heading_anchors = 3
 # ---------------------------------------------------------------- autodoc
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
+# NamedTuple fields are documented once, as ``:ivar:`` entries, instead of as
+# attribute directives that duplicate the members autodoc already emits.
+napoleon_use_ivar = True
 autosummary_generate = False
 autodoc_typehints = "description"
 autodoc_member_order = "bysource"
@@ -129,14 +131,6 @@ autodoc_mock_imports = [
     name for name in _OPTIONAL_RUNTIME_DEPS if importlib.util.find_spec(name) is None
 ]
 
-intersphinx_mapping = {
-    "python": ("https://docs.python.org/3", None),
-    "numpy": ("https://numpy.org/doc/stable/", None),
-    "scipy": ("https://docs.scipy.org/doc/scipy/", None),
-    "jax": ("https://docs.jax.dev/en/latest/", None),
-    "h5py": ("https://docs.h5py.org/en/stable/", None),
-}
-intersphinx_timeout = 20
 
 # Docstrings in this code base are prose-heavy and were not written for
 # Sphinx; autodoc reports their formatting slips as warnings.  Those do not
@@ -149,6 +143,43 @@ suppress_warnings = [
     "ref.python",
 ]
 nitpicky = False
+
+_ADORNMENT = set("-=~^\"'`+*#")
+
+
+def _demote_docstring_titles(app, what, name, obj, options, lines):
+    """Turn RST section titles inside module docstrings into rubrics.
+
+    Many modules open with ``selection.py`` over a dashed line.  Rendered by
+    automodule, every such title becomes a section label, and two modules
+    with the same file name (``registry.py`` in ``marks`` and ``sky``) then
+    collide as duplicate labels.  A rubric renders the same heading without
+    registering a label.
+    """
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        stripped = nxt.strip()
+        if (
+            line.strip()
+            and len(stripped) >= 3
+            and set(stripped) <= _ADORNMENT
+            and len(set(stripped)) == 1
+            and len(stripped) >= len(line.strip()) - 1
+            and not line.startswith(" ")
+        ):
+            out.extend([f".. rubric:: {line.strip()}", ""])
+            i += 2
+            continue
+        out.append(line)
+        i += 1
+    lines[:] = out
+
+
+def setup(app):
+    app.connect("autodoc-process-docstring", _demote_docstring_titles)
 
 copybutton_prompt_text = r"\$ |>>> |\.\.\. "
 copybutton_prompt_is_regexp = True
