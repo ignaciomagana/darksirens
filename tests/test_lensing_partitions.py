@@ -1578,3 +1578,31 @@ def test_fixed_partition_coverage_error_lists_the_dropped_events():
     # long lists are truncated rather than dumping thousands of indices
     long_msg = fixed_partition_coverage_error([0], 100)
     assert "(+79 more)" in long_msg
+
+
+def test_enumeration_of_a_graph_with_more_edges_than_the_recursion_limit_hits_the_cap_cleanly():
+    """The recursive enumeration recursed once per edge, so a component with
+    ~1000+ candidate edges (the repo's own 280-event mock graph has 1116) died
+    with RecursionError before the ``max_partitions`` cap could fire.  The
+    explicit-stack version reaches the cap and raises the documented error."""
+    import sys
+
+    n_events = 2400
+    # 1200 disjoint edges: every subset is a matching, so the cap fires fast.
+    candidates = [CandidatePair(2 * k, 2 * k + 1, 0.0) for k in range(1200)]
+    assert len(candidates) > sys.getrecursionlimit()
+    with pytest.raises(ValueError, match="exceeded max_partitions=50"):
+        enumerate_compatible_partitions(n_events, candidates, max_partitions=50)
+
+
+def test_enumeration_order_is_the_recursive_preorder():
+    """The all-singleton matching first, then the edge subsets in the order the
+    recursive spelling produced them (callers read index 0 as the baseline)."""
+    candidates = [CandidatePair(0, 1, 0.1), CandidatePair(2, 3, 0.2), CandidatePair(1, 2, 0.3)]
+    states = enumerate_compatible_partitions(4, candidates)
+    edges = [tuple(np.asarray(s.candidate_edge_indices, dtype=int).tolist()) for s in states]
+    assert edges == [(), (2,), (1,), (0,), (0, 1)]
+    assert states[0].n_pairs == 0 and states[0].n_singletons == 4
+    np.testing.assert_allclose(
+        [s.log_prior_weight for s in states], [0.0, 0.3, 0.2, 0.1, 0.1 + 0.2]
+    )

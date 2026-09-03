@@ -44,8 +44,8 @@ prediction is the standard "guess what event j would look like, given
 event i's source-frame and the lens" calculation.
 
 The Jacobian |J_app→src| is the inverse of commit 2's apparent-frame
-Jacobian at fixed μ:
-    log|J_app→src| = log(1 + z_s) + log dL'(z_s) - 0.5 log μ_σ(i).
+Jacobian at fixed μ (see ``_log_jac_app_to_src``):
+    log|J_app→src| = -log(1 + z_s) - log dL'(z_s) + 0.5 log μ_σ(i).
 
 Quadrature
 ~~~~~~~~~~
@@ -256,6 +256,17 @@ def _pair_branch_log_integrand(
 #       annihilated exactly.
 PAIR_MARKS_DELTA_COLLAPSE = 2
 _TIME_COLLAPSE_HERMITE_NODES = 8
+
+
+def _n_valid_rows(event: dict) -> jnp.ndarray:
+    """Number of PE rows that enter a branch's importance mean: valid and with a
+    positive proposal weight (the same mask ``_pair_branch_log_integrand``
+    applies), floored at 1 so an empty event stays finite (its branch is -inf
+    through the integrand anyway)."""
+    valid = jnp.asarray(event["valid"], dtype=bool) & (
+        jnp.asarray(event["prior_wt"]) > 0.0
+    )
+    return jnp.maximum(jnp.sum(valid.astype(jnp.float64)), 1.0)
 
 
 def _correlated_branch_variance(log_z_a, var_a, log_z_b, var_b):
@@ -489,7 +500,12 @@ def cluster_log_likelihood_pair(
         pair_marks=pair_marks, delta_t_obs=dt_a,
         sigma_delta_t=sigma_delta_t, y_nodes=y_nodes_a,
     )
-    N_i = event_i["m1det"].shape[0]
+    # Normalise by the VALID driving samples, as the partner KDE does
+    # (pair_kde.log_eval_pair_kde, "Padding"): a padded row is already -inf in
+    # the integrand, and dividing by the padded length would shift log L_2 by
+    # -log(N_pad / N_valid), a per-event constant that does not cancel in the
+    # pair Bayes factor.  Identical to the array length when nothing is padded.
+    N_i = _n_valid_rows(event_i)
     log_branch_a = logsumexp(log_int_a) - jnp.log(N_i)
 
     # Branch σ_b: j→μ_+, i→μ_-. Drive over event-j PE samples; KDE event-i.
@@ -506,7 +522,7 @@ def cluster_log_likelihood_pair(
         pair_marks=pair_marks, delta_t_obs=dt_b,
         sigma_delta_t=sigma_delta_t, y_nodes=y_nodes_b,
     )
-    N_j = event_j["m1det"].shape[0]
+    N_j = _n_valid_rows(event_j)
     log_branch_b = logsumexp(log_int_b) - jnp.log(N_j)
 
     # Symmetric SUM over the two image-to-event assignments: they are distinct

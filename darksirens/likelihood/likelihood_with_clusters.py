@@ -74,9 +74,10 @@ from darksirens.lensing.wlmagnification import (
 from darksirens.lensing.slmarks import SISLensParams, tau_2_prob
 from darksirens.core.types import CosmoParams, EMCatalog, GWEvent, SurveyParams
 from darksirens.utils.cosmology import (
-    dL_grid_bounds,
+    dL_of_z,
     threads_distance_table,
-    z_of_dL,
+    z_of_dL_precomputed,
+    zgrid as _cosmo_zgrid,
 )
 
 
@@ -399,6 +400,14 @@ def darksiren_log_likelihood_with_clusters(
     raw_logPriorUniv = get_redshift_prior(pe_prior_name)
     raw_logPriorSelection = get_redshift_prior(sel_prior_name)
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+    # ONE luminosity-distance grid per proposal, shared by every clamp and
+    # inversion below (likelihood/core.py does the same).  ``dL_grid_bounds``,
+    # ``z_of_dL`` and ``dL_in_z_grid`` each rebuild ``dL_of_z(zgrid, ...)`` from
+    # the 4-D table, and the Hermite WL kernel rebuilt it three more times per
+    # weight call when handed no grid.  Same arrays through the same
+    # arithmetic, so every consumer is bit-identical to its rebuilding form.
+    dL_grid = dL_of_z(_cosmo_zgrid, H0, Om0, w0, wa)
+    dL_lo, dL_hi = dL_grid[0], dL_grid[-1]
 
     def log_prior_z(z, pix, catalog):
         return raw_logPriorUniv(z, pix, cosmo, survey, catalog)
@@ -451,7 +460,6 @@ def darksiren_log_likelihood_with_clusters(
         # lensing-stack finding 1: the cluster wrappers missed the e39dc11
         # fix). Full CPL bounds: the old dL_in_z_grid(dL, H0, Om0) silently
         # dropped w0/wa (finding 5).
-        dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
         supported = (dL >= dL_lo) & (dL <= dL_hi)
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
         if wl_selection_enabled:
@@ -460,12 +468,14 @@ def darksiren_log_likelihood_with_clusters(
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, _selection_prior,
                 wl_a, wl_b, u_nodes, log_wH_nodes,
+                dL_grid=dL_grid,
             )
         else:
             ldw = log_sample_weight(
                 m1det, q, dL_c, chieff, pix, prior_wt,
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, _selection_prior,
+                dL_grid=dL_grid,
             )
         if unlensed_tau_suppression:
             # Poisson consistency: the singleton EVIDENCE suppresses the
@@ -478,7 +488,7 @@ def darksiren_log_likelihood_with_clusters(
             # parameters (A_tau, n_tau). tau_2 is evaluated
             # at the mu = 1 apparent redshift, mirroring the evidence side's
             # stated approximation (the mu-dependence of tau_2 is O(tau x s^2)).
-            z_app_sel = z_of_dL(dL_c, H0, Om0, w0, wa)
+            z_app_sel = z_of_dL_precomputed(dL_c, dL_grid)
             tau_app_sel = tau_2_prob(z_app_sel, sis_params)
             ldw = ldw + jnp.log1p(-tau_app_sel)
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
@@ -564,7 +574,6 @@ def darksiren_log_likelihood_with_clusters(
     # ──────────────────────────────────────────────────────────────────
     def _log_sample_weight_if_supported(m1det, q, dL, chieff, pix, prior_wt, catalog):
         # Clamp-then-mask + full CPL bounds (see log_weight_sel above).
-        dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
         supported = (dL >= dL_lo) & (dL <= dL_hi)
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
         if wl_enabled and wl_backend == WL_BACKEND_LOGNORMAL:
@@ -573,6 +582,7 @@ def darksiren_log_likelihood_with_clusters(
                 cosmo, survey, pop_params, catalog,
                 log_p_pop, log_prior_z,
                 wl_a, wl_b, u_nodes, log_wH_nodes,
+                dL_grid=dL_grid,
             )
         else:
             ldw = log_sample_weight_wl_or_standard(
@@ -581,6 +591,7 @@ def darksiren_log_likelihood_with_clusters(
                 log_p_pop, log_prior_z,
                 log_p_wl_fn, mu_nodes, log_w_nodes,
                 wl_enabled=wl_enabled,
+                dL_grid=dL_grid,
             )
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
@@ -613,9 +624,8 @@ def darksiren_log_likelihood_with_clusters(
         # It must match the SAME factor applied to mu_sel^(1) above: the
         # per-event evidence and the selection integral have to describe one
         # intensity (see _unlensed_tau_suppression_enabled).
-        dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
         dL_ev = sl(gw_pe.dL)
-        z_app = z_of_dL(jnp.clip(dL_ev, dL_lo, dL_hi), H0, Om0, w0, wa)
+        z_app = z_of_dL_precomputed(jnp.clip(dL_ev, dL_lo, dL_hi), dL_grid)
         tau_app = tau_2_prob(z_app, sis_params)
         ldw_unlensed = jnp.where(
             jnp.isfinite(ldw), ldw + jnp.log1p(-tau_app), -jnp.inf
@@ -672,6 +682,15 @@ def darksiren_log_likelihood_with_clusters(
         int(jnp.shape(singleton_indices)[0]) if cluster_mode == CLUSTER_MODE_J2
         else nEvents
     )
+    if cluster_mode == CLUSTER_MODE_J2 and n_pe_rows != int(n_singletons):
+        # Both are static; a mismatch means the caller's partition and its
+        # counts disagree, and the evidence sum (over the array) and the
+        # selection correction (over the count) would describe different
+        # partitions -- silently, since neither reads the other.
+        raise ValueError(
+            f"singleton_indices has {n_pe_rows} rows but n_singletons="
+            f"{int(n_singletons)}; build both from one PartitionState"
+        )
     use_pe_block = (
         not _has_counterpart_arrays(em_catalog_pe)
         and singleton_lensing != SINGLETON_LENSING_MIXTURE
@@ -712,8 +731,7 @@ def darksiren_log_likelihood_with_clusters(
             ldw = jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
             if unlensed_tau_suppression:
                 # Same per-sample (1 - tau_2) factor as the scan above.
-                dL_lo, dL_hi = dL_grid_bounds(H0, Om0, w0, wa)
-                z_app = z_of_dL(jnp.clip(dL_ev, dL_lo, dL_hi), H0, Om0, w0, wa)
+                z_app = z_of_dL_precomputed(jnp.clip(dL_ev, dL_lo, dL_hi), dL_grid)
                 tau_app = tau_2_prob(z_app, sis_params)
                 ldw = jnp.where(
                     jnp.isfinite(ldw), ldw + jnp.log1p(-tau_app), -jnp.inf

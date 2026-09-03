@@ -503,6 +503,23 @@ def _validate_lensed_injection_payload(
                 "non-positive value(s); it is a denominator of the "
                 "importance weight"
             )
+    # Physical ranges the importance weight assumes: p(y) = 2y is a density on
+    # the SIS impact parameter y in (0, 1) (raw ``log(2 y)`` is finite and
+    # WRONG for y >= 1), and the redshift prior is evaluated at z_src >= 0.
+    y_src = np.asarray(by_name["y_source"], dtype=float)
+    n_bad_y = int((~(np.isfinite(y_src) & (y_src > 0.0) & (y_src < 1.0))).sum())
+    if n_bad_y:
+        raise ValueError(
+            f"lensed-injection dataset 'y_source' has {n_bad_y} value(s) outside "
+            "the SIS support (0, 1); p(y) = 2y is a density there only"
+        )
+    z_src = np.asarray(by_name["z_src"], dtype=float)
+    n_bad_z = int((~(np.isfinite(z_src) & (z_src >= 0.0))).sum())
+    if n_bad_z:
+        raise ValueError(
+            f"lensed-injection dataset 'z_src' has {n_bad_z} non-finite or "
+            "negative value(s)"
+        )
     if n_draw_sources < 1:
         raise ValueError(
             f"n_draw_sources={n_draw_sources} must be a positive count; it is "

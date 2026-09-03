@@ -346,6 +346,12 @@ def _build_lens_parameter_space(opts, fixed_parameter_values, lens_prior_overrid
     ``fixed_parameter_values`` is treated as fixed, which allows tiny recovery
     runs such as sampling ``log10_tau_A`` while fixing ``tau_n``.
     """
+    unknown = sorted(set(lens_prior_overrides) - set(LENS_PARAMETER_PRIORS))
+    if unknown:
+        raise ValueError(
+            f"--lens_prior_overrides names unknown lens label(s) {unknown}; "
+            f"the SIS optical-depth labels are {sorted(LENS_PARAMETER_PRIORS)}"
+        )
     if getattr(opts, "fix_lens_rate", True):
         return [], np.asarray([], dtype=float), np.asarray([], dtype=float)
 
@@ -377,15 +383,20 @@ def _decode_lens_params(coord, sampled_labels, fixed_parameter_values, opts):
     from darksirens.lensing.slmarks import make_sis_lens_params
 
     T0 = _sl_T0_seconds(opts)
+    fixed = {label: float(value) for label, value in fixed_parameter_values.items()}
     if getattr(opts, "fix_lens_rate", True):
+        # A lens label pinned through --fixed_parameter_values is honoured
+        # here too: this branch used to read opts.sl_tau_A / opts.sl_tau_n
+        # only, so ``{"log10_tau_A": -6}`` was silently ignored and the
+        # ignored value archived under the bare ``lens_A_tau`` name.
+        log10_tau_A = fixed.get("log10_tau_A", np.log10(float(opts.sl_tau_A)))
+        tau_n = fixed.get("tau_n", float(opts.sl_tau_n))
         return make_sis_lens_params(
-            A_tau=opts.sl_tau_A, n_tau=opts.sl_tau_n, T0_seconds=T0,
+            A_tau=10.0**log10_tau_A, n_tau=tau_n, T0_seconds=T0,
         )
 
     values = {label: jnp.asarray(coord)[i] for i, label in enumerate(sampled_labels)}
-    values.update(
-        {label: float(value) for label, value in fixed_parameter_values.items()}
-    )
+    values.update(fixed)
     log10_tau_A = values.get("log10_tau_A", np.log10(float(opts.sl_tau_A)))
     tau_n = values.get("tau_n", float(opts.sl_tau_n))
     return make_sis_lens_params(
@@ -1174,6 +1185,23 @@ def _load_wl_table_arrays(opts):
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    # The interpolator CLAMPS the redshift query to the table's z range, so a
+    # source redshift past ``z_grid[-1]`` silently reuses the last row's PDF
+    # (constant extrapolation) -- and the mu-quadrature coverage check above
+    # cannot see it, because a clamped PDF is still normalised.  The kernel
+    # evaluates p_WL at z_s up to the cosmology grid's zMax; say so.
+    import warnings
+    from darksirens.redshift import zgrid as _zgrid
+    z_lo, z_hi = float(wl_z_grid[0]), float(wl_z_grid[-1])
+    if z_hi < float(_zgrid[-1]) or z_lo > 1.0e-3:
+        warnings.warn(
+            f"--lensing_wl_table_path {path}: the WL table covers z in "
+            f"[{z_lo:g}, {z_hi:g}] but the likelihood evaluates p_WL(mu | z_s) for "
+            f"source redshifts up to zMax = {float(_zgrid[-1]):g} (and down to "
+            "1e-3); outside the table the PDF is held CONSTANT at the nearest "
+            "tabulated redshift. Extend the table if posterior mass lives there.",
+            RuntimeWarning, stacklevel=2,
+        )
     return dict(
         wl_z_grid=wl_z_grid,
         wl_log_mu_grid=wl_log_mu_grid,
@@ -2431,17 +2459,48 @@ def _resolve_pair_marks(opts, inp):
     )
 
 
+def _max_abs_time_mark(inp) -> float:
+    """Largest |delta_t_obs| any time-marked pair this run can evaluate carries:
+    the fixed partition's marks and every candidate edge's mark."""
+    values = [
+        abs(float(x)) for x in np.asarray(inp.get("pair_time_delta_t_obs", []), dtype=float).ravel()
+    ]
+    for pair in inp.get("candidate_pairs") or ():
+        if getattr(pair, "delta_t_obs", None) is not None:
+            values.append(abs(float(pair.delta_t_obs)))
+    return max(values) if values else 0.0
+
+
 def _require_time_window(opts, inp):
-    """Time marks need the observing-run length for the coincidence odds."""
-    if (
-        getattr(opts, "pair_marks", "none") == "time"
-        and inp.get("pair_time_t_obs_window_sec") is None
-    ):
+    """Time marks need the observing-run length for the coincidence odds, and
+    every mark must lie INSIDE it.
+
+    The unlensed reference density ``p_U(|dt|) = 2 (T - |dt|) / T^2`` vanishes
+    at ``|dt| = T``; ``cluster_log_likelihood_pair`` clamps ``|dt|`` just below
+    ``T`` so the odds stay finite, which turns a mark at or beyond the window
+    (a mis-set ``t_obs_days`` or a cross-run time base) into a ~+20 nat
+    pro-lensing reward for EVERY such pair.  That clamp is a numerical
+    backstop; the data condition is enforced here.
+    """
+    if getattr(opts, "pair_marks", "none") != "time":
+        return
+    window = inp.get("pair_time_t_obs_window_sec")
+    if window is None:
         raise SystemExit(
             "--pair_marks time requires an observed catalog with "
             "observation_times='uniform' (t_obs_days): the time-mark "
             "coincidence odds need the observing-run length. Regenerate the "
             "mock with --observation-times uniform."
+        )
+    worst = _max_abs_time_mark(inp)
+    if worst >= float(window):
+        raise SystemExit(
+            f"--pair_marks time: a candidate/pair time mark |delta_t_obs| = "
+            f"{worst:g} s reaches the observing-run length t_obs = "
+            f"{float(window):g} s. Two arrivals from one run cannot be that far "
+            "apart, so the mark or the window is wrong (a mis-set t_obs_days, "
+            "or a cross-run time base); the unlensed coincidence density "
+            "vanishes there and the pair would be rewarded by ~+20 nats."
         )
 
 
@@ -4098,8 +4157,63 @@ def _smoke_test_likelihood(opts, run_dir, settings, labels, lower, upper,
             labels=labels, settings=settings,
         )
         raise
+    _check_pair_y_quadrature(opts, diagnostics_fn, diagnostics, diag_point)
     _print_diagnostics_summary(diagnostics)
     return mid, diagnostics, diag_point, diag_label
+
+
+#: |delta logL| between ``--y_nodes_pair`` and four times as many nodes above
+#: which the pair y-quadrature is reported as unconverged (nats).
+_PAIR_Y_QUADRATURE_TOL = 1.0e-3
+
+
+def _check_pair_y_quadrature(opts, diagnostics_fn, diagnostics, point):
+    """Measure the pair channel's y-quadrature error at the diagnostics point.
+
+    The unmarked SIS pair likelihood integrates a peaked integrand over the
+    impact parameter with ``--y_nodes_pair`` Gauss-Legendre nodes (default 32)
+    and its convergence is pair-dependent and non-monotonic: on the mock, one
+    true pair carried 0.15 nats of pure quadrature error at 32 nodes and a
+    false pair 0.42 -- the order of the j2-vs-off evidence differences the CLI
+    exists to measure.  Nothing checked it.  Re-evaluate the diagnostics total
+    with 4x the nodes and record ``|delta|``; warn (do not refuse: the choice
+    of node count is the run's) when it exceeds ``_PAIR_Y_QUADRATURE_TOL``.
+    Delta-collapsed time-marked pairs do not read ``y_nodes_pair`` and
+    contribute 0 to the difference.  Skipped when the pair channel is off.
+    """
+    if getattr(opts, "cluster_mode", "off") != "j2":
+        return None
+    key = "logL_marginalized" if "logL_marginalized" in diagnostics else "logL_total"
+    ref = diagnostics.get(key)
+    if ref is None or not np.isfinite(float(ref)):
+        return None
+    n_nodes = int(getattr(opts, "y_nodes_pair", 32))
+    opts.y_nodes_pair = 4 * n_nodes
+    try:
+        fine = float(diagnostics_fn(point)[key])
+    finally:
+        opts.y_nodes_pair = n_nodes
+    delta = abs(float(ref) - fine)
+    diagnostics["pair_y_quadrature_check"] = {
+        "y_nodes_pair": n_nodes,
+        "y_nodes_reference": 4 * n_nodes,
+        "abs_delta_logL": float(delta),
+        "tolerance": _PAIR_Y_QUADRATURE_TOL,
+        "converged": bool(delta <= _PAIR_Y_QUADRATURE_TOL),
+    }
+    if not np.isfinite(delta) or delta > _PAIR_Y_QUADRATURE_TOL:
+        _warn(
+            f"pair y-quadrature: |logL({n_nodes} nodes) - logL({4 * n_nodes} "
+            f"nodes)| = {delta:.3g} nats at the diagnostics point (tolerance "
+            f"{_PAIR_Y_QUADRATURE_TOL:g}). The SIS pair integrand is peaked and "
+            "its Gauss-Legendre convergence is pair-dependent; raise "
+            "--y_nodes_pair (128 removed the error on the mock) if this is "
+            "comparable to the evidence difference being measured."
+        )
+    else:
+        _ok(f"pair y-quadrature converged: |delta logL| = {delta:.3g} nats "
+            f"({n_nodes} vs {4 * n_nodes} nodes)")
+    return delta
 
 
 def _run_lensing_sampling(opts, run_dir, settings, labels, lower, upper,

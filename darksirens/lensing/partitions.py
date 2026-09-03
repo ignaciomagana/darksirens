@@ -591,23 +591,29 @@ def enumerate_compatible_partitions(
             )
         )
 
-    def rec(
-        pos: int, chosen: list[tuple[int, CandidatePair]], used: set[int], logw: float
-    ) -> None:
-        if pos == len(pairs):
-            emit(chosen, used, logw)
-            return
-        rec(pos + 1, chosen, used, logw)
+    # Depth-first over the edge list with an EXPLICIT stack: the recursive
+    # spelling recursed once per edge, so a component with more edges than the
+    # interpreter's recursion limit (~1000; the repo's own 280-event mock graph
+    # has 1116) died with RecursionError before the ``max_partitions`` cap in
+    # ``emit`` could fire.  The stack is LIFO, so the "skip this edge" frame is
+    # pushed LAST and explored FIRST -- the same pre-order as the recursion, and
+    # hence the same emission order (the all-singleton matching comes first).
+    n_pairs = len(pairs)
+    stack: list[tuple[int, tuple[tuple[int, CandidatePair], ...], frozenset, float]] = [
+        (0, (), frozenset(), 0.0)
+    ]
+    while stack:
+        pos, chosen, used, logw = stack.pop()
+        if pos == n_pairs:
+            emit(list(chosen), set(used), logw)
+            continue
         p = pairs[pos]
         if p.i not in used and p.j not in used:
-            used.update((p.i, p.j))
-            chosen.append((pos, p))
-            rec(pos + 1, chosen, used, logw + p.log_prior_odds)
-            chosen.pop()
-            used.remove(p.i)
-            used.remove(p.j)
-
-    rec(0, [], set(), 0.0)
+            stack.append(
+                (pos + 1, chosen + ((pos, p),), used | {p.i, p.j},
+                 logw + p.log_prior_odds)
+            )
+        stack.append((pos + 1, chosen, used, logw))
     return tuple(states)
 
 
