@@ -231,7 +231,10 @@ def configure_catalog_kde_window(size=1024, n_sigma=8.0):
     The likelihood factory sizes the window from the bound catalogs and
     threads it statically (``CatalogKernelState.kde_window``); this
     process-global size is the fallback for direct callers.  A fixed W that is
-    smaller than the data-sized one truncates to the W index-nearest galaxies:
+    smaller than the data-sized one truncates: the window is CENTRED on the
+    sample's insertion index (one binary search), so it holds the W
+    index-nearest galaxies and nothing repositions it to fit a block --
+    exactness is entirely the sizing's job.  Measured:
     W=1024 held max |delta log p_cat| < 1e-6 against the full-row evaluator on
     a 2113-galaxy spectroscopic row across the sampled sigma_kde prior
     [0, 0.05] (tests/test_catalog_kde_window.py) but moved it by 0.17 nats on
@@ -265,11 +268,16 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     (``sigma_kde_max``; the prior upper bound in
     ``darksirens/inference/prior.py``, 0.05 by default): TWICE the largest
     number of galaxies any interval of length ``n_sigma * sigma_max`` (one
-    side of the sample) contains, capped at the row's real count -- a window
-    as long as the row IS the row.  At the default ``n_sigma=6`` the kernel
-    mass a covered sample can miss is < 2e-9 per galaxy, comfortably inside
-    the 1e-6 |delta log p_cat| validation bar.  Host-side numpy diagnostic --
-    run once per catalog when sizing W, not in the hot path.
+    side of the sample) contains.  NOT capped at the row's real count: on a
+    ragged catalog a window as long as a SHORT row is not that row -- centred
+    on a sample past the row's support it starts at ``n - W//2 > 0`` and
+    drops the row's front half (measured 0.53 nats on a 300-galaxy photo-z
+    row beside a 2000-galaxy one).  A result longer than every row simply
+    sends the evaluator down its exact full-row path.  At the default
+    ``n_sigma=6`` the kernel mass a covered sample can miss is < 2e-9 per
+    galaxy, comfortably inside the 1e-6 |delta log p_cat| validation bar.
+    Host-side numpy diagnostic -- run once per catalog when sizing W, not in
+    the hot path.
 
     The one-sided rule is what lets the evaluator locate a window with ONE
     binary search (the insertion index) instead of three (the block's two
@@ -285,8 +293,7 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
     worst = 0
     for r in range(z.shape[0]):
         n = int(ng[r])
-        if n < 2:
-            worst = max(worst, n)
+        if n < 1:
             continue
         zr = np.sort(z[r, :n])
         sig_max = float(
@@ -297,7 +304,7 @@ def recommended_kde_window(zgals, ngals, dzgals, sigma_kde_max, n_sigma=6.0):
         right = np.searchsorted(zr, zr + width, side="right") - idx   # [z_j, z_j + w]
         left = idx - np.searchsorted(zr, zr - width, side="left") + 1  # [z_j - w, z_j]
         one_sided = int(max(np.max(right), np.max(left)))
-        worst = max(worst, min(2 * one_sided, n))
+        worst = max(worst, 2 * one_sided)
     return worst
 
 
@@ -1032,15 +1039,14 @@ def _spread_probe_rows(zgals, ngals, n_probe: int) -> jnp.ndarray:
 def _real_row_max(sig_eff, log_kw_raw):
     """Per-row max ``sigma_eff`` over the REAL galaxies (finite raw ``log_kw``).
 
-    The windowed evaluator's half-width is ``n_sigma`` times this.  Taken over
-    the whole padded row it was the PADDING width -- ``dzgals`` pads at 1.0, so
-    every row shorter than ``N_max`` reported ``sigma_eff_max = 1.0`` and a
-    half-width of 8 in redshift: the in-range block was then the entire row,
-    it never "fit" a window shorter than the row, and the evaluator silently
-    fell to its nearest-``W``-by-index truncation on every such row, whatever
-    the galaxies' actual widths.  With the real maximum the block is the
-    galaxies within ``n_sigma`` true widths, and a window sized from the data
-    (:func:`auto_kde_window`) always holds it.  Empty rows report 0.
+    ``n_sigma`` times this is the half-width the static window is sized to
+    cover (:func:`recommended_kde_window` computes the same row maximum on the
+    host).  The evaluator no longer reads the value -- its window is centred by
+    index and its exactness rests on the sizing -- but the state keeps it as the
+    per-row diagnostic of that contract and as the ``use_window`` marker.  Taken
+    over the whole padded row it would be the PADDING width (``dzgals`` pads at
+    1.0), which is how the traced half-width it once fed made every ragged row
+    "not fit" its window.  Empty rows report 0.
     """
     real = jnp.isfinite(log_kw_raw)
     return jnp.max(jnp.where(real, sig_eff, 0.0), axis=1)

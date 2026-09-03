@@ -1829,8 +1829,11 @@ def build_parser():
                         "value, or the prior's upper bound when sampled), so the "
                         "evaluator never truncates (darksirens.redshift.catalog."
                         "auto_kde_window; the former fixed 1024 truncated silently on "
-                        "denser rows). A value pins W; 0 disables windowing entirely "
-                        "(full-row escape hatch for A/B validation).")
+                        "denser rows). A value pins W: the window is centred on the "
+                        "sample by index and not repositioned, so a W below the "
+                        "data-sized one TRUNCATES the catalog prior (warned at build). "
+                        "0 disables windowing entirely (full-row escape hatch for A/B "
+                        "validation).")
     g.add_argument("--freeze_redshift_prior", type=str_to_bool, default=True, metavar="BOOL",
                    help="Evaluate the per-sample catalog redshift prior ONCE at build time "
                         "when no cosmology, survey or mark label is sampled (a "

@@ -434,3 +434,58 @@ def test_auto_kde_window_refuses_rows_without_widths_and_accepts_missing_counts(
     full = C.auto_kde_window([SimpleNamespace(zgals=zg, dzgals=dz, ngals=None)], 0.0)
     counted = C.auto_kde_window([SimpleNamespace(zgals=zg, dzgals=dz, ngals=ng)], 0.0)
     assert full is not None and counted is not None and full >= counted
+
+
+def test_ragged_short_row_is_not_truncated_by_a_row_length_cap():
+    """A window as long as a SHORT row is not that row: centred on a sample
+    past the row's support it starts at ``n - W//2`` and drops the front half.
+    2000-galaxy spectroscopic row beside a 300-galaxy photo-z clump (every
+    galaxy of the clump within one width of every other): the capped rule gave
+    W = 300 and -0.53 nats at z = 0.36; uncapped it is 2 x 300 and exact."""
+    n_max = 2000
+    zg = np.full((2, n_max), 100.0); dz = np.full((2, n_max), 1.0); wg = np.zeros((2, n_max))
+    ng = np.array([2000, 300], dtype=np.int32)
+    rng = np.random.default_rng(0)
+    zg[0, :2000] = np.sort(rng.uniform(0.0, 2.0, 2000)); dz[0, :2000] = 0.001; wg[0, :2000] = 1.0
+    zg[1, :300] = np.sort(rng.uniform(0.30, 0.35, 300)); dz[1, :300] = 0.05; wg[1, :300] = 1.0
+    cat = EMCatalog(apix=1e-3, zgals=jnp.asarray(zg), dzgals=jnp.asarray(dz),
+                    wgals=jnp.asarray(wg), ngals=jnp.asarray(ng),
+                    delta_g_pix_z=jnp.zeros((1, 10)), dN_obs_kde=None, pixel_to_cache_idx=None)
+    assert C.recommended_kde_window(zg, ng, dz, 0.0, n_sigma=C._KDE_WINDOW_NSIGMA) == 600
+    W = C.auto_kde_window([cat], 0.0)
+    assert 600 < W < n_max                      # windowing stays armed
+    cosmo = CosmoParams(H0=70.0, Om0=0.3, w0=-1.0, wa=0.0)
+    zs = jnp.asarray([0.36, 0.355, 0.34, 0.30, 0.28, 1.0])
+    px = jnp.asarray([1, 1, 1, 1, 1, 0], dtype=jnp.int32)
+    st_w = C.catalog_kernel_state(cosmo, _survey(), cat, kde_window=W)
+    C.configure_catalog_kde_window(None)
+    try:
+        st_f = C.catalog_kernel_state(cosmo, _survey(), cat)
+    finally:
+        C.configure_catalog_kde_window()
+    win = vmap(lambda z, p: C.eval_log_catalog_prior_state(z, p, st_w, cat))(zs, px)
+    full = vmap(lambda z, p: C.eval_log_catalog_prior_state(z, p, st_f, cat))(zs, px)
+    np.testing.assert_allclose(np.asarray(win), np.asarray(full), rtol=0, atol=1e-9)
+
+
+def test_resolve_kde_window_warns_when_a_pinned_window_truncates():
+    import darksirens.likelihood.factory as F
+    from darksirens.inference.parameters import ParameterDecoder
+    from types import SimpleNamespace
+    dec = ParameterDecoder(
+        sampled_labels=("H0",), fixed_parameter_values={"Om0": 0.3075, "sigma_kde": 0.05},
+        pop_labels=(), pop_params_fid=(), complete_empty_pixel_policy=0, z_depths=(0.3,),
+    )
+    cat = _rows()
+    auto = F._resolve_kde_window(SimpleNamespace(kde_window=None, prior_overrides=None), dec, [cat], 1)
+    assert auto is not None and auto >= 2
+    with pytest.warns(RuntimeWarning, match="below the data-sized window"):
+        assert F._resolve_kde_window(
+            SimpleNamespace(kde_window=2, prior_overrides=None), dec, [cat], 1) == 2
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert F._resolve_kde_window(
+            SimpleNamespace(kde_window=auto, prior_overrides=None), dec, [cat], 1) == auto
+        assert F._resolve_kde_window(
+            SimpleNamespace(kde_window=0, prior_overrides=None), dec, [cat], 1) is None

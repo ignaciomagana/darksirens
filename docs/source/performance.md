@@ -307,6 +307,16 @@ injections, powerlaw+peak fully sampled, cosmology and survey fixed): 7.38 s/cal
 What remains is the population term itself — dominated by the exact per-sample
 `q`-quadrature of the pairing normaliser — and the reductions.
 
+That quadrature was profiled on its own (`N = 262144` samples, `beta` sampled so
+`q**beta` is a real power, 4-core CPU): 439 ms per call, of which evaluating the
+200-node integrand is 420 ms (`sfilter_low` at the nodes 190 ms, `q**beta` at the
+nodes 248 ms). Reformulations that keep the 200-node trapezoid rule — materialising
+the node grid once behind an optimization barrier, a reciprocal in place of the
+per-node division, `exp(beta log q)` spelled out — were all *slower* (464–549 ms)
+at ≤ 3e-14 relative: XLA already fuses the grid's max and sum into one pass, so
+the node evaluation is the floor of this rule. Changing the cost means changing
+the rule (`--pairing_norm_grid`, opt-in), which changes the numbers.
+
 ## The likelihood closure is jitted
 
 The callable returned by `make_likelihood` / `_make_mixture_likelihood` /
