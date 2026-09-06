@@ -51,6 +51,7 @@ from dataclasses import replace as _dc_replace
 
 import darksirens.gw.populations.utils as U
 from darksirens.gw.populations.utils import (
+    PAIRING_PANEL_NQ,
     get_q_grid,
     sfilter_low,
     normalization_grid_settings,
@@ -120,17 +121,29 @@ def _logp(m1, q, z, chi, theta):
 
 def _exact_pairing_norm_powerlaw(m1, mmin, dmmin, beta):
     """Independent NumPy reimplementation of PowerLawPairing's q-integral
-    ``N(m1) = ∫ q^beta S_low(q*m1) dq`` on the SAME q-grid, for cross-checking."""
-    q = np.asarray(get_q_grid())
-    m1 = np.atleast_1d(np.asarray(m1))
-    out = np.empty(m1.shape)
-    for i, mm1 in enumerate(m1):
-        m2 = q * mm1
+    ``N(m1) = ∫ q^beta S_low(q*m1) dq`` under the SAME rule the exact branch
+    uses, for cross-checking.
+
+    Since 2026-09-05 that rule is TWO Gauss-Legendre panels split at the taper
+    shoulder ``q_a = (mmin + dmmin)/m1`` on the support-relative interval
+    ``[q_cut, 1]``, ``PAIRING_PANEL_NQ`` nodes each -- not the historical
+    ``get_q_grid()`` trapezoid.  See tests/test_pairing_panel_quadrature.py for
+    the full pin of that rule."""
+    x, w = np.polynomial.legendre.leggauss(PAIRING_PANEL_NQ)
+    t, wt = 0.5 * (x + 1.0), 0.5 * w
+    m1 = np.atleast_1d(np.asarray(m1, dtype=float))
+    q_cut = np.clip(mmin / m1, 0.0, 1.0)
+    q_a = np.clip((mmin + dmmin) / m1, q_cut, 1.0)
+    out = np.zeros(m1.shape)
+    for lo, hi in ((q_cut, q_a), (q_a, np.ones_like(q_a))):
+        width = hi - lo
+        q = lo[:, None] + width[:, None] * t
+        m2 = q * m1[:, None]
         sq = np.where(q > 0, q, 1.0)
         p = np.where(q > 0, sq ** beta, 0.0)
         p = np.asarray(sfilter_low(m2, mmin, dmmin)) * p
         p = np.where(m2 < mmin, 0.0, p)
-        out[i] = _trapezoid(p, q)  # np.trapz removed in NumPy 2.0
+        out += np.sum(p * wt, axis=-1) * width
     return out
 
 
@@ -151,13 +164,21 @@ def test_default_none_bit_identical_to_exact():
     # Deterministic default path: identical bits on repeat.
     assert np.array_equal(a, b), "None path not reproducible"
 
-    # Cross-check the normalizer against the independent NumPy integral: the
-    # single-component power-law pairing normalizer must be strictly positive on
-    # the support (a sanity check that the exact quadrature is what we compare to).
+    # Cross-check the normalizer against the independent NumPy reimplementation
+    # of the SAME two-panel Gauss-Legendre rule: strictly positive on the
+    # support, and the shipped exact branch reproduces it to floating point.
     beta = float(THETA0[_I_BETA]); mmin = float(THETA0[_I_MMIN])
     dmmin = float(THETA0[_I_DMMIN])
-    N_ref = _exact_pairing_norm_powerlaw(np.asarray(m1), mmin, dmmin, beta)
-    assert np.all(N_ref[np.asarray(m1) > mmin + 1.0] > 0)
+    m1_np = np.asarray(m1)
+    N_ref = _exact_pairing_norm_powerlaw(m1_np, mmin, dmmin, beta)
+    assert np.all(N_ref[m1_np > mmin + 1.0] > 0)
+    pair = MODEL.mixture.pairing_components[0]
+    t, w = U.get_pairing_panel_quadrature()
+    n_sc, scale = pair._panel_norm(m1, mmin, dmmin, jnp.asarray([beta]), t, w)
+    N_got = np.asarray(n_sc) * np.asarray(scale)
+    ok = N_ref > 0
+    # Only the row-max scale factoring differs (association order).
+    assert np.max(np.abs(N_got[ok] / N_ref[ok] - 1.0)) < 1e-12
 
 
 # ---------------------------------------------------------------------------
@@ -755,7 +776,7 @@ def test_support_edge_cell_is_bounded_and_one_sided(capsys):
     _set_pairing_grid(None)
     exact = _logp(_EDGE_M1, _EDGE_Q, z, chi, theta)
     assert np.all(np.isfinite(exact)), exact
-    np.testing.assert_allclose(exact, [-10.60412986, -9.89268181, -11.26923722],
+    np.testing.assert_allclose(exact, [-10.60664237, -9.89519596, -11.27174666],
                                rtol=0, atol=1e-6)
 
     worst = {}
@@ -769,17 +790,17 @@ def test_support_edge_cell_is_bounded_and_one_sided(capsys):
               "(was +406.8 nats at 2048):")
         for ng, (hi_e, lo_e) in worst.items():
             print(f"    grid={ng:5d}:  {hi_e:+.3e} | {lo_e:+.3e}")
-    # Post-fix the edge cell is integrated on the sample's own support, so the
-    # ONLY residual is the exact branch's own endpoint deficit: its q-trapezoid
-    # scores p(t = 0) = 0 at the support edge, losing 1/(2 (n_q - 1)) = 2.513e-3
-    # of the normaliser in this fully-tapered corner.  The grid path is on the
-    # right side of that (it is CLOSER to the converged reference -- see
-    # tests/test_pairing_edge_fix.py), so the residual is a small NEGATIVE
-    # offset, identical at every grid size.
+    # The edge cell is integrated on the sample's OWN support in both branches,
+    # and since the 2-panel Gauss-Legendre rule landed (2026-09-05) it is the
+    # SAME rule on both sides -- the exact branch at 16 nodes per panel, the grid
+    # branch's edge rule at ``pairing_edge_nq`` -- so the residual here is pure
+    # floating point, not a quadrature offset.  It used to be a one-sided
+    # -2.513e-3 nats: the old n_q = 200 uniform q-trapezoid scored p(t = 0) = 0 at
+    # the support edge and lost 1/(2 (n_q - 1)) of the normaliser in this
+    # fully-tapered corner, which is exactly the deficit the panel split removed.
     for ng, (hi_e, lo_e) in worst.items():
-        assert hi_e < 0.0, (ng, worst)          # never inflated
-        assert lo_e > -3.0e-3, (ng, worst)      # and pinned to the trapezoid deficit
-        assert abs(lo_e) > 2.4e-3, (ng, worst)
+        assert abs(hi_e) < 1.0e-12, (ng, worst)     # same rule on both sides now
+        assert abs(lo_e) < 1.0e-12, (ng, worst)
 
 
 def test_support_edge_dense_sweep_bounded_and_one_sided(capsys):
@@ -827,15 +848,21 @@ def test_support_edge_dense_sweep_bounded_and_one_sided(capsys):
         for mmin, dmmin, beta, ng, over, mism in rows:
             print(f"    mmin={mmin:5} dm={dmmin:6} beta={beta:5} N={ng:5}: "
                   f"over={over:+.3e}  zero-pattern-mismatches={mism}")
-    # Post-fix the residual is GRID-SIZE INDEPENDENT and is the EXACT branch's
-    # own quadrature error, not the grid path's: near the support edge the exact
-    # branch's 200-node uniform q-trapezoid does not resolve the taper boundary
-    # layer and is itself up to 3.1e-2 off a converged 200001-node reference,
-    # which the per-sample Gauss-Legendre rule tracks to <= 5e-3
-    # (tests/test_pairing_edge_fix.py).  Pre-fix this column read up to +3.5.
+    # Post-fix the residual is GRID-SIZE INDEPENDENT and is the difference of
+    # two rules on the SAME two-panel split -- the grid branch's near-edge rule
+    # at ``pairing_edge_nq`` nodes per panel against the exact branch's
+    # ``PAIRING_PANEL_NQ`` -- so it is bounded by the exact branch's own
+    # near-edge quadrature error, 7.6e-3 nats off a composite-GL reference
+    # (tests/test_pairing_panel_quadrature.py), and not by the interpolant.
+    # Measured worst over all 18 rows here: +4.2e-3, at mmin = 6, dm = 5.005,
+    # beta = 2.5, N = 2048 (the widest taper of the set, where the interpolated
+    # and per-sample rules disagree most).  The bound below is re-derived
+    # against that with ~2x headroom, not against the 200-node trapezoid the
+    # panel split replaced (this assertion read 3.5e-2 while that trapezoid was
+    # the exact branch).  Pre-fix this column read up to +3.5.
     for mmin, dmmin, beta, ng, over, mism in rows:
         assert mism == 0, (mmin, dmmin, beta, ng, mism)
-        assert over < 3.5e-2, (mmin, dmmin, beta, ng, over)
+        assert over < 1.0e-2, (mmin, dmmin, beta, ng, over)
 
 
 def test_support_edge_sample_does_not_corrupt_logmu_or_neff(capsys):
