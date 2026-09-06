@@ -184,6 +184,47 @@ injections at five values of `H0`. A run on a catalog with no `z_depth`
 attribute and no `--survey_z_depth` enters the band for at most 2e-3 of
 samples, monotonically more of them as `H0` rises.
 
+### Routing the empty catalog rows
+
+A sample whose pixel row holds no galaxies pays the whole per-sample KDE for a
+value the evaluator throws away. `row_empty[pix]` selects an exact `-inf` for
+`log p_cat` and `log_Nobs[pix]` is `-inf` too, so the prior collapses to the
+missing-galaxy branch alone -- `logaddexp(-inf, log_miss)`, which returns
+`log_miss` bit for bit. On the production DESI nside-64 catalog 18,682 of the
+49,152 rows are empty, and 41.7% of the PE samples and 38.9% of the injections
+land in one.
+
+A sample's pixel is data: it never depends on a proposal. So the factory
+partitions each sample set once, at build time, into "my row holds galaxies"
+and "my row is empty" (`EmptyRowRouting` in `darksirens/redshift/prior.py`), and
+the evaluator runs the unchanged KDE on the first group and the KDE-free
+expression on the second. It then gathers the concatenation back through the
+stored inverse permutation, so the vector it RETURNS is in the caller's sample
+order: the per-event `(nEvents, nsamp)` reshape and the selection `logsumexp`
+see the same values in the same slots, and no other per-sample array has to
+move. The plan is built only for `dark_sirens` without a frozen prior, only on
+a catalog that carries `ngals` (the row-prefix invariant that makes
+`ngals == 0` imply `row_empty`), and only when the empty group is at least a
+tenth of the set. The evaluator falls back to the plain path for any sample
+vector whose length is not the planned one, which is what a `--sel_batch_size`
+pin (it pads the injections) or a `--pe_event_block` chunk produces.
+
+The premise -- that a row the plan calls empty really does produce `-inf` -- is
+re-checked in the graph on every call, one `(N_rows,)` reduce, and a violation
+drives the whole log-likelihood to `-inf` rather than to NaN: every per-sample
+NaN in this likelihood dies at the `isfinite` mask before it can reach a
+reduction, so `-inf` is the only verdict that can reach the caller.
+
+Measured on the same production likelihood and the same eight prior draws as
+the one-pass reduction above, on an H100 NVL, median of 20 warm calls:
+27.8 ms/call against 32.8 ms with the routing off (1.18x), and 2.13x against
+the 59.2 ms `f770956` baseline. The log-likelihood is bit-identical -- the five
+finite draws agree to the last bit, the same three are `-inf`. Peak device
+memory is 13.06 GB against 13.14 GB (the plan's three `int32` index arrays per
+sample set cost 25.6 MB and the narrower KDE intermediate more than pays for
+them). The spectral configuration has no catalog KDE and cannot reach this
+path.
+
 ## The frozen redshift prior (population-only runs)
 
 `--freeze_redshift_prior BOOL` (default true) evaluates the per-sample catalog

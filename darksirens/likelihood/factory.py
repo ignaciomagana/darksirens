@@ -58,6 +58,7 @@ from darksirens.inference.parameters import (
     complete_empty_pixel_policy_code,
 )
 from darksirens.core.types import EMCatalog, GWEvent
+from darksirens.redshift.prior import EmptyRowRouting
 from darksirens.utils import cosmology
 
 # Backward-compatible aliases for callers/tests that imported private helpers.
@@ -1160,6 +1161,83 @@ def _injection_pixel_order(pixels_sel):
     return np.argsort(p, kind="stable")
 
 
+# Below this share of the sample set the routed group cannot pay for the two
+# extra index gathers and the extra lowered KDE shape; the production catalog
+# sits at 0.39-0.42, four times the bar.
+_EMPTY_ROW_ROUTING_MIN_FRACTION = 0.10
+
+
+def empty_row_routing_admissible(universe_model, frozen_prior) -> bool:
+    """Is the empty-row sample routing meaningful for this run?
+
+    Only the incomplete-catalog dark-siren prior has the
+    ``N_obs p_cat + dN_miss`` decomposition whose catalog term the routing
+    skips, and only a run that evaluates that prior PER PROPOSAL can save
+    anything: a frozen prior has already paid for every sample at build time.
+    Every other configuration gets ``()`` and the historical graph.
+    """
+    return universe_model == "dark_sirens" and frozen_prior is None
+
+
+def _empty_row_routing_plan(pixels_col, ngals):
+    """Build-time :class:`EmptyRowRouting` for one sample set, or ``None``.
+
+    ``pixels_col`` is this sample set's COMPACT row index per sample (the
+    catalog view's ``sample_to_unique_idx``); ``ngals`` the compact per-row real
+    galaxy count.  Returns ``None`` -- i.e. the unrouted, historical path --
+    whenever the partition cannot pay: no ``ngals`` (the row-prefix invariant
+    the KDE's padding sanitisation rests on is then unproven, see
+    ``catalog._row_real_mask``), a degenerate partition, or an empty group too
+    small to matter.
+
+    The two groups keep their samples' ORIGINAL relative order, so the occupied
+    group inherits whatever gather locality the caller arranged (the injections
+    are pixel-sorted by :func:`_injection_pixel_order`) instead of trading it
+    away for the partition.
+    """
+    if ngals is None or pixels_col is None:
+        return None
+    ng = np.asarray(ngals)
+    p = np.asarray(pixels_col)
+    if p.ndim != 1 or p.size == 0 or ng.ndim != 1 or ng.size == 0:
+        return None
+    empty_rows = ng == 0
+    if not bool(empty_rows.any()):
+        return None
+    is_empty = empty_rows[p.astype(np.int64)]
+    n_empty = int(is_empty.sum())
+    if n_empty == 0 or n_empty == p.size:
+        return None
+    if n_empty < _EMPTY_ROW_ROUTING_MIN_FRACTION * p.size:
+        return None
+    idx = np.arange(p.size, dtype=np.int32)
+    order = np.concatenate([idx[~is_empty], idx[is_empty]])
+    inv = np.empty_like(order)
+    inv[order] = idx
+    return EmptyRowRouting(
+        idx_occ=barrier(jnp.asarray(idx[~is_empty], dtype=jnp.int32)),
+        idx_empty=barrier(jnp.asarray(idx[is_empty], dtype=jnp.int32)),
+        inv_order=barrier(jnp.asarray(inv, dtype=jnp.int32)),
+        empty_rows=barrier(jnp.asarray(empty_rows, dtype=bool)),
+    )
+
+
+def _empty_row_routing(universe_model, frozen_prior, catalogs_pe, catalogs_sel):
+    """Per-catalog ``(pe, sel)`` routing plans, or ``()`` when inadmissible."""
+    if not empty_row_routing_admissible(universe_model, frozen_prior):
+        return ()
+    plans = tuple(
+        (
+            _empty_row_routing_plan(cat_pe.sample_to_unique_idx, cat_pe.ngals),
+            _empty_row_routing_plan(cat_sel.sample_to_unique_idx, cat_sel.ngals),
+        )
+        for cat_pe, cat_sel in zip(catalogs_pe, catalogs_sel)
+    )
+    if all(pe is None and sel is None for pe, sel in plans):
+        return ()
+    return plans
+
+
 def _permute_rows(arr, order):
     """``arr[order]`` along the leading (sample) axis, re-barriered; identity
     on ``None`` (an absent optional block or no permutation)."""
@@ -1910,13 +1988,20 @@ def _make_mixture_likelihood(
         kde_window, gw_pe, tuple(em_catalogs_pe), gw_sel, tuple(em_catalogs_sel),
         n_catalogs,
     )
-    operands = (*operands, frozen_prior)
+    # Build-time empty-catalog-row sample routing (bit-identical; see
+    # ``redshift.prior.EmptyRowRouting``).  Built AFTER the frozen prior, whose
+    # presence makes it pointless.
+    empty_routing = _empty_row_routing(
+        universe_model, frozen_prior, tuple(em_catalogs_pe), tuple(em_catalogs_sel),
+    )
+    # ``frozen_prior`` stays LAST: callers and tests read it as ``operands[-1]``.
+    operands = (*operands, empty_routing, frozen_prior)
 
     def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
         (
             gw_pe_, em_catalog_pe_0_, gw_sel_, em_catalog_sel_0_,
             mixture_em_catalogs_pe_, mixture_em_catalogs_sel_,
-            frozen_prior_,
+            empty_routing_, frozen_prior_,
         ) = operands
         if n_catalogs >= 2:
             (
@@ -1983,11 +2068,13 @@ def _make_mixture_likelihood(
             share_prior_state_by_catalog=share_prior_state_by_catalog,
             kde_window=kde_window,
             frozen_prior=frozen_prior_,
+            empty_row_routing=empty_routing_,
         )
 
     likelihood = _jit_likelihood_body(_body, operands)
     likelihood.kde_window = kde_window
     likelihood.frozen_redshift_prior = frozen_prior is not None
+    likelihood.empty_row_routing = empty_routing
     return likelihood
 
 
@@ -2557,13 +2644,22 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         opts, parameter_decoder, universe_model, mark_model, catalog_sky_weighting,
         kde_window, gw_pe, (em_catalog_pe,), gw_sel, (em_catalog_sel,), 1,
     )
-    operands = (*operands, frozen_prior)
+    # Build-time empty-catalog-row sample routing (bit-identical; see
+    # ``redshift.prior.EmptyRowRouting``).  Under a ``sel_batch_size`` pin the
+    # injections above were padded to a multiple of the batch, so the selection
+    # plan's length no longer matches the vector the evaluator sees and the
+    # evaluator falls back to the unrouted path on its own.
+    empty_routing = _empty_row_routing(
+        universe_model, frozen_prior, (em_catalog_pe,), (em_catalog_sel,),
+    )
+    # ``frozen_prior`` stays LAST: callers and tests read it as ``operands[-1]``.
+    operands = (*operands, empty_routing, frozen_prior)
 
     def _body(coord: jnp.ndarray, operands) -> jnp.ndarray:
         (
             gw_pe_, em_catalog_pe_, gw_sel_, em_catalog_sel_,
             wl_a_, wl_b_, wl_z_grid_, wl_log_mu_grid_, wl_log_p_table_,
-            frozen_prior_,
+            empty_routing_, frozen_prior_,
         ) = operands
         cosmo, survey, pop_params, sky_params, mark_params = parameter_decoder.decode(coord)
         if len(pop_params) != len(parameter_decoder.pop_labels):
@@ -2611,6 +2707,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
                 share_prior_state_by_catalog=share_prior_state_by_catalog,
                 kde_window=kde_window,
                 frozen_prior=frozen_prior_,
+                empty_row_routing=empty_routing_,
             )
         return darksiren_log_likelihood(
             cosmo,
@@ -2651,9 +2748,11 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
             share_prior_state_by_catalog=share_prior_state_by_catalog,
             kde_window=kde_window,
             frozen_prior=frozen_prior_,
+            empty_row_routing=empty_routing_,
         )
 
     likelihood = _jit_likelihood_body(_body, operands)
     likelihood.kde_window = kde_window
     likelihood.frozen_redshift_prior = frozen_prior is not None
+    likelihood.empty_row_routing = empty_routing
     return likelihood
