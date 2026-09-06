@@ -2275,7 +2275,7 @@ def build_pinned_field_observed_total(
     array so the guard samples the whole depth range, not one pixel's neighbours.
     """
     total = field_observed_global_total(cosmo, survey, em_catalog)
-    n_gal = int(np.asarray(em_catalog.field_depth_z).shape[0])
+    n_gal = int(array_shape(em_catalog.field_depth_z)[0])
     n_probe = max(1, min(int(n_probe), n_gal))
     idx = jnp.asarray(
         np.unique(np.linspace(0, n_gal - 1, n_probe).round().astype(np.int64))
@@ -3302,7 +3302,7 @@ def completion_clip_diagnostics(
         if em_catalog.unique_pixels is not None:
             pixels_np = np.arange(np.asarray(em_catalog.unique_pixels).size, dtype=np.int32)
         else:
-            pixels_np = np.arange(np.asarray(em_catalog.zgals).shape[0], dtype=np.int32)
+            pixels_np = np.arange(array_shape(em_catalog.zgals)[0], dtype=np.int32)
     else:
         pixels_np = np.asarray(pixels, dtype=np.int32).reshape(-1)
 

@@ -5,21 +5,35 @@ from jax.scipy.special import logsumexp
 
 
 def array_shape(a):
-    """Shape of an array-like WITHOUT forcing a device->host copy.
+    """Shape of an array-like WITHOUT converting it through ``numpy``.
 
     ``np.asarray(x).shape`` on a device-resident ``jax.Array`` materialises the
     whole table on the host (676 MB per full-sky galaxy table on the production
-    DESI nside-64 catalog, ~0.17 s at 4 GB/s) purely to read a static integer
-    that the ``jax.Array`` already carries.  Anything exposing ``.shape`` --
+    DESI nside-64 catalog) purely to read a static integer that the
+    ``jax.Array`` already carries.  Anything exposing ``.shape`` --
     ``jax.Array``, ``np.ndarray``, ``h5py`` datasets -- answers from metadata;
     only genuine sequences fall through to ``np.asarray``.  Exactly
-    bit-identical: no value is read, and the shape is the same object either
-    way.
+    bit-identical: no value is read, and the shape is the same VALUE either way
+    (a freshly built tuple, not the same object).
+
+    What this does and does NOT buy.  Whether the host copy is avoided
+    ALTOGETHER or merely moved depends on whether some other build-time site
+    consumes the same array's VALUES: ``np.asarray`` caches its result on the
+    ``jax.Array`` (``_npy_value``), so converting a shape-only reader ahead of a
+    genuine value-reader just shifts the one download to the value-reader.  Use
+    it anyway -- it is never slower -- but claim a saving only for an array with
+    no host value-consumer, or for the duplicate device buffer a
+    ``jnp.asarray(np.asarray(x))`` round-trip would have re-uploaded.
+
+    A traced array returns its ABSTRACT shape here rather than raising, whereas
+    ``np.asarray`` raises ``TracerArrayConversionError``; call sites that lean
+    on that raise as their traced-array detector must keep their own check.
     """
     shape = getattr(a, "shape", None)
     if shape is None:
         return np.asarray(a).shape
     return tuple(int(d) for d in shape)
+
 
 @jit
 def logdiffexp(x, y):
