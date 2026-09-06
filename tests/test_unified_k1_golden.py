@@ -20,18 +20,19 @@ Goldens are stored PER JAX BACKEND (cpu/gpu reductions differ at the ULP
 level), keyed by ``jax.default_backend()``; a backend with no recorded
 goldens fails with a regeneration hint.
 
-UNRECORDED CELL: ``empty_row_routing`` was added with the perf campaign's
-empty-catalog-row routing and is recorded for ``cpu`` only -- the two ``gpu:*``
-banks must be regenerated ON THAT HARDWARE (the box this was added on is an
-H100 NVL, which has no bank at all) and will report a missing golden for that
-one cell until then.  No other cell moved: the routing arms for no other
-fixture.
-
-STALE CELL: the two ``gpu:*`` ``wl_lognormal`` entries predate the PHY-06 fix
-(the lognormal Hermite backend now carries the proposal-to-target density
-ratio, which moves that cell by ~6%).  The cpu entry was regenerated with the
-fix; the A100/H100 entries must be regenerated ON THAT HARDWARE and will fail
-until then.  No other cell is affected -- the fix touches only the WL path.
+RECORDED BANKS (2026-09-06): ``cpu`` and ``gpu:NVIDIA H100 NVL``, 15 cells
+each.  The ``gpu:NVIDIA A100 80GB PCIe`` and ``gpu:NVIDIA H100 80GB HBM3``
+banks were DELETED on 2026-09-06: they were recorded before the pairing
+quadrature changed (``PAIRING_PANEL_NQ`` 16 -> 32, which moves every cell by
+2.6e-14 to 2.5e-11 relative, four to five orders above this file's rtol 1e-12
+pin), and they never carried ``empty_row_routing`` or the PHY-06 weak-lensing
+fix.  Left in place they failed 15 of 15 cells on that hardware -- 14 rtol
+drifts plus a hard "no golden recorded for cell 'empty_row_routing'" -- and a
+STALE bank is worse than a MISSING one, because a backend with no bank SKIPS
+with a regeneration hint while a stale one reports fifteen red cells that say
+nothing about the code.  Re-record them on an A100 80GB PCIe and on an H100
+80GB HBM3 with the command below; that also retires the two pre-existing
+``wl_lognormal`` staleness entries they carried.
 
 Regenerate (ONLY on the legacy path, never after the refactor):
     DARKSIRENS_REGEN_GOLDEN=1 python -m pytest tests/test_unified_k1_golden.py -q
