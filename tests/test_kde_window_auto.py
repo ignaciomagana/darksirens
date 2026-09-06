@@ -114,6 +114,22 @@ def test_log_kw_eff_is_the_fused_sample_independent_term():
 
 @pytest.mark.parametrize("window", [None, 64, 256])
 def test_three_gather_evaluator_matches_the_historical_arithmetic(window):
+    """The one-pass evaluator reproduces the historical four-gather logsumexp
+    wherever the build-time offset has the f64 exponent range to hold the
+    answer, and returns exactly -inf well below it.
+
+    The reduction subtracts a BUILD-TIME per-row offset
+    (``log_kw_eff_rowmax``) instead of the sample's own maximum, which is what
+    removes the ``logsumexp`` amax pass.  The price is a finite offset budget
+    set by where ``exp`` underflows on the backend (708.4 nats on XLA CPU,
+    744.4 on CUDA), with a graded band just above the edge --
+    :func:`test_the_offset_budget_is_the_backend_exp_underflow_edge` pins that.
+    Agreement to 1e-12 is therefore a property of samples whose deficit stays
+    below the band, which is every sample on this fixture (its per-row
+    ``log_kw_eff`` spread is small, so the row max and the sample max coincide
+    to well under a nat); what is pinned here is that the floor fires only
+    hundreds of nats down, and never the other way round.
+    """
     rng = np.random.default_rng(1)
     cat = _rows()
     z, pix = _samples(rng)
@@ -121,7 +137,205 @@ def test_three_gather_evaluator_matches_the_historical_arithmetic(window):
     st = C.catalog_kernel_state(COSMO, _survey(0.01), cat)
     new = _eval(st, cat, z, pix)
     old = _eval(st._replace(log_kw_eff=None), cat, z, pix)   # four-gather arithmetic
-    assert _max_abs_delta(new, old) < 1e-12
+    floored = np.isfinite(old) & np.isneginf(new)
+    # The floor is one-way: nothing the two-pass form called -inf comes back.
+    assert not (np.isneginf(old) & np.isfinite(new)).any()
+    peak = np.max(old[np.isfinite(old)])
+    assert np.all(old[floored] < peak - 700.0)
+    assert _max_abs_delta(new[~floored], old[~floored]) < 1e-12
+
+
+def test_one_pass_offset_is_the_row_max_of_the_served_log_kw_eff():
+    """``log_kw_eff_rowmax`` IS the maximum of the array the evaluator gathers.
+
+    The offset is not a correctness-critical value -- any offset within the
+    f64 exponent range returns the same number -- but a STALE one silently
+    moves the underflow edge, so it is pinned against the served array on every
+    builder, including the pinned quadrature at a shifted H0 (where the offset
+    must carry the same scalar ``3 ln(H0/H0_ref)`` as ``log_kw_eff`` itself).
+    """
+    cat = _rows()
+    survey = _survey(0.01)
+    st = C.catalog_kernel_state(COSMO, survey, cat)
+    lkwe = np.asarray(st.log_kw_eff)
+    want = np.max(lkwe, axis=1)
+    occupied = np.asarray(cat.ngals) > 0
+    np.testing.assert_array_equal(
+        np.asarray(st.log_kw_eff_rowmax)[occupied], want[occupied])
+    # An all-padding row is clamped to 0.0, not left at the -1e30 sentinel:
+    # with -1e30 as the offset the padding exponents would be 0 and the row
+    # would return a finite ~-1e30 + log(N_max) instead of -inf.
+    assert np.all(np.asarray(st.log_kw_eff_rowmax)[~occupied] == 0.0)
+    assert np.isneginf(
+        float(C.eval_log_catalog_prior_state(0.5, 2, st, cat)))
+
+    # The pin shifts the offset by exactly the scalar it shifts log_kw_eff by.
+    pin = C.build_pinned_kernel_quadrature(COSMO, survey, cat)
+    assert pin.log_kw_eff_rowmax is not None and pin.inv_sig_eff is not None
+    live = C.catalog_kernel_state(
+        COSMO._replace(H0=90.0), survey, cat, pinned=pin)
+    served = np.asarray(live.log_kw_eff)
+    got = np.asarray(live.log_kw_eff_rowmax)
+    np.testing.assert_allclose(
+        got[occupied], np.max(served, axis=1)[occupied],
+        rtol=0.0, atol=C.KERNEL_PIN_TOL)
+    # Every exponent the evaluator forms is <= 0 by construction at any H0.
+    assert np.all(served <= got[:, None])
+
+
+def test_inv_sig_eff_is_the_reciprocal_on_real_slots_and_zero_on_padding():
+    cat = _rows()
+    st = C.catalog_kernel_state(COSMO, _survey(0.01), cat)
+    live = np.asarray(st.log_kw_eff) > -1e29
+    inv = np.asarray(st.inv_sig_eff)
+    np.testing.assert_array_equal(
+        inv[live], (1.0 / np.asarray(st.sig_eff))[live])
+    # Padding carries 0.0 so its deviate is exactly 0 and the exponent is the
+    # bare -1e30 sentinel, whatever the padding widths are.
+    assert np.all(inv[~live] == 0.0)
+
+
+def test_every_builder_populates_the_one_pass_leaves():
+    """A builder that forgets a leaf silently falls back to the two-pass form
+    and loses the 27 ms/call, with every other test still green.  Pin all four
+    construction sites, including the marked-host one the evaluator shares.
+    """
+    cat = _rows()
+    survey = _survey(0.01)
+
+    st = C.catalog_kernel_state(COSMO, survey, cat)
+    assert st.log_kw_eff_rowmax is not None and st.inv_sig_eff is not None
+
+    pin = C.build_pinned_kernel_quadrature(COSMO, survey, cat)
+    assert pin.log_kw_eff_rowmax is not None and pin.inv_sig_eff is not None
+
+    live = C.catalog_kernel_state(
+        COSMO._replace(H0=90.0), survey, cat, pinned=pin)
+    assert live.log_kw_eff_rowmax is not None and live.inv_sig_eff is not None
+
+    log_h = jnp.asarray(
+        np.where(np.asarray(cat.wgals) > 0.0, -0.5, -np.inf))
+    marked, _ = C.marked_catalog_kernel_state(COSMO, survey, cat, log_h)
+    assert marked.log_kw_eff_rowmax is not None
+    assert marked.inv_sig_eff is not None
+    served = np.asarray(marked.log_kw_eff)
+    occupied = np.asarray(cat.ngals) > 0
+    got = np.asarray(marked.log_kw_eff_rowmax)
+    np.testing.assert_array_equal(
+        got[occupied], np.max(served, axis=1)[occupied])
+    assert np.all(served[occupied] <= got[occupied][:, None])
+
+
+def _has_reduce_max(state, cat):
+    """Does the traced evaluator still contain a row-wide max reduction?"""
+    jx = jax.make_jaxpr(
+        lambda z, p: C.eval_log_catalog_prior_state(z, p, state, cat)
+    )(jnp.asarray(0.5), jnp.int32(0))
+    return "reduce_max" in str(jx)
+
+
+@pytest.mark.parametrize("window", [None, 256])
+def test_the_fast_one_pass_branch_is_actually_taken(window):
+    """The perf contract as a TEST, not a comment.
+
+    The whole win is the disappearance of the ``logsumexp`` amax pass (and with
+    it the (N_samples, N_max) f64 intermediate XLA materialised between the two
+    reductions).  With the leaves present the traced evaluator must contain NO
+    ``reduce_max``; drop the offset and it must come back.
+    """
+    cat = _rows()
+    C.configure_catalog_kde_window(window)
+    st = C.catalog_kernel_state(COSMO, _survey(0.01), cat)
+    assert not _has_reduce_max(st, cat)
+    assert _has_reduce_max(st._replace(log_kw_eff_rowmax=None), cat)
+
+
+def _backend_exp_underflow_edge():
+    """Nats below zero at which ``jnp.exp`` reaches 0 on the LIVE backend.
+
+    ``ln(smallest normal f64) = 708.396`` where subnormal results are flushed
+    (the XLA CPU backend), ``ln(smallest subnormal) = 744.440`` where they are
+    not (CUDA).  Measured, not assumed, so the pin follows the backend.
+    """
+    flushes = float(jnp.exp(jnp.asarray(-709.0))) == 0.0
+    return 708.396 if flushes else 744.440
+
+
+def test_the_offset_budget_is_the_backend_exp_underflow_edge():
+    """The build-time offset buys a FINITE budget, and the edge is graded.
+
+    One galaxy in the row, so a sample at redshift ``z`` sits exactly
+    ``0.5 * ((z - z_gal) / sig_eff)**2`` nats below the row's maximum and the
+    deficit is a dial.  Well inside the budget the one-pass form is exact;
+    well past it the row sums to zero and returns -inf.  Between them the
+    finite value degrades with the subnormal mantissa (MEASURED on an H100 NVL:
+    relative drift 4e-15 at a deficit of 720 nats, 2e-12 at 725, 0.25 nats at
+    744), which is why the docs state a graded band rather than a clean floor.
+    Nothing downstream can see it: the sample's weight in the caller's
+    ``logaddexp`` is ``exp(-708) = 0`` whatever value comes back.
+    """
+    n_max = 4
+    zg = np.full((1, n_max), 100.0)
+    dz = np.full((1, n_max), 1.0)
+    wg = np.zeros((1, n_max))
+    zg[0, 0], dz[0, 0], wg[0, 0] = 0.5, 0.01, 1.0
+    cat = EMCatalog(
+        apix=1e-3, zgals=jnp.asarray(zg), dzgals=jnp.asarray(dz),
+        wgals=jnp.asarray(wg), ngals=jnp.asarray(np.array([1], np.int32)),
+        delta_g_pix_z=jnp.zeros((1, 10)), dN_obs_kde=None,
+        pixel_to_cache_idx=None,
+    )
+    C.configure_catalog_kde_window(None)
+    st = C.catalog_kernel_state(COSMO, _survey(0.0), cat)
+    sig = float(np.asarray(st.sig_eff)[0, 0])
+
+    edge = _backend_exp_underflow_edge()
+    # 20 nats of guard on each side of the measured band (the drift crosses
+    # 1e-12 about 20 nats below the CUDA edge; the CPU term-drop band is
+    # narrower still).
+    inside = np.array([1.0, 100.0, 400.0, edge - 20.0])
+    outside = np.array([edge + 1.0, edge + 20.0, edge + 100.0])
+    deficits = np.concatenate([inside, outside])
+    z = jnp.asarray(0.5 + sig * np.sqrt(2.0 * deficits))
+    pix = jnp.zeros(z.shape, dtype=jnp.int32)
+
+    new = _eval(st, cat, z, pix)
+    old = _eval(st._replace(log_kw_eff_rowmax=None), cat, z, pix)
+    n_in = inside.size
+    # Inside the budget: exact to re-association, and the two-pass reference is
+    # finite there (the reference has no offset budget at all).
+    assert np.all(np.isfinite(old[:n_in])) and np.all(np.isfinite(new[:n_in]))
+    assert _max_abs_delta(new[:n_in], old[:n_in]) < 1e-12
+    # Past the edge: exactly -inf, and the two-pass form still finite -- i.e.
+    # the floor is the one-pass form's, not the arithmetic's.
+    assert np.all(np.isneginf(new[n_in:]))
+    assert np.all(np.isfinite(old[n_in:]))
+    # And the value that is lost is unobservable: it is more than 700 nats
+    # under the row's peak, so exp() of it is 0 in the caller's logaddexp.
+    peak = float(np.max(old))
+    assert np.all(old[n_in:] < peak - 700.0)
+
+
+def test_one_pass_state_leaves_gate_the_fast_form():
+    """Dropping EITHER new leaf falls back to the historical two-pass form.
+
+    The admissibility condition is the presence of the leaves, not the H0 pin:
+    the same branch serves pinned, unpinned, marked, volume-weighted and
+    windowed states.
+    """
+    rng = np.random.default_rng(7)
+    cat = _rows()
+    z, pix = _samples(rng, n=200)
+    C.configure_catalog_kde_window(None)
+    st = C.catalog_kernel_state(COSMO, _survey(0.01), cat)
+    ref = _eval(st._replace(log_kw_eff=None), cat, z, pix)
+    for drop in ({"log_kw_eff_rowmax": None}, {"inv_sig_eff": None},
+                 {"log_kw_eff_rowmax": None, "inv_sig_eff": None}):
+        got = _eval(st._replace(**drop), cat, z, pix)
+        # The fused three-gather logsumexp, which agrees with the four-gather
+        # arithmetic to re-association and has NO underflow floor.
+        assert not np.isneginf(got[np.isfinite(ref)]).any()
+        assert _max_abs_delta(got, ref) < 1e-12
 
 
 def test_pinned_state_carries_the_fused_array_with_the_shift():
