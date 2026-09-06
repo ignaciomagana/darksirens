@@ -205,25 +205,45 @@ see the same values in the same slots, and no other per-sample array has to
 move. The plan is built only for `dark_sirens` without a frozen prior, only on
 a catalog that carries `ngals` (the row-prefix invariant that makes
 `ngals == 0` imply `row_empty`), and only when the empty group is at least a
-tenth of the set. The evaluator falls back to the plain path for any sample
-vector whose length is not the planned one, which is what a `--sel_batch_size`
-pin (it pads the injections) or a `--pe_event_block` chunk produces.
+tenth of the set. A `--sel_batch_size` pin batches (and pads) the injections
+and a `--pe_event_block` chunk splits the PE samples, so neither evaluator can
+be handed a whole-sample-set plan: that side is refused at build time and never
+uploads its index arrays, and the run keeps today's speed and today's bits.
 
-The premise -- that a row the plan calls empty really does produce `-inf` -- is
-re-checked in the graph on every call, one `(N_rows,)` reduce, and a violation
-drives the whole log-likelihood to `-inf` rather than to NaN: every per-sample
-NaN in this likelihood dies at the `isfinite` mask before it can reach a
-reduction, so `-inf` is the only verdict that can reach the caller.
+Both halves of the premise are re-checked IN THE GRAPH on every call, and a
+violation of either drives the whole log-likelihood to `-inf`. The row half --
+every row the plan calls empty really does produce `-inf` -- is one `(N_rows,)`
+reduce. The sample half -- every sample the plan routed really does sit on one
+of those rows -- is one gather over the routed group, and it is the one that
+binds the plan to the pixel vector the evaluator is actually holding (the plan
+is selected by sample-vector length, and the factory derives it from the
+catalog view's `sample_to_unique_idx` while the evaluator consumes
+`gw.pixels[:, k]`). The verdict is `-inf` rather than NaN by necessity: every
+per-sample NaN in this likelihood dies at the `isfinite` mask before it can
+reach a reduction, so `-inf` is the only verdict that can reach the caller.
 
 Measured on the same production likelihood and the same eight prior draws as
-the one-pass reduction above, on an H100 NVL, median of 20 warm calls:
-27.8 ms/call against 32.8 ms with the routing off (1.18x), and 2.13x against
-the 59.2 ms `f770956` baseline. The log-likelihood is bit-identical -- the five
-finite draws agree to the last bit, the same three are `-inf`. Peak device
-memory is 13.06 GB against 13.14 GB (the plan's three `int32` index arrays per
-sample set cost 25.6 MB and the narrower KDE intermediate more than pays for
-them). The spectral configuration has no catalog KDE and cannot reach this
-path.
+the one-pass reduction above, on an H100 NVL, median of 20 warm calls, three
+launches per arm interleaved in one session: 28.4 ms/call against 32.6 ms with
+the routing off (1.15x), and 2.09x against the 59.2 ms `f770956` baseline. Peak
+device memory is 13.06 GB against 13.14 GB -- the plan costs `2N` `int32` per
+sample set (`idx_occ` and `idx_empty` partition the set, plus `inv_order`), 17.0
+MB across both, and the narrower KDE intermediate more than pays for it. The
+spectral configuration has no catalog KDE and cannot reach this path.
+
+On accuracy the routing is exact where it can be and ulp-level where it cannot.
+The prior vector it returns is bit-identical to the plain path sample by sample
+and slot by slot, and on the production build the whole log-likelihood is too:
+`max |dlogL| = 0.000e+00` at the benchmark's five finite prior draws (the same
+three are `-inf`) and at nine H0 values spanning [20, 140] with every other
+label at its fiducial. What is NOT guaranteed is the last bit of the total,
+because splitting one `vmap` into two changes how XLA fuses and orders the
+reductions ABOVE the evaluator: on the CPU backend a small minority of
+coordinates move by <= 4e-14 relative (1-2 in a 49-point H0 scan, no coherent
+sign, twelve orders below the 0.3-nat bar this campaign works to). The gate in
+`tests/test_empty_row_routing.py` is that dense scan with a `1e-12` relative
+bound and a signed-mean check, plus an exact equality on the prior vector
+itself.
 
 ## The frozen redshift prior (population-only runs)
 

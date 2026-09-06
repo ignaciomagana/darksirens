@@ -778,6 +778,13 @@ def _routing_applies(routing, z) -> bool:
     unrouted path, which is the exact expression the plan was derived from, so
     the fallback costs speed and never accuracy.  ``z.shape`` is static at trace
     time, so this is a Python branch, not a select.
+
+    A LENGTH match is necessary, not sufficient: two different sample vectors of
+    the same length both pass here.  Correctness does not rest on this
+    predicate -- :func:`_eval_dark_routed` verifies IN THE GRAPH that the samples
+    the plan routed really do sit on empty rows, so a plan applied to the wrong
+    same-length vector fails closed to ``-inf`` instead of returning a plausible
+    wrong number.
     """
     if routing is None:
         return False
@@ -788,7 +795,7 @@ def _routing_applies(routing, z) -> bool:
 
 
 def _empty_row_routing_ok(state, routing):
-    """In-graph verdict on the routing PREDICATE (``ngals == 0``).
+    """In-graph verdict on the routing predicate's ROW half (``ngals == 0``).
 
     The shortcut below is bit-exact only because ``log p_cat`` is exactly
     ``-inf`` on every routed sample, and that is supplied by the
@@ -809,6 +816,14 @@ def _empty_row_routing_ok(state, routing):
     log-likelihood ``-inf`` at every coordinate -- a run that cannot start, not
     a plausible wrong number.  Returns ``None`` when the kernels carry no
     ``row_empty`` at all, which the caller reads as "do not route".
+
+    This is only HALF the verdict.  It says "every row the plan CALLED empty is
+    empty" and says nothing about which SAMPLES were routed onto those rows --
+    a plan built for a different (same-length) sample vector, or one that moved
+    an occupied-row sample into ``idx_empty``, passes this check untouched.
+    :func:`_eval_dark_routed` ANDs in the sample half,
+    ``all(empty_rows[pix[idx_empty]])``, which is what actually makes the
+    substitution sound; the two belong together.
     """
     kernels = getattr(state, "kernels", None)
     row_empty = getattr(kernels, "row_empty", None) if kernels is not None else None
@@ -878,8 +893,25 @@ def _eval_dark_routed(
     the caller's sample order.  Because the inverse gather happens HERE -- before
     the value ever leaves this function -- no reduction downstream is
     re-associated and no other per-sample array has to be permuted.
+
+    The verdict spent on the result is BOTH halves of the routing predicate:
+    ``ok`` (every row the plan called empty really is empty, from
+    :func:`_empty_row_routing_ok`) AND ``all(empty_rows[pix[idx_empty]])`` --
+    every sample the plan ROUTED really does sit on one of those rows.  The
+    second half is the one that binds the plan to THIS ``pix`` vector: the plan
+    is selected by sample-vector LENGTH alone, and the factory derives it from
+    the catalog view's ``sample_to_unique_idx`` while the evaluator consumes
+    ``gw.pixels[:, k]`` -- two arrays kept in step by hand, in two factories.
+    If they ever fall out of step the routed samples stop being empty-row
+    samples, the substitution ``log p_cat = -inf`` stops being their KDE's
+    answer, and without this term the result would be a silent, finite, WRONG
+    number (measured at up to 2e-6 nats per sample on a toy catalog, and the
+    kind of decorrelated per-sample array that tilts with H0 at production
+    scale).  It costs one ``(n_emp,)`` int32 gather and a bool reduce -- 442k
+    elements against a 1e6-sample KDE on production, unmeasurable.
     """
     io, ie = routing.idx_occ, routing.idx_empty
+    pix_emp = pix[ie]
     v_occ = vmap(
         lambda z_i, p_i: _eval_dark_scalar(
             z_i, p_i, state, em_catalog, catalog_sky_weighting
@@ -889,12 +921,12 @@ def _eval_dark_routed(
         lambda z_i, p_i: _eval_dark_scalar_empty_row(
             z_i, p_i, state, catalog_sky_weighting
         )
-    )(z[ie], pix[ie])
+    )(z[ie], pix_emp)
     out = jnp.concatenate([v_occ, v_emp])[routing.inv_order]
+    routed_rows_are_empty = jnp.all(routing.empty_rows[pix_emp])
     # ``where`` and not an additive shift: an exactly-representable no-op on the
-    # clean branch, so the routed values are bit-identical rather than
-    # bit-identical-up-to-signed-zero.
-    return jnp.where(ok, out, -jnp.inf)
+    # clean branch, so the routed samples carry no arithmetic of their own.
+    return jnp.where(ok & routed_rows_are_empty, out, -jnp.inf)
 
 
 # ------------------------------------------------------------
@@ -1104,9 +1136,14 @@ def eval_redshift_prior_with_state(
     build-time partition of THIS sample set into "my catalog row holds galaxies"
     and "my catalog row is empty"; the second group skips the KDE and takes the
     KDE-free expression instead.  The returned vector is in the caller's sample
-    order either way, and the two paths agree bit for bit, so passing it is a
-    speed decision only.  ``None`` (the default), a slice of the planned set, or
-    kernels that carry no ``row_empty`` all fall back to the plain vmap.
+    order either way, and it agrees with the plain path SAMPLE BY SAMPLE to the
+    bit, so passing it is a speed decision only.  (The total log-likelihood
+    built out of it can still move at the last bit, because splitting one vmap
+    into two changes how XLA fuses and orders the reductions ABOVE this
+    function: measured at <= 4e-14 relative on the CPU backend and at exactly
+    0.0 on the production H100 build -- see ``docs/source/guide/performance.md``.)
+    ``None`` (the default), a slice of the planned set, or kernels that carry no
+    ``row_empty`` all fall back to the plain vmap.
     """
     if model == "spectral_sirens":
         return vmap(lambda z_i: log_interp_zgrid(z_i, state.log_pvol))(z)

@@ -1222,14 +1222,53 @@ def _empty_row_routing_plan(pixels_col, ngals):
     )
 
 
-def _empty_row_routing(universe_model, frozen_prior, catalogs_pe, catalogs_sel):
-    """Per-catalog ``(pe, sel)`` routing plans, or ``()`` when inadmissible."""
+def _empty_row_routing_side_is_consumable(side, sel_batch_size, pe_event_block,
+                                          nEvents):
+    """Can THIS side's evaluator be handed a whole-sample-set plan?
+
+    The plan covers one full sample set, and the evaluator identifies it by
+    length, so a side the likelihood body chops up never routes:
+    ``sel_batch_size`` batches the injections (and pads them to a multiple of
+    the batch first), and ``pe_event_block`` evaluates the PE samples a chunk of
+    events at a time -- ``pe_block * nsamp`` rows, not ``nEvents * nsamp``.
+    Deciding it HERE rather than leaving it to the evaluator's length check is
+    what keeps a pinned-block build from uploading index arrays nothing will
+    ever read (~17 MB on the production selection set) and keeps the build-time
+    ``likelihood.empty_row_routing`` an honest report of whether the routing is
+    live.
+    """
+    if side == "sel":
+        return sel_batch_size is None
+    if pe_event_block is None:
+        return True
+    # ``core`` clamps with ``min(pe_event_block, nEvents)``, so a block at or
+    # above the event count is the whole set in one call.
+    return nEvents is not None and int(pe_event_block) >= int(nEvents)
+
+
+def _empty_row_routing(universe_model, frozen_prior, catalogs_pe, catalogs_sel,
+                       sel_batch_size=None, pe_event_block=None, nEvents=None):
+    """Per-catalog ``(pe, sel)`` routing plans, or ``()`` when inadmissible.
+
+    A side whose evaluator cannot consume a whole-sample-set plan (a
+    ``sel_batch_size`` pin, a ``pe_event_block`` chunk) gets ``None`` and never
+    builds its index arrays; see
+    :func:`_empty_row_routing_side_is_consumable`.
+    """
     if not empty_row_routing_admissible(universe_model, frozen_prior):
+        return ()
+    pe_ok = _empty_row_routing_side_is_consumable(
+        "pe", sel_batch_size, pe_event_block, nEvents)
+    sel_ok = _empty_row_routing_side_is_consumable(
+        "sel", sel_batch_size, pe_event_block, nEvents)
+    if not (pe_ok or sel_ok):
         return ()
     plans = tuple(
         (
-            _empty_row_routing_plan(cat_pe.sample_to_unique_idx, cat_pe.ngals),
-            _empty_row_routing_plan(cat_sel.sample_to_unique_idx, cat_sel.ngals),
+            _empty_row_routing_plan(cat_pe.sample_to_unique_idx, cat_pe.ngals)
+            if pe_ok else None,
+            _empty_row_routing_plan(cat_sel.sample_to_unique_idx, cat_sel.ngals)
+            if sel_ok else None,
         )
         for cat_pe, cat_sel in zip(catalogs_pe, catalogs_sel)
     )
@@ -1988,11 +2027,14 @@ def _make_mixture_likelihood(
         kde_window, gw_pe, tuple(em_catalogs_pe), gw_sel, tuple(em_catalogs_sel),
         n_catalogs,
     )
-    # Build-time empty-catalog-row sample routing (bit-identical; see
+    # Build-time empty-catalog-row sample routing (see
     # ``redshift.prior.EmptyRowRouting``).  Built AFTER the frozen prior, whose
-    # presence makes it pointless.
+    # presence makes it pointless, and refused per side for a blocking pin the
+    # evaluator would chop the sample set under.
     empty_routing = _empty_row_routing(
         universe_model, frozen_prior, tuple(em_catalogs_pe), tuple(em_catalogs_sel),
+        sel_batch_size=sel_batch_size, pe_event_block=pe_event_block,
+        nEvents=nEvents,
     )
     # ``frozen_prior`` stays LAST: callers and tests read it as ``operands[-1]``.
     operands = (*operands, empty_routing, frozen_prior)
@@ -2644,13 +2686,15 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
         opts, parameter_decoder, universe_model, mark_model, catalog_sky_weighting,
         kde_window, gw_pe, (em_catalog_pe,), gw_sel, (em_catalog_sel,), 1,
     )
-    # Build-time empty-catalog-row sample routing (bit-identical; see
-    # ``redshift.prior.EmptyRowRouting``).  Under a ``sel_batch_size`` pin the
-    # injections above were padded to a multiple of the batch, so the selection
-    # plan's length no longer matches the vector the evaluator sees and the
-    # evaluator falls back to the unrouted path on its own.
+    # Build-time empty-catalog-row sample routing (see
+    # ``redshift.prior.EmptyRowRouting``).  A ``sel_batch_size`` pin batches
+    # (and pads) the injections and a ``pe_event_block`` chunk splits the PE
+    # samples, so neither evaluator can consume a whole-sample-set plan: that
+    # side is refused HERE and its index arrays are never built.
     empty_routing = _empty_row_routing(
         universe_model, frozen_prior, (em_catalog_pe,), (em_catalog_sel,),
+        sel_batch_size=sel_batch_size, pe_event_block=pe_event_block,
+        nEvents=nEvents,
     )
     # ``frozen_prior`` stays LAST: callers and tests read it as ``operands[-1]``.
     operands = (*operands, empty_routing, frozen_prior)
