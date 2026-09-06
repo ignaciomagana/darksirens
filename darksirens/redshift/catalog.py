@@ -210,9 +210,10 @@ def _resolve_row_chunk(n_rows: int, n_max: int) -> int | None:
 # centred window provably holds every galaxy within n_sigma widths of any
 # sample, so the evaluator never truncates inside the contract.  A sample beyond
 # the row's support straddles the nearest galaxies (far-tail evaluations stay
-# finite); windows containing zero real galaxies go through the same logsumexp
-# path as empty full rows (log_kw is sanitized to -1e30 at state build time, so
-# plain logsumexp has finite gradients).
+# finite down to 745 nats below the row's kernel maximum, where the one-pass
+# reduction floors them at -inf); windows containing zero real galaxies go
+# through the same reduction as empty full rows (log_kw is sanitized to -1e30 at
+# state build time, so the reduction has finite gradients).
 _KDE_WINDOW_SIZE = 1024                # static window size W; None = full row
 _KDE_WINDOW_NSIGMA: float = 8.0        # sizing multiplier: n_sigma * max(sig_eff)
 
@@ -922,6 +923,23 @@ class CatalogKernelState(NamedTuple):
     #: turn into a finite ~-1e30 value.  ``None`` (a hand-built state) keeps
     #: plain logsumexp semantics.
     row_empty: Any = None
+    #: (N_rows,) per-row maximum of the SANITIZED ``log_kw_eff``, 0.0 on an
+    #: all-padding row.  It is the OFFSET the per-sample reduction subtracts,
+    #: which is what removes the ``logsumexp`` amax pass: the Gaussian exponent
+    #: ``-0.5 u^2`` is <= 0 and ``log_kw_eff_i - rowmax <= 0`` by construction,
+    #: so no term can overflow and the data-dependent maximum is not needed.
+    #: Populated by every builder alongside ``log_kw_eff``; ``None`` (a
+    #: hand-built state) selects the historical two-pass ``logsumexp``.
+    log_kw_eff_rowmax: Any = None
+    #: (N_rows, N_max) ``1 / sig_eff``, formed once at state-build time so the
+    #: per-sample evaluator multiplies instead of dividing.  ``sig_eff`` is
+    #: theta-invariant once ``sigma_kde`` is fixed, and for an unpinned state
+    #: the reciprocal is formed inside the traced build so the derivative with
+    #: respect to ``sigma_kde`` still flows.  Padding slots carry 0.0, so their
+    #: deviate is exactly zero and their exponent is the bare ``-1e30``
+    #: sentinel.  ``None`` (a hand-built state) selects the historical
+    #: division.
+    inv_sig_eff: Any = None
     #: Scalar boolean verdict of the H0-pin probe (see
     #: :class:`PinnedKernelQuadrature`), or ``None`` for an unpinned state.
     #: Consumed by :func:`kernel_pin_poison` at the prior's NORMALIZER seam,
@@ -1016,6 +1034,11 @@ class PinnedKernelQuadrature(NamedTuple):
     row_empty: jnp.ndarray          # (N_rows,)        theta-invariant
     probe_rows: jnp.ndarray         # (P,) int32 rows rebuilt every proposal
     log_kw_eff: Any = None          # (N_rows, N_max) at H0_ref; shifts like log_kw
+    #: (N_rows,) row max of ``log_kw_eff`` at ``H0_ref``.  The shift is UNIFORM
+    #: over a row, so the row max shifts by exactly the same scalar as
+    #: ``log_kw_eff`` itself and no reduction is repeated per proposal.
+    log_kw_eff_rowmax: Any = None
+    inv_sig_eff: Any = None         # (N_rows, N_max)  theta-invariant
 
 
 def _spread_probe_rows(zgals, ngals, n_probe: int) -> jnp.ndarray:
@@ -1062,6 +1085,37 @@ def _fused_log_kw_eff(log_kw_safe, sig_eff):
     )
 
 
+def _inv_sig_eff(log_kw_eff, sig_eff):
+    """``1 / sig_eff`` on real galaxies, 0.0 on the ``-1e30`` padding slots.
+
+    Zeroing padding makes the per-sample deviate ``u = (z - z_pad) * 0`` exactly
+    zero there, so the padded exponent is the bare sentinel and no padding
+    convention (``dzgals`` pads at 1.0 today, but a hand-built view may pad at 0,
+    where ``sig_eff`` floors at ``SIGMA_EFF_FLOOR`` and ``u`` would reach 1e6)
+    can put a large number in front of it.  The term is ``exp(-1e30) = 0``
+    either way; this only removes the overflow question.
+    """
+    return jnp.where(log_kw_eff > _KERNEL_PIN_SENTINEL_CUT, 1.0 / sig_eff, 0.0)
+
+
+def _log_kw_eff_rowmax(log_kw_eff):
+    """Per-row maximum of the SANITIZED ``log_kw_eff``, clamped to 0.0 on an
+    all-padding row.
+
+    This is the build-time offset the one-pass per-sample reduction subtracts
+    (see :attr:`CatalogKernelState.log_kw_eff_rowmax`).  Rows with at least one
+    real galaxy report that galaxy's ``log_kw_eff``; a row whose every slot is
+    the ``-1e30`` sentinel would otherwise hand the evaluator an offset of
+    ``-1e30``, which makes ``log_kw_eff - offset`` exactly ``0`` for padding and
+    returns a finite ``-1e30 + log N_max`` instead of ``-inf``.  Clamping to 0.0
+    keeps the sum at ``exp(-1e30) = 0`` and hence the answer at ``-inf`` -- which
+    ``CatalogKernelState.row_empty`` overrides with the same value anyway, so the
+    clamp is belt-and-braces rather than the contract.
+    """
+    rm = jnp.max(log_kw_eff, axis=1)
+    return jnp.where(rm > _KERNEL_PIN_SENTINEL_CUT, rm, 0.0)
+
+
 def _pinned_kernel_state(cosmo, survey, em_catalog, pinned, log_g_grid, z_depth,
                          kde_window=None):
     """This proposal's kernel state from the pin: one scalar shift + the probe.
@@ -1103,6 +1157,12 @@ def _pinned_kernel_state(cosmo, survey, em_catalog, pinned, log_g_grid, z_depth,
     log_kw_eff = getattr(pinned, "log_kw_eff", None)
     if log_kw_eff is None:
         log_kw_eff = _fused_log_kw_eff(pinned.log_kw, pinned.sig_eff)
+    rowmax = getattr(pinned, "log_kw_eff_rowmax", None)
+    if rowmax is None:
+        rowmax = _log_kw_eff_rowmax(log_kw_eff)
+    inv_sig_eff = getattr(pinned, "inv_sig_eff", None)
+    if inv_sig_eff is None:
+        inv_sig_eff = _inv_sig_eff(log_kw_eff, pinned.sig_eff)
     # ``-1e30 + shift`` is exactly ``-1e30`` in f64 (|shift| < 10), so the
     # padding sentinel survives the shift on both fused and unfused arrays.
     return CatalogKernelState(
@@ -1116,6 +1176,12 @@ def _pinned_kernel_state(cosmo, survey, em_catalog, pinned, log_g_grid, z_depth,
         row_empty=pinned.row_empty,
         pin_ok=ok,
         log_kw_eff=log_kw_eff + shift,
+        # The shift is one scalar added to the WHOLE array, so the row maximum
+        # shifts by exactly the same scalar: adding it here (a (N_rows,) add)
+        # keeps ``log_kw_eff - rowmax <= 0`` structurally at every H0 rather
+        # than merely <= 3 ln(140 / H0Planck) = 2.18.
+        log_kw_eff_rowmax=rowmax + shift,
+        inv_sig_eff=inv_sig_eff,
         kde_window=_static_window(kde_window),
     )
 
@@ -1195,6 +1261,7 @@ def catalog_kernel_state(
 
     row_empty = ~jnp.any(jnp.isfinite(log_kw), axis=-1)
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1e30)
+    log_kw_eff = _fused_log_kw_eff(log_kw_safe, sig_eff)
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
         log_sig_eff=jnp.log(sig_eff),
@@ -1203,7 +1270,9 @@ def catalog_kernel_state(
         sig_eff_row_max=_real_row_max(sig_eff, log_kw),
         rows_sorted=_resolve_rows_sorted_guard(zgals, ngals, kde_window),
         row_empty=row_empty,
-        log_kw_eff=_fused_log_kw_eff(log_kw_safe, sig_eff),
+        log_kw_eff=log_kw_eff,
+        log_kw_eff_rowmax=_log_kw_eff_rowmax(log_kw_eff),
+        inv_sig_eff=_inv_sig_eff(log_kw_eff, sig_eff),
         kde_window=_static_window(kde_window),
     )
 
@@ -1252,6 +1321,8 @@ def build_pinned_kernel_quadrature(
         row_empty=state.row_empty,
         probe_rows=probe_rows,
         log_kw_eff=state.log_kw_eff,
+        log_kw_eff_rowmax=state.log_kw_eff_rowmax,
+        inv_sig_eff=state.inv_sig_eff,
     )
 
 
@@ -1358,6 +1429,7 @@ def marked_catalog_kernel_state(
 
     row_empty = ~jnp.any(jnp.isfinite(log_kw), axis=-1)
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1e30)
+    log_kw_eff = _fused_log_kw_eff(log_kw_safe, sig_eff)
     return CatalogKernelState(
         log_g_grid=log_g_grid, log_kw=log_kw_safe, sig_eff=sig_eff,
         log_sig_eff=jnp.log(sig_eff),
@@ -1365,7 +1437,9 @@ def marked_catalog_kernel_state(
         sig_eff_row_max=_real_row_max(sig_eff, log_kw),
         rows_sorted=_resolve_rows_sorted_guard(zgals, ngals, kde_window),
         row_empty=row_empty,
-        log_kw_eff=_fused_log_kw_eff(log_kw_safe, sig_eff),
+        log_kw_eff=log_kw_eff,
+        log_kw_eff_rowmax=_log_kw_eff_rowmax(log_kw_eff),
+        inv_sig_eff=_inv_sig_eff(log_kw_eff, sig_eff),
         kde_window=_static_window(kde_window),
     ), log_N_host
 
@@ -1396,9 +1470,15 @@ def eval_log_catalog_prior_state(
     O(W) per sample on the windowed hot path (rows z-sorted, see
     :func:`configure_catalog_kde_window`): a binary search over the row's real
     prefix, one fused 2-D windowed gather per array, one Gaussian logpdf per
-    windowed galaxy, one logsumexp.  Falls back to the historical O(N_max)
+    windowed galaxy, one reduction.  Falls back to the historical O(N_max)
     full-row evaluation when windowing is disabled, the rows are not
     verifiably sorted, or the row is not longer than the window.
+
+    The reduction is ONE pass: it subtracts the row's build-time maximum
+    (``CatalogKernelState.log_kw_eff_rowmax``) instead of the sample's own, so
+    the ``logsumexp`` amax pass -- and with it the (N_samples, N_max) f64
+    intermediate XLA materialises between the two passes -- disappears.  The
+    price is a floor at 745 nats below the row maximum; see the branch itself.
 
     Self-verifying windowed branch.  Whether to EMIT the windowed code is a
     trace-time Python decision that reads mutable process globals
@@ -1448,16 +1528,61 @@ def eval_log_catalog_prior_state(
             return a[pix]
 
     log_kw_eff = getattr(state, "log_kw_eff", None)
+    rowmax = getattr(state, "log_kw_eff_rowmax", None)
+    inv_sig_eff = getattr(state, "inv_sig_eff", None)
     zs = _gather(em_catalog.zgals)
-    sig = _gather(state.sig_eff)
-    d = (z - zs) / sig
-    if log_kw_eff is not None:
-        # Three gathers: the sample-independent part of every galaxy's log
-        # kernel term was fused at state-build time (``log_kw_eff``), so the
-        # per-galaxy work here is one subtraction, one division, one FMA.
+    if (log_kw_eff is not None
+            and rowmax is not None and inv_sig_eff is not None):
+        # ONE-PASS reduction with a BUILD-TIME offset.  ``logsumexp`` is two
+        # reductions over the row -- an amax, then exp+sum -- and the gathered
+        # per-galaxy vector cannot be produced once and consumed twice inside a
+        # single XLA fusion, so the compiler materialises the whole
+        # (N_samples, N_max) f64 exponent array between them (MEASURED on the
+        # 259-event DESI nside-64 production run: 14.6 GB per sample set,
+        # written by one fusion and re-read by the next, which also re-gathers
+        # ``log_kw_eff``).  The row's maximum is a BUILD-TIME constant of the
+        # catalog, so subtracting it instead removes the first pass entirely:
+        # ``log_kw_eff_i - rowmax <= 0`` and ``-0.5 u^2 <= 0``, hence every
+        # exponent is <= 0 and nothing can overflow.  What is left is one
+        # register-resident input fusion.  MEASURED on an H100 NVL, PROD_ARGS,
+        # median of 20 warm calls: 59.2 -> 32.2 ms, peak device memory
+        # 22.62 -> 12.24 GB.  The division is fused out for the same reason
+        # (it is what forced XLA to break the fusion), one multiply by the
+        # build-time ``1 / sig_eff`` instead; both halves are needed --
+        # MEASURED, either one alone buys 5.7 ms and leaves the 14.6 GB
+        # intermediate in place.
+        #
+        # Exactness: sum_i exp(x_i - M) is the same real number for ANY offset
+        # M, so this is re-association only (MEASURED max |dlog p_cat| 1.1e-13
+        # per sample, aggregate log-likelihood bit-identical at 8 prior
+        # coordinates).  Nothing here carries a sampled label -- the offset is
+        # a catalog constant and ``sig_eff`` is theta-invariant once
+        # ``sigma_kde`` is fixed -- so no H0-correlated component is possible.
+        # The one behaviour change is that a row whose every term sits more
+        # than ~745 nats below its own maximum underflows to -inf instead of
+        # returning that finite value; such a sample is annihilated by
+        # ``exp(-745) = 0`` in the ``logaddexp`` the caller weighs it in, and
+        # in the production configuration the set is empty (worst headroom
+        # actually used below ``z_depth``: 178 nats of the 745 available,
+        # over 51,959 PE + 52,594 selection samples at 5 values of H0).
+        u = (z - zs) * _gather(inv_sig_eff)
+        m = rowmax[jnp.asarray(pix, dtype=jnp.int32)]
+        s = jnp.sum(jnp.exp(_gather(log_kw_eff) - m - 0.5 * u * u))
+        # The double ``where`` is the gradient-safe spelling: a naked
+        # ``log(s)`` returns NaN cotangents when a row underflows to s = 0,
+        # which is exactly what broke NumPyro NUTS on empty catalog pixels.
+        log_mix = m + jnp.where(s > 0, jnp.log(jnp.where(s > 0, s, 1.0)),
+                                -jnp.inf)
+    elif log_kw_eff is not None:
+        # A state built before the offset leaves existed: three gathers, the
+        # sample-independent part fused at build time, and the historical
+        # two-pass ``logsumexp``.
+        d = (z - zs) / _gather(state.sig_eff)
         log_mix = logsumexp(_gather(log_kw_eff) - 0.5 * d * d)
     else:
         # Hand-built state without the fused array: the historical arithmetic.
+        sig = _gather(state.sig_eff)
+        d = (z - zs) / sig
         log_kw = _gather(state.log_kw)
         log_sig = (_gather(state.log_sig_eff) if state.log_sig_eff is not None
                    else jnp.log(sig))

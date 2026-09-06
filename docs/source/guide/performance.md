@@ -112,6 +112,48 @@ injections, `H0` the only sampled label) the windowed evaluator plus the
 pixel-sorted injection order runs 5.01 s/call against 7.07 s/call (1.41x) with
 log-likelihoods bit-identical at five prior draws.
 
+### The one-pass mixture reduction
+
+The mixture itself is reduced in ONE pass over the row. A `logsumexp` is two
+reductions -- a maximum, then the exponential sum -- and the gathered
+per-galaxy exponent cannot be produced once and consumed twice inside one XLA
+fusion, so the compiler materialises it: on the production run that was an
+`f64[1, 1060864, 1719]` intermediate, 14.6 GB per sample set, written by one
+kernel and re-read by the next, which also re-gathered the fused weights.
+
+`CatalogKernelState` therefore carries the row's own maximum
+(`log_kw_eff_rowmax`, a build-time constant of the catalog) and `1 / sigma_eff`
+(`inv_sig_eff`, theta-invariant once `sigma_kde` is fixed). Subtracting the
+build-time maximum makes every exponent non-positive by construction, so the
+first reduction is not needed and the whole evaluation collapses into one
+register-resident fusion; the reciprocal removes the per-galaxy division that
+was forcing XLA to break that fusion in the first place. Both are needed: on an
+H100 NVL either one alone is worth about 6 ms and leaves the intermediate in
+place. A state without the two leaves (a hand-built one) falls back to the
+`logsumexp` form. The windowed evaluator shares the full-row offset (a maximum
+over a subset is no larger, so the offset is still valid); measured on the real
+DESI catalog a window gives away at most 12 of the 745 nats below, and the
+production run never windows at all (`W` 3456 exceeds the 1719-galaxy rows).
+
+Measured on the full production likelihood (259 events, DESI nside-64, field
+weighting, `zspace`-24 `n_sigma` 6, `sigma_kde` pinned, auto blocking) on an
+H100 NVL, median of 20 warm calls: 32.2 ms/call against 59.2 ms (1.84x) and
+peak device memory 12.24 GB against 22.62 GB, with the log-likelihood
+bit-identical at eight prior draws spanning `H0` in `[20, 140]` (the five
+finite ones agree to the last bit and the same three are `-inf`). The spectral
+configuration has no catalog KDE and is unchanged (13.9 against 14.0 ms,
+bit-identical).
+
+The build-time offset costs one thing: a sample whose every kernel term sits
+more than 745 nats (the log of the f64 denormal floor) below its row's maximum
+sums to exactly zero and returns `-inf` where the two-pass form returned a
+finite value of order `-1e3`. Such a sample carries weight `exp(-745) = 0`
+against any sample near the row's peak, so nothing downstream can see it. In
+the production configuration the set is empty by a wide margin -- the deepest
+headroom actually used below `z_depth = 0.3` is 178 nats of the 745 available,
+measured over 51,959 PE samples and 52,594 injections at five values of `H0` --
+and a run with no survey depth reaches it for at most 2e-3 of samples.
+
 ## The frozen redshift prior (population-only runs)
 
 `--freeze_redshift_prior BOOL` (default true) evaluates the per-sample catalog
