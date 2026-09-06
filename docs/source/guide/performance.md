@@ -612,6 +612,63 @@ The unroll is paid for in compile time and in live intermediates, both small:
 `t_first_call` 3.9-5.6 s -> 4.4-6.7 s on the spectral build and 10.0-10.3 s ->
 10.5-10.9 s on the dark-siren one (one-time per run, against 1e5-1e6 calls, and
 measured for the two-site case), and the peak-memory column above.
+
+## The redshift-grid bracket
+
+The dark-siren redshift prior interpolates the missing-galaxy density
+`dN_miss(z|pix)` between the two `zgrid` nodes that bracket each sample
+(`_grid_bracket`, `darksirens/redshift/prior.py`) -- a two-element gather
+instead of the full row. Finding those two nodes was the same
+`searchsorted(side='right')` binary search the inversion above removes, run over
+every PE sample and every injection: two trace sites per production call, 2.1e6
+samples, an 11-level `lax.scan` each.
+
+`zgrid` is `expm1` of a UNIFORM grid in log(1+z), so the bracket is closed form:
+`floor(log1p(z)/dlog)` plus two one-step corrections that compare `z` against the
+tabulated nodes. That is exactly what `log_interp_zgrid` already used, and it now
+lives in one shared helper, `redshift.grid.zgrid_upper_index`, that both sites
+call; `DARKSIRENS_INTERP_SEARCHSORTED=1` (read at call time) restores the binary
+search at both.
+
+The index is the same integer `searchsorted` returns, so the interpolation is
+unchanged expression for expression and the result is **bit-identical**. It is
+provably the same integer, not merely the same on a probe set: against the
+tabulated nodes, `log1p(z)/dlog` deviates from the node coordinate by at most
+2.3e-13 and lies strictly inside the cell in between, so `floor` can be off by at
+most one and only within 2.3e-13 of a node -- which is what the two corrections
+fix. An off-by-two would need a `log1p` relative error of order 1e-3. The
+uniform-log(1+z) grid construction is the precondition; it holds for every
+`DARKSIRENS_ZMAX`.
+
+Measured on an NVIDIA H100 NVL, float64, `DARKSIRENS_ZMAX=6`, 20 warm calls per
+launch, five launches per arm interleaved inside GPU-lock holds with the launch
+order alternating. `Before` is the head of the luminosity-distance inversion
+above; both columns are the MEAN of the five launch medians and `Saving` is the
+launch-paired difference:
+
+| Configuration | Before | After | Saving | Speedup | Peak device memory |
+|---|---|---|---|---|---|
+| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 46.496 ms/call | 46.157 ms/call | -0.340 ± 0.055 ms | 1.007x | 24.306 -> 24.292 GB |
+| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 2.560 ms/call | 2.562 ms/call | +0.002 ms | 1.00x | 0.691 -> 0.691 GB |
+
+The spectral row is a null by construction: `spectral_sirens` interpolates the
+volume element with `log_interp_zgrid`, which already carried the closed form,
+and never reaches `_grid_bracket`. On the dark-siren configuration the
+`--components` breakdown attributes the whole saving to the bracket: the PE
+redshift-prior evaluation falls 16.7 -> 16.1 ms and the selection one 11.7 ->
+11.3 ms while the catalog-KDE-only rows inside them are unchanged (16.0 and
+11.2 ms in both arms). Per-launch medians were 46.275 / 46.608 / 46.329 / 46.524
+/ 46.746 ms against 45.891 / 46.124 / 46.173 / 46.141 / 46.454 ms; the sign is
+consistent across all five pairs, which is what the pairing buys at this box's
+~0.3 ms process-to-process drift.
+
+The log-likelihoods are equal bit for bit at all eight benchmark coordinates in
+both configurations (`max |dlogL| = 0`, identical `-inf` pattern) and at 21 H0
+values spanning the full production prior [20, 140] compared as IEEE-754 hex --
+the scan that would catch an H0-correlated tilt. It is live: perturbing only the
+bracket WEIGHT by 1e-9 relative moves the same log-likelihoods by up to 6.6e-6
+nats with a -0.81 correlation against H0.
+
 ## Lensing
 
 Under `--partition_mode marginalize_exact` the lensing CLI makes ONE call to
