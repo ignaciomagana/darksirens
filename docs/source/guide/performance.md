@@ -119,6 +119,15 @@ both arms, so the compiled graph and the likelihood are unchanged
 (max |dlogL| 0.0 across the benchmark coordinates) and the per-call median is
 flat at 58.6–59.2 ms.
 
+Shape reads follow the same rule as the sizing scan: a build-time site that
+needs only a galaxy table's row or column count reads `.shape` from the
+`jax.Array` rather than `np.asarray(...)`, which would pull the whole table
+back to the host (676 MB per table on that catalog, ~0.17 s). Over three
+interleaved launches per arm on the same run, the build phase goes from a
+median 14.0 s to 13.7 s and load-plus-build-plus-first-call from 33.8 s to
+33.2 s, with the per-call median unchanged at 59.4–59.7 ms and
+max |dlogL| 0.0 (no value is read, only a shape).
+
 Measured on a DESI-like mixed spectroscopic-plus-photometric catalog (73% of
 widths in `[0.02, 0.10]`, 2158 galaxies per row), a pinned `W = 1024` moved
 `log p_cat` by 0.17 nats on average and 0.36 at worst against the full-row
