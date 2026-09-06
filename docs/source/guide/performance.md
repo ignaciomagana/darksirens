@@ -245,6 +245,76 @@ sign, twelve orders below the 0.3-nat bar this campaign works to). The gate in
 bound and a signed-mean check, plus an exact equality on the prior vector
 itself.
 
+### Row-width tiers for the catalog KDE
+
+The compact catalog is a rectangle padded to the GLOBAL densest row -- 1719
+slots on the production DESI nside-64 view -- while the sample-weighted mean
+real row holds 436 galaxies on the PE side and 457 on the selection side. Every
+sample therefore gathers about 2.7x more slots than its own pixel contains, and
+what it gathers extra is padding: the build sanitises those slots to
+`log_kw_eff = -1e30`, so their `exp(-1e30 - m)` is already exactly `0.0` in the
+full-row sum.
+
+A sample's row LENGTH is data for the same reason its pixel is. The build
+therefore cuts the occupied samples of each set -- the ones the empty-row
+routing above did not already send past the KDE -- into a static ladder of width
+tiers by `ngals[pix]`, and evaluates each tier over the column PREFIX
+`zgals[pix, :cap]`, `inv_sig_eff[pix, :cap]`, `log_kw_eff[pix, :cap]` of the
+same resident arrays. Under the evaluator's `vmap` that is one gather with a
+narrower slice size, not a narrowed copy of the catalog: no row is relabelled,
+no table is compacted, and no other per-sample array moves. The shipped ladder
+is `(0, 1024, n_max)` -- a single interior cut. On the production sets it puts
+571,810 PE samples on the 1024 rung and 47,195 on the 1719 rung (604,755 and
+48,220 on the selection side), taking the mean gathered slots from 1719 to 628.4
+(PE) and 657.5 (selection). A finer ladder gathers still fewer slots and runs
+SLOWER: measured on an H100 NVL, caps `(0, 256, 512, 768, 1024, 1280, 1719)`
+evaluate the catalog KDE in 9.08 ms against 8.41 ms for the three-tier ladder,
+because the small tiers hold only 21k-30k samples and are launch-bound, and
+each extra tier is another lowered shape.
+
+Measured on the production likelihood (259 events, DESI nside-64, field
+weighting, `zspace`-24 `n_sigma` 6, `sigma_kde` pinned, auto blocking) on an
+H100 NVL, median of 20 warm calls, three launches per arm interleaved in one
+session: 23.41 ms/call against 28.04 ms with the ladder refused (1.20x), and
+2.53x against the 59.2 ms `f770956` baseline. Peak device memory is unchanged at
+13.06 GB (the plan adds 35.8 kB of index arrays): the column slice keeps the
+whole catalog resident, and only per-tier ROW compaction -- which would have to
+move every row-indexed leaf coherently -- could shrink the tables. The spectral
+configuration has no catalog KDE and cannot reach this path.
+
+The class is ulp-level, not bit-identical. Each tier evaluates exactly the same
+galaxies as the full row, so the real number the reduction represents is
+unchanged; but the reduction is shorter, and XLA may pair the real terms
+differently. Measured on the production catalog the per-sample residual peaks at
+`5.7e-14` nats and drifts with `H0` at `6.6e-15` nats per km/s/Mpc, i.e. `7.9e-13`
+nats across the whole `[20, 140]` prior against the 0.3-nat bar this campaign
+works to. In situ the total does not move at all: `max |dlogL| = 0.000e+00` at
+the benchmark's five finite prior draws and at eight `H0` values spanning
+`[20, 140]` with every other label at its fiducial, tiered against untiered
+builds of the same code in the same process.
+
+The ladder is exact only while every LIVE slot of every row a tier's samples
+land on sits below that tier's cap, and both halves of that are enforced. The
+build asserts the half that is a property of the arrays -- live slots occupy the
+row prefix `[0, ngals)` -- on the pinned kernel array the graph will actually
+read, and refuses the ladder outright when it fails or when the catalog carries
+no `ngals` at all. The graph asserts the half that is a property of the plan,
+per tier and per call: `all(ngals[pix[tier]] <= cap)`, one gather and a reduce,
+whose failure drives the whole log-likelihood to `-inf`.
+
+One configuration is refused rather than tiered, and it is the one that would be
+a physics error rather than a slowdown. The windowed KDE branch is a DIFFERENT
+estimator -- it keeps the `W` galaxies nearest `z` and drops the rest -- and it
+arms on `zgals.shape[1] > W`, which a `cap`-wide view is not. Tiering under an
+armed window would therefore run the windowed estimator on the widest tier and
+the exact one on the narrow tiers, a difference worth up to 0.28 nats per sample
+on this catalog and a function of `z`, hence of `H0`. So the ladder is built only
+when windowing would NOT have armed on the untiered shape. The production
+configuration clears that by sizing (the data-sized window is 3456 against
+`n_max` 1719, so the full-row branch is what runs); a `--kde_window` below
+`n_max` keeps the untiered graph, and the evaluator raises if a cap ever reaches
+it with the window armed. The gate is `tests/test_kde_width_tiers.py`.
+
 ## The frozen redshift prior (population-only runs)
 
 `--freeze_redshift_prior BOOL` (default true) evaluates the per-sample catalog

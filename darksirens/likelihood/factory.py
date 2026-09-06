@@ -58,7 +58,7 @@ from darksirens.inference.parameters import (
     complete_empty_pixel_policy_code,
 )
 from darksirens.core.types import EMCatalog, GWEvent
-from darksirens.redshift.prior import EmptyRowRouting
+from darksirens.redshift.prior import EmptyRowRouting, WidthTier
 from darksirens.utils import cosmology
 
 # Backward-compatible aliases for callers/tests that imported private helpers.
@@ -1179,7 +1179,120 @@ def empty_row_routing_admissible(universe_model, frozen_prior) -> bool:
     return universe_model == "dark_sirens" and frozen_prior is None
 
 
-def _empty_row_routing_plan(pixels_col, ngals):
+#: Interior cuts of the static row-WIDTH tier ladder, in columns.  The ladder
+#: is ``(0, *cuts, n_max)``: the 0 tier is the empty-row group the routing
+#: already carries, and ``n_max`` is always the last cap, so no row is ever
+#: narrowed below its own galaxy count.
+#:
+#: THREE tiers and not seven.  MEASURED on an H100 NVL over the real production
+#: sample sets, on top of the one-pass reduction this branch already carries:
+#: caps (0, 1024, 1719) evaluate the catalog KDE in 8.41 ms against 9.08 ms for
+#: (0, 256, 512, 768, 1024, 1280, 1719) and 15.54 ms flat.  The finer ladder
+#: gathers fewer slots (mean 513 against 628 on the PE set) and is still SLOWER:
+#: its small tiers hold 21k-30k samples and are launch-bound, running at
+#: 52-61 ps per gathered slot against the wide kernels' 12-16, and each extra
+#: tier is another lowered shape and another compile.
+_KDE_ROW_WIDTH_TIER_CUTS: tuple = (1024,)
+
+
+def _row_width_tier_caps(n_max) -> tuple:
+    """The ladder's caps for a catalog padded to ``n_max`` columns.
+
+    ``(cut_1, ..., cut_k, n_max)`` with the cuts that actually fall inside the
+    row.  A catalog no wider than the first cut yields ``(n_max,)`` -- a single
+    tier, i.e. the untiered evaluation -- and the caller declines to tier.
+    """
+    n = int(n_max)
+    cuts = tuple(sorted({int(c) for c in _KDE_ROW_WIDTH_TIER_CUTS
+                         if 0 < int(c) < n}))
+    return cuts + (n,)
+
+
+def _assert_live_slots_are_row_prefix(em_catalog) -> None:
+    """Refuse to tier a catalog whose LIVE slots are not the row prefix.
+
+    A column slice ``a[pix, :cap]`` is exact because the slots it drops are
+    padding, and padding is exactly ``log_kw_eff = -1e30``, whose
+    ``exp(-1e30 - m)`` is already 0.0 in the full-row sum.  That rests on the
+    live slots of every row occupying ``[0, ngals[row])``, which
+    ``catalog._row_real_mask`` GUARANTEES when ``ngals`` is present
+    (``arange < ngal``) and does NOT when it is absent (it falls back to
+    ``ws > 0``, an arbitrary set).  Hence the hard requirement on ``ngals``.
+
+    When the run also carries a build-time kernel pin the invariant is checked
+    against the array the graph will actually read, not merely against the rule
+    that built it: one ``(N_rows, N_max)`` bool reduce asserting that no slot at
+    or beyond ``ngals[row]`` is live.  That is the assertion the accuracy
+    verifier asked for by name -- on the LIVE SLOT COLUMN INDEX, not on
+    ``ngals`` alone -- and it is what would catch a pin built from a stale or
+    differently ordered catalog.  Raises rather than falling back: a silent
+    fallback here would ship a truncating estimator under an exact one's name.
+    """
+    from darksirens.redshift.catalog import _KERNEL_PIN_SENTINEL_CUT
+
+    ngals = getattr(em_catalog, "ngals", None)
+    zgals = getattr(em_catalog, "zgals", None)
+    if ngals is None:
+        raise ValueError(
+            "row-width tiering requires em_catalog.ngals: without it "
+            "catalog._row_real_mask falls back to `ws > 0`, the live slots are "
+            "not the row prefix, and a column slice would drop real galaxies"
+        )
+    if getattr(zgals, "ndim", 0) != 2:
+        raise ValueError(
+            "row-width tiering requires a 2-D (N_rows, N_max) catalog view"
+        )
+    pinned = getattr(em_catalog, "pinned_kernels", None)
+    log_kw_eff = getattr(pinned, "log_kw_eff", None) if pinned is not None else None
+    if log_kw_eff is None:
+        return
+    n_cols = int(np.asarray(zgals).shape[1])
+    live = np.asarray(log_kw_eff) > _KERNEL_PIN_SENTINEL_CUT
+    beyond = np.arange(n_cols)[None, :] >= np.asarray(ngals)[:, None]
+    n_bad = int(np.count_nonzero(live & beyond))
+    if n_bad:
+        raise ValueError(
+            f"row-width tiering refused: {n_bad} live kernel slots sit at or "
+            "beyond their row's ngals, so the live slots are not the row "
+            "prefix and a column slice would drop real galaxies"
+        )
+
+
+def _row_width_tiering_admissible(em_catalog, kde_window) -> bool:
+    """Is the static row-width tier ladder meaningful AND exact for this view?
+
+    ``kde_window`` is the decisive one and the merged candidate record omitted
+    it entirely.  The windowed KDE branch is a DIFFERENT estimator -- it keeps
+    the ``window`` galaxies nearest ``z`` and drops the rest -- and it arms on
+    ``zgals.shape[1] > window``.  A tier reading ``cap`` columns is not that
+    shape, so windowing would switch OFF for the narrow tiers and stay ON for
+    the wide one: two estimators in one likelihood, differing by up to 0.28 nats
+    per sample on this catalog in a way that is a function of ``z``, hence of
+    ``H0`` -- the correlated class this campaign refuses.  So the ladder is
+    admissible only when windowing would NOT have armed on the untiered shape.
+    The production configuration clears this by sizing (the data-sized window is
+    3456 against ``n_max`` 1719, so the full-row branch is what runs); a
+    ``--kde_window`` below ``n_max`` keeps the untiered graph.
+
+    Raises through :func:`_assert_live_slots_are_row_prefix` when the ladder
+    would be inexact; returns False only when it would be pointless.
+    """
+    from darksirens.redshift.catalog import _effective_kde_window
+
+    zgals = getattr(em_catalog, "zgals", None)
+    if getattr(zgals, "ndim", 0) != 2:
+        return False
+    n_max = int(np.asarray(zgals).shape[1])
+    if len(_row_width_tier_caps(n_max)) < 2:
+        return False
+    window = _effective_kde_window(kde_window)
+    if window is not None and n_max > int(window):
+        return False
+    _assert_live_slots_are_row_prefix(em_catalog)
+    return True
+
+
+def _empty_row_routing_plan(pixels_col, ngals, tier_caps=None):
     """Build-time :class:`EmptyRowRouting` for one sample set, or ``None``.
 
     ``pixels_col`` is this sample set's COMPACT row index per sample (the
@@ -1190,10 +1303,20 @@ def _empty_row_routing_plan(pixels_col, ngals):
     ``catalog._row_real_mask``), a degenerate partition, or an empty group too
     small to matter.
 
-    The two groups keep their samples' ORIGINAL relative order, so the occupied
-    group inherits whatever gather locality the caller arranged (the injections
-    are pixel-sorted by :func:`_injection_pixel_order`) instead of trading it
-    away for the partition.
+    Every group keeps its samples' ORIGINAL relative order, so it inherits
+    whatever gather locality the caller arranged (the injections are pixel-sorted
+    by :func:`_injection_pixel_order`) instead of trading it away for the
+    partition.
+
+    ``tier_caps`` (ascending, last entry ``n_max``) additionally cuts the
+    OCCUPIED samples by row WIDTH: sample ``i`` joins the first tier whose cap is
+    at least ``ngals[pix_i]``, and reads only that many catalog columns.  The
+    assignment is ``searchsorted`` on the caps, so ``cap_t >= ngals[pix]`` holds
+    for every sample by construction; the graph re-checks it per tier against
+    the ``ngals`` it is actually handed (:func:`~darksirens.redshift.prior._eval_dark_routed`),
+    because construction here and consumption there are separated by a jit cache
+    key that does not contain the catalog.  A tier that ends up empty is
+    dropped: it would lower a zero-size kernel for nothing.
     """
     if ngals is None or pixels_col is None:
         return None
@@ -1211,14 +1334,44 @@ def _empty_row_routing_plan(pixels_col, ngals):
     if n_empty < _EMPTY_ROW_ROUTING_MIN_FRACTION * p.size:
         return None
     idx = np.arange(p.size, dtype=np.int32)
-    order = np.concatenate([idx[~is_empty], idx[is_empty]])
+    occ = idx[~is_empty]
+
+    tiers = ()
+    if tier_caps is not None and len(tier_caps) >= 2:
+        caps = np.asarray(sorted(int(c) for c in tier_caps), dtype=np.int64)
+        n_at = ng[p.astype(np.int64)][occ]
+        # ``side='left'``: a row holding exactly ``cap`` galaxies belongs to the
+        # ``cap`` tier, not the next one up.
+        which = np.searchsorted(caps, n_at, side="left")
+        if int(which.max(initial=0)) >= caps.size:
+            # Unreachable while the last cap is n_max; a loud refusal beats a
+            # silently truncated tier if that ever stops being true.
+            raise ValueError(
+                "row-width tier ladder does not cover the catalog: "
+                f"max ngals at a sample is {int(n_at.max(initial=0))}, "
+                f"widest cap is {int(caps[-1])}"
+            )
+        groups = [(int(caps[t]), occ[which == t]) for t in range(caps.size)]
+        groups = [(cap, g) for cap, g in groups if g.size]
+        if len(groups) >= 2:
+            tiers = tuple(
+                WidthTier(cap, barrier(jnp.asarray(g, dtype=jnp.int32)))
+                for cap, g in groups
+            )
+            occ = np.concatenate([g for _, g in groups])
+
+    order = np.concatenate([occ, idx[is_empty]])
     inv = np.empty_like(order)
     inv[order] = idx
     return EmptyRowRouting(
-        idx_occ=barrier(jnp.asarray(idx[~is_empty], dtype=jnp.int32)),
+        # The tiers ARE the occupied group when there are any; carrying the flat
+        # copy as well would upload a second 2.5 MB index vector nothing reads.
+        idx_occ=(None if tiers
+                 else barrier(jnp.asarray(occ, dtype=jnp.int32))),
         idx_empty=barrier(jnp.asarray(idx[is_empty], dtype=jnp.int32)),
         inv_order=barrier(jnp.asarray(inv, dtype=jnp.int32)),
         empty_rows=barrier(jnp.asarray(empty_rows, dtype=bool)),
+        tiers=tiers,
     )
 
 
@@ -1247,13 +1400,19 @@ def _empty_row_routing_side_is_consumable(side, sel_batch_size, pe_event_block,
 
 
 def _empty_row_routing(universe_model, frozen_prior, catalogs_pe, catalogs_sel,
-                       sel_batch_size=None, pe_event_block=None, nEvents=None):
+                       sel_batch_size=None, pe_event_block=None, nEvents=None,
+                       kde_window=None):
     """Per-catalog ``(pe, sel)`` routing plans, or ``()`` when inadmissible.
 
     A side whose evaluator cannot consume a whole-sample-set plan (a
     ``sel_batch_size`` pin, a ``pe_event_block`` chunk) gets ``None`` and never
     builds its index arrays; see
     :func:`_empty_row_routing_side_is_consumable`.
+
+    Each catalog also gets its own row-WIDTH tier ladder when the view admits
+    one (:func:`_row_width_tiering_admissible`); the two views of one catalog
+    are tested separately because a view is what carries ``zgals``, ``ngals``
+    and the pin the ladder's exactness is asserted against.
     """
     if not empty_row_routing_admissible(universe_model, frozen_prior):
         return ()
@@ -1263,11 +1422,19 @@ def _empty_row_routing(universe_model, frozen_prior, catalogs_pe, catalogs_sel,
         "sel", sel_batch_size, pe_event_block, nEvents)
     if not (pe_ok or sel_ok):
         return ()
+
+    def _caps(cat):
+        if not _row_width_tiering_admissible(cat, kde_window):
+            return None
+        return _row_width_tier_caps(np.asarray(cat.zgals).shape[1])
+
     plans = tuple(
         (
-            _empty_row_routing_plan(cat_pe.sample_to_unique_idx, cat_pe.ngals)
+            _empty_row_routing_plan(cat_pe.sample_to_unique_idx, cat_pe.ngals,
+                                    tier_caps=_caps(cat_pe))
             if pe_ok else None,
-            _empty_row_routing_plan(cat_sel.sample_to_unique_idx, cat_sel.ngals)
+            _empty_row_routing_plan(cat_sel.sample_to_unique_idx, cat_sel.ngals,
+                                    tier_caps=_caps(cat_sel))
             if sel_ok else None,
         )
         for cat_pe, cat_sel in zip(catalogs_pe, catalogs_sel)
@@ -2034,7 +2201,7 @@ def _make_mixture_likelihood(
     empty_routing = _empty_row_routing(
         universe_model, frozen_prior, tuple(em_catalogs_pe), tuple(em_catalogs_sel),
         sel_batch_size=sel_batch_size, pe_event_block=pe_event_block,
-        nEvents=nEvents,
+        nEvents=nEvents, kde_window=kde_window,
     )
     # ``frozen_prior`` stays LAST: callers and tests read it as ``operands[-1]``.
     operands = (*operands, empty_routing, frozen_prior)
@@ -2694,7 +2861,7 @@ def make_likelihood(opts, data: dict, pop_params_fid, fixed_parameter_values: di
     empty_routing = _empty_row_routing(
         universe_model, frozen_prior, (em_catalog_pe,), (em_catalog_sel,),
         sel_batch_size=sel_batch_size, pe_event_block=pe_event_block,
-        nEvents=nEvents,
+        nEvents=nEvents, kde_window=kde_window,
     )
     # ``frozen_prior`` stays LAST: callers and tests read it as ``operands[-1]``.
     operands = (*operands, empty_routing, frozen_prior)
