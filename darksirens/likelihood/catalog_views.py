@@ -9,6 +9,8 @@ import jax.numpy as jnp
 from jax import lax
 import numpy as np
 
+from darksirens.utils.utils import array_shape
+
 from darksirens.redshift.completion import (
     _LOGQ_CLIP,
     build_field_delta_g_inputs,
@@ -496,7 +498,7 @@ def prepare_catalog_views(
             n_pix_total = int(
                 data.get(
                     "n_pix_catalog",
-                    np.asarray(full_z).shape[0] if full_z is not None else 0,
+                    array_shape(full_z)[0] if full_z is not None else 0,
                 )
             )
             # Caller-supplied budget rows are used AS-IS: the multitracer
@@ -660,7 +662,7 @@ def prepare_catalog_views(
                 unique_pixels=union_unique_pixels,
                 zgals=full_z,
                 n_pix_catalog=int(
-                    data.get("n_pix_catalog", np.asarray(full_z).shape[0])
+                    data.get("n_pix_catalog", array_shape(full_z)[0])
                 ),
                 wgals=full_w,
                 ngals=full_n,
@@ -671,7 +673,7 @@ def prepare_catalog_views(
             # galaxy table, so build ONE cache over the union rows and alias it to
             # both views -- the compact-view analogue of the flat
             # ``union_unique_pixels`` branch above (one cache per bundle).
-            n_union_rows = int(np.asarray(pe_view.zgals).shape[0])
+            n_union_rows = int(array_shape(pe_view.zgals)[0])
             dN_obs_kde_pe, _ = cache_builder(
                 unique_pixels=np.arange(n_union_rows, dtype=np.int32),
                 zgals=pe_view.zgals,
@@ -729,8 +731,8 @@ def prepare_catalog_views(
                 else:
                     raise RuntimeError(message)
             else:
-                n_pe_rows = int(np.asarray(pe_view.zgals).shape[0])
-                n_sel_rows = int(np.asarray(sel_view.zgals).shape[0])
+                n_pe_rows = int(array_shape(pe_view.zgals)[0])
+                n_sel_rows = int(array_shape(sel_view.zgals)[0])
                 # Row-for-row caches (row k == compact row k); the completion code
                 # indexes them by row, so no global re-key lookup is built.
                 dN_obs_kde_pe, _ = cache_builder(

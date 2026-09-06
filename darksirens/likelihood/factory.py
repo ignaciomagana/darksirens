@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from darksirens.utils.utils import array_shape
+
 import jax
 import jax.numpy as jnp
 
@@ -1241,7 +1243,7 @@ def _resolve_kde_window(opts, parameter_decoder, catalogs, n_catalogs):
     if window is None:
         return None
     n_max = max(
-        int(np.asarray(c.zgals).shape[1]) for c in catalogs
+        int(array_shape(c.zgals)[1]) for c in catalogs
         if getattr(c, "zgals", None) is not None and getattr(c.zgals, "ndim", 0) == 2
     )
     if window > 1024:

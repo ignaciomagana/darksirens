@@ -156,6 +156,8 @@ import warnings
 from contextlib import contextmanager
 
 import numpy as np
+
+from darksirens.utils.utils import array_shape
 import jax
 import jax.numpy as jnp
 from jax import jit, lax, vmap
@@ -717,8 +719,7 @@ def build_field_normalization_inputs(
         total observed real-galaxy count; ``occupied_pixels`` (n_occupied,)
         int32 global pixel ids keying the per-pixel budget modulations.
     """
-    full_z = np.asarray(full_z)
-    n_pix_total = int(full_z.shape[0])
+    n_pix_total = int(array_shape(full_z)[0])
 
     if full_n is not None:
         ngals_np = np.asarray(full_n).reshape(-1).astype(np.int64)
@@ -2274,7 +2275,7 @@ def build_pinned_field_observed_total(
     array so the guard samples the whole depth range, not one pixel's neighbours.
     """
     total = field_observed_global_total(cosmo, survey, em_catalog)
-    n_gal = int(np.asarray(em_catalog.field_depth_z).shape[0])
+    n_gal = int(array_shape(em_catalog.field_depth_z)[0])
     n_probe = max(1, min(int(n_probe), n_gal))
     idx = jnp.asarray(
         np.unique(np.linspace(0, n_gal - 1, n_probe).round().astype(np.int64))
@@ -3301,7 +3302,7 @@ def completion_clip_diagnostics(
         if em_catalog.unique_pixels is not None:
             pixels_np = np.arange(np.asarray(em_catalog.unique_pixels).size, dtype=np.int32)
         else:
-            pixels_np = np.arange(np.asarray(em_catalog.zgals).shape[0], dtype=np.int32)
+            pixels_np = np.arange(array_shape(em_catalog.zgals)[0], dtype=np.int32)
     else:
         pixels_np = np.asarray(pixels, dtype=np.int32).reshape(-1)
 
