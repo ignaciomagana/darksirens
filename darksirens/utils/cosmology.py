@@ -194,17 +194,57 @@ def _build_cpl_distance_grid():
 zgrid = jnp.array(zgrid)
 """Redshift coordinates of the distance interpolation grid."""
 
-# ``jnp.interp``'s guard against a zero-width cell, reproduced verbatim
-# (``np.spacing(eps)``, ~1e-31 in float64 -- NOT ``eps`` itself).
-_INTERP_DX0_EPS = float(np.spacing(np.finfo(np.asarray(zgrid).dtype).eps))
-# Escape hatch: ``DARKSIRENS_INTERP_SCAN=1`` restores the stock ``jnp.interp``
-# call inside :func:`z_of_dL_precomputed`.  The explicit spelling below is jax
-# 0.4.34's ``_interp`` body expression for expression, with the insertion index
-# found by ``method='scan_unrolled'`` instead of the module-default
-# ``'scan'``; the method changes only HOW the binary search is lowered (straight
-# -line code instead of a ceil(log2 N)-level ``lax.scan``), never which index it
-# returns, so the two paths are bit-identical.  Read once at import so the
-# branch is resolved at trace time and never becomes a traced select.
+
+def _interp_dx0_eps(*operands):
+    """Return ``jnp.interp``'s zero-width-cell guard for ``operands``.
+
+    jax spells the guard ``np.spacing(np.finfo(xp.dtype).eps)`` -- note
+    ``np.spacing(eps)``, ~4.9e-32 in float64, NOT ``eps`` itself -- and takes
+    the dtype AFTER promoting ``x`` and ``xp`` to a common inexact type
+    (``promote_dtypes_inexact``), so the epsilon follows the operands and not
+    ``zgrid`` alone: it is 1.4e-14 for a float32 pair.  Every argument is a
+    dtype-carrying object, so this is a trace-time Python constant and costs
+    nothing per call.
+    """
+    dtype = jnp.result_type(jnp.result_type(*operands), float)
+    return float(np.spacing(np.finfo(dtype).eps))
+
+
+def _interp_unrolled(x, xp, fp):
+    """Return ``jnp.interp(x, xp, fp)`` with an UNROLLED insertion search.
+
+    jax 0.4.34's ``_interp`` body, expression for expression, with the one
+    change this spelling exists for: the bracketing node is found with
+    ``method='scan_unrolled'`` instead of the module-default ``'scan'``.  The
+    method selects only HOW the binary search is lowered -- straight-line code
+    instead of a ``ceil(log2 N)``-level ``lax.scan``, which on a GPU becomes a
+    ``while`` op XLA cannot fuse through and which therefore also splits the
+    surrounding per-sample kernel -- never WHICH index it returns, so the
+    result is bit-identical to ``jnp.interp``
+    (``tests/test_cosmology_interp_scan_unrolled.py``).
+    """
+    n = xp.shape[0]
+    i = jnp.clip(jnp.searchsorted(xp, x, side="right",
+                                  method="scan_unrolled"), 1, n - 1)
+    df = fp[i] - fp[i - 1]
+    dx = xp[i] - xp[i - 1]
+    delta = x - xp[i - 1]
+    dx0 = jnp.abs(dx) <= _interp_dx0_eps(x, xp)
+    f = jnp.where(dx0, fp[i - 1], fp[i - 1] + (delta / jnp.where(dx0, 1, dx)) * df)
+    # jax's out-of-range fills.  :func:`z_of_dL_precomputed` masks those samples
+    # to NaN afterwards, so there they are dead weight folded into the same
+    # select; they are kept (and pinned directly against ``jnp.interp`` in the
+    # tests) so this body stays auditable line for line against jax's source.
+    f = jnp.where(x < xp[0], fp[0], f)
+    f = jnp.where(x > xp[-1], fp[-1], f)
+    return f
+
+
+# Escape hatch: ``DARKSIRENS_INTERP_SCAN=1`` sends :func:`z_of_dL_precomputed`
+# back to the stock ``jnp.interp`` call, for an A/B against
+# :func:`_interp_unrolled` above (the two are bit-identical, so this only moves
+# the lowering).  Read ONCE at import so the branch resolves at trace time and
+# never becomes a traced select.
 _USE_INTERP_SCAN = os.environ.get("DARKSIRENS_INTERP_SCAN") == "1"
 
 #: First NONZERO node of :data:`zgrid` (~0.0036 at the default zMax=5).  Below
@@ -547,23 +587,26 @@ def z_of_dL_precomputed(dL, dL_grid):
     through, which also splits the surrounding per-sample kernel in two.  The
     body is jax 0.4.34's ``_interp`` expression for expression, so the result is
     bit-identical (``tests/test_cosmology_interp_scan_unrolled.py``).
+
+    Raises ``ValueError`` when ``dL_grid`` is not a one-dimensional array with
+    one node per :data:`zgrid` entry, which is the fail-fast ``jnp.interp``
+    performs on ``shape(xp) != shape(fp)``.
     """
     dL_grid = jnp.asarray(dL_grid)
+    n = dL_grid.shape[0]
+    if dL_grid.ndim != 1 or n != zgrid.shape[0]:
+        # ``jnp.interp`` fails fast on a grid that does not match ``fp``; the
+        # explicit body below would silently absorb the mismatch, because jax
+        # clamps out-of-range gather indices.  Trace-time check, no run cost.
+        raise ValueError(
+            "z_of_dL_precomputed: dL_grid must be a one-dimensional array of "
+            f"{zgrid.shape[0]} nodes to match zgrid, got shape {dL_grid.shape}"
+        )
     in_grid = (dL >= dL_grid[0]) & (dL <= dL_grid[-1])
     if _USE_INTERP_SCAN:
         z = jnp.interp(dL, dL_grid, zgrid)
     else:
-        n = dL_grid.shape[0]
-        i = jnp.clip(jnp.searchsorted(dL_grid, dL, side="right",
-                                      method="scan_unrolled"), 1, n - 1)
-        df = zgrid[i] - zgrid[i - 1]
-        dx = dL_grid[i] - dL_grid[i - 1]
-        delta = dL - dL_grid[i - 1]
-        dx0 = jnp.abs(dx) <= _INTERP_DX0_EPS
-        z = jnp.where(dx0, zgrid[i - 1],
-                      zgrid[i - 1] + (delta / jnp.where(dx0, 1, dx)) * df)
-        z = jnp.where(dL < dL_grid[0], zgrid[0], z)
-        z = jnp.where(dL > dL_grid[-1], zgrid[-1], z)
+        z = _interp_unrolled(dL, dL_grid, zgrid)
     return jnp.where(in_grid, z, jnp.nan)
 
 
