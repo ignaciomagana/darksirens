@@ -184,6 +184,67 @@ injections at five values of `H0`. A run on a catalog with no `z_depth`
 attribute and no `--survey_z_depth` enters the band for at most 2e-3 of
 samples, monotonically more of them as `H0` rises.
 
+### Routing the empty catalog rows
+
+A sample whose pixel row holds no galaxies pays the whole per-sample KDE for a
+value the evaluator throws away. `row_empty[pix]` selects an exact `-inf` for
+`log p_cat` and `log_Nobs[pix]` is `-inf` too, so the prior collapses to the
+missing-galaxy branch alone -- `logaddexp(-inf, log_miss)`, which returns
+`log_miss` bit for bit. On the production DESI nside-64 catalog 18,682 of the
+49,152 rows are empty, and 41.7% of the PE samples and 38.9% of the injections
+land in one.
+
+A sample's pixel is data: it never depends on a proposal. So the factory
+partitions each sample set once, at build time, into "my row holds galaxies"
+and "my row is empty" (`EmptyRowRouting` in `darksirens/redshift/prior.py`), and
+the evaluator runs the unchanged KDE on the first group and the KDE-free
+expression on the second. It then gathers the concatenation back through the
+stored inverse permutation, so the vector it RETURNS is in the caller's sample
+order: the per-event `(nEvents, nsamp)` reshape and the selection `logsumexp`
+see the same values in the same slots, and no other per-sample array has to
+move. The plan is built only for `dark_sirens` without a frozen prior, only on
+a catalog that carries `ngals` (the row-prefix invariant that makes
+`ngals == 0` imply `row_empty`), and only when the empty group is at least a
+tenth of the set. A `--sel_batch_size` pin batches (and pads) the injections
+and a `--pe_event_block` chunk splits the PE samples, so neither evaluator can
+be handed a whole-sample-set plan: that side is refused at build time and never
+uploads its index arrays, and the run keeps today's speed and today's bits.
+
+Both halves of the premise are re-checked IN THE GRAPH on every call, and a
+violation of either drives the whole log-likelihood to `-inf`. The row half --
+every row the plan calls empty really does produce `-inf` -- is one `(N_rows,)`
+reduce. The sample half -- every sample the plan routed really does sit on one
+of those rows -- is one gather over the routed group, and it is the one that
+binds the plan to the pixel vector the evaluator is actually holding (the plan
+is selected by sample-vector length, and the factory derives it from the
+catalog view's `sample_to_unique_idx` while the evaluator consumes
+`gw.pixels[:, k]`). The verdict is `-inf` rather than NaN by necessity: every
+per-sample NaN in this likelihood dies at the `isfinite` mask before it can
+reach a reduction, so `-inf` is the only verdict that can reach the caller.
+
+Measured on the same production likelihood and the same eight prior draws as
+the one-pass reduction above, on an H100 NVL, median of 20 warm calls, three
+launches per arm interleaved in one session: 28.4 ms/call against 32.6 ms with
+the routing off (1.15x), and 2.09x against the 59.2 ms `f770956` baseline. Peak
+device memory is 13.06 GB against 13.14 GB -- the plan costs `2N` `int32` per
+sample set (`idx_occ` and `idx_empty` partition the set, plus `inv_order`), 17.0
+MB across both, and the narrower KDE intermediate more than pays for it. The
+spectral configuration has no catalog KDE and cannot reach this path.
+
+On accuracy the routing is exact where it can be and ulp-level where it cannot.
+The prior vector it returns is bit-identical to the plain path sample by sample
+and slot by slot, and on the production build the whole log-likelihood is too:
+`max |dlogL| = 0.000e+00` at the benchmark's five finite prior draws (the same
+three are `-inf`) and at nine H0 values spanning [20, 140] with every other
+label at its fiducial. What is NOT guaranteed is the last bit of the total,
+because splitting one `vmap` into two changes how XLA fuses and orders the
+reductions ABOVE the evaluator: on the CPU backend a small minority of
+coordinates move by <= 4e-14 relative (1-2 in a 49-point H0 scan, no coherent
+sign, twelve orders below the 0.3-nat bar this campaign works to). The gate in
+`tests/test_empty_row_routing.py` is that dense scan with a `1e-12` relative
+bound and a signed-mean check, plus an exact equality on the prior vector
+itself.
+
 ## The frozen redshift prior (population-only runs)
 
 `--freeze_redshift_prior BOOL` (default true) evaluates the per-sample catalog
