@@ -194,6 +194,19 @@ def _build_cpl_distance_grid():
 zgrid = jnp.array(zgrid)
 """Redshift coordinates of the distance interpolation grid."""
 
+# ``jnp.interp``'s guard against a zero-width cell, reproduced verbatim
+# (``np.spacing(eps)``, ~1e-31 in float64 -- NOT ``eps`` itself).
+_INTERP_DX0_EPS = float(np.spacing(np.finfo(np.asarray(zgrid).dtype).eps))
+# Escape hatch: ``DARKSIRENS_INTERP_SCAN=1`` restores the stock ``jnp.interp``
+# call inside :func:`z_of_dL_precomputed`.  The explicit spelling below is jax
+# 0.4.34's ``_interp`` body expression for expression, with the insertion index
+# found by ``method='scan_unrolled'`` instead of the module-default
+# ``'scan'``; the method changes only HOW the binary search is lowered (straight
+# -line code instead of a ceil(log2 N)-level ``lax.scan``), never which index it
+# returns, so the two paths are bit-identical.  Read once at import so the
+# branch is resolved at trace time and never becomes a traced select.
+_USE_INTERP_SCAN = os.environ.get("DARKSIRENS_INTERP_SCAN") == "1"
+
 #: First NONZERO node of :data:`zgrid` (~0.0036 at the default zMax=5).  Below
 #: it the table has exactly one cell, spanned by linear interpolation from
 #: ``r(0) = 0`` -- see :func:`_low_z_hermite_correction`.
@@ -527,9 +540,30 @@ def z_of_dL_precomputed(dL, dL_grid):
     typical likelihood hot path), precomputing the grid once with
     ``dL_of_z(zgrid, H0, Om0, w0, wa)`` and passing it here avoids
     redundant 4-D table lookups.
+
+    The interpolation is spelled out rather than delegated to ``jnp.interp`` so
+    the insertion index can be found with ``method='scan_unrolled'``: on a GPU
+    the module-default ``'scan'`` lowers to a ``while`` op XLA cannot fuse
+    through, which also splits the surrounding per-sample kernel in two.  The
+    body is jax 0.4.34's ``_interp`` expression for expression, so the result is
+    bit-identical (``tests/test_cosmology_interp_scan_unrolled.py``).
     """
+    dL_grid = jnp.asarray(dL_grid)
     in_grid = (dL >= dL_grid[0]) & (dL <= dL_grid[-1])
-    z = jnp.interp(dL, dL_grid, zgrid)
+    if _USE_INTERP_SCAN:
+        z = jnp.interp(dL, dL_grid, zgrid)
+    else:
+        n = dL_grid.shape[0]
+        i = jnp.clip(jnp.searchsorted(dL_grid, dL, side="right",
+                                      method="scan_unrolled"), 1, n - 1)
+        df = zgrid[i] - zgrid[i - 1]
+        dx = dL_grid[i] - dL_grid[i - 1]
+        delta = dL - dL_grid[i - 1]
+        dx0 = jnp.abs(dx) <= _INTERP_DX0_EPS
+        z = jnp.where(dx0, zgrid[i - 1],
+                      zgrid[i - 1] + (delta / jnp.where(dx0, 1, dx)) * df)
+        z = jnp.where(dL < dL_grid[0], zgrid[0], z)
+        z = jnp.where(dL > dL_grid[-1], zgrid[-1], z)
     return jnp.where(in_grid, z, jnp.nan)
 
 

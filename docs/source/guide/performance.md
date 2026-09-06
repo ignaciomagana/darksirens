@@ -284,6 +284,49 @@ closed form's H0-coherent error there is 3e-15 nats against the GL plateau's
 accordingly and were re-blessed (population registry: max 7.7e-5 nats, 1.5e-5
 relative, one-sided).
 
+## The luminosity-distance inversion
+
+Every call inverts `dL -> z` twice — once for the PE samples, once for the
+selection injections — by interpolating the per-proposal `dL_grid`
+(`z_of_dL_precomputed`, `darksirens/utils/cosmology.py`). `jnp.interp` finds the
+bracketing node with `searchsorted(side='right')` at JAX's module-default
+`method='scan'`, a serial `ceil(log2 N)`-level `lax.scan` (10 levels for the
+543-node `zgrid` at `DARKSIRENS_ZMAX=6`). On a GPU that lowers to a `while` op
+XLA cannot fuse through, so it also splits the surrounding per-sample kernel in
+two.
+
+`z_of_dL_precomputed` therefore spells the interpolation out — jax 0.4.34's own
+`_interp` body, expression for expression, including the `dx0` zero-width-cell
+guard and the two out-of-range fills — and asks for `method='scan_unrolled'`,
+which lowers the same binary search to straight-line code that fuses into the
+neighbouring memory-bound work. The method selects only **how** the insertion
+index is found, never which index, so the result is **bit-identical**; the
+`in_grid` mask that returns `NaN` outside the grid is unchanged.
+`DARKSIRENS_INTERP_SCAN=1` (read once at import) restores the stock
+`jnp.interp` call for an A/B.
+
+Measured on an NVIDIA H100 NVL, float64, `DARKSIRENS_ZMAX=6`, 20 warm calls per
+launch, three launches per arm interleaved inside one lock hold:
+
+| Configuration | Before | After | Speedup | Peak device memory |
+|---|---|---|---|---|
+| 259-event spectral (`spectral_sirens`, `powerlaw+peak`, all sampled) | 2.877 ms/call | 2.403 ms/call | 1.20x | 0.640 -> 0.644 GiB |
+| 259-event dark sirens (DESI nside-64, `gwtc5_fiducial_bpl2peaks`, field weighting, auto blocking) | 46.453 ms/call | 46.163 ms/call | 1.006x | 22.620 -> 22.637 GiB |
+
+`Before` is the head of the pairing-normaliser change above. Per-launch medians
+were 2.572 / 2.872 / 2.891 ms against 2.167 / 2.519 / 2.523 ms on the spectral
+configuration and 46.439 / 46.502 / 46.419 ms against 46.208 / 46.106 / 46.174
+ms on the dark-siren one: the saving is 0.23-0.40 ms in absolute terms in both,
+which is 13.5% of the spectral call and 0.6% of the dark-siren one, since the
+inversion is the same fixed cost in each. The log-likelihoods are equal bit for
+bit at every benchmark coordinate in both configurations (`max |dlogL| = 0`,
+identical `-inf` pattern), and at eight fiducial coordinates per configuration.
+
+The unroll is paid for in compile time and in live intermediates, both small:
+`t_first_call` 3.9-5.6 s -> 4.4-6.7 s on the spectral build and 10.0-10.3 s ->
+10.5-10.9 s on the dark-siren one (one-time per run, against 1e5-1e6 calls), and
+the peak-memory column above.
+
 ## Lensing
 
 Under `--partition_mode marginalize_exact` the lensing CLI makes ONE call to
