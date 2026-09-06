@@ -27,11 +27,18 @@ What these tests pin
 * the two halves of the exactness promise, each where it is enforced --
   live slots are the row prefix (build time, on the array the graph reads), and
   ``ngals[pix] <= cap`` per tier (in graph, against THIS ``pix`` vector).
-* the refusals, which must be LOUD: no ``ngals``, a live slot past ``ngals``,
-  a 1-D view, an out-of-range cap, and above all an ARMED KDE WINDOW -- the
-  windowed branch is a different (truncating) estimator, worth up to 0.28 nats
-  per sample on the production catalog in a z-dependent (hence H0-correlated)
-  way, and a narrowed view would silently switch it off.
+* the refusals, which must be LOUD: a live slot past ``ngals``, a 1-D view, an
+  out-of-range cap, and above all an ARMED KDE WINDOW -- the windowed branch is
+  a different (truncating) estimator, worth up to 0.28 nats per sample on the
+  production catalog in a z-dependent (hence H0-correlated) way, and a narrowed
+  view would silently switch it off.
+* the one refusal that must instead be QUIET: a catalog with no ``ngals``
+  cannot prove the row-prefix invariant, but the untiered graph serves it
+  correctly, so the ladder DECLINES rather than raising -- with an end-to-end
+  regression that such a build still works.
+* the SHIPPED cut list, on a fixture wide enough for it to arm, so that an edit
+  correct at the toy caps and wrong at ``(1024, n_max)`` cannot pass; and the
+  public off switch that restores the pre-ladder graph.
 """
 
 from types import SimpleNamespace
@@ -70,12 +77,18 @@ H0_SCAN_ABS_NATS = 1e-9
 H0_SCAN_SLOPE_NATS_PER_H0 = 1e-11
 
 # Six compact rows, padded to 8 slots: real galaxies in the prefix [0, ngals),
-# tail at z = 100, dz = 1, w = 0 (the loader contract).  Row lengths 2/4/0/7/0/3
-# straddle the test ladder's cuts at 2 and 4 in both directions, including the
-# boundary case ngals == cap.
+# tail at z = 100, dz = 1, w = 0 (the loader contract).  Row lengths 2/4/0/8/0/3
+# straddle the test ladder's cuts at 2 and 4 in both directions, and include
+# BOTH boundary cases: ``ngals == cut`` (row 1, 4 galaxies at the 4 cut) and
+# ``ngals == n_max`` (row 3, a row with no padding at all).  The second one is
+# what production actually has (ngals 1719 == n_max) and it is the case that
+# distinguishes ``searchsorted(..., side="left")`` from ``side="right"``: under
+# ``"right"`` a full row indexes PAST the last cap and the ladder refuses to
+# build.  Both partition tests below route samples onto row 3, so that mutation
+# cannot pass.
 N_ROWS = 6
 N_MAX = 8
-_NGALS = np.array([2, 4, 0, 7, 0, 3], dtype=np.int32)
+_NGALS = np.array([2, 4, 0, 8, 0, 3], dtype=np.int32)
 TEST_CUTS = (2, 4)
 TEST_CAPS = (2, 4, 8)
 
@@ -420,6 +433,176 @@ def test_the_production_ladder_is_three_tiers():
     assert factory_mod._row_width_tier_caps(1719) == (1024, 1719)
 
 
+# ---------------------------------------------------------------------------
+# The SHIPPED cut list, end to end
+# ---------------------------------------------------------------------------
+
+# The functional tests above run the ladder at caps (2, 4, 8) on an 8-column
+# fixture, which pins the MECHANISM but never the shipped constant: an edit to
+# ``_KDE_ROW_WIDTH_TIER_CUTS``, to ``_row_width_tier_caps`` or to the
+# ``searchsorted`` assignment that is right at (2, 4, 8) and wrong at
+# (1024, n_max) would leave every one of them green.  So one fixture is wide
+# enough for the real ladder to arm on: rows straddling the 1024 cut in both
+# directions, including a row filled to ``n_max``.
+WIDE_N_ROWS = 6
+WIDE_N_MAX = 1500
+_WIDE_NGALS = np.array([300, 1024, 0, 1500, 0, 1100], dtype=np.int32)
+
+
+def _wide_arrays():
+    rng = np.random.default_rng(7)
+    zg = np.full((WIDE_N_ROWS, WIDE_N_MAX), 100.0)
+    dz = np.full((WIDE_N_ROWS, WIDE_N_MAX), 1.0)
+    wg = np.zeros((WIDE_N_ROWS, WIDE_N_MAX))
+    for r, n in enumerate(_WIDE_NGALS):
+        if n:
+            zg[r, :n] = np.sort(rng.uniform(0.05, 0.25, size=int(n)))
+            dz[r, :n] = rng.uniform(0.01, 0.03, size=int(n))
+            wg[r, :n] = rng.uniform(0.5, 1.5, size=int(n))
+    return zg, dz, wg
+
+
+def _wide_data(zg, dz, wg):
+    d = _data()
+    d.update(
+        zgals_pe=zg.copy(), dzgals_pe=dz.copy(), wgals_pe=wg.copy(),
+        ngals_pe=_WIDE_NGALS.copy(),
+        zgals_sel=zg.copy(), dzgals_sel=dz.copy(), wgals_sel=wg.copy(),
+        ngals_sel=_WIDE_NGALS.copy(),
+    )
+    fobs, _ne, nobs, _occ = build_field_normalization_inputs(
+        jnp.asarray(zg), None, jnp.asarray(_WIDE_NGALS)
+    )
+    d["field_dN_obs_s"] = fobs
+    d["field_N_obs_total"] = float(nobs)
+    return d
+
+
+def test_the_shipped_cut_list_arms_and_is_ulp_level(monkeypatch):
+    """The default ``_KDE_ROW_WIDTH_TIER_CUTS = (1024,)``, actually armed.
+
+    Same gate as the (2, 4) one -- a 49-point H0 scan with a relative bound, a
+    signed mean and a slope -- but on a 1500-column catalog, so the constant the
+    production build uses is the constant under test and the ``ngals == n_max``
+    row (which is what production has: 1719 == n_max) is really routed.
+    """
+    shipped = factory_mod._KDE_ROW_WIDTH_TIER_CUTS
+    zg, dz, wg = _wide_arrays()
+    pop_fid, fixed = _pop_bits()
+    fixed = dict(fixed, Om0=0.3)
+
+    def _mk(cuts):
+        monkeypatch.setattr(factory_mod, "_KDE_ROW_WIDTH_TIER_CUTS", cuts)
+        return make_likelihood(_opts("field"), _wide_data(zg, dz, wg), pop_fid,
+                               fixed_parameter_values=fixed)
+
+    lo = _mk(())            # untiered reference
+    hi = _mk(shipped)       # the SHIPPED cut list, unmodified
+    pe_hi, sel_hi = _plans(hi)
+    assert not _plans(lo)[0].tiers
+    # The ladder the shipped cut produces on this catalog, on BOTH views.
+    assert [t.cap for t in pe_hi.tiers] == [1024, WIDE_N_MAX]
+    assert [t.cap for t in sel_hi.tiers] == [1024, WIDE_N_MAX]
+
+    h0 = np.asarray(H0_SCAN)
+    ref = np.array([float(lo(jnp.asarray([h]))) for h in h0])
+    got = np.array([float(hi(jnp.asarray([h]))) for h in h0])
+    assert np.array_equal(np.isfinite(ref), np.isfinite(got))
+    fin = np.isfinite(ref)
+    assert fin.sum() >= 5
+    d = got[fin] - ref[fin]
+    rel = np.abs(d) / np.maximum(np.abs(ref[fin]), 1.0)
+    assert rel.max() <= H0_SCAN_REL_TOL, rel.max()
+    assert abs(np.mean(rel * np.sign(d))) <= H0_SCAN_SIGNED_MEAN_TOL
+    assert np.abs(d).max() <= H0_SCAN_ABS_NATS, np.abs(d).max()
+    slope = np.polyfit(h0[fin], d, 1)[0]
+    assert abs(slope) <= H0_SCAN_SLOPE_NATS_PER_H0, slope
+
+
+def test_the_shipped_cut_list_drops_only_padding_at_the_evaluator():
+    """``a[pix, :cap]`` against the full row at the SHIPPED caps.
+
+    1024 columns is wide enough for XLA to re-associate the reduction, so this
+    asserts the ulp bound, not bit-equality -- the honest form of the claim on
+    the ladder that actually ships.
+    """
+    zg, dz, wg = _wide_arrays()
+    cat = EMCatalog(
+        apix=APIX1, zgals=jnp.asarray(zg), dzgals=jnp.asarray(dz),
+        wgals=jnp.asarray(wg), ngals=jnp.asarray(_WIDE_NGALS),
+        delta_g_pix_z=jnp.zeros((1, len(zgrid))),
+        dN_obs_kde=None, pixel_to_cache_idx=None,
+    )
+    # A window wider than the row: the full-row branch, which is the only one
+    # the ladder is ever admissible under.
+    kern = catalog_kernel_state(_cosmo(), _survey(), cat,
+                               kde_window=2 * WIDE_N_MAX)
+    caps = factory_mod._row_width_tier_caps(WIDE_N_MAX)
+    assert caps == (1024, WIDE_N_MAX)
+    worst = 0.0
+    for row, ng in enumerate(_WIDE_NGALS):
+        if ng == 0:
+            continue
+        cap = int(min(c for c in caps if c >= ng))
+        for z in np.linspace(0.05, 0.26, 11):
+            full = float(eval_log_catalog_prior_state(
+                jnp.asarray(z), jnp.asarray(row), kern, cat))
+            cut = float(eval_log_catalog_prior_state(
+                jnp.asarray(z), jnp.asarray(row), kern, cat, col_cap=cap))
+            worst = max(worst, abs(full - cut) / max(abs(full), 1.0))
+    assert worst <= H0_SCAN_REL_TOL, worst
+
+
+def test_the_shipped_ladder_covers_the_full_row_boundary():
+    """``ngals == n_max`` lands on the widest cap, not past the ladder.
+
+    This is the ``side="left"`` contract at production's own boundary: with
+    ``side="right"`` a row holding exactly ``n_max`` galaxies indexes past the
+    last cap and ``_empty_row_routing_plan`` refuses to build at all.
+    """
+    caps = factory_mod._row_width_tier_caps(WIDE_N_MAX)
+    plan = factory_mod._empty_row_routing_plan(_PE_ROWS, _WIDE_NGALS,
+                                               tier_caps=caps)
+    assert [t.cap for t in plan.tiers] == [1024, WIDE_N_MAX]
+    full_rows = np.flatnonzero(_WIDE_NGALS == WIDE_N_MAX)
+    hit = [t.cap for t in plan.tiers
+           if np.isin(_PE_ROWS[np.asarray(t.idx)], full_rows).any()]
+    assert hit == [WIDE_N_MAX], hit
+    for t in plan.tiers:
+        n_at = _WIDE_NGALS[_PE_ROWS[np.asarray(t.idx)]]
+        assert n_at.max() <= t.cap
+
+
+# ---------------------------------------------------------------------------
+# The off switch
+# ---------------------------------------------------------------------------
+
+def test_configure_kde_row_width_tiers_is_the_off_switch(monkeypatch):
+    """The supported way to get the untiered full-row graph back.
+
+    ``--kde_window`` is NOT that lever (it arms a different, truncating
+    estimator), so bisecting an inference result or re-running the A/B needs a
+    public switch, the way ``configure_catalog_kde_window(size=None)`` is one
+    for windowing.
+    """
+    monkeypatch.setattr(factory_mod, "_KDE_ROW_WIDTH_TIER_CUTS", TEST_CUTS)
+    factory_mod.configure_kde_row_width_tiers(())
+    assert factory_mod._KDE_ROW_WIDTH_TIER_CUTS == ()
+    assert not factory_mod._row_width_tiering_admissible(_catalog(),
+                                                         kde_window=None)
+    pop_fid, fixed = _pop_bits()
+    lik = make_likelihood(_opts("field"), _data(), pop_fid,
+                          fixed_parameter_values=dict(fixed, Om0=0.3))
+    assert _plans(lik)[0].tiers == ()
+
+    factory_mod.configure_kde_row_width_tiers((3,))
+    assert factory_mod._KDE_ROW_WIDTH_TIER_CUTS == (3,)
+    assert factory_mod._row_width_tier_caps(N_MAX) == (3, N_MAX)
+    # Idempotent default, and the cuts are normalised (sorted, de-duplicated).
+    factory_mod.configure_kde_row_width_tiers((1024, 1024))
+    assert factory_mod._KDE_ROW_WIDTH_TIER_CUTS == (1024,)
+
+
 def test_a_tier_that_ends_up_empty_is_dropped(monkeypatch):
     """No zero-size kernel gets lowered for a rung nothing lands on."""
     monkeypatch.setattr(factory_mod, "_KDE_ROW_WIDTH_TIER_CUTS", TEST_CUTS)
@@ -483,10 +666,45 @@ def test_a_live_slot_past_ngals_refuses_the_ladder():
             cat._replace(pinned_kernels=bad))
 
 
-def test_the_ladder_refuses_a_catalog_without_ngals():
-    """Without ``ngals`` the live slots are ``ws > 0`` -- not a prefix."""
+def test_the_ladder_declines_a_catalog_without_ngals(monkeypatch):
+    """Without ``ngals`` the live slots are ``ws > 0`` -- not a prefix.
+
+    The predicate DECLINES rather than raising, and that distinction is the
+    whole point: ``EMCatalog.ngals`` is optional, ``_empty_row_routing_plan``
+    already returns ``None`` without it, and the base graph builds such a
+    catalog fine.  Raising here would have turned a supported ``make_likelihood``
+    call into a build-time crash -- see the end-to-end regression below.  The
+    low-level assertion keeps its raise for direct callers.
+    """
+    monkeypatch.setattr(factory_mod, "_KDE_ROW_WIDTH_TIER_CUTS", TEST_CUTS)
+    cat = _catalog(ngals=False)
+    assert factory_mod._row_width_tiering_admissible(cat, kde_window=None) is False
+    assert factory_mod._row_width_tiering_admissible(cat, kde_window=64) is False
     with pytest.raises(ValueError, match="ngals"):
-        factory_mod._assert_live_slots_are_row_prefix(_catalog(ngals=False))
+        factory_mod._assert_live_slots_are_row_prefix(cat)
+
+
+def test_a_bundle_without_ngals_still_builds(monkeypatch):
+    """REGRESSION: a dark-siren build on a catalog with no ``ngals``.
+
+    ``catalog_views`` binds ``ngals_*_catalog=None`` when the bundle carries
+    none, and the untiered, unrouted graph handles that.  The first cut of this
+    change raised from the admissibility hook instead, killing a build the base
+    branch served.  Conditional sky weighting so the field normalisation inputs
+    (which want ``ngals``) are not what is under test.
+    """
+    monkeypatch.setattr(factory_mod, "_KDE_ROW_WIDTH_TIER_CUTS", TEST_CUTS)
+    pop_fid, fixed = _pop_bits()
+    fixed = dict(fixed, Om0=0.3)
+    data = _data()
+    for key in ("ngals_pe", "ngals_sel"):
+        data[key] = None
+    lik = make_likelihood(
+        _opts("conditional"), data, pop_fid, fixed_parameter_values=fixed,
+    )
+    assert np.isfinite(float(lik(jnp.asarray([70.0]))))
+    # No ngals -> no routing plan at all, hence no ladder.
+    assert not lik.empty_row_routing
 
 
 # ---------------------------------------------------------------------------

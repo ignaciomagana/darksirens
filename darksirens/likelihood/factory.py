@@ -1195,6 +1195,27 @@ def empty_row_routing_admissible(universe_model, frozen_prior) -> bool:
 _KDE_ROW_WIDTH_TIER_CUTS: tuple = (1024,)
 
 
+def configure_kde_row_width_tiers(cuts=(1024,)) -> None:
+    """Configure the catalog KDE's static row-WIDTH tier ladder.
+
+    Build-time configuration: call BEFORE :func:`make_likelihood` (the ladder
+    is baked into the routing plan and into the jit cache key, so changing it
+    afterwards does not affect a likelihood that already exists).
+
+    ``cuts`` are the ladder's INTERIOR cuts in columns; the ladder a catalog
+    padded to ``n_max`` actually gets is ``(0, *cuts_inside_the_row, n_max)``.
+    ``cuts=()`` disables tiering entirely -- the untiered full-row escape hatch
+    for A/B validation and for bisecting an inference result, and the only
+    supported way to get the pre-ladder graph back (``--kde_window`` does NOT
+    serve that purpose: it arms a different, truncating estimator).
+
+    The shipped default is a SINGLE interior cut, and that is a measurement,
+    not a guess: see :data:`_KDE_ROW_WIDTH_TIER_CUTS`.
+    """
+    global _KDE_ROW_WIDTH_TIER_CUTS
+    _KDE_ROW_WIDTH_TIER_CUTS = tuple(sorted({int(c) for c in cuts}))
+
+
 def _row_width_tier_caps(n_max) -> tuple:
     """The ladder's caps for a catalog padded to ``n_max`` columns.
 
@@ -1208,6 +1229,20 @@ def _row_width_tier_caps(n_max) -> tuple:
     return cuts + (n,)
 
 
+@jax.jit
+def _n_live_slots_beyond_ngals(log_kw_eff, ngals, sentinel_cut):
+    """Pinned kernel slots that are LIVE at or beyond their row's ``ngals``.
+
+    One jitted device reduce, so the ``(N_rows, N_max)`` masks are fused away
+    instead of being materialised twice; see
+    :func:`_assert_live_slots_are_row_prefix` for why this must not touch the
+    host.
+    """
+    live = log_kw_eff > sentinel_cut
+    beyond = jnp.arange(log_kw_eff.shape[1])[None, :] >= ngals[:, None]
+    return jnp.count_nonzero(live & beyond)
+
+
 def _assert_live_slots_are_row_prefix(em_catalog) -> None:
     """Refuse to tier a catalog whose LIVE slots are not the row prefix.
 
@@ -1217,7 +1252,10 @@ def _assert_live_slots_are_row_prefix(em_catalog) -> None:
     live slots of every row occupying ``[0, ngals[row])``, which
     ``catalog._row_real_mask`` GUARANTEES when ``ngals`` is present
     (``arange < ngal``) and does NOT when it is absent (it falls back to
-    ``ws > 0``, an arbitrary set).  Hence the hard requirement on ``ngals``.
+    ``ws > 0``, an arbitrary set).  Hence the hard requirement on ``ngals``
+    -- a guard for direct callers only: the admissibility predicate DECLINES
+    (returns False, i.e. keeps the untiered graph) before it ever gets here,
+    because a catalog without ``ngals`` is a legal build, not a broken one.
 
     When the run also carries a build-time kernel pin the invariant is checked
     against the array the graph will actually read, not merely against the rule
@@ -1246,10 +1284,18 @@ def _assert_live_slots_are_row_prefix(em_catalog) -> None:
     log_kw_eff = getattr(pinned, "log_kw_eff", None) if pinned is not None else None
     if log_kw_eff is None:
         return
-    n_cols = int(np.asarray(zgals).shape[1])
-    live = np.asarray(log_kw_eff) > _KERNEL_PIN_SENTINEL_CUT
-    beyond = np.arange(n_cols)[None, :] >= np.asarray(ngals)[:, None]
-    n_bad = int(np.count_nonzero(live & beyond))
+    # ON DEVICE.  The pin is a dense ``(N_rows, N_max)`` f64 array -- 676 MB on
+    # the production view -- so reducing it with numpy both copies the galaxy
+    # table back to the host and RETAINS that copy in the buffer's
+    # ``_npy_value``, which is exactly the D2H traffic this campaign is trying
+    # to remove.  MEASURED on the production PE view (49152 x 1719, H100 NVL):
+    # 0.15-0.33 s per view for the numpy spelling against 0.9 ms for one fused
+    # device reduce, which also leaves nothing behind on the host.
+    lk = jnp.asarray(log_kw_eff)
+    n_bad = int(_n_live_slots_beyond_ngals(
+        lk, jnp.asarray(ngals),
+        jnp.asarray(_KERNEL_PIN_SENTINEL_CUT, dtype=lk.dtype),
+    ))
     if n_bad:
         raise ValueError(
             f"row-width tiering refused: {n_bad} live kernel slots sit at or "
@@ -1274,13 +1320,24 @@ def _row_width_tiering_admissible(em_catalog, kde_window) -> bool:
     3456 against ``n_max`` 1719, so the full-row branch is what runs); a
     ``--kde_window`` below ``n_max`` keeps the untiered graph.
 
+    A view with no ``ngals`` DECLINES here rather than raising.
+    ``EMCatalog.ngals`` is genuinely optional -- ``catalog._row_real_mask``
+    falls back to ``ws > 0`` and ``_empty_row_routing_plan`` already returns
+    ``None`` for that case -- so a catalog without it is a build the base graph
+    serves perfectly well, untiered.  Declining is that base graph, not a
+    truncating estimator wearing an exact one's name, so the "refuse loudly"
+    rule that governs the live-slot check does not reach this case.
+
     Raises through :func:`_assert_live_slots_are_row_prefix` when the ladder
-    would be inexact; returns False only when it would be pointless.
+    would be inexact; returns False only when it would be pointless or
+    unprovable.
     """
     from darksirens.redshift.catalog import _effective_kde_window
 
     zgals = getattr(em_catalog, "zgals", None)
     if getattr(zgals, "ndim", 0) != 2:
+        return False
+    if getattr(em_catalog, "ngals", None) is None:
         return False
     n_max = int(np.asarray(zgals).shape[1])
     if len(_row_width_tier_caps(n_max)) < 2:
@@ -1344,10 +1401,10 @@ def _empty_row_routing_plan(pixels_col, ngals, tier_caps=None):
         # ``cap`` tier, not the next one up.
         which = np.searchsorted(caps, n_at, side="left")
         if int(which.max(initial=0)) >= caps.size:
-            # Unreachable while the last cap is n_max; a loud refusal beats a
-            # silently truncated tier if that ever stops being true.
             raise ValueError(
-                "row-width tier ladder does not cover the catalog: "
+                "row-width tier ladder does not cover the catalog (this is "
+                "UNREACHABLE while _row_width_tier_caps ends the ladder at "
+                "n_max -- reaching it means that postcondition was broken): "
                 f"max ngals at a sample is {int(n_at.max(initial=0))}, "
                 f"widest cap is {int(caps[-1])}"
             )

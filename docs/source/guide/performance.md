@@ -285,22 +285,34 @@ configuration has no catalog KDE and cannot reach this path.
 The class is ulp-level, not bit-identical. Each tier evaluates exactly the same
 galaxies as the full row, so the real number the reduction represents is
 unchanged; but the reduction is shorter, and XLA may pair the real terms
-differently. Measured on the production catalog the per-sample residual peaks at
-`5.7e-14` nats and drifts with `H0` at `6.6e-15` nats per km/s/Mpc, i.e. `7.9e-13`
-nats across the whole `[20, 140]` prior against the 0.3-nat bar this campaign
-works to. In situ the total does not move at all: `max |dlogL| = 0.000e+00` at
-the benchmark's five finite prior draws and at eight `H0` values spanning
-`[20, 140]` with every other label at its fiducial, tiered against untiered
-builds of the same code in the same process.
+differently. Measured on the production catalog with real PE pixels, THIS
+ladder's per-sample residual is `3.55e-15` nats -- on both sides and on both of
+its tiers, the widest one (`cap = n_max`) being bit-identical by construction.
+The conservative bound the accuracy argument is stated against is the finer
+`(0, 512, 1024, 1719)` ladder's `5.7e-14` nats, which drifts with `H0` at
+`6.6e-15` nats per km/s/Mpc, i.e. `7.9e-13` nats across the whole `[20, 140]`
+prior -- 16x above what the shipped ladder actually moves, and still more than
+eleven orders of magnitude below the 0.3-nat bar this campaign works to. In situ the total does not
+move at all: `max |dlogL| = 0.000e+00` at the benchmark's five finite prior
+draws, at eight `H0` values spanning `[20, 140]` with every other label at its
+fiducial, and at 13 `H0` values from each of three non-fiducial base
+coordinates -- tiered against untiered builds of the same code in the same
+process.
 
 The ladder is exact only while every LIVE slot of every row a tier's samples
 land on sits below that tier's cap, and both halves of that are enforced. The
 build asserts the half that is a property of the arrays -- live slots occupy the
 row prefix `[0, ngals)` -- on the pinned kernel array the graph will actually
-read, and refuses the ladder outright when it fails or when the catalog carries
-no `ngals` at all. The graph asserts the half that is a property of the plan,
-per tier and per call: `all(ngals[pix[tier]] <= cap)`, one gather and a reduce,
-whose failure drives the whole log-likelihood to `-inf`.
+read, and refuses the ladder outright when it fails. A catalog carrying no
+`ngals` at all cannot prove the invariant either (`_row_real_mask` then falls
+back to `w > 0`, which is not a prefix), and that case simply DECLINES to tier:
+the untiered graph is the correct answer for it, not an error. The build-time
+assertion is a single jitted device reduce over the pinned kernel array, not a
+host one: measured 0.9 ms per view against 0.16-0.33 s for the numpy spelling,
+which also copied the 676 MB galaxy table back to the host and kept it there.
+The graph asserts the half that is a property of the plan, per tier and per
+call: `all(ngals[pix[tier]] <= cap)`, one gather and a reduce, whose failure
+drives the whole log-likelihood to `-inf`.
 
 One configuration is refused rather than tiered, and it is the one that would be
 a physics error rather than a slowdown. The windowed KDE branch is a DIFFERENT
@@ -314,6 +326,17 @@ configuration clears that by sizing (the data-sized window is 3456 against
 `n_max` 1719, so the full-row branch is what runs); a `--kde_window` below
 `n_max` keeps the untiered graph, and the evaluator raises if a cap ever reaches
 it with the window armed. The gate is `tests/test_kde_width_tiers.py`.
+
+`--kde_window` is NOT the way to turn the ladder off: it arms that other
+estimator. The off switch is
+`darksirens.likelihood.factory.configure_kde_row_width_tiers(cuts)`, called
+before `make_likelihood`; `cuts=()` restores the untiered full-row graph exactly
+as it ran before this ladder existed, which is what an A/B or a bisection of an
+inference result needs. `cuts` are the ladder's INTERIOR cuts, so the default
+`(1024,)` is the `(0, 1024, n_max)` ladder above. There is deliberately no CLI
+flag and no auto-tuning from the catalog's own `ngals` histogram: the
+measurement above says the single interior cut beats the finer ladders, and a
+histogram rule would re-derive the slower ones.
 
 ## The frozen redshift prior (population-only runs)
 
